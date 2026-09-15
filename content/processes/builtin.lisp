@@ -142,6 +142,39 @@
          (target-set! :wire 1)
          nil))
 
+;; Cirklon "xpose by trk n" (manual ch. 13, Inter Track events): on a high
+;; step, transpose this track's note by the note on the step the source
+;; track is currently on. The Cirklon measures that note from middle C; eseq
+;; notes are already semitones from the track root, so the source note IS
+;; the offset (a source sitting on its root adds nothing). Same-tick
+;; `:pattern` read, held until the source steps onto its next trig (empty
+;; source steps keep the last note that played), so a source at a slower
+;; timebase transposes a whole bar at once. Adds on top of this step's own
+;; transpose and any accumulator, like every other transpose write.
+(def-process lane-xpose
+  :doc "Cirklon xpose by track: a high step transposes this track's note by the note on the step the source track is currently on (semitones from the root), on top of its own transpose. Empty source steps hold the last note that played."
+  :target (step-param :transpose)
+  :in ((gate :gate :default 0 :lane true)
+       (source :track :default 0))
+  :run (if (> (in :gate) 0.5)
+         (let ((src (read (track (in :source) :note :pattern))))
+           (if (= src nil) nil (target-add! src)))
+         nil))
+
+;; Cirklon "xpose by trk n+B": the same transpose-by-track, except the
+;; source's note is taken AFTER its own bar transpose (manual 3-14 "Bar
+;; Values"), so moving the source's bar XPOSE moves this track with it.
+;; Plain `xpose` reads the authored note and ignores the source's bar.
+(def-process lane-xpose-b
+  :doc "Cirklon xpose by trk n+B: a high step transposes this track's note by the source track's current step note PLUS that source bar's transpose, on top of its own transpose."
+  :target (step-param :transpose)
+  :in ((gate :gate :default 0 :lane true)
+       (source :track :default 0))
+  :run (if (> (in :gate) 0.5)
+         (let ((src (read (track (in :source) :note+b :pattern))))
+           (if (= src nil) nil (target-add! src)))
+         nil))
+
 ;; Cirklon "grab" (manual ch. 13, Inter Track events): on a step where the
 ;; aux is set, the chosen row value on this track is REPLACED by the value on
 ;; the step the source track is currently sitting on. Same tick, no scaling,
@@ -154,16 +187,19 @@
 ;; the source's. A chord step moves as a block so its base note lands on the
 ;; source's note. The source's note is its chord base note when it has chord
 ;; data, else its transpose p-lock, so a melody drawn in the piano roll and
-;; one typed into the trn lane both grab the same way. Before the source has
-;; stepped at all the read is nil and the step plays untouched.
+;; one typed into the trn lane both grab the same way. An empty source step
+;; is not a value: the read holds the last source step that actually played
+;; (its trig), so a source with rests between its notes keeps grabbing the
+;; note in effect. Before the source has played any step the read is nil and
+;; the step plays untouched. The xpose and harmony lanes read the same way.
 (def-process lane-grab
-  :doc "Cirklon grab: a high step replaces one value on this track (value: note, vel or dur) with the value on the step the source track is currently on, same tick. Note keeps this track's accumulator offsets and moves a chord with its base note."
+  :doc "Cirklon grab: a high step replaces one value on this track (value: note, vel, dur or note+b) with the value on the step the source track is currently on, same tick; empty source steps hold the last step that played. note+b is the Cirklon nte+B: the source note after its bar transpose. Note keeps this track's accumulator offsets and moves a chord with its base note."
   :targets ((note (step-param :transpose))
             (vel (step-param :velocity))
             (dur (step-param :duration)))
   :in ((grab :gate :default 0 :lane true)
        (source :track :default 0)
-       (value :enum ("note" "vel" "dur") :default 0))
+       (value :enum ("note" "vel" "dur" "note+b") :default 0))
   :run (if (> (in :grab) 0.5)
          (let ((which (in :value)))
            (if (< which 0.5)
@@ -174,8 +210,13 @@
              (if (< which 1.5)
                (let ((src (read (track (in :source) :velocity :pattern))))
                  (if (= src nil) nil (target-set! :vel src)))
-               (let ((src (read (track (in :source) :duration :pattern))))
-                 (if (= src nil) nil (target-set! :dur src))))))
+               (if (< which 2.5)
+                 (let ((src (read (track (in :source) :duration :pattern))))
+                   (if (= src nil) nil (target-set! :dur src)))
+                 (let ((src (read (track (in :source) :note+b :pattern))))
+                   (if (= src nil)
+                     nil
+                     (target-set! :note (+ (current-note) (- src (step-note))))))))))
          nil))
 
 (def-process lane-rand
@@ -268,3 +309,40 @@
   :run (if (> (in :gate) 0.5)
          (roll! (in :rate))
          nil))
+
+;; Harmony by track: the lane-UI cousin of `follow-harmony`. Where that one
+;; listens to a named channel some scripted publisher must `suggest` into,
+;; this one points at a source track like grab/xpose do and reads the step
+;; the source is currently on, same tick: its chord (or single note) and the
+;; key its whole pattern implies (the union of every pitch it authors, or
+;; the scale its chord quality suggests when that set is thin).
+;;
+;; Amount is strictness, not distance. Every pitch class is scored against
+;; the chord on a ladder (runtime/harmony.rs): chord tones 1.0, key tones
+;; ~0.6-0.75, color tones ~0.3-0.45, clashes (a semitone above a chord tone,
+;; the tritone on the root) below 0.2. A follower note that scores at least
+;; amount plays as authored; one that does not snaps to the nearest pitch
+;; class that does. So 1 allows only chord tones, ~0.5 lets the follower
+;; play its own melody as long as it stays in key, ~0.3 admits chromatic
+;; color and only corrects clashes, and 0 leaves everything alone. No amount
+;; ever produces a fractional transpose. Grace is a dead zone in semitones:
+;; a snap that small is skipped. A chord stays in effect through the source's
+;; empty steps until its next trig, so a chord track with rests between
+;; changes harmonizes every follower step. Before the source has played any
+;; step the read is nil and the step plays untouched. Both tracks' pitches
+;; are taken relative to their own roots, as with grab.
+(def-process lane-harmony
+  :doc "Harmony lane: hold this step's note to the chord and key of the source track's current step, same tick; empty source steps hold the last chord that played. Amount is strictness: 1 chord tones only, ~0.5 anything in key, ~0.3 anything but clashes, 0 free. A note that fails snaps to the nearest pitch class that passes. Grace is a dead zone in semitones."
+  :target (step-param :transpose)
+  :in ((amount :float 0 1 :default 1 :lane true)
+       (source :track :default 0)
+       (grace :int 0 3 :default 0))
+  :run (let ((src (read (track (in :source) :chord :pattern))))
+         (if (= src nil)
+           nil
+           (target-add!
+             (harmonic-snap src
+                            (read (track (in :source) :key :pattern))
+                            (current-note)
+                            (in :amount)
+                            (in :grace))))))

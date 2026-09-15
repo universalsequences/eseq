@@ -63,6 +63,7 @@ pub enum EditPatch {
     BusGroupStructure(BusGroupStructurePatch),
     MacroConfiguration(MacroConfigurationPatch),
     TransportParams(TransportParamsPatch),
+    BarTranspose(BarTransposePatch),
 }
 
 #[derive(Clone, Debug)]
@@ -778,6 +779,23 @@ pub struct TransportAuthoringSnapshot {
     pub reverb_size_bits: u32,
     pub reverb_brightness_bits: u32,
     pub reverb_replace_bits: u32,
+}
+
+/// One pattern's per-bar transpose (Cirklon P3 bar XPOSE). Pattern-targeted
+/// like a step-cell patch, so a scene switch between the edit and the undo
+/// cannot redirect replay into whatever pattern is loaded now.
+#[derive(Clone, Debug)]
+pub struct BarTransposePatch {
+    pub target: TrackPatternId,
+    pub bar: usize,
+    pub before: f32,
+    pub after: f32,
+}
+
+impl BarTransposePatch {
+    pub fn retained_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+    }
 }
 
 #[derive(Clone, Debug)]

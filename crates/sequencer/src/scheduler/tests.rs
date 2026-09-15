@@ -4205,6 +4205,43 @@
         );
     }
 
+    /// The manual's "Transpose By Events" table: a flat C4 pattern with
+    /// "xpose by trk 2" on steps 1, 5, 9, 13 plays C4, G4, D5, A5 against
+    /// the rising scale, i.e. its own note plus the source's note from the
+    /// root (the Cirklon's "from middle C"). Here step 4 also carries its
+    /// own trn of +3, which the transpose adds to rather than replaces.
+    #[test]
+    fn scheduler_default_lanes_xpose_adds_the_source_step_note_to_the_transpose() {
+        let events = run_with_scheduler_stack(|| {
+            grab_lanes_fixture(
+                |state| {
+                    paint_transposes(state, 1, &SOURCE_SCALE);
+                    state.pattern.step_data[0].set(4, StepParam::Transpose, 3.0);
+                },
+                |chain| {
+                    let xpose = default_lane_slot_mut(chain, "xpose");
+                    xpose.inlets.insert(
+                        "source".to_string(),
+                        crate::process::ProcessLiteral::Number(1.0),
+                    );
+                    xpose.lanes.insert(
+                        "gate".to_string(),
+                        lane(&[1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]),
+                    );
+                },
+            )
+        });
+        let transposes = events
+            .iter()
+            .map(|event| event.transpose)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            transposes,
+            vec![0.0, 0.0, 0.0, 0.0, 10.0, 0.0, 0.0, 0.0],
+            "step 0: own 0 + source 0; step 4: own 3 + source 7"
+        );
+    }
+
     /// The manual's timebase example: a source stepping four times slower
     /// holds each step for four of the grabber's, so grabbing on every step
     /// plays the grabber's pattern through under each source note in turn.
@@ -4228,6 +4265,322 @@
             .map(|event| event.transpose)
             .collect::<Vec<_>>();
         assert_eq!(transposes, vec![2.0, 2.0, 2.0, 2.0, 9.0, 9.0, 9.0, 9.0]);
+    }
+
+    // ── Bar transpose (Cirklon P3 bar XPOSE, eseq-m14x) ──────────────────
+
+    /// One trigger as the bar-transpose tests read it: the resolved
+    /// transpose plus the chord payload, which `ObservedTrigger` does not
+    /// carry.
+    #[derive(Clone, Debug)]
+    struct BarTrigger {
+        track: usize,
+        sample_time: u64,
+        transpose: f32,
+        chord: Vec<f32>,
+        chord_step_transpose: f32,
+    }
+
+    /// `tracks` 32-step tracks (two 16-step bars) with every step active.
+    /// `edit_state` paints patterns and bar transposes; `edit_chain` edits
+    /// the default project layer (skipped, with no scratch runtime at all,
+    /// when it is `None` — the pure-playback path). Returns every resolved
+    /// trigger in time order.
+    fn bar_transpose_fixture(
+        tracks: usize,
+        edit_state: impl FnOnce(&SequencerState),
+        edit_chain: Option<Box<dyn FnOnce(&mut crate::process::TrackProcessChain)>>,
+        scene_slots: Option<crate::sequencer::SceneSlotStore>,
+    ) -> Vec<BarTrigger> {
+        const STEPS: usize = 32;
+        let state = Arc::new(SequencerState::new(
+            tracks,
+            (0..tracks).map(|_| default_empty_effect_chain()).collect(),
+        ));
+        for track in 0..tracks {
+            state.pattern.track_params[track].set_num_steps(STEPS);
+            for step in 0..STEPS {
+                state.pattern.patterns[track].set_step_active(step, true);
+            }
+        }
+        edit_state(&state);
+
+        let mut scratch_runtime = None;
+        if let Some(edit_chain) = edit_chain {
+            let mut scratch = lisp_host::ScratchControlRuntime::new(
+                Arc::clone(&state),
+                (0..tracks).map(|_| Vec::new()).collect(),
+                (0..tracks)
+                    .map(|_| EffectDescriptor::builtin_sampler())
+                    .collect(),
+                0,
+                0,
+            );
+            scratch
+                .eval(&lisp_host::load_process_library_source())
+                .expect("builtin process library");
+            let mut chain = crate::process::default_project_layer();
+            edit_chain(&mut chain);
+            assert!(state.set_project_process_chain(chain));
+            scratch_runtime = Some(scratch);
+        }
+
+        state.transport.playing.store(true, Ordering::Relaxed);
+        let published = state.publish_scheduler_snapshot();
+        let snapshot = match scene_slots {
+            Some(slots) => {
+                let mut snapshot = (*published).clone();
+                snapshot.transport.current_pattern = 0;
+                snapshot.scene_slot_table = Arc::new(vec![Arc::new(slots)]);
+                Arc::new(snapshot)
+            }
+            None => published,
+        };
+        let queue = ScheduledEventQueue::<256>::new();
+        let mut scheduler = SchedulerLookaheadState::new(48_000);
+        if let Some(scratch) = scratch_runtime.as_ref() {
+            scheduler
+                .process_runtime
+                .sync_authoring(scratch.process_authoring_snapshot(), 0.0);
+        }
+        let live_midi_fx_tracks: [LiveMidiFxTrackState; MAX_TRACKS] =
+            std::array::from_fn(|_| LiveMidiFxTrackState::default());
+        // 32 sixteenth steps at 6_000 samples each is one full cycle.
+        schedule_playing_lookahead(
+            &mut scheduler,
+            &state,
+            &snapshot,
+            &queue,
+            &mut scratch_runtime,
+            &live_midi_fx_tracks,
+            snapshot.transport.pattern_epoch,
+            0,
+            192_000,
+            48_000,
+            6_000,
+            24_000.0,
+            0,
+            false,
+            false,
+        );
+
+        let mut out = Vec::new();
+        while let Some(event) = queue.pop_owned() {
+            if let ScheduledEventKind::ResolvedTrigger {
+                track,
+                resolved,
+                chord,
+                ..
+            } = event.kind
+            {
+                out.push(BarTrigger {
+                    track,
+                    sample_time: event.sample_time,
+                    transpose: resolved.transpose,
+                    chord: chord.notes[..chord.count].to_vec(),
+                    chord_step_transpose: chord.step_transpose,
+                });
+            }
+        }
+        out.sort_by_key(|event| (event.sample_time, event.track));
+        out
+    }
+
+    fn track_transposes(events: &[BarTrigger], track: usize) -> Vec<f32> {
+        events
+            .iter()
+            .filter(|event| event.track == track)
+            .map(|event| event.transpose)
+            .collect()
+    }
+
+    /// The Cirklon P3 bar value (manual 3-14): one XPOSE per 16-step bar,
+    /// applied to every note that bar plays. A chord step in the transposed
+    /// bar moves as a block — the notes keep their intervals because
+    /// playback adds `resolved.transpose - step_transpose` to each.
+    #[test]
+    fn scheduler_bar_transpose_moves_every_note_in_its_bar_and_keeps_chords_intact() {
+        let events = run_with_scheduler_stack(|| {
+            bar_transpose_fixture(
+                1,
+                |state| {
+                    state.set_bar_transpose(0, 1, 7.0);
+                    for note in [0.0, 4.0, 7.0] {
+                        state.pattern.chord_data[0].add_note(20, note);
+                    }
+                },
+                None,
+                None,
+            )
+        });
+        let transposes = track_transposes(&events, 0);
+        assert_eq!(transposes.len(), 32, "one cycle of 32 steps");
+        assert!(
+            transposes[..16].iter().all(|value| *value == 0.0),
+            "bar 0 is untransposed: {transposes:?}"
+        );
+        assert!(
+            transposes[16..].iter().all(|value| *value == 7.0),
+            "bar 1 plays +7: {transposes:?}"
+        );
+        let chord_step = events
+            .iter()
+            .filter(|event| event.track == 0)
+            .nth(20)
+            .expect("step 20");
+        assert_eq!(chord_step.chord, vec![0.0, 4.0, 7.0], "intervals intact");
+        assert_eq!(chord_step.chord_step_transpose, 0.0);
+        // Playback sounds each chord note at note + (resolved - step), so
+        // the whole chord lands seven semitones up.
+        assert_eq!(chord_step.transpose, 7.0);
+    }
+
+    /// The bar value is not a replacement: a track accumulator's ramp and
+    /// the bar transpose sum, and the accumulator sees the transposed note
+    /// because the bar value lands before the process chain runs.
+    #[test]
+    fn scheduler_bar_transpose_sums_with_a_track_accumulator() {
+        let events = run_with_scheduler_stack(|| {
+            bar_transpose_fixture(
+                1,
+                |state| state.set_bar_transpose(0, 1, 7.0),
+                Some(Box::new(|chain: &mut crate::process::TrackProcessChain| {
+                    default_lane_slot_mut(chain, "tacc")
+                        .lanes
+                        .insert("amount".to_string(), lane(&[1.0; 32]));
+                })),
+                None,
+            )
+        });
+        let transposes = track_transposes(&events, 0);
+        assert_eq!(transposes.len(), 32);
+        // tacc ramps 1..32 across the cycle; bar 1 adds 7 on top.
+        let expected = (0..32)
+            .map(|step| (step + 1) as f32 + if step >= 16 { 7.0 } else { 0.0 })
+            .collect::<Vec<f32>>();
+        assert_eq!(transposes, expected);
+    }
+
+    /// Two source tracks' worth of the manual's `nte` vs `nte+B` (ch. 13):
+    /// grab `note` copies the source's AUTHORED note and leaves the source's
+    /// bar XPOSE behind, `note+b` takes the note after that bar value. Both
+    /// keep this track's own bar transpose, which is already in
+    /// `(current-note)` when the replace formula runs.
+    fn bar_transpose_grab_fixture(value: f64) -> Vec<f32> {
+        let events = bar_transpose_fixture(
+            2,
+            |state| {
+                // Source step 16 is authored at 7; its bar carries +5.
+                let mut source = [0.0f32; 32];
+                source[16] = 7.0;
+                paint_transposes(state, 1, &source);
+                state.set_bar_transpose(1, 1, 5.0);
+                // The grabbing track's own bar 1 is +2 and must survive.
+                state.set_bar_transpose(0, 1, 2.0);
+            },
+            Some(Box::new(move |chain: &mut crate::process::TrackProcessChain| {
+                let grab = default_lane_slot_mut(chain, "grab");
+                grab.inlets.insert(
+                    "source".to_string(),
+                    crate::process::ProcessLiteral::Number(1.0),
+                );
+                grab.inlets.insert(
+                    "value".to_string(),
+                    crate::process::ProcessLiteral::Number(value),
+                );
+                let mut gate = [0.0f32; 32];
+                gate[16] = 1.0;
+                grab.lanes.insert("grab".to_string(), lane(&gate));
+            })),
+            None,
+        );
+        track_transposes(&events, 0)
+    }
+
+    #[test]
+    fn scheduler_bar_transpose_grab_note_excludes_the_source_bar() {
+        let transposes = run_with_scheduler_stack(|| bar_transpose_grab_fixture(0.0));
+        // Own bar (+2) plus the source's authored 7, not its bar's +5.
+        assert_eq!(transposes[16], 9.0, "{transposes:?}");
+        assert_eq!(transposes[15], 0.0);
+        assert_eq!(transposes[17], 2.0, "own bar transpose still plays");
+    }
+
+    #[test]
+    fn scheduler_bar_transpose_grab_note_b_includes_the_source_bar() {
+        let transposes = run_with_scheduler_stack(|| bar_transpose_grab_fixture(3.0));
+        // Own bar (+2) plus the source's 7 + 5.
+        assert_eq!(transposes[16], 14.0, "{transposes:?}");
+        assert_eq!(transposes[17], 2.0);
+    }
+
+    /// Cirklon "xpose by trk n" vs "xpose by trk n+B": the plain lane adds
+    /// the source's authored note, the +B lane adds that note after the
+    /// source's bar transpose.
+    fn bar_transpose_xpose_fixture(lane_name: &'static str) -> Vec<f32> {
+        let events = bar_transpose_fixture(
+            2,
+            |state| {
+                let mut source = [0.0f32; 32];
+                source[16] = 7.0;
+                paint_transposes(state, 1, &source);
+                state.set_bar_transpose(1, 1, 5.0);
+            },
+            Some(Box::new(move |chain: &mut crate::process::TrackProcessChain| {
+                let xpose = default_lane_slot_mut(chain, lane_name);
+                xpose.inlets.insert(
+                    "source".to_string(),
+                    crate::process::ProcessLiteral::Number(1.0),
+                );
+                let mut gate = [0.0f32; 32];
+                gate[16] = 1.0;
+                xpose.lanes.insert("gate".to_string(), lane(&gate));
+            })),
+            None,
+        );
+        track_transposes(&events, 0)
+    }
+
+    #[test]
+    fn scheduler_xpose_by_track_ignores_the_source_bar_transpose() {
+        let transposes = run_with_scheduler_stack(|| bar_transpose_xpose_fixture("xpose"));
+        assert_eq!(transposes[16], 7.0, "{transposes:?}");
+    }
+
+    #[test]
+    fn scheduler_xpose_b_by_track_adds_the_source_bar_transpose() {
+        let transposes = run_with_scheduler_stack(|| bar_transpose_xpose_fixture("xpose+b"));
+        assert_eq!(transposes[16], 12.0, "source note 7 + its bar's 5: {transposes:?}");
+    }
+
+    /// Scene transpose is a separate layer (Cirklon keeps them apart) and
+    /// stacks on top of the bar value.
+    #[test]
+    fn scheduler_scene_transpose_stacks_on_top_of_the_bar_transpose() {
+        let events = run_with_scheduler_stack(|| {
+            let mut slots = crate::sequencer::SceneSlotStore::default();
+            slots
+                .write_literal(
+                    crate::sequencer::SCENE_TRANSPOSE_SLOT,
+                    crate::process::ProcessLiteral::Number(-3.0),
+                )
+                .unwrap();
+            bar_transpose_fixture(
+                1,
+                |state| state.set_bar_transpose(0, 1, 7.0),
+                None,
+                Some(slots),
+            )
+        });
+        let transposes = track_transposes(&events, 0);
+        assert!(
+            transposes[..16].iter().all(|value| *value == -3.0),
+            "bar 0: scene transpose only: {transposes:?}"
+        );
+        assert!(
+            transposes[16..].iter().all(|value| *value == 4.0),
+            "bar 1: +7 bar value with the scene's -3 on top: {transposes:?}"
+        );
     }
 
     fn rand_spike_into_acc_fixture(hold: f64) -> Vec<f32> {
@@ -4383,6 +4736,260 @@
             expected_durations,
             "the second added grab copies the duration source track"
         );
+    }
+
+    /// Track 0 follows a harmony source with one added `lane-harmony` slot:
+    /// track 1 authors a C major triad chord on every step, track 2 a single
+    /// G on every step. Returns track 0's first-bar transposes.
+    fn track_roster_harmony_fixture(source: f64, amount: f32, grace: f64) -> Vec<f32> {
+        const FOLLOWER: [f32; 8] = [0.0, 1.0, 2.0, 3.0, 5.0, 6.0, 8.0, 11.0];
+        let state = Arc::new(SequencerState::new(
+            3,
+            vec![
+                default_empty_effect_chain(),
+                default_empty_effect_chain(),
+                default_empty_effect_chain(),
+            ],
+        ));
+        for track in 0..3 {
+            state.pattern.track_params[track].set_num_steps(8);
+            for step in 0..8 {
+                state.pattern.patterns[track].set_step_active(step, true);
+            }
+        }
+        paint_transposes(&state, 0, &FOLLOWER);
+        for step in 0..8 {
+            for note in [0.0, 4.0, 7.0] {
+                assert!(state.pattern.chord_data[1].add_note(step, note));
+            }
+            state.pattern.step_data[2].set(step, StepParam::Transpose, 7.0);
+        }
+        track_roster_harmony_from(state, source, amount, grace)
+    }
+
+    /// Attach one `lane-harmony` slot to track 0 with the given inlets and
+    /// return track 0's first-bar transposes.
+    fn track_roster_harmony_from(
+        state: Arc<SequencerState>,
+        source: f64,
+        amount: f32,
+        grace: f64,
+    ) -> Vec<f32> {
+        let mut scratch = lisp_host::ScratchControlRuntime::new(
+            Arc::clone(&state),
+            vec![Vec::new(), Vec::new(), Vec::new()],
+            vec![
+                EffectDescriptor::builtin_sampler(),
+                EffectDescriptor::builtin_sampler(),
+                EffectDescriptor::builtin_sampler(),
+            ],
+            0,
+            0,
+        );
+        scratch
+            .eval(&lisp_host::load_process_library_source())
+            .expect("builtin process library");
+        assert!(state.set_project_process_chain(crate::process::default_project_layer()));
+        let harmony = state
+            .add_track_roster_slot(0, "lane-harmony")
+            .expect("harmony slot");
+        assert!(state.set_track_process_inlet_value(
+            0,
+            harmony,
+            "source",
+            crate::process::ProcessLiteral::Number(source),
+        ));
+        assert!(state.set_track_process_inlet_value(
+            0,
+            harmony,
+            "grace",
+            crate::process::ProcessLiteral::Number(grace),
+        ));
+        for step in 0..8 {
+            assert!(state.set_process_lane_value(0, harmony, "amount", step, amount));
+        }
+        let mut events = schedule_process_observed_fixture(&state, scratch, 102_000)
+            .into_iter()
+            .filter(|event| event.track == 0)
+            .collect::<Vec<_>>();
+        events.sort_by_key(|event| event.sample_time);
+        events.truncate(8);
+        events.iter().map(|event| event.transpose).collect()
+    }
+
+    /// A chord source: every follower note snaps to the nearest pitch class
+    /// of the source step's chord by the shortest interval, same tick. An
+    /// equidistant note (2 between 0 and 4) takes the first chord note, and
+    /// 11 wraps up to the octave rather than falling to 7.
+    #[test]
+    fn scheduler_track_roster_harmony_snaps_to_the_source_chord() {
+        assert_eq!(
+            run_with_scheduler_stack(|| track_roster_harmony_fixture(1.0, 1.0, 0.0)),
+            vec![0.0, 0.0, 0.0, 4.0, 4.0, 7.0, 7.0, 12.0],
+        );
+    }
+
+    /// A single-note source is a one-pitch chord. The pull is by pitch class,
+    /// so 0 goes down 5 to the G below rather than up 7, and grace leaves
+    /// notes already within a semitone of a G alone.
+    #[test]
+    fn scheduler_track_roster_harmony_follows_a_mono_source_with_grace() {
+        assert_eq!(
+            run_with_scheduler_stack(|| track_roster_harmony_fixture(2.0, 1.0, 1.0)),
+            vec![-5.0, -5.0, 7.0, 7.0, 7.0, 6.0, 8.0, 7.0],
+        );
+    }
+
+    /// Track 1 cycles C, F and G major, so its pattern implies C major.
+    /// Track 0 plays a chromatic line. Returns track 0's transposes at the
+    /// given amount.
+    fn track_roster_harmony_in_c_major(amount: f32) -> Vec<f32> {
+        const FOLLOWER: [f32; 8] = [0.0, 1.0, 2.0, 3.0, 5.0, 6.0, 8.0, 11.0];
+        let state = Arc::new(SequencerState::new(
+            2,
+            vec![default_empty_effect_chain(), default_empty_effect_chain()],
+        ));
+        for track in 0..2 {
+            state.pattern.track_params[track].set_num_steps(8);
+        }
+        for step in 0..8 {
+            state.pattern.patterns[0].set_step_active(step, true);
+        }
+        paint_transposes(&state, 0, &FOLLOWER);
+        for (step, chord) in [
+            (0, [0.0, 4.0, 7.0]),
+            (4, [5.0, 9.0, 12.0]),
+            (6, [7.0, 11.0, 14.0]),
+        ] {
+            state.pattern.patterns[1].set_step_active(step, true);
+            for note in chord {
+                assert!(state.pattern.chord_data[1].add_note(step, note));
+            }
+        }
+        track_roster_harmony_from(state, 1.0, amount, 0.0)
+    }
+
+    /// Amount 0.5 is "stay in key": D under C major and the chord tones play
+    /// as authored, while Db, Eb, Gb and Ab (none in C major) snap to the
+    /// nearest note that is. On a tie the chord tone wins (Db to C, Eb to E).
+    #[test]
+    fn scheduler_track_roster_harmony_half_amount_keeps_the_follower_in_key() {
+        assert_eq!(
+            run_with_scheduler_stack(|| track_roster_harmony_in_c_major(0.5)),
+            vec![0.0, 0.0, 2.0, 4.0, 5.0, 5.0, 7.0, 11.0],
+        );
+    }
+
+    /// Amount 0.3 admits chromatic color: Eb over C major now plays, while
+    /// the clashes (Db on the root of C, Gb on the root of F, Ab on the root
+    /// of G) are still corrected.
+    #[test]
+    fn scheduler_track_roster_harmony_low_amount_only_corrects_clashes() {
+        assert_eq!(
+            run_with_scheduler_stack(|| track_roster_harmony_in_c_major(0.3)),
+            vec![0.0, 0.0, 2.0, 3.0, 5.0, 5.0, 7.0, 11.0],
+        );
+    }
+
+    /// Amount 0 is a bypass: the chromatic line plays untouched.
+    #[test]
+    fn scheduler_track_roster_harmony_zero_amount_is_a_bypass() {
+        assert_eq!(
+            run_with_scheduler_stack(|| track_roster_harmony_in_c_major(0.0)),
+            vec![0.0, 1.0, 2.0, 3.0, 5.0, 6.0, 8.0, 11.0],
+        );
+    }
+
+    /// A chord track with rests: track 1 strikes a C major triad on step 0
+    /// and an F major triad on step 4, with empty steps between. Every
+    /// follower step still harmonizes, because an empty source step holds
+    /// the last chord that played rather than reading as a bare C. The
+    /// follower plays Eb: under C major it goes up to E, under F major up
+    /// to F. Without the hold, steps 1-3 and 5-7 would fall to C.
+    #[test]
+    fn scheduler_track_roster_harmony_holds_the_chord_through_empty_source_steps() {
+        let transposes = run_with_scheduler_stack(|| {
+            let state = Arc::new(SequencerState::new(
+                3,
+                vec![
+                    default_empty_effect_chain(),
+                    default_empty_effect_chain(),
+                    default_empty_effect_chain(),
+                ],
+            ));
+            for track in 0..3 {
+                state.pattern.track_params[track].set_num_steps(8);
+            }
+            for step in 0..8 {
+                state.pattern.patterns[0].set_step_active(step, true);
+                state.pattern.step_data[0].set(step, StepParam::Transpose, 3.0);
+            }
+            for (step, chord) in [(0, [0.0, 4.0, 7.0]), (4, [5.0, 9.0, 12.0])] {
+                state.pattern.patterns[1].set_step_active(step, true);
+                for note in chord {
+                    assert!(state.pattern.chord_data[1].add_note(step, note));
+                }
+            }
+            track_roster_harmony_from(state, 1.0, 1.0, 0.0)
+        });
+        assert_eq!(transposes, vec![4.0, 4.0, 4.0, 4.0, 5.0, 5.0, 5.0, 5.0]);
+    }
+
+    /// The same hold for grab: a source with a note on steps 0 and 4 only
+    /// keeps that note current through its rests, so a grab on every step
+    /// copies the note in effect instead of the empty steps' default 0.
+    #[test]
+    fn scheduler_track_roster_grab_holds_the_source_note_through_empty_steps() {
+        let transposes = run_with_scheduler_stack(|| {
+            let state = Arc::new(SequencerState::new(
+                2,
+                vec![default_empty_effect_chain(), default_empty_effect_chain()],
+            ));
+            for track in 0..2 {
+                state.pattern.track_params[track].set_num_steps(8);
+            }
+            for step in 0..8 {
+                state.pattern.patterns[0].set_step_active(step, true);
+            }
+            for (step, note) in [(0, 5.0), (4, 9.0)] {
+                state.pattern.patterns[1].set_step_active(step, true);
+                state.pattern.step_data[1].set(step, StepParam::Transpose, note);
+            }
+            let mut scratch = lisp_host::ScratchControlRuntime::new(
+                Arc::clone(&state),
+                vec![Vec::new(), Vec::new()],
+                vec![
+                    EffectDescriptor::builtin_sampler(),
+                    EffectDescriptor::builtin_sampler(),
+                ],
+                0,
+                0,
+            );
+            scratch
+                .eval(&lisp_host::load_process_library_source())
+                .expect("builtin process library");
+            assert!(state.set_project_process_chain(crate::process::default_project_layer()));
+            let grab = state
+                .add_track_roster_slot(0, "lane-grab")
+                .expect("grab slot");
+            assert!(state.set_track_process_inlet_value(
+                0,
+                grab,
+                "source",
+                crate::process::ProcessLiteral::Number(1.0),
+            ));
+            for step in 0..8 {
+                assert!(state.set_process_lane_value(0, grab, "grab", step, 1.0));
+            }
+            let mut events = schedule_process_observed_fixture(&state, scratch, 102_000)
+                .into_iter()
+                .filter(|event| event.track == 0)
+                .collect::<Vec<_>>();
+            events.sort_by_key(|event| event.sample_time);
+            events.truncate(8);
+            events.iter().map(|event| event.transpose).collect::<Vec<_>>()
+        });
+        assert_eq!(transposes, vec![5.0, 5.0, 5.0, 5.0, 9.0, 9.0, 9.0, 9.0]);
     }
 
     #[test]
@@ -10910,7 +11517,7 @@ fn a_prebuilt_chunk_reads_live_scene_slots_not_its_preflight_copy() {
     use std::sync::Arc;
 
     let overridden = {
-        let mut slots = SceneSlotStore::default();
+        let mut slots = crate::sequencer::SceneSlotStore::default();
         slots
             .write_literal("ds-vel", crate::process::ProcessLiteral::Number(0.1))
             .expect("portable value");
@@ -10983,7 +11590,7 @@ fn scratch_generator_follows_a_mid_playback_scene_switch() {
 
         let published = state.publish_scheduler_snapshot();
         let overridden = {
-            let mut slots = SceneSlotStore::default();
+            let mut slots = crate::sequencer::SceneSlotStore::default();
             slots
                 .write_literal("ds-vel", crate::process::ProcessLiteral::Number(0.1))
                 .expect("portable value");
@@ -11114,7 +11721,7 @@ fn scene_transpose_follows_live_scene_values_without_a_scratch_runtime() {
         // Two scenes, then a live write to scene 1, then reset. Keep the same
         // scheduler running; deliberately leave the snapshot's frozen slots empty.
         for (scene, semitones) in [(0, -9.0), (1, 12.0), (1, -5.0), (0, 0.0)] {
-            let mut slots = SceneSlotStore::default();
+            let mut slots = crate::sequencer::SceneSlotStore::default();
             slots.write_literal(SCENE_TRANSPOSE_SLOT,
                 crate::process::ProcessLiteral::Number(semitones)).unwrap();
             let mut snapshot = (*published).clone();

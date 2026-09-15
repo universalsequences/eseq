@@ -877,7 +877,7 @@ pub(in crate::lisp_host) fn register_process_natives(
         runtime.register_native_with_docs(
             "track",
             "(track index :param [:steps-ago n | :trigs-ago n | :pattern])",
-            "Construct a track read source: the previous-tick resolved value (optionally n steps or trigs back), or with :pattern the authored value on the step the track is currently on, visible the same tick. :note is only readable as :pattern.",
+            "Construct a track read source: the previous-tick resolved value (optionally n steps or trigs back), or with :pattern the authored value on the step the track is currently on, visible the same tick. :note, :note+b (that note plus the source bar's transpose, the Cirklon 'nte+B') and :chord (a list of the step's chord notes, or its single note) are only readable as :pattern.",
             move |args, _ctx| {
                 if args.len() != 2 && args.len() != 3 && args.len() != 4 {
                     return Err(
@@ -896,7 +896,7 @@ pub(in crate::lisp_host) fn register_process_natives(
                             "track read with three arguments expects :pattern".to_string()
                         );
                     }
-                    if param != "note" {
+                    if !matches!(param.as_str(), "note" | "note+b" | "chord" | "key") {
                         parse_step_param_arg(&[EValue::Keyword(param.clone())], 0)?;
                     }
                     return Ok(process_map([
@@ -906,8 +906,8 @@ pub(in crate::lisp_host) fn register_process_natives(
                         ("mode", EValue::Keyword("pattern".to_string())),
                     ]));
                 }
-                if param == "note" {
-                    return Err("track :note is only readable as :pattern".to_string());
+                if matches!(param.as_str(), "note" | "note+b" | "chord" | "key") {
+                    return Err(format!("track :{param} is only readable as :pattern"));
                 }
                 if param == "fire-count" {
                     if args.len() != 4 || process_symbol_name(&args[2])? != "window" {
@@ -1110,6 +1110,44 @@ pub(in crate::lisp_host) fn register_process_natives(
             },
         );
     }
+
+    runtime.register_native_with_docs(
+        "harmonic-snap",
+        "(harmonic-snap chord key current-pitch amount grace)",
+        "Signed semitone delta that moves current-pitch onto the nearest pitch class at least `amount` harmonic against `chord` (root first) in `key` (pitch classes; the chord's quality fills in a thin key), or 0 when it already is or the move is within grace. Tiers: chord tones 1, key tones ~0.6-0.75, color tones ~0.3-0.45, clashes below 0.2.",
+        move |args, _ctx| {
+            if args.len() != 5 {
+                return Err(
+                    "harmonic-snap expects chord, key, current pitch, amount and grace".to_string(),
+                );
+            }
+            let number_list = |value: &EValue, what: &str| -> Result<Vec<f64>, String> {
+                match value {
+                    EValue::Nil => Ok(Vec::new()),
+                    EValue::List(items) => items
+                        .iter()
+                        .map(|item| process_number_arg(Some(&item.borrow()), what))
+                        .collect(),
+                    _ => Err(format!("harmonic-snap {what} must be a list of pitches")),
+                }
+            };
+            let chord = number_list(&args[0], "chord")?
+                .into_iter()
+                .map(|pitch| pitch as f32)
+                .collect::<Vec<_>>();
+            let key_mask = number_list(&args[1], "key")?
+                .into_iter()
+                .fold(0u16, |mask, pc| {
+                    mask | (1 << crate::runtime::harmony::pitch_class(pc as f32))
+                });
+            let current = process_number_arg(args.get(2), "harmonic-snap")?;
+            let amount = process_number_arg(args.get(3), "harmonic-snap")?;
+            let grace = process_number_arg(args.get(4), "harmonic-snap")?;
+            Ok(EValue::Number(crate::runtime::harmony::harmonic_snap(
+                &chord, key_mask, current, amount, grace,
+            )))
+        },
+    );
 
     runtime.register_native_with_docs(
         "field-nearest-delta",
@@ -1328,6 +1366,24 @@ pub(in crate::lisp_host) fn register_process_natives(
                         };
                         if param_name == "note" {
                             return Ok(EValue::Number(pattern.note as f64));
+                        }
+                        // Cirklon "nte+B": the source's note AFTER its bar
+                        // transpose, which plain :note deliberately excludes.
+                        if param_name == "note+b" {
+                            return Ok(EValue::Number(pattern.note_with_bar() as f64));
+                        }
+                        if param_name == "chord" {
+                            return Ok(process_list(
+                                pattern
+                                    .pitches()
+                                    .map(|pitch| EValue::Number(pitch as f64)),
+                            ));
+                        }
+                        if param_name == "key" {
+                            return Ok(process_list(
+                                crate::runtime::harmony::mask_pitch_classes(pattern.key_mask)
+                                    .map(|pc| EValue::Number(f64::from(pc))),
+                            ));
                         }
                         let param = parse_step_param_arg(&[EValue::Keyword(param_name)], 0)?;
                         return Ok(EValue::Number(pattern.params[param.index()] as f64));

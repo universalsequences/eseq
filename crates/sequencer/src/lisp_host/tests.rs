@@ -13017,6 +13017,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             names.iter().any(|name| name == "follow-harmony"),
             "{names:?}"
         );
+        assert!(names.iter().any(|name| name == "lane-harmony"), "{names:?}");
         assert!(defs.iter().all(|def| {
             def.source_path
                 .as_deref()

@@ -10,7 +10,7 @@ use crate::neural::ProjectNeuralNetwork;
 use super::data::{
     BusId, CustomInstrumentRunMode, InstrumentType, ModConnection, StepParam, SwingResolution,
     Timebase, TrackParamsSnapshot, TrackSendBaseline, TrackSendRuntimeTarget, TrackSendSnapshot,
-    MAX_STEPS, NUM_PARAMS,
+    BARS_PER_PATTERN, MAX_STEPS, NUM_PARAMS,
 };
 use super::state::{RackTrackSnapshot, SceneSlotStore, SequencerState, TrackPatternData};
 
@@ -90,6 +90,11 @@ pub struct SequencerTrackSnapshot {
     /// Live mixer baselines paired with the immutable runtime targets above.
     /// The cells outlive queued events and update without snapshot publication.
     pub track_send_live_baselines: Vec<(BusId, Arc<TrackSendBaseline>)>,
+    /// This pattern's per-bar transpose (Cirklon P3 bar XPOSE), one semitone
+    /// value per 16-step page. The scheduler folds `bar_transposes[step /
+    /// STEPS_PER_PAGE]` into the resolved transpose before the process chain
+    /// runs, so processes see (and can grab) the transposed note.
+    pub bar_transposes: [f32; BARS_PER_PATTERN],
     pub steps: Vec<SequencerStepSnapshot>,
 }
 
@@ -372,6 +377,7 @@ fn capture_live_track(
     let instrument_descriptor =
         instrument_descriptor.unwrap_or_else(EffectDescriptor::builtin_sampler);
     let instrument_slot = EffectSlotSnapshot::capture(&state.pattern.instrument_slots[track]);
+    let bar_transposes = state.pattern.bar_transposes[track].snapshot();
     let steps = (0..MAX_STEPS)
         .map(|step| SequencerStepSnapshot::capture(state, track, step))
         .collect();
@@ -419,6 +425,7 @@ fn capture_live_track(
         instrument_slot,
         track_send_runtime_targets,
         track_send_live_baselines,
+        bar_transposes,
         steps,
     }
 }
@@ -567,6 +574,7 @@ fn track_snapshot_from_pattern_data(
         instrument_slot: data.instrument_slot.clone(),
         track_send_runtime_targets: Vec::new(),
         track_send_live_baselines: Vec::new(),
+        bar_transposes: data.bar_transpose_snapshot,
         steps,
     }
 }

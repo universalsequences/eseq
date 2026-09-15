@@ -13,6 +13,10 @@ pub struct TrackPatternData {
     pub track_sound_state: TrackSoundState,
     pub sample_id: (i32, String, u32),
     pub chord_snapshot: ChordSnapshot,
+    /// This pattern's per-bar transpose (Cirklon P3 bar XPOSE), one semitone
+    /// value per 16-step page. Scene-locked like the step lanes: it swaps
+    /// with the pattern on a scene switch.
+    pub bar_transpose_snapshot: [f32; BARS_PER_PATTERN],
     pub timebase_plock_snapshot: [Option<u32>; MAX_STEPS],
     pub swing_plock_snapshot: [Option<u32>; MAX_STEPS],
     pub swing_resolution_plock_snapshot: [Option<u32>; MAX_STEPS],
@@ -67,6 +71,7 @@ impl TrackPatternData {
                 step.clear();
             }
         }
+        self.bar_transpose_snapshot = [0.0; BARS_PER_PATTERN];
         self.timebase_plock_snapshot = [None; MAX_STEPS];
         self.swing_plock_snapshot = [None; MAX_STEPS];
         self.swing_resolution_plock_snapshot = [None; MAX_STEPS];
@@ -928,6 +933,7 @@ impl TrackPatternData {
 
         self.chord_snapshot
             .restore(&state.pattern.chord_data[track]);
+        state.pattern.bar_transposes[track].restore(&self.bar_transpose_snapshot);
         state.pattern.timebase_plocks[track].restore(&self.timebase_plock_snapshot);
         state.pattern.swing_plocks[track].restore(&self.swing_plock_snapshot);
         state.pattern.swing_resolution_plocks[track].restore(&self.swing_resolution_plock_snapshot);
@@ -1148,6 +1154,7 @@ impl TrackPatternData {
         self.track_sound_state = TrackSoundState::default();
         self.sample_id = (-1, String::new(), 44_100);
         self.chord_snapshot = ChordSnapshot::new_default();
+        self.bar_transpose_snapshot = [0.0; BARS_PER_PATTERN];
         self.timebase_plock_snapshot = [None; MAX_STEPS];
         self.swing_plock_snapshot = [None; MAX_STEPS];
         self.swing_resolution_plock_snapshot = [None; MAX_STEPS];

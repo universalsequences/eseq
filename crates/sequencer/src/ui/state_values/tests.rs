@@ -25752,6 +25752,75 @@ mod instrument_header_ui_tests;
     }
 
     #[test]
+    fn loaded_project_reveals_initial_bank_before_song_tick() {
+        let eng = engine::init_headless_engine(44_100, 2).unwrap();
+        struct GraphGuard(sequencer::audiograph::LiveGraphPtr);
+        impl Drop for GraphGuard {
+            fn drop(&mut self) {
+                unsafe {
+                    sequencer::audiograph::engine_stop_workers();
+                    sequencer::audiograph::destroy_live_graph(self.0.0);
+                }
+            }
+        }
+        let _guard = GraphGuard(eng.lg_ptr);
+        let mut app = app::App::new(eng.state, eng.lg_ptr, eng.sample_rate,
+            eng.buses, eng.master_recorder, eng.keyboard_tx);
+        app.graph_controller().add_blank_sampler_track().unwrap();
+        let mut project = app.capture_export_project().unwrap();
+        // impakt's actual bank topology and saved current scene, with a blank
+        // sampler instead of its DSP: project loading is what this test covers.
+        project.patterns = vec![project.patterns[0].clone(); 28];
+        project.scene_banks = vec![
+            sequencer::project::ProjectSceneBank { id: 1, name: None, len: 10 },
+            sequencer::project::ProjectSceneBank { id: 2, name: None, len: 18 },
+        ];
+        project.current_pattern = 11;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bank-load.json");
+        std::fs::write(&path, serde_json::to_vec(&project).unwrap()).unwrap();
+
+        let mut editor = full_grid_editor_for_scroll_tests();
+        editor.runtime_mut().eval_str("(set-window-buffer \"*transport*\")").unwrap();
+        let mut song_frame = SongFrameState::default();
+        sync_song_state(editor.runtime_mut(), &app, &mut song_frame, false);
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        assert_eq!(editor.runtime_mut().eval_str("(eseq.scene-banks/scene-viewed-bank-index)").unwrap(),
+            Some(Value::Number(0.0)));
+
+        for _ in 0..2 {
+            editor.runtime_mut().eval_str("(eseq.transport/select-scene-bank \"A\")").unwrap();
+            app.queue_project_load_from_path("bank-load", &path).unwrap();
+            for _ in 0..512 {
+                if !app.has_pending_project_load() { break; }
+                app.advance_pending_project_load().unwrap();
+            }
+            assert!(!app.has_pending_project_load());
+            assert_eq!(app.state.current_scene_index(), 11);
+            // Exactly the load-completion ordering: publish/reset, render,
+            // then the later frame's song sync. No pre-seeded SEQ.scene-banks.
+            sync_project_scene_state(editor.runtime_mut(), &app.state);
+            editor.runtime_mut().run_reactive_cycle();
+            editor.refresh_runtime_side_effects();
+            for after_song_tick in [false, true] {
+                if after_song_tick {
+                    sync_song_state(editor.runtime_mut(), &app, &mut song_frame, false);
+                    editor.runtime_mut().run_reactive_cycle();
+                    editor.refresh_runtime_side_effects();
+                }
+                let layout = editor.widget_layout().unwrap();
+                let dropdown = find_layout_node_by_stable_key_suffix(&layout, "/scene-bank-dropdown").unwrap();
+                assert_finite_nonzero_rect(dropdown, "loaded scene bank dropdown");
+                assert_eq!(dropdown.props.get("value"), Some(&Value::String("B".into())),
+                    "loaded initial bank (after_song_tick={after_song_tick})");
+                let pill = find_layout_node_by_stable_key_suffix(&layout, "/transport-scene-pill-11").unwrap();
+                assert_finite_nonzero_rect(pill, "loaded initial scene");
+            }
+        }
+    }
+
+    #[test]
     fn project_scene_publication_resets_bank_view_on_every_replacement() {
         let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
         let mut runtime = Runtime::new();
@@ -31611,7 +31680,51 @@ mod instrument_header_ui_tests;
     }
 
     #[test]
-    fn metal_seq_track_name_double_click_always_shows_lower_fx_mode() {
+    fn metal_seq_short_track_empty_steps_hit_track_row() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let selected = Arc::new(Mutex::new(Vec::new()));
+        let selected_sink = selected.clone();
+        editor.runtime_mut().register_native("seq-set-track", move |args, _ctx| {
+            selected_sink.lock().unwrap().push(args);
+            Ok(Value::Bool(true))
+        });
+        editor.runtime_mut().eval_str(
+            r#"(reactive-set "SEQ" "track-num-steps" (list 4))"#,
+        ).unwrap();
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let sequencer_id = editor.buffers.iter()
+            .find(|buffer| buffer.name == "*sequencer*").unwrap().id;
+        editor.set_active_buffer(sequencer_id);
+        editor.set_layout_viewport(140, 20);
+        let layout = editor.widget_layout().expect("short track layout");
+        let first = find_layout_node_by_stable_key_suffix(&layout, "/step-cell-0-0")
+            .expect("first live step");
+        let row = find_layout_node_by_stable_key_suffix(&layout, "sequencer-track-0")
+            .expect("track row");
+        assert!(first.rect.width.is_finite() && first.rect.width > 0.0);
+        assert!(first.rect.height.is_finite() && first.rect.height > 0.0);
+        for step in 4..16 {
+            assert!(find_layout_node_by_stable_key_suffix(
+                &layout, &format!("/step-cell-0-{step}"),
+            ).is_none(), "out-of-range step must not create an interactive cell");
+            let hit = eseqlisp::layout::hit_test_layout(
+                &layout,
+                first.rect.row + first.rect.height * 0.5,
+                first.rect.col + first.rect.width * (step as f32 + 0.5),
+            ).expect("empty grid area should hit the row");
+            assert_eq!(hit.widget_id, row.widget_id, "empty step {step}");
+            editor.runtime_mut().invoke(
+                hit.props.get("on-click").cloned().expect("row click handler"),
+                vec![map_value([])],
+            ).unwrap();
+        }
+        assert_eq!(selected.lock().unwrap().as_slice(),
+            vec![vec![Value::Number(0.0)]; 12].as_slice());
+    }
+
+    #[test]
+    fn metal_seq_track_name_and_row_double_click_toggle_lower_panel() {
         let mut editor = full_grid_editor_for_scroll_tests();
         let sequencer_id = editor
             .buffers
@@ -31627,17 +31740,14 @@ mod instrument_header_ui_tests;
 
         let track_name_hit = find_layout_node_by_stable_key_suffix(&layout, "/select-0")
             .expect("track name hit target should exist");
-        let show_fx = track_name_hit
+        let toggle_panel = track_name_hit
             .props
             .get("on-double-click")
             .cloned()
-            .expect("track name hit target should expose FX-mode double-click");
+            .expect("track name hit target should expose panel-toggle double-click");
 
-        // "sequencer-track-0" is a `(subtree :key …)` and never qualifies, so it
-        // matches as its own exact suffix; the rest are widget keys that now
-        // hash as "eseq.sequencer/<key>" (module spec §10 hazards a and e).
+        // Track controls retain their own gestures rather than toggling panels.
         for key in [
-            "sequencer-track-0",
             "/color-badge-0",
             "/arm-0",
             "/mute-0",
@@ -31684,7 +31794,7 @@ mod instrument_header_ui_tests;
         editor
             .runtime_mut()
             .invoke(
-                show_fx.clone(),
+                toggle_panel,
                 vec![map_value([(
                     "phase",
                     Value::String("double-click".to_string()),
@@ -31700,8 +31810,8 @@ mod instrument_header_ui_tests;
         );
         assert_eq!(
             editor.runtime_mut().eval_str("eseq.seq-step-tabs/lower-panel-buffer").unwrap(),
-            Some(Value::String("*fx*".to_string())),
-            "track-name double-click in FX mode must remain in FX mode"
+            Some(Value::String("*piano-roll*".to_string())),
+            "track-name double-click in FX mode must open piano roll"
         );
         assert_eq!(
             editor
@@ -31709,7 +31819,7 @@ mod instrument_header_ui_tests;
                 .eval_str("(eseq.piano-roll/piano-roll-arrangement-mode?)")
                 .unwrap(),
             Some(Value::Bool(false)),
-            "track-name double-click is an explicit FX transition even when FX is already visible"
+            "track-name double-click must clear arrangement piano-roll mode"
         );
 
         editor
@@ -31722,27 +31832,31 @@ mod instrument_header_ui_tests;
             Some(Value::String("*piano-roll*".to_string()))
         );
 
+        let row_toggle = find_layout_node_by_stable_key_suffix(&layout, "sequencer-track-0")
+            .expect("track row should exist")
+            .props.get("on-double-click").cloned()
+            .expect("track row should toggle the lower panel");
         editor
             .runtime_mut()
             .invoke(
-                show_fx,
+                row_toggle,
                 vec![map_value([(
                     "phase",
                     Value::String("double-click".to_string()),
                 )])],
             )
-            .expect("invoke track name double-click from piano-roll mode");
+            .expect("invoke track row double-click from piano-roll mode");
         editor.refresh_runtime_side_effects();
 
         assert_eq!(
             editor.runtime_mut().eval_str("eseq.seq-step-tabs/step-panel-buffer").unwrap(),
             Some(Value::String("*sequencer*".to_string())),
-            "second track-name double-click should keep the main sequencer panel"
+            "track-row double-click should keep the main sequencer panel"
         );
         assert_eq!(
             editor.runtime_mut().eval_str("eseq.seq-step-tabs/lower-panel-buffer").unwrap(),
             Some(Value::String("*fx*".to_string())),
-            "track-name double-click from piano-roll mode must enter FX mode"
+            "track-row double-click from piano-roll mode must enter FX mode"
         );
     }
 
@@ -33558,7 +33672,7 @@ mod instrument_header_ui_tests;
     }
 
     #[test]
-    fn metal_seq_fx_process_chain_rows_stack_in_execution_order() {
+    fn metal_seq_fx_omits_process_panel_with_attached_processes() {
         let mut editor = full_grid_editor_for_scroll_tests();
         editor.runtime_mut().set_reactive(
             "SEQ",
@@ -33581,19 +33695,11 @@ mod instrument_header_ui_tests;
         editor.refresh_runtime_side_effects();
         editor.set_layout_viewport(180, 18);
         let layout = editor.widget_layout().expect("process stack layout");
-        let panel = find_layout_node_by_debug_name(&layout, "process-chain-panel")
-            .expect("process chain panel should render");
-        let rows = (0..3)
-            .map(|index| {
-                find_layout_node_by_debug_name(&layout, &format!("process-panel-slot-{index}"))
-                    .unwrap_or_else(|| panic!("process row {index} should render"))
-            })
-            .collect::<Vec<_>>();
-        for (index, row) in rows.iter().enumerate() {
-            assert_finite_nonzero_rect(row, &format!("process row {index}"));
-            assert_layout_inside(row, panel, &format!("process row {index}"));
-        }
-        assert!(rows[0].rect.row < rows[1].rect.row && rows[1].rect.row < rows[2].rect.row);
+        assert_finite_layout_tree(&layout);
+        assert!(find_layout_node_by_debug_name(&layout, "process-chain-panel").is_none());
+        let instrument = find_layout_node_by_debug_name(&layout, "instrument-panel")
+            .expect("instrument panel remains visible");
+        assert_finite_nonzero_rect(instrument, "instrument panel");
     }
 
     #[test]
@@ -33678,143 +33784,11 @@ mod instrument_header_ui_tests;
             find_layout_node_by_stable_key(&layout, "seqv-process-lane-map-0-0-shape").is_none(),
             "the sequencer lane surface must not own process mapping controls"
         );
-        let process_panel = find_layout_node_by_debug_name(&layout, "process-chain-panel")
-            .unwrap_or_else(|| {
-                let mut summaries = Vec::new();
-                collect_layout_node_summaries(&layout, &mut summaries);
-                panic!(
-                    "an attached process should render the process chain panel; layout={summaries:#?}"
-                )
-            });
-        assert_finite_nonzero_rect(process_panel, "process chain panel");
-        assert_eq!(
-            process_panel.props.get("background"),
-            Some(&Value::String("fx-panel-bg".to_string())),
-            "the process chain should use the same rounded panel shader as instruments and effects"
-        );
-        assert_eq!(
-            process_panel.props.get("color"),
-            Some(&Value::Keyword("instrument-panel-bg".to_string())),
-            "the process chain body should use the shared instrument/effect color scheme"
-        );
-        let instrument_panel = find_layout_node_by_debug_name(&layout, "instrument-panel")
-            .expect("instrument panel should render beside process chain");
-        assert!(
-            process_panel.rect.col < instrument_panel.rect.col,
-            "process chain must render left of the instrument and MIDI FX pipeline"
-        );
-        let process_panel_header =
-            find_layout_node_by_debug_name(&layout, "process-panel-header-box")
-                .expect("process panel header should render");
-        let instrument_panel_header =
-            find_layout_node_by_debug_name(&layout, "instrument-header-box")
-                .expect("instrument panel header should render");
-        assert!(
-            (process_panel_header.rect.height - instrument_panel_header.rect.height).abs() < 0.01,
-            "process and instrument headers should reserve the same height; process={:?}; instrument={:?}",
-            process_panel_header.rect,
-            instrument_panel_header.rect
-        );
-
-        let header = find_layout_node_by_stable_key_suffix(&layout, "/header-42")
-            .expect("process slot header should render");
-        assert_finite_nonzero_rect(header, "process slot header");
-        editor
-            .runtime_mut()
-            .invoke(
-                header
-                    .props
-                    .get("on-double-click")
-                    .cloned()
-                    .expect("process slot source-navigation callback"),
-                vec![Value::Nil],
-            )
-            .expect("open process source");
-        let commands = editor.drain_host_commands();
-        let source_command = commands
-            .iter()
-            .find(|command| {
-                matches!(
-                    command,
-                    eseqlisp::host::HostCommand::Custom { name, .. }
-                        if name == "open-script-source-tab"
-                )
-            })
-            .expect("double-click should enqueue a source-tab command");
-        let eseqlisp::host::HostCommand::Custom { payload, .. } = source_command else {
-            unreachable!("matched custom source command")
-        };
-        assert_eq!(
-            extract_string_from_payload(payload, "path"),
-            Some("content/scripts/mod-writer.lisp".to_string())
-        );
-        editor
-            .runtime_mut()
-            .invoke(
-                header
-                    .props
-                    .get("on-click")
-                    .cloned()
-                    .expect("process slot header click callback"),
-                vec![Value::Nil],
-            )
-            .expect("select process slot");
-        editor.refresh_runtime_side_effects();
-
-        let layout = editor
-            .widget_layout()
-            .expect("selected process panel layout should build");
-        let selected_panel = find_layout_node_by_debug_name(&layout, "process-chain-panel")
-            .expect("selected process chain panel should render");
-        let port_button = find_layout_node_by_stable_key_suffix(&layout, "/map-42-shape")
-            .expect("selected process slot should render its mappable port button");
-        assert_finite_nonzero_rect(port_button, "process port map button");
-        assert_layout_inside(port_button, selected_panel, "process port map button");
-        for (key, label) in [
-            ("/enabled-42", "process bypass toggle"),
-            ("/edit-42", "process edit button"),
-            ("/end-drop-zone", "process end drop zone"),
-        ] {
-            let node = find_layout_node_by_stable_key_suffix(&layout, key)
-                .unwrap_or_else(|| panic!("{label} should render"));
-            assert_finite_nonzero_rect(node, label);
-            assert_layout_inside(node, selected_panel, label);
-        }
-        assert!(
-            find_layout_node_by_stable_key_suffix(&layout, "/remove-42").is_none(),
-            "process rows should use the *fx* Backspace/Delete action instead of an inline remove button"
-        );
-        let slot_header_row =
-            find_layout_node_by_debug_name(&layout, "process-panel-slot-header-row-42")
-                .expect("process slot header row should render");
-        assert_eq!(
-            slot_header_row.props.get("align"),
-            Some(&Value::Keyword("baseline".to_string())),
-            "process index, enabled dot, name, and actions should share a text baseline"
-        );
-        let order_drop_target = find_layout_node_by_debug_name(&layout, "process-panel-slot-0")
-            .expect("process slot should expose a reorder drop target");
-        assert_layout_inside(
-            order_drop_target,
-            selected_panel,
-            "process reorder drop target",
-        );
-        assert_eq!(
-            order_drop_target.props.get("drag-type"),
-            Some(&Value::String("process-instance".to_string()))
-        );
-        assert!(order_drop_target.props.contains_key("on-drop"));
-        editor
-            .runtime_mut()
-            .invoke(
-                port_button
-                    .props
-                    .get("on-click")
-                    .cloned()
-                    .expect("process port map button on-click"),
-                vec![Value::Nil],
-            )
-            .expect("arm process port mapping");
+        assert!(find_layout_node_by_debug_name(&layout, "process-chain-panel").is_none());
+        // Mapping remains a supported API, independent of the removed FX box.
+        editor.runtime_mut().eval_str(
+            "(let ((slot (nth SEQ.process-slots 0))) (eseq.effects.param-controls/process-map-arm-port 0 slot (nth (get slot :ports) 0)))"
+        ).expect("arm process port mapping");
         assert_eq!(
             editor
                 .runtime_mut()
@@ -33876,137 +33850,6 @@ mod instrument_header_ui_tests;
                 .eval_str("(eseq.effects.param-controls/process-map-active?)")
                 .expect("read cleared process map active state"),
             Some(Value::Bool(false))
-        );
-    }
-
-    #[test]
-    fn metal_seq_process_selection_clears_outside_and_backspace_deletes_selected_slot() {
-        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-
-        let mut editor = full_grid_editor_for_scroll_tests();
-        install_mappable_process_lane_fixture(&mut editor);
-        let removals = Arc::new(Mutex::new(Vec::<(usize, u64)>::new()));
-        {
-            let removals = Arc::clone(&removals);
-            editor
-                .runtime_mut()
-                .register_native("seq-remove-process-slot", move |args, _ctx| {
-                    let track = match args.first() {
-                        Some(Value::Number(value)) => *value as usize,
-                        _ => usize::MAX,
-                    };
-                    let instance_id = match args.get(1) {
-                        Some(Value::Number(value)) => *value as u64,
-                        _ => 0,
-                    };
-                    removals.lock().unwrap().push((track, instance_id));
-                    Ok(Value::Bool(true))
-                });
-        }
-
-        let fx_id = editor
-            .buffers
-            .iter()
-            .find(|buffer| buffer.name == "*fx*")
-            .expect("fx buffer should exist")
-            .id;
-        editor.set_active_buffer(fx_id);
-        editor.runtime_mut().run_reactive_cycle();
-        editor.refresh_runtime_side_effects();
-        editor.set_layout_viewport(180, 18);
-
-        let select_process = |editor: &mut eseqlisp::Editor| {
-            let layout = editor.widget_layout().expect("process selection layout");
-            let header = find_layout_node_by_stable_key_suffix(&layout, "/header-42")
-                .expect("process header should render");
-            editor
-                .runtime_mut()
-                .invoke(
-                    header
-                        .props
-                        .get("on-click")
-                        .cloned()
-                        .expect("process selection callback"),
-                    vec![Value::Nil],
-                )
-                .expect("select process");
-            editor.refresh_runtime_side_effects();
-        };
-
-        select_process(&mut editor);
-        assert!(matches!(
-            editor
-                .runtime_mut()
-                .eval_str("(eseq.effects.process-panel/selected-slot)")
-                .expect("selected process"),
-            Some(Value::Map(_))
-        ));
-
-        let layout = editor.widget_layout().expect("selected process layout");
-        let process_scroll =
-            find_layout_node_by_stable_key_suffix(&layout, "/process-chain-scroll-0")
-                .expect("process scroll surface should render");
-        editor
-            .runtime_mut()
-            .invoke(
-                process_scroll
-                    .props
-                    .get("on-click")
-                    .cloned()
-                    .expect("process background deselection callback"),
-                vec![Value::Nil],
-            )
-            .expect("click process background");
-        editor.refresh_runtime_side_effects();
-        assert_eq!(
-            editor
-                .runtime_mut()
-                .eval_str("(eseq.effects.process-panel/selected-slot)")
-                .expect("cleared process selection"),
-            Some(Value::Nil),
-            "clicking empty process-panel space should collapse the selected process"
-        );
-
-        select_process(&mut editor);
-        let layout = editor.widget_layout().expect("selected process layout");
-        let instrument_body = find_layout_node_by_debug_name(&layout, "instrument-content-box")
-            .expect("neighboring instrument body should render");
-        editor
-            .runtime_mut()
-            .invoke(
-                instrument_body
-                    .props
-                    .get("on-click")
-                    .cloned()
-                    .expect("instrument body selection-clear callback"),
-                vec![Value::Nil],
-            )
-            .expect("click neighboring instrument panel");
-        editor.refresh_runtime_side_effects();
-        assert_eq!(
-            editor
-                .runtime_mut()
-                .eval_str("(eseq.effects.process-panel/selected-slot)")
-                .expect("selection after neighboring panel click"),
-            Some(Value::Nil),
-            "clicking outside the process panel should collapse its selection"
-        );
-
-        select_process(&mut editor);
-        editor.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
-        editor.refresh_runtime_side_effects();
-        assert_eq!(
-            removals.lock().unwrap().as_slice(),
-            [(0, 42)],
-            "Backspace in *fx* should remove the selected process slot"
-        );
-        assert_eq!(
-            editor
-                .runtime_mut()
-                .eval_str("(eseq.effects.process-panel/selected-slot)")
-                .expect("selection after Backspace"),
-            Some(Value::Nil),
-            "deleting a process should clear its expanded selection"
         );
     }
 
@@ -34516,6 +34359,143 @@ mod instrument_header_ui_tests;
             ["lane:0:3:2"],
             "focused process lane number picker should commit to the cursor step"
         );
+    }
+
+    #[test]
+    fn metal_seq_process_lane_slider_step_quantizes_ui_writes() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        // A float lane wider than 1: the UI-only step (default 1) is what
+        // turns the slider's floats into whole numbers, not the lane's
+        // :decimals. A half step and "free" (0) follow the strip's picker.
+        let mut lane = sparse_transpose_process_lane_value();
+        if let Value::Map(map) = &mut lane {
+            map.insert(
+                "decimals".to_string(),
+                std::rc::Rc::new(std::cell::RefCell::new(Value::Number(2.0))),
+            );
+        }
+        let slot = sparse_transpose_process_slot_value();
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "process-lanes", test_list(vec![lane.clone()]));
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "track-process-lanes",
+            test_list(vec![test_list(vec![lane])]),
+        );
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "process-slots", test_list(vec![slot.clone()]));
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "track-process-slots",
+            test_list(vec![test_list(vec![slot])]),
+        );
+        editor.runtime_mut().run_reactive_cycle();
+        let calls = Arc::new(Mutex::new(Vec::<String>::new()));
+        {
+            let calls = Arc::clone(&calls);
+            editor
+                .runtime_mut()
+                .register_native("seq-set-process-lane-step", move |args, _ctx| {
+                    let value = match args.get(4) {
+                        Some(Value::Number(value)) => *value,
+                        _ => f64::NAN,
+                    };
+                    calls.lock().unwrap().push(format!("{value}"));
+                    Ok(Value::Number(value))
+                });
+        }
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (eseq.sequencer/set-track-expanded 0 true)
+                (eseq.sequencer/set-track-param-mode 0 9)
+                "#,
+            )
+            .expect("expand track and select process lane");
+        editor.refresh_runtime_side_effects();
+
+        let sequencer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*sequencer*")
+            .expect("sequencer buffer should exist")
+            .id;
+        editor.set_active_buffer(sequencer_id);
+        editor.set_layout_viewport(180, 30);
+        let layout = editor
+            .widget_layout()
+            .expect("expanded sequencer layout should build");
+        let step_picker =
+            find_layout_node_by_stable_key_suffix(&layout, "/lane-step-control-42-amount")
+                .expect("lane strip should offer a step picker for a lane wider than 1");
+        assert_eq!(step_picker.props.get("value"), Some(&Value::Number(1.0)));
+        assert_eq!(step_picker.props.get("decimals"), Some(&Value::Number(0.0)));
+        let row_picker =
+            find_layout_node_by_stable_key_suffix(&layout, "/expanded-param-number-picker-0")
+                .expect("row picker should render");
+        assert_eq!(row_picker.props.get("step"), Some(&Value::Number(1.0)));
+        assert_eq!(row_picker.props.get("decimals"), Some(&Value::Number(0.0)));
+        let slider = find_layout_node_by_stable_key_suffix(&layout, "/expanded-step-slider-0-0")
+            .expect("process lane slider should render");
+        let on_change = slider
+            .props
+            .get("on-change")
+            .cloned()
+            .expect("process lane slider on-change");
+
+        editor
+            .runtime_mut()
+            .invoke(on_change.clone(), vec![Value::Number(1.3)])
+            .expect("slider write at the default step");
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (eseq.sequencer/set-lane-slider-step
+                  (eseq.seqv-track-params/seqv-track-process-lane 0 9) 0.5)
+                "#,
+            )
+            .expect("set a half step");
+        editor
+            .runtime_mut()
+            .invoke(on_change.clone(), vec![Value::Number(1.3)])
+            .expect("slider write at a half step");
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (eseq.sequencer/set-lane-slider-step
+                  (eseq.seqv-track-params/seqv-track-process-lane 0 9) 0)
+                "#,
+            )
+            .expect("set the step free");
+        editor
+            .runtime_mut()
+            .invoke(on_change, vec![Value::Number(1.3)])
+            .expect("slider write with a free step");
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            ["1", "1.5", "1.3"],
+            "slider writes should snap to the lane's UI step, and pass through when free"
+        );
+
+        editor.refresh_runtime_side_effects();
+        let layout = editor
+            .widget_layout()
+            .expect("expanded sequencer layout should rebuild");
+        let step_picker =
+            find_layout_node_by_stable_key_suffix(&layout, "/lane-step-control-42-amount")
+                .expect("lane strip step picker should still render");
+        assert_eq!(step_picker.props.get("value"), Some(&Value::Number(0.0)));
+        assert_eq!(step_picker.props.get("decimals"), Some(&Value::Number(2.0)));
+        let row_picker =
+            find_layout_node_by_stable_key_suffix(&layout, "/expanded-param-number-picker-0")
+                .expect("row picker should still render");
+        assert_eq!(row_picker.props.get("step"), Some(&Value::Number(0.0)));
+        assert_eq!(row_picker.props.get("decimals"), Some(&Value::Number(2.0)));
     }
 
     #[test]
@@ -35824,6 +35804,131 @@ mod instrument_header_ui_tests;
                 .eval_str("(eseq.sequencer/track-current-page 1 1)")
                 .unwrap(),
             Some(Value::Number(0.0))
+        );
+    }
+
+    /// Bar transpose (Cirklon P3 bar XPOSE, eseq-m14x.2): the expanded
+    /// track's page row carries one number picker per bar, bound to that
+    /// bar's reactive slot, and editing it routes to
+    /// `(seq-set-bar-transpose track bar semitones)`.
+    #[test]
+    fn metal_seq_expanded_page_row_bar_transpose_pickers_bind_and_commit() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        set_full_grid_track_count(&mut editor, 1, 48);
+        let calls = Arc::new(Mutex::new(Vec::<String>::new()));
+        {
+            let calls = Arc::clone(&calls);
+            editor
+                .runtime_mut()
+                .register_native("seq-set-bar-transpose", move |args, _ctx| {
+                    let number = |index: usize| match args.get(index) {
+                        Some(Value::Number(value)) => *value,
+                        _ => f64::NAN,
+                    };
+                    calls.lock().unwrap().push(format!(
+                        "bar:{}:{}:{}",
+                        number(0),
+                        number(1),
+                        number(2)
+                    ));
+                    Ok(Value::Number(number(2)))
+                });
+        }
+        // Bar 2 (index 1) carries +7; bar 1 is still at rest.
+        {
+            let rt = editor.runtime_mut();
+            rt.set_reactive(
+                "SEQ",
+                &expanded_step_bar_transpose_field(0, 0),
+                Value::Number(0.0),
+            );
+            rt.set_reactive(
+                "SEQ",
+                &expanded_step_bar_transpose_set_field(0, 0),
+                Value::Bool(false),
+            );
+            rt.set_reactive(
+                "SEQ",
+                &expanded_step_bar_transpose_field(0, 1),
+                Value::Number(7.0),
+            );
+            rt.set_reactive(
+                "SEQ",
+                &expanded_step_bar_transpose_set_field(0, 1),
+                Value::Bool(true),
+            );
+        }
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+
+        let sequencer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*sequencer*")
+            .expect("sequencer buffer should exist")
+            .id;
+        editor.set_active_buffer(sequencer_id);
+        editor.set_layout_viewport(220, 200);
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.sequencer/track-menu-click 0)")
+            .expect("expand the sequencer row");
+        editor.refresh_runtime_side_effects();
+
+        let layout = editor
+            .widget_layout()
+            .expect("expanded sequencer layout should build");
+        // 48 steps is three bars, so the page row shows three pickers.
+        assert_eq!(
+            count_stable_key_prefix(&layout, "eseq.sequencer/expanded-bar-transpose-"),
+            3,
+            "one bar-transpose picker per page button"
+        );
+        let rest = find_layout_node_by_stable_key_suffix(&layout, "/expanded-bar-transpose-0-0")
+            .expect("bar 1 picker");
+        let edited = find_layout_node_by_stable_key_suffix(&layout, "/expanded-bar-transpose-0-1")
+            .expect("bar 2 picker");
+        assert_finite_nonzero_rect(edited, "bar 2 transpose picker");
+        let bound = |node: &eseqlisp::layout::LayoutNode, prop: &str| {
+            eseqlisp::vm::format_lisp_value(node.props.get(prop).expect("bound prop"))
+        };
+        assert_eq!(
+            bound(edited, "value"),
+            "<bind:SEQ.seqv-bar-transpose-0-1>",
+            "picker should read its own bar's reactive slot"
+        );
+        assert_eq!(
+            reactive_field_value(editor.runtime(), "SEQ", &expanded_step_bar_transpose_field(0, 1)),
+            Value::Number(7.0)
+        );
+        // 0 is a legal transpose, so "dim at rest" rides an explicit flag
+        // rather than the number itself.
+        assert_eq!(bound(rest, "active"), "<bind:SEQ.seqv-bar-transpose-set-0-0>");
+        assert_eq!(bound(edited, "active"), "<bind:SEQ.seqv-bar-transpose-set-0-1>");
+        assert_eq!(
+            reactive_field_value(
+                editor.runtime(),
+                "SEQ",
+                &expanded_step_bar_transpose_set_field(0, 1)
+            ),
+            Value::Bool(true)
+        );
+
+        editor
+            .runtime_mut()
+            .invoke(
+                edited
+                    .props
+                    .get("on-change")
+                    .cloned()
+                    .expect("bar 2 picker on-change"),
+                vec![Value::Number(-12.0)],
+            )
+            .expect("edit bar 2's transpose");
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            ["bar:0:1:-12"],
+            "the page-row picker should write its own bar on its own track"
         );
     }
 
@@ -56173,6 +56278,64 @@ mod instrument_header_ui_tests;
             .unwrap();
         assert_eq!(lane_selected(&mut editor, roll_id), Some(Value::Bool(true)));
         assert_eq!(lane_selected(&mut editor, rand_id), Some(Value::Bool(false)));
+
+        // Crossing each six-cell boundary adds a row, including when the
+        // add control itself needs the new row. Use varied lane counts so
+        // a fixed two-row layout cannot satisfy this regression.
+        for lane_count in [0_usize, 5, 6, 11, 12, 17, 24] {
+            let entries = (0..lane_count).map(|index| map_value([
+                ("instance-id", Value::Number((1000 + index) as f64)),
+                ("name", Value::String(format!("lane {index}"))),
+                ("enabled", Value::Bool(true)),
+                ("in-ports", test_list(vec![])),
+                ("out-ports", test_list(vec![])),
+            ])).collect();
+            editor.runtime_mut().set_reactive(
+                "SEQ", "track-lane-patch", test_list(vec![test_list(entries)]),
+            );
+            editor.runtime_mut().run_reactive_cycle();
+            editor.refresh_runtime_side_effects();
+            let layout = editor.widget_layout().expect("wrapped patchbay layout");
+            assert_finite_layout_tree(&layout);
+            let track_id = editor.runtime_mut().eval_str("(nth SEQ.track-ids 0)")
+                .unwrap().unwrap();
+            let Value::Number(track_id) = track_id else { panic!("numeric track id") };
+            let panel = find_layout_node_by_stable_key_suffix(
+                &layout, &format!("/lane-patchbay-{track_id}"),
+            ).expect("patchbay");
+            assert_layout_inside(panel, &layout, "visible patchbay");
+            let mut cells = (0..lane_count).map(|index| {
+                find_layout_node_by_stable_key_suffix(panel, &format!("/lane-patch-col-{}", 1000 + index))
+                    .expect("lane cell")
+            }).collect::<Vec<_>>();
+            cells.push(find_layout_node_by_stable_key_suffix(
+                panel, &format!("/lane-patch-add-{track_id}"),
+            ).expect("add cell"));
+            let mut rows: Vec<(f32, usize)> = Vec::new();
+            for cell in cells {
+                assert_finite_nonzero_rect(cell, "patchbay cell");
+                assert_layout_inside(cell, panel, "patchbay cell");
+                if let Some((_, count)) = rows.iter_mut().find(|(y, _)| (*y - cell.rect.row).abs() < 0.01) {
+                    *count += 1;
+                } else {
+                    rows.push((cell.rect.row, 1));
+                }
+            }
+            assert_eq!(rows.len(), (lane_count + 1).div_ceil(6));
+            assert!(rows.iter().all(|(_, count)| *count <= 6));
+            assert!(rows.windows(2).all(|pair| pair[0].0 < pair[1].0));
+        }
+
+        // Restore real port data before checking that hiding removes it.
+        editor.runtime_mut().set_reactive(
+            "SEQ", "track-lane-patch", build_all_track_lane_patch_value(&state, 1),
+        );
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let restored = editor.widget_layout().unwrap();
+        let mut restored_ports = Vec::new();
+        patch_ports(&restored, &mut restored_ports);
+        assert!(!restored_ports.is_empty());
 
         // Toggling the view off removes every port.
         editor.runtime_mut().eval_str("(eseq.sequencer/lane-patch-show false)").unwrap();

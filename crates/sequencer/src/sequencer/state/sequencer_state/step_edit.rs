@@ -1348,6 +1348,74 @@ impl SequencerState {
         Ok(is_effective)
     }
 
+    /// This pattern's bar transpose for `bar`, read from the live mirror when
+    /// `pattern_id` is still effective for the track and from the pool
+    /// otherwise — the same live/pool split every step-cell capture uses, so
+    /// a history entry recorded before a scene switch still names its own
+    /// pattern's value.
+    pub(crate) fn capture_pattern_bar_transpose(
+        &self,
+        track: usize,
+        pattern_id: PatternId,
+        bar: usize,
+    ) -> Result<f32, String> {
+        if bar >= BARS_PER_PATTERN {
+            return Err("bar target is out of range".to_string());
+        }
+        let scenes = self.pattern.scenes.lock().unwrap();
+        if scenes.effective_pattern_id(track) == Some(pattern_id) {
+            drop(scenes);
+            return Ok(self.bar_transpose(track, bar));
+        }
+        scenes
+            .track_pools
+            .get(track)
+            .and_then(|pool| pool.seq(pattern_id))
+            .map(|seq| seq.bar_transpose_snapshot[bar])
+            .ok_or_else(|| "Track Pattern target no longer exists".to_string())
+    }
+
+    /// Restore one stable Track Pattern bar transpose without publishing.
+    ///
+    /// The pool is always updated. The live mirror is updated only if the same
+    /// pattern is still effective, so a scene change cannot redirect replay
+    /// into whatever pattern happens to be loaded now.
+    pub(crate) fn restore_pattern_bar_transpose_no_publish(
+        &self,
+        track: usize,
+        pattern_id: PatternId,
+        bar: usize,
+        semitones: f32,
+    ) -> Result<bool, String> {
+        if bar >= BARS_PER_PATTERN {
+            return Err("bar target is out of range".to_string());
+        }
+        let semitones = semitones.clamp(
+            -crate::sequencer::BAR_TRANSPOSE_LIMIT,
+            crate::sequencer::BAR_TRANSPOSE_LIMIT,
+        );
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        let is_effective = scenes.effective_pattern_id(track) == Some(pattern_id);
+        let stored = scenes
+            .track_pools
+            .get_mut(track)
+            .and_then(|pool| pool.patterns.get_mut(&pattern_id).map(Arc::make_mut))
+            .ok_or_else(|| "Track Pattern target no longer exists".to_string())?;
+        stored.seq.bar_transpose_snapshot[bar] = semitones;
+        drop(scenes);
+        if is_effective {
+            self.pattern
+                .bar_transposes
+                .get(track)
+                .ok_or_else(|| "live track target no longer exists".to_string())?
+                .set(bar, semitones);
+            self.transport
+                .pattern_epoch
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(is_effective)
+    }
+
     pub(crate) fn restore_pattern_num_steps_no_publish(
         &self,
         track: usize,

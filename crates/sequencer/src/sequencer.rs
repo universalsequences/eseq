@@ -11,7 +11,8 @@ mod state;
 pub use clock::{SequencerClock, TrackClockState};
 #[allow(unused_imports)]
 pub use data::{
-    ceil_to_grid, rack_slot_pool_index, sync_beats, BusId, ChordData, ChordSnapshot,
+    bar_of_step, ceil_to_grid, rack_slot_pool_index, sync_beats, BarTransposeData, BusId,
+    ChordData, ChordSnapshot,
     CustomInstrumentRunMode, PatternStepGeometry,
     InstrumentType, KeyboardTrigger, LiveNoteSource, LiveNoteOrigin, LiveInputEvent, MidiFxPosition, MonoTrigger, VoicePriority, ModConnection, ModDestination,
     LiveTriggerStamp, LiveTriggerStampRing, RollCommand, RollHitRecorded,
@@ -20,6 +21,7 @@ pub use data::{
     TrackSendRuntimeTarget, TrackSendSnapshot, TrackSoundState, Trigger, DEFAULT_BPM,
     DEFAULT_BUS_A_ID, DEFAULT_BUS_B_ID, DRUM_RACK_FIRST_PAD_NOTE, DRUM_RACK_LAST_PAD_NOTE,
     DRUM_RACK_TOTAL_PAD_NOTES, EXT_MOD_INPUT_COUNT, MAX_INSTRUMENT_ENGINES, MAX_RACK_SLOTS,
+    BARS_PER_PATTERN, BAR_TRANSPOSE_LIMIT,
     MAX_SAMPLER_POOLS, MAX_STEPS, MAX_TRACKS, MIX_BUS_ID, NUM_PARAMS, STEPS_PER_PAGE, SYNC_COUNT,
     SYNC_RESOLUTIONS, TRACK_PATTERN_WORDS, RETRIG_INFINITE, RETRIG_RATE_PITCH_THRESHOLD,
     RETRIG_RATE_SEMITONE, format_retrig_rate, retrig_rate_hz,

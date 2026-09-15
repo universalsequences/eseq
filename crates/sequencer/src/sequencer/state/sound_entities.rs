@@ -329,6 +329,9 @@ pub struct TrackPatternSeq {
     /// Macro automation belongs to this sequence, never to its shared Patch.
     /// Indexed by stable RackMacroId, then step.
     pub rack_macro_plocks: Vec<Vec<Option<f32>>>,
+    /// Per-bar transpose (Cirklon P3 bar XPOSE) — sequence data, never the
+    /// shared Patch's.
+    pub bar_transpose_snapshot: [f32; BARS_PER_PATTERN],
     pub timebase_plock_snapshot: [Option<u32>; MAX_STEPS],
     pub swing_plock_snapshot: [Option<u32>; MAX_STEPS],
     pub swing_resolution_plock_snapshot: [Option<u32>; MAX_STEPS],
@@ -366,6 +369,7 @@ impl TrackPatternData {
             track_sound_state,
             sample_id,
             chord_snapshot,
+            bar_transpose_snapshot,
             timebase_plock_snapshot,
             swing_plock_snapshot,
             swing_resolution_plock_snapshot,
@@ -404,6 +408,7 @@ impl TrackPatternData {
             },
             chord_snapshot,
             rack_macro_plocks,
+            bar_transpose_snapshot,
             timebase_plock_snapshot,
             swing_plock_snapshot,
             swing_resolution_plock_snapshot,
@@ -495,6 +500,7 @@ impl TrackPatternData {
             track_sound_state: patch.track_sound_state.clone(),
             sample_id: patch.sample_id.clone(),
             chord_snapshot: seq.chord_snapshot.clone(),
+            bar_transpose_snapshot: seq.bar_transpose_snapshot,
             timebase_plock_snapshot: seq.timebase_plock_snapshot,
             swing_plock_snapshot: seq.swing_plock_snapshot,
             swing_resolution_plock_snapshot: seq.swing_resolution_plock_snapshot,

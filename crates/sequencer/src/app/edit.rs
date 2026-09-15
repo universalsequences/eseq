@@ -25,6 +25,7 @@ use super::history::{
     TrackCreationPatch, TrackDeletionPatch, TrackParamsBatchPatch, TrackParamsPatch,
     TrackPresentationChange, TrackPresentationPatch, TrackPresentationState,
     TransportAuthoringSnapshot, TransportParamsPatch,
+    BarTransposePatch,
 };
 use super::App;
 use super::fx_chain::{
@@ -9517,6 +9518,118 @@ fn replay_transport_params_patch(
     Ok(MutationEffects { publish_scheduler })
 }
 
+fn replay_bar_transpose_patch(
+    app: &mut App,
+    patch: &BarTransposePatch,
+    mode: ApplyMode,
+    publish: bool,
+) -> Result<MutationEffects, EditError> {
+    let target = match mode {
+        ApplyMode::Undo => patch.before,
+        ApplyMode::Redo => patch.after,
+        ApplyMode::UserEdit | ApplyMode::ProjectLoad => {
+            return Err(EditError::ReplayFailed(
+                "bar-transpose replay requires undo or redo mode".to_string(),
+            ));
+        }
+    };
+    let track = app
+        .track_registry
+        .index_of(patch.target.track)
+        .ok_or(EditError::MissingStableTrack {
+            track: patch.target.track,
+        })?;
+    let is_effective = app
+        .state
+        .restore_pattern_bar_transpose_no_publish(track, patch.target.pattern, patch.bar, target)
+        .map_err(EditError::ReplayFailed)?;
+    if is_effective && publish {
+        app.state.publish_scheduler_snapshot();
+    }
+    Ok(MutationEffects {
+        publish_scheduler: is_effective,
+    })
+}
+
+/// Write one bar transpose as a coalescing history gesture: the picker fires
+/// `on-change` per drag event, and every event of one drag merges into the
+/// single entry the gesture commits at pointer release (or the idle
+/// fallback). The `before` is taken from the entry already staged for this
+/// merge key, so undo lands on the value the drag started from rather than on
+/// the previous drag event.
+pub fn apply_bar_transpose_edit(
+    app: &mut App,
+    track: usize,
+    bar: usize,
+    semitones: f32,
+) -> Result<EditOutcome, EditError> {
+    if bar >= crate::sequencer::BARS_PER_PATTERN || !semitones.is_finite() {
+        return Err(EditError::UnsupportedCommand);
+    }
+    let semitones = semitones.clamp(
+        -crate::sequencer::BAR_TRANSPOSE_LIMIT,
+        crate::sequencer::BAR_TRANSPOSE_LIMIT,
+    );
+    let track_id = app
+        .track_registry
+        .id_at(track)
+        .ok_or(EditError::TrackOutOfRange { track })?;
+    // A bare scene cell has no pattern to carry the value; materialize it the
+    // way the first step edit does (takes spec 11.1).
+    let pattern_id =
+        ensure_effective_track_pattern(app, track).ok_or(EditError::MissingTrackPattern)?;
+    let target = TrackPatternId {
+        track: track_id,
+        pattern: pattern_id,
+    };
+    let merge_key = MergeKey::new(format!("bar-transpose:{}:{bar}", track_id.0));
+    let current_before = app
+        .state
+        .capture_pattern_bar_transpose(track, pattern_id, bar)
+        .map_err(EditError::ReplayFailed)?;
+    let entry_before = app
+        .history
+        .active_gesture_patch(&merge_key)
+        .and_then(|patch| match patch {
+            EditPatch::BarTranspose(patch) if patch.target == target && patch.bar == bar => {
+                Some(patch.before)
+            }
+            _ => None,
+        })
+        .unwrap_or(current_before);
+    if current_before == semitones && entry_before == semitones {
+        return Ok(EditOutcome::NoOp);
+    }
+    let is_effective = app
+        .state
+        .restore_pattern_bar_transpose_no_publish(track, pattern_id, bar, semitones)
+        .map_err(EditError::ReplayFailed)?;
+    if is_effective {
+        app.state.publish_scheduler_snapshot();
+    }
+    let patch = BarTransposePatch {
+        target,
+        bar,
+        before: entry_before,
+        after: semitones,
+    };
+    if patch.before == patch.after && app.history.discard_active_gesture_entry(&merge_key) {
+        return Ok(EditOutcome::NoOp);
+    }
+    let retained_bytes = patch.retained_bytes();
+    ensure_coalescing_gesture(app, &merge_key);
+    let history_move = app
+        .history
+        .stage_active_gesture(
+            "Set bar transpose",
+            &merge_key,
+            EditPatch::BarTranspose(patch),
+            retained_bytes,
+        )
+        .ok_or(EditError::UnsupportedCommand)?;
+    Ok(EditOutcome::Applied(history_move))
+}
+
 fn replay_patch(app: &mut App, patch: &EditPatch, mode: ApplyMode) -> Result<(), EditError> {
     match patch {
         EditPatch::Composite(patches) => replay_composite_patch(app, patches, mode),
@@ -9807,6 +9920,9 @@ fn replay_patch(app: &mut App, patch: &EditPatch, mode: ApplyMode) -> Result<(),
         EditPatch::TransportParams(patch) => {
             replay_transport_params_patch(app, patch, mode, true).map(|_| ())
         }
+        EditPatch::BarTranspose(patch) => {
+            replay_bar_transpose_patch(app, patch, mode, true).map(|_| ())
+        }
     }
 }
 
@@ -9878,6 +9994,9 @@ fn pending_gesture_publishes_scheduler(patch: &EditPatch) -> bool {
         EditPatch::RackEffectChain(_) => true,
         EditPatch::MidiFxChain(_) => true,
         EditPatch::StepCells(_) | EditPatch::PatternGeometry(_) | EditPatch::BusMixer(_) => false,
+        // The scheduler reads bar transposes off the published track snapshot,
+        // so the value has to be audible on the very next trigger.
+        EditPatch::BarTranspose(patch) => patch.before != patch.after,
     }
 }
 
@@ -10036,6 +10155,7 @@ fn edit_patch_retained_bytes(patch: &EditPatch) -> usize {
         EditPatch::BusGroupStructure(patch) => patch.retained_bytes(),
         EditPatch::MacroConfiguration(patch) => patch.retained_bytes(),
         EditPatch::TransportParams(patch) => patch.retained_bytes(),
+        EditPatch::BarTranspose(patch) => patch.retained_bytes(),
     }
 }
 
@@ -10199,6 +10319,9 @@ pub fn cancel_active_gesture(app: &mut App) -> Result<bool, EditError> {
         EditPatch::StepCells(_) | EditPatch::PatternGeometry(_) => {
             replay_patch(app, &patch, ApplyMode::Undo)?;
         }
+        EditPatch::BarTranspose(patch) => {
+            replay_bar_transpose_patch(app, patch, ApplyMode::Undo, false)?;
+        }
     }
     if !app.history.discard_active_gesture_entry(&gesture.merge_key) {
         return Err(EditError::ReplayFailed(
@@ -10276,6 +10399,88 @@ mod tests {
         app.tracks = vec!["Track 1".to_string()];
         app.track_registry = crate::sequencer::TrackRegistry::for_legacy_track_count(1).unwrap();
         app
+    }
+
+    /// Bar transpose (Cirklon P3 bar XPOSE, eseq-m14x.2) through the real
+    /// edit path: one drag is one history entry, undo returns the bar to 0,
+    /// and the value belongs to the pattern, not the track — so a scene
+    /// switch shows the other scene's bar values and an undo recorded before
+    /// the switch still lands on the pattern it was recorded against.
+    #[test]
+    fn bar_transpose_edit_coalesces_one_gesture_and_is_scene_local() {
+        use crate::sequencer::{BARS_PER_PATTERN, BAR_TRANSPOSE_LIMIT};
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        state.replace_pattern_repository(
+            vec![
+                PatternSnapshot::new_default(1, &[]),
+                PatternSnapshot::new_default(1, &[]),
+            ],
+            0,
+        );
+        state.restore_current_pattern_from_repository().unwrap();
+        let mut app = test_app(state);
+        app.graph.track_buffer_ids = vec![-1];
+        app.graph.track_sample_rates = vec![44_100];
+        app.graph.track_instrument_types = vec![InstrumentType::Sampler];
+        let launch = |app: &mut App, scene: usize| {
+            app.state
+                .launch_scene(
+                    scene,
+                    1,
+                    &app.graph.track_buffer_ids,
+                    &app.graph.track_sample_rates,
+                    &app.tracks,
+                    &app.graph.track_instrument_types,
+                )
+                .expect("launch scene");
+        };
+
+        // Out-of-range bars and non-finite values never reach state.
+        assert!(apply_bar_transpose_edit(&mut app, 0, BARS_PER_PATTERN, 7.0).is_err());
+        assert!(apply_bar_transpose_edit(&mut app, 0, 1, f32::NAN).is_err());
+        assert!(app.history.active_gesture().is_none());
+
+        // One drag: three on-change events, one history entry at release.
+        for value in [3.0, 6.0, 7.0] {
+            apply_bar_transpose_edit(&mut app, 0, 1, value).expect("bar transpose drag event");
+        }
+        assert_eq!(app.history.undo_len(), 0, "history commits at gesture end");
+        assert_eq!(app.state.bar_transpose(0, 1), 7.0);
+        assert_eq!(app.state.bar_transpose_for_step(0, 16), 7.0);
+        assert_eq!(app.state.bar_transpose_for_step(0, 15), 0.0);
+        assert!(finish_active_gesture(&mut app));
+        assert_eq!(app.history.undo_len(), 1);
+
+        // Undo returns the bar to where the drag started, not to the previous
+        // drag event.
+        assert!(matches!(undo(&mut app), HistoryReplay::Applied(_)));
+        assert_eq!(app.state.bar_transpose(0, 1), 0.0);
+        assert!(matches!(redo(&mut app), HistoryReplay::Applied(_)));
+        assert_eq!(app.state.bar_transpose(0, 1), 7.0);
+
+        // Beyond five octaves the setter clamps.
+        apply_bar_transpose_edit(&mut app, 0, 2, 999.0).expect("clamped bar transpose");
+        finish_active_gesture(&mut app);
+        assert_eq!(app.state.bar_transpose(0, 2), BAR_TRANSPOSE_LIMIT);
+
+        // Scene 1 has its own pattern, so its bars start at 0 and an edit
+        // there leaves scene 0 alone.
+        launch(&mut app, 1);
+        assert_eq!(app.state.bar_transpose(0, 1), 0.0, "scene 1 keeps its own bars");
+        apply_bar_transpose_edit(&mut app, 0, 1, -12.0).expect("scene 1 bar transpose");
+        finish_active_gesture(&mut app);
+        assert_eq!(app.state.bar_transpose(0, 1), -12.0);
+
+        launch(&mut app, 0);
+        assert_eq!(app.state.bar_transpose(0, 1), 7.0, "scene 0's bar value returns");
+        assert_eq!(app.state.bar_transpose(0, 2), BAR_TRANSPOSE_LIMIT);
+
+        // Undoing scene 1's edit while scene 0 is live writes scene 1's
+        // pattern in the pool, never the pattern that happens to be loaded.
+        assert!(matches!(undo(&mut app), HistoryReplay::Applied(_)));
+        assert_eq!(app.state.bar_transpose(0, 1), 7.0, "scene 0 untouched by the replay");
+        launch(&mut app, 1);
+        assert_eq!(app.state.bar_transpose(0, 1), 0.0, "scene 1's edit was undone");
     }
 
     #[test]

@@ -580,6 +580,7 @@
                     arr
                 })
                 .collect(),
+            bar_transpose_snapshots: vec![[0.0; BARS_PER_PATTERN]; num_tracks],
             track_send_plock_snapshots: vec![vec![Vec::new(); MAX_STEPS]; num_tracks],
             instrument_types: (0..num_tracks)
                 .map(|track| {
@@ -2841,6 +2842,7 @@
             track_sound_states: vec![TrackSoundState::default(); 4],
             sample_ids: vec![(-1, String::new(), 44_100); 4],
             chord_snapshots: (0..4).map(|_| ChordSnapshot::new_default()).collect(),
+            bar_transpose_snapshots: vec![[0.0; BARS_PER_PATTERN]; 4],
             timebase_plock_snapshots: vec![[None; MAX_STEPS]; 4],
             swing_plock_snapshots: vec![[None; MAX_STEPS]; 4],
             swing_resolution_plock_snapshots: vec![[None; MAX_STEPS]; 4],
@@ -3317,6 +3319,54 @@
             .iter()
             .find(|slot| slot.instance_id == instance_id)
             .cloned()
+    }
+
+    /// Bar transposes (Cirklon P3 bar XPOSE, eseq-m14x) are pattern data:
+    /// a value written in one scene belongs to that scene's pattern only,
+    /// and comes back when the scene does.
+    #[test]
+    fn bar_transposes_are_per_pattern_and_survive_a_scene_round_trip() {
+        let state = state_with_three_scenes();
+        launch(&state, 0);
+        state.set_bar_transpose(0, 1, 7.0);
+        state.set_bar_transpose(0, 3, -5.0);
+        assert_eq!(state.bar_transpose(0, 1), 7.0);
+        assert_eq!(state.bar_transpose(0, 3), -5.0);
+        // Every step of bar 1 resolves to the same value.
+        assert_eq!(state.bar_transpose_for_step(0, 16), 7.0);
+        assert_eq!(state.bar_transpose_for_step(0, 31), 7.0);
+        assert_eq!(state.bar_transpose_for_step(0, 15), 0.0);
+
+        launch(&state, 1);
+        assert_eq!(state.bar_transpose(0, 1), 0.0, "scene B keeps its own bars");
+        assert_eq!(state.bar_transpose(0, 3), 0.0);
+        state.set_bar_transpose(0, 1, 2.0);
+
+        launch(&state, 0);
+        assert_eq!(state.bar_transpose(0, 1), 7.0, "scene A's bar value returns");
+        assert_eq!(state.bar_transpose(0, 3), -5.0);
+
+        launch(&state, 1);
+        assert_eq!(state.bar_transpose(0, 1), 2.0);
+    }
+
+    /// The setter clamps to the Cirklon range (five octaves either way) and
+    /// the published scheduler snapshot carries the bars the scheduler reads.
+    #[test]
+    fn bar_transpose_clamps_to_five_octaves_and_reaches_the_snapshot() {
+        let state = make_state_with_tracks(1);
+        state.set_bar_transpose(0, 0, 999.0);
+        state.set_bar_transpose(0, 2, -999.0);
+        assert_eq!(state.bar_transpose(0, 0), 60.0);
+        assert_eq!(state.bar_transpose(0, 2), -60.0);
+        // Out-of-range bars are inert rather than a panic.
+        state.set_bar_transpose(0, BARS_PER_PATTERN, 5.0);
+        assert_eq!(state.bar_transpose(0, BARS_PER_PATTERN), 0.0);
+
+        let snapshot = state.publish_scheduler_snapshot();
+        assert_eq!(snapshot.tracks[0].bar_transposes[0], 60.0);
+        assert_eq!(snapshot.tracks[0].bar_transposes[2], -60.0);
+        assert_eq!(snapshot.tracks[0].bar_transposes[1], 0.0);
     }
 
     #[test]

@@ -869,6 +869,28 @@ fn apply_capture_macro_host_commands(
             applied = true;
             continue;
         }
+        // Bar transpose (Cirklon bar XPOSE), so a fixture can show the page
+        // row's transpose pickers carrying real pattern values.
+        if name == "set-bar-transpose" {
+            let Value::Map(ref map) = payload else {
+                return Err("capture setup set-bar-transpose payload must be a map".to_string());
+            };
+            let number = |field: &str| {
+                map.get(field).and_then(|cell| match &*cell.borrow() {
+                    Value::Number(value) => Some(*value),
+                    _ => None,
+                })
+            };
+            let (Some(track), Some(bar), Some(value)) =
+                (number("track"), number("bar"), number("value"))
+            else {
+                return Err("capture setup set-bar-transpose is missing a field".to_string());
+            };
+            app::edit::apply_bar_transpose_edit(app, track as usize, bar as usize, value as f32)
+                .map_err(|error| format!("capture setup set-bar-transpose failed: {error:?}"))?;
+            applied = true;
+            continue;
+        }
         // Sound-palette open/close so fixtures can capture the palette modal.
         if let Some(result) =
             crate::host_commands::apply_sound_palette_view_command(&name, &payload, app)

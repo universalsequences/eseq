@@ -51,14 +51,81 @@ pub struct ProcessStepPattern {
     /// the pitch that a note grab replaces.
     pub note: f32,
     pub params: ProcessResolvedValues,
+    /// The step's authored chord notes (semitones from the track root), in
+    /// step order; only the first `chord_count` entries are meaningful. A
+    /// plain step has none, and `pitches` then yields `note` alone.
+    pub chord: [f32; PROCESS_STEP_PATTERN_MAX_CHORD],
+    pub chord_count: usize,
+    /// The bar transpose (Cirklon P3 bar XPOSE) in force on this step's
+    /// 16-step page. `note` stays authored — it excludes this — so a plain
+    /// `:note` read is the manual's "nte" and `:note+b` is its "nte+B".
+    pub bar_transpose: f32,
+    /// Whether the step is a trig. An empty step never becomes the pattern a
+    /// `:pattern` read sees: the boundary it records carries the last active
+    /// step's pattern instead, so grab/xpose/harmony hold the note or chord
+    /// that actually played until the source steps onto its next trig.
+    pub active: bool,
+    /// Pitch-class set of the whole pattern this step belongs to (see
+    /// `runtime::harmony::pattern_pitch_class_mask`): the key a `:key
+    /// :pattern` read reports. Refreshed on every boundary, empty steps
+    /// included, so edits to the source pattern reach a listener at the next
+    /// step rather than the next trig.
+    pub key_mask: u16,
 }
 
+/// Chord notes a step pattern read carries: the voice limit, since a step
+/// cannot author more notes than that.
+pub const PROCESS_STEP_PATTERN_MAX_CHORD: usize = crate::audio::MAX_VOICES;
+
 impl ProcessStepPattern {
-    pub fn from_step_snapshot(step: &crate::sequencer::SequencerStepSnapshot) -> Self {
+    pub fn from_step_snapshot(
+        step: &crate::sequencer::SequencerStepSnapshot,
+        bar_transpose: f32,
+        key_mask: u16,
+    ) -> Self {
+        let mut chord = [0.0; PROCESS_STEP_PATTERN_MAX_CHORD];
+        let chord_count = step.chord.len().min(PROCESS_STEP_PATTERN_MAX_CHORD);
+        chord[..chord_count].copy_from_slice(&step.chord[..chord_count]);
         Self {
             note: step_authored_note(&step.chord, &step.params),
             params: step.params,
+            chord,
+            chord_count,
+            bar_transpose,
+            active: step.active,
+            key_mask,
         }
+    }
+
+    /// Build an active pattern with no chord data.
+    pub fn plain(note: f32, params: ProcessResolvedValues) -> Self {
+        Self {
+            note,
+            params,
+            chord: [0.0; PROCESS_STEP_PATTERN_MAX_CHORD],
+            chord_count: 0,
+            bar_transpose: 0.0,
+            active: true,
+            key_mask: 0,
+        }
+    }
+
+    /// The manual's "nte+B": the authored note plus this bar's transpose.
+    pub fn note_with_bar(&self) -> f32 {
+        self.note + self.bar_transpose
+    }
+
+    /// Every authored pitch on the step: the chord notes when it has chord
+    /// data, else its single note. This is what a `:chord :pattern` read
+    /// returns, so a harmony lane can follow monophonic and chord sources
+    /// alike.
+    pub fn pitches(&self) -> impl Iterator<Item = f32> + '_ {
+        let chord = if self.chord_count > 0 {
+            &self.chord[..self.chord_count]
+        } else {
+            std::slice::from_ref(&self.note)
+        };
+        chord.iter().copied()
     }
 }
 
@@ -108,6 +175,9 @@ struct ResolvedTrackHistory {
     current: ProcessResolvedValues,
     steps: VecDeque<TimedResolvedValues>,
     trigs: VecDeque<TimedResolvedValues>,
+    /// Pattern of the newest active step recorded so far; what an empty
+    /// step's boundary carries in its place.
+    held_pattern: Option<ProcessStepPattern>,
 }
 
 impl ResolvedTrackHistory {
@@ -117,6 +187,7 @@ impl ResolvedTrackHistory {
             current: base,
             steps: VecDeque::new(),
             trigs: VecDeque::new(),
+            held_pattern: None,
         }
     }
 }
@@ -1878,7 +1949,10 @@ impl ProcessRuntime {
     }
 
     /// Record a step boundary together with the pattern data of the step the
-    /// track just entered, so same-tick `:pattern` reads can see it.
+    /// track just entered, so same-tick `:pattern` reads can see it. An
+    /// inactive step's boundary carries the last active step's pattern
+    /// instead (`None` until one has played), so reads hold what actually
+    /// sounded rather than an empty step's default row values.
     pub fn record_track_step_boundary_with_pattern(
         &mut self,
         track: usize,
@@ -1887,6 +1961,17 @@ impl ProcessRuntime {
     ) {
         let Some(history) = self.resolved_track_history.get_mut(track) else {
             return;
+        };
+        let pattern = match pattern {
+            Some(pattern) if pattern.active => {
+                history.held_pattern = Some(pattern);
+                Some(pattern)
+            }
+            Some(empty) => history.held_pattern.map(|held| ProcessStepPattern {
+                key_mask: empty.key_mask,
+                ..held
+            }),
+            None => None,
         };
         history.steps.push_back(TimedResolvedValues {
             beat,
@@ -3829,11 +3914,47 @@ mod tests {
     }
 
     #[test]
-    fn step_pattern_reads_are_same_tick_and_hold_until_the_next_boundary() {
-        let pattern = |note: f32| ProcessStepPattern {
-            note,
-            params: read_values(0.0),
+    fn step_pattern_pitches_are_the_chord_or_the_single_note() {
+        let plain = ProcessStepPattern::plain(5.0, read_values(5.0));
+        assert_eq!(plain.pitches().collect::<Vec<_>>(), vec![5.0]);
+        let mut chord = ProcessStepPattern::plain(0.0, read_values(0.0));
+        chord.chord[..3].copy_from_slice(&[0.0, 4.0, 7.0]);
+        chord.chord_count = 3;
+        assert_eq!(chord.pitches().collect::<Vec<_>>(), vec![0.0, 4.0, 7.0]);
+    }
+
+    #[test]
+    fn step_pattern_reads_hold_the_last_active_step_across_empty_steps() {
+        let active = ProcessStepPattern::plain(7.0, read_values(7.0));
+        let empty = ProcessStepPattern {
+            active: false,
+            ..ProcessStepPattern::plain(0.0, read_values(0.0))
         };
+        let mut runtime = ProcessRuntime::default();
+        runtime.reset_resolved_track_history(&[read_values(0.0)]);
+        // Empty steps before any trig read as nothing, not as their defaults.
+        runtime.record_track_step_boundary_with_pattern(0, 0.0, Some(empty));
+        assert_eq!(runtime.read_snapshot(0.0).tracks[0].step_pattern, None);
+        runtime.record_track_step_boundary_with_pattern(0, 1.0, Some(active));
+        assert_eq!(
+            runtime.read_snapshot(1.0).tracks[0].step_pattern,
+            Some(active)
+        );
+        runtime.record_track_step_boundary_with_pattern(0, 2.0, Some(empty));
+        runtime.record_track_step_boundary_with_pattern(0, 3.0, Some(empty));
+        assert_eq!(
+            runtime.read_snapshot(3.0).tracks[0].step_pattern,
+            Some(active),
+            "empty steps keep the last trig's pattern in effect"
+        );
+        let next = ProcessStepPattern::plain(2.0, read_values(2.0));
+        runtime.record_track_step_boundary_with_pattern(0, 4.0, Some(next));
+        assert_eq!(runtime.read_snapshot(4.0).tracks[0].step_pattern, Some(next));
+    }
+
+    #[test]
+    fn step_pattern_reads_are_same_tick_and_hold_until_the_next_boundary() {
+        let pattern = |note: f32| ProcessStepPattern::plain(note, read_values(0.0));
         let mut runtime = ProcessRuntime::default();
         runtime.reset_resolved_track_history(&[read_values(0.0)]);
         assert_eq!(runtime.read_snapshot(0.0).tracks[0].step_pattern, None);
@@ -4487,7 +4608,7 @@ mod tests {
 
 /// Class names of the always-on project layer. The classes themselves are
 /// defined in `content/processes/builtin.lisp`.
-pub const DEFAULT_LANE_CLASSES: [&str; 9] = [
+pub const DEFAULT_LANE_CLASSES: [&str; 11] = [
     "lane-prob",
     "lane-acc",
     "lane-reset",
@@ -4497,6 +4618,8 @@ pub const DEFAULT_LANE_CLASSES: [&str; 9] = [
     "lane-cmp",
     "lane-veto",
     "lane-roll",
+    "lane-xpose",
+    "lane-xpose-b",
 ];
 
 /// One default lane as installed on every scene's project layer, in chain
@@ -4510,7 +4633,12 @@ pub struct DefaultLaneSpec {
 /// The logic lanes (`cmp A`, `cmp B`, `veto`, `roll`) sit after every
 /// generator so a wire from any of them lands on the same fire (writes only
 /// flow forward within one fire; a backward wire waits for the next).
-pub const DEFAULT_LANES: [DefaultLaneSpec; 12] = [
+/// `xpose` (Cirklon "xpose by trk n") is appended after `roll` rather than
+/// next to `grab`: default lane ids are index-based, so inserting mid-list
+/// would renumber the logic lanes and strand saved wires into them. For the
+/// same reason `xpose+b` (Cirklon "xpose by trk n+B") goes on the END rather
+/// than beside `xpose`.
+pub const DEFAULT_LANES: [DefaultLaneSpec; 14] = [
     DefaultLaneSpec { class_name: "lane-prob", name: "prob" },
     DefaultLaneSpec { class_name: "lane-reset", name: "reset" },
     DefaultLaneSpec { class_name: "lane-rand", name: "rand" },
@@ -4523,6 +4651,8 @@ pub const DEFAULT_LANES: [DefaultLaneSpec; 12] = [
     DefaultLaneSpec { class_name: "lane-cmp", name: "cmp B" },
     DefaultLaneSpec { class_name: "lane-veto", name: "veto" },
     DefaultLaneSpec { class_name: "lane-roll", name: "roll" },
+    DefaultLaneSpec { class_name: "lane-xpose", name: "xpose" },
+    DefaultLaneSpec { class_name: "lane-xpose-b", name: "xpose+b" },
 ];
 
 /// Default lane slot ids sit in a fixed block below the UI handle base

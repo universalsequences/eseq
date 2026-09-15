@@ -9,6 +9,7 @@
 //! - [`accumulator`] — `def-accumulator` step accumulators
 //! - [`generator`] — `def-generator` self-clocked emitters
 //! - [`graph`] — graph-mode `def-sequencer` gather/scatter node fields
+//! - [`harmony`] — pitch-class tiers behind the `lane-harmony` process
 //! - [`grid_clock`] — the shared [`grid_clock::GridBoundaryClock`] timebase and
 //!   the `(sample_time, index)` determinism contract all emitters follow
 //!
@@ -21,4 +22,5 @@ pub mod accumulator;
 pub mod generator;
 pub mod graph;
 pub mod grid_clock;
+pub mod harmony;
 pub mod process;

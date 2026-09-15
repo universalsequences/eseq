@@ -117,6 +117,21 @@ pub(crate) fn expanded_step_page_active_field(track_id: usize, page: usize) -> S
     format!("seqv-page-active-{track_id}-{page}")
 }
 
+/// This track's per-bar transpose (Cirklon P3 bar XPOSE) for one 16-step
+/// page, in semitones. Per bar rather than one list per track because the
+/// pickers are dragged: a per-field slot repaints the one picker under the
+/// pointer instead of rebuilding a whole-track list every drag event.
+pub(crate) fn expanded_step_bar_transpose_field(track_id: usize, bar: usize) -> String {
+    format!("seqv-bar-transpose-{track_id}-{bar}")
+}
+
+/// Whether this bar carries a non-zero transpose. The picker binds it to
+/// `:active` so a bar at 0 renders dim — 0 is a legal value, so the picker
+/// cannot infer "unset" from the number itself.
+pub(crate) fn expanded_step_bar_transpose_set_field(track_id: usize, bar: usize) -> String {
+    format!("seqv-bar-transpose-set-{track_id}-{bar}")
+}
+
 pub(crate) fn expanded_step_cursor_param_value_field(track_id: usize) -> String {
     format!("seqv-cursor-param-value-{track_id}")
 }
@@ -421,6 +436,24 @@ pub(crate) fn sync_expanded_step_viewport(
                 "SEQ",
                 &expanded_step_page_active_field(viewport.track_id, page),
                 Value::Bool(page == viewport.page && page < page_count),
+            )
+            .effects_dirty;
+        // One bar per page, so the page row's transpose pickers ride the same
+        // loop. Republished here means a scene switch (which re-syncs every
+        // expanded viewport) shows the incoming pattern's bar values.
+        let bar_transpose = state.bar_transpose(viewport.track, page);
+        dirty |= rt
+            .set_reactive(
+                "SEQ",
+                &expanded_step_bar_transpose_field(viewport.track_id, page),
+                Value::Number(bar_transpose as f64),
+            )
+            .effects_dirty;
+        dirty |= rt
+            .set_reactive(
+                "SEQ",
+                &expanded_step_bar_transpose_set_field(viewport.track_id, page),
+                Value::Bool(bar_transpose != 0.0),
             )
             .effects_dirty;
     }

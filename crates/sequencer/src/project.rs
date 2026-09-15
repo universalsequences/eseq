@@ -68,7 +68,11 @@ use crate::track_color::TrackColor;
 //       list of user-added process slots on each track. Older files have no
 //       roster, load with an empty one, and behave exactly as before — every
 //       track slot they carry stays the per-pattern slot it already was.
-const PROJECT_FILE_VERSION: u32 = 11;
+//  12 — per-bar transpose (Cirklon P3 bar XPOSE, eseq-m14x): one semitone
+//       value per 16-step page, per track, per pattern. Older files have no
+//       bar transposes and load with every bar at 0, which plays exactly as
+//       they did.
+const PROJECT_FILE_VERSION: u32 = 12;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ProjectSoundPreset {
@@ -1630,6 +1634,12 @@ pub struct ProjectPattern {
         deserialize_with = "deserialize_timebase_plock_snapshots"
     )]
     pub timebase_plock_snapshots: Vec<Vec<Option<u32>>>,
+    /// Per-track, per-bar transpose (Cirklon P3 bar XPOSE). Absent in files
+    /// older than v12, which then load with every bar at 0. A pattern where
+    /// no bar carries a transpose writes no key at all, so projects that
+    /// never touch the feature keep the shape they had.
+    #[serde(default, skip_serializing_if = "bar_transposes_are_all_zero")]
+    pub bar_transpose_snapshots: Vec<Vec<f32>>,
     #[serde(
         default,
         serialize_with = "serialize_timebase_plock_snapshots",
@@ -2003,6 +2013,11 @@ impl ProjectPattern {
                 .timebase_plock_snapshots
                 .iter()
                 .map(|steps| steps.to_vec())
+                .collect(),
+            bar_transpose_snapshots: snapshot
+                .bar_transpose_snapshots
+                .iter()
+                .map(|bars| bars.to_vec())
                 .collect(),
             swing_plock_snapshots: snapshot
                 .swing_plock_snapshots
@@ -2971,6 +2986,12 @@ where
             Ok(tracks)
         }
     }
+}
+
+fn bar_transposes_are_all_zero(snapshots: &[Vec<f32>]) -> bool {
+    snapshots
+        .iter()
+        .all(|bars| bars.iter().all(|value| *value == 0.0))
 }
 
 fn serialize_timebase_plock_snapshots<S>(
@@ -3974,6 +3995,7 @@ mod tests {
                     snapshots
                 },
                 timebase_plock_snapshots: vec![vec![None; 256], vec![None; 256]],
+                bar_transpose_snapshots: vec![vec![0.0; 16], vec![0.0; 16]],
                 swing_plock_snapshots: vec![vec![None; 256], vec![None; 256]],
                 swing_resolution_plock_snapshots: vec![vec![None; 256], vec![None; 256]],
                 track_send_plock_snapshots: Vec::new(),
@@ -4346,6 +4368,62 @@ mod tests {
         // Save never writes it.
         let json = serde_json::to_string(&sample_project()).expect("serialize project");
         assert!(!json.contains("\"song\""), "{json}");
+    }
+
+    /// The capture half: a pattern snapshot's bar transposes reach the
+    /// serialized pattern.
+    #[test]
+    fn project_pattern_carries_bar_transposes_from_a_snapshot() {
+        use crate::sequencer::{PatternSnapshot, BARS_PER_PATTERN};
+        let mut snapshot = PatternSnapshot::new_default(2, &[]);
+        snapshot.bar_transpose_snapshots[1][2] = 12.0;
+        let pattern = ProjectPattern::from_snapshot(
+            &snapshot,
+            vec![None; 2],
+            vec![String::new(); 2],
+            Vec::new(),
+        );
+        assert_eq!(pattern.bar_transpose_snapshots.len(), 2);
+        assert_eq!(pattern.bar_transpose_snapshots[1].len(), BARS_PER_PATTERN);
+        assert_eq!(pattern.bar_transpose_snapshots[1][2], 12.0);
+        assert!(pattern.bar_transpose_snapshots[0].iter().all(|v| *v == 0.0));
+    }
+
+    /// eseq-m14x: per-bar transposes round-trip, a project saved before them
+    /// (v11) loads with every bar at 0, and a project that never uses them
+    /// writes no key.
+    #[test]
+    fn bar_transposes_round_trip_and_older_files_load_zeros() {
+        let mut project = sample_project();
+        project.patterns[0].bar_transpose_snapshots[0][1] = 7.0;
+        project.patterns[0].bar_transpose_snapshots[1][3] = -5.0;
+        let json = serde_json::to_string(&project).expect("serialize project");
+        let restored: ProjectFile = serde_json::from_str(&json).expect("parse project");
+        assert_eq!(restored.patterns[0].bar_transpose_snapshots[0][1], 7.0);
+        assert_eq!(restored.patterns[0].bar_transpose_snapshots[1][3], -5.0);
+        assert_eq!(restored.patterns[0].bar_transpose_snapshots[0][0], 0.0);
+
+        // A v11 file has no `bar_transpose_snapshots` key at all.
+        let mut value: serde_json::Value = serde_json::from_str(&json).expect("parse json");
+        let object = value.as_object_mut().expect("project is a json object");
+        object.insert("version".to_string(), serde_json::json!(11));
+        for pattern in object
+            .get_mut("patterns")
+            .and_then(|patterns| patterns.as_array_mut())
+            .expect("patterns array")
+        {
+            pattern
+                .as_object_mut()
+                .expect("pattern is a json object")
+                .remove("bar_transpose_snapshots");
+        }
+        let legacy: ProjectFile =
+            serde_json::from_value(value).expect("a pre-bar-transpose project must still parse");
+        assert!(legacy.patterns[0].bar_transpose_snapshots.is_empty());
+
+        // Untouched projects keep the shape they had.
+        let empty = serde_json::to_string(&sample_project()).expect("serialize project");
+        assert!(!empty.contains("bar_transpose_snapshots"), "{empty}");
     }
 
     /// eseq-53y7: the per-track lane roster round-trips, and a project saved

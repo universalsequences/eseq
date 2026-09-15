@@ -1,6 +1,6 @@
 # Default Process Lanes: Cirklon parity out of the box
 
-Status: spec rev 6, 2026-09-15. Rev 1 was the plan; rev 2 records what shipped (epic eseq-ks8x) and where it deviates; rev 3 (eseq-38k8) gives `grab` the Cirklon replace semantics; rev 4 is the lane patchbay (eseq-jrab), rev 5 bus-send targets (eseq-jmi9), rev 6 user-added track lanes (epic eseq-53y7). Companion to
+Status: spec rev 6, 2026-09-15. Rev 1 was the plan; rev 2 records what shipped (epic eseq-ks8x) and where it deviates; rev 3 (eseq-38k8) gives `grab` the Cirklon replace semantics; rev 4 is the lane patchbay (eseq-jrab), rev 5 bus-send targets (eseq-jmi9), rev 6 user-added track lanes (epic eseq-53y7); rev 7, 2026-09-15, per-bar transpose and the `+B` family (epic eseq-m14x). Companion to
 `docs/cirklon-process-accumulator-brainstorm.md` (normative process model) and
 `docs/cirklon-endgame-trajectory.md`. Design canvas (approved):
 https://claude.ai/code/artifact/b53be653-e637-4314-9332-23011c7be9ac
@@ -25,7 +25,9 @@ by a package the UI imports at startup. Untouched lanes are inert.
   value on the step the source track is currently on, recorded in the chunk
   pre-pass before any process runs, held until the source's next boundary.
   `:note` (chord base note, else the transpose p-lock) is only readable this
-  way; `(step-note)` is the same quantity for the running step, and
+  way, as is `:note+b` (rev 7: that same note plus the source step's bar
+  transpose, Cirklon `nte+B`); `(step-note)` is the same quantity for the
+  running step as plain `:note`, excluding the bar, and
   `(+ (current-note) (- new (step-note)))` is the replace-the-note write that
   keeps accumulator offsets and moves chords as a block.
 
@@ -40,7 +42,9 @@ Chain order is dropdown order. Lane names have no instance prefix.
 | `reset` | gate lane | accumulator reset | resets `tacc`, `acc A`, `acc B` before the step |
 | `acc A` | float lane | aux C | generic accumulator, `out :mappable`, default hint `(step-param :retrig)` |
 | `acc B` | float lane | aux D | same def as `acc A`, default hint `(step-param :rate)` |
-| `grab` | gate lane | Cirklon grab (Inter Track) | `target-set!` replaces `value` (note / vel / dur picker) with the source track's current-step pattern value via `(read (track source :note :pattern))`; same tick, no scaling. `source` is a slot inlet. Rev 3, 2026-09-14: replaced the rev 2 additive `amount × (read … :steps-ago lag)` form, which was an invention with no Cirklon analog |
+| `grab` | gate lane | Cirklon grab (Inter Track) | `target-set!` replaces `value` (note / vel / dur / note+b picker) with the source track's current-step pattern value via `(read (track source :note :pattern))`; same tick, no scaling. `source` is a slot inlet. `note+b` (index 3, rev 7) reads `:note+b` instead, so the source's bar transpose comes along. Rev 3, 2026-09-14: replaced the rev 2 additive `amount × (read … :steps-ago lag)` form, which was an invention with no Cirklon analog |
+| `xpose` | gate lane | Cirklon "xpose by trk n" (Inter Track) | `target-add!` of `(read (track source :note :pattern))`: this note plus the source's current-step note from the root, same tick. Appended after `roll` (rev 3) so the index-based default ids of the logic lanes do not move |
+| `xpose+b` | gate lane | Cirklon "xpose by trk n+B" (Inter Track) | `lane-xpose-b`: `target-add!` of `(read (track source :note+b :pattern))`, i.e. the source's current-step note *as heard*, after its own bar transpose. Appended last in `DEFAULT_LANES` (rev 7) — the list is append-only because default lane ids are index-based |
 | `rand` | gate lane `roll` | generator | seeded roll between `lo`/`hi` slot inlets, `out :process-inlet` |
 | `count` | gate lane `step` | generator | up-counter with `lo`/`hi`/`wrap`, `out :process-inlet` |
 | `cmp A` / `cmp B` | float lane `a` (input, or wired) | logic | 1/0 from `a` under `op` (`< > >= <= == !=`) against the `value` picker; `hold` 1 keeps the last wired input on quiet fires |
@@ -469,3 +473,58 @@ track (2026-09-14). So a track carries its own added lanes.
   the same mutex — instant deadlock. Bind the `len()` to a local first. The
   same shape lurks anywhere a `PatternState` field is read to drive a loop
   that then edits state.
+
+## Bar transpose (rev 7, shipped 2026-09-15; epic eseq-m14x)
+
+Cirklon P3 patterns carry one XPOSE value per bar (manual 3-14, "Bar
+Values": each bar of the pattern transposes up or down by up to five
+octaves), separate from the scene-level transpose. eseq now has the same
+quantity, and the `+B` reads exist so one track can transpose by another
+track's note *as heard*.
+
+**Model.** Per track, per pattern, scene-locked exactly like step data. One
+semitone value per 16-step page: `BARS_PER_PATTERN` = 16 (`MAX_STEPS` 256 /
+16), `bar_of_step(step) = step / 16`, range ±60 (`BAR_TRANSPOSE_LIMIT`, five
+octaves). `BarTransposeData` in `sequencer/data.rs` holds the values as
+atomics next to `TimebasePLockData`; `PatternState.bar_transposes` is the
+live copy, `TrackPatternData.bar_transpose_snapshot` makes it swap with the
+pattern, and `SequencerTrackSnapshot.bar_transposes` carries it to the
+scheduler. Project file v11 → v12: `bar_transpose_snapshots`, skipped when
+every value is zero, so untouched projects are byte-identical and older
+files load zeros.
+
+**Where it applies, and why there.** `lookahead.rs` adds the bar value to
+`resolved.transpose` immediately *after* the live print overrides and
+*before* the process chain runs.
+
+- After the print overrides because the transpose print override *assigns*
+  rather than adds: folding the bar in first would have been discarded on
+  any step passing under an armed print latch, and the printed value and the
+  next pass would disagree.
+- Before the chain so the bar is part of the note every process sees:
+  `(current-note)` includes it, a `grab` note write
+  (`(+ (current-note) (- new (step-note)))`) keeps it because `(step-note)`
+  is authored-only, and `tacc` sums with it rather than replacing it.
+- Chord steps move as a block: the chord math is already expressed relative
+  to the step transpose, so every chord note shifts together.
+
+**What stacks.** Scene transpose still applies on top, unchanged, including
+the per-track `global_transpose` opt-out. Step transpose, bar transpose,
+process transposes and scene transpose all sum.
+
+**What it does not touch.** Live roll hits, live keyboard/musical-typing
+streams, and neural-derived events get no bar transpose — it is a property
+of an authored pattern step, not of the track.
+
+**What reads it.** `ProcessStepPattern.bar_transpose` records it in the
+chunk pre-pass; `note_with_bar()` is the sum. The track read param `:note+b`
+exposes it, in `:pattern` mode only (like `:note`). Plain `:note` and
+`(step-note)` stay authored and exclude the bar — that difference is the
+whole point of the `+B` family, and is what makes `grab`'s `note` vs
+`note+b` the manual's `nte` vs `nte+B`.
+
+**UI** (bead eseq-m14x.2): a per-bar number picker under each page button of
+an expanded track, `trn`-style formatting, undoable, per scene.
+
+**Open follow-up** (eseq-m14x.4): pattern duplicate/halve does not copy bar
+transposes yet.

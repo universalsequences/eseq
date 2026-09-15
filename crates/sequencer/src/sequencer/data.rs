@@ -1896,6 +1896,87 @@ pub struct Trigger {
     pub cycle_start_beats: f64,
 }
 
+/// Bars a pattern can carry: one per 16-step page (`STEPS_PER_PAGE`).
+pub const BARS_PER_PATTERN: usize = MAX_STEPS / STEPS_PER_PAGE;
+
+/// Cirklon P3 bar XPOSE range (manual 3-14 "Bar Values"): five octaves
+/// either way.
+pub const BAR_TRANSPOSE_LIMIT: f32 = 60.0;
+
+/// The bar (16-step page) a step belongs to.
+pub fn bar_of_step(step: usize) -> usize {
+    (step / STEPS_PER_PAGE).min(BARS_PER_PATTERN - 1)
+}
+
+/// Per-bar transpose of one track's pattern (Cirklon P3 "XPOSE" bar value):
+/// one semitone offset per 16-step page, applied to every note the bar
+/// plays, on top of the step's own transpose and before the process chain
+/// runs. Scene transpose stacks on top of it. Stored as f32 bits so the
+/// audio thread reads it without a lock, exactly like the p-lock lanes.
+pub struct BarTransposeData {
+    values: [AtomicU32; BARS_PER_PATTERN],
+}
+
+impl BarTransposeData {
+    pub fn new() -> Self {
+        Self {
+            values: std::array::from_fn(|_| AtomicU32::new(0.0_f32.to_bits())),
+        }
+    }
+
+    pub fn get(&self, bar: usize) -> f32 {
+        self.values
+            .get(bar)
+            .map(|cell| f32::from_bits(cell.load(Ordering::Relaxed)))
+            .unwrap_or(0.0)
+    }
+
+    /// The transpose that applies to `step`, i.e. to its bar.
+    pub fn get_for_step(&self, step: usize) -> f32 {
+        self.get(bar_of_step(step))
+    }
+
+    pub fn set(&self, bar: usize, semitones: f32) {
+        if let Some(cell) = self.values.get(bar) {
+            let value = if semitones.is_finite() { semitones } else { 0.0 };
+            cell.store(
+                value
+                    .clamp(-BAR_TRANSPOSE_LIMIT, BAR_TRANSPOSE_LIMIT)
+                    .to_bits(),
+                Ordering::Relaxed,
+            );
+        }
+    }
+
+    pub fn clear(&self, bar: usize) {
+        self.set(bar, 0.0);
+    }
+
+    /// True when no bar carries a transpose — the state a fresh pattern is
+    /// in, so UI and serialization can skip it.
+    pub fn is_default(&self) -> bool {
+        self.values
+            .iter()
+            .all(|cell| f32::from_bits(cell.load(Ordering::Relaxed)) == 0.0)
+    }
+
+    pub fn snapshot(&self) -> [f32; BARS_PER_PATTERN] {
+        std::array::from_fn(|bar| self.get(bar))
+    }
+
+    pub fn restore(&self, snap: &[f32; BARS_PER_PATTERN]) {
+        for (bar, value) in snap.iter().enumerate() {
+            self.set(bar, *value);
+        }
+    }
+}
+
+impl Default for BarTransposeData {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub struct TimebasePLockData {
     overrides: [AtomicU32; MAX_STEPS],
 }

@@ -16,7 +16,8 @@ use crate::project::{
 };
 use crate::sequencer::{
     BusId, BusPatternSnapshot, CustomInstrumentRunMode, InstrumentType,
-    PatternSnapshot, RackTrackSnapshot, TrackOutput, MAX_STEPS, TRACK_PATTERN_WORDS,
+    PatternSnapshot, RackTrackSnapshot, TrackOutput, BARS_PER_PATTERN, MAX_STEPS,
+    TRACK_PATTERN_WORDS,
 };
 
 use super::fx_chain::{FxChainLocator, FxGraphEditBatch};
@@ -4582,6 +4583,7 @@ impl App {
             chord_duration_snapshots,
             chord_delay_snapshots,
             timebase_plock_snapshots,
+            bar_transpose_snapshots,
             swing_plock_snapshots,
             swing_resolution_plock_snapshots,
             track_send_plock_snapshots,
@@ -4839,6 +4841,16 @@ impl App {
                 .map(|steps| {
                     let mut snapshot = [None; MAX_STEPS];
                     for (idx, value) in steps.into_iter().take(MAX_STEPS).enumerate() {
+                        snapshot[idx] = value;
+                    }
+                    snapshot
+                })
+                .collect(),
+            bar_transpose_snapshots: bar_transpose_snapshots
+                .into_iter()
+                .map(|bars| {
+                    let mut snapshot = [0.0f32; BARS_PER_PATTERN];
+                    for (idx, value) in bars.into_iter().take(BARS_PER_PATTERN).enumerate() {
                         snapshot[idx] = value;
                     }
                     snapshot
@@ -5911,6 +5923,7 @@ mod tests {
                 chord_duration_snapshots: Vec::new(),
                 chord_delay_snapshots: Vec::new(),
                 timebase_plock_snapshots: Vec::new(),
+                bar_transpose_snapshots: Vec::new(),
                 swing_plock_snapshots: Vec::new(),
                 swing_resolution_plock_snapshots: Vec::new(),
                 track_send_plock_snapshots: Vec::new(),

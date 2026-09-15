@@ -107,6 +107,7 @@ impl SequencerState {
                 pool_content_revision: AtomicU64::new(0),
                 current_pattern: AtomicU32::new(0),
                 num_patterns: AtomicU32::new(1),
+                bar_transposes: (0..MAX_TRACKS).map(|_| BarTransposeData::new()).collect(),
                 timebase_plocks: (0..MAX_TRACKS).map(|_| TimebasePLockData::new()).collect(),
                 swing_plocks: (0..MAX_TRACKS).map(|_| SwingPLockData::new()).collect(),
                 swing_resolution_plocks: (0..MAX_TRACKS)
@@ -356,6 +357,40 @@ impl SequencerState {
 
     pub fn active_track_count(&self) -> usize {
         self.transport.num_tracks.load(Ordering::Acquire) as usize
+    }
+
+    /// This pattern's bar transpose for `track`'s `bar`, in semitones
+    /// (Cirklon P3 "XPOSE" bar value). Out-of-range indices read 0.
+    pub fn bar_transpose(&self, track: usize, bar: usize) -> f32 {
+        self.pattern
+            .bar_transposes
+            .get(track)
+            .map(|bars| bars.get(bar))
+            .unwrap_or(0.0)
+    }
+
+    /// The bar transpose that applies to `step` — i.e. to the 16-step page
+    /// it sits on.
+    pub fn bar_transpose_for_step(&self, track: usize, step: usize) -> f32 {
+        self.bar_transpose(track, bar_of_step(step))
+    }
+
+    /// Write one bar transpose (clamped to ±5 octaves) and republish: the
+    /// scheduler reads bar transposes off the track snapshot, and the value
+    /// must be audible on the very next trigger, so this mirrors the
+    /// timebase-p-lock setter's epoch bump + publish.
+    pub fn set_bar_transpose(&self, track: usize, bar: usize, semitones: f32) {
+        if bar >= BARS_PER_PATTERN {
+            return;
+        }
+        let Some(bars) = self.pattern.bar_transposes.get(track) else {
+            return;
+        };
+        bars.set(bar, semitones);
+        self.transport
+            .pattern_epoch
+            .fetch_add(1, Ordering::Relaxed);
+        self.publish_scheduler_snapshot();
     }
 
     pub fn quantized_launches(&self) -> &crate::quantized_launch::QuantizedLaunchMailbox {

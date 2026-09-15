@@ -42,6 +42,11 @@ pub struct PatternState {
     pub(super) pool_content_revision: AtomicU64,
     pub(super) current_pattern: AtomicU32,
     pub(super) num_patterns: AtomicU32,
+    /// Per-track, per-bar transpose of THIS pattern (Cirklon P3 bar XPOSE).
+    /// Indexed by track; each entry holds one semitone value per 16-step
+    /// page. Swaps with the pattern on a scene switch via
+    /// `TrackPatternData::bar_transpose_snapshot`.
+    pub bar_transposes: Vec<BarTransposeData>,
     pub timebase_plocks: Vec<TimebasePLockData>,
     pub swing_plocks: Vec<SwingPLockData>,
     pub swing_resolution_plocks: Vec<SwingResolutionPLockData>,

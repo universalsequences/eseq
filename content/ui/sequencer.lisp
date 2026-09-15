@@ -951,9 +951,7 @@
           :key (str "select-" i)
           :background-color :transparent
           :on-click (lambda (event) (track-click event i))
-          ;; Arrangement/step track headers are device-view gestures:
-          ;; double-click always enters FX mode rather than toggling.
-          :on-double-click (lambda (evt) (show-fx-for-track i))
+          :on-double-click (lambda (evt) (open-piano-roll-for-track i))
           (badge (track-name-display name)
             :key (str "track-name-label-" i)
             :icon (eseq.track-collapse/type-icon i)
@@ -1105,7 +1103,7 @@
       (odd2 (mod (floor (/ step 32)) 2)))
     (if (= odd2 1) (if (= odd1 1) 0 1) odd1)))
 
-(def step-cell (track step visible)
+(def step-cell (track step)
   ;; Step cells use the step-color channels: same as the track color but
   ;; additionally dimmed while the lane is take-governed. Muting is passed
   ;; separately so the shader can replace colored layers with opaque neutral
@@ -1122,24 +1120,16 @@
       :width 3.05 :height 1.55
       :key (str "step-cell-" track "-" step)
       :on-mouse-down (lambda (evt)
-        (if visible
-          (grid-step-pointer-down track step evt)
-          nil))
+        (grid-step-pointer-down track step evt))
       :on-drag (lambda (evt)
-        (if visible
-          (grid-step-select-drag-over track step evt)
-          nil))
+        (grid-step-select-drag-over track step evt))
       :on-mouse-up (lambda (evt)
-        (if visible
-          (grid-step-pointer-up track step evt)
-          nil))
+        (grid-step-pointer-up track step evt))
       :on-double-click (lambda (evt)
-        (if visible
-          (grid-step-double-click track step evt)
-          nil))
+        (grid-step-double-click track step evt))
       :active (cursor-highlight-binding track step)
       :selected (track-selected-binding track)
-      :hide (if visible 0 1)
+      :hide 0
       :background "cursor-highlight"
       (box
         :width 3.05 :height 1.55
@@ -1149,7 +1139,7 @@
         :selected (bind-seq (str "seq-track-step-selected-" track "-" step))
         :duration (bind-seq (str "seq-track-step-duration-" track "-" step))
         :muted muted
-        :hide (if visible 0 1)
+        :hide 0
         :track-r track-r :track-g track-g :track-b track-b
         :variant-r variant-r :variant-g variant-g :variant-b variant-b
         :color :sequencer-step-border
@@ -1249,6 +1239,22 @@
 
 (def slot-page-active-field (track-id page)
   (str "seqv-page-active-" track-id "-" page))
+
+;; Per-bar transpose (Cirklon P3 bar XPOSE), one value per 16-step page.
+;; Two slots per bar: the semitone value the picker edits, and a flag the
+;; picker binds to `:active` so a bar at 0 stays dim (a number-picker picks
+;; its colour from `:active`, and 0 is a legal value here, not an absence).
+(def slot-bar-transpose-field (track-id bar)
+  (str "seqv-bar-transpose-" track-id "-" bar))
+
+(def slot-bar-transpose-set-field (track-id bar)
+  (str "seqv-bar-transpose-set-" track-id "-" bar))
+
+(def bar-transpose-binding (track-id bar)
+  (bind-seq (slot-bar-transpose-field track-id bar)))
+
+(def bar-transpose-set-binding (track-id bar)
+  (bind-seq (slot-bar-transpose-set-field track-id bar)))
 
 (def slot-step-index-binding (track-id slot)
   (bind-seq (slot-field "step-index" track-id slot)))
@@ -1395,6 +1401,63 @@
       (expanded-step-double-click track track-id step evt)
       nil)))
 
+;; ---------------------------------------------------------------------------
+;; UI-only slider step per process lane. The process keeps floats; this only
+;; quantizes what the expanded sliders and the row picker write, so a lane
+;; whose range is wider than 1 (acc, tacc) moves in whole numbers by default.
+;; 0..1 lanes stay floats (int/gate lanes already round via :decimals 0).
+;; Keyed by instance-id + inlet so a forked lane keeps its own step. 0 = free.
+(defstate lane-slider-steps '())
+
+(def lane-step-key (lane) (str (get lane :instance-id) "-" (get lane :inlet)))
+
+(def lane-range (lane) (- (get lane :max) (get lane :min)))
+
+(def lane-stepped? (lane) (> (lane-range lane) 1))
+
+(def lane-slider-step-entry (lane)
+  (let ((key (lane-step-key lane)))
+    (reduce |acc entry| (if (= (get entry :key) key) entry acc) nil lane-slider-steps)))
+
+(def lane-slider-step (lane)
+  (if (lane-stepped? lane)
+    (let ((entry (lane-slider-step-entry lane)))
+      (if entry (get entry :step) 1))
+    (if (= (get lane :decimals) 0) 1 0)))
+
+(def set-lane-slider-step (lane step)
+  (let ((key (lane-step-key lane)))
+    (set! lane-slider-steps
+      (cons (dict :key key :step step)
+            (filter (lambda (entry) (not (= (get entry :key) key))) lane-slider-steps)))))
+
+(def lane-slider-step-quantize (lane value)
+  (let ((step (lane-slider-step lane))
+        (lo (get lane :min))
+        (hi (get lane :max)))
+    (if (> step 0)
+      (min hi (max lo (+ lo (* step (round (/ (- value lo) step))))))
+      value)))
+
+;; Display precision that matches the step: 1 -> "3", 0.5 -> "1.5", 0.25 -> "0.75".
+(def lane-slider-step-decimals (step)
+  (if (= step 0) 2
+    (if (= step (round step)) 0
+      (if (= (* step 10) (round (* step 10))) 1 2))))
+
+(def expanded-lane-param-value (track mode value)
+  (lane-slider-step-quantize (eseq.seqv-track-params/seqv-track-process-lane track mode) value))
+
+(def expanded-param-step (track mode)
+  (if (eseq.seqv-track-params/seqv-process-lane-mode? mode)
+    (lane-slider-step (eseq.seqv-track-params/seqv-track-process-lane track mode))
+    0))
+
+(def expanded-param-decimals (track mode)
+  (if (eseq.seqv-track-params/seqv-process-lane-mode? mode)
+    (lane-slider-step-decimals (expanded-param-step track mode))
+    (eseq.seqv-track-params/seqv-track-param-decimals track mode)))
+
 (def set-expanded-slot-param (track track-id slot mode slider-value)
   (let ((step (slot-step-index-value track-id slot)))
     (if (>= step 0)
@@ -1411,7 +1474,8 @@
         track
         mode
         step
-        (eseq.seqv-track-params/seqv-track-step-slider-param-value track mode slider-value))
+        (expanded-lane-param-value track mode
+          (eseq.seqv-track-params/seqv-track-step-slider-param-value track mode slider-value)))
       (eseq.step-grid-interactions/seq-set-step-param-from-step
         step
         (eseq.seqv-track-params/seqv-param-keyword mode)
@@ -1429,7 +1493,8 @@
         track
         mode
         (track-current-step track track-id)
-        (eseq.seqv-track-params/seqv-track-step-param-value track mode value))
+        (expanded-lane-param-value track mode
+          (eseq.seqv-track-params/seqv-track-step-param-value track mode value)))
       (eseq.step-grid-interactions/seq-set-step-param-from-selection-or-step
         (track-current-step track track-id)
         (eseq.seqv-track-params/seqv-param-keyword mode)
@@ -1891,6 +1956,9 @@
     (dropdown
       :key (str "lane-inlet-track-" (get slot :instance-id) "-" (get inlet :name))
       :value (lane-track-option (floor (get inlet :value)))
+      :bg-color :mixer-strip-bg
+      :badge-color :mixer-strip-selected-bg
+      :border-color :mixer-strip-selected-bg
       :options (lane-track-options)
       :on-change (lambda (label)
         (let ((index (lane-track-option-index label)))
@@ -1937,6 +2005,24 @@
       (if (= (get inlet :kind) "enum")
         (lane-strip-enum-inlet-row track slot inlet)
         (lane-strip-inlet-row track slot inlet)))))
+
+;; UI-only slider step (see lane-slider-steps): only lanes wider than 1 get
+;; one. 0 reads "free" and hands the sliders back their floats.
+(def lane-strip-step-row (track lane)
+  (if (lane-stepped? lane)
+    (h-stack :width :fill :gap 0.3 :align :center
+      :key (str "lane-step-row-" (lane-step-key lane))
+      (label "step" :flex 1 :font-size 8.5 :color :dim :bg :transparent)
+      (number-picker
+        :key (str "lane-step-control-" (lane-step-key lane))
+        :value (lane-slider-step lane)
+        :min 0 :max 16 :step 0.25 :drag-rows 64
+        :decimals (lane-slider-step-decimals (lane-slider-step lane))
+        :value-labels '((0 "free"))
+        :noui true :font-size 9 :text-color :dim :text-align :right
+        :on-change (lambda (value) (set-lane-slider-step lane value))
+        :width 4.6 :height 1.0))
+    (box :height 0)))
 
 ;; Reorder within the chain: move before the previous slot, or after the next.
 (def lane-strip-neighbor (track slot delta)
@@ -2281,7 +2367,7 @@
       :selected selected
       :height 3
       :on-click (lambda (event) (lane-patch-select-lane track track-id (get entry :instance-id)))
-      (v-stack :width 9.0 :gap 0.0 :align :start
+      (v-stack :width 10.0 :gap 0.0 :align :start
         (label (get entry :name) :width :fill :font-size 8 :v-align :center
           :v-align :center
           :color (if (get entry :enabled) :process-lane-accent :dim) :bg :transparent)
@@ -2400,7 +2486,7 @@
             (lane-patch-select-lane track track-id instance-id))))
       nil)))
 
-;; Same box footprint as a lane cell so the two rows stay on one grid.
+;; Same box footprint as a lane cell so the add control shares the grid.
 (def lane-patch-add-cell (track track-id)
   (box :padding 0.4 :corner-radius 12
     :key (str "lane-patch-add-" track-id)
@@ -2408,7 +2494,7 @@
     :border-width 0.08 :border-color (rgba 0.94 0.63 0.24 0.16)
     :height 3
     :on-click (lambda (event) (lane-add-open track track-id))
-    (v-stack :width 9.0 :gap 0.0 :align :center
+    (v-stack :width 10.0 :gap 0.0 :align :center
       (label "+" :width :fill :height 1.6 :font-size 15
         :h-align :center :v-align :center
         :color :process-lane-accent :bg :transparent)
@@ -2480,18 +2566,19 @@
         (lane-patch-column track track-id (nth entries index))
         (lane-patch-add-cell track track-id)))))
 
-;; Two rows of lane boxes, read left to right then top to bottom. The + box
-;; counts as an entry so the rows stay balanced with it on the end.
+;; Wrap after six cells, read left to right then top to bottom. The + box
+;; counts as an entry and follows the last lane onto a new row when needed.
 (def lane-patchbay (track track-id)
   (let ((entries (track-lane-patch track)))
     (do
       (lane-add-resolve-pending track)
       (let ((count (+ (len entries) 1))
-            (half (floor (/ (+ (len entries) 2) 2))))
+            (columns 6))
         (v-stack :width :fill :gap 0.1 :padding 0.3
           :key (str "lane-patchbay-" track-id)
-          (lane-patch-grid-row track track-id entries 0 half)
-          (lane-patch-grid-row track track-id entries half count)
+          (each (range 0 (ceil (/ count columns))) |row|
+            (lane-patch-grid-row track track-id entries
+              (* row columns) (min count (* (+ row 1) columns))))
           (if lane-patch-selected (lane-patch-remove-button track) nil))))))
 
 (def lane-patchbay-under (track track-id mode)
@@ -2525,7 +2612,8 @@
           (lane-fanout-rows track slot)
           (lane-strip-wire-row track slot)
           (lane-strip-scope-row track slot)
-          (lane-strip-inlets track slot)))
+          (lane-strip-inlets track slot)
+          (lane-strip-step-row track lane)))
       nil)))
 
 ;; While a lane's map button is armed, the other lanes on the track offer
@@ -2592,7 +2680,9 @@
           (number-picker :key (str "expanded-param-number-picker-" track-id)
             :border-color :white
             :value (expanded-cursor-param-binding track-id)
-            :min (eseq.seqv-track-params/seqv-track-param-min track mode) :max (eseq.seqv-track-params/seqv-track-param-max track mode) :decimals (eseq.seqv-track-params/seqv-track-param-decimals track mode)
+            :min (eseq.seqv-track-params/seqv-track-param-min track mode) :max (eseq.seqv-track-params/seqv-track-param-max track mode)
+            :decimals (expanded-param-decimals track mode)
+            :step (expanded-param-step track mode)
             :on-change (lambda (v) (set-expanded-current-param track track-id mode v))
             :width 8 :height 1.3 :font-size 11))
         (h-stack :gap 0.4 :align :center
@@ -2612,23 +2702,37 @@
                 :font-size 12
                 :color :white
                 :bg :transparent)))
-          (box :background "transport-btn-bg" :padding 0.2 :height 1.4
+          (box :background "transport-btn-bg" :padding 0.2 :height 2.75
             :key (str "expanded-pages-" track-id)
             (h-stack :gap 0.1 :align :center
               (each (range 0 (page-count track)) |page|
-                (box :width eseq.step-grid-interactions/page-button-width :height 1.1
-                  :key (str "expanded-page-" track-id "-" page)
-                  :background "pattern-pill-bg"
-                  :active (page-active-binding track-id page)
-                  :style eseq.transport/pattern-control-style
-                  :on-click |x y r| (goto-page track track-id page)
-                  (v-stack :align :center
-                    (label (fmt " {} " (+ page 1))
-                      :font-size 11
-                      :active (page-active-binding track-id page)
-                      :active-color :white
-                      :color :dim
-                      :bg :transparent)))))))))))
+                (v-stack :gap 0.15 :align :center
+                  :key (str "expanded-page-slot-" track-id "-" page)
+                  (box :width eseq.step-grid-interactions/page-button-width :height 1.1
+                    :key (str "expanded-page-" track-id "-" page)
+                    :background "pattern-pill-bg"
+                    :active (page-active-binding track-id page)
+                    :style eseq.transport/pattern-control-style
+                    :on-click |x y r| (goto-page track track-id page)
+                    (v-stack :align :center
+                      (label (fmt " {} " (+ page 1))
+                        :font-size 11
+                        :active (page-active-binding track-id page)
+                        :active-color :white
+                        :color :dim
+                        :bg :transparent)))
+                  (number-picker
+                    :key (str "expanded-bar-transpose-" track-id "-" page)
+                    :value (bar-transpose-binding track-id page)
+                    :min -60 :max 60 :step 1 :decimals 0
+                    :active (bar-transpose-set-binding track-id page)
+                    :active-color :white
+                    :text-color :dim
+                    :noui true
+                    :text-align :center
+                    :on-change (lambda (v) (seq-set-bar-transpose track page v))
+                    :width eseq.step-grid-interactions/page-button-width
+                    :height 1.1 :font-size 7))))))))))
 
 (def expanded-track-editor (track track-id)
   (let ((mode (track-param-mode track-id)))
@@ -2776,10 +2880,11 @@
                 (h-stack :gap 0.0
                   (each (range 0 row-width) |col|
                     (let ((step (+ (* row row-width) col)))
-                      (step-cell
-                        track-idx
-                        step
-                        (< step num-steps))))))
+                      (if (< step num-steps)
+                        (step-cell track-idx step)
+                        ;; Preserve the grid width without an interactive ghost
+                        ;; step: hit testing must reach the enclosing track row.
+                        (box :width 3.05 :height 1.55))))))
               (h-stack (box :width 1)
                 (playhead-row track-idx (nth SEQ.track-ids track-idx) row)))))))
     )
@@ -2817,6 +2922,7 @@
       :on-drop (lambda (event) (drop-on-track event))
       :padding 0.0145
       :on-click (lambda (event) (track-click event i))
+      :on-double-click (lambda (event) (open-piano-roll-for-track i))
       (if (track-expanded? (nth SEQ.track-ids i))
         (v-stack 
           :width :fill :gap 0.2

@@ -4485,6 +4485,48 @@ pub(crate) fn init_runtime(
         Ok(Value::Bool(*enabled))
     });
 
+    // Bar transpose (Cirklon P3 bar XPOSE): one semitone value per 16-step
+    // page of the current pattern, edited from the expanded track's page row.
+    let st = state.clone();
+    runtime.register_native("seq-bar-transpose", move |args, _ctx| {
+        let (Some(Value::Number(track)), Some(Value::Number(bar))) = (args.first(), args.get(1))
+        else {
+            return Err("seq-bar-transpose: expected (track bar)".into());
+        };
+        if *track < 0.0 || *bar < 0.0 {
+            return Err("seq-bar-transpose: track and bar must be non-negative".into());
+        }
+        Ok(Value::Number(
+            st.bar_transpose(*track as usize, *bar as usize) as f64,
+        ))
+    });
+
+    runtime.register_native("seq-set-bar-transpose", move |args, ctx| {
+        let (Some(Value::Number(track)), Some(Value::Number(bar)), Some(Value::Number(semitones))) =
+            (args.first(), args.get(1), args.get(2))
+        else {
+            return Err("seq-set-bar-transpose: expected (track bar semitones)".into());
+        };
+        if *track < 0.0 || *bar < 0.0 || !semitones.is_finite() {
+            return Err("seq-set-bar-transpose: invalid track, bar or value".into());
+        }
+        let mut payload = HashMap::new();
+        payload.insert(
+            "track".to_string(),
+            Rc::new(RefCell::new(Value::Number(*track))),
+        );
+        payload.insert("bar".to_string(), Rc::new(RefCell::new(Value::Number(*bar))));
+        payload.insert(
+            "value".to_string(),
+            Rc::new(RefCell::new(Value::Number(*semitones))),
+        );
+        ctx.enqueue_command(HostCommand::Custom {
+            name: "set-bar-transpose".to_string(),
+            payload: Value::Map(payload),
+        });
+        Ok(Value::Number(*semitones))
+    });
+
     runtime.register_native("seq-move-process-slot-before", move |args, ctx| {
         let (Some(Value::Number(track)), Some(Value::Number(instance_id)), Some(target)) =
             (args.first(), args.get(1), args.get(2))
@@ -7683,6 +7725,16 @@ fn document_metal_seq_natives(runtime: &mut Runtime) {
             "seq-set-process-slot-enabled",
             "(seq-set-process-slot-enabled track instance-id enabled)",
             "Enable or bypass one attached process slot on a track.",
+        ),
+        (
+            "seq-bar-transpose",
+            "(seq-bar-transpose track bar)",
+            "Read one bar transpose (Cirklon bar XPOSE) of the current pattern, in semitones.",
+        ),
+        (
+            "seq-set-bar-transpose",
+            "(seq-set-bar-transpose track bar semitones)",
+            "Set one bar transpose (Cirklon bar XPOSE) on the current pattern, clamped to five octaves, with undo.",
         ),
         (
             "seq-move-process-slot-before",

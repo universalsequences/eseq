@@ -13,6 +13,8 @@ pub struct PatternSnapshot {
     pub track_sound_states: Vec<TrackSoundState>,
     pub sample_ids: Vec<(i32, String, u32)>,
     pub chord_snapshots: Vec<ChordSnapshot>,
+    /// Per-track, per-bar transpose (Cirklon P3 bar XPOSE) of this pattern.
+    pub bar_transpose_snapshots: Vec<[f32; BARS_PER_PATTERN]>,
     pub timebase_plock_snapshots: Vec<[Option<u32>; MAX_STEPS]>,
     pub swing_plock_snapshots: Vec<[Option<u32>; MAX_STEPS]>,
     pub swing_resolution_plock_snapshots: Vec<[Option<u32>; MAX_STEPS]>,
@@ -579,6 +581,7 @@ impl PatternSnapshot {
         remove_track_lane_if_present(&mut self.track_sound_states, track_idx);
         remove_track_lane_if_present(&mut self.sample_ids, track_idx);
         remove_track_lane_if_present(&mut self.chord_snapshots, track_idx);
+        remove_track_lane_if_present(&mut self.bar_transpose_snapshots, track_idx);
         remove_track_lane_if_present(&mut self.timebase_plock_snapshots, track_idx);
         remove_track_lane_if_present(&mut self.swing_plock_snapshots, track_idx);
         remove_track_lane_if_present(&mut self.swing_resolution_plock_snapshots, track_idx);
@@ -746,6 +749,7 @@ impl PatternSnapshot {
             self.track_sound_states.push(TrackSoundState::default());
             self.sample_ids.push((-1, String::new(), 44_100));
             self.chord_snapshots.push(ChordSnapshot::new_default());
+            self.bar_transpose_snapshots.push([0.0; BARS_PER_PATTERN]);
             self.timebase_plock_snapshots.push([None; MAX_STEPS]);
             self.swing_plock_snapshots.push([None; MAX_STEPS]);
             self.swing_resolution_plock_snapshots
@@ -773,6 +777,9 @@ impl PatternSnapshot {
         for steps in &mut self.track_send_plock_snapshots {
             steps.truncate(MAX_STEPS);
             steps.resize_with(MAX_STEPS, Vec::new);
+        }
+        while self.bar_transpose_snapshots.len() < track_count {
+            self.bar_transpose_snapshots.push([0.0; BARS_PER_PATTERN]);
         }
         while self.rack_tracks.len() < track_count {
             self.rack_tracks.push(None);
@@ -822,6 +829,7 @@ impl PatternSnapshot {
         self.track_sound_states.truncate(track_count);
         self.sample_ids.truncate(track_count);
         self.chord_snapshots.truncate(track_count);
+        self.bar_transpose_snapshots.truncate(track_count);
         self.timebase_plock_snapshots.truncate(track_count);
         self.swing_plock_snapshots.truncate(track_count);
         self.swing_resolution_plock_snapshots.truncate(track_count);
@@ -860,6 +868,7 @@ impl PatternSnapshot {
         let mut sound_states = Vec::with_capacity(num_tracks);
         let mut sample_ids = Vec::with_capacity(num_tracks);
         let mut chord_snapshots = Vec::with_capacity(num_tracks);
+        let mut bar_transpose_snapshots = Vec::with_capacity(num_tracks);
         let mut timebase_plock_snapshots = Vec::with_capacity(num_tracks);
         let mut swing_plock_snapshots = Vec::with_capacity(num_tracks);
         let mut swing_resolution_plock_snapshots = Vec::with_capacity(num_tracks);
@@ -941,6 +950,7 @@ impl PatternSnapshot {
             };
             sample_ids.push((buf_id, name, sample_rate));
             chord_snapshots.push(ChordSnapshot::capture(&state.pattern.chord_data[t]));
+            bar_transpose_snapshots.push(state.pattern.bar_transposes[t].snapshot());
             timebase_plock_snapshots.push(state.pattern.timebase_plocks[t].snapshot());
             swing_plock_snapshots.push(state.pattern.swing_plocks[t].snapshot());
             swing_resolution_plock_snapshots
@@ -1019,6 +1029,7 @@ impl PatternSnapshot {
             track_sound_states: sound_states,
             sample_ids,
             chord_snapshots,
+            bar_transpose_snapshots,
             timebase_plock_snapshots,
             swing_plock_snapshots,
             swing_resolution_plock_snapshots,
@@ -1175,6 +1186,11 @@ impl PatternSnapshot {
                 .get(track)
                 .cloned()
                 .unwrap_or_else(ChordSnapshot::new_default),
+            bar_transpose_snapshot: self
+                .bar_transpose_snapshots
+                .get(track)
+                .copied()
+                .unwrap_or([0.0; BARS_PER_PATTERN]),
             timebase_plock_snapshot: self
                 .timebase_plock_snapshots
                 .get(track)
@@ -1241,6 +1257,7 @@ impl PatternSnapshot {
         self.track_sound_states[track] = data.track_sound_state;
         self.sample_ids[track] = data.sample_id;
         self.chord_snapshots[track] = data.chord_snapshot;
+        self.bar_transpose_snapshots[track] = data.bar_transpose_snapshot;
         self.timebase_plock_snapshots[track] = data.timebase_plock_snapshot;
         self.swing_plock_snapshots[track] = data.swing_plock_snapshot;
         self.swing_resolution_plock_snapshots[track] = data.swing_resolution_plock_snapshot;
@@ -1280,6 +1297,7 @@ impl PatternSnapshot {
         self.track_sound_states[track] = TrackSoundState::default();
         self.sample_ids[track] = (-1, String::new(), 44_100);
         self.chord_snapshots[track] = ChordSnapshot::new_default();
+        self.bar_transpose_snapshots[track] = [0.0; BARS_PER_PATTERN];
         self.timebase_plock_snapshots[track] = [None; MAX_STEPS];
         self.swing_plock_snapshots[track] = [None; MAX_STEPS];
         self.swing_resolution_plock_snapshots[track] = [None; MAX_STEPS];
@@ -1342,6 +1360,7 @@ impl PatternSnapshot {
         self.track_sound_states.push(TrackSoundState::default());
         self.sample_ids.push((-1, String::new(), 44_100));
         self.chord_snapshots.push(ChordSnapshot::new_default());
+        self.bar_transpose_snapshots.push([0.0; BARS_PER_PATTERN]);
         self.timebase_plock_snapshots.push([None; MAX_STEPS]);
         self.swing_plock_snapshots.push([None; MAX_STEPS]);
         self.swing_resolution_plock_snapshots
@@ -1374,6 +1393,7 @@ impl PatternSnapshot {
             track_sound_states: Vec::with_capacity(num_tracks),
             sample_ids: Vec::with_capacity(num_tracks),
             chord_snapshots: Vec::with_capacity(num_tracks),
+            bar_transpose_snapshots: Vec::with_capacity(num_tracks),
             timebase_plock_snapshots: Vec::with_capacity(num_tracks),
             swing_plock_snapshots: Vec::with_capacity(num_tracks),
             swing_resolution_plock_snapshots: Vec::with_capacity(num_tracks),
@@ -1424,6 +1444,7 @@ impl PatternSnapshot {
             && self.track_sound_states.len() == n
             && self.sample_ids.len() == n
             && self.chord_snapshots.len() == n
+            && self.bar_transpose_snapshots.len() == n
             && self.timebase_plock_snapshots.len() == n
             && self.swing_plock_snapshots.len() == n
             && self.instrument_types.len() == n

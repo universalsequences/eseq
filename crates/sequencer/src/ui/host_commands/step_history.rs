@@ -18,6 +18,7 @@ pub(super) const COMMANDS: &[&str] = &[
     "slice3-history-action",
     "bus-mixer-history-action",
     "toggle-step",
+    "set-bar-transpose",
     "set-track-plock-entry",
     "set-track-plock-entry-option",
     "clear-track-plock-entry",
@@ -990,6 +991,55 @@ pub(super) fn handle(
                     ));
                 }
                 Err(error) => editor.handle_host_event(HostEvent::Error(error)),
+            }
+        }
+        // Bar transpose (Cirklon P3 bar XPOSE). The picker fires per drag
+        // event, so this stays on the targeted expanded-viewport invalidation
+        // and never bumps ui_epoch: the coalescing gesture in
+        // `apply_bar_transpose_edit` commits one history entry at pointer
+        // release.
+        "set-bar-transpose" => {
+            let Value::Map(ref map) = payload else {
+                editor.handle_host_event(HostEvent::Error(
+                    "Bar transpose edit failed: invalid payload".to_string(),
+                ));
+                return;
+            };
+            let number = |name: &str| {
+                map.get(name).and_then(|cell| match &*cell.borrow() {
+                    Value::Number(value) => Some(*value),
+                    _ => None,
+                })
+            };
+            let (Some(track), Some(bar), Some(value)) =
+                (number("track"), number("bar"), number("value"))
+            else {
+                editor.handle_host_event(HostEvent::Error(
+                    "Bar transpose edit failed: missing target".to_string(),
+                ));
+                return;
+            };
+            if track < 0.0 || bar < 0.0 {
+                editor.handle_host_event(HostEvent::Error(
+                    "Bar transpose edit failed: invalid target".to_string(),
+                ));
+                return;
+            }
+            let track = track as usize;
+            let bar = bar as usize;
+            match app::edit::apply_bar_transpose_edit(&mut app, track, bar, value as f32) {
+                Ok(app::edit::EditOutcome::Applied(_)) => {
+                    for viewport in ctx.shared.expanded_step_projection.viewports_for_track(track) {
+                        ui_invalidations.push(UiInvalidation::ExpandedStepViewport {
+                            track,
+                            track_id: viewport.track_id,
+                        });
+                    }
+                }
+                Ok(_) => {}
+                Err(error) => editor.handle_host_event(HostEvent::Error(format!(
+                    "Bar transpose edit failed: {error:?}"
+                ))),
             }
         }
         "toggle-step" => {

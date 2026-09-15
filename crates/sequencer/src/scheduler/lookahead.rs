@@ -569,15 +569,29 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
         let mut neural_cursor_sample = scheduled_until_sample;
         let mut chunk_enqueued = true;
         let mut neural_reset_groups: Vec<(usize, f64)> = Vec::new();
+        // The key each track's pattern implies, computed once per chunk per
+        // track that steps, for `:key :pattern` reads.
+        let mut key_masks: Vec<Option<u16>> = vec![None; snapshot.tracks.len()];
         for trigger in &triggers {
-            let step = &snapshot.tracks[trigger.track].steps[trigger.step];
+            let source = &snapshot.tracks[trigger.track];
+            let step = &source.steps[trigger.step];
+            let key_mask = *key_masks[trigger.track].get_or_insert_with(|| {
+                crate::runtime::harmony::pattern_pitch_class_mask(
+                    &source.steps,
+                    source.params.num_steps,
+                )
+            });
             // Pattern data rides along so a `:pattern` read from any track's
             // process later in this chunk sees the step the source is on,
             // same tick (the grab lane's Cirklon semantics).
             process_runtime.record_track_step_boundary_with_pattern(
                 trigger.track,
                 trigger.absolute_beats,
-                Some(crate::process::ProcessStepPattern::from_step_snapshot(step)),
+                Some(crate::process::ProcessStepPattern::from_step_snapshot(
+                    step,
+                    source.bar_transposes[crate::sequencer::bar_of_step(trigger.step)],
+                    key_mask,
+                )),
             );
             if !step.active || !step.neural_reset {
                 continue;
@@ -765,6 +779,8 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                 retrig: step_snapshot.params[StepParam::Retrig.index()],
                 retrig_rate: step_snapshot.params[StepParam::RetrigRate.index()],
             };
+            let bar_transpose =
+                track.bar_transposes[crate::sequencer::bar_of_step(trigger.step)];
             // Live step-param printing (bead eseq-jc9): while the *step*
             // panel's print latch is armed for this track, the latched values
             // are what must be HEARD now — the pattern write lands behind the
@@ -809,6 +825,18 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                     resolved.pan = value;
                 }
             }
+            // Bar transpose (Cirklon P3 bar XPOSE, eseq-m14x): one value per
+            // 16-step page, applied to every note the bar plays. Folded in
+            // BEFORE the process chain runs, so `(current-note)` and every
+            // process read already carry it and a note grab's replace
+            // formula keeps it. It lands AFTER the print-override
+            // substitution above because that substitution stands in for the
+            // step_data write behind the playhead — which the next pass
+            // plays back with the bar transpose on top, exactly like this.
+            // Chord steps move with it for free: playback applies
+            // `resolved.transpose - step_transpose` as a delta per chord
+            // note. Scene transpose is applied later and stacks on top.
+            resolved.transpose += bar_transpose;
             let mut process_overlay = ProcessTargetOverlay::default();
             let mut process_base_alive = true;
             let step_beats = trigger.samples_per_step / samples_per_quarter as f32;
