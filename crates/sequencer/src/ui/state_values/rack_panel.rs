@@ -1362,6 +1362,7 @@ pub(super) fn build_rack_panel_value(
             );
             insert_string_prop(&mut map, "key", &rack_macro.id.stable_key());
             insert_string_prop(&mut map, "name", &rack_macro.name);
+            insert_string_prop(&mut map, "name-field", rack_macro_name_field(track, rack_macro.id.index()));
             insert_string_prop(&mut map, "scope", "rack");
             map.insert(
                 "value".to_string(),

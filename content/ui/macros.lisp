@@ -181,7 +181,8 @@
           (rgba 0.18 0.85 0.42 0.10)
           :mixer-control-bg))
       (h-stack :gap 0.25 :align :center
-        (label (get macro :name) :width 6.0 :font-size 9 :color :foreground :bg :transparent :v-align :center)
+        (subtree :key (str "macro-mapping-name-" (get macro :id) "-" (get mapping :mapping-idx))
+          (label (eseq.macro-state/macro-name macro) :width 6.0 :font-size 9 :color :foreground :bg :transparent :v-align :center))
         (label (substring (get mapping :path-label) 0 18) :width 8.5 :font-size 8.5 :color :dim :bg :transparent :v-align :center)
         (label (substring (get mapping :param-label) 0 14) :width 7.0 :font-size 8.5
           :color (if (get mapping :suspended) :dim :foreground) :v-align :center :bg :transparent)

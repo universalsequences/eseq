@@ -163,12 +163,34 @@ pub(super) fn refresh_instrument_panel_reactive(
         )
         .effects_dirty;
     dirty |= sync_rack_macro_value_fields(rt, app, track, display_step);
+    dirty |= sync_all_rack_macro_name_fields(rt, app);
     dirty |= sync_rack_panel_param_value_fields(rt, app, track, display_step);
     if dirty {
         editor.refresh_runtime_side_effects();
         editor.mark_needs_redraw();
     }
     ui_epoch.fetch_add(1, Ordering::Relaxed);
+}
+
+pub(super) fn apply_rack_macro_rename_host_command(
+    editor: &mut Editor,
+    app: &mut app::App,
+    map: &HashMap<String, Rc<RefCell<Value>>>,
+) {
+    let (Some(track), Some(id), Some(name)) = (
+        map_usize(map, "track"), map_usize(map, "id"),
+        map.get("name").and_then(|value| match &*value.borrow() {
+            Value::String(name) => Some(name.clone()),
+            _ => None,
+        }),
+    ) else { return; };
+    let Some(id) = sequencer::sequencer::RackMacroId::from_index(id) else { return; };
+    if app.rename_rack_macro(track, id, name) {
+        // A label edit cannot change rack topology, locks, or DSP. Publish
+        // only its text fields; an epoch bump resyncs the entire project.
+        let dirty = sync_rack_macro_name_field(editor.runtime_mut(), app, track, id);
+        flush_reactive_display_edit(editor, dirty);
+    }
 }
 
 pub(super) fn refresh_rack_macro_value_reactive(
@@ -1882,6 +1904,7 @@ pub(super) fn apply_ui_invalidations(
             | UiInvalidation::TrackRoute { track }
             | UiInvalidation::TrackParam { track, .. }
             | UiInvalidation::TrackParamPanel { track }
+            | UiInvalidation::ProcessLaneValues { track }
             | UiInvalidation::ProcessChain { track }
             | UiInvalidation::Instrument { track, .. }
             | UiInvalidation::TrackFx { track, .. }
@@ -2385,6 +2408,14 @@ pub(super) fn apply_ui_invalidations(
                     );
                     needs_reactive_cycle = true;
                 }
+            }
+            UiInvalidation::ProcessLaneValues { track } => {
+                let viewports = if sequencer_visible {
+                    expanded_step_projection.viewports_for_track(track)
+                } else { Vec::new() };
+                needs_reactive_cycle |= sync_process_lane_track_state(
+                    rt, state, track, current_track_idx, &viewports,
+                );
             }
             UiInvalidation::ProcessChain { track } => {
                 sync_process_chain_state(rt, state, app.tracks.len(), current_track_idx);

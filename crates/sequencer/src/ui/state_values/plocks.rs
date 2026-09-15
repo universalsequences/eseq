@@ -563,7 +563,7 @@ pub(super) fn build_track_plock_preview_row_for_variant_entry(
                 .cloned()
                 .flatten()?;
             let rack_macro = rack.macros.get(entry.param)?;
-            Some(preview_plock_entry(
+            let row = preview_plock_entry(
                 label,
                 "rack-macro",
                 "rack",
@@ -575,7 +575,11 @@ pub(super) fn build_track_plock_preview_row_for_variant_entry(
                 None,
                 Some(entry.param),
                 None,
-            ))
+            );
+            if let Value::Map(map) = &mut *row.borrow_mut() {
+                insert_string_prop(map, "name-field", rack_macro_name_field(track, entry.param));
+            }
+            Some(row)
         }
         sequencer::plock_variants::PlockVariantDomain::RackSlotParam => {
             let param = rack_slot_param_by_index(entry.param)?;
@@ -1056,6 +1060,7 @@ pub(crate) fn build_track_plocks_value(
                     None,
                 );
                 if let Value::Map(map) = &mut *entry.borrow_mut() {
+                    insert_string_prop(map, "name-field", rack_macro_name_field(track, rack_macro.id.index()));
                     map.insert(
                         "value-field".to_string(),
                         value_cell(Value::String(rack_macro_value_field(

@@ -64,6 +64,14 @@ pub(crate) fn rack_macro_value_field(track: usize, macro_idx: usize) -> String {
     format!("track-{track}-rack-macro-{macro_idx}")
 }
 
+pub(crate) fn rack_macro_name_field(track: usize, macro_idx: usize) -> String {
+    format!("track-{track}-rack-macro-{macro_idx}-name")
+}
+
+pub(crate) fn rack_macro_short_name_field(track: usize, macro_idx: usize) -> String {
+    format!("track-{track}-rack-macro-{macro_idx}-short-name")
+}
+
 pub(crate) fn rack_macro_plock_active_field(track: usize, macro_idx: usize) -> String {
     format!("track-{track}-rack-macro-{macro_idx}-plock-active")
 }

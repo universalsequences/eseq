@@ -884,40 +884,22 @@ fn soft_step_param_edit_spec(
     }
 }
 
-fn sync_soft_process_lane_commit(
-    editor: &mut Editor,
-    state: &Arc<SequencerState>,
-    current_track: &Arc<AtomicUsize>,
-    expanded_step_projection: &Arc<ExpandedStepProjectionRegistry>,
-    target: &SoftStepParamEditTarget,
-) {
-    let runtime = editor.runtime_mut();
-    sync_process_chain_state(
-        runtime,
-        state,
-        state.active_track_count(),
-        current_track.load(Ordering::Relaxed),
-    );
-    for viewport in expanded_step_projection.viewports_for_track(target.track) {
-        if let Some(slot) = visible_slot_for_step(viewport, target.step) {
-            let _ = sync_expanded_step_param_slot(runtime, state, viewport, viewport.mode, slot);
-        }
-    }
-}
-
 fn sync_soft_step_param_commit(
     editor: &mut Editor,
     state: &Arc<SequencerState>,
     expanded_step_projection: &Arc<ExpandedStepProjectionRegistry>,
     target: &SoftStepParamEditTarget,
+    steps: &[usize],
     param: StepParam,
 ) {
     let runtime = editor.runtime_mut();
     sync_step_param_lists(runtime, state, target.track);
     if let Some(mode) = metal_mode_for_step_param(param) {
         for viewport in expanded_step_projection.viewports_for_track(target.track) {
-            if let Some(slot) = visible_slot_for_step(viewport, target.step) {
-                let _ = sync_expanded_step_param_slot(runtime, state, viewport, mode, slot);
+            for step in steps {
+                if let Some(slot) = visible_slot_for_step(viewport, *step) {
+                    let _ = sync_expanded_step_param_slot(runtime, state, viewport, mode, slot);
+                }
             }
         }
     }
@@ -927,57 +909,46 @@ fn commit_soft_step_param_edit(
     editor: &mut Editor,
     app: &mut app::App,
     current_track: &Arc<AtomicUsize>,
+    selected_steps: &Arc<Mutex<HashSet<usize>>>,
     expanded_step_projection: &Arc<ExpandedStepProjectionRegistry>,
     target: &SoftStepParamEditTarget,
     value: f64,
 ) -> bool {
+    // The row-wide picker owns the current selection even when the cursor
+    // sits outside it, just like its on-change handler in sequencer.lisp.
+    let mut steps: Vec<usize> = if target.track == current_track.load(Ordering::Relaxed) {
+        selected_steps.lock().unwrap().iter().copied().collect()
+    } else { Vec::new() };
+    if steps.is_empty() { steps.push(target.step); }
+    steps.sort_unstable();
     match &target.kind {
         SoftStepParamEditKind::StepParam(param) => {
-            if app::try_apply_command(
-                app,
-                app::AppCommand::SetStepParam {
-                    track: target.track,
-                    step: target.step,
-                    param: *param,
-                    value: value as f32,
+            if app::edit::apply_recorded_step_mutation(
+                app, target.track, &steps, "Set step parameter", |app| {
+                    for step in &steps {
+                        app.state.set_step_param_no_publish(target.track, *step, *param, value as f32);
+                    }
+                    Ok(())
                 },
-            )
-            .is_err()
-            {
+            ).is_err() {
                 return false;
             }
             sync_soft_step_param_commit(
-                editor,
-                &app.state,
-                expanded_step_projection,
-                target,
-                *param,
+                editor, &app.state, expanded_step_projection, target, &steps, *param,
             );
             true
         }
-        SoftStepParamEditKind::ProcessLane {
-            instance_id,
-            inlet_name,
-        } => {
-            let result = app.apply_recorded_scene_structure_mutation(
-                "Edit process lane",
-                |app| app.state.set_process_lane_value(
-                    target.track,
-                    *instance_id,
-                    inlet_name.clone(),
-                    target.step,
-                    value as f32,
-                ).then_some(()).ok_or_else(|| "Process lane target is missing or unchanged".to_string()),
+        SoftStepParamEditKind::ProcessLane { instance_id, inlet_name } => {
+            app::edit::finish_active_gesture(app);
+            let result = app::edit::apply_process_lane_drag_steps(
+                app, target.track, *instance_id, inlet_name, &steps, value as f32,
             );
-            if result.is_err() {
-                return false;
-            }
-            sync_soft_process_lane_commit(
-                editor,
-                &app.state,
-                current_track,
-                expanded_step_projection,
-                target,
+            app::edit::finish_active_gesture(app);
+            if result.is_err() { return false; }
+            sync_process_lane_track_state(
+                editor.runtime_mut(), &app.state, target.track,
+                current_track.load(Ordering::Relaxed),
+                &expanded_step_projection.viewports_for_track(target.track),
             );
             true
         }
@@ -1101,6 +1072,7 @@ pub(crate) fn handle_metal_soft_step_param_key(
     key: &crossterm::event::KeyEvent,
     app: &mut app::App,
     current_track: &Arc<AtomicUsize>,
+    selected_steps: &Arc<Mutex<HashSet<usize>>>,
     expanded_step_projection: &Arc<ExpandedStepProjectionRegistry>,
     edit: &mut SoftStepParamEdit,
 ) -> bool {
@@ -1206,6 +1178,7 @@ pub(crate) fn handle_metal_soft_step_param_key(
                 editor,
                 app,
                 current_track,
+                selected_steps,
                 expanded_step_projection,
                 &target,
                 value,
@@ -5322,6 +5295,7 @@ mod live_keyboard_tests {
                     &key,
                     &mut app,
                     &current_track,
+                    &Arc::new(Mutex::new(HashSet::new())),
                     &expanded_step_projection,
                     &mut edit,
                 ),
@@ -5368,8 +5342,7 @@ mod live_keyboard_tests {
         );
     }
 
-    #[test]
-    fn sequencer_soft_number_entry_edits_current_process_lane_step() {
+    fn check_process_lane_soft_entry(selection: &[usize]) {
         let state = Arc::new(SequencerState::new(1, vec![]));
         let mut app = soft_edit_test_app(Arc::clone(&state));
         let current_track = Arc::new(AtomicUsize::new(0));
@@ -5454,6 +5427,7 @@ mod live_keyboard_tests {
                     &key,
                     &mut app,
                     &current_track,
+                    &Arc::new(Mutex::new(selection.iter().copied().collect())),
                     &expanded_step_projection,
                     &mut edit,
                 ),
@@ -5470,9 +5444,16 @@ mod live_keyboard_tests {
             .expect("amount lane should exist");
         assert_eq!(
             amount_lane.values.get(2).copied(),
-            Some(2.0),
+            Some(if selection.is_empty() { 2.0 } else { 0.0 }),
             "sequencer numeric entry should update the process lane at the cursor step"
         );
+        for step in selection {
+            assert_eq!(amount_lane.values[*step], 2.0, "every selected lane step is edited");
+            assert_eq!(editor.runtime_mut().eval_str(&format!(
+                "(reactive-get \"SEQ\" \"seqv-slot-param-slider-0-9-{step}\")"
+            )).unwrap(), Some(Value::Number(2.0)));
+        }
+        assert_eq!(app.history.undo_len(), 1, "one typed commit is one undo entry");
         assert_eq!(
             state.pattern.step_data[0].get(2, StepParam::Transpose),
             0.0,
@@ -5483,7 +5464,7 @@ mod live_keyboard_tests {
                 .runtime_mut()
                 .eval_str(r#"(reactive-get "SEQ" "seqv-slot-param-slider-0-9-2")"#)
                 .unwrap(),
-            Some(Value::Number(2.0)),
+            Some(Value::Number(if selection.is_empty() { 2.0 } else { 0.0 })),
             "soft edit commit should update the visible process lane slider slot immediately"
         );
         assert_eq!(
@@ -5494,6 +5475,23 @@ mod live_keyboard_tests {
             Some(Value::Number(0.0)),
             "soft Enter commit should not fall through to the step gate toggle"
         );
+        assert!(matches!(sequencer::app::edit::undo(&mut app), sequencer::app::history::HistoryReplay::Applied(_)));
+        assert_eq!(state.track_process_chain(0).unwrap().slots[0].lanes["amount"].values,
+            vec![0.0, 1.0, 0.0, 0.0]);
+        assert!(matches!(sequencer::app::edit::redo(&mut app), sequencer::app::history::HistoryReplay::Applied(_)));
+        let restored = state.track_process_chain(0).unwrap();
+        let targets = if selection.is_empty() { vec![2] } else { selection.to_vec() };
+        for step in targets { assert_eq!(restored.slots[0].lanes["amount"].values[step], 2.0); }
+    }
+
+    #[test]
+    fn sequencer_soft_number_entry_edits_current_process_lane_step() {
+        check_process_lane_soft_entry(&[]);
+    }
+
+    #[test]
+    fn sequencer_soft_number_entry_edits_selected_process_lane_steps() {
+        check_process_lane_soft_entry(&[0, 1, 3]);
     }
 
     #[test]
@@ -5630,6 +5628,7 @@ mod live_keyboard_tests {
                 &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
                 &mut app,
                 &current_track,
+                &Arc::new(Mutex::new(HashSet::new())),
                 &expanded_step_projection,
                 &mut edit,
             ),

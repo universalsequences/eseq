@@ -583,10 +583,14 @@
   (let ((hits (filter pred items)))
     (if (empty? hits) nil (first hits))))
 
+(def automation-name (p)
+  (let ((name (if (get p :label-field) (reactive-get "SEQ" (get p :label-field)) nil)))
+    (if (= name nil) (get p :label) name)))
+
 (def automation-param-label (p)
   (if (= (get p :target) "step-param")
-    (get p :label)
-    (str (get p :group) " " (get p :label))))
+    (automation-name p)
+    (str (get p :group) " " (automation-name p))))
 
 (def automation-param-options ()
   (map (lambda (p) (automation-param-label p)) (automation-params)))
@@ -595,7 +599,7 @@
   (let ((key (get (automation) :key)))
     (let ((row (first-matching (lambda (p) (= (get p :key) key)) (automation-params))))
       (if (= row nil)
-        (or (get (automation) :label) "Velocity")
+        (or (automation-name (automation)) "Velocity")
         (automation-param-label row)))))
 
 ;; Declare before compiling the callbacks that write this reactive state.

@@ -161,9 +161,9 @@
 ;;   SEQ.track-lock-targets   every bindable parameter per track, grouped by
 ;;                            device — the "+" picker; a chosen target with no
 ;;                            lock yet is an empty column until typed into
-;;   SEQ.track-process-lanes  process lanes (prob, rand, count, …) with their
-;;                            per-step values; added through the picker's
-;;                            Lanes group
+;;   SEQ.track-process-lanes  process lane metadata (prob, rand, count, …);
+;;                            added through the picker's Lanes group
+;;   SEQ.track-process-lane-values  per-track, per-lane step values
 ;;
 ;; A column is a dict with :key :label :target :min :max :default :increment
 ;; and :values (one entry per step, nil = nothing on that step), plus the
@@ -218,7 +218,7 @@
         :default (get lane :default)
         :decimals (get lane :decimals)
         :increment (if (= (get lane :decimals) 0) 1 0)
-        :values (get lane :values)))
+        :lane-index (get lane :lane-index)))
 
 ;; Every pickable target on a track, flat, with lanes folded in.
 (def target-columns (track)
@@ -261,11 +261,12 @@
 
 ;; Column idx (position in the track's column list) → its value on a row.
 ;; Locked/automation columns read the cell matrix; user-added targets with
-;; no lock yet have no values; lanes carry their own per-step list.
+;; no lock yet have no values; lanes read their separate per-step projection.
 (def column-value (track idx row)
   (let ((col (nth (track-columns track) idx))
         (auto-count (len (track-automation track))))
-    (if (lane-col? col) (nth (get col :values) (real-row track row))
+    (if (lane-col? col) (nth (nth (nth SEQ.track-process-lane-values track)
+                              (get col :lane-index)) (real-row track row))
     (if (< idx auto-count) (nth (cell track row) (+ 3 idx))
       nil))))
 
@@ -580,7 +581,12 @@
 ;; Headers use the host's compact spelling (:short, e.g. voicing.character →
 ;; vcn.chr); lanes bring their own short-label. The picker keeps full names.
 (def column-title (col)
-  (or (get col :short) (get col :label)))
+  (let ((name (if (get col :short-field) (reactive-get "SEQ" (get col :short-field)) nil)))
+    (if (= name nil) (or (get col :short) (get col :label)) name)))
+
+(def column-label (col)
+  (let ((name (if (get col :label-field) (reactive-get "SEQ" (get col :label-field)) nil)))
+    (if (= name nil) (get col :label) name)))
 
 (def column-w (col)
   (max auto-w (+ 0.6 (* 0.62 (len (column-title col))))))
@@ -842,7 +848,7 @@
 
 (def picker-item (track col prefix)
   (let ((key (get col :key)))
-    (menu-item (get col :label)
+    (menu-item (column-label col)
       :key (str prefix key)
       :checked (column-shown? track key)
       :on-select (lambda (event) (toggle-column track key)))))

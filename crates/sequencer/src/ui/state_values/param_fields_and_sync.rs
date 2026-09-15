@@ -163,6 +163,49 @@ pub(crate) fn sync_fx_instrument_tensor_value_field(
     sync_instrument_tensor_value_fields(rt, app, track, tensor_idx, display_step, true)
 }
 
+fn set_rack_macro_name_fields(rt: &mut Runtime, track: usize, id: usize, name: String) -> bool {
+    let short = super::super::piano_roll::compact_param_label(&name);
+    let mut dirty = reactive_set_needs_ui(rt.set_reactive(
+        "SEQ", &rack_macro_name_field(track, id), Value::String(name),
+    ));
+    dirty |= reactive_set_needs_ui(rt.set_reactive(
+        "SEQ", &rack_macro_short_name_field(track, id), Value::String(short),
+    ));
+    dirty
+}
+
+pub(crate) fn sync_rack_macro_name_field(
+    rt: &mut Runtime,
+    app: &app::App,
+    track: usize,
+    id: sequencer::sequencer::RackMacroId,
+) -> bool {
+    let name = {
+        let racks = app.state.pattern.rack_tracks.lock().unwrap();
+        let Some(rack_macro) = racks.get(track).and_then(Option::as_ref)
+            .and_then(|rack| rack.macros.get(id.index())) else {
+                return false;
+            };
+        rack_macro.name.clone()
+    };
+    set_rack_macro_name_fields(rt, track, id.index(), name)
+}
+
+pub(crate) fn sync_all_rack_macro_name_fields(rt: &mut Runtime, app: &app::App) -> bool {
+    let names: Vec<_> = {
+        let racks = app.state.pattern.rack_tracks.lock().unwrap();
+        racks.iter().enumerate().filter_map(|(track, rack)| rack.as_ref().map(|rack| (track, rack)))
+            .flat_map(|(track, rack)| rack.macros.iter()
+                .map(move |m| (track, m.id.index(), m.name.clone())))
+            .collect()
+    };
+    let mut dirty = false;
+    for (track, id, name) in names {
+        dirty |= set_rack_macro_name_fields(rt, track, id, name);
+    }
+    dirty
+}
+
 pub(crate) fn sync_rack_macro_value_fields(
     rt: &mut Runtime,
     app: &app::App,
@@ -1335,6 +1378,7 @@ pub(super) fn sync_all_track_sequencer_state_inner(
         build_all_track_param_lists_value(state, app, StepParam::Transpose),
     );
     sync_all_rack_slot_selection_binding_fields(rt, app);
+    sync_all_rack_macro_name_fields(rt, app);
     if let Some(profile) = profile.as_deref_mut() {
         profile.track_transposes = started.expect("profile timer").elapsed();
     }
@@ -1377,6 +1421,10 @@ pub(super) fn sync_all_track_sequencer_state_inner(
         "SEQ",
         "track-retrig-rates",
         build_all_track_param_lists_value(state, app, StepParam::RetrigRate),
+    );
+    rt.set_reactive(
+        "SEQ", "track-process-lane-values",
+        build_all_track_process_lane_values(state, app.tracks.len()),
     );
     rt.set_reactive(
         "SEQ",

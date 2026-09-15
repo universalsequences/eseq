@@ -545,16 +545,32 @@ impl SequencerState {
         step: usize,
         value: f32,
     ) -> bool {
-        if track >= self.active_track_count() || step >= MAX_STEPS {
+        self.set_process_lane_steps(track, instance_id, inlet_name, &[step], value)
+    }
+
+    /// Apply one selection edit atomically and publish the affected track once.
+    pub fn set_process_lane_steps(
+        &self,
+        track: usize,
+        instance_id: crate::process::ProcessInstanceId,
+        inlet_name: impl Into<String>,
+        steps: &[usize],
+        value: f32,
+    ) -> bool {
+        if track >= self.active_track_count() || steps.is_empty()
+            || steps.iter().any(|step| *step >= MAX_STEPS) || !value.is_finite()
+        {
             return false;
         }
+        let last_step = *steps.iter().max().unwrap();
         let inlet_name = inlet_name.into();
-        let write_lane_step = |slot: &mut crate::process::TrackProcessSlot| {
-            let lane = slot.lanes.entry(inlet_name.clone()).or_default();
-            if lane.values.len() <= step {
-                lane.values.resize(step + 1, 0.0);
+        let write_lane = |lane: &mut crate::process::ProcessLane| {
+            if lane.values.len() <= last_step {
+                lane.values.resize(last_step + 1, 0.0);
             }
-            lane.values[step] = value;
+            for step in steps {
+                lane.values[*step] = value;
+            }
         };
         let updated = {
             let mut chains = self.pattern.process_chains.lock().unwrap();
@@ -567,7 +583,7 @@ impl SequencerState {
                 .find(|slot| slot.instance_id == instance_id)
             {
                 Some(slot) => {
-                    write_lane_step(slot);
+                    write_lane(slot.lanes.entry(inlet_name.clone()).or_default());
                     true
                 }
                 None => false,
@@ -599,17 +615,14 @@ impl SequencerState {
                         .cloned()
                         .unwrap_or_default()
                 });
-            if lane.values.len() <= step {
-                lane.values.resize(step + 1, 0.0);
-            }
-            lane.values[step] = value;
+            write_lane(lane);
         }
         // Content, not topology: publish so the next fire reads the new
         // value, but do not bump `pattern_epoch`. The epoch makes the
         // playing scheduler clear its queue, re-seek and reset every
         // accumulator; per-event during a slider drag that silenced the
         // transport for as long as the mouse moved.
-        self.publish_scheduler_snapshot();
+        self.publish_scheduler_track(track);
         true
     }
     pub fn clear_project_process_lane_override(

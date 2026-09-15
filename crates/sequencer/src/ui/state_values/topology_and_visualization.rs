@@ -78,6 +78,7 @@ pub(crate) fn sync_track_topology_state(
         rt.set_reactive("SEQ", "track-retrigs", Value::List(vec![]));
         rt.set_reactive("SEQ", "track-retrig-rates", Value::List(vec![]));
         rt.set_reactive("SEQ", "track-process-lanes", Value::List(vec![]));
+        rt.set_reactive("SEQ", "track-process-lane-values", Value::List(vec![]));
         rt.set_reactive("SEQ", "process-lanes", Value::List(vec![]));
         rt.set_reactive("SEQ", "process-slots", Value::List(vec![]));
         rt.set_reactive("SEQ", "track-process-slots", Value::List(vec![]));

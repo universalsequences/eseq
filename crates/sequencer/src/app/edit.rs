@@ -9873,14 +9873,19 @@ pub(crate) struct ProcessLaneDrag {
 
 const PROCESS_LANE_DRAG_GESTURE_ID: GestureId = GestureId(0x7072_6f63_6c61_6e65);
 
-pub fn apply_process_lane_drag_step(
+pub fn apply_process_lane_drag_steps(
     app: &mut App,
     track: usize,
     instance_id: crate::process::ProcessInstanceId,
     inlet: &str,
-    step: usize,
+    steps: &[usize],
     value: f32,
 ) -> Result<(), String> {
+    if track >= app.state.active_track_count() || steps.is_empty()
+        || steps.iter().any(|step| *step >= MAX_STEPS) || !value.is_finite()
+    {
+        return Err("Invalid process lane edit targets or value".to_string());
+    }
     let merge_key = MergeKey::new(format!(
         "process-lane-drag:{track}:{}:{inlet}",
         instance_id.0
@@ -9905,8 +9910,11 @@ pub fn apply_process_lane_drag_step(
     }
     if !app
         .state
-        .set_process_lane_value(track, instance_id, inlet, step, value)
+        .set_process_lane_steps(track, instance_id, inlet, steps, value)
     {
+        if !continuing {
+            finish_active_gesture(app);
+        }
         return Err("Process lane target was missing".to_string());
     }
     Ok(())
@@ -10247,6 +10255,30 @@ mod tests {
         app.tracks = vec!["Track 1".to_string()];
         app.track_registry = crate::sequencer::TrackRegistry::for_legacy_track_count(1).unwrap();
         app
+    }
+
+    #[test]
+    fn process_lane_selection_drag_is_one_undoable_gesture() {
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        state.replace_pattern_repository(vec![PatternSnapshot::new_default(1, &[])], 0);
+        let mut app = test_app(state);
+        let instance = app.state.project_process_chain().slots.into_iter()
+            .find(|slot| slot.instance_name.as_deref() == Some("tacc")).unwrap().instance_id;
+        assert!(apply_process_lane_drag_steps(&mut app, 0, instance, "amount", &[MAX_STEPS], 1.0).is_err());
+        assert!(app.history.active_gesture().is_none());
+        for value in [1.0, 2.0, 3.0] {
+            apply_process_lane_drag_steps(&mut app, 0, instance, "amount", &[1, 3], value).unwrap();
+        }
+        assert_eq!(app.history.undo_len(), 0, "history commits at gesture end");
+        assert!(finish_active_gesture(&mut app));
+        assert_eq!(app.history.undo_len(), 1);
+        let edited = app.state.composed_track_process_chain(0).unwrap();
+        assert_eq!(edited.slots.iter().find(|slot| slot.instance_id == instance)
+            .unwrap().lanes["amount"].values, vec![0.0, 3.0, 0.0, 3.0]);
+        assert!(matches!(undo(&mut app), HistoryReplay::Applied(_)));
+        assert!(!app.state.has_project_process_lane_override(0, instance, "amount"));
+        assert!(matches!(redo(&mut app), HistoryReplay::Applied(_)));
+        assert_eq!(app.state.composed_track_process_chain(0).unwrap(), edited);
     }
 
     #[test]

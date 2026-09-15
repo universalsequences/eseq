@@ -3,6 +3,7 @@
 
 (import eseq.effects.state :as st)
 (import eseq.effects.param-controls :as pc)
+(import eseq.macro-state :as ms)
 
 (export selected-plock-row
         plock-row-selected?
@@ -232,7 +233,7 @@
 (def plock-row-title (p)
   (if (= (get p :source) "neuron")
     (str (get p :label) " " (get p :name))
-    (get p :name)))
+    (ms/macro-name p)))
 
 (def plock-row-key (idx suffix)
   (str "track-plock-row-" idx "-" suffix))

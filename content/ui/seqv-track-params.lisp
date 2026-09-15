@@ -118,7 +118,7 @@
 
 (def seqv-current-param-values (mode)
   (if (seqv-process-lane-mode? mode)
-    (get (seqv-current-process-lane mode) :values)
+    (seqv-track-param-values SEQ.current-track mode)
     (if (= mode 0) SEQ.velocities
       (if (= mode 1) SEQ.durations
         (if (= mode 2) SEQ.auxas
@@ -131,7 +131,9 @@
 
 (def seqv-track-param-values (track mode)
   (if (seqv-process-lane-mode? mode)
-    (get (seqv-track-process-lane track mode) :values)
+    (seqv-list-ref
+      (seqv-list-ref SEQ.track-process-lane-values track '())
+      (seqv-process-lane-index mode) '())
     (if (= mode 0) (seqv-track-list SEQ.track-velocities track)
       (if (= mode 1) (seqv-track-list SEQ.track-durations track)
         (if (= mode 2) (seqv-track-list SEQ.track-auxas track)

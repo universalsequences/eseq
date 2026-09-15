@@ -1257,23 +1257,7 @@ pub(super) fn handle(
         }
         "rename-rack-macro" => {
             if let Value::Map(ref map) = payload {
-                if let (Some(track), Some(id), Some(name)) = (
-                    map_usize(map, "track"),
-                    map_usize(map, "id"),
-                    map_string(map, "name"),
-                ) {
-                    if let Some(id) = sequencer::sequencer::RackMacroId::from_index(id)
-                    {
-                        app.rename_rack_macro(track, id, name);
-                        refresh_instrument_panel_reactive(
-                            &mut editor,
-                            &app,
-                            track,
-                            &selected_steps,
-                            &ui_epoch,
-                        );
-                    }
-                }
+                apply_rack_macro_rename_host_command(&mut editor, &mut app, map);
             }
         }
         "set-rack-macro-plock" => {

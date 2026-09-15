@@ -199,7 +199,7 @@ pub(super) fn handle(
             // Lane step writes arrive per drag event: they ride one history
             // gesture (captured once, committed once) instead of the full
             // scene-structure capture below, which stalls the scheduler.
-            if op == "set-lane-step" {
+            if op == "set-lane-steps" {
                 let result = (|| -> Result<(), String> {
                     let inlet = field("inlet")
                         .and_then(|value| match value {
@@ -207,29 +207,26 @@ pub(super) fn handle(
                             _ => None,
                         })
                         .ok_or_else(|| "Process lane inlet is missing".to_string())?;
-                    let step = field("step")
-                        .and_then(|value| match value {
-                            Value::Number(value) if value >= 0.0 => Some(value as usize),
-                            _ => None,
-                        })
-                        .ok_or_else(|| "Process lane step is missing".to_string())?;
+                    let steps = map_usize_list(map, "steps")
+                        .filter(|steps| !steps.is_empty() && steps.iter().all(|step| *step < MAX_STEPS))
+                        .ok_or_else(|| "Process lane steps are missing or invalid".to_string())?;
                     let value = field("value")
                         .and_then(|value| match value {
                             Value::Number(value) => Some(value as f32),
                             _ => None,
                         })
                         .ok_or_else(|| "Process lane value is missing".to_string())?;
-                    app::edit::apply_process_lane_drag_step(
+                    app::edit::apply_process_lane_drag_steps(
                         &mut app,
                         track,
                         instance_id,
                         &inlet,
-                        step,
+                        &steps,
                         value,
                     )
                 })();
                 match result {
-                    Ok(()) => ui_invalidations.push(UiInvalidation::ProcessChain { track }),
+                    Ok(()) => ui_invalidations.push(UiInvalidation::ProcessLaneValues { track }),
                     Err(error) => editor.handle_host_event(HostEvent::Status(format!(
                         "Process edit failed: {error}"
                     ))),
@@ -275,28 +272,6 @@ pub(super) fn handle(
             }
             let result = app.apply_recorded_scene_structure_mutation("Edit process chain", |app| {
                 let changed = match op.as_str() {
-                    "set-lane-step" => {
-                        let inlet = field("inlet")
-                            .and_then(|value| match value {
-                                Value::String(value) => Some(value),
-                                _ => None,
-                            })
-                            .ok_or_else(|| "Process lane inlet is missing".to_string())?;
-                        let step = field("step")
-                            .and_then(|value| match value {
-                                Value::Number(value) if value >= 0.0 => Some(value as usize),
-                                _ => None,
-                            })
-                            .ok_or_else(|| "Process lane step is missing".to_string())?;
-                        let value = field("value")
-                            .and_then(|value| match value {
-                                Value::Number(value) => Some(value as f32),
-                                _ => None,
-                            })
-                            .ok_or_else(|| "Process lane value is missing".to_string())?;
-                        app.state
-                            .set_process_lane_value(track, instance_id, inlet, step, value)
-                    }
                     "clear-project-lane-override" => {
                         let inlet = field("inlet")
                             .and_then(|value| match value {

@@ -65,6 +65,9 @@ pub(crate) enum UiInvalidation {
     TrackParamPanel {
         track: usize,
     },
+    ProcessLaneValues {
+        track: usize,
+    },
     ProcessChain {
         track: usize,
     },
@@ -450,12 +453,15 @@ impl UiInvalidationQueue {
 fn invalidation_supersedes(newer: &UiInvalidation, older: &UiInvalidation) -> bool {
     match (newer, older) {
         (UiInvalidation::Full(_), _) => true,
+        (UiInvalidation::ProcessChain { track }, UiInvalidation::ProcessLaneValues { track: other }) =>
+            track == other,
         (UiInvalidation::TrackTopology(_), UiInvalidation::TrackMixer { .. })
         | (UiInvalidation::TrackTopology(_), UiInvalidation::TrackBusSend { .. })
         | (UiInvalidation::TrackTopology(_), UiInvalidation::TrackRoute { .. })
         | (UiInvalidation::TrackTopology(_), UiInvalidation::TrackParam { .. })
         | (UiInvalidation::TrackTopology(_), UiInvalidation::TrackParamPanel { .. })
         | (UiInvalidation::TrackTopology(_), UiInvalidation::ProcessChain { .. })
+        | (UiInvalidation::TrackTopology(_), UiInvalidation::ProcessLaneValues { .. })
         | (UiInvalidation::TrackTopology(_), UiInvalidation::Step { .. })
         | (UiInvalidation::TrackTopology(_), UiInvalidation::StepInvalidationBatch { .. })
         | (UiInvalidation::TrackTopology(_), UiInvalidation::StepSelection { .. })

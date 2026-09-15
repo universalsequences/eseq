@@ -1,5 +1,7 @@
 #[path = "rack_preset_tests.rs"]
 mod rack_preset_tests;
+#[path = "rack_macro_name_tests.rs"]
+mod rack_macro_name_tests;
 #[path = "poseidon_ui_tests.rs"]
 mod poseidon_ui_tests;
 #[path = "drift_waveform_tests.rs"]
@@ -16984,9 +16986,11 @@ mod instrument_header_ui_tests;
                 ("max", Value::Number(1.0)),
                 ("default", Value::Number(1.0)),
                 ("decimals", Value::Number(2.0)),
-                ("values", test_list(vec![Value::Number(1.0); 16])),
+                ("lane-index", Value::Number(0.0)),
             ])])]),
         );
+        editor.runtime_mut().set_reactive("SEQ", "track-process-lane-values",
+            test_list(vec![test_list(vec![test_list(vec![Value::Number(0.75); 16])])]));
         editor
             .runtime_mut()
             .eval_str("(alez.tracker.ui/open-column-menu 0 (dict :col 10 :row 4))")
@@ -17008,6 +17012,8 @@ mod instrument_header_ui_tests;
             .runtime_mut()
             .eval_str("(do (alez.tracker.ui/toggle-column 0 \"instrument:3\") (alez.tracker.ui/toggle-column 0 \"lane:7:prob\"))")
             .expect("toggle columns");
+        assert_eq!(editor.runtime_mut().eval_str("(alez.tracker.ui/column-value 0 1 2)").unwrap(),
+            Some(Value::Number(0.75)), "tracker reads the separate lane value projection");
         let count = editor
             .runtime_mut()
             .eval_str("(len (alez.tracker.ui/track-columns 0))")
@@ -20748,13 +20754,12 @@ mod instrument_header_ui_tests;
             lane.get("max").map(|cell| cell.borrow().clone()),
             Some(Value::Number(24.0))
         );
-        let values = lane
-            .get("values")
-            .map(|cell| cell.borrow().clone())
-            .expect("lane values");
-        let Value::List(values) = values else {
-            panic!("lane values should be a list");
+        assert!(!lane.contains_key("values"), "metadata must not carry changing values");
+        let Value::List(tracks) = build_all_track_process_lane_values(&state, 1) else {
+            panic!("lane values should be per track");
         };
+        let Value::List(lanes) = &*tracks[0].borrow() else { panic!("track lanes"); };
+        let Value::List(values) = &*lanes[0].borrow() else { panic!("lane values"); };
         assert_eq!(*values[0].borrow(), Value::Number(0.0));
         assert_eq!(*values[1].borrow(), Value::Number(1.0));
 
@@ -34215,6 +34220,105 @@ mod instrument_header_ui_tests;
         );
     }
 
+    /// Measures the steady edit path after gesture start: state publication,
+    /// reactive sync and retained layout. Excludes pointer dispatch and GPU draw.
+    #[test]
+    #[ignore = "manual process lane edit timing probe"]
+    fn process_lane_selection_edit_perf() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        set_full_grid_track_count(&mut editor, 8, 64);
+        let state = Arc::new(SequencerState::new(8, vec![]));
+        sequencer::lisp_host::register_published_process_authoring_natives(
+            editor.runtime_mut(), Arc::clone(&state), Arc::new(AtomicUsize::new(0)),
+        );
+        editor.runtime_mut().eval_str(r#"
+            (def-accumulator perf-lane :target (step-param :transpose)
+              :amount (amount :lane true :default 0) :range (-24 24) :mode :clip)
+        "#).unwrap();
+        for track in 0..8 {
+            state.pattern.track_params[track].set_num_steps(64);
+            editor.runtime_mut().eval_str(&format!(
+                "(def perf-chain-{track} (processes :track {track} {}))",
+                "(perf-lane :amount (lane 0 1 0 0)) ".repeat(12),
+            )).unwrap();
+        }
+        sync_process_chain_state(editor.runtime_mut(), &state, 8, 0);
+        let instance = state.track_process_chain(0).unwrap().slots[0].instance_id;
+        let viewport = ExpandedStepViewport { track: 0, track_id: 0, page: 0,
+            mode: PROCESS_LANE_MODE_OFFSET, cursor_step: 0 };
+        editor.runtime_mut().eval_str(r#"
+            (eseq.sequencer/set-track-expanded 0 true)
+            (eseq.sequencer/set-track-param-mode 0 9)
+        "#).unwrap();
+        let buffer = editor.buffers.iter().find(|buffer| buffer.name == "*sequencer*").unwrap().id;
+        editor.set_active_buffer(buffer);
+        editor.set_layout_viewport(220, 80);
+        sync_process_lane_track_state(editor.runtime_mut(), &state, 0, 0, &[viewport]);
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let layout = editor.widget_layout().unwrap();
+        let slider = find_layout_node_by_stable_key_suffix(&layout, "/expanded-step-slider-0-0").unwrap();
+        assert!(slider.rect.width > 0.0 && slider.rect.height > 0.0);
+        for count in [1, 16, 64] {
+            let steps: Vec<usize> = (0..count).collect();
+            let mut samples = Vec::new();
+            for iteration in 0..40 {
+                let start = Instant::now();
+                let version = state.scheduler_snapshot_version();
+                assert!(state.set_process_lane_steps(0, instance, "amount", &steps,
+                    (iteration % 20) as f32));
+                sync_process_lane_track_state(editor.runtime_mut(), &state, 0, 0, &[viewport]);
+                editor.runtime_mut().run_reactive_cycle();
+                editor.refresh_runtime_side_effects();
+                editor.widget_layout().unwrap();
+                assert_eq!(state.scheduler_snapshot_version(), version + 1);
+                if iteration >= 10 { samples.push(start.elapsed().as_secs_f64() * 1000.0); }
+            }
+            samples.sort_by(f64::total_cmp);
+            eprintln!("process-lane edit: tracks=8 lanes/track=12 selected={count} median={:.3}ms p95={:.3}ms",
+                samples[samples.len() / 2], samples[samples.len() * 95 / 100]);
+        }
+    }
+
+    #[test]
+    fn process_lane_value_sync_preserves_metadata_readers_and_updates_bindings() {
+        let state = Arc::new(SequencerState::new(2, vec![]));
+        let mut runtime = Runtime::new();
+        runtime.register_reactive("SEQ", vec![], true);
+        sequencer::lisp_host::register_published_process_authoring_natives(
+            &mut runtime, Arc::clone(&state), Arc::new(AtomicUsize::new(0)),
+        );
+        runtime.eval_str(r#"
+            (def-accumulator test-lane :target (step-param :transpose)
+              :amount (amount :lane true :default 0) :range (-24 24) :mode :clip)
+            (def test-chain (processes :track 0 (test-lane :amount (lane 0 1 0 0))))
+        "#).unwrap();
+        let instance = state.track_process_chain(0).unwrap().slots[0].instance_id;
+        sync_process_chain_state(&mut runtime, &state, 2, 0);
+        runtime.eval_str(r#"
+            (defstate metadata-runs 0)
+            (effect (do SEQ.track-process-lanes SEQ.process-lanes SEQ.track-process-slots
+              SEQ.process-slots SEQ.track-lane-patch SEQ.process-library
+              (set! metadata-runs (+ metadata-runs 1))))
+            (defstate observed-value 0)
+            (effect (set! observed-value (nth (nth (nth SEQ.track-process-lane-values 0) 0) 3)))
+        "#).unwrap();
+        runtime.run_reactive_cycle();
+        let runs_before = runtime.eval_str("metadata-runs").unwrap();
+        let viewport = ExpandedStepViewport { track: 0, track_id: 0, page: 0,
+            mode: PROCESS_LANE_MODE_OFFSET, cursor_step: 3 };
+        assert!(state.set_process_lane_steps(0, instance, "amount", &[1, 3], 7.0));
+        sync_process_lane_track_state(&mut runtime, &state, 0, 0, &[viewport]);
+        runtime.run_reactive_cycle();
+        assert_eq!(runtime.eval_str("metadata-runs").unwrap(), runs_before);
+        assert_eq!(runtime.eval_str("observed-value").unwrap(), Some(Value::Number(7.0)));
+        for field in ["seqv-slot-param-slider-0-9-1", "seqv-slot-param-haptic-0-9-3",
+            "seqv-cursor-param-value-0"] {
+            assert_eq!(runtime.eval_str(&format!("(reactive-get \"SEQ\" \"{field}\")")).unwrap(),
+                Some(Value::Number(7.0)));
+        }
+    }
+
     #[test]
     fn metal_seq_process_lane_slider_edits_all_selected_steps() {
         let mut editor = full_grid_editor_for_scroll_tests();
@@ -34235,7 +34339,7 @@ mod instrument_header_ui_tests;
             let calls = Arc::clone(&calls);
             editor
                 .runtime_mut()
-                .register_native("seq-set-process-lane-step", move |args, _ctx| {
+                .register_native("seq-set-process-lane-steps", move |args, _ctx| {
                     let track = match args.first() {
                         Some(Value::Number(value)) => *value as usize,
                         _ => usize::MAX,
@@ -34246,9 +34350,14 @@ mod instrument_header_ui_tests;
                         | Some(Value::Keyword(value)) => value.clone(),
                         other => format!("{other:?}"),
                     };
-                    let step = match args.get(3) {
-                        Some(Value::Number(value)) => *value as usize,
-                        _ => usize::MAX,
+                    let steps = match args.get(3) {
+                        Some(Value::List(steps)) => steps.iter().map(|step| {
+                            match *step.borrow() {
+                                Value::Number(step) => step as usize,
+                                _ => panic!("step must be numeric"),
+                            }
+                        }).collect::<Vec<_>>(),
+                        _ => panic!("selection must be sent as one batch"),
                     };
                     let value = match args.get(4) {
                         Some(Value::Number(value)) => *value,
@@ -34257,7 +34366,7 @@ mod instrument_header_ui_tests;
                     calls
                         .lock()
                         .unwrap()
-                        .push(format!("lane:{track}:{inlet}:{step}:{value}"));
+                        .push(format!("lane:{track}:{inlet}:{steps:?}:{value}"));
                     Ok(Value::Number(value))
                 });
         }
@@ -34285,6 +34394,8 @@ mod instrument_header_ui_tests;
             .expect("expanded sequencer layout should build");
         let slider = find_layout_node_by_stable_key_suffix(&layout, "/expanded-step-slider-0-0")
             .expect("process lane slider should render");
+        assert!(slider.rect.width.is_finite() && slider.rect.width > 0.0);
+        assert!(slider.rect.height.is_finite() && slider.rect.height > 0.0);
         editor
             .runtime_mut()
             .invoke(
@@ -34298,7 +34409,7 @@ mod instrument_header_ui_tests;
             .expect("change selected process lane slider");
         assert_eq!(
             calls.lock().unwrap().as_slice(),
-            ["lane:0:amount:0:2", "lane:0:amount:4:2"],
+            ["lane:0:amount:[0, 4]:2"],
             "process lane slider should bulk-edit the selected steps"
         );
     }

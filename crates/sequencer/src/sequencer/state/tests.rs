@@ -3189,6 +3189,47 @@
     }
 
     #[test]
+    fn process_lane_batch_publishes_once_and_preserves_other_tracks() {
+        let state = make_state_with_tracks(2);
+        assert!(state.set_track_process_chain(0, sample_process_chain()));
+        let before = state.latest_scheduler_snapshot();
+        let version = state.scheduler_snapshot_version();
+        let epoch = state.transport.pattern_epoch.load(Ordering::Relaxed);
+        let steps: Vec<usize> = (0..64).step_by(2).collect();
+        assert!(state.set_process_lane_steps(
+            0, crate::process::ProcessInstanceId(7), "amount", &steps, 6.0,
+        ));
+        let after = state.latest_scheduler_snapshot();
+        assert_eq!(state.scheduler_snapshot_version(), version + 1);
+        assert_eq!(state.transport.pattern_epoch.load(Ordering::Relaxed), epoch);
+        assert!(Arc::ptr_eq(&before.tracks[1], &after.tracks[1]));
+        let lane = &after.tracks[0].process_chain.slots.iter()
+            .find(|slot| slot.instance_id.0 == 7).unwrap().lanes["amount"];
+        for step in steps { assert_eq!(lane.values[step], 6.0); }
+        let version = state.scheduler_snapshot_version();
+        assert!(!state.set_process_lane_steps(
+            0, crate::process::ProcessInstanceId(7), "amount", &[0, MAX_STEPS], 9.0,
+        ));
+        assert_eq!(state.scheduler_snapshot_version(), version);
+        assert_eq!(state.track_process_chain(0).unwrap().slots.iter()
+            .find(|slot| slot.instance_id.0 == 7).unwrap().lanes["amount"].values[0], 6.0);
+        state.coalesce_publishes(|| {
+            assert!(state.set_process_lane_steps(
+                0, crate::process::ProcessInstanceId(7), "amount", &[0], 8.0,
+            ));
+            assert!(state.set_process_lane_steps(
+                0, crate::process::ProcessInstanceId(7), "amount", &[1], 9.0,
+            ));
+            assert_eq!(state.scheduler_snapshot_version(), version);
+        });
+        assert_eq!(state.scheduler_snapshot_version(), version + 1);
+        let snapshot = state.latest_scheduler_snapshot();
+        let lane = &snapshot.tracks[0].process_chain.slots.iter()
+            .find(|slot| slot.instance_id.0 == 7).unwrap().lanes["amount"];
+        assert_eq!(&lane.values[..2], &[8.0, 9.0]);
+    }
+
+    #[test]
     fn process_chain_and_lane_values_survive_snapshots_and_project_save() {
         let state = make_state_with_tracks(1);
         let mut expected = sample_process_chain();
@@ -3445,6 +3486,28 @@
         assert_eq!(binding(1), Some(rate.clone()), "track 1 inherits the shared bind");
         assert!(state.clear_process_port_binding(0, rand.instance_id, "out"));
         assert_eq!(binding(0), Some(rate), "clearing the fork reverts to shared");
+    }
+
+    #[test]
+    fn process_lane_batch_forks_only_the_edited_track() {
+        let state = make_state_with_tracks(2);
+        let instance = state.project_process_chain().slots.into_iter()
+            .find(|slot| slot.instance_name.as_deref() == Some("tacc")).unwrap().instance_id;
+        state.set_process_lane_values(instance, "amount", vec![1.0, 2.0, 3.0, 4.0]);
+        let before = state.latest_scheduler_snapshot();
+        let version = state.scheduler_snapshot_version();
+        assert!(state.set_process_lane_steps(0, instance, "amount", &[1, 3], 9.0));
+        assert_eq!(state.scheduler_snapshot_version(), version + 1);
+        let after = state.latest_scheduler_snapshot();
+        assert!(Arc::ptr_eq(&before.tracks[1], &after.tracks[1]));
+        assert_eq!(after.tracks[0].process_chain.slots.iter()
+            .find(|slot| slot.instance_id == instance).unwrap().lanes["amount"].values,
+            vec![1.0, 9.0, 3.0, 9.0]);
+        assert_eq!(after.tracks[1].process_chain.slots.iter()
+            .find(|slot| slot.instance_id == instance).unwrap().lanes["amount"].values,
+            vec![1.0, 2.0, 3.0, 4.0]);
+        assert!(state.has_project_process_lane_override(0, instance, "amount"));
+        assert!(!state.has_project_process_lane_override(1, instance, "amount"));
     }
 
     #[test]

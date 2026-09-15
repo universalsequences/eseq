@@ -3013,6 +3013,10 @@ pub(crate) fn init_runtime(
                     },
                 ),
                 (
+                    "track-process-lane-values",
+                    build_all_track_process_lane_values(&state, track_count),
+                ),
+                (
                     "track-process-lanes",
                     build_all_track_process_lanes_value(&state, track_count),
                 ),
@@ -4327,40 +4331,43 @@ pub(crate) fn init_runtime(
         Ok(Value::Nil)
     });
 
-    runtime.register_native("seq-set-process-lane-step", move |args, ctx| {
-        let (
-            Some(Value::Number(track)),
-            Some(Value::Number(instance_id)),
-            Some(inlet),
-            Some(Value::Number(step)),
-            Some(Value::Number(value)),
-        ) = (
-            args.first(),
-            args.get(1),
-            args.get(2),
-            args.get(3),
-            args.get(4),
-        )
-        else {
-            return Err(
-                "seq-set-process-lane-step: expected (track instance-id inlet step value)".into(),
-            );
-        };
-        let track = *track as usize;
-        let instance_id = *instance_id as u64;
-        let inlet = value_symbol_name(inlet)
-            .ok_or_else(|| "seq-set-process-lane-step: inlet must be a name".to_string())?;
-        let step = *step as usize;
-        let value = *value as f32;
-        ctx.enqueue_command(process_history_command("set-lane-step", vec![
-            ("track", Value::Number(track as f64)),
-            ("instance-id", Value::Number(instance_id as f64)),
-            ("inlet", Value::String(inlet)),
-            ("step", Value::Number(step as f64)),
-            ("value", Value::Number(value as f64)),
-        ]));
-        Ok(Value::Number(value as f64))
-    });
+    for name in ["seq-set-process-lane-step", "seq-set-process-lane-steps"] {
+        runtime.register_native(name, move |args, ctx| {
+            let (Some(Value::Number(track)), Some(Value::Number(instance_id)),
+                Some(inlet), Some(targets), Some(Value::Number(value))) =
+                (args.first(), args.get(1), args.get(2), args.get(3), args.get(4))
+            else {
+                return Err(format!("{name}: expected (track instance-id inlet step(s) value)"));
+            };
+            let inlet = value_symbol_name(inlet)
+                .ok_or_else(|| format!("{name}: inlet must be a name"))?;
+            let valid_step = |value: &Value| matches!(value,
+                Value::Number(step) if step.is_finite() && *step >= 0.0
+                    && step.fract() == 0.0 && *step < MAX_STEPS as f64);
+            let steps = match targets {
+                Value::Number(_) if name == "seq-set-process-lane-step" && valid_step(targets) =>
+                    Value::List(vec![Rc::new(RefCell::new(targets.clone()))]),
+                Value::List(steps) if name == "seq-set-process-lane-steps"
+                    && !steps.is_empty() && steps.iter().all(|step| valid_step(&step.borrow())) =>
+                    targets.clone(),
+                _ => return Err(format!("{name}: invalid step targets")),
+            };
+            if !track.is_finite() || *track < 0.0 || track.fract() != 0.0
+                || !instance_id.is_finite() || *instance_id < 0.0 || instance_id.fract() != 0.0
+                || !(*value as f32).is_finite()
+            {
+                return Err(format!("{name}: invalid track, instance or value"));
+            }
+            ctx.enqueue_command(process_history_command("set-lane-steps", vec![
+                ("track", Value::Number(*track)),
+                ("instance-id", Value::Number(*instance_id)),
+                ("inlet", Value::String(inlet)),
+                ("steps", steps),
+                ("value", Value::Number(*value)),
+            ]));
+            Ok(Value::Number(*value))
+        });
+    }
 
     runtime.register_native("seq-clear-project-lane-override", move |args, ctx| {
         if args.len() != 3 {
@@ -7603,6 +7610,11 @@ fn document_metal_seq_natives(runtime: &mut Runtime) {
             "seq-set-process-lane-step",
             "(seq-set-process-lane-step track instance-id inlet step value)",
             "Set one value in an attached process lane.",
+        ),
+        (
+            "seq-set-process-lane-steps",
+            "(seq-set-process-lane-steps track instance-id inlet steps value)",
+            "Set a selection of process lane values in one edit.",
         ),
         (
             "seq-set-process-inlet",

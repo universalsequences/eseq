@@ -1053,7 +1053,7 @@ pub struct App {
     pub(crate) pending_song_row_invalidation: Option<(usize, crate::sequencer::PatternId)>,
     /// An in-flight process lane slider drag: the scene structure captured
     /// before its first write, committed as one history entry when the
-    /// gesture finishes (see `edit::apply_process_lane_drag_step`).
+    /// gesture finishes (see `edit::apply_process_lane_drag_steps`).
     pub(crate) process_lane_drag: Option<edit::ProcessLaneDrag>,
     /// Bumped whenever a track's loaded binding actually moves. The device
     /// panels are rebuilt from epochs, not polled, so swapping the mirror is

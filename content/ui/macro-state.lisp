@@ -3,6 +3,7 @@
 (module eseq.macro-state)
 
 (export mapping-open
+        macro-name
         mapping-selected
         rack-mapping-selected
         macro-mapping-sidebar-open-hook
@@ -21,6 +22,13 @@
 (defstate mapping-open false)
 (defstate mapping-selected -1)
 (defstate rack-mapping-selected -1)
+
+;; Rack names have their own field so live typing need not replace the
+;; instrument panel (or its mapping/parameter-lock metadata). Empty text is
+;; an edit in progress, so fall back only when the field is absent.
+(def macro-name (macro)
+  (let ((name (if (get macro :name-field) (reactive-get "SEQ" (get macro :name-field)) nil)))
+    (if (= name nil) (get macro :name) name)))
 
 ;; Extension hooks: the full sequencer adds listeners that temporarily mount
 ;; the mapping table in its sidebar. Standalone macro-control tests and

@@ -878,15 +878,6 @@ pub(super) fn process_lane_entry_value(entry: &ProcessLaneUiEntry, mode: usize) 
         ("decimals", Value::Number(entry.decimals as f64)),
         ("target", Value::String(entry.target.clone())),
         ("map-ports", list_value(entry.map_ports.iter().cloned())),
-        (
-            "values",
-            list_value(
-                entry
-                    .values
-                    .iter()
-                    .map(|value| Value::Number(*value as f64)),
-            ),
-        ),
     ])
 }
 
@@ -906,6 +897,70 @@ pub(crate) fn build_all_track_process_lanes_value(
     track_count: usize,
 ) -> Value {
     list_value((0..track_count).map(|track| build_process_lanes_value(state, track)))
+}
+
+/// Numeric lane data is separate from metadata so slider writes do not
+/// invalidate the expanded row's selector, ranges, labels and patchbay.
+fn process_lane_values_value(entries: &[ProcessLaneUiEntry]) -> Value {
+    list_value(entries.iter().map(|entry| {
+        list_value(entry.values.iter().map(|value| Value::Number(*value as f64)))
+    }))
+}
+
+pub(crate) fn build_all_track_process_lane_values(
+    state: &Arc<SequencerState>,
+    track_count: usize,
+) -> Value {
+    list_value((0..track_count).map(|track| {
+        process_lane_values_value(&process_lane_entries_for_track(state, track))
+    }))
+}
+
+/// A lane edit changes one track's values and, on its first project-lane
+/// write, its fork marker. It cannot change ports, the library or other tracks.
+pub(crate) fn sync_process_lane_track_state(
+    rt: &mut Runtime,
+    state: &Arc<SequencerState>,
+    track: usize,
+    current_track: usize,
+    viewports: &[ExpandedStepViewport],
+) -> bool {
+    let entries = process_lane_entries_for_track(state, track);
+    let metadata = list_value(entries.iter().enumerate().map(|(index, entry)| {
+        process_lane_entry_value(entry, PROCESS_LANE_MODE_OFFSET + index)
+    }));
+    let mut dirty = rt.set_reactive_list_index(
+        "SEQ", "track-process-lanes", track, metadata.clone(),
+    ).effects_dirty;
+    dirty |= rt.set_reactive_list_index(
+        "SEQ", "track-process-lane-values", track, process_lane_values_value(&entries),
+    ).effects_dirty;
+    if track == current_track {
+        dirty |= rt.set_reactive("SEQ", "process-lanes", metadata).effects_dirty;
+    }
+    let num_steps = state.pattern.track_params[track].get_num_steps().min(MAX_STEPS);
+    for viewport in viewports {
+        let Some(entry) = viewport.mode.checked_sub(PROCESS_LANE_MODE_OFFSET)
+            .and_then(|index| entries.get(index)) else { continue; };
+        for slot in 0..PAGE_SIZE {
+            let step = viewport.page.saturating_mul(PAGE_SIZE).saturating_add(slot);
+            let value = if step < num_steps { entry.values[step] } else { 0.0 };
+            for field in [
+                expanded_step_slot_param_slider_field(viewport.track_id, viewport.mode, slot),
+                expanded_step_slot_param_haptic_field(viewport.track_id, viewport.mode, slot),
+            ] {
+                dirty |= rt.set_reactive("SEQ", &field, Value::Number(value as f64)).effects_dirty;
+            }
+        }
+        let value = if viewport.cursor_step < num_steps {
+            entry.values[viewport.cursor_step]
+        } else { 0.0 };
+        dirty |= rt.set_reactive(
+            "SEQ", &expanded_step_cursor_param_value_field(viewport.track_id),
+            Value::Number(value as f64),
+        ).effects_dirty;
+    }
+    dirty
 }
 
 pub(super) fn process_lane_value_for_mode(
@@ -1471,6 +1526,10 @@ pub(crate) fn sync_process_chain_state(
     track_count: usize,
     current_track: usize,
 ) {
+    rt.set_reactive(
+        "SEQ", "track-process-lane-values",
+        build_all_track_process_lane_values(state, track_count),
+    );
     rt.set_reactive(
         "SEQ",
         "track-process-lanes",

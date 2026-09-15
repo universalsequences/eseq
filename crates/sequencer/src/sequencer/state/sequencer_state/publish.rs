@@ -330,6 +330,10 @@ impl SequencerState {
     /// Unchanged tracks keep their existing `Arc`, while the edited track is
     /// recaptured with its step payloads, device p-locks, and process state.
     pub fn publish_scheduler_track(&self, track: usize) -> Arc<SequencerSnapshot> {
+        if self.publish_coalesce_depth.load(Ordering::Acquire) > 0 {
+            self.pending_coalesced_publish.store(true, Ordering::Release);
+            return self.latest_scheduler_snapshot();
+        }
         let current = self.scheduler_snapshot.lock().unwrap().clone();
         if track >= self.active_track_count()
             || track >= current.tracks.len()

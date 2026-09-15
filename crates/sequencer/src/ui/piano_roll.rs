@@ -9,7 +9,7 @@ use sequencer::sequencer::{
     PatternId, SequencerState, StepParam, TakeId, TrackPatternData, MAX_STEPS,
 };
 
-use super::state_values::held_plock_value;
+use super::state_values::{held_plock_value, rack_macro_name_field, rack_macro_short_name_field};
 use super::values::{list_value, map_value};
 
 const PIANO_ROLL_ID_STRIDE: usize = 16;
@@ -933,7 +933,19 @@ fn automation_device_lock(
     }
 }
 
+fn automation_name_fields(
+    entries: &mut Vec<(&str, Value)>,
+    track: usize,
+    target: PianoRollAutomationTarget,
+) {
+    if let PianoRollAutomationTarget::RackMacro { macro_idx } = target {
+        entries.push(("label-field", Value::String(rack_macro_name_field(track, macro_idx))));
+        entries.push(("short-field", Value::String(rack_macro_short_name_field(track, macro_idx))));
+    }
+}
+
 fn automation_param_row(
+    track: usize,
     target: PianoRollAutomationTarget,
     scale: &AutomationScale,
     locked_anywhere: bool,
@@ -945,6 +957,7 @@ fn automation_param_row(
         ("target", Value::String(target.target_name().to_string())),
         ("locked", Value::Bool(locked_anywhere)),
     ];
+    automation_name_fields(&mut entries, track, target);
     if let Some(slot_idx) = target.slot_idx() {
         entries.push(("slot-idx", Value::Number(slot_idx as f64)));
     }
@@ -966,12 +979,12 @@ pub(crate) fn build_piano_roll_automation_params_value(
     for param in StepParam::VISIBLE {
         let target = PianoRollAutomationTarget::StepParam(param);
         if let Some(scale) = automation_scale(app, state, track, target) {
-            rows.push(automation_param_row(target, &scale, true));
+            rows.push(automation_param_row(track, target, &scale, true));
         }
     }
     for target in automation_device_targets(app, state, track) {
         if let Some(scale) = automation_scale(app, state, track, target) {
-            rows.push(automation_param_row(target, &scale, true));
+            rows.push(automation_param_row(track, target, &scale, true));
         }
     }
     list_value(rows)
@@ -1144,7 +1157,7 @@ pub(crate) fn build_track_automation_value(
     for track in 0..track_count {
         let rows: Vec<Value> = track_automation_columns(app, state, track)
             .into_iter()
-            .map(|(target, scale)| automation_column_row(target, &scale, &[]))
+            .map(|(target, scale)| automation_column_row(track, target, &scale, &[]))
             .collect();
         tracks.push(list_value(rows));
     }
@@ -1291,7 +1304,7 @@ pub(crate) fn build_track_lock_targets_value(
                 .into_iter()
                 .filter_map(|target| {
                     let scale = automation_scale(app, state, track, target)?;
-                    Some(automation_column_row(target, &scale, &[]))
+                    Some(automation_column_row(track, target, &scale, &[]))
                 })
                 .collect();
             (!items.is_empty()).then(|| {
@@ -1366,6 +1379,7 @@ fn compact_token(token: &str) -> String {
 }
 
 fn automation_column_row(
+    track: usize,
     target: PianoRollAutomationTarget,
     scale: &AutomationScale,
     values: &[Option<f32>],
@@ -1393,6 +1407,7 @@ fn automation_column_row(
             ),
         ),
     ];
+    automation_name_fields(&mut entries, track, target);
     if let Some(slot_idx) = target.slot_idx() {
         entries.push(("slot-idx", Value::Number(slot_idx as f64)));
     }
@@ -1504,6 +1519,7 @@ pub(crate) fn build_piano_roll_automation_value(
         ("editable", Value::Bool(is_step_param || live)),
         ("points", list_value(points)),
     ];
+    automation_name_fields(&mut entries, track, target);
     if let Some(slot_idx) = target.slot_idx() {
         entries.push(("slot-idx", Value::Number(slot_idx as f64)));
     }

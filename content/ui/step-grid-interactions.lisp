@@ -392,10 +392,9 @@
 (def seq-set-process-lane-from-step (track mode step value)
   (let ((lane (eseq.seqv-track-params/seqv-track-process-lane track mode)))
     (if (step-selected? step)
-      (for-each
-        (lambda (selected-step)
-          (seq-set-process-lane-step-value track lane selected-step value))
-        (seq-selected-step-indexes))
+      (seq-set-process-lane-steps
+        track (get lane :instance-id) (get lane :inlet)
+        (seq-selected-step-indexes) value)
       (do
         (if (seq-has-selection?) (seq-clear-selection) nil)
         (seq-set-process-lane-step-value track lane step value)))))
@@ -410,10 +409,9 @@
 (def seq-set-process-lane-from-selection-or-step (track mode step value)
   (let ((lane (eseq.seqv-track-params/seqv-track-process-lane track mode)))
     (if (seq-has-selection?)
-      (for-each
-        (lambda (selected-step)
-          (seq-set-process-lane-step-value track lane selected-step value))
-        (seq-selected-step-indexes))
+      (seq-set-process-lane-steps
+        track (get lane :instance-id) (get lane :inlet)
+        (seq-selected-step-indexes) value)
       (seq-set-process-lane-step-value track lane step value))))
 
 (def select-all-steps ()

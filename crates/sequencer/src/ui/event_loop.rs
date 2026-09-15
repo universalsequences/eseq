@@ -1172,6 +1172,7 @@ pub(crate) fn run_event_loop(
                         &key,
                         &mut app,
                         &shared.current_track,
+                        &shared.selected_steps,
                         &shared.expanded_step_projection,
                         &mut soft_step_param_edit,
                     ) {

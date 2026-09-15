@@ -194,10 +194,11 @@
       :background-color :mixer-strip-bg :border-color
       (if (= ms/rack-mapping-selected (get macro :id)) :rack-mapping-border :mixer-strip-border)
       (v-stack :gap 0.08 :align :center
-        (text-input :key (str "rack-macro-name-" (get macro :id))
-          :width 5.2 :height 0.9 :font-size 8.5 :value (get macro :name)
-          :on-change (lambda (name) (host-command "rename-rack-macro"
-              (dict :track track :id (get macro :id) :name name))))
+        (subtree :key (str "rack-macro-name-" (get macro :id))
+          (text-input :debug-name (str "rack-macro-name-" (get macro :id))
+            :width 5.2 :height 0.9 :font-size 8.5 :value (ms/macro-name macro)
+            :on-change (lambda (name) (host-command "rename-rack-macro"
+                (dict :track track :id (get macro :id) :name name)))))
         (box :debug-name (str "rack-macro-control-" (get macro :id))
           :plock-any (if has-locks 1 0)
           :on-right-click (lambda (event) (pc/open-target-plock-menu event target has-locks))
