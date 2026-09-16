@@ -795,7 +795,7 @@ pub(crate) fn scene_bank_auto_label(mut index: usize) -> String {
     String::from_utf8(reversed).expect("scene bank labels contain only ASCII letters")
 }
 
-fn build_scene_banks_value(banks: &[SceneBank]) -> Value {
+pub(super) fn build_scene_banks_value(banks: &[SceneBank]) -> Value {
     let mut offset = 0usize;
     Value::List(
         banks

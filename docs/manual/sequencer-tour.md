@@ -54,6 +54,14 @@ Track settings hold the timing controls.
 
 Tracks can have different lengths. Their patterns drift against each other on each repeat, which is a good way to make a short loop feel longer.
 
+## Bar transpose
+
+Every sixteen steps of a track is one page, and each page has its own transpose under its page button. Set it and every note on that page moves by that many semitones, on top of each step's own transpose and on top of the scene transpose. Chords move as a block.
+
+Bar transposes belong to the pattern, so each scene keeps its own, like the steps themselves. Set a page back to 0 to clear it.
+
+Try it: write four bars, leave the first page at 0, and put -5 on the third. The phrase answers itself a fourth down without editing a single note.
+
 ## Base value or p-lock
 
 With steps selected, turning a synth or effect knob locks that value onto those steps. With nothing selected, it changes the pattern's base value. Read the selected count in the inspector before you turn a knob. See [Parameter locks](parameter-locks).
