@@ -194,6 +194,8 @@ pub(super) fn render_audio_block(
     apply_take_rack_macro_updates(data);
     sync_free_patch_transport_routes(data, num_tracks);
 
+    super::live_params::apply_live_instrument_params(data);
+
     #[cfg(feature = "audio-experiments")]
     let pool_sync_us = super::experiment::phase_elapsed(&mut phase_clock);
 

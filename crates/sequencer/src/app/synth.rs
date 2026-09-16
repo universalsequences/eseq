@@ -4,6 +4,8 @@ use super::command::{apply_command, AppCommand};
 
 use crate::effects::EffectDescriptor;
 use crate::sequencer::{InstrumentType, RackSlotParam, RackSlotSnapshot};
+use crate::audio::live_params::{InstrumentParamOwner, InstrumentParamVoice, InstrumentParamWrite};
+use crate::scheduled_event::{ScheduledInstrumentParam, ScheduledInstrumentParamTarget};
 
 use super::App;
 
@@ -13,6 +15,7 @@ pub(super) const SYNTH_COLUMN_GAP: u16 = 2;
 #[derive(Clone, Copy)]
 struct RackSlotInstrumentParamRoute {
     instrument_type: InstrumentType,
+    run_mode: crate::sequencer::CustomInstrumentRunMode,
     node_param_idx: u64,
     node_param_span: u32,
     sample_rate: Option<f32>,
@@ -571,48 +574,53 @@ impl App {
         let Some(engine_id) = self.graph.track_engine_ids.get(track).and_then(|id| *id) else {
             return;
         };
-        let engine_track_uses = self
-            .graph
-            .track_engine_ids
-            .iter()
-            .filter(|bound| **bound == Some(engine_id))
-            .count();
-        if engine_track_uses > 1 {
+        let free_patch = self.graph.track_instrument_run_modes[track]
+            == crate::sequencer::CustomInstrumentRunMode::FreePatch;
+        self.publish_live_instrument_param(engine_id, track, free_patch, param_idx, idx, span, value);
+    }
+
+    fn live_instrument_param_owner(
+        &self,
+        engine_id: usize,
+        route: usize,
+        free_patch: bool,
+    ) -> Option<InstrumentParamOwner> {
+        if self.graph.lg.0.is_null() { return None; }
+        let engine = self.graph.engine_node_ids.get(engine_id)?.as_ref()?;
+        let synth_id = *engine.synth_ids.first()?;
+        let route_lid = engine.route_gain_ids.get(route)?.first()?[0];
+        if synth_id <= 0 || route_lid <= 0 { return None; }
+        Some(InstrumentParamOwner {
+            engine_id, route, route_lid: route_lid as u64, free_patch,
+            voices: std::array::from_fn(|voice| InstrumentParamVoice {
+                synth_id: engine.synth_ids.get(voice).copied().unwrap_or(0) as u32,
+                modulator_id: engine.modulator_ids.get(voice).copied().unwrap_or(0) as u32,
+                gatepitch_id: engine.gatepitch_ids.get(voice).copied().unwrap_or(0) as u32,
+            }),
+        })
+    }
+
+    fn publish_live_instrument_param(
+        &self,
+        engine_id: usize,
+        route: usize,
+        free_patch: bool,
+        param_idx: usize,
+        idx: u64,
+        span: u32,
+        value: f32,
+    ) {
+        let Some(owner) = self.live_instrument_param_owner(engine_id, route, free_patch) else {
             return;
-        }
-        let Some(engine) = self
-            .graph
-            .engine_node_ids
-            .get(engine_id)
-            .and_then(|engine| engine.as_ref())
-        else {
-            return;
         };
-        let is_mod_param = idx as u32 >= crate::instruments::voice_modulator::MOD_PARAM_BASE;
-        let resolved_idx = if is_mod_param {
-            idx - crate::instruments::voice_modulator::MOD_PARAM_BASE as u64
+        let mod_base = crate::instruments::voice_modulator::MOD_PARAM_BASE as u64;
+        let (target, idx) = if idx >= mod_base {
+            (ScheduledInstrumentParamTarget::Modulator, idx - mod_base)
         } else {
-            idx
+            (ScheduledInstrumentParamTarget::Synth, idx)
         };
-        let target_ids = if is_mod_param {
-            &engine.modulator_ids
-        } else {
-            &engine.synth_ids
-        };
-        for &node_id in target_ids {
-            unsafe {
-                for lane in 0..span as u64 {
-                    crate::audiograph::params_push_wrapper(
-                        self.graph.lg.0,
-                        crate::audiograph::ParamMsg {
-                            idx: resolved_idx + lane,
-                            logical_id: node_id as u64,
-                            fvalue: value,
-                        },
-                    );
-                }
-            }
-        }
+        self.state.live_instrument_params.publish(owner, param_idx,
+            InstrumentParamWrite::Scalar(ScheduledInstrumentParam { target, idx, span, value }));
     }
 
     pub fn effective_instrument_param_value(&self, track: usize, param_idx: usize) -> Option<f32> {
@@ -663,28 +671,13 @@ impl App {
         let Some(engine_id) = self.graph.track_engine_ids.get(track).and_then(|id| *id) else {
             return;
         };
-        let engine_track_uses = self
-            .graph
-            .track_engine_ids
-            .iter()
-            .filter(|bound| **bound == Some(engine_id))
-            .count();
-        if engine_track_uses > 1 {
-            return;
-        }
-        let Some(engine) = self
-            .graph
-            .engine_node_ids
-            .get(engine_id)
-            .and_then(|engine| engine.as_ref())
-        else {
+        let free_patch = self.graph.track_instrument_run_modes[track]
+            == crate::sequencer::CustomInstrumentRunMode::FreePatch;
+        let Some(owner) = self.live_instrument_param_owner(engine_id, track, free_patch) else {
             return;
         };
-        for &node_id in &engine.synth_ids {
-            unsafe {
-                crate::lisp_host::queue_tensor_write(self.graph.lg.0, node_id, cell_offset, values);
-            }
-        }
+        self.state.live_instrument_params.publish(owner, tensor_idx,
+            InstrumentParamWrite::Tensor { cell_offset, values: values.into() });
     }
 
     pub fn rack_slot_instrument_descriptor(
@@ -749,6 +742,7 @@ impl App {
             .and_then(|rack| rack.slots.get(slot_idx))?;
         Some(RackSlotInstrumentParamRoute {
             instrument_type: slot.instrument_type,
+            run_mode: slot.instrument_run_mode,
             node_param_idx: slot
                 .instrument_slot
                 .param_node_indices
@@ -1029,39 +1023,11 @@ impl App {
         let Some(engine_id) = nodes.engine_id else {
             return;
         };
-        let Some(engine) = self
-            .graph
-            .engine_node_ids
-            .get(engine_id)
-            .and_then(|engine| engine.as_ref())
-        else {
+        let Some(route_idx) = crate::sequencer::rack_slot_pool_index(track, slot_idx) else {
             return;
         };
-        let is_mod_param = idx as u32 >= crate::instruments::voice_modulator::MOD_PARAM_BASE;
-        let resolved_idx = if is_mod_param {
-            idx - crate::instruments::voice_modulator::MOD_PARAM_BASE as u64
-        } else {
-            idx
-        };
-        let target_ids = if is_mod_param {
-            &engine.modulator_ids
-        } else {
-            &engine.synth_ids
-        };
-        for &node_id in target_ids {
-            unsafe {
-                for lane in 0..span as u64 {
-                    crate::audiograph::params_push_wrapper(
-                        self.graph.lg.0,
-                        crate::audiograph::ParamMsg {
-                            idx: resolved_idx + lane,
-                            logical_id: node_id as u64,
-                            fvalue: value,
-                        },
-                    );
-                }
-            }
-        }
+        let free_patch = route.run_mode == crate::sequencer::CustomInstrumentRunMode::FreePatch;
+        self.publish_live_instrument_param(engine_id, route_idx, free_patch, param_idx, idx, span, value);
     }
 
     fn set_rack_slot_instrument_default_only(

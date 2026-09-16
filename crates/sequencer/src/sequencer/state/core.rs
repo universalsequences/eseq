@@ -597,6 +597,7 @@ impl SequencerState {
 }
 
 pub struct SequencerState {
+    pub(crate) live_instrument_params: crate::audio::live_params::LiveInstrumentParams,
     pub pattern: PatternState,
     pub transport: TransportState,
     /// Live step-param print override (bead eseq-jc9): scheduler-side

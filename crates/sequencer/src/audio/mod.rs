@@ -44,6 +44,7 @@ mod device;
 mod events;
 mod fire;
 mod graph_dispatch;
+pub(crate) mod live_params;
 mod metrics;
 #[cfg(target_os = "macos")]
 mod workgroup;
@@ -126,6 +127,8 @@ const SCHEDULED_BLOCK_SCRATCH_CAPACITY: usize =
 mod tests;
 #[cfg(test)]
 mod live_input_tests;
+#[cfg(test)]
+mod live_params_tests;
 
 #[cfg(test)]
 pub(crate) fn resolve_snapshot_instrument_defaults_for_test(

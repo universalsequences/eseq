@@ -283,6 +283,7 @@ impl SequencerState {
             scheduler_snapshot: Mutex::new(Arc::new(SequencerSnapshot::empty())),
             scheduler_snapshot_version: AtomicU64::new(0),
             snapshot_handoff: SchedulerSnapshotHandoff::new(),
+            live_instrument_params: crate::audio::live_params::LiveInstrumentParams::default(),
             publish_coalesce_depth: AtomicU64::new(0),
             pending_coalesced_publish: AtomicBool::new(false),
             live_macro_overrides: Mutex::new(HashMap::new()),
