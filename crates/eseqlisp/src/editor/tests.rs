@@ -3019,6 +3019,98 @@ fn tab_accepts_completion_from_runtime_symbols() {
 }
 
 #[test]
+fn shader_completion_in_defwidget_includes_macros_and_native_forms() {
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    let source = "(defwidget xyz\n  :width 2 :height 2\n  :state (playing)\n  :bindable (playing)\n  :paint-margin 0.4\n  :shader\n  (sdf";
+    editor.open_scratch_buffer("*shader*", source);
+    editor.active_buffer_mut().cursor = (6, "  (sdf".len());
+    editor.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+
+    let completion = editor.completion_state().expect("SDF completion");
+    for name in [
+        "sdf/layer", "sdf/fill", "sdf/paint", "sdf/region", "sdf/stroke",
+        "sdf/ellipse", "sdf/stroke-px", "sdf/rounded-rect", "sdf/scale",
+        "sdf/disclosure-right",
+    ] {
+        let item = completion.items.iter().find(|item| item.label == name)
+            .unwrap_or_else(|| panic!("missing {name}"));
+        assert!(item.signature.is_some(), "missing signature for {name}");
+    }
+
+    for (prefix, suffix, expected, signature) in [
+        ("sdf/la", 'y', "sdf/layer", "(sdf/layer shape ...)"),
+        ("sdf/rounded-", 'r', "sdf/rounded-rect", "(sdf/rounded-rect w h r)"),
+        ("sdf/disclosure-", 'r', "sdf/disclosure-right", "(sdf/disclosure-right)"),
+    ] {
+        let source = format!("(defwidget xyz :shader ({prefix}");
+        editor.open_scratch_buffer("*accept-shader*", &source);
+        editor.active_buffer_mut().cursor = (0, source.len());
+        editor.handle_key(KeyEvent::new(KeyCode::Char(suffix), KeyModifiers::NONE));
+        let completion = editor.completion_state().expect("shader prefix completion");
+        assert_eq!(completion.items.len(), 1);
+        assert_eq!(completion.items[0].signature.as_deref(), Some(signature));
+        editor.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(editor.active_buffer().text(), format!("(defwidget xyz :shader ({expected}"));
+    }
+}
+
+#[test]
+fn shader_completion_keywords_follow_defwidget_and_nested_material_context() {
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    for (source, keywords) in [
+        ("(defwidget xyz\n  :width 2 :height 2\n  :state (playing)\n  ",
+            &[":width", ":height", ":state", ":bindable", ":paint-margin", ":shader", ":animates"][..]),
+        ("(defwidget xyz :shader (sdf/fill (sdf/rounded-rect width width 0.06)\n  (material ",
+            &[":color", ":shadow", ":lighting"][..]),
+        ("(defwidget xyz :shader (sdf/fill (sdf/circle 1)\n  (material :color (rgba 1 1 1 1) :shadow (shadow ",
+            &[":color", ":blur", ":offset", ":spread"][..]),
+        ("(defwidget xyz :shader (sdf/fill (sdf/circle 1)\n  (material :color :accent :lighting (lighting ",
+            &[":edge-min", ":edge-max", ":eps", ":light", ":shininess", ":bump"][..]),
+    ] {
+        editor.open_scratch_buffer("*shader-keywords*", source);
+        let row = editor.active_buffer().lines.len() - 1;
+        let col = editor.active_buffer().lines[row].len();
+        editor.active_buffer_mut().cursor = (row, col);
+        editor.handle_key(KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE));
+        let completion = editor.completion_state()
+            .unwrap_or_else(|| panic!("missing keyword completion in {source}"));
+        let mut actual = completion.items.iter().map(|item| item.label.as_str()).collect::<Vec<_>>();
+        let mut expected = keywords.to_vec();
+        actual.sort_unstable();
+        expected.sort_unstable();
+        assert_eq!(actual, expected, "keyword context in {source}");
+    }
+
+    let source = "(defwidget xyz :state (playing) :paint-";
+    editor.open_scratch_buffer("*accept-keyword*", source);
+    editor.active_buffer_mut().cursor = (0, source.len());
+    editor.handle_key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE));
+    editor.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    assert_eq!(editor.active_buffer().text(), "(defwidget xyz :state (playing) :paint-margin");
+}
+
+#[test]
+fn macro_completion_refreshes_names_and_signatures_after_evaluation() {
+    let mut runtime = Runtime::new();
+    // Populate both caches before adding macros from another source buffer.
+    runtime.completion_symbols();
+    runtime.completion_metadata();
+    runtime.eval_str("(defmacro completion-wrap (value &rest body) `(do ,value ,@body))").unwrap();
+    assert!(runtime.completion_symbols().iter().any(|name| name == "completion-wrap"));
+    assert_eq!(runtime.completion_metadata()["completion-wrap"].signature,
+        "(completion-wrap value &rest body)");
+
+    runtime.eval_str("(defmacro completion-wrap (value) value)").unwrap();
+    assert_eq!(runtime.completion_metadata()["completion-wrap"].signature,
+        "(completion-wrap value)");
+
+    runtime.eval_str("(module completion-demo)\n(defmacro wrap (value) value)").unwrap();
+    assert!(runtime.completion_symbols().iter().any(|name| name == "completion-demo/wrap"));
+    assert_eq!(runtime.completion_metadata()["completion-demo/wrap"].signature,
+        "(completion-demo/wrap value)");
+}
+
+#[test]
 fn import_completion_discovers_all_configured_roots_and_accepts_dotted_names() {
     let dir = hot_reload_temp_dir("eseqlisp-import-completion");
     let user = dir.join("user");

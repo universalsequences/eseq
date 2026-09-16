@@ -105,7 +105,7 @@
   :state (active)
   :shader
   (sdf/layer
-    (sdf/fill (sdf/rounded-rect width height 0.7)
+    (sdf/fill (sdf/rounded-rect width height 0.4)
       (material :color (if active :mixer-strip-selected-bg :mixer-strip-bg)
         :shadow (shadow :color (rgba 0 0 0 0.4) :blur 0.08 :offset (vec2 0 0.03))))))
 

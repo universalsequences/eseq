@@ -12,6 +12,16 @@
 
 ;; ── Primitive Shapes ──────────────────────────────────────────────────
 
+;; Native geometry/compositing forms (implemented by both shader backends):
+;; (sdf/ellipse radius-x radius-y) returns the Euclidean signed distance,
+;; including on the axes and at the center. Radii are half-extents, like rect.
+;; Zero radii collapse to a segment/point; negative radii use their magnitude.
+;; (sdf/stroke-px distance full-width-px color) draws a centered stroke with
+;; one-pixel edge coverage, preserving width when the widget is resized.
+;; Use a true distance such as ellipse/circle/rect/line, and place transforms
+;; inside the distance expression. Existing sdf/stroke uses half-width in
+;; drawing units; stroke-px instead takes the full width in render-target pixels.
+
 ;; Circle centered at origin with radius r.
 ;; Returns negative inside, zero on boundary, positive outside.
 (defmacro circle (r)

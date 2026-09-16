@@ -4,6 +4,8 @@ use crate::vm::Value;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 
+mod geometry;
+
 #[derive(Debug)]
 pub enum CodegenError {
     UnsupportedExpression(String),
@@ -292,7 +294,7 @@ impl ShaderEmitter {
                 match head.as_str() {
                     "vec2" => Some("float2"),
                     "vec3" => Some("float3"),
-                    "vec4" | "rgba" | "sdf/region" | "sdf/fill" | "sdf/paint" | "sdf/stroke" | "sdf/layer" => {
+                    "vec4" | "rgba" | "sdf/region" | "sdf/fill" | "sdf/paint" | "sdf/stroke" | "sdf/stroke-px" | "sdf/layer" => {
                         Some("float4")
                     }
                     "let" | "do" => items.last().and_then(|expr| self.expr_type(expr)),
@@ -386,6 +388,8 @@ impl ShaderEmitter {
                     "sdf/region" => self.emit_sdf_region(args),
                     "sdf/paint" => self.emit_sdf_paint(args),
                     "sdf/stroke" => self.emit_sdf_stroke(args),
+                    "sdf/ellipse" => self.emit_ellipse(args),
+                    "sdf/stroke-px" => self.emit_pixel_stroke(args),
 
                     _ => Err(CodegenError::UnknownFunction(head.clone())),
                 }
@@ -1279,7 +1283,7 @@ fn expr_returns_float4(expr: &Expression) -> bool {
                 return false;
             };
             match head.as_str() {
-                "vec4" | "rgba" | "sdf/region" | "sdf/fill" | "sdf/paint" | "sdf/stroke" | "sdf/layer" => true,
+                "vec4" | "rgba" | "sdf/region" | "sdf/fill" | "sdf/paint" | "sdf/stroke" | "sdf/stroke-px" | "sdf/layer" => true,
                 "let" => items.last().is_some_and(expr_returns_float4),
                 "do" => items.last().is_some_and(expr_returns_float4),
                 "if" => items.get(2).is_some_and(expr_returns_float4),
@@ -2236,6 +2240,36 @@ mod tests {
 
     fn macro_to_metal(src: &str) -> (Vec<String>, String) {
         compile_sdf_expr(&expand_sdf(src)).unwrap()
+    }
+
+    #[test]
+    fn ellipse_pixel_stroke_compiles_for_both_backends() {
+        for source in [
+            "(sdf/stroke-px (sdf/ellipse 4 0.25) 1 :white)",
+            "(sdf/stroke-px (sdf/translate 0.3 0.2 (sdf/rotate 0.4 (sdf/ellipse 0.25 4))) 1.5 :white)",
+            "(sdf/layer (sdf/stroke-px (sdf/ellipse 1 1) 0.5 :white) (sdf/stroke-px (sdf/ellipse 0 1) 2 :white))",
+            "(sdf/stroke-px (sdf/circle 0.5) 0 :white)",
+            "(let ((ink (sdf/stroke-px (sdf/ellipse 2 0.2) 1 :white))) (sdf/layer ink))",
+        ] {
+            let expr = expand_sdf(source);
+            let metal = compile_sdf_to_metal(&expr).unwrap();
+            let wgsl = compile_sdf_to_wgsl(&expr).unwrap();
+            assert_valid_wgsl(&wgsl.shader_source);
+            assert_eq!(metal.region_count, 0);
+            assert_eq!(wgsl.region_count, 0);
+            assert!(!metal.shader_source.contains("smoothstep"));
+            assert!(!wgsl.shader_source.contains("smoothstep"));
+        }
+    }
+
+    #[test]
+    fn ellipse_pixel_stroke_rejects_wrong_arity() {
+        for source in ["(sdf/ellipse 1)", "(sdf/ellipse 1 2 3)",
+            "(sdf/stroke-px (sdf/ellipse 1 2) 1)", "(sdf/stroke-px 0 1 :white 2)"] {
+            let expr = parse_one_expr(source);
+            assert!(compile_sdf_to_metal(&expr).is_err(), "{source}");
+            assert!(compile_sdf_to_wgsl(&expr).is_err(), "{source}");
+        }
     }
 
     #[test]

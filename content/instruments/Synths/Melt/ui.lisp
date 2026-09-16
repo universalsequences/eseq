@@ -30,8 +30,9 @@
           :process-value (eseq.effects.custom-ui-runtime/custom-ui-param-process-value p) :process-clamped (eseq.effects.custom-ui-runtime/custom-ui-param-process-clamped p)
           :max (eseq.effects.custom-ui-runtime/custom-ui-param-control-max p)
           :text-align :left
-          :text-color (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p)
-            (eseq.effects.custom-ui-runtime/custom-ui-param-plock-text-color p) ink)
+          :text-color ink :edit-color ink :cursor-color ink
+          :plock-style :underline
+          :plock-active (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p) 1 0)
           :on-change (eseq.effects.custom-ui-runtime/custom-ui-param-change-callback p))))))
 (def melt-write (scope name value)
   (let ((p (eseq.effects.custom-ui-runtime/custom-ui-param-in-scope scope name)))

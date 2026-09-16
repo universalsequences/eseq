@@ -8514,6 +8514,64 @@ mod tests {
     }
 
     #[test]
+    fn file_backed_override_of_private_fn_read_inside_subtree_rerenders_effect() {
+        let mut vm = module_test_vm();
+        crate::widgets::register_widget_natives(&mut vm);
+        let owner = temp_lisp_path("override-subtree-owner");
+        let user = temp_lisp_path("override-subtree-user");
+        fn trees_text(vm: &VM) -> String {
+            vm.pending_widget_trees
+                .iter()
+                .map(|update| match update {
+                    PendingUiUpdate::FullTree(pending) => format!("{:?}", pending.tree),
+                    PendingUiUpdate::ReplaceSubtree { tree, .. } => format!("{:?}", tree),
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+        vm.source_manager.begin_transaction();
+        vm.eval_module_source(
+            owner.clone(),
+            r#"(module test.factory)
+(defstate tick 0)
+(def grid (i) (label (str "factory-grid-" i "-" tick)))
+(def strip (i) (v-stack (subtree :key (str "inner-" i) (label "inner")) (grid i)))
+(def item (i) (subtree :key (str "strip-" i) (strip i)))
+(effect-buffer "*m*" (h-stack (each (list 0 1) |i idx| (item i))))"#,
+            1,
+        )
+        .expect("owner");
+        let first = trees_text(&vm);
+        assert!(first.contains("factory-grid-1-0"), "factory mount: {first}");
+        vm.pending_widget_trees.clear();
+        // A reactive-only rerun of the strip subtrees, like a clip click in
+        // the mixer, before the override arrives.
+        vm.eval_str("(set! test.factory/tick 1)").expect("tick");
+        let ticked = trees_text(&vm);
+        assert!(ticked.contains("factory-grid-1-1"), "standalone subtree rerun: {ticked}");
+        vm.pending_widget_trees.clear();
+
+        vm.source_manager.begin_transaction();
+        vm.eval_module_source(
+            user,
+            r#"(module test.user)
+(override test.factory/grid (lambda (i) (label (str "override-grid-" i))))"#,
+            1,
+        )
+        .expect("override");
+        let changed = vm.source_manager.changed_symbols();
+        eprintln!("changed symbols: {changed:?}");
+        let rerendered = vm.mark_effects_depending_on_symbols(&changed);
+        eprintln!("rerendered roots: {rerendered:?}");
+        vm.rerender_dirty_effects().expect("rerender");
+        let after = trees_text(&vm);
+        assert!(
+            after.contains("override-grid-1"),
+            "changed={changed:?} rerendered={rerendered:?} trees={after}"
+        );
+    }
+
+    #[test]
     fn override_survives_owner_reload_and_removal_restores_reloaded_factory() {
         let mut vm = module_test_vm();
         let owner = temp_lisp_path("override-owner");

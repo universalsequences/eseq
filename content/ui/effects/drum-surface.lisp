@@ -30,8 +30,9 @@
             :step (if (= name "bank_harm") 0.5 (pow 10 (- 0 decimals)))
             :value (bind name) :min (eseq.effects.custom-ui-runtime/custom-ui-param-control-min p)
             :max (eseq.effects.custom-ui-runtime/custom-ui-param-control-max p)
-            :text-color (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p)
-              (eseq.effects.custom-ui-runtime/custom-ui-param-plock-text-color p) (ink p))
+            :text-color (ink p) :edit-color (ink p) :cursor-color (ink p)
+            :plock-style :underline
+            :plock-active (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p) 1 0)
             :on-change (eseq.effects.custom-ui-runtime/custom-ui-param-change-callback p)))))))
 (def knob (spec section)
   (eseq.effects.custom-ui-lego/ui-lego-knob-styled-s section (nth spec 0) (nth spec 1)

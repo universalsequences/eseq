@@ -39,12 +39,9 @@
             :value (bind name)
             :min (eseq.effects.custom-ui-runtime/custom-ui-param-control-min p)
             :max (eseq.effects.custom-ui-runtime/custom-ui-param-control-max p)
-            :text-color (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p)
-              (eseq.effects.custom-ui-runtime/custom-ui-param-plock-text-color p) text-ink)
+            :text-color text-ink :edit-color text-ink :cursor-color text-ink
+            :plock-style :underline
             :plock-active (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p) 1 0)
-            :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
-            :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
-            :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
             :on-change (eseq.effects.custom-ui-runtime/custom-ui-param-change-callback-s section p)))))))
 (def details (specs section)
   (v-stack :gap 0.15
@@ -649,18 +646,25 @@
 
 ;; These diagrams explain the reduced plate and contact conditions; they do not
 ;; display measured audio or claim to recover the source cymbal's geometry.
+
+(defmacro cymbal-ring (major radius stroke)
+  `(sdf/stroke-px (sdf/ellipse (* ,major ,radius) (/ ,radius 3.5))
+     ,stroke (eseq.effects.physical-model-surface/screen-ink)))
+
 (defwidget pm-cymbal-body
   :width 35.3 :height 3.1 :state (size character) :bindable (size character)
   :shader
-  (let ((u (/ x (* aspect (+ 0.45 (* size 0.2)))))
-        (v (* y 3.5))
-        (radius (sqrt (+ (* u u) (* v v))))
-        (rings (abs (sin (* radius (+ 18 (* character 22)))))))
+  (let ((major (* aspect (+ 0.45 (* size 0.2)))))
     (sdf/layer
       (sdf/fill (sdf/rect width height) (eseq.effects.physical-model-surface/screen))
-      (sdf/paint (- (abs (- radius 1)) 0.025) (eseq.effects.physical-model-surface/screen-ink))
-      (sdf/paint (max (- radius 0.94) (- rings 0.07)) (rgba 0.16 0.06 0.11 0.3))
-      (sdf/paint (- (abs (- radius 0.22)) 0.035) (eseq.effects.physical-model-surface/screen-ink)))))
+      ;; Four separate grooves leave visible gaps at the panel's normal size.
+      ;; Voicing changes their spacing; all contours keep their pixel width.
+      (eseq.effects.physical-model-surface/cymbal-ring major (+ 0.36 (* character 0.08)) 1)
+      (eseq.effects.physical-model-surface/cymbal-ring major (+ 0.52 (* character 0.06)) 1)
+      (eseq.effects.physical-model-surface/cymbal-ring major (+ 0.68 (* character 0.04)) 1)
+      (eseq.effects.physical-model-surface/cymbal-ring major (+ 0.84 (* character 0.02)) 1)
+      (eseq.effects.physical-model-surface/cymbal-ring major 0.22 1.25)
+      (eseq.effects.physical-model-surface/cymbal-ring major 1 1.5))))
 (def cymbal-body-view ()
   (v-stack :gap 0.15 (caption "Plate size and voicing / dense inharmonic resonance")
     (pm-cymbal-body :debug-name "pm-cymbal-body" :size (bind "body.size")

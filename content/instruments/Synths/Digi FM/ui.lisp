@@ -31,12 +31,9 @@
             :process-value (eseq.effects.custom-ui-runtime/custom-ui-param-process-value p) :process-clamped (eseq.effects.custom-ui-runtime/custom-ui-param-process-clamped p)
             :max (eseq.effects.custom-ui-runtime/custom-ui-param-control-max p)
             :text-align :left
-            :text-color (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p)
-              (eseq.effects.custom-ui-runtime/custom-ui-param-plock-text-color p) ink)
+            :text-color ink :edit-color ink :cursor-color ink
+            :plock-style :underline
             :plock-active (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p) 1 0)
-            :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
-            :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
-            :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
             :on-change (if (number? section)
               (eseq.effects.custom-ui-runtime/custom-ui-param-change-callback-s section p)
               (eseq.effects.custom-ui-runtime/custom-ui-param-change-callback p))))))))

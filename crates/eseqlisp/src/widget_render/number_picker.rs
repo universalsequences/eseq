@@ -135,6 +135,49 @@ mod tests {
     }
 
     #[test]
+    fn underline_plock_preserves_readout_and_toggles_marker_from_binding() {
+        let slots = crate::reactive::ReactiveBindingStore::default();
+        slots.write_float("LOCK", "active", 0.0);
+        let node = test_number_picker_node(HashMap::from([
+            ("value".to_string(), Value::Number(0.58)),
+            ("noui".to_string(), Value::Bool(true)),
+            ("text-color".to_string(), Value::Keyword("black".to_string())),
+            ("plock-style".to_string(), Value::Keyword("underline".to_string())),
+            ("plock-active".to_string(), Value::ReactiveRef {
+                namespace: "LOCK".to_string(),
+                field: "active".to_string(),
+                index: None,
+                kind: crate::vm::BindingKind::Float,
+                slot: slots.slot("LOCK", "active"),
+            }),
+        ]));
+        let unlocked = NumberPickerWidget.build_primitives("number-picker", &node, test_viewport());
+        let [GpuPrimitive::ProportionalText(unlocked_text)] = unlocked.as_slice() else {
+            panic!("unlocked readout should contain only its value");
+        };
+        for active in [1.0_f64, 0.0] {
+            slots.write_float("LOCK", "active", active);
+            let primitives = NumberPickerWidget.build_primitives("number-picker", &node, test_viewport());
+            let GpuPrimitive::ProportionalText(text) = &primitives[0] else {
+                panic!("locked readout should retain its value");
+            };
+            assert_eq!(text.text, unlocked_text.text);
+            // This is the underline style's contract, independent of the palette.
+            assert_eq!(text.fg, unlocked_text.fg);
+            if active == 1.0 {
+                let [_, GpuPrimitive::Rect(marker)] = primitives.as_slice() else {
+                    panic!("locked readout should add one underline");
+                };
+                assert_eq!(marker.color, text.fg);
+                assert!(marker.rect.width.is_finite() && marker.rect.width > 0.0);
+                assert!(marker.rect.height.is_finite() && marker.rect.height > 0.0);
+            } else {
+                assert_eq!(primitives.len(), 1, "clearing the lock removes the underline");
+            }
+        }
+    }
+
+    #[test]
     fn zero_decimal_values_snap_to_integers() {
         let props = HashMap::from([("decimals".to_string(), Value::Number(0.0))]);
         let step = quantize_step(&props, 0);
@@ -731,6 +774,7 @@ impl WidgetDefinition for NumberPickerWidget {
             "on-change",
             "on-release",
             "plock-active",
+            "plock-style",
             "plock-color-r",
             "plock-color-g",
             "plock-color-b",
@@ -1075,7 +1119,18 @@ impl WidgetDefinition for NumberPickerWidget {
 
         let active = get_bool_prop(&node.props, "active", false);
         let plocked = plock_active(&node.props);
-        let plock_color = plock_color(&node.props);
+        let normal_text_color =
+            resolve_named_color(&node.props, "text-color", theme::BUTTON_SECONDARY_FG());
+        // Display panels supply ink that contrasts with their own surface.
+        // Underline-only locks retain that ink for both the value and marker;
+        // a global lock accent may be indistinguishable from the panel itself.
+        let plock_color = if matches!(node.props.get("plock-style"),
+            Some(Value::Keyword(style)) if style == "underline")
+        {
+            normal_text_color
+        } else {
+            plock_color(&node.props)
+        };
         let active_color = resolve_named_color(
             &node.props,
             "active-color",
@@ -1086,7 +1141,7 @@ impl WidgetDefinition for NumberPickerWidget {
         } else if plocked {
             plock_color
         } else {
-            resolve_named_color(&node.props, "text-color", theme::BUTTON_SECONDARY_FG())
+            normal_text_color
         };
         let edit_color = number_picker_edit_color(&node.props);
         let focus_color = resolve_named_color(&node.props, "focus-color", edit_color);

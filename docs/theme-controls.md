@@ -30,6 +30,14 @@ colors toward the theme RGB. Alpha zero preserves authored colors; alpha one
 replaces them. Mute/take dimming is applied afterward. Saved project colors
 are never rewritten.
 
+Bright instrument displays use `number-picker :plock-style :underline`:
+`:plock-active` adds an underline in the authored `:text-color`, preserving
+the display's contrasting ink instead of substituting the global lock accent.
+Set `:edit-color` and `:cursor-color` to the same ink so focused and typed
+values stay readable too. Pickers without this style retain accent-colored
+locks. The `bright-instrument-plocks.lisp` capture fixture covers Membrane
+Snare, PM Flute, and Heat on tracks 0, 1, and 2.
+
 For headless visual checks, use
 `crates/sequencer/ui/capture-fixtures/theme-controls.lisp` with `metal_seq
 capture`. It covers sampler/Space Echo on track 0, sampler/Str8 Delay on track

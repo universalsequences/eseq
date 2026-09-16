@@ -2,6 +2,7 @@ pub mod compiler;
 pub mod modules;
 pub mod parser;
 pub mod sdf_codegen;
+mod sdf_geometry;
 pub mod sdf_hit;
 pub mod vm;
 

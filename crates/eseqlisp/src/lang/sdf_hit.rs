@@ -85,6 +85,10 @@ fn eval_sdf_expr(expr: &Expression, vars: &HashMap<String, f64>) -> f64 {
                 }
                 "pow" => eval_sdf_expr(&args[0], vars).powf(eval_sdf_expr(&args[1], vars)),
                 "atan2" => eval_sdf_expr(&args[0], vars).atan2(eval_sdf_expr(&args[1], vars)),
+                "sdf/ellipse" if args.len() == 2 => super::sdf_geometry::ellipse_distance(
+                    vars.get("x").copied().unwrap_or(f64::NAN),
+                    vars.get("y").copied().unwrap_or(f64::NAN),
+                    eval_sdf_expr(&args[0], vars), eval_sdf_expr(&args[1], vars)),
                 "clamp" => {
                     let v = eval_sdf_expr(&args[0], vars);
                     let lo = eval_sdf_expr(&args[1], vars);
@@ -208,7 +212,7 @@ fn eval_sdf_expr(expr: &Expression, vars: &HashMap<String, f64>) -> f64 {
                 }
 
                 // SDF compositing — for hit testing we only care about sdf/fill distances
-                "sdf/fill" | "sdf/paint" | "sdf/stroke" => {
+                "sdf/fill" | "sdf/paint" | "sdf/stroke" | "sdf/stroke-px" => {
                     // Return the SDF distance of the first argument
                     eval_sdf_expr(&args[0], vars)
                 }
@@ -372,6 +376,16 @@ mod tests {
         let mut rt = Runtime::new();
         rt.expand_macros_expression(&parse_expr(src))
             .expect("expand SDF macro")
+    }
+
+    #[test]
+    fn ellipse_hit_region_follows_transformed_bound_radii() {
+        let expr = expand_expr("(sdf/fill (sdf/translate 0.5 0.3 (sdf/ellipse radius 0.1)) :white)");
+        let vars = HashMap::from([("radius".to_string(), 2.0)]);
+        assert_eq!(sdf_hit_region_with_vars(&expr, 0.5, 0.3, &vars).0, 0);
+        assert_eq!(sdf_hit_region_with_vars(&expr, 2.4, 0.3, &vars).0, 0);
+        assert_eq!(sdf_hit_region_with_vars(&expr, 2.6, 0.3, &vars).0, -1);
+        assert_eq!(sdf_hit_region_with_vars(&expr, 0.5, 0.41, &vars).0, -1);
     }
 
     #[test]

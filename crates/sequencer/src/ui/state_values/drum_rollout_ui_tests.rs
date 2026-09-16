@@ -32,6 +32,7 @@ fn check_surface_at(instrument: &str, page_count: usize, root: std::path::PathBu
 
     let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
     editor.set_layout_viewport(180, 18);
+    editor.runtime_mut().register_reactive("SEQV", vec![], true);
     editor.runtime_mut().register_reactive(
         "SEQ",
         vec![
@@ -85,6 +86,23 @@ fn check_surface_at(instrument: &str, page_count: usize, root: std::path::PathBu
     editor.set_active_buffer(fx_id);
     editor.set_layout_viewport(180, 18);
 
+    if instrument == "Membrane Snare" {
+        let index = dsp.lines().map(str::trim).filter(|line| line.starts_with("(param "))
+            .position(|line| line.split_whitespace().nth(1) == Some("head_couple")).unwrap();
+        let field = format!("plk-instrument-any-x-{index}-on");
+        for locked in [0.0, 1.0, 0.0] {
+            editor.runtime_mut().set_reactive("SEQV", &field, Value::Number(locked));
+            editor.runtime_mut().run_reactive_cycle();
+            editor.refresh_runtime_side_effects();
+            let layout = editor.widget_layout().unwrap();
+            let picker = find_layout_node_by_debug_name(&layout, "drum-detail-head_couple")
+                .expect("selected-step head coupling readout");
+            assert_finite_nonzero_rect(picker, "head coupling readout");
+            assert!(matches!(picker.props.get("value"), Some(Value::ReactiveRef { .. })));
+            assert_eq!(layout_prop_number(picker, "plock-active"), Some(locked));
+            assert_eq!(picker.props.get("plock-style"), Some(&Value::Keyword("underline".into())));
+        }
+    }
 
 
     fn visit(node: &eseqlisp::layout::LayoutNode, panel: &eseqlisp::layout::LayoutNode,

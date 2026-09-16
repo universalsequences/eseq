@@ -1973,14 +1973,46 @@ impl Runtime {
                 "Read and evaluate a Lisp file. Relative paths follow the loading file; @/ paths follow the process working directory.",
             ),
             ("sdf->metal", "(sdf->metal sdf-expr)", "Compile a quoted SDF expression to Metal shader source."),
-            ("defwidget", "(defwidget name :width w :height h :animates bool :shader expr ...)", "Register an SDF-backed widget constructor."),
             ("vec3", "(vec3 x y z)", "Return a tagged SDF vec3 expression."),
             ("vec4", "(vec4 x y z w)", "Return a tagged SDF vec4 expression."),
             ("rgba", "(rgba r g b a)", "Return a tagged SDF color expression."),
-            ("material", "(material :key value ...)", "Return a tagged SDF material expression."),
-            ("lighting", "(lighting :key value ...)", "Return a tagged SDF lighting expression."),
-            ("shadow", "(shadow :key value ...)", "Return a tagged SDF shadow expression."),
+            // Shader-native forms are interpreted by sdf_codegen, so they have
+            // no VM global or macro entry for completion to discover.
+            ("sdf/layer", "(sdf/layer shape ...)", "Composite SDF colors in order, with later shapes painted over earlier ones."),
+            ("sdf/fill", "(sdf/fill distance material-or-color)", "Fill a signed distance shape and allocate an interactive hit region."),
+            ("sdf/paint", "(sdf/paint distance material-or-color)", "Paint a signed distance shape without allocating a new hit region."),
+            ("sdf/region", "(sdf/region :name visible-distance material-or-color [hit-distance])", "Name an interactive shape, optionally using separate hit geometry."),
+            ("sdf/stroke", "(sdf/stroke distance half-width color)", "Stroke a signed distance shape; width is the half-width in drawing units."),
+            ("sdf/ellipse", "(sdf/ellipse radius-x radius-y)", "Euclidean signed distance to an ellipse centered at the origin; radii are half-extents."),
+            ("sdf/stroke-px", "(sdf/stroke-px distance width-px color)", "Stroke a signed distance shape with a full width in render-target pixels."),
+            ("normalize", "(normalize vector)", "Normalize a vector in a shader expression."),
+            ("fwidth", "(fwidth value)", "Return the sum of absolute screen-space derivatives in a shader expression."),
         ]);
+
+        self.document_symbol_with_keywords(
+            "defwidget",
+            "(defwidget name :width w :height h :state (name ...) :bindable (prop ...) :paint-margin margin :animates bool :shader expr)",
+            "Register an SDF-backed widget constructor. The shader, state names, and bindable props are automatically quoted.",
+            ["width", "height", "state", "bindable", "paint-margin", "animates", "shader"],
+        );
+        self.document_symbol_with_keywords(
+            "material",
+            "(material :color color [:shadow shadow] [:lighting lighting])",
+            "Describe an SDF fill or paint material. Color is required; shadow and lighting are optional.",
+            ["color", "shadow", "lighting"],
+        );
+        self.document_symbol_with_keywords(
+            "lighting",
+            "(lighting :edge-min min :edge-max max [:eps eps] [:light direction] [:shininess value] [:bump expression])",
+            "Describe SDF surface lighting. Edge bounds control the height field used to estimate the normal.",
+            ["edge-min", "edge-max", "eps", "light", "shininess", "bump"],
+        );
+        self.document_symbol_with_keywords(
+            "shadow",
+            "(shadow :color color :blur blur [:offset (vec2 x y)] [:spread spread])",
+            "Describe an SDF shadow. Color and blur are required; offset and spread are optional.",
+            ["color", "blur", "offset", "spread"],
+        );
 
         for &widget in crate::widgets::BUILTIN_WIDGET_NAMES {
             let definition = crate::widget_render::widget_definition(widget).or_else(|| {
@@ -3222,6 +3254,12 @@ impl Runtime {
                 .keys()
                 .map(|name| crate::modules::strip_implicit(name).to_string()),
         );
+        // Macros are compile-time declarations, not VM globals. Discover them
+        // from the live registry so library and user macros share this path.
+        symbols.extend(
+            self.vm.macros.keys()
+                .map(|name| crate::modules::strip_implicit(name).to_string()),
+        );
         for global in self.vm.global_names() {
             if let Some(Value::Map(map)) = self.vm.global_value(global) {
                 let display = crate::modules::strip_implicit(global);
@@ -3252,6 +3290,26 @@ impl Runtime {
         }
 
         let mut metadata = self.symbol_metadata.clone();
+        for (name, definition) in &self.vm.macros {
+            let display = crate::modules::strip_implicit(name);
+            metadata.entry(display.to_string()).or_insert_with(|| {
+                let mut signature = format!("({display}");
+                for param in &definition.params {
+                    signature.push(' ');
+                    signature.push_str(param);
+                }
+                if let Some(rest) = &definition.rest_param {
+                    signature.push_str(" &rest ");
+                    signature.push_str(rest);
+                }
+                signature.push(')');
+                SymbolMetadata {
+                    signature,
+                    docs: "Lisp macro; arguments are expanded before evaluation.".to_string(),
+                    keyword_args: Vec::new(),
+                }
+            });
+        }
         for global in self.vm.global_names() {
             if let Some(Value::Map(map)) = self.vm.global_value(global) {
                 let display = crate::modules::strip_implicit(global);
