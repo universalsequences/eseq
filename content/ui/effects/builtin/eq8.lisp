@@ -29,6 +29,7 @@
    param-selected-mod-slot-prop
    param-set-control-value))
 (import eseq.effects.param-grid :refer (fx-param-grid))
+(import eseq.effects.panel-frame :refer (fx-clear-selected-effect))
 
 (export eq8-source
         eq8-ui)
@@ -108,14 +109,27 @@
     (dict :kind :bus-effect :index (get fx :bus-idx) :slot (get fx :slot-idx))
     (dict :kind :track-effect :index (get fx :track-idx) :slot (get fx :slot-idx)))))
 
-(def set-band-values (fx params band freq gain q)
+(def set-band-values (fx params band freq gain q commit)
   (let ((freq-p (param params band "freq"))
         (gain-p (param params band "gain"))
         (q-p (param params band "q")))
-    (do
-      (eseq.effects.param-controls/fx-set-effect-value fx freq-p freq)
-      (eseq.effects.param-controls/fx-set-effect-value fx gain-p gain)
-      (eseq.effects.param-controls/fx-set-effect-value fx q-p q))))
+    (if (get fx :rack-fx)
+      (do
+        (eseq.effects.panel-frame/fx-clear-selected-effect)
+        (host-command
+          (if (seq-has-selection?) "set-rack-slot-effect-plock-batch" "set-rack-slot-effect-param-batch")
+          (dict :track (get fx :track-idx)
+                :rack-slot (get fx :rack-slot)
+                :effect-slot (get fx :slot-idx)
+                :updates (list
+                  (dict :param-idx (get freq-p :idx) :value freq)
+                  (dict :param-idx (get gain-p :idx) :value gain)
+                  (dict :param-idx (get q-p :idx) :value q))
+                :commit commit)))
+      (do
+        (eseq.effects.param-controls/fx-set-effect-value fx freq-p freq)
+        (eseq.effects.param-controls/fx-set-effect-value fx gain-p gain)
+        (eseq.effects.param-controls/fx-set-effect-value fx q-p q)))))
 
 (def handle-action (fx params event)
   (let ((type (get event :type))
@@ -133,7 +147,8 @@
             (set-band-values fx params band
               (get event :freq)
               (get event :gain)
-              (get event :q)))
+              (get event :q)
+              (= type :commit-band)))
           nil)))))
 
 (def band-button (fx params band)

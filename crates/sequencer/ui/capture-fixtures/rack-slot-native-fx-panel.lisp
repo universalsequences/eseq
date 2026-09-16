@@ -3,5 +3,5 @@
 (capture-project
   (track :layer-rack
     :name "Layer Rack + Native Slot FX"
-    :samples ("../../assets/ir/lexicon-300-rich-plate.wav")
+    :samples ("../../../../content/impulses/lexicon-300-rich-plate.wav")
     :rack-slot-audio-fx ("EQ8" "Phaser-Flanger")))

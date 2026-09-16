@@ -10,6 +10,8 @@ pub(super) const COMMANDS: &[&str] = &[
     "move-rack-slot-effect",
     "set-rack-slot-effect-param",
     "set-rack-slot-effect-plock",
+    "set-rack-slot-effect-param-batch",
+    "set-rack-slot-effect-plock-batch",
     "set-rack-slot-effect-param-option",
     "set-rack-slot-effect-plock-option",
     "group-track-to-instrument-rack",
@@ -434,6 +436,128 @@ pub(super) fn handle(
                 }
                 _ => editor.handle_host_event(HostEvent::Status(
                     "Rack-slot effect move is missing its source".to_string(),
+                )),
+            }
+        }
+        "set-rack-slot-effect-param-batch" | "set-rack-slot-effect-plock-batch" => {
+            let Value::Map(ref map) = payload else { return; };
+            let (Some(track), Some(rack_slot), Some(effect_slot), Some(updates)) = (
+                map_usize(map, "track"),
+                map_usize(map, "rack-slot"),
+                map_usize(map, "effect-slot"),
+                map_param_updates(map),
+            ) else {
+                editor.handle_host_event(HostEvent::Error(
+                    "Rack-slot effect parameter batch is incomplete".to_string(),
+                ));
+                return;
+            };
+            // Validate the entire batch before touching history, audio or print
+            // latches. Do not silently apply just the valid part of a curve.
+            let prepared = app.rack_slot_effect_snapshot(track, rack_slot).and_then(|slot| {
+                let descriptor = slot.effect_descriptors.get(effect_slot)
+                    .ok_or_else(|| "Rack-slot effect slot is out of range".to_string())?;
+                updates.into_iter().map(|(param_idx, value)| {
+                    let param = descriptor.params.get(param_idx)
+                        .ok_or_else(|| "Rack-slot effect parameter is out of range".to_string())?;
+                    if !value.is_finite()
+                        || matches!(param.host_control, Some(sequencer::effects::HostControl::FxSidechain { .. }))
+                        || sequencer::instruments::voice_modulator::is_envelope_source_param_value(
+                            param.node_param_idx, value,
+                        )
+                    {
+                        return Err("Unsupported rack-slot effect parameter value".to_string());
+                    }
+                    Ok((param_idx, param.clamp(value), param_change_needs_fx_rebuild(param)))
+                }).collect::<Result<Vec<_>, String>>()
+            });
+            let updates = match prepared {
+                Ok(updates) => updates,
+                Err(error) => {
+                    editor.handle_host_event(HostEvent::Error(error));
+                    return;
+                }
+            };
+            let plocks = name == "set-rack-slot-effect-plock-batch";
+            let steps = map_usize_list(map, "steps").unwrap_or_else(|| {
+                selected_steps.lock().unwrap().iter().copied().collect()
+            });
+            if !plocks {
+                let targets = updates.iter().map(|&(param_idx, value, _)| {
+                    (PrintTarget::RackSlotEffect {
+                        rack_slot_idx: rack_slot,
+                        effect_slot_idx: effect_slot,
+                        param_idx,
+                    }, value)
+                }).collect::<Vec<_>>();
+                if try_latch_param_print(ctx.shared, &mut editor, &app, track, &targets) {
+                    return;
+                }
+            }
+            let display_step = displayed_plock_step(&state, track, selected_plock_step(&selected_steps));
+            let new_plock_row = plocks && updates.iter().any(|&(param_idx, _, _)| {
+                !rack_slot_effect_plock_exists(&state, track, rack_slot, effect_slot, param_idx, display_step)
+            });
+            let commands = updates.iter().map(|&(param_idx, value, _)| {
+                if plocks {
+                    app::AppCommand::SetRackSlotEffectPlockMulti {
+                        track, steps: steps.clone(), rack_slot_idx: rack_slot,
+                        effect_slot_idx: effect_slot, param_idx, value,
+                    }
+                } else {
+                    app::AppCommand::SetRackSlotEffectParam {
+                        track, rack_slot_idx: rack_slot, effect_slot_idx: effect_slot,
+                        param_idx, value,
+                    }
+                }
+            }).collect::<Vec<_>>();
+            let result = if plocks {
+                app::edit::apply_coalesced_device_plock_batch(
+                    &mut app, &commands, "rack-effect-curve", "Set rack effect curve",
+                )
+            } else {
+                app::edit::apply_coalesced_device_value_batch(
+                    &mut app, &commands, "rack-effect-curve", "Set rack effect curve",
+                )
+            };
+            match result {
+                Ok(outcome) => {
+                    if outcome != app::edit::EditOutcome::NoOp {
+                        if updates.iter().any(|&(_, _, rebuild)| rebuild) {
+                            if plocks {
+                                sync_rack_slot_instrument_authoring_display(
+                                    &mut editor, &app, &state, track, &selected_steps,
+                                );
+                                ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                fx_epoch.fetch_add(1, Ordering::Relaxed);
+                            } else {
+                                refresh_instrument_panel_reactive(
+                                    &mut editor, &app, track, &selected_steps, &ui_epoch,
+                                );
+                            }
+                        } else {
+                            let targets = updates.iter().map(|&(param_idx, _, _)| {
+                                RackDirectDisplayTarget::EffectParam { rack_slot, effect_slot, param_idx }
+                            }).collect::<Vec<_>>();
+                            refresh_rack_direct_params_reactive(
+                                &mut editor, &app, &state, track, &targets, &selected_steps,
+                                if new_plock_row { RackPlockRowsSync::RowSetChanged } else { RackPlockRowsSync::Unchanged },
+                                &ctx.shared.expanded_step_projection, &ui_epoch,
+                            );
+                        }
+                    }
+                    if map_bool(map, "commit") {
+                        app::edit::finish_active_gesture(&mut app);
+                    } else if !plocks && outcome != app::edit::EditOutcome::NoOp {
+                        // Rack triggers restore effect defaults from the
+                        // scheduler snapshot. Keep them current while holding
+                        // the point, without recapturing every other track.
+                        // P-lock batches already publish in the edit layer.
+                        state.publish_scheduler_track(track);
+                    }
+                }
+                Err(error) => editor.handle_host_event(HostEvent::Error(
+                    format!("Rack-slot effect parameter batch failed: {error:?}"),
                 )),
             }
         }
@@ -2226,9 +2350,13 @@ mod tests {
 
     impl RackHarness {
         fn new(selected_steps: HashSet<usize>) -> Self {
+            Self::with_tracks(selected_steps, 1)
+        }
+
+        fn with_tracks(selected_steps: HashSet<usize>, tracks: usize) -> Self {
             let state = Arc::new(sequencer::sequencer::SequencerState::new(
-                1,
-                vec![sequencer::sequencer::default_empty_effect_chain()],
+                tracks,
+                (0..tracks).map(|_| sequencer::sequencer::default_empty_effect_chain()).collect(),
             ));
             let (keyboard_tx, _keyboard_rx) = std::sync::mpsc::channel();
             let mut app = app::App::new(
@@ -2246,9 +2374,9 @@ mod tests {
                 Arc::new(sequencer::recorder::MasterRecorder::new(44_100, 2)),
                 keyboard_tx.clone(),
             );
-            app.tracks = vec!["Track 1".to_string()];
+            app.tracks = (0..tracks).map(|i| format!("Track {}", i + 1)).collect();
             app.track_registry =
-                sequencer::sequencer::TrackRegistry::for_legacy_track_count(1).unwrap();
+                sequencer::sequencer::TrackRegistry::for_legacy_track_count(tracks).unwrap();
 
             let sampler_descriptor = sequencer::effects::EffectDescriptor::builtin_sampler();
             state.set_rack_track_for_all_pattern_snapshots(
@@ -2326,7 +2454,7 @@ mod tests {
                 bus_state: Arc::new(Mutex::new(app.buses.clone())),
                 bus_node_ids: Arc::new(Mutex::new(app.graph.bus_node_ids.clone())),
                 track_groups: Arc::new(Mutex::new(app.groups.clone())),
-                record_armed: Arc::new(Mutex::new(vec![false])),
+                record_armed: Arc::new(Mutex::new(vec![false; tracks])),
                 armed_rack: Arc::new(Mutex::new(None)),
                 recording: Arc::new(AtomicBool::new(false)),
                 master_recording: Arc::new(AtomicBool::new(false)),
@@ -2346,7 +2474,7 @@ mod tests {
             let meters = MeterCache {
                 cached_peak_l_level: 0.0,
                 cached_peak_r_level: 0.0,
-                cached_track_peak_levels: vec![0.0],
+                cached_track_peak_levels: vec![0.0; tracks],
                 cached_rack_slot_peak_levels: Vec::new(),
                 cached_bus_peak_levels: Vec::new(),
                 cached_modulator_phases: Vec::new(),
@@ -2363,6 +2491,7 @@ mod tests {
                 visualization_liveness: VisualizationLiveness::default(),
                 last_voice_count_log_at: Instant::now(),
             };
+            let track_names = app.tracks.clone();
             Self {
                 state,
                 app,
@@ -2372,7 +2501,7 @@ mod tests {
                 frame: FrameDiffState::default(),
                 gesture: GestureState::default(),
                 meters,
-                track_names: vec!["Track 1".to_string()],
+                track_names,
             }
         }
 
@@ -2409,6 +2538,244 @@ mod tests {
                 ("value", user_value),
             ])
         }
+    }
+
+    fn eq8_harness(selected: bool) -> RackHarness {
+        let mut h = RackHarness::with_tracks(
+            if selected { HashSet::from([STEP, STEP + 1]) } else { HashSet::new() },
+            9,
+        );
+        let descriptor = sequencer::effects::EffectDescriptor::builtin_eq8();
+        let mut rack = h.state.pattern.rack_tracks.lock().unwrap()[TRACK].clone().unwrap();
+        rack.slots[SLOT].effect_descriptors[0] = descriptor.clone();
+        rack.slots[SLOT].effect_slots[0] =
+            sequencer::effects::EffectSlotSnapshot::new_default(&descriptor, 0);
+        // A second slot proves edits stay with their rack owner.
+        rack.slots.push(rack.slots[0].clone());
+        h.state.set_rack_track_for_all_pattern_snapshots(TRACK, rack);
+        h.state.transport.playing.store(true, Ordering::Relaxed);
+        let rt = h.editor.runtime_mut();
+        rt.register_native("seq-has-selection?", move |_, _| Ok(Value::Bool(selected)));
+        for file in ["effects/param-controls.lisp", "effects/builtin/filter-core.lisp", "effects/builtin/eq8.lisp"] {
+            let source = std::fs::read_to_string(
+                sequencer::app_paths::app_paths().ui_dir().join(file),
+            ).unwrap();
+            rt.eval_str(&source).unwrap();
+        }
+        // Only the host selection clear is irrelevant to this gesture test.
+        rt.eval_str("(def eseq.effects.panel-frame/fx-clear-selected-effect () nil)").unwrap();
+        rt.eval_str(r#"
+          (def eq8-test-params
+            (list (dict :name "b1 freq" :idx 3)
+                  (dict :name "b1 gain" :idx 4)
+                  (dict :name "b1 q" :idx 5)))
+          (def eq8-test-fx (dict :rack-fx true :track-idx 0 :rack-slot 0 :slot-idx 0))
+        "#).unwrap();
+        h
+    }
+
+    fn eq8_action(h: &mut RackHarness, frequency: f64, commit: bool) {
+        let event = if commit { "commit-band" } else { "change-band" };
+        h.editor.runtime_mut().eval_str(&format!(
+            "(eseq.effects.builtin.eq8/handle-action eq8-test-fx eq8-test-params (dict :type :{event} :id 0 :freq {frequency} :gain 6 :q 1.5))"
+        )).unwrap();
+        let commands = h.editor.drain_host_commands();
+        assert_eq!(commands.len(), 1, "one EQ drag event must be one host batch: {commands:?}");
+        for command in commands {
+            let HostCommand::Custom { name, payload } = command else { panic!("custom EQ command"); };
+            h.dispatch(&name, payload);
+        }
+    }
+
+    #[test]
+    fn rack_eq8_drag_is_one_gesture_and_publishes_only_the_edited_track() {
+        let mut h = eq8_harness(false);
+        let before = h.app.rack_slot_effect_snapshot(TRACK, SLOT).unwrap();
+        let epochs = h.epochs();
+        let scheduler = h.state.latest_scheduler_snapshot();
+        let observed = Rc::new(RefCell::new(Vec::new()));
+        let observer = observed.clone();
+        let rt = h.editor.runtime_mut();
+        rt.register_native("observe-eq8-values", move |args, _| {
+            observer.borrow_mut().push(args.to_vec());
+            Ok(Value::Nil)
+        });
+        let reads = (3..6).map(|param| {
+            sync_rack_slot_effect_param_value_field(rt, &h.app, TRACK, SLOT, 0, param, None);
+            format!("(reactive-get \"SEQ\" \"{}\")",
+                rack_slot_effect_param_value_field(TRACK, SLOT, 0, param,
+                    &before.effect_descriptors[0].params[param].name))
+        }).collect::<Vec<_>>().join(" ");
+        rt.eval_str(&format!("(effect-buffer \"*eq8-values-test*\" (do (observe-eq8-values {reads}) (label \"EQ\")))")).unwrap();
+        h.editor.refresh_runtime_side_effects();
+        let buffer = h.editor.buffers.iter().find(|b| b.name == "*eq8-values-test*").unwrap().id;
+        h.editor.set_active_buffer(buffer);
+        h.editor.set_layout_viewport(40, 10);
+        h.editor.widget_layout().expect("visible EQ value reader");
+        assert!(!observed.borrow().is_empty(), "reader must be mounted before the drag");
+        for frequency in [200.0, 400.0, 800.0] {
+            observed.borrow_mut().clear();
+            eq8_action(&mut h, frequency, false);
+            assert_eq!(*observed.borrow(), vec![vec![
+                Value::Number(frequency), Value::Number(6.0), Value::Number(1.5),
+            ]], "reactive readers see one coherent band update per drag event");
+            assert_eq!(h.epochs(), epochs, "continuous EQ edits do not rebuild the panel");
+            let published = h.state.latest_scheduler_snapshot();
+            assert_eq!(&published.tracks[TRACK].rack_track.as_ref().unwrap()
+                .slots[SLOT].effect_slots[0].defaults[3..6], &[frequency as f32, 6.0, 1.5],
+                "new triggers must hear the current EQ while the point is held");
+            for other_track in 1..9 {
+                assert!(Arc::ptr_eq(&scheduler.tracks[other_track], &published.tracks[other_track]),
+                    "an EQ drag must reuse every unrelated track snapshot");
+            }
+            assert_eq!(h.app.history.undo_len(), 0, "keep the whole drag pending");
+            let slot = h.app.rack_slot_effect_snapshot(TRACK, SLOT).unwrap();
+            assert_eq!(&slot.effect_slots[0].defaults[3..6], &[frequency as f32, 6.0, 1.5]);
+            for (param, value) in [(3, frequency), (4, 6.0), (5, 1.5)] {
+                let field = rack_slot_effect_param_value_field(TRACK, SLOT, 0, param,
+                    &slot.effect_descriptors[0].params[param].name);
+                assert_eq!(reactive_number(&h.editor, &field), value);
+            }
+        }
+        eq8_action(&mut h, 800.0, true);
+        assert!(h.app.history.active_gesture().is_none());
+        assert_eq!(h.app.history.undo_len(), 1);
+        assert!(!Arc::ptr_eq(&scheduler, &h.state.latest_scheduler_snapshot()));
+        let after = h.app.rack_slot_effect_snapshot(TRACK, SLOT).unwrap();
+        assert!(matches!(app::edit::undo(&mut h.app), app::history::HistoryReplay::Applied(_)));
+        assert_eq!(h.app.rack_slot_effect_snapshot(TRACK, SLOT).unwrap().effect_slots[0].defaults,
+            before.effect_slots[0].defaults);
+        assert!(matches!(app::edit::redo(&mut h.app), app::history::HistoryReplay::Applied(_)));
+        assert_eq!(h.app.rack_slot_effect_snapshot(TRACK, SLOT).unwrap().effect_slots[0].defaults,
+            after.effect_slots[0].defaults);
+        assert_eq!(h.app.rack_slot_effect_snapshot(TRACK, SLOT + 1).unwrap().effect_slots[0].defaults,
+            before.effect_slots[0].defaults);
+    }
+
+    #[test]
+    fn rack_eq8_plock_drag_batches_selection_and_preserves_defaults() {
+        let mut h = eq8_harness(true);
+        let before = h.app.rack_slot_effect_snapshot(TRACK, SLOT).unwrap();
+        eq8_action(&mut h, 400.0, false);
+        let epochs = h.epochs();
+        eq8_action(&mut h, 800.0, false);
+        assert_eq!(h.epochs(), epochs, "existing lock drag does not rebuild the panel");
+        eq8_action(&mut h, 800.0, true);
+        assert_eq!(h.app.history.undo_len(), 1);
+        let slot = h.app.rack_slot_effect_snapshot(TRACK, SLOT).unwrap();
+        assert_eq!(slot.effect_slots[0].defaults, before.effect_slots[0].defaults);
+        for step in [STEP, STEP + 1] {
+            assert_eq!(&slot.effect_slots[0].plocks[step][3..6],
+                &[Some(800.0), Some(6.0), Some(1.5)]);
+        }
+        assert!(matches!(app::edit::undo(&mut h.app), app::history::HistoryReplay::Applied(_)));
+        assert_eq!(h.app.rack_slot_effect_snapshot(TRACK, SLOT).unwrap().effect_slots[0].plocks,
+            before.effect_slots[0].plocks);
+    }
+
+    #[test]
+    fn rack_eq8_recording_latches_the_whole_band_without_changing_defaults() {
+        let mut h = eq8_harness(false);
+        h.shared.recording.store(true, Ordering::Relaxed);
+        h.state.pattern.patterns[TRACK].toggle_step(STEP);
+        h.state.transport.track_playheads[TRACK].store(STEP as u32, Ordering::Relaxed);
+        let before = h.app.rack_slot_effect_snapshot(TRACK, SLOT).unwrap();
+        let epochs = h.epochs();
+        eq8_action(&mut h, 800.0, false);
+        let slot = h.app.rack_slot_effect_snapshot(TRACK, SLOT).unwrap();
+        assert_eq!(slot.effect_slots[0].defaults, before.effect_slots[0].defaults);
+        assert_eq!(slot.effect_slots[0].plocks, before.effect_slots[0].plocks);
+        assert_eq!(h.epochs(), epochs);
+        for (param, value) in [(3, 800.0), (4, 6.0), (5, 1.5)] {
+            let field = rack_slot_effect_param_value_field(TRACK, SLOT, 0, param,
+                &slot.effect_descriptors[0].params[param].name);
+            assert_eq!(reactive_number(&h.editor, &field), value);
+        }
+        assert!(tick_step_print(&mut h.app, &h.shared, h.editor.runtime_mut()).printed);
+        let slot = h.app.rack_slot_effect_snapshot(TRACK, SLOT).unwrap();
+        assert_eq!(&slot.effect_slots[0].plocks[STEP][3..6],
+            &[Some(800.0), Some(6.0), Some(1.5)]);
+        assert_eq!(slot.effect_slots[0].defaults, before.effect_slots[0].defaults);
+        assert_eq!(h.app.history.undo_len(), 0, "printing belongs to the recording take");
+        h.shared.step_print.lock().unwrap().release_device_param_gesture(&h.state);
+        assert!(!h.shared.step_print.lock().unwrap().armed());
+    }
+
+    fn eq8_batch_payload(updates: &[(usize, f64)]) -> Value {
+        let Value::Map(mut map) = number_payload(&[
+            ("track", TRACK as f64), ("rack-slot", SLOT as f64), ("effect-slot", 0.0),
+        ]) else { unreachable!() };
+        map.insert("updates".to_string(), Rc::new(RefCell::new(Value::List(
+            updates.iter().map(|&(param, value)| Rc::new(RefCell::new(
+                number_payload(&[("param-idx", param as f64), ("value", value)]),
+            ))).collect(),
+        ))));
+        Value::Map(map)
+    }
+
+    #[test]
+    fn rack_eq8_batch_rejects_invalid_updates_before_any_mutation() {
+        for recording in [false, true] {
+            let mut h = eq8_harness(false);
+            h.shared.recording.store(recording, Ordering::Relaxed);
+            let before = h.app.rack_slot_effect_snapshot(TRACK, SLOT).unwrap();
+            let scheduler = h.state.latest_scheduler_snapshot();
+            for invalid in [(999, 6.0), (4, f64::NAN)] {
+                h.dispatch("set-rack-slot-effect-param-batch",
+                    eq8_batch_payload(&[(3, 800.0), invalid]));
+                assert_eq!(h.app.rack_slot_effect_snapshot(TRACK, SLOT).unwrap().effect_slots[0].defaults,
+                    before.effect_slots[0].defaults);
+                assert!(h.app.history.active_gesture().is_none());
+                assert!(!h.shared.step_print.lock().unwrap().armed());
+                assert!(Arc::ptr_eq(&scheduler, &h.state.latest_scheduler_snapshot()));
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "release-mode nine-track EQ8 host-dispatch comparison; no audio device or GPU"]
+    fn rack_eq8_drag_dispatch_perf() {
+        let mut scalar = eq8_harness(false);
+        let mut batch = eq8_harness(false);
+        let mut scalar_times = Vec::new();
+        let mut batch_times = Vec::new();
+        let mut scalar_publishes = 0;
+        for index in 0..48 {
+            let updates = [(3, 200.0 + index as f64 * 20.0), (4, index as f64 * 0.1), (5, 1.5)];
+            // Alternate order to keep thermal/load drift from favoring a path.
+            for batched in if index % 2 == 0 { [false, true] } else { [true, false] } {
+                let h = if batched { &mut batch } else { &mut scalar };
+                let commands = if batched {
+                    vec![("set-rack-slot-effect-param-batch", eq8_batch_payload(&updates))]
+                } else {
+                    updates.iter().map(|&(param, value)| ("set-rack-slot-effect-param", number_payload(&[
+                        ("track", TRACK as f64), ("rack-slot", SLOT as f64),
+                        ("effect-slot", 0.0), ("param", param as f64), ("value", value),
+                    ]))).collect()
+                };
+                let scheduler = h.state.latest_scheduler_snapshot();
+                let started = Instant::now();
+                for (name, payload) in commands { h.dispatch(name, payload); }
+                let elapsed = started.elapsed().as_secs_f64() * 1_000.0;
+                let published = h.state.latest_scheduler_snapshot();
+                let whole_project_published = !Arc::ptr_eq(&scheduler.tracks[1], &published.tracks[1]);
+                if batched {
+                    assert!(!whole_project_published, "batch drag must not publish the whole project");
+                    assert_eq!(published.tracks[TRACK].rack_track.as_ref().unwrap()
+                        .slots[SLOT].effect_slots[0].defaults[3], updates[0].1 as f32);
+                } else if whole_project_published {
+                    scalar_publishes += 1;
+                }
+                if index >= 8 {
+                    if batched { batch_times.push(elapsed); } else { scalar_times.push(elapsed); }
+                }
+            }
+        }
+        scalar_times.sort_by(f64::total_cmp);
+        batch_times.sort_by(f64::total_cmp);
+        eprintln!("EQ8 nine-track host dispatch: scalar median={:.3}ms p95={:.3}ms; batch median={:.3}ms p95={:.3}ms; events recapturing unrelated tracks: scalar={scalar_publishes}/48, batch=0/48",
+            scalar_times[20], scalar_times[38], batch_times[20], batch_times[38]);
+        assert!(scalar_publishes > 0, "the comparison must exercise the original publication cost");
     }
 
     #[test]

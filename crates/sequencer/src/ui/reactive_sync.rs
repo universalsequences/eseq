@@ -293,37 +293,59 @@ pub(super) fn refresh_rack_direct_param_reactive(
     expanded_step_projection: &Arc<ExpandedStepProjectionRegistry>,
     ui_epoch: &AtomicUsize,
 ) {
+    refresh_rack_direct_params_reactive(
+        editor, app, state, track, &[target], selected_steps, plock_rows,
+        expanded_step_projection, ui_epoch,
+    );
+}
+
+/// Publish every value of a multi-parameter gesture before flushing readers.
+/// EQ curves must not rerender with only frequency or gain updated.
+pub(super) fn refresh_rack_direct_params_reactive(
+    editor: &mut Editor,
+    app: &app::App,
+    state: &Arc<SequencerState>,
+    track: usize,
+    targets: &[RackDirectDisplayTarget],
+    selected_steps: &Arc<Mutex<HashSet<usize>>>,
+    plock_rows: RackPlockRowsSync,
+    expanded_step_projection: &Arc<ExpandedStepProjectionRegistry>,
+    ui_epoch: &AtomicUsize,
+) {
     let display_step = displayed_plock_step(state, track, selected_plock_step(selected_steps));
     let rt = editor.runtime_mut();
-    let mut dirty = match target {
-        RackDirectDisplayTarget::SlotParam { slot_idx, param } => {
-            sync_rack_slot_control_value_field(rt, app, track, slot_idx, param, display_step)
-        }
-        RackDirectDisplayTarget::InstrumentParam {
-            slot_idx,
-            param_idx,
-        } => sync_rack_slot_instrument_param_value_field(
-            rt,
-            app,
-            track,
-            slot_idx,
-            param_idx,
-            display_step,
-        ),
-        RackDirectDisplayTarget::EffectParam {
-            rack_slot,
-            effect_slot,
-            param_idx,
-        } => sync_rack_slot_effect_param_value_field(
-            rt,
-            app,
-            track,
-            rack_slot,
-            effect_slot,
-            param_idx,
-            display_step,
-        ),
-    };
+    let mut dirty = false;
+    for target in targets {
+        dirty |= match *target {
+            RackDirectDisplayTarget::SlotParam { slot_idx, param } => {
+                sync_rack_slot_control_value_field(rt, app, track, slot_idx, param, display_step)
+            }
+            RackDirectDisplayTarget::InstrumentParam {
+                slot_idx,
+                param_idx,
+            } => sync_rack_slot_instrument_param_value_field(
+                rt,
+                app,
+                track,
+                slot_idx,
+                param_idx,
+                display_step,
+            ),
+            RackDirectDisplayTarget::EffectParam {
+                rack_slot,
+                effect_slot,
+                param_idx,
+            } => sync_rack_slot_effect_param_value_field(
+                rt,
+                app,
+                track,
+                rack_slot,
+                effect_slot,
+                param_idx,
+                display_step,
+            ),
+        };
+    }
     if plock_rows == RackPlockRowsSync::RowSetChanged {
         let result = rt.set_reactive(
             "SEQ",
