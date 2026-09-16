@@ -29,6 +29,8 @@ pub mod glyph_atlas;
 pub mod hit;
 pub mod layout;
 pub mod metal_backend;
+#[cfg(target_os = "macos")]
+mod metal_buffer_pool;
 pub mod platform;
 pub(crate) mod pointer_input;
 pub mod theme;

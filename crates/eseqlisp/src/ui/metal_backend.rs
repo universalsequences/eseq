@@ -43,6 +43,7 @@ mod inner {
     };
 
     use crate::ui::pointer_input::HiddenDrag;
+    use crate::ui::metal_buffer_pool::{BufferLease, MetalBufferPool};
 
     use crate::audio::sample::get_registered_sample;
     use crate::backend::{
@@ -148,6 +149,11 @@ mod inner {
         pub scene_ms: f64,
         pub gpu_ms: f64,
         pub static_allocations: u64,
+        pub storage_reuses: u64,
+        pub geometry_upload_bytes: usize,
+        pub storage_spare_bytes: usize,
+        pub storage_in_flight_frames: usize,
+        pub storage_wait_ms: f64,
         pub primitives: u64,
         pub rebuilt_nodes: usize,
         pub reused_nodes: usize,
@@ -183,10 +189,16 @@ mod inner {
         pub fn render_tiled_capture(
             &mut self, tiled: &TiledRenderFrame, target: &TiledCaptureTarget,
         ) -> Result<TiledCaptureTiming, BackendError> {
-            let (status, timing) = self.render_tiled_target(tiled, Some(target))?;
+            let (status, mut timing, command_buffer) = self.render_tiled_target(tiled, Some(target))?;
             if status != TiledRenderStatus::Presented {
                 return Err(BackendError::MetalError);
             }
+            let command_buffer = command_buffer.ok_or(BackendError::MetalError)?;
+            command_buffer.waitUntilCompleted();
+            if command_buffer.status() == MTLCommandBufferStatus::Error {
+                return Err(BackendError::MetalError);
+            }
+            timing.gpu_ms = (command_buffer.GPUEndTime() - command_buffer.GPUStartTime()) * 1000.0;
             Ok(timing)
         }
     }
@@ -1937,7 +1949,7 @@ fragment float4 live_spectrogram_frag(
     struct CompiledWidgetRunCommand {
         phase: WidgetRunCommandPhase,
         pipeline: CompiledWidgetRunPipeline,
-        buffer: Retained<ProtocolObject<dyn MTLBuffer>>,
+        buffer: BufferLease,
         count: usize,
     }
 
@@ -2274,6 +2286,7 @@ fragment float4 live_spectrogram_frag(
         retained_widget_scenes: HashMap<u32, widget_render::retained_scene::RetainedScene>,
         retained_compiled_runs: HashMap<RetainedRunKey, RetainedCompiledRun>,
         retained_compiled_bytes: usize,
+        geometry_pool: MetalBufferPool,
         #[cfg(test)]
         force_dynamic_runs: bool,
         cached_widget_scenes: HashMap<u64, CachedWidgetScene>,
@@ -2425,6 +2438,7 @@ fragment float4 live_spectrogram_frag(
                 retained_widget_scenes: HashMap::new(),
                 retained_compiled_runs: HashMap::new(),
                 retained_compiled_bytes: 0,
+                geometry_pool: MetalBufferPool::new(),
                 #[cfg(test)]
                 force_dynamic_runs: false,
                 cached_widget_scenes: HashMap::new(),
@@ -3103,25 +3117,16 @@ fragment float4 live_spectrogram_frag(
             }
         }
 
-        fn new_static_buffer<T>(
-            &mut self,
-            data: &[T],
-        ) -> Option<Retained<ProtocolObject<dyn MTLBuffer>>> {
-            let byte_len = std::mem::size_of_val(data);
-            if byte_len == 0 {
-                return None;
+        fn upload_retained_geometry<T: Copy>(&mut self, data: &[T]) -> Option<BufferLease> {
+            let before = self.geometry_pool.stats();
+            let buffer = self.geometry_pool.upload(&self.device, data)?;
+            let after = self.geometry_pool.stats();
+            if after.allocations != before.allocations {
+                self.stats.note_widget_run_static_allocation(after.allocated_bytes - before.allocated_bytes);
             }
-            let buffer = unsafe {
-                self.device.newBufferWithBytes_length_options(
-                    NonNull::new(data.as_ptr() as *mut _)?,
-                    byte_len,
-                    MTLResourceOptions::StorageModeShared,
-                )
-            };
-            if buffer.is_some() {
-                self.stats.note_widget_run_static_allocation(byte_len);
-            }
-            buffer
+            self.stats.widget_run_storage_reuses += after.reuses - before.reuses;
+            self.stats.widget_run_upload_bytes += std::mem::size_of_val(data);
+            Some(buffer)
         }
 
         fn compile_simple_widget_run(
@@ -3139,7 +3144,7 @@ fragment float4 live_spectrogram_frag(
             let mut commands = Vec::new();
             let (bg_runs, fg_runs) = partition_widget_instance_runs(primitives);
             for (widget_type, instances) in bg_runs {
-                let buffer = self.new_static_buffer(instances.as_slice())?;
+                let buffer = self.upload_retained_geometry(instances.as_slice())?;
                 commands.push(CompiledWidgetRunCommand {
                     phase: WidgetRunCommandPhase::BackgroundInstances,
                     pipeline: CompiledWidgetRunPipeline::Widget(widget_type),
@@ -3153,7 +3158,7 @@ fragment float4 live_spectrogram_frag(
                 build_widget_primitive_quads(primitives, atlas, vp_w, vp_h)
             };
             if !main_vertices.is_empty() {
-                let buffer = self.new_static_buffer(main_vertices.as_slice())?;
+                let buffer = self.upload_retained_geometry(main_vertices.as_slice())?;
                 commands.push(CompiledWidgetRunCommand {
                     phase: WidgetRunCommandPhase::MainVertices,
                     pipeline: CompiledWidgetRunPipeline::MainText,
@@ -3163,7 +3168,7 @@ fragment float4 live_spectrogram_frag(
             }
 
             for (widget_type, instances) in fg_runs {
-                let buffer = self.new_static_buffer(instances.as_slice())?;
+                let buffer = self.upload_retained_geometry(instances.as_slice())?;
                 commands.push(CompiledWidgetRunCommand {
                     phase: WidgetRunCommandPhase::ForegroundInstances,
                     pipeline: CompiledWidgetRunPipeline::Widget(widget_type),
@@ -3174,7 +3179,7 @@ fragment float4 live_spectrogram_frag(
 
             let circle_vertices = build_circle_quads(primitives, cell_w, cell_h, vp_w, vp_h);
             if !circle_vertices.is_empty() {
-                let buffer = self.new_static_buffer(circle_vertices.as_slice())?;
+                let buffer = self.upload_retained_geometry(circle_vertices.as_slice())?;
                 commands.push(CompiledWidgetRunCommand {
                     phase: WidgetRunCommandPhase::CircleVertices,
                     pipeline: CompiledWidgetRunPipeline::MainText,
@@ -3186,7 +3191,7 @@ fragment float4 live_spectrogram_frag(
             let foreground_rect_vertices =
                 build_foreground_rect_quads(primitives, cell_w, cell_h, vp_w, vp_h);
             if !foreground_rect_vertices.is_empty() {
-                let buffer = self.new_static_buffer(foreground_rect_vertices.as_slice())?;
+                let buffer = self.upload_retained_geometry(foreground_rect_vertices.as_slice())?;
                 commands.push(CompiledWidgetRunCommand {
                     phase: WidgetRunCommandPhase::ForegroundRectVertices,
                     pipeline: CompiledWidgetRunPipeline::MainText,
@@ -3211,7 +3216,7 @@ fragment float4 live_spectrogram_frag(
                     Vec::new()
                 };
                 if !prop_vertices.is_empty() {
-                    let buffer = self.new_static_buffer(prop_vertices.as_slice())?;
+                    let buffer = self.upload_retained_geometry(prop_vertices.as_slice())?;
                     commands.push(CompiledWidgetRunCommand {
                         phase: WidgetRunCommandPhase::ProportionalTextVertices,
                         pipeline: CompiledWidgetRunPipeline::ProportionalText,
@@ -3259,21 +3264,24 @@ fragment float4 live_spectrogram_frag(
                 self.stats.note_widget_run_cache_hit();
                 return Some(std::rc::Rc::clone(&entry.compiled));
             }
+            // Release the obsolete cache owner before allocating its replacement.
+            // Encoded/in-flight frames still own independent immutable leases.
+            if let Some(previous) = self.retained_compiled_runs.remove(&key) {
+                self.retained_compiled_bytes -= previous.bytes;
+            }
             let primitives: Vec<_> = primitives.iter().cloned().map(|primitive|
                 extend_right_edge_primitive(primitive, run.layout_width,
                     run.fill_extra_cols, cell_w, vp_w)).collect();
             let compiled = std::rc::Rc::new(self.compile_simple_widget_run(
                 &primitives, cell_w, cell_h, vp_w, vp_h)?);
             self.stats.note_widget_run_cache_miss();
-            let bytes = compiled.commands.iter().map(|command| command.buffer.length()).sum();
+            let bytes = compiled.commands.iter().map(|command| command.buffer.capacity()).sum();
             self.retained_compiled_bytes += bytes;
-            if let Some(previous) = self.retained_compiled_runs.insert(key, RetainedCompiledRun {
+            self.retained_compiled_runs.insert(key, RetainedCompiledRun {
                 stamp, compiled: std::rc::Rc::clone(&compiled),
                 last_used_frame: self.compiled_widget_run_frame,
                 bytes,
-            }) {
-                self.retained_compiled_bytes -= previous.bytes;
-            }
+            });
             Some(compiled)
         }
 
@@ -3292,6 +3300,7 @@ fragment float4 live_spectrogram_frag(
                 .iter()
                 .filter(|command| command.phase == phase)
             {
+                self.geometry_pool.pin(&command.buffer);
                 match &command.pipeline {
                     CompiledWidgetRunPipeline::MainText => {
                         let Some(pipeline) = self.pipeline.as_ref() else {
@@ -3299,7 +3308,7 @@ fragment float4 live_spectrogram_frag(
                         };
                         enc.setRenderPipelineState(pipeline);
                         unsafe {
-                            enc.setVertexBuffer_offset_atIndex(Some(&command.buffer), 0, 0);
+                            enc.setVertexBuffer_offset_atIndex(Some(command.buffer.metal()), 0, 0);
                             enc.setFragmentTexture_atIndex(Some(atlas_texture), 0);
                             enc.drawPrimitives_vertexStart_vertexCount(
                                 MTLPrimitiveType::Triangle,
@@ -3317,7 +3326,7 @@ fragment float4 live_spectrogram_frag(
                         };
                         enc.setRenderPipelineState(pipeline);
                         unsafe {
-                            enc.setVertexBuffer_offset_atIndex(Some(&command.buffer), 0, 0);
+                            enc.setVertexBuffer_offset_atIndex(Some(command.buffer.metal()), 0, 0);
                             enc.setFragmentTexture_atIndex(Some(texture), 0);
                             enc.drawPrimitives_vertexStart_vertexCount(
                                 MTLPrimitiveType::Triangle,
@@ -3333,7 +3342,7 @@ fragment float4 live_spectrogram_frag(
                         };
                         enc.setRenderPipelineState(pipeline);
                         unsafe {
-                            enc.setVertexBuffer_offset_atIndex(Some(&command.buffer), 0, 0);
+                            enc.setVertexBuffer_offset_atIndex(Some(command.buffer.metal()), 0, 0);
                             enc.drawPrimitives_vertexStart_vertexCount_instanceCount(
                                 MTLPrimitiveType::Triangle,
                                 0,
@@ -4147,6 +4156,7 @@ fragment float4 live_spectrogram_frag(
                 .command_queue
                 .commandBuffer()
                 .ok_or(BackendError::MetalError)?;
+            let buffer_frame = self.geometry_pool.begin_frame(cmdbuf.clone());
             let enc = cmdbuf
                 .renderCommandEncoderWithDescriptor(&render_desc)
                 .ok_or(BackendError::MetalError)?;
@@ -4249,7 +4259,7 @@ fragment float4 live_spectrogram_frag(
             }
 
             enc.endEncoding();
-            cmdbuf.commit();
+            buffer_frame.submit();
             self.upload_arena.finish_frame(cmdbuf.clone());
             cmdbuf.waitUntilCompleted();
             Ok(())
@@ -5030,16 +5040,18 @@ fragment float4 live_spectrogram_frag(
             &mut self,
             tiled: &TiledRenderFrame,
         ) -> Result<TiledRenderStatus, BackendError> {
-            self.render_tiled_target(tiled, None).map(|(status, _)| status)
+            self.render_tiled_target(tiled, None).map(|(status, _, _)| status)
         }
 
         fn render_tiled_target(
             &mut self,
             tiled: &TiledRenderFrame,
             target: Option<&TiledCaptureTarget>,
-        ) -> Result<(TiledRenderStatus, TiledCaptureTiming), BackendError> {
+        ) -> Result<(TiledRenderStatus, TiledCaptureTiming,
+            Option<Retained<ProtocolObject<dyn MTLCommandBuffer>>>), BackendError> {
             let started = Instant::now();
             let allocations_before = self.stats.widget_run_static_allocations;
+            let storage_before = self.geometry_pool.stats();
             let primitives_before = self.stats.widget_primitives;
             let hits_before = self.stats.widget_run_cache_hits;
             let misses_before = self.stats.widget_run_cache_misses;
@@ -5056,7 +5068,7 @@ fragment float4 live_spectrogram_frag(
             self.drain_decoded_images(2);
 
             let Some(pipeline) = self.pipeline.clone() else {
-                return Ok((TiledRenderStatus::NotPresented, TiledCaptureTiming::default()));
+                return Ok((TiledRenderStatus::NotPresented, TiledCaptureTiming::default(), None));
             };
             let Some((cell_w, cell_h, atlas_texture)) = self.atlas.as_ref().map(|atlas| {
                 (
@@ -5065,7 +5077,7 @@ fragment float4 live_spectrogram_frag(
                     atlas.texture.clone(),
                 )
             }) else {
-                return Ok((TiledRenderStatus::NotPresented, TiledCaptureTiming::default()));
+                return Ok((TiledRenderStatus::NotPresented, TiledCaptureTiming::default(), None));
             };
             let drawable = if target.is_none() { self.layer.nextDrawable() } else { None };
             let texture = if let Some(target) = target {
@@ -5073,7 +5085,7 @@ fragment float4 live_spectrogram_frag(
             } else if let Some(drawable) = &drawable {
                 drawable.texture()
             } else {
-                return Ok((TiledRenderStatus::NotPresented, TiledCaptureTiming::default()));
+                return Ok((TiledRenderStatus::NotPresented, TiledCaptureTiming::default(), None));
             };
             let vp_w = texture.width() as f32;
             let vp_h = texture.height() as f32;
@@ -5106,6 +5118,7 @@ fragment float4 live_spectrogram_frag(
                 .command_queue
                 .commandBuffer()
                 .ok_or(BackendError::MetalError)?;
+            let buffer_frame = self.geometry_pool.begin_frame(cmdbuf.clone());
             let enc = cmdbuf
                 .renderCommandEncoderWithDescriptor(&desc)
                 .ok_or(BackendError::MetalError)?;
@@ -6253,13 +6266,20 @@ fragment float4 live_spectrogram_frag(
             if let Some(drawable) = &drawable {
                 cmdbuf.presentDrawable(objc2::runtime::ProtocolObject::from_ref(&**drawable));
             }
-            cmdbuf.commit();
+            buffer_frame.submit();
             self.upload_arena.finish_frame(cmdbuf.clone());
-            let mut timing = TiledCaptureTiming {
-                cpu_ms: started.elapsed().as_secs_f64() * 1000.0,
+            let storage_after = self.geometry_pool.stats();
+            let storage_wait = storage_after.backpressure_wait_time - storage_before.backpressure_wait_time;
+            let timing = TiledCaptureTiming {
+                cpu_ms: started.elapsed().saturating_sub(storage_wait).as_secs_f64() * 1000.0,
                 scene_ms: widget_scene_build_time.as_secs_f64() * 1000.0,
                 gpu_ms: 0.0,
                 static_allocations: self.stats.widget_run_static_allocations - allocations_before,
+                storage_reuses: storage_after.reuses - storage_before.reuses,
+                geometry_upload_bytes: storage_after.uploaded_bytes - storage_before.uploaded_bytes,
+                storage_spare_bytes: self.geometry_pool.spare_bytes(),
+                storage_in_flight_frames: self.geometry_pool.in_flight_frames(),
+                storage_wait_ms: storage_wait.as_secs_f64() * 1000.0,
                 primitives: self.stats.widget_primitives - primitives_before,
                 rebuilt_nodes: scene_counts[0],
                 reused_nodes: scene_counts[1],
@@ -6269,16 +6289,9 @@ fragment float4 live_spectrogram_frag(
                 cache_hits: self.stats.widget_run_cache_hits - hits_before,
                 cache_misses: self.stats.widget_run_cache_misses - misses_before,
             };
-            if target.is_some() {
-                cmdbuf.waitUntilCompleted();
-                if cmdbuf.status() == objc2_metal::MTLCommandBufferStatus::Error {
-                    return Err(BackendError::MetalError);
-                }
-                timing.gpu_ms = (cmdbuf.GPUEndTime() - cmdbuf.GPUStartTime()) * 1000.0;
-            }
             self.stats
                 .note_frame(0, 0, 0, widget_scene_build_time, metal_prep_time);
-            Ok((TiledRenderStatus::Presented, timing))
+            Ok((TiledRenderStatus::Presented, timing, Some(cmdbuf)))
         }
     }
 
@@ -6809,6 +6822,7 @@ fragment float4 live_spectrogram_frag(
                 .command_queue
                 .commandBuffer()
                 .ok_or(BackendError::MetalError)?;
+            let buffer_frame = self.geometry_pool.begin_frame(buf.clone());
             let enc = buf
                 .renderCommandEncoderWithDescriptor(&desc)
                 .ok_or(BackendError::MetalError)?;
@@ -7010,7 +7024,7 @@ fragment float4 live_spectrogram_frag(
 
             enc.endEncoding();
             buf.presentDrawable(objc2::runtime::ProtocolObject::from_ref(&*drawable));
-            buf.commit();
+            buffer_frame.submit();
             self.upload_arena.finish_frame(buf.clone());
             crate::widget_render::sdf_widget::note_sdf_frame_presented(time_seconds);
             if crate::widget_render::sdf_widget::sdf_visual_animations_active(time_seconds)
@@ -7074,6 +7088,8 @@ fragment float4 live_spectrogram_frag(
         widget_run_dynamic_draws: u64,
         widget_run_static_allocations: u64,
         widget_run_static_allocated_bytes: usize,
+        widget_run_storage_reuses: u64,
+        widget_run_upload_bytes: usize,
         retained_run_collection_misses: u64,
         retained_run_reuses: u64,
         retained_run_rebuilds: u64,
@@ -7128,6 +7144,8 @@ fragment float4 live_spectrogram_frag(
                 widget_run_dynamic_draws: 0,
                 widget_run_static_allocations: 0,
                 widget_run_static_allocated_bytes: 0,
+                widget_run_storage_reuses: 0,
+                widget_run_upload_bytes: 0,
                 retained_run_collection_misses: 0,
                 retained_run_reuses: 0,
                 retained_run_rebuilds: 0,
@@ -7316,7 +7334,7 @@ fragment float4 live_spectrogram_frag(
                     self.widget_scene_cache_hits as f64 * 100.0 / scene_cache_attempts as f64
                 };
                 eprintln!(
-                    "[ui-profile][metal] fps={fps:.1} scene_avg={:.2}ms prep_avg={:.2}ms upload={mbps:.2}MB/s text={:.2}MB/s labels={:.2}MB/s widgets={:.2}MB/s arena_upload={:.2}MB/s arena_allocs:{} arena_alloc_mb:{:.2} arena_frame_grows:{} draws:{} prims:{} segments:{} run_cache=hit:{}/miss:{} cached:{} dynamic:{} bypass_dirty:{} bypass_unsupported:{} bypass_complex:{} clear:{} static_allocs:{} static_alloc_mb:{:.2} retained_runs=reuse:{} rebuild:{} miss:{} missing_prev:{} invalid_prev:{} prop_runs:{} prop_glyphs:{} prop_quads:{} prop_cache=hit:{}/miss:{} scene_cache=hit:{}/miss:{}({scene_cache_hit_pct:.1}%) dirty:{} dirty_ids:{} overlay:{} clear:{} miss_reason=cold:{} content:{} layout:{} widget_state:{} theme:{} focus:{} scroll:{} viewport:{}",
+                    "[ui-profile][metal] fps={fps:.1} scene_avg={:.2}ms prep_avg={:.2}ms upload={mbps:.2}MB/s text={:.2}MB/s labels={:.2}MB/s widgets={:.2}MB/s arena_upload={:.2}MB/s arena_allocs:{} arena_alloc_mb:{:.2} arena_frame_grows:{} draws:{} prims:{} segments:{} run_cache=hit:{}/miss:{} cached:{} dynamic:{} bypass_dirty:{} bypass_unsupported:{} bypass_complex:{} clear:{} static_allocs:{} static_alloc_mb:{:.2} storage_reuses:{} storage_upload_mb:{:.2} retained_runs=reuse:{} rebuild:{} miss:{} missing_prev:{} invalid_prev:{} prop_runs:{} prop_glyphs:{} prop_quads:{} prop_cache=hit:{}/miss:{} scene_cache=hit:{}/miss:{}({scene_cache_hit_pct:.1}%) dirty:{} dirty_ids:{} overlay:{} clear:{} miss_reason=cold:{} content:{} layout:{} widget_state:{} theme:{} focus:{} scroll:{} viewport:{}",
                     self.widget_scene_build.as_secs_f64() * 1000.0 / self.frames as f64,
                     self.metal_prep.as_secs_f64() * 1000.0 / self.frames as f64,
                     self.text_bytes as f64 / (1024.0 * 1024.0) / secs,
@@ -7339,6 +7357,8 @@ fragment float4 live_spectrogram_frag(
                     self.widget_run_cache_clears,
                     self.widget_run_static_allocations,
                     self.widget_run_static_allocated_bytes as f64 / (1024.0 * 1024.0),
+                    self.widget_run_storage_reuses,
+                    self.widget_run_upload_bytes as f64 / (1024.0 * 1024.0),
                     self.retained_run_reuses,
                     self.retained_run_rebuilds,
                     self.retained_run_collection_misses,
@@ -7409,6 +7429,8 @@ fragment float4 live_spectrogram_frag(
             self.widget_run_dynamic_draws = 0;
             self.widget_run_static_allocations = 0;
             self.widget_run_static_allocated_bytes = 0;
+            self.widget_run_storage_reuses = 0;
+            self.widget_run_upload_bytes = 0;
             self.retained_run_collection_misses = 0;
             self.retained_run_reuses = 0;
             self.retained_run_rebuilds = 0;
@@ -10682,12 +10704,15 @@ fragment float4 live_spectrogram_frag(
             tiled.tiles[0].frame.widget_content_cache_key += 1;
             tiled.tiles[0].frame.dirty_widget_ids = vec![90102];
             let changed = unwrap_backend(backend.render_tiled_capture(&tiled, &target), "changed control");
-            assert!(changed.static_allocations > 0);
+            assert_eq!(changed.static_allocations, 0, "changed values reuse completed geometry storage");
+            assert!(changed.cache_misses > 0, "changed values must refresh geometry");
             assert_ne!(target.rgba(), old);
             tiled.tiles[0].frame.dirty_widget_ids.clear();
             assert_eq!(unwrap_backend(backend.render_tiled_capture(&tiled, &target), "warm control").static_allocations, 0);
             backend.mono_atlas_generation += 1;
-            assert!(unwrap_backend(backend.render_tiled_capture(&tiled, &target), "atlas invalidation").static_allocations > 0);
+            let atlas_changed = unwrap_backend(backend.render_tiled_capture(&tiled, &target), "atlas invalidation");
+            assert!(atlas_changed.cache_misses > 0, "atlas revisions must refresh UV data");
+            assert_eq!(atlas_changed.static_allocations, 0);
             widget_render::sdf_widget::set_sdf_hit_state(90104,
                 widget_render::sdf_widget::SdfHitState { hit_region: 0, hit_pressed: false });
             unwrap_backend(backend.render_tiled_capture(&tiled, &target), "start hover transition");
@@ -10696,6 +10721,190 @@ fragment float4 live_spectrogram_frag(
             let animated = unwrap_backend(backend.render_tiled_capture(&tiled, &target), "advance hover transition");
             assert_eq!(animated.static_allocations, 0, "hover time must not rebuild geometry");
             assert_ne!(target.rgba(), before_hover, "hover scale must advance on retained geometry");
+        }
+
+        fn changing_controls_frame(backend: &MetalBackend, width: u32, height: u32) -> TiledRenderFrame {
+            use crate::ui::backend::{StatusIndicator, TileFrame};
+            let (cell_w, cell_h) = backend.cell_dimensions();
+            let area = Rect { col: 0.0, row: 0.0,
+                width: width as f32 / cell_w, height: height as f32 / cell_h };
+            let mut root = layout_node("vstack", HashMap::new());
+            root.widget_id = 98000;
+            root.rect = area;
+            for index in 0..96 {
+                let col = (index % 12) as f32 * 7.0;
+                let row = (index / 12) as f32 * 5.0;
+                let mut knob = layout_node("knob", HashMap::from([
+                    ("value".into(), Value::Number(0.0)),
+                ]));
+                knob.widget_id = 98001 + index * 2;
+                knob.rect = Rect { col, row, width: 6.0, height: 3.0 };
+                let mut label = layout_node("label", HashMap::from([
+                    ("text".into(), Value::String("0.000".into())),
+                ]));
+                label.widget_id = knob.widget_id + 1;
+                label.rect = Rect { col, row: row + 3.0, width: 6.0, height: 1.0 };
+                root.children.extend([knob, label]);
+            }
+            TiledRenderFrame { completion: None, tiles: vec![TileFrame {
+                tile_id: 1, rect: area, body_rect: area, tabs: vec![], is_active: true,
+                show_status: false, show_border: false, border_width_px: 0.0,
+                border_radius_px: 0.0, background_color: None, background_color_name: None,
+                inspect_overlay: None,
+                frame: RenderFrame {
+                    lines: vec![], cursor: None, buffer_name: "changing-controls".into(), dirty: false,
+                    status_cells: vec![], status_indicator: StatusIndicator { toggle_cols: None },
+                    completion: None, text_cache_key: 1, widget_layout_cache_key: 1,
+                    widget_content_cache_key: 1, dirty_widget_ids: vec![],
+                    widget_layout: Some(std::sync::Arc::new(root)), focused_widget_id: None,
+                    widget_scroll_top: 0.0, widget_scroll_left: 0.0, widget_layout_scroll_left: 0.0,
+                    text_scroll_top: 0, text_cell_width_scale: 1.0, text_cell_height_scale: 1.0,
+                },
+            }] }
+        }
+
+        fn change_control_values(tiled: &mut TiledRenderFrame, index: usize) {
+            let frame = &mut tiled.tiles[0].frame;
+            frame.widget_content_cache_key += 1;
+            frame.dirty_widget_ids.clear();
+            let root = std::sync::Arc::make_mut(frame.widget_layout.as_mut().unwrap());
+            for (control, pair) in root.children.chunks_mut(2).enumerate() {
+                let value = ((index * 7 + control * 13) % 1000) as f64 / 999.0;
+                pair[0].props.insert("value".into(), Value::Number(value));
+                pair[1].props.insert("text".into(), Value::String(format!("{value:.3}")));
+                frame.dirty_widget_ids.extend([pair[0].widget_id, pair[1].widget_id]);
+            }
+        }
+
+        #[test]
+        #[ignore = "release renderer measurement; run alone on a quiet machine"]
+        fn retained_value_update_perf() {
+            let (width, height) = (1600, 1200);
+            let mut backend = unwrap_backend(MetalBackend::new_capture(width, height), "backend");
+            unwrap_backend(backend.initialize_graphics(1.0), "graphics");
+            let target = unwrap_backend(backend.create_tiled_capture_target(width, height), "target");
+            let mut tiled = changing_controls_frame(&backend, width, height);
+            let mut samples = Vec::new();
+            for index in 0..360 {
+                change_control_values(&mut tiled, index);
+                let sample = unwrap_backend(backend.render_tiled_capture(&tiled, &target), "value update");
+                if index >= 120 { samples.push(sample); }
+            }
+            let mut times: Vec<_> = samples.iter().map(|sample| sample.cpu_ms).collect();
+            times.sort_by(f64::total_cmp);
+            let report = serde_json::json!({
+                "scope": "production tiled renderer, 96 changing knobs and text labels; no audio/input/presentation",
+                "width": width, "height": height, "warmup_frames": 120,
+                "cpu_p50_ms": times[times.len() / 2],
+                "cpu_p95_ms": times[times.len() * 95 / 100],
+                "static_allocations": samples.iter().map(|sample| sample.static_allocations).sum::<u64>(),
+                "samples": samples,
+            });
+            if let Some(path) = std::env::var_os("ESEQ_RETAINED_BENCH_OUT") {
+                std::fs::write(path, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
+            }
+            eprintln!("retained value updates: p50={:.3}ms p95={:.3}ms allocations={}",
+                times[times.len() / 2], times[times.len() * 95 / 100], report["static_allocations"]);
+            assert_pixels_have_non_background_values(&target.rgba());
+        }
+
+        #[test]
+        fn changing_values_reuse_storage_and_match_dynamic_pixels() {
+            let (width, height) = (1600, 1200);
+            let mut backend = unwrap_backend(MetalBackend::new_capture(width, height), "backend");
+            unwrap_backend(backend.initialize_graphics(1.0), "graphics");
+            let target = unwrap_backend(backend.create_tiled_capture_target(width, height), "target");
+            let mut tiled = changing_controls_frame(&backend, width, height);
+            let mut prior_pixels = Vec::new();
+            for index in 0..48 {
+                change_control_values(&mut tiled, index);
+                let sample = unwrap_backend(backend.render_tiled_capture(&tiled, &target), "changing controls");
+                assert!(sample.cache_misses > 0);
+                if index >= 16 {
+                    assert_eq!(sample.static_allocations, 0, "warm value update {index} allocated storage");
+                }
+                if matches!(index, 0 | 1 | 16 | 47) {
+                    let pixels = target.rgba();
+                    assert_ne!(pixels, prior_pixels, "values must visibly change");
+                    backend.force_dynamic_runs = true;
+                    unwrap_backend(backend.render_tiled_capture(&tiled, &target), "dynamic reference");
+                    backend.force_dynamic_runs = false;
+                    let dynamic = target.rgba();
+                    let error: u64 = pixels.iter().zip(&dynamic).map(|(&a, &b)| a.abs_diff(b) as u64).sum();
+                    assert!(error as f64 / (pixels.len() as f64) < 0.1,
+                        "reused storage/reference mismatch on value update {index}");
+                    prior_pixels = pixels;
+                }
+            }
+        }
+
+        fn queued_value_update_pixel_errors(discard_pins: bool) -> Vec<f64> {
+            use objc2_metal::{MTLEvent, MTLSharedEvent};
+            struct Unblock(Retained<ProtocolObject<dyn MTLSharedEvent>>);
+            impl Drop for Unblock {
+                fn drop(&mut self) { self.0.setSignaledValue(u64::MAX); }
+            }
+            let (width, height) = (1600, 1200);
+            let mut backend = unwrap_backend(MetalBackend::new_capture(width, height), "backend");
+            unwrap_backend(backend.initialize_graphics(1.0), "graphics");
+            let mut tiled = changing_controls_frame(&backend, width, height);
+            let reference = unwrap_backend(backend.create_tiled_capture_target(width, height), "reference");
+            change_control_values(&mut tiled, 73);
+            unwrap_backend(backend.render_tiled_capture(&tiled, &reference), "prime cached draws");
+            let gate = Unblock(backend.device.newSharedEvent().expect("shared event"));
+            let blocker = backend.command_queue.commandBuffer().unwrap();
+            let event: &ProtocolObject<dyn MTLEvent> = ProtocolObject::from_ref(&*gate.0);
+            blocker.encodeWaitForEvent_value(event, 1);
+            blocker.commit();
+            let mut queued = Vec::new();
+            for index in 1..=3 {
+                change_control_values(&mut tiled, index * 73);
+                if index == 1 {
+                    // A cache-hit frame must pin just as reliably as a rebuilt one.
+                    tiled.tiles[0].frame.widget_content_cache_key -= 1;
+                    tiled.tiles[0].frame.dirty_widget_ids.clear();
+                }
+                let target = unwrap_backend(backend.create_tiled_capture_target(width, height), "queued target");
+                let (_, timing, command) = unwrap_backend(backend.render_tiled_target(&tiled, Some(&target)), "queued frame");
+                let command = command.expect("submitted frame");
+                assert_ne!(command.status(), MTLCommandBufferStatus::Completed);
+                if index == 1 { assert_eq!(timing.cache_misses, 0); }
+                queued.push((index, target, command));
+                if discard_pins { backend.geometry_pool.discard_in_flight_leases_for_test(); }
+                backend.retained_compiled_runs.clear();
+                backend.retained_compiled_bytes = 0;
+            }
+            assert_eq!(backend.geometry_pool.in_flight_frames(), 3);
+            gate.0.setSignaledValue(1);
+            queued.last().unwrap().2.waitUntilCompleted();
+            let mut errors = Vec::new();
+            for (index, target, command) in queued {
+                assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
+                let pixels = target.rgba();
+                change_control_values(&mut tiled, index * 73);
+                backend.force_dynamic_runs = true;
+                unwrap_backend(backend.render_tiled_capture(&tiled, &reference), "dynamic reference");
+                backend.force_dynamic_runs = false;
+                let dynamic = reference.rgba();
+                let error: u64 = pixels.iter().zip(&dynamic).map(|(&a, &b)| a.abs_diff(b) as u64).sum();
+                errors.push(error as f64 / pixels.len() as f64);
+            }
+            errors
+        }
+
+        #[test]
+        fn queued_value_updates_keep_each_frames_pixels_after_cache_eviction() {
+            let errors = queued_value_update_pixel_errors(false);
+            assert!(errors.iter().all(|&error| error < 0.1),
+                "queued frames were overwritten before their GPU draws: {errors:?}");
+        }
+
+        #[test]
+        fn queued_pixel_regression_detects_missing_gpu_frame_ownership() {
+            let errors = queued_value_update_pixel_errors(true);
+            assert!(errors[0] > 0.1 && errors[1] > 0.1,
+                "regression must detect premature recycling: {errors:?}");
+            assert!(errors[2] < 0.1, "last frame still has the newest data: {errors:?}");
         }
 
         #[test]
