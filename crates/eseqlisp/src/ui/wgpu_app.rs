@@ -535,6 +535,7 @@ pub struct WgpuAppBackend {
     text_atlas_zoom: f32,
     prop_atlas: Option<WgpuPropGlyphAtlas>,
     prop_text_layout_cache: PropTextLayoutCache,
+    retained_widget_scenes: HashMap<u32, widget_render::retained_scene::RetainedScene>,
     // Resources
     waveform_buffers: HashMap<(String, u32), WaveformGpuResource>,
     wavetable_buffers: HashMap<String, WavetableGpuResource>,
@@ -620,6 +621,7 @@ impl WgpuAppBackend {
             text_atlas_zoom: 0.0,
             prop_atlas: None,
             prop_text_layout_cache: PropTextLayoutCache::new(),
+            retained_widget_scenes: HashMap::new(),
             waveform_buffers: HashMap::new(),
             wavetable_buffers: HashMap::new(),
             live_spectrogram_buffers: HashMap::new(),
@@ -1596,6 +1598,8 @@ impl WgpuAppBackend {
         let plan_start = Instant::now();
 
         // ── Per-tile planning ────────────────────────────────────────────────
+        self.retained_widget_scenes.retain(|id, _|
+            tiled.tiles.iter().any(|tile| tile.tile_id == *id));
         for tile in &tiled.tiles {
             let frame_left_px = tile.rect.col * cell_w;
             let frame_top_px = tile.rect.row * cell_h;
@@ -1749,7 +1753,6 @@ impl WgpuAppBackend {
                 }
                 let time_seconds = self.elapsed_time_seconds();
                 let inner_rows_exact = ((content_bottom_px - content_top_px) / cell_h).max(0.0);
-                let inner_rows = inner_rows_exact.floor() as u16;
                 let text_scroll = tile.frame.text_scroll_top as f32;
                 let widget_scroll = tile.frame.widget_scroll_top;
                 let combined_scroll = text_scroll + widget_scroll;
@@ -1782,12 +1785,15 @@ impl WgpuAppBackend {
                 let fill_extra_cols = (content_width_cells - layout.rect.width).max(0.0);
 
                 let widget_scene_start = Instant::now();
-                let (primitives, overlay_prims) = widget_render::collect_gpu_primitives(
-                    layout,
-                    viewport,
-                    combined_scroll,
-                    inner_rows,
-                );
+                let scene = self.retained_widget_scenes.entry(tile.tile_id).or_default().prepare(
+                    layout, tile.frame.widget_layout_cache_key,
+                    tile.frame.widget_content_cache_key, &tile.frame.dirty_widget_ids,
+                    viewport, crate::layout::Rect {
+                        col: tile.frame.widget_layout_scroll_left, row: combined_scroll,
+                        width: content_width_cells, height: inner_rows_exact,
+                    });
+                let primitives = scene.flatten(viewport);
+                let overlay_prims = scene.overlay;
                 sample.widget_primitives += primitives.len() as u64;
                 let offset_prims: Vec<_> = primitives
                     .into_iter()

@@ -186,3 +186,34 @@ commands. See `crates/sequencer/ui/capture-fixtures/bus-routing.lisp` for a mixe
 capture with a group routed through several buses.
 
 Layer racks can declare `:instruments ("factory:Synths/Digi Drift")` to load saved instruments into slots through the normal host path. When combined with `:samples`, instrument slots follow the sample slots. See `crates/sequencer/ui/capture-fixtures/rack-slot-presets.lisp`.
+
+## Tiled capture and scroll replay
+
+`--all-panels` preserves the fixture's panel layout and focuses the existing
+tile named by `--buffer`. It fails if that buffer is not visible, so selecting
+FX cannot replace the transport or another panel. This path uses the production
+tiled renderer. Without `--all-panels`, a scroll replay isolates the selected
+buffer first.
+
+```sh
+cargo run --release -p sequencer --bin metal_seq -- capture \
+  --script crates/sequencer/ui/capture-fixtures/renderer-scroll.lisp \
+  --buffer fx --all-panels --width 2400 --height 1400 \
+  --scroll-frames 240 --scroll-x 220 \
+  --out /tmp/renderer-scroll.png
+```
+
+Scroll distances are in layout cells; `--scroll-y` selects vertical movement.
+The replay moves from zero to the requested distance and back, subject to the
+buffer's actual scroll limits. It warms the same positions once, then records
+the second pass. The JSON beside the PNG includes the active buffer and actual
+scroll offsets, CPU frame-building/submission times, scene preparation, GPU
+time, visible primitives, rebuilt/reused/culled nodes, reindexed nodes, refreshed
+bounds, compiled cache hits and misses, and new static GPU geometry allocations. The PNG contains the final
+frame. Use `--scroll-frames 2` to capture the maximum scroll position.
+
+CPU timing excludes waiting for GPU completion. This is a headless project
+replay without an audio device, playback scheduling, event delivery, or display
+presentation latency; it does not measure whole-app input latency. Use a release
+build and compare saved baseline/candidate binaries with identical fixtures and
+viewport sizes. Report live playback and event-to-present measurements separately.

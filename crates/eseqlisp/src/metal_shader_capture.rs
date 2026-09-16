@@ -275,6 +275,11 @@ impl MetalCaptureRenderer {
         scene: &str,
         encoder: &ProtocolObject<dyn MTLRenderCommandEncoder>,
     ) -> Result<(), String> {
+        let translation = [0.0f32; 4];
+        unsafe {
+            encoder.setVertexBytes_length_atIndex(
+                NonNull::from(&translation).cast(), std::mem::size_of_val(&translation), 1);
+        }
         // Every encoder call below is an `unsafe` Objective-C message in
         // objc2-metal; the buffers and textures they reference are all owned
         // by this function and outlive the encoder.

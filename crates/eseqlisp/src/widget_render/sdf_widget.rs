@@ -35,7 +35,7 @@ pub fn shader_state_prop_name(name: &str) -> String {
 }
 
 /// Per-widget hit state tracked between frames.
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct SdfHitState {
     pub hit_region: i32, // -1 = none
     pub hit_pressed: bool,
@@ -62,8 +62,13 @@ thread_local! {
 }
 
 pub fn set_sdf_hit_state(widget_id: u64, state: SdfHitState) {
-    SDF_HIT_STATES.with(|s| s.borrow_mut().insert(widget_id, state));
-    super::bump_widget_state_generation();
+    let changed = SDF_HIT_STATES.with(|states| {
+        let mut states = states.borrow_mut();
+        if states.get(&widget_id) == Some(&state) { return false; }
+        states.insert(widget_id, state);
+        true
+    });
+    if changed { super::bump_widget_state_revision(widget_id); }
 }
 
 pub fn get_sdf_hit_state(widget_id: u64) -> SdfHitState {
@@ -80,14 +85,12 @@ pub fn clear_sdf_hit_states_except(keep_widget_id: Option<u64>) -> bool {
             }
             if state.hit_region != -1 || state.hit_pressed {
                 *state = SdfHitState::default();
+                super::bump_widget_state_revision(*widget_id);
                 changed = true;
             }
         }
         changed
     });
-    if changed {
-        super::bump_widget_state_generation();
-    }
     changed
 }
 
@@ -645,6 +648,29 @@ pub fn sdf_widget_paint_rect(rect: Rect, paint_margin: f32) -> Rect {
         width: rect.width + paint_margin * 2.0,
         height: rect.height + paint_margin * 2.0,
     }
+}
+
+/// Conservative bounds for every declared hover/press scale and any transition
+/// still in flight from a previous style. Used before invoking the painter.
+pub(super) fn visual_style_paint_bounds(widget_id: u64, props: &HashMap<String, Value>, rect: Rect) -> Option<Rect> {
+    let mut scale = 1.0_f32;
+    if let Some(Value::Map(style)) = props.get("style") {
+        for state in ["hover", "pressed"] {
+            if let Some(style) = style_state_map(style, state) {
+                let value = map_number(&style, "scale").unwrap_or(1.0);
+                if !value.is_finite() { return None; }
+                scale = scale.max(value);
+            }
+        }
+    }
+    SDF_VISUAL_SCALE_ANIMS.with(|anims| {
+        if let Some(anim) = anims.borrow().get(&widget_id) {
+            scale = scale.max(anim.start_scale).max(anim.target_scale);
+        }
+    });
+    Some(Rect { col: rect.col - rect.width * (scale - 1.0) * 0.5,
+        row: rect.row - rect.height * (scale - 1.0) * 0.5,
+        width: rect.width * scale, height: rect.height * scale })
 }
 
 pub fn sdf_widget_logical_uv_bounds(logical_rect: Rect, paint_rect: Rect) -> [f32; 4] {

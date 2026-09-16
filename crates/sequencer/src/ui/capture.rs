@@ -34,6 +34,10 @@ pub(crate) struct CaptureArgs {
     padding: u32,
     list_keys: bool,
     hide_status: bool,
+    scroll_frames: usize,
+    scroll_x: f32,
+    scroll_y: f32,
+    all_panels: bool,
 }
 
 impl CaptureArgs {
@@ -58,6 +62,10 @@ impl CaptureArgs {
         let mut padding = 0;
         let mut list_keys = false;
         let mut hide_status = false;
+        let mut scroll_frames = 0;
+        let mut scroll_x = 0.0;
+        let mut scroll_y = 0.0;
+        let mut all_panels = false;
 
         while let Some(arg) = args.next() {
             match arg.as_str() {
@@ -72,6 +80,16 @@ impl CaptureArgs {
                     .map_err(|_| "--padding expects a non-negative pixel count".to_string())?,
                 "--list-keys" => list_keys = true,
                 "--hide-status" => hide_status = true,
+                "--scroll-frames" => scroll_frames = parse_usize_arg(&mut args, "--scroll-frames")?,
+                "--scroll-x" | "--scroll-y" => {
+                    let value = next_arg(&mut args, &arg)?.parse::<f32>()
+                        .map_err(|_| format!("{arg} expects a finite non-negative cell offset"))?;
+                    if !value.is_finite() || value < 0.0 {
+                        return Err(format!("{arg} expects a finite non-negative cell offset"));
+                    }
+                    if arg == "--scroll-x" { scroll_x = value; } else { scroll_y = value; }
+                }
+                "--all-panels" => all_panels = true,
                 "-h" | "--help" => return Err(Self::usage()),
                 other => {
                     return Err(format!(
@@ -99,11 +117,15 @@ impl CaptureArgs {
             padding,
             list_keys,
             hide_status,
+            scroll_frames,
+            scroll_x,
+            scroll_y,
+            all_panels,
         }))
     }
 
     fn usage() -> String {
-        "usage: metal_seq capture --script PATH [--buffer '*fx*'] [--track N] [--width PX] [--height PX] [--key KEY] [--padding PX] [--list-keys] [--hide-status] [--out PATH]"
+        "usage: metal_seq capture --script PATH [--buffer '*fx*'] [--track N] [--width PX] [--height PX] [--key KEY] [--padding PX] [--list-keys] [--hide-status] [--out PATH] [--scroll-frames N --scroll-x CELLS --scroll-y CELLS] [--all-panels]"
             .to_string()
     }
 }
@@ -1295,16 +1317,24 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
         .find(|buffer| buffer.name == args.buffer)
         .map(|buffer| buffer.id)
         .ok_or_else(|| format!("capture buffer {:?} does not exist", args.buffer))?;
-    editor.set_active_buffer(buffer_id);
+    if args.all_panels {
+        if !editor.switch_active_tile_to_buffer_named(&args.buffer) {
+            return Err(format!("capture buffer {:?} is not visible in the panel layout", args.buffer).into());
+        }
+    } else {
+        editor.set_active_buffer(buffer_id);
+    }
     let isolation = if args.hide_status {
         format!("(set-layout (list :buf {} :hide-status true))", serde_json::to_string(&args.buffer)?)
     } else {
         "(delete-other-windows)".to_string()
     };
-    editor
-        .runtime_mut()
-        .eval_str(&isolation)
-        .map_err(|error| format!("failed to isolate capture buffer: {error:?}"))?;
+    if !args.all_panels {
+        editor
+            .runtime_mut()
+            .eval_str(&isolation)
+            .map_err(|error| format!("failed to isolate capture buffer: {error:?}"))?;
+    }
     editor.refresh_runtime_side_effects();
     editor.clear_minibuffer_message();
 
@@ -1318,6 +1348,56 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
     let mut frame = build_render_frame(&mut editor, columns, rows);
     if apply_capture_click_widgets(&mut editor, columns, rows)? {
         frame = build_render_frame(&mut editor, columns, rows);
+    }
+
+    if args.scroll_frames > 0 || args.all_panels {
+        if args.key.is_some() || args.list_keys {
+            return Err("tiled capture cannot be combined with keyed capture".into());
+        }
+        let target = backend.create_tiled_capture_target(args.width, args.height)
+            .map_err(|_| "failed to create tiled capture target")?;
+        let mut samples = Vec::new();
+        let mut previous = (0.0, 0.0);
+        // Warm every position in the replay before measuring. This distinguishes
+        // steady scrolling from first exposure, glyph rasterization and uploads.
+        let frames = args.scroll_frames.max(1);
+        let passes = if args.scroll_frames > 0 { 2 } else { 1 };
+        for pass in 0..passes {
+            for index in 0..frames {
+                let phase = index as f32 / frames as f32;
+                let position = 1.0 - (phase * 2.0 - 1.0).abs();
+                let next = (args.scroll_x * position, args.scroll_y * position);
+                let started = Instant::now();
+                editor.apply_smooth_widget_scroll(previous.0 - next.0, previous.1 - next.1);
+                previous = next;
+                editor.sync_reactive_bindings_for_visible_layouts();
+                let tiled = eseqlisp::frame::build_tiled_render_frame_borderless(
+                    &mut editor, columns, rows);
+                let frame_build_ms = started.elapsed().as_secs_f64() * 1000.0;
+                let timing = backend.render_tiled_capture(&tiled, &target)
+                    .map_err(|_| "failed to render tiled scroll replay")?;
+                if pass + 1 == passes {
+                    let active = tiled.tiles.iter().find(|tile| tile.is_active);
+                    samples.push(serde_json::json!({
+                        "frame_build_ms": frame_build_ms, "render": timing,
+                        "cpu_ms": frame_build_ms + timing.cpu_ms,
+                        "scroll": active.map(|tile| [tile.frame.widget_layout_scroll_left, tile.frame.widget_scroll_top]),
+                        "active_buffer": active.map(|tile| &tile.frame.buffer_name),
+                    }));
+                }
+            }
+        }
+        if let Some(parent) = args.out.parent() { std::fs::create_dir_all(parent)?; }
+        target.save_png(&args.out)?;
+        let report = serde_json::json!({
+            "scope": "production tiled renderer, no audio device or presentation latency",
+            "script": args.script, "buffer": args.buffer, "all_panels": args.all_panels,
+            "width": args.width, "height": args.height,
+            "scroll_cells": [args.scroll_x, args.scroll_y], "samples": samples,
+        });
+        std::fs::write(args.out.with_extension("json"), serde_json::to_vec_pretty(&report)?)?;
+        println!("{}", args.out.display());
+        return Ok(());
     }
 
     if args.list_keys {

@@ -136,6 +136,88 @@ mod inner {
         NotPresented,
     }
 
+    /// Reusable offscreen destination for the production tiled render path.
+    pub struct TiledCaptureTarget {
+        texture: Retained<ProtocolObject<dyn MTLTexture>>,
+    }
+
+    #[derive(Clone, Copy, Debug, Default, serde::Serialize)]
+    pub struct TiledCaptureTiming {
+        /// CPU preparation and submission, excluding the GPU completion wait.
+        pub cpu_ms: f64,
+        pub scene_ms: f64,
+        pub gpu_ms: f64,
+        pub static_allocations: u64,
+        pub primitives: u64,
+        pub rebuilt_nodes: usize,
+        pub reused_nodes: usize,
+        pub culled_nodes: usize,
+        pub reindexed_nodes: usize,
+        pub bounds_refreshed_nodes: usize,
+        pub cache_hits: u64,
+        pub cache_misses: u64,
+    }
+
+    impl MetalBackend {
+        pub fn create_tiled_capture_target(
+            &self, width: u32, height: u32,
+        ) -> Result<TiledCaptureTarget, BackendError> {
+            if width == 0 || height == 0 {
+                return Err(BackendError::MetalError);
+            }
+            let desc = MTLTextureDescriptor::new();
+            desc.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
+            unsafe {
+                desc.setWidth(width as usize);
+                desc.setHeight(height as usize);
+            }
+            desc.setStorageMode(MTLStorageMode::Shared);
+            desc.setUsage(MTLTextureUsage::RenderTarget | MTLTextureUsage::ShaderRead);
+            let texture = self.device.newTextureWithDescriptor(&desc)
+                .ok_or(BackendError::MetalError)?;
+            Ok(TiledCaptureTarget { texture })
+        }
+
+        /// Uses the live tiled renderer, then waits so readback and GPU timing
+        /// are valid. No drawable, window, audio device, or alternate renderer.
+        pub fn render_tiled_capture(
+            &mut self, tiled: &TiledRenderFrame, target: &TiledCaptureTarget,
+        ) -> Result<TiledCaptureTiming, BackendError> {
+            let (status, timing) = self.render_tiled_target(tiled, Some(target))?;
+            if status != TiledRenderStatus::Presented {
+                return Err(BackendError::MetalError);
+            }
+            Ok(timing)
+        }
+    }
+
+    impl TiledCaptureTarget {
+        pub fn rgba(&self) -> Vec<u8> {
+            let width = self.texture.width();
+            let height = self.texture.height();
+            let mut pixels = vec![0u8; width * height * 4];
+            unsafe {
+                self.texture.getBytes_bytesPerRow_fromRegion_mipmapLevel(
+                    NonNull::new(pixels.as_mut_ptr().cast()).unwrap(), width * 4,
+                    MTLRegion {
+                        origin: MTLOrigin { x: 0, y: 0, z: 0 },
+                        size: MTLSize { width, height, depth: 1 },
+                    }, 0,
+                );
+            }
+            for pixel in pixels.chunks_exact_mut(4) {
+                pixel.swap(0, 2);
+            }
+            pixels
+        }
+
+        pub fn save_png(&self, path: &std::path::Path) -> Result<(), image::ImageError> {
+            image::save_buffer_with_format(path, &self.rgba(),
+                self.texture.width() as u32, self.texture.height() as u32,
+                image::ColorType::Rgba8, image::ImageFormat::Png)
+        }
+    }
+
     // ── Shader source ─────────────────────────────────────────────────────────
     //
     // Buffer-based vertex input: no vertex descriptor needed.
@@ -161,11 +243,12 @@ struct Varyings {
 
 vertex Varyings vert(
     uint                    vid   [[vertex_id]],
-    device const Vertex*    verts [[buffer(0)]])
+    device const Vertex*    verts [[buffer(0)]],
+    constant float4& frame [[buffer(1)]])
 {
     Vertex v = verts[vid];
     Varyings out;
-    out.position = float4(v.position, 0.0, 1.0);
+    out.position = float4(v.position + frame.xy, 0.0, 1.0);
     out.uv  = v.uv;
     out.fg  = v.fg;
     out.bg  = v.bg;
@@ -656,7 +739,8 @@ float compute_border_mask(float2 localPos, float2 outerSize, float cornerRadius,
 vertex WidgetVaryings widget_vert(
     uint vid [[vertex_id]],
     uint iid [[instance_id]],
-    device const WidgetInstance* instances [[buffer(0)]])
+    device const WidgetInstance* instances [[buffer(0)]],
+    constant float4& frame [[buffer(1)]])
 {
     float2 corners[6] = {
         float2(0, 0), float2(0, 1), float2(1, 0),
@@ -665,12 +749,23 @@ vertex WidgetVaryings widget_vert(
     float2 corner = corners[vid];
     WidgetInstance inst = instances[iid];
     float2 ndc = mix(inst.ndc_min, inst.ndc_max, corner);
+    // Hover/press scale is presentation state. Keep the original quad resident
+    // and evaluate its transition from the same frame time as the fragment.
+    if (inst.color_d.w < 0.0) {
+        float duration = -inst.color_d.w;
+        float t = clamp((frame.z - inst.color_d.z) / duration, 0.0, 1.0);
+        float eased = fabs(inst.color_b.z - 2.0) < 0.5 ? t * t * (3.0 - 2.0 * t)
+            : (fabs(inst.color_b.z - 3.0) < 0.5 ? t : 1.0 - pow(1.0 - t, 3.0));
+        float scale = duration <= 0.0001 ? inst.color_d.y : mix(inst.color_d.x, inst.color_d.y, eased);
+        float2 center = (inst.ndc_min + inst.ndc_max) * 0.5;
+        ndc = center + (ndc - center) * scale;
+    }
 
     WidgetVaryings out;
-    out.position = float4(ndc, 0.0, 1.0);
+    out.position = float4(ndc + frame.xy, 0.0, 1.0);
     out.uv = corner;
     out.value_t = inst.value_t;
-    out.itime = inst.itime;
+    out.itime = frame.z;
     out.uniform_a = inst.uniform_a;
     out.uniform_b = inst.uniform_b;
     out.uniform_c = inst.uniform_c;
@@ -678,7 +773,7 @@ vertex WidgetVaryings widget_vert(
     out.color_a = inst.color_a;
     out.color_b = inst.color_b;
     out.color_c = inst.color_c;
-    out.color_d = inst.color_d;
+    out.color_d = inst.color_d.w < 0.0 ? float4(0.0) : inst.color_d;
     out.aspect = inst.pixel_aspect;
     out.corner_radius = inst.corner_radius;
     return out;
@@ -1831,20 +1926,6 @@ fragment float4 live_spectrogram_frag(
         ProportionalTextVertices,
     }
 
-    #[derive(Clone, Debug, Hash, PartialEq, Eq)]
-    struct WidgetRunCacheKey {
-        widget_id: u64,
-        widget_type: String,
-        primitive_signature: u64,
-        theme_generation: u64,
-        mono_atlas_generation: u64,
-        prop_atlas_generation: u64,
-        cell_w_bits: u32,
-        cell_h_bits: u32,
-        vp_w_bits: u32,
-        vp_h_bits: u32,
-    }
-
     #[derive(Clone)]
     enum CompiledWidgetRunPipeline {
         MainText,
@@ -1863,13 +1944,42 @@ fragment float4 live_spectrogram_frag(
     #[derive(Clone)]
     struct CompiledWidgetRun {
         commands: Vec<CompiledWidgetRunCommand>,
-        last_used_frame: u64,
     }
 
     struct OffsetGpuPrimitiveRun {
+        scene_id: u32,
+        source: widget_render::retained_scene::PreparedRun,
+        primitive_start: usize,
+        translation: [f32; 2],
+        fill_extra_cols: f32,
+        layout_width: f32,
+    }
+
+    #[derive(Clone, Copy, Hash, PartialEq, Eq)]
+    struct RetainedRunKey {
+        scene_id: u32,
         widget_id: u64,
-        widget_type: String,
-        ancestor_widget_ids: Vec<u64>,
+        ordinal: u16,
+        start: usize,
+        end: usize,
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    struct RetainedRunStamp {
+        paint_revision: u64,
+        theme_generation: u64,
+        mono_atlas_generation: u64,
+        prop_atlas_generation: u64,
+        metrics: [u32; 4],
+        fill_extra_cols_bits: u32,
+        layout_width_bits: u32,
+    }
+
+    struct RetainedCompiledRun {
+        stamp: RetainedRunStamp,
+        compiled: std::rc::Rc<CompiledWidgetRun>,
+        last_used_frame: u64,
+        bytes: usize,
     }
 
     #[derive(Clone, Copy)]
@@ -2013,26 +2123,15 @@ fragment float4 live_spectrogram_frag(
     const MONOSPACE_FONT_NAME: &str = "JetBrainsMono-Regular";
     use crate::ui::DEFAULT_MONOSPACE_FONT_SIZE_PT;
 
-    fn simple_widget_run_cacheable(widget_type: &str) -> bool {
-        matches!(
-            widget_type,
-            "label"
-                | "button"
-                | "badge"
-                | "slider"
-                | "hslider"
-                | "vslider"
-                | "toggle"
-                | "knob"
-                | "tabs"
-                | "box"
-                | "number-label"
-        )
-    }
-
     fn primitive_run_supported_for_cache(primitives: &[widget_render::GpuPrimitive]) -> bool {
         !primitives.is_empty()
             && primitives.iter().all(|primitive| {
+                if let widget_render::GpuPrimitive::WidgetInstance { widget_type, .. } =
+                    widget_render::innermost_primitive(primitive)
+                    && widget_instance_shader_uses_time(widget_type)
+                {
+                    return false;
+                }
                 matches!(
                     widget_render::innermost_primitive(primitive),
                     widget_render::GpuPrimitive::Rect(_)
@@ -2048,201 +2147,11 @@ fragment float4 live_spectrogram_frag(
             })
     }
 
-    fn widget_run_or_ancestor_dirty(
-        run: &OffsetGpuPrimitiveRun,
-        dirty_widget_ids: &[u64],
-    ) -> bool {
-        dirty_widget_ids.contains(&run.widget_id)
-            || run
-                .ancestor_widget_ids
-                .iter()
-                .any(|widget_id| dirty_widget_ids.contains(widget_id))
-    }
-
-    fn hash_f32(value: f32, hasher: &mut DefaultHasher) {
-        value.to_bits().hash(hasher);
-    }
-
-    fn hash_color(color: Color, hasher: &mut DefaultHasher) {
-        hash_f32(color.r, hasher);
-        hash_f32(color.g, hasher);
-        hash_f32(color.b, hasher);
-        hash_f32(color.a, hasher);
-    }
-
-    fn hash_rect(rect: Rect, hasher: &mut DefaultHasher) {
-        hash_f32(rect.row, hasher);
-        hash_f32(rect.col, hasher);
-        hash_f32(rect.width, hasher);
-        hash_f32(rect.height, hasher);
-    }
-
-    fn hash_f32_array<const N: usize>(values: [f32; N], hasher: &mut DefaultHasher) {
-        for value in values {
-            hash_f32(value, hasher);
-        }
-    }
-
-    fn hash_widget_instance(
-        widget_type: &str,
-        instance: &WidgetInstance,
-        hasher: &mut DefaultHasher,
-    ) {
-        hash_f32_array(instance.ndc_min, hasher);
-        hash_f32_array(instance.ndc_max, hasher);
-        hash_f32(instance.value_t, hasher);
-        hash_f32(instance.orientation, hasher);
-        if widget_instance_shader_uses_time(widget_type) {
-            hash_f32(instance.itime, hasher);
-        }
-        hash_f32_array(instance.uniform_a, hasher);
-        hash_f32_array(instance.uniform_b, hasher);
-        hash_f32_array(instance.uniform_c, hasher);
-        hash_f32_array(instance.uniform_d, hasher);
-        hash_f32_array(instance.color_a, hasher);
-        hash_f32_array(instance.color_b, hasher);
-        hash_f32_array(instance.color_c, hasher);
-        hash_f32_array(instance.color_d, hasher);
-        hash_f32(instance.corner_radius, hasher);
-        hash_f32(instance.pixel_aspect, hasher);
-    }
-
     fn widget_instance_shader_uses_time(widget_type: &str) -> bool {
         widget_render::widget_definition(widget_type)
             .is_some_and(|definition| definition.shader_uses_time())
             || widget_render::sdf_widget::sdf_widget_def(widget_type)
                 .is_some_and(|definition| definition.animates)
-    }
-
-    fn hash_metal_primitive(primitive: &widget_render::GpuPrimitive, hasher: &mut DefaultHasher) {
-        match primitive {
-            widget_render::GpuPrimitive::ZLayer { z_index, primitive } => {
-                0u8.hash(hasher);
-                z_index.hash(hasher);
-                hash_metal_primitive(primitive, hasher);
-            }
-            widget_render::GpuPrimitive::Rect(rect) => {
-                1u8.hash(hasher);
-                hash_rect(rect.rect, hasher);
-                hash_color(rect.color, hasher);
-            }
-            widget_render::GpuPrimitive::ForegroundRect(rect) => {
-                2u8.hash(hasher);
-                hash_rect(rect.rect, hasher);
-                hash_color(rect.color, hasher);
-            }
-            widget_render::GpuPrimitive::ForegroundMesh(mesh) => {
-                18u8.hash(hasher);
-                mesh.vertices.len().hash(hasher);
-                for vertex in &mesh.vertices {
-                    hash_f32_array(vertex.point, hasher);
-                    hash_color(vertex.color, hasher);
-                }
-            }
-            widget_render::GpuPrimitive::Quad(quad) => {
-                3u8.hash(hasher);
-                hash_f32(quad.x, hasher);
-                hash_f32(quad.y, hasher);
-                hash_f32(quad.width, hasher);
-                hash_f32(quad.height, hasher);
-                hash_color(quad.color, hasher);
-            }
-            widget_render::GpuPrimitive::Triangle(triangle) => {
-                4u8.hash(hasher);
-                for point in triangle.points {
-                    hash_f32_array(point, hasher);
-                }
-                hash_color(triangle.color, hasher);
-            }
-            widget_render::GpuPrimitive::GlyphRun(run) => {
-                5u8.hash(hasher);
-                hash_f32(run.row, hasher);
-                run.col.hash(hasher);
-                run.text.hash(hasher);
-                hash_color(run.fg, hasher);
-                hash_color(run.bg, hasher);
-            }
-            widget_render::GpuPrimitive::ProportionalText(run) => {
-                6u8.hash(hasher);
-                hash_f32(run.row, hasher);
-                hash_f32(run.col, hasher);
-                hash_f32(run.align_width, hasher);
-                hash_f32(run.h_align, hasher);
-                run.text.hash(hasher);
-                hash_f32(run.font_size, hasher);
-                hash_f32(run.scale, hasher);
-                hash_color(run.fg, hasher);
-                hash_color(run.bg, hasher);
-            }
-            widget_render::GpuPrimitive::Circle(circle) => {
-                7u8.hash(hasher);
-                hash_f32_array(circle.center, hasher);
-                hash_f32(circle.radius_px, hasher);
-                hash_color(circle.color, hasher);
-                std::mem::discriminant(&circle.visible_half).hash(hasher);
-            }
-            widget_render::GpuPrimitive::WidgetInstance {
-                widget_type,
-                instance,
-                is_background,
-            } => {
-                8u8.hash(hasher);
-                widget_type.hash(hasher);
-                is_background.hash(hasher);
-                hash_widget_instance(widget_type, instance, hasher);
-            }
-            widget_render::GpuPrimitive::Wavetable(wavetable) => {
-                9u8.hash(hasher);
-                hash_rect(wavetable.rect, hasher);
-                wavetable.bank_key.hash(hasher);
-                wavetable.set_base.hash(hasher);
-                wavetable.waves_in_set.hash(hasher);
-                hash_f32(wavetable.wave_pos, hasher);
-                hash_f32(wavetable.warp, hasher);
-                hash_f32(wavetable.fold, hasher);
-                hash_color(wavetable.selected_color, hasher);
-                hash_color(wavetable.inactive_color, hasher);
-                hash_color(wavetable.bg_color, hasher);
-            }
-            widget_render::GpuPrimitive::PatchCable(_)
-            | widget_render::GpuPrimitive::Waveform(_)
-            | widget_render::GpuPrimitive::LiveSpectrogram(_)
-            | widget_render::GpuPrimitive::Image(_)
-            | widget_render::GpuPrimitive::PushClipRect(_)
-            | widget_render::GpuPrimitive::PopClipRect => {
-                255u8.hash(hasher);
-            }
-        }
-    }
-
-    fn widget_run_cache_key(
-        widget_id: u64,
-        widget_type: &str,
-        primitives: &[widget_render::GpuPrimitive],
-        cell_w: f32,
-        cell_h: f32,
-        vp_w: f32,
-        vp_h: f32,
-        mono_atlas_generation: u64,
-        prop_atlas_generation: u64,
-    ) -> WidgetRunCacheKey {
-        let mut hasher = DefaultHasher::new();
-        primitives.len().hash(&mut hasher);
-        for primitive in primitives {
-            hash_metal_primitive(primitive, &mut hasher);
-        }
-        WidgetRunCacheKey {
-            widget_id,
-            widget_type: widget_type.to_string(),
-            primitive_signature: hasher.finish(),
-            theme_generation: theme::generation(),
-            mono_atlas_generation,
-            prop_atlas_generation,
-            cell_w_bits: cell_w.to_bits(),
-            cell_h_bits: cell_h.to_bits(),
-            vp_w_bits: vp_w.to_bits(),
-            vp_h_bits: vp_h.to_bits(),
-        }
     }
 
     // ── Backend ───────────────────────────────────────────────────────────────
@@ -2361,8 +2270,12 @@ fragment float4 live_spectrogram_frag(
         prop_text_layout_cache: ProportionalTextLayoutCache,
         mono_atlas_generation: u64,
         prop_atlas_generation: u64,
-        compiled_widget_runs: HashMap<WidgetRunCacheKey, CompiledWidgetRun>,
         compiled_widget_run_frame: u64,
+        retained_widget_scenes: HashMap<u32, widget_render::retained_scene::RetainedScene>,
+        retained_compiled_runs: HashMap<RetainedRunKey, RetainedCompiledRun>,
+        retained_compiled_bytes: usize,
+        #[cfg(test)]
+        force_dynamic_runs: bool,
         cached_widget_scenes: HashMap<u64, CachedWidgetScene>,
         cached_widget_run_scenes: HashMap<u64, CachedWidgetRunScene>,
         widget_scene_last_keys: HashMap<usize, WidgetSceneCacheKey>,
@@ -2508,8 +2421,12 @@ fragment float4 live_spectrogram_frag(
                 prop_text_layout_cache: ProportionalTextLayoutCache::new(),
                 mono_atlas_generation: 0,
                 prop_atlas_generation: 0,
-                compiled_widget_runs: HashMap::new(),
                 compiled_widget_run_frame: 0,
+                retained_widget_scenes: HashMap::new(),
+                retained_compiled_runs: HashMap::new(),
+                retained_compiled_bytes: 0,
+                #[cfg(test)]
+                force_dynamic_runs: false,
                 cached_widget_scenes: HashMap::new(),
                 cached_widget_run_scenes: HashMap::new(),
                 widget_scene_last_keys: HashMap::new(),
@@ -2556,6 +2473,285 @@ fragment float4 live_spectrogram_frag(
                 return Err(BackendError::MetalError);
             }
             self.monospace_font_path = Some(path.into());
+            Ok(())
+        }
+
+        fn initialize_graphics(&mut self, scale: f64) -> Result<(), BackendError> {
+            let atlas = self.create_monospace_atlas(self.monospace_font_size_pt * scale)?;
+            self.atlas = Some(atlas);
+            let text_zoom = if self.text_atlas_zoom.is_finite() && self.text_atlas_zoom > 0.0 {
+                self.text_atlas_zoom
+            } else {
+                1.0
+            };
+            let text_atlas = self.create_monospace_atlas(
+                self.monospace_font_size_pt * text_zoom as f64 * scale,
+            )?;
+            self.text_atlas = Some(text_atlas);
+            self.text_atlas_zoom = text_zoom;
+            self.prop_atlas = ProportionalGlyphAtlas::new(&self.device, scale);
+            self.mono_atlas_generation = self.mono_atlas_generation.wrapping_add(1);
+            self.prop_atlas_generation = self.prop_atlas_generation.wrapping_add(1);
+            self.retained_compiled_runs.clear();
+            self.retained_compiled_bytes = 0;
+            self.prop_text_layout_cache = ProportionalTextLayoutCache::new();
+
+            // ── Render pipeline ──────────────────────────────────────────────
+            let src = NSString::from_str(SHADER_SRC);
+            let library = self
+                .device
+                .newLibraryWithSource_options_error(&src, None)
+                .map_err(|_| BackendError::MetalError)?;
+
+            let vert_fn = library
+                .newFunctionWithName(&NSString::from_str("vert"))
+                .ok_or(BackendError::MetalError)?;
+            let frag_fn = library
+                .newFunctionWithName(&NSString::from_str("frag"))
+                .ok_or(BackendError::MetalError)?;
+
+            let desc = MTLRenderPipelineDescriptor::new();
+            desc.setVertexFunction(Some(&vert_fn));
+            desc.setFragmentFunction(Some(&frag_fn));
+            let attach = unsafe { desc.colorAttachments().objectAtIndexedSubscript(0) };
+            attach.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
+            attach.setBlendingEnabled(true);
+            attach.setSourceRGBBlendFactor(MTLBlendFactor::SourceAlpha);
+            attach.setDestinationRGBBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
+            attach.setSourceAlphaBlendFactor(MTLBlendFactor::One);
+            attach.setDestinationAlphaBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
+
+            self.pipeline = Some(
+                self.device
+                    .newRenderPipelineStateWithDescriptor_error(&desc)
+                    .map_err(|_| BackendError::MetalError)?,
+            );
+
+            // ── Proportional text pipeline (linear filtering) ────────────────
+            {
+                // Compile the proportional fragment shader alongside the shared
+                // vertex shader (reuse from the main library).
+                // Compile PROP_FRAG_SRC as its own library,
+                // reuse the vertex function from the main library.
+                let prop_lib = self
+                    .device
+                    .newLibraryWithSource_options_error(&NSString::from_str(PROP_FRAG_SRC), None)
+                    .map_err(|_| BackendError::MetalError)?;
+                let prop_frag_fn = prop_lib
+                    .newFunctionWithName(&NSString::from_str("prop_frag"))
+                    .ok_or(BackendError::MetalError)?;
+
+                let prop_desc = MTLRenderPipelineDescriptor::new();
+                prop_desc.setVertexFunction(Some(&vert_fn));
+                prop_desc.setFragmentFunction(Some(&prop_frag_fn));
+                let prop_attach =
+                    unsafe { prop_desc.colorAttachments().objectAtIndexedSubscript(0) };
+                prop_attach.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
+                // Enable alpha blending: src * srcAlpha + dst * (1 - srcAlpha).
+                // This lets glyph quads overlap without clipping each other.
+                prop_attach.setBlendingEnabled(true);
+                prop_attach.setSourceRGBBlendFactor(MTLBlendFactor::SourceAlpha);
+                prop_attach.setDestinationRGBBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
+                prop_attach.setSourceAlphaBlendFactor(MTLBlendFactor::One);
+                prop_attach.setDestinationAlphaBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
+
+                self.prop_pipeline = Some(
+                    self.device
+                        .newRenderPipelineStateWithDescriptor_error(&prop_desc)
+                        .map_err(|_| BackendError::MetalError)?,
+                );
+            }
+
+            // ── Image pipeline ───────────────────────────────────────────────
+            {
+                let image_lib = self
+                    .device
+                    .newLibraryWithSource_options_error(&NSString::from_str(IMAGE_SHADER_SRC), None)
+                    .map_err(|_| BackendError::MetalError)?;
+                let image_vert = image_lib
+                    .newFunctionWithName(&NSString::from_str("image_vert"))
+                    .ok_or(BackendError::MetalError)?;
+                let image_frag = image_lib
+                    .newFunctionWithName(&NSString::from_str("image_frag"))
+                    .ok_or(BackendError::MetalError)?;
+                let image_desc = MTLRenderPipelineDescriptor::new();
+                image_desc.setVertexFunction(Some(&image_vert));
+                image_desc.setFragmentFunction(Some(&image_frag));
+                let image_attach =
+                    unsafe { image_desc.colorAttachments().objectAtIndexedSubscript(0) };
+                image_attach.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
+                image_attach.setBlendingEnabled(true);
+                image_attach.setSourceRGBBlendFactor(MTLBlendFactor::SourceAlpha);
+                image_attach.setDestinationRGBBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
+                image_attach.setSourceAlphaBlendFactor(MTLBlendFactor::One);
+                image_attach.setDestinationAlphaBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
+                self.image_pipeline = Some(
+                    self.device
+                        .newRenderPipelineStateWithDescriptor_error(&image_desc)
+                        .map_err(|_| BackendError::MetalError)?,
+                );
+            }
+
+            // ── Patch cable pipeline ────────────────────────────────────────
+            {
+                let cable_lib = self
+                    .device
+                    .newLibraryWithSource_options_error(
+                        &NSString::from_str(PATCH_CABLE_SHADER_SRC),
+                        None,
+                    )
+                    .map_err(|err| {
+                        eprintln!("Metal patch cable shader compile failed: {err:?}");
+                        BackendError::MetalError
+                    })?;
+                let cable_vert = cable_lib
+                    .newFunctionWithName(&NSString::from_str("patch_cable_vert"))
+                    .ok_or(BackendError::MetalError)?;
+                let cable_frag = cable_lib
+                    .newFunctionWithName(&NSString::from_str("patch_cable_frag"))
+                    .ok_or(BackendError::MetalError)?;
+                let cable_desc = MTLRenderPipelineDescriptor::new();
+                cable_desc.setVertexFunction(Some(&cable_vert));
+                cable_desc.setFragmentFunction(Some(&cable_frag));
+                let cable_attach =
+                    unsafe { cable_desc.colorAttachments().objectAtIndexedSubscript(0) };
+                cable_attach.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
+                cable_attach.setBlendingEnabled(true);
+                cable_attach.setSourceRGBBlendFactor(MTLBlendFactor::SourceAlpha);
+                cable_attach.setDestinationRGBBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
+                cable_attach.setSourceAlphaBlendFactor(MTLBlendFactor::One);
+                cable_attach.setDestinationAlphaBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
+                self.patch_cable_pipeline = Some(
+                    self.device
+                        .newRenderPipelineStateWithDescriptor_error(&cable_desc)
+                        .map_err(|err| {
+                            eprintln!("Metal patch cable pipeline creation failed: {err:?}");
+                            BackendError::MetalError
+                        })?,
+                );
+            }
+
+            // ── Widget render pipelines (one per widget type) ────────────────
+            // Each widget gets its own fragment shader but shares the vertex
+            // shader and SDF utilities from the preamble.
+            for (widget_type, vertex_src, fragment_src) in widget_render::widget_shader_sources(
+                widget_render::ShaderBackend::Msl,
+            ) {
+                let pipeline_state =
+                    self.compile_widget_pipeline_source(widget_type, vertex_src, fragment_src)?;
+                self.widget_pipelines
+                    .insert(widget_type.to_string(), pipeline_state);
+            }
+            self.compile_pending_button_surface_override();
+
+            let waveform_src = NSString::from_str(WAVEFORM_SHADER_SRC);
+            let waveform_lib = self
+                .device
+                .newLibraryWithSource_options_error(&waveform_src, None)
+                .map_err(|_| BackendError::MetalError)?;
+            let waveform_vert = waveform_lib
+                .newFunctionWithName(&NSString::from_str("waveform_vert"))
+                .ok_or(BackendError::MetalError)?;
+            let waveform_frag = waveform_lib
+                .newFunctionWithName(&NSString::from_str("waveform_frag"))
+                .ok_or(BackendError::MetalError)?;
+            let waveform_desc = MTLRenderPipelineDescriptor::new();
+            waveform_desc.setVertexFunction(Some(&waveform_vert));
+            waveform_desc.setFragmentFunction(Some(&waveform_frag));
+            let waveform_attach =
+                unsafe { waveform_desc.colorAttachments().objectAtIndexedSubscript(0) };
+            waveform_attach.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
+            waveform_attach.setBlendingEnabled(true);
+            {
+                use objc2_metal::{MTLBlendFactor, MTLBlendOperation};
+                waveform_attach.setSourceRGBBlendFactor(MTLBlendFactor::SourceAlpha);
+                waveform_attach.setDestinationRGBBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
+                waveform_attach.setRgbBlendOperation(MTLBlendOperation::Add);
+                waveform_attach.setSourceAlphaBlendFactor(MTLBlendFactor::One);
+                waveform_attach.setDestinationAlphaBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
+                waveform_attach.setAlphaBlendOperation(MTLBlendOperation::Add);
+            }
+            self.waveform_pipeline = Some(
+                self.device
+                    .newRenderPipelineStateWithDescriptor_error(&waveform_desc)
+                    .map_err(|_| BackendError::MetalError)?,
+            );
+
+            let wavetable_src = NSString::from_str(WAVETABLE_SHADER_SRC);
+            let wavetable_lib = self
+                .device
+                .newLibraryWithSource_options_error(&wavetable_src, None)
+                .map_err(|_| BackendError::MetalError)?;
+            let wavetable_vert = wavetable_lib
+                .newFunctionWithName(&NSString::from_str("wavetable_vert"))
+                .ok_or(BackendError::MetalError)?;
+            let wavetable_frag = wavetable_lib
+                .newFunctionWithName(&NSString::from_str("wavetable_frag"))
+                .ok_or(BackendError::MetalError)?;
+            let wavetable_desc = MTLRenderPipelineDescriptor::new();
+            wavetable_desc.setVertexFunction(Some(&wavetable_vert));
+            wavetable_desc.setFragmentFunction(Some(&wavetable_frag));
+            let wavetable_attach = unsafe {
+                wavetable_desc
+                    .colorAttachments()
+                    .objectAtIndexedSubscript(0)
+            };
+            wavetable_attach.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
+            wavetable_attach.setBlendingEnabled(true);
+            {
+                use objc2_metal::{MTLBlendFactor, MTLBlendOperation};
+                wavetable_attach.setSourceRGBBlendFactor(MTLBlendFactor::SourceAlpha);
+                wavetable_attach.setDestinationRGBBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
+                wavetable_attach.setRgbBlendOperation(MTLBlendOperation::Add);
+                wavetable_attach.setSourceAlphaBlendFactor(MTLBlendFactor::One);
+                wavetable_attach
+                    .setDestinationAlphaBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
+                wavetable_attach.setAlphaBlendOperation(MTLBlendOperation::Add);
+            }
+            self.wavetable_pipeline = Some(
+                self.device
+                    .newRenderPipelineStateWithDescriptor_error(&wavetable_desc)
+                    .map_err(|_| BackendError::MetalError)?,
+            );
+
+            let live_spectrogram_src = NSString::from_str(LIVE_SPECTROGRAM_SHADER_SRC);
+            let live_spectrogram_lib = self
+                .device
+                .newLibraryWithSource_options_error(&live_spectrogram_src, None)
+                .map_err(|_| BackendError::MetalError)?;
+            let live_spectrogram_vert = live_spectrogram_lib
+                .newFunctionWithName(&NSString::from_str("live_spectrogram_vert"))
+                .ok_or(BackendError::MetalError)?;
+            let live_spectrogram_frag = live_spectrogram_lib
+                .newFunctionWithName(&NSString::from_str("live_spectrogram_frag"))
+                .ok_or(BackendError::MetalError)?;
+            let live_spectrogram_desc = MTLRenderPipelineDescriptor::new();
+            live_spectrogram_desc.setVertexFunction(Some(&live_spectrogram_vert));
+            live_spectrogram_desc.setFragmentFunction(Some(&live_spectrogram_frag));
+            let live_spectrogram_attach = unsafe {
+                live_spectrogram_desc
+                    .colorAttachments()
+                    .objectAtIndexedSubscript(0)
+            };
+            live_spectrogram_attach.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
+            live_spectrogram_attach.setBlendingEnabled(true);
+            {
+                use objc2_metal::{MTLBlendFactor, MTLBlendOperation};
+                live_spectrogram_attach.setSourceRGBBlendFactor(MTLBlendFactor::SourceAlpha);
+                live_spectrogram_attach
+                    .setDestinationRGBBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
+                live_spectrogram_attach.setRgbBlendOperation(MTLBlendOperation::Add);
+                live_spectrogram_attach.setSourceAlphaBlendFactor(MTLBlendFactor::One);
+                live_spectrogram_attach
+                    .setDestinationAlphaBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
+                live_spectrogram_attach.setAlphaBlendOperation(MTLBlendOperation::Add);
+            }
+            self.live_spectrogram_pipeline = Some(
+                self.device
+                    .newRenderPipelineStateWithDescriptor_error(&live_spectrogram_desc)
+                    .map_err(|_| BackendError::MetalError)?,
+            );
+
             Ok(())
         }
 
@@ -2631,57 +2827,8 @@ fragment float4 live_spectrogram_frag(
             for primitive in primitives {
                 if let widget_render::GpuPrimitive::ZLayer { primitive, .. } = primitive {
                     Self::refresh_widget_scene_time(std::slice::from_mut(primitive), time_seconds);
-                    continue;
-                }
-                if let widget_render::GpuPrimitive::WidgetInstance {
-                    widget_type,
-                    instance,
-                    ..
-                } = primitive
-                {
+                } else if let widget_render::GpuPrimitive::WidgetInstance { instance, .. } = primitive {
                     instance.itime = time_seconds;
-                    if instance.color_d[3] < 0.0 {
-                        let duration = -instance.color_d[3];
-                        let scale = if duration <= 0.0001 {
-                            instance.color_d[1]
-                        } else {
-                            let t =
-                                ((time_seconds - instance.color_d[2]) / duration).clamp(0.0, 1.0);
-                            let ease = instance.color_b[2];
-                            let eased = if (ease - 2.0).abs() < 0.5 {
-                                t * t * (3.0 - 2.0 * t)
-                            } else if (ease - 3.0).abs() < 0.5 {
-                                t
-                            } else {
-                                1.0 - (1.0 - t).powi(3)
-                            };
-                            instance.color_d[0]
-                                + (instance.color_d[1] - instance.color_d[0]) * eased
-                        };
-                        if widget_type == "save-icon" && duration > 0.0001 {
-                            let elapsed = time_seconds - instance.color_d[2];
-                            let phase = if elapsed < 0.0 {
-                                "before"
-                            } else if elapsed < duration {
-                                "active"
-                            } else {
-                                "done"
-                            };
-                            eprintln!(
-                                "[anim-draw] t={:.3} widget={} phase={} elapsed={:.3}/{:.3} scale={:.3}",
-                                time_seconds, widget_type, phase, elapsed, duration, scale
-                            );
-                        }
-                        let center = [
-                            (instance.ndc_min[0] + instance.ndc_max[0]) * 0.5,
-                            (instance.ndc_min[1] + instance.ndc_max[1]) * 0.5,
-                        ];
-                        instance.ndc_min[0] = center[0] + (instance.ndc_min[0] - center[0]) * scale;
-                        instance.ndc_max[0] = center[0] + (instance.ndc_max[0] - center[0]) * scale;
-                        instance.ndc_min[1] = center[1] + (instance.ndc_min[1] - center[1]) * scale;
-                        instance.ndc_max[1] = center[1] + (instance.ndc_max[1] - center[1]) * scale;
-                        instance.color_d = [0.0; 4];
-                    }
                 }
             }
         }
@@ -2931,13 +3078,21 @@ fragment float4 live_spectrogram_frag(
 
         fn begin_compiled_widget_run_frame(&mut self) {
             self.compiled_widget_run_frame = self.compiled_widget_run_frame.wrapping_add(1);
-            if self.compiled_widget_runs.len() > 8192 {
-                let cutoff = self.compiled_widget_run_frame.saturating_sub(600);
-                self.compiled_widget_runs
-                    .retain(|_, run| run.last_used_frame >= cutoff);
-                if self.compiled_widget_runs.len() > 8192 {
-                    self.compiled_widget_runs.clear();
-                    self.stats.note_widget_run_cache_clear();
+            // One entry per logical run, never per scroll position. Evict
+            // oldest entries only when the bounded resource budget is exceeded.
+            const MAX_RUNS: usize = 8192;
+            const MAX_BYTES: usize = 64 * 1024 * 1024;
+            if self.retained_compiled_runs.len() > MAX_RUNS || self.retained_compiled_bytes > MAX_BYTES {
+                let mut oldest: Vec<_> = self.retained_compiled_runs.iter()
+                    .map(|(&key, entry)| (key, entry.last_used_frame)).collect();
+                oldest.sort_unstable_by_key(|(_, frame)| *frame);
+                for (key, _) in oldest {
+                    if self.retained_compiled_runs.len() <= MAX_RUNS && self.retained_compiled_bytes <= MAX_BYTES {
+                        break;
+                    }
+                    if let Some(entry) = self.retained_compiled_runs.remove(&key) {
+                        self.retained_compiled_bytes -= entry.bytes;
+                    }
                 }
             }
             // Bank keys are per-publisher and never reused (the Filter Table
@@ -3072,55 +3227,53 @@ fragment float4 live_spectrogram_frag(
 
             Some(CompiledWidgetRun {
                 commands,
-                last_used_frame: self.compiled_widget_run_frame,
             })
         }
 
-        fn compiled_simple_widget_run(
-            &mut self,
-            widget_id: u64,
-            widget_type: &str,
-            primitives: &[widget_render::GpuPrimitive],
-            dirty_widget_ids: &[u64],
-            cell_w: f32,
-            cell_h: f32,
-            vp_w: f32,
-            vp_h: f32,
-        ) -> Option<CompiledWidgetRun> {
-            if !simple_widget_run_cacheable(widget_type) {
-                self.stats.note_widget_run_cache_bypass_unsupported();
-                return None;
-            }
-            if dirty_widget_ids.contains(&widget_id) {
-                self.stats.note_widget_run_cache_bypass_dirty();
-                return None;
-            }
+        fn compiled_retained_widget_run(
+            &mut self, run: &OffsetGpuPrimitiveRun, range: Range<usize>,
+            cell_w: f32, cell_h: f32, vp_w: f32, vp_h: f32,
+        ) -> Option<std::rc::Rc<CompiledWidgetRun>> {
+            let primitives = &run.source.primitives[range.clone()];
             if !primitive_run_supported_for_cache(primitives) {
                 self.stats.note_widget_run_cache_bypass_complex();
                 return None;
             }
-
-            let key = widget_run_cache_key(
-                widget_id,
-                widget_type,
-                primitives,
-                cell_w,
-                cell_h,
-                vp_w,
-                vp_h,
-                self.mono_atlas_generation,
-                self.prop_atlas_generation,
-            );
-            if let Some(compiled) = self.compiled_widget_runs.get_mut(&key) {
-                compiled.last_used_frame = self.compiled_widget_run_frame;
+            let key = RetainedRunKey {
+                scene_id: run.scene_id, widget_id: run.source.widget_id,
+                ordinal: run.source.ordinal, start: range.start, end: range.end,
+            };
+            let stamp = RetainedRunStamp {
+                paint_revision: run.source.revision,
+                theme_generation: theme::generation(),
+                mono_atlas_generation: self.mono_atlas_generation,
+                prop_atlas_generation: self.prop_atlas_generation,
+                metrics: [cell_w.to_bits(), cell_h.to_bits(), vp_w.to_bits(), vp_h.to_bits()],
+                fill_extra_cols_bits: run.fill_extra_cols.to_bits(),
+                layout_width_bits: run.layout_width.to_bits(),
+            };
+            if let Some(entry) = self.retained_compiled_runs.get_mut(&key)
+                && entry.stamp == stamp
+            {
+                entry.last_used_frame = self.compiled_widget_run_frame;
                 self.stats.note_widget_run_cache_hit();
-                return Some(compiled.clone());
+                return Some(std::rc::Rc::clone(&entry.compiled));
             }
-
+            let primitives: Vec<_> = primitives.iter().cloned().map(|primitive|
+                extend_right_edge_primitive(primitive, run.layout_width,
+                    run.fill_extra_cols, cell_w, vp_w)).collect();
+            let compiled = std::rc::Rc::new(self.compile_simple_widget_run(
+                &primitives, cell_w, cell_h, vp_w, vp_h)?);
             self.stats.note_widget_run_cache_miss();
-            let compiled =
-                self.compile_simple_widget_run(primitives, cell_w, cell_h, vp_w, vp_h)?;
-            self.compiled_widget_runs.insert(key, compiled.clone());
+            let bytes = compiled.commands.iter().map(|command| command.buffer.length()).sum();
+            self.retained_compiled_bytes += bytes;
+            if let Some(previous) = self.retained_compiled_runs.insert(key, RetainedCompiledRun {
+                stamp, compiled: std::rc::Rc::clone(&compiled),
+                last_used_frame: self.compiled_widget_run_frame,
+                bytes,
+            }) {
+                self.retained_compiled_bytes -= previous.bytes;
+            }
             Some(compiled)
         }
 
@@ -3131,7 +3284,9 @@ fragment float4 live_spectrogram_frag(
             phase: WidgetRunCommandPhase,
             atlas_texture: &ProtocolObject<dyn MTLTexture>,
             prop_atlas_texture: Option<&ProtocolObject<dyn MTLTexture>>,
+            translation: [f32; 2],
         ) {
+            set_render_translation(enc, translation);
             for command in compiled
                 .commands
                 .iter()
@@ -3528,7 +3683,7 @@ fragment float4 live_spectrogram_frag(
             offset_prims: &[widget_render::GpuPrimitive],
             run_indices: &[usize],
             offset_runs: &[OffsetGpuPrimitiveRun],
-            dirty_widget_ids: &[u64],
+            _dirty_widget_ids: &[u64],
             atlas_texture: &ProtocolObject<dyn MTLTexture>,
             cell_w: f32,
             cell_h: f32,
@@ -3537,109 +3692,39 @@ fragment float4 live_spectrogram_frag(
             image_load_budget: &mut usize,
             render_time_seconds: f32,
         ) -> Duration {
-            if offset_prims[segment_range.clone()]
-                .iter()
-                .any(|primitive| matches!(primitive, widget_render::GpuPrimitive::ZLayer { .. }))
-            {
-                self.stats.note_widget_run_cache_bypass_complex();
-                return self.draw_dynamic_segment_all(
-                    enc,
-                    seg_scissor,
-                    &offset_prims[segment_range],
-                    atlas_texture,
-                    cell_w,
-                    cell_h,
-                    vp_w,
-                    vp_h,
-                    image_load_budget,
-                    render_time_seconds,
-                );
+            #[cfg(test)]
+            if self.force_dynamic_runs {
+                return self.draw_dynamic_segment_all(enc, seg_scissor,
+                    &offset_prims[segment_range], atlas_texture, cell_w, cell_h,
+                    vp_w, vp_h, image_load_budget, render_time_seconds);
             }
-
             let prop_atlas_texture = self.prop_atlas.as_ref().map(|atlas| atlas.texture.clone());
-            let mut groups: Vec<CompiledWidgetRun> = Vec::new();
+            let prep_started = Instant::now();
+            let mut groups = Vec::new();
             let mut cursor = segment_range.start;
             while cursor < segment_range.end {
                 let run_index = run_indices[cursor];
                 let start = cursor;
+                let z = widget_render::effective_z_index(&offset_prims[cursor]);
                 cursor += 1;
-                while cursor < segment_range.end && run_indices[cursor] == run_index {
+                while cursor < segment_range.end && run_indices[cursor] == run_index
+                    && widget_render::effective_z_index(&offset_prims[cursor]) == z
+                {
                     cursor += 1;
                 }
                 let run = &offset_runs[run_index];
-                let primitives = &offset_prims[start..cursor];
-                if !simple_widget_run_cacheable(&run.widget_type) {
-                    self.stats.note_widget_run_cache_bypass_unsupported();
-                    return self.draw_dynamic_segment_all(
-                        enc,
-                        seg_scissor,
-                        &offset_prims[segment_range],
-                        atlas_texture,
-                        cell_w,
-                        cell_h,
-                        vp_w,
-                        vp_h,
-                        image_load_budget,
-                        render_time_seconds,
-                    );
+                let local_range = start - run.primitive_start..cursor - run.primitive_start;
+                let compiled = self.compiled_retained_widget_run(
+                    run, local_range, cell_w, cell_h, vp_w, vp_h);
+                if compiled.is_some() {
+                    self.stats.note_widget_run_cached_draw();
                 }
-                if widget_run_or_ancestor_dirty(run, dirty_widget_ids) {
-                    self.stats.note_widget_run_cache_bypass_dirty();
-                    return self.draw_dynamic_segment_all(
-                        enc,
-                        seg_scissor,
-                        &offset_prims[segment_range],
-                        atlas_texture,
-                        cell_w,
-                        cell_h,
-                        vp_w,
-                        vp_h,
-                        image_load_budget,
-                        render_time_seconds,
-                    );
-                }
-                if !primitive_run_supported_for_cache(primitives) {
-                    self.stats.note_widget_run_cache_bypass_complex();
-                    return self.draw_dynamic_segment_all(
-                        enc,
-                        seg_scissor,
-                        &offset_prims[segment_range],
-                        atlas_texture,
-                        cell_w,
-                        cell_h,
-                        vp_w,
-                        vp_h,
-                        image_load_budget,
-                        render_time_seconds,
-                    );
-                }
-                let Some(compiled) = self.compiled_simple_widget_run(
-                    run.widget_id,
-                    &run.widget_type,
-                    primitives,
-                    dirty_widget_ids,
-                    cell_w,
-                    cell_h,
-                    vp_w,
-                    vp_h,
-                ) else {
-                    self.stats.note_widget_run_cache_bypass_complex();
-                    return self.draw_dynamic_segment_all(
-                        enc,
-                        seg_scissor,
-                        &offset_prims[segment_range],
-                        atlas_texture,
-                        cell_w,
-                        cell_h,
-                        vp_w,
-                        vp_h,
-                        image_load_budget,
-                        render_time_seconds,
-                    );
-                };
-                self.stats.note_widget_run_cached_draw();
-                groups.push(compiled);
+                groups.push((z, compiled, start..cursor, [
+                    run.translation[0] * cell_w * 2.0 / vp_w,
+                    -run.translation[1] * cell_h * 2.0 / vp_h,
+                ]));
             }
+            let preparation_time = prep_started.elapsed();
 
             const PHASES: [WidgetRunCommandPhase; 6] = [
                 WidgetRunCommandPhase::BackgroundInstances,
@@ -3650,102 +3735,121 @@ fragment float4 live_spectrogram_frag(
                 WidgetRunCommandPhase::ProportionalTextVertices,
             ];
 
-            for (phase_idx, phase) in PHASES.iter().copied().enumerate() {
-                if phase_idx == 1 {
-                    if let Some(image_pipeline) = self.image_pipeline.clone() {
-                        let images = collect_image_primitives(&offset_prims[segment_range.clone()]);
-                        self.draw_image_primitives(
-                            enc,
-                            &image_pipeline,
-                            &images,
-                            Some(seg_scissor),
-                            image_load_budget,
-                            cell_w,
-                            cell_h,
-                            vp_w,
-                            vp_h,
-                            render_time_seconds,
-                        );
+            let mut layers: Vec<_> = groups.iter().map(|(z, ..)| *z).collect();
+            layers.sort_unstable();
+            layers.dedup();
+            let single_layer = layers.len() == 1;
+            for z in layers {
+                // Preserve the existing painter contract: all phases of a lower
+                // z layer complete before any phase of the next layer.
+                let layer_primitives: std::borrow::Cow<'_, [widget_render::GpuPrimitive]> =
+                    if single_layer {
+                        std::borrow::Cow::Borrowed(&offset_prims[segment_range.clone()])
+                    } else {
+                        std::borrow::Cow::Owned(offset_prims[segment_range.clone()].iter()
+                            .filter(|primitive| widget_render::effective_z_index(primitive) == z)
+                            .cloned().collect())
+                    };
+                for (phase_idx, phase) in PHASES.iter().copied().enumerate() {
+                    if phase_idx == 1 {
+                        if let Some(image_pipeline) = self.image_pipeline.clone() {
+                            let images = collect_image_primitives(&layer_primitives);
+                            self.draw_image_primitives(
+                                enc,
+                                &image_pipeline,
+                                &images,
+                                Some(seg_scissor),
+                                image_load_budget,
+                                cell_w,
+                                cell_h,
+                                vp_w,
+                                vp_h,
+                                render_time_seconds,
+                            );
+                        }
                     }
-                }
-                if phase_idx == 2 {
-                    if let Some(cable_pipeline) = self.patch_cable_pipeline.clone() {
-                        let cables = collect_patch_cable_primitives(
-                            &offset_prims[segment_range.clone()],
-                            seg_scissor,
-                            cell_w,
-                            cell_h,
-                            vp_w,
-                            vp_h,
-                        );
-                        draw_patch_cable_instances(
-                            enc,
-                            &self.device,
-                            &mut self.upload_arena,
-                            &mut self.stats,
-                            &cable_pipeline,
-                            &cables,
-                        );
-                        enc.setScissorRect(mtl_scissor(seg_scissor));
+                    if phase_idx == 2 {
+                        if let Some(cable_pipeline) = self.patch_cable_pipeline.clone() {
+                            let cables = collect_patch_cable_primitives(
+                                &layer_primitives,
+                                seg_scissor,
+                                cell_w,
+                                cell_h,
+                                vp_w,
+                                vp_h,
+                            );
+                            draw_patch_cable_instances(
+                                enc,
+                                &self.device,
+                                &mut self.upload_arena,
+                                &mut self.stats,
+                                &cable_pipeline,
+                                &cables,
+                            );
+                            enc.setScissorRect(mtl_scissor(seg_scissor));
+                        }
+
+                        if let Some(waveform_pipeline) = self.waveform_pipeline.clone() {
+                            let waveforms =
+                                collect_waveform_primitives(&layer_primitives);
+                            self.draw_waveform_primitives(
+                                enc,
+                                &waveform_pipeline,
+                                &waveforms,
+                                cell_w,
+                                cell_h,
+                                vp_w,
+                                vp_h,
+                            );
+                        }
+
+                        if let Some(wavetable_pipeline) = self.wavetable_pipeline.clone() {
+                            let wavetables =
+                                collect_wavetable_primitives(&layer_primitives);
+                            self.draw_wavetable_primitives(
+                                enc,
+                                &wavetable_pipeline,
+                                &wavetables,
+                                cell_w,
+                                cell_h,
+                                vp_w,
+                                vp_h,
+                            );
+                        }
+
+                        if let Some(live_spectrogram_pipeline) = self.live_spectrogram_pipeline.clone()
+                        {
+                            let spectrograms = collect_live_spectrogram_primitives(
+                                &layer_primitives,
+                            );
+                            self.draw_live_spectrogram_primitives(
+                                enc,
+                                &live_spectrogram_pipeline,
+                                &spectrograms,
+                                cell_w,
+                                cell_h,
+                                vp_w,
+                                vp_h,
+                            );
+                        }
                     }
 
-                    if let Some(waveform_pipeline) = self.waveform_pipeline.clone() {
-                        let waveforms =
-                            collect_waveform_primitives(&offset_prims[segment_range.clone()]);
-                        self.draw_waveform_primitives(
-                            enc,
-                            &waveform_pipeline,
-                            &waveforms,
-                            cell_w,
-                            cell_h,
-                            vp_w,
-                            vp_h,
-                        );
+                    for (_, compiled, range, translation) in groups.iter().filter(|(layer, ..)| *layer == z) {
+                        if let Some(compiled) = compiled {
+                            self.draw_compiled_widget_run_phase(
+                                enc, compiled, phase, atlas_texture,
+                                prop_atlas_texture.as_deref(), *translation);
+                        } else {
+                            self.draw_dynamic_widget_run_phase(
+                                enc, &offset_prims[range.clone()], phase, atlas_texture,
+                                prop_atlas_texture.as_deref(), cell_w, cell_h, vp_w, vp_h);
+                        }
                     }
-
-                    if let Some(wavetable_pipeline) = self.wavetable_pipeline.clone() {
-                        let wavetables =
-                            collect_wavetable_primitives(&offset_prims[segment_range.clone()]);
-                        self.draw_wavetable_primitives(
-                            enc,
-                            &wavetable_pipeline,
-                            &wavetables,
-                            cell_w,
-                            cell_h,
-                            vp_w,
-                            vp_h,
-                        );
-                    }
-
-                    if let Some(live_spectrogram_pipeline) = self.live_spectrogram_pipeline.clone()
-                    {
-                        let spectrograms = collect_live_spectrogram_primitives(
-                            &offset_prims[segment_range.clone()],
-                        );
-                        self.draw_live_spectrogram_primitives(
-                            enc,
-                            &live_spectrogram_pipeline,
-                            &spectrograms,
-                            cell_w,
-                            cell_h,
-                            vp_w,
-                            vp_h,
-                        );
-                    }
-                }
-
-                for compiled in &groups {
-                    self.draw_compiled_widget_run_phase(
-                        enc,
-                        compiled,
-                        phase,
-                        atlas_texture,
-                        prop_atlas_texture.as_deref(),
-                    );
                 }
             }
+            set_render_translation(enc, [0.0, 0.0]);
 
-            Duration::ZERO
+            preparation_time
         }
 
         pub fn take_last_precise_mouse(&mut self) -> Option<(f32, f32)> {
@@ -4046,6 +4150,7 @@ fragment float4 live_spectrogram_frag(
             let enc = cmdbuf
                 .renderCommandEncoderWithDescriptor(&render_desc)
                 .ok_or(BackendError::MetalError)?;
+            set_render_translation(&enc, [0.0, 0.0]);
             let scene_scissor = ScissorRect::full(
                 texture.width().min(u32::MAX as usize) as u32,
                 texture.height().min(u32::MAX as usize) as u32,
@@ -4548,7 +4653,8 @@ fragment float4 live_spectrogram_frag(
             self.widget_pipelines
                 .insert("number-picker".to_string(), number_picker_pipeline);
             self.button_surface_override_modified = Some(modified);
-            self.compiled_widget_runs.clear();
+            self.retained_compiled_runs.clear();
+            self.retained_compiled_bytes = 0;
             self.stats.note_widget_run_cache_clear();
             eprintln!(
                 "[button-shader-watch] reload ok; swapped button and number-picker pipelines and cleared compiled widget runs"
@@ -4924,6 +5030,20 @@ fragment float4 live_spectrogram_frag(
             &mut self,
             tiled: &TiledRenderFrame,
         ) -> Result<TiledRenderStatus, BackendError> {
+            self.render_tiled_target(tiled, None).map(|(status, _)| status)
+        }
+
+        fn render_tiled_target(
+            &mut self,
+            tiled: &TiledRenderFrame,
+            target: Option<&TiledCaptureTarget>,
+        ) -> Result<(TiledRenderStatus, TiledCaptureTiming), BackendError> {
+            let started = Instant::now();
+            let allocations_before = self.stats.widget_run_static_allocations;
+            let primitives_before = self.stats.widget_primitives;
+            let hits_before = self.stats.widget_run_cache_hits;
+            let misses_before = self.stats.widget_run_cache_misses;
+            let mut scene_counts = [0usize; 5];
             crate::widget_render::sdf_widget::set_sdf_time_seconds(self.elapsed_time_seconds());
             self.compile_pending_sdf_pipelines();
             self.compile_pending_button_surface_override();
@@ -4936,7 +5056,7 @@ fragment float4 live_spectrogram_frag(
             self.drain_decoded_images(2);
 
             let Some(pipeline) = self.pipeline.clone() else {
-                return Ok(TiledRenderStatus::NotPresented);
+                return Ok((TiledRenderStatus::NotPresented, TiledCaptureTiming::default()));
             };
             let Some((cell_w, cell_h, atlas_texture)) = self.atlas.as_ref().map(|atlas| {
                 (
@@ -4945,12 +5065,16 @@ fragment float4 live_spectrogram_frag(
                     atlas.texture.clone(),
                 )
             }) else {
-                return Ok(TiledRenderStatus::NotPresented);
+                return Ok((TiledRenderStatus::NotPresented, TiledCaptureTiming::default()));
             };
-            let Some(drawable) = self.layer.nextDrawable() else {
-                return Ok(TiledRenderStatus::NotPresented);
+            let drawable = if target.is_none() { self.layer.nextDrawable() } else { None };
+            let texture = if let Some(target) = target {
+                target.texture.clone()
+            } else if let Some(drawable) = &drawable {
+                drawable.texture()
+            } else {
+                return Ok((TiledRenderStatus::NotPresented, TiledCaptureTiming::default()));
             };
-            let texture = drawable.texture();
             let vp_w = texture.width() as f32;
             let vp_h = texture.height() as f32;
             let ndc_x = |px: f32| px / vp_w * 2.0 - 1.0;
@@ -4985,9 +5109,13 @@ fragment float4 live_spectrogram_frag(
             let enc = cmdbuf
                 .renderCommandEncoderWithDescriptor(&desc)
                 .ok_or(BackendError::MetalError)?;
+            set_render_translation(&enc, [0.0, 0.0]);
             self.upload_arena.begin_frame(&mut self.stats);
             self.prop_text_layout_cache.begin_frame();
             self.begin_compiled_widget_run_frame();
+
+            self.retained_widget_scenes.retain(|id, _|
+                tiled.tiles.iter().any(|tile| tile.tile_id == *id));
 
             // ── Per-tile rendering with scissor rect ─────────────────────────
             for tile in &tiled.tiles {
@@ -5161,7 +5289,6 @@ fragment float4 live_spectrogram_frag(
                     }
                     let time_seconds = self.elapsed_time_seconds();
                     let inner_rows_exact = ((content_bottom_px - content_top_px) / cell_h).max(0.0);
-                    let inner_rows = inner_rows_exact.floor() as u16;
                     let text_scroll = tile.frame.text_scroll_top as f32;
                     let widget_scroll = tile.frame.widget_scroll_top;
                     let combined_scroll = text_scroll + widget_scroll;
@@ -5199,101 +5326,47 @@ fragment float4 live_spectrogram_frag(
                     let content_width_cells =
                         ((content_right_px - content_left_px) / cell_w).max(0.0);
                     let fill_extra_cols = (content_width_cells - layout.rect.width).max(0.0);
-                    let use_widget_run_cache = !tile.frame.dirty_widget_ids.is_empty()
-                        && !widget_render::any_overlay_active()
-                        && !widget_render::layout_wants_animation_frames(layout);
                     let scene_started = Instant::now();
-                    let (
-                        offset_prims,
-                        offset_run_indices,
-                        offset_runs,
-                        overlay_prims,
-                        use_widget_run_cache,
-                    ) = if use_widget_run_cache {
-                        let (run_scene_key, overlay) = self
-                            .refresh_widget_run_scene_for_dirty_layout(
-                                tile.frame.widget_content_cache_key,
-                                tile.frame.widget_layout_cache_key,
-                                layout,
-                                &tile.frame.dirty_widget_ids,
-                                viewport,
-                                combined_scroll,
-                                inner_rows,
-                            );
-                        let primitive_runs = self
-                            .cached_widget_run_scenes
-                            .get(&run_scene_key)
-                            .map(|scene| scene.runs.as_slice())
-                            .unwrap_or(&[]);
-                        let mut offset_prims = Vec::new();
-                        let mut offset_run_indices = Vec::new();
-                        let mut offset_runs = Vec::new();
-                        for run in primitive_runs {
-                            let mut run_primitives = run.primitives.clone();
-                            Self::refresh_widget_scene_time(
-                                &mut run_primitives,
-                                viewport.time_seconds,
-                            );
-                            let run_index = offset_runs.len();
-                            for primitive in run_primitives {
-                                let offset = offset_primitive(
-                                    extend_right_edge_primitive(
-                                        primitive,
-                                        layout.rect.width,
-                                        fill_extra_cols,
-                                        cell_w,
-                                        vp_w,
-                                    ),
-                                    widget_col_off,
-                                    widget_row_off,
-                                    cell_w,
-                                    cell_h,
-                                    vp_w,
-                                    vp_h,
-                                );
-                                offset_run_indices.push(run_index);
-                                offset_prims.push(offset);
-                            }
-                            offset_runs.push(OffsetGpuPrimitiveRun {
-                                widget_id: run.widget_id,
-                                widget_type: run.widget_type.clone(),
-                                ancestor_widget_ids: run.ancestor_widget_ids.clone(),
-                            });
+                    let scene = self.retained_widget_scenes.entry(tile.tile_id).or_default().prepare(
+                        layout, tile.frame.widget_layout_cache_key,
+                        tile.frame.widget_content_cache_key, &tile.frame.dirty_widget_ids,
+                        viewport, Rect {
+                            col: tile.frame.widget_layout_scroll_left, row: combined_scroll,
+                            width: content_width_cells, height: inner_rows_exact,
+                        });
+                    self.stats.note_widget_retained_run_collection(
+                        scene.reused_nodes, scene.rebuilt_nodes, 0, 0);
+                    scene_counts[0] += scene.rebuilt_nodes;
+                    scene_counts[1] += scene.reused_nodes;
+                    scene_counts[2] += scene.culled_nodes;
+                    scene_counts[3] += scene.reindexed_nodes;
+                    scene_counts[4] += scene.bounds_refreshed_nodes;
+                    let mut offset_prims = Vec::new();
+                    let mut offset_run_indices = Vec::new();
+                    let mut offset_runs = Vec::new();
+                    for run in scene.runs {
+                        let run_index = offset_runs.len();
+                        let translation = [
+                            widget_col_off + run.translation[0],
+                            widget_row_off + run.translation[1],
+                        ];
+                        let primitive_start = offset_prims.len();
+                        let mut primitives = run.primitives.as_ref().clone();
+                        Self::refresh_widget_scene_time(&mut primitives, viewport.time_seconds);
+                        for primitive in primitives {
+                            offset_prims.push(offset_primitive(
+                                extend_right_edge_primitive(primitive, layout.rect.width,
+                                    fill_extra_cols, cell_w, vp_w),
+                                translation[0], translation[1], cell_w, cell_h, vp_w, vp_h));
+                            offset_run_indices.push(run_index);
                         }
-                        self.stats.note_widget_primitives(offset_prims.len());
-                        (offset_prims, offset_run_indices, offset_runs, overlay, true)
-                    } else {
-                        let (primitives, overlay) = self.widget_scene_for_layout(
-                            tile.frame.widget_content_cache_key,
-                            tile.frame.widget_layout_cache_key,
-                            layout,
-                            &tile.frame.dirty_widget_ids,
-                            viewport,
-                            combined_scroll,
-                            inner_rows,
-                        );
-                        let offset_prims: Vec<_> = primitives
-                            .into_iter()
-                            .map(|p| {
-                                offset_primitive(
-                                    extend_right_edge_primitive(
-                                        p,
-                                        layout.rect.width,
-                                        fill_extra_cols,
-                                        cell_w,
-                                        vp_w,
-                                    ),
-                                    widget_col_off,
-                                    widget_row_off,
-                                    cell_w,
-                                    cell_h,
-                                    vp_w,
-                                    vp_h,
-                                )
-                            })
-                            .collect();
-                        (offset_prims, Vec::new(), Vec::new(), overlay, false)
-                    };
+                        offset_runs.push(OffsetGpuPrimitiveRun {
+                            scene_id: tile.tile_id, source: run, primitive_start,
+                            translation, fill_extra_cols, layout_width: layout.rect.width,
+                        });
+                    }
+                    let overlay_prims = scene.overlay;
+                    self.stats.note_widget_primitives(offset_prims.len());
                     widget_scene_build_time += scene_started.elapsed();
                     if contains_agent_instrument_stub_animation(&offset_prims) {
                         self.note_agent_instrument_stub_animation_detected();
@@ -5306,37 +5379,22 @@ fragment float4 live_spectrogram_frag(
 
                     for (seg_scissor, seg_range) in &segments {
                         enc.setScissorRect(mtl_scissor(*seg_scissor));
-                        metal_prep_time += if use_widget_run_cache {
-                            self.draw_widget_run_cached_segment(
-                                &enc,
-                                *seg_scissor,
-                                seg_range.clone(),
-                                &offset_prims,
-                                &offset_run_indices,
-                                &offset_runs,
-                                &tile.frame.dirty_widget_ids,
-                                &atlas_texture,
-                                cell_w,
-                                cell_h,
-                                vp_w,
-                                vp_h,
-                                &mut image_load_budget,
-                                render_time_seconds,
-                            )
-                        } else {
-                            self.draw_dynamic_segment_all(
-                                &enc,
-                                *seg_scissor,
-                                &offset_prims[seg_range.clone()],
-                                &atlas_texture,
-                                cell_w,
-                                cell_h,
-                                vp_w,
-                                vp_h,
-                                &mut image_load_budget,
-                                render_time_seconds,
-                            )
-                        };
+                        metal_prep_time += self.draw_widget_run_cached_segment(
+                            &enc,
+                            *seg_scissor,
+                            seg_range.clone(),
+                            &offset_prims,
+                            &offset_run_indices,
+                            &offset_runs,
+                            &tile.frame.dirty_widget_ids,
+                            &atlas_texture,
+                            cell_w,
+                            cell_h,
+                            vp_w,
+                            vp_h,
+                            &mut image_load_budget,
+                            render_time_seconds,
+                        );
                     }
                     // Restore tile scissor after segments
                     enc.setScissorRect(mtl_scissor(content_scissor));
@@ -6192,12 +6250,35 @@ fragment float4 live_spectrogram_frag(
             }
 
             enc.endEncoding();
-            cmdbuf.presentDrawable(objc2::runtime::ProtocolObject::from_ref(&*drawable));
+            if let Some(drawable) = &drawable {
+                cmdbuf.presentDrawable(objc2::runtime::ProtocolObject::from_ref(&**drawable));
+            }
             cmdbuf.commit();
             self.upload_arena.finish_frame(cmdbuf.clone());
+            let mut timing = TiledCaptureTiming {
+                cpu_ms: started.elapsed().as_secs_f64() * 1000.0,
+                scene_ms: widget_scene_build_time.as_secs_f64() * 1000.0,
+                gpu_ms: 0.0,
+                static_allocations: self.stats.widget_run_static_allocations - allocations_before,
+                primitives: self.stats.widget_primitives - primitives_before,
+                rebuilt_nodes: scene_counts[0],
+                reused_nodes: scene_counts[1],
+                culled_nodes: scene_counts[2],
+                reindexed_nodes: scene_counts[3],
+                bounds_refreshed_nodes: scene_counts[4],
+                cache_hits: self.stats.widget_run_cache_hits - hits_before,
+                cache_misses: self.stats.widget_run_cache_misses - misses_before,
+            };
+            if target.is_some() {
+                cmdbuf.waitUntilCompleted();
+                if cmdbuf.status() == objc2_metal::MTLCommandBufferStatus::Error {
+                    return Err(BackendError::MetalError);
+                }
+                timing.gpu_ms = (cmdbuf.GPUEndTime() - cmdbuf.GPUStartTime()) * 1000.0;
+            }
             self.stats
                 .note_frame(0, 0, 0, widget_scene_build_time, metal_prep_time);
-            Ok(TiledRenderStatus::Presented)
+            Ok((TiledRenderStatus::Presented, timing))
         }
     }
 
@@ -6571,281 +6652,7 @@ fragment float4 live_spectrogram_frag(
                 .as_ref()
                 .map(|w| w.scale_factor())
                 .unwrap_or(1.0);
-            let atlas = self.create_monospace_atlas(self.monospace_font_size_pt * scale)?;
-            self.atlas = Some(atlas);
-            let text_zoom = if self.text_atlas_zoom.is_finite() && self.text_atlas_zoom > 0.0 {
-                self.text_atlas_zoom
-            } else {
-                1.0
-            };
-            let text_atlas = self.create_monospace_atlas(
-                self.monospace_font_size_pt * text_zoom as f64 * scale,
-            )?;
-            self.text_atlas = Some(text_atlas);
-            self.text_atlas_zoom = text_zoom;
-            self.prop_atlas = ProportionalGlyphAtlas::new(&self.device, scale);
-            self.mono_atlas_generation = self.mono_atlas_generation.wrapping_add(1);
-            self.prop_atlas_generation = self.prop_atlas_generation.wrapping_add(1);
-            self.compiled_widget_runs.clear();
-            self.prop_text_layout_cache = ProportionalTextLayoutCache::new();
-
-            // ── Render pipeline ──────────────────────────────────────────────
-            let src = NSString::from_str(SHADER_SRC);
-            let library = self
-                .device
-                .newLibraryWithSource_options_error(&src, None)
-                .map_err(|_| BackendError::MetalError)?;
-
-            let vert_fn = library
-                .newFunctionWithName(&NSString::from_str("vert"))
-                .ok_or(BackendError::MetalError)?;
-            let frag_fn = library
-                .newFunctionWithName(&NSString::from_str("frag"))
-                .ok_or(BackendError::MetalError)?;
-
-            let desc = MTLRenderPipelineDescriptor::new();
-            desc.setVertexFunction(Some(&vert_fn));
-            desc.setFragmentFunction(Some(&frag_fn));
-            let attach = unsafe { desc.colorAttachments().objectAtIndexedSubscript(0) };
-            attach.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
-            attach.setBlendingEnabled(true);
-            attach.setSourceRGBBlendFactor(MTLBlendFactor::SourceAlpha);
-            attach.setDestinationRGBBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
-            attach.setSourceAlphaBlendFactor(MTLBlendFactor::One);
-            attach.setDestinationAlphaBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
-
-            self.pipeline = Some(
-                self.device
-                    .newRenderPipelineStateWithDescriptor_error(&desc)
-                    .map_err(|_| BackendError::MetalError)?,
-            );
-
-            // ── Proportional text pipeline (linear filtering) ────────────────
-            {
-                // Compile the proportional fragment shader alongside the shared
-                // vertex shader (reuse from the main library).
-                // Compile PROP_FRAG_SRC as its own library,
-                // reuse the vertex function from the main library.
-                let prop_lib = self
-                    .device
-                    .newLibraryWithSource_options_error(&NSString::from_str(PROP_FRAG_SRC), None)
-                    .map_err(|_| BackendError::MetalError)?;
-                let prop_frag_fn = prop_lib
-                    .newFunctionWithName(&NSString::from_str("prop_frag"))
-                    .ok_or(BackendError::MetalError)?;
-
-                let prop_desc = MTLRenderPipelineDescriptor::new();
-                prop_desc.setVertexFunction(Some(&vert_fn));
-                prop_desc.setFragmentFunction(Some(&prop_frag_fn));
-                let prop_attach =
-                    unsafe { prop_desc.colorAttachments().objectAtIndexedSubscript(0) };
-                prop_attach.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
-                // Enable alpha blending: src * srcAlpha + dst * (1 - srcAlpha).
-                // This lets glyph quads overlap without clipping each other.
-                prop_attach.setBlendingEnabled(true);
-                prop_attach.setSourceRGBBlendFactor(MTLBlendFactor::SourceAlpha);
-                prop_attach.setDestinationRGBBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
-                prop_attach.setSourceAlphaBlendFactor(MTLBlendFactor::One);
-                prop_attach.setDestinationAlphaBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
-
-                self.prop_pipeline = Some(
-                    self.device
-                        .newRenderPipelineStateWithDescriptor_error(&prop_desc)
-                        .map_err(|_| BackendError::MetalError)?,
-                );
-            }
-
-            // ── Image pipeline ───────────────────────────────────────────────
-            {
-                let image_lib = self
-                    .device
-                    .newLibraryWithSource_options_error(&NSString::from_str(IMAGE_SHADER_SRC), None)
-                    .map_err(|_| BackendError::MetalError)?;
-                let image_vert = image_lib
-                    .newFunctionWithName(&NSString::from_str("image_vert"))
-                    .ok_or(BackendError::MetalError)?;
-                let image_frag = image_lib
-                    .newFunctionWithName(&NSString::from_str("image_frag"))
-                    .ok_or(BackendError::MetalError)?;
-                let image_desc = MTLRenderPipelineDescriptor::new();
-                image_desc.setVertexFunction(Some(&image_vert));
-                image_desc.setFragmentFunction(Some(&image_frag));
-                let image_attach =
-                    unsafe { image_desc.colorAttachments().objectAtIndexedSubscript(0) };
-                image_attach.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
-                image_attach.setBlendingEnabled(true);
-                image_attach.setSourceRGBBlendFactor(MTLBlendFactor::SourceAlpha);
-                image_attach.setDestinationRGBBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
-                image_attach.setSourceAlphaBlendFactor(MTLBlendFactor::One);
-                image_attach.setDestinationAlphaBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
-                self.image_pipeline = Some(
-                    self.device
-                        .newRenderPipelineStateWithDescriptor_error(&image_desc)
-                        .map_err(|_| BackendError::MetalError)?,
-                );
-            }
-
-            // ── Patch cable pipeline ────────────────────────────────────────
-            {
-                let cable_lib = self
-                    .device
-                    .newLibraryWithSource_options_error(
-                        &NSString::from_str(PATCH_CABLE_SHADER_SRC),
-                        None,
-                    )
-                    .map_err(|err| {
-                        eprintln!("Metal patch cable shader compile failed: {err:?}");
-                        BackendError::MetalError
-                    })?;
-                let cable_vert = cable_lib
-                    .newFunctionWithName(&NSString::from_str("patch_cable_vert"))
-                    .ok_or(BackendError::MetalError)?;
-                let cable_frag = cable_lib
-                    .newFunctionWithName(&NSString::from_str("patch_cable_frag"))
-                    .ok_or(BackendError::MetalError)?;
-                let cable_desc = MTLRenderPipelineDescriptor::new();
-                cable_desc.setVertexFunction(Some(&cable_vert));
-                cable_desc.setFragmentFunction(Some(&cable_frag));
-                let cable_attach =
-                    unsafe { cable_desc.colorAttachments().objectAtIndexedSubscript(0) };
-                cable_attach.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
-                cable_attach.setBlendingEnabled(true);
-                cable_attach.setSourceRGBBlendFactor(MTLBlendFactor::SourceAlpha);
-                cable_attach.setDestinationRGBBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
-                cable_attach.setSourceAlphaBlendFactor(MTLBlendFactor::One);
-                cable_attach.setDestinationAlphaBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
-                self.patch_cable_pipeline = Some(
-                    self.device
-                        .newRenderPipelineStateWithDescriptor_error(&cable_desc)
-                        .map_err(|err| {
-                            eprintln!("Metal patch cable pipeline creation failed: {err:?}");
-                            BackendError::MetalError
-                        })?,
-                );
-            }
-
-            // ── Widget render pipelines (one per widget type) ────────────────
-            // Each widget gets its own fragment shader but shares the vertex
-            // shader and SDF utilities from the preamble.
-            for (widget_type, vertex_src, fragment_src) in widget_render::widget_shader_sources(
-                widget_render::ShaderBackend::Msl,
-            ) {
-                let pipeline_state =
-                    self.compile_widget_pipeline_source(widget_type, vertex_src, fragment_src)?;
-                self.widget_pipelines
-                    .insert(widget_type.to_string(), pipeline_state);
-            }
-            self.compile_pending_button_surface_override();
-
-            let waveform_src = NSString::from_str(WAVEFORM_SHADER_SRC);
-            let waveform_lib = self
-                .device
-                .newLibraryWithSource_options_error(&waveform_src, None)
-                .map_err(|_| BackendError::MetalError)?;
-            let waveform_vert = waveform_lib
-                .newFunctionWithName(&NSString::from_str("waveform_vert"))
-                .ok_or(BackendError::MetalError)?;
-            let waveform_frag = waveform_lib
-                .newFunctionWithName(&NSString::from_str("waveform_frag"))
-                .ok_or(BackendError::MetalError)?;
-            let waveform_desc = MTLRenderPipelineDescriptor::new();
-            waveform_desc.setVertexFunction(Some(&waveform_vert));
-            waveform_desc.setFragmentFunction(Some(&waveform_frag));
-            let waveform_attach =
-                unsafe { waveform_desc.colorAttachments().objectAtIndexedSubscript(0) };
-            waveform_attach.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
-            waveform_attach.setBlendingEnabled(true);
-            {
-                use objc2_metal::{MTLBlendFactor, MTLBlendOperation};
-                waveform_attach.setSourceRGBBlendFactor(MTLBlendFactor::SourceAlpha);
-                waveform_attach.setDestinationRGBBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
-                waveform_attach.setRgbBlendOperation(MTLBlendOperation::Add);
-                waveform_attach.setSourceAlphaBlendFactor(MTLBlendFactor::One);
-                waveform_attach.setDestinationAlphaBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
-                waveform_attach.setAlphaBlendOperation(MTLBlendOperation::Add);
-            }
-            self.waveform_pipeline = Some(
-                self.device
-                    .newRenderPipelineStateWithDescriptor_error(&waveform_desc)
-                    .map_err(|_| BackendError::MetalError)?,
-            );
-
-            let wavetable_src = NSString::from_str(WAVETABLE_SHADER_SRC);
-            let wavetable_lib = self
-                .device
-                .newLibraryWithSource_options_error(&wavetable_src, None)
-                .map_err(|_| BackendError::MetalError)?;
-            let wavetable_vert = wavetable_lib
-                .newFunctionWithName(&NSString::from_str("wavetable_vert"))
-                .ok_or(BackendError::MetalError)?;
-            let wavetable_frag = wavetable_lib
-                .newFunctionWithName(&NSString::from_str("wavetable_frag"))
-                .ok_or(BackendError::MetalError)?;
-            let wavetable_desc = MTLRenderPipelineDescriptor::new();
-            wavetable_desc.setVertexFunction(Some(&wavetable_vert));
-            wavetable_desc.setFragmentFunction(Some(&wavetable_frag));
-            let wavetable_attach = unsafe {
-                wavetable_desc
-                    .colorAttachments()
-                    .objectAtIndexedSubscript(0)
-            };
-            wavetable_attach.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
-            wavetable_attach.setBlendingEnabled(true);
-            {
-                use objc2_metal::{MTLBlendFactor, MTLBlendOperation};
-                wavetable_attach.setSourceRGBBlendFactor(MTLBlendFactor::SourceAlpha);
-                wavetable_attach.setDestinationRGBBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
-                wavetable_attach.setRgbBlendOperation(MTLBlendOperation::Add);
-                wavetable_attach.setSourceAlphaBlendFactor(MTLBlendFactor::One);
-                wavetable_attach
-                    .setDestinationAlphaBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
-                wavetable_attach.setAlphaBlendOperation(MTLBlendOperation::Add);
-            }
-            self.wavetable_pipeline = Some(
-                self.device
-                    .newRenderPipelineStateWithDescriptor_error(&wavetable_desc)
-                    .map_err(|_| BackendError::MetalError)?,
-            );
-
-            let live_spectrogram_src = NSString::from_str(LIVE_SPECTROGRAM_SHADER_SRC);
-            let live_spectrogram_lib = self
-                .device
-                .newLibraryWithSource_options_error(&live_spectrogram_src, None)
-                .map_err(|_| BackendError::MetalError)?;
-            let live_spectrogram_vert = live_spectrogram_lib
-                .newFunctionWithName(&NSString::from_str("live_spectrogram_vert"))
-                .ok_or(BackendError::MetalError)?;
-            let live_spectrogram_frag = live_spectrogram_lib
-                .newFunctionWithName(&NSString::from_str("live_spectrogram_frag"))
-                .ok_or(BackendError::MetalError)?;
-            let live_spectrogram_desc = MTLRenderPipelineDescriptor::new();
-            live_spectrogram_desc.setVertexFunction(Some(&live_spectrogram_vert));
-            live_spectrogram_desc.setFragmentFunction(Some(&live_spectrogram_frag));
-            let live_spectrogram_attach = unsafe {
-                live_spectrogram_desc
-                    .colorAttachments()
-                    .objectAtIndexedSubscript(0)
-            };
-            live_spectrogram_attach.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
-            live_spectrogram_attach.setBlendingEnabled(true);
-            {
-                use objc2_metal::{MTLBlendFactor, MTLBlendOperation};
-                live_spectrogram_attach.setSourceRGBBlendFactor(MTLBlendFactor::SourceAlpha);
-                live_spectrogram_attach
-                    .setDestinationRGBBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
-                live_spectrogram_attach.setRgbBlendOperation(MTLBlendOperation::Add);
-                live_spectrogram_attach.setSourceAlphaBlendFactor(MTLBlendFactor::One);
-                live_spectrogram_attach
-                    .setDestinationAlphaBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
-                live_spectrogram_attach.setAlphaBlendOperation(MTLBlendOperation::Add);
-            }
-            self.live_spectrogram_pipeline = Some(
-                self.device
-                    .newRenderPipelineStateWithDescriptor_error(&live_spectrogram_desc)
-                    .map_err(|_| BackendError::MetalError)?,
-            );
-
-            Ok(())
+            self.initialize_graphics(scale)
         }
 
         fn teardown(&mut self) -> Result<(), BackendError> {
@@ -7042,6 +6849,7 @@ fragment float4 live_spectrogram_frag(
 
             if let Some(vbuf) = &text_vbuf {
                 enc.setRenderPipelineState(&pipeline);
+                set_render_translation(&enc, [0.0, 0.0]);
                 unsafe {
                     enc.setVertexBuffer_offset_atIndex(Some(vbuf), 0, 0);
                     enc.setFragmentTexture_atIndex(Some(&text_atlas_texture), 0);
@@ -9532,6 +9340,15 @@ fragment float4 live_spectrogram_frag(
         })
     }
 
+    fn set_render_translation(enc: &ProtocolObject<dyn MTLRenderCommandEncoder>, translation: [f32; 2]) {
+        let frame = [translation[0], translation[1],
+            widget_render::sdf_widget::current_sdf_time_seconds(), 0.0];
+        unsafe {
+            enc.setVertexBytes_length_atIndex(
+                NonNull::from(&frame).cast(), std::mem::size_of_val(&frame), 1);
+        }
+    }
+
     fn draw_widget_instances(
         enc: &ProtocolObject<dyn MTLRenderCommandEncoder>,
         device: &ProtocolObject<dyn MTLDevice>,
@@ -9546,6 +9363,7 @@ fragment float4 live_spectrogram_frag(
         let Some(upload) = upload_arena.upload_slice(device, instances, stats) else {
             return;
         };
+        set_render_translation(enc, [0.0, 0.0]);
         enc.setRenderPipelineState(pipeline);
         unsafe {
             enc.setVertexBuffer_offset_atIndex(Some(&upload.buffer), upload.offset, 0);
@@ -9574,6 +9392,7 @@ fragment float4 live_spectrogram_frag(
         let Some(upload) = upload_arena.upload_slice(device, verts, stats) else {
             return;
         };
+        set_render_translation(enc, [0.0, 0.0]);
         enc.setRenderPipelineState(pipeline);
         unsafe {
             enc.setVertexBuffer_offset_atIndex(Some(&upload.buffer), upload.offset, 0);
@@ -10600,28 +10419,6 @@ fragment float4 live_spectrogram_frag(
             }
         }
 
-        fn test_widget_run_cache_key(
-            primitives: &[GpuPrimitive],
-            cell_w: f32,
-            cell_h: f32,
-            vp_w: f32,
-            vp_h: f32,
-            mono_atlas_generation: u64,
-            prop_atlas_generation: u64,
-        ) -> WidgetRunCacheKey {
-            widget_run_cache_key(
-                7,
-                "label",
-                primitives,
-                cell_w,
-                cell_h,
-                vp_w,
-                vp_h,
-                mono_atlas_generation,
-                prop_atlas_generation,
-            )
-        }
-
         fn test_widget_instance_primitive(widget_type: &str, itime: f32) -> GpuPrimitive {
             GpuPrimitive::WidgetInstance {
                 widget_type: widget_type.to_string(),
@@ -10793,193 +10590,118 @@ fragment float4 live_spectrogram_frag(
         }
 
         #[test]
-        fn widget_run_cache_key_reuses_unchanged_label_primitives() {
-            let primitives = vec![GpuPrimitive::ProportionalText(
-                widget_render::GpuProportionalTextPrimitive {
-                    row: 1.0,
-                    col: 2.0,
-                    align_width: 6.0,
-                    h_align: 0.0,
-                    text: "1".to_string(),
-                    font_size: 12.0,
-                    scale: 1.0,
-                    fg: theme::FG(),
-                    bg: theme::BG(),
-                    mono: false,
+        fn retained_scroll_matches_dynamic_pixels_and_reuses_gpu_buffers() {
+            use crate::ui::backend::{StatusIndicator, TileFrame};
+            use std::sync::Arc;
+            let (width, height) = (960, 640);
+            let mut backend = unwrap_backend(MetalBackend::new_capture(width, height), "backend");
+            unwrap_backend(backend.initialize_graphics(1.0), "graphics");
+            let (cell_w, cell_h) = backend.cell_dimensions();
+            let mut label = layout_node("label", HashMap::from([
+                ("text".into(), Value::String("Retained scroll geometry".into())),
+            ]));
+            label.widget_id = 90101;
+            label.rect = Rect { col: 2.0, row: 1.0, width: 28.0, height: 2.0 };
+            let mut knob = layout_node("knob", HashMap::from([
+                ("value".into(), Value::Number(0.3)),
+            ]));
+            knob.widget_id = 90102;
+            knob.rect = Rect { col: 5.0, row: 4.0, width: 6.0, height: 4.0 };
+            let mut envelope = layout_node("adsr-editor", HashMap::new());
+            envelope.widget_id = 90103;
+            envelope.rect = Rect { col: 15.0, row: 4.0, width: 20.0, height: 6.0 };
+            widget_render::sdf_widget::register_sdf_widget(widget_render::sdf_widget::SdfWidgetDef {
+                name: "retained-style-test".into(),
+                shader_source: "fragment float4 widget_frag(WidgetVaryings in [[stage_in]]) { return float4(0.8, 0.3, 0.1, 1.0); }".into(),
+                sdf_expr: crate::parser::Expression::Number(0.0), state_uniforms: vec![],
+                bindable_props: vec![], region_count: 1, width: 8.0, height: 3.0,
+                paint_margin: 0.0, animates: false,
+            });
+            let value = |v| std::rc::Rc::new(std::cell::RefCell::new(v));
+            let mut styled = layout_node("retained-style-test", HashMap::from([
+                ("style".into(), Value::Map(HashMap::from([
+                    ("hover".into(), value(Value::Map(HashMap::from([
+                        ("scale".into(), value(Value::Number(1.5))),
+                        ("transition".into(), value(Value::Map(HashMap::from([
+                            ("scale".into(), value(Value::Number(10.0))),
+                        ])))),
+                    ])))),
+                ]))),
+            ]));
+            styled.widget_id = 90104;
+            styled.rect = Rect { col: 10.0, row: 11.0, width: 8.0, height: 3.0 };
+            let mut root = layout_node("scroll", HashMap::from([
+                ("_content_height".into(), Value::Number(50.0)),
+            ]));
+            root.widget_id = 90100;
+            root.rect = Rect { col: 0.0, row: 0.0, width: 40.0, height: 16.0 };
+            root.children = vec![label, knob, envelope, styled];
+            let area = Rect { col: 3.0, row: 2.0,
+                width: width as f32 / cell_w - 6.0, height: height as f32 / cell_h - 4.0 };
+            let mut tiled = TiledRenderFrame { completion: None, tiles: vec![TileFrame {
+                tile_id: 1, rect: area, body_rect: area, tabs: vec![], is_active: true,
+                show_status: false, show_border: false, border_width_px: 0.0,
+                border_radius_px: 0.0, background_color: None, background_color_name: None,
+                inspect_overlay: None,
+                frame: RenderFrame {
+                    lines: vec![], cursor: None, buffer_name: "test".into(), dirty: false,
+                    status_cells: vec![], status_indicator: StatusIndicator { toggle_cols: None },
+                    completion: None, text_cache_key: 1, widget_layout_cache_key: 1,
+                    widget_content_cache_key: 1, dirty_widget_ids: vec![],
+                    widget_layout: Some(Arc::new(root)), focused_widget_id: None,
+                    widget_scroll_top: 0.0, widget_scroll_left: 0.0, widget_layout_scroll_left: 0.0,
+                    text_scroll_top: 0, text_cell_width_scale: 1.0, text_cell_height_scale: 1.0,
                 },
-            )];
-
-            let a = test_widget_run_cache_key(&primitives, 8.0, 16.0, 800.0, 600.0, 1, 1);
-            let b = test_widget_run_cache_key(&primitives, 8.0, 16.0, 800.0, 600.0, 1, 1);
-
-            assert_eq!(a, b);
+            }] };
+            let target = unwrap_backend(backend.create_tiled_capture_target(width, height), "target");
+            let first = unwrap_backend(backend.render_tiled_capture(&tiled, &target), "cold frame");
+            assert!(first.static_allocations > 0);
+            let first_pixels = target.rgba();
+            assert_pixels_have_non_background_values(&first_pixels);
+            for offset in [0.0, 0.375, 3.0, 7.5, 0.0] {
+                tiled.tiles[0].frame.widget_layout_scroll_left = offset;
+                let warm = unwrap_backend(backend.render_tiled_capture(&tiled, &target), "retained frame");
+                assert_eq!(warm.static_allocations, 0, "scroll {offset} allocated geometry");
+                let retained = target.rgba();
+                if offset != 0.0 { assert_ne!(retained, first_pixels); }
+                backend.force_dynamic_runs = true;
+                unwrap_backend(backend.render_tiled_capture(&tiled, &target), "reference frame");
+                let dynamic = target.rgba();
+                backend.force_dynamic_runs = false;
+                // Translation moves the floating point addition from CPU to
+                // GPU, so antialiased edge pixels can differ by a few levels.
+                let error: u64 = retained.iter().zip(&dynamic)
+                    .map(|(&a, &b)| a.abs_diff(b) as u64).sum();
+                assert!(error as f64 / (retained.len() as f64) < 0.1,
+                    "retained/reference mismatch at {offset}: mean channel error {}",
+                    error as f64 / retained.len() as f64);
+            }
+            let old = target.rgba();
+            let layout = Arc::make_mut(tiled.tiles[0].frame.widget_layout.as_mut().unwrap());
+            layout.children[1].props.insert("value".into(), Value::Number(0.8));
+            tiled.tiles[0].frame.widget_content_cache_key += 1;
+            tiled.tiles[0].frame.dirty_widget_ids = vec![90102];
+            let changed = unwrap_backend(backend.render_tiled_capture(&tiled, &target), "changed control");
+            assert!(changed.static_allocations > 0);
+            assert_ne!(target.rgba(), old);
+            tiled.tiles[0].frame.dirty_widget_ids.clear();
+            assert_eq!(unwrap_backend(backend.render_tiled_capture(&tiled, &target), "warm control").static_allocations, 0);
+            backend.mono_atlas_generation += 1;
+            assert!(unwrap_backend(backend.render_tiled_capture(&tiled, &target), "atlas invalidation").static_allocations > 0);
+            widget_render::sdf_widget::set_sdf_hit_state(90104,
+                widget_render::sdf_widget::SdfHitState { hit_region: 0, hit_pressed: false });
+            unwrap_backend(backend.render_tiled_capture(&tiled, &target), "start hover transition");
+            let before_hover = target.rgba();
+            backend.start_time -= Duration::from_secs(10);
+            let animated = unwrap_backend(backend.render_tiled_capture(&tiled, &target), "advance hover transition");
+            assert_eq!(animated.static_allocations, 0, "hover time must not rebuild geometry");
+            assert_ne!(target.rgba(), before_hover, "hover scale must advance on retained geometry");
         }
 
         #[test]
-        fn widget_run_cache_key_invalidates_changed_text() {
-            let mut primitives = vec![GpuPrimitive::ProportionalText(
-                widget_render::GpuProportionalTextPrimitive {
-                    row: 1.0,
-                    col: 2.0,
-                    align_width: 6.0,
-                    h_align: 0.0,
-                    text: "1".to_string(),
-                    font_size: 12.0,
-                    scale: 1.0,
-                    fg: theme::FG(),
-                    bg: theme::BG(),
-                    mono: false,
-                },
-            )];
-
-            let before = test_widget_run_cache_key(&primitives, 8.0, 16.0, 800.0, 600.0, 1, 1);
-            if let GpuPrimitive::ProportionalText(text) = &mut primitives[0] {
-                text.text = "17".to_string();
-            }
-            let after = test_widget_run_cache_key(&primitives, 8.0, 16.0, 800.0, 600.0, 1, 1);
-
-            assert_ne!(before, after);
-        }
-
-        #[test]
-        fn widget_run_cache_key_invalidates_text_style_and_view_metrics() {
-            let mut primitives = vec![GpuPrimitive::ProportionalText(
-                widget_render::GpuProportionalTextPrimitive {
-                    row: 1.0,
-                    col: 2.0,
-                    align_width: 6.0,
-                    h_align: 0.0,
-                    text: "Tempo".to_string(),
-                    font_size: 12.0,
-                    scale: 1.0,
-                    fg: theme::FG(),
-                    bg: theme::BG(),
-                    mono: false,
-                },
-            )];
-
-            let base = test_widget_run_cache_key(&primitives, 8.0, 16.0, 800.0, 600.0, 1, 1);
-            if let GpuPrimitive::ProportionalText(text) = &mut primitives[0] {
-                text.font_size = 14.0;
-            }
-            assert_ne!(
-                base,
-                test_widget_run_cache_key(&primitives, 8.0, 16.0, 800.0, 600.0, 1, 1)
-            );
-
-            if let GpuPrimitive::ProportionalText(text) = &mut primitives[0] {
-                text.font_size = 12.0;
-                text.h_align = 1.0;
-            }
-            assert_ne!(
-                base,
-                test_widget_run_cache_key(&primitives, 8.0, 16.0, 800.0, 600.0, 1, 1)
-            );
-
-            if let GpuPrimitive::ProportionalText(text) = &mut primitives[0] {
-                text.h_align = 0.0;
-                text.fg = theme::ACCENT();
-            }
-            assert_ne!(
-                base,
-                test_widget_run_cache_key(&primitives, 8.0, 16.0, 800.0, 600.0, 1, 1)
-            );
-
-            if let GpuPrimitive::ProportionalText(text) = &mut primitives[0] {
-                text.fg = theme::FG();
-            }
-            assert_ne!(
-                base,
-                test_widget_run_cache_key(&primitives, 10.0, 16.0, 800.0, 600.0, 1, 1)
-            );
-        }
-
-        #[test]
-        fn widget_run_cache_key_invalidates_atlas_recreation() {
-            let primitives = vec![GpuPrimitive::ProportionalText(
-                widget_render::GpuProportionalTextPrimitive {
-                    row: 1.0,
-                    col: 2.0,
-                    align_width: 6.0,
-                    h_align: 0.0,
-                    text: "Tempo".to_string(),
-                    font_size: 12.0,
-                    scale: 1.0,
-                    fg: theme::FG(),
-                    bg: theme::BG(),
-                    mono: false,
-                },
-            )];
-
-            let base = test_widget_run_cache_key(&primitives, 8.0, 16.0, 800.0, 600.0, 1, 1);
-            assert_ne!(
-                base,
-                test_widget_run_cache_key(&primitives, 8.0, 16.0, 800.0, 600.0, 2, 1)
-            );
-            assert_ne!(
-                base,
-                test_widget_run_cache_key(&primitives, 8.0, 16.0, 800.0, 600.0, 1, 2)
-            );
-        }
-
-        #[test]
-        fn widget_run_cache_key_ignores_itime_for_non_animated_widget_instances() {
-            let mut primitives = vec![test_widget_instance_primitive("button", 1.0)];
-            let base = test_widget_run_cache_key(&primitives, 8.0, 16.0, 800.0, 600.0, 1, 1);
-            if let GpuPrimitive::WidgetInstance { instance, .. } = &mut primitives[0] {
-                instance.itime = 42.0;
-            }
-
-            assert_eq!(
-                base,
-                test_widget_run_cache_key(&primitives, 8.0, 16.0, 800.0, 600.0, 1, 1)
-            );
-        }
-
-        #[test]
-        fn widget_run_cache_key_keeps_itime_for_animated_widget_instances() {
-            widget_render::sdf_widget::register_sdf_widget(
-                widget_render::sdf_widget::SdfWidgetDef {
-                    name: "test-cache-itime-animated".to_string(),
-                    shader_source: String::new(),
-                    sdf_expr: crate::parser::Expression::Number(0.0),
-                    state_uniforms: Vec::new(),
-                    bindable_props: Vec::new(),
-                    region_count: 0,
-                    width: 1.0,
-                    height: 1.0,
-                    paint_margin: 0.0,
-                    animates: true,
-                },
-            );
-
-            let mut primitives = vec![test_widget_instance_primitive(
-                "test-cache-itime-animated",
-                1.0,
-            )];
-            let base = test_widget_run_cache_key(&primitives, 8.0, 16.0, 800.0, 600.0, 1, 1);
-            if let GpuPrimitive::WidgetInstance { instance, .. } = &mut primitives[0] {
-                instance.itime = 42.0;
-            }
-
-            assert_ne!(
-                base,
-                test_widget_run_cache_key(&primitives, 8.0, 16.0, 800.0, 600.0, 1, 1)
-            );
-        }
-
-        #[test]
-        fn widget_run_cache_key_keeps_itime_for_animated_builtin_widgets() {
-            let mut primitives = vec![test_widget_instance_primitive("phaser-notch", 1.0)];
-            let base = test_widget_run_cache_key(&primitives, 8.0, 16.0, 800.0, 600.0, 1, 1);
-            if let GpuPrimitive::WidgetInstance { instance, .. } = &mut primitives[0] {
-                instance.itime = 42.0;
-            }
-
-            assert_ne!(
-                base,
-                test_widget_run_cache_key(&primitives, 8.0, 16.0, 800.0, 600.0, 1, 1)
-            );
+        fn retained_cache_keeps_shader_animation_dynamic() {
+            assert!(primitive_run_supported_for_cache(&[test_widget_instance_primitive("knob", 1.0)]));
+            assert!(!primitive_run_supported_for_cache(&[test_widget_instance_primitive("phaser-notch", 1.0)]));
         }
 
         #[test]
@@ -11031,7 +10753,7 @@ fragment float4 live_spectrogram_frag(
 }
 
 #[cfg(target_os = "macos")]
-pub use inner::{MetalBackend, TiledRenderStatus};
+pub use inner::{MetalBackend, TiledCaptureTarget, TiledCaptureTiming, TiledRenderStatus};
 
 /// The MSL sources the Metal backend compiles, re-exported so
 /// [`crate::metal_shader_capture`] renders the reference captures from exactly

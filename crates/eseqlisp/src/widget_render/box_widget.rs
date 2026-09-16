@@ -32,6 +32,43 @@ fn content_extent(node: &LayoutNode) -> Rect {
     rect
 }
 
+pub(super) fn background_rect(node: &LayoutNode) -> Rect {
+    if node.children.iter().any(|child| child.widget_type == "scroll") {
+        node.rect
+    } else {
+        content_extent(node)
+    }
+}
+
+const STATE_DOT_OUTER_PX: f32 = 12.0;
+const STATE_DOT_MARGIN_PX: f32 = 2.5;
+
+/// Bounds of the box's own paint, including the expanded SDF background and
+/// corner state dots. Children have a separate clipping/overflow contract.
+pub(super) fn paint_bounds(node: &LayoutNode, viewport: WidgetViewport, background: Rect) -> Option<Rect> {
+    let mut bounds = node.rect;
+    if let Some(Value::String(name)) = node.props.get("background")
+        && let Some(definition) = super::sdf_widget::sdf_widget_def(name)
+    {
+        let paint = super::sdf_widget::sdf_widget_paint_rect(background, definition.paint_margin);
+        let paint = super::sdf_widget::visual_style_paint_bounds(node.widget_id, &node.props, paint)?;
+        let col = bounds.col.min(paint.col);
+        let row = bounds.row.min(paint.row);
+        bounds = Rect { col, row,
+            width: (bounds.col + bounds.width).max(paint.col + paint.width) - col,
+            height: (bounds.row + bounds.height).max(paint.row + paint.height) - row };
+    }
+    // Reserve every declared indicator, even while a reactive flag is off.
+    let dots = ["macro-owned", "plock-any"].iter().filter(|prop| node.props.contains_key(**prop)).count();
+    if dots > 0 {
+        let outer = super::ui_design_px(STATE_DOT_OUTER_PX);
+        let margin = super::ui_design_px(STATE_DOT_MARGIN_PX);
+        bounds.width = bounds.width.max(node.rect.col + (margin + outer * dots as f32) / viewport.cell_w.max(1.0) - bounds.col);
+        bounds.height = bounds.height.max(node.rect.row + (margin + outer) / viewport.cell_h.max(1.0) - bounds.row);
+    }
+    Some(bounds)
+}
+
 fn child_extent(node: &LayoutNode) -> Rect {
     let mut rect = node.rect;
     // Don't recurse into scroll containers — their children may be much
@@ -681,12 +718,7 @@ impl WidgetDefinition for BoxWidget {
         if let Some(Value::String(bg_type)) = node.props.get("background") {
             // Scroll-containing boxes use their own layout rect: content_extent
             // would include scroll children, but node.rect is the viewport.
-            let has_scroll_child = node.children.iter().any(|c| c.widget_type == "scroll");
-            let bg_rect = if has_scroll_child {
-                node.rect
-            } else {
-                content_extent(node)
-            };
+            let bg_rect = background_rect(node);
             prims.extend(super::sdf_widget::sdf_widget_background_primitives(
                 bg_type,
                 node.widget_id,
@@ -703,9 +735,9 @@ impl WidgetDefinition for BoxWidget {
         let macro_owned = box_state_active(&node.props, "macro-owned");
         let plock_any = box_state_active(&node.props, "plock-any");
         if macro_owned || plock_any {
-            let outer_px = super::ui_design_px(12.0);
+            let outer_px = super::ui_design_px(STATE_DOT_OUTER_PX);
             let inner_px = super::ui_design_px(8.0);
-            let margin_px = super::ui_design_px(2.5);
+            let margin_px = super::ui_design_px(STATE_DOT_MARGIN_PX);
             let mut push_dot = |slot: f32, inner: Color| {
                 let center = [
                     node.rect.col

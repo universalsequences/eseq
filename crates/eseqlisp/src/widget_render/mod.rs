@@ -32,6 +32,7 @@ pub mod patcher;
 pub mod phaser_notch;
 pub mod piano_keyboard;
 pub mod response_curve_editor;
+pub mod retained_scene;
 pub mod roar_filter;
 pub mod roar_shaper;
 pub mod scope;
@@ -227,8 +228,9 @@ pub fn set_pointer_hover_widget(widget_id: Option<u64>) -> bool {
         if *hovered == widget_id {
             return false;
         }
+        if let Some(id) = *hovered { bump_widget_state_revision(id); }
         *hovered = widget_id;
-        bump_widget_state_generation();
+        if let Some(id) = widget_id { bump_widget_state_revision(id); }
         true
     })
 }
@@ -1620,6 +1622,7 @@ fn widget_primitive_cache_key(node: &LayoutNode, viewport: WidgetViewport) -> Op
     viewport.vp_h.to_bits().hash(&mut hasher);
     viewport.focused_widget_id.hash(&mut hasher);
     viewport.focused_branch.hash(&mut hasher);
+    viewport.inherited_hover.hash(&mut hasher);
     viewport.overlay_viewport_bottom.to_bits().hash(&mut hasher);
     viewport.scroll_top.to_bits().hash(&mut hasher);
     viewport.scroll_left.to_bits().hash(&mut hasher);
