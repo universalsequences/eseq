@@ -20,6 +20,7 @@ pub(super) enum GateOffTarget {
 
 #[derive(Clone, Copy, Debug)]
 pub(super) struct GateOffEvent {
+    pub(super) audition_generation: u64,
     pub(super) track_idx: usize,
     pub(super) logical_id: u64,
     pub(super) target: GateOffTarget,
@@ -68,6 +69,7 @@ pub(super) enum RetrigTarget {
 /// `docs/step-retrig-spec.md`.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct RetrigEvent {
+    pub(super) audition_generation: u64,
     pub(super) track_idx: usize,
     pub(super) step: usize,
     /// Gate length for this hit, in samples: `min(interval, step duration)`,
@@ -200,6 +202,7 @@ pub(super) fn schedule_gate_off_event(
         1,
         data.scheduler_snapshot.transport.pattern_epoch,
         CountdownEventKind::GateOff(GateOffEvent {
+            audition_generation: data.current_audition_generation,
             track_idx,
             logical_id,
             target,
@@ -223,6 +226,7 @@ pub(super) fn record_sequenced_legato_note(
 ) {
     data.legato_holds.note_on(
         SequencedLegatoHold {
+            audition_generation: data.current_audition_generation,
             logical_id,
             track_idx,
             target,
@@ -264,6 +268,7 @@ pub(super) fn schedule_retrig_events(
         repeats,
         data.scheduler_snapshot.transport.pattern_epoch,
         CountdownEventKind::Retrig(RetrigEvent {
+            audition_generation: data.current_audition_generation,
             track_idx,
             step,
             gate,
@@ -288,7 +293,8 @@ pub(super) fn dispatch_gate_off_event(
             }
             if !free_patch {
                 if let Some(resume) =
-                    data.legato_holds.resume_on_gate_off(event.logical_id, frame_offset)
+                    data.legato_holds.resume_on_gate_off_retaining(event.logical_id, frame_offset,
+                        |generation| data.state.note_audition.is_current(generation))
                 {
                     // The note this one displaced is still inside its own
                     // duration: fall back to it without retriggering, the way
@@ -312,6 +318,8 @@ pub(super) fn dispatch_gate_off_event(
                             true,
                         );
                     }
+                    let previous_scope = data.current_audition_generation;
+                    data.current_audition_generation = resume.audition_generation;
                     schedule_gate_off_event(
                         data,
                         resume.track_idx,
@@ -320,6 +328,7 @@ pub(super) fn dispatch_gate_off_event(
                         resume.remaining_samples - frame_offset as f64,
                         resume.target,
                     );
+                    data.current_audition_generation = previous_scope;
                     return;
                 }
             }
@@ -438,6 +447,8 @@ pub(super) fn dispatch_scheduled_event(
     event: &CallbackScheduledEvent,
     frame_offset: u32,
 ) {
+    if !data.state.note_audition.is_current(event.event.audition_generation) { return; }
+    data.current_audition_generation = event.event.audition_generation;
     match &event.event.kind {
         ScheduledEventKind::ResolvedTrigger {
             track,
@@ -523,6 +534,7 @@ pub(super) fn dispatch_scheduled_event(
             );
         }
     }
+    data.current_audition_generation = 0;
 }
 
 pub(super) fn scheduled_trigger_track(event: &CallbackScheduledEvent) -> Option<usize> {
@@ -713,7 +725,8 @@ pub(super) fn enqueue_scheduled_event_for_callback(
     nframes: usize,
     current_pattern_epoch: u64,
 ) {
-    if event.pattern_epoch != current_pattern_epoch {
+    if event.pattern_epoch != current_pattern_epoch
+        || !data.state.note_audition.is_current(event.audition_generation) {
         return;
     }
     let seq = data.event_seq;
@@ -755,6 +768,9 @@ pub(super) fn drain_scheduled_events_for_callback(
             current_pattern_epoch,
         );
     }
+    while let Some(event) = data.state.note_audition.queue.pop() {
+        enqueue_scheduled_event_for_callback(data, event, block_start_sample, nframes, current_pattern_epoch);
+    }
 }
 
 pub(super) fn collect_due_countdown_events(
@@ -766,12 +782,16 @@ pub(super) fn collect_due_countdown_events(
     data.legato_holds.advance(nframes);
     let mut i = 0usize;
     while i < data.countdown_events.len() {
-        let stale = match data.countdown_events[i].kind {
-            CountdownEventKind::GateOff(_) => false,
-            CountdownEventKind::Scheduled(_) | CountdownEventKind::Retrig(_) => {
-                data.countdown_events[i].pattern_epoch != current_pattern_epoch
-            }
+        let scope = match &data.countdown_events[i].kind {
+            CountdownEventKind::GateOff(event) => event.audition_generation,
+            CountdownEventKind::Retrig(event) => event.audition_generation,
+            CountdownEventKind::Scheduled(event) => event.event.audition_generation,
         };
+        let cancelled = !data.state.note_audition.is_current(scope);
+        let release = matches!(data.countdown_events[i].kind, CountdownEventKind::GateOff(_));
+        if cancelled && release { data.countdown_events[i].remaining_samples = 0.0; }
+        let stale = !release && (cancelled
+            || data.countdown_events[i].pattern_epoch != current_pattern_epoch);
         if stale {
             data.countdown_events.swap_remove(i);
             continue;
@@ -869,6 +889,21 @@ pub(super) fn dispatch_block_events_until(
     let end_offset = source_end.filter(|end| *end >= block_start_sample
         && *end - block_start_sample < data.current_callback_nframes as u64)
         .map(|end| (end - block_start_sample) as u32);
+    // Cancel before mute-group arbitration, so a stale preview cannot choke
+    // a fresh live hit. Already sounding preview gates release this block.
+    data.block_events.retain_mut(|event| {
+        let scope = match &event.kind {
+            BlockEventKind::Scheduled(note) => note.event.audition_generation,
+            BlockEventKind::GateOff(gate) => gate.audition_generation,
+            BlockEventKind::Retrig(retrig) => retrig.audition_generation,
+        };
+        if data.state.note_audition.is_current(scope) { return true; }
+        if matches!(event.kind, BlockEventKind::GateOff(_)) {
+            event.frame_offset = 0;
+            data.block_events_need_sort = true;
+            true
+        } else { false }
+    });
     while !data.block_events.is_empty() {
         if let Some(end) = source_end {
             // Also filters retriggers created by an earlier event in THIS
@@ -969,7 +1004,11 @@ pub(super) fn dispatch_block_events_until(
                     dispatch_gate_off_event(data, gate_off, frame_offset, block_start_sample);
                 }
                 BlockEventKind::Retrig(retrig) => {
-                    dispatch_retrig_event(data, retrig, frame_offset);
+                    if data.state.note_audition.is_current(retrig.audition_generation) {
+                        data.current_audition_generation = retrig.audition_generation;
+                        dispatch_retrig_event(data, retrig, frame_offset);
+                        data.current_audition_generation = 0;
+                    }
                 }
             }
             #[cfg(feature = "audio-experiments")]
@@ -1004,6 +1043,7 @@ fn release_range_gates(data: &mut AudioCallbackData, frame_offset: u32, block_st
             let free_patch = track_custom_run_mode(&data.state, track_idx)
                 == CustomInstrumentRunMode::FreePatch;
             let gate = GateOffEvent {
+                audition_generation: data.current_audition_generation,
                 track_idx,
                 logical_id: voice.logical_id,
                 target: GateOffTarget::Custom { engine_id, free_patch },

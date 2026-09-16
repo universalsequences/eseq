@@ -1807,7 +1807,8 @@ fn arm_rack_voice_retrig(
     schedule_countdown_or_block_event(
         data, frame_offset as f64 + interval, interval, repeats,
         data.scheduler_snapshot.transport.pattern_epoch,
-        CountdownEventKind::Retrig(RetrigEvent { track_idx, step, gate, target }),
+        CountdownEventKind::Retrig(RetrigEvent { audition_generation: data.current_audition_generation,
+            track_idx, step, gate, target }),
     );
 }
 

@@ -8,6 +8,7 @@ the audio module remains its consumer.
 */
 
 pub mod scheduled_event;
+pub mod audition;
 
 mod clock;
 mod enqueue;
@@ -52,7 +53,7 @@ use self::scheduled_event::{
     ScheduledEffectParam, ScheduledEvent, ScheduledEventKind, ScheduledEventQueue,
     ScheduledInstrumentParam,
     ScheduledInstrumentParamTarget, ScheduledInstrumentParams, ScheduledInstrumentTensorParam,
-    ScheduledInstrumentTensorParams, ScheduledSamplerParams, StepEvent,
+    ScheduledInstrumentTensorParams, ScheduledSamplerParams, StepEvent, ScheduledEventSink,
 };
 use crate::sequencer::{
     sync_beats, InstrumentType, KeyboardTrigger, MidiFxPosition, SequencerSnapshot, SequencerState,

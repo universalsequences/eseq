@@ -4413,6 +4413,7 @@ fn get_selection_rect(props: &HashMap<String, Value>) -> Option<TimelineSelectio
 fn get_time_ruler(map: &HashMap<String, Value>) -> Option<TimeRuler> {
     let mode = map.get("mode").and_then(as_string)?;
     match mode.as_str() {
+        "seconds" => Some(TimeRuler { mode: TimeRulerMode::Seconds }),
         "bars-beats" => Some(TimeRuler {
             mode: TimeRulerMode::BarsBeats {
                 beats_per_bar: map

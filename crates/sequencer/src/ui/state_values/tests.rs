@@ -14,6 +14,8 @@ mod rack_slot_indicator_tests;
 mod rack_effect_modulation_tests;
 #[path = "instrument_header_ui_tests.rs"]
 mod instrument_header_ui_tests;
+#[path = "retrospective_ui_tests.rs"]
+mod retrospective_ui_tests;
 
     use super::*;
     use eseqlisp::parser::{ASTParser, Expression, Parser, ParserError, Token};
@@ -16160,6 +16162,7 @@ mod instrument_header_ui_tests;
         register_agent_test_natives(editor.runtime_mut());
         let menu_state = crate::application_menu::register_natives(editor.runtime_mut());
         register_full_grid_test_natives(&mut editor);
+        crate::retrospective::register_state(editor.runtime_mut());
         // Transport owns a real defscene value, so full-UI fixtures need the
         // same scene authoring natives as the application.
         let scene_state = scene_state.unwrap_or_else(|| Arc::new(SequencerState::new(

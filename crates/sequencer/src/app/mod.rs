@@ -47,6 +47,7 @@ mod params;
 mod projects;
 mod bus_outputs;
 pub mod pending_capture;
+pub mod retrospective;
 pub mod song_capture;
 pub mod song_edit;
 pub mod song_region;
@@ -943,6 +944,7 @@ pub struct App {
     pub master_recorder: Arc<MasterRecorder>,
     pub sample_analysis: AnalysisService,
     pub pending_recording_take: Option<RecordingTake>,
+    pub retrospective: retrospective::RetrospectiveCapture,
     recording_history: Option<RecordingHistoryTransaction>,
     /// The single active launch authority (docs/song-mode-spec.md 13); all
     /// transitions go through the methods in `song_transport.rs`.
@@ -2529,6 +2531,7 @@ impl App {
             sample_analysis: AnalysisService::new(),
             pending_recording_take: None,
             recording_history: None,
+            retrospective: retrospective::RetrospectiveCapture::default(),
             song_transport_mode: song_transport::SongTransportMode::Stopped,
             recording_kind: None,
             song_capture_armed: false,

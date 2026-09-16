@@ -28,6 +28,7 @@
 
 ;; Drag-and-drop sample import modal (zero footprint while closed).
 (import eseq.sample-import)
+(import eseq.retrospective)
 (import eseq.export-song)
 (import eseq.file-dialogs)
 
@@ -3534,6 +3535,8 @@
       (eseq.file-dialogs/panel))
     (subtree :key "seq-sample-import"
       (eseq.sample-import/panel))
+    (subtree :key "seq-retrospective"
+      (eseq.retrospective/panel))
     ;; Lane class picker for the patch bay's + box: a modal only gets pointer
     ;; input through the active tile, so it mounts in this buffer.
     (subtree :key "seq-lane-add"

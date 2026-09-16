@@ -5,8 +5,8 @@ Conversion of resolved step and generated emissions into scheduled queue events.
 #[allow(unused_imports)]
 use super::*;
 
-pub(super) fn enqueue_resolved_trigger<const QUEUE_CAP: usize>(
-    queue: &ScheduledEventQueue<QUEUE_CAP>,
+pub(super) fn enqueue_resolved_trigger(
+    queue: &impl ScheduledEventSink,
     snapshot: &SequencerSnapshot,
     track_output_events: &mut Vec<TrackOutputEvent>,
     pattern_epoch: u64,
@@ -77,6 +77,7 @@ pub(super) fn enqueue_resolved_trigger<const QUEUE_CAP: usize>(
                 );
                 if queue
                     .push(ScheduledEvent {
+                        audition_generation: 0,
                         pattern_epoch,
                         sample_time: note_sample_time,
                         kind: ScheduledEventKind::ResolvedTrigger {
@@ -115,6 +116,7 @@ pub(super) fn enqueue_resolved_trigger<const QUEUE_CAP: usize>(
     }
     let enqueued = queue
         .push(ScheduledEvent {
+            audition_generation: 0,
             pattern_epoch,
             sample_time,
             kind: ScheduledEventKind::ResolvedTrigger {
@@ -180,8 +182,8 @@ pub(super) fn step_event_from_resolved(
     }
 }
 
-pub(super) fn enqueue_step_event<const QUEUE_CAP: usize>(
-    queue: &ScheduledEventQueue<QUEUE_CAP>,
+pub(super) fn enqueue_step_event(
+    queue: &impl ScheduledEventSink,
     snapshot: &SequencerSnapshot,
     track_output_events: &mut Vec<TrackOutputEvent>,
     pattern_epoch: u64,
@@ -258,8 +260,8 @@ pub(super) fn midi_fx_step_for_step_event(snapshot: &SequencerSnapshot, event: &
     midi_fx_event_step_for_track(snapshot, event.track, step)
 }
 
-pub(super) fn enqueue_step_event_with_midi_fx<const QUEUE_CAP: usize>(
-    queue: &ScheduledEventQueue<QUEUE_CAP>,
+pub(super) fn enqueue_step_event_with_midi_fx(
+    queue: &impl ScheduledEventSink,
     snapshot: &SequencerSnapshot,
     track_output_events: &mut Vec<TrackOutputEvent>,
     runtime: Option<&mut lisp_host::ScratchControlRuntime>,
@@ -396,8 +398,8 @@ pub(super) fn enqueue_step_event_with_midi_fx<const QUEUE_CAP: usize>(
     )
 }
 
-pub(super) fn enqueue_neuron_parameter_events<const QUEUE_CAP: usize>(
-    queue: &ScheduledEventQueue<QUEUE_CAP>,
+pub(super) fn enqueue_neuron_parameter_events(
+    queue: &impl ScheduledEventSink,
     pattern_epoch: u64,
     sample_time: u64,
     parameter_events: NeuronParameterEvents,
@@ -409,6 +411,7 @@ pub(super) fn enqueue_neuron_parameter_events<const QUEUE_CAP: usize>(
         }
         if queue
             .push(ScheduledEvent {
+                audition_generation: 0,
                 pattern_epoch,
                 sample_time,
                 kind: ScheduledEventKind::InstrumentParams {
@@ -430,6 +433,7 @@ pub(super) fn enqueue_neuron_parameter_events<const QUEUE_CAP: usize>(
             }
             if queue
                 .push(ScheduledEvent {
+                    audition_generation: 0,
                     pattern_epoch,
                     sample_time,
                     kind: ScheduledEventKind::EffectParams {
@@ -447,8 +451,8 @@ pub(super) fn enqueue_neuron_parameter_events<const QUEUE_CAP: usize>(
     ok
 }
 
-pub(super) fn enqueue_neural_output_with_midi_fx<const QUEUE_CAP: usize>(
-    queue: &ScheduledEventQueue<QUEUE_CAP>,
+pub(super) fn enqueue_neural_output_with_midi_fx(
+    queue: &impl ScheduledEventSink,
     snapshot: &SequencerSnapshot,
     track_output_events: &mut Vec<TrackOutputEvent>,
     runtime: Option<&mut lisp_host::ScratchControlRuntime>,
@@ -563,8 +567,8 @@ impl EmittedNetworkEventSource {
     }
 }
 
-pub(super) fn enqueue_emitted_network_event_with_midi_fx<const QUEUE_CAP: usize>(
-    queue: &ScheduledEventQueue<QUEUE_CAP>,
+pub(super) fn enqueue_emitted_network_event_with_midi_fx(
+    queue: &impl ScheduledEventSink,
     snapshot: &SequencerSnapshot,
     track_output_events: &mut Vec<TrackOutputEvent>,
     runtime: Option<&mut lisp_host::ScratchControlRuntime>,
@@ -668,8 +672,8 @@ pub(super) fn enqueue_emitted_network_event_with_midi_fx<const QUEUE_CAP: usize>
     )
 }
 
-pub(super) fn enqueue_due_process_emissions<const QUEUE_CAP: usize>(
-    queue: &ScheduledEventQueue<QUEUE_CAP>,
+pub(super) fn enqueue_due_process_emissions(
+    queue: &impl ScheduledEventSink,
     snapshot: &SequencerSnapshot,
     track_output_events: &mut Vec<TrackOutputEvent>,
     scratch_runtime: &mut Option<lisp_host::ScratchControlRuntime>,

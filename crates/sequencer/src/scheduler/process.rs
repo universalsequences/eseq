@@ -2131,8 +2131,8 @@ pub(super) fn apply_global_transpose_to_resolved(
     resolved
 }
 
-pub(super) fn enqueue_network_trigger<const QUEUE_CAP: usize>(
-    queue: &ScheduledEventQueue<QUEUE_CAP>,
+pub(super) fn enqueue_network_trigger(
+    queue: &impl ScheduledEventSink,
     snapshot: &SequencerSnapshot,
     track_output_events: &mut Vec<TrackOutputEvent>,
     pattern_epoch: u64,
@@ -2200,6 +2200,7 @@ pub(super) fn enqueue_network_trigger<const QUEUE_CAP: usize>(
                 );
                 if queue
                     .push(ScheduledEvent {
+                        audition_generation: 0,
                         pattern_epoch,
                         sample_time: note_sample_time,
                         kind: ScheduledEventKind::NetworkTrigger {
@@ -2239,6 +2240,7 @@ pub(super) fn enqueue_network_trigger<const QUEUE_CAP: usize>(
     }
     let enqueued = queue
         .push(ScheduledEvent {
+            audition_generation: 0,
             pattern_epoch,
             sample_time,
             kind: ScheduledEventKind::NetworkTrigger {

@@ -39,6 +39,10 @@
   (host-command "open-learn-patch"
     (dict :patcher-buffer (current-buffer-name))))
 
+;; Recover a freely played phrase without enabling recording or transport.
+(def capture-midi ()
+  (host-command "retrospective-open" (dict)))
+
 (def seq-clear-ui-selection ()
   (do
     (seq-clear-selection)))

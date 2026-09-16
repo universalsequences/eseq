@@ -281,6 +281,7 @@ pub(super) struct AudioCallbackData {
     pub(super) dropped_scheduled_events: u64,
     pub(super) late_scheduled_events: u64,
     pub(super) event_seq: u64,
+    pub(super) current_audition_generation: u64,
     #[cfg(feature = "audio-experiments")]
     pub(super) event_profile: super::experiment::EventProfile,
     pub(super) trace_audio: bool,

@@ -11,6 +11,10 @@ pub(crate) fn dispatch_custom_host_command(
     ctx: &mut LoopCtx<'_>,
 ) {
     match name {
+        n if crate::retrospective::COMMANDS.contains(&n) => {
+            crate::retrospective::handle(name, payload, app, editor);
+            ctx.shared.ui_epoch.fetch_add(1, Ordering::Relaxed);
+        }
         n if super::menu_actions::COMMANDS.contains(&n) => super::menu_actions::handle(name, payload, app, editor, ctx),
         n if super::export::COMMANDS.contains(&n) => super::export::handle(name, payload, app, editor, ctx),
         n if super::file_menu::COMMANDS.contains(&n) => super::file_menu::handle(name, payload, app, editor, ctx),

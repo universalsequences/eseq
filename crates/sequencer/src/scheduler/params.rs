@@ -678,6 +678,7 @@ pub(super) fn enqueue_instrument_param_change<const QUEUE_CAP: usize>(
     }
     queue
         .push(ScheduledEvent {
+            audition_generation: 0,
             pattern_epoch,
             sample_time,
             kind: ScheduledEventKind::InstrumentParams {

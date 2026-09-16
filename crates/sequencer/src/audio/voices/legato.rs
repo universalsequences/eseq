@@ -19,6 +19,7 @@ const MAX_HOLDS: usize = 256;
 
 #[derive(Clone, Copy, Debug)]
 pub(in crate::audio) struct SequencedLegatoHold {
+    pub audition_generation: u64,
     pub logical_id: u64,
     pub track_idx: usize,
     pub target: GateOffTarget,
@@ -81,17 +82,25 @@ impl SequencedLegatoHolds {
     /// Pops it and returns the newest displaced note still inside its gate,
     /// already re-pushed as the voice's current note, or `None` when the
     /// voice should really close.
+    #[cfg(test)]
     pub fn resume_on_gate_off(
         &mut self,
         logical_id: u64,
         frame_offset: u32,
+    ) -> Option<SequencedLegatoHold> {
+        self.resume_on_gate_off_retaining(logical_id, frame_offset, |_| true)
+    }
+
+    pub fn resume_on_gate_off_retaining(
+        &mut self, logical_id: u64, frame_offset: u32, is_current: impl Fn(u64) -> bool,
     ) -> Option<SequencedLegatoHold> {
         if let Some(top) = self.holds.iter().rposition(|held| held.logical_id == logical_id) {
             self.holds.remove(top);
         }
         let now = frame_offset as f64;
         self.holds
-            .retain(|held| held.logical_id != logical_id || held.remaining_samples > now);
+            .retain(|held| (held.logical_id != logical_id || held.remaining_samples > now)
+                && is_current(held.audition_generation));
         self.holds
             .iter()
             .rposition(|held| held.logical_id == logical_id)
@@ -111,6 +120,7 @@ mod tests {
 
     fn hold(lid: u64, pitch_hz: f32) -> SequencedLegatoHold {
         SequencedLegatoHold {
+            audition_generation: 0,
             logical_id: lid,
             track_idx: 0,
             target: GateOffTarget::Custom { engine_id: 0, free_patch: false },
@@ -118,6 +128,21 @@ mod tests {
             velocity: 0.8,
             remaining_samples: 0.0,
         }
+    }
+
+    #[test]
+    fn retrospective_cancel_cannot_resume_an_older_preview_hold() {
+        let mut holds = SequencedLegatoHolds::default();
+        let mut preview = hold(7, 110.0);
+        preview.audition_generation = 5;
+        holds.note_on(preview, false, 1000.0);
+        holds.note_on(preview, true, 500.0);
+        assert!(holds.resume_on_gate_off_retaining(7, 0, |generation| generation == 0).is_none());
+        holds.note_on(hold(7, 220.0), false, 1000.0);
+        holds.note_on(preview, true, 500.0);
+        let resumed = holds.resume_on_gate_off_retaining(7, 0, |generation| generation == 0).unwrap();
+        assert_eq!(resumed.pitch_hz, 220.0);
+        assert_eq!(resumed.audition_generation, 0);
     }
 
     #[test]

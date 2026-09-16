@@ -891,6 +891,7 @@ fn rack_choke_group_releases_matching_sampler_and_custom_slots() {
         pattern_epoch: 0,
         seq: 0,
         kind: CountdownEventKind::GateOff(GateOffEvent {
+            audition_generation: 0,
             track_idx: 0,
             logical_id: 10,
             target: GateOffTarget::Sampler { gatepitch_id: 0 },
@@ -900,6 +901,7 @@ fn rack_choke_group_releases_matching_sampler_and_custom_slots() {
         frame_offset: 4,
         seq: 1,
         kind: BlockEventKind::GateOff(GateOffEvent {
+            audition_generation: 0,
             track_idx: 0,
             logical_id: 20,
             target: GateOffTarget::Sampler { gatepitch_id: 0 },
@@ -976,6 +978,7 @@ fn rack_choke_group_releases_matching_sampler_and_custom_slots() {
         pattern_epoch: 0,
         seq: 2,
         kind: CountdownEventKind::GateOff(GateOffEvent {
+            audition_generation: 0,
             track_idx: 0,
             logical_id: 30,
             target: GateOffTarget::Custom {
@@ -988,6 +991,7 @@ fn rack_choke_group_releases_matching_sampler_and_custom_slots() {
         frame_offset: 12,
         seq: 3,
         kind: BlockEventKind::GateOff(GateOffEvent {
+            audition_generation: 0,
             track_idx: 0,
             logical_id: 40,
             target: GateOffTarget::Custom {
@@ -1087,6 +1091,7 @@ fn rack_v2_choke_group_cuts_other_member_tracks_across_instruments() {
         pattern_epoch: 0,
         seq: 0,
         kind: CountdownEventKind::GateOff(GateOffEvent {
+            audition_generation: 0,
             track_idx: 0,
             logical_id: 10,
             target: GateOffTarget::Sampler { gatepitch_id: 0 },
@@ -1096,6 +1101,7 @@ fn rack_v2_choke_group_cuts_other_member_tracks_across_instruments() {
         frame_offset: 4,
         seq: 1,
         kind: BlockEventKind::GateOff(GateOffEvent {
+            audition_generation: 0,
             track_idx: 3,
             logical_id: 40,
             target: GateOffTarget::Sampler { gatepitch_id: 0 },
@@ -1593,6 +1599,7 @@ fn test_block_trigger(seq: u64, track: usize) -> BlockEvent {
         frame_offset: 128,
         seq,
         kind: BlockEventKind::Scheduled(Arc::new(ScheduledEvent {
+            audition_generation: 0,
             pattern_epoch: 1,
             sample_time: 128,
             kind: ScheduledEventKind::ResolvedTrigger {
@@ -1636,6 +1643,7 @@ fn test_block_network_trigger(seq: u64, track: usize) -> BlockEvent {
         frame_offset: 128,
         seq,
         kind: BlockEventKind::Scheduled(Arc::new(ScheduledEvent {
+            audition_generation: 0,
             pattern_epoch: 1,
             sample_time: 128,
             kind: ScheduledEventKind::NetworkTrigger {
@@ -2375,6 +2383,7 @@ fn countdown_gate_off_cancel_removes_matching_pending_lids() {
             pattern_epoch: 1,
             seq: 0,
             kind: CountdownEventKind::GateOff(GateOffEvent {
+                audition_generation: 0,
                 track_idx: 0,
                 logical_id: 10,
                 target: GateOffTarget::Sampler { gatepitch_id: 100 },
@@ -2387,6 +2396,7 @@ fn countdown_gate_off_cancel_removes_matching_pending_lids() {
             pattern_epoch: 1,
             seq: 1,
             kind: CountdownEventKind::GateOff(GateOffEvent {
+                audition_generation: 0,
                 track_idx: 0,
                 logical_id: 20,
                 target: GateOffTarget::Sampler { gatepitch_id: 200 },
@@ -2398,6 +2408,7 @@ fn countdown_gate_off_cancel_removes_matching_pending_lids() {
             frame_offset: 12,
             seq: 2,
             kind: BlockEventKind::GateOff(GateOffEvent {
+                audition_generation: 0,
                 track_idx: 0,
                 logical_id: 10,
                 target: GateOffTarget::Sampler { gatepitch_id: 100 },
@@ -2407,6 +2418,7 @@ fn countdown_gate_off_cancel_removes_matching_pending_lids() {
             frame_offset: 16,
             seq: 3,
             kind: BlockEventKind::GateOff(GateOffEvent {
+                audition_generation: 0,
                 track_idx: 0,
                 logical_id: 20,
                 target: GateOffTarget::Sampler { gatepitch_id: 200 },
@@ -2450,6 +2462,7 @@ fn retrig_cancel_preserves_scheduled_triggers_for_later_mute_group_winner() {
             pattern_epoch: 1,
             seq: 1,
             kind: CountdownEventKind::Retrig(RetrigEvent {
+                audition_generation: 0,
                 track_idx: 1,
                 step: 0,
                 gate: 16.0,
@@ -2463,6 +2476,7 @@ fn retrig_cancel_preserves_scheduled_triggers_for_later_mute_group_winner() {
             frame_offset: 20,
             seq: 3,
             kind: BlockEventKind::Retrig(RetrigEvent {
+                audition_generation: 0,
                 track_idx: 1,
                 step: 0,
                 gate: 16.0,
@@ -2706,6 +2720,7 @@ fn retrig_infinite_keeps_scheduling_until_the_track_fires_again() {
         pattern_epoch: 1,
         seq: 0,
         kind: CountdownEventKind::Retrig(RetrigEvent {
+            audition_generation: 0,
             track_idx: 2,
             step: 0,
             gate: 128.0,
@@ -2716,6 +2731,7 @@ fn retrig_infinite_keeps_scheduling_until_the_track_fires_again() {
         frame_offset: 8,
         seq: 1,
         kind: BlockEventKind::Retrig(RetrigEvent {
+            audition_generation: 0,
             track_idx: 2,
             step: 0,
             gate: 128.0,
@@ -2752,6 +2768,7 @@ fn retrig_custom_track_refires_the_same_logical_voices() {
     // Every repeat carries the identical voice identities, so a dgen voice is
     // re-excited in place instead of a fresh voice being stolen per hit.
     let event = RetrigEvent {
+        audition_generation: 0,
         track_idx: 0,
         step: 0,
         gate: 3_000.0,

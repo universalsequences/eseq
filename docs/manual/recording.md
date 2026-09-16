@@ -46,6 +46,44 @@ Arm the rack header to play pads: each key triggers one pad at its base pitch. A
 
 Use `Z` and `X` to reach the loaded pads. Recorded notes land on each member's own pattern. See [Racks](racks).
 
+## Recover something you just played
+
+Arm a track or drum rack and play freely with the transport stopped. The last
+30 seconds of live keyboard, MIDI, and on-screen pad trigs are kept automatically;
+Record and the metronome can stay off.
+
+1. Run **M-x capture-midi** as soon as you hear a phrase you want to keep.
+2. Drag across the roll to select its beginning and end. Each row shows one
+   track and pitch. **Start (s)** and **End (s)** fine-tune the crop; **Zoom to
+   crop** enlarges it.
+3. Choose how many **Bars** the crop contains. Its length determines the BPM:
+   a two-second crop with one bar gives 120 BPM. Slow tempos automatically double
+   the bar count until the BPM reaches at least 70 (36 becomes 72; 48 becomes 96),
+   preserving the phrase's timing. The displayed BPM is rounded
+   to the nearest whole number, which is the project's current tempo precision.
+4. If the transport is running, click **Stop playback**. Click **Loop crop** to
+   audition through the original tracks' sounds at that BPM. The playhead shows
+   your position. **Stop loop**, cropping, Refresh, or Cancel ends the preview.
+5. Click **Send to tracks**. This sets the project to the displayed BPM and
+   creates new patterns in the current scene's cells on the original tracks.
+   Onsets and note lengths retain their proportions without quantization.
+   Old patterns remain in the pattern pool. One Undo restores both the old
+   patterns and the old tempo.
+
+Opening the modal freezes the preview while live capture continues. **Refresh
+capture** replaces that preview with the latest playing. Cancel leaves your
+patterns untouched. Only notes starting inside the crop are included; notes
+extending beyond its end are shortened there.
+
+The preview uses the prepared notes and the tracks' MIDI and audio effects;
+track processes and sequencer generators apply during normal pattern playback.
+Capture follows live input before MIDI effects, and excludes sequencer playback
+and roll-generated notes. It clears when you change projects. The buffer holds
+up to 8192 trigs and reports if dense input exceeded that capacity. Patterns
+currently share one velocity per step: import reports conflicting velocities,
+excess notes in a step, or overlong notes instead of silently changing them.
+Increasing the bar count can separate close hits into different steps.
+
 ## Record quantization
 
 Record quantization snaps performed notes to a grid; **off** keeps your timing. It is separate from launch quantization, which schedules pattern and scene changes, and from the quantizer MIDI effect, which alters playback.

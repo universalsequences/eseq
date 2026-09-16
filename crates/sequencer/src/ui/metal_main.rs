@@ -16,6 +16,7 @@ mod piano_roll;
 mod patch_learn;
 mod profile;
 mod roll_record;
+mod retrospective;
 mod step_print;
 mod sample_import_ui;
 mod sampler_monitor;

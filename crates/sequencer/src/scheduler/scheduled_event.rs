@@ -279,6 +279,8 @@ pub enum ScheduledEventKind {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ScheduledEvent {
+    /// Zero is normal playback; nonzero identifies a cancellable audition.
+    pub audition_generation: u64,
     pub pattern_epoch: u64,
     pub sample_time: u64,
     pub kind: ScheduledEventKind,
@@ -415,6 +417,7 @@ mod tests {
     fn queue_reports_rejections_across_clear_and_reuse() {
         let queue = ScheduledEventQueue::<2>::new();
         let event = ScheduledEvent {
+            audition_generation: 0,
             pattern_epoch: 0, sample_time: 1,
             kind: ScheduledEventKind::RackParams { track: 0, step: 0 },
         };
@@ -438,6 +441,7 @@ mod tests {
         let retained = std::sync::Arc::downgrade(&baseline);
         let queue = ScheduledEventQueue::<2>::new();
         queue.push(ScheduledEvent {
+            audition_generation: 0,
             pattern_epoch: 0, sample_time: 1000,
             kind: ScheduledEventKind::EffectParams {
                 track: 0,
@@ -456,6 +460,7 @@ mod tests {
     fn queue_reclaims_payloads_only_on_producer_and_bounds_inflight_events() {
         let queue = ScheduledEventQueue::<3>::new();
         let event = |sample_time| ScheduledEvent {
+            audition_generation: 0,
             pattern_epoch: 0, sample_time,
             kind: ScheduledEventKind::InstrumentParams {
                 track: 0, instrument_params: ScheduledInstrumentParams::new(),
@@ -501,6 +506,7 @@ mod tests {
         let baseline = params.send_baseline(crate::sequencer::BusId::DEFAULT_A).unwrap();
         let queue = ScheduledEventQueue::<2>::new();
         queue.push(ScheduledEvent {
+            audition_generation: 0,
             pattern_epoch: 0, sample_time: 0,
             kind: ScheduledEventKind::EffectParams {
                 track: 0, effect_params: vec![
@@ -541,6 +547,7 @@ mod tests {
         }).1);
         for sample_time in 0..4096 {
             let mut event = ScheduledEvent {
+                audition_generation: 0,
                 pattern_epoch: 0, sample_time,
                 kind: ScheduledEventKind::EffectParams {
                     track: 0, effect_params: vec![ScheduledEffectParam::fixed(1, 0, 0.5); 256],
@@ -561,6 +568,7 @@ mod tests {
         let queue = ScheduledEventQueue::<8>::new();
         queue
             .push(ScheduledEvent {
+                audition_generation: 0,
                 pattern_epoch: 0,
                 sample_time: 10,
                 kind: ScheduledEventKind::ResolvedTrigger {
@@ -606,6 +614,7 @@ mod tests {
             .unwrap();
         queue
             .push(ScheduledEvent {
+                audition_generation: 0,
                 pattern_epoch: 0,
                 sample_time: 11,
                 kind: ScheduledEventKind::ResolvedTrigger {
@@ -646,6 +655,7 @@ mod tests {
         assert_eq!(
             queue.pop_owned(),
             Some(ScheduledEvent {
+                audition_generation: 0,
                 pattern_epoch: 0,
                 sample_time: 10,
                 kind: ScheduledEventKind::ResolvedTrigger {
@@ -692,6 +702,7 @@ mod tests {
         assert_eq!(
             queue.pop_owned(),
             Some(ScheduledEvent {
+                audition_generation: 0,
                 pattern_epoch: 0,
                 sample_time: 11,
                 kind: ScheduledEventKind::ResolvedTrigger {
@@ -736,6 +747,7 @@ mod tests {
         let queue = ScheduledEventQueue::<2>::new();
         queue
             .push(ScheduledEvent {
+                audition_generation: 0,
                 pattern_epoch: 0,
                 sample_time: 1,
                 kind: ScheduledEventKind::ResolvedTrigger {
@@ -774,6 +786,7 @@ mod tests {
             .unwrap();
 
         let overflow = queue.push(ScheduledEvent {
+            audition_generation: 0,
             pattern_epoch: 0,
             sample_time: 2,
             kind: ScheduledEventKind::ResolvedTrigger {
@@ -810,5 +823,35 @@ mod tests {
             },
         });
         assert!(overflow.is_err());
+    }
+}
+
+/// Producer interface lets an audition attach ownership without duplicating
+/// note resolution, MIDI-FX routing, or the queue's off-audio reclamation.
+pub trait ScheduledEventSink {
+    fn push(&self, event: ScheduledEvent) -> Result<(), ScheduledEvent>;
+}
+
+impl<const CAPACITY: usize> ScheduledEventSink for ScheduledEventQueue<CAPACITY> {
+    fn push(&self, event: ScheduledEvent) -> Result<(), ScheduledEvent> {
+        ScheduledEventQueue::push(self, event)
+    }
+}
+
+pub(crate) struct AuditionSink<'a> {
+    pub queue: &'a dyn ScheduledEventSink,
+    pub generation: u64,
+}
+
+impl ScheduledEventSink for AuditionSink<'_> {
+    fn push(&self, mut event: ScheduledEvent) -> Result<(), ScheduledEvent> {
+        event.audition_generation = self.generation;
+        self.queue.push(event)
+    }
+}
+
+impl<T: ScheduledEventSink> ScheduledEventSink for Arc<T> {
+    fn push(&self, event: ScheduledEvent) -> Result<(), ScheduledEvent> {
+        self.as_ref().push(event)
     }
 }

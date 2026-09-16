@@ -2102,7 +2102,7 @@ fn live_note_on(
                 transpose: target.transpose,
             });
         } else {
-            let _ = keyboard_tx.send(sequencer::sequencer::LiveInputEvent::Note(KeyboardTrigger {
+            let sent = keyboard_tx.send(sequencer::sequencer::LiveInputEvent::Note(KeyboardTrigger {
                 generation,
                 source: Some(source),
                 track: target.track,
@@ -2110,6 +2110,11 @@ fn live_note_on(
                 velocity,
                 note_off: false,
             }));
+            if sent.is_ok() {
+                if let Some(track) = app.track_registry.id_at(target.track) {
+                    app.retrospective.note_on(generation, track, target.transpose, velocity, press_time);
+                }
+            }
         }
     }
 
@@ -2156,6 +2161,7 @@ fn live_note_off(
 
     // Record into pattern if recording + playing
     if let Some(mut note) = held_entry {
+        app.retrospective.note_off(note.generation, Instant::now());
         // A tap so short its audio-thread stamp has not landed yet:
         // the trigger is still in flight and will sound at the render
         // frontier, so restamp there instead of keeping the
@@ -3027,6 +3033,31 @@ mod live_keyboard_tests {
         assert!(drive_at(0, 5, off, &mut app).consumed());
         assert!(drive(off, &mut app).consumed());
         assert!(held.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn retrospective_live_input_captures_stopped_midi_and_pad_targets_without_recording() {
+        let state = Arc::new(SequencerState::new(3, vec![]));
+        let mut app = rack_test_app(Arc::clone(&state), 3);
+        let armed = Arc::new(Mutex::new(vec![true, false, false]));
+        let rack = Arc::new(Mutex::new(Some(7)));
+        let recording = Arc::new(AtomicBool::new(false));
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let held = Arc::new(Mutex::new(Vec::new()));
+        let roll = Arc::new(Mutex::new(RollRecordBuffer::default()));
+        let invalidations = UiInvalidationQueue::new();
+        for on in [true, true, false] {
+            handle_midi_note(0, 0, sequencer::midi_input::MidiNoteEvent {
+                note: 96, velocity: if on { 0.7 } else { 0.0 }, on,
+            }, &mut app, &state, &armed, &rack, &recording, &tx, &held, &roll, &invalidations);
+        }
+        let snapshot = app.retrospective.snapshot(Instant::now(), sequencer::sequencer::SceneId(1));
+        assert_eq!(snapshot.notes.len(), 2, "one press targets the armed track and pad; repeat is suppressed");
+        assert_eq!(snapshot.notes[0].transpose, 36.0);
+        assert_eq!(snapshot.notes[1].transpose, 0.0);
+        assert!(snapshot.notes.iter().all(|note| note.velocity == 0.7 && note.end >= note.start));
+        assert!(!state.is_playing());
+        assert!(!state.pattern.patterns[0].is_active(0));
     }
 
     #[test]

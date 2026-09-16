@@ -898,6 +898,7 @@ pub(crate) fn sync_reactive_tick(
                 &selected_neural_snapshot,
             );
         }
+        needs_reactive_cycle |= crate::retrospective::sync(editor.runtime_mut(), &app);
         needs_reactive_cycle |= sync_song_state(
             editor.runtime_mut(),
             &app,

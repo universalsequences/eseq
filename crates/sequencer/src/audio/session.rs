@@ -85,6 +85,7 @@ pub(super) fn new_audio_callback_data(
         dropped_scheduled_events: 0,
         late_scheduled_events: 0,
         event_seq: 0,
+        current_audition_generation: 0,
         trace_audio,
         trace_callback_counter: 0,
         #[cfg(feature = "audio-experiments")]
@@ -125,6 +126,7 @@ mod tests {
         let mut output = [0.0; 1024];
         unsafe { graph::process_next_block(lg, output.as_mut_ptr(), 512); }
         let event = |pattern_epoch, sample_time| ScheduledEvent {
+            audition_generation: 0,
             pattern_epoch, sample_time,
             kind: ScheduledEventKind::EffectParams {
                 track: 0, effect_params: (0..256).map(|idx|
@@ -296,6 +298,76 @@ mod tests {
         assert!(data.voice_pools[1].voices[0].active);
         assert!(data.countdown_events.is_empty());
         assert_eq!(unsafe { graph::graph_block_event_delivery_failures(lg) }, 0);
+        drop(data);
+        unsafe { engine.destroy(); }
+    }
+
+    #[test]
+    fn retrospective_audition_cancel_releases_its_gate_and_preserves_live_sound_without_allocating() {
+        use crate::audiograph as graph;
+        use crate::instruments::sampler::*;
+        let engine = engine::init_headless_engine(48_000, 2).unwrap();
+        let lg = engine.lg_ptr.0;
+        let sample = vec![0.5_f32; 8192];
+        let buffer = unsafe { graph::create_buffer(lg, 4096, 2, sample.as_ptr()) };
+        let preview = create_sampler_node(lg, buffer, 48_000, "preview").unwrap();
+        let live = create_sampler_node(lg, buffer, 48_000, "live").unwrap();
+        unsafe {
+            assert!(graph::graph_connect(lg, preview.node_id, 0, 0, 0));
+            assert!(graph::graph_connect(lg, live.node_id, 0, 0, 1));
+        }
+        let (_tx, rx) = std::sync::mpsc::channel();
+        let mut data = new_audio_callback_data(lg, engine.state.clone(), 48_000, 2, 512,
+            engine.master_recorder.clone(), rx, engine.buses.bus_effect_runtime.clone(),
+            Arc::new(ScheduledEventQueue::new()), Arc::new(AtomicU64::new(0)));
+        let mut output = vec![0.0; 1024];
+        unsafe { graph::process_next_block(lg, output.as_mut_ptr(), 512); }
+        engine.state.note_audition.start(crate::scheduler::audition::AuditionLoop {
+            snapshot: (*engine.state.latest_scheduler_snapshot()).clone(), steps: 16,
+        });
+        let generation = engine.state.note_audition.generation();
+        for (pool, node, scope) in [(0, &preview, generation), (1, &live, 0)] {
+            data.voice_pools[pool].add_voice(node.logical_id, node.node_id);
+            data.voice_pools[pool].allocate_voice(60.0);
+            let mut aux = [0.0; graph::GBE_AUX_CAP];
+            aux[SAMPLER_EVENT_AUX_ENABLED] = 1.0;
+            aux[SAMPLER_EVENT_AUX_VELOCITY] = 1.0;
+            aux[SAMPLER_EVENT_AUX_SPEED] = 1.0;
+            aux[SAMPLER_EVENT_AUX_GATE_SAMPLES] = 4096.0;
+            aux[SAMPLER_EVENT_AUX_GATE_MODE] = 1.0;
+            aux[SAMPLER_EVENT_AUX_LOOP_MODE] = 1.0;
+            aux[SAMPLER_EVENT_AUX_RELEASE_SAMPLES] = 128.0;
+            aux[SAMPLER_EVENT_AUX_END_POINT] = 1.0;
+            aux[SAMPLER_EVENT_AUX_SR_HZ] = 48_000.0;
+            assert!(unsafe { graph::push_block_event(lg, graph::GraphBlockEvent {
+                logical_id: node.logical_id, frame_offset: 0, sequence: 0,
+                kind: graph::GBE_NOTE_ON, aux_count: SAMPLER_EVENT_AUX_NOTE_ON_COUNT as u32, aux,
+            }) });
+            data.current_audition_generation = scope;
+            schedule_gate_off_event(&mut data, pool, node.logical_id, 0, 4096.0,
+                GateOffTarget::Sampler { gatepitch_id: 0 });
+        }
+        data.current_audition_generation = 0;
+        unsafe { graph::process_next_block(lg, output.as_mut_ptr(), 512); }
+        assert!(output[800] > 0.1 && output[801] > 0.1);
+        // Also cancel future notes already admitted to callback countdowns.
+        engine.state.note_audition.queue.push(ScheduledEvent {
+            audition_generation: generation, pattern_epoch: 0, sample_time: 8000,
+            kind: ScheduledEventKind::EffectParams { track: 0, effect_params: vec![] },
+        }).unwrap();
+        drain_scheduled_events_for_callback(&mut data, 512, 512, 0);
+        engine.state.note_audition.stop();
+        let (_, allocations) = crate::test_alloc::measure(|| {
+            collect_due_countdown_events(&mut data, 512, 0);
+            dispatch_block_events_until(&mut data, 512, None);
+        });
+        assert_eq!(allocations, crate::test_alloc::Counts::default());
+        unsafe { graph::process_next_block(lg, output.as_mut_ptr(), 512); }
+        assert!(output[400..].iter().step_by(2).all(|value| value.abs() < 0.00001));
+        assert!(output[401..].iter().step_by(2).all(|value| *value > 0.1));
+        assert!(!data.voice_pools[0].voices[0].active);
+        assert!(data.voice_pools[1].voices[0].active);
+        assert_eq!(data.countdown_events.len(), 1, "the live gate retains its original deadline");
         drop(data);
         unsafe { engine.destroy(); }
     }

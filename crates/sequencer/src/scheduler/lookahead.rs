@@ -677,6 +677,7 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                 ));
                 if !off_step_effect_params.is_empty() {
                     chunk_enqueued &= queue.push(ScheduledEvent {
+                        audition_generation: 0,
                         pattern_epoch,
                         sample_time,
                         kind: ScheduledEventKind::EffectParams {
@@ -705,6 +706,7 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                 if rack_off_step_has_params(state, snapshot, trigger.track, trigger.step) {
                     chunk_enqueued &= queue
                         .push(ScheduledEvent {
+                            audition_generation: 0,
                             pattern_epoch,
                             sample_time,
                             kind: ScheduledEventKind::RackParams {

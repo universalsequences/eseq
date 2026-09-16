@@ -864,8 +864,8 @@ pub(super) fn run_midi_fx_chain_for_track_inner(
     current
 }
 
-pub(super) fn enqueue_midi_fx_events<const QUEUE_CAP: usize>(
-    queue: &ScheduledEventQueue<QUEUE_CAP>,
+pub(super) fn enqueue_midi_fx_events(
+    queue: &impl ScheduledEventSink,
     snapshot: &SequencerSnapshot,
     track_output_events: &mut Vec<TrackOutputEvent>,
     pattern_epoch: u64,
@@ -961,8 +961,8 @@ pub(super) fn enqueue_midi_fx_events<const QUEUE_CAP: usize>(
         if !enqueued {
             if debug_routing_enabled() {
                 eprintln!(
-                    "[routing] enqueue failed track={} sample={} queue_capacity={}",
-                    enqueue_track, enqueue_sample_time, QUEUE_CAP
+                    "[routing] enqueue failed track={} sample={}",
+                    enqueue_track, enqueue_sample_time
                 );
             }
             ok = false;
@@ -1062,11 +1062,11 @@ pub(super) fn quantized_live_tick_sample(
     rendered_sample.saturating_add((beats_to_next_tick * samples_per_quarter as f64).round() as u64)
 }
 
-pub(super) fn schedule_live_midi_fx<const QUEUE_CAP: usize>(
+pub(super) fn schedule_live_midi_fx(
     runtime: Option<&mut lisp_host::ScratchControlRuntime>,
     state: &SequencerState,
     snapshot: &SequencerSnapshot,
-    queue: &ScheduledEventQueue<QUEUE_CAP>,
+    queue: &impl ScheduledEventSink,
     pattern_epoch: u64,
     rendered_sample: u64,
     rendered_total_beats: f64,

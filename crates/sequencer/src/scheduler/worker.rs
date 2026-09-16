@@ -74,6 +74,7 @@ pub(crate) struct SchedulerDriver {
     last_num_tracks: usize,
     last_playing: bool,
     roll_play_hold: Option<std::time::Instant>,
+    audition: audition::AuditionPlayer,
     live_midi_fx_tracks: [LiveMidiFxTrackState; MAX_TRACKS],
     loaded_graph_overrides: Option<Vec<crate::graph::ProjectGraphOverrides>>,
     loaded_neural_networks: Option<Vec<crate::neural::ProjectNeuralNetwork>>,
@@ -126,6 +127,7 @@ impl SchedulerDriver {
             last_num_tracks: usize::MAX,
             last_playing: false,
             roll_play_hold: None,
+            audition: audition::AuditionPlayer::default(),
             live_midi_fx_tracks: std::array::from_fn(|_| LiveMidiFxTrackState::default()),
             loaded_graph_overrides: None,
             loaded_neural_networks: None,
@@ -456,6 +458,11 @@ impl SchedulerDriver {
             );
             let grid = self.lookahead_state.roll.active_grid_beats(state);
             self.lookahead_state.roll.publish_windows(state, grid);
+        }
+        if let Err(error) = self.audition.advance(state, &snapshot, rendered, horizon,
+            sample_rate, scheduler_block_size, self.scratch_runtime.as_mut()) {
+            state.note_audition.report_error(error.clone());
+            self.runtime_errors.push(error);
         }
         let live_midi_fx_active = any_live_midi_fx_notes(&self.live_midi_fx_tracks);
         if live_midi_fx_active != self.last_live_midi_fx_active {

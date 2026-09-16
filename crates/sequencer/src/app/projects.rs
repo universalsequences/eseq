@@ -903,6 +903,8 @@ impl App {
     /// reconciles committed arrangement lanes against the live topology and
     /// must never see lanes from the project being replaced.
     fn clear_project_arrangement_state(&mut self) {
+        self.state.note_audition.stop();
+        self.retrospective = super::retrospective::RetrospectiveCapture::default();
         self.state.clear_committed_arrangement();
         self.song_capture_armed = false;
         self.recording_kind = None;

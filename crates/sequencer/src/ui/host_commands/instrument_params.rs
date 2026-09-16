@@ -176,6 +176,9 @@ pub(super) fn handle(
                             }))
                             .is_ok()
                         {
+                            if let Some(id) = app.track_registry.id_at(track) {
+                                app.retrospective.trig(id, transpose, Instant::now(), KEY_LOCK_AUDITION_DURATION);
+                            }
                             ctx.sessions.pending_key_lock_auditions.push(PendingKeyLockAudition {
                                 track,
                                 transpose,
