@@ -42,6 +42,8 @@ def main():
     parser.add_argument("--warmup-bars", type=float, default=4)
     parser.add_argument("--measure-bars", type=float, default=8)
     parser.add_argument("--offline", action="store_true")
+    parser.add_argument("--record-audio", action="store_true",
+                        help="save exact measured output as float WAV before device silencing")
     parser.add_argument("--binary", type=Path, default=ROOT / "target/release/audio_experiment")
     parser.add_argument("--baseline-binary", type=Path, help="optionally interleave a saved baseline binary")
     parser.add_argument("--baseline-names", default="workers-4,workers-6")
@@ -78,6 +80,8 @@ def main():
                       measure_seconds=args.measure_bars * 240 / bpm,
                       offline=args.offline, sample_rate=48000)
         stem = args.out.resolve() / f"{name}-r{rep}"
+        if args.record_audio:
+            config["output_wav"] = str(stem.with_suffix(".wav"))
         stem.with_suffix(".config.json").write_text(json.dumps(config, indent=2) + "\n")
         print(f"[{number}/{len(jobs)}] {name} repeat {rep}", flush=True)
         with stem.with_suffix(".stdout.log").open("w") as stdout, stem.with_suffix(".stderr.log").open("w") as stderr:

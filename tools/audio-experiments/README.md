@@ -32,6 +32,15 @@ strict synchronous export driver instead of CoreAudio and includes an audio
 SHA-256 for deterministic output comparisons. Offline throughput does not
 predict live scheduling latency; live mode is the performance comparison.
 
+Add `--record-audio` to save each run's measured output as a 32-bit float WAV,
+before device silencing. This works in live and offline modes. Warmup is omitted;
+use `--warmup-bars 0` to listen from the beginning. PCM is copied into a bounded,
+preallocated queue and written only after the engine stops. Overflow or a sample
+count different from the timing capture fails the run. Samples are neither
+normalized nor clipped. JSON `recorded_audio` reports the path, frame count,
+sample rate, channels and PCM SHA-256. The copy adds overhead after the block
+timer, so use separate runs without recording for performance comparisons.
+
 ## Native real-time safety audit
 
 On macOS, run the calibrated audit separately from timing measurements:

@@ -10,6 +10,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{io, path::PathBuf, sync::{OnceLock, atomic::AtomicBool}, time::Duration};
 
+mod pcm;
+
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 static WORKGROUPS_ENABLED: AtomicBool = AtomicBool::new(true);
@@ -38,6 +40,10 @@ pub struct Config {
     pub rtsan_measure_only: bool,
     #[serde(default = "default_workgroups")]
     pub workgroups: bool,
+    /// Optional, unmodified float PCM from the measured interval, before device
+    /// silencing. The file is written after the audio engine has stopped.
+    #[serde(default)]
+    pub output_wav: Option<PathBuf>,
 }
 
 #[derive(Serialize)]
@@ -124,6 +130,7 @@ struct Capture {
     blocks: ArrayQueue<Block>,
 }
 static CAPTURE: OnceLock<Capture> = OnceLock::new();
+static PCM_CAPTURE: OnceLock<pcm::PcmCapture> = OnceLock::new();
 
 pub(super) fn silence_device() -> bool { CAPTURE.get().is_some() }
 
@@ -133,6 +140,7 @@ pub(super) fn record_block(
     let elapsed_us = start.elapsed().as_secs_f64() * 1e6;
     let Some(capture) = CAPTURE.get() else { return; };
     if !capture.enabled.load(Ordering::Acquire) { return; }
+    if let Some(pcm) = PCM_CAPTURE.get() { pcm.push(output); }
     let mut block = Block {
         elapsed_us, phases, events: data.event_profile,
         frames: output.len() / data.num_channels,
@@ -269,6 +277,10 @@ pub fn run(mut config: Config) -> Result<serde_json::Value> {
         || !(8_000..=192_000).contains(&config.sample_rate)
     { return Err("Invalid experiment config".into()); }
     config.project = config.project.canonicalize()?;
+    if let Some(path) = &mut config.output_wav {
+        if path.is_relative() { *path = std::env::current_dir()?.join(&*path); }
+        if path.exists() { return Err("Audio output path already exists".into()); }
+    }
     crate::app_paths::init_dev()?;
     crate::paths::enter_sequencer_dir()?;
     std::env::set_var("TINYSEQ_AUDIOGRAPH_WORKERS", config.workers.to_string());
@@ -286,6 +298,11 @@ pub fn run(mut config: Config) -> Result<serde_json::Value> {
     let (sample_rate, channels, cpu, wall, audio_hash, instrument_stats) = if config.offline {
         let owner = OfflineOwner(engine::init_headless_engine(config.sample_rate, 2)?);
         let engine = &owner.0;
+        if config.output_wav.is_some() {
+            PCM_CAPTURE.set(pcm::PcmCapture::new(engine.sample_rate, 2,
+                engine.block_size, config.measure_seconds)?)
+                .map_err(|_| "Only one audio capture is allowed per process")?;
+        }
         let mut app = App::new(Arc::clone(&engine.state), engine.lg_ptr, engine.sample_rate,
             engine.buses.clone(), Arc::clone(&engine.master_recorder), engine.keyboard_tx.clone());
         load(&mut app, &config, true)?;
@@ -325,6 +342,11 @@ pub fn run(mut config: Config) -> Result<serde_json::Value> {
     } else {
         let mut owner = LiveOwner { engine: Some(engine::init_engine()?), app: None };
         let engine = owner.engine.as_ref().unwrap();
+        if config.output_wav.is_some() {
+            PCM_CAPTURE.set(pcm::PcmCapture::new(engine.sample_rate, engine.channels as usize,
+                engine::ENGINE_BLOCK_FRAMES, config.measure_seconds)?)
+                .map_err(|_| "Only one audio capture is allowed per process")?;
+        }
         owner.app = Some(App::new(Arc::clone(&engine.state), engine.lg_ptr, engine.sample_rate,
             engine.buses.clone(), Arc::clone(&engine.master_recorder), engine.keyboard_tx.clone()));
         let app = owner.app.as_mut().unwrap();
@@ -394,6 +416,10 @@ pub fn run(mut config: Config) -> Result<serde_json::Value> {
     let peak = blocks.iter().map(|block| block.peak).fold(0.0, f32::max);
     let nonfinite: usize = blocks.iter().map(|block| block.nonfinite).sum();
     if nonfinite != 0 || peak < 0.0001 { return Err(format!("Invalid/silent render: peak={peak}, nonfinite={nonfinite}").into()); }
+    let recorded_audio = config.output_wav.as_ref().map(|path| {
+        PCM_CAPTURE.get().ok_or("Missing PCM capture")?
+            .write_wav(path, sample_rate, channels, frames * channels)
+    }).transpose()?;
     Ok(serde_json::json!({
         "config": config, "sample_rate": sample_rate, "channels": channels,
         "rtsan_enabled": cfg!(feature = "audio-rtsan"),
@@ -415,5 +441,6 @@ pub fn run(mut config: Config) -> Result<serde_json::Value> {
         "measured_dropped_events": blocks.last().unwrap().dropped.saturating_sub(blocks.first().unwrap().dropped),
         "measured_late_events": blocks.last().unwrap().late.saturating_sub(blocks.first().unwrap().late),
         "audio_sha256": audio_hash, "instrument_voice_stats": instrument_stats, "blocks": blocks,
+        "recorded_audio": recorded_audio,
     }))
 }
