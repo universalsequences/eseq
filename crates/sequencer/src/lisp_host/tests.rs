@@ -4490,6 +4490,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     #[test]
     fn dgen_init_message_honors_param_span() {
         let manifest = super::DGenManifest {
+            effect_latency_samples: None,
             dylib_path: std::path::PathBuf::new(),
             asset_base: None,
             version: 2,
@@ -4556,6 +4557,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     fn voice_init_message_round_trips_through_dgenlisp_init() {
         let total_memory_slots = 16;
         let manifest = super::DGenManifest {
+            effect_latency_samples: None,
             dylib_path: std::path::PathBuf::new(),
             asset_base: None,
             version: 2,
@@ -5108,6 +5110,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             &manifest.params,
             manifest.n_inputs,
             manifest.n_outputs,
+            manifest.effect_latency_samples,
         );
         super::append_effect_host_modulation_controls(&mut desc, &manifest);
 
@@ -6973,6 +6976,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             }],
             0,
             0,
+            None,
         );
         let mut runtime = Runtime::new();
         register_sequencer_natives(
@@ -7021,6 +7025,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             }],
             2,
             2,
+            None,
         );
         let mut effect_descriptors = fallback_effect_descriptors(1);
         effect_descriptors[0][0] = custom_desc;
@@ -7079,6 +7084,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             }],
             0,
             0,
+            None,
         );
         state.pattern.instrument_slots[0].apply_descriptor(&instrument_desc, 0);
         let expected = instrument_desc.params[0].denormalize(0.25);

@@ -472,7 +472,10 @@ pub(crate) fn compile_effective_dgen_source_to_dir(
     dir: &Path,
     dylib_name: &str,
 ) -> Result<String, String> {
-    let effective_source = finalize_effective_dgen_source(effective_source);
+    let (compiler_source, latency_samples) = super::effect_latency::prepare(
+        effective_source, sample_rate, kind == DGenCompileKind::Effect,
+    )?;
+    let effective_source = finalize_effective_dgen_source(&compiler_source);
     let effective_source = super::dylib_cache::rewrite_library_asset_references(
         &effective_source,
         asset_base,
@@ -524,8 +527,13 @@ pub(crate) fn compile_effective_dgen_source_to_dir(
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    log_dgenlisp_compile_manifest(source_name, &src_path, &stdout);
-    Ok(stdout)
+    let manifest = super::effect_latency::annotate_manifest(&stdout, latency_samples)?;
+    // Persist the same host manifest returned to both cached and uncached
+    // callers. The compiler's original manifest has no host declarations.
+    std::fs::write(dir.join(format!("{dylib_name}.json")), &manifest)
+        .map_err(|e| format!("Failed to write host manifest: {e}"))?;
+    log_dgenlisp_compile_manifest(source_name, &src_path, &manifest);
+    Ok(manifest)
 }
 
 // ── Parse manifest ──

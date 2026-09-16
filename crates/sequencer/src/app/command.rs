@@ -1492,6 +1492,7 @@ mod tests {
             input_channels: 6,
             output_channels: 2,
             instrument_modulators: Vec::new(),
+            declared_latency_samples: None,
             instrument_modulation_targets: vec![
                 InstrumentModulationTarget {
                     base_param_idx: 0,
@@ -1670,6 +1671,7 @@ mod tests {
             input_channels: 0,
             output_channels: 2,
             instrument_modulators: Vec::new(),
+            declared_latency_samples: None,
             instrument_modulation_targets: Vec::new(),
             tensor_params: vec![TensorParamDescriptor {
                 name: "strike_mask".to_string(),

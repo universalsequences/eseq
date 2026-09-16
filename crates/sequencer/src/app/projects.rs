@@ -6169,6 +6169,7 @@ mod tests {
             input_channels: 0,
             output_channels: 2,
             instrument_modulators: Vec::new(),
+            declared_latency_samples: None,
             instrument_modulation_targets: Vec::new(),
             tensor_params: Vec::new(),
             params: vec![
@@ -6236,6 +6237,7 @@ mod tests {
             input_channels: 0,
             output_channels: 2,
             instrument_modulators: Vec::new(),
+            declared_latency_samples: None,
             instrument_modulation_targets: Vec::new(),
             tensor_params: Vec::new(),
             params: vec![
@@ -6291,6 +6293,7 @@ mod tests {
             input_channels: 0,
             output_channels: 2,
             instrument_modulators: Vec::new(),
+            declared_latency_samples: None,
             instrument_modulation_targets: Vec::new(),
             tensor_params: Vec::new(),
             params: vec![
@@ -6325,6 +6328,7 @@ mod tests {
             input_channels: 0,
             output_channels: 2,
             instrument_modulators: Vec::new(),
+            declared_latency_samples: None,
             instrument_modulation_targets: Vec::new(),
             tensor_params: Vec::new(),
             params: vec![
@@ -6431,6 +6435,7 @@ mod tests {
             input_channels: 0,
             output_channels: 2,
             instrument_modulators: Vec::new(),
+            declared_latency_samples: None,
             instrument_modulation_targets: Vec::new(),
             tensor_params: Vec::new(),
             params: vec![
@@ -6474,6 +6479,7 @@ mod tests {
             input_channels: 0,
             output_channels: 2,
             instrument_modulators: Vec::new(),
+            declared_latency_samples: None,
             instrument_modulation_targets: Vec::new(),
             tensor_params: Vec::new(),
             params: vec![

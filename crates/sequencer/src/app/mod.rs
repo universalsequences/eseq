@@ -349,6 +349,7 @@ mod engine_registry_tests {
 
     fn manifest() -> DGenManifest {
         DGenManifest {
+            effect_latency_samples: None,
             dylib_path: std::path::PathBuf::new(),
             asset_base: None,
             version: 2,

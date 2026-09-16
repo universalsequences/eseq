@@ -15394,6 +15394,7 @@
             input_channels: 6,
             output_channels: 2,
             instrument_modulators: Vec::new(),
+            declared_latency_samples: None,
             instrument_modulation_targets: vec![target(0, 1, 4, 3), target(1, 2, 6, 5)],
         }
     }

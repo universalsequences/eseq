@@ -30,6 +30,8 @@ pub struct EffectGraphNodeIds {
 
 #[derive(Clone)]
 pub struct DGenManifest {
+    /// Host-resolved, immutable algorithmic delay at this artifact's sample rate.
+    pub effect_latency_samples: Option<u32>,
     pub dylib_path: PathBuf,
     pub asset_base: Option<PathBuf>,
     pub version: u32,
@@ -446,6 +448,7 @@ pub fn parse_manifest_with_base(json: &str, base_dir: &Path) -> Result<DGenManif
     let voice_cell_id = v["voiceCellId"].as_u64().map(|id| id as usize);
 
     Ok(DGenManifest {
+        effect_latency_samples: super::effect_latency::parse_manifest(&v)?,
         dylib_path,
         asset_base: None,
         version,
@@ -495,6 +498,7 @@ pub fn instrument_descriptor_from_manifest(
         manifest.asset_base.as_deref(),
         manifest.n_inputs,
         manifest.n_outputs,
+        manifest.effect_latency_samples,
     );
     desc.tensor_params = crate::effects::tensor_param_descriptors_from_manifest(
         &manifest.tensors,

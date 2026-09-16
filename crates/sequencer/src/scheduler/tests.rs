@@ -423,6 +423,7 @@
             input_channels: 2,
             output_channels: 2,
             instrument_modulators: Vec::new(),
+            declared_latency_samples: None,
             instrument_modulation_targets: Vec::new(),
             tensor_params: Vec::new(),
             params: vec![descriptor.clone()],
@@ -6942,6 +6943,7 @@
             input_channels: 6,
             output_channels: 2,
             instrument_modulators: Vec::new(),
+            declared_latency_samples: None,
             instrument_modulation_targets: Vec::new(),
             tensor_params: Vec::new(),
             params: vec![
@@ -7273,6 +7275,7 @@
             input_channels: 6,
             output_channels: 2,
             instrument_modulators: Vec::new(),
+            declared_latency_samples: None,
             instrument_modulation_targets: Vec::new(),
             tensor_params: Vec::new(),
             params: vec![
@@ -7375,6 +7378,7 @@
             input_channels: 6,
             output_channels: 2,
             instrument_modulators: Vec::new(),
+            declared_latency_samples: None,
             instrument_modulation_targets: Vec::new(),
             tensor_params: Vec::new(),
             params: vec![ParamDescriptor {
@@ -7506,6 +7510,7 @@
             input_channels: 6,
             output_channels: 2,
             instrument_modulators: Vec::new(),
+            declared_latency_samples: None,
             instrument_modulation_targets: Vec::new(),
             tensor_params: Vec::new(),
             params: vec![ParamDescriptor {
@@ -7879,6 +7884,7 @@
             input_channels: 0,
             output_channels: 1,
             instrument_modulators: Vec::new(),
+            declared_latency_samples: None,
             instrument_modulation_targets: Vec::new(),
             tensor_params: Vec::new(),
             params: vec![
@@ -7946,6 +7952,7 @@
             input_channels: 0,
             output_channels: 2,
             instrument_modulators: Vec::new(),
+            declared_latency_samples: None,
             instrument_modulation_targets: Vec::new(),
             tensor_params: vec![TensorParamDescriptor {
                 name: "strike_mask".to_string(),
@@ -11686,6 +11693,7 @@ fn scheduler_process_param_lookup_aliases_pre_namespacing_names(
         ],
         0,
         1,
+        None,
     );
     let lookup = |name: &str| {
         crate::scheduler::process::process_param_index_by_tag_or_name(&descriptor, name)

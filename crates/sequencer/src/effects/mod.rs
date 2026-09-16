@@ -642,6 +642,7 @@ mod tests {
             Some(&registered),
             0,
             1,
+            None,
         );
         match &desc.params[0].kind {
             ParamKind::Enum { labels } => {
@@ -658,6 +659,7 @@ mod tests {
             Some(&registered),
             0,
             1,
+            None,
         );
         assert!(matches!(
             desc.params[0].kind,
@@ -803,6 +805,7 @@ mod tests {
             input_channels: 0,
             output_channels: 2,
             instrument_modulators: Vec::new(),
+            declared_latency_samples: None,
             instrument_modulation_targets: Vec::new(),
             tensor_params: Vec::new(),
             params,
@@ -901,6 +904,7 @@ mod tests {
             input_channels: 0,
             output_channels: 2,
             instrument_modulators: Vec::new(),
+            declared_latency_samples: None,
             instrument_modulation_targets: Vec::new(),
             tensor_params: Vec::new(),
             params: vec![ParamDescriptor {
@@ -958,6 +962,7 @@ mod tests {
             input_channels: 0,
             output_channels: 2,
             instrument_modulators: Vec::new(),
+            declared_latency_samples: None,
             instrument_modulation_targets: Vec::new(),
             tensor_params: Vec::new(),
             params: vec![ParamDescriptor {
@@ -1040,6 +1045,7 @@ mod tests {
             input_channels: 0,
             output_channels: 2,
             instrument_modulators: Vec::new(),
+            declared_latency_samples: None,
             instrument_modulation_targets: Vec::new(),
             tensor_params: vec![TensorParamDescriptor {
                 name: "strike_mask".to_string(),
@@ -1164,6 +1170,7 @@ mod tests {
             input_channels: 0,
             output_channels: 2,
             instrument_modulators: Vec::new(),
+            declared_latency_samples: None,
             instrument_modulation_targets: Vec::new(),
             tensor_params: Vec::new(),
             params: vec![ParamDescriptor {
@@ -1215,6 +1222,7 @@ mod tests {
             input_channels: 0,
             output_channels: 2,
             instrument_modulators: Vec::new(),
+            declared_latency_samples: None,
             instrument_modulation_targets: Vec::new(),
             tensor_params: Vec::new(),
             params,
@@ -1248,6 +1256,7 @@ mod tests {
             input_channels: 0,
             output_channels: 2,
             instrument_modulators: Vec::new(),
+            declared_latency_samples: None,
             instrument_modulation_targets: Vec::new(),
             tensor_params: Vec::new(),
             params: vec![ParamDescriptor {
@@ -1361,6 +1370,7 @@ mod tests {
             input_channels: 0,
             output_channels: 2,
             instrument_modulators: Vec::new(),
+            declared_latency_samples: None,
             instrument_modulation_targets: Vec::new(),
             tensor_params: Vec::new(),
             params,
@@ -1383,6 +1393,7 @@ mod tests {
             input_channels: 2,
             output_channels: 2,
             instrument_modulators: Vec::new(),
+            declared_latency_samples: None,
             instrument_modulation_targets: Vec::new(),
             tensor_params: Vec::new(),
             params: vec![
@@ -1417,6 +1428,7 @@ mod tests {
             input_channels: 2,
             output_channels: 2,
             instrument_modulators: Vec::new(),
+            declared_latency_samples: None,
             instrument_modulation_targets: Vec::new(),
             tensor_params: Vec::new(),
             params: vec![
@@ -1471,6 +1483,7 @@ mod tests {
             input_channels: 2,
             output_channels: 2,
             instrument_modulators: Vec::new(),
+            declared_latency_samples: None,
             instrument_modulation_targets: Vec::new(),
             tensor_params: Vec::new(),
             params: vec![
@@ -1507,6 +1520,7 @@ mod tests {
             input_channels: 2,
             output_channels: 2,
             instrument_modulators: Vec::new(),
+            declared_latency_samples: None,
             instrument_modulation_targets: Vec::new(),
             tensor_params: Vec::new(),
             params: vec![
@@ -1563,6 +1577,7 @@ mod tests {
             input_channels: 2,
             output_channels: 2,
             instrument_modulators: Vec::new(),
+            declared_latency_samples: None,
             instrument_modulation_targets: Vec::new(),
             tensor_params: Vec::new(),
             params: vec![
@@ -1599,6 +1614,7 @@ mod tests {
             input_channels: 2,
             output_channels: 2,
             instrument_modulators: Vec::new(),
+            declared_latency_samples: None,
             instrument_modulation_targets: Vec::new(),
             tensor_params: Vec::new(),
             params: vec![
@@ -1652,6 +1668,7 @@ mod tests {
             input_channels: 0,
             output_channels: 1,
             instrument_modulators: Vec::new(),
+            declared_latency_samples: None,
             instrument_modulation_targets: Vec::new(),
             tensor_params: Vec::new(),
             params: vec![
@@ -1711,6 +1728,7 @@ mod tests {
             }],
             0,
             1,
+            None,
         );
 
         assert_eq!(
@@ -1738,6 +1756,7 @@ mod tests {
                 role: None,
                 options: None,
             }], 0, 1,
+            None,
         );
         let new_desc = EffectDescriptor::from_lisp_manifest(
             "custom",
@@ -1756,6 +1775,7 @@ mod tests {
                 role: None,
                 options: None,
             }], 0, 1,
+            None,
         );
         let slot = EffectSlotState::new(&old_desc, 100);
         slot.defaults.set(0, 0.8);
@@ -1806,6 +1826,7 @@ mod tests {
             ],
             0,
             1,
+            None,
         );
 
         assert_eq!(
@@ -3204,6 +3225,9 @@ fn sampler_mod_depth_range(destination: &str) -> (f32, f32, Option<String>) {
 
 #[derive(Clone, Debug)]
 pub struct EffectDescriptor {
+    /// Immutable host metadata, resolved when compiling at the instance rate.
+    /// None preserves legacy builtin per-node latency providers.
+    pub declared_latency_samples: Option<u32>,
     pub name: String,
     pub params: Vec<ParamDescriptor>,
     pub tensor_params: Vec<TensorParamDescriptor>,
@@ -3270,13 +3294,16 @@ impl EffectDescriptor {
     }
 
     /// Fixed processing latency this effect imposes on its signal path, in
-    /// samples. Latency is a property of the effect's algorithm, so it is
-    /// keyed by name like `transport_phase_param_idx` — except the Filter
-    /// Table, whose per-node engine (spectral STFT vs causal min-phase FIR)
-    /// decides between one-window latency and zero. This is the latency of
+    /// samples. Authored declarations override legacy builtin providers,
+    /// including an explicit declaration of zero. Filter Table retains its
+    /// per-node engine provider until its engine sources declare latency.
+    /// This is the latency of
     /// the *running* algorithm; callers must consult `enabled_param_idx` and
     /// report zero for a bypassed slot.
     pub fn latency_samples(&self, node_id: i32) -> u32 {
+        if let Some(samples) = self.declared_latency_samples {
+            return samples;
+        }
         match self.name.as_str() {
             crate::effects::filter_table::NAME => {
                 crate::effects::filter_table::engine_for(node_id).latency_samples() as u32
@@ -3496,6 +3523,7 @@ impl EffectDescriptor {
             input_channels: 2,
             output_channels: 2,
             instrument_modulators: Vec::new(),
+            declared_latency_samples: None,
             instrument_modulation_targets: Vec::new(),
             tensor_params: Vec::new(),
             params,
@@ -3514,6 +3542,7 @@ impl EffectDescriptor {
                     label: crate::instruments::voice_modulator::modulator_slot_label(slot, ""),
                 })
                 .collect(),
+            declared_latency_samples: None,
             instrument_modulation_targets: Vec::new(),
             tensor_params: Vec::new(),
             params: vec![
@@ -3805,6 +3834,7 @@ impl EffectDescriptor {
             input_channels: 2,
             output_channels: 2,
             instrument_modulators: Vec::new(),
+            declared_latency_samples: None,
             instrument_modulation_targets: Vec::new(),
             tensor_params: Vec::new(),
             params: vec![
@@ -3915,6 +3945,7 @@ impl EffectDescriptor {
                     label: crate::instruments::voice_modulator::modulator_slot_label(slot, ""),
                 })
                 .collect(),
+            declared_latency_samples: None,
             instrument_modulation_targets: Vec::new(),
             tensor_params: Vec::new(),
             params: vec![
@@ -4288,6 +4319,7 @@ impl EffectDescriptor {
                     label: crate::instruments::voice_modulator::modulator_slot_label(slot, ""),
                 })
                 .collect(),
+            declared_latency_samples: None,
             instrument_modulation_targets: Vec::new(),
             tensor_params: Vec::new(),
             params: vec![
@@ -4754,6 +4786,7 @@ impl EffectDescriptor {
                     label: crate::instruments::voice_modulator::modulator_slot_label(slot, ""),
                 })
                 .collect(),
+            declared_latency_samples: None,
             instrument_modulation_targets: Vec::new(),
             tensor_params: Vec::new(),
             params: vec![
@@ -5309,6 +5342,7 @@ impl EffectDescriptor {
                     label: crate::instruments::voice_modulator::modulator_slot_label(slot, ""),
                 })
                 .collect(),
+            declared_latency_samples: None,
             instrument_modulation_targets: Vec::new(),
             tensor_params: Vec::new(),
             params: vec![
@@ -5560,6 +5594,7 @@ impl EffectDescriptor {
                     label: crate::instruments::voice_modulator::modulator_slot_label(slot, ""),
                 })
                 .collect(),
+            declared_latency_samples: None,
             instrument_modulation_targets: Vec::new(),
             tensor_params: Vec::new(),
             params: vec![
@@ -6311,6 +6346,7 @@ impl EffectDescriptor {
                     label: crate::instruments::voice_modulator::modulator_slot_label(slot, ""),
                 })
                 .collect(),
+            declared_latency_samples: None,
             instrument_modulation_targets: Vec::new(),
             tensor_params: Vec::new(),
             params,
@@ -6415,6 +6451,7 @@ impl EffectDescriptor {
                     label: crate::instruments::voice_modulator::modulator_slot_label(slot, ""),
                 })
                 .collect(),
+            declared_latency_samples: None,
             instrument_modulation_targets: Vec::new(),
             tensor_params: Vec::new(),
             params: vec![
@@ -6659,6 +6696,7 @@ impl EffectDescriptor {
                     label: crate::instruments::voice_modulator::modulator_slot_label(slot, ""),
                 })
                 .collect(),
+            declared_latency_samples: None,
             instrument_modulation_targets: Vec::new(),
             tensor_params: Vec::new(),
             params: vec![
@@ -6917,6 +6955,7 @@ impl EffectDescriptor {
                     label: crate::instruments::voice_modulator::modulator_slot_label(slot, ""),
                 })
                 .collect(),
+            declared_latency_samples: None,
             instrument_modulation_targets: Vec::new(),
             tensor_params: Vec::new(),
             params: vec![
@@ -7158,6 +7197,7 @@ impl EffectDescriptor {
             input_channels: 2,
             output_channels: 2,
             instrument_modulators: Vec::new(),
+            declared_latency_samples: None,
             instrument_modulation_targets: Vec::new(),
             tensor_params: Vec::new(),
             params: vec![
@@ -7421,6 +7461,7 @@ impl EffectDescriptor {
             input_channels: 3,
             output_channels: 2,
             instrument_modulators: Vec::new(),
+            declared_latency_samples: None,
             instrument_modulation_targets: Vec::new(),
             tensor_params: Vec::new(),
             params: vec![
@@ -7743,6 +7784,7 @@ impl EffectDescriptor {
             input_channels: 2,
             output_channels: 2,
             instrument_modulators: Vec::new(),
+            declared_latency_samples: None,
             instrument_modulation_targets: Vec::new(),
             tensor_params: Vec::new(),
             params,
@@ -7756,6 +7798,7 @@ impl EffectDescriptor {
             input_channels: 2,
             output_channels: 2,
             instrument_modulators: Vec::new(),
+            declared_latency_samples: None,
             instrument_modulation_targets: Vec::new(),
             tensor_params: Vec::new(),
             params: vec![
@@ -7827,6 +7870,7 @@ impl EffectDescriptor {
             input_channels: 2,
             output_channels: 2,
             instrument_modulators: Vec::new(),
+            declared_latency_samples: None,
             instrument_modulation_targets: Vec::new(),
             tensor_params: Vec::new(),
             params: vec![
@@ -8350,6 +8394,7 @@ impl EffectDescriptor {
                 })
                 .collect(),
             instrument_modulation_targets,
+            declared_latency_samples: None,
             tensor_params: Vec::new(),
             params,
         }
@@ -8377,6 +8422,7 @@ impl EffectDescriptor {
             input_channels: 0,
             output_channels: 0,
             instrument_modulators: Vec::new(),
+            declared_latency_samples: None,
             instrument_modulation_targets: Vec::new(),
         }
     }
@@ -8429,6 +8475,7 @@ impl EffectDescriptor {
         params: &[crate::lisp_host::DGenParam],
         input_channels: usize,
         output_channels: usize,
+        declared_latency_samples: Option<u32>,
     ) -> Self {
         Self::from_lisp_manifest_with_asset_base(
             name,
@@ -8436,6 +8483,7 @@ impl EffectDescriptor {
             None,
             input_channels,
             output_channels,
+            declared_latency_samples,
         )
     }
 
@@ -8445,6 +8493,7 @@ impl EffectDescriptor {
         asset_base: Option<&std::path::Path>,
         input_channels: usize,
         output_channels: usize,
+        declared_latency_samples: Option<u32>,
     ) -> Self {
         let mut descriptors: Vec<ParamDescriptor> = params
             .iter()
@@ -8555,6 +8604,7 @@ impl EffectDescriptor {
             input_channels,
             output_channels,
             instrument_modulators: Vec::new(),
+            declared_latency_samples,
             instrument_modulation_targets: Vec::new(),
         }
     }

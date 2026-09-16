@@ -3169,6 +3169,7 @@ impl App {
             manifest.asset_base.as_deref(),
             manifest.n_inputs,
             manifest.n_outputs,
+            manifest.effect_latency_samples,
         );
         desc.tensor_params = crate::effects::tensor_param_descriptors_from_manifest(
             &manifest.tensors,
@@ -3212,6 +3213,7 @@ impl App {
             manifest.asset_base.as_deref(),
             manifest.n_inputs,
             manifest.n_outputs,
+            manifest.effect_latency_samples,
         );
         desc.tensor_params = crate::effects::tensor_param_descriptors_from_manifest(
             &manifest.tensors,
@@ -4736,6 +4738,7 @@ impl App {
             manifest.asset_base.as_deref(),
             manifest.n_inputs,
             manifest.n_outputs,
+            manifest.effect_latency_samples,
         );
         descriptor.tensor_params = crate::effects::tensor_param_descriptors_from_manifest(
             &manifest.tensors,
@@ -5442,6 +5445,7 @@ mod tests {
 
     fn test_instrument_manifest() -> lisp_host::DGenManifest {
         lisp_host::DGenManifest {
+            effect_latency_samples: None,
             dylib_path: std::path::PathBuf::new(),
             asset_base: None,
             version: 1,

@@ -46,6 +46,9 @@ pub(super) fn generate_patch_source(
     let mut renames = HashMap::new();
     let mut sections: Vec<String> = Vec::new();
     sections.push(GENERATED_HEADER.to_string());
+    if !patch.host_declarations.is_empty() {
+        sections.push(patch.host_declarations.join("\n"));
+    }
 
     let library_imports = used_library_macro_names(patch);
     if !library_imports.is_empty() {

@@ -1082,6 +1082,7 @@
             input_channels: 2,
             output_channels: 2,
             instrument_modulators: Vec::new(),
+            declared_latency_samples: None,
             instrument_modulation_targets: Vec::new(),
             tensor_params: Vec::new(),
         }
@@ -1105,6 +1106,7 @@
             input_channels: 2,
             output_channels: 2,
             instrument_modulators: Vec::new(),
+            declared_latency_samples: None,
             instrument_modulation_targets: Vec::new(),
             tensor_params: vec![TensorParamDescriptor {
                 name: "matrix".to_string(),
@@ -7476,6 +7478,7 @@
             input_channels: 0,
             output_channels: 0,
             instrument_modulators: Vec::new(),
+            declared_latency_samples: None,
             instrument_modulation_targets: Vec::new(),
             tensor_params: Vec::new(),
         };
@@ -7533,6 +7536,7 @@
             input_channels: 0,
             output_channels: 0,
             instrument_modulators: Vec::new(),
+            declared_latency_samples: None,
             instrument_modulation_targets: Vec::new(),
             tensor_params: Vec::new(),
         };

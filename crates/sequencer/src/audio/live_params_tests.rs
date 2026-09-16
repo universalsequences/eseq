@@ -17,6 +17,7 @@ impl Fixture {
             engine.buses.clone(), engine.master_recorder.clone(), tx,
         );
         let manifest = crate::lisp_host::DGenManifest {
+            effect_latency_samples: None,
             dylib_path: Default::default(), asset_base: None, version: 1,
             process_abi: String::new(), total_memory_slots: 8,
             params: vec![crate::lisp_host::DGenParam {

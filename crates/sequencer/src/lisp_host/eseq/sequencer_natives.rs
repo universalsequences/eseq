@@ -1332,6 +1332,7 @@ pub(in crate::lisp_host) fn register_sequencer_natives_with_accumulators(
                         input_channels: 0,
                         output_channels: 0,
                         instrument_modulators: Vec::new(),
+                        declared_latency_samples: None,
                         instrument_modulation_targets: Vec::new(),
                         tensor_params: Vec::new(),
                     };

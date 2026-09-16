@@ -718,6 +718,7 @@ fn key_locked_live_instrument_params_apply_per_note_after_base_offset() {
         input_channels: 0,
         output_channels: 2,
         instrument_modulators: Vec::new(),
+        declared_latency_samples: None,
         instrument_modulation_targets: Vec::new(),
         tensor_params: Vec::new(),
         params: vec![
@@ -807,6 +808,7 @@ fn key_locked_live_instrument_params_keep_step_plocks_per_param() {
         input_channels: 0,
         output_channels: 2,
         instrument_modulators: Vec::new(),
+        declared_latency_samples: None,
         instrument_modulation_targets: Vec::new(),
         tensor_params: Vec::new(),
         params: vec![
@@ -851,6 +853,7 @@ fn key_locked_live_instrument_params_drop_stale_key_lock_identity() {
         input_channels: 0,
         output_channels: 2,
         instrument_modulators: Vec::new(),
+        declared_latency_samples: None,
         instrument_modulation_targets: Vec::new(),
         tensor_params: Vec::new(),
         params: vec![audio_test_param("cutoff", 100.0, 0)],
@@ -1746,6 +1749,7 @@ fn instrument_sound_fingerprint_changes_for_tensor_default_and_plock_values() {
         input_channels: 0,
         output_channels: 2,
         instrument_modulators: Vec::new(),
+        declared_latency_samples: None,
         instrument_modulation_targets: Vec::new(),
         tensor_params: vec![TensorParamDescriptor {
             name: "strike_mask".to_string(),

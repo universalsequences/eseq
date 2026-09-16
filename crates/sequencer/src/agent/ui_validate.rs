@@ -575,6 +575,7 @@ mod tests {
 
     fn manifest_with_params(names: &[&str]) -> DGenManifest {
         DGenManifest {
+            effect_latency_samples: None,
             dylib_path: std::path::PathBuf::new(),
             asset_base: None,
             version: 2,

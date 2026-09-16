@@ -3843,6 +3843,7 @@ mod tests {
             ],
             0,
             1,
+            None,
         );
         let live_slot = crate::effects::EffectSlotState::new(&descriptor, 42);
         let snapshot = EffectSlotSnapshot::capture(&live_slot);

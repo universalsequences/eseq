@@ -343,6 +343,7 @@ pub fn descriptor() -> EffectDescriptor {
                 label: voice_modulator::modulator_slot_label(slot, ""),
             })
             .collect(),
+        declared_latency_samples: None,
         instrument_modulation_targets: targets,
     }
 }

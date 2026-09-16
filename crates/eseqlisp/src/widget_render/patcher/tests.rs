@@ -15572,6 +15572,7 @@ fn committed_editor_nodes_project_ports_from_operator_metadata() {
 
     let patch = Patch {
         nodes: vec![phasor],
+        host_declarations: Vec::new(),
         connections: Vec::new(),
         macros: Vec::new(),
         diagnostics: Vec::new(),
@@ -15588,6 +15589,7 @@ fn committed_editor_nodes_project_ports_from_operator_metadata() {
     assert_eq!(node_display_label(&multiply), "* 3");
     let patch = Patch {
         nodes: vec![multiply],
+        host_declarations: Vec::new(),
         connections: Vec::new(),
         macros: Vec::new(),
         diagnostics: Vec::new(),
@@ -15628,6 +15630,7 @@ fn committed_editor_nodes_project_ports_from_operator_metadata() {
 
     let patch = Patch {
         nodes: vec![history],
+        host_declarations: Vec::new(),
         connections: Vec::new(),
         macros: Vec::new(),
         diagnostics: Vec::new(),
@@ -19680,6 +19683,7 @@ fn metal_render_places_committed_node_tail_after_measured_space_width() {
     cache_text_widths(label, NODE_FONT_SIZE, &measure_ctx);
 
     let patch = Patch {
+        host_declarations: Vec::new(),
         nodes: vec![PatchNode {
             id: "committed-space-node".to_string(),
             op: "in".to_string(),

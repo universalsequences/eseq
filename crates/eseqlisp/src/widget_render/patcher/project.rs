@@ -156,6 +156,9 @@ impl Projector {
             "def" => self.project_def(items, expr, source_expr),
             "defmacro" => self.project_defmacro(items, expr, source_expr),
             "param" => self.project_param(items, expr, source_expr),
+            "effect-latency" if self.scope == SourceScopeId::Root && self.intent == PatcherIntent::Effect => {
+                self.patch.host_declarations.push(format_expression(expr));
+            }
             "use-defmacro" => {
                 if let Some(name) = symbol_at(items, 1)
                     && !self.patch.imports.iter().any(|import| import == name)

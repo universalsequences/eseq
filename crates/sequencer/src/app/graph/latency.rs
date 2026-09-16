@@ -972,6 +972,71 @@ mod tests {
     }
 
     #[test]
+    fn authored_latency_recompile_and_bypass_update_real_app_pads() {
+        let engine = crate::audio::engine::init_headless_engine(48_000, 2).unwrap();
+        let lg = engine.lg_ptr.0;
+        let mut app = App::new(engine.state, engine.lg_ptr, engine.sample_rate,
+            engine.buses, engine.master_recorder, engine.keyboard_tx);
+        app.graph_controller().add_blank_sampler_track().unwrap();
+        app.graph_controller().add_blank_sampler_track().unwrap();
+        for latency in [60, 17, 0] {
+            let source = format!("(effect-latency {latency})\n(out (in 1) 1)\n(out (in 2) 2)");
+            let compiled = crate::lisp_host::compile_and_load(&source, 48_000).unwrap();
+            app.apply_compiled_effect_to_slot_sync(compiled, "declared-effect", 0, 0).unwrap();
+            let enabled = app.graph.effect_descriptors[0][0].enabled_param_idx().unwrap();
+            app.state.pattern.effect_chains[0][0].defaults.set(enabled, 1.0);
+            let plan = unsafe { app.prepare_bounce_latency() }.unwrap();
+            assert_eq!(plan.mix_latency, latency);
+            assert_eq!(plan.track_primary_pads[1], latency);
+            app.state.pattern.effect_chains[0][0].defaults.set(enabled, 0.0);
+            let bypassed = unsafe { app.prepare_bounce_latency() }.unwrap();
+            assert_eq!(bypassed.mix_latency, 0);
+            assert_eq!(bypassed.track_primary_pads[1], 0);
+        }
+        unsafe {
+            crate::audiograph::engine_stop_workers();
+            crate::audiograph::destroy_live_graph(lg);
+        }
+    }
+
+    #[test]
+    fn authored_latency_aligns_real_serial_effects_and_parallel_dry() {
+        use crate::lisp_host::{compile_and_load, add_effect_to_chain_at};
+        let source = "(effect-latency 31)\n(out (delay (in 1) 31) 1)\n(out (delay (in 2) 31) 2)";
+        let first = compile_and_load(source, 44100).unwrap();
+        let second = compile_and_load(source, 44100).unwrap();
+        let desc = EffectDescriptor::from_lisp_manifest("authored", &first.manifest.params,
+            first.manifest.n_inputs, first.manifest.n_outputs, first.manifest.effect_latency_samples);
+        let graph = EngineGraph::new("authored-latency");
+        let impulse = graph.add_impulse();
+        let pad = add_pdc_node(graph.lg, "aligned-dry");
+        let (node1, node2) = unsafe {
+            let node1 = add_effect_to_chain_at(graph.lg, 0, &first.manifest, &first.lib,
+                impulse, 2, 0, 2, None, None, None).unwrap().effect_node_id;
+            let node2 = add_effect_to_chain_at(graph.lg, 1, &second.manifest, &second.lib,
+                node1, 2, 0, 2, None, None, None).unwrap().effect_node_id;
+            connect_stereo_pair(graph.lg, impulse, pad);
+            connect_stereo_pair(graph.lg, pad, 0);
+            (node1, node2)
+        };
+        let chain = chain_latency([(true, &desc, node1), (true, &desc, node2)].into_iter());
+        assert_eq!(chain, 62);
+        let plan = compute_latency_plan(&LatencyTopology {
+            tracks: vec![track(chain, TrackOutput::Mix, &[]), track(0, TrackOutput::Mix, &[])],
+            buses: Vec::new(), bus_destinations: Vec::new(),
+        });
+        graph.set_pdc_delay(pad, plan.track_primary_pads[1] as f32);
+        assert_eq!(spikes(&graph.render_channel0(4)), vec![(62, 2.0)]);
+        let enabled = desc.enabled_param_idx().unwrap();
+        let bypassed = slot_is_active(node1, &desc, |idx| if idx == enabled { 0.0 } else { 1.0 });
+        assert_eq!(chain_latency([(bypassed, &desc, node1), (true, &desc, node2)].into_iter()), 31);
+        let mut zero = desc.clone();
+        zero.name = crate::effects::filter_table::NAME.into();
+        zero.declared_latency_samples = Some(0);
+        assert_eq!(zero.latency_samples(node1), 0, "explicit zero overrides the legacy name provider");
+    }
+
+    #[test]
     fn filter_table_descriptor_reports_stft_latency() {
         // Latency is keyed by descriptor name (dgen builtins take their
         // descriptor name from the compile manifest, which uses NAME), with

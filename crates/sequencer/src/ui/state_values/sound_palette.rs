@@ -1517,6 +1517,7 @@ mod rack_glyph_tests {
 
     fn manifest(params: Vec<DGenParam>) -> DGenManifest {
         DGenManifest {
+            effect_latency_samples: None,
             dylib_path: std::path::PathBuf::new(),
             asset_base: None,
             version: 2,
@@ -1845,6 +1846,7 @@ mod glyph_fingerprint_tests {
             input_channels: 0,
             output_channels: 2,
             instrument_modulators: Vec::new(),
+            declared_latency_samples: None,
             instrument_modulation_targets: Vec::new(),
         }
     }

@@ -380,6 +380,10 @@ pub struct Patch {
     /// materializes library defmacros from these headers alone. Keeping the
     /// raw names in the model makes the round-trip lossless either way.
     pub imports: Vec<String>,
+    /// Root-only host metadata forms, preserved through graph regeneration.
+    /// Keep every declaration (including duplicates) so host validation, not
+    /// projection, decides whether the authored contract is valid.
+    pub host_declarations: Vec<String>,
 }
 
 pub fn refresh_patch_inline_inputs(patch: &mut Patch) {

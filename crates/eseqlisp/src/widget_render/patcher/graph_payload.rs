@@ -41,6 +41,8 @@ pub(super) struct GraphPayload {
     host_modulators: Vec<HostModulatorEntry>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     imports: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    host_declarations: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -159,6 +161,26 @@ struct HostModulatorEntry {
     slot: usize,
 }
 
+#[cfg(test)]
+mod latency_tests {
+    use super::*;
+
+    #[test]
+    fn host_declarations_survive_serialized_graph_and_regeneration() {
+        use super::super::{generate::generate_patch_source, parse_patch_source, PatcherIntent};
+        let source = "(effect-latency (+ 31 (round (* samplerate 0.001))))\n(out (in 1) 1)";
+        let patch = parse_patch_source(source, PatcherIntent::Effect).unwrap();
+        assert_eq!(patch.host_declarations.len(), 1);
+        assert!(!patch.nodes.iter().any(|node| node.kind == NodeKind::CodeIsland));
+        let json = serde_json::to_string(&payload_from_patch(&patch)).unwrap();
+        let restored = patch_from_payload(&serde_json::from_str(&json).unwrap());
+        assert_eq!(restored.host_declarations, patch.host_declarations);
+        let generated = generate_patch_source(&restored, PatcherIntent::Effect).unwrap();
+        let reparsed = parse_patch_source(&generated.source, PatcherIntent::Effect).unwrap();
+        assert_eq!(reparsed.host_declarations, patch.host_declarations);
+    }
+}
+
 pub(super) fn payload_from_patch(patch: &Patch) -> GraphPayload {
     // Normalize before serializing, not only after loading: a node created by
     // typing `phasor trigger` records the edge as a bare argument with no
@@ -184,6 +206,7 @@ pub(super) fn payload_from_patch(patch: &Patch) -> GraphPayload {
             })
             .collect(),
         imports: patch.imports.clone(),
+        host_declarations: patch.host_declarations.clone(),
     }
 }
 
@@ -203,6 +226,7 @@ pub(super) fn patch_from_payload(payload: &GraphPayload) -> Patch {
             })
             .collect(),
         imports: payload.imports.clone(),
+        host_declarations: payload.host_declarations.clone(),
     };
     materialize_symbol_ref_connections(&mut patch);
     refresh_patch_inline_inputs(&mut patch);

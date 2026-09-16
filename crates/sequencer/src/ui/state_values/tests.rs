@@ -10534,6 +10534,7 @@ mod instrument_header_ui_tests;
             input_channels: 0,
             output_channels: 2,
             instrument_modulators: Vec::new(),
+            declared_latency_samples: None,
             instrument_modulation_targets: Vec::new(),
             tensor_params: vec![sequencer::effects::TensorParamDescriptor {
                 name: "strike_mask".to_string(),
@@ -49182,6 +49183,7 @@ mod instrument_header_ui_tests;
             input_channels: 7,
             output_channels: 2,
             instrument_modulators: Vec::new(),
+            declared_latency_samples: None,
             instrument_modulation_targets: Vec::new(),
             tensor_params: Vec::new(),
             params: vec![
@@ -53459,6 +53461,7 @@ mod instrument_header_ui_tests;
         let mut desc = sequencer::effects::EffectDescriptor::from_lisp_manifest_with_asset_base(
             "spectral-tamer", &compiled.manifest.params, source_path.parent(),
             compiled.manifest.n_inputs, compiled.manifest.n_outputs,
+            compiled.manifest.effect_latency_samples,
         );
         sequencer::lisp_host::append_effect_host_modulation_controls(&mut desc, &compiled.manifest);
         let names = ["amount", "attack", "release", "gate", "low-cut", "high-cut",
