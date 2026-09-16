@@ -7006,7 +7006,7 @@ pub(crate) fn init_runtime(
             Some(Value::String(s)) => s.as_str(),
             _ => "",
         };
-        Ok(build_instrument_tree_value(query, &project_engines, origin_filter))
+        build_instrument_tree_value(query, &project_engines, origin_filter)
     });
     runtime.register_native("seq-audio-effect-tree", move |args, _ctx| {
         let query = match args.first() {

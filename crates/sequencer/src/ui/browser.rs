@@ -551,12 +551,95 @@ fn primary_category(tags: &[String]) -> &'static str {
     "other"
 }
 
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InstrumentCategories {
+    version: u32,
+    groups: Vec<InstrumentCategory>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InstrumentCategory {
+    label: String,
+    instruments: Vec<String>,
+}
+
+/// Categories organize browser rows without changing the storage paths used
+/// by projects, presets, custom UIs and asset resolution. Unlisted instruments
+/// remain visible beside the groups so adding an instrument never hides it.
+fn group_instrument_tree_nodes(
+    items: Vec<InstrumentTreeNode>,
+    categories: InstrumentCategories,
+) -> Result<Vec<InstrumentTreeNode>, String> {
+    if categories.version != 1 {
+        return Err(format!("unsupported category version {}", categories.version));
+    }
+    let mut labels = HashSet::new();
+    let mut assigned = HashSet::new();
+    for group in &categories.groups {
+        if group.label.trim().is_empty() || group.label.trim() != group.label
+            || group.label.contains(['/', '\\']) {
+            return Err(format!("invalid category label {:?}", group.label));
+        }
+        if !labels.insert(group.label.to_lowercase())
+            || items.iter().any(|item| item.label.eq_ignore_ascii_case(&group.label)) {
+            return Err(format!("duplicate category or instrument label {:?}", group.label));
+        }
+        if group.instruments.is_empty() {
+            return Err(format!("category {:?} has no instruments", group.label));
+        }
+        for name in &group.instruments {
+            if !assigned.insert(name.clone()) {
+                return Err(format!("instrument {name:?} belongs to more than one category"));
+            }
+            let matches = items.iter().filter(|item| item.name.is_some() && item.label == *name).count();
+            if matches != 1 {
+                return Err(format!("category {:?}: expected one instrument {name:?}, found {matches}", group.label));
+            }
+        }
+    }
+
+    let mut remaining = items;
+    let mut grouped = Vec::new();
+    for group in categories.groups {
+        let (children, rest) = remaining.into_iter()
+            .partition(|item: &InstrumentTreeNode| item.name.is_some() && group.instruments.contains(&item.label));
+        remaining = rest;
+        grouped.push(InstrumentTreeNode {
+            label: group.label,
+            name: None,
+            folder: None,
+            children,
+        });
+    }
+    grouped.extend(remaining);
+    Ok(grouped)
+}
+
+fn apply_instrument_categories(
+    items: Vec<InstrumentTreeNode>,
+    dir: &Path,
+) -> Result<Vec<InstrumentTreeNode>, String> {
+    let path = dir.join(".categories.json");
+    let source = match std::fs::read_to_string(&path) {
+        Ok(source) => source,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(items),
+        Err(error) => return Err(format!("{}: {error}", path.display())),
+    };
+    let categories = serde_json::from_str(&source)
+        .map_err(|error| format!("{}: {error}", path.display()))?;
+    group_instrument_tree_nodes(items, categories)
+        .map_err(|error| format!("{}: {error}", path.display()))
+}
+
 fn build_instrument_tree_nodes(
     dir: &std::path::Path,
     root: &std::path::Path,
-) -> Vec<InstrumentTreeNode> {
+    categorized: bool,
+) -> Result<Vec<InstrumentTreeNode>, String> {
     let Ok(entries) = std::fs::read_dir(dir) else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
 
     let mut dirs: Vec<(String, std::path::PathBuf)> = Vec::new();
@@ -606,7 +689,7 @@ fn build_instrument_tree_nodes(
             continue;
         }
 
-        let children = build_instrument_tree_nodes(&path, root);
+        let children = build_instrument_tree_nodes(&path, root, categorized)?;
         if !children.is_empty() {
             let folder = path
                 .strip_prefix(root)
@@ -629,7 +712,11 @@ fn build_instrument_tree_nodes(
             children: Vec::new(),
         });
     }
-    items
+    if categorized {
+        apply_instrument_categories(items, dir)
+    } else {
+        Ok(items)
+    }
 }
 
 fn instrument_tree_nodes_to_value(items: &[InstrumentTreeNode]) -> Value {
@@ -762,14 +849,19 @@ fn filter_instrument_tree_nodes(
     items
         .iter()
         .filter_map(|item| {
-            let children = filter_instrument_tree_nodes(&item.children, query_lower);
             let label_matches = item.label.to_lowercase().contains(query_lower);
+            // Matching a category selects its contents as well. Otherwise a
+            // search for "Gamelan" would produce an empty category row.
+            if label_matches {
+                return Some(item.clone());
+            }
+            let children = filter_instrument_tree_nodes(&item.children, query_lower);
             let name_matches = item
                 .name
                 .as_ref()
                 .map(|name| name.to_lowercase().contains(query_lower))
                 .unwrap_or(false);
-            if label_matches || name_matches || !children.is_empty() {
+            if name_matches || !children.is_empty() {
                 let mut filtered = item.clone();
                 filtered.children = children;
                 Some(filtered)
@@ -815,26 +907,26 @@ pub(crate) fn build_instrument_tree_value(
     query: &str,
     project_engines: &[String],
     origin_filter: &str,
-) -> Value {
+) -> Result<Value, String> {
     let query_lower = query.trim().to_lowercase();
     let paths = sequencer::app_paths::app_paths();
     let tier_items = |root: std::path::PathBuf, movable: bool| {
-        let mut nodes = build_instrument_tree_nodes(&root, &root);
+        let mut nodes = build_instrument_tree_nodes(&root, &root, !movable)?;
         if !movable {
             clear_instrument_folder_ids(&mut nodes);
         }
-        list_items(instrument_tree_nodes_to_value(&filter_instrument_tree_nodes(
+        Ok::<_, String>(list_items(instrument_tree_nodes_to_value(&filter_instrument_tree_nodes(
             &nodes,
             &query_lower,
-        )))
+        ))))
     };
     let factory = if instrument_origin_visible(origin_filter, "factory") {
-        tier_items(paths.instruments_dir(), false)
+        tier_items(paths.instruments_dir(), false)?
     } else {
         Vec::new()
     };
     let library = if instrument_origin_visible(origin_filter, "user") {
-        tier_items(paths.user_instruments_dir(), true)
+        tier_items(paths.user_instruments_dir(), true)?
     } else {
         Vec::new()
     };
@@ -855,7 +947,7 @@ pub(crate) fn build_instrument_tree_value(
         items.extend(factory);
         items.extend(library);
     }
-    list_value(items)
+    Ok(list_value(items))
 }
 
 pub(crate) fn project_instrument_engine_names(app: &app::App) -> Vec<String> {
@@ -1390,12 +1482,110 @@ mod tests {
     }
 
     #[test]
+    fn factory_instrument_categories_preserve_ids_and_flat_synths() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../content/instruments");
+        let original = build_instrument_tree_nodes(&root, &root, false).unwrap();
+        let grouped = build_instrument_tree_nodes(&root, &root, true).unwrap();
+        fn names(items: &[InstrumentTreeNode]) -> Vec<String> {
+            let mut result = Vec::new();
+            for item in items {
+                if let Some(name) = &item.name { result.push(name.clone()); }
+                result.extend(names(&item.children));
+            }
+            result.sort();
+            result
+        }
+        assert_eq!(names(&grouped), names(&original), "every original load/drag id occurs exactly once");
+        for label in ["Drums", "Physical Models"] {
+            let folder = grouped.iter().find(|item| item.label == label).unwrap();
+            assert!(!folder.children.is_empty());
+            for category in &folder.children {
+                assert!(category.name.is_none(), "uncategorized factory instrument: {}", category.label);
+                assert!(category.folder.is_none(), "categories are not filesystem drop targets");
+                assert!(!category.children.is_empty());
+                assert!(category.children.iter().all(|item| item.name.is_some() && item.children.is_empty()));
+            }
+        }
+        let synths = grouped.iter().find(|item| item.label == "Synths").unwrap();
+        assert!(synths.children.iter().all(|item| item.name.is_some() && item.children.is_empty()));
+        let original_synths = original.iter().find(|item| item.label == "Synths").unwrap();
+        assert_eq!(names(&synths.children), names(&original_synths.children));
+    }
+
+    fn category_test_items() -> Vec<InstrumentTreeNode> {
+        ["First", "Second", "Unlisted"].into_iter().map(|label| InstrumentTreeNode {
+            label: label.into(), name: Some(format!("Drums/{label}/")),
+            folder: None, children: Vec::new(),
+        }).collect()
+    }
+
+    #[test]
+    fn instrument_categories_keep_unlisted_items_and_searchable_members() {
+        let categories = serde_json::from_str(r#"{"version":1,"groups":[
+            {"label":"Family","instruments":["First","Second"]}
+        ]}"#).unwrap();
+        let grouped = group_instrument_tree_nodes(category_test_items(), categories).unwrap();
+        assert_eq!(grouped.len(), 2);
+        assert_eq!(grouped[1].name.as_deref(), Some("Drums/Unlisted/"));
+        let family = filter_instrument_tree_nodes(&grouped, "family");
+        assert_eq!(family.len(), 1);
+        assert_eq!(family[0].children.len(), 2, "category search includes its members");
+        let first = filter_instrument_tree_nodes(&grouped, "first");
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].label, "Family");
+        assert_eq!(first[0].children.len(), 1);
+        assert_eq!(first[0].children[0].name.as_deref(), Some("Drums/First/"));
+        let value = instrument_tree_nodes_to_value(&family);
+        let Value::List(items) = value else { panic!("tree list"); };
+        let Value::Map(folder) = &*items[0].borrow() else { panic!("category map"); };
+        assert_eq!(*folder["drop-target"].borrow(), Value::Bool(false));
+        assert!(!folder.contains_key("folder"));
+
+        // A flat First.lisp and a directory First can coexist. Only the
+        // instrument belongs to the category; a same-label directory stays put.
+        let mut items = category_test_items();
+        items.push(InstrumentTreeNode {
+            label: "First".into(), name: None, folder: Some("Drums/First".into()),
+            children: Vec::new(),
+        });
+        let categories = serde_json::from_str(r#"{"version":1,"groups":[
+            {"label":"Family","instruments":["First","Second"]}
+        ]}"#).unwrap();
+        let grouped = group_instrument_tree_nodes(items, categories).unwrap();
+        assert_eq!(grouped[0].children.len(), 2);
+        assert_eq!(grouped[2].folder.as_deref(), Some("Drums/First"));
+    }
+
+    #[test]
+    fn instrument_categories_reject_invalid_definitions_with_file_context() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".categories.json");
+        assert_eq!(apply_instrument_categories(category_test_items(), dir.path()).unwrap().len(), 3);
+        let cases = [
+            (r#"{"version":2,"groups":[]}"#, "unsupported category version"),
+            (r#"{"version":1,"groups":[{"label":"Family","instruments":["Missing"]}]}"#, "Missing"),
+            (r#"{"version":1,"groups":[{"label":"Family","instruments":["First","First"]}]}"#, "more than one category"),
+            (r#"{"version":1,"groups":[{"label":"First","instruments":["Second"]}]}"#, "duplicate category"),
+            (r#"{"version":1,"groups":[{"label":"Family","instruments":[]}]}"#, "no instruments"),
+            (r#"{"version":1,"groups":[{"label":"../Family","instruments":["First"]}]}"#, "invalid category label"),
+            (r#"{"version":1,"groups":[],"typo":true}"#, "unknown field"),
+            ("{", "EOF"),
+        ];
+        for (source, expected) in cases {
+            std::fs::write(&path, source).unwrap();
+            let error = apply_instrument_categories(category_test_items(), dir.path()).err().expect("invalid categories fail");
+            assert!(error.contains(expected), "{error}");
+            assert!(error.contains(&path.display().to_string()), "diagnostic identifies the file: {error}");
+        }
+    }
+
+    #[test]
     fn instrument_tree_places_unique_project_engines_between_builtins_and_library() {
         let tree = build_instrument_tree_value(
             "",
             &["drums/3d-drum/".to_string(), "drums/3d-drum/".to_string()],
             "",
-        );
+        ).unwrap();
         let labels = top_level_tree_labels(&tree);
 
         assert_eq!(
@@ -1415,7 +1605,7 @@ mod tests {
 
     #[test]
     fn instrument_tree_origin_filter_hides_the_other_tier() {
-        let labels_for = |origin: &str| top_level_tree_labels(&build_instrument_tree_value("", &[], origin));
+        let labels_for = |origin: &str| top_level_tree_labels(&build_instrument_tree_value("", &[], origin).unwrap());
         let both = labels_for("");
         let factory_only = labels_for("factory");
         let library_only = labels_for("user");

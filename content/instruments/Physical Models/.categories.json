@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "groups": [
+    {"label": "Winds", "instruments": ["PM Clarinet", "PM Flute", "PM Saxophone"]},
+    {"label": "Strings", "instruments": ["PM Cello", "PM Electric Bass"]},
+    {"label": "Keys", "instruments": ["PM Piano"]},
+    {"label": "Cymbals", "instruments": ["PM Crash", "PM Hi-Hat", "PM Ride"]},
+    {"label": "Gamelan", "instruments": ["PM Bonang", "PM Kempyang", "PM Kethuk", "PM Saron", "PM Slenthem", "PM Slenthem Slendro"]}
+  ]
+}

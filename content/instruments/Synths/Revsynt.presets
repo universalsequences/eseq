@@ -1,0 +1,101 @@
+{
+  "version": 1,
+  "engine_name": "Synths/Revsynt/",
+  "source_file": "instruments/Synths/Revsynt/dsp.lisp",
+  "presets": [
+    {
+      "id": "Cut The Rev",
+      "name": "Cut The Rev",
+      "base_note_offset": -12.0,
+      "params": {
+        "fm_rate": 1.06,
+        "unison": 0.27,
+        "stab_decay_ms": 320.0,
+        "gain": 0.5,
+        "octave": 0.0,
+        "fade_s": 2.34,
+        "feedback": 0.6,
+        "damping": 2650.0,
+        "size": 1.0,
+        "wet": 0.9,
+        "amp_attack_ms": 20.0,
+        "amp_decay_ms": 65.0,
+        "amp_sustain": 1.0,
+        "amp_release_ms": 20.0,
+        "size_fine": 0.0
+      }
+    },
+    {
+      "id": "Ahh Choir",
+      "name": "Ahh Choir",
+      "base_note_offset": -12.0,
+      "params": {
+        "fm_rate": 1.06,
+        "unison": 0.27,
+        "stab_decay_ms": 600.0,
+        "gain": 0.5,
+        "octave": 0.0,
+        "fade_s": 2.34,
+        "feedback": 0.8,
+        "damping": 1800.0,
+        "size": 1.0,
+        "wet": 1.0,
+        "amp_attack_ms": 120.0,
+        "amp_decay_ms": 65.0,
+        "amp_sustain": 1.0,
+        "amp_release_ms": 900.0,
+        "size_fine": 0.0
+      }
+    },
+    {
+      "id": "Sub Tank",
+      "name": "Sub Tank",
+      "base_note_offset": -12.0,
+      "params": {
+        "fm_rate": 1.06,
+        "unison": 0.27,
+        "stab_decay_ms": 320.0,
+        "gain": 0.5,
+        "octave": -1.0,
+        "fade_s": 2.34,
+        "feedback": 0.75,
+        "damping": 900.0,
+        "size": 1.6,
+        "wet": 0.9,
+        "amp_attack_ms": 20.0,
+        "amp_decay_ms": 65.0,
+        "amp_sustain": 1.0,
+        "amp_release_ms": 400.0,
+        "size_fine": 0.0
+      }
+    },
+    {
+      "id": "Phase Wash",
+      "name": "Phase Wash",
+      "base_note_offset": -12.0,
+      "params": {
+        "fm_rate": 1.06,
+        "unison": 0.27,
+        "stab_decay_ms": 320.0,
+        "gain": 0.5,
+        "octave": 0.0,
+        "fade_s": 2.34,
+        "feedback": 0.7,
+        "damping": 2650.0,
+        "size": 1.0,
+        "wet": 1.0,
+        "amp_attack_ms": 20.0,
+        "amp_decay_ms": 65.0,
+        "amp_sustain": 1.0,
+        "amp_release_ms": 600.0,
+        "mod1_source": 1.0,
+        "mod1_lfo_rate": 0.23,
+        "mod1_lfo_shape": 0.0,
+        "mod1_lfo_sync": 0.0,
+        "size_fine": 0.0,
+        "__dgen_mod_active__size_fine": 1.0,
+        "mod size_fine slot 1 amt": 1.0
+      }
+    }
+  ]
+}

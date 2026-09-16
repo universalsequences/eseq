@@ -16569,6 +16569,39 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     }
 
     #[test]
+    fn factory_revsynt_renders_audible_signal_at_defaults() {
+        let name = "Synths/Revsynt/";
+        let source = super::load_instrument_source(name).unwrap();
+        let asset_base = super::instrument_source_path(name)
+            .ok()
+            .and_then(|path| path.parent().map(|parent| parent.to_path_buf()));
+        let report = super::render_instrument_source_for_test(
+            &source,
+            asset_base.as_deref(),
+            &super::InstrumentRenderOptions {
+                sample_rate: 48_000,
+                block_size: 128,
+                frames: 24_000,
+                midi_note: 57.0,
+                velocity: 1.0,
+                gate_frames: 24_000,
+                voice_index: 0,
+                param_overrides: Vec::new(),
+                param_events: Vec::new(),
+                input_overrides: Vec::new(),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(report.non_finite_samples, 0, "finite output, got {report:?}");
+        assert!(report.peak > 0.01, "expected audible peak, got report: {report:?}");
+        // The tank must ring from the very first note of a fresh voice: the
+        // user-library ancestor spent its first note with no tail because a
+        // zero-initialised smoother drove the delay time to zero.
+        assert!(report.rms > 0.01, "expected the reverb tail on the first note, got report: {report:?}");
+    }
+
+    #[test]
     fn dpro_dens_v1_renders_audible_signal() {
         let name = "emulations/monomachine-dpro-dens-v1/";
         let source = super::load_instrument_source(name).unwrap();

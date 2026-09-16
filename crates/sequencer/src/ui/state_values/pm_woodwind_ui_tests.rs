@@ -246,3 +246,17 @@ fn break_kick_53_surface_controls_and_pages() {
         .join("../../tools/pm-break-kick");
     check_resonant_surface_at(&root, "model.lisp", "Break Kick 53", 4);
 }
+
+#[test]
+fn boom_bap_kick_surface_controls_and_pages() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../content/instruments/Drums/Boom Bap Kick");
+    check_resonant_surface_at(&root, "dsp.lisp", "Boom Bap Kick", 5);
+}
+
+#[test]
+fn break_kick_surface_controls_and_pages() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../content/instruments/Drums/Break Kick");
+    check_resonant_surface_at(&root, "dsp.lisp", "Break Kick", 4);
+}

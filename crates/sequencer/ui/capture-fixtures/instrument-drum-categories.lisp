@@ -1,0 +1,5 @@
+(capture-project (track :sampler :name "Sampler"))
+(def capture-after-sync ()
+  (eseq.browser/select-tab "instruments")
+  (set! eseq.browser/instrument-origin-filter "factory")
+  (set! eseq.browser/search-filter "Drums"))

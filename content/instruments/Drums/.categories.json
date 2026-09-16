@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "groups": [
+    {"label": "Kicks", "instruments": ["808 Kick", "909 Kick", "Boom Bap Kick", "Break Kick", "Modal Kick", "Virus B BassDrum 23"]},
+    {"label": "Snares", "instruments": ["Digi Snare", "Membrane Snare", "Modal Snare"]},
+    {"label": "Claps", "instruments": ["808 Clap", "Digi Clap"]},
+    {"label": "Hats & Cymbals", "instruments": ["909 Open Hat", "Digi Cymbal", "Digi Hat"]},
+    {"label": "Toms", "instruments": ["808 Tom", "Orbit Tom 66"]}
+  ]
+}

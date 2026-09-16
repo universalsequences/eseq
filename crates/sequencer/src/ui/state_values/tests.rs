@@ -2678,7 +2678,7 @@ mod instrument_header_ui_tests;
                         .collect::<Vec<_>>(),
                     _ => Vec::new(),
                 };
-                Ok(build_instrument_tree_value(query, &project_engines, ""))
+                build_instrument_tree_value(query, &project_engines, "")
             });
         // selected-bus and seq-has-selected-bus? used to be stubbed flat here;
         // browser.lisp now imports eseq.seq-core-state, whose compile-time
@@ -3329,6 +3329,24 @@ mod instrument_header_ui_tests;
     }
 
     #[test]
+    fn metal_seq_browser_factory_category_search_has_visible_instruments() {
+        let mut editor = browser_editor_on_instrument_tab();
+        editor.runtime_mut().eval_str(r#"(set! eseq.browser/search-filter "Gamelan")"#).unwrap();
+        editor.runtime_mut().eval_str("(eseq.browser/refresh-buffer)").unwrap();
+        editor.refresh_runtime_side_effects();
+        editor.set_active_buffer(browser_id(&editor));
+        editor.set_layout_viewport(90, 70);
+        let layout = editor.widget_layout().expect("categorized browser layout");
+        let tree = find_layout_node_by_stable_key_suffix(&layout, "/instruments-tab-tree")
+            .expect("instrument tree");
+        assert_finite_nonzero_rect(tree, "categorized instrument tree");
+        let rendered = render_layout_cells(&layout, 90, 70);
+        for name in ["PM Bonang", "PM Kempyang", "PM Kethuk", "PM Saron", "PM Slenthem", "PM Slenthem Slendro"] {
+            assert!(rendered.contains(name), "category member {name} must render visibly:\n{rendered}");
+        }
+    }
+
+    #[test]
     fn metal_seq_browser_project_engine_rows_have_visible_layout() {
         let mut editor = browser_editor_on_instrument_tab();
         editor.runtime_mut().set_reactive(
@@ -3374,7 +3392,7 @@ mod instrument_header_ui_tests;
 
     #[test]
     fn metal_seq_instrument_tree_starts_with_builtin_rows() {
-        let tree = build_instrument_tree_value("", &[], "");
+        let tree = build_instrument_tree_value("", &[], "").unwrap();
         let labels = top_level_tree_field_strings(&tree, "label");
         let kinds = top_level_tree_field_strings(&tree, "kind");
         let names = top_level_tree_field_strings(&tree, "name");
@@ -3417,7 +3435,7 @@ mod instrument_header_ui_tests;
 
     #[test]
     fn metal_seq_instrument_tree_search_filters_builtins_without_headers() {
-        let tree = build_instrument_tree_value("samp", &[], "");
+        let tree = build_instrument_tree_value("samp", &[], "").unwrap();
         let labels = top_level_tree_field_strings(&tree, "label");
         let kinds = top_level_tree_field_strings(&tree, "kind");
 
@@ -15988,7 +16006,7 @@ mod instrument_header_ui_tests;
                     Some(Value::String(s)) => s.as_str(),
                     _ => "",
                 };
-                Ok(build_instrument_tree_value(query, &[], ""))
+                build_instrument_tree_value(query, &[], "")
             });
         editor
             .runtime_mut()
@@ -46837,6 +46855,118 @@ mod instrument_header_ui_tests;
 
     /// Heat's real instrument source, including the editable envelopes and the compact
     /// detail controls, must fit in the production instrument panel.
+    #[test]
+    fn metal_seq_fx_lisp_lays_out_revsynt_panel() {
+        fn find_param<'a>(node: &'a eseqlisp::layout::LayoutNode, suffix: &str)
+            -> Option<&'a eseqlisp::layout::LayoutNode>
+        {
+            if node.stable_key.as_deref().is_some_and(|key| key.ends_with(suffix)) {
+                return Some(node);
+            }
+            node.children.iter().find_map(|child| find_param(child, suffix))
+        }
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../content/instruments/Synths/Revsynt");
+        let dsp = std::fs::read_to_string(root.join("dsp.lisp")).unwrap();
+        let ui = std::fs::read_to_string(root.join("ui.lisp")).unwrap();
+        // Every top-level `(param …)` of the shipped source, in manifest order,
+        // so the panel is laid out against the real parameter set.
+        let names: Vec<String> = dsp.lines().filter(|line| line.starts_with("(param "))
+            .map(|line| line.split_whitespace().nth(1).unwrap().to_string()).collect();
+        let params = dsp.lines().filter(|line| line.starts_with("(param "))
+            .enumerate().map(|(index, line)| {
+                let words: Vec<_> = line.trim_end_matches(')').split_whitespace().collect();
+                let number = |key| {
+                    let pos = words.iter().position(|word| *word == key).unwrap();
+                    words[pos + 1].parse::<f64>().unwrap()
+                };
+                Value::Map(test_param_map(words[1], index, number("@default"), number("@min"), number("@max")))
+            }).collect();
+        let mut inst = test_instrument_map();
+        inst.insert("synth".to_string(), Rc::new(RefCell::new(test_list(params))));
+        let custom_ui = build_custom_instrument_ui_source_with_overlay(Some((
+            "test-instrument".to_string(), root.join("ui.lisp").display().to_string(), ui,
+        )));
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.set_layout_viewport(180, 24);
+        editor.runtime_mut().register_reactive("SEQ", vec![
+            ("num-tracks", Value::Number(1.0)), ("compiling", Value::Bool(false)),
+            ("available-effects", test_list(vec![])), ("available-builtin-effects", test_list(vec![])),
+            ("available-midi-effects", test_list(vec![])), ("bus-names", test_list(vec![])),
+            ("effects", test_list(vec![])), ("midi-effects", test_list(vec![])),
+            ("instrument-panel", test_list(vec![Value::Map(inst)])), ("bus-effects", test_list(vec![])),
+        ], true);
+        editor.runtime_mut().eval_str(r#"
+            (def eseq.seq-core-state/selected-bus-name () "Mix")
+            (def seq-has-selection? () false)
+            (def eseq.browser/sbrowser-editor-name "")
+            (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+            (def custom-midi-fx-ui (fx) false)
+            (def custom-audio-fx-ui (fx) false)
+            (defstate eseq.seq-core-state/selected-bus -1)
+        "#).unwrap();
+        register_test_delete_target_natives(&mut editor, 1);
+        editor.runtime_mut().eval_str(&custom_ui).expect("load Revsynt UI");
+        editor.runtime_mut().eval_str(&read_ui_source("effects.lisp").unwrap()).unwrap();
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            panic!("Revsynt fx lisp status after refresh: {status}");
+        }
+        let fx_id = editor.buffers.iter().find(|buffer| buffer.name == "*fx*").unwrap().id;
+        editor.set_active_buffer(fx_id);
+
+        // Default view: the STAB detail page plus every knob panel. All
+        // fourteen shipped params are reachable without switching pages
+        // except the three amp envelope fields that live on the AMP page.
+        let layout = editor.widget_layout().expect("default Revsynt layout");
+        let panel = find_layout_node_by_debug_name(&layout, "instrument-panel")
+            .expect("instrument panel layout node");
+        assert!(panel.rect.width > 70.0 && panel.rect.height > 8.0,
+            "instrument panel should occupy visible measured space, got {:?}", panel.rect);
+        let display = find_layout_node_by_debug_name(&layout, "mnm-display").expect("detail display");
+        assert_finite_nonzero_rect(display, "mnm-display");
+        for section in 0..5 {
+            let node = find_layout_node_by_debug_name(&layout, &format!("mnm-panel-{section}"));
+            if section < 4 {
+                assert_finite_nonzero_rect(node.unwrap_or_else(|| panic!("mnm-panel-{section}")), "mnm-panel");
+            }
+        }
+        for name in names.iter().filter(|n| !matches!(n.as_str(), "amp_decay_ms" | "amp_sustain")) {
+            let control = find_param(&layout, name)
+                .unwrap_or_else(|| panic!("missing default-view control for {name}"));
+            assert_finite_nonzero_rect(control, name);
+        }
+        // The STAB page carries the stab-decay editor; the amp envelope
+        // editor only appears once the AMP page is selected.
+        assert_finite_nonzero_rect(
+            find_layout_node_by_debug_name(&layout, "rv-stab-decay").expect("stab decay editor"),
+            "rv-stab-decay",
+        );
+        assert!(find_layout_node_by_debug_name(&layout, "rv-amp").is_none(),
+            "the amp envelope editor lives on the AMP page, not the default STAB page");
+
+        // AMP page: the envelope editor and its four number fields.
+        // Select the page through the real per-scope state (the scope name is
+        // the instrument name the overlay registered): a reactive write, so
+        // the memoized panel subtree re-renders. Redefining the accessor the
+        // generated wrapper reads does not invalidate the cached layout.
+        editor.runtime_mut()
+            .eval_str(r#"(eseq.effects.custom-ui-sections/custom-ui-select-section-in-scope (dict :name "test-instrument") 3)"#)
+            .expect("select the AMP section");
+        editor.refresh_runtime_side_effects();
+        let layout = editor.widget_layout().expect("Revsynt AMP layout");
+        let adsr = find_layout_node_by_debug_name(&layout, "rv-amp").expect("amp adsr editor");
+        assert!(adsr.rect.width > 8.0 && adsr.rect.height > 2.0 && adsr.rect.height <= 4.0,
+            "ADSR editor should stay constrained in the detail display, got {:?}", adsr.rect);
+        // Non-modulatable params get no keyed mod wrapper, so the page's
+        // number fields are found by the picker's debug name.
+        for name in ["amp_attack_ms", "amp_decay_ms", "amp_sustain", "amp_release_ms"] {
+            let control = find_layout_node_by_debug_name(&layout, &format!("mnm-num-{name}"))
+                .unwrap_or_else(|| panic!("missing AMP page control for {name}"));
+            assert_finite_nonzero_rect(control, name);
+        }
+    }
+
     #[test]
     fn heat_ui_sections_have_visible_parameter_controls() {
         fn find_param<'a>(node: &'a eseqlisp::layout::LayoutNode, suffix: &str)
