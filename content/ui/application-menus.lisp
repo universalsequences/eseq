@@ -40,6 +40,8 @@
       nil
       (merge (application-menu-entry "file-menu-export" "Export Audio…" "e" (lambda () (eseq.export-song/export-song))) :shortcut (dict :key "e" :modifiers (list :primary :shift)))
       (application-menu-entry "file-menu-import" "Import Samples…" "" (lambda () (host-command "menu-import-samples" (dict))))
+      (application-menu-entry "file-menu-import-package" "Import Package…" "" (lambda () (host-command "menu-import-package" (dict))))
+      (application-menu-entry "file-menu-export-package" "Export Package…" "" (lambda () (host-command "menu-export-package" (dict))))
       (application-menu-entry "file-menu-settings" "Settings…" "," (lambda () (host-command "settings-open" (dict))))
       nil
       (application-menu-entry "file-menu-help" "Help" "" (lambda () (host-command "open-help" (dict))))

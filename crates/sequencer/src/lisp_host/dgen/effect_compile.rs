@@ -159,7 +159,53 @@ pub(in crate::lisp_host) fn compile_and_load_uncached_with_host_services(
 
 // ── Effect library storage ──
 
+use crate::app_paths::{ContentRoot, ContentTier};
+
+/// Split an effect name into its package (when it is a `pkg:author.name/…`
+/// id) and its logical path. Effects have no `factory:`/`user:` qualifiers:
+/// bare names resolve factory tier first, then user, as they always have.
+fn parse_effect_id(name: &str) -> io::Result<(Option<String>, &str)> {
+    let trimmed = name.trim_end_matches('/');
+    match ContentTier::parse_id(trimmed) {
+        Ok(Some((ContentTier::Package(prefix), logical))) => Ok((Some(prefix), logical)),
+        Ok(Some((_, logical))) => Ok((None, logical)),
+        Ok(None) => Ok((None, trimmed)),
+        Err(message) => Err(io::Error::new(io::ErrorKind::InvalidInput, message)),
+    }
+}
+
+fn package_effect_root<'a>(roots: &'a [ContentRoot], prefix: &str) -> Option<&'a ContentRoot> {
+    roots
+        .iter()
+        .find(|root| root.tier == ContentTier::Package(prefix.to_string()))
+}
+
+/// Where a `pkg:` effect name lands when its package is not installed: a
+/// hidden, never-listed corner of the user tier, so the path exists to
+/// report "missing" against and can never alias a real effect.
+fn missing_package_effect_path(roots: &[ContentRoot], prefix: &str, relative: &Path) -> PathBuf {
+    roots
+        .iter()
+        .find(|root| root.tier == ContentTier::User)
+        .or_else(|| roots.first())
+        .map(|root| root.path.clone())
+        .unwrap_or_default()
+        .join(".missing-package")
+        .join(prefix)
+        .join(relative)
+}
+
+fn read_only_effect_error(name: &str) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        format!("package effect '{name}' is read-only; fork it before editing"),
+    )
+}
+
 pub fn save_effect(name: &str, source: &str) -> io::Result<()> {
+    if parse_effect_id(name)?.0.is_some() {
+        return Err(read_only_effect_error(name));
+    }
     let root = crate::app_paths::app_paths().user_effects_dir();
     let path = if name.ends_with('/') {
         root.join(name.trim_end_matches('/')).join("dsp.lisp")
@@ -173,6 +219,9 @@ pub fn save_effect(name: &str, source: &str) -> io::Result<()> {
 }
 
 pub fn save_effect_ui(name: &str, source: &str) -> io::Result<()> {
+    if parse_effect_id(name)?.0.is_some() {
+        return Err(read_only_effect_error(name));
+    }
     let path = crate::app_paths::app_paths()
         .user_effects_dir()
         .join(name.trim_end_matches('/'))
@@ -184,6 +233,10 @@ pub fn save_effect_ui(name: &str, source: &str) -> io::Result<()> {
 }
 
 pub fn list_saved_effects() -> Vec<String> {
+    list_saved_effects_in_roots(&crate::app_paths::app_paths().effect_roots())
+}
+
+fn list_saved_effects_in_roots(roots: &[ContentRoot]) -> Vec<String> {
     fn collect(dir: &Path, root: &Path, out: &mut Vec<String>) {
         let Ok(entries) = std::fs::read_dir(dir) else {
             return;
@@ -218,12 +271,26 @@ pub fn list_saved_effects() -> Vec<String> {
     }
 
     let mut names = Vec::new();
-    for dir in crate::app_paths::app_paths().effect_dirs() {
-        collect(&dir, &dir, &mut names);
+    for root in roots {
+        if root.tier.is_package() {
+            // Package effects list under their qualified id so the browser and
+            // the picker hand back a name that resolves into that package.
+            let mut package_names = Vec::new();
+            collect(&root.path, &root.path, &mut package_names);
+            names.extend(package_names.into_iter().map(|name| root.tier.qualify(&name)));
+        } else {
+            collect(&root.path, &root.path, &mut names);
+        }
     }
     names.sort();
     names.dedup();
     names
+}
+
+/// The tier an effect name resolves in: the package it is qualified with,
+/// or `None` for the factory/user library.
+pub fn effect_package(name: &str) -> Option<String> {
+    parse_effect_id(name).ok().and_then(|(package, _)| package)
 }
 
 pub fn load_effect_source(name: &str) -> io::Result<String> {
@@ -236,7 +303,26 @@ pub fn load_effect_ui_source(name: &str) -> io::Result<String> {
 }
 
 pub fn effect_source_path(name: &str) -> PathBuf {
-    let roots = crate::app_paths::app_paths().effect_dirs();
+    effect_source_path_in_roots(&crate::app_paths::app_paths().effect_roots(), name)
+}
+
+fn effect_source_path_in_roots(roots: &[ContentRoot], name: &str) -> PathBuf {
+    if let Ok((Some(prefix), logical)) = parse_effect_id(name) {
+        // Package effects never fall through to another tier.
+        let Some(root) = package_effect_root(roots, &prefix) else {
+            return missing_package_effect_path(
+                roots,
+                &prefix,
+                Path::new(&format!("{logical}.lisp")),
+            );
+        };
+        let folder_dsp = root.path.join(logical).join("dsp.lisp");
+        if folder_dsp.exists() || name.ends_with('/') {
+            return folder_dsp;
+        }
+        return root.path.join(format!("{logical}.lisp"));
+    }
+    let roots = roots.iter().map(|root| root.path.clone()).collect::<Vec<_>>();
     for root in &roots {
         let path = if name.ends_with('/') {
             root.join(name.trim_end_matches('/')).join("dsp.lisp")
@@ -256,13 +342,138 @@ pub fn effect_source_path(name: &str) -> PathBuf {
 }
 
 pub fn effect_ui_path(name: &str) -> PathBuf {
+    effect_ui_path_in_roots(&crate::app_paths::app_paths().effect_roots(), name)
+}
+
+fn effect_ui_path_in_roots(roots: &[ContentRoot], name: &str) -> PathBuf {
+    if let Ok((Some(prefix), logical)) = parse_effect_id(name) {
+        let relative = Path::new(logical).join("ui.lisp");
+        return match package_effect_root(roots, &prefix) {
+            Some(root) => root.path.join(relative),
+            None => missing_package_effect_path(roots, &prefix, &relative),
+        };
+    }
     let relative = Path::new(name.trim_end_matches('/')).join("ui.lisp");
-    crate::app_paths::app_paths()
-        .effect_dirs()
-        .into_iter()
-        .map(|root| root.join(&relative))
+    roots
+        .iter()
+        .map(|root| root.path.join(&relative))
         .find(|path| path.exists())
-        .unwrap_or_else(|| crate::app_paths::app_paths().effects_dir().join(relative))
+        .unwrap_or_else(|| {
+            roots
+                .iter()
+                .find(|root| root.tier == ContentTier::Factory)
+                .or_else(|| roots.first())
+                .map(|root| root.path.clone())
+                .unwrap_or_default()
+                .join(relative)
+        })
+}
+
+#[cfg(test)]
+mod package_effect_tests {
+    use super::*;
+
+    fn temp_root(tag: &str) -> PathBuf {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("eseq-package-effects-{tag}-{unique}"));
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    fn write_folder_effect(root: &Path, name: &str) {
+        let dir = root.join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("dsp.lisp"), "(out (in 1) 1)").unwrap();
+        std::fs::write(dir.join("ui.lisp"), "(def ui 1)").unwrap();
+    }
+
+    fn roots(root: &Path) -> Vec<ContentRoot> {
+        vec![
+            ContentRoot { tier: ContentTier::Factory, path: root.join("factory") },
+            ContentRoot { tier: ContentTier::User, path: root.join("user") },
+            ContentRoot {
+                tier: ContentTier::Package("alec.fx".into()),
+                path: root.join("packages/alec.fx/effects"),
+            },
+        ]
+    }
+
+    #[test]
+    fn package_effects_list_qualified_and_resolve_only_in_their_package() {
+        let root = temp_root("resolve");
+        let roots = roots(&root);
+        write_folder_effect(&roots[0].path, "comp");
+        write_folder_effect(&roots[1].path, "comp");
+        write_folder_effect(&roots[2].path, "comp");
+        write_folder_effect(&roots[2].path, "chains/verb");
+        std::fs::write(roots[2].path.join("flat.lisp"), "(out (in 1) 1)").unwrap();
+
+        let mut names = list_saved_effects_in_roots(&roots);
+        names.sort();
+        assert_eq!(
+            names,
+            vec![
+                "comp".to_string(),
+                "pkg:alec.fx/chains/verb".into(),
+                "pkg:alec.fx/comp".into(),
+                "pkg:alec.fx/flat".into(),
+            ],
+            "library names stay bare, package names carry their qualifier"
+        );
+
+        // The same bare name resolves factory-first as always; the package
+        // id resolves into the package and nowhere else.
+        assert_eq!(
+            effect_source_path_in_roots(&roots, "comp"),
+            roots[0].path.join("comp/dsp.lisp")
+        );
+        assert_eq!(
+            effect_source_path_in_roots(&roots, "pkg:alec.fx/comp"),
+            roots[2].path.join("comp/dsp.lisp")
+        );
+        assert_eq!(
+            effect_source_path_in_roots(&roots, "pkg:alec.fx/chains/verb/"),
+            roots[2].path.join("chains/verb/dsp.lisp")
+        );
+        assert_eq!(
+            effect_source_path_in_roots(&roots, "pkg:alec.fx/flat"),
+            roots[2].path.join("flat.lisp")
+        );
+        assert_eq!(
+            effect_ui_path_in_roots(&roots, "pkg:alec.fx/comp"),
+            roots[2].path.join("comp/ui.lisp")
+        );
+
+        // A package effect missing from its package never borrows the user
+        // or factory copy of the same name.
+        let missing = effect_source_path_in_roots(&roots, "pkg:alec.fx/nope");
+        assert!(missing.starts_with(&roots[2].path));
+        assert!(!missing.exists());
+        // An uninstalled package lands in a hidden, never-listed corner.
+        let uninstalled = effect_source_path_in_roots(&roots, "pkg:nobody.pack/comp");
+        assert!(uninstalled.starts_with(roots[1].path.join(".missing-package")));
+        assert!(!uninstalled.exists());
+        assert_eq!(effect_package("pkg:alec.fx/comp"), Some("alec.fx".into()));
+        assert_eq!(effect_package("comp"), None);
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn package_effects_are_read_only() {
+        let error = save_effect("pkg:alec.fx/comp/", "(out 0)").unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        let error = save_effect_ui("pkg:alec.fx/comp", "(def ui 1)").unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        // Malformed package ids are rejected, not written somewhere odd.
+        assert_eq!(
+            save_effect("pkg:no-slash", "(out 0)").unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+    }
 }
 
 // ── Editor flow ──

@@ -3,7 +3,336 @@ use crate::*;
 const PACKAGES_BUFFER_NAME: &str = "*packages*";
 const LISTING_START_LINE: usize = 5;
 
-pub(super) const COMMANDS: &[&str] = &["open-packages-view", "packages-view-key"];
+pub(super) const COMMANDS: &[&str] = &[
+    "open-packages-view",
+    "packages-view-key",
+    "menu-import-package",
+    "package-import-stage",
+    "package-import-commit",
+    "package-import-cancel",
+    "menu-export-package",
+    "package-export-commit",
+];
+
+// ── Export Package… ──
+//
+// The export modal (`eseq.file-dialogs/package-export-body`) lists every
+// user-tier instrument and effect from `seq-package-export-candidates`; the
+// picked set lives here so Lisp only toggles and re-reads it. Commit asks
+// for a destination with the native save panel, writes the pack with
+// `sequencer::package_export::export_package`, and reports.
+
+thread_local! {
+    static EXPORT_SELECTION: std::cell::RefCell<
+        std::collections::BTreeSet<(sequencer::package_export::ExportKind, String)>,
+    > = const { std::cell::RefCell::new(std::collections::BTreeSet::new()) };
+}
+
+fn export_kind(name: &str) -> Option<sequencer::package_export::ExportKind> {
+    match name {
+        "instrument" => Some(sequencer::package_export::ExportKind::Instrument),
+        "effect" => Some(sequencer::package_export::ExportKind::Effect),
+        _ => None,
+    }
+}
+
+fn export_kind_name(kind: sequencer::package_export::ExportKind) -> &'static str {
+    match kind {
+        sequencer::package_export::ExportKind::Instrument => "instrument",
+        sequencer::package_export::ExportKind::Effect => "effect",
+    }
+}
+
+pub(crate) fn register_package_export_natives(runtime: &mut Runtime) {
+    // Every exportable item as (dict :kind "instrument"|"effect" :name
+    // <logical> :selected? bool), instruments first.
+    runtime.register_native("seq-package-export-candidates", |_args, _ctx| {
+        let candidates =
+            sequencer::package_export::export_candidates(sequencer::app_paths::app_paths());
+        let items = EXPORT_SELECTION.with(|selection| {
+            let selection = selection.borrow();
+            candidates
+                .into_iter()
+                .map(|candidate| {
+                    let selected =
+                        selection.contains(&(candidate.kind, candidate.logical.clone()));
+                    Rc::new(RefCell::new(crate::values::map_value([
+                        ("kind", Value::String(export_kind_name(candidate.kind).into())),
+                        ("name", Value::String(candidate.logical)),
+                        ("selected?", Value::Bool(selected)),
+                    ])))
+                })
+                .collect::<Vec<_>>()
+        });
+        Ok(Value::List(items))
+    });
+    // (seq-package-export-toggle kind name) flips one item; returns the new
+    // selected count so the caller can bump its generation.
+    runtime.register_native("seq-package-export-toggle", |args, _ctx| {
+        let (Some(Value::String(kind)), Some(Value::String(name))) = (args.first(), args.get(1))
+        else {
+            return Err("seq-package-export-toggle expects kind and name".into());
+        };
+        let kind = export_kind(kind).ok_or("unknown export kind")?;
+        let count = EXPORT_SELECTION.with(|selection| {
+            let mut selection = selection.borrow_mut();
+            let key = (kind, name.clone());
+            if !selection.remove(&key) {
+                selection.insert(key);
+            }
+            selection.len()
+        });
+        Ok(Value::Number(count as f64))
+    });
+    runtime.register_native("seq-package-export-selected-count", |_args, _ctx| {
+        Ok(Value::Number(EXPORT_SELECTION.with(|selection| selection.borrow().len()) as f64))
+    });
+    runtime.register_native("seq-package-export-clear", |_args, _ctx| {
+        EXPORT_SELECTION.with(|selection| selection.borrow_mut().clear());
+        Ok(Value::Nil)
+    });
+}
+
+fn commit_package_export(payload: &Value) -> Result<String, String> {
+    let Value::Map(map) = payload else {
+        return Err("Expected :identity and :version".into());
+    };
+    let identity = map_string(map, "identity").unwrap_or_default();
+    let identity = identity.trim().to_string();
+    let version = map_string(map, "version").unwrap_or_default();
+    let version = version.trim().to_string();
+    eseqlisp::package::validate_package_name(&identity)
+        .map_err(|error| format!("package name: {error}"))?;
+    if version.is_empty() {
+        return Err("Enter a version".into());
+    }
+    let items = EXPORT_SELECTION.with(|selection| selection.borrow().iter().cloned().collect::<Vec<_>>());
+    if items.is_empty() {
+        return Err("Pick at least one instrument or effect".into());
+    }
+    let suggested = sequencer::package_export::archive_file_name(&identity, &version);
+    let Some(archive_path) = crate::application_menu::choose_package_export_path(&suggested)? else {
+        return Err("Export canceled".into());
+    };
+    let out_dir = archive_path
+        .parent()
+        .ok_or("Choose a folder for the archive")?
+        .to_path_buf();
+    // The writer names the archive itself; the panel only picks the folder
+    // (and lets the user rename the file, which we honor by renaming after).
+    let request = sequencer::package_export::ExportRequest { identity, version, items };
+    let report = sequencer::package_export::export_package(
+        sequencer::app_paths::app_paths(),
+        &request,
+        &out_dir,
+        true,
+    )?;
+    let mut archive = report.archive.clone().ok_or("export produced no archive")?;
+    if archive != archive_path {
+        if archive_path.exists() {
+            let _ = std::fs::remove_dir_all(&report.package_dir);
+            let _ = std::fs::remove_file(&archive);
+            return Err(format!("{} already exists", archive_path.display()));
+        }
+        std::fs::rename(&archive, &archive_path).map_err(|error| error.to_string())?;
+        archive = archive_path;
+    }
+    // The archive is the deliverable; the unpacked folder beside it would
+    // only confuse a later drag into the packages directory.
+    let _ = std::fs::remove_dir_all(&report.package_dir);
+    EXPORT_SELECTION.with(|selection| selection.borrow_mut().clear());
+    let mut message = format!(
+        "Exported {} ({} instrument(s), {} effect(s))",
+        archive.display(),
+        report.instruments,
+        report.effects
+    );
+    for warning in &report.warnings {
+        eprintln!("metal_seq: export warning: {warning}");
+    }
+    if let Some(first) = report.warnings.first() {
+        message.push_str(&format!(" — warning: {first}"));
+    }
+    Ok(message)
+}
+
+// ── Import Package… ──
+//
+// File > Import Package… picks a folder or archive, stages and validates it
+// (`sequencer::package_install::stage_package_from_path`), and opens the
+// confirmation modal in `eseq.file-dialogs`. The staged package waits in
+// this slot until the user installs or cancels; a leaked staging directory
+// is hidden from the package scan anyway.
+
+thread_local! {
+    static STAGED_PACKAGE: std::cell::RefCell<Option<sequencer::package_install::StagedPackage>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn install_staged(staged: sequencer::package_install::StagedPackage) {
+    STAGED_PACKAGE.with(|slot| {
+        if let Some(previous) = slot.borrow_mut().replace(staged) {
+            sequencer::package_install::discard_staged_package(previous);
+        }
+    });
+}
+
+fn take_staged() -> Option<sequencer::package_install::StagedPackage> {
+    STAGED_PACKAGE.with(|slot| slot.borrow_mut().take())
+}
+
+#[cfg(test)]
+pub(crate) fn install_staged_for_tests(staged: sequencer::package_install::StagedPackage) {
+    install_staged(staged);
+}
+
+#[cfg(test)]
+pub(crate) fn take_staged_for_tests() -> Option<sequencer::package_install::StagedPackage> {
+    take_staged()
+}
+
+/// The confirmation modal's view of the staged package: a dict of counts
+/// (see `eseq.file-dialogs/package-import-body`), or `nil` when nothing is
+/// staged.
+pub(crate) fn staged_package_summary_value() -> Value {
+    STAGED_PACKAGE.with(|slot| {
+        let slot = slot.borrow();
+        let Some(staged) = slot.as_ref() else {
+            return Value::Nil;
+        };
+        let summary = &staged.summary;
+        let number = |value: usize| Value::Number(value as f64);
+        crate::values::map_value([
+            ("identity", Value::String(summary.identity.clone())),
+            ("version", Value::String(summary.version.clone())),
+            ("path", Value::String(staged.destination().display().to_string())),
+            ("modules", number(summary.modules)),
+            ("instruments", number(summary.instruments)),
+            ("effects", number(summary.effects)),
+            ("midi-fx", number(summary.midi_fx)),
+            ("samples", number(summary.samples)),
+            ("themes", number(summary.themes)),
+            ("installed?", Value::Bool(staged.replaces_installed())),
+        ])
+    })
+}
+
+pub(crate) fn register_package_import_natives(runtime: &mut Runtime) {
+    runtime.register_native("seq-package-import-summary", |_args, _ctx| {
+        Ok(staged_package_summary_value())
+    });
+    // Script entry point (capture fixtures, automation): stage a package
+    // folder or archive exactly as the menu command would, without the file
+    // dialog. Returns the identity; the caller opens the modal.
+    runtime.register_native("seq-package-import-stage", |args, _ctx| {
+        let Some(Value::String(path)) = args.first() else {
+            return Err("seq-package-import-stage expects a path string".into());
+        };
+        let packages_dir = sequencer::app_paths::app_paths().packages_dir();
+        let staged =
+            sequencer::package_install::stage_package_from_path(Path::new(path), &packages_dir)?;
+        let identity = staged.identity().to_string();
+        install_staged(staged);
+        Ok(Value::String(identity))
+    });
+}
+
+/// Stage `source` and open the confirmation modal. Shared by the menu
+/// command (after the file dialog) and the scripted `package-import-stage`
+/// entry point that capture fixtures and tests use.
+fn stage_and_open(source: &Path, editor: &mut Editor) -> Result<(), String> {
+    let packages_dir = sequencer::app_paths::app_paths().packages_dir();
+    let staged = sequencer::package_install::stage_package_from_path(source, &packages_dir)?;
+    let description = format!(
+        "{} {}: {}",
+        staged.summary.identity,
+        staged.summary.version,
+        staged.summary.describe_contents()
+    );
+    install_staged(staged);
+    super::file_menu::activate_dialog_tile(editor);
+    editor
+        .runtime_mut()
+        .eval_str("(eseq.file-dialogs/open-package-import)")
+        .map_err(|error| format!("{error:?}"))?;
+    editor.show_transient_message(format!("Staged {description}"));
+    Ok(())
+}
+
+fn close_package_import_modal(editor: &mut Editor) {
+    let _ = editor
+        .runtime_mut()
+        .eval_str("(eseq.file-dialogs/close-package-import)");
+}
+
+/// Publish the staged package and make it live without a relaunch: the
+/// package catalog cache is dropped, the UI runtime's module load path is
+/// rebuilt, the scratch source is republished so the scheduler and MIDI-fx
+/// runtimes rebuild theirs (they construct a fresh runtime from
+/// `module_load_roots` on every scratch version), package samples are
+/// reconciled into the sample DB, and the browsers re-list.
+fn commit_staged_package(
+    app: &mut app::App,
+    editor: &mut Editor,
+    ctx: &mut LoopCtx<'_>,
+) -> Result<String, String> {
+    let staged = take_staged().ok_or("Nothing is staged for import")?;
+    let replace = staged.replaces_installed();
+    let summary = staged.summary.clone();
+    let result = sequencer::package_install::publish_staged_package(staged, replace)?;
+    register_installed_packages_live(app, editor, ctx);
+    let mut message = format!(
+        "{} {} {}: {}",
+        if replace { "Replaced" } else { "Installed" },
+        summary.identity,
+        summary.version,
+        summary.describe_contents()
+    );
+    if let Some(error) = reconcile_package_samples_after_change() {
+        message.push_str(&format!(" (samples: {error})"));
+    }
+    let _ = result;
+    Ok(message)
+}
+
+/// Re-point every runtime at the current package set. Safe to call after any
+/// install, replace, or removal.
+pub(crate) fn register_installed_packages_live(
+    app: &mut app::App,
+    editor: &mut Editor,
+    ctx: &mut LoopCtx<'_>,
+) {
+    sequencer::app_paths::invalidate_package_catalog_cache();
+    let app_paths = sequencer::app_paths::app_paths();
+    let (roots, errors) = app_paths.module_load_roots();
+    for error in errors {
+        eprintln!("metal_seq: {error}");
+    }
+    editor.runtime_mut().set_scoped_module_load_path(roots);
+    // Same source, new version: the scheduler and MIDI-fx runtimes rebuild
+    // from `module_load_roots` on the next tick.
+    let scratch = app.state.scratch_source();
+    app.state.set_scratch_source(scratch);
+    ctx.shared.ui_epoch.fetch_add(1, Ordering::Relaxed);
+    ctx.shared.fx_epoch.fetch_add(1, Ordering::Relaxed);
+    let _ = editor.runtime_mut().eval_str("(eseq.browser/refresh-buffer)");
+    editor.refresh_runtime_side_effects();
+    editor.mark_needs_redraw();
+}
+
+fn reconcile_package_samples_after_change() -> Option<String> {
+    match sequencer::package_samples::reconcile_app_package_samples(
+        sequencer::app_paths::app_paths(),
+    ) {
+        Ok(report) => {
+            for error in &report.errors {
+                eprintln!("metal_seq: {error}");
+            }
+            report.errors.first().cloned()
+        }
+        Err(error) => Some(error),
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PackageEntry {
@@ -29,6 +358,80 @@ pub(super) fn handle(
     match name {
         "open-packages-view" => open_packages_view(editor, ctx),
         "packages-view-key" => handle_packages_key(&payload, app, editor, ctx),
+        "menu-import-package" => {
+            let result = (|| -> Result<(), String> {
+                let Some(source) = crate::application_menu::choose_package_path()? else {
+                    return Ok(());
+                };
+                stage_and_open(&source, editor)
+            })();
+            if let Err(error) = result {
+                editor.show_transient_message(format!("Import package: {error}"));
+            }
+            editor.refresh_runtime_side_effects();
+            editor.mark_needs_redraw();
+        }
+        "package-import-stage" => {
+            let result = (|| -> Result<(), String> {
+                let Value::Map(map) = &payload else {
+                    return Err("Expected a :path".into());
+                };
+                let path = map_string(map, "path").ok_or("Expected a :path")?;
+                stage_and_open(Path::new(&path), editor)
+            })();
+            if let Err(error) = result {
+                editor.show_transient_message(format!("Import package: {error}"));
+            }
+            editor.refresh_runtime_side_effects();
+            editor.mark_needs_redraw();
+        }
+        "package-import-commit" => {
+            match commit_staged_package(app, editor, ctx) {
+                Ok(message) => {
+                    close_package_import_modal(editor);
+                    editor.show_transient_message(message);
+                }
+                Err(error) => {
+                    close_package_import_modal(editor);
+                    editor.show_transient_message(format!("Import package failed: {error}"));
+                }
+            }
+            editor.refresh_runtime_side_effects();
+            editor.mark_needs_redraw();
+        }
+        "menu-export-package" => {
+            super::file_menu::activate_dialog_tile(editor);
+            if let Err(error) = editor
+                .runtime_mut()
+                .eval_str("(eseq.file-dialogs/open-package-export)")
+            {
+                editor.show_transient_message(format!("Export package: {error:?}"));
+            }
+            editor.refresh_runtime_side_effects();
+            editor.mark_needs_redraw();
+        }
+        "package-export-commit" => {
+            match commit_package_export(&payload) {
+                Ok(message) => {
+                    let _ = editor
+                        .runtime_mut()
+                        .eval_str("(eseq.file-dialogs/close-package-export)");
+                    editor.show_transient_message(message);
+                }
+                Err(error) => editor.show_transient_message(format!("Export package: {error}")),
+            }
+            editor.refresh_runtime_side_effects();
+            editor.mark_needs_redraw();
+        }
+        "package-import-cancel" => {
+            if let Some(staged) = take_staged() {
+                sequencer::package_install::discard_staged_package(staged);
+            }
+            close_package_import_modal(editor);
+            editor.show_transient_message("Package import canceled");
+            editor.refresh_runtime_side_effects();
+            editor.mark_needs_redraw();
+        }
         _ => {}
     }
 }
@@ -933,3 +1336,52 @@ mod tests {
     }
 }
 
+#[cfg(test)]
+mod import_tests {
+    use super::*;
+
+    #[test]
+    fn staged_package_summary_is_a_dict_until_taken() {
+        let root = std::env::temp_dir().join(format!(
+            "eseq-package-import-native-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let source = root.join("alec.drums");
+        std::fs::create_dir_all(source.join("instruments/kick")).unwrap();
+        std::fs::write(source.join("instruments/kick/dsp.lisp"), "(out 0)").unwrap();
+        std::fs::write(
+            source.join("manifest.json"),
+            r#"{"name":"alec/drums","version":"1"}"#,
+        )
+        .unwrap();
+        let packages_dir = root.join("packages");
+        let staged =
+            sequencer::package_install::stage_package_from_path(&source, &packages_dir).unwrap();
+        let staging = staged.staging_path().to_path_buf();
+        install_staged(staged);
+
+        let Value::Map(summary) = staged_package_summary_value() else {
+            panic!("a staged package summarizes as a dict");
+        };
+        let get = |key: &str| summary.get(key).map(|value| value.borrow().clone());
+        assert_eq!(get("identity"), Some(Value::String("alec/drums".into())));
+        assert_eq!(get("instruments"), Some(Value::Number(1.0)));
+        assert_eq!(get("effects"), Some(Value::Number(0.0)));
+        assert_eq!(get("installed?"), Some(Value::Bool(false)));
+        assert_eq!(
+            get("path"),
+            Some(Value::String(packages_dir.join("alec.drums").display().to_string()))
+        );
+
+        // Cancel discards the staging directory and empties the summary.
+        let staged = take_staged().expect("still staged");
+        sequencer::package_install::discard_staged_package(staged);
+        assert!(!staging.exists());
+        assert_eq!(staged_package_summary_value(), Value::Nil);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}

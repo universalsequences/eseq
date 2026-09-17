@@ -1,14 +1,20 @@
-;; File-menu dialogs: the project Save / Save As name modal and the About
-;; modal. Both are opened by Rust host commands ("project-save-open",
-;; "about-open") that first activate the tile mounting `panel`, because a
-;; modal only receives pointer input through the active tile. Mounted by both
-;; step-panel buffers (`*sequencer*` and `*arrangement*`), like export-song.
+;; File-menu dialogs: the project Save / Save As name modal, the About
+;; modal and the Import Package confirmation. All are opened by Rust host
+;; commands ("project-save-open", "about-open", "menu-import-package") that
+;; first activate the tile mounting `panel`, because a modal only receives
+;; pointer input through the active tile. Mounted by both step-panel buffers
+;; (`*sequencer*` and `*arrangement*`), like export-song.
 (module eseq.file-dialogs)
 (import eseq.settings)
 (export open-confirm panel open-save close-save save-open? save-draft commit-save
         open-unsaved-prompt close-unsaved-prompt unsaved-prompt-open?
         unsaved-prompt-save unsaved-prompt-discard
-        open-about close-about about-open?)
+        open-about close-about about-open?
+        open-package-import close-package-import package-import-open?
+        package-import-install package-import-cancel
+        open-package-export close-package-export package-export-open?
+        package-export-identity package-export-version package-export-toggle
+        package-export-commit)
 
 (defstate save-open? false)
 (defstate save-draft "")
@@ -138,9 +144,144 @@
     (close-confirm)
     (if action (action) nil)))
 
+;; ── Import Package… ──
+;;
+;; Rust stages the picked folder / archive, validates it, and opens this
+;; modal; the body is a view over `seq-package-import-summary` (a dict of
+;; counts, or nil once the staging is gone). Install / Replace publish it,
+;; Cancel discards the staging. Packages are trusted code: the modal says
+;; so instead of pretending a sandbox exists.
+(defstate package-import-open? false)
+
+(def open-package-import () (set! package-import-open? true))
+(def close-package-import () (set! package-import-open? false))
+(def package-import-install ()
+  (host-command "package-import-commit" (dict)))
+(def package-import-cancel ()
+  (host-command "package-import-cancel" (dict)))
+
+(def package-import-count-row (caption count)
+  (if (> count 0)
+    (h-stack :width :fill :gap 0.5
+      (label (str count) :font-size 12 :color :white :bg :transparent :width 2)
+      (label caption :font-size 12 :color :dim :bg :transparent))
+    (box :width 0 :height 0 :bg :transparent)))
+
+(def package-import-body ()
+  (let ((summary (seq-package-import-summary)))
+    (if (= summary nil)
+      (v-stack :width :fill :height :fill :padding 1 :gap 1
+        (label "Nothing staged for import." :font-size 12 :color :dim :bg :transparent)
+        (h-stack :width :fill :gap 0.5
+          (box :flex 1 :bg :transparent)
+          (button "Close" :key "package-import-close" :on-click |x y r| (close-package-import))))
+      (let ((installed? (get summary :installed?)))
+        (v-stack :width :fill :height :fill :padding 1 :gap 0.6
+          (label (str "Import " (get summary :identity) " " (get summary :version))
+            :key "package-import-title" :font-size 15 :color :white :bg :transparent)
+          (label (get summary :path) :font-size 10 :color :dim :bg :transparent)
+          (v-stack :width :fill :gap 0.2 :padding 0.4
+            (package-import-count-row "Lisp modules" (get summary :modules))
+            (package-import-count-row "instruments" (get summary :instruments))
+            (package-import-count-row "effects" (get summary :effects))
+            (package-import-count-row "MIDI effects" (get summary :midi-fx))
+            (package-import-count-row "samples" (get summary :samples))
+            (package-import-count-row "themes" (get summary :themes)))
+          (if installed?
+            (label (str "A package named " (get summary :identity) " is already installed; importing replaces it.")
+              :key "package-import-replace-note" :font-size 11 :color :accent :bg :transparent)
+            (box :width 0 :height 0 :bg :transparent))
+          (label "Packages are trusted code: installing runs its Lisp."
+            :font-size 11 :color :dim :bg :transparent)
+          (h-stack :width :fill :gap 0.5 :padding-top 0.6
+            (box :flex 1 :bg :transparent)
+            (button "Cancel" :key "package-import-cancel" :on-click |x y r| (package-import-cancel))
+            (button (if installed? "Replace" "Install")
+              :key "package-import-install" :variant :primary
+              :on-click |x y r| (package-import-install))))))))
+
+;; ── Export Package… ──
+;;
+;; Picks user-tier instruments and effects (factory content must be forked
+;; first: only the user's library exports) into an `author/name` pack. The
+;; picked set lives in Rust (`seq-package-export-toggle`); `generation`
+;; re-renders the list after every toggle. Commit opens the native save
+;; panel and writes `<author.name>-<version>.eseqpack`.
+(defstate package-export-open? false)
+(defstate package-export-identity "")
+(defstate package-export-version "1.0")
+(defstate package-export-generation 0)
+
+(def open-package-export ()
+  (seq-package-export-clear)
+  (set! package-export-generation (+ package-export-generation 1))
+  (set! package-export-open? true))
+(def close-package-export () (set! package-export-open? false))
+(def package-export-toggle (kind name)
+  (seq-package-export-toggle kind name)
+  (set! package-export-generation (+ package-export-generation 1)))
+(def package-export-commit ()
+  (host-command "package-export-commit"
+    (dict :identity package-export-identity :version package-export-version)))
+
+(def package-export-row (item)
+  (let ((kind (get item :kind)) (name (get item :name)))
+    (h-stack :key (str "package-export-row-" kind "-" name) :width :fill :gap 0.5 :align :center
+      (toggle :value (get item :selected?)
+        :on-change (lambda (value) (package-export-toggle kind name)))
+      (label name :font-size 12 :color :white :bg :transparent :flex 1)
+      (label kind :font-size 10 :color :dim :bg :transparent))))
+
+(def package-export-body ()
+  (let ((epoch package-export-generation)
+        (items (seq-package-export-candidates))
+        (selected (seq-package-export-selected-count)))
+    (v-stack :width :fill :height :fill :padding 1 :gap 0.5
+      (label "Export Package" :key "package-export-title" :font-size 15 :color :white :bg :transparent)
+      (h-stack :width :fill :gap 0.6
+        (v-stack :flex 2 :gap 0.2
+          (label "Package name (author/name)" :font-size 10 :color :dim :bg :transparent)
+          (text-input :key "package-export-identity" :width :fill :height 1.3 :font-size 13
+            :value package-export-identity
+            :placeholder "alec/acid-tools"
+            :auto-focus true
+            :on-change (lambda (v) (set! package-export-identity v))
+            :on-cancel (lambda () (close-package-export))))
+        (v-stack :flex 1 :gap 0.2
+          (label "Version" :font-size 10 :color :dim :bg :transparent)
+          (text-input :key "package-export-version" :width :fill :height 1.3 :font-size 13
+            :value package-export-version
+            :placeholder "1.0"
+            :on-change (lambda (v) (set! package-export-version v))
+            :on-cancel (lambda () (close-package-export)))))
+      (label (if (= (len items) 0)
+               "Your library is empty: fork or create an instrument first."
+               "Pick from your library (fork factory content to export it):")
+        :font-size 11 :color :dim :bg :transparent)
+      (scroll :key "package-export-list" :width :fill :height 5
+        (v-stack :width :fill :gap 0.15
+          (each items |item| (package-export-row item))))
+      (label "Library macros are inlined; absolute paths are reported after export."
+        :font-size 10 :color :dim :bg :transparent)
+      (h-stack :width :fill :gap 0.5 :padding-top 0.4
+        (label (str selected " selected") :font-size 11 :color :dim :bg :transparent)
+        (box :flex 1 :bg :transparent)
+        (button "Cancel" :key "package-export-cancel" :on-click |x y r| (close-package-export))
+        (button "Export…" :key "package-export-submit" :variant :primary
+          :disabled (or (= selected 0) (= (len (string-trim package-export-identity)) 0))
+          :on-click |x y r| (package-export-commit))))))
+
 (def panel ()
   (v-stack :width 0 :height 0 :bg :transparent
     (eseq.settings/panel)
+    (modal :is-open package-export-open? :on-close (lambda () (close-package-export))
+        :width-px 640 :height-px 560
+      (box :debug-name "package-export-panel" :width :fill :height :fill :padding 0.6 :bg :transparent
+        (if package-export-open? (package-export-body) (box :width 0 :height 0 :bg :transparent))))
+    (modal :is-open package-import-open? :on-close (lambda () (package-import-cancel))
+        :width-px 600 :height-px 480
+      (box :debug-name "package-import-panel" :width :fill :height :fill :padding 0.6 :bg :transparent
+        (if package-import-open? (package-import-body) (box :width 0 :height 0 :bg :transparent))))
     (modal :is-open confirm-open? :on-close close-confirm :width-px 520 :height-px 220
       (v-stack :width :fill :height :fill :padding 1 :gap 1
         (label confirm-message :key "menu-confirm-message" :font-size 14 :bg :transparent)

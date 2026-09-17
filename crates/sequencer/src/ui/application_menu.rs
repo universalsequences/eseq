@@ -518,6 +518,62 @@ pub(crate) fn choose_sample_paths() -> Result<Vec<PathBuf>, String> {
         .collect())
 }
 
+/// File > Import Package…: one package directory or a `.zip` / `.eseqpack`
+/// archive of one. `None` when the user cancels.
+#[cfg(target_os = "macos")]
+pub(crate) fn choose_package_path() -> Result<Option<PathBuf>, String> {
+    use objc2_app_kit::{NSModalResponseOK, NSOpenPanel};
+    use objc2_foundation::{MainThreadMarker, NSString};
+    let mtm = MainThreadMarker::new().ok_or("File picker requires the UI thread")?;
+    let panel = NSOpenPanel::openPanel(mtm);
+    panel.setCanChooseFiles(true);
+    panel.setCanChooseDirectories(true);
+    panel.setAllowsMultipleSelection(false);
+    panel.setTitle(Some(&NSString::from_str("Import Package")));
+    panel.setMessage(Some(&NSString::from_str(
+        "Choose a package folder (with manifest.json) or a .zip / .eseqpack archive of one.",
+    )));
+    panel.setPrompt(Some(&NSString::from_str("Import")));
+    if panel.runModal() != NSModalResponseOK {
+        return Ok(None);
+    }
+    Ok(panel
+        .URLs()
+        .iter()
+        .find_map(|url| url.path().map(|path| PathBuf::from(path.to_string()))))
+}
+
+/// File > Export Package…: where to write the `.eseqpack` archive. `None`
+/// when the user cancels.
+#[cfg(target_os = "macos")]
+pub(crate) fn choose_package_export_path(suggested_name: &str) -> Result<Option<PathBuf>, String> {
+    use objc2_app_kit::{NSModalResponseOK, NSSavePanel};
+    use objc2_foundation::{MainThreadMarker, NSString};
+    let mtm = MainThreadMarker::new().ok_or("File picker requires the UI thread")?;
+    let panel = NSSavePanel::savePanel(mtm);
+    panel.setTitle(Some(&NSString::from_str("Export Package")));
+    panel.setPrompt(Some(&NSString::from_str("Export")));
+    panel.setCanCreateDirectories(true);
+    panel.setExtensionHidden(false);
+    panel.setNameFieldStringValue(&NSString::from_str(suggested_name));
+    if panel.runModal() != NSModalResponseOK {
+        return Ok(None);
+    }
+    Ok(panel
+        .URL()
+        .and_then(|url| url.path().map(|path| PathBuf::from(path.to_string()))))
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn choose_package_export_path(_suggested_name: &str) -> Result<Option<PathBuf>, String> {
+    Err("Export Package… needs a native file dialog on this platform".into())
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn choose_package_path() -> Result<Option<PathBuf>, String> {
+    Err("Import Package… needs a native file dialog; run `eseq package install` instead".into())
+}
+
 #[cfg(not(target_os = "macos"))]
 pub(crate) fn choose_sample_paths() -> Result<Vec<PathBuf>, String> {
     Err("Use file-manager drag and drop to import samples on this platform".into())

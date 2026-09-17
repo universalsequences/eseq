@@ -44,5 +44,6 @@ Follow [Your first session](first-session) with eseq open beside the manual. It 
 - [Mixer](mixer) — levels, sends, buses, and groups
 - [Arrangement](arrangement) — clips, takes, and captured launches
 - [Saving and export](saving-and-export) — projects and stereo WAV
+- [Packages](packages) — install and share packs of instruments and effects
 - [Navigation and keys](customization) — panels, shortcuts, and this manual
 - [Troubleshooting](troubleshooting) — when something is silent or wrong

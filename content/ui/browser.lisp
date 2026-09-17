@@ -874,9 +874,10 @@
         :color :gray
         :bg :transparent))))
 
-;; Saved-instrument tier filter: "" shows both the shipped Factory tree and
-;; the user's Library, "factory" or "user" narrows to one. Single-select so a
-;; second click on the active chip clears it.
+;; Saved-instrument tier filter: "" shows the shipped Factory tree, the
+;; user's Library and every installed package; "factory", "user" or "pkg"
+;; narrows to one. Single-select so a second click on the active chip clears
+;; it.
 (defstate instrument-origin-filter "")
 
 (def toggle-instrument-origin (origin)
@@ -902,7 +903,8 @@
   (box :key "instrument-origin-filter" :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0.35
     (h-stack :width :fill :gap 0.25 :align :center
       (instrument-origin-chip "factory" "Factory")
-      (instrument-origin-chip "user" "Library"))))
+      (instrument-origin-chip "user" "Library")
+      (instrument-origin-chip "pkg" "Packages"))))
 
 (def create-items ()
   (seq-saved-instrument-tree search-filter SEQ.project-instrument-engines instrument-origin-filter))

@@ -215,6 +215,42 @@ copies it into the user tier and edits the copy; the factory original
 stays pristine underneath; "revert to factory" deletes the copy. This
 restores the just-hack-everything feel without update clobbering.
 
+### 4.0.1 Built (2026-09-17): package tier, import, export
+
+What landed (beads eseq-mods.20–.23), where it differs from the text above:
+
+- **Ids.** `pkg:<author.name>/<path>` (the module prefix, not `author/name`),
+  e.g. `pkg:alec.acid-tools/303`. `ContentTier::parse_id` / `qualify` in
+  `app_paths` is the one parser; `factory:` and `user:` are unchanged.
+  Effects gained the same `pkg:` qualifier; bare effect names still resolve
+  factory-then-user as before.
+- **Resolution.** A `pkg:` id resolves only inside its package and errors
+  when the package is not installed. Bare instrument names walk factory,
+  user, then packages. Package content is read-only; presets for a package
+  instrument save to `user_instruments_dir/.package-presets/<prefix>/`.
+- **Manifest relaxation.** `entry` and `src/` are optional. A content-only
+  pack is `manifest.json` `{name, version}` plus any of `instruments/`,
+  `effects/`, `midi-fx/`, `samples/`, `themes/`. A package with neither
+  `src/` nor a content directory is invalid.
+- **Catalog cache.** `AppPaths::package_catalog()` caches the scan behind a
+  fingerprint of the package directories (dir + manifest mtimes);
+  `invalidate_package_catalog_cache()` after in-process installs.
+- **Import.** File > Import Package… accepts a folder or a `.zip` /
+  `.eseqpack` (a zip of the folder; a single wrapping directory is
+  unwrapped). Staging under `.install-*`, validation, atomic rename;
+  replacing an installed identity moves the old directory aside first.
+  Live registration: UI runtime load path reset, scratch republished so the
+  scheduler/MIDI-fx runtimes rebuild, samples reconciled, browsers refreshed.
+  CLI: `eseq package install` (git) and `eseq package import PATH`.
+- **Export.** File > Export Package… (or `eseq package export`) writes a
+  user-tier selection as `<author.name>-<version>.eseqpack`: folders copied
+  minus caches/previews, preset bank beside the folder, `use-defmacro`
+  inlined, absolute-path literals reported. Factory content must be forked
+  into the user tier to export.
+- **Not built.** Sample bundling for sampler content; forking a package
+  instrument does not carry its user preset overlay; live filesystem
+  detection of hand-cloned packages (eseq-mods.19).
+
 ### 4.1 Instruments / effects / midi-fx: same shape, two roots, NO shadowing
 
 The app ships a curated factory set; users author their own via the

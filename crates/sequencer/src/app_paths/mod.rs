@@ -37,6 +37,7 @@ ignores it.
 
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::OnceLock;
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
@@ -405,10 +406,7 @@ impl AppPaths {
     /// packages are excluded and reported — like a failed user init, a broken
     /// third-party clone never aborts application boot.
     pub fn module_load_roots(&self) -> (Vec<eseqlisp::ModuleLoadRoot>, Vec<String>) {
-        let (packages, errors) = eseqlisp::package::PackageCatalog::scan_layered_reporting(&[
-            self.packages_dir(),
-            self.factory_packages_dir(),
-        ]);
+        let (packages, errors) = self.package_catalog_with_errors();
 
         let mut roots = vec![eseqlisp::ModuleLoadRoot {
             path: self.local_modules_dir(),
@@ -421,7 +419,83 @@ impl AppPaths {
             path: self.factory_root(),
             module_prefix: None,
         });
-        (roots, errors.into_iter().map(|error| error.to_string()).collect())
+        (roots, errors.to_vec())
+    }
+
+    /// The package tier roots in shadowing order: the user's installed
+    /// packages, then packages shipped with the application.
+    fn package_tier_roots(&self) -> Vec<PathBuf> {
+        vec![self.packages_dir(), self.factory_packages_dir()]
+    }
+
+    /// Every valid installed package, plus one message per package that
+    /// failed validation. The scan is cached process-wide behind a cheap
+    /// directory fingerprint (see [`package_catalog_fingerprint`]): instrument
+    /// and effect resolution consult the catalog on hot paths and must not
+    /// re-read every manifest and module file each time. A package that
+    /// appears, disappears, or changes its manifest is picked up on the next
+    /// call; [`invalidate_package_catalog_cache`] forces it.
+    pub fn package_catalog_with_errors(
+        &self,
+    ) -> (Arc<eseqlisp::package::PackageCatalog>, Arc<Vec<String>>) {
+        let roots = self.package_tier_roots();
+        let fingerprint = package_catalog_fingerprint(&roots);
+        let mut cache = package_catalog_cache().lock().unwrap();
+        if let Some(entry) = cache.get(&roots) {
+            if entry.fingerprint == fingerprint {
+                return (entry.catalog.clone(), entry.errors.clone());
+            }
+        }
+        let (catalog, errors) =
+            eseqlisp::package::PackageCatalog::scan_layered_reporting(&roots);
+        let entry = PackageCatalogCacheEntry {
+            fingerprint,
+            catalog: Arc::new(catalog),
+            errors: Arc::new(errors.into_iter().map(|error| error.to_string()).collect()),
+        };
+        let result = (entry.catalog.clone(), entry.errors.clone());
+        cache.insert(roots, entry);
+        result
+    }
+
+    pub fn package_catalog(&self) -> Arc<eseqlisp::package::PackageCatalog> {
+        self.package_catalog_with_errors().0
+    }
+
+    /// The tiers that can hold one kind of content (`"instruments"`,
+    /// `"effects"`, …), in resolution order: the shipped factory tree, the
+    /// user's library, then every installed package that carries that
+    /// directory, in package load order. Package roots are only listed when
+    /// the directory exists, so a Lisp-only package adds nothing here.
+    pub fn content_roots(&self, kind: &str) -> Vec<ContentRoot> {
+        let (factory, user) = match kind {
+            "instruments" => (self.instruments_dir(), self.user_instruments_dir()),
+            "effects" => (self.effects_dir(), self.user_effects_dir()),
+            other => (self.factory_root().join(other), self.user_data_root().join(other)),
+        };
+        let mut roots = vec![
+            ContentRoot { tier: ContentTier::Factory, path: factory.clone() },
+        ];
+        if user != factory {
+            roots.push(ContentRoot { tier: ContentTier::User, path: user });
+        }
+        for package in self.package_catalog().ordered() {
+            if let Some(path) = package.content_dir(kind) {
+                roots.push(ContentRoot {
+                    tier: ContentTier::Package(package.module_prefix.clone()),
+                    path,
+                });
+            }
+        }
+        roots
+    }
+
+    pub fn instrument_roots(&self) -> Vec<ContentRoot> {
+        self.content_roots("instruments")
+    }
+
+    pub fn effect_roots(&self) -> Vec<ContentRoot> {
+        self.content_roots("effects")
     }
 
     pub fn load_path(&self) -> io::Result<Vec<PathBuf>> {
@@ -608,12 +682,18 @@ impl AppPaths {
         self.user_data_root().join("assets")
     }
 
+    /// Every directory that may hold an effect, factory and user tiers first,
+    /// then installed packages. See [`Self::effect_roots`] for the tier of
+    /// each.
     pub fn effect_dirs(&self) -> Vec<PathBuf> {
-        distinct_paths([self.effects_dir(), self.user_effects_dir()])
+        distinct_vec_paths(self.effect_roots().into_iter().map(|root| root.path).collect())
     }
 
+    /// Every directory that may hold an instrument, factory and user tiers
+    /// first, then installed packages. See [`Self::instrument_roots`] for the
+    /// tier of each.
     pub fn instrument_dirs(&self) -> Vec<PathBuf> {
-        distinct_paths([self.instruments_dir(), self.user_instruments_dir()])
+        distinct_vec_paths(self.instrument_roots().into_iter().map(|root| root.path).collect())
     }
 
     /// The pre-curation factory instrument tree, kept as checked-in test
@@ -708,6 +788,141 @@ impl AppPaths {
 /// Always loud: an active override is logged, and a set-but-missing path is
 /// reported (and still honored, so the compile preflight hard-errors against
 /// the path the user asked for instead of silently using another toolchain).
+/// One tier that holds instruments or effects. Ids are qualified by tier so a
+/// user instrument never shadows a factory or package one of the same name
+/// (content-tiers spec §4.1): `factory:<path>`, `user:<path>`,
+/// `pkg:<author.name>/<path>`.
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+pub enum ContentTier {
+    Factory,
+    User,
+    /// An installed package, by its owned module prefix (`author.name`).
+    Package(String),
+}
+
+impl ContentTier {
+    /// The id prefix for this tier, up to and including the separator that
+    /// precedes the logical path.
+    pub fn id_prefix(&self) -> String {
+        match self {
+            Self::Factory => "factory:".to_string(),
+            Self::User => "user:".to_string(),
+            Self::Package(prefix) => format!("pkg:{prefix}/"),
+        }
+    }
+
+    /// The tier-qualified id of a logical path under this tier.
+    pub fn qualify(&self, logical: &str) -> String {
+        format!("{}{logical}", self.id_prefix())
+    }
+
+    /// Short label for provenance badges: `factory`, `user`, or the package
+    /// identity `author/name`.
+    pub fn label(&self) -> String {
+        match self {
+            Self::Factory => "factory".to_string(),
+            Self::User => "user".to_string(),
+            Self::Package(prefix) => prefix.replacen('.', "/", 1),
+        }
+    }
+
+    pub fn is_package(&self) -> bool {
+        matches!(self, Self::Package(_))
+    }
+
+    /// Split a tier-qualified id into its tier and logical path. `Ok(None)`
+    /// for a legacy bare name; `Err` for an unknown or malformed qualifier.
+    pub fn parse_id(id: &str) -> Result<Option<(ContentTier, &str)>, String> {
+        let trimmed = id.trim_end_matches('/');
+        if let Some(path) = trimmed.strip_prefix("factory:") {
+            return Ok(Some((Self::Factory, path)));
+        }
+        if let Some(path) = trimmed.strip_prefix("user:") {
+            return Ok(Some((Self::User, path)));
+        }
+        if let Some(rest) = trimmed.strip_prefix("pkg:") {
+            let Some((prefix, path)) = rest.split_once('/') else {
+                return Err(format!("package id '{id}' has no path after the package name"));
+            };
+            if prefix.is_empty()
+                || !prefix.contains('.')
+                || !prefix
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+            {
+                return Err(format!("package id '{id}' names an invalid package '{prefix}'"));
+            }
+            return Ok(Some((Self::Package(prefix.to_string()), path)));
+        }
+        if trimmed.contains(':') {
+            return Err(format!("unsupported id '{id}'"));
+        }
+        Ok(None)
+    }
+}
+
+/// A directory that holds one kind of content, tagged with its tier.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContentRoot {
+    pub tier: ContentTier,
+    pub path: PathBuf,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PackageCatalogFingerprint(Vec<(PathBuf, Option<std::time::SystemTime>, Option<std::time::SystemTime>)>);
+
+struct PackageCatalogCacheEntry {
+    fingerprint: PackageCatalogFingerprint,
+    catalog: Arc<eseqlisp::package::PackageCatalog>,
+    errors: Arc<Vec<String>>,
+}
+
+fn package_catalog_cache(
+) -> &'static std::sync::Mutex<std::collections::HashMap<Vec<PathBuf>, PackageCatalogCacheEntry>> {
+    static CACHE: OnceLock<
+        std::sync::Mutex<std::collections::HashMap<Vec<PathBuf>, PackageCatalogCacheEntry>>,
+    > = OnceLock::new();
+    CACHE.get_or_init(Default::default)
+}
+
+/// Drop every cached package scan. Call after installing or removing a
+/// package in-process; ordinary edits are caught by the fingerprint.
+pub fn invalidate_package_catalog_cache() {
+    package_catalog_cache().lock().unwrap().clear();
+}
+
+/// The cheap identity of a package-tier scan: every candidate package
+/// directory with the modification times of the directory itself and its
+/// manifest. Two `read_dir`s and a handful of `stat`s, versus parsing every
+/// manifest and reading every module file for a real scan.
+fn package_catalog_fingerprint(roots: &[PathBuf]) -> PackageCatalogFingerprint {
+    let mut entries = Vec::new();
+    for root in roots {
+        let Ok(dir) = std::fs::read_dir(root) else {
+            continue;
+        };
+        for entry in dir.flatten() {
+            let path = entry.path();
+            let hidden = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with('.'));
+            if hidden || !path.is_dir() {
+                continue;
+            }
+            let manifest = path.join("manifest.json");
+            if !manifest.is_file() {
+                continue;
+            }
+            let dir_mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+            let manifest_mtime = std::fs::metadata(&manifest).and_then(|m| m.modified()).ok();
+            entries.push((path, dir_mtime, manifest_mtime));
+        }
+    }
+    entries.sort();
+    PackageCatalogFingerprint(entries)
+}
+
 fn distinct_paths<const N: usize>(paths: [PathBuf; N]) -> Vec<PathBuf> {
     distinct_vec_paths(paths.into_iter().collect())
 }
@@ -1405,6 +1620,94 @@ mod tests {
         assert!(errors[0].contains("broken"), "error names the offending package: {}", errors[0]);
 
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn content_roots_list_packages_that_ship_that_content() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("eseq-content-roots-{unique}"));
+        let workspace = root.join("workspace");
+        let config = root.join("config");
+        let paths = AppPaths::dev(workspace.join("crates/sequencer"), workspace.clone(), config.clone());
+        paths.ensure_user_tier().unwrap();
+
+        // Lisp-only package: on the module load path, absent from content roots.
+        let lisp_only = paths.packages_dir().join("dev.lisp-only");
+        std::fs::create_dir_all(lisp_only.join("src")).unwrap();
+        std::fs::write(lisp_only.join("src/main.lisp"), "(module dev.lisp-only.main)").unwrap();
+        std::fs::write(
+            lisp_only.join("manifest.json"),
+            r#"{"name":"dev/lisp-only","version":"1","entry":"dev.lisp-only.main"}"#,
+        )
+        .unwrap();
+        // Content-only pack: instruments and effects, no src.
+        let pack = paths.packages_dir().join("dev.pack");
+        std::fs::create_dir_all(pack.join("instruments/kick")).unwrap();
+        std::fs::create_dir_all(pack.join("effects/comp")).unwrap();
+        std::fs::write(pack.join("manifest.json"), r#"{"name":"dev/pack","version":"1"}"#).unwrap();
+
+        let instrument_tiers = paths
+            .instrument_roots()
+            .into_iter()
+            .map(|root| (root.tier, root.path))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            instrument_tiers,
+            vec![
+                (ContentTier::Factory, paths.instruments_dir()),
+                (ContentTier::User, paths.user_instruments_dir()),
+                (ContentTier::Package("dev.pack".into()), pack.join("instruments")),
+            ]
+        );
+        assert_eq!(
+            paths.effect_roots().last().map(|root| root.path.clone()),
+            Some(pack.join("effects"))
+        );
+        assert_eq!(
+            paths.effect_dirs(),
+            vec![paths.effects_dir(), paths.user_effects_dir(), pack.join("effects")]
+        );
+        assert_eq!(
+            paths.load_path().unwrap(),
+            vec![config.join("packages/local"), lisp_only.join("src"), workspace.join("content")],
+            "a content-only pack adds no module root"
+        );
+
+        // The catalog is cached behind a directory fingerprint: a package
+        // installed after the first scan is visible on the next call.
+        let later = paths.packages_dir().join("dev.later");
+        std::fs::create_dir_all(later.join("effects/verb")).unwrap();
+        std::fs::write(later.join("manifest.json"), r#"{"name":"dev/later","version":"1"}"#).unwrap();
+        assert!(paths
+            .effect_roots()
+            .iter()
+            .any(|root| root.tier == ContentTier::Package("dev.later".into())));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn content_tier_ids_round_trip() {
+        let package = ContentTier::Package("alec.drums".into());
+        assert_eq!(package.qualify("kits/808"), "pkg:alec.drums/kits/808");
+        assert_eq!(package.label(), "alec/drums");
+        assert_eq!(ContentTier::Factory.qualify("core/wavetable"), "factory:core/wavetable");
+        assert_eq!(ContentTier::User.qualify("mine"), "user:mine");
+        assert_eq!(
+            ContentTier::parse_id("pkg:alec.drums/kits/808/").unwrap(),
+            Some((package.clone(), "kits/808"))
+        );
+        assert_eq!(
+            ContentTier::parse_id("factory:core/wavetable").unwrap(),
+            Some((ContentTier::Factory, "core/wavetable"))
+        );
+        assert_eq!(ContentTier::parse_id("bare/name").unwrap(), None);
+        assert!(ContentTier::parse_id("pkg:alec.drums").is_err(), "no path");
+        assert!(ContentTier::parse_id("pkg:noauthor/kick").is_err(), "unscoped package");
+        assert!(ContentTier::parse_id("weird:thing").is_err());
     }
 
     #[test]

@@ -299,10 +299,10 @@ fn namespace_local_helpers(
 }
 
 fn instrument_logical_name(instrument_name: &str) -> &str {
-    instrument_name.strip_prefix("factory:")
-        .or_else(|| instrument_name.strip_prefix("user:"))
-        .unwrap_or(instrument_name)
-        .trim_end_matches('/')
+    match sequencer::app_paths::ContentTier::parse_id(instrument_name) {
+        Ok(Some((_, logical))) => logical,
+        _ => instrument_name.trim_end_matches('/'),
+    }
 }
 
 fn instrument_leaf_name(instrument_name: &str) -> Option<String> {
@@ -372,7 +372,7 @@ pub(crate) fn build_custom_instrument_ui_source_with_overlay(
                             (path.strip_prefix(root), std::fs::read_to_string(&ui_path))
                         {
                             let inst_name =
-                                format!("{tier}:{}/", rel.to_string_lossy().replace('\\', "/"));
+                                format!("{tier}{}/", rel.to_string_lossy().replace('\\', "/"));
                             out.push((inst_name, ui_path.display().to_string(), src));
                         }
                     }
@@ -384,8 +384,8 @@ pub(crate) fn build_custom_instrument_ui_source_with_overlay(
 
     let mut ui_sources = Vec::new();
     let paths = sequencer::app_paths::app_paths();
-    for (root, tier) in [(paths.instruments_dir(), "factory"), (paths.user_instruments_dir(), "user")] {
-        collect(&root, &root, tier, &mut ui_sources);
+    for root in paths.instrument_roots() {
+        collect(&root.path, &root.path, &root.tier.id_prefix(), &mut ui_sources);
     }
 
     let mut functions = r#"
@@ -647,7 +647,7 @@ pub(crate) fn build_custom_audio_fx_ui_source_with_overlay(
 ) -> String {
     use eseqlisp::parser::{ASTParser, Expression, Parser};
 
-    fn collect(dir: &Path, root: &Path, out: &mut Vec<(String, String, String)>) {
+    fn collect(dir: &Path, root: &Path, prefix: &str, out: &mut Vec<(String, String, String)>) {
         let Ok(entries) = std::fs::read_dir(dir) else {
             return;
         };
@@ -664,19 +664,23 @@ pub(crate) fn build_custom_audio_fx_ui_source_with_overlay(
                         if let (Ok(rel), Ok(src)) =
                             (path.strip_prefix(root), std::fs::read_to_string(&ui_path))
                         {
-                            let fx_name = rel.to_string_lossy().replace('\\', "/");
+                            let fx_name =
+                                format!("{prefix}{}", rel.to_string_lossy().replace('\\', "/"));
                             out.push((fx_name, ui_path.display().to_string(), src));
                         }
                     }
                 }
-                collect(&path, root, out);
+                collect(&path, root, prefix, out);
             }
         }
     }
 
     let mut ui_sources = Vec::new();
-    for root in sequencer::app_paths::app_paths().effect_dirs() {
-        collect(&root, &root, &mut ui_sources);
+    for root in sequencer::app_paths::app_paths().effect_roots() {
+        // Library effects keep their bare names; package effects carry their
+        // `pkg:author.name/` qualifier, which is the name the graph binds.
+        let prefix = if root.tier.is_package() { root.tier.id_prefix() } else { String::new() };
+        collect(&root.path, &root.path, &prefix, &mut ui_sources);
     }
 
     if let Some((fx_name, ui_path, src)) = overlay {
@@ -1094,11 +1098,16 @@ fn active_custom_ui_buffer_overlay(editor: &Editor) -> Option<(String, String, S
     if !folder.join("dsp.lisp").exists() {
         return None;
     }
-    let rel = sequencer::app_paths::app_paths()
-        .instrument_dirs()
+    let (prefix, rel) = sequencer::app_paths::app_paths()
+        .instrument_roots()
         .into_iter()
-        .find_map(|root| folder.strip_prefix(root).ok().map(Path::to_path_buf))?;
-    let instrument_name = format!("{}/", rel.to_string_lossy().replace('\\', "/"));
+        .find_map(|root| {
+            folder
+                .strip_prefix(&root.path)
+                .ok()
+                .map(|rel| (root.tier.id_prefix(), rel.to_path_buf()))
+        })?;
+    let instrument_name = format!("{prefix}{}/", rel.to_string_lossy().replace('\\', "/"));
     Some((instrument_name, path.display().to_string(), buffer.text()))
 }
 
@@ -1128,10 +1137,15 @@ fn active_custom_audio_fx_ui_buffer_overlay(editor: &Editor) -> Option<(String, 
     if !folder.join("dsp.lisp").exists() {
         return None;
     }
-    let rel = sequencer::app_paths::app_paths()
-        .effect_dirs()
+    let (prefix, rel) = sequencer::app_paths::app_paths()
+        .effect_roots()
         .into_iter()
-        .find_map(|root| folder.strip_prefix(root).ok().map(Path::to_path_buf))?;
-    let fx_name = rel.to_string_lossy().replace('\\', "/");
+        .find_map(|root| {
+            folder.strip_prefix(&root.path).ok().map(|rel| {
+                let prefix = if root.tier.is_package() { root.tier.id_prefix() } else { String::new() };
+                (prefix, rel.to_path_buf())
+            })
+        })?;
+    let fx_name = format!("{prefix}{}", rel.to_string_lossy().replace('\\', "/"));
     Some((fx_name, path.display().to_string(), buffer.text()))
 }

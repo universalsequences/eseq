@@ -9,7 +9,7 @@ mod instrument_authoring;
 mod instrument_params;
 mod learn;
 mod misc;
-mod packages;
+pub(crate) mod packages;
 mod project;
 mod rack;
 mod routing;

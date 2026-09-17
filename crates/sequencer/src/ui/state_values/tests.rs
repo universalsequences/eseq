@@ -18680,6 +18680,152 @@ mod midi_midimix_tests;
     /// in the *sequencer* buffer: a tree of the dropped folders on the left,
     /// the selected node's tags on the right, editing the draft installed by
     /// `sample_import_ui::install_draft` through the exported actions.
+    /// File > Import Package… stages a package in Rust and opens the
+    /// confirmation modal in `eseq.file-dialogs`; the modal is a view over
+    /// the `seq-package-import-summary` native and offers Install (or
+    /// Replace when the identity is already installed) and Cancel.
+    #[test]
+    fn metal_seq_package_import_modal_renders_the_staged_summary() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        crate::host_commands::packages::register_package_import_natives(editor.runtime_mut());
+        let sequencer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*sequencer*")
+            .expect("sequencer buffer should exist")
+            .id;
+        editor.set_active_buffer(sequencer_id);
+        editor.set_layout_viewport(160, 48);
+        let layout = editor.widget_layout().expect("sequencer layout");
+        assert!(
+            find_layout_node_by_stable_key_suffix(&layout, "/package-import-title").is_none(),
+            "package import modal must not render while closed"
+        );
+
+        let root = std::env::temp_dir().join(format!(
+            "eseq-package-import-modal-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let source = root.join("alec.drums");
+        std::fs::create_dir_all(source.join("instruments/kick")).unwrap();
+        std::fs::write(source.join("instruments/kick/dsp.lisp"), "(out 0)").unwrap();
+        std::fs::write(
+            source.join("manifest.json"),
+            r#"{"name":"alec/drums","version":"1"}"#,
+        )
+        .unwrap();
+        let packages_dir = root.join("packages");
+        let staged =
+            sequencer::package_install::stage_package_from_path(&source, &packages_dir).unwrap();
+        crate::host_commands::packages::install_staged_for_tests(staged);
+
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.file-dialogs/open-package-import)")
+            .expect("open package import modal");
+        editor.refresh_runtime_side_effects();
+        editor.set_layout_viewport(160, 48);
+        let layout = editor.widget_layout().expect("sequencer layout with package modal");
+        assert_finite_layout_tree(&layout);
+        for key in ["/package-import-title", "/package-import-install", "/package-import-cancel"] {
+            let node = find_layout_node_by_stable_key_suffix(&layout, key)
+                .unwrap_or_else(|| panic!("{key} should render once the modal is open"));
+            assert!(node.rect.width > 0.0 && node.rect.height > 0.0, "{key}: {:?}", node.rect);
+        }
+        assert!(
+            find_layout_node_by_stable_key_suffix(&layout, "/package-import-replace-note").is_none(),
+            "a fresh identity is an install, not a replace"
+        );
+
+        // Once the staging is gone (cancel/commit), the open modal degrades
+        // to the empty message with a Close button instead of erroring.
+        let staged = crate::host_commands::packages::take_staged_for_tests().expect("staged");
+        sequencer::package_install::discard_staged_package(staged);
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.file-dialogs/close-package-import)")
+            .unwrap();
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.file-dialogs/open-package-import)")
+            .unwrap();
+        editor.refresh_runtime_side_effects();
+        editor.set_layout_viewport(160, 48);
+        let layout = editor.widget_layout().expect("sequencer layout after discard");
+        assert!(find_layout_node_by_stable_key_suffix(&layout, "/package-import-close").is_some());
+        assert!(find_layout_node_by_stable_key_suffix(&layout, "/package-import-title").is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// File > Export Package… lists the user tier through
+    /// `seq-package-export-candidates`; toggling a row updates the Rust-side
+    /// selection and the count in the footer.
+    #[test]
+    fn metal_seq_package_export_modal_lists_the_library_and_counts_picks() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        crate::host_commands::packages::register_package_export_natives(editor.runtime_mut());
+        let sequencer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*sequencer*")
+            .expect("sequencer buffer should exist")
+            .id;
+        editor.set_active_buffer(sequencer_id);
+        editor.set_layout_viewport(160, 48);
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.file-dialogs/open-package-export)")
+            .expect("open export modal");
+        editor.refresh_runtime_side_effects();
+        editor.set_layout_viewport(160, 48);
+        let layout = editor.widget_layout().expect("sequencer layout with export modal");
+        assert_finite_layout_tree(&layout);
+        for key in [
+            "/package-export-title",
+            "/package-export-identity",
+            "/package-export-version",
+            "/package-export-list",
+            "/package-export-submit",
+        ] {
+            let node = find_layout_node_by_stable_key_suffix(&layout, key)
+                .unwrap_or_else(|| panic!("{key} should render once the modal is open"));
+            assert!(node.rect.width > 0.0 && node.rect.height > 0.0, "{key}: {:?}", node.rect);
+        }
+        assert_eq!(
+            editor.runtime_mut().eval_str("(seq-package-export-selected-count)").unwrap(),
+            Some(Value::Number(0.0))
+        );
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.file-dialogs/package-export-toggle \"effect\" \"nope\")")
+            .unwrap();
+        assert_eq!(
+            editor.runtime_mut().eval_str("(seq-package-export-selected-count)").unwrap(),
+            Some(Value::Number(1.0))
+        );
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.file-dialogs/package-export-toggle \"effect\" \"nope\")")
+            .unwrap();
+        assert_eq!(
+            editor.runtime_mut().eval_str("(seq-package-export-selected-count)").unwrap(),
+            Some(Value::Number(0.0))
+        );
+        // Reopening clears any leftover picks.
+        editor
+            .runtime_mut()
+            .eval_str("(do (eseq.file-dialogs/package-export-toggle \"effect\" \"nope\") (eseq.file-dialogs/close-package-export) (eseq.file-dialogs/open-package-export))")
+            .unwrap();
+        assert_eq!(
+            editor.runtime_mut().eval_str("(seq-package-export-selected-count)").unwrap(),
+            Some(Value::Number(0.0))
+        );
+    }
+
     #[test]
     fn metal_seq_sample_import_modal_renders_and_edits_the_staged_draft() {
         use sequencer::sample_import::{StagedSample, StagedSampleStatus};

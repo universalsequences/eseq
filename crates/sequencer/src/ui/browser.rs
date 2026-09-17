@@ -784,8 +784,12 @@ fn instrument_tree_nodes_to_value(items: &[InstrumentTreeNode]) -> Value {
 }
 
 fn tree_header(label: &'static str) -> Value {
+    tree_header_owned(label.to_string())
+}
+
+fn tree_header_owned(label: String) -> Value {
     map_value([
-        ("label", Value::String(label.to_string())),
+        ("label", Value::String(label)),
         ("kind", Value::String("header".to_string())),
         ("draggable", Value::Bool(false)),
         ("drop-target", Value::Bool(false)),
@@ -830,11 +834,15 @@ fn list_items(value: Value) -> Vec<Value> {
     }
 }
 
-fn append_tree_section(items: &mut Vec<Value>, label: &'static str, mut children: Vec<Value>) {
+fn append_tree_section(items: &mut Vec<Value>, label: &'static str, children: Vec<Value>) {
+    append_tree_section_owned(items, label.to_string(), children);
+}
+
+fn append_tree_section_owned(items: &mut Vec<Value>, label: String, mut children: Vec<Value>) {
     if children.is_empty() {
         return;
     }
-    items.push(tree_header(label));
+    items.push(tree_header_owned(label));
     items.append(&mut children);
 }
 
@@ -886,10 +894,22 @@ fn project_engine_nodes(engine_names: &[String]) -> Vec<InstrumentTreeNode> {
         .collect()
 }
 
-/// Which saved-instrument tier the browser shows. `""` shows both.
-/// `"factory"` is the shipped tree, `"user"` the user's library.
+/// Which saved-instrument tier the browser shows. `""` shows all.
+/// `"factory"` is the shipped tree, `"user"` the user's library, `"pkg"`
+/// every installed package.
 fn instrument_origin_visible(origin_filter: &str, origin: &str) -> bool {
     origin_filter.is_empty() || origin_filter == origin
+}
+
+/// Package rows carry their tier-qualified id (`pkg:author.name/<path>/`):
+/// the bare relative path would resolve factory-first and land elsewhere.
+fn qualify_instrument_tree_names(items: &mut [InstrumentTreeNode], tier: &sequencer::app_paths::ContentTier) {
+    for item in items {
+        if let Some(name) = &item.name {
+            item.name = Some(tier.qualify(name));
+        }
+        qualify_instrument_tree_names(&mut item.children, tier);
+    }
 }
 
 /// Factory folders cannot receive a move: `move-saved-instrument` only writes
@@ -910,10 +930,15 @@ pub(crate) fn build_instrument_tree_value(
 ) -> Result<Value, String> {
     let query_lower = query.trim().to_lowercase();
     let paths = sequencer::app_paths::app_paths();
-    let tier_items = |root: std::path::PathBuf, movable: bool| {
+    let tier_items = |root: std::path::PathBuf,
+                      movable: bool,
+                      qualify: Option<&sequencer::app_paths::ContentTier>| {
         let mut nodes = build_instrument_tree_nodes(&root, &root, !movable)?;
         if !movable {
             clear_instrument_folder_ids(&mut nodes);
+        }
+        if let Some(tier) = qualify {
+            qualify_instrument_tree_names(&mut nodes, tier);
         }
         Ok::<_, String>(list_items(instrument_tree_nodes_to_value(&filter_instrument_tree_nodes(
             &nodes,
@@ -921,15 +946,27 @@ pub(crate) fn build_instrument_tree_value(
         ))))
     };
     let factory = if instrument_origin_visible(origin_filter, "factory") {
-        tier_items(paths.instruments_dir(), false)?
+        tier_items(paths.instruments_dir(), false, None)?
     } else {
         Vec::new()
     };
     let library = if instrument_origin_visible(origin_filter, "user") {
-        tier_items(paths.user_instruments_dir(), true)?
+        tier_items(paths.user_instruments_dir(), true, None)?
     } else {
         Vec::new()
     };
+    // One section per installed package that ships instruments, headed by
+    // the package identity: that header is the provenance badge.
+    let mut packages: Vec<(String, Vec<Value>)> = Vec::new();
+    if instrument_origin_visible(origin_filter, "pkg") {
+        for root in paths.instrument_roots() {
+            if !root.tier.is_package() {
+                continue;
+            }
+            let items = tier_items(root.path.clone(), false, Some(&root.tier))?;
+            packages.push((root.tier.label(), items));
+        }
+    }
     let builtin = builtin_instrument_values(&query_lower);
     let engines = list_items(instrument_tree_nodes_to_value(
         &filter_instrument_tree_nodes(&project_engine_nodes(project_engines), &query_lower),
@@ -941,11 +978,17 @@ pub(crate) fn build_instrument_tree_value(
         append_tree_section(&mut items, "Engines", engines);
         append_tree_section(&mut items, "Factory", factory);
         append_tree_section(&mut items, "Library", library);
+        for (label, children) in packages {
+            append_tree_section_owned(&mut items, label, children);
+        }
     } else {
         items.extend(builtin);
         items.extend(engines);
         items.extend(factory);
         items.extend(library);
+        for (_, children) in packages {
+            items.extend(children);
+        }
     }
     Ok(list_value(items))
 }
@@ -1248,14 +1291,18 @@ pub(crate) fn build_preset_tree_from_list(items_value: Option<&Value>, query: &s
 }
 
 fn effect_leaf(label: String, kind: &'static str) -> Value {
+    effect_leaf_named(label.clone(), label, kind)
+}
+
+fn effect_leaf_named(label: String, name: String, kind: &'static str) -> Value {
     let icon = if kind == "midi-effect" {
         "note-arrow"
     } else {
         "drop"
     };
     map_value([
-        ("label", Value::String(label.clone())),
-        ("name", Value::String(label)),
+        ("label", Value::String(label)),
+        ("name", Value::String(name)),
         ("kind", Value::String(kind.to_string())),
         ("icon", Value::Keyword(icon.to_string())),
     ])
@@ -1284,18 +1331,38 @@ fn build_audio_effect_tree_from_names(
         .map(|name| effect_leaf(name, "builtin-audio-effect"))
         .collect();
 
-    let custom: Vec<Value> = filter_effect_names(custom_names, &query_lower)
-        .into_iter()
-        .map(|name| effect_leaf(name, "custom-audio-effect"))
-        .collect();
+    // Package effects list under their qualified id; the row shows the path
+    // inside the package and sits in a section headed by the package
+    // identity (the provenance badge), after the user's own Custom section.
+    let mut custom = Vec::new();
+    let mut packages: Vec<(String, Vec<Value>)> = Vec::new();
+    for name in filter_effect_names(custom_names, &query_lower) {
+        match sequencer::app_paths::ContentTier::parse_id(&name) {
+            Ok(Some((tier @ sequencer::app_paths::ContentTier::Package(_), logical))) => {
+                let leaf = effect_leaf_named(logical.to_string(), name.clone(), "custom-audio-effect");
+                let label = tier.label();
+                match packages.iter_mut().find(|(existing, _)| *existing == label) {
+                    Some((_, items)) => items.push(leaf),
+                    None => packages.push((label, vec![leaf])),
+                }
+            }
+            _ => custom.push(effect_leaf(name, "custom-audio-effect")),
+        }
+    }
 
     let mut items = Vec::new();
     if query_lower.is_empty() {
         append_tree_section(&mut items, "Built-in", builtin);
         append_tree_section(&mut items, "Custom", custom);
+        for (label, children) in packages {
+            append_tree_section_owned(&mut items, label, children);
+        }
     } else {
         items.extend(builtin);
         items.extend(custom);
+        for (_, children) in packages {
+            items.extend(children);
+        }
     }
     list_value(items)
 }
@@ -1721,6 +1788,40 @@ mod tests {
     fn audio_effect_tree_omits_empty_custom_header() {
         let tree = build_audio_effect_tree_from_names("", vec!["EQ8".to_string()], Vec::new());
         assert_eq!(top_level_tree_labels(&tree), vec!["Built-in", "EQ8"]);
+    }
+
+    #[test]
+    fn audio_effect_tree_groups_package_effects_under_their_package() {
+        let tree = build_audio_effect_tree_from_names(
+            "",
+            Vec::new(),
+            vec![
+                "pkg:alec.fx/verb".to_string(),
+                "mine".to_string(),
+                "pkg:alec.fx/chains/comp".to_string(),
+                "pkg:zed.pack/gate".to_string(),
+            ],
+        );
+        assert_eq!(
+            top_level_tree_labels(&tree),
+            vec!["Custom", "mine", "alec/fx", "verb", "chains/comp", "zed/pack", "gate"]
+        );
+        // The row's name is the qualified id the graph binds; the label is
+        // the path inside the package.
+        let Value::List(items) = tree else { panic!("tree is a list") };
+        let name_of = |index: usize| match &*items[index].borrow() {
+            Value::Map(map) => map.get("name").map(|value| value.borrow().clone()),
+            _ => None,
+        };
+        assert_eq!(name_of(3), Some(Value::String("pkg:alec.fx/verb".to_string())));
+
+        // A query flattens sections but keeps the qualified names.
+        let filtered = build_audio_effect_tree_from_names(
+            "comp",
+            Vec::new(),
+            vec!["mine".to_string(), "pkg:alec.fx/chains/comp".to_string()],
+        );
+        assert_eq!(top_level_tree_labels(&filtered), vec!["chains/comp"]);
     }
 
     #[test]

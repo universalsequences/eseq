@@ -25,11 +25,20 @@ pub struct PackageManifest {
     /// deliberately deferred; dependencies are identity-only in format v1.
     #[serde(default)]
     pub deps: Vec<String>,
-    /// Module evaluated by consumers as the package entry point.
-    pub entry: String,
+    /// Module evaluated by consumers as the package entry point. Optional:
+    /// a content-only pack (instruments, effects, samples, no Lisp) has no
+    /// entry, and a package whose `src/` is a library of modules may leave
+    /// it out too.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry: Option<String>,
     #[serde(default, alias = "assets")]
     pub external_assets: Vec<ExternalAsset>,
 }
+
+/// The content directories a package may carry beside `src/`. Each mirrors
+/// the same-named factory tree, so a loader that already reads that tree from
+/// the factory and user tiers reads it from a package with no per-type code.
+pub const PACKAGE_CONTENT_DIRS: &[&str] = &["instruments", "effects", "midi-fx", "samples", "themes"];
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ExternalAsset {
@@ -41,9 +50,36 @@ pub struct ExternalAsset {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstalledPackage {
     pub root: PathBuf,
-    pub source_root: PathBuf,
+    /// `<root>/src` when the package ships Lisp modules; `None` for a
+    /// content-only pack.
+    pub source_root: Option<PathBuf>,
     pub module_prefix: String,
     pub manifest: PackageManifest,
+}
+
+impl InstalledPackage {
+    /// The package's `<kind>/` content directory when it exists on disk.
+    pub fn content_dir(&self, kind: &str) -> Option<PathBuf> {
+        let dir = self.root.join(kind);
+        dir.is_dir().then_some(dir)
+    }
+
+    pub fn instruments_dir(&self) -> Option<PathBuf> {
+        self.content_dir("instruments")
+    }
+
+    pub fn effects_dir(&self) -> Option<PathBuf> {
+        self.content_dir("effects")
+    }
+
+    /// Which of [`PACKAGE_CONTENT_DIRS`] this package carries, in that order.
+    pub fn content_kinds(&self) -> Vec<&'static str> {
+        PACKAGE_CONTENT_DIRS
+            .iter()
+            .copied()
+            .filter(|kind| self.root.join(kind).is_dir())
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -182,11 +218,21 @@ impl PackageCatalog {
     }
 
     pub fn module_roots(&self) -> Vec<(PathBuf, String)> {
+        self.ordered()
+            .filter_map(|package| {
+                package
+                    .source_root
+                    .clone()
+                    .map(|root| (root, package.module_prefix.clone()))
+            })
+            .collect()
+    }
+
+    /// Installed packages in load order: earlier tiers first, then by name.
+    pub fn ordered(&self) -> impl Iterator<Item = &InstalledPackage> {
         self.load_order
             .iter()
             .filter_map(|name| self.packages.get(name))
-            .map(|package| (package.source_root.clone(), package.module_prefix.clone()))
-            .collect()
     }
 }
 
@@ -218,23 +264,45 @@ impl InstalledPackage {
                 message: format!("invalid dependency `{dependency}`: {message}"),
             })?;
         }
-        if !manifest.entry.starts_with(&format!("{module_prefix}.")) {
-            return Err(PackageError {
-                path: root.join("manifest.json"),
-                message: format!(
-                    "entry module `{}` is outside owned namespace `{module_prefix}`",
-                    manifest.entry
-                ),
-            });
+        if let Some(entry) = &manifest.entry {
+            if !entry.starts_with(&format!("{module_prefix}.")) {
+                return Err(PackageError {
+                    path: root.join("manifest.json"),
+                    message: format!(
+                        "entry module `{entry}` is outside owned namespace `{module_prefix}`"
+                    ),
+                });
+            }
         }
         let source_root = root.join("src");
-        if !source_root.is_dir() {
-            return Err(PackageError {
-                path: source_root,
-                message: "missing src directory".into(),
-            });
-        }
-        validate_modules(&source_root, &module_prefix, &manifest.entry)?;
+        let source_root = if source_root.is_dir() {
+            validate_modules(&source_root, &module_prefix, manifest.entry.as_deref())?;
+            Some(source_root)
+        } else {
+            // A content-only pack needs no Lisp, but an entry module promises
+            // one, and a package with nothing at all is a mistake, not a pack.
+            if let Some(entry) = &manifest.entry {
+                return Err(PackageError {
+                    path: source_root,
+                    message: format!(
+                        "missing src directory (entry module `{entry}` needs one)"
+                    ),
+                });
+            }
+            let has_content = PACKAGE_CONTENT_DIRS
+                .iter()
+                .any(|kind| root.join(kind).is_dir());
+            if !has_content {
+                return Err(PackageError {
+                    path: source_root,
+                    message: format!(
+                        "missing src directory and no content directory ({})",
+                        PACKAGE_CONTENT_DIRS.join(", ")
+                    ),
+                });
+            }
+            None
+        };
         for asset in &manifest.external_assets {
             verify_asset(&root, asset)?;
         }
@@ -270,7 +338,11 @@ fn valid_segment(segment: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
 }
 
-fn validate_modules(source_root: &Path, prefix: &str, entry: &str) -> Result<(), PackageError> {
+fn validate_modules(
+    source_root: &Path,
+    prefix: &str,
+    entry: Option<&str>,
+) -> Result<(), PackageError> {
     let mut files = Vec::new();
     collect_lisp_files(source_root, &mut files)?;
     let mut modules = BTreeSet::new();
@@ -299,11 +371,13 @@ fn validate_modules(source_root: &Path, prefix: &str, entry: &str) -> Result<(),
             });
         }
     }
-    if !modules.contains(entry) {
-        return Err(PackageError {
-            path: source_root.to_path_buf(),
-            message: format!("entry module `{entry}` was not found under src"),
-        });
+    if let Some(entry) = entry {
+        if !modules.contains(entry) {
+            return Err(PackageError {
+                path: source_root.to_path_buf(),
+                message: format!("entry module `{entry}` was not found under src"),
+            });
+        }
     }
     Ok(())
 }
@@ -449,6 +523,45 @@ mod tests {
             catalog.module_roots(),
             vec![(package.join("src"), "alec.acid-tools".into())]
         );
+    }
+
+    #[test]
+    fn content_only_package_needs_no_src_or_entry() {
+        let root = temp_root("content-only");
+        let package = root.join("drums");
+        fs::create_dir_all(package.join("instruments/kick")).unwrap();
+        fs::write(package.join("instruments/kick/dsp.lisp"), "(out 0)").unwrap();
+        fs::write(
+            package.join("manifest.json"),
+            r#"{"name":"alec/drums","version":"1"}"#,
+        )
+        .unwrap();
+        let catalog = PackageCatalog::scan(&root).expect("content-only pack is valid");
+        let installed = &catalog.packages()["alec/drums"];
+        assert_eq!(installed.source_root, None);
+        assert_eq!(installed.manifest.entry, None);
+        assert_eq!(installed.instruments_dir(), Some(package.join("instruments")));
+        assert_eq!(installed.effects_dir(), None);
+        assert_eq!(installed.content_kinds(), vec!["instruments"]);
+        assert!(catalog.module_roots().is_empty());
+
+        // An entry module without src is a broken package, not a pack.
+        fs::write(
+            package.join("manifest.json"),
+            r#"{"name":"alec/drums","version":"1","entry":"alec.drums.main"}"#,
+        )
+        .unwrap();
+        let errors = PackageCatalog::scan(&root).expect_err("entry without src");
+        assert!(errors[0].to_string().contains("missing src directory"));
+
+        // Nothing at all is rejected too.
+        let empty = root.join("empty");
+        fs::create_dir_all(&empty).unwrap();
+        fs::write(empty.join("manifest.json"), r#"{"name":"alec/empty","version":"1"}"#).unwrap();
+        fs::write(package.join("manifest.json"), r#"{"name":"alec/drums","version":"1"}"#).unwrap();
+        let errors = PackageCatalog::scan(&root).expect_err("empty package");
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].to_string().contains("no content directory"));
     }
 
     #[test]

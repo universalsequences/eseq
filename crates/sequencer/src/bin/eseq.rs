@@ -34,8 +34,72 @@ fn run(args: Vec<String>) -> Result<(), String> {
             }
             Ok(())
         }
+        [package, import, path] if package == "package" && import == "import" => {
+            let app_paths = sequencer::app_paths::app_paths();
+            app_paths.ensure_user_tier().map_err(|error| {
+                format!("failed to initialize user content directories: {error}")
+            })?;
+            let staged = sequencer::package_install::stage_package_from_path(
+                std::path::Path::new(path),
+                &app_paths.packages_dir(),
+            )?;
+            let replace = staged.replaces_installed();
+            let summary = staged.summary.clone();
+            let result = sequencer::package_install::publish_staged_package(staged, replace)?;
+            let report = sequencer::package_samples::reconcile_app_package_samples(app_paths)?;
+            println!(
+                "{} {} {} at {} ({})",
+                if replace { "replaced" } else { "installed" },
+                summary.identity,
+                summary.version,
+                result.path.display(),
+                summary.describe_contents()
+            );
+            for error in report.errors {
+                eprintln!("eseq: {error}");
+            }
+            Ok(())
+        }
+        [package, export, identity, version, out_dir, items @ ..]
+            if package == "package" && export == "export" =>
+        {
+            use sequencer::package_export::{export_package, ExportKind, ExportRequest};
+            let mut picked = Vec::new();
+            for item in items {
+                let (kind, name) = item.split_once(':').ok_or_else(|| {
+                    format!("item `{item}` must be instrument:<name> or effect:<name>")
+                })?;
+                let kind = match kind {
+                    "instrument" => ExportKind::Instrument,
+                    "effect" => ExportKind::Effect,
+                    other => return Err(format!("unknown item kind `{other}`")),
+                };
+                picked.push((kind, name.to_string()));
+            }
+            let request = ExportRequest {
+                identity: identity.clone(),
+                version: version.clone(),
+                items: picked,
+            };
+            let report = export_package(
+                sequencer::app_paths::app_paths(),
+                &request,
+                std::path::Path::new(out_dir),
+                true,
+            )?;
+            println!(
+                "exported {} ({} instrument(s), {} effect(s))",
+                report.archive.as_deref().unwrap_or(&report.package_dir).display(),
+                report.instruments,
+                report.effects
+            );
+            for warning in report.warnings {
+                eprintln!("eseq: warning: {warning}");
+            }
+            Ok(())
+        }
         _ => Err(
-            "usage: eseq package index [PACKAGE_DIR]\n       eseq package install AUTHOR/NAME GIT_URL"
+            "usage: eseq package index [PACKAGE_DIR]\n       eseq package install AUTHOR/NAME GIT_URL\n       eseq package import PATH_OR_ARCHIVE\n       eseq package export AUTHOR/NAME VERSION OUT_DIR (instrument:<name>|effect:<name>)..."
                 .to_string(),
         ),
     }

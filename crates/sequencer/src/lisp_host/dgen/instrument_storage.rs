@@ -56,27 +56,7 @@ fn resolved_walk_cache(
     CACHE.get_or_init(Default::default)
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum InstrumentTier {
-    Factory,
-    User,
-}
-
-impl InstrumentTier {
-    fn prefix(self) -> &'static str {
-        match self {
-            Self::Factory => "factory",
-            Self::User => "user",
-        }
-    }
-
-    fn root(self, paths: &crate::app_paths::AppPaths) -> PathBuf {
-        match self {
-            Self::Factory => paths.instruments_dir(),
-            Self::User => paths.user_instruments_dir(),
-        }
-    }
-}
+use crate::app_paths::ContentTier as InstrumentTier;
 
 /// One directory instrument sources resolve from.
 struct InstrumentRoot {
@@ -88,23 +68,21 @@ struct InstrumentRoot {
     fallback: bool,
 }
 
-/// Instrument roots in resolution order: the factory tier, the user tier, and
-/// (dev only) the pre-curation factory tree kept as test fixtures. The fixture
+/// Instrument roots in resolution order: the factory tier, the user tier,
+/// every installed package that ships an `instruments/` directory, and (dev
+/// only) the pre-curation factory tree kept as test fixtures. The fixture
 /// root qualifies as `factory` — it is the tree those ids were minted for —
 /// but resolves last.
 fn instrument_roots(paths: &crate::app_paths::AppPaths) -> Vec<InstrumentRoot> {
-    let mut roots = vec![
-        InstrumentRoot {
-            tier: InstrumentTier::Factory,
-            path: InstrumentTier::Factory.root(paths),
+    let mut roots = paths
+        .instrument_roots()
+        .into_iter()
+        .map(|root| InstrumentRoot {
+            tier: root.tier,
+            path: root.path,
             fallback: false,
-        },
-        InstrumentRoot {
-            tier: InstrumentTier::User,
-            path: InstrumentTier::User.root(paths),
-            fallback: false,
-        },
-    ];
+        })
+        .collect::<Vec<_>>();
     if let Some(fixtures) = paths.dev_instrument_fixtures_dir() {
         roots.push(InstrumentRoot {
             tier: InstrumentTier::Factory,
@@ -113,6 +91,10 @@ fn instrument_roots(paths: &crate::app_paths::AppPaths) -> Vec<InstrumentRoot> {
         });
     }
     roots
+}
+
+fn factory_instruments_root(paths: &crate::app_paths::AppPaths) -> PathBuf {
+    paths.instruments_dir()
 }
 
 /// Every directory that may hold an instrument source, for path-to-name
@@ -127,19 +109,13 @@ pub(in crate::lisp_host) fn instrument_source_roots() -> Vec<PathBuf> {
 
 fn parse_instrument_id(name: &str) -> io::Result<Option<(InstrumentTier, &str)>> {
     let trimmed = name.trim_end_matches('/');
-    let qualified = if let Some(path) = trimmed.strip_prefix("factory:") {
-        Some((InstrumentTier::Factory, path))
-    } else if let Some(path) = trimmed.strip_prefix("user:") {
-        Some((InstrumentTier::User, path))
-    } else if trimmed.contains(':') {
-        return Err(io::Error::new(
+    let qualified = InstrumentTier::parse_id(trimmed).map_err(|_| {
+        io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("unsupported instrument id '{name}'"),
-        ));
-    } else {
-        None
-    };
-    let path = qualified.map(|(_, path)| path).unwrap_or(trimmed);
+        )
+    })?;
+    let path = qualified.as_ref().map(|(_, path)| *path).unwrap_or(trimmed);
     if path.is_empty()
         || Path::new(path)
             .components()
@@ -230,8 +206,21 @@ fn resolve_instrument_storage_path_with_paths(
 
     let qualified = parse_instrument_id(name)?;
     let logical_name = qualified
-        .map(|(_, logical_name)| logical_name)
+        .as_ref()
+        .map(|(_, logical_name)| *logical_name)
         .unwrap_or_else(|| name.trim_end_matches('/'));
+
+    // The walk cache is consulted before the roots are enumerated: hot
+    // callers (glyph feeds re-read sources every reactive tick) must pay one
+    // hash lookup and an `exists()`, not the package-catalog scan.
+    let cache_key = (name.to_string(), extension.to_string());
+    if let Some(cached) = resolved_walk_cache().lock().unwrap().get(&cache_key).cloned() {
+        if cached.exists() {
+            return Ok(cached);
+        }
+        resolved_walk_cache().lock().unwrap().remove(&cache_key);
+    }
+
     // A qualified id names an exact logical path. `factory:` ids search the
     // factory tier, then the user tier, then fallback roots: they keep working
     // after an instrument leaves the shipped factory set and lives on as a
@@ -239,31 +228,35 @@ fn resolve_instrument_storage_path_with_paths(
     // re-qualifies them through `qualify_instrument_id`. `user:` ids never
     // fall through — a user id whose copy is missing must still resolve into
     // the user tier, otherwise a save would write over shipped factory content
-    // and requalify the project's instrument as read-only. Bare names keep the
-    // legacy leaf-name walk within each root.
+    // and requalify the project's instrument as read-only. `pkg:` ids resolve
+    // only inside their own package: instruments never shadow across tiers,
+    // so a missing package instrument is missing, not somebody else's. Bare
+    // names keep the legacy leaf-name walk within each root, factory and user
+    // tiers before packages.
     let all_roots = instrument_roots(paths);
     let mut ordered: Vec<&InstrumentRoot> = Vec::with_capacity(all_roots.len());
-    match qualified {
+    match &qualified {
         Some((InstrumentTier::User, _)) => {
             ordered.extend(all_roots.iter().filter(|r| !r.fallback && r.tier == InstrumentTier::User));
         }
+        Some((tier @ InstrumentTier::Package(_), _)) => {
+            ordered.extend(all_roots.iter().filter(|r| !r.fallback && r.tier == *tier));
+            if ordered.is_empty() {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("instrument '{name}' belongs to a package that is not installed"),
+                ));
+            }
+        }
         Some((InstrumentTier::Factory, _)) => {
             ordered.extend(all_roots.iter().filter(|r| !r.fallback && r.tier == InstrumentTier::Factory));
-            ordered.extend(all_roots.iter().filter(|r| !r.fallback && r.tier != InstrumentTier::Factory));
+            ordered.extend(all_roots.iter().filter(|r| !r.fallback && r.tier == InstrumentTier::User));
             ordered.extend(all_roots.iter().filter(|r| r.fallback));
         }
         None => {
             ordered.extend(all_roots.iter().filter(|r| !r.fallback));
             ordered.extend(all_roots.iter().filter(|r| r.fallback));
         }
-    }
-
-    let cache_key = (name.to_string(), extension.to_string());
-    if let Some(cached) = resolved_walk_cache().lock().unwrap().get(&cache_key).cloned() {
-        if cached.exists() {
-            return Ok(cached);
-        }
-        resolved_walk_cache().lock().unwrap().remove(&cache_key);
     }
 
     let mut remember = |resolved: PathBuf| {
@@ -306,6 +299,14 @@ fn resolve_instrument_storage_path_with_paths(
         .join(format!("{logical_name}.{extension}")))
 }
 
+#[cfg(test)]
+pub fn instrument_source_path_with_paths_for_tests(
+    paths: &crate::app_paths::AppPaths,
+    name: &str,
+) -> io::Result<PathBuf> {
+    resolve_instrument_storage_path_with_paths(paths, name, "lisp")
+}
+
 pub(in crate::lisp_host) fn resolve_instrument_storage_path(name: &str, extension: &str) -> io::Result<PathBuf> {
     resolve_instrument_storage_path_with_paths(crate::app_paths::app_paths(), name, extension)
 }
@@ -336,7 +337,7 @@ fn qualify_instrument_id_with_paths(
                 relative.with_extension("")
             };
             let logical = logical.to_string_lossy().replace('\\', "/");
-            return Ok(format!("{}:{logical}", tier.prefix()));
+            return Ok(tier.qualify(&logical));
         }
     }
     Err(io::Error::new(
@@ -473,6 +474,19 @@ fn strip_source_root(parent: &Path, roots: &[PathBuf], relative_dir: &str) -> Op
 pub(in crate::lisp_host) fn instrument_name_from_source_path(path: &Path) -> Option<String> {
     if path.file_name().and_then(|name| name.to_str()) == Some("dsp.lisp") {
         if let Some(parent) = path.parent() {
+            // A package instrument's name is always qualified: its bare
+            // relative path would resolve factory-first and land elsewhere.
+            for root in instrument_roots(crate::app_paths::app_paths()) {
+                if !root.tier.is_package() {
+                    continue;
+                }
+                if let Ok(rel) = parent.strip_prefix(&root.path) {
+                    let rel = rel.to_string_lossy().replace('\\', "/");
+                    if !rel.is_empty() {
+                        return Some(format!("{}/", root.tier.qualify(&rel)));
+                    }
+                }
+            }
             if let Some(rel) = strip_source_root(parent, &instrument_source_roots(), "instruments")
             {
                 let rel = rel.to_string_lossy().replace('\\', "/");
@@ -492,15 +506,24 @@ pub(in crate::lisp_host) fn source_name_from_path(kind: &CompileKind, path: &Pat
         CompileKind::Instrument => instrument_name_from_source_path(path),
         CompileKind::Effect => {
             if path.file_name().and_then(|name| name.to_str()) == Some("dsp.lisp") {
-                path.parent()
-                    .and_then(|parent| {
-                        strip_source_root(
-                            parent,
-                            &crate::app_paths::app_paths().effect_dirs(),
-                            "effects",
-                        )
-                    })
-                    .map(|rel| rel.to_string_lossy().replace('\\', "/"))
+                let parent = path.parent()?;
+                for root in crate::app_paths::app_paths().effect_roots() {
+                    if !root.tier.is_package() {
+                        continue;
+                    }
+                    if let Ok(rel) = parent.strip_prefix(&root.path) {
+                        let rel = rel.to_string_lossy().replace('\\', "/");
+                        if !rel.is_empty() {
+                            return Some(root.tier.qualify(&rel));
+                        }
+                    }
+                }
+                strip_source_root(
+                    parent,
+                    &crate::app_paths::app_paths().effect_dirs(),
+                    "effects",
+                )
+                .map(|rel| rel.to_string_lossy().replace('\\', "/"))
             } else {
                 path.file_stem()
                     .map(|stem| stem.to_string_lossy().to_string())
@@ -518,6 +541,23 @@ pub(in crate::lisp_host) fn source_name_from_path(kind: &CompileKind, path: &Pat
 fn user_tier_preset_path(paths: &crate::app_paths::AppPaths, logical_name: &str) -> PathBuf {
     paths
         .user_instruments_dir()
+        .join(format!("{logical_name}.presets"))
+}
+
+/// Where a package instrument's user presets live. Packages are read-only
+/// like the factory tier, but their logical paths would collide with the
+/// user's own instruments under `user_instruments_dir`, so each package gets
+/// its own overlay tree under a hidden directory that no instrument walk
+/// lists.
+fn package_tier_preset_path(
+    paths: &crate::app_paths::AppPaths,
+    package_prefix: &str,
+    logical_name: &str,
+) -> PathBuf {
+    paths
+        .user_instruments_dir()
+        .join(".package-presets")
+        .join(package_prefix)
         .join(format!("{logical_name}.presets"))
 }
 
@@ -837,8 +877,14 @@ fn instrument_preset_save_path_with_paths(
     paths: &crate::app_paths::AppPaths,
     name: &str,
 ) -> io::Result<PathBuf> {
-    if let Some((InstrumentTier::Factory, logical_name)) = parse_instrument_id(name)? {
-        return Ok(user_tier_preset_path(paths, logical_name));
+    match parse_instrument_id(name)? {
+        Some((InstrumentTier::Factory, logical_name)) => {
+            return Ok(user_tier_preset_path(paths, logical_name));
+        }
+        Some((InstrumentTier::Package(prefix), logical_name)) => {
+            return Ok(package_tier_preset_path(paths, &prefix, logical_name));
+        }
+        _ => {}
     }
     let source = writable_instrument_source_path_with_paths(paths, name)?;
     Ok(preset_path_for_writable_instrument_source(&source))
@@ -1124,6 +1170,12 @@ fn writable_instrument_source_path_with_paths(
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 format!("factory instrument '{name}' is read-only; fork it before editing"),
+            ));
+        }
+        Some((InstrumentTier::Package(_), _)) => {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!("package instrument '{name}' is read-only; fork it before editing"),
             ));
         }
         Some((InstrumentTier::User, logical_name)) => {
@@ -1440,6 +1492,142 @@ mod tier_id_tests {
 
     fn names(presets: &[InstrumentPreset]) -> Vec<&str> {
         presets.iter().map(|preset| preset.name.as_str()).collect()
+    }
+
+    /// A manifest-backed package under the user's packages dir carrying one
+    /// folder instrument. Content-only: no `src/`, no entry module.
+    fn write_package_instrument(
+        paths: &crate::app_paths::AppPaths,
+        identity: &str,
+        name: &str,
+        marker: &str,
+    ) -> PathBuf {
+        let package = paths.packages_dir().join(identity.replace('/', "."));
+        std::fs::create_dir_all(&package).unwrap();
+        std::fs::write(
+            package.join("manifest.json"),
+            format!(r#"{{"name":"{identity}","version":"1"}}"#),
+        )
+        .unwrap();
+        let instruments = package.join("instruments");
+        write_folder_instrument(&instruments, name, marker);
+        crate::app_paths::invalidate_package_catalog_cache();
+        instruments
+    }
+
+    #[test]
+    fn package_ids_resolve_only_inside_their_package() {
+        let (paths, root) = test_paths("package-ids");
+        write_folder_instrument(&paths.instruments_dir(), "kick", "factory");
+        write_folder_instrument(&paths.user_instruments_dir(), "kick", "user");
+        let package_root = write_package_instrument(&paths, "alec/drums", "kick", "package");
+
+        let resolve = |name: &str| resolve_instrument_storage_path_with_paths(&paths, name, "lisp").unwrap();
+        assert_eq!(resolve("pkg:alec.drums/kick"), package_root.join("kick/dsp.lisp"));
+        assert_eq!(resolve("pkg:alec.drums/kick/"), package_root.join("kick/dsp.lisp"));
+        assert_eq!(resolve("factory:kick"), paths.instruments_dir().join("kick/dsp.lisp"));
+        assert_eq!(resolve("user:kick"), paths.user_instruments_dir().join("kick/dsp.lisp"));
+        // Legacy bare names keep resolving factory-first: a package never
+        // shadows the shipped tree or the user's library.
+        assert_eq!(resolve("kick"), paths.instruments_dir().join("kick/dsp.lisp"));
+
+        // The id round-trips through the source path.
+        assert_eq!(
+            qualify_instrument_id_with_paths(&paths, "pkg:alec.drums/kick").unwrap(),
+            "pkg:alec.drums/kick"
+        );
+        assert_eq!(
+            qualify_instrument_id_with_paths(&paths, "pkg:alec.drums/kick/").unwrap(),
+            "pkg:alec.drums/kick"
+        );
+
+        // Missing inside the package: stays inside the package, never borrows
+        // the same-named factory or user instrument.
+        let missing = resolve("pkg:alec.drums/snare");
+        assert!(missing.starts_with(&package_root), "{}", missing.display());
+        assert!(!missing.exists());
+        assert!(qualify_instrument_id_with_paths(&paths, "pkg:alec.drums/snare").is_err());
+
+        // An id from a package that is not installed is an error, not a
+        // silent fall-through.
+        let error = resolve_instrument_storage_path_with_paths(&paths, "pkg:nobody.pack/kick", "lisp")
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        // A malformed package id is rejected up front.
+        assert_eq!(
+            resolve_instrument_storage_path_with_paths(&paths, "pkg:alec.drums", "lisp")
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn bare_names_reach_a_package_only_when_no_tier_has_them() {
+        let (paths, root) = test_paths("package-bare");
+        let package_root = write_package_instrument(&paths, "alec/drums", "snare", "package");
+        assert_eq!(
+            resolve_instrument_storage_path_with_paths(&paths, "snare", "lisp").unwrap(),
+            package_root.join("snare/dsp.lisp")
+        );
+        assert_eq!(
+            qualify_instrument_id_with_paths(&paths, "snare").unwrap(),
+            "pkg:alec.drums/snare",
+            "a bare name that lands in a package qualifies as that package's"
+        );
+        write_folder_instrument(&paths.user_instruments_dir(), "snare", "user");
+        // The walk cache revalidates by existence only, so the new user copy is
+        // not observed until the cached package path goes away; a fresh
+        // resolution of the same name on a fresh name string is the contract.
+        resolved_walk_cache().lock().unwrap().clear();
+        assert_eq!(
+            resolve_instrument_storage_path_with_paths(&paths, "snare", "lisp").unwrap(),
+            paths.user_instruments_dir().join("snare/dsp.lisp")
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn package_instruments_are_read_only_with_a_user_preset_overlay() {
+        let (paths, root) = test_paths("package-presets");
+        let package_root = write_package_instrument(&paths, "alec/drums", "kick", "package");
+        write_preset_bank(&package_root.join("kick.presets"), "pkg:alec.drums/kick", &["Tight"]);
+        let name = "pkg:alec.drums/kick/";
+
+        let error = writable_instrument_source_path_with_paths(&paths, name).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert!(save_instrument_with_paths(&paths, name, "edited").is_err());
+        assert_eq!(
+            std::fs::read_to_string(package_root.join("kick/dsp.lisp")).unwrap(),
+            "package"
+        );
+
+        // Presets save into a per-package overlay under the user tier that no
+        // instrument walk lists, and load merged with the shipped bank.
+        let overlay = instrument_preset_save_path_with_paths(&paths, name).unwrap();
+        assert_eq!(
+            overlay,
+            paths
+                .user_instruments_dir()
+                .join(".package-presets/alec.drums/kick.presets")
+        );
+        assert_eq!(
+            names(&cached_instrument_presets_with_paths(&paths, name).unwrap()),
+            vec!["Tight"]
+        );
+        save_instrument_presets_with_paths(&paths, name, &[preset("Loose"), preset("Tight")]).unwrap();
+        assert!(overlay.is_file());
+        assert_eq!(
+            names(&cached_instrument_presets_with_paths(&paths, name).unwrap()),
+            vec!["Loose", "Tight"]
+        );
+        // The overlay directory is hidden from the bare-name walk.
+        assert!(resolve_instrument_storage_path_with_paths(&paths, "kick", "lisp")
+            .unwrap()
+            .starts_with(&package_root));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -1890,7 +2078,7 @@ mod tier_id_tests {
     #[test]
     fn user_ids_never_fall_through_to_factory_content() {
         let (paths, root) = test_paths("user-no-fallthrough");
-        write_folder_instrument(&InstrumentTier::Factory.root(&paths), "core/drift", "factory");
+        write_folder_instrument(&factory_instruments_root(&paths), "core/drift", "factory");
         let fixtures = paths.dev_instrument_fixtures_dir().expect("dev layout has a fixture root");
         write_folder_instrument(&fixtures, "core/fixture-only", "fixture");
         let user_root = paths.user_instruments_dir();
@@ -1921,7 +2109,7 @@ mod tier_id_tests {
         }
         save_instrument_with_paths(&paths, "user:core/drift/", "user copy").unwrap();
         assert_eq!(
-            std::fs::read_to_string(InstrumentTier::Factory.root(&paths).join("core/drift/dsp.lisp"))
+            std::fs::read_to_string(factory_instruments_root(&paths).join("core/drift/dsp.lisp"))
                 .unwrap(),
             "factory",
             "saving a user: id must not touch the factory source"
