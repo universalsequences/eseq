@@ -5154,6 +5154,7 @@ mod tests {
                     )]),
                     fanout: std::collections::BTreeMap::new(),
                     unbound_ports: Default::default(),
+                    enabled: Some(false),
                 },
             )])];
         let json = serde_json::to_string(&project).expect("serialize current project");

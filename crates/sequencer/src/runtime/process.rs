@@ -684,6 +684,10 @@ pub struct ProjectSlotOverride {
     /// Ports this track disconnected (see `TrackProcessSlot::unbound_ports`).
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub unbound_ports: BTreeSet<String>,
+    /// This track's own enable state for the shared slot; `None` follows the
+    /// shared slot. Lets one track bypass `prob` while the others keep it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
 }
 
 impl ProjectSlotOverride {
@@ -693,6 +697,7 @@ impl ProjectSlotOverride {
             && self.bindings.is_empty()
             && self.fanout.is_empty()
             && self.unbound_ports.is_empty()
+            && self.enabled.is_none()
     }
 }
 
@@ -709,6 +714,8 @@ struct ProjectSlotOverrideFields {
     fanout: BTreeMap<String, Vec<ProcessPortFanout>>,
     #[serde(default)]
     unbound_ports: BTreeSet<String>,
+    #[serde(default)]
+    enabled: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -727,6 +734,7 @@ impl From<ProjectSlotOverrideCompat> for ProjectSlotOverride {
                 bindings: fields.bindings,
                 fanout: fields.fanout,
                 unbound_ports: fields.unbound_ports,
+                enabled: fields.enabled,
             },
             ProjectSlotOverrideCompat::Legacy(lanes) => Self {
                 lanes,
@@ -775,6 +783,9 @@ pub fn apply_project_lane_overrides(
         for port in &override_.unbound_ports {
             slot.unbound_ports.insert(port.clone());
         }
+        if let Some(enabled) = override_.enabled {
+            slot.enabled = enabled;
+        }
     }
 }
 
@@ -798,10 +809,38 @@ mod project_slot_override_tests {
             )]),
             fanout: BTreeMap::new(),
             unbound_ports: BTreeSet::from(["wire".to_string()]),
+            enabled: Some(false),
         };
         let json = serde_json::to_string(&current).unwrap();
         let back: ProjectSlotOverride = serde_json::from_str(&json).unwrap();
         assert_eq!(back, current);
+        assert!(parsed.enabled.is_none(), "legacy overrides follow the shared slot");
+    }
+
+    #[test]
+    fn enabled_override_bypasses_the_shared_slot_for_one_track() {
+        let mut chain = default_project_layer();
+        let prob = chain
+            .slots
+            .iter()
+            .find(|slot| slot.instance_name.as_deref() == Some("prob"))
+            .unwrap();
+        let identity = project_slot_identity_id(prob);
+        let overrides = ProjectLaneOverrides::from([(
+            identity,
+            ProjectSlotOverride {
+                enabled: Some(false),
+                ..Default::default()
+            },
+        )]);
+        apply_project_lane_overrides(&mut chain, &overrides);
+        let prob = chain
+            .slots
+            .iter()
+            .find(|slot| slot.instance_name.as_deref() == Some("prob"))
+            .unwrap();
+        assert!(!prob.enabled);
+        assert!(chain.slots.iter().filter(|slot| slot.enabled).count() == chain.slots.len() - 1);
     }
 }
 

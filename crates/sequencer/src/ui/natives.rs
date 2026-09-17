@@ -4478,11 +4478,17 @@ pub(crate) fn init_runtime(
             );
         };
         let track = *track as usize;
-        ctx.enqueue_command(process_history_command("set-enabled", vec![
+        let mut fields = vec![
             ("track", Value::Number(track as f64)),
             ("instance-id", Value::Number(*instance_id)),
             ("enabled", Value::Bool(*enabled)),
-        ]));
+        ];
+        // Default forks a project slot for this track only; `:all` flips the
+        // shared slot on every track (same contract as `seq-set-process-inlet`).
+        if process_edit_scope_is_all(args.get(3)) {
+            fields.push(("scope", Value::String("all".to_string())));
+        }
+        ctx.enqueue_command(process_history_command("set-enabled", fields));
         Ok(Value::Bool(*enabled))
     });
 
@@ -7724,7 +7730,7 @@ fn document_metal_seq_natives(runtime: &mut Runtime) {
         ),
         (
             "seq-set-process-slot-enabled",
-            "(seq-set-process-slot-enabled track instance-id enabled)",
+            "(seq-set-process-slot-enabled track instance-id enabled [:all])",
             "Enable or bypass one attached process slot on a track.",
         ),
         (

@@ -596,17 +596,83 @@ impl SequencerState {
                 None => None,
             }
         };
-        // Project-layer slots are editable from any track's panel; the toggle
-        // lands on the one shared object.
+        // A project slot toggled from one track's UI forks that track only
+        // (docs/default-process-lanes-spec.md): bypassing `prob` on track 4
+        // must not silence it everywhere. `set_process_slot_enabled_all` is
+        // the every-track write.
         let Some(changed) = changed.or_else(|| {
-            self.edit_project_process_chain_slot(instance_id, |slot| {
-                let changed = slot.enabled != enabled;
-                slot.enabled = enabled;
-                changed
+            let shared = self
+                .project_process_chain()
+                .slots
+                .into_iter()
+                .find(|slot| slot.instance_id == instance_id)
+                .map(|slot| slot.enabled)?;
+            self.edit_project_slot_override(track, instance_id, |override_| {
+                let effective = override_.enabled.unwrap_or(shared);
+                // Agreeing with the shared slot needs no fork at all, so the
+                // override collapses instead of pinning a redundant value.
+                override_.enabled = (enabled != shared).then_some(enabled);
+                effective != enabled
             })
         }) else {
             return false;
         };
+        if changed {
+            self.publish_process_chain_edit();
+        }
+        true
+    }
+    /// Enable or bypass a slot on every track. Track attachments of the
+    /// instance flip in place; a project slot flips the shared object and
+    /// drops each track's `enabled` fork so "all tracks" means exactly that.
+    pub fn set_process_slot_enabled_all(
+        &self,
+        instance_id: crate::process::ProcessInstanceId,
+        enabled: bool,
+    ) -> bool {
+        let mut changed = false;
+        let mut matched = false;
+        {
+            let mut chains = self.pattern.process_chains.lock().unwrap();
+            for slot in chains
+                .iter_mut()
+                .flat_map(|chain| chain.slots.iter_mut())
+                .filter(|slot| slot.instance_id == instance_id)
+            {
+                matched = true;
+                changed |= slot.enabled != enabled;
+                slot.enabled = enabled;
+            }
+        }
+        let shared = self
+            .project_process_chain()
+            .slots
+            .into_iter()
+            .find(|slot| slot.instance_id == instance_id);
+        if let Some(shared) = shared {
+            matched = true;
+            let identity = crate::process::project_slot_identity_id(&shared);
+            let mut all = self.pattern.project_process_lane_overrides.lock().unwrap();
+            for track_overrides in all.iter_mut() {
+                let Some(override_) = track_overrides.get_mut(&identity) else {
+                    continue;
+                };
+                if let Some(forked) = override_.enabled.take() {
+                    changed |= forked != enabled;
+                }
+                if override_.is_empty() {
+                    track_overrides.remove(&identity);
+                }
+            }
+            drop(all);
+            self.edit_project_process_chain_slot(instance_id, |slot| {
+                changed |= slot.enabled != enabled;
+                slot.enabled = enabled;
+            });
+        }
+        if !matched {
+            return false;
+        }
         if changed {
             self.publish_process_chain_edit();
         }

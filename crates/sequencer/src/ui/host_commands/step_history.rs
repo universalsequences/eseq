@@ -323,8 +323,12 @@ pub(super) fn handle(
                                 _ => None,
                             })
                             .ok_or_else(|| "Process enabled state is missing".to_string())?;
-                        app.state
-                            .set_track_process_slot_enabled(track, instance_id, enabled)
+                        if all_tracks {
+                            app.state.set_process_slot_enabled_all(instance_id, enabled)
+                        } else {
+                            app.state
+                                .set_track_process_slot_enabled(track, instance_id, enabled)
+                        }
                     }
                     "move-slot" => {
                         let before = match field("before-instance-id") {

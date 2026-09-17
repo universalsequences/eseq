@@ -155,6 +155,17 @@ Where the build differs from the rev 1 plan, and why.
   write the shared slot (and a shared clear drops every track's fork of that
   port). Clearing a forked binding reverts the track to the shared one. The
   old on-disk form (bare lane map) still loads.
+- **Per-track bypass (rev 2 addendum, eseq-1ulv).** `ProjectSlotOverride`
+  also carries `enabled: Option<bool>`, so bypassing `prob` from one track's
+  strip or patch-bay box forks that track only; the shared slot and every
+  other track keep running. The lane strip header has an `on`/`off` button
+  and each patch-bay box a dot beside its name (filled while the lane runs
+  on this track). Both call `seq-set-process-slot-enabled`, which forks by
+  default and takes `:all` under the `all tracks` scope: that flips the
+  shared slot and drops every track's `enabled` fork. A fork that agrees
+  with the shared slot collapses instead of pinning a redundant value. The
+  flag lives in pattern data like every other slot edit, so it is per
+  pattern and undoable.
 - **Fan-out (rev 2 addendum, closes eseq-elru).** A port keeps one primary
   binding (raw value, add/set as the process wrote it) plus a list of
   `ProcessPortFanout {target, lo, hi}` entries. Each entry rescales the port

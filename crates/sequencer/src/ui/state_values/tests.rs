@@ -56721,6 +56721,208 @@ mod retrospective_ui_tests;
     /// `track_roster_slots_add_and_remove_through_the_process_history_handler`;
     /// here the native stands in for that round trip so the UI projection
     /// can be asserted in one frame.
+    /// The patch-bay dot and the lane strip's on/off button both call the
+    /// real toggle; a project lane forks this track by default and only
+    /// writes every track once the scope chip says "all tracks".
+    #[test]
+    fn lane_patchbay_enable_dot_toggles_this_track_then_all_tracks_by_scope() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let state = Arc::new(SequencerState::new(
+            2,
+            vec![
+                sequencer::sequencer::default_empty_effect_chain(),
+                sequencer::sequencer::default_empty_effect_chain(),
+            ],
+        ));
+        let mut authoring = Runtime::new();
+        sequencer::lisp_host::register_published_process_authoring_natives(
+            &mut authoring,
+            Arc::clone(&state),
+            Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        );
+        authoring
+            .eval_str(&sequencer::lisp_host::load_process_library_source())
+            .expect("builtin process library");
+        let chain = sequencer::process::default_project_layer();
+        let prob_index = chain
+            .slots
+            .iter()
+            .position(|slot| slot.instance_name.as_deref() == Some("prob"))
+            .expect("default prob lane");
+        let prob_id = chain.slots[prob_index].instance_id;
+        assert!(state.set_project_process_chain(chain));
+
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let id = editor.buffers.iter().find(|b| b.name == "*sequencer*").unwrap().id;
+        editor.set_active_buffer(id);
+        editor.set_layout_viewport(220, 90);
+        let publish = |editor: &mut eseqlisp::Editor, state: &Arc<SequencerState>| {
+            for (name, value) in [
+                ("track-process-lanes", build_all_track_process_lanes_value(state, 2)),
+                ("track-process-slots", build_all_track_process_slots_value(state, 2)),
+                ("track-lane-patch", build_all_track_lane_patch_value(state, 2)),
+            ] {
+                editor.runtime_mut().set_reactive("SEQ", name, value);
+            }
+            editor.runtime_mut().run_reactive_cycle();
+            editor.refresh_runtime_side_effects();
+        };
+        publish(&mut editor, &state);
+
+        // Stand in for the host command: record the call, apply it to state
+        // the way the `set-enabled` history op does, and republish.
+        let calls: Rc<RefCell<Vec<Vec<Value>>>> = Rc::new(RefCell::new(Vec::new()));
+        {
+            let calls = Rc::clone(&calls);
+            let toggle_state = Arc::clone(&state);
+            editor
+                .runtime_mut()
+                .register_native("seq-set-process-slot-enabled", move |args, _ctx| {
+                    calls.borrow_mut().push(args.to_vec());
+                    let (Some(Value::Number(track)), Some(Value::Number(id)), Some(Value::Bool(on))) =
+                        (args.first(), args.get(1), args.get(2))
+                    else {
+                        return Err("expected (track id enabled [:all])".into());
+                    };
+                    let id = sequencer::process::ProcessInstanceId(*id as u64);
+                    let all = matches!(args.get(3), Some(Value::Keyword(scope)) if scope == "all");
+                    if all {
+                        toggle_state.set_process_slot_enabled_all(id, *on);
+                    } else {
+                        toggle_state.set_track_process_slot_enabled(*track as usize, id, *on);
+                    }
+                    Ok(Value::Bool(*on))
+                });
+        }
+
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.sequencer/set-track-expanded (nth SEQ.track-ids 0) true)")
+            .unwrap();
+        editor
+            .runtime_mut()
+            .eval_str(&format!(
+                "(eseq.sequencer/set-track-param-mode (nth SEQ.track-ids 0) (+ eseq.seqv-track-params/seqv-process-lane-mode-offset {prob_index}))"
+            ))
+            .unwrap();
+        editor.runtime_mut().eval_str("(eseq.sequencer/lane-patch-show true)").unwrap();
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        editor.set_layout_viewport(220, 90);
+
+        let click = |editor: &mut eseqlisp::Editor, key: &str| {
+            use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+            let frame = eseqlisp::frame::build_tiled_render_frame_borderless(editor, 220, 90);
+            let tile = frame
+                .tiles
+                .iter()
+                .find(|tile| tile.frame.buffer_name == "*sequencer*")
+                .expect("sequencer tile");
+            let layout = tile.frame.widget_layout.as_deref().expect("sequencer tile layout");
+            let node = find_layout_node_by_stable_key_suffix(layout, key)
+                .unwrap_or_else(|| panic!("missing {key}"));
+            let col = tile.rect.col + node.rect.col + node.rect.width * 0.5
+                - tile.frame.widget_layout_scroll_left;
+            let row = tile.rect.row + node.rect.row + node.rect.height * 0.5
+                - tile.frame.widget_scroll_top;
+            // Back-to-back clicks on the same button inside the 350 ms window
+            // would read as a double-click; this test clicks, not double-clicks.
+            editor.active_leaf_mut().last_widget_click = None;
+            for kind in [
+                MouseEventKind::Down(MouseButton::Left),
+                MouseEventKind::Up(MouseButton::Left),
+            ] {
+                editor.handle_tiled_mouse_precise(
+                    MouseEvent {
+                        kind,
+                        column: col as u16,
+                        row: row as u16,
+                        modifiers: crossterm::event::KeyModifiers::NONE,
+                    },
+                    col,
+                    row,
+                    0,
+                );
+            }
+            editor.runtime_mut().run_reactive_cycle();
+            editor.refresh_runtime_side_effects();
+        };
+        let enabled_on = |state: &Arc<SequencerState>, track: usize| {
+            state
+                .composed_track_process_chain(track)
+                .unwrap()
+                .slots
+                .into_iter()
+                .find(|slot| slot.instance_id == prob_id)
+                .unwrap()
+                .enabled
+        };
+        let dot_key = format!("/lane-patch-enable-{}", prob_id.0);
+        let strip_key = format!("/lane-enable-{}", prob_id.0);
+
+        // Patch-bay dot: bypass prob on track 0 only.
+        click(&mut editor, &dot_key);
+        publish(&mut editor, &state);
+        assert_eq!(calls.borrow().len(), 1, "one toggle call: {:?}", calls.borrow());
+        assert_eq!(
+            calls.borrow()[0],
+            vec![
+                Value::Number(0.0),
+                Value::Number(prob_id.0 as f64),
+                Value::Bool(false),
+                Value::Nil,
+            ],
+            "the dot forks this track (no :all)"
+        );
+        assert!(!enabled_on(&state, 0));
+        assert!(enabled_on(&state, 1), "track 1 keeps the shared lane running");
+        let snapshot = sequencer::sequencer::SequencerSnapshot::capture(&state);
+        let snapshot_enabled = |track: usize| {
+            snapshot.tracks[track]
+                .process_chain
+                .slots
+                .iter()
+                .find(|slot| slot.instance_id == prob_id)
+                .unwrap()
+                .enabled
+        };
+        assert!(!snapshot_enabled(0) && snapshot_enabled(1), "the scheduler sees the fork");
+
+        // Strip button reads the same state back and re-enables it.
+        let layout = editor.widget_layout().unwrap();
+        let strip = find_layout_node_by_stable_key_suffix(&layout, &strip_key).expect("strip toggle");
+        assert_eq!(
+            strip.props.get("text"),
+            Some(&Value::String("off".to_string())),
+            "the strip button shows the bypass"
+        );
+        click(&mut editor, &strip_key);
+        publish(&mut editor, &state);
+        assert_eq!(calls.borrow().len(), 2);
+        assert_eq!(calls.borrow()[1][2], Value::Bool(true));
+        assert!(enabled_on(&state, 0));
+
+        // With the scope chip on "all tracks" the same button flips every
+        // track through the shared slot.
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.sequencer/lane-toggle-edit-scope)")
+            .unwrap();
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        click(&mut editor, &strip_key);
+        publish(&mut editor, &state);
+        assert_eq!(calls.borrow().len(), 3);
+        assert_eq!(
+            calls.borrow()[2][3],
+            Value::Keyword("all".to_string()),
+            "all-tracks scope passes :all"
+        );
+        assert!(!enabled_on(&state, 0) && !enabled_on(&state, 1));
+    }
+
     #[test]
     fn lane_patchbay_add_box_picks_a_class_and_opens_the_new_lane() {
         use eseqlisp::layout::LayoutNode;

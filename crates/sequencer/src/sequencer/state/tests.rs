@@ -3903,6 +3903,64 @@
     }
 
     #[test]
+    fn bypassing_a_project_lane_forks_one_track_until_all_tracks_write() {
+        let state = make_state_with_tracks(2);
+        let prob = state
+            .project_process_chain()
+            .slots
+            .into_iter()
+            .find(|slot| slot.instance_name.as_deref() == Some("prob"))
+            .expect("prob default lane");
+        let enabled = |track: usize| {
+            state
+                .composed_track_process_chain(track)
+                .unwrap()
+                .slots
+                .into_iter()
+                .find(|slot| slot.instance_id == prob.instance_id)
+                .unwrap()
+                .enabled
+        };
+        let shared_enabled = || {
+            state
+                .project_process_chain()
+                .slots
+                .into_iter()
+                .find(|slot| slot.instance_id == prob.instance_id)
+                .unwrap()
+                .enabled
+        };
+
+        // Bypass on track 0 only: the shared slot and track 1 keep running.
+        assert!(state.set_track_process_slot_enabled(0, prob.instance_id, false));
+        assert!(!enabled(0));
+        assert!(enabled(1), "track 1 keeps the shared slot enabled");
+        assert!(shared_enabled(), "the shared slot is untouched");
+
+        // Re-enabling collapses the fork instead of pinning `Some(true)`.
+        assert!(state.set_track_process_slot_enabled(0, prob.instance_id, true));
+        assert!(enabled(0));
+        let identity = crate::process::project_slot_identity_id(&prob);
+        assert!(
+            !state.pattern.project_process_lane_overrides.lock().unwrap()[0]
+                .contains_key(&identity),
+            "an override agreeing with the shared slot is dropped"
+        );
+
+        // The every-track write flips the shared slot and clears each fork.
+        assert!(state.set_track_process_slot_enabled(1, prob.instance_id, false));
+        assert!(state.set_process_slot_enabled_all(prob.instance_id, false));
+        assert!(!enabled(0) && !enabled(1) && !shared_enabled());
+        assert!(state.set_process_slot_enabled_all(prob.instance_id, true));
+        assert!(enabled(0) && enabled(1) && shared_enabled());
+        assert!(
+            !state.pattern.project_process_lane_overrides.lock().unwrap()[1]
+                .contains_key(&identity),
+            "all-tracks write drops track 1's fork"
+        );
+    }
+
+    #[test]
     fn unbinding_a_project_port_mutes_it_per_track_until_rebound() {
         let state = make_state_with_tracks(2);
         let rand = state
@@ -4080,12 +4138,18 @@
         let instance_id = project_chain.slots[0].instance_id;
         assert!(state.set_project_process_chain(project_chain));
 
-        // Structural track-scoped mutators fall back to the shared project slot
-        // when the instance is not in that track's own chain.
+        // The enable toggle forks the track like any other slot edit: the
+        // shared project slot only changes through the every-track write.
         assert!(state.set_track_process_slot_enabled(1, instance_id, false));
-        assert!(!state.project_process_chain().slots[0].enabled);
-        assert!(state.set_track_process_slot_enabled(0, instance_id, true));
         assert!(state.project_process_chain().slots[0].enabled);
+        assert!(!state.composed_track_process_chain(1).unwrap().slots[0].enabled);
+        assert!(state.composed_track_process_chain(0).unwrap().slots[0].enabled);
+        assert!(state.set_process_slot_enabled_all(instance_id, false));
+        assert!(!state.project_process_chain().slots[0].enabled);
+        assert!(!state.composed_track_process_chain(0).unwrap().slots[0].enabled);
+        assert!(state.set_process_slot_enabled_all(instance_id, true));
+        assert!(state.project_process_chain().slots[0].enabled);
+        assert!(state.composed_track_process_chain(1).unwrap().slots[0].enabled);
 
         assert!(state.set_process_lane_value(1, instance_id, "amount", 2, 7.0));
         assert_eq!(

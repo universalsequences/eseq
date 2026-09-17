@@ -1710,6 +1710,44 @@
     :color (if (lane-edit-all?) :black :dim)
     :on-click (lambda (event) (lane-toggle-edit-scope))))
 
+;; Bypass toggle for the selected lane. A project lane forks this track
+;; only (the shared slot keeps running elsewhere) unless the scope chip says
+;; "all tracks"; roster and track lanes are per track already. Per pattern,
+;; undoable, like every other slot edit.
+(def lane-toggle-enabled (track slot)
+  (seq-set-process-slot-enabled track (get slot :instance-id)
+    (not (get slot :enabled))
+    (if (and (get slot :project) (lane-edit-all?)) :all nil)))
+
+(def lane-strip-enable-button (track slot)
+  (button (if (get slot :enabled) "on" "off")
+    :key (str "lane-enable-" (get slot :instance-id))
+    :width 2.2 :height 1.0 :padding 0.2 :font-size 7.5
+    :background-color (if (get slot :enabled) :process-lane-accent :transparent)
+    :border-color :process-lane-accent
+    :color (if (get slot :enabled) :black :dim)
+    :on-click (lambda (event) (lane-toggle-enabled track slot))))
+
+;; The dot in a patch-bay box: filled while the lane runs on this track.
+;; An SDF circle rather than a rounded box, which reads as a square at
+;; this size (the same accent literal as `lane-chip`).
+(defwidget lane-patch-enable-dot-shape
+  :width 1.4 :height 0.8
+  :state (active)
+  :shader
+  (sdf/fill (sdf/circle 0.62)
+    (material :color
+      (if (> active 0.5)
+        (rgba 0.94 0.63 0.24 1.0)
+        (rgba 0.5 0.5 0.5 0.84)))))
+
+(def lane-patch-enable-dot (track entry)
+  (box :width 1.4 :height 0.8 :padding 0
+    :background "lane-patch-enable-dot-shape"
+    :key (str "lane-patch-enable-" (get entry :instance-id))
+    :active (if (get entry :enabled) 1 0)
+    :on-click (lambda (event) (lane-toggle-enabled track entry))))
+
 (def track-process-slots (track)
   (if (< track (len SEQ.track-process-slots))
     (nth SEQ.track-process-slots track)
@@ -2363,15 +2401,16 @@
   (let ((selected (lane-patch-lane-selected? track track-id (get entry :instance-id))))
     (box :padding 0.4 :corner-radius 12
       :key (str "lane-patch-col-" (get entry :instance-id))
-      :background-color (rgba 1 1 1 0.04)
+      :background-color (if (get entry :enabled) (rgba 1 1 1 0.04) (rgba 1 1 1 0.015))
       :selected-background-color :mixer-strip-selected-bg
       :selected selected
       :height 3
       :on-click (lambda (event) (lane-patch-select-lane track track-id (get entry :instance-id)))
       (v-stack :width 10.0 :gap 0.0 :align :start
-        (label (get entry :name) :width :fill :font-size 8 :v-align :center
-          :v-align :center
-          :color (if (get entry :enabled) :process-lane-accent :dim) :bg :transparent)
+        (h-stack :width :fill :gap 0.3 :align :center
+          (label (get entry :name) :flex 1 :font-size 8 :v-align :center
+            :color (if (get entry :enabled) :process-lane-accent :dim) :bg :transparent)
+          (lane-patch-enable-dot track entry))
         (h-stack :width :fill :height 0.8 :gap 0.4 :align :center
           (each (lane-patch-list entry :in-ports) |port|
             (lane-patch-in-port-widget track entry port)))
@@ -2601,6 +2640,7 @@
               :v-align :center
               :font-size 11 :color :process-lane-accent :bg :transparent)
             (box :flex 1 :height 0.1)
+            (lane-strip-enable-button track slot)
             (if (get slot :project)
               (lane-scope-chip)
               (label "track lane" :v-align :center :font-size 7.5 :color :dim :bg :transparent))
