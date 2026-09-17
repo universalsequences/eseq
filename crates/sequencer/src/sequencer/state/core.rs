@@ -631,9 +631,9 @@ pub struct SequencerState {
     pub(super) neural_visualization: Mutex<NeuralVisualizationSnapshot>,
     pub(super) graph_visualizations: Mutex<Vec<GraphVisualizationSnapshot>>,
     pub(super) graph_control_commands: Mutex<Vec<crate::graph::GraphControlCommand>>,
-    /// Control-thread roll commands, drained at the top of every scheduler
-    /// worker iteration (docs/rolling-core-spec.md 3).
-    pub(super) roll_commands: Mutex<Vec<crate::sequencer::RollCommand>>,
+    /// Control-thread hold ownership and ordered roll commands, drained at
+    /// the top of every scheduler worker iteration.
+    pub(super) roll_input: Mutex<crate::sequencer::RollInputState>,
     /// Scheduler → control-thread rolled-hit feedback, drained in the UI
     /// reactive tick and written back on note release
     /// (docs/rolling-core-spec.md 6).

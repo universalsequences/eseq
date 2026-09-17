@@ -1303,6 +1303,7 @@ static WIDGET_DEFINITIONS: &[&dyn WidgetDefinition] = &[
     &number_picker::NUMBER_PICKER_WIDGET,
     &response_curve_editor::RESPONSE_CURVE_EDITOR_WIDGET,
     &scope::SCOPE_WIDGET,
+    &scope::XY_SCOPE_WIDGET,
     &scroll::SCROLL_WIDGET,
     &text_input::TEXT_INPUT_WIDGET,
     &text_input::TEXTBOX_WIDGET,

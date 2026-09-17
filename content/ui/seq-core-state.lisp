@@ -40,7 +40,9 @@
         sel-bus-vis-field
         track-selected-vis-binding
         group-selected-vis-binding
-        bus-selected-vis-binding)
+        bus-selected-vis-binding
+        mixer-clip-area-height
+        mixer-panel-height)
 
 
 ;; Both views select ranges by their rendered order, not storage indices.
@@ -219,3 +221,19 @@
                 0))))
         (range 0 (len SEQ.groups)))
       nil)))
+
+;; Mixer sizing knob (content-tiers spec: customize tier). Every strip in
+;; *mixer* — track, grouped track, collapsed track, bus, group bus — and the
+;; *mixer* tile itself derive their heights from this one number, so a
+;; package that replaces the clip area (e.g. an Ableton-style clip list)
+;; grows the whole mixer with `(setopt eseq.seq-core-state/mixer-clip-area-height 9)`.
+;; It lives here rather than in eseq.mixer because eseq.seq-layout must read
+;; it too and neither module imports the other.
+(defcustom mixer-clip-area-height 4.0
+  :type :number
+  :doc "Height (cells) of the clip area at the top of each mixer track strip; strips and the mixer panel grow with it.")
+
+;; The *mixer* tile height eseq.seq-layout pins: a 13.8-cell strip plus the
+;; buffer's own padding/border was 14.5 with the stock 4.0 clip area.
+(def mixer-panel-height ()
+  (+ 10.5 mixer-clip-area-height))

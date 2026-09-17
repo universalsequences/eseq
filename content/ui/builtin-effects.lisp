@@ -21,4 +21,5 @@
 (load "@/ui/effects/builtin/convolution-reverb.lisp")
 (load "@/ui/effects/builtin/filter-table.lisp")
 (load "@/ui/effects/builtin/filterbank.lisp")
+(load "@/ui/effects/builtin/es-compressor.lisp")
 (load "@/ui/effects/builtin/audio-fx.lisp")

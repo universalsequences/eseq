@@ -704,6 +704,102 @@ pub(crate) fn build_effects_value(
     Value::List(slots)
 }
 
+/// One entry per device in a channel's signal chain, for compact channel
+/// views that list devices by name (the Autechre-style grid mixer): the
+/// track's instrument first, then each effect slot. `enabled` mirrors the
+/// effect's own `enabled` parameter when it has one (true otherwise), so a
+/// bypassed device reads as off without the panel's full param projection.
+fn device_entry(name: String, kind: &str, enabled: bool, slot: i64) -> Value {
+    map_value([
+        ("name", Value::String(name)),
+        ("kind", Value::String(kind.to_string())),
+        ("enabled", Value::Bool(enabled)),
+        // Effect slot index (matches the fx panel's `slot-idx`); -1 for the
+        // instrument, which has no slot.
+        ("slot", Value::Number(slot as f64)),
+    ])
+}
+
+fn enabled_param_index(desc: &sequencer::effects::EffectDescriptor) -> Option<usize> {
+    desc.params.iter().position(|param| param.name == "enabled")
+}
+
+pub(crate) fn build_track_device_chains_value(
+    app: &app::App,
+    state: &Arc<SequencerState>,
+) -> Value {
+    let track_count = app.tracks.len();
+    list_value((0..track_count).map(|track| {
+        let mut entries = Vec::new();
+        let instrument_type = app.graph.track_instrument_types.get(track).copied();
+        let instrument_name = match instrument_type {
+            Some(sequencer::sequencer::InstrumentType::Custom) => app
+                .graph
+                .track_engine_ids
+                .get(track)
+                .and_then(|engine_id| *engine_id)
+                .and_then(|engine_id| app.editor.engine_registry.get(engine_id))
+                .map(|engine| engine.name.clone())
+                .or_else(|| app.tracks.get(track).cloned()),
+            Some(sequencer::sequencer::InstrumentType::Sampler) => Some("sampler".to_string()),
+            // A rack has no engine name of its own; the track's name is the
+            // only label that says which rack this is.
+            Some(sequencer::sequencer::InstrumentType::Rack) => app
+                .tracks
+                .get(track)
+                .filter(|name| !name.trim().is_empty())
+                .cloned()
+                .or_else(|| Some("rack".to_string())),
+            Some(sequencer::sequencer::InstrumentType::Modulator) => Some("modulator".to_string()),
+            Some(sequencer::sequencer::InstrumentType::Empty) | None => None,
+        };
+        if let Some(name) = instrument_name {
+            // Engine names are library paths ("factory:Drums/808 Clap"); a
+            // channel strip wants just the leaf.
+            let leaf = name
+                .rsplit('/')
+                .next()
+                .and_then(|leaf| leaf.rsplit(':').next())
+                .unwrap_or(name.as_str())
+                .to_string();
+            entries.push(device_entry(leaf, "instrument", true, -1));
+        }
+        let descs = app.graph.effect_descriptors.get(track);
+        let chain = state.pattern.effect_chains.get(track);
+        if let Some(descs) = descs {
+            // Chains are fixed-size slot arrays; an unused slot has an
+            // empty descriptor. Only occupied slots are devices.
+            for (slot_idx, desc) in descs.iter().enumerate().filter(|(_, d)| !d.name.is_empty()) {
+                let enabled = match (enabled_param_index(desc), chain.and_then(|c| c.get(slot_idx))) {
+                    (Some(idx), Some(slot)) => {
+                        slot_param_stored_value(slot, &desc.params[idx], idx, None) >= 0.5
+                    }
+                    _ => true,
+                };
+                entries.push(device_entry(desc.name.clone(), "effect", enabled, slot_idx as i64));
+            }
+        }
+        list_value(entries)
+    }))
+}
+
+pub(crate) fn build_bus_device_chains_value(app: &app::App) -> Value {
+    list_value(app.buses.iter().map(|bus| {
+        list_value(bus.effect_descriptors.iter().enumerate().filter(|(_, d)| !d.name.is_empty()).map(|(slot_idx, desc)| {
+            let enabled = match (enabled_param_index(desc), bus.effect_slots.get(slot_idx)) {
+                (Some(idx), Some(slot)) => slot
+                    .defaults
+                    .get(idx)
+                    .copied()
+                    .unwrap_or(desc.params[idx].default)
+                    >= 0.5,
+                _ => true,
+            };
+            device_entry(desc.name.clone(), "effect", enabled, slot_idx as i64)
+        }))
+    }))
+}
+
 pub(crate) fn build_bus_effects_value(app: &app::App) -> Value {
     build_bus_effects_value_for_selection(app, None)
 }

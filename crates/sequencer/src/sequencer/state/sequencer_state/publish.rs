@@ -37,14 +37,6 @@ impl SequencerState {
         std::mem::take(&mut *self.graph_control_commands.lock().unwrap())
     }
 
-    pub fn push_roll_command(&self, command: crate::sequencer::RollCommand) {
-        self.roll_commands.lock().unwrap().push(command);
-    }
-
-    pub fn drain_roll_commands(&self) -> Vec<crate::sequencer::RollCommand> {
-        std::mem::take(&mut *self.roll_commands.lock().unwrap())
-    }
-
     pub fn push_roll_recorded_hit(&self, hit: crate::sequencer::RollHitRecorded) {
         let mut hits = self.roll_recorded_hits.lock().unwrap();
         // Backstop for a control thread that never drains (headless

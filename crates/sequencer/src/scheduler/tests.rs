@@ -3877,6 +3877,20 @@
         assert!(roll.process_roll.is_none());
         assert!(state.transport.roll_mode.load(Ordering::Relaxed));
         assert!(!state.transport.sequence_rolling.load(Ordering::Relaxed));
+
+        // A manual MIDI start can arrive after the scheduler drained commands
+        // but before this process roll reaches its deadline. Releasing the
+        // process must preserve that new owner's published held state.
+        assert!(roll.engage_process_roll(request, &mut clock, &snapshot, &state));
+        let source = crate::sequencer::SequenceRollSource::MidiNote { port: 0, channel: 0, note: 27 };
+        state.set_sequence_roll_held(source.clone(), true);
+        assert!(roll.release_process_roll_if_due(1.0, &state));
+        assert!(state.transport.sequence_rolling.load(Ordering::Acquire));
+        roll.apply_commands_with_clock(&state.drain_roll_commands(), &mut clock, &snapshot);
+        assert!(roll.sequence_rolling());
+        state.set_sequence_roll_held(source, false);
+        roll.apply_commands_with_clock(&state.drain_roll_commands(), &mut clock, &snapshot);
+        assert!(!roll.sequence_rolling());
     }
 
     fn tacc_ramp_restart_fixture(
@@ -11357,31 +11371,36 @@
     #[test]
     fn production_lookahead_replays_the_captured_sequence_window() {
         run_with_scheduler_stack(|| {
-            let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
-            state.pattern.track_params[0].set_num_steps(4);
-            for step in 0..4 {
-                state.pattern.patterns[0].set_step_active(step, true);
-            }
-            state.toggle_play();
-            state.transport.roll_mode.store(true, Ordering::Release);
-            let snapshot = state.publish_scheduler_snapshot();
-            let mut scheduler = SchedulerLookaheadState::new(48_000);
-            scheduler.roll.apply_commands_with_clock(
-                &[RollCommand::SequenceRoll { on: true }],
-                &mut scheduler.clock,
-                &snapshot,
-            );
-            let queue = ScheduledEventQueue::<64>::new();
-            drive_roll_chunks(&state, &mut scheduler, &queue, 0, 0);
-
-            let mut steps = Vec::new();
-            while let Some(event) = queue.pop_owned() {
-                if let ScheduledEventKind::ResolvedTrigger { step, .. } = event.kind {
-                    steps.push(step);
+            for roll_mode in [false, true] {
+                let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+                state.pattern.track_params[0].set_num_steps(4);
+                for step in 0..4 {
+                    state.pattern.patterns[0].set_step_active(step, true);
                 }
+                state.toggle_play();
+                state.transport.roll_mode.store(roll_mode, Ordering::Release);
+                let snapshot = state.publish_scheduler_snapshot();
+                let mut scheduler = SchedulerLookaheadState::new(48_000);
+                state.set_sequence_roll_held(crate::sequencer::SequenceRollSource::MidiNote {
+                    port: 0, channel: 0, note: 27,
+                }, true);
+                scheduler.roll.apply_commands_with_clock(
+                    &state.drain_roll_commands(),
+                    &mut scheduler.clock,
+                    &snapshot,
+                );
+                let queue = ScheduledEventQueue::<64>::new();
+                drive_roll_chunks(&state, &mut scheduler, &queue, 0, 0);
+
+                let mut steps = Vec::new();
+                while let Some(event) = queue.pop_owned() {
+                    if let ScheduledEventKind::ResolvedTrigger { step, .. } = event.kind {
+                        steps.push(step);
+                    }
+                }
+                assert!(steps.len() >= 4, "the captured step must retrigger each roll window");
+                assert!(steps.iter().all(|step| *step == 0), "rolled steps: {steps:?}");
             }
-            assert!(steps.len() >= 4, "the captured step must retrigger each roll window");
-            assert!(steps.iter().all(|step| *step == 0), "rolled steps: {steps:?}");
         });
     }
 
@@ -11856,6 +11875,49 @@ fn scene_transpose_follows_live_scene_values_without_a_scratch_runtime() {
             let events = observed_triggers(&queue);
             assert_eq!(events.len(), 1);
             assert_eq!(events[0].sample_time, 0);
+        });
+    }
+
+    #[test]
+    fn scheduler_driver_preserves_only_roll_holds_pressed_after_stop() {
+        run_with_scheduler_stack(|| {
+            let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+            state.pattern.track_params[0].set_num_steps(4);
+            for step in 0..4 {
+                state.pattern.patterns[0].set_step_active(step, true);
+                state.pattern.step_data[0].set(step, StepParam::Transpose, step as f32);
+            }
+            state.start_playback();
+            state.publish_scheduler_snapshot();
+            let queue = Arc::new(ScheduledEventQueue::<4096>::new());
+            let mut driver = super::worker::SchedulerDriver::new(state.clone(), 48_000, 512, queue.clone());
+            let input = super::worker::SchedulerInput::Offline;
+            driver.advance(0, 24_000, input);
+            observed_triggers(&queue);
+
+            state.stop_playback();
+            state.set_sequence_roll_held(crate::sequencer::SequenceRollSource::MidiNote {
+                port: 0, channel: 0, note: 27,
+            }, true);
+            // Stop and the fresh MIDI press arrive in the same scheduler
+            // batch. The stopped transition must not discard the new hold.
+            driver.advance(24_000, 24_512, input);
+            observed_triggers(&queue);
+            state.start_playback();
+            driver.advance(24_512, 48_512, input);
+            let rolled = observed_triggers(&queue);
+            assert!(rolled.len() >= 4, "rolled hits: {rolled:?}");
+            assert!(rolled.iter().all(|event| event.transpose == rolled[0].transpose));
+
+            // Another Stop cancels that hold. Even an immediate restart must
+            // restore the normal sequence through the ordered ClearAll.
+            state.stop_playback();
+            state.start_playback();
+            driver.advance(48_512, 72_512, input);
+            let normal = observed_triggers(&queue);
+            assert!(normal.iter().any(|event| event.transpose != normal[0].transpose),
+                "a cleared roll must return to different authored notes: {normal:?}");
+            assert!(!state.transport.sequence_rolling.load(Ordering::Acquire));
         });
     }
 

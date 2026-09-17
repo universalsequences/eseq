@@ -10,13 +10,17 @@
 ;;   {:kind :aftertouch :channel 0 :value 0.3 :port 0}
 ;;   {:kind :poly-pressure :channel 0 :note 60 :value 0.3 :port 0}
 ;;
+;; Connected inputs also carry :device-id and :device-name. Device-scoped
+;; mappings take precedence over unscoped mappings for the same message;
+;; endpoint-ID mappings take precedence over device-name mappings.
+;;
 ;; `:value` is always normalised (0..1, or -1..1 for pitch bend) so targets
 ;; never see raw 7-bit numbers unless they ask for `:raw`.
 ;;
 ;; Mappings are a list of plain dicts so a future editor UI can render and
 ;; edit the same table the user's init.lisp builds:
 ;;
-;;   {:key "cc:14" :source {...} :target {...} :mode :absolute}
+;;   {:key "..." :source {...} :target {...} :mode :absolute}
 ;;
 ;; Sources and targets are constructed with the small helpers below and
 ;; resolved at EVENT time — `(rack-macro 0)` means "macro 0 of whichever
@@ -47,8 +51,11 @@
         pitch-bend
         aftertouch
         on-channel
+        on-device
+        on-device-id
         rack-macro
         rack-macro-of
+        set-rack-macro-value
         armed-rack-track
         source-key
         dispatch
@@ -92,23 +99,29 @@
 (def on-channel (channel source)
   (merge source :channel channel))
 
+;; Match an input by its exact driver name, or one particular endpoint ID.
+;; Endpoint IDs are persistent on macOS and session-local on Linux.
+(def on-device (name source)
+  (merge source :device-name name))
+
+(def on-device-id (id source)
+  (merge source :device-id id))
+
 ;; Stable identity of a source, used as the mapping key so re-evaluating
 ;; init.lisp replaces a mapping instead of stacking a duplicate.
 (def source-key (source)
-  (let ((kind (get source :kind))
-        (channel (get source :channel)))
-   (let ((suffix (if (present? channel) (str "@" channel) "")))
-    (if (= kind :cc)
-      (str "cc:" (get source :cc) suffix)
-      (if (= kind :note)
-        (str "note:" (get source :note) suffix)
-        (str (get source :kind) suffix))))))
+  (str (list (get source :kind) (get source :cc) (get source :note)
+             (get source :channel) (get source :device-name) (get source :device-id))))
 
 (def source-matches? (source msg)
   (let ((kind (get source :kind))
         (channel (get source :channel))
         (msg-kind (get msg :kind)))
-    (if (and (present? channel) (not (= channel (get msg :channel))))
+    (if (or (and (present? channel) (not (= channel (get msg :channel))))
+            (and (present? (get source :device-name))
+                 (not (= (get source :device-name) (get msg :device-name))))
+            (and (present? (get source :device-id))
+                 (not (= (get source :device-id) (get msg :device-id)))))
       false
       (if (= kind :cc)
         (and (= msg-kind :cc) (= (get source :cc) (get msg :cc)))
@@ -126,6 +139,18 @@
 ;; (rack-macro-of 3 0) → macro 0 of track 3, armed or not.
 (def rack-macro-of (track index)
   (dict :kind :rack-macro :macro index :track track))
+
+;; Shared by declarative macro targets and controller callbacks whose track
+;; is resolved dynamically. Missing racks/macros are inert; zero is a value.
+(def set-rack-macro-value (track index value)
+  (if (and (present? track) (present? (seq-rack-macro-value track index)))
+    (do
+      ;; Same command pair as the on-screen macro knob: selected steps receive
+      ;; p-locks; otherwise the host sets the value and handles recording.
+      (host-command (if (seq-has-selection?) "set-rack-macro-plock" "set-rack-macro-value")
+        (dict :track track :id index :value value))
+      true)
+    false))
 
 ;; First armed track whose instrument is an Instrument Rack, else nil.
 ;; Exported so scripts can `override` the policy (e.g. prefer the selected
@@ -163,13 +188,13 @@
                        :mode (or-default (get opts :mode) :absolute)
                        :step (or-default (get opts :step) (/ 1.0 127.0)))))
     (set! mappings
-      (append (filter |m| (not (= (get m :key) key)) mappings)
+      (append (filter |m| (not (= (source-key (get m :source)) key)) mappings)
               (list mapping)))
     mapping)))
 
 (def midi-unmap (source)
   (let ((key (source-key source)))
-    (set! mappings (filter |m| (not (= (get m :key) key)) mappings))
+    (set! mappings (filter |m| (not (= (source-key (get m :source)) key)) mappings))
     true))
 
 (def midi-clear-mappings ()
@@ -191,7 +216,6 @@
     ;; message without one is not consumed rather than decoded from nil —
     ;; its `:value` is not a macro position (pitch bend is -1..1).
     (if (and (present? track)
-             (seq-track-is-rack? track)
              (or (not relative) (present? (get msg :raw))))
       (let ((value (if relative
                      (let ((current (seq-rack-macro-value track index)))
@@ -199,13 +223,7 @@
                                  (* (relative-delta (get msg :raw)) (get mapping :step)))
                               0.0 1.0))
                      (get msg :value))))
-        ;; Same command pair as the on-screen macro knob (instrument-panel
-        ;; `rack-macro-set`): with steps selected the turn writes a p-lock
-        ;; onto them, otherwise it sets the value — and, while play+record
-        ;; is on, the host's print latch prints it onto passing steps.
-        (host-command (if (seq-has-selection?) "set-rack-macro-plock" "set-rack-macro-value")
-          (dict :track track :id index :value value))
-        true)
+        (set-rack-macro-value track index value))
       false)))
 
 (def apply-target (target mapping msg)
@@ -217,13 +235,18 @@
         ;; Not a target dict: treat as a callable (lambda (value msg) …).
         (do (target (get msg :value) msg) true)))))
 
+(def device-specificity (mapping)
+  (let ((source (get mapping :source)))
+    (if (present? (get source :device-id)) 2
+      (if (present? (get source :device-name)) 1 0))))
+
 ;; Entry point the host calls once per message. Returns true when consumed.
 (def dispatch (msg)
   (set! last-message msg)
   (run-hook "midi-message-hook" msg)
-  (reduce |consumed mapping|
-    (if (source-matches? (get mapping :source) msg)
+  (let ((matched (filter |mapping| (source-matches? (get mapping :source) msg) mappings))
+        (specificity (reduce |level mapping| (max level (device-specificity mapping)) 0 matched)))
+    (reduce |consumed mapping|
       (or (apply-target (get mapping :target) mapping msg) consumed)
-      consumed)
-    false
-    mappings))
+      false
+      (filter |mapping| (= (device-specificity mapping) specificity) matched))))

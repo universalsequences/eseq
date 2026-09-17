@@ -98,3 +98,7 @@ patcher writeback. `app::graph::latency::tests::authored_latency_*` covers real
 compiled serial delays aligned with a parallel dry branch, explicit zero,
 bypass accounting, and replacement/bypass pad updates in a headless app.
 No project-specific or private-effect fixture is required.
+
+The builtin ES Compressor (`crates/sequencer/src/effects/es_compressor_dsp.lisp`)
+is the first factory effect to use the declaration; bundled builtins compile
+through the same path, so no name registration is needed for them either.

@@ -5845,6 +5845,7 @@ mod tests {
         for name in [
             crate::effects::conv_reverb::NAME,
             crate::effects::filter_table::NAME,
+            crate::effects::es_compressor::NAME,
         ] {
             let project_name = format!(
                 "{}{}",

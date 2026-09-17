@@ -750,6 +750,14 @@ pub(crate) fn sync_track_mixer_state(
         "track-instrument-types",
         build_track_instrument_types(app),
     );
+    // Compact channel views list devices by name; this rides the same sync
+    // as the instrument types so any mixer refresh (project load, effect
+    // add/remove, dgen compile landing) carries the chain too.
+    rt.set_reactive(
+        "SEQ",
+        "track-device-chains",
+        build_track_device_chains_value(app, state),
+    );
     sync_all_rack_slot_selection_binding_fields(rt, app);
     rt.set_reactive(
         "SEQ",
@@ -868,6 +876,7 @@ pub(crate) fn sync_bus_mixer_control_state(rt: &mut Runtime, app: &app::App) {
 pub(crate) fn sync_bus_mixer_state(rt: &mut Runtime, app: &app::App) {
     sync_bus_mixer_control_state(rt, app);
     rt.set_reactive("SEQ", "bus-effects", build_bus_effects_value(app));
+    rt.set_reactive("SEQ", "bus-device-chains", build_bus_device_chains_value(app));
 }
 
 pub(crate) fn sync_track_mixer_empty_state(rt: &mut Runtime) {
@@ -877,6 +886,7 @@ pub(crate) fn sync_track_mixer_empty_state(rt: &mut Runtime) {
     rt.set_reactive("SEQ", "track-colors", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-collapsed", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-pattern-cells", Value::List(vec![]));
+    rt.set_reactive("SEQ", "track-active-pattern-ids", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-instrument-types", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-mod-output-available", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-bus-sends", Value::List(vec![]));

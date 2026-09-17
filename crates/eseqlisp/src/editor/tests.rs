@@ -5989,6 +5989,57 @@ fn tiled_text_click_uses_precise_content_origin_and_border_inset() {
 }
 
 #[test]
+fn reveal_widget_pans_the_tile_to_the_keyed_widget() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor
+        .runtime
+        .eval_str(
+            r#"
+                (effect
+                  (h-stack :gap 0
+                    (box :key "wide-box-0" :width 8 :height 2)
+                    (box :key "wide-box-1" :width 8 :height 2)
+                    (box :key "wide-box-2" :width 8 :height 2)
+                    (box :key "wide-box-3" :width 8 :height 2)
+                    (box :key "wide-box-4" :width 8 :height 2)
+                    (box :key "wide-box-5" :width 8 :height 2)
+                    (box :key "wide-box-6" :width 8 :height 2)
+                    (box :key "wide-box-7" :width 8 :height 2)
+                    (box :key "wide-box-8" :width 8 :height 2)
+                    (box :key "wide-box-9" :width 8 :height 2)))
+            "#,
+        )
+        .unwrap();
+    editor.active_buffer_mut().view_mode = super::ViewMode::UiOnly;
+    editor.set_layout_viewport_exact(20.0, 8.0);
+    editor.sync_layout_to_active_leaf();
+    assert_eq!(editor.widget_scroll_left(), 0.0);
+
+    let name = editor.active_buffer().name.clone();
+    editor
+        .runtime
+        .request_reveal_widget(name.clone(), "wide-box-7".to_string());
+    editor.refresh_runtime_side_effects();
+    let left = editor.widget_scroll_left();
+    // Box 7 starts at col 56; content is 80 wide in a 20-wide viewport, so
+    // the pan lands at 55.5 (half a cell of margin), inside the 60 limit.
+    assert!((left - 55.5).abs() < 0.01, "revealed left = {left}");
+
+    // An unknown key leaves the offset alone and does not pin the request.
+    editor
+        .runtime
+        .request_reveal_widget(name.clone(), "no-such-widget".to_string());
+    editor.refresh_runtime_side_effects();
+    assert!((editor.widget_scroll_left() - 55.5).abs() < 0.01);
+
+    // An empty key pans back to the start.
+    editor.runtime.request_reveal_widget(name, String::new());
+    editor.refresh_runtime_side_effects();
+    assert_eq!(editor.widget_scroll_left(), 0.0);
+}
+
+#[test]
 fn metal_tiled_widget_click_uses_fractional_layout_viewport_without_relayout() {
     let runtime = Runtime::new();
     let mut editor = Editor::new(runtime, EditorConfig::default());

@@ -16,7 +16,7 @@ pub mod dgen_manifest;
 pub mod dylib_cache;
 pub mod effect_chain_graph;
 pub mod effect_compile;
-mod effect_latency;
+pub(crate) mod effect_latency;
 pub mod instrument_compile;
 pub mod instrument_storage;
 

@@ -29,6 +29,9 @@ pub struct Snapshot {
 }
 
 pub enum Event {
+    /// Ordered before this connection's first message (including callbacks
+    /// made synchronously by connect). ResetPort retires the identity.
+    PortConnected { port: usize, id: String, name: String },
     Message(MidiInputEvent),
     Snapshot(Snapshot),
     /// Lifecycle cleanup cannot be consumed by user controller mappings.
@@ -303,6 +306,9 @@ impl<D: Driver> Manager<D> {
                         port: slot,
                         sink: self.sink.clone(),
                     }));
+                    self.sink.send(Event::PortConnected {
+                        port: slot, id: id.clone(), name: name.clone(),
+                    });
                     match self.driver.connect(&port, ingress.clone()) {
                         Ok(driver) => {
                             self.connections[slot] = Some(Connection {
@@ -467,6 +473,7 @@ mod tests {
         invalid_once: Option<String>,
         fail_scan: bool,
         fail_connect: bool,
+        note_during_connect: bool,
     }
     impl Driver for FakeDriver {
         type Port = String;
@@ -491,6 +498,9 @@ mod tests {
             }
         }
         fn connect(&mut self, port: &String, ingress: Arc<Mutex<Ingress>>) -> Result<(), String> {
+            if self.note_during_connect {
+                ingress.lock().unwrap().message(note(true));
+            }
             if self.fail_connect {
                 return Err("busy".into());
             }
@@ -525,6 +535,22 @@ mod tests {
     }
 
     #[test]
+    fn connection_identity_precedes_synchronous_callbacks_and_failed_open_reset() {
+        let (_dir, mut m, rx) = harness();
+        m.driver.ports = vec!["a".into()];
+        m.driver.note_during_connect = true;
+        m.driver.fail_connect = true;
+        m.scan();
+        let events: Vec<_> = rx.try_iter().collect();
+        assert_eq!(events.len(), 4);
+        assert!(matches!(&events[0], Event::PortConnected { port: 0, id, name } if id == "a" && name == "Keyboard"));
+        assert!(matches!(events[1], Event::Message(e) if e.port == 0 && e.message == note(true)));
+        assert!(matches!(events[2], Event::Message(e) if e.port == 0 && e.message == note(false)));
+        assert!(matches!(events[3], Event::ResetPort(0)));
+        assert!(!m.snapshot.devices[0].connected);
+    }
+
+    #[test]
     fn hotplug_preserves_connections_and_releases_before_slot_reuse() {
         let (_dir, mut m, rx) = harness();
         m.scan();
@@ -546,11 +572,14 @@ mod tests {
         old.lock().unwrap().message(note(true)); // stale callback after close
         m.driver.opened[2].1.lock().unwrap().message(note(true));
         let events: Vec<_> = rx.try_iter().collect();
-        assert_eq!(events.len(), 4);
-        assert!(matches!(events[0], Event::Message(e) if e.port == 0 && e.message == note(true)));
-        assert!(matches!(events[1], Event::Message(e) if e.port == 0 && e.message == note(false)));
-        assert!(matches!(events[2], Event::ResetPort(0)));
-        assert!(matches!(events[3], Event::Message(e) if e.port == 0 && e.message == note(true)));
+        assert_eq!(events.len(), 7);
+        assert!(matches!(&events[0], Event::PortConnected { port: 0, id, name } if id == "a" && name == "Keyboard"));
+        assert!(matches!(&events[1], Event::PortConnected { port: 1, id, .. } if id == "b"));
+        assert!(matches!(events[2], Event::Message(e) if e.port == 0 && e.message == note(true)));
+        assert!(matches!(events[3], Event::Message(e) if e.port == 0 && e.message == note(false)));
+        assert!(matches!(events[4], Event::ResetPort(0)));
+        assert!(matches!(&events[5], Event::PortConnected { port: 0, id, .. } if id == "c"));
+        assert!(matches!(events[6], Event::Message(e) if e.port == 0 && e.message == note(true)));
         assert_eq!(m.connections[1].as_ref().unwrap().id, "b");
     }
 
@@ -567,9 +596,10 @@ mod tests {
         assert!(m.snapshot.devices[0].connected);
         old.lock().unwrap().message(note(true));
         let events: Vec<_> = rx.try_iter().collect();
-        assert_eq!(events.len(), 3);
-        assert!(matches!(events[1], Event::Message(e) if e.message == note(false)));
-        assert!(matches!(events[2], Event::ResetPort(0)));
+        assert_eq!(events.len(), 5);
+        assert!(matches!(events[2], Event::Message(e) if e.message == note(false)));
+        assert!(matches!(events[3], Event::ResetPort(0)));
+        assert!(matches!(&events[4], Event::PortConnected { port: 0, id, .. } if id == "a"));
     }
 
     #[test]
@@ -582,7 +612,7 @@ mod tests {
         m.set_enabled("a", false, &path);
         m.scan();
         assert!(
-            matches!(rx.try_iter().nth(1), Some(Event::Message(e)) if e.message == note(false))
+            matches!(rx.try_iter().nth(3), Some(Event::Message(e)) if e.message == note(false))
         );
         assert!(!m.snapshot.devices[0].enabled);
         assert!(m.snapshot.devices[1].connected);

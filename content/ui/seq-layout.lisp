@@ -13,6 +13,8 @@
 (import eseq.effects.param-controls :as pc)
 
 (export buffer-radius
+        transport-height
+        transport-tile-spec
         step-and-track-panel-layout-spec
         main-panel-layout-spec
         lower-panel-layout-spec
@@ -38,6 +40,14 @@
 ;; `apply-*` names are also the M-x-visible spellings.
 
 (def buffer-radius 16)
+
+;; Transport bar height (cells). A function, not a literal, so a package can
+;; `override` it (e.g. a two-row transport while its own view is showing).
+(def transport-height () 2.4)
+
+(def transport-tile-spec ()
+  (list :buf "*transport*" :hide-status true :borderless true
+    :min-height (transport-height) :max-height (transport-height)))
 ;; The width itself lives in the seq-step-tabs hub (which cannot import us);
 ;; edit it there and every tile follows, including *sequencer*.
 (def border-width eseq.seq-step-tabs/seq-tile-border-width)
@@ -103,7 +113,8 @@
   (if eseq.seq-core-state/mixer-panel-visible
     (list :rows :gap 1
       0.55 (main-panel-layout-spec)
-      0.45 (mixer-panel-layout-spec nil nil 14.5 14.5))
+      0.45 (let ((h (eseq.seq-core-state/mixer-panel-height)))
+             (mixer-panel-layout-spec nil nil h h)))
     (main-panel-layout-spec)))
 
 (def lower-panel-layout-spec (lower-buffer lower-ratio lower-min-height lower-max-height)
@@ -115,14 +126,14 @@
             (main-and-mixer-layout-spec))))
     (if eseq.seq-core-state/lower-panel-visible
       (list :rows :gap 1
-        0.05 (list :buf "*transport*" :hide-status true :borderless true :min-height 2.4 :max-height 2.4)
+        0.05 (transport-tile-spec)
         0.95 (list :rows :gap 1 :remember (str "sequencer-lower-panel:" lower-buffer)
           0.95 main-layout
           lower-ratio (if (= lower-buffer "*fx*")
             (fx-panel-layout-spec nil nil lower-min-height lower-max-height)
             (list :buf lower-buffer :hide-status true :border-radius buffer-radius :border-width border-width :background-color :buffer-bg :min-height lower-min-height :max-height lower-max-height))))
       (list :rows :gap 1
-        0.05 (list :buf "*transport*" :hide-status true :borderless true :min-height 2.4 :max-height 2.4)
+        0.05 (transport-tile-spec)
         0.95 main-layout))))
 
 ;; Every patcher bottom-bar panel shares the regular fx-panel height so the
@@ -180,11 +191,11 @@
 (def instrument-patcher-layout-spec (patcher-buffer)
   (if (patcher-bottom-bar-visible?)
     (list :rows :gap 1
-      0.05 (list :buf "*transport*" :hide-status true :borderless true :min-height 2.4 :max-height 2.4)
+      0.05 (transport-tile-spec)
       0.80 (patcher-main-layout-spec patcher-buffer)
       0.15 (patcher-bottom-bar-layout-spec))
     (list :rows :gap 1
-      0.05 (list :buf "*transport*" :hide-status true :borderless true :min-height 2.4 :max-height 2.4)
+      0.05 (transport-tile-spec)
       0.95 (patcher-main-layout-spec patcher-buffer))))
 
 (def instrument-patcher-source-layout-spec (patcher-buffer source-buffer)
@@ -199,11 +210,11 @@
               0.38 (list :buf source-buffer :hide-status true :border-radius buffer-radius :border-width border-width :background-color :buffer-bg :min-height 20)))))
     (if (patcher-bottom-bar-visible?)
       (list :rows :gap 1
-        0.05 (list :buf "*transport*" :hide-status true :borderless true :min-height 2.4 :max-height 2.4)
+        0.05 (transport-tile-spec)
         0.80 main-layout
         0.15 (patcher-bottom-bar-layout-spec))
       (list :rows :gap 1
-        0.05 (list :buf "*transport*" :hide-status true :borderless true :min-height 2.4 :max-height 2.4)
+        0.05 (transport-tile-spec)
         0.95 main-layout))))
 
 ;; Patch Learn is a real sibling buffer in the editor's tile tree. Keeping it
@@ -222,11 +233,11 @@
             patcher-and-learn)))
     (if (patcher-bottom-bar-visible?)
       (list :rows :gap 1
-        0.05 (list :buf "*transport*" :hide-status true :borderless true :min-height 2.4 :max-height 2.4)
+        0.05 (transport-tile-spec)
         0.80 main-layout
         0.15 (patcher-bottom-bar-layout-spec))
       (list :rows :gap 1
-        0.05 (list :buf "*transport*" :hide-status true :borderless true :min-height 2.4 :max-height 2.4)
+        0.05 (transport-tile-spec)
         0.95 main-layout))))
 
 (def apply-lower-panel-layout (lower-buffer lower-ratio lower-min-height lower-max-height)
@@ -285,3 +296,21 @@
         (if (= eseq.seq-step-tabs/lower-panel-buffer "*piano-roll*")
           (apply-piano-roll-layout)
           (apply-fx-layout))))))
+
+;; The *mixer* tile follows the clip-area knob: a package that grows the
+;; strips via `setopt` gets the taller tile without also having to know the
+;; layout entry points. The observer runs once at load, before the startup
+;; layout exists, so that first run only records the value; later changes
+;; reapply the current layout. `seen` is a plain global, not a defstate, so
+;; writing it here does not re-trigger the observer.
+(def mixer-clip-area-height-seen nil)
+
+(observe
+  (let ((h eseq.seq-core-state/mixer-clip-area-height))
+    (do
+      (if (and mixer-clip-area-height-seen
+               (not (= mixer-clip-area-height-seen h))
+               eseq.seq-core-state/mixer-panel-visible)
+        (refresh-current-layout)
+        nil)
+      (set! mixer-clip-area-height-seen h))))

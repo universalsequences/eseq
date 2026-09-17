@@ -2490,6 +2490,11 @@ pub struct VM {
     pub overrides: HashMap<String, OverrideSet>,
     /// Auto-qualified `defcustom` metadata used to generate settings UIs.
     pub custom_declarations: HashMap<String, CustomDeclaration>,
+    /// Defaults of `defcustom`s pruned by a module re-declaration, kept until
+    /// the re-evaluated `defcustom` consumes them to tell an untouched knob
+    /// (still on its old default, should follow a new one) from a customized
+    /// one (keeps the user's value).
+    retired_custom_defaults: HashMap<String, Value>,
     /// Modules declared via `(module NAME)` → the file that declared them
     /// (None for include_str!-style sources with no path). `import`
     /// consults this for load-once semantics (spec §4).
@@ -3053,8 +3058,14 @@ pub fn register_core_natives(vm: &mut VM) {
         vm.declared_modules.insert(name.clone(), path);
         vm.module_exports.entry(name.clone()).or_default();
         let custom_prefix = format!("{name}/");
-        vm.custom_declarations
-            .retain(|custom_name, _| !custom_name.starts_with(&custom_prefix));
+        let retired = &mut vm.retired_custom_defaults;
+        vm.custom_declarations.retain(|custom_name, declaration| {
+            let keep = !custom_name.starts_with(&custom_prefix);
+            if !keep {
+                retired.insert(custom_name.clone(), declaration.default.clone());
+            }
+            keep
+        });
         // A module evaluated by `load` counts as satisfied for this pass too,
         // so a later `import` of it does not double-evaluate (ui/effects.lisp
         // still `load`s files that effects/* modules import).
@@ -3271,6 +3282,29 @@ pub fn register_core_natives(vm: &mut VM) {
             if module == crate::modules::IMPLICIT_MODULE { name.clone() }
             else { crate::modules::qualify(module, name) }
         };
+        // Re-evaluation preserves defstate values, which is right for a knob
+        // the user has `setopt`: their choice survives a reload. But a knob
+        // still sitting on its declared default should follow a *new*
+        // default, otherwise editing the number in the file and re-evaluating
+        // does nothing until restart. "Untouched" is "current value equals
+        // the previously declared default".
+        let previous_default = vm
+            .custom_declarations
+            .get(&name)
+            .map(|declaration| declaration.default.clone())
+            .or_else(|| vm.retired_custom_defaults.remove(&name));
+        if let Some(previous_default) = previous_default
+            && previous_default != *default
+            && let Some(id) = vm.dag.find_local_state_source_node(&name)
+        {
+            let untouched = matches!(
+                vm.dag.nodes.get(&id),
+                Some(ReactiveNode::Source { value, .. }) if *value == previous_default
+            );
+            if untouched {
+                vm.mark_source_dependents_dirty(id, default.clone());
+            }
+        }
         vm.custom_declarations.insert(name.clone(), CustomDeclaration {
             name,
             type_name: type_name.clone(),
@@ -4266,6 +4300,7 @@ impl VM {
             extension_hooks: HashMap::new(),
             overrides: HashMap::new(),
             custom_declarations: HashMap::new(),
+            retired_custom_defaults: HashMap::new(),
             declared_modules: HashMap::new(),
             module_exports: crate::modules::ModuleExportRegistry::new(),
             imported_at_epoch: HashMap::new(),
@@ -9491,6 +9526,34 @@ counter
         assert_eq!(declaration.default, Value::Number(0.5));
         let listed = vm.eval_str("(get (first (custom-declarations)) :name)").expect("list declarations");
         assert_eq!(listed, Some(Value::String("alec.tools.settings/gain".into())));
+    }
+
+    #[test]
+    fn defcustom_new_default_applies_on_reload_unless_the_user_set_it() {
+        let mut vm = module_test_vm();
+        let path = temp_lisp_path("defcustom-redefault");
+        vm.set_preserve_state_on_redefinition(true);
+        vm.eval_module_source(
+            path.clone(),
+            "(module t.knobs)\n(defcustom rows 8 :type :number :doc \"rows\")",
+            1,
+        ).expect("v1");
+        assert_eq!(vm.read_tracked_state_value("t.knobs/rows"), Some(Value::Number(8.0)));
+        // Untouched: a new declared default replaces the preserved value.
+        vm.eval_module_source(
+            path.clone(),
+            "(module t.knobs)\n(defcustom rows 12 :type :number :doc \"rows\")",
+            2,
+        ).expect("v2");
+        assert_eq!(vm.read_tracked_state_value("t.knobs/rows"), Some(Value::Number(12.0)));
+        // Customized: the user's value survives another default change.
+        vm.eval_str("(setopt t.knobs/rows 20)").expect("setopt");
+        vm.eval_module_source(
+            path,
+            "(module t.knobs)\n(defcustom rows 16 :type :number :doc \"rows\")",
+            3,
+        ).expect("v3");
+        assert_eq!(vm.read_tracked_state_value("t.knobs/rows"), Some(Value::Number(20.0)));
     }
 
     #[test]

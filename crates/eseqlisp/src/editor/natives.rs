@@ -535,6 +535,23 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
     );
 
     runtime.register_native_with_docs(
+        "reveal-widget",
+        "(reveal-widget buffer-name key-substring)",
+        "Scroll the tile showing BUFFER-NAME horizontally so the first widget whose \
+         stable key contains KEY-SUBSTRING is in view; an empty key scrolls to the \
+         start. Retries across frames until that buffer's layout carries the key.",
+        |args, ctx| {
+            let (Some(Value::String(buffer)), Some(Value::String(key))) =
+                (args.first(), args.get(1))
+            else {
+                return Ok(Value::Bool(false));
+            };
+            ctx.request_reveal_widget(buffer.clone(), key.clone());
+            Ok(Value::Bool(true))
+        },
+    );
+
+    runtime.register_native_with_docs(
         "eval-current-buffer",
         "(eval-current-buffer)",
         "Evaluate the current buffer through the editor reload pipeline.",

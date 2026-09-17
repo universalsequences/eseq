@@ -12,10 +12,6 @@ pub(super) fn toggle_roll_mode(state: &SequencerState, editor: &mut Editor) -> b
     if !enabled {
         // Toggling roll mode off always clears stuck rolls
         // (docs/rolling-core-spec.md 7).
-        state
-            .transport
-            .sequence_rolling
-            .store(false, Ordering::Release);
         state.push_roll_command(sequencer::sequencer::RollCommand::ClearAll);
     }
     editor

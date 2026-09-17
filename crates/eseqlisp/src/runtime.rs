@@ -884,6 +884,9 @@ pub(crate) struct RuntimeBridgeState {
     pub queued_commands: Vec<HostCommand>,
     pub lisp_bindings: HashMap<String, String>,
     pub pending_eval_buffer: Option<BufferId>,
+    /// (buffer name, stable-key substring) a native asked the editor to
+    /// scroll into view once that buffer's tile has a layout.
+    pub pending_widget_reveal: Option<(String, String)>,
     pub pending_save: bool,
     pub pending_save_as: Option<PathBuf>,
     pub pending_load: bool,
@@ -1036,6 +1039,10 @@ impl NativeContext {
 
     pub fn request_eval_buffer(&mut self) {
         self.shared.borrow_mut().pending_eval_buffer = self.current_buffer_id();
+    }
+
+    pub fn request_reveal_widget(&mut self, buffer: String, key: String) {
+        self.shared.borrow_mut().pending_widget_reveal = Some((buffer, key));
     }
 
     pub fn current_buffer_read_only(&self) -> bool {
@@ -2335,7 +2342,35 @@ impl Runtime {
             };
         }
 
-        let changed_symbols = self.vm.source_manager.changed_symbols();
+        let mut changed_symbols = self.vm.source_manager.changed_symbols();
+        if evaluated_path.is_none() {
+            // A pathless buffer (*scratch*, a host-driven `(import …)`) never
+            // reaches the module graph, so its own `def`/`override` forms
+            // were invisible here: an `(override eseq.mixer/x …)` evaluated
+            // from *scratch* registered but no dependent repainted. Count the
+            // source's authored definitions and override targets the way a
+            // file-backed unit does, in every spelling a dependent may have
+            // recorded.
+            if let Ok(authored) = crate::hot_reload::extract_defined_symbols_from_source(&eval_source) {
+                let declared = crate::modules::inspect_exports(&eval_source)
+                    .ok()
+                    .and_then(|(module, _)| module);
+                for name in authored {
+                    if crate::modules::is_qualified(&name) {
+                        changed_symbols.insert(name);
+                        continue;
+                    }
+                    changed_symbols.insert(crate::modules::qualify(
+                        crate::modules::IMPLICIT_MODULE,
+                        &name,
+                    ));
+                    if let Some(module) = declared.as_deref() {
+                        changed_symbols.insert(crate::modules::qualify(module, &name));
+                    }
+                    changed_symbols.insert(name);
+                }
+            }
+        }
         let mut rerendered_roots = self.vm.mark_effects_depending_on_symbols(&changed_symbols);
         if let Err(error) = self.vm.rerender_dirty_effects() {
             let diagnostics = vec![format!("Lisp render-root reload failed: {error:?}")];
@@ -3422,6 +3457,16 @@ impl Runtime {
     pub(crate) fn take_pending_eval_buffer(&mut self) -> Option<BufferId> {
         let mut shared = self.shared.borrow_mut();
         shared.pending_eval_buffer.take()
+    }
+
+    pub(crate) fn take_pending_widget_reveal(&mut self) -> Option<(String, String)> {
+        self.shared.borrow_mut().pending_widget_reveal.take()
+    }
+
+    /// Host-side entry for `reveal-widget` (the native goes through the
+    /// same shared slot from Lisp).
+    pub fn request_reveal_widget(&mut self, buffer: String, key: String) {
+        self.shared.borrow_mut().pending_widget_reveal = Some((buffer, key));
     }
 
     pub(crate) fn take_pending_save(&mut self) -> bool {
@@ -4654,6 +4699,50 @@ mod theme_shader_recompile_tests {
 #[cfg(test)]
 mod observer_tests {
     use super::*;
+
+    #[test]
+    fn pathless_transactional_eval_of_an_override_rerenders_the_dependent_buffer() {
+        let mut runtime = Runtime::new();
+        let owner = std::env::temp_dir().join(format!(
+            "eseqlisp-pathless-override-owner-{}.lisp",
+            std::process::id()
+        ));
+        let factory = "(module test.factory)\n\
+             (def grid () (label \"factory-grid\"))\n\
+             (def strip () (subtree :key \"strip\" (grid)))\n\
+             (effect-buffer \"*m*\" (strip))";
+        let report = runtime.eval_source_transactional(Some(owner), factory, Vec::new());
+        assert!(report.success, "{:?}", report.diagnostics);
+        runtime.take_pending_buffer_widget_trees();
+
+        // *scratch*: no path, so the module graph never sees this source.
+        let report = runtime.eval_source_transactional(
+            None,
+            "(module test.user)\n(override test.factory/grid (lambda () (label \"override-grid\")))",
+            Vec::new(),
+        );
+        assert!(report.success, "{:?}", report.diagnostics);
+        assert!(
+            report.changed_symbols.iter().any(|s| s == "test.factory/grid"),
+            "override target must count as changed: {:?}",
+            report.changed_symbols
+        );
+        assert!(
+            report.rerendered_roots.iter().any(|r| r.contains("*m*")),
+            "dependent buffer must rerender: {:?}",
+            report.rerendered_roots
+        );
+        let text = runtime
+            .take_pending_buffer_widget_trees()
+            .iter()
+            .map(|t| match t {
+                crate::vm::PendingUiUpdate::FullTree(p) => format!("{:?}", p.tree),
+                crate::vm::PendingUiUpdate::ReplaceSubtree { tree, .. } => format!("{tree:?}"),
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("override-grid"), "{text}");
+    }
 
     #[test]
     fn resubscribed_reader_observes_return_to_value_before_unobserved_write() {

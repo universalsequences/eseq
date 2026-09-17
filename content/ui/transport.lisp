@@ -65,6 +65,7 @@
         seq-set-scene-launch-quantize
         seq-set-record-quantize
         seq-switch-pattern
+        seq-switch-relative
         seq-clone-pattern
         seq-delete-pattern
         seq-reorder-scene-drop
@@ -73,7 +74,11 @@
         scene-push-begin
         scene-push-drag
         scene-push-end
-        pattern-control-style)
+        pattern-control-style
+        transport-body
+        transport-leading
+        transport-scene-strip
+        transport-trailing)
 
 ;; Identity compat aliases (spec §10 slice 3). Each covers a flat caller that
 ;; cannot see a qualified name; every one is a function or a `defstate`, both
@@ -621,6 +626,12 @@
   (host-command "switch-pattern"
     (dict :idx idx :quantize (or SEQ.scene-launch-quantize "off"))))
 
+;; Resolve relative movement in the host when commands are drained. Several
+;; button presses in one MIDI batch must advance from each other's targets.
+(def seq-switch-relative (delta)
+  (host-command "switch-pattern-relative"
+    (dict :delta delta :quantize (or SEQ.scene-launch-quantize "off"))))
+
 ;; Scene-bank view state lives in eseq.scene-banks so the mixer clip grid
 ;; (scene-banks spec 10.1) shares one viewed bank with this strip. These four
 ;; are thin local spellings of that module's accessors; the writes below name
@@ -986,8 +997,15 @@
 
 ;; Widget-only buffer: take the shared sequencer keymap (was an implicit host default).
 (set-buffer-mode-for "*transport*" "eseq.sequencer-keys/sequencer-keys")
-(effect-buffer "*transport*"
-  (h-stack :key "transport-bar" :width :fill :gap 0.5 :padding 0.5 :align :center
+;; The transport bar is assembled from four overridable functions so a
+;; package can re-flow it (e.g. a two-row transport with the scene strip
+;; underneath) without retyping the controls: `transport-leading` (view
+;; buttons, menus, playback, clock, meters, cpu), `transport-scene-strip`
+;; (the scene pills), `transport-trailing` (context menus and the session/
+;; arrangement pair), and `transport-body` which lays them out. The first
+;; and third return child lists; stacks splice lists into their children.
+(def transport-leading ()
+  (list
     
     (subtree :key "transport-samples-sidebar-button"
       (samples-sidebar-icon
@@ -1201,6 +1219,9 @@
               :color :gray
               :bg :transparent)))))
     
+  ))
+
+(def transport-scene-strip ()
     ;; Pattern pills in their own subtree: scene/bank changes rerun just this
     ;; bar, not the whole transport. Widget children stay in `each`; the bank
     ;; offset is applied before every launch, drag, and context-menu command.
@@ -1292,7 +1313,10 @@
                   (box :width 0.45 :height 0.45 :bg :transparent)))
               (scene-bank-context-menu)
               (scene-bank-ops-context-menu))))))
-    
+)
+
+(def transport-trailing ()
+  (list
     (subtree :key "transport-transpose-context-menu"
       (transpose-context-menu))
     (subtree :key "transport-context-menus"
@@ -1310,4 +1334,14 @@
       (arrangement-view-icon
         :on-click |x y r| (eseq.seq-panels/seq-open-arrangement)
         :style transport-icon-style
-        :active (if (tabs/seq-arrangement-view?) 1 0)))))
+        :active (if (tabs/seq-arrangement-view?) 1 0)))
+  ))
+
+(def transport-body ()
+  (h-stack :key "transport-bar" :width :fill :gap 0.5 :padding 0.5 :align :center
+    (transport-leading)
+    (transport-scene-strip)
+    (transport-trailing)))
+
+(effect-buffer "*transport*"
+  (transport-body))

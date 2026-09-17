@@ -1708,6 +1708,22 @@ impl ChordSnapshot {
     }
 }
 
+/// A physical or named owner of a momentary sequence roll. Independent
+/// sources may overlap; only the last release ends the roll.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SequenceRollSource {
+    Named(String),
+    MidiNote { port: usize, channel: u8, note: u8 },
+}
+
+/// Ownership and commands share a lock so source transitions reach the
+/// scheduler in order. This state is never accessed by the audio callback.
+#[derive(Default)]
+pub(crate) struct RollInputState {
+    pub held: Vec<SequenceRollSource>,
+    pub commands: Vec<RollCommand>,
+}
+
 /// Control-thread → scheduler roll commands (docs/rolling-core-spec.md 3).
 /// The `TransportState` roll atomics answer "what is the state right now";
 /// this channel answers "when did it change" so the scheduler can act on

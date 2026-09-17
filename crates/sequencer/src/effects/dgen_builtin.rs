@@ -9,7 +9,11 @@ pub struct DGenBuiltin {
     pub origin: DGenSourceOrigin,
 }
 
-pub const NAMES: &[&str] = &[super::conv_reverb::NAME, super::filter_table::NAME];
+pub const NAMES: &[&str] = &[
+    super::conv_reverb::NAME,
+    super::filter_table::NAME,
+    super::es_compressor::NAME,
+];
 
 pub fn find(name: &str) -> Option<DGenBuiltin> {
     if name == super::conv_reverb::NAME {
@@ -24,6 +28,12 @@ pub fn find(name: &str) -> Option<DGenBuiltin> {
             source: super::filter_table::dsp_source(),
             origin: DGenSourceOrigin::BuiltinFilterTable,
         })
+    } else if name == super::es_compressor::NAME {
+        Some(DGenBuiltin {
+            name: super::es_compressor::NAME,
+            source: super::es_compressor::dsp_source(),
+            origin: DGenSourceOrigin::BuiltinEsCompressor,
+        })
     } else {
         None
     }
@@ -36,4 +46,5 @@ pub fn contains(name: &str) -> bool {
 pub fn clear_instance(node_id: i32) {
     super::conv_reverb::clear_instance(node_id);
     super::filter_table::clear_instance(node_id);
+    // ES Compressor keeps no per-instance state.
 }

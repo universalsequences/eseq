@@ -645,6 +645,7 @@ fn collect_defined_symbols(expr: &Expression, out: &mut HashSet<String>) {
                     | "defscene"
                     | "defmacro"
                     | "defwidget"
+                    | "defcustom"
                     | "def-process"
                     | "def-accumulator"
                     | "def-sequencer"
@@ -690,6 +691,15 @@ fn normalize_path(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn defcustom_is_a_defined_symbol_for_exports_and_hot_reload() {
+        let symbols = extract_defined_symbols_from_source(
+            "(module m)\n(defcustom knob 4.0 :type :number :doc \"d\")",
+        )
+        .expect("extract symbols");
+        assert!(symbols.contains("knob"), "{symbols:?}");
+    }
 
     #[test]
     fn override_targets_are_effective_defined_symbols_for_hot_reload() {

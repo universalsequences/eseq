@@ -195,6 +195,21 @@ pub fn read_latest_mono(state: &[f32], frame_count: usize) -> Option<Vec<f32>> {
     Some(samples)
 }
 
+/// Latest `frame_count` frames as interleaved L/R, oldest first.
+pub fn read_latest_stereo(state: &[f32], frame_count: usize) -> Option<Vec<f32>> {
+    let metadata = tap_metadata(state)?;
+    let frames = frame_count.min(metadata.ring_frames);
+    let mut samples = Vec::with_capacity(frames * 2);
+    for offset in 0..frames {
+        let ring_index =
+            (metadata.write_head + metadata.ring_frames - frames + offset) % metadata.ring_frames;
+        let data_index = STATE_DATA_START + ring_index * TAP_CHANNELS;
+        samples.push(state[data_index]);
+        samples.push(state[data_index + 1]);
+    }
+    Some(samples)
+}
+
 pub fn compute_normalized_spectrum(samples: &[f32], min_db: f32, max_db: f32) -> Vec<f32> {
     assert!(samples.len().is_power_of_two());
     let n = samples.len();
@@ -340,6 +355,18 @@ pub fn audio_tap_vtable() -> NodeVTable {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn read_latest_stereo_returns_interleaved_pairs_oldest_first() {
+        let mut state = initial_state(MIN_TAP_RING_FRAMES);
+        assert!(initialize_state_buffer(&mut state, MIN_TAP_RING_FRAMES, 48_000.0));
+        // Four frames through the tap node itself: L = frame, R = -frame.
+        run_tap(&mut state, &[0.0, 1.0, 2.0, 3.0], &[0.0, -1.0, -2.0, -3.0]);
+        let stereo = read_latest_stereo(&state, 2).expect("stereo read");
+        assert_eq!(stereo, vec![2.0, -2.0, 3.0, -3.0], "interleaved L/R, oldest first");
+        let mono = read_latest_mono(&state, 2).expect("mono read");
+        assert_eq!(mono, vec![0.0, 0.0], "mono is the L/R mean of the same frames");
+    }
 
     fn run_tap(state: &mut [f32], left: &[f32], right: &[f32]) {
         let mut left = left.to_vec();

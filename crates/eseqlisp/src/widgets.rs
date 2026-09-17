@@ -58,6 +58,7 @@ pub const BUILTIN_WIDGET_NAMES: &[&str] = &[
     "sound-glyph",
     "spectrogram",
     "scope",
+    "xy-scope",
     "multiband-meter",
     "compressor-display",
     "phaser-notch",

@@ -2144,6 +2144,9 @@ impl App {
                 crate::effects::filter_table::DEFAULT_TABLE_REF,
                 std::path::Path::new("Procedural Shapes"),
             )?;
+        } else if name == crate::effects::es_compressor::NAME {
+            // Asset-free builtin: parameters come from the manifest and the
+            // source declares its own latency. Nothing to seed.
         } else {
             return Err(format!("Unknown dgenlisp builtin '{name}'"));
         }

@@ -545,7 +545,12 @@ impl SchedulerDriver {
             // press-then-play starts rolling exactly on beat one.
             if self.last_playing {
                 self.lookahead_state.roll.cancel_process_roll(state, true);
-                self.lookahead_state.roll.clear_all();
+                // Stop queues ClearAll at the input boundary. A new manual
+                // hold after it may already have been applied above; keep
+                // that fresh gesture armed for the next Play.
+                if !state.has_sequence_roll_holds() {
+                    self.lookahead_state.roll.clear_all();
+                }
             }
             self.roll_play_hold = None;
             self.last_playing = false;

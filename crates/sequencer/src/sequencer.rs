@@ -7,6 +7,8 @@ mod snapshot;
 #[path = "sequencer/state/mod.rs"]
 mod state;
 
+pub(crate) use data::RollInputState;
+
 #[allow(unused_imports)]
 pub use clock::{SequencerClock, TrackClockState};
 #[allow(unused_imports)]
@@ -15,7 +17,7 @@ pub use data::{
     ChordData, ChordSnapshot,
     CustomInstrumentRunMode, PatternStepGeometry,
     InstrumentType, KeyboardTrigger, LiveNoteSource, LiveNoteOrigin, LiveInputEvent, MidiFxPosition, MonoTrigger, VoicePriority, ModConnection, ModDestination,
-    LiveTriggerStamp, LiveTriggerStampRing, RollCommand, RollHitRecorded,
+    LiveTriggerStamp, LiveTriggerStampRing, RollCommand, RollHitRecorded, SequenceRollSource,
     StepData, StepParam, SwingResolution, Timebase, TimebasePLockData, TrackOutput, TrackParams,
     TrackParamsSnapshot, TrackPattern, TrackSendBaseline, TrackSendPLockData,
     TrackSendRuntimeTarget, TrackSendSnapshot, TrackSoundState, Trigger, DEFAULT_BPM,

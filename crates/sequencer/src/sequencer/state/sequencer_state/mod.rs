@@ -4,6 +4,7 @@ mod rack_editing;
 mod effect_propagation;
 mod repository_edit;
 mod publish;
+mod roll_input;
 mod topology;
 mod process_chain;
 mod transport;

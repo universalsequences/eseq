@@ -19,6 +19,7 @@
 (import eseq.effects.builtin.convolution-reverb :as cr)
 (import eseq.effects.builtin.filter-table :as ft)
 (import eseq.effects.builtin.filterbank :as fb)
+(import eseq.effects.builtin.es-compressor :as esc)
 
 (export builtin-audio-fx-ui)
 
@@ -68,4 +69,6 @@
                       (ft/filter-table-ui fx)
                       (if (= (get fx :name) "Filterbank")
                         (fb/panel fx)
-                        false))))))))))))))))))))
+                        (if (= (get fx :name) "ES Compressor")
+                          (esc/es-compressor-ui fx)
+                          false)))))))))))))))))))))

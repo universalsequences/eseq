@@ -66,6 +66,13 @@ pub use dgen::effect_chain_graph::*;
 pub use dgen::instrument_compile::*;
 pub use dgen::instrument_storage::*;
 
+/// Resolve the optional top-level `(effect-latency …)` declaration of an
+/// effect source at `sample_rate`, without compiling it. Builtin modules use
+/// this to pin their declared latency in tests.
+pub(crate) fn declared_effect_latency_samples(source: &str, sample_rate: u32) -> Result<Option<u32>, String> {
+    dgen::effect_latency::prepare(source, sample_rate, true).map(|(_, samples)| samples)
+}
+
 // -- eseqlisp: live-coding / sequencing natives --
 pub use eseq::graph_authoring::register_graph_authoring_natives;
 pub use eseq::graph_manifest::{graph_mode_present, parse_graph_manifest};

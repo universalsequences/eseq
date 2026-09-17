@@ -3140,6 +3140,11 @@ pub(crate) fn init_runtime(
                 ),
                 ("bus-effects", build_bus_effects_value(&app)),
                 (
+                    "track-device-chains",
+                    build_track_device_chains_value(&app, &state),
+                ),
+                ("bus-device-chains", build_bus_device_chains_value(&app)),
+                (
                     "effects",
                     if track_count == 0 {
                         Value::List(vec![])
@@ -3613,6 +3618,7 @@ pub(crate) fn init_runtime(
     );
     runtime.register_reactive("SEQV", vec![], true);
     crate::midi_dispatch::register_device_state(&mut runtime);
+    crate::roll_input::register_natives(&mut runtime, state.clone());
     crate::retrospective::register_state(&mut runtime);
     runtime.register_reactive("AGENT", vec![("generation", Value::Number(0.0))], false);
     if track_count > 0 {

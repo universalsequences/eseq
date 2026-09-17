@@ -1,5 +1,15 @@
 use crate::*;
 
+fn adjacent_scene_index(state: &SequencerState, delta: i32) -> Option<usize> {
+    use sequencer::quantized_launch::{PatternLaunchTarget, QuantizedLaunchOwner};
+    let current = match state.quantized_launches().pending_target(QuantizedLaunchOwner::Transport) {
+        Some(PatternLaunchTarget::Scene { scene } | PatternLaunchTarget::SceneTracks { scene, .. }) => scene,
+        _ => state.current_scene_index(),
+    };
+    let target = current.checked_add_signed(delta as isize)?;
+    (target < state.scene_count()).then_some(target)
+}
+
 pub(super) const COMMANDS: &[&str] = &[
     "set-scene-launch-quantize",
     "fork-track-pattern",
@@ -9,6 +19,7 @@ pub(super) const COMMANDS: &[&str] = &[
     "clear-scene-cell",
     "launch-track-pattern",
     "switch-pattern",
+    "switch-pattern-relative",
     "rename-scene",
     "reorder-scene",
     "propagate-current-track-to-all-patterns",
@@ -735,14 +746,22 @@ pub(super) fn handle(
                 pattern_id
             )));
         }
-        "switch-pattern" => {
+        "switch-pattern" | "switch-pattern-relative" => {
             let profile_switch = pattern_switch_profile_enabled();
             let profile_total_started = Instant::now();
             if let Value::Map(ref map) = payload {
-                let idx = map.get("idx").and_then(|cell| match &*cell.borrow() {
-                    Value::Number(n) => Some(*n as usize),
-                    _ => None,
-                });
+                let idx = if name == "switch-pattern-relative" {
+                    map.get("delta").and_then(|cell| match &*cell.borrow() {
+                        Value::Number(n) if *n == -1.0 || *n == 1.0 =>
+                            adjacent_scene_index(&state, *n as i32),
+                        _ => None,
+                    })
+                } else {
+                    map.get("idx").and_then(|cell| match &*cell.borrow() {
+                        Value::Number(n) => Some(*n as usize),
+                        _ => None,
+                    })
+                };
                 if let Some(idx) = idx {
                     // Spec 7.3: the song is the only launch authority during
                     // song playback.
@@ -1275,6 +1294,26 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
+    #[test]
+    fn relative_scene_navigation_follows_pending_launch_and_stops_at_edges() {
+        use sequencer::quantized_launch::{LaunchQuantize, PatternLaunchTarget, QuantizedLaunchOwner};
+        let state = SequencerState::new(1, vec![sequencer::sequencer::default_empty_effect_chain()]);
+        state.replace_pattern_repository(
+            (0..3).map(|_| sequencer::sequencer::PatternSnapshot::new_default(1, &[])).collect(), 0);
+        assert_eq!(adjacent_scene_index(&state, -1), None);
+        assert_eq!(adjacent_scene_index(&state, 1), Some(1));
+        state.schedule_quantized_pattern_launch(
+            PatternLaunchTarget::Scene { scene: 1 }, LaunchQuantize::Bar,
+            QuantizedLaunchOwner::Transport).unwrap();
+        assert_eq!(adjacent_scene_index(&state, 1), Some(2));
+        assert_eq!(adjacent_scene_index(&state, -1), Some(0));
+        state.schedule_quantized_pattern_launch(
+            PatternLaunchTarget::Scene { scene: 2 }, LaunchQuantize::Bar,
+            QuantizedLaunchOwner::Transport).unwrap();
+        assert_eq!(adjacent_scene_index(&state, 1), None);
+        assert_eq!(adjacent_scene_index(&state, -1), Some(1));
+    }
+
     fn scene_cell_payload(scene: f64, track: f64, pattern_id: f64, quantize: &str) -> Value {
         Value::Map(
             [
@@ -1502,5 +1541,28 @@ mod tests {
             !state.pattern.patterns[TRACK].is_active(4),
             "an unquantized override launch must swap the live pattern immediately"
         );
+
+        // Hardware scene buttons enqueue relative commands. Exercise the real
+        // command registry/handler in a batch, with no UI sync between presses.
+        // Movement follows the pending scene and does not wrap at either edge.
+        for (delta, expected) in [(1.0, 1), (1.0, 1), (-1.0, 0), (-1.0, 0)] {
+            let payload = Value::Map(HashMap::from([
+                ("delta".into(), Rc::new(RefCell::new(Value::Number(delta)))),
+                ("quantize".into(), Rc::new(RefCell::new(Value::String("1 bar".into())))),
+            ]));
+            dispatch_custom_host_command(
+                "switch-pattern-relative", payload, &mut app, &mut editor, &mut ctx);
+            assert_eq!(state.current_scene_index(), 0);
+            assert_eq!(state.quantized_launches().pending_target(
+                sequencer::quantized_launch::QuantizedLaunchOwner::Transport),
+                Some(sequencer::quantized_launch::PatternLaunchTarget::Scene { scene: expected }));
+        }
+        let payload = Value::Map(HashMap::from([
+            ("delta".into(), Rc::new(RefCell::new(Value::Number(1.0)))),
+            ("quantize".into(), Rc::new(RefCell::new(Value::String("off".into())))),
+        ]));
+        dispatch_custom_host_command(
+            "switch-pattern-relative", payload, &mut app, &mut editor, &mut ctx);
+        assert_eq!(state.current_scene_index(), 1, "quantization off launches immediately");
     }
 }

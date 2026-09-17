@@ -51,6 +51,8 @@ pub(crate) fn sync_track_topology_state(
         sync_track_mixer_state(rt, app, state);
         sync_bus_mixer_state(rt, app);
         rt.set_reactive("SEQ", "effects", Value::List(vec![]));
+        rt.set_reactive("SEQ", "track-device-chains", Value::List(vec![]));
+        rt.set_reactive("SEQ", "bus-device-chains", Value::List(vec![]));
         rt.set_reactive("SEQ", "midi-effects", Value::List(vec![]));
         rt.set_reactive("SEQ", "instrument-panel", Value::List(vec![]));
         rt.set_reactive("SEQ", "step-has-plocks", Value::List(vec![]));
@@ -137,6 +139,12 @@ pub(crate) fn sync_track_topology_state(
         "midi-effects",
         build_midi_effects_value(state, current_track_idx, selected_steps),
     );
+    rt.set_reactive(
+        "SEQ",
+        "track-device-chains",
+        build_track_device_chains_value(app, state),
+    );
+    rt.set_reactive("SEQ", "bus-device-chains", build_bus_device_chains_value(app));
     rt.set_reactive(
         "SEQ",
         "instrument-panel",

@@ -291,7 +291,7 @@ impl SequencerState {
             neural_visualization: Mutex::new(NeuralVisualizationSnapshot::default()),
             graph_visualizations: Mutex::new(Vec::new()),
             graph_control_commands: Mutex::new(Vec::new()),
-            roll_commands: Mutex::new(Vec::new()),
+            roll_input: Mutex::new(crate::sequencer::RollInputState::default()),
             roll_recorded_hits: Mutex::new(Vec::new()),
             live_trigger_stamps: crate::sequencer::LiveTriggerStampRing::default(),
             step_print_override: StepPrintOverride::default(),

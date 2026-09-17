@@ -14,6 +14,7 @@ pub(crate) mod dj_mixer;
 pub(crate) mod dynamics;
 #[allow(dead_code)]
 pub(crate) mod eq8;
+pub mod es_compressor;
 #[allow(dead_code)]
 pub(crate) mod filter;
 #[allow(dead_code)]
@@ -2178,6 +2179,7 @@ mod tests {
                 "Dimension",
                 "DJ Mixer",
                 "EQ8",
+                "ES Compressor",
                 "Filter",
                 "Filter Table",
                 "Filterbank",
@@ -8590,6 +8592,14 @@ impl EffectDescriptor {
                 .iter_mut()
                 .find(|param| param.name == crate::effects::filter_table::PARAM_CUTOFF)
             {
+                param.scaling = ParamScaling::Exponential;
+            }
+        }
+        if name == crate::effects::es_compressor::NAME {
+            for param in descriptors.iter_mut().filter(|param| {
+                param.name == crate::effects::es_compressor::PARAM_ATTACK
+                    || param.name == crate::effects::es_compressor::PARAM_RELEASE
+            }) {
                 param.scaling = ParamScaling::Exponential;
             }
         }

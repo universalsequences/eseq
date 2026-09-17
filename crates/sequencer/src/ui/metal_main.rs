@@ -88,6 +88,7 @@ mod event_loop;
 mod live_input_batch;
 mod loop_ctx;
 mod midi_dispatch;
+mod roll_input;
 mod scroll_inertia;
 mod reactive_tick;
 mod reactive_sync;

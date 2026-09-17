@@ -201,6 +201,26 @@ For a selected track, the context provides:
 
 The UI author does not pass the track explicitly.
 
+### Parameter ownership during reactive redraws
+
+Resolve a parameter with `custom-ui-current-param` (or
+`custom-ui-param-in-scope`) before entering a keyed `subtree`. The returned
+parameter descriptor retains its device owner. Pass that same descriptor to
+`custom-ui-param-binding`, the range/modulation/p-lock helpers, and
+`custom-ui-param-change-callback` / `custom-ui-param-change-callback-s`.
+
+A subtree can rerun independently after a step selection or lock-display
+change. At that point the ambient custom UI globals may describe a different
+effect that rendered later. Do not resolve the parameter name again inside
+the subtree, or reconstruct its callback from those globals. For a deferred
+operation that must resolve names, capture `custom-ui-current-scope` outside
+the subtree and use the explicit `*-in-scope` helpers.
+
+The owner metadata is added to a copy of the parameter descriptor; it does
+not modify the host-published instrument or effect data. It retains the
+section identity and effect owner, without retaining the entire instrument
+parameter list in each control's cached inputs.
+
 ## Parameter Reference Syntax
 
 Parameter helpers use symbols, not strings:

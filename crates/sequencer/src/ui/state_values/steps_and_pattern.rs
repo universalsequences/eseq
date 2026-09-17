@@ -351,11 +351,36 @@ pub(crate) fn selected_mod_routes_value(
     }
 }
 
+/// The effectively active clip per track (pattern id, or -1 while a track
+/// has none), as one list. The per-cell `track-pattern-cell-active-*`
+/// bindings answer "is this cell playing?"; this answers "which cell?", which
+/// is what a list-shaped clip view needs to scroll the active clip into view.
+pub(crate) fn build_track_active_pattern_ids_value(
+    state: &Arc<SequencerState>,
+    track_count: usize,
+) -> Value {
+    list_value((0..track_count).map(|track| {
+        Value::Number(
+            state
+                .track_pattern_cells(track)
+                .into_iter()
+                .find(|cell| cell.active_effective)
+                .map(|cell| cell.pattern_id.0 as f64)
+                .unwrap_or(-1.0),
+        )
+    }))
+}
+
 pub(crate) fn sync_track_pattern_cell_state_fields(
     rt: &mut Runtime,
     state: &Arc<SequencerState>,
     track_count: usize,
 ) {
+    rt.set_reactive(
+        "SEQ",
+        "track-active-pattern-ids",
+        build_track_active_pattern_ids_value(state, track_count),
+    );
     for track in 0..track_count {
         for cell in state.track_pattern_cells(track) {
             let pattern_id = cell.pattern_id.0;

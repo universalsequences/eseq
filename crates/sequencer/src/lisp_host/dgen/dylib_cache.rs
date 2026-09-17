@@ -124,6 +124,7 @@ pub enum DGenSourceOrigin {
     Custom,
     BuiltinConvolutionReverb,
     BuiltinFilterTable,
+    BuiltinEsCompressor,
     Draft,
 }
 

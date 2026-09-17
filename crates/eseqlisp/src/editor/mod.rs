@@ -704,6 +704,9 @@ pub struct Editor {
     pointer_drag_started_on_slider: bool,
     last_slider_drag_widget_id: Option<u64>,
     pending_inline_writeback: Option<(BufferId, u64)>,
+    /// (buffer name, stable-key substring, layouts left) from `reveal-widget`;
+    /// applied when that buffer's tile next gets a layout that carries the key.
+    pending_widget_reveal: Option<(String, String, u8)>,
     text_zoom: f32,
     text_cell_width_scale: f32,
     text_cell_height_scale: f32,
@@ -862,6 +865,7 @@ impl Editor {
             pointer_drag_started_on_slider: false,
             last_slider_drag_widget_id: None,
             pending_inline_writeback: None,
+            pending_widget_reveal: None,
             text_zoom: DEFAULT_TEXT_ZOOM,
             text_cell_width_scale: DEFAULT_TEXT_ZOOM,
             text_cell_height_scale: DEFAULT_TEXT_ZOOM,
@@ -4651,6 +4655,7 @@ impl Editor {
         leaf.layout_frame_viewport = layout_frame_viewport;
         self.remap_focused_widget_after_layout_change();
         self.sync_reactive_bindings_for_visible_layouts();
+        self.apply_pending_widget_reveal();
     }
 
     pub fn sync_reactive_bindings_for_visible_layouts(&mut self) {
@@ -7807,6 +7812,50 @@ impl Editor {
         }
     }
 
+    /// `reveal-widget`: pan the tile showing the requested buffer so the
+    /// widget whose stable key contains the requested substring is at the
+    /// left edge (an empty substring pans to the start). Runs whenever a
+    /// tile takes a new layout, because the request usually lands before the
+    /// buffer has re-rendered for the selection that makes the widget exist;
+    /// gives up after a bounded number of layouts so a bad key cannot pin
+    /// the request forever.
+    fn apply_pending_widget_reveal(&mut self) {
+        let Some((buffer_name, key, layouts_left)) = self.pending_widget_reveal.clone() else {
+            return;
+        };
+        let Some(buffer_idx) = self.buffers.iter().position(|b| b.name == buffer_name) else {
+            self.pending_widget_reveal = None;
+            return;
+        };
+        let target = self
+            .tile_root
+            .find_leaf_by_buffer_idx(buffer_idx)
+            .and_then(|leaf| {
+                let layout = leaf.cached_layout.as_deref()?;
+                let col = if key.is_empty() {
+                    0.0
+                } else {
+                    find_layout_node_by_stable_key_substring(layout, &key)?.rect.col
+                };
+                let max_left = (max_layout_right(layout) - leaf.widget_viewport_width).max(0.0);
+                Some((col - 0.5).clamp(0.0, max_left))
+            });
+        match target {
+            Some(left) => {
+                if let Some(leaf) = self.tile_root.find_leaf_by_buffer_idx_mut(buffer_idx) {
+                    leaf.widget_scroll_left = left;
+                    leaf.cached_inactive_frame = None;
+                }
+                self.pending_widget_reveal = None;
+                self.mark_needs_redraw();
+            }
+            None => {
+                self.pending_widget_reveal =
+                    (layouts_left > 1).then(|| (buffer_name, key, layouts_left - 1));
+            }
+        }
+    }
+
     fn refresh_inactive_tile_layouts_for_buffer(&mut self, buffer_idx: usize) {
         let tree = self.buffers[buffer_idx].widget_tree.clone();
         let buffer_name = self.buffers[buffer_idx].name.clone();
@@ -7954,6 +8003,7 @@ impl Editor {
         }
         self.sync_reactive_bindings_for_visible_layouts();
         self.mark_needs_redraw();
+        self.apply_pending_widget_reveal();
     }
 
     pub fn refresh_visible_layouts_for_buffer_named(&mut self, name: &str) {
@@ -8535,6 +8585,11 @@ impl Editor {
 
         if let Some(buffer_id) = self.runtime.take_pending_eval_buffer() {
             self.evaluate_buffer_transactional(buffer_id);
+        }
+
+        if let Some((buffer, key)) = self.runtime.take_pending_widget_reveal() {
+            self.pending_widget_reveal = Some((buffer, key, 90));
+            self.apply_pending_widget_reveal();
         }
 
         if let Some(read_only) = self.runtime.take_pending_set_read_only() {
@@ -10612,6 +10667,26 @@ fn debug_is_symbol_byte(byte: u8) -> bool {
             ch,
             '(' | ')' | '[' | ']' | '{' | '}' | '"' | '\'' | ';' | '#'
         )
+}
+
+fn max_layout_right(node: &crate::layout::LayoutNode) -> f32 {
+    node.children
+        .iter()
+        .fold(node.rect.col + node.rect.width, |right, child| {
+            right.max(max_layout_right(child))
+        })
+}
+
+fn find_layout_node_by_stable_key_substring<'a>(
+    node: &'a crate::layout::LayoutNode,
+    needle: &str,
+) -> Option<&'a crate::layout::LayoutNode> {
+    if node.stable_key.as_deref().is_some_and(|key| key.contains(needle)) {
+        return Some(node);
+    }
+    node.children
+        .iter()
+        .find_map(|child| find_layout_node_by_stable_key_substring(child, needle))
 }
 
 fn max_layout_bottom(node: &crate::layout::LayoutNode) -> f32 {

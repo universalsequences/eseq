@@ -624,11 +624,22 @@ fn attach_selected_package(
 /// Evaluate `(import <module>)` in the UI runtime. `import` is load-once and
 /// idempotent, so re-attaching an already-loaded module is a no-op.
 fn load_module(editor: &mut Editor, module: &str) -> Result<(), String> {
-    let result = editor.runtime_mut().eval_str(&format!("(import {module})"));
-    editor.refresh_runtime_side_effects();
-    match result {
-        Ok(_) => Ok(()),
-        Err(error) => Err(format!("Could not load '{module}': {error:?}")),
+    // Transactional, like eval-buffer: the module's recorded definitions and
+    // `override` targets mark the factory effects that read them, so a
+    // package that overrides a mixer seam repaints the mixer on attach
+    // instead of waiting for an unrelated rerun. A plain `eval_str` here
+    // registered the override but left every dependent stale.
+    let overlays = editor.snapshot_file_backed_sources();
+    let report = editor
+        .runtime_mut()
+        .eval_source_transactional(None, &format!("(import {module})"), overlays);
+    let success = report.success;
+    let diagnostics = report.diagnostics.clone();
+    editor.process_lisp_reload_report(report);
+    if success {
+        Ok(())
+    } else {
+        Err(format!("Could not load '{module}': {}", diagnostics.join("; ")))
     }
 }
 

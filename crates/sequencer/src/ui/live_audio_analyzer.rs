@@ -311,8 +311,12 @@ impl LiveAudioAnalyzerManager {
                         .or_insert(request);
                 }
                 for request in unique_scope_requests.into_values() {
-                    let Some(samples) = audio_tap::read_latest_mono(state, request.frame_count)
-                    else {
+                    let samples = if request.channels == 2 {
+                        audio_tap::read_latest_stereo(state, request.frame_count)
+                    } else {
+                        audio_tap::read_latest_mono(state, request.frame_count)
+                    };
+                    let Some(samples) = samples else {
                         continue;
                     };
                     let Some(metadata) = metadata else {

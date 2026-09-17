@@ -22,6 +22,10 @@
 (import eseq.scene-banks)
 
 (export muted?
+        render-order
+        bus-index-by-id
+        display-bus-index
+        group-bus-id?
         track-color-r
         track-color-g
         track-color-b
@@ -40,7 +44,72 @@
         handle-key
         drop-on-group-header
         patch-mixer-strip
-        seq-ctrl-g)
+        seq-ctrl-g
+        clip-area-height
+        strip-height
+        grouped-strip-height
+        collapsed-strip-height
+        bus-strip-height
+        group-bus-strip-height
+        drop-zone-height
+        clip-growth-spacer
+        viewed-bank-track-pattern-cells
+        track-pattern-grid
+        mixer-body
+        track-meter-control
+        bus-meter-control
+        bus-output-dropdown
+        bus-mute-label
+        track-volume-field
+        select-bus
+        activate-track-control
+        clear-delete-target
+        display-bus-index
+        has-mix-bus?
+        track-context-menu
+        bus-meter
+        track-meter
+        pointer-volume
+        mod-port-row
+        bus-mod-port-row)
+
+;; Strip heights derive from the shared clip-area knob
+;; (eseq.seq-core-state/mixer-clip-area-height) so a package can grow the
+;; whole mixer by one `setopt`. Each is a function, so a package can also
+;; `override` one strip kind independently. The constants are the stock
+;; 13.8-cell strip minus its 4.0-cell clip area, and the historical offsets
+;; of the other strip kinds from it.
+(def clip-area-height ()
+  eseq.seq-core-state/mixer-clip-area-height)
+
+(def strip-height ()
+  (+ 9.8 (clip-area-height)))
+
+;; Grouped strips drop the output dropdown, so they are shorter.
+(def grouped-strip-height ()
+  (- (strip-height) 1.3))
+
+(def collapsed-strip-height ()
+  (- (strip-height) 1.65))
+
+(def bus-strip-height ()
+  (strip-height))
+
+(def group-bus-strip-height ()
+  (- (strip-height) 0.05))
+
+(def drop-zone-height ()
+  (strip-height))
+
+;; Bus and group strips have no clip area, so they absorb the clip-area
+;; growth with a spacer above their meter row; that keeps their meters,
+;; buttons and labels level with the track strips'. Nothing is inserted at
+;; the stock height so the factory layout is unchanged.
+(def clip-growth-spacer ()
+  (let ((extra (- (clip-area-height) 4.0)))
+    (if (> extra 0)
+      (box :width :fill :height extra :bg :transparent)
+      nil)))
 
 (defstate track-menu-open false)
 (defstate track-menu-col 0)
@@ -610,7 +679,7 @@
 
 (def track-pattern-grid (track)
   (let ((cells (viewed-bank-track-pattern-cells track)))
-    (box :width :fill :height 4.0 :align :top :bg :black :background-color :buffer-bg
+    (box :width :fill :height (clip-area-height) :align :top :bg :black :background-color :buffer-bg
       (grid :cols 6 :col-width 2.0 :row-height 1.0 :align :center
         (each cells |cell cell-idx|
           (let ((pattern-id (get cell :id)))
@@ -648,10 +717,10 @@
                 :pixelate 2
                 :edge-soft 0.1
                 :white-damp 0
-                :height-in 0.3
+                :height-in 0.1
                 :height-out -0.08
                 :height-amp 3
-                :diffuse 0.8
+                :diffuse 0.05
                 :rim-width 0.1
                 ;; Leave the active launch mark visually dominant: its host-
                 ;; driven play state shrinks and dims only the identity glyph.
@@ -893,7 +962,7 @@
     ;; dead space at the bottom inside the group container.
     ;; Mute/name/output reads live in bindings or nested subtrees so those
     ;; changes don't rerun the whole strip.
-    (box :width 12.9 :height (if (track-grouped? i) 12.5 13.8)
+    (box :width 12.9 :height (if (track-grouped? i) (grouped-strip-height) (strip-height))
       :selected (track-selected-binding i)
       :muted (bind-seq-nth "track-muted-effective" i)
       :background-color :mixer-strip-bg
@@ -1152,7 +1221,7 @@
 
 (def track-collapsed-strip (i)
   (let ((muted (muted? i)))
-    (box :width 4.7 :height 12.15
+    (box :width 4.7 :height (collapsed-strip-height)
       :selected (track-selected-binding i)
       :muted muted
       :background-color :mixer-strip-bg
@@ -1171,7 +1240,9 @@
       :on-click (lambda (event) (track-body-click event i))
       :on-right-click (lambda (event) (open-track-menu event i))
       (v-stack :gap 0.42 :align :center
-        (box :width :fill :height 3.45 :bg :transparent)
+        ;; Spacer absorbs the clip-area growth so the meter stays level with
+        ;; the full strips' meters.
+        (box :width :fill :height (+ 3.45 (- (clip-area-height) 4.0)) :bg :transparent)
         (track-meter-control i)
         (button "M"
           :key (str "track-collapsed-mute-" i)
@@ -1292,8 +1363,8 @@
 (def bus-output-dropdown (i)
   (subtree :key (str "mixer-bus-output-" i)
     (let ((route (nth SEQ.bus-output-routes i))
-          (options (get route :options))
-          (ids (get route :ids)))
+        (options (get route :options))
+        (ids (get route :ids)))
       (if (> (len options) 0)
         (dropdown :key (str "bus-output-" i)
           :value (get route :value) :options options
@@ -1310,7 +1381,7 @@
   (do
     ;; `do` keeps the original body indentation; the strip is one box.
     (box :key (str "bus-strip-" i)
-      :width 10.3 :height 13.8
+      :width 10.3 :height (bus-strip-height)
       ;; Bound selection state (eseq-4jv): a raw `selected-bus` read here
       ;; re-rendered every bus strip on each selection.
       :selected (eseq.seq-core-state/bus-selected-vis-binding i)
@@ -1330,6 +1401,7 @@
       :on-click (lambda (event) (select-bus i))
       (v-stack :gap 0.25
         (bus-output-dropdown i)
+        (clip-growth-spacer)
         ;; Mix/Main is the graph output and has no external modulation inputs.
         ;; Every other bus has the same four backend inputs used by group buses.
         ;(if (= (nth SEQ.bus-names i) "Mix")
@@ -1546,7 +1618,7 @@
       (c (group-color gidx))
       (bus-idx (bus-index-by-id (get (nth SEQ.groups gidx) :bus-id))))
     (box :key (str "group-bus-strip-" bus-idx)
-      :width 10.2 :height 13.75
+      :width 10.2 :height (group-bus-strip-height)
       :corner-radius 12
       :padding 0.1
       :background-color :mixer-strip-bg
@@ -1558,6 +1630,7 @@
       :on-drop (lambda (event) (drop-on-group-header event gidx))
       (v-stack :gap 0.3 :align :center
         (bus-output-dropdown bus-idx)
+        (clip-growth-spacer)
         ;; Meter + fader reflect the group's backing bus. Selecting/dragging
         ;; them selects the group's bus (bus-meter-control selects by
         ;; index). Fall back to nothing if the bus can't be resolved.
@@ -1691,7 +1764,7 @@
 
 (def sample-drop-zone ()
   (box :key "sample-drop-zone"
-    :width 11.8 :height 13.8
+    :width 11.8 :height (drop-zone-height)
     :background-color :buffer-bg
     :drop-hover-background-color :mixer-control-bg
     :border-width 2
@@ -1779,7 +1852,11 @@
       (patch-mixer-strip SEQ.current-track))
     (track-context-menu)))
 
-(effect-buffer "*mixer*"
+;; The *mixer* buffer keeps its name (the host keys meter/peak liveness and
+;; delete-target routing on it) but its whole body is one overridable
+;; function, so a package can replace the strip-per-track view with its own
+;; (e.g. a grid of compact channels) via (override eseq.mixer/mixer-body …).
+(def mixer-body ()
   (h-stack :padding 0.2 :gap 1.5
     (h-stack :gap 0.5
       (each (render-order) |item|
@@ -1794,6 +1871,9 @@
               (bus-strip i)))))
       (track-context-menu)
       (subtree :key "mixer-param-plock-menu" (pc/param-plock-context-menu)))))
+
+(effect-buffer "*mixer*"
+  (mixer-body))
 
 ;; Ctrl+G / Cmd+G — fold the multi-selected tracks into a new group.
 (def group-selected ()

@@ -116,12 +116,29 @@
 ;; with audio effects: the codegen sets custom-ui-current-kind to "midi-fx"
 ;; and the param/fx lookups below route to the midi-fx slot dict, whose
 ;; `:midi-fx true` flag makes param-controls issue set-midi-fx-* commands.
+
+;; A resolved parameter carries its owner across independently rerendered
+;; subtrees. Ambient render globals belong to whichever panel rendered last;
+;; never consult them again when reading or editing an already resolved param.
+;; Keep only the section identity and effect owner: instrument routing is
+;; already in p, and retaining the entire instrument here would make every
+;; subtree compare every instrument parameter when checking cached inputs.
+;; merge creates a descriptor without mutating the host-published parameter.
+(def scoped-param (scope p)
+  (if p
+    (merge p :custom-ui-owner (dict :name (get scope :name) :fx (fx-in-scope scope)))
+    false))
+
+(def param-owner (p)
+  (get p :custom-ui-owner))
+
 (def custom-ui-param-in-scope (scope name)
-  (if (= (get scope :kind) "audio-fx")
-    (fxui/audio-fx-ui-param (get scope :audio-fx) name)
-    (if (= (get scope :kind) "midi-fx")
-      (fxui/midi-fx-ui-param (get scope :midi-fx) name)
-      (inst-param (get scope :inst) name))))
+  (scoped-param scope
+    (if (= (get scope :kind) "audio-fx")
+      (fxui/audio-fx-ui-param (get scope :audio-fx) name)
+      (if (= (get scope :kind) "midi-fx")
+        (fxui/midi-fx-ui-param (get scope :midi-fx) name)
+        (inst-param (get scope :inst) name)))))
 
 (def effect-scope? (scope)
   (or (= (get scope :kind) "audio-fx") (= (get scope :kind) "midi-fx")))
@@ -129,12 +146,12 @@
 (def tensor-param-in-scope (scope name)
   (if (effect-scope? scope)
     false
-    (inst-tensor-param (get scope :inst) name)))
+    (scoped-param scope (inst-tensor-param (get scope :inst) name))))
 
 (def base-note-param-in-scope (scope)
   (if (effect-scope? scope)
     false
-    (inst-base-note-param (get scope :inst))))
+    (scoped-param scope (inst-base-note-param (get scope :inst)))))
 
 (def fx-in-scope (scope)
   (if (= (get scope :kind) "audio-fx")
@@ -143,8 +160,8 @@
       (get scope :midi-fx)
       false)))
 
-(def current-fx ()
-  (fx-in-scope (custom-ui-current-scope)))
+(def param-fx (p)
+  (get (param-owner p) :fx))
 
 (def custom-ui-set-param-in-scope (scope p value)
   (pc/param-set-control-value (fx-in-scope scope) p value))
@@ -181,24 +198,20 @@
       (list (list :attack attack) (list :decay decay) (list :sustain sustain))) env))
 
 (def custom-ui-param-change-callback (p)
-  (let ((scope (custom-ui-current-scope)))
-    (lambda (v)
-      (custom-ui-set-param-in-scope scope p v))))
+  (lambda (v) (custom-ui-set-param p v)))
 
 (def custom-ui-param-change-callback-s (section p)
-  (let ((scope (custom-ui-current-scope)))
-    (lambda (v)
-      (do
-        (sec/custom-ui-select-section-in-scope scope section)
-        (custom-ui-set-param-in-scope scope p v)))))
+  (lambda (v)
+    (do
+      (sec/custom-ui-select-section-in-scope (param-owner p) section)
+      (custom-ui-set-param p v))))
 
 (def custom-ui-xy-change-callback-s (section x-p y-p)
-  (let ((scope (custom-ui-current-scope)))
-    (lambda (x y)
-      (do
-        (sec/custom-ui-select-section-in-scope scope section)
-        (custom-ui-set-param-in-scope scope x-p x)
-        (custom-ui-set-param-in-scope scope y-p y)))))
+  (lambda (x y)
+    (do
+      (sec/custom-ui-select-section-in-scope (param-owner x-p) section)
+      (custom-ui-set-param x-p x)
+      (custom-ui-set-param y-p y))))
 
 (def custom-ui-current-param (name)
   (custom-ui-param-in-scope (custom-ui-current-scope) name))
@@ -210,10 +223,10 @@
   (base-note-param-in-scope (custom-ui-current-scope)))
 
 (def custom-ui-set-param (p value)
-  (custom-ui-set-param-in-scope (custom-ui-current-scope) p value))
+  (pc/param-set-control-value (param-fx p) p value))
 
 (def custom-ui-param-binding (p)
-  (pc/fx-param-value-for (current-fx) p))
+  (pc/fx-param-value-for (param-fx p) p))
 
 ;; Public custom-UI calculations have historically consumed a number here.
 ;; Keep that contract distinct from the binding passed directly to widgets.
@@ -221,22 +234,22 @@
   (reactive-value (custom-ui-param-binding p)))
 
 (def custom-ui-param-control-min (p)
-  (pc/param-control-min (current-fx) p))
+  (pc/param-control-min (param-fx p) p))
 
 (def custom-ui-param-control-max (p)
-  (pc/param-control-max (current-fx) p))
+  (pc/param-control-max (param-fx p) p))
 
 (def custom-ui-param-control-unit (p)
-  (pc/param-control-unit (current-fx) p))
+  (pc/param-control-unit (param-fx p) p))
 
 (def custom-ui-param-mod-wrapper (p key body)
-  (pc/param-mod-wrapper (current-fx) p key body))
+  (pc/param-mod-wrapper (param-fx p) p key body))
 
 (def custom-ui-param-control-key-mode (p)
-  (pc/param-control-key-mode (current-fx) p))
+  (pc/param-control-key-mode (param-fx p) p))
 
 (def custom-ui-param-base-value-prop (p)
-  (pc/param-base-value-prop (current-fx) p))
+  (pc/param-base-value-prop (param-fx p) p))
 
 ;; Live modulation offset for a custom instrument's param (eseq-6mva). The host
 ;; samples the most recently triggered voice's modulator and publishes
@@ -250,21 +263,21 @@
   (pc/param-mod-scale p))
 
 (def custom-ui-param-base-min-prop (p)
-  (pc/param-base-min-prop (current-fx) p))
+  (pc/param-base-min-prop (param-fx p) p))
 
 (def custom-ui-param-base-max-prop (p)
-  (pc/param-base-max-prop (current-fx) p))
+  (pc/param-base-max-prop (param-fx p) p))
 
 (def custom-ui-param-plock-active? (p)
-  (pc/param-plock-active? (current-fx) p))
+  (pc/param-plock-active? (param-fx p) p))
 
 (def custom-ui-param-plock-default (p)
-  (pc/param-plock-default (current-fx) p))
+  (pc/param-plock-default (param-fx p) p))
 
 ;; P-lock colour, else the process accent when a step process is mapped to
 ;; this param (eseq-p1kg), else `:dim`.
 (def custom-ui-param-plock-text-color (p)
-  (pc/param-process-text-color (current-fx) p))
+  (pc/param-process-text-color (param-fx p) p))
 
 ;; Process effective value / clamp flag for the knob dot and picker bar
 ;; (eseq-p1kg); see `pc/param-process-value`.
@@ -280,16 +293,16 @@
 ;; True while the mods tab paints its dark highlight box behind this param,
 ;; so light-panel surfaces can swap their black ink for a legible color.
 (def custom-ui-param-mod-highlighted? (p)
-  (and p (pc/param-mods-open? (current-fx)) (get p :modulatable)))
+  (and p (pc/param-mods-open? (param-fx p)) (get p :modulatable)))
 
 (def custom-ui-param-knob-mod-slot-prop (p idx)
-  (pc/param-knob-mod-slot-prop (current-fx) p idx))
+  (pc/param-knob-mod-slot-prop (param-fx p) p idx))
 
 (def custom-ui-param-knob-mod-depth-prop (p idx)
-  (pc/param-knob-mod-depth-prop (current-fx) p idx))
+  (pc/param-knob-mod-depth-prop (param-fx p) p idx))
 
 (def custom-ui-selected-mod-slot-prop (p)
-  (pc/param-selected-mod-slot-prop (current-fx) p))
+  (pc/param-selected-mod-slot-prop (param-fx p) p))
 
 (def set-param-by-name (name value)
   (let ((p (custom-ui-current-param name)))
@@ -310,7 +323,7 @@
             :value value))))
 
 (def custom-ui-tensor-cell-change-callback-s (section p)
-  (let ((scope (custom-ui-current-scope)))
+  (let ((scope (param-owner p)))
     (lambda (row col value)
       (do
         (sec/custom-ui-select-section-in-scope scope section)

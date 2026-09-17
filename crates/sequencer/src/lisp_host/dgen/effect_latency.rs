@@ -59,7 +59,7 @@ fn validate_samples(value: u64) -> Result<u32, String> {
 /// Remove exactly one optional top-level declaration without changing source
 /// positions of the remaining program (including UTF-8 byte offsets/newlines).
 /// Nested declarations are errors, not silently ignored metadata.
-pub(super) fn prepare(source: &str, rate: u32, is_effect: bool) -> Result<(String, Option<u32>), String> {
+pub(crate) fn prepare(source: &str, rate: u32, is_effect: bool) -> Result<(String, Option<u32>), String> {
     if !source.contains(FORM) {
         return Ok((source.to_string(), None));
     }

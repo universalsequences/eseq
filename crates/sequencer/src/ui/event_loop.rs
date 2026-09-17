@@ -1256,6 +1256,10 @@ pub(crate) fn run_event_loop(
             for event in midi_input.drain() {
                 use sequencer::midi_input::service::Event;
                 let event = match event {
+                    Event::PortConnected { port, id, name } => {
+                        midi_dispatch::sync_midi_port(&mut editor, port, Some((id, name)));
+                        continue;
+                    }
                     Event::Message(event) => event,
                     Event::Snapshot(snapshot) => {
                         midi_dispatch::sync_midi_devices(&mut editor, snapshot);
@@ -1263,6 +1267,7 @@ pub(crate) fn run_event_loop(
                         continue;
                     }
                     Event::ResetPort(port) => {
+                        midi_dispatch::reset_midi_port(&mut editor, &shared.state, port);
                         for channel in 0..16 {
                             let _ = shared.keyboard_tx.send(
                                 sequencer::sequencer::LiveInputEvent::ResetControllers { port, channel });
@@ -1292,7 +1297,7 @@ pub(crate) fn run_event_loop(
                 // so a note-off is routed like its note-on rather than asked
                 // again: a note the live keyboard holds always gets its
                 // release, and a note-on Lisp consumed keeps its note-off.
-                let consumed = dispatch_midi_to_lisp(&mut editor, &event);
+                let consumed = dispatch_midi_input(&mut editor, &shared.state, &event);
                 dispatched_to_lisp = true;
                 if !consumed {
                     use sequencer::midi_input::MidiMessage;

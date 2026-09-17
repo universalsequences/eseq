@@ -173,11 +173,10 @@ impl RollState {
             return;
         };
         self.window_start.fill(None);
+        // A control-thread hold may have arrived after this iteration drained
+        // commands. Its pending start must survive the process roll's deadline.
         if clear_sequence_rolling {
-            state
-                .transport
-                .sequence_rolling
-                .store(false, Ordering::Release);
+            state.clear_sequence_rolling_if_unheld();
         }
         if roll.armed_roll_mode {
             state.transport.roll_mode.store(false, Ordering::Release);

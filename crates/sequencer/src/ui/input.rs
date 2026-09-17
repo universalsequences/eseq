@@ -1862,13 +1862,10 @@ pub(crate) fn handle_recording_key(
                         press_time: Instant::now(),
                         targets: Vec::new(),
                     });
-                    state
-                        .transport
-                        .sequence_rolling
-                        .store(true, Ordering::Release);
-                    state.push_roll_command(sequencer::sequencer::RollCommand::SequenceRoll {
-                        on: true,
-                    });
+                    state.set_sequence_roll_held(
+                        sequencer::sequencer::SequenceRollSource::Named(format!("keyboard:{normalized_code:?}")),
+                        true,
+                    );
                 }
                 return RecordingKeyOutcome::Consumed;
             }
@@ -1881,13 +1878,10 @@ pub(crate) fn handle_recording_key(
                     pos.map(|idx| held.remove(idx)).is_some()
                 };
                 if removed {
-                    state
-                        .transport
-                        .sequence_rolling
-                        .store(false, Ordering::Release);
-                    state.push_roll_command(sequencer::sequencer::RollCommand::SequenceRoll {
-                        on: false,
-                    });
+                    state.set_sequence_roll_held(
+                        sequencer::sequencer::SequenceRollSource::Named(format!("keyboard:{normalized_code:?}")),
+                        false,
+                    );
                     return RecordingKeyOutcome::Consumed;
                 }
                 return RecordingKeyOutcome::Ignored;
@@ -1909,11 +1903,7 @@ pub(crate) fn handle_recording_key(
     if roll_mode && key.modifiers.is_empty() {
         if let Some(rate) = sequencer::sequencer::Timebase::roll_rate_from_key(c) {
             if key.kind == KeyEventKind::Press {
-                state
-                    .transport
-                    .roll_rate
-                    .store(rate as u32, Ordering::Release);
-                state.push_roll_command(sequencer::sequencer::RollCommand::SetRate { rate });
+                state.set_roll_rate(rate);
             }
             return RecordingKeyOutcome::Consumed;
         }

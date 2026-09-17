@@ -36,7 +36,7 @@
           (number-picker :debug-name (str "pm-value-" name)
             :width 11.3 :height 0.6 :noui true :decimals (nth spec 2) :font-size 10 :text-align :left
             :step (pow 10 (- 0 (nth spec 2)))
-            :value (bind name)
+            :value (eseq.effects.custom-ui-runtime/custom-ui-param-binding p)
             :min (eseq.effects.custom-ui-runtime/custom-ui-param-control-min p)
             :max (eseq.effects.custom-ui-runtime/custom-ui-param-control-max p)
             :text-color text-ink :edit-color text-ink :cursor-color text-ink

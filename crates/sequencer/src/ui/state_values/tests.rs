@@ -1,3 +1,5 @@
+#[path = "custom_ui_scope_tests.rs"]
+mod custom_ui_scope_tests;
 #[path = "rack_view_tests.rs"]
 mod rack_view_tests;
 #[path = "rack_preset_tests.rs"]
@@ -16,6 +18,8 @@ mod rack_effect_modulation_tests;
 mod instrument_header_ui_tests;
 #[path = "retrospective_ui_tests.rs"]
 mod retrospective_ui_tests;
+#[path = "midi_midimix_tests.rs"]
+mod midi_midimix_tests;
 
     use super::*;
     use eseqlisp::parser::{ASTParser, Expression, Parser, ParserError, Token};
@@ -1078,6 +1082,7 @@ mod retrospective_ui_tests;
             "ui/effects/builtin/dynamics.lisp",
             "ui/effects/builtin/multiband.lisp",
             "ui/effects/builtin/tape.lisp",
+            "ui/effects/builtin/es-compressor.lisp",
             "ui/effects/builtin/dj-mixer.lisp",
             "ui/effects/builtin/audio-fx.lisp",
             "ui/effects.lisp",
@@ -1110,6 +1115,7 @@ mod retrospective_ui_tests;
             "ui/choose-model.lisp",
             "ui/transport.lisp",
             "ui/midi.lisp",
+            "ui/midi-midimix.lisp",
             "ui/agent.lisp",
             "ui/step-grid.lisp",
             "ui/legacy/mixer.lisp",
@@ -6431,6 +6437,80 @@ mod retrospective_ui_tests;
             "track pattern cell topology should only include stable identity \
              and scene-bank membership"
         );
+    }
+
+    #[test]
+    fn build_track_active_pattern_ids_value_reports_the_effective_clip_per_track() {
+        let state = Arc::new(SequencerState::new(2, vec![vec![], vec![]]));
+        let value = build_track_active_pattern_ids_value(&state, 2);
+        let Value::List(ids) = value else {
+            panic!("active pattern ids should be a per-track list");
+        };
+        let ids = ids.iter().map(|id| id.borrow().clone()).collect::<Vec<_>>();
+        let expected = (0..2)
+            .map(|track| {
+                state
+                    .track_pattern_cells(track)
+                    .into_iter()
+                    .find(|cell| cell.active_effective)
+                    .map(|cell| Value::Number(cell.pattern_id.0 as f64))
+                    .unwrap_or(Value::Number(-1.0))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(ids, expected);
+        assert!(
+            ids.iter().all(|id| matches!(id, Value::Number(n) if *n >= 1.0)),
+            "a fresh project's sole scene makes each track's first clip effective: {ids:?}"
+        );
+    }
+
+    #[test]
+    fn device_chain_values_are_per_channel_lists_of_device_maps() {
+        let app = test_app_with_instrument_descriptor_on_tracks(
+            sequencer::effects::EffectDescriptor::builtin_filter(),
+            2,
+        );
+        let tracks = build_track_device_chains_value(&app, &app.state);
+        let Value::List(tracks) = tracks else {
+            panic!("track device chains should be a per-track list");
+        };
+        assert_eq!(tracks.len(), app.tracks.len());
+        for track in &tracks {
+            let Value::List(devices) = &*track.borrow() else {
+                panic!("each track should carry a device list");
+            };
+            for device in devices {
+                let Value::Map(device) = &*device.borrow() else {
+                    panic!("device entry should be a map");
+                };
+                assert!(matches!(
+                    device.get("kind").map(|v| v.borrow().clone()),
+                    Some(Value::String(kind)) if kind == "instrument" || kind == "effect"
+                ));
+                assert!(matches!(
+                    device.get("enabled").map(|v| v.borrow().clone()),
+                    Some(Value::Bool(_))
+                ));
+                assert!(matches!(
+                    device.get("name").map(|v| v.borrow().clone()),
+                    Some(Value::String(_))
+                ));
+            }
+        }
+        let Value::List(buses) = build_bus_device_chains_value(&app) else {
+            panic!("bus device chains should be a per-bus list");
+        };
+        assert_eq!(buses.len(), app.buses.len());
+        for bus in &buses {
+            let Value::List(devices) = &*bus.borrow() else {
+                panic!("each bus should carry a device list");
+            };
+            assert_eq!(
+                devices.len(),
+                0,
+                "a fresh bus has no effects: {devices:?}"
+            );
+        }
     }
 
     fn test_delete_target_number(payload: &Value, field: &str) -> Option<usize> {
@@ -40508,6 +40588,102 @@ mod retrospective_ui_tests;
             layout_contains_debug_name(&layout, "audio-fx-panel-root-0-Dimension"),
             "layout should contain the built-in Dimension panel"
         );
+    }
+
+    #[test]
+    fn metal_seq_fx_es_compressor_layout_contains_knobs() {
+        let src = read_ui_source("effects.lisp").expect("read fx lisp");
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        let params = vec![
+            Value::Map(test_param_map("amount", 0, 50.0, 0.0, 100.0)),
+            Value::Map(test_param_map("attack", 1, 40.0, 1.0, 200.0)),
+            Value::Map(test_param_map("release", 2, 120.0, 20.0, 2000.0)),
+            Value::Map(test_param_map("mix", 3, 1.0, 0.0, 1.0)),
+            Value::Map(test_param_map("drive", 4, 0.0, 0.0, 24.0)),
+            Value::Map(test_param_map("input-db", 5, 0.0, -24.0, 24.0)),
+            Value::Map(test_param_map("output-db", 6, -6.0, -48.0, 6.0)),
+            Value::Map(test_param_map("detector-db", 7, 0.0, -36.0, 36.0)),
+            Value::Map(test_param_map("enabled", 8, 1.0, 0.0, 1.0)),
+        ];
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![
+                ("num-tracks", Value::Number(1.0)),
+                ("compiling", Value::Bool(false)),
+                ("available-effects", test_list(vec![])),
+                (
+                    "available-builtin-effects",
+                    test_list(vec![Value::String("ES Compressor".to_string())]),
+                ),
+                ("available-midi-effects", test_list(vec![])),
+                (
+                    "bus-names",
+                    test_list(vec![Value::String("Mix".to_string())]),
+                ),
+                (
+                    "effects",
+                    test_list(vec![Value::Map(test_fx_map("ES Compressor", 0, params))]),
+                ),
+                ("midi-effects", test_list(vec![])),
+                (
+                    "instrument-panel",
+                    test_list(vec![Value::Map(test_instrument_map())]),
+                ),
+                ("bus-effects", test_list(vec![test_list(vec![])])),
+            ],
+            true,
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def eseq.seq-core-state/selected-bus-name () "Mix")
+                (def seq-has-selection? () false)
+                (def eseq.browser/sbrowser-editor-name "")
+                (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def custom-instrument-synth-ui (inst) false)
+                (def custom-midi-fx-ui (fx) false)
+                (def custom-audio-fx-ui (fx) false)
+                (defstate eseq.seq-core-state/selected-bus -1)
+                "#,
+            )
+            .expect("install fx test helpers");
+        register_test_delete_target_natives(&mut editor, 1);
+        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        let ui_probe = editor
+            .runtime_mut()
+            .eval_str("(eseq.effects.builtin.audio-fx/builtin-audio-fx-ui (nth SEQ.effects 0))")
+            .expect("probe es compressor ui")
+            .expect("es compressor ui probe value");
+        for text in ["sustain", "mix", "attack", "release", "input", "drive", "detect", "output"] {
+            assert!(
+                value_contains_string(&ui_probe, text),
+                "ES Compressor custom UI probe should contain the {text} knob: {ui_probe:?}"
+            );
+        }
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            panic!("ES Compressor fx lisp status after refresh: {status}");
+        }
+        let fx_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx lisp should create the *fx* buffer")
+            .id;
+        editor.set_active_buffer(fx_id);
+        editor.set_layout_viewport(128, 20);
+        let layout = editor.widget_layout().expect("es compressor fx layout");
+        assert_finite_layout_tree(&layout);
+        assert!(
+            layout_contains_debug_name(&layout, "audio-fx-panel-root-0-ES Compressor"),
+            "layout should contain the built-in ES Compressor panel"
+        );
+        assert!(
+            layout_contains_debug_name(&layout, "es-compressor-panel"),
+            "layout should contain the ES Compressor knob panel body"
+        );
+        assert_eq!(count_widget_type(&layout, "knob-number"), 8);
     }
 
     #[test]

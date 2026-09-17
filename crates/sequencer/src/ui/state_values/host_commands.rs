@@ -41,6 +41,12 @@ pub(crate) fn poll_pending_compile_status(
         );
         rt.set_reactive(
             "SEQ",
+            "track-device-chains",
+            build_track_device_chains_value(&app, &state),
+        );
+        rt.set_reactive("SEQ", "bus-device-chains", build_bus_device_chains_value(&app));
+        rt.set_reactive(
+            "SEQ",
             "instrument-panel",
             if app.tracks.is_empty() {
                 Value::List(vec![])
