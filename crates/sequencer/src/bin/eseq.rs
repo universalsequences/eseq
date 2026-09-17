@@ -69,11 +69,8 @@ fn run(args: Vec<String>) -> Result<(), String> {
                 let (kind, name) = item.split_once(':').ok_or_else(|| {
                     format!("item `{item}` must be instrument:<name> or effect:<name>")
                 })?;
-                let kind = match kind {
-                    "instrument" => ExportKind::Instrument,
-                    "effect" => ExportKind::Effect,
-                    other => return Err(format!("unknown item kind `{other}`")),
-                };
+                let kind = ExportKind::parse(kind)
+                    .ok_or_else(|| format!("unknown item kind `{kind}`"))?;
                 picked.push((kind, name.to_string()));
             }
             let request = ExportRequest {
@@ -88,10 +85,11 @@ fn run(args: Vec<String>) -> Result<(), String> {
                 true,
             )?;
             println!(
-                "exported {} ({} instrument(s), {} effect(s))",
+                "exported {} ({} instrument(s), {} effect(s), {} preset bank(s))",
                 report.archive.as_deref().unwrap_or(&report.package_dir).display(),
                 report.instruments,
-                report.effects
+                report.effects,
+                report.presets
             );
             for warning in report.warnings {
                 eprintln!("eseq: warning: {warning}");
@@ -99,7 +97,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
             Ok(())
         }
         _ => Err(
-            "usage: eseq package index [PACKAGE_DIR]\n       eseq package install AUTHOR/NAME GIT_URL\n       eseq package import PATH_OR_ARCHIVE\n       eseq package export AUTHOR/NAME VERSION OUT_DIR (instrument:<name>|effect:<name>)..."
+            "usage: eseq package index [PACKAGE_DIR]\n       eseq package install AUTHOR/NAME GIT_URL\n       eseq package import PATH_OR_ARCHIVE\n       eseq package export AUTHOR/NAME VERSION OUT_DIR (instrument:<name>|effect:<name>|presets:<factory-instrument>)..."
                 .to_string(),
         ),
     }

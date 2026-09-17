@@ -31,6 +31,9 @@ pub struct PackageSummary {
     /// the package ships audio without an index, the audio files found.
     pub samples: usize,
     pub themes: usize,
+    /// Preset banks under `presets/` for instruments the pack does not
+    /// itself ship (factory or user instruments).
+    pub presets: usize,
 }
 
 impl PackageSummary {
@@ -77,6 +80,10 @@ impl PackageSummary {
                 .content_dir("themes")
                 .map(|dir| count_files(&dir, |path| path.extension().is_some_and(|ext| ext == "lisp")))
                 .unwrap_or(0),
+            presets: package
+                .content_dir("presets")
+                .map(|dir| count_files(&dir, |path| path.extension().is_some_and(|ext| ext == "presets")))
+                .unwrap_or(0),
         }
     }
 
@@ -88,6 +95,7 @@ impl PackageSummary {
             (self.instruments, "instrument", "instruments"),
             (self.effects, "effect", "effects"),
             (self.midi_fx, "MIDI effect", "MIDI effects"),
+            (self.presets, "preset bank", "preset banks"),
             (self.samples, "sample", "samples"),
             (self.themes, "theme", "themes"),
         ] {
@@ -563,6 +571,7 @@ mod tests {
                 midi_fx: 0,
                 samples: 0,
                 themes: 0,
+                presets: 0,
             }
         );
         assert_eq!(staged.summary.describe_contents(), "2 instruments, 1 effect");

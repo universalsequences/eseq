@@ -185,6 +185,7 @@
             (package-import-count-row "instruments" (get summary :instruments))
             (package-import-count-row "effects" (get summary :effects))
             (package-import-count-row "MIDI effects" (get summary :midi-fx))
+            (package-import-count-row "preset banks" (get summary :presets))
             (package-import-count-row "samples" (get summary :samples))
             (package-import-count-row "themes" (get summary :themes)))
           (if installed?
@@ -229,15 +230,24 @@
     (h-stack :key (str "package-export-row-" kind "-" name) :width :fill :gap 0.5 :align :center
       (toggle :value (get item :selected?)
         :on-change (lambda (value) (package-export-toggle kind name)))
-      (label name :font-size 12 :color :white :bg :transparent :flex 1)
-      (label kind :font-size 10 :color :dim :bg :transparent))))
+      (label name :font-size 12 :color :white :bg :transparent :flex 1))))
+
+(def package-export-column (title kind hint)
+  (let ((items (seq-package-export-candidates kind)))
+    (v-stack :flex 1 :gap 0.3
+      (label title :key (str "package-export-column-" kind) :font-size 12 :color :white :bg :transparent)
+      (label hint :width :fill :wrap true :font-size 10 :color :dim :bg :transparent)
+      (scroll :key (str "package-export-list-" kind) :width :fill :height 10
+        (v-stack :width :fill :gap 0.15
+          (if (= (len items) 0)
+            (label "Nothing here yet." :font-size 11 :color :dim :bg :transparent)
+            (each items |item| (package-export-row item))))))))
 
 (def package-export-body ()
   (let ((epoch package-export-generation)
-        (items (seq-package-export-candidates))
         (selected (seq-package-export-selected-count)))
     (v-stack :width :fill :height :fill :padding 1 :gap 0.5
-      (label "Export Package" :key "package-export-title" :font-size 15 :color :white :bg :transparent)
+      (label "Export Package" :key "package-export-title" :font-size 16 :color :white :bg :transparent)
       (h-stack :width :fill :gap 0.6
         (v-stack :flex 2 :gap 0.2
           (label "Package name (author/name)" :font-size 10 :color :dim :bg :transparent)
@@ -254,13 +264,13 @@
             :placeholder "1.0"
             :on-change (lambda (v) (set! package-export-version v))
             :on-cancel (lambda () (close-package-export)))))
-      (label (if (= (len items) 0)
-               "Your library is empty: fork or create an instrument first."
-               "Pick from your library (fork factory content to export it):")
-        :font-size 11 :color :dim :bg :transparent)
-      (scroll :key "package-export-list" :width :fill :height 5
-        (v-stack :width :fill :gap 0.15
-          (each items |item| (package-export-row item))))
+      (h-stack :width :fill :gap 0.8 :padding-top 0.4
+        (package-export-column "Instruments" "instrument"
+          "From your library. Fork a factory synth to export it.")
+        (package-export-column "Effects" "effect"
+          "Custom effects from your library.")
+        (package-export-column "Presets" "presets"
+          "Your saved presets for factory instruments."))
       (label "Library macros are inlined; absolute paths are reported after export."
         :font-size 10 :color :dim :bg :transparent)
       (h-stack :width :fill :gap 0.5 :padding-top 0.4
@@ -275,7 +285,7 @@
   (v-stack :width 0 :height 0 :bg :transparent
     (eseq.settings/panel)
     (modal :is-open package-export-open? :on-close (lambda () (close-package-export))
-        :width-px 640 :height-px 560
+        :width-px 1200 :height-px 820
       (box :debug-name "package-export-panel" :width :fill :height :fill :padding 0.6 :bg :transparent
         (if package-export-open? (package-export-body) (box :width 0 :height 0 :bg :transparent))))
     (modal :is-open package-import-open? :on-close (lambda () (package-import-cancel))

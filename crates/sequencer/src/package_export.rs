@@ -19,6 +19,10 @@ use crate::app_paths::{AppPaths, ContentTier};
 pub enum ExportKind {
     Instrument,
     Effect,
+    /// The user's saved presets for a factory instrument (the overlay bank
+    /// in the user tier), shipped as `presets/factory/<logical>.presets`.
+    /// User instruments carry their own bank with the instrument instead.
+    Presets,
 }
 
 impl ExportKind {
@@ -26,6 +30,24 @@ impl ExportKind {
         match self {
             Self::Instrument => "instruments",
             Self::Effect => "effects",
+            Self::Presets => "presets",
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Instrument => "instrument",
+            Self::Effect => "effect",
+            Self::Presets => "presets",
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "instrument" => Some(Self::Instrument),
+            "effect" => Some(Self::Effect),
+            "presets" => Some(Self::Presets),
+            _ => None,
         }
     }
 }
@@ -77,11 +99,43 @@ pub fn export_candidates(paths: &AppPaths) -> Vec<ExportCandidate> {
             }
         }
     }
+    // Preset overlays: a `<logical>.presets` in the user tier with no user
+    // instrument of that name beside it belongs to a factory instrument.
+    fn collect_preset_overlays(dir: &Path, root: &Path, out: &mut Vec<ExportCandidate>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if name.starts_with('.') {
+                continue;
+            }
+            if path.is_dir() {
+                if !path.join("dsp.lisp").is_file() {
+                    collect_preset_overlays(&path, root, out);
+                }
+            } else if path.extension().is_some_and(|ext| ext == "presets") {
+                let stem = path.with_extension("");
+                if stem.join("dsp.lisp").is_file() || stem.with_extension("lisp").is_file() {
+                    continue;
+                }
+                if let Ok(rel) = stem.strip_prefix(root) {
+                    out.push(ExportCandidate {
+                        kind: ExportKind::Presets,
+                        logical: rel.to_string_lossy().replace('\\', "/"),
+                        source: path.clone(),
+                    });
+                }
+            }
+        }
+    }
     let mut out = Vec::new();
     let instruments = paths.user_instruments_dir();
     collect(ExportKind::Instrument, &instruments, &instruments, &mut out);
     let effects = paths.user_effects_dir();
     collect(ExportKind::Effect, &effects, &effects, &mut out);
+    collect_preset_overlays(&instruments, &instruments, &mut out);
     out.sort_by(|a, b| (a.kind as u8, a.logical.to_lowercase()).cmp(&(b.kind as u8, b.logical.to_lowercase())));
     out
 }
@@ -102,6 +156,7 @@ pub struct ExportReport {
     pub archive: Option<PathBuf>,
     pub instruments: usize,
     pub effects: usize,
+    pub presets: usize,
     /// Things the author should look at before sharing: absolute paths in
     /// a source, a macro that could not be inlined, a missing preset bank.
     pub warnings: Vec<String>,
@@ -173,16 +228,14 @@ pub fn export_package(
                 .ok_or_else(|| {
                     format!(
                         "{} '{logical}' is not in your library (only user-tier content exports; fork factory content first)",
-                        match kind {
-                            ExportKind::Instrument => "instrument",
-                            ExportKind::Effect => "effect",
-                        }
+                        kind.name()
                     )
                 })?;
             export_candidate(paths, candidate, &package_dir, &mut report)?;
             match kind {
                 ExportKind::Instrument => report.instruments += 1,
                 ExportKind::Effect => report.effects += 1,
+                ExportKind::Presets => report.presets += 1,
             }
         }
         let manifest = serde_json::json!({
@@ -219,6 +272,16 @@ fn export_candidate(
     report: &mut ExportReport,
 ) -> Result<(), String> {
     let target_root = package_dir.join(candidate.kind.content_dir());
+    if candidate.kind == ExportKind::Presets {
+        let target = target_root.join("factory").join(format!("{}.presets", candidate.logical));
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|error| format!("failed to create {}: {error}", parent.display()))?;
+        }
+        std::fs::copy(&candidate.source, &target)
+            .map_err(|error| format!("failed to copy {}: {error}", candidate.source.display()))?;
+        return Ok(());
+    }
     let folder_layout = candidate.source.file_name().and_then(|n| n.to_str()) == Some("dsp.lisp");
     let label = format!("{:?} {}", candidate.kind, candidate.logical).to_lowercase();
     if folder_layout {
@@ -398,9 +461,15 @@ mod tests {
         let comp = paths.user_effects_dir().join("comp");
         std::fs::create_dir_all(&comp).unwrap();
         std::fs::write(comp.join("dsp.lisp"), "(out (in 1) 1)").unwrap();
-        // A factory instrument must not be offered.
+        // A factory instrument must not be offered, but the user's presets
+        // for it are.
         std::fs::create_dir_all(paths.instruments_dir().join("shipped")).unwrap();
         std::fs::write(paths.instruments_dir().join("shipped/dsp.lisp"), "(out 0)").unwrap();
+        std::fs::write(
+            paths.user_instruments_dir().join("shipped.presets"),
+            r#"{"version":1,"engine_name":"factory:shipped","source_file":"x","presets":[{"id":"warm","name":"Warm","base_note_offset":0.0,"params":{}}]}"#,
+        )
+        .unwrap();
 
         let candidates = export_candidates(&paths);
         assert_eq!(
@@ -409,6 +478,7 @@ mod tests {
                 (ExportKind::Instrument, "kits/kick"),
                 (ExportKind::Effect, "comp"),
                 (ExportKind::Effect, "gain"),
+                (ExportKind::Presets, "shipped"),
             ]
         );
 
@@ -421,9 +491,12 @@ mod tests {
                 (ExportKind::Instrument, "kits/kick/".into()),
                 (ExportKind::Effect, "comp".into()),
                 (ExportKind::Effect, "gain".into()),
+                (ExportKind::Presets, "shipped".into()),
             ],
         };
         let report = export_package(&paths, &request, &out, true).unwrap();
+        assert_eq!(report.presets, 1);
+        assert!(report.package_dir.join("presets/factory/shipped.presets").is_file());
         assert_eq!(report.package_dir, out.join("alec.drums"));
         assert_eq!(report.archive, Some(out.join("alec.drums-1.0.eseqpack")));
         assert_eq!((report.instruments, report.effects), (1, 2));
@@ -462,6 +535,7 @@ mod tests {
         .unwrap();
         assert_eq!(staged.summary.instruments, 1);
         assert_eq!(staged.summary.effects, 2);
+        assert_eq!(staged.summary.presets, 1);
         let installed = crate::package_install::publish_staged_package(staged, false).unwrap();
         assert_eq!(installed.path, paths.packages_dir().join("alec.drums"));
         let id = exported_id("alec/drums", "kits/kick/");
@@ -472,6 +546,11 @@ mod tests {
             .effect_roots()
             .iter()
             .any(|root| root.tier == ContentTier::Package("alec.drums".into())));
+        // The shipped presets reach the factory instrument through the
+        // package overlay even after the user's own bank is gone.
+        std::fs::remove_file(paths.user_instruments_dir().join("shipped.presets")).unwrap();
+        let presets = crate::lisp_host::instrument_presets_with_paths_for_tests(&paths, "factory:shipped").unwrap();
+        assert_eq!(presets.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), vec!["Warm"]);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -512,3 +591,4 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 }
+

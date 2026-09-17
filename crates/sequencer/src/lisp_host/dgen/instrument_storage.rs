@@ -300,6 +300,14 @@ fn resolve_instrument_storage_path_with_paths(
 }
 
 #[cfg(test)]
+pub fn instrument_presets_with_paths_for_tests(
+    paths: &crate::app_paths::AppPaths,
+    name: &str,
+) -> io::Result<std::sync::Arc<Vec<InstrumentPreset>>> {
+    cached_instrument_presets_with_paths(paths, name)
+}
+
+#[cfg(test)]
 pub fn instrument_source_path_with_paths_for_tests(
     paths: &crate::app_paths::AppPaths,
     name: &str,
@@ -569,17 +577,55 @@ fn package_tier_preset_path(
 /// instruments whose `base` is already writable.
 struct PresetBankPaths {
     base: PathBuf,
+    /// Banks shipped by installed packages for this instrument
+    /// (`<package>/presets/<factory|user>/<logical>.presets`), in package
+    /// load order. Merged between `base` and `user_overlay`: a pack can add
+    /// or reshape presets for a factory synth, and the user's own saves
+    /// still win.
+    package_overlays: Vec<PathBuf>,
     user_overlay: Option<PathBuf>,
 }
 
 impl PresetBankPaths {
     fn all(&self) -> Vec<PathBuf> {
         let mut paths = vec![self.base.clone()];
+        paths.extend(self.package_overlays.iter().cloned());
         if let Some(overlay) = &self.user_overlay {
             paths.push(overlay.clone());
         }
         paths
     }
+}
+
+/// Where a package would ship presets for `name`: the tier directory the
+/// id belongs to (`factory` for factory ids and legacy bare names, which
+/// resolve factory-first; `user` for user ids) under the package's
+/// `presets/`. Package instruments carry their bank beside the source, so
+/// they have no overlay slot.
+fn package_preset_overlay_relative(name: &str) -> io::Result<Option<PathBuf>> {
+    let (tier_dir, logical) = match parse_instrument_id(name)? {
+        Some((InstrumentTier::Package(_), _)) => return Ok(None),
+        Some((InstrumentTier::User, logical)) => ("user", logical),
+        Some((InstrumentTier::Factory, logical)) => ("factory", logical),
+        None => ("factory", name.trim_end_matches('/')),
+    };
+    Ok(Some(Path::new(tier_dir).join(format!("{logical}.presets"))))
+}
+
+fn package_preset_overlays_with_paths(
+    paths: &crate::app_paths::AppPaths,
+    name: &str,
+) -> io::Result<Vec<PathBuf>> {
+    let Some(relative) = package_preset_overlay_relative(name)? else {
+        return Ok(Vec::new());
+    };
+    Ok(paths
+        .package_catalog()
+        .ordered()
+        .filter_map(|package| package.content_dir("presets"))
+        .map(|dir| dir.join(&relative))
+        .filter(|path| path.is_file())
+        .collect())
 }
 
 fn instrument_preset_bank_paths_with_paths(
@@ -594,7 +640,8 @@ fn instrument_preset_bank_paths_with_paths(
     // a bare-named factory instrument's saved presets never show up on load.
     let user_overlay =
         Some(instrument_preset_save_path_with_paths(paths, name)?).filter(|overlay| *overlay != base);
-    Ok(PresetBankPaths { base, user_overlay })
+    let package_overlays = package_preset_overlays_with_paths(paths, name)?;
+    Ok(PresetBankPaths { base, package_overlays, user_overlay })
 }
 
 /// The factory-shipped (or, for user instruments, the only) bank path. The
@@ -739,7 +786,15 @@ fn cached_instrument_presets_with_paths(
     // Resolve and read while holding the cache lock so a concurrent save cannot
     // publish a new bank and then have this load install stale contents over it.
     let bank_paths = instrument_preset_bank_paths_with_paths(paths, name)?;
-    let base = read_preset_bank(&bank_paths.base)?;
+    let mut base = read_preset_bank(&bank_paths.base)?;
+    for overlay in &bank_paths.package_overlays {
+        if let Some(pack) = read_preset_bank(overlay)? {
+            base = Some(match base {
+                Some(base) => merge_preset_banks(&base, &pack),
+                None => pack,
+            });
+        }
+    }
     let overlay = match &bank_paths.user_overlay {
         Some(overlay) => read_preset_bank(overlay)?,
         None => None,
@@ -1627,6 +1682,51 @@ mod tier_id_tests {
         assert!(resolve_instrument_storage_path_with_paths(&paths, "kick", "lisp")
             .unwrap()
             .starts_with(&package_root));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn package_preset_banks_overlay_factory_instruments_under_the_user_bank() {
+        let (paths, root) = test_paths("package-preset-overlay");
+        std::fs::create_dir_all(paths.instruments_dir()).unwrap();
+        write_folder_instrument(&paths.instruments_dir(), "heat", "factory");
+        write_preset_bank(&paths.instruments_dir().join("heat.presets"), "factory:heat", &["Init"]);
+        let package = paths.packages_dir().join("alec.heatpack");
+        std::fs::create_dir_all(package.join("presets/factory")).unwrap();
+        std::fs::write(package.join("manifest.json"), r#"{"name":"alec/heatpack","version":"1"}"#).unwrap();
+        write_preset_bank(
+            &package.join("presets/factory/heat.presets"),
+            "factory:heat",
+            &["Init", "Pack Lead"],
+        );
+        crate::app_paths::invalidate_package_catalog_cache();
+
+        assert_eq!(
+            names(&cached_instrument_presets_with_paths(&paths, "factory:heat").unwrap()),
+            vec!["Init", "Pack Lead"]
+        );
+        // Bare names see the pack too (they resolve factory-first).
+        assert_eq!(
+            names(&cached_instrument_presets_with_paths(&paths, "heat").unwrap()),
+            vec!["Init", "Pack Lead"]
+        );
+        // The user's own save still wins by name and adds on top.
+        save_instrument_presets_with_paths(
+            &paths,
+            "factory:heat",
+            &[preset("Mine"), preset("Pack Lead")],
+        )
+        .unwrap();
+        assert_eq!(
+            names(&cached_instrument_presets_with_paths(&paths, "factory:heat").unwrap()),
+            vec!["Init", "Mine", "Pack Lead"]
+        );
+        // A package instrument has no overlay slot: its bank travels with it.
+        assert_eq!(package_preset_overlay_relative("pkg:alec.heatpack/x").unwrap(), None);
+        assert_eq!(
+            package_preset_overlay_relative("user:kits/kick").unwrap(),
+            Some(PathBuf::from("user/kits/kick.presets"))
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 

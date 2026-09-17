@@ -375,7 +375,9 @@ fn patch_cable_click_output(
     }
     let outputs: std::collections::HashMap<usize, (f32, f32)> = ports
         .iter()
-        .filter(|port| port.direction == PatchPortDirection::Out)
+        // Match build_mod_patch_cables: retained routes from unavailable
+        // outputs are not drawn and must not intercept clicks on widgets.
+        .filter(|port| port.direction == PatchPortDirection::Out && port.active)
         .map(|port| (port.track, (port.center.0 * cell_w, port.center.1 * cell_h)))
         .collect();
     let point_px = (layout_col * cell_w, layout_row * cell_h);
@@ -558,7 +560,7 @@ mod tests {
     use crate::layout::{LayoutNode, Rect};
     use crate::vm::Value;
 
-    use super::{PatchPortDirection, patch_drop_output};
+    use super::{PatchPortDirection, patch_cable_click_output, patch_drop_output};
 
     fn port(
         direction: PatchPortDirection,
@@ -665,6 +667,31 @@ mod tests {
             [Value::Number(source), Value::Number(dest), Value::Number(input)]
                 if *source == 0.0 && *dest == 1.0 && *input == 3.0
         ));
+    }
+
+    #[test]
+    fn patch_cable_click_ignores_inactive_sources() {
+        let mut source = port(PatchPortDirection::Out, 0, 0, (2.0, 2.0), false);
+        let mut dest = port(PatchPortDirection::In, 1, 3, (20.0, 2.0), false);
+        dest.props.insert("connected-sources".into(), Value::List(vec![
+            std::rc::Rc::new(std::cell::RefCell::new(Value::Number(0.0))),
+        ]));
+        dest.props.insert("on-cable-click".into(), Value::String("select".into()));
+        dest.props.insert("dest-kind".into(), Value::String("bus".into()));
+        dest.props.insert("dest".into(), Value::Number(7.0));
+
+        // Midpoint of the rendered cable at 10 x 20 px cells. The same
+        // stored route must stop intercepting clicks when its source loses
+        // its modulation output, because the renderer hides that cable.
+        let click = |source: LayoutNode| {
+            patch_cable_click_output(&layout(vec![source, dest.clone()]), 11.0, 3.7745, 10.0, 20.0)
+        };
+        let output = click(source.clone()).expect("active cable remains selectable");
+        assert_eq!(output.callback, Value::String("select".into()));
+        assert_eq!(output.args, vec![Value::Number(0.0), Value::Number(7.0), Value::Number(3.0)]);
+
+        source.props.insert("active".into(), Value::Bool(false));
+        assert!(click(source).is_none(), "an invisible cable must not intercept clicks");
     }
 }
 

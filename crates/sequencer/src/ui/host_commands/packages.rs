@@ -28,27 +28,23 @@ thread_local! {
     > = const { std::cell::RefCell::new(std::collections::BTreeSet::new()) };
 }
 
-fn export_kind(name: &str) -> Option<sequencer::package_export::ExportKind> {
-    match name {
-        "instrument" => Some(sequencer::package_export::ExportKind::Instrument),
-        "effect" => Some(sequencer::package_export::ExportKind::Effect),
-        _ => None,
-    }
-}
-
-fn export_kind_name(kind: sequencer::package_export::ExportKind) -> &'static str {
-    match kind {
-        sequencer::package_export::ExportKind::Instrument => "instrument",
-        sequencer::package_export::ExportKind::Effect => "effect",
-    }
-}
-
 pub(crate) fn register_package_export_natives(runtime: &mut Runtime) {
     // Every exportable item as (dict :kind "instrument"|"effect" :name
     // <logical> :selected? bool), instruments first.
-    runtime.register_native("seq-package-export-candidates", |_args, _ctx| {
+    // An optional kind argument ("instrument" | "effect" | "presets") narrows
+    // the list so a column never renders placeholder rows for other kinds.
+    runtime.register_native("seq-package-export-candidates", |args, _ctx| {
+        let only = match args.first() {
+            Some(Value::String(kind)) => Some(
+                sequencer::package_export::ExportKind::parse(kind).ok_or("unknown export kind")?,
+            ),
+            _ => None,
+        };
         let candidates =
-            sequencer::package_export::export_candidates(sequencer::app_paths::app_paths());
+            sequencer::package_export::export_candidates(sequencer::app_paths::app_paths())
+                .into_iter()
+                .filter(|candidate| only.is_none_or(|kind| candidate.kind == kind))
+                .collect::<Vec<_>>();
         let items = EXPORT_SELECTION.with(|selection| {
             let selection = selection.borrow();
             candidates
@@ -57,7 +53,7 @@ pub(crate) fn register_package_export_natives(runtime: &mut Runtime) {
                     let selected =
                         selection.contains(&(candidate.kind, candidate.logical.clone()));
                     Rc::new(RefCell::new(crate::values::map_value([
-                        ("kind", Value::String(export_kind_name(candidate.kind).into())),
+                        ("kind", Value::String(candidate.kind.name().into())),
                         ("name", Value::String(candidate.logical)),
                         ("selected?", Value::Bool(selected)),
                     ])))
@@ -73,7 +69,7 @@ pub(crate) fn register_package_export_natives(runtime: &mut Runtime) {
         else {
             return Err("seq-package-export-toggle expects kind and name".into());
         };
-        let kind = export_kind(kind).ok_or("unknown export kind")?;
+        let kind = sequencer::package_export::ExportKind::parse(kind).ok_or("unknown export kind")?;
         let count = EXPORT_SELECTION.with(|selection| {
             let mut selection = selection.borrow_mut();
             let key = (kind, name.clone());
@@ -142,10 +138,11 @@ fn commit_package_export(payload: &Value) -> Result<String, String> {
     let _ = std::fs::remove_dir_all(&report.package_dir);
     EXPORT_SELECTION.with(|selection| selection.borrow_mut().clear());
     let mut message = format!(
-        "Exported {} ({} instrument(s), {} effect(s))",
+        "Exported {} ({} instrument(s), {} effect(s), {} preset bank(s))",
         archive.display(),
         report.instruments,
-        report.effects
+        report.effects,
+        report.presets
     );
     for warning in &report.warnings {
         eprintln!("metal_seq: export warning: {warning}");
@@ -212,6 +209,7 @@ pub(crate) fn staged_package_summary_value() -> Value {
             ("midi-fx", number(summary.midi_fx)),
             ("samples", number(summary.samples)),
             ("themes", number(summary.themes)),
+            ("presets", number(summary.presets)),
             ("installed?", Value::Bool(staged.replaces_installed())),
         ])
     })

@@ -498,43 +498,6 @@ pub(crate) fn build_custom_instrument_ui_source_with_overlay(
     format!("{functions}\n(def custom-instrument-synth-ui (inst) {dispatch})\n")
 }
 
-pub(crate) fn custom_ui_source_paths() -> Vec<PathBuf> {
-    fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            if name.starts_with('.') {
-                continue;
-            }
-            if path.is_dir() {
-                if path.join("dsp.lisp").exists() {
-                    let ui_path = path.join("ui.lisp");
-                    if ui_path.exists() {
-                        out.push(ui_path);
-                    }
-                }
-                collect(&path, out);
-            }
-        }
-    }
-
-    let app_paths = sequencer::app_paths::app_paths();
-    let mut paths = Vec::new();
-    for root in app_paths.instrument_dirs() {
-        collect(&root, &mut paths);
-    }
-    collect(&app_paths.midi_fx_dir(), &mut paths);
-    for root in app_paths.effect_dirs() {
-        collect(&root, &mut paths);
-    }
-    paths.sort();
-    paths.dedup();
-    paths
-}
-
 pub(crate) fn is_generated_custom_ui_source_path(path: &Path) -> bool {
     path.ends_with(GENERATED_INSTRUMENT_UI_PATH)
         || path.ends_with(GENERATED_MIDI_FX_UI_PATH)
@@ -1091,6 +1054,7 @@ mod tests {
 fn active_custom_ui_buffer_overlay(editor: &Editor) -> Option<(String, String, String)> {
     let buffer = editor.active_buffer();
     let path = buffer.path.as_ref()?;
+    if !buffer.dirty && !path.is_file() { return None; }
     if path.file_name().and_then(|name| name.to_str()) != Some("ui.lisp") {
         return None;
     }
@@ -1114,6 +1078,7 @@ fn active_custom_ui_buffer_overlay(editor: &Editor) -> Option<(String, String, S
 fn active_custom_midi_fx_ui_buffer_overlay(editor: &Editor) -> Option<(String, String, String)> {
     let buffer = editor.active_buffer();
     let path = buffer.path.as_ref()?;
+    if !buffer.dirty && !path.is_file() { return None; }
     if path.file_name().and_then(|name| name.to_str()) != Some("ui.lisp") {
         return None;
     }
@@ -1130,6 +1095,7 @@ fn active_custom_midi_fx_ui_buffer_overlay(editor: &Editor) -> Option<(String, S
 fn active_custom_audio_fx_ui_buffer_overlay(editor: &Editor) -> Option<(String, String, String)> {
     let buffer = editor.active_buffer();
     let path = buffer.path.as_ref()?;
+    if !buffer.dirty && !path.is_file() { return None; }
     if path.file_name().and_then(|name| name.to_str()) != Some("ui.lisp") {
         return None;
     }

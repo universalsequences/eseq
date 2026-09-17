@@ -254,7 +254,6 @@ pub(crate) fn run_event_loop(
         None
     };
     let mut lisp_hot_reload_source_revision = editor.runtime().lisp_source_revision();
-    let mut last_lisp_hot_reload_path_scan = Instant::now();
 
     // Driver discovery and device settings run outside the UI/audio threads.
     // The waker ends a blocked idle poll the moment a note is queued.
@@ -606,12 +605,9 @@ pub(crate) fn run_event_loop(
         }
         if let Some(watcher) = lisp_hot_reload_watcher.as_mut() {
             let source_revision = editor.runtime().lisp_source_revision();
-            if source_revision != lisp_hot_reload_source_revision
-                || last_lisp_hot_reload_path_scan.elapsed() >= Duration::from_secs(1)
-            {
+            if source_revision != lisp_hot_reload_source_revision {
                 watcher.set_watched_paths(watched_lisp_paths(&editor));
                 lisp_hot_reload_source_revision = source_revision;
-                last_lisp_hot_reload_path_scan = Instant::now();
             }
             let changed_paths = watcher.poll_ready_paths();
             if !changed_paths.is_empty()

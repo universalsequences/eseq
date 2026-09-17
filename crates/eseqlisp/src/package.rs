@@ -38,7 +38,8 @@ pub struct PackageManifest {
 /// The content directories a package may carry beside `src/`. Each mirrors
 /// the same-named factory tree, so a loader that already reads that tree from
 /// the factory and user tiers reads it from a package with no per-type code.
-pub const PACKAGE_CONTENT_DIRS: &[&str] = &["instruments", "effects", "midi-fx", "samples", "themes"];
+pub const PACKAGE_CONTENT_DIRS: &[&str] =
+    &["instruments", "effects", "midi-fx", "presets", "samples", "themes"];
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ExternalAsset {

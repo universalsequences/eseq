@@ -20,6 +20,8 @@ mod instrument_header_ui_tests;
 mod retrospective_ui_tests;
 #[path = "midi_midimix_tests.rs"]
 mod midi_midimix_tests;
+#[path = "mixer_hit_tests.rs"]
+mod mixer_hit_tests;
 
     use super::*;
     use eseqlisp::parser::{ASTParser, Expression, Parser, ParserError, Token};
@@ -18788,7 +18790,8 @@ mod midi_midimix_tests;
             "/package-export-title",
             "/package-export-identity",
             "/package-export-version",
-            "/package-export-list",
+            "/package-export-list-instrument",
+            "/package-export-list-presets",
             "/package-export-submit",
         ] {
             let node = find_layout_node_by_stable_key_suffix(&layout, key)

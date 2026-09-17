@@ -1,157 +1,45 @@
-use std::collections::BTreeSet;
+mod discovery;
+
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Receiver};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use eseqlisp::{Editor, ReloadReport};
-use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use discovery::{DiscoveryRoots, DiscoveryWorker, ReloadBatch};
 
-use super::custom_ui::{
-    custom_ui_source_paths, is_generated_custom_ui_source_path, reload_custom_instrument_ui,
-};
+use super::custom_ui::{is_generated_custom_ui_source_path, reload_custom_instrument_ui};
 
 const DEBOUNCE_WINDOW: Duration = Duration::from_millis(150);
 
-#[derive(Debug)]
-pub(crate) struct LispHotReloadWatcher {
-    receiver: Receiver<PathBuf>,
-    watcher: RecommendedWatcher,
-    watched_dirs: BTreeSet<PathBuf>,
-    watched_files: BTreeSet<PathBuf>,
-    pending: BTreeSet<PathBuf>,
-    last_event_at: Option<Instant>,
-}
+pub(crate) struct LispHotReloadWatcher(DiscoveryWorker);
 
 impl LispHotReloadWatcher {
-    pub(crate) fn start(paths: impl IntoIterator<Item = PathBuf>) -> Option<Self> {
-        if std::env::var("METAL_SEQ_DISABLE_LISP_HOT_RELOAD")
-            .ok()
+    pub(crate) fn start(paths: Vec<PathBuf>) -> Option<Self> {
+        if std::env::var("METAL_SEQ_DISABLE_LISP_HOT_RELOAD").ok()
             .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "yes" | "on"))
         {
             eprintln!("metal_seq: Lisp hot reload watcher disabled by environment");
             return None;
         }
-
-        let (tx, rx) = mpsc::channel();
-        let watcher = RecommendedWatcher::new(
-            move |result: notify::Result<Event>| match result {
-                Ok(event) => {
-                    if !is_reload_event(&event.kind) {
-                        return;
-                    }
-                    for path in event.paths {
-                        let _ = tx.send(path);
-                    }
-                }
-                Err(error) => {
-                    eprintln!("metal_seq: Lisp hot reload watcher error: {error}");
-                }
-            },
-            Config::default(),
-        )
-        .ok()?;
-
-        let mut watcher = Self {
-            receiver: rx,
-            watcher,
-            watched_dirs: BTreeSet::new(),
-            watched_files: BTreeSet::new(),
-            pending: BTreeSet::new(),
-            last_event_at: None,
-        };
-        watcher.set_watched_paths(paths);
-        eprintln!(
-            "metal_seq: Lisp hot reload watcher observing {} files in {} dirs",
-            watcher.watched_files.len(),
-            watcher.watched_dirs.len()
-        );
-        Some(watcher)
-    }
-
-    pub(crate) fn set_watched_paths(&mut self, paths: impl IntoIterator<Item = PathBuf>) {
-        let next_files = paths
-            .into_iter()
-            .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("lisp"))
-            .map(|path| watch_path(&path))
-            .collect::<BTreeSet<_>>();
-        let desired_dirs = next_files
-            .iter()
-            .filter_map(|path| path.parent().map(Path::to_path_buf))
-            .collect::<BTreeSet<_>>();
-
-        if next_files == self.watched_files && desired_dirs == self.watched_dirs {
-            return;
-        }
-
-        let mut active_dirs = self.watched_dirs.clone();
-        for dir in self.watched_dirs.difference(&desired_dirs) {
-            if let Err(error) = self.watcher.unwatch(dir) {
-                eprintln!(
-                    "metal_seq: Lisp hot reload failed to unwatch {}: {error}",
-                    dir.display()
-                );
+        match DiscoveryWorker::start(paths, discovery_roots) {
+            Ok(worker) => Some(Self(worker)),
+            Err(error) => {
+                eprintln!("metal_seq: cannot start Lisp discovery worker: {error}");
+                None
             }
-            active_dirs.remove(dir);
-        }
-        for dir in desired_dirs.difference(&self.watched_dirs) {
-            match self.watcher.watch(dir, RecursiveMode::NonRecursive) {
-                Ok(()) => {
-                    active_dirs.insert(dir.clone());
-                }
-                Err(error) => {
-                    eprintln!(
-                        "metal_seq: Lisp hot reload failed to watch {}: {error}",
-                        dir.display()
-                    );
-                }
-            };
-        }
-
-        let active_files = next_files
-            .into_iter()
-            .filter(|path| {
-                path.parent()
-                    .is_some_and(|parent| active_dirs.contains(parent))
-            })
-            .collect::<BTreeSet<_>>();
-        let changed =
-            active_files.len() != self.watched_files.len() || active_dirs != self.watched_dirs;
-        self.watched_files = active_files;
-        self.watched_dirs = active_dirs;
-        self.pending
-            .retain(|path| self.watched_files.contains(path));
-        if changed {
-            eprintln!(
-                "metal_seq: Lisp hot reload watcher now observing {} files in {} dirs",
-                self.watched_files.len(),
-                self.watched_dirs.len()
-            );
         }
     }
 
-    pub(crate) fn poll_ready_paths(&mut self) -> Vec<PathBuf> {
-        while let Ok(path) = self.receiver.try_recv() {
-            let path = watch_path(&path);
-            if !self.watched_files.contains(&path) {
-                continue;
-            }
-            self.pending.insert(path);
-            self.last_event_at = Some(Instant::now());
-        }
-        if self.pending.is_empty()
-            || self
-                .last_event_at
-                .is_some_and(|last| last.elapsed() < DEBOUNCE_WINDOW)
-        {
-            return Vec::new();
-        }
-        self.last_event_at = None;
-        std::mem::take(&mut self.pending).into_iter().collect()
-    }
+    pub(crate) fn set_watched_paths(&self, paths: Vec<PathBuf>) { self.0.set_sources(paths); }
+    pub(crate) fn poll_ready_paths(&self) -> ReloadBatch { self.0.poll() }
 }
 
-fn is_reload_event(kind: &EventKind) -> bool {
-    !matches!(kind, EventKind::Access(_))
+fn discovery_roots() -> DiscoveryRoots {
+    let paths = sequencer::app_paths::app_paths();
+    DiscoveryRoots {
+        custom: paths.instrument_dirs().into_iter().chain(paths.effect_dirs())
+            .chain([paths.midi_fx_dir()]).collect(),
+        packages: [paths.packages_dir(), paths.factory_packages_dir()].into_iter().collect(),
+    }
 }
 
 pub(crate) fn watched_lisp_paths(editor: &Editor) -> Vec<PathBuf> {
@@ -161,29 +49,24 @@ pub(crate) fn watched_lisp_paths(editor: &Editor) -> Vec<PathBuf> {
         .into_iter()
         .filter(|path| !is_generated_custom_ui_source_path(path))
         .collect::<Vec<_>>();
-    paths.extend(custom_ui_source_paths());
     // A valid init is already in the module graph. Add it explicitly as well
     // so a boot-time-erroring init remains watched and can recover live.
     if let Some(path) = sequencer::paths::user_init_path() {
-        if path.is_file() {
-            paths.push(path);
-        }
+        // Watch the parent even before init exists, so creation recovers live.
+        paths.push(path);
     }
     paths.sort();
     paths.dedup();
     paths
 }
 
-pub(crate) fn process_lisp_hot_reload_paths(editor: &mut Editor, paths: Vec<PathBuf>) -> bool {
+pub(crate) fn process_lisp_hot_reload_paths(editor: &mut Editor, changes: ReloadBatch) -> bool {
+    let paths: Vec<_> = changes.paths.into_iter().collect();
     eprintln!(
         "metal_seq: Lisp hot reload observed changes: {}",
         format_paths(&paths)
     );
     let mut reload_paths = Vec::new();
-    let custom_ui_paths = custom_ui_source_paths()
-        .into_iter()
-        .map(|path| watch_path(&path))
-        .collect::<BTreeSet<_>>();
     let mut custom_ui_changed = false;
     for path in paths {
         if has_dirty_open_buffer(editor, &path) {
@@ -197,7 +80,12 @@ pub(crate) fn process_lisp_hot_reload_paths(editor: &mut Editor, paths: Vec<Path
             )));
             continue;
         }
-        if let Err(error) = refresh_clean_open_buffers(editor, &path) {
+        let custom_ui = changes.custom_ui.contains(&path);
+        // A removed custom source must rebuild dispatch without that definition.
+        // Keep any open buffer text, just as a normal external deletion does.
+        if let Err(error) = if custom_ui && !path.exists() { Ok(()) }
+            else { refresh_clean_open_buffers(editor, &path) }
+        {
             eprintln!(
                 "metal_seq: Lisp hot reload skipped unreadable file: {} ({error})",
                 path.display()
@@ -208,7 +96,7 @@ pub(crate) fn process_lisp_hot_reload_paths(editor: &mut Editor, paths: Vec<Path
             )));
             continue;
         }
-        if custom_ui_paths.contains(&watch_path(&path)) {
+        if custom_ui {
             custom_ui_changed = true;
         } else {
             reload_paths.push(path);
@@ -353,13 +241,20 @@ fn refresh_clean_open_buffer(editor: &mut Editor, buffer_idx: usize, text: &str)
 }
 
 fn same_path(a: &Path, b: &Path) -> bool {
-    let a = std::fs::canonicalize(a).unwrap_or_else(|_| a.to_path_buf());
-    let b = std::fs::canonicalize(b).unwrap_or_else(|_| b.to_path_buf());
-    a == b
+    watch_path(a) == watch_path(b)
 }
 
 fn watch_path(path: &Path) -> PathBuf {
-    std::fs::canonicalize(path).unwrap_or_else(|_| absolute_normalized_path(path))
+    let absolute = absolute_normalized_path(path);
+    // Canonicalize the existing prefix too: a deleted /var/... source must
+    // still match its previously discovered /private/var/... identity on macOS.
+    for ancestor in absolute.ancestors() {
+        if let Ok(canonical) = std::fs::canonicalize(ancestor) {
+            let suffix = absolute.strip_prefix(ancestor).unwrap();
+            return if suffix.as_os_str().is_empty() { canonical } else { canonical.join(suffix) };
+        }
+    }
+    absolute
 }
 
 fn absolute_normalized_path(path: &Path) -> PathBuf {
@@ -390,6 +285,7 @@ fn normalize_path(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
     use eseqlisp::vm::Value;
     use eseqlisp::{EditorConfig, Runtime};
 
@@ -488,7 +384,7 @@ mod tests {
 
         assert!(process_lisp_hot_reload_paths(
             &mut editor,
-            vec![child.clone()]
+            ReloadBatch { paths: [child.clone()].into_iter().map(|path| watch_path(&path)).collect(), ..Default::default() }
         ));
 
         let child_idx = editor
@@ -521,13 +417,43 @@ mod tests {
 
         assert!(!process_lisp_hot_reload_paths(
             &mut editor,
-            vec![child.clone()]
+            ReloadBatch { paths: [child.clone()].into_iter().map(|path| watch_path(&path)).collect(), ..Default::default() }
         ));
         assert_eq!(
             editor.active_buffer().text(),
             r#"(def hot-label "unsaved")"#
         );
         assert!(editor.active_buffer().dirty);
+    }
+
+    #[test]
+    fn deleted_custom_ui_is_not_resurrected_by_a_clean_open_buffer() {
+        let root = sequencer::app_paths::app_paths().user_instruments_dir();
+        std::fs::create_dir_all(&root).unwrap();
+        let dir = tempfile::Builder::new().prefix("hot-reload-removal-").tempdir_in(root).unwrap();
+        let ui = dir.path().join("ui.lisp");
+        std::fs::write(dir.path().join("dsp.lisp"), "(out 0)").unwrap();
+        std::fs::write(&ui, "(defsynth-ui (label 1))").unwrap();
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        editor.runtime_mut().eval_str(
+            "(def eseq.effects.custom-ui-sections/custom-ui-selected-section-for-current-scope () 0)"
+        ).unwrap();
+        editor.open_or_create_file_buffer(&ui).unwrap();
+        assert!(reload_custom_instrument_ui(&mut editor));
+        let name = dir.path().file_name().unwrap().to_str().unwrap();
+        let expression = format!("(custom-instrument-synth-ui (dict :name \"user:{name}\"))");
+        assert!(matches!(editor.runtime_mut().eval_str(&expression).unwrap(), Some(Value::Map(_))));
+        std::fs::remove_file(&ui).unwrap();
+        let path = watch_path(&ui);
+        assert!(process_lisp_hot_reload_paths(&mut editor, ReloadBatch {
+            paths: [path.clone()].into_iter().collect(), custom_ui: [path].into_iter().collect(),
+        }));
+        assert!(matches!(editor.runtime_mut().eval_str(&expression).unwrap(), Some(Value::Bool(false))));
+        assert_eq!(editor.active_buffer().text(), "(defsynth-ui (label 1))", "keep the user's open text");
+        editor.active_buffer_mut().dirty = true;
+        assert!(reload_custom_instrument_ui(&mut editor));
+        assert!(matches!(editor.runtime_mut().eval_str(&expression).unwrap(), Some(Value::Map(_))),
+            "explicit evaluation still supports an unsaved custom UI overlay");
     }
 
     #[test]
@@ -551,13 +477,27 @@ mod tests {
     }
 
     #[test]
-    fn watched_lisp_paths_include_custom_instrument_and_effect_ui_sources() {
-        let editor = Editor::new(Runtime::new(), EditorConfig::default());
-        let watched = watched_lisp_paths(&editor)
-            .into_iter()
-            .map(|path| watch_path(&path))
-            .collect::<BTreeSet<_>>();
+    #[cfg(unix)]
+    fn deleted_source_keeps_dirty_buffer_identity_through_symlinked_parent() {
+        let temp = tempfile::tempdir().unwrap();
+        let real = temp.path().join("real");
+        let alias = temp.path().join("alias");
+        std::fs::create_dir(&real).unwrap();
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+        let source = real.join("source.lisp");
+        std::fs::write(&source, "(def value 1)").unwrap();
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        editor.open_or_create_file_buffer(alias.join("source.lisp")).unwrap();
+        editor.active_buffer_mut().dirty = true;
+        let identity = watch_path(&source);
+        std::fs::remove_file(&source).unwrap();
+        assert_eq!(watch_path(&source), identity);
+        assert!(has_dirty_open_buffer(&editor, &identity));
+    }
 
+    #[test]
+    fn discovery_roots_cover_custom_instrument_and_effect_ui_sources() {
+        let roots = discovery_roots();
         for path in [
             sequencer::app_paths::app_paths()
                 .instruments_dir()
@@ -567,8 +507,8 @@ mod tests {
                 .join("sidechain/ui.lisp"),
         ] {
             assert!(
-                watched.contains(&watch_path(&path)),
-                "hot reload watch list should include {}",
+                roots.custom.iter().any(|root| path.starts_with(root)),
+                "hot reload discovery roots should cover {}",
                 path.display()
             );
         }
