@@ -705,6 +705,26 @@ pub(crate) fn extract_bool_from_payload(payload: &Value, key: &str) -> bool {
     false
 }
 
+/// A payload list of scene indices (the "Export as kit…" checklist, §7.2):
+/// non-negative integers, in the order given, deduplicated.
+pub(crate) fn extract_usize_list_from_payload(payload: &Value, key: &str) -> Vec<usize> {
+    let Value::Map(map) = payload else { return Vec::new() };
+    let Some(cell) = map.get(key) else { return Vec::new() };
+    let Value::List(items) = &*cell.borrow() else { return Vec::new() };
+    let mut out: Vec<usize> = Vec::new();
+    for item in items {
+        if let Value::Number(value) = &*item.borrow() {
+            if value.is_finite() && *value >= 0.0 {
+                let value = *value as usize;
+                if !out.contains(&value) {
+                    out.push(value);
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Push individual tp-* reactive fields for the current track.
 fn sync_track_param_fields(
     rt: &mut Runtime,

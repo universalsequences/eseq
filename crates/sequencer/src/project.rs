@@ -110,7 +110,38 @@ pub struct ProjectKitPreset {
     /// and leaves the target bus alone.
     #[serde(default)]
     pub bus_chain: Option<ProjectKitBusChain>,
+    /// Break-kit format generation (`docs/rack-clips-and-break-kits-spec.md`
+    /// §7.1), deliberately separate from `version`: `version` stays the
+    /// PROJECT file generation because a kit's clip patterns are
+    /// `ProjectPattern`s and parse by that generation, while this counts the
+    /// kit's own payload. 1 = pads + color + optional bus chain; 2 = also
+    /// `sequencers` and `clips`. Absent (pre-feature `.kit` files) reads as 1.
+    #[serde(default = "default_kit_version")]
+    pub kit_version: u32,
+    /// The graph sequencers the rack owned, recorded exactly as
+    /// `ProjectRackConfig::sequencers` records them: an `(import module)` for a
+    /// package script, a `(load \"path\")` for a plain file, the script text
+    /// itself otherwise. The ids are the EXPORTING rack's namespaced ids; the
+    /// importer re-derives them for the rack it builds (§7.3).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sequencers: Vec<ProjectRackSequencer>,
+    /// The kit's clip bank, one clip per exported scene, named after it.
+    ///
+    /// A kit clip is a [`ProjectRackClip`] in **pad space**: `members` and the
+    /// meaningful track lanes of `pattern` are indexed by position in `pads`,
+    /// not by member position or track index, because a kit has no project to
+    /// index into. Graph-override routes and seed tracks are in pad space too.
+    /// The importer maps pad position -> the member track it just built.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub clips: Vec<ProjectRackClip>,
 }
+
+fn default_kit_version() -> u32 {
+    1
+}
+
+/// The break-kit payload generation this build writes (§7.1).
+pub const KIT_PRESET_VERSION: u32 = 2;
 
 /// A rack bus insert chain as a kit carries it: one entry per occupied slot in
 /// chain order. Effect identities are not carried (a kit is not a project
@@ -6537,6 +6568,28 @@ mod tests {
                     slot: ProjectEffectSlot::from(&EffectSlotSnapshot::new_empty()),
                 }],
             }),
+            kit_version: KIT_PRESET_VERSION,
+            // A break kit (spec 7.1): the rack's own sequencers, and one clip
+            // per exported scene in PAD space.
+            sequencers: vec![ProjectRackSequencer {
+                sequencer_id: 4242,
+                sequencer_name: "break".to_string(),
+                source: "(import demos.break)".to_string(),
+            }],
+            clips: vec![ProjectRackClip {
+                id: 1,
+                name: "Verse".to_string(),
+                color: None,
+                members: vec![true, false],
+                pattern: ProjectPattern::from_snapshot(
+                    &crate::sequencer::PatternSnapshot::new_default(2, &[]),
+                    vec![None, None],
+                    vec![String::new(), String::new()],
+                    Vec::new(),
+                ),
+                graph_overrides: Vec::new(),
+                bus_chain: None,
+            }],
         };
 
         let json = serde_json::to_string(&kit).expect("serialize kit");
@@ -6555,6 +6608,25 @@ mod tests {
         )
         .expect("a kit saved before the bus chain travelled still loads");
         assert!(legacy.bus_chain.is_none(), "missing bus_chain leaves the target bus alone");
+        assert_eq!(restored.kit_version, KIT_PRESET_VERSION);
+        assert_eq!(restored.sequencers.len(), 1);
+        assert_eq!(restored.sequencers[0].source, "(import demos.break)");
+        assert_eq!(restored.clips.len(), 1);
+        assert_eq!(restored.clips[0].name, "Verse");
+        assert_eq!(restored.clips[0].members, vec![true, false]);
+        // A pre-feature `.kit` file is a kit with no break: version 1, no
+        // sequencers, no clips, and every other field unchanged.
+        let pre_feature: ProjectKitPreset = serde_json::from_str(
+            &json
+                .replace(",\"kit_version\":2", "")
+                .replace(",\"sequencers\":[", ",\"sequencers_unused\":[")
+                .replace(",\"clips\":[", ",\"clips_unused\":["),
+        )
+        .expect("a kit saved before break kits still loads");
+        assert_eq!(pre_feature.kit_version, 1);
+        assert!(pre_feature.sequencers.is_empty());
+        assert!(pre_feature.clips.is_empty());
+        assert_eq!(pre_feature.pads.len(), 2);
         match &restored.pads[1].sound.track.kind {
             ProjectTrackKind::Rack { slots, .. } => {
                 assert_eq!(slots[0].sample_path.as_deref(), Some("samples/hat.wav"));

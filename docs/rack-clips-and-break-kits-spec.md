@@ -1,7 +1,7 @@
 # Rack Clips and Break Kits
 
-**Status:** rev 3. Phases 1, 2 and 3 built (§7.1 kit bus chain, §5 rack-owned
-sequencers, §2–4 + §6 rack clips); §7 break kits is design.
+**Status:** rev 4. All four phases built: §7.1 kit bus chain, §5 rack-owned
+sequencers, §2–4 + §6 rack clips, §7 break kits.
 **Epic:** `bd show eseq-172r` (children .1 bus chain, .2 rack-owned sequencers,
 .3 rack clips, .4 break kits).
 **Depends on:** `docs/drum-rack-v2-spec.md` (rack = group with `rack: Some(_)`),
@@ -394,8 +394,8 @@ The expanded rack keeps member strips.
 ### 6.3 Rack header actions
 
 Rack header `…` menu gains: Attach sequencer…, Detach sequencer, Convert to
-clips (legacy racks only), Export as kit…, Save clip as…, Delete clip. Built
-except Export as kit… (phase 4). "Delete clip <name>" is listed once per clip
+clips (legacy racks only), Export as kit…, Save clip as…, Delete clip. All
+built. "Delete clip <name>" is listed once per clip
 rather than acting on a selection.
 
 ### 6.4 Scene list
@@ -403,51 +403,105 @@ rather than acting on a selection.
 The scene list is unchanged. A scene's row could later show a tiny per-rack
 clip glyph; not in scope.
 
-## 7. Break kits (kit v2)
+## 7. Break kits (kit v2) — BUILT (eseq-172r.4)
 
 ### 7.1 What a kit carries
 
-`ProjectKitPreset` (`project.rs`) version bumps and gains:
-
 ```rust
 pub struct ProjectKitPreset {
-    // ... existing: version, metadata, color, pads ...
-    #[serde(default)]
-    pub bus_chain: Option<ProjectFxChainPreset>,   // the rack bus insert chain
-    #[serde(default)]
-    pub sequencers: Vec<ProjectRackSequencer>,     // package ids preferred
-    #[serde(default)]
-    pub embedded_sources: Vec<(String, String)>,   // name → source, for Inline
-    #[serde(default)]
-    pub clips: Vec<ProjectRackClip>,               // member-positional over pads
+    // ... existing: version, metadata, color, pads, bus_chain ...
+    #[serde(default = "default_kit_version")]
+    pub kit_version: u32,                          // 1 = pre-break, 2 = break kit
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sequencers: Vec<ProjectRackSequencer>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub clips: Vec<ProjectRackClip>,               // PAD-positional
 }
 ```
 
-The bus chain is carried unconditionally from now on. This is the one place
+Four decisions differ from the sketch this section used to hold.
+
+1. **The version bump is `kit_version`, not `version`.** A kit's `version` is
+   the PROJECT file generation, and it has to stay that, because a kit clip's
+   content is a `ProjectPattern` and parses by that generation. `kit_version`
+   counts the kit's own payload instead, defaults to 1, and leaves
+   `PROJECT_FILE_VERSION` at 13 — no project file changes meaning for a kit
+   feature.
+2. **No `embedded_sources`.** `ProjectRackSequencer::source` is already a Lisp
+   form that distinguishes all three cases: `(import module)` for a package
+   script, `(load "path")` for a plain file, and the script text itself when
+   neither applies. A second, name-keyed side table would have been a
+   duplicate. The export warns instead: a source that is empty, or a `(load …)`
+   whose file no longer exists, is reported by sequencer name at save time.
+3. **Everything positional in a kit is in PAD space**, not member space: a
+   clip's `members` flags, the meaningful lanes of its `pattern`, and its
+   graph-override routes and seed sets. A kit has no project to index into and
+   rebuilds its members *from* pads, so pads are the only stable coordinate.
+   Export maps member position → pad, import maps pad → the member track it
+   just built (`app/break_kits.rs`).
+4. **A kit clip's `pattern` is a compact `ProjectPattern` of exactly pad-count
+   width.** Import lifts it back to full project width
+   (`expand_kit_clip_pattern`) before handing it to the ordinary
+   `project_pattern_into_snapshot_with_policy`, so kit clips get the same
+   sample resolution, effect-slot rebinding and fallback accounting a project
+   load gets, with no second conversion path.
+
+The bus chain is carried unconditionally (phase 1). This is the one place
 where "preset replaces device but keeps your effects" is the wrong instinct:
 a kit's group processing is part of the kit.
 
 ### 7.2 Export
 
-"Export as kit…" opens the existing kit save modal extended with a scene
-picker: a checklist of project scenes (default: all scenes where the rack's
-pointer is not `None`, or for legacy racks, all scenes where any member has
-steps). Each chosen scene becomes clip 1..n in the kit, named after the
-scene. Rack-owned sequencers are bundled by package id when the source is a
-package, by path when it is a project script that lives under `content/`, and
-inlined otherwise, with a warning that inline sources do not update.
+"Export as kit…" in the rack's mixer menu opens the existing kit save panel
+(`content/ui/browser.lisp`), now carrying a scene checklist. The default
+selection is every scene the rack actually plays, read from the per-scene
+pointers `SEQ.rack-clips` publishes (`scene-clips`); a LEGACY rack has no
+bank to read, so its checklist defaults to every scene and the export drops
+the ones it finds empty. Unticking everything saves the old kind of kit.
+
+Each chosen scene becomes clip 1..n, in scene order, named after the scene and
+carrying that scene's rack-owned overrides. A legacy rack is converted to clips
+first (`App::convert_rack_to_clips_recorded`, its own undo entry) so the export
+reads one representation; a chosen scene the rack is silent in contributes no
+clip, which is the rule conversion itself uses. The rack's sequencers travel as
+recorded — no re-classification at export time, because the recording already
+chose `(import …)` over `(load …)` when the script sat under a module root.
 
 ### 7.3 Import
 
 Loading a break kit does what a kit load does today (new rack group beside
-existing tracks, one member per pad, Sounds re-applied) and additionally:
-restores the bus chain, registers the rack-owned sequencers, and fills the
-clip bank. Every existing project scene gets `None` for the new rack, so it is
-silent until the user launches a clip. The whole load is one undo entry, as
-today.
+existing tracks, one member per pad, Sounds re-applied, failures reported by
+name) and additionally restores the bus chain, registers the rack-owned
+sequencers and fills the clip bank. Every existing project scene gets `None`
+for the new rack, so it is silent until the user launches a clip. The whole
+load is one undo entry (`load_kit_as_rack` now squashes; it used to leave one
+entry per pad).
+
+The import has two halves, because the App cannot evaluate Lisp:
+
+- **App half** (`app/break_kits.rs`, inside the squashed load): re-derive each
+  sequencer id for the NEW rack — a rack-owned instance id is
+  `graph_instance_id(name, Some(gid))`, so the recorded id belongs to the
+  exporting rack and is meaningless here — record the entries with
+  `attach_rack_sequencer_recorded` (which republishes the module owner map),
+  then install the clip bank, rewriting each clip override's `sequencer_id`
+  through that old→new map and its `owner_rack` to the new group.
+- **Host half** (`ui/host_commands/drum_rack_v2.rs`): evaluate each recorded
+  source under the new rack (`evaluate_rack_sequencer_source`), reporting
+  failures by module. A missing package is reported and the rest lands; the
+  recorded entry survives, so a later re-import brings the instance back.
 
 A kit without clips is still a valid kit; nothing about existing `.kit` files
 changes meaning.
+
+**Auditioning a break kit onto an existing rack** (`load_kit_onto_rack`, the
+browser's activate-with-a-rack-selected path) replaces that rack's sequencers
+and its whole clip bank, in the same single undo entry, because a kit's
+processing and its clips are part of the kit — the same argument §7.1 makes for
+the bus chain. The scene pointers are cleared with the old bank, so the
+auditioned rack is silent until a clip is launched, exactly like a fresh
+import. A kit with no clips of its own leaves the bank alone, which is what
+keeps every pre-feature `.kit` file behaving as before.
 
 ### 7.4 Packages
 
@@ -490,8 +544,9 @@ Each phase is independently shippable and independently valuable.
 3. **Rack clips.** BUILT (eseq-172r.3). Data model, launch composition, edit
    redirect, legacy migration, collapsed-row clip launcher in sequencer and
    mixer. Rack-owned overrides moved into clips.
-4. **Break kit export/import.** Scene picker, sequencer bundling, clip bank
-   in the kit, import with silent pointers.
+4. **Break kit export/import.** BUILT (eseq-172r.4). Scene picker, sequencer
+   bundling, clip bank in the kit, import with silent pointers, audition
+   replaces the bank.
 
 ## 10. Open questions
 

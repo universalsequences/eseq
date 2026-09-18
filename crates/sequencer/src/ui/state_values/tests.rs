@@ -2596,6 +2596,32 @@ mod mixer_hit_tests;
                         ("path", Value::String("sounds/wide-plate.sound".to_string())),
                     ])]),
                 ),
+                // The kit save panel's scene checklist (rack-clips spec §7.2)
+                // reads the scene names and the rack's per-scene clip pointers.
+                (
+                    "scene-names",
+                    test_list(vec![
+                        Value::String("Intro".to_string()),
+                        Value::String("Verse".to_string()),
+                        Value::String("Chorus".to_string()),
+                    ]),
+                ),
+                (
+                    "rack-clips",
+                    test_list(vec![map_value([
+                        ("group-id", Value::Number(8.0)),
+                        ("active", Value::Number(-1.0)),
+                        (
+                            "scene-clips",
+                            test_list(vec![
+                                Value::Number(-1.0),
+                                Value::Number(4.0),
+                                Value::Number(7.0),
+                            ]),
+                        ),
+                        ("clips", test_list(vec![])),
+                    ])]),
+                ),
                 (
                     "kit-presets",
                     test_list(vec![map_value([
@@ -4179,6 +4205,71 @@ mod mixer_hit_tests;
             "package provenance chip should have a finite visible rect: {:?}; rendered:\n{rendered}",
             package.rect
         );
+    }
+
+    /// "Export as kit…" (rack-clips spec §7.2): the kit save panel carries a
+    /// scene checklist, defaulted to the scenes the rack actually plays, and
+    /// the save sends exactly the ticked scenes, in scene order.
+    #[test]
+    fn metal_seq_kit_save_panel_checklist_defaults_to_the_scenes_a_rack_plays() {
+        let mut editor = browser_editor_on_instrument_tab();
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.browser/enter-kit-save 8 \"Break\")")
+            .expect("enter kit save mode");
+        // Scene 0 has no clip for rack 8, scenes 1 and 2 do.
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("eseq.browser/kit-save-scenes")
+                .expect("selection"),
+            Some(test_list(vec![Value::Number(1.0), Value::Number(2.0)])),
+        );
+
+        editor.refresh_runtime_side_effects();
+        let id = browser_id(&editor);
+        editor.set_active_buffer(id);
+        editor.set_layout_viewport(72, 40);
+        let layout = editor.widget_layout().expect("kit save layout");
+        assert_finite_layout_tree(&layout);
+        let rendered = render_layout_cells(&layout, 72, 40);
+        for name in ["Intro", "Verse", "Chorus"] {
+            assert!(
+                rendered.contains(name),
+                "the checklist should list every scene; rendered:\n{rendered}"
+            );
+        }
+
+        // Unticking scene 2 and re-ticking scene 0 keeps the selection in
+        // scene order, not click order.
+        editor
+            .runtime_mut()
+            .eval_str("(do (eseq.browser/kit-toggle-scene 2) (eseq.browser/kit-toggle-scene 0))")
+            .expect("toggle scenes");
+        let _ = editor.drain_host_commands();
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.browser/save-kit)")
+            .expect("save the kit");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "save-rack-as-kit");
+                let Value::Map(payload) = payload else {
+                    panic!("save-rack-as-kit payload should be a dict: {payload:?}");
+                };
+                assert_eq!(
+                    payload.get("scenes").map(|value| value.borrow().clone()),
+                    Some(test_list(vec![Value::Number(0.0), Value::Number(1.0)])),
+                );
+                assert_eq!(
+                    payload.get("group-id").map(|value| value.borrow().clone()),
+                    Some(Value::Number(8.0)),
+                );
+            }
+            other => panic!("unexpected host command: {other:?}"),
+        }
     }
 
     #[test]
@@ -32649,6 +32740,8 @@ mod mixer_hit_tests;
                 "save-rack-clip",
                 "delete-rack-clip",
                 "delete-rack-clip",
+                // Break kits (spec §7.2) enter through the rack menu too.
+                "export-kit",
                 "ungroup",
             ],
         );
@@ -32703,7 +32796,7 @@ mod mixer_hit_tests;
             // A rack with no clip bank is a LEGACY rack, so it is offered the
             // one-shot conversion (rack-clips spec §6.3).
             menu_action_ids(&mut editor, 8.0),
-            vec!["rename", "convert-to-clips", "ungroup"],
+            vec!["rename", "convert-to-clips", "export-kit", "ungroup"],
         );
 
         editor.drain_host_commands();

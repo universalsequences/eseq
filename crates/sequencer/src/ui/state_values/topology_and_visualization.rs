@@ -891,6 +891,20 @@ pub(crate) fn build_rack_clips_value(state: &Arc<SequencerState>) -> Value {
             map_value([
                 ("group-id", Value::Number(bank.group_id as f64)),
                 ("active", Value::Number(active)),
+                // One entry per project scene: the clip that scene points at,
+                // or -1 for silence. The "Export as kit..." checklist defaults
+                // to the scenes this rack actually plays (spec 7.2).
+                (
+                    "scene-clips",
+                    list_value((0..scenes.scenes.len()).map(|scene| {
+                        Value::Number(
+                            scenes
+                                .scene_rack_clip(scene, bank.group_id)
+                                .map(|id| id as f64)
+                                .unwrap_or(-1.0),
+                        )
+                    })),
+                ),
                 (
                     "clips",
                     list_value(bank.clips.iter().map(|clip| {

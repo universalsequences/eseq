@@ -187,6 +187,9 @@
                     (= (get graph :owner-rack) gid)))
         (or SEQ.graph-sequencers (list))))
     (list
+      ;; Break kits (docs/rack-clips-and-break-kits-spec.md 7.2): the kit save
+      ;; panel, which carries a scene checklist for the clip bank.
+      (dict :id :export-kit :label "Export as kit...")
       (dict :id :ungroup :label "Ungroup"))))
 
 ;; The path a project-owned script was loaded from, per the step-tab registry;
@@ -1223,6 +1226,11 @@
             (set! track-menu-open false)
             (host-command "ungroup-tracks"
               (dict :group-id track-menu-group-id)))
+          (if (= (get action :id) :export-kit)
+            (do
+              (set! track-menu-open false)
+              (eseq.browser/enter-kit-save track-menu-group-id
+                (get (nth SEQ.groups (group-index-by-id track-menu-group-id)) :name)))
           (if (= (get action :id) :move-sequencer-into-rack)
             (do
               (set! track-menu-open false)
@@ -1249,7 +1257,7 @@
                       (set! track-menu-open false)
                       (eseq.drum-rack-v2/delete-clip track-menu-group-id
                         (get action :clip-id)))
-                    nil))))))))))
+                    nil)))))))))))
 
 (def track-context-menu ()
   (context-menu :is-open track-menu-open

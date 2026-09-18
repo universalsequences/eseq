@@ -65,6 +65,8 @@
         clip-bank
         clips
         active-clip
+        scene-clips
+        scene-plays-clip?
         has-clips?
         launch-clip
         silence-clips
@@ -510,6 +512,21 @@
 
 (def has-clips? (gid)
   (> (len (clips gid)) 0))
+
+;; Clip id per project scene, -1 where the rack is silent. A LEGACY rack has no
+;; bank and answers an empty list, which is why the kit export checklist falls
+;; back to every scene for one (the export drops the scenes it finds empty).
+(def scene-clips (gid)
+  (let ((bank (clip-bank gid)))
+    (if bank (or (get bank :scene-clips) (list)) (list))))
+
+(def scene-plays-clip? (gid scene-idx)
+  (let ((pointers (scene-clips gid)))
+    (if (= (len pointers) 0)
+      true
+      (if (< scene-idx (len pointers))
+        (>= (nth pointers scene-idx) 0)
+        false))))
 
 ;; A clip launch is a scene edit plus a relaunch of the current scene, so it
 ;; rides the transport's scene-launch quantize exactly as a scene does (§4.4).

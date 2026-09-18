@@ -1817,13 +1817,22 @@ impl App {
     /// [`ProjectKitPreset`].
     ///
     /// [`ProjectKitPreset`]: crate::project::ProjectKitPreset
+    /// `scene_selection` is the "Export as kit…" scene checklist (§7.2): the
+    /// project scenes, in order, whose rack clips become kit clips 1..n named
+    /// after them. Empty means today's kit — instruments and bus chain only.
+    /// Returns the preset and one warning per sequencer that will not travel
+    /// cleanly.
     pub fn capture_rack_as_kit(
         &mut self,
         group_id: u64,
         name: &str,
         tags: Vec<String>,
         author: String,
-    ) -> Result<crate::project::ProjectKitPreset, String> {
+        scene_selection: &[usize],
+    ) -> Result<(crate::project::ProjectKitPreset, Vec<String>), String> {
+        // The clip capture may convert a legacy rack first, which rewrites the
+        // group; read the rack only after it.
+        let content = self.capture_kit_content(group_id, scene_selection)?;
         let group = self
             .groups
             .iter()
@@ -1870,17 +1879,24 @@ impl App {
             });
         }
         let bus_chain = Some(self.capture_kit_bus_chain(bus_id)?);
-        Ok(crate::project::ProjectKitPreset {
-            version: crate::project::project_file_version(),
-            metadata: crate::project::ProjectSoundMetadata {
-                name: name.trim().to_string(),
-                tags,
-                author,
+        let super::break_kits::CapturedKitContent { sequencers, clips, warnings } = content;
+        Ok((
+            crate::project::ProjectKitPreset {
+                version: crate::project::project_file_version(),
+                kit_version: crate::project::KIT_PRESET_VERSION,
+                metadata: crate::project::ProjectSoundMetadata {
+                    name: name.trim().to_string(),
+                    tags,
+                    author,
+                },
+                color,
+                pads: kit_pads,
+                bus_chain,
+                sequencers,
+                clips,
             },
-            color,
-            pads: kit_pads,
-            bus_chain,
-        })
+            warnings,
+        ))
     }
 
     /// The rack bus insert chain as a kit carries it: every occupied slot in
@@ -1987,23 +2003,39 @@ impl App {
         group_id: u64,
         name: &str,
         overwrite: bool,
-    ) -> Result<PathBuf, String> {
+        scene_selection: &[usize],
+    ) -> Result<(PathBuf, Vec<String>), String> {
         if name.trim().is_empty() {
             return Err("A kit needs a name".to_string());
         }
         if crate::project::kit_preset_path(name).exists() && !overwrite {
             return Err(format!("Kit '{name}' already exists"));
         }
-        let kit = self.capture_rack_as_kit(group_id, name, Vec::new(), String::new())?;
-        crate::project::save_kit_preset(name, &kit).map_err(|error| error.to_string())
+        let (kit, warnings) =
+            self.capture_rack_as_kit(group_id, name, Vec::new(), String::new(), scene_selection)?;
+        let path =
+            crate::project::save_kit_preset(name, &kit).map_err(|error| error.to_string())?;
+        Ok((path, warnings))
     }
 
     /// Rebuilds a saved kit as a fresh drum rack: the group and its bus, then
     /// one member track per pad loaded from the pad's Sound, then the pad map
-    /// and choke groups. Returns the new group id along with a message per pad
-    /// that failed to load — a kit missing one sample still loads the rest, and
-    /// every step it took is an ordinary undo entry.
+    /// and choke groups. A BREAK kit (§7.3) additionally registers the rack's
+    /// graph sequencers and fills its clip bank, with every existing project
+    /// scene left pointing at `None` so the rack is silent until a clip is
+    /// launched. Returns the new group id along with a message per pad that
+    /// failed to load — a kit missing one sample still loads the rest — and the
+    /// whole load squashes into one undo entry.
     pub fn load_kit_as_rack(&mut self, path: &Path) -> Result<(u64, Vec<String>), String> {
+        let history_len = self.history.undo_len();
+        let result = self.load_kit_as_rack_inner(path);
+        if result.is_ok() {
+            crate::app::edit::squash_history_since(self, history_len, "Load kit");
+        }
+        result
+    }
+
+    fn load_kit_as_rack_inner(&mut self, path: &Path) -> Result<(u64, Vec<String>), String> {
         let kit = crate::project::load_kit_preset(path).map_err(|error| error.to_string())?;
         let fallback_name = path
             .file_stem()
@@ -2054,6 +2086,15 @@ impl App {
                 {
                     failures.push(format!("{pad_name}: {error}"));
                 }
+            }
+        }
+        // Break-kit payload (§7.3). The sequencer ids are re-derived for THIS
+        // rack and the clip overrides follow that map; the host evaluates each
+        // recorded source afterwards, because the App cannot run Lisp.
+        let id_map = self.register_kit_sequencers(group_id, &kit.sequencers, &mut failures);
+        if !kit.clips.is_empty() {
+            if let Err(error) = self.install_kit_clips(group_id, kit.clips, &id_map) {
+                failures.push(format!("clips: {error}"));
             }
         }
         Ok((group_id, failures))
@@ -2108,6 +2149,14 @@ impl App {
         let history_checkpoint = self.history.clone();
         let history_len = self.history.undo_len();
         let result = (|| {
+            // The rack config is replaced wholesale below, which drops the
+            // rack's current sequencer entries; their published instances must
+            // go with them or they keep firing, unrecorded. (Undo restores the
+            // entries with the group structure and the project-open replay
+            // republishes them.)
+            for sequencer in self.rack_sequencers(group_id) {
+                self.state.unpublish_sequencer_by_id(sequencer.sequencer_id);
+            }
             let mut desired = Vec::with_capacity(kit.pads.len());
             for pad in kit.pads {
                 let pad_name = if pad.name.trim().is_empty() {
@@ -2195,8 +2244,25 @@ impl App {
                     .ok_or_else(|| format!("Track group {group_id} does not exist"))?;
                 self.restore_kit_bus_chain(bus_id, chain)?;
             }
+            // A kit's processing and its clips are part of the kit, so
+            // auditioning a BREAK kit replaces the rack's sequencers and its
+            // whole clip bank, in this same undo entry (§7.3 decision). A kit
+            // with no clips of its own leaves the bank alone, which is what
+            // keeps every pre-feature `.kit` file behaving exactly as before.
+            let mut notes = Vec::new();
+            let id_map =
+                self.register_kit_sequencers(group_id, &kit.sequencers, &mut notes);
+            if !kit.clips.is_empty() {
+                if let Err(error) = self.install_kit_clips(group_id, kit.clips, &id_map) {
+                    notes.push(format!("clips: {error}"));
+                }
+            }
             crate::app::edit::squash_history_since(self, history_len, "Audition kit on drum rack");
-            Ok(kit_name.clone())
+            if notes.is_empty() {
+                Ok(kit_name.clone())
+            } else {
+                Ok(format!("{kit_name} ({})", notes.join("; ")))
+            }
         })();
         match result {
             Ok(name) => Ok(name),
@@ -4844,7 +4910,7 @@ impl App {
         self.project_pattern_into_snapshot_with_policy(pattern, sample_assets, false)
     }
 
-    fn project_pattern_into_snapshot_with_policy(
+    pub(super) fn project_pattern_into_snapshot_with_policy(
         &mut self,
         pattern: ProjectPattern,
         sample_assets: &mut std::collections::HashMap<PathBuf, ProjectSampleAsset>,

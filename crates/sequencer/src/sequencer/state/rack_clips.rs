@@ -88,6 +88,16 @@ impl ProjectScenes {
         self.adopt_live_rack_clips();
     }
 
+    /// Replace one rack's bank wholesale, keeping every other rack's. This is
+    /// the break-kit import seam (spec 7.3): a kit's bank is the rack's bank,
+    /// and the caller clears the scene pointers, because a kit's clips are
+    /// silent until launched.
+    pub fn replace_rack_bank(&mut self, bank: RackClipBank) {
+        let group_id = bank.group_id;
+        self.rack_banks.retain(|existing| existing.group_id != group_id);
+        self.rack_banks.push(bank);
+    }
+
     /// Declare that the live grid now holds what the current scene's pointers
     /// name. Every site that installs the live lanes (scene launch) or that
     /// mints/forks a clip out of the live lanes calls this; pointing a scene at

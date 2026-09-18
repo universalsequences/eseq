@@ -280,6 +280,31 @@ impl App {
     }
 }
 
+/// Rewrite a rack-owned override's member-relative routes and seed tracks
+/// through `map`, indexed by the OLD position: `map[old] = Some(new)` moves
+/// it, `None` drops it to "off". Break kits use this twice — member position
+/// -> pad on export, pad -> member position on import (§7).
+pub(crate) fn remap_graph_member_routes(graph: &mut ProjectGraphOverrides, map: &[Option<usize>]) {
+    for intrinsic in &mut graph.node_intrinsics {
+        if let Some(ProjectGraphRouteOverride::Track(from)) = intrinsic.route {
+            intrinsic.route = Some(
+                map.get(from)
+                    .copied()
+                    .flatten()
+                    .map(ProjectGraphRouteOverride::Track)
+                    .unwrap_or(ProjectGraphRouteOverride::None),
+            );
+        }
+        if let Some(ProjectGraphSeedFrom::Tracks(seed)) = &intrinsic.seed_from {
+            intrinsic.seed_from = Some(ProjectGraphSeedFrom::Tracks(
+                seed.iter()
+                    .filter_map(|from| map.get(*from).copied().flatten())
+                    .collect(),
+            ));
+        }
+    }
+}
+
 fn expand_member_routes_to_tracks(graph: &mut ProjectGraphOverrides, members: &[usize]) {
     for intrinsic in &mut graph.node_intrinsics {
         if let Some(ProjectGraphRouteOverride::Track(member)) = intrinsic.route {

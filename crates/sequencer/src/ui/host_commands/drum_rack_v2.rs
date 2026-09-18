@@ -135,16 +135,21 @@ pub(super) fn handle(
                 .or_else(|| group_name(app, group_id))
                 .unwrap_or_else(|| "Kit".to_string());
             let overwrite = extract_bool_from_payload(&payload, "overwrite");
-            match app.save_rack_as_kit(group_id, &name, overwrite) {
-                Ok(path) => {
+            // The scene checklist (§7.2). Absent/empty = today's kit: pads and
+            // bus chain only, no clips.
+            let scenes = crate::state_values::extract_usize_list_from_payload(&payload, "scenes");
+            match app.save_rack_as_kit(group_id, &name, overwrite, &scenes) {
+                Ok((path, warnings)) => {
                     let rt = editor.runtime_mut();
                     rt.set_reactive("SEQ", "kit-presets", build_kit_presets_value());
                     rt.run_reactive_cycle();
                     editor.refresh_runtime_side_effects();
-                    editor.handle_host_event(HostEvent::Status(format!(
-                        "Saved kit '{name}' to {}",
-                        path.display()
-                    )));
+                    sync_rack_pad_map(app, editor, &track_groups, &ui_epoch);
+                    let mut status = format!("Saved kit '{name}' to {}", path.display());
+                    if !warnings.is_empty() {
+                        status = format!("{status} ({})", warnings.join("; "));
+                    }
+                    editor.handle_host_event(HostEvent::Status(status));
                 }
                 Err(error) => editor.handle_host_event(HostEvent::Status(error)),
             }
@@ -372,20 +377,29 @@ pub(super) fn handle(
             if let Some(group_id) = selected_rack {
                 match app.load_kit_onto_rack(group_id, Path::new(&path)) {
                     Ok(name) => {
+                        let failures = evaluate_rack_sequencers(editor, app, group_id);
                         sync_after_rack_structure_change(app, editor, ctx, None);
-                        editor.handle_host_event(HostEvent::Status(format!(
-                            "Auditioned kit '{name}'"
-                        )));
+                        let mut status = format!("Auditioned kit '{name}'");
+                        if !failures.is_empty() {
+                            status = format!("{status} ({})", failures.join("; "));
+                        }
+                        editor.handle_host_event(HostEvent::Status(status));
                     }
                     Err(error) => editor.handle_host_event(HostEvent::Status(error)),
                 }
             } else {
                 let tracks_before = app.tracks.len();
                 match app.load_kit_as_rack(Path::new(&path)) {
-                    Ok((group_id, failures)) => {
+                    Ok((group_id, mut failures)) => {
                         let name = group_name(app, group_id).unwrap_or_else(|| "Kit".to_string());
                         let focus = (app.tracks.len() > tracks_before)
                             .then(|| app.tracks.len() - 1);
+                        // The App recorded the kit's sequencers but cannot run
+                        // Lisp; evaluating each recorded source under the new
+                        // rack is the host half of the import (§7.3). A module
+                        // that is not installed is reported and its entry stays
+                        // recorded, so a later re-import brings it back.
+                        failures.extend(evaluate_rack_sequencers(editor, app, group_id));
                         sync_after_rack_structure_change(app, editor, ctx, focus);
                         let status = if failures.is_empty() {
                             format!("Loaded kit '{name}'")
@@ -521,6 +535,33 @@ pub(crate) fn evaluate_rack_sequencer_source(
         })
         .map(|published| (published.id, published.name))
         .collect())
+}
+
+/// Evaluate every source a rack has recorded, under that rack, and report the
+/// ones that failed by name. This is the host half of a break-kit import
+/// (§7.3) and of a break-kit audition: the App records the entries, only the
+/// host can run Lisp. The recorded entry survives a failure on purpose, so a
+/// project that later installs the missing package gets the instance back.
+fn evaluate_rack_sequencers(
+    editor: &mut Editor,
+    app: &app::App,
+    group_id: u64,
+) -> Vec<String> {
+    let recorded = app.rack_sequencers(group_id);
+    let mut failures = Vec::new();
+    for sequencer in recorded {
+        if sequencer.source.trim().is_empty() {
+            continue;
+        }
+        if let Err(error) =
+            evaluate_rack_sequencer_source(editor, app, group_id, &sequencer.source)
+        {
+            let what = sequencer::app::rack_sequencer_module(&sequencer.source)
+                .unwrap_or_else(|| sequencer.sequencer_name.clone());
+            failures.push(format!("{what}: {error}"));
+        }
+    }
+    failures
 }
 
 pub(super) fn group_name(app: &app::App, group_id: u64) -> Option<String> {

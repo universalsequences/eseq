@@ -7326,9 +7326,11 @@ mod tests {
         app.buses[rack_bus_idx].effect_slots[filter_slot].defaults[0] = 0.37;
         app.save_current_bus_pattern();
 
-        let kit = app
-            .capture_rack_as_kit(group_id, "Test Kit", Vec::new(), String::new())
+        let (kit, warnings) = app
+            .capture_rack_as_kit(group_id, "Test Kit", Vec::new(), String::new(), &[])
             .expect("rack should capture as a kit");
+        assert!(warnings.is_empty(), "a rack with no sequencers exports cleanly");
+        assert!(kit.clips.is_empty(), "no scene chosen means no clip bank");
         assert_eq!(kit.pads.len(), 2);
         assert_eq!(kit.pads[0].pad_note, 36);
         assert_eq!(kit.pads[1].pad_note, 42);
@@ -7429,6 +7431,207 @@ mod tests {
 
         std::fs::remove_dir_all(&directory).expect("clean kit test directory");
         graph.process_block();
+    }
+
+    /// eseq-172r.4: a BREAK kit carries the rack's clip bank and its
+    /// rack-owned sequencers, and importing one into a different project
+    /// rebuilds all of it beside the existing tracks — silent, because every
+    /// existing scene points at `None` until a clip is launched (spec 7.2-7.3).
+    #[test]
+    fn a_break_kit_round_trips_a_clip_bank_and_its_rack_sequencers() {
+        let graph = TestLiveGraph::new("break-kit-export-test", 64, 44_100, 2);
+        let mut app = test_app_for_live_graph(&graph, 0);
+        let sample = std::path::Path::new("../../content/impulses/lexicon-300-rich-plate.wav");
+        let (group_id, _) = app
+            .create_drum_rack_recorded(Some("Break".to_string()))
+            .expect("drum rack");
+        let kick = app.graph_controller().add_track(sample).expect("kick");
+        let snare = app.graph_controller().add_track(sample).expect("snare");
+        let hat = app.graph_controller().add_track(sample).expect("hat");
+        for (note, track) in [(36, kick), (38, snare), (42, hat)] {
+            app.assign_rack_pad_track_recorded(group_id, note, track).expect("pad");
+        }
+        app.state.with_scenes_mut(|scenes| {
+            for _ in 0..3 {
+                scenes.new_scene();
+            }
+            scenes.current_scene = 0;
+        });
+        let relaunch = |app: &App, scene: usize| {
+            app.state.launch_scene(
+                scene,
+                app.tracks.len(),
+                &app.graph.track_buffer_ids,
+                &app.graph.track_sample_rates,
+                &app.tracks,
+                &app.graph.track_instrument_types,
+            );
+        };
+        // One distinct step pattern per scene, seeded through scene launch (the
+        // live-grid save-back point).
+        let seeded: [[usize; 3]; 4] = [[0, 1, 2], [3, 4, 5], [6, 7, 8], [9, 10, 11]];
+        for (scene, steps) in seeded.iter().enumerate() {
+            relaunch(&app, scene);
+            for (track, step) in [kick, snare, hat].into_iter().zip(steps.iter()) {
+                app.state.toggle_step_and_clear_plocks(track, *step);
+            }
+        }
+        relaunch(&app, 0);
+
+        // A rack-owned sequencer, and one clip-scoped override for it.
+        let sequencer_id = crate::lisp_host::graph_instance_id("brk", Some(group_id));
+        app.attach_rack_sequencer_recorded(
+            group_id,
+            sequencer_id,
+            "brk",
+            "(import demos.break)",
+        )
+        .expect("attach rack sequencer");
+        app.convert_rack_to_clips_recorded(group_id).expect("convert to clips");
+        let scene_clip = |app: &App, scene: usize| {
+            app.state
+                .with_scenes(|scenes| scenes.scene_rack_clip(scene, group_id))
+        };
+        // Route node instance 0 at member 2 (the hat) in scene 2's clip only.
+        let clip_for_scene_2 = scene_clip(&app, 2).expect("scene 2 has a clip");
+        app.state.with_scenes_mut(|scenes| {
+            let clip = scenes
+                .rack_bank_mut(group_id)
+                .and_then(|bank| bank.clip_mut(clip_for_scene_2))
+                .expect("clip");
+            clip.graph_overrides = vec![crate::graph::ProjectGraphOverrides {
+                sequencer_id,
+                owner_rack: Some(group_id),
+                node_intrinsics: vec![crate::graph::ProjectGraphNodeIntrinsicOverride {
+                    group: "nrn".into(),
+                    instance: 0,
+                    resolution: None,
+                    delay_steps: None,
+                    quantize: None,
+                    route: Some(crate::graph::ProjectGraphRouteOverride::Track(2)),
+                    seed_from: None,
+                    seed_on_reset: None,
+                    duration: None,
+                    swing: None,
+                    neural_group: None,
+                }],
+                ..Default::default()
+            }];
+        });
+
+        // Export scenes 1 and 2 only.
+        let (kit, warnings) = app
+            .capture_rack_as_kit(group_id, "Break Kit", Vec::new(), String::new(), &[1, 2])
+            .expect("break kit captures");
+        assert!(warnings.is_empty(), "an imported package source exports cleanly: {warnings:?}");
+        assert_eq!(kit.clips.len(), 2, "one clip per chosen scene");
+        assert_eq!(kit.sequencers.len(), 1);
+        assert_eq!(kit.sequencers[0].source, "(import demos.break)");
+        assert_eq!(kit.clips[0].members, vec![true, true, true]);
+
+        let directory = std::env::temp_dir().join(format!(
+            "eseq-break-kit-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&directory).expect("kit test directory");
+        let path = directory.join("Break-Kit.kit");
+        std::fs::write(&path, serde_json::to_string(&kit).expect("serialize kit"))
+            .expect("write kit");
+
+        // A DIFFERENT project, with more scenes than the kit knows about.
+        let host_graph = TestLiveGraph::new("break-kit-import-test", 64, 44_100, 2);
+        let mut host = test_app_for_live_graph(&host_graph, 0);
+        host.state.with_scenes_mut(|scenes| {
+            for _ in 0..5 {
+                scenes.new_scene();
+            }
+            scenes.current_scene = 0;
+        });
+        let scene_count = host.state.with_scenes(|scenes| scenes.scenes.len());
+        assert_eq!(scene_count, 6);
+        // A rack already in the host project, so the imported one gets a
+        // different group id and the re-derivation of the sequencer ids is
+        // actually exercised.
+        host.create_drum_rack_recorded(Some("Existing".to_string())).expect("host rack");
+        let undo_len = host.history.undo_len();
+        let (loaded_id, failures) = host.load_kit_as_rack(&path).expect("break kit loads");
+        assert!(failures.is_empty(), "the kit should land whole: {failures:?}");
+        assert_eq!(
+            host.history.undo_len(),
+            undo_len + 1,
+            "the whole kit load is one undo entry"
+        );
+
+        let loaded = host.groups.iter().find(|group| group.id == loaded_id).expect("rack");
+        let loaded_members = loaded.members.clone();
+        assert_eq!(loaded_members.len(), 3);
+        let loaded_rack = loaded.rack.as_ref().expect("rack config");
+        // The sequencer came back, re-keyed for THIS rack.
+        assert_eq!(loaded_rack.sequencers.len(), 1);
+        let new_sequencer_id = crate::lisp_host::graph_instance_id("brk", Some(loaded_id));
+        assert_eq!(loaded_rack.sequencers[0].sequencer_id, new_sequencer_id);
+        assert_ne!(new_sequencer_id, sequencer_id, "a rack-owned id is derived from its rack");
+
+        let bank = host.rack_clip_bank(loaded_id);
+        assert_eq!(bank.len(), 2, "the kit's two clips fill the new rack's bank");
+        assert!(
+            host.state.with_scenes(|scenes| (0..scene_count)
+                .all(|scene| scenes.scene_rack_clip(scene, loaded_id).is_none())),
+            "every existing project scene points at None: the rack is silent until launched"
+        );
+        // The override followed the new rack: new instance id, new owner.
+        let clip_overrides = host.state.with_scenes(|scenes| {
+            scenes
+                .rack_bank(loaded_id)
+                .map(|bank| bank.clips[1].graph_overrides.clone())
+                .unwrap_or_default()
+        });
+        assert_eq!(clip_overrides.len(), 1);
+        assert_eq!(clip_overrides[0].sequencer_id, new_sequencer_id);
+        assert_eq!(clip_overrides[0].owner_rack, Some(loaded_id));
+        assert!(matches!(
+            clip_overrides[0].node_intrinsics[0].route,
+            Some(crate::graph::ProjectGraphRouteOverride::Track(2))
+        ));
+
+        // Launching a clip plays the exported scene's content on the new
+        // members; the composed snapshot is the proof.
+        let host_relaunch = |app: &App, scene: usize| {
+            app.state.launch_scene(
+                scene,
+                app.tracks.len(),
+                &app.graph.track_buffer_ids,
+                &app.graph.track_sample_rates,
+                &app.tracks,
+                &app.graph.track_instrument_types,
+            );
+        };
+        let member_bits = |app: &App, scene: usize| -> Vec<u64> {
+            app.state.with_scenes(|scenes| {
+                let snapshot = scenes.scene_snapshot(scene).expect("snapshot");
+                loaded_members
+                    .iter()
+                    .map(|track| snapshot.track_pattern_data(*track).expect("lane").track_bits[0])
+                    .collect()
+            })
+        };
+        assert_eq!(member_bits(&host, 0), vec![0, 0, 0], "silent before a launch");
+        host_relaunch(&host, 3);
+        host.set_current_rack_clip_recorded(loaded_id, Some(bank[1].0))
+            .expect("launch the kit's second clip");
+        // Scene 2 of the source seeded steps 6, 7, 8 on kick, snare, hat.
+        assert_eq!(member_bits(&host, 3), vec![1 << 6, 1 << 7, 1 << 8]);
+        host_relaunch(&host, 3);
+        assert_eq!(
+            member_bits(&host, 0),
+            vec![0, 0, 0],
+            "the scenes nobody pointed stay silent"
+        );
+
+        std::fs::remove_dir_all(&directory).expect("clean kit test directory");
+        graph.process_block();
+        host_graph.process_block();
     }
 
     /// eseq-172r.2: a graph sequencer moves into a rack only when every route
@@ -7709,7 +7912,7 @@ mod tests {
         let kick_id = app.track_registry.id_at(kick).unwrap();
         let snare_id = app.track_registry.id_at(snare).unwrap();
 
-        let mut kit = app.capture_rack_as_kit(group_id, "New Kit", Vec::new(), String::new()).unwrap();
+        let mut kit = app.capture_rack_as_kit(group_id, "New Kit", Vec::new(), String::new(), &[]).unwrap().0;
         let new_pad = crate::project::ProjectKitPad {
             pad_note: 42,
             choke_group: Some(3),
@@ -7774,7 +7977,7 @@ mod tests {
         let kick_id = app.track_registry.id_at(kick).unwrap();
         let snare_id = app.track_registry.id_at(snare).unwrap();
         let sound = app.capture_rack_as_kit(
-            group_id, "Kit", Vec::new(), String::new()).unwrap()
+            group_id, "Kit", Vec::new(), String::new(), &[]).unwrap().0
             .pads.into_iter().find(|pad| pad.pad_note == 38).unwrap().sound;
         let directory = std::env::temp_dir().join(format!(
             "eseq-selected-sound-{}-{:?}", std::process::id(), std::thread::current().id()
