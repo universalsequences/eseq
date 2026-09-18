@@ -215,10 +215,12 @@ pub(super) fn handle(
             let group_id = extract_usize_from_payload(&payload, "group-id").map(|id| id as u64);
             let sequencer_id = extract_usize_from_payload(&payload, "sequencer-id").map(|id| id as u64);
             // The UI passes the script's source PATH (from the step-tab
-            // registry); the recorded replay form depends on where it lives.
-            let source = extract_string_from_payload(&payload, "source-path")
-                .map(|path| source_form_for_script_path(path.trim()))
+            // registry). The rack records `(load "<path>")`: unlike `import`,
+            // a load re-evaluates every time, which the rack's replay relies on.
+            let source_path = extract_string_from_payload(&payload, "source-path")
+                .map(|path| path.trim().to_string())
                 .unwrap_or_default();
+            let source = source_form_for_script_path(&source_path);
             let (Some(group_id), Some(sequencer_id)) = (group_id, sequencer_id) else {
                 editor.handle_host_event(HostEvent::Status(
                     "move-sequencer-into-rack needs a group id and a sequencer id".to_string(),
@@ -228,10 +230,22 @@ pub(super) fn handle(
             match app.move_sequencer_into_rack_recorded(group_id, sequencer_id, &source) {
                 Ok(_) => {
                     sync_rack_pad_map(app, editor, &track_groups, &ui_epoch);
-                    editor.handle_host_event(HostEvent::Status(format!(
-                        "Moved sequencer into {}; routes are now rack members",
-                        group_name(app, group_id).unwrap_or_else(|| "rack".to_string())
-                    )));
+                    let rack = group_name(app, group_id).unwrap_or_else(|| "rack".to_string());
+                    let mut status = format!("{rack} now owns the sequencer; routes are its members");
+                    if !source_path.is_empty() {
+                        // The project-level line would republish a project-owned
+                        // copy on the next open; the rack's replay owns it now.
+                        let module = module_name_for_script_path(&source_path);
+                        remove_project_script_source_lines(editor, app, &source_path, module.as_deref());
+                        // Re-run the script under the rack so its tab and route
+                        // dropdown switch over right away.
+                        if let Err(error) = evaluate_rack_sequencer_source(editor, app, group_id, &source) {
+                            status = format!("{status}; re-running the script failed: {error}");
+                        } else {
+                            editor.refresh_runtime_side_effects();
+                        }
+                    }
+                    editor.handle_host_event(HostEvent::Status(status));
                 }
                 Err(error) => editor.handle_host_event(HostEvent::Status(error)),
             }
@@ -313,15 +327,21 @@ pub(super) fn handle(
 
 /// A rack group's display name by its stable id, for status messages and kit
 /// naming. Groups are addressed by `GroupId`, never by index.
-/// The Lisp form that brings a script back, from the path it was loaded
-/// from: a file inside a module load root (a package such as
-/// `~/.eseq.d/packages/local/demos/x.lisp`) is re-imported by module name, so
-/// the package's module system (exports, hot reload) applies on replay;
-/// anything else is loaded by path. Empty for an empty path.
+/// The Lisp form that brings a script back on project open: a `load` by
+/// path, which re-evaluates every time (an `import` is load-once, so it would
+/// be a no-op after the scratch imported the same module). Empty for an
+/// empty path.
 pub(crate) fn source_form_for_script_path(path: &str) -> String {
     if path.is_empty() {
         return String::new();
     }
+    format!("(load {path:?})")
+}
+
+/// The module name a script file answers to under the module load roots
+/// (`~/.eseq.d/packages/local/demos/x.lisp` -> `demos.x`), or `None` for a
+/// file outside every root. Used to find the scratch's `(import …)` line.
+pub(crate) fn module_name_for_script_path(path: &str) -> Option<String> {
     let script = std::path::Path::new(path);
     let roots = sequencer::app_paths::app_paths().load_path().unwrap_or_default();
     for root in roots {
@@ -336,10 +356,10 @@ pub(crate) fn source_form_for_script_path(path: &str) -> String {
             .collect::<Vec<_>>()
             .join(".");
         if !module.is_empty() {
-            return format!("(import {module})");
+            return Some(module);
         }
     }
-    format!("(load {path:?})")
+    None
 }
 
 /// Evaluate `source` on the UI runtime with every graph def-sequencer it
@@ -471,21 +491,24 @@ pub(super) fn sync_after_rack_structure_change(
 
 #[cfg(test)]
 mod tests {
-    use super::source_form_for_script_path;
+    use super::{module_name_for_script_path, source_form_for_script_path};
 
     #[test]
-    fn script_paths_inside_a_module_root_replay_as_imports_and_others_as_loads() {
+    fn script_paths_replay_as_loads_and_module_names_come_from_load_roots() {
         let roots = sequencer::app_paths::app_paths().load_path().unwrap_or_default();
         let root = roots.first().expect("dev app paths expose a module load root");
         let inside = root.join("demos").join("graph-variable-reset.lisp");
+        let inside = inside.to_str().unwrap();
+        assert_eq!(source_form_for_script_path(inside), format!("(load {inside:?})"));
         assert_eq!(
-            source_form_for_script_path(inside.to_str().unwrap()),
-            "(import demos.graph-variable-reset)"
+            module_name_for_script_path(inside).as_deref(),
+            Some("demos.graph-variable-reset")
         );
         assert_eq!(
             source_form_for_script_path("/elsewhere/scripts/x.lisp"),
             "(load \"/elsewhere/scripts/x.lisp\")"
         );
+        assert_eq!(module_name_for_script_path("/elsewhere/scripts/x.lisp"), None);
         assert_eq!(source_form_for_script_path(""), "");
     }
 }

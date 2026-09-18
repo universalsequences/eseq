@@ -3800,9 +3800,9 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             report.failure_message()
         );
         assert_eq!(
-            runtime.eval_str("g8-name").expect("read loaded graph name"),
-            Some(Value::String("neural-8x8-demo".to_string())),
-            "scratch-style load should define the graph demo UI state"
+            runtime.eval_str("g8-name").expect("read loaded graph handle"),
+            Some(Value::Number(super::graph_instance_id("neural-8x8-demo", None) as f64)),
+            "scratch-style load should define the graph demo UI state (the handle)"
         );
 
         assert!(

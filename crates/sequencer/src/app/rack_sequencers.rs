@@ -95,8 +95,9 @@ impl App {
     }
 
     /// Move a project-owned graph sequencer into a rack. Allowed only when
-    /// every route and seed track it uses, in every scene, is a member of that
-    /// rack; otherwise the error names the offending nodes and nothing changes.
+    /// every explicit route and seed track it uses, in every scene, is a
+    /// member of that rack; otherwise the error names the offending nodes and
+    /// nothing changes.
     /// Returns the rack-owned instance id.
     pub fn move_sequencer_into_rack_recorded(
         &mut self,
@@ -119,17 +120,9 @@ impl App {
             return Err(format!("'{}' already belongs to a rack", manifest.name));
         }
         let member_of = |track: usize| members.iter().position(|member| *member == track);
-        // The manifest's own default route is a track index too; it must be a
-        // member, since it applies to every node without an override.
-        if let Some(route) = manifest.node.route {
-            if member_of(route).is_none() {
-                return Err(format!(
-                    "'{}' routes to track {} by default, which is not in this rack",
-                    manifest.name,
-                    route + 1
-                ));
-            }
-        }
+        // The manifest's default `:route n` is read as member n once the rack
+        // owns it (a demo's `:route 0` lands on the first pad), so only
+        // explicit per-node routes can point outside the rack.
         let mut outside: Vec<String> = Vec::new();
         {
             let scenes = self.state.all_scene_graph_overrides();

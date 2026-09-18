@@ -7471,7 +7471,9 @@ mod tests {
             max_poly_selection: crate::neural::NeuralMaxPolySelection::Deterministic,
             duration: GraphDurationSpec::default(),
             swing: GraphSwingSpec::default(),
-            node: NodeProto { route: Some(kick), ..NodeProto::default() },
+            // Default route 0 is track 1 (outside the rack); once owned it
+            // reads as member 0, so it must not block the move.
+            node: NodeProto { route: Some(0), ..NodeProto::default() },
             edge_sets: Vec::new(),
         };
         app.state.publish_sequencer(crate::sequencer::PublishedSequencer {

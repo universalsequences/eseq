@@ -256,6 +256,80 @@ pub(crate) fn remove_project_script_from_scratch(editor: &mut Editor, source_pat
     removed
 }
 
+/// `Some(module)` when `line` is a one-line `(import module …)` form.
+pub(crate) fn project_script_import_module(line: &str) -> Option<String> {
+    let tokens = Parser::new(line.to_string()).parse().ok()?;
+    let expressions = ASTParser::new(tokens).parse().ok()?;
+    let [Expression::List(items)] = expressions.as_slice() else {
+        return None;
+    };
+    match items.as_slice() {
+        [Expression::Symbol(import), Expression::Symbol(module), ..] if import == "import" => {
+            Some(module.clone())
+        }
+        _ => None,
+    }
+}
+
+/// Drop every `(load "<path>")` and `(import <module>)` line that brought a
+/// script into the project, from both the visible scratch buffer and the
+/// evaluated scratch source the next project open replays. Used when a rack
+/// takes a script over: the rack's own replay brings it back, and a second,
+/// project-owned copy would fire on its default routes.
+pub(crate) fn remove_project_script_source_lines(
+    editor: &mut Editor,
+    app: &app::App,
+    source_path: &str,
+    module: Option<&str>,
+) -> bool {
+    let target = canonical_project_script_path(source_path);
+    let matches = |line: &str| {
+        project_script_load_path(line)
+            .is_some_and(|path| canonical_project_script_path(&path) == target)
+            || module.is_some_and(|module| {
+                project_script_import_module(line).as_deref() == Some(module)
+            })
+    };
+    let strip = |text: &str| -> Option<String> {
+        let mut removed = false;
+        let mut previous_blank = true;
+        let mut kept = Vec::new();
+        for line in text.lines() {
+            if matches(line) {
+                removed = true;
+                continue;
+            }
+            let blank = line.trim().is_empty();
+            if blank && previous_blank {
+                continue;
+            }
+            kept.push(line.to_string());
+            previous_blank = blank;
+        }
+        while kept.last().is_some_and(|line| line.trim().is_empty()) {
+            kept.pop();
+        }
+        removed.then(|| kept.join("\n"))
+    };
+    let mut removed = false;
+    if let Some(buffer) = editor
+        .buffers
+        .iter_mut()
+        .find(|buffer| buffer.name == PROJECT_SCRATCH_BUFFER_NAME)
+    {
+        if let Some(updated) = strip(&buffer.lines.join("\n")) {
+            buffer.set_text(&updated);
+            editor.mark_needs_redraw();
+            removed = true;
+        }
+    }
+    if let Some(updated) = strip(&app.state.scratch_source()) {
+        app.state.set_scratch_source(updated);
+        removed = true;
+    }
+    removed
+}
+
 pub(crate) fn push_project_scratch_to_named_buffer(editor: &mut Editor, app: &app::App) {
     let scratch_text = app.editor.scratch_buffer.clone();
     let scratch_cursor = app.editor.scratch_cursor;
