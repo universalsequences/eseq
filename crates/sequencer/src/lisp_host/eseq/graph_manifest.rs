@@ -183,6 +183,36 @@ pub fn with_graph_owner_rack<T>(group_id: Option<u64>, body: impl FnOnce() -> T)
     result
 }
 
+/// Which drum rack owns each module's graph sequencers, by module name
+/// (`demos.graph-variable-reset` -> group id). The app derives it from every
+/// rack's recorded `(import …)` sources whenever group topology changes, so a
+/// `def-sequencer` evaluated inside that module publishes as rack-owned no
+/// matter who imported the module: the project scratch on open, or a fresh
+/// `(import …)` pass after attaching. This is what lets the scratch stay the
+/// one place scripts are imported (spec §5.1).
+static RACK_OWNER_BY_MODULE: std::sync::Mutex<Option<std::collections::HashMap<String, u64>>> =
+    std::sync::Mutex::new(None);
+
+pub fn set_rack_owner_modules(owners: std::collections::HashMap<String, u64>) {
+    if let Ok(mut map) = RACK_OWNER_BY_MODULE.lock() {
+        *map = Some(owners);
+    }
+}
+
+pub fn rack_owner_for_module(module: &str) -> Option<u64> {
+    RACK_OWNER_BY_MODULE
+        .lock()
+        .ok()
+        .and_then(|map| map.as_ref().and_then(|map| map.get(module).copied()))
+}
+
+/// The owner a graph `def-sequencer` evaluated inside `module` publishes
+/// under: an explicit `with_graph_owner_rack` scope wins, then the module's
+/// recorded owner, else the project.
+pub fn graph_owner_for_module(module: Option<&str>) -> Option<u64> {
+    current_graph_owner_rack().or_else(|| module.and_then(rack_owner_for_module))
+}
+
 /// A sequencer instance's id: the authored name for a project-owned one, the
 /// name namespaced by the owning rack otherwise, so the same script can run
 /// once per rack.
@@ -196,13 +226,23 @@ pub fn graph_instance_id(name: &str, owner_rack: Option<u64>) -> u64 {
 /// Parse a graph-mode `def-sequencer` arg list (including the leading name) into a
 /// [`GraphManifest`].
 pub fn parse_graph_manifest(args: &[EValue]) -> Result<GraphManifest, String> {
+    parse_graph_manifest_in_module(args, None)
+}
+
+/// [`parse_graph_manifest`] for a `def-sequencer` evaluated inside `module`
+/// (`None` = headerless scratch code): the owner comes from
+/// [`graph_owner_for_module`].
+pub fn parse_graph_manifest_in_module(
+    args: &[EValue],
+    module: Option<&str>,
+) -> Result<GraphManifest, String> {
     let name = match args.first() {
         Some(EValue::String(s) | EValue::Symbol(s) | EValue::Keyword(s)) => {
             s.trim_start_matches('@').to_string()
         }
         _ => return Err("def-sequencer expects a name".to_string()),
     };
-    let owner_rack = current_graph_owner_rack();
+    let owner_rack = graph_owner_for_module(module);
     let id = graph_instance_id(&name, owner_rack);
     let mut shape: Option<ShapeSpec> = None;
     let mut energy_decay = 0.9;

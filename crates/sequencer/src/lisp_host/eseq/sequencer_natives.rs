@@ -2989,6 +2989,16 @@ pub fn stable_sequencer_id(name: &str) -> u64 {
 }
 
 pub fn published_sequencer_from_def_args(args: &[EValue]) -> Result<PublishedSequencer, String> {
+    published_sequencer_from_def_args_in_module(args, None)
+}
+
+/// [`published_sequencer_from_def_args`] for a `def-sequencer` evaluated
+/// inside `module`; a graph manifest then takes its owner from the module's
+/// recorded rack (`graph_owner_for_module`).
+pub fn published_sequencer_from_def_args_in_module(
+    args: &[EValue],
+    module: Option<&str>,
+) -> Result<PublishedSequencer, String> {
     let name = match args.first() {
         Some(EValue::String(s) | EValue::Symbol(s) | EValue::Keyword(s)) => {
             s.trim_start_matches('@').to_string()
@@ -2996,7 +3006,7 @@ pub fn published_sequencer_from_def_args(args: &[EValue]) -> Result<PublishedSeq
         _ => return Err("def-sequencer expects a name".to_string()),
     };
     if graph_mode_present(args) {
-        let manifest = parse_graph_manifest(args)?;
+        let manifest = parse_graph_manifest_in_module(args, module)?;
         return Ok(PublishedSequencer {
             id: manifest.id,
             name,

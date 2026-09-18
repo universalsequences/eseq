@@ -46,6 +46,7 @@ pub mod mixer_controls;
 mod params;
 mod projects;
 mod rack_sequencers;
+pub use rack_sequencers::rack_sequencer_module;
 mod bus_outputs;
 pub mod pending_capture;
 pub mod retrospective;
@@ -2308,6 +2309,7 @@ impl App {
         // is a group-topology change, which is exactly when rack-owned graph
         // sequencers' member routes need re-resolving.
         self.state.set_rack_memberships(self.rack_memberships());
+        self.publish_rack_owner_modules();
         let keys = &self.state.runtime.rack_choke_keys;
         for key in keys.iter() {
             key.store(0, Ordering::Release);

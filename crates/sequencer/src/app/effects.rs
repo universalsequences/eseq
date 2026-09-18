@@ -7568,8 +7568,9 @@ mod tests {
             vec![kick, snare, hat]
         );
 
-        let name = app.detach_rack_sequencer_recorded(group_id, rack_id).expect("detach");
+        let (name, source) = app.detach_rack_sequencer_recorded(group_id, rack_id).expect("detach");
         assert_eq!(name, "brk");
+        assert_eq!(source, "(load \"x.lisp\")");
         assert!(app.rack_sequencers(group_id).is_empty());
         let graphs = app.state.current_graph_overrides();
         assert_eq!(graphs[0].owner_rack, None);

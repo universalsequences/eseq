@@ -6400,8 +6400,14 @@ pub(crate) fn init_runtime(
         sequencer::lisp_host::DEF_SEQUENCER_SIGNATURE,
         sequencer::lisp_host::DEF_SEQUENCER_DOCS,
         sequencer::lisp_host::DEF_SEQUENCER_KEYWORDS.iter().copied(),
-        move |args, _ctx| {
-            let published = sequencer::lisp_host::published_sequencer_from_def_args(&args)?;
+        move |args, ctx| {
+            // A def-sequencer inside a module a drum rack owns publishes as
+            // that rack's instance, whoever imported the module (spec §5.1).
+            let module = ctx.current_module();
+            let published = sequencer::lisp_host::published_sequencer_from_def_args_in_module(
+                &args,
+                module.as_deref(),
+            )?;
             // The instance id is the handle every graph-* native accepts. It
             // is the only unambiguous reference once a rack owns a copy of a
             // script the project also runs (spec §5.2).

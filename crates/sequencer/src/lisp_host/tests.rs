@@ -1343,6 +1343,31 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         ));
     }
 
+    /// A module a rack owns publishes its graph def-sequencer as rack-owned
+    /// whoever imports it; an explicit owner scope still wins; other modules
+    /// and headerless code stay project-owned.
+    #[test]
+    fn module_owner_map_decides_graph_ownership() {
+        let args = sample_graph_args(); // a graph manifest named "neural"
+        super::set_rack_owner_modules(
+            [("demos.shared".to_string(), 12u64)].into_iter().collect(),
+        );
+        let owned = super::parse_graph_manifest_in_module(&args, Some("demos.shared")).unwrap();
+        assert_eq!(owned.owner_rack, Some(12));
+        assert_eq!(owned.id, super::graph_instance_id("neural", Some(12)));
+        let other = super::parse_graph_manifest_in_module(&args, Some("demos.other")).unwrap();
+        assert_eq!(other.owner_rack, None);
+        let headerless = super::parse_graph_manifest_in_module(&args, None).unwrap();
+        assert_eq!(headerless.owner_rack, None);
+        let explicit = super::with_graph_owner_rack(Some(3), || {
+            super::parse_graph_manifest_in_module(&args, Some("demos.shared")).unwrap()
+        });
+        assert_eq!(explicit.owner_rack, Some(3), "an explicit owner scope wins");
+        super::set_rack_owner_modules(Default::default());
+        let released = super::parse_graph_manifest_in_module(&args, Some("demos.shared")).unwrap();
+        assert_eq!(released.owner_rack, None);
+    }
+
     #[test]
     fn rack_owned_graph_instances_are_namespaced_and_keep_separate_overrides() {
         let state = Arc::new(SequencerState::new(

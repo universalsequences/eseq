@@ -202,11 +202,17 @@ pub(super) fn handle(
                 return;
             };
             match app.detach_rack_sequencer_recorded(group_id, sequencer_id) {
-                Ok(name) => {
+                Ok((name, source)) => {
                     sync_rack_pad_map(app, editor, &track_groups, &ui_epoch);
-                    editor.handle_host_event(HostEvent::Status(format!(
-                        "Detached '{name}'; its routes are plain tracks again"
-                    )));
+                    let mut status = format!("Detached '{name}'; its routes are plain tracks again");
+                    // Re-run the module now that no rack owns it, so the
+                    // project-owned instance and its UI come straight back.
+                    if !source.trim().is_empty() {
+                        if let Err(error) = reevaluate_sequencer_source(editor, &source) {
+                            status = format!("{status}; re-running the script failed: {error}");
+                        }
+                    }
+                    editor.handle_host_event(HostEvent::Status(status));
                 }
                 Err(error) => editor.handle_host_event(HostEvent::Status(error)),
             }
@@ -215,8 +221,8 @@ pub(super) fn handle(
             let group_id = extract_usize_from_payload(&payload, "group-id").map(|id| id as u64);
             let sequencer_id = extract_usize_from_payload(&payload, "sequencer-id").map(|id| id as u64);
             // The UI passes the script's source PATH (from the step-tab
-            // registry). The rack records `(load "<path>")`: unlike `import`,
-            // a load re-evaluates every time, which the rack's replay relies on.
+            // registry); a file under a module load root is recorded as the
+            // `(import …)` the scratch already uses, anything else as a load.
             let source_path = extract_string_from_payload(&payload, "source-path")
                 .map(|path| path.trim().to_string())
                 .unwrap_or_default();
@@ -232,17 +238,12 @@ pub(super) fn handle(
                     sync_rack_pad_map(app, editor, &track_groups, &ui_epoch);
                     let rack = group_name(app, group_id).unwrap_or_else(|| "rack".to_string());
                     let mut status = format!("{rack} now owns the sequencer; routes are its members");
-                    if !source_path.is_empty() {
-                        // The project-level line would republish a project-owned
-                        // copy on the next open; the rack's replay owns it now.
-                        let module = module_name_for_script_path(&source_path);
-                        remove_project_script_source_lines(editor, app, &source_path, module.as_deref());
-                        // Re-run the script under the rack so its tab and route
-                        // dropdown switch over right away.
-                        if let Err(error) = evaluate_rack_sequencer_source(editor, app, group_id, &source) {
+                    // Re-run the module now that the rack owns it (the owner
+                    // map is published), so its tab and route dropdown switch
+                    // over right away. A fresh eval pass re-imports.
+                    if !source.is_empty() {
+                        if let Err(error) = reevaluate_sequencer_source(editor, &source) {
                             status = format!("{status}; re-running the script failed: {error}");
-                        } else {
-                            editor.refresh_runtime_side_effects();
                         }
                     }
                     editor.handle_host_event(HostEvent::Status(status));
@@ -327,20 +328,37 @@ pub(super) fn handle(
 
 /// A rack group's display name by its stable id, for status messages and kit
 /// naming. Groups are addressed by `GroupId`, never by index.
-/// The Lisp form that brings a script back on project open: a `load` by
-/// path, which re-evaluates every time (an `import` is load-once, so it would
-/// be a no-op after the scratch imported the same module). Empty for an
-/// empty path.
+/// The Lisp form a rack records for a script: the module's `(import …)` when
+/// the file lives under a module load root (a package), so it is the same
+/// line the scratch uses and the module's rack ownership applies whoever
+/// imports it; `(load "<path>")` for a plain file. Empty for an empty path.
 pub(crate) fn source_form_for_script_path(path: &str) -> String {
     if path.is_empty() {
         return String::new();
     }
-    format!("(load {path:?})")
+    match module_name_for_script_path(path) {
+        Some(module) => format!("(import {module})"),
+        None => format!("(load {path:?})"),
+    }
+}
+
+/// Evaluate a recorded sequencer source in a fresh pass. Imports are
+/// load-once per pass, so this re-runs the module even though the scratch
+/// imported it earlier; the current owner map decides who owns the result.
+pub(crate) fn reevaluate_sequencer_source(editor: &mut Editor, source: &str) -> Result<(), String> {
+    let overlays = editor.snapshot_file_backed_sources();
+    let report = editor.runtime_mut().eval_source_transactional(None, source, overlays);
+    if report.success {
+        editor.refresh_runtime_side_effects();
+        Ok(())
+    } else {
+        Err(report.failure_message())
+    }
 }
 
 /// The module name a script file answers to under the module load roots
 /// (`~/.eseq.d/packages/local/demos/x.lisp` -> `demos.x`), or `None` for a
-/// file outside every root. Used to find the scratch's `(import …)` line.
+/// file outside every root.
 pub(crate) fn module_name_for_script_path(path: &str) -> Option<String> {
     let script = std::path::Path::new(path);
     let roots = sequencer::app_paths::app_paths().load_path().unwrap_or_default();
@@ -494,12 +512,12 @@ mod tests {
     use super::{module_name_for_script_path, source_form_for_script_path};
 
     #[test]
-    fn script_paths_replay_as_loads_and_module_names_come_from_load_roots() {
+    fn package_scripts_record_their_import_and_plain_files_record_a_load() {
         let roots = sequencer::app_paths::app_paths().load_path().unwrap_or_default();
         let root = roots.first().expect("dev app paths expose a module load root");
         let inside = root.join("demos").join("graph-variable-reset.lisp");
         let inside = inside.to_str().unwrap();
-        assert_eq!(source_form_for_script_path(inside), format!("(load {inside:?})"));
+        assert_eq!(source_form_for_script_path(inside), "(import demos.graph-variable-reset)");
         assert_eq!(
             module_name_for_script_path(inside).as_deref(),
             Some("demos.graph-variable-reset")

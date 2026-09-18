@@ -11,7 +11,32 @@ use super::*;
 use crate::graph::{ProjectGraphOverrides, ProjectGraphRouteOverride, ProjectGraphSeedFrom, RackMembership};
 use crate::project::ProjectRackSequencer;
 
+/// `Some(module)` when a recorded rack sequencer source is a one-line
+/// `(import module)` form, which is how package scripts are recorded.
+pub fn rack_sequencer_module(source: &str) -> Option<String> {
+    let inner = source.trim().strip_prefix("(import ")?.strip_suffix(')')?.trim();
+    let module = inner.split_whitespace().next()?;
+    (!module.is_empty() && !module.starts_with(':')).then(|| module.to_string())
+}
+
 impl App {
+    /// Tell the Lisp side which modules' graph sequencers belong to which
+    /// rack, so a `def-sequencer` inside an imported module publishes as
+    /// rack-owned however the module gets imported (spec §5.1).
+    pub fn publish_rack_owner_modules(&self) {
+        let owners = self
+            .groups
+            .iter()
+            .filter_map(|group| group.rack.as_ref().map(|rack| (group.id, rack)))
+            .flat_map(|(group_id, rack)| {
+                rack.sequencers
+                    .iter()
+                    .filter_map(move |s| rack_sequencer_module(&s.source).map(|m| (m, group_id)))
+            })
+            .collect();
+        crate::lisp_host::set_rack_owner_modules(owners);
+    }
+
     /// Every drum rack's member tracks in member order, for the scheduler's
     /// member-route resolution.
     pub fn rack_memberships(&self) -> Vec<RackMembership> {
@@ -52,6 +77,7 @@ impl App {
                 Some(existing) => *existing = entry,
                 None => rack.sequencers.push(entry),
             }
+            app.publish_rack_owner_modules();
             Ok(())
         })
     }
@@ -59,13 +85,14 @@ impl App {
     /// Give a rack-owned sequencer back to the project: member routes expand
     /// to the tracks they currently resolve to, the overrides re-key to the
     /// project-owned instance id, and the rack instance is unpublished. The
-    /// script itself is not re-evaluated; loading it project-wide again picks
-    /// the expanded overrides up by name. Returns the sequencer's name.
+    /// script itself is not re-evaluated here; the host re-imports it so it
+    /// republishes project-owned and picks the expanded overrides up by name.
+    /// Returns the sequencer's name and its recorded source form.
     pub fn detach_rack_sequencer_recorded(
         &mut self,
         group_id: u64,
         sequencer_id: u64,
-    ) -> Result<String, String> {
+    ) -> Result<(String, String), String> {
         let members = self.rack_member_tracks(group_id)?;
         self.apply_recorded_bus_group_structure_mutation("Detach sequencer from rack", move |app| {
             let rack = app.rack_config_mut(group_id)?;
@@ -90,7 +117,8 @@ impl App {
                 changed
             });
             app.state.unpublish_sequencer_by_id(sequencer_id);
-            Ok(entry.sequencer_name)
+            app.publish_rack_owner_modules();
+            Ok((entry.sequencer_name, entry.source))
         })
     }
 
@@ -192,6 +220,7 @@ impl App {
             });
             app.state.unpublish_sequencer_by_id(sequencer_id);
             app.state.publish_sequencer(rack_published);
+            app.publish_rack_owner_modules();
             Ok(rack_id)
         })
     }

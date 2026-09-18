@@ -221,16 +221,27 @@ route/seed track in every scene are members of that rack; otherwise the error
 names the offending nodes and nothing changes. Moving rewrites the overrides
 to member indices, sets `owner_rack`, re-keys them to the namespaced id,
 republishes the manifest under the rack and records a `ProjectRackSequencer`
-whose source is the `(load …)` form the step-tab registry knows for that
-script. Detaching reverses it (member routes expand to tracks, id back to the
-project one, rack instance unpublished). Scripting can also attach from a
-source form directly: host command `attach-rack-sequencer` evaluates the form
-with `with_graph_owner_rack` and records each graph sequencer it published.
-All three are recorded group-structure edits, and the structure state
-captures the scene bank, so the override rewrites undo with them.
+whose source is the same `(import demos.x)` the scratch uses for a package
+script (a plain file records `(load "<path>")`). Detaching reverses it
+(member routes expand to tracks, id back to the project one, rack instance
+unpublished). All three are recorded group-structure edits, and the
+structure state captures the scene bank, so the override rewrites undo with
+them.
 
-On project open the host replays each recorded source under its owner after
-the scratch replay (`replay_rack_sequencer_sources`).
+**Ownership is a property of the module.** The app publishes a map
+module name → owning rack (`set_rack_owner_modules`, rebuilt from every
+rack's recorded imports on each group-topology change), and the UI
+`def-sequencer` native asks the VM which module is evaluating
+(`ctx.current_module()`) and looks it up. So the scratch stays the one place
+scripts are imported: on project open its own `(import demos.x)` publishes
+the instance as rack-owned, with no second replay and no scratch edits.
+Attaching and detaching re-evaluate the `(import …)` in a fresh eval pass
+(imports are load-once *per pass*, so this re-runs the module) and the map
+decides who owns the result, which flips the script's tab and route dropdown
+immediately. `replay_rack_sequencer_sources` only evaluates recorded sources
+the scratch does not import (plain `(load …)` files). An explicit
+`with_graph_owner_rack` scope still wins over the map, which is what tests
+and `attach-rack-sequencer` use.
 
 Phase 3 moves the rack-owned overrides from project scenes into rack clips;
 in phase 2 they still live in the scenes, only the route space changed.
