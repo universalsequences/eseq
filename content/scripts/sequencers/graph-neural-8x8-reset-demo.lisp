@@ -28,7 +28,10 @@
 ;; pattern. It does not write graph overrides. For a fresh demo patch, explicitly run:
 ;;   (script-init-fn)
 
-(def-sequencer "neural-8x8-reset-demo"
+;; `def-sequencer` returns the instance handle; every graph-* native below takes
+;; it, so this script also works when a drum rack owns it (routes then address
+;; rack members and the handle stays unambiguous next to a project-owned copy).
+(def g8r-name (def-sequencer "neural-8x8-reset-demo"
   :shape (line 8)
   :energy-decay 0.992
   :reset-every (bars 4)
@@ -83,22 +86,31 @@
     :topology (all-to-all)
     :gather (- (edge :weight) (edge :dampening))
     :params ((weight :float -1 1 :default 0.0)
-      (dampening :float 0 1 :default 0))))
+      (dampening :float 0 1 :default 0)))))
 
-(def g8r-name "neural-8x8-reset-demo")
 (def g8r-node-count 8)
 (def script-buffer-name "*8x8-reset*")
-(def script-tab-label "8x8 rst")
-(def script-sequencer-name g8r-name)
+;; Owned by a rack: routes address its members and the tab wears its name.
+(def g8r-owner-rack (graph-owner g8r-name))
+(def g8r-route-tracks (graph-route-tracks g8r-name))
+(def script-tab-label
+  (if g8r-owner-rack (eseq.drum-rack-v2/group-name (eseq.drum-rack-v2/group-index-by-id g8r-owner-rack)) "8x8 rst"))
+(def script-sequencer-name "neural-8x8-reset-demo")
 
 ;; ── dropdown option lists (order is the index space bind-graph maps into) ──
 
 (def g8r-res-options (list "1" "2" "4" "8" "16" "32" "64"))
 (def g8r-quant-options (list "off" "1" "2" "4" "8" "16" "32" "64" "2T" "4T" "8T" "16T" "32T" "64T" "Prh"))
+;; Route option n is track n (project-owned) or rack member n (rack-owned);
+;; "Off" is always last. Either way the option index IS the route value.
 (def g8r-route-options
-  (list "Track 1" "Track 2" "Track 3" "Track 4" "Track 5" "Track 6" "Track 7" "Track 8"
-        "Track 9" "Track 10" "Track 11" "Track 12" "Track 13" "Track 14" "Track 15" "Track 16"
-        "Off"))
+  (if g8r-route-tracks
+    (append
+      (map (lambda (track) (str (+ track 1) " " (nth SEQ.track-names track))) g8r-route-tracks)
+      (list "Off"))
+    (list "Track 1" "Track 2" "Track 3" "Track 4" "Track 5" "Track 6" "Track 7" "Track 8"
+          "Track 9" "Track 10" "Track 11" "Track 12" "Track 13" "Track 14" "Track 15" "Track 16"
+          "Off")))
 
 (def g8r-index-of (xs item)
   (let ((hits (filter (lambda (i) (= (nth xs i) item)) (range 0 (len xs)))))
@@ -148,7 +160,7 @@
   (map (lambda (n) (list 0)) (range 0 g8r-node-count)))
 
 (def g8r-viz (visualizations)
-  (let ((hits (filter (lambda (viz) (= (get viz :name) g8r-name)) visualizations)))
+  (let ((hits (filter (lambda (viz) (= (get viz :id) g8r-name)) visualizations)))
     (if (> (len hits) 0) (nth hits 0) nil)))
 
 (def g8r-viz-matrix (viz field fallback)

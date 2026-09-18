@@ -1139,6 +1139,111 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         });
     }
 
+    /// Every graph demo script keeps the handle `def-sequencer` returns and,
+    /// under a rack owner, publishes a rack-owned instance and labels its tab
+    /// with the rack. The variable-reset demo additionally checks the
+    /// member-built route options and a route edit through its own helper.
+    #[test]
+    fn every_graph_demo_loads_project_owned_and_rack_owned() {
+        for (file, name, prefix) in [
+            ("graph-markov-8x8-demo.lisp", "markov-8x8-demo", "m8"),
+            ("graph-neural-16-cycle-demo.lisp", "neural-16-cycle-demo", "g16c"),
+            ("graph-neural-16-demo.lisp", "neural-16-demo", "g16"),
+            ("graph-neural-8x8-demo.lisp", "neural-8x8-demo", "g8"),
+            ("graph-neural-8x8-reset-demo.lisp", "neural-8x8-reset-demo", "g8r"),
+            ("graph-neural-group-matrix-demo.lisp", "neural-group-matrix-demo", "ggm"),
+        ] {
+            let state = Arc::new(SequencerState::new(
+                4,
+                (0..4).map(|_| default_empty_effect_chain()).collect(),
+            ));
+            let mut runtime = Runtime::new();
+            runtime.register_reactive(
+                "SEQ",
+                vec![
+                    ("current-pattern", Value::Number(0.0)),
+                    ("graph-visualizations", Value::List(Vec::new())),
+                    ("track-colors", Value::List(Vec::new())),
+                    ("track-active-notes", Value::List(Vec::new())),
+                    ("track-events", Value::List(Vec::new())),
+                    ("track-event-current-beat", Value::Number(0.0)),
+                    (
+                        "track-names",
+                        Value::List(
+                            ["kick", "snare", "hat", "perc"]
+                                .iter()
+                                .map(|n| Rc::new(RefCell::new(Value::String(n.to_string()))))
+                                .collect(),
+                        ),
+                    ),
+                ],
+                true,
+            );
+            register_graph_def_sequencer_test_native(&mut runtime, Arc::clone(&state));
+            register_graph_authoring_natives(&mut runtime, Arc::clone(&state));
+            let workspace_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .and_then(|crates_dir| crates_dir.parent())
+                .expect("sequencer crate should live under workspace crates dir")
+                .join(".eseqlisp-scratch");
+            let stubs = r#"
+                (def eseq.seq-step-tabs/seq-register-step-sequencer-tab (label buffer) nil)
+                (def eseq.seq-step-tabs/seq-register-script-step-sequencer-tab (label buffer sequencer icon) nil)
+                (def eseq.drum-rack-v2/group-index-by-id (gid) 0)
+                (def eseq.drum-rack-v2/group-name (gidx) "Break")
+            "#;
+            let load = format!(r#"(load "content/scripts/sequencers/{file}")"#);
+            let report = runtime.eval_source_transactional(
+                Some(workspace_root.clone()),
+                &format!("{stubs}\n{load}"),
+                Vec::new(),
+            );
+            assert!(report.success, "{file}: project-owned load failed: {:?}", report.diagnostics);
+            let handle = runtime.eval_str(&format!("{prefix}-name")).expect("handle").expect("value");
+            let project_id = super::graph_instance_id(name, None);
+            assert!(matches!(handle, Value::Number(n) if n == project_id as f64), "{file}: {handle:?}");
+            assert_eq!(
+                runtime.eval_str("script-sequencer-name").unwrap(),
+                Some(Value::String(name.into())),
+                "{file}: the tab registry still keys by name"
+            );
+            assert_eq!(
+                runtime.eval_str(&format!("(len {prefix}-route-options)")).unwrap(),
+                Some(Value::Number(17.0)),
+                "{file}: project-owned: 16 tracks + Off"
+            );
+
+            state.set_rack_memberships(vec![crate::graph::RackMembership {
+                group_id: 9,
+                members: vec![2, 0],
+            }]);
+            let report = super::with_graph_owner_rack(Some(9), || {
+                runtime.eval_source_transactional(Some(workspace_root.clone()), &load, Vec::new())
+            });
+            assert!(report.success, "{file}: rack-owned load failed: {:?}", report.diagnostics);
+            let handle = runtime.eval_str(&format!("{prefix}-name")).expect("handle").expect("value");
+            let rack_id = super::graph_instance_id(name, Some(9));
+            assert!(matches!(handle, Value::Number(n) if n == rack_id as f64), "{file}: {handle:?}");
+            assert_eq!(
+                runtime.eval_str("script-tab-label").unwrap(),
+                Some(Value::String("Break".into())),
+                "{file}: rack-owned: the tab wears the rack's name"
+            );
+            assert_eq!(
+                eseqlisp::vm::format_lisp_value(
+                    &runtime.eval_str(&format!("{prefix}-route-options")).unwrap().unwrap()
+                ),
+                r#"("3 hat" "1 kick" "Off")"#,
+                "{file}: rack-owned route options"
+            );
+            assert!(
+                state.published_sequencers().iter().any(|p| p.id == rack_id
+                    && p.graph.as_ref().is_some_and(|m| m.owner_rack == Some(9))),
+                "{file}: rack-owned instance published"
+            );
+        }
+    }
+
     /// The variable-reset demo is the reference rack-ready script: it keeps
     /// the handle `def-sequencer` returns, and under a rack owner it labels
     /// its tab with the rack and builds route options from the members.

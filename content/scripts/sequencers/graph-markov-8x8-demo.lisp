@@ -12,7 +12,10 @@
 ;; Loading this file publishes the graph/UI only. For a fresh patch, run:
 ;;   (script-init-fn)
 
-(def-sequencer "markov-8x8-demo"
+;; `def-sequencer` returns the instance handle; every graph-* native below takes
+;; it, so this script also works when a drum rack owns it (routes then address
+;; rack members and the handle stays unambiguous next to a project-owned copy).
+(def m8-name (def-sequencer "markov-8x8-demo"
   :shape (line 8)
   :energy-decay 1
   :reset-every 0
@@ -44,20 +47,29 @@
     :topology (all-to-all)
     :distribution :weighted-choice
     :gather (edge :weight)
-    :params ((weight :float 0 1 :default 0.0))))
+    :params ((weight :float 0 1 :default 0.0)))))
 
-(def m8-name "markov-8x8-demo")
 (def m8-node-count 8)
 (def script-buffer-name "*markov-8x8*")
-(def script-tab-label "Markov 8x8")
-(def script-sequencer-name m8-name)
+;; Owned by a rack: routes address its members and the tab wears its name.
+(def m8-owner-rack (graph-owner m8-name))
+(def m8-route-tracks (graph-route-tracks m8-name))
+(def script-tab-label
+  (if m8-owner-rack (eseq.drum-rack-v2/group-name (eseq.drum-rack-v2/group-index-by-id m8-owner-rack)) "Markov 8x8"))
+(def script-sequencer-name "markov-8x8-demo")
 
 (def m8-res-options (list "1" "2" "4" "8" "16" "32" "64"))
 (def m8-quant-options (list "off" "1" "2" "4" "8" "16" "32" "64" "2T" "4T" "8T" "16T" "32T" "64T" "Prh"))
+;; Route option n is track n (project-owned) or rack member n (rack-owned);
+;; "Off" is always last. Either way the option index IS the route value.
 (def m8-route-options
-  (list "Track 1" "Track 2" "Track 3" "Track 4" "Track 5" "Track 6" "Track 7" "Track 8"
-        "Track 9" "Track 10" "Track 11" "Track 12" "Track 13" "Track 14" "Track 15" "Track 16"
-        "Off"))
+  (if m8-route-tracks
+    (append
+      (map (lambda (track) (str (+ track 1) " " (nth SEQ.track-names track))) m8-route-tracks)
+      (list "Off"))
+    (list "Track 1" "Track 2" "Track 3" "Track 4" "Track 5" "Track 6" "Track 7" "Track 8"
+          "Track 9" "Track 10" "Track 11" "Track 12" "Track 13" "Track 14" "Track 15" "Track 16"
+          "Off")))
 
 (def m8-index-of (xs item)
   (let ((hits (filter (lambda (i) (= (nth xs i) item)) (range 0 (len xs)))))
@@ -100,7 +112,7 @@
   (map (lambda (n) (list 0)) (range 0 m8-node-count)))
 
 (def m8-viz (visualizations)
-  (let ((hits (filter (lambda (viz) (= (get viz :name) m8-name)) visualizations)))
+  (let ((hits (filter (lambda (viz) (= (get viz :id) m8-name)) visualizations)))
     (if (> (len hits) 0) (nth hits 0) nil)))
 
 (def m8-viz-matrix (viz field fallback)

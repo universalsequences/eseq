@@ -214,14 +214,18 @@ pub(super) fn handle(
         "move-sequencer-into-rack" => {
             let group_id = extract_usize_from_payload(&payload, "group-id").map(|id| id as u64);
             let sequencer_id = extract_usize_from_payload(&payload, "sequencer-id").map(|id| id as u64);
-            let source = extract_string_from_payload(&payload, "source").unwrap_or_default();
+            // The UI passes the script's source PATH (from the step-tab
+            // registry); the recorded replay form depends on where it lives.
+            let source = extract_string_from_payload(&payload, "source-path")
+                .map(|path| source_form_for_script_path(path.trim()))
+                .unwrap_or_default();
             let (Some(group_id), Some(sequencer_id)) = (group_id, sequencer_id) else {
                 editor.handle_host_event(HostEvent::Status(
                     "move-sequencer-into-rack needs a group id and a sequencer id".to_string(),
                 ));
                 return;
             };
-            match app.move_sequencer_into_rack_recorded(group_id, sequencer_id, source.trim()) {
+            match app.move_sequencer_into_rack_recorded(group_id, sequencer_id, &source) {
                 Ok(_) => {
                     sync_rack_pad_map(app, editor, &track_groups, &ui_epoch);
                     editor.handle_host_event(HostEvent::Status(format!(
@@ -309,6 +313,35 @@ pub(super) fn handle(
 
 /// A rack group's display name by its stable id, for status messages and kit
 /// naming. Groups are addressed by `GroupId`, never by index.
+/// The Lisp form that brings a script back, from the path it was loaded
+/// from: a file inside a module load root (a package such as
+/// `~/.eseq.d/packages/local/demos/x.lisp`) is re-imported by module name, so
+/// the package's module system (exports, hot reload) applies on replay;
+/// anything else is loaded by path. Empty for an empty path.
+pub(crate) fn source_form_for_script_path(path: &str) -> String {
+    if path.is_empty() {
+        return String::new();
+    }
+    let script = std::path::Path::new(path);
+    let roots = sequencer::app_paths::app_paths().load_path().unwrap_or_default();
+    for root in roots {
+        let Ok(relative) = script.strip_prefix(&root) else { continue };
+        if relative.extension().and_then(|ext| ext.to_str()) != Some("lisp") {
+            continue;
+        }
+        let module = relative
+            .with_extension("")
+            .components()
+            .filter_map(|component| component.as_os_str().to_str().map(str::to_string))
+            .collect::<Vec<_>>()
+            .join(".");
+        if !module.is_empty() {
+            return format!("(import {module})");
+        }
+    }
+    format!("(load {path:?})")
+}
+
 /// Evaluate `source` on the UI runtime with every graph def-sequencer it
 /// publishes owned by `group_id`. Returns the (id, name) of each graph
 /// sequencer the evaluation newly published under that owner.
@@ -434,4 +467,25 @@ pub(super) fn sync_after_rack_structure_change(
     ctx.frame.prev_track_playheads = track_playheads_snapshot(&state, app);
     ctx.frame.prev_track_button_states = track_button_state_snapshot(&state);
     ctx.shared.ui_epoch.fetch_add(1, Ordering::Relaxed);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::source_form_for_script_path;
+
+    #[test]
+    fn script_paths_inside_a_module_root_replay_as_imports_and_others_as_loads() {
+        let roots = sequencer::app_paths::app_paths().load_path().unwrap_or_default();
+        let root = roots.first().expect("dev app paths expose a module load root");
+        let inside = root.join("demos").join("graph-variable-reset.lisp");
+        assert_eq!(
+            source_form_for_script_path(inside.to_str().unwrap()),
+            "(import demos.graph-variable-reset)"
+        );
+        assert_eq!(
+            source_form_for_script_path("/elsewhere/scripts/x.lisp"),
+            "(load \"/elsewhere/scripts/x.lisp\")"
+        );
+        assert_eq!(source_form_for_script_path(""), "");
+    }
 }

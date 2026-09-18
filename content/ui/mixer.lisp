@@ -175,17 +175,17 @@
     (list
       (dict :id :ungroup :label "Ungroup"))))
 
-;; The `(load "path")` form that brought a project-owned script in, from the
-;; step-tab registry; "" when unknown (the moved instance then does not come
-;; back by itself on project open).
-(def sequencer-source-form (name)
+;; The path a project-owned script was loaded from, per the step-tab registry;
+;; "" when unknown (the moved instance then does not come back by itself on
+;; project open). The host turns it into `(import …)` for package modules or
+;; `(load …)` for plain files.
+(def sequencer-source-path (name)
   (let ((hits (filter
                 (lambda (tab)
                   (= (eseq.seq-step-tabs/seq-step-tab-sequencer-name tab) name))
                 eseq.seq-step-tabs/seq-registered-step-tabs)))
     (if (> (len hits) 0)
-      (let ((path (eseq.seq-step-tabs/seq-step-tab-source-path (nth hits 0))))
-        (if (= path "") "" (str "(load \"" path "\")")))
+      (eseq.seq-step-tabs/seq-step-tab-source-path (nth hits 0))
       "")))
 
 (def track-peak (i)
@@ -1215,7 +1215,7 @@
               (host-command "move-sequencer-into-rack"
                 (dict :group-id track-menu-group-id
                       :sequencer-id (get action :sequencer-id)
-                      :source (sequencer-source-form (get action :sequencer-name)))))
+                      :source-path (sequencer-source-path (get action :sequencer-name)))))
             (if (= (get action :id) :detach-sequencer)
               (do
                 (set! track-menu-open false)

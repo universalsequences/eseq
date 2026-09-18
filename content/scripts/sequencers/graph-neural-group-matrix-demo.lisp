@@ -46,7 +46,10 @@
 ;; pattern. It does not write graph overrides. For a fresh demo patch, explicitly run:
 ;;   (script-init-fn)
 
-(def-sequencer "neural-group-matrix-demo"
+;; `def-sequencer` returns the instance handle; every graph-* native below takes
+;; it, so this script also works when a drum rack owns it (routes then address
+;; rack members and the handle stays unambiguous next to a project-owned copy).
+(def ggm-name (def-sequencer "neural-group-matrix-demo"
   :shape (line :default 8 :min 1 :max 16)
   :energy-decay 0.992
   :reset-every (bars 4)
@@ -101,23 +104,38 @@
     :topology (all-to-all)
     :gather (- (edge :weight) (edge :dampening))
     :params ((weight :float -1 1 :default 0.0)
-      (dampening :float 0 1 :default 0))))
+      (dampening :float 0 1 :default 0)))))
 
-(def ggm-name "neural-group-matrix-demo")
 (def ggm-min-node-count 1)
 (def ggm-max-node-count 16)
 (def script-buffer-name "*group-matrix*")
-(def script-tab-label "grp mtx")
-(def script-sequencer-name ggm-name)
+;; Owned by a rack: routes address its members and the tab wears its name.
+(def ggm-owner-rack (graph-owner ggm-name))
+(def ggm-route-tracks (graph-route-tracks ggm-name))
+(def script-tab-label
+  (if ggm-owner-rack (eseq.drum-rack-v2/group-name (eseq.drum-rack-v2/group-index-by-id ggm-owner-rack)) "grp mtx"))
+(def script-sequencer-name "neural-group-matrix-demo")
 
 ;; ── dropdown option lists (order is the index space bind-graph maps into) ──
 
 (def ggm-res-options (list "1" "2" "4" "8" "16" "32" "64"))
 (def ggm-quant-options (list "off" "1" "2" "4" "8" "16" "32" "64" "2T" "4T" "8T" "16T" "32T" "64T" "Prh"))
+;; Route option n is track n (project-owned) or rack member n (rack-owned);
+;; "Off" is always last. Either way the option index IS the route value.
 (def ggm-route-options
-  (list "Track 1" "Track 2" "Track 3" "Track 4" "Track 5" "Track 6" "Track 7" "Track 8"
-        "Track 9" "Track 10" "Track 11" "Track 12" "Track 13" "Track 14" "Track 15" "Track 16"
-        "Off"))
+  (if ggm-route-tracks
+    (append
+      (map (lambda (track) (str (+ track 1) " " (nth SEQ.track-names track))) ggm-route-tracks)
+      (list "Off"))
+    (list "Track 1" "Track 2" "Track 3" "Track 4" "Track 5" "Track 6" "Track 7" "Track 8"
+          "Track 9" "Track 10" "Track 11" "Track 12" "Track 13" "Track 14" "Track 15" "Track 16"
+          "Off")))
+;; Colors parallel to the route options: a rack-owned instance colors by the
+;; member's track, so the panel's track-colors are re-indexed through the members.
+(def ggm-route-track-colors (track-colors)
+  (if ggm-route-tracks
+    (map (lambda (track) (nth track-colors track)) ggm-route-tracks)
+    track-colors))
 (def ggm-max-poly-selection-options
   (list "deterministic" "propagation" "random" "loudest" "lowest-transpose" "highest-transpose" "seed-first"))
 ;; Neural-group assignment (docs/neural-groups-spec.md §3.1). The stored value IS the
@@ -237,7 +255,7 @@
     (graph-config ggm-name (ggm-group-cell-field prefix r c) v)))
 
 (def ggm-viz (visualizations)
-  (let ((hits (filter (lambda (viz) (= (get viz :name) ggm-name)) visualizations)))
+  (let ((hits (filter (lambda (viz) (= (get viz :id) ggm-name)) visualizations)))
     (if (> (len hits) 0) (nth hits 0) nil)))
 
 (def ggm-matrix-shape? (value rows cols)
@@ -876,5 +894,5 @@
               :height 3.5))
           )))))
 
-(effect-buffer "*group-matrix*" (ggm-panel SEQ.current-pattern SEQ.graph-visualizations SEQ.track-colors SEQ.track-active-notes))
+(effect-buffer "*group-matrix*" (ggm-panel SEQ.current-pattern SEQ.graph-visualizations (ggm-route-track-colors SEQ.track-colors) SEQ.track-active-notes))
 (eseq.seq-step-tabs/seq-register-script-step-sequencer-tab script-tab-label script-buffer-name script-sequencer-name "")

@@ -18,7 +18,10 @@
 ;; pattern. It does not write graph overrides. For a fresh demo patch, explicitly run:
 ;;   (script-init-fn)
 
-(def-sequencer "neural-16-demo"
+;; `def-sequencer` returns the instance handle; every graph-* native below takes
+;; it, so this script also works when a drum rack owns it (routes then address
+;; rack members and the handle stays unambiguous next to a project-owned copy).
+(def g16-name (def-sequencer "neural-16-demo"
   :shape (line 16)
   :energy-decay 0.992
   :reset-every (bars 4)
@@ -74,22 +77,31 @@
     :topology (all-to-all)
     :gather (- (edge :weight) (edge :dampening))
     :params ((weight :float -1 1 :default 0.0)
-      (dampening :float 0 1 :default 0))))
+      (dampening :float 0 1 :default 0)))))
 
-(def g16-name "neural-16-demo")
 (def g16-node-count 16)
 (def script-buffer-name "*16x16*")
-(def script-tab-label "16x16")
-(def script-sequencer-name g16-name)
+;; Owned by a rack: routes address its members and the tab wears its name.
+(def g16-owner-rack (graph-owner g16-name))
+(def g16-route-tracks (graph-route-tracks g16-name))
+(def script-tab-label
+  (if g16-owner-rack (eseq.drum-rack-v2/group-name (eseq.drum-rack-v2/group-index-by-id g16-owner-rack)) "16x16"))
+(def script-sequencer-name "neural-16-demo")
 
 ;; Dropdown option lists. Order is the index space bind-graph maps into.
 
 (def g16-res-options (list "1" "2" "4" "8" "16" "32" "64"))
 (def g16-quant-options (list "off" "1" "2" "4" "8" "16" "32" "64" "2T" "4T" "8T" "16T" "32T" "64T" "Prh"))
+;; Route option n is track n (project-owned) or rack member n (rack-owned);
+;; "Off" is always last. Either way the option index IS the route value.
 (def g16-route-options
-  (list "Track 1" "Track 2" "Track 3" "Track 4" "Track 5" "Track 6" "Track 7" "Track 8"
-        "Track 9" "Track 10" "Track 11" "Track 12" "Track 13" "Track 14" "Track 15" "Track 16"
-        "Off"))
+  (if g16-route-tracks
+    (append
+      (map (lambda (track) (str (+ track 1) " " (nth SEQ.track-names track))) g16-route-tracks)
+      (list "Off"))
+    (list "Track 1" "Track 2" "Track 3" "Track 4" "Track 5" "Track 6" "Track 7" "Track 8"
+          "Track 9" "Track 10" "Track 11" "Track 12" "Track 13" "Track 14" "Track 15" "Track 16"
+          "Off")))
 
 (def g16-index-of (xs item)
   (let ((hits (filter (lambda (i) (= (nth xs i) item)) (range 0 (len xs)))))
@@ -133,7 +145,7 @@
   (map (lambda (n) (list 0)) (range 0 g16-node-count)))
 
 (def g16-viz (visualizations)
-  (let ((hits (filter (lambda (viz) (= (get viz :name) g16-name)) visualizations)))
+  (let ((hits (filter (lambda (viz) (= (get viz :id) g16-name)) visualizations)))
     (if (> (len hits) 0) (nth hits 0) nil)))
 
 (def g16-viz-matrix (viz field fallback)
