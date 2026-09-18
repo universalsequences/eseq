@@ -151,8 +151,8 @@
 
 ;; A rack's menu also offers the graph sequencers it could own. A sequencer
 ;; that merely routes to tracks inside the rack is still project-owned;
-;; "Rack owns …" hands it to the rack (routes become rack members, and the
-;; pair travels together into kits), and "Release …" gives it back
+;; "Attach … to rack" hands it to the rack (routes become rack members, and
+;; the pair travels together into kits), and "Detach …" gives it back
 ;; (docs/rack-clips-and-break-kits-spec.md §5.1).
 (def rack-group-menu-actions (gid)
   (append
@@ -164,11 +164,11 @@
           (dict :id :detach-sequencer
                 :sequencer-id (get graph :id)
                 :sequencer-name (get graph :name)
-                :label (str "Release \"" (get graph :name) "\" from rack"))
+                :label (str "Detach " (get graph :name)))
           (dict :id :move-sequencer-into-rack
                 :sequencer-id (get graph :id)
                 :sequencer-name (get graph :name)
-                :label (str "Rack owns \"" (get graph :name) "\"…"))))
+                :label (str "Attach " (get graph :name) " to rack"))))
       (filter (lambda (graph)
                 (or (= (get graph :owner-rack) nil)
                     (= (get graph :owner-rack) gid)))
