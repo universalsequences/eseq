@@ -432,24 +432,32 @@
 ;; ride along into every VM that loads the effects family.
 (def step-track-badge ()
   (let ((track SEQ.current-track)
-      (muted (eseq.mixer/muted? SEQ.current-track)))
+      (muted (bind-seq-nth "track-muted-effective" track)))
     (box
       :key "step-track-badge"
       :width 4.55 :height 1.0
       :padding 0
       :corner-radius 8
       :v-align :center
+      :muted muted
       :background-color (rgba
-        (eseq.mixer/track-color-r track muted)
-        (eseq.mixer/track-color-g track muted)
-        (eseq.mixer/track-color-b track muted)
+        (eseq.mixer/track-color-r track false)
+        (eseq.mixer/track-color-g track false)
+        (eseq.mixer/track-color-b track false)
+        1.0)
+      :muted-background-color (rgba
+        (eseq.mixer/track-color-r track true)
+        (eseq.mixer/track-color-g track true)
+        (eseq.mixer/track-color-b track true)
         1.0)
       (label (eseq.mixer/track-collapsed-label track)
         :width 4.55
         :font-size 10
         :v-align :center
         :h-align :center
-        :color (if muted :dim :black)
+        :active muted
+        :color :black
+        :active-color :dim
         :bg :transparent))))
 
 (def step-parameters-panel ()

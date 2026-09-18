@@ -193,23 +193,29 @@
                 (button (str (+ i 1))
                   :key (str "track-mute-" i)
                   :width 1.55 :height 1.2 :padding 0 :font-size 10
-                  :background-color (mute-button-bg (nth SEQ.track-mutes i))
-                  :color (if (nth SEQ.track-mutes i) :gray :blue)
+                  :active (bind-seq-nth "track-mutes" i)
+                  :background-color (mute-button-bg false)
+                  :active-background-color (mute-button-bg true)
+                  :color :blue
+                  :active-color :gray
                   :on-click |x y r| (do (set! eseq.seq-core-state/selected-bus -1) (seq-toggle-track-mute i)))
                 (button "S"
                   :key (str "track-solo-" i)
                   :width 1.55 :height 1.2 :padding 0 :font-size 10
-                  :background-color (solo-button-bg (nth SEQ.track-solos i))
-                  :color (if (nth SEQ.track-solos i) :white :gray)
+                  :active (bind-seq-nth "track-solos" i)
+                  :background-color (solo-button-bg false)
+                  :active-background-color (solo-button-bg true)
+                  :color :gray
+                  :active-color :white
                   :on-click |x y r| (do (set! eseq.seq-core-state/selected-bus -1) (seq-toggle-track-solo i)))
                 (box :width 8.6 :height 1
                   :key (str "track-select-" i)
                   :bg (if (and (< eseq.seq-core-state/selected-bus 0) (= SEQ.current-track i)) :blue :dark-gray)
                   :on-click |x y r| (do (set! eseq.seq-core-state/selected-bus -1) (seq-set-track i))
                   (label (substring name 0 12) :font-size 11 :width 8.6
-                    :color (if (or (nth SEQ.track-mutes i) (nth SEQ.track-muted-by-solo i))
-                             :dark-gray
-                             (if (and (< eseq.seq-core-state/selected-bus 0) (= SEQ.current-track i)) :white :gray))
+                    :active (bind-seq-nth "track-muted-effective" i)
+                    :active-color :dark-gray
+                    :color (if (and (< eseq.seq-core-state/selected-bus 0) (= SEQ.current-track i)) :white :gray)
                     :bg :transparent))
                 (box :width 5.2
                   (v-stack :gap 0.18
@@ -241,14 +247,20 @@
                 (button (bus-row-label i)
                   :key (str "bus-mute-" i)
                   :width 1.55 :height 1.2 :padding 0 :font-size 10
-                  :background-color (mute-button-bg (nth SEQ.bus-mutes i))
-                  :color (if (nth SEQ.bus-mutes i) :gray :blue)
+                  :active (bind-seq-nth "bus-mutes" i)
+                  :background-color (mute-button-bg false)
+                  :active-background-color (mute-button-bg true)
+                  :color :blue
+                  :active-color :gray
                   :on-click |x y r| (seq-toggle-bus-mute i))
                 (button "S"
                   :key (str "bus-solo-" i)
                   :width 1.55 :height 1.2 :padding 0 :font-size 10
-                  :background-color (solo-button-bg (nth SEQ.bus-solos i))
-                  :color (if (nth SEQ.bus-solos i) :white :gray)
+                  :active (bind-seq-nth "bus-solos" i)
+                  :background-color (solo-button-bg false)
+                  :active-background-color (solo-button-bg true)
+                  :color :gray
+                  :active-color :white
                   :on-click |x y r| (seq-toggle-bus-solo i))
                 (box :width 8.6 :height 1
                   :key (str "bus-select-" i)

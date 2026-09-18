@@ -8,6 +8,11 @@ pub(super) fn run(editor: &mut Editor, app: &mut app::App, shared: &SharedHandle
     let out = std::path::PathBuf::from(std::env::var("ESEQ_UI_REPLAY_OUT")
         .expect("set ESEQ_UI_REPLAY_OUT to the report JSON path"));
     if let Some(parent) = out.parent() { std::fs::create_dir_all(parent).unwrap(); }
+    // The fixture loaded its project after creating SharedHandles. Mirror the
+    // live project-load publication before the first tick can pull stale buses
+    // back into App and discard the project's group buses.
+    *shared.bus_state.lock().unwrap() = app.buses.clone();
+    *shared.track_groups.lock().unwrap() = app.groups.clone();
     let extra_tracks: usize = std::env::var("ESEQ_UI_REPLAY_EMPTY_TRACKS")
         .ok().map(|value| value.parse().expect("empty track count")).unwrap_or(0);
     for _ in 0..extra_tracks {
@@ -21,8 +26,13 @@ pub(super) fn run(editor: &mut Editor, app: &mut app::App, shared: &SharedHandle
     editor.set_layout_viewport(cols as u16, rows as u16);
     editor.update_tile_rects(cols as u16, rows as u16);
     shared.current_track.store(0, Ordering::Relaxed);
-    shared.state.start_playback();
-    editor.runtime_mut().set_reactive("SEQ", "playing", Value::Bool(true));
+    let solo_replay = std::env::var("ESEQ_UI_REPLAY_MODE").as_deref() == Ok("solo");
+    if solo_replay {
+        shared.state.stop_playback();
+    } else {
+        shared.state.start_playback();
+    }
+    editor.runtime_mut().set_reactive("SEQ", "playing", Value::Bool(!solo_replay));
     let mut sessions = EditSessionState::default();
     let mut frame = FrameDiffState::default();
     let mut gesture = GestureState::default();
@@ -50,6 +60,83 @@ pub(super) fn run(editor: &mut Editor, app: &mut app::App, shared: &SharedHandle
     };
 
     let mut reports = Vec::new();
+    if solo_replay {
+        let bus_count = app.buses.len();
+        // Exercise the real native -> targeted invalidation -> reactive tick ->
+        // frame path. Selection is held fixed to isolate mute/solo publication.
+        for _ in 0..4 {
+            editor.sync_reactive_bindings_for_visible_layouts();
+            sync_reactive_tick(app, editor, &mut LoopCtx {
+                sessions: &mut sessions, meters: &mut meters, frame: &mut frame,
+                gesture: &mut gesture, track_names: &mut track_names, shared,
+            }, &TickInputs { cols, rows, playing_now: false }, &mut stats);
+            let tiled = eseqlisp::frame::build_tiled_render_frame_borderless(editor, cols, rows);
+            backend.render_tiled_capture(&tiled, &target).unwrap_or_else(|_| panic!("render solo warmup"));
+        }
+        assert_eq!(app.buses.len(), bus_count, "warmup must retain every project bus");
+        for (native, count) in [
+            ("seq-toggle-track-solo", app.tracks.len()),
+            ("seq-toggle-track-mute", app.tracks.len()),
+            ("seq-toggle-bus-solo", app.buses.len()),
+            ("seq-toggle-bus-mute", app.buses.len()),
+        ] {
+            for index in 0..count {
+                for toggle in 0..2 {
+                    let enabled = |app: &app::App| match native {
+                        "seq-toggle-track-solo" => app.state.pattern.track_params[index].is_solo(),
+                        "seq-toggle-track-mute" => app.state.pattern.track_params[index].is_muted(),
+                        "seq-toggle-bus-solo" => app.buses[index].solo,
+                        "seq-toggle-bus-mute" => app.buses[index].mute,
+                        _ => unreachable!(),
+                    };
+                    let was_enabled = enabled(app);
+                    let before = editor.runtime().ui_work_counters();
+                    let started = Instant::now();
+                    editor.runtime_mut().eval_str(&format!("({native} {index})")).unwrap();
+                    let commands = editor.drain_host_commands();
+                    assert!(!commands.is_empty(), "{native} must enqueue its history command");
+                    for command in commands {
+                        let eseqlisp::HostCommand::Custom { name, payload } = command else {
+                            panic!("unexpected solo probe host command");
+                        };
+                        dispatch_custom_host_command(&name, payload, app, editor, &mut LoopCtx {
+                            sessions: &mut sessions, meters: &mut meters, frame: &mut frame,
+                            gesture: &mut gesture, track_names: &mut track_names, shared,
+                        });
+                    }
+                    assert_ne!(enabled(app), was_enabled, "{native} {index} must change actual state");
+                    sync_reactive_tick(app, editor, &mut LoopCtx {
+                        sessions: &mut sessions, meters: &mut meters, frame: &mut frame,
+                        gesture: &mut gesture, track_names: &mut track_names, shared,
+                    }, &TickInputs { cols, rows, playing_now: false }, &mut stats);
+                    let sync_ms = started.elapsed().as_secs_f64() * 1000.0;
+                    let build_started = Instant::now();
+                    let tiled = eseqlisp::frame::build_tiled_render_frame_borderless(editor, cols, rows);
+                    let build_ms = build_started.elapsed().as_secs_f64() * 1000.0;
+                    let render = backend.render_tiled_capture(&tiled, &target).unwrap_or_else(|_| panic!("render solo frame"));
+                    let after = editor.runtime().ui_work_counters();
+                    reports.push(serde_json::json!({"native": native, "index": index, "toggle": toggle,
+                        "enabled": enabled(app), "sync_ms": sync_ms, "frame_build_ms": build_ms, "render": render,
+                        "full_reruns": after.full_buffer_reruns - before.full_buffer_reruns,
+                        "subtree_reruns": after.subtree_reruns - before.subtree_reruns,
+                        "relayout_full": after.relayout_full - before.relayout_full,
+                        "relayout_subtree": after.relayout_subtree - before.relayout_subtree}));
+                    assert_eq!(after, before, "{native} {index} toggle {toggle} rebuilt UI: {:?}",
+                        editor.runtime().last_ui_invalidation_trace());
+                    if native == "seq-toggle-track-solo" && index == 0 && toggle == 0 {
+                        target.save_png(&out.with_extension("png")).unwrap();
+                    }
+                }
+            }
+        }
+        std::fs::write(&out, serde_json::to_vec_pretty(&serde_json::json!({
+            "scope": "saved-project mute/solo native dispatch, reactive sync, frame and Metal capture; fixed selection; no OS input or display scanout",
+            "project": std::env::var("ESEQ_UI_REPLAY_PROJECT").unwrap(),
+            "tracks": app.tracks.len(), "buses": app.buses.len(), "samples": reports,
+        })).unwrap()).unwrap();
+        eprintln!("Solo replay report: {}", out.display());
+        return;
+    }
     for phase in ["panels", "live-panels", "scroll", "scratch"] {
         if phase == "scratch" {
             let buffer = editor.buffers.iter().find(|buffer| buffer.name == "*scratch*").expect("scratch").id;

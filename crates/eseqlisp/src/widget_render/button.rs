@@ -4,7 +4,7 @@ use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEventKind};
 
 use super::{
     CellBuffer, EventOutput, GpuPrimitive, GpuProportionalTextPrimitive, MouseEventOutcome,
-    PointerEvent, WidgetDefinition, WidgetEvent, get_f32_prop, label::label_text_row, ndc_bounds,
+    PointerEvent, WidgetDefinition, WidgetEvent, get_bool_prop, get_f32_prop, label::label_text_row, ndc_bounds,
     plock_active, plock_color, resolve_named_color, styled_cell,
 };
 use crate::backend::Color;
@@ -113,6 +113,11 @@ fn variant_fg(props: &HashMap<String, Value>) -> Color {
         && let Some(active_fg) = props.get("active-color")
     {
         return theme::parse_color_value(active_fg).unwrap_or(default);
+    }
+    if get_bool_prop(props, "muted", false)
+        && let Some(muted_fg) = props.get("muted-color")
+    {
+        return theme::parse_color_value(muted_fg).unwrap_or(default);
     }
     resolve_named_color(props, "color", default)
 }
@@ -638,6 +643,7 @@ impl WidgetDefinition for ButtonWidget {
     fn bindable_props(&self) -> &'static [&'static str] {
         &[
             "active",
+            "muted",
             "corner-radius",
             "plock-active",
             "plock-color-r",
@@ -667,6 +673,8 @@ impl WidgetDefinition for ButtonWidget {
             "shape",
             "color",
             "active-color",
+            "muted",
+            "muted-color",
             "background-color",
             "active-background-color",
             "border-color",
@@ -1162,6 +1170,7 @@ mod tests {
             BUTTON_WIDGET.bindable_props(),
             &[
                 "active",
+                "muted",
                 "corner-radius",
                 "plock-active",
                 "plock-color-r",
@@ -1173,6 +1182,7 @@ mod tests {
             ]
         );
         assert!(!BUTTON_WIDGET.size_affecting_props().contains(&"active"));
+        assert!(!BUTTON_WIDGET.size_affecting_props().contains(&"muted"));
         assert!(
             !BUTTON_WIDGET
                 .size_affecting_props()
@@ -1497,5 +1507,41 @@ mod tests {
             })
             .expect("button background");
         assert_eq!(active_bg, [0.0, 0.48, 0.95, 1.0]);
+    }
+
+    #[test]
+    fn badge_muted_binding_repaints_without_overriding_active_foreground() {
+        let slots = crate::reactive::ReactiveBindingStore::default();
+        let muted = Value::ReactiveRef {
+            namespace: "BADGE_TEST".into(),
+            field: "muted".into(),
+            index: None,
+            kind: crate::vm::BindingKind::Float,
+            slot: slots.slot("BADGE_TEST", "muted"),
+        };
+        let widget = crate::widgets::build_widget("badge", vec![
+            Value::String("Track".into()),
+            Value::Keyword("muted".into()), muted.clone(),
+        ]);
+        let Value::Map(widget) = widget else {
+            panic!("badge must accept a muted ReactiveRef: {widget:?}");
+        };
+        assert!(!widget.contains_key("__widget-diagnostic"));
+        let mut props = HashMap::from([
+            ("muted".into(), muted),
+            ("color".into(), color_value(0.1, 0.2, 0.3, 1.0)),
+            ("muted-color".into(), color_value(0.4, 0.5, 0.6, 0.7)),
+            ("active-color".into(), color_value(0.8, 0.9, 1.0, 1.0)),
+        ]);
+        for value in [0.0, 1.0, 0.0] {
+            slots.write_float("BADGE_TEST", "muted", value);
+            let expected = if value == 0.0 { [0.1, 0.2, 0.3, 1.0] } else { [0.4, 0.5, 0.6, 0.7] };
+            let color = variant_fg(&props);
+            assert_eq!([color.r, color.g, color.b, color.a], expected);
+        }
+        slots.write_float("BADGE_TEST", "muted", 1.0);
+        props.insert("active".into(), Value::Bool(true));
+        let color = variant_fg(&props);
+        assert_eq!([color.r, color.g, color.b, color.a], [0.8, 0.9, 1.0, 1.0]);
     }
 }

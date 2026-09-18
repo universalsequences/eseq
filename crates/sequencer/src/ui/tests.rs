@@ -381,8 +381,9 @@
             bus_mixer_targeted_invalidation(&volume),
             Some(BusMixerInvalidation::Volume)
         );
-        let mute = history_value_map([("op", Value::Keyword("toggle-mute".to_string()))]);
-        assert_eq!(bus_mixer_targeted_invalidation(&mute), None);
+        assert_eq!(bus_mixer_targeted_invalidation(&mute_op), Some(BusMixerInvalidation::Mute));
+        assert_eq!(bus_mixer_targeted_invalidation(&solo_op), Some(BusMixerInvalidation::Solo));
+        assert_eq!(bus_mixer_targeted_invalidation(&Value::Nil), None);
     }
 
     #[test]

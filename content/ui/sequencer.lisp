@@ -122,9 +122,6 @@
     (str (substring name 0 (- track-name-max-chars 2)) "..")
     name))
 
-(def muted? (i)
-  (or (nth SEQ.track-mutes i) (nth SEQ.track-muted-by-solo i)))
-
 ;; Bound, never a raw `selected-bus` read: reading the defstate here made
 ;; every track row (and every arrangement lane reusing this binding) re-render
 ;; on each bus/group selection. The *sel-sync* projection in
@@ -887,16 +884,10 @@
                  (rgba (* track-r 0.82) (* track-g 0.82) (* track-b 0.82) 1.0)
                  (rgba track-r track-g track-b 1.0)))))))))
 
-(def mute-bg (active)
-  (if active :sequencer-toggle-off-bg :control-on-bg))
-
-(def solo-bg (active)
-  (if active :sequencer-solo-on-bg :sequencer-toggle-off-bg))
-
 ;; Compact mixer track row — the common track actions plus an inline
 ;; meter/fader so the sequencer remains usable when the mixer is hidden.
-;; The header lives in its own subtree so name/mute/solo/arm changes rerun
-;; only this header instead of the whole track row (incl. its step grid).
+;; Names and structural edits rebuild only this header. Mute/solo styling
+;; uses bindings throughout, including the name, so it never rebuilds a tree.
 (def track-header (i is-bare-track)
   (subtree :key (str "seqv-track-header-" (nth SEQ.track-ids i))
     (track-header-body i is-bare-track)))
@@ -962,17 +953,23 @@
           :key (str "mute-" i)
           :width 1.55 :height 1.2 :padding 0 :font-size 10
           :border-color :transparent
-          :background-color (mute-bg (nth SEQ.track-mutes i))
-          :color (if (nth SEQ.track-mutes i) :gray :control-on-fg)
+          :active (bind-seq-nth "track-mutes" i)
+          :background-color :control-on-bg
+          :active-background-color :sequencer-toggle-off-bg
+          :color :control-on-fg
+          :active-color :gray
           :on-click (lambda (event)
             (track-control-click event i
               (lambda () (do (activate-track-for-edit i) (seq-toggle-track-mute i))))))
         (button "S"
           :key (str "solo-" i)
           :width 1.55 :height 1.2 :padding 0 :font-size 10
-          :background-color (solo-bg (nth SEQ.track-solos i))
+          :active (bind-seq-nth "track-solos" i)
+          :background-color :sequencer-toggle-off-bg
+          :active-background-color :sequencer-solo-on-bg
           :border-color :transparent
-          :color (if (nth SEQ.track-solos i) :sequencer-solo-on-fg :gray)
+          :color :gray
+          :active-color :sequencer-solo-on-fg
           :on-click (lambda (event)
             (track-control-click event i
               (lambda () (do (activate-track-for-edit i) (seq-toggle-track-solo i))))))
@@ -994,9 +991,9 @@
             :border-color :transparent
             :highlight-color :transparent
             :shadow-color :transparent
-            :color (if (or (nth SEQ.track-mutes i) (nth SEQ.track-muted-by-solo i))
-              (rgba 0.4 0.4 0.4 0.6)
-              :dim)
+            :muted (bind-seq-nth "track-muted-effective" i)
+            :color :dim
+            :muted-color (rgba 0.4 0.4 0.4 0.6)
             :bg :transparent))
         (box :width 0.5)
         (track-volume-control i)
@@ -3492,8 +3489,8 @@
       (bus-idx (eseq.drum-rack-v2/bus-index gidx))
       (rack (eseq.drum-rack-v2/rack? gidx))
       (armed (eseq.drum-rack-v2/armed? gidx))
-      (muted (and (>= bus-idx 0) (nth SEQ.bus-mutes bus-idx)))
-      (soloed (and (>= bus-idx 0) (nth SEQ.bus-solos bus-idx))))
+      (muted (if (>= bus-idx 0) (bind-seq-nth "bus-mutes" bus-idx) 0))
+      (soloed (if (>= bus-idx 0) (bind-seq-nth "bus-solos" bus-idx) 0)))
     (box :background "seqv-track-container"
       :padding 0.1
       :on-click |x y r| (select-group gidx)
@@ -3528,17 +3525,23 @@
           :key (group-element-key gidx "mute")
           :width 1.55 :height 1.2 :padding 0 :font-size 10
           :border-color :transparent
-          :background-color (mute-bg muted)
-          :color (if muted :gray :black)
+          :active muted
+          :background-color :control-on-bg
+          :active-background-color :sequencer-toggle-off-bg
+          :color :black
+          :active-color :gray
           :on-click |x y r| (if (>= bus-idx 0)
             (do (select-group gidx) (seq-toggle-bus-mute bus-idx))
             nil))
         (button "S"
           :key (group-element-key gidx "solo")
           :width 1.55 :height 1.2 :padding 0 :font-size 10
-          :background-color (solo-bg soloed)
+          :active soloed
+          :background-color :sequencer-toggle-off-bg
+          :active-background-color :sequencer-solo-on-bg
           :border-color :transparent
-          :color (if soloed :white :gray)
+          :color :gray
+          :active-color :white
           :on-click |x y r| (if (>= bus-idx 0)
             (do (select-group gidx) (seq-toggle-bus-solo bus-idx))
             nil))
@@ -3556,7 +3559,9 @@
             :border-color :transparent
             :highlight-color :transparent
             :shadow-color :transparent
-            :color (if muted (rgba 0.4 0.4 0.4 0.6) :dim)
+            :muted muted
+            :color :dim
+            :muted-color (rgba 0.4 0.4 0.4 0.6)
             :bg :transparent))
         (box :width 0.3)
         ;; No PADS/KIT buttons here: selecting the rack puts both the pad grid

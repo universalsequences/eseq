@@ -589,6 +589,8 @@ pub(super) fn bus_mixer_targeted_invalidation(payload: &Value) -> Option<BusMixe
     };
     match map_string(map, "op")?.as_str() {
         "volume" => Some(BusMixerInvalidation::Volume),
+        "toggle-mute" => Some(BusMixerInvalidation::Mute),
+        "toggle-solo" => Some(BusMixerInvalidation::Solo),
         _ => None,
     }
 }

@@ -7,8 +7,8 @@
 (import eseq.seq-core-state)
 
 ;; Migration aliases (module spec §10 step 2) for the names unconverted
-;; callers still spell flat.  Five are lisp-side (effects/track-panels.lisp
-;; paints the track-panel header with the mixer's colour/mute helpers);
+;; callers still spell flat. Four are lisp-side (effects/track-panels.lisp
+;; paints the track-panel header with the mixer's colour/name helpers);
 ;; thirteen are `mixer-v2-*` entry points driven by name from Rust
 ;; state_values tests; `seq-ctrl-g` is the global Ctrl+G / Cmd+G dispatcher
 ;; that src/ui/input.rs evals by name.  Deleted as each consumer converts.
@@ -23,8 +23,7 @@
 ;; transport strip is viewing (scene-banks spec 10.1).
 (import eseq.scene-banks)
 
-(export muted?
-        render-order
+(export render-order
         bus-index-by-id
         display-bus-index
         group-bus-id?
@@ -202,9 +201,6 @@
     (bind-seq "master-peak-r")
     (bind-seq (str "bus-peak-" i))))
 
-(def muted? (i)
-  (or (nth SEQ.track-mutes i) (nth SEQ.track-muted-by-solo i)))
-
 (def track-selected-binding (i)
   (bind-seq (str "track-selected-" i)))
 
@@ -259,9 +255,6 @@
   (if selected
     :mixer-strip-selected-border
     :mixer-strip-border))
-
-(def button-bg (active)
-  (if active :control-on-bg :mixer-control-bg))
 
 (def arm-bg (active)
   (if active
@@ -1100,22 +1093,27 @@
         (subtree :key (str "mixer-v2-strip-label-" i)
           (strip-label i))))))
 
-;; Mute/solo/arm buttons in their own subtree: mute/solo/arm changes rerun
-;; just this row instead of the whole strip.
+;; Mute and solo only repaint bound button states; they never rebuild the strip.
 (def strip-buttons (i)
-  (let ((muted (muted? i)))
+  (let ((muted (bind-seq-nth "track-muted-effective" i)))
     (h-stack :gap 0.35
       (button (str (+ i 1))
         :width 2.1 :height 1.0 :padding 0 :font-size 10
         :border-color :transparent
-        :background-color (if muted :mixer-control-bg :control-on-bg)
-        :color (if muted :dim :control-on-fg)
+        :active muted
+        :background-color :control-on-bg
+        :active-background-color :mixer-control-bg
+        :color :control-on-fg
+        :active-color :dim
         :on-click (lambda (event) (do (activate-track-control i) (seq-toggle-track-mute i))))
       (button "S"
         :width 2.1 :height 1.0 :padding 0 :font-size 10
         :border-color :transparent
-        :background-color (button-bg (nth SEQ.track-solos i))
-        :color (if (nth SEQ.track-solos i) :control-on-fg :dim)
+        :active (bind-seq-nth "track-solos" i)
+        :background-color :mixer-control-bg
+        :active-background-color :control-on-bg
+        :color :dim
+        :active-color :control-on-fg
         :on-click (lambda (event) (do (activate-track-control i) (seq-toggle-track-solo i))))
       (button "R"
         :width 2.1 :height 1.0 :padding 0 :font-size 10
@@ -1261,9 +1259,9 @@
     (lambda () (finish-group-rename group-id true))
     (lambda () (finish-group-rename group-id false))))
 
-;; Name label in its own subtree: rename/mute changes rerun just the label.
+;; Renames rebuild the label; mute/solo and selection only repaint bindings.
 (def strip-label (i)
-  (let ((muted (muted? i)))
+  (let ((muted (bind-seq-nth "track-muted-effective" i)))
     (box
       :key (str "track-label-" i)
       :width :fill :height 1.0
@@ -1272,10 +1270,16 @@
       :drag-type "track-badge"
       :drag-payload (dict :track i)
       :selected (track-delete-target-binding i)
+      :muted muted
       :background-color (rgba
-        (track-color-r i muted)
-        (track-color-g i muted)
-        (track-color-b i muted)
+        (track-color-r i false)
+        (track-color-g i false)
+        (track-color-b i false)
+        1.0)
+      :muted-background-color (rgba
+        (track-color-r i true)
+        (track-color-g i true)
+        (track-color-b i true)
         1.0)
       :selected-background-color :fx-panel-header-selected-bg
       :on-click (lambda (event) (track-label-click event i))
@@ -1295,7 +1299,9 @@
           :border-color :transparent
           :highlight-color :transparent
           :shadow-color :transparent
-          :color (if muted :dim :black)
+          :muted muted
+          :color :black
+          :muted-color :dim
           :active (track-delete-target-binding i)
           :active-color :white
           :bg :transparent)))))
@@ -1304,7 +1310,7 @@
   (str (+ i 1) " " (substring (nth SEQ.track-names i) 0 3)))
 
 (def track-collapsed-strip (i)
-  (let ((muted (muted? i)))
+  (let ((muted (bind-seq-nth "track-muted-effective" i)))
     (box :width 4.7 :height (collapsed-strip-height)
       :selected (track-selected-binding i)
       :muted muted
@@ -1331,18 +1337,27 @@
         (button "M"
           :key (str "track-collapsed-mute-" i)
           :width 3.65 :height 1.0 :padding 0 :font-size 10
-          :background-color (button-bg (nth SEQ.track-mutes i))
-          :color (if (nth SEQ.track-mutes i) :control-on-fg :dim)
+          :active (bind-seq-nth "track-mutes" i)
+          :background-color :mixer-control-bg
+          :active-background-color :control-on-bg
+          :color :dim
+          :active-color :control-on-fg
           :on-click (lambda (event) (do (activate-track-control i) (seq-toggle-track-mute i))))
         (box
           :key (str "track-collapsed-label-" i)
           :width 3.65 :height 1.0
           :padding 0
           :selected (track-delete-target-binding i)
+          :muted muted
           :background-color (rgba
-            (track-color-r i muted)
-            (track-color-g i muted)
-            (track-color-b i muted)
+            (track-color-r i false)
+            (track-color-g i false)
+            (track-color-b i false)
+            1.0)
+          :muted-background-color (rgba
+            (track-color-r i true)
+            (track-color-g i true)
+            (track-color-b i true)
             1.0)
           :selected-background-color :fx-panel-header-selected-bg
           :on-click (lambda (event) (track-label-click event i))
@@ -1361,7 +1376,9 @@
               :border-color :transparent
               :highlight-color :transparent
               :shadow-color :transparent
-              :color (if muted :dim :black)
+              :muted muted
+              :color :black
+              :muted-color :dim
               :active (track-delete-target-binding i)
               :active-color :white
               :bg :transparent)))))))
@@ -1470,7 +1487,7 @@
       ;; Bound selection state (eseq-4jv): a raw `selected-bus` read here
       ;; re-rendered every bus strip on each selection.
       :selected (eseq.seq-core-state/bus-selected-vis-binding i)
-      :muted (nth SEQ.bus-mutes i)
+      :muted (bind-seq-nth "bus-mutes" i)
       :background-color :mixer-strip-bg
       :selected-background-color :mixer-strip-selected-bg
       :muted-background-color :mixer-strip-muted-bg
@@ -1499,15 +1516,21 @@
         (h-stack :gap 0.35
           (button (bus-mute-label i)
             :width 2.1 :height 1.0 :padding 0 :font-size 10
-            :background-color (if (nth SEQ.bus-mutes i) :mixer-control-bg :control-on-bg)
+            :active (bind-seq-nth "bus-mutes" i)
+            :background-color :control-on-bg
+            :active-background-color :mixer-control-bg
             :border-color :transparent
-            :color (if (nth SEQ.bus-mutes i) :dim :control-on-fg)
+            :color :control-on-fg
+            :active-color :dim
             :on-click (lambda (event) (do (select-bus i) (seq-toggle-bus-mute i))))
           (button "S"
             :width 2.1 :height 1.0 :padding 0 :font-size 10
-            :background-color (button-bg (nth SEQ.bus-solos i))
+            :active (bind-seq-nth "bus-solos" i)
+            :background-color :mixer-control-bg
+            :active-background-color :control-on-bg
             :border-color :transparent
-            :color (if (nth SEQ.bus-solos i) :control-on-fg :dim)
+            :color :dim
+            :active-color :control-on-fg
             :on-click (lambda (event) (do (select-bus i) (seq-toggle-bus-solo i))))
           (box :width 2.1 :height 1.0))
         (if (not (= (nth SEQ.bus-names i) "Mix"))
@@ -1662,8 +1685,8 @@
 (def group-control-buttons (gidx bus-idx)
   (let ((gid (get (nth SEQ.groups gidx) :id))
       (rack (get (nth SEQ.groups gidx) :rack))
-      (muted (nth SEQ.bus-mutes bus-idx))
-      (soloed (nth SEQ.bus-solos bus-idx))
+      (muted (bind-seq-nth "bus-mutes" bus-idx))
+      (soloed (bind-seq-nth "bus-solos" bus-idx))
       (armed (and rack (= SEQ.armed-rack-id gid))))
     (h-stack :gap 0.35 :align :left :padding 0.1 :width :fill
       ;; Mute is lit when the strip is *passing* audio and goes dark when
@@ -1672,16 +1695,22 @@
         :key (str "group-mute-" gid)
         :width 2.1 :height 1.0 :padding 0 :font-size 10
         :border-color :transparent
-        :background-color (if muted :mixer-control-bg :control-on-bg)
-        :color (if muted :dim :control-on-fg)
+        :active muted
+        :background-color :control-on-bg
+        :active-background-color :mixer-control-bg
+        :color :control-on-fg
+        :active-color :dim
         :on-click (lambda (event)
           (do (select-group gidx) (seq-toggle-bus-mute bus-idx))))
       (button "S"
         :key (str "group-solo-" gid)
         :width 2.1 :height 1.0 :padding 0 :font-size 10
         :border-color :transparent
-        :background-color (button-bg soloed)
-        :color (if soloed :control-on-fg :dim)
+        :active soloed
+        :background-color :mixer-control-bg
+        :active-background-color :control-on-bg
+        :color :dim
+        :active-color :control-on-fg
         :on-click (lambda (event)
           (do (select-group gidx) (seq-toggle-bus-solo bus-idx))))
       (if rack

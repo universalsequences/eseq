@@ -22,6 +22,8 @@ mod retrospective_ui_tests;
 mod midi_midimix_tests;
 #[path = "mixer_hit_tests.rs"]
 mod mixer_hit_tests;
+#[path = "solo_binding_tests.rs"]
+mod solo_binding_tests;
 
     use super::*;
     use eseqlisp::parser::{ASTParser, Expression, Parser, ParserError, Token};

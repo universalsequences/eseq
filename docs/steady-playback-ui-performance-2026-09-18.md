@@ -92,6 +92,39 @@ capture readback and subtracts geometry-storage backpressure wait. Input
 publication before the tick, analyzer polling, audio callback deadlines, and
 physical input-to-display latency are outside this replay.
 
+### Mute/solo transitions
+
+Set `ESEQ_UI_REPLAY_MODE=solo` to replay mute and solo on every track and bus
+(including group buses), toggling each twice to restore its starting state:
+
+```sh
+ESEQ_UI_REPLAY_MODE=solo \
+ESEQ_UI_REPLAY_PROJECT="$PWD/.local/projects/garageddd.json" \
+ESEQ_UI_REPLAY_OUT=/tmp/solo-replay.json \
+cargo nextest run --release -p sequencer --bin metal_seq \
+  -E 'test(=tests::saved_project_ui_playback_replay)' \
+  --run-ignored ignored-only --no-capture
+```
+
+This mode stops transport and holds selection fixed. It dispatches the real
+Lisp natives and their history host commands, verifies the actual track/bus
+state changed, then runs reactive sync, frame building, and Metal capture.
+Every transition must leave all runtime UI rebuild/relayout counters unchanged.
+The JSON separates dispatch-plus-sync, frame building, and renderer timings;
+the PNG captures the first track solo. These are state-to-render measurements,
+not physical click-to-display latency. Shared bus/group state is refreshed from
+the loaded project before warmup so the first tick preserves its group buses.
+
+Validated on `garageddd`, 2026-09-18: 19 tracks, six buses, 100 mute/solo
+transitions, zero buffer/subtree rebuilds and zero relayouts. Track solo
+dispatch-plus-sync measured 1.018 ms median / 1.674 ms maximum; frame building
+was 0.179 ms median and Metal renderer CPU work was 18.188 ms median.
+The removed dependencies were name/button colors in sequencer/arrangement
+headers, mixer strips (including collapsed/group/bus/patch strips), and the
+step inspector. Bus history commands also now use targeted mute/solo
+invalidations. Raw results and inspected captures are under
+`.local/benchmarks/solo-bindings-2026-09-18/`.
+
 ## Measured result — 2026-09-18
 
 Apple M1 Max, optimized release, 2000 × 1200 pixels at scale 1. Baseline is
