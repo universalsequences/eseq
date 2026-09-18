@@ -12,6 +12,52 @@ impl SequencerState {
         *self.scratch_source.lock().unwrap() = source.into();
         self.scratch_source_version.fetch_add(1, Ordering::AcqRel);
     }
+    /// Drop one published sequencer by id. Returns whether one was removed.
+    pub fn unpublish_sequencer_by_id(&self, id: u64) -> bool {
+        let removed = {
+            let mut list = self.published_sequencers.lock().unwrap();
+            let before = list.len();
+            list.retain(|sequencer| sequencer.id != id);
+            list.len() != before
+        };
+        if removed {
+            self.published_sequencers_version.fetch_add(1, Ordering::AcqRel);
+        }
+        removed
+    }
+    /// Mirror of the app's drum-rack member lists, read into every scheduler
+    /// snapshot so rack-owned graph sequencers can resolve member routes.
+    pub fn set_rack_memberships(&self, memberships: Vec<crate::graph::RackMembership>) {
+        *self.rack_memberships.lock().unwrap() = memberships;
+    }
+    pub fn rack_memberships(&self) -> Vec<crate::graph::RackMembership> {
+        self.rack_memberships.lock().unwrap().clone()
+    }
+    /// The graph overrides of every scene, by scene position.
+    pub fn all_scene_graph_overrides(&self) -> Vec<Vec<ProjectGraphOverrides>> {
+        let bank = self.pattern.scenes.lock().unwrap();
+        bank.scenes.iter().map(|scene| scene.graph_overrides.clone()).collect()
+    }
+    /// Edit the graph overrides of EVERY scene (attach/detach/member-leave
+    /// rewrites are structural and must hold across the whole scene bank).
+    /// Republishes the scheduler snapshot when anything changed.
+    pub fn edit_all_scene_graph_overrides(
+        &self,
+        mut edit: impl FnMut(&mut Vec<ProjectGraphOverrides>) -> bool,
+    ) -> bool {
+        let changed = {
+            let mut bank = self.pattern.scenes.lock().unwrap();
+            let mut changed = false;
+            for scene in &mut bank.scenes {
+                changed |= edit(&mut scene.graph_overrides);
+            }
+            changed
+        };
+        if changed {
+            self.publish_scheduler_snapshot();
+        }
+        changed
+    }
     /// Publish (upsert by id) a UI-authored generator definition for the scheduler.
     pub fn publish_sequencer(&self, sequencer: PublishedSequencer) {
         {

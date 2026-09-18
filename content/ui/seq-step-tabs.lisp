@@ -27,6 +27,7 @@
 ;; Hazard (n)/(n2): no Rust harness reads or slices this file's source, so
 ;; neither the fragment-eval nor the standalone-eval restriction applies.
 (module eseq.seq-step-tabs)
+(import eseq.seq-core-state)
 
 (export piano-roll-placement
         seq-main-view
@@ -77,12 +78,16 @@
 ;; this constant lets piano-roll import it instead of this hub reading a
 ;; render root at load time (roots must never be imported).
 (def piano-roll-default-pane-height 11.5)
-(def lower-fx-layout-height piano-roll-default-pane-height)
+(defcustom lower-fx-layout-height piano-roll-default-pane-height
+  :type :number :min 6 :max 30 :step 0.5
+  :doc "Height (cells) of the lower devices panel; the piano roll starts at this height too.")
 
 ;; One border width for every tile chrome stroke. Home is this hub for the
 ;; same reason as piano-roll-default-pane-height: eseq.seq-layout reads it at
 ;; load time and imports us, so it cannot be imported back.
-(def seq-tile-border-width 2)
+(defcustom seq-tile-border-width 2
+  :type :number :min 0 :max 6 :step 1
+  :doc "Border stroke width of every tile in the sequencer layout.")
 
 (def seq-step-tab-label (tab)
   (nth tab 0))
@@ -143,8 +148,8 @@
     (if (and (> (len tabs) 1) (seq-main-step-tab-buffer? buffer))
       (list :buf buffer
         :tabs tabs
-        :hide-status true :border-radius 12 :border-width seq-tile-border-width :background-color :buffer-bg :min-width 25)
-      (list :buf buffer :hide-status true :border-radius 12 :border-width seq-tile-border-width :background-color :buffer-bg :min-width 25))))
+        :hide-status true :border-radius (eseq.seq-core-state/radius 12) :border-width seq-tile-border-width :background-color :buffer-bg :min-width 25)
+      (list :buf buffer :hide-status true :border-radius (eseq.seq-core-state/radius 12) :border-width seq-tile-border-width :background-color :buffer-bg :min-width 25))))
 
 (def seq-refresh-step-tabs-if-present ()
   (let ((tabs (seq-main-step-tabs)))

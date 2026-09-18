@@ -10778,6 +10778,51 @@ fragment float4 live_spectrogram_frag(
 
         #[test]
         #[ignore = "release renderer measurement; run alone on a quiet machine"]
+        fn retained_sparse_subtree_update_perf() {
+            let (width, height) = (1600, 1200);
+            let mut backend = unwrap_backend(MetalBackend::new_capture(width, height), "backend");
+            unwrap_backend(backend.initialize_graphics(1.0), "graphics");
+            let target = unwrap_backend(backend.create_tiled_capture_target(width, height), "target");
+            let mut tiled = changing_controls_frame(&backend, width, height);
+            let mut samples = Vec::new();
+            for index in 0..360 {
+                change_one_control_in_dirty_subtree(&mut tiled, index);
+                let sample = unwrap_backend(backend.render_tiled_capture(&tiled, &target), "subtree update");
+                if index >= 120 { samples.push(sample); }
+            }
+            let mut times: Vec<_> = samples.iter().map(|sample| sample.cpu_ms).collect();
+            times.sort_by(f64::total_cmp);
+            let report = serde_json::json!({
+                "scope": "production tiled renderer, one changing knob/label among 96 pairs in a dirty parent; no audio/input/presentation",
+                "width": width, "height": height, "warmup_frames": 120,
+                "cpu_p50_ms": times[times.len() / 2],
+                "cpu_p95_ms": times[times.len() * 95 / 100],
+                "samples": samples,
+            });
+            if let Some(path) = std::env::var_os("ESEQ_RETAINED_BENCH_OUT") {
+                std::fs::write(path, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
+            }
+            eprintln!("retained sparse subtree updates: p50={:.3}ms p95={:.3}ms",
+                times[times.len() / 2], times[times.len() * 95 / 100]);
+            assert_pixels_have_non_background_values(&target.rgba());
+        }
+
+        fn change_one_control_in_dirty_subtree(tiled: &mut TiledRenderFrame, index: usize) {
+            let frame = &mut tiled.tiles[0].frame;
+            // Subtree reevaluation can produce a new layout allocation while
+            // leaving almost all descendants' paint inputs unchanged.
+            let mut root = (**frame.widget_layout.as_ref().unwrap()).clone();
+            let control = index % 96;
+            let value = ((index * 7 + 13) % 1000) as f64 / 999.0;
+            root.children[control * 2].props.insert("value".into(), Value::Number(value));
+            root.children[control * 2 + 1].props.insert("text".into(), Value::String(format!("{value:.3}")));
+            frame.dirty_widget_ids = vec![root.widget_id];
+            frame.widget_layout = Some(Arc::new(root));
+            frame.widget_content_cache_key += 1;
+        }
+
+        #[test]
+        #[ignore = "release renderer measurement; run alone on a quiet machine"]
         fn retained_value_update_perf() {
             let (width, height) = (1600, 1200);
             let mut backend = unwrap_backend(MetalBackend::new_capture(width, height), "backend");
@@ -10806,6 +10851,72 @@ fragment float4 live_spectrogram_frag(
             eprintln!("retained value updates: p50={:.3}ms p95={:.3}ms allocations={}",
                 times[times.len() / 2], times[times.len() * 95 / 100], report["static_allocations"]);
             assert_pixels_have_non_background_values(&target.rgba());
+        }
+
+        #[test]
+        fn sparse_dirty_subtree_reuses_paint_and_matches_fresh_scene_pixels() {
+            let (width, height) = (1600, 1200);
+            let mut backend = unwrap_backend(MetalBackend::new_capture(width, height), "backend");
+            unwrap_backend(backend.initialize_graphics(1.0), "graphics");
+            let target = unwrap_backend(backend.create_tiled_capture_target(width, height), "target");
+            let mut reference = unwrap_backend(MetalBackend::new_capture(width, height), "reference backend");
+            unwrap_backend(reference.initialize_graphics(1.0), "reference graphics");
+            reference.force_dynamic_runs = true;
+            let reference_target = unwrap_backend(reference.create_tiled_capture_target(width, height), "reference target");
+            let mut tiled = changing_controls_frame(&backend, width, height);
+            for child in &mut Arc::make_mut(tiled.tiles[0].frame.widget_layout.as_mut().unwrap()).children {
+                child.props.insert("on-change".into(), Value::Closure(1, vec![]));
+            }
+            let mut prior_pixels = Vec::new();
+            for index in 0..32 {
+                change_one_control_in_dirty_subtree(&mut tiled, index);
+                let sample = unwrap_backend(backend.render_tiled_capture(&tiled, &target), "sparse update");
+                if index > 0 {
+                    assert_eq!(sample.rebuilt_nodes, 3, "only parent and changed knob/label paint");
+                    assert_eq!(sample.reused_nodes, 190);
+                    assert_eq!(sample.cache_misses, 2, "only changed paint compiles");
+                    assert_eq!(sample.cache_hits, 190);
+                }
+                if matches!(index, 0 | 1 | 16 | 31) {
+                    let pixels = target.rgba();
+                    assert_ne!(pixels, prior_pixels, "the sparse update must visibly change");
+                    // Repaint every node in an independent scene, then draw
+                    // without the compiled-run cache. Reusing our own retained
+                    // primitives here would conceal a missed invalidation.
+                    reference.retained_widget_scenes.clear();
+                    unwrap_backend(reference.render_tiled_capture(&tiled, &reference_target), "fresh reference");
+                    let dynamic = reference_target.rgba();
+                    let error: u64 = pixels.iter().zip(&dynamic).map(|(&a, &b)| a.abs_diff(b) as u64).sum();
+                    assert!(error as f64 / (pixels.len() as f64) < 0.1,
+                        "retained/fresh scene mismatch on sparse update {index}");
+                    // A whole-frame average can hide one stale control among
+                    // 96 pairs. Check the changed pair locally, and prove this
+                    // threshold would reject its previous visible state.
+                    let root = tiled.tiles[0].frame.widget_layout.as_ref().unwrap();
+                    let knob = &root.children[(index % 96) * 2];
+                    let label = &root.children[(index % 96) * 2 + 1];
+                    let (cell_w, cell_h) = backend.cell_dimensions();
+                    let left = (knob.rect.col * cell_w).floor() as usize;
+                    let right = ((knob.rect.col + knob.rect.width) * cell_w).ceil() as usize;
+                    let top = (knob.rect.row * cell_h).floor() as usize;
+                    let bottom = ((label.rect.row + label.rect.height) * cell_h).ceil() as usize;
+                    let local_error = |actual: &[u8]| {
+                        let mut error = 0u64;
+                        for row in top..bottom {
+                            let start = (row * width as usize + left) * 4;
+                            let end = (row * width as usize + right) * 4;
+                            error += actual[start..end].iter().zip(&dynamic[start..end])
+                                .map(|(&a, &b)| a.abs_diff(b) as u64).sum::<u64>();
+                        }
+                        error as f64 / ((right - left) * (bottom - top) * 4) as f64
+                    };
+                    assert!(local_error(&pixels) < 0.1, "changed pair differs from fresh paint at {index}");
+                    if !prior_pixels.is_empty() {
+                        assert!(local_error(&prior_pixels) > 0.1, "pixel check must reject stale paint at {index}");
+                    }
+                    prior_pixels = pixels;
+                }
+            }
         }
 
         #[test]

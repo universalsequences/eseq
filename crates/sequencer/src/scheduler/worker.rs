@@ -375,6 +375,7 @@ impl SchedulerDriver {
             reconcile_graph_runtimes(
                 new_manifests,
                 &snapshot.graph_overrides,
+                &snapshot.rack_memberships,
                 &mut self.lookahead_state.graph_runtimes,
                 &mut self.lookahead_state.graph_manifests,
                 self.lookahead_state.clock.total_beats,
@@ -400,6 +401,7 @@ impl SchedulerDriver {
             reconcile_graph_runtimes(
                 self.lookahead_state.graph_manifests.clone(),
                 &snapshot.graph_overrides,
+                &snapshot.rack_memberships,
                 &mut self.lookahead_state.graph_runtimes,
                 &mut self.lookahead_state.graph_manifests,
                 self.lookahead_state.clock.total_beats,

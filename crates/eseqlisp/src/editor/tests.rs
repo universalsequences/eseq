@@ -16092,3 +16092,159 @@ fn context_menu_long_submenu_scrolls_and_keyboard_reaches_last_choice() {
     editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
     assert!(find_menu_item(&editor.runtime.current_layout.clone().unwrap(), "0").is_some(), "reopen resets scrolling");
 }
+
+/// A package channel strip (the `~/.eseq.d` autechre mixer) reads
+/// `(nth (or SEQ.field (list)) i)` inside a keyed subtree, living in a visible
+/// *inactive* tile (the mixer sits beside the fx panel, which holds focus).
+/// Republishing the list of device dicts, and growing the outer list, must
+/// rerun the strip and land in the inactive tile's cached layout.
+#[test]
+fn subtree_device_strip_in_inactive_tile_reruns_when_reactive_list_grows() {
+    fn label_texts(node: &crate::layout::LayoutNode, out: &mut Vec<String>) {
+        if node.widget_type == "label" {
+            if let Some(Value::String(text)) = node.props.get("text") {
+                out.push(text.clone());
+            }
+        }
+        for child in &node.children {
+            label_texts(child, out);
+        }
+    }
+    fn chains(entries: &[&[(&str, bool)]]) -> Value {
+        Value::List(
+            entries
+                .iter()
+                .map(|track| {
+                    Rc::new(RefCell::new(Value::List(
+                        track
+                            .iter()
+                            .map(|(name, enabled)| {
+                                let mut map = std::collections::HashMap::new();
+                                map.insert(
+                                    "name".to_string(),
+                                    Rc::new(RefCell::new(Value::String(name.to_string()))),
+                                );
+                                map.insert(
+                                    "enabled".to_string(),
+                                    Rc::new(RefCell::new(Value::Bool(*enabled))),
+                                );
+                                Rc::new(RefCell::new(Value::Map(map)))
+                            })
+                            .collect(),
+                    )))
+                })
+                .collect(),
+        )
+    }
+    let mut runtime = Runtime::new();
+    runtime.register_reactive(
+        "SEQ",
+        vec![
+            ("track-names", Value::List(vec![
+                Rc::new(RefCell::new(Value::String("a".into()))),
+                Rc::new(RefCell::new(Value::String("b".into()))),
+            ])),
+            ("track-device-chains", chains(&[&[("Space Echo", true)], &[]])),
+        ],
+        true,
+    );
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.set_layout_viewport(80, 20);
+    editor.update_tile_rects(80, 20);
+    editor
+        .runtime_mut()
+        .eval_str(
+            r#"
+            (def device-row (key name enabled)
+              (box :key key :width :fill :height 1
+                :on-click (lambda (e) (if name (str "open " name) nil))
+                (label (if name name "") :width 8 :font-size 9)))
+            (def device-strip (key devices open)
+              (v-stack :gap 0.08 :width 10
+                (each (range 0 3) |row|
+                  (let ((device (nth devices row)))
+                    (device-row (str key "-dev-" row)
+                      (if device (get device :name) nil)
+                      (if device (get device :enabled) false))))))
+            (def track-cell (i)
+              (let ((devices (nth (or SEQ.track-device-chains (list)) i)))
+                (box :key (str "au-track-" i) :width 12 :height 5
+                  (device-strip (str "au-track-" i) devices (lambda (d) d)))))
+            (effect-buffer "*strip*"
+              (h-stack
+                (each (range 0 (len SEQ.track-names)) |i idx|
+                  (subtree :key (str "au-track-sub-" i) (track-cell i)))))
+            (split-window-right "*strip*")
+            "#,
+        )
+        .expect("build strip");
+    editor.refresh_runtime_side_effects();
+    editor.update_tile_rects(80, 20);
+    editor.sync_reactive_bindings_for_visible_layouts();
+
+    let strip_idx = editor
+        .buffers
+        .iter()
+        .position(|buffer| buffer.name == "*strip*")
+        .unwrap();
+    let strip_leaf_id = editor
+        .tile_root
+        .leaf_ids()
+        .into_iter()
+        .filter_map(|tile_id| editor.tile_root.find_leaf(tile_id))
+        .find(|leaf| leaf.buffer_idx == strip_idx)
+        .unwrap()
+        .id;
+    assert_ne!(strip_leaf_id, editor.active_tile, "strip must sit in an inactive tile");
+    let leaf_labels = |editor: &Editor| {
+        let leaf = editor.tile_root.find_leaf(strip_leaf_id).unwrap();
+        let mut out = Vec::new();
+        label_texts(leaf.cached_layout.as_ref().expect("cached inactive layout"), &mut out);
+        out
+    };
+    assert_eq!(leaf_labels(&editor), vec!["Space Echo", "", "", "", "", ""]);
+
+    editor.runtime_mut().set_reactive(
+        "SEQ",
+        "track-device-chains",
+        chains(&[&[("Space Echo", true)], &[("808 Kick", true), ("Reverb", false)]]),
+    );
+    editor.runtime_mut().run_reactive_cycle();
+    editor.refresh_runtime_side_effects();
+    editor.update_tile_rects(80, 20);
+    assert_eq!(
+        leaf_labels(&editor),
+        vec!["Space Echo", "", "", "808 Kick", "Reverb", ""],
+        "inactive tile must show the republished chain"
+    );
+
+    editor.runtime_mut().set_reactive(
+        "SEQ",
+        "track-names",
+        Value::List(vec![
+            Rc::new(RefCell::new(Value::String("a".into()))),
+            Rc::new(RefCell::new(Value::String("b".into()))),
+            Rc::new(RefCell::new(Value::String("c".into()))),
+        ]),
+    );
+    editor.runtime_mut().run_reactive_cycle();
+    editor.refresh_runtime_side_effects();
+    editor.update_tile_rects(80, 20);
+    editor.runtime_mut().set_reactive(
+        "SEQ",
+        "track-device-chains",
+        chains(&[
+            &[("Space Echo", true)],
+            &[("808 Kick", true), ("Reverb", false)],
+            &[("Digiwave", true)],
+        ]),
+    );
+    editor.runtime_mut().run_reactive_cycle();
+    editor.refresh_runtime_side_effects();
+    editor.update_tile_rects(80, 20);
+    assert_eq!(
+        leaf_labels(&editor),
+        vec!["Space Echo", "", "", "808 Kick", "Reverb", "", "Digiwave", "", ""],
+        "new track's subtree in the inactive tile must pick up the later chain"
+    );
+}

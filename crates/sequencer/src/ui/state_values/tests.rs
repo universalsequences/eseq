@@ -6467,6 +6467,19 @@ mod mixer_hit_tests;
     }
 
     #[test]
+    fn device_leaf_name_strips_tier_folder_and_sidecar_trailing_slash() {
+        // Sidecar instrument ids end in '/', which used to leave the strip's
+        // instrument row with an empty name.
+        assert_eq!(device_leaf_name("factory:Drums/808 Kick/"), "808 Kick");
+        assert_eq!(device_leaf_name("factory:Drums/808 Clap"), "808 Clap");
+        assert_eq!(device_leaf_name("user:Leads/Saw.lisp"), "Saw");
+        assert_eq!(device_leaf_name("pkg:alec.autechre/Synths/Digiwave/"), "Digiwave");
+        assert_eq!(device_leaf_name("factory:Solo"), "Solo");
+        assert_eq!(device_leaf_name("Bare Name"), "Bare Name");
+        assert_eq!(device_leaf_name("/"), "");
+    }
+
+    #[test]
     fn device_chain_values_are_per_channel_lists_of_device_maps() {
         let app = test_app_with_instrument_descriptor_on_tracks(
             sequencer::effects::EffectDescriptor::builtin_filter(),
@@ -14057,6 +14070,24 @@ mod mixer_hit_tests;
             selected_sampler_panel.rect
         );
         assert_eq!(selected_sampler_actions.widget_type, "menu-button");
+        assert_eq!(
+            selected_sampler_actions.props.get("options"),
+            Some(&test_string_list(&["Copy slot 1 values to all scenes"])),
+            "rack slot instrument menu should name the slot it applies to"
+        );
+        let rack_actions = find_layout_node_by_debug_name(rack_panel, "rack-header-actions-0")
+            .expect("rack header action menu layout node");
+        assert_eq!(rack_actions.widget_type, "menu-button");
+        assert_eq!(
+            rack_actions.props.get("options"),
+            Some(&test_string_list(&["Copy rack (all slots) to all scenes"])),
+            "rack header menu should carry the rack-wide copy"
+        );
+        assert_finite_nonzero_rect(rack_actions, "rack header action menu");
+        assert!(
+            rack_actions.rect.col < rack_preset_button.rect.col,
+            "rack header menu should sit left of the save icon"
+        );
         assert_finite_nonzero_rect(
             selected_sampler_actions,
             "selected rack sampler action menu",
@@ -40832,7 +40863,12 @@ mod mixer_hit_tests;
             layout_contains_debug_name(&layout, "es-compressor-panel"),
             "layout should contain the ES Compressor knob panel body"
         );
-        assert_eq!(count_widget_type(&layout, "knob-number"), 8);
+        // Four large knobs (sustain, mix, attack, release) plus four slider
+        // trims in the gain strip (input, drive, detector, output).
+        let panel = find_layout_node_by_debug_name(&layout, "es-compressor-panel")
+            .expect("es-compressor-panel layout node");
+        assert_eq!(count_widget_type(panel, "knob-number"), 4);
+        assert_eq!(count_widget_type(panel, "number-picker"), 4);
     }
 
     #[test]
@@ -54434,6 +54470,7 @@ mod mixer_hit_tests;
             members: vec![1, 2],
             bus_id: 2,
             rack: Some(sequencer::project::ProjectRackConfig {
+                sequencers: Vec::new(),
                 pads: vec![
                     sequencer::project::ProjectRackPad {
                         pad_note: 36,
@@ -54448,6 +54485,78 @@ mod mixer_hit_tests;
             }),
             rack_members: Vec::new(),
         }
+    }
+
+    /// Cmd+A fans out over the selected drum rack's members (focusing the
+    /// first one when the rack was picked from its header), over a two-plus
+    /// track selection, and otherwise stays the single-track select-all.
+    #[test]
+    fn metal_seq_select_all_spans_selected_rack_or_multi_track_selection() {
+        use eseqlisp::vm::format_lisp_value;
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let calls: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+        for name in ["seq-select-all-steps-on-tracks", "seq-select-all-steps", "seq-set-track"] {
+            let calls = Rc::clone(&calls);
+            editor.runtime_mut().register_native(name, move |args, _ctx| {
+                calls
+                    .borrow_mut()
+                    .push(format!("{name} {}", args.iter().map(format_lisp_value).collect::<Vec<_>>().join(" ")));
+                Ok(Value::Nil)
+            });
+        }
+        let mut rack = rack_group_fixture(false);
+        rack.members = vec![1, 2, 3];
+        apply_groups_bindings(&mut editor, &[rack]);
+        {
+            let rt = editor.runtime_mut();
+            rt.set_reactive("SEQ", "bus-ids", test_list(vec![Value::Number(1.0), Value::Number(2.0)]));
+            rt.set_reactive("SEQ", "bus-names", test_list(vec![
+                Value::String("Bus".to_string()),
+                Value::String("Kit".to_string()),
+            ]));
+            rt.set_reactive("SEQ", "current-track", Value::Number(0.0));
+            rt.set_reactive("SEQ", "selected-tracks", test_list(vec![]));
+        }
+        let run = |editor: &mut eseqlisp::Editor, calls: &Rc<RefCell<Vec<String>>>, setup: &str| {
+            calls.borrow_mut().clear();
+            editor.runtime_mut().eval_str(setup).expect("setup");
+            editor
+                .runtime_mut()
+                .eval_str("(eseq.sequencer/select-all-current-track-steps)")
+                .expect("select all");
+            calls.borrow().clone()
+        };
+
+        // Rack header selected (its bus is bus index 1), current track outside it.
+        let calls_seen = run(&mut editor, &calls, "(set! eseq.seq-core-state/selected-bus 1)");
+        assert_eq!(
+            calls_seen,
+            vec!["seq-set-track 1".to_string(), "seq-select-all-steps-on-tracks (1 2 3)".to_string()],
+        );
+        assert_eq!(
+            editor.runtime_mut().eval_str("eseq.seq-core-state/selected-bus").unwrap(),
+            Some(Value::Number(1.0)),
+            "a rack selection survives select-all"
+        );
+
+        // Multi-track selection with the current track among them.
+        editor.runtime_mut().set_reactive("SEQ", "current-track", Value::Number(4.0));
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "selected-tracks",
+            test_list(vec![Value::Number(2.0), Value::Number(4.0)]),
+        );
+        let calls_seen = run(&mut editor, &calls, "(set! eseq.seq-core-state/selected-bus -1)");
+        assert_eq!(calls_seen, vec!["seq-select-all-steps-on-tracks (2 4)".to_string()]);
+
+        // Single track: the plain path, and a non-rack bus selection is dropped.
+        editor.runtime_mut().set_reactive("SEQ", "selected-tracks", test_list(vec![Value::Number(4.0)]));
+        let calls_seen = run(&mut editor, &calls, "(set! eseq.seq-core-state/selected-bus 0)");
+        assert_eq!(calls_seen, vec!["seq-select-all-steps ".to_string()]);
+        assert_eq!(
+            editor.runtime_mut().eval_str("eseq.seq-core-state/selected-bus").unwrap(),
+            Some(Value::Number(-1.0)),
+        );
     }
 
     fn regular_group_fixture(collapsed: bool) -> sequencer::project::ProjectTrackGroup {
@@ -56426,6 +56535,7 @@ mod mixer_hit_tests;
             "/file-menu-open-project",
             "/file-menu-export",
             "/file-menu-settings",
+            "/file-menu-customize",
             "/file-menu-help",
             "/file-menu-about",
         ] {
@@ -57673,6 +57783,8 @@ mod mnm_ui_tests;
 
 #[path = "manual_ui_tests.rs"]
 mod manual_ui_tests;
+#[path = "customize_ui_tests.rs"]
+mod customize_ui_tests;
 
 #[path = "about_ui_tests.rs"]
 mod about_ui_tests;

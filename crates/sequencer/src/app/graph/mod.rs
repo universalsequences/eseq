@@ -461,6 +461,7 @@ impl App {
 mod bus_routing;
 mod engine_connect;
 pub mod latency;
+pub(crate) mod bounce_latency;
 mod engine_voice;
 mod mod_routes;
 mod node_build;

@@ -512,9 +512,56 @@ impl SequencerState {
                 continue;
             };
             if seen.insert(stored.sound.patch) {
-                slot.instrument_slot
-                    .copy_base_values_from(&source.instrument_slot);
-                slot.instrument_base_note_offset = source.instrument_base_note_offset;
+                slot.copy_scene_values_from(&source);
+            }
+            updated += 1;
+        }
+        updated
+    }
+
+    /// Rack-wide "copy current values to all scenes": every slot's instrument
+    /// values, base note, mixer fields (gain/pan/mute/solo/polyphony/choke)
+    /// and slot-FX values, plus the macro knob positions.  Slots are matched
+    /// by index; p-locks and structure are left alone.  Returns the number of
+    /// patterns whose patch received the copy (each distinct Patch is written
+    /// once).
+    pub fn copy_current_rack_values_to_all_track_patterns(&self, track: usize) -> usize {
+        let source = self
+            .pattern
+            .rack_tracks
+            .lock()
+            .unwrap()
+            .get(track)
+            .and_then(Option::as_ref)
+            .cloned();
+        let Some(source) = source else {
+            return 0;
+        };
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        let Some(pool) = scenes.track_pools.get_mut(track) else {
+            return 0;
+        };
+        let TrackPatternPool { patterns, sounds, .. } = pool;
+        let mut updated = 0;
+        let mut seen: HashSet<PatchId> = HashSet::new();
+        for stored in patterns.values() {
+            let Some(rack) = sounds
+                .patches
+                .get_mut(&stored.sound.patch)
+                .map(Arc::make_mut)
+                .and_then(|patch| patch.rack_track.as_mut())
+            else {
+                continue;
+            };
+            if seen.insert(stored.sound.patch) {
+                for (target, source) in rack.slots.iter_mut().zip(&source.slots) {
+                    target.copy_scene_values_from(source);
+                }
+                for (target, source) in rack.macros.iter_mut().zip(&source.macros) {
+                    if target.id == source.id {
+                        target.value = source.value;
+                    }
+                }
             }
             updated += 1;
         }

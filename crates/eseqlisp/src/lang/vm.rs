@@ -74,6 +74,21 @@ pub struct OverrideEntry {
     pub kind: OverrideKind,
     pub callback: Value,
     pub quarantined: bool,
+    /// A disabled entry stays registered (so re-enabling needs no re-eval)
+    /// but is skipped by dispatch, like a minor mode that turned its advice
+    /// off. Flipped per entry, per target, or per overriding module.
+    pub enabled: bool,
+}
+
+impl OverrideSet {
+    /// The entry dispatch runs: the most recently registered one that is
+    /// enabled and not quarantined. `None` means the factory definition.
+    pub fn active(&self) -> Option<&OverrideEntry> {
+        self.entries
+            .iter()
+            .rev()
+            .find(|entry| entry.enabled && !entry.quarantined)
+    }
 }
 
 #[derive(Clone)]
@@ -88,6 +103,13 @@ pub struct CustomDeclaration {
     pub type_name: String,
     pub default: Value,
     pub doc: String,
+    /// Optional `:choices` list; a settings UI renders a dropdown over it.
+    pub choices: Vec<Value>,
+    /// Optional `:min` / `:max` / `:step` for number knobs. A settings UI
+    /// derives a range from the default when these are absent.
+    pub min: Option<f64>,
+    pub max: Option<f64>,
+    pub step: Option<f64>,
 }
 
 pub type InlineWidgetMetadataResolver = Rc<dyn Fn(&str, &str) -> Option<InlineWidgetMetadata>>;
@@ -2488,6 +2510,11 @@ pub struct VM {
     /// overriding module within each set; the most recently evaluated module
     /// is active. Factory global cells remain untouched underneath.
     pub overrides: HashMap<String, OverrideSet>,
+    /// Overriding modules whose advice is switched off. Consulted when a
+    /// module (re)registers an override so a disabled package stays
+    /// disabled across hot reload and across restart (the user init
+    /// replays `(disable-module-overrides …)` from its managed block).
+    pub disabled_override_modules: HashSet<String>,
     /// Auto-qualified `defcustom` metadata used to generate settings UIs.
     pub custom_declarations: HashMap<String, CustomDeclaration>,
     /// Defaults of `defcustom`s pruned by a module re-declaration, kept until
@@ -2556,6 +2583,7 @@ pub struct VmStateSnapshot {
     preserve_state_on_redefinition: bool,
     extension_hooks: HashMap<String, Vec<(String, Value)>>,
     overrides: HashMap<String, OverrideSet>,
+    disabled_override_modules: HashSet<String>,
     custom_declarations: HashMap<String, CustomDeclaration>,
     declared_modules: HashMap<String, Option<std::path::PathBuf>>,
     module_exports: crate::modules::ModuleExportRegistry,
@@ -3257,6 +3285,15 @@ pub fn register_core_natives(vm: &mut VM) {
             });
         // Re-evaluation replaces this module's registration and makes it the
         // active (most recently evaluated) layer rather than stacking copies.
+        // A hot reload keeps the entry's enabled state: a package the user
+        // switched off must not switch itself back on by re-evaluating.
+        let previously_enabled = set
+            .entries
+            .iter()
+            .find(|entry| entry.overriding_module == overriding_module)
+            .map(|entry| entry.enabled);
+        let enabled = previously_enabled
+            .unwrap_or_else(|| !vm.disabled_override_modules.contains(&overriding_module));
         set.entries
             .retain(|entry| entry.overriding_module != overriding_module);
         set.entries.push(OverrideEntry {
@@ -3264,7 +3301,145 @@ pub fn register_core_natives(vm: &mut VM) {
             kind,
             callback: callback.clone(),
             quarantined: false,
+            enabled,
         });
+        Value::Nil
+    });
+
+    // Enable/disable flip flags in place: no re-evaluation to re-enable, no
+    // removal to disable. The Lisp forms `(disable-override sym)`,
+    // `(enable-override sym)`, `(disable-module-overrides mod)` and
+    // `(enable-module-overrides mod)` compile to these string-taking natives;
+    // a settings UI calls `set-override-entry-enabled` directly.
+    vm.register_native_with_vm("__set-override-enabled", |args, vm| {
+        let (Some(Value::String(name)), Some(Value::Bool(enabled))) = (args.first(), args.get(1))
+        else {
+            log_native_misuse("__set-override-enabled", "expects target string and bool");
+            return Value::Nil;
+        };
+        let mut touched = HashSet::new();
+        if let Some(set) = vm.overrides.get_mut(name) {
+            for entry in &mut set.entries {
+                entry.enabled = *enabled;
+                if *enabled {
+                    entry.quarantined = false;
+                }
+            }
+            touched.insert(name.clone());
+        }
+        vm.mark_effects_depending_on_override_targets(&touched);
+        Value::Nil
+    });
+
+    vm.register_native_with_vm("set-override-entry-enabled", |args, vm| {
+        let (Some(Value::String(name)), Some(Value::String(module)), Some(Value::Bool(enabled))) =
+            (args.first(), args.get(1), args.get(2))
+        else {
+            log_native_misuse(
+                "set-override-entry-enabled",
+                "expects target string, module string, and bool",
+            );
+            return Value::Nil;
+        };
+        let mut touched = HashSet::new();
+        if let Some(set) = vm.overrides.get_mut(name) {
+            for entry in set
+                .entries
+                .iter_mut()
+                .filter(|entry| entry.overriding_module == *module)
+            {
+                entry.enabled = *enabled;
+                if *enabled {
+                    entry.quarantined = false;
+                }
+                touched.insert(name.clone());
+            }
+        }
+        vm.mark_effects_depending_on_override_targets(&touched);
+        Value::Nil
+    });
+
+    vm.register_native_with_vm("__set-module-overrides-enabled", |args, vm| {
+        let (Some(Value::String(module)), Some(Value::Bool(enabled))) = (args.first(), args.get(1))
+        else {
+            log_native_misuse("__set-module-overrides-enabled", "expects module string and bool");
+            return Value::Nil;
+        };
+        if *enabled {
+            vm.disabled_override_modules.remove(module);
+        } else {
+            vm.disabled_override_modules.insert(module.clone());
+        }
+        let mut touched = HashSet::new();
+        for (name, set) in &mut vm.overrides {
+            for entry in set
+                .entries
+                .iter_mut()
+                .filter(|entry| entry.overriding_module == *module)
+            {
+                entry.enabled = *enabled;
+                if *enabled {
+                    entry.quarantined = false;
+                }
+                touched.insert(name.clone());
+            }
+        }
+        vm.mark_effects_depending_on_override_targets(&touched);
+        Value::Nil
+    });
+
+    vm.register_native_with_vm("disabled-override-modules", |_args, vm| {
+        let mut modules = vm.disabled_override_modules.iter().cloned().collect::<Vec<_>>();
+        modules.sort();
+        Value::List(modules.into_iter().map(|module| Rc::new(RefCell::new(Value::String(module)))).collect())
+    });
+
+    // Every registration as a map, sorted by module then target, for the
+    // customize buffer: {:target :module :kind :enabled :quarantined}.
+    vm.register_native_with_vm("override-declarations", |_args, vm| {
+        let mut rows = Vec::new();
+        for (target, set) in &vm.overrides {
+            for entry in &set.entries {
+                rows.push((
+                    entry.overriding_module.clone(),
+                    target.clone(),
+                    entry.kind,
+                    entry.enabled,
+                    entry.quarantined,
+                ));
+            }
+        }
+        rows.sort_by(|left, right| (&left.0, &left.1).cmp(&(&right.0, &right.1)));
+        Value::List(rows.into_iter().map(|(module, target, kind, enabled, quarantined)| {
+            let mut map = HashMap::new();
+            for (key, value) in [
+                ("target", Value::String(target)),
+                ("module", Value::String(module)),
+                ("kind", Value::Keyword(match kind {
+                    OverrideKind::Replace => "replace".to_string(),
+                    OverrideKind::Around => "around".to_string(),
+                })),
+                ("enabled", Value::Bool(enabled)),
+                ("quarantined", Value::Bool(quarantined)),
+            ] {
+                map.insert(key.to_string(), Rc::new(RefCell::new(value)));
+            }
+            Rc::new(RefCell::new(Value::Map(map)))
+        }).collect())
+    });
+
+    // `(setopt name value)` is compiler syntax over a symbol; a settings UI
+    // iterating `(custom-declarations)` only has the qualified name string.
+    vm.register_native_with_vm("setopt-by-name", |args, vm| {
+        let (Some(Value::String(name)), Some(value)) = (args.first(), args.get(1)) else {
+            log_native_misuse("setopt-by-name", "expects qualified name string and value");
+            return Value::Nil;
+        };
+        let Some(id) = vm.dag.find_local_state_source_node(name) else {
+            log_native_misuse("setopt-by-name", "unknown defcustom");
+            return Value::Nil;
+        };
+        vm.mark_source_dependents_dirty(id, value.clone());
         Value::Nil
     });
 
@@ -3275,6 +3450,15 @@ pub fn register_core_natives(vm: &mut VM) {
             log_native_misuse("defcustom", "expected default, name, type, and docstring");
             return Value::Nil;
         };
+        let choices = match args.get(4) {
+            Some(Value::List(items)) => items.iter().map(|item| clone_value_for_snapshot(&item.borrow())).collect(),
+            _ => Vec::new(),
+        };
+        let bound = |index: usize| match args.get(index) {
+            Some(Value::Number(n)) => Some(*n),
+            _ => None,
+        };
+        let (min, max, step) = (bound(5), bound(6), bound(7));
         let name = if crate::modules::is_qualified(name) {
             crate::modules::strip_implicit(name).to_string()
         } else {
@@ -3310,6 +3494,10 @@ pub fn register_core_natives(vm: &mut VM) {
             type_name: type_name.clone(),
             default: default.clone(),
             doc: doc.clone(),
+            choices,
+            min,
+            max,
+            step,
         });
         Value::Nil
     });
@@ -3317,18 +3505,34 @@ pub fn register_core_natives(vm: &mut VM) {
     vm.register_native_with_vm("custom-declarations", |_args, vm| {
         let mut declarations = vm.custom_declarations.values().cloned().collect::<Vec<_>>();
         declarations.sort_by(|left, right| left.name.cmp(&right.name));
-        Value::List(declarations.into_iter().map(|declaration| {
+        // `:value` goes through the tracked read so an effect that lists the
+        // knobs (the customize buffer) reruns when one is `setopt`.
+        let mut rows = Vec::with_capacity(declarations.len());
+        for declaration in declarations {
+            let value = vm
+                .read_tracked_state_value(&declaration.name)
+                .unwrap_or_else(|| clone_value_for_snapshot(&declaration.default));
+            let module = crate::modules::split_qualified(&declaration.name)
+                .map(|(module, _)| module.to_string())
+                .unwrap_or_else(|| crate::modules::IMPLICIT_MODULE.to_string());
             let mut map = HashMap::new();
             for (key, value) in [
                 ("name", Value::String(declaration.name)),
+                ("module", Value::String(module)),
                 ("type", Value::Keyword(declaration.type_name)),
                 ("default", clone_value_for_snapshot(&declaration.default)),
+                ("value", value),
                 ("doc", Value::String(declaration.doc)),
+                ("choices", Value::List(declaration.choices.iter().map(|choice| Rc::new(RefCell::new(clone_value_for_snapshot(choice)))).collect())),
+                ("min", declaration.min.map_or(Value::Nil, Value::Number)),
+                ("max", declaration.max.map_or(Value::Nil, Value::Number)),
+                ("step", declaration.step.map_or(Value::Nil, Value::Number)),
             ] {
                 map.insert(key.to_string(), Rc::new(RefCell::new(value)));
             }
-            Rc::new(RefCell::new(Value::Map(map)))
-        }).collect())
+            rows.push(Rc::new(RefCell::new(Value::Map(map))));
+        }
+        Value::List(rows)
     });
 
     vm.register_native_with_vm("__remove-override", |args, vm| {
@@ -4299,6 +4503,7 @@ impl VM {
             preserve_state_on_redefinition: false,
             extension_hooks: HashMap::new(),
             overrides: HashMap::new(),
+            disabled_override_modules: HashSet::new(),
             custom_declarations: HashMap::new(),
             retired_custom_defaults: HashMap::new(),
             declared_modules: HashMap::new(),
@@ -5137,6 +5342,7 @@ impl VM {
                             kind: entry.kind,
                             callback: clone_value_for_snapshot(&entry.callback),
                             quarantined: entry.quarantined,
+                            enabled: entry.enabled,
                         })
                         .collect();
                     (
@@ -5150,6 +5356,7 @@ impl VM {
                     )
                 })
                 .collect(),
+            disabled_override_modules: self.disabled_override_modules.clone(),
             custom_declarations: self.custom_declarations.iter().map(|(name, declaration)| {
                 let mut declaration = declaration.clone();
                 declaration.default = clone_value_for_snapshot(&declaration.default);
@@ -5199,6 +5406,7 @@ impl VM {
         self.preserve_state_on_redefinition = snapshot.preserve_state_on_redefinition;
         self.extension_hooks = snapshot.extension_hooks;
         self.overrides = snapshot.overrides;
+        self.disabled_override_modules = snapshot.disabled_override_modules;
         self.custom_declarations = snapshot.custom_declarations;
         self.declared_modules = snapshot.declared_modules;
         self.module_exports = snapshot.module_exports;
@@ -5412,11 +5620,7 @@ impl VM {
                     })
             })?
         })?;
-        if set.entries.last().is_some_and(|entry| !entry.quarantined) {
-            Some(set.dispatcher.clone())
-        } else {
-            None
-        }
+        set.active().map(|_| set.dispatcher.clone())
     }
 
     fn raw_global_cell(&mut self, idx: usize) -> Option<Rc<RefCell<Value>>> {
@@ -5455,14 +5659,11 @@ impl VM {
         let Some(active) = self
             .overrides
             .get(name)
-            .and_then(|set| set.entries.last())
+            .and_then(OverrideSet::active)
             .cloned()
         else {
             return self.invoke_raw_global(name, args);
         };
-        if active.quarantined {
-            return self.invoke_raw_global(name, args);
-        }
 
         let mut override_args = args.clone();
         if active.kind == OverrideKind::Around {
@@ -5760,6 +5961,23 @@ impl VM {
             }
         }
         self.source_manager.record_render_root(node_id);
+    }
+
+    /// Overrides never touch the factory cell, so flipping one changes what a
+    /// dependent effect renders without any reactive edge firing. Mark the
+    /// dependents of each target in every spelling they may have recorded.
+    pub fn mark_effects_depending_on_override_targets(&mut self, targets: &HashSet<String>) {
+        if targets.is_empty() {
+            return;
+        }
+        let mut symbols = HashSet::new();
+        for target in targets {
+            symbols.insert(target.clone());
+            if let Some((_, base)) = crate::modules::split_qualified(target) {
+                symbols.insert(base.to_string());
+            }
+        }
+        self.mark_effects_depending_on_symbols(&symbols);
     }
 
     pub fn mark_effects_depending_on_symbols(&mut self, symbols: &HashSet<String>) -> Vec<String> {
@@ -8663,6 +8881,164 @@ mod tests {
     }
 
     #[test]
+    fn disable_module_overrides_reverts_to_factory_and_enable_needs_no_reeval() {
+        let mut vm = module_test_vm();
+        vm.eval_module_source(
+            temp_lisp_path("toggle-owner"),
+            "(module test.tfactory)\n(def value () 1)\n(def other () 2)",
+            1,
+        )
+        .expect("owner");
+        vm.eval_module_source(
+            temp_lisp_path("toggle-user"),
+            "(module test.tpkg)\n\
+             (override test.tfactory/value () 10)\n\
+             (override test.tfactory/other :around (original) (+ (original) 20))",
+            1,
+        )
+        .expect("package overrides");
+        assert_eq!(vm.eval_str("(test.tfactory/value)").unwrap(), Some(Value::Number(10.0)));
+        assert_eq!(vm.eval_str("(test.tfactory/other)").unwrap(), Some(Value::Number(22.0)));
+
+        vm.eval_str("(disable-module-overrides test.tpkg)").expect("disable");
+        assert_eq!(vm.eval_str("(test.tfactory/value)").unwrap(), Some(Value::Number(1.0)));
+        assert_eq!(vm.eval_str("(test.tfactory/other)").unwrap(), Some(Value::Number(2.0)));
+        assert_eq!(
+            vm.overrides["test.tfactory/value"].entries.len(),
+            1,
+            "disabling keeps the registration"
+        );
+        assert_eq!(
+            vm.eval_str("(disabled-override-modules)").unwrap(),
+            Some(Value::List(vec![Rc::new(RefCell::new(Value::String("test.tpkg".into())))]))
+        );
+
+        vm.eval_str("(enable-module-overrides test.tpkg)").expect("enable");
+        assert_eq!(vm.eval_str("(test.tfactory/value)").unwrap(), Some(Value::Number(10.0)));
+        assert_eq!(vm.eval_str("(test.tfactory/other)").unwrap(), Some(Value::Number(22.0)));
+        assert_eq!(vm.eval_str("(disabled-override-modules)").unwrap(), Some(Value::List(vec![])));
+
+        // Per-symbol forms flip one target only.
+        vm.eval_str("(disable-override test.tfactory/value)").expect("disable one");
+        assert_eq!(vm.eval_str("(test.tfactory/value)").unwrap(), Some(Value::Number(1.0)));
+        assert_eq!(vm.eval_str("(test.tfactory/other)").unwrap(), Some(Value::Number(22.0)));
+        vm.eval_str("(enable-override test.tfactory/value)").expect("enable one");
+        assert_eq!(vm.eval_str("(test.tfactory/value)").unwrap(), Some(Value::Number(10.0)));
+    }
+
+    #[test]
+    fn disabled_module_stays_disabled_across_its_own_reload_and_late_registration() {
+        let mut vm = module_test_vm();
+        vm.eval_module_source(
+            temp_lisp_path("sticky-owner"),
+            "(module test.sfactory)\n(def value () 1)\n(def later () 3)",
+            1,
+        )
+        .expect("owner");
+        let user = temp_lisp_path("sticky-user");
+        vm.eval_module_source(
+            user.clone(),
+            "(module test.spkg)\n(override test.sfactory/value () 10)",
+            1,
+        )
+        .expect("v1");
+        vm.eval_str("(disable-module-overrides test.spkg)").expect("disable");
+        // Hot reload of the package must not switch it back on…
+        vm.eval_module_source(
+            user,
+            "(module test.spkg)\n\
+             (override test.sfactory/value () 11)\n\
+             (override test.sfactory/later () 30)",
+            2,
+        )
+        .expect("v2");
+        assert_eq!(vm.eval_str("(test.sfactory/value)").unwrap(), Some(Value::Number(1.0)));
+        // …and a target it registers for the first time while disabled starts off.
+        assert_eq!(vm.eval_str("(test.sfactory/later)").unwrap(), Some(Value::Number(3.0)));
+        // The disabled list may also be replayed before the package loads
+        // (user init managed block), which is the restart case.
+        let mut fresh = module_test_vm();
+        fresh.eval_str("(disable-module-overrides test.spkg)").expect("pre-disable");
+        fresh.eval_module_source(
+            temp_lisp_path("sticky-owner-2"),
+            "(module test.sfactory)\n(def value () 1)",
+            1,
+        )
+        .expect("owner");
+        fresh.eval_module_source(
+            temp_lisp_path("sticky-user-2"),
+            "(module test.spkg)\n(override test.sfactory/value () 10)",
+            1,
+        )
+        .expect("package");
+        assert_eq!(fresh.eval_str("(test.sfactory/value)").unwrap(), Some(Value::Number(1.0)));
+        fresh.eval_str("(enable-module-overrides test.spkg)").expect("enable");
+        assert_eq!(fresh.eval_str("(test.sfactory/value)").unwrap(), Some(Value::Number(10.0)));
+    }
+
+    #[test]
+    fn disabling_the_active_entry_falls_through_to_the_next_enabled_module() {
+        let mut vm = module_test_vm();
+        vm.eval_module_source(
+            temp_lisp_path("stack-owner"),
+            "(module test.kfactory)\n(def value () 1)",
+            1,
+        )
+        .expect("owner");
+        vm.eval_module_source(
+            temp_lisp_path("stack-a"),
+            "(module test.ka)\n(override test.kfactory/value () 10)",
+            1,
+        )
+        .expect("a");
+        vm.eval_module_source(
+            temp_lisp_path("stack-b"),
+            "(module test.kb)\n(override test.kfactory/value () 20)",
+            1,
+        )
+        .expect("b");
+        assert_eq!(vm.eval_str("(test.kfactory/value)").unwrap(), Some(Value::Number(20.0)));
+        vm.eval_str("(set-override-entry-enabled \"test.kfactory/value\" \"test.kb\" false)")
+            .expect("disable b");
+        assert_eq!(vm.eval_str("(test.kfactory/value)").unwrap(), Some(Value::Number(10.0)));
+        let rows = vm.eval_str("(override-declarations)").expect("declarations").unwrap();
+        let Value::List(rows) = rows else { panic!("expected list") };
+        assert_eq!(rows.len(), 2);
+        let enabled = |row: &Rc<RefCell<Value>>| match &*row.borrow() {
+            Value::Map(map) => (
+                match &*map["module"].borrow() { Value::String(s) => s.clone(), _ => unreachable!() },
+                match &*map["enabled"].borrow() { Value::Bool(b) => *b, _ => unreachable!() },
+            ),
+            _ => unreachable!(),
+        };
+        assert_eq!(enabled(&rows[0]), ("test.ka".to_string(), true));
+        assert_eq!(enabled(&rows[1]), ("test.kb".to_string(), false));
+    }
+
+    #[test]
+    fn override_enabled_state_is_transactional() {
+        let mut vm = module_test_vm();
+        vm.eval_module_source(
+            temp_lisp_path("txn-owner"),
+            "(module test.xfactory)\n(def value () 1)",
+            1,
+        )
+        .expect("owner");
+        vm.eval_module_source(
+            temp_lisp_path("txn-user"),
+            "(module test.xpkg)\n(override test.xfactory/value () 10)",
+            1,
+        )
+        .expect("package");
+        let snapshot = vm.snapshot_state();
+        vm.eval_str("(disable-module-overrides test.xpkg)").expect("disable");
+        assert_eq!(vm.eval_str("(test.xfactory/value)").unwrap(), Some(Value::Number(1.0)));
+        vm.restore_state(snapshot);
+        assert_eq!(vm.eval_str("(test.xfactory/value)").unwrap(), Some(Value::Number(10.0)));
+        assert!(vm.disabled_override_modules.is_empty());
+    }
+
+    #[test]
     fn around_override_late_binds_original_across_owner_reload() {
         let mut vm = module_test_vm();
         let owner = temp_lisp_path("around-owner");
@@ -9526,6 +9902,39 @@ counter
         assert_eq!(declaration.default, Value::Number(0.5));
         let listed = vm.eval_str("(get (first (custom-declarations)) :name)").expect("list declarations");
         assert_eq!(listed, Some(Value::String("alec.tools.settings/gain".into())));
+    }
+
+    #[test]
+    fn custom_declarations_report_live_value_module_and_choices() {
+        let mut vm = module_test_vm();
+        vm.eval_module_source(
+            temp_lisp_path("defcustom-live"),
+            "(module alec.tools.settings)\n\
+             (defcustom gain 0.5 :type :number :doc \"Output gain\")\n\
+             (defcustom mode \"soft\" :type :string :doc \"Mode\" :choices (list \"soft\" \"hard\"))\n\
+             (defcustom width 12 :type :number :doc \"Width\" :min 4 :max 40 :step 0.5)",
+            1,
+        ).expect("defcustom module");
+        assert_eq!(vm.eval_str("(get (nth (custom-declarations) 2) :max)").unwrap(), Some(Value::Number(40.0)));
+        assert_eq!(vm.eval_str("(get (nth (custom-declarations) 2) :step)").unwrap(), Some(Value::Number(0.5)));
+        assert_eq!(vm.eval_str("(get (first (custom-declarations)) :min)").unwrap(), Some(Value::Nil));
+        let read = |vm: &mut VM, expr: &str| vm.eval_str(expr).expect("read").unwrap();
+        assert_eq!(read(&mut vm, "(get (first (custom-declarations)) :value)"), Value::Number(0.5));
+        assert_eq!(
+            read(&mut vm, "(get (first (custom-declarations)) :module)"),
+            Value::String("alec.tools.settings".into())
+        );
+        vm.eval_str("(setopt alec.tools.settings/gain 0.75)").expect("setopt");
+        assert_eq!(read(&mut vm, "(get (first (custom-declarations)) :value)"), Value::Number(0.75));
+        assert_eq!(read(&mut vm, "(get (first (custom-declarations)) :default)"), Value::Number(0.5));
+        assert_eq!(read(&mut vm, "(len (get (first (custom-declarations)) :choices))"), Value::Number(0.0));
+        assert_eq!(
+            read(&mut vm, "(nth (get (nth (custom-declarations) 1) :choices) 1)"),
+            Value::String("hard".into())
+        );
+        // A settings UI only holds the name string.
+        vm.eval_str("(setopt-by-name \"alec.tools.settings/gain\" 0.25)").expect("by name");
+        assert_eq!(vm.read_tracked_state_value("alec.tools.settings/gain"), Some(Value::Number(0.25)));
     }
 
     #[test]

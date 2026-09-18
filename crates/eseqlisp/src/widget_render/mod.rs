@@ -622,7 +622,7 @@ pub enum WidgetCursor {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 #[cfg_attr(feature = "wgpu", derive(bytemuck::Pod, bytemuck::Zeroable))]
 pub struct WidgetInstance {
     pub ndc_min: [f32; 2],
@@ -709,13 +709,13 @@ pub struct WidgetViewport {
     pub inherited_hover: bool,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct GpuRectPrimitive {
     pub rect: Rect,
     pub color: Color,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 pub struct GpuQuadPrimitive {
     pub x: f32,
     pub y: f32,
@@ -724,7 +724,7 @@ pub struct GpuQuadPrimitive {
     pub color: Color,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 pub struct GpuTrianglePrimitive {
     pub points: [[f32; 2]; 3],
     pub color: Color,
@@ -733,7 +733,7 @@ pub struct GpuTrianglePrimitive {
 /// One vertex of a shaded mesh: a position in cell units, like every other
 /// primitive, and its own color. The color is linearly interpolated across the
 /// face of the triangle it belongs to, alpha included.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 pub struct GpuShadedVertex {
     pub point: [f32; 2],
     pub color: Color,
@@ -743,12 +743,12 @@ pub struct GpuShadedVertex {
 /// triangle. Batching a widget's whole soft-edged geometry into one primitive
 /// keeps the per-frame primitive clone/offset work in the backends proportional
 /// to widgets rather than to triangles.
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct GpuShadedMeshPrimitive {
     pub vertices: Vec<GpuShadedVertex>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct GpuGlyphRunPrimitive {
     pub row: f32,
     pub col: i32,
@@ -757,7 +757,7 @@ pub struct GpuGlyphRunPrimitive {
     pub bg: Color,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct GpuProportionalTextPrimitive {
     /// Position in cell-space (fractional allowed).
     pub row: f32,
@@ -779,7 +779,7 @@ pub struct GpuProportionalTextPrimitive {
     pub mono: bool,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct GpuWaveformPrimitive {
     pub rect: Rect,
     pub sample_key: String,
@@ -823,7 +823,22 @@ pub struct GpuWavetablePrimitive {
     pub bg_color: Color,
 }
 
-#[derive(Clone)]
+impl PartialEq for GpuWavetablePrimitive {
+    fn eq(&self, other: &Self) -> bool {
+        // Retained paint pins this immutable bank. Identity comparison avoids
+        // scanning potentially millions of samples on every viewer update;
+        // a replacement allocation conservatively counts as changed paint.
+        std::sync::Arc::ptr_eq(&self.data, &other.data)
+            && self.rect == other.rect && self.bank_key == other.bank_key
+            && self.data_revision == other.data_revision && self.frame_len == other.frame_len
+            && self.set_base == other.set_base && self.waves_in_set == other.waves_in_set
+            && self.wave_pos == other.wave_pos && self.warp == other.warp && self.fold == other.fold
+            && self.domain == other.domain && self.selected_color == other.selected_color
+            && self.inactive_color == other.inactive_color && self.bg_color == other.bg_color
+    }
+}
+
+#[derive(Clone, PartialEq)]
 pub struct GpuLiveSpectrogramPrimitive {
     pub rect: Rect,
     pub data_key: String,
@@ -839,7 +854,7 @@ pub struct GpuLiveSpectrogramPrimitive {
     pub background_color: Color,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct GpuImagePrimitive {
     pub widget_id: u64,
     pub rect: Rect,
@@ -859,7 +874,7 @@ pub enum ImageFit {
     Stretch,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct GpuPatchCablePrimitive {
     pub start: [f32; 2],
     pub control1: [f32; 2],
@@ -872,7 +887,7 @@ pub struct GpuPatchCablePrimitive {
     pub corner_radius_cells: f32,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct GpuCirclePrimitive {
     pub center: [f32; 2],
     pub radius_px: f32,
@@ -887,7 +902,7 @@ pub enum GpuCircleVisibleHalf {
     Bottom,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub enum GpuPrimitive {
     ZLayer {
         z_index: i32,
@@ -1807,6 +1822,24 @@ pub fn widget_primitives_for_node(
         return cached;
     }
 
+    let primitives = build_widget_primitives_for_node(node, viewport);
+    if let Some(cache_key) = cache_key {
+        WIDGET_PRIMITIVE_CACHE.with(|cache| {
+            let mut cache = cache.borrow_mut();
+            if cache.len() >= 4096 {
+                cache.clear();
+            }
+            cache.insert(cache_key, primitives.clone());
+        });
+    }
+    primitives
+}
+
+/// Paint directly for owners that already retain and validate their inputs.
+/// Avoid a second cache/hash/clone, and let the retained scene compare actual
+/// output even for values the legacy primitive cache cannot observe exactly.
+fn build_widget_primitives_for_node(node: &LayoutNode, viewport: WidgetViewport) -> Vec<GpuPrimitive> {
+    let viewport = narrow_viewport_focus_to(node, viewport);
     if let Some(definition) = widget_definition(&node.widget_type) {
         let mut primitives = definition.build_primitives(&node.widget_type, node, viewport);
         if node.focusable && viewport.focused_widget_id == Some(node.widget_id) {
@@ -1815,15 +1848,6 @@ pub fn widget_primitives_for_node(
                     .focus_decoration(node)
                     .primitives(node.rect, viewport),
             );
-        }
-        if let Some(cache_key) = cache_key {
-            WIDGET_PRIMITIVE_CACHE.with(|cache| {
-                let mut cache = cache.borrow_mut();
-                if cache.len() >= 4096 {
-                    cache.clear();
-                }
-                cache.insert(cache_key, primitives.clone());
-            });
         }
         primitives
     } else if sdf_widget::sdf_widget_def(&node.widget_type).is_some() {

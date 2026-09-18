@@ -1117,7 +1117,7 @@ fn attach_to_user_init(editor: &mut Editor, module: &str) -> Result<bool, String
     Ok(false)
 }
 
-fn write_text_atomically(path: &Path, source: &str) -> Result<(), String> {
+pub(super) fn write_text_atomically(path: &Path, source: &str) -> Result<(), String> {
     use std::io::Write;
 
     let parent = path
@@ -1179,7 +1179,7 @@ fn open_user_init(editor: &mut Editor, ctx: &mut LoopCtx<'_>) {
     }
 }
 
-fn user_init_path() -> PathBuf {
+pub(super) fn user_init_path() -> PathBuf {
     sequencer::app_paths::app_paths()
         .user_lisp_root()
         .join("init.lisp")

@@ -1454,12 +1454,37 @@ pub(crate) fn sync_reactive_tick(
                 "delete-target-version",
                 Value::Number(delete_target_version as f64),
             );
-            sync_mixer_delete_target_binding_fields(
-                rt,
-                app.tracks.len(),
-                &ctx.shared.state,
-                ctx.shared.active_delete_target.lock().unwrap().as_ref(),
-            );
+            let multi_track_selection = {
+                let guard = ctx.shared.active_delete_target.lock().unwrap();
+                sync_mixer_delete_target_binding_fields(
+                    rt,
+                    app.tracks.len(),
+                    &ctx.shared.state,
+                    guard.as_ref(),
+                );
+                match guard.as_ref() {
+                    Some(ActiveDeleteTarget::TrackSteps { tracks }) => tracks.clone(),
+                    _ => Vec::new(),
+                }
+            };
+            // A multi-track step selection highlights non-current tracks only
+            // while its target is armed; once it drops, republish those rows.
+            if ctx.frame.prev_multi_track_selection != multi_track_selection {
+                let track_count = ctx.shared.state.active_track_count();
+                for track in &ctx.frame.prev_multi_track_selection {
+                    if multi_track_selection.contains(track) || *track >= track_count {
+                        continue;
+                    }
+                    let num_steps = ctx.shared.state.pattern.track_params[*track]
+                        .get_num_steps()
+                        .min(sequencer::sequencer::MAX_STEPS);
+                    ctx.shared.ui_invalidations.push(UiInvalidation::StepSelection {
+                        track: *track,
+                        changed_steps: (0..num_steps).collect(),
+                    });
+                }
+                ctx.frame.prev_multi_track_selection = multi_track_selection;
+            }
             needs_reactive_cycle = true;
         }
         let ui_ep = ctx.shared.ui_epoch.load(Ordering::Relaxed);

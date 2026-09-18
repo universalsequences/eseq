@@ -75,7 +75,10 @@ pub(crate) fn declared_effect_latency_samples(source: &str, sample_rate: u32) ->
 
 // -- eseqlisp: live-coding / sequencing natives --
 pub use eseq::graph_authoring::register_graph_authoring_natives;
-pub use eseq::graph_manifest::{graph_mode_present, parse_graph_manifest};
+pub use eseq::graph_manifest::{
+    current_graph_owner_rack, graph_instance_id, graph_mode_present, parse_graph_manifest,
+    with_graph_owner_rack,
+};
 use eseq::graph_update; // qualified `graph_update::` calls in shared_state/process_natives
 use eseq::graph_update::{CompiledGraphUpdate, SharedGraphNodeContext};
 use eseq::midi_fx::*;

@@ -56,35 +56,51 @@
 (def finger_width (latch (+ 0.004 (* 0.075 (clip
   (+ pluck.softness (* pluck.velocity_tone (- 1 (clip velocity 0 1)))) 0 1))) onset))
 
-(defmacro bass-coefficient (value update) (latch (event-hold value update) update))
+(defmacro bass-coefficient (value update) (latch value update))
 
 (defmacro bass-modes (n update excite level pluck width frequency damping friction mute decay release held stiffness pickup aperture sub_gain)
   (make-tensor-history real_h @shape [64])
   (make-tensor-history imag_h @shape [64])
-  (def b (* 0.002 stiffness stiffness))
+  ;; Schedule the pure design from its inputs, before transcendental/modal
+  ;; work. Holding only the final result leaves its ancestors at audio rate.
+  ;; The existing tick includes note onset/off; final latches restore the
+  ;; coefficients to audio rate before updating the complex resonators.
+  (def pluck-coefficient (event-hold pluck update))
+  (def width-coefficient (event-hold width update))
+  (def frequency-coefficient (event-hold frequency update))
+  (def damping-coefficient (event-hold damping update))
+  (def friction-coefficient (event-hold friction update))
+  (def mute-coefficient (event-hold mute update))
+  (def decay-coefficient (event-hold decay update))
+  (def release-coefficient (event-hold release update))
+  (def held-coefficient (event-hold held update))
+  (def stiffness-coefficient (event-hold stiffness update))
+  (def pickup-coefficient (event-hold pickup update))
+  (def aperture-coefficient (event-hold aperture update))
+  (def b (* 0.002 stiffness-coefficient stiffness-coefficient))
   ;; Divide by sqrt(1+B) so stiffness does not detune the fundamental.
   (def ratios (* n (sqrt (/ (+ 1 (* b n n)) (+ 1 b)))))
-  (def hz (* frequency ratios))
+  (def hz (* frequency-coefficient ratios))
   (def omega (* twopi (/ (min hz (* 0.49 samplerate)) samplerate)))
   ;; friction adds loss growing with ln(n): a per-partial law measured on
   ;; recorded fingerstyle bass, where partial 2 dies several times faster
   ;; than the fundamental although it is only an octave up.
-  (def rate (+ (/ 6.907755 decay)
-    (* (+ 0.2 (* 24 damping damping)) (pow (/ hz 1000) 2))
-    (* friction (log n))
-    (* 35 mute mute (+ 1 (* 0.15 n)))
-    (* (- 1 held) (/ 6.907755 release))))
+  (def rate (+ (/ 6.907755 decay-coefficient)
+    (* (+ 0.2 (* 24 damping-coefficient damping-coefficient)) (pow (/ hz 1000) 2))
+    (* friction-coefficient (log n))
+    (* 35 mute-coefficient mute-coefficient (+ 1 (* 0.15 n)))
+    (* (- 1 held-coefficient) (/ 6.907755 release-coefficient))))
   (def radius (exp (/ (- rate) samplerate)))
   (def c (bass-coefficient (* radius (cos omega)) update))
   (def s (bass-coefficient (* radius (sin omega)) update))
   ;; Fourier coefficients of a triangular displacement, spatially smoothed
   ;; by the finger's Gaussian contact footprint. Differentiation gives ratio/n².
-  (def shape (/ (* 2 (sin (* pi n pluck))) (* pi pi n n pluck (- 1 pluck))))
-  (def contact (exp (* -0.5 (pow (* pi n width) 2))))
+  (def shape (/ (* 2 (sin (* pi n pluck-coefficient))) (* pi pi n n pluck-coefficient (- 1 pluck-coefficient))))
+  (def contact (exp (* -0.5 (pow (* pi n width-coefficient) 2))))
   (def bandlimit (clip (/ (- (* 0.48 samplerate) hz) (* 0.08 samplerate)) 0 1))
   (def weight (bass-coefficient (* shape contact ratios bandlimit) update))
-  (def readout (bass-coefficient (* (sin (* pi n pickup))
-    (/ (sin (* 0.5 pi n aperture)) (* 0.5 pi n aperture))) update))
+  (def readout (bass-coefficient (* (sin (* pi n pickup-coefficient))
+    (/ (sin (* 0.5 pi n aperture-coefficient)) (* 0.5 pi n aperture-coefficient))) update))
   (def x (read-tensor-history real_h))
   (def y (read-tensor-history imag_h))
   ;; A new pluck resets displacement and velocity. Note-off changes only loss,

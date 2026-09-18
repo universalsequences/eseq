@@ -14,6 +14,8 @@
         instrument-copy-values-to-all-scenes
         header-actions-menu
         instrument-header-actions-menu
+        rack-header-actions-menu
+        rack-copy-values-to-all-scenes
         fx-effect-drop-meta
         fx-effect-drop-types
         fx-panel-header
@@ -62,6 +64,21 @@
     (dict :track (get inst :track)
           :rack-slot (get inst :rack-slot))))
 
+;; Rack-wide copy: every slot's instrument values, base note, gain/pan/
+;; mute/solo/voices and slot FX, plus the macro knobs.  Sent from the rack
+;; header menu; the per-slot menu above only covers the selected slot.
+(def rack-copy-values-to-all-scenes (inst)
+  (host-command "copy-instrument-values-to-all-scenes"
+    (dict :track (get inst :track) :rack true)))
+
+(def rack-copy-all-scenes-label "Copy rack (all slots) to all scenes")
+
+(def rack-header-actions-menu (inst)
+  (header-actions-menu
+    (str "rack-header-actions-" (get inst :track))
+    (list rack-copy-all-scenes-label)
+    (lambda (item) (rack-copy-values-to-all-scenes inst))))
+
 (def header-actions-menu (debug-name options action)
   (menu-button
     :key debug-name
@@ -92,10 +109,17 @@
   (host-command "enter-edit-instrument"
     (dict :name (if (get inst :name) (get inst :name) SEQ.sidebar-instrument-name))))
 
+;; Inside a rack the instrument header belongs to one slot, so say so: the
+;; rack-wide copy lives in the rack header's own menu.
+(def instrument-copy-all-scenes-label (inst)
+  (if (= (get inst :rack-slot) nil)
+    "Copy current values to all scenes"
+    (str "Copy slot " (+ (get inst :rack-slot) 1) " values to all scenes")))
+
 (def instrument-header-action-options (inst)
   (append
     (append
-      (list "Copy current values to all scenes")
+      (list (instrument-copy-all-scenes-label inst))
       (if (and (= (get inst :rack-slot) nil)
                (not (= (get inst :type) "modulator")))
         (list "Group Rack")

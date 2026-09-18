@@ -6,6 +6,7 @@
 ;; (`*sequencer*` and `*arrangement*`), like export-song.
 (module eseq.file-dialogs)
 (import eseq.settings)
+(import eseq.customize)
 (export open-confirm panel open-save close-save save-open? save-draft commit-save
         open-unsaved-prompt close-unsaved-prompt unsaved-prompt-open?
         unsaved-prompt-save unsaved-prompt-discard
@@ -284,6 +285,7 @@
 (def panel ()
   (v-stack :width 0 :height 0 :bg :transparent
     (eseq.settings/panel)
+    (eseq.customize/panel)
     (modal :is-open package-export-open? :on-close (lambda () (close-package-export))
         :width-px 1200 :height-px 820
       (box :debug-name "package-export-panel" :width :fill :height :fill :padding 0.6 :bg :transparent

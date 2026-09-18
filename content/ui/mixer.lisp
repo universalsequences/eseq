@@ -15,6 +15,8 @@
 
 (import eseq.track-collapse)
 (import eseq.drum-rack-v2)
+;; Read-only: the step-tab registry names the `(load …)` a script came from.
+(import eseq.seq-step-tabs)
 (import eseq.effects.drag-drop :as effect-dd)
 (import eseq.effects.param-controls :as pc)
 ;; Shared scene-bank view state: the clip grid below shows only the bank the
@@ -80,7 +82,22 @@
 ;; 13.8-cell strip minus its 4.0-cell clip area, and the historical offsets
 ;; of the other strip kinds from it.
 (def clip-area-height ()
-  eseq.seq-core-state/mixer-clip-area-height)
+  (eseq.seq-core-state/effective-clip-area-height))
+
+;; Compact mode (eseq.seq-core-state/mixer-show-clip-grid off): no clip grid,
+;; and the bus/group strips drop the spacers that kept them level with the
+;; taller track strips.
+(def compact? ()
+  (not eseq.seq-core-state/mixer-show-clip-grid))
+
+;; Strip widths (cells), customize-tier knobs.
+(defcustom track-strip-width 12.9
+  :type :number :min 11 :max 24 :step 0.1
+  :doc "Width (cells) of a track strip in the mixer.")
+
+(defcustom bus-strip-width 10.3
+  :type :number :min 9 :max 20 :step 0.1
+  :doc "Width (cells) of a bus strip in the mixer.")
 
 (def strip-height ()
   (+ 9.8 (clip-area-height)))
@@ -132,10 +149,44 @@
     (dict :id :convert-drum-rack :label "Convert to Drum Rack")
     (dict :id :ungroup :label "Ungroup")))
 
-(def rack-group-menu-actions
-  (list
-    (dict :id :rename :label "Rename")
-    (dict :id :ungroup :label "Ungroup")))
+;; A rack's menu also offers the graph sequencers it could own: every
+;; project-owned graph sequencer can move into the rack (its routes become
+;; rack members), and every sequencer the rack already owns can be detached
+;; (docs/rack-clips-and-break-kits-spec.md §5.1).
+(def rack-group-menu-actions (gid)
+  (append
+    (list
+      (dict :id :rename :label "Rename"))
+    (map
+      (lambda (graph)
+        (if (= (get graph :owner-rack) gid)
+          (dict :id :detach-sequencer
+                :sequencer-id (get graph :id)
+                :sequencer-name (get graph :name)
+                :label (str "Detach \"" (get graph :name) "\""))
+          (dict :id :move-sequencer-into-rack
+                :sequencer-id (get graph :id)
+                :sequencer-name (get graph :name)
+                :label (str "Move \"" (get graph :name) "\" into rack"))))
+      (filter (lambda (graph)
+                (or (= (get graph :owner-rack) nil)
+                    (= (get graph :owner-rack) gid)))
+        (or SEQ.graph-sequencers (list))))
+    (list
+      (dict :id :ungroup :label "Ungroup"))))
+
+;; The `(load "path")` form that brought a project-owned script in, from the
+;; step-tab registry; "" when unknown (the moved instance then does not come
+;; back by itself on project open).
+(def sequencer-source-form (name)
+  (let ((hits (filter
+                (lambda (tab)
+                  (= (eseq.seq-step-tabs/seq-step-tab-sequencer-name tab) name))
+                eseq.seq-step-tabs/seq-registered-step-tabs)))
+    (if (> (len hits) 0)
+      (let ((path (eseq.seq-step-tabs/seq-step-tab-source-path (nth hits 0))))
+        (if (= path "") "" (str "(load \"" path "\")")))
+      "")))
 
 (def track-peak (i)
   (bind-seq (str "track-peak-" i)))
@@ -677,10 +728,27 @@
   (filter (lambda (cell) (eseq.scene-banks/clip-in-viewed-bank? cell))
     (track-pattern-cells track)))
 
+;; Clip launch cells scale with the strip width: the 6x4 grid was sized for
+;; the stock 12.9-cell strip (six 2.0-cell columns), so a narrower strip
+;; shrinks the cells instead of spilling them past the strip's edge.
+(def clip-cell-scale ()
+  (/ track-strip-width 12.9))
+
+;; Character budget for a name that fit `base` characters at the stock strip
+;; width; narrower strips truncate harder, wider ones show more.
+(def name-chars (base)
+  (max 3 (floor (* base (clip-cell-scale)))))
+
+;; Bus strips have their own width knob; ~1.1 characters per cell at the
+;; label's 10pt font.
+(def bus-name-chars ()
+  (max 3 (floor (* bus-strip-width 1.1))))
+
 (def track-pattern-grid (track)
-  (let ((cells (viewed-bank-track-pattern-cells track)))
+  (let ((cells (viewed-bank-track-pattern-cells track))
+        (k (clip-cell-scale)))
     (box :width :fill :height (clip-area-height) :align :top :bg :black :background-color :buffer-bg
-      (grid :cols 6 :col-width 2.0 :row-height 1.0 :align :center
+      (grid :cols 6 :col-width (* 2.0 k) :row-height (* 1.0 k) :align :center
         (each cells |cell cell-idx|
           (let ((pattern-id (get cell :id)))
             (box
@@ -688,8 +756,8 @@
               :drag-type (str "track-pattern-" (nth SEQ.track-ids track))
               :drag-modifier :none
               :drag-payload (dict :track track :track-id (nth SEQ.track-ids track) :pattern-id pattern-id)
-              :width 1.90 :height 0.95
-              :padding 0.35
+              :width (* 1.90 k) :height (* 0.95 k)
+              :padding (* 0.35 k)
               :bg :transparent
               :background (if (= pattern-id (queued-clip track))
                 "track-pattern-cell-queued-bg"
@@ -894,7 +962,8 @@
         ;;(seq-set-bus-volume i (event-volume event))
         ))
     (v-stack
-      (box :width :fill :height 4.2)
+      ;; Level with the track strips' meters, which sit below the clip area.
+      (box :width :fill :height (if (compact?) 0.2 4.2))
       (h-stack :gap 0.06 
         (box :width (if is-group 6 2))
         (mixer-v2-volume-triangle
@@ -962,14 +1031,14 @@
     ;; dead space at the bottom inside the group container.
     ;; Mute/name/output reads live in bindings or nested subtrees so those
     ;; changes don't rerun the whole strip.
-    (box :width 12.9 :height (if (track-grouped? i) (grouped-strip-height) (strip-height))
+    (box :width track-strip-width :height (if (track-grouped? i) (grouped-strip-height) (strip-height))
       :selected (track-selected-binding i)
       :muted (bind-seq-nth "track-muted-effective" i)
       :background-color :mixer-strip-bg
       :selected-background-color :mixer-strip-selected-bg
       :muted-background-color :mixer-strip-muted-bg
       :border-width 4
-      :corner-radius 16
+      :corner-radius (eseq.seq-core-state/radius 16)
       :border-color :mixer-strip-border
       :selected-border-color :mixer-strip-selected-border
       :muted-border-color :mixer-strip-border
@@ -980,7 +1049,7 @@
       :on-drop (lambda (event) (drop-on-track event))
       :on-click (lambda (event) (track-body-click event i))
       :on-right-click (lambda (event) (open-track-menu event i))
-      (v-stack :gap 0.18
+      (v-stack :gap 0.18 :width :fill
         ;; Grouped tracks drop the output dropdown (their output is the group
         ;; bus); the container provides the color above. A small spacer keeps
         ;; the pattern grid aligned with loose strips.
@@ -994,11 +1063,12 @@
                 (do
                   (clear-delete-target)
                   (host-command "set-track-output" (dict :track i :label v))))
-              :width :fill :height 1.2 :font-size 10)))
-        (track-pattern-grid i)
+              :width :fill :height 1.2 :font-size 10
+              :corner-radius (eseq.seq-core-state/radius 20))))
+        (if (compact?) nil (track-pattern-grid i))
         
-        	       
-        (h-stack :gap 1.6 :align :center
+        (box :width :fill
+        (h-stack :gap 0 :align :center :width :fill
           (v-stack
             
             (h-stack :gap 0.05
@@ -1019,8 +1089,8 @@
                 (do
                   (clear-delete-target)
                   (seq-set-track-pan i v)))))
-          
-          (track-meter-control i))
+          (box :flex 1 :height 1)
+          (track-meter-control i)))
         
         (box :width :fill :height 0.05)
         (subtree :key (str "mixer-v2-strip-buttons-" i)
@@ -1114,7 +1184,7 @@
       (if (< gidx 0)
         (list)
         (if (get (nth SEQ.groups gidx) :rack)
-          rack-group-menu-actions
+          (rack-group-menu-actions track-menu-group-id)
           group-menu-actions)))
     (if (and (>= (len SEQ.selected-tracks) 2) (track-menu-target-selected?))
       (append track-menu-actions (list (dict :id :group :label "Group Tracks")))
@@ -1139,7 +1209,20 @@
             (set! track-menu-open false)
             (host-command "ungroup-tracks"
               (dict :group-id track-menu-group-id)))
-          nil)))))
+          (if (= (get action :id) :move-sequencer-into-rack)
+            (do
+              (set! track-menu-open false)
+              (host-command "move-sequencer-into-rack"
+                (dict :group-id track-menu-group-id
+                      :sequencer-id (get action :sequencer-id)
+                      :source (sequencer-source-form (get action :sequencer-name)))))
+            (if (= (get action :id) :detach-sequencer)
+              (do
+                (set! track-menu-open false)
+                (host-command "detach-rack-sequencer"
+                  (dict :group-id track-menu-group-id
+                        :sequencer-id (get action :sequencer-id))))
+              nil)))))))
 
 (def track-context-menu ()
   (context-menu :is-open track-menu-open
@@ -1183,7 +1266,7 @@
     (box
       :key (str "track-label-" i)
       :width :fill :height 1.0
-      :corner-radius 30
+      :corner-radius (eseq.seq-core-state/radius 30)
       :padding 0
       :drag-type "track-badge"
       :drag-payload (dict :track i)
@@ -1197,11 +1280,11 @@
       :on-click (lambda (event) (track-label-click event i))
       :on-double-click (lambda (event) (eseq.sequencer/open-piano-roll-for-track i))
       (if (= track-renaming i)
-        (track-rename-input i "track-rename-input-" 9.8 10)
-        (badge (substring (nth SEQ.track-names i) 0 12)
+        (track-rename-input i "track-rename-input-" (* 9.8 (clip-cell-scale)) 10)
+        (badge (substring (nth SEQ.track-names i) 0 (name-chars 12))
           :key (str "track-label-content-" i)
           :icon (eseq.track-collapse/type-icon i)
-          :width 9.8
+          :width (* 9.8 (clip-cell-scale))
           :height 1.0
           :padding 0
           :font-size 10
@@ -1228,7 +1311,7 @@
       :selected-background-color :mixer-strip-selected-bg
       :muted-background-color :mixer-strip-muted-bg
       :border-width 2
-      :corner-radius 10
+      :corner-radius (eseq.seq-core-state/radius 10)
       :border-color :mixer-strip-border
       :selected-border-color :mixer-strip-selected-border
       :muted-border-color :mixer-strip-border
@@ -1242,7 +1325,7 @@
       (v-stack :gap 0.42 :align :center
         ;; Spacer absorbs the clip-area growth so the meter stays level with
         ;; the full strips' meters.
-        (box :width :fill :height (+ 3.45 (- (clip-area-height) 4.0)) :bg :transparent)
+        (box :width :fill :height (max 0 (+ 3.45 (- (clip-area-height) 4.0))) :bg :transparent)
         (track-meter-control i)
         (button "M"
           :key (str "track-collapsed-mute-" i)
@@ -1369,6 +1452,7 @@
         (dropdown :key (str "bus-output-" i)
           :value (get route :value) :options options
           :width :fill :height 1.2 :font-size 10
+          :corner-radius (eseq.seq-core-state/radius 20)
           :on-change (lambda (value)
             (each (range 0 (len options)) |index|
               (if (= value (nth options index))
@@ -1381,7 +1465,7 @@
   (do
     ;; `do` keeps the original body indentation; the strip is one box.
     (box :key (str "bus-strip-" i)
-      :width 10.3 :height (bus-strip-height)
+      :width bus-strip-width :height (bus-strip-height)
       ;; Bound selection state (eseq-4jv): a raw `selected-bus` read here
       ;; re-rendered every bus strip on each selection.
       :selected (eseq.seq-core-state/bus-selected-vis-binding i)
@@ -1390,7 +1474,7 @@
       :selected-background-color :mixer-strip-selected-bg
       :muted-background-color :mixer-strip-muted-bg
       :border-width 2
-      :corner-radius 16
+      :corner-radius (eseq.seq-core-state/radius 16)
       :border-color :mixer-strip-border
       :selected-border-color :mixer-strip-selected-border
       :drop-hover-border-color :mixer-strip-selected-border
@@ -1408,9 +1492,9 @@
         ;  (box :height 0.8 :width :fill :bg :transparent)
         ;  )
         (h-stack :gap 0.45 :align :center
-          (box :width 3.0 :height 5.0)
+          (box :width 3.0 :height (if (compact?) 1.0 5.0))
           (bus-meter-control i false))
-        (box :height 2.8)
+        (box :height (if (compact?) 0 2.8))
         (h-stack :gap 0.35
           (button (bus-mute-label i)
             :width 2.1 :height 1.0 :padding 0 :font-size 10
@@ -1427,10 +1511,10 @@
           (box :width 2.1 :height 1.0))
         (if (not (= (nth SEQ.bus-names i) "Mix"))
           (bus-mod-port-row (nth SEQ.bus-ids i))
-          (box :height 0.8)
+          (box :height (if (compact?) 0 0.8))
           )
         
-        (button (bus-label i)
+        (button (substring (bus-label i) 0 (bus-name-chars))
           :width :fill :height 1.0 :padding 0 :font-size 10
           :background-color :mixer-label-bg
           :border-color :transparent
@@ -1619,7 +1703,7 @@
       (bus-idx (bus-index-by-id (get (nth SEQ.groups gidx) :bus-id))))
     (box :key (str "group-bus-strip-" bus-idx)
       :width 10.2 :height (group-bus-strip-height)
-      :corner-radius 12
+      :corner-radius (eseq.seq-core-state/radius 12)
       :padding 0.1
       :background-color :mixer-strip-bg
       :drop-hover-border-color :mixer-strip-selected-border
@@ -1636,19 +1720,20 @@
         ;; index). Fall back to nothing if the bus can't be resolved.
         (if (>= bus-idx 0)
           (v-stack :gap 0.4 :align :center
-            (box :width :fill :height 8.1
+            (box :width :fill :height (if (compact?) 4.1 8.1)
               (bus-meter-control bus-idx true)
               )
             )
           (box :width 0.0 :height 0.0 :bg :transparent))
         (group-control-buttons gidx bus-idx)
         (bus-mod-port-row (get group :bus-id))
-        (box :corner-radius 34 :background-color c :width 9.5 :padding 0.1
+        (box :corner-radius (eseq.seq-core-state/radius 34) :background-color c :width 9.5 :padding 0.1
           
           :key (str "group-badge-" (get group :id))
           :selected (group-delete-target? (get group :id))
           :selected-background-color :fx-panel-header-selected-bg
           :on-click (lambda (event) (select-group-delete-target gidx))
+          :on-double-click (lambda (event) (eseq.sequencer/show-fx-for-group gidx))
           :on-right-click (lambda (event) (open-group-menu event gidx))
           (h-stack :gap 0.2 :align :center
             (box :width 0.05)
@@ -1663,7 +1748,7 @@
             (box :width 0.05)
             (if (= group-renaming (get group :id))
               (group-rename-input (get group :id))
-              (label (substring (get group :name) 0 10)
+              (label (substring (get group :name) 0 (name-chars 10))
                 :key (str "group-name-label-" (get group :id))
                 :font-size 11
                 :height 0.9
@@ -1717,7 +1802,7 @@
   (let ((group (nth SEQ.groups gidx))
       (c (group-color gidx)))
     (box
-      :corner-radius 16
+      :corner-radius (eseq.seq-core-state/radius 16)
       :padding 0.3
       ;; Selection is a bound state, not a computed color (eseq-4jv): the
       ;; selected look keeps a constant border width so it never relayouts.
@@ -1770,7 +1855,7 @@
     :border-width 2
     :border-color :mixer-strip-border
     :drop-hover-border-color :mixer-strip-selected-border
-    :corner-radius 16
+    :corner-radius (eseq.seq-core-state/radius 16)
     :padding 0.5
     :align :center
     :drop-types (list "sample" "instrument" "sound" "track-badge")
@@ -1793,7 +1878,7 @@
     :selected-background-color :mixer-strip-selected-bg
     :muted-background-color :mixer-strip-muted-bg
     :border-width 2
-    :corner-radius 16
+    :corner-radius (eseq.seq-core-state/radius 16)
     :border-color :mixer-strip-border
     :selected-border-color :mixer-strip-selected-border
     :muted-border-color :mixer-strip-border

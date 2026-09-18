@@ -31,7 +31,11 @@
 ;; pattern. It does not write graph overrides. For a fresh demo patch, explicitly run:
 ;;   (script-init-fn)
 
-(def-sequencer "neural-variable-reset-demo"
+;; `def-sequencer` returns the instance handle. Every graph-* native below takes
+;; it, so this script also works when a drum rack owns it (attached via the
+;; rack menu or `attach-rack-sequencer`): the handle is unambiguous even when
+;; the project and a rack both run a copy, and routes then address rack members.
+(def gvr-name (def-sequencer "neural-variable-reset-demo"
   :shape (line :default 8 :min 1 :max 16)
   :energy-decay 0.992
   :reset-every (bars 4)
@@ -86,23 +90,40 @@
     :topology (all-to-all)
     :gather (- (edge :weight) (edge :dampening))
     :params ((weight :float -1 1 :default 0.0)
-      (dampening :float 0 1 :default 0))))
+      (dampening :float 0 1 :default 0)))))
 
-(def gvr-name "neural-variable-reset-demo")
 (def gvr-min-node-count 1)
 (def gvr-max-node-count 16)
 (def script-buffer-name "*variable-reset*")
-(def script-tab-label "var rst")
-(def script-sequencer-name gvr-name)
+;; Owned by a rack: the tab wears the rack's name and routes are its members.
+(def gvr-owner-rack (graph-owner gvr-name))
+(def gvr-route-tracks (graph-route-tracks gvr-name))
+(def script-tab-label
+  (if gvr-owner-rack
+    (eseq.drum-rack-v2/group-name (eseq.drum-rack-v2/group-index-by-id gvr-owner-rack))
+    "var rst"))
+(def script-sequencer-name "neural-variable-reset-demo")
 
 ;; ── dropdown option lists (order is the index space bind-graph maps into) ──
 
 (def gvr-res-options (list "1" "2" "4" "8" "16" "32" "64"))
 (def gvr-quant-options (list "off" "1" "2" "4" "8" "16" "32" "64" "2T" "4T" "8T" "16T" "32T" "64T" "Prh"))
+;; Route option n is track n (project-owned) or rack member n (rack-owned);
+;; "Off" is always last. Either way the option index IS the route value.
 (def gvr-route-options
-  (list "Track 1" "Track 2" "Track 3" "Track 4" "Track 5" "Track 6" "Track 7" "Track 8"
-        "Track 9" "Track 10" "Track 11" "Track 12" "Track 13" "Track 14" "Track 15" "Track 16"
-        "Off"))
+  (if gvr-route-tracks
+    (append
+      (map (lambda (track) (str (+ track 1) " " (nth SEQ.track-names track))) gvr-route-tracks)
+      (list "Off"))
+    (list "Track 1" "Track 2" "Track 3" "Track 4" "Track 5" "Track 6" "Track 7" "Track 8"
+          "Track 9" "Track 10" "Track 11" "Track 12" "Track 13" "Track 14" "Track 15" "Track 16"
+          "Off")))
+;; Colors parallel to the route options: a rack-owned instance colors by the
+;; member's track, so `track-colors` below is re-indexed through the members.
+(def gvr-route-track-colors (track-colors)
+  (if gvr-route-tracks
+    (map (lambda (track) (nth track-colors track)) gvr-route-tracks)
+    track-colors))
 (def gvr-max-poly-selection-options
   (list "deterministic" "propagation" "random" "loudest" "lowest-transpose" "highest-transpose" "seed-first"))
 ;; Neural-group assignment (docs/neural-groups-spec.md §3.1). The stored value IS the
@@ -193,7 +214,7 @@
   (map (lambda (n) (list 0)) (range 0 (gvr-node-count))))
 
 (def gvr-viz (visualizations)
-  (let ((hits (filter (lambda (viz) (= (get viz :name) gvr-name)) visualizations)))
+  (let ((hits (filter (lambda (viz) (= (get viz :id) gvr-name)) visualizations)))
     (if (> (len hits) 0) (nth hits 0) nil)))
 
 (def gvr-matrix-shape? (value rows cols)
@@ -524,7 +545,8 @@
     (label "res"    :width gvr-control-width :height 1.0 :font-size 8 :h-align :center :color :dim :bg :transparent)
     (label "quant"  :width gvr-control-width :height 1.0 :font-size 8 :h-align :center :color :dim :bg :transparent)))
 
-(def gvr-panel (current-pattern graph-visualizations track-colors track-active-notes)
+(def gvr-panel (current-pattern graph-visualizations all-track-colors track-active-notes)
+  (let ((track-colors (gvr-route-track-colors all-track-colors)))
   (do
     ;; Re-derive the matrix snapshot from the resolved current-pattern graph. The
     ;; per-node knobs need no sync — `bind-graph` re-seeds their slots as the rows
@@ -726,7 +748,7 @@
               :key-count 80
               :width 84
               :height 3.5))
-          )))))
+          ))))))
 
 (effect-buffer "*variable-reset*" (gvr-panel SEQ.current-pattern SEQ.graph-visualizations SEQ.track-colors SEQ.track-active-notes))
 (eseq.seq-step-tabs/seq-register-script-step-sequencer-tab script-tab-label script-buffer-name script-sequencer-name "")

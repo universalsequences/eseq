@@ -2976,6 +2976,11 @@ pub fn stable_sequencer_id(name: &str) -> u64 {
         hash ^= *byte as u64;
         hash = hash.wrapping_mul(0x0000_0100_0000_01B3);
     }
+    // Ids travel through Lisp as f64 (`def-sequencer` returns the handle every
+    // graph-* native accepts), so keep them inside f64's exact integer range.
+    // Projects saved with full-width ids still resolve: override matching
+    // falls back to the name within the same owner (`GraphManifest::matches_overrides`).
+    let hash = hash & ((1u64 << 53) - 1);
     if hash == 0 {
         0x9E37_79B9_7F4A_7C15
     } else {

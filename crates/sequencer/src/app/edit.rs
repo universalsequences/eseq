@@ -2926,11 +2926,13 @@ impl App {
         let group_index = self.groups.iter()
             .position(|group| group.members.contains(&track))?;
         let group = &mut self.groups[group_index];
+        let group_id = group.id;
         let position = group.members.iter().position(|member| *member == track)?;
         group.members.remove(position);
         if let Some(rack) = group.rack.as_mut() {
             rack.remap_after_member_removed(position);
         }
+        self.remap_rack_sequencer_routes_after_member_removed(group_id, position);
         Some(group_index)
     }
 
@@ -3704,6 +3706,7 @@ impl App {
     }
 
     fn remap_groups_after_track_delete(&mut self, deleted: usize) {
+        let mut removed_members = Vec::new();
         for group in &mut self.groups {
             let position = group.members.iter().position(|member| *member == deleted);
             group.members.retain(|member| *member != deleted);
@@ -3717,6 +3720,12 @@ impl App {
             if let (Some(position), Some(rack)) = (position, group.rack.as_mut()) {
                 rack.remap_after_member_removed(position);
             }
+            if let Some(position) = position {
+                removed_members.push((group.id, position));
+            }
+        }
+        for (group_id, position) in removed_members {
+            self.remap_rack_sequencer_routes_after_member_removed(group_id, position);
         }
         // A rack with no pads is still a rack (lazy pads); a plain group is
         // still a group while it holds a child rack, whose bus chains into
@@ -8512,7 +8521,7 @@ fn apply_recorded_pattern_geometry_command(
 /// Applies pattern geometry edits to distinct tracks as one atomic history
 /// entry. Capturing every target before executing any command keeps a rack-wide
 /// resize from becoming a sequence of independently undoable track edits.
-fn apply_recorded_pattern_geometry_commands(
+pub fn apply_recorded_pattern_geometry_commands(
     app: &mut App,
     commands: &[AppCommand],
     label: &'static str,
@@ -8773,6 +8782,155 @@ pub fn apply_recorded_step_mutation(
         EditPatch::StepCells(patch),
         retained_bytes,
     );
+    Ok(EditOutcome::Applied(history_move))
+}
+
+/// Clears steps on several tracks as ONE history entry: the rack-wide /
+/// multi-track select-all followed by Backspace. One track degenerates to a
+/// plain step-cells patch; more become a Composite of per-track patches so a
+/// single undo restores every track.
+pub fn apply_recorded_multi_track_step_clear(
+    app: &mut App,
+    targets: &[(usize, Vec<usize>)],
+) -> Result<EditOutcome, EditError> {
+    struct Pending {
+        track: usize,
+        pattern_id: PatternId,
+        target: TrackPatternId,
+        steps: Vec<usize>,
+        before: Vec<StepCellSnapshot>,
+        registry_before: PlockVariantRegistry,
+    }
+
+    let mut seen_tracks = HashSet::new();
+    let mut pending = Vec::with_capacity(targets.len());
+    for (track, steps) in targets {
+        let steps = normalized_steps(steps);
+        if steps.is_empty() {
+            continue;
+        }
+        if !seen_tracks.insert(*track) {
+            return Err(EditError::InvalidTarget(format!(
+                "multi-track step clear contains track {track} more than once"
+            )));
+        }
+        let track_id = app
+            .track_registry
+            .id_at(*track)
+            .ok_or(EditError::TrackOutOfRange { track: *track })?;
+        let pattern_id =
+            ensure_effective_track_pattern(app, *track).ok_or(EditError::MissingTrackPattern)?;
+        let (before, registry_before) = app
+            .state
+            .capture_pattern_step_cells(*track, pattern_id, &steps)
+            .map_err(EditError::ReplayFailed)?;
+        pending.push(Pending {
+            track: *track,
+            pattern_id,
+            target: TrackPatternId {
+                track: track_id,
+                pattern: pattern_id,
+            },
+            steps,
+            before,
+            registry_before,
+        });
+    }
+    if pending.is_empty() {
+        return Ok(EditOutcome::NoOp);
+    }
+
+    let rollback_all = |app: &mut App, pending: &[Pending]| {
+        for entry in pending {
+            let cells = entry
+                .steps
+                .iter()
+                .copied()
+                .zip(entry.before.iter().cloned())
+                .collect::<Vec<_>>();
+            let _ = app.state.restore_pattern_step_cells_no_publish(
+                entry.track,
+                entry.pattern_id,
+                &cells,
+                &entry.registry_before,
+            );
+        }
+    };
+
+    for entry in &pending {
+        for step in &entry.steps {
+            app.state.clear_step_payload_inner(entry.track, *step);
+        }
+    }
+
+    let mut patches = Vec::with_capacity(pending.len());
+    for entry in &pending {
+        let (after, _) = match app
+            .state
+            .capture_pattern_step_cells(entry.track, entry.pattern_id, &entry.steps)
+        {
+            Ok(after) => after,
+            Err(error) => {
+                rollback_all(app, &pending);
+                return Err(EditError::ReplayFailed(error));
+            }
+        };
+        let cells = entry
+            .steps
+            .iter()
+            .copied()
+            .zip(entry.before.iter().cloned())
+            .zip(after)
+            .filter_map(|((step, before), after)| {
+                (!step_snapshot_bit_exact_eq(&before, &after)).then_some(StepCellDelta {
+                    step,
+                    before,
+                    after,
+                })
+            })
+            .collect::<Vec<_>>();
+        if cells.is_empty() {
+            continue;
+        }
+        app.state
+            .reconcile_plock_variant_registry_for_track(entry.track);
+        let (_, registry_after) = match app
+            .state
+            .capture_pattern_step_cells(entry.track, entry.pattern_id, &entry.steps)
+        {
+            Ok(after) => after,
+            Err(error) => {
+                rollback_all(app, &pending);
+                return Err(EditError::ReplayFailed(error));
+            }
+        };
+        patches.push(StepCellsPatch {
+            target: entry.target,
+            cells,
+            variant_registry_before: entry.registry_before.clone(),
+            variant_registry_after: registry_after,
+        });
+    }
+    if patches.is_empty() {
+        return Ok(EditOutcome::NoOp);
+    }
+    // Publish per track exactly as the single-track path does: the clears
+    // above were no-publish writes.
+    for patch in &patches {
+        if let Err(error) = replay_step_patch(app, patch, ApplyMode::Redo) {
+            rollback_all(app, &pending);
+            return Err(error);
+        }
+    }
+    let label = if patches.len() == 1 { "Clear steps" } else { "Clear steps on tracks" };
+    let patch = if patches.len() == 1 {
+        EditPatch::StepCells(patches.pop().expect("one patch"))
+    } else {
+        EditPatch::Composite(patches.into_iter().map(EditPatch::StepCells).collect())
+    };
+    let retained_bytes = edit_patch_retained_bytes(&patch);
+    finish_active_gesture(app);
+    let history_move = app.history.commit(label, None, patch, retained_bytes);
     Ok(EditOutcome::Applied(history_move))
 }
 
@@ -13427,6 +13585,44 @@ mod tests {
             restored_final.first_difference(&final_state),
             operations.join("\n"),
         );
+    }
+
+    #[test]
+    fn multi_track_step_clear_is_one_undo_entry() {
+        let mut app = test_app(SequencerState::new(
+            3,
+            vec![
+                default_empty_effect_chain(),
+                default_empty_effect_chain(),
+                default_empty_effect_chain(),
+            ],
+        ));
+        app.tracks = vec!["1".to_string(), "2".to_string(), "3".to_string()];
+        app.track_registry = crate::sequencer::TrackRegistry::for_legacy_track_count(3).unwrap();
+        for (track, step) in [(0, 0), (0, 4), (1, 2), (2, 7)] {
+            try_apply_command(&mut app, AppCommand::ToggleStep { track, step }).unwrap();
+        }
+        let undo_before = app.history.undo_len();
+        let all = (0..16).collect::<Vec<_>>();
+        let outcome = apply_recorded_multi_track_step_clear(
+            &mut app,
+            &[(0, all.clone()), (1, all.clone()), (2, all)],
+        )
+        .expect("clear across tracks");
+        assert!(matches!(outcome, EditOutcome::Applied(_)));
+        assert_eq!(app.history.undo_len(), undo_before + 1, "one entry for all tracks");
+        for track in 0..3 {
+            assert!((0..16).all(|step| !app.state.pattern.patterns[track].is_active(step)));
+        }
+        assert!(matches!(undo(&mut app), HistoryReplay::Applied(_)));
+        for (track, step) in [(0, 0), (0, 4), (1, 2), (2, 7)] {
+            assert!(app.state.pattern.patterns[track].is_active(step), "{track}:{step} restored");
+        }
+        // Nothing to clear is a no-op that leaves history alone.
+        let outcome = apply_recorded_multi_track_step_clear(&mut app, &[(1, vec![9, 10])])
+            .expect("empty clear");
+        assert!(matches!(outcome, EditOutcome::NoOp));
+        assert_eq!(app.history.undo_len(), undo_before);
     }
 
     #[test]

@@ -36,6 +36,8 @@
 (module eseq.step-grid-interactions)
 
 (import eseq.seq-core-state :as core)
+;; Rack membership for the rack-wide select-all (drum rack v2 groups).
+(import eseq.drum-rack-v2)
 
 (export page-button-width
         page-slot-width
@@ -414,10 +416,35 @@
         (seq-selected-step-indexes) value)
       (seq-set-process-lane-step-value track lane step value))))
 
+;; Tracks a Cmd+A spans beyond the current one: every member of the selected
+;; drum rack (the rack header/bus is selected), else the multi-track selection
+;; when it has two or more tracks. Empty means the plain single-track select.
+(def select-all-tracks ()
+  (let ((rack (eseq.drum-rack-v2/rack-of-bus eseq.seq-core-state/selected-bus)))
+    (if (>= rack 0)
+      (eseq.drum-rack-v2/members rack)
+      (if (>= (len SEQ.selected-tracks) 2)
+        SEQ.selected-tracks
+        '()))))
+
+(def track-in-list? (tracks track)
+  (> (len (filter (lambda (t) (= t track)) tracks)) 0))
+
+;; Cmd+A over a selected drum rack (or a multi-track selection) selects every
+;; step on every one of those tracks so one Backspace clears them all; the
+;; current track must be one of them because the shared step set is keyed to
+;; it, so a rack selected from its header first focuses its first member.
 (def select-all-steps ()
   (do
     (eseq.seq-core-state/cool-off-follow)
-    (seq-select-all-steps)))
+    (let ((tracks (select-all-tracks)))
+      (if (>= (len tracks) 2)
+        (do
+          (if (track-in-list? tracks SEQ.current-track)
+            nil
+            (seq-set-track (nth tracks 0)))
+          (seq-select-all-steps-on-tracks tracks))
+        (seq-select-all-steps)))))
 
 (def buffer-visible? (name)
   (> (len (filter (lambda (n) (= n name)) (visible-buffer-list))) 0))

@@ -5,7 +5,8 @@
         apply_bus_mixer_history_host_command,
         apply_piano_roll_gesture_update,
         apply_piano_roll_history_host_command,
-        apply_selected_steps_delete, apply_slice3_history_host_command,
+        apply_selected_steps_delete, apply_selected_steps_delete_multi,
+        apply_slice3_history_host_command, apply_track_params_batch_host_command,
         apply_toggle_step_host_command, bus_mixer_targeted_invalidation,
         slice3_track_mixer_invalidation, BusMixerInvalidation, TrackMixerInvalidation,
         build_custom_instrument_ui_source_with_overlay, claim_param_sync_revision,
@@ -402,6 +403,164 @@
             sequencer::app::history::HistoryReplay::Applied(_)
         ));
         assert_eq!(state.pattern.track_params[0].get_volume().to_bits(), before.to_bits());
+    }
+
+    /// Three-track app for the multi-track (bulk edit / rack-wide select-all)
+    /// host handlers.
+    fn multi_track_history_test_app() -> (
+        std::sync::Arc<sequencer::sequencer::SequencerState>,
+        sequencer::app::App,
+    ) {
+        let state = std::sync::Arc::new(sequencer::sequencer::SequencerState::new(
+            3,
+            vec![
+                sequencer::sequencer::default_empty_effect_chain(),
+                sequencer::sequencer::default_empty_effect_chain(),
+                sequencer::sequencer::default_empty_effect_chain(),
+            ],
+        ));
+        let (keyboard_tx, _keyboard_rx) = std::sync::mpsc::channel();
+        let mut app = sequencer::app::App::new(
+            state.clone(),
+            sequencer::audiograph::LiveGraphPtr(std::ptr::null_mut()),
+            44_100,
+            sequencer::app::AudioBuses {
+                bus_l_id: 0,
+                bus_r_id: 0,
+                default_bus_nodes: Vec::new(),
+                bus_effect_runtime: std::sync::Arc::new(std::sync::Mutex::new(std::sync::Arc::new(Vec::new()))),
+                reverb_bus_id: 0,
+                reverb_node_id: 0,
+            },
+            std::sync::Arc::new(sequencer::recorder::MasterRecorder::new(44_100, 2)),
+            keyboard_tx,
+        );
+        app.tracks = vec!["1".to_string(), "2".to_string(), "3".to_string()];
+        app.track_registry =
+            sequencer::sequencer::TrackRegistry::for_legacy_track_count(3).unwrap();
+        (state, app)
+    }
+
+    #[test]
+    fn track_params_batch_host_action_sets_every_track_as_one_undo() {
+        let (state, mut app) = multi_track_history_test_app();
+        let tracks = || Value::List(vec![
+            std::rc::Rc::new(std::cell::RefCell::new(Value::Number(0.0))),
+            std::rc::Rc::new(std::cell::RefCell::new(Value::Number(2.0))),
+        ]);
+        let before = state.pattern.track_params[0].get_timebase();
+        let payload = history_value_map([
+            ("op", Value::Keyword("timebase".to_string())),
+            ("tracks", tracks()),
+            ("value", Value::Number(3.0)),
+        ]);
+        let undo_before = app.history.undo_len();
+        let (outcome, touched) = apply_track_params_batch_host_command(&mut app, &payload)
+            .expect("apply timebase batch");
+        assert!(matches!(outcome, sequencer::app::edit::EditOutcome::Applied(_)));
+        assert_eq!(touched, vec![0, 2]);
+        sequencer::app::edit::finish_active_gesture(&mut app);
+        assert_eq!(app.history.undo_len(), undo_before + 1);
+        let expected = sequencer::sequencer::Timebase::from_index(3);
+        assert_eq!(state.pattern.track_params[0].get_timebase(), expected);
+        assert_eq!(state.pattern.track_params[1].get_timebase(), before, "unselected track untouched");
+        assert_eq!(state.pattern.track_params[2].get_timebase(), expected);
+        assert!(matches!(
+            sequencer::app::edit::undo(&mut app),
+            sequencer::app::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(state.pattern.track_params[0].get_timebase(), before);
+        assert_eq!(state.pattern.track_params[2].get_timebase(), before);
+
+        // Poly asks for a target state: only the tracks that differ flip, so a
+        // mixed selection lands uniform instead of swapping.
+        let poly0 = state.pattern.track_params[0].is_polyphonic();
+        sequencer::app::try_apply_command(
+            &mut app,
+            sequencer::app::AppCommand::ToggleTrackPolyphonic { track: 2 },
+        )
+        .unwrap();
+        assert_ne!(state.pattern.track_params[2].is_polyphonic(), poly0);
+        let payload = history_value_map([
+            ("op", Value::Keyword("toggle-poly".to_string())),
+            ("tracks", tracks()),
+            ("value", Value::Number(if poly0 { 1.0 } else { 0.0 })),
+        ]);
+        let (outcome, _) = apply_track_params_batch_host_command(&mut app, &payload)
+            .expect("apply poly batch");
+        assert!(matches!(outcome, sequencer::app::edit::EditOutcome::Applied(_)));
+        assert_eq!(state.pattern.track_params[0].is_polyphonic(), poly0);
+        assert_eq!(state.pattern.track_params[2].is_polyphonic(), poly0);
+        // Already uniform at the requested state: nothing to flip, no entry.
+        let undo_before = app.history.undo_len();
+        let (outcome, _) = apply_track_params_batch_host_command(&mut app, &payload)
+            .expect("apply poly batch again");
+        assert!(matches!(outcome, sequencer::app::edit::EditOutcome::NoOp));
+        assert_eq!(app.history.undo_len(), undo_before);
+
+        // Pattern length rides the geometry batch. (The poly batch above is a
+        // coalescing gesture; close it so its entry is counted first.)
+        sequencer::app::edit::finish_active_gesture(&mut app);
+        let payload = history_value_map([
+            ("op", Value::Keyword("set-length".to_string())),
+            ("tracks", tracks()),
+            ("value", Value::Number(32.0)),
+        ]);
+        let undo_before = app.history.undo_len();
+        let (outcome, _) = apply_track_params_batch_host_command(&mut app, &payload)
+            .expect("apply length batch");
+        assert!(matches!(outcome, sequencer::app::edit::EditOutcome::Applied(_)));
+        assert_eq!(app.history.undo_len(), undo_before + 1);
+        assert_eq!(state.pattern.track_params[0].get_num_steps(), 32);
+        assert_eq!(state.pattern.track_params[1].get_num_steps(), 16);
+        assert_eq!(state.pattern.track_params[2].get_num_steps(), 32);
+    }
+
+    #[test]
+    fn multi_track_selected_step_delete_clips_to_each_length_and_clears_selection() {
+        let (state, mut app) = multi_track_history_test_app();
+        for (track, step) in [(0, 1), (1, 5), (2, 3)] {
+            sequencer::app::try_apply_command(
+                &mut app,
+                sequencer::app::AppCommand::ToggleStep { track, step },
+            )
+            .unwrap();
+        }
+        // Track 1 is longer; the shared step set spans the longest pattern.
+        sequencer::app::try_apply_command(
+            &mut app,
+            sequencer::app::AppCommand::SetTrackNumSteps { track: 1, n: 32 },
+        )
+        .unwrap();
+        sequencer::app::try_apply_command(
+            &mut app,
+            sequencer::app::AppCommand::ToggleStep { track: 1, step: 20 },
+        )
+        .unwrap();
+        let selected = std::sync::Arc::new(std::sync::Mutex::new(
+            (0..32).collect::<std::collections::HashSet<usize>>(),
+        ));
+        let undo_before = app.history.undo_len();
+        let (outcome, targets) =
+            apply_selected_steps_delete_multi(&mut app, &[2, 0, 1], &selected)
+                .expect("delete across tracks");
+        assert!(matches!(outcome, sequencer::app::edit::EditOutcome::Applied(_)));
+        assert_eq!(
+            targets.iter().map(|(track, steps)| (*track, steps.len())).collect::<Vec<_>>(),
+            vec![(2, 16), (0, 16), (1, 32)]
+        );
+        assert!(selected.lock().unwrap().is_empty());
+        assert_eq!(app.history.undo_len(), undo_before + 1);
+        for track in 0..3 {
+            assert!((0..32).all(|step| !state.pattern.patterns[track].is_active(step)));
+        }
+        assert!(matches!(
+            sequencer::app::edit::undo(&mut app),
+            sequencer::app::history::HistoryReplay::Applied(_)
+        ));
+        for (track, step) in [(0, 1), (1, 5), (1, 20), (2, 3)] {
+            assert!(state.pattern.patterns[track].is_active(step), "{track}:{step}");
+        }
     }
 
     #[test]
@@ -1041,6 +1200,7 @@
             &expanded_step_projection,
             &(0..sequencer::sequencer::MAX_STEPS).collect::<Vec<_>>(),
             true,
+            None,
         );
 
         assert_eq!(
@@ -1086,6 +1246,7 @@
             &expanded_step_projection,
             &[3],
             true,
+            None,
         );
         assert_eq!(
             runtime

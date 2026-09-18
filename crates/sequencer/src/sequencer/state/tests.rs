@@ -1672,6 +1672,13 @@
         live_rack.slots[0].instrument_slot.defaults[0] = 97.0;
         live_rack.slots[0].instrument_slot.defaults[1] = 98.0;
         live_rack.slots[0].instrument_base_note_offset = 24.0;
+        live_rack.slots[0].gain = 1.5;
+        live_rack.slots[0].pan = 0.4;
+        live_rack.slots[0].max_polyphony = 6;
+        live_rack.slots[0].mute = true;
+        live_rack.slots[0].solo = false;
+        live_rack.slots[0].choke_group = Some(2);
+        live_rack.slots[0].param_plocks.rows[3][0] = Some(9.0);
         state.pattern.rack_tracks.lock().unwrap()[0] = Some(live_rack);
 
         // 2 other scene patterns + the track-sound carrier.
@@ -1701,6 +1708,15 @@
             let rack_slot = &pattern.rack_tracks[0].as_ref().unwrap().slots[0];
             assert_eq!(&rack_slot.instrument_slot.defaults[..2], &[97.0, 98.0]);
             assert_eq!(rack_slot.instrument_base_note_offset, 24.0);
+            // Slot-level mixer fields travel with the slot instrument copy.
+            assert_eq!(rack_slot.gain, 1.5);
+            assert_eq!(rack_slot.pan, 0.4);
+            assert_eq!(rack_slot.max_polyphony, 6);
+            assert!(rack_slot.mute);
+            assert!(!rack_slot.solo);
+            assert_eq!(rack_slot.choke_group, Some(2));
+            // ...but slot p-locks do not.
+            assert_eq!(rack_slot.param_plocks.rows[3][0], None);
         }
         assert_eq!(patterns[1].effect_slots[0][0].plocks[5][1], Some(555.0));
         assert_eq!(patterns[1].midi_fx_slots[0][0].plocks[6][1], Some(666.0));
@@ -1714,6 +1730,52 @@
                 .plocks[7][1],
             Some(888.0)
         );
+    }
+
+    #[test]
+    fn copy_current_rack_values_updates_every_slot_and_macro_in_every_pattern() {
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        let two_slots = || {
+            let mut rack = sample_rack_track_snapshot();
+            let mut second = rack.slots[0].clone();
+            second.instrument_slot = sample_effect_slot_snapshot(78);
+            rack.slots.push(second);
+            rack
+        };
+        let mut first = sample_pattern_snapshot(1);
+        let mut second = sample_pattern_snapshot(1);
+        first.rack_tracks[0] = Some(two_slots());
+        second.rack_tracks[0] = Some(two_slots());
+        second.rack_tracks[0].as_mut().unwrap().slots[1].gain = 0.1;
+        second.rack_tracks[0].as_mut().unwrap().macros[1].plocks[4] = Some(0.9);
+        state.replace_pattern_repository(vec![first, second], 0);
+
+        let mut live_rack = two_slots();
+        live_rack.slots[0].gain = 1.25;
+        live_rack.slots[0].instrument_base_note_offset = -5.0;
+        live_rack.slots[1].gain = 0.5;
+        live_rack.slots[1].pan = -0.75;
+        live_rack.slots[1].max_polyphony = 2;
+        live_rack.slots[1].instrument_slot.defaults[0] = 42.0;
+        live_rack.macros[1].value = 0.33;
+        state.pattern.rack_tracks.lock().unwrap()[0] = Some(live_rack);
+
+        assert_eq!(state.copy_current_rack_values_to_all_track_patterns(0), 3);
+
+        for pattern in &state.export_pattern_repository() {
+            let rack = pattern.rack_tracks[0].as_ref().unwrap();
+            assert_eq!(rack.slots[0].gain, 1.25);
+            assert_eq!(rack.slots[0].instrument_base_note_offset, -5.0);
+            assert_eq!(rack.slots[1].gain, 0.5);
+            assert_eq!(rack.slots[1].pan, -0.75);
+            assert_eq!(rack.slots[1].max_polyphony, 2);
+            assert_eq!(rack.slots[1].instrument_slot.defaults[0], 42.0);
+            assert_eq!(rack.macros[1].value, 0.33);
+        }
+        // Macro p-locks stay per pattern.
+        let patterns = state.export_pattern_repository();
+        assert_eq!(patterns[1].rack_tracks[0].as_ref().unwrap().macros[1].plocks[4], Some(0.9));
+        assert_eq!(patterns[0].rack_tracks[0].as_ref().unwrap().macros[1].plocks[4], None);
     }
 
     #[test]

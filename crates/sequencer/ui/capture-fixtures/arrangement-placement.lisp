@@ -7,5 +7,5 @@
     (eseq.seq-panels/seq-open-arrangement)
     (eseq.arrangement/set-cursor 8 0)
     (eseq.arrangement/begin-placement)
-    (eseq.arrangement/track-action 1 (dict :type :place-item :time 8))
-    (eseq.arrangement/begin-placement)))
+    ;; Placement stays active after a click, so no re-arm is needed.
+    (eseq.arrangement/track-action 1 (dict :type :place-item :time 8))))

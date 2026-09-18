@@ -274,13 +274,41 @@ pub(crate) fn push_project_scratch_to_named_buffer(editor: &mut Editor, app: &ap
     }
 }
 
+/// Bring every rack-owned graph sequencer back after the scratch replay: each
+/// recorded source evaluates under its rack owner, so the instance publishes
+/// with the same namespaced id the project's overrides are keyed by.
+fn replay_rack_sequencer_sources(editor: &mut Editor, app: &app::App) -> Result<(), String> {
+    let mut failures = Vec::new();
+    for group in &app.groups {
+        let Some(rack) = group.rack.as_ref() else { continue };
+        for sequencer in &rack.sequencers {
+            if sequencer.source.trim().is_empty() {
+                continue;
+            }
+            if let Err(error) = crate::host_commands::evaluate_rack_sequencer_source(
+                editor,
+                app,
+                group.id,
+                &sequencer.source,
+            ) {
+                failures.push(format!("{} ({}): {error}", sequencer.sequencer_name, group.name));
+            }
+        }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("Rack sequencers: {}", failures.join("; ")))
+    }
+}
+
 pub(crate) fn evaluate_project_scratch_on_ui_runtime(
     editor: &mut Editor,
     app: &app::App,
 ) -> Result<(), String> {
     let scratch_text = app.state.scratch_source();
     if scratch_text.trim().is_empty() {
-        return Ok(());
+        return replay_rack_sequencer_sources(editor, app);
     }
 
     let overlays = editor.snapshot_file_backed_sources();
@@ -290,7 +318,7 @@ pub(crate) fn evaluate_project_scratch_on_ui_runtime(
         overlays,
     );
     let result = if report.success {
-        Ok(())
+        replay_rack_sequencer_sources(editor, app)
     } else {
         let failure = report.failure_message();
         eprintln!(

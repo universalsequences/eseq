@@ -652,6 +652,92 @@ pub struct ProjectGraphOverrides {
     /// Per-beat decay of the per-group activity trace (spec §4.4).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group_trace_decay: Option<f64>,
+    /// `None` = project-owned: routes and seed tracks are track indices and the
+    /// overrides live in the project scene. `Some(group id)` = owned by that
+    /// drum rack: routes and seed tracks are MEMBER indices into the rack, the
+    /// sequencer instance is namespaced by the rack, and the scheduler resolves
+    /// member -> track through the rack membership published with the snapshot
+    /// (`docs/rack-clips-and-break-kits-spec.md` §5).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_rack: Option<u64>,
+}
+
+/// One drum rack's member tracks, in member order, as the sequencer state
+/// mirrors them for route resolution (`App::publish_rack_choke_runtime`
+/// republishes the mirror whenever group topology changes).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RackMembership {
+    pub group_id: u64,
+    pub members: Vec<usize>,
+}
+
+pub fn rack_members<'a>(memberships: &'a [RackMembership], group_id: u64) -> Option<&'a [usize]> {
+    memberships
+        .iter()
+        .find(|membership| membership.group_id == group_id)
+        .map(|membership| membership.members.as_slice())
+}
+
+/// Turn a rack-owned config's member-relative routes and seed masks into track
+/// indices. A member index the rack no longer has routes nowhere. Project-owned
+/// manifests (`owner_rack == None`) pass through untouched.
+pub fn resolve_rack_member_routes(
+    config: &mut GraphRuntimeConfig,
+    owner_rack: Option<u64>,
+    memberships: &[RackMembership],
+) {
+    let Some(group_id) = owner_rack else {
+        return;
+    };
+    let members = rack_members(memberships, group_id).unwrap_or(&[]);
+    for node in &mut config.nodes {
+        node.route = node.route.and_then(|member| members.get(member).copied());
+        let mut mask = 0u128;
+        for (member, track) in members.iter().enumerate().take(128) {
+            if node.seed_track_mask & (1u128 << member) != 0 && *track < 128 {
+                mask |= 1u128 << *track;
+            }
+        }
+        node.seed_track_mask = mask;
+    }
+}
+
+impl ProjectGraphOverrides {
+    /// Remap member-relative routes after member `removed` left the owning
+    /// rack: nodes routed to it go silent, later members shift down one.
+    /// Project-owned overrides are untouched.
+    pub fn remap_after_rack_member_removed(&mut self, group_id: u64, removed: usize) -> bool {
+        if self.owner_rack != Some(group_id) {
+            return false;
+        }
+        let shift = |member: usize| -> Option<usize> {
+            match member.cmp(&removed) {
+                std::cmp::Ordering::Less => Some(member),
+                std::cmp::Ordering::Equal => None,
+                std::cmp::Ordering::Greater => Some(member - 1),
+            }
+        };
+        let mut changed = false;
+        for intrinsic in &mut self.node_intrinsics {
+            if let Some(ProjectGraphRouteOverride::Track(member)) = intrinsic.route {
+                let next = shift(member)
+                    .map(ProjectGraphRouteOverride::Track)
+                    .unwrap_or(ProjectGraphRouteOverride::None);
+                if Some(&next) != intrinsic.route.as_ref() {
+                    intrinsic.route = Some(next);
+                    changed = true;
+                }
+            }
+            if let Some(ProjectGraphSeedFrom::Tracks(members)) = &intrinsic.seed_from {
+                let next: Vec<usize> = members.iter().filter_map(|m| shift(*m)).collect();
+                if &next != members {
+                    intrinsic.seed_from = Some(ProjectGraphSeedFrom::Tracks(next));
+                    changed = true;
+                }
+            }
+        }
+        changed
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1283,6 +1369,11 @@ impl GraphRuntime {
 
     pub fn edge_dampening(&self, edge_index: usize) -> Option<f64> {
         self.edges.get(edge_index).map(|edge| edge.dampening)
+    }
+
+    /// The track a node emits to after resolution (`None` = off).
+    pub fn node_route(&self, node_index: usize) -> Option<usize> {
+        self.nodes.get(node_index).and_then(|node| node.route)
     }
 
     pub fn matches_reference(&self, graph_id: u64, graph_name: &str) -> bool {
@@ -2985,6 +3076,10 @@ impl EdgeSetSpec {
 pub struct GraphManifest {
     pub id: u64,
     pub name: String,
+    /// The drum rack this instance belongs to, if any. Rack-owned instances are
+    /// namespaced: their `id` hashes `name@rack:<gid>` so two racks can run the
+    /// same script side by side. See `ProjectGraphOverrides::owner_rack`.
+    pub owner_rack: Option<u64>,
     pub shape: ShapeSpec,
     pub energy_decay: f64,
     pub reset_every_beats: f64,
@@ -2998,6 +3093,15 @@ pub struct GraphManifest {
 }
 
 impl GraphManifest {
+    /// The one override record that belongs to this instance. Ids are exact;
+    /// a name match only counts inside the same owner, so a rack-owned copy of
+    /// a script never picks up the project-owned copy's overrides (or vice
+    /// versa). Every match site goes through here.
+    pub fn matches_overrides(&self, overrides: &ProjectGraphOverrides) -> bool {
+        overrides.sequencer_id == self.id
+            || (overrides.sequencer_name == self.name && overrides.owner_rack == self.owner_rack)
+    }
+
     /// True if `other` materializes to the same runtime identity and edge topology.
     /// Live-editable config fields such as route, delay, threshold, weight, and
     /// default dampening are intentionally compatible because they can be applied to
@@ -3247,6 +3351,119 @@ pub fn edge_set_group_id(set: &EdgeSetSpec) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rack_owned_config_resolves_member_routes_and_seed_masks_to_tracks() {
+        let members = vec![RackMembership { group_id: 7, members: vec![4, 9, 2] }];
+        let mut nodes: Vec<GraphNode> = (0..4).map(|_| GraphNode::default()).collect();
+        nodes[0].route = Some(0);
+        nodes[1].route = Some(2);
+        nodes[2].route = Some(3); // member the rack does not have
+        nodes[3].route = None;
+        nodes[0].seed_track_mask = seed_track_mask(&[0, 1]);
+        nodes[2].seed_track_mask = seed_track_mask(&[5]);
+        let mut config = runtime_config(1, nodes.clone(), Vec::new());
+
+        let mut untouched = runtime_config(1, nodes, Vec::new());
+        resolve_rack_member_routes(&mut untouched, None, &members);
+        assert_eq!(untouched.nodes[1].route, Some(2), "project-owned configs pass through");
+
+        resolve_rack_member_routes(&mut config, Some(7), &members);
+        assert_eq!(config.nodes[0].route, Some(4));
+        assert_eq!(config.nodes[1].route, Some(2));
+        assert_eq!(config.nodes[2].route, None, "a missing member routes nowhere");
+        assert_eq!(config.nodes[3].route, None);
+        assert_eq!(config.nodes[0].seed_track_mask, seed_track_mask(&[4, 9]));
+        assert_eq!(config.nodes[2].seed_track_mask, 0);
+
+        let mut unknown_rack = runtime_config(1, config.nodes.clone(), Vec::new());
+        resolve_rack_member_routes(&mut unknown_rack, Some(99), &members);
+        assert!(unknown_rack.nodes.iter().all(|node| node.route.is_none()));
+    }
+
+    #[test]
+    fn rack_member_leave_silences_its_nodes_and_shifts_later_members() {
+        let intrinsic = |instance: usize, route: Option<ProjectGraphRouteOverride>, seed: Option<ProjectGraphSeedFrom>| {
+            ProjectGraphNodeIntrinsicOverride {
+                group: "n".into(),
+                instance,
+                resolution: None,
+                delay_steps: None,
+                quantize: None,
+                route,
+                seed_from: seed,
+                seed_on_reset: None,
+                duration: None,
+                swing: None,
+                neural_group: None,
+            }
+        };
+        let mut owned = ProjectGraphOverrides {
+            sequencer_id: 1,
+            sequencer_name: "g".into(),
+            owner_rack: Some(3),
+            node_intrinsics: vec![
+                intrinsic(0, Some(ProjectGraphRouteOverride::Track(0)), None),
+                intrinsic(1, Some(ProjectGraphRouteOverride::Track(1)), Some(ProjectGraphSeedFrom::Tracks(vec![0, 1, 2]))),
+                intrinsic(2, Some(ProjectGraphRouteOverride::Track(2)), Some(ProjectGraphSeedFrom::Route)),
+            ],
+            ..ProjectGraphOverrides::default()
+        };
+        assert!(!owned.remap_after_rack_member_removed(4, 1), "another rack's leave is ignored");
+        assert!(owned.remap_after_rack_member_removed(3, 1));
+        assert_eq!(owned.node_intrinsics[0].route, Some(ProjectGraphRouteOverride::Track(0)));
+        assert_eq!(owned.node_intrinsics[1].route, Some(ProjectGraphRouteOverride::None));
+        assert_eq!(owned.node_intrinsics[2].route, Some(ProjectGraphRouteOverride::Track(1)));
+        assert_eq!(
+            owned.node_intrinsics[1].seed_from,
+            Some(ProjectGraphSeedFrom::Tracks(vec![0, 1]))
+        );
+        assert_eq!(owned.node_intrinsics[2].seed_from, Some(ProjectGraphSeedFrom::Route));
+
+        let mut project = ProjectGraphOverrides {
+            sequencer_id: 2,
+            sequencer_name: "g".into(),
+            node_intrinsics: vec![intrinsic(0, Some(ProjectGraphRouteOverride::Track(1)), None)],
+            ..ProjectGraphOverrides::default()
+        };
+        assert!(!project.remap_after_rack_member_removed(3, 1), "project-owned is untouched");
+        assert_eq!(project.node_intrinsics[0].route, Some(ProjectGraphRouteOverride::Track(1)));
+    }
+
+    #[test]
+    fn override_matching_is_exact_by_id_and_name_only_within_the_same_owner() {
+        let project = GraphManifest {
+            id: 10,
+            name: "shared".into(),
+            owner_rack: None,
+            shape: ShapeSpec::Line(1),
+            energy_decay: 1.0,
+            reset_every_beats: 0.0,
+            seed_on_reset: 0.0,
+            max_poly: 0,
+            max_poly_selection: NeuralMaxPolySelection::Deterministic,
+            duration: GraphDurationSpec::default(),
+            swing: GraphSwingSpec::default(),
+            node: NodeProto::default(),
+            edge_sets: Vec::new(),
+        };
+        let mut rack = project.clone();
+        rack.id = 11;
+        rack.owner_rack = Some(5);
+        let by_name_project = ProjectGraphOverrides {
+            sequencer_id: 999,
+            sequencer_name: "shared".into(),
+            ..ProjectGraphOverrides::default()
+        };
+        let by_name_rack = ProjectGraphOverrides { owner_rack: Some(5), ..by_name_project.clone() };
+        let by_id_rack = ProjectGraphOverrides { sequencer_id: 11, sequencer_name: "x".into(), ..ProjectGraphOverrides::default() };
+        assert!(project.matches_overrides(&by_name_project));
+        assert!(!project.matches_overrides(&by_name_rack));
+        assert!(!project.matches_overrides(&by_id_rack));
+        assert!(rack.matches_overrides(&by_name_rack));
+        assert!(!rack.matches_overrides(&by_name_project));
+        assert!(rack.matches_overrides(&by_id_rack));
+    }
 
     /// A node that fires when its integrated energy reaches `threshold`.
     fn threshold_update(thresholds: Vec<f64>) -> impl FnMut(&NodeEval) -> NodeFire {
@@ -3747,6 +3964,7 @@ mod tests {
         let manifest = GraphManifest {
             id: 1,
             name: "markov".into(),
+            owner_rack: None,
             shape: ShapeSpec::Line(2),
             energy_decay: 1.0,
             reset_every_beats: 0.0,
@@ -4198,6 +4416,7 @@ mod tests {
         let manifest = GraphManifest {
             id: 22,
             name: "matrices".into(),
+            owner_rack: None,
             shape: ShapeSpec::Line(2),
             energy_decay: 1.0,
             reset_every_beats: 0.0,
@@ -4376,6 +4595,7 @@ mod tests {
         let manifest = GraphManifest {
             id: 42,
             name: "neural".into(),
+            owner_rack: None,
             shape: ShapeSpec::Line(1),
             energy_decay: 1.0,
             reset_every_beats: 0.0,
@@ -5265,6 +5485,7 @@ mod tests {
         let manifest = GraphManifest {
             id: 21,
             name: "grouped".into(),
+            owner_rack: None,
             shape: ShapeSpec::Line(3),
             energy_decay: 1.0,
             reset_every_beats: 0.0,
@@ -5313,6 +5534,7 @@ mod tests {
         let manifest = GraphManifest {
             id: 17,
             name: "variable".into(),
+            owner_rack: None,
             shape: ShapeSpec::VariableLine {
                 default: 8,
                 min: 1,

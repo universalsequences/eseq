@@ -1076,12 +1076,17 @@ pub(super) fn sync_step_selection_bindings(
     expanded_step_projection: &Arc<ExpandedStepProjectionRegistry>,
     changed_steps: &[usize],
     sync_legacy_list: bool,
+    multi_track_selection: Option<&[usize]>,
 ) -> bool {
     let _ = rt.set_reactive("SEQ", &track_step_binding_rev_field(track), Value::Nil);
     let selected = selected_steps.lock().unwrap();
     let num_steps = state.pattern.track_params[track]
         .get_num_steps()
         .min(MAX_STEPS);
+    // The shared step set belongs to the current track; another track shows
+    // it only while a multi-track (rack-wide) selection names that track.
+    let track_selected = track == current_track_idx
+        || multi_track_selection.is_some_and(|tracks| tracks.contains(&track));
     let cursor_step = fx_step_cursor_from_runtime(rt);
     let mut dirty = sync_fx_step_cursor_binding_fields(
         rt,
@@ -1095,7 +1100,7 @@ pub(super) fn sync_step_selection_bindings(
         if step >= MAX_STEPS {
             continue;
         }
-        let is_selected = step < num_steps && selected.contains(&step);
+        let is_selected = track_selected && step < num_steps && selected.contains(&step);
         dirty |= rt
             .set_reactive(
                 "SEQ",
@@ -2158,6 +2163,10 @@ pub(super) fn apply_ui_invalidations(
                 track,
                 changed_steps,
             } => {
+                let multi_track_selection = match active_delete_target.lock().unwrap().as_ref() {
+                    Some(ActiveDeleteTarget::TrackSteps { tracks }) => Some(tracks.clone()),
+                    _ => None,
+                };
                 needs_reactive_cycle |= sync_step_selection_bindings(
                     rt,
                     state,
@@ -2168,6 +2177,7 @@ pub(super) fn apply_ui_invalidations(
                     expanded_step_projection,
                     &changed_steps,
                     legacy_step_grid_visible,
+                    multi_track_selection.as_deref(),
                 );
                 if track == current_track_idx {
                     needs_reactive_cycle |= sync_selected_track_bus_send_binding_fields(

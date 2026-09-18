@@ -42,7 +42,9 @@
         group-selected-vis-binding
         bus-selected-vis-binding
         mixer-clip-area-height
-        mixer-panel-height)
+        mixer-panel-height
+        corner-radius-scale
+        radius)
 
 
 ;; Both views select ranges by their rendered order, not storage indices.
@@ -230,10 +232,31 @@
 ;; It lives here rather than in eseq.mixer because eseq.seq-layout must read
 ;; it too and neither module imports the other.
 (defcustom mixer-clip-area-height 4.0
-  :type :number
+  :type :number :min 2 :max 12 :step 0.5
   :doc "Height (cells) of the clip area at the top of each mixer track strip; strips and the mixer panel grow with it.")
+
+;; Compact mode: hide the clip launch grid entirely. Strips lose the whole
+;; clip area and the *mixer* tile shrinks with them.
+(defcustom mixer-show-clip-grid true
+  :type :bool
+  :doc "Show the pattern clip launch grid at the top of each mixer track strip; off gives a compact mixer.")
+
+;; The clip area the strips actually reserve: the knob's height, or nothing
+;; in compact mode. eseq.mixer and eseq.seq-layout both read this one.
+(def effective-clip-area-height ()
+  (if mixer-show-clip-grid mixer-clip-area-height 0))
+
+;; Rounded-corner scale for the sequencer and mixer chrome: 1 is the stock
+;; look, 0 squares every corner. `radius` is the multiplier every
+;; `:corner-radius` / `:border-radius` literal in those views goes through.
+(defcustom corner-radius-scale 1
+  :type :number :min 0 :max 1 :step 0.05
+  :doc "Rounded-corner amount for the sequencer and mixer chrome: 1 is fully rounded, 0 is square.")
+
+(def radius (r)
+  (* r corner-radius-scale))
 
 ;; The *mixer* tile height eseq.seq-layout pins: a 13.8-cell strip plus the
 ;; buffer's own padding/border was 14.5 with the stock 4.0 clip area.
 (def mixer-panel-height ()
-  (+ 10.5 mixer-clip-area-height))
+  (+ 10.5 (effective-clip-area-height)))

@@ -1403,8 +1403,10 @@
     (seq-song-deselect-clip)
     (set-cursor (get event :time) i)))
 
-;; Pattern placement is a one-shot gesture. Source identity is captured on
-;; activation for each track; moving the pointer only repaints the hovered lane.
+;; Pattern placement is a sticky mode: it stays active across clicks until
+;; Place (or Command-P) toggles it off, Escape cancels it, or the track list
+;; changes. Source identity is captured on activation for each track; moving
+;; the pointer only repaints the hovered lane.
 (defstate placement nil)
 (defstate placement-choice nil)
 (defstate placement-choice-track -1)
@@ -1460,7 +1462,6 @@
 (def place-pattern (track source time)
   (if (= source nil) nil
     (do
-      (cancel-placement)
       (set! placement-menu nil)
       (host-command "arrangement-pattern-place"
         (dict :track track :pattern-id (get source :pattern-id) :track-id (get source :track-id) :start-beat time)))))

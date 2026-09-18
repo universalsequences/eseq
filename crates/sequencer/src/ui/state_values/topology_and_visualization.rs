@@ -188,6 +188,39 @@ pub(crate) fn sync_track_topology_state(
     sync_sidebar_browser(rt, app, current_track_idx);
 }
 
+/// Every published graph-mode sequencer as `{id name owner-rack}`, for UI
+/// that lists instances (the rack menu's move/detach entries) without calling
+/// the authoring natives from inside a module. `owner-rack` is the owning
+/// drum rack's group id, or nil for a project-owned instance.
+pub(crate) fn build_graph_sequencers_value(state: &SequencerState) -> Value {
+    Value::List(
+        state
+            .published_sequencers()
+            .into_iter()
+            .filter_map(|published| published.graph)
+            .map(|manifest| {
+                let mut map = HashMap::new();
+                map.insert(
+                    "id".to_string(),
+                    Rc::new(RefCell::new(Value::Number(manifest.id as f64))),
+                );
+                map.insert(
+                    "name".to_string(),
+                    Rc::new(RefCell::new(Value::String(manifest.name.clone()))),
+                );
+                map.insert(
+                    "owner-rack".to_string(),
+                    Rc::new(RefCell::new(match manifest.owner_rack {
+                        Some(group_id) => Value::Number(group_id as f64),
+                        None => Value::Nil,
+                    })),
+                );
+                Rc::new(RefCell::new(Value::Map(map)))
+            })
+            .collect(),
+    )
+}
+
 pub(crate) fn sync_pattern_state(rt: &mut Runtime, state: &Arc<SequencerState>) {
     rt.set_reactive(
         "SEQ",
@@ -225,6 +258,11 @@ pub(crate) fn sync_pattern_state(rt: &mut Runtime, state: &Arc<SequencerState>) 
         "SEQ",
         "graph-visualizations",
         build_graph_visualizations_value(state),
+    );
+    rt.set_reactive(
+        "SEQ",
+        "graph-sequencers",
+        build_graph_sequencers_value(state),
     );
     rt.set_reactive(
         "SEQ",

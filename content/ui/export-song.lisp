@@ -90,7 +90,7 @@
             (button "New export" :key "export-new" :on-click |x y r| (export-song))
             (button EXPORT.export-reveal-label :key "export-reveal"
               :on-click |x y r| (host-command "export-song-reveal" (dict))))
-          (button "Export" :key "export-submit" :on-click |x y r| (start)))))))
+          (button "Export" :key "export-submit" :variant :primary :on-click |x y r| (start)))))))
 
 (def panel ()
   (modal :is-open open? :on-close (lambda () (close)) :width-px 720 :height-px 740

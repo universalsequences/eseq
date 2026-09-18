@@ -58,7 +58,8 @@ impl PreparedExport {
             .end_beat;
         app.sample_analysis.require_complete().map_err(io::Error::other)?;
         app.publish_all_sampler_analysis_runtime();
-        app.start_bounce_playback().map_err(io::Error::other)?;
+        app.start_bounce_playback(options.selection.map(|(_, end)| end).unwrap_or(end_beat))
+            .map_err(io::Error::other)?;
         let latency = unsafe { app.prepare_bounce_latency() }.map_err(io::Error::other)?;
         let plan = BouncePlan::new(
             engine.sample_rate,

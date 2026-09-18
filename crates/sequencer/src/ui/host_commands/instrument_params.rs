@@ -906,19 +906,27 @@ pub(super) fn handle(
         "copy-instrument-values-to-all-scenes" => {
             let track = extract_usize_from_payload(&payload, "track");
             let rack_slot = extract_usize_from_payload(&payload, "rack-slot");
-            let updated = match (track, rack_slot) {
-                (Some(track), Some(rack_slot)) => state
+            // `:rack true` = the whole rack (every slot + macros), sent from
+            // the rack header menu; `:rack-slot n` = one slot's instrument,
+            // sent from that slot's instrument header menu.
+            let whole_rack = extract_bool_from_payload(&payload, "rack");
+            let updated = match (track, rack_slot, whole_rack) {
+                (Some(track), _, true) => {
+                    state.copy_current_rack_values_to_all_track_patterns(track)
+                }
+                (Some(track), Some(rack_slot), false) => state
                     .copy_current_rack_slot_instrument_values_to_all_track_patterns(
                         track, rack_slot,
                     ),
-                (Some(track), None) => {
+                (Some(track), None, false) => {
                     state.copy_current_instrument_values_to_all_track_patterns(track)
                 }
                 _ => 0,
             };
             if updated > 0 {
+                let what = if whole_rack { "rack" } else { "instrument" };
                 editor.handle_host_event(HostEvent::Status(format!(
-                    "Copied instrument values to {updated} patterns/scenes"
+                    "Copied {what} values to {updated} patterns/scenes"
                 )));
             } else {
                 editor.handle_host_event(HostEvent::Status(

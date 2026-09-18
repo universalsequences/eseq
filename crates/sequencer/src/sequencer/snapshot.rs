@@ -105,6 +105,9 @@ pub struct SequencerSnapshot {
     pub mod_connections: Vec<ModConnection>,
     pub neural_networks: Vec<ProjectNeuralNetwork>,
     pub graph_overrides: Vec<ProjectGraphOverrides>,
+    /// Drum-rack member lists at capture time, for resolving rack-owned graph
+    /// sequencers' member-relative routes (`crate::graph::resolve_rack_member_routes`).
+    pub rack_memberships: Vec<crate::graph::RackMembership>,
     pub scene_slots: SceneSlotStore,
     /// Live scene-slot overrides for EVERY scene, indexed by scene position.
     ///
@@ -138,6 +141,7 @@ impl SequencerSnapshot {
             mod_connections: Vec::new(),
             neural_networks: Vec::new(),
             graph_overrides: Vec::new(),
+            rack_memberships: Vec::new(),
             scene_slots: SceneSlotStore::default(),
             scene_slot_table: Arc::new(Vec::new()),
             process_trace: false,
@@ -192,6 +196,7 @@ impl SequencerSnapshot {
             mod_connections,
             neural_networks,
             graph_overrides,
+            rack_memberships: state.rack_memberships(),
             scene_slots,
             scene_slot_table,
             process_trace: state.process_trace_enabled(),
@@ -302,6 +307,7 @@ impl SequencerSnapshot {
             mod_connections,
             neural_networks,
             graph_overrides,
+            rack_memberships: state.rack_memberships(),
             scene_slots,
             // Prebuilt row snapshots are frozen at preflight; the table is
             // rebuilt from live state on every full publish, so readers take

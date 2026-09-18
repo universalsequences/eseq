@@ -77,6 +77,9 @@ The numerical loss laws and voicings here are original design choices, not
 measured bass parameters.
 
 Coefficient work runs every 16 samples and immediately on onset/note-off.
+The control inputs enter `event-hold` before the modal expressions; placing it
+only around a finished coefficient leaves the expensive upstream math running
+every sample. Final latches keep the resonators running at audio rate.
 
 ## Steveland fit (vinyl bass reference)
 

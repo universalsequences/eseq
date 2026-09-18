@@ -12,6 +12,9 @@ pub(super) const COMMANDS: &[&str] = &[
     "save-rack-as-kit",
     "load-kit",
     "audition-sound-on-rack",
+    "attach-rack-sequencer",
+    "detach-rack-sequencer",
+    "move-sequencer-into-rack",
 ];
 
 /// How long a pad-grid hit sounds before its note-off. The pad grid is a
@@ -140,6 +143,95 @@ pub(super) fn handle(
                 Err(error) => editor.handle_host_event(HostEvent::Status(error)),
             }
         }
+        // Evaluate a Lisp form (`(load "path")`, `(import pkg)` or script
+        // text) with every graph def-sequencer it publishes owned by the rack,
+        // and record each new instance so it comes back on project open
+        // (docs/rack-clips-and-break-kits-spec.md §5.1).
+        "attach-rack-sequencer" => {
+            let group_id = extract_usize_from_payload(&payload, "group-id").map(|id| id as u64);
+            let source = extract_string_from_payload(&payload, "source")
+                .map(|source| source.trim().to_string())
+                .filter(|source| !source.is_empty());
+            let (Some(group_id), Some(source)) = (group_id, source) else {
+                editor.handle_host_event(HostEvent::Status(
+                    "attach-rack-sequencer needs a group id and a source form".to_string(),
+                ));
+                return;
+            };
+            if !app.groups.iter().any(|group| group.id == group_id && group.rack.is_some()) {
+                editor.handle_host_event(HostEvent::Status(
+                    format!("Track group {group_id} is not a drum rack"),
+                ));
+                return;
+            }
+            let attached = match evaluate_rack_sequencer_source(editor, app, group_id, &source) {
+                Ok(attached) => attached,
+                Err(error) => {
+                    editor.handle_host_event(HostEvent::Status(error));
+                    return;
+                }
+            };
+            if attached.is_empty() {
+                editor.handle_host_event(HostEvent::Status(
+                    "The source published no graph sequencer; nothing attached".to_string(),
+                ));
+                return;
+            }
+            let mut names = Vec::new();
+            for (id, name) in attached {
+                if let Err(error) = app.attach_rack_sequencer_recorded(group_id, id, &name, &source) {
+                    editor.handle_host_event(HostEvent::Status(error));
+                    return;
+                }
+                names.push(name);
+            }
+            sync_rack_pad_map(app, editor, &track_groups, &ui_epoch);
+            editor.handle_host_event(HostEvent::Status(format!(
+                "Attached {} to {}",
+                names.join(", "),
+                group_name(app, group_id).unwrap_or_else(|| "rack".to_string())
+            )));
+        }
+        "detach-rack-sequencer" => {
+            let group_id = extract_usize_from_payload(&payload, "group-id").map(|id| id as u64);
+            let sequencer_id = extract_usize_from_payload(&payload, "sequencer-id").map(|id| id as u64);
+            let (Some(group_id), Some(sequencer_id)) = (group_id, sequencer_id) else {
+                editor.handle_host_event(HostEvent::Status(
+                    "detach-rack-sequencer needs a group id and a sequencer id".to_string(),
+                ));
+                return;
+            };
+            match app.detach_rack_sequencer_recorded(group_id, sequencer_id) {
+                Ok(name) => {
+                    sync_rack_pad_map(app, editor, &track_groups, &ui_epoch);
+                    editor.handle_host_event(HostEvent::Status(format!(
+                        "Detached '{name}'; its routes are plain tracks again"
+                    )));
+                }
+                Err(error) => editor.handle_host_event(HostEvent::Status(error)),
+            }
+        }
+        "move-sequencer-into-rack" => {
+            let group_id = extract_usize_from_payload(&payload, "group-id").map(|id| id as u64);
+            let sequencer_id = extract_usize_from_payload(&payload, "sequencer-id").map(|id| id as u64);
+            let source = extract_string_from_payload(&payload, "source").unwrap_or_default();
+            let (Some(group_id), Some(sequencer_id)) = (group_id, sequencer_id) else {
+                editor.handle_host_event(HostEvent::Status(
+                    "move-sequencer-into-rack needs a group id and a sequencer id".to_string(),
+                ));
+                return;
+            };
+            match app.move_sequencer_into_rack_recorded(group_id, sequencer_id, source.trim()) {
+                Ok(_) => {
+                    sync_rack_pad_map(app, editor, &track_groups, &ui_epoch);
+                    editor.handle_host_event(HostEvent::Status(format!(
+                        "Moved sequencer into {}; routes are now rack members",
+                        group_name(app, group_id).unwrap_or_else(|| "rack".to_string())
+                    )));
+                }
+                Err(error) => editor.handle_host_event(HostEvent::Status(error)),
+            }
+        }
         // With a selected rack, activating a kit swaps that rack's complete
         // pad/sound assignment in one undo entry. With no addressed rack the
         // browser's create behavior remains: append a new rack.
@@ -217,6 +309,43 @@ pub(super) fn handle(
 
 /// A rack group's display name by its stable id, for status messages and kit
 /// naming. Groups are addressed by `GroupId`, never by index.
+/// Evaluate `source` on the UI runtime with every graph def-sequencer it
+/// publishes owned by `group_id`. Returns the (id, name) of each graph
+/// sequencer the evaluation newly published under that owner.
+pub(crate) fn evaluate_rack_sequencer_source(
+    editor: &mut Editor,
+    app: &app::App,
+    group_id: u64,
+    source: &str,
+) -> Result<Vec<(u64, String)>, String> {
+    let before: std::collections::HashSet<u64> = app
+        .state
+        .published_sequencers()
+        .iter()
+        .map(|published| published.id)
+        .collect();
+    let overlays = editor.snapshot_file_backed_sources();
+    let report = sequencer::lisp_host::with_graph_owner_rack(Some(group_id), || {
+        editor.runtime_mut().eval_source_transactional(None, source, overlays)
+    });
+    if !report.success {
+        return Err(format!("Rack sequencer source failed: {}", report.failure_message()));
+    }
+    Ok(app
+        .state
+        .published_sequencers()
+        .into_iter()
+        .filter(|published| !before.contains(&published.id))
+        .filter(|published| {
+            published
+                .graph
+                .as_ref()
+                .is_some_and(|manifest| manifest.owner_rack == Some(group_id))
+        })
+        .map(|published| (published.id, published.name))
+        .collect())
+}
+
 pub(super) fn group_name(app: &app::App, group_id: u64) -> Option<String> {
     app.groups
         .iter()

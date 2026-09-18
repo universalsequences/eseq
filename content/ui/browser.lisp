@@ -1651,21 +1651,21 @@
            (= SEQ.editor-mode "edit-effect"))))
 
 (def editor-header ()
-  (box :width :fill :padding 0.25
-    (v-stack :width :fill :gap 0.4
-      (h-stack :width :fill :gap 0.5 :align :center
-        (label
-          (if (editor-macro-action?) "Defmacro"
-            (if (= SEQ.editor-mode "new-instrument") "New Instrument"
-              (if (= SEQ.editor-mode "edit-instrument")
-                (if (= SEQ.editor-surface "code") "Edit Instrument (code)" "Edit Instrument")
-                (if (= SEQ.editor-mode "new-effect") "New Effect"
-                  (if (= SEQ.editor-mode "edit-effect")
-                    (if (= SEQ.editor-surface "code") "Edit Effect (code)" "Edit Effect")
-                    "Editor")))))
-          :font-size 12
-          :color :white
-          :bg :transparent))
+  (box :width :fill :padding 0.25 :height :fill
+    (v-stack :width :fill :gap 0.4 :height :fill
+      ;(h-stack :width :fill :gap 0.5 :align :center
+      ;(label
+      ;  (if (editor-macro-action?) "Defmacro"
+      ;    (if (= SEQ.editor-mode "new-instrument") "New Instrument"
+      ;      (if (= SEQ.editor-mode "edit-instrument")
+      ;        (if (= SEQ.editor-surface "code") "Edit Instrument (code)" "Edit Instrument")
+      ;        (if (= SEQ.editor-mode "new-effect") "New Effect"
+      ;          (if (= SEQ.editor-mode "edit-effect")
+      ;            (if (= SEQ.editor-surface "code") "Edit Effect (code)" "Edit Effect")
+      ;            "Editor")))))
+      ;  :font-size 12
+      ;  :color :white
+      ;  :bg :transparent))
       
       (if (editor-macro-action?)
         (v-stack :width :fill :gap 0.35
@@ -1686,30 +1686,30 @@
             :color :white
             :bg :transparent))
         (if (= SEQ.editor-mode "new-instrument")
-          (v-stack :width :fill :gap 0.35
-            (label "Mode"
-              :font-size 9
-              :color :gray
-              :bg :transparent)
+          (v-stack :width :fill :height :fill :gap 0.35
+            
             (h-stack :width :fill :gap 0.35
               (button "Instrument"
-                :variant (if (= SEQ.editor-instrument-run-mode "instrument") :primary :secondary)
+                :background-color (if (= SEQ.editor-instrument-run-mode "instrument") :mixer-strip-bg :transparent)
+                :border-color :black
                 :width 8.5
                 :height 1.2
-                :font-size 9
+                :font-size 11
                 :on-click |x y r|
                 (host-command "set-draft-instrument-run-mode" (dict :run-mode "instrument"))
-                :color (if (= SEQ.editor-instrument-run-mode "instrument") :browser-primary-fg :white))
+                :color (if (= SEQ.editor-instrument-run-mode "instrument") :white :dimmer))
               (button "Free Patch"
-                :variant (if (= SEQ.editor-instrument-run-mode "free_patch") :primary :secondary)
+                :background-color (if (= SEQ.editor-instrument-run-mode "free_patch") :mixer-strip-bg :transparent)
+                :border-color :black
+                :border-width 1
                 :width 8.5
                 :height 1.2
-                :font-size 9
+                :font-size 11
                 :on-click |x y r|
                 (host-command "set-draft-instrument-run-mode" (dict :run-mode "free_patch"))
-                :color (if (= SEQ.editor-instrument-run-mode "free_patch") :browser-primary-fg :white)))
+                :color (if (= SEQ.editor-instrument-run-mode "free_patch") :white :dim)))
             (label "Save as"
-              :font-size 9
+              :font-size 12
               :color :gray
               :bg :transparent)
             (text-input
@@ -1782,19 +1782,31 @@
       ;; Eject to code (patch editor, edit-existing only)
       (if (and (= SEQ.editor-surface "patch")
           (or (= SEQ.editor-mode "edit-instrument") (= SEQ.editor-mode "edit-effect")))
-        (button "Eject to code"
-          :variant :secondary
-          :width 13
-          :height 1.2
-          :font-size 10
-          :on-click |x y r|
-          (host-command "eject-editor-to-code" (dict))
-          :color :white)
+          (button "View code"
+            :variant :ghost
+            :corner-radius 16
+            :width 13
+            :font-size 13
+            :on-click |x y r|
+            (host-command "eject-editor-to-code" (dict))
+            :color :white)
         (box))
+      (box :width 1 :flex 1)
       ;; Save button
       (if (editor-busy?)
         (box :height 1.2)
-        (h-stack :align :baseline
+        (h-stack :align :center :width :fill :gap 0.5 :padding 0.1
+          (box :flex 1 :height 1)
+          (box :bg :dark-gray :width 6 :height 1.5 :align :center
+            :on-click |x y r|
+            (if SEQ.editor-canceling nil (host-command "cancel-editor" (dict)))
+            (button "Cancel"
+              :variant :secondary
+              :font-size 13
+              :width 8
+              :color (if SEQ.editor-canceling :white :white)
+              ))          
+          (box :width 0.7 :height 1)
           (button
             (if (editor-macro-action?)
               (editor-macro-action-label)
@@ -1805,8 +1817,7 @@
                   "Save")))
             :variant :primary
             :width (if (editor-macro-action?) 14.5 10)
-            :height 1.2
-            :font-size 11
+            :font-size 13
             :on-click |x y r|
             (if (editor-macro-action?)
               (host-command "save-active-editor-macro" (dict))
@@ -1824,20 +1835,11 @@
           (if (editor-fork-available?)
             (button "Fork"
               :variant :secondary
-              :width 6
-              :height 1.2
-              :font-size 11
+              :font-size 13
               :on-click |x y r| (host-command "fork-editor-session" (dict))
               :color :white)
             (box))
-          (box :bg :dark-gray :width 6 :height 1.5 :align :center
-            :on-click |x y r|
-            (if SEQ.editor-canceling nil (host-command "cancel-editor" (dict)))
-            (button "cancel"
-              :font-size 9
-              :height 1.2
-              :color (if SEQ.editor-canceling :white :white)
-              :background-color :gray)))            
+          )            
         )
       )))
 
@@ -1863,7 +1865,7 @@
 ;; ── Reactive rendering (like ui/main.lisp) ──
 
 (def root-widget ()
-  (v-stack :width :fill :gap 0.4 :padding 0.15 (build-widgets)))
+  (v-stack :width :fill :height :fill :gap 0.4 :padding 0.15 (build-widgets)))
 
 (def refresh-buffer ()
   (render-widget-to-buffer "*samples*" (root-widget)))

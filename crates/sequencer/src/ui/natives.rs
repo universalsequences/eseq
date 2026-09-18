@@ -131,6 +131,48 @@ fn slice3_numeric_history_command(op: &str, track: Option<usize>, value: f64) ->
     }
 }
 
+/// Tracks a track-settings edit fans out to (bulk edit): the multi-track
+/// selection when it has two or more members and includes the edited track,
+/// else `None` and the edit stays single-track.
+fn bulk_edit_tracks(
+    selected_tracks: &Arc<Mutex<HashSet<usize>>>,
+    track: usize,
+) -> Option<Vec<usize>> {
+    let set = selected_tracks.lock().unwrap();
+    if set.len() < 2 || !set.contains(&track) {
+        return None;
+    }
+    let mut tracks: Vec<usize> = set.iter().copied().collect();
+    tracks.sort_unstable();
+    Some(tracks)
+}
+
+/// One track-settings op applied to every listed track as a single undo entry.
+fn track_params_batch_command(op: &str, tracks: &[usize], value: f64) -> HostCommand {
+    let mut payload = HashMap::new();
+    payload.insert(
+        "op".to_string(),
+        Rc::new(RefCell::new(Value::Keyword(op.to_string()))),
+    );
+    payload.insert(
+        "tracks".to_string(),
+        Rc::new(RefCell::new(Value::List(
+            tracks
+                .iter()
+                .map(|track| Rc::new(RefCell::new(Value::Number(*track as f64))))
+                .collect(),
+        ))),
+    );
+    payload.insert(
+        "value".to_string(),
+        Rc::new(RefCell::new(Value::Number(value))),
+    );
+    HostCommand::Custom {
+        name: "track-params-batch-action".to_string(),
+        payload: Value::Map(payload),
+    }
+}
+
 fn bus_mixer_history_command(
     op: &str,
     bus: usize,
@@ -2012,6 +2054,7 @@ fn active_delete_target_kind(target: Option<&ActiveDeleteTarget>) -> Value {
         Some(ActiveDeleteTarget::MixerTracks { .. }) => Value::String("mixer-tracks".to_string()),
         Some(ActiveDeleteTarget::MixerGroup { .. }) => Value::String("mixer-group".to_string()),
         Some(ActiveDeleteTarget::TrackPattern { .. }) => Value::String("track-pattern".to_string()),
+        Some(ActiveDeleteTarget::TrackSteps { .. }) => Value::String("track-steps".to_string()),
         Some(ActiveDeleteTarget::ModRoute { .. }) => Value::String("mod-route".to_string()),
         Some(ActiveDeleteTarget::FxEffect { .. }) => Value::String("fx-effect".to_string()),
         Some(ActiveDeleteTarget::RackEffect { .. }) => Value::String("fx-effect".to_string()),
@@ -2416,6 +2459,19 @@ pub(crate) fn prune_stale_group_references(
     }
 }
 
+/// Drops a multi-track step-selection target (and republishes) without
+/// touching any other armed badge: plain selection edits own that.
+fn clear_track_steps_delete_target(
+    active_delete_target: &Arc<Mutex<Option<ActiveDeleteTarget>>>,
+    active_delete_target_version: &Arc<AtomicUsize>,
+) {
+    let mut guard = active_delete_target.lock().unwrap();
+    if matches!(guard.as_ref(), Some(ActiveDeleteTarget::TrackSteps { .. })) {
+        guard.take();
+        bump_delete_target_version(active_delete_target_version);
+    }
+}
+
 fn arm_selected_tracks_delete_target(
     selected: &HashSet<usize>,
     active_delete_target: &Arc<Mutex<Option<ActiveDeleteTarget>>>,
@@ -2633,7 +2689,10 @@ fn register_step_selection_natives(
     let sel = selected_steps.clone();
     let ct = current_track.clone();
     let ui_inv = ui_invalidations.clone();
+    let delete_target = active_delete_target.clone();
+    let delete_target_version = active_delete_target_version.clone();
     runtime.register_native("seq-clear-selection", move |_args, _ctx| {
+        clear_track_steps_delete_target(&delete_target, &delete_target_version);
         let mut selected = sel.lock().unwrap();
         if selected.is_empty() {
             return Ok(Value::Nil);
@@ -2646,6 +2705,77 @@ fn register_step_selection_natives(
             changed_steps,
         });
         Ok(Value::Nil)
+    });
+
+    // seq-select-all-steps-on-tracks — (seq-select-all-steps-on-tracks tracks)
+    // Rack-wide / multi-track Cmd+A: select every step on every listed track
+    // (which must include the current track) and arm a TrackSteps delete
+    // target so Backspace clears all of them in one undo entry. The step set
+    // spans the longest pattern; the per-track publish clips to each length.
+    let st = state.clone();
+    let ct = current_track.clone();
+    let sel = selected_steps.clone();
+    let ui_inv = ui_invalidations.clone();
+    let delete_target = active_delete_target.clone();
+    let delete_target_version = active_delete_target_version.clone();
+    runtime.register_native("seq-select-all-steps-on-tracks", move |args, _ctx| {
+        let Some(Value::List(values)) = args.first() else {
+            return Err("seq-select-all-steps-on-tracks: expected a track list".into());
+        };
+        let track_count = st.active_track_count();
+        let mut tracks = Vec::with_capacity(values.len());
+        for value in values {
+            let Value::Number(track) = &*value.borrow() else {
+                return Err("seq-select-all-steps-on-tracks: track indices must be numbers".into());
+            };
+            if !track.is_finite() || *track < 0.0 || track.fract() != 0.0 {
+                return Err(format!("seq-select-all-steps-on-tracks: invalid track {track}").into());
+            }
+            let track = *track as usize;
+            if track >= track_count {
+                return Err(format!("seq-select-all-steps-on-tracks: track {track} out of range").into());
+            }
+            tracks.push(track);
+        }
+        tracks.sort_unstable();
+        tracks.dedup();
+        let current = ct.load(Ordering::Relaxed);
+        if !tracks.contains(&current) {
+            return Err(format!(
+                "seq-select-all-steps-on-tracks: current track {current} is not in the list"
+            )
+            .into());
+        }
+        let max_steps = tracks
+            .iter()
+            .map(|track| st.pattern.track_params[*track].get_num_steps())
+            .max()
+            .unwrap_or(0);
+        let previous_tracks = {
+            let mut guard = delete_target.lock().unwrap();
+            let previous = match guard.take() {
+                Some(ActiveDeleteTarget::TrackSteps { tracks }) => tracks,
+                _ => Vec::new(),
+            };
+            *guard = Some(ActiveDeleteTarget::TrackSteps { tracks: tracks.clone() });
+            bump_delete_target_version(&delete_target_version);
+            previous
+        };
+        let previous_steps = {
+            let mut set = sel.lock().unwrap();
+            let previous = std::mem::take(&mut *set);
+            set.extend(0..max_steps);
+            previous
+        };
+        let all_steps = (0..max_steps.max(previous_steps.iter().copied().max().map_or(0, |s| s + 1)))
+            .collect::<Vec<_>>();
+        for track in tracks.iter().chain(previous_tracks.iter()) {
+            ui_inv.push(UiInvalidation::StepSelection {
+                track: *track,
+                changed_steps: all_steps.clone(),
+            });
+        }
+        Ok(Value::Number(max_steps as f64))
     });
 
     // seq-has-selection?
@@ -3425,6 +3555,7 @@ pub(crate) fn init_runtime(
                 ),
                 ("sound-presets", build_sound_presets_value()),
                 ("kit-presets", build_kit_presets_value()),
+                ("graph-sequencers", Value::List(vec![])),
                 ("current-project-name", Value::String(String::new())),
                 ("scene-bank-view-generation", Value::Number(0.0)),
                 ("rack-panel-view-generation", Value::Number(0.0)),
@@ -3876,6 +4007,9 @@ pub(crate) fn init_runtime(
                     payload: Value::Map(map),
                 });
             }
+            // Multi-track step selections delete through the step grid's own
+            // Backspace path (`seq-delete-selected-steps`), never the badge.
+            ActiveDeleteTarget::TrackSteps { .. } => return Ok(Value::Bool(false)),
             ActiveDeleteTarget::MixerGroup { group_id } => {
                 if current_buffer != "*mixer*" {
                     return Ok(Value::Bool(false));
@@ -4993,6 +5127,7 @@ pub(crate) fn init_runtime(
             if matches!(
                 guard.as_ref(),
                 Some(ActiveDeleteTarget::TrackPattern { .. })
+                    | Some(ActiveDeleteTarget::TrackSteps { .. })
             ) {
                 guard.take();
                 bump_delete_target_version(&delete_target_version);
@@ -5627,9 +5762,12 @@ pub(crate) fn init_runtime(
         active_delete_target_version.clone(),
     );
 
-    // seq-delete-selected-steps — clear all selected steps and clear selection
+    // seq-delete-selected-steps — clear all selected steps and clear selection.
+    // A multi-track selection (TrackSteps delete target) names every track the
+    // clear spans; the host applies them as one undo entry.
     let ct = current_track.clone();
     let sel = selected_steps.clone();
+    let delete_target = active_delete_target.clone();
     runtime.register_native("seq-delete-selected-steps", move |_args, ctx| {
         let track = ct.load(Ordering::Relaxed);
         let steps: Vec<usize> = {
@@ -5643,6 +5781,19 @@ pub(crate) fn init_runtime(
             "track".to_string(),
             Rc::new(RefCell::new(Value::Number(track as f64))),
         );
+        if let Some(ActiveDeleteTarget::TrackSteps { tracks }) =
+            delete_target.lock().unwrap().as_ref()
+        {
+            payload.insert(
+                "tracks".to_string(),
+                Rc::new(RefCell::new(Value::List(
+                    tracks
+                        .iter()
+                        .map(|track| Rc::new(RefCell::new(Value::Number(*track as f64))))
+                        .collect(),
+                ))),
+            );
+        }
         ctx.enqueue_command(HostCommand::Custom {
             name: "delete-selected-steps".to_string(),
             payload: Value::Map(payload),
@@ -5908,10 +6059,13 @@ pub(crate) fn init_runtime(
         Ok(Value::Number(bpm as f64))
     });
 
-    // seq-set-track-param — set a track parameter on the current track
+    // seq-set-track-param — set a track parameter on the current track. With
+    // two or more tracks selected (and the current one among them) the
+    // track-settings ops fan out to all of them as one undo entry.
     let st = state.clone();
     let ct = current_track.clone();
     let sel = selected_steps.clone();
+    let sel_tracks = selected_tracks.clone();
     let auto_follow_override = auto_follow_override_until.clone();
     let ui_inv = ui_invalidations.clone();
     runtime.register_native("seq-set-track-param", move |args, ctx| {
@@ -5953,6 +6107,10 @@ pub(crate) fn init_runtime(
                 let v = (val as f32).clamp(50.0, 75.0);
                 let steps = sel.lock().unwrap();
                 if steps.is_empty() {
+                    if let Some(tracks) = bulk_edit_tracks(&sel_tracks, track) {
+                        ctx.enqueue_command(track_params_batch_command("swing", &tracks, v as f64));
+                        return Ok(Value::Number(v as f64));
+                    }
                     ctx.enqueue_command(slice3_numeric_history_command(
                         "swing", Some(track), v as f64,
                     ));
@@ -5976,6 +6134,10 @@ pub(crate) fn init_runtime(
                     return Err("seq-set-track-param: :num-steps expects a number".into());
                 };
                 let v = (val as usize).clamp(1, MAX_STEPS);
+                if let Some(tracks) = bulk_edit_tracks(&sel_tracks, track) {
+                    ctx.enqueue_command(track_params_batch_command("set-length", &tracks, v as f64));
+                    return Ok(Value::Number(v as f64));
+                }
                 let mut payload = HashMap::new();
                 payload.insert("op".to_string(), Rc::new(RefCell::new(Value::Keyword("set-length".to_string()))));
                 payload.insert("track".to_string(), Rc::new(RefCell::new(Value::Number(track as f64))));
@@ -6016,6 +6178,14 @@ pub(crate) fn init_runtime(
                     return Err("seq-set-track-param: :poly expects a number".into());
                 };
                 let want_on = val != 0.0;
+                if let Some(tracks) = bulk_edit_tracks(&sel_tracks, track) {
+                    ctx.enqueue_command(track_params_batch_command(
+                        "toggle-poly",
+                        &tracks,
+                        if want_on { 1.0 } else { 0.0 },
+                    ));
+                    return Ok(Value::Bool(want_on));
+                }
                 if want_on != tp.is_polyphonic() {
                     ctx.enqueue_command(slice3_numeric_history_command(
                         "toggle-poly", Some(track), 0.0,
@@ -6033,6 +6203,10 @@ pub(crate) fn init_runtime(
                 if value != 0.0 && value != 1.0 && value != 2.0 {
                     return Err("seq-set-track-param: :voice-priority expects 0, 1 or 2".into());
                 }
+                if let Some(tracks) = bulk_edit_tracks(&sel_tracks, track) {
+                    ctx.enqueue_command(track_params_batch_command("voice-priority", &tracks, value));
+                    return Ok(Value::Number(value));
+                }
                 ctx.enqueue_command(slice3_numeric_history_command(
                     "voice-priority", Some(track), value,
                 ));
@@ -6045,6 +6219,10 @@ pub(crate) fn init_runtime(
                 if value != 0.0 && value != 1.0 {
                     return Err("seq-set-track-param: :mono-trigger expects 0 or 1".into());
                 }
+                if let Some(tracks) = bulk_edit_tracks(&sel_tracks, track) {
+                    ctx.enqueue_command(track_params_batch_command("mono-trigger", &tracks, value));
+                    return Ok(Value::Number(value));
+                }
                 ctx.enqueue_command(slice3_numeric_history_command(
                     "mono-trigger", Some(track), value,
                 ));
@@ -6055,6 +6233,14 @@ pub(crate) fn init_runtime(
                     return Err("seq-set-track-param: :max-poly expects a number".into());
                 };
                 let value = val.round().max(1.0) as usize;
+                if let Some(tracks) = bulk_edit_tracks(&sel_tracks, track) {
+                    ctx.enqueue_command(track_params_batch_command(
+                        "max-polyphony",
+                        &tracks,
+                        value as f64,
+                    ));
+                    return Ok(Value::Number(value as f64));
+                }
                 ctx.enqueue_command(slice3_numeric_history_command(
                     "max-polyphony", Some(track), value as f64,
                 ));
@@ -6068,6 +6254,10 @@ pub(crate) fn init_runtime(
                     return Err("seq-set-track-param: :mute-group expects a number".into());
                 };
                 let value = val.round().clamp(0.0, 8.0) as u8;
+                if let Some(tracks) = bulk_edit_tracks(&sel_tracks, track) {
+                    ctx.enqueue_command(track_params_batch_command("mute-group", &tracks, value as f64));
+                    return Ok(Value::Number(value as f64));
+                }
                 ctx.enqueue_command(slice3_numeric_history_command(
                     "mute-group", Some(track), value as f64,
                 ));
@@ -6212,10 +6402,13 @@ pub(crate) fn init_runtime(
         sequencer::lisp_host::DEF_SEQUENCER_KEYWORDS.iter().copied(),
         move |args, _ctx| {
             let published = sequencer::lisp_host::published_sequencer_from_def_args(&args)?;
-            let name = published.name.clone();
+            // The instance id is the handle every graph-* native accepts. It
+            // is the only unambiguous reference once a rack owns a copy of a
+            // script the project also runs (spec §5.2).
+            let id = published.id;
             st_def_sequencer.publish_sequencer(published);
             ui_ep_def_sequencer.fetch_add(1, Ordering::Relaxed);
-            Ok(Value::String(name))
+            Ok(Value::Number(id as f64))
         },
     );
     runtime.document_symbol_with_keywords(
@@ -6556,8 +6749,10 @@ pub(crate) fn init_runtime(
         },
     );
 
-    // seq-set-timebase — set the default timebase for the current track (by label string)
+    // seq-set-timebase — set the default timebase for the current track (by
+    // label string); fans out over a multi-track selection.
     let ct = current_track.clone();
+    let sel_tracks = selected_tracks.clone();
     let ui_ep = ui_epoch.clone();
     let auto_follow_override = auto_follow_override_until.clone();
     runtime.register_native("seq-set-timebase", move |args, ctx| {
@@ -6572,6 +6767,10 @@ pub(crate) fn init_runtime(
             .map(|i| Timebase::ALL[i])
             .ok_or_else(|| format!("seq-set-timebase: unknown timebase '{label}'"))?;
         let track = ct.load(Ordering::Relaxed);
+        if let Some(tracks) = bulk_edit_tracks(&sel_tracks, track) {
+            ctx.enqueue_command(track_params_batch_command("timebase", &tracks, tb as u32 as f64));
+            return Ok(Value::String(tb.label().to_string()));
+        }
         ctx.enqueue_command(slice3_numeric_history_command(
             "timebase", Some(track), tb as u32 as f64,
         ));
@@ -6581,6 +6780,7 @@ pub(crate) fn init_runtime(
     });
 
     let ct = current_track.clone();
+    let sel_tracks = selected_tracks.clone();
     let ui_ep = ui_epoch.clone();
     let auto_follow_override = auto_follow_override_until.clone();
     runtime.register_native("seq-set-fts", move |args, ctx| {
@@ -6594,6 +6794,10 @@ pub(crate) fn init_runtime(
             .position(|scale| scale.to_ascii_lowercase() == normalized)
             .ok_or_else(|| format!("seq-set-fts: unknown scale '{label}'"))?;
         let track = ct.load(Ordering::Relaxed);
+        if let Some(tracks) = bulk_edit_tracks(&sel_tracks, track) {
+            ctx.enqueue_command(track_params_batch_command("fts", &tracks, scale_idx as f64));
+            return Ok(Value::String(FTS_SCALE_NAMES[scale_idx].to_string()));
+        }
         ctx.enqueue_command(slice3_numeric_history_command(
             "fts", Some(track), scale_idx as f64,
         ));
@@ -6634,6 +6838,7 @@ pub(crate) fn init_runtime(
     // seq-set-swing-resolution — set the default swing resolution for the current track (by label string)
     let ct = current_track.clone();
     let sel = selected_steps.clone();
+    let sel_tracks = selected_tracks.clone();
     let ui_ep = ui_epoch.clone();
     let auto_follow_override = auto_follow_override_until.clone();
     runtime.register_native("seq-set-swing-resolution", move |args, ctx| {
@@ -6650,6 +6855,14 @@ pub(crate) fn init_runtime(
         let track = ct.load(Ordering::Relaxed);
         let steps = sel.lock().unwrap();
         if steps.is_empty() {
+            if let Some(tracks) = bulk_edit_tracks(&sel_tracks, track) {
+                ctx.enqueue_command(track_params_batch_command(
+                    "swing-resolution",
+                    &tracks,
+                    resolution as u32 as f64,
+                ));
+                return Ok(Value::String(resolution.label().to_string()));
+            }
             ctx.enqueue_command(slice3_numeric_history_command(
                 "swing-resolution",
                 Some(track),
@@ -7912,6 +8125,11 @@ fn document_metal_seq_natives(runtime: &mut Runtime) {
             "Clear all selected step payloads and clear the selection.",
         ),
         (
+            "seq-select-all-steps-on-tracks",
+            "(seq-select-all-steps-on-tracks tracks)",
+            "Select every step on each listed track (rack-wide / multi-track select-all); Backspace then clears them all.",
+        ),
+        (
             "seq-move-step-drag",
             "(seq-move-step-drag start target)",
             "Move a step payload or the selected step payloads by drag delta.",
@@ -8208,6 +8426,57 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn select_all_steps_on_tracks_arms_multi_track_target_and_backspace_carries_it() {
+        let state = Arc::new(SequencerState::new(3, vec![]));
+        let num_steps = state.pattern.track_params[0].get_num_steps();
+        let selected = Arc::new(Mutex::new(HashSet::new()));
+        let target = Arc::new(Mutex::new(None));
+        let version = Arc::new(AtomicUsize::new(0));
+        let queue = Arc::new(UiInvalidationQueue::new());
+        let mut runtime = Runtime::new();
+        register_step_selection_natives(
+            &mut runtime,
+            state,
+            Arc::new(AtomicUsize::new(1)),
+            selected.clone(),
+            queue.clone(),
+            target.clone(),
+            version.clone(),
+        );
+
+        // The current track must be part of the span.
+        // (Native errors surface to lisp as a false result, not an Err.)
+        let _ = runtime.eval_str("(seq-select-all-steps-on-tracks '(0 2))");
+        assert_eq!(*target.lock().unwrap(), None);
+        assert!(selected.lock().unwrap().is_empty());
+
+        let before = version.load(Ordering::Relaxed);
+        runtime
+            .eval_str("(seq-select-all-steps-on-tracks '(2 1 0))")
+            .expect("rack-wide select all");
+        assert_eq!(*selected.lock().unwrap(), (0..num_steps).collect::<HashSet<_>>());
+        assert_eq!(
+            *target.lock().unwrap(),
+            Some(ActiveDeleteTarget::TrackSteps { tracks: vec![0, 1, 2] })
+        );
+        assert_eq!(version.load(Ordering::Relaxed), before + 1);
+        let tracks = queue
+            .drain()
+            .into_iter()
+            .filter_map(|inv| match inv {
+                UiInvalidation::StepSelection { track, .. } => Some(track),
+                _ => None,
+            })
+            .collect::<HashSet<_>>();
+        assert_eq!(tracks, HashSet::from([0, 1, 2]), "every spanned track republishes");
+
+        // Any plain selection edit relinquishes the multi-track span.
+        runtime.eval_str("(seq-clear-selection)").expect("clear");
+        assert_eq!(*target.lock().unwrap(), None);
+        assert!(selected.lock().unwrap().is_empty());
     }
 
     #[test]

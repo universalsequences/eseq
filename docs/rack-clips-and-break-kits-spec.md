@@ -1,6 +1,7 @@
 # Rack Clips and Break Kits
 
-**Status:** rev 1, design. Nothing built.
+**Status:** rev 2. Phases 1 and 2 built (§7.1 kit bus chain, §5 rack-owned
+sequencers); §2–4 rack clips and §7 break kits are design.
 **Epic:** `bd show eseq-172r` (children .1 bus chain, .2 rack-owned sequencers,
 .3 rack clips, .4 break kits).
 **Depends on:** `docs/drum-rack-v2-spec.md` (rack = group with `rack: Some(_)`),
@@ -109,17 +110,15 @@ pub struct ProjectRackClip {
 }
 
 pub struct ProjectRackSequencer {
-    pub sequencer_id: u64,      // same id space as project-owned sequencers
-    pub sequencer_name: String, // def-sequencer name
-    /// Where the def-sequencer source comes from. Package ids are preferred
-    /// for anything that is meant to travel inside a kit.
-    pub source: RackSequencerSource,
-}
-
-pub enum RackSequencerSource {
-    Package { id: String },       // pkg:author.name/<path>
-    ProjectScript { path: String },
-    Inline { source: String },    // last resort, kit-embedded
+    pub sequencer_id: u64,      // namespaced: hash of "name@rack:<gid>"
+    pub sequencer_name: String, // def-sequencer name as authored
+    /// The Lisp form the host evaluates under the rack owner to bring the
+    /// instance back on project open: `(load "content/scripts/…")` for a
+    /// project script, `(import author.package)` for a package module, or
+    /// the script text itself. Empty = unknown origin, does not come back.
+    /// (Built as a plain form string in phase 2 rather than the enum first
+    /// drafted here; the form already distinguishes the three cases.)
+    pub source: String,
 }
 
 pub struct ProjectScene {
@@ -213,47 +212,73 @@ scene-swap logic (`docs/rack-scene-swap-spec.md`). No new boundary code.
 
 ## 5. Rack-owned sequencers
 
-### 5.1 Ownership
+### 5.1 Ownership (built, eseq-172r.2)
 
-A sequencer is attached to a rack from the rack header ("Attach sequencer…",
-choosing a package or script) or converted from a project-owned instance
-("Move into rack"). Conversion is allowed only when every route of the
-instance already targets a member of that rack; otherwise the action explains
-which nodes route outside and refuses. No guessing.
+The rack's context menu (mixer strip) lists every project-owned graph
+sequencer as "Move "name" into rack" and every rack-owned one as "Detach
+"name"". Moving is allowed only when the manifest's default route and every
+route/seed track in every scene are members of that rack; otherwise the error
+names the offending nodes and nothing changes. Moving rewrites the overrides
+to member indices, sets `owner_rack`, re-keys them to the namespaced id,
+republishes the manifest under the rack and records a `ProjectRackSequencer`
+whose source is the `(load …)` form the step-tab registry knows for that
+script. Detaching reverses it (member routes expand to tracks, id back to the
+project one, rack instance unpublished). Scripting can also attach from a
+source form directly: host command `attach-rack-sequencer` evaluates the form
+with `with_graph_owner_rack` and records each graph sequencer it published.
+All three are recorded group-structure edits, and the structure state
+captures the scene bank, so the override rewrites undo with them.
 
-Attachment allocates a fresh `sequencer_id`, writes a `ProjectRackSequencer`,
-and moves the instance's overrides into the rack's clips (migrating per §4.3
-if the rack is legacy). Detaching reverses it with member routes expanded to
-track indices.
+On project open the host replays each recorded source under its owner after
+the scratch replay (`replay_rack_sequencer_sources`).
 
-### 5.2 Namespacing
+Phase 3 moves the rack-owned overrides from project scenes into rack clips;
+in phase 2 they still live in the scenes, only the route space changed.
 
-Two imported kits may both carry `neural-variable-reset-demo`. Instances are
-keyed by `sequencer_id`, not name, everywhere it matters already
-(`ProjectGraphOverrides.sequencer_id`). What is name-keyed today is the Lisp
-surface: `bind-graph`, `graph-node`, `graph-param`, `graph-config` and
-`graph-key` take `gvr-name`. Add an instance handle: the script's
-`def-sequencer` evaluates to an instance object when loaded under a rack
-owner, and the `graph-*` natives accept either a name (project-owned, as
-today) or a handle. The loader binds `*graph-instance*` for rack-loaded
-scripts so unmodified demo scripts keep working via a dynamic default.
+### 5.2 Namespacing (built, eseq-172r.2)
 
-### 5.3 Script UI
+Two imported kits may both carry `neural-variable-reset-demo`. A rack-owned
+instance's id is `stable_sequencer_id("name@rack:<gid>")`
+(`graph_instance_id`), so each rack gets its own; the manifest carries
+`owner_rack`. Override matching goes through one rule,
+`GraphManifest::matches_overrides`: exact id, or name *within the same
+owner*. Ids are masked to 53 bits so they survive the trip through Lisp
+numbers; projects saved with wider ids still match by name.
 
-`seq-register-script-step-sequencer-tab` registers one tab per instance. The
-tab label is the rack name when the sequencer is rack-owned. The route
-dropdown of a rack-owned instance lists the rack's pads (pad name, colored by
-member track) plus "Off". `gvr-route-options` in the demo hardcodes
-"Track 1".."Track 16"; the rack-aware version should read the option list from
-a native (`graph-route-options handle`) so scripts do not have to know which
-mode they are in.
+The handle is the number `def-sequencer` returns (both the UI and lisp_host
+natives), and every `graph-*` native accepts it. A bare name still resolves
+when exactly one instance carries it, or, while the host is evaluating a
+rack-attached script (`with_graph_owner_rack`), to that rack's own copy;
+otherwise it is an error naming the candidate ids. Scripts meant to run under
+a rack write `(def gvr-name (def-sequencer …))`, as the demo now does.
+Duplicating one script across two racks also needs per-instance buffer and
+widget keys, which is the script's business (§10).
 
-### 5.4 Route semantics
+### 5.3 Script UI (built)
 
-Member-relative routes make `track_delete_remap.rs` a no-op for rack-owned
-instances. A member leaving the rack is the only structural event: nodes
-routed to it are set to `:off`, reported in the status line, and the change
-is part of the same undo entry as the leave.
+`seq-register-script-step-sequencer-tab` registers one tab per instance; the
+demo labels its tab with the rack name when `(graph-owner handle)` is set.
+Two natives feed rack-aware scripts: `(graph-owner handle)` → owning group id
+or nil, and `(graph-route-tracks handle)` → the member track index behind
+each route option (nil when project-owned). Route option *n* is always route
+value *n* with "Off" last, and `bind-graph … :route options` indexes by that
+value rather than by label, so the demo builds pad labels and colours from
+the member tracks and the rest of its route code is unchanged. The UI also
+publishes `SEQ.graph-sequencers` (`{id name owner-rack}` per instance) for
+UI that lists instances, such as the rack menu.
+
+### 5.4 Route semantics (built)
+
+Rack-owned overrides are skipped by `remap_graph_overrides_after_track_delete`.
+The scheduler is the one place member routes become tracks:
+`reconcile_graph_runtimes` builds the config with overrides as before and then
+`resolve_rack_member_routes` maps routes and seed masks through the
+`rack_memberships` the snapshot carries (mirrored into `SequencerState` by
+`App::publish_rack_choke_runtime`, which every group-topology edit already
+calls). The manifest's own default `:route n` is a member index too. A member
+leaving the rack (detach, move, ungroup, track delete) runs
+`remap_after_rack_member_removed` over every scene inside the same recorded
+edit: nodes routed to it go to `None`, later members shift down.
 
 ## 6. UI
 
@@ -368,10 +393,10 @@ preclude it.
 Each phase is independently shippable and independently valuable.
 
 1. **Kit bus chain.** Kits carry and restore the rack bus insert chain.
-2. **Rack-owned sequencers.** Ownership, member-relative routes, instance
-   handles, rack-aware route dropdown. Overrides still live in project scenes
-   for this phase (racks are still legacy); only the route space changes.
-   jungle-ology benefits immediately.
+2. **Rack-owned sequencers.** BUILT (eseq-172r.2). Ownership, member-relative
+   routes, instance handles, rack-aware route dropdown. Overrides still live
+   in project scenes for this phase (racks are still legacy); only the route
+   space changed.
 3. **Rack clips.** Data model, launch composition, edit redirect, legacy
    migration, collapsed-row clip launcher in sequencer and mixer. Rack-owned
    overrides move into clips here.

@@ -159,6 +159,40 @@ pub fn graph_mode_present(args: &[EValue]) -> bool {
     })
 }
 
+/// The drum rack that owns every graph `def-sequencer` evaluated while it is
+/// set. The host binds it around evaluating a rack-attached script (and around
+/// replaying those scripts on project open); nothing else touches it. A plain
+/// process-wide cell rather than a VM global because the UI and lisp_host
+/// def-sequencer natives share one parser but not one runtime.
+static GRAPH_OWNER_RACK: std::sync::Mutex<Option<u64>> = std::sync::Mutex::new(None);
+
+pub fn current_graph_owner_rack() -> Option<u64> {
+    GRAPH_OWNER_RACK.lock().map(|owner| *owner).unwrap_or(None)
+}
+
+/// Run `body` with every graph `def-sequencer` it evaluates owned by `group_id`.
+pub fn with_graph_owner_rack<T>(group_id: Option<u64>, body: impl FnOnce() -> T) -> T {
+    let previous = {
+        let mut owner = GRAPH_OWNER_RACK.lock().unwrap_or_else(|e| e.into_inner());
+        std::mem::replace(&mut *owner, group_id)
+    };
+    let result = body();
+    if let Ok(mut owner) = GRAPH_OWNER_RACK.lock() {
+        *owner = previous;
+    }
+    result
+}
+
+/// A sequencer instance's id: the authored name for a project-owned one, the
+/// name namespaced by the owning rack otherwise, so the same script can run
+/// once per rack.
+pub fn graph_instance_id(name: &str, owner_rack: Option<u64>) -> u64 {
+    match owner_rack {
+        Some(group_id) => stable_sequencer_id(&format!("{name}@rack:{group_id}")),
+        None => stable_sequencer_id(name),
+    }
+}
+
 /// Parse a graph-mode `def-sequencer` arg list (including the leading name) into a
 /// [`GraphManifest`].
 pub fn parse_graph_manifest(args: &[EValue]) -> Result<GraphManifest, String> {
@@ -168,7 +202,8 @@ pub fn parse_graph_manifest(args: &[EValue]) -> Result<GraphManifest, String> {
         }
         _ => return Err("def-sequencer expects a name".to_string()),
     };
-    let id = stable_sequencer_id(&name);
+    let owner_rack = current_graph_owner_rack();
+    let id = graph_instance_id(&name, owner_rack);
     let mut shape: Option<ShapeSpec> = None;
     let mut energy_decay = 0.9;
     let mut reset_every_beats = 0.0;
@@ -234,6 +269,7 @@ pub fn parse_graph_manifest(args: &[EValue]) -> Result<GraphManifest, String> {
     Ok(GraphManifest {
         id,
         name,
+        owner_rack,
         shape,
         energy_decay,
         reset_every_beats,

@@ -53,7 +53,10 @@ Failures identify the stage: validation, preparation, rendering, writing or
 publication. Loading, analysis and song/latency preparation complete before the
 worker creates the temporary output file.
 
-The worker requires fixed processing latency and compensation throughout the
-arrangement. Unsupported topology or compensation changes fail without publishing
-a partial WAV. Full in-app source capture and broader arrangement acceptance
+The worker prepares one fixed compensation plan for the rendered arrangement,
+including every scene's track outputs, bus outputs, and sends. Silent send paths
+are prepared before rendering so opening a send preserves its delay history.
+Routing changes that share a fixed compensation plan are supported. Effect
+latency changes and routing choices that cannot share a fixed plan still fail
+without publishing a partial WAV. Full in-app source capture and broader arrangement acceptance
 coverage remain tracked in the bounce epic.

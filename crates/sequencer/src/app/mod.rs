@@ -45,6 +45,7 @@ mod hooks;
 pub mod mixer_controls;
 mod params;
 mod projects;
+mod rack_sequencers;
 mod bus_outputs;
 pub mod pending_capture;
 pub mod retrospective;
@@ -586,6 +587,8 @@ pub struct GraphState {
     /// Lets the per-frame tick skip graph writes when nothing changed, and
     /// re-push when a node is rebuilt under an unchanged plan.
     pub applied_latency_pads: Vec<(i32, u32)>,
+    /// Fixed route and delay plan owned by an isolated export session.
+    pub(crate) bounce_latency: Option<graph::bounce_latency::FixedBounceLatency>,
 }
 
 impl GraphState {
@@ -2301,6 +2304,10 @@ impl App {
     /// edit that caused it.
     pub fn publish_rack_choke_runtime(&self) {
         use std::sync::atomic::Ordering;
+        // Rack membership rides along: every site that republishes choke keys
+        // is a group-topology change, which is exactly when rack-owned graph
+        // sequencers' member routes need re-resolving.
+        self.state.set_rack_memberships(self.rack_memberships());
         let keys = &self.state.runtime.rack_choke_keys;
         for key in keys.iter() {
             key.store(0, Ordering::Release);
@@ -2584,6 +2591,7 @@ impl App {
                 applied_mod_routes: Vec::new(),
                 deferred_rack_teardowns: Vec::new(),
                 applied_latency_pads: Vec::new(),
+                bounce_latency: None,
             },
         };
         app.ensure_bus_pattern_bank_len(1);

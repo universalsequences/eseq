@@ -324,6 +324,22 @@ Semantics:
 - `(remove-override eseq.mixer/track-strip)` is "revert to factory." The
   inspector can show provenance: *track-strip — overridden by
   ~/.eseq.d/init.lisp*.
+- **Enable/disable (eseq-ditl.13, BUILT 2026-09-17).** Each `OverrideEntry`
+  carries `enabled`; dispatch runs the most recent entry that is enabled and
+  not quarantined, else the factory def. `(disable-override sym)` /
+  `(enable-override sym)` flip every entry on a target;
+  `(disable-module-overrides mod)` / `(enable-module-overrides mod)` flip every
+  entry an overriding module installed and record the module in
+  `VM::disabled_override_modules`, which a later or re-evaluated registration
+  from that module consults, so a package switched off stays off across its
+  own hot reload and across restart (the managed block replays the form
+  before packages load). `(set-override-entry-enabled "target" "module" bool)`
+  toggles one entry; `(override-declarations)` lists
+  `{:target :module :kind :enabled :quarantined}` for the customize buffer.
+  Emacs analogue: `advice-remove` is per advising function and minor modes
+  toggle their advice; this is that, with the registry doing the bookkeeping.
+  `remove-override` keeps its wipe-the-set contract. Flags live in
+  `snapshot_state`/`restore_state`.
 - **Graceful failure:** an override whose body errors at call time emits one
   diagnostic, quarantines that registration, and falls through to the
   factory def. Later reads bypass the broken body until it is re-registered,
@@ -394,10 +410,31 @@ a package source root becomes importable. Package `src/` roots are namespace-
 scoped, so `alec.acid-tools.ui` resolves `src/ui.lisp` without allowing that
 root to satisfy an unrelated package's import.
 
-`defcustom` syntax is `(defcustom name default :type TYPE :doc "…")`; it is a
-reactive, auto-qualified declaration. `(setopt name value)` sets it, and
-`(custom-declarations)` returns sorted metadata maps for Lisp-generated settings
-UI.
+`defcustom` syntax is `(defcustom name default :type TYPE :doc "…"
+[:choices LIST] [:min N :max N :step N])`; it is a reactive, auto-qualified declaration. `(setopt name
+value)` sets it, `(setopt-by-name "qualified" value)` does the same from a
+name string, and `(custom-declarations)` returns sorted metadata maps
+`{:name :module :type :default :value :doc :choices :min :max :step}` — `:value`
+is a tracked read, so an effect listing the knobs reruns when one changes. The
+customize buffer derives a range from the default when `:min`/`:max`/`:step`
+are absent (a picker's drag scales with its range, so an unbounded knob
+jumped by thousands per touch); package authors should declare them.
+
+**Customize surface (eseq-ditl, BUILT 2026-09-17).** `content/ui/customize.lisp`
+(module `eseq.customize`, a library module whose `panel` is mounted by
+eseq.file-dialogs) is the Emacs-customize equivalent:
+`M-x eseq.customize/customize` asks the host (`customize-open`) to activate the
+step-panel tile and open a 1400×900 modal,
+knobs grouped by `:module` with an editor per `:type` (number-picker, toggle,
+text-input, dropdown over `:choices`), Reset per row, and an Overrides section
+(below). Persistence is the host command `save-custom-values`
+(`crates/sequencer/src/ui/host_commands/customize.rs`): it rewrites a managed
+block delimited by `;; customize -- managed, edit via M-x customize` … `;; end
+customize` in the user init with one `(setopt …)` per knob off its default and
+one `(disable-module-overrides …)` per module switched off, leaving the rest of
+the file alone and removing the block when nothing is customized. The user init
+evaluates last at boot and hot-reloads on save, so the block is the whole
+restore path.
 
 Generalize the existing dgenlisp defmacro-library format
 (`crates/eseqlisp/src/defmacro_library.rs` — dir-per-package,

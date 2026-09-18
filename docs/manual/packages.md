@@ -15,6 +15,8 @@ Installing a package runs its Lisp inside eseq. Only install packages from peopl
 
 Packages live in `~/.eseq.d/packages/`. Deleting a package's folder there removes it on the next launch.
 
+A package that replaces part of eseq, such as a different mixer, can be switched off without uninstalling it: open `M-x eseq.customize/customize`, find the package under **Overrides**, and turn its switch off. The factory version returns at once. See [Navigation and keys](customization).
+
 ## Export a package
 
 Only instruments and effects in your **Library** can be exported. To share a factory sound, fork it first so a copy lands in your library.

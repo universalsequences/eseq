@@ -189,9 +189,7 @@ pub(super) fn graph_overrides_for_manifest<'a>(
     manifest: &crate::graph::GraphManifest,
     overrides: &'a [crate::graph::ProjectGraphOverrides],
 ) -> Option<&'a crate::graph::ProjectGraphOverrides> {
-    overrides.iter().find(|overrides| {
-        overrides.sequencer_id == manifest.id || overrides.sequencer_name == manifest.name
-    })
+    overrides.iter().find(|overrides| manifest.matches_overrides(overrides))
 }
 
 pub(super) fn apply_graph_control_commands(
@@ -256,6 +254,7 @@ pub(super) fn apply_graph_process_commands(
 pub(super) fn reconcile_graph_runtimes(
     manifests: Vec<crate::graph::GraphManifest>,
     overrides: &[crate::graph::ProjectGraphOverrides],
+    rack_memberships: &[crate::graph::RackMembership],
     runtimes: &mut Vec<crate::graph::GraphRuntime>,
     stored_manifests: &mut Vec<crate::graph::GraphManifest>,
     total_beats: f64,
@@ -264,7 +263,10 @@ pub(super) fn reconcile_graph_runtimes(
     let mut next_runtimes = Vec::with_capacity(manifests.len());
     for manifest in &manifests {
         let graph_overrides = graph_overrides_for_manifest(manifest, overrides);
-        let config = manifest.runtime_config_with_overrides(graph_overrides);
+        let mut config = manifest.runtime_config_with_overrides(graph_overrides);
+        // Rack-owned instances author member-relative routes; the scheduler is
+        // the one place that turns them into the tracks it schedules on.
+        crate::graph::resolve_rack_member_routes(&mut config, manifest.owner_rack, rack_memberships);
         let next_runtime = if let Some(pos) = existing
             .iter()
             .position(|runtime| runtime.id == manifest.id)

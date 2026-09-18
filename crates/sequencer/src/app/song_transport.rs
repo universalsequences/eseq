@@ -408,8 +408,8 @@ impl App {
 
     /// Start the authored arrangement in an isolated render worker. Export
     /// does not invoke the performer's auto-latch on an intentional silent intro.
-    pub(crate) fn start_bounce_playback(&mut self) -> Result<(), String> {
-        self.prepare_song_playback_at(0.0)?;
+    pub(crate) fn start_bounce_playback(&mut self, end_beat: f64) -> Result<(), String> {
+        self.prepare_song_playback(0.0, Some(end_beat))?;
         self.state.start_playback();
         Ok(())
     }
@@ -477,6 +477,10 @@ impl App {
     /// keeps sounding past the end and a latched jam is never cut off by an
     /// arrangement the performer is ignoring.
     fn prepare_song_playback_at(&mut self, requested_start_beat: f64) -> Result<(), String> {
+        self.prepare_song_playback(requested_start_beat, None)
+    }
+
+    fn prepare_song_playback(&mut self, requested_start_beat: f64, export_end_beat: Option<f64>) -> Result<(), String> {
         // The arrangement always exists (empty-arrangement spec 4.3); a
         // state that was never seeded installs the empty one, which plays
         // silence.
@@ -497,7 +501,7 @@ impl App {
                     .to_string(),
             );
         }
-        let song = self
+        let mut song = self
             .state
             .preflight_runtime_song()
             .map_err(|error| format!("Song playback could not start: {error}"))?;
@@ -522,6 +526,14 @@ impl App {
         // quantized session launches so none fires mid-song.
         let _ = self.state.quantized_launches().cancel_all();
         self.apply_song_row_control(row.scene, &row.overrides, true, 0)?;
+        if let Some(end_beat) = export_end_beat {
+            self.prepare_bounce_routing(&song, end_beat)?;
+            // Send nodes are now stable for the entire job. Rebuild snapshots
+            // so every row targets their final logical ids, including sends
+            // that are silent or absent in the initial scene.
+            song = self.state.preflight_runtime_song()
+                .map_err(|error| format!("Export routing preflight failed: {error}"))?;
+        }
         self.state
             .start_song_playback(Arc::clone(&song), start_beat, true)
             .map_err(|error| format!("Song playback could not start: {error}"))?;

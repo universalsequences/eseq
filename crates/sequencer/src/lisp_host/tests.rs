@@ -395,6 +395,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         let manifest = GraphManifest {
             id: 99,
             name: "g".into(),
+            owner_rack: None,
             shape: ShapeSpec::Line(1),
             energy_decay: 1.0,
             reset_every_beats: 0.0,
@@ -485,6 +486,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         let manifest = GraphManifest {
             id: 7,
             name: "g".into(),
+            owner_rack: None,
             shape: ShapeSpec::Line(1),
             energy_decay: 1.0,
             reset_every_beats: 0.0,
@@ -570,6 +572,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         let manifest = GraphManifest {
             id: 31,
             name: "g".into(),
+            owner_rack: None,
             shape: ShapeSpec::Line(1),
             energy_decay: 1.0,
             reset_every_beats: 0.0,
@@ -654,6 +657,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         let manifest = GraphManifest {
             id: 33,
             name: "g".into(),
+            owner_rack: None,
             shape: ShapeSpec::Line(1),
             energy_decay: 1.0,
             reset_every_beats: 0.0,
@@ -722,6 +726,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         let manifest = GraphManifest {
             id: 33,
             name: "g".into(),
+            owner_rack: None,
             shape: ShapeSpec::Line(1),
             energy_decay: 1.0,
             reset_every_beats: 0.0,
@@ -804,6 +809,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         let manifest = GraphManifest {
             id: 34,
             name: "g".into(),
+            owner_rack: None,
             shape: ShapeSpec::Line(1),
             energy_decay: 1.0,
             reset_every_beats: 0.0,
@@ -885,6 +891,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         let manifest = GraphManifest {
             id: 32,
             name: "g".into(),
+            owner_rack: None,
             shape: ShapeSpec::Line(1),
             energy_decay: 1.0,
             reset_every_beats: 0.0,
@@ -977,6 +984,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         let manifest = GraphManifest {
             id: 17,
             name: "g".into(),
+            owner_rack: None,
             shape: ShapeSpec::Line(2),
             energy_decay: 1.0,
             reset_every_beats: 0.0,
@@ -1117,16 +1125,229 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                 return Err("test def-sequencer native only supports graph mode".to_string());
             }
             let manifest = super::parse_graph_manifest(&args)?;
+            let id = manifest.id;
             state.publish_sequencer(PublishedSequencer {
-                id: manifest.id,
-                name: name.clone(),
+                id,
+                name,
                 resolution: Timebase::Sixteenth as u8,
                 tick_source: String::new(),
                 requires: Vec::new(),
                 graph: Some(manifest),
             });
-            Ok(Value::String(name))
+            // Mirrors the production natives: the handle is the instance id.
+            Ok(Value::Number(id as f64))
         });
+    }
+
+    /// The variable-reset demo is the reference rack-ready script: it keeps
+    /// the handle `def-sequencer` returns, and under a rack owner it labels
+    /// its tab with the rack and builds route options from the members.
+    #[test]
+    fn variable_reset_demo_loads_project_owned_and_rack_owned() {
+        let state = Arc::new(SequencerState::new(
+            4,
+            (0..4).map(|_| default_empty_effect_chain()).collect(),
+        ));
+        let mut runtime = Runtime::new();
+        runtime.register_reactive(
+            "SEQ",
+            vec![
+                ("current-pattern", Value::Number(0.0)),
+                ("graph-visualizations", Value::List(Vec::new())),
+                ("track-colors", Value::List(Vec::new())),
+                ("track-active-notes", Value::List(Vec::new())),
+                (
+                    "track-names",
+                    Value::List(
+                        ["kick", "snare", "hat", "perc"]
+                            .iter()
+                            .map(|n| Rc::new(RefCell::new(Value::String(n.to_string()))))
+                            .collect(),
+                    ),
+                ),
+            ],
+            true,
+        );
+        register_graph_def_sequencer_test_native(&mut runtime, Arc::clone(&state));
+        register_graph_authoring_natives(&mut runtime, Arc::clone(&state));
+        let workspace_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|crates_dir| crates_dir.parent())
+            .expect("sequencer crate should live under workspace crates dir")
+            .join(".eseqlisp-scratch");
+        let stubs = r#"
+            (def eseq.seq-step-tabs/seq-register-step-sequencer-tab (label buffer) nil)
+            (def eseq.seq-step-tabs/seq-register-script-step-sequencer-tab (label buffer sequencer icon) nil)
+            (def eseq.drum-rack-v2/group-index-by-id (gid) 0)
+            (def eseq.drum-rack-v2/group-name (gidx) "Break")
+        "#;
+        let load = r#"(load "content/scripts/sequencers/graph-neural-variable-reset-demo.lisp")"#;
+        let report = runtime.eval_source_transactional(
+            Some(workspace_root.clone()),
+            &format!("{stubs}\n{load}"),
+            Vec::new(),
+        );
+        assert!(report.success, "project-owned load failed: {}", report.failure_message());
+        let handle = runtime.eval_str("gvr-name").expect("handle").expect("value");
+        let project_id = super::graph_instance_id("neural-variable-reset-demo", None);
+        assert!(matches!(handle, Value::Number(n) if n == project_id as f64), "{handle:?}");
+        assert_eq!(
+            runtime.eval_str("script-tab-label").unwrap(),
+            Some(Value::String("var rst".into()))
+        );
+        assert_eq!(
+            runtime.eval_str("(len gvr-route-options)").unwrap(),
+            Some(Value::Number(17.0)),
+            "project-owned: 16 tracks + Off"
+        );
+
+        state.set_rack_memberships(vec![crate::graph::RackMembership {
+            group_id: 9,
+            members: vec![2, 0],
+        }]);
+        let report = super::with_graph_owner_rack(Some(9), || {
+            runtime.eval_source_transactional(Some(workspace_root), load, Vec::new())
+        });
+        assert!(report.success, "rack-owned load failed: {}", report.failure_message());
+        let handle = runtime.eval_str("gvr-name").expect("handle").expect("value");
+        let rack_id = super::graph_instance_id("neural-variable-reset-demo", Some(9));
+        assert!(matches!(handle, Value::Number(n) if n == rack_id as f64), "{handle:?}");
+        assert_eq!(
+            runtime.eval_str("script-tab-label").unwrap(),
+            Some(Value::String("Break".into())),
+            "rack-owned: the tab wears the rack's name"
+        );
+        assert_eq!(
+            eseqlisp::vm::format_lisp_value(&runtime.eval_str("gvr-route-options").unwrap().unwrap()),
+            r#"("3 hat" "1 kick" "Off")"#,
+            "rack-owned: route options are the members in order (labelled by track number), then Off"
+        );
+        // Editing a route through the demo's own helper stores a member index.
+        runtime
+            .eval_str(r#"(gvr-edit-route 0 "1 kick" (list))"#)
+            .expect("edit route through the demo helper");
+        let overrides = state.current_graph_overrides();
+        let owned = overrides
+            .iter()
+            .find(|o| o.sequencer_id == rack_id)
+            .expect("rack-owned overrides");
+        assert_eq!(owned.owner_rack, Some(9));
+        assert!(matches!(
+            owned.node_intrinsics[0].route,
+            Some(crate::graph::ProjectGraphRouteOverride::Track(1))
+        ));
+    }
+
+    #[test]
+    fn rack_owned_graph_instances_are_namespaced_and_keep_separate_overrides() {
+        let state = Arc::new(SequencerState::new(
+            4,
+            (0..4).map(|_| default_empty_effect_chain()).collect(),
+        ));
+        let mut authoring = Runtime::new();
+        register_graph_def_sequencer_test_native(&mut authoring, Arc::clone(&state));
+        register_graph_authoring_natives(&mut authoring, Arc::clone(&state));
+        let script = r#"
+            (def-sequencer "shared"
+              :shape (line 2)
+              :energy-decay 1
+              :reset-every 0
+              :seed-on-reset 0
+              :max-poly 4
+              (def-node nrn
+                :resolution :16
+                :delay 1
+                :quantize :16
+                :route 0
+                :seed-from ()
+                :reduce :sum
+                :params ((threshold :float 0 4 :default 0.5))
+                :state ((energy :leak (per-step :energy-decay)))
+                :update (>= (node-state self :energy) (node-param self :threshold)))
+              (edges :from nrn :to nrn :topology (all-to-all) :gather (edge :weight)
+                :params ((weight :float -1 1 :default 1))))
+        "#;
+        authoring.eval_str(script).expect("project-owned copy");
+        super::with_graph_owner_rack(Some(3), || authoring.eval_str(script).expect("rack copy"));
+        super::with_graph_owner_rack(Some(4), || authoring.eval_str(script).expect("second rack copy"));
+
+        let published = state.published_sequencers();
+        let graphs: Vec<_> = published.iter().filter_map(|p| p.graph.clone()).collect();
+        assert_eq!(graphs.len(), 3, "one instance per owner");
+        let project = graphs.iter().find(|m| m.owner_rack.is_none()).unwrap();
+        let rack3 = graphs.iter().find(|m| m.owner_rack == Some(3)).unwrap();
+        let rack4 = graphs.iter().find(|m| m.owner_rack == Some(4)).unwrap();
+        assert_eq!(project.id, super::graph_instance_id("shared", None));
+        assert_eq!(rack3.id, super::graph_instance_id("shared", Some(3)));
+        assert_ne!(rack3.id, rack4.id);
+        assert!(project.id < (1u64 << 53) && rack3.id < (1u64 << 53), "handles survive f64");
+
+        // A bare name is ambiguous now; the handle is not. A native's Err
+        // lands in the runtime status, not in eval_str's result.
+        authoring.take_status_message();
+        let _ = authoring.eval_str(r#"(graph-node "shared" 0 :route 1)"#);
+        let status = authoring.take_status_message().unwrap_or_default();
+        assert!(status.contains("ambiguous"), "bare name must be ambiguous: {status}");
+        assert!(
+            state.current_graph_overrides().is_empty(),
+            "an ambiguous reference writes nothing"
+        );
+        // ...unless a rack owner is being evaluated, which picks its own copy.
+        super::with_graph_owner_rack(Some(3), || {
+            authoring.eval_str(r#"(graph-node "shared" 0 :route 1)"#).expect("owner-scoped name")
+        });
+        authoring
+            .eval_str(&format!("(graph-node {} 1 :route 1)", rack4.id))
+            .expect("numeric handle");
+        authoring
+            .eval_str(&format!("(graph-owner {})", rack4.id))
+            .map(|v| assert!(matches!(v, Some(Value::Number(n)) if n == 4.0)))
+            .expect("graph-owner");
+        assert!(matches!(
+            authoring.eval_str(&format!("(graph-owner {})", project.id)).expect("graph-owner"),
+            Some(Value::Nil)
+        ));
+
+        let overrides = state.current_graph_overrides();
+        let for_rack3 = overrides.iter().find(|o| rack3.matches_overrides(o)).expect("rack 3 overrides");
+        assert_eq!(for_rack3.owner_rack, Some(3));
+        assert_eq!(for_rack3.sequencer_id, rack3.id);
+        assert!(matches!(
+            for_rack3.node_intrinsics[0].route,
+            Some(crate::graph::ProjectGraphRouteOverride::Track(1))
+        ));
+        let for_rack4 = overrides.iter().find(|o| rack4.matches_overrides(o)).expect("rack 4 overrides");
+        assert_eq!(for_rack4.node_intrinsics[0].instance, 1);
+        assert!(!overrides.iter().any(|o| project.matches_overrides(o)), "project copy untouched");
+
+        // Member-relative routes are what the rack instance stores; the route
+        // options come from membership, and bind-graph indexes them directly.
+        state.set_rack_memberships(vec![crate::graph::RackMembership { group_id: 3, members: vec![9, 2] }]);
+        let tracks = authoring
+            .eval_str(&format!("(graph-route-tracks {})", rack3.id))
+            .expect("route tracks");
+        assert_eq!(eseqlisp::vm::format_lisp_value(&tracks.expect("value")), "(9 2)");
+        assert!(matches!(
+            authoring.eval_str(&format!("(graph-route-tracks {})", project.id)).unwrap(),
+            Some(Value::Nil)
+        ));
+        let index = authoring
+            .eval_str(&format!(
+                "(reactive-value (bind-graph {} 0 :route (list \"a\" \"b\" \"Off\")))",
+                rack3.id
+            ))
+            .expect("bind-graph route index");
+        assert!(matches!(index, Some(Value::Number(n)) if n == 1.0), "{index:?}");
+        authoring
+            .eval_str(&format!("(graph-node {} 0 :route :off)", rack3.id))
+            .expect("route off");
+        let index = authoring
+            .eval_str(&format!(
+                "(reactive-value (bind-graph {} 0 :route (list \"a\" \"b\" \"Off\")))",
+                rack3.id
+            ))
+            .expect("bind-graph route index");
+        assert!(matches!(index, Some(Value::Number(n)) if n == 2.0), "Off is the last option: {index:?}");
     }
 
     #[test]
@@ -3373,6 +3594,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         let expected = crate::graph::ProjectGraphOverrides {
             sequencer_id: super::stable_sequencer_id("neural-8x8-demo"),
             sequencer_name: "neural-8x8-demo".to_string(),
+            owner_rack: None,
             node_intrinsics: vec![
                 crate::graph::ProjectGraphNodeIntrinsicOverride {
                     group: "nrn".to_string(),
@@ -3529,6 +3751,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         let manifest = GraphManifest {
             id: 123,
             name: "neural".into(),
+            owner_rack: None,
             shape: ShapeSpec::Line(2),
             energy_decay: 1.0,
             reset_every_beats: 0.0,
@@ -3714,6 +3937,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         let manifest = GraphManifest {
             id: 77,
             name: "neural".into(),
+            owner_rack: None,
             shape: ShapeSpec::Line(2),
             energy_decay: 1.0,
             reset_every_beats: 0.0,
@@ -3843,6 +4067,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         let manifest = GraphManifest {
             id: 88,
             name: "neural".into(),
+            owner_rack: None,
             shape: ShapeSpec::Line(2),
             energy_decay: 1.0,
             reset_every_beats: 16.0, // 4 bars
@@ -4028,6 +4253,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         let manifest = GraphManifest {
             id: 188,
             name: "variable".into(),
+            owner_rack: None,
             shape: ShapeSpec::VariableLine {
                 default: 8,
                 min: 1,
@@ -4069,6 +4295,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         let fixed = GraphManifest {
             id: 189,
             name: "fixed".into(),
+            owner_rack: None,
             shape: ShapeSpec::Line(8),
             ..manifest.clone()
         };

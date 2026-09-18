@@ -1190,6 +1190,26 @@ pub struct ProjectRackConfig {
     /// Parallel to `pads`: the choke group each pad belongs to, if any.
     #[serde(default)]
     pub choke_groups: Vec<Option<u8>>,
+    /// Graph sequencers this rack owns (`docs/rack-clips-and-break-kits-spec.md`
+    /// §5): their routes are member indices and their instances are namespaced
+    /// by this rack, so the pair travels together.
+    #[serde(default)]
+    pub sequencers: Vec<ProjectRackSequencer>,
+}
+
+/// One graph `def-sequencer` instance a drum rack owns. `source` is the Lisp
+/// form the host evaluates under the rack owner to bring the instance back on
+/// project open: `(load "content/scripts/...")` for a project script,
+/// `(import author.package)` for a package module, or the script text itself
+/// when neither applies. Empty when the instance was moved into the rack from
+/// a project-owned script whose origin was unknown; such an instance does not
+/// come back by itself.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectRackSequencer {
+    pub sequencer_id: u64,
+    pub sequencer_name: String,
+    #[serde(default)]
+    pub source: String,
 }
 
 /// One pad: the MIDI note it answers to and the member track backing it.
@@ -4073,6 +4093,7 @@ mod tests {
                 graph_overrides: vec![ProjectGraphOverrides {
                     sequencer_id: 99,
                     sequencer_name: "neural".to_string(),
+                    owner_rack: None,
                     node_intrinsics: vec![crate::graph::ProjectGraphNodeIntrinsicOverride {
                         group: "nrn".to_string(),
                         instance: 1,
@@ -4806,6 +4827,7 @@ mod tests {
             members: vec![0, 1],
             bus_id: 7,
             rack: Some(ProjectRackConfig {
+                sequencers: Vec::new(),
                 pads: vec![
                     ProjectRackPad { pad_note: 36, member: 0 },
                     ProjectRackPad { pad_note: 38, member: 1 },
@@ -4836,6 +4858,7 @@ mod tests {
     #[test]
     fn rack_sanitize_enforces_pad_invariants() {
         let mut rack = ProjectRackConfig {
+            sequencers: Vec::new(),
             pads: vec![
                 ProjectRackPad { pad_note: 36, member: 0 },
                 // Duplicate pad note.
@@ -4865,6 +4888,7 @@ mod tests {
     #[test]
     fn rack_sanitize_migrates_out_of_domain_pad_notes() {
         let mut rack = ProjectRackConfig {
+            sequencers: Vec::new(),
             pads: vec![
                 ProjectRackPad { pad_note: 36, member: 0 },
                 // Legal before eseq-4b5.15, above D#8 now.
@@ -4894,6 +4918,7 @@ mod tests {
     #[test]
     fn rack_sanitize_preserves_choke_groups_across_the_pad_note_migration() {
         let mut rack = ProjectRackConfig {
+            sequencers: Vec::new(),
             pads: vec![
                 ProjectRackPad { pad_note: 90, member: 0 },
                 ProjectRackPad { pad_note: 91, member: 1 },

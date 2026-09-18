@@ -566,7 +566,16 @@ impl GraphController<'_> {
         };
         let delay_id = nodes.delay_id;
         let mut old_sends = std::mem::take(&mut nodes.bus_send_ids);
-        let requested_sends = self.app.state.pattern.track_params[track_idx].sends();
+        let mut requested_sends = self.app.state.pattern.track_params[track_idx].sends();
+        if let Some(fixed) = &self.app.graph.bounce_latency {
+            for destination in &fixed.sends[track_idx] {
+                if !requested_sends.iter().any(|send| send.destination == *destination) {
+                    requested_sends.push(crate::sequencer::TrackSendSnapshot {
+                        destination: *destination, amount: 0.0,
+                    });
+                }
+            }
+        }
         let bus_nodes = self.app.graph.bus_node_ids.clone();
         let lg = self.app.graph.lg.0;
 

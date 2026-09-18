@@ -43,6 +43,7 @@
       (application-menu-entry "file-menu-import-package" "Import Package…" "" (lambda () (host-command "menu-import-package" (dict))))
       (application-menu-entry "file-menu-export-package" "Export Package…" "" (lambda () (host-command "menu-export-package" (dict))))
       (application-menu-entry "file-menu-settings" "Settings…" "," (lambda () (host-command "settings-open" (dict))))
+      (application-menu-entry "file-menu-customize" "Customize…" "" (lambda () (host-command "customize-open" (dict))))
       nil
       (application-menu-entry "file-menu-help" "Help" "" (lambda () (host-command "open-help" (dict))))
       (application-menu-entry "file-menu-about" "About eseq" "" (lambda () (host-command "about-open" (dict)))))

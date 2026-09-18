@@ -2174,6 +2174,7 @@ impl App {
                 group.color = kit_color;
                 group.members = members;
                 group.rack = Some(crate::project::ProjectRackConfig {
+                    sequencers: Vec::new(),
                     pads,
                     choke_groups: desired_for_group.iter().map(|(_, choke, _)| *choke).collect(),
                 });

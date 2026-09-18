@@ -22,6 +22,12 @@ pub(crate) enum ActiveDeleteTarget {
         track: usize,
         pattern_id: PatternId,
     },
+    /// A step selection that spans several tracks (rack-wide / multi-track
+    /// Cmd+A). `selected_steps` still holds the step indexes; this names the
+    /// tracks they apply to, so Backspace clears every one of them at once.
+    TrackSteps {
+        tracks: Vec<usize>,
+    },
     ModRoute {
         source: usize,
         destination: sequencer::sequencer::ModDestination,
@@ -1153,6 +1159,7 @@ impl ActiveDeleteTarget {
             | ActiveDeleteTarget::MixerGroup { .. }
             | ActiveDeleteTarget::TrackPattern { .. }
             | ActiveDeleteTarget::ModRoute { .. } => "*mixer*",
+            ActiveDeleteTarget::TrackSteps { .. } => "*sequencer*",
             ActiveDeleteTarget::FxEffect { .. }
             | ActiveDeleteTarget::RackEffect { .. }
             | ActiveDeleteTarget::RackSlot { .. } => "*fx*",

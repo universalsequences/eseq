@@ -30,12 +30,14 @@ enum ButtonVariant {
 fn variant(props: &HashMap<String, Value>) -> ButtonVariant {
     match props.get("variant") {
         Some(Value::Keyword(value)) | Some(Value::String(value)) => match value.as_str() {
-            "secondary" => ButtonVariant::Secondary,
+            "primary" => ButtonVariant::Primary,
             "ghost" => ButtonVariant::Ghost,
             "danger" => ButtonVariant::Danger,
-            _ => ButtonVariant::Primary,
+            _ => ButtonVariant::Secondary,
         },
-        _ => ButtonVariant::Primary,
+        // Unstyled buttons are the quiet grey kind; a filled accent button is
+        // opt-in so each view has one default action, like a native dialog.
+        _ => ButtonVariant::Secondary,
     }
 }
 
@@ -115,15 +117,23 @@ fn variant_fg(props: &HashMap<String, Value>) -> Color {
     resolve_named_color(props, "color", default)
 }
 
+/// Filled accent variants draw flat, like a native default button: no lit
+/// rim and only a faint top highlight. The grey variants keep their bevel.
+fn is_filled(props: &HashMap<String, Value>) -> bool {
+    matches!(variant(props), ButtonVariant::Primary | ButtonVariant::Danger)
+}
+
 fn button_border(props: &HashMap<String, Value>) -> Color {
     if plock_active(props) {
         return plock_color(props);
     }
-    resolve_named_color(props, "border-color", theme::BUTTON_BORDER())
+    let default = if is_filled(props) { Color::rgba(0.0, 0.0, 0.0, 0.0) } else { theme::BUTTON_BORDER() };
+    resolve_named_color(props, "border-color", default)
 }
 
 fn button_highlight(props: &HashMap<String, Value>) -> Color {
-    resolve_named_color(props, "highlight-color", theme::BUTTON_HIGHLIGHT())
+    let default = if is_filled(props) { Color::rgba(1.0, 1.0, 1.0, 0.05) } else { theme::BUTTON_HIGHLIGHT() };
+    resolve_named_color(props, "highlight-color", default)
 }
 
 fn button_shadow(props: &HashMap<String, Value>) -> Color {
@@ -687,7 +697,9 @@ impl WidgetDefinition for ButtonWidget {
         let font_size = get_prop_num(node, "font-size")
             .map(f64_to_f32)
             .unwrap_or(ctx.inherited_font_size);
-        let padding = get_prop_num(node, "padding").map(f64_to_f32).unwrap_or(1.2);
+        // Wide side padding, like native dialog buttons: the label sits in
+        // a short, roomy pill rather than a tight chip.
+        let padding = get_prop_num(node, "padding").map(f64_to_f32).unwrap_or(1.9);
         let text_width = ctx
             .text_measurer
             .map(|measurer| measurer.measure_text_px(&text, font_size) / ctx.cell_w)
@@ -696,7 +708,7 @@ impl WidgetDefinition for ButtonWidget {
             width: get_prop_num(node, "width")
                 .map(f64_to_f32)
                 .unwrap_or(text_width + padding * 2.0),
-            height: get_prop_num(node, "height").map(f64_to_f32).unwrap_or(1.5),
+            height: get_prop_num(node, "height").map(f64_to_f32).unwrap_or(1.3),
         })
     }
 
@@ -838,7 +850,7 @@ impl WidgetDefinition for ButtonWidget {
             let (ndc_min, ndc_max) = ndc_bounds(node.rect, viewport);
             let px_w = node.rect.width * viewport.cell_w;
             let px_h = node.rect.height * viewport.cell_h;
-            let corner_radius_px = get_f32_prop(&node.props, "corner-radius", 12.0).max(0.0);
+            let corner_radius_px = get_f32_prop(&node.props, "corner-radius", 9.0).max(0.0);
             prims.push(GpuPrimitive::WidgetInstance {
                 widget_type: "button".to_string(),
                 instance: super::WidgetInstance {
@@ -1371,7 +1383,7 @@ mod tests {
         };
 
         assert!((corner_radius(&custom_node) - (8.0 / 30.0)).abs() < 0.0001);
-        assert!((corner_radius(&default_node) - 0.8).abs() < 0.0001);
+        assert!((corner_radius(&default_node) - 0.6).abs() < 0.0001);
         assert!((corner_radius(&pill_node) - 1.0).abs() < 0.0001);
         assert!((corner_radius(&oversized_node) - 1.0).abs() < 0.0001);
     }

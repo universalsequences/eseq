@@ -600,6 +600,9 @@
                 :color :dim :bg :transparent))
             )
           (if (rack-panel-expanded? inst)
+            (pf/rack-header-actions-menu inst)
+            (box :width 0 :height 0))
+          (if (rack-panel-expanded? inst)
             (box :debug-name "rack-preset-button" :padding 0 :width 2 :align :center
               (v-stack
                 (box :width 1 :height 0.1)

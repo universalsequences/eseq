@@ -34,3 +34,13 @@ In command help, `C-` is Control, `M-` is Option, `S-` is Shift, and `s-` is Com
 - `l`: back
 - `t`: top page
 - `q`: close the manual
+
+## Customize
+
+`M-x eseq.customize/customize` opens the Customize dialog, a one-stop list of every setting a module or package declares as a knob, grouped by the module that owns it. Each row shows the knob's name and description and an editor for its type: a number field, a switch, a text field, or a dropdown when the knob offers a fixed set of choices. Changes apply immediately, so you can watch the mixer resize as you turn a width knob. For example, turning off `mixer-show-clip-grid` under `eseq.seq-core-state` hides the clip launch grid and gives you a compact mixer with shorter strips and a shorter mixer panel. **Reset** returns a knob to its factory default, and a knob that differs from its default is marked *(customized)*.
+
+The **Overrides** section below the knobs lists every factory definition a package has replaced, grouped by the package that replaced it. Turn a package's switch off to get the factory behavior back without uninstalling the package; turn it on again to restore the package's version. No reload is needed in either direction. A row marked *quarantined* errored when it ran, so eseq is already using the factory definition for it.
+
+Press **Save** to keep your changes across sessions. eseq writes them into a managed block at the end of `~/.eseq.d/init.lisp`, one `(setopt …)` per changed knob and one `(disable-module-overrides …)` per package you turned off, and leaves the rest of that file alone. A knob you reset to its default is removed from the block. **Close** or Escape dismisses the dialog.
+
+Package authors add a knob with `(defcustom name default :type :number :min 0 :max 10 :step 0.5 :doc "…")` in their module; the range is optional but keeps the number field's drag sensible. See [Packages](packages).

@@ -198,6 +198,10 @@
         }]);
         assert!(locked.iter().all(|param| param.current_value() == 0.85));
         assert!(restored.iter().all(|param| param.current_value() == 0.4));
+        // A scene with no send must silence already queued baseline restores.
+        state.pattern.track_params[0].set_sends(Vec::new());
+        assert!(locked.iter().all(|param| param.current_value() == 0.85));
+        assert!(restored.iter().all(|param| param.current_value() == 0.0));
     }
 
     #[test]
@@ -760,6 +764,7 @@
         GraphManifest {
             id,
             name: name.into(),
+            owner_rack: None,
             shape,
             energy_decay: 1.0,
             reset_every_beats: 0.0,
@@ -792,6 +797,52 @@
         }
     }
 
+    #[test]
+    fn reconcile_resolves_rack_owned_member_routes_through_membership() {
+        let mut manifest = graph_manifest(1, "g", ShapeSpec::Line(3));
+        manifest.owner_rack = Some(7);
+        let memberships = vec![crate::graph::RackMembership { group_id: 7, members: vec![5, 3] }];
+        let mut overrides = graph_route_override(1, "g", 0, 1);
+        overrides.owner_rack = Some(7);
+        overrides.node_intrinsics.push(ProjectGraphNodeIntrinsicOverride {
+            route: Some(ProjectGraphRouteOverride::Track(4)),
+            ..overrides.node_intrinsics[0].clone()
+        });
+        overrides.node_intrinsics[1].instance = 1;
+        let mut manifests = Vec::new();
+        let mut runtimes = Vec::new();
+        reconcile_graph_runtimes(
+            vec![manifest.clone()],
+            &[overrides.clone()],
+            &memberships,
+            &mut runtimes,
+            &mut manifests,
+            0.0,
+        );
+        assert_eq!(runtimes[0].node_route(0), Some(3), "member 1 is track 3");
+        assert_eq!(runtimes[0].node_route(1), None, "member 4 does not exist");
+        assert_eq!(
+            runtimes[0].node_route(2),
+            Some(5),
+            "the manifest's default route is a member index too"
+        );
+
+        // The same overrides keyed by the project-owned copy never reach the
+        // rack instance, and vice versa.
+        let mut project_overrides = overrides.clone();
+        project_overrides.owner_rack = None;
+        project_overrides.sequencer_id = 2; // the project-owned copy's own id
+        reconcile_graph_runtimes(
+            vec![manifest],
+            &[project_overrides],
+            &memberships,
+            &mut runtimes,
+            &mut manifests,
+            0.0,
+        );
+        assert_eq!(runtimes[0].node_route(0), Some(5), "project-owned overrides are not ours");
+    }
+
     fn graph_route_override(
         sequencer_id: u64,
         sequencer_name: &str,
@@ -801,6 +852,7 @@
         ProjectGraphOverrides {
             sequencer_id,
             sequencer_name: sequencer_name.into(),
+            owner_rack: None,
             node_intrinsics: vec![ProjectGraphNodeIntrinsicOverride {
                 group: "n".into(),
                 instance: node_index,
@@ -916,6 +968,7 @@
         reconcile_graph_runtimes(
             vec![manifest.clone()],
             &[],
+            &[],
             &mut runtimes,
             &mut manifests,
             0.0,
@@ -925,6 +978,7 @@
         reconcile_graph_runtimes(
             vec![manifest],
             &[graph_route_override(1, "g", 0, 2)],
+            &[],
             &mut runtimes,
             &mut manifests,
             0.0,
@@ -942,6 +996,7 @@
         reconcile_graph_runtimes(
             vec![graph_manifest(1, "g", ShapeSpec::Line(1))],
             &[],
+            &[],
             &mut runtimes,
             &mut manifests,
             0.0,
@@ -950,6 +1005,7 @@
 
         reconcile_graph_runtimes(
             vec![graph_manifest(1, "g", ShapeSpec::Line(2))],
+            &[],
             &[],
             &mut runtimes,
             &mut manifests,
@@ -977,6 +1033,7 @@
         reconcile_graph_runtimes(
             vec![manifest.clone()],
             &[],
+            &[],
             &mut runtimes,
             &mut manifests,
             0.0,
@@ -987,6 +1044,7 @@
         let overrides = vec![ProjectGraphOverrides {
             sequencer_id: 1,
             sequencer_name: "g".into(),
+            owner_rack: None,
             node_count: Some(12),
             node_params: vec![ProjectGraphNodeParamOverride {
                 group: "n".into(),
@@ -1006,6 +1064,7 @@
         reconcile_graph_runtimes(
             vec![manifest.clone()],
             &overrides,
+            &[],
             &mut runtimes,
             &mut manifests,
             0.0,
@@ -1059,6 +1118,7 @@
         reconcile_graph_runtimes(
             vec![manifest.clone()],
             &[],
+            &[],
             &mut runtimes,
             &mut manifests,
             0.0,
@@ -1079,12 +1139,14 @@
         let overrides = ProjectGraphOverrides {
             sequencer_id: 1,
             sequencer_name: "g".into(),
+            owner_rack: None,
             node_count: Some(4),
             ..ProjectGraphOverrides::default()
         };
         reconcile_graph_runtimes(
             vec![manifest],
             &[overrides],
+            &[],
             &mut runtimes,
             &mut manifests,
             0.0,
@@ -1104,6 +1166,7 @@
         reconcile_graph_runtimes(
             vec![graph_a.clone(), graph_b.clone()],
             &[],
+            &[],
             &mut runtimes,
             &mut manifests,
             0.0,
@@ -1114,6 +1177,7 @@
         reconcile_graph_runtimes(
             vec![graph_a, graph_b],
             &[graph_route_override(1, "a", 0, 3)],
+            &[],
             &mut runtimes,
             &mut manifests,
             0.0,
@@ -6320,6 +6384,7 @@
                 graphs.push(ProjectGraphOverrides {
                     sequencer_id: published_graph.id,
                     sequencer_name: published_graph.name.clone(),
+                    owner_rack: None,
                     node_intrinsics: vec![ProjectGraphNodeIntrinsicOverride {
                         group: "nrn".to_string(),
                         instance: 1,
@@ -6362,6 +6427,7 @@
         reconcile_graph_runtimes(
             manifests,
             &snapshot.graph_overrides,
+            &[],
             &mut scheduler.graph_runtimes,
             &mut scheduler.graph_manifests,
             scheduler.clock.total_beats,

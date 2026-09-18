@@ -123,6 +123,47 @@ pub fn register_graph_authoring_natives(
         },
     );
 
+    let state_for_graph_owner = Arc::clone(&state);
+    runtime.register_native_with_docs(
+        "graph-owner",
+        "(graph-owner id-or-name)",
+        "The drum rack group id that owns this graph sequencer, or nil when the \
+         project owns it (docs/rack-clips-and-break-kits-spec.md §5).",
+        move |args, _ctx| {
+            let reference = args
+                .first()
+                .ok_or_else(|| "graph-owner expects graph id or name".to_string())?;
+            let manifest = resolve_graph_manifest(&state_for_graph_owner, reference)?;
+            Ok(manifest
+                .owner_rack
+                .map(|group_id| EValue::Number(group_id as f64))
+                .unwrap_or(EValue::Nil))
+        },
+    );
+
+    let state_for_graph_route_tracks = Arc::clone(&state);
+    runtime.register_native_with_docs(
+        "graph-route-tracks",
+        "(graph-route-tracks id-or-name)",
+        "For a rack-owned graph sequencer, the track index behind each route \
+         option (member order, so route n is member n); nil when the project \
+         owns it and routes are plain track indices.",
+        move |args, _ctx| {
+            let reference = args
+                .first()
+                .ok_or_else(|| "graph-route-tracks expects graph id or name".to_string())?;
+            let manifest = resolve_graph_manifest(&state_for_graph_route_tracks, reference)?;
+            let Some(group_id) = manifest.owner_rack else {
+                return Ok(EValue::Nil);
+            };
+            let memberships = state_for_graph_route_tracks.rack_memberships();
+            let members = crate::graph::rack_members(&memberships, group_id).unwrap_or(&[]);
+            Ok(lisp_list(
+                members.iter().map(|track| EValue::Number(*track as f64)).collect(),
+            ))
+        },
+    );
+
     let state_for_graph_node_value = Arc::clone(&state);
     runtime.register_native_with_docs(
         "graph-node-value",
@@ -279,6 +320,20 @@ pub fn register_graph_authoring_natives(
             let field = graph_key_string(&args[2])
                 .ok_or_else(|| "bind-graph expects a field name".to_string())?;
             let value = match args.get(3) {
+                // A route is already an index into the route option list
+                // (track n / rack member n at position n), with "Off" as the
+                // list's last entry; label matching would tie the binding to
+                // the "Track n" spelling, which rack-owned instances do not use.
+                Some(options) if field == "route" => {
+                    let option_count = match options {
+                        EValue::List(items) => items.len(),
+                        _ => 0,
+                    };
+                    match resolved_graph_node_value(&state_for_bind_graph, &manifest, instance, &field)? {
+                        EValue::Number(route) if (route as usize) < option_count => route,
+                        _ => option_count.saturating_sub(1) as f64,
+                    }
+                }
                 Some(options) => {
                     let display = graph_node_display_value(
                         &state_for_bind_graph,
@@ -524,9 +579,7 @@ fn resolved_graph_overrides_for_manifest(
     state
         .current_graph_overrides()
         .into_iter()
-        .find(|overrides| {
-            overrides.sequencer_id == manifest.id || overrides.sequencer_name == manifest.name
-        })
+        .find(|overrides| manifest.matches_overrides(overrides))
 }
 
 fn graph_runtime_config_for_current_pattern(
@@ -1161,11 +1214,35 @@ fn resolve_graph_manifest(
         }
         EValue::String(name) | EValue::Symbol(name) | EValue::Keyword(name) => {
             let name = name.trim_start_matches('@').trim_start_matches(':');
-            published
+            let candidates: Vec<crate::graph::GraphManifest> = published
                 .into_iter()
                 .filter_map(|published| published.graph)
-                .find(|manifest| manifest.name == name)
-                .ok_or_else(|| "graph sequencer name not found".to_string())
+                .filter(|manifest| manifest.name == name)
+                .collect();
+            // A bare name is unambiguous when one instance carries it, or when
+            // the host is currently evaluating a rack-attached script and one
+            // of them belongs to that rack. Otherwise the caller must use the
+            // numeric handle `def-sequencer` returned.
+            let owner = crate::lisp_host::eseq::graph_manifest::current_graph_owner_rack();
+            if let Some(manifest) = candidates
+                .iter()
+                .find(|manifest| owner.is_some() && manifest.owner_rack == owner)
+            {
+                return Ok(manifest.clone());
+            }
+            match candidates.len() {
+                0 => Err("graph sequencer name not found".to_string()),
+                1 => Ok(candidates.into_iter().next().expect("one candidate")),
+                n => Err(format!(
+                    "graph sequencer name '{name}' is ambiguous: {n} instances (ids {}); \
+                     use the id returned by def-sequencer",
+                    candidates
+                        .iter()
+                        .map(|manifest| manifest.id.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )),
+            }
         }
         _ => Err("graph reference must be id or name".to_string()),
     }
@@ -1175,23 +1252,20 @@ fn graph_overrides_for_manifest<'a>(
     overrides: &'a [crate::graph::ProjectGraphOverrides],
     manifest: &crate::graph::GraphManifest,
 ) -> Option<&'a crate::graph::ProjectGraphOverrides> {
-    overrides.iter().find(|overrides| {
-        overrides.sequencer_id == manifest.id || overrides.sequencer_name == manifest.name
-    })
+    overrides.iter().find(|overrides| manifest.matches_overrides(overrides))
 }
 
 fn ensure_graph_overrides<'a>(
     graphs: &'a mut Vec<crate::graph::ProjectGraphOverrides>,
     manifest: &crate::graph::GraphManifest,
 ) -> &'a mut crate::graph::ProjectGraphOverrides {
-    if let Some(idx) = graphs.iter().position(|graph| {
-        graph.sequencer_id == manifest.id || graph.sequencer_name == manifest.name
-    }) {
+    if let Some(idx) = graphs.iter().position(|graph| manifest.matches_overrides(graph)) {
         return &mut graphs[idx];
     }
     graphs.push(crate::graph::ProjectGraphOverrides {
         sequencer_id: manifest.id,
         sequencer_name: manifest.name.clone(),
+        owner_rack: manifest.owner_rack,
         ..crate::graph::ProjectGraphOverrides::default()
     });
     graphs.last_mut().expect("just pushed graph overrides")
@@ -1499,6 +1573,13 @@ fn graph_manifest_to_value(
     let mut map: HashMap<String, Rc<RefCell<EValue>>> = HashMap::new();
     map.insert("id".to_string(), lisp_number(manifest.id as f64));
     map.insert("name".to_string(), lisp_string(manifest.name.clone()));
+    map.insert(
+        "owner-rack".to_string(),
+        match manifest.owner_rack {
+            Some(group_id) => lisp_number(group_id as f64),
+            None => Rc::new(RefCell::new(EValue::Nil)),
+        },
+    );
     map.insert(
         "nodes".to_string(),
         lisp_number(manifest.shape.resolved_node_count(overrides) as f64),

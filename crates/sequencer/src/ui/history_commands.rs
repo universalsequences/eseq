@@ -114,6 +114,47 @@ pub(super) fn apply_selected_steps_delete(
     Ok((outcome, steps))
 }
 
+/// Multi-track selected-step delete (rack-wide / multi-track select-all): the
+/// shared step set is clipped to each track's length and cleared on every
+/// listed track as ONE history entry. Returns the per-track steps actually
+/// targeted so the caller can invalidate exactly those.
+pub(super) fn apply_selected_steps_delete_multi(
+    app: &mut app::App,
+    tracks: &[usize],
+    selected_steps: &Arc<Mutex<HashSet<usize>>>,
+) -> Result<(app::edit::EditOutcome, Vec<(usize, Vec<usize>)>), String> {
+    let mut steps = selected_steps
+        .lock()
+        .unwrap()
+        .iter()
+        .copied()
+        .collect::<Vec<_>>();
+    steps.sort_unstable();
+    let track_count = app.state.active_track_count();
+    let targets = tracks
+        .iter()
+        .copied()
+        .filter(|track| *track < track_count)
+        .map(|track| {
+            let num_steps = app.state.pattern.track_params[track].get_num_steps();
+            (
+                track,
+                steps
+                    .iter()
+                    .copied()
+                    .filter(|step| *step < num_steps)
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let outcome = app::edit::apply_recorded_multi_track_step_clear(app, &targets)
+        .map_err(|error| format!("could not delete selected steps: {error:?}"))?;
+    if matches!(outcome, app::edit::EditOutcome::Applied(_)) {
+        selected_steps.lock().unwrap().clear();
+    }
+    Ok((outcome, targets))
+}
+
 pub(super) fn apply_step_paste_host_command(
     app: &mut app::App,
     clipboard: &Arc<Mutex<Option<(usize, Vec<(usize, sequencer::sequencer::StepSnapshot)>)>>>,
@@ -343,14 +384,27 @@ pub(super) fn apply_slice3_history_host_command(
     };
     let op = map_string(map, "op")
         .ok_or_else(|| "Slice 3 edit operation was missing".to_string())?;
+    let track = map_usize(map, "track");
+    let command = slice3_command(map, &op, track)?;
+    app::try_apply_command(app, command)
+        .map(|outcome| (outcome, track))
+        .map_err(|error| format!("could not apply Slice 3 edit: {error:?}"))
+}
+
+/// Builds the app command for one Slice 3 op against one track (or none for
+/// the global ops). Shared by the single-track path and the multi-track batch.
+fn slice3_command(
+    map: &std::collections::HashMap<String, Rc<RefCell<Value>>>,
+    op: &str,
+    track: Option<usize>,
+) -> Result<app::AppCommand, String> {
     let value = || {
         map_number(map, "value")
             .filter(|value| value.is_finite())
             .ok_or_else(|| "Slice 3 edit value was invalid".to_string())
     };
-    let track = map_usize(map, "track");
     let track_required = || track.ok_or_else(|| "Slice 3 edit track was invalid".to_string());
-    let command = match op.as_str() {
+    let command = match op {
         "volume" => app::AppCommand::SetTrackVolume {
             track: track_required()?,
             value: value()? as f32,
@@ -445,9 +499,70 @@ pub(super) fn apply_slice3_history_host_command(
         },
         _ => return Err(format!("unknown Slice 3 edit operation {op}")),
     };
-    app::try_apply_command(app, command)
-        .map(|outcome| (outcome, track))
-        .map_err(|error| format!("could not apply Slice 3 edit: {error:?}"))
+    Ok(command)
+}
+
+/// One track-settings op (steps / poly / voices / priority / trigger / swing
+/// / swing resolution / timebase / mute group / scale) applied to every track
+/// of a multi-track selection as a single undo entry.
+pub(super) fn apply_track_params_batch_host_command(
+    app: &mut app::App,
+    payload: &Value,
+) -> Result<(app::edit::EditOutcome, Vec<usize>), String> {
+    let Value::Map(map) = payload else {
+        return Err("Track-settings batch payload was invalid".to_string());
+    };
+    let op = map_string(map, "op")
+        .ok_or_else(|| "Track-settings batch operation was missing".to_string())?;
+    let mut tracks = map_usize_list(map, "tracks")
+        .ok_or_else(|| "Track-settings batch tracks were invalid".to_string())?;
+    tracks.sort_unstable();
+    tracks.dedup();
+    let track_count = app.state.active_track_count();
+    if let Some(track) = tracks.iter().find(|track| **track >= track_count) {
+        return Err(format!("Track-settings batch track {track} does not exist"));
+    }
+    if tracks.is_empty() {
+        return Ok((app::edit::EditOutcome::NoOp, tracks));
+    }
+    let value = map_number(map, "value")
+        .filter(|value| value.is_finite())
+        .ok_or_else(|| "Track-settings batch value was invalid".to_string())?;
+    let outcome = match op.as_str() {
+        "set-length" => {
+            let n = value.round().max(1.0) as usize;
+            let commands = tracks
+                .iter()
+                .map(|track| app::AppCommand::SetTrackNumSteps { track: *track, n })
+                .collect::<Vec<_>>();
+            app::edit::apply_recorded_pattern_geometry_commands(
+                app,
+                &commands,
+                "Set track lengths",
+            )
+        }
+        "toggle-poly" => {
+            // The panel asked for a target state, so only flip the tracks
+            // that differ; toggling all would leave a mixed selection mixed.
+            let want_on = value != 0.0;
+            let commands = tracks
+                .iter()
+                .filter(|track| app.state.pattern.track_params[**track].is_polyphonic() != want_on)
+                .map(|track| app::AppCommand::ToggleTrackPolyphonic { track: *track })
+                .collect::<Vec<_>>();
+            app::edit::apply_recorded_track_params_batch(app, &commands)
+        }
+        _ => {
+            let commands = tracks
+                .iter()
+                .map(|track| slice3_command(map, &op, Some(*track)))
+                .collect::<Result<Vec<_>, _>>()?;
+            app::edit::apply_recorded_track_params_batch(app, &commands)
+        }
+    };
+    outcome
+        .map(|outcome| (outcome, tracks))
+        .map_err(|error| format!("could not apply track-settings batch: {error:?}"))
 }
 
 /// Mixer-strip ops stay on the targeted per-track invalidation (Mute/Solo

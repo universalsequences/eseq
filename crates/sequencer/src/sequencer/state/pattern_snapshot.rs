@@ -379,6 +379,25 @@ pub(super) fn optional_f32_rows_bit_exact_eq(
 }
 
 impl RackSlotSnapshot {
+    /// Copy the scene-level values of `source` onto this slot: the instrument
+    /// base values, base note, mixer fields and slot-FX base values.  P-locks,
+    /// descriptors, sound state and sample bindings are untouched.  Used by
+    /// "copy current values to all scenes".
+    pub fn copy_scene_values_from(&mut self, source: &Self) {
+        self.instrument_slot
+            .copy_base_values_from(&source.instrument_slot);
+        self.instrument_base_note_offset = source.instrument_base_note_offset;
+        self.choke_group = source.choke_group;
+        self.gain = source.gain;
+        self.pan = source.pan;
+        self.mute = source.mute;
+        self.solo = source.solo;
+        self.max_polyphony = source.max_polyphony;
+        for (target, source) in self.effect_slots.iter_mut().zip(&source.effect_slots) {
+            target.copy_base_values_from(source);
+        }
+    }
+
     pub fn authoring_values(&self) -> RackSlotValuesSnapshot {
         RackSlotValuesSnapshot {
             base_note_offset_bits: self.instrument_base_note_offset.to_bits(),

@@ -724,6 +724,22 @@ fn enabled_param_index(desc: &sequencer::effects::EffectDescriptor) -> Option<us
     desc.params.iter().position(|param| param.name == "enabled")
 }
 
+/// The channel-strip label for an engine name. Engine names are library ids
+/// ("factory:Drums/808 Clap"); sidecar instruments (a folder with dsp.lisp +
+/// ui.lisp) carry a trailing slash ("factory:Drums/808 Kick/"), and a bare
+/// file id may end in ".lisp". The strip wants just the leaf.
+pub(crate) fn device_leaf_name(name: &str) -> String {
+    let trimmed = name.trim_end_matches('/');
+    let leaf = trimmed.rsplit('/').next().unwrap_or(trimmed);
+    let leaf = leaf.rsplit(':').next().unwrap_or(leaf);
+    let leaf = leaf.strip_suffix(".lisp").unwrap_or(leaf);
+    if leaf.is_empty() {
+        trimmed.to_string()
+    } else {
+        leaf.to_string()
+    }
+}
+
 pub(crate) fn build_track_device_chains_value(
     app: &app::App,
     state: &Arc<SequencerState>,
@@ -754,15 +770,12 @@ pub(crate) fn build_track_device_chains_value(
             Some(sequencer::sequencer::InstrumentType::Empty) | None => None,
         };
         if let Some(name) = instrument_name {
-            // Engine names are library paths ("factory:Drums/808 Clap"); a
-            // channel strip wants just the leaf.
-            let leaf = name
-                .rsplit('/')
-                .next()
-                .and_then(|leaf| leaf.rsplit(':').next())
-                .unwrap_or(name.as_str())
-                .to_string();
-            entries.push(device_entry(leaf, "instrument", true, -1));
+            entries.push(device_entry(
+                device_leaf_name(&name),
+                "instrument",
+                true,
+                -1,
+            ));
         }
         let descs = app.graph.effect_descriptors.get(track);
         let chain = state.pattern.effect_chains.get(track);

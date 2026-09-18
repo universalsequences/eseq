@@ -36,6 +36,7 @@
         expanded-track-ids
         select-track-for-edit
         open-piano-roll-for-track
+        show-fx-for-group
         set-track-expanded
         lane-patch-show
         lane-patch-select-cable
@@ -273,6 +274,8 @@
 
 (def open-piano-roll-for-track (track)
   (do
+    ;; A badge's first click may arm deletion; double-click is navigation.
+    (seq-clear-delete-target)
     (activate-track-for-edit track)
     (if (eseq.track-collapse/empty-instrument? track)
       (eseq.browser/open-device-picker)
@@ -424,9 +427,13 @@
                 (if (> (len SEQ.process-lanes) 0) eseq.seqv-track-params/seqv-process-lane-mode-offset -1)
                 -1))))))))
 
+;; A selected drum rack keeps its bus selection: Cmd+A then spans its members
+;; (step-grid-interactions/select-all-steps).
 (def select-all-current-track-steps ()
   (do
-    (set! eseq.seq-core-state/selected-bus -1)
+    (if (>= (eseq.drum-rack-v2/rack-of-bus eseq.seq-core-state/selected-bus) 0)
+      nil
+      (set! eseq.seq-core-state/selected-bus -1))
     (eseq.step-grid-interactions/select-all-steps)))
 
 (def collapse-all-tracks ()
@@ -1620,7 +1627,7 @@
       :key (str "expanded-param-tab-" track-id "-" mode)
       :bg (if (= (track-param-mode track-id) mode) (eseq.seqv-track-params/seqv-param-color mode) :dark-gray)
       :background-color (if armed :process-map-arm-bg (rgba 0 0 0 0))
-      :corner-radius 6
+      :corner-radius (eseq.seq-core-state/radius 6)
       :on-click |x y r| (if armed
                           (param-tab-bind track mode)
                           (do (activate-track-for-edit track) (set-track-param-mode track-id mode)))
@@ -1827,7 +1834,7 @@
 (def lane-chip (text filled dim)
   ;; `filled` / `dim` are 1 or 0. No border: a thin SDF border on a small
   ;; rounded box floods it with the border color.
-  (box :height 1.1 :padding 0.25 :corner-radius 6
+  (box :height 1.1 :padding 0.25 :corner-radius (eseq.seq-core-state/radius 6)
     :background-color (if (= filled 1)
                         (if (= dim 1) (rgba 0.94 0.63 0.24 0.45) :process-lane-accent)
                         (rgba 0.94 0.63 0.24 0.14))
@@ -1862,7 +1869,7 @@
 
 (def lane-strip-mode-row (track slot)
   (if (slot-inlet-named slot "mode")
-    (h-stack :width :fill :gap 0.15 :padding 0.1 :corner-radius 6
+    (h-stack :width :fill :gap 0.15 :padding 0.1 :corner-radius (eseq.seq-core-state/radius 6)
       :background-color (rgba 0 0 0 0.25)
       (lane-strip-mode-button track slot "accumulate" 0)
       (lane-strip-mode-button track slot "pass" 1))
@@ -2135,7 +2142,7 @@
             :font-size 10 :color :process-lane-accent :bg :transparent)
           (box :flex 1 :height 0.1)
           (label (get entry :state) :font-size 8 :color :dim :bg :transparent :v-align :center))
-        (box :width :fill :height 2.6 :corner-radius 6 :padding 0.2
+        (box :width :fill :height 2.6 :corner-radius (eseq.seq-core-state/radius 6) :padding 0.2
           :background-color (rgba 0 0 0 0.3)
           (linegraph
             :key (str "lane-scope-" track "-" (get slot :instance-id))
@@ -2420,7 +2427,7 @@
 
 (def lane-patch-column (track track-id entry)
   (let ((selected (lane-patch-lane-selected? track track-id (get entry :instance-id))))
-    (box :padding 0.4 :corner-radius 12
+    (box :padding 0.4 :corner-radius (eseq.seq-core-state/radius 12)
       :key (str "lane-patch-col-" (get entry :instance-id))
       :background-color (if (get entry :enabled) (rgba 1 1 1 0.04) (rgba 1 1 1 0.015))
       :selected-background-color :mixer-strip-selected-bg
@@ -2549,7 +2556,7 @@
 
 ;; Same box footprint as a lane cell so the add control shares the grid.
 (def lane-patch-add-cell (track track-id)
-  (box :padding 0.4 :corner-radius 12
+  (box :padding 0.4 :corner-radius (eseq.seq-core-state/radius 12)
     :key (str "lane-patch-add-" track-id)
     :background-color :transparent
     :border-width 0.08 :border-color (rgba 0.94 0.63 0.24 0.16)
@@ -2651,7 +2658,7 @@
   (let ((lane (selected-process-lane track mode))
       (slot (if lane (track-process-slot track (get lane :instance-id)) nil)))
     (if (and lane slot)
-      (box :width 20 :padding 0.5 :corner-radius 10
+      (box :width 20 :padding 0.5 :corner-radius (eseq.seq-core-state/radius 10)
         :key (str "lane-strip-" track-id "-" (get slot :instance-id))
         :background-color (rgba 1 1 1 0.04)
         :border-width 0.08 :border-color (rgba 1 1 1 0.08)
@@ -2800,7 +2807,7 @@
   (let ((mode (track-param-mode track-id)))
     (box :padding 0.85
       (box 
-        :background-color :buffer-bg :corner-radius 16
+        :background-color :buffer-bg :corner-radius (eseq.seq-core-state/radius 16)
         (v-stack :width :fill :padding 0.35 :gap 0.1
           (h-stack :gap 0.5
             (box :width 1)
@@ -2979,7 +2986,7 @@
       :selected-background-color :mixer-strip-selected-bg
       :muted-background-color :mixer-strip-muted-bg
       :border-width 2
-      :corner-radius 10
+      :corner-radius (eseq.seq-core-state/radius 10)
       :border-color :mixer-strip-border
       :selected-border-color :mixer-strip-selected-border
       :muted-border-color :mixer-strip-border
@@ -3058,6 +3065,13 @@
     (if (>= bus-idx 0)
       (set! eseq.seq-core-state/selected-bus bus-idx)
       false)))
+
+(def show-fx-for-group (gidx)
+  (do
+    (seq-clear-delete-target)
+    (seq-clear-selection)
+    (select-group gidx)
+    (eseq.seq-panels/seq-show-fx-lower-panel)))
 
 ;; Selection visibility rides the *sel-sync* SEQV field, never a raw
 ;; `selected-bus` read: this block wraps every member row, so a render-time
@@ -3289,7 +3303,7 @@
         '(rgba 0.30 0.31 0.32 1.0))
       :drop-hover-border-color :mixer-strip-selected-border
       :drop-hover-background-color :mixer-control-bg
-      :corner-radius 8
+      :corner-radius (eseq.seq-core-state/radius 8)
       :drop-types (pad-cell-drop-types pad)
       :drop-meta (pad-cell-drop-meta gidx cell pad)
       :on-drop (lambda (event) (drop-on-pad-cell event gidx cell))
@@ -3364,7 +3378,7 @@
   (box :key (str "rack-pad-grid-" (eseq.drum-rack-v2/group-id gidx))
     :width pad-grid-intrinsic-width :padding 0.2
     :background-color :bg
-    :corner-radius 14
+    :corner-radius (eseq.seq-core-state/radius 14)
     (v-stack :gap 0.1 :align :start
       (each (range 0 4) |row|
         (pad-grid-row gidx row)))))
@@ -3437,7 +3451,7 @@
       ;; Being a drop target makes the cell a pointer target too, so it must
       ;; page the grid itself: the click no longer reaches the row.
       :on-click |x y r| (set-pad-page gidx (eseq.drum-rack-v2/page-of-note note))
-      :corner-radius 2)))
+      :corner-radius (eseq.seq-core-state/radius 2))))
 
 ;; A row is the click target, not its cells: four notes is already a finer jump
 ;; than the octave-aligned pages the click snaps to, and one handler per row
@@ -3451,7 +3465,7 @@
         :transparent)
       :border-width 1
       :border-color (if on-page :mixer-strip-selected-border :transparent)
-      :corner-radius 2
+      :corner-radius (eseq.seq-core-state/radius 2)
       :on-click |x y r| (set-pad-page gidx (eseq.drum-rack-v2/page-of-note base))
       (h-stack :gap 0.08 :align :center
         (each (range 0 4) |col|
@@ -3467,7 +3481,7 @@
       :key (str "rack-pad-map-" gid)
       :width pad-map-intrinsic-width :height :fill :padding 0.15
       :background-color :bg
-      :corner-radius 8
+      :corner-radius (eseq.seq-core-state/radius 8)
       :v-align :center :h-align :center
       (v-stack :gap 0.05 :align :center
         (each (range 0 (eseq.drum-rack-v2/pad-map-row-count)) |row|
@@ -3532,6 +3546,7 @@
           :key (group-element-key gidx "select")
           :background-color :transparent
           :on-click |x y r| (select-group gidx)
+          :on-double-click (lambda (event) (show-fx-for-group gidx))
           (badge (track-name-display (eseq.drum-rack-v2/group-name gidx))
             :key (group-element-key gidx "name-label")
             :icon (eseq.track-collapse/group-type-icon (nth SEQ.groups gidx))
@@ -3564,7 +3579,7 @@
       :border-width 2
       :border-color :mixer-strip-border
       :selected-border-color :mixer-strip-selected-border
-      :corner-radius 10
+      :corner-radius (eseq.seq-core-state/radius 10)
       :padding 0.345
       ;; Hit testing chooses the deepest clickable widget, so member-track
       ;; clicks keep selecting the track; only exposed container chrome reaches
@@ -3618,7 +3633,7 @@
       :border-width 1
       :border-color :transparent
       :drop-hover-border-color :mixer-strip-selected-border
-      :corner-radius 10
+      :corner-radius (eseq.seq-core-state/radius 10)
       :drop-types (list "sample" "instrument" "sound")
       :drop-meta (dict :kind "new-sample-track")
       :on-drop (lambda (event) (drop-new-track event))

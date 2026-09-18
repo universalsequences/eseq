@@ -662,6 +662,9 @@ pub struct SequencerState {
     pub(super) scratch_source: Mutex<String>,
     pub(super) scratch_source_version: AtomicU64,
     pub(super) published_sequencers: Mutex<Vec<PublishedSequencer>>,
+    /// Drum-rack member lists mirrored from the app's track groups, captured
+    /// into every scheduler snapshot for rack-owned graph route resolution.
+    pub(super) rack_memberships: Mutex<Vec<crate::graph::RackMembership>>,
     pub(super) published_sequencers_version: AtomicU64,
     /// Scene-slot declarations (`defscene` name → default) shared across VMs.
     /// Each runtime keeps its own declaration table for the slots it evaluated

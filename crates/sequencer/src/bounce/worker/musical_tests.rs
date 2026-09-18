@@ -280,3 +280,62 @@ fn saved_muted_layer_rack_is_silent_from_the_first_sample() {
     assert!(peak(&audio) < 1e-7,
         "saved muted slots must never leak into the export, peak={}", peak(&audio));
 }
+
+#[test]
+fn saved_scene_routing_changes_preserve_compensated_audio_and_tail() {
+    use crate::sequencer::{SceneEvent, TrackSendSnapshot};
+    let folder = tempfile::tempdir().unwrap();
+    let mut bus_a = crate::sequencer::BusId::MIX;
+    let mut bus_b = bus_a;
+    let mut project = saved_song(folder.path(), |app| {
+        bus_a = app.add_bus_channel("A");
+        bus_b = app.add_bus_channel("B");
+        let latent_bus = app.add_bus_channel("Latent");
+        app.graph_controller().add_blank_sampler_track().unwrap();
+        let index = app.buses.iter().position(|bus| bus.id == latent_bus).unwrap();
+        app.add_builtin_bus_effect_sync(index, crate::effects::filter_table::NAME).unwrap();
+        app.set_track_output_all_scenes_unrecorded(1, TrackOutput::Bus(latent_bus));
+        for step in 0..16 { app.state.pattern.patterns[0].set_step_active(step, true); }
+        // The second track is silent; its bus's spectral effect requires 2048
+        // samples of compensation on the audible, otherwise dry paths.
+        app.set_track_output_all_scenes_unrecorded(0, TrackOutput::Bus(bus_a));
+    });
+    project.patterns.truncate(1);
+    project.patterns.push(project.patterns[0].clone());
+    project.scene_banks.clear();
+    project.track_sounds.clear();
+    let boundary = 0.75037; // The preceding note is still inside the PDC ring.
+    let mut arrangement = ProjectArrangement::new(2, 2.25);
+    arrangement.scene_lane = vec![SceneEvent { start_beat: 0.0, scene: 0 },
+        SceneEvent { start_beat: boundary, scene: 1 }];
+    for (start, end, pattern) in [(0.0, boundary, 1), (boundary, 2.0, 2)] {
+        let id = arrangement.allocate_clip_id().unwrap();
+        arrangement.track_lanes[0].push(ArrClip::new(id, start, end, Some(pattern)));
+    }
+    project.arrangement = Some(arrangement);
+    let reference = render(folder.path(), "fixed-routing-reference", &project, None, 0.1);
+    assert!(peak(&reference) > 0.01);
+    project.patterns[1].bus_patterns.iter_mut().find(|bus| bus.id == bus_a.0).unwrap()
+        .output = crate::project::BusOutput::Bus(bus_b.0);
+    let rerouted = render(folder.path(), "bus-rerouted", &project, None, 0.1);
+    assert_audio_matches(&rerouted, &reference);
+    project.patterns[1].track_params[0].output = TrackOutput::Mix.into();
+    assert_audio_matches(&render(folder.path(), "primary-rerouted", &project, None, 0.1), &reference);
+
+    // A send absent in scene zero opens in scene one. Its node ids must be
+    // prepared before the scheduler snapshots, and its delay history must
+    // already be warm. With dry buses it adds another copy of the same note.
+    project.patterns[1].track_params[0].sends = vec![TrackSendSnapshot { destination: bus_b, amount: 1.0 }.into()];
+    let sent = render(folder.path(), "later-send", &project, None, 0.1);
+    let late_note = 30_000 * 2..32_000 * 2;
+    assert!(peak(&reference[late_note.clone()]) > 0.01);
+    let doubled: Vec<_> = reference[late_note.clone()].iter().map(|sample| sample * 2.0).collect();
+    assert_audio_matches(&sent[late_note], &doubled);
+    let excerpt = render(folder.path(), "routing-excerpt", &project, Some((0.9, 1.9)), 0.1);
+    assert_audio_matches(&excerpt, &sent[21_600 * 2..50_400 * 2]);
+
+    project.patterns[0].track_params[0].sends = project.patterns[1].track_params[0].sends.clone();
+    project.patterns[1].track_params[0].sends.clear();
+    let closed = render(folder.path(), "removed-send", &project, None, 0.1);
+    assert_audio_matches(&closed[30_000 * 2..32_000 * 2], &reference[30_000 * 2..32_000 * 2]);
+}

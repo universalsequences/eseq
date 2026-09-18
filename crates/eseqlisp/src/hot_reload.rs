@@ -658,7 +658,10 @@ fn collect_defined_symbols(expr: &Expression, out: &mut HashSet<String>) {
             out.insert(name.clone());
         }
         [Expression::Symbol(form), Expression::Symbol(name), ..]
-            if form == "override" || form == "remove-override" =>
+            if matches!(
+                form.as_str(),
+                "override" | "remove-override" | "disable-override" | "enable-override"
+            ) =>
         {
             // Overrides change the effective value of the factory symbol even
             // though they deliberately do not mutate its global cell. Mark it

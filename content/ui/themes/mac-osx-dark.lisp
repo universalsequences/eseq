@@ -152,8 +152,8 @@
       :bright-black   '(0.30 0.30 0.32)     ; Subtle separators
       
       ;; Accent colors
-      :blue           '(0.00 0.48 0.95)     ; #007AFF — System blue
-      :accent         '(0.00 0.48 0.95)     ; System blue
+      :blue           '(0.00 0.48 1.00)     ; #007AFF — System blue
+      :accent         '(0.00 0.48 1.00)     ; System blue
       :green          '(0.20 0.78 0.35)     ; #32C759 — System green
       :red            '(1.00 0.23 0.19)     ; #FF3B30 — System red
       :yellow         '(1.00 0.80 0.00)     ; #FFCC00 — System yellow
@@ -242,7 +242,7 @@
       :mixer-control-bg  '(0.07 0.075 0.08)
       :mixer-label-bg    '(0.13 0.13 0.14)
       :mixer-label-muted-bg '(0.09 0.09 0.09)
-      :button-primary-bg '(0.00 0.48 0.95)
+      :button-primary-bg '(0.00 0.48 1.00)
       :button-primary-fg '(0.96 0.96 0.98)
       :button-secondary-bg '(0.22 0.23 0.25)
       :button-secondary-fg '(0.94 0.94 0.96)

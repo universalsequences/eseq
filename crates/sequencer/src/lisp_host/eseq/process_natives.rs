@@ -1895,9 +1895,7 @@ fn homeostat_authored_config(
     let overrides = state
         .current_graph_overrides()
         .into_iter()
-        .find(|overrides| {
-            overrides.sequencer_id == manifest.id || overrides.sequencer_name == manifest.name
-        });
+        .find(|overrides| manifest.matches_overrides(overrides));
     manifest.runtime_config_with_overrides(overrides.as_ref())
 }
 

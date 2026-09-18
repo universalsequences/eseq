@@ -874,7 +874,7 @@ theme_slots!(
     (
         button_primary_fg,
         BUTTON_PRIMARY_FG,
-        Color::from_hex(0xf4, 0xf4, 0xf5)
+        Color::from_hex(0xff, 0xff, 0xff)
     ),
     (
         button_secondary_bg,

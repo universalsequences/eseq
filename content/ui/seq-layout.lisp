@@ -41,9 +41,14 @@
 
 (def buffer-radius 16)
 
-;; Transport bar height (cells). A function, not a literal, so a package can
-;; `override` it (e.g. a two-row transport while its own view is showing).
-(def transport-height () 2.4)
+;; Transport bar height (cells). The knob is the customize-tier surface; the
+;; function stays so a package can `override` it (e.g. a two-row transport
+;; while its own view is showing).
+(defcustom transport-bar-height 2.4
+  :type :number :min 1.5 :max 6 :step 0.1
+  :doc "Height (cells) of the transport bar.")
+
+(def transport-height () transport-bar-height)
 
 (def transport-tile-spec ()
   (list :buf "*transport*" :hide-status true :borderless true
@@ -56,18 +61,18 @@
   (list :cols :gap 1
     0.78 (eseq.seq-step-tabs/seq-main-step-tile-layout-spec)
     0.22 (list :rows :gap 1
-      0.48 (list :buf "*step*" :hide-status true :border-radius buffer-radius :border-width border-width :background-color :buffer-bg :min-width 28 :max-width 28)
-      0.52 (list :buf "*track*" :hide-status true :border-radius buffer-radius :border-width border-width :background-color :buffer-bg :max-height 7 :min-height 7 :min-width 28 :max-width 28))))
+      0.48 (list :buf "*step*" :hide-status true :border-radius (eseq.seq-core-state/radius buffer-radius) :border-width border-width :background-color :buffer-bg :min-width 28 :max-width 28)
+      0.52 (list :buf "*track*" :hide-status true :border-radius (eseq.seq-core-state/radius buffer-radius) :border-width border-width :background-color :buffer-bg :max-height 7 :min-height 7 :min-width 28 :max-width 28))))
 
 (def main-panel-layout-spec ()
   (if (eseq.seq-step-tabs/seq-arrangement-view?)
-    (list :buf "*arrangement*" :hide-status true :border-radius buffer-radius :border-width border-width :background-color :buffer-bg :min-width 25)
+    (list :buf "*arrangement*" :hide-status true :border-radius (eseq.seq-core-state/radius buffer-radius) :border-width border-width :background-color :buffer-bg :min-width 25)
     (step-and-track-panel-layout-spec)))
 
 (def collapsible-panel-layout-spec (buffer on-collapse min-width max-width min-height max-height)
   (list :buf buffer
     :hide-status true
-    :border-radius buffer-radius
+    :border-radius (eseq.seq-core-state/radius buffer-radius)
     :border-width border-width
     :background-color :buffer-bg
     :min-width min-width
@@ -106,8 +111,16 @@
       46 64 nil nil)
     (samples-panel-layout-spec 34 42 nil nil)))
 
+(defcustom samples-sidebar-ratio 0.2
+  :type :number :min 0.1 :max 0.5 :step 0.01
+  :doc "Share of the window width given to the samples sidebar.")
+
+(defcustom macro-mapping-sidebar-ratio 0.34
+  :type :number :min 0.1 :max 0.6 :step 0.01
+  :doc "Share of the window width given to the sidebar while a macro mapping is being armed.")
+
 (def sidebar-ratio ()
-  (if (pc/param-macro-mapping-active?) 0.34 0.2))
+  (if (pc/param-macro-mapping-active?) macro-mapping-sidebar-ratio samples-sidebar-ratio))
 
 (def main-and-mixer-layout-spec ()
   (if eseq.seq-core-state/mixer-panel-visible
@@ -131,7 +144,7 @@
           0.95 main-layout
           lower-ratio (if (= lower-buffer "*fx*")
             (fx-panel-layout-spec nil nil lower-min-height lower-max-height)
-            (list :buf lower-buffer :hide-status true :border-radius buffer-radius :border-width border-width :background-color :buffer-bg :min-height lower-min-height :max-height lower-max-height))))
+            (list :buf lower-buffer :hide-status true :border-radius (eseq.seq-core-state/radius buffer-radius) :border-width border-width :background-color :buffer-bg :min-height lower-min-height :max-height lower-max-height))))
       (list :rows :gap 1
         0.05 (transport-tile-spec)
         0.95 main-layout))))
@@ -176,10 +189,10 @@
     22 26 nil nil))
 
 (def patcher-canvas-layout-spec (patcher-buffer)
-  (list :buf patcher-buffer :hide-status true :border-radius buffer-radius :border-width border-width :background-color :buffer-bg :min-height 20))
+  (list :buf patcher-buffer :hide-status true :border-radius (eseq.seq-core-state/radius buffer-radius) :border-width border-width :background-color :buffer-bg :min-height 20))
 
 (def patch-learn-buffer-layout-spec (learn-buffer)
-  (list :buf learn-buffer :hide-status true :border-radius buffer-radius :border-width border-width :background-color :buffer-bg :min-width 28 :min-height 20))
+  (list :buf learn-buffer :hide-status true :border-radius (eseq.seq-core-state/radius buffer-radius) :border-width border-width :background-color :buffer-bg :min-width 28 :min-height 20))
 
 (def patcher-main-layout-spec (patcher-buffer)
   (if eseq.seq-core-state/patch-macros-panel-visible
@@ -204,10 +217,10 @@
             (list :cols :gap 1
               0.14 (patch-macros-panel-layout-spec)
               0.53 (patcher-canvas-layout-spec patcher-buffer)
-              0.33 (list :buf source-buffer :hide-status true :border-raduis buffer-radius :border-width border-width :background-color :buffer-bg :min-height 20))
+              0.33 (list :buf source-buffer :hide-status true :border-radius (eseq.seq-core-state/radius buffer-radius) :border-width border-width :background-color :buffer-bg :min-height 20))
             (list :cols :gap 1
               0.62 (patcher-canvas-layout-spec patcher-buffer)
-              0.38 (list :buf source-buffer :hide-status true :border-radius buffer-radius :border-width border-width :background-color :buffer-bg :min-height 20)))))
+              0.38 (list :buf source-buffer :hide-status true :border-radius (eseq.seq-core-state/radius buffer-radius) :border-width border-width :background-color :buffer-bg :min-height 20)))))
     (if (patcher-bottom-bar-visible?)
       (list :rows :gap 1
         0.05 (transport-tile-spec)
@@ -246,15 +259,19 @@
     (set-layout (lower-panel-layout-spec lower-buffer lower-ratio lower-min-height lower-max-height))
     (host-command "refresh-mixer-ui" (dict))))
 
+(defcustom lower-panel-ratio 0.33
+  :type :number :min 0.15 :max 0.7 :step 0.01
+  :doc "Share of the main column's height given to the lower panel (devices or piano roll).")
+
 (def apply-fx-layout ()
   (do
     (set! eseq.seq-step-tabs/lower-panel-buffer "*fx*")
-    (apply-lower-panel-layout "*fx*" 0.33 eseq.seq-step-tabs/lower-fx-layout-height eseq.seq-step-tabs/lower-fx-layout-height)))
+    (apply-lower-panel-layout "*fx*" lower-panel-ratio eseq.seq-step-tabs/lower-fx-layout-height eseq.seq-step-tabs/lower-fx-layout-height)))
 
 (def apply-piano-roll-layout ()
   (do
     (set! eseq.seq-step-tabs/lower-panel-buffer "*piano-roll*")
-    (apply-lower-panel-layout "*piano-roll*" 0.33 eseq.seq-step-tabs/lower-fx-layout-height 50)))
+    (apply-lower-panel-layout "*piano-roll*" lower-panel-ratio eseq.seq-step-tabs/lower-fx-layout-height 50)))
 
 (def apply-instrument-patcher-layout (patcher-buffer)
   (do
@@ -297,7 +314,7 @@
           (apply-piano-roll-layout)
           (apply-fx-layout))))))
 
-;; The *mixer* tile follows the clip-area knob: a package that grows the
+;; The *mixer* tile follows the clip-area and corner-radius knobs: a package that grows the
 ;; strips via `setopt` gets the taller tile without also having to know the
 ;; layout entry points. The observer runs once at load, before the startup
 ;; layout exists, so that first run only records the value; later changes
@@ -306,7 +323,8 @@
 (def mixer-clip-area-height-seen nil)
 
 (observe
-  (let ((h eseq.seq-core-state/mixer-clip-area-height))
+  (let ((h (str (eseq.seq-core-state/effective-clip-area-height)
+                "/" eseq.seq-core-state/corner-radius-scale)))
     (do
       (if (and mixer-clip-area-height-seen
                (not (= mixer-clip-area-height-seen h))

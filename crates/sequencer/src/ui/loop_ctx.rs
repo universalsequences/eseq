@@ -196,6 +196,9 @@ pub(crate) struct FrameDiffState {
     /// read surfaces (version reactive + mixer/rack binding fields) off this
     /// counter — it deliberately does NOT ride `ui_epoch`.
     pub(crate) prev_delete_target_version: usize,
+    /// Tracks a multi-track (rack-wide) step selection last highlighted, so
+    /// dropping that delete target un-highlights the non-current ones.
+    pub(crate) prev_multi_track_selection: Vec<usize>,
     pub(crate) track_param_sync_revision: Option<ParamSyncRevision>,
     pub(crate) fx_param_sync_revision: Option<ParamSyncRevision>,
     /// Identity of the CLIP-derived piano-roll surfaces (clip panel, window

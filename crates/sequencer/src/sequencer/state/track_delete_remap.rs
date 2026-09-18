@@ -21,6 +21,11 @@ pub(super) fn remap_graph_overrides_after_track_delete(
     deleted_track: usize,
 ) {
     for graph in overrides {
+        // Rack-owned overrides route by member index; the owning rack's own
+        // member-leave remap (`remap_after_rack_member_removed`) handles them.
+        if graph.owner_rack.is_some() {
+            continue;
+        }
         for intrinsic in &mut graph.node_intrinsics {
             if let Some(route) = intrinsic.route.take() {
                 intrinsic.route = match route {

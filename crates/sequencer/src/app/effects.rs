@@ -7431,6 +7431,156 @@ mod tests {
         graph.process_block();
     }
 
+    /// eseq-172r.2: a graph sequencer moves into a rack only when every route
+    /// is a member; its overrides then speak member indices, a member leaving
+    /// silences its nodes inside the same undo entry, and detaching expands
+    /// the routes back to tracks.
+    #[test]
+    fn graph_sequencer_moves_into_rack_follows_member_leave_and_detaches() {
+        use crate::graph::{
+            GraphDurationSpec, GraphManifest, GraphSwingSpec, NodeProto,
+            ProjectGraphNodeIntrinsicOverride, ProjectGraphOverrides, ProjectGraphRouteOverride,
+            ShapeSpec,
+        };
+        let graph = TestLiveGraph::new("rack-owned-sequencer-test", 64, 44_100, 2);
+        let mut app = test_app_for_live_graph(&graph, 0);
+        let sample = std::path::Path::new("../../content/impulses/lexicon-300-rich-plate.wav");
+        let (group_id, _) = app
+            .create_drum_rack_recorded(Some("Break".to_string()))
+            .expect("drum rack");
+        let outside = app.graph_controller().add_track(sample).expect("outside track");
+        let kick = app.graph_controller().add_track(sample).expect("kick");
+        let snare = app.graph_controller().add_track(sample).expect("snare");
+        let hat = app.graph_controller().add_track(sample).expect("hat");
+        for (note, track) in [(36, kick), (38, snare), (42, hat)] {
+            app.assign_rack_pad_track_recorded(group_id, note, track).expect("pad");
+        }
+        let members = app.groups.iter().find(|g| g.id == group_id).unwrap().members.clone();
+        assert_eq!(members, vec![kick, snare, hat]);
+
+        let project_id = crate::lisp_host::graph_instance_id("brk", None);
+        let manifest = GraphManifest {
+            id: project_id,
+            name: "brk".into(),
+            owner_rack: None,
+            shape: ShapeSpec::Line(3),
+            energy_decay: 1.0,
+            reset_every_beats: 0.0,
+            seed_on_reset: 0.0,
+            max_poly: 0,
+            max_poly_selection: crate::neural::NeuralMaxPolySelection::Deterministic,
+            duration: GraphDurationSpec::default(),
+            swing: GraphSwingSpec::default(),
+            node: NodeProto { route: Some(kick), ..NodeProto::default() },
+            edge_sets: Vec::new(),
+        };
+        app.state.publish_sequencer(crate::sequencer::PublishedSequencer {
+            id: project_id,
+            name: "brk".into(),
+            resolution: crate::sequencer::Timebase::Sixteenth as u8,
+            tick_source: String::new(),
+            requires: Vec::new(),
+            graph: Some(manifest),
+        });
+        let intrinsic = |instance: usize, route: usize| ProjectGraphNodeIntrinsicOverride {
+            group: "nrn".into(),
+            instance,
+            resolution: None,
+            delay_steps: None,
+            quantize: None,
+            route: Some(ProjectGraphRouteOverride::Track(route)),
+            seed_from: None,
+            seed_on_reset: None,
+            duration: None,
+            swing: None,
+            neural_group: None,
+        };
+        app.state
+            .edit_current_graph_overrides(|graphs| {
+                graphs.push(ProjectGraphOverrides {
+                    sequencer_id: project_id,
+                    sequencer_name: "brk".into(),
+                    node_intrinsics: vec![intrinsic(0, snare), intrinsic(1, outside)],
+                    ..ProjectGraphOverrides::default()
+                });
+                Ok(())
+            })
+            .expect("seed overrides");
+
+        let error = app
+            .move_sequencer_into_rack_recorded(group_id, project_id, "")
+            .expect_err("a route outside the rack refuses the move");
+        assert!(error.contains("node 1"), "{error}");
+        assert!(
+            app.rack_sequencers(group_id).is_empty() && app.state.published_sequencers().len() == 1,
+            "a refused move changes nothing"
+        );
+
+        app.state
+            .edit_current_graph_overrides(|graphs| {
+                graphs[0].node_intrinsics[1] = intrinsic(1, hat);
+                Ok(())
+            })
+            .expect("fix route");
+        let rack_id = app
+            .move_sequencer_into_rack_recorded(group_id, project_id, "(load \"x.lisp\")")
+            .expect("move into rack");
+        assert_eq!(rack_id, crate::lisp_host::graph_instance_id("brk", Some(group_id)));
+        let owned = app.rack_sequencers(group_id);
+        assert_eq!(owned.len(), 1);
+        assert_eq!(owned[0].sequencer_id, rack_id);
+        assert_eq!(owned[0].source, "(load \"x.lisp\")");
+        let published = app.state.published_sequencers();
+        assert_eq!(published.len(), 1, "the project-owned instance was replaced");
+        assert_eq!(published[0].graph.as_ref().unwrap().owner_rack, Some(group_id));
+        let routes = |app: &App| -> Vec<Option<ProjectGraphRouteOverride>> {
+            let graphs = app.state.current_graph_overrides();
+            graphs[0].node_intrinsics.iter().map(|i| i.route.clone()).collect()
+        };
+        let graphs = app.state.current_graph_overrides();
+        assert_eq!(graphs[0].owner_rack, Some(group_id));
+        assert_eq!(graphs[0].sequencer_id, rack_id);
+        assert_eq!(
+            routes(&app),
+            vec![Some(ProjectGraphRouteOverride::Track(1)), Some(ProjectGraphRouteOverride::Track(2))],
+            "routes are member indices now"
+        );
+
+        // Snare leaves the rack: node 0 goes silent, hat shifts to member 1.
+        app.remove_track_from_group_recorded(snare).expect("snare leaves");
+        assert_eq!(
+            routes(&app),
+            vec![Some(ProjectGraphRouteOverride::None), Some(ProjectGraphRouteOverride::Track(1))]
+        );
+        assert!(matches!(
+            crate::app::edit::undo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(
+            routes(&app),
+            vec![Some(ProjectGraphRouteOverride::Track(1)), Some(ProjectGraphRouteOverride::Track(2))],
+            "the member leave and its route remap are one undo entry"
+        );
+        assert_eq!(
+            app.groups.iter().find(|g| g.id == group_id).unwrap().members,
+            vec![kick, snare, hat]
+        );
+
+        let name = app.detach_rack_sequencer_recorded(group_id, rack_id).expect("detach");
+        assert_eq!(name, "brk");
+        assert!(app.rack_sequencers(group_id).is_empty());
+        let graphs = app.state.current_graph_overrides();
+        assert_eq!(graphs[0].owner_rack, None);
+        assert_eq!(graphs[0].sequencer_id, project_id);
+        assert_eq!(
+            routes(&app),
+            vec![Some(ProjectGraphRouteOverride::Track(snare)), Some(ProjectGraphRouteOverride::Track(hat))],
+            "detaching expands member routes back to tracks"
+        );
+        assert!(app.state.published_sequencers().is_empty(), "the rack instance is unpublished");
+        graph.process_block();
+    }
+
     /// eseq-4b5.19: auditioning a kit on a selected rack reuses lanes at the
     /// same pad notes, replaces the rest of the pad topology, and is one undo.
     #[test]

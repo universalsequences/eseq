@@ -137,10 +137,18 @@ master path latency in frames, including any terminal DSP latency. The existing
 plan exposes `mix_latency`; if later master processing adds latency it must be
 included explicitly. Never add CPAL/device presentation latency to L.
 
-Freeze topology and latency for a job. A project requiring a latency-changing
-configuration during the range must fail preflight until a tested time-varying
-latency design exists; ordinary parameter automation that leaves latency fixed
-is allowed. Do not trim each track independently or disable compensation.
+Freeze processing latency and every compensation delay for a job. Preflight
+collects routing choices through the selected end beat (including the rendered
+prefix). Destinations sharing a switchable primary output must have equal input
+arrival times; bus chains impose their fixed latency between input and output.
+Solve these constraints once, and create every required send before scheduler
+snapshots are finalized. Send levels and routes may then change without moving
+delay taps or losing buffered audio. Silent lane placeholders do not recall
+mixer settings: retain the previous sound and routing through gaps and tails.
+Routing constraints with a positive-latency cycle fail preflight. Effect latency
+changes remain unsupported and are checked before rendering each block. Ordinary
+parameter automation that leaves latency fixed is allowed. Do not trim each
+track independently or disable compensation.
 
 Current limitation: `RACK_SLOT_JOIN_UNCOMPENSATED` documents that computed
 `rack_slot_pads` are not installed. Fix the rack join in the shared playback graph

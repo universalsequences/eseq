@@ -1313,6 +1313,14 @@ impl TrackParams {
             .collect::<Vec<_>>();
         {
             let mut baselines = self.send_baselines.lock().unwrap();
+            // Queued events and prepared song routes retain these cells even
+            // when the new scene omits a send. Absence means silence, not the
+            // last level written by an earlier scene.
+            for (destination, baseline) in baselines.iter() {
+                if !sends.iter().any(|send| send.destination == *destination) {
+                    baseline.store(0.0);
+                }
+            }
             for send in &sends {
                 baselines
                     .entry(send.destination)

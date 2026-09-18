@@ -318,6 +318,7 @@ impl SequencerState {
             scratch_source: Mutex::new(String::new()),
             scratch_source_version: AtomicU64::new(0),
             published_sequencers: Mutex::new(Vec::new()),
+            rack_memberships: Mutex::new(Vec::new()),
             published_sequencers_version: AtomicU64::new(0),
             published_scene_slot_declarations: Mutex::new(std::collections::BTreeMap::new()),
             generator_tick_errors: Mutex::new(Vec::new()),

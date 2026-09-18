@@ -256,7 +256,7 @@
         :on-click |x y r| (host-command "preview-sample" (dict :path target-path)) :color :white)
       (button "Seeded" :variant :secondary :flex 1 :height 1.35
         :on-click |x y r| (host-command "preview-sample" (dict :path seeded-wav)) :color :white)
-      (button "Learned" :variant :primary :flex 1 :height 1.35
+      (button "Learned" :variant :secondary :flex 1 :height 1.35
         :on-click |x y r| (host-command "preview-sample" (dict :path final-wav)) :color :white))
     (label "The live instrument is previewing these learned values. Back or close restores the seed."
       :width :fill :height 1.7 :wrap true :font-size 7 :color :dim :bg :transparent)

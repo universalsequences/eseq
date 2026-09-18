@@ -1318,9 +1318,20 @@ impl<'a> Compiler<'a> {
         let initial = list.get(2).ok_or(CompilerError::InvalidArg)?;
         let mut type_name = None;
         let mut doc = None;
+        let mut choices = None;
+        let mut range = [None, None, None];
         let mut index = 3;
         while index < list.len() {
             match list.get(index) {
+                Some(Expression::Keyword(key)) if key == "choices" => {
+                    choices = Some(list.get(index + 1).ok_or(CompilerError::InvalidArg)?.clone());
+                    index += 2;
+                }
+                Some(Expression::Keyword(key)) if matches!(key.as_str(), "min" | "max" | "step") => {
+                    let slot = match key.as_str() { "min" => 0, "max" => 1, _ => 2 };
+                    range[slot] = Some(list.get(index + 1).ok_or(CompilerError::InvalidArg)?.clone());
+                    index += 2;
+                }
                 Some(Expression::Keyword(key)) if key == "type" => {
                     let value = list.get(index + 1).ok_or(CompilerError::InvalidArg)?;
                     type_name = match value {
@@ -1337,7 +1348,7 @@ impl<'a> Compiler<'a> {
                     index += 2;
                 }
                 _ => return Err(CompilerError::Message(
-                    "defcustom syntax is (defcustom name default :type TYPE :doc \"…\")".into()
+                    "defcustom syntax is (defcustom name default :type TYPE :doc \"…\" [:choices LIST] [:min N :max N :step N])".into()
                 )),
             }
         }
@@ -1356,8 +1367,18 @@ impl<'a> Compiler<'a> {
             let index = self.use_string_constant(value);
             self.emit(OpCode::PushStr(index));
         }
+        match choices {
+            Some(choices) => self.compile_expression(&choices)?,
+            None => self.emit(OpCode::PushNil),
+        }
+        for bound in range {
+            match bound {
+                Some(bound) => self.compile_expression(&bound)?,
+                None => self.emit(OpCode::PushNil),
+            }
+        }
         self.emit_symbol_load("__register-defcustom");
-        self.emit(OpCode::Call(4));
+        self.emit(OpCode::Call(8));
         Ok(())
     }
 
@@ -2917,24 +2938,22 @@ impl<'a> Compiler<'a> {
                 ]);
                 return self.compile_expression(&register);
             }
-            if s == "remove-override" {
+            if s == "remove-override" || s == "disable-override" || s == "enable-override" {
                 let Some(Expression::Symbol(target)) = list.get(1) else {
-                    self.errors.push(
-                        "(remove-override …) expects a qualified symbol target".to_string(),
-                    );
+                    self.errors.push(format!(
+                        "({s} …) expects a qualified symbol target"
+                    ));
                     self.emit(OpCode::PushNil);
                     return Ok(());
                 };
                 if list.len() != 2 {
-                    self.errors.push(
-                        "(remove-override …) expects exactly one target".to_string(),
-                    );
+                    self.errors.push(format!("({s} …) expects exactly one target"));
                     self.emit(OpCode::PushNil);
                     return Ok(());
                 }
                 let Some((namespace, base)) = super::modules::split_qualified(target) else {
                     self.errors.push(format!(
-                        "remove-override target '{target}' must be module-qualified"
+                        "{s} target '{target}' must be module-qualified"
                     ));
                     self.emit(OpCode::PushNil);
                     return Ok(());
@@ -2944,11 +2963,39 @@ impl<'a> Compiler<'a> {
                     .get(namespace)
                     .map(String::as_str)
                     .unwrap_or(namespace);
-                let remove = Expression::List(vec![
-                    Expression::Symbol("__remove-override".to_string()),
-                    Expression::String(super::modules::qualify(namespace, base)),
+                let qualified = Expression::String(super::modules::qualify(namespace, base));
+                let call = if s == "remove-override" {
+                    vec![Expression::Symbol("__remove-override".to_string()), qualified]
+                } else {
+                    vec![
+                        Expression::Symbol("__set-override-enabled".to_string()),
+                        qualified,
+                        Expression::Symbol(if s == "enable-override" { "true" } else { "false" }.to_string()),
+                    ]
+                };
+                return self.compile_expression(&Expression::List(call));
+            }
+            if s == "disable-module-overrides" || s == "enable-module-overrides" {
+                // The target is a module name, which is not a global, so it
+                // is spelled as a bare symbol (or a string) and passed as text.
+                let module = match list.get(1) {
+                    Some(Expression::Symbol(module)) | Some(Expression::String(module))
+                        if list.len() == 2 =>
+                    {
+                        module.clone()
+                    }
+                    _ => {
+                        self.errors.push(format!("({s} …) expects exactly one module name"));
+                        self.emit(OpCode::PushNil);
+                        return Ok(());
+                    }
+                };
+                let call = Expression::List(vec![
+                    Expression::Symbol("__set-module-overrides-enabled".to_string()),
+                    Expression::String(module),
+                    Expression::Symbol(if s == "enable-module-overrides" { "true" } else { "false" }.to_string()),
                 ]);
-                return self.compile_expression(&remove);
+                return self.compile_expression(&call);
             }
             if s == "defmacro" && list.len() == 4 {
                 let Expression::Symbol(name) = &list[1] else {

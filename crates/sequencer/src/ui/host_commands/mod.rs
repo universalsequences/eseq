@@ -1,6 +1,8 @@
 mod agent;
+mod customize;
 mod dispatch;
 mod drum_rack_v2;
+pub(crate) use drum_rack_v2::evaluate_rack_sequencer_source;
 mod effects;
 pub(crate) mod export;
 mod file_menu;
@@ -750,6 +752,7 @@ mod tests {
             members: vec![0],
             bus_id: 2,
             rack: Some(sequencer::project::ProjectRackConfig {
+                sequencers: Vec::new(),
                 pads: vec![sequencer::project::ProjectRackPad {
                     pad_note: 36,
                     member: 0,

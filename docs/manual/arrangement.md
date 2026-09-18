@@ -10,7 +10,7 @@ Switch views with the upper-right control or Tab. Click the ruler to set the cur
 
 1. Select the track.
 2. Pick a pattern in the selector beside **Place**, then click Place, or press Command-P.
-3. Click where the clip should start in that track's lane. Escape cancels.
+3. Click where the clip should start in that track's lane. Place mode stays on so you can keep clicking; press Command-P, click Place, or press Escape to leave it.
 
 You can also drag a pattern cell from the mixer into its lane. Either way the clip plays the same pattern; edit the pattern and every clip changes.
 

@@ -222,6 +222,7 @@ impl GraphController<'_> {
         self.app.sampler_paths.clear();
         self.app.rack_selected_slots.clear();
         self.app.graph.track_node_ids.clear();
+        self.app.graph.bounce_latency = None;
         self.app.graph.applied_mod_routes.clear();
         self.app.graph.track_buffer_ids.clear();
         self.app.graph.track_sample_rates.clear();

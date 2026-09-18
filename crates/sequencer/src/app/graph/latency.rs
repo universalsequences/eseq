@@ -268,7 +268,13 @@ impl App {
         if lg.is_null() {
             return Err("Export has no prepared audio graph".into());
         }
-        let mut plan = compute_latency_plan(&self.latency_topology());
+        let topology = self.latency_topology();
+        let mut plan = if let Some(fixed) = &self.graph.bounce_latency {
+            fixed.validate(&topology)?;
+            fixed.plan.clone()
+        } else {
+            compute_latency_plan(&topology)
+        };
         // Master inserts follow the compensated join, so their latency belongs
         // in the export trim without adding it to any upstream branch pad.
         if let Some(master) = self.buses.iter().find(|bus| bus.id == BusId::MIX) {
@@ -437,7 +443,8 @@ impl App {
     /// The full (pdc node, pad) target set for the current topology, plus the
     /// plan's total mix latency.
     fn latency_pad_targets(&self) -> (Vec<(i32, u32)>, u32) {
-        let plan = compute_latency_plan(&self.latency_topology());
+        let plan = self.graph.bounce_latency.as_ref().map(|fixed| fixed.plan.clone())
+            .unwrap_or_else(|| compute_latency_plan(&self.latency_topology()));
         let mut targets = Vec::new();
         for (track, nodes) in self.graph.track_node_ids.iter().enumerate() {
             targets.push((

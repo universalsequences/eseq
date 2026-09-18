@@ -16,6 +16,7 @@ pub(super) const COMMANDS: &[&str] = &[
     "slice2-history-action",
     "resize-drum-rack-patterns",
     "slice3-history-action",
+    "track-params-batch-action",
     "bus-mixer-history-action",
     "toggle-step",
     "set-bar-transpose",
@@ -618,9 +619,9 @@ pub(super) fn handle(
             });
         }
         "delete-selected-steps" => {
-            let track = match &payload {
-                Value::Map(map) => map_usize(map, "track"),
-                _ => None,
+            let (track, tracks) = match &payload {
+                Value::Map(map) => (map_usize(map, "track"), map_usize_list(map, "tracks")),
+                _ => (None, None),
             };
             let Some(track) = track else {
                 editor.handle_host_event(HostEvent::Error(
@@ -628,6 +629,40 @@ pub(super) fn handle(
                 ));
                 return;
             };
+            // A multi-track selection (rack-wide / multi-track Cmd+A) clears
+            // every listed track as one undo entry and disarms its target.
+            if let Some(tracks) = tracks.filter(|tracks| tracks.len() >= 2) {
+                match apply_selected_steps_delete_multi(&mut app, &tracks, &selected_steps) {
+                    Ok((app::edit::EditOutcome::Applied(_), targets)) => {
+                        *auto_follow_override_until.lock().unwrap() =
+                            Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
+                        {
+                            let mut guard = ctx.shared.active_delete_target.lock().unwrap();
+                            if matches!(guard.as_ref(), Some(ActiveDeleteTarget::TrackSteps { .. })) {
+                                guard.take();
+                                ctx.shared
+                                    .active_delete_target_version
+                                    .fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+                        for (track, steps) in targets {
+                            ui_invalidations.push(UiInvalidation::StepBatch {
+                                track,
+                                steps: steps.clone(),
+                            });
+                            ui_invalidations.push(UiInvalidation::StepSelection {
+                                track,
+                                changed_steps: steps,
+                            });
+                        }
+                        fx_epoch.fetch_add(1, Ordering::Relaxed);
+                        ui_epoch.fetch_add(1, Ordering::Relaxed);
+                    }
+                    Ok(_) => {}
+                    Err(error) => editor.handle_host_event(HostEvent::Error(error)),
+                }
+                return;
+            }
             match apply_selected_steps_delete(&mut app, track, &selected_steps) {
                 Ok((app::edit::EditOutcome::Applied(_), steps)) => {
                     *auto_follow_override_until.lock().unwrap() =
@@ -970,6 +1005,28 @@ pub(super) fn handle(
             }
             Err(error) => editor.handle_host_event(HostEvent::Error(error)),
         },
+        "track-params-batch-action" => {
+            match apply_track_params_batch_host_command(&mut app, &payload) {
+                Ok((app::edit::EditOutcome::Applied(result), tracks)) => {
+                    *auto_follow_override_until.lock().unwrap() =
+                        Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
+                    for track in tracks {
+                        ui_invalidations.push(UiInvalidation::Pattern(
+                            PatternInvalidation::WholeTrack { track },
+                        ));
+                    }
+                    ui_epoch.fetch_add(1, Ordering::Relaxed);
+                    editor.show_transient_message(result.label);
+                }
+                Ok((app::edit::EditOutcome::NoOp, _)) => {}
+                Ok((app::edit::EditOutcome::AppliedUnrecorded, _)) => {
+                    editor.handle_host_event(HostEvent::Error(
+                        "Track-settings batch was applied without history".to_string(),
+                    ));
+                }
+                Err(error) => editor.handle_host_event(HostEvent::Error(error)),
+            }
+        }
         "bus-mixer-history-action" => {
             match apply_bus_mixer_history_host_command(&mut app, &payload) {
                 Ok((app::edit::EditOutcome::Applied(result), bus)) => {

@@ -554,7 +554,7 @@ impl WidgetDefinition for DropdownWidget {
         &[
             "options", "value", "value-index", "value-index-offset", "width", "height",
             "font-size", "icon", "focusable", "action-menu", "badge-color", "bg-color",
-            "border-color", "border-width", "check-color", "chevron-color", "hover-bg",
+            "border-color", "border-width", "check-color", "chevron-color", "corner-radius", "hover-bg",
             "menu-bg", "menu-border-color", "ring-color", "scrollbar-color", "text-color",
             "on-change", "plock-active", "plock-color-r", "plock-color-g", "plock-color-b",
         ]
@@ -867,6 +867,18 @@ impl WidgetDefinition for DropdownWidget {
         };
         let mut prims = Vec::new();
 
+        // `:corner-radius` in design pixels, like `box`. Absent keeps the
+        // shader's historical pill default; 0 is square.
+        let corner_radius_px = match node.props.get("corner-radius") {
+            Some(Value::Number(n)) => Some((*n as f32).max(0.0)),
+            _ => None,
+        };
+        let radius_for = |rect: Rect| {
+            corner_radius_px
+                .map(|px| normalized_corner_radius(rect, viewport, px))
+                .unwrap_or(0.0)
+        };
+
         // ── Focus ring ──
         if is_focused && (!action_menu || !state.open) {
             let ring_v = 0.15_f32;
@@ -877,7 +889,7 @@ impl WidgetDefinition for DropdownWidget {
                 width: node.rect.width + ring_h * 2.0,
                 height: node.rect.height + ring_v * 2.0,
             };
-            emit_rounded_rect(&mut prims, ring_rect, ring_color, viewport, true, 0.0);
+            emit_rounded_rect(&mut prims, ring_rect, ring_color, viewport, true, radius_for(ring_rect));
         }
 
         // ── Border (only when border-color is set; default is no border) ──
@@ -899,11 +911,11 @@ impl WidgetDefinition for DropdownWidget {
                 width: node.rect.width + bw_h * 2.0,
                 height: node.rect.height + bw_v * 2.0,
             };
-            emit_rounded_rect(&mut prims, border_rect, border_color, viewport, true, 0.0);
+            emit_rounded_rect(&mut prims, border_rect, border_color, viewport, true, radius_for(border_rect));
         }
 
         // ── Background ──
-        emit_rounded_rect(&mut prims, node.rect, bg_color, viewport, true, 0.0);
+        emit_rounded_rect(&mut prims, node.rect, bg_color, viewport, true, radius_for(node.rect));
 
         let ch_h = node.rect.height * 0.48;
         let ch_w = ch_h * 1.8;
