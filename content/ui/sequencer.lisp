@@ -907,6 +907,27 @@
       :on-drag (lambda (event) (set-track-volume-from-event i event))))
   )
 
+;; Step-grid sizing knob (content-tiers spec: customize tier). Every step
+;; cell, the ghost filler cells that pad short rows, and the track colour
+;; badge in the header derive their heights from this one number, so it sets
+;; how tall (or how dense) the whole sequencer reads. No shader change is
+;; needed: the step widgets scale their artwork with the box.
+(defcustom step-cell-width 3.05
+  :type :number :min 1.5 :max 6 :step 0.05
+  :doc "Width (cells) of each step in the sequencer grid; the playhead bar under each row spans the same width.")
+
+(defcustom step-cell-height 1.55
+  :type :number :min 1 :max 4 :step 0.05
+  :doc "Height (cells) of each step in the sequencer grid; track rows and the colour badge scale with it.")
+
+;; Header colour badge: stock 2.0 at the stock 1.55 step height.
+(def track-color-badge-height ()
+  (* step-cell-height 1.29))
+
+;; Row number label beside each grid row: stock 1.1 at the stock 1.55 step.
+(def track-row-label-height ()
+  (* step-cell-height 0.71))
+
 (def track-header-body (i is-bare-track)
   (let ((name (nth SEQ.track-names i)))
     (box :background "seqv-track-container"
@@ -916,7 +937,7 @@
       (h-stack :gap 0.4 :align :center
         (box
           :key (str "color-badge-" i)
-          :width 0.68 :height 2.0
+          :width 0.68 :height (track-color-badge-height)
           :background "seqv-track-color-badge"
           :track-r (track-color-r-binding i)
           :track-g (track-color-g-binding i)
@@ -1118,7 +1139,7 @@
       (variant-g (bind-seq (str "seq-track-step-variant-g-" track "-" step)))
       (variant-b (bind-seq (str "seq-track-step-variant-b-" track "-" step))))
     (box
-      :width 3.05 :height 1.55
+      :width step-cell-width :height step-cell-height
       :key (str "step-cell-" track "-" step)
       :on-mouse-down (lambda (evt)
         (grid-step-pointer-down track step evt))
@@ -1133,7 +1154,7 @@
       :hide 0
       :background "cursor-highlight"
       (box
-        :width 3.05 :height 1.55
+        :width step-cell-width :height step-cell-height
         :align :center
         :active (bind-seq (str "seq-track-step-active-" track "-" step))
         :plock-kind plock-kind
@@ -1153,7 +1174,7 @@
 (def playhead-row (track track-id row)
   (box
     :key (str "playhead-row-" track-id "-" row)
-    :width 48.8 :height 0.24
+    :width (* row-width step-cell-width) :height 0.24
     :background "seqv-playhead-row-bar"
     :col (bind-seq (str "track-playhead-row-" track "-" row))))
 
@@ -2906,17 +2927,22 @@
           (box :width 0.1 :height 0.342 :bg :transparent)
           (each (range 0 rows) |row|
             (v-stack :gap -0.16
-              (h-stack
+              (h-stack :align :center
+                (box :width 0.1)
                 
-                (box :v-align :center :height 1.1 :padding 0.5
-                  ;; `active` is a reactive float slot the label reads at paint
-                  ;; time, so the playing row brightens without re-evaluating or
-                  ;; re-laying out the grid.
-                  (label (+ row 1)
-                    :color (if (> rows 1) :dim :buffer-bg)
-                    :active (if (> rows 1) (bind-seq (str "track-playhead-row-active-" track-idx "-" row)) 0)
-                    :active-color :white
-                    :width 0.1 :bg :transparent :font-size 8)
+                (box  :height (track-row-label-height) :v-align :center 
+                  (v-stack :gap 0
+                    ;; `active` is a reactive float slot the label reads at paint
+                    ;; time, so the playing row brightens without re-evaluating or
+                    ;; re-laying out the grid.
+                    (label (+ row 1)
+                      :color (if (> rows 1) :dim :buffer-bg)
+                      :active (if (> rows 1) (bind-seq (str "track-playhead-row-active-" track-idx "-" row)) 0)
+                      :active-color :white
+                    :v-align :center
+                      :width 0.1 :bg :transparent :font-size 8)
+                    (box :width 0.2 :height (* (track-row-label-height) 0.02))
+                    )
                   )
                 (h-stack :gap 0.0
                   (each (range 0 row-width) |col|
@@ -2925,7 +2951,7 @@
                         (step-cell track-idx step)
                         ;; Preserve the grid width without an interactive ghost
                         ;; step: hit testing must reach the enclosing track row.
-                        (box :width 3.05 :height 1.55))))))
+                        (box :width step-cell-width :height step-cell-height))))))
               (h-stack (box :width 1)
                 (playhead-row track-idx (nth SEQ.track-ids track-idx) row)))))))
     )
