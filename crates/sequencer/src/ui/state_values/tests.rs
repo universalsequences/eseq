@@ -32528,6 +32528,132 @@ mod mixer_hit_tests;
         ));
     }
 
+    /// A rack with a clip bank shows the clip run in the sequencer row and the
+    /// mixer strip, its menu swaps "Convert to clips" for the per-clip actions,
+    /// and clicking a cell launches quantized like a scene (rack-clips spec §6).
+    #[test]
+    fn metal_seq_rack_clip_run_renders_launches_and_swaps_the_rack_menu() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let rack = map_value([
+            ("id", Value::Number(8.0)),
+            ("rack", Value::Bool(true)),
+            ("name", Value::String("Break".into())),
+            ("collapsed", Value::Bool(true)),
+            ("members", test_list(vec![Value::Number(0.0)])),
+            ("bus-id", Value::Number(1.0)),
+            ("anchor", Value::Number(0.0)),
+            ("rack-members", test_list(vec![])),
+            ("parent", Value::Number(-1.0)),
+            ("pads", test_list(vec![])),
+            ("color", test_list(vec![Value::Number(0.4), Value::Number(0.4), Value::Number(0.4)])),
+        ]);
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "groups", test_list(vec![rack]));
+        let clip = |id: f64, name: &str| {
+            map_value([
+                ("id", Value::Number(id)),
+                ("name", Value::String(name.into())),
+            ])
+        };
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "rack-clips",
+            test_list(vec![map_value([
+                ("group-id", Value::Number(8.0)),
+                ("active", Value::Number(2.0)),
+                ("clips", test_list(vec![clip(1.0, "Intro"), clip(2.0, "Break")])),
+            ])]),
+        );
+        editor.runtime_mut().run_reactive_cycle();
+
+        // The bank reads through, including which clip the current scene plays.
+        assert_eq!(
+            editor.runtime_mut().eval_str("(len (eseq.drum-rack-v2/clips 8))").unwrap(),
+            Some(Value::Number(2.0)),
+        );
+        assert_eq!(
+            editor.runtime_mut().eval_str("(eseq.drum-rack-v2/active-clip 8)").unwrap(),
+            Some(Value::Number(2.0)),
+        );
+        assert_eq!(
+            editor.runtime_mut().eval_str("(eseq.drum-rack-v2/has-clips? 8)").unwrap(),
+            Some(Value::Bool(true)),
+        );
+        // Both runs build (the collapsed sequencer row and the mixer strip).
+        assert!(
+            editor.runtime_mut().eval_str("(eseq.sequencer/rack-clip-run 0)").unwrap().is_some(),
+            "the collapsed rack row renders its clip run",
+        );
+        assert!(
+            editor.runtime_mut().eval_str("(eseq.mixer/rack-clip-column 8)").unwrap().is_some(),
+            "the collapsed mixer strip renders its clip run",
+        );
+
+        // Clicking a cell is a quantized clip launch.
+        editor.drain_host_commands();
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.drum-rack-v2/launch-clip 8 1)")
+            .expect("launch clip");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "launch-rack-clip");
+                let Value::Map(payload) = payload else {
+                    panic!("launch payload should be a dict: {payload:?}");
+                };
+                assert_eq!(
+                    payload.get("group-id").map(|value| value.borrow().clone()),
+                    Some(Value::Number(8.0)),
+                );
+                assert_eq!(
+                    payload.get("clip-id").map(|value| value.borrow().clone()),
+                    Some(Value::Number(1.0)),
+                );
+                assert!(payload.contains_key("quantize"), "clip launch rides scene quantize");
+            }
+            command => panic!("expected a launch-rack-clip command, got {command:?}"),
+        }
+
+        // With a bank, the menu offers the per-clip actions instead of the
+        // legacy conversion.
+        editor
+            .runtime_mut()
+            .eval_str("(set! eseq.mixer/track-menu-group-id 8)")
+            .expect("target the rack");
+        let Some(Value::List(actions)) = editor
+            .runtime_mut()
+            .eval_str("(eseq.mixer/track-context-menu-actions)")
+            .expect("menu actions")
+        else {
+            panic!("menu actions should be a list");
+        };
+        let ids: Vec<String> = actions
+            .into_iter()
+            .map(|action| {
+                let Value::Map(action) = action.borrow().clone() else {
+                    panic!("menu action should be a map");
+                };
+                let Value::Keyword(id) = action.get("id").expect("id").borrow().clone() else {
+                    panic!("menu action id should be a keyword");
+                };
+                id
+            })
+            .collect();
+        assert_eq!(
+            ids,
+            vec![
+                "rename",
+                "save-rack-clip",
+                "delete-rack-clip",
+                "delete-rack-clip",
+                "ungroup",
+            ],
+        );
+    }
+
     #[test]
     fn metal_seq_mixer_group_context_menu_actions_distinguish_plain_groups_and_racks() {
         let mut editor = full_grid_editor_for_scroll_tests();
@@ -32574,8 +32700,10 @@ mod mixer_hit_tests;
             vec!["rename", "convert-drum-rack", "ungroup"],
         );
         assert_eq!(
+            // A rack with no clip bank is a LEGACY rack, so it is offered the
+            // one-shot conversion (rack-clips spec §6.3).
             menu_action_ids(&mut editor, 8.0),
-            vec!["rename", "ungroup"],
+            vec!["rename", "convert-to-clips", "ungroup"],
         );
 
         editor.drain_host_commands();
@@ -54470,6 +54598,8 @@ mod mixer_hit_tests;
             members: vec![1, 2],
             bus_id: 2,
             rack: Some(sequencer::project::ProjectRackConfig {
+                clips: Vec::new(),
+                next_clip_id: 0,
                 sequencers: Vec::new(),
                 pads: vec![
                     sequencer::project::ProjectRackPad {

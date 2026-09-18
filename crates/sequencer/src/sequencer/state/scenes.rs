@@ -305,6 +305,10 @@ pub struct Scene {
     pub mod_connections: Vec<ModConnection>,
     pub neural_networks: Vec<ProjectNeuralNetwork>,
     pub graph_overrides: Vec<ProjectGraphOverrides>,
+    /// Per rack, by group id: the clip this scene points at (rack-clips spec
+    /// §2). A rack with no entry is silent in this scene; a rack with no clip
+    /// bank at all is legacy and resolves through `cells` as before.
+    pub rack_clips: Vec<(u64, RackClipId)>,
     /// Pattern-scoped portable values declared through `defscene`.
     pub scene_slots: SceneSlotStore,
     /// Project-level default process chain: composed ahead of every track's
@@ -330,6 +334,14 @@ pub struct ProjectScenes {
     pub track_sounds: Vec<Option<PatternId>>,
     /// Ordered contiguous spans over `scenes`. Always non-empty.
     pub banks: Vec<SceneBank>,
+    /// Per-rack clip banks (rack-clips spec §3). A rack absent here — or
+    /// present with no clips — is legacy: the composition step is skipped.
+    pub rack_banks: Vec<RackClipBank>,
+    /// Per rack, the clip pointer the LIVE grid was installed from. Pointing a
+    /// scene at another clip without relaunching would otherwise let the next
+    /// save-back clone the stale live lanes over the newly pointed clip — the
+    /// same hazard `stale_mask` covers for song-latched lanes.
+    pub live_rack_clips: Vec<(u64, Option<RackClipId>)>,
     pub(super) next_scene_id: u64,
     pub(super) next_bank_id: u64,
 }
@@ -377,6 +389,7 @@ impl ProjectScenes {
                 mod_connections: snapshot.mod_connections.clone(),
                 neural_networks: snapshot.neural_networks.clone(),
                 graph_overrides: snapshot.graph_overrides.clone(),
+                rack_clips: Vec::new(),
                 scene_slots: snapshot.scene_slots.clone(),
                 project_process_chain: {
                     let mut chain = snapshot.project_process_chain.clone();
@@ -403,6 +416,7 @@ impl ProjectScenes {
                 mod_connections: Vec::new(),
                 neural_networks: Vec::new(),
                 graph_overrides: Vec::new(),
+                rack_clips: Vec::new(),
                 scene_slots: SceneSlotStore::default(),
                 project_process_chain: crate::process::default_project_layer(),
             });
@@ -417,6 +431,8 @@ impl ProjectScenes {
             track_overrides: vec![None; track_count],
             track_sounds: vec![None; track_count],
             banks: default_banks,
+            rack_banks: Vec::new(),
+            live_rack_clips: Vec::new(),
             next_scene_id: u64::try_from(snapshots.len().max(1))
                 .expect("scene count exceeds stable identity space")
                 .checked_add(1)
@@ -788,7 +804,7 @@ impl ProjectScenes {
         Some((
             scene.mod_connections.clone(),
             scene.neural_networks.clone(),
-            scene.graph_overrides.clone(),
+            self.composed_graph_overrides(scene_idx),
         ))
     }
 
@@ -797,11 +813,15 @@ impl ProjectScenes {
         let mut snapshot = PatternSnapshot::new_default(self.track_pools.len(), &[]);
         snapshot.mod_connections = scene.mod_connections.clone();
         snapshot.neural_networks = scene.neural_networks.clone();
-        snapshot.graph_overrides = scene.graph_overrides.clone();
+        // Rack composition (rack-clips spec §4.1): overrides owned by a
+        // clip-bearing rack come from its pointed clip, UNRESOLVED (routes are
+        // member indices) exactly as a scene's do — the scheduler resolves
+        // member -> track through `rack_memberships`.
+        snapshot.graph_overrides = self.composed_graph_overrides(scene_idx);
         snapshot.scene_slots = scene.scene_slots.clone();
         snapshot.project_process_chain = scene.project_process_chain.clone();
         for track in 0..self.track_pools.len() {
-            let Some(id) = scene.cells.get(track).copied().flatten() else {
+            let Some(id) = self.composed_scene_cell(scene_idx, track) else {
                 continue;
             };
             let Some(data) = self.track_pools[track].get(id) else {
@@ -870,6 +890,39 @@ impl ProjectScenes {
         }
         // New tracks get a track sound with their pool (§2.1).
         self.ensure_track_sounds();
+        // Rack-clip edit redirect (rack-clips spec §4.2). A member of a
+        // clip-bearing rack saves into the rack's ACTIVE CLIP, not the scene
+        // cell. Editing under a `None` pointer is never a dead end: content on
+        // such a lane mints the clip (and the member's cell) first, so the
+        // resolve below finds it. This pre-pass runs before the scene borrow
+        // because both need `&mut self`.
+        for track in 0..snapshot.track_bits.len() {
+            if self.rack_member_slot(track).is_none() {
+                continue;
+            }
+            if self.rack_member_lane_is_stale(scene_idx, track) {
+                continue;
+            }
+            if matches!(self.rack_composed_cell(scene_idx, track), Some(Some(_))) {
+                continue;
+            }
+            let Some(data) = snapshot.track_pattern_data(track) else {
+                continue;
+            };
+            if data.track_bits.iter().all(|word| *word == 0) {
+                continue;
+            }
+            self.ensure_rack_clip_cell(scene_idx, track, data);
+        }
+        // A member lane whose rack was re-pointed since the grid was installed
+        // holds foreign content; never clone it over the newly pointed clip.
+        let rack_stale: Vec<bool> = (0..snapshot.track_bits.len())
+            .map(|track| self.rack_member_lane_is_stale(scene_idx, track))
+            .collect();
+        let rack_cells: Vec<Option<Option<PatternId>>> = (0..snapshot.track_bits.len())
+            .map(|track| self.rack_composed_cell(scene_idx, track))
+            .collect();
+        let composed_graph_overrides = snapshot.graph_overrides.clone();
         let Some(scene) = self.scenes.get_mut(scene_idx) else {
             return false;
         };
@@ -884,7 +937,6 @@ impl ProjectScenes {
         }
         scene.mod_connections = snapshot.mod_connections.clone();
         scene.neural_networks = snapshot.neural_networks.clone();
-        scene.graph_overrides = snapshot.graph_overrides.clone();
         scene.scene_slots = snapshot.scene_slots.clone();
         // Deliberately NOT copied from the snapshot: the scene itself is the
         // live authority for `project_process_chain` (edited in place via
@@ -893,6 +945,9 @@ impl ProjectScenes {
         // only in from_pattern_snapshots (project load).
 
         for track in 0..snapshot.track_bits.len() {
+            if rack_stale.get(track).copied().unwrap_or(false) {
+                continue;
+            }
             let Some(data) = snapshot.track_pattern_data(track) else {
                 continue;
             };
@@ -901,7 +956,10 @@ impl ProjectScenes {
                 .get(track)
                 .copied()
                 .flatten()
-                .or_else(|| scene.cells.get(track).copied().flatten())
+                .or_else(|| match rack_cells.get(track).copied() {
+                    Some(Some(cell)) => cell,
+                    _ => scene.cells.get(track).copied().flatten(),
+                })
                 .filter(|id| self.track_pools[track].contains(*id));
             let latched = track < 64 && latched_mask >> track & 1 == 1;
             let track_owned = track < 64 && track_owned_mask >> track & 1 == 1;
@@ -931,8 +989,11 @@ impl ProjectScenes {
             // user's edits. A latched lane's mirror is the performer's clip,
             // not the track's own sound — skip it. A cell holding a dangling
             // pattern id is ambiguous, not bare — skip it too.
-            let cell_dangling =
-                resolved.is_none() && scene.cells.get(track).copied().flatten().is_some();
+            let composed_cell = match rack_cells.get(track).copied() {
+                Some(Some(cell)) => cell,
+                _ => scene.cells.get(track).copied().flatten(),
+            };
+            let cell_dangling = resolved.is_none() && composed_cell.is_some();
             if latched || cell_dangling || (!track_owned && resolved.is_some()) {
                 continue;
             }
@@ -949,6 +1010,9 @@ impl ProjectScenes {
                 sounds.mixes.insert(refs.mix, Arc::new(mix));
             }
         }
+        // Rack-owned overrides of a clip-bearing rack belong to its active
+        // clip; everything else to the scene (§4.2).
+        self.store_composed_graph_overrides(scene_idx, composed_graph_overrides);
         true
     }
 
@@ -1012,7 +1076,7 @@ impl ProjectScenes {
                 (
                     scene.mod_connections.clone(),
                     scene.neural_networks.clone(),
-                    scene.graph_overrides.clone(),
+                    self.composed_graph_overrides(self.current_scene),
                 )
             })
             .unwrap_or_default()
@@ -1055,10 +1119,7 @@ impl ProjectScenes {
     }
 
     pub fn current_graph_overrides(&self) -> Vec<ProjectGraphOverrides> {
-        self.scenes
-            .get(self.current_scene)
-            .map(|scene| scene.graph_overrides.clone())
-            .unwrap_or_default()
+        self.composed_graph_overrides(self.current_scene)
     }
 
     pub fn current_project_process_chain(&self) -> crate::process::TrackProcessChain {
@@ -1079,29 +1140,37 @@ impl ProjectScenes {
         edit(&mut scene.project_process_chain)
     }
 
+    /// Graph-override edits from the script UI. The list handed to `edit` is
+    /// COMPOSED (scene + every clip-bearing rack's active clip) and split back
+    /// by `owner_rack` afterwards, so a rack-owned edit lands in that rack's
+    /// clip — creating one under a `None` pointer (rack-clips spec §4.2).
     pub fn edit_current_graph_overrides<F, R>(&mut self, edit: F) -> Result<R, String>
     where
         F: FnOnce(&mut Vec<ProjectGraphOverrides>) -> Result<R, String>,
     {
-        let scene = self
-            .scenes
-            .get_mut(self.current_scene)
-            .ok_or_else(|| "current scene out of range".to_string())?;
-        edit(&mut scene.graph_overrides)
+        if self.scenes.get(self.current_scene).is_none() {
+            return Err("current scene out of range".to_string());
+        }
+        let scene_idx = self.current_scene;
+        let mut composed = self.composed_graph_overrides(scene_idx);
+        let result = edit(&mut composed);
+        if result.is_ok() {
+            self.store_composed_graph_overrides(scene_idx, composed);
+        }
+        result
     }
 
+    /// The pattern the track's live lane mirrors. This is the read half of the
+    /// rack-clip edit redirect (rack-clips spec §4.2): for a member of a
+    /// clip-bearing rack the cell comes from the rack's active clip, so every
+    /// funnel built on this — step edits, p-locks, lane roster, pad edits —
+    /// redirects without knowing racks exist.
     pub fn effective_pattern_id(&self, track: usize) -> Option<PatternId> {
         self.track_overrides
             .get(track)
             .copied()
             .flatten()
-            .or_else(|| {
-                self.scenes
-                    .get(self.current_scene)
-                    .and_then(|scene| scene.cells.get(track))
-                    .copied()
-                    .flatten()
-            })
+            .or_else(|| self.composed_scene_cell(self.current_scene, track))
     }
 
     /// Composed working form of the track's effective pattern. Owned: the
@@ -1119,13 +1188,7 @@ impl ProjectScenes {
                 return Some(refs);
             }
         }
-        if let Some(id) = self
-            .scenes
-            .get(self.current_scene)
-            .and_then(|scene| scene.cells.get(track))
-            .copied()
-            .flatten()
-        {
+        if let Some(id) = self.composed_scene_cell(self.current_scene, track) {
             if let Some(refs) = self.track_pools.get(track)?.refs(id) {
                 return Some(refs);
             }
@@ -1139,7 +1202,10 @@ impl ProjectScenes {
 
     pub fn save_effective_track_pattern(&mut self, track: usize, data: TrackPatternData) -> bool {
         let Some(id) = self.effective_pattern_id(track) else {
-            return false;
+            // Rack member under a `None` pointer, or with no cell in the active
+            // clip: the edit creates them (rack-clips spec §4.2).
+            let scene = self.current_scene;
+            return self.ensure_rack_clip_cell(scene, track, data).is_some();
         };
         self.track_pools
             .get_mut(track)
@@ -1147,10 +1213,13 @@ impl ProjectScenes {
     }
 
     pub fn launch_scene(&mut self, scene: usize) -> Option<Vec<Option<TrackPatternData>>> {
-        let scene_cells = self.scenes.get(scene)?.cells.clone();
-        let mut track_patterns = Vec::with_capacity(scene_cells.len());
-        for (track, cell) in scene_cells.iter().copied().enumerate() {
-            let data = match cell {
+        let track_count = self.scenes.get(scene)?.cells.len();
+        let mut track_patterns = Vec::with_capacity(track_count);
+        for track in 0..track_count {
+            // Rack composition (§4.1): a member of a clip-bearing rack plays
+            // its clip's cell, and `None` (no pointer, or a silent member)
+            // installs an empty pattern rather than keeping the last one.
+            let data = match self.composed_scene_cell(scene, track) {
                 Some(id) => Some(self.track_pools.get(track)?.get(id)?),
                 None => None,
             };
@@ -1159,6 +1228,8 @@ impl ProjectScenes {
 
         self.current_scene = scene;
         self.track_overrides.fill(None);
+        // The live lanes now hold this scene's rack clips (rack-clips §4.4).
+        self.adopt_live_rack_clips();
         Some(track_patterns)
     }
 
@@ -1179,12 +1250,12 @@ impl ProjectScenes {
         scene: usize,
         tracks: &[usize],
     ) -> Option<Vec<(usize, TrackPatternData)>> {
-        let scene = self.scenes.get(scene)?;
+        self.scenes.get(scene)?;
         let resolved = tracks
             .iter()
             .copied()
             .map(|track| {
-                let id = scene.cells.get(track).copied().flatten()?;
+                let id = self.composed_scene_cell(scene, track)?;
                 let data = self.track_pools.get(track)?.get(id)?;
                 Some((track, id, data))
             })
@@ -1416,7 +1487,15 @@ impl ProjectScenes {
             // inserted into the pool mints a fresh Patch + Mix, and the new
             // cell adopts them. A track with no effective pattern still
             // forks its current cell's sound so the new cell resolves.
-            match self.effective_track_pattern(track) {
+            // A clip-bearing rack's member resolves through the rack clip, not
+            // this cell (rack-clips spec §4.1): forking it would mint a pool
+            // pattern nothing can ever play.
+            let source_pattern = if self.rack_member_slot(track).is_some() {
+                None
+            } else {
+                self.effective_track_pattern(track)
+            };
+            match source_pattern {
                 Some(source) => {
                     let id = self.track_pools[track].insert(source);
                     cells[track] = Some(id);
@@ -1442,6 +1521,7 @@ impl ProjectScenes {
             mod_connections,
             neural_networks,
             graph_overrides,
+            rack_clips,
             scene_slots,
             mut project_process_chain,
         ) = source_scene
@@ -1451,6 +1531,7 @@ impl ProjectScenes {
                     scene.mod_connections,
                     scene.neural_networks,
                     scene.graph_overrides,
+                    scene.rack_clips,
                     scene.scene_slots,
                     scene.project_process_chain,
                 )
@@ -1473,6 +1554,7 @@ impl ProjectScenes {
             mod_connections,
             neural_networks,
             graph_overrides,
+            rack_clips,
             scene_slots,
             project_process_chain,
         });

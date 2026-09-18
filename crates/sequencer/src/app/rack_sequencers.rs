@@ -225,14 +225,20 @@ impl App {
         })
     }
 
-    /// Member `position` just left rack `group_id`: nodes routed to it go
-    /// silent and later members shift down, in every scene. Called from the
-    /// group-member funnels, inside whatever recorded edit removed the member.
+    /// Member `position` just left rack `group_id`: its cell drops out of every
+    /// rack clip, nodes routed to it go silent and later members shift down, in
+    /// every scene. Called from the group-member funnels, inside whatever
+    /// recorded edit removed the member.
     pub(crate) fn remap_rack_sequencer_routes_after_member_removed(
         &self,
         group_id: u64,
         position: usize,
     ) {
+        // Rack clips are positional over members too (rack-clips spec §3): the
+        // leaving member's cell drops out of every clip, keeping
+        // `clip.cells.len() == members.len()`.
+        self.state
+            .with_scenes_mut(|scenes| scenes.rack_clip_member_removed(group_id, position));
         let owns_sequencers = self
             .groups
             .iter()

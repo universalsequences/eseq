@@ -28,6 +28,14 @@ impl SequencerState {
     /// Mirror of the app's drum-rack member lists, read into every scheduler
     /// snapshot so rack-owned graph sequencers can resolve member routes.
     pub fn set_rack_memberships(&self, memberships: Vec<crate::graph::RackMembership>) {
+        // The rack clip banks mirror the member track list so launch
+        // composition needs nothing but `ProjectScenes` (rack-clips spec §3);
+        // this is the one group-topology funnel, so they refresh here.
+        self.pattern
+            .scenes
+            .lock()
+            .unwrap()
+            .sync_rack_members(&memberships);
         *self.rack_memberships.lock().unwrap() = memberships;
     }
     pub fn rack_memberships(&self) -> Vec<crate::graph::RackMembership> {
@@ -36,7 +44,9 @@ impl SequencerState {
     /// The graph overrides of every scene, by scene position.
     pub fn all_scene_graph_overrides(&self) -> Vec<Vec<ProjectGraphOverrides>> {
         let bank = self.pattern.scenes.lock().unwrap();
-        bank.scenes.iter().map(|scene| scene.graph_overrides.clone()).collect()
+        (0..bank.scenes.len())
+            .map(|scene_idx| bank.composed_graph_overrides(scene_idx))
+            .collect()
     }
     /// Edit the graph overrides of EVERY scene (attach/detach/member-leave
     /// rewrites are structural and must hold across the whole scene bank).
@@ -48,8 +58,15 @@ impl SequencerState {
         let changed = {
             let mut bank = self.pattern.scenes.lock().unwrap();
             let mut changed = false;
-            for scene in &mut bank.scenes {
-                changed |= edit(&mut scene.graph_overrides);
+            // Composed, so a structural rewrite (attach/detach/member leave)
+            // reaches rack-clip overrides too, then split back by owner
+            // (rack-clips spec §4.2).
+            for scene_idx in 0..bank.scenes.len() {
+                let mut composed = bank.composed_graph_overrides(scene_idx);
+                if edit(&mut composed) {
+                    changed = true;
+                }
+                bank.store_composed_graph_overrides(scene_idx, composed);
             }
             changed
         };

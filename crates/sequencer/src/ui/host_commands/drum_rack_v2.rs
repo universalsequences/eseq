@@ -15,6 +15,12 @@ pub(super) const COMMANDS: &[&str] = &[
     "attach-rack-sequencer",
     "detach-rack-sequencer",
     "move-sequencer-into-rack",
+    // Rack clips (docs/rack-clips-and-break-kits-spec.md §4.2-§4.4, §6.3).
+    "convert-rack-to-clips",
+    "launch-rack-clip",
+    "save-rack-clip-as",
+    "delete-rack-clip",
+    "rename-rack-clip",
 ];
 
 /// How long a pad-grid hit sounds before its note-off. The pad grid is a
@@ -251,6 +257,106 @@ pub(super) fn handle(
                 Err(error) => editor.handle_host_event(HostEvent::Status(error)),
             }
         }
+        // Legacy rack -> clips, once (§4.3). One undoable patch, no audible
+        // change: every scene keeps playing exactly what it played.
+        "convert-rack-to-clips" => {
+            let Some(group_id) = extract_usize_from_payload(&payload, "group-id").map(|id| id as u64)
+            else {
+                editor.handle_host_event(HostEvent::Status(
+                    "convert-rack-to-clips needs a group id".to_string(),
+                ));
+                return;
+            };
+            match app.convert_rack_to_clips_recorded(group_id) {
+                Ok(created) => {
+                    sync_rack_pad_map(app, editor, &track_groups, &ui_epoch);
+                    editor.handle_host_event(HostEvent::Status(format!(
+                        "{} now has {created} clip(s)",
+                        group_name(app, group_id).unwrap_or_else(|| "Rack".to_string())
+                    )));
+                }
+                Err(error) => editor.handle_host_event(HostEvent::Status(error)),
+            }
+        }
+        // Clip launch (§4.4): set the pointer in the current scene, then
+        // relaunch the current scene through the ordinary scene-launch path,
+        // so it rides quantized launch with no new boundary code.
+        "launch-rack-clip" => {
+            let group_id = extract_usize_from_payload(&payload, "group-id").map(|id| id as u64);
+            let clip_id = extract_usize_from_payload(&payload, "clip-id").map(|id| id as u64);
+            let Some(group_id) = group_id else {
+                editor.handle_host_event(HostEvent::Status(
+                    "launch-rack-clip needs a group id".to_string(),
+                ));
+                return;
+            };
+            // clip-id < 0 (absent) means "silence this rack in this scene".
+            let clip = clip_id.filter(|id| *id > 0);
+            if let Err(error) = app.set_current_rack_clip_recorded(group_id, clip) {
+                editor.handle_host_event(HostEvent::Status(error));
+                return;
+            }
+            let quantize = extract_string_from_payload(&payload, "quantize")
+                .unwrap_or_else(|| "off".to_string());
+            let scene = ctx.shared.state.current_scene_index();
+            let relaunch = Value::Map(
+                [
+                    ("idx".to_string(), Value::Number(scene as f64)),
+                    ("quantize".to_string(), Value::String(quantize)),
+                ]
+                .into_iter()
+                .map(|(key, value)| (key, std::rc::Rc::new(std::cell::RefCell::new(value))))
+                .collect(),
+            );
+            super::scenes::handle("switch-pattern", relaunch, app, editor, ctx);
+            sync_rack_pad_map(app, editor, &track_groups, &ui_epoch);
+        }
+        "save-rack-clip-as" => {
+            let group_id = extract_usize_from_payload(&payload, "group-id").map(|id| id as u64);
+            let name = extract_string_from_payload(&payload, "name").unwrap_or_default();
+            let Some(group_id) = group_id else {
+                editor.handle_host_event(HostEvent::Status(
+                    "save-rack-clip-as needs a group id".to_string(),
+                ));
+                return;
+            };
+            match app.save_rack_clip_as_recorded(group_id, &name) {
+                Ok(_) => {
+                    sync_rack_pad_map(app, editor, &track_groups, &ui_epoch);
+                    editor.handle_host_event(HostEvent::Status("Saved rack clip".to_string()));
+                }
+                Err(error) => editor.handle_host_event(HostEvent::Status(error)),
+            }
+        }
+        "delete-rack-clip" => {
+            let group_id = extract_usize_from_payload(&payload, "group-id").map(|id| id as u64);
+            let clip_id = extract_usize_from_payload(&payload, "clip-id").map(|id| id as u64);
+            let (Some(group_id), Some(clip_id)) = (group_id, clip_id) else {
+                editor.handle_host_event(HostEvent::Status(
+                    "delete-rack-clip needs a group id and a clip id".to_string(),
+                ));
+                return;
+            };
+            match app.delete_rack_clip_recorded(group_id, clip_id) {
+                Ok(()) => sync_rack_pad_map(app, editor, &track_groups, &ui_epoch),
+                Err(error) => editor.handle_host_event(HostEvent::Status(error)),
+            }
+        }
+        "rename-rack-clip" => {
+            let group_id = extract_usize_from_payload(&payload, "group-id").map(|id| id as u64);
+            let clip_id = extract_usize_from_payload(&payload, "clip-id").map(|id| id as u64);
+            let name = extract_string_from_payload(&payload, "name").unwrap_or_default();
+            let (Some(group_id), Some(clip_id)) = (group_id, clip_id) else {
+                editor.handle_host_event(HostEvent::Status(
+                    "rename-rack-clip needs a group id and a clip id".to_string(),
+                ));
+                return;
+            };
+            match app.rename_rack_clip_recorded(group_id, clip_id, &name) {
+                Ok(()) => sync_rack_pad_map(app, editor, &track_groups, &ui_epoch),
+                Err(error) => editor.handle_host_event(HostEvent::Status(error)),
+            }
+        }
         // With a selected rack, activating a kit swaps that rack's complete
         // pad/sound assignment in one undo entry. With no addressed rack the
         // browser's create behavior remains: append a new rack.
@@ -436,6 +542,9 @@ fn sync_rack_pad_map(
     *track_groups.lock().unwrap() = app.groups.clone();
     let rt = editor.runtime_mut();
     sync_groups_bindings(rt, &app.groups);
+    // Clip bank edits (create/rename/delete/convert/launch) do not bump the
+    // pattern epoch, so the clip run's source is republished here explicitly.
+    rt.set_reactive("SEQ", "rack-clips", build_rack_clips_value(&app.state));
     rt.run_reactive_cycle();
     editor.refresh_runtime_side_effects();
     ui_epoch.fetch_add(1, Ordering::Relaxed);

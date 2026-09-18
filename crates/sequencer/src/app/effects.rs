@@ -7435,6 +7435,114 @@ mod tests {
     /// is a member; its overrides then speak member indices, a member leaving
     /// silences its nodes inside the same undo entry, and detaching expands
     /// the routes back to tracks.
+    /// Converting a legacy rack to clips is ONE undoable patch and changes
+    /// nothing audible: every scene keeps composing exactly the member slices
+    /// it composed before (rack-clips spec §4.3). Launching a clip afterwards
+    /// is a scene edit that composes the other clip's slices instead.
+    #[test]
+    fn a_legacy_rack_converts_to_clips_with_no_audible_change_and_undoes_in_one_step() {
+        let graph = TestLiveGraph::new("rack-clips-convert-test", 64, 44_100, 2);
+        let mut app = test_app_for_live_graph(&graph, 0);
+        let sample = std::path::Path::new("../../content/impulses/lexicon-300-rich-plate.wav");
+        let (group_id, _) = app
+            .create_drum_rack_recorded(Some("Break".to_string()))
+            .expect("drum rack");
+        let kick = app.graph_controller().add_track(sample).expect("kick");
+        let snare = app.graph_controller().add_track(sample).expect("snare");
+        for (note, track) in [(36, kick), (38, snare)] {
+            app.assign_rack_pad_track_recorded(group_id, note, track).expect("pad");
+        }
+        app.state.with_scenes_mut(|scenes| {
+            scenes.new_scene();
+            scenes.current_scene = 0;
+        });
+        let members = app.groups.iter().find(|g| g.id == group_id).unwrap().members.clone();
+        assert_eq!(members, vec![kick, snare]);
+
+        // Scene launch is also the live-grid save-back point, so seeding has to
+        // go through it: write steps into the live lanes, then launch the other
+        // scene, which persists them into the one being left.
+        let relaunch = |app: &App, scene: usize| {
+            app.state.launch_scene(
+                scene,
+                app.tracks.len(),
+                &app.graph.track_buffer_ids,
+                &app.graph.track_sample_rates,
+                &app.tracks,
+                &app.graph.track_instrument_types,
+            );
+        };
+        relaunch(&app, 0);
+        for track in [kick, snare] {
+            app.state.toggle_step_and_clear_plocks(track, 0);
+        }
+        relaunch(&app, 1);
+        for track in [kick, snare] {
+            app.state.toggle_step_and_clear_plocks(track, 1);
+            app.state.toggle_step_and_clear_plocks(track, 2);
+        }
+        relaunch(&app, 0);
+        let member_bits = |app: &App| -> Vec<Vec<u64>> {
+            app.state.with_scenes(|scenes| {
+                (0..scenes.scenes.len())
+                    .map(|scene_idx| {
+                        let snapshot = scenes.scene_snapshot(scene_idx).expect("snapshot");
+                        [kick, snare]
+                            .into_iter()
+                            .map(|track| {
+                                snapshot.track_pattern_data(track).expect("lane").track_bits[0]
+                            })
+                            .collect()
+                    })
+                    .collect()
+            })
+        };
+        let before = member_bits(&app);
+        assert_eq!(before, vec![vec![0b0001, 0b0001], vec![0b0110, 0b0110]]);
+        assert!(app.rack_is_legacy(group_id));
+
+        let undo_len = app.history.undo_len();
+        let created = app.convert_rack_to_clips_recorded(group_id).expect("convert");
+        assert_eq!(created, 2, "one clip per scene that had content");
+        assert!(!app.rack_is_legacy(group_id));
+        assert_eq!(member_bits(&app), before, "conversion is not audible");
+        assert_eq!(
+            app.history.undo_len(),
+            undo_len + 1,
+            "the whole conversion is one undo entry"
+        );
+
+        // Launching scene 0's clip into scene 1 makes scene 1 play scene 0's
+        // slices — the whole point of the clip pointer.
+        let bank = app.rack_clip_bank(group_id);
+        assert_eq!(bank.len(), 2);
+        assert!(bank[0].2, "scene 0 points at the first clip");
+        relaunch(&app, 1);
+        app.set_current_rack_clip_recorded(group_id, Some(bank[0].0)).expect("launch");
+        assert_eq!(member_bits(&app)[1], vec![0b0001, 0b0001]);
+        relaunch(&app, 1);
+        assert_eq!(
+            member_bits(&app)[0],
+            vec![0b0001, 0b0001],
+            "scene 0's clip is untouched by scene 1 pointing at it too"
+        );
+
+        // Silence is explicit: a None pointer empties the members.
+        app.set_current_rack_clip_recorded(group_id, None).expect("silence");
+        assert_eq!(member_bits(&app)[1], vec![0, 0]);
+        relaunch(&app, 1);
+
+        // Undo back past the conversion restores the legacy rack exactly.
+        for _ in 0..3 {
+            assert!(matches!(
+                crate::app::edit::undo(&mut app),
+                crate::app::history::HistoryReplay::Applied(_)
+            ));
+        }
+        assert!(app.rack_is_legacy(group_id));
+        assert_eq!(member_bits(&app), before);
+    }
+
     #[test]
     fn graph_sequencer_moves_into_rack_follows_member_leave_and_detaches() {
         use crate::graph::{

@@ -156,8 +156,21 @@
 ;; (docs/rack-clips-and-break-kits-spec.md §5.1).
 (def rack-group-menu-actions (gid)
   (append
-    (list
-      (dict :id :rename :label "Rename"))
+    (append
+      (list
+        (dict :id :rename :label "Rename"))
+      ;; Rack clips (docs/rack-clips-and-break-kits-spec.md §6.3). A LEGACY
+      ;; rack (no bank) is offered the one-shot conversion; a rack that already
+      ;; has clips is offered the per-clip actions instead.
+      (if (eseq.drum-rack-v2/has-clips? gid)
+        (append
+          (list (dict :id :save-rack-clip :label "Save clip as..."))
+          (map (lambda (clip)
+                 (dict :id :delete-rack-clip
+                       :clip-id (get clip :id)
+                       :label (str "Delete clip " (get clip :name))))
+            (eseq.drum-rack-v2/clips gid)))
+        (list (dict :id :convert-to-clips :label "Convert to clips"))))
     (map
       (lambda (graph)
         (if (= (get graph :owner-rack) gid)
@@ -1223,7 +1236,20 @@
                 (host-command "detach-rack-sequencer"
                   (dict :group-id track-menu-group-id
                         :sequencer-id (get action :sequencer-id))))
-              nil)))))))
+              (if (= (get action :id) :convert-to-clips)
+                (do
+                  (set! track-menu-open false)
+                  (eseq.drum-rack-v2/convert-to-clips track-menu-group-id))
+                (if (= (get action :id) :save-rack-clip)
+                  (do
+                    (set! track-menu-open false)
+                    (eseq.drum-rack-v2/save-clip-as track-menu-group-id "Clip"))
+                  (if (= (get action :id) :delete-rack-clip)
+                    (do
+                      (set! track-menu-open false)
+                      (eseq.drum-rack-v2/delete-clip track-menu-group-id
+                        (get action :clip-id)))
+                    nil))))))))))
 
 (def track-context-menu ()
   (context-menu :is-open track-menu-open
@@ -1698,6 +1724,30 @@
 ;; The group's own channel slot (collapse toggle + name) shown at the left of
 ;; the container, over the container color. It matches a bus strip's width so
 ;; the full rack mute/solo/arm row has room without crowding the container.
+(def rack-clip-column (gid)
+  (let ((active (eseq.drum-rack-v2/active-clip gid)))
+    (box :key (str "rack-clip-column-" gid)
+      :width :fill :height (clip-area-height) :align :top
+      :bg :black :background-color :buffer-bg
+      (v-stack :gap 0.12 :align :center
+        (each (eseq.drum-rack-v2/clips gid) |clip|
+          (box :key (str "mixer-rack-clip-" gid "-" (get clip :id))
+            :debug-name "mixer-rack-clip-cell"
+            :width 9.0 :height 0.95 :padding 0.08
+            :corner-radius (eseq.seq-core-state/radius 4)
+            :background-color (if (= (get clip :id) active)
+              :control-on-bg
+              :mixer-control-bg)
+            :on-click (lambda (event)
+              (eseq.drum-rack-v2/launch-clip gid (get clip :id)))
+            (label (substring (get clip :name) 0 (name-chars 9))
+              :key (str "mixer-rack-clip-label-" gid "-" (get clip :id))
+              :font-size 9 :h-align :center :v-align :center
+              :background-color :transparent :border-color :transparent
+              :highlight-color :transparent :shadow-color :transparent
+              :color (if (= (get clip :id) active) :control-on-fg :dim)
+              :bg :transparent)))))))
+
 (def group-header-slot (gidx)
   (let ((group (nth SEQ.groups gidx))
       (c (group-color gidx))
@@ -1715,7 +1765,12 @@
       :on-drop (lambda (event) (drop-on-group-header event gidx))
       (v-stack :gap 0.3 :align :center
         (bus-output-dropdown bus-idx)
-        (clip-growth-spacer)
+        ;; Where a plain track strip shows its pattern grid, a clip-bearing
+        ;; rack shows its clip run vertically (§6.2). Everything else keeps the
+        ;; spacer that levels the meters.
+        (if (eseq.drum-rack-v2/has-clips? (get group :id))
+          (rack-clip-column (get group :id))
+          (clip-growth-spacer))
         ;; Meter + fader reflect the group's backing bus. Selecting/dragging
         ;; them selects the group's bus (bus-meter-control selects by
         ;; index). Fall back to nothing if the bus can't be resolved.

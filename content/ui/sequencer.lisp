@@ -3565,6 +3565,99 @@
         ;; name/meter shape an ordinary track header has.
         (group-volume-control gidx bus-idx)))))
 
+(defstate clip-renaming -1)
+(defstate clip-rename-draft "")
+
+;; ── Rack clip run (docs/rack-clips-and-break-kits-spec.md §6.1) ──────────
+;; A collapsed rack is no longer a dead row: it shows the rack's clip bank as a
+;; horizontal run. The cell the CURRENT scene points at is lit; clicking one
+;; launches it (quantized exactly like a scene launch), shift-clicking renames
+;; it, and the trailing + saves what the rack is playing now as a new clip.
+;; Drag reorder is not wired yet (the run is rendered from SEQ.rack-clips, which
+;; carries no drop target); the bank order is the create order.
+
+(def rack-clip-cell-width 2.9)
+
+(def finish-clip-rename (gid clip-id commit)
+  (do
+    (if commit (eseq.drum-rack-v2/rename-clip gid clip-id clip-rename-draft) nil)
+    (set! clip-renaming -1)
+    (set! clip-rename-draft "")))
+
+(def rack-clip-cell (gid clip active)
+  (let ((id (get clip :id))
+      (lit (= (get clip :id) active)))
+    (box :key (str "rack-clip-" gid "-" id)
+      :debug-name "rack-clip-cell"
+      :width rack-clip-cell-width :height 1.15 :padding 0.08
+      :corner-radius (eseq.seq-core-state/radius 4)
+      :background-color (if lit :control-on-bg :mixer-control-bg)
+      :border-width 1
+      :border-color :mixer-strip-border
+      :on-click (lambda (event)
+        (if (get event :shift)
+          (do
+            (set! clip-renaming id)
+            (set! clip-rename-draft (get clip :name)))
+          (eseq.drum-rack-v2/launch-clip gid id)))
+      (if (= clip-renaming id)
+        (text-input
+          :key (str "rack-clip-rename-" gid "-" id)
+          :width (- rack-clip-cell-width 0.3) :height 0.95 :font-size 9
+          :value clip-rename-draft
+          :auto-focus true
+          :select-all-on-focus true
+          :on-change (lambda (name) (set! clip-rename-draft name))
+          :on-submit (lambda () (finish-clip-rename gid id true))
+          :on-cancel (lambda () (finish-clip-rename gid id false))
+          :on-blur (lambda () (finish-clip-rename gid id true)))
+        (label (substring (get clip :name) 0 7)
+          :key (str "rack-clip-label-" gid "-" id)
+          :font-size 9
+          :h-align :center :v-align :center
+          :background-color :transparent
+          :border-color :transparent
+          :highlight-color :transparent
+          :shadow-color :transparent
+          :color (if lit :control-on-fg :dim)
+          :bg :transparent)))))
+
+;; One dot per member, lit by the same per-track trigger binding the pad map
+;; uses — no new host feed for the activity strip.
+(def rack-activity-strip (gidx gid)
+  (h-stack :key (str "rack-activity-" gid) :gap 0.08 :align :center
+    (each (eseq.drum-rack-v2/members gidx) |m|
+      (box :key (str "rack-activity-dot-" gid "-" (nth SEQ.track-ids m))
+        :width 0.42 :height 0.42
+        :corner-radius (eseq.seq-core-state/radius 3)
+        :background-color '(rgba 0.19 0.20 0.21 1.0)
+        :selected (bind-seq (str "rack-pad-trigger-" m))
+        :selected-background-color '(rgba 0.95 0.98 1.0 1.0)))))
+
+(def rack-clip-run (gidx)
+  (let ((gid (eseq.drum-rack-v2/group-id gidx))
+      (rack (eseq.drum-rack-v2/rack? gidx)))
+    (if (and rack (eseq.drum-rack-v2/has-clips? gid))
+      (h-stack :key (str "rack-clip-run-" gid) :gap 0.12 :align :center :width :fill
+        (each (eseq.drum-rack-v2/clips gid) |clip|
+          (rack-clip-cell gid clip (eseq.drum-rack-v2/active-clip gid)))
+        (box :key (str "rack-clip-add-" gid)
+          :width 1.15 :height 1.15 :padding 0.08
+          :corner-radius (eseq.seq-core-state/radius 4)
+          :background-color :mixer-control-bg
+          :border-width 1
+          :border-color :mixer-strip-border
+          :on-click (lambda (event) (eseq.drum-rack-v2/save-clip-as gid "Clip"))
+          (label "+"
+            :key (str "rack-clip-add-label-" gid)
+            :font-size 10 :h-align :center :v-align :center
+            :background-color :transparent :border-color :transparent
+            :highlight-color :transparent :shadow-color :transparent
+            :color :dim :bg :transparent))
+        (box :width :fill :height 0.0 :bg :transparent)
+        (rack-activity-strip gidx gid))
+      nil)))
+
 (def group-header-row (gidx)
   (subtree :key (str "seqv-" (group-ui-kind gidx) "-header-" (eseq.drum-rack-v2/group-id gidx))
     (group-header-body gidx)))
@@ -3587,6 +3680,9 @@
       :on-click |x y r| (select-group gidx)
       (v-stack :width :fill :gap 0.1
         (group-header-row gidx)
+        ;; The clip run shows in both states (§6.1): collapsed it IS the row's
+        ;; content, expanded it sits under the header above the member rows.
+        (rack-clip-run gidx)
         (if (eseq.drum-rack-v2/collapsed? gidx)
           (box :width 0.0 :height 0.0 :bg :transparent)
           (v-stack :width :fill :gap 0.0

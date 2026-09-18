@@ -1492,6 +1492,115 @@
         }
     }
 
+    /// Rack clips, their per-scene pointers and their rack-owned overrides
+    /// survive a project save/load (rack-clips spec §3), and a rack with no
+    /// clips comes back legacy.
+    #[test]
+    fn rack_clips_and_scene_pointers_survive_project_save_and_load() {
+        let engine = crate::audio::engine::init_headless_engine(48_000, 2).unwrap();
+        let lg = engine.lg_ptr;
+        let mut app = App::new(engine.state, lg, engine.sample_rate,
+            engine.buses, engine.master_recorder, engine.keyboard_tx);
+        let sample = std::path::Path::new("../../content/impulses/lexicon-300-rich-plate.wav");
+        let (group_id, _) = app
+            .create_drum_rack_recorded(Some("Break".to_string()))
+            .expect("drum rack");
+        let kick = app.graph_controller().add_track(sample).expect("kick");
+        let snare = app.graph_controller().add_track(sample).expect("snare");
+        for (note, track) in [(36, kick), (38, snare)] {
+            app.assign_rack_pad_track_recorded(group_id, note, track).expect("pad");
+        }
+        app.state.with_scenes_mut(|scenes| {
+            scenes.new_scene();
+        });
+        let relaunch = |app: &App, scene: usize| {
+            app.state.launch_scene(
+                scene,
+                app.tracks.len(),
+                &app.graph.track_buffer_ids,
+                &app.graph.track_sample_rates,
+                &app.tracks,
+                &app.graph.track_instrument_types,
+            );
+        };
+        relaunch(&app, 0);
+        for track in [kick, snare] {
+            app.state.toggle_step_and_clear_plocks(track, 0);
+        }
+        relaunch(&app, 1);
+        for track in [kick, snare] {
+            app.state.toggle_step_and_clear_plocks(track, 3);
+        }
+        relaunch(&app, 0);
+        app.convert_rack_to_clips_recorded(group_id).expect("convert");
+        // A rack-owned override rides in the active clip.
+        app.state
+            .edit_current_graph_overrides(|graphs| {
+                graphs.push(crate::graph::ProjectGraphOverrides {
+                    sequencer_id: 4242,
+                    sequencer_name: "brk".into(),
+                    owner_rack: Some(group_id),
+                    ..Default::default()
+                });
+                Ok(())
+            })
+            .expect("seed rack override");
+
+        let bank_before = app.rack_clip_bank(group_id);
+        assert_eq!(bank_before.len(), 2);
+        let member_bits = |app: &App| -> Vec<Vec<u64>> {
+            app.state.with_scenes(|scenes| {
+                (0..scenes.scenes.len())
+                    .map(|scene_idx| {
+                        let snapshot = scenes.scene_snapshot(scene_idx).expect("snapshot");
+                        [kick, snare]
+                            .into_iter()
+                            .map(|track| {
+                                snapshot.track_pattern_data(track).expect("lane").track_bits[0]
+                            })
+                            .collect()
+                    })
+                    .collect()
+            })
+        };
+        let bits_before = member_bits(&app);
+        assert_eq!(bits_before, vec![vec![0b0001, 0b0001], vec![0b1000, 0b1000]]);
+
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let name = format!("__test-rack-clips-{}-{nonce}", std::process::id());
+        let project = app.capture_project(&name).unwrap();
+        let rack = project.groups.iter().find(|g| g.id == group_id)
+            .and_then(|g| g.rack.as_ref()).expect("rack config");
+        assert_eq!(rack.clips.len(), 2, "the bank serializes onto the rack config");
+        assert_eq!(project.scene_rack_clips.len(), 2, "one pointer list per scene");
+        let _cleanup = TestProjectFile(crate::project::save_project(&name, &project).unwrap());
+        app.queue_project_load_named(&name).unwrap();
+        for _ in 0..200 {
+            if app.editor.pending_project_load.is_none() {
+                break;
+            }
+            app.advance_pending_project_load().unwrap();
+            unsafe { crate::audiograph::prepare_graph_for_render(lg.0); }
+        }
+        assert!(app.editor.pending_project_load.is_none(), "project load should finish");
+
+        let bank_after = app.rack_clip_bank(group_id);
+        assert_eq!(
+            bank_after.iter().map(|(id, name, _)| (*id, name.clone())).collect::<Vec<_>>(),
+            bank_before.iter().map(|(id, name, _)| (*id, name.clone())).collect::<Vec<_>>(),
+        );
+        assert!(!app.rack_is_legacy(group_id));
+        assert_eq!(member_bits(&app), bits_before, "every scene plays what it played");
+        assert!(
+            app.state.current_graph_overrides().iter().any(|g| g.sequencer_id == 4242
+                && g.owner_rack == Some(group_id)),
+            "the clip's rack-owned override came back"
+        );
+        drop(app);
+        unsafe { crate::audiograph::destroy_live_graph(lg.0); }
+    }
+
     #[test]
     fn rack_macro_names_survive_project_save_and_load() {
         let engine = crate::audio::engine::init_headless_engine(48_000, 2).unwrap();

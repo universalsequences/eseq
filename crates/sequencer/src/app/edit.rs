@@ -3298,6 +3298,14 @@ impl App {
                 rack.push_pad(crate::project::ProjectRackPad { pad_note, member: position });
             }
         }
+        // Rack clips are positional over members (rack-clips spec §3): the
+        // joining member gets a silent cell in every clip.
+        let joined_rack = self.groups[group_index].is_rack();
+        if joined_rack {
+            let group_id = self.groups[group_index].id;
+            self.state
+                .with_scenes_mut(|scenes| scenes.rack_clip_member_inserted(group_id, position));
+        }
         self.publish_rack_choke_runtime();
         Ok(())
     }

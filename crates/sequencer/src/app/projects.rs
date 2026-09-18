@@ -2177,6 +2177,8 @@ impl App {
                     sequencers: Vec::new(),
                     pads,
                     choke_groups: desired_for_group.iter().map(|(_, choke, _)| *choke).collect(),
+                    clips: Vec::new(),
+                    next_clip_id: 0,
                 });
                 Ok(())
             })?;
@@ -2748,6 +2750,24 @@ impl App {
             });
         }
 
+        // Rack clips (rack-clips spec 3). The bank lives in `ProjectScenes`;
+        // it serializes onto each rack's config, and the per-scene pointers
+        // onto the file.
+        let (rack_clip_banks, scene_rack_clips) =
+            self.capture_rack_clips(&scenes_for_takes, num_tracks)?;
+        let mut groups = self.groups.clone();
+        for group in &mut groups {
+            let Some(rack) = group.rack.as_mut() else {
+                continue;
+            };
+            if let Some((_, clips, next_clip_id)) =
+                rack_clip_banks.iter().find(|(gid, _, _)| *gid == group.id)
+            {
+                rack.clips = clips.clone();
+                rack.next_clip_id = *next_clip_id;
+            }
+        }
+
         Ok(ProjectFile {
             version: project_file_version(),
             name: project_name.to_string(),
@@ -2778,7 +2798,7 @@ impl App {
                 cursor_col: self.editor.scratch_cursor.1,
             },
             patterns,
-            groups: self.groups.clone(),
+            groups,
             scene_banks,
             // The arrangement always exists (empty-arrangement spec 7):
             // every save writes one, the empty arrangement included.
@@ -2810,6 +2830,7 @@ impl App {
                 Vec::new()
             },
             scene_cell_presence,
+            scene_rack_clips,
             take_pools,
             track_sounds,
             // Scene-independent per-track process slot rosters (eseq-53y7).
@@ -3933,6 +3954,226 @@ impl App {
         Ok(())
     }
 
+    /// Serialize every rack's clip bank (rack-clips spec 3). A clip's member
+    /// lanes ride in ONE full-width `ProjectPattern` in which only the rack's
+    /// member tracks are meaningful — the same wire form take chunks use, so
+    /// clip content reuses the scene pattern conversion and sample resolution
+    /// unchanged. Returns the per-rack banks and the per-scene pointers.
+    #[allow(clippy::type_complexity)]
+    fn capture_rack_clips(
+        &self,
+        scenes: &crate::sequencer::ProjectScenes,
+        num_tracks: usize,
+    ) -> Result<
+        (
+            Vec<(u64, Vec<crate::project::ProjectRackClip>, u64)>,
+            Vec<Vec<(u64, crate::project::RackClipId)>>,
+        ),
+        String,
+    > {
+        let mut banks = Vec::new();
+        for bank in scenes.rack_banks() {
+            let mut clips = Vec::with_capacity(bank.clips.len());
+            for clip in &bank.clips {
+                let mut snapshot = PatternSnapshot::new_default(num_tracks, &[]);
+                let mut sample_paths = vec![None; num_tracks];
+                let mut sample_names = vec![String::new(); num_tracks];
+                let mut members = Vec::with_capacity(clip.cells.len());
+                for (position, cell) in clip.cells.iter().enumerate() {
+                    let track = bank.members.get(position).copied();
+                    let data = cell.zip(track).and_then(|(id, track)| {
+                        scenes.track_pools.get(track).and_then(|pool| pool.get(id))
+                    });
+                    members.push(data.is_some());
+                    let (Some(track), Some(data)) = (track, data) else {
+                        continue;
+                    };
+                    if track >= num_tracks {
+                        continue;
+                    }
+                    snapshot.set_track_pattern_data(track, data);
+                    let (buffer_id, sample_name, _) = snapshot.sample_ids[track].clone();
+                    if snapshot
+                        .instrument_types
+                        .get(track)
+                        .copied()
+                        .unwrap_or(InstrumentType::Sampler)
+                        == InstrumentType::Sampler
+                    {
+                        sample_paths[track] = self
+                            .capture_sampler_source_path(buffer_id, &sample_name)?
+                            .map(|path| path.to_string_lossy().to_string());
+                    }
+                    sample_names[track] = if sample_paths[track].is_some() {
+                        sample_name
+                    } else {
+                        String::new()
+                    };
+                }
+                clips.push(crate::project::ProjectRackClip {
+                    id: clip.id,
+                    name: clip.name.clone(),
+                    color: clip.color,
+                    members,
+                    pattern: ProjectPattern::from_snapshot(
+                        &snapshot,
+                        sample_paths,
+                        sample_names,
+                        Vec::new(),
+                    ),
+                    graph_overrides: clip.graph_overrides.clone(),
+                    bus_chain: None,
+                });
+            }
+            banks.push((bank.group_id, clips, bank.next_clip_id));
+        }
+        let pointers: Vec<Vec<(u64, crate::project::RackClipId)>> = scenes
+            .scenes
+            .iter()
+            .map(|scene| scene.rack_clips.clone())
+            .collect();
+        // Skip the field entirely when no scene points at a clip, keeping
+        // pre-feature projects byte-identical.
+        let pointers = if pointers.iter().all(|scene| scene.is_empty()) {
+            Vec::new()
+        } else {
+            pointers
+        };
+        Ok((banks, pointers))
+    }
+
+    /// Rebuild the live clip banks from the loaded rack configs, inserting each
+    /// clip's member lanes into that member's pattern pool, then install the
+    /// per-scene pointers. A rack with no serialized clips installs nothing and
+    /// stays legacy (spec 4.3).
+    fn install_rack_clips(
+        &mut self,
+        scene_rack_clips: &[Vec<(u64, crate::project::RackClipId)>],
+        sample_assets: &mut std::collections::HashMap<PathBuf, ProjectSampleAsset>,
+        strict_samples: bool,
+        fallback_samples: &mut usize,
+    ) -> Result<(), String> {
+        let serialized: Vec<(u64, Vec<usize>, u64, Vec<crate::project::ProjectRackClip>)> = self
+            .groups
+            .iter()
+            .filter_map(|group| {
+                let rack = group.rack.as_ref()?;
+                (!rack.clips.is_empty()).then(|| {
+                    (
+                        group.id,
+                        group.members.clone(),
+                        rack.next_clip_id,
+                        rack.clips.clone(),
+                    )
+                })
+            })
+            .collect();
+        // The live `App` groups never carry clips: the bank in `ProjectScenes`
+        // is the single authority, and save rebuilds the serialized form.
+        for group in &mut self.groups {
+            if let Some(rack) = group.rack.as_mut() {
+                rack.clips = Vec::new();
+                rack.next_clip_id = 0;
+            }
+        }
+        let mut converted: Vec<(
+            u64,
+            Vec<usize>,
+            u64,
+            Vec<(
+                crate::project::RackClipId,
+                String,
+                Option<[f32; 3]>,
+                Vec<crate::graph::ProjectGraphOverrides>,
+                Vec<Option<crate::sequencer::TrackPatternData>>,
+            )>,
+        )> = Vec::new();
+        for (group_id, members, next_clip_id, clips) in serialized {
+            let mut built = Vec::with_capacity(clips.len());
+            for clip in clips {
+                let (snapshot, _, fallback_count) = self
+                    .project_pattern_into_snapshot_with_policy(
+                        clip.pattern,
+                        sample_assets,
+                        strict_samples,
+                    )?;
+                *fallback_samples += fallback_count;
+                let cells = members
+                    .iter()
+                    .enumerate()
+                    .map(|(position, track)| {
+                        clip.members
+                            .get(position)
+                            .copied()
+                            .unwrap_or(false)
+                            .then(|| snapshot.track_pattern_data(*track))
+                            .flatten()
+                    })
+                    .collect();
+                built.push((clip.id, clip.name, clip.color, clip.graph_overrides, cells));
+            }
+            converted.push((group_id, members, next_clip_id, built));
+        }
+        if converted.is_empty() {
+            return Ok(());
+        }
+        let pointers = scene_rack_clips.to_vec();
+        self.state.with_scenes_mut(|scenes| {
+            let mut banks = Vec::with_capacity(converted.len());
+            let mut member_tracks: Vec<usize> = Vec::new();
+            for (group_id, members, next_clip_id, clips) in converted {
+                let mut bank = crate::sequencer::RackClipBank {
+                    group_id,
+                    members: members.clone(),
+                    clips: Vec::with_capacity(clips.len()),
+                    next_clip_id: next_clip_id.max(1),
+                };
+                for (id, name, color, graph_overrides, cells) in clips {
+                    let cells = cells
+                        .into_iter()
+                        .enumerate()
+                        .map(|(position, data)| {
+                            let track = *members.get(position)?;
+                            let data = data?;
+                            scenes
+                                .track_pools
+                                .get_mut(track)
+                                .map(|pool: &mut crate::sequencer::TrackPatternPool| pool.insert(data))
+                        })
+                        .collect();
+                    bank.clips.push(crate::sequencer::RackClip {
+                        id,
+                        name,
+                        color,
+                        cells,
+                        graph_overrides,
+                    });
+                }
+                member_tracks.extend(members);
+                banks.push(bank);
+            }
+            scenes.install_rack_banks(banks);
+            for (scene_idx, entries) in pointers.into_iter().enumerate() {
+                for (group_id, clip) in entries {
+                    scenes.set_scene_rack_clip(scene_idx, group_id, Some(clip));
+                }
+            }
+            // A clip-bearing rack's members resolve through the clip, so the
+            // dense bank's duplicate of the same lanes must not linger as a
+            // second, divergent copy.
+            for scene in &mut scenes.scenes {
+                for track in &member_tracks {
+                    if let Some(cell) = scene.cells.get_mut(*track) {
+                        *cell = None;
+                    }
+                }
+            }
+            scenes.repair_rack_clips();
+        });
+        self.publish_rack_choke_runtime();
+        Ok(())
+    }
+
     fn finish_project_load(
         &mut self,
         mut pending: super::PendingProjectLoad,
@@ -3966,6 +4207,7 @@ impl App {
             use_arrangement: _,
             record_armed,
             scene_cell_presence,
+            scene_rack_clips,
             take_pools,
             track_sounds,
             track_lane_rosters,
@@ -4208,6 +4450,18 @@ impl App {
         }
         self.reconcile_rack_group_bus_outputs();
         self.publish_rack_choke_runtime();
+        // Rack clips (rack-clips spec 3/4.3). Racks that carry no bank are
+        // legacy and install nothing, so pre-v13 projects are untouched.
+        {
+            let strict = pending.strict_samples;
+            let mut assets = std::mem::take(&mut pending.sample_assets);
+            let mut fallback = 0usize;
+            let result =
+                self.install_rack_clips(&scene_rack_clips, &mut assets, strict, &mut fallback);
+            pending.sample_assets = assets;
+            pending.fallback_samples += fallback;
+            result?;
+        }
         // Reconcile group routing: a group's members must reach its backing bus
         // in every scene. Output is stored per-scene, so older saves (or any
         // pre-fix grouping) can have members still pointing at Mix in some/all
@@ -5996,6 +6250,7 @@ mod tests {
         effect_slots: Vec<project::ProjectEffectSlot>,
     ) -> ProjectFile {
         ProjectFile {
+            scene_rack_clips: Vec::new(),
             version: project::project_file_version(),
             name: "test".to_string(),
             bpm: 120,

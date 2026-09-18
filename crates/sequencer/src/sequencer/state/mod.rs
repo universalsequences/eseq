@@ -47,6 +47,8 @@ use super::{BusId, TrackOutput};
 
 mod ids;
 pub use ids::*;
+mod rack_clips;
+pub use rack_clips::*;
 mod track_registry;
 pub use track_registry::*;
 mod rack_macro;

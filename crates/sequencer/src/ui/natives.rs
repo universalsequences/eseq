@@ -3556,6 +3556,7 @@ pub(crate) fn init_runtime(
                 ("sound-presets", build_sound_presets_value()),
                 ("kit-presets", build_kit_presets_value()),
                 ("graph-sequencers", Value::List(vec![])),
+                ("rack-clips", Value::List(vec![])),
                 ("current-project-name", Value::String(String::new())),
                 ("scene-bank-view-generation", Value::Number(0.0)),
                 ("rack-panel-view-generation", Value::Number(0.0)),

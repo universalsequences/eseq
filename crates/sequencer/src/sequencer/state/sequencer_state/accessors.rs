@@ -1547,8 +1547,11 @@ impl SequencerState {
         Ok(changed)
     }
 
-    #[cfg(test)]
-    pub(crate) fn with_scenes_mut<R>(&self, f: impl FnOnce(&mut ProjectScenes) -> R) -> R {
+    pub fn with_scenes<R>(&self, f: impl FnOnce(&ProjectScenes) -> R) -> R {
+        f(&self.pattern.scenes.lock().unwrap())
+    }
+
+    pub fn with_scenes_mut<R>(&self, f: impl FnOnce(&mut ProjectScenes) -> R) -> R {
         f(&mut self.pattern.scenes.lock().unwrap())
     }
 

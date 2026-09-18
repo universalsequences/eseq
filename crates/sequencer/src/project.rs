@@ -72,7 +72,12 @@ use crate::track_color::TrackColor;
 //       value per 16-step page, per track, per pattern. Older files have no
 //       bar transposes and load with every bar at 0, which plays exactly as
 //       they did.
-const PROJECT_FILE_VERSION: u32 = 12;
+//  13 - rack clips (docs/rack-clips-and-break-kits-spec.md 2-4): per-rack clip
+//       banks (`ProjectRackConfig::clips`) and the per-scene pointers into
+//       them (`ProjectFile::scene_rack_clips`). Older files have neither, so
+//       every rack loads as a LEGACY rack (empty bank) whose members resolve
+//       through the project scenes exactly as before.
+const PROJECT_FILE_VERSION: u32 = 13;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ProjectSoundPreset {
@@ -219,6 +224,12 @@ pub struct ProjectFile {
     /// an empty roster.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub track_lane_rosters: Vec<crate::process::TrackLaneRoster>,
+    /// Per scene, the rack clip pointers of `ProjectScene::rack_clips`
+    /// (rack-clips spec 3): `(group id, clip id)`. Outer index = scene; a rack
+    /// with no entry is silent in that scene. Absent in files below v13, whose
+    /// racks are all legacy.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scene_rack_clips: Vec<Vec<(u64, RackClipId)>>,
 }
 
 impl ProjectFile {
@@ -407,6 +418,8 @@ struct ProjectFileWire {
     track_sounds: Vec<ProjectTrackSounds>,
     #[serde(default)]
     track_lane_rosters: Vec<crate::process::TrackLaneRoster>,
+    #[serde(default)]
+    scene_rack_clips: Vec<Vec<(u64, RackClipId)>>,
 }
 
 impl<'de> Deserialize<'de> for ProjectFile {
@@ -446,6 +459,7 @@ impl<'de> Deserialize<'de> for ProjectFile {
             take_pools: wire.take_pools,
             track_sounds: wire.track_sounds,
             track_lane_rosters: wire.track_lane_rosters,
+            scene_rack_clips: wire.scene_rack_clips,
         };
         project.normalize_device_instances().map_err(D::Error::custom)?;
         migrate_legacy_chop_to_retrig(&mut project);
@@ -1195,6 +1209,69 @@ pub struct ProjectRackConfig {
     /// by this rack, so the pair travels together.
     #[serde(default)]
     pub sequencers: Vec<ProjectRackSequencer>,
+    /// Ordered clip bank (rack-clips spec 3). Empty = LEGACY rack: the launch
+    /// composition step is skipped and its members' data stays in the project
+    /// scenes exactly as before v13.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub clips: Vec<ProjectRackClip>,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub next_clip_id: RackClipId,
+}
+
+fn is_zero_u64(value: &u64) -> bool {
+    *value == 0
+}
+
+/// Stable identity of one rack clip within its rack's bank.
+pub type RackClipId = u64;
+
+/// One clip in a rack's bank: the rack-scoped slice of what a project scene
+/// holds (rack-clips spec 3).
+///
+/// `members` is positional over `group.members` and its length is the
+/// invariant the join/leave funnels maintain; `true` means that member sounds
+/// in this clip. The member LANES themselves ride in `pattern`, one full-width
+/// `ProjectPattern` in which only the rack's member tracks are meaningful --
+/// the same wire form take chunks use, so clip content reuses the scene
+/// pattern conversion and load-time sample resolution unchanged.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ProjectRackClip {
+    pub id: RackClipId,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<[f32; 3]>,
+    pub members: Vec<bool>,
+    pub pattern: ProjectPattern,
+    /// The rack-owned sequencer overrides, routes still MEMBER-relative.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub graph_overrides: Vec<ProjectGraphOverrides>,
+    /// Reserved for the per-clip rack bus chain snapshot (spec 10 open
+    /// question). Round-trips; nothing applies it yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bus_chain: Option<ProjectKitBusChain>,
+}
+
+// `ProjectPattern` (and the kit bus chain) predate `Debug`/`PartialEq`, and
+// deriving them there would cascade through a dozen wire types for no gain.
+// A clip's identity for both purposes is its serialized form.
+impl std::fmt::Debug for ProjectRackClip {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProjectRackClip")
+            .field("id", &self.id)
+            .field("name", &self.name)
+            .field("members", &self.members)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PartialEq for ProjectRackClip {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+            && self.name == other.name
+            && self.color == other.color
+            && self.members == other.members
+            && serde_json::to_vec(self).ok() == serde_json::to_vec(other).ok()
+    }
 }
 
 /// One graph `def-sequencer` instance a drum rack owns. `source` is the Lisp
@@ -3869,6 +3946,7 @@ mod tests {
 
     fn sample_project() -> ProjectFile {
         ProjectFile {
+            scene_rack_clips: Vec::new(),
             version: project_file_version(),
             name: "roundtrip".to_string(),
             bpm: 120,
@@ -4827,6 +4905,8 @@ mod tests {
             members: vec![0, 1],
             bus_id: 7,
             rack: Some(ProjectRackConfig {
+                clips: Vec::new(),
+                next_clip_id: 0,
                 sequencers: Vec::new(),
                 pads: vec![
                     ProjectRackPad { pad_note: 36, member: 0 },
@@ -4855,9 +4935,77 @@ mod tests {
         assert!(!restored.groups[0].is_rack());
     }
 
+    /// Rack clips (rack-clips spec 3): the bank, the per-scene pointers and the
+    /// rack-owned overrides survive a round trip, and a pre-feature file loads
+    /// as a legacy rack with an empty bank.
+    #[test]
+    fn rack_clips_round_trip_and_default_to_a_legacy_rack() {
+        let mut project = sample_project();
+        let clip_pattern = project.patterns[0].clone();
+        project.groups = vec![ProjectTrackGroup {
+            id: 3,
+            name: "Break".to_string(),
+            color: [0.4, 0.2, 0.6],
+            collapsed: true,
+            members: vec![0, 1],
+            bus_id: 7,
+            rack: Some(ProjectRackConfig {
+                sequencers: Vec::new(),
+                pads: vec![
+                    ProjectRackPad { pad_note: 36, member: 0 },
+                    ProjectRackPad { pad_note: 38, member: 1 },
+                ],
+                choke_groups: vec![None, None],
+                clips: vec![ProjectRackClip {
+                    id: 4,
+                    name: "Jungle".to_string(),
+                    color: Some([0.1, 0.2, 0.3]),
+                    members: vec![true, false],
+                    pattern: clip_pattern,
+                    graph_overrides: vec![ProjectGraphOverrides {
+                        sequencer_id: 11,
+                        sequencer_name: "gvr".to_string(),
+                        owner_rack: Some(3),
+                        ..Default::default()
+                    }],
+                    bus_chain: None,
+                }],
+                next_clip_id: 5,
+            }),
+            rack_members: Vec::new(),
+        }];
+        project.scene_rack_clips = vec![vec![(3, 4)]];
+
+        let json = serde_json::to_string(&project).expect("serialize project");
+        let restored: ProjectFile = serde_json::from_str(&json).expect("deserialize project");
+        let rack = restored.groups[0].rack.as_ref().expect("rack survives");
+        assert_eq!(rack.next_clip_id, 5);
+        assert_eq!(rack.clips.len(), 1);
+        assert_eq!(rack.clips[0].id, 4);
+        assert_eq!(rack.clips[0].name, "Jungle");
+        assert_eq!(rack.clips[0].members, vec![true, false]);
+        assert_eq!(rack.clips[0].graph_overrides[0].owner_rack, Some(3));
+        assert_eq!(restored.scene_rack_clips, vec![vec![(3, 4)]]);
+
+        // A pre-v13 file carries neither key; every rack loads as legacy.
+        let mut value: serde_json::Value = serde_json::from_str(&json).expect("parse json");
+        value.as_object_mut().expect("object").remove("scene_rack_clips");
+        let group = value["groups"][0]["rack"].as_object_mut().expect("rack object");
+        group.remove("clips");
+        group.remove("next_clip_id");
+        let restored: ProjectFile =
+            serde_json::from_value(value).expect("deserialize pre-clip project");
+        let rack = restored.groups[0].rack.as_ref().expect("rack");
+        assert!(rack.clips.is_empty(), "no bank means a legacy rack");
+        assert_eq!(rack.next_clip_id, 0);
+        assert!(restored.scene_rack_clips.is_empty());
+    }
+
     #[test]
     fn rack_sanitize_enforces_pad_invariants() {
         let mut rack = ProjectRackConfig {
+            clips: Vec::new(),
+            next_clip_id: 0,
             sequencers: Vec::new(),
             pads: vec![
                 ProjectRackPad { pad_note: 36, member: 0 },
@@ -4888,6 +5036,8 @@ mod tests {
     #[test]
     fn rack_sanitize_migrates_out_of_domain_pad_notes() {
         let mut rack = ProjectRackConfig {
+            clips: Vec::new(),
+            next_clip_id: 0,
             sequencers: Vec::new(),
             pads: vec![
                 ProjectRackPad { pad_note: 36, member: 0 },
@@ -4918,6 +5068,8 @@ mod tests {
     #[test]
     fn rack_sanitize_preserves_choke_groups_across_the_pad_note_migration() {
         let mut rack = ProjectRackConfig {
+            clips: Vec::new(),
+            next_clip_id: 0,
             sequencers: Vec::new(),
             pads: vec![
                 ProjectRackPad { pad_note: 90, member: 0 },
