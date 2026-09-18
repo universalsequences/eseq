@@ -315,6 +315,7 @@ pub(crate) fn run_event_loop(
         prev_transport_playhead: u32::MAX,
         prev_pattern_epoch: 0,
         prev_song_row_mirror_epoch: 0,
+        prev_published_sequencers_version: u64::MAX,
         prev_current_track: usize::MAX,
         prev_cpu_load_bits: u32::MAX,
         cpu_overload: CpuOverloadIndicator::default(),

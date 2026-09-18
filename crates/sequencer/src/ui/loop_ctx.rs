@@ -140,6 +140,8 @@ pub(crate) struct FrameDiffState {
     /// transitions (which never bump the real pattern epoch) still trigger
     /// the full pattern-switch resync.
     pub(crate) prev_song_row_mirror_epoch: u64,
+    /// Last `published_sequencers_version` mirrored into `SEQ.graph-sequencers`.
+    pub(crate) prev_published_sequencers_version: u64,
     pub(crate) prev_current_track: usize,
     pub(crate) prev_cpu_load_bits: u32,
     pub(crate) cpu_overload: CpuOverloadIndicator,

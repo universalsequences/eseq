@@ -1280,6 +1280,20 @@ pub(crate) fn sync_reactive_tick(
                     sync_piano_roll_playhead(editor.runtime_mut(), &app, ct, playhead as usize);
             }
         }
+        // Registering or unpublishing a sequencer bumps only the UI epoch, so
+        // the instance list the rack menu reads is mirrored on its own version.
+        let sequencers_version = ctx.shared.state.published_sequencers_version();
+        if sequencers_version != ctx.frame.prev_published_sequencers_version {
+            ctx.frame.prev_published_sequencers_version = sequencers_version;
+            needs_reactive_cycle |= editor
+                .runtime_mut()
+                .set_reactive(
+                    "SEQ",
+                    "graph-sequencers",
+                    build_graph_sequencers_value(&ctx.shared.state),
+                )
+                .effects_dirty;
+        }
         let mirror_epoch = app.song_row_mirror_epoch;
         if (epoch != ctx.frame.prev_pattern_epoch
             || mirror_epoch != ctx.frame.prev_song_row_mirror_epoch)
