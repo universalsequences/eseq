@@ -19,10 +19,9 @@ pub enum BackendEvent {
     Quit,
 }
 
-/// Cross-thread wake-up for a backend blocked in its event pump. A producer
+/// Cross-thread wake-up for the native loop or a blocked event pump. A producer
 /// on another thread (the MIDI input callback) calls `wake` after queueing
-/// work so the host loop returns from `poll_backend_event_with_redraw` now
-/// instead of at its idle timeout.
+/// work so the host runs a tick now instead of waiting for its idle timeout.
 ///
 /// The proxy is `Send` but not `Sync` on every platform, so it sits behind a
 /// mutex; a wake is one uncontended lock.

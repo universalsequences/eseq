@@ -1,6 +1,7 @@
 use super::*;
 
 pub(crate) struct UiLoopStats {
+    pub(crate) benchmark: ui_benchmark::UiBenchmark,
     enabled: bool,
     window_start: Instant,
     events: u64,
@@ -26,6 +27,7 @@ pub(crate) struct UiLoopStats {
 impl UiLoopStats {
     pub(crate) fn new() -> Self {
         Self {
+            benchmark: ui_benchmark::UiBenchmark::default(),
             enabled: std::env::var_os("ESEQLISP_PROFILE_UI").is_some(),
             window_start: Instant::now(),
             events: 0,
@@ -47,6 +49,7 @@ impl UiLoopStats {
     }
 
     pub(crate) fn note_event(&mut self, elapsed: Duration, redraw: bool) {
+        self.benchmark.note_event(elapsed, redraw);
         if !self.enabled {
             return;
         }
@@ -74,6 +77,7 @@ impl UiLoopStats {
     }
 
     pub(crate) fn note_sync(&mut self, elapsed: Duration) {
+        self.benchmark.note_sync();
         if !self.enabled {
             return;
         }
@@ -86,6 +90,7 @@ impl UiLoopStats {
     }
 
     pub(crate) fn note_frame(&mut self, build: Duration, render: Duration, presented: bool) {
+        self.benchmark.note_frame(presented);
         if !self.enabled {
             return;
         }

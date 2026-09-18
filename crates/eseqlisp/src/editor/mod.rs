@@ -1,6 +1,7 @@
 mod commands;
 mod minibuffer;
 mod natives;
+mod runtime_context;
 pub use natives::{asset_metadata_lisp_value, asset_option_labels};
 pub(crate) mod widget_focus;
 mod widget_interaction;
@@ -645,6 +646,7 @@ pub struct Editor {
     lisp_bindings: LispBindings,
     runtime: Runtime,
     runtime_source_context_revision: Option<RuntimeSourceContextRevision>,
+    runtime_context_cache: runtime_context::RuntimeContextCache,
     needs_redraw: bool,
     should_quit: bool,
     last_exit: EditorExit,
@@ -819,6 +821,7 @@ impl Editor {
             lisp_bindings: HashMap::new(),
             runtime,
             runtime_source_context_revision: None,
+            runtime_context_cache: runtime_context::RuntimeContextCache::default(),
             needs_redraw: true,
             should_quit: false,
             last_exit: EditorExit::Closed,
@@ -7657,77 +7660,6 @@ impl Editor {
         buffer.set_mode(mode);
         buffer.dirty = false;
         Ok(path)
-    }
-
-    fn sync_runtime_context(&mut self) {
-        let active = self.active_buffer();
-        let current_buffer_id = active.id;
-        let current_buffer_name = active.name.clone();
-        let current_buffer_path = active.path.clone();
-        let current_buffer_read_only = active.read_only;
-        let current_buffer_mode = active.mode.name().to_string();
-        let current_line_number = active.cursor.0 + 1;
-        let current_line_text = active
-            .lines
-            .get(active.cursor.0)
-            .cloned()
-            .unwrap_or_default();
-        let current_view_mode = active.view_mode.label().to_string();
-        let buffer_infos = self.buffer_infos_by_recency();
-        let buffer_names = buffer_infos
-            .iter()
-            .map(|info| info.name.clone())
-            .collect::<Vec<_>>();
-        {
-            let mut shared = self.runtime.shared.borrow_mut();
-            shared.current_buffer_id = Some(current_buffer_id);
-            shared.current_buffer_name = current_buffer_name;
-            shared.current_buffer_path = current_buffer_path;
-            shared.current_buffer_read_only = current_buffer_read_only;
-            shared.current_buffer_mode = current_buffer_mode;
-            shared.current_line_number = current_line_number;
-            shared.current_line_text = current_line_text;
-            shared.buffer_names = buffer_names;
-            shared.buffer_infos = buffer_infos;
-            shared.current_view_mode = current_view_mode;
-            shared.current_text_zoom = self.text_zoom as f64;
-        }
-        self.sync_visible_effect_buffers();
-    }
-
-    fn sync_visible_effect_buffers(&mut self) {
-        let visible_names = self
-            .tile_root
-            .leaf_ids()
-            .into_iter()
-            .filter_map(|tile_id| self.tile_root.find_leaf(tile_id))
-            .filter_map(|leaf| self.buffers.get(leaf.buffer_idx))
-            .map(|buffer| buffer.name.as_str())
-            .collect::<HashSet<_>>();
-        {
-            let mut ordered = visible_names
-                .iter()
-                .map(|name| name.to_string())
-                .collect::<Vec<_>>();
-            ordered.sort();
-            self.runtime.shared.borrow_mut().visible_buffer_names = ordered;
-        }
-        // Only presentation buffers (a committed widget tree) can defer:
-        // inert nil-returning projections like *sel-sync* exist purely for
-        // their reactive-set side effects and must keep running while hidden.
-        let hidden_names = self
-            .buffers
-            .iter()
-            .filter(|buffer| !visible_names.contains(buffer.name.as_str()))
-            .filter(|buffer| {
-                buffer
-                    .widget_tree
-                    .as_ref()
-                    .is_some_and(|tree| !matches!(tree, Value::Nil))
-            })
-            .map(|buffer| buffer.name.clone())
-            .collect::<HashSet<_>>();
-        self.runtime.set_hidden_effect_buffer_names(hidden_names);
     }
 
     /// Run effects that deferred while their target buffer was hidden and

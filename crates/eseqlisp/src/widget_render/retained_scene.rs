@@ -27,6 +27,7 @@ pub struct PreparedScene {
     pub runs: Vec<PreparedRun>,
     pub overlay: Vec<GpuPrimitive>,
     pub rebuilt_nodes: usize,
+    pub visited_nodes: usize,
     pub reused_nodes: usize,
     pub culled_nodes: usize,
     pub reindexed_nodes: usize,
@@ -91,8 +92,29 @@ struct PaintContext {
     inherited_hover: bool,
 }
 
+#[derive(Clone, Copy, PartialEq)]
+struct PresentationContext {
+    epoch: u64,
+    visible: Rect,
+    translation: [f32; 2],
+    scroll: [f32; 3],
+    focus: Option<u64>,
+    focused_branch: bool,
+    inherited_hover: bool,
+}
+
 struct SceneNode {
     widget_id: u64,
+    stable_widget_id: Option<u64>,
+    needs_visit: bool,
+    presentation: Option<PresentationContext>,
+    // Offsets are relative to the parent run span, so copying a clean branch
+    // never requires walking its descendants to adjust their cached spans.
+    run_offset: usize,
+    run_count: usize,
+    children_prepared: bool,
+    visible_nodes: usize,
+    culled_nodes: usize,
     widget_type: String,
     layout_rect: Rect,
     box_background_rect: Option<Rect>,
@@ -119,6 +141,10 @@ struct SceneNode {
 pub struct RetainedScene {
     nodes: Vec<SceneNode>,
     by_id: HashMap<u64, usize>,
+    state_owners: HashMap<u64, Vec<usize>>,
+    state_cursor: u64,
+    resource_nodes: std::collections::BTreeSet<usize>,
+    previous_runs: Vec<PreparedRun>,
     layout_revision: u64,
     content_revision: u64,
     layout_identity: usize,
@@ -155,6 +181,9 @@ impl RetainedScene {
         if topology_changed || metrics_changed {
             self.nodes.clear();
             self.by_id.clear();
+            self.state_owners.clear();
+            self.resource_nodes.clear();
+            self.previous_runs.clear();
             self.index(layout, viewport, None, 0);
             scene.reindexed_nodes = self.nodes.len();
         } else if !dirty_ids.is_empty() && (self.layout_identity != identity || content_changed) {
@@ -183,7 +212,8 @@ impl RetainedScene {
                 let end = if self.nodes[index].is_scroll && !content_changed {
                     index + 1
                 } else { self.nodes[index].end };
-                for node in &mut self.nodes[index..end] { node.dirty = true; }
+                for node in &mut self.nodes[index..end] { node.dirty = true; node.needs_visit = true; }
+                self.mark_visit(index);
             }
         }
         // Time-dependent painters must run even when their authored props are
@@ -191,19 +221,40 @@ impl RetainedScene {
         for id in active_animation_widget_ids(layout) {
             if let Some(&index) = self.by_id.get(&id) {
                 let end = self.nodes[index].end;
-                for node in &mut self.nodes[index..end] { node.animation_dirty = true; }
+                for node in &mut self.nodes[index..end] { node.animation_dirty = true; node.needs_visit = true; }
+                self.mark_visit(index);
             }
         }
+        let mut state_cursor = self.state_cursor;
+        widget_state_changes_since(&mut state_cursor, |id| {
+            if let Some(indices) = self.state_owners.get(&id).cloned() {
+                for index in indices { self.mark_visit(index); }
+            }
+        });
+        self.state_cursor = state_cursor;
+        let changed_resources: Vec<_> = self.resource_nodes.iter().copied()
+            .filter(|&index| self.nodes[index].resources.changed()).collect();
+        for index in changed_resources { self.mark_visit(index); }
         self.visit(layout, 0, viewport, visible, [0.0, 0.0],
-            any_overlay_active(), &mut scene);
+            any_overlay_active(), Some(0), &mut scene);
+        self.previous_runs.clone_from(&scene.runs);
         scene.overlay = drain_overlay_primitives();
         self.profile.record(layout.widget_id, started, &scene);
         scene
     }
 
+    fn mark_visit(&mut self, mut index: usize) {
+        loop {
+            self.nodes[index].needs_visit = true;
+            let Some(parent) = self.nodes[index].parent else { break; };
+            index = parent;
+        }
+    }
+
     fn same_topology(&self, layout: &LayoutNode, index: usize) -> bool {
         let Some(node) = self.nodes.get(index) else { return false; };
-        node.widget_id == layout.widget_id && node.children.len() == layout.children.len()
+        node.widget_id == layout.widget_id && node.stable_widget_id == layout.stable_widget_id
+            && node.children.len() == layout.children.len()
             && node.widget_type == layout.widget_type && node.layout_rect == layout.rect
             && node.children.iter().zip(&layout.children)
                 .all(|(&index, child)| self.same_topology(child, index))
@@ -251,7 +302,15 @@ impl RetainedScene {
         let index = self.nodes.len();
         let box_background_rect = (layout.widget_type == "box").then(|| box_widget::background_rect(layout));
         self.by_id.insert(layout.widget_id, index);
+        self.state_owners.entry(layout.widget_id).or_default().push(index);
+        if let Some(id) = layout.stable_widget_id.filter(|id| *id != layout.widget_id) {
+            self.state_owners.entry(id).or_default().push(index);
+        }
         self.nodes.push(SceneNode {
+            needs_visit: true, presentation: None, run_offset: 0, run_count: 0,
+            children_prepared: false,
+            visible_nodes: 0, culled_nodes: 0,
+            stable_widget_id: layout.stable_widget_id,
             widget_id: layout.widget_id, parent, child_offset, children: Vec::new(), end: 0,
             widget_type: layout.widget_type.clone(), layout_rect: layout.rect, box_background_rect,
             bounds: None, has_overlay: is_overlay_panel_widget(&layout.widget_type),
@@ -277,14 +336,39 @@ impl RetainedScene {
     fn visit(
         &mut self, layout: &LayoutNode, index: usize, viewport: WidgetViewport,
         visible: Rect, translation: [f32; 2], overlays_active: bool,
-        scene: &mut PreparedScene,
+        previous_start: Option<usize>, scene: &mut PreparedScene,
     ) {
+        let presentation = PresentationContext {
+            epoch: self.epoch, visible, translation,
+            scroll: [viewport.scroll_top, viewport.scroll_left, viewport.overlay_viewport_bottom],
+            focus: viewport.focused_widget_id, focused_branch: viewport.focused_branch,
+            inherited_hover: viewport.inherited_hover,
+        };
+        let node = &self.nodes[index];
+        if !overlays_active && !node.has_overlay && !node.needs_visit
+            && node.presentation == Some(presentation)
+            && let Some(previous_start) = previous_start
+        {
+            scene.runs.extend_from_slice(&self.previous_runs[previous_start..previous_start + node.run_count]);
+            scene.reused_nodes += node.visible_nodes;
+            scene.culled_nodes += node.culled_nodes;
+            return;
+        }
+        scene.visited_nodes += 1;
+        let run_start = scene.runs.len();
+        let visible_before = scene.rebuilt_nodes + scene.reused_nodes;
+        let culled_before = scene.culled_nodes;
+        self.nodes[index].needs_visit = false;
+        self.nodes[index].presentation = Some(presentation);
         let node = &self.nodes[index];
         if !overlays_active && !node.has_overlay
             && ((finite_bounds(visible) && (visible.width == 0.0 || visible.height == 0.0))
                 || node.bounds.is_some_and(|bounds| !intersects(bounds, visible)))
         {
             scene.culled_nodes += node.end - index;
+            let node = &mut self.nodes[index];
+            node.run_count = 0; node.visible_nodes = 0; node.culled_nodes = node.end - index;
+            node.children_prepared = false;
             return;
         }
         let focused = layout.focusable && viewport.focused_widget_id == Some(layout.widget_id);
@@ -359,6 +443,8 @@ impl RetainedScene {
             node.context = Some(context);
             node.inputs = inputs;
             node.scroll_state = scroll_state.clone();
+            if node.resources.is_empty() { self.resource_nodes.remove(&index); }
+            else { self.resource_nodes.insert(index); }
             scene.rebuilt_nodes += 1;
         } else {
             scene.reused_nodes += 1;
@@ -382,10 +468,21 @@ impl RetainedScene {
         }
         for (child_offset, child) in layout.children.iter().enumerate() {
             let child_index = self.nodes[index].children[child_offset];
+            // A culled parent emitted no descendant spans in the previous
+            // frame. Its old offsets cannot refer to the current run buffer.
+            let child_previous_start = previous_start.filter(|_| self.nodes[index].children_prepared)
+                .map(|start| start + self.nodes[child_index].run_offset);
+            let child_run_offset = scene.runs.len() - run_start;
             self.visit(child, child_index, child_viewport, child_visible,
-                child_translation, overlays_active, scene);
+                child_translation, overlays_active, child_previous_start, scene);
+            self.nodes[child_index].run_offset = child_run_offset;
         }
         self.push_run(index, 1, translation, scene);
+        let node = &mut self.nodes[index];
+        node.children_prepared = true;
+        node.run_count = scene.runs.len() - run_start;
+        node.visible_nodes = scene.rebuilt_nodes + scene.reused_nodes - visible_before;
+        node.culled_nodes = scene.culled_nodes - culled_before;
     }
 
     fn push_run(&self, index: usize, ordinal: u16, translation: [f32; 2], scene: &mut PreparedScene) {
@@ -501,6 +598,44 @@ mod tests {
         let mut panel = node(id, "box", rect(col, 0.0, 20.0, 10.0), vec![label]);
         panel.props.insert("background".into(), Value::String("unregistered-background".into()));
         panel
+    }
+
+    #[test]
+    fn clean_subtrees_skip_visits_and_keep_run_offsets_after_sibling_changes() {
+        let mut root = node(99100, "hstack", rect(0.0, 0.0, 40.0, 20.0),
+            vec![panel(99110, 0.0), panel(99120, 20.0)]);
+        root.children[1].children[0].stable_widget_id = Some(99199);
+        let visible = rect(0.0, 0.0, 40.0, 20.0);
+        let mut cache = RetainedScene::default();
+        cache.prepare(&root, 1, 1, &[], viewport(), visible);
+        assert_eq!(cache.prepare(&root, 1, 1, &[], viewport(), visible).visited_nodes, 0);
+        for (index, text) in ["", "new label", "", "restored"].into_iter().enumerate() {
+            root.children[0].children[0].props.insert("text".into(), Value::String(text.into()));
+            let revision = index as u64 + 2;
+            let prepared = cache.prepare(&root, 1, revision, &[99111], viewport(), visible);
+            let fresh = RetainedScene::default().prepare(&root, 1, revision, &[], viewport(), visible);
+            assert!(prepared.flatten(viewport()) == fresh.flatten(viewport()), "retained sibling run offsets");
+            assert!(prepared.visited_nodes < fresh.visited_nodes, "unrelated branch stays resident");
+            assert_eq!(cache.prepare(&root, 1, revision, &[], viewport(), visible).visited_nodes, 0);
+        }
+        bump_widget_state_revision(99199);
+        let changed = cache.prepare(&root, 1, 5, &[], viewport(), visible);
+        assert_eq!(changed.rebuilt_nodes, 1, "stable interaction identity invalidates its paint owner");
+    }
+
+    #[test]
+    fn clean_subtree_reentry_does_not_reuse_a_culled_run_span() {
+        let root = node(99200, "hstack", rect(0.0, 0.0, 160.0, 20.0),
+            vec![panel(99210, 0.0), panel(99220, 100.0)]);
+        let mut cache = RetainedScene::default();
+        for col in [0.0, 100.0, 0.0, 100.0, 0.0] {
+            let visible = rect(col, 0.0, 40.0, 20.0);
+            let prepared = cache.prepare(&root, 1, 1, &[], viewport(), visible);
+            let fresh = RetainedScene::default().prepare(&root, 1, 1, &[], viewport(), visible);
+            assert!(prepared.flatten(viewport()) == fresh.flatten(viewport()));
+        }
+        let visible = rect(0.0, 0.0, 40.0, 20.0);
+        assert_eq!(cache.prepare(&root, 1, 1, &[], viewport(), visible).visited_nodes, 0);
     }
 
     #[test]

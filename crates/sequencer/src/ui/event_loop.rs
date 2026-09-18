@@ -1,4 +1,51 @@
 use crate::*;
+use eseqlisp::ui::host_loop::{HostLoopAction, HostLoopControl};
+
+fn drive_host_loop(
+    backend: &mut AppBackend,
+    host: impl FnMut(&mut AppBackend, HostLoopAction)
+        -> Result<HostLoopControl, Box<dyn std::error::Error>>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(target_os = "macos")]
+    { backend.run_host_loop(host) }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let mut host = host;
+        // The wgpu host retains its existing blocking poll inside each tick.
+        loop {
+            if host(backend, HostLoopAction::Tick)? == HostLoopControl::Exit { return Ok(()); }
+        }
+    }
+}
+
+fn host_animation_active(editor: &Editor, backend: &AppBackend, gesture: &GestureState) -> bool {
+    editor.visible_widgets_animating() || gesture.scroll_inertia.fling_active()
+        || (!editor.visible_widget_layouts().is_empty()
+            && eseqlisp::widget_render::sdf_widget::sdf_visual_animations_active(backend.time_seconds()))
+}
+
+fn render_live_resize(
+    editor: &mut Editor,
+    backend: &mut AppBackend,
+    frame_pacer: &mut frame_pacer::FramePacer,
+    ui_loop_stats: &mut UiLoopStats,
+) {
+    let (cols, rows) = backend.viewport_size();
+    editor.update_tile_rects(cols as u16, rows as u16);
+    let tiled_frame = eseqlisp::frame::build_tiled_render_frame_borderless(editor, cols, rows);
+    match backend.render_tiled(&tiled_frame) {
+        Ok(TiledRenderStatus::Presented) => {
+            ui_loop_stats.benchmark.note_frame(true);
+            editor.clear_needs_redraw();
+            frame_pacer.frame_finished(Instant::now());
+        }
+        Ok(TiledRenderStatus::NotPresented) => {
+            ui_loop_stats.benchmark.note_frame(false);
+            eseqlisp::frame::requeue_unpresented_tiled_frame(editor, &tiled_frame);
+        }
+        Err(_) => {}
+    }
+}
 
 type PendingPointerDrag = (crossterm::event::MouseEvent, (f32, f32));
 
@@ -239,7 +286,6 @@ pub(crate) fn run_event_loop(
     // 5. Metal event loop
     let frame_interval = Duration::from_secs_f64(1.0 / 60.0);
     let mut frame_pacer = frame_pacer::FramePacer::new(Instant::now(), frame_interval);
-    let mut stub_animation_cache = StubAnimationRenderCache::new();
     let mut pending_drag: Option<PendingPointerDrag> = None;
     // Edge-tracked so the un-hide fires even when the gesture is dropped for a
     // reason other than mouse-up (editor reload, tile close, focus loss).
@@ -408,13 +454,27 @@ pub(crate) fn run_event_loop(
 
     eprintln!("metal_seq: entering event loop");
     let mut ui_loop_stats = UiLoopStats::new();
+    let benchmark_server = match ui_benchmark::Server::start(backend.event_loop_waker()) {
+        Ok(server) => Some(server),
+        Err(error) => { eprintln!("UI benchmark endpoint unavailable: {error}"); None }
+    };
     let mut pointer_is_down = false;
     // Hardware MIDI note-ons a Lisp mapping consumed, so their note-offs route
     // the same way even if the mapping's answer has changed meanwhile.
     let mut lisp_consumed_midi_notes: std::collections::HashSet<LiveNoteSource> =
         std::collections::HashSet::new();
 
-    'app_loop: loop {
+    drive_host_loop(&mut backend, |mut backend, action| {
+        if action == HostLoopAction::LiveResize {
+            render_live_resize(&mut editor, backend, &mut frame_pacer, &mut ui_loop_stats);
+            return Ok(HostLoopControl::WaitUntil(Instant::now()));
+        }
+        if let Some(server) = &benchmark_server {
+            while let Ok(request) = server.receiver.try_recv() {
+                ui_loop_stats.benchmark.request(request, &mut backend);
+            }
+        }
+        ui_loop_stats.benchmark.advance(&app, &editor, &shared, &mut backend);
         application_menu::sync_context(&menu_state, &mut editor);
         let mut pointer_released_this_loop = false;
         for result in app.drain_due_pattern_launches() {
@@ -703,59 +763,32 @@ pub(crate) fn run_event_loop(
             meters.last_voice_count_log_at = Instant::now();
         }
 
-        let viewport_size = (cols, rows);
-        let stub_animation_active = stub_animation_cache.is_active(
-            viewport_size,
-            backend.agent_instrument_stub_animation_visible(),
-        );
-        let widget_animation_active =
-            editor.visible_widgets_animating() || gesture.scroll_inertia.fling_active();
-        let learn_ui_active = sessions.pending_learn_job.is_some();
-        let sdf_animation_active = !editor.visible_widget_layouts().is_empty()
-            && eseqlisp::widget_render::sdf_widget::sdf_visual_animations_active(
-                backend.time_seconds(),
-            );
-        // Animations share the ordinary input/control/render path. In
-        // particular an SDF transition must never sleep before polling input.
-        if widget_animation_active || sdf_animation_active {
-            editor.mark_needs_redraw();
-        }
+        let animation_active = host_animation_active(&editor, backend, &gesture);
+        // Animations share ordinary input/control/render scheduling.
+        if animation_active { editor.mark_needs_redraw(); }
 
-        // 1. Poll events FIRST
+        // Native-owned loops drain translated input; the wgpu loop still polls.
         let playing_now = shared.state.transport.playing.load(Ordering::Relaxed);
-        let timeout = if editor.needs_redraw() || stub_animation_active {
-            frame_pacer.time_until_frame(Instant::now())
-        } else if playing_now || learn_ui_active {
-            let until_frame = frame_pacer.time_until_frame(Instant::now());
-            if until_frame.is_zero() { frame_interval } else { until_frame }
-        } else {
-            Duration::from_millis(50)
+        #[cfg(not(target_os = "macos"))]
+        let timeout = {
+            let now = Instant::now();
+            frame_pacer.next_host_tick(now, editor.needs_redraw(), playing_now || sessions.pending_learn_job.is_some())
+                .saturating_duration_since(now)
         };
         let mut input_batch = live_input_batch::LiveInputBatch::new();
         loop {
-            // During a macOS live resize the poll blocks inside AppKit's modal
-            // tracking loop, so this outer loop cannot render; the backend invokes
-            // this callback on each resize tick to keep the frame matching the
-            // window instead of letting the compositor stretch the previous one.
-            let mut live_resize_redraw = |backend: &mut AppBackend| {
-                let (cols, rows) = backend.viewport_size();
-                editor.update_tile_rects(cols as u16, rows as u16);
-                let tiled_frame =
-                    eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, cols, rows);
-                match backend.render_tiled(&tiled_frame) {
-                    Ok(TiledRenderStatus::Presented) => {
-                        editor.clear_needs_redraw();
-                        frame_pacer.frame_finished(Instant::now());
-                    }
-                    Ok(TiledRenderStatus::NotPresented) => {
-                        eseqlisp::frame::requeue_unpresented_tiled_frame(&mut editor, &tiled_frame);
-                    }
-                    Err(_) => {}
-                }
+            #[cfg(target_os = "macos")]
+            let (poll_timeout, event) = (Duration::ZERO, backend.next_queued_backend_event());
+            #[cfg(not(target_os = "macos"))]
+            let (poll_timeout, event) = {
+                let poll_timeout = input_batch.poll_timeout(timeout);
+                let event = backend.poll_backend_event_with_redraw(poll_timeout, &mut |backend| {
+                    render_live_resize(&mut editor, backend, &mut frame_pacer, &mut ui_loop_stats);
+                });
+                (poll_timeout, event)
             };
-            let Some(event) = backend.poll_backend_event_with_redraw(
-                input_batch.poll_timeout(timeout), &mut live_resize_redraw,
-            ) else { break; };
+            ui_loop_stats.benchmark.note_poll(poll_timeout, event.is_some());
+            let Some(event) = event else { break; };
             let event_started = Instant::now();
             input_batch.begin_event(event_started);
             let mut live_key_consumed = false;
@@ -819,7 +852,7 @@ pub(crate) fn run_event_loop(
                             let _ = editor.runtime_mut().eval_str("(seq-toggle-play)");
                             editor.refresh_runtime_side_effects();
                             ui_loop_stats.note_event(event_started.elapsed(), editor.needs_redraw());
-                            continue 'app_loop;
+                            return Ok(HostLoopControl::WaitUntil(Instant::now()));
                         }
                         // Every other app-level shortcut yields to the modal.
                         // Editor routing sends the key to the modal's owning
@@ -827,7 +860,7 @@ pub(crate) fn run_event_loop(
                         // control handles it.
                         editor.handle_key(key);
                         ui_loop_stats.note_event(event_started.elapsed(), editor.needs_redraw());
-                        continue 'app_loop;
+                        return Ok(HostLoopControl::WaitUntil(Instant::now()));
                     }
                     if raw_key.kind == crossterm::event::KeyEventKind::Press {
                         if raw_key.code == crossterm::event::KeyCode::Esc
@@ -847,7 +880,7 @@ pub(crate) fn run_event_loop(
                             pointer_is_down = false;
                             shared.ui_epoch.fetch_add(1, Ordering::Relaxed);
                             ui_loop_stats.note_event(event_started.elapsed(), editor.needs_redraw());
-                            continue 'app_loop;
+                            return Ok(HostLoopControl::WaitUntil(Instant::now()));
                         }
                         if let Some(gesture) = gesture.piano_roll_history_gesture.take() {
                             let track = gesture.track;
@@ -875,7 +908,7 @@ pub(crate) fn run_event_loop(
                                         "Could not finalize interrupted piano-roll gesture: {error:?}"
                                     )));
                                     ui_loop_stats.note_event(event_started.elapsed(), editor.needs_redraw());
-                                    continue 'app_loop;
+                                    return Ok(HostLoopControl::WaitUntil(Instant::now()));
                                 }
                             }
                         }
@@ -1053,7 +1086,7 @@ pub(crate) fn run_event_loop(
                         editor.show_transient_message(message);
                         editor.mark_needs_redraw();
                         ui_loop_stats.note_event(event_started.elapsed(), editor.needs_redraw());
-                        continue 'app_loop;
+                        return Ok(HostLoopControl::WaitUntil(Instant::now()));
                     }
                     if handle_metal_command_shortcut_with_ui_epoch(
                         &mut editor,
@@ -1070,7 +1103,7 @@ pub(crate) fn run_event_loop(
                         }
                         editor.mark_needs_redraw();
                         ui_loop_stats.note_event(event_started.elapsed(), editor.needs_redraw());
-                        continue 'app_loop;
+                        return Ok(HostLoopControl::WaitUntil(Instant::now()));
                     }
                     let key = normalize_command_shortcuts(raw_key);
                     if key.kind == crossterm::event::KeyEventKind::Press
@@ -1083,7 +1116,7 @@ pub(crate) fn run_event_loop(
                         ), Ok(Some(Value::Bool(true)))) {
                             editor.refresh_runtime_side_effects();
                             editor.mark_needs_redraw();
-                            continue 'app_loop;
+                            return Ok(HostLoopControl::WaitUntil(Instant::now()));
                         }
                         let cleared_neural_selection = {
                             let mut selection = shared.selected_neural_neurons.lock().unwrap();
@@ -1118,14 +1151,14 @@ pub(crate) fn run_event_loop(
                             frame.prev_selected_neural_neurons = selection;
                             editor.mark_needs_redraw();
                             ui_loop_stats.note_event(event_started.elapsed(), editor.needs_redraw());
-                            continue 'app_loop;
+                            return Ok(HostLoopControl::WaitUntil(Instant::now()));
                         }
                     }
                     if should_toggle_play_on_space(&editor, &key) {
                         let _ = editor.runtime_mut().eval_str("(seq-toggle-play)");
                         editor.refresh_runtime_side_effects();
                         ui_loop_stats.note_event(event_started.elapsed(), editor.needs_redraw());
-                        continue 'app_loop;
+                        return Ok(HostLoopControl::WaitUntil(Instant::now()));
                     }
                     if handle_metal_soft_step_param_key(
                         &mut editor,
@@ -1137,7 +1170,7 @@ pub(crate) fn run_event_loop(
                         &mut soft_step_param_edit,
                     ) {
                         ui_loop_stats.note_event(event_started.elapsed(), editor.needs_redraw());
-                        continue 'app_loop;
+                        return Ok(HostLoopControl::WaitUntil(Instant::now()));
                     }
                     let recording_key_outcome =
                         dispatch_live_keyboard_event(&mut editor, &mut app, &shared, &key);
@@ -2623,7 +2656,9 @@ pub(crate) fn run_event_loop(
             }
         }
         if project_load_still_pending {
-            continue;
+            // Loading skips the normal frame pass; keep asynchronous progress
+            // bounded by the existing UI cadence instead of spinning.
+            return Ok(HostLoopControl::WaitUntil(Instant::now() + frame_interval));
         }
 
         match reactive_tick_and_render(
@@ -2641,19 +2676,20 @@ pub(crate) fn run_event_loop(
             TickInputs {
                 cols,
                 rows,
-                viewport_size,
-                stub_animation_active,
-                sdf_animation_active,
                 playing_now,
             },
             &mut frame_pacer,
-            &mut stub_animation_cache,
             &mut ui_loop_stats,
         )? {
-            TickFlow::Quit => break,
+            TickFlow::Quit => return Ok(HostLoopControl::Exit),
             TickFlow::Continue => {}
         }
-    }
+        Ok(HostLoopControl::WaitUntil(frame_pacer.next_host_tick(
+            Instant::now(),
+            editor.needs_redraw() || host_animation_active(&editor, backend, &gesture),
+            shared.state.transport.playing.load(Ordering::Relaxed) || sessions.pending_learn_job.is_some(),
+        )))
+    })?;
 
     #[cfg(target_os = "macos")]
     drop(native_menu);

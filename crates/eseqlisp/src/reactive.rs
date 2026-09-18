@@ -335,13 +335,122 @@ fn patch_value_cells(stored: &Rc<RefCell<Value>>, next: &Rc<RefCell<Value>>, pat
     }
 }
 
+/// Group subscriptions by namespace and field so demand queries need no scan
+/// or temporary owned key. Empty binding, field and namespace entries are
+/// removed together; presence of a field means it has at least one reader.
+#[derive(Clone, Default)]
+struct WidgetSubscriptions {
+    namespaces: HashMap<String, HashMap<String, FieldWidgetReaders>>,
+}
+
+#[derive(Clone, Default)]
+struct FieldWidgetReaders {
+    scalar: HashSet<u64>,
+    // Most fields have only scalar readers. Keep their set inline instead of
+    // allocating an index table for every individual control parameter.
+    indexed: HashMap<usize, HashSet<u64>>,
+}
+
+impl FieldWidgetReaders {
+    fn is_empty(&self) -> bool {
+        self.scalar.is_empty() && self.indexed.is_empty()
+    }
+}
+
+impl WidgetSubscriptions {
+    fn clear(&mut self) {
+        self.namespaces.clear();
+    }
+
+    fn has_readers(&self, namespace: &str, field: &str) -> bool {
+        self.namespaces.get(namespace).is_some_and(|fields| fields.contains_key(field))
+    }
+
+    fn get(&self, namespace: &str, field: &str, index: Option<usize>) -> Option<&HashSet<u64>> {
+        let readers = self.namespaces.get(namespace)?.get(field)?;
+        match index {
+            Some(index) => readers.indexed.get(&index),
+            None => (!readers.scalar.is_empty()).then_some(&readers.scalar),
+        }
+    }
+
+    fn insert(&mut self, key: ReactiveBindingKey, widget_id: u64) {
+        let readers = self.namespaces.entry(key.field.namespace).or_default()
+            .entry(key.field.field).or_default();
+        match key.index {
+            Some(index) => { readers.indexed.entry(index).or_default().insert(widget_id); }
+            None => { readers.scalar.insert(widget_id); }
+        }
+    }
+
+    fn remove(&mut self, key: &ReactiveBindingKey, widget_id: u64) {
+        let Some(fields) = self.namespaces.get_mut(&key.field.namespace) else { return; };
+        if let Some(readers) = fields.get_mut(&key.field.field) {
+            match key.index {
+                Some(index) => {
+                    if let Some(widgets) = readers.indexed.get_mut(&index) {
+                        widgets.remove(&widget_id);
+                        if widgets.is_empty() { readers.indexed.remove(&index); }
+                    }
+                }
+                None => { readers.scalar.remove(&widget_id); }
+            }
+            if readers.is_empty() { fields.remove(&key.field.field); }
+        }
+        if fields.is_empty() { self.namespaces.remove(&key.field.namespace); }
+    }
+
+    fn remove_widgets(&mut self, removed: &HashSet<u64>) {
+        self.namespaces.retain(|_, fields| {
+            fields.retain(|_, readers| {
+                readers.scalar.retain(|widget_id| !removed.contains(widget_id));
+                readers.indexed.retain(|_, widgets| {
+                    widgets.retain(|widget_id| !removed.contains(widget_id));
+                    !widgets.is_empty()
+                });
+                !readers.is_empty()
+            });
+            !fields.is_empty()
+        });
+    }
+
+    fn snapshot(&self) -> HashMap<ReactiveBindingKey, HashSet<u64>> {
+        let mut bindings = HashMap::new();
+        for (namespace, fields) in &self.namespaces {
+            for (field, readers) in fields {
+                if !readers.scalar.is_empty() {
+                    bindings.insert(ReactiveBindingKey::field(namespace, field), readers.scalar.clone());
+                }
+                for (index, widgets) in &readers.indexed {
+                    bindings.insert(ReactiveBindingKey::indexed(namespace, field, *index), widgets.clone());
+                }
+            }
+        }
+        bindings
+    }
+
+    fn restore(&mut self, bindings: HashMap<ReactiveBindingKey, HashSet<u64>>) {
+        self.clear();
+        for (key, widgets) in bindings {
+            if !widgets.is_empty() {
+                let readers = self.namespaces.entry(key.field.namespace).or_default()
+                    .entry(key.field.field).or_default();
+                match key.index {
+                    Some(index) => { readers.indexed.insert(index, widgets); }
+                    None => { readers.scalar = widgets; }
+                }
+            }
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct ReactiveRegistry {
     float_slots: ReactiveBindingStore,
     namespaces: HashMap<String, Namespace>,
     dirty: Vec<(String, String, Value)>,
     batched: Vec<(String, String, Value)>,
-    field_to_widgets: HashMap<ReactiveBindingKey, HashSet<u64>>,
+    field_to_widgets: WidgetSubscriptions,
     widget_bindings_revision: u64,
     batching: bool,
 }
@@ -372,7 +481,7 @@ impl ReactiveRegistry {
             namespaces: HashMap::new(),
             dirty: Vec::new(),
             batched: Vec::new(),
-            field_to_widgets: HashMap::new(),
+            field_to_widgets: WidgetSubscriptions::default(),
             widget_bindings_revision: 0,
             batching: false,
         }
@@ -548,7 +657,6 @@ impl ReactiveRegistry {
             }
         }
 
-        let key = ReactiveBindingKey::field(namespace, field);
         self.float_slots.store_value(namespace, field, &value);
         namespace_entry
             .fields
@@ -577,13 +685,13 @@ impl ReactiveRegistry {
         }
         let mut widgets: Vec<u64> = self
             .field_to_widgets
-            .get(&key)
+            .get(namespace, field, None)
             .map(|widgets| widgets.iter().copied().collect())
             .unwrap_or_default();
         for index in changed_indices {
             if let Some(index_widgets) = self
                 .field_to_widgets
-                .get(&ReactiveBindingKey::indexed(namespace, field, index))
+                .get(namespace, field, Some(index))
             {
                 widgets.extend(index_widgets.iter().copied());
             }
@@ -704,12 +812,12 @@ impl ReactiveRegistry {
 
         let mut widgets: Vec<u64> = self
             .field_to_widgets
-            .get(&ReactiveBindingKey::field(namespace, field))
+            .get(namespace, field, None)
             .map(|widgets| widgets.iter().copied().collect())
             .unwrap_or_default();
         if let Some(index_widgets) = self
             .field_to_widgets
-            .get(&ReactiveBindingKey::indexed(namespace, field, index))
+            .get(namespace, field, Some(index))
         {
             widgets.extend(index_widgets.iter().copied());
         }
@@ -745,8 +853,7 @@ impl ReactiveRegistry {
     }
 
     pub(crate) fn has_widget_readers(&self, namespace: &str, field: &str) -> bool {
-        self.field_to_widgets.iter().any(|(key, widgets)|
-            key.field.namespace == namespace && key.field.field == field && !widgets.is_empty())
+        self.field_to_widgets.has_readers(namespace, field)
     }
 
     pub fn replace_widget_bindings_for_layout_subtree(
@@ -756,11 +863,7 @@ impl ReactiveRegistry {
     ) {
         let mut removed_widget_ids = HashSet::new();
         collect_layout_widget_ids(old_subtree, &mut removed_widget_ids);
-        for widgets in self.field_to_widgets.values_mut() {
-            widgets.retain(|widget_id| !removed_widget_ids.contains(widget_id));
-        }
-        self.field_to_widgets
-            .retain(|_, widgets| !widgets.is_empty());
+        self.field_to_widgets.remove_widgets(&removed_widget_ids);
         self.collect_widget_bindings(new_subtree);
         self.bump_widget_bindings_revision();
     }
@@ -786,10 +889,7 @@ impl ReactiveRegistry {
         self.field_to_widgets.clear();
         for entries in entry_lists {
             for (key, widget_id) in entries {
-                self.field_to_widgets
-                    .entry(key.clone())
-                    .or_default()
-                    .insert(*widget_id);
+                self.field_to_widgets.insert(key.clone(), *widget_id);
             }
         }
         self.bump_widget_bindings_revision();
@@ -808,20 +908,12 @@ impl ReactiveRegistry {
     ) {
         for entries in removed {
             for (key, widget_id) in entries {
-                if let Some(widgets) = self.field_to_widgets.get_mut(key) {
-                    widgets.remove(widget_id);
-                    if widgets.is_empty() {
-                        self.field_to_widgets.remove(key);
-                    }
-                }
+                self.field_to_widgets.remove(key, *widget_id);
             }
         }
         for entries in added {
             for (key, widget_id) in entries {
-                self.field_to_widgets
-                    .entry(key.clone())
-                    .or_default()
-                    .insert(*widget_id);
+                self.field_to_widgets.insert(key.clone(), *widget_id);
             }
         }
         self.bump_widget_bindings_revision();
@@ -832,11 +924,11 @@ impl ReactiveRegistry {
     }
 
     pub fn widget_bindings_snapshot(&self) -> HashMap<ReactiveBindingKey, HashSet<u64>> {
-        self.field_to_widgets.clone()
+        self.field_to_widgets.snapshot()
     }
 
     pub fn restore_widget_bindings(&mut self, bindings: HashMap<ReactiveBindingKey, HashSet<u64>>) {
-        self.field_to_widgets = bindings;
+        self.field_to_widgets.restore(bindings);
         self.bump_widget_bindings_revision();
     }
 
@@ -912,10 +1004,7 @@ impl ReactiveRegistry {
                     }
                     None => ReactiveBindingKey::field(namespace.clone(), field.clone()),
                 };
-                self.field_to_widgets
-                    .entry(key)
-                    .or_default()
-                    .insert(widget_id);
+                self.field_to_widgets.insert(key, widget_id);
             }
             Value::List(items) => {
                 for item in items {
@@ -1035,5 +1124,105 @@ mod tests {
         let before = registry.widget_bindings_revision();
         registry.update_widget_bindings_with_tile_delta([], [[entry("steps", 1)].as_slice()]);
         assert_ne!(registry.widget_bindings_revision(), before);
+    }
+
+    #[test]
+    fn widget_readers_survive_mixed_binding_tile_removals() {
+        let scalar = entry("levels", 1);
+        let indexed = (ReactiveBindingKey::indexed("SEQ", "levels", 3), 2);
+        let other_namespace = (ReactiveBindingKey::indexed("OTHER", "levels", 3), 3);
+        let mut registry = ReactiveRegistry::new();
+        registry.replace_widget_bindings_from_entry_lists([
+            [scalar.clone(), scalar.clone(), indexed.clone(), other_namespace.clone()].as_slice(),
+        ]);
+        assert!(registry.has_widget_readers("SEQ", "levels"));
+        assert!(!registry.has_widget_readers("SEQ", "absent"));
+        registry.update_widget_bindings_with_tile_delta([[scalar.clone(), scalar].as_slice()], []);
+        assert!(registry.has_widget_readers("SEQ", "levels"), "indexed reader survives scalar removal");
+        registry.update_widget_bindings_with_tile_delta([[indexed.clone(), indexed].as_slice()], []);
+        assert!(!registry.has_widget_readers("SEQ", "levels"));
+        assert!(registry.has_widget_readers("OTHER", "levels"));
+        registry.update_widget_bindings_with_tile_delta([[other_namespace].as_slice()], []);
+        assert!(!registry.has_widget_readers("OTHER", "levels"));
+        assert!(registry.widget_bindings_snapshot().is_empty());
+    }
+
+    #[test]
+    fn widget_readers_follow_snapshot_restore_and_clone() {
+        let binding = entry("position", 1);
+        let mut registry = ReactiveRegistry::new();
+        registry.replace_widget_bindings_from_entry_lists([[binding.clone()].as_slice()]);
+        let mut snapshot = registry.widget_bindings_snapshot();
+        snapshot.insert(ReactiveBindingKey::field("EMPTY", "unused"), HashSet::new());
+        let cloned = registry.clone();
+        registry.replace_widget_bindings_from_layout(None);
+        assert!(!registry.has_widget_readers("SEQ", "position"));
+        assert!(cloned.has_widget_readers("SEQ", "position"));
+        registry.restore_widget_bindings(snapshot);
+        assert!(registry.has_widget_readers("SEQ", "position"));
+        assert!(!registry.has_widget_readers("EMPTY", "unused"));
+        registry.update_widget_bindings_with_tile_delta([[binding].as_slice()], []);
+        assert!(!registry.has_widget_readers("SEQ", "position"));
+        assert!(cloned.has_widget_readers("SEQ", "position"));
+    }
+
+    fn bound_node(widget_id: u64, key: ReactiveBindingKey, children: Vec<LayoutNode>) -> LayoutNode {
+        let binding = Value::ReactiveRef {
+            namespace: key.field.namespace, field: key.field.field, index: key.index,
+            kind: crate::vm::BindingKind::Float, slot: Arc::new(AtomicU64::new(0)),
+        };
+        LayoutNode {
+            widget_id, stable_widget_id: None, subtree_root_id: None, parent_subtree_root_id: None,
+            stable_key: None, widget_type: "text".into(),
+            rect: crate::layout::Rect { row: 0.0, col: 0.0, width: 1.0, height: 1.0 },
+            props: HashMap::from([("value".into(), binding)]), children,
+            focusable: false, animation: Default::default(),
+        }
+    }
+
+    #[test]
+    fn widget_readers_follow_subtree_and_full_layout_replacement() {
+        let old = bound_node(2, ReactiveBindingKey::indexed("SEQ", "levels", 0), vec![
+            bound_node(3, ReactiveBindingKey::field("SEQ", "removed"), vec![]),
+        ]);
+        let kept = bound_node(4, ReactiveBindingKey::indexed("SEQ", "levels", 1), vec![]);
+        let root = bound_node(1, ReactiveBindingKey::field("SEQ", "parent"), vec![old.clone(), kept]);
+        let new = bound_node(2, ReactiveBindingKey::field("SEQ", "replacement"), vec![]);
+        let mut registry = ReactiveRegistry::new();
+        registry.replace_widget_bindings_from_layout(Some(&root));
+        registry.replace_widget_bindings_for_layout_subtree(&old, &new);
+        assert!(registry.has_widget_readers("SEQ", "levels"));
+        assert!(registry.has_widget_readers("SEQ", "parent"));
+        assert!(registry.has_widget_readers("SEQ", "replacement"));
+        assert!(!registry.has_widget_readers("SEQ", "removed"));
+        let snapshot = registry.widget_bindings_snapshot();
+        assert_eq!(snapshot.get(&ReactiveBindingKey::indexed("SEQ", "levels", 0)), None);
+        assert_eq!(snapshot.get(&ReactiveBindingKey::indexed("SEQ", "levels", 1)), Some(&HashSet::from([4])));
+        registry.replace_widget_bindings_from_layouts([&old, &new]);
+        assert!(!registry.has_widget_readers("SEQ", "parent"));
+        assert!(registry.has_widget_readers("SEQ", "removed"));
+        registry.replace_widget_bindings_from_layouts([]);
+        assert!(!registry.has_widget_readers("SEQ", "levels"));
+        assert!(!registry.has_widget_readers("SEQ", "replacement"));
+    }
+
+    #[test]
+    fn widget_publication_preserves_scalar_and_indexed_subscribers() {
+        let list = |values: &[f64]| Value::List(values.iter()
+            .map(|value| Rc::new(RefCell::new(Value::Number(*value)))).collect());
+        let mut registry = ReactiveRegistry::new();
+        registry.register("SEQ", vec![("levels", list(&[0.0, 0.0]))], true);
+        let bindings = [
+            entry("levels", 1),
+            (ReactiveBindingKey::indexed("SEQ", "levels", 0), 2),
+            (ReactiveBindingKey::indexed("SEQ", "levels", 1), 3),
+            (ReactiveBindingKey::indexed("SEQ", "levels", 0), 1),
+            (ReactiveBindingKey::indexed("OTHER", "levels", 0), 4),
+        ];
+        registry.replace_widget_bindings_from_entry_lists([bindings.as_slice()]);
+        assert_eq!(registry.set_list_index("SEQ", "levels", 0, Value::Number(1.0), false).widget_ids, vec![1, 2]);
+        assert_eq!(registry.set("SEQ", "levels", list(&[1.0, 2.0]), false).widget_ids, vec![1, 3]);
+        assert_eq!(registry.set("SEQ", "levels", list(&[2.0, 3.0]), false).widget_ids, vec![1, 2, 3]);
+        assert!(registry.set("SEQ", "levels", list(&[2.0, 3.0]), false).widget_ids.is_empty());
     }
 }

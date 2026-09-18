@@ -204,10 +204,20 @@ fn widget_state_shared_generation() -> u64 {
 static WIDGET_STATE_TOTAL_REVISION: AtomicU64 = AtomicU64::new(0);
 
 pub fn bump_widget_state_revision(widget_id: u64) {
+    let revision = WIDGET_STATE_TOTAL_REVISION.fetch_add(1, Ordering::Relaxed) + 1;
+    WIDGET_STATE_REVISIONS.with(|revisions| { revisions.borrow_mut().insert(widget_id, revision); });
+}
+
+/// Each scene owns its cursor; observing one scene never consumes another's changes.
+fn widget_state_changes_since(cursor: &mut u64, mut changed: impl FnMut(u64)) {
+    let latest = WIDGET_STATE_TOTAL_REVISION.load(Ordering::Relaxed);
+    if latest == *cursor { return; }
     WIDGET_STATE_REVISIONS.with(|revisions| {
-        *revisions.borrow_mut().entry(widget_id).or_insert(0) += 1;
+        for (&id, &revision) in revisions.borrow().iter() {
+            if revision > *cursor { changed(id); }
+        }
     });
-    WIDGET_STATE_TOTAL_REVISION.fetch_add(1, Ordering::Relaxed);
+    *cursor = latest;
 }
 
 pub(crate) fn widget_state_revision(widget_id: u64) -> u64 {

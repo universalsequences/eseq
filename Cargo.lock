@@ -1107,6 +1107,7 @@ dependencies = [
 name = "eseqlisp"
 version = "0.1.0"
 dependencies = [
+ "block2 0.6.2",
  "bytemuck",
  "crossterm",
  "etagere",
@@ -1114,6 +1115,7 @@ dependencies = [
  "fontdue",
  "image",
  "naga",
+ "notify",
  "objc2 0.6.4",
  "objc2-app-kit",
  "objc2-core-foundation",

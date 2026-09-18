@@ -92,9 +92,6 @@ pub(super) fn run(
             &TickInputs {
                 cols: cols as usize,
                 rows: rows as usize,
-                viewport_size: (cols as usize, rows as usize),
-                stub_animation_active: false,
-                sdf_animation_active: false,
                 playing_now: true,
             },
             &mut stats,

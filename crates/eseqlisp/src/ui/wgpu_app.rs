@@ -494,6 +494,7 @@ pub struct WgpuAppBackend {
     // Winit
     event_loop: Option<EventLoop<()>>,
     window: Option<Arc<Window>>,
+    window_occluded: Option<bool>,
     pending: VecDeque<Event>,
     pending_drag: Option<Event>,
     pending_move: Option<Event>,
@@ -535,6 +536,7 @@ pub struct WgpuAppBackend {
     text_atlas_zoom: f32,
     prop_atlas: Option<WgpuPropGlyphAtlas>,
     prop_text_layout_cache: PropTextLayoutCache,
+    mod_patch_indices: HashMap<u32, crate::ui::patch_port_index::PatchPortIndex>,
     retained_widget_scenes: HashMap<u32, widget_render::retained_scene::RetainedScene>,
     // Resources
     waveform_buffers: HashMap<(String, u32), WaveformGpuResource>,
@@ -548,7 +550,6 @@ pub struct WgpuAppBackend {
     // SDF widget pipelines from user content
     sdf_widget_pipeline_sources: HashMap<String, String>,
     sdf_widget_pipeline_registry_generation: u64,
-    agent_instrument_stub_animation_visible: bool,
     last_window_bg: Option<Color>,
     /// Per-frame profiling aggregate; see `ui/wgpu_frame_stats.rs`. Also holds
     /// the "was the adapter already reported" latch, because both are
@@ -594,6 +595,7 @@ impl WgpuAppBackend {
         Ok(Self {
             event_loop: None,
             window: None,
+            window_occluded: None,
             pending: VecDeque::new(),
             pending_drag: None,
             pending_move: None,
@@ -621,6 +623,7 @@ impl WgpuAppBackend {
             text_atlas_zoom: 0.0,
             prop_atlas: None,
             prop_text_layout_cache: PropTextLayoutCache::new(),
+            mod_patch_indices: HashMap::new(),
             retained_widget_scenes: HashMap::new(),
             waveform_buffers: HashMap::new(),
             wavetable_buffers: HashMap::new(),
@@ -632,7 +635,6 @@ impl WgpuAppBackend {
             image_rotation_states: HashMap::new(),
             sdf_widget_pipeline_sources: HashMap::new(),
             sdf_widget_pipeline_registry_generation: 0,
-            agent_instrument_stub_animation_visible: false,
             last_window_bg: None,
             frame_stats: WgpuFrameStats::new(),
             reported_adapter: false,
@@ -670,10 +672,6 @@ impl WgpuAppBackend {
 
     pub fn time_seconds(&self) -> f32 {
         self.elapsed_time_seconds()
-    }
-
-    pub fn agent_instrument_stub_animation_visible(&self) -> bool {
-        self.agent_instrument_stub_animation_visible
     }
 
     pub fn take_last_precise_mouse(&mut self) -> Option<(f32, f32)> {
@@ -1530,7 +1528,6 @@ impl WgpuAppBackend {
     ) -> Result<TiledRenderStatus, BackendError> {
         widget_render::sdf_widget::set_sdf_time_seconds(self.elapsed_time_seconds());
         self.compile_pending_sdf_pipelines();
-        self.agent_instrument_stub_animation_visible = false;
         let render_time_seconds = self.elapsed_time_seconds();
         self.sync_window_theme();
         let mut image_load_budget = 1usize;
@@ -1599,6 +1596,8 @@ impl WgpuAppBackend {
 
         // ── Per-tile planning ────────────────────────────────────────────────
         self.retained_widget_scenes.retain(|id, _|
+            tiled.tiles.iter().any(|tile| tile.tile_id == *id));
+        self.mod_patch_indices.retain(|id, _|
             tiled.tiles.iter().any(|tile| tile.tile_id == *id));
         for tile in &tiled.tiles {
             let frame_left_px = tile.rect.col * cell_w;
@@ -1748,9 +1747,6 @@ impl WgpuAppBackend {
 
             // ── Widget primitives ────────────────────────────────────────────
             if let Some(ref layout) = tile.frame.widget_layout {
-                if gpu_scene::layout_contains_agent_instrument_stub_animation(layout) {
-                    self.agent_instrument_stub_animation_visible = true;
-                }
                 let time_seconds = self.elapsed_time_seconds();
                 let inner_rows_exact = ((content_bottom_px - content_top_px) / cell_h).max(0.0);
                 let text_scroll = tile.frame.text_scroll_top as f32;
@@ -1772,15 +1768,17 @@ impl WgpuAppBackend {
                 };
                 let widget_col_off = content_col - tile.frame.widget_layout_scroll_left;
                 let widget_row_off = content_row - combined_scroll;
-                gpu_scene::collect_mod_patch_ports(
-                    layout,
-                    widget_col_off,
-                    widget_row_off,
-                    cell_w,
-                    cell_h,
-                    content_scissor,
-                    &mut mod_patch_ports,
-                );
+                for node in self.mod_patch_indices.entry(tile.tile_id).or_default().nodes(layout) {
+                    gpu_scene::collect_mod_patch_port(
+                        node,
+                        widget_col_off,
+                        widget_row_off,
+                        cell_w,
+                        cell_h,
+                        content_scissor,
+                        &mut mod_patch_ports,
+                    );
+                }
                 let content_width_cells = ((content_right_px - content_left_px) / cell_w).max(0.0);
                 let fill_extra_cols = (content_width_cells - layout.rect.width).max(0.0);
 
@@ -1815,9 +1813,6 @@ impl WgpuAppBackend {
                         )
                     })
                     .collect();
-                if gpu_scene::contains_agent_instrument_stub_animation(&offset_prims) {
-                    self.agent_instrument_stub_animation_visible = true;
-                }
 
                 let segments = gpu_scene::split_prim_segment_ranges(
                     &offset_prims,
@@ -1861,9 +1856,6 @@ impl WgpuAppBackend {
                             )
                         })
                         .collect();
-                    if gpu_scene::contains_agent_instrument_stub_animation(&offset_overlay) {
-                        self.agent_instrument_stub_animation_visible = true;
-                    }
                     global_overlay_prims.extend(offset_overlay);
                 }
             }
@@ -2737,6 +2729,16 @@ fn create_event_loop() -> Result<EventLoop<()>, winit::error::EventLoopError> {
 }
 
 impl WgpuAppBackend {
+    pub fn presentation_window_state(&self) -> Option<crate::ui::presentation_timing::WindowPresentationState> {
+        self.window.as_ref().map(|window| {
+            let size = window.inner_size();
+            crate::ui::presentation_timing::WindowPresentationState {
+                physical_size: [size.width, size.height], focused: window.has_focus(),
+                visible: window.is_visible(), occluded: self.window_occluded,
+            }
+        })
+    }
+
     /// Handle another thread can use to interrupt a blocked poll.
     pub fn event_loop_waker(&self) -> Option<crate::ui::backend::EventLoopWaker> {
         self.event_loop
@@ -3021,6 +3023,7 @@ impl Backend for WgpuAppBackend {
         let pending_resize = &mut self.pending_resize;
         let pending_scale_factor = &mut self.pending_scale_factor;
         let close_requested = &mut self.close_requested;
+        let window_occluded = &mut self.window_occluded;
         let suppress_scroll_until = &mut self.suppress_scroll_until;
         let modifiers = &mut self.modifiers;
         let pressed_mouse_button = &mut self.pressed_mouse_button;
@@ -3081,6 +3084,7 @@ impl Backend for WgpuAppBackend {
                 WindowEvent::CloseRequested => {
                     *close_requested = true;
                 }
+                WindowEvent::Occluded(occluded) => *window_occluded = Some(occluded),
                 WindowEvent::Focused(false) => {
                     // Never leave the pointer hidden and grabbed behind an
                     // unfocused window: end the drag and synthesize the

@@ -4,9 +4,6 @@ use crate::*;
 pub(crate) struct TickInputs {
     pub(crate) cols: usize,
     pub(crate) rows: usize,
-    pub(crate) viewport_size: (usize, usize),
-    pub(crate) stub_animation_active: bool,
-    pub(crate) sdf_animation_active: bool,
     pub(crate) playing_now: bool,
 }
 
@@ -2063,30 +2060,9 @@ pub(crate) fn reactive_tick_and_render(
     ctx: &mut LoopCtx<'_>,
     inputs: TickInputs,
     frame_pacer: &mut frame_pacer::FramePacer,
-    stub_animation_cache: &mut StubAnimationRenderCache,
     ui_loop_stats: &mut UiLoopStats,
 ) -> Result<TickFlow, Box<dyn std::error::Error>> {
     sync_reactive_tick(app, editor, ctx, &inputs, ui_loop_stats);
-
-    stub_animation_cache.update_size(inputs.viewport_size);
-
-    // Render
-    if frame_pacer.is_due(Instant::now()) {
-        if inputs.stub_animation_active && !editor.needs_redraw() && !inputs.sdf_animation_active {
-            if let Some(tiled_frame) = stub_animation_cache.frame() {
-                let render_started = Instant::now();
-                let render_status = backend
-                    .render_tiled(tiled_frame)
-                    .map_err(|_| "render failed")?;
-                ui_loop_stats.note_frame(Duration::ZERO, render_started.elapsed(), render_status == TiledRenderStatus::Presented);
-                if render_status == TiledRenderStatus::Presented {
-                    frame_pacer.frame_finished(Instant::now());
-                    return Ok(TickFlow::Continue);
-                }
-                frame_pacer.frame_finished(Instant::now());
-            }
-        }
-    }
 
     if editor.needs_redraw() && frame_pacer.is_due(Instant::now()) {
         let frame_build_started = Instant::now();
@@ -2105,11 +2081,6 @@ pub(crate) fn reactive_tick_and_render(
         match render_status {
             TiledRenderStatus::Presented => {
                 editor.clear_needs_redraw();
-                if backend.agent_instrument_stub_animation_visible() {
-                    stub_animation_cache.store(inputs.viewport_size, tiled_frame);
-                } else {
-                    stub_animation_cache.reset();
-                }
                 frame_pacer.frame_finished(Instant::now());
             }
             TiledRenderStatus::NotPresented => {

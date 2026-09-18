@@ -4,8 +4,8 @@ pub(crate) const DEFAULT_MONOSPACE_FONT_SIZE_PT: f64 = 16.0;
 
 /// Live-editable shader overrides read from `env!("ESEQ_DEV_MANIFEST_DIR")` in
 /// this crate's source tree. That path only exists in a checkout, so a
-/// packaged application must switch the watch off: otherwise every rendered
-/// frame pays an `fs::metadata` on a path that can never resolve. Hosts call
+/// packaged application must switch the watch off. Development builds use
+/// native file-change notifications rather than polling metadata. Hosts call
 /// [`set_editable_shader_overrides_enabled`] once at startup; the default
 /// stays on so `cargo run` and the tests are unaffected.
 static EDITABLE_SHADER_OVERRIDES_ENABLED: std::sync::atomic::AtomicBool =
@@ -27,10 +27,15 @@ pub(crate) mod gpu_geometry;
 pub(crate) mod gpu_scene;
 pub mod glyph_atlas;
 pub mod hit;
+pub mod host_loop;
 pub mod layout;
 pub mod metal_backend;
 #[cfg(target_os = "macos")]
 mod metal_buffer_pool;
+#[cfg(target_os = "macos")]
+mod shader_watch;
+mod patch_port_index;
+pub mod presentation_timing;
 pub mod platform;
 pub(crate) mod pointer_input;
 pub mod theme;

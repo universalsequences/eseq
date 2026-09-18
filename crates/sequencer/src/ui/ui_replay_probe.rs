@@ -66,7 +66,12 @@ pub(super) fn run(editor: &mut Editor, app: &mut app::App, shared: &SharedHandle
         let compressor_keys = editor.visible_widget_layouts().iter().flat_map(|layout|
             eseqlisp::widget_render::compressor_display::collect_compressor_meter_requests(layout)
                 .into_iter().map(|request| request.data_key)).collect::<std::collections::HashSet<_>>();
+        let spectra = if std::env::var_os("ESEQ_UI_REPLAY_SPECTRA").is_some() {
+            editor.visible_widget_layouts().iter().flat_map(|layout|
+                eseqlisp::widget_render::spectrogram::collect_spectrogram_requests(layout)).collect::<Vec<_>>()
+        } else { Vec::new() };
         if phase == "live-panels" { assert!(!compressor_keys.is_empty(), "fixture needs a visible compressor"); }
+        eprintln!("replay {phase}: {} mounted spectra, {} compressors", spectra.len(), compressor_keys.len());
         for index in 0..210 {
             for track in 0..app.tracks.len() {
                 let steps = shared.state.pattern.track_params[track].get_num_steps().max(1);
@@ -100,7 +105,18 @@ pub(super) fn run(editor: &mut Editor, app: &mut app::App, shared: &SharedHandle
                             .map(|sample| [-12.0 + ((sample + index as usize) as f32 * 0.1).sin() * 6.0, -3.0]).collect()),
                     });
                 }
-                if !compressor_keys.is_empty() { editor.mark_needs_redraw(); }
+                for request in &spectra {
+                    let bins = request.fft_size / 2 + 1;
+                    let smoothed: Vec<_> = (0..bins).map(|bin|
+                        (0.45 + 0.3 * ((bin + index as usize) as f32 * 0.07).sin()).max(0.0)).collect();
+                    eseqlisp::live_audio::publish_spectrogram_frame(&request.data_key, eseqlisp::live_audio::SpectrogramFrame {
+                        revision: index as u64, bins: bins as u32, time_slices: request.time_slices as u32,
+                        write_head: index % request.time_slices as u32, sample_rate: 48_000.0,
+                        waterfall: std::sync::Arc::new(smoothed.repeat(request.time_slices)),
+                        smoothed: std::sync::Arc::new(smoothed),
+                    });
+                }
+                if !compressor_keys.is_empty() || !spectra.is_empty() { editor.mark_needs_redraw(); }
             }
             // Exercise playback publishers even when the replay runs faster
             // than their wall-clock cadence. The previous probe left these
@@ -119,8 +135,8 @@ pub(super) fn run(editor: &mut Editor, app: &mut app::App, shared: &SharedHandle
                 sessions: &mut sessions, meters: &mut meters, frame: &mut frame,
                 gesture: &mut gesture, track_names: &mut track_names, shared,
             }, &TickInputs {
-                cols, rows, viewport_size: (cols, rows), stub_animation_active: false,
-                sdf_animation_active: false, playing_now: true,
+                cols, rows,
+                playing_now: true,
             }, &mut stats);
             let sync_ms = started.elapsed().as_secs_f64() * 1000.0;
             let redraw = editor.needs_redraw();
@@ -163,8 +179,8 @@ pub(super) fn run(editor: &mut Editor, app: &mut app::App, shared: &SharedHandle
         sessions: &mut sessions, meters: &mut meters, frame: &mut frame,
         gesture: &mut gesture, track_names: &mut track_names, shared,
     }, &TickInputs {
-        cols, rows, viewport_size: (cols, rows), stub_animation_active: false,
-        sdf_animation_active: false, playing_now: true,
+        cols, rows,
+        playing_now: true,
     }, &mut stats);
     assert!(meters.cached_peak_l_level >= 0.0, "reopened master meter samples immediately");
     assert_eq!(meters.cached_track_peak_levels.len(), app.tracks.len());

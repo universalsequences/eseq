@@ -9,6 +9,7 @@ use crate::mode::{TokenClass, TokenSpan, highlight_lines};
 use crate::text::matching_paren;
 use crate::theme;
 use crate::tile::{TileFrameCacheKey, tile_body_rect, tile_tab_layouts_with_hover};
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -123,7 +124,47 @@ fn join_status_sections(mut left: Vec<Cell>, right: Vec<Cell>, width: usize) -> 
     finalize_status_cells(left, width)
 }
 
-fn build_message_status_row(message: &str, width: usize) -> (Vec<Cell>, StatusIndicator, String) {
+// Describe the status without constructing its styled cells. Cache lookup and
+// drawing use the same description, and hidden rows have no display inputs.
+enum StatusContent<'a> {
+    Hidden,
+    Message(Cow<'a, str>),
+    Buffer {
+        buffer: &'a Buffer,
+        ui_available: bool,
+        vim_status: Option<&'a str>,
+    },
+}
+
+impl StatusContent<'_> {
+    fn signature(&self) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        std::mem::discriminant(self).hash(&mut hasher);
+        match self {
+            Self::Hidden => {},
+            Self::Message(message) => message.hash(&mut hasher),
+            Self::Buffer { buffer, ui_available, vim_status } => {
+                (
+                    &buffer.name, &buffer.mode, buffer.dirty, buffer.read_only,
+                    vim_status, ui_available, buffer.view_mode, buffer.cursor,
+                ).hash(&mut hasher);
+            }
+        }
+        hasher.finish()
+    }
+
+    fn build(&self, width: usize) -> (Vec<Cell>, StatusIndicator) {
+        match self {
+            Self::Hidden => (Vec::new(), StatusIndicator { toggle_cols: None }),
+            Self::Message(message) => build_message_status_row(message, width),
+            Self::Buffer { buffer, ui_available, vim_status } => {
+                build_buffer_status_row(buffer, *ui_available, *vim_status, width)
+            }
+        }
+    }
+}
+
+fn build_message_status_row(message: &str, width: usize) -> (Vec<Cell>, StatusIndicator) {
     let mut cells = Vec::new();
     push_status_chip(
         &mut cells,
@@ -142,7 +183,6 @@ fn build_message_status_row(message: &str, width: usize) -> (Vec<Cell>, StatusIn
     (
         finalize_status_cells(cells, width),
         StatusIndicator { toggle_cols: None },
-        format!("msg:{message}"),
     )
 }
 
@@ -150,10 +190,8 @@ fn build_buffer_status_row(
     buffer: &Buffer,
     ui_available: bool,
     vim_status: Option<&str>,
-    cursor_row: usize,
-    cursor_col: usize,
     width: usize,
-) -> (Vec<Cell>, StatusIndicator, String) {
+) -> (Vec<Cell>, StatusIndicator) {
     let mut left = Vec::new();
     let mut right = Vec::new();
     let mut toggle_cols = None;
@@ -222,28 +260,15 @@ fn build_buffer_status_row(
     right.push(status_space());
     push_status_chip(
         &mut right,
-        &format!(" {}:{} ", cursor_row + 1, cursor_col + 1),
+        &format!(" {}:{} ", buffer.cursor.0 + 1, buffer.cursor.1 + 1),
         theme::STATUS_FG(),
         theme::STATUS_POS_BG(),
         false,
     );
 
-    let signature = format!(
-        "buf:{}:{}:{}:{}:{}:{}:{}:{}",
-        buffer.name,
-        buffer.mode.name(),
-        buffer.dirty,
-        buffer.read_only,
-        vim_status.unwrap_or("-"),
-        ui_available,
-        buffer.view_mode.label(),
-        cursor_row * 10000 + cursor_col
-    );
-
     (
         join_status_sections(left, right, width),
         StatusIndicator { toggle_cols },
-        signature,
     )
 }
 
@@ -268,6 +293,7 @@ pub fn build_render_frame(
         viewport_height,
         viewport_width as f32,
         viewport_height as f32,
+        true,
     )
 }
 
@@ -277,6 +303,7 @@ fn build_render_frame_with_layout_viewport(
     viewport_height: usize,
     layout_width: f32,
     layout_height: f32,
+    show_status: bool,
 ) -> RenderFrame {
     editor.refresh_inline_widget_runtime_values();
     // Before any relayout this pass can run: frame-anchored widgets resolve
@@ -314,9 +341,9 @@ fn build_render_frame_with_layout_viewport(
     let text_viewport_width = text_viewport_cells(layout_width, text_cell_width_scale);
     let text_viewport_height = text_viewport_cells(layout_height, text_cell_height_scale);
     if view_mode == ViewMode::UiOnly {
-        let (cursor_row, cursor_col) = editor.active_buffer().cursor;
-        let (status_cells, status_indicator, status_signature) =
-            build_active_status_row(editor, cursor_row, cursor_col, viewport_width);
+        let status = active_status_content(editor, show_status);
+        let status_signature = status.signature();
+        let (status_cells, status_indicator) = status.build(viewport_width);
 
         let text_cache_key = {
             let mut hasher = DefaultHasher::new();
@@ -472,8 +499,9 @@ fn build_render_frame_with_layout_viewport(
     };
 
     // Status bar
-    let (status_cells, status_indicator, status_signature) =
-        build_active_status_row(editor, cursor_row, cursor_col, viewport_width);
+    let status = active_status_content(editor, show_status);
+    let status_signature = status.signature();
+    let (status_cells, status_indicator) = status.build(viewport_width);
 
     let completion = build_completion(
         editor,
@@ -580,29 +608,23 @@ fn build_render_frame_with_layout_viewport(
     }
 }
 
-fn build_active_status_row(
-    editor: &Editor,
-    cursor_row: usize,
-    cursor_col: usize,
-    viewport_width: usize,
-) -> (Vec<Cell>, StatusIndicator, String) {
-    if let Some(prompt) = editor.minibuffer_prompt() {
-        build_message_status_row(&format!(" {prompt}"), viewport_width)
+fn active_status_content(editor: &Editor, show_status: bool) -> StatusContent<'_> {
+    if !show_status {
+        StatusContent::Hidden
+    } else if let Some(prompt) = editor.minibuffer_prompt() {
+        StatusContent::Message(Cow::Owned(format!(" {prompt}")))
     } else if let Some(prompt) = editor.prompt_text() {
-        build_message_status_row(&prompt, viewport_width)
+        StatusContent::Message(Cow::Owned(prompt))
     } else if let Some(prompt) = editor.pending_key_prompt() {
-        build_message_status_row(&format!(" {prompt}"), viewport_width)
+        StatusContent::Message(Cow::Owned(format!(" {prompt}")))
     } else if let Some(msg) = &editor.minibuffer {
-        build_message_status_row(&format!(" {msg}"), viewport_width)
+        StatusContent::Message(Cow::Owned(format!(" {msg}")))
     } else {
-        build_buffer_status_row(
-            editor.active_buffer(),
-            editor.active_buffer_has_ui(),
-            editor.vim_status_label(),
-            cursor_row,
-            cursor_col,
-            viewport_width,
-        )
+        StatusContent::Buffer {
+            buffer: editor.active_buffer(),
+            ui_available: editor.active_buffer_has_ui(),
+            vim_status: editor.vim_status_label(),
+        }
     }
 }
 
@@ -875,6 +897,52 @@ mod tests {
         let frame = build_tiled_render_frame_borderless(&mut editor, 20, 9);
         assert_eq!(frame.tiles[0].frame.dirty_widget_ids, vec![42]);
         assert!(editor.active_leaf().cached_inactive_frame.is_some());
+    }
+
+    #[test]
+    fn hidden_status_rows_stay_empty_and_refresh_when_shown() {
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        editor.runtime_mut().eval_str("(effect (box :width :fill :height :fill))").unwrap();
+        editor.refresh_runtime_side_effects();
+        editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
+        let inactive_tile = editor.split_active_tile(crate::tile::SplitDir::Vertical, 0).unwrap();
+        editor.active_leaf_mut().show_status = false;
+        editor.tile_root.find_leaf_mut(inactive_tile).unwrap().show_status = false;
+
+        let hidden = build_tiled_render_frame_borderless(&mut editor, 80, 20);
+        assert_eq!(hidden.tiles.len(), 2);
+        for tile in &hidden.tiles {
+            assert!(!tile.show_status);
+            assert!(tile.frame.status_cells.is_empty());
+            assert!(tile.frame.status_indicator.toggle_cols.is_none());
+        }
+        let revision = editor.active_leaf().cached_inactive_frame.as_ref().unwrap().0.frame_state_revision;
+        editor.minibuffer = Some("status changed while hidden".to_string());
+        let still_hidden = build_tiled_render_frame_borderless(&mut editor, 80, 20);
+        assert!(still_hidden.tiles.iter().all(|tile| tile.frame.status_cells.is_empty()));
+        assert_eq!(editor.active_leaf().cached_inactive_frame.as_ref().unwrap().0.frame_state_revision, revision);
+
+        editor.active_leaf_mut().show_status = true;
+        let shown = build_tiled_render_frame_borderless(&mut editor, 80, 20);
+        let active = shown.tiles.iter().find(|tile| tile.is_active).unwrap();
+        assert!(active.show_status);
+        assert!(active.frame.status_cells.iter().map(|cell| cell.ch).collect::<String>()
+            .contains("status changed while hidden"));
+
+        editor.minibuffer = None;
+        editor.tile_root.find_leaf_mut(inactive_tile).unwrap().show_status = true;
+        let visible = build_tiled_render_frame_borderless(&mut editor, 80, 20);
+        assert!(visible.tiles.iter().all(|tile| tile.frame.status_indicator.toggle_cols.is_some()));
+        editor.active_buffer_mut().read_only = true;
+        editor.active_buffer_mut().cursor = (1, 3);
+        let changed = build_tiled_render_frame_borderless(&mut editor, 80, 20);
+        for (before, after) in visible.tiles.iter().zip(&changed.tiles) {
+            assert_ne!(before.frame.text_cache_key, after.frame.text_cache_key);
+            assert_ne!(
+                before.frame.status_cells.iter().map(|cell| cell.ch).collect::<String>(),
+                after.frame.status_cells.iter().map(|cell| cell.ch).collect::<String>(),
+            );
+        }
     }
 
     #[test]
@@ -1238,24 +1306,23 @@ fn build_tiled_render_frame_impl(
             leaf.widget_viewport_height = inner_height_exact;
         }
 
-        let status_signature = if is_active {
-            let (cursor_row, cursor_col) = editor.active_buffer().cursor;
-            build_active_status_row(editor, cursor_row, cursor_col, inner_width).2
+        let status_signature = if !show_status {
+            StatusContent::Hidden.signature()
+        } else if is_active {
+            active_status_content(editor, true).signature()
         } else {
             let buffer = &editor.buffers[buffer_idx];
-            build_buffer_status_row(
+            StatusContent::Buffer {
                 buffer,
-                buffer.widget_tree.is_some() || cached_layout.is_some(),
-                None,
-                buffer.cursor.0,
-                buffer.cursor.1,
-                inner_width,
-            )
-            .2
+                ui_available: buffer.widget_tree.is_some() || cached_layout.is_some(),
+                vim_status: None,
+            }.signature()
         };
         let frame_state_revision = {
             let mut hasher = DefaultHasher::new();
             buffer_revision.hash(&mut hasher);
+            editor.buffers[buffer_idx].name.hash(&mut hasher);
+            editor.buffers[buffer_idx].dirty.hash(&mut hasher);
             status_signature.hash(&mut hasher);
             if view_mode != ViewMode::UiOnly {
                 editor.buffers[buffer_idx].mode.hash(&mut hasher);
@@ -1303,6 +1370,7 @@ fn build_tiled_render_frame_impl(
                         inner_height,
                         inner_width_exact,
                         inner_height_exact,
+                        show_status,
                     )
                 })
             } else {
@@ -1312,10 +1380,11 @@ fn build_tiled_render_frame_impl(
                     inner_height,
                     inner_width_exact,
                     inner_height_exact,
+                    show_status,
                 )
             };
-            if let Some(message) = inspect_status_message.as_deref() {
-                let (status_cells, status_indicator, _) =
+            if let Some(message) = inspect_status_message.as_deref().filter(|_| show_status) {
+                let (status_cells, status_indicator) =
                     build_message_status_row(&format!(" {message}"), inner_width);
                 frame.status_cells = status_cells;
                 frame.status_indicator = status_indicator;
@@ -1383,6 +1452,7 @@ fn build_tiled_render_frame_impl(
                     inner_height,
                     text_cell_width_scale,
                     text_cell_height_scale,
+                    show_status,
                 );
                 // Cache for next frame
                 if let Some(leaf) = editor.tile_root.find_leaf_mut(tile_id) {
@@ -1395,8 +1465,8 @@ fn build_tiled_render_frame_impl(
                 }
                 frame
             };
-            if let Some(message) = inspect_status_message.as_deref() {
-                let (status_cells, status_indicator, _) =
+            if let Some(message) = inspect_status_message.as_deref().filter(|_| show_status) {
+                let (status_cells, status_indicator) =
                     build_message_status_row(&format!(" {message}"), inner_width);
                 frame.status_cells = status_cells;
                 frame.status_indicator = status_indicator;
@@ -1442,6 +1512,7 @@ fn build_inactive_tile_frame_from_parts(
     viewport_height: usize,
     text_cell_width_scale: f32,
     text_cell_height_scale: f32,
+    show_status: bool,
 ) -> RenderFrame {
     let display_map = buffer.inline_display_row_map();
     let scroll_top = buffer.scroll_top.min(display_map.len());
@@ -1458,14 +1529,17 @@ fn build_inactive_tile_frame_from_parts(
         )
     });
 
-    let (status_cells, status_indicator, status_signature) = build_buffer_status_row(
-        buffer,
-        buffer.widget_tree.is_some() || cached_layout.is_some(),
-        None,
-        cursor_row,
-        cursor_col,
-        viewport_width,
-    );
+    let status = if show_status {
+        StatusContent::Buffer {
+            buffer,
+            ui_available: buffer.widget_tree.is_some() || cached_layout.is_some(),
+            vim_status: None,
+        }
+    } else {
+        StatusContent::Hidden
+    };
+    let status_signature = status.signature();
+    let (status_cells, status_indicator) = status.build(viewport_width);
 
     let text_cache_key = {
         let mut hasher = DefaultHasher::new();

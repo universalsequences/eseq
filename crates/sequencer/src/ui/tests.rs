@@ -1792,21 +1792,10 @@
 
     #[test]
     fn agent_instrument_stub_ui_registers_as_custom_synth_ui() {
-        const LEGACY_AGENT_INSTRUMENT_STUB_UI: &str = r#"(defwidget agent-instrument-stub-bg-legacy
-  :width 70 :height 8.2
-  :shader
-  (sdf/fill
-    (sdf/rounded-rect width height 0.45)
-    (material :color (rgba (+ 0.1 (* 0.1 (sin itime))) 0.2 0.4 1.0))))
-
-(defsynth-ui
-  (box :width 70 :height 8.2 :padding 0 :debug-name "agent-instrument-stub-skeleton"
-    (agent-instrument-stub-bg-legacy)))
-"#;
         let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
             "agent-draft-1/".to_string(),
             "instruments/agent-draft-1/ui.lisp".to_string(),
-            LEGACY_AGENT_INSTRUMENT_STUB_UI.to_string(),
+            AGENT_INSTRUMENT_STUB_UI.to_string(),
         )));
         let mut runtime = Runtime::new();
         runtime
@@ -1815,10 +1804,7 @@
                 (def synth-ui-current-name "")
                 (def custom-ui-current-kind "instrument")
                 (def custom-ui-selected-section 0)
-                (def eseq.effects.custom-ui-sections/custom-ui-selected-section-for-current-scope () 0)
-                (def agent-instrument-stub-bg ()
-                    (box :width 70 :height 8.2
-                      (label "stub" :font-size 10 :color :gray :bg :transparent)))"#,
+                (def eseq.effects.custom-ui-sections/custom-ui-selected-section-for-current-scope () 0)"#,
             )
             .expect("install stub widget test double");
         runtime

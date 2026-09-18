@@ -26,12 +26,6 @@ use crate::ui::glyph_atlas::{self, GlyphAtlas, ProportionalGlyphAtlas};
 use crate::vm::Value;
 use crate::widget_render::{self, WidgetInstance};
 
-pub(crate) const AGENT_INSTRUMENT_STUB_ANIMATION_WIDGET: &str = "agent-instrument-stub-bg";
-pub(crate) const AGENT_INSTRUMENT_STUB_ANIMATION_WIDGET_SUFFIX: &str =
-    "__agent-instrument-stub-bg";
-pub(crate) const AGENT_INSTRUMENT_STUB_ANIMATION_WIDGET_SAFE_SUFFIX: &str =
-    "__agent_instrument_stub_bg";
-pub(crate) const AGENT_INSTRUMENT_STUB_SKELETON_DEBUG_NAME: &str = "agent-instrument-stub-skeleton";
 
 #[derive(Clone, Copy)]
 pub(crate) struct CharCtx {
@@ -807,6 +801,21 @@ pub(crate) fn collect_mod_patch_ports(
     visible_scissor: ScissorRect,
     out: &mut Vec<ModPatchPort>,
 ) {
+    collect_mod_patch_port(node, col_off, row_off, cell_w, cell_h, visible_scissor, out);
+    for child in &node.children {
+        collect_mod_patch_ports(child, col_off, row_off, cell_w, cell_h, visible_scissor, out);
+    }
+}
+
+pub(crate) fn collect_mod_patch_port(
+    node: &LayoutNode,
+    col_off: f32,
+    row_off: f32,
+    cell_w: f32,
+    cell_h: f32,
+    visible_scissor: ScissorRect,
+    out: &mut Vec<ModPatchPort>,
+) {
     if layout_node_bool_prop(node, "patch-port")
         && let Some(direction) = mod_patch_port_direction(node)
     {
@@ -815,17 +824,6 @@ pub(crate) fn collect_mod_patch_ports(
             layout_node_string_prop(node, "dest-kind").unwrap_or_else(|| "track".into());
         let dest = layout_node_usize_prop(node, "dest").or(track);
         let Some(track_or_dest) = track.or(dest) else {
-            for child in &node.children {
-                collect_mod_patch_ports(
-                    child,
-                    col_off,
-                    row_off,
-                    cell_w,
-                    cell_h,
-                    visible_scissor,
-                    out,
-                );
-            }
             return;
         };
         let center_col = col_off + node.rect.col + node.rect.width * 0.5;
@@ -850,10 +848,6 @@ pub(crate) fn collect_mod_patch_ports(
                 selected_sources: layout_node_usize_list_prop(node, "selected-sources"),
             });
         }
-    }
-
-    for child in &node.children {
-        collect_mod_patch_ports(child, col_off, row_off, cell_w, cell_h, visible_scissor, out);
     }
 }
 
@@ -1913,41 +1907,6 @@ pub(crate) fn partition_widget_instance_runs(
         }
     }
     (bg_runs, fg_runs)
-}
-
-pub(crate) fn contains_agent_instrument_stub_animation(
-    primitives: &[widget_render::GpuPrimitive],
-) -> bool {
-    primitives.iter().any(|primitive| {
-        matches!(
-            widget_render::innermost_primitive(primitive),
-            widget_render::GpuPrimitive::WidgetInstance { widget_type, .. }
-                if is_agent_instrument_stub_animation_widget_type(widget_type)
-        )
-    })
-}
-
-pub(crate) fn layout_contains_agent_instrument_stub_animation(layout: &LayoutNode) -> bool {
-    is_agent_instrument_stub_animation_widget_type(&layout.widget_type)
-        || layout_debug_name(layout) == Some(AGENT_INSTRUMENT_STUB_SKELETON_DEBUG_NAME)
-        || layout
-            .children
-            .iter()
-            .any(layout_contains_agent_instrument_stub_animation)
-}
-
-fn is_agent_instrument_stub_animation_widget_type(widget_type: &str) -> bool {
-    widget_type == AGENT_INSTRUMENT_STUB_ANIMATION_WIDGET
-        || widget_type.ends_with(AGENT_INSTRUMENT_STUB_ANIMATION_WIDGET_SUFFIX)
-        || widget_type.ends_with(AGENT_INSTRUMENT_STUB_ANIMATION_WIDGET_SAFE_SUFFIX)
-}
-
-fn layout_debug_name(layout: &LayoutNode) -> Option<&str> {
-    let value = layout.props.get("debug-name")?;
-    let Value::String(debug_name) = value else {
-        return None;
-    };
-    Some(debug_name.as_str())
 }
 
 pub(crate) fn extend_right_edge_primitive(

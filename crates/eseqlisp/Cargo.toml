@@ -33,6 +33,8 @@ crossterm = "0.28"
 naga = { version = "24", features = ["wgsl-in"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+notify = "6"
+block2 = "0.6"
 objc2 = "0.6"
 objc2-foundation = "0.3"
 objc2-metal = { version = "0.3", features = [
@@ -89,6 +91,11 @@ path = "examples/embed.rs"
 [[example]]
 name = "metal_window"
 path = "examples/metal_window.rs"
+
+[[example]]
+name = "native_host_loop_probe"
+path = "examples/native_host_loop_probe.rs"
+required-features = ["capture-harness"]
 
 [[example]]
 name = "winit_window"

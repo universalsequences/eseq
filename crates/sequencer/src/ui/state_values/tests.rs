@@ -47008,6 +47008,10 @@ mod mixer_hit_tests;
             "agent stub skeleton should have a finite visible rect, got {:?}",
             skeleton.rect
         );
+        let placeholder = find_layout_node_by_widget_type(skeleton, "label")
+            .expect("draft instrument has a static placeholder");
+        assert!(placeholder.rect.width.is_finite() && placeholder.rect.height.is_finite()
+            && placeholder.rect.width > 0.0 && placeholder.rect.height > 0.0);
         assert!(
             skeleton.rect.height >= body.rect.height - 1.0,
             "agent stub skeleton should fill the instrument panel body height, body={:?} skeleton={:?}",

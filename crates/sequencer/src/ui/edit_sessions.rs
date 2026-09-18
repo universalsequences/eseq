@@ -1488,39 +1488,3 @@ pub(super) fn metal_agent_instrument_preset_schema(
         params,
     })
 }
-
-#[derive(Default)]
-pub(super) struct StubAnimationRenderCache {
-    pub(super) frame: Option<eseqlisp::backend::TiledRenderFrame>,
-    pub(super) size: Option<(usize, usize)>,
-}
-
-impl StubAnimationRenderCache {
-    pub(super) fn new() -> Self {
-        Self::default()
-    }
-
-    pub(super) fn reset(&mut self) {
-        self.frame = None;
-        self.size = None;
-    }
-
-    pub(super) fn update_size(&mut self, size: (usize, usize)) {
-        if self.size != Some(size) {
-            self.reset();
-        }
-    }
-
-    pub(super) fn store(&mut self, size: (usize, usize), frame: eseqlisp::backend::TiledRenderFrame) {
-        self.size = Some(size);
-        self.frame = Some(frame);
-    }
-
-    pub(super) fn is_active(&self, size: (usize, usize), stub_visible: bool) -> bool {
-        stub_visible && self.size == Some(size) && self.frame.is_some()
-    }
-
-    pub(super) fn frame(&self) -> Option<&eseqlisp::backend::TiledRenderFrame> {
-        self.frame.as_ref()
-    }
-}

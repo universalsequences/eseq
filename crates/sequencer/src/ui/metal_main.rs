@@ -15,6 +15,7 @@ mod native_menu;
 mod piano_roll;
 mod patch_learn;
 mod profile;
+mod ui_benchmark;
 mod frame_pacer;
 mod roll_record;
 mod retrospective;
@@ -107,6 +108,9 @@ use reactive_sync::*;
 mod tests;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    if std::env::args().nth(1).as_deref() == Some("benchmark-ui") {
+        return ui_benchmark::run_cli();
+    }
     if std::env::args().nth(1).as_deref() == Some("export-worker") {
         return sequencer::bounce::command::run(std::env::args().skip(2));
     }

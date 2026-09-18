@@ -9,7 +9,7 @@ mod inner {
     use std::path::PathBuf;
     use std::ptr::NonNull;
     use std::sync::mpsc;
-    use std::time::{Duration, Instant, SystemTime};
+    use std::time::{Duration, Instant};
 
     use crossterm::event::{
         Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
@@ -37,7 +37,7 @@ mod inner {
         },
         event_loop::{ControlFlow, EventLoop},
         keyboard::{Key, KeyCode as WinitKeyCode, NamedKey, PhysicalKey},
-        platform::pump_events::EventLoopExtPumpEvents,
+        platform::{pump_events::EventLoopExtPumpEvents, run_on_demand::EventLoopExtRunOnDemand},
         raw_window_handle::{HasWindowHandle, RawWindowHandle},
         window::{CursorIcon, Window},
     };
@@ -149,12 +149,15 @@ mod inner {
         pub scene_ms: f64,
         pub gpu_ms: f64,
         pub static_allocations: u64,
+        pub gpu_buffer_allocations: u64,
         pub storage_reuses: u64,
         pub geometry_upload_bytes: usize,
         pub storage_spare_bytes: usize,
         pub storage_in_flight_frames: usize,
         pub storage_wait_ms: f64,
         pub primitives: u64,
+        pub draw_commands: u64,
+        pub visited_nodes: usize,
         pub rebuilt_nodes: usize,
         pub reused_nodes: usize,
         pub culled_nodes: usize,
@@ -1939,11 +1942,17 @@ fragment float4 live_spectrogram_frag(
         ProportionalTextVertices,
     }
 
-    #[derive(Clone)]
+    #[derive(Clone, PartialEq, Eq)]
     enum CompiledWidgetRunPipeline {
         MainText,
         ProportionalText,
         Widget(String),
+    }
+
+    #[derive(Default)]
+    struct EncodedWidgetState {
+        translation: Option<[f32; 2]>,
+        pipeline: Option<CompiledWidgetRunPipeline>,
     }
 
     #[derive(Clone)]
@@ -1966,10 +1975,76 @@ fragment float4 live_spectrogram_frag(
         translation: [f32; 2],
         fill_extra_cols: f32,
         layout_width: f32,
+        unsupported: Vec<usize>,
+    }
+
+    #[derive(Clone, PartialEq, Eq)]
+    struct BatchSourceStamp {
+        widget_id: u64,
+        ordinal: u16,
+        revision: u64,
+        len: usize,
+        translation: [u32; 2],
+    }
+
+    #[derive(Default)]
+    struct RetainedTilePrimitives {
+        runs: Vec<OffsetGpuPrimitiveRun>,
+        primitives: Vec<widget_render::GpuPrimitive>,
+        run_indices: Vec<usize>,
+        metrics: [u32; 6],
+    }
+
+    impl RetainedTilePrimitives {
+        fn update(&mut self, scene_id: u32, runs: Vec<widget_render::retained_scene::PreparedRun>,
+            origin: [f32; 2], layout_width: f32, fill_extra_cols: f32,
+            cell_w: f32, cell_h: f32, vp_w: f32, vp_h: f32)
+        {
+            let metrics = [layout_width.to_bits(), fill_extra_cols.to_bits(), cell_w.to_bits(),
+                cell_h.to_bits(), vp_w.to_bits(), vp_h.to_bits()];
+            let same_shape = self.runs.len() == runs.len() && self.runs.iter().zip(&runs).all(|(old, run)|
+                old.source.widget_id == run.widget_id && old.source.ordinal == run.ordinal
+                    && old.source.primitives.len() == run.primitives.len());
+            if !same_shape {
+                self.runs.clear(); self.primitives.clear(); self.run_indices.clear();
+            }
+            for (index, run) in runs.into_iter().enumerate() {
+                let translation = [origin[0] + run.translation[0], origin[1] + run.translation[1]];
+                let previous = self.runs.get(index);
+                let changed = self.metrics != metrics || previous.is_none_or(|old|
+                    old.source.revision != run.revision || old.translation != translation);
+                if changed {
+                    let start = previous.map_or(self.primitives.len(), |old| old.primitive_start);
+                    let mut unsupported = Vec::new();
+                    for (offset, primitive) in run.primitives.iter().enumerate() {
+                        if !primitive_run_supported_for_cache(std::slice::from_ref(primitive)) {
+                            unsupported.push(offset);
+                        }
+                        let primitive = offset_primitive(extend_right_edge_primitive(primitive.clone(),
+                            layout_width, fill_extra_cols, cell_w, vp_w),
+                            translation[0], translation[1], cell_w, cell_h, vp_w, vp_h);
+                        if same_shape { self.primitives[start + offset] = primitive; }
+                        else { self.primitives.push(primitive); self.run_indices.push(index); }
+                    }
+                    let updated = OffsetGpuPrimitiveRun { scene_id, source: run, primitive_start: start,
+                        translation, fill_extra_cols, layout_width, unsupported };
+                    if same_shape { self.runs[index] = updated; } else { self.runs.push(updated); }
+                }
+            }
+            self.metrics = metrics;
+        }
+    }
+
+    impl OffsetGpuPrimitiveRun {
+        fn supports(&self, range: Range<usize>) -> bool {
+            let first = self.unsupported.partition_point(|&offset| offset < range.start);
+            self.unsupported.get(first).is_none_or(|&offset| offset >= range.end)
+        }
     }
 
     #[derive(Clone, Copy, Hash, PartialEq, Eq)]
     struct RetainedRunKey {
+        batch: bool,
         scene_id: u32,
         widget_id: u64,
         ordinal: u16,
@@ -1980,6 +2055,7 @@ fragment float4 live_spectrogram_frag(
     #[derive(Clone, Copy, PartialEq, Eq)]
     struct RetainedRunStamp {
         paint_revision: u64,
+        shader_generation: u64,
         theme_generation: u64,
         mono_atlas_generation: u64,
         prop_atlas_generation: u64,
@@ -1990,7 +2066,8 @@ fragment float4 live_spectrogram_frag(
 
     struct RetainedCompiledRun {
         stamp: RetainedRunStamp,
-        compiled: std::rc::Rc<CompiledWidgetRun>,
+        sources: Vec<BatchSourceStamp>,
+        compiled: Option<std::rc::Rc<CompiledWidgetRun>>,
         last_used_frame: u64,
         bytes: usize,
     }
@@ -2017,8 +2094,8 @@ fragment float4 live_spectrogram_frag(
         time_slices: u32,
         write_head: u32,
         sample_rate: f32,
-        waterfall_buffer: Retained<ProtocolObject<dyn MTLBuffer>>,
-        smoothed_buffer: Retained<ProtocolObject<dyn MTLBuffer>>,
+        waterfall_buffer: BufferLease,
+        smoothed_buffer: BufferLease,
     }
 
     /// Layout + colour context threaded into `rasterize_char`.
@@ -2129,22 +2206,12 @@ fragment float4 live_spectrogram_frag(
         overlay_viewport_bottom_bits: u32,
     }
 
-    const AGENT_INSTRUMENT_STUB_ANIMATION_WIDGET: &str = "agent-instrument-stub-bg";
-    const AGENT_INSTRUMENT_STUB_ANIMATION_WIDGET_SUFFIX: &str = "__agent-instrument-stub-bg";
-    const AGENT_INSTRUMENT_STUB_ANIMATION_WIDGET_SAFE_SUFFIX: &str = "__agent_instrument_stub_bg";
-    const AGENT_INSTRUMENT_STUB_SKELETON_DEBUG_NAME: &str = "agent-instrument-stub-skeleton";
     const MONOSPACE_FONT_NAME: &str = "JetBrainsMono-Regular";
     use crate::ui::DEFAULT_MONOSPACE_FONT_SIZE_PT;
 
     fn primitive_run_supported_for_cache(primitives: &[widget_render::GpuPrimitive]) -> bool {
         !primitives.is_empty()
             && primitives.iter().all(|primitive| {
-                if let widget_render::GpuPrimitive::WidgetInstance { widget_type, .. } =
-                    widget_render::innermost_primitive(primitive)
-                    && widget_instance_shader_uses_time(widget_type)
-                {
-                    return false;
-                }
                 matches!(
                     widget_render::innermost_primitive(primitive),
                     widget_render::GpuPrimitive::Rect(_)
@@ -2158,13 +2225,6 @@ fragment float4 live_spectrogram_frag(
                         | widget_render::GpuPrimitive::WidgetInstance { .. }
                 )
             })
-    }
-
-    fn widget_instance_shader_uses_time(widget_type: &str) -> bool {
-        widget_render::widget_definition(widget_type)
-            .is_some_and(|definition| definition.shader_uses_time())
-            || widget_render::sdf_widget::sdf_widget_def(widget_type)
-                .is_some_and(|definition| definition.animates)
     }
 
     // ── Backend ───────────────────────────────────────────────────────────────
@@ -2251,7 +2311,7 @@ fragment float4 live_spectrogram_frag(
         prop_pipeline: Option<Retained<ProtocolObject<dyn MTLRenderPipelineState>>>,
         // Per-widget-type GPU pipelines (hslider, vslider, toggle)
         widget_pipelines: HashMap<String, Retained<ProtocolObject<dyn MTLRenderPipelineState>>>,
-        button_surface_override_modified: Option<SystemTime>,
+        button_surface_override_watch: Option<super::super::shader_watch::ShaderFileWatch>,
         sdf_widget_pipeline_sources: HashMap<String, String>,
         sdf_widget_pipeline_registry_generation: u64,
         waveform_pipeline: Option<Retained<ProtocolObject<dyn MTLRenderPipelineState>>>,
@@ -2284,9 +2344,13 @@ fragment float4 live_spectrogram_frag(
         mono_atlas_generation: u64,
         prop_atlas_generation: u64,
         compiled_widget_run_frame: u64,
+        retained_tile_primitives: HashMap<u32, RetainedTilePrimitives>,
+        mod_patch_indices: HashMap<u32, crate::ui::patch_port_index::PatchPortIndex>,
         retained_widget_scenes: HashMap<u32, widget_render::retained_scene::RetainedScene>,
         retained_compiled_runs: HashMap<RetainedRunKey, RetainedCompiledRun>,
         retained_compiled_bytes: usize,
+        measure_frame: bool,
+        presentation_observer: Option<crate::ui::presentation_timing::PresentationObserver>,
         geometry_pool: MetalBufferPool,
         #[cfg(test)]
         force_dynamic_runs: bool,
@@ -2296,10 +2360,10 @@ fragment float4 live_spectrogram_frag(
         image_rotation_states: HashMap<u64, ImageRotationState>,
         stats: RenderStats,
         backend_poll_profile: BackendPollProfile,
-        agent_instrument_stub_animation_visible: bool,
         // Winit
         event_loop: Option<EventLoop<()>>,
         window: Option<Window>,
+        window_occluded: Option<bool>,
         pending: VecDeque<Event>,
         pending_drag: Option<Event>,
         pending_move: Option<Event>,
@@ -2412,7 +2476,7 @@ fragment float4 live_spectrogram_frag(
                 pipeline: None,
                 prop_pipeline: None,
                 widget_pipelines: HashMap::new(),
-                button_surface_override_modified: None,
+                button_surface_override_watch: None,
                 sdf_widget_pipeline_sources: HashMap::new(),
                 sdf_widget_pipeline_registry_generation: 0,
                 waveform_pipeline: None,
@@ -2444,9 +2508,13 @@ fragment float4 live_spectrogram_frag(
                 mono_atlas_generation: 0,
                 prop_atlas_generation: 0,
                 compiled_widget_run_frame: 0,
+                retained_tile_primitives: HashMap::new(),
+                mod_patch_indices: HashMap::new(),
                 retained_widget_scenes: HashMap::new(),
                 retained_compiled_runs: HashMap::new(),
                 retained_compiled_bytes: 0,
+                measure_frame: false,
+                presentation_observer: None,
                 geometry_pool: MetalBufferPool::new(),
                 #[cfg(test)]
                 force_dynamic_runs: false,
@@ -2456,9 +2524,9 @@ fragment float4 live_spectrogram_frag(
                 image_rotation_states: HashMap::new(),
                 stats: RenderStats::new(),
                 backend_poll_profile: BackendPollProfile::new(),
-                agent_instrument_stub_animation_visible: false,
                 event_loop: None,
                 window: None,
+                window_occluded: None,
                 pending: VecDeque::new(),
                 pending_drag: None,
                 pending_move: None,
@@ -2803,14 +2871,6 @@ fragment float4 live_spectrogram_frag(
             self.elapsed_time_seconds()
         }
 
-        pub fn agent_instrument_stub_animation_visible(&self) -> bool {
-            self.agent_instrument_stub_animation_visible
-        }
-
-        fn note_agent_instrument_stub_animation_detected(&mut self) {
-            self.agent_instrument_stub_animation_visible = true;
-        }
-
         fn widget_scene_cache_parts(
             &self,
             owner_frame_key: u64,
@@ -3146,10 +3206,6 @@ fragment float4 live_spectrogram_frag(
             vp_w: f32,
             vp_h: f32,
         ) -> Option<CompiledWidgetRun> {
-            if !primitive_run_supported_for_cache(primitives) {
-                return None;
-            }
-
             let mut commands = Vec::new();
             let (bg_runs, fg_runs) = partition_widget_instance_runs(primitives);
             for (widget_type, instances) in bg_runs {
@@ -3249,16 +3305,14 @@ fragment float4 live_spectrogram_frag(
             cell_w: f32, cell_h: f32, vp_w: f32, vp_h: f32,
         ) -> Option<std::rc::Rc<CompiledWidgetRun>> {
             let primitives = &run.source.primitives[range.clone()];
-            if !primitive_run_supported_for_cache(primitives) {
-                self.stats.note_widget_run_cache_bypass_complex();
-                return None;
-            }
             let key = RetainedRunKey {
+                batch: false,
                 scene_id: run.scene_id, widget_id: run.source.widget_id,
                 ordinal: run.source.ordinal, start: range.start, end: range.end,
             };
             let stamp = RetainedRunStamp {
                 paint_revision: run.source.revision,
+                shader_generation: widget_render::sdf_widget::sdf_widget_registry_generation(),
                 theme_generation: theme::generation(),
                 mono_atlas_generation: self.mono_atlas_generation,
                 prop_atlas_generation: self.prop_atlas_generation,
@@ -3270,13 +3324,20 @@ fragment float4 live_spectrogram_frag(
                 && entry.stamp == stamp
             {
                 entry.last_used_frame = self.compiled_widget_run_frame;
-                self.stats.note_widget_run_cache_hit();
-                return Some(std::rc::Rc::clone(&entry.compiled));
+                if entry.compiled.is_some() { self.stats.note_widget_run_cache_hit(); }
+                return entry.compiled.clone();
             }
             // Release the obsolete cache owner before allocating its replacement.
             // Encoded/in-flight frames still own independent immutable leases.
             if let Some(previous) = self.retained_compiled_runs.remove(&key) {
                 self.retained_compiled_bytes -= previous.bytes;
+            }
+            if !run.supports(range) {
+                self.stats.note_widget_run_cache_bypass_complex();
+                self.retained_compiled_runs.insert(key, RetainedCompiledRun {
+                    stamp, sources: Vec::new(), compiled: None, last_used_frame: self.compiled_widget_run_frame, bytes: 0,
+                });
+                return None;
             }
             let primitives: Vec<_> = primitives.iter().cloned().map(|primitive|
                 extend_right_edge_primitive(primitive, run.layout_width,
@@ -3287,9 +3348,50 @@ fragment float4 live_spectrogram_frag(
             let bytes = compiled.commands.iter().map(|command| command.buffer.capacity()).sum();
             self.retained_compiled_bytes += bytes;
             self.retained_compiled_runs.insert(key, RetainedCompiledRun {
-                stamp, compiled: std::rc::Rc::clone(&compiled),
+                stamp, sources: Vec::new(), compiled: Some(std::rc::Rc::clone(&compiled)),
                 last_used_frame: self.compiled_widget_run_frame,
                 bytes,
+            });
+            Some(compiled)
+        }
+
+        fn compiled_widget_batch(
+            &mut self, runs: &[OffsetGpuPrimitiveRun], run_range: Range<usize>,
+            range: Range<usize>, primitives: &[widget_render::GpuPrimitive],
+            cell_w: f32, cell_h: f32, vp_w: f32, vp_h: f32,
+        ) -> Option<std::rc::Rc<CompiledWidgetRun>> {
+            let first = &runs[run_range.start];
+            let key = RetainedRunKey { batch: true, scene_id: first.scene_id,
+                widget_id: first.source.widget_id, ordinal: first.source.ordinal,
+                start: range.start, end: range.end };
+            let stamp = RetainedRunStamp {
+                paint_revision: first.source.revision,
+                shader_generation: widget_render::sdf_widget::sdf_widget_registry_generation(),
+                theme_generation: theme::generation(), mono_atlas_generation: self.mono_atlas_generation,
+                prop_atlas_generation: self.prop_atlas_generation,
+                metrics: [cell_w.to_bits(), cell_h.to_bits(), vp_w.to_bits(), vp_h.to_bits()],
+                fill_extra_cols_bits: first.fill_extra_cols.to_bits(), layout_width_bits: first.layout_width.to_bits(),
+            };
+            let source_stamp = |run: &OffsetGpuPrimitiveRun| BatchSourceStamp {
+                widget_id: run.source.widget_id, ordinal: run.source.ordinal, revision: run.source.revision,
+                len: run.source.primitives.len(), translation: run.translation.map(f32::to_bits),
+            };
+            if let Some(entry) = self.retained_compiled_runs.get_mut(&key)
+                && entry.stamp == stamp
+                && entry.sources.iter().cloned().eq(runs[run_range.clone()].iter().map(source_stamp))
+            {
+                entry.last_used_frame = self.compiled_widget_run_frame;
+                self.stats.note_widget_run_cache_hit();
+                return entry.compiled.clone();
+            }
+            if let Some(previous) = self.retained_compiled_runs.remove(&key) { self.retained_compiled_bytes -= previous.bytes; }
+            let compiled = std::rc::Rc::new(self.compile_simple_widget_run(&primitives[range], cell_w, cell_h, vp_w, vp_h)?);
+            self.stats.note_widget_run_cache_miss();
+            let bytes = compiled.commands.iter().map(|command| command.buffer.capacity()).sum();
+            self.retained_compiled_bytes += bytes;
+            self.retained_compiled_runs.insert(key, RetainedCompiledRun {
+                stamp, sources: runs[run_range].iter().map(source_stamp).collect(),
+                compiled: Some(std::rc::Rc::clone(&compiled)), last_used_frame: self.compiled_widget_run_frame, bytes,
             });
             Some(compiled)
         }
@@ -3302,23 +3404,28 @@ fragment float4 live_spectrogram_frag(
             atlas_texture: &ProtocolObject<dyn MTLTexture>,
             prop_atlas_texture: Option<&ProtocolObject<dyn MTLTexture>>,
             translation: [f32; 2],
+            state: &mut EncodedWidgetState,
         ) {
-            set_render_translation(enc, translation);
-            for command in compiled
-                .commands
-                .iter()
-                .filter(|command| command.phase == phase)
-            {
+            let mut commands = compiled.commands.iter().filter(|command| command.phase == phase).peekable();
+            if commands.peek().is_none() { return; }
+            if state.translation != Some(translation) {
+                set_render_translation(enc, translation);
+                state.translation = Some(translation);
+            }
+            for command in commands {
                 self.geometry_pool.pin(&command.buffer);
                 match &command.pipeline {
                     CompiledWidgetRunPipeline::MainText => {
                         let Some(pipeline) = self.pipeline.as_ref() else {
                             continue;
                         };
-                        enc.setRenderPipelineState(pipeline);
+                        if state.pipeline.as_ref() != Some(&command.pipeline) {
+                            enc.setRenderPipelineState(pipeline);
+                            unsafe { enc.setFragmentTexture_atIndex(Some(atlas_texture), 0); }
+                            state.pipeline = Some(command.pipeline.clone());
+                        }
                         unsafe {
                             enc.setVertexBuffer_offset_atIndex(Some(command.buffer.metal()), 0, 0);
-                            enc.setFragmentTexture_atIndex(Some(atlas_texture), 0);
                             enc.drawPrimitives_vertexStart_vertexCount(
                                 MTLPrimitiveType::Triangle,
                                 0,
@@ -3333,10 +3440,13 @@ fragment float4 live_spectrogram_frag(
                         else {
                             continue;
                         };
-                        enc.setRenderPipelineState(pipeline);
+                        if state.pipeline.as_ref() != Some(&command.pipeline) {
+                            enc.setRenderPipelineState(pipeline);
+                            unsafe { enc.setFragmentTexture_atIndex(Some(texture), 0); }
+                            state.pipeline = Some(command.pipeline.clone());
+                        }
                         unsafe {
                             enc.setVertexBuffer_offset_atIndex(Some(command.buffer.metal()), 0, 0);
-                            enc.setFragmentTexture_atIndex(Some(texture), 0);
                             enc.drawPrimitives_vertexStart_vertexCount(
                                 MTLPrimitiveType::Triangle,
                                 0,
@@ -3349,7 +3459,10 @@ fragment float4 live_spectrogram_frag(
                         let Some(pipeline) = self.widget_pipelines.get(widget_type) else {
                             continue;
                         };
-                        enc.setRenderPipelineState(pipeline);
+                        if state.pipeline.as_ref() != Some(&command.pipeline) {
+                            enc.setRenderPipelineState(pipeline);
+                            state.pipeline = Some(command.pipeline.clone());
+                        }
                         unsafe {
                             enc.setVertexBuffer_offset_atIndex(Some(command.buffer.metal()), 0, 0);
                             enc.drawPrimitives_vertexStart_vertexCount_instanceCount(
@@ -3506,7 +3619,7 @@ fragment float4 live_spectrogram_frag(
             let mut metal_prep_time = Duration::ZERO;
             let z_layers = z_ordered_primitive_layers(seg_prims);
             for seg_prims in &z_layers {
-                let prep_started = Instant::now();
+                let prep_started = self.measure_frame.then(Instant::now);
                 let (bg_runs, fg_runs) = partition_widget_instance_runs(seg_prims);
                 for (widget_type, instances) in &bg_runs {
                     let Some(wpipe) = self.widget_pipelines.get(widget_type) else {
@@ -3547,7 +3660,7 @@ fragment float4 live_spectrogram_frag(
                     };
                     build_widget_primitive_quads(seg_prims, atlas, vp_w, vp_h)
                 };
-                metal_prep_time += prep_started.elapsed();
+                metal_prep_time += prep_started.map_or(Duration::ZERO, |started| started.elapsed());
                 if let Some(pipeline) = self.pipeline.as_ref() {
                     draw_vertices(
                         enc,
@@ -3666,7 +3779,7 @@ fragment float4 live_spectrogram_frag(
                 if let (Some(prop_atlas), Some(prop_pipe)) =
                     (self.prop_atlas.as_mut(), self.prop_pipeline.as_ref())
                 {
-                    let prop_started = Instant::now();
+                    let prop_started = self.measure_frame.then(Instant::now);
                     let prop_verts = build_proportional_text_quads_cached(
                         seg_prims,
                         prop_atlas,
@@ -3677,7 +3790,7 @@ fragment float4 live_spectrogram_frag(
                         vp_w,
                         vp_h,
                     );
-                    metal_prep_time += prop_started.elapsed();
+                    metal_prep_time += prop_started.map_or(Duration::ZERO, |started| started.elapsed());
                     let prop_tex = prop_atlas.texture.clone();
                     draw_vertices(
                         enc,
@@ -3717,7 +3830,7 @@ fragment float4 live_spectrogram_frag(
                     vp_w, vp_h, image_load_budget, render_time_seconds);
             }
             let prop_atlas_texture = self.prop_atlas.as_ref().map(|atlas| atlas.texture.clone());
-            let prep_started = Instant::now();
+            let prep_started = self.measure_frame.then(Instant::now);
             let mut groups = Vec::new();
             let mut cursor = segment_range.start;
             while cursor < segment_range.end {
@@ -3732,17 +3845,34 @@ fragment float4 live_spectrogram_frag(
                 }
                 let run = &offset_runs[run_index];
                 let local_range = start - run.primitive_start..cursor - run.primitive_start;
-                let compiled = self.compiled_retained_widget_run(
-                    run, local_range, cell_w, cell_h, vp_w, vp_h);
-                if compiled.is_some() {
-                    self.stats.note_widget_run_cached_draw();
+                let mut last_run = run_index;
+                if run.supports(local_range.clone()) {
+                    // A bounded batch localizes invalidation; z and clip remain barriers.
+                    while cursor < segment_range.end && last_run - run_index < 31 {
+                        let next_run = run_indices[cursor];
+                        if next_run != last_run + 1 { break; }
+                        let next = &offset_runs[next_run];
+                        let begin = cursor;
+                        let mut end = begin;
+                        while end < segment_range.end && run_indices[end] == next_run
+                            && widget_render::effective_z_index(&offset_prims[end]) == z { end += 1; }
+                        if end == begin || !next.supports(begin - next.primitive_start..end - next.primitive_start) { break; }
+                        cursor = end;
+                        last_run = next_run;
+                    }
                 }
-                groups.push((z, compiled, start..cursor, [
-                    run.translation[0] * cell_w * 2.0 / vp_w,
-                    -run.translation[1] * cell_h * 2.0 / vp_h,
-                ]));
+                let (compiled, translation) = if last_run > run_index {
+                    (self.compiled_widget_batch(offset_runs, run_index..last_run + 1, start..cursor,
+                        offset_prims, cell_w, cell_h, vp_w, vp_h), [0.0, 0.0])
+                } else {
+                    (self.compiled_retained_widget_run(run, local_range, cell_w, cell_h, vp_w, vp_h), [
+                        run.translation[0] * cell_w * 2.0 / vp_w, -run.translation[1] * cell_h * 2.0 / vp_h,
+                    ])
+                };
+                if compiled.is_some() { self.stats.note_widget_run_cached_draw(); }
+                groups.push((z, compiled, start..cursor, translation));
             }
-            let preparation_time = prep_started.elapsed();
+            let preparation_time = prep_started.map_or(Duration::ZERO, |started| started.elapsed());
 
             const PHASES: [WidgetRunCommandPhase; 6] = [
                 WidgetRunCommandPhase::BackgroundInstances,
@@ -3852,12 +3982,14 @@ fragment float4 live_spectrogram_frag(
                         }
                     }
 
+                    let mut encoded_state = EncodedWidgetState::default();
                     for (_, compiled, range, translation) in groups.iter().filter(|(layer, ..)| *layer == z) {
                         if let Some(compiled) = compiled {
                             self.draw_compiled_widget_run_phase(
                                 enc, compiled, phase, atlas_texture,
-                                prop_atlas_texture.as_deref(), *translation);
+                                prop_atlas_texture.as_deref(), *translation, &mut encoded_state);
                         } else {
+                            encoded_state = EncodedWidgetState::default();
                             self.draw_dynamic_widget_run_phase(
                                 enc, &offset_prims[range.clone()], phase, atlas_texture,
                                 prop_atlas_texture.as_deref(), cell_w, cell_h, vp_w, vp_h);
@@ -4018,7 +4150,8 @@ fragment float4 live_spectrogram_frag(
                 || region.y.checked_add(region.height).is_none_or(|bottom| bottom > height_px) {
                 return Err(BackendError::MetalError);
             }
-            crate::widget_render::sdf_widget::set_sdf_time_seconds(self.elapsed_time_seconds());
+            let render_time_seconds = self.elapsed_time_seconds();
+            crate::widget_render::sdf_widget::set_sdf_time_seconds(render_time_seconds);
             self.compile_pending_sdf_pipelines();
             self.compile_pending_button_surface_override();
             self.drain_decoded_images(usize::MAX);
@@ -4587,51 +4720,15 @@ fragment float4 live_spectrogram_frag(
 
         fn compile_pending_button_surface_override(&mut self) -> bool {
             if !crate::ui::editable_shader_overrides_enabled() {
+                self.button_surface_override_watch = None;
                 return false;
             }
-            let path =
-                PathBuf::from(env!("ESEQ_DEV_MANIFEST_DIR")).join("shaders/button_surface.metal");
-            let metadata = match fs::metadata(&path) {
-                Ok(metadata) => metadata,
-                Err(error) => {
-                    if self.button_surface_override_modified.is_none() {
-                        eprintln!(
-                            "[button-shader-watch] override file not available path={} error={error}",
-                            path.display()
-                        );
-                    }
-                    return false;
-                }
-            };
-            let modified = match metadata.modified() {
-                Ok(modified) => modified,
-                Err(error) => {
-                    eprintln!(
-                        "[button-shader-watch] could not read mtime path={} error={error}",
-                        path.display()
-                    );
-                    return false;
-                }
-            };
-            if self.button_surface_override_modified == Some(modified) {
-                return false;
-            }
-            eprintln!(
-                "[button-shader-watch] edit detected path={} previous={:?} next={:?}",
-                path.display(),
-                self.button_surface_override_modified,
-                modified
-            );
-            let fragment_src = match fs::read_to_string(&path) {
-                Ok(fragment_src) => fragment_src,
-                Err(error) => {
-                    eprintln!(
-                        "[button-shader-watch] failed to read shader path={} error={error}",
-                        path.display()
-                    );
-                    return false;
-                }
-            };
+            let watch = self.button_surface_override_watch.get_or_insert_with(|| {
+                super::super::shader_watch::ShaderFileWatch::new(
+                    PathBuf::from(env!("ESEQ_DEV_MANIFEST_DIR")).join("shaders/button_surface.metal"),
+                )
+            });
+            let Some(fragment_src) = watch.take_changed_source() else { return false; };
             eprintln!(
                 "[button-shader-watch] compiling button shader bytes={}",
                 fragment_src.len()
@@ -4643,10 +4740,8 @@ fragment float4 live_spectrogram_frag(
             ) {
                 Ok(pipeline) => pipeline,
                 Err(_) => {
-                    self.button_surface_override_modified = Some(modified);
                     eprintln!(
-                        "[button-shader-watch] reload failed; keeping previous button pipeline path={}",
-                        path.display()
+                        "[button-shader-watch] reload failed; keeping previous button pipeline"
                     );
                     return false;
                 }
@@ -4658,10 +4753,8 @@ fragment float4 live_spectrogram_frag(
             ) {
                 Ok(pipeline) => pipeline,
                 Err(_) => {
-                    self.button_surface_override_modified = Some(modified);
                     eprintln!(
-                        "[button-shader-watch] reload failed; keeping previous number-picker pipeline path={}",
-                        path.display()
+                        "[button-shader-watch] reload failed; keeping previous number-picker pipeline"
                     );
                     return false;
                 }
@@ -4671,7 +4764,6 @@ fragment float4 live_spectrogram_frag(
                 .insert("button".to_string(), button_pipeline);
             self.widget_pipelines
                 .insert("number-picker".to_string(), number_picker_pipeline);
-            self.button_surface_override_modified = Some(modified);
             self.retained_compiled_runs.clear();
             self.retained_compiled_bytes = 0;
             self.stats.note_widget_run_cache_clear();
@@ -4841,20 +4933,11 @@ fragment float4 live_spectrogram_frag(
                 })
                 .unwrap_or(true);
             if needs_upload {
-                let waterfall_buffer = unsafe {
-                    self.device.newBufferWithBytes_length_options(
-                        NonNull::new(frame.waterfall.as_ptr() as *mut _)?,
-                        std::mem::size_of_val(frame.waterfall.as_slice()),
-                        MTLResourceOptions(0),
-                    )
-                }?;
-                let smoothed_buffer = unsafe {
-                    self.device.newBufferWithBytes_length_options(
-                        NonNull::new(frame.smoothed.as_ptr() as *mut _)?,
-                        std::mem::size_of_val(frame.smoothed.as_slice()),
-                        MTLResourceOptions(0),
-                    )
-                }?;
+                // Cache and encoded frames own immutable leases. Replacement may
+                // recycle only storage no longer read by any submitted frame.
+                self.live_spectrogram_buffers.remove(data_key);
+                let waterfall_buffer = self.geometry_pool.upload(&self.device, frame.waterfall.as_slice())?;
+                let smoothed_buffer = self.geometry_pool.upload(&self.device, frame.smoothed.as_slice())?;
                 self.live_spectrogram_buffers.insert(
                     data_key.to_string(),
                     LiveSpectrogramGpuResource {
@@ -4911,6 +4994,8 @@ fragment float4 live_spectrogram_frag(
                     continue;
                 }
 
+                self.geometry_pool.pin(&waterfall_buffer);
+                self.geometry_pool.pin(&smoothed_buffer);
                 let ndc_min = [
                     (primitive.rect.col * cell_w / vp_w) * 2.0 - 1.0,
                     1.0 - ((primitive.rect.row + primitive.rect.height) * cell_h / vp_h) * 2.0,
@@ -4953,8 +5038,8 @@ fragment float4 live_spectrogram_frag(
                         instance_upload.offset,
                         0,
                     );
-                    enc.setFragmentBuffer_offset_atIndex(Some(&waterfall_buffer), 0, 1);
-                    enc.setFragmentBuffer_offset_atIndex(Some(&smoothed_buffer), 0, 2);
+                    enc.setFragmentBuffer_offset_atIndex(Some(waterfall_buffer.metal()), 0, 1);
+                    enc.setFragmentBuffer_offset_atIndex(Some(smoothed_buffer.metal()), 0, 2);
                     enc.drawPrimitives_vertexStart_vertexCount(MTLPrimitiveType::Triangle, 0, 6);
                 }
                 self.stats.note_draw_command();
@@ -5058,19 +5143,22 @@ fragment float4 live_spectrogram_frag(
             target: Option<&TiledCaptureTarget>,
         ) -> Result<(TiledRenderStatus, TiledCaptureTiming,
             Option<Retained<ProtocolObject<dyn MTLCommandBuffer>>>), BackendError> {
-            let started = Instant::now();
+            self.measure_frame = self.stats.enabled || target.is_some();
+            let presentation_started = self.presentation_observer.as_ref().map(|_| Instant::now());
+            let started = self.measure_frame.then(Instant::now);
             let allocations_before = self.stats.widget_run_static_allocations;
             let storage_before = self.geometry_pool.stats();
             let primitives_before = self.stats.widget_primitives;
+            let draws_before = self.stats.draw_commands;
+            let mut visited_nodes = 0;
             let hits_before = self.stats.widget_run_cache_hits;
             let misses_before = self.stats.widget_run_cache_misses;
             let mut scene_counts = [0usize; 5];
             let mut paint_reasons = crate::widget_render::retained_scene::PaintReasons::default();
-            crate::widget_render::sdf_widget::set_sdf_time_seconds(self.elapsed_time_seconds());
+            let render_time_seconds = self.elapsed_time_seconds();
+            crate::widget_render::sdf_widget::set_sdf_time_seconds(render_time_seconds);
             self.compile_pending_sdf_pipelines();
             self.compile_pending_button_surface_override();
-            self.agent_instrument_stub_animation_visible = false;
-            let render_time_seconds = self.elapsed_time_seconds();
             self.sync_window_theme();
             let mut widget_scene_build_time = Duration::ZERO;
             let mut metal_prep_time = Duration::ZERO;
@@ -5138,6 +5226,10 @@ fragment float4 live_spectrogram_frag(
             self.begin_compiled_widget_run_frame();
 
             self.retained_widget_scenes.retain(|id, _|
+                tiled.tiles.iter().any(|tile| tile.tile_id == *id));
+            self.retained_tile_primitives.retain(|id, _|
+                tiled.tiles.iter().any(|tile| tile.tile_id == *id));
+            self.mod_patch_indices.retain(|id, _|
                 tiled.tiles.iter().any(|tile| tile.tile_id == *id));
 
             // ── Per-tile rendering with scissor rect ─────────────────────────
@@ -5307,10 +5399,7 @@ fragment float4 live_spectrogram_frag(
                 // Collect with LOCAL coords (no offset) so scroll/clip logic works,
                 // then offset the resulting primitives to screen position.
                 if let Some(ref layout) = tile.frame.widget_layout {
-                    if layout_contains_agent_instrument_stub_animation(layout) {
-                        self.note_agent_instrument_stub_animation_detected();
-                    }
-                    let time_seconds = self.elapsed_time_seconds();
+                    let time_seconds = render_time_seconds;
                     let inner_rows_exact = ((content_bottom_px - content_top_px) / cell_h).max(0.0);
                     let text_scroll = tile.frame.text_scroll_top as f32;
                     let widget_scroll = tile.frame.widget_scroll_top;
@@ -5337,19 +5426,21 @@ fragment float4 live_spectrogram_frag(
                     // so widgets move with the text.
                     let widget_col_off = content_col - tile.frame.widget_layout_scroll_left;
                     let widget_row_off = content_row - combined_scroll;
-                    collect_mod_patch_ports(
-                        layout,
-                        widget_col_off,
-                        widget_row_off,
-                        cell_w,
-                        cell_h,
-                        content_scissor,
-                        &mut mod_patch_ports,
-                    );
+                    for node in self.mod_patch_indices.entry(tile.tile_id).or_default().nodes(layout) {
+                        collect_mod_patch_port(
+                            node,
+                            widget_col_off,
+                            widget_row_off,
+                            cell_w,
+                            cell_h,
+                            content_scissor,
+                            &mut mod_patch_ports,
+                        );
+                    }
                     let content_width_cells =
                         ((content_right_px - content_left_px) / cell_w).max(0.0);
                     let fill_extra_cols = (content_width_cells - layout.rect.width).max(0.0);
-                    let scene_started = Instant::now();
+                    let scene_started = self.measure_frame.then(Instant::now);
                     let scene = self.retained_widget_scenes.entry(tile.tile_id).or_default().prepare(
                         layout, tile.frame.widget_layout_cache_key,
                         tile.frame.widget_content_cache_key, &tile.frame.dirty_widget_ids,
@@ -5359,42 +5450,22 @@ fragment float4 live_spectrogram_frag(
                         });
                     self.stats.note_widget_retained_run_collection(
                         scene.reused_nodes, scene.rebuilt_nodes, 0, 0);
+                    visited_nodes += scene.visited_nodes;
                     scene_counts[0] += scene.rebuilt_nodes;
                     scene_counts[1] += scene.reused_nodes;
                     scene_counts[2] += scene.culled_nodes;
                     scene_counts[3] += scene.reindexed_nodes;
                     scene_counts[4] += scene.bounds_refreshed_nodes;
                     paint_reasons.accumulate(scene.paint_reasons);
-                    let mut offset_prims = Vec::new();
-                    let mut offset_run_indices = Vec::new();
-                    let mut offset_runs = Vec::new();
-                    for run in scene.runs {
-                        let run_index = offset_runs.len();
-                        let translation = [
-                            widget_col_off + run.translation[0],
-                            widget_row_off + run.translation[1],
-                        ];
-                        let primitive_start = offset_prims.len();
-                        let mut primitives = run.primitives.as_ref().clone();
-                        Self::refresh_widget_scene_time(&mut primitives, viewport.time_seconds);
-                        for primitive in primitives {
-                            offset_prims.push(offset_primitive(
-                                extend_right_edge_primitive(primitive, layout.rect.width,
-                                    fill_extra_cols, cell_w, vp_w),
-                                translation[0], translation[1], cell_w, cell_h, vp_w, vp_h));
-                            offset_run_indices.push(run_index);
-                        }
-                        offset_runs.push(OffsetGpuPrimitiveRun {
-                            scene_id: tile.tile_id, source: run, primitive_start,
-                            translation, fill_extra_cols, layout_width: layout.rect.width,
-                        });
-                    }
+                    let mut retained = self.retained_tile_primitives.remove(&tile.tile_id).unwrap_or_default();
+                    retained.update(tile.tile_id, scene.runs, [widget_col_off, widget_row_off],
+                        layout.rect.width, fill_extra_cols, cell_w, cell_h, vp_w, vp_h);
+                    let offset_prims = &retained.primitives;
+                    let offset_run_indices = &retained.run_indices;
+                    let offset_runs = &retained.runs;
                     let overlay_prims = scene.overlay;
                     self.stats.note_widget_primitives(offset_prims.len());
-                    widget_scene_build_time += scene_started.elapsed();
-                    if contains_agent_instrument_stub_animation(&offset_prims) {
-                        self.note_agent_instrument_stub_animation_detected();
-                    }
+                    widget_scene_build_time += scene_started.map_or(Duration::ZERO, |started| started.elapsed());
                     // Split primitives into segments at clip rect boundaries.
                     // Each segment gets its own scissor rect for proper scroll clipping.
                     let segments =
@@ -5446,11 +5517,9 @@ fragment float4 live_spectrogram_frag(
                                 )
                             })
                             .collect();
-                        if contains_agent_instrument_stub_animation(&offset_overlay) {
-                            self.note_agent_instrument_stub_animation_detected();
-                        }
                         global_overlay_prims.extend(offset_overlay);
                     }
+                    self.retained_tile_primitives.insert(tile.tile_id, retained);
                 }
 
                 if let Some(overlay) = tile.inspect_overlay {
@@ -6275,6 +6344,9 @@ fragment float4 live_spectrogram_frag(
 
             enc.endEncoding();
             if let Some(drawable) = &drawable {
+                if let (Some(observer), Some(started)) = (&self.presentation_observer, presentation_started) {
+                    observer.observe_metal_drawable(objc2::runtime::ProtocolObject::from_ref(&**drawable), started);
+                }
                 cmdbuf.presentDrawable(objc2::runtime::ProtocolObject::from_ref(&**drawable));
             }
             buffer_frame.submit();
@@ -6282,16 +6354,19 @@ fragment float4 live_spectrogram_frag(
             let storage_after = self.geometry_pool.stats();
             let storage_wait = storage_after.backpressure_wait_time - storage_before.backpressure_wait_time;
             let timing = TiledCaptureTiming {
-                cpu_ms: started.elapsed().saturating_sub(storage_wait).as_secs_f64() * 1000.0,
+                cpu_ms: started.map_or(Duration::ZERO, |started| started.elapsed()).saturating_sub(storage_wait).as_secs_f64() * 1000.0,
                 scene_ms: widget_scene_build_time.as_secs_f64() * 1000.0,
                 gpu_ms: 0.0,
                 static_allocations: self.stats.widget_run_static_allocations - allocations_before,
+                gpu_buffer_allocations: storage_after.allocations - storage_before.allocations,
                 storage_reuses: storage_after.reuses - storage_before.reuses,
                 geometry_upload_bytes: storage_after.uploaded_bytes - storage_before.uploaded_bytes,
                 storage_spare_bytes: self.geometry_pool.spare_bytes(),
                 storage_in_flight_frames: self.geometry_pool.in_flight_frames(),
                 storage_wait_ms: storage_wait.as_secs_f64() * 1000.0,
                 primitives: self.stats.widget_primitives - primitives_before,
+                draw_commands: self.stats.draw_commands - draws_before,
+                visited_nodes,
                 rebuilt_nodes: scene_counts[0],
                 reused_nodes: scene_counts[1],
                 culled_nodes: scene_counts[2],
@@ -6308,13 +6383,95 @@ fragment float4 live_spectrogram_frag(
     }
 
     impl MetalBackend {
-        /// Handle another thread can use to interrupt a blocked poll. A
-        /// user event posted through it ends the AppKit wait inside
-        /// `pump_events`, so a MIDI note queued off-thread reaches the host
-        /// loop within a frame instead of at the idle timeout.
+        /// Let AppKit own the loop for the application's lifetime. Native
+        /// internal wakes do not run a host tick unless its deadline is due.
+        /// Input translation is shared with the legacy polling entry point.
+        pub fn run_host_loop(
+            &mut self,
+            mut host: impl FnMut(&mut Self, crate::ui::host_loop::HostLoopAction)
+                -> Result<crate::ui::host_loop::HostLoopControl, Box<dyn std::error::Error>>,
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            use crate::ui::host_loop::{HostLoopAction, HostLoopControl, HostSchedule};
+            let mut event_loop = self.event_loop.take().ok_or("native event loop is not initialized")?;
+            let mut schedule = HostSchedule::new(Instant::now());
+            let mut dropped_paths = Vec::new();
+            let mut dropped_position = None;
+            let mut host_error = None;
+            let mut exiting = false;
+            let result = event_loop.run_on_demand(|event, target| {
+                if exiting { return; }
+                match event {
+                    WEvent::UserEvent(()) => schedule.request_tick(),
+                    event @ (WEvent::WindowEvent { .. } | WEvent::DeviceEvent { .. }) => {
+                        if matches!(&event, WEvent::WindowEvent { .. }) || self.hidden_drag.is_some() {
+                            schedule.request_tick();
+                        }
+                        self.handle_native_event(event, &mut dropped_paths, &mut dropped_position, &mut |backend| {
+                            match host(backend, HostLoopAction::LiveResize) {
+                                Ok(HostLoopControl::WaitUntil(deadline)) => schedule.set_deadline(deadline),
+                                Ok(HostLoopControl::Exit) => exiting = true,
+                                Err(error) => { host_error = Some(error); exiting = true; }
+                            }
+                        });
+                    }
+                    WEvent::AboutToWait => {
+                        if !dropped_paths.is_empty() {
+                            self.pending_file_drops.push_back((std::mem::take(&mut dropped_paths), dropped_position.take()));
+                        }
+                        if schedule.take_tick(Instant::now(), self.has_queued_host_input()) {
+                            match host(self, HostLoopAction::Tick) {
+                                Ok(HostLoopControl::WaitUntil(deadline)) => schedule.set_deadline(deadline),
+                                Ok(HostLoopControl::Exit) => exiting = true,
+                                Err(error) => { host_error = Some(error); exiting = true; }
+                            }
+                        }
+                        target.set_control_flow(schedule.control_flow(self.has_queued_host_input()));
+                    }
+                    _ => {}
+                }
+                if exiting { target.exit(); }
+            });
+            self.event_loop = Some(event_loop);
+            result?;
+            if let Some(error) = host_error { return Err(error); }
+            Ok(())
+        }
+
+        fn has_queued_host_input(&self) -> bool {
+            self.close_requested || !self.pending_file_drops.is_empty() || !self.pending.is_empty()
+                || self.pending_drag.is_some() || self.pending_move.is_some()
+                || !self.pending_scroll.is_empty() || !self.pending_magnify.is_empty()
+        }
+
+        /// Drain already-translated input without entering or restarting AppKit.
+        pub fn next_queued_backend_event(&mut self) -> Option<BackendEvent> {
+            if std::mem::take(&mut self.close_requested) { return Some(BackendEvent::Quit); }
+            if let Some((paths, position)) = self.pending_file_drops.pop_front() {
+                return Some(BackendEvent::FileDrop(paths, position));
+            }
+            self.take_queued_terminal_event().map(BackendEvent::Terminal)
+        }
+
+        /// A thread-safe wake handle. Create it before entering the host loop;
+        /// posting a user event requests a host tick without waiting for its
+        /// next deadline. It also interrupts the legacy polling entry point.
         pub fn event_loop_waker(&self) -> Option<crate::ui::backend::EventLoopWaker> {
             self.event_loop.as_ref().map(|event_loop| {
                 crate::ui::backend::EventLoopWaker::new(event_loop.create_proxy())
+            })
+        }
+
+        pub fn set_presentation_observer(&mut self, observer: Option<crate::ui::presentation_timing::PresentationObserver>) {
+            self.presentation_observer = observer;
+        }
+
+        pub fn presentation_window_state(&self) -> Option<crate::ui::presentation_timing::WindowPresentationState> {
+            self.window.as_ref().map(|window| {
+                let size = window.inner_size();
+                crate::ui::presentation_timing::WindowPresentationState {
+                    physical_size: [size.width, size.height], focused: window.has_focus(),
+                    visible: window.is_visible(), occluded: self.window_occluded,
+                }
             })
         }
 
@@ -6372,249 +6529,264 @@ fragment float4 live_spectrogram_frag(
             }
         }
 
-        pub fn poll_event_with_redraw(
-            &mut self,
-            timeout: Duration,
-            redraw: &mut dyn FnMut(&mut Self),
-        ) -> Option<Event> {
+        fn take_queued_terminal_event(&mut self) -> Option<Event> {
             if let Some(ev) = self.pending.pop_front() {
-                self.backend_poll_profile.note_immediate();
                 if matches!(ev, Event::Mouse(_)) {
                     self.last_precise_mouse = Some(self.cursor_pos);
                 }
                 return Some(ev);
             }
             if let Some(ev) = self.pending_drag.take() {
-                self.backend_poll_profile.note_immediate();
                 self.last_precise_mouse = Some(self.cursor_pos);
                 return Some(ev);
             }
             if let Some(ev) = self.pending_move.take() {
-                self.backend_poll_profile.note_immediate();
                 self.last_precise_mouse = Some(self.cursor_pos);
                 return Some(ev);
             }
-            // Take the event loop out of `self` so the pump closure can borrow
-            // `self` as a whole (it must call `redraw(self)` mid-pump).
-            let Some(mut event_loop) = self.event_loop.take() else {
-                return None;
-            };
+            None
+        }
+
+        fn handle_native_event(
+            &mut self,
+            event: WEvent<()>,
+            dropped_paths: &mut Vec<std::path::PathBuf>,
+            dropped_position: &mut Option<(f32, f32)>,
+            redraw: &mut dyn FnMut(&mut Self),
+        ) {
             let cell_size = self
                 .atlas
                 .as_ref()
                 .map(|a| (a.cell_w.max(1) as f64, a.cell_h.max(1) as f64))
                 .unwrap_or((8.0, 16.0));
-            let wake_at = Instant::now() + timeout;
-            let mut dropped_paths = Vec::new();
-            let mut dropped_position: Option<(f32, f32)> = None;
-            let pump_started = Instant::now();
             let pointer_scale = self.window.as_ref().map(|w| w.scale_factor()).unwrap_or(1.0);
-            event_loop.pump_events(Some(timeout), |event, elwt| {
-                elwt.set_control_flow(if timeout.is_zero() {
-                    ControlFlow::Poll
-                } else {
-                    ControlFlow::WaitUntil(wake_at)
-                });
-                // Raw motion is the only pointer stream that survives a
-                // cursor grab: while locked, macOS stops sending CursorMoved.
-                if let WEvent::DeviceEvent {
-                    event: DeviceEvent::MouseMotion { delta },
-                    ..
-                } = event
-                {
-                    if let Some(drag) = self.hidden_drag.as_mut() {
-                        // winit reports raw deltas in logical points; the virtual
-                        // pointer lives in physical pixels like CursorMoved.
-                        let delta = (delta.0 * pointer_scale, delta.1 * pointer_scale);
-                        let (vx, vy) = drag.accumulate(delta);
-                        let exact_col = (vx / cell_size.0) as f32;
-                        let exact_row = (vy / cell_size.1) as f32;
-                        self.cursor_pos = (exact_col, exact_row);
-                        self.cursor_cell = (
-                            exact_col.max(0.0).floor() as u16,
-                            exact_row.max(0.0).floor() as u16,
-                        );
-                        if let Some(button) = self.pressed_mouse_button {
-                            self.pending_drag = Some(Event::Mouse(MouseEvent {
-                                kind: MouseEventKind::Drag(button),
+            // Raw motion is the only pointer stream that survives a
+            // cursor grab: while locked, macOS stops sending CursorMoved.
+            if let WEvent::DeviceEvent {
+                event: DeviceEvent::MouseMotion { delta },
+                ..
+            } = event
+            {
+                if let Some(drag) = self.hidden_drag.as_mut() {
+                    // winit reports raw deltas in logical points; the virtual
+                    // pointer lives in physical pixels like CursorMoved.
+                    let delta = (delta.0 * pointer_scale, delta.1 * pointer_scale);
+                    let (vx, vy) = drag.accumulate(delta);
+                    let exact_col = (vx / cell_size.0) as f32;
+                    let exact_row = (vy / cell_size.1) as f32;
+                    self.cursor_pos = (exact_col, exact_row);
+                    self.cursor_cell = (
+                        exact_col.max(0.0).floor() as u16,
+                        exact_row.max(0.0).floor() as u16,
+                    );
+                    if let Some(button) = self.pressed_mouse_button {
+                        self.pending_drag = Some(Event::Mouse(MouseEvent {
+                            kind: MouseEventKind::Drag(button),
+                            column: self.cursor_cell.0,
+                            row: self.cursor_cell.1,
+                            modifiers: self.modifiers,
+                        }));
+                    }
+                }
+                return;
+            }
+            let WEvent::WindowEvent { event, .. } = event else {
+                return;
+            };
+            match event {
+                WindowEvent::CloseRequested => {
+                    self.close_requested = true;
+                }
+                WindowEvent::Occluded(occluded) => self.window_occluded = Some(occluded),
+                WindowEvent::Focused(false) => {
+                    // Never leave the pointer hidden and grabbed behind an
+                    // unfocused window: end the drag and synthesize the
+                    // release so the editor tears the gesture down too.
+                    if self.hidden_drag.is_some() {
+                        self.end_hidden_drag();
+                        if let Some(button) = self.pressed_mouse_button.take() {
+                            self.pending.push_back(Event::Mouse(MouseEvent {
+                                kind: MouseEventKind::Up(button),
                                 column: self.cursor_cell.0,
                                 row: self.cursor_cell.1,
                                 modifiers: self.modifiers,
                             }));
                         }
                     }
-                    return;
                 }
-                let WEvent::WindowEvent { event, .. } = event else {
-                    return;
-                };
-                match event {
-                    WindowEvent::CloseRequested => {
-                        self.close_requested = true;
+                WindowEvent::Resized(new_size) => {
+                    self.layer.setDrawableSize(CGSize {
+                        width: new_size.width as f64,
+                        height: new_size.height as f64,
+                    });
+                    // Ask macOS to send RedrawRequested during the modal drag loop.
+                    if let Some(w) = self.window.as_ref() {
+                        w.request_redraw();
                     }
-                    WindowEvent::Focused(false) => {
-                        // Never leave the pointer hidden and grabbed behind an
-                        // unfocused window: end the drag and synthesize the
-                        // release so the editor tears the gesture down too.
-                        if self.hidden_drag.is_some() {
-                            self.end_hidden_drag();
-                            if let Some(button) = self.pressed_mouse_button.take() {
-                                self.pending.push_back(Event::Mouse(MouseEvent {
-                                    kind: MouseEventKind::Up(button),
-                                    column: self.cursor_cell.0,
-                                    row: self.cursor_cell.1,
-                                    modifiers: self.modifiers,
-                                }));
+                    self.pending.push_back(Event::Resize(
+                        new_size.width as u16,
+                        new_size.height as u16,
+                    ));
+                    // Draw synchronously inside AppKit's modal tracking loop,
+                    // before its compositor stretches the last presented frame
+                    // to the new layer bounds. Both loop entry points use this.
+                    redraw(self);
+                }
+                WindowEvent::RedrawRequested => {
+                    self.pending.push_back(Event::Resize(0, 0));
+                }
+                WindowEvent::DroppedFile(path) => {
+                    // macOS sends no CursorMoved during an external drag,
+                    // so the tracked cursor position is stale here; ask
+                    // AppKit where the pointer actually is.
+                    *dropped_position = self.pointer_cell_position(cell_size);
+                    dropped_paths.push(path);
+                }
+                WindowEvent::ModifiersChanged(mods) => {
+                    self.modifiers = winit_mods_to_crossterm(mods.state());
+                }
+                WindowEvent::KeyboardInput { event: kev, .. } => {
+                    match kev.state {
+                        ElementState::Pressed => {
+                            if let Some(ev) =
+                                translate_key(&kev.logical_key, &kev.physical_key, self.modifiers)
+                            {
+                                self.pending.push_back(ev);
+                            }
+                        }
+                        ElementState::Released => {
+                            // Emit Release events for note-off handling in sequencer
+                            if let Some(ev) = translate_key_with_state(
+                                &kev.logical_key,
+                                &kev.physical_key,
+                                self.modifiers,
+                                kev.state,
+                            ) {
+                                self.pending.push_back(ev);
                             }
                         }
                     }
-                    WindowEvent::Resized(new_size) => {
-                        self.layer.setDrawableSize(CGSize {
-                            width: new_size.width as f64,
-                            height: new_size.height as f64,
-                        });
-                        // Ask macOS to send RedrawRequested during the modal drag loop.
-                        if let Some(w) = self.window.as_ref() {
-                            w.request_redraw();
-                        }
-                        self.pending.push_back(Event::Resize(
-                            new_size.width as u16,
-                            new_size.height as u16,
-                        ));
-                        // Live resize runs inside AppKit's modal tracking loop, so
-                        // pump_events does not return until the drag ends; render a
-                        // frame now or the compositor stretches the last presented
-                        // frame to the new layer bounds.
-                        redraw(self);
+                }
+                WindowEvent::CursorMoved { position, .. } => {
+                    // While the pointer is locked the OS keeps sending
+                    // CursorMoved with a frozen position (macOS does this for
+                    // every drag event); letting it through would overwrite
+                    // the virtual pointer with the anchor on every step.
+                    if self.hidden_drag.is_some() {
+                        return;
                     }
-                    WindowEvent::RedrawRequested => {
-                        self.pending.push_back(Event::Resize(0, 0));
+                    let exact_col = (position.x / cell_size.0).max(0.0) as f32;
+                    let exact_row = (position.y / cell_size.1).max(0.0) as f32;
+                    let col = exact_col.floor() as u16;
+                    let row = exact_row.floor() as u16;
+                    self.cursor_pos = (exact_col, exact_row);
+                    self.cursor_cell = (col, row);
+                    self.cursor_physical = position;
+                    if let Some(button) = self.pressed_mouse_button {
+                        self.pending_drag = Some(Event::Mouse(MouseEvent {
+                            kind: MouseEventKind::Drag(button),
+                            column: col,
+                            row,
+                            modifiers: self.modifiers,
+                        }));
+                    } else {
+                        // Coalesce Moved events — only keep the latest for hover detection
+                        self.pending_move = Some(Event::Mouse(MouseEvent {
+                            kind: MouseEventKind::Moved,
+                            column: col,
+                            row,
+                            modifiers: self.modifiers,
+                        }));
                     }
-                    WindowEvent::DroppedFile(path) => {
-                        // macOS sends no CursorMoved during an external drag,
-                        // so the tracked cursor position is stale here; ask
-                        // AppKit where the pointer actually is.
-                        dropped_position = self.pointer_cell_position(cell_size);
-                        dropped_paths.push(path);
-                    }
-                    WindowEvent::ModifiersChanged(mods) => {
-                        self.modifiers = winit_mods_to_crossterm(mods.state());
-                    }
-                    WindowEvent::KeyboardInput { event: kev, .. } => {
-                        match kev.state {
-                            ElementState::Pressed => {
-                                if let Some(ev) =
-                                    translate_key(&kev.logical_key, &kev.physical_key, self.modifiers)
-                                {
-                                    self.pending.push_back(ev);
-                                }
-                            }
-                            ElementState::Released => {
-                                // Emit Release events for note-off handling in sequencer
-                                if let Some(ev) = translate_key_with_state(
-                                    &kev.logical_key,
-                                    &kev.physical_key,
-                                    self.modifiers,
-                                    kev.state,
-                                ) {
-                                    self.pending.push_back(ev);
-                                }
-                            }
-                        }
-                    }
-                    WindowEvent::CursorMoved { position, .. } => {
-                        // While the pointer is locked the OS keeps sending
-                        // CursorMoved with a frozen position (macOS does this for
-                        // every drag event); letting it through would overwrite
-                        // the virtual pointer with the anchor on every step.
-                        if self.hidden_drag.is_some() {
-                            return;
-                        }
-                        let exact_col = (position.x / cell_size.0).max(0.0) as f32;
-                        let exact_row = (position.y / cell_size.1).max(0.0) as f32;
-                        let col = exact_col.floor() as u16;
-                        let row = exact_row.floor() as u16;
-                        self.cursor_pos = (exact_col, exact_row);
-                        self.cursor_cell = (col, row);
-                        self.cursor_physical = position;
-                        if let Some(button) = self.pressed_mouse_button {
-                            self.pending_drag = Some(Event::Mouse(MouseEvent {
-                                kind: MouseEventKind::Drag(button),
-                                column: col,
-                                row,
-                                modifiers: self.modifiers,
-                            }));
-                        } else {
-                            // Coalesce Moved events — only keep the latest for hover detection
-                            self.pending_move = Some(Event::Mouse(MouseEvent {
-                                kind: MouseEventKind::Moved,
-                                column: col,
-                                row,
+                }
+                WindowEvent::MouseInput { state, button, .. } => {
+                    let Some(button) = translate_mouse_button(button) else {
+                        return;
+                    };
+                    match state {
+                        ElementState::Pressed => {
+                            self.pressed_mouse_button = Some(button);
+                            self.press_physical = Some(self.cursor_physical);
+                            self.pending.push_back(Event::Mouse(MouseEvent {
+                                kind: MouseEventKind::Down(button),
+                                column: self.cursor_cell.0,
+                                row: self.cursor_cell.1,
                                 modifiers: self.modifiers,
                             }));
                         }
-                    }
-                    WindowEvent::MouseInput { state, button, .. } => {
-                        let Some(button) = translate_mouse_button(button) else {
-                            return;
-                        };
-                        match state {
-                            ElementState::Pressed => {
-                                self.pressed_mouse_button = Some(button);
-                                self.press_physical = Some(self.cursor_physical);
-                                self.pending.push_back(Event::Mouse(MouseEvent {
-                                    kind: MouseEventKind::Down(button),
-                                    column: self.cursor_cell.0,
-                                    row: self.cursor_cell.1,
-                                    modifiers: self.modifiers,
-                                }));
-                            }
-                            ElementState::Released => {
-                                let release = Event::Mouse(MouseEvent {
-                                    kind: MouseEventKind::Up(button),
-                                    column: self.cursor_cell.0,
-                                    row: self.cursor_cell.1,
-                                    modifiers: self.modifiers,
-                                });
-                                enqueue_mouse_release(&mut self.pending, &mut self.pending_drag, release);
-                                if self.pressed_mouse_button.as_ref() == Some(&button) {
-                                    self.pressed_mouse_button = None;
-                                }
+                        ElementState::Released => {
+                            let release = Event::Mouse(MouseEvent {
+                                kind: MouseEventKind::Up(button),
+                                column: self.cursor_cell.0,
+                                row: self.cursor_cell.1,
+                                modifiers: self.modifiers,
+                            });
+                            enqueue_mouse_release(&mut self.pending, &mut self.pending_drag, release);
+                            if self.pressed_mouse_button.as_ref() == Some(&button) {
+                                self.pressed_mouse_button = None;
                             }
                         }
                     }
-                    WindowEvent::MouseWheel { delta, phase, .. } => {
-                        if matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled) {
-                            return;
-                        }
-                        if let Some(until) = self.suppress_scroll_until {
-                            if Instant::now() < until {
-                                return;
-                            }
-                            self.suppress_scroll_until = None;
-                        }
-                        let delta = crate::ui::pointer_input::scroll_delta_pixels(
-                            delta,
-                            cell_size.1 as f32,
-                        );
-                        if let Some(magnify_delta) =
-                            crate::ui::pointer_input::ctrl_scroll_magnify_delta(self.modifiers, delta)
-                        {
-                            self.pending_magnify.push_back((magnify_delta, self.cursor_pos));
-                        } else {
-                            self.pending_scroll.push_back((delta, self.cursor_pos));
-                        }
-                    }
-                    WindowEvent::TouchpadMagnify { delta, phase, .. } => {
-                        if matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled) {
-                            return;
-                        }
-                        self.pending_scroll.clear();
-                        self.suppress_scroll_until = Some(Instant::now() + Duration::from_millis(120));
-                        self.pending_magnify.push_back((delta, self.cursor_pos));
-                    }
-                    _ => {}
                 }
+                WindowEvent::MouseWheel { delta, phase, .. } => {
+                    if matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled) {
+                        return;
+                    }
+                    if let Some(until) = self.suppress_scroll_until {
+                        if Instant::now() < until {
+                            return;
+                        }
+                        self.suppress_scroll_until = None;
+                    }
+                    let delta = crate::ui::pointer_input::scroll_delta_pixels(
+                        delta,
+                        cell_size.1 as f32,
+                    );
+                    if let Some(magnify_delta) =
+                        crate::ui::pointer_input::ctrl_scroll_magnify_delta(self.modifiers, delta)
+                    {
+                        self.pending_magnify.push_back((magnify_delta, self.cursor_pos));
+                    } else {
+                        self.pending_scroll.push_back((delta, self.cursor_pos));
+                    }
+                }
+                WindowEvent::TouchpadMagnify { delta, phase, .. } => {
+                    if matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled) {
+                        return;
+                    }
+                    self.pending_scroll.clear();
+                    self.suppress_scroll_until = Some(Instant::now() + Duration::from_millis(120));
+                    self.pending_magnify.push_back((delta, self.cursor_pos));
+                }
+                _ => {}
+            }
+        }
+
+        pub fn poll_event_with_redraw(
+            &mut self,
+            timeout: Duration,
+            redraw: &mut dyn FnMut(&mut Self),
+        ) -> Option<Event> {
+            if let Some(event) = self.take_queued_terminal_event() {
+                self.backend_poll_profile.note_immediate();
+                return Some(event);
+            }
+            // Take the event loop out of `self` so the pump closure can borrow
+            // `self` as a whole (it must call `redraw(self)` mid-pump).
+            let Some(mut event_loop) = self.event_loop.take() else {
+                return None;
+            };
+            let wake_at = Instant::now() + timeout;
+            let mut dropped_paths = Vec::new();
+            let mut dropped_position: Option<(f32, f32)> = None;
+            let pump_started = Instant::now();
+            event_loop.pump_events(Some(timeout), |event, elwt| {
+                elwt.set_control_flow(if timeout.is_zero() {
+                    ControlFlow::Poll
+                } else {
+                    ControlFlow::WaitUntil(wake_at)
+                });
+                self.handle_native_event(event, &mut dropped_paths, &mut dropped_position, redraw);
             });
             self.event_loop = Some(event_loop);
             let pump_elapsed = pump_started.elapsed();
@@ -6710,6 +6882,7 @@ fragment float4 live_spectrogram_frag(
         }
 
         fn render(&mut self, frame: &RenderFrame) -> Result<(), BackendError> {
+            self.measure_frame = self.stats.enabled;
             crate::widget_render::sdf_widget::set_sdf_time_seconds(self.elapsed_time_seconds());
             self.sync_window_theme();
             let time_seconds = self.elapsed_time_seconds();
@@ -6809,11 +6982,11 @@ fragment float4 live_spectrogram_frag(
                     }
                 };
             }
-            let prep_started = Instant::now();
+            let prep_started = self.measure_frame.then(Instant::now);
             let primitive_quads = build_widget_primitive_quads(&primitive_scene, atlas, vp_w, vp_h);
             let (primitive_bg_runs, primitive_instance_runs) =
                 partition_widget_instance_runs(&primitive_scene);
-            metal_prep_time += prep_started.elapsed();
+            metal_prep_time += prep_started.map_or(Duration::ZERO, |started| started.elapsed());
             let _ = atlas;
 
             // ── Vertex buffer ────────────────────────────────────────────────
@@ -7007,7 +7180,7 @@ fragment float4 live_spectrogram_frag(
             if let (Some(prop_atlas), Some(prop_pipe)) =
                 (self.prop_atlas.as_mut(), self.prop_pipeline.as_ref())
             {
-                let prop_started = Instant::now();
+                let prop_started = self.measure_frame.then(Instant::now);
                 let prop_verts = build_proportional_text_quads_cached(
                     &primitive_scene,
                     prop_atlas,
@@ -7018,7 +7191,7 @@ fragment float4 live_spectrogram_frag(
                     vp_w,
                     vp_h,
                 );
-                metal_prep_time += prop_started.elapsed();
+                metal_prep_time += prop_started.map_or(Duration::ZERO, |started| started.elapsed());
                 draw_vertices(
                     &enc,
                     &self.device,
@@ -8346,6 +8519,21 @@ fragment float4 live_spectrogram_frag(
         visible_scissor: ScissorRect,
         out: &mut Vec<ModPatchPort>,
     ) {
+        collect_mod_patch_port(node, col_off, row_off, cell_w, cell_h, visible_scissor, out);
+        for child in &node.children {
+            collect_mod_patch_ports(child, col_off, row_off, cell_w, cell_h, visible_scissor, out);
+        }
+    }
+
+    fn collect_mod_patch_port(
+        node: &LayoutNode,
+        col_off: f32,
+        row_off: f32,
+        cell_w: f32,
+        cell_h: f32,
+        visible_scissor: ScissorRect,
+        out: &mut Vec<ModPatchPort>,
+    ) {
         if layout_node_bool_prop(node, "patch-port") {
             if let Some(direction) = mod_patch_port_direction(node) {
                 let track = layout_node_usize_prop(node, "track");
@@ -8353,17 +8541,6 @@ fragment float4 live_spectrogram_frag(
                     layout_node_string_prop(node, "dest-kind").unwrap_or_else(|| "track".into());
                 let dest = layout_node_usize_prop(node, "dest").or(track);
                 let Some(track_or_dest) = track.or(dest) else {
-                    for child in &node.children {
-                        collect_mod_patch_ports(
-                            child,
-                            col_off,
-                            row_off,
-                            cell_w,
-                            cell_h,
-                            visible_scissor,
-                            out,
-                        );
-                    }
                     return;
                 };
                 let center_col = col_off + node.rect.col + node.rect.width * 0.5;
@@ -8389,18 +8566,6 @@ fragment float4 live_spectrogram_frag(
                     });
                 }
             }
-        }
-
-        for child in &node.children {
-            collect_mod_patch_ports(
-                child,
-                col_off,
-                row_off,
-                cell_w,
-                cell_h,
-                visible_scissor,
-                out,
-            );
         }
     }
 
@@ -9618,41 +9783,6 @@ fragment float4 live_spectrogram_frag(
         (bg_runs, fg_runs)
     }
 
-    fn contains_agent_instrument_stub_animation(
-        primitives: &[widget_render::GpuPrimitive],
-    ) -> bool {
-        primitives.iter().any(|primitive| {
-            matches!(
-                widget_render::innermost_primitive(primitive),
-                widget_render::GpuPrimitive::WidgetInstance { widget_type, .. }
-                    if is_agent_instrument_stub_animation_widget_type(widget_type)
-            )
-        })
-    }
-
-    fn layout_contains_agent_instrument_stub_animation(layout: &crate::layout::LayoutNode) -> bool {
-        is_agent_instrument_stub_animation_widget_type(&layout.widget_type)
-            || layout_debug_name(layout) == Some(AGENT_INSTRUMENT_STUB_SKELETON_DEBUG_NAME)
-            || layout
-                .children
-                .iter()
-                .any(layout_contains_agent_instrument_stub_animation)
-    }
-
-    fn is_agent_instrument_stub_animation_widget_type(widget_type: &str) -> bool {
-        widget_type == AGENT_INSTRUMENT_STUB_ANIMATION_WIDGET
-            || widget_type.ends_with(AGENT_INSTRUMENT_STUB_ANIMATION_WIDGET_SUFFIX)
-            || widget_type.ends_with(AGENT_INSTRUMENT_STUB_ANIMATION_WIDGET_SAFE_SUFFIX)
-    }
-
-    fn layout_debug_name(layout: &crate::layout::LayoutNode) -> Option<&str> {
-        let value = layout.props.get("debug-name")?;
-        let crate::vm::Value::String(debug_name) = value else {
-            return None;
-        };
-        Some(debug_name.as_str())
-    }
-
     fn extend_right_edge_primitive(
         prim: widget_render::GpuPrimitive,
         layout_width: f32,
@@ -10062,6 +10192,11 @@ fragment float4 live_spectrogram_frag(
         pending.push_back(release);
     }
 
+    #[cfg(feature = "capture-harness")]
+    mod native_host_probe;
+    #[cfg(feature = "capture-harness")]
+    pub use native_host_probe::run as run_native_host_probe;
+
     #[cfg(test)]
     mod input_queue_tests {
         use super::*;
@@ -10073,6 +10208,27 @@ fragment float4 live_spectrogram_frag(
                 row,
                 modifiers: KeyModifiers::NONE,
             })
+        }
+
+        #[test]
+        fn native_queue_drain_preserves_priority_and_coalesced_pointer_order() {
+            let mut backend = MetalBackend::new_capture(100, 100).ok().expect("Metal backend");
+            backend.close_requested = true;
+            backend.pending_file_drops.push_back((vec![PathBuf::from("test.wav")], Some((3.0, 4.0))));
+            let down = mouse_event(MouseEventKind::Down(MouseButton::Left), 3, 4);
+            let drag = mouse_event(MouseEventKind::Drag(MouseButton::Left), 5, 4);
+            let moved = mouse_event(MouseEventKind::Moved, 6, 4);
+            backend.pending.push_back(down.clone());
+            backend.pending_drag = Some(drag.clone());
+            backend.pending_move = Some(moved.clone());
+            assert!(backend.has_queued_host_input());
+            assert_eq!(backend.next_queued_backend_event(), Some(BackendEvent::Quit));
+            assert_eq!(backend.next_queued_backend_event(), Some(BackendEvent::FileDrop(vec![PathBuf::from("test.wav")], Some((3.0, 4.0)))));
+            for event in [down, drag, moved] {
+                assert_eq!(backend.next_queued_backend_event(), Some(BackendEvent::Terminal(event)));
+            }
+            assert!(!backend.has_queued_host_input());
+            assert_eq!(backend.next_queued_backend_event(), None);
         }
 
         #[test]
@@ -10321,6 +10477,7 @@ fragment float4 live_spectrogram_frag(
 
             let command_buffer =
                 unwrap_option(backend.command_queue.commandBuffer(), "command buffer");
+            let buffer_frame = backend.geometry_pool.begin_frame(command_buffer.clone());
             let encoder = unwrap_option(
                 command_buffer.renderCommandEncoderWithDescriptor(&render_desc),
                 "render command encoder",
@@ -10361,7 +10518,7 @@ fragment float4 live_spectrogram_frag(
                 height as f32,
             );
             encoder.endEncoding();
-            command_buffer.commit();
+            buffer_frame.submit();
             backend.upload_arena.finish_frame(command_buffer.clone());
             command_buffer.waitUntilCompleted();
 
@@ -10450,30 +10607,6 @@ fragment float4 live_spectrogram_frag(
                 row: top.min(bottom),
                 width: (right - left).abs(),
                 height: (bottom - top).abs(),
-            }
-        }
-
-        fn test_widget_instance_primitive(widget_type: &str, itime: f32) -> GpuPrimitive {
-            GpuPrimitive::WidgetInstance {
-                widget_type: widget_type.to_string(),
-                instance: WidgetInstance {
-                    ndc_min: [-0.5, -0.5],
-                    ndc_max: [0.5, 0.5],
-                    value_t: 0.25,
-                    orientation: 0.0,
-                    itime,
-                    uniform_a: [0.0; 4],
-                    uniform_b: [0.0; 4],
-                    uniform_c: [0.0; 4],
-                    uniform_d: [0.0; 4],
-                    color_a: [0.2, 0.3, 0.4, 1.0],
-                    color_b: [0.5, 0.6, 0.7, 1.0],
-                    color_c: [0.0; 4],
-                    color_d: [0.0; 4],
-                    corner_radius: 0.2,
-                    pixel_aspect: 1.0,
-                },
-                is_background: false,
             }
         }
 
@@ -10571,56 +10704,6 @@ fragment float4 live_spectrogram_frag(
                 covering_rect_dispatched_after_button_background.is_none(),
                 "the backend dispatches widget backgrounds before Rect primitives; this covering Rect paints over the button chrome"
             );
-        }
-
-        #[test]
-        fn agent_stub_animation_detection_matches_namespaced_custom_widget() {
-            let namespaced = layout_node(
-                "custom_ui_agent_draft___agent_instrument_stub_bg",
-                HashMap::new(),
-            );
-            assert!(layout_contains_agent_instrument_stub_animation(&namespaced));
-            assert!(contains_agent_instrument_stub_animation(&[
-                GpuPrimitive::WidgetInstance {
-                    widget_type: "custom_ui_agent_draft___agent_instrument_stub_bg".to_string(),
-                    instance: WidgetInstance {
-                        ndc_min: [-1.0, -1.0],
-                        ndc_max: [1.0, 1.0],
-                        value_t: 0.0,
-                        orientation: 0.0,
-                        itime: 0.0,
-                        uniform_a: [0.0; 4],
-                        uniform_b: [0.0; 4],
-                        uniform_c: [0.0; 4],
-                        uniform_d: [0.0; 4],
-                        color_a: [0.0; 4],
-                        color_b: [0.0; 4],
-                        color_c: [0.0; 4],
-                        color_d: [0.0; 4],
-                        corner_radius: 0.0,
-                        pixel_aspect: 1.0,
-                    },
-                    is_background: false,
-                }
-            ]));
-        }
-
-        #[test]
-        fn agent_stub_animation_detection_matches_raw_defwidget_name() {
-            let raw = layout_node("agent-instrument-stub-bg", HashMap::new());
-            assert!(layout_contains_agent_instrument_stub_animation(&raw));
-        }
-
-        #[test]
-        fn agent_stub_animation_detection_matches_skeleton_debug_name() {
-            let skeleton = layout_node(
-                "box",
-                HashMap::from([(
-                    "debug-name".to_string(),
-                    prop_string("agent-instrument-stub-skeleton"),
-                )]),
-            );
-            assert!(layout_contains_agent_instrument_stub_animation(&skeleton));
         }
 
         #[test]
@@ -10886,8 +10969,9 @@ fragment float4 live_spectrogram_frag(
                 if index > 0 {
                     assert_eq!(sample.rebuilt_nodes, 3, "only parent and changed knob/label paint");
                     assert_eq!(sample.reused_nodes, 190);
-                    assert_eq!(sample.cache_misses, 2, "only changed paint compiles");
-                    assert_eq!(sample.cache_hits, 190);
+                    assert!(sample.cache_misses > 0 && sample.cache_misses < sample.cache_hits,
+                        "sparse edits rebuild affected batches and reuse unrelated batches");
+                    assert!(sample.draw_commands < 96, "retained controls must batch submission");
                 }
                 if matches!(index, 0 | 1 | 16 | 31) {
                     let pixels = target.rgba();
@@ -11031,9 +11115,103 @@ fragment float4 live_spectrogram_frag(
         }
 
         #[test]
-        fn retained_cache_keeps_shader_animation_dynamic() {
-            assert!(primitive_run_supported_for_cache(&[test_widget_instance_primitive("knob", 1.0)]));
-            assert!(!primitive_run_supported_for_cache(&[test_widget_instance_primitive("phaser-notch", 1.0)]));
+        fn spectrogram_updates_reuse_storage_without_overwriting_owned_revisions() {
+            let mut backend = unwrap_backend(MetalBackend::new_capture(360, 220), "backend");
+            let publish = |revision, bins| live_audio::publish_spectrogram_frame("buffer-reuse", SpectrogramFrame {
+                revision, bins, time_slices: 4, write_head: revision as u32 % 4, sample_rate: 48_000.0,
+                waterfall: Arc::new(vec![revision as f32; bins as usize * 4]),
+                smoothed: Arc::new(vec![revision as f32; bins as usize]),
+            });
+            publish(1, 128);
+            let original = backend.ensure_live_spectrogram_buffers("buffer-reuse").unwrap().waterfall_buffer.clone();
+            for revision in 2..40 {
+                let command = backend.command_queue.commandBuffer().unwrap();
+                let frame = backend.geometry_pool.begin_frame(command.clone());
+                publish(revision, 128);
+                let resource = backend.ensure_live_spectrogram_buffers("buffer-reuse").unwrap();
+                assert_eq!(resource.write_head, revision as u32 % 4);
+                let waterfall = resource.waterfall_buffer.clone();
+                let smoothed = resource.smoothed_buffer.clone();
+                backend.geometry_pool.pin(&waterfall);
+                backend.geometry_pool.pin(&smoothed);
+                unsafe {
+                    assert_eq!(*waterfall.metal().contents().as_ptr().cast::<f32>(), revision as f32);
+                    assert_eq!(*original.metal().contents().as_ptr().cast::<f32>(), 1.0);
+                }
+                frame.submit();
+                command.waitUntilCompleted();
+            }
+            assert!(backend.geometry_pool.stats().allocations <= 5, "updates must reach a bounded storage plateau");
+            publish(40, 1024);
+            let grown = backend.ensure_live_spectrogram_buffers("buffer-reuse").unwrap();
+            assert_eq!(grown.bins, 1024);
+            assert!(grown.waterfall_buffer.capacity() >= 1024 * 4 * 4);
+            live_audio::clear_spectrogram_frames();
+        }
+
+        #[test]
+        fn retained_shader_time_advances_without_geometry_uploads() {
+            let mut backend = unwrap_backend(MetalBackend::new_capture(640, 480), "backend");
+            unwrap_backend(backend.initialize_graphics(1.0), "graphics");
+            widget_render::sdf_widget::register_sdf_widget(widget_render::sdf_widget::SdfWidgetDef {
+                name: "retained-clock-test".into(),
+                shader_source: "fragment float4 widget_frag(WidgetVaryings in [[stage_in]]) { return float4(fract(in.itime * 0.1), 0.3, 0.1, 1.0); }".into(),
+                sdf_expr: crate::parser::Expression::Number(0.0), state_uniforms: vec![],
+                bindable_props: vec![], region_count: 1, width: 8.0, height: 3.0,
+                paint_margin: 0.0, animates: true,
+            });
+            let mut tiled = changing_controls_frame(&backend, 640, 480);
+            let layout = Arc::make_mut(tiled.tiles[0].frame.widget_layout.as_mut().unwrap());
+            layout.children.truncate(1);
+            layout.children[0].widget_type = "retained-clock-test".into();
+            let target = unwrap_backend(backend.create_tiled_capture_target(640, 480), "target");
+            for _ in 0..3 { unwrap_backend(backend.render_tiled_capture(&tiled, &target), "warm"); }
+            let before = target.rgba();
+            backend.start_time -= Duration::from_secs(5);
+            let after = unwrap_backend(backend.render_tiled_capture(&tiled, &target), "advance time");
+            assert_eq!(after.cache_misses, 0);
+            assert_eq!(after.geometry_upload_bytes, 0);
+            assert_ne!(before, target.rgba(), "cached shaders must receive the current frame time");
+        }
+
+        #[test]
+        fn indexed_patch_ports_follow_layout_replacement_and_live_values() {
+            let level = Arc::new(std::sync::atomic::AtomicU64::new(0.5_f64.to_bits()));
+            let mut root = layout_node("hstack", HashMap::new());
+            let mut port = layout_node("button", HashMap::from([
+                ("patch-port".into(), Value::Bool(true)), ("direction".into(), prop_keyword("out")),
+                ("track".into(), prop_number(0.0)), ("active".into(), Value::Bool(true)),
+                ("level".into(), Value::ReactiveRef {
+                    namespace: "TEST".into(), field: "level".into(), index: None,
+                    kind: crate::vm::BindingKind::Float, slot: Arc::clone(&level),
+                }),
+            ]));
+            port.widget_id = 771;
+            root.children = vec![layout_node("label", HashMap::new()), port];
+            let mut root = Arc::new(root);
+            let mut index = crate::ui::patch_port_index::PatchPortIndex::default();
+            let scissor = full_viewport_scissor(640.0, 480.0);
+            let collect = |index: &mut crate::ui::patch_port_index::PatchPortIndex, root: &Arc<LayoutNode>| {
+                let mut indexed = Vec::new();
+                for node in index.nodes(root) {
+                    collect_mod_patch_port(node, 0.0, 0.0, 10.0, 20.0, scissor, &mut indexed);
+                }
+                indexed
+            };
+            let ports = collect(&mut index, &root);
+            assert_eq!(ports.len(), 1);
+            assert_eq!(ports[0].level, 0.5);
+            level.store(0.8_f64.to_bits(), std::sync::atomic::Ordering::Relaxed);
+            assert_eq!(collect(&mut index, &root)[0].level, 0.8, "indexed nodes read current reactive levels");
+            let layout = Arc::make_mut(&mut root);
+            layout.children[1].rect.col += 3.0;
+            let ports = collect(&mut index, &root);
+            let mut fresh = Vec::new();
+            collect_mod_patch_ports(&root, 0.0, 0.0, 10.0, 20.0, scissor, &mut fresh);
+            assert_eq!(ports[0].center_px, fresh[0].center_px);
+            assert_eq!(ports[0].level, 0.8);
+            Arc::make_mut(&mut root).children.clear();
+            assert!(collect(&mut index, &root).is_empty());
         }
 
         #[test]
@@ -11096,3 +11274,6 @@ pub use inner::{
     PATCH_CABLE_SHADER_SRC, PROP_FRAG_SRC, SHADER_SRC, WAVEFORM_SHADER_SRC, WAVETABLE_SHADER_SRC,
     WIDGET_SHADER_PREAMBLE,
 };
+
+#[cfg(all(target_os = "macos", feature = "capture-harness"))]
+pub use inner::run_native_host_probe;
