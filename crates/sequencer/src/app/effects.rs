@@ -7312,6 +7312,19 @@ mod tests {
             .expect("hat choke");
         // A pattern on a member track is exactly what a kit must NOT carry.
         app.state.toggle_step_and_clear_plocks(kick, 0);
+        // The rack bus's own insert chain IS part of the kit
+        // (docs/rack-clips-and-break-kits-spec.md §7.1).
+        let rack_bus_id = app.groups.iter().find(|group| group.id == group_id)
+            .expect("rack group").bus_id;
+        let rack_bus_idx = app.buses.iter().position(|bus| bus.id.0 == rack_bus_id)
+            .expect("rack bus");
+        let filter_slot = app
+            .apply_recorded_bus_effect_chain_mutation(rack_bus_idx, "Add bus effect", |app| {
+                app.add_builtin_bus_effect_sync(rack_bus_idx, "Filter")
+            })
+            .expect("rack bus filter");
+        app.buses[rack_bus_idx].effect_slots[filter_slot].defaults[0] = 0.37;
+        app.save_current_bus_pattern();
 
         let kit = app
             .capture_rack_as_kit(group_id, "Test Kit", Vec::new(), String::new())
@@ -7320,6 +7333,10 @@ mod tests {
         assert_eq!(kit.pads[0].pad_note, 36);
         assert_eq!(kit.pads[1].pad_note, 42);
         assert_eq!(kit.pads[1].choke_group, Some(3));
+        let chain = kit.bus_chain.as_ref().expect("kit carries the rack bus chain");
+        assert_eq!(chain.effects.len(), 1);
+        assert_eq!(chain.effects[0].name, "builtin:Filter");
+        assert_eq!(chain.effects[0].slot.defaults[0].to_bits(), 0.37_f32.to_bits());
 
         let directory = std::env::temp_dir().join(format!(
             "eseq-kit-roundtrip-{}-{:?}",
@@ -7365,6 +7382,49 @@ mod tests {
         assert!(
             !app.state.pattern.patterns[loaded_kick].is_active(0),
             "a kit carries instruments and fx, never patterns"
+        );
+        let loaded_bus_idx = app.buses.iter().position(|bus| bus.id.0 == loaded.bus_id)
+            .expect("loaded rack bus");
+        assert_eq!(
+            app.buses[loaded_bus_idx].effect_descriptors[0].name, "Filter",
+            "the loaded kit rebuilt the rack bus chain"
+        );
+        assert_ne!(app.buses[loaded_bus_idx].effect_slots[0].node_id, 0, "bus effect is live");
+        assert_eq!(
+            app.buses[loaded_bus_idx].effect_slots[0].defaults[0].to_bits(),
+            0.37_f32.to_bits(),
+            "bus effect parameters travel with the kit"
+        );
+        assert_eq!(
+            app.buses[loaded_bus_idx].effect_slots[1].node_id, 0,
+            "only the saved chain lands"
+        );
+
+        // Auditioning the kit onto a rack whose bus has a different chain
+        // replaces that chain, and one undo brings the old chain back.
+        let (other_id, other_bus) = app
+            .create_drum_rack_recorded(Some("Other".to_string()))
+            .expect("second rack");
+        let other_bus_idx = app.buses.iter().position(|bus| bus.id == other_bus).unwrap();
+        let other_member = app.graph_controller().add_track(sample).expect("other member");
+        app.assign_rack_pad_track_recorded(other_id, 36, other_member).expect("other pad");
+        app.apply_recorded_bus_effect_chain_mutation(other_bus_idx, "Add bus effect", |app| {
+            app.add_builtin_bus_effect_sync(other_bus_idx, "Reverb")
+        })
+        .expect("other rack reverb");
+        app.load_kit_onto_rack(other_id, &path).expect("kit auditions onto the other rack");
+        assert_eq!(app.buses[other_bus_idx].effect_descriptors[0].name, "Filter");
+        assert_eq!(
+            app.buses[other_bus_idx].effect_slots[0].defaults[0].to_bits(),
+            0.37_f32.to_bits()
+        );
+        assert!(matches!(
+            crate::app::edit::undo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(
+            app.buses[other_bus_idx].effect_descriptors[0].name, "Reverb",
+            "undoing the audition restores the rack's previous bus chain"
         );
 
         std::fs::remove_dir_all(&directory).expect("clean kit test directory");

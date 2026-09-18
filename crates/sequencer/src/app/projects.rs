@@ -1812,8 +1812,9 @@ impl App {
     }
 
     /// Captures a drum rack as a **kit** (`docs/drum-rack-v2-spec.md`,
-    /// "Polish"): the rack's identity plus one Sound per pad, in pad order.
-    /// Patterns are deliberately left behind — see [`ProjectKitPreset`].
+    /// "Polish"): the rack's identity, one Sound per pad in pad order, and the
+    /// rack bus's insert chain. Patterns are deliberately left behind — see
+    /// [`ProjectKitPreset`].
     ///
     /// [`ProjectKitPreset`]: crate::project::ProjectKitPreset
     pub fn capture_rack_as_kit(
@@ -1833,6 +1834,7 @@ impl App {
             .as_ref()
             .ok_or_else(|| format!("Track group {group_id} is not a drum rack"))?;
         let color = group.color;
+        let bus_id = group.bus_id;
         // Resolve every pad against the member list up front: capturing a pad
         // borrows `self` mutably, and a capture must not see a half-built kit.
         let pads: Vec<(i32, Option<u8>, usize)> = rack
@@ -1867,6 +1869,7 @@ impl App {
                 sound,
             });
         }
+        let bus_chain = Some(self.capture_kit_bus_chain(bus_id)?);
         Ok(crate::project::ProjectKitPreset {
             version: crate::project::project_file_version(),
             metadata: crate::project::ProjectSoundMetadata {
@@ -1876,6 +1879,104 @@ impl App {
             },
             color,
             pads: kit_pads,
+            bus_chain,
+        })
+    }
+
+    /// The rack bus insert chain as a kit carries it: every occupied slot in
+    /// chain order, with its live parameter snapshot. Mirrors how
+    /// `capture_project` reads a bus (`custom_effect_names` up to the first
+    /// empty slot, `effect_slots` alongside).
+    fn capture_kit_bus_chain(
+        &self,
+        bus_id: u64,
+    ) -> Result<crate::project::ProjectKitBusChain, String> {
+        let bus = self
+            .buses
+            .iter()
+            .find(|bus| bus.id.0 == bus_id)
+            .ok_or_else(|| format!("Rack bus {bus_id} does not exist"))?;
+        let effects = bus
+            .custom_effect_names
+            .iter()
+            .enumerate()
+            .map_while(|(slot_idx, name)| {
+                let name = name.as_deref()?.trim();
+                if name.is_empty() {
+                    return None;
+                }
+                let slot = bus
+                    .effect_slots
+                    .get(slot_idx)
+                    .map(crate::project::ProjectEffectSlot::from)
+                    .unwrap_or_else(|| {
+                        crate::project::ProjectEffectSlot::from(
+                            &crate::effects::EffectSlotSnapshot::new_empty(),
+                        )
+                    });
+                Some(crate::project::ProjectKitBusEffect { name: name.to_string(), slot })
+            })
+            .collect();
+        Ok(crate::project::ProjectKitBusChain { effects })
+    }
+
+    /// Replaces a rack bus's insert chain with the one a kit carries, as one
+    /// recorded bus-effect edit (so it undoes with the rest of the kit load).
+    /// The restore mirrors project load: load each effect into its slot, put
+    /// the saved parameters back under the live node ids, push defaults, then
+    /// re-point host-managed refs (Convolution Reverb IR, Filter Table).
+    fn restore_kit_bus_chain(
+        &mut self,
+        bus_id: u64,
+        chain: &crate::project::ProjectKitBusChain,
+    ) -> Result<(), String> {
+        if chain.effects.len() > crate::lisp_host::MAX_CUSTOM_FX {
+            return Err(format!(
+                "Kit bus chain has {} effects; a bus holds at most {}",
+                chain.effects.len(),
+                crate::lisp_host::MAX_CUSTOM_FX
+            ));
+        }
+        let bus_idx = self
+            .buses
+            .iter()
+            .position(|bus| bus.id.0 == bus_id)
+            .ok_or_else(|| format!("Rack bus {bus_id} does not exist"))?;
+        let chain = chain.clone();
+        self.apply_recorded_bus_effect_chain_mutation(bus_idx, "Load kit bus effects", |app| {
+            let occupied = app.buses[bus_idx]
+                .effect_slots
+                .iter()
+                .enumerate()
+                .filter(|(_, slot)| slot.node_id != 0)
+                .map(|(slot_idx, _)| slot_idx)
+                .collect::<Vec<_>>();
+            for slot_idx in occupied.into_iter().rev() {
+                app.delete_bus_effect_slot(bus_idx, slot_idx)?;
+            }
+            for (slot_idx, effect) in chain.effects.into_iter().enumerate() {
+                let saved = effect.slot.into_snapshot_with_node_id(0);
+                let saved_ir = saved.ir.clone();
+                let saved_table = saved.table.clone();
+                if let Some(builtin_name) = project_builtin_effect_name_for_load(&effect.name) {
+                    app.load_builtin_bus_effect_to_slot_sync(bus_idx, slot_idx, &builtin_name)?;
+                } else {
+                    app.load_bus_effect_to_slot_sync(bus_idx, slot_idx, &effect.name)?;
+                }
+                if let Some(bus) = app.buses.get_mut(bus_idx) {
+                    if let (Some(slot), Some(desc)) = (
+                        bus.effect_slots.get_mut(slot_idx),
+                        bus.effect_descriptors.get(slot_idx),
+                    ) {
+                        restore_saved_bus_effect_slot(slot, saved, desc);
+                    }
+                }
+                app.push_bus_effect_slot_defaults(bus_idx, slot_idx);
+                app.restore_conv_reverb_ir_bus(bus_idx, slot_idx, saved_ir.as_deref())?;
+                app.restore_filter_table_bus(bus_idx, slot_idx, saved_table.as_deref())?;
+            }
+            app.save_current_bus_pattern();
+            Ok(())
         })
     }
 
@@ -1913,11 +2014,16 @@ impl App {
         } else {
             kit.metadata.name.trim().to_string()
         };
-        let (group_id, _) = self.create_drum_rack_recorded(Some(kit_name))?;
+        let (group_id, bus) = self.create_drum_rack_recorded(Some(kit_name))?;
         if let Some(group) = self.groups.iter_mut().find(|group| group.id == group_id) {
             group.color = kit.color;
         }
         let mut failures = Vec::new();
+        if let Some(chain) = &kit.bus_chain {
+            if let Err(error) = self.restore_kit_bus_chain(bus.0, chain) {
+                failures.push(format!("bus effects: {error}"));
+            }
+        }
         for pad in kit.pads {
             let pad_name = if pad.name.trim().is_empty() {
                 format!("Pad {}", pad.pad_note)
@@ -2079,6 +2185,12 @@ impl App {
             removed.sort_unstable_by(|a, b| b.cmp(a));
             for track in removed {
                 self.delete_track_recorded(track)?;
+            }
+            if let Some(chain) = &kit.bus_chain {
+                let bus_id = self.groups.iter().find(|group| group.id == group_id)
+                    .map(|group| group.bus_id)
+                    .ok_or_else(|| format!("Track group {group_id} does not exist"))?;
+                self.restore_kit_bus_chain(bus_id, chain)?;
             }
             crate::app::edit::squash_history_since(self, history_len, "Audition kit on drum rack");
             Ok(kit_name.clone())

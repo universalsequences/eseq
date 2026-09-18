@@ -84,10 +84,10 @@ pub struct ProjectSoundPreset {
 
 /// A drum-rack **kit** (`docs/drum-rack-v2-spec.md`, "Polish"): the rack's own
 /// identity plus one Sound per pad. A kit is deliberately *not* a project
-/// fragment — it carries the kit config (name, color, pad notes, choke groups)
-/// and each pad's instrument + fx chain, and no patterns: the member tracks a
-/// kit rebuilds are born empty, so dropping a kit into a session never
-/// overwrites what is already sequenced there.
+/// fragment — it carries the kit config (name, color, pad notes, choke groups),
+/// each pad's instrument + fx chain, and the rack bus's own insert chain, and
+/// no patterns: the member tracks a kit rebuilds are born empty, so dropping a
+/// kit into a session never overwrites what is already sequenced there.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ProjectKitPreset {
     pub version: u32,
@@ -97,6 +97,32 @@ pub struct ProjectKitPreset {
     pub color: [f32; 3],
     /// Ordered pads, in the rack's own pad order (the pad grid position).
     pub pads: Vec<ProjectKitPad>,
+    /// The rack bus's insert chain (`docs/rack-clips-and-break-kits-spec.md`
+    /// §7.1). Group processing is part of a kit, so this is captured
+    /// unconditionally on save — `Some(empty)` means "the rack had no bus
+    /// effects" and loading it onto an existing rack clears that rack's
+    /// chain. `None` only appears in kits saved before the chain travelled
+    /// and leaves the target bus alone.
+    #[serde(default)]
+    pub bus_chain: Option<ProjectKitBusChain>,
+}
+
+/// A rack bus insert chain as a kit carries it: one entry per occupied slot in
+/// chain order. Effect identities are not carried (a kit is not a project
+/// fragment); the loader allocates fresh ones.
+#[derive(Clone, Default, Serialize, Deserialize)]
+pub struct ProjectKitBusChain {
+    pub effects: Vec<ProjectKitBusEffect>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ProjectKitBusEffect {
+    /// Project effect name, as `ProjectBusChannel::custom_effects` stores it
+    /// (`builtin:<name>` for builtins, the saved effect name otherwise).
+    pub name: String,
+    /// Parameter values, plocks and host-managed refs (IR, filter table) of
+    /// the slot as it was when the kit was saved.
+    pub slot: ProjectEffectSlot,
 }
 
 /// One kit pad: where it sits on the pad keyboard, what it chokes, and the
@@ -6328,6 +6354,12 @@ mod tests {
                     sound: pad_sound("Hat", "samples/hat.wav"),
                 },
             ],
+            bus_chain: Some(ProjectKitBusChain {
+                effects: vec![ProjectKitBusEffect {
+                    name: "builtin:Filter".to_string(),
+                    slot: ProjectEffectSlot::from(&EffectSlotSnapshot::new_empty()),
+                }],
+            }),
         };
 
         let json = serde_json::to_string(&kit).expect("serialize kit");
@@ -6338,6 +6370,14 @@ mod tests {
         assert_eq!(restored.pads[1].pad_note, 42);
         assert_eq!(restored.pads[1].choke_group, Some(1));
         assert_eq!(restored.pads[1].name, "Hat");
+        let chain = restored.bus_chain.as_ref().expect("kits carry the rack bus chain");
+        assert_eq!(chain.effects.len(), 1);
+        assert_eq!(chain.effects[0].name, "builtin:Filter");
+        let legacy: ProjectKitPreset = serde_json::from_str(
+            &json.replace(",\"bus_chain\":{", ",\"bus_chain_unused\":{"),
+        )
+        .expect("a kit saved before the bus chain travelled still loads");
+        assert!(legacy.bus_chain.is_none(), "missing bus_chain leaves the target bus alone");
         match &restored.pads[1].sound.track.kind {
             ProjectTrackKind::Rack { slots, .. } => {
                 assert_eq!(slots[0].sample_path.as_deref(), Some("samples/hat.wav"));

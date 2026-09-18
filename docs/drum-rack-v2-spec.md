@@ -365,11 +365,16 @@ carries:
   track: the member's instrument (sampler buffer or custom engine), its
   instrument params, and its insert fx chain.
 
-It deliberately does **not** carry patterns, and it does not carry the rack
-bus's own fx chain or fader. Loading a kit therefore never overwrites anything
-that is already sequenced: it creates a *new* rack group beside the existing
-tracks, one empty member track per pad, and re-applies the pad map and choke
-groups. Pads whose Sound fails to load (a missing sample, a missing instrument)
+- the rack bus's own insert fx chain, since 2026-09-18 (eseq-172r.1,
+  `docs/rack-clips-and-break-kits-spec.md` §7.1): group processing is part
+  of a kit. Loading a kit onto an existing rack replaces that rack's bus
+  chain; kits saved before the chain travelled leave it alone. The bus fader,
+  pan and sends still do not travel.
+
+It deliberately does **not** carry patterns. Loading a kit therefore never
+overwrites anything that is already sequenced: it creates a *new* rack group
+beside the existing tracks, one empty member track per pad, and re-applies the
+pad map, choke groups and bus chain. Pads whose Sound fails to load (a missing sample, a missing instrument)
 are reported by name; the rest of the kit still lands. Every step a load takes
 is an ordinary recorded edit, so a kit load undoes like any other.
 
