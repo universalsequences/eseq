@@ -25,6 +25,7 @@ const DEFAULT_CAPTURE_OUTPUT: &str = "/tmp/metal-seq-capture.png";
 #[derive(Debug, Clone)]
 pub(crate) struct CaptureArgs {
     script: PathBuf,
+    project: Option<PathBuf>,
     buffer: String,
     track: usize,
     width: u32,
@@ -53,6 +54,7 @@ impl CaptureArgs {
         let cwd = std::env::current_dir()
             .map_err(|error| format!("failed to read the current directory: {error}"))?;
         let mut script = None;
+        let mut project = None;
         let mut buffer = DEFAULT_CAPTURE_BUFFER.to_string();
         let mut track = 0usize;
         let mut width = DEFAULT_CAPTURE_WIDTH;
@@ -70,6 +72,7 @@ impl CaptureArgs {
         while let Some(arg) = args.next() {
             match arg.as_str() {
                 "--script" => script = Some(PathBuf::from(next_arg(&mut args, "--script")?)),
+                "--project" => project = Some(absolute_path(&cwd, PathBuf::from(next_arg(&mut args, "--project")?))),
                 "--buffer" => buffer = normalize_buffer_name(&next_arg(&mut args, "--buffer")?),
                 "--track" => track = parse_usize_arg(&mut args, "--track")?,
                 "--width" => width = parse_dimension_arg(&mut args, "--width")?,
@@ -108,6 +111,7 @@ impl CaptureArgs {
         let out = absolute_path(&cwd, out);
         Ok(Some(Self {
             script,
+            project,
             buffer,
             track,
             width,
@@ -125,7 +129,7 @@ impl CaptureArgs {
     }
 
     fn usage() -> String {
-        "usage: metal_seq capture --script PATH [--buffer '*fx*'] [--track N] [--width PX] [--height PX] [--key KEY] [--padding PX] [--list-keys] [--hide-status] [--out PATH] [--scroll-frames N --scroll-x CELLS --scroll-y CELLS] [--all-panels]"
+        "usage: metal_seq capture --script PATH [--project SAVED_PROJECT_JSON] [--buffer '*fx*'] [--track N] [--width PX] [--height PX] [--key KEY] [--padding PX] [--list-keys] [--hide-status] [--out PATH] [--scroll-frames N --scroll-x CELLS --scroll-y CELLS] [--all-panels]"
             .to_string()
     }
 }
@@ -1124,8 +1128,16 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
         engine.master_recorder,
         engine.keyboard_tx,
     );
-    apply_capture_project(&mut app, &parsed.project)
-        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
+    if let Some(project) = &args.project {
+        if !parsed.project.tracks.is_empty() {
+            return Err("--project requires an empty (capture-project) declaration in the setup script".into());
+        }
+        app.queue_project_load_from_path("capture", project)?;
+        while app.has_pending_project_load() { app.advance_pending_project_load()?; }
+    } else {
+        apply_capture_project(&mut app, &parsed.project)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
+    }
     if !app.tracks.is_empty() && args.track >= app.tracks.len() {
         return Err(format!(
             "capture track {} is out of range for a {}-track project",
@@ -1289,6 +1301,7 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
         editor.runtime_mut(),
         &app,
         &mut SoundPaletteFrameState::default(),
+        true,
         true,
     );
     publish_capture_sound_glyphs(&mut editor)?;

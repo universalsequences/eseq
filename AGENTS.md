@@ -147,6 +147,15 @@ HEAD (see "Working tree safety"), then report it as pre-existing and move on.
 
 Known pre-existing failures in the validated baselines below: **none**.
 
+Local environment limitation verified 2026-09-18 against clean `1941c385`:
+`ui::metal_backend::inner::render_dispatch_tests::queued_value_updates_keep_each_frames_pixels_after_cache_eviction`
+fails at `device.newSharedEvent().expect("shared event")` before its ownership
+assertions. Reproduced with the exact release test in an isolated worktree and
+with the current debug build. The other three targeted Metal pixel/reuse tests
+pass. This does not establish a failure on other Macs or alter the historical
+baselines below; do not silently skip the queued-frame ownership check.
+Evidence: `.local/benchmarks/garageddd-ui-diagnosis-2026-09-17/metal-lease-clean-head.log`.
+
 Resolved on Apple Silicon, 2026-09-13 (`eseq-ymqh`):
 `state_values::tests::metal_seq_sequencer_ellipsis_toggles_expanded_track_editor`
 previously expected the removed `/expanded-timebase-0` control. The obsolete

@@ -67,6 +67,15 @@ change. Verify the prerequisite with `cargo nextest --version`; install it with
 reserved for explicitly exhaustive work such as eseq-4tl; see `AGENTS.md` for
 selection examples and runtime policy.
 
+Local environment limitation verified 2026-09-18 against clean `1941c385`:
+`ui::metal_backend::inner::render_dispatch_tests::queued_value_updates_keep_each_frames_pixels_after_cache_eviction`
+fails at `device.newSharedEvent().expect("shared event")` before its ownership
+assertions. Reproduced with the exact release test in an isolated worktree and
+with the current debug build. The other three targeted Metal pixel/reuse tests
+pass. This does not establish a failure on other Macs or alter the historical
+baselines below; do not silently skip the queued-frame ownership check.
+Evidence: `.local/benchmarks/garageddd-ui-diagnosis-2026-09-17/metal-lease-clean-head.log`.
+
 ### DGenLisp compiler (fetched, not tracked)
 
 The DGenLisp compiler binary is not in git. `content/dgenlisp.lock` pins the

@@ -1209,11 +1209,14 @@ pub(super) fn pull_shared_bus_state(
 /// factory `*sequencer*` plus every custom sequencer view a script or
 /// package registered. Read from the Lisp registry so a new view needs no
 /// host edit to count as "the sequencer".
-pub(super) fn registered_sequencer_view_buffers(editor: &mut Editor) -> Vec<String> {
+pub(super) fn registered_sequencer_view_buffers(editor: &Editor) -> Vec<String> {
     let mut names = vec!["*sequencer*".to_string()];
-    if let Ok(Some(Value::List(tabs))) = editor
-        .runtime_mut()
-        .invoke_global("eseq.seq-step-tabs/seq-main-step-tabs", Vec::new())
+    // Read the authoritative registration data, not its presentation accessor.
+    // Invoking Lisp also processes dirty effects and flushes widget trees; a
+    // per-tick visibility query must be a read-only operation.
+    if let Some(Value::List(tabs)) = editor
+        .runtime()
+        .state_value("eseq.seq-step-tabs/seq-registered-step-tabs")
     {
         for tab in tabs {
             let tab = tab.borrow();
@@ -1239,7 +1242,7 @@ pub(super) fn registered_sequencer_view_buffers(editor: &mut Editor) -> Vec<Stri
 /// step-tab buffer showing in its place. Per-frame sequencer publishes
 /// (step lists, playhead fields, expanded viewports) are gated on this, so
 /// a custom tab that replaces the factory grid keeps receiving state.
-pub(super) fn editor_has_visible_sequencer_view(editor: &mut Editor) -> bool {
+pub(super) fn editor_has_visible_sequencer_view(editor: &Editor) -> bool {
     registered_sequencer_view_buffers(editor)
         .iter()
         .any(|name| editor_has_visible_buffer(editor, name))

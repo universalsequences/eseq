@@ -57,11 +57,21 @@ pub(super) struct GlyphFrames {
     /// Per-track fingerprints for the mixer pattern-cell glyph feed, which
     /// runs every sync regardless of whether the palette is open.
     cell_published: HashMap<usize, u64>,
+    cell_sources: HashMap<usize, CellGlyphSourceRevision>,
     /// Per-track cache of `hash_descriptor_glyph_inputs` (SipHash over every
     /// param's name/range/kind/taper/ui metadata — ~110ms/s across a scroll
     /// profile when recomputed per tick). See `cached_descriptor_glyph_hash`
     /// for why the probe is sufficient.
     descriptor_hashes: HashMap<usize, DescriptorGlyphHashEntry>,
+}
+
+#[derive(PartialEq)]
+struct CellGlyphSourceRevision {
+    scenes: u64,
+    racks: u64,
+    schema: u64,
+    identity: u64,
+    instrument_type: Option<sequencer::sequencer::InstrumentType>,
 }
 
 struct DescriptorGlyphHashEntry {
@@ -1085,11 +1095,16 @@ pub(super) fn collect_pattern_cell_glyph_frames(
     let GlyphFrames {
         identity: identity_cache,
         cell_published,
+        cell_sources,
         revision,
         descriptor_hashes,
         ..
     } = glyphs;
     for track in 0..app.tracks.len() {
+        // Read revisions before the model snapshots. A concurrent writer can
+        // only cause one extra rebuild; it cannot certify stale data as fresh.
+        let scenes_revision = app.state.project_scenes_revision();
+        let racks_revision = app.state.pattern.rack_tracks.revision();
         let cells = app.state.track_pattern_cells(track);
         if cells.is_empty() {
             continue;
@@ -1108,6 +1123,10 @@ pub(super) fn collect_pattern_cell_glyph_frames(
         let descriptor_hash = surface.schema_hash;
         let identity_fingerprint = surface.identity_fingerprint;
         let identity = surface.identity;
+        let source_revision = CellGlyphSourceRevision {
+            scenes: scenes_revision, racks: racks_revision, schema: descriptor_hash,
+            identity: identity_fingerprint, instrument_type: surface.track_instrument_type.cloned(),
+        };
         app.state.with_project_scenes(|scenes| {
             let Some(pool) = scenes.track_pools.get(track) else { return };
             // Reference first, then each cell's patch in cell order, deduped.
@@ -1131,6 +1150,8 @@ pub(super) fn collect_pattern_cell_glyph_frames(
             for (pattern, _) in &cell_patches {
                 active.insert(pattern_cell_glyph_key(track, pattern.0));
             }
+            if cell_sources.get(&track) == Some(&source_revision) { return; }
+            cell_sources.insert(track, source_revision);
 
             // Compatibility is resolved ONCE per cohort patch per sync and
             // reused by the cohort build below: for a rack it hashes the
@@ -1245,6 +1266,7 @@ pub(super) fn collect_pattern_cell_glyph_frames(
     retain_sound_glyph_frames("pattern-glyph:", &active);
     set_sound_glyph_play_keys("pattern-glyph:", play_keys);
     cell_published.retain(|track, _| tracks_seen.contains(track));
+    cell_sources.retain(|track, _| tracks_seen.contains(track));
     pending
 }
 
@@ -1424,8 +1446,13 @@ fn build_clip_sounds_value(tracks: &[Vec<(u64, bool, Option<u8>)>]) -> Value {
     )
 }
 
-/// Publish the palette read surfaces. Returns true when a reactive cycle is
-/// needed. The clip-sounds join (two lock scopes + a full per-clip build)
+pub(crate) struct SoundPaletteSyncResult {
+    pub effects_dirty: bool,
+    pub paint_dirty: bool,
+}
+
+/// Publish the palette read surfaces, distinguishing effect work from paint
+/// resource changes. The clip-sounds join (two lock scopes + a full per-clip build)
 /// only runs while the arrangement is visible — nothing else reads it; the
 /// cache clears on hide so re-showing republishes fresh. The palette half
 /// stays ungated (cheap, and it also mounts in the *step* side panel).
@@ -1434,9 +1461,13 @@ pub(crate) fn sync_sound_palette(
     app: &app::App,
     frame: &mut SoundPaletteFrameState,
     arrangement_visible: bool,
-) -> bool {
+    pattern_glyphs_visible: bool,
+) -> SoundPaletteSyncResult {
     let mut dirty = false;
-    sync_pattern_cell_glyph_frames(app, &mut frame.glyphs);
+    let paint_before = eseqlisp::widget_render::widget_state_generation();
+    if pattern_glyphs_visible {
+        sync_pattern_cell_glyph_frames(app, &mut frame.glyphs);
+    }
     match app.sound_palette_open {
         Some((track, target)) => {
             let entries = app.sound_palette_entries(track, target);
@@ -1483,7 +1514,10 @@ pub(crate) fn sync_sound_palette(
         // visible frame recomputes and republishes.
         frame.cached_clip_sounds = None;
     }
-    dirty
+    SoundPaletteSyncResult {
+        effects_dirty: dirty,
+        paint_dirty: paint_before != eseqlisp::widget_render::widget_state_generation(),
+    }
 }
 
 /// Rack composite surface tests (docs/rack-glyph-spec.md §4). These exercise

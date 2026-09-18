@@ -15,6 +15,7 @@ mod native_menu;
 mod piano_roll;
 mod patch_learn;
 mod profile;
+mod frame_pacer;
 mod roll_record;
 mod retrospective;
 mod step_print;

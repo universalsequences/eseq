@@ -62,6 +62,16 @@ pub(crate) struct EditSessionState {
     >,
 }
 
+/// Demand at the previous display poll. Newly shown panels sample immediately,
+/// even when the ordinary meter cadence is not due yet.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct MeterVisibility {
+    pub(crate) master: bool,
+    pub(crate) tracks: bool,
+    pub(crate) fx: bool,
+    pub(crate) mixer: bool,
+}
+
 /// Meter/CPU/modulator polling caches: values read from the audio graph at a
 /// throttled rate and reused between polls.
 pub(crate) struct MeterCache {
@@ -117,6 +127,7 @@ pub(crate) struct ParamSyncRevision {
 /// reactives to republish.
 #[cfg_attr(test, derive(Default))]
 pub(crate) struct FrameDiffState {
+    pub(crate) prev_meter_visibility: MeterVisibility,
     pub(crate) prev_editor_macro_action: (String, String),
     /// Hash of the macro-action query's inputs (edit-session path/source/
     /// validity plus the patcher's open macro view); the origin lookup only

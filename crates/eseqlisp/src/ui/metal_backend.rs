@@ -160,6 +160,7 @@ mod inner {
         pub culled_nodes: usize,
         pub reindexed_nodes: usize,
         pub bounds_refreshed_nodes: usize,
+        pub paint_reasons: crate::widget_render::retained_scene::PaintReasons,
         pub cache_hits: u64,
         pub cache_misses: u64,
     }
@@ -2366,6 +2367,14 @@ fragment float4 live_spectrogram_frag(
                 monospace_font_size_pt,
                 false,
             )
+        }
+
+        /// Initialize textures and pipelines for explicit capture targets,
+        /// without constructing an AppKit window or a winit event loop.
+        /// `scale` is pixels per logical point in the requested capture.
+        pub fn initialize_offscreen(&mut self, scale: f64) -> Result<(), BackendError> {
+            if !scale.is_finite() || scale <= 0.0 { return Err(BackendError::MetalError); }
+            self.initialize_graphics(scale)
         }
 
         fn new_with_size_font_size_and_visibility(
@@ -5056,6 +5065,7 @@ fragment float4 live_spectrogram_frag(
             let hits_before = self.stats.widget_run_cache_hits;
             let misses_before = self.stats.widget_run_cache_misses;
             let mut scene_counts = [0usize; 5];
+            let mut paint_reasons = crate::widget_render::retained_scene::PaintReasons::default();
             crate::widget_render::sdf_widget::set_sdf_time_seconds(self.elapsed_time_seconds());
             self.compile_pending_sdf_pipelines();
             self.compile_pending_button_surface_override();
@@ -5354,6 +5364,7 @@ fragment float4 live_spectrogram_frag(
                     scene_counts[2] += scene.culled_nodes;
                     scene_counts[3] += scene.reindexed_nodes;
                     scene_counts[4] += scene.bounds_refreshed_nodes;
+                    paint_reasons.accumulate(scene.paint_reasons);
                     let mut offset_prims = Vec::new();
                     let mut offset_run_indices = Vec::new();
                     let mut offset_runs = Vec::new();
@@ -6286,6 +6297,7 @@ fragment float4 live_spectrogram_frag(
                 culled_nodes: scene_counts[2],
                 reindexed_nodes: scene_counts[3],
                 bounds_refreshed_nodes: scene_counts[4],
+                paint_reasons,
                 cache_hits: self.stats.widget_run_cache_hits - hits_before,
                 cache_misses: self.stats.widget_run_cache_misses - misses_before,
             };

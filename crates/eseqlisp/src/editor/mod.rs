@@ -6,6 +6,7 @@ pub(crate) mod widget_focus;
 mod widget_interaction;
 
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -21,7 +22,7 @@ use crate::hot_reload::{ReloadReport, SourceOverlay};
 use crate::layout::{LayoutNode, Rect};
 use crate::mode::{
     BufferMode, CompletionItem, CompletionMatch, TokenSpan, completion_match,
-    has_completion_prefix, has_import_module_prefix, highlight_lines,
+    has_completion_prefix, has_import_module_prefix,
 };
 use crate::runtime::Runtime;
 use crate::text::{innermost_sexp_range_at_cursor, sexp_at_cursor};
@@ -3530,13 +3531,34 @@ impl Editor {
         &mut self,
         scroll_top: usize,
         viewport_height: usize,
-    ) -> Vec<Vec<TokenSpan>> {
+    ) -> Rc<Vec<Vec<TokenSpan>>> {
         let buf_idx = self.active_buffer_idx();
-        let symbols = self.runtime.completion_symbols();
         let buffer = &self.buffers[buf_idx];
         let visible = scroll_top.min(buffer.lines.len())
-            ..(scroll_top + viewport_height).min(buffer.lines.len());
-        highlight_lines(&buffer.mode, buffer.lines[visible].iter(), &symbols, buffer)
+            ..scroll_top.saturating_add(viewport_height).min(buffer.lines.len());
+        let symbol_revision = self.runtime.symbol_revision();
+        let mut vocabulary = None;
+        if let Some(cache) = &self.active_leaf().highlight_cache {
+            if cache.buffer_id == buffer.id && cache.buffer_revision == buffer.revision
+                && cache.buffer_mode == buffer.mode
+                && cache.runtime_symbol_revision == symbol_revision
+            {
+                if cache.visible == visible { return Rc::clone(&cache.spans); }
+                vocabulary = Some(Rc::clone(&cache.vocabulary));
+            }
+        }
+        let vocabulary = vocabulary.unwrap_or_else(|| {
+            let symbols = self.runtime.completion_symbols();
+            Rc::new(crate::mode::HighlightVocabulary::new(&self.buffers[buf_idx], &symbols))
+        });
+        let buffer = &self.buffers[buf_idx];
+        let spans = Rc::new(vocabulary.highlight_lines(buffer.lines[visible.clone()].iter()));
+        let cache = crate::tile::HighlightCache {
+            buffer_id: buffer.id, buffer_revision: buffer.revision, buffer_mode: buffer.mode.clone(),
+            runtime_symbol_revision: symbol_revision, visible, vocabulary, spans: Rc::clone(&spans),
+        };
+        self.active_leaf_mut().highlight_cache = Some(cache);
+        spans
     }
 
     pub fn active_sexp_range(&self) -> Option<((usize, usize), (usize, usize))> {
@@ -4400,6 +4422,13 @@ impl Editor {
         }
     }
 
+    pub fn has_visible_inline_runtime_bindings(&self) -> bool {
+        self.tile_root.leaf_ids().iter().any(|tile_id| {
+            self.tile_root.find_leaf(*tile_id).is_some_and(|leaf|
+                !self.buffers[leaf.buffer_idx].inline_widget_runtime_bindings().is_empty())
+        })
+    }
+
     pub fn visible_widget_layouts(&self) -> Vec<Arc<crate::layout::LayoutNode>> {
         let active_buffer_idx = self.active_buffer_idx();
         self.tile_root
@@ -4414,6 +4443,16 @@ impl Editor {
                 }
             })
             .collect()
+    }
+
+    /// Query actual mounted widget sources, including user-authored buffers.
+    pub fn has_visible_widget_source(&mut self, widget_type: &str, prefix: &str) -> bool {
+        self.sync_layout_to_active_leaf();
+        self.tile_root.leaf_ids().into_iter().any(|id| {
+            self.tile_root.find_leaf_mut(id).and_then(|leaf| leaf.layout_index())
+                .and_then(|index| index.sources.get(widget_type))
+                .is_some_and(|sources| sources.iter().any(|source| source.starts_with(prefix)))
+        })
     }
 
     pub fn active_buffer_has_ui(&self) -> bool {

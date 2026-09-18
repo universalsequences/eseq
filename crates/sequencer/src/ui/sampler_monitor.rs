@@ -130,12 +130,13 @@ mod tests {
 
 pub(crate) fn sync_watched_sampler_voices(
     app: &app::App,
-    current_track: usize,
+    current_track: Option<usize>,
     watched_track: &mut Option<usize>,
     watched_voice_ids: &mut Vec<i32>,
 ) {
+    let sampler_track = current_track.filter(|&track| track < app.tracks.len() && app.is_sampler_track(track));
     let desired_voice_ids =
-        if current_track < app.tracks.len() && app.is_sampler_track(current_track) {
+        if let Some(current_track) = sampler_track {
             app.graph
                 .track_node_ids
                 .get(current_track)
@@ -145,7 +146,7 @@ pub(crate) fn sync_watched_sampler_voices(
             Vec::new()
         };
 
-    if *watched_track == Some(current_track) && *watched_voice_ids == desired_voice_ids {
+    if *watched_track == sampler_track && *watched_voice_ids == desired_voice_ids {
         return;
     }
 
@@ -166,7 +167,7 @@ pub(crate) fn sync_watched_sampler_voices(
     *watched_track = if desired_voice_ids.is_empty() {
         None
     } else {
-        Some(current_track)
+        current_track
     };
     *watched_voice_ids = desired_voice_ids;
 }

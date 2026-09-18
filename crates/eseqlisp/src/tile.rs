@@ -116,6 +116,7 @@ pub struct TileLeaf {
     pub last_widget_click: Option<WidgetClick>,
     pub hit_grid_cache: Option<CachedHitGrid>,
     pub highlight_cache: Option<HighlightCache>,
+    layout_index: Option<LayoutIndex>,
     // Per-tile layout cache
     pub cached_layout: Option<Arc<LayoutNode>>,
     pub cached_layout_widget_tree_revision: u64,
@@ -183,12 +184,50 @@ pub struct HighlightCache {
     pub buffer_revision: u64,
     pub buffer_mode: BufferMode,
     pub runtime_symbol_revision: u64,
+    pub visible: std::ops::Range<usize>,
+    pub vocabulary: Rc<crate::mode::HighlightVocabulary>,
     pub spans: Rc<Vec<Vec<TokenSpan>>>,
+}
+
+/// Indexed once per layout content revision, shared by dirty routing and
+/// host display-demand queries. It holds no extra Arc that would force layout
+/// copy-on-write during edits.
+pub struct LayoutIndex {
+    identity: usize,
+    layout_revision: u64,
+    content_revision: u64,
+    pub widget_ids: std::collections::HashSet<u64>,
+    pub sources: std::collections::HashMap<String, std::collections::HashSet<String>>,
 }
 
 // ── TileLeaf constructors ────────────────────────────────────────────────
 
 impl TileLeaf {
+    pub fn layout_index(&mut self) -> Option<&LayoutIndex> {
+        let layout = self.cached_layout.as_ref()?;
+        let identity = Arc::as_ptr(layout) as usize;
+        if !self.layout_index.as_ref().is_some_and(|index|
+            index.identity == identity && index.layout_revision == self.layout_revision
+                && index.content_revision == self.cached_layout_widget_tree_revision)
+        {
+            let mut index = LayoutIndex {
+                identity, layout_revision: self.layout_revision,
+                content_revision: self.cached_layout_widget_tree_revision,
+                widget_ids: Default::default(), sources: Default::default(),
+            };
+            let mut pending = vec![layout.as_ref()];
+            while let Some(node) = pending.pop() {
+                index.widget_ids.insert(node.widget_id);
+                if let Some(Value::String(source)) = node.props.get("source") {
+                    index.sources.entry(node.widget_type.clone()).or_default().insert(source.clone());
+                }
+                pending.extend(node.children.iter());
+            }
+            self.layout_index = Some(index);
+        }
+        self.layout_index.as_ref()
+    }
+
     pub fn new(id: TileId, buffer_idx: usize) -> Self {
         Self {
             id,
@@ -220,6 +259,7 @@ impl TileLeaf {
             last_widget_click: None,
             hit_grid_cache: None,
             highlight_cache: None,
+            layout_index: None,
             cached_layout: None,
             cached_layout_widget_tree_revision: 0,
             dirty_widget_ids: Vec::new(),
@@ -806,5 +846,34 @@ pub fn split_ratio_for_point(area: Rect, dir: SplitDir, col: f32, row: f32) -> f
     match dir {
         SplitDir::Horizontal => ((row - area.row) / area.height.max(1.0)).clamp(0.1, 0.9),
         SplitDir::Vertical => ((col - area.col) / area.width.max(1.0)).clamp(0.1, 0.9),
+    }
+}
+
+#[cfg(test)]
+mod layout_index_tests {
+    use super::*;
+
+    #[test]
+    fn in_place_content_edits_refresh_widget_ids_and_host_sources() {
+        let mut leaf = TileLeaf::new(1, 0);
+        leaf.cached_layout = Some(Arc::new(LayoutNode {
+            widget_id: 41, stable_widget_id: None, subtree_root_id: None,
+            parent_subtree_root_id: None, stable_key: None, widget_type: "sound-glyph".into(),
+            rect: Rect { row: 0.0, col: 0.0, width: 5.0, height: 5.0 },
+            props: std::collections::HashMap::from([("source".into(), Value::String("pattern-glyph:old".into()))]),
+            children: vec![], focusable: false, animation: Default::default(),
+        }));
+        assert!(leaf.layout_index().unwrap().widget_ids.contains(&41));
+        let identity = Arc::as_ptr(leaf.cached_layout.as_ref().unwrap());
+        let node = Arc::get_mut(leaf.cached_layout.as_mut().unwrap()).expect("index must not retain a layout Arc");
+        node.widget_id = 42;
+        node.props.insert("source".into(), Value::String("pattern-glyph:new".into()));
+        leaf.cached_layout_widget_tree_revision += 1;
+        assert_eq!(identity, Arc::as_ptr(leaf.cached_layout.as_ref().unwrap()));
+        let index = leaf.layout_index().unwrap();
+        assert!(!index.widget_ids.contains(&41));
+        assert!(index.widget_ids.contains(&42));
+        assert!(index.sources["sound-glyph"].contains("pattern-glyph:new"));
+        assert!(!index.sources["sound-glyph"].contains("pattern-glyph:old"));
     }
 }

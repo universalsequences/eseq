@@ -1,5 +1,6 @@
-use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::collections::HashSet;
+use std::sync::{Arc, OnceLock};
+use crate::widget_render::paint_resources::PaintResourceStore;
 
 #[derive(Clone, Debug)]
 pub struct SpectrogramFrame {
@@ -24,33 +25,29 @@ impl SpectrogramFrame {
     }
 }
 
-static SPECTROGRAM_FRAMES: OnceLock<Mutex<HashMap<String, Arc<SpectrogramFrame>>>> =
-    OnceLock::new();
+static SPECTROGRAM_FRAMES: OnceLock<PaintResourceStore<Arc<SpectrogramFrame>>> = OnceLock::new();
 
-fn spectrogram_frames() -> &'static Mutex<HashMap<String, Arc<SpectrogramFrame>>> {
-    SPECTROGRAM_FRAMES.get_or_init(|| Mutex::new(HashMap::new()))
+fn spectrogram_frames() -> &'static PaintResourceStore<Arc<SpectrogramFrame>> {
+    SPECTROGRAM_FRAMES.get_or_init(PaintResourceStore::default)
 }
 
 pub fn publish_spectrogram_frame(key: impl Into<String>, frame: SpectrogramFrame) {
     if !frame.is_well_formed() {
         return;
     }
-    let mut frames = spectrogram_frames().lock().unwrap();
-    frames.insert(key.into(), Arc::new(frame));
+    spectrogram_frames().publish(key.into(), Arc::new(frame));
 }
 
 pub fn spectrogram_frame(key: &str) -> Option<Arc<SpectrogramFrame>> {
-    let frames = spectrogram_frames().lock().unwrap();
-    frames.get(key).cloned()
+    spectrogram_frames().get(key)
 }
 
 pub fn retain_spectrogram_frames(active_keys: &HashSet<String>) {
-    let mut frames = spectrogram_frames().lock().unwrap();
-    frames.retain(|key, _| active_keys.contains(key));
+    spectrogram_frames().retain(|key| active_keys.contains(key));
 }
 
 pub fn clear_spectrogram_frames() {
-    spectrogram_frames().lock().unwrap().clear();
+    spectrogram_frames().clear();
 }
 
 #[derive(Clone, Debug)]
@@ -69,36 +66,29 @@ impl ScopeFrame {
     }
 }
 
-static SCOPE_FRAMES: OnceLock<Mutex<HashMap<String, Arc<ScopeFrame>>>> = OnceLock::new();
+static SCOPE_FRAMES: OnceLock<PaintResourceStore<Arc<ScopeFrame>>> = OnceLock::new();
 
-fn scope_frames() -> &'static Mutex<HashMap<String, Arc<ScopeFrame>>> {
-    SCOPE_FRAMES.get_or_init(|| Mutex::new(HashMap::new()))
+fn scope_frames() -> &'static PaintResourceStore<Arc<ScopeFrame>> {
+    SCOPE_FRAMES.get_or_init(PaintResourceStore::default)
 }
 
 pub fn publish_scope_frame(key: impl Into<String>, frame: ScopeFrame) {
     if !frame.is_well_formed() {
         return;
     }
-    scope_frames()
-        .lock()
-        .unwrap()
-        .insert(key.into(), Arc::new(frame));
-    crate::widget_render::bump_widget_state_generation();
+    scope_frames().publish(key.into(), Arc::new(frame));
 }
 
 pub fn scope_frame(key: &str) -> Option<Arc<ScopeFrame>> {
-    scope_frames().lock().unwrap().get(key).cloned()
+    scope_frames().get(key)
 }
 
 pub fn retain_scope_frames(active_keys: &HashSet<String>) {
-    scope_frames()
-        .lock()
-        .unwrap()
-        .retain(|key, _| active_keys.contains(key));
+    scope_frames().retain(|key| active_keys.contains(key));
 }
 
 pub fn clear_scope_frames() {
-    scope_frames().lock().unwrap().clear();
+    scope_frames().clear();
 }
 
 /// Live meter snapshot for one multiband dynamics effect instance: per-band
@@ -110,34 +100,26 @@ pub struct BandMeterFrame {
     pub gain_db: [f32; 3],
 }
 
-static BAND_METER_FRAMES: OnceLock<Mutex<HashMap<String, BandMeterFrame>>> = OnceLock::new();
+static BAND_METER_FRAMES: OnceLock<PaintResourceStore<BandMeterFrame>> = OnceLock::new();
 
-fn band_meter_frames() -> &'static Mutex<HashMap<String, BandMeterFrame>> {
-    BAND_METER_FRAMES.get_or_init(|| Mutex::new(HashMap::new()))
+fn band_meter_frames() -> &'static PaintResourceStore<BandMeterFrame> {
+    BAND_METER_FRAMES.get_or_init(PaintResourceStore::default)
 }
 
 pub fn publish_band_meter_frame(key: impl Into<String>, frame: BandMeterFrame) {
-    {
-        let mut frames = band_meter_frames().lock().unwrap();
-        frames.insert(key.into(), frame);
-    }
-    // Meter widgets fold the frame into their primitives at build time, so a
-    // new frame must invalidate the compiled primitive cache to repaint.
-    crate::widget_render::bump_widget_state_generation();
+    band_meter_frames().publish(key.into(), frame);
 }
 
 pub fn band_meter_frame(key: &str) -> Option<BandMeterFrame> {
-    let frames = band_meter_frames().lock().unwrap();
-    frames.get(key).copied()
+    band_meter_frames().get(key)
 }
 
 pub fn retain_band_meter_frames(active_keys: &HashSet<String>) {
-    let mut frames = band_meter_frames().lock().unwrap();
-    frames.retain(|key, _| active_keys.contains(key));
+    band_meter_frames().retain(|key| active_keys.contains(key));
 }
 
 pub fn clear_band_meter_frames() {
-    band_meter_frames().lock().unwrap().clear();
+    band_meter_frames().clear();
 }
 
 /// Live meter history for one compressor effect instance: fine-grained
@@ -164,37 +146,29 @@ impl CompressorMeterFrame {
     }
 }
 
-static COMPRESSOR_METER_FRAMES: OnceLock<Mutex<HashMap<String, Arc<CompressorMeterFrame>>>> =
-    OnceLock::new();
+static COMPRESSOR_METER_FRAMES: OnceLock<PaintResourceStore<Arc<CompressorMeterFrame>>> = OnceLock::new();
 
-fn compressor_meter_frames() -> &'static Mutex<HashMap<String, Arc<CompressorMeterFrame>>> {
-    COMPRESSOR_METER_FRAMES.get_or_init(|| Mutex::new(HashMap::new()))
+fn compressor_meter_frames() -> &'static PaintResourceStore<Arc<CompressorMeterFrame>> {
+    COMPRESSOR_METER_FRAMES.get_or_init(PaintResourceStore::default)
 }
 
 pub fn publish_compressor_meter_frame(key: impl Into<String>, frame: CompressorMeterFrame) {
     if !frame.is_well_formed() {
         return;
     }
-    compressor_meter_frames()
-        .lock()
-        .unwrap()
-        .insert(key.into(), Arc::new(frame));
-    crate::widget_render::bump_widget_state_generation();
+    compressor_meter_frames().publish(key.into(), Arc::new(frame));
 }
 
 pub fn compressor_meter_frame(key: &str) -> Option<Arc<CompressorMeterFrame>> {
-    compressor_meter_frames().lock().unwrap().get(key).cloned()
+    compressor_meter_frames().get(key)
 }
 
 pub fn retain_compressor_meter_frames(active_keys: &HashSet<String>) {
-    compressor_meter_frames()
-        .lock()
-        .unwrap()
-        .retain(|key, _| active_keys.contains(key));
+    compressor_meter_frames().retain(|key| active_keys.contains(key));
 }
 
 pub fn clear_compressor_meter_frames() {
-    compressor_meter_frames().lock().unwrap().clear();
+    compressor_meter_frames().clear();
 }
 
 #[cfg(test)]

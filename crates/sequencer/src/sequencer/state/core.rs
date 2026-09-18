@@ -16,7 +16,7 @@ pub struct PatternState {
     pub track_params: Vec<TrackParams>,
     pub effect_chains: Vec<Vec<EffectSlotState>>,
     pub midi_fx_slots: Vec<Vec<EffectSlotState>>,
-    pub(super) scenes: Mutex<ProjectScenes>,
+    pub(super) scenes: RevisionedMutex<ProjectScenes>,
     /// The committed song (docs/song-mode-spec.md section 5), or `None` when
     /// the project has no song. Stored beside — not inside — `ProjectScenes`
     /// because several paths rebuild `ProjectScenes` wholesale from snapshots
@@ -58,7 +58,7 @@ pub struct PatternState {
     pub instrument_base_note_offsets: Vec<AtomicU32>,
     pub instrument_run_modes: Vec<AtomicU32>,
     pub track_sound_state: Mutex<Vec<TrackSoundState>>,
-    pub rack_tracks: Mutex<Vec<Option<RackTrackSnapshot>>>,
+    pub rack_tracks: RevisionedMutex<Vec<Option<RackTrackSnapshot>>>,
     pub process_chains: Mutex<Vec<crate::process::TrackProcessChain>>,
     /// Per-track roster of user-added process slots (eseq-53y7): the
     /// scene-INDEPENDENT structure half of a track's own process chain.

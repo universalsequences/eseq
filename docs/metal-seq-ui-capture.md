@@ -189,6 +189,12 @@ Layer racks can declare `:instruments ("factory:Synths/Digi Drift")` to load sav
 
 ## Tiled capture and scroll replay
 
+`--project PATH` loads a saved project through the normal host loader. Use a
+script containing an empty `(capture-project)` declaration followed by any UI
+setup and `capture-after-sync` hook. The project file is read, never saved; the
+in-memory project supplies the tracks, instruments, effects, and groups.
+`--track 0` selects the first track after loading.
+
 `--all-panels` preserves the fixture's panel layout and focuses the existing
 tile named by `--buffer`. It fails if that buffer is not visible, so selecting
 FX cannot replace the transport or another panel. This path uses the production

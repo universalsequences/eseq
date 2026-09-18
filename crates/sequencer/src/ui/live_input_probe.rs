@@ -94,7 +94,6 @@ pub(super) fn run(
                 rows: rows as usize,
                 viewport_size: (cols as usize, rows as usize),
                 stub_animation_active: false,
-                frame_interval: Duration::from_secs_f64(1.0 / 30.0),
                 sdf_animation_active: false,
                 playing_now: true,
             },

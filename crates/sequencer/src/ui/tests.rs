@@ -1,5 +1,8 @@
     #[path = "live_input_probe.rs"]
     mod live_input_probe;
+    #[cfg(target_os = "macos")]
+    #[path = "ui_replay_probe.rs"]
+    mod ui_replay_probe;
 
     use super::{
         apply_bus_mixer_history_host_command,
@@ -2714,9 +2717,17 @@
         project_92_ui_performance_probe_impl(Project92UiProbe::LiveKeyboardLatency);
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "manual release UI replay; ESEQ_UI_REPLAY_PROJECT names a saved project"]
+    fn saved_project_ui_playback_replay() {
+        project_92_ui_performance_probe_impl(Project92UiProbe::PlaybackUi);
+    }
+
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     enum Project92UiProbe {
         LiveKeyboardLatency,
+        PlaybackUi,
         SceneSwitch,
         EscapeDeselect,
         RackMacroDrag,
@@ -2886,7 +2897,7 @@
         let _dir = SequencerDirGuard::enter();
         let full_layout = matches!(
             probe,
-            Project92UiProbe::LiveKeyboardLatency
+            Project92UiProbe::LiveKeyboardLatency | Project92UiProbe::PlaybackUi
                 | Project92UiProbe::StepInteractionsFullLayout
                 | Project92UiProbe::InstrumentPlockKnobDrag
                 | Project92UiProbe::ResponseCurveEditorDrag
@@ -2912,16 +2923,17 @@
             Project92UiProbe::DriftTrackSwitch | Project92UiProbe::DriftTrackSwitchSmoke
         );
         let project_name = match probe {
-            Project92UiProbe::LiveKeyboardLatency => "live-input-probe",
+            Project92UiProbe::LiveKeyboardLatency | Project92UiProbe::PlaybackUi => "live-input-probe",
             Project92UiProbe::PianoholdSelection => "pianohold",
             Project92UiProbe::DriftTrackSwitch | Project92UiProbe::DriftTrackSwitchSmoke => {
                 "drift-switch"
             }
             _ => "92",
         };
-        let project_fixture = if probe == Project92UiProbe::LiveKeyboardLatency {
-            PathBuf::from(std::env::var("ESEQ_LIVE_INPUT_PROJECT")
-                .expect("set ESEQ_LIVE_INPUT_PROJECT to an absolute saved-project path"))
+        let project_fixture = if matches!(probe, Project92UiProbe::LiveKeyboardLatency | Project92UiProbe::PlaybackUi) {
+            let variable = if probe == Project92UiProbe::PlaybackUi { "ESEQ_UI_REPLAY_PROJECT" } else { "ESEQ_LIVE_INPUT_PROJECT" };
+            PathBuf::from(std::env::var(variable)
+                .unwrap_or_else(|_| panic!("set {variable} to an absolute saved-project path")))
         } else {
             perf_probe_project_fixture(project_name)
         };
@@ -3148,7 +3160,7 @@
         );
         // The drift-switch fixture is the reported project verbatim: one
         // scene. Every other probe fixture is multi-scene.
-        let required_scenes = if drift_switch || probe == Project92UiProbe::LiveKeyboardLatency {
+        let required_scenes = if drift_switch || matches!(probe, Project92UiProbe::LiveKeyboardLatency | Project92UiProbe::PlaybackUi) {
             1
         } else {
             2
@@ -3412,7 +3424,7 @@
         editor.update_tile_rects(vp_cols, vp_rows);
         let _ = editor.drain_host_commands();
 
-        if probe == Project92UiProbe::LiveKeyboardLatency {
+        if matches!(probe, Project92UiProbe::LiveKeyboardLatency | Project92UiProbe::PlaybackUi) {
             let (probe_tx, probe_rx) = std::sync::mpsc::channel();
             let shared = SharedHandles {
                 state: state.clone(),
@@ -3452,7 +3464,12 @@
                 piano_roll_clipboard: piano_roll_clipboard.clone(),
                 arrangement_clipboard: app::song_region::new_arrangement_clipboard(),
             };
-            live_input_probe::run(&mut editor, &mut app, &shared, probe_rx, vp_cols, vp_rows);
+            if probe == Project92UiProbe::PlaybackUi {
+                #[cfg(target_os = "macos")]
+                ui_replay_probe::run(&mut editor, &mut app, &shared);
+            } else {
+                live_input_probe::run(&mut editor, &mut app, &shared, probe_rx, vp_cols, vp_rows);
+            }
             return;
         }
 
@@ -9433,6 +9450,7 @@
                 &app,
                 &mut frame_diff.sound_palette,
                 false,
+                true,
             );
             editor.runtime_mut().run_reactive_cycle();
             editor.refresh_runtime_side_effects();
@@ -9546,6 +9564,7 @@
                     app,
                     &mut frame.sound_palette,
                     false,
+                    true,
                 );
                 let tick_sync_done = Instant::now();
                 let ct = current_track.load(Ordering::Relaxed);

@@ -6,7 +6,6 @@ pub(crate) struct TickInputs {
     pub(crate) rows: usize,
     pub(crate) viewport_size: (usize, usize),
     pub(crate) stub_animation_active: bool,
-    pub(crate) frame_interval: Duration,
     pub(crate) sdf_animation_active: bool,
     pub(crate) playing_now: bool,
 }
@@ -247,7 +246,9 @@ pub(crate) fn sync_reactive_tick(
         ctx.shared.state.process_channel_values_version();
     if process_channel_values_version != ctx.frame.prev_process_channel_values_version {
         ctx.frame.prev_process_channel_values_version = process_channel_values_version;
-        editor.mark_needs_redraw();
+        if editor.has_visible_inline_runtime_bindings() {
+            editor.mark_needs_redraw();
+        }
     }
     // Process → instrument param effective values (knob dot / picker bar):
     // republish when the scheduler resolved a new write since the last frame.
@@ -274,7 +275,9 @@ pub(crate) fn sync_reactive_tick(
     // Lane strip scopes: republish the state histories whenever the
     // scheduler fired a step process since the last frame.
     let process_scope_values_version = ctx.shared.state.process_scope_values_version();
-    if process_scope_values_version != ctx.frame.prev_process_scope_values_version {
+    if process_scope_values_version != ctx.frame.prev_process_scope_values_version
+        && editor.runtime().has_live_reactive_consumers("SEQ", "track-process-scopes")
+    {
         ctx.frame.prev_process_scope_values_version = process_scope_values_version;
         state_values::sync_process_scope_state(
             editor.runtime_mut(),
@@ -337,9 +340,10 @@ pub(crate) fn sync_reactive_tick(
 
     // 2. Sync reactive state AFTER events
     let ct = current_track_for_app(&mut app, &ctx.shared.current_track).unwrap_or(0);
+    let sampler_playhead_wanted = editor.runtime().has_live_reactive_consumers("SEQ", "sampler-playhead");
     sync_watched_sampler_voices(
         &app,
-        ct,
+        sampler_playhead_wanted.then_some(ct),
         &mut ctx.frame.watched_sampler_voice_track,
         &mut ctx.frame.watched_sampler_voice_ids,
     );
@@ -374,33 +378,40 @@ pub(crate) fn sync_reactive_tick(
             || editor_has_visible_buffer(&editor, "*piano-roll*");
         let previous_playhead = ctx.frame.prev_playhead;
         let current_track_playhead_changed = playhead != ctx.frame.prev_playhead;
-        let mut meter_polled = false;
-        if ctx.meters.last_meter_poll_at.elapsed() >= METER_POLL_INTERVAL {
+        let meter_polled = ctx.meters.last_meter_poll_at.elapsed() >= METER_POLL_INTERVAL;
+        let was_visible = ctx.frame.prev_meter_visibility;
+        if master_meter_visible && (meter_polled || !was_visible.master) {
             ctx.meters.cached_peak_l_level = meter_display_level(f32::from_bits(
                 ctx.shared.state.transport.peak_l.load(Ordering::Relaxed),
             ));
             ctx.meters.cached_peak_r_level = meter_display_level(f32::from_bits(
                 ctx.shared.state.transport.peak_r.load(Ordering::Relaxed),
             ));
+        }
+        if track_and_bus_meter_visible && (meter_polled || !was_visible.tracks) {
             ctx.meters.cached_track_peak_levels =
                 read_track_peak_levels(app.graph.lg, &app.graph.track_node_ids);
-            ctx.meters.cached_rack_slot_peak_levels =
-                read_rack_slot_peak_levels(app.graph.lg, &app);
-            ctx.meters.cached_bus_peak_levels =
-                read_bus_peak_levels(app.graph.lg, &app.graph.bus_node_ids);
-            (
-                ctx.meters.cached_modulator_phases,
-                ctx.meters.cached_modulator_levels,
-            ) = read_modulator_display_values(app.graph.lg, &app);
+            ctx.meters.cached_rack_slot_peak_levels = read_rack_slot_peak_levels(app.graph.lg, &app);
+            ctx.meters.cached_bus_peak_levels = read_bus_peak_levels(app.graph.lg, &app.graph.bus_node_ids);
+        }
+        if fx_visible && (meter_polled || !was_visible.fx) {
+            (ctx.meters.cached_modulator_phases, ctx.meters.cached_modulator_levels) =
+                read_modulator_display_values(app.graph.lg, &app);
+        }
+        if mixer_visible && (meter_polled || !was_visible.mixer) {
             ctx.meters.cached_mod_port_levels = read_mod_port_levels(app.graph.lg, &app);
-            meter_polled = true;
+        }
+        if meter_polled {
             ctx.meters.last_meter_poll_at = Instant::now();
         }
+        ctx.frame.prev_meter_visibility = MeterVisibility {
+            master: master_meter_visible, tracks: track_and_bus_meter_visible,
+            fx: fx_visible, mixer: mixer_visible,
+        };
         // Effective (post-modulation) effect param values (eseq-dtx.13,
-        // generalized in eseq-hpc). Gated on the FX panel: hidden panels drop
-        // their modulator nodes off the watchlist and report base values, which
-        // is also what settles knob dots and curves back to base when
-        // modulation stops.
+        // generalized in eseq-hpc). Hidden panels release their modulator
+        // watchlist and skip value conversion. Reopening samples immediately;
+        // stopping modulation while visible still settles readouts to base.
         //
         // Also polled off-cadence whenever fx_epoch moves, so a freshly
         // inserted effect publishes its base values in the same tick its panel
@@ -414,7 +425,15 @@ pub(crate) fn sync_reactive_tick(
         // switching instruments republishes immediately rather than leaving the
         // previous one's modulation on the panel.
         let mod_display_epoch = ctx.shared.fx_epoch.load(Ordering::Relaxed);
-        if meter_polled
+        if !fx_visible {
+            // Releasing the watchlist also removes audio-thread snapshot work.
+            // Keep the last published values for the next visible delta.
+            for node in ctx.meters.watched_display_modulators.drain() {
+                unsafe { sequencer::audiograph::remove_node_from_watchlist(app.graph.lg.0, node); }
+            }
+            ctx.meters.mod_display_poll_track = None;
+        } else if meter_polled
+            || !was_visible.fx
             || mod_display_epoch != ctx.meters.mod_display_poll_fx_epoch
             || Some(ct) != ctx.meters.mod_display_poll_track
         {
@@ -434,11 +453,16 @@ pub(crate) fn sync_reactive_tick(
         let mut needs_reactive_cycle = false;
         let mut refresh_visible_step_after_cycle = false;
         let selected_neural_snapshot = ctx.shared.selected_neural_neurons.lock().unwrap().clone();
+        let track_notes_wanted = editor.runtime().has_live_reactive_consumers("SEQ", "track-active-notes");
+        // Rack trigger latches must still be consumed while hidden. Other
+        // tracks need no 128-note scan unless a display consumes their activity.
+        let active_notes_wanted = track_notes_wanted || fx_visible
+            || app.groups.iter().any(|group| group.is_rack());
         let track_active_notes: Vec<Vec<sequencer::sequencer::ActiveNoteActivity>> =
-            (0..app.tracks.len())
+            (0..if active_notes_wanted { app.tracks.len() } else { 0 })
             .map(|track| ctx.shared.state.active_note_activity(track))
             .collect();
-        if track_active_notes != ctx.frame.prev_track_active_notes {
+        if track_notes_wanted && track_active_notes != ctx.frame.prev_track_active_notes {
             needs_reactive_cycle |= editor
                 .runtime_mut()
                 .set_reactive(
@@ -905,12 +929,16 @@ pub(crate) fn sync_reactive_tick(
             &mut ctx.frame.song,
             transport_visible || arrangement_visible,
         );
-        needs_reactive_cycle |= sync_sound_palette(
+        let pattern_glyphs_visible = editor.has_visible_widget_source("sound-glyph", "pattern-glyph:");
+        let palette_sync = sync_sound_palette(
             editor.runtime_mut(),
             &app,
             &mut ctx.frame.sound_palette,
             arrangement_visible,
+            pattern_glyphs_visible,
         );
+        needs_reactive_cycle |= palette_sync.effects_dirty;
+        if palette_sync.paint_dirty { editor.mark_needs_redraw(); }
         if master_meter_visible && ctx.meters.cached_peak_l_level != ctx.frame.prev_peak_l_level {
             needs_reactive_cycle |= editor
                 .runtime_mut()
@@ -1039,7 +1067,7 @@ pub(crate) fn sync_reactive_tick(
         // the panel visibility: the sampler already reports base values while
         // the FX panel is hidden, so this is what leaves the fields holding
         // base values for the next open, and it only writes on change.
-        if ctx.meters.cached_mod_display_values != ctx.frame.prev_mod_display_values {
+        if fx_visible && ctx.meters.cached_mod_display_values != ctx.frame.prev_mod_display_values {
             needs_reactive_cycle |= sync_effect_mod_offset_field_delta(
                 editor.runtime_mut(),
                 &ctx.frame.prev_mod_display_values.effects,
@@ -1712,9 +1740,11 @@ pub(crate) fn sync_reactive_tick(
             ctx.frame.prev_fx_value_epoch = fx_value_ep;
             needs_reactive_cycle = true;
         }
-        // Published whether or not *transport* is visible: the tracker's ghost
-        // rows read it, and it is one scalar per sixteenth.
-        if transport_playhead != ctx.frame.prev_transport_playhead {
+        // Custom views (including the tracker's ghost rows) may consume this
+        // outside *transport*. Hidden readers alone must not request a frame.
+        if transport_playhead != ctx.frame.prev_transport_playhead
+            && editor.runtime().has_live_reactive_consumers("SEQ", "transport-playhead")
+        {
             needs_reactive_cycle |= editor
                 .runtime_mut()
                 .set_reactive(
@@ -1763,7 +1793,7 @@ pub(crate) fn sync_reactive_tick(
         // Update sampler playhead for waveform display
         {
             let ct = ctx.shared.current_track.load(Ordering::Relaxed);
-            if app.is_sampler_track(ct) {
+            if sampler_playhead_wanted && app.is_sampler_track(ct) {
                 let ph = read_sampler_playhead_seconds(&app, ct);
                 if ph > 0.0 {
                     editor
@@ -1778,7 +1808,9 @@ pub(crate) fn sync_reactive_tick(
         // the clip ending on its own).
         {
             let preview_playing = sequencer::audio::preview::is_playing();
-            if preview_playing != ctx.frame.prev_browser_preview_playing {
+            let preview_wanted = editor.runtime().has_live_reactive_consumers("SEQ", "browser-preview-playing")
+                || editor.runtime().has_live_reactive_consumers("SEQ", "browser-preview-playhead");
+            if preview_wanted && preview_playing != ctx.frame.prev_browser_preview_playing {
                 editor.runtime_mut().set_reactive(
                     "SEQ",
                     "browser-preview-playing",
@@ -1794,7 +1826,7 @@ pub(crate) fn sync_reactive_tick(
                 ctx.frame.prev_browser_preview_playing = preview_playing;
                 needs_reactive_cycle = true;
             }
-            if preview_playing {
+            if preview_wanted && preview_playing {
                 editor.runtime_mut().set_reactive(
                     "SEQ",
                     "browser-preview-playhead",
@@ -2017,7 +2049,9 @@ pub(crate) fn sync_reactive_tick(
 
     // Keep selection animation live only during playback; when paused, edits/events
     // still request redraws explicitly, but idle should stay cheap.
-    if inputs.playing_now && !ctx.shared.selected_steps.lock().unwrap().is_empty() {
+    if inputs.playing_now && !ctx.shared.selected_steps.lock().unwrap().is_empty()
+        && editor.runtime().has_live_reactive_consumers("SEQ", "selected-steps")
+    {
         editor.mark_needs_redraw();
     }
 }
@@ -2028,7 +2062,7 @@ pub(crate) fn reactive_tick_and_render(
     backend: &mut AppBackend,
     ctx: &mut LoopCtx<'_>,
     inputs: TickInputs,
-    last_render_at: &mut Instant,
+    frame_pacer: &mut frame_pacer::FramePacer,
     stub_animation_cache: &mut StubAnimationRenderCache,
     ui_loop_stats: &mut UiLoopStats,
 ) -> Result<TickFlow, Box<dyn std::error::Error>> {
@@ -2037,24 +2071,24 @@ pub(crate) fn reactive_tick_and_render(
     stub_animation_cache.update_size(inputs.viewport_size);
 
     // Render
-    if last_render_at.elapsed() >= inputs.frame_interval {
+    if frame_pacer.is_due(Instant::now()) {
         if inputs.stub_animation_active && !editor.needs_redraw() && !inputs.sdf_animation_active {
             if let Some(tiled_frame) = stub_animation_cache.frame() {
                 let render_started = Instant::now();
                 let render_status = backend
                     .render_tiled(tiled_frame)
                     .map_err(|_| "render failed")?;
-                ui_loop_stats.note_frame(Duration::ZERO, render_started.elapsed());
+                ui_loop_stats.note_frame(Duration::ZERO, render_started.elapsed(), render_status == TiledRenderStatus::Presented);
                 if render_status == TiledRenderStatus::Presented {
-                    *last_render_at = Instant::now();
+                    frame_pacer.frame_finished(Instant::now());
                     return Ok(TickFlow::Continue);
                 }
-                *last_render_at = Instant::now();
+                frame_pacer.frame_finished(Instant::now());
             }
         }
     }
 
-    if editor.needs_redraw() && last_render_at.elapsed() >= inputs.frame_interval {
+    if editor.needs_redraw() && frame_pacer.is_due(Instant::now()) {
         let frame_build_started = Instant::now();
         let tiled_frame = eseqlisp::frame::build_tiled_render_frame_borderless(
             &mut editor,
@@ -2067,7 +2101,7 @@ pub(crate) fn reactive_tick_and_render(
             .render_tiled(&tiled_frame)
             .map_err(|_| "render failed")?;
         let render_elapsed = render_started.elapsed();
-        ui_loop_stats.note_frame(frame_build_elapsed, render_elapsed);
+        ui_loop_stats.note_frame(frame_build_elapsed, render_elapsed, render_status == TiledRenderStatus::Presented);
         match render_status {
             TiledRenderStatus::Presented => {
                 editor.clear_needs_redraw();
@@ -2076,11 +2110,11 @@ pub(crate) fn reactive_tick_and_render(
                 } else {
                     stub_animation_cache.reset();
                 }
-                *last_render_at = Instant::now();
+                frame_pacer.frame_finished(Instant::now());
             }
             TiledRenderStatus::NotPresented => {
                 eseqlisp::frame::requeue_unpresented_tiled_frame(&mut editor, &tiled_frame);
-                *last_render_at = Instant::now();
+                frame_pacer.frame_finished(Instant::now());
             }
         }
     }

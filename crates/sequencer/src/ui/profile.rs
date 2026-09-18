@@ -16,6 +16,11 @@ pub(crate) struct UiLoopStats {
     max_sync: Duration,
     max_frame_build: Duration,
     max_render: Duration,
+    sync_samples: Vec<f64>,
+    work_samples: Vec<f64>,
+    input_submit_samples: Vec<f64>,
+    pending_input: Option<Instant>,
+    last_sync: Duration,
 }
 
 impl UiLoopStats {
@@ -36,13 +41,16 @@ impl UiLoopStats {
             max_sync: Duration::ZERO,
             max_frame_build: Duration::ZERO,
             max_render: Duration::ZERO,
+            sync_samples: Vec::new(), work_samples: Vec::new(), input_submit_samples: Vec::new(),
+            pending_input: None, last_sync: Duration::ZERO,
         }
     }
 
-    pub(crate) fn note_event(&mut self, elapsed: Duration) {
+    pub(crate) fn note_event(&mut self, elapsed: Duration, redraw: bool) {
         if !self.enabled {
             return;
         }
+        if redraw && self.pending_input.is_none() { self.pending_input = Some(Instant::now() - elapsed); }
         self.events += 1;
         self.event_handle += elapsed;
         self.max_event = self.max_event.max(elapsed);
@@ -70,16 +78,27 @@ impl UiLoopStats {
             return;
         }
         self.reactive_sync += elapsed;
+        self.last_sync = elapsed;
+        if self.sync_samples.len() < 4096 { self.sync_samples.push(duration_ms(elapsed)); }
         self.syncs += 1;
         self.max_sync = self.max_sync.max(elapsed);
         self.maybe_emit();
     }
 
-    pub(crate) fn note_frame(&mut self, build: Duration, render: Duration) {
+    pub(crate) fn note_frame(&mut self, build: Duration, render: Duration, presented: bool) {
         if !self.enabled {
             return;
         }
         self.frames += 1;
+        if self.work_samples.len() < 4096 {
+            self.work_samples.push(duration_ms(self.last_sync + build + render));
+        }
+        self.last_sync = Duration::ZERO;
+        if presented {
+            if let Some(input) = self.pending_input.take() {
+                if self.input_submit_samples.len() < 4096 { self.input_submit_samples.push(duration_ms(input.elapsed())); }
+            }
+        }
         self.frame_build += build;
         self.render += render;
         self.max_frame_build = self.max_frame_build.max(build);
@@ -93,7 +112,7 @@ impl UiLoopStats {
         }
         let secs = self.window_start.elapsed().as_secs_f64();
         eprintln!(
-            "[ui-profile][sequencer] events/s={:.1} frames/s={:.1} event_avg={:.2}ms event_max={:.2}ms gestures={:.2}ms host={:.2}ms sync_avg={:.2}ms sync_max={:.2}ms frame_build_avg={:.2}ms frame_build_max={:.2}ms render_avg={:.2}ms render_max={:.2}ms",
+            "[ui-profile][sequencer] events/s={:.1} render_attempts/s={:.1} event_avg={:.2}ms event_max={:.2}ms gestures={:.2}ms host={:.2}ms sync_avg={:.2}ms sync_max={:.2}ms frame_build_avg={:.2}ms frame_build_max={:.2}ms render_avg={:.2}ms render_max={:.2}ms",
             self.events as f64 / secs,
             self.frames as f64 / secs,
             avg_ms(self.event_handle, self.events),
@@ -107,6 +126,13 @@ impl UiLoopStats {
             avg_ms(self.render, self.frames),
             self.max_render.as_secs_f64() * 1000.0,
         );
+        eprintln!(
+            "[ui-profile][latency] sync_ms[p50,p95,p99]={:?} ui_work_ms[p50,p95,p99]={:?} input_to_submit_ms[p50,p95,p99]={:?} samples={}/{}/{} (software dispatch to render return; excludes display scanout)",
+            percentiles(&mut self.sync_samples), percentiles(&mut self.work_samples),
+            percentiles(&mut self.input_submit_samples), self.sync_samples.len(),
+            self.work_samples.len(), self.input_submit_samples.len(),
+        );
+        self.sync_samples.clear(); self.work_samples.clear(); self.input_submit_samples.clear();
         self.window_start = Instant::now();
         self.events = 0;
         self.syncs = 0;
@@ -122,6 +148,32 @@ impl UiLoopStats {
         self.max_frame_build = Duration::ZERO;
         self.max_render = Duration::ZERO;
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unpresented_frames_preserve_pending_input_latency() {
+        let mut stats = UiLoopStats::new();
+        stats.enabled = true;
+        stats.note_event(Duration::from_millis(1), true);
+        let pending = stats.pending_input;
+        stats.note_frame(Duration::ZERO, Duration::ZERO, false);
+        assert_eq!(stats.pending_input, pending);
+        assert!(stats.input_submit_samples.is_empty());
+        stats.note_frame(Duration::ZERO, Duration::ZERO, true);
+        assert!(stats.pending_input.is_none());
+        assert_eq!(stats.input_submit_samples.len(), 1);
+        assert!(stats.input_submit_samples[0] >= 1.0);
+    }
+}
+
+fn percentiles(samples: &mut [f64]) -> [f64; 3] {
+    if samples.is_empty() { return [0.0; 3]; }
+    samples.sort_unstable_by(f64::total_cmp);
+    [50, 95, 99].map(|percent| samples[(samples.len() * percent).div_ceil(100).saturating_sub(1)])
 }
 
 pub(crate) fn avg_ms(total: Duration, count: u64) -> f64 {

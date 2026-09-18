@@ -165,9 +165,8 @@ impl WidgetDefinition for SoundGlyphWidget {
             return Vec::new();
         };
         // Play indicator (mixer pattern cells): `:play` prop overrides, else
-        // the host-published play-key store drives it. The store bumps the
-        // widget-state generation on launch changes, and color_a is part of
-        // the primitive cache token, so this stays live without itime.
+        // the host-published play-key store drives it. Paint dependency tracking
+        // invalidates this glyph on launch changes without repainting siblings.
         let play = if node.props.contains_key("play") {
             get_f32_prop(&node.props, "play", 0.0) > 0.5
         } else {

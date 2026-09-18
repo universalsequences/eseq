@@ -4,7 +4,7 @@ use crate::backend::{
 };
 use crate::buffer::{Buffer, BufferTextStyle, DisplayRow};
 use crate::editor::{Editor, ViewMode};
-use crate::layout::{Rect, layout_contains_widget_id};
+use crate::layout::Rect;
 use crate::mode::{TokenClass, TokenSpan, highlight_lines};
 use crate::text::matching_paren;
 use crate::theme;
@@ -504,6 +504,7 @@ fn build_render_frame_with_layout_viewport(
             .inline_widget_revision
             .hash(&mut hasher);
         editor.active_buffer().mode.hash(&mut hasher);
+        editor.runtime().symbol_revision().hash(&mut hasher);
         viewport_width.hash(&mut hasher);
         viewport_height.hash(&mut hasher);
         text_viewport_width.hash(&mut hasher);
@@ -1033,16 +1034,16 @@ fn build_tiled_render_frame_impl(
         let tile_ids = editor.tile_root.leaf_ids();
         for tile_id in tile_ids {
             let matching_dirty_ids = {
-                let Some(leaf) = editor.tile_root.find_leaf(tile_id) else {
+                let Some(leaf) = editor.tile_root.find_leaf_mut(tile_id) else {
                     continue;
                 };
-                let Some(layout) = leaf.cached_layout.as_ref() else {
+                let Some(index) = leaf.layout_index() else {
                     continue;
                 };
                 dirty_widget_ids
                     .iter()
                     .copied()
-                    .filter(|widget_id| layout_contains_widget_id(layout.as_ref(), *widget_id))
+                    .filter(|widget_id| index.widget_ids.contains(widget_id))
                     .collect::<Vec<_>>()
             };
             if matching_dirty_ids.is_empty() {
@@ -1146,7 +1147,7 @@ fn build_tiled_render_frame_impl(
         .collect();
 
     // Only compute symbols if we actually need to rebuild an inactive tile
-    let mut symbols: Option<Vec<String>> = None;
+    let mut symbols: Option<std::rc::Rc<Vec<String>>> = None;
     let mut tiles = Vec::with_capacity(tile_info.len());
 
     for (
@@ -1256,6 +1257,10 @@ fn build_tiled_render_frame_impl(
             let mut hasher = DefaultHasher::new();
             buffer_revision.hash(&mut hasher);
             status_signature.hash(&mut hasher);
+            if view_mode != ViewMode::UiOnly {
+                editor.buffers[buffer_idx].mode.hash(&mut hasher);
+                editor.runtime().symbol_revision().hash(&mut hasher);
+            }
             hasher.finish()
         };
         let frame_key = TileFrameCacheKey {
@@ -1373,6 +1378,7 @@ fn build_tiled_render_frame_impl(
                     cached_layout,
                     dirty_widget_ids.clone(),
                     syms,
+                    editor.runtime().symbol_revision(),
                     inner_width,
                     inner_height,
                     text_cell_width_scale,
@@ -1431,6 +1437,7 @@ fn build_inactive_tile_frame_from_parts(
     cached_layout: Option<std::sync::Arc<crate::layout::LayoutNode>>,
     dirty_widget_ids: Vec<u64>,
     symbols: Option<&[String]>,
+    symbol_revision: u64,
     viewport_width: usize,
     viewport_height: usize,
     text_cell_width_scale: f32,
@@ -1466,6 +1473,7 @@ fn build_inactive_tile_frame_from_parts(
         buffer.revision.hash(&mut hasher);
         buffer.inline_widget_revision.hash(&mut hasher);
         buffer.mode.hash(&mut hasher);
+        if buffer.view_mode != ViewMode::UiOnly { symbol_revision.hash(&mut hasher); }
         buffer.view_mode.hash(&mut hasher);
         viewport_width.hash(&mut hasher);
         viewport_height.hash(&mut hasher);

@@ -1866,73 +1866,55 @@ pub(crate) fn sync_track_peak_fields(rt: &mut Runtime, levels: &[f64]) -> bool {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct VisualizationLiveness {
-    neural: bool,
-    graph: bool,
-    track_output: bool,
+    neural_energy: Option<bool>,
+    neural_trigger: Option<bool>,
+    neural_dampening: Option<bool>,
+    graph: Option<bool>,
+    track_output: Option<bool>,
+    track_beat: Option<bool>,
+}
+
+/// Hidden displays do not pull or convert scheduler histories. Forget their
+/// observed liveness so reopening always publishes the current snapshot,
+/// including an empty snapshot when the source stopped while hidden.
+fn sync_visualization_field(
+    rt: &mut Runtime,
+    field: &str,
+    previous: &mut Option<bool>,
+    has_data: impl FnOnce() -> bool,
+    value: impl FnOnce() -> Value,
+) -> bool {
+    if !rt.has_live_reactive_consumers("SEQ", field) {
+        *previous = None;
+        return false;
+    }
+    let live = has_data();
+    if !live && *previous == Some(false) {
+        return false;
+    }
+    *previous = Some(live);
+    rt.set_reactive("SEQ", field, value()).effects_dirty
 }
 
 pub(crate) fn sync_neural_visualization_fields(
     rt: &mut Runtime,
     state: &Arc<SequencerState>,
-    previous_liveness: &mut VisualizationLiveness,
+    previous: &mut VisualizationLiveness,
 ) -> bool {
-    let liveness = VisualizationLiveness {
-        neural: state.has_neural_visualization(),
-        graph: state.has_graph_visualizations(),
-        track_output: state.has_track_output_events(),
-    };
-    let mut effects_dirty = false;
-
-    if liveness.neural || previous_liveness.neural {
-        effects_dirty |= rt
-            .set_reactive(
-                "SEQ",
-                "neural-energy-matrix",
-                build_neural_energy_matrix_value(state),
-            )
-            .effects_dirty;
-        effects_dirty |= rt
-            .set_reactive(
-                "SEQ",
-                "neural-trigger-matrix",
-                build_neural_trigger_matrix_value(state),
-            )
-            .effects_dirty;
-        effects_dirty |= rt
-            .set_reactive(
-                "SEQ",
-                "neural-dampening-matrix",
-                build_neural_dampening_matrix_value(state),
-            )
-            .effects_dirty;
-    }
-    if liveness.graph || previous_liveness.graph {
-        effects_dirty |= rt
-            .set_reactive(
-                "SEQ",
-                "graph-visualizations",
-                build_graph_visualizations_value(state),
-            )
-            .effects_dirty;
-    }
-    if liveness.track_output || previous_liveness.track_output {
-        effects_dirty |= rt
-            .set_reactive(
-                "SEQ",
-                "track-events",
-                build_track_output_events_value(state),
-            )
-            .effects_dirty;
-        effects_dirty |= rt
-            .set_reactive(
-                "SEQ",
-                "track-event-current-beat",
-                build_track_output_current_beat_value(state),
-            )
-            .effects_dirty;
-    }
-    *previous_liveness = liveness;
-    effects_dirty
+    let mut dirty = false;
+    dirty |= sync_visualization_field(rt, "neural-energy-matrix", &mut previous.neural_energy,
+        || state.has_neural_visualization(), || build_neural_energy_matrix_value(state));
+    dirty |= sync_visualization_field(rt, "neural-trigger-matrix", &mut previous.neural_trigger,
+        || state.has_neural_visualization(), || build_neural_trigger_matrix_value(state));
+    dirty |= sync_visualization_field(rt, "neural-dampening-matrix", &mut previous.neural_dampening,
+        || state.has_neural_visualization(), || build_neural_dampening_matrix_value(state));
+    dirty |= sync_visualization_field(rt, "graph-visualizations", &mut previous.graph,
+        || state.has_graph_visualizations(), || build_graph_visualizations_value(state));
+    dirty |= sync_visualization_field(rt, "track-events", &mut previous.track_output,
+        || state.has_track_output_events(), || build_track_output_events_value(state));
+    dirty |= sync_visualization_field(rt, "track-event-current-beat", &mut previous.track_beat,
+        || state.has_track_output_events(), || build_track_output_current_beat_value(state));
+    dirty
 }
 
 pub(crate) fn sync_bus_peak_fields(rt: &mut Runtime, levels: &[f64]) -> bool {

@@ -33,6 +33,8 @@ pub mod phaser_notch;
 pub mod piano_keyboard;
 pub mod response_curve_editor;
 pub mod retained_scene;
+pub(crate) mod paint_resources;
+mod value_snapshot;
 pub mod roar_filter;
 pub mod roar_shaper;
 pub mod scope;
@@ -179,6 +181,7 @@ pub fn widget_state_generation() -> u64 {
     WIDGET_STATE_GENERATION
         .load(Ordering::Relaxed)
         .wrapping_add(WIDGET_STATE_TOTAL_REVISION.load(Ordering::Relaxed))
+        .wrapping_add(paint_resources::generation())
 }
 
 /// Shared-state-only generation, used by the per-widget primitive cache key
@@ -382,9 +385,21 @@ pub fn remove_overlay(widget_id: u64) {
 /// Clear the whole overlay stack. Used when the overlay world is torn down
 /// wholesale (buffer/tree switches, hot reload, tests).
 pub fn clear_overlay() {
-    OVERLAY_STACK.with(|stack| stack.borrow_mut().clear());
-    OVERLAY_PRIMITIVES.with(|o| o.borrow_mut().clear());
-    bump_widget_state_generation();
+    let removed = OVERLAY_STACK.with(|stack| {
+        let mut stack = stack.borrow_mut();
+        let removed = !stack.is_empty();
+        stack.clear();
+        removed
+    });
+    let removed_paint = OVERLAY_PRIMITIVES.with(|paint| {
+        let mut paint = paint.borrow_mut();
+        let removed = !paint.is_empty();
+        paint.clear();
+        removed
+    });
+    if removed || removed_paint {
+        bump_widget_state_generation();
+    }
 }
 
 /// The topmost overlay entry — the input-routing target.
@@ -1630,6 +1645,7 @@ fn widget_primitive_cache_key(node: &LayoutNode, viewport: WidgetViewport) -> Op
     node.rect.width.to_bits().hash(&mut hasher);
     node.rect.height.to_bits().hash(&mut hasher);
     widget_state_shared_generation().hash(&mut hasher);
+    paint_resources::generation().hash(&mut hasher);
     widget_state_revision(node.widget_id).hash(&mut hasher);
     theme::generation().hash(&mut hasher);
     viewport.cell_w.to_bits().hash(&mut hasher);

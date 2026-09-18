@@ -97,7 +97,7 @@ impl SequencerState {
                 track_params,
                 effect_chains,
                 midi_fx_slots,
-                scenes: Mutex::new(ProjectScenes::from_pattern_snapshots(
+                scenes: RevisionedMutex::new(ProjectScenes::from_pattern_snapshots(
                     &[PatternSnapshot::new_default(num_tracks, &slot_descriptors)],
                     0,
                 )),
@@ -129,7 +129,7 @@ impl SequencerState {
                         .map(|_| TrackSoundState::default())
                         .collect(),
                 ),
-                rack_tracks: Mutex::new((0..MAX_TRACKS).map(|_| None).collect()),
+                rack_tracks: RevisionedMutex::new((0..MAX_TRACKS).map(|_| None).collect()),
                 process_chains: Mutex::new(
                     (0..MAX_TRACKS)
                         .map(|_| crate::process::TrackProcessChain::default())
@@ -1333,6 +1333,8 @@ impl SequencerState {
     pub fn with_project_scenes<R>(&self, f: impl FnOnce(&ProjectScenes) -> R) -> R {
         f(&self.pattern.scenes.lock().unwrap())
     }
+
+    pub fn project_scenes_revision(&self) -> u64 { self.pattern.scenes.revision() }
 
     /// Read one pool pattern's stored data. `None` when the pattern is gone.
     pub fn with_pool_pattern<R>(

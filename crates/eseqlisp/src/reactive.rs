@@ -744,6 +744,11 @@ impl ReactiveRegistry {
         self.bump_widget_bindings_revision();
     }
 
+    pub(crate) fn has_widget_readers(&self, namespace: &str, field: &str) -> bool {
+        self.field_to_widgets.iter().any(|(key, widgets)|
+            key.field.namespace == namespace && key.field.field == field && !widgets.is_empty())
+    }
+
     pub fn replace_widget_bindings_for_layout_subtree(
         &mut self,
         old_subtree: &LayoutNode,

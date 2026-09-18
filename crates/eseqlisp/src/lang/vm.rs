@@ -5808,6 +5808,15 @@ impl VM {
         None
     }
 
+    /// Read a defstate/defcustom without invoking code or adding a dependency.
+    pub(crate) fn state_value(&self, name: &str) -> Option<Value> {
+        let node_id = self.state_binding_node(name)?;
+        self.dag.nodes.get(&node_id).and_then(|node| match node {
+            ReactiveNode::Source { value, .. } => Some(value.clone()),
+            _ => None,
+        })
+    }
+
     pub fn read_tracked_state_value(&mut self, name: &str) -> Option<Value> {
         let node_id = self.state_binding_node(name)?;
         if let Some(ctx_id) = self.tracking_stack.last().copied() {
@@ -7022,6 +7031,27 @@ impl VM {
                 ReactiveNode::Source { dependents, .. } => !dependents.is_empty(),
                 _ => false,
             })
+    }
+
+    /// Whether a publication can reach a live observer or visible UI effect.
+    /// Derived nodes are followed transitively; detached and hidden UI owners
+    /// do not demand display-only host data. Nonvisual observers remain live.
+    pub(crate) fn has_live_reactive_consumers(&self, namespace: &str, field: &str) -> bool {
+        let Some(source) = self.dag.find_namespace_field_source_node(namespace, field) else { return false; };
+        let mut pending = vec![source];
+        let mut seen = HashSet::new();
+        while let Some(id) = pending.pop() {
+            if !seen.insert(id) { continue; }
+            match self.dag.nodes.get(&id) {
+                Some(ReactiveNode::Source { dependents, .. } | ReactiveNode::Derived { dependents, .. }) => {
+                    pending.extend(dependents.iter().copied());
+                }
+                Some(ReactiveNode::Effect { .. }) if !self.dag.is_detached_subtree_effect(id)
+                    && self.effect_target_is_visible(id) => return true,
+                _ => {}
+            }
+        }
+        false
     }
 
     /// Host writes without subscribers skip effect scheduling, but a retained

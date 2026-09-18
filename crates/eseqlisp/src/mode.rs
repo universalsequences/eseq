@@ -326,6 +326,28 @@ pub fn highlight_lines<'a>(
         .collect()
 }
 
+/// Symbol membership lives longer than a highlighted viewport. Scrolling
+/// tokenizes new lines without rescanning definitions or copying completions.
+#[derive(Debug)]
+pub struct HighlightVocabulary {
+    mode: BufferMode,
+    known: HashSet<Cow<'static, str>>,
+}
+
+impl HighlightVocabulary {
+    pub fn new(buffer: &Buffer, runtime_symbols: &[String]) -> Self {
+        Self {
+            mode: buffer.mode.clone(),
+            known: completion_labels(&buffer.mode, runtime_symbols, buffer)
+                .into_iter().map(|label| Cow::Owned(label.into_owned())).collect(),
+        }
+    }
+
+    pub fn highlight_lines<'a>(&self, lines: impl IntoIterator<Item = &'a String>) -> Vec<Vec<TokenSpan>> {
+        lines.into_iter().map(|line| highlight_line_with_known(&self.mode, line, &self.known)).collect()
+    }
+}
+
 fn highlight_line_with_known(
     mode: &BufferMode,
     line: &str,

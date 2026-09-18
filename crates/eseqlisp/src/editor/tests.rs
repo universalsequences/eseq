@@ -3090,6 +3090,80 @@ fn shader_completion_keywords_follow_defwidget_and_nested_material_context() {
 }
 
 #[test]
+fn highlighting_reuses_unchanged_text_and_invalidates_each_input() {
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    editor.open_scratch_buffer("*highlight-cache*", "(new-symbol 1)\n; second line");
+    let first = editor.active_highlight_spans_for_visible(0, 1);
+    editor.active_buffer_mut().cursor = (0, 2);
+    assert!(Rc::ptr_eq(&first, &editor.active_highlight_spans_for_visible(0, 1)),
+        "cursor movement must not retokenize text");
+    editor.runtime_mut().eval_str("(def new-symbol 42)").unwrap();
+    let defined = editor.active_highlight_spans_for_visible(0, 1);
+    assert!(!Rc::ptr_eq(&first, &defined));
+    assert_ne!(first, defined, "evaluating a definition updates token classification");
+    let vocabulary = editor.active_leaf().highlight_cache.as_ref().unwrap().vocabulary.clone();
+    let scrolled = editor.active_highlight_spans_for_visible(1, 1);
+    assert!(Rc::ptr_eq(&vocabulary, &editor.active_leaf().highlight_cache.as_ref().unwrap().vocabulary));
+    assert_ne!(defined, scrolled);
+    editor.active_buffer_mut().set_text("; edited\n; second line");
+    let edited = editor.active_highlight_spans_for_visible(0, 1);
+    assert_ne!(defined, edited);
+    editor.active_buffer_mut().mode = BufferMode::DGenLisp;
+    let mode = editor.active_highlight_spans_for_visible(0, 1);
+    assert!(!Rc::ptr_eq(&edited, &mode));
+    editor.open_scratch_buffer("*other-highlight*", "42");
+    assert_ne!(mode, editor.active_highlight_spans_for_visible(0, 1));
+    assert!(editor.active_highlight_spans_for_visible(usize::MAX, 2).is_empty());
+}
+
+#[test]
+#[ignore = "manual release timing; compares identical visible text against the uncached path"]
+fn unchanged_highlighting_performance_probe() {
+    use std::time::Instant;
+    use crate::mode::highlight_lines;
+    let mut runtime = Runtime::new();
+    for i in 0..4000 { runtime.eval_str(&format!("(def benchmark-symbol-{i} {i})")).unwrap(); }
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.open_scratch_buffer("*highlight-probe*", &"(benchmark-symbol-2000 12)\n".repeat(200));
+    editor.active_highlight_spans_for_visible(0, 50);
+    let start = Instant::now();
+    for _ in 0..500 {
+        let symbols = editor.runtime_mut().completion_symbols().as_ref().clone();
+        let buffer = editor.active_buffer();
+        std::hint::black_box(highlight_lines(&buffer.mode, buffer.lines[..50].iter(), &symbols, buffer));
+    }
+    let uncached = start.elapsed();
+    let start = Instant::now();
+    for _ in 0..500 { std::hint::black_box(editor.active_highlight_spans_for_visible(0, 50)); }
+    eprintln!("highlight probe: 500 frames uncached={uncached:?} cached={:?}", start.elapsed());
+}
+
+#[test]
+fn evaluated_symbols_refresh_active_and_inactive_text_frames_and_gpu_keys() {
+    for inactive in [false, true] {
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        editor.open_scratch_buffer("*highlight-target*", "(future-highlight-symbol 1)");
+        let target_buffer = editor.active_buffer_idx();
+        if inactive {
+            editor.open_scratch_buffer("*other*", "");
+            editor.split_active_tile(crate::tile::SplitDir::Vertical, target_buffer).unwrap();
+        }
+        let observe = |editor: &mut Editor| {
+            let tiled = crate::ui::frame::build_tiled_render_frame_borderless(editor, 100, 20);
+            let frame = tiled.tiles.iter().find(|tile| tile.frame.buffer_name == "*highlight-target*").unwrap();
+            assert_eq!(frame.is_active, !inactive);
+            (frame.frame.text_cache_key, frame.frame.lines.iter().flatten().map(|cell| cell.style).collect::<Vec<_>>())
+        };
+        let first = observe(&mut editor);
+        assert_eq!(first, observe(&mut editor));
+        editor.runtime_mut().eval_str("(def future-highlight-symbol 42)").unwrap();
+        let evaluated = observe(&mut editor);
+        assert_ne!(first.0, evaluated.0, "GPU text cache must observe symbol changes");
+        assert_ne!(first.1, evaluated.1, "visible token colors must update");
+    }
+}
+
+#[test]
 fn macro_completion_refreshes_names_and_signatures_after_evaluation() {
     let mut runtime = Runtime::new();
     // Populate both caches before adding macros from another source buffer.
@@ -9468,6 +9542,7 @@ fn hidden_effect_buffer_defers_rerender_until_the_target_becomes_visible() {
         .find(|buffer| buffer.name == "*controls*")
         .expect("effect-buffer should create its target")
         .id;
+    assert!(!editor.runtime().has_live_reactive_consumers("APP", "count"));
     editor
         .runtime_mut()
         .set_reactive("APP", "count", Value::Number(7.0));
@@ -9487,6 +9562,7 @@ fn hidden_effect_buffer_defers_rerender_until_the_target_becomes_visible() {
     );
 
     editor.set_active_buffer(controls_id);
+    assert!(editor.runtime().has_live_reactive_consumers("APP", "count"));
     // This is the reactive phase of the same frame that presents the buffer.
     // It must resume deferred work even though no new reactive field changed.
     editor.runtime_mut().run_reactive_cycle();

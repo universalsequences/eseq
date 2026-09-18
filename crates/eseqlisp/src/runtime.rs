@@ -1336,7 +1336,7 @@ pub struct Runtime {
     sync_theme_to_global: bool,
     symbol_metadata: HashMap<String, SymbolMetadata>,
     symbol_revision: u64,
-    cached_completion_symbols: Option<Vec<String>>,
+    cached_completion_symbols: Option<Rc<Vec<String>>>,
     cached_completion_metadata: Option<HashMap<String, SymbolMetadata>>,
     module_completion_roots: Vec<crate::hot_reload::ModuleLoadRoot>,
     cached_module_completions: Option<Vec<String>>,
@@ -1375,7 +1375,7 @@ struct RuntimeStateSnapshot {
     shared: RuntimeBridgeState,
     symbol_metadata: HashMap<String, SymbolMetadata>,
     symbol_revision: u64,
-    cached_completion_symbols: Option<Vec<String>>,
+    cached_completion_symbols: Option<Rc<Vec<String>>>,
     cached_completion_metadata: Option<HashMap<String, SymbolMetadata>>,
     cached_module_completions: Option<Vec<String>>,
     reactive_registry: ReactiveRegistry,
@@ -2634,6 +2634,12 @@ impl Runtime {
         self.vm.global_value(name)
     }
 
+    /// Host-side observation of current Lisp state, without execution or a
+    /// reactive flush. Unlike a global slot, this resolves the state's value.
+    pub fn state_value(&self, name: &str) -> Option<Value> {
+        self.vm.state_value(name)
+    }
+
     pub fn has_global(&self, name: &str) -> bool {
         self.vm.has_global(name)
     }
@@ -3267,11 +3273,18 @@ impl Runtime {
         self.vm.global_names()
     }
 
+    /// Demand for host display data, including authored UI and nonvisual
+    /// observers. The editor maintains bindings for all visible tile layouts.
+    pub fn has_live_reactive_consumers(&self, namespace: &str, field: &str) -> bool {
+        self.reactive_registry.has_widget_readers(namespace, field)
+            || self.vm.has_live_reactive_consumers(namespace, field)
+    }
+
     pub fn symbol_metadata(&self) -> &HashMap<String, SymbolMetadata> {
         &self.symbol_metadata
     }
 
-    pub fn completion_symbols(&mut self) -> Vec<String> {
+    pub fn completion_symbols(&mut self) -> Rc<Vec<String>> {
         if let Some(symbols) = &self.cached_completion_symbols {
             return symbols.clone();
         }
@@ -3305,7 +3318,8 @@ impl Runtime {
         }
         symbols.sort();
         symbols.dedup();
-        self.cached_completion_symbols = Some(symbols.clone());
+        let symbols = Rc::new(symbols);
+        self.cached_completion_symbols = Some(Rc::clone(&symbols));
         symbols
     }
 
@@ -4763,12 +4777,15 @@ mod observer_tests {
             runtime.eval_str(&format!(
                 "(defstate visible true) (observe (if visible (record-value {read}) nil))"
             )).unwrap();
+            assert!(runtime.has_live_reactive_consumers("INPUT", "value"), "nonvisual observers demand host data: {read}");
             runtime.eval_str("(set! visible false)").unwrap();
             assert!(!runtime.vm.has_reactive_subscribers("INPUT", "value"));
+            assert!(!runtime.has_live_reactive_consumers("INPUT", "value"));
             if indexed { runtime.set_reactive_list_index("INPUT", "value", 0, Value::Number(2.0)); }
             else { runtime.set_reactive("INPUT", "value", Value::Number(2.0)); }
             runtime.run_reactive_cycle();
             runtime.eval_str("(set! visible true)").unwrap();
+            assert!(runtime.has_live_reactive_consumers("INPUT", "value"));
             if indexed { runtime.set_reactive_list_index("INPUT", "value", 0, Value::Number(1.0)); }
             else { runtime.set_reactive("INPUT", "value", Value::Number(1.0)); }
             runtime.run_reactive_cycle();

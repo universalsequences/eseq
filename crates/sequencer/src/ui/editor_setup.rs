@@ -139,6 +139,18 @@ fn configure_editor_for_backend(editor: &mut Editor, backend: &mut AppBackend) {
     }
 }
 
+#[cfg(target_os = "macos")]
+pub(crate) fn create_offscreen_capture_backend(
+    editor: &mut Editor, width: u32, height: u32, scale: f64,
+) -> Result<AppBackend, Box<dyn std::error::Error>> {
+    let mut backend = AppBackend::new_capture_with_font_size(width, height, METAL_SEQ_TEXT_FONT_SIZE_PT)
+        .map_err(|_| "Metal offscreen backend creation failed")?;
+    configure_application_font(&mut backend)?;
+    backend.initialize_offscreen(scale).map_err(|_| "Metal offscreen initialization failed")?;
+    configure_editor_for_backend(editor, &mut backend);
+    Ok(backend)
+}
+
 pub(crate) fn apply_startup_grid_layout(
     editor: &mut Editor,
 ) -> Result<(), Box<dyn std::error::Error>> {

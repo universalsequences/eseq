@@ -6,7 +6,9 @@
 use super::*;
 
 mod paint_inputs;
+mod profile;
 use paint_inputs::PaintInputs;
+use super::paint_resources::PaintDependencies;
 
 static PAINT_REVISION: AtomicU64 = AtomicU64::new(1);
 
@@ -29,6 +31,35 @@ pub struct PreparedScene {
     pub culled_nodes: usize,
     pub reindexed_nodes: usize,
     pub bounds_refreshed_nodes: usize,
+    pub paint_reasons: PaintReasons,
+}
+
+/// Nonexclusive causes: a node can have both new inputs and a state change.
+#[derive(Clone, Copy, Debug, Default, serde::Serialize)]
+pub struct PaintReasons {
+    pub first_paint: usize,
+    pub inputs: usize,
+    pub animation: usize,
+    pub shared_context: usize,
+    pub widget_state: usize,
+    pub focus_hover: usize,
+    pub overlay: usize,
+    pub scroll: usize,
+    pub resource: usize,
+}
+
+impl PaintReasons {
+    pub fn accumulate(&mut self, other: Self) {
+        self.first_paint += other.first_paint;
+        self.inputs += other.inputs;
+        self.animation += other.animation;
+        self.shared_context += other.shared_context;
+        self.widget_state += other.widget_state;
+        self.focus_hover += other.focus_hover;
+        self.overlay += other.overlay;
+        self.scroll += other.scroll;
+        self.resource += other.resource;
+    }
 }
 
 impl PreparedScene {
@@ -76,6 +107,7 @@ struct SceneNode {
     animation_dirty: bool,
     context: Option<PaintContext>,
     inputs: Option<PaintInputs>,
+    resources: PaintDependencies,
     scroll_state: Option<scroll::ScrollState>,
     head: Rc<Vec<GpuPrimitive>>,
     tail: Rc<Vec<GpuPrimitive>>,
@@ -95,6 +127,7 @@ pub struct RetainedScene {
     theme_generation: u64,
     shader_generation: u64,
     epoch: u64,
+    profile: profile::PaintProfile,
 }
 
 impl RetainedScene {
@@ -107,6 +140,7 @@ impl RetainedScene {
         viewport: WidgetViewport,
         visible: Rect,
     ) -> PreparedScene {
+        let started = self.profile.start();
         let mut scene = PreparedScene::default();
         let identity = layout as *const LayoutNode as usize;
         let metrics = [viewport.cell_w.to_bits(), viewport.cell_h.to_bits(),
@@ -163,6 +197,7 @@ impl RetainedScene {
         self.visit(layout, 0, viewport, visible, [0.0, 0.0],
             any_overlay_active(), &mut scene);
         scene.overlay = drain_overlay_primitives();
+        self.profile.record(layout.widget_id, started, &scene);
         scene
     }
 
@@ -222,6 +257,7 @@ impl RetainedScene {
             bounds: None, has_overlay: is_overlay_panel_widget(&layout.widget_type),
             is_scroll: layout.widget_type == "scroll",
             dirty: true, animation_dirty: false, context: None, inputs: None,
+            resources: PaintDependencies::default(),
             scroll_state: None, head: Rc::new(Vec::new()),
             tail: Rc::new(Vec::new()), head_revision: 0, tail_revision: 0,
         });
@@ -265,18 +301,34 @@ impl RetainedScene {
         // may change at render time; it is presentation state, not child paint.
         let scroll_state = (layout.widget_type == "scroll").then(|| scroll::sync_node_state(layout));
         let context = PaintContext {
-            epoch: self.epoch, state_revision: widget_state_revision(layout.widget_id),
+            epoch: self.epoch, state_revision: widget_state_revision(layout.widget_id)
+                .wrapping_add(layout.stable_widget_id.filter(|id| *id != layout.widget_id)
+                    .map(widget_state_revision).unwrap_or(0)),
             focused, focused_branch: viewport.focused_branch,
             inherited_hover: viewport.inherited_hover,
         };
-        let inputs_changed = node.dirty
-            && !node.inputs.as_ref().is_some_and(|inputs| inputs.matches(layout));
+        let unchanged_literal = node.dirty && node.inputs.as_ref().is_some_and(|inputs| inputs.matches_literal(layout));
+        let mut inputs = (node.dirty && !unchanged_literal).then(|| PaintInputs::capture(layout)).flatten();
+        let inputs_changed = node.dirty && !unchanged_literal
+            && (inputs.is_none() || node.inputs.as_ref() != inputs.as_ref());
         if inputs_changed || node.animation_dirty || node.context != Some(context)
-            || overlays_active || node.scroll_state != scroll_state
+            || overlays_active || node.scroll_state != scroll_state || node.resources.changed()
         {
-            // Own the observations rather than aliasing mutable Lisp cells.
-            // Live atomics decline this shortcut and compare painted output.
-            let inputs = PaintInputs::capture(layout);
+            let reasons = &mut scene.paint_reasons;
+            reasons.first_paint += usize::from(node.context.is_none());
+            reasons.inputs += usize::from(inputs_changed);
+            reasons.animation += usize::from(node.animation_dirty);
+            reasons.shared_context += usize::from(node.context.is_some_and(|old| old.epoch != context.epoch));
+            reasons.widget_state += usize::from(node.context.is_some_and(|old| old.state_revision != context.state_revision));
+            reasons.focus_hover += usize::from(node.context.is_some_and(|old|
+                old.focused != context.focused || old.focused_branch != context.focused_branch
+                    || old.inherited_hover != context.inherited_hover));
+            reasons.overlay += usize::from(overlays_active);
+            reasons.scroll += usize::from(node.scroll_state != scroll_state);
+            reasons.resource += usize::from(node.resources.changed());
+            if !node.dirty || unchanged_literal { inputs = PaintInputs::capture(layout); }
+            let frozen = inputs.as_ref().and_then(|inputs| inputs.frozen_layout(layout));
+            let paint_layout = frozen.as_ref().unwrap_or(layout);
             let mut head = Vec::new();
             let mut tail = Vec::new();
             if focused && is_layout_widget_type(&layout.widget_type)
@@ -289,9 +341,13 @@ impl RetainedScene {
             if scroll_state.is_some() {
                 head.push(GpuPrimitive::PushClipRect(layout.rect));
                 tail.push(GpuPrimitive::PopClipRect);
-                tail.extend(build_widget_primitives_for_node(layout, viewport));
+                let (paint, resources) = PaintDependencies::capture(|| build_widget_primitives_for_node(paint_layout, viewport));
+                tail.extend(paint);
+                self.nodes[index].resources = resources;
             } else {
-                head.extend(build_widget_primitives_for_node(layout, viewport));
+                let (paint, resources) = PaintDependencies::capture(|| build_widget_primitives_for_node(paint_layout, viewport));
+                head.extend(paint);
+                self.nodes[index].resources = resources;
                 if layout.widget_type == "box" && layout.props.contains_key("background") {
                     head.push(GpuPrimitive::PushClipRect(layout.rect));
                     tail.push(GpuPrimitive::PopClipRect);
@@ -301,7 +357,7 @@ impl RetainedScene {
             retain_paint(&mut node.head, &mut node.head_revision, head);
             retain_paint(&mut node.tail, &mut node.tail_revision, tail);
             node.context = Some(context);
-            node.inputs = inputs.filter(|inputs| inputs.matches(layout));
+            node.inputs = inputs;
             node.scroll_state = scroll_state.clone();
             scene.rebuilt_nodes += 1;
         } else {
@@ -487,6 +543,51 @@ mod tests {
         let frame = RetainedScene::default().prepare(&root, 1, 1, &[], viewport(),
             rect(0.0, 0.0, 40.0, 20.0));
         assert!(frame.runs.iter().any(|run| run.widget_id == 80211));
+    }
+
+    #[test]
+    fn resource_publication_only_repaints_its_readers_including_missing_resources() {
+        use crate::sound_glyph_data::{publish_sound_glyph_frame, retain_sound_glyph_frames, SoundGlyphFrame};
+        let key = "retained-resource-test:glyph";
+        let mut glyph = node(80350, "sound-glyph", rect(0.0, 0.0, 5.0, 5.0), vec![]);
+        glyph.props.insert("source".into(), Value::String(key.into()));
+        let root = node(80340, "hstack", rect(0.0, 0.0, 40.0, 20.0), vec![panel(80360, 0.0), glyph]);
+        let mut cache = RetainedScene::default();
+        cache.prepare(&root, 1, 1, &[], viewport(), root.rect);
+        publish_sound_glyph_frame(key, SoundGlyphFrame {
+            revision: 1, cols: 1, rows: 1, substrate: vec![1], pieces: vec![], anchor: false, incompatible: false,
+        });
+        let published = cache.prepare(&root, 1, 1, &[], viewport(), root.rect);
+        assert_eq!(published.rebuilt_nodes, 1);
+        assert_eq!(published.paint_reasons.resource, 1);
+        assert_eq!(published.paint_reasons.shared_context, 0);
+        assert!(published.runs.iter().any(|run| run.widget_id == 80350));
+        retain_sound_glyph_frames("retained-resource-test:", &Default::default());
+        let removed = cache.prepare(&root, 1, 1, &[], viewport(), root.rect);
+        assert_eq!(removed.rebuilt_nodes, 1);
+        assert!(!removed.runs.iter().any(|run| run.widget_id == 80350));
+        clear_overlay();
+        let unchanged = cache.prepare(&root, 1, 1, &[], viewport(), root.rect);
+        assert_eq!(unchanged.rebuilt_nodes, 0, "clearing an empty overlay must not invalidate paint");
+    }
+
+    #[test]
+    fn reactive_paint_consumes_the_compared_snapshot_even_if_live_slot_changes() {
+        let slot = std::sync::Arc::new(AtomicU64::new(0.25f64.to_bits()));
+        let mut knob = node(80380, "knob", rect(0.0, 0.0, 5.0, 5.0), vec![]);
+        knob.props.insert("value".into(), Value::ReactiveRef {
+            namespace: "TEST".into(), field: "value".into(), index: None,
+            kind: crate::vm::BindingKind::Float, slot: slot.clone(),
+        });
+        let observed = PaintInputs::capture(&knob).unwrap();
+        let expected = build_widget_primitives_for_node(&knob, viewport());
+        slot.store(0.75f64.to_bits(), Ordering::Relaxed);
+        let frozen = observed.frozen_layout(&knob).unwrap();
+        assert_eq!(get_f32_prop(&frozen.props, "value", 0.0), 0.25);
+        assert!(build_widget_primitives_for_node(&frozen, viewport()) == expected);
+        assert!(observed != PaintInputs::capture(&knob).unwrap());
+        slot.store(0.25f64.to_bits(), Ordering::Relaxed);
+        assert!(observed == PaintInputs::capture(&knob).unwrap());
     }
 
     #[test]
@@ -732,7 +833,7 @@ mod tests {
         let mut cache = RetainedScene::default();
         let first = cache.prepare(&root, 1, 1, &[], viewport(), root.rect);
         let unchanged = cache.prepare(&root, 1, 2, &[85000], viewport(), root.rect);
-        assert_eq!(unchanged.rebuilt_nodes, 2, "live atomics must be observed by the painter");
+        assert_eq!(unchanged.rebuilt_nodes, 1, "unchanged frozen inputs skip the linegraph painter");
         assert_eq!(first.runs[0].revision, unchanged.runs[0].revision);
         slot.store(0.75f64.to_bits(), Ordering::Relaxed);
         let reactive = cache.prepare(&root, 1, 3, &[85000], viewport(), root.rect);

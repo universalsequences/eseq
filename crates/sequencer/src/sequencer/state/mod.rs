@@ -78,6 +78,8 @@ pub use arrangement::*;
 mod track_delete_remap;
 use track_delete_remap::*;
 mod core;
+mod revisioned_mutex;
+pub use revisioned_mutex::RevisionedMutex;
 pub use core::*;
 mod variant_lock_helpers;
 use variant_lock_helpers::*;

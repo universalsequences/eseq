@@ -151,7 +151,7 @@ pub(crate) fn poll_learn_job(
         if let Some(pending) = sessions.pending_learn_job.take() {
             let _ = pending.job.cancel();
         }
-        if clear_learn_param_preview(
+        if sessions.learn_param_preview.is_some() && clear_learn_param_preview(
             app,
             editor.runtime_mut(),
             &mut sessions.learn_param_preview,

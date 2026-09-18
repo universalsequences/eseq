@@ -237,9 +237,8 @@ pub(crate) fn run_event_loop(
     #[cfg(target_os = "macos")]
     let mut native_menu = native_menu::NativeMenu::attach(menu_state.clone(), &mut editor, &backend);
     // 5. Metal event loop
-    let idle_frame_interval = Duration::from_secs_f64(1.0 / 30.0);
-    let animation_frame_interval = Duration::from_secs_f64(1.0 / 60.0);
-    let mut last_render_at = Instant::now() - idle_frame_interval;
+    let frame_interval = Duration::from_secs_f64(1.0 / 60.0);
+    let mut frame_pacer = frame_pacer::FramePacer::new(Instant::now(), frame_interval);
     let mut stub_animation_cache = StubAnimationRenderCache::new();
     let mut pending_drag: Option<PendingPointerDrag> = None;
     // Edge-tracked so the un-hide fires even when the gesture is dropped for a
@@ -304,6 +303,7 @@ pub(crate) fn run_event_loop(
         pending_lisp_history_transactions: HashMap::new(),
     };
     let mut frame = FrameDiffState {
+        prev_meter_visibility: MeterVisibility::default(),
         prev_editor_macro_action: (String::new(), String::new()),
         prev_editor_macro_action_fingerprint: u64::MAX,
         prev_editor_macro_sidebar_fingerprint: u64::MAX,
@@ -618,10 +618,10 @@ pub(crate) fn run_event_loop(
                 shared.ui_epoch.fetch_add(1, Ordering::Relaxed);
             }
         }
-        // `poll_editable_shader_overrides` also drains pending SDF pipelines,
-        // which is not dev-only work; the dev-only shader watch inside it is
-        // gated by `ui::set_editable_shader_overrides_enabled` at startup.
-        if backend.poll_editable_shader_overrides() {
+        // Hidden widget shaders need no polling. The renderer also drains
+        // pending pipelines before drawing, so reopening still compiles the
+        // current source even if no widget layout existed during this poll.
+        if !editor.visible_widget_layouts().is_empty() && backend.poll_editable_shader_overrides() {
             editor.mark_needs_redraw();
         }
         release_due_key_lock_auditions(
@@ -711,61 +711,23 @@ pub(crate) fn run_event_loop(
         let widget_animation_active =
             editor.visible_widgets_animating() || gesture.scroll_inertia.fling_active();
         let learn_ui_active = sessions.pending_learn_job.is_some();
-        let frame_interval =
-            if stub_animation_active || widget_animation_active || learn_ui_active {
-                animation_frame_interval
-            } else {
-                idle_frame_interval
-            };
-
-        let sdf_animation_active =
-            eseqlisp::widget_render::sdf_widget::sdf_visual_animations_active(
+        let sdf_animation_active = !editor.visible_widget_layouts().is_empty()
+            && eseqlisp::widget_render::sdf_widget::sdf_visual_animations_active(
                 backend.time_seconds(),
             );
-        if sdf_animation_active {
-            editor.mark_needs_redraw();
-            let elapsed = last_render_at.elapsed();
-            if elapsed < frame_interval {
-                std::thread::sleep(frame_interval - elapsed);
-            }
-            let frame_build_started = Instant::now();
-            let tiled_frame =
-                eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, cols, rows);
-            let frame_build_elapsed = frame_build_started.elapsed();
-            let render_started = Instant::now();
-            let render_status = backend
-                .render_tiled(&tiled_frame)
-                .map_err(|_| "render failed")?;
-            let render_elapsed = render_started.elapsed();
-            ui_loop_stats.note_frame(frame_build_elapsed, render_elapsed);
-            match render_status {
-                TiledRenderStatus::Presented => {
-                    editor.clear_needs_redraw();
-                    last_render_at = Instant::now();
-                }
-                TiledRenderStatus::NotPresented => {
-                    eseqlisp::frame::requeue_unpresented_tiled_frame(&mut editor, &tiled_frame);
-                    last_render_at = Instant::now();
-                }
-            }
-            continue;
-        }
-        if widget_animation_active {
+        // Animations share the ordinary input/control/render path. In
+        // particular an SDF transition must never sleep before polling input.
+        if widget_animation_active || sdf_animation_active {
             editor.mark_needs_redraw();
         }
 
         // 1. Poll events FIRST
         let playing_now = shared.state.transport.playing.load(Ordering::Relaxed);
-        let timeout = if playing_now {
-            frame_interval
-                .saturating_sub(last_render_at.elapsed())
-                .max(Duration::from_millis(8))
-        } else if learn_ui_active {
-            frame_interval
-                .saturating_sub(last_render_at.elapsed())
-                .max(Duration::from_millis(4))
-        } else if editor.needs_redraw() {
-            Duration::from_millis(4)
+        let timeout = if editor.needs_redraw() || stub_animation_active {
+            frame_pacer.time_until_frame(Instant::now())
+        } else if playing_now || learn_ui_active {
+            let until_frame = frame_pacer.time_until_frame(Instant::now());
+            if until_frame.is_zero() { frame_interval } else { until_frame }
         } else {
             Duration::from_millis(50)
         };
@@ -783,7 +745,7 @@ pub(crate) fn run_event_loop(
                 match backend.render_tiled(&tiled_frame) {
                     Ok(TiledRenderStatus::Presented) => {
                         editor.clear_needs_redraw();
-                        last_render_at = Instant::now();
+                        frame_pacer.frame_finished(Instant::now());
                     }
                     Ok(TiledRenderStatus::NotPresented) => {
                         eseqlisp::frame::requeue_unpresented_tiled_frame(&mut editor, &tiled_frame);
@@ -856,7 +818,7 @@ pub(crate) fn run_event_loop(
                         if should_toggle_play_on_space(&editor, &key) {
                             let _ = editor.runtime_mut().eval_str("(seq-toggle-play)");
                             editor.refresh_runtime_side_effects();
-                            ui_loop_stats.note_event(event_started.elapsed());
+                            ui_loop_stats.note_event(event_started.elapsed(), editor.needs_redraw());
                             continue 'app_loop;
                         }
                         // Every other app-level shortcut yields to the modal.
@@ -864,7 +826,7 @@ pub(crate) fn run_event_loop(
                         // tile and consumes it there even when no modal
                         // control handles it.
                         editor.handle_key(key);
-                        ui_loop_stats.note_event(event_started.elapsed());
+                        ui_loop_stats.note_event(event_started.elapsed(), editor.needs_redraw());
                         continue 'app_loop;
                     }
                     if raw_key.kind == crossterm::event::KeyEventKind::Press {
@@ -884,7 +846,7 @@ pub(crate) fn run_event_loop(
                             pending_drag = None;
                             pointer_is_down = false;
                             shared.ui_epoch.fetch_add(1, Ordering::Relaxed);
-                            ui_loop_stats.note_event(event_started.elapsed());
+                            ui_loop_stats.note_event(event_started.elapsed(), editor.needs_redraw());
                             continue 'app_loop;
                         }
                         if let Some(gesture) = gesture.piano_roll_history_gesture.take() {
@@ -912,7 +874,7 @@ pub(crate) fn run_event_loop(
                                     editor.handle_host_event(HostEvent::Error(format!(
                                         "Could not finalize interrupted piano-roll gesture: {error:?}"
                                     )));
-                                    ui_loop_stats.note_event(event_started.elapsed());
+                                    ui_loop_stats.note_event(event_started.elapsed(), editor.needs_redraw());
                                     continue 'app_loop;
                                 }
                             }
@@ -1090,7 +1052,7 @@ pub(crate) fn run_event_loop(
                         };
                         editor.show_transient_message(message);
                         editor.mark_needs_redraw();
-                        ui_loop_stats.note_event(event_started.elapsed());
+                        ui_loop_stats.note_event(event_started.elapsed(), editor.needs_redraw());
                         continue 'app_loop;
                     }
                     if handle_metal_command_shortcut_with_ui_epoch(
@@ -1107,7 +1069,7 @@ pub(crate) fn run_event_loop(
                             reveal_sequencer_current_track(&mut editor, &app, track);
                         }
                         editor.mark_needs_redraw();
-                        ui_loop_stats.note_event(event_started.elapsed());
+                        ui_loop_stats.note_event(event_started.elapsed(), editor.needs_redraw());
                         continue 'app_loop;
                     }
                     let key = normalize_command_shortcuts(raw_key);
@@ -1155,14 +1117,14 @@ pub(crate) fn run_event_loop(
                             );
                             frame.prev_selected_neural_neurons = selection;
                             editor.mark_needs_redraw();
-                            ui_loop_stats.note_event(event_started.elapsed());
+                            ui_loop_stats.note_event(event_started.elapsed(), editor.needs_redraw());
                             continue 'app_loop;
                         }
                     }
                     if should_toggle_play_on_space(&editor, &key) {
                         let _ = editor.runtime_mut().eval_str("(seq-toggle-play)");
                         editor.refresh_runtime_side_effects();
-                        ui_loop_stats.note_event(event_started.elapsed());
+                        ui_loop_stats.note_event(event_started.elapsed(), editor.needs_redraw());
                         continue 'app_loop;
                     }
                     if handle_metal_soft_step_param_key(
@@ -1174,7 +1136,7 @@ pub(crate) fn run_event_loop(
                         &shared.expanded_step_projection,
                         &mut soft_step_param_edit,
                     ) {
-                        ui_loop_stats.note_event(event_started.elapsed());
+                        ui_loop_stats.note_event(event_started.elapsed(), editor.needs_redraw());
                         continue 'app_loop;
                     }
                     let recording_key_outcome =
@@ -1239,7 +1201,7 @@ pub(crate) fn run_event_loop(
                 BackendEvent::Terminal(Event::Resize(_, _)) => editor.mark_needs_redraw(),
                 _ => {}
             }
-            ui_loop_stats.note_event(event_started.elapsed());
+            ui_loop_stats.note_event(event_started.elapsed(), editor.needs_redraw());
             if !input_batch.should_drain(
                 live_key_consumed, editor.has_pending_host_commands(), Instant::now(),
             ) {
@@ -2681,11 +2643,10 @@ pub(crate) fn run_event_loop(
                 rows,
                 viewport_size,
                 stub_animation_active,
-                frame_interval,
                 sdf_animation_active,
                 playing_now,
             },
-            &mut last_render_at,
+            &mut frame_pacer,
             &mut stub_animation_cache,
             &mut ui_loop_stats,
         )? {

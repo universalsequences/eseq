@@ -283,7 +283,7 @@ impl Editor {
     pub fn collect_mx_candidates(&mut self) -> Vec<String> {
         let mut names: Vec<String> = self.builtins.values().cloned().collect();
         let symbols = self.runtime.completion_symbols();
-        names.extend(symbols);
+        names.extend(symbols.iter().cloned());
         // Also include lisp binding handler names
         names.extend(self.lisp_bindings.values().cloned());
         names.sort();

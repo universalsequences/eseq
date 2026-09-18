@@ -2,6 +2,8 @@ use std::cell::RefCell;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
+use std::rc::Rc;
+use super::value_snapshot::{ValueSnapshot, SnapshotContext};
 
 use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEventKind};
 
@@ -53,8 +55,13 @@ fn get_tree_state(widget_id: u64) -> TreeState {
 fn set_tree_state(widget_id: u64, state: TreeState) {
     // Always sync LAST_EXPANDED so measure() picks up the latest state
     update_last_known_expanded(widget_id, &state.expanded);
-    TREE_STATES.with(|s| s.borrow_mut().insert(widget_id, state));
-    super::bump_widget_state_generation();
+    let changed = TREE_STATES.with(|s| {
+        let mut states = s.borrow_mut();
+        if states.get(&widget_id) == Some(&state) { return false; }
+        states.insert(widget_id, state);
+        true
+    });
+    if changed { super::bump_widget_state_revision(widget_id); }
 }
 
 fn tree_state_key(node: &LayoutNode) -> u64 {
@@ -81,6 +88,42 @@ struct TreeRow {
     path: Vec<usize>,
     id_path: NodeIdPath,
     item_value: Value,
+}
+
+struct RowCache {
+    items: ValueSnapshot,
+    expanded: HashSet<NodeIdPath>,
+    expand_all: bool,
+    rows: Rc<Vec<TreeRow>>,
+}
+
+thread_local! {
+    static ROW_CACHE: RefCell<HashMap<u64, RowCache>> = RefCell::new(HashMap::new());
+}
+
+fn cached_rows(widget_key: u64, items: &Value, expanded: &HashSet<NodeIdPath>, expand_all: bool) -> Rc<Vec<TreeRow>> {
+    ROW_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if let Some(cached) = cache.get(&widget_key) {
+            if cached.expand_all == expand_all && cached.expanded == *expanded && cached.items.matches(items) {
+                return Rc::clone(&cached.rows);
+            }
+        }
+        let mut rows = Vec::new();
+        flatten_items(items, 0, &[], expanded, expand_all, &mut rows);
+        let rows = Rc::new(rows);
+        let mut snapshot = SnapshotContext::default();
+        snapshot.compare_cell_identity = true;
+        if let Some(items) = ValueSnapshot::capture(items, &mut snapshot) {
+            // This is a derived-data cache, never the owner of interaction
+            // state. Bound storage even when generated widget IDs churn.
+            if cache.len() >= 256 { cache.clear(); }
+            cache.insert(widget_key, RowCache { items, expanded: expanded.clone(), expand_all, rows: Rc::clone(&rows) });
+        } else {
+            cache.remove(&widget_key);
+        }
+        rows
+    })
 }
 
 fn truncate_with_ellipsis(text: &str, max_chars: usize) -> String {
@@ -641,8 +684,7 @@ pub(crate) fn selection_view_hint(node: &LayoutNode) -> Option<(String, usize, f
     let widget_key = tree_state_key(node);
     let mut state = get_tree_state(widget_key);
     sync_state_with_external_selection(widget_key, &items, &node.props, expand_all, &mut state);
-    let mut rows = Vec::new();
-    flatten_items(&items, 0, &[], &state.expanded, expand_all, &mut rows);
+    let rows = cached_rows(widget_key, &items, &state.expanded, expand_all);
     if rows.is_empty() {
         return None;
     }
@@ -671,8 +713,7 @@ pub(crate) fn current_content_height(node: &LayoutNode) -> Option<f32> {
     let widget_key = tree_state_key(node);
     let mut state = get_tree_state(widget_key);
     sync_state_with_external_selection(widget_key, &items, &node.props, expand_all, &mut state);
-    let mut rows = Vec::new();
-    flatten_items(&items, 0, &[], &state.expanded, expand_all, &mut rows);
+    let rows = cached_rows(widget_key, &items, &state.expanded, expand_all);
     Some(rows.len() as f32 * row_height_from_props(&node.props))
 }
 
@@ -720,8 +761,7 @@ pub(crate) fn tree_drop_info(
     let widget_key = tree_state_key(node);
     let mut state = get_tree_state(widget_key);
     sync_state_with_external_selection(widget_key, &items, &node.props, expand_all, &mut state);
-    let mut rows = Vec::new();
-    flatten_items(&items, 0, &[], &state.expanded, expand_all, &mut rows);
+    let rows = cached_rows(widget_key, &items, &state.expanded, expand_all);
 
     let rh = row_height_from_props(&node.props);
     let scroll_offset = find_parent_scroll_offset(node);
@@ -950,8 +990,7 @@ impl WidgetDefinition for TreeWidget {
         let widget_key = tree_state_key(node);
         let mut state = get_tree_state(widget_key);
         sync_state_with_external_selection(widget_key, &items, &node.props, expand_all, &mut state);
-        let mut rows = Vec::new();
-        flatten_items(&items, 0, &[], &state.expanded, expand_all, &mut rows);
+        let rows = cached_rows(widget_key, &items, &state.expanded, expand_all);
 
         let rh = row_height_from_props(&node.props);
 
@@ -1000,8 +1039,7 @@ impl WidgetDefinition for TreeWidget {
         let widget_key = tree_state_key(node);
         let mut state = get_tree_state(widget_key);
         sync_state_with_external_selection(widget_key, &items, &node.props, expand_all, &mut state);
-        let mut rows = Vec::new();
-        flatten_items(&items, 0, &[], &state.expanded, expand_all, &mut rows);
+        let rows = cached_rows(widget_key, &items, &state.expanded, expand_all);
 
         let rh = row_height_from_props(&node.props);
         let scroll_offset = find_parent_scroll_offset(node);
@@ -1021,8 +1059,7 @@ impl WidgetDefinition for TreeWidget {
         let widget_key = tree_state_key(node);
         let mut state = get_tree_state(widget_key);
         sync_state_with_external_selection(widget_key, &items, &node.props, expand_all, &mut state);
-        let mut rows = Vec::new();
-        flatten_items(&items, 0, &[], &state.expanded, expand_all, &mut rows);
+        let rows = cached_rows(widget_key, &items, &state.expanded, expand_all);
         normalize_state_for_visible_rows(widget_key, &mut state, &rows);
         if first_interactive_row(&rows).is_none() {
             return None;
@@ -1156,8 +1193,7 @@ impl WidgetDefinition for TreeWidget {
         let widget_key = tree_state_key(node);
         let mut state = get_tree_state(widget_key);
         sync_state_with_external_selection(widget_key, &items, &node.props, expand_all, &mut state);
-        let mut rows = Vec::new();
-        flatten_items(&items, 0, &[], &state.expanded, expand_all, &mut rows);
+        let rows = cached_rows(widget_key, &items, &state.expanded, expand_all);
 
         let rh = row_height_from_props(&node.props);
         let scroll_offset = find_parent_scroll_offset(node);
@@ -1239,8 +1275,7 @@ impl WidgetDefinition for TreeWidget {
         let widget_key = tree_state_key(node);
         let mut state = get_tree_state(widget_key);
         sync_state_with_external_selection(widget_key, &items, &node.props, expand_all, &mut state);
-        let mut rows = Vec::new();
-        flatten_items(&items, 0, &[], &state.expanded, expand_all, &mut rows);
+        let rows = cached_rows(widget_key, &items, &state.expanded, expand_all);
         normalize_state_for_visible_rows(widget_key, &mut state, &rows);
 
         // Update the last-known expanded state for measure() to use
@@ -1634,6 +1669,38 @@ const MIN_ROW_HEIGHT: f32 = 1.0;
 mod expansion_identity_tests {
     use super::*;
     use std::rc::Rc;
+
+    #[test]
+    fn flattened_rows_reuse_exact_inputs_and_refresh_shared_cell_edits_and_expansion() {
+        let items = list(vec![item("Folder", "folder", vec![item("Child", "instrument", vec![])])]);
+        let expanded = HashSet::new();
+        let first = cached_rows(89001, &items, &expanded, false);
+        assert_eq!(first.len(), 1);
+        assert!(Rc::ptr_eq(&first, &cached_rows(89001, &items, &expanded, false)));
+        let opened = cached_rows(89001, &items, &expanded, true);
+        assert_eq!(opened.len(), 2);
+        let Value::List(cells) = &items else { unreachable!() };
+        let Value::Map(folder) = &*cells[0].borrow() else { unreachable!() };
+        *folder["label"].borrow_mut() = Value::String("Renamed".into());
+        let edited = cached_rows(89001, &items, &expanded, true);
+        assert!(!Rc::ptr_eq(&opened, &edited));
+        assert_eq!(edited[0].label, "Renamed");
+        assert_eq!(opened[0].label, "Folder");
+    }
+
+    #[test]
+    fn equal_replacement_items_refresh_the_cells_passed_to_callbacks() {
+        let old = list(vec![item("Same", "instrument", vec![])]);
+        let new = list(vec![item("Same", "instrument", vec![])]);
+        let expanded = HashSet::new();
+        let before = cached_rows(89002, &old, &expanded, false);
+        let after = cached_rows(89002, &new, &expanded, false);
+        assert!(!Rc::ptr_eq(&before, &after));
+        let Value::Map(row) = &after[0].item_value else { panic!("row item"); };
+        let Value::List(items) = &new else { panic!("items"); };
+        let Value::Map(current) = &*items[0].borrow() else { panic!("current item"); };
+        assert!(Rc::ptr_eq(&row["label"], &current["label"]));
+    }
 
     fn item(label: &str, kind: &str, children: Vec<Value>) -> Value {
         let mut map = HashMap::new();

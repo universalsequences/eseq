@@ -517,77 +517,92 @@ mod mixer_hit_tests;
     }
 
     #[test]
-    fn visualization_sync_skips_dead_sources_and_clears_each_source_once() {
-        let state = Arc::new(SequencerState::new(
-            1,
-            vec![default_empty_effect_chain()],
-        ));
+    fn visualization_sync_requires_live_consumers_and_refreshes_reopened_panels() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
         let mut runtime = Runtime::new();
-        runtime.register_reactive(
-            "SEQ",
-            vec![
-                ("neural-energy-matrix", Value::Number(-1.0)),
-                ("neural-trigger-matrix", Value::Number(-1.0)),
-                ("neural-dampening-matrix", Value::Number(-1.0)),
-                ("graph-visualizations", Value::Number(-1.0)),
-                ("track-events", Value::Number(-1.0)),
-                ("track-event-current-beat", Value::Number(-1.0)),
-            ],
-            true,
-        );
-        let mut liveness = VisualizationLiveness::default();
-
-        sync_neural_visualization_fields(&mut runtime, &state, &mut liveness);
-        assert_eq!(
-            runtime.eval_str("SEQ.neural-energy-matrix").unwrap(),
-            Some(Value::Number(-1.0))
-        );
-        assert_eq!(
-            runtime.eval_str("SEQ.track-events").unwrap(),
-            Some(Value::Number(-1.0))
-        );
-
+        runtime.register_reactive("SEQ", vec![
+            ("neural-energy-matrix", Value::Number(-1.0)),
+            ("neural-trigger-matrix", Value::Number(-1.0)),
+            ("neural-dampening-matrix", Value::Number(-1.0)),
+            ("graph-visualizations", Value::Number(-1.0)),
+            ("track-events", Value::Number(-1.0)),
+            ("track-event-current-beat", Value::Number(-1.0)),
+        ], true);
+        state.append_track_output_events([sequencer::sequencer::TrackOutputEvent {
+            track: 0, sample_time: 1, beat: 2.0, transpose: 0.0, velocity: 1.0,
+        }]);
+        state.set_track_output_current_beat(2.0);
         let mut neural = sequencer::neural::NeuralVisualizationSnapshot::default();
         neural.num_neurons = 1;
         neural.energy[0] = 0.5;
         state.set_neural_visualization(neural);
+        let mut liveness = VisualizationLiveness::default();
         sync_neural_visualization_fields(&mut runtime, &state, &mut liveness);
-        assert!(matches!(
-            runtime.eval_str("SEQ.neural-energy-matrix").unwrap(),
-            Some(Value::List(_))
-        ));
-        assert_eq!(
-            runtime.eval_str("SEQ.track-events").unwrap(),
-            Some(Value::Number(-1.0))
-        );
+        assert_eq!(runtime.reactive_field_value("SEQ", "track-events"), Some(&Value::Number(-1.0)),
+            "unobserved histories must not be converted or published");
 
-        state.set_neural_visualization(
-            sequencer::neural::NeuralVisualizationSnapshot::default(),
-        );
+        runtime.eval_str(r#"(effect-buffer "*events*" (label :text (str SEQ.track-events)))"#).unwrap();
         sync_neural_visualization_fields(&mut runtime, &state, &mut liveness);
-        assert_eq!(
-            runtime.eval_str("SEQ.neural-energy-matrix").unwrap(),
-            Some(Value::List(Vec::new()))
-        );
-        runtime.set_reactive("SEQ", "neural-energy-matrix", Value::Number(-2.0));
-        sync_neural_visualization_fields(&mut runtime, &state, &mut liveness);
-        assert_eq!(
-            runtime.eval_str("SEQ.neural-energy-matrix").unwrap(),
-            Some(Value::Number(-2.0))
-        );
+        runtime.run_reactive_cycle();
+        let published = runtime.reactive_field_value("SEQ", "track-events").unwrap().clone();
+        assert!(matches!(&published, Value::List(events) if events.len() == 1));
+        assert_eq!(runtime.reactive_field_value("SEQ", "track-event-current-beat"), Some(&Value::Number(-1.0)),
+            "a reader of one visualization does not demand the others");
+        assert_eq!(runtime.reactive_field_value("SEQ", "neural-energy-matrix"), Some(&Value::Number(-1.0)));
 
-        state.append_track_output_events([sequencer::sequencer::TrackOutputEvent {
-            track: 0,
-            sample_time: 1,
-            beat: 0.0,
-            transpose: 0.0,
-            velocity: 1.0,
-        }]);
+        runtime.set_hidden_effect_buffer_names(HashSet::from(["*events*".to_string()]));
+        state.clear_track_output_events();
         sync_neural_visualization_fields(&mut runtime, &state, &mut liveness);
-        let Some(Value::List(events)) = runtime.eval_str("SEQ.track-events").unwrap() else {
-            panic!("track output visualization should sync independently");
-        };
-        assert_eq!(events.len(), 1);
+        assert_eq!(runtime.reactive_field_value("SEQ", "track-events"), Some(&published));
+        runtime.set_hidden_effect_buffer_names(HashSet::new());
+        sync_neural_visualization_fields(&mut runtime, &state, &mut liveness);
+        assert_eq!(runtime.reactive_field_value("SEQ", "track-events"), Some(&Value::List(vec![])),
+            "reopening clears data whose source stopped while hidden");
+        runtime.run_reactive_cycle();
+        runtime.set_reactive("SEQ", "track-events", Value::Number(-2.0));
+        sync_neural_visualization_fields(&mut runtime, &state, &mut liveness);
+        assert_eq!(runtime.reactive_field_value("SEQ", "track-events"), Some(&Value::Number(-2.0)),
+            "a dead source clears once, not on every poll");
+
+        // Nonvisual observers still run in scratch-only mode.
+        runtime.eval_str("(observe SEQ.neural-energy-matrix)").unwrap();
+        sync_neural_visualization_fields(&mut runtime, &state, &mut liveness);
+        assert!(matches!(runtime.reactive_field_value("SEQ", "neural-energy-matrix"), Some(Value::List(_))));
+        state.set_neural_visualization(Default::default());
+        sync_neural_visualization_fields(&mut runtime, &state, &mut liveness);
+        assert_eq!(runtime.reactive_field_value("SEQ", "neural-energy-matrix"), Some(&Value::List(vec![])));
+    }
+
+    #[test]
+    fn sequencer_visibility_reads_live_registry_without_invoking_lisp() {
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        let calls = Rc::new(RefCell::new(0));
+        let recorded = calls.clone();
+        editor.runtime_mut().register_native("eseq.seq-step-tabs/seq-main-step-tabs", move |_, _| {
+            *recorded.borrow_mut() += 1;
+            Ok(Value::List(vec![]))
+        });
+        editor.create_scratch_buffer("*custom-seq*", "", eseqlisp::BufferMode::ESeqLisp);
+        let id = editor.buffers.iter_mut().find(|buffer| buffer.name == "*custom-seq*").map(|buffer| {
+            buffer.view_mode = eseqlisp::editor::ViewMode::UiOnly;
+            buffer.id
+        }).unwrap();
+        editor.set_active_buffer(id);
+        editor.runtime_mut().eval_str(
+            "(module eseq.seq-step-tabs) (defstate seq-registered-step-tabs '())"
+        ).unwrap();
+        let visible = super::super::edit_sessions::editor_has_visible_sequencer_view;
+        assert!(!visible(&editor));
+        editor.runtime_mut().eval_str(
+            r#"(set! eseq.seq-step-tabs/seq-registered-step-tabs '(("Custom" "*custom-seq*")))"#
+        ).unwrap();
+        assert!(visible(&editor), "new package registration is observed immediately");
+        editor.active_buffer_mut().view_mode = eseqlisp::editor::ViewMode::TextOnly;
+        assert!(!visible(&editor));
+        editor.active_buffer_mut().view_mode = eseqlisp::editor::ViewMode::UiOnly;
+        editor.runtime_mut().eval_str("(set! eseq.seq-step-tabs/seq-registered-step-tabs '())").unwrap();
+        assert!(!visible(&editor), "unregistered views stop receiving sequencer publishes");
+        assert_eq!(*calls.borrow(), 0, "visibility must never invoke or flush the Lisp runtime");
     }
 
     #[test]

@@ -4,8 +4,9 @@
 //! compact, renderer-neutral lattice frame; the `sound-glyph` widget only
 //! packs it for its Metal shader.
 
-use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::collections::HashSet;
+use std::sync::{Arc, OnceLock};
+use crate::widget_render::paint_resources::PaintResourceStore;
 
 /// One accent piece: a welded polyomino anchored at a lattice slot.
 #[derive(Clone, Debug, PartialEq)]
@@ -31,69 +32,46 @@ pub struct SoundGlyphFrame {
     pub incompatible: bool,
 }
 
-static SOUND_GLYPH_FRAMES: OnceLock<Mutex<HashMap<String, Arc<SoundGlyphFrame>>>> = OnceLock::new();
+static SOUND_GLYPH_FRAMES: OnceLock<PaintResourceStore<Arc<SoundGlyphFrame>>> = OnceLock::new();
 
-fn sound_glyph_frames() -> &'static Mutex<HashMap<String, Arc<SoundGlyphFrame>>> {
-    SOUND_GLYPH_FRAMES.get_or_init(|| Mutex::new(HashMap::new()))
+fn sound_glyph_frames() -> &'static PaintResourceStore<Arc<SoundGlyphFrame>> {
+    SOUND_GLYPH_FRAMES.get_or_init(PaintResourceStore::default)
 }
 
 /// Glyph keys whose surface is currently "playing" (mixer pattern cells draw a
 /// play triangle on top of the glyph). Kept OUT of `SoundGlyphFrame` on
 /// purpose: launch state changes independently of glyph geometry, and folding
 /// it into the frame would force a full cohort re-stat per launch.
-static SOUND_GLYPH_PLAY_KEYS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+static SOUND_GLYPH_PLAY_KEYS: OnceLock<PaintResourceStore<bool>> = OnceLock::new();
 
-fn sound_glyph_play_keys() -> &'static Mutex<HashSet<String>> {
-    SOUND_GLYPH_PLAY_KEYS.get_or_init(|| Mutex::new(HashSet::new()))
+fn sound_glyph_play_keys() -> &'static PaintResourceStore<bool> {
+    SOUND_GLYPH_PLAY_KEYS.get_or_init(PaintResourceStore::default)
 }
 
 /// Replace ONE publisher's playing set: keys under `prefix` become exactly
 /// `keys`; other publishers' keys are untouched (same namespace rule as
-/// `retain_sound_glyph_frames`). Bumps the widget-state generation only on a
-/// real change, so the steady state costs a set comparison and no rebuild.
+/// `retain_sound_glyph_frames`). Invalidates readers only on a
+/// real change, without repainting unrelated widgets.
 pub fn set_sound_glyph_play_keys(prefix: &str, keys: HashSet<String>) {
     debug_assert!(keys.iter().all(|key| key.starts_with(prefix)));
-    let mut store = sound_glyph_play_keys().lock().unwrap();
-    let mut next: HashSet<String> = store
-        .iter()
-        .filter(|key| !key.starts_with(prefix))
-        .cloned()
-        .collect();
-    next.extend(keys);
-    if *store == next {
-        return;
-    }
-    *store = next;
-    drop(store);
-    crate::widget_render::bump_widget_state_generation();
+    sound_glyph_play_keys().replace_set(prefix, &keys);
 }
 
 pub fn sound_glyph_playing(key: &str) -> bool {
-    sound_glyph_play_keys().lock().unwrap().contains(key)
+    sound_glyph_play_keys().get(key).unwrap_or(false)
 }
 
 pub fn publish_sound_glyph_frame(key: impl Into<String>, frame: SoundGlyphFrame) {
     publish_sound_glyph_frames([(key.into(), frame)]);
 }
 
-/// Publish a cohort atomically and invalidate widget primitives once. A
-/// reference change normally replaces every tile, so per-frame invalidation
-/// would perform redundant global generation bumps.
+/// Publish a cohort atomically; each key invalidates only its paint readers.
 pub fn publish_sound_glyph_frames(frames: impl IntoIterator<Item = (String, SoundGlyphFrame)>) {
-    let mut store = sound_glyph_frames().lock().unwrap();
-    let mut changed = false;
-    for (key, frame) in frames {
-        store.insert(key, Arc::new(frame));
-        changed = true;
-    }
-    drop(store);
-    if changed {
-        crate::widget_render::bump_widget_state_generation();
-    }
+    sound_glyph_frames().publish_many(frames.into_iter().map(|(key, frame)| (key, Arc::new(frame))));
 }
 
 pub fn sound_glyph_frame(key: &str) -> Option<Arc<SoundGlyphFrame>> {
-    sound_glyph_frames().lock().unwrap().get(key).cloned()
+    sound_glyph_frames().get(key)
 }
 
 /// Prune ONE publisher's namespace: keys under `prefix` survive only when in
@@ -101,10 +79,7 @@ pub fn sound_glyph_frame(key: &str) -> Option<Arc<SoundGlyphFrame>> {
 /// would let the palette feed and the mixer-cell feed silently prune each
 /// other every sync.
 pub fn retain_sound_glyph_frames(prefix: &str, active_keys: &HashSet<String>) {
-    sound_glyph_frames()
-        .lock()
-        .unwrap()
-        .retain(|key, _| !key.starts_with(prefix) || active_keys.contains(key));
+    sound_glyph_frames().retain(|key| !key.starts_with(prefix) || active_keys.contains(key));
 }
 
 // NOTE: play keys are deliberately NOT cleared here. Their lifecycle is owned
@@ -112,7 +87,7 @@ pub fn retain_sound_glyph_frames(prefix: &str, active_keys: &HashSet<String>) {
 // namespace every sync — and clearing them here would let the parallel test
 // that exercises `clear_sound_glyph_frames` race the play-key test.
 pub fn clear_sound_glyph_frames() {
-    sound_glyph_frames().lock().unwrap().clear();
+    sound_glyph_frames().clear();
 }
 
 #[cfg(test)]
