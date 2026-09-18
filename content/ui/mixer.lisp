@@ -149,9 +149,10 @@
     (dict :id :convert-drum-rack :label "Convert to Drum Rack")
     (dict :id :ungroup :label "Ungroup")))
 
-;; A rack's menu also offers the graph sequencers it could own: every
-;; project-owned graph sequencer can move into the rack (its routes become
-;; rack members), and every sequencer the rack already owns can be detached
+;; A rack's menu also offers the graph sequencers it could own. A sequencer
+;; that merely routes to tracks inside the rack is still project-owned;
+;; "Rack owns …" hands it to the rack (routes become rack members, and the
+;; pair travels together into kits), and "Release …" gives it back
 ;; (docs/rack-clips-and-break-kits-spec.md §5.1).
 (def rack-group-menu-actions (gid)
   (append
@@ -163,11 +164,11 @@
           (dict :id :detach-sequencer
                 :sequencer-id (get graph :id)
                 :sequencer-name (get graph :name)
-                :label (str "Detach \"" (get graph :name) "\""))
+                :label (str "Release \"" (get graph :name) "\" from rack"))
           (dict :id :move-sequencer-into-rack
                 :sequencer-id (get graph :id)
                 :sequencer-name (get graph :name)
-                :label (str "Move \"" (get graph :name) "\" into rack"))))
+                :label (str "Rack owns \"" (get graph :name) "\"…"))))
       (filter (lambda (graph)
                 (or (= (get graph :owner-rack) nil)
                     (= (get graph :owner-rack) gid)))
