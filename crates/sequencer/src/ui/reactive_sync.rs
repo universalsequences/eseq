@@ -2775,6 +2775,54 @@ pub(super) fn load_or_convert_sampler_track(
         });
     }
 
+    // A single-layer rack container (what a kit pad or a Sound preset loads
+    // as) takes the sample the way a sampler track does: into the pattern it
+    // is playing, so a rack clip or scene can hold its own sample while the
+    // others keep theirs. Replacing the whole container would rewrite every
+    // pattern of the track.
+    let single_layer_rack = instrument_type == InstrumentType::Rack
+        && path.is_some()
+        && app
+            .state
+            .live_rack_track_snapshot(track)
+            .is_some_and(|rack| rack.slots.len() == 1);
+    if single_layer_rack {
+        let path = path.expect("checked above");
+        app.apply_recorded_rack_slot_source_replacement(
+            track,
+            0,
+            "Replace rack sample",
+            |app| app.graph_controller().replace_rack_slot_with_sampler(track, 0, path),
+        )?;
+        register_waveform_sample(path);
+        reset_sampler_waveform_view(editor);
+        let selected_track = host_commands::selection_after_track_apply(
+            track,
+            preserve_track_selection,
+            current_track,
+            app.tracks.len(),
+        );
+        current_track.store(selected_track, Ordering::Relaxed);
+        app.ui.cursor_track = selected_track;
+        let rt = editor.runtime_mut();
+        set_current_track_reactive(rt, app.tracks.len(), selected_track);
+        rt.set_reactive(
+            "SEQ",
+            "instrument-panel",
+            build_instrument_panel_value(app, selected_track, selected_steps),
+        );
+        sync_track_mixer_state(rt, app, state);
+        sync_sidebar_browser(rt, app, selected_track);
+        rt.run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let name = sequencer::sample_db::display_title_for_sample_path(path)
+            .unwrap_or_else(|| app.tracks[track].clone());
+        return Ok(SamplerTrackLoadResult {
+            name,
+            reset_summary: None,
+        });
+    }
+
     let resolved_path = path
         .map(Path::to_path_buf)
         .or_else(|| app.sampler_path_for_track(track));

@@ -83,7 +83,10 @@
 (def script-buffer-name "*16x16*")
 ;; Owned by a rack: routes address its members and the tab wears its name.
 (def g16-owner-rack (graph-owner g16-name))
-(def g16-route-tracks (graph-route-tracks g16-name))
+(def g16-route-tracks ()
+  ;; Read live so a member that joins the rack later shows up; SEQ.groups
+  ;; is read only to re-render when the membership changes.
+  (let ((groups SEQ.groups)) (graph-route-tracks g16-name)))
 (def script-tab-label
   (if g16-owner-rack (eseq.drum-rack-v2/group-name (eseq.drum-rack-v2/group-index-by-id g16-owner-rack)) "16x16"))
 (def script-sequencer-name "neural-16-demo")
@@ -94,10 +97,10 @@
 (def g16-quant-options (list "off" "1" "2" "4" "8" "16" "32" "64" "2T" "4T" "8T" "16T" "32T" "64T" "Prh"))
 ;; Route option n is track n (project-owned) or rack member n (rack-owned);
 ;; "Off" is always last. Either way the option index IS the route value.
-(def g16-route-options
-  (if g16-route-tracks
+(def g16-route-options ()
+  (if (g16-route-tracks)
     (append
-      (map (lambda (track) (str (+ track 1) " " (nth SEQ.track-names track))) g16-route-tracks)
+      (map (lambda (track) (str (+ track 1) " " (nth SEQ.track-names track))) (g16-route-tracks))
       (list "Off"))
     (list "Track 1" "Track 2" "Track 3" "Track 4" "Track 5" "Track 6" "Track 7" "Track 8"
           "Track 9" "Track 10" "Track 11" "Track 12" "Track 13" "Track 14" "Track 15" "Track 16"
@@ -109,7 +112,7 @@
 
 ;; Route dropdown label -> the internal route the engine stores (:off or a track index).
 (def g16-route->internal (label)
-  (if (= label "Off") :off (g16-index-of g16-route-options label)))
+  (if (= label "Off") :off (g16-index-of (g16-route-options) label)))
 
 ;; Connection weights: one list-valued widget, so a single state cell is fine.
 ;; Per-node knobs avoid defstate via bind-graph. The matrix keeps one g16-weights
@@ -230,8 +233,8 @@
   (h-stack :gap 0.4 :align :center
     (label (str n) :width g16-node-width :height g16-row-height :font-size 9 :h-align :center :color :dim)
     (g16-pick (str "graph-16-route-" n)
-      (bind-graph g16-name n :route g16-route-options) g16-route-options
-      (lambda (v) (g16-edit-enum n :route g16-route-options v (g16-route->internal v))))
+      (bind-graph g16-name n :route (g16-route-options)) (g16-route-options)
+      (lambda (v) (g16-edit-enum n :route (g16-route-options) v (g16-route->internal v))))
     (g16-num (str "graph-16-delay-" n)
       (bind-graph g16-name n :delay) 0 16 1 0
       (lambda (v) (g16-edit-num n :delay v)))

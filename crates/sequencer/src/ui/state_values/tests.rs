@@ -32677,7 +32677,7 @@ mod mixer_hit_tests;
             "the collapsed rack row renders its clip run",
         );
         assert!(
-            editor.runtime_mut().eval_str("(eseq.mixer/rack-clip-column 8)").unwrap().is_some(),
+            editor.runtime_mut().eval_str("(eseq.mixer/rack-clip-column 8 0)").unwrap().is_some(),
             "the collapsed mixer strip renders its clip run",
         );
 

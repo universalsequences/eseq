@@ -1162,6 +1162,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                 "SEQ",
                 vec![
                     ("current-pattern", Value::Number(0.0)),
+                    ("groups", Value::List(Vec::new())),
                     ("graph-visualizations", Value::List(Vec::new())),
                     ("track-colors", Value::List(Vec::new())),
                     ("track-active-notes", Value::List(Vec::new())),
@@ -1208,7 +1209,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                 "{file}: the tab registry still keys by name"
             );
             assert_eq!(
-                runtime.eval_str(&format!("(len {prefix}-route-options)")).unwrap(),
+                runtime.eval_str(&format!("(len ({prefix}-route-options))")).unwrap(),
                 Some(Value::Number(17.0)),
                 "{file}: project-owned: 16 tracks + Off"
             );
@@ -1231,7 +1232,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             );
             assert_eq!(
                 eseqlisp::vm::format_lisp_value(
-                    &runtime.eval_str(&format!("{prefix}-route-options")).unwrap().unwrap()
+                    &runtime.eval_str(&format!("({prefix}-route-options)")).unwrap().unwrap()
                 ),
                 r#"("3 hat" "1 kick" "Off")"#,
                 "{file}: rack-owned route options"
@@ -1240,6 +1241,19 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                 state.published_sequencers().iter().any(|p| p.id == rack_id
                     && p.graph.as_ref().is_some_and(|m| m.owner_rack == Some(9))),
                 "{file}: rack-owned instance published"
+            );
+            // A member that joins the rack after the script loaded shows up:
+            // the options are read live, not snapshotted at load.
+            state.set_rack_memberships(vec![crate::graph::RackMembership {
+                group_id: 9,
+                members: vec![2, 0, 3],
+            }]);
+            assert_eq!(
+                eseqlisp::vm::format_lisp_value(
+                    &runtime.eval_str(&format!("({prefix}-route-options)")).unwrap().unwrap()
+                ),
+                r#"("3 hat" "1 kick" "4 perc" "Off")"#,
+                "{file}: a later member joins the route options"
             );
         }
     }
@@ -1258,6 +1272,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             "SEQ",
             vec![
                 ("current-pattern", Value::Number(0.0)),
+                    ("groups", Value::List(Vec::new())),
                 ("graph-visualizations", Value::List(Vec::new())),
                 ("track-colors", Value::List(Vec::new())),
                 ("track-active-notes", Value::List(Vec::new())),
@@ -1301,7 +1316,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             Some(Value::String("var rst".into()))
         );
         assert_eq!(
-            runtime.eval_str("(len gvr-route-options)").unwrap(),
+            runtime.eval_str("(len (gvr-route-options))").unwrap(),
             Some(Value::Number(17.0)),
             "project-owned: 16 tracks + Off"
         );
@@ -1323,7 +1338,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             "rack-owned: the tab wears the rack's name"
         );
         assert_eq!(
-            eseqlisp::vm::format_lisp_value(&runtime.eval_str("gvr-route-options").unwrap().unwrap()),
+            eseqlisp::vm::format_lisp_value(&runtime.eval_str("(gvr-route-options)").unwrap().unwrap()),
             r#"("3 hat" "1 kick" "Off")"#,
             "rack-owned: route options are the members in order (labelled by track number), then Off"
         );
@@ -1642,6 +1657,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             "SEQ",
             vec![
                 ("current-pattern", Value::Number(0.0)),
+                    ("groups", Value::List(Vec::new())),
                 ("graph-visualizations", Value::List(Vec::new())),
                 ("track-events", Value::List(Vec::new())),
                 ("track-event-current-beat", Value::Number(0.0)),
@@ -2052,7 +2068,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         );
         assert_eq!(
             runtime
-                .eval_str("(reactive-value (bind-graph g8-name 4 :route g8-route-options))")
+                .eval_str("(reactive-value (bind-graph g8-name 4 :route (g8-route-options)))")
                 .expect("read bound route index"),
             Some(Value::Number(0.0)),
             "pattern switch should display internal route 0 as Track 1 (index 0)"
@@ -2241,6 +2257,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             "SEQ",
             vec![
                 ("current-pattern", Value::Number(0.0)),
+                    ("groups", Value::List(Vec::new())),
                 ("graph-visualizations", Value::List(Vec::new())),
             ],
             true,
@@ -2657,6 +2674,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             "SEQ",
             vec![
                 ("current-pattern", Value::Number(0.0)),
+                    ("groups", Value::List(Vec::new())),
                 ("graph-visualizations", Value::List(Vec::new())),
                 ("track-colors", test_track_colors()),
             ],
@@ -2979,6 +2997,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             "SEQ",
             vec![
                 ("current-pattern", Value::Number(0.0)),
+                    ("groups", Value::List(Vec::new())),
                 ("graph-visualizations", Value::List(Vec::new())),
             ],
             true,
@@ -3139,6 +3158,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             "SEQ",
             vec![
                 ("current-pattern", Value::Number(0.0)),
+                    ("groups", Value::List(Vec::new())),
                 ("graph-visualizations", Value::List(Vec::new())),
             ],
             true,
@@ -3298,6 +3318,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             "SEQ",
             vec![
                 ("current-pattern", Value::Number(0.0)),
+                    ("groups", Value::List(Vec::new())),
                 ("graph-visualizations", Value::List(Vec::new())),
             ],
             true,
@@ -3551,6 +3572,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             "SEQ",
             vec![
                 ("current-pattern", Value::Number(0.0)),
+                    ("groups", Value::List(Vec::new())),
                 ("graph-visualizations", Value::List(Vec::new())),
             ],
             true,
@@ -3799,6 +3821,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             "SEQ",
             vec![
                 ("current-pattern", Value::Number(0.0)),
+                    ("groups", Value::List(Vec::new())),
                 ("graph-visualizations", Value::List(Vec::new())),
             ],
             true,
@@ -3858,7 +3881,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         );
         assert_eq!(
             runtime
-                .eval_str("(reactive-value (bind-graph g8-name 4 :route g8-route-options))")
+                .eval_str("(reactive-value (bind-graph g8-name 4 :route (g8-route-options)))")
                 .expect("read bound route index"),
             Some(Value::Number(0.0)),
             "loaded UI should display saved internal route 0 as Track 1 (index 0)"
@@ -5618,6 +5641,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             "SEQ",
             vec![
                 ("current-pattern", Value::Number(0.0)),
+                    ("groups", Value::List(Vec::new())),
                 ("neural-networks", Value::List(Vec::new())),
                 ("neural-energy-matrix", Value::List(Vec::new())),
                 ("neural-trigger-matrix", Value::List(Vec::new())),

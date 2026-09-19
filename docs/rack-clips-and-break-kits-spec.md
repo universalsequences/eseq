@@ -197,6 +197,16 @@ Invariants:
   to them. Track reindex-on-delete touches nothing here because everything is
   by group id and member position.
 
+### 3.x Scene create
+
+Creating a project scene (transport "new scene") forks the current scene's
+clip for every clip-bearing rack: a new clip named after the new scene, one
+fresh pattern (own Patch and Mix) per member, the rack-owned overrides copied,
+and the new scene pointing at it. This mirrors what scene create does for plain
+tracks, so the rack immediately has somewhere new to put steps and sounds
+instead of sharing the clip it was playing. A rack the current scene left
+silent (`None`) stays silent in the new scene.
+
 ## 4. Launch composition — BUILT (eseq-172r.3)
 
 Built as described, through one pair of helpers on `ProjectScenes`:
@@ -378,6 +388,13 @@ trigger-matrix data the demo script already renders).
 
 Opening the rack still reveals member rows for editing. Nothing about the
 expanded view changes except the header now also shows the clip run.
+
+The run lives inside the header row itself, in the empty right half after the
+volume slider and starting where the member rows' step grids start, rather than
+as a second row under the header: a second row squeezed the cells and doubled
+the height of a collapsed rack. In the mixer the group strip has no clip area
+of its own (its meter control carries a spacer to sit level with the track
+meters), so the clip column takes that spacer's room instead of adding to it.
 
 **Not built:** drag reorder of clip cells (the run renders from a reactive field
 with no drop target; `ProjectScenes::reorder_rack_clip` exists for when it is

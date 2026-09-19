@@ -1558,6 +1558,13 @@ impl ProjectScenes {
             scene_slots,
             project_process_chain,
         });
+        // A clip-bearing rack gets its own new clip the way each plain track
+        // got a forked pattern above: the current scene's clip is forked (one
+        // fresh pattern, Patch and Mix per member) and the new scene points at
+        // it, so the rack has somewhere new to put sounds and steps instead of
+        // sharing the clip it was already playing. A rack the current scene
+        // left silent stays silent here.
+        self.fork_rack_clips_for_new_scene(scene_idx);
         self.banks[bank_index].len += 1;
         self.current_scene = scene_idx;
         self.track_overrides.fill(None);

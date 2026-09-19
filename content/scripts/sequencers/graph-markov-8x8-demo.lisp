@@ -53,7 +53,10 @@
 (def script-buffer-name "*markov-8x8*")
 ;; Owned by a rack: routes address its members and the tab wears its name.
 (def m8-owner-rack (graph-owner m8-name))
-(def m8-route-tracks (graph-route-tracks m8-name))
+(def m8-route-tracks ()
+  ;; Read live so a member that joins the rack later shows up; SEQ.groups
+  ;; is read only to re-render when the membership changes.
+  (let ((groups SEQ.groups)) (graph-route-tracks m8-name)))
 (def script-tab-label
   (if m8-owner-rack (eseq.drum-rack-v2/group-name (eseq.drum-rack-v2/group-index-by-id m8-owner-rack)) "Markov 8x8"))
 (def script-sequencer-name "markov-8x8-demo")
@@ -62,10 +65,10 @@
 (def m8-quant-options (list "off" "1" "2" "4" "8" "16" "32" "64" "2T" "4T" "8T" "16T" "32T" "64T" "Prh"))
 ;; Route option n is track n (project-owned) or rack member n (rack-owned);
 ;; "Off" is always last. Either way the option index IS the route value.
-(def m8-route-options
-  (if m8-route-tracks
+(def m8-route-options ()
+  (if (m8-route-tracks)
     (append
-      (map (lambda (track) (str (+ track 1) " " (nth SEQ.track-names track))) m8-route-tracks)
+      (map (lambda (track) (str (+ track 1) " " (nth SEQ.track-names track))) (m8-route-tracks))
       (list "Off"))
     (list "Track 1" "Track 2" "Track 3" "Track 4" "Track 5" "Track 6" "Track 7" "Track 8"
           "Track 9" "Track 10" "Track 11" "Track 12" "Track 13" "Track 14" "Track 15" "Track 16"
@@ -76,7 +79,7 @@
     (if (> (len hits) 0) (nth hits 0) 0)))
 
 (def m8-route->internal (label)
-  (if (= label "Off") :off (m8-index-of m8-route-options label)))
+  (if (= label "Off") :off (m8-index-of (m8-route-options) label)))
 
 (def m8-ring-weights ()
   (list
@@ -196,8 +199,8 @@
   (h-stack :gap 0.4 :align :center
     (label (str n) :width m8-node-width :height m8-row-height :font-size 9 :h-align :center :color :dim)
     (m8-pick (str "markov-8x8-route-" n)
-      (bind-graph m8-name n :route m8-route-options) m8-route-options
-      (lambda (v) (m8-edit-enum n :route m8-route-options v (m8-route->internal v))))
+      (bind-graph m8-name n :route (m8-route-options)) (m8-route-options)
+      (lambda (v) (m8-edit-enum n :route (m8-route-options) v (m8-route->internal v))))
     (m8-num (str "markov-8x8-delay-" n)
       (bind-graph m8-name n :delay) 0 16 1 0
       (lambda (v) (m8-edit-num n :delay v)))

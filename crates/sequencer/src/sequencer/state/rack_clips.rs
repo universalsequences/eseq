@@ -182,15 +182,37 @@ impl ProjectScenes {
         self.repair_rack_clips();
     }
 
-    /// Member `position` joined rack `group_id`: every clip grows a silent cell
-    /// there so `cells.len() == members.len()` holds.
-    pub fn rack_clip_member_inserted(&mut self, group_id: u64, position: usize) {
+    /// Member `position` (track `track`) joined rack `group_id`: every clip
+    /// grows a cell there so `cells.len() == members.len()` holds. The cell is
+    /// the track's own scene pattern where a scene points at that clip (a new
+    /// track has one private pattern per scene, and an existing track brings
+    /// its content along), else silent. The joining member's scene cells are
+    /// then cleared: a clip-bearing rack's members resolve through the clip,
+    /// so a second copy in the scene would only diverge.
+    pub fn rack_clip_member_inserted(&mut self, group_id: u64, position: usize, track: usize) {
+        let pointers: Vec<Option<RackClipId>> = (0..self.scenes.len())
+            .map(|scene_idx| self.scene_rack_clip(scene_idx, group_id))
+            .collect();
+        let scene_cells: Vec<Option<PatternId>> = self
+            .scenes
+            .iter()
+            .map(|scene| scene.cells.get(track).copied().flatten())
+            .collect();
         let Some(bank) = self.rack_bank_mut(group_id) else {
             return;
         };
         for clip in &mut bank.clips {
             let at = position.min(clip.cells.len());
-            clip.cells.insert(at, None);
+            let adopted = pointers
+                .iter()
+                .zip(&scene_cells)
+                .find_map(|(pointer, cell)| (*pointer == Some(clip.id)).then_some(*cell)?);
+            clip.cells.insert(at, adopted);
+        }
+        for scene in &mut self.scenes {
+            if let Some(cell) = scene.cells.get_mut(track) {
+                *cell = None;
+            }
         }
     }
 
@@ -423,6 +445,49 @@ impl ProjectScenes {
             self.adopt_live_rack_clips();
         }
         Some(id)
+    }
+
+    /// Scene create (`new_scene_in_bank`): every rack the new scene inherits
+    /// a clip pointer for gets a fork of that clip under the new scene's
+    /// name, and the pointer moves to the fork.
+    pub(super) fn fork_rack_clips_for_new_scene(&mut self, scene_idx: usize) {
+        let Some(scene_name) = self.scenes.get(scene_idx).map(|scene| scene.name.clone()) else {
+            return;
+        };
+        let inherited: Vec<(u64, RackClipId)> = self
+            .scenes
+            .get(scene_idx)
+            .map(|scene| scene.rack_clips.clone())
+            .unwrap_or_default();
+        for (group_id, source) in inherited {
+            let Some((members, cells, overrides)) = self.rack_bank(group_id).and_then(|bank| {
+                let clip = bank.clip(source)?;
+                Some((bank.members.clone(), clip.cells.clone(), clip.graph_overrides.clone()))
+            }) else {
+                continue;
+            };
+            let forked: Vec<Option<PatternId>> = cells
+                .iter()
+                .enumerate()
+                .map(|(position, cell)| {
+                    let track = *members.get(position)?;
+                    let data = self.track_pools.get(track)?.get((*cell)?)?;
+                    Some(self.track_pools.get_mut(track)?.insert(data))
+                })
+                .collect();
+            let Some(bank) = self.rack_bank_mut(group_id) else {
+                continue;
+            };
+            let id = bank.mint_id();
+            bank.clips.push(RackClip {
+                id,
+                name: scene_name.clone(),
+                color: None,
+                cells: forked,
+                graph_overrides: overrides,
+            });
+            self.set_scene_rack_clip(scene_idx, group_id, Some(id));
+        }
     }
 
     /// Append an empty clip to a rack that already has a bank.
@@ -829,13 +894,54 @@ mod tests {
     }
 
     #[test]
+    fn a_new_project_scene_forks_the_current_clip_and_points_at_the_fork() {
+        let mut scenes = scenes();
+        for track in MEMBERS {
+            let data = pattern_data(&scenes, track);
+            let id = scenes.track_pools[track].insert(data);
+            scenes.scenes[0].cells[track] = Some(id);
+        }
+        scenes.scenes[0].graph_overrides = vec![rack_override(11, 0)];
+        scenes.convert_rack_to_clips(RACK, &MEMBERS).expect("converts");
+        scenes.current_scene = 0;
+        let source = scenes.scene_rack_clip(0, RACK).expect("scene 0 plays a clip");
+        let source_cells = scenes.rack_bank(RACK).unwrap().clip(source).unwrap().cells.clone();
+
+        let new_idx = scenes.new_scene();
+        let forked = scenes.scene_rack_clip(new_idx, RACK).expect("the new scene plays a clip");
+        assert_ne!(forked, source, "the new scene has its own clip");
+        let bank = scenes.rack_bank(RACK).unwrap();
+        let clip = bank.clip(forked).unwrap();
+        assert_eq!(clip.name, scenes.scenes[new_idx].name);
+        assert_eq!(clip.graph_overrides.len(), 1, "rack-owned overrides ride along");
+        for (position, track) in MEMBERS.iter().enumerate() {
+            let fresh = clip.cells[position].expect("every member has a cell");
+            let old = source_cells[position].unwrap();
+            assert_ne!(fresh, old, "member {track}: a fresh pattern, not the shared one");
+            assert_ne!(
+                scenes.track_pools[*track].refs(fresh),
+                scenes.track_pools[*track].refs(old),
+                "member {track}: a fresh Patch/Mix so the new scene can hold its own sound"
+            );
+            assert!(scenes.scenes[new_idx].cells[*track].is_none(), "members resolve via the clip");
+        }
+        // The source clip is untouched, and a rack the current scene left
+        // silent stays silent in the new scene.
+        assert_eq!(bank.clip(source).unwrap().cells, source_cells);
+        scenes.set_scene_rack_clip(new_idx, RACK, None);
+        scenes.current_scene = new_idx;
+        let silent_idx = scenes.new_scene();
+        assert_eq!(scenes.scene_rack_clip(silent_idx, RACK), None);
+    }
+
+    #[test]
     fn member_join_and_leave_keep_the_clip_cell_count_in_step() {
         let mut scenes = scenes();
         let clip = scenes.create_rack_clip_with_members(RACK, &MEMBERS, "Break");
         assert_eq!(scenes.rack_bank(RACK).unwrap().clip(clip).unwrap().cells.len(), 2);
 
         scenes.rack_bank_mut(RACK).unwrap().members = vec![1, 2, 3];
-        scenes.rack_clip_member_inserted(RACK, 2);
+        scenes.rack_clip_member_inserted(RACK, 2, 3);
         assert_eq!(scenes.rack_bank(RACK).unwrap().clip(clip).unwrap().cells.len(), 3);
 
         scenes.rack_clip_member_removed(RACK, 0);

@@ -3299,12 +3299,14 @@ impl App {
             }
         }
         // Rack clips are positional over members (rack-clips spec §3): the
-        // joining member gets a silent cell in every clip.
+        // joining member gets a cell in every clip, adopting its scene
+        // patterns where a scene points at the clip.
         let joined_rack = self.groups[group_index].is_rack();
         if joined_rack {
             let group_id = self.groups[group_index].id;
-            self.state
-                .with_scenes_mut(|scenes| scenes.rack_clip_member_inserted(group_id, position));
+            self.state.with_scenes_mut(|scenes| {
+                scenes.rack_clip_member_inserted(group_id, position, track)
+            });
         }
         self.publish_rack_choke_runtime();
         Ok(())

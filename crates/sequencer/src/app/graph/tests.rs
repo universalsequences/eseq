@@ -1496,6 +1496,158 @@
     /// survive a project save/load (rack-clips spec §3), and a rack with no
     /// clips comes back legacy.
     #[test]
+    fn dropping_a_sample_on_an_empty_pad_of_a_clip_bearing_rack_adds_a_member_with_a_cell() {
+        let engine = crate::audio::engine::init_headless_engine(48_000, 2).unwrap();
+        let lg = engine.lg_ptr;
+        let mut app = App::new(engine.state, lg, engine.sample_rate,
+            engine.buses, engine.master_recorder, engine.keyboard_tx);
+        let sample = std::path::Path::new("../../content/impulses/lexicon-300-rich-plate.wav");
+        let (group_id, _) = app
+            .create_drum_rack_recorded(Some("Break".to_string()))
+            .expect("drum rack");
+        let kick = app.graph_controller().add_track(sample).expect("kick");
+        app.assign_rack_pad_track_recorded(group_id, 36, kick).expect("pad");
+        app.state.launch_scene(
+            0,
+            app.tracks.len(),
+            &app.graph.track_buffer_ids,
+            &app.graph.track_sample_rates,
+            &app.tracks,
+            &app.graph.track_instrument_types,
+        );
+        app.state.toggle_step_and_clear_plocks(kick, 0);
+        app.convert_rack_to_clips_recorded(group_id).expect("convert");
+        let idx = app.graph_controller().add_track(sample).expect("new track");
+        app.attach_track_to_group(idx, group_id, Some(38)).expect("attach to pad");
+        // The joining member has a cell in the clip the current scene plays
+        // (its own scene pattern, adopted), so the history capture that
+        // commits the new track finds an effective pattern.
+        app.commit_created_track(idx, "Add sample track").expect("commit");
+        let members = app.groups.iter().find(|g| g.id == group_id).unwrap().members.clone();
+        assert_eq!(members, vec![kick, idx]);
+        app.state.with_scenes(|scenes| {
+            assert!(scenes.effective_pattern_id(idx).is_some(), "new member has an effective pattern");
+            let clip = scenes.current_rack_clip(group_id).expect("scene 0 plays a clip");
+            let bank = scenes.rack_bank(group_id).expect("bank");
+            assert_eq!(bank.clip(clip).unwrap().cells.len(), 2);
+            assert!(bank.clip(clip).unwrap().cells[1].is_some());
+            assert!(scenes.scenes[0].cells[idx].is_none(), "scene cell moved into the clip");
+        });
+    }
+
+    #[test]
+    fn a_sample_dropped_on_a_kit_pad_lands_in_the_playing_clip_only() {
+        let engine = crate::audio::engine::init_headless_engine(48_000, 2).unwrap();
+        let lg = engine.lg_ptr;
+        let mut app = App::new(engine.state, lg, engine.sample_rate,
+            engine.buses, engine.master_recorder, engine.keyboard_tx);
+        let sample = std::path::Path::new("../../content/impulses/lexicon-300-rich-plate.wav");
+        let other = std::fs::read_dir("../../content/impulses/king-tubby")
+            .expect("king-tubby impulses")
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .find(|path| path.extension().is_some_and(|ext| ext == "wav"))
+            .expect("a second wav");
+        let (group_id, _) = app
+            .create_drum_rack_recorded(Some("Break".to_string()))
+            .expect("drum rack");
+        let kick = app.graph_controller().add_track(sample).expect("kick");
+        app.assign_rack_pad_track_recorded(group_id, 36, kick).expect("pad");
+        app.state.with_scenes_mut(|scenes| { scenes.new_scene(); });
+        let relaunch = |app: &App, scene: usize| {
+            app.state.launch_scene(scene, app.tracks.len(), &app.graph.track_buffer_ids,
+                &app.graph.track_sample_rates, &app.tracks, &app.graph.track_instrument_types);
+        };
+        relaunch(&app, 0);
+        app.state.toggle_step_and_clear_plocks(kick, 0);
+        relaunch(&app, 1);
+        app.state.toggle_step_and_clear_plocks(kick, 3);
+        relaunch(&app, 0);
+        app.convert_rack_to_clips_recorded(group_id).expect("convert");
+        let name = format!("kit-pad-sample-{}", std::process::id());
+        let (path, _) = app.save_rack_as_kit(group_id, &name, true, &[0, 1]).expect("save kit");
+
+        // A kit pad loads as a single-layer rack container whose sample lives
+        // in each pattern's rack slot snapshot.
+        let engine2 = crate::audio::engine::init_headless_engine(48_000, 2).unwrap();
+        let mut app2 = App::new(engine2.state, engine2.lg_ptr, engine2.sample_rate,
+            engine2.buses, engine2.master_recorder, engine2.keyboard_tx);
+        let (gid2, _) = app2.load_kit_as_rack(&path).expect("load kit");
+        let _ = std::fs::remove_file(&path);
+        let pad = app2.groups.iter().find(|g| g.id == gid2).unwrap().members[0];
+        assert_eq!(app2.graph.track_instrument_types[pad], InstrumentType::Rack);
+        let clips: Vec<crate::sequencer::RackClipId> = app2.state.with_scenes(|scenes| {
+            scenes.rack_bank(gid2).unwrap().clips.iter().map(|clip| clip.id).collect()
+        });
+        assert_eq!(clips.len(), 2);
+        app2.state.with_scenes_mut(|scenes| {
+            scenes.set_scene_rack_clip(0, gid2, Some(clips[0]));
+        });
+        relaunch(&app2, 0);
+        let slot_sample = |app: &App, clip: crate::sequencer::RackClipId| -> String {
+            app.state.with_scenes(|scenes| {
+                let bank = scenes.rack_bank(gid2).unwrap();
+                let id = bank.clip(clip).unwrap().cells[0].unwrap();
+                let data = scenes.track_pools[pad].get(id).unwrap();
+                data.rack_track.as_ref().unwrap().slots[0].sample_id.as_ref().unwrap().1.clone()
+            })
+        };
+        let original = slot_sample(&app2, clips[0]);
+        assert_eq!(slot_sample(&app2, clips[1]), original);
+
+        // The same slot replacement a sample drop on the pad now performs.
+        app2.apply_recorded_rack_slot_source_replacement(pad, 0, "Replace rack sample", |app| {
+            app.graph_controller().replace_rack_slot_with_sampler(pad, 0, &other)
+        })
+        .expect("replace the playing clip's sample");
+        let replaced = slot_sample(&app2, clips[0]);
+        assert_ne!(replaced, original, "the playing clip took the new sample");
+        assert_eq!(slot_sample(&app2, clips[1]), original, "the other clip kept its sample");
+    }
+
+    #[test]
+    fn saving_a_clip_without_a_name_numbers_it_past_the_scene_named_clips() {
+        let engine = crate::audio::engine::init_headless_engine(48_000, 2).unwrap();
+        let lg = engine.lg_ptr;
+        let mut app = App::new(engine.state, lg, engine.sample_rate,
+            engine.buses, engine.master_recorder, engine.keyboard_tx);
+        let sample = std::path::Path::new("../../content/impulses/lexicon-300-rich-plate.wav");
+        let (group_id, _) = app
+            .create_drum_rack_recorded(Some("Break".to_string()))
+            .expect("drum rack");
+        let kick = app.graph_controller().add_track(sample).expect("kick");
+        app.assign_rack_pad_track_recorded(group_id, 36, kick).expect("pad");
+        app.state.with_scenes_mut(|scenes| {
+            scenes.new_scene();
+        });
+        app.state.launch_scene(
+            0,
+            app.tracks.len(),
+            &app.graph.track_buffer_ids,
+            &app.graph.track_sample_rates,
+            &app.tracks,
+            &app.graph.track_instrument_types,
+        );
+        app.state.toggle_step_and_clear_plocks(kick, 0);
+        app.convert_rack_to_clips_recorded(group_id).expect("convert");
+        app.save_rack_clip_as_recorded(group_id, "").expect("first unnamed clip");
+        app.save_rack_clip_as_recorded(group_id, "  ").expect("second unnamed clip");
+        app.save_rack_clip_as_recorded(group_id, "Fill").expect("named clip");
+        let names: Vec<String> = app.state.with_scenes(|scenes| {
+            scenes
+                .rack_bank(group_id)
+                .expect("bank")
+                .clips
+                .iter()
+                .map(|clip| clip.name.clone())
+                .collect()
+        });
+        // Convert names clips after their scenes; the unnamed saves continue
+        // the numbering instead of stacking identical "Clip" entries, and an
+        // explicit name is kept verbatim.
+        assert_eq!(names, vec!["Scene 1", "Scene 2", "Clip 3", "Clip 4", "Fill"]);
+    }
+
+    #[test]
     fn rack_clips_and_scene_pointers_survive_project_save_and_load() {
         let engine = crate::audio::engine::init_headless_engine(48_000, 2).unwrap();
         let lg = engine.lg_ptr;

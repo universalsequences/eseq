@@ -85,6 +85,26 @@ impl App {
     /// scene keeps its member slices as clips instead of falling silent the
     /// moment the rack becomes clip-bearing; the new clip is then forked from
     /// the current scene's clip.
+    /// "Clip N" with the smallest N no clip of this rack already uses, so a
+    /// bank that converted from scenes reads "Scene 1, Scene 2, Clip 3" rather
+    /// than a run of identical "Clip" entries.
+    fn next_rack_clip_name(&self, group_id: u64) -> String {
+        self.state.with_scenes(|scenes| {
+            let names: Vec<&str> = scenes
+                .rack_bank(group_id)
+                .map(|bank| bank.clips.iter().map(|clip| clip.name.as_str()).collect())
+                .unwrap_or_default();
+            let mut n = names.len() + 1;
+            loop {
+                let candidate = format!("Clip {n}");
+                if !names.iter().any(|name| *name == candidate) {
+                    return candidate;
+                }
+                n += 1;
+            }
+        })
+    }
+
     pub fn save_rack_clip_as_recorded(
         &mut self,
         group_id: u64,
@@ -92,7 +112,7 @@ impl App {
     ) -> Result<RackClipId, String> {
         let members = self.rack_members(group_id)?;
         let name = if name.trim().is_empty() {
-            "Clip".to_string()
+            self.next_rack_clip_name(group_id)
         } else {
             name.trim().to_string()
         };

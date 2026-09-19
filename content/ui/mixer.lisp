@@ -965,7 +965,10 @@
             (seq-set-track-volume i (pointer-volume sy)))))
       (track-meter i))))
 
-(def bus-meter-control (i is-group)
+;; `spacer` is the room left above the meter: the clip-area equivalent that
+;; keeps a bus/group meter level with the track strips' meters, or 0 when the
+;; caller already filled that room (a rack's clip column, mixer §6.2).
+(def bus-meter-control-with-spacer (i is-group spacer)
   (box :width 3.65 :height 4.24
     :on-click (lambda (event)
       (do
@@ -980,7 +983,7 @@
         ))
     (v-stack
       ;; Level with the track strips' meters, which sit below the clip area.
-      (box :width :fill :height (if (compact?) 0.2 4.2))
+      (box :width :fill :height spacer)
       (h-stack :gap 0.06 
         (box :width (if is-group 6 2))
         (mixer-v2-volume-triangle
@@ -994,6 +997,9 @@
               (select-bus i)
               (seq-set-bus-volume i (pointer-volume sy)))))
         (bus-meter i)))))
+
+(def bus-meter-control (i is-group)
+  (bus-meter-control-with-spacer i is-group (if (compact?) 0.2 4.2)))
 
 (def send-label (name)
   (if (= name "Bus A")
@@ -1251,7 +1257,7 @@
                 (if (= (get action :id) :save-rack-clip)
                   (do
                     (set! track-menu-open false)
-                    (eseq.drum-rack-v2/save-clip-as track-menu-group-id "Clip"))
+                    (eseq.drum-rack-v2/save-clip-as track-menu-group-id ""))
                   (if (= (get action :id) :delete-rack-clip)
                     (do
                       (set! track-menu-open false)
@@ -1732,34 +1738,76 @@
 ;; The group's own channel slot (collapse toggle + name) shown at the left of
 ;; the container, over the container color. It matches a bus strip's width so
 ;; the full rack mute/solo/arm row has room without crowding the container.
-(def rack-clip-column (gid)
-  (let ((active (eseq.drum-rack-v2/active-clip gid)))
-    (box :key (str "rack-clip-column-" gid)
-      :width :fill :height (clip-area-height) :align :top
-      :bg :black :background-color :buffer-bg
-      (v-stack :gap 0.12 :align :center
-        (each (eseq.drum-rack-v2/clips gid) |clip|
-          (box :key (str "mixer-rack-clip-" gid "-" (get clip :id))
-            :debug-name "mixer-rack-clip-cell"
-            :width 9.0 :height 0.95 :padding 0.08
-            :corner-radius (eseq.seq-core-state/radius 4)
-            :background-color (if (= (get clip :id) active)
-              :control-on-bg
-              :mixer-control-bg)
-            :on-click (lambda (event)
-              (eseq.drum-rack-v2/launch-clip gid (get clip :id)))
-            (label (substring (get clip :name) 0 (name-chars 9))
-              :key (str "mixer-rack-clip-label-" gid "-" (get clip :id))
-              :font-size 9 :h-align :center :v-align :center
-              :background-color :transparent :border-color :transparent
-              :highlight-color :transparent :shadow-color :transparent
-              :color (if (= (get clip :id) active) :control-on-fg :dim)
-              :bg :transparent)))))))
+;; Sized so column + the v-stack gap + the meter box equal the spacer-plus-
+;; 8.1 meter box a clipless group strip has: the meters stay level.
+;; Play glyph for a clip row: a rounded tile with a disclosure triangle that
+;; lights when the row is the clip the current scene plays.
+(defwidget rack-clip-play
+  :width 1.4 :height 1.4
+  :state (playing)
+  :bindable (playing)
+  :paint-margin 0.4
+  :shader
+  (sdf/layer
+    (sdf/fill (sdf/rounded-rect width width 0.06)
+      (material :color (if playing (rgba 0 0 0 1) (rgba 0 0 0 0.35))))
+    (sdf/fill (sdf/scale 1.02 (sdf/disclosure-right))
+      (material :color (if (= playing 1)
+          (rgba 0.30 0.95 0.55 1.0)
+          (rgba 0.05 0.05 0.06 0.5))))))
+
+(def rack-clip-row-height 0.9)
+
+;; Index of the active clip in the bank, or -1 (no follow) for silence.
+(def rack-clip-active-row (clips active)
+  (reduce |acc i|
+    (if (and (< acc 0) (= (get (nth clips i) :id) active)) i acc)
+    -1
+    (range 0 (len clips))))
+
+;; Sized so column + the v-stack gap + the meter box equal the spacer-plus-
+;; 8.1 meter box a clipless group strip has: the meters stay level. Past the
+;; visible rows the list scrolls, following the active clip the way the
+;; session-view package follows a track's effective clip: only a changed row
+;; scrolls, so a manual scroll in between holds.
+(def rack-clip-column (gid gidx)
+  (let ((active (eseq.drum-rack-v2/active-clip gid))
+      (clips (eseq.drum-rack-v2/clips gid))
+      (c (group-color gidx)))
+    (let ((row (rack-clip-active-row clips active))
+        (row-bg (rgba (nth c 0) (nth c 1) (nth c 2) 1.0)))
+      (box :key (str "rack-clip-column-" gid)
+        :width :fill :height (- (clip-area-height) 0.1) :align :top
+        :bg :black :background-color :buffer-bg
+        (scroll :key (str "rack-clip-scroll-" gid) :width :fill :height :fill
+          :center-row (if (>= row 0) (* row (+ rack-clip-row-height 0.01)) -1)
+          :center-span rack-clip-row-height
+          (v-stack :gap 0.01
+            (each clips |clip|
+              (box :key (str "mixer-rack-clip-" gid "-" (get clip :id))
+                :debug-name "mixer-rack-clip-cell"
+                :width :fill :height rack-clip-row-height :padding 0.01
+                :corner-radius 0
+                :background-color row-bg
+                :on-click (lambda (event)
+                  (eseq.drum-rack-v2/launch-clip gid (get clip :id)))
+                (h-stack :gap 0.3 :align :center
+                  (rack-clip-play :playing (if (= (get clip :id) active) 1 0))
+                  (label (substring (get clip :name) 0 (name-chars 9))
+                    :key (str "mixer-rack-clip-label-" gid "-" (get clip :id))
+                    :font-size 9 :h-align :left :v-align :center
+                    :background-color :transparent :border-color :transparent
+                    :highlight-color :transparent :shadow-color :transparent
+                    :color :black
+                    :bg :transparent))))))))))
 
 (def group-header-slot (gidx)
   (let ((group (nth SEQ.groups gidx))
       (c (group-color gidx))
-      (bus-idx (bus-index-by-id (get (nth SEQ.groups gidx) :bus-id))))
+      (bus-idx (bus-index-by-id (get (nth SEQ.groups gidx) :bus-id)))
+      ;; Compact mode has no clip area for the column to stand in.
+      (show-clips (and (not (compact?))
+        (eseq.drum-rack-v2/has-clips? (get (nth SEQ.groups gidx) :id)))))
     (box :key (str "group-bus-strip-" bus-idx)
       :width 10.2 :height (group-bus-strip-height)
       :corner-radius (eseq.seq-core-state/radius 12)
@@ -1776,16 +1824,19 @@
         ;; Where a plain track strip shows its pattern grid, a clip-bearing
         ;; rack shows its clip run vertically (§6.2). Everything else keeps the
         ;; spacer that levels the meters.
-        (if (eseq.drum-rack-v2/has-clips? (get group :id))
-          (rack-clip-column (get group :id))
+        (if show-clips
+          (rack-clip-column (get group :id) gidx)
           (clip-growth-spacer))
         ;; Meter + fader reflect the group's backing bus. Selecting/dragging
         ;; them selects the group's bus (bus-meter-control selects by
-        ;; index). Fall back to nothing if the bus can't be resolved.
+        ;; index). Fall back to nothing if the bus can't be resolved. With the
+        ;; clip column above, the meter gives up the spacer that kept it level.
         (if (>= bus-idx 0)
           (v-stack :gap 0.4 :align :center
-            (box :width :fill :height (if (compact?) 4.1 8.1)
-              (bus-meter-control bus-idx true)
+            (box :width :fill :height (if (compact?) 4.1 (if show-clips 3.9 8.1))
+              (if show-clips
+                (bus-meter-control-with-spacer bus-idx true 0.0)
+                (bus-meter-control bus-idx true))
               )
             )
           (box :width 0.0 :height 0.0 :bg :transparent))

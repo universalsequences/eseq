@@ -81,7 +81,10 @@
 (def script-buffer-name "*8x8*")
 ;; Owned by a rack: routes address its members and the tab wears its name.
 (def g8-owner-rack (graph-owner g8-name))
-(def g8-route-tracks (graph-route-tracks g8-name))
+(def g8-route-tracks ()
+  ;; Read live so a member that joins the rack later shows up; SEQ.groups
+  ;; is read only to re-render when the membership changes.
+  (let ((groups SEQ.groups)) (graph-route-tracks g8-name)))
 (def script-tab-label
   (if g8-owner-rack (eseq.drum-rack-v2/group-name (eseq.drum-rack-v2/group-index-by-id g8-owner-rack)) "8x8"))
 (def script-sequencer-name "neural-8x8-demo")
@@ -92,10 +95,10 @@
 (def g8-quant-options (list "off" "1" "2" "4" "8" "16" "32" "64" "2T" "4T" "8T" "16T" "32T" "64T" "Prh"))
 ;; Route option n is track n (project-owned) or rack member n (rack-owned);
 ;; "Off" is always last. Either way the option index IS the route value.
-(def g8-route-options
-  (if g8-route-tracks
+(def g8-route-options ()
+  (if (g8-route-tracks)
     (append
-      (map (lambda (track) (str (+ track 1) " " (nth SEQ.track-names track))) g8-route-tracks)
+      (map (lambda (track) (str (+ track 1) " " (nth SEQ.track-names track))) (g8-route-tracks))
       (list "Off"))
     (list "Track 1" "Track 2" "Track 3" "Track 4" "Track 5" "Track 6" "Track 7" "Track 8"
           "Track 9" "Track 10" "Track 11" "Track 12" "Track 13" "Track 14" "Track 15" "Track 16"
@@ -107,7 +110,7 @@
 
 ;; Route dropdown label -> the internal route the engine stores (:off or a track index).
 (def g8-route->internal (label)
-  (if (= label "Off") :off (g8-index-of g8-route-options label)))
+  (if (= label "Off") :off (g8-index-of (g8-route-options) label)))
 
 ;; ── connection weights: one list-valued widget, so a single state cell is fine ──
 ;; (Per-node knobs avoid defstate via bind-graph; the matrix is one widget for all 64
@@ -234,8 +237,8 @@
   (h-stack :gap 0.4 :align :center
     (label (str n) :width g8-node-width :height g8-row-height :font-size 9 :h-align :center :color :dim :bg :transparent)
     (g8-pick (str "graph-8x8-route-" n)
-      (bind-graph g8-name n :route g8-route-options) g8-route-options
-      (lambda (v) (g8-edit-enum n :route g8-route-options v (g8-route->internal v))))
+      (bind-graph g8-name n :route (g8-route-options)) (g8-route-options)
+      (lambda (v) (g8-edit-enum n :route (g8-route-options) v (g8-route->internal v))))
     (g8-num (str "graph-8x8-delay-" n)
       (bind-graph g8-name n :delay) 0 16 1 0
       (lambda (v) (g8-edit-num n :delay v)))

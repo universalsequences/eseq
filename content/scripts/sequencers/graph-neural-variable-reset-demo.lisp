@@ -97,7 +97,10 @@
 (def script-buffer-name "*variable-reset*")
 ;; Owned by a rack: the tab wears the rack's name and routes are its members.
 (def gvr-owner-rack (graph-owner gvr-name))
-(def gvr-route-tracks (graph-route-tracks gvr-name))
+(def gvr-route-tracks ()
+  ;; Read live so a member that joins the rack later shows up; SEQ.groups
+  ;; is read only to re-render when the membership changes.
+  (let ((groups SEQ.groups)) (graph-route-tracks gvr-name)))
 (def script-tab-label
   (if gvr-owner-rack
     (eseq.drum-rack-v2/group-name (eseq.drum-rack-v2/group-index-by-id gvr-owner-rack))
@@ -110,10 +113,10 @@
 (def gvr-quant-options (list "off" "1" "2" "4" "8" "16" "32" "64" "2T" "4T" "8T" "16T" "32T" "64T" "Prh"))
 ;; Route option n is track n (project-owned) or rack member n (rack-owned);
 ;; "Off" is always last. Either way the option index IS the route value.
-(def gvr-route-options
-  (if gvr-route-tracks
+(def gvr-route-options ()
+  (if (gvr-route-tracks)
     (append
-      (map (lambda (track) (str (+ track 1) " " (nth SEQ.track-names track))) gvr-route-tracks)
+      (map (lambda (track) (str (+ track 1) " " (nth SEQ.track-names track))) (gvr-route-tracks))
       (list "Off"))
     (list "Track 1" "Track 2" "Track 3" "Track 4" "Track 5" "Track 6" "Track 7" "Track 8"
           "Track 9" "Track 10" "Track 11" "Track 12" "Track 13" "Track 14" "Track 15" "Track 16"
@@ -121,15 +124,15 @@
 ;; Colors parallel to the route options: a rack-owned instance colors by the
 ;; member's track, so `track-colors` below is re-indexed through the members.
 (def gvr-route-track-colors (track-colors)
-  (if gvr-route-tracks
-    (map (lambda (track) (nth track-colors track)) gvr-route-tracks)
+  (if (gvr-route-tracks)
+    (map (lambda (track) (nth track-colors track)) (gvr-route-tracks))
     track-colors))
 (def gvr-max-poly-selection-options
   (list "deterministic" "propagation" "random" "loudest" "lowest-transpose" "highest-transpose" "seed-first"))
 ;; Neural-group assignment (docs/neural-groups-spec.md §3.1). The stored value IS the
 ;; dropdown index (group A = 0), so the numeric bind-graph handle seeds it directly.
 (def gvr-group-options (list "A" "B" "C" "D"))
-(def gvr-route-off-index (- (len gvr-route-options) 1))
+(def gvr-route-off-index () (- (len (gvr-route-options)) 1))
 (def gvr-route-off-color (list 0.20 0.21 0.23))
 
 (def gvr-index-of (xs item)
@@ -138,16 +141,16 @@
 
 ;; Route dropdown label -> the internal route the engine stores (:off or a track index).
 (def gvr-route->internal (label)
-  (if (= label "Off") :off (gvr-index-of gvr-route-options label)))
+  (if (= label "Off") :off (gvr-index-of (gvr-route-options) label)))
 
 (def gvr-route-color-field (n channel)
   (str "gvr-route-color-" n "-" channel))
 
 (def gvr-route-option-index (n)
-  (round (reactive-value (bind-graph gvr-name n :route gvr-route-options))))
+  (round (reactive-value (bind-graph gvr-name n :route (gvr-route-options)))))
 
 (def gvr-route-color-valid? (track-colors route-index)
-  (and (>= route-index 0) (< route-index (len track-colors)) (< route-index gvr-route-off-index)))
+  (and (>= route-index 0) (< route-index (len track-colors)) (< route-index (gvr-route-off-index))))
 
 (def gvr-color-channel (color channel fallback)
   (if (< channel (len color)) (nth color channel) fallback))
@@ -297,9 +300,9 @@
     (graph-node gvr-name n field internal)))
 
 (def gvr-edit-route (n label track-colors)
-  (let ((route-index (gvr-index-of gvr-route-options label)))
+  (let ((route-index (gvr-index-of (gvr-route-options) label)))
     (do
-      (gvr-edit-enum n :route gvr-route-options label (gvr-route->internal label))
+      (gvr-edit-enum n :route (gvr-route-options) label (gvr-route->internal label))
       (gvr-sync-route-color n track-colors route-index))))
 
 (def gvr-edit-seed-route (n enabled)
@@ -488,7 +491,7 @@
       (gvr-route-bar n track-colors)
       (label (str n) :width gvr-node-width :height gvr-row-height :font-size 9 :h-align :center :color :dim :bg :transparent)
       (gvr-pick (str "graph-variable-reset-route-" n)
-        (bind-graph gvr-name n :route gvr-route-options) gvr-route-options
+        (bind-graph gvr-name n :route (gvr-route-options)) (gvr-route-options)
         (lambda (v) (gvr-edit-route n v track-colors)))
       (gvr-pick-sized (str "graph-variable-reset-group-" n)
         (bind-graph gvr-name n :group) gvr-group-options gvr-group-width

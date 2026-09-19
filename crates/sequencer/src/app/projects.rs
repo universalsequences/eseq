@@ -4235,6 +4235,11 @@ impl App {
                 }
             }
             scenes.repair_rack_clips();
+            // The banks adopted while every pointer was still empty; now that
+            // the pointers are in, record that the live lanes hold the
+            // current scene's clips, or every member lane reads as stale and
+            // the first edits after load are dropped until a relaunch.
+            scenes.adopt_live_rack_clips();
         });
         self.publish_rack_choke_runtime();
         Ok(())

@@ -111,7 +111,10 @@
 (def script-buffer-name "*group-matrix*")
 ;; Owned by a rack: routes address its members and the tab wears its name.
 (def ggm-owner-rack (graph-owner ggm-name))
-(def ggm-route-tracks (graph-route-tracks ggm-name))
+(def ggm-route-tracks ()
+  ;; Read live so a member that joins the rack later shows up; SEQ.groups
+  ;; is read only to re-render when the membership changes.
+  (let ((groups SEQ.groups)) (graph-route-tracks ggm-name)))
 (def script-tab-label
   (if ggm-owner-rack (eseq.drum-rack-v2/group-name (eseq.drum-rack-v2/group-index-by-id ggm-owner-rack)) "grp mtx"))
 (def script-sequencer-name "neural-group-matrix-demo")
@@ -122,10 +125,10 @@
 (def ggm-quant-options (list "off" "1" "2" "4" "8" "16" "32" "64" "2T" "4T" "8T" "16T" "32T" "64T" "Prh"))
 ;; Route option n is track n (project-owned) or rack member n (rack-owned);
 ;; "Off" is always last. Either way the option index IS the route value.
-(def ggm-route-options
-  (if ggm-route-tracks
+(def ggm-route-options ()
+  (if (ggm-route-tracks)
     (append
-      (map (lambda (track) (str (+ track 1) " " (nth SEQ.track-names track))) ggm-route-tracks)
+      (map (lambda (track) (str (+ track 1) " " (nth SEQ.track-names track))) (ggm-route-tracks))
       (list "Off"))
     (list "Track 1" "Track 2" "Track 3" "Track 4" "Track 5" "Track 6" "Track 7" "Track 8"
           "Track 9" "Track 10" "Track 11" "Track 12" "Track 13" "Track 14" "Track 15" "Track 16"
@@ -133,15 +136,15 @@
 ;; Colors parallel to the route options: a rack-owned instance colors by the
 ;; member's track, so the panel's track-colors are re-indexed through the members.
 (def ggm-route-track-colors (track-colors)
-  (if ggm-route-tracks
-    (map (lambda (track) (nth track-colors track)) ggm-route-tracks)
+  (if (ggm-route-tracks)
+    (map (lambda (track) (nth track-colors track)) (ggm-route-tracks))
     track-colors))
 (def ggm-max-poly-selection-options
   (list "deterministic" "propagation" "random" "loudest" "lowest-transpose" "highest-transpose" "seed-first"))
 ;; Neural-group assignment (docs/neural-groups-spec.md §3.1). The stored value IS the
 ;; dropdown index (group A = 0), so the numeric bind-graph handle seeds it directly.
 (def ggm-group-options (list "A" "B" "C" "D"))
-(def ggm-route-off-index (- (len ggm-route-options) 1))
+(def ggm-route-off-index () (- (len (ggm-route-options)) 1))
 (def ggm-route-off-color (list 0.20 0.21 0.23))
 
 (def ggm-index-of (xs item)
@@ -150,16 +153,16 @@
 
 ;; Route dropdown label -> the internal route the engine stores (:off or a track index).
 (def ggm-route->internal (label)
-  (if (= label "Off") :off (ggm-index-of ggm-route-options label)))
+  (if (= label "Off") :off (ggm-index-of (ggm-route-options) label)))
 
 (def ggm-route-color-field (n channel)
   (str "ggm-route-color-" n "-" channel))
 
 (def ggm-route-option-index (n)
-  (round (reactive-value (bind-graph ggm-name n :route ggm-route-options))))
+  (round (reactive-value (bind-graph ggm-name n :route (ggm-route-options)))))
 
 (def ggm-route-color-valid? (track-colors route-index)
-  (and (>= route-index 0) (< route-index (len track-colors)) (< route-index ggm-route-off-index)))
+  (and (>= route-index 0) (< route-index (len track-colors)) (< route-index (ggm-route-off-index))))
 
 (def ggm-color-channel (color channel fallback)
   (if (< channel (len color)) (nth color channel) fallback))
@@ -338,9 +341,9 @@
     (graph-node ggm-name n field internal)))
 
 (def ggm-edit-route (n label track-colors)
-  (let ((route-index (ggm-index-of ggm-route-options label)))
+  (let ((route-index (ggm-index-of (ggm-route-options) label)))
     (do
-      (ggm-edit-enum n :route ggm-route-options label (ggm-route->internal label))
+      (ggm-edit-enum n :route (ggm-route-options) label (ggm-route->internal label))
       (ggm-sync-route-color n track-colors route-index))))
 
 (def ggm-edit-seed-route (n enabled)
@@ -529,7 +532,7 @@
       (ggm-route-bar n track-colors)
       (label (str n) :width ggm-node-width :height ggm-row-height :font-size 9 :h-align :center :color :dim :bg :transparent)
       (ggm-pick (str "graph-group-matrix-route-" n)
-        (bind-graph ggm-name n :route ggm-route-options) ggm-route-options
+        (bind-graph ggm-name n :route (ggm-route-options)) (ggm-route-options)
         (lambda (v) (ggm-edit-route n v track-colors)))
       (ggm-pick-sized (str "graph-group-matrix-group-" n)
         (bind-graph ggm-name n :group) ggm-group-options ggm-group-width
