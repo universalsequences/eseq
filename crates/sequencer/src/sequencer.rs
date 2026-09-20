@@ -52,7 +52,7 @@ pub use state::{
     SongPositionShared,
     DeviceParamPrintOverride, DeviceParamPrintTarget, DeviceParamPrintValues, RackMacroPrintOverride,
     EffectInstanceId, InstrumentDeviceValuesSnapshot, InstrumentSlotResetSummary,
-    GeneratorTickErrorNotice, MidiFxInstanceId, PatternId, PatternSnapshot, ProjectScenes, PublishedSequencer, RackMacro, RackMacroCurve,
+    GeneratorTickErrorNotice, MidiFxInstanceId, PatternId, PatternSnapshot, ProjectScenes, RackClip, RackClipBank, RackClipId, PublishedSequencer, RackMacro, RackMacroCurve,
     ResolvedSceneSlot, SceneSlotStore, SCENE_SLOT_SOFT_SERIALIZED_BYTES, SCENE_TRANSPOSE_SLOT,
     rack_choke_key,
     RackMacroId, RackMacroMapping, RackMacroTarget, RackSlotId, RackSlotParam,

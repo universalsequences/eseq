@@ -123,6 +123,9 @@
 (defstate kit-save-name "")
 (defstate kit-save-group-id -1)
 (defstate kit-save-mode false)
+;; "Export as kit..." scene checklist (rack-clips spec 7.2): the project scenes
+;; whose rack clip travels in the kit, as scene indices.
+(defstate kit-save-scenes (list))
 (defstate preset-filter "")
 
 (defwidget editor-spinner
@@ -1086,11 +1089,30 @@
   (set! preset-save-mode "")
   (set! kit-save-group-id group-id)
   (set! kit-save-name name)
+  ;; Default: every scene this rack actually plays. A LEGACY rack (no bank)
+  ;; answers true for every scene and the export drops the empty ones itself.
+  (set! kit-save-scenes
+    (filter (lambda (i) (eseq.drum-rack-v2/scene-plays-clip? group-id i))
+      (range 0 (len SEQ.scene-names))))
   (set! kit-save-mode true)
   (select-tab "kits"))
 
+(def kit-scene-selected? (i)
+  (> (len (filter (lambda (s) (= s i)) kit-save-scenes)) 0))
+
+(def kit-toggle-scene (i)
+  (let ((now (if (kit-scene-selected? i)
+               (filter (lambda (s) (not (= s i))) kit-save-scenes)
+               (append kit-save-scenes (list i)))))
+    ;; Keep the selection in scene order: clip 1..n follow the project's scene
+    ;; order, not the order the boxes were ticked.
+    (set! kit-save-scenes
+      (filter (lambda (i) (> (len (filter (lambda (s) (= s i)) now)) 0))
+        (range 0 (len SEQ.scene-names))))))
+
 (def exit-kit-save ()
   (set! kit-save-mode false)
+  (set! kit-save-scenes (list))
   (set! kit-save-group-id -1))
 
 (def save-kit ()
@@ -1100,8 +1122,28 @@
       (host-command "save-rack-as-kit"
         (dict :group-id kit-save-group-id
               :name kit-save-name
+              :scenes kit-save-scenes
               :overwrite false))
       (exit-kit-save))))
+
+;; One row per project scene. A ticked scene becomes a clip in the kit, named
+;; after the scene; untick every scene to save the old kind of kit (pads and
+;; bus chain only).
+(def kit-scene-row (i)
+  (h-stack :key (str "kit-save-scene-" i) :width :fill :gap 0.5 :align :center
+    (toggle :value (kit-scene-selected? i)
+      :on-change (lambda (value) (kit-toggle-scene i)))
+    (label (nth SEQ.scene-names i)
+      :font-size 11 :color :white :bg :transparent :flex 1)))
+
+(def kit-scene-checklist ()
+  (v-stack :width :fill :gap 0.3
+    (label "Scenes to export as clips"
+      :key "kit-save-scenes-title"
+      :font-size 10 :color :dim :bg :transparent)
+    (scroll :key "kit-save-scenes-scroll" :width :fill :height 8
+      (v-stack :width :fill :gap 0.15
+        (each (range 0 (len SEQ.scene-names)) |i| (kit-scene-row i))))))
 
 (def kit-save-panel ()
   (box :key "kit-save-panel" :width :fill :padding 0.5
@@ -1123,6 +1165,7 @@
         :on-change (lambda (value) (set! kit-save-name value))
         :height 1.5
         :font-size 12)
+      (kit-scene-checklist)
       (button "Save Kit"
         :key "kit-save-confirm"
         :variant :primary

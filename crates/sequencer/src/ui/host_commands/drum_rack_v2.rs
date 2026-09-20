@@ -15,6 +15,12 @@ pub(super) const COMMANDS: &[&str] = &[
     "attach-rack-sequencer",
     "detach-rack-sequencer",
     "move-sequencer-into-rack",
+    // Rack clips (docs/rack-clips-and-break-kits-spec.md §4.2-§4.4, §6.3).
+    "convert-rack-to-clips",
+    "launch-rack-clip",
+    "save-rack-clip-as",
+    "delete-rack-clip",
+    "rename-rack-clip",
 ];
 
 /// How long a pad-grid hit sounds before its note-off. The pad grid is a
@@ -129,16 +135,21 @@ pub(super) fn handle(
                 .or_else(|| group_name(app, group_id))
                 .unwrap_or_else(|| "Kit".to_string());
             let overwrite = extract_bool_from_payload(&payload, "overwrite");
-            match app.save_rack_as_kit(group_id, &name, overwrite) {
-                Ok(path) => {
+            // The scene checklist (§7.2). Absent/empty = today's kit: pads and
+            // bus chain only, no clips.
+            let scenes = crate::state_values::extract_usize_list_from_payload(&payload, "scenes");
+            match app.save_rack_as_kit(group_id, &name, overwrite, &scenes) {
+                Ok((path, warnings)) => {
                     let rt = editor.runtime_mut();
                     rt.set_reactive("SEQ", "kit-presets", build_kit_presets_value());
                     rt.run_reactive_cycle();
                     editor.refresh_runtime_side_effects();
-                    editor.handle_host_event(HostEvent::Status(format!(
-                        "Saved kit '{name}' to {}",
-                        path.display()
-                    )));
+                    sync_rack_pad_map(app, editor, &track_groups, &ui_epoch);
+                    let mut status = format!("Saved kit '{name}' to {}", path.display());
+                    if !warnings.is_empty() {
+                        status = format!("{status} ({})", warnings.join("; "));
+                    }
+                    editor.handle_host_event(HostEvent::Status(status));
                 }
                 Err(error) => editor.handle_host_event(HostEvent::Status(error)),
             }
@@ -251,6 +262,106 @@ pub(super) fn handle(
                 Err(error) => editor.handle_host_event(HostEvent::Status(error)),
             }
         }
+        // Legacy rack -> clips, once (§4.3). One undoable patch, no audible
+        // change: every scene keeps playing exactly what it played.
+        "convert-rack-to-clips" => {
+            let Some(group_id) = extract_usize_from_payload(&payload, "group-id").map(|id| id as u64)
+            else {
+                editor.handle_host_event(HostEvent::Status(
+                    "convert-rack-to-clips needs a group id".to_string(),
+                ));
+                return;
+            };
+            match app.convert_rack_to_clips_recorded(group_id) {
+                Ok(created) => {
+                    sync_rack_pad_map(app, editor, &track_groups, &ui_epoch);
+                    editor.handle_host_event(HostEvent::Status(format!(
+                        "{} now has {created} clip(s)",
+                        group_name(app, group_id).unwrap_or_else(|| "Rack".to_string())
+                    )));
+                }
+                Err(error) => editor.handle_host_event(HostEvent::Status(error)),
+            }
+        }
+        // Clip launch (§4.4): set the pointer in the current scene, then
+        // relaunch the current scene through the ordinary scene-launch path,
+        // so it rides quantized launch with no new boundary code.
+        "launch-rack-clip" => {
+            let group_id = extract_usize_from_payload(&payload, "group-id").map(|id| id as u64);
+            let clip_id = extract_usize_from_payload(&payload, "clip-id").map(|id| id as u64);
+            let Some(group_id) = group_id else {
+                editor.handle_host_event(HostEvent::Status(
+                    "launch-rack-clip needs a group id".to_string(),
+                ));
+                return;
+            };
+            // clip-id < 0 (absent) means "silence this rack in this scene".
+            let clip = clip_id.filter(|id| *id > 0);
+            if let Err(error) = app.set_current_rack_clip_recorded(group_id, clip) {
+                editor.handle_host_event(HostEvent::Status(error));
+                return;
+            }
+            let quantize = extract_string_from_payload(&payload, "quantize")
+                .unwrap_or_else(|| "off".to_string());
+            let scene = ctx.shared.state.current_scene_index();
+            let relaunch = Value::Map(
+                [
+                    ("idx".to_string(), Value::Number(scene as f64)),
+                    ("quantize".to_string(), Value::String(quantize)),
+                ]
+                .into_iter()
+                .map(|(key, value)| (key, std::rc::Rc::new(std::cell::RefCell::new(value))))
+                .collect(),
+            );
+            super::scenes::handle("switch-pattern", relaunch, app, editor, ctx);
+            sync_rack_pad_map(app, editor, &track_groups, &ui_epoch);
+        }
+        "save-rack-clip-as" => {
+            let group_id = extract_usize_from_payload(&payload, "group-id").map(|id| id as u64);
+            let name = extract_string_from_payload(&payload, "name").unwrap_or_default();
+            let Some(group_id) = group_id else {
+                editor.handle_host_event(HostEvent::Status(
+                    "save-rack-clip-as needs a group id".to_string(),
+                ));
+                return;
+            };
+            match app.save_rack_clip_as_recorded(group_id, &name) {
+                Ok(_) => {
+                    sync_rack_pad_map(app, editor, &track_groups, &ui_epoch);
+                    editor.handle_host_event(HostEvent::Status("Saved rack clip".to_string()));
+                }
+                Err(error) => editor.handle_host_event(HostEvent::Status(error)),
+            }
+        }
+        "delete-rack-clip" => {
+            let group_id = extract_usize_from_payload(&payload, "group-id").map(|id| id as u64);
+            let clip_id = extract_usize_from_payload(&payload, "clip-id").map(|id| id as u64);
+            let (Some(group_id), Some(clip_id)) = (group_id, clip_id) else {
+                editor.handle_host_event(HostEvent::Status(
+                    "delete-rack-clip needs a group id and a clip id".to_string(),
+                ));
+                return;
+            };
+            match app.delete_rack_clip_recorded(group_id, clip_id) {
+                Ok(()) => sync_rack_pad_map(app, editor, &track_groups, &ui_epoch),
+                Err(error) => editor.handle_host_event(HostEvent::Status(error)),
+            }
+        }
+        "rename-rack-clip" => {
+            let group_id = extract_usize_from_payload(&payload, "group-id").map(|id| id as u64);
+            let clip_id = extract_usize_from_payload(&payload, "clip-id").map(|id| id as u64);
+            let name = extract_string_from_payload(&payload, "name").unwrap_or_default();
+            let (Some(group_id), Some(clip_id)) = (group_id, clip_id) else {
+                editor.handle_host_event(HostEvent::Status(
+                    "rename-rack-clip needs a group id and a clip id".to_string(),
+                ));
+                return;
+            };
+            match app.rename_rack_clip_recorded(group_id, clip_id, &name) {
+                Ok(()) => sync_rack_pad_map(app, editor, &track_groups, &ui_epoch),
+                Err(error) => editor.handle_host_event(HostEvent::Status(error)),
+            }
+        }
         // With a selected rack, activating a kit swaps that rack's complete
         // pad/sound assignment in one undo entry. With no addressed rack the
         // browser's create behavior remains: append a new rack.
@@ -266,21 +377,43 @@ pub(super) fn handle(
             if let Some(group_id) = selected_rack {
                 match app.load_kit_onto_rack(group_id, Path::new(&path)) {
                     Ok(name) => {
+                        // Publish the rebuilt rack to the UI runtime BEFORE
+                        // running its scripts: a rack-owned script reads
+                        // `SEQ.groups` (its tab wears the rack's name) and
+                        // must see the members it now has.
                         sync_after_rack_structure_change(app, editor, ctx, None);
-                        editor.handle_host_event(HostEvent::Status(format!(
-                            "Auditioned kit '{name}'"
-                        )));
+                        let failures = evaluate_rack_sequencers(editor, app, group_id);
+                        refresh_after_rack_scripts(editor);
+                        let mut status = format!("Auditioned kit '{name}'");
+                        if !failures.is_empty() {
+                            status = format!("{status} ({})", failures.join("; "));
+                        }
+                        editor.handle_host_event(HostEvent::Status(status));
                     }
                     Err(error) => editor.handle_host_event(HostEvent::Status(error)),
                 }
             } else {
                 let tracks_before = app.tracks.len();
                 match app.load_kit_as_rack(Path::new(&path)) {
-                    Ok((group_id, failures)) => {
+                    Ok((group_id, mut failures)) => {
                         let name = group_name(app, group_id).unwrap_or_else(|| "Kit".to_string());
                         let focus = (app.tracks.len() > tracks_before)
                             .then(|| app.tracks.len() - 1);
+                        // The App recorded the kit's sequencers but cannot run
+                        // Lisp; evaluating each recorded source under the new
+                        // rack is the host half of the import (§7.3). A module
+                        // that is not installed is reported and its entry stays
+                        // recorded, so a later re-import brings it back.
+                        //
+                        // The new rack is published to the UI runtime FIRST:
+                        // a rack-owned script reads `SEQ.groups` on evaluation
+                        // (its tab is named after the rack), and a group the
+                        // runtime has not heard of yet fails that eval, which
+                        // rolls the script's panel and tab back while the
+                        // def-sequencer it already published stays behind.
                         sync_after_rack_structure_change(app, editor, ctx, focus);
+                        failures.extend(evaluate_rack_sequencers(editor, app, group_id));
+                        refresh_after_rack_scripts(editor);
                         let status = if failures.is_empty() {
                             format!("Loaded kit '{name}'")
                         } else {
@@ -417,6 +550,41 @@ pub(crate) fn evaluate_rack_sequencer_source(
         .collect())
 }
 
+/// Evaluate every source a rack has recorded, under that rack, and report the
+/// ones that failed by name. This is the host half of a break-kit import
+/// (§7.3) and of a break-kit audition: the App records the entries, only the
+/// host can run Lisp. The recorded entry survives a failure on purpose, so a
+/// project that later installs the missing package gets the instance back.
+fn evaluate_rack_sequencers(
+    editor: &mut Editor,
+    app: &app::App,
+    group_id: u64,
+) -> Vec<String> {
+    let recorded = app.rack_sequencers(group_id);
+    let mut failures = Vec::new();
+    for sequencer in recorded {
+        if sequencer.source.trim().is_empty() {
+            continue;
+        }
+        if let Err(error) =
+            evaluate_rack_sequencer_source(editor, app, group_id, &sequencer.source)
+        {
+            let what = sequencer::app::rack_sequencer_module(&sequencer.source)
+                .unwrap_or_else(|| sequencer.sequencer_name.clone());
+            failures.push(format!("{what}: {error}"));
+        }
+    }
+    failures
+}
+
+/// Settle the UI runtime after rack scripts were evaluated as a follow-up to a
+/// topology sync: the panels and tabs those scripts registered need a
+/// reactive cycle and a side-effect flush to appear.
+fn refresh_after_rack_scripts(editor: &mut Editor) {
+    editor.runtime_mut().run_reactive_cycle();
+    editor.refresh_runtime_side_effects();
+}
+
 pub(super) fn group_name(app: &app::App, group_id: u64) -> Option<String> {
     app.groups
         .iter()
@@ -436,6 +604,9 @@ fn sync_rack_pad_map(
     *track_groups.lock().unwrap() = app.groups.clone();
     let rt = editor.runtime_mut();
     sync_groups_bindings(rt, &app.groups);
+    // Clip bank edits (create/rename/delete/convert/launch) do not bump the
+    // pattern epoch, so the clip run's source is republished here explicitly.
+    rt.set_reactive("SEQ", "rack-clips", build_rack_clips_value(&app.state));
     rt.run_reactive_cycle();
     editor.refresh_runtime_side_effects();
     ui_epoch.fetch_add(1, Ordering::Relaxed);

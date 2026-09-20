@@ -225,14 +225,20 @@ impl App {
         })
     }
 
-    /// Member `position` just left rack `group_id`: nodes routed to it go
-    /// silent and later members shift down, in every scene. Called from the
-    /// group-member funnels, inside whatever recorded edit removed the member.
+    /// Member `position` just left rack `group_id`: its cell drops out of every
+    /// rack clip, nodes routed to it go silent and later members shift down, in
+    /// every scene. Called from the group-member funnels, inside whatever
+    /// recorded edit removed the member.
     pub(crate) fn remap_rack_sequencer_routes_after_member_removed(
         &self,
         group_id: u64,
         position: usize,
     ) {
+        // Rack clips are positional over members too (rack-clips spec §3): the
+        // leaving member's cell drops out of every clip, keeping
+        // `clip.cells.len() == members.len()`.
+        self.state
+            .with_scenes_mut(|scenes| scenes.rack_clip_member_removed(group_id, position));
         let owns_sequencers = self
             .groups
             .iter()
@@ -271,6 +277,31 @@ impl App {
             .rack
             .as_mut()
             .ok_or_else(|| format!("Track group {group_id} is not a drum rack"))
+    }
+}
+
+/// Rewrite a rack-owned override's member-relative routes and seed tracks
+/// through `map`, indexed by the OLD position: `map[old] = Some(new)` moves
+/// it, `None` drops it to "off". Break kits use this twice — member position
+/// -> pad on export, pad -> member position on import (§7).
+pub(crate) fn remap_graph_member_routes(graph: &mut ProjectGraphOverrides, map: &[Option<usize>]) {
+    for intrinsic in &mut graph.node_intrinsics {
+        if let Some(ProjectGraphRouteOverride::Track(from)) = intrinsic.route {
+            intrinsic.route = Some(
+                map.get(from)
+                    .copied()
+                    .flatten()
+                    .map(ProjectGraphRouteOverride::Track)
+                    .unwrap_or(ProjectGraphRouteOverride::None),
+            );
+        }
+        if let Some(ProjectGraphSeedFrom::Tracks(seed)) = &intrinsic.seed_from {
+            intrinsic.seed_from = Some(ProjectGraphSeedFrom::Tracks(
+                seed.iter()
+                    .filter_map(|from| map.get(*from).copied().flatten())
+                    .collect(),
+            ));
+        }
     }
 }
 

@@ -3494,7 +3494,10 @@
     (box :background "seqv-track-container"
       :padding 0.1
       :on-click |x y r| (select-group gidx)
-      (h-stack :gap 0.4 :align :center
+      ;; A fill row: the clip grid at the end flexes into whatever width the
+      ;; panel has left and wraps there, so a wide window shows more cells
+      ;; per row and a long bank grows the header instead of running off it.
+      (h-stack :width :fill :gap 0.4 :align :center
         (box
           :key (group-element-key gidx "color-badge")
           :width 0.68 :height 2.0
@@ -3568,7 +3571,174 @@
         ;; and SAVE KIT in the *fx* buffer's rack panel (ui/effects/buffers.lisp,
         ;; docs/drum-rack-v2-spec.md, "UI"), so the header keeps the same
         ;; name/meter shape an ordinary track header has.
-        (group-volume-control gidx bus-idx)))))
+        (group-volume-control gidx bus-idx)
+        ;; A clip-bearing rack's clip grid sits in the header's empty right half
+        ;; (§6.1), starting where the member rows' step grids start.
+        (rack-clip-grid gidx c)))))
+
+(defstate clip-renaming -1)
+(defstate clip-rename-draft "")
+;; Right-click menu over a clip cell: nil while closed, else a dict with the
+;; rack id, the clip id and the pointer cell it opened at.
+(defstate clip-menu nil)
+
+;; ── Rack clip grid (docs/rack-clips-and-break-kits-spec.md §6.1) ─────────
+;; A collapsed rack is no longer a dead row: it shows the rack's clip bank as a
+;; Max-style preset box grid. The cell the CURRENT scene points at is lit;
+;; clicking one launches it (quantized exactly like a scene launch),
+;; right-clicking opens a menu (rename in place, launch, save what the rack
+;; is playing now as a new clip, delete), and the trailing number picker
+;; shows the lit clip's number and launches whatever number is typed in.
+;; Drag reorder is not wired yet (the grid is rendered from SEQ.rack-clips,
+;; which carries no drop target); the bank order is the create order.
+
+;; The cells are the mixer's `track-pattern-cell-bg` boxes (ui/mixer.lisp)
+;; without the sound glyph on top: unnumbered, tinted with the rack color,
+;; lit when active. They sit in a `wrap` that fills the header's right half,
+;; so the column count follows the panel width and a long bank wraps onto
+;; more rows rather than stretching the row past the window.
+(def rack-clip-cell-width 1.8)
+(def rack-clip-cell-height 0.9)
+(def rack-clip-rename-width 4.6)
+
+(def begin-clip-rename (clip)
+  (do
+    (set! clip-menu nil)
+    (set! clip-renaming (get clip :id))
+    (set! clip-rename-draft (get clip :name))))
+
+(def finish-clip-rename (gid clip-id commit)
+  (do
+    (if commit (eseq.drum-rack-v2/rename-clip gid clip-id clip-rename-draft) nil)
+    (set! clip-renaming -1)
+    (set! clip-rename-draft "")))
+
+(def open-clip-menu (event gid clip)
+  (set! clip-menu (dict :gid gid :clip clip
+    :col (get event :col) :row (get event :row))))
+
+;; Mounted once at the buffer root (like the mixer's track menu) so it
+;; overlays the grid instead of being clipped by the header row.
+(def rack-clip-context-menu ()
+  (let ((menu clip-menu)
+      (gid (get clip-menu :gid))
+      (clip (get clip-menu :clip)))
+    (context-menu :is-open (not (= menu nil))
+      :anchor-col (or (get menu :col) 0)
+      :anchor-row (or (get menu :row) 0)
+      :on-close (lambda () (set! clip-menu nil))
+      (menu-item "Rename…" :key "rack-clip-menu-rename"
+        :on-select (lambda (event) (begin-clip-rename clip)))
+      (menu-item "Launch" :key "rack-clip-menu-launch"
+        :on-select (lambda (event)
+          (do (set! clip-menu nil)
+            (eseq.drum-rack-v2/launch-clip gid (get clip :id)))))
+      (menu-separator)
+      (menu-item "New Clip from Playing" :key "rack-clip-menu-save-new"
+        :on-select (lambda (event)
+          (do (set! clip-menu nil)
+            (eseq.drum-rack-v2/save-clip-as gid ""))))
+      (menu-item "Delete" :key "rack-clip-menu-delete"
+        :on-select (lambda (event)
+          (do (set! clip-menu nil)
+            (eseq.drum-rack-v2/delete-clip gid (get clip :id))))))))
+
+(def rack-clip-cell (gid clip active c)
+  (let ((id (get clip :id))
+      (lit (= (get clip :id) active))
+      (renaming (= clip-renaming id)))
+    (box :key (str "rack-clip-" gid "-" id)
+      :debug-name "rack-clip-cell"
+      :width (if renaming rack-clip-rename-width rack-clip-cell-width)
+      :height rack-clip-cell-height
+      :padding (if renaming 0.1 0.3)
+      :bg :transparent
+      :background "track-pattern-cell-bg"
+      :active (if lit 1 0)
+      :assigned 1
+      :override 0
+      :selected 0
+      :track-r (* 0.65 (nth c 0))
+      :track-g (* 0.65 (nth c 1))
+      :track-b (* 0.65 (nth c 2))
+      :on-click (lambda (event)
+        (if (get event :shift)
+          (begin-clip-rename clip)
+          (eseq.drum-rack-v2/launch-clip gid id)))
+      :on-right-click (lambda (event) (open-clip-menu event gid clip))
+      (if renaming
+        (text-input
+          :key (str "rack-clip-rename-" gid "-" id)
+          :width 4.3 :height 0.7 :font-size 10
+          :value clip-rename-draft
+          :auto-focus true
+          :select-all-on-focus true
+          :on-change (lambda (name) (set! clip-rename-draft name))
+          :on-submit (lambda () (finish-clip-rename gid id true))
+          :on-cancel (lambda () (finish-clip-rename gid id false))
+          :on-blur (lambda () (finish-clip-rename gid id true)))
+        nil))))
+
+;; 1-based position of the lit clip in the bank, 0 while the current scene
+;; plays silence.
+(def rack-clip-active-index (clips active)
+  (let ((hit (filter (lambda (i) (= (get (nth clips i) :id) active)) (range 0 (len clips)))))
+    (if (= (len hit) 0) 0 (+ 1 (nth hit 0)))))
+
+;; The last cell is a number picker showing the lit clip's number: read it at
+;; a glance, or type/drag a number to launch that clip (quantized like a
+;; click on its cell). Save and delete live in the right-click menu.
+(def rack-clip-number-picker (gid clips active c)
+  (number-picker :key (str "rack-clip-number-" gid)
+    :width 5.2 :height rack-clip-cell-height :font-size 10
+    ;; Same skin as the launch cells: rack-tinted rim, and the well is the
+    ;; cell shader's 70% dark layer composited over that tint.
+    :border-color (rgba (* 0.65 (nth c 0)) (* 0.65 (nth c 1)) (* 0.65 (nth c 2)) 1.0)
+    :border-width 2
+    :background-color (rgba
+      (+ (* 0.195 (nth c 0)) 0.014)
+      (+ (* 0.195 (nth c 1)) 0.0175)
+      (+ (* 0.195 (nth c 2)) 0.021)
+      1.0)
+    :corner-radius 4
+    :value (rack-clip-active-index clips active)
+    :min 1 :max (max 1 (len clips)) :step 1 :decimals 0
+    :on-change (lambda (v)
+      (let ((i (- (round v) 1)))
+        (if (and (>= i 0) (< i (len clips))
+              (not (= (get (nth clips i) :id) active)))
+          (eseq.drum-rack-v2/launch-clip gid (get (nth clips i) :id))
+          nil)))))
+
+;; One dot per member, lit by the same per-track trigger binding the pad map
+;; uses — no new host feed for the activity strip.
+(def rack-activity-strip (gidx gid)
+  (h-stack :key (str "rack-activity-" gid) :gap 0.08 :align :center
+    (each (eseq.drum-rack-v2/members gidx) |m|
+      (box :key (str "rack-activity-dot-" gid "-" (nth SEQ.track-ids m))
+        :width 0.42 :height 0.42
+        :corner-radius (eseq.seq-core-state/radius 3)
+        :background-color '(rgba 0.19 0.20 0.21 1.0)
+        :selected (bind-seq (str "rack-pad-trigger-" m))
+        :selected-background-color '(rgba 0.95 0.98 1.0 1.0)))))
+
+(def rack-clip-grid (gidx c)
+  (let ((gid (eseq.drum-rack-v2/group-id gidx))
+      (rack (eseq.drum-rack-v2/rack? gidx)))
+    (if (and rack (eseq.drum-rack-v2/has-clips? gid))
+      (let ((active (eseq.drum-rack-v2/active-clip gid))
+          (clips (eseq.drum-rack-v2/clips gid)))
+        (h-stack :key (str "rack-clip-run-" gid) :gap 0.4 :align :center :width :fill :flex 1
+          ;; Lines the first cell up with the member rows' step grids.
+          (box :width 1.6 :height 0.0 :bg :transparent)
+          (wrap :key (str "rack-clip-grid-" gid)
+            :width :fill :flex 1 :gap 0.12 :row-gap 0.12 :align :center
+            (each clips |clip i|
+              (rack-clip-cell gid clip active c))
+            (rack-clip-number-picker gid clips active c))
+          (rack-activity-strip gidx gid)
+          (box :width 1.0 :height 0.0 :bg :transparent)))
+      nil)))
 
 (def group-header-row (gidx)
   (subtree :key (str "seqv-" (group-ui-kind gidx) "-header-" (eseq.drum-rack-v2/group-id gidx))
@@ -3627,6 +3797,8 @@
     ;; input through the active tile, so it mounts in this buffer.
     (subtree :key "seq-lane-add"
       (lane-add-panel))
+    (subtree :key "seq-rack-clip-menu"
+      (rack-clip-context-menu))
     (v-stack :key "sequencer-tracks" :width :fill :gap 0
       (each (eseq.drum-rack-v2/grid-render-items) |item|
         (grid-render-item item)))

@@ -45,6 +45,8 @@ mod hooks;
 pub mod mixer_controls;
 mod params;
 mod projects;
+mod break_kits;
+mod rack_clips;
 mod rack_sequencers;
 pub use rack_sequencers::rack_sequencer_module;
 mod bus_outputs;

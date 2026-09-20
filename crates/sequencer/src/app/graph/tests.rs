@@ -1492,6 +1492,381 @@
         }
     }
 
+    /// Rack clips, their per-scene pointers and their rack-owned overrides
+    /// survive a project save/load (rack-clips spec §3), and a rack with no
+    /// clips comes back legacy.
+    #[test]
+    fn dropping_a_sample_on_an_empty_pad_of_a_clip_bearing_rack_adds_a_member_with_a_cell() {
+        let engine = crate::audio::engine::init_headless_engine(48_000, 2).unwrap();
+        let lg = engine.lg_ptr;
+        let mut app = App::new(engine.state, lg, engine.sample_rate,
+            engine.buses, engine.master_recorder, engine.keyboard_tx);
+        let sample = std::path::Path::new("../../content/impulses/lexicon-300-rich-plate.wav");
+        let (group_id, _) = app
+            .create_drum_rack_recorded(Some("Break".to_string()))
+            .expect("drum rack");
+        let kick = app.graph_controller().add_track(sample).expect("kick");
+        app.assign_rack_pad_track_recorded(group_id, 36, kick).expect("pad");
+        app.state.launch_scene(
+            0,
+            app.tracks.len(),
+            &app.graph.track_buffer_ids,
+            &app.graph.track_sample_rates,
+            &app.tracks,
+            &app.graph.track_instrument_types,
+        );
+        app.state.toggle_step_and_clear_plocks(kick, 0);
+        app.convert_rack_to_clips_recorded(group_id).expect("convert");
+        let idx = app.graph_controller().add_track(sample).expect("new track");
+        app.attach_track_to_group(idx, group_id, Some(38)).expect("attach to pad");
+        // The joining member has a cell in the clip the current scene plays
+        // (its own scene pattern, adopted), so the history capture that
+        // commits the new track finds an effective pattern.
+        app.commit_created_track(idx, "Add sample track").expect("commit");
+        let members = app.groups.iter().find(|g| g.id == group_id).unwrap().members.clone();
+        assert_eq!(members, vec![kick, idx]);
+        app.state.with_scenes(|scenes| {
+            assert!(scenes.effective_pattern_id(idx).is_some(), "new member has an effective pattern");
+            let clip = scenes.current_rack_clip(group_id).expect("scene 0 plays a clip");
+            let bank = scenes.rack_bank(group_id).expect("bank");
+            assert_eq!(bank.clip(clip).unwrap().cells.len(), 2);
+            assert!(bank.clip(clip).unwrap().cells[1].is_some());
+            assert!(scenes.scenes[0].cells[idx].is_none(), "scene cell moved into the clip");
+        });
+    }
+
+    #[test]
+    fn a_sample_dropped_on_a_kit_pad_lands_in_the_playing_clip_only() {
+        let engine = crate::audio::engine::init_headless_engine(48_000, 2).unwrap();
+        let lg = engine.lg_ptr;
+        let mut app = App::new(engine.state, lg, engine.sample_rate,
+            engine.buses, engine.master_recorder, engine.keyboard_tx);
+        let sample = std::path::Path::new("../../content/impulses/lexicon-300-rich-plate.wav");
+        let other = std::fs::read_dir("../../content/impulses/king-tubby")
+            .expect("king-tubby impulses")
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .find(|path| path.extension().is_some_and(|ext| ext == "wav"))
+            .expect("a second wav");
+        let (group_id, _) = app
+            .create_drum_rack_recorded(Some("Break".to_string()))
+            .expect("drum rack");
+        let kick = app.graph_controller().add_track(sample).expect("kick");
+        app.assign_rack_pad_track_recorded(group_id, 36, kick).expect("pad");
+        app.state.with_scenes_mut(|scenes| { scenes.new_scene(); });
+        let relaunch = |app: &App, scene: usize| {
+            app.state.launch_scene(scene, app.tracks.len(), &app.graph.track_buffer_ids,
+                &app.graph.track_sample_rates, &app.tracks, &app.graph.track_instrument_types);
+        };
+        relaunch(&app, 0);
+        app.state.toggle_step_and_clear_plocks(kick, 0);
+        relaunch(&app, 1);
+        app.state.toggle_step_and_clear_plocks(kick, 3);
+        relaunch(&app, 0);
+        app.convert_rack_to_clips_recorded(group_id).expect("convert");
+        let name = format!("kit-pad-sample-{}", std::process::id());
+        let (path, _) = app.save_rack_as_kit(group_id, &name, true, &[0, 1]).expect("save kit");
+
+        // A kit pad loads as a single-layer rack container whose sample lives
+        // in each pattern's rack slot snapshot.
+        let engine2 = crate::audio::engine::init_headless_engine(48_000, 2).unwrap();
+        let mut app2 = App::new(engine2.state, engine2.lg_ptr, engine2.sample_rate,
+            engine2.buses, engine2.master_recorder, engine2.keyboard_tx);
+        let (gid2, _) = app2.load_kit_as_rack(&path).expect("load kit");
+        let _ = std::fs::remove_file(&path);
+        let pad = app2.groups.iter().find(|g| g.id == gid2).unwrap().members[0];
+        assert_eq!(app2.graph.track_instrument_types[pad], InstrumentType::Rack);
+        let clips: Vec<crate::sequencer::RackClipId> = app2.state.with_scenes(|scenes| {
+            scenes.rack_bank(gid2).unwrap().clips.iter().map(|clip| clip.id).collect()
+        });
+        assert_eq!(clips.len(), 2);
+        app2.state.with_scenes_mut(|scenes| {
+            scenes.set_scene_rack_clip(0, gid2, Some(clips[0]));
+        });
+        relaunch(&app2, 0);
+        let slot_sample = |app: &App, clip: crate::sequencer::RackClipId| -> String {
+            app.state.with_scenes(|scenes| {
+                let bank = scenes.rack_bank(gid2).unwrap();
+                let id = bank.clip(clip).unwrap().cells[0].unwrap();
+                let data = scenes.track_pools[pad].get(id).unwrap();
+                data.rack_track.as_ref().unwrap().slots[0].sample_id.as_ref().unwrap().1.clone()
+            })
+        };
+        let original = slot_sample(&app2, clips[0]);
+        assert_eq!(slot_sample(&app2, clips[1]), original);
+
+        // The same slot replacement a sample drop on the pad now performs.
+        app2.apply_recorded_rack_slot_source_replacement(pad, 0, "Replace rack sample", |app| {
+            app.graph_controller().replace_rack_slot_with_sampler(pad, 0, &other)
+        })
+        .expect("replace the playing clip's sample");
+        let replaced = slot_sample(&app2, clips[0]);
+        assert_ne!(replaced, original, "the playing clip took the new sample");
+        assert_eq!(slot_sample(&app2, clips[1]), original, "the other clip kept its sample");
+    }
+
+    #[test]
+    fn dropping_a_sample_on_an_empty_pad_while_the_rack_is_silent_mints_a_clip() {
+        let engine = crate::audio::engine::init_headless_engine(48_000, 2).unwrap();
+        let lg = engine.lg_ptr;
+        let mut app = App::new(engine.state, lg, engine.sample_rate,
+            engine.buses, engine.master_recorder, engine.keyboard_tx);
+        let sample = std::path::Path::new("../../content/impulses/lexicon-300-rich-plate.wav");
+        let (group_id, _) = app
+            .create_drum_rack_recorded(Some("Break".to_string()))
+            .expect("drum rack");
+        let kick = app.graph_controller().add_track(sample).expect("kick");
+        app.assign_rack_pad_track_recorded(group_id, 36, kick).expect("pad");
+        app.state.launch_scene(0, app.tracks.len(), &app.graph.track_buffer_ids,
+            &app.graph.track_sample_rates, &app.tracks, &app.graph.track_instrument_types);
+        app.state.toggle_step_and_clear_plocks(kick, 0);
+        app.convert_rack_to_clips_recorded(group_id).expect("convert");
+        // The scene the user is in leaves the rack silent.
+        app.state.with_scenes_mut(|scenes| {
+            scenes.set_scene_rack_clip(0, group_id, None);
+            scenes.adopt_live_rack_clips();
+        });
+        let idx = app.graph_controller().add_track(sample).expect("new track");
+        app.attach_track_to_group(idx, group_id, Some(38)).expect("attach to pad");
+        if let Err(e) = app.commit_created_track(idx, "Add sample track") { panic!("COMMIT ERROR: {e}"); }
+        app.state.with_scenes(|scenes| {
+            assert!(scenes.effective_pattern_id(idx).is_some(), "new member has an effective pattern");
+            let clip = scenes.current_rack_clip(group_id).expect("the drop minted a clip for this scene");
+            let bank = scenes.rack_bank(group_id).expect("bank");
+            let cells = &bank.clip(clip).unwrap().cells;
+            assert!(cells[1].is_some(), "the new member's cell");
+            assert!(cells[0].is_none(), "the existing member stays silent in the minted clip");
+        });
+    }
+
+    #[test]
+    fn a_plain_track_can_still_be_added_next_to_a_clip_bearing_rack_after_a_new_scene() {
+        let engine = crate::audio::engine::init_headless_engine(48_000, 2).unwrap();
+        let lg = engine.lg_ptr;
+        let mut app = App::new(engine.state, lg, engine.sample_rate,
+            engine.buses, engine.master_recorder, engine.keyboard_tx);
+        let sample = std::path::Path::new("../../content/impulses/lexicon-300-rich-plate.wav");
+        let (group_id, _) = app
+            .create_drum_rack_recorded(Some("Break".to_string()))
+            .expect("drum rack");
+        let kick = app.graph_controller().add_track(sample).expect("kick");
+        app.assign_rack_pad_track_recorded(group_id, 36, kick).expect("pad");
+        let relaunch = |app: &App, scene: usize| {
+            app.state.launch_scene(scene, app.tracks.len(), &app.graph.track_buffer_ids,
+                &app.graph.track_sample_rates, &app.tracks, &app.graph.track_instrument_types);
+        };
+        relaunch(&app, 0);
+        app.state.toggle_step_and_clear_plocks(kick, 0);
+        app.convert_rack_to_clips_recorded(group_id).expect("convert");
+        let new_scene = app.state.with_scenes_mut(|scenes| scenes.new_scene());
+        relaunch(&app, new_scene);
+        for scene in [new_scene, 0] {
+            relaunch(&app, scene);
+            let idx = app.graph_controller().add_track(sample).expect("plain track");
+            if let Err(e) = app.commit_created_track(idx, "Add sample track") {
+                panic!("scene {scene}: COMMIT ERROR: {e}");
+            }
+            let idx2 = app.graph_controller().add_track(sample).expect("pad track");
+            app.attach_track_to_group(idx2, group_id, None).expect("attach");
+            if let Err(e) = app.commit_created_track(idx2, "Add sample track") {
+                panic!("scene {scene}: PAD COMMIT ERROR: {e}");
+            }
+        }
+    }
+
+    /// A device record that disagrees with the chain the patterns rebuild
+    /// (a live lane that never saved back) must not make the project
+    /// unopenable: the record is dropped and everything else loads.
+    #[test]
+    fn a_stale_midi_instance_record_does_not_refuse_the_project() {
+        let engine = crate::audio::engine::init_headless_engine(48_000, 2).unwrap();
+        let lg = engine.lg_ptr;
+        let mut app = App::new(engine.state, lg, engine.sample_rate,
+            engine.buses, engine.master_recorder, engine.keyboard_tx);
+        let sample = std::path::Path::new("../../content/impulses/lexicon-300-rich-plate.wav");
+        let (group_id, _) = app
+            .create_drum_rack_recorded(Some("Break".to_string()))
+            .expect("drum rack");
+        let kick = app.graph_controller().add_track(sample).expect("kick");
+        app.assign_rack_pad_track_recorded(group_id, 36, kick).expect("pad");
+        app.state.launch_scene(0, app.tracks.len(), &app.graph.track_buffer_ids,
+            &app.graph.track_sample_rates, &app.tracks, &app.graph.track_instrument_types);
+        app.state.toggle_step_and_clear_plocks(kick, 0);
+        app.convert_rack_to_clips_recorded(group_id).expect("convert");
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let name = format!("__test-stale-midi-record-{}-{nonce}", std::process::id());
+        let mut project = app.capture_project(&name).unwrap();
+        let kick_id = app.track_registry.id_at(kick).unwrap().0;
+        let chain = project.device_instances.midi_effects.iter_mut()
+            .find(|chain| chain.track_id == kick_id).expect("kick MIDI record");
+        assert!(chain.instances.is_empty());
+        chain.instances.push(crate::project::ProjectMidiEffectInstance {
+            id: 424242,
+            name: "transpose-range".into(),
+        });
+        let _cleanup = TestProjectFile(crate::project::save_project(&name, &project).unwrap());
+        app.queue_project_load_named(&name).unwrap();
+        for _ in 0..200 {
+            if app.editor.pending_project_load.is_none() { break; }
+            app.advance_pending_project_load().expect("a stale record is dropped, not fatal");
+            unsafe { crate::audiograph::prepare_graph_for_render(lg.0); }
+        }
+        assert!(app.editor.pending_project_load.is_none(), "project load should finish");
+        assert!(app.groups.iter().any(|g| g.id == group_id && g.rack.is_some()), "the rack came back");
+        assert!(!app.rack_is_legacy(group_id), "with its clips");
+        drop(app);
+        unsafe { crate::audiograph::destroy_live_graph(lg.0); }
+    }
+
+    #[test]
+    fn saving_a_clip_without_a_name_numbers_it_past_the_scene_named_clips() {
+        let engine = crate::audio::engine::init_headless_engine(48_000, 2).unwrap();
+        let lg = engine.lg_ptr;
+        let mut app = App::new(engine.state, lg, engine.sample_rate,
+            engine.buses, engine.master_recorder, engine.keyboard_tx);
+        let sample = std::path::Path::new("../../content/impulses/lexicon-300-rich-plate.wav");
+        let (group_id, _) = app
+            .create_drum_rack_recorded(Some("Break".to_string()))
+            .expect("drum rack");
+        let kick = app.graph_controller().add_track(sample).expect("kick");
+        app.assign_rack_pad_track_recorded(group_id, 36, kick).expect("pad");
+        app.state.with_scenes_mut(|scenes| {
+            scenes.new_scene();
+        });
+        app.state.launch_scene(
+            0,
+            app.tracks.len(),
+            &app.graph.track_buffer_ids,
+            &app.graph.track_sample_rates,
+            &app.tracks,
+            &app.graph.track_instrument_types,
+        );
+        app.state.toggle_step_and_clear_plocks(kick, 0);
+        app.convert_rack_to_clips_recorded(group_id).expect("convert");
+        app.save_rack_clip_as_recorded(group_id, "").expect("first unnamed clip");
+        app.save_rack_clip_as_recorded(group_id, "  ").expect("second unnamed clip");
+        app.save_rack_clip_as_recorded(group_id, "Fill").expect("named clip");
+        let names: Vec<String> = app.state.with_scenes(|scenes| {
+            scenes
+                .rack_bank(group_id)
+                .expect("bank")
+                .clips
+                .iter()
+                .map(|clip| clip.name.clone())
+                .collect()
+        });
+        // Convert names clips after their scenes; the unnamed saves continue
+        // the numbering instead of stacking identical "Clip" entries, and an
+        // explicit name is kept verbatim.
+        assert_eq!(names, vec!["Scene 1", "Scene 2", "Clip 3", "Clip 4", "Fill"]);
+    }
+
+    #[test]
+    fn rack_clips_and_scene_pointers_survive_project_save_and_load() {
+        let engine = crate::audio::engine::init_headless_engine(48_000, 2).unwrap();
+        let lg = engine.lg_ptr;
+        let mut app = App::new(engine.state, lg, engine.sample_rate,
+            engine.buses, engine.master_recorder, engine.keyboard_tx);
+        let sample = std::path::Path::new("../../content/impulses/lexicon-300-rich-plate.wav");
+        let (group_id, _) = app
+            .create_drum_rack_recorded(Some("Break".to_string()))
+            .expect("drum rack");
+        let kick = app.graph_controller().add_track(sample).expect("kick");
+        let snare = app.graph_controller().add_track(sample).expect("snare");
+        for (note, track) in [(36, kick), (38, snare)] {
+            app.assign_rack_pad_track_recorded(group_id, note, track).expect("pad");
+        }
+        app.state.with_scenes_mut(|scenes| {
+            scenes.new_scene();
+        });
+        let relaunch = |app: &App, scene: usize| {
+            app.state.launch_scene(
+                scene,
+                app.tracks.len(),
+                &app.graph.track_buffer_ids,
+                &app.graph.track_sample_rates,
+                &app.tracks,
+                &app.graph.track_instrument_types,
+            );
+        };
+        relaunch(&app, 0);
+        for track in [kick, snare] {
+            app.state.toggle_step_and_clear_plocks(track, 0);
+        }
+        relaunch(&app, 1);
+        for track in [kick, snare] {
+            app.state.toggle_step_and_clear_plocks(track, 3);
+        }
+        relaunch(&app, 0);
+        app.convert_rack_to_clips_recorded(group_id).expect("convert");
+        // A rack-owned override rides in the active clip.
+        app.state
+            .edit_current_graph_overrides(|graphs| {
+                graphs.push(crate::graph::ProjectGraphOverrides {
+                    sequencer_id: 4242,
+                    sequencer_name: "brk".into(),
+                    owner_rack: Some(group_id),
+                    ..Default::default()
+                });
+                Ok(())
+            })
+            .expect("seed rack override");
+
+        let bank_before = app.rack_clip_bank(group_id);
+        assert_eq!(bank_before.len(), 2);
+        let member_bits = |app: &App| -> Vec<Vec<u64>> {
+            app.state.with_scenes(|scenes| {
+                (0..scenes.scenes.len())
+                    .map(|scene_idx| {
+                        let snapshot = scenes.scene_snapshot(scene_idx).expect("snapshot");
+                        [kick, snare]
+                            .into_iter()
+                            .map(|track| {
+                                snapshot.track_pattern_data(track).expect("lane").track_bits[0]
+                            })
+                            .collect()
+                    })
+                    .collect()
+            })
+        };
+        let bits_before = member_bits(&app);
+        assert_eq!(bits_before, vec![vec![0b0001, 0b0001], vec![0b1000, 0b1000]]);
+
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let name = format!("__test-rack-clips-{}-{nonce}", std::process::id());
+        let project = app.capture_project(&name).unwrap();
+        let rack = project.groups.iter().find(|g| g.id == group_id)
+            .and_then(|g| g.rack.as_ref()).expect("rack config");
+        assert_eq!(rack.clips.len(), 2, "the bank serializes onto the rack config");
+        assert_eq!(project.scene_rack_clips.len(), 2, "one pointer list per scene");
+        let _cleanup = TestProjectFile(crate::project::save_project(&name, &project).unwrap());
+        app.queue_project_load_named(&name).unwrap();
+        for _ in 0..200 {
+            if app.editor.pending_project_load.is_none() {
+                break;
+            }
+            app.advance_pending_project_load().unwrap();
+            unsafe { crate::audiograph::prepare_graph_for_render(lg.0); }
+        }
+        assert!(app.editor.pending_project_load.is_none(), "project load should finish");
+
+        let bank_after = app.rack_clip_bank(group_id);
+        assert_eq!(
+            bank_after.iter().map(|(id, name, _)| (*id, name.clone())).collect::<Vec<_>>(),
+            bank_before.iter().map(|(id, name, _)| (*id, name.clone())).collect::<Vec<_>>(),
+        );
+        assert!(!app.rack_is_legacy(group_id));
+        assert_eq!(member_bits(&app), bits_before, "every scene plays what it played");
+        assert!(
+            app.state.current_graph_overrides().iter().any(|g| g.sequencer_id == 4242
+                && g.owner_rack == Some(group_id)),
+            "the clip's rack-owned override came back"
+        );
+        drop(app);
+        unsafe { crate::audiograph::destroy_live_graph(lg.0); }
+    }
+
     #[test]
     fn rack_macro_names_survive_project_save_and_load() {
         let engine = crate::audio::engine::init_headless_engine(48_000, 2).unwrap();

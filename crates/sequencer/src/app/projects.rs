@@ -1817,70 +1817,113 @@ impl App {
     /// [`ProjectKitPreset`].
     ///
     /// [`ProjectKitPreset`]: crate::project::ProjectKitPreset
+    /// `scene_selection` is the "Export as kit…" scene checklist (§7.2): the
+    /// project scenes, in order, whose rack clips become kit clips 1..n named
+    /// after them. Empty means today's kit — instruments and bus chain only.
+    /// Returns the preset and one warning per sequencer that will not travel
+    /// cleanly.
     pub fn capture_rack_as_kit(
         &mut self,
         group_id: u64,
         name: &str,
         tags: Vec<String>,
         author: String,
-    ) -> Result<crate::project::ProjectKitPreset, String> {
+        scene_selection: &[usize],
+    ) -> Result<(crate::project::ProjectKitPreset, Vec<String>), String> {
+        // The clip capture may convert a legacy rack first, which rewrites the
+        // group; read the rack only after it.
+        let content = self.capture_kit_content(group_id, scene_selection)?;
         let group = self
             .groups
             .iter()
             .find(|group| group.id == group_id)
             .ok_or_else(|| format!("Track group {group_id} does not exist"))?;
-        let rack = group
-            .rack
-            .as_ref()
-            .ok_or_else(|| format!("Track group {group_id} is not a drum rack"))?;
+        if group.rack.is_none() {
+            return Err(format!("Track group {group_id} is not a drum rack"));
+        }
         let color = group.color;
         let bus_id = group.bus_id;
         // Resolve every pad against the member list up front: capturing a pad
         // borrows `self` mutably, and a capture must not see a half-built kit.
-        let pads: Vec<(i32, Option<u8>, usize)> = rack
-            .pads
-            .iter()
-            .enumerate()
-            .filter_map(|(pad_index, pad)| {
-                let track = group.members.get(pad.member).copied()?;
-                Some((pad.pad_note, rack.choke_group(pad_index), track))
-            })
-            .collect();
-        if pads.is_empty() {
+        // The roster is the same pad space the clips were just written in;
+        // its warnings already travelled with `content`.
+        let roster = self.kit_pad_roster(group_id)?;
+        if roster.pads.iter().all(|pad| pad.modulator) {
             return Err("A kit needs at least one pad with a sound on it".to_string());
         }
-        let mut kit_pads = Vec::with_capacity(pads.len());
-        for (pad_note, choke_group, track) in pads {
-            let track_name = self
-                .tracks
-                .get(track)
-                .cloned()
-                .ok_or_else(|| format!("Kit pad {pad_note} has no member track"))?;
-            let sound = self.capture_track_as_container_preset(
-                track,
-                &track_name,
-                Vec::new(),
-                String::new(),
-            )?;
+        let super::break_kits::CapturedKitContent { sequencers, clips, mut warnings } = content;
+        warnings.extend(roster.warnings.iter().cloned());
+        // The rack's internal cables (§7.5), read before the pad captures
+        // below, which snapshot the project.
+        let (mod_connections, dropped_cables) =
+            self.capture_kit_mod_connections(group_id, &roster.member_to_pad)?;
+        if dropped_cables > 0 {
+            warnings.push(format!(
+                "{dropped_cables} modulation cable{} leaving the rack {} not carried",
+                if dropped_cables == 1 { "" } else { "s" },
+                if dropped_cables == 1 { "was" } else { "were" }
+            ));
+        }
+        let mut kit_pads = Vec::with_capacity(roster.pads.len());
+        for pad in roster.pads {
+            let (sound, modulator) = if pad.modulator {
+                (None, Some(self.capture_modulator_instrument_slot(pad.track, &pad.name)?))
+            } else {
+                let sound = self.capture_track_as_container_preset(
+                    pad.track,
+                    &pad.name,
+                    Vec::new(),
+                    String::new(),
+                )?;
+                (Some(sound), None)
+            };
             kit_pads.push(crate::project::ProjectKitPad {
-                pad_note,
-                choke_group,
-                name: track_name,
+                pad_note: pad.pad_note,
+                choke_group: pad.choke_group,
+                name: pad.name,
                 sound,
+                modulator,
             });
         }
         let bus_chain = Some(self.capture_kit_bus_chain(bus_id)?);
-        Ok(crate::project::ProjectKitPreset {
-            version: crate::project::project_file_version(),
-            metadata: crate::project::ProjectSoundMetadata {
-                name: name.trim().to_string(),
-                tags,
-                author,
+        Ok((
+            crate::project::ProjectKitPreset {
+                version: crate::project::project_file_version(),
+                kit_version: crate::project::KIT_PRESET_VERSION,
+                metadata: crate::project::ProjectSoundMetadata {
+                    name: name.trim().to_string(),
+                    tags,
+                    author,
+                },
+                color,
+                pads: kit_pads,
+                bus_chain,
+                sequencers,
+                mod_connections,
+                clips,
             },
-            color,
-            pads: kit_pads,
-            bus_chain,
-        })
+            warnings,
+        ))
+    }
+
+    /// A modulator member's instrument slot as the current scene has it
+    /// (§7.5): rate, shape and the rest of the modulator's settings, read
+    /// through the same project capture a Sound pad uses.
+    fn capture_modulator_instrument_slot(
+        &mut self,
+        track: usize,
+        name: &str,
+    ) -> Result<crate::project::ProjectEffectSlot, String> {
+        let project = self.capture_project(name)?;
+        let pattern = project
+            .patterns
+            .get(project.current_pattern)
+            .ok_or_else(|| "Current pattern is missing while saving kit".to_string())?;
+        pattern
+            .instrument_slots
+            .get(track)
+            .cloned()
+            .ok_or_else(|| format!("Modulator '{name}' has no instrument slot to save"))
     }
 
     /// The rack bus insert chain as a kit carries it: every occupied slot in
@@ -1987,23 +2030,39 @@ impl App {
         group_id: u64,
         name: &str,
         overwrite: bool,
-    ) -> Result<PathBuf, String> {
+        scene_selection: &[usize],
+    ) -> Result<(PathBuf, Vec<String>), String> {
         if name.trim().is_empty() {
             return Err("A kit needs a name".to_string());
         }
         if crate::project::kit_preset_path(name).exists() && !overwrite {
             return Err(format!("Kit '{name}' already exists"));
         }
-        let kit = self.capture_rack_as_kit(group_id, name, Vec::new(), String::new())?;
-        crate::project::save_kit_preset(name, &kit).map_err(|error| error.to_string())
+        let (kit, warnings) =
+            self.capture_rack_as_kit(group_id, name, Vec::new(), String::new(), scene_selection)?;
+        let path =
+            crate::project::save_kit_preset(name, &kit).map_err(|error| error.to_string())?;
+        Ok((path, warnings))
     }
 
     /// Rebuilds a saved kit as a fresh drum rack: the group and its bus, then
     /// one member track per pad loaded from the pad's Sound, then the pad map
-    /// and choke groups. Returns the new group id along with a message per pad
-    /// that failed to load — a kit missing one sample still loads the rest, and
-    /// every step it took is an ordinary undo entry.
+    /// and choke groups. A BREAK kit (§7.3) additionally registers the rack's
+    /// graph sequencers and fills its clip bank, with every existing project
+    /// scene left pointing at `None` so the rack is silent until a clip is
+    /// launched. Returns the new group id along with a message per pad that
+    /// failed to load — a kit missing one sample still loads the rest — and the
+    /// whole load squashes into one undo entry.
     pub fn load_kit_as_rack(&mut self, path: &Path) -> Result<(u64, Vec<String>), String> {
+        let history_len = self.history.undo_len();
+        let result = self.load_kit_as_rack_inner(path);
+        if result.is_ok() {
+            crate::app::edit::squash_history_since(self, history_len, "Load kit");
+        }
+        result
+    }
+
+    fn load_kit_as_rack_inner(&mut self, path: &Path) -> Result<(u64, Vec<String>), String> {
         let kit = crate::project::load_kit_preset(path).map_err(|error| error.to_string())?;
         let fallback_name = path
             .file_stem()
@@ -2030,7 +2089,7 @@ impl App {
             } else {
                 pad.name.trim().to_string()
             };
-            let track = match self.add_track_from_sound_preset(pad.sound, &pad_name) {
+            let track = match self.add_kit_pad_track(&pad, &pad_name) {
                 Ok(track) => track,
                 Err(error) => {
                     failures.push(format!("{pad_name}: {error}"));
@@ -2056,7 +2115,70 @@ impl App {
                 }
             }
         }
+        // Break-kit payload (§7.3). The sequencer ids are re-derived for THIS
+        // rack and the clip overrides follow that map; the host evaluates each
+        // recorded source afterwards, because the App cannot run Lisp.
+        let id_map = self.register_kit_sequencers(group_id, &kit.sequencers, &mut failures);
+        if !kit.clips.is_empty() {
+            if let Err(error) = self.install_kit_clips(group_id, kit.clips, &id_map) {
+                failures.push(format!("clips: {error}"));
+            }
+        }
+        // The rack's internal cables (§7.5), once every member exists.
+        if let Err(error) = self.install_kit_mod_connections(group_id, &kit.mod_connections) {
+            failures.push(format!("modulation cables: {error}"));
+        }
         Ok((group_id, failures))
+    }
+
+    /// Build the member track for one kit pad: a track from the pad's Sound,
+    /// or a modulator track with the pad's saved settings (§7.5).
+    fn add_kit_pad_track(
+        &mut self,
+        pad: &crate::project::ProjectKitPad,
+        pad_name: &str,
+    ) -> Result<usize, String> {
+        match (&pad.sound, &pad.modulator) {
+            (_, Some(slot)) => {
+                let track = self.graph_controller().add_modulator_track()?;
+                self.tracks[track] = pad_name.to_string();
+                if let Some(authored) = self.track_name_user_authored.get_mut(track) {
+                    *authored = true;
+                }
+                self.apply_kit_modulator_settings(track, slot);
+                Ok(track)
+            }
+            (Some(sound), None) => self.add_track_from_sound_preset(sound.clone(), pad_name),
+            (None, None) => Err("kit pad carries neither a Sound nor a modulator".to_string()),
+        }
+    }
+
+    /// Write a kit modulator pad's saved settings onto `track`'s live
+    /// instrument slot, through the same per-parameter command the panel
+    /// uses, so the values reach the engine and the current scene alike.
+    /// The live slot's own parameter count wins over the saved one.
+    fn apply_kit_modulator_settings(
+        &mut self,
+        track: usize,
+        slot: &crate::project::ProjectEffectSlot,
+    ) {
+        let live_params = self
+            .state
+            .pattern
+            .instrument_slots
+            .get(track)
+            .map(|live| live.num_params.load(Ordering::Relaxed) as usize)
+            .unwrap_or(0);
+        for (param_idx, value) in slot.defaults.iter().enumerate().take(live_params) {
+            super::command::apply_command(
+                self,
+                super::command::AppCommand::SetInstrumentParam {
+                    track,
+                    param_idx,
+                    value: *value,
+                },
+            );
+        }
     }
 
     /// Auditions a kit into an existing drum rack as one atomic authoring edit.
@@ -2108,6 +2230,14 @@ impl App {
         let history_checkpoint = self.history.clone();
         let history_len = self.history.undo_len();
         let result = (|| {
+            // The rack config is replaced wholesale below, which drops the
+            // rack's current sequencer entries; their published instances must
+            // go with them or they keep firing, unrecorded. (Undo restores the
+            // entries with the group structure and the project-open replay
+            // republishes them.)
+            for sequencer in self.rack_sequencers(group_id) {
+                self.state.unpublish_sequencer_by_id(sequencer.sequencer_id);
+            }
             let mut desired = Vec::with_capacity(kit.pads.len());
             for pad in kit.pads {
                 let pad_name = if pad.name.trim().is_empty() {
@@ -2115,13 +2245,35 @@ impl App {
                 } else {
                     pad.name.trim().to_string()
                 };
-                let track_id = if let Some(track_id) = old_by_note.get(&pad.pad_note).copied() {
+                // An existing lane is reused by note only when it is the same
+                // kind of member; a Sound cannot land on a modulator track or
+                // the reverse, so those pads get a fresh track and the old
+                // one goes with the pads absent from the kit.
+                let reusable = old_by_note.get(&pad.pad_note).copied().filter(|track_id| {
+                    self.track_registry.index_of(*track_id).is_some_and(|track| {
+                        let is_modulator = self.graph.track_instrument_types.get(track).copied()
+                            == Some(InstrumentType::Modulator);
+                        is_modulator == pad.is_modulator()
+                    })
+                });
+                let track_id = if let Some(track_id) = reusable {
                     let track = self.track_registry.index_of(track_id)
                         .ok_or_else(|| format!("Kit pad {pad_name} lost its member track"))?;
-                    self.load_sound_preset_onto_track(track, pad.sound, &pad_name)?;
+                    match (&pad.sound, &pad.modulator) {
+                        (_, Some(slot)) => {
+                            self.tracks[track] = pad_name.clone();
+                            self.apply_kit_modulator_settings(track, slot);
+                        }
+                        (Some(sound), None) => {
+                            self.load_sound_preset_onto_track(track, sound.clone(), &pad_name)?;
+                        }
+                        (None, None) => {
+                            return Err(format!("Kit pad {pad_name} carries neither a Sound nor a modulator"));
+                        }
+                    }
                     track_id
                 } else {
-                    let track = self.add_track_from_sound_preset(pad.sound, &pad_name)?;
+                    let track = self.add_kit_pad_track(&pad, &pad_name)?;
                     if let Err(error) = self.commit_created_track(track, "Load kit pad") {
                         let rollback = self.graph_controller().delete_track(track);
                         return match rollback {
@@ -2177,6 +2329,8 @@ impl App {
                     sequencers: Vec::new(),
                     pads,
                     choke_groups: desired_for_group.iter().map(|(_, choke, _)| *choke).collect(),
+                    clips: Vec::new(),
+                    next_clip_id: 0,
                 });
                 Ok(())
             })?;
@@ -2193,8 +2347,28 @@ impl App {
                     .ok_or_else(|| format!("Track group {group_id} does not exist"))?;
                 self.restore_kit_bus_chain(bus_id, chain)?;
             }
+            // A kit's processing and its clips are part of the kit, so
+            // auditioning a BREAK kit replaces the rack's sequencers and its
+            // whole clip bank, in this same undo entry (§7.3 decision). A kit
+            // with no clips of its own leaves the bank alone, which is what
+            // keeps every pre-feature `.kit` file behaving exactly as before.
+            let mut notes = Vec::new();
+            let id_map =
+                self.register_kit_sequencers(group_id, &kit.sequencers, &mut notes);
+            if !kit.clips.is_empty() {
+                if let Err(error) = self.install_kit_clips(group_id, kit.clips, &id_map) {
+                    notes.push(format!("clips: {error}"));
+                }
+            }
+            if let Err(error) = self.install_kit_mod_connections(group_id, &kit.mod_connections) {
+                notes.push(format!("modulation cables: {error}"));
+            }
             crate::app::edit::squash_history_since(self, history_len, "Audition kit on drum rack");
-            Ok(kit_name.clone())
+            if notes.is_empty() {
+                Ok(kit_name.clone())
+            } else {
+                Ok(format!("{kit_name} ({})", notes.join("; ")))
+            }
         })();
         match result {
             Ok(name) => Ok(name),
@@ -2748,6 +2922,24 @@ impl App {
             });
         }
 
+        // Rack clips (rack-clips spec 3). The bank lives in `ProjectScenes`;
+        // it serializes onto each rack's config, and the per-scene pointers
+        // onto the file.
+        let (rack_clip_banks, scene_rack_clips) =
+            self.capture_rack_clips(&scenes_for_takes, num_tracks)?;
+        let mut groups = self.groups.clone();
+        for group in &mut groups {
+            let Some(rack) = group.rack.as_mut() else {
+                continue;
+            };
+            if let Some((_, clips, next_clip_id)) =
+                rack_clip_banks.iter().find(|(gid, _, _)| *gid == group.id)
+            {
+                rack.clips = clips.clone();
+                rack.next_clip_id = *next_clip_id;
+            }
+        }
+
         Ok(ProjectFile {
             version: project_file_version(),
             name: project_name.to_string(),
@@ -2778,7 +2970,7 @@ impl App {
                 cursor_col: self.editor.scratch_cursor.1,
             },
             patterns,
-            groups: self.groups.clone(),
+            groups,
             scene_banks,
             // The arrangement always exists (empty-arrangement spec 7):
             // every save writes one, the empty arrangement included.
@@ -2810,6 +3002,7 @@ impl App {
                 Vec::new()
             },
             scene_cell_presence,
+            scene_rack_clips,
             take_pools,
             track_sounds,
             // Scene-independent per-track process slot rosters (eseq-53y7).
@@ -3184,6 +3377,13 @@ impl App {
             return Err("project rack-effect records do not cover every rack slot exactly once".to_string());
         }
 
+        // A per-track device record that disagrees with the chain the
+        // patterns rebuilt is a stale record (a live lane that was never
+        // saved back), not a reason to refuse the whole project: the chain
+        // the patterns hold is what the project plays, so those instance ids
+        // are dropped (the registry mints fresh ones on demand) and the load
+        // goes on. Bus and rack-slot records stay strict below.
+        let mut track_effects = Vec::with_capacity(instances.track_effects.len());
         for chain in &instances.track_effects {
             let track_id = crate::sequencer::TrackId(chain.track_id);
             let track = self.track_registry.index_of(track_id)
@@ -3193,16 +3393,30 @@ impl App {
                 .take_while(|slot| slot.node_id.load(Ordering::Relaxed) != 0)
                 .count();
             if live_count != chain.instances.len() {
-                return Err(format!("track {} effect-instance count does not match the live chain", track + 1));
+                eprintln!(
+                    "Project load: track {} effect-instance record ({}) does not match its chain ({live_count}); dropping the stale record",
+                    track + 1,
+                    chain.instances.len()
+                );
+                continue;
             }
+            track_effects.push(chain);
         }
+        let mut midi_effects = Vec::with_capacity(instances.midi_effects.len());
         for chain in &instances.midi_effects {
             let track_id = crate::sequencer::TrackId(chain.track_id);
             let track = self.track_registry.index_of(track_id)
                 .ok_or_else(|| format!("MIDI chain references missing track {}", chain.track_id))?;
-            if self.state.pattern.track_params[track].midi_fx_chain().len() != chain.instances.len() {
-                return Err(format!("track {} MIDI-instance count does not match the live chain", track + 1));
+            let live_count = self.state.pattern.track_params[track].midi_fx_chain().len();
+            if live_count != chain.instances.len() {
+                eprintln!(
+                    "Project load: track {} MIDI-instance record ({}) does not match its chain ({live_count}); dropping the stale record",
+                    track + 1,
+                    chain.instances.len()
+                );
+                continue;
             }
+            midi_effects.push(chain);
         }
         for chain in &instances.bus_effects {
             let bus_id = BusId(chain.bus_id);
@@ -3230,14 +3444,14 @@ impl App {
         }
 
         self.device_registry.clear();
-        for chain in &instances.track_effects {
+        for chain in track_effects {
             let track_id = crate::sequencer::TrackId(chain.track_id);
             let ids = chain.instances.iter()
                 .map(|instance| crate::sequencer::EffectInstanceId(instance.id))
                 .collect::<Vec<_>>();
             self.device_registry.bind_audio_effect_chain(track_id, BUILTIN_SLOT_COUNT, &ids)?;
         }
-        for chain in &instances.midi_effects {
+        for chain in midi_effects {
             let track_id = crate::sequencer::TrackId(chain.track_id);
             let ids = chain.instances.iter()
                 .map(|instance| crate::sequencer::MidiFxInstanceId(instance.id))
@@ -3933,6 +4147,231 @@ impl App {
         Ok(())
     }
 
+    /// Serialize every rack's clip bank (rack-clips spec 3). A clip's member
+    /// lanes ride in ONE full-width `ProjectPattern` in which only the rack's
+    /// member tracks are meaningful — the same wire form take chunks use, so
+    /// clip content reuses the scene pattern conversion and sample resolution
+    /// unchanged. Returns the per-rack banks and the per-scene pointers.
+    #[allow(clippy::type_complexity)]
+    fn capture_rack_clips(
+        &self,
+        scenes: &crate::sequencer::ProjectScenes,
+        num_tracks: usize,
+    ) -> Result<
+        (
+            Vec<(u64, Vec<crate::project::ProjectRackClip>, u64)>,
+            Vec<Vec<(u64, crate::project::RackClipId)>>,
+        ),
+        String,
+    > {
+        let mut banks = Vec::new();
+        for bank in scenes.rack_banks() {
+            let mut clips = Vec::with_capacity(bank.clips.len());
+            for clip in &bank.clips {
+                let mut snapshot = PatternSnapshot::new_default(num_tracks, &[]);
+                let mut sample_paths = vec![None; num_tracks];
+                let mut sample_names = vec![String::new(); num_tracks];
+                let mut members = Vec::with_capacity(clip.cells.len());
+                for (position, cell) in clip.cells.iter().enumerate() {
+                    let track = bank.members.get(position).copied();
+                    let data = cell.zip(track).and_then(|(id, track)| {
+                        scenes.track_pools.get(track).and_then(|pool| pool.get(id))
+                    });
+                    members.push(data.is_some());
+                    let (Some(track), Some(data)) = (track, data) else {
+                        continue;
+                    };
+                    if track >= num_tracks {
+                        continue;
+                    }
+                    snapshot.set_track_pattern_data(track, data);
+                    let (buffer_id, sample_name, _) = snapshot.sample_ids[track].clone();
+                    if snapshot
+                        .instrument_types
+                        .get(track)
+                        .copied()
+                        .unwrap_or(InstrumentType::Sampler)
+                        == InstrumentType::Sampler
+                    {
+                        sample_paths[track] = self
+                            .capture_sampler_source_path(buffer_id, &sample_name)?
+                            .map(|path| path.to_string_lossy().to_string());
+                    }
+                    sample_names[track] = if sample_paths[track].is_some() {
+                        sample_name
+                    } else {
+                        String::new()
+                    };
+                }
+                clips.push(crate::project::ProjectRackClip {
+                    id: clip.id,
+                    name: clip.name.clone(),
+                    color: clip.color,
+                    members,
+                    pattern: ProjectPattern::from_snapshot(
+                        &snapshot,
+                        sample_paths,
+                        sample_names,
+                        Vec::new(),
+                    ),
+                    graph_overrides: clip.graph_overrides.clone(),
+                    bus_chain: None,
+                });
+            }
+            banks.push((bank.group_id, clips, bank.next_clip_id));
+        }
+        let pointers: Vec<Vec<(u64, crate::project::RackClipId)>> = scenes
+            .scenes
+            .iter()
+            .map(|scene| scene.rack_clips.clone())
+            .collect();
+        // Skip the field entirely when no scene points at a clip, keeping
+        // pre-feature projects byte-identical.
+        let pointers = if pointers.iter().all(|scene| scene.is_empty()) {
+            Vec::new()
+        } else {
+            pointers
+        };
+        Ok((banks, pointers))
+    }
+
+    /// Rebuild the live clip banks from the loaded rack configs, inserting each
+    /// clip's member lanes into that member's pattern pool, then install the
+    /// per-scene pointers. A rack with no serialized clips installs nothing and
+    /// stays legacy (spec 4.3).
+    fn install_rack_clips(
+        &mut self,
+        scene_rack_clips: &[Vec<(u64, crate::project::RackClipId)>],
+        sample_assets: &mut std::collections::HashMap<PathBuf, ProjectSampleAsset>,
+        strict_samples: bool,
+        fallback_samples: &mut usize,
+    ) -> Result<(), String> {
+        let serialized: Vec<(u64, Vec<usize>, u64, Vec<crate::project::ProjectRackClip>)> = self
+            .groups
+            .iter()
+            .filter_map(|group| {
+                let rack = group.rack.as_ref()?;
+                (!rack.clips.is_empty()).then(|| {
+                    (
+                        group.id,
+                        group.members.clone(),
+                        rack.next_clip_id,
+                        rack.clips.clone(),
+                    )
+                })
+            })
+            .collect();
+        // The live `App` groups never carry clips: the bank in `ProjectScenes`
+        // is the single authority, and save rebuilds the serialized form.
+        for group in &mut self.groups {
+            if let Some(rack) = group.rack.as_mut() {
+                rack.clips = Vec::new();
+                rack.next_clip_id = 0;
+            }
+        }
+        let mut converted: Vec<(
+            u64,
+            Vec<usize>,
+            u64,
+            Vec<(
+                crate::project::RackClipId,
+                String,
+                Option<[f32; 3]>,
+                Vec<crate::graph::ProjectGraphOverrides>,
+                Vec<Option<crate::sequencer::TrackPatternData>>,
+            )>,
+        )> = Vec::new();
+        for (group_id, members, next_clip_id, clips) in serialized {
+            let mut built = Vec::with_capacity(clips.len());
+            for clip in clips {
+                let (snapshot, _, fallback_count) = self
+                    .project_pattern_into_snapshot_with_policy(
+                        clip.pattern,
+                        sample_assets,
+                        strict_samples,
+                    )?;
+                *fallback_samples += fallback_count;
+                let cells = members
+                    .iter()
+                    .enumerate()
+                    .map(|(position, track)| {
+                        clip.members
+                            .get(position)
+                            .copied()
+                            .unwrap_or(false)
+                            .then(|| snapshot.track_pattern_data(*track))
+                            .flatten()
+                    })
+                    .collect();
+                built.push((clip.id, clip.name, clip.color, clip.graph_overrides, cells));
+            }
+            converted.push((group_id, members, next_clip_id, built));
+        }
+        if converted.is_empty() {
+            return Ok(());
+        }
+        let pointers = scene_rack_clips.to_vec();
+        self.state.with_scenes_mut(|scenes| {
+            let mut banks = Vec::with_capacity(converted.len());
+            let mut member_tracks: Vec<usize> = Vec::new();
+            for (group_id, members, next_clip_id, clips) in converted {
+                let mut bank = crate::sequencer::RackClipBank {
+                    group_id,
+                    members: members.clone(),
+                    clips: Vec::with_capacity(clips.len()),
+                    next_clip_id: next_clip_id.max(1),
+                };
+                for (id, name, color, graph_overrides, cells) in clips {
+                    let cells = cells
+                        .into_iter()
+                        .enumerate()
+                        .map(|(position, data)| {
+                            let track = *members.get(position)?;
+                            let data = data?;
+                            scenes
+                                .track_pools
+                                .get_mut(track)
+                                .map(|pool: &mut crate::sequencer::TrackPatternPool| pool.insert(data))
+                        })
+                        .collect();
+                    bank.clips.push(crate::sequencer::RackClip {
+                        id,
+                        name,
+                        color,
+                        cells,
+                        graph_overrides,
+                    });
+                }
+                member_tracks.extend(members);
+                banks.push(bank);
+            }
+            scenes.install_rack_banks(banks);
+            for (scene_idx, entries) in pointers.into_iter().enumerate() {
+                for (group_id, clip) in entries {
+                    scenes.set_scene_rack_clip(scene_idx, group_id, Some(clip));
+                }
+            }
+            // A clip-bearing rack's members resolve through the clip, so the
+            // dense bank's duplicate of the same lanes must not linger as a
+            // second, divergent copy.
+            for scene in &mut scenes.scenes {
+                for track in &member_tracks {
+                    if let Some(cell) = scene.cells.get_mut(*track) {
+                        *cell = None;
+                    }
+                }
+            }
+            scenes.repair_rack_clips();
+            // The banks adopted while every pointer was still empty; now that
+            // the pointers are in, record that the live lanes hold the
+            // current scene's clips, or every member lane reads as stale and
+            // the first edits after load are dropped until a relaunch.
+            scenes.adopt_live_rack_clips();
+        });
+        self.publish_rack_choke_runtime();
+        Ok(())
+    }
+
     fn finish_project_load(
         &mut self,
         mut pending: super::PendingProjectLoad,
@@ -3966,6 +4405,7 @@ impl App {
             use_arrangement: _,
             record_armed,
             scene_cell_presence,
+            scene_rack_clips,
             take_pools,
             track_sounds,
             track_lane_rosters,
@@ -4208,6 +4648,18 @@ impl App {
         }
         self.reconcile_rack_group_bus_outputs();
         self.publish_rack_choke_runtime();
+        // Rack clips (rack-clips spec 3/4.3). Racks that carry no bank are
+        // legacy and install nothing, so pre-v13 projects are untouched.
+        {
+            let strict = pending.strict_samples;
+            let mut assets = std::mem::take(&mut pending.sample_assets);
+            let mut fallback = 0usize;
+            let result =
+                self.install_rack_clips(&scene_rack_clips, &mut assets, strict, &mut fallback);
+            pending.sample_assets = assets;
+            pending.fallback_samples += fallback;
+            result?;
+        }
         // Reconcile group routing: a group's members must reach its backing bus
         // in every scene. Output is stored per-scene, so older saves (or any
         // pre-fix grouping) can have members still pointing at Mix in some/all
@@ -4590,7 +5042,7 @@ impl App {
         self.project_pattern_into_snapshot_with_policy(pattern, sample_assets, false)
     }
 
-    fn project_pattern_into_snapshot_with_policy(
+    pub(super) fn project_pattern_into_snapshot_with_policy(
         &mut self,
         pattern: ProjectPattern,
         sample_assets: &mut std::collections::HashMap<PathBuf, ProjectSampleAsset>,
@@ -5996,6 +6448,7 @@ mod tests {
         effect_slots: Vec<project::ProjectEffectSlot>,
     ) -> ProjectFile {
         ProjectFile {
+            scene_rack_clips: Vec::new(),
             version: project::project_file_version(),
             name: "test".to_string(),
             bpm: 120,

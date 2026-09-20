@@ -41,12 +41,42 @@ impl WidgetDefinition for HStackWidget {
         if !prop_is_keyword(node, "width", "fill") {
             inner.max_width = f32::INFINITY;
         }
-        let child_sizes: Vec<(&Value, Size)> = children
+        let mut child_sizes: Vec<(&Value, Size)> = children
             .iter()
             .filter_map(|child| measure_child(child, inner).map(|size| (child, size)))
             .collect();
         let width = child_sizes.iter().map(|(_, size)| size.width).sum::<f32>()
             + gap * (child_sizes.len() as f32 - 1.0).max(0.0);
+        // A fill row hands its flex children their final width only in layout,
+        // so a width-dependent flex child (a `wrap`, a wrapped label) measured
+        // at the full row width here would under-report its height. Re-measure
+        // those children at the width layout will actually give them so the
+        // row grows to hold them.
+        if inner.max_width.is_finite() {
+            let flex_of = |child: &Value| get_prop_num(child, "flex").map(f64_to_f32).unwrap_or(0.0);
+            let total_flex: f32 = child_sizes.iter().map(|(child, _)| flex_of(child)).sum();
+            if total_flex > 0.0 {
+                let count = child_sizes.len();
+                let fixed_width: f32 = child_sizes
+                    .iter()
+                    .filter(|(child, _)| flex_of(child) <= 0.0)
+                    .map(|(_, size)| size.width)
+                    .sum();
+                let remaining =
+                    (inner.max_width - fixed_width - gap * (count as f32 - 1.0).max(0.0)).max(0.0);
+                for (child, size) in child_sizes.iter_mut() {
+                    let flex = flex_of(child);
+                    if flex <= 0.0 {
+                        continue;
+                    }
+                    let mut final_constraints = inner;
+                    final_constraints.max_width = remaining * (flex / total_flex);
+                    if let Some(final_size) = measure_child(child, final_constraints) {
+                        size.height = final_size.height;
+                    }
+                }
+            }
+        }
         // Exclude `:height :fill` children from the height max — they consume
         // the full incoming constraint, which would inflate the h-stack's
         // natural height to the parent's max and break sibling-aware layout.
@@ -127,6 +157,25 @@ impl WidgetDefinition for HStackWidget {
 
         let (start_offset, effective_gap) =
             distribute_justify(justify, justify_remaining, count, gap);
+
+        // Flex children were measured at zero width so they would not eat the
+        // row before distribution; now that their final width is known,
+        // measure them again at it for their height. Widths are unchanged.
+        let measured: Vec<(&Value, Size, f32)> = measured
+            .into_iter()
+            .map(|(child, size, flex)| {
+                if total_flex > 0.0 && flex > 0.0 && prop_is_keyword(node, "width", "fill") {
+                    let mut final_constraints = inner_constraints;
+                    final_constraints.max_width = size.width + flex_consumed * (flex / total_flex);
+                    let height = measure_child(child, final_constraints)
+                        .map(|final_size| final_size.height)
+                        .unwrap_or(size.height);
+                    (child, Size { width: size.width, height }, flex)
+                } else {
+                    (child, size, flex)
+                }
+            })
+            .collect();
 
         let baseline_offset = |child: &Value, size: &Size| -> f32 {
             super::widget_baseline_offset(child, *size, measure_ctx)
@@ -291,5 +340,110 @@ mod tests {
         assert!(
             ((rects[0].row + sizes[0].height) - (rects[1].row + sizes[1].height)).abs() > 0.0001
         );
+    }
+
+    fn fill_stack() -> Value {
+        Value::Map(HashMap::from([(
+            "width".to_string(),
+            Rc::new(RefCell::new(Value::Keyword("fill".to_string()))),
+        )]))
+    }
+
+    fn flex_widget(widget_type: &str, flex: f64) -> Value {
+        Value::Map(HashMap::from([
+            (
+                "type".to_string(),
+                Rc::new(RefCell::new(Value::Keyword(widget_type.to_string()))),
+            ),
+            ("flex".to_string(), Rc::new(RefCell::new(Value::Number(flex)))),
+        ]))
+    }
+
+    /// A width-dependent child (like `wrap`) that needs 10 cells of width per
+    /// row: its height is the number of rows it wraps into.
+    fn wrapping_measure(constraints: Constraints) -> Size {
+        let width = constraints.max_width;
+        if !width.is_finite() || width <= 0.0 {
+            return Size {
+                width: 0.0,
+                height: 1.0,
+            };
+        }
+        let rows = (30.0 / width).ceil().max(1.0);
+        Size {
+            width: width.min(30.0),
+            height: rows,
+        }
+    }
+
+    #[test]
+    fn fill_row_measures_flex_children_at_their_final_width() {
+        // 20-cell row, 4-cell fixed child, 1-cell gap: the flex child gets 15.
+        let children = vec![widget("label", 8.0), flex_widget("wrap", 1.0)];
+        let ctx = MeasureCtx {
+            text_measurer: Some(&BaselineMeasurer),
+            cell_w: 10.0,
+            cell_h: 20.0,
+            inherited_font_size: 14.0,
+        };
+        let mut measure = |child: &Value, constraints: Constraints| {
+            let widget_type = crate::layout::get_widget_type(child)?;
+            Some(if widget_type == "label" {
+                Size {
+                    width: 4.0,
+                    height: 1.0,
+                }
+            } else {
+                wrapping_measure(constraints)
+            })
+        };
+        let constraints = Constraints {
+            min_width: 0.0,
+            max_width: 20.0,
+            min_height: 0.0,
+            max_height: 100.0,
+            aspect: 1.0,
+        };
+        let size = HSTACK_WIDGET
+            .measure(&fill_stack(), &children, constraints, &ctx, &mut measure)
+            .unwrap();
+        // 30 cells of content at 15 cells wide wraps into two rows, not the
+        // single row the child reports when measured at the full 20 cells.
+        assert!((size.height - 2.0).abs() < 0.0001, "height {}", size.height);
+
+        let mut rects = Vec::new();
+        HSTACK_WIDGET.layout_children(
+            &fill_stack(),
+            Rect {
+                row: 0.0,
+                col: 0.0,
+                width: 20.0,
+                height: size.height,
+            },
+            &children,
+            1.0,
+            &ctx,
+            LayoutCtx::default(),
+            &mut measure,
+            &mut |child, rect, _| {
+                rects.push(rect);
+                LayoutNode {
+                    widget_id: rects.len() as u64,
+                    stable_widget_id: None,
+                    subtree_root_id: None,
+                    parent_subtree_root_id: None,
+                    stable_key: None,
+                    widget_type: crate::layout::get_widget_type(child).unwrap(),
+                    rect,
+                    props: HashMap::new(),
+                    children: Vec::new(),
+                    focusable: false,
+                    animation: Default::default(),
+                }
+            },
+        );
+        assert_eq!(rects.len(), 2);
+        assert!((rects[1].width - 15.0).abs() < 0.0001, "width {}", rects[1].width);
+        assert!((rects[1].height - 2.0).abs() < 0.0001, "height {}", rects[1].height);
     }
 }

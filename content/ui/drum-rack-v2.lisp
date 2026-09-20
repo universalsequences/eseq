@@ -61,7 +61,19 @@
         default-pad-page
         pad-map-row-count
         pad-map-row-base
-        pad-map-row-on-page?)
+        pad-map-row-on-page?
+        clip-bank
+        clips
+        active-clip
+        scene-clips
+        scene-plays-clip?
+        has-clips?
+        launch-clip
+        silence-clips
+        save-clip-as
+        delete-clip
+        rename-clip
+        convert-to-clips)
 
 (def contains? (xs v)
   (> (len (filter (lambda (x) (= x v)) xs)) 0))
@@ -477,3 +489,67 @@
   (let ((base (pad-map-row-base row))
       (page-base (pad-page-base page)))
     (and (>= base page-base) (< base (+ page-base 16)))))
+
+;; ── Rack clips (docs/rack-clips-and-break-kits-spec.md §2-§4, §6) ────────
+;; A rack carries its own scene axis: a bank of clips plus one pointer per
+;; project scene. The host publishes the bank as SEQ.rack-clips; a rack with no
+;; entry there is a LEGACY rack (§4.3) whose members still live in the project
+;; scenes, which is why "Convert to clips" only shows up for those.
+
+(def clip-bank (gid)
+  (let ((hits (filter (lambda (bank) (= (get bank :group-id) gid))
+                (or SEQ.rack-clips (list)))))
+    (if (> (len hits) 0) (nth hits 0) nil)))
+
+(def clips (gid)
+  (let ((bank (clip-bank gid)))
+    (if bank (get bank :clips) (list))))
+
+;; Clip id the CURRENT scene points at, or -1 for silence.
+(def active-clip (gid)
+  (let ((bank (clip-bank gid)))
+    (if bank (get bank :active) -1)))
+
+(def has-clips? (gid)
+  (> (len (clips gid)) 0))
+
+;; Clip id per project scene, -1 where the rack is silent. A LEGACY rack has no
+;; bank and answers an empty list, which is why the kit export checklist falls
+;; back to every scene for one (the export drops the scenes it finds empty).
+(def scene-clips (gid)
+  (let ((bank (clip-bank gid)))
+    (if bank (or (get bank :scene-clips) (list)) (list))))
+
+(def scene-plays-clip? (gid scene-idx)
+  (let ((pointers (scene-clips gid)))
+    (if (= (len pointers) 0)
+      true
+      (if (< scene-idx (len pointers))
+        (>= (nth pointers scene-idx) 0)
+        false))))
+
+;; A clip launch is a scene edit plus a relaunch of the current scene, so it
+;; rides the transport's scene-launch quantize exactly as a scene does (§4.4).
+(def launch-clip (gid clip-id)
+  (host-command "launch-rack-clip"
+    (dict :group-id gid
+          :clip-id clip-id
+          :quantize (or SEQ.scene-launch-quantize "off"))))
+
+(def silence-clips (gid)
+  (host-command "launch-rack-clip"
+    (dict :group-id gid
+          :clip-id 0
+          :quantize (or SEQ.scene-launch-quantize "off"))))
+
+(def save-clip-as (gid name)
+  (host-command "save-rack-clip-as" (dict :group-id gid :name name)))
+
+(def delete-clip (gid clip-id)
+  (host-command "delete-rack-clip" (dict :group-id gid :clip-id clip-id)))
+
+(def rename-clip (gid clip-id name)
+  (host-command "rename-rack-clip" (dict :group-id gid :clip-id clip-id :name name)))
+
+(def convert-to-clips (gid)
+  (host-command "convert-rack-to-clips" (dict :group-id gid)))

@@ -2613,6 +2613,32 @@ mod solo_binding_tests;
                         ("path", Value::String("sounds/wide-plate.sound".to_string())),
                     ])]),
                 ),
+                // The kit save panel's scene checklist (rack-clips spec §7.2)
+                // reads the scene names and the rack's per-scene clip pointers.
+                (
+                    "scene-names",
+                    test_list(vec![
+                        Value::String("Intro".to_string()),
+                        Value::String("Verse".to_string()),
+                        Value::String("Chorus".to_string()),
+                    ]),
+                ),
+                (
+                    "rack-clips",
+                    test_list(vec![map_value([
+                        ("group-id", Value::Number(8.0)),
+                        ("active", Value::Number(-1.0)),
+                        (
+                            "scene-clips",
+                            test_list(vec![
+                                Value::Number(-1.0),
+                                Value::Number(4.0),
+                                Value::Number(7.0),
+                            ]),
+                        ),
+                        ("clips", test_list(vec![])),
+                    ])]),
+                ),
                 (
                     "kit-presets",
                     test_list(vec![map_value([
@@ -4196,6 +4222,71 @@ mod solo_binding_tests;
             "package provenance chip should have a finite visible rect: {:?}; rendered:\n{rendered}",
             package.rect
         );
+    }
+
+    /// "Export as kit…" (rack-clips spec §7.2): the kit save panel carries a
+    /// scene checklist, defaulted to the scenes the rack actually plays, and
+    /// the save sends exactly the ticked scenes, in scene order.
+    #[test]
+    fn metal_seq_kit_save_panel_checklist_defaults_to_the_scenes_a_rack_plays() {
+        let mut editor = browser_editor_on_instrument_tab();
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.browser/enter-kit-save 8 \"Break\")")
+            .expect("enter kit save mode");
+        // Scene 0 has no clip for rack 8, scenes 1 and 2 do.
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("eseq.browser/kit-save-scenes")
+                .expect("selection"),
+            Some(test_list(vec![Value::Number(1.0), Value::Number(2.0)])),
+        );
+
+        editor.refresh_runtime_side_effects();
+        let id = browser_id(&editor);
+        editor.set_active_buffer(id);
+        editor.set_layout_viewport(72, 40);
+        let layout = editor.widget_layout().expect("kit save layout");
+        assert_finite_layout_tree(&layout);
+        let rendered = render_layout_cells(&layout, 72, 40);
+        for name in ["Intro", "Verse", "Chorus"] {
+            assert!(
+                rendered.contains(name),
+                "the checklist should list every scene; rendered:\n{rendered}"
+            );
+        }
+
+        // Unticking scene 2 and re-ticking scene 0 keeps the selection in
+        // scene order, not click order.
+        editor
+            .runtime_mut()
+            .eval_str("(do (eseq.browser/kit-toggle-scene 2) (eseq.browser/kit-toggle-scene 0))")
+            .expect("toggle scenes");
+        let _ = editor.drain_host_commands();
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.browser/save-kit)")
+            .expect("save the kit");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "save-rack-as-kit");
+                let Value::Map(payload) = payload else {
+                    panic!("save-rack-as-kit payload should be a dict: {payload:?}");
+                };
+                assert_eq!(
+                    payload.get("scenes").map(|value| value.borrow().clone()),
+                    Some(test_list(vec![Value::Number(0.0), Value::Number(1.0)])),
+                );
+                assert_eq!(
+                    payload.get("group-id").map(|value| value.borrow().clone()),
+                    Some(Value::Number(8.0)),
+                );
+            }
+            other => panic!("unexpected host command: {other:?}"),
+        }
     }
 
     #[test]
@@ -19614,6 +19705,44 @@ mod solo_binding_tests;
         );
     }
 
+    /// The file dialogs are mounted by the step-panel buffers only. With a
+    /// script sequencer tab in front the main tile shows the script's buffer,
+    /// so opening Save there used to set the modal open with nothing to
+    /// render it. The opener now flips the step panel back to the Seq tab.
+    #[test]
+    fn metal_seq_save_dialog_opens_over_a_script_sequencer_tab() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (effect-buffer "*16x16*" (label "sixteen"))
+                (eseq.seq-step-tabs/seq-register-script-step-sequencer-tab
+                  "16x16" "*16x16*" "neural-16-demo" "")
+                (eseq.seq-step-tabs/seq-select-main-step-tab-by-index 2)
+                "#,
+            )
+            .expect("register and select script sequencer tab");
+        editor.refresh_runtime_side_effects();
+        assert_eq!(editor.active_buffer().name, "*16x16*");
+
+        crate::host_commands::activate_dialog_tile(&mut editor);
+        assert_eq!(editor.active_buffer().name, "*sequencer*", "the Seq tab is in front again");
+
+        editor
+            .runtime_mut()
+            .eval_str(r#"(eseq.file-dialogs/open-save "Save project" "" "")"#)
+            .unwrap();
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        editor.set_layout_viewport(160, 60);
+        let layout = editor.widget_layout().unwrap();
+        let name = find_layout_node_by_stable_key_suffix(&layout, "/project-save-name")
+            .expect("the save modal renders in the active tile");
+        assert_finite_nonzero_rect(name, "project name input");
+        editor.runtime_mut().eval_str("(eseq.file-dialogs/close-save)").unwrap();
+    }
+
     #[test]
     fn metal_seq_delete_script_sequencer_removes_tab_and_scratch_load() {
         let mut editor = full_grid_editor_for_scroll_tests();
@@ -32545,6 +32674,133 @@ mod solo_binding_tests;
         ));
     }
 
+    /// A rack with a clip bank shows the clip run in the sequencer row and the
+    /// mixer strip, its menu swaps "Convert to clips" for the per-clip actions,
+    /// and clicking a cell launches quantized like a scene (rack-clips spec §6).
+    #[test]
+    fn metal_seq_rack_clip_run_renders_launches_and_swaps_the_rack_menu() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let rack = map_value([
+            ("id", Value::Number(8.0)),
+            ("rack", Value::Bool(true)),
+            ("name", Value::String("Break".into())),
+            ("collapsed", Value::Bool(true)),
+            ("members", test_list(vec![Value::Number(0.0)])),
+            ("bus-id", Value::Number(1.0)),
+            ("anchor", Value::Number(0.0)),
+            ("rack-members", test_list(vec![])),
+            ("parent", Value::Number(-1.0)),
+            ("pads", test_list(vec![])),
+            ("color", test_list(vec![Value::Number(0.4), Value::Number(0.4), Value::Number(0.4)])),
+        ]);
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "groups", test_list(vec![rack]));
+        let clip = |id: f64, name: &str| {
+            map_value([
+                ("id", Value::Number(id)),
+                ("name", Value::String(name.into())),
+            ])
+        };
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "rack-clips",
+            test_list(vec![map_value([
+                ("group-id", Value::Number(8.0)),
+                ("active", Value::Number(2.0)),
+                ("clips", test_list(vec![clip(1.0, "Intro"), clip(2.0, "Break")])),
+            ])]),
+        );
+        editor.runtime_mut().run_reactive_cycle();
+
+        // The bank reads through, including which clip the current scene plays.
+        assert_eq!(
+            editor.runtime_mut().eval_str("(len (eseq.drum-rack-v2/clips 8))").unwrap(),
+            Some(Value::Number(2.0)),
+        );
+        assert_eq!(
+            editor.runtime_mut().eval_str("(eseq.drum-rack-v2/active-clip 8)").unwrap(),
+            Some(Value::Number(2.0)),
+        );
+        assert_eq!(
+            editor.runtime_mut().eval_str("(eseq.drum-rack-v2/has-clips? 8)").unwrap(),
+            Some(Value::Bool(true)),
+        );
+        // Both runs build (the collapsed sequencer row and the mixer strip).
+        assert!(
+            editor.runtime_mut().eval_str("(eseq.sequencer/rack-clip-grid 0 (eseq.drum-rack-v2/color 0))").unwrap().is_some(),
+            "the collapsed rack row renders its clip grid",
+        );
+        assert!(
+            editor.runtime_mut().eval_str("(eseq.mixer/rack-clip-column 8 0)").unwrap().is_some(),
+            "the collapsed mixer strip renders its clip run",
+        );
+
+        // Clicking a cell is a quantized clip launch.
+        editor.drain_host_commands();
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.drum-rack-v2/launch-clip 8 1)")
+            .expect("launch clip");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "launch-rack-clip");
+                let Value::Map(payload) = payload else {
+                    panic!("launch payload should be a dict: {payload:?}");
+                };
+                assert_eq!(
+                    payload.get("group-id").map(|value| value.borrow().clone()),
+                    Some(Value::Number(8.0)),
+                );
+                assert_eq!(
+                    payload.get("clip-id").map(|value| value.borrow().clone()),
+                    Some(Value::Number(1.0)),
+                );
+                assert!(payload.contains_key("quantize"), "clip launch rides scene quantize");
+            }
+            command => panic!("expected a launch-rack-clip command, got {command:?}"),
+        }
+
+        // With a bank, the menu offers the per-clip actions instead of the
+        // legacy conversion.
+        editor
+            .runtime_mut()
+            .eval_str("(set! eseq.mixer/track-menu-group-id 8)")
+            .expect("target the rack");
+        let Some(Value::List(actions)) = editor
+            .runtime_mut()
+            .eval_str("(eseq.mixer/track-context-menu-actions)")
+            .expect("menu actions")
+        else {
+            panic!("menu actions should be a list");
+        };
+        let ids: Vec<String> = actions
+            .into_iter()
+            .map(|action| {
+                let Value::Map(action) = action.borrow().clone() else {
+                    panic!("menu action should be a map");
+                };
+                let Value::Keyword(id) = action.get("id").expect("id").borrow().clone() else {
+                    panic!("menu action id should be a keyword");
+                };
+                id
+            })
+            .collect();
+        assert_eq!(
+            ids,
+            vec![
+                "rename",
+                "save-rack-clip",
+                // Deleting a clip is the row's [-] button, not a menu entry per clip.
+                // Break kits (spec §7.2) enter through the rack menu too.
+                "export-kit",
+                "ungroup",
+            ],
+        );
+    }
+
     #[test]
     fn metal_seq_mixer_group_context_menu_actions_distinguish_plain_groups_and_racks() {
         let mut editor = full_grid_editor_for_scroll_tests();
@@ -32591,8 +32847,10 @@ mod solo_binding_tests;
             vec!["rename", "convert-drum-rack", "ungroup"],
         );
         assert_eq!(
+            // A rack with no clip bank is a LEGACY rack, so it is offered the
+            // one-shot conversion (rack-clips spec §6.3).
             menu_action_ids(&mut editor, 8.0),
-            vec!["rename", "ungroup"],
+            vec!["rename", "convert-to-clips", "export-kit", "ungroup"],
         );
 
         editor.drain_host_commands();
@@ -54491,6 +54749,8 @@ mod solo_binding_tests;
             members: vec![1, 2],
             bus_id: 2,
             rack: Some(sequencer::project::ProjectRackConfig {
+                clips: Vec::new(),
+                next_clip_id: 0,
                 sequencers: Vec::new(),
                 pads: vec![
                     sequencer::project::ProjectRackPad {

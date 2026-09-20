@@ -6,6 +6,7 @@ pub(crate) use drum_rack_v2::evaluate_rack_sequencer_source;
 mod effects;
 pub(crate) mod export;
 mod file_menu;
+pub(crate) use file_menu::activate_dialog_tile;
 mod menu_actions;
 mod instrument_authoring;
 mod instrument_params;
@@ -752,6 +753,8 @@ mod tests {
             members: vec![0],
             bus_id: 2,
             rack: Some(sequencer::project::ProjectRackConfig {
+                clips: Vec::new(),
+                next_clip_id: 0,
                 sequencers: Vec::new(),
                 pads: vec![sequencer::project::ProjectRackPad {
                     pad_note: 36,

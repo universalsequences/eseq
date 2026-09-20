@@ -2802,6 +2802,8 @@ mod live_keyboard_tests {
             members: vec![1, 2],
             bus_id: 2,
             rack: Some(sequencer::project::ProjectRackConfig {
+                clips: Vec::new(),
+                next_clip_id: 0,
                 sequencers: Vec::new(),
                 pads: vec![
                     sequencer::project::ProjectRackPad {
