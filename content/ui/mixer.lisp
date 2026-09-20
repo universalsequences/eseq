@@ -161,15 +161,9 @@
         (dict :id :rename :label "Rename"))
       ;; Rack clips (docs/rack-clips-and-break-kits-spec.md §6.3). A LEGACY
       ;; rack (no bank) is offered the one-shot conversion; a rack that already
-      ;; has clips is offered the per-clip actions instead.
+      ;; has clips saves a new one here and deletes from the row's [-] button.
       (if (eseq.drum-rack-v2/has-clips? gid)
-        (append
-          (list (dict :id :save-rack-clip :label "Save clip as..."))
-          (map (lambda (clip)
-                 (dict :id :delete-rack-clip
-                       :clip-id (get clip :id)
-                       :label (str "Delete clip " (get clip :name))))
-            (eseq.drum-rack-v2/clips gid)))
+        (list (dict :id :save-rack-clip :label "Save clip as..."))
         (list (dict :id :convert-to-clips :label "Convert to clips"))))
     (map
       (lambda (graph)
@@ -1258,12 +1252,7 @@
                   (do
                     (set! track-menu-open false)
                     (eseq.drum-rack-v2/save-clip-as track-menu-group-id ""))
-                  (if (= (get action :id) :delete-rack-clip)
-                    (do
-                      (set! track-menu-open false)
-                      (eseq.drum-rack-v2/delete-clip track-menu-group-id
-                        (get action :clip-id)))
-                    nil)))))))))))
+                  nil))))))))))
 
 (def track-context-menu ()
   (context-menu :is-open track-menu-open

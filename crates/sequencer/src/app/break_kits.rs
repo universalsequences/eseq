@@ -13,7 +13,11 @@ use super::*;
 use std::path::Path;
 
 use crate::graph::ProjectGraphOverrides;
-use crate::project::{ProjectPattern, ProjectRackClip, ProjectRackSequencer};
+use crate::project::{
+    ProjectKitModConnection, ProjectKitModDestination, ProjectPattern, ProjectRackClip,
+    ProjectRackSequencer,
+};
+use crate::sequencer::{BusId, ModConnection, ModDestination};
 use crate::sequencer::{PatternSnapshot, TrackPatternData};
 
 /// What the export of one rack's sequencers + chosen scenes produced, plus the
@@ -22,6 +26,26 @@ use crate::sequencer::{PatternSnapshot, TrackPatternData};
 pub(super) struct CapturedKitContent {
     pub sequencers: Vec<ProjectRackSequencer>,
     pub clips: Vec<ProjectRackClip>,
+    pub warnings: Vec<String>,
+}
+
+/// One pad a kit will carry: the rack pad's note and choke group plus the
+/// member track its Sound is captured from.
+pub(super) struct KitPadSource {
+    pub pad_note: i32,
+    pub choke_group: Option<u8>,
+    pub track: usize,
+    pub name: String,
+    /// A modulator member (§7.5): travels as its instrument slot, not a Sound.
+    pub modulator: bool,
+}
+
+/// The kit's pad space for one rack (see `App::kit_pad_roster`).
+pub(super) struct KitPadRoster {
+    pub pads: Vec<KitPadSource>,
+    /// member position -> position in `pads`; `None` for a member with no
+    /// pad or one a kit cannot carry.
+    pub member_to_pad: Vec<Option<usize>>,
     pub warnings: Vec<String>,
 }
 
@@ -69,23 +93,16 @@ impl App {
             self.convert_rack_to_clips_recorded(group_id)?;
         }
 
-        // member position -> pad position, and the pad count. A member with no
-        // pad cannot travel: a kit rebuilds members FROM pads.
-        let (member_to_pad, pad_count) = {
-            let group = self
-                .groups
-                .iter()
-                .find(|group| group.id == group_id)
-                .ok_or_else(|| format!("Track group {group_id} does not exist"))?;
-            let rack = group
-                .rack
-                .as_ref()
-                .ok_or_else(|| format!("Track group {group_id} is not a drum rack"))?;
-            let map: Vec<Option<usize>> = (0..group.members.len())
-                .map(|member| rack.pad_index_for_member(member))
-                .collect();
-            (map, rack.pads.len())
-        };
+        // member position -> kit pad position, and the kit pad count. A member
+        // with no pad cannot travel: a kit rebuilds members FROM pads. Members
+        // a kit cannot carry (modulator and empty tracks) are left out too, and
+        // reported, so the positional pad space here is the one
+        // `capture_rack_as_kit` writes.
+        // (The roster's own warnings are reported by `capture_rack_as_kit`,
+        // which reads the roster whether or not scenes were chosen.)
+        let roster = self.kit_pad_roster(group_id)?;
+        let member_to_pad = roster.member_to_pad;
+        let pad_count = roster.pads.len();
         if pad_count == 0 {
             return Err("A kit needs at least one pad with a sound on it".to_string());
         }
@@ -192,6 +209,163 @@ impl App {
             clips,
             warnings,
         })
+    }
+
+    /// The pads a kit can carry, in rack pad order: every pad whose member
+    /// track is an instrument (captured as a Sound) or a modulator (captured
+    /// as its instrument slot, §7.5). An empty member track has nothing to
+    /// carry, so it is left out and named in `warnings` instead of failing
+    /// the whole export. `member_to_pad` maps member position -> position in
+    /// `pads`, which is the pad space the kit's clips and cables are written
+    /// in.
+    pub(super) fn kit_pad_roster(&self, group_id: u64) -> Result<KitPadRoster, String> {
+        let group = self
+            .groups
+            .iter()
+            .find(|group| group.id == group_id)
+            .ok_or_else(|| format!("Track group {group_id} does not exist"))?;
+        let rack = group
+            .rack
+            .as_ref()
+            .ok_or_else(|| format!("Track group {group_id} is not a drum rack"))?;
+        let mut pads = Vec::with_capacity(rack.pads.len());
+        let mut member_to_pad = vec![None; group.members.len()];
+        let mut warnings = Vec::new();
+        for (pad_index, pad) in rack.pads.iter().enumerate() {
+            let Some(track) = group.members.get(pad.member).copied() else {
+                continue;
+            };
+            let name = self
+                .tracks
+                .get(track)
+                .cloned()
+                .ok_or_else(|| format!("Kit pad {} has no member track", pad.pad_note))?;
+            let modulator = match self.graph.track_instrument_types.get(track).copied() {
+                Some(InstrumentType::Modulator) => true,
+                Some(InstrumentType::Empty) | None => {
+                    warnings.push(format!("'{name}' is an empty track and was left out of the kit"));
+                    continue;
+                }
+                Some(_) => false,
+            };
+            member_to_pad[pad.member] = Some(pads.len());
+            pads.push(KitPadSource {
+                pad_note: pad.pad_note,
+                choke_group: rack.choke_group(pad_index),
+                track,
+                name,
+                modulator,
+            });
+        }
+        Ok(KitPadRoster { pads, member_to_pad, warnings })
+    }
+
+    /// The rack's internal modulation cables in the current scene, in pad
+    /// space (§7.5): a route whose source is a member pad and whose
+    /// destination is a member pad or the rack's own bus. Any other route
+    /// leaves the rack and is counted, not carried — a kit is self-contained.
+    pub(super) fn capture_kit_mod_connections(
+        &self,
+        group_id: u64,
+        member_to_pad: &[Option<usize>],
+    ) -> Result<(Vec<ProjectKitModConnection>, usize), String> {
+        let group = self
+            .groups
+            .iter()
+            .find(|group| group.id == group_id)
+            .ok_or_else(|| format!("Track group {group_id} does not exist"))?;
+        let track_to_pad = |track: usize| -> Option<usize> {
+            let member = group.members.iter().position(|member| *member == track)?;
+            member_to_pad.get(member).copied().flatten()
+        };
+        let mut carried = Vec::new();
+        let mut dropped = 0usize;
+        for connection in self.state.current_mod_connections() {
+            let Some(source_pad) = track_to_pad(connection.source_track) else {
+                // Not the rack's cable at all: sourced outside it.
+                continue;
+            };
+            let destination = match connection.destination {
+                ModDestination::Track(track) => track_to_pad(track).map(ProjectKitModDestination::Pad),
+                ModDestination::Bus(bus) if bus.0 == group.bus_id => {
+                    Some(ProjectKitModDestination::RackBus)
+                }
+                ModDestination::Bus(_) => None,
+            };
+            let Some(destination) = destination else {
+                dropped += 1;
+                continue;
+            };
+            let cable = ProjectKitModConnection {
+                source_pad,
+                destination,
+                dest_input: connection.dest_input,
+            };
+            if !carried.contains(&cable) {
+                carried.push(cable);
+            }
+        }
+        Ok((carried, dropped))
+    }
+
+    /// Install a kit's cables (§7.5) onto the rack just built: pad -> the
+    /// member track it became, RackBus -> the rack's bus, into EVERY scene,
+    /// since the kit carries one patch and the rack must sound the same
+    /// whichever scene launches one of its clips. Cables whose pad did not
+    /// load are skipped. Idempotent per scene.
+    pub(super) fn install_kit_mod_connections(
+        &mut self,
+        group_id: u64,
+        cables: &[ProjectKitModConnection],
+    ) -> Result<(), String> {
+        if cables.is_empty() {
+            return Ok(());
+        }
+        let group = self
+            .groups
+            .iter()
+            .find(|group| group.id == group_id)
+            .ok_or_else(|| format!("Track group {group_id} does not exist"))?;
+        let rack = group
+            .rack
+            .as_ref()
+            .ok_or_else(|| format!("Track group {group_id} is not a drum rack"))?;
+        let pad_to_track: Vec<Option<usize>> = rack
+            .pads
+            .iter()
+            .map(|pad| group.members.get(pad.member).copied())
+            .collect();
+        let bus = BusId(group.bus_id);
+        let resolved: Vec<ModConnection> = cables
+            .iter()
+            .filter_map(|cable| {
+                let source_track = pad_to_track.get(cable.source_pad).copied().flatten()?;
+                let destination = match cable.destination {
+                    ProjectKitModDestination::Pad(pad) => {
+                        ModDestination::Track(pad_to_track.get(pad).copied().flatten()?)
+                    }
+                    ProjectKitModDestination::RackBus => ModDestination::Bus(bus),
+                };
+                if destination == ModDestination::Track(source_track) {
+                    return None;
+                }
+                Some(ModConnection { source_track, destination, dest_input: cable.dest_input })
+            })
+            .collect();
+        if resolved.is_empty() {
+            return Ok(());
+        }
+        self.state.with_scenes_mut(|scenes| {
+            for scene in scenes.scenes.iter_mut() {
+                for connection in &resolved {
+                    if !scene.mod_connections.contains(connection) {
+                        scene.mod_connections.push(*connection);
+                    }
+                }
+            }
+        });
+        self.graph_controller().sync_current_pattern_mod_routes();
+        Ok(())
     }
 
     /// Register the kit's rack-owned sequencers on `group_id`.

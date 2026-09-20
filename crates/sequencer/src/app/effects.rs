@@ -1152,10 +1152,14 @@ impl App {
         self.state.pattern.midi_fx_slots[track][slot_idx].apply_descriptor(&desc, 0);
 
         self.state.save_current_track_midi_fx_snapshot(track);
-        // The track sound's chain layout must follow the append (track-sound
-        // spec §2.3), or the carrier drifts from the live chain.
-        self.state
-            .insert_midi_fx_slot_in_track_sound(track, slot_idx, desc.name.clone(), &desc);
+        // A track's MIDI-FX chain is one chain across every pattern of the
+        // track (scenes, rack clips, the track sound), exactly as the
+        // before-slot insert, move and delete paths already treat it; a
+        // pattern that should not run the effect bypasses it with the slot's
+        // enabled toggle. Appending only to the current lane left the user
+        // re-adding the effect scene by scene, and a save from another scene
+        // captured a device record the reopened chain could not match.
+        self.sync_other_pattern_midi_fx_insert(track, slot_idx, desc.name.clone(), &desc);
         self.device_registry
             .insert_midi_effect_identity(track_id, slot_idx, old_len)?;
 
@@ -7437,6 +7441,123 @@ mod tests {
     /// rack-owned sequencers, and importing one into a different project
     /// rebuilds all of it beside the existing tracks — silent, because every
     /// existing scene points at `None` until a clip is launched (spec 7.2-7.3).
+    /// A rack's modulators are part of its patch (§7.5): a modulator member
+    /// travels as a modulator pad with its settings, and the rack's internal
+    /// cables — modulator -> member input, modulator -> the rack bus's own
+    /// input — come back on load, in every scene. A cable leaving the rack
+    /// does not travel, and an empty member track is left out with a warning
+    /// rather than failing the export.
+    #[test]
+    fn a_kit_carries_its_modulators_and_internal_cables() {
+        use crate::sequencer::{BusId, ModConnection, ModDestination};
+        let graph = TestLiveGraph::new("kit-modulator-patch", 64, 44_100, 2);
+        let mut app = test_app_for_live_graph(&graph, 0);
+        let sample = std::path::Path::new("../../content/impulses/lexicon-300-rich-plate.wav");
+        let outsider = app.graph_controller().add_track(sample).expect("outsider");
+        let (group_id, rack_bus) = app
+            .create_drum_rack_recorded(Some("Patch".to_string()))
+            .expect("drum rack");
+        let kick = app.graph_controller().add_track(sample).expect("kick");
+        let lfo = app.graph_controller().add_modulator_track().expect("modulator");
+        let blank = app.graph_controller().add_empty_track().expect("empty");
+        for (note, track) in [(36, kick), (38, lfo), (40, blank)] {
+            app.assign_rack_pad_track_recorded(group_id, note, track).expect("pad");
+        }
+        app.tracks[kick] = "Kick".to_string();
+        app.tracks[lfo] = "LFO".to_string();
+        app.tracks[blank] = "Blank".to_string();
+        app.state.launch_scene(
+            0,
+            app.tracks.len(),
+            &app.graph.track_buffer_ids,
+            &app.graph.track_sample_rates,
+            &app.tracks,
+            &app.graph.track_instrument_types,
+        );
+        // A modulator setting that is not the default.
+        let param_idx = 0;
+        let default = app.effective_instrument_param_value(lfo, param_idx).expect("param");
+        let changed = if default > 0.5 { default - 0.25 } else { default + 0.25 };
+        crate::app::command::apply_command(
+            &mut app,
+            crate::app::command::AppCommand::SetInstrumentParam { track: lfo, param_idx, value: changed },
+        );
+        // Two internal cables and one leaving the rack.
+        app.graph_controller()
+            .set_mod_route_to_destination(lfo, ModDestination::Track(kick), 0)
+            .expect("lfo -> kick");
+        app.graph_controller()
+            .set_mod_route_to_destination(lfo, ModDestination::Bus(rack_bus), 1)
+            .expect("lfo -> rack bus");
+        app.graph_controller()
+            .set_mod_route_to_destination(lfo, ModDestination::Track(outsider), 2)
+            .expect("lfo -> outsider");
+
+        let name = format!("kit-modulator-patch-{}", std::process::id());
+        let (path, warnings) = app
+            .save_rack_as_kit(group_id, &name, true, &[])
+            .expect("save kit");
+        let kit = crate::project::load_kit_preset(&path).expect("kit parses");
+        assert!(
+            warnings.iter().any(|w| w.contains("'Blank'") && w.contains("empty")),
+            "the empty pad is reported: {warnings:?}"
+        );
+        assert!(
+            warnings.iter().any(|w| w.contains("1 modulation cable leaving the rack")),
+            "the outside cable is reported: {warnings:?}"
+        );
+        let pad_names: Vec<&str> = kit.pads.iter().map(|pad| pad.name.as_str()).collect();
+        assert_eq!(pad_names, vec!["Kick", "LFO"]);
+        assert!(kit.pads[0].sound.is_some() && kit.pads[0].modulator.is_none());
+        assert!(kit.pads[1].sound.is_none() && kit.pads[1].is_modulator());
+        assert_eq!(
+            kit.mod_connections,
+            vec![
+                crate::project::ProjectKitModConnection {
+                    source_pad: 1,
+                    destination: crate::project::ProjectKitModDestination::Pad(0),
+                    dest_input: 0,
+                },
+                crate::project::ProjectKitModConnection {
+                    source_pad: 1,
+                    destination: crate::project::ProjectKitModDestination::RackBus,
+                    dest_input: 1,
+                },
+            ]
+        );
+
+        // Load into a project that already has two scenes: the patch lands
+        // in both.
+        let graph2 = TestLiveGraph::new("kit-modulator-patch-load", 64, 44_100, 2);
+        let mut app2 = test_app_for_live_graph(&graph2, 0);
+        app2.state.with_scenes_mut(|scenes| {
+            scenes.new_scene();
+        });
+        let (gid2, failures) = app2.load_kit_as_rack(&path).expect("load kit");
+        let _ = std::fs::remove_file(&path);
+        assert!(failures.is_empty(), "clean load: {failures:?}");
+        let group = app2.groups.iter().find(|g| g.id == gid2).unwrap().clone();
+        assert_eq!(group.members.len(), 2);
+        let rack = group.rack.as_ref().unwrap();
+        let kick2 = group.members[rack.pads.iter().find(|p| p.pad_note == 36).unwrap().member];
+        let lfo2 = group.members[rack.pads.iter().find(|p| p.pad_note == 38).unwrap().member];
+        assert_eq!(app2.graph.track_instrument_types[lfo2], InstrumentType::Modulator);
+        assert_eq!(app2.tracks[lfo2], "LFO");
+        let restored = app2.effective_instrument_param_value(lfo2, param_idx).expect("param");
+        assert!((restored - changed).abs() < 1e-5, "modulator setting restored: {restored} vs {changed}");
+        let expected = vec![
+            ModConnection { source_track: lfo2, destination: ModDestination::Track(kick2), dest_input: 0 },
+            ModConnection { source_track: lfo2, destination: ModDestination::Bus(BusId(group.bus_id)), dest_input: 1 },
+        ];
+        app2.state.with_scenes(|scenes| {
+            assert_eq!(scenes.scenes.len(), 2);
+            for (idx, scene) in scenes.scenes.iter().enumerate() {
+                assert_eq!(scene.mod_connections, expected, "scene {idx} carries the patch");
+            }
+        });
+        assert_eq!(app2.graph.applied_mod_routes.len(), 2, "both cables reached the engine");
+    }
+
     #[test]
     fn a_break_kit_round_trips_a_clip_bank_and_its_rack_sequencers() {
         let graph = TestLiveGraph::new("break-kit-export-test", 64, 44_100, 2);
@@ -7918,6 +8039,7 @@ mod tests {
             choke_group: Some(3),
             name: "Hat".to_string(),
             sound: kit.pads[0].sound.clone(),
+            modulator: None,
         };
         kit.pads.retain(|pad| pad.pad_note == 36);
         kit.pads.push(new_pad);
@@ -9216,6 +9338,33 @@ mod tests {
             .expect("adding MIDI FX should not block on pattern_bank");
         assert_eq!(result.unwrap(), 0);
         assert_eq!(published_chain, vec!["arp".to_string()]);
+    }
+
+    #[test]
+    fn add_midi_fx_to_track_reaches_every_pattern_of_the_track() {
+        let mut app = test_app_with_track();
+        let other = app.state.with_scenes_mut(|scenes| {
+            let current = scenes.effective_pattern_id(0).expect("live lane resolves");
+            let data = scenes.track_pools[0].get(current).expect("current pattern");
+            scenes.track_pools[0].insert(data)
+        });
+
+        let slot = app.add_midi_fx_to_track_sync(0, "arp").unwrap();
+
+        let (other_chain, other_slot_params) = app.state.with_scenes(|scenes| {
+            let data = scenes.track_pools[0].get(other).expect("other pattern");
+            (
+                data.track_params.midi_fx_chain.clone(),
+                data.midi_fx_slots[slot].num_params,
+            )
+        });
+        assert_eq!(other_chain, vec!["arp".to_string()]);
+        assert!(other_slot_params > 0, "the other pattern's slot carries the descriptor layout");
+        let track_sound_chain = app.state.with_scenes(|scenes| {
+            let id = scenes.track_sound_pattern(0).expect("track sound");
+            scenes.track_pools[0].get(id).expect("track sound pattern").track_params.midi_fx_chain.clone()
+        });
+        assert_eq!(track_sound_chain, vec!["arp".to_string()], "track sound gets exactly one copy");
     }
 
     #[test]

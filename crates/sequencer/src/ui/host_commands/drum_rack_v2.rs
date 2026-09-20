@@ -377,8 +377,13 @@ pub(super) fn handle(
             if let Some(group_id) = selected_rack {
                 match app.load_kit_onto_rack(group_id, Path::new(&path)) {
                     Ok(name) => {
-                        let failures = evaluate_rack_sequencers(editor, app, group_id);
+                        // Publish the rebuilt rack to the UI runtime BEFORE
+                        // running its scripts: a rack-owned script reads
+                        // `SEQ.groups` (its tab wears the rack's name) and
+                        // must see the members it now has.
                         sync_after_rack_structure_change(app, editor, ctx, None);
+                        let failures = evaluate_rack_sequencers(editor, app, group_id);
+                        refresh_after_rack_scripts(editor);
                         let mut status = format!("Auditioned kit '{name}'");
                         if !failures.is_empty() {
                             status = format!("{status} ({})", failures.join("; "));
@@ -399,8 +404,16 @@ pub(super) fn handle(
                         // rack is the host half of the import (§7.3). A module
                         // that is not installed is reported and its entry stays
                         // recorded, so a later re-import brings it back.
-                        failures.extend(evaluate_rack_sequencers(editor, app, group_id));
+                        //
+                        // The new rack is published to the UI runtime FIRST:
+                        // a rack-owned script reads `SEQ.groups` on evaluation
+                        // (its tab is named after the rack), and a group the
+                        // runtime has not heard of yet fails that eval, which
+                        // rolls the script's panel and tab back while the
+                        // def-sequencer it already published stays behind.
                         sync_after_rack_structure_change(app, editor, ctx, focus);
+                        failures.extend(evaluate_rack_sequencers(editor, app, group_id));
+                        refresh_after_rack_scripts(editor);
                         let status = if failures.is_empty() {
                             format!("Loaded kit '{name}'")
                         } else {
@@ -562,6 +575,14 @@ fn evaluate_rack_sequencers(
         }
     }
     failures
+}
+
+/// Settle the UI runtime after rack scripts were evaluated as a follow-up to a
+/// topology sync: the panels and tabs those scripts registered need a
+/// reactive cycle and a side-effect flush to appear.
+fn refresh_after_rack_scripts(editor: &mut Editor) {
+    editor.runtime_mut().run_reactive_cycle();
+    editor.refresh_runtime_side_effects();
 }
 
 pub(super) fn group_name(app: &app::App, group_id: u64) -> Option<String> {

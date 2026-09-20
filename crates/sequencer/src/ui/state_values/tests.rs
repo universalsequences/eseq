@@ -19688,6 +19688,44 @@ mod mixer_hit_tests;
         );
     }
 
+    /// The file dialogs are mounted by the step-panel buffers only. With a
+    /// script sequencer tab in front the main tile shows the script's buffer,
+    /// so opening Save there used to set the modal open with nothing to
+    /// render it. The opener now flips the step panel back to the Seq tab.
+    #[test]
+    fn metal_seq_save_dialog_opens_over_a_script_sequencer_tab() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (effect-buffer "*16x16*" (label "sixteen"))
+                (eseq.seq-step-tabs/seq-register-script-step-sequencer-tab
+                  "16x16" "*16x16*" "neural-16-demo" "")
+                (eseq.seq-step-tabs/seq-select-main-step-tab-by-index 2)
+                "#,
+            )
+            .expect("register and select script sequencer tab");
+        editor.refresh_runtime_side_effects();
+        assert_eq!(editor.active_buffer().name, "*16x16*");
+
+        crate::host_commands::activate_dialog_tile(&mut editor);
+        assert_eq!(editor.active_buffer().name, "*sequencer*", "the Seq tab is in front again");
+
+        editor
+            .runtime_mut()
+            .eval_str(r#"(eseq.file-dialogs/open-save "Save project" "" "")"#)
+            .unwrap();
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        editor.set_layout_viewport(160, 60);
+        let layout = editor.widget_layout().unwrap();
+        let name = find_layout_node_by_stable_key_suffix(&layout, "/project-save-name")
+            .expect("the save modal renders in the active tile");
+        assert_finite_nonzero_rect(name, "project name input");
+        editor.runtime_mut().eval_str("(eseq.file-dialogs/close-save)").unwrap();
+    }
+
     #[test]
     fn metal_seq_delete_script_sequencer_removes_tab_and_scratch_load() {
         let mut editor = full_grid_editor_for_scroll_tests();
@@ -32673,8 +32711,8 @@ mod mixer_hit_tests;
         );
         // Both runs build (the collapsed sequencer row and the mixer strip).
         assert!(
-            editor.runtime_mut().eval_str("(eseq.sequencer/rack-clip-run 0)").unwrap().is_some(),
-            "the collapsed rack row renders its clip run",
+            editor.runtime_mut().eval_str("(eseq.sequencer/rack-clip-grid 0 (eseq.drum-rack-v2/color 0))").unwrap().is_some(),
+            "the collapsed rack row renders its clip grid",
         );
         assert!(
             editor.runtime_mut().eval_str("(eseq.mixer/rack-clip-column 8 0)").unwrap().is_some(),
@@ -32738,8 +32776,7 @@ mod mixer_hit_tests;
             vec![
                 "rename",
                 "save-rack-clip",
-                "delete-rack-clip",
-                "delete-rack-clip",
+                // Deleting a clip is the row's [-] button, not a menu entry per clip.
                 // Break kits (spec §7.2) enter through the rack menu too.
                 "export-kit",
                 "ungroup",

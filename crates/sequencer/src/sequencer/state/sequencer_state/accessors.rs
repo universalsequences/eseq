@@ -1928,12 +1928,14 @@ impl SequencerState {
         if track < 64 && stale_mask >> track & 1 == 1 && override_id.is_none() {
             return false;
         }
-        let Some(id) = override_id.or_else(|| {
-            scenes
-                .scenes
-                .get(scene_idx)
-                .and_then(|scene| scene.cells.get(track).copied().flatten())
-        }) else {
+        // A rack member's lane resolves through the rack's active clip
+        // (rack-clips spec §4.2), never the scene cell, which is cleared for
+        // members; reading the scene cell here dropped every per-lane device
+        // save on a member into nothing but the track sound.
+        if scenes.rack_member_lane_is_stale(scene_idx, track) && override_id.is_none() {
+            return false;
+        }
+        let Some(id) = override_id.or_else(|| scenes.composed_scene_cell(scene_idx, track)) else {
             return false;
         };
         scenes

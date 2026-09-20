@@ -115,7 +115,8 @@ pub struct ProjectKitPreset {
     /// PROJECT file generation because a kit's clip patterns are
     /// `ProjectPattern`s and parse by that generation, while this counts the
     /// kit's own payload. 1 = pads + color + optional bus chain; 2 = also
-    /// `sequencers` and `clips`. Absent (pre-feature `.kit` files) reads as 1.
+    /// `sequencers` and `clips`; 3 = also modulator pads and `mod_connections`.
+    /// Absent (pre-feature `.kit` files) reads as 1.
     #[serde(default = "default_kit_version")]
     pub kit_version: u32,
     /// The graph sequencers the rack owned, recorded exactly as
@@ -125,6 +126,12 @@ pub struct ProjectKitPreset {
     /// importer re-derives them for the rack it builds (§7.3).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sequencers: Vec<ProjectRackSequencer>,
+    /// The rack's internal modulation cables (§7.5): every current-scene
+    /// route from a modulator pad to a member pad or to the rack bus, in pad
+    /// space. Cables are scene state in a project; a kit carries ONE set, the
+    /// patch, and import installs it into every scene.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mod_connections: Vec<ProjectKitModConnection>,
     /// The kit's clip bank, one clip per exported scene, named after it.
     ///
     /// A kit clip is a [`ProjectRackClip`] in **pad space**: `members` and the
@@ -141,7 +148,9 @@ fn default_kit_version() -> u32 {
 }
 
 /// The break-kit payload generation this build writes (§7.1).
-pub const KIT_PRESET_VERSION: u32 = 2;
+/// 1 = pads + color + optional bus chain; 2 = also sequencers and clips;
+/// 3 = also modulator pads and the rack's internal mod cables (§7.5).
+pub const KIT_PRESET_VERSION: u32 = 3;
 
 /// A rack bus insert chain as a kit carries it: one entry per occupied slot in
 /// chain order. Effect identities are not carried (a kit is not a project
@@ -161,8 +170,8 @@ pub struct ProjectKitBusEffect {
     pub slot: ProjectEffectSlot,
 }
 
-/// One kit pad: where it sits on the pad keyboard, what it chokes, and the
-/// Sound that rebuilds its member track.
+/// One kit pad: where it sits on the pad keyboard, what it chokes, and what
+/// rebuilds its member track — a Sound, or (kit v3) a modulator's settings.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ProjectKitPad {
     pub pad_note: i32,
@@ -172,7 +181,41 @@ pub struct ProjectKitPad {
     #[serde(default)]
     pub name: String,
     /// The member track captured exactly as the Sounds browser captures one.
-    pub sound: ProjectSoundPreset,
+    /// Always present for an instrument pad; `None` for a modulator pad.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sound: Option<ProjectSoundPreset>,
+    /// A modulator member (`docs/rack-clips-and-break-kits-spec.md` §7.5):
+    /// its instrument slot as the current scene had it at save time, so a
+    /// kit with no clips still brings the modulator back configured. Exactly
+    /// one of `sound` / `modulator` is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modulator: Option<ProjectEffectSlot>,
+}
+
+impl ProjectKitPad {
+    pub fn is_modulator(&self) -> bool {
+        self.modulator.is_some()
+    }
+}
+
+/// Where a kit modulation cable lands (§7.5), in PAD space: another kit pad's
+/// external modulation input, or the rack's own bus. Cables to anything
+/// outside the rack do not travel — a kit is a self-contained patch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "pad")]
+pub enum ProjectKitModDestination {
+    Pad(usize),
+    RackBus,
+}
+
+/// One modulation cable inside a kit: `source_pad` is a modulator pad, and
+/// `dest_input` the external mod input (0..EXT_MOD_INPUT_COUNT) it feeds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectKitModConnection {
+    pub source_pad: usize,
+    pub destination: ProjectKitModDestination,
+    #[serde(default)]
+    pub dest_input: usize,
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -809,6 +852,25 @@ impl ProjectFile {
                         .map(|chain| chain.instances.iter()
                             .map(|instance| Some(instance.source.project_name()))
                             .collect())
+                        .unwrap_or_default();
+                }
+            }
+        }
+        // Rack clip patterns (rack-clips spec 3) carry member lanes in the same
+        // wire form as the pattern bank, and `midi_fx_chain` is not serialized
+        // there either. A clip-bearing rack's members launch THROUGH the clip
+        // cell, so a chain rebuilt only into `patterns` never reaches the live
+        // lane: the loader then sees a record no chain matches and drops the
+        // member's MIDI effects (the graph-sequenced kit pad that lost its
+        // transpose on every reopen).
+        for group in &mut self.groups {
+            let Some(rack) = group.rack.as_mut() else { continue };
+            for clip in &mut rack.clips {
+                for (track, params) in clip.pattern.track_params.iter_mut().enumerate() {
+                    let Some(project_track) = self.tracks.get(track) else { continue };
+                    params.midi_fx_chain = self.device_instances.midi_effects.iter()
+                        .find(|chain| chain.track_id == project_track.id.0)
+                        .map(|chain| chain.instances.iter().map(|instance| instance.name.clone()).collect())
                         .unwrap_or_default();
                 }
             }
@@ -6553,13 +6615,15 @@ mod tests {
                     pad_note: 36,
                     choke_group: None,
                     name: "Kick".to_string(),
-                    sound: pad_sound("Kick", "samples/kick.wav"),
+                    sound: Some(pad_sound("Kick", "samples/kick.wav")),
+                    modulator: None,
                 },
                 ProjectKitPad {
                     pad_note: 42,
                     choke_group: Some(1),
                     name: "Hat".to_string(),
-                    sound: pad_sound("Hat", "samples/hat.wav"),
+                    sound: Some(pad_sound("Hat", "samples/hat.wav")),
+                    modulator: None,
                 },
             ],
             bus_chain: Some(ProjectKitBusChain {
@@ -6569,6 +6633,11 @@ mod tests {
                 }],
             }),
             kit_version: KIT_PRESET_VERSION,
+            mod_connections: vec![ProjectKitModConnection {
+                source_pad: 1,
+                destination: ProjectKitModDestination::RackBus,
+                dest_input: 2,
+            }],
             // A break kit (spec 7.1): the rack's own sequencers, and one clip
             // per exported scene in PAD space.
             sequencers: vec![ProjectRackSequencer {
@@ -6609,6 +6678,8 @@ mod tests {
         .expect("a kit saved before the bus chain travelled still loads");
         assert!(legacy.bus_chain.is_none(), "missing bus_chain leaves the target bus alone");
         assert_eq!(restored.kit_version, KIT_PRESET_VERSION);
+        assert_eq!(restored.mod_connections.len(), 1);
+        assert_eq!(restored.mod_connections[0].destination, ProjectKitModDestination::RackBus);
         assert_eq!(restored.sequencers.len(), 1);
         assert_eq!(restored.sequencers[0].source, "(import demos.break)");
         assert_eq!(restored.clips.len(), 1);
@@ -6618,7 +6689,8 @@ mod tests {
         // sequencers, no clips, and every other field unchanged.
         let pre_feature: ProjectKitPreset = serde_json::from_str(
             &json
-                .replace(",\"kit_version\":2", "")
+                .replace(",\"kit_version\":3", "")
+                .replace(",\"mod_connections\":[", ",\"mod_connections_unused\":[")
                 .replace(",\"sequencers\":[", ",\"sequencers_unused\":[")
                 .replace(",\"clips\":[", ",\"clips_unused\":["),
         )
@@ -6627,7 +6699,7 @@ mod tests {
         assert!(pre_feature.sequencers.is_empty());
         assert!(pre_feature.clips.is_empty());
         assert_eq!(pre_feature.pads.len(), 2);
-        match &restored.pads[1].sound.track.kind {
+        match &restored.pads[1].sound.as_ref().expect("instrument pad").track.kind {
             ProjectTrackKind::Rack { slots, .. } => {
                 assert_eq!(slots[0].sample_path.as_deref(), Some("samples/hat.wav"));
             }

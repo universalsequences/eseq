@@ -209,6 +209,30 @@ impl ProjectScenes {
                 .find_map(|(pointer, cell)| (*pointer == Some(clip.id)).then_some(*cell)?);
             clip.cells.insert(at, adopted);
         }
+        // The scene the user is in leaves the rack silent: the join mints
+        // that scene's clip (as an edit under a `None` pointer would) and the
+        // member's pattern goes there, so the new track has an effective
+        // pattern to commit and edit. The other members stay silent in it.
+        let current = self.current_scene;
+        if self.scene_rack_clip(current, group_id).is_none() {
+            if let (Some(cell), Some(clip_id)) = (
+                scene_cells.get(current).copied().flatten(),
+                self.ensure_scene_rack_clip(current, group_id),
+            ) {
+                // The bank's member list syncs from the group topology after
+                // this call, so the freshly minted clip may still be sized
+                // for the old member count.
+                if let Some(clip) = self
+                    .rack_bank_mut(group_id)
+                    .and_then(|bank| bank.clip_mut(clip_id))
+                {
+                    if clip.cells.len() <= position {
+                        clip.cells.resize(position + 1, None);
+                    }
+                    clip.cells[position] = Some(cell);
+                }
+            }
+        }
         for scene in &mut self.scenes {
             if let Some(cell) = scene.cells.get_mut(track) {
                 *cell = None;
@@ -830,6 +854,59 @@ mod tests {
             0,
             "the scene cell was not written"
         );
+    }
+
+    /// A member driven by a graph sequencer has no steps; its lane is its
+    /// devices. Under a pointed clip that lane is saved into the clip even
+    /// with zero steps, and under a silent scene a MIDI effect alone is
+    /// enough to mint one, so neither survives only in the live grid.
+    #[test]
+    fn a_stepless_member_lane_is_saved_into_the_pointed_clip() {
+        let mut scenes = scenes();
+        let clip = scenes.create_rack_clip_with_members(RACK, &MEMBERS, "Break");
+        scenes.set_scene_rack_clip(0, RACK, Some(clip));
+        scenes.adopt_live_rack_clips();
+        assert!(scenes.rack_bank(RACK).unwrap().clip(clip).unwrap().cells[0].is_none());
+
+        let mut snapshot = PatternSnapshot::new_default(4, &[]);
+        let mut data = pattern_data(&scenes, 1);
+        data.track_params.midi_fx_chain = vec!["transpose-range".into()];
+        snapshot.set_track_pattern_data(1, data);
+        let mut untouched = pattern_data(&scenes, 2);
+        untouched.track_params.midi_fx_chain = Vec::new();
+        snapshot.set_track_pattern_data(2, untouched);
+        scenes.save_scene_snapshot_masked(0, snapshot, 0, 0, 0);
+
+        let bank = scenes.rack_bank(RACK).unwrap();
+        let cells = &bank.clip(clip).unwrap().cells;
+        let cell = cells[0].expect("the stepless lane got a cell in the pointed clip");
+        assert_eq!(
+            scenes.track_pools[1].get(cell).unwrap().track_params.midi_fx_chain,
+            vec!["transpose-range".to_string()],
+            "the MIDI effect rides in the clip"
+        );
+        assert!(cells[1].is_some(), "an untouched member lane is kept under a pointed clip too");
+
+        // Silent scene: an untouched lane mints nothing, a MIDI effect does.
+        scenes.set_scene_rack_clip(1, RACK, None);
+        scenes.current_scene = 1;
+        scenes.adopt_live_rack_clips();
+        let mut snapshot = PatternSnapshot::new_default(4, &[]);
+        let mut untouched = pattern_data(&scenes, 1);
+        untouched.track_params.midi_fx_chain = Vec::new();
+        snapshot.set_track_pattern_data(1, untouched);
+        let mut untouched = pattern_data(&scenes, 2);
+        untouched.track_params.midi_fx_chain = Vec::new();
+        snapshot.set_track_pattern_data(2, untouched);
+        scenes.save_scene_snapshot_masked(1, snapshot, 0, 0, 0);
+        assert_eq!(scenes.scene_rack_clip(1, RACK), None, "nothing minted from an untouched lane");
+        let mut snapshot = PatternSnapshot::new_default(4, &[]);
+        let mut data = pattern_data(&scenes, 1);
+        data.track_params.midi_fx_chain = vec!["transpose-range".into()];
+        snapshot.set_track_pattern_data(1, data);
+        scenes.save_scene_snapshot_masked(1, snapshot, 0, 0, 0);
+        let minted = scenes.scene_rack_clip(1, RACK).expect("a MIDI effect mints the clip");
+        assert!(scenes.rack_bank(RACK).unwrap().clip(minted).unwrap().cells[0].is_some());
     }
 
     #[test]

@@ -897,9 +897,9 @@ impl ProjectScenes {
         // resolve below finds it. This pre-pass runs before the scene borrow
         // because both need `&mut self`.
         for track in 0..snapshot.track_bits.len() {
-            if self.rack_member_slot(track).is_none() {
+            let Some((group_id, _)) = self.rack_member_slot(track) else {
                 continue;
-            }
+            };
             if self.rack_member_lane_is_stale(scene_idx, track) {
                 continue;
             }
@@ -909,7 +909,16 @@ impl ProjectScenes {
             let Some(data) = snapshot.track_pattern_data(track) else {
                 continue;
             };
-            if data.track_bits.iter().all(|word| *word == 0) {
+            // Under a POINTED clip the member's lane is always kept: a cell
+            // with no steps is still silent, but it holds the lane's devices,
+            // params and sound, which is all a track driven by a graph
+            // sequencer has. Under a SILENT scene (`None` pointer) nothing is
+            // minted out of an untouched lane, but steps or a MIDI effect are
+            // content that must not stay live-only.
+            let pointed = self.scene_rack_clip(scene_idx, group_id).is_some();
+            let has_steps = data.track_bits.iter().any(|word| *word != 0);
+            let has_midi_fx = !data.track_params.midi_fx_chain.is_empty();
+            if !pointed && !has_steps && !has_midi_fx {
                 continue;
             }
             self.ensure_rack_clip_cell(scene_idx, track, data);

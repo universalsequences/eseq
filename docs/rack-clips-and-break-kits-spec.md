@@ -207,6 +207,17 @@ tracks, so the rack immediately has somewhere new to put steps and sounds
 instead of sharing the clip it was playing. A rack the current scene left
 silent (`None`) stays silent in the new scene.
 
+### 3.y Save-back of member lanes
+
+Under a pointed clip a member's live lane is always saved into the clip, steps
+or not: a cell with zero steps is still silent, but it keeps the lane's MIDI
+effects, effect chain, params and sound, which is everything a member driven
+by a graph sequencer has. Under a silent scene (`None` pointer) nothing is
+minted from an untouched lane, but steps or a MIDI effect mint the clip. A
+project's per-track device records are captured from the live lanes, so a lane
+that is never saved back leaves a record no pattern can rebuild; the loader
+drops such a record with a warning instead of refusing the project.
+
 ## 4. Launch composition — BUILT (eseq-172r.3)
 
 Built as described, through one pair of helpers on `ProjectScenes`:
@@ -396,6 +407,19 @@ the height of a collapsed rack. In the mixer the group strip has no clip area
 of its own (its meter control carries a spacer to sit level with the track
 meters), so the clip column takes that spacer's room instead of adding to it.
 
+The sequencer run is a Max-style preset box grid, not the transport's numbered
+pill strip: a bank of thirty numbered pills ran the header off the window. The
+cells are the mixer's unnumbered `track-pattern-cell-bg` boxes (no sound glyph)
+tinted with the rack color, with a number picker as the last cell that shows
+the lit clip's 1-based number and launches the number typed or dragged into it
+(rename, launch, new-clip-from-playing and delete are on the cell's right-click
+menu), in a `wrap`
+that flexes into the header's remaining width. The column count therefore
+follows the window width and a long bank grows the header by rows. To make
+that work, a fill `h-stack` now measures its flex children a second time at
+their final width for height (`widget_render/hstack.rs`); widths are
+unchanged, so nothing else in the UI moves.
+
 **Not built:** drag reorder of clip cells (the run renders from a reactive field
 with no drop target; `ProjectScenes::reorder_rack_clip` exists for when it is
 wired). The activity strip is built and reuses the per-track
@@ -411,9 +435,9 @@ The expanded rack keeps member strips.
 ### 6.3 Rack header actions
 
 Rack header `…` menu gains: Attach sequencer…, Detach sequencer, Convert to
-clips (legacy racks only), Export as kit…, Save clip as…, Delete clip. All
-built. "Delete clip <name>" is listed once per clip
-rather than acting on a selection.
+clips (legacy racks only), Export as kit…, Save clip as…. All built. Deleting
+a clip is the row's `[-]` button (it deletes the clip the current scene
+plays), not a menu entry per clip.
 
 ### 6.4 Scene list
 
@@ -519,6 +543,34 @@ the bus chain. The scene pointers are cleared with the old bank, so the
 auditioned rack is silent until a clip is launched, exactly like a fresh
 import. A kit with no clips of its own leaves the bank alone, which is what
 keeps every pre-feature `.kit` file behaving as before.
+
+### 7.5 Modulators and cables — BUILT (kit v3)
+
+A rack is a self-contained patch: its modulator members and the cables from
+them to the rack's own inputs are part of the kit.
+
+- **A modulator member is a modulator pad.** `ProjectKitPad::sound` is now
+  `Option`, and a modulator pad carries `modulator: Some(ProjectEffectSlot)`
+  instead — its instrument slot (rate, shape, …) as the current scene had it
+  at save time, so a kit with no clips still brings the modulator back
+  configured. Import builds it with `add_modulator_track` and writes the saved
+  parameters back through the ordinary per-parameter instrument command.
+  Clips carry the modulator's lane like any other member's, so a scene-clip
+  still restores its own modulator settings on launch. An EMPTY member track
+  has nothing to carry: it is left out and named in the save status.
+- **Cables are one kit-level set**, `ProjectKitPreset::mod_connections`, in
+  PAD space: `source_pad` → `Pad(n)` (a member's external mod input) or
+  `RackBus` (the rack bus's own input). They are read from the CURRENT scene
+  at export. In a project cables are scene state; a kit carries the patch,
+  and import installs the same cables into EVERY scene, so the rack sounds
+  the same whichever scene launches one of its clips. A cable that leaves
+  the rack (to a track or bus outside it) does not travel; the export counts
+  it in the status line.
+- `kit_version` is 3. A v2 kit reads with `mod_connections` empty and every
+  pad a Sound pad, exactly as before.
+- Audition onto an existing rack reuses a lane by note only when it is the
+  same kind of member; a Sound pad over a modulator lane (or the reverse)
+  gets a fresh track and the old one goes with the pads absent from the kit.
 
 ### 7.4 Packages
 

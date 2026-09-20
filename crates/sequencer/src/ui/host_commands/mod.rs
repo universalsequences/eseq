@@ -6,6 +6,7 @@ pub(crate) use drum_rack_v2::evaluate_rack_sequencer_source;
 mod effects;
 pub(crate) mod export;
 mod file_menu;
+pub(crate) use file_menu::activate_dialog_tile;
 mod menu_actions;
 mod instrument_authoring;
 mod instrument_params;

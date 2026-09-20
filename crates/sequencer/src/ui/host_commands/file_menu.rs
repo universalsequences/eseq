@@ -13,8 +13,25 @@ pub(super) const COMMANDS: &[&str] = &[
 
 /// The Save / Save As / About modals are mounted in the step-panel buffers,
 /// and a modal only receives pointer input through the active tile.
-pub(super) fn activate_dialog_tile(editor: &mut Editor) {
-    if !editor.switch_active_tile_to_buffer_named("*arrangement*") {
+/// Make the tile that mounts the file dialogs (`eseq.file-dialogs/panel`)
+/// the active one, so the modal about to open is both rendered and reachable
+/// by the pointer. The panel is mounted by the two step-panel buffers only;
+/// while a script sequencer tab is in front, the main tile shows the script's
+/// own buffer and neither switch finds a tile. In that case the step panel is
+/// flipped back to the Seq tab first — one click to return to the script
+/// beats a modal that opens where nothing renders it.
+pub(crate) fn activate_dialog_tile(editor: &mut Editor) {
+    if editor.switch_active_tile_to_buffer_named("*arrangement*")
+        || editor.switch_active_tile_to_buffer_named("*sequencer*")
+    {
+        return;
+    }
+    if editor
+        .runtime_mut()
+        .eval_str("(eseq.seq-step-tabs/seq-select-main-step-tab-by-index 1)")
+        .is_ok()
+    {
+        editor.refresh_runtime_side_effects();
         editor.switch_active_tile_to_buffer_named("*sequencer*");
     }
 }

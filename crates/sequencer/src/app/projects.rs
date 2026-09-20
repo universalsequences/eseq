@@ -1838,48 +1838,54 @@ impl App {
             .iter()
             .find(|group| group.id == group_id)
             .ok_or_else(|| format!("Track group {group_id} does not exist"))?;
-        let rack = group
-            .rack
-            .as_ref()
-            .ok_or_else(|| format!("Track group {group_id} is not a drum rack"))?;
+        if group.rack.is_none() {
+            return Err(format!("Track group {group_id} is not a drum rack"));
+        }
         let color = group.color;
         let bus_id = group.bus_id;
         // Resolve every pad against the member list up front: capturing a pad
         // borrows `self` mutably, and a capture must not see a half-built kit.
-        let pads: Vec<(i32, Option<u8>, usize)> = rack
-            .pads
-            .iter()
-            .enumerate()
-            .filter_map(|(pad_index, pad)| {
-                let track = group.members.get(pad.member).copied()?;
-                Some((pad.pad_note, rack.choke_group(pad_index), track))
-            })
-            .collect();
-        if pads.is_empty() {
+        // The roster is the same pad space the clips were just written in;
+        // its warnings already travelled with `content`.
+        let roster = self.kit_pad_roster(group_id)?;
+        if roster.pads.iter().all(|pad| pad.modulator) {
             return Err("A kit needs at least one pad with a sound on it".to_string());
         }
-        let mut kit_pads = Vec::with_capacity(pads.len());
-        for (pad_note, choke_group, track) in pads {
-            let track_name = self
-                .tracks
-                .get(track)
-                .cloned()
-                .ok_or_else(|| format!("Kit pad {pad_note} has no member track"))?;
-            let sound = self.capture_track_as_container_preset(
-                track,
-                &track_name,
-                Vec::new(),
-                String::new(),
-            )?;
+        let super::break_kits::CapturedKitContent { sequencers, clips, mut warnings } = content;
+        warnings.extend(roster.warnings.iter().cloned());
+        // The rack's internal cables (§7.5), read before the pad captures
+        // below, which snapshot the project.
+        let (mod_connections, dropped_cables) =
+            self.capture_kit_mod_connections(group_id, &roster.member_to_pad)?;
+        if dropped_cables > 0 {
+            warnings.push(format!(
+                "{dropped_cables} modulation cable{} leaving the rack {} not carried",
+                if dropped_cables == 1 { "" } else { "s" },
+                if dropped_cables == 1 { "was" } else { "were" }
+            ));
+        }
+        let mut kit_pads = Vec::with_capacity(roster.pads.len());
+        for pad in roster.pads {
+            let (sound, modulator) = if pad.modulator {
+                (None, Some(self.capture_modulator_instrument_slot(pad.track, &pad.name)?))
+            } else {
+                let sound = self.capture_track_as_container_preset(
+                    pad.track,
+                    &pad.name,
+                    Vec::new(),
+                    String::new(),
+                )?;
+                (Some(sound), None)
+            };
             kit_pads.push(crate::project::ProjectKitPad {
-                pad_note,
-                choke_group,
-                name: track_name,
+                pad_note: pad.pad_note,
+                choke_group: pad.choke_group,
+                name: pad.name,
                 sound,
+                modulator,
             });
         }
         let bus_chain = Some(self.capture_kit_bus_chain(bus_id)?);
-        let super::break_kits::CapturedKitContent { sequencers, clips, warnings } = content;
         Ok((
             crate::project::ProjectKitPreset {
                 version: crate::project::project_file_version(),
@@ -1893,10 +1899,31 @@ impl App {
                 pads: kit_pads,
                 bus_chain,
                 sequencers,
+                mod_connections,
                 clips,
             },
             warnings,
         ))
+    }
+
+    /// A modulator member's instrument slot as the current scene has it
+    /// (§7.5): rate, shape and the rest of the modulator's settings, read
+    /// through the same project capture a Sound pad uses.
+    fn capture_modulator_instrument_slot(
+        &mut self,
+        track: usize,
+        name: &str,
+    ) -> Result<crate::project::ProjectEffectSlot, String> {
+        let project = self.capture_project(name)?;
+        let pattern = project
+            .patterns
+            .get(project.current_pattern)
+            .ok_or_else(|| "Current pattern is missing while saving kit".to_string())?;
+        pattern
+            .instrument_slots
+            .get(track)
+            .cloned()
+            .ok_or_else(|| format!("Modulator '{name}' has no instrument slot to save"))
     }
 
     /// The rack bus insert chain as a kit carries it: every occupied slot in
@@ -2062,7 +2089,7 @@ impl App {
             } else {
                 pad.name.trim().to_string()
             };
-            let track = match self.add_track_from_sound_preset(pad.sound, &pad_name) {
+            let track = match self.add_kit_pad_track(&pad, &pad_name) {
                 Ok(track) => track,
                 Err(error) => {
                     failures.push(format!("{pad_name}: {error}"));
@@ -2097,7 +2124,61 @@ impl App {
                 failures.push(format!("clips: {error}"));
             }
         }
+        // The rack's internal cables (§7.5), once every member exists.
+        if let Err(error) = self.install_kit_mod_connections(group_id, &kit.mod_connections) {
+            failures.push(format!("modulation cables: {error}"));
+        }
         Ok((group_id, failures))
+    }
+
+    /// Build the member track for one kit pad: a track from the pad's Sound,
+    /// or a modulator track with the pad's saved settings (§7.5).
+    fn add_kit_pad_track(
+        &mut self,
+        pad: &crate::project::ProjectKitPad,
+        pad_name: &str,
+    ) -> Result<usize, String> {
+        match (&pad.sound, &pad.modulator) {
+            (_, Some(slot)) => {
+                let track = self.graph_controller().add_modulator_track()?;
+                self.tracks[track] = pad_name.to_string();
+                if let Some(authored) = self.track_name_user_authored.get_mut(track) {
+                    *authored = true;
+                }
+                self.apply_kit_modulator_settings(track, slot);
+                Ok(track)
+            }
+            (Some(sound), None) => self.add_track_from_sound_preset(sound.clone(), pad_name),
+            (None, None) => Err("kit pad carries neither a Sound nor a modulator".to_string()),
+        }
+    }
+
+    /// Write a kit modulator pad's saved settings onto `track`'s live
+    /// instrument slot, through the same per-parameter command the panel
+    /// uses, so the values reach the engine and the current scene alike.
+    /// The live slot's own parameter count wins over the saved one.
+    fn apply_kit_modulator_settings(
+        &mut self,
+        track: usize,
+        slot: &crate::project::ProjectEffectSlot,
+    ) {
+        let live_params = self
+            .state
+            .pattern
+            .instrument_slots
+            .get(track)
+            .map(|live| live.num_params.load(Ordering::Relaxed) as usize)
+            .unwrap_or(0);
+        for (param_idx, value) in slot.defaults.iter().enumerate().take(live_params) {
+            super::command::apply_command(
+                self,
+                super::command::AppCommand::SetInstrumentParam {
+                    track,
+                    param_idx,
+                    value: *value,
+                },
+            );
+        }
     }
 
     /// Auditions a kit into an existing drum rack as one atomic authoring edit.
@@ -2164,13 +2245,35 @@ impl App {
                 } else {
                     pad.name.trim().to_string()
                 };
-                let track_id = if let Some(track_id) = old_by_note.get(&pad.pad_note).copied() {
+                // An existing lane is reused by note only when it is the same
+                // kind of member; a Sound cannot land on a modulator track or
+                // the reverse, so those pads get a fresh track and the old
+                // one goes with the pads absent from the kit.
+                let reusable = old_by_note.get(&pad.pad_note).copied().filter(|track_id| {
+                    self.track_registry.index_of(*track_id).is_some_and(|track| {
+                        let is_modulator = self.graph.track_instrument_types.get(track).copied()
+                            == Some(InstrumentType::Modulator);
+                        is_modulator == pad.is_modulator()
+                    })
+                });
+                let track_id = if let Some(track_id) = reusable {
                     let track = self.track_registry.index_of(track_id)
                         .ok_or_else(|| format!("Kit pad {pad_name} lost its member track"))?;
-                    self.load_sound_preset_onto_track(track, pad.sound, &pad_name)?;
+                    match (&pad.sound, &pad.modulator) {
+                        (_, Some(slot)) => {
+                            self.tracks[track] = pad_name.clone();
+                            self.apply_kit_modulator_settings(track, slot);
+                        }
+                        (Some(sound), None) => {
+                            self.load_sound_preset_onto_track(track, sound.clone(), &pad_name)?;
+                        }
+                        (None, None) => {
+                            return Err(format!("Kit pad {pad_name} carries neither a Sound nor a modulator"));
+                        }
+                    }
                     track_id
                 } else {
-                    let track = self.add_track_from_sound_preset(pad.sound, &pad_name)?;
+                    let track = self.add_kit_pad_track(&pad, &pad_name)?;
                     if let Err(error) = self.commit_created_track(track, "Load kit pad") {
                         let rollback = self.graph_controller().delete_track(track);
                         return match rollback {
@@ -2256,6 +2359,9 @@ impl App {
                 if let Err(error) = self.install_kit_clips(group_id, kit.clips, &id_map) {
                     notes.push(format!("clips: {error}"));
                 }
+            }
+            if let Err(error) = self.install_kit_mod_connections(group_id, &kit.mod_connections) {
+                notes.push(format!("modulation cables: {error}"));
             }
             crate::app::edit::squash_history_since(self, history_len, "Audition kit on drum rack");
             if notes.is_empty() {
@@ -3271,6 +3377,13 @@ impl App {
             return Err("project rack-effect records do not cover every rack slot exactly once".to_string());
         }
 
+        // A per-track device record that disagrees with the chain the
+        // patterns rebuilt is a stale record (a live lane that was never
+        // saved back), not a reason to refuse the whole project: the chain
+        // the patterns hold is what the project plays, so those instance ids
+        // are dropped (the registry mints fresh ones on demand) and the load
+        // goes on. Bus and rack-slot records stay strict below.
+        let mut track_effects = Vec::with_capacity(instances.track_effects.len());
         for chain in &instances.track_effects {
             let track_id = crate::sequencer::TrackId(chain.track_id);
             let track = self.track_registry.index_of(track_id)
@@ -3280,16 +3393,30 @@ impl App {
                 .take_while(|slot| slot.node_id.load(Ordering::Relaxed) != 0)
                 .count();
             if live_count != chain.instances.len() {
-                return Err(format!("track {} effect-instance count does not match the live chain", track + 1));
+                eprintln!(
+                    "Project load: track {} effect-instance record ({}) does not match its chain ({live_count}); dropping the stale record",
+                    track + 1,
+                    chain.instances.len()
+                );
+                continue;
             }
+            track_effects.push(chain);
         }
+        let mut midi_effects = Vec::with_capacity(instances.midi_effects.len());
         for chain in &instances.midi_effects {
             let track_id = crate::sequencer::TrackId(chain.track_id);
             let track = self.track_registry.index_of(track_id)
                 .ok_or_else(|| format!("MIDI chain references missing track {}", chain.track_id))?;
-            if self.state.pattern.track_params[track].midi_fx_chain().len() != chain.instances.len() {
-                return Err(format!("track {} MIDI-instance count does not match the live chain", track + 1));
+            let live_count = self.state.pattern.track_params[track].midi_fx_chain().len();
+            if live_count != chain.instances.len() {
+                eprintln!(
+                    "Project load: track {} MIDI-instance record ({}) does not match its chain ({live_count}); dropping the stale record",
+                    track + 1,
+                    chain.instances.len()
+                );
+                continue;
             }
+            midi_effects.push(chain);
         }
         for chain in &instances.bus_effects {
             let bus_id = BusId(chain.bus_id);
@@ -3317,14 +3444,14 @@ impl App {
         }
 
         self.device_registry.clear();
-        for chain in &instances.track_effects {
+        for chain in track_effects {
             let track_id = crate::sequencer::TrackId(chain.track_id);
             let ids = chain.instances.iter()
                 .map(|instance| crate::sequencer::EffectInstanceId(instance.id))
                 .collect::<Vec<_>>();
             self.device_registry.bind_audio_effect_chain(track_id, BUILTIN_SLOT_COUNT, &ids)?;
         }
-        for chain in &instances.midi_effects {
+        for chain in midi_effects {
             let track_id = crate::sequencer::TrackId(chain.track_id);
             let ids = chain.instances.iter()
                 .map(|instance| crate::sequencer::MidiFxInstanceId(instance.id))
