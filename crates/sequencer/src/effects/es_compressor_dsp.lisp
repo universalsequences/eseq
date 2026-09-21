@@ -1,34 +1,26 @@
-; ES Compressor — sampler-style "sustain" compressor. Builtin effect whose
-; DSP body is dgenlisp (see crates/sequencer/src/effects/es_compressor.rs).
-;
-; Very low threshold, heavy ratio and large auto makeup keep everything above
-; the noise floor under compression, so decaying tails are lifted and feel
-; sustained while a lookahead peak detector and a grab-and-settle envelope
-; let drum transients through. Makeup drives a soft-knee saturator, and a
-; dark minimum-phase tone filter follows. Crunch is gated by absolute level:
-; only material near full scale gets the fast time constants that let the
-; gain ride inside a bass or kick waveform; quieter material keeps a smooth
-; envelope, so the effect reads as compression, not distortion.
-;
-; Generic techniques throughout (peak detector with short lookahead,
-; feedforward one-pole envelope with error- and level-dependent time
-; constants, real-cepstrum minimum-phase FIR, overlap-save convolution).
-; Every curve is a closed-form formula; the numbers live in the TUNING block.
-;
-; Supported render rates: 8-384 kHz (fixed per instance). No oversampling.
-; Latency: peak window + 255 samples of overlap-save block delay, declared
-; below for the host's delay compensation.
-(effect-latency (+ 255 (max 1 (min 127 (round (* 0.00025 samplerate))))))
+; ES Compressor: Punch / Level / Sustain. Independently authored, asset-free.
+; Sources, derivations and intentional departures from the literature:
+; crates/sequencer/docs/es-compressor-effect-spec.md.
+; Punch: feedforward log-domain soft knee + passive two-capacitor timing.
+; Level: feedback optical attenuation; coupled photocarrier populations from
+; Najnudel et al., DAFx 2023, Eq. (4), with an original normalized driver.
+; Sustain: the existing ES history/error-dependent grab-and-settle controller.
+; All controllers run continuously; mode selects smoothly crossfaded gains.
+; 8-384 kHz, fixed per instance. No FFT, external assets or oversampling.
+; A common short delay aligns every mode and the conventional dry/wet path.
+(effect-latency (max 1 (min 127 (round (* 0.00025 samplerate)))))
 
 (def left (in 1 @name Left))
 (def right (in 2 @name Right))
+(param mode @options ["Punch" "Level" "Sustain"] @default 0)
 (param amount @min 0 @max 100 @default 50)
+(param tone @min 0 @max 100 @default 0)
 (param attack @min 1 @max 200 @default 40 @unit ms)
 (param release @min 20 @max 2000 @default 120 @unit ms)
 (param mix @min 0 @max 1 @default 1)
 (param drive @min 0 @max 24 @default 0 @unit dB)
 (param input-db @min -24 @max 24 @default 0 @unit dB)
-(param output-db @min -48 @max 6 @default -6 @unit dB)
+(param output-db @min -48 @max 18 @default 0 @unit dB)
 (param detector-db @min -36 @max 36 @default 0 @unit dB)
 
 ; ------------------------------------------------------------------ TUNING
@@ -76,13 +68,11 @@
 (def shaper-ceiling 1.02)
 (def shaper-hardness 4)
 (def drive-compensation 0.7)    ; fraction of drive dB removed after the shaper
-; Tone: dB target of the minimum-phase FIR (scaled by mix in dB).
-(def shelf-db 1.5)              ; low-shelf gain
-(def shelf-hz 200)              ; shelf half-gain corner
-(def lowpass-hz 11500)          ; -3 dB corner
-(def lowpass-order 12)          ; 6 dB/oct per order
-(def tone-floor-db -60)         ; stopband floor
-(def tone-taper-start 1024)     ; FIR taps beyond this fade with a half-cosine
+; Original tone design: first-order low shelf + fourth-order Butterworth LP.
+; Tone 0 is flat. Tone 100 applies this full response, independently of Mix.
+(def shelf-db 1.5)
+(def shelf-hz 200)
+(def lowpass-hz 11500)
 ; ------------------------------------------------------------------------
 
 ; 10 ms dezippering, initialized directly to the first parameter value.
@@ -100,9 +90,17 @@
 (def attack-ms (smooth-control (clip attack 1 200)))
 (def release-ms (smooth-control (clip release 20 2000)))
 (def m (smooth-control (clip mix 0 1)))
+(def tone-strength (/ (smooth-control (clip tone 0 100)) 100))
+; Smooth one-hot weights, not the mode number: Punch -> Sustain never takes
+; a detour through Level. Normalization prevents accumulated unity drift.
+(def selected-mode (round (clip mode 0 2)))
+(def punch-weight (smooth-control (eq selected-mode 0)))
+(def level-weight (smooth-control (eq selected-mode 1)))
+(def sustain-weight (smooth-control (eq selected-mode 2)))
+(def weight-total (+ punch-weight level-weight sustain-weight))
 (def drive-db (smooth-control (clip drive 0 24)))
 (def input-gain (exp (* db-to-ln (smooth-control (clip input-db -24 24)))))
-(def output-gain (exp (* db-to-ln (smooth-control (clip output-db -48 6)))))
+(def output-gain (exp (* db-to-ln (smooth-control (clip output-db -48 18)))))
 (def detector-trim (smooth-control (clip detector-db -36 36)))
 (def x-l (* left input-gain))
 (def x-r (* right input-gain))
@@ -197,11 +195,81 @@
 
 ; Auto makeup: unity gain for a steady input at unity-level-db.
 (def makeup (saturating-reduction (max 0 (- unity-level-db threshold))))
-; Gain-domain mix: mix scales (makeup - reduction) in dB.
-(def gain (exp (* db-to-ln m (- makeup gr))))
-; Delay the audio by the peak window so the trailing max acts as lookahead.
-(def compressed-l (* (short-delay x-l span) gain))
-(def compressed-r (* (short-delay x-r span) gain))
+(def sustain-gain (exp (* db-to-ln (- makeup gr))))
+
+; PUNCH. Giannoulis/Massberg/Reiss (2012) soft-knee gain computer followed
+; by an original passive RC ladder. In normalized capacitor-voltage units:
+;   da/dt = (target-a)/tau + (b-a)/memory, db/dt = (a-b)/memory.
+; Backward Euler solves both nodes together: nonnegative coefficients, unity
+; DC gain, and no explicit-Euler stability limit at low sample rates.
+(make-history punch-a)
+(make-history punch-b)
+(def pa (read-history punch-a))
+(def pb (read-history punch-b))
+(def punch-threshold (- -6 (* 30 u)))
+(def punch-ratio (+ 1 (* 7 u)))
+(def punch-over (- level punch-threshold))
+(def punch-knee (clip (+ punch-over 3) 0 6))
+(def punch-target (* (- 1 (/ 1 punch-ratio))
+  (+ (/ (* punch-knee punch-knee) 12) (max 0 (- punch-over 3)))))
+(def punch-tau (gswitch (gt punch-target pa) attack-ms release-ms))
+(def pd (/ 1000 (* samplerate punch-tau)))
+(def pc (/ 1000 (* samplerate (* release-ms 0.25))))
+(def punch-next-a (/ (+ (* (+ pa (* pd punch-target)) (+ 1 pc)) (* pc pb))
+  (+ 1 pd (* 2 pc) (* pd pc))))
+(def punch-next-b (/ (+ pb (* pc punch-next-a)) (+ 1 pc)))
+(write-history punch-a punch-next-a)
+(write-history punch-b punch-next-b)
+(def punch-gain (exp (* (- 0 db-to-ln) punch-next-a)))
+
+; Common audio alignment. Level's feedback is taken AFTER its own attenuator
+; and BEFORE makeup, saturation, mode crossfade and output trim.
+(def aligned-l (short-delay x-l span))
+(def aligned-r (short-delay x-r span))
+
+; LEVEL. Normalized form of Najnudel et al. (2023), Eq. (4):
+;   dn/dt = J - kn*(n-p)*n, dp/dt = J - kp*(1+p-n)*p.
+; n,p are electron/hole populations; trap capacity is normalized to 1.
+; Generation adds equal charge. Sequential implicit recombination steps
+; preserve n>=p>=0 and 0<=n-p<=1 without a Newton solver or state clipping.
+; These are OUR normalized rates/mobilities, not fitted Vactrol/T4 data.
+; Store p and d=n-p rather than subtracting nearly equal carrier counts.
+; This keeps the bounded trap occupancy well-conditioned in float32.
+(make-history traps)
+(make-history holes)
+(make-history optical-feedback)
+(def light-drive (max 0 (- (* (read-history optical-feedback)
+  (exp (* db-to-ln (- detector-trim punch-threshold)))) 1)))
+; Finite LED-driver headroom, with a smooth asymptote; no exponent overflow.
+(def light-limited (/ light-drive (+ 1 (/ light-drive 8))))
+(def generation (* u (/ 1000 (* attack-ms samplerate))
+  light-limited light-limited))
+(def d0 (read-history traps))
+(def p0 (+ (read-history holes) generation))
+(def kn (/ 1000 (* release-ms samplerate)))
+(def kp (* 4 kn))
+; Solve k*d^2 + b*d = old_delta using the cancellation-free positive root.
+(def nb (+ 1 (* kn p0)))
+(def d1 (/ (* 2 d0) (+ nb (sqrt (+ (* nb nb) (* 4 kn d0))))))
+(def empty-traps (- 1 d1))
+(def p-floor (max 0 (- p0 empty-traps)))
+(def pdiff (min p0 empty-traps))
+(def pbase (+ 1 (* kp (abs (- empty-traps p0)))))
+(def p1 (+ p-floor (/ (* 2 pdiff)
+  (+ pbase (sqrt (+ (* pbase pbase) (* 4 kp pdiff)))))))
+(def d2 (- 1 (/ empty-traps (+ 1 (* kp p1)))))
+(def n1 (+ p1 d2))
+(write-history traps d2)
+(write-history holes p1)
+; Eq. (7): conductivity is the mobility-weighted sum of populations.
+; A series resistor and LDR shunt form an ordinary voltage divider.
+(def level-gain (/ 1 (+ 1 (* u (+ n1 (* 0.2 p1))))))
+(write-history optical-feedback (* level-gain (max (abs aligned-l) (abs aligned-r))))
+
+(def gain (/ (+ (* punch-weight punch-gain) (* level-weight level-gain)
+  (* sustain-weight sustain-gain)) weight-total))
+(def compressed-l (* aligned-l gain))
+(def compressed-r (* aligned-r gain))
 
 ; Shaper: unity below the knee, then the rational soft clip toward the
 ; ceiling. Odd-symmetric (odd harmonics only). Drive adds gain in front of it
@@ -215,60 +283,34 @@
   (def s (/ (max 0 (- a shaper-knee)) shaper-headroom))
   (def bent (/ s (pow (+ 1 (pow s shaper-hardness)) (/ 1 shaper-hardness))))
   (def shaped (* drive-post (sign driven) (+ (min a shaper-knee) (* shaper-headroom bent))))
-  (mix x shaped m))
+  ; Sustain retains its original unity-drive shaper. Punch and Level are
+  ; uncolored at Drive 0; raising Drive introduces the shaper continuously.
+  (def strength (/ (+ sustain-weight
+    (* (+ punch-weight level-weight) (clip (/ drive-db 6) 0 1))) weight-total))
+  (mix x shaped strength))
 
-; Tone filter. The dB target is a low shelf plus a Butterworth-magnitude
-; lowpass evaluated on a 4096-bin grid at the host rate, converted to a
-; minimum-phase impulse through the real cepstrum, tapered, then applied by
-; 8192-point overlap-save with a 256-sample hop. Mix changes rebuild the
-; kernel per hop; old and new outputs crossfade across the hop.
-(def color-rate (hop-hold samplerate 256))
-(make-history color-last-mix)
-(make-history color-mix-seeded)
-(make-history color-clock)
-(def color-tick (eq (read-history color-clock) 0))
-(write-history color-clock (% (+ (read-history color-clock) 1) 256))
-(def color-mix (hop-hold m 256))
-(def color-before (hop-hold (gswitch (read-history color-mix-seeded)
-  (read-history color-last-mix) m) 256))
-(write-history color-last-mix (gswitch color-tick m (read-history color-last-mix)))
-(write-history color-mix-seeded 1)
-(def color-index (iota 4096))
-(def color-positive (min color-index (- 4096 color-index)))
-(def color-hz (* color-positive (/ color-rate 4096)))
-(def color-lowpass-db (* -10 (log10 (+ 1 (pow (/ color-hz lowpass-hz) (* 2 lowpass-order))))))
-(def color-shelf-db (/ shelf-db (+ 1 (pow (/ color-hz shelf-hz) 2))))
-(def color-db (max tone-floor-db (+ color-shelf-db color-lowpass-db)))
-(def color-log-base (* color-db db-to-ln))
-; Textbook causal lifter: keep c[0], double 1..N/2-1, keep c[N/2], zero the rest.
-(def color-lifter (+ (eq color-index 0) (eq color-index 2048)
-  (* 2 (* (gte color-index 1) (lt color-index 2048)))))
-(def color-tail (clip (/ (- color-index tone-taper-start) (- 4096 tone-taper-start)) 0 1))
-(def color-window (* 0.5 (+ 1 (cos (* 3.141592653589793 color-tail)))))
-(defmacro base-transfer (strength)
-  (def log-mag (* color-log-base strength))
-  (def cep (ifft log-mag (* log-mag 0) @N 4096 @backend accelerated))
-  (def (re im) (fft (* cep color-lifter) @N 4096 @backend accelerated))
-  (def mag (exp re))
-  (def ir (ifft (* mag (cos im)) (* mag (sin im)) @N 4096 @backend accelerated))
-  (def taps (* ir color-window))
-  ; Zero padding keeps overlap-save linear: 8192 >= 4096 + 256 - 1.
-  (fft (pad taps @padding [0:4096]) @N 8192 @backend accelerated))
-(def (color-new-re color-new-im) (base-transfer color-mix))
-(def (color-old-re color-old-im) (base-transfer color-before))
-(def color-ramp (/ (iota 256) 255))
-(defmacro base-filter (audio)
-  (def window (reshape (buffer audio 8192 256) @shape [8192]))
-  (def (re im) (fft window @N 8192 @backend accelerated))
-  (def new-time (ifft
-    (- (* re color-new-re) (* im color-new-im))
-    (+ (* re color-new-im) (* im color-new-re)) @N 8192 @backend accelerated))
-  (def old-time (ifft
-    (- (* re color-old-re) (* im color-old-im))
-    (+ (* re color-old-im) (* im color-old-re)) @N 8192 @backend accelerated))
-  ; Keep the newest 256 samples; the earlier part is circularly contaminated.
-  (def new-block (shrink new-time @ranges [7936:8192]))
-  (def old-block (shrink old-time @ranges [7936:8192]))
-  (overlap-add (+ (* (- 1 color-ramp) old-block) (* color-ramp new-block)) 256))
-(out (* output-gain (base-filter (color compressed-l))) 1 @name Left)
-(out (* output-gain (base-filter (color compressed-r))) 2 @name Right)
+; Scalar topology-preserving-transform filters. Fixed poles, smoothed blend:
+; no coefficient interpolation, kernel rebuild, block delay or FFT service.
+(def shelf-g (tan (/ (* 3.141592653589793 shelf-hz) samplerate)))
+(def lp-g (tan (/ (* 3.141592653589793 (min lowpass-hz (* 0.45 samplerate))) samplerate)))
+(defmacro low-shelf (x)
+  (make-history z)
+  (def v (/ (* shelf-g (- x (read-history z))) (+ 1 shelf-g)))
+  (def low (+ v (read-history z)))
+  (write-history z (+ low v))
+  (+ x (* (- (exp (* shelf-db db-to-ln)) 1) low)))
+(defmacro tone-lowpass (x damping)
+  (make-history z1)
+  (make-history z2)
+  (def band (/ (+ (read-history z1) (* lp-g (- x (read-history z2))))
+    (+ 1 (* lp-g (+ lp-g damping)))))
+  (def low (+ (read-history z2) (* lp-g band)))
+  (write-history z1 (- (* 2 band) (read-history z1)))
+  (write-history z2 (- (* 2 low) (read-history z2)))
+  low)
+(defmacro finish (wet dry)
+  (def colored (color wet))
+  (def filtered (tone-lowpass (tone-lowpass (low-shelf colored) 1.847759065) 0.765366865))
+  (* output-gain (mix dry (mix colored filtered tone-strength) m)))
+(out (finish compressed-l aligned-l) 1 @name Left)
+(out (finish compressed-r aligned-r) 2 @name Right)

@@ -42,6 +42,7 @@ pub mod roar;
 pub(crate) mod space_echo;
 pub mod spring;
 pub(crate) mod slowdown;
+pub(crate) mod chorus;
 #[allow(dead_code)]
 pub mod stereo_panner;
 #[allow(dead_code)]
@@ -2180,6 +2181,7 @@ mod tests {
             EffectDescriptor::builtin_insert_names(),
             &[
                 "444 Compressor",
+                "Chorus",
                 "Compressor",
                 "Delay",
                 "Dimension",
@@ -2204,6 +2206,7 @@ mod tests {
         assert_eq!(
             EffectDescriptor::listable_builtin_insert_names(),
             vec![
+                "Chorus",
                 "Compressor",
                 "Dimension",
                 "DJ Mixer",
@@ -2225,6 +2228,7 @@ mod tests {
         assert_eq!(
             builtin_effect_names(),
             vec![
+                "Chorus",
                 "Compressor",
                 "Convolution Reverb",
                 "Dimension",
@@ -3394,6 +3398,7 @@ impl EffectDescriptor {
     pub fn builtin_insert_names() -> &'static [&'static str] {
         &[
             "444 Compressor",
+            "Chorus",
             "Compressor",
             "Delay",
             "Dimension",
@@ -3469,6 +3474,7 @@ impl EffectDescriptor {
             "Str8 Delay" => Some(Self::builtin_str8_delay()),
             "Space Echo" => Some(Self::builtin_space_echo()),
             "Slowdown" => Some(slowdown::descriptor()),
+            "Chorus" => Some(chorus::descriptor()),
             "Dimension" => Some(Self::builtin_dimension()),
             "Phaser-Flanger" => Some(Self::builtin_phaser_flanger()),
             "Roar" => Some(Self::builtin_roar()),

@@ -1413,7 +1413,6 @@
 (def audio-fx-panel ()
   (let ((items (seq-audio-effect-tree search-filter)))
     (v-stack :key "audio-fx-tab-panel" :width :fill :gap 0.5 :flex 1
-      (audio-fx-toolbar)
       (box :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0 :flex 1
         (if (= (len items) 0)
           (empty-message "No audio effects found.")

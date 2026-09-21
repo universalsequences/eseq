@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
-use crate::layout::{LayoutNode, hit_test_layout};
+use crate::layout::{LayoutNode, hit_test_layout, hit_test_scroll_layout};
 use crate::tile::{WidgetClick, WidgetGesture};
 use crate::ui::hit::{self, HitGrid};
 use crate::vm::Value;
@@ -2283,21 +2283,15 @@ impl Editor {
             }
             return true;
         }
-        let node = match &modal_root {
-            Some(root) => {
-                let layout_col = local_col + self.widget_layout_scroll_left();
-                let layout_row = local_row + self.total_scroll_top();
-                hit_test_layout(root, layout_row, layout_col).cloned()
-            }
-            None => self.widget_node_at_local(local_col, local_row),
-        };
+        let scrolled_col = local_col + self.widget_layout_scroll_left();
+        let scrolled_row = local_row + self.total_scroll_top();
+        let node = modal_root.as_ref().or(self.runtime.current_layout.as_deref())
+            .and_then(|root| hit_test_scroll_layout(root, scrolled_row, scrolled_col))
+            .cloned();
         let Some(node) = node else {
             // Inside the panel but not over a scrollable child: still consume.
             return modal_root.is_some();
         };
-        let scrolled_col = local_col + self.widget_layout_scroll_left();
-        let scrolled_row = local_row + self.total_scroll_top();
-
         // Try the leaf widget first
         let offset =
             event_scroll_offset_for(self.runtime.current_layout.as_deref(), node.widget_id);

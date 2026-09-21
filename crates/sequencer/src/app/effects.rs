@@ -1733,6 +1733,10 @@ impl App {
                 crate::effects::slowdown::vtable(),
                 crate::effects::slowdown::state_size(self.graph.sample_rate as f32),
             ),
+            "Chorus" => (
+                crate::effects::chorus::vtable(),
+                crate::effects::chorus::state_size(self.graph.sample_rate as f32),
+            ),
             "Dimension" => (
                 crate::effects::dimension::dimension_vtable(),
                 crate::effects::dimension::DIMENSION_STATE_SIZE * std::mem::size_of::<f32>(),
@@ -7941,24 +7945,26 @@ mod tests {
             })
             .expect("seed overrides");
 
-        let error = app
-            .move_sequencer_into_rack_recorded(group_id, project_id, "")
-            .expect_err("a route outside the rack refuses the move");
-        assert!(error.contains("node 1"), "{error}");
-        assert!(
-            app.rack_sequencers(group_id).is_empty() && app.state.published_sequencers().len() == 1,
-            "a refused move changes nothing"
-        );
-
-        app.state
-            .edit_current_graph_overrides(|graphs| {
-                graphs[0].node_intrinsics[1] = intrinsic(1, hat);
-                Ok(())
-            })
-            .expect("fix route");
+        // Node 1 routes outside the rack: the move still goes through, with
+        // that route dropped to "off" rather than refused.
         let rack_id = app
             .move_sequencer_into_rack_recorded(group_id, project_id, "(load \"x.lisp\")")
             .expect("move into rack");
+        {
+            let graphs = app.state.current_graph_overrides();
+            assert_eq!(
+                graphs[0].node_intrinsics.iter().map(|i| i.route.clone()).collect::<Vec<_>>(),
+                vec![Some(ProjectGraphRouteOverride::Track(1)), Some(ProjectGraphRouteOverride::None)],
+                "in-rack route becomes a member index, outside route goes off"
+            );
+        }
+        // Point node 1 at the hat (member 2) for the rest of the test.
+        app.state
+            .edit_current_graph_overrides(|graphs| {
+                graphs[0].node_intrinsics[1].route = Some(ProjectGraphRouteOverride::Track(2));
+                Ok(())
+            })
+            .expect("route inside the rack");
         assert_eq!(rack_id, crate::lisp_host::graph_instance_id("brk", Some(group_id)));
         let owned = app.rack_sequencers(group_id);
         assert_eq!(owned.len(), 1);

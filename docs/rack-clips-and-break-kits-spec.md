@@ -373,6 +373,13 @@ calls). The manifest's own default `:route n` is a member index too. A member
 leaving the rack (detach, move, ungroup, track delete) runs
 `remap_after_rack_member_removed` over every scene inside the same recorded
 edit: nodes routed to it go to `None`, later members shift down.
+Moving a project-owned sequencer into a rack (`move-sequencer-into-rack`, the
+mixer's "Attach … to rack") rewrites its explicit routes and seed tracks in every
+scene the same way: a track that is a rack member becomes that member's index,
+a track outside the rack goes to `None` (seed lists drop it). The move is never
+refused for routing. The post-move re-run of the script is scoped with
+`with_graph_owner_rack` so a `(load …)` scratch script republishes rack-owned
+instead of adding a second project-owned instance under the same name.
 
 ## 6. UI — BUILT (eseq-172r.3)
 

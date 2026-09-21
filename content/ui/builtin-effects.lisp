@@ -10,6 +10,7 @@
 (load "@/ui/effects/builtin/multiverb.lisp")
 (load "@/ui/effects/builtin/reverb.lisp")
 (load "@/ui/effects/builtin/dimension.lisp")
+(load "@/ui/effects/builtin/chorus.lisp")
 (load "@/ui/effects/builtin/phaser-flanger.lisp")
 (load "@/ui/effects/builtin/roar.lisp")
 (load "@/ui/effects/builtin/filter-panel.lisp")

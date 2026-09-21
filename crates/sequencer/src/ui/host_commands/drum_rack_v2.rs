@@ -249,11 +249,19 @@ pub(super) fn handle(
                     sync_rack_pad_map(app, editor, &track_groups, &ui_epoch);
                     let rack = group_name(app, group_id).unwrap_or_else(|| "rack".to_string());
                     let mut status = format!("{rack} now owns the sequencer; routes are its members");
-                    // Re-run the module now that the rack owns it (the owner
-                    // map is published), so its tab and route dropdown switch
-                    // over right away. A fresh eval pass re-imports.
+                    // Re-run the script now that the rack owns it, so its tab
+                    // and route dropdown switch over right away. The scope
+                    // pins the owner explicitly: a module source would find
+                    // it in the published owner map, but a `(load …)` scratch
+                    // script has no module and would otherwise republish a
+                    // second, project-owned instance under the same name,
+                    // making every `bind-graph` by name ambiguous and the
+                    // tab's node rows disappear.
                     if !source.is_empty() {
-                        if let Err(error) = reevaluate_sequencer_source(editor, &source) {
+                        let rerun = sequencer::lisp_host::with_graph_owner_rack(Some(group_id), || {
+                            reevaluate_sequencer_source(editor, &source)
+                        });
+                        if let Err(error) = rerun {
                             status = format!("{status}; re-running the script failed: {error}");
                         }
                     }

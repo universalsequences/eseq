@@ -750,8 +750,9 @@
 
 (def track-pattern-grid (track)
   (let ((cells (viewed-bank-track-pattern-cells track))
-        (k (clip-cell-scale)))
+      (k (clip-cell-scale)))
     (box :width :fill :height (clip-area-height) :align :top :bg :black :background-color :buffer-bg
+      (scroll
       (grid :cols 6 :col-width (* 2.0 k) :row-height (* 1.0 k) :align :center
         (each cells |cell cell-idx|
           (let ((pattern-id (get cell :id)))
@@ -802,7 +803,7 @@
                 :tint-r (* 0.1 (track-color-r track false))
                 :tint-g (* 0.1 (track-color-g track false))
                 :tint-b (* 0.1 (track-color-b track false))
-                ))))))))
+                )))))))))
 
 (def mod-output-style
   (ui/style

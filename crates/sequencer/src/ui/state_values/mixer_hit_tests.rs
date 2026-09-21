@@ -1,6 +1,103 @@
 use super::*;
 use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
+#[test]
+fn rack_clip_scroll_owns_vertical_gestures_across_the_visible_list() {
+    use eseqlisp::widget_render::scroll::{get_scroll_state, scroll_state_key, set_scroll_state};
+
+    let mut editor = full_grid_editor_for_scroll_tests();
+    set_full_grid_track_count(&mut editor, 12, 16);
+    let mut group = rack_group_fixture(true);
+    group.members = vec![9, 10];
+    apply_group_bindings(&mut editor, group);
+    let clips = test_list((1..=20).map(|id| map_value([
+        ("id", Value::Number(id as f64)),
+        ("name", Value::String(format!("Clip {id}"))),
+    ])).collect());
+    for field in ["rack-clips", "rack-clip-banks"] {
+        editor.runtime_mut().set_reactive("SEQ", field, test_list(vec![map_value([
+            ("group-id", Value::Number(7.0)),
+            ("active", Value::Number(1.0)),
+            ("clips", clips.clone()),
+        ])]));
+    }
+    editor.runtime_mut().run_reactive_cycle();
+    editor.refresh_runtime_side_effects();
+    assert!(editor.switch_active_tile_to_buffer_named("*mixer*"));
+    let frame = eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 180, 70);
+    let tile = frame.tiles.iter().find(|tile| tile.frame.buffer_name == "*mixer*").unwrap();
+    let scroll = find_layout_node_by_stable_key_suffix(
+        tile.frame.widget_layout.as_deref().unwrap(), "/rack-clip-scroll-7",
+    ).unwrap();
+    assert_finite_nonzero_rect(scroll, "rack clip viewport");
+    let rect = scroll.rect;
+    let key = scroll_state_key(scroll);
+    let state = get_scroll_state(key);
+    assert!(state.content_height > state.viewport_height);
+
+    // Put this later rack inside the viewport using the same horizontal
+    // panning as the app, then test the full painted list, including its rim.
+    editor.apply_smooth_widget_scroll(-(rect.col - 10.0), 0.0);
+    let frame = eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 180, 70);
+    let tile = frame.tiles.iter().find(|tile| tile.frame.buffer_name == "*mixer*").unwrap();
+    let scroll_left = tile.frame.widget_layout_scroll_left;
+    assert!(scroll_left > 0.0);
+    let (cell_w, cell_h) = editor.runtime().layout_cell_dims();
+    let border = eseqlisp::widget_render::ui_design_px(tile.border_width_px);
+    let origin = (
+        tile.rect.col + border / cell_w + rect.col - scroll_left,
+        tile.rect.row + border / cell_h + rect.row - tile.frame.widget_scroll_top,
+    );
+    for x_fraction in [0.001, 0.2, 0.5, 0.8, 0.999] {
+        for y_fraction in [0.001, 0.2, 0.5, 0.8, 0.999] {
+            let at = (origin.0 + rect.width * x_fraction, origin.1 + rect.height * y_fraction);
+            assert!(at.0 >= tile.rect.col && at.0 < tile.rect.col + tile.rect.width);
+            assert!(at.1 >= tile.rect.row && at.1 < tile.rect.row + tile.rect.height);
+            set_scroll_state(key, state.clone());
+            let handled = editor.handle_tiled_touchpad_scroll(at.0, at.1, 0, -2.0, -20.0);
+            if !handled {
+                editor.apply_smooth_widget_scroll(-0.1, -1.0);
+            }
+            assert!(handled, "clip list missed vertical scroll at ({x_fraction}, {y_fraction})");
+            assert!(get_scroll_state(key).offset_y > state.offset_y,
+                "clip list did not move at ({x_fraction}, {y_fraction})");
+            assert_eq!(editor.widget_scroll_left(), scroll_left, "vertical gesture moved mixer");
+        }
+    }
+
+    // Gaps between clickable rows are still part of the clip viewport.
+    let layout = tile.frame.widget_layout.as_deref().unwrap();
+    let first = find_layout_node_by_stable_key_suffix(layout, "/mixer-rack-clip-7-1").unwrap();
+    let second = find_layout_node_by_stable_key_suffix(layout, "/mixer-rack-clip-7-2").unwrap();
+    let gap_row = (first.rect.row + first.rect.height + second.rect.row) * 0.5;
+    let at = (origin.0 + rect.width * 0.5, origin.1 + gap_row - rect.row);
+    set_scroll_state(key, state.clone());
+    assert!(editor.handle_tiled_touchpad_scroll(at.0, at.1, 0, -2.0, -20.0),
+        "the row gap must scroll the list");
+    assert!(get_scroll_state(key).offset_y > state.offset_y);
+
+    let at = (origin.0 + rect.width * 0.5, origin.1 + rect.height * 0.5);
+    for offset in [0.0, (state.content_height - state.viewport_height) * 0.5,
+        state.content_height - state.viewport_height]
+    {
+        let mut positioned = state.clone();
+        positioned.offset_y = offset;
+        set_scroll_state(key, positioned);
+        for delta_y in [-20.0, 20.0] {
+            assert!(editor.handle_tiled_touchpad_scroll(at.0, at.1, 0, -2.0, delta_y),
+                "vertical gestures stay with the list at its limits too");
+            assert_eq!(editor.widget_scroll_left(), scroll_left);
+        }
+    }
+
+    let before = get_scroll_state(key).offset_y;
+    assert!(!editor.handle_tiled_touchpad_scroll(at.0, at.1, 0, 20.0, -2.0),
+        "intentional sideways gestures must still reach the mixer");
+    editor.apply_smooth_widget_scroll(1.0, -0.1);
+    assert!(editor.widget_scroll_left() < scroll_left);
+    assert_eq!(get_scroll_state(key).offset_y, before);
+}
+
 fn click_at(editor: &mut Editor, at: (f32, f32)) {
     for kind in [MouseEventKind::Down(MouseButton::Left), MouseEventKind::Up(MouseButton::Left)] {
         editor.handle_tiled_mouse_precise(MouseEvent {

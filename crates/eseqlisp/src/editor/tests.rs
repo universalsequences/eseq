@@ -11017,6 +11017,57 @@ fn widget_scroll_limit_cache_recomputes_after_layout_revision_changes() {
 }
 
 #[test]
+fn tiled_touchpad_scroll_uses_fractional_content_origin() {
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    editor.set_layout_cell_dimensions(8.0, 16.0);
+    editor.runtime.eval_str(r#"
+        (effect
+          (scroll :key "fractional-scroll" :width 10 :height 4
+            (box :width :fill :height 40 :on-click (lambda (event) nil))))
+    "#).unwrap();
+    editor.active_buffer_mut().view_mode = super::ViewMode::UiOnly;
+    editor.set_layout_viewport(24, 9);
+    let tile_id = editor.active_tile;
+    let leaf = editor.active_leaf_mut();
+    leaf.show_border = true;
+    leaf.border_width_px = 1.0;
+    editor.cached_tile_rects = vec![(tile_id, crate::layout::Rect {
+        col: 3.25, row: 10.5, width: 24.0, height: 10.0,
+    })];
+    let layout = editor.widget_layout().unwrap();
+    let key = crate::widget_render::scroll::scroll_state_key(&layout);
+    let border = crate::widget_render::ui_design_px(1.0);
+    let at = (3.25 + border / 8.0 + 9.9, 10.5 + border / 16.0 + 3.9);
+    assert!(editor.handle_tiled_touchpad_scroll(at.0, at.1, 0, 0.0, -20.0),
+        "gesture just inside the painted viewport must hit its scroll container");
+    assert!(crate::widget_render::scroll::get_scroll_state(key).offset_y > 0.0);
+}
+
+#[test]
+fn touchpad_scroll_inside_clickable_parent_reaches_nested_scroll() {
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    editor.runtime.eval_str(r#"
+        (effect
+          (box :width 12 :height 10 :on-click (lambda (event) nil)
+            (scroll :key "nested-scroll" :width 10 :height 4
+              (v-stack :width :fill :gap 1
+                (box :width :fill :height 2 :on-click (lambda (event) nil))
+                (box :width :fill :height 20 :on-click (lambda (event) nil))))))
+    "#).unwrap();
+    editor.active_buffer_mut().view_mode = super::ViewMode::UiOnly;
+    editor.set_layout_viewport(24, 12);
+    let layout = editor.widget_layout().unwrap();
+    let scroll = find_widget_of_type(&layout, "scroll").unwrap();
+    let key = crate::widget_render::scroll::scroll_state_key(scroll);
+    // The gap has no click handler. Click bubbling must not discard the
+    // scroll container when choosing the target of a different event kind.
+    assert_eq!(crate::layout::hit_test_layout(&layout, 2.5, 5.0).unwrap().widget_id,
+        layout.widget_id, "clicks on the gap still belong to the clickable parent");
+    assert!(editor.handle_touchpad_scroll(0, 0, 5.0, 2.5, 0.0, -20.0));
+    assert!(crate::widget_render::scroll::get_scroll_state(key).offset_y > 0.0);
+}
+
+#[test]
 fn touchpad_scroll_over_plain_scroll_container_does_not_relayout() {
     // eseq-pzp: a plain scroll container applies its offset at render time, so
     // moving it changes no layout geometry. Scrolling one used to force a full

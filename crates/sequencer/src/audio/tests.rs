@@ -2565,6 +2565,7 @@ fn live_keyboard_transpose_applies_current_transpose_ramp_state() {
 
     let resolved = resolve_live_keyboard_transpose(
         &state,
+        &state.latest_scheduler_snapshot(),
         AccumulatorRuntimeState {
             value: 5.0,
             reversed: false,
@@ -2577,13 +2578,16 @@ fn live_keyboard_transpose_applies_current_transpose_ramp_state() {
 }
 
 #[test]
-fn live_keyboard_transpose_quantizes_after_transpose_ramp_offset() {
+fn live_keyboard_transpose_quantizes_after_ramp_and_before_scene_transpose() {
     let state = SequencerState::new(1, Vec::new());
     state.pattern.track_params[0].set_accumulator_idx(1);
     state.pattern.track_params[0].set_fts_scale(1);
+    state.write_current_scene_slot(crate::sequencer::SCENE_TRANSPOSE_SLOT,
+        crate::process::ProcessLiteral::Number(1.0)).unwrap();
 
     let resolved = resolve_live_keyboard_transpose(
         &state,
+        &state.latest_scheduler_snapshot(),
         AccumulatorRuntimeState {
             value: 1.0,
             reversed: false,
@@ -2592,7 +2596,7 @@ fn live_keyboard_transpose_quantizes_after_transpose_ramp_offset() {
         2.6,
     );
 
-    assert_eq!(resolved, 4.0);
+    assert_eq!(resolved, 5.0);
 }
 
 #[test]

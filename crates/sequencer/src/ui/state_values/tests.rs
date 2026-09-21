@@ -1,3 +1,5 @@
+#[path = "chorus_ui_tests.rs"]
+mod chorus_ui_tests;
 #[path = "rack_sequencer_restore_tests.rs"]
 mod rack_sequencer_restore_tests;
 #[path = "custom_ui_scope_tests.rs"]
@@ -41120,20 +41122,29 @@ mod solo_binding_tests;
     fn metal_seq_fx_es_compressor_layout_contains_knobs() {
         let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        let mut mode = test_param_map("mode", 0, 0.0, 0.0, 2.0);
+        mode.insert("options".into(), Rc::new(RefCell::new(test_string_list(&["Punch", "Level", "Sustain"]))));
+        mode.insert("value-field".into(), Rc::new(RefCell::new(Value::String("test-es-mode".into()))));
+        let mut tone = test_param_map("tone", 2, 0.0, 0.0, 100.0);
+        tone.insert("value-field".into(), Rc::new(RefCell::new(Value::String("test-es-tone".into()))));
         let params = vec![
-            Value::Map(test_param_map("amount", 0, 50.0, 0.0, 100.0)),
-            Value::Map(test_param_map("attack", 1, 40.0, 1.0, 200.0)),
-            Value::Map(test_param_map("release", 2, 120.0, 20.0, 2000.0)),
-            Value::Map(test_param_map("mix", 3, 1.0, 0.0, 1.0)),
-            Value::Map(test_param_map("drive", 4, 0.0, 0.0, 24.0)),
-            Value::Map(test_param_map("input-db", 5, 0.0, -24.0, 24.0)),
-            Value::Map(test_param_map("output-db", 6, -6.0, -48.0, 6.0)),
-            Value::Map(test_param_map("detector-db", 7, 0.0, -36.0, 36.0)),
-            Value::Map(test_param_map("enabled", 8, 1.0, 0.0, 1.0)),
+            Value::Map(mode),
+            Value::Map(test_param_map("amount", 1, 50.0, 0.0, 100.0)),
+            Value::Map(tone),
+            Value::Map(test_param_map("attack", 3, 40.0, 1.0, 200.0)),
+            Value::Map(test_param_map("release", 4, 120.0, 20.0, 2000.0)),
+            Value::Map(test_param_map("mix", 5, 1.0, 0.0, 1.0)),
+            Value::Map(test_param_map("drive", 6, 0.0, 0.0, 24.0)),
+            Value::Map(test_param_map("input-db", 7, 0.0, -24.0, 24.0)),
+            Value::Map(test_param_map("output-db", 8, 0.0, -48.0, 18.0)),
+            Value::Map(test_param_map("detector-db", 9, 0.0, -36.0, 36.0)),
+            Value::Map(test_param_map("enabled", 10, 1.0, 0.0, 1.0)),
         ];
         editor.runtime_mut().register_reactive(
             "SEQ",
             vec![
+                ("test-es-mode", Value::Number(0.0)),
+                ("test-es-tone", Value::Number(0.0)),
                 ("num-tracks", Value::Number(1.0)),
                 ("compiling", Value::Bool(false)),
                 ("available-effects", test_list(vec![])),
@@ -41181,7 +41192,7 @@ mod solo_binding_tests;
             .eval_str("(eseq.effects.builtin.audio-fx/builtin-audio-fx-ui (nth SEQ.effects 0))")
             .expect("probe es compressor ui")
             .expect("es compressor ui probe value");
-        for text in ["sustain", "mix", "attack", "release", "input", "drive", "detect", "output"] {
+        for text in ["amount", "tone", "mix", "attack", "release", "input", "drive", "detect", "output"] {
             assert!(
                 value_contains_string(&ui_probe, text),
                 "ES Compressor custom UI probe should contain the {text} knob: {ui_probe:?}"
@@ -41198,7 +41209,7 @@ mod solo_binding_tests;
             .expect("fx lisp should create the *fx* buffer")
             .id;
         editor.set_active_buffer(fx_id);
-        editor.set_layout_viewport(128, 20);
+        editor.set_layout_viewport(200, 24);
         let layout = editor.widget_layout().expect("es compressor fx layout");
         assert_finite_layout_tree(&layout);
         assert!(
@@ -41209,12 +41220,40 @@ mod solo_binding_tests;
             layout_contains_debug_name(&layout, "es-compressor-panel"),
             "layout should contain the ES Compressor knob panel body"
         );
-        // Four large knobs (sustain, mix, attack, release) plus four slider
-        // trims in the gain strip (input, drive, detector, output).
         let panel = find_layout_node_by_debug_name(&layout, "es-compressor-panel")
             .expect("es-compressor-panel layout node");
-        assert_eq!(count_widget_type(panel, "knob-number"), 4);
+        assert_eq!(count_widget_type(panel, "knob-number"), 5);
         assert_eq!(count_widget_type(panel, "number-picker"), 4);
+        assert_eq!(count_widget_type(panel, "dropdown"), 1);
+        fn check_controls(node: &eseqlisp::layout::LayoutNode, panel: &eseqlisp::layout::LayoutNode) {
+            if ["knob-number", "number-picker", "dropdown"].contains(&node.widget_type.as_str()) {
+                assert_finite_nonzero_rect(node, "ES Compressor control");
+                assert!(node.rect.col >= panel.rect.col && node.rect.row >= panel.rect.row);
+                assert!(node.rect.col + node.rect.width <= panel.rect.col + panel.rect.width + 0.01);
+                assert!(node.rect.row + node.rect.height <= panel.rect.row + panel.rect.height + 0.01);
+            }
+            for child in &node.children { check_controls(child, panel); }
+        }
+        check_controls(panel, panel);
+        assert!(panel.rect.col >= 0.0 && panel.rect.col + panel.rect.width <= 200.0);
+        assert!(panel.rect.row >= 0.0 && panel.rect.row + panel.rect.height <= 24.0);
+        for name in ["amount", "tone", "mix", "attack", "release", "drive", "input-db", "output-db", "detector-db"] {
+            let control = find_layout_node_by_debug_name(panel, &format!("es-compressor-control-{name}")).unwrap();
+            assert_finite_nonzero_rect(control, name);
+        }
+        let tone = find_layout_node_by_debug_name(panel, "es-compressor-control-tone").unwrap();
+        assert!(matches!(tone.props.get("value"), Some(Value::ReactiveRef { .. })));
+        let selector = find_layout_node_by_debug_name(panel, "es-compressor-mode").unwrap();
+        assert_eq!(selector.props.get("value"), Some(&Value::String("Punch".into())));
+        for mode in 1..=2 {
+            editor.runtime_mut().set_reactive("SEQ", "test-es-mode", Value::Number(mode as f64));
+            editor.runtime_mut().run_reactive_cycle();
+            editor.refresh_runtime_side_effects();
+            let layout = editor.widget_layout().expect("updated ES Compressor layout");
+            let selector = find_layout_node_by_debug_name(&layout, "es-compressor-mode").unwrap();
+            assert_finite_nonzero_rect(selector, "mode selector");
+            assert_eq!(selector.props.get("value"), Some(&Value::String(["Punch", "Level", "Sustain"][mode].into())));
+        }
     }
 
     #[test]

@@ -8,6 +8,7 @@
 (import eseq.effects.builtin.multiverb :as mv)
 (import eseq.effects.builtin.reverb :as rv)
 (import eseq.effects.builtin.dimension :as dim)
+(import eseq.effects.builtin.chorus :as chorus)
 (import eseq.effects.builtin.slowdown :as slow)
 (import eseq.effects.builtin.phaser-flanger :as pf)
 (import eseq.effects.builtin.roar :as roar)
@@ -30,6 +31,8 @@
 ;; Deleted when those tests move to the qualified spelling.
 
 (def builtin-audio-fx-ui (fx)
+  (if (= (get fx :name) "Chorus")
+    (chorus/panel fx)
   (if (= (get fx :name) "Filter")
     (flt/panel fx)
     (if (= (get fx :name) "EQ8")
@@ -71,4 +74,4 @@
                         (fb/panel fx)
                         (if (= (get fx :name) "ES Compressor")
                           (esc/es-compressor-ui fx)
-                          false)))))))))))))))))))))
+                          false))))))))))))))))))))))

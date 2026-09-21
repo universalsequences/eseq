@@ -332,6 +332,7 @@ pub(super) fn render_audio_block(
             // Note-on: allocate voice and trigger
             let mut resolved_transpose = held_transpose.unwrap_or_else(|| resolve_live_keyboard_transpose(
                 &data.state,
+                &data.scheduler_snapshot,
                 data.accumulator_states[kt.track],
                 kt.track,
                 kt.transpose,
