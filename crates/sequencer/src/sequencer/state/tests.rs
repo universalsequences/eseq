@@ -1000,6 +1000,60 @@
     }
 
     #[test]
+    fn unchanged_rack_bindings_preserve_shared_sound_patches() {
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        let mut snapshot = sample_pattern_snapshot(1);
+        snapshot.rack_tracks[0] = Some(sample_rack_track_snapshot());
+        state.replace_pattern_repository(vec![snapshot.clone(), snapshot], 0);
+        state.pattern.rack_tracks.lock().unwrap()[0] = Some(sample_rack_track_snapshot());
+        let desc = EffectDescriptor::builtin_filter();
+        let bindings = vec![(desc.clone(), 42, 43)];
+        assert!(state.sync_rack_slot_instrument_bindings_for_all_patterns(0, &bindings));
+        let before = state.capture_project_scenes();
+        assert!(state.sync_rack_slot_instrument_bindings_for_all_patterns(0, &bindings));
+        let after = state.capture_project_scenes();
+        for (id, patch) in &before.track_pools[0].sounds.patches {
+            assert!(std::sync::Arc::ptr_eq(patch, &after.track_pools[0].sounds.patches[id]));
+        }
+        assert!(state.sync_rack_slot_instrument_bindings_for_all_patterns(0, &[(desc.clone(), 44, 45)]));
+        let rebound = state.capture_project_scenes();
+        for (id, patch) in &before.track_pools[0].sounds.patches {
+            let new = &rebound.track_pools[0].sounds.patches[id];
+            assert!(!std::sync::Arc::ptr_eq(patch, new));
+            assert_eq!(patch.rack_track.as_ref().unwrap().slots[0].instrument_slot.node_id, 42);
+            assert_eq!(new.rack_track.as_ref().unwrap().slots[0].instrument_slot.node_id, 44);
+        }
+        drop(before);
+        drop(after);
+        drop(rebound);
+        // A sole strong owner must invalidate the weak identity too. This
+        // catches stale checks after edits when no undo snapshot owns a copy.
+        let id = state.with_scenes_mut(|scenes| {
+            let pool = &mut scenes.track_pools[0];
+            let id = *pool.sounds.patches.keys().next().unwrap();
+            let patch = pool.sounds.patches.get_mut(&id).unwrap();
+            assert_eq!(std::sync::Arc::strong_count(patch), 1);
+            let slot = &mut std::sync::Arc::make_mut(patch).rack_track.as_mut().unwrap().slots[0].instrument_slot;
+            slot.plocks[3][0] = Some(0.7);
+            slot.plock_param_ids[3][0] = None;
+            id
+        });
+        assert!(state.sync_rack_slot_instrument_bindings_for_all_patterns(0, &[(desc.clone(), 44, 45)]));
+        state.with_scenes(|scenes| {
+            let slot = &scenes.track_pools[0].sounds.patches[&id].rack_track.as_ref().unwrap().slots[0].instrument_slot;
+            assert_eq!(slot.explicit_plock_value(3, 0), Some(0.7));
+        });
+        // An engine can change its schema while retaining its node identity.
+        let mut changed = desc.clone();
+        changed.params[0].node_param_span += 1;
+        assert!(state.sync_rack_slot_instrument_bindings_for_all_patterns(0, &[(changed.clone(), 44, 45)]));
+        state.with_scenes(|scenes| {
+            let slot = &scenes.track_pools[0].sounds.patches[&id].rack_track.as_ref().unwrap().slots[0].instrument_slot;
+            assert_eq!(slot.param_node_spans[0], changed.params[0].node_param_span);
+        });
+    }
+
+    #[test]
     fn pattern_restore_keeps_live_rack_macro_names() {
         let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
         state.replace_pattern_repository(vec![sample_pattern_snapshot(1)], 0);
@@ -1804,6 +1858,35 @@
         assert_eq!(second[0].effect_defaults[1], vec![11.0]);
         assert_eq!(first[0].effect_plocks[1][0][0], Some(1.25));
         assert_eq!(second[0].effect_plocks[1][0][0], Some(1.75));
+    }
+
+    #[test]
+    fn owned_pattern_snapshot_lanes_preserve_data_and_move_grid_storage() {
+        let mut snapshot = sample_pattern_snapshot(3);
+        snapshot.rack_tracks[1] = Some(sample_rack_track_snapshot());
+        let step_storage = snapshot.step_data[1].as_ptr();
+        let rack_storage = snapshot.rack_tracks[1].as_ref().unwrap().slots[0].instrument_slot.plocks.as_ptr();
+        let expected: Vec<_> = (0..3).map(|track|
+            format!("{:?}", snapshot.track_pattern_data(track).unwrap())).collect();
+        let lanes: Vec<_> = snapshot.into_track_pattern_data().collect();
+        assert_eq!(lanes.len(), 3);
+        assert_eq!(lanes[1].step_data.as_ptr(), step_storage);
+        assert_eq!(lanes[1].rack_track.as_ref().unwrap().slots[0].instrument_slot.plocks.as_ptr(), rack_storage);
+        for (lane, expected) in lanes.iter().zip(expected) {
+            assert_eq!(format!("{lane:?}"), expected);
+        }
+
+        // A short optional column defaults without shifting later lanes;
+        // an incomplete required column makes its suffix unextractable.
+        let mut snapshot = sample_pattern_snapshot(3);
+        snapshot.midi_fx_slots.truncate(1);
+        snapshot.instrument_slots.clear();
+        snapshot.rack_tracks.clear();
+        snapshot.effect_slots.truncate(2);
+        let expected: Vec<_> = (0..3).filter_map(|track|
+            snapshot.track_pattern_data(track).map(|lane| format!("{lane:?}"))).collect();
+        let actual: Vec<_> = snapshot.into_track_pattern_data().map(|lane| format!("{lane:?}")).collect();
+        assert_eq!(actual, expected);
     }
 
     #[test]

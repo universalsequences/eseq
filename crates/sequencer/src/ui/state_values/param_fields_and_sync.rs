@@ -1299,34 +1299,23 @@ pub(super) fn sync_all_track_sequencer_state_inner(
     }
 
     let started = profile.as_ref().map(|_| Instant::now());
+    let variants: Vec<_> = (0..app.tracks.len())
+        .map(|track| plock_variant_step_render_values(state, track)).collect();
     let plock_masks: Vec<[u64; MAX_STEPS / 64]> = (0..app.tracks.len())
-        .map(|track| track_step_plock_mask(state, track, &app.graph.effect_descriptors))
+        .map(|track| track_step_plock_mask_with_render(state, track,
+            &app.graph.effect_descriptors, Some(&variants[track])))
         .collect();
     rt.set_reactive(
         "SEQ",
         "track-step-has-plocks",
         build_all_track_step_has_plocks_from_masks(&plock_masks),
     );
-    rt.set_reactive(
-        "SEQ",
-        "track-step-plock-kinds",
-        build_all_track_step_plock_kinds(state, app),
-    );
-    rt.set_reactive(
-        "SEQ",
-        "track-step-variant-r",
-        build_all_track_step_variant_color_channel(state, app, 0),
-    );
-    rt.set_reactive(
-        "SEQ",
-        "track-step-variant-g",
-        build_all_track_step_variant_color_channel(state, app, 1),
-    );
-    rt.set_reactive(
-        "SEQ",
-        "track-step-variant-b",
-        build_all_track_step_variant_color_channel(state, app, 2),
-    );
+    rt.set_reactive("SEQ", "track-step-plock-kinds",
+        list_value(variants.iter().map(|values| build_step_plock_kinds_from_render(values))));
+    for (channel, field) in ["track-step-variant-r", "track-step-variant-g", "track-step-variant-b"].iter().enumerate() {
+        rt.set_reactive("SEQ", field, list_value(variants.iter()
+            .map(|values| build_step_variant_color_channel_from_render(values, channel))));
+    }
     if let Some(profile) = profile.as_deref_mut() {
         profile.track_step_has_plocks = started.expect("profile timer").elapsed();
     }
@@ -1441,6 +1430,7 @@ pub(super) fn sync_all_track_sequencer_state_inner(
             current_track_idx,
             selected_steps,
             &plock_masks,
+            &variants,
         );
     } else {
         sync_all_track_step_binding_fields(
@@ -1450,6 +1440,7 @@ pub(super) fn sync_all_track_sequencer_state_inner(
             current_track_idx,
             selected_steps,
             &plock_masks,
+            &variants,
         );
     }
 
@@ -1565,7 +1556,7 @@ pub(crate) fn sync_fx_step_cursor_binding_fields(
     dirty
 }
 
-pub(crate) fn sync_step_param_lists(rt: &mut Runtime, state: &Arc<SequencerState>, track: usize) {
+pub(crate) fn sync_current_track_step_param_lists(rt: &mut Runtime, state: &Arc<SequencerState>, track: usize) {
     rt.set_reactive(
         "SEQ",
         "velocities",
@@ -1611,6 +1602,10 @@ pub(crate) fn sync_step_param_lists(rt: &mut Runtime, state: &Arc<SequencerState
         "retrig-rates",
         build_param_list(state, track, StepParam::RetrigRate),
     );
+}
+
+pub(crate) fn sync_step_param_lists(rt: &mut Runtime, state: &Arc<SequencerState>, track: usize) {
+    sync_current_track_step_param_lists(rt, state, track);
     rt.set_reactive(
         "SEQ",
         "track-velocities",

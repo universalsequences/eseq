@@ -15345,6 +15345,12 @@ mod solo_binding_tests;
             build_step_has_plocks(&app.state, 0, &app.graph.effect_descriptors),
             Value::List(values) if matches!(*values[3].borrow(), Value::Bool(true))
         ));
+        app.state.pattern.step_data[0].set(7, StepParam::Velocity, 0.25);
+        let render = plock_variant_step_render_values(&app.state, 0);
+        let mask = track_step_plock_mask_with_render(&app.state, 0, &app.graph.effect_descriptors, Some(&render));
+        assert_ne!(mask[0] & (1 << 3), 0, "rack effect lock survives reuse of the variant lanes");
+        assert_ne!(mask[0] & (1 << 7), 0, "sequencer lock survives reuse of the variant lanes");
+        assert_eq!(mask, track_step_plock_mask(&app.state, 0, &app.graph.effect_descriptors));
     }
 
     // Bead eseq-yr6w: the knob dot asks "is this param automated anywhere in
@@ -32713,7 +32719,70 @@ mod solo_binding_tests;
                 ("clips", test_list(vec![clip(1.0, "Intro"), clip(2.0, "Break")])),
             ])]),
         );
+        editor.runtime_mut().set_reactive("SEQ", "rack-clip-banks", test_list(vec![map_value([
+            ("group-id", Value::Number(8.0)),
+            ("clips", test_list(vec![clip(1.0, "Intro"), clip(2.0, "Break")])),
+        ])]));
+        for (field, value) in [("rack-clip-active-8-1", 0.0), ("rack-clip-active-8-2", 1.0), ("rack-clip-index-8", 2.0)] {
+            editor.runtime_mut().set_reactive("SEQ", field, Value::Number(value));
+        }
         editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let seq = editor.buffers.iter().find(|buffer| buffer.name == "*sequencer*").unwrap().id;
+        editor.set_active_buffer(seq);
+        editor.set_layout_viewport(180, 80);
+        let layout = editor.widget_layout().expect("rack clip layout");
+        let cell = find_layout_node_by_stable_key_suffix(&layout, "/rack-clip-8-2").unwrap();
+        let picker = find_layout_node_by_stable_key_suffix(&layout, "/rack-clip-number-8").unwrap();
+        assert_finite_nonzero_rect(cell, "rack clip");
+        assert_finite_nonzero_rect(picker, "rack clip index");
+        assert_layout_inside(cell, &layout, "rack clip");
+        assert_layout_inside(picker, &layout, "rack clip index");
+        assert!(matches!(cell.props.get("active"), Some(Value::ReactiveRef { .. })));
+        assert!(matches!(picker.props.get("value"), Some(Value::ReactiveRef { .. })));
+        assert_eq!(layout_prop_number(cell, "active"), Some(1.0));
+        assert_eq!(layout_prop_number(picker, "value"), Some(2.0));
+
+        let mixer = editor.buffers.iter().find(|buffer| buffer.name == "*mixer*").unwrap().id;
+        let assert_mixer_clip = |editor: &mut Editor, active: usize| {
+            editor.set_active_buffer(mixer);
+            let layout = editor.widget_layout().expect("mixer clip layout");
+            let scroll = find_layout_node_by_stable_key_suffix(&layout, "/rack-clip-scroll-8").unwrap();
+            assert_finite_nonzero_rect(scroll, "mixer clip scroll");
+            assert_layout_inside(scroll, &layout, "mixer clip scroll");
+            assert!(matches!(scroll.props.get("center-row"), Some(Value::ReactiveRef { .. })));
+            assert!((layout_prop_number(scroll, "center-row").unwrap() - (active - 1) as f64 * 0.91).abs() < 0.0001);
+            for id in 1..=2 {
+                let cell = find_layout_node_by_stable_key_suffix(&layout, &format!("/mixer-rack-clip-8-{id}")).unwrap();
+                let play = find_layout_node_by_widget_type(cell, "rack-clip-play").unwrap();
+                assert_finite_nonzero_rect(cell, "mixer clip");
+                assert_finite_nonzero_rect(play, "mixer clip playing marker");
+                assert_layout_inside(cell, &layout, "mixer clip");
+                assert_layout_inside(play, &layout, "mixer clip playing marker");
+                assert!(matches!(play.props.get("playing"), Some(Value::ReactiveRef { .. })));
+                assert_eq!(layout_prop_number(play, "playing"), Some(if id == active { 1.0 } else { 0.0 }));
+            }
+            editor.set_active_buffer(seq);
+        };
+        assert_mixer_clip(&mut editor, 2);
+
+        // A retained binding must repaint without rebuilding the clip roster.
+        editor.runtime_mut().set_reactive("SEQ", "rack-clip-active-8-2", Value::Number(0.0));
+        editor.runtime_mut().set_reactive("SEQ", "rack-clip-active-8-1", Value::Number(1.0));
+        editor.runtime_mut().set_reactive("SEQ", "rack-clip-index-8", Value::Number(1.0));
+        editor.runtime_mut().set_reactive("SEQ", "rack-clips", test_list(vec![map_value([
+            ("group-id", Value::Number(8.0)),
+            ("active", Value::Number(1.0)),
+            ("clips", test_list(vec![clip(1.0, "Intro"), clip(2.0, "Break")])),
+        ])]));
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let layout = editor.widget_layout().unwrap();
+        let cell = find_layout_node_by_stable_key_suffix(&layout, "/rack-clip-8-2").unwrap();
+        let picker = find_layout_node_by_stable_key_suffix(&layout, "/rack-clip-number-8").unwrap();
+        assert_eq!(layout_prop_number(cell, "active"), Some(0.0));
+        assert_eq!(layout_prop_number(picker, "value"), Some(1.0));
+        assert_mixer_clip(&mut editor, 1);
 
         // The bank reads through, including which clip the current scene plays.
         assert_eq!(
@@ -32722,7 +32791,7 @@ mod solo_binding_tests;
         );
         assert_eq!(
             editor.runtime_mut().eval_str("(eseq.drum-rack-v2/active-clip 8)").unwrap(),
-            Some(Value::Number(2.0)),
+            Some(Value::Number(1.0)),
         );
         assert_eq!(
             editor.runtime_mut().eval_str("(eseq.drum-rack-v2/has-clips? 8)").unwrap(),

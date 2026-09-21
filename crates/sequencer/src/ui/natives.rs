@@ -2970,6 +2970,8 @@ pub(crate) fn init_runtime(
                 ("current-track", Value::Number(0.0)),
                 ("selected-tracks", Value::List(vec![])),
                 ("groups", Value::List(vec![])),
+                ("rack-clips", Value::List(vec![])),
+                ("rack-clip-banks", Value::List(vec![])),
                 ("group-collapsed", Value::List(vec![])),
                 // Group id of the pad-armed drum rack; -1 = none.
                 ("armed-rack-id", Value::Number(-1.0)),

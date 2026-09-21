@@ -1783,22 +1783,28 @@
     -1
     (range 0 (len clips))))
 
+;; Follow is a numeric binding, like the playing glyphs. Keep its layout
+;; arithmetic in Lisp and update it without reconstructing the clip column.
+(observe
+  (each (or SEQ.rack-clips (list)) |bank|
+    (let ((row (rack-clip-active-row (get bank :clips) (get bank :active))))
+      (reactive-set "SEQV" (str "rack-clip-center-" (get bank :group-id))
+        (if (>= row 0) (* row (+ rack-clip-row-height 0.01)) -1)))))
+
 ;; Sized so column + the v-stack gap + the meter box equal the spacer-plus-
 ;; 8.1 meter box a clipless group strip has: the meters stay level. Past the
 ;; visible rows the list scrolls, following the active clip the way the
 ;; session-view package follows a track's effective clip: only a changed row
 ;; scrolls, so a manual scroll in between holds.
 (def rack-clip-column (gid gidx)
-  (let ((active (eseq.drum-rack-v2/active-clip gid))
-      (clips (eseq.drum-rack-v2/clips gid))
+  (let ((clips (eseq.drum-rack-v2/clips gid))
       (c (group-color gidx)))
-    (let ((row (rack-clip-active-row clips active))
-        (row-bg (rgba (nth c 0) (nth c 1) (nth c 2) 1.0)))
+    (let ((row-bg (rgba (nth c 0) (nth c 1) (nth c 2) 1.0)))
       (box :key (str "rack-clip-column-" gid)
         :width :fill :height (- (clip-area-height) 0.1) :align :top
         :bg :black :background-color :buffer-bg
         (scroll :key (str "rack-clip-scroll-" gid) :width :fill :height :fill
-          :center-row (if (>= row 0) (* row (+ rack-clip-row-height 0.01)) -1)
+          :center-row (bind "SEQV" (str "rack-clip-center-" gid))
           :center-span rack-clip-row-height
           (v-stack :gap 0.01
             (each clips |clip|
@@ -1810,7 +1816,7 @@
                 :on-click (lambda (event)
                   (eseq.drum-rack-v2/launch-clip gid (get clip :id)))
                 (h-stack :gap 0.3 :align :center
-                  (rack-clip-play :playing (if (= (get clip :id) active) 1 0))
+                  (rack-clip-play :playing (bind-seq (str "rack-clip-active-" gid "-" (get clip :id))))
                   (label (substring (get clip :name) 0 (name-chars 9))
                     :key (str "mixer-rack-clip-label-" gid "-" (get clip :id))
                     :font-size 9 :h-align :left :v-align :center

@@ -502,8 +502,11 @@
     (if (> (len hits) 0) (nth hits 0) nil)))
 
 (def clips (gid)
-  (let ((bank (clip-bank gid)))
-    (if bank (get bank :clips) (list))))
+  ;; The clip roster is independent of scene pointers. A launch must not
+  ;; rebuild every widget that asks whether this rack has clips.
+  (let ((hits (filter (lambda (bank) (= (get bank :group-id) gid))
+                (or SEQ.rack-clip-banks (list)))))
+    (if (> (len hits) 0) (get (nth hits 0) :clips) (list))))
 
 ;; Clip id the CURRENT scene points at, or -1 for silence.
 (def active-clip (gid)

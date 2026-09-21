@@ -502,6 +502,7 @@ pub(crate) fn sync_all_track_step_binding_fields(
     current_track_idx: usize,
     selected_steps: &Arc<Mutex<HashSet<usize>>>,
     plock_masks: &[[u64; MAX_STEPS / 64]],
+    plock_render: &[Vec<PlockVariantStepRender>],
 ) {
     sync_all_track_step_binding_fields_inner(
         rt,
@@ -510,6 +511,7 @@ pub(crate) fn sync_all_track_step_binding_fields(
         current_track_idx,
         selected_steps,
         plock_masks,
+        plock_render,
         None,
     );
 }
@@ -521,6 +523,7 @@ pub(crate) fn sync_all_track_step_binding_fields_profiled(
     current_track_idx: usize,
     selected_steps: &Arc<Mutex<HashSet<usize>>>,
     plock_masks: &[[u64; MAX_STEPS / 64]],
+    plock_render: &[Vec<PlockVariantStepRender>],
 ) -> AllTrackStepBindingSyncProfile {
     let mut profile = AllTrackStepBindingSyncProfile::default();
     sync_all_track_step_binding_fields_inner(
@@ -530,6 +533,7 @@ pub(crate) fn sync_all_track_step_binding_fields_profiled(
         current_track_idx,
         selected_steps,
         plock_masks,
+        plock_render,
         Some(&mut profile),
     );
     profile
@@ -542,6 +546,7 @@ pub(super) fn sync_all_track_step_binding_fields_inner(
     current_track_idx: usize,
     selected_steps: &Arc<Mutex<HashSet<usize>>>,
     plock_masks: &[[u64; MAX_STEPS / 64]],
+    plock_render: &[Vec<PlockVariantStepRender>],
     mut profile: Option<&mut AllTrackStepBindingSyncProfile>,
 ) {
     const WORDS: usize = MAX_STEPS / 64;
@@ -562,7 +567,7 @@ pub(super) fn sync_all_track_step_binding_fields_inner(
         let mut duration_mask = [0u64; WORDS];
         let mut plocked_mask = [0u64; WORDS];
         let mut selected_mask = [0u64; WORDS];
-        let render_values = plock_variant_step_render_values(state, track);
+        let render_values = &plock_render[track];
         let mut max_reach = f64::NEG_INFINITY;
         for step in 0..MAX_STEPS {
             let word = step / 64;
@@ -597,18 +602,16 @@ pub(super) fn sync_all_track_step_binding_fields_inner(
         }
 
         // Skip all per-step writes when this track's lanes are unchanged.
-        let mut rev = String::with_capacity(WORDS * 4 * 16 + 3);
+        let mut rev = String::with_capacity(WORDS * 4 * 16 + render_values.len() * 26);
         for mask in [&active_mask, &duration_mask, &plocked_mask, &selected_mask] {
             for word in mask.iter() {
-                use std::fmt::Write as _;
-                let _ = write!(rev, "{word:016x}");
+                append_step_binding_signature_bytes(&mut rev, &word.to_be_bytes());
             }
         }
-        for render in &render_values {
-            use std::fmt::Write as _;
-            let _ = write!(rev, "{:02x}", render.kind);
+        for render in render_values {
+            append_step_binding_signature_bytes(&mut rev, &[render.kind]);
             for channel in render.color {
-                let _ = write!(rev, "{:08x}", channel.to_bits());
+                append_step_binding_signature_bytes(&mut rev, &channel.to_bits().to_be_bytes());
             }
         }
         let rev_changed = rt
@@ -690,6 +693,16 @@ pub(super) fn sync_all_track_step_binding_fields_inner(
     }
     if let Some(profile) = profile.as_deref_mut() {
         profile.elapsed = total_started.expect("profile timer").elapsed();
+    }
+}
+
+/// Fixed-width lowercase hex preserves the exact signature (including float
+/// bits), without invoking the formatting machinery for every step/channel.
+fn append_step_binding_signature_bytes(out: &mut String, bytes: &[u8]) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    for byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 15) as usize] as char);
     }
 }
 

@@ -314,7 +314,13 @@ pub(super) fn handle(
                 .collect(),
             );
             super::scenes::handle("switch-pattern", relaunch, app, editor, ctx);
-            sync_rack_pad_map(app, editor, &track_groups, &ui_epoch);
+            // Only the scene's clip pointer changed. An immediate launch
+            // already publishes this via sync_pattern_state; a quantized one
+            // still needs its selected clip shown while waiting for the beat.
+            if sync_rack_clip_state(editor.runtime_mut(), &app.state) {
+                editor.runtime_mut().run_reactive_cycle();
+                editor.refresh_runtime_side_effects();
+            }
         }
         "save-rack-clip-as" => {
             let group_id = extract_usize_from_payload(&payload, "group-id").map(|id| id as u64);
@@ -605,7 +611,7 @@ fn sync_rack_pad_map(
     sync_groups_bindings(rt, &app.groups);
     // Clip bank edits (create/rename/delete/convert/launch) do not bump the
     // pattern epoch, so the clip run's source is republished here explicitly.
-    rt.set_reactive("SEQ", "rack-clips", build_rack_clips_value(&app.state));
+    sync_rack_clip_state(rt, &app.state);
     rt.run_reactive_cycle();
     editor.refresh_runtime_side_effects();
     ui_epoch.fetch_add(1, Ordering::Relaxed);

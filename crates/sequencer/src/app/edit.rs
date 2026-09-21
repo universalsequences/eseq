@@ -10056,6 +10056,19 @@ fn replay_patch(app: &mut App, patch: &EditPatch, mode: ApplyMode) -> Result<(),
             app.restore_committed_arrangement_state(target)
                 .map_err(EditError::ReplayFailed)
         }
+        EditPatch::RackClipAssignment(patch) => {
+            let clip = match mode {
+                ApplyMode::Undo => patch.before,
+                ApplyMode::Redo => patch.after,
+                ApplyMode::UserEdit | ApplyMode::ProjectLoad => {
+                    return Err(EditError::ReplayFailed(
+                        "rack-clip assignment replay requires undo or redo mode".to_string(),
+                    ));
+                }
+            };
+            app.restore_rack_clip_assignment(patch.scene, patch.group_id, clip)
+                .map_err(EditError::ReplayFailed)
+        }
         EditPatch::BusGroupStructure(patch) => {
             let target = match mode {
                 ApplyMode::Undo => &patch.before,
@@ -10152,6 +10165,7 @@ fn pending_gesture_publishes_scheduler(patch: &EditPatch) -> bool {
         EditPatch::TrackPresentation(_) => false,
         EditPatch::SceneSlot(_) | EditPatch::SceneSlots(_) => true,
         EditPatch::SceneStructure(_) => true,
+        EditPatch::RackClipAssignment(_) => true,
         // The arrangement's compiled song has no scheduler runtime.
         EditPatch::Arrangement(_) => false,
         EditPatch::BusGroupStructure(_) => true,
@@ -10321,6 +10335,7 @@ fn edit_patch_retained_bytes(patch: &EditPatch) -> usize {
         EditPatch::SceneStructure(patch) => patch.retained_bytes(),
         EditPatch::Arrangement(patch) => patch.retained_bytes(),
         EditPatch::BusGroupStructure(patch) => patch.retained_bytes(),
+        EditPatch::RackClipAssignment(_) => std::mem::size_of::<super::history::RackClipAssignmentPatch>(),
         EditPatch::MacroConfiguration(patch) => patch.retained_bytes(),
         EditPatch::TransportParams(patch) => patch.retained_bytes(),
         EditPatch::BarTranspose(patch) => patch.retained_bytes(),
@@ -10466,7 +10481,7 @@ pub fn cancel_active_gesture(app: &mut App) -> Result<bool, EditError> {
         EditPatch::Arrangement(_) => {
             replay_patch(app, &patch, ApplyMode::Undo)?;
         }
-        EditPatch::BusGroupStructure(_) => {
+        EditPatch::BusGroupStructure(_) | EditPatch::RackClipAssignment(_) => {
             replay_patch(app, &patch, ApplyMode::Undo)?;
         }
         EditPatch::MacroConfiguration(_) => {

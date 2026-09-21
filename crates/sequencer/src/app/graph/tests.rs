@@ -1496,6 +1496,69 @@
     /// survive a project save/load (rack-clips spec §3), and a rack with no
     /// clips comes back legacy.
     #[test]
+    fn rack_clip_assignment_history_preserves_live_edits_and_stable_scene_identity() {
+        use crate::app::{edit, history::{EditPatch, HistoryReplay}};
+        use crate::quantized_launch::PatternLaunchTarget;
+        let engine = crate::audio::engine::init_headless_engine(48_000, 2).unwrap();
+        let mut app = App::new(engine.state, engine.lg_ptr, engine.sample_rate,
+            engine.buses, engine.master_recorder, engine.keyboard_tx);
+        let (group, _) = app.create_drum_rack_recorded(Some("Clips".into())).unwrap();
+        let track = app.graph_controller().add_track(Path::new("../../content/impulses/lexicon-300-rich-plate.wav")).unwrap();
+        app.assign_rack_pad_track_recorded(group, 36, track).unwrap();
+        app.state.with_scenes_mut(|scenes| { scenes.new_scene(); });
+        app.apply_pattern_launch(&PatternLaunchTarget::Scene { scene: 0 }).unwrap();
+        app.state.toggle_step_and_clear_plocks(track, 0);
+        app.apply_pattern_launch(&PatternLaunchTarget::Scene { scene: 1 }).unwrap();
+        app.state.toggle_step_and_clear_plocks(track, 3);
+        app.apply_pattern_launch(&PatternLaunchTarget::Scene { scene: 0 }).unwrap();
+        app.convert_rack_to_clips_recorded(group).unwrap();
+        let original_scene = app.state.current_scene_id().unwrap();
+        let clips = app.rack_clip_bank(group);
+        assert_eq!(clips.len(), 2);
+        let (a, b) = (clips[0].0, clips[1].0);
+        app.history = Default::default();
+        app.state.toggle_step_and_clear_plocks(track, 5);
+        app.set_current_rack_clip_recorded(group, Some(b)).unwrap();
+        assert_eq!(app.history.undo_len(), 1);
+        assert!(matches!(app.history.next_undo_patch(), Some(EditPatch::RackClipAssignment(_))));
+        assert!(app.history.retained_bytes() < 128);
+        app.state.with_scenes(|scenes| {
+            assert_eq!(scenes.live_rack_clips, vec![(group, Some(a))], "assignment does not bypass quantized playback");
+            let pattern = scenes.rack_bank(group).unwrap().clip(a).unwrap().cells[0].unwrap();
+            assert_ne!(scenes.track_pools[track].get(pattern).unwrap().track_bits[0] & (1 << 5), 0);
+        });
+        app.set_current_rack_clip_recorded(group, Some(b)).unwrap();
+        assert_eq!(app.history.undo_len(), 1, "relaunching the same clip adds no edit");
+        assert!(app.set_current_rack_clip_recorded(group, Some(u64::MAX)).is_err());
+        assert_eq!(app.history.undo_len(), 1);
+        let before_version = app.state.scheduler_snapshot_version();
+        app.apply_manual_pattern_launch(&PatternLaunchTarget::Scene { scene: 0 }).unwrap();
+        assert_eq!(app.state.scheduler_snapshot_version(), before_version + 1,
+            "publish only the complete launch, after bindings and override pins");
+        assert!(matches!(edit::undo(&mut app), HistoryReplay::Applied(_)));
+        app.state.with_scenes(|scenes| {
+            assert_eq!(scenes.current_rack_clip(group), Some(a));
+            assert_eq!(scenes.live_rack_clips, vec![(group, Some(a))]);
+        });
+        assert!(matches!(edit::redo(&mut app), HistoryReplay::Applied(_)));
+        assert_eq!(app.state.with_scenes(|scenes| scenes.current_rack_clip(group)), Some(b));
+
+        // Undo after navigating and reordering addresses the recorded scene,
+        // and leaves the newly selected scene's audible clip alone.
+        app.apply_pattern_launch(&PatternLaunchTarget::Scene { scene: 1 }).unwrap();
+        let selected = app.state.current_scene_id();
+        app.state.reorder_scene(0, 1).unwrap();
+        assert!(matches!(edit::undo(&mut app), HistoryReplay::Applied(_)));
+        assert_eq!(app.state.current_scene_id(), selected);
+        app.state.with_scenes(|scenes| {
+            let index = scenes.scene_index(original_scene).unwrap();
+            assert_eq!(scenes.scene_rack_clip(index, group), Some(a));
+            assert_eq!(scenes.current_rack_clip(group), Some(b));
+            assert_eq!(scenes.live_rack_clips, vec![(group, Some(b))]);
+        });
+    }
+
+    #[test]
     fn dropping_a_sample_on_an_empty_pad_of_a_clip_bearing_rack_adds_a_member_with_a_cell() {
         let engine = crate::audio::engine::init_headless_engine(48_000, 2).unwrap();
         let lg = engine.lg_ptr;

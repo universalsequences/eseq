@@ -565,10 +565,7 @@ impl SequencerState {
     /// pool, silently discarding the recording.
     pub fn pin_track_override_to_effective(&self, track: usize) -> bool {
         let mut scenes = self.pattern.scenes.lock().unwrap();
-        let Some(id) = scenes.effective_pattern_id(track) else {
-            return false;
-        };
-        scenes.launch_track_pattern(track, id).is_some()
+        scenes.pin_track_override_to_effective(track)
     }
 
     /// Latch specific tracks (a manual track launch during song playback).

@@ -868,7 +868,9 @@ pub(super) fn handle(
                         sync_piano_roll_state(rt, app, &state, ct, &piano_roll_selection);
                         sync_piano_elapsed = started.elapsed();
                         let started = Instant::now();
-                        sync_step_param_lists(rt, &state, ct);
+                        // The all-track pass above already published its parameter lists.
+                        sync_current_track_step_param_lists(rt, &state, ct);
+                        sync_process_chain_state(rt, &state, state.active_track_count(), ct);
                         sync_step_params_elapsed = started.elapsed();
                         let started = Instant::now();
                         sync_track_mixer_state(rt, &app, &state);

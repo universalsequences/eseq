@@ -393,6 +393,10 @@ impl SequencerState {
         scene_slots: SceneSlotStore,
         project_process_chain: crate::process::TrackProcessChain,
     ) -> Arc<SequencerSnapshot> {
+        if self.publish_coalesce_depth.load(Ordering::Acquire) > 0 {
+            self.pending_coalesced_publish.store(true, Ordering::Release);
+            return self.latest_scheduler_snapshot();
+        }
         self.publish_scheduler_snapshot_arc(Arc::new(
             SequencerSnapshot::capture_from_track_pattern_data(
                 self,
