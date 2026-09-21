@@ -8,7 +8,7 @@ use super::{
     get_f32_prop, plock_active, plock_color, resolve_named_color, styled_cell,
 };
 use crate::layout::{
-    Constraints, DEFAULT_FONT_SIZE, LayoutNode, MeasureCtx, Rect, Size, f64_to_f32, get_map,
+    Constraints, DEFAULT_FONT_SIZE, LayoutNode, MeasureCtx, Rect, Size, TextMeasurer, f64_to_f32, get_map,
     get_prop_num,
 };
 use crate::theme;
@@ -85,10 +85,6 @@ thread_local! {
     /// mounted conditional subtree can receive one numeric ID for its first
     /// interaction and another after the resulting relayout.
     static STATE_KEYS_BY_WIDGET_ID: RefCell<HashMap<u64, DropdownStateKey>> = RefCell::new(HashMap::new());
-    /// Cached per-character cell widths for dropdown labels.
-    /// Key: (font_size_bits, text) -> cell-widths for each character.
-    static CHAR_WIDTH_CACHE: RefCell<HashMap<(u32, String), Vec<f32>>> =
-        RefCell::new(HashMap::new());
 }
 
 fn state_key_for_widget_id(widget_id: u64) -> DropdownStateKey {
@@ -340,71 +336,44 @@ fn props_from_node(node: &Value) -> HashMap<String, Value> {
         .collect()
 }
 
-fn cache_text_widths(text: &str, font_size: f32, ctx: &MeasureCtx<'_>) {
-    let Some(measurer) = ctx.text_measurer else {
-        return;
-    };
-    let key = (font_size.to_bits(), text.to_string());
-    CHAR_WIDTH_CACHE.with(|cache| {
-        let mut cache = cache.borrow_mut();
-        cache.entry(key).or_insert_with(|| {
-            text.chars()
-                .map(|ch| measurer.measure_text_px(&ch.to_string(), font_size) / ctx.cell_w)
-                .collect()
-        });
-    });
+fn text_width_cells(
+    text: &str, font_size: f32, cell_w: f32, measurer: Option<&dyn TextMeasurer>,
+) -> f32 {
+    match measurer {
+        Some(measurer) if cell_w > 0.0 => measurer.measure_text_px(text, font_size) / cell_w,
+        _ => text.chars().count() as f32 * APPROX_CHAR_WIDTH * (font_size / DEFAULT_FONT_SIZE),
+    }
 }
 
-fn text_width_cells(text: &str, font_size: f32) -> f32 {
-    let key = (font_size.to_bits(), text.to_string());
-    CHAR_WIDTH_CACHE.with(|cache| {
-        cache
-            .borrow()
-            .get(&key)
-            .map(|widths| widths.iter().sum())
-            .unwrap_or_else(|| text.chars().count() as f32 * APPROX_CHAR_WIDTH)
-    })
+fn render_text_width_cells(text: &str, font_size: f32, cell_w: f32) -> f32 {
+    // Fixed-size parents and retained layouts can skip intrinsic measurement.
+    // Use the current render font and cell width, never measure-pass side effects
+    // or cell widths cached under an earlier display scale.
+    super::with_render_text_measurer(|measurer| {
+        text_width_cells(text, font_size, cell_w, Some(measurer))
+    }).unwrap_or_else(|| text_width_cells(text, font_size, cell_w, None))
 }
 
-fn truncate_text_to_width(text: &str, max_width: f32, font_size: f32) -> String {
+fn truncate_text_to_width(text: &str, max_width: f32, font_size: f32, cell_w: f32) -> String {
     if max_width <= 0.0 || text.is_empty() {
         return String::new();
     }
 
-    let key = (font_size.to_bits(), text.to_string());
-    let widths = CHAR_WIDTH_CACHE.with(|cache| cache.borrow().get(&key).cloned());
-
-    let fits_full = widths
-        .as_ref()
-        .map(|w| w.iter().sum::<f32>() <= max_width)
-        .unwrap_or_else(|| text_width_cells(text, font_size) <= max_width);
-    if fits_full {
+    if render_text_width_cells(text, font_size, cell_w) <= max_width {
         return text.to_string();
     }
 
     let mut acc = 0.0;
     let mut out = String::new();
 
-    match widths {
-        Some(widths) => {
-            for (ch, ch_width) in text.chars().zip(widths.iter().copied()) {
-                if acc + ch_width > max_width {
-                    break;
-                }
-                out.push(ch);
-                acc += ch_width;
-            }
+    for ch in text.chars() {
+        let mut utf8 = [0; 4];
+        let width = render_text_width_cells(ch.encode_utf8(&mut utf8), font_size, cell_w);
+        if acc + width > max_width {
+            break;
         }
-        None => {
-            let fallback = APPROX_CHAR_WIDTH;
-            for ch in text.chars() {
-                if acc + fallback > max_width {
-                    break;
-                }
-                out.push(ch);
-                acc += fallback;
-            }
-        }
+        out.push(ch);
+        acc += width;
     }
 
     out
@@ -575,38 +544,26 @@ impl WidgetDefinition for DropdownWidget {
         let font_size = get_prop_num(node, "font-size")
             .map(f64_to_f32)
             .unwrap_or(ctx.inherited_font_size);
-        let menu_font_size = super::menu_style::menu_font_size_from_node(node);
         let props = props_from_node(node);
         let action_menu = is_action_menu(&props);
         let selected = get_selected(&props);
         let options = get_options(&props);
-        if ctx.text_measurer.is_some() {
-            if !selected.is_empty() {
-                cache_text_widths(&selected, font_size, ctx);
-            }
-            for option in &options {
-                cache_text_widths(&option, font_size, ctx);
-                cache_text_widths(&option, menu_font_size, ctx);
-            }
-        }
         let height = get_prop_num(node, "height")
             .map(f64_to_f32)
             .unwrap_or(if action_menu { 1.1 } else { 1.5 });
         let explicit_width = get_prop_num(node, "width").map(f64_to_f32);
         let width = explicit_width.unwrap_or(if action_menu { 2.2 } else { 10.0 });
         if action_menu {
-            if ctx.text_measurer.is_some() {
-                cache_text_widths(&action_menu_icon(&props), font_size, ctx);
-            }
             return Some(Size { width, height });
         }
+        let text_width = |text: &str| text_width_cells(text, font_size, ctx.cell_w, ctx.text_measurer);
         let selected_width = if props.contains_key("value-index") {
             options
                 .iter()
-                .map(|option| text_width_cells(option, font_size))
-                .fold(text_width_cells(&selected, font_size), f32::max)
+                .map(|option| text_width(option))
+                .fold(text_width(&selected), f32::max)
         } else {
-            text_width_cells(&selected, font_size)
+            text_width(&selected)
         };
         let chevron_width = height * 0.48 * 1.8;
         let min_width =
@@ -953,7 +910,7 @@ impl WidgetDefinition for DropdownWidget {
                 height: (node.rect.height - 0.16).max(0.0),
             };
             let selected_display =
-                truncate_text_to_width(&selected, text_clip_rect.width, font_size);
+                truncate_text_to_width(&selected, text_clip_rect.width, font_size, viewport.cell_w);
             if !selected_display.is_empty() && text_clip_rect.width > 0.0 {
                 prims.push(GpuPrimitive::PushClipRect(text_clip_rect));
                 prims.push(GpuPrimitive::ProportionalText(
@@ -1051,7 +1008,7 @@ impl WidgetDefinition for DropdownWidget {
             };
             let max_option_width = options
                 .iter()
-                .map(|o| text_width_cells(o, menu_font_size))
+                .map(|o| render_text_width_cells(o, menu_font_size, viewport.cell_w))
                 .fold(0.0_f32, f32::max);
             let content_width = text_left_pad + max_option_width + PADDING_H + scrollbar_pad;
             let menu_width = content_width.max(node.rect.width);
@@ -1131,7 +1088,7 @@ impl WidgetDefinition for DropdownWidget {
 
                 // Option label
                 let option_display =
-                    truncate_text_to_width(option, item_text_width, menu_font_size);
+                    truncate_text_to_width(option, item_text_width, menu_font_size, viewport.cell_w);
                 if option_display.is_empty() {
                     continue;
                 }
@@ -1441,8 +1398,8 @@ mod tests {
 
     #[test]
     fn truncation_does_not_spend_width_on_ellipsis() {
-        assert_eq!(truncate_text_to_width("-1oct", 2.0, 10.0), "-1o");
-        assert!(!truncate_text_to_width("-1oct", 2.0, 10.0).contains('…'));
+        assert_eq!(truncate_text_to_width("-1oct", 2.0, DEFAULT_FONT_SIZE, 10.0), "-1o");
+        assert!(!truncate_text_to_width("-1oct", 2.0, DEFAULT_FONT_SIZE, 10.0).contains('…'));
     }
 
     #[test]
@@ -1474,6 +1431,62 @@ mod tests {
         assert!(geometry.visible_height <= 10.0);
         assert_eq!(geometry.menu_top, -2.9);
         assert!(geometry.max_scroll > 0.0);
+    }
+
+    #[test]
+    fn fixed_size_parent_dropdown_keeps_menu_text_inside_padding() {
+        struct Font(f32);
+        impl crate::layout::TextMeasurer for Font {
+            fn measure_text_px(&self, text: &str, font_size: f32) -> f32 {
+                text.chars().count() as f32 * font_size * self.0
+            }
+            fn line_height_px(&self, font_size: f32) -> f32 { font_size * self.0 }
+        }
+
+        let mut runtime = crate::Runtime::new();
+        let tree = runtime.eval_str(r#"
+            (box :width 4.2 :height 0.8
+              (dropdown :width 4.2 :height 0.5 :font-size 10
+                :value "A" :options '("A" "B" "Wide menu option")))
+        "#).unwrap().unwrap();
+        // A stretched child of a fixed-size box never needs intrinsic
+        // measurement. Rendering must still use the current font/cell metrics.
+        for (scale, cell_w) in [(1.2, 10.0), (2.4, 12.0)] {
+            let font = Rc::new(Font(scale));
+            super::super::set_render_text_measurer(font.clone());
+            let engine = crate::layout::LayoutEngine::with_text_measurer(
+                100, 30, 1.0, font.as_ref(), cell_w, 20.0);
+            let layout = engine.layout(&tree).unwrap();
+            let node = &layout.children[0];
+            assert!(node.rect.width.is_finite() && node.rect.width > 0.0);
+            assert!(node.rect.height.is_finite() && node.rect.height > 0.0);
+            let viewport = WidgetViewport {
+                cell_w, cell_h: 20.0, vp_w: 1000.0, vp_h: 600.0,
+                time_seconds: 0.0, focused_widget_id: None, focused_branch: false,
+                overlay_viewport_bottom: 30.0, scroll_top: 0.0, scroll_left: 0.0,
+                inherited_hover: false,
+            };
+            super::super::clear_overlay();
+            close_dropdown(node.widget_id);
+            DROPDOWN_WIDGET.mouse_event(node, MouseEventKind::Down(MouseButton::Left),
+                node.rect.col, node.rect.row, None, None, KeyModifiers::NONE, cell_w, 20.0);
+            let (_, overlays) = super::super::collect_gpu_primitives(node, viewport, 0.0, 30);
+            let panel = super::super::get_overlay_rect().expect("open menu bounds");
+            let labels: Vec<_> = overlays.iter().filter_map(|primitive| match primitive {
+                GpuPrimitive::ProportionalText(text) => Some(text),
+                _ => None,
+            }).collect();
+            assert_eq!(labels.len(), 3);
+            assert_eq!(labels[2].text, "Wide menu option", "the menu must fit its complete options");
+            for label in labels {
+                let text_width = crate::layout::TextMeasurer::measure_text_px(
+                    font.as_ref(), &label.text, label.font_size) / cell_w;
+                assert!(label.col + text_width + PADDING_H <= panel.col + panel.width + 0.001,
+                    "menu text must leave right padding: text={:?}, panel={panel:?}", label.text);
+            }
+            close_dropdown(node.widget_id);
+            super::super::clear_overlay();
+        }
     }
 
     #[test]

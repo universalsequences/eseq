@@ -4674,6 +4674,123 @@ fn tree_header_rows_are_not_selectable_or_keyboard_targets() {
 }
 
 #[test]
+fn tree_right_click_reaches_on_right_click_with_the_hit_item() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.set_layout_viewport(40, 10);
+    editor
+        .runtime
+        .eval_str(
+            r#"
+                (def selected (state ""))
+                (def menu-item (state ""))
+                (def menu-phase (state ""))
+                (def menu-count (state 0))
+                (effect
+                  (tree
+                    :focusable true
+                    :row-height 1.0
+                    :items '(
+                      (:label "one" :path "/one.lisp" :status-icon :check)
+                      (:label "two" :path "/two.lisp"))
+                    :on-select (lambda (item) (set! selected (get item :label)))
+                    :on-right-click (lambda (event)
+                      (do
+                        (set! menu-count (+ menu-count 1))
+                        (set! menu-phase (get event :phase))
+                        (set! menu-item (if (= (get event :item) nil) "none" (get (get event :item) :label)))))))
+                "#,
+        )
+        .unwrap();
+    editor.set_layout_viewport(40, 10);
+
+    editor.handle_mouse_precise(
+        mouse_event(MouseEventKind::Down(MouseButton::Right), 1, 1),
+        0,
+        0,
+        40,
+        10,
+        1.0,
+        1.2,
+    );
+    assert_eq!(
+        editor.runtime.eval_str("menu-item").unwrap().unwrap(),
+        Value::String("two".to_string()),
+        "the right-clicked row's item rides on the event"
+    );
+    assert_eq!(
+        editor.runtime.eval_str("menu-phase").unwrap().unwrap(),
+        Value::String("right-click".to_string())
+    );
+    assert_eq!(
+        editor.runtime.eval_str("selected").unwrap().unwrap(),
+        Value::String(String::new()),
+        "a right-click never fires :on-select"
+    );
+
+    // Outside the tree nothing fires.
+    editor.handle_mouse_precise(
+        mouse_event(MouseEventKind::Down(MouseButton::Right), 1, 6),
+        0,
+        0,
+        40,
+        10,
+        1.0,
+        6.2,
+    );
+    assert_eq!(
+        editor.runtime.eval_str("menu-count").unwrap().unwrap(),
+        Value::Number(1.0)
+    );
+
+    // ctrl+click is the macOS right-click synonym.
+    let mut ctrl_click = mouse_event(MouseEventKind::Down(MouseButton::Left), 1, 0);
+    ctrl_click.modifiers = KeyModifiers::CONTROL;
+    editor.handle_mouse_precise(ctrl_click, 0, 0, 40, 10, 1.0, 0.2);
+    assert_eq!(
+        editor.runtime.eval_str("menu-item").unwrap().unwrap(),
+        Value::String("one".to_string())
+    );
+    assert_eq!(
+        editor.runtime.eval_str("selected").unwrap().unwrap(),
+        Value::String(String::new())
+    );
+}
+
+#[test]
+fn tree_without_right_click_handler_swallows_right_clicks() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.set_layout_viewport(40, 10);
+    editor
+        .runtime
+        .eval_str(
+            r#"
+                (def selected (state ""))
+                (effect
+                  (tree
+                    :items '((:label "one" :path "/one.lisp"))
+                    :on-select (lambda (item) (set! selected (get item :label)))))
+                "#,
+        )
+        .unwrap();
+    editor.set_layout_viewport(40, 10);
+    editor.handle_mouse_precise(
+        mouse_event(MouseEventKind::Down(MouseButton::Right), 1, 0),
+        0,
+        0,
+        40,
+        10,
+        1.0,
+        0.2,
+    );
+    assert_eq!(
+        editor.runtime.eval_str("selected").unwrap().unwrap(),
+        Value::String(String::new())
+    );
+}
+
+#[test]
 fn tree_double_click_activates_leaf() {
     let runtime = Runtime::new();
     let mut editor = Editor::new(runtime, EditorConfig::default());

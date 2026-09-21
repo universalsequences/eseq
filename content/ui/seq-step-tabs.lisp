@@ -55,6 +55,8 @@
         seq-refresh-step-tabs-if-present
         seq-register-step-sequencer-tab
         seq-register-script-step-sequencer-tab
+        seq-register-source-tab
+        seq-select-main-step-tab-by-buffer
         seq-unregister-step-sequencer-tab
         seq-clear-project-script-tabs
         seq-select-main-step-tab-by-index)
@@ -96,26 +98,39 @@
   (nth tab 1))
 
 (def seq-step-tab-sequencer-name (tab)
-  (if (> (len tab) 2) (nth tab 2) ""))
+  (if (and (> (len tab) 2) (not (seq-source-step-tab? tab))) (nth tab 2) ""))
+
+;; A source tab is a plain closable view onto a file (a package module,
+;; init.lisp, the project scratch), registered as (label buffer :source).
+;; Its × only closes the tab; attaching and detaching packages is the
+;; Packages tab's job, never a tab lifecycle side effect.
+(def seq-source-step-tab? (tab)
+  (and (> (len tab) 2) (= (nth tab 2) :source)))
 
 (def seq-step-tab-source-path (tab)
   (if (> (len tab) 3) (nth tab 3) ""))
 
 (def seq-script-step-tab? (tab)
-  (> (len tab) 2))
+  (and (> (len tab) 2) (not (seq-source-step-tab? tab))))
 
 (def seq-step-tab-matches-buffer? (tab buffer)
   (= (seq-step-tab-buffer tab) buffer))
 
 (def seq-render-step-tab (tab)
   (let ((buffer (seq-step-tab-buffer tab)))
+    (if (seq-source-step-tab? tab)
+      (list (seq-step-tab-label tab)
+        buffer
+        :on-close
+        (lambda (closed-buffer tab-index)
+          (host-command "packages-close-source" (dict :buffer closed-buffer))))
     (if (seq-script-step-tab? tab)
       (list (seq-step-tab-label tab)
         buffer
         :on-close
         (lambda (closed-buffer tab-index)
           (eseq.seq-script-picker/seq-delete-script-sequencer-by-buffer closed-buffer)))
-      (list (seq-step-tab-label tab) buffer))))
+      (list (seq-step-tab-label tab) buffer)))))
 
 (def seq-main-step-tabs ()
   (append (list (list "Seq" "*sequencer*"))
@@ -182,6 +197,23 @@
             seq-registered-step-tabs)
           (list (list label buffer sequencer-name project-source-path))))
       (seq-refresh-step-tabs-if-present))))
+
+(def seq-register-source-tab (label buffer)
+  (do
+    (set! seq-registered-step-tabs
+      (append
+        (filter (lambda (tab) (not (seq-step-tab-matches-buffer? tab buffer)))
+          seq-registered-step-tabs)
+        (list (list label buffer :source))))
+    (seq-refresh-step-tabs-if-present)))
+
+(def seq-select-main-step-tab-by-buffer (buffer)
+  (let ((tabs (seq-main-step-tabs))
+        (hits (filter (lambda (i) (seq-step-tab-matches-buffer? (nth tabs i) buffer))
+                (range (len tabs)))))
+    (if (> (len hits) 0)
+      (seq-select-main-step-tab-by-index (+ (nth hits 0) 1))
+      false)))
 
 (def seq-unregister-step-sequencer-tab (buffer)
   (do

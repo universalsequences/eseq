@@ -7106,6 +7106,7 @@ pub(crate) fn init_runtime(
     register_sample_import_natives(&mut runtime);
     crate::host_commands::packages::register_package_import_natives(&mut runtime);
     crate::host_commands::packages::register_package_export_natives(&mut runtime);
+    crate::host_commands::packages::register_package_tree_natives(&mut runtime, state.clone());
     runtime.register_reactive("EXPORT", vec![], true);
 
     let sample_db_for_search = sample_db.clone();

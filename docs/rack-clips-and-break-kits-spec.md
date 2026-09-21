@@ -533,7 +533,10 @@ The import has two halves, because the App cannot evaluate Lisp:
   exporting rack and is meaningless here — record the entries with
   `attach_rack_sequencer_recorded` (which republishes the module owner map),
   then install the clip bank, rewriting each clip override's `sequencer_id`
-  through that old→new map and its `owner_rack` to the new group.
+  through that old→new map and its `owner_rack` to the new group. Bind every
+  imported member lane's output to the destination rack's backing bus before
+  storing the clip: saved output bus IDs belong to the exporting project.
+  This also applies when auditioning a kit onto an existing rack.
 - **Host half** (`ui/host_commands/drum_rack_v2.rs`): evaluate each recorded
   source under the new rack (`evaluate_rack_sequencer_source`), reporting
   failures by module. A missing package is reported and the rest lands; the

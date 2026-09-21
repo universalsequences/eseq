@@ -1038,6 +1038,112 @@
         );
     }
 
+    fn assert_imported_kit_clips_use_the_destination_bus(audition: bool) {
+        use crate::quantized_launch::PatternLaunchTarget;
+
+        let graph = TestLiveGraph::new("kit-clip-output-routing-test");
+        let mut app = test_app_with_track_count(&graph, 0);
+        let sample = Path::new("../../content/impulses/lexicon-300-rich-plate.wav");
+        let (source_group, source_bus) = app
+            .create_drum_rack_recorded(Some("Source rack".to_string()))
+            .expect("source rack");
+        let source_track = app.graph_controller().add_track(sample).expect("source sample");
+        app.assign_rack_pad_track_recorded(source_group, 36, source_track).expect("source pad");
+        app.state.with_scenes_mut(|scenes| {
+            scenes.new_scene();
+        });
+        for scene in 0..2 {
+            app.apply_pattern_launch(&PatternLaunchTarget::Scene { scene }).expect("source scene");
+            app.state.toggle_step_and_clear_plocks(source_track, scene);
+        }
+        let (kit, warnings) = app.capture_rack_as_kit(
+            source_group, "Routing kit", Vec::new(), String::new(), &[0, 1],
+        ).expect("capture kit clips");
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(kit.clips.len(), 2);
+        for clip in &kit.clips {
+            assert!(matches!(clip.pattern.track_params[0].output,
+                crate::project::ProjectTrackOutput::Bus { id } if id == source_bus.0));
+        }
+        let directory = tempfile::tempdir().expect("kit directory");
+        let path = directory.path().join("Routing.kit");
+        std::fs::write(&path, serde_json::to_vec(&kit).expect("serialize kit")).expect("write kit");
+
+        // Keep the source rack in this project: its bus ID is valid here but
+        // belongs to another group, just like importing into an existing song.
+        let destination_group = if audition {
+            let (group, _) = app.create_drum_rack_recorded(Some("Destination rack".to_string()))
+                .expect("destination rack");
+            let track = app.graph_controller().add_track(sample).expect("destination sample");
+            app.assign_rack_pad_track_recorded(group, 36, track).expect("destination pad");
+            assert_eq!(app.load_kit_onto_rack(group, &path).expect("audition kit"), "Routing kit");
+            group
+        } else {
+            let (group, failures) = app.load_kit_as_rack(&path).expect("load kit as new rack");
+            assert!(failures.is_empty(), "{failures:?}");
+            group
+        };
+        let destination = app.groups.iter().find(|group| group.id == destination_group)
+            .expect("destination group");
+        let destination_bus = BusId(destination.bus_id);
+        let destination_track = destination.members[0];
+        assert_ne!(destination_bus, source_bus);
+        app.state.with_scenes(|scenes| {
+            let bank = scenes.rack_bank(destination_group).expect("imported clip bank");
+            for clip in &bank.clips {
+                let lane = scenes.track_pools[destination_track].get(clip.cells[0].expect("clip cell"))
+                    .expect("imported lane");
+                assert_eq!(lane.track_params.output, TrackOutput::Bus(destination_bus),
+                    "every imported clip must belong to the destination bus before its first launch");
+            }
+        });
+
+        // Drive the actual member signal path and read both bus meters so a
+        // correct stored value with a stale audio-graph edge cannot pass.
+        let nodes = app.graph.track_node_ids[destination_track].clone();
+        let source_l = graph.add_constant_source("kit_routing_source_l");
+        let source_r = graph.add_constant_source("kit_routing_source_r");
+        unsafe {
+            crate::audiograph::graph_connect(graph.ptr.0, source_l, 0, nodes.voice_sum_id, 0);
+            crate::audiograph::graph_connect(graph.ptr.0, source_r, 0, nodes.voice_sum_r_id, 0);
+        }
+        let source_meter = app.graph.bus_node_ids.iter().find(|nodes| nodes.id == source_bus)
+            .expect("source bus nodes").meter_id;
+        let destination_meter = app.graph.bus_node_ids.iter().find(|nodes| nodes.id == destination_bus)
+            .expect("destination bus nodes").meter_id;
+        let peak = |meter| {
+            graph.read_node_state::<{ crate::effects::peak_meter::PEAK_METER_STATE_SIZE }>(meter)
+                .expect("watched bus meter")[crate::effects::peak_meter::STATE_PEAK_L]
+        };
+        for (index, (clip_id, _, _)) in app.rack_clip_bank(destination_group).into_iter().enumerate() {
+            app.apply_pattern_launch(&PatternLaunchTarget::Scene { scene: index })
+                .expect("destination scene");
+            app.set_current_rack_clip_recorded(destination_group, Some(clip_id)).expect("select clip");
+            app.apply_pattern_launch(&PatternLaunchTarget::Scene { scene: index }).expect("launch clip");
+            assert_eq!(app.state.pattern.track_params[destination_track].output(),
+                TrackOutput::Bus(destination_bus));
+            assert_eq!(app.state.pattern.track_params[source_track].output(),
+                TrackOutput::Bus(source_bus), "the existing group's routing stays intact");
+            assert!(app.state.pattern.patterns[destination_track].is_active(index),
+                "the imported clip still carries its steps");
+            for _ in 0..120 {
+                graph.process_block();
+            }
+            assert!(peak(destination_meter) > 0.1, "the imported track reaches its own bus");
+            assert!(peak(source_meter) < 0.001, "the imported track must not reach the existing bus");
+        }
+    }
+
+    #[test]
+    fn new_kit_rack_clips_route_audio_to_the_new_bus() {
+        assert_imported_kit_clips_use_the_destination_bus(false);
+    }
+
+    #[test]
+    fn auditioned_kit_clips_route_audio_to_the_selected_rack_bus() {
+        assert_imported_kit_clips_use_the_destination_bus(true);
+    }
+
     /// The arrangement path: a song row that recalls a scene is mirrored on
     /// the control thread through `apply_song_row_control`, which must
     /// rewire the scene-locked track output exactly like a live launch.

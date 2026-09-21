@@ -89,6 +89,13 @@
 ;; keyspace).  Inside this module a bare read/write still compiles to
 ;; Load/StoreState on that flat key, so both sides hit one node.
 (def search-filter (state ""))
+;; Packages tab context menu + inline "New Package" name field.
+(def package-menu-open (state false))
+(def package-menu-col (state 0))
+(def package-menu-row (state 0))
+(def package-menu-item (state nil))
+(def package-new-mode (state false))
+(def package-new-name (state ""))
 (def source-buffer "")
 (defstate mode "audition")
 (defstate eseq.vanilla/sbrowser-tab "samples")
@@ -603,8 +610,8 @@
     (if (= sbrowser-tab "instruments") "audio-fx"
       (if (= sbrowser-tab "audio-fx") "midi-fx"
         (if (= sbrowser-tab "midi-fx") "presets"
-          (if (= sbrowser-tab "presets") "scripts"
-            (if (= sbrowser-tab "scripts") "projects"
+          (if (= sbrowser-tab "presets") "packages"
+            (if (= sbrowser-tab "packages") "projects"
               "samples"))))))))
 
 (def next-tab ()
@@ -626,7 +633,7 @@
       (if (= sbrowser-tab "audio-fx") (tree-key "audio-fx-tab-tree")
         (if (= sbrowser-tab "midi-fx") (tree-key "midi-fx-tab-tree")
           (if (= sbrowser-tab "presets") (tree-key "presets-tab-tree")
-            (if (= sbrowser-tab "scripts") (tree-key "scripts-tab-tree")
+            (if (= sbrowser-tab "packages") (tree-key "packages-tab-tree")
               (tree-key "projects-tab-tree"))))))))))
 
 (def list-contains? (items value)
@@ -701,7 +708,7 @@
       (if (= sbrowser-tab "audio-fx") "Search audio effects..."
         (if (= sbrowser-tab "midi-fx") "Search MIDI effects..."
           (if (= sbrowser-tab "presets") "Search presets..."
-            (if (= sbrowser-tab "scripts") "Search scripts..."
+            (if (= sbrowser-tab "packages") "Search packages..."
               "Search projects..."))))))))
 
 (def empty-message (message)
@@ -793,29 +800,6 @@
         (dict :name name))))
   (eseq.seq-panels/seq-show-fx-lower-panel)
   (status (str "Load preset: " name)))
-
-(def select-script (item)
-  (let ((kind (get item :kind))
-        (label (get item :label)))
-    (if (= kind "script")
-      (status (str label))
-      (if (= kind "folder")
-        (status (str "Folder: " label))
-        (status "Choose a script")))))
-
-(def activate-script (item)
-  (let ((kind (get item :kind))
-        (path (get item :path)))
-    (if (and (= kind "script") path)
-      (do
-        ;; Event-time calls through the temporary identity-alias rung avoid a
-        ;; compile-time cycle: the picker imports the step-tab registry, whose
-        ;; close callback reaches back into the picker. eseq-mods.17 removes
-        ;; this legacy Scripts path entirely.
-        (seq-script-remember-source-buffer)
-        (seq-script-load-file path)
-        (status (str "Load script: " (get item :label))))
-      (status "Choose a script file"))))
 
 (def load-project (name)
   (host-command "load-project" (dict :name name))
@@ -1032,7 +1016,7 @@
     (dict :name "audio-fx" :label "Audio FX" :icon :drop)
     (dict :name "midi-fx" :label "MIDI FX" :icon :note-arrow)
     (dict :name "presets" :label "Presets" :icon :dial)
-    (dict :name "scripts" :label "Scripts" :icon :folder)
+    (dict :name "packages" :label "Packages" :icon :project)
     (dict :name "projects" :label "Projects" :icon :project)))
 
 (def visible-sounds ()
@@ -1475,29 +1459,187 @@
       (box :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0 :flex 1
         (empty-message "Presets are available for instrument tracks.")))))
 
-(def scripts-tab-panel ()
-  (let ((items (seq-script-tree search-filter)))
-    (v-stack :key "scripts-tab-panel" :width :fill :gap 0.5 :flex 1
+(def package-item-attachable? (item)
+  (let ((module (get item :module)))
+    (and (not (= module nil)) (not (= module "")))))
+
+(def describe-package-item (item)
+  (let ((kind (get item :kind))
+        (label (get item :label)))
+    (if (= kind "module")
+      (status (str (get item :module)
+        (if (get item :attached?) "  (attached to project)" "")
+        (if (get item :always?) "  (always loaded)" "")))
+      (if (= kind "package")
+        (status (str label " " (get item :detail)))
+        (if (= kind "file")
+          (status (str label ": no (module ...) header, so it cannot be attached"))
+          (status (str label)))))))
+
+;; Enter or double-click on a leaf attaches it to the project. The host
+;; loads the module first and only writes the import line once it
+;; evaluates, and answers "already attached" for a second press.
+(def activate-package-item (item)
+  (if (package-item-attachable? item)
+    (host-command "packages-attach" (dict :module (get item :module)))
+    (if (= (get item :kind) "file")
+      (status "This file has no (module ...) header, so it cannot be attached")
+      nil)))
+
+(def open-package-menu (event)
+  (let ((item (get event :item)))
+    (if (and (not (= item nil))
+             (not (= (get item :kind) "header"))
+             (not (= (get item :kind) "folder")))
+      (do
+        (set! package-menu-item item)
+        (set! package-menu-col (get event :col))
+        (set! package-menu-row (get event :row))
+        (set! package-menu-open true))
+      nil)))
+
+(def package-menu-actions ()
+  (let ((item package-menu-item))
+    (if (= item nil)
+      (list)
+      (append
+        (if (package-item-attachable? item)
+          (list
+            (if (get item :attached?)
+              (dict :id :detach :label "Remove from Project")
+              (dict :id :attach :label "Attach to Project"))
+            (if (get item :always?)
+              (dict :id :stop-always :label "Stop Always Loading")
+              (dict :id :always :label "Always Load")))
+          (list))
+        (if (and (not (= (get item :path) nil)) (not (= (get item :kind) "package")))
+          (append
+            (list (dict :id :view
+                    :label (if (get item :read-only?) "View Source" "Edit Source")))
+            (if (and (get item :read-only?) (package-item-attachable? item))
+              (list (dict :id :copy :label "Copy to Local"))
+              (list)))
+          (list))))))
+
+(def select-package-menu-action (action)
+  (let ((item package-menu-item)
+        (id (get action :id)))
+    (do
+      (set! package-menu-open false)
+      (if (= id :attach)
+        (host-command "packages-attach" (dict :module (get item :module)))
+        (if (= id :detach)
+          (host-command "packages-detach" (dict :module (get item :module)))
+          (if (= id :always)
+            (host-command "packages-always-load" (dict :module (get item :module)))
+            (if (= id :stop-always)
+              (host-command "packages-stop-always-load" (dict :module (get item :module)))
+              (if (= id :view)
+                (host-command "packages-open-source"
+                  (dict :path (get item :path) :read-only (get item :read-only?)))
+                (if (= id :copy)
+                  (host-command "packages-copy-to-local" (dict :path (get item :path)))
+                  nil)))))))))
+
+(def package-context-menu ()
+  (context-menu :is-open package-menu-open
+    :anchor-col package-menu-col
+    :anchor-row package-menu-row
+    :on-close (lambda () (set! package-menu-open false))
+    (each (package-menu-actions) |action|
+      (menu-item (get action :label)
+        :key (str "package-menu-" (get action :id))
+        :on-select (lambda (event) (select-package-menu-action action))))))
+
+(def begin-new-package ()
+  (do
+    (set! package-new-name "")
+    (set! package-new-mode true)))
+
+(def cancel-new-package ()
+  (set! package-new-mode false))
+
+(def create-new-package ()
+  (if (= (len package-new-name) 0)
+    (status "Type a package name, for example euclid or my.euclid.sparse")
+    (do
+      (host-command "packages-create" (dict :name package-new-name))
+      (set! package-new-mode false))))
+
+(def package-new-panel ()
+  (box :key "package-new-panel" :width :fill :padding 0.25
+    (v-stack :width :fill :gap 0.4
+      (text-input
+        :key "package-new-name"
+        :width :fill
+        :value package-new-name
+        :placeholder "name (euclid or my.euclid.sparse)..."
+        :auto-focus true
+        :on-change (lambda (value) (set! package-new-name value))
+        :on-submit (lambda () (create-new-package))
+        :on-cancel (lambda () (cancel-new-package))
+        :height 1.5
+        :font-size 12)
+      (h-stack :width :fill :gap 0.5 :align :center
+        (button "Create"
+          :key "package-new-confirm"
+          :variant :primary
+          :flex 1 :height 1.2 :font-size 10
+          :on-click |x y r| (create-new-package)
+          :color :white)
+        (button "Cancel"
+          :key "package-new-cancel"
+          :variant :ghost
+          :flex 1 :height 1.2 :font-size 10
+          :on-click |x y r| (cancel-new-package)
+          :color :gray)))))
+
+;; Packages tab: everything importable, sectioned Local / Installed /
+;; Factory by `seq-package-tree` (src/ui/host_commands/packages.rs). It is
+;; sugar over the textual import record: attach writes the (import …) line
+;; into the project scratch, "Always Load" into ~/.eseq.d/init.lisp, and the
+;; check / bookmark glyphs read those files back. The C-x p text view
+;; drives the same host commands.
+(def packages-tab-panel ()
+  (let ((items (seq-package-tree search-filter)))
+    (v-stack :key "packages-tab-panel" :width :fill :gap 0.5 :flex 1
       (box :width :fill :padding 0.25
-        (label "Scripts"
-          :font-size 10
-          :color :gray
-          :bg :transparent))
+        (h-stack :width :fill :gap 0.5 :align :center
+          (button "New Package"
+            :key "package-new-button"
+            :variant :secondary
+            :flex 1
+            :height 1.3
+            :font-size 10.5
+            :on-click |x y r| (begin-new-package)
+            :color :white)
+          (button "Refresh"
+            :key "package-refresh-button"
+            :variant :secondary
+            :width 6
+            :height 1.3
+            :font-size 10.5
+            :on-click |x y r| (host-command "packages-refresh" (dict))
+            :color :white)))
+      (if package-new-mode
+        (package-new-panel)
+        (box :width :fill :height 0))
       (box :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0 :flex 1
         (if (= (len items) 0)
-          (empty-message "No scripts found.")
-          (scroll :key "scripts-tab-scroll" :width :fill :flex 1
+          (empty-message "No packages found.")
+          (scroll :key "packages-tab-scroll" :width :fill :flex 1
             (tree
-              :key "scripts-tab-tree"
+              :key "packages-tab-tree"
               :width :fill
               :background-color :buffer-bg
               :items items
+              :font-size 12
               :expand-all (not (= search-filter ""))
               :focusable true
-              :on-select (lambda (item) (select-script item))
-              :on-cursor-change (lambda (item) (select-script item))
-              :on-activate (lambda (item) (activate-script item))
-              :on-modified-activate (lambda (item) (activate-script item)))))))))
+              :on-select (lambda (item) (describe-package-item item))
+              :on-cursor-change (lambda (item) (describe-package-item item))
+              :on-activate (lambda (item) (activate-package-item item))
+              :on-right-click (lambda (event) (open-package-menu event)))))))))
 
 (def projects-tab-panel ()
   (let ((items (seq-project-tree search-filter)))
@@ -1541,7 +1683,7 @@
       (if (= sbrowser-tab "audio-fx") (audio-fx-panel)
         (if (= sbrowser-tab "midi-fx") (midi-fx-panel)
           (if (= sbrowser-tab "presets") (presets-tab-panel)
-            (if (= sbrowser-tab "scripts") (scripts-tab-panel)
+            (if (= sbrowser-tab "packages") (packages-tab-panel)
               (projects-tab-panel))))))))))
 
 (def tabbed-content ()
@@ -1907,7 +2049,9 @@
 ;; ── Reactive rendering (like ui/main.lisp) ──
 
 (def root-widget ()
-  (v-stack :width :fill :height :fill :gap 0.4 :padding 0.15 (build-widgets)))
+  (v-stack :width :fill :height :fill :gap 0.4 :padding 0.15
+    (build-widgets)
+    (package-context-menu)))
 
 (def refresh-buffer ()
   (render-widget-to-buffer "*samples*" (root-widget)))

@@ -516,6 +516,31 @@ fn widget_frag(input: WidgetVaryings) -> @location(0) vec4<f32>
         } else {
             d = min(abs(drop) - stroke, glint);
         }
+    } else if (input.value_t > 12.5) {
+        // bookmark: a ribbon, a tall rounded rect with a V notch cut out of
+        // its bottom edge. Filled style is the silhouette; stroke style
+        // outlines it.
+        var q: vec2<f32> = p;
+        var body: f32 = button_icon_round_rect(q, vec2<f32>(0.28, 0.46), 0.05);
+        var notch: f32 = max(abs(q.x) * 1.6 - (q.y - 0.16), q.y - 0.50);
+        var ribbon: f32 = max(body, -notch);
+        if (filled) {
+            d = ribbon;
+        } else {
+            d = abs(ribbon) - stroke;
+        }
+    } else if (input.value_t > 11.5) {
+        // check: a tick mark. Short down-stroke from the left, long
+        // up-stroke to the right; the filled style is simply a fatter stroke
+        // so it reads at list-icon size.
+        var leg_a: f32 = button_icon_segment(p, vec2<f32>(-0.40, 0.02), vec2<f32>(-0.13, 0.32));
+        var leg_b: f32 = button_icon_segment(p, vec2<f32>(-0.13, 0.32), vec2<f32>(0.42, -0.30));
+        var tick: f32 = min(leg_a, leg_b);
+        if (filled) {
+            d = tick - 0.11;
+        } else {
+            d = tick - stroke;
+        }
     } else if (input.value_t > 10.5) {
         // MIDI: five-pin DIN socket, with an inset key slot and five contacts.
         let body = length(p) - 0.52;

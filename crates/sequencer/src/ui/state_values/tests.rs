@@ -2709,6 +2709,22 @@ mod solo_binding_tests;
                 };
                 Ok(build_script_tree(query))
             });
+        // The real tree builder over an empty workspace: three section
+        // headers and nothing under them, independent of this machine's
+        // installed packages.
+        editor
+            .runtime_mut()
+            .register_native("seq-package-tree", |_args, _ctx| {
+                let empty = std::env::temp_dir().join("eseq-tests-no-such-packages-dir");
+                let tree = crate::host_commands::packages::build_package_tree(
+                    &empty,
+                    &eseqlisp::package::PackageCatalog::default(),
+                    &empty,
+                    "",
+                    "",
+                );
+                Ok(crate::host_commands::packages::package_tree_to_value(&tree))
+            });
         editor
             .runtime_mut()
             .register_native("seq-preset-tree", |_args, _ctx| Ok(test_list(vec![])));
@@ -3639,12 +3655,12 @@ mod solo_binding_tests;
     }
 
     #[test]
-    fn metal_seq_browser_scripts_tab_renders_script_tree() {
+    fn metal_seq_browser_packages_tab_renders_tiered_package_tree() {
         let mut editor = browser_editor_on_instrument_tab();
         editor
             .runtime_mut()
-            .eval_str("(set! sbrowser-tab \"scripts\")")
-            .expect("select scripts tab");
+            .eval_str("(set! sbrowser-tab \"packages\")")
+            .expect("select packages tab");
         editor.refresh_runtime_side_effects();
 
         let browser = editor
@@ -3653,7 +3669,17 @@ mod solo_binding_tests;
             .find(|buffer| buffer.name == "*samples*")
             .expect("browser lisp should create the *samples* buffer");
         let tree = browser.widget_tree.as_ref().expect("browser widget tree");
-        assert!(value_contains_string(tree, "process-chain-demo.lisp"));
+        for section in ["Local", "Installed", "Factory"] {
+            assert!(
+                value_contains_string(tree, section),
+                "packages tab lists the {section} section"
+            );
+        }
+        assert!(value_contains_string(tree, "New Package"));
+        assert!(
+            !value_contains_string(tree, "Search scripts"),
+            "the legacy Scripts tab is gone from the rail"
+        );
     }
 
     #[test]
@@ -16222,6 +16248,22 @@ mod solo_binding_tests;
                     _ => "",
                 };
                 Ok(build_script_tree(query))
+            });
+        // The real tree builder over an empty workspace: three section
+        // headers and nothing under them, independent of this machine's
+        // installed packages.
+        editor
+            .runtime_mut()
+            .register_native("seq-package-tree", |_args, _ctx| {
+                let empty = std::env::temp_dir().join("eseq-tests-no-such-packages-dir");
+                let tree = crate::host_commands::packages::build_package_tree(
+                    &empty,
+                    &eseqlisp::package::PackageCatalog::default(),
+                    &empty,
+                    "",
+                    "",
+                );
+                Ok(crate::host_commands::packages::package_tree_to_value(&tree))
             });
         editor
             .runtime_mut()

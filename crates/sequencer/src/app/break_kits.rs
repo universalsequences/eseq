@@ -17,7 +17,7 @@ use crate::project::{
     ProjectKitModConnection, ProjectKitModDestination, ProjectPattern, ProjectRackClip,
     ProjectRackSequencer,
 };
-use crate::sequencer::{BusId, ModConnection, ModDestination};
+use crate::sequencer::{BusId, ModConnection, ModDestination, TrackOutput};
 use crate::sequencer::{PatternSnapshot, TrackPatternData};
 
 /// What the export of one rack's sequencers + chosen scenes produced, plus the
@@ -420,6 +420,7 @@ impl App {
             .as_ref()
             .ok_or_else(|| format!("Track group {group_id} is not a drum rack"))?;
         let members = group.members.clone();
+        let bus = BusId(group.bus_id);
         // pad position -> member position, through the pad map the loader just
         // built. A pad whose Sound failed to load has no member and its lane is
         // simply dropped.
@@ -445,12 +446,18 @@ impl App {
                     let pad = pad_to_position
                         .iter()
                         .position(|slot| *slot == Some(position))?;
-                    clip.members
+                    let mut lane = clip.members
                         .get(pad)
                         .copied()
                         .unwrap_or(false)
                         .then(|| snapshot.track_pattern_data(*track))
-                        .flatten()
+                        .flatten()?;
+                    // Group membership owns the output route. The clip's
+                    // saved bus ID belongs to the exporting project and may
+                    // identify an unrelated bus here. Bind before inserting
+                    // the lane so every later clip launch uses this rack.
+                    lane.track_params.output = TrackOutput::Bus(bus);
+                    Some(lane)
                 })
                 .collect();
             let graph_overrides: Vec<ProjectGraphOverrides> = clip

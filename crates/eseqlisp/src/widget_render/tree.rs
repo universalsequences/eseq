@@ -80,6 +80,9 @@ struct TreeRow {
     label: String,
     detail: Option<String>,
     icon: Option<f32>,
+    /// Trailing glyph at the row's right edge (`:status-icon`), for state
+    /// such as "attached" that is not part of the item's identity.
+    status_icon: Option<f32>,
     has_children: bool,
     expanded: bool,
     is_header: bool,
@@ -189,6 +192,8 @@ fn list_icon_fill(icon: f32) -> [f32; 4] {
         7 => theme::LIST_ICON_FOLDER(),
         8 => theme::LIST_ICON_LFO(),
         9 => theme::LIST_ICON_AUDIO_FX(),
+        12 => theme::ACCENT(),
+        13 => theme::LIST_ICON_PRESET(),
         _ => theme::LIST_ICON_MISC(),
     };
     color.to_rgba()
@@ -196,6 +201,10 @@ fn list_icon_fill(icon: f32) -> [f32; 4] {
 
 fn item_icon_value(item: &Value) -> Option<f32> {
     super::button::icon_name_value(&item_string_field(item, "icon")?)
+}
+
+fn item_status_icon_value(item: &Value) -> Option<f32> {
+    super::button::icon_name_value(&item_string_field(item, "status-icon")?)
 }
 
 fn item_is_header(item: &Value) -> bool {
@@ -273,6 +282,7 @@ fn flatten_items_inner(
             label,
             detail,
             icon: item_icon_value(&item),
+            status_icon: item_status_icon_value(&item),
             has_children,
             expanded: is_expanded,
             is_header,
@@ -813,6 +823,53 @@ const LABEL_APPROX_CHAR_WIDTH: f32 = 0.62;
 const DETAIL_APPROX_CHAR_WIDTH: f32 = 0.52;
 const LABEL_DETAIL_GAP: f32 = 1.2;
 
+/// The `:on-right-click` payload for a tree: the generic pointer event
+/// (`:x`, `:y`, modifier flags, `:phase "right-click"`) plus the hit row as
+/// `:item`, or `nil` below the last row. The cursor moves to the row so the
+/// menu visibly belongs to it. `map_mouse_event` calls this in place of the
+/// plain pointer info so the tree keeps the same `:on-right-click` contract
+/// as every other widget.
+pub(crate) fn tree_context_menu_info(
+    node: &LayoutNode,
+    modifiers: KeyModifiers,
+    local_col: f32,
+    local_row: f32,
+) -> Value {
+    let items = get_items_from_props(&node.props);
+    let expand_all = get_expand_all_prop(&node.props);
+    let widget_key = tree_state_key(node);
+    let mut state = get_tree_state(widget_key);
+    sync_state_with_external_selection(widget_key, &items, &node.props, expand_all, &mut state);
+    let rows = cached_rows(widget_key, &items, &state.expanded, expand_all);
+
+    let rh = row_height_from_props(&node.props);
+    let scroll_offset = find_parent_scroll_offset(node);
+    let row_relative = local_row - node.rect.row + scroll_offset;
+    let hit = if row_relative >= 0.0 {
+        let row_idx = (row_relative / rh).floor() as usize;
+        rows.get(row_idx)
+            .filter(|row| row_is_interactive(row))
+            .map(|row| (row.item_value.clone(), row_idx))
+    } else {
+        None
+    };
+    let info = super::pointer_event_info("right-click", modifiers, node, local_col, local_row);
+    let Value::Map(mut info) = info else {
+        return info;
+    };
+    let item_value = match hit {
+        Some((item, row_idx)) => {
+            set_cursor_row(&mut state, &rows, row_idx);
+            state.cursor_view_active = true;
+            set_tree_state(widget_key, state);
+            item_to_map(&item)
+        }
+        None => Value::Nil,
+    };
+    info.insert("item".to_string(), std::rc::Rc::new(RefCell::new(item_value)));
+    Value::Map(info)
+}
+
 impl WidgetDefinition for TreeWidget {
     fn names(&self) -> &'static [&'static str] {
         &["tree"]
@@ -981,6 +1038,18 @@ impl WidgetDefinition for TreeWidget {
         _cell_w: f32,
         _cell_h: f32,
     ) -> MouseEventOutcome {
+        // macOS convention: ctrl+click is a right-click synonym (some
+        // terminals swallow the right button). Only when the tree opts in via
+        // :on-right-click; a plain right-click is routed generically by
+        // `map_mouse_event` through `tree_context_menu_info`.
+        if matches!(mouse_kind, MouseEventKind::Down(MouseButton::Left))
+            && _modifiers.contains(KeyModifiers::CONTROL)
+            && node.props.contains_key("on-right-click")
+        {
+            return MouseEventOutcome::Dispatch(WidgetEvent::ContextMenu(
+                tree_context_menu_info(node, _modifiers, _local_col, local_row),
+            ));
+        }
         if !matches!(mouse_kind, MouseEventKind::Down(MouseButton::Left)) {
             return MouseEventOutcome::Consume;
         }
@@ -1471,16 +1540,56 @@ impl WidgetDefinition for TreeWidget {
                     is_background: false,
                 });
             }
+            // Trailing status glyph hugs the right edge; the detail text,
+            // when present, moves left to make room for it.
+            let status_width = if row.status_icon.is_some() {
+                icon_width + 0.6
+            } else {
+                0.0
+            };
+            if let Some(icon) = row.status_icon {
+                let icon_rect = Rect {
+                    row: y + (rh - icon_height) * 0.5 - 0.08,
+                    col: node.rect.col + node.rect.width - icon_width - 0.9,
+                    width: icon_width + 0.12,
+                    height: icon_height + 0.12,
+                };
+                let (ndc_min, ndc_max) = ndc_bounds(icon_rect, _viewport);
+                let px_w = icon_rect.width * _viewport.cell_w;
+                let px_h = icon_rect.height * _viewport.cell_h;
+                prims.push(GpuPrimitive::WidgetInstance {
+                    widget_type: "button-icon".to_string(),
+                    instance: WidgetInstance {
+                        ndc_min,
+                        ndc_max,
+                        value_t: icon,
+                        orientation: 0.0,
+                        itime: _viewport.time_seconds,
+                        uniform_a: [1.0, 0.0, 0.0, 0.0],
+                        uniform_b: [0.0; 4],
+                        uniform_c: [0.0; 4],
+                        uniform_d: [0.0; 4],
+                        color_a: theme::LIST_ICON_DETAIL().to_rgba(),
+                        color_b: list_icon_fill(icon),
+                        color_c: [0.0; 4],
+                        color_d: [0.0; 4],
+                        corner_radius: 0.0,
+                        pixel_aspect: if px_h > 0.0 { px_w / px_h } else { 1.0 },
+                    },
+                    is_background: false,
+                });
+            }
             let detail_layout = row.detail.as_ref().map(|detail| {
                 let detail_width =
                     (detail.chars().count() as f32 * DETAIL_APPROX_CHAR_WIDTH).max(1.0);
-                let detail_col = node.rect.col + node.rect.width - detail_width - 0.9;
+                let detail_col =
+                    node.rect.col + node.rect.width - detail_width - 0.9 - status_width;
                 (detail, detail_width, detail_col)
             });
             let label_available_width = detail_layout
                 .as_ref()
                 .map(|(_, _, detail_col)| detail_col - label_x - LABEL_DETAIL_GAP)
-                .unwrap_or(node.rect.col + node.rect.width - label_x - 0.9)
+                .unwrap_or(node.rect.col + node.rect.width - label_x - 0.9 - status_width)
                 .max(0.0);
             let label_max_chars =
                 (label_available_width / LABEL_APPROX_CHAR_WIDTH).floor() as usize;
