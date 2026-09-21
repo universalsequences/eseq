@@ -951,71 +951,56 @@ fn scan_directory(directory: &Path) -> Result<Vec<PackageEntry>, String> {
     Ok(entries)
 }
 
+/// Parse complete top-level forms only. A draft may end in an unfinished
+/// form; never reinterpret its nested forms, quoted examples or string
+/// contents as attachment records.
+fn source_forms(source: &str) -> Vec<eseqlisp::parser::Expr> {
+    let Ok(tokens) = Parser::new(source.to_string()).parse_spanned() else {
+        return Vec::new();
+    };
+    let mut parser = eseqlisp::parser::SpannedASTParser::new(tokens);
+    let mut forms = Vec::new();
+    while parser.peek().is_some() {
+        let Ok(form) = parser.parse_expression() else { break };
+        forms.push(form);
+    }
+    forms
+}
+
 fn declared_module(source: &str) -> Option<String> {
-    fn from_expression(expression: Expression) -> Option<String> {
-        match expression {
-            Expression::List(items) => match items.as_slice() {
-                [Expression::Symbol(head), Expression::Symbol(name), ..] if head == "module" => {
-                    Some(name.clone())
+    use eseqlisp::parser::ExprKind;
+    source_forms(source).into_iter().find_map(|form| {
+        let ExprKind::List(items) = form.kind else { return None };
+        match items.as_slice() {
+            [head, name, ..] if matches!(&head.kind, ExprKind::Symbol(s) if s == "module") => {
+                match &name.kind {
+                    ExprKind::Symbol(name) => Some(name.clone()),
+                    _ => None,
                 }
-                _ => None,
-            },
+            }
             _ => None,
         }
-    }
-
-    let whole_source = Parser::new(source.to_string())
-        .parse()
-        .ok()
-        .and_then(|tokens| ASTParser::new(tokens).parse().ok())
-        .and_then(|expressions| expressions.into_iter().find_map(from_expression));
-    whole_source.or_else(|| {
-        source.lines().find_map(|line| {
-            Parser::new(line.to_string())
-                .parse()
-                .ok()
-                .and_then(|tokens| ASTParser::new(tokens).parse().ok())
-                .and_then(|expressions| expressions.into_iter().find_map(from_expression))
-        })
     })
 }
 
-fn import_modules(source: &str) -> HashSet<String> {
-    fn from_expression(expression: Expression) -> Option<String> {
-        match expression {
-            Expression::List(items) => match items.as_slice() {
-                [Expression::Symbol(head), Expression::Symbol(name), ..] if head == "import" => {
-                    Some(name.clone())
+fn import_forms(source: &str) -> Vec<(String, eseqlisp::parser::SourceSpan)> {
+    use eseqlisp::parser::ExprKind;
+    source_forms(source).into_iter().filter_map(|form| {
+        let ExprKind::List(items) = form.kind else { return None };
+        match items.as_slice() {
+            [head, name, ..] if matches!(&head.kind, ExprKind::Symbol(s) if s == "import") => {
+                match &name.kind {
+                    ExprKind::Symbol(name) => Some((name.clone(), form.origin.primary_span)),
+                    _ => None,
                 }
-                _ => None,
-            },
+            }
             _ => None,
         }
-    }
+    }).collect()
+}
 
-    let mut modules = Parser::new(source.to_string())
-        .parse()
-        .ok()
-        .and_then(|tokens| ASTParser::new(tokens).parse().ok())
-        .into_iter()
-        .flatten()
-        .filter_map(from_expression)
-        .collect::<HashSet<_>>();
-    // Scratch is an editable source buffer and may temporarily be invalid.
-    // Imports inserted by this view are canonical one-line forms, so retain
-    // their derived markers/idempotence even while an unrelated form is half
-    // typed and prevents a whole-buffer parse.
-    for line in source.lines() {
-        let Some(expressions) = Parser::new(line.to_string())
-            .parse()
-            .ok()
-            .and_then(|tokens| ASTParser::new(tokens).parse().ok())
-        else {
-            continue;
-        };
-        modules.extend(expressions.into_iter().filter_map(from_expression));
-    }
-    modules
+fn import_modules(source: &str) -> HashSet<String> {
+    import_forms(source).into_iter().map(|(name, _)| name).collect()
 }
 
 fn create_target(root: &Path, input: &str) -> Result<CreateTarget, String> {
@@ -1191,15 +1176,13 @@ fn set_module_overrides_enabled(editor: &mut Editor, module: &str, enabled: bool
 /// True when `module` is still imported by the other attachment record: a
 /// module removed from the project but kept in init.lisp (or the reverse)
 /// stays live, so its overrides must stay on.
-fn module_still_attached_elsewhere(editor: &Editor, module: &str, removed_from: AttachmentDestination) -> bool {
+fn module_still_attached_elsewhere(state: &SequencerState, module: &str, removed_from: AttachmentDestination) -> bool {
     match removed_from {
         AttachmentDestination::Scratch => {
             let init = std::fs::read_to_string(user_init_path()).unwrap_or_default();
-            let init = buffer_source(editor, &user_init_path(), "").unwrap_or(init);
             import_modules(&init).contains(module)
         }
-        AttachmentDestination::UserInit => buffer_source(editor, Path::new(""), PROJECT_SCRATCH_BUFFER_NAME)
-            .is_some_and(|scratch| import_modules(&scratch).contains(module)),
+        AttachmentDestination::UserInit => import_modules(&state.scratch_source()).contains(module),
     }
 }
 
@@ -1217,15 +1200,13 @@ pub(crate) fn detach_module(
 ) -> Result<bool, String> {
     let removed = match destination {
         AttachmentDestination::Scratch => {
-            let removed = detach_from_scratch(editor, module)?;
-            record_evaluated_project_detach(app, module);
-            removed
+            detach_from_project(editor, &app.state, module)?
         }
         AttachmentDestination::UserInit => {
             detach_from_user_init_at(editor, &user_init_path(), module)?
         }
     };
-    if removed && !module_still_attached_elsewhere(editor, module, destination) {
+    if removed && !module_still_attached_elsewhere(&app.state, module, destination) {
         set_module_overrides_enabled(editor, module, false);
     }
     Ok(removed)
@@ -1246,7 +1227,7 @@ fn attachment_status(module: &str, destination: AttachmentDestination, already: 
 fn detachment_status(module: &str, destination: AttachmentDestination, removed: bool) -> String {
     if removed {
         format!(
-            "Removed from {}: {module} (its overrides are off; fully unloads when the project is reopened)",
+            "Removed from {}: {module}",
             destination_name(destination)
         )
     } else {
@@ -1316,36 +1297,36 @@ fn attach_to_scratch(editor: &mut Editor, module: &str) -> Result<bool, String> 
     Ok(already_present)
 }
 
+/// Persist only the requested import edit, then mirror it into an open draft.
+/// Saving the entire open buffer here would also save unrelated user edits.
 fn attach_to_user_init_at(editor: &mut Editor, path: &Path, module: &str) -> Result<bool, String> {
-    if let Some(buffer) = editor
-        .buffers
-        .iter_mut()
-        .find(|buffer| buffer.path.as_deref() == Some(path))
-    {
-        let (source, line, already_present) = source_with_import(&buffer.text(), module);
-        if !already_present {
-            buffer.set_text(&source);
+    let persisted = read_user_init(path)?;
+    let (source, _, already_present) = source_with_import(&persisted, module);
+    if !already_present {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|error| format!("Could not create '{}': {error}", parent.display()))?;
         }
+        write_text_atomically(path, &source)?;
+    }
+    if let Some(buffer) = editor.buffers.iter_mut().find(|buffer| buffer.path.as_deref() == Some(path)) {
+        let (draft, line, present_in_draft) = source_with_import(&buffer.text(), module);
+        if !present_in_draft {
+            buffer.set_text(&draft);
+        }
+        buffer.dirty = draft != source;
         buffer.cursor = (line, 0);
         editor.mark_needs_redraw();
-        return Ok(already_present);
     }
+    Ok(already_present)
+}
 
-    let source = match std::fs::read_to_string(path) {
-        Ok(source) => source,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(error) => return Err(format!("Could not read '{}': {error}", path.display())),
-    };
-    let (source, _, already_present) = source_with_import(&source, module);
-    if already_present {
-        return Ok(true);
+fn read_user_init(path: &Path) -> Result<String, String> {
+    match std::fs::read_to_string(path) {
+        Ok(source) => Ok(source),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(error) => Err(format!("Could not read '{}': {error}", path.display())),
     }
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|error| format!("Could not create '{}': {error}", parent.display()))?;
-    }
-    write_text_atomically(path, &source)?;
-    Ok(false)
 }
 
 fn detach_from_scratch(editor: &mut Editor, module: &str) -> Result<bool, String> {
@@ -1364,83 +1345,54 @@ fn detach_from_scratch(editor: &mut Editor, module: &str) -> Result<bool, String
     Ok(removed)
 }
 
-fn record_evaluated_project_detach(app: &mut app::App, module: &str) {
-    let (updated, removed) = source_without_import(&app.state.scratch_source(), module);
-    if removed {
-        app.state.set_scratch_source(updated);
+fn detach_from_project(editor: &mut Editor, state: &SequencerState, module: &str) -> Result<bool, String> {
+    let draft_removed = detach_from_scratch(editor, module)?;
+    let (updated, evaluated_removed) = source_without_import(&state.scratch_source(), module);
+    if evaluated_removed {
+        state.set_scratch_source(updated);
     }
+    Ok(draft_removed || evaluated_removed)
 }
 
 fn detach_from_user_init_at(editor: &mut Editor, path: &Path, module: &str) -> Result<bool, String> {
-    if let Some(buffer) = editor
-        .buffers
-        .iter_mut()
-        .find(|buffer| buffer.path.as_deref() == Some(path))
-    {
-        let (source, removed) = source_without_import(&buffer.text(), module);
-        if removed {
-            buffer.set_text(&source);
-            editor.mark_needs_redraw();
-        }
-        return Ok(removed);
-    }
-    let source = match std::fs::read_to_string(path) {
-        Ok(source) => source,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(format!("Could not read '{}': {error}", path.display())),
-    };
-    let (source, removed) = source_without_import(&source, module);
+    let (source, removed) = source_without_import(&read_user_init(path)?, module);
     if removed {
         write_text_atomically(path, &source)?;
     }
-    Ok(removed)
+    let mut draft_removed = false;
+    if let Some(buffer) = editor.buffers.iter_mut().find(|buffer| buffer.path.as_deref() == Some(path)) {
+        let (draft, removed) = source_without_import(&buffer.text(), module);
+        draft_removed = removed;
+        if removed {
+            buffer.set_text(&draft);
+        }
+        buffer.dirty = draft != source;
+        editor.mark_needs_redraw();
+    }
+    Ok(removed || draft_removed)
 }
 
-/// `Some(module)` when `line` is a one-line `(import module …)` form.
-fn line_import_module(line: &str) -> Option<String> {
-    let tokens = Parser::new(line.to_string()).parse().ok()?;
-    let expressions = ASTParser::new(tokens).parse().ok()?;
-    expressions.into_iter().find_map(|expression| match expression {
-        Expression::List(items) => match items.as_slice() {
-            [Expression::Symbol(head), Expression::Symbol(name), ..] if head == "import" => {
-                Some(name.clone())
-            }
-            _ => None,
-        },
-        _ => None,
-    })
-}
-
-/// Drop every one-line `(import module)` for `module`, collapsing the blank
-/// run it leaves behind. Multi-line import forms are not this view's — it
-/// only ever writes canonical one-line imports — and are left alone.
+/// Remove only parsed top-level imports, including multiline forms. Preserve
+/// neighboring code, comments and strings byte-for-byte. A form on a line of
+/// its own also owns that line's indentation and newline, not surrounding
+/// blank lines or comments.
 fn source_without_import(source: &str, module: &str) -> (String, bool) {
+    let mut updated = source.to_string();
     let mut removed = false;
-    let mut previous_blank = true;
-    let mut kept: Vec<&str> = Vec::new();
-    for line in source.lines() {
-        if line_import_module(line).as_deref() == Some(module) {
-            removed = true;
-            continue;
+    for (name, span) in import_forms(source).into_iter().rev() {
+        if name != module { continue; }
+        let mut start = span.start_byte;
+        let mut end = span.end_byte;
+        let line_start = source[..start].rfind('\n').map_or(0, |i| i + 1);
+        let line_end = source[end..].find('\n').map_or(source.len(), |i| end + i + 1);
+        if source[line_start..start].trim().is_empty() && source[end..line_end].trim().is_empty() {
+            start = line_start;
+            end = line_end;
         }
-        let blank = line.trim().is_empty();
-        if blank && previous_blank {
-            continue;
-        }
-        kept.push(line);
-        previous_blank = blank;
+        updated.replace_range(start..end, "");
+        removed = true;
     }
-    if !removed {
-        return (source.to_string(), false);
-    }
-    while kept.last().is_some_and(|line| line.trim().is_empty()) {
-        kept.pop();
-    }
-    let mut updated = kept.join("\n");
-    if !updated.is_empty() {
-        updated.push('\n');
-    }
-    (updated, true)
+    (updated, removed)
 }
 
 pub(super) fn write_text_atomically(path: &Path, source: &str) -> Result<(), String> {
@@ -1760,7 +1712,7 @@ pub(crate) fn build_package_tree(
             read_only: false,
             attached: false,
             always: false,
-            children: scan_tree_nodes(local_root, "local", false, None),
+            children: scan_tree_nodes(local_root, "local", false),
         },
         PackageTreeNode {
             label: "Installed".to_string(),
@@ -1875,7 +1827,7 @@ fn package_node(package: &eseqlisp::package::InstalledPackage, tier: &'static st
     let children = package
         .source_root
         .as_deref()
-        .map(|source_root| scan_tree_nodes(source_root, tier, true, Some(&package.module_prefix)))
+        .map(|source_root| scan_tree_nodes(source_root, tier, true))
         .unwrap_or_default();
     PackageTreeNode {
         label: package.manifest.name.clone(),
@@ -1891,14 +1843,12 @@ fn package_node(package: &eseqlisp::package::InstalledPackage, tier: &'static st
     }
 }
 
-/// Recursively list one source directory. `module_prefix` derives a module
-/// name for package files whose header is missing or half typed, so an
-/// installed package's modules still attach by their owned name.
+/// Recursively list source files. Only declared modules are importable;
+/// headerless helper scripts remain available for viewing their source.
 fn scan_tree_nodes(
     directory: &Path,
     tier: &'static str,
     read_only: bool,
-    module_prefix: Option<&str>,
 ) -> Vec<PackageTreeNode> {
     let Ok(entries) = scan_directory(directory) else {
         return Vec::new();
@@ -1908,7 +1858,7 @@ fn scan_tree_nodes(
         .map(|entry| {
             if entry.directory {
                 PackageTreeNode {
-                    children: scan_tree_nodes(&entry.path, tier, read_only, module_prefix),
+                    children: scan_tree_nodes(&entry.path, tier, read_only),
                     label: entry.name,
                     kind: "folder",
                     tier,
@@ -1920,11 +1870,7 @@ fn scan_tree_nodes(
                     always: false,
                 }
             } else {
-                let module = entry.module.clone().or_else(|| {
-                    let prefix = module_prefix?;
-                    let stem = entry.path.file_stem()?.to_str()?;
-                    Some(format!("{prefix}.{stem}"))
-                });
+                let module = entry.module;
                 let kind = if module.is_some() { "module" } else { "file" };
                 // No detail column: the file name already says which module
                 // it is, and a second dotted name only crowds the row (the
@@ -2162,11 +2108,31 @@ mod tests {
     // ── eseq-mods.18.1: path-keyed helpers shared by the tab and the text view ──
 
     #[test]
+    fn detach_preserves_neighboring_forms_strings_comments_and_quoted_imports() {
+        let source = concat!(
+            "; (import my.euclid) is an example, not a dependency\n",
+            "(def example \"Unicode λ\n(import my.euclid)\n\")\n",
+            "'(import my.euclid)\n",
+            "(def before 1) (import my.euclid) (def after 2) ; keep this\n",
+            "(import\n  my.euclid\n  :as euclid)\n",
+            "(import my.other)\n",
+        );
+        let (updated, removed) = source_without_import(source, "my.euclid");
+        assert!(removed);
+        assert!(updated.contains("(def before 1)  (def after 2) ; keep this"));
+        assert!(updated.contains("(def example \"Unicode λ\n(import my.euclid)\n\")"));
+        assert!(updated.contains("'(import my.euclid)"));
+        assert!(updated.contains("; (import my.euclid) is an example"));
+        assert_eq!(import_modules(&updated), HashSet::from(["my.other".to_string()]));
+        assert_eq!(source_without_import(&updated, "my.euclid"), (updated, false));
+    }
+
+    #[test]
     fn detach_removes_only_the_canonical_import_line_and_is_idempotent() {
         let source = "(def tempo 120)\n\n(import my.euclid)\n\n(import my.other)\n";
         let (updated, removed) = source_without_import(source, "my.euclid");
         assert!(removed);
-        assert_eq!(updated, "(def tempo 120)\n\n(import my.other)\n");
+        assert_eq!(updated, "(def tempo 120)\n\n\n(import my.other)\n");
         assert!(!import_modules(&updated).contains("my.euclid"));
         assert!(import_modules(&updated).contains("my.other"));
         let (again, removed_again) = source_without_import(&updated, "my.euclid");
@@ -2176,7 +2142,7 @@ mod tests {
         // from being found, mirroring how attach derives its markers.
         let (updated, removed) = source_without_import("(import my.euclid)\n(half", "my.euclid");
         assert!(removed);
-        assert_eq!(updated, "(half\n");
+        assert_eq!(updated, "(half");
     }
 
     #[test]
@@ -2202,7 +2168,7 @@ mod tests {
             .find(|buffer| buffer.name == PROJECT_SCRATCH_BUFFER_NAME)
             .unwrap()
             .text();
-        assert_eq!(source, "(def project-value 1)\n");
+        assert_eq!(source, "(def project-value 1)\n\n");
     }
 
     #[test]
@@ -2237,6 +2203,61 @@ mod tests {
         ));
         set_module_overrides_enabled(&mut editor, "t.pkg", true);
         assert_eq!(seam(&mut editor), Some(Value::String("package".into())));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn project_detach_updates_evaluated_source_when_draft_already_removed_import() {
+        let state = SequencerState::new(1, vec![]);
+        state.set_scratch_source("(import my.euclid)\n(def saved 1)\n");
+        let mut editor = Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        let draft = "(def unsaved 2)\n";
+        editor.buffers.iter_mut().find(|buffer| buffer.name == PROJECT_SCRATCH_BUFFER_NAME)
+            .unwrap().set_text(draft);
+        assert!(module_still_attached_elsewhere(&state, "my.euclid", AttachmentDestination::UserInit),
+            "an unevaluated draft edit does not detach the live project");
+        assert!(detach_from_project(&mut editor, &state, "my.euclid").unwrap());
+        assert_eq!(state.scratch_source(), "(def saved 1)\n");
+        assert_eq!(editor.buffers.iter().find(|buffer| buffer.name == PROJECT_SCRATCH_BUFFER_NAME)
+            .unwrap().text(), draft);
+        assert!(!detach_from_project(&mut editor, &state, "my.euclid").unwrap());
+    }
+
+    #[test]
+    fn user_init_edits_persist_with_an_open_buffer_without_saving_unrelated_draft() {
+        let root = temp_root("open-init");
+        std::fs::create_dir_all(&root).unwrap();
+        let init = root.join("init.lisp");
+        std::fs::write(&init, "(def saved 1)\n").unwrap();
+        let mut editor = Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.open_file_buffer(init.clone()).unwrap();
+        let buffer_id = editor.buffers.iter().position(|buffer| buffer.path.as_deref() == Some(&init)).unwrap();
+        editor.buffers[buffer_id].set_text("(def saved 2)\n");
+        assert!(!attach_to_user_init_at(&mut editor, &init, "my.euclid").unwrap());
+        let persisted = std::fs::read_to_string(&init).unwrap();
+        assert!(persisted.contains("(def saved 1)"));
+        assert!(import_modules(&persisted).contains("my.euclid"));
+        assert!(editor.buffers[buffer_id].text().contains("(def saved 2)"));
+        assert!(import_modules(&editor.buffers[buffer_id].text()).contains("my.euclid"));
+        assert!(editor.buffers[buffer_id].dirty);
+        assert!(detach_from_user_init_at(&mut editor, &init, "my.euclid").unwrap());
+        assert!(!import_modules(&std::fs::read_to_string(&init).unwrap()).contains("my.euclid"));
+        assert!(!import_modules(&editor.buffers[buffer_id].text()).contains("my.euclid"));
+        assert!(editor.buffers[buffer_id].text().contains("(def saved 2)"));
+        assert!(editor.buffers[buffer_id].dirty);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn headerless_package_helpers_are_files_not_importable_modules() {
+        let root = temp_root("headerless");
+        std::fs::create_dir_all(root.join("helpers")).unwrap();
+        std::fs::write(root.join("helpers/config.lisp"), "(def config 1)\n").unwrap();
+        let tree = scan_tree_nodes(&root, "installed", true);
+        let helper = &tree[0].children[0];
+        assert_eq!(helper.kind, "file");
+        assert!(helper.module.is_none());
+        assert_eq!(helper.path.as_deref(), Some(root.join("helpers/config.lisp").as_path()));
         std::fs::remove_dir_all(root).unwrap();
     }
 

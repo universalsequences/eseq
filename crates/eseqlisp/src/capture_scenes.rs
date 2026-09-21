@@ -59,6 +59,7 @@ pub const SCENES: &[&str] = &[
     "widget-knob-number-mod-dot",
     "widget-roar-filter",
     "widget-number-picker-tri",
+    "widget-number-picker-slider",
     "widget-tile-chrome",
     "widget-tile-tab",
     "widget-patcher-panel",
@@ -528,6 +529,14 @@ pub fn live_spectrogram_instances() -> Vec<LiveSpectrogramInstance> {
 pub fn widget_instances_for_scene(scene: &str) -> Vec<WidgetInstance> {
     let mut widgets = widget_instances();
     match scene {
+        "widget-number-picker-slider" => {
+            for (index, widget) in widgets.iter_mut().enumerate() {
+                widget.value_t = [0.2, 0.47, 0.72, 0.88][index];
+                // Border width in pixels and the fill's zero point. Cover
+                // both unipolar and bipolar fills, on each side of zero.
+                widget.uniform_a = [1.5, [0.0, 0.5, 0.5, 0.0][index], 0.0, 0.0];
+            }
+        }
         "widget-slider" => {
             // Keep the fill endpoint away from the exact half-pixel boundary
             // produced by the generic 0.5 value. Mesa can round that one

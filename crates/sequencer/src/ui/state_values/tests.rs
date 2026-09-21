@@ -3657,29 +3657,33 @@ mod solo_binding_tests;
     #[test]
     fn metal_seq_browser_packages_tab_renders_tiered_package_tree() {
         let mut editor = browser_editor_on_instrument_tab();
-        editor
-            .runtime_mut()
-            .eval_str("(set! sbrowser-tab \"packages\")")
+        let items = editor.runtime_mut().eval_str(r#"
+            (list (dict :kind "header" :label "Local" :tier "local")
+                  (dict :kind "module" :label "my.euclid" :module "my.euclid"
+                        :path "/packages/local/my/euclid.lisp" :tier "local"
+                        :attached? true :always? false :read-only? false))
+        "#).unwrap().unwrap();
+        editor.runtime_mut().register_native("seq-package-tree", move |_args, _ctx| Ok(items.clone()));
+        editor.runtime_mut().eval_str("(set! sbrowser-tab \"packages\")")
             .expect("select packages tab");
+        editor.runtime_mut().eval_str("(eseq.browser/refresh-buffer)").unwrap();
         editor.refresh_runtime_side_effects();
-
-        let browser = editor
-            .buffers
-            .iter()
-            .find(|buffer| buffer.name == "*samples*")
-            .expect("browser lisp should create the *samples* buffer");
-        let tree = browser.widget_tree.as_ref().expect("browser widget tree");
-        for section in ["Local", "Installed", "Factory"] {
-            assert!(
-                value_contains_string(tree, section),
-                "packages tab lists the {section} section"
-            );
+        editor.set_active_buffer(browser_id(&editor));
+        editor.set_layout_viewport(90, 70);
+        let layout = editor.widget_layout().expect("packages browser layout");
+        let panel = find_layout_node_by_stable_key_suffix(&layout, "/packages-tab-panel")
+            .expect("packages panel");
+        for key in ["/packages-tab-tree", "/package-new-button", "/package-refresh-button"] {
+            let node = find_layout_node_by_stable_key_suffix(&layout, key).expect(key);
+            assert_finite_nonzero_rect(node, key);
+            assert_layout_inside(node, panel, key);
         }
-        assert!(value_contains_string(tree, "New Package"));
-        assert!(
-            !value_contains_string(tree, "Search scripts"),
-            "the legacy Scripts tab is gone from the rail"
-        );
+        let tree = find_layout_node_by_stable_key_suffix(&layout, "/packages-tab-tree").unwrap();
+        for handler in ["on-select", "on-activate", "on-right-click"] {
+            assert!(tree.props.contains_key(handler), "package tree needs {handler}");
+        }
+        let rendered = render_layout_cells(&layout, 90, 70);
+        assert!(rendered.contains("my.euclid"), "module row should render visibly: {rendered}");
     }
 
     #[test]

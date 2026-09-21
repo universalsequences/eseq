@@ -865,7 +865,10 @@ impl SpannedASTParser {
         ))
     }
 
-    fn parse_expression(&mut self) -> Result<Expr, ParserError> {
+    /// Parse one form with its original source span. Editor tooling may keep
+    /// complete top-level forms before an unfinished form; callers must stop
+    /// at the first error rather than treating its remaining tokens as forms.
+    pub fn parse_expression(&mut self) -> Result<Expr, ParserError> {
         let Some(token) = self.peek().cloned() else {
             return Err(ParserError::UnexpectedEOF);
         };
