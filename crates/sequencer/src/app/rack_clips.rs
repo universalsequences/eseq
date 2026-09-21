@@ -66,17 +66,79 @@ impl App {
         group_id: u64,
         clip: Option<RackClipId>,
     ) -> Result<(), String> {
-        self.apply_recorded_bus_group_structure_mutation("Launch rack clip", move |app| {
-            let ok = app.state.with_scenes_mut(|scenes| {
-                let scene = scenes.current_scene;
-                scenes.set_scene_rack_clip(scene, group_id, clip)
-            });
-            if ok {
-                Ok(())
-            } else {
-                Err("That rack clip no longer exists".to_string())
+        self.rack_members(group_id)?;
+        super::edit::finish_active_gesture(self);
+        let scene = self.state.current_scene_id()
+            .ok_or_else(|| "The current scene no longer exists".to_string())?;
+        let (index, before) = self.validate_rack_clip_assignment(scene, group_id, clip)?;
+        if before == clip {
+            return Ok(());
+        }
+        self.save_live_patterns_before_clip_assignment()?;
+        self.state.with_scenes_mut(|scenes| {
+            assert!(scenes.set_scene_rack_clip(index, group_id, clip));
+        });
+        let patch = super::history::RackClipAssignmentPatch { scene, group_id, before, after: clip };
+        self.history.commit("Launch rack clip", None,
+            super::history::EditPatch::RackClipAssignment(patch),
+            std::mem::size_of::<super::history::RackClipAssignmentPatch>());
+        Ok(())
+    }
+
+    fn validate_rack_clip_assignment(
+        &self,
+        scene: crate::sequencer::SceneId,
+        group_id: u64,
+        clip: Option<RackClipId>,
+    ) -> Result<(usize, Option<RackClipId>), String> {
+        self.rack_members(group_id)?;
+        self.state.with_scenes(|scenes| {
+            let index = scenes.scene_index(scene)
+                .ok_or_else(|| "That scene no longer exists".to_string())?;
+            let bank = scenes.rack_bank(group_id)
+                .ok_or_else(|| "That rack has no clip bank".to_string())?;
+            if clip.is_some_and(|id| bank.clip(id).is_none()) {
+                return Err("That rack clip no longer exists".to_string());
             }
+            Ok((index, scenes.scene_rack_clip(index, group_id)))
         })
+    }
+
+    fn save_live_patterns_before_clip_assignment(&mut self) -> Result<(), String> {
+        // Save while the old pointer still identifies the audible clip. Once
+        // it changes, launch save-back deliberately ignores those stale lanes.
+        if self.state.save_current_pattern_snapshot(self.tracks.len(),
+            &self.graph.track_buffer_ids, &self.graph.track_sample_rates,
+            &self.tracks, &self.graph.track_instrument_types)
+        {
+            Ok(())
+        } else {
+            Err("Could not save the playing patterns before assigning a rack clip".to_string())
+        }
+    }
+
+    pub(super) fn restore_rack_clip_assignment(
+        &mut self,
+        scene: crate::sequencer::SceneId,
+        group_id: u64,
+        clip: Option<RackClipId>,
+    ) -> Result<(), String> {
+        let (index, _) = self.validate_rack_clip_assignment(scene, group_id, clip)?;
+        let is_current = self.state.current_scene_id() == Some(scene);
+        if is_current {
+            self.save_live_patterns_before_clip_assignment()?;
+        }
+        self.state.with_scenes_mut(|scenes| {
+            assert!(scenes.set_scene_rack_clip(index, group_id, clip));
+        });
+        if is_current {
+            let _ = self.state.quantized_launches().cancel_all();
+            self.apply_pattern_launch(&crate::quantized_launch::PatternLaunchTarget::Scene { scene: index })
+                .map_err(|error| format!("Could not restore rack clip playback: {error:?}"))?;
+        } else {
+            self.state.publish_scheduler_snapshot();
+        }
+        Ok(())
     }
 
     /// "Save clip as…": a new clip holding an independent copy of what the rack

@@ -12,6 +12,20 @@ pub(super) const COMMANDS: &[&str] = &[
     "package-import-cancel",
     "menu-export-package",
     "package-export-commit",
+    // Path-keyed package commands shared by the Packages tab and the text
+    // view (eseq-mods.18.1). Every one takes a `:path` (a module file) or a
+    // `:module` name; attach/detach edit the textual import record only.
+    "packages-attach",
+    "packages-detach",
+    "packages-always-load",
+    "packages-stop-always-load",
+    "packages-open-source",
+    "packages-close-source",
+    "packages-open-init",
+    "packages-open-scratch",
+    "packages-create",
+    "packages-copy-to-local",
+    "packages-refresh",
 ];
 
 // ── Export Package… ──
@@ -356,6 +370,137 @@ pub(super) fn handle(
     match name {
         "open-packages-view" => open_packages_view(editor, ctx),
         "packages-view-key" => handle_packages_key(&payload, app, editor, ctx),
+        "packages-attach" | "packages-detach" | "packages-always-load"
+        | "packages-stop-always-load" => {
+            let result = payload_module(&payload).and_then(|module| {
+                let (destination, attach) = match name {
+                    "packages-attach" => (AttachmentDestination::Scratch, true),
+                    "packages-detach" => (AttachmentDestination::Scratch, false),
+                    "packages-always-load" => (AttachmentDestination::UserInit, true),
+                    _ => (AttachmentDestination::UserInit, false),
+                };
+                if attach {
+                    attach_module(editor, app, &module, destination)
+                        .map(|already| attachment_status(&module, destination, already))
+                } else {
+                    detach_module(editor, app, &module, destination)
+                        .map(|removed| detachment_status(&module, destination, removed))
+                }
+            });
+            match result {
+                Ok(message) => editor.show_transient_message(message),
+                Err(error) => editor.show_transient_message(error),
+            }
+            refresh_package_listings(editor, ctx);
+        }
+        "packages-open-source" => {
+            let result = (|| -> Result<String, String> {
+                let path = extract_string_from_payload(&payload, "path")
+                    .filter(|path| !path.trim().is_empty())
+                    .ok_or("Expected a :path")?;
+                let path = PathBuf::from(path);
+                let label = extract_string_from_payload(&payload, "label")
+                    .filter(|label| !label.trim().is_empty())
+                    .unwrap_or_else(|| source_tab_label(&path));
+                let read_only = extract_bool_from_payload(&payload, "read-only");
+                if ctx.sessions.package_view_session.is_some() {
+                    close_packages_view(editor, ctx);
+                }
+                open_source_tab(editor, &path, &label, read_only)?;
+                Ok(format!("Opened {label}"))
+            })();
+            match result {
+                Ok(message) => editor.show_transient_message(message),
+                Err(error) => editor.show_transient_message(error),
+            }
+            editor.refresh_runtime_side_effects();
+            editor.mark_needs_redraw();
+        }
+        "packages-close-source" => {
+            let Some(buffer) = extract_string_from_payload(&payload, "buffer")
+                .filter(|buffer| !buffer.trim().is_empty())
+            else {
+                return;
+            };
+            close_source_tab(editor, &buffer);
+        }
+        "packages-open-init" => {
+            if ctx.sessions.package_view_session.is_some() {
+                close_packages_view(editor, ctx);
+            }
+            if let Err(error) = open_user_init_tab(editor) {
+                editor.show_transient_message(error);
+            }
+            editor.refresh_runtime_side_effects();
+            editor.mark_needs_redraw();
+        }
+        "packages-open-scratch" => {
+            if ctx.sessions.package_view_session.is_some() {
+                close_packages_view(editor, ctx);
+            }
+            if let Err(error) = register_source_tab(editor, "scratch", PROJECT_SCRATCH_BUFFER_NAME) {
+                editor.show_transient_message(error);
+            }
+            editor.refresh_runtime_side_effects();
+            editor.mark_needs_redraw();
+        }
+        "packages-create" => {
+            let result = (|| -> Result<String, String> {
+                let name = extract_string_from_payload(&payload, "name")
+                    .filter(|name| !name.trim().is_empty())
+                    .ok_or("Type a module name (for example euclid or my.euclid.sparse)")?;
+                let root = sequencer::app_paths::app_paths().local_modules_dir();
+                match create_target(&root, &name)? {
+                    CreateTarget::Module { name, path } => {
+                        if path.exists() {
+                            return Err(format!("{name} already exists"));
+                        }
+                        create_module_file(&path, &name)?;
+                        if ctx.sessions.package_view_session.is_some() {
+                            close_packages_view(editor, ctx);
+                        }
+                        open_source_tab(editor, &path, &source_tab_label(&path), false)?;
+                        Ok(format!("Created {name}"))
+                    }
+                    CreateTarget::Directory(path) => {
+                        std::fs::create_dir_all(&path).map_err(|error| {
+                            format!("Could not create folder '{}': {error}", path.display())
+                        })?;
+                        Ok(format!("Created folder {}/", path.display()))
+                    }
+                }
+            })();
+            match result {
+                Ok(message) => editor.show_transient_message(message),
+                Err(error) => editor.show_transient_message(error),
+            }
+            refresh_package_listings(editor, ctx);
+        }
+        "packages-copy-to-local" => {
+            let result = (|| -> Result<String, String> {
+                let path = extract_string_from_payload(&payload, "path")
+                    .filter(|path| !path.trim().is_empty())
+                    .ok_or("Expected a :path")?;
+                let source = PathBuf::from(path);
+                let module = module_at_path(&source)?;
+                let root = sequencer::app_paths::app_paths().local_modules_dir();
+                let target = copy_module_to_local(&source, &module, &root)?;
+                if ctx.sessions.package_view_session.is_some() {
+                    close_packages_view(editor, ctx);
+                }
+                open_source_tab(editor, &target, &source_tab_label(&target), false)?;
+                Ok(format!("Copied {module} to Local (it now shadows the package copy)"))
+            })();
+            match result {
+                Ok(message) => editor.show_transient_message(message),
+                Err(error) => editor.show_transient_message(error),
+            }
+            refresh_package_listings(editor, ctx);
+        }
+        "packages-refresh" => {
+            sequencer::app_paths::invalidate_package_catalog_cache();
+            refresh_package_listings(editor, ctx);
+        }
         "menu-import-package" => {
             let result = (|| -> Result<(), String> {
                 let Some(source) = crate::application_menu::choose_package_path()? else {
@@ -632,12 +777,12 @@ fn activate_packages_selection(editor: &mut Editor, ctx: &mut LoopCtx<'_>) {
 }
 
 fn open_package_file(editor: &mut Editor, ctx: &mut LoopCtx<'_>, path: &Path) {
-    match editor.open_or_create_file_buffer(path) {
-        Ok(_) => finish_packages_session(editor, ctx),
-        Err(error) => editor.handle_host_event(HostEvent::Status(format!(
-            "Could not open '{}': {error:?}",
-            path.display()
-        ))),
+    // The text view took over the sequencer's tile; give it back first so
+    // the source tab lands in the step-tab bar the way it does from the
+    // Packages tab.
+    close_packages_view(editor, ctx);
+    if let Err(error) = open_source_tab(editor, path, &source_tab_label(path), false) {
+        editor.handle_host_event(HostEvent::Status(error));
     }
 }
 
@@ -648,12 +793,6 @@ fn close_packages_view(editor: &mut Editor, ctx: &mut LoopCtx<'_>) {
     let _ = editor.swap_buffer_in_tile_showing(PACKAGES_BUFFER_NAME, &session.previous_buffer);
     editor.remove_buffer_by_name(PACKAGES_BUFFER_NAME);
     let _ = editor.switch_active_tile_to_buffer_named(&session.previous_buffer);
-    reinstall_step_tabs(editor);
-}
-
-fn finish_packages_session(editor: &mut Editor, ctx: &mut LoopCtx<'_>) {
-    ctx.sessions.package_view_session = None;
-    editor.remove_buffer_by_name(PACKAGES_BUFFER_NAME);
     reinstall_step_tabs(editor);
 }
 
@@ -812,71 +951,56 @@ fn scan_directory(directory: &Path) -> Result<Vec<PackageEntry>, String> {
     Ok(entries)
 }
 
+/// Parse complete top-level forms only. A draft may end in an unfinished
+/// form; never reinterpret its nested forms, quoted examples or string
+/// contents as attachment records.
+fn source_forms(source: &str) -> Vec<eseqlisp::parser::Expr> {
+    let Ok(tokens) = Parser::new(source.to_string()).parse_spanned() else {
+        return Vec::new();
+    };
+    let mut parser = eseqlisp::parser::SpannedASTParser::new(tokens);
+    let mut forms = Vec::new();
+    while parser.peek().is_some() {
+        let Ok(form) = parser.parse_expression() else { break };
+        forms.push(form);
+    }
+    forms
+}
+
 fn declared_module(source: &str) -> Option<String> {
-    fn from_expression(expression: Expression) -> Option<String> {
-        match expression {
-            Expression::List(items) => match items.as_slice() {
-                [Expression::Symbol(head), Expression::Symbol(name), ..] if head == "module" => {
-                    Some(name.clone())
+    use eseqlisp::parser::ExprKind;
+    source_forms(source).into_iter().find_map(|form| {
+        let ExprKind::List(items) = form.kind else { return None };
+        match items.as_slice() {
+            [head, name, ..] if matches!(&head.kind, ExprKind::Symbol(s) if s == "module") => {
+                match &name.kind {
+                    ExprKind::Symbol(name) => Some(name.clone()),
+                    _ => None,
                 }
-                _ => None,
-            },
+            }
             _ => None,
         }
-    }
-
-    let whole_source = Parser::new(source.to_string())
-        .parse()
-        .ok()
-        .and_then(|tokens| ASTParser::new(tokens).parse().ok())
-        .and_then(|expressions| expressions.into_iter().find_map(from_expression));
-    whole_source.or_else(|| {
-        source.lines().find_map(|line| {
-            Parser::new(line.to_string())
-                .parse()
-                .ok()
-                .and_then(|tokens| ASTParser::new(tokens).parse().ok())
-                .and_then(|expressions| expressions.into_iter().find_map(from_expression))
-        })
     })
 }
 
-fn import_modules(source: &str) -> HashSet<String> {
-    fn from_expression(expression: Expression) -> Option<String> {
-        match expression {
-            Expression::List(items) => match items.as_slice() {
-                [Expression::Symbol(head), Expression::Symbol(name), ..] if head == "import" => {
-                    Some(name.clone())
+fn import_forms(source: &str) -> Vec<(String, eseqlisp::parser::SourceSpan)> {
+    use eseqlisp::parser::ExprKind;
+    source_forms(source).into_iter().filter_map(|form| {
+        let ExprKind::List(items) = form.kind else { return None };
+        match items.as_slice() {
+            [head, name, ..] if matches!(&head.kind, ExprKind::Symbol(s) if s == "import") => {
+                match &name.kind {
+                    ExprKind::Symbol(name) => Some((name.clone(), form.origin.primary_span)),
+                    _ => None,
                 }
-                _ => None,
-            },
+            }
             _ => None,
         }
-    }
+    }).collect()
+}
 
-    let mut modules = Parser::new(source.to_string())
-        .parse()
-        .ok()
-        .and_then(|tokens| ASTParser::new(tokens).parse().ok())
-        .into_iter()
-        .flatten()
-        .filter_map(from_expression)
-        .collect::<HashSet<_>>();
-    // Scratch is an editable source buffer and may temporarily be invalid.
-    // Imports inserted by this view are canonical one-line forms, so retain
-    // their derived markers/idempotence even while an unrelated form is half
-    // typed and prevents a whole-buffer parse.
-    for line in source.lines() {
-        let Some(expressions) = Parser::new(line.to_string())
-            .parse()
-            .ok()
-            .and_then(|tokens| ASTParser::new(tokens).parse().ok())
-        else {
-            continue;
-        };
-        modules.extend(expressions.into_iter().filter_map(from_expression));
-    }
-    modules
+fn import_modules(source: &str) -> HashSet<String> {
+    import_forms(source).into_iter().map(|(name, _)| name).collect()
 }
 
 fn create_target(root: &Path, input: &str) -> Result<CreateTarget, String> {
@@ -956,12 +1080,12 @@ fn create_module_file(path: &Path, module: &str) -> Result<(), String> {
 
 fn module_template(module: &str) -> String {
     format!(
-        "(module {module})\n\n; Attach this module to the current project with C-a in the Packages view.\n; Attach it to every session with C-i, which adds its import to ~/.eseq.d/init.lisp.\n; Modules may register their own UI from their namespace, for example:\n; (effect-buffer \"*my-package*\" (label \"Hello from {module}\"))\n\n(export )\n"
+        "(module {module})\n\n; Attach this module to the current project from the browser's Packages tab\n; (Enter, or right-click > Attach to Project), or with C-a in the C-x p text view.\n; Right-click > Always Load (C-i in the text view) adds its import to ~/.eseq.d/init.lisp.\n; Modules may register their own UI from their namespace, for example:\n; (effect-buffer \"*my-package*\" (label \"Hello from {module}\"))\n\n(export )\n"
     )
 }
 
-#[derive(Debug, Clone, Copy)]
-enum AttachmentDestination {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AttachmentDestination {
     Scratch,
     UserInit,
 }
@@ -992,33 +1116,122 @@ fn attach_selected_package(
         return;
     };
 
-    let result = match destination {
-        // Attaching to the project loads the module on the spot, the way
-        // clicking a script in the Scripts tab used to: the module registers
-        // its step tab, effect buffers and macros immediately instead of
-        // waiting for the next scratch replay. The scratch line is written
-        // only once the module evaluates, so a broken module cannot poison
-        // the project.
-        AttachmentDestination::Scratch => load_module(editor, module)
-            .and_then(|()| attach_to_scratch(editor, module))
-            .inspect(|_| record_evaluated_project_import(app, module)),
-        AttachmentDestination::UserInit => attach_to_user_init(editor, module),
-    };
+    let result = attach_module(editor, app, module, destination);
     match result {
         Ok(already_present) => {
-            let destination = match destination {
-                AttachmentDestination::Scratch => "project scratch",
-                AttachmentDestination::UserInit => "init.lisp",
-            };
-            let verb = if already_present {
-                "Already attached to"
-            } else {
-                "Attached to"
-            };
-            editor.handle_host_event(HostEvent::Status(format!("{verb} {destination}: {module}")));
+            let message = attachment_status(module, destination, already_present);
+            editor.handle_host_event(HostEvent::Status(message));
             refresh_packages_view(editor, ctx);
         }
         Err(error) => editor.handle_host_event(HostEvent::Status(error)),
+    }
+}
+
+/// Attach `module` to one destination. `Ok(true)` when it was already there.
+///
+/// Attaching to the project loads the module on the spot, the way clicking
+/// a script in the Scripts tab used to: the module registers its step tab,
+/// effect buffers and macros immediately instead of waiting for the next
+/// scratch replay. The scratch line is written only once the module
+/// evaluates, so a broken module cannot poison the project.
+pub(crate) fn attach_module(
+    editor: &mut Editor,
+    app: &mut app::App,
+    module: &str,
+    destination: AttachmentDestination,
+) -> Result<bool, String> {
+    let result = match destination {
+        AttachmentDestination::Scratch => load_module(editor, module)
+            .and_then(|()| attach_to_scratch(editor, module))
+            .inspect(|_| record_evaluated_project_import(app, module)),
+        AttachmentDestination::UserInit => attach_to_user_init_at(editor, &user_init_path(), module),
+    };
+    if result.is_ok() {
+        // A module detached earlier this session had its overrides switched
+        // off; attaching it again switches them back on (idempotent).
+        set_module_overrides_enabled(editor, module, true);
+    }
+    result
+}
+
+/// Switch a module's `override` entries on or off in the UI runtime, the
+/// same per-module toggle the Customize modal offers. `import` is load-once
+/// and nothing unloads, so this is how detach takes effect immediately: the
+/// factory seams the module replaced are back on screen as soon as the
+/// import line is gone. The dependents of every touched target are marked
+/// stale by the VM, so a mixer replacement repaints on the spot.
+fn set_module_overrides_enabled(editor: &mut Editor, module: &str, enabled: bool) {
+    let form = if enabled {
+        format!("(enable-module-overrides {module})")
+    } else {
+        format!("(disable-module-overrides {module})")
+    };
+    if let Err(error) = editor.runtime_mut().eval_str(&form) {
+        eprintln!("metal_seq: could not toggle overrides for {module}: {error:?}");
+    }
+    editor.refresh_runtime_side_effects();
+    editor.mark_needs_redraw();
+}
+
+/// True when `module` is still imported by the other attachment record: a
+/// module removed from the project but kept in init.lisp (or the reverse)
+/// stays live, so its overrides must stay on.
+fn module_still_attached_elsewhere(state: &SequencerState, module: &str, removed_from: AttachmentDestination) -> bool {
+    match removed_from {
+        AttachmentDestination::Scratch => {
+            let init = std::fs::read_to_string(user_init_path()).unwrap_or_default();
+            import_modules(&init).contains(module)
+        }
+        AttachmentDestination::UserInit => import_modules(&state.scratch_source()).contains(module),
+    }
+}
+
+/// Remove `module`'s import from one destination. `Ok(true)` when a line was
+/// removed. `import` is load-once and there is no unload, so the module's
+/// plain definitions stay in this session; its `override` entries are
+/// switched off (unless the other record still imports it), which is what
+/// the user sees. The next project open, and the scheduler runtime that
+/// rebuilds from the evaluated scratch on every version, no longer load it.
+pub(crate) fn detach_module(
+    editor: &mut Editor,
+    app: &mut app::App,
+    module: &str,
+    destination: AttachmentDestination,
+) -> Result<bool, String> {
+    let removed = match destination {
+        AttachmentDestination::Scratch => {
+            detach_from_project(editor, &app.state, module)?
+        }
+        AttachmentDestination::UserInit => {
+            detach_from_user_init_at(editor, &user_init_path(), module)?
+        }
+    };
+    if removed && !module_still_attached_elsewhere(&app.state, module, destination) {
+        set_module_overrides_enabled(editor, module, false);
+    }
+    Ok(removed)
+}
+
+fn destination_name(destination: AttachmentDestination) -> &'static str {
+    match destination {
+        AttachmentDestination::Scratch => "project",
+        AttachmentDestination::UserInit => "every session (init.lisp)",
+    }
+}
+
+fn attachment_status(module: &str, destination: AttachmentDestination, already: bool) -> String {
+    let verb = if already { "Already attached to" } else { "Attached to" };
+    format!("{verb} {}: {module}", destination_name(destination))
+}
+
+fn detachment_status(module: &str, destination: AttachmentDestination, removed: bool) -> String {
+    if removed {
+        format!(
+            "Removed from {}: {module}",
+            destination_name(destination)
+        )
+    } else {
+        format!("{module} was not attached to {}", destination_name(destination))
     }
 }
 
@@ -1084,37 +1297,102 @@ fn attach_to_scratch(editor: &mut Editor, module: &str) -> Result<bool, String> 
     Ok(already_present)
 }
 
-fn attach_to_user_init(editor: &mut Editor, module: &str) -> Result<bool, String> {
-    let path = user_init_path();
-    if let Some(buffer) = editor
-        .buffers
-        .iter_mut()
-        .find(|buffer| buffer.path.as_ref() == Some(&path))
-    {
-        let (source, line, already_present) = source_with_import(&buffer.text(), module);
-        if !already_present {
-            buffer.set_text(&source);
+/// Persist only the requested import edit, then mirror it into an open draft.
+/// Saving the entire open buffer here would also save unrelated user edits.
+fn attach_to_user_init_at(editor: &mut Editor, path: &Path, module: &str) -> Result<bool, String> {
+    let persisted = read_user_init(path)?;
+    let (source, _, already_present) = source_with_import(&persisted, module);
+    if !already_present {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|error| format!("Could not create '{}': {error}", parent.display()))?;
         }
+        write_text_atomically(path, &source)?;
+    }
+    if let Some(buffer) = editor.buffers.iter_mut().find(|buffer| buffer.path.as_deref() == Some(path)) {
+        let (draft, line, present_in_draft) = source_with_import(&buffer.text(), module);
+        if !present_in_draft {
+            buffer.set_text(&draft);
+        }
+        buffer.dirty = draft != source;
         buffer.cursor = (line, 0);
         editor.mark_needs_redraw();
-        return Ok(already_present);
     }
+    Ok(already_present)
+}
 
-    let source = match std::fs::read_to_string(&path) {
-        Ok(source) => source,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(error) => return Err(format!("Could not read '{}': {error}", path.display())),
+fn read_user_init(path: &Path) -> Result<String, String> {
+    match std::fs::read_to_string(path) {
+        Ok(source) => Ok(source),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(error) => Err(format!("Could not read '{}': {error}", path.display())),
+    }
+}
+
+fn detach_from_scratch(editor: &mut Editor, module: &str) -> Result<bool, String> {
+    let Some(buffer) = editor
+        .buffers
+        .iter_mut()
+        .find(|buffer| buffer.name == PROJECT_SCRATCH_BUFFER_NAME)
+    else {
+        return Err("Project scratch buffer is not available".to_string());
     };
-    let (source, _, already_present) = source_with_import(&source, module);
-    if already_present {
-        return Ok(true);
+    let (source, removed) = source_without_import(&buffer.text(), module);
+    if removed {
+        buffer.set_text(&source);
+        editor.mark_needs_redraw();
     }
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|error| format!("Could not create '{}': {error}", parent.display()))?;
+    Ok(removed)
+}
+
+fn detach_from_project(editor: &mut Editor, state: &SequencerState, module: &str) -> Result<bool, String> {
+    let draft_removed = detach_from_scratch(editor, module)?;
+    let (updated, evaluated_removed) = source_without_import(&state.scratch_source(), module);
+    if evaluated_removed {
+        state.set_scratch_source(updated);
     }
-    write_text_atomically(&path, &source)?;
-    Ok(false)
+    Ok(draft_removed || evaluated_removed)
+}
+
+fn detach_from_user_init_at(editor: &mut Editor, path: &Path, module: &str) -> Result<bool, String> {
+    let (source, removed) = source_without_import(&read_user_init(path)?, module);
+    if removed {
+        write_text_atomically(path, &source)?;
+    }
+    let mut draft_removed = false;
+    if let Some(buffer) = editor.buffers.iter_mut().find(|buffer| buffer.path.as_deref() == Some(path)) {
+        let (draft, removed) = source_without_import(&buffer.text(), module);
+        draft_removed = removed;
+        if removed {
+            buffer.set_text(&draft);
+        }
+        buffer.dirty = draft != source;
+        editor.mark_needs_redraw();
+    }
+    Ok(removed || draft_removed)
+}
+
+/// Remove only parsed top-level imports, including multiline forms. Preserve
+/// neighboring code, comments and strings byte-for-byte. A form on a line of
+/// its own also owns that line's indentation and newline, not surrounding
+/// blank lines or comments.
+fn source_without_import(source: &str, module: &str) -> (String, bool) {
+    let mut updated = source.to_string();
+    let mut removed = false;
+    for (name, span) in import_forms(source).into_iter().rev() {
+        if name != module { continue; }
+        let mut start = span.start_byte;
+        let mut end = span.end_byte;
+        let line_start = source[..start].rfind('\n').map_or(0, |i| i + 1);
+        let line_end = source[end..].find('\n').map_or(source.len(), |i| end + i + 1);
+        if source[line_start..start].trim().is_empty() && source[end..line_end].trim().is_empty() {
+            start = line_start;
+            end = line_end;
+        }
+        updated.replace_range(start..end, "");
+        removed = true;
+    }
+    (updated, removed)
 }
 
 pub(super) fn write_text_atomically(path: &Path, source: &str) -> Result<(), String> {
@@ -1169,14 +1447,22 @@ fn source_with_import(source: &str, module: &str) -> (String, usize, bool) {
 }
 
 fn open_user_init(editor: &mut Editor, ctx: &mut LoopCtx<'_>) {
-    let path = user_init_path();
-    match editor.open_or_create_file_buffer(&path) {
-        Ok(_) => finish_packages_session(editor, ctx),
-        Err(error) => editor.handle_host_event(HostEvent::Status(format!(
-            "Could not open '{}': {error:?}",
-            path.display()
-        ))),
+    close_packages_view(editor, ctx);
+    if let Err(error) = open_user_init_tab(editor) {
+        editor.handle_host_event(HostEvent::Status(error));
     }
+}
+
+fn open_user_init_tab(editor: &mut Editor) -> Result<String, String> {
+    let path = user_init_path();
+    if !path.exists() {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|error| format!("Could not create '{}': {error}", parent.display()))?;
+        }
+        write_text_atomically(&path, "")?;
+    }
+    open_source_tab(editor, &path, "init.lisp", false)
 }
 
 pub(super) fn user_init_path() -> PathBuf {
@@ -1195,6 +1481,507 @@ fn buffer_source(editor: &Editor, path: &Path, name: &str) -> Option<String> {
                     && buffer.path.as_ref() == Some(&path.to_path_buf()))
         })
         .map(|buffer| buffer.text())
+}
+
+
+// ── Source tabs ──
+//
+// "View source" opens a module file as a closable tab in the sequencer
+// tile. The tab is a plain view onto the file: its × only unregisters the
+// tab and drops the buffer (`packages-close-source`), never touching the
+// import record. Attach and detach live only in the Packages tab's context
+// menu and the text view's keys. The same path serves init.lisp and the
+// project scratch from the File menu.
+
+fn source_tab_label(path: &Path) -> String {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("source")
+        .to_string()
+}
+
+/// Open `path` in a buffer and register it as a closable source tab, then
+/// select it. Returns the buffer name. A read-only tab is for installed and
+/// factory sources, which an import would overwrite.
+pub(crate) fn open_source_tab(
+    editor: &mut Editor,
+    path: &Path,
+    label: &str,
+    read_only: bool,
+) -> Result<String, String> {
+    if !path.is_file() {
+        return Err(format!("'{}' is not a file", path.display()));
+    }
+    let buffer_name = crate::edit_sessions::open_script_source_buffer(editor, path)?;
+    if let Some(buffer) = editor
+        .buffers
+        .iter_mut()
+        .find(|buffer| buffer.name == buffer_name)
+    {
+        buffer.read_only = read_only;
+    }
+    register_source_tab(editor, label, &buffer_name)?;
+    Ok(buffer_name)
+}
+
+/// Register `buffer` as a closable source tab in the sequencer tile and
+/// switch to it.
+fn register_source_tab(editor: &mut Editor, label: &str, buffer: &str) -> Result<String, String> {
+    let label_literal = crate::edit_sessions::escape_lisp_string(label);
+    let buffer_literal = crate::edit_sessions::escape_lisp_string(buffer);
+    editor
+        .runtime_mut()
+        .eval_str(&format!(
+            "(eseq.seq-step-tabs/seq-register-source-tab \"{label_literal}\" \"{buffer_literal}\")"
+        ))
+        .map_err(|error| format!("Could not register source tab: {error:?}"))?;
+    let _ = editor.runtime_mut().eval_str(&format!(
+        "(eseq.seq-step-tabs/seq-select-main-step-tab-by-buffer \"{buffer_literal}\")"
+    ));
+    editor.refresh_runtime_side_effects();
+    editor.mark_needs_redraw();
+    Ok(buffer.to_string())
+}
+
+/// The tab's × handler: unregister the tab and drop the buffer. The project
+/// scratch is never dropped, and a buffer with unsaved edits is kept (with
+/// its tab gone) rather than silently saved or discarded.
+fn close_source_tab(editor: &mut Editor, buffer: &str) {
+    let buffer_literal = crate::edit_sessions::escape_lisp_string(buffer);
+    let _ = editor.runtime_mut().eval_str(&format!(
+        "(eseq.seq-step-tabs/seq-unregister-step-sequencer-tab \"{buffer_literal}\")"
+    ));
+    editor.refresh_runtime_side_effects();
+    if buffer != PROJECT_SCRATCH_BUFFER_NAME {
+        let dirty = editor
+            .buffers
+            .iter()
+            .find(|candidate| candidate.name == buffer)
+            .is_some_and(|candidate| candidate.dirty);
+        if dirty {
+            editor.show_transient_message(format!(
+                "{buffer} has unsaved changes; the buffer is kept open"
+            ));
+        } else {
+            editor.remove_buffer_by_name(buffer);
+        }
+    }
+    editor.mark_needs_redraw();
+}
+
+fn payload_module(payload: &Value) -> Result<String, String> {
+    if let Some(module) =
+        extract_string_from_payload(payload, "module").filter(|module| !module.trim().is_empty())
+    {
+        return Ok(module.trim().to_string());
+    }
+    let path = extract_string_from_payload(payload, "path")
+        .filter(|path| !path.trim().is_empty())
+        .ok_or("Expected a :module name or a :path")?;
+    module_at_path(Path::new(&path))
+}
+
+/// The `(module …)` a file declares, or why it cannot be attached.
+fn module_at_path(path: &Path) -> Result<String, String> {
+    if path.is_dir() {
+        return Err("Select a module file to attach, not a folder".to_string());
+    }
+    let source = std::fs::read_to_string(path)
+        .map_err(|error| format!("Could not read '{}': {error}", path.display()))?;
+    declared_module(&source)
+        .ok_or_else(|| format!("'{}' has no (module ...) header", source_tab_label(path)))
+}
+
+/// Copy a read-only (installed or factory) module into the Local workspace
+/// under the path its module name maps to. Local is the first module load
+/// root, so the copy shadows the package's file under the same name: the
+/// user edits their copy and every `(import …)` keeps working.
+fn copy_module_to_local(source: &Path, module: &str, local_root: &Path) -> Result<PathBuf, String> {
+    if !valid_module_name(module) {
+        return Err(format!("'{module}' is not a valid module name"));
+    }
+    let mut target = local_root.to_path_buf();
+    for segment in module.split('.') {
+        target.push(segment);
+    }
+    target.set_extension("lisp");
+    if target.exists() {
+        return Err(format!("Local already has {module} ({})", target.display()));
+    }
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("Could not create '{}': {error}", parent.display()))?;
+    }
+    std::fs::copy(source, &target).map_err(|error| {
+        format!("Could not copy '{}' to '{}': {error}", source.display(), target.display())
+    })?;
+    Ok(target)
+}
+
+/// Re-list every package surface after the import record or the package
+/// set changed: the text view if it is open, and the browser tab.
+fn refresh_package_listings(editor: &mut Editor, ctx: &mut LoopCtx<'_>) {
+    if ctx.sessions.package_view_session.is_some() {
+        refresh_packages_view(editor, ctx);
+    }
+    let _ = editor.runtime_mut().eval_str("(eseq.browser/refresh-buffer)");
+    editor.refresh_runtime_side_effects();
+    editor.mark_needs_redraw();
+}
+
+// ── Packages tab tree ──
+//
+// `(seq-package-tree query)` lists everything importable as one tree with
+// three roots: Local (`~/.eseq.d/packages/local`, manifest-free personal
+// modules), Installed (packages under `~/.eseq.d/packages` with a
+// manifest), and Factory (packages shipped with the application). Items
+// carry the module name and attachment marks so the tab can act on them
+// without a second lookup; the record they reflect is the evaluated project
+// scratch plus `~/.eseq.d/init.lisp`.
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PackageTreeNode {
+    label: String,
+    /// "root" | "folder" | "package" | "module" | "file"
+    kind: &'static str,
+    /// "local" | "installed" | "factory"
+    tier: &'static str,
+    path: Option<PathBuf>,
+    module: Option<String>,
+    detail: Option<String>,
+    read_only: bool,
+    /// Imported by the evaluated project scratch.
+    attached: bool,
+    /// Imported by `~/.eseq.d/init.lisp`.
+    always: bool,
+    children: Vec<PackageTreeNode>,
+}
+
+pub(crate) fn register_package_tree_natives(runtime: &mut Runtime, state: Arc<SequencerState>) {
+    runtime.register_native_with_docs(
+        "seq-package-tree",
+        "(seq-package-tree query)",
+        "Return the Packages browser tree (Local / Installed / Factory roots) filtered by query.",
+        move |args, _ctx| {
+            let query = match args.first() {
+                Some(Value::String(query)) => query.as_str(),
+                _ => "",
+            };
+            let app_paths = sequencer::app_paths::app_paths();
+            let catalog = app_paths.package_catalog();
+            let init = std::fs::read_to_string(user_init_path()).unwrap_or_default();
+            let tree = build_package_tree(
+                &app_paths.local_modules_dir(),
+                &catalog,
+                &app_paths.packages_dir(),
+                &state.scratch_source(),
+                &init,
+            );
+            Ok(package_tree_to_value(&filter_package_tree(&tree, &query.trim().to_lowercase())))
+        },
+    );
+}
+
+pub(crate) fn build_package_tree(
+    local_root: &Path,
+    catalog: &eseqlisp::package::PackageCatalog,
+    installed_dir: &Path,
+    scratch_source: &str,
+    init_source: &str,
+) -> Vec<PackageTreeNode> {
+    let mut installed = Vec::new();
+    let mut factory = Vec::new();
+    for package in catalog.ordered() {
+        let is_installed = package.root.starts_with(installed_dir);
+        let tier = if is_installed { "installed" } else { "factory" };
+        let node = package_node(package, tier);
+        if is_installed {
+            installed.push(node);
+        } else {
+            factory.push(node);
+        }
+    }
+    let mut roots = vec![
+        PackageTreeNode {
+            label: "Local".to_string(),
+            kind: "root",
+            tier: "local",
+            path: Some(local_root.to_path_buf()),
+            module: None,
+            detail: None,
+            read_only: false,
+            attached: false,
+            always: false,
+            children: scan_tree_nodes(local_root, "local", false),
+        },
+        PackageTreeNode {
+            label: "Installed".to_string(),
+            kind: "root",
+            tier: "installed",
+            path: Some(installed_dir.to_path_buf()),
+            module: None,
+            detail: None,
+            read_only: true,
+            attached: false,
+            always: false,
+            children: installed,
+        },
+        PackageTreeNode {
+            label: "Factory".to_string(),
+            kind: "root",
+            tier: "factory",
+            path: None,
+            module: None,
+            detail: None,
+            read_only: true,
+            attached: false,
+            always: false,
+            children: factory,
+        },
+    ];
+    let scratch_imports = import_modules(scratch_source);
+    let init_imports = import_modules(init_source);
+    mark_attachments(&mut roots, &scratch_imports, &init_imports);
+    let loaded = loaded_section(&roots, &scratch_imports, &init_imports);
+    roots.insert(0, loaded);
+    roots
+}
+
+/// The "Loaded" section: one flat row per module the project scratch or
+/// init.lisp imports, in import order, so what is live is visible at the
+/// top of the list and can be removed without hunting through the tiers
+/// (the way the Instruments tab leads with the engines a project uses). A
+/// row keeps the file's path when some tier has it, so View Source and Copy
+/// to Local work from here too; an import nobody can locate still lists,
+/// since removing it is the only useful action.
+fn loaded_section(
+    roots: &[PackageTreeNode],
+    scratch_imports: &HashSet<String>,
+    init_imports: &HashSet<String>,
+) -> PackageTreeNode {
+    fn collect<'a>(nodes: &'a [PackageTreeNode], found: &mut Vec<&'a PackageTreeNode>) {
+        for node in nodes {
+            if node.kind == "module" && (node.attached || node.always) {
+                found.push(node);
+            }
+            collect(&node.children, found);
+        }
+    }
+    let mut located = Vec::new();
+    collect(roots, &mut located);
+    let mut modules = scratch_imports.iter().chain(init_imports.iter()).cloned().collect::<Vec<_>>();
+    modules.sort();
+    modules.dedup();
+    let children = modules
+        .into_iter()
+        .map(|module| {
+            let source = located.iter().find(|node| node.module.as_deref() == Some(&module));
+            let attached = scratch_imports.contains(&module);
+            let always = init_imports.contains(&module);
+            // The status glyph already says project (check) or always
+            // (bookmark); only the both case needs words.
+            let detail = if attached && always { Some("project + always".to_string()) } else { None };
+            PackageTreeNode {
+                label: module.clone(),
+                kind: "module",
+                tier: source.map(|node| node.tier).unwrap_or("loaded"),
+                path: source.and_then(|node| node.path.clone()),
+                module: Some(module),
+                detail,
+                read_only: source.is_some_and(|node| node.read_only),
+                attached,
+                always,
+                children: Vec::new(),
+            }
+        })
+        .collect();
+    PackageTreeNode {
+        label: "Loaded".to_string(),
+        kind: "root",
+        tier: "loaded",
+        path: None,
+        module: None,
+        detail: None,
+        read_only: true,
+        attached: false,
+        always: false,
+        children,
+    }
+}
+
+fn mark_attachments(
+    nodes: &mut [PackageTreeNode],
+    scratch_imports: &HashSet<String>,
+    init_imports: &HashSet<String>,
+) {
+    for node in nodes {
+        if let Some(module) = &node.module {
+            node.attached = scratch_imports.contains(module);
+            node.always = init_imports.contains(module);
+        }
+        mark_attachments(&mut node.children, scratch_imports, init_imports);
+    }
+}
+
+fn package_node(package: &eseqlisp::package::InstalledPackage, tier: &'static str) -> PackageTreeNode {
+    let children = package
+        .source_root
+        .as_deref()
+        .map(|source_root| scan_tree_nodes(source_root, tier, true))
+        .unwrap_or_default();
+    PackageTreeNode {
+        label: package.manifest.name.clone(),
+        kind: "package",
+        tier,
+        path: Some(package.root.clone()),
+        module: package.manifest.entry.clone(),
+        detail: Some(package.manifest.version.clone()),
+        read_only: true,
+        attached: false,
+        always: false,
+        children,
+    }
+}
+
+/// Recursively list source files. Only declared modules are importable;
+/// headerless helper scripts remain available for viewing their source.
+fn scan_tree_nodes(
+    directory: &Path,
+    tier: &'static str,
+    read_only: bool,
+) -> Vec<PackageTreeNode> {
+    let Ok(entries) = scan_directory(directory) else {
+        return Vec::new();
+    };
+    entries
+        .into_iter()
+        .map(|entry| {
+            if entry.directory {
+                PackageTreeNode {
+                    children: scan_tree_nodes(&entry.path, tier, read_only),
+                    label: entry.name,
+                    kind: "folder",
+                    tier,
+                    path: Some(entry.path),
+                    module: None,
+                    detail: None,
+                    read_only,
+                    attached: false,
+                    always: false,
+                }
+            } else {
+                let module = entry.module;
+                let kind = if module.is_some() { "module" } else { "file" };
+                // No detail column: the file name already says which module
+                // it is, and a second dotted name only crowds the row (the
+                // status line spells the module out on select).
+                PackageTreeNode {
+                    label: entry.name,
+                    kind,
+                    tier,
+                    path: Some(entry.path),
+                    detail: None,
+                    module,
+                    read_only,
+                    attached: false,
+                    always: false,
+                    children: Vec::new(),
+                }
+            }
+        })
+        .collect()
+}
+
+pub(crate) fn filter_package_tree(items: &[PackageTreeNode], query: &str) -> Vec<PackageTreeNode> {
+    if query.is_empty() {
+        return items.to_vec();
+    }
+    items
+        .iter()
+        .filter_map(|item| {
+            let children = filter_package_tree(&item.children, query);
+            let matches = item.label.to_lowercase().contains(query)
+                || item
+                    .module
+                    .as_ref()
+                    .is_some_and(|module| module.to_lowercase().contains(query));
+            if item.kind == "root" || matches || !children.is_empty() {
+                let mut filtered = item.clone();
+                filtered.children = children;
+                Some(filtered)
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// The Lisp tree: each root becomes a non-interactive section header
+/// ("Local", "Installed", "Factory") followed by its entries at depth 0, the
+/// way the instrument browser sections its list. A header never collapses,
+/// so the three tiers are always in view; folders and packages below them
+/// expand on click.
+pub(crate) fn package_tree_to_value(roots: &[PackageTreeNode]) -> Value {
+    let mut items = Vec::new();
+    for root in roots {
+        items.push(Rc::new(RefCell::new(crate::values::map_value(vec![
+            ("label", Value::String(root.label.clone())),
+            ("kind", Value::String("header".to_string())),
+            ("tier", Value::String(root.tier.to_string())),
+        ]))));
+        let Value::List(children) = package_nodes_to_value(&root.children) else {
+            continue;
+        };
+        items.extend(children);
+    }
+    Value::List(items)
+}
+
+fn package_nodes_to_value(items: &[PackageTreeNode]) -> Value {
+    Value::List(
+        items
+            .iter()
+            .map(|item| {
+                let icon = match item.kind {
+                    "root" | "folder" => "folder",
+                    "package" => "project",
+                    _ => "document",
+                };
+                let mut fields: Vec<(&str, Value)> = vec![
+                    ("label", Value::String(item.label.clone())),
+                    ("kind", Value::String(item.kind.to_string())),
+                    ("tier", Value::String(item.tier.to_string())),
+                    ("icon", Value::Keyword(icon.to_string())),
+                    ("read-only?", Value::Bool(item.read_only)),
+                    ("attached?", Value::Bool(item.attached)),
+                    ("always?", Value::Bool(item.always)),
+                    ("draggable", Value::Bool(false)),
+                    ("drop-target", Value::Bool(false)),
+                ];
+                // One trailing glyph: attached to this project wins over the
+                // always-load bookmark, since the project is what the user
+                // is looking at.
+                if item.attached {
+                    fields.push(("status-icon", Value::Keyword("check".to_string())));
+                } else if item.always {
+                    fields.push(("status-icon", Value::Keyword("bookmark".to_string())));
+                }
+                if let Some(path) = &item.path {
+                    fields.push(("path", Value::String(path.display().to_string())));
+                }
+                if let Some(module) = &item.module {
+                    fields.push(("module", Value::String(module.clone())));
+                }
+                if let Some(detail) = &item.detail {
+                    fields.push(("detail", Value::String(detail.clone())));
+                }
+                if !item.children.is_empty() {
+                    fields.push(("children", package_nodes_to_value(&item.children)));
+                }
+                Rc::new(RefCell::new(crate::values::map_value(fields)))
+            })
+            .collect(),
+    )
 }
 
 #[cfg(test)]
@@ -1315,6 +2102,417 @@ mod tests {
             .text();
         assert_eq!(source.matches("(import my.euclid)").count(), 1);
         assert!(source.contains("(def project-value 1)"));
+    }
+
+
+    // ── eseq-mods.18.1: path-keyed helpers shared by the tab and the text view ──
+
+    #[test]
+    fn detach_preserves_neighboring_forms_strings_comments_and_quoted_imports() {
+        let source = concat!(
+            "; (import my.euclid) is an example, not a dependency\n",
+            "(def example \"Unicode λ\n(import my.euclid)\n\")\n",
+            "'(import my.euclid)\n",
+            "(def before 1) (import my.euclid) (def after 2) ; keep this\n",
+            "(import\n  my.euclid\n  :as euclid)\n",
+            "(import my.other)\n",
+        );
+        let (updated, removed) = source_without_import(source, "my.euclid");
+        assert!(removed);
+        assert!(updated.contains("(def before 1)  (def after 2) ; keep this"));
+        assert!(updated.contains("(def example \"Unicode λ\n(import my.euclid)\n\")"));
+        assert!(updated.contains("'(import my.euclid)"));
+        assert!(updated.contains("; (import my.euclid) is an example"));
+        assert_eq!(import_modules(&updated), HashSet::from(["my.other".to_string()]));
+        assert_eq!(source_without_import(&updated, "my.euclid"), (updated, false));
+    }
+
+    #[test]
+    fn detach_removes_only_the_canonical_import_line_and_is_idempotent() {
+        let source = "(def tempo 120)\n\n(import my.euclid)\n\n(import my.other)\n";
+        let (updated, removed) = source_without_import(source, "my.euclid");
+        assert!(removed);
+        assert_eq!(updated, "(def tempo 120)\n\n\n(import my.other)\n");
+        assert!(!import_modules(&updated).contains("my.euclid"));
+        assert!(import_modules(&updated).contains("my.other"));
+        let (again, removed_again) = source_without_import(&updated, "my.euclid");
+        assert!(!removed_again);
+        assert_eq!(again, updated);
+        // A half-typed unrelated form does not stop the one-line import
+        // from being found, mirroring how attach derives its markers.
+        let (updated, removed) = source_without_import("(import my.euclid)\n(half", "my.euclid");
+        assert!(removed);
+        assert_eq!(updated, "(half");
+    }
+
+    #[test]
+    fn scratch_attach_then_detach_round_trips_the_draft_buffer() {
+        let mut runtime = Runtime::new();
+        runtime.register_reactive("SEQ", Vec::new(), true);
+        let mut editor = Editor::new(runtime, eseqlisp::EditorConfig::default());
+        editor
+            .buffers
+            .iter_mut()
+            .find(|buffer| buffer.name == PROJECT_SCRATCH_BUFFER_NAME)
+            .expect("default scratch buffer")
+            .set_text("(def project-value 1)\n");
+        assert!(!attach_to_scratch(&mut editor, "my.euclid").unwrap());
+        assert!(detach_from_scratch(&mut editor, "my.euclid").unwrap());
+        assert!(
+            !detach_from_scratch(&mut editor, "my.euclid").unwrap(),
+            "a second detach finds nothing to remove"
+        );
+        let source = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == PROJECT_SCRATCH_BUFFER_NAME)
+            .unwrap()
+            .text();
+        assert_eq!(source, "(def project-value 1)\n\n");
+    }
+
+    #[test]
+    fn toggling_module_overrides_reverts_the_factory_seam_and_reattach_restores_it() {
+        let mut runtime = Runtime::new();
+        runtime.register_reactive("SEQ", Vec::new(), true);
+        let mut editor = Editor::new(runtime, eseqlisp::EditorConfig::default());
+        let root = temp_root("override-toggle");
+        std::fs::create_dir_all(root.join("t")).unwrap();
+        std::fs::write(
+            root.join("t/factory.lisp"),
+            "(module t.factory)\n(export seam)\n(def seam () \"factory\")\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("t/pkg.lisp"),
+            "(module t.pkg)\n(import t.factory)\n(override t.factory/seam () \"package\")\n",
+        )
+        .unwrap();
+        editor.runtime_mut().set_scoped_module_load_path(vec![eseqlisp::ModuleLoadRoot {
+            path: root.clone(),
+            module_prefix: None,
+        }]);
+        editor.runtime_mut().eval_str("(import t.pkg)").unwrap();
+        let seam = |editor: &mut Editor| editor.runtime_mut().eval_str("(t.factory/seam)").unwrap();
+        assert_eq!(seam(&mut editor), Some(Value::String("package".into())));
+        set_module_overrides_enabled(&mut editor, "t.pkg", false);
+        assert_eq!(seam(&mut editor), Some(Value::String("factory".into())));
+        assert!(matches!(
+            editor.runtime_mut().eval_str("(disabled-override-modules)").unwrap(),
+            Some(Value::List(list)) if list.len() == 1
+        ));
+        set_module_overrides_enabled(&mut editor, "t.pkg", true);
+        assert_eq!(seam(&mut editor), Some(Value::String("package".into())));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn project_detach_updates_evaluated_source_when_draft_already_removed_import() {
+        let state = SequencerState::new(1, vec![]);
+        state.set_scratch_source("(import my.euclid)\n(def saved 1)\n");
+        let mut editor = Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        let draft = "(def unsaved 2)\n";
+        editor.buffers.iter_mut().find(|buffer| buffer.name == PROJECT_SCRATCH_BUFFER_NAME)
+            .unwrap().set_text(draft);
+        assert!(module_still_attached_elsewhere(&state, "my.euclid", AttachmentDestination::UserInit),
+            "an unevaluated draft edit does not detach the live project");
+        assert!(detach_from_project(&mut editor, &state, "my.euclid").unwrap());
+        assert_eq!(state.scratch_source(), "(def saved 1)\n");
+        assert_eq!(editor.buffers.iter().find(|buffer| buffer.name == PROJECT_SCRATCH_BUFFER_NAME)
+            .unwrap().text(), draft);
+        assert!(!detach_from_project(&mut editor, &state, "my.euclid").unwrap());
+    }
+
+    #[test]
+    fn user_init_edits_persist_with_an_open_buffer_without_saving_unrelated_draft() {
+        let root = temp_root("open-init");
+        std::fs::create_dir_all(&root).unwrap();
+        let init = root.join("init.lisp");
+        std::fs::write(&init, "(def saved 1)\n").unwrap();
+        let mut editor = Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.open_file_buffer(init.clone()).unwrap();
+        let buffer_id = editor.buffers.iter().position(|buffer| buffer.path.as_deref() == Some(&init)).unwrap();
+        editor.buffers[buffer_id].set_text("(def saved 2)\n");
+        assert!(!attach_to_user_init_at(&mut editor, &init, "my.euclid").unwrap());
+        let persisted = std::fs::read_to_string(&init).unwrap();
+        assert!(persisted.contains("(def saved 1)"));
+        assert!(import_modules(&persisted).contains("my.euclid"));
+        assert!(editor.buffers[buffer_id].text().contains("(def saved 2)"));
+        assert!(import_modules(&editor.buffers[buffer_id].text()).contains("my.euclid"));
+        assert!(editor.buffers[buffer_id].dirty);
+        assert!(detach_from_user_init_at(&mut editor, &init, "my.euclid").unwrap());
+        assert!(!import_modules(&std::fs::read_to_string(&init).unwrap()).contains("my.euclid"));
+        assert!(!import_modules(&editor.buffers[buffer_id].text()).contains("my.euclid"));
+        assert!(editor.buffers[buffer_id].text().contains("(def saved 2)"));
+        assert!(editor.buffers[buffer_id].dirty);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn headerless_package_helpers_are_files_not_importable_modules() {
+        let root = temp_root("headerless");
+        std::fs::create_dir_all(root.join("helpers")).unwrap();
+        std::fs::write(root.join("helpers/config.lisp"), "(def config 1)\n").unwrap();
+        let tree = scan_tree_nodes(&root, "installed", true);
+        let helper = &tree[0].children[0];
+        assert_eq!(helper.kind, "file");
+        assert!(helper.module.is_none());
+        assert_eq!(helper.path.as_deref(), Some(root.join("helpers/config.lisp").as_path()));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn user_init_attach_and_detach_write_the_file_when_no_buffer_is_open() {
+        let root = temp_root("init");
+        let init = root.join("init.lisp");
+        let mut editor = Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        assert!(!attach_to_user_init_at(&mut editor, &init, "my.euclid").unwrap());
+        assert!(attach_to_user_init_at(&mut editor, &init, "my.euclid").unwrap());
+        assert_eq!(
+            std::fs::read_to_string(&init).unwrap().matches("(import my.euclid)").count(),
+            1
+        );
+        assert!(detach_from_user_init_at(&mut editor, &init, "my.euclid").unwrap());
+        assert_eq!(std::fs::read_to_string(&init).unwrap(), "");
+        assert!(!detach_from_user_init_at(&mut editor, &init, "my.euclid").unwrap());
+        assert!(
+            !detach_from_user_init_at(&mut editor, &root.join("missing.lisp"), "x").unwrap(),
+            "a missing init.lisp has nothing attached"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn module_at_path_reads_the_header_and_rejects_folders_and_headerless_files() {
+        let root = temp_root("module-at-path");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("one.lisp"), "(module my.one)\n").unwrap();
+        std::fs::write(root.join("plain.lisp"), "(def x 1)\n").unwrap();
+        assert_eq!(module_at_path(&root.join("one.lisp")).unwrap(), "my.one");
+        assert!(module_at_path(&root).unwrap_err().contains("folder"));
+        assert!(module_at_path(&root.join("plain.lisp")).unwrap_err().contains("no (module"));
+        let payload = crate::values::map_value([(
+            "path",
+            Value::String(root.join("one.lisp").display().to_string()),
+        )]);
+        assert_eq!(payload_module(&payload).unwrap(), "my.one");
+        let payload = crate::values::map_value([("module", Value::String("my.two".into()))]);
+        assert_eq!(payload_module(&payload).unwrap(), "my.two");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn package_tree_lists_local_installed_and_factory_tiers_with_attachment_marks() {
+        let root = temp_root("tree");
+        let local = root.join("local");
+        std::fs::create_dir_all(local.join("my")).unwrap();
+        std::fs::write(local.join("my/euclid.lisp"), "(module my.euclid)\n").unwrap();
+        std::fs::write(local.join("notes.lisp"), "(def x 1)\n").unwrap();
+        let installed = root.join("packages");
+        std::fs::create_dir_all(installed.join("alec.drums/src")).unwrap();
+        std::fs::write(
+            installed.join("alec.drums/manifest.json"),
+            r#"{"name":"alec/drums","version":"1","entry":"alec.drums.kit"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            installed.join("alec.drums/src/kit.lisp"),
+            "(module alec.drums.kit)\n(export )\n",
+        )
+        .unwrap();
+        let factory = root.join("factory");
+        std::fs::create_dir_all(factory.join("demo.pack/src")).unwrap();
+        std::fs::write(
+            factory.join("demo.pack/manifest.json"),
+            r#"{"name":"demo/pack","version":"1"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            factory.join("demo.pack/src/mixer.lisp"),
+            "(module demo.pack.mixer)\n(def y 2)\n",
+        )
+        .unwrap();
+        let (catalog, errors) = eseqlisp::package::PackageCatalog::scan_layered_reporting(&[
+            installed.clone(),
+            factory.clone(),
+        ]);
+        assert!(errors.is_empty(), "{errors:?}");
+
+        let tree = build_package_tree(
+            &local,
+            &catalog,
+            &installed,
+            "(import my.euclid)\n",
+            "(import alec.drums.kit)\n",
+        );
+        assert_eq!(
+            tree.iter().map(|node| node.label.as_str()).collect::<Vec<_>>(),
+            ["Loaded", "Local", "Installed", "Factory"]
+        );
+        let loaded = &tree[0].children;
+        assert_eq!(
+            loaded.iter().map(|node| (node.label.as_str(), node.detail.as_deref())).collect::<Vec<_>>(),
+            [("alec.drums.kit", None), ("my.euclid", None)]
+        );
+        assert_eq!(loaded[1].path, Some(local.join("my/euclid.lisp")));
+        assert!(loaded[0].read_only && !loaded[1].read_only);
+        let tree = &tree[1..];
+        let my = &tree[0].children[0];
+        assert_eq!((my.label.as_str(), my.kind), ("my", "folder"));
+        let euclid = &my.children[0];
+        assert_eq!(euclid.module.as_deref(), Some("my.euclid"));
+        assert!(euclid.attached && !euclid.always && !euclid.read_only);
+        let notes = &tree[0].children[1];
+        assert_eq!((notes.kind, notes.module.as_deref()), ("file", None));
+
+        let drums = &tree[1].children[0];
+        assert_eq!((drums.label.as_str(), drums.kind, drums.tier), ("alec/drums", "package", "installed"));
+        assert_eq!(drums.module.as_deref(), Some("alec.drums.kit"));
+        assert!(drums.always && !drums.attached && drums.read_only);
+        let kit = &drums.children[0];
+        assert_eq!(kit.module.as_deref(), Some("alec.drums.kit"));
+        assert!(kit.always && kit.read_only);
+
+        let demo = &tree[2].children[0];
+        assert_eq!((demo.tier, demo.module.as_deref()), ("factory", None));
+        assert_eq!(demo.children[0].module.as_deref(), Some("demo.pack.mixer"));
+
+        let filtered = filter_package_tree(tree, "kit");
+        assert_eq!(filtered.len(), 3, "roots always survive a filter");
+        assert!(filtered[0].children.is_empty());
+        assert_eq!(filtered[1].children[0].children.len(), 1);
+        assert!(filtered[2].children.is_empty());
+
+        let Value::List(rows) = package_tree_to_value(tree) else {
+            panic!("tree value is a list");
+        };
+        let field = |index: usize, key: &str| -> Option<Value> {
+            let Value::Map(map) = rows[index].borrow().clone() else {
+                return None;
+            };
+            map.get(key).map(|value| value.borrow().clone())
+        };
+        // Headers then entries: Local, my/, Installed, alec/drums, Factory, demo/pack.
+        assert_eq!(rows.len(), 7, "{rows:?}");
+        assert_eq!(field(0, "kind"), Some(Value::String("header".into())));
+        assert_eq!(field(0, "label"), Some(Value::String("Local".into())));
+        assert_eq!(field(1, "label"), Some(Value::String("my".into())));
+        assert_eq!(field(3, "kind"), Some(Value::String("header".into())));
+        assert_eq!(field(4, "status-icon"), Some(Value::Keyword("bookmark".into())));
+        assert_eq!(field(5, "label"), Some(Value::String("Factory".into())));
+
+        let copied = copy_module_to_local(
+            &installed.join("alec.drums/src/kit.lisp"),
+            "alec.drums.kit",
+            &local,
+        )
+        .unwrap();
+        assert_eq!(copied, local.join("alec/drums/kit.lisp"));
+        assert!(copy_module_to_local(&copied, "alec.drums.kit", &local)
+            .unwrap_err()
+            .contains("already has"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    fn editor_with_step_tabs() -> Editor {
+        let mut runtime = Runtime::new();
+        runtime.register_reactive("SEQ", Vec::new(), true);
+        let mut editor = Editor::new(runtime, eseqlisp::EditorConfig::default());
+        let ui_dir = sequencer::app_paths::app_paths().ui_dir();
+        for file in ["seq-core-state.lisp", "seq-step-tabs.lisp"] {
+            let source = std::fs::read_to_string(ui_dir.join(file)).expect(file);
+            editor.runtime_mut().eval_str(&source).unwrap_or_else(|error| {
+                panic!("load {file}: {error:?}");
+            });
+        }
+        // The layout hub is an event-time dependency of tab selection.
+        editor.runtime_mut().register_native(
+            "eseq.seq-layout/refresh-current-layout",
+            |_args, _ctx| Ok(Value::Nil),
+        );
+        editor
+    }
+
+    fn registered_tabs(editor: &mut Editor) -> String {
+        match editor
+            .runtime_mut()
+            .eval_str("(str eseq.seq-step-tabs/seq-registered-step-tabs)")
+        {
+            Ok(Some(Value::String(text))) => text,
+            other => panic!("registered tabs: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn source_tab_opens_as_a_closable_view_and_close_only_drops_the_tab() {
+        let root = temp_root("source-tab");
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("euclid.lisp");
+        std::fs::write(&path, "(module my.euclid)\n").unwrap();
+        let mut editor = editor_with_step_tabs();
+
+        let buffer = open_source_tab(&mut editor, &path, "euclid.lisp", true).unwrap();
+        assert!(editor.buffers.iter().any(|candidate| candidate.name == buffer));
+        assert!(
+            editor.buffers.iter().find(|candidate| candidate.name == buffer).unwrap().read_only,
+            "installed and factory sources open read-only"
+        );
+        let tabs = registered_tabs(&mut editor);
+        assert!(tabs.contains(&buffer) && tabs.contains(":source"), "{tabs}");
+        assert!(
+            matches!(
+                editor.runtime_mut().eval_str(&format!(
+                    "(eseq.seq-step-tabs/seq-script-step-tab? (nth eseq.seq-step-tabs/seq-registered-step-tabs 0))"
+                )),
+                Ok(Some(Value::Bool(false)))
+            ),
+            "a source tab is never mistaken for a script sequencer tab"
+        );
+        let rendered = editor
+            .runtime_mut()
+            .eval_str("(str (eseq.seq-step-tabs/seq-main-step-tabs))")
+            .unwrap();
+        assert!(
+            matches!(&rendered, Some(Value::String(text)) if text.contains("on-close")),
+            "the tab renders with a close handler: {rendered:?}"
+        );
+
+        close_source_tab(&mut editor, &buffer);
+        assert!(!registered_tabs(&mut editor).contains(&buffer));
+        assert!(
+            !editor.buffers.iter().any(|candidate| candidate.name == buffer),
+            "a clean buffer is dropped with its tab"
+        );
+        assert!(
+            editor.drain_host_commands().is_empty(),
+            "closing a source tab never queues a script-sequencer teardown"
+        );
+
+        // Unsaved edits survive the tab closing.
+        let buffer = open_source_tab(&mut editor, &path, "euclid.lisp", false).unwrap();
+        editor
+            .buffers
+            .iter_mut()
+            .find(|candidate| candidate.name == buffer)
+            .unwrap()
+            .set_text("(module my.euclid)\n(def edited 1)\n");
+        editor
+            .buffers
+            .iter_mut()
+            .find(|candidate| candidate.name == buffer)
+            .unwrap()
+            .dirty = true;
+        close_source_tab(&mut editor, &buffer);
+        assert!(!registered_tabs(&mut editor).contains(&buffer));
+        assert!(editor.buffers.iter().any(|candidate| candidate.name == buffer));
+
+        // The project scratch registers as a tab but is never dropped.
+        register_source_tab(&mut editor, "scratch", PROJECT_SCRATCH_BUFFER_NAME).unwrap();
+        assert!(registered_tabs(&mut editor).contains(PROJECT_SCRATCH_BUFFER_NAME));
+        close_source_tab(&mut editor, PROJECT_SCRATCH_BUFFER_NAME);
+        assert!(!registered_tabs(&mut editor).contains(PROJECT_SCRATCH_BUFFER_NAME));
+        assert!(editor.buffers.iter().any(|candidate| candidate.name == PROJECT_SCRATCH_BUFFER_NAME));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

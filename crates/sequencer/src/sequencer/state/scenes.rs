@@ -58,6 +58,17 @@ pub struct TrackPatternPool {
     pub patterns: HashMap<PatternId, Arc<StoredPattern>>,
     pub next_id: u64,
     pub sounds: TrackSoundPool,
+    pub(crate) rack_binding_sync: RackBindingSyncCache,
+}
+
+/// A successful binding check applies only to this exact immutable patch and
+/// descriptor layout. Weak references do not retain device data. `Arc::make_mut`
+/// dissociates them even with one strong owner, so every mutation invalidates
+/// the check automatically, including edits, imports and history restoration.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct RackBindingSyncCache {
+    pub layouts: Vec<crate::effects::EffectSlotBindingLayout>,
+    pub patches: HashMap<PatchId, std::sync::Weak<Patch>>,
 }
 
 #[derive(Clone, Debug)]
@@ -95,6 +106,7 @@ impl Default for TrackPatternPool {
             // Reserve 0 for atomic/sentinel uses; real track pattern ids start at 1.
             next_id: 1,
             sounds: TrackSoundPool::default(),
+            rack_binding_sync: RackBindingSyncCache::default(),
         }
     }
 }
@@ -953,13 +965,10 @@ impl ProjectScenes {
         // snapshots that never carried it. Snapshot→scene transfer happens
         // only in from_pattern_snapshots (project load).
 
-        for track in 0..snapshot.track_bits.len() {
+        for (track, data) in snapshot.into_track_pattern_data().enumerate() {
             if rack_stale.get(track).copied().unwrap_or(false) {
                 continue;
             }
-            let Some(data) = snapshot.track_pattern_data(track) else {
-                continue;
-            };
             let resolved = self
                 .track_overrides
                 .get(track)
@@ -1250,6 +1259,19 @@ impl ProjectScenes {
         let data = self.track_pools.get(track)?.get(id)?;
         *self.track_overrides.get_mut(track)? = Some(id);
         Some(data)
+    }
+
+    /// Pin the already-playing pattern without composing/copying its devices.
+    pub fn pin_track_override_to_effective(&mut self, track: usize) -> bool {
+        let Some(id) = self.effective_pattern_id(track) else { return false };
+        let Some(pool) = self.track_pools.get(track) else { return false };
+        let Some(sound) = pool.refs(id) else { return false };
+        if !pool.sounds.patches.contains_key(&sound.patch) || !pool.sounds.mixes.contains_key(&sound.mix) {
+            return false;
+        }
+        let Some(target) = self.track_overrides.get_mut(track) else { return false };
+        *target = Some(id);
+        true
     }
 
     /// Resolve every selected cell before changing any override. This keeps a

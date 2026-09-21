@@ -122,10 +122,10 @@ impl App {
         })
     }
 
-    /// Move a project-owned graph sequencer into a rack. Allowed only when
-    /// every explicit route and seed track it uses, in every scene, is a
-    /// member of that rack; otherwise the error names the offending nodes and
-    /// nothing changes.
+    /// Move a project-owned graph sequencer into a rack. Every explicit route
+    /// and seed track it uses, in every scene, is rewritten: a track that is a
+    /// member of the rack becomes that member's index, and a track outside the
+    /// rack becomes "off" (seed lists simply drop it). Nothing is refused.
     /// Returns the rack-owned instance id.
     pub fn move_sequencer_into_rack_recorded(
         &mut self,
@@ -147,46 +147,9 @@ impl App {
         if manifest.owner_rack.is_some() {
             return Err(format!("'{}' already belongs to a rack", manifest.name));
         }
-        let member_of = |track: usize| members.iter().position(|member| *member == track);
         // The manifest's default `:route n` is read as member n once the rack
-        // owns it (a demo's `:route 0` lands on the first pad), so only
-        // explicit per-node routes can point outside the rack.
-        let mut outside: Vec<String> = Vec::new();
-        {
-            let scenes = self.state.all_scene_graph_overrides();
-            for (scene_idx, graphs) in scenes.iter().enumerate() {
-                for graph in graphs.iter().filter(|g| manifest.matches_overrides(g)) {
-                    for intrinsic in &graph.node_intrinsics {
-                        let mut tracks = Vec::new();
-                        if let Some(ProjectGraphRouteOverride::Track(track)) = intrinsic.route {
-                            tracks.push(track);
-                        }
-                        if let Some(ProjectGraphSeedFrom::Tracks(seed)) = &intrinsic.seed_from {
-                            tracks.extend(seed.iter().copied());
-                        }
-                        for track in tracks {
-                            if member_of(track).is_none() {
-                                outside.push(format!(
-                                    "node {} (scene {}, track {})",
-                                    intrinsic.instance,
-                                    scene_idx + 1,
-                                    track + 1
-                                ));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        if !outside.is_empty() {
-            outside.sort();
-            outside.dedup();
-            return Err(format!(
-                "'{}' routes outside the rack: {}",
-                manifest.name,
-                outside.join(", ")
-            ));
-        }
+        // owns it (a demo's `:route 0` lands on the first pad); only explicit
+        // per-node overrides are remapped here.
         let rack_id = crate::lisp_host::graph_instance_id(&manifest.name, Some(group_id));
         let entry = ProjectRackSequencer {
             sequencer_id: rack_id,

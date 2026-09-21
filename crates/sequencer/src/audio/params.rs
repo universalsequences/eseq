@@ -39,6 +39,7 @@ pub(super) fn track_accepts_scheduled_trigger(state: &SequencerState, track_idx:
 
 pub(super) fn resolve_live_keyboard_transpose(
     state: &SequencerState,
+    snapshot: &SequencerSnapshot,
     accumulator_state: crate::accumulator::AccumulatorRuntimeState,
     track_idx: usize,
     raw_transpose: f32,
@@ -50,10 +51,19 @@ pub(super) fn resolve_live_keyboard_transpose(
         _ => raw_transpose,
     };
     let fts = tp.get_fts_scale();
-    if fts > 0 {
+    let quantized = if fts > 0 {
         crate::scale::quantize_transpose(with_accumulator, fts)
     } else {
         with_accumulator
+    };
+    // Match scheduled playback: scene transpose comes after fit-to-scale.
+    // Use the callback's published snapshot, never lock the scene store on
+    // the audio thread. Only the sounding pitch changes; the trigger keeps
+    // its source pitch for recording, note-off and mono held-note identity.
+    if tp.uses_global_transpose() {
+        quantized + snapshot.scene_slots.transpose_semitones()
+    } else {
+        quantized
     }
 }
 

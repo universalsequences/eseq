@@ -1,6 +1,5 @@
-;; ES Compressor built-in FX panel: sampler-style sustain compressor.
-;; Layout mirrors the dust-comp custom panel it was promoted from: paired
-;; primary knobs, a response pair, and a compact gain strip of slider trims.
+;; ES Compressor: three architectures, shared timing/gain controls and a
+;; manifest-backed, p-lock-aware mode selector. No private study assets.
 (module eseq.effects.builtin.es-compressor)
 
 (import eseq.effects.builtin.filter-core :refer (builtin-fx-param))
@@ -22,6 +21,7 @@
 (def es-compressor-knob (fx label-text p decimals taper)
   (subtree :key (str "es-compressor-knob-" (get p :idx) (pc/param-control-key-mode fx p))
     (knob-number :label label-text
+      :debug-name (str "es-compressor-control-" (get p :name))
       :taper taper
       :step (if (= decimals 0) 1 nil)
       :value (pc/fx-param-value-for fx p)
@@ -42,6 +42,7 @@
 (def es-compressor-percent-knob (fx label-text p)
   (subtree :key (str "es-compressor-knob-" (get p :idx) (pc/param-control-key-mode fx p))
     (knob-number :label label-text
+      :debug-name (str "es-compressor-control-" (get p :name))
       :value (pc/fx-param-value-for fx p)
       :min (pc/param-control-min fx p) :max (pc/param-control-max fx p)
       :value-scale 100 :decimals 0
@@ -63,6 +64,7 @@
     (v-stack :width 7.2 :gap 0.06 :align :start
       (label label-text :font-size 9 :width 7.2 :height 0.78 :color :dim :bg :transparent)
       (number-picker
+        :debug-name (str "es-compressor-control-" (get p :name))
         :value (pc/fx-param-value-for fx p)
         :min (pc/param-control-min fx p)
         :max (pc/param-control-max fx p)
@@ -82,9 +84,24 @@
   (box :width width :padding 0.24 :background-color surface :corner-radius 7 :border-width 1
     body))
 
+(def es-compressor-mode (fx p)
+  (subtree :key (str "es-compressor-mode-" (get p :idx) (pc/param-control-key-mode fx p))
+    (dropdown :debug-name "es-compressor-mode"
+      :value (pc/fx-param-text-value-for fx p)
+      :options (get p :options)
+      :width 9 :height 1.1 :font-size 10
+      :bg-color :mixer-strip-bg :border-color :mixer-strip-border
+      :plock-active (if (pc/param-plock-active? fx p) 1 0)
+      :plock-color-r (pc/param-plock-color-r)
+      :plock-color-g (pc/param-plock-color-g)
+      :plock-color-b (pc/param-plock-color-b)
+      :on-change (lambda (v) (pc/param-set-option fx p v)))))
+
 (def es-compressor-ui (fx)
   (let ((params (get fx :params)))
-    (let ((amount-p (eseq.effects.builtin.filter-core/builtin-fx-param params "amount"))
+    (let ((mode-p (eseq.effects.builtin.filter-core/builtin-fx-param params "mode"))
+          (tone-p (eseq.effects.builtin.filter-core/builtin-fx-param params "tone"))
+          (amount-p (eseq.effects.builtin.filter-core/builtin-fx-param params "amount"))
           (mix-p (eseq.effects.builtin.filter-core/builtin-fx-param params "mix"))
           (attack-p (eseq.effects.builtin.filter-core/builtin-fx-param params "attack"))
           (release-p (eseq.effects.builtin.filter-core/builtin-fx-param params "release"))
@@ -92,22 +109,27 @@
           (drive-p (eseq.effects.builtin.filter-core/builtin-fx-param params "drive"))
           (detector-p (eseq.effects.builtin.filter-core/builtin-fx-param params "detector-db"))
           (output-p (eseq.effects.builtin.filter-core/builtin-fx-param params "output-db")))
-      (if (and amount-p mix-p attack-p release-p input-p drive-p detector-p output-p)
+      (if (and mode-p tone-p amount-p mix-p attack-p release-p input-p drive-p detector-p output-p)
         (h-stack :gap 0.35 :align :stretch :debug-name "es-compressor-panel"
           (es-compressor-surface 16 :instrument-group-bg
             (v-stack :gap 0.18 :align :start
-              (es-compressor-heading "COMPRESSION")
+              (es-compressor-mode fx mode-p)
               (h-stack :gap 0.3 :align :start
-                (es-compressor-knob fx "sustain / %" amount-p 0 "linear")
+                (es-compressor-knob fx "amount / %" amount-p 0 "linear")
                 (es-compressor-percent-knob fx "mix" mix-p))
-              (es-compressor-caption "stereo linked · gain-domain mix")))
-          (es-compressor-surface 16 :instrument-group-bg
+              (es-compressor-caption "stereo linked · parallel mix")))
+          (es-compressor-surface 23.8 :instrument-group-bg
             (v-stack :gap 0.18 :align :start
-              (es-compressor-heading "RESPONSE")
+              (box :height 1.1 (es-compressor-heading "RESPONSE / COLOR"))
               (h-stack :gap 0.3 :align :start
                 (es-compressor-knob fx "attack / ms" attack-p 1 "log")
-                (es-compressor-knob fx "release / ms" release-p 0 "log"))
-              (es-compressor-caption "grab-and-settle envelope")))
+                (es-compressor-knob fx "release / ms" release-p 0 "log")
+                (es-compressor-knob fx "tone / %" tone-p 0 "linear"))
+              (es-compressor-caption
+                (let ((mode-value (reactive-value (pc/fx-param-value-for fx mode-p))))
+                  (if (= mode-value 1) "optical excitation / recovery · tone = darkness"
+                    (if (= mode-value 2) "grab-and-settle · automatic makeup"
+                      "coupled timing · manual output makeup"))))))
           (es-compressor-surface 8 :instrument-control-bg
             (v-stack :gap 0.18 :align :start
               (es-compressor-heading "GAIN")

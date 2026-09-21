@@ -42,6 +42,7 @@ pub mod roar;
 pub(crate) mod space_echo;
 pub mod spring;
 pub(crate) mod slowdown;
+pub(crate) mod chorus;
 #[allow(dead_code)]
 pub mod stereo_panner;
 #[allow(dead_code)]
@@ -1251,6 +1252,57 @@ mod tests {
     }
 
     #[test]
+    fn descriptor_sync_preserves_normalized_storage_and_repairs_stale_bindings() {
+        use super::{InstrumentModulationTarget, ModulationMode};
+        let mut desc = EffectDescriptor::builtin_filter();
+        desc.instrument_modulation_targets.push(InstrumentModulationTarget {
+            base_param_idx: 2, source_param_idx: None, modulator_slot: 0,
+            depth_param_idx: 0, active_param_idx: Some(1),
+            depth_min: -1.0, depth_max: 1.0, depth_unit: None, mod_mode: ModulationMode::Additive,
+        });
+        let mut slot = EffectSlotSnapshot::new_default_with_modulator(&desc, 42, 43);
+        slot.defaults[0] = 0.0;
+        slot.set_plock(3, 0, 0.7);
+        slot.sync_to_descriptor_with_modulator(&desc, 42, 43);
+        assert_eq!(slot.defaults[1], 0.0);
+        assert_eq!(slot.plocks[3][1], Some(1.0));
+        assert!(slot.is_synced_to_descriptor_with_modulator(&desc, 42, 43));
+        let storage = slot.plocks[3].as_ptr();
+        slot.sync_to_descriptor_with_modulator(&desc, 42, 43);
+        assert_eq!(slot.plocks[3].as_ptr(), storage, "unchanged binding keeps lock storage");
+
+        // Node identity alone is insufficient: loaded snapshots can carry
+        // stale mappings, incomplete rows, or out-of-date modulation flags.
+        let mutations: &[fn(&mut EffectSlotSnapshot)] = &[
+            |s| s.plock_param_ids[3][0] = None,
+            |s| { s.plocks[4].pop(); },
+            |s| { s.plock_param_ids.pop(); },
+            |s| s.param_node_spans[0] += 1,
+            |s| s.param_node_indices[0] += 1,
+            |s| s.modulator_node_id += 1,
+            |s| s.node_id += 1,
+            |s| s.defaults[1] = 1.0,
+            |s| s.plocks[3][1] = None,
+            |s| { s.key_locks.insert(60, vec![None; s.num_params as usize]); },
+        ];
+        for (case, mutate) in mutations.iter().enumerate() {
+            let mut candidate = slot.clone();
+            mutate(&mut candidate);
+            assert!(!candidate.is_synced_to_descriptor_with_modulator(&desc, 42, 43));
+            candidate.sync_to_descriptor_with_modulator(&desc, 42, 43);
+            assert!(candidate.is_synced_to_descriptor_with_modulator(&desc, 42, 43), "case {case}");
+            assert_eq!(candidate.plocks[3][0], Some(0.7));
+            assert_eq!(candidate.plocks[3][1], Some(1.0));
+        }
+        let mut changed = desc.clone();
+        changed.params[0].node_param_idx += 1;
+        assert!(!slot.is_synced_to_descriptor_with_modulator(&changed, 42, 43));
+        slot.sync_to_descriptor_with_modulator(&changed, 42, 43);
+        assert!(slot.is_synced_to_descriptor_with_modulator(&changed, 42, 43));
+        assert_eq!(slot.plocks[3][0], Some(0.7));
+    }
+
+    #[test]
     fn sync_to_descriptor_rebinds_loaded_plock_and_key_lock_ids_to_live_node_id() {
         let desc = EffectDescriptor {
             name: "test".to_string(),
@@ -2129,6 +2181,7 @@ mod tests {
             EffectDescriptor::builtin_insert_names(),
             &[
                 "444 Compressor",
+                "Chorus",
                 "Compressor",
                 "Delay",
                 "Dimension",
@@ -2153,6 +2206,7 @@ mod tests {
         assert_eq!(
             EffectDescriptor::listable_builtin_insert_names(),
             vec![
+                "Chorus",
                 "Compressor",
                 "Dimension",
                 "DJ Mixer",
@@ -2174,6 +2228,7 @@ mod tests {
         assert_eq!(
             builtin_effect_names(),
             vec![
+                "Chorus",
                 "Compressor",
                 "Convolution Reverb",
                 "Dimension",
@@ -3343,6 +3398,7 @@ impl EffectDescriptor {
     pub fn builtin_insert_names() -> &'static [&'static str] {
         &[
             "444 Compressor",
+            "Chorus",
             "Compressor",
             "Delay",
             "Dimension",
@@ -3418,6 +3474,7 @@ impl EffectDescriptor {
             "Str8 Delay" => Some(Self::builtin_str8_delay()),
             "Space Echo" => Some(Self::builtin_space_echo()),
             "Slowdown" => Some(slowdown::descriptor()),
+            "Chorus" => Some(chorus::descriptor()),
             "Dimension" => Some(Self::builtin_dimension()),
             "Phaser-Flanger" => Some(Self::builtin_phaser_flanger()),
             "Roar" => Some(Self::builtin_roar()),
@@ -10547,6 +10604,33 @@ pub struct EffectSlotSnapshot {
     pub sampler_slice_edits: Option<crate::analysis::SamplerSliceEdits>,
 }
 
+/// The descriptor fields that affect synchronization of an already-normalized
+/// snapshot. Authored defaults survive a rebind; only layout/identity and the
+/// derived modulation-active rules can change such a snapshot.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct EffectSlotBindingLayout {
+    node_id: u32,
+    modulator_node_id: u32,
+    params: Vec<(u32, u32)>,
+    transport_phase: u32,
+    tensors: Vec<(String, Vec<usize>, usize, usize)>,
+    modulation_groups: BTreeMap<usize, Vec<usize>>,
+}
+
+impl EffectSlotBindingLayout {
+    pub(crate) fn new(desc: &EffectDescriptor, node_id: u32, modulator_node_id: u32) -> Self {
+        Self {
+            node_id,
+            modulator_node_id,
+            params: desc.params.iter().map(|p| (p.node_param_idx, p.node_param_span.max(1))).collect(),
+            transport_phase: desc.transport_phase_param_idx().unwrap_or(NO_TRANSPORT_PHASE_PARAM),
+            tensors: desc.tensor_params.iter().map(|t|
+                (t.name.clone(), t.shape.clone(), t.default.len(), t.cell_offset)).collect(),
+            modulation_groups: EffectSlotSnapshot::modulation_active_groups(desc),
+        }
+    }
+}
+
 impl EffectSlotSnapshot {
     pub fn capture_authoring_values(slot: &EffectSlotState) -> EffectSlotValuesSnapshot {
         Self::capture(slot).authoring_values()
@@ -11124,12 +11208,92 @@ impl EffectSlotSnapshot {
         self.sync_to_descriptor_with_modulator(desc, node_id, self.modulator_node_id);
     }
 
+    /// Whether binding this snapshot would leave it unchanged. Check the
+    /// normalized lock identities as well as the schema: restored snapshots
+    /// can have the right node ID but incomplete or stale per-step bindings.
+    /// Callers owning shared sound patches can use this before copy-on-write.
+    pub fn is_synced_to_descriptor_with_modulator(
+        &self,
+        desc: &EffectDescriptor,
+        node_id: u32,
+        modulator_node_id: u32,
+    ) -> bool {
+        let n = desc.params.len();
+        if self.node_id != node_id || self.modulator_node_id != modulator_node_id
+            || self.num_params as usize != n || self.defaults.len() != n
+            || !self.param_node_indices.iter().copied().eq(desc.params.iter().map(|p| p.node_param_idx))
+            || !self.param_node_spans.iter().copied().eq(desc.params.iter().map(|p| p.node_param_span.max(1)))
+            || self.transport_phase_param_idx != desc.transport_phase_param_idx().unwrap_or(NO_TRANSPORT_PHASE_PARAM)
+            || self.plocks.len() != MAX_STEPS || self.plock_param_ids.len() != MAX_STEPS
+            || self.tensor_params.len() != desc.tensor_params.len()
+            || !self.tensor_params.iter().zip(&desc.tensor_params)
+                .all(|(saved, expected)| saved.same_identity_as_descriptor(expected)
+                    && saved.cell_offset == expected.cell_offset)
+        {
+            return false;
+        }
+        let identities: Vec<_> = desc.params.iter().map(|p|
+            ParamNodeId::from_slot_param(node_id, modulator_node_id, p.node_param_idx)).collect();
+        if !self.plocks.iter().zip(&self.plock_param_ids).all(|(row, ids)| {
+            row.len() == n && ids.len() == n
+                && *ids == identities
+        }) || self.key_locks.len() != self.key_lock_param_ids.len()
+            || !self.key_locks.iter().all(|(note, row)| {
+                row.len() == n && row.iter().any(Option::is_some)
+                    && self.key_lock_param_ids.get(note).is_some_and(|ids| {
+                        ids.len() == n && row.iter().zip(ids).enumerate().all(|(i, (value, id))| {
+                            *id == value.and_then(|_| identities[i])
+                        })
+                    })
+            })
+        {
+            return false;
+        }
+        Self::modulation_active_groups(desc).iter().all(|(active, depths)| {
+            *active >= n || (self.defaults[*active] == self.modulation_active_value(depths, None).unwrap()
+                && self.plocks.iter().enumerate().all(|(step, row)| {
+                    row[*active] == self.modulation_active_value(depths, Some(step))
+                }))
+        })
+    }
+
+    fn modulation_active_groups(desc: &EffectDescriptor) -> BTreeMap<usize, Vec<usize>> {
+        let mut groups: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+        for target in &desc.instrument_modulation_targets {
+            if let Some(active) = target.active_param_idx {
+                groups.entry(active).or_default().push(target.depth_param_idx);
+            }
+        }
+        groups
+    }
+
+    fn modulation_active_value(
+        &self,
+        depths: &[usize],
+        step: Option<usize>,
+    ) -> Option<f32> {
+        let row = step.and_then(|step| self.plocks.get(step));
+        let depth_plock = |index: usize| row.and_then(|row| row.get(index)).copied().flatten();
+        if step.is_some() && !depths.iter().any(|depth| depth_plock(*depth).is_some()) {
+            return None;
+        }
+        let active = depths.iter().any(|depth| {
+            depth_plock(*depth)
+                .unwrap_or_else(|| self.defaults.get(*depth).copied().unwrap_or(0.0))
+                .abs() > f32::EPSILON
+        });
+        Some(if active { 1.0 } else { 0.0 })
+    }
+
     pub fn sync_to_descriptor_with_modulator(
         &mut self,
         desc: &EffectDescriptor,
         node_id: u32,
         modulator_node_id: u32,
     ) {
+        if self.is_synced_to_descriptor_with_modulator(desc, node_id, modulator_node_id) {
+            return;
+        }
         let new_np = desc.params.len();
         let old_defaults = self.defaults.clone();
         let old_plocks = self.plocks.clone();
@@ -11158,7 +11322,11 @@ impl EffectSlotSnapshot {
             .transport_phase_param_idx()
             .unwrap_or(NO_TRANSPORT_PHASE_PARAM);
         self.plocks = (0..MAX_STEPS).map(|_| vec![None; new_np]).collect();
-        self.plock_param_ids = (0..MAX_STEPS).map(|_| vec![None; new_np]).collect();
+        // Normalize every column, including newly introduced or missing rows.
+        // Empty cells still carry no value; their identity cannot create a lock.
+        let identities: Vec<_> = self.param_node_indices.iter().map(|raw_idx|
+            ParamNodeId::from_slot_param(node_id, modulator_node_id, *raw_idx)).collect();
+        self.plock_param_ids = (0..MAX_STEPS).map(|_| identities.clone()).collect();
         self.key_locks = BTreeMap::new();
         self.key_lock_param_ids = BTreeMap::new();
         self.tensor_params = desc
@@ -11212,13 +11380,6 @@ impl EffectSlotSnapshot {
                         continue;
                     }
                     self.plocks[step][param_idx] = saved_step[param_idx];
-                    self.plock_param_ids[step][param_idx] = self
-                        .param_node_indices
-                        .get(param_idx)
-                        .copied()
-                        .and_then(|raw_idx| {
-                            ParamNodeId::from_slot_param(node_id, modulator_node_id, raw_idx)
-                        });
                 }
             }
         }
@@ -11255,70 +11416,16 @@ impl EffectSlotSnapshot {
     }
 
     pub fn recompute_modulation_active_params(&mut self, desc: &EffectDescriptor) {
-        let mut active_indices = desc
-            .instrument_modulation_targets
-            .iter()
-            .filter_map(|target| target.active_param_idx)
-            .collect::<Vec<_>>();
-        active_indices.sort_unstable();
-        active_indices.dedup();
-
-        for active_idx in active_indices {
+        for (active_idx, depths) in Self::modulation_active_groups(desc) {
             if active_idx >= self.defaults.len() {
                 continue;
             }
 
-            let group = desc
-                .instrument_modulation_targets
-                .iter()
-                .filter(|target| target.active_param_idx == Some(active_idx))
-                .collect::<Vec<_>>();
-            if group.is_empty() {
-                continue;
-            }
-
-            let default_active = group.iter().any(|target| {
-                self.defaults
-                    .get(target.depth_param_idx)
-                    .copied()
-                    .unwrap_or(0.0)
-                    .abs()
-                    > f32::EPSILON
-            });
-            self.defaults[active_idx] = if default_active { 1.0 } else { 0.0 };
-
+            self.defaults[active_idx] = self.modulation_active_value(&depths, None).unwrap();
             for step in 0..MAX_STEPS {
-                let Some(step_plocks) = self.plocks.get_mut(step) else {
-                    continue;
-                };
-                if active_idx >= step_plocks.len() {
-                    continue;
-                }
-                let has_depth_plock = group.iter().any(|target| {
-                    step_plocks
-                        .get(target.depth_param_idx)
-                        .copied()
-                        .flatten()
-                        .is_some()
-                });
-                if has_depth_plock {
-                    let active = group.iter().any(|target| {
-                        step_plocks
-                            .get(target.depth_param_idx)
-                            .copied()
-                            .flatten()
-                            .unwrap_or_else(|| {
-                                self.defaults
-                                    .get(target.depth_param_idx)
-                                    .copied()
-                                    .unwrap_or(0.0)
-                            })
-                            .abs()
-                            > f32::EPSILON
-                    });
-                    step_plocks[active_idx] = Some(if active { 1.0 } else { 0.0 });
-                } else {
-                    step_plocks[active_idx] = None;
+                let value = self.modulation_active_value(&depths, Some(step));
+                if let Some(cell) = self.plocks.get_mut(step).and_then(|row| row.get_mut(active_idx)) {
+                    *cell = value;
                 }
             }
         }

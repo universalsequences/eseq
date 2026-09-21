@@ -14,11 +14,13 @@ use crate::layout::{
 use crate::vm::Value;
 use crossterm::event::{KeyModifiers, MouseButton, MouseEventKind};
 
-/// Compute the bounding rect that covers the box itself and all its children.
+/// Compute the bounding rect that covers the box and its in-flow descendants.
 /// This ensures the SDF background covers the full scrollable content.
 fn content_extent(node: &LayoutNode) -> Rect {
     let mut rect = node.rect;
     for child in &node.children {
+        // Overlay panels paint in frame space and never belong to this surface.
+        if super::is_overlay_panel_widget(&child.widget_type) { continue; }
         let cr = child_extent(child);
         // Use the child's actual laid out inset rather than raw padding.
         // This keeps the background extent aligned with aspect-corrected vertical padding.
@@ -77,6 +79,7 @@ fn child_extent(node: &LayoutNode) -> Rect {
         return rect;
     }
     for child in &node.children {
+        if super::is_overlay_panel_widget(&child.widget_type) { continue; }
         let cr = child_extent(child);
         let right = (cr.col + cr.width).max(rect.col + rect.width);
         let bottom = (cr.row + cr.height).max(rect.row + rect.height);
@@ -775,6 +778,40 @@ impl WidgetDefinition for BoxWidget {
 mod tests {
     use super::*;
     use crate::theme;
+
+    #[test]
+    fn overlay_panels_do_not_expand_ancestor_backgrounds() {
+        let mut runtime = crate::Runtime::new();
+        let engine = crate::layout::LayoutEngine::new(100, 40, 1.0);
+        for menu in ["context-menu :anchor-col 30 :anchor-row 10", "modal"] {
+            let layout = |runtime: &mut crate::Runtime, open| {
+                let tree = runtime.eval_str(&format!(r#"
+                    (box :width 12 :height 2 :padding 0.2
+                      (h-stack :gap 0
+                        (box :width 8 :height 1)
+                        ({menu} :is-open {open}
+                          (menu-item "An action"))))
+                "#)).unwrap().unwrap();
+                engine.layout(&tree).unwrap()
+            };
+            let closed = layout(&mut runtime, false);
+            let open = layout(&mut runtime, true);
+            let panel = &open.children[0].children[1];
+            assert!(!panel.children.is_empty(), "the overlay must be laid out");
+            for child in &panel.children {
+                assert!(child.rect.width.is_finite() && child.rect.width > 0.0);
+                assert!(child.rect.height.is_finite() && child.rect.height > 0.0);
+            }
+            assert_eq!(open.rect, closed.rect, "opening an overlay must preserve layout size");
+            assert_eq!(background_rect(&open), background_rect(&closed),
+                "opening an overlay must preserve its ancestor's painted size");
+
+            // Ordinary overflowing content must still extend the background.
+            let mut overflowing = closed.clone();
+            overflowing.children[0].children[0].rect.width = 20.0;
+            assert!(background_rect(&overflowing).width > background_rect(&closed).width);
+        }
+    }
 
     #[test]
     fn borderless_boxes_render_state_indicators() {

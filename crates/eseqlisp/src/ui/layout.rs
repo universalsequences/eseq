@@ -975,6 +975,22 @@ fn node_has_event_handler(node: &LayoutNode) -> bool {
 }
 
 pub fn hit_test_layout(node: &LayoutNode, row: f32, col: f32) -> Option<&LayoutNode> {
+    hit_test_layout_impl(node, row, col, true)
+}
+
+/// Scroll routing needs the node under the pointer before click-handler
+/// bubbling. Otherwise a clickable ancestor outside a scroll viewport can
+/// steal hits on its padding or gaps, leaving no scroll ancestor to dispatch to.
+pub(crate) fn hit_test_scroll_layout(node: &LayoutNode, row: f32, col: f32) -> Option<&LayoutNode> {
+    hit_test_layout_impl(node, row, col, false)
+}
+
+fn hit_test_layout_impl(
+    node: &LayoutNode,
+    row: f32,
+    col: f32,
+    bubble_pointer_handlers: bool,
+) -> Option<&LayoutNode> {
     // Scroll containers: only hit-test within viewport rect, and adjust
     // coordinates by scroll offset before recursing into children.
     if node.widget_type == "scroll" {
@@ -985,7 +1001,7 @@ pub fn hit_test_layout(node: &LayoutNode, row: f32, col: f32) -> Option<&LayoutN
             widget_render::scroll::get_scroll_state(widget_render::scroll::scroll_state_key(node));
         let adjusted_row = row + state.offset_y;
         for child in node.children.iter().rev() {
-            if let Some(hit) = hit_test_layout(child, adjusted_row, col) {
+            if let Some(hit) = hit_test_layout_impl(child, adjusted_row, col, bubble_pointer_handlers) {
                 return Some(hit);
             }
         }
@@ -996,9 +1012,9 @@ pub fn hit_test_layout(node: &LayoutNode, row: f32, col: f32) -> Option<&LayoutN
     // Container nodes: always recurse into children — their rects may be
     // clamped to the viewport while children extend beyond (scroll).
     for child in node.children.iter().rev() {
-        if let Some(hit) = hit_test_layout(child, row, col) {
+        if let Some(hit) = hit_test_layout_impl(child, row, col, bubble_pointer_handlers) {
             // If the child doesn't handle events but this node does, bubble up
-            if !node_has_event_handler(hit) && node_has_event_handler(node) {
+            if bubble_pointer_handlers && !node_has_event_handler(hit) && node_has_event_handler(node) {
                 return Some(node);
             }
             return Some(hit);

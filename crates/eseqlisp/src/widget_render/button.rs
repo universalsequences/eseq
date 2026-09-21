@@ -153,12 +153,14 @@ pub(super) fn icon_name_value(value: &str) -> Option<f32> {
         "piano" | "keys" => Some(3.0),
         "sliders" | "controls" => Some(4.0),
         "note-arrow" | "midi-fx" => Some(5.0),
-        "dial" | "preset" | "bookmark" => Some(6.0),
+        "dial" | "preset" => Some(6.0),
         "folder" => Some(7.0),
         "sine" | "lfo" => Some(8.0),
         "drop" | "droplet" | "bubbles" | "audio-fx" => Some(9.0),
         "document" | "project" => Some(10.0),
         "midi" => Some(11.0),
+        "check" | "checkmark" => Some(12.0),
+        "bookmark" => Some(13.0),
         _ => None,
     }
 }
@@ -464,6 +466,31 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
             detail_d = glint;
         } else {
             d = min(abs(drop) - stroke, glint);
+        }
+    } else if (in.value_t > 12.5) {
+        // bookmark: a ribbon, a tall rounded rect with a V notch cut out of
+        // its bottom edge. Filled style is the silhouette; stroke style
+        // outlines it.
+        float2 q = p;
+        float body = button_icon_round_rect(q, float2(0.28, 0.46), 0.05);
+        float notch = max(abs(q.x) * 1.6 - (q.y - 0.16), q.y - 0.50);
+        float ribbon = max(body, -notch);
+        if (filled) {
+            d = ribbon;
+        } else {
+            d = abs(ribbon) - stroke;
+        }
+    } else if (in.value_t > 11.5) {
+        // check: a tick mark. Short down-stroke from the left, long
+        // up-stroke to the right; the filled style is simply a fatter stroke
+        // so it reads at list-icon size.
+        float leg_a = button_icon_segment(p, float2(-0.40, 0.02), float2(-0.13, 0.32));
+        float leg_b = button_icon_segment(p, float2(-0.13, 0.32), float2(0.42, -0.30));
+        float tick = min(leg_a, leg_b);
+        if (filled) {
+            d = tick - 0.11;
+        } else {
+            d = tick - stroke;
         }
     } else if (in.value_t > 10.5) {
         // MIDI: five-pin DIN socket, with an inset key slot and five contacts.

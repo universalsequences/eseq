@@ -373,6 +373,13 @@ calls). The manifest's own default `:route n` is a member index too. A member
 leaving the rack (detach, move, ungroup, track delete) runs
 `remap_after_rack_member_removed` over every scene inside the same recorded
 edit: nodes routed to it go to `None`, later members shift down.
+Moving a project-owned sequencer into a rack (`move-sequencer-into-rack`, the
+mixer's "Attach … to rack") rewrites its explicit routes and seed tracks in every
+scene the same way: a track that is a rack member becomes that member's index,
+a track outside the rack goes to `None` (seed lists drop it). The move is never
+refused for routing. The post-move re-run of the script is scoped with
+`with_graph_owner_rack` so a `(load …)` scratch script republishes rack-owned
+instead of adding a second project-owned instance under the same name.
 
 ## 6. UI — BUILT (eseq-172r.3)
 
@@ -526,7 +533,10 @@ The import has two halves, because the App cannot evaluate Lisp:
   exporting rack and is meaningless here — record the entries with
   `attach_rack_sequencer_recorded` (which republishes the module owner map),
   then install the clip bank, rewriting each clip override's `sequencer_id`
-  through that old→new map and its `owner_rack` to the new group.
+  through that old→new map and its `owner_rack` to the new group. Bind every
+  imported member lane's output to the destination rack's backing bus before
+  storing the clip: saved output bus IDs belong to the exporting project.
+  This also applies when auditioning a kit onto an existing rack.
 - **Host half** (`ui/host_commands/drum_rack_v2.rs`): evaluate each recorded
   source under the new rack (`evaluate_rack_sequencer_source`), reporting
   failures by module. A missing package is reported and the rest lands; the

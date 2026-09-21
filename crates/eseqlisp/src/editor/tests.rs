@@ -4674,6 +4674,123 @@ fn tree_header_rows_are_not_selectable_or_keyboard_targets() {
 }
 
 #[test]
+fn tree_right_click_reaches_on_right_click_with_the_hit_item() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.set_layout_viewport(40, 10);
+    editor
+        .runtime
+        .eval_str(
+            r#"
+                (def selected (state ""))
+                (def menu-item (state ""))
+                (def menu-phase (state ""))
+                (def menu-count (state 0))
+                (effect
+                  (tree
+                    :focusable true
+                    :row-height 1.0
+                    :items '(
+                      (:label "one" :path "/one.lisp" :status-icon :check)
+                      (:label "two" :path "/two.lisp"))
+                    :on-select (lambda (item) (set! selected (get item :label)))
+                    :on-right-click (lambda (event)
+                      (do
+                        (set! menu-count (+ menu-count 1))
+                        (set! menu-phase (get event :phase))
+                        (set! menu-item (if (= (get event :item) nil) "none" (get (get event :item) :label)))))))
+                "#,
+        )
+        .unwrap();
+    editor.set_layout_viewport(40, 10);
+
+    editor.handle_mouse_precise(
+        mouse_event(MouseEventKind::Down(MouseButton::Right), 1, 1),
+        0,
+        0,
+        40,
+        10,
+        1.0,
+        1.2,
+    );
+    assert_eq!(
+        editor.runtime.eval_str("menu-item").unwrap().unwrap(),
+        Value::String("two".to_string()),
+        "the right-clicked row's item rides on the event"
+    );
+    assert_eq!(
+        editor.runtime.eval_str("menu-phase").unwrap().unwrap(),
+        Value::String("right-click".to_string())
+    );
+    assert_eq!(
+        editor.runtime.eval_str("selected").unwrap().unwrap(),
+        Value::String(String::new()),
+        "a right-click never fires :on-select"
+    );
+
+    // Outside the tree nothing fires.
+    editor.handle_mouse_precise(
+        mouse_event(MouseEventKind::Down(MouseButton::Right), 1, 6),
+        0,
+        0,
+        40,
+        10,
+        1.0,
+        6.2,
+    );
+    assert_eq!(
+        editor.runtime.eval_str("menu-count").unwrap().unwrap(),
+        Value::Number(1.0)
+    );
+
+    // ctrl+click is the macOS right-click synonym.
+    let mut ctrl_click = mouse_event(MouseEventKind::Down(MouseButton::Left), 1, 0);
+    ctrl_click.modifiers = KeyModifiers::CONTROL;
+    editor.handle_mouse_precise(ctrl_click, 0, 0, 40, 10, 1.0, 0.2);
+    assert_eq!(
+        editor.runtime.eval_str("menu-item").unwrap().unwrap(),
+        Value::String("one".to_string())
+    );
+    assert_eq!(
+        editor.runtime.eval_str("selected").unwrap().unwrap(),
+        Value::String(String::new())
+    );
+}
+
+#[test]
+fn tree_without_right_click_handler_swallows_right_clicks() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.set_layout_viewport(40, 10);
+    editor
+        .runtime
+        .eval_str(
+            r#"
+                (def selected (state ""))
+                (effect
+                  (tree
+                    :items '((:label "one" :path "/one.lisp"))
+                    :on-select (lambda (item) (set! selected (get item :label)))))
+                "#,
+        )
+        .unwrap();
+    editor.set_layout_viewport(40, 10);
+    editor.handle_mouse_precise(
+        mouse_event(MouseEventKind::Down(MouseButton::Right), 1, 0),
+        0,
+        0,
+        40,
+        10,
+        1.0,
+        0.2,
+    );
+    assert_eq!(
+        editor.runtime.eval_str("selected").unwrap().unwrap(),
+        Value::String(String::new())
+    );
+}
+
+#[test]
 fn tree_double_click_activates_leaf() {
     let runtime = Runtime::new();
     let mut editor = Editor::new(runtime, EditorConfig::default());
@@ -11014,6 +11131,57 @@ fn widget_scroll_limit_cache_recomputes_after_layout_revision_changes() {
     let second = editor.clamp_widget_scroll_offsets();
     assert!(second.0 < first.0, "first={first:?} second={second:?}");
     assert!(second.1 < first.1, "first={first:?} second={second:?}");
+}
+
+#[test]
+fn tiled_touchpad_scroll_uses_fractional_content_origin() {
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    editor.set_layout_cell_dimensions(8.0, 16.0);
+    editor.runtime.eval_str(r#"
+        (effect
+          (scroll :key "fractional-scroll" :width 10 :height 4
+            (box :width :fill :height 40 :on-click (lambda (event) nil))))
+    "#).unwrap();
+    editor.active_buffer_mut().view_mode = super::ViewMode::UiOnly;
+    editor.set_layout_viewport(24, 9);
+    let tile_id = editor.active_tile;
+    let leaf = editor.active_leaf_mut();
+    leaf.show_border = true;
+    leaf.border_width_px = 1.0;
+    editor.cached_tile_rects = vec![(tile_id, crate::layout::Rect {
+        col: 3.25, row: 10.5, width: 24.0, height: 10.0,
+    })];
+    let layout = editor.widget_layout().unwrap();
+    let key = crate::widget_render::scroll::scroll_state_key(&layout);
+    let border = crate::widget_render::ui_design_px(1.0);
+    let at = (3.25 + border / 8.0 + 9.9, 10.5 + border / 16.0 + 3.9);
+    assert!(editor.handle_tiled_touchpad_scroll(at.0, at.1, 0, 0.0, -20.0),
+        "gesture just inside the painted viewport must hit its scroll container");
+    assert!(crate::widget_render::scroll::get_scroll_state(key).offset_y > 0.0);
+}
+
+#[test]
+fn touchpad_scroll_inside_clickable_parent_reaches_nested_scroll() {
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    editor.runtime.eval_str(r#"
+        (effect
+          (box :width 12 :height 10 :on-click (lambda (event) nil)
+            (scroll :key "nested-scroll" :width 10 :height 4
+              (v-stack :width :fill :gap 1
+                (box :width :fill :height 2 :on-click (lambda (event) nil))
+                (box :width :fill :height 20 :on-click (lambda (event) nil))))))
+    "#).unwrap();
+    editor.active_buffer_mut().view_mode = super::ViewMode::UiOnly;
+    editor.set_layout_viewport(24, 12);
+    let layout = editor.widget_layout().unwrap();
+    let scroll = find_widget_of_type(&layout, "scroll").unwrap();
+    let key = crate::widget_render::scroll::scroll_state_key(scroll);
+    // The gap has no click handler. Click bubbling must not discard the
+    // scroll container when choosing the target of a different event kind.
+    assert_eq!(crate::layout::hit_test_layout(&layout, 2.5, 5.0).unwrap().widget_id,
+        layout.widget_id, "clicks on the gap still belong to the clickable parent");
+    assert!(editor.handle_touchpad_scroll(0, 0, 5.0, 2.5, 0.0, -20.0));
+    assert!(crate::widget_render::scroll::get_scroll_state(key).offset_y > 0.0);
 }
 
 #[test]

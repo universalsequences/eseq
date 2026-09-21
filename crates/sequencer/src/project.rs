@@ -2967,32 +2967,15 @@ fn load_container_preset(path: &Path, kind: &str) -> std::io::Result<ProjectSoun
     Ok(sound)
 }
 
+mod rack_preset_catalog;
+
 pub fn list_rack_presets() -> std::io::Result<Vec<String>> {
+    static CATALOG: std::sync::OnceLock<std::sync::Mutex<rack_preset_catalog::RackPresetCatalog>> =
+        std::sync::OnceLock::new();
     let paths = crate::app_paths::app_paths();
     std::fs::create_dir_all(paths.user_rack_presets_dir())?;
-    let mut names = Vec::new();
-    for dir in [paths.rack_presets_dir(), paths.user_rack_presets_dir()] {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            continue;
-        };
-        names.extend(
-            entries
-                .filter_map(Result::ok)
-                .map(|entry| entry.path())
-                .filter(|path| {
-                    path.extension().and_then(|ext| ext.to_str()) == Some("rackpreset")
-                })
-                .filter_map(|path| {
-                    let fallback = path.file_stem()?.to_str()?.to_owned();
-                    let preset = load_container_preset(&path, "rack preset").ok()?;
-                    let name = preset.metadata.name.trim();
-                    Some(if name.is_empty() { fallback } else { name.to_owned() })
-                }),
-        );
-    }
-    names.sort();
-    names.dedup();
-    Ok(names)
+    let catalog = CATALOG.get_or_init(Default::default);
+    Ok(catalog.lock().unwrap().names(&[paths.rack_presets_dir(), paths.user_rack_presets_dir()]))
 }
 
 pub fn kit_preset_path(name: &str) -> PathBuf {

@@ -3029,6 +3029,53 @@ mod live_keyboard_tests {
     }
 
     #[test]
+    fn live_recording_with_scene_transpose_keeps_authored_note_pitch() {
+        let state = Arc::new(SequencerState::new(1, vec![]));
+        state.write_current_scene_slot(sequencer::sequencer::SCENE_TRANSPOSE_SLOT,
+            sequencer::process::ProcessLiteral::Number(8.0)).unwrap();
+        state.transport.playing.store(true, Ordering::Relaxed);
+        state.transport.record_quantize.store(RecordQuantize::Off as u32, Ordering::Relaxed);
+        let mut app = rack_test_app(state.clone(), 1);
+        let armed = Arc::new(Mutex::new(vec![true]));
+        let rack = Arc::new(Mutex::new(None));
+        let recording = Arc::new(AtomicBool::new(true));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let held = Arc::new(Mutex::new(Vec::new()));
+        let roll = Arc::new(Mutex::new(RollRecordBuffer::default()));
+        let invalidations = UiInvalidationQueue::new();
+        for (step, midi) in [(2, false), (5, true)] {
+            state.transport.track_playheads[0].store(step, Ordering::Relaxed);
+            state.transport.track_playhead_phases[0].store(0f32.to_bits(), Ordering::Relaxed);
+            for on in [true, false] {
+                let outcome = if midi {
+                    handle_midi_note(0, 0, sequencer::midi_input::MidiNoteEvent {
+                        note: 62, velocity: if on { 0.7 } else { 0.0 }, on,
+                    }, &mut app, &state, &armed, &rack, &recording, &tx, &held, &roll, &invalidations)
+                } else {
+                    let mut key = KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE);
+                    key.kind = if on { KeyEventKind::Press } else { KeyEventKind::Release };
+                    handle_recording_key(&key, &mut app, &state, &armed, &rack, &recording,
+                        &tx, &Arc::new(std::sync::atomic::AtomicI32::new(0)),
+                        &held, &roll, &invalidations, false)
+                };
+                assert_eq!(outcome, if on { RecordingKeyOutcome::Triggered } else { RecordingKeyOutcome::Recorded });
+                let trigger = expect_note(rx.try_recv().unwrap());
+                assert_eq!(trigger.transpose, 2.0, "monitoring must receive the original source pitch");
+                assert_eq!(trigger.note_off, !on);
+                if on {
+                    // The callback's heard-time stamp is keyed by source pitch.
+                    state.push_live_trigger_stamp(0, 2.0, step as f64 / 4.0);
+                }
+            }
+            assert!(held.lock().unwrap().is_empty());
+            assert!(state.pattern.patterns[0].is_active(step as usize));
+            assert_eq!(state.pattern.step_data[0].get(step as usize, StepParam::Transpose), 2.0);
+            assert_eq!(state.pattern.chord_data[0].get(step as usize, 0), 2.0,
+                "playback will apply +8 once; it must not be baked into the recording");
+        }
+    }
+
+    #[test]
     fn retrospective_live_input_captures_stopped_midi_and_pad_targets_without_recording() {
         let state = Arc::new(SequencerState::new(3, vec![]));
         let mut app = rack_test_app(Arc::clone(&state), 3);

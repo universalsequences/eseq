@@ -1621,6 +1621,19 @@ impl App {
         audible_beats: Option<f64>,
         mirror: bool,
     ) -> Result<PatternLaunchOutcome, PatternLaunchError> {
+        // Publish the completed launch once, after the scene, graph bindings,
+        // defaults and override pins agree. Intermediate captures are both
+        // expensive and incomplete descriptions of the launched sound.
+        let state = Arc::clone(&self.state);
+        state.coalesce_publishes(|| self.apply_pattern_launch_inner(target, audible_beats, mirror))
+    }
+
+    fn apply_pattern_launch_inner(
+        &mut self,
+        target: &PatternLaunchTarget,
+        audible_beats: Option<f64>,
+        mirror: bool,
+    ) -> Result<PatternLaunchOutcome, PatternLaunchError> {
         // Launch save-back seam (takes spec 17.10): the scene capture below
         // must persist base values, never an engaged macro override.
         self.debug_assert_no_macro_override_leak();
@@ -1830,12 +1843,15 @@ impl App {
         if self.manual_launch_rejection().is_some() {
             return Err(PatternLaunchError::SongPlaybackActive);
         }
-        let _ = self.state.quantized_launches().cancel_all();
-        self.scene_macro_runtime.clear();
-        let mut touched = self.macro_engine.release_all_scene_macros();
-        touched.extend(self.macro_engine.end_scene_push());
-        self.send_macro_targets(touched);
-        self.apply_pattern_launch(target)
+        let state = Arc::clone(&self.state);
+        state.coalesce_publishes(|| {
+            let _ = self.state.quantized_launches().cancel_all();
+            self.scene_macro_runtime.clear();
+            let mut touched = self.macro_engine.release_all_scene_macros();
+            touched.extend(self.macro_engine.end_scene_push());
+            self.send_macro_targets(touched);
+            self.apply_pattern_launch(target)
+        })
     }
 
     pub fn drain_due_pattern_launches(

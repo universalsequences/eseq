@@ -789,11 +789,37 @@ impl SequencerState {
         }) {
             return false;
         }
-        for patch in pool.sounds.patches.values_mut().map(Arc::make_mut) {
-            if let Some(rack) = patch.rack_track.as_mut() {
-                if rack.slots.len() == bindings.len() {
-                    sync_slots(&mut rack.slots);
-                }
+        let layouts = bindings.iter().map(|(desc, node, modulator)|
+            crate::effects::EffectSlotBindingLayout::new(desc, *node, *modulator)).collect::<Vec<_>>();
+        let cache = &mut pool.rack_binding_sync;
+        if cache.layouts != layouts {
+            cache.layouts = layouts;
+            cache.patches.clear();
+        }
+        cache.patches.retain(|id, _| pool.sounds.patches.contains_key(id));
+        for (id, patch) in &mut pool.sounds.patches {
+            if cache.patches.get(id).and_then(std::sync::Weak::upgrade)
+                .is_some_and(|checked| Arc::ptr_eq(&checked, patch))
+            {
+                continue;
+            }
+            let needs_sync = patch.rack_track.as_ref().is_some_and(|rack| {
+                rack.slots.len() == bindings.len()
+                    && rack.slots.iter().zip(bindings).any(|(slot, (desc, node, modulator))| {
+                        !slot.instrument_slot.is_synced_to_descriptor_with_modulator(desc, *node, *modulator)
+                    })
+            });
+            if needs_sync {
+                sync_slots(&mut Arc::make_mut(patch).rack_track.as_mut().unwrap().slots);
+            }
+            let normalized = !needs_sync || patch.rack_track.as_ref().is_none_or(|rack| {
+                rack.slots.len() != bindings.len()
+                    || rack.slots.iter().zip(bindings).all(|(slot, (desc, node, modulator))| {
+                        slot.instrument_slot.is_synced_to_descriptor_with_modulator(desc, *node, *modulator)
+                    })
+            });
+            if normalized {
+                cache.patches.insert(*id, Arc::downgrade(patch));
             }
         }
         true

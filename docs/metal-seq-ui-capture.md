@@ -193,6 +193,12 @@ Layer racks can declare `:instruments ("factory:Synths/Digi Drift")` to load sav
 script containing an empty `(capture-project)` declaration followed by any UI
 setup and `capture-after-sync` hook. The project file is read, never saved; the
 in-memory project supplies the tracks, instruments, effects, and groups.
+`project-rack-clips.lisp` also enables the mixer clip area, for inspecting saved
+rack clip banks in both the mixer and sequencer header.
+After synchronizing that state, capture restores the project's evaluated
+scratch and rack-owned sequencer sources before calling `capture-after-sync`.
+The `project-sequencer-tab.lisp` fixture selects the first restored custom tab;
+use its buffer name with `--buffer` and `--all-panels` to inspect the tab rail.
 `--track 0` selects the first track after loading.
 
 `--all-panels` preserves the fixture's panel layout and focuses the existing

@@ -1,5 +1,112 @@
 use super::*;
 
+#[test]
+fn live_scene_transpose_reaches_synth_and_preserves_held_note_identity() {
+    use crate::effects::gatepitch as gp;
+    use crate::sequencer::{LiveInputEvent, LiveNoteSource, SCENE_TRANSPOSE_SLOT};
+
+    let engine = engine::init_headless_engine(48_000, 2).unwrap();
+    struct GraphGuard(engine::HeadlessEngine);
+    impl Drop for GraphGuard {
+        fn drop(&mut self) { unsafe { self.0.destroy(); } }
+    }
+    let guard = GraphGuard(engine);
+    let engine = &guard.0;
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut app = crate::app::App::new(
+        engine.state.clone(), engine.lg_ptr, engine.sample_rate,
+        engine.buses.clone(), engine.master_recorder.clone(), tx.clone(),
+    );
+    // Keep the actual host voice graph and GatePitch event ABI, without a
+    // compiler or audio device: the synth at the end of the graph is silent.
+    let manifest = crate::lisp_host::DGenManifest {
+        effect_latency_samples: None, dylib_path: Default::default(), asset_base: None,
+        version: 1, process_abi: String::new(), total_memory_slots: 1,
+        params: vec![], groups: vec![], envelopes: vec![], inputs: vec![],
+        modulators: vec![], mod_outputs: vec![], mod_destinations: vec![],
+        n_inputs: 4, n_outputs: 1, tensors: vec![], tensor_init_data: vec![],
+        voice_cell_id: None,
+    };
+    let lib = crate::lisp_host::test_loaded_dgen_lib();
+    let engine_id = app.editor.engine_registry.upsert(crate::app::EngineDescriptor {
+        name: "live-transpose".into(), source: "live-transpose.lisp".into(),
+        manifest: manifest.clone(), lib_index: 0, shared_runtime: true,
+    });
+    app.editor.instrument_libs.push(crate::lisp_host::test_loaded_dgen_lib());
+    app.graph_controller().add_custom_track(
+        "live-transpose", engine_id, &manifest, &lib, CustomInstrumentRunMode::Instrument,
+    ).unwrap();
+    let state = &engine.state;
+    state.pattern.track_params[0].set_max_polyphony(1);
+    if !state.pattern.track_params[0].is_gate_on() {
+        state.pattern.track_params[0].toggle_gate();
+    }
+    let gatepitch = app.graph.engine_node_ids[engine_id].as_ref().unwrap().gatepitch_ids[0];
+    unsafe { assert!(add_node_to_watchlist(engine.lg_ptr.0, gatepitch)); }
+    let mut data = new_audio_callback_data(
+        engine.lg_ptr.0, state.clone(), 48_000, 2, 512,
+        engine.master_recorder.clone(), rx, engine.buses.bus_effect_runtime.clone(),
+        Arc::new(ScheduledEventQueue::new()), Arc::new(AtomicU64::new(0)),
+    );
+    let mut output = vec![0.0; 1024];
+    let mut render = |data: &mut AudioCallbackData| {
+        // Watched node state is published every four graph blocks.
+        for _ in 0..4 { audio_callback(data, &mut output); }
+    };
+    let assert_voice = |transpose: f32, gate: f32| {
+        let mut slots = vec![0.0_f32; gp::GATEPITCH_STATE_SIZE];
+        let mut size = 0;
+        unsafe { assert!(get_node_state_into(engine.lg_ptr.0, gatepitch,
+            slots.as_mut_ptr().cast(), std::mem::size_of_val(slots.as_slice()), &mut size)); }
+        let expected_hz = 440.0 * 2f32.powf((transpose - 9.0) / 12.0);
+        assert!((slots[gp::PARAM_PITCH as usize] - expected_hz).abs() < 0.001,
+            "synth pitch {} must match {expected_hz}", slots[gp::PARAM_PITCH as usize]);
+        assert_eq!(slots[gp::PARAM_GATE as usize], gate);
+    };
+    for (playing, semitones, enabled) in [
+        (false, 8.0, true), (true, -5.0, true), (true, 0.0, true), (true, 8.0, false),
+    ] {
+        state.transport.playing.store(playing, Ordering::Relaxed);
+        state.pattern.track_params[0].set_global_transpose(enabled);
+        state.write_current_scene_slot(SCENE_TRANSPOSE_SLOT,
+            crate::process::ProcessLiteral::Number(semitones)).unwrap();
+        let first = KeyboardTrigger {
+            generation: 1, source: Some(LiveNoteSource::Key('s')), track: 0,
+            transpose: 2.0, velocity: 0.7, note_off: false,
+        };
+        tx.send(LiveInputEvent::Note(first)).unwrap();
+        render(&mut data);
+        let first_pitch = 2.0 + if enabled { semitones as f32 } else { 0.0 };
+        assert_voice(first_pitch, 1.0);
+        let held = data.active_keyboard_notes[0].iter().flatten().next().unwrap();
+        assert_eq!(held.source_transpose, 2.0, "release and recording use the input pitch");
+        assert_eq!(held.midi_note, Some((60.0 + first_pitch) as u8));
+
+        // A later note sees a live edit; releasing it must restore the older
+        // hold at its original sounding pitch and ultimately close its gate.
+        state.write_current_scene_slot(SCENE_TRANSPOSE_SLOT,
+            crate::process::ProcessLiteral::Number(semitones + 3.0)).unwrap();
+        let second = KeyboardTrigger {
+            generation: 2, source: Some(LiveNoteSource::Midi { port: 0, channel: 0, note: 67 }),
+            transpose: 7.0, ..first
+        };
+        tx.send(LiveInputEvent::Note(second)).unwrap();
+        render(&mut data);
+        assert_voice(7.0 + if enabled { semitones as f32 + 3.0 } else { 0.0 }, 1.0);
+        tx.send(LiveInputEvent::Note(KeyboardTrigger { note_off: true, ..second })).unwrap();
+        render(&mut data);
+        assert_voice(first_pitch, 1.0);
+        tx.send(LiveInputEvent::Note(KeyboardTrigger { note_off: true, ..first })).unwrap();
+        render(&mut data);
+        assert_voice(first_pitch, 0.0);
+        assert!(data.active_keyboard_notes[0].iter().all(Option::is_none));
+        let mut stamps = Vec::new();
+        state.drain_live_trigger_stamps(|stamp| stamps.push(stamp.transpose));
+        assert_eq!(stamps, if playing { vec![2.0, 7.0] } else { vec![] },
+            "recording stamps retain source pitch; resumed holds do not record twice");
+    }
+}
+
 /// Complements the UI dispatch probe with the real callback and saved DSP.
 /// No device, scheduler lookahead, UI, or synthetic delay is involved here.
 #[test]

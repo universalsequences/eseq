@@ -1166,6 +1166,58 @@ impl PatternSnapshot {
         }
     }
 
+    /// Consume the complete lanes without copying their device and step grids.
+    /// Required columns end together at the shortest column; optional columns
+    /// use the same defaults as `track_pattern_data`.
+    pub(crate) fn into_track_pattern_data(self) -> impl Iterator<Item = TrackPatternData> {
+        let mut neural_reset_bits = self.neural_reset_bits.into_iter();
+        let mut midi_fx_slots = self.midi_fx_slots.into_iter();
+        let mut instrument_slots = self.instrument_slots.into_iter();
+        let mut instrument_base_note_offsets = self.instrument_base_note_offsets.into_iter();
+        let mut track_sound_states = self.track_sound_states.into_iter();
+        let mut sample_ids = self.sample_ids.into_iter();
+        let mut chord_snapshots = self.chord_snapshots.into_iter();
+        let mut bar_transpose_snapshots = self.bar_transpose_snapshots.into_iter();
+        let mut timebase_plock_snapshots = self.timebase_plock_snapshots.into_iter();
+        let mut swing_plock_snapshots = self.swing_plock_snapshots.into_iter();
+        let mut swing_resolution_plock_snapshots = self.swing_resolution_plock_snapshots.into_iter();
+        let mut track_send_plock_snapshots = self.track_send_plock_snapshots.into_iter();
+        let mut instrument_types = self.instrument_types.into_iter();
+        let mut instrument_run_modes = self.instrument_run_modes.into_iter();
+        let mut rack_tracks = self.rack_tracks.into_iter();
+        let mut process_chains = self.process_chains.into_iter();
+        let mut project_process_lane_overrides = self.project_process_lane_overrides.into_iter();
+        let mut plock_variant_registries = self.plock_variant_registries.into_iter();
+        let mut key_lock_variant_registries = self.key_lock_variant_registries.into_iter();
+        self.track_bits.into_iter().zip(self.step_data).zip(self.track_params).zip(self.effect_slots)
+            .map(move |(((track_bits, step_data), track_params), effect_slots)| TrackPatternData {
+                track_bits,
+                neural_reset_bits: neural_reset_bits.next().unwrap_or([0; TRACK_PATTERN_WORDS]),
+                step_data,
+                track_params,
+                effect_slots,
+                midi_fx_slots: midi_fx_slots.next().unwrap_or_else(||
+                    vec![EffectSlotSnapshot::new_empty(); crate::lisp_host::MAX_MIDI_FX_SLOTS]),
+                instrument_slot: instrument_slots.next().unwrap_or_else(EffectSlotSnapshot::new_empty),
+                instrument_base_note_offset: instrument_base_note_offsets.next().unwrap_or(0.0),
+                track_sound_state: track_sound_states.next().unwrap_or_default(),
+                sample_id: sample_ids.next().unwrap_or((-1, String::new(), 44_100)),
+                chord_snapshot: chord_snapshots.next().unwrap_or_else(ChordSnapshot::new_default),
+                bar_transpose_snapshot: bar_transpose_snapshots.next().unwrap_or([0.0; BARS_PER_PATTERN]),
+                timebase_plock_snapshot: timebase_plock_snapshots.next().unwrap_or([None; MAX_STEPS]),
+                swing_plock_snapshot: swing_plock_snapshots.next().unwrap_or([None; MAX_STEPS]),
+                swing_resolution_plock_snapshot: swing_resolution_plock_snapshots.next().unwrap_or([None; MAX_STEPS]),
+                track_send_plock_snapshot: track_send_plock_snapshots.next().unwrap_or_else(|| vec![Vec::new(); MAX_STEPS]),
+                instrument_type: instrument_types.next().unwrap_or(InstrumentType::Sampler),
+                instrument_run_mode: instrument_run_modes.next().unwrap_or(CustomInstrumentRunMode::Instrument),
+                rack_track: rack_tracks.next().flatten(),
+                process_chain: process_chains.next().unwrap_or_default(),
+                project_process_lane_overrides: project_process_lane_overrides.next().unwrap_or_default(),
+                plock_variant_registry: plock_variant_registries.next().unwrap_or_default(),
+                key_lock_variant_registry: key_lock_variant_registries.next().unwrap_or_default(),
+            })
+    }
+
     pub fn track_pattern_data(&self, track: usize) -> Option<TrackPatternData> {
         Some(TrackPatternData {
             track_bits: *self.track_bits.get(track)?,

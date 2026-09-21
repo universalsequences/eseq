@@ -3007,7 +3007,7 @@
           (v-stack (box :height 0.1)
             (track-header i is-bare-track))
           (track-grid i)
-          (box :flex 1 :width 0 :height 0.1 :bg :transparent)
+          (box :flex 1 :width :fill :height 0.1 :bg :transparent)
           (track-actions i)))))
 
 ;; ── Track groups ────────────────────────────────────────────────────────
@@ -3589,7 +3589,7 @@
 ;; right-clicking opens a menu (rename in place, launch, save what the rack
 ;; is playing now as a new clip, delete), and the trailing number picker
 ;; shows the lit clip's number and launches whatever number is typed in.
-;; Drag reorder is not wired yet (the grid is rendered from SEQ.rack-clips,
+;; Drag reorder is not wired yet (the grid is rendered from SEQ.rack-clip-banks,
 ;; which carries no drop target); the bank order is the create order.
 
 ;; The cells are the mixer's `track-pattern-cell-bg` boxes (ui/mixer.lisp)
@@ -3643,9 +3643,8 @@
           (do (set! clip-menu nil)
             (eseq.drum-rack-v2/delete-clip gid (get clip :id))))))))
 
-(def rack-clip-cell (gid clip active c)
+(def rack-clip-cell (gid clip c)
   (let ((id (get clip :id))
-      (lit (= (get clip :id) active))
       (renaming (= clip-renaming id)))
     (box :key (str "rack-clip-" gid "-" id)
       :debug-name "rack-clip-cell"
@@ -3654,7 +3653,7 @@
       :padding (if renaming 0.1 0.3)
       :bg :transparent
       :background "track-pattern-cell-bg"
-      :active (if lit 1 0)
+      :active (bind-seq (str "rack-clip-active-" gid "-" id))
       :assigned 1
       :override 0
       :selected 0
@@ -3679,16 +3678,10 @@
           :on-blur (lambda () (finish-clip-rename gid id true)))
         nil))))
 
-;; 1-based position of the lit clip in the bank, 0 while the current scene
-;; plays silence.
-(def rack-clip-active-index (clips active)
-  (let ((hit (filter (lambda (i) (= (get (nth clips i) :id) active)) (range 0 (len clips)))))
-    (if (= (len hit) 0) 0 (+ 1 (nth hit 0)))))
-
 ;; The last cell is a number picker showing the lit clip's number: read it at
 ;; a glance, or type/drag a number to launch that clip (quantized like a
 ;; click on its cell). Save and delete live in the right-click menu.
-(def rack-clip-number-picker (gid clips active c)
+(def rack-clip-number-picker (gid clips c)
   (number-picker :key (str "rack-clip-number-" gid)
     :width 5.2 :height rack-clip-cell-height :font-size 10
     ;; Same skin as the launch cells: rack-tinted rim, and the well is the
@@ -3701,12 +3694,12 @@
       (+ (* 0.195 (nth c 2)) 0.021)
       1.0)
     :corner-radius 4
-    :value (rack-clip-active-index clips active)
+    :value (bind-seq (str "rack-clip-index-" gid))
     :min 1 :max (max 1 (len clips)) :step 1 :decimals 0
     :on-change (lambda (v)
       (let ((i (- (round v) 1)))
         (if (and (>= i 0) (< i (len clips))
-              (not (= (get (nth clips i) :id) active)))
+              (not (= (get (nth clips i) :id) (eseq.drum-rack-v2/active-clip gid))))
           (eseq.drum-rack-v2/launch-clip gid (get (nth clips i) :id))
           nil)))))
 
@@ -3726,16 +3719,17 @@
   (let ((gid (eseq.drum-rack-v2/group-id gidx))
       (rack (eseq.drum-rack-v2/rack? gidx)))
     (if (and rack (eseq.drum-rack-v2/has-clips? gid))
-      (let ((active (eseq.drum-rack-v2/active-clip gid))
-          (clips (eseq.drum-rack-v2/clips gid)))
+      (let ((clips (eseq.drum-rack-v2/clips gid)))
         (h-stack :key (str "rack-clip-run-" gid) :gap 0.4 :align :center :width :fill :flex 1
           ;; Lines the first cell up with the member rows' step grids.
-          (box :width 1.6 :height 0.0 :bg :transparent)
-          (wrap :key (str "rack-clip-grid-" gid)
-            :width :fill :flex 1 :gap 0.12 :row-gap 0.12 :align :center
-            (each clips |clip i|
-              (rack-clip-cell gid clip active c))
-            (rack-clip-number-picker gid clips active c))
+          (box :width 2.2 :height 0.0 :bg :transparent)
+          (box :background-color '(rgba 0.1 0.1 0.1 0.5) :corner-radius 10 :padding 0.2
+            (wrap :key (str "rack-clip-grid-" gid)
+              :width 50 :gap 0.12 :row-gap 0.12 :align :center
+              (each clips |clip i|
+                (rack-clip-cell gid clip c))
+              (rack-clip-number-picker gid clips c)))
+          (box :height 0.1 :width :fill :flex 1)
           (rack-activity-strip gidx gid)
           (box :width 1.0 :height 0.0 :bg :transparent)))
       nil)))

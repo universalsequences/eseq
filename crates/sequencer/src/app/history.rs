@@ -58,12 +58,23 @@ pub enum EditPatch {
     /// Replay under one repository lock and publish once; a Composite would
     /// publish intermediate per-scene states while applying its children.
     SceneSlots(Vec<SceneSlotPatch>),
+    RackClipAssignment(RackClipAssignmentPatch),
     SceneStructure(SceneStructurePatch),
     Arrangement(ArrangementStructurePatch),
     BusGroupStructure(BusGroupStructurePatch),
     MacroConfiguration(MacroConfigurationPatch),
     TransportParams(TransportParamsPatch),
     BarTranspose(BarTransposePatch),
+}
+
+/// A scene's clip pointer is an edit, not a snapshot of the rack's topology
+/// or its entire pattern bank. Stable IDs keep replay independent of ordering.
+#[derive(Clone, Debug)]
+pub struct RackClipAssignmentPatch {
+    pub scene: SceneId,
+    pub group_id: u64,
+    pub before: Option<crate::sequencer::RackClipId>,
+    pub after: Option<crate::sequencer::RackClipId>,
 }
 
 #[derive(Clone, Debug)]

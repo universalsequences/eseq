@@ -2755,11 +2755,21 @@ impl Editor {
                     // note).
                     return modal_open;
                 };
+                let (event_col, event_row) = editor
+                    .tile_content_precise_event_position(
+                        tile_id,
+                        border_inset,
+                        content_col,
+                        content_row,
+                        precise_col,
+                        precise_row,
+                    )
+                    .unwrap_or((precise_col, precise_row));
                 editor.handle_touchpad_scroll(
                     content_col,
                     content_row,
-                    precise_col,
-                    precise_row,
+                    event_col,
+                    event_row,
                     delta_x,
                     delta_y,
                 )

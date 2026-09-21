@@ -1535,6 +1535,18 @@ pub(crate) fn track_step_plock_mask(
     track: usize,
     descriptors: &[Vec<sequencer::effects::EffectDescriptor>],
 ) -> [u64; MAX_STEPS / 64] {
+    track_step_plock_mask_with_render(state, track, descriptors, None)
+}
+
+/// A full UI sync already reconciles variant keys and sequencer locks for its
+/// color lanes. Reuse that result while still including the rack/slot locks
+/// that do not participate in the variant palette.
+pub(super) fn track_step_plock_mask_with_render(
+    state: &Arc<SequencerState>,
+    track: usize,
+    descriptors: &[Vec<sequencer::effects::EffectDescriptor>],
+    render_values: Option<&[PlockVariantStepRender]>,
+) -> [u64; MAX_STEPS / 64] {
     let mut mask = [0u64; MAX_STEPS / 64];
     let chain = &state.pattern.effect_chains[track];
     let num_slots = descriptors.get(track).map(|d| d.len()).unwrap_or(0);
@@ -1609,9 +1621,11 @@ pub(crate) fn track_step_plock_mask(
                 .is_some_and(|row| !row.is_empty())
             || swing_plocks.has_plock(step)
             || swing_resolution_plocks.has_plock(step)
-            || sequencer::plock_variants::live_track_has_seq_lock(state.as_ref(), track, step)
-            || sequencer::plock_variants::live_track_variant_key(state.as_ref(), track, step)
-                .is_some()
+            || render_values.and_then(|values| values.get(step)).map_or_else(
+                || sequencer::plock_variants::live_track_has_seq_lock(state.as_ref(), track, step)
+                    || sequencer::plock_variants::live_track_variant_key(state.as_ref(), track, step).is_some(),
+                |render| render.kind != 0,
+            )
         {
             mask[word] |= bit;
         }

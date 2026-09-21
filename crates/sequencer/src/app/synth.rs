@@ -787,24 +787,17 @@ impl App {
     }
 
     pub fn push_rack_slot_solo_mutes(&self, track: usize) {
-        let Some(rack) = self
-            .state
-            .pattern
-            .rack_tracks
-            .lock()
-            .unwrap()
-            .get(track)
-            .and_then(|rack| rack.as_ref())
-            .cloned()
-        else {
-            return;
+        let solos = {
+            let racks = self.state.pattern.rack_tracks.lock().unwrap();
+            let Some(rack) = racks.get(track).and_then(Option::as_ref) else { return };
+            rack.slots.iter().map(|slot| slot.solo).collect::<Vec<_>>()
         };
-        let has_solo = rack.slots.iter().any(|slot| slot.solo);
+        let has_solo = solos.iter().any(|solo| *solo);
         let Some(track_nodes) = self.graph.track_node_ids.get(track) else {
             return;
         };
         for (slot_idx, nodes) in track_nodes.rack_slots.iter().enumerate() {
-            let muted_by_solo = has_solo && !rack.slots.get(slot_idx).is_some_and(|slot| slot.solo);
+            let muted_by_solo = has_solo && !solos.get(slot_idx).copied().unwrap_or(false);
             unsafe {
                 crate::audiograph::params_push_wrapper(
                     self.graph.lg.0,
@@ -1542,35 +1535,27 @@ impl App {
     }
 
     pub(super) fn push_rack_slot_instrument_defaults_for_track(&self, track: usize) {
-        let Some(rack) = self
-            .state
-            .pattern
-            .rack_tracks
-            .lock()
-            .unwrap()
-            .get(track)
-            .and_then(|rack| rack.as_ref())
-            .cloned()
-        else {
-            return;
+        // Parameter dispatch takes the rack lock itself. Copy only the
+        // defaults it needs before releasing the lock, never the step grids.
+        let defaults = {
+            let racks = self.state.pattern.rack_tracks.lock().unwrap();
+            let Some(rack) = racks.get(track).and_then(Option::as_ref) else { return };
+            rack.slots.iter().enumerate().filter_map(|(slot_idx, slot)| {
+                // Note-on owns sampler and instrument-mode voice values.
+                if slot.instrument_type == InstrumentType::Sampler
+                    || (slot.instrument_type == InstrumentType::Custom
+                        && slot.instrument_run_mode == crate::sequencer::CustomInstrumentRunMode::Instrument)
+                {
+                    return None;
+                }
+                let values = (0..slot.instrument_slot.num_params as usize)
+                    .map(|param| slot.instrument_slot.defaults.get(param).copied().unwrap_or_default())
+                    .collect::<Vec<_>>();
+                Some((slot_idx, values))
+            }).collect::<Vec<_>>()
         };
-        for (slot_idx, slot) in rack.slots.iter().enumerate() {
-            // Same ownership as ordinary instrument tracks: note-on stamps
-            // instrument-mode voices. A binding refresh must not overwrite
-            // their sounding macro/p-lock values with raw sound defaults.
-            if slot.instrument_type == InstrumentType::Sampler
-                || (slot.instrument_type == InstrumentType::Custom
-                    && slot.instrument_run_mode == crate::sequencer::CustomInstrumentRunMode::Instrument)
-            {
-                continue;
-            }
-            for param_idx in 0..slot.instrument_slot.num_params as usize {
-                let value = slot
-                    .instrument_slot
-                    .defaults
-                    .get(param_idx)
-                    .copied()
-                    .unwrap_or_default();
+        for (slot_idx, values) in defaults {
+            for (param_idx, value) in values.into_iter().enumerate() {
                 self.send_rack_slot_instrument_param(track, slot_idx, param_idx, value);
             }
         }

@@ -3,6 +3,9 @@
     #[cfg(target_os = "macos")]
     #[path = "ui_replay_probe.rs"]
     mod ui_replay_probe;
+    #[cfg(target_os = "macos")]
+    #[path = "rack_clip_switch_probe.rs"]
+    mod rack_clip_switch_probe;
 
     use super::{
         apply_bus_mixer_history_host_command,
@@ -2711,10 +2714,19 @@
         project_92_ui_performance_probe_impl(Project92UiProbe::PlaybackUi);
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "manual release benchmark; ESEQ_RACK_CLIP_PROJECT names a saved project"]
+    fn saved_project_rack_clip_switch_benchmark() {
+        assert!(!cfg!(debug_assertions), "run this benchmark with --release");
+        project_92_ui_performance_probe_impl(Project92UiProbe::RackClipSwitch);
+    }
+
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     enum Project92UiProbe {
         LiveKeyboardLatency,
         PlaybackUi,
+        RackClipSwitch,
         SceneSwitch,
         EscapeDeselect,
         RackMacroDrag,
@@ -2884,7 +2896,7 @@
         let _dir = SequencerDirGuard::enter();
         let full_layout = matches!(
             probe,
-            Project92UiProbe::LiveKeyboardLatency | Project92UiProbe::PlaybackUi
+            Project92UiProbe::LiveKeyboardLatency | Project92UiProbe::PlaybackUi | Project92UiProbe::RackClipSwitch
                 | Project92UiProbe::StepInteractionsFullLayout
                 | Project92UiProbe::InstrumentPlockKnobDrag
                 | Project92UiProbe::ResponseCurveEditorDrag
@@ -2910,20 +2922,35 @@
             Project92UiProbe::DriftTrackSwitch | Project92UiProbe::DriftTrackSwitchSmoke
         );
         let project_name = match probe {
-            Project92UiProbe::LiveKeyboardLatency | Project92UiProbe::PlaybackUi => "live-input-probe",
+            Project92UiProbe::LiveKeyboardLatency | Project92UiProbe::PlaybackUi | Project92UiProbe::RackClipSwitch => "live-input-probe",
             Project92UiProbe::PianoholdSelection => "pianohold",
             Project92UiProbe::DriftTrackSwitch | Project92UiProbe::DriftTrackSwitchSmoke => {
                 "drift-switch"
             }
             _ => "92",
         };
-        let project_fixture = if matches!(probe, Project92UiProbe::LiveKeyboardLatency | Project92UiProbe::PlaybackUi) {
-            let variable = if probe == Project92UiProbe::PlaybackUi { "ESEQ_UI_REPLAY_PROJECT" } else { "ESEQ_LIVE_INPUT_PROJECT" };
+        let project_fixture = if matches!(probe, Project92UiProbe::LiveKeyboardLatency | Project92UiProbe::PlaybackUi | Project92UiProbe::RackClipSwitch) {
+            let variable = match probe {
+                Project92UiProbe::PlaybackUi => "ESEQ_UI_REPLAY_PROJECT",
+                Project92UiProbe::RackClipSwitch => "ESEQ_RACK_CLIP_PROJECT",
+                _ => "ESEQ_LIVE_INPUT_PROJECT",
+            };
             PathBuf::from(std::env::var(variable)
                 .unwrap_or_else(|_| panic!("set {variable} to an absolute saved-project path")))
         } else {
             perf_probe_project_fixture(project_name)
         };
+        // Freeze the bytes before loading: the author may save the open project
+        // during a run. The benchmark reports the hash of this exact snapshot.
+        let rack_clip_snapshot = (probe == Project92UiProbe::RackClipSwitch).then(|| {
+            assert!(project_fixture.is_absolute(), "ESEQ_RACK_CLIP_PROJECT must be absolute");
+            let bytes = std::fs::read(&project_fixture).expect("read rack clip project");
+            let snapshot = tempfile::Builder::new().suffix(".json").tempfile().unwrap();
+            std::fs::write(snapshot.path(), bytes).unwrap();
+            snapshot
+        });
+        let project_fixture = rack_clip_snapshot.as_ref()
+            .map(|snapshot| snapshot.path().to_path_buf()).unwrap_or(project_fixture);
         // Project 92 references content-addressed samples from the author's
         // local library. The eseq-eeng probes measure pointer latency, not
         // sample content, and must run on any machine (the Linux workstation
@@ -3147,7 +3174,7 @@
         );
         // The drift-switch fixture is the reported project verbatim: one
         // scene. Every other probe fixture is multi-scene.
-        let required_scenes = if drift_switch || matches!(probe, Project92UiProbe::LiveKeyboardLatency | Project92UiProbe::PlaybackUi) {
+        let required_scenes = if drift_switch || matches!(probe, Project92UiProbe::LiveKeyboardLatency | Project92UiProbe::PlaybackUi | Project92UiProbe::RackClipSwitch) {
             1
         } else {
             2
@@ -3356,8 +3383,10 @@
         *record_armed.lock().unwrap() = vec![false; app.tracks.len()];
         sync_shared_track_collapsed(&track_collapsed, &app);
         push_project_scratch_to_named_buffer(&mut editor, &app);
-        if let Err(error) = evaluate_project_scratch_on_ui_runtime(&mut editor, &app) {
-            editor.handle_host_event(HostEvent::Status(format!("Scratch UI eval error: {error}")));
+        if probe != Project92UiProbe::RackClipSwitch {
+            if let Err(error) = evaluate_project_scratch_on_ui_runtime(&mut editor, &app) {
+                editor.handle_host_event(HostEvent::Status(format!("Scratch UI eval error: {error}")));
+            }
         }
 
         let cached_track_peak_levels = vec![0.0; app.tracks.len()];
@@ -3411,7 +3440,7 @@
         editor.update_tile_rects(vp_cols, vp_rows);
         let _ = editor.drain_host_commands();
 
-        if matches!(probe, Project92UiProbe::LiveKeyboardLatency | Project92UiProbe::PlaybackUi) {
+        if matches!(probe, Project92UiProbe::LiveKeyboardLatency | Project92UiProbe::PlaybackUi | Project92UiProbe::RackClipSwitch) {
             let (probe_tx, probe_rx) = std::sync::mpsc::channel();
             let shared = SharedHandles {
                 state: state.clone(),
@@ -3451,7 +3480,10 @@
                 piano_roll_clipboard: piano_roll_clipboard.clone(),
                 arrangement_clipboard: app::song_region::new_arrangement_clipboard(),
             };
-            if probe == Project92UiProbe::PlaybackUi {
+            if probe == Project92UiProbe::RackClipSwitch {
+                #[cfg(target_os = "macos")]
+                rack_clip_switch_probe::run(&mut editor, &mut app, &shared, &project_fixture);
+            } else if probe == Project92UiProbe::PlaybackUi {
                 #[cfg(target_os = "macos")]
                 ui_replay_probe::run(&mut editor, &mut app, &shared);
             } else {

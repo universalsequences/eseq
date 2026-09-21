@@ -681,7 +681,7 @@
       (eseq.effects.custom-ui-runtime/custom-ui-param-mod-wrapper p (str "custom-ui-lego-option-mod-" (eseq.effects.custom-ui-runtime/custom-ui-scope-name) "-" name)
         (subtree :key (str "custom-ui-lego-option-" (eseq.effects.custom-ui-runtime/custom-ui-scope-name) "-" name)
           (v-stack :width width :height 1.12 :gap 0.08 :align :start
-            (label title :font-size 8.2 :width width :color :dim :bg :transparent)
+            (label title :font-size 8.2 :v-align :center :width width :color :dim :bg :transparent)
             (dropdown :value-index (eseq.effects.custom-ui-runtime/custom-ui-param-binding p)
               :value-index-offset (get p :min)
               :options options
