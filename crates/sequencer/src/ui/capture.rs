@@ -1260,6 +1260,12 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
         runtime.run_reactive_cycle();
     }
     editor.refresh_runtime_side_effects();
+    if args.project.is_some() {
+        // Match live project-open ordering: scripts can read the loaded
+        // topology and must restore their own buffers before the capture hook.
+        evaluate_project_scratch_on_ui_runtime(&mut editor, &app)
+            .map_err(|error| format!("capture project scripts failed: {error}"))?;
+    }
     editor
         .runtime_mut()
         .eval_str("(capture-after-sync)")

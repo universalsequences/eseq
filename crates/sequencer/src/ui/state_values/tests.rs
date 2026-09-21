@@ -1,3 +1,5 @@
+#[path = "rack_sequencer_restore_tests.rs"]
+mod rack_sequencer_restore_tests;
 #[path = "custom_ui_scope_tests.rs"]
 mod custom_ui_scope_tests;
 #[path = "rack_view_tests.rs"]
