@@ -1477,6 +1477,7 @@ impl App {
                     pan: 0.0,
                     mute: false,
                     solo: false,
+                    enabled: true,
                     max_polyphony: crate::audio::MAX_VOICES,
                     param_plocks: Vec::new(),
                     instrument_slot: pattern.instrument_slots[track].clone(),
@@ -1529,6 +1530,7 @@ impl App {
                     pan: 0.0,
                     mute: false,
                     solo: false,
+                    enabled: true,
                     max_polyphony: crate::audio::MAX_VOICES,
                     param_plocks: Vec::new(),
                     instrument_slot: pattern.instrument_slots[track].clone(),
@@ -3895,6 +3897,10 @@ impl App {
                                         .as_ref()
                                         .map(|slot| slot.solo)
                                         .unwrap_or(false),
+                                    enabled: saved_slot
+                                        .as_ref()
+                                        .map(|slot| slot.enabled)
+                                        .unwrap_or(true),
                                     max_polyphony: saved_slot
                                         .as_ref()
                                         .map(|slot| slot.max_polyphony)

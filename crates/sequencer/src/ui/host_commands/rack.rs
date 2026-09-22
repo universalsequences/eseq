@@ -22,6 +22,7 @@ pub(super) const COMMANDS: &[&str] = &[
     "set-rack-slot-pan",
     "set-rack-slot-mute",
     "set-rack-slot-solo",
+    "set-rack-slot-enabled",
     "set-rack-slot-max-polyphony",
     "set-rack-slot-choke-group",
     "set-rack-slot-base-note",
@@ -1145,6 +1146,34 @@ pub(super) fn handle(
                         track,
                         &selected_steps,
                     );
+                }
+            }
+        }
+        "set-rack-slot-enabled" => {
+            if let Value::Map(ref map) = payload {
+                if let (Some(track), Some(slot_idx)) =
+                    (map_usize(map, "track"), map_usize(map, "slot"))
+                {
+                    let value = map_bool(map, "value");
+                    app::apply_command(
+                        &mut app,
+                        app::AppCommand::SetRackSlotEnabled {
+                            track,
+                            slot_idx,
+                            value,
+                        },
+                    );
+                    ctx.gesture.rack_control_snapshot_dirty = true;
+                    // The slot dict carries `enabled` as a plain value, so
+                    // rebuild it or the header keeps the stale state.
+                    sync_rack_slot_instrument_authoring_display(
+                        &mut editor,
+                        &app,
+                        &state,
+                        track,
+                        &selected_steps,
+                    );
+                    fx_epoch.fetch_add(1, Ordering::Relaxed);
                 }
             }
         }
@@ -2392,6 +2421,7 @@ mod tests {
                         pan: 0.0,
                         mute: false,
                         solo: false,
+                        enabled: true,
                         max_polyphony: 8,
                         param_plocks: sequencer::sequencer::RackSlotParamPlocks::new(),
                         instrument_slot:
@@ -2965,4 +2995,43 @@ mod tests {
             );
         }
     }
+
+    /// eseq-bw9v: the slot-number toggle drives the real host-command seam.
+    /// Disabling a slot lands in the live rack snapshot, flips the
+    /// scheduler snapshot the audio thread reads, and republishes the
+    /// panel dict so the header repaints with `enabled` false.
+    #[test]
+    fn set_rack_slot_enabled_updates_snapshot_and_panel_dict() {
+        let mut h = RackHarness::new(HashSet::new());
+        let slot_enabled = |h: &RackHarness| {
+            rack_slot_snapshot_for_host(&h.state, TRACK, SLOT).unwrap().enabled
+        };
+        let published_enabled = |h: &RackHarness| {
+            h.state.latest_scheduler_snapshot().tracks[TRACK]
+                .rack_track.as_ref().unwrap().slots[SLOT].enabled
+        };
+        assert!(slot_enabled(&h));
+        let payload = |value: bool| {
+            let mut map: std::collections::HashMap<String, Rc<RefCell<Value>>> =
+                std::collections::HashMap::new();
+            map.insert("track".into(), Rc::new(RefCell::new(Value::Number(TRACK as f64))));
+            map.insert("slot".into(), Rc::new(RefCell::new(Value::Number(SLOT as f64))));
+            map.insert("value".into(), Rc::new(RefCell::new(Value::Bool(value))));
+            Value::Map(map.into_iter().collect())
+        };
+        let before = h.epochs();
+        h.dispatch("set-rack-slot-enabled", payload(false));
+        assert!(!slot_enabled(&h), "live rack snapshot carries the gate");
+        assert!(!published_enabled(&h), "scheduler snapshot republished for the audio thread");
+        assert!(h.epochs().1 > before.1, "the slot header is structural: fx_epoch must bump");
+        let panel = h.editor.runtime().reactive_field_value("SEQ", "instrument-panel")
+            .expect("panel dict republished");
+        let dict = format!("{panel:?}");
+        assert!(dict.contains("enabled"), "slot dict must carry the enabled flag: {dict}");
+
+        h.dispatch("set-rack-slot-enabled", payload(true));
+        assert!(slot_enabled(&h));
+        assert!(published_enabled(&h));
+    }
+
 }

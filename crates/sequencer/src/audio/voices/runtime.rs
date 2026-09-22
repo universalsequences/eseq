@@ -416,7 +416,8 @@ pub(in crate::audio) fn custom_engine_requires_idle_voice(
             .as_ref()
             .is_some_and(|rack| {
                 rack.slots.iter().any(|slot| {
-                    slot.track_sound_state.engine_id == Some(engine_id)
+                    slot.enabled
+                        && slot.track_sound_state.engine_id == Some(engine_id)
                         && slot.instrument_run_mode == CustomInstrumentRunMode::FreePatch
                 })
             })

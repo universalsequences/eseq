@@ -2851,7 +2851,7 @@ mod tests {
                     instrument_type: InstrumentType::Sampler,
                     instrument_run_mode: CustomInstrumentRunMode::Instrument,
                     instrument_base_note_offset: 0.0, choke_group: None,
-                    gain: 0.75, pan: 0.0, mute: false, solo: false, max_polyphony: 4,
+                    gain: 0.75, pan: 0.0, mute: false, solo: false, enabled: true, max_polyphony: 4,
                     param_plocks: RackSlotParamPlocks::new(),
                     instrument_slot: sequencer::effects::EffectSlotSnapshot::new_default_with_modulator(&desc, 0, 0),
                     effect_slots: RackSlotSnapshot::empty_effect_slots(),

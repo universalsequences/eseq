@@ -371,6 +371,7 @@ fn rack_routing_test_slot() -> RackSlotSnapshot {
         pan: 0.0,
         mute: false,
         solo: false,
+        enabled: true,
         max_polyphony: 1,
         param_plocks: RackSlotParamPlocks::new(),
         instrument_slot: EffectSlotSnapshot::new_empty(),

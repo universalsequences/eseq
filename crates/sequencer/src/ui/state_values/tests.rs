@@ -12621,6 +12621,7 @@ mod solo_binding_tests;
                     pan: -0.2,
                     mute: false,
                     solo: true,
+                    enabled: true,
                     max_polyphony: 4,
                     param_plocks: sequencer::sequencer::RackSlotParamPlocks::new(),
                     instrument_slot:
@@ -19651,6 +19652,34 @@ mod solo_binding_tests;
                 .unwrap(),
             Some(Value::String("Default (auto)".to_string())),
             "the stubbed native reports no choice, so the sentinel row is current"
+        );
+    }
+
+    #[test]
+    fn metal_seq_agent_catalog_error_preserves_conversation_and_allows_retry() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        editor.runtime_mut().register_native("agent/new", |_args, _ctx| {
+            Err("invalid agent-models.lisp catalog".to_string())
+        });
+        editor.runtime_mut().eval_str("(eseq.agent/agent-open)").unwrap();
+        assert_eq!(
+            editor.runtime_mut().eval_str("eseq.agent/agent-current-conv").unwrap(),
+            Some(Value::Number(0.0)),
+        );
+        assert!(editor.runtime_mut().take_status_message().unwrap().contains("agent-models.lisp"));
+        editor.runtime_mut().eval_str("(set! eseq.agent/agent-current-conv 7)").unwrap();
+        editor.runtime_mut().eval_str("(eseq.agent/new-conversation)").unwrap();
+        assert_eq!(
+            editor.runtime_mut().eval_str("eseq.agent/agent-current-conv").unwrap(),
+            Some(Value::Number(7.0)),
+        );
+        editor.runtime_mut().register_native("agent/new", |_args, _ctx| {
+            Ok(Value::Number(8.0))
+        });
+        editor.runtime_mut().eval_str("(eseq.agent/new-conversation)").unwrap();
+        assert_eq!(
+            editor.runtime_mut().eval_str("eseq.agent/agent-current-conv").unwrap(),
+            Some(Value::Number(8.0)),
         );
     }
 

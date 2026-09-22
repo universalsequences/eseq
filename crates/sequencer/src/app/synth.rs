@@ -858,6 +858,57 @@ impl App {
         updated
     }
 
+    /// eseq-bw9v: flip a slot's live-set gate. The audio thread stops
+    /// triggering the slot on the next scheduler snapshot; the FX bypass is
+    /// pushed here too so a slot disabled while the track is silent does not
+    /// keep running its chain until the next trigger repushes it.
+    pub fn set_rack_slot_enabled(&mut self, track: usize, slot_idx: usize, value: bool) -> bool {
+        let updated = self
+            .state
+            .update_live_rack_slot(track, slot_idx, |slot| slot.enabled = value);
+        if !updated {
+            return false;
+        }
+        let slot = {
+            let racks = self.state.pattern.rack_tracks.lock().unwrap();
+            racks
+                .get(track)
+                .and_then(Option::as_ref)
+                .and_then(|rack| rack.slots.get(slot_idx))
+                .cloned()
+        };
+        if let Some(slot) = slot {
+            for (effect, descriptor) in slot.effect_slots.iter().zip(&slot.effect_descriptors) {
+                let Some(param_idx) = descriptor.enabled_param_idx() else {
+                    continue;
+                };
+                let Some(idx) = effect.node_param_idx(param_idx) else {
+                    continue;
+                };
+                if effect.node_id == 0
+                    || idx == u32::MAX
+                    || idx >= crate::instruments::voice_modulator::MOD_PARAM_BASE
+                {
+                    continue;
+                }
+                let stored = effect.defaults.get(param_idx).copied().unwrap_or(1.0);
+                let fvalue = if value { stored } else { 0.0 };
+                unsafe {
+                    crate::audiograph::params_push_wrapper(
+                        self.graph.lg.0,
+                        crate::audiograph::ParamMsg {
+                            idx: idx as u64,
+                            logical_id: effect.node_id as u64,
+                            fvalue,
+                        },
+                    );
+                }
+            }
+        }
+        self.state.publish_scheduler_snapshot();
+        true
+    }
+
     pub fn set_rack_slot_solo(&mut self, track: usize, slot_idx: usize, value: bool) -> bool {
         let updated = self
             .state
