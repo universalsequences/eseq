@@ -388,6 +388,30 @@ fn cell_gesture_args(value: &Value, expected_kind: &str) -> Option<Vec<Value>> {
     Some(vec![items[1].borrow().clone(), items[2].borrow().clone()])
 }
 
+/// Value a cell snaps back to on double-click. `:default` may be one number
+/// for the whole grid or a nested (rows × cols) list like `:value`; without it
+/// a bipolar range resets to zero and a unipolar one to `min`.
+fn default_cell_value(props: &HashMap<String, Value>, row: usize, col: usize) -> f32 {
+    let min = get_f32_prop(props, "min", 0.0);
+    let max = get_f32_prop(props, "max", 1.0);
+    let lo = min.min(max);
+    let hi = min.max(max);
+    let fallback = if lo < 0.0 && hi > 0.0 { 0.0 } else { lo };
+    let value = match props.get("default") {
+        Some(Value::List(rows)) => rows
+            .get(row)
+            .and_then(|r| match &*r.borrow() {
+                Value::List(cells) => cells.get(col).and_then(|c| number_value(&c.borrow())),
+                other => number_value(other),
+            })
+            .map(|v| v as f32)
+            .unwrap_or(fallback),
+        Some(other) => number_value(other).map(|v| v as f32).unwrap_or(fallback),
+        None => fallback,
+    };
+    value.clamp(lo, hi)
+}
+
 fn handle_toggle(node: &LayoutNode, local_col: f32, local_row: f32) -> MouseEventOutcome {
     let rows = matrix_rows_from_props(&node.props);
     let cols = matrix_cols_from_props(&node.props);
@@ -773,6 +797,34 @@ impl WidgetDefinition for MatrixWidget {
                 }
             }
             _ => MouseEventOutcome::Ignore,
+        }
+    }
+
+    /// Double-click resets one cell to its default (see `default_cell_value`).
+    /// The event takes the same `on-cell-change` / `on-change` path as a drag.
+    fn double_click_event(
+        &self,
+        node: &LayoutNode,
+        local_col: f32,
+        local_row: f32,
+    ) -> Option<WidgetEvent> {
+        if get_bool_prop(&node.props, "toggle", false) {
+            return None;
+        }
+        if !has_callback(node, "on-cell-change") && !has_callback(node, "on-change") {
+            return None;
+        }
+        let rows = matrix_rows_from_props(&node.props);
+        let cols = matrix_cols_from_props(&node.props);
+        let cell = cell_index(node, local_col, local_row);
+        let value = default_cell_value(&node.props, cell / cols, cell % cols);
+        update_state(node.widget_id, |state| {
+            state.active_cell = None;
+            state.drag_start_value = value;
+        });
+        match dispatch_cell_change(node, cell, value, rows, cols) {
+            MouseEventOutcome::Dispatch(event) => Some(event),
+            _ => None,
         }
     }
 
@@ -1342,6 +1394,51 @@ mod tests {
         assert_eq!(output.args[0], Value::Number(0.0));
         assert_eq!(output.args[1], Value::Number(1.0));
         assert_eq!(output.args[2], Value::Number(0.75));
+    }
+
+    #[test]
+    fn double_click_resets_cell_to_default_prop_or_range_center() {
+        // Explicit scalar :default wins.
+        let mut props = HashMap::new();
+        props.insert("rows".to_string(), Value::Number(2.0));
+        props.insert("cols".to_string(), Value::Number(2.0));
+        props.insert("min".to_string(), Value::Number(0.0));
+        props.insert("max".to_string(), Value::Number(2.0));
+        props.insert("default".to_string(), Value::Number(1.0));
+        props.insert("on-cell-change".to_string(), Value::Bool(true));
+        props.insert(
+            "value".to_string(),
+            matrix_value(vec![vec![0.3, 1.7], vec![0.0, 2.0]]),
+        );
+        let node = matrix_node(props);
+        let Some(WidgetEvent::Custom(value)) = MATRIX_WIDGET.double_click_event(&node, 7.0, 7.0)
+        else {
+            panic!("double-click dispatches a cell change");
+        };
+        assert_eq!(value, cell_change_value(1, 1, 1.0));
+
+        // Bipolar range without :default resets to zero; unipolar resets to min.
+        let mut props = HashMap::new();
+        props.insert("rows".to_string(), Value::Number(1.0));
+        props.insert("cols".to_string(), Value::Number(1.0));
+        props.insert("min".to_string(), Value::Number(-2.0));
+        props.insert("max".to_string(), Value::Number(2.0));
+        props.insert("on-cell-change".to_string(), Value::Bool(true));
+        props.insert("value".to_string(), matrix_value(vec![vec![1.5]]));
+        let node = matrix_node(props);
+        let Some(WidgetEvent::Custom(value)) = MATRIX_WIDGET.double_click_event(&node, 1.0, 1.0)
+        else {
+            panic!("double-click dispatches a cell change");
+        };
+        assert_eq!(value, cell_change_value(0, 0, 0.0));
+
+        // No change callback at all → nothing to reset into.
+        let mut props = HashMap::new();
+        props.insert("rows".to_string(), Value::Number(1.0));
+        props.insert("cols".to_string(), Value::Number(1.0));
+        props.insert("value".to_string(), matrix_value(vec![vec![0.5]]));
+        let node = matrix_node(props);
+        assert!(MATRIX_WIDGET.double_click_event(&node, 1.0, 1.0).is_none());
     }
 
     #[test]

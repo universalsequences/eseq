@@ -1032,7 +1032,7 @@ theme_slots!(
     (
         widget_toggle_on,
         WIDGET_TOGGLE_ON,
-        Color::from_hex(0xc8, 0xff, 0x00)
+        Color::from_hex(0x00, 0x7a, 0xff)
     ),
     (
         widget_toggle_off,
