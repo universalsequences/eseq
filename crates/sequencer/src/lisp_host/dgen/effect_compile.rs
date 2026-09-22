@@ -255,6 +255,9 @@ fn list_saved_effects_in_roots(roots: &[ContentRoot]) -> Vec<String> {
                     if let Ok(rel) = path.strip_prefix(root) {
                         out.push(rel.to_string_lossy().replace('\\', "/"));
                     }
+                    // A folder effect owns everything beneath it (captures,
+                    // research snapshots, helper Lisp); none of it is an effect.
+                    continue;
                 }
                 collect(&path, root, out);
             } else if path.extension().map(|ext| ext == "lisp").unwrap_or(false) {
@@ -399,6 +402,24 @@ mod package_effect_tests {
                 path: root.join("packages/alec.fx/effects"),
             },
         ]
+    }
+
+    #[test]
+    fn lisp_files_inside_a_folder_effect_are_not_listed_as_effects() {
+        let root = temp_root("folder-contents");
+        let roots = roots(&root);
+        write_folder_effect(&roots[1].path, "channel");
+        let effect = roots[1].path.join("channel");
+        std::fs::write(effect.join("capture.lisp"), "(out (in 1) 1)").unwrap();
+        let snapshots = effect.join("research/snapshots");
+        std::fs::create_dir_all(&snapshots).unwrap();
+        std::fs::write(snapshots.join("0a4df8e569fe.lisp"), "(out (in 1) 1)").unwrap();
+        std::fs::write(roots[1].path.join("flat.lisp"), "(out (in 1) 1)").unwrap();
+
+        assert_eq!(
+            list_saved_effects_in_roots(&roots),
+            vec!["channel".to_string(), "flat".into()]
+        );
     }
 
     #[test]
