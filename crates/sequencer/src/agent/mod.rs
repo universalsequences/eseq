@@ -4,6 +4,7 @@ pub mod audition;
 pub mod catalog;
 pub mod dsp_validate;
 pub mod model_choice;
+pub mod models;
 pub mod network;
 pub mod parse;
 pub mod protocol;

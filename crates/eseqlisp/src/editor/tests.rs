@@ -15327,7 +15327,7 @@ fn real_choose_model_dropdown_row_click_selects() {
             if let Some(Value::String(v)) = args.first() {
                 *picked_for_set.borrow_mut() = v.clone();
             }
-            Ok(Value::Nil)
+            Ok(Value::Bool(true))
         });
     let source_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../content/ui/choose-model.lisp");
@@ -15404,6 +15404,29 @@ fn real_choose_model_dropdown_row_click_selects() {
     );
 }
 
+
+#[test]
+fn real_choose_model_reports_catalog_errors_without_closing_or_claiming_selection() {
+    let mut runtime = Runtime::new();
+    runtime.register_native("agent/models", |_args, _ctx| {
+        Err("invalid agent-models.lisp catalog".to_string())
+    });
+    runtime.register_native("agent/set-patch-model", |_args, _ctx| {
+        Err("selected model was removed from agent-models.lisp".to_string())
+    });
+    let source_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../content/ui/choose-model.lisp");
+    let source = std::fs::read_to_string(&source_path).unwrap();
+    runtime.eval_source_at_path(source_path, &source).unwrap();
+    runtime.eval_str("(eseq.choose-model/choose-model)").unwrap();
+    let options = runtime.eval_str("(eseq.choose-model/options)").unwrap();
+    assert!(matches!(options, Some(Value::List(rows)) if rows.len() == 1));
+    assert!(runtime.take_status_message().unwrap().contains("invalid agent-models.lisp"));
+    runtime.eval_str(r#"(eseq.choose-model/select-model "removed-model")"#).unwrap();
+    assert_eq!(runtime.eval_str("eseq.choose-model/open?").unwrap(), Some(Value::Bool(true)));
+    assert_eq!(runtime.eval_str("eseq.choose-model/generation").unwrap(), Some(Value::Number(0.0)));
+    assert!(runtime.take_status_message().unwrap().contains("selected model was removed"));
+}
 
 /// Differential probe: identical to module_dropdown_row_click test but the
 /// module fn is named `select` (a builtin widget name).

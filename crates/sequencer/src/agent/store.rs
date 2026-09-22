@@ -153,14 +153,14 @@ impl ConversationStore {
         Arc::clone(&self.task_handles)
     }
 
-    pub fn new_conversation(&self, kind: AgentKind) -> ConvId {
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let provider_state = AgentProviderState::from_env();
+    pub fn new_conversation(&self, kind: AgentKind) -> Result<ConvId, String> {
+        let provider_state = AgentProviderState::from_env()?;
         let provider = provider_state.selected_provider;
         let model = provider_state
             .selected_model()
             .map(ToOwned::to_owned)
-            .unwrap_or_else(|| "gpt-5.5".to_string());
+            .ok_or_else(|| "No agent model selected".to_string())?;
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let mut inner = self.inner.lock().unwrap();
         inner.insert(
             id,
@@ -187,7 +187,7 @@ impl ConversationStore {
                 model,
             },
         );
-        id
+        Ok(id)
     }
 
     pub fn list(&self) -> Vec<ConvId> {
@@ -387,7 +387,7 @@ mod tests {
     #[test]
     fn creates_and_lists_conversations() {
         let store = ConversationStore::new(44_100);
-        let id = store.new_conversation(AgentKind::Instrument);
+        let id = store.new_conversation(AgentKind::Instrument).unwrap();
         assert_eq!(store.list(), vec![id]);
         let snapshot = store.snapshot(id).unwrap();
         assert_eq!(snapshot.state.status, AgentStatus::Idle);
@@ -397,7 +397,7 @@ mod tests {
     #[test]
     fn set_model_bumps_generation() {
         let store = ConversationStore::new(44_100);
-        let id = store.new_conversation(AgentKind::Instrument);
+        let id = store.new_conversation(AgentKind::Instrument).unwrap();
         let before = store.snapshot(id).unwrap().state.generation;
         store
             .set_model(
@@ -413,7 +413,7 @@ mod tests {
     #[test]
     fn finalized_effect_consumes_draft_state() {
         let store = ConversationStore::new(44_100);
-        let id = store.new_conversation(AgentKind::Effect);
+        let id = store.new_conversation(AgentKind::Effect).unwrap();
         {
             let inner = store.inner();
             let mut inner = inner.lock().unwrap();
@@ -442,7 +442,7 @@ mod tests {
     #[test]
     fn finalized_instrument_consumes_draft_state() {
         let store = ConversationStore::new(44_100);
-        let id = store.new_conversation(AgentKind::Instrument);
+        let id = store.new_conversation(AgentKind::Instrument).unwrap();
         {
             let inner = store.inner();
             let mut inner = inner.lock().unwrap();

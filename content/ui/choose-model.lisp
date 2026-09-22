@@ -53,7 +53,12 @@
 (def default-label () "Default (auto)")
 
 (def options ()
-  (cons (default-label) (agent/models)))
+  (let ((models (agent/models)))
+    ;; Native errors report their diagnostic and return false. Keep the picker
+    ;; usable without replacing that diagnostic with a list type error.
+    (if (= models false)
+      (list (default-label))
+      (cons (default-label) models))))
 
 (def current ()
   (let ((chosen (agent/patch-model)))
@@ -80,12 +85,13 @@
   (open))
 
 (def select-model (value)
-  (do
-    (agent/set-patch-model
+  (if (agent/set-patch-model
       (if (= value (default-label)) "" value))
-    (set! generation (+ generation 1))
-    (status (str "Patch agent model: " value))
-    (close)))
+    (do
+      (set! generation (+ generation 1))
+      (status (str "Patch agent model: " value))
+      (close))
+    nil))
 
 ;; Widget `:key`s auto-qualify inside a declared module (spec §5): these hash
 ;; as `eseq.choose-model/title`, `…/dropdown`, and so on. Nothing serializes

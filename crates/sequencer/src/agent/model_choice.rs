@@ -16,11 +16,11 @@ use std::sync::{Mutex, OnceLock};
 
 use serde::{Deserialize, Serialize};
 
-use super::providers::{default_model_presets, AgentProviderKind};
+use super::models::AgentModelCatalog;
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct Prefs {
-    /// Model id (e.g. "claude-opus-5"), matched against `default_model_presets`.
+    /// Model id, validated against the runtime catalog when selected or used.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     agentic_model: Option<String>,
 }
@@ -37,10 +37,7 @@ fn cell() -> &'static Mutex<Option<String>> {
 fn load_from_disk() -> Option<String> {
     let raw = std::fs::read_to_string(prefs_path()).ok()?;
     let prefs: Prefs = serde_json::from_str(&raw).ok()?;
-    prefs
-        .agentic_model
-        .filter(|id| !id.trim().is_empty())
-        .filter(|id| is_known_model(id))
+    prefs.agentic_model.filter(|id| !id.trim().is_empty())
 }
 
 fn save_to_disk(model: Option<&str>) {
@@ -70,37 +67,20 @@ fn save_to_disk(model: Option<&str>) {
     }
 }
 
-fn is_known_model(id: &str) -> bool {
-    default_model_presets().iter().any(|preset| preset.id == id)
-}
-
 /// The chosen model id, or `None` when the user has never picked one.
 pub fn agentic_model() -> Option<String> {
     cell().lock().ok().and_then(|guard| guard.clone())
 }
 
-/// The provider that serves a model id, resolved from the preset table. Pure —
-/// no global state — so it is directly testable.
-fn provider_for_model(id: &str) -> Option<AgentProviderKind> {
-    default_model_presets()
-        .into_iter()
-        .find(|preset| preset.id == id)
-        .map(|preset| preset.provider)
-}
-
-/// The provider that serves `agentic_model()`, resolved from the preset table.
-pub fn agentic_provider() -> Option<AgentProviderKind> {
-    provider_for_model(&agentic_model()?)
-}
-
-/// Record a choice. An id absent from `default_model_presets` is rejected so a
-/// typo in Lisp can't silently point every bubble at a nonexistent model.
+/// Record a choice. Reject ids absent from the current catalog before changing
+/// preferences. A removed saved choice is retained so a new request can report
+/// it explicitly instead of silently switching models or providers.
 pub fn set_agentic_model(model: &str) -> Result<(), String> {
     let trimmed = model.trim();
     if trimmed.is_empty() {
         return Err("model id is empty".to_string());
     }
-    if !is_known_model(trimmed) {
+    if AgentModelCatalog::load()?.model(trimmed).is_none() {
         return Err(format!("unknown model {trimmed}"));
     }
     if let Ok(mut guard) = cell().lock() {
@@ -126,58 +106,5 @@ mod tests {
     fn rejects_unknown_models() {
         assert!(set_agentic_model("not-a-real-model").is_err());
         assert!(set_agentic_model("  ").is_err());
-    }
-
-    #[test]
-    fn every_preset_id_is_accepted_as_known() {
-        for preset in default_model_presets() {
-            assert!(is_known_model(&preset.id), "{} not known", preset.id);
-        }
-    }
-
-    #[test]
-    fn provider_resolves_from_the_preset_table() {
-        // `provider_for_model` is what `agentic_provider()` delegates to, and
-        // it is pure — no global state touched, so this stays independent of
-        // whatever the developer's prefs.json holds. Routing a model to the
-        // wrong provider sends the request to an API that 404s on the id, so
-        // pin the expected provider per id rather than comparing the table to
-        // itself.
-        let expected = [
-            ("gpt-5.5", AgentProviderKind::OpenAi),
-            ("gpt-5.6-luna", AgentProviderKind::OpenAi),
-            ("gpt-5-mini", AgentProviderKind::OpenAi),
-            ("gpt-5-nano", AgentProviderKind::OpenAi),
-            ("gemini-3-flash-preview", AgentProviderKind::Gemini),
-            ("gemini-3.5-flash", AgentProviderKind::Gemini),
-            ("gemini-2.5-pro", AgentProviderKind::Gemini),
-            ("gemini-2.5-flash", AgentProviderKind::Gemini),
-            ("gemini-2.5-flash-lite", AgentProviderKind::Gemini),
-            ("claude-opus-5", AgentProviderKind::Anthropic),
-            ("claude-fable-5", AgentProviderKind::Anthropic),
-            ("claude-sonnet-5", AgentProviderKind::Anthropic),
-            ("claude-haiku-4-5", AgentProviderKind::Anthropic),
-            ("deepseek-v4-pro", AgentProviderKind::DeepSeek),
-            ("deepseek-v4-flash", AgentProviderKind::DeepSeek),
-        ];
-
-        for (id, provider) in expected {
-            assert_eq!(
-                provider_for_model(id),
-                Some(provider),
-                "{id} must resolve to {provider:?}"
-            );
-        }
-
-        // Every preset has to be covered, so a new model cannot land unrouted.
-        for preset in default_model_presets() {
-            assert!(
-                expected.iter().any(|(id, _)| *id == preset.id),
-                "{} is a preset with no expected provider in this test",
-                preset.id
-            );
-        }
-
-        assert_eq!(provider_for_model("not-a-real-model"), None);
     }
 }

@@ -1159,7 +1159,7 @@ mod tests {
     #[test]
     fn build_request_filters_tool_progress_messages() {
         let store = ConversationStore::new(48_000);
-        let id = store.new_conversation(crate::agent::store::AgentKind::Instrument);
+        let id = store.new_conversation(crate::agent::store::AgentKind::Instrument).unwrap();
         {
             let inner = store.inner();
             let mut inner = inner.lock().unwrap();
@@ -1199,7 +1199,7 @@ mod tests {
     #[test]
     fn intent_action_switches_general_conversation_to_focused_kind() {
         let store = ConversationStore::new(48_000);
-        let id = store.new_conversation(AgentKind::General);
+        let id = store.new_conversation(AgentKind::General).unwrap();
 
         let outcome = run_pending_action_pipeline(
             &store,

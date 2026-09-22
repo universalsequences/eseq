@@ -80,10 +80,13 @@
 (def agent-open ()
   (do
     (if (= agent-current-conv 0)
-      (set! agent-current-conv (agent/new :kind 'general))
+      (new-conversation)
       nil)
-    (set-window-buffer-for "*track*" "*agent-artifacts*")
-    (switch-to-buffer "*agent*")))
+    (if (> agent-current-conv 0)
+      (do
+        (set-window-buffer-for "*track*" "*agent-artifacts*")
+        (switch-to-buffer "*agent*"))
+      nil)))
 
 (def close-panel ()
   (do
@@ -92,9 +95,12 @@
     (switch-to-buffer "*sequencer*")))
 
 (def new-conversation ()
-  (do
-    (set! agent-current-conv (agent/new :kind 'general))
-    (set! finalize-name "")))
+  (let ((id (agent/new :kind 'general)))
+    (if id
+      (do
+        (set! agent-current-conv id)
+        (set! finalize-name ""))
+      nil)))
 
 (def send-current ()
   (if (and (> agent-current-conv 0) (not (= prompt "")))
@@ -123,10 +129,15 @@
           (= status 'auditioning)))
     false))
 
+(def model-options ()
+  (let ((models (agent/models)))
+    (if (= models false) (list) models)))
+
 (def current-model ()
   (if (> agent-current-conv 0)
     (agent/model agent-current-conv)
-    (nth (agent/models) 0)))
+    (let ((models (model-options)))
+      (if models (nth models 0) ""))))
 
 (def set-current-model (model)
   (if (> agent-current-conv 0)
@@ -344,7 +355,7 @@
             (dropdown
               :key "model-select"
               :value (current-model)
-              :options (agent/models)
+              :options (model-options)
               :width 14.0
               :height 1.35
               :font-size 11

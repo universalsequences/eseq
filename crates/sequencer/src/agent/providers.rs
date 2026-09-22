@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use super::actions::AgentSessionContext;
+use super::models::AgentModelCatalog;
 use super::protocol::{ToolCall, ToolCallOutcome, ToolSpec};
 
 const OPENAI_API_KEY_ENV: &str = "OPENAI_API_KEY";
@@ -27,6 +28,8 @@ pub enum AgentProviderKind {
 }
 
 impl AgentProviderKind {
+    pub const ALL: [Self; 4] = [Self::OpenAi, Self::Gemini, Self::DeepSeek, Self::Anthropic];
+
     pub fn display_name(self) -> &'static str {
         match self {
             AgentProviderKind::OpenAi => "OpenAI",
@@ -68,6 +71,8 @@ pub struct AgentModelPreset {
     pub display_name: String,
     pub provider: AgentProviderKind,
     pub capability: ModelCapability,
+    pub default: bool,
+    pub bubble_default: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -110,132 +115,35 @@ pub struct AgentTurnRequest {
     pub session_context: AgentSessionContext,
 }
 
-pub fn default_model_presets() -> Vec<AgentModelPreset> {
-    vec![
-        AgentModelPreset {
-            id: "gpt-5.5".to_string(),
-            display_name: "GPT-5.5".to_string(),
-            provider: AgentProviderKind::OpenAi,
-            capability: ModelCapability::Balanced,
-        },
-        AgentModelPreset {
-            id: "gpt-5.6-luna".to_string(),
-            display_name: "GPT-5.6 Luna".to_string(),
-            provider: AgentProviderKind::OpenAi,
-            capability: ModelCapability::Cheap,
-        },
-        AgentModelPreset {
-            id: "gpt-5-mini".to_string(),
-            display_name: "GPT-5 mini".to_string(),
-            provider: AgentProviderKind::OpenAi,
-            capability: ModelCapability::Fast,
-        },
-        AgentModelPreset {
-            id: "gpt-5-nano".to_string(),
-            display_name: "GPT-5 nano".to_string(),
-            provider: AgentProviderKind::OpenAi,
-            capability: ModelCapability::Cheap,
-        },
-        AgentModelPreset {
-            id: "gemini-3-flash-preview".to_string(),
-            display_name: "Gemini 3 Flash Preview".to_string(),
-            provider: AgentProviderKind::Gemini,
-            capability: ModelCapability::Cheap,
-        },
-        AgentModelPreset {
-            id: "gemini-3.5-flash".to_string(),
-            display_name: "Gemini 3.5 Flash".to_string(),
-            provider: AgentProviderKind::Gemini,
-            capability: ModelCapability::Cheap,
-        },
-        AgentModelPreset {
-            id: "gemini-2.5-pro".to_string(),
-            display_name: "Gemini 2.5 Pro".to_string(),
-            provider: AgentProviderKind::Gemini,
-            capability: ModelCapability::Balanced,
-        },
-        AgentModelPreset {
-            id: "gemini-2.5-flash".to_string(),
-            display_name: "Gemini 2.5 Flash".to_string(),
-            provider: AgentProviderKind::Gemini,
-            capability: ModelCapability::Cheap,
-        },
-        AgentModelPreset {
-            id: "gemini-2.5-flash-lite".to_string(),
-            display_name: "Gemini 2.5 Flash Lite".to_string(),
-            provider: AgentProviderKind::Gemini,
-            capability: ModelCapability::Cheap,
-        },
-        // Anthropic model ids carry no date suffix — `claude-opus-5`, not
-        // `claude-opus-5-20260101`. A suffixed id 404s at the Messages API.
-        AgentModelPreset {
-            id: "claude-opus-5".to_string(),
-            display_name: "Claude Opus 5".to_string(),
-            provider: AgentProviderKind::Anthropic,
-            capability: ModelCapability::Balanced,
-        },
-        AgentModelPreset {
-            id: "claude-fable-5".to_string(),
-            display_name: "Claude Fable 5".to_string(),
-            provider: AgentProviderKind::Anthropic,
-            capability: ModelCapability::Balanced,
-        },
-        AgentModelPreset {
-            id: "claude-sonnet-5".to_string(),
-            display_name: "Claude Sonnet 5".to_string(),
-            provider: AgentProviderKind::Anthropic,
-            capability: ModelCapability::Balanced,
-        },
-        AgentModelPreset {
-            id: "claude-haiku-4-5".to_string(),
-            display_name: "Claude Haiku 4.5".to_string(),
-            provider: AgentProviderKind::Anthropic,
-            capability: ModelCapability::Fast,
-        },
-        AgentModelPreset {
-            id: "deepseek-v4-pro".to_string(),
-            display_name: "DeepSeek V4 Pro".to_string(),
-            provider: AgentProviderKind::DeepSeek,
-            capability: ModelCapability::Balanced,
-        },
-        AgentModelPreset {
-            id: "deepseek-v4-flash".to_string(),
-            display_name: "DeepSeek V4 Flash".to_string(),
-            provider: AgentProviderKind::DeepSeek,
-            capability: ModelCapability::Fast,
-        },
-    ]
-}
-
 impl AgentProviderState {
-    pub fn from_env() -> Self {
-        let models = default_model_presets();
-        let providers = [
-            AgentProviderKind::OpenAi,
-            AgentProviderKind::Gemini,
-            AgentProviderKind::DeepSeek,
-            AgentProviderKind::Anthropic,
-        ]
-        .into_iter()
-        .map(|provider| ProviderAvailability {
-            provider,
-            api_key_present: std::env::var(provider.api_key_env())
-                .map(|value| !value.trim().is_empty())
-                .unwrap_or(false),
-            selected_model: provider_selected_model(provider, &models),
-            available_models: models
-                .iter()
-                .filter(|preset| preset.provider == provider)
-                .cloned()
-                .collect(),
-        })
-        .collect::<Vec<_>>();
+    pub fn from_env() -> Result<Self, String> {
+        Ok(Self::from_catalog(&AgentModelCatalog::load()?))
+    }
+
+    pub fn from_catalog(catalog: &AgentModelCatalog) -> Self {
+        let models = catalog.models();
+        let providers = AgentProviderKind::ALL
+            .into_iter()
+            .filter(|provider| models.iter().any(|model| model.provider == *provider))
+            .map(|provider| ProviderAvailability {
+                provider,
+                api_key_present: std::env::var(provider.api_key_env())
+                    .map(|value| !value.trim().is_empty())
+                    .unwrap_or(false),
+                selected_model: provider_selected_model(provider, models),
+                available_models: models
+                    .iter()
+                    .filter(|preset| preset.provider == provider)
+                    .cloned()
+                    .collect(),
+            })
+            .collect::<Vec<_>>();
 
         let selected_provider = providers
             .iter()
             .find(|entry| entry.api_key_present)
             .map(|entry| entry.provider)
-            .unwrap_or(AgentProviderKind::OpenAi);
+            .unwrap_or(providers[0].provider);
 
         Self {
             selected_provider,
@@ -261,15 +169,9 @@ fn provider_selected_model(provider: AgentProviderKind, presets: &[AgentModelPre
 
     presets
         .iter()
-        .find(|preset| {
-            preset.provider == provider
-                && matches!(
-                    preset.capability,
-                    ModelCapability::Balanced | ModelCapability::Cheap
-                )
-        })
+        .find(|preset| preset.provider == provider && preset.default)
         .map(|preset| preset.id.clone())
-        .unwrap_or_else(|| "unknown".to_string())
+        .expect("validated catalog has a default for each provider")
 }
 
 pub fn build_openai_responses_payload(request: &AgentTurnRequest) -> Value {
@@ -436,16 +338,22 @@ mod tests {
 
     use super::{
         build_anthropic_messages_payload, build_gemini_generate_content_payload,
-        build_openai_responses_payload, default_model_presets, normalize_openai_tool_call,
+        build_openai_responses_payload, normalize_openai_tool_call,
         AgentMessage, AgentMessageRole, AgentProviderKind, AgentProviderState, AgentTurnRequest,
         ModelCapability,
     };
     use crate::agent::actions::AgentSessionContext;
+    use crate::agent::models::AgentModelCatalog;
     use crate::agent::protocol::AgentToolRuntime;
+
+    fn factory_catalog() -> AgentModelCatalog {
+        let path = crate::app_paths::app_paths().ui_dir().join("agent-models.lisp");
+        AgentModelCatalog::parse(&std::fs::read_to_string(path).unwrap()).unwrap()
+    }
 
     #[test]
     fn provider_state_contains_both_backends() {
-        let state = AgentProviderState::from_env();
+        let state = AgentProviderState::from_catalog(&factory_catalog());
         assert_eq!(state.providers.len(), 4);
         assert!(state
             .providers
@@ -467,10 +375,11 @@ mod tests {
 
     #[test]
     fn anthropic_presets_are_available() {
-        let presets = default_model_presets();
+        let presets = factory_catalog().models().to_vec();
         for id in [
             "claude-opus-5",
             "claude-fable-5",
+            "claude-fable-5-1",
             "claude-sonnet-5",
             "claude-haiku-4-5",
         ] {
@@ -535,7 +444,7 @@ mod tests {
 
     #[test]
     fn deepseek_v4_pro_is_available() {
-        let presets = default_model_presets();
+        let presets = factory_catalog().models().to_vec();
         let preset = presets
             .iter()
             .find(|preset| preset.id == "deepseek-v4-pro")
@@ -546,7 +455,7 @@ mod tests {
 
     #[test]
     fn deepseek_v4_flash_is_available() {
-        let presets = default_model_presets();
+        let presets = factory_catalog().models().to_vec();
         let preset = presets
             .iter()
             .find(|preset| preset.id == "deepseek-v4-flash")
@@ -557,7 +466,7 @@ mod tests {
 
     #[test]
     fn gpt_5_6_luna_is_available() {
-        let presets = default_model_presets();
+        let presets = factory_catalog().models().to_vec();
         let preset = presets
             .iter()
             .find(|preset| preset.id == "gpt-5.6-luna")
@@ -568,7 +477,7 @@ mod tests {
 
     #[test]
     fn gemini_3_5_flash_replaces_latest_flash_alias() {
-        let presets = default_model_presets();
+        let presets = factory_catalog().models().to_vec();
         let preset = presets
             .iter()
             .find(|preset| preset.id == "gemini-3.5-flash")

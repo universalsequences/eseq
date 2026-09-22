@@ -7281,7 +7281,7 @@ fn register_agent_mode_natives(
     let s = store.clone();
     runtime.register_native("agent/new", move |args, _ctx| {
         let kind = parse_agent_kind(&args).unwrap_or(sequencer::agent::store::AgentKind::General);
-        let id = s.new_conversation(kind);
+        let id = s.new_conversation(kind)?;
         eprintln!("[agent-ui] agent/new kind={kind:?} conv={id}");
         Ok(Value::Number(id as f64))
     });
@@ -7514,10 +7514,11 @@ fn register_agent_mode_natives(
     );
 
     runtime.register_native("agent/models", move |_args, _ctx| {
+        let catalog = sequencer::agent::models::AgentModelCatalog::load()?;
         Ok(Value::List(
-            sequencer::agent::providers::default_model_presets()
-                .into_iter()
-                .map(|model| Rc::new(RefCell::new(Value::String(model.id))))
+            catalog.models()
+                .iter()
+                .map(|model| Rc::new(RefCell::new(Value::String(model.id.clone()))))
                 .collect(),
         ))
     });
@@ -7535,11 +7536,10 @@ fn register_agent_mode_natives(
             Some(Value::String(value)) => value.clone(),
             _ => return Err("agent/set-model: expected conv-id and model string".to_string()),
         };
-        let provider = sequencer::agent::providers::default_model_presets()
-            .into_iter()
-            .find(|preset| preset.id == model)
+        let catalog = sequencer::agent::models::AgentModelCatalog::load()?;
+        let provider = catalog.model(&model)
             .map(|preset| preset.provider)
-            .unwrap_or(sequencer::agent::providers::AgentProviderKind::OpenAi);
+            .ok_or_else(|| format!("agent/set-model: unknown model {model}"))?;
         s.set_model(id, provider, model)?;
         Ok(Value::Nil)
     });
@@ -8370,6 +8370,40 @@ fn document_metal_seq_natives(runtime: &mut Runtime) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_model_natives_list_catalog_and_reject_unknown_routing() {
+        use sequencer::agent::providers::AgentProviderKind;
+        use sequencer::agent::store::{AgentKind, ConversationStore};
+
+        let mut runtime = Runtime::new();
+        let store = ConversationStore::new(44_100);
+        let id = store.new_conversation(AgentKind::General).unwrap();
+        register_agent_mode_natives(&mut runtime, store.clone());
+        let Some(Value::List(models)) = runtime.eval_str("(agent/models)").unwrap() else {
+            panic!("agent/models must return the catalog ids");
+        };
+        for (model, provider) in [
+            ("gpt-6-astra", AgentProviderKind::OpenAi),
+            ("claude-fable-5-1", AgentProviderKind::Anthropic),
+        ] {
+            assert!(models.iter().any(|value| matches!(&*value.borrow(), Value::String(id) if id == model)));
+            runtime.eval_str(&format!("(agent/set-model {id} \"{model}\")")).unwrap();
+            let selected = store.snapshot(id).unwrap().state;
+            assert_eq!(selected.model, model);
+            assert_eq!(selected.provider, provider);
+        }
+        let before = store.snapshot(id).unwrap().state;
+        assert_eq!(
+            runtime.eval_str(&format!("(agent/set-model {id} \"unknown-model\")")).unwrap(),
+            Some(Value::Bool(false)),
+        );
+        let after = store.snapshot(id).unwrap().state;
+        assert_eq!(after.model, before.model);
+        assert_eq!(after.provider, before.provider);
+        assert_eq!(after.generation, before.generation);
+        assert!(runtime.take_status_message().unwrap().contains("unknown model"));
+    }
 
     #[test]
     fn bus_send_process_target_parses_by_bus_id_and_rejects_the_mix_bus() {
@@ -9287,7 +9321,7 @@ mod tests {
     #[test]
     fn applied_general_effect_artifact_can_finalize_but_not_apply_again() {
         let store = sequencer::agent::store::ConversationStore::new(44_100);
-        let id = store.new_conversation(sequencer::agent::store::AgentKind::General);
+        let id = store.new_conversation(sequencer::agent::store::AgentKind::General).unwrap();
         let mut state = store.snapshot(id).unwrap().state;
         state.effect_draft = Some(sequencer::agent::store::EffectDraft {
             name: "simple-tape-delay".to_string(),
@@ -9312,7 +9346,7 @@ mod tests {
     #[test]
     fn updated_applied_effect_artifact_can_apply_again() {
         let store = sequencer::agent::store::ConversationStore::new(44_100);
-        let id = store.new_conversation(sequencer::agent::store::AgentKind::Effect);
+        let id = store.new_conversation(sequencer::agent::store::AgentKind::Effect).unwrap();
         let mut state = store.snapshot(id).unwrap().state;
         state.effect_draft = Some(sequencer::agent::store::EffectDraft {
             name: "simple-tape-delay".to_string(),
@@ -9337,7 +9371,7 @@ mod tests {
     #[test]
     fn updated_applied_instrument_artifact_can_apply_again() {
         let store = sequencer::agent::store::ConversationStore::new(44_100);
-        let id = store.new_conversation(sequencer::agent::store::AgentKind::Instrument);
+        let id = store.new_conversation(sequencer::agent::store::AgentKind::Instrument).unwrap();
         let mut state = store.snapshot(id).unwrap().state;
         state.draft = Some(sequencer::agent::store::InstrumentDraft {
             dsp_source: "(out 0 1 @name audio)".to_string(),
