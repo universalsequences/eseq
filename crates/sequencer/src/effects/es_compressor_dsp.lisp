@@ -1,11 +1,12 @@
 ; ES Compressor: Punch / Level / Sustain. Independently authored, asset-free.
-; Sources, derivations and intentional departures from the literature:
+; Behavioral design, identification method and limitations:
 ; crates/sequencer/docs/es-compressor-effect-spec.md.
-; Punch: feedforward log-domain soft knee + passive two-capacitor timing.
-; Level: feedback optical attenuation; coupled photocarrier populations from
-; Najnudel et al., DAFx 2023, Eq. (4), with an original normalized driver.
+; Punch: broad soft knee, weighted RMS detector and short recovery reservoir.
+; Level: frequency-sensitive detector and two linear-gain relaxation populations.
+; Both are independently authored models fitted to black-box audio measurements,
+; not transcriptions of reference circuits, code or calibration tables.
 ; Sustain: the existing ES history/error-dependent grab-and-settle controller.
-; All controllers run continuously; mode selects smoothly crossfaded gains.
+; All paths stay warm; mode crossfades aligned processed audio.
 ; 8-384 kHz, fixed per instance. No FFT, external assets or oversampling.
 ; A common short delay aligns every mode and the conventional dry/wet path.
 (effect-latency (max 1 (min 127 (round (* 0.00025 samplerate)))))
@@ -197,79 +198,196 @@
 (def makeup (saturating-reduction (max 0 (- unity-level-db threshold))))
 (def sustain-gain (exp (* db-to-ln (- makeup gr))))
 
-; PUNCH. Giannoulis/Massberg/Reiss (2012) soft-knee gain computer followed
-; by an original passive RC ladder. In normalized capacitor-voltage units:
-;   da/dt = (target-a)/tau + (b-a)/memory, db/dt = (a-b)/memory.
-; Backward Euler solves both nodes together: nonnegative coefficients, unity
-; DC gain, and no explicit-Euler stability limit at low sample rates.
-(make-history punch-a)
-(make-history punch-b)
-(def pa (read-history punch-a))
-(def pb (read-history punch-b))
-(def punch-threshold (- -6 (* 30 u)))
-(def punch-ratio (+ 1 (* 7 u)))
-(def punch-over (- level punch-threshold))
-(def punch-knee (clip (+ punch-over 3) 0 6))
-(def punch-target (* (- 1 (/ 1 punch-ratio))
-  (+ (/ (* punch-knee punch-knee) 12) (max 0 (- punch-over 3)))))
-(def punch-tau (gswitch (gt punch-target pa) attack-ms release-ms))
-(def pd (/ 1000 (* samplerate punch-tau)))
-(def pc (/ 1000 (* samplerate (* release-ms 0.25))))
-(def punch-next-a (/ (+ (* (+ pa (* pd punch-target)) (+ 1 pc)) (* pc pb))
-  (+ 1 pd (* 2 pc) (* pd pc))))
-(def punch-next-b (/ (+ pb (* pc punch-next-a)) (+ 1 pc)))
-(write-history punch-a punch-next-a)
-(write-history punch-b punch-next-b)
-(def punch-gain (exp (* (- 0 db-to-ln) punch-next-a)))
+; Independently authored behavioral controllers fitted to audio I/O measurements.
+(defmacro gain-curve (level-db threshold-db slope knee)
+  (def over-db (- level-db threshold-db))
+  (def knee-x (clip (+ over-db (* 0.5 knee)) 0 knee))
+  (* slope (+ (/ (* knee-x knee-x) (* 2 knee))
+    (max 0 (- over-db (* 0.5 knee))))))
 
-; Common audio alignment. Level's feedback is taken AFTER its own attenuator
-; and BEFORE makeup, saturation, mode crossfade and output trim.
+; Stable 1-exp(-x), including the longest release at 384 kHz. The fourth-
+; order branch has <1e-12 absolute truncation error for x<0.01.
+(defmacro follower-step (ms)
+  (def x (/ 1000 (* samplerate ms)))
+  (gswitch (lt x 0.01)
+    (* x (+ 1 (* x (+ -0.5 (* x (+ 0.1666666666666667 (* x -0.0416666666666667)))))))
+    (- 1 (exp (- 0 x)))))
+
+; A charge reservoir remembers exposure; during release it supplies a decaying
+; floor to the fast envelope. On attack the fast envelope follows the target
+; directly. Both updates are convex combinations of nonnegative values.
+(defmacro memory-envelope (target attack-ms release-ms charge-ms memory-ms weight)
+  (make-history reservoir)
+  (make-history envelope)
+  (make-history reservoir-fraction)
+  (make-history envelope-fraction)
+  (def memory-whole (read-history reservoir))
+  (def memory-fraction (read-history reservoir-fraction))
+  (def envelope-whole (read-history envelope))
+  (def envelope-fraction-old (read-history envelope-fraction))
+  (def old-memory (/ (+ memory-whole memory-fraction) 16384))
+  (def old-envelope (/ (+ envelope-whole envelope-fraction-old) 16384))
+  (def memory-tau (gswitch (gt target old-memory) charge-ms memory-ms))
+  ; Explicit integer/fraction accumulation, not Kahan cancellation (which
+  ; fast-math may erase). Whole parts are exact float32 integers; fractional
+  ; increments accumulate near zero and carry via round. Reconstruct BOTH
+  ; parts for output: this does not quantize the audible gain to 1/16384.
+  ; Finite detector dB targets are below 512, so whole parts stay below 2^23.
+  (def memory-sum (+ memory-fraction (* 16384 (follower-step memory-tau) (- target old-memory))))
+  (def memory-carry (round memory-sum))
+  (def memory-next-whole (+ memory-whole memory-carry))
+  (def memory-next-fraction (- memory-sum memory-carry))
+  (write-history reservoir memory-next-whole)
+  (write-history reservoir-fraction memory-next-fraction)
+  (def memory (/ (+ memory-next-whole memory-next-fraction) 16384))
+  (def rising (gt target old-envelope))
+  (def aim (gswitch rising target
+    (min old-envelope (+ target (* weight (max 0 (- memory target)))))))
+  (def tau (gswitch rising attack-ms release-ms))
+  (def sum (+ envelope-fraction-old (* 16384 (follower-step tau) (- aim old-envelope))))
+  (def carry (round sum))
+  (def next-whole (+ envelope-whole carry))
+  (def next-fraction (- sum carry))
+  (write-history envelope next-whole)
+  (write-history envelope-fraction next-fraction)
+  (/ (+ next-whole next-fraction) 16384))
+
+(defmacro detector-low (x g)
+  (make-history z)
+  (def v (/ (* g (- x (read-history z))) (+ 1 g)))
+  (def low (+ v (read-history z)))
+  (write-history z (+ low v))
+  low)
+
+(defmacro detector-lowpass (x g)
+  (make-history z1)
+  (make-history z2)
+  (def band (/ (+ (read-history z1) (* g (- x (read-history z2))))
+    (+ 1 (* g (+ g 1.4142135623730951)))))
+  (def low (+ (read-history z2) (* g band)))
+  (write-history z1 (- (* 2 band) (read-history z1)))
+  (write-history z2 (- (* 2 low) (read-history z2)))
+  low)
+
+(defmacro rms-level (left right ms)
+  (make-history power)
+  (def p (max (* left left) (* right right)))
+  (def smooth (+ p (* (exp (/ -1000 (* samplerate ms))) (- (read-history power) p))))
+  (write-history power smooth)
+  ; Peak-equivalent dB for a sine. A full-scale sine is 0 dB, not -3 dB.
+  (+ (* 4.342944819032518 (log (max (* 2 smooth) 1e-30))) detector-trim))
+
+; PUNCH: broad knee with a decisive, almost linear-in-dB onset and a short
+; recovery reservoir. Amount changes threshold and slope monotonically.
+(def punch-threshold (+ -9.9652 (* -43.6853 u) (* 16.487 u u)))
+(def punch-slope (* 0.80984 (- 1 (exp (* -3.70731 (pow u 1.38568))))))
+(def punch-detector-g (tan (/ (* 3.141592653589793 (min 1879.05 (* 0.4 samplerate))) samplerate)))
+(def punch-detector-gain (exp (* db-to-ln 2.95957)))
+(def punch-reference-w (tan (/ (* 3.141592653589793 1000) samplerate)))
+(def punch-detector-scale (* (exp (* db-to-ln -0.4144))
+  (sqrt (/ (+ (* punch-detector-g punch-detector-g) (* punch-reference-w punch-reference-w))
+    (+ (* punch-detector-g punch-detector-g)
+      (* punch-detector-gain punch-detector-gain punch-reference-w punch-reference-w))))))
+(defmacro punch-detector (x)
+  (* punch-detector-scale (+ (* punch-detector-gain x)
+    (* (- 1 punch-detector-gain) (detector-low x punch-detector-g)))))
+(def punch-level (rms-level (punch-detector x-l) (punch-detector x-r) 0.5))
+(def punch-target (gain-curve punch-level punch-threshold punch-slope 19.5))
+(def punch-gr (memory-envelope punch-target (* 1.0475 attack-ms) (* 0.8444 release-ms)
+  (* 1.4787 release-ms) (* 2.4024 release-ms) 0.15335))
+(def punch-gain (exp (* (- 0 db-to-ln) punch-gr)))
+
+; LEVEL: bass/treble-sensitive detector and two relaxation populations.
+; Filter response is normalized at 1 kHz at every rate.
+(def detector-low-g (tan (/ (* 3.141592653589793 214.482) samplerate)))
+(def detector-high-g (tan (/ (* 3.141592653589793 (min 3502.0182 (* 0.4 samplerate))) samplerate)))
+(def detector-lp-g (tan (/ (* 3.141592653589793 (min 12551.2309 (* 0.45 samplerate))) samplerate)))
+(def detector-low-gain (exp (* db-to-ln 6.3252)))
+(def detector-high-gain (exp (* db-to-ln 11.8211)))
+(def detector-w (tan (/ (* 3.141592653589793 1000) samplerate)))
+(def detector-w2 (* detector-w detector-w))
+(def detector-gl2 (* detector-low-g detector-low-g))
+(def detector-gh2 (* detector-high-g detector-high-g))
+(def detector-gp2 (* detector-lp-g detector-lp-g))
+(def detector-low-power (/ (+ (* detector-low-gain detector-low-gain detector-gl2) detector-w2)
+  (+ detector-gl2 detector-w2)))
+(def detector-high-power (/ (+ detector-gh2 (* detector-high-gain detector-high-gain detector-w2))
+  (+ detector-gh2 detector-w2)))
+(def detector-lp-power (/ (* detector-gp2 detector-gp2)
+  (+ (pow (- detector-gp2 detector-w2) 2) (* 2 detector-gp2 detector-w2))))
+(def detector-normalization (/ 1 (sqrt (* detector-low-power detector-high-power detector-lp-power))))
+(defmacro level-detector (x)
+  (def low (+ x (* (- detector-low-gain 1) (detector-low x detector-low-g))))
+  (def shelf (+ (* detector-high-gain low)
+    (* (- 1 detector-high-gain) (detector-low low detector-high-g))))
+  (* detector-normalization (detector-lowpass shelf detector-lp-g)))
+; Independent approximation of the measured audio-path conditioning:
+; a gentle DC blocker and a sub-dB high-frequency dip, not a saturator.
+(def level-dc-g (tan (/ (* 3.141592653589793 4) samplerate)))
+(def level-source-l (- x-l (detector-low x-l level-dc-g)))
+(def level-source-r (- x-r (detector-low x-r level-dc-g)))
+(def level-detector-l (level-detector level-source-l))
+(def level-detector-r (level-detector level-source-r))
+(def level-input (rms-level level-detector-l level-detector-r 0.5))
+(def level-threshold (- 3.7361 (* 33.7184 u)))
+(def level-target (gain-curve level-input level-threshold (* 0.75 (min 1 (* 4 u))) 7))
+
+; Two linear-gain populations. Their weighted sum is a convex combination
+; of positive gains; prolonged signals charge the slow population, producing
+; exposure-dependent recovery without an artificial dB floor or gain slew cap.
+; Store gains directly (initialized at unity), not 1-gain: strong reduction
+; must not lose precision by subtracting nearly equal float32 values.
+(defmacro gain-population (target attack-ms release-ms)
+  (make-history stored)
+  (make-history initialized)
+  (make-history fraction)
+  (def whole (gswitch (read-history initialized) (read-history stored) 16384))
+  (def old-fraction (read-history fraction))
+  (def previous (/ (+ whole old-fraction) 16384))
+  (def tau (gswitch (lt target previous) attack-ms release-ms))
+  ; Same split representation as the Punch reservoir. Gain is in (0,1], so
+  ; its integer part is at most 16384 even under the longest release.
+  (def sum (+ old-fraction (* 16384 (follower-step tau) (- target previous))))
+  (def carry (round sum))
+  (def next-whole (+ whole carry))
+  (def next-fraction (- sum carry))
+  (write-history stored next-whole)
+  (write-history fraction next-fraction)
+  (write-history initialized 1)
+  (/ (+ next-whole next-fraction) 16384))
+(def level-target-gain (exp (* (- 0 db-to-ln) level-target)))
+; Soft onset near threshold, bounded at every Amount and sample rate.
+(def level-attack-scale (+ 1 (/ 17.0739 (+ 1 (pow (/ level-target 4.26775) 7.53749)))))
+(def level-fast (gain-population level-target-gain
+  (* 0.0817833 attack-ms level-attack-scale) (* 2.30597 release-ms)))
+(def level-slow (gain-population level-target-gain
+  (* 0.901311 attack-ms level-attack-scale) (* 43.3357 release-ms)))
+(def level-attenuation (+ (* 0.815406 level-fast) (* 0.184594 level-slow)))
+(def level-gr (/ (- 0 (log (max level-attenuation 1e-30))) db-to-ln))
+; Nominal gain measured at the reference's chosen operating point, independent
+; of Amount. Output is an additional trim; Mix 0 is the exact dry path.
+(def level-makeup 8.5)
+(def level-gain (* (exp (* db-to-ln level-makeup)) level-attenuation))
+
+; Common alignment, including dry. Controller/filter states remain warm.
 (def aligned-l (short-delay x-l span))
 (def aligned-r (short-delay x-r span))
-
-; LEVEL. Normalized form of Najnudel et al. (2023), Eq. (4):
-;   dn/dt = J - kn*(n-p)*n, dp/dt = J - kp*(1+p-n)*p.
-; n,p are electron/hole populations; trap capacity is normalized to 1.
-; Generation adds equal charge. Sequential implicit recombination steps
-; preserve n>=p>=0 and 0<=n-p<=1 without a Newton solver or state clipping.
-; These are OUR normalized rates/mobilities, not fitted Vactrol/T4 data.
-; Store p and d=n-p rather than subtracting nearly equal carrier counts.
-; This keeps the bounded trap occupancy well-conditioned in float32.
-(make-history traps)
-(make-history holes)
-(make-history optical-feedback)
-(def light-drive (max 0 (- (* (read-history optical-feedback)
-  (exp (* db-to-ln (- detector-trim punch-threshold)))) 1)))
-; Finite LED-driver headroom, with a smooth asymptote; no exponent overflow.
-(def light-limited (/ light-drive (+ 1 (/ light-drive 8))))
-(def generation (* u (/ 1000 (* attack-ms samplerate))
-  light-limited light-limited))
-(def d0 (read-history traps))
-(def p0 (+ (read-history holes) generation))
-(def kn (/ 1000 (* release-ms samplerate)))
-(def kp (* 4 kn))
-; Solve k*d^2 + b*d = old_delta using the cancellation-free positive root.
-(def nb (+ 1 (* kn p0)))
-(def d1 (/ (* 2 d0) (+ nb (sqrt (+ (* nb nb) (* 4 kn d0))))))
-(def empty-traps (- 1 d1))
-(def p-floor (max 0 (- p0 empty-traps)))
-(def pdiff (min p0 empty-traps))
-(def pbase (+ 1 (* kp (abs (- empty-traps p0)))))
-(def p1 (+ p-floor (/ (* 2 pdiff)
-  (+ pbase (sqrt (+ (* pbase pbase) (* 4 kp pdiff)))))))
-(def d2 (- 1 (/ empty-traps (+ 1 (* kp p1)))))
-(def n1 (+ p1 d2))
-(write-history traps d2)
-(write-history holes p1)
-; Eq. (7): conductivity is the mobility-weighted sum of populations.
-; A series resistor and LDR shunt form an ordinary voltage divider.
-(def level-gain (/ 1 (+ 1 (* u (+ n1 (* 0.2 p1))))))
-(write-history optical-feedback (* level-gain (max (abs aligned-l) (abs aligned-r))))
-
-(def gain (/ (+ (* punch-weight punch-gain) (* level-weight level-gain)
-  (* sustain-weight sustain-gain)) weight-total))
-(def compressed-l (* aligned-l gain))
-(def compressed-r (* aligned-r gain))
+(def level-audio-g (tan (/ (* 3.141592653589793 (min 11500 (* 0.4 samplerate))) samplerate)))
+(def level-audio-cut (- (exp (* db-to-ln -0.65)) 1))
+(defmacro level-audio (x)
+  (make-history z1)
+  (make-history z2)
+  (def band (/ (+ (read-history z1) (* level-audio-g (- x (read-history z2))))
+    (+ 1 (* level-audio-g (+ level-audio-g 1.5)))))
+  (def low (+ (read-history z2) (* level-audio-g band)))
+  (write-history z1 (- (* 2 band) (read-history z1)))
+  (write-history z2 (- (* 2 low) (read-history z2)))
+  (+ x (* level-audio-cut 1.5 band)))
+(def level-l (level-audio (* level-gain (short-delay level-source-l span))))
+(def level-r (level-audio (* level-gain (short-delay level-source-r span))))
+(def uncolored-gain (+ (* punch-weight punch-gain) (* sustain-weight sustain-gain)))
+(def compressed-l (/ (+ (* aligned-l uncolored-gain) (* level-weight level-l)) weight-total))
+(def compressed-r (/ (+ (* aligned-r uncolored-gain) (* level-weight level-r)) weight-total))
 
 ; Shaper: unity below the knee, then the rational soft clip toward the
 ; ceiling. Odd-symmetric (odd harmonics only). Drive adds gain in front of it
