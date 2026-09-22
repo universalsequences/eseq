@@ -1727,6 +1727,37 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
     );
 
     runtime.register_native_with_docs(
+        "toast",
+        "(toast text &key :kind)",
+        "Show a bottom-right window toast. :kind is :success (default, ~1.2s) or :error (~4s, dismissed by the next keypress).",
+        |args, ctx| {
+            let Some(Value::String(text)) = args.first() else {
+                return Err("toast expects a text string".to_string());
+            };
+            let mut kind = crate::host::ToastKind::Success;
+            let mut i = 1;
+            while i < args.len() {
+                match (args.get(i), args.get(i + 1)) {
+                    (Some(Value::Keyword(key)), Some(Value::Keyword(label) | Value::String(label)))
+                        if key == "kind" =>
+                    {
+                        kind = crate::host::ToastKind::from_label(label).ok_or_else(|| {
+                            format!("toast :kind must be :success or :error, got {label}")
+                        })?;
+                    }
+                    (Some(other), _) => {
+                        return Err(format!("toast: unexpected argument {}", format_lisp_value(other)));
+                    }
+                    (None, _) => {}
+                }
+                i += 2;
+            }
+            ctx.show_toast(text.clone(), kind);
+            Ok(Value::Nil)
+        },
+    );
+
+    runtime.register_native_with_docs(
         "text-zoom",
         "(text-zoom)",
         "Return the current editor text zoom.",

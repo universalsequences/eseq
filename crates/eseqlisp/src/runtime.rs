@@ -924,6 +924,7 @@ pub(crate) struct RuntimeBridgeState {
     pub pending_set_view_mode: Option<String>,
     pub current_view_mode: String,
     pub pending_set_text_zoom: Option<f64>,
+    pub pending_toasts: Vec<(String, crate::host::ToastKind)>,
     pub current_text_zoom: f64,
     // Tiling operations — processed in order enqueued
     pub pending_tile_ops: Vec<TileOp>,
@@ -1314,6 +1315,10 @@ impl NativeContext {
 
     pub fn set_text_zoom(&mut self, zoom: f64) {
         self.shared.borrow_mut().pending_set_text_zoom = Some(zoom);
+    }
+
+    pub fn show_toast(&mut self, message: String, kind: crate::host::ToastKind) {
+        self.shared.borrow_mut().pending_toasts.push((message, kind));
     }
 
     pub fn text_zoom(&self) -> f64 {
@@ -3624,6 +3629,10 @@ impl Runtime {
 
     pub(crate) fn take_pending_set_view_mode(&mut self) -> Option<String> {
         self.shared.borrow_mut().pending_set_view_mode.take()
+    }
+
+    pub(crate) fn take_pending_toasts(&mut self) -> Vec<(String, crate::host::ToastKind)> {
+        std::mem::take(&mut self.shared.borrow_mut().pending_toasts)
     }
 
     pub(crate) fn take_pending_set_text_zoom(&mut self) -> Option<f64> {

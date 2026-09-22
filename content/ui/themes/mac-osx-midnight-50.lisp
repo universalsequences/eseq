@@ -226,6 +226,11 @@
       :comp-doc-border    '(0.26 0.32 0.39)
       :comp-doc-fg        '(0.52 0.58 0.64)
       :comp-doc-title-fg  '(0.34 0.78 0.90)
+      :toast-bg           '(0.0450 0.0580 0.0740)
+      :toast-fg           '(0.82 0.87 0.92)
+      :toast-border       '(0.26 0.32 0.39)
+      :toast-success      '(0.30 0.84 0.52)
+      :toast-error        '(1.00 0.36 0.36)
 
       ;; Browser, tiles, effects, instruments, and mixer
       :tree-row-alt-bg                 '(0.0410 0.0525 0.0660)

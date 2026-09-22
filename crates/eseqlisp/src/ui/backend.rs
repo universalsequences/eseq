@@ -132,6 +132,101 @@ impl Cell {
     }
 }
 
+// ── Toast ─────────────────────────────────────────────────────────────────────
+
+/// Window-level toast, drawn bottom-right above every tile.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ToastFrame {
+    pub message: String,
+    pub kind: crate::host::ToastKind,
+}
+
+pub const TOAST_CORNER_RADIUS_PX: f32 = 10.0;
+pub const TOAST_BORDER_WIDTH_PX: f32 = 1.0;
+/// Horizontal padding, in toast cells, on each side of the icon + message.
+const TOAST_PAD_COLS: usize = 2;
+/// Panel height in toast cells; the single text row sits centred inside it.
+const TOAST_HEIGHT_ROWS: f32 = 2.2;
+const TOAST_MARGIN_COLS: usize = 2;
+/// Rows between the text row and the window bottom, clear of a status line.
+const TOAST_BOTTOM_ROWS: usize = 4;
+
+impl ToastFrame {
+    pub fn icon(&self) -> char {
+        match self.kind {
+            crate::host::ToastKind::Success => '✓',
+            crate::host::ToastKind::Error => '✕',
+        }
+    }
+}
+
+/// Toast geometry on the layout-cell grid (`cell_w` x `cell_h` pixels).
+/// Text columns/rows are whole cells so glyphs land on the atlas grid; the
+/// panel extends fractionally around them.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ToastPlacement {
+    pub panel_col: f32,
+    pub panel_row: f32,
+    pub panel_cols: f32,
+    pub panel_rows: f32,
+    pub icon_col: usize,
+    pub text_col: usize,
+    pub text_row: usize,
+    pub text_max_cols: usize,
+}
+
+pub fn toast_placement(toast: &ToastFrame, total_cols: usize, total_rows: usize) -> Option<ToastPlacement> {
+    // icon, gap, message
+    let chrome_cols = TOAST_PAD_COLS * 2 + 2 + TOAST_MARGIN_COLS * 2;
+    let text_max_cols = total_cols.checked_sub(chrome_cols)?.min(80);
+    if text_max_cols == 0 || total_rows < TOAST_BOTTOM_ROWS + 2 {
+        return None;
+    }
+    let text_cols = toast.message.chars().count().min(text_max_cols);
+    let panel_cols = TOAST_PAD_COLS * 2 + 2 + text_cols;
+    let panel_col = total_cols - TOAST_MARGIN_COLS - panel_cols;
+    let text_row = total_rows - TOAST_BOTTOM_ROWS;
+    Some(ToastPlacement {
+        panel_col: panel_col as f32,
+        panel_row: text_row as f32 - (TOAST_HEIGHT_ROWS - 1.0) / 2.0,
+        panel_cols: panel_cols as f32,
+        panel_rows: TOAST_HEIGHT_ROWS,
+        icon_col: panel_col + TOAST_PAD_COLS,
+        text_col: panel_col + TOAST_PAD_COLS + 2,
+        text_row,
+        text_max_cols,
+    })
+}
+
+#[cfg(test)]
+mod toast_tests {
+    use super::*;
+    use crate::host::ToastKind;
+
+    fn toast(message: &str) -> ToastFrame {
+        ToastFrame { message: message.to_string(), kind: ToastKind::Success }
+    }
+
+    #[test]
+    fn toast_sits_bottom_right_inside_the_viewport() {
+        let place = toast_placement(&toast("Saved demo"), 120, 40).unwrap();
+        assert_eq!(place.panel_col + place.panel_cols, 118.0);
+        assert!(place.panel_row + place.panel_rows < 40.0);
+        assert!(place.panel_row > 30.0);
+        assert!(place.icon_col < place.text_col);
+        assert_eq!(place.text_col + "Saved demo".len(), 118 - 2);
+    }
+
+    #[test]
+    fn long_toast_text_is_clipped_to_the_viewport() {
+        let place = toast_placement(&toast(&"x".repeat(200)), 40, 20).unwrap();
+        assert_eq!(place.panel_col, 2.0);
+        assert_eq!(place.text_col + place.text_max_cols, 40 - 4);
+        assert!(toast_placement(&toast("Saved"), 6, 20).is_none());
+        assert!(toast_placement(&toast("Saved"), 80, 3).is_none());
+    }
+}
+
 // ── Completion popup ──────────────────────────────────────────────────────────
 
 /// Shared geometry for the patcher and code-editor completion overlays.
@@ -311,6 +406,7 @@ pub struct TileFrame {
 pub struct TiledRenderFrame {
     pub tiles: Vec<TileFrame>,
     pub completion: Option<CompletionFrame>, // completion popup (global)
+    pub toast: Option<ToastFrame>,           // bottom-right toast (global)
 }
 
 // ── Backend trait ─────────────────────────────────────────────────────────────

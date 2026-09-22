@@ -18,7 +18,7 @@ use crossterm::event::{
 };
 
 use crate::buffer::{Buffer, InlineWidgetPlacement, debug_widget_tree_summary};
-use crate::host::{BufferId, CompileKind, HostCommand, HostEvent};
+use crate::host::{BufferId, CompileKind, HostCommand, HostEvent, ToastKind};
 use crate::hot_reload::{ReloadReport, SourceOverlay};
 use crate::layout::{LayoutNode, Rect};
 use crate::mode::{
@@ -631,6 +631,16 @@ impl RetainedTileLayout {
     }
 }
 
+const TOAST_SUCCESS_DURATION: Duration = Duration::from_millis(1200);
+const TOAST_ERROR_DURATION: Duration = Duration::from_secs(4);
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Toast {
+    pub message: String,
+    pub kind: ToastKind,
+    expires_at: Instant,
+}
+
 pub struct Editor {
     pub buffers: Vec<Buffer>,
     buffer_recency: Vec<BufferId>,
@@ -639,6 +649,9 @@ pub struct Editor {
     next_tile_id: TileId,
     pub minibuffer: Option<String>,
     minibuffer_expires_at: Option<Instant>,
+    /// Window-level toast (bottom-right). Drawn above every tile regardless of
+    /// focus or `:hide-status`; a newer toast replaces the current one.
+    toast: Option<Toast>,
 
     pending_key: Option<KeyEvent>,
     builtins: HashMap<KeyEvent, String>,
@@ -815,6 +828,7 @@ impl Editor {
             next_tile_id: 1,
             minibuffer: None,
             minibuffer_expires_at: None,
+            toast: None,
             pending_key: None,
             builtins: HashMap::new(),
             default_lisp_bindings: HashMap::new(),
@@ -3429,6 +3443,31 @@ impl Editor {
         self.mark_needs_redraw();
     }
 
+    /// Show a bottom-right toast. It does not touch the minibuffer; callers
+    /// that also want the status line keep reporting through it.
+    pub fn show_toast(&mut self, message: impl Into<String>, kind: ToastKind) {
+        let duration = match kind {
+            ToastKind::Success => TOAST_SUCCESS_DURATION,
+            ToastKind::Error => TOAST_ERROR_DURATION,
+        };
+        self.toast = Some(Toast {
+            message: message.into(),
+            kind,
+            expires_at: Instant::now() + duration,
+        });
+        self.mark_needs_redraw();
+    }
+
+    pub fn toast(&self) -> Option<&Toast> {
+        self.toast.as_ref()
+    }
+
+    pub fn dismiss_toast(&mut self) {
+        if self.toast.take().is_some() {
+            self.mark_needs_redraw();
+        }
+    }
+
     pub fn clear_minibuffer_message(&mut self) {
         self.minibuffer = None;
         self.minibuffer_expires_at = None;
@@ -3441,6 +3480,14 @@ impl Editor {
         {
             self.clear_minibuffer_message();
             self.mark_needs_redraw();
+        }
+
+        if self
+            .toast
+            .as_ref()
+            .is_some_and(|toast| Instant::now() >= toast.expires_at)
+        {
+            self.dismiss_toast();
         }
 
         if self
@@ -5801,6 +5848,11 @@ impl Editor {
                     buffer.set_path(path.clone());
                     buffer.dirty = false;
                 }
+                let name = path.file_name().map_or_else(
+                    || path.display().to_string(),
+                    |name| name.to_string_lossy().into_owned(),
+                );
+                self.show_toast(format!("Saved {name}"), ToastKind::Success);
                 format!("Saved {}", path.display())
             }
         };
@@ -5947,6 +5999,10 @@ impl Editor {
         self.mark_needs_redraw();
         if !self.key_starts_text_insert(key) {
             self.finish_typing_undo_group();
+        }
+        // Errors linger until acknowledged; any keypress counts.
+        if self.toast.as_ref().is_some_and(|toast| toast.kind == ToastKind::Error) {
+            self.toast = None;
         }
 
         // Inspect mode outranks the modal keyboard boundary, same as it
@@ -9390,6 +9446,10 @@ impl Editor {
             } else {
                 self.show_transient_message(format!("Unknown view mode: {mode_str}"));
             }
+        }
+
+        for (message, kind) in self.runtime.take_pending_toasts() {
+            self.show_toast(message, kind);
         }
 
         if let Some(zoom) = self.runtime.take_pending_set_text_zoom() {

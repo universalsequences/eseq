@@ -128,7 +128,7 @@ use ratatui::DefaultTerminal;
 use vm::{VMError, Value};
 
 pub use editor::{Editor, EditorConfig, EditorError, EditorExit};
-pub use host::{BufferId, CompileKind, HostCommand, HostEvent};
+pub use host::{BufferId, CompileKind, HostCommand, HostEvent, ToastKind};
 pub use hot_reload::{ModuleLoadRoot, ReloadReport, SourceOverlay, SourceSnapshot};
 pub use mode::BufferMode;
 pub use runtime::{NativeContext, NativeResult, Runtime, RuntimeError, SymbolMetadata};

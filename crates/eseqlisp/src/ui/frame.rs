@@ -1494,7 +1494,11 @@ fn build_tiled_render_frame_impl(
         }
     }
 
-    TiledRenderFrame { tiles, completion }
+    let toast = editor.toast().map(|toast| crate::backend::ToastFrame {
+        message: toast.message.clone(),
+        kind: toast.kind,
+    });
+    TiledRenderFrame { tiles, completion, toast }
 }
 
 /// Build a simple RenderFrame for an inactive (non-focused) tile.

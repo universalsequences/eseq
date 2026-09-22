@@ -3836,6 +3836,77 @@ fn transient_minibuffer_message_expires_without_input() {
 }
 
 #[test]
+fn buffer_saved_host_event_shows_success_toast_that_expires_without_input() {
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    let buffer_id = editor.active_buffer().id;
+
+    editor.handle_host_event(crate::host::HostEvent::BufferSaved {
+        buffer_id,
+        path: std::path::PathBuf::from("/tmp/songs/demo.lisp"),
+    });
+
+    // The minibuffer keeps its full-path message; the toast is additive.
+    assert_eq!(editor.minibuffer.as_deref(), Some("Saved /tmp/songs/demo.lisp"));
+    let toast = editor.toast().expect("save toast");
+    assert_eq!(toast.message, "Saved demo.lisp");
+    assert_eq!(toast.kind, crate::host::ToastKind::Success);
+    let frame = crate::frame::build_tiled_render_frame_borderless(&mut editor, 80, 24);
+    assert_eq!(
+        frame.toast,
+        Some(crate::backend::ToastFrame {
+            message: "Saved demo.lisp".to_string(),
+            kind: crate::host::ToastKind::Success,
+        })
+    );
+
+    // A success toast survives unrelated keys and clears on its own timer.
+    editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+    assert!(editor.toast().is_some());
+    editor.toast.as_mut().unwrap().expires_at =
+        std::time::Instant::now() - std::time::Duration::from_millis(1);
+    editor.clear_needs_redraw();
+    editor.update_timers();
+    assert!(editor.toast().is_none());
+    assert!(editor.needs_redraw(), "expiry must request the frame that erases the toast");
+    let frame = crate::frame::build_tiled_render_frame_borderless(&mut editor, 80, 24);
+    assert_eq!(frame.toast, None);
+}
+
+#[test]
+fn error_toast_lingers_until_the_next_keypress() {
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+
+    editor.show_toast("Save failed: disk full", crate::host::ToastKind::Error);
+    editor.update_timers();
+    assert_eq!(editor.toast().map(|toast| toast.kind), Some(crate::host::ToastKind::Error));
+
+    editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+    assert!(editor.toast().is_none());
+}
+
+#[test]
+fn toast_native_queues_a_window_toast() {
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+
+    editor.runtime_mut().eval_str("(toast \"Exported kit\")").unwrap();
+    editor.refresh_runtime_side_effects();
+    let toast = editor.toast().expect("toast from Lisp");
+    assert_eq!(toast.message, "Exported kit");
+    assert_eq!(toast.kind, crate::host::ToastKind::Success);
+
+    editor.runtime_mut().eval_str("(toast \"Export failed\" :kind :error)").unwrap();
+    editor.refresh_runtime_side_effects();
+    let toast = editor.toast().expect("error toast from Lisp");
+    assert_eq!(toast.message, "Export failed");
+    assert_eq!(toast.kind, crate::host::ToastKind::Error);
+
+    // An unknown :kind is rejected rather than rendered as success.
+    let _ = editor.runtime_mut().eval_str("(toast \"x\" :kind :warning)");
+    editor.refresh_runtime_side_effects();
+    assert_eq!(editor.toast().map(|toast| toast.message.as_str()), Some("Export failed"));
+}
+
+#[test]
 fn quit_does_not_prompt_for_dirty_scratch_buffer() {
     let runtime = Runtime::new();
     let mut editor = Editor::new(runtime, EditorConfig::default());

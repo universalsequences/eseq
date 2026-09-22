@@ -160,4 +160,22 @@ fn new_project_default_tracks_are_armable_without_deleting_a_track() {
             );
         }
     }
+
+    // Save failures reach the app-wide toast, not only the (usually hidden)
+    // minibuffer. A fresh project has no name, so this save fails before any
+    // disk write.
+    assert!(app.current_project_name.is_none());
+    let mut ctx = LoopCtx {
+        sessions: &mut sessions,
+        meters: &mut meters,
+        frame: &mut frame,
+        gesture: &mut gesture,
+        track_names: &mut track_names,
+        shared: &shared,
+    };
+    super::handle("save-project", Value::Nil, &mut app, &mut editor, &mut ctx);
+    let toast = editor.toast().expect("save failure toast");
+    assert_eq!(toast.kind, eseqlisp::ToastKind::Error);
+    assert!(toast.message.starts_with("Save failed: "), "{}", toast.message);
+    assert!(editor.minibuffer.as_deref().is_some_and(|m| m.starts_with("Error saving project")));
 }

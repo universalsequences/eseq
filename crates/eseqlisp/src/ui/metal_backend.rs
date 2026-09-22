@@ -50,7 +50,8 @@ mod inner {
         AUTOCOMPLETE_ANCHOR_GAP_PX, AUTOCOMPLETE_PANEL_BORDER_WIDTH_PX,
         AUTOCOMPLETE_PANEL_CORNER_RADIUS_PX, AUTOCOMPLETE_ROW_CORNER_RADIUS_PX,
         AUTOCOMPLETE_TEXT_CELL_SCALE, Backend, BackendError, BackendEvent, Color, RenderFrame,
-        TiledRenderFrame, completion_panel_columns,
+        TOAST_BORDER_WIDTH_PX, TOAST_CORNER_RADIUS_PX, TiledRenderFrame, completion_panel_columns,
+        toast_placement,
     };
     use crate::glyph_atlas::{
         MetalGlyphAtlas as GlyphAtlas,
@@ -6342,6 +6343,105 @@ fragment float4 live_spectrogram_frag(
                 }
             }
 
+            // ── Toast (bottom-right, above everything) ──────────────────────
+            if let Some(toast) = &tiled.toast {
+                let total_cols = (vp_w / cell_w).floor().max(1.0) as usize;
+                let total_rows = (vp_h / cell_h).floor().max(1.0) as usize;
+                if let Some(place) = toast_placement(toast, total_cols, total_rows) {
+                    enc.setScissorRect(MTLScissorRect {
+                        x: 0,
+                        y: 0,
+                        width: vp_w as usize,
+                        height: vp_h as usize,
+                    });
+                    let bg = theme::TOAST_BG();
+                    let accent = match toast.kind {
+                        crate::host::ToastKind::Success => theme::TOAST_SUCCESS(),
+                        crate::host::ToastKind::Error => theme::TOAST_ERROR(),
+                    };
+                    let border = match toast.kind {
+                        crate::host::ToastKind::Success => theme::TOAST_BORDER(),
+                        crate::host::ToastKind::Error => accent,
+                    };
+                    let mut rounded = Vec::new();
+                    push_rounded_instance_cells(
+                        &mut rounded,
+                        place.panel_col,
+                        place.panel_row,
+                        place.panel_cols,
+                        place.panel_rows,
+                        bg,
+                        TOAST_CORNER_RADIUS_PX,
+                        cell_w,
+                        cell_h,
+                        vp_w,
+                        vp_h,
+                    );
+                    if let Some(wpipe) = self.widget_pipelines.get("dropdown") {
+                        draw_widget_instances(
+                            &enc,
+                            &self.device,
+                            &mut self.upload_arena,
+                            &mut self.stats,
+                            wpipe,
+                            rounded.as_slice(),
+                        );
+                    }
+                    let mut toast_verts = Vec::new();
+                    push_rounded_rect_border_px(
+                        &mut toast_verts,
+                        place.panel_col * cell_w,
+                        place.panel_row * cell_h,
+                        place.panel_cols * cell_w,
+                        place.panel_rows * cell_h,
+                        TOAST_BORDER_WIDTH_PX,
+                        TOAST_CORNER_RADIUS_PX,
+                        border,
+                        vp_w,
+                        vp_h,
+                    );
+                    let atlas = self.atlas.as_mut().ok_or(BackendError::MetalError)?;
+                    let mut icon = [0u8; 4];
+                    push_text_cells(
+                        &mut toast_verts,
+                        atlas,
+                        toast.icon().encode_utf8(&mut icon),
+                        place.icon_col,
+                        place.text_row,
+                        1,
+                        to_rgba(accent),
+                        to_rgba(bg),
+                        cell_w,
+                        cell_h,
+                        vp_w,
+                        vp_h,
+                    );
+                    push_text_cells(
+                        &mut toast_verts,
+                        atlas,
+                        &toast.message,
+                        place.text_col,
+                        place.text_row,
+                        place.text_max_cols,
+                        to_rgba(theme::TOAST_FG()),
+                        to_rgba(bg),
+                        cell_w,
+                        cell_h,
+                        vp_w,
+                        vp_h,
+                    );
+                    draw_vertices(
+                        &enc,
+                        &self.device,
+                        &mut self.upload_arena,
+                        &mut self.stats,
+                        &pipeline,
+                        &atlas_texture,
+                        &toast_verts,
+                    );
+                }
+            }
+
             enc.endEncoding();
             if let Some(drawable) = &drawable {
                 if let (Some(observer), Some(started)) = (&self.presentation_observer, presentation_started) {
@@ -10755,7 +10855,7 @@ fragment float4 live_spectrogram_frag(
             root.children = vec![label, knob, envelope, styled];
             let area = Rect { col: 3.0, row: 2.0,
                 width: width as f32 / cell_w - 6.0, height: height as f32 / cell_h - 4.0 };
-            let mut tiled = TiledRenderFrame { completion: None, tiles: vec![TileFrame {
+            let mut tiled = TiledRenderFrame { completion: None, toast: None, tiles: vec![TileFrame {
                 tile_id: 1, rect: area, body_rect: area, tabs: vec![], is_active: true,
                 show_status: false, show_border: false, border_width_px: 0.0,
                 border_radius_px: 0.0, background_color: None, background_color_name: None,
@@ -10841,7 +10941,7 @@ fragment float4 live_spectrogram_frag(
                 label.rect = Rect { col, row: row + 3.0, width: 6.0, height: 1.0 };
                 root.children.extend([knob, label]);
             }
-            TiledRenderFrame { completion: None, tiles: vec![TileFrame {
+            TiledRenderFrame { completion: None, toast: None, tiles: vec![TileFrame {
                 tile_id: 1, rect: area, body_rect: area, tabs: vec![], is_active: true,
                 show_status: false, show_border: false, border_width_px: 0.0,
                 border_radius_px: 0.0, background_color: None, background_color_name: None,
