@@ -5184,6 +5184,81 @@ fn cmd_y_toggles_visible_patcher_selected_cable_without_widget_focus() {
     assert_ne!(after, initially_segmented);
 }
 
+/// Load the REAL ui/patcher.lisp, mount a patcher the way the host's buffer
+/// template does, and right-click the canvas: the menu state opens and the
+/// entries evaluate without a Lisp error.
+#[test]
+fn real_patcher_lisp_right_click_opens_context_menu() {
+    let _overlay_guard = OverlayClearGuard;
+    let path = temp_file_path("patcher-context-menu");
+    std::fs::write(&path, "(def sig (in 1))\n(out sig 1)\n").unwrap();
+
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    let source_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../content/ui/patcher.lisp");
+    let source = std::fs::read_to_string(&source_path).expect("read real patcher.lisp");
+    editor
+        .runtime_mut()
+        .eval_source_at_path(source_path, &source)
+        .expect("load real patcher.lisp");
+    editor.active_buffer_mut().view_mode = super::ViewMode::UiOnly;
+    editor.set_layout_viewport(40, 14);
+    editor
+        .runtime
+        .eval_str(&format!(
+            r#"
+                (effect
+                  (v-stack :width :fill :height :fill
+                    (eseq.patcher/context-menu-panel)
+                    (patcher
+                      :height 12
+                      :path "{}"
+                      :on-focus-key (lambda (key text) (eseq.patcher/handle-focus-key key text))
+                      :on-right-click (lambda (event) (eseq.patcher/open-context-menu event)))))
+                "#,
+            path.display()
+        ))
+        .unwrap();
+    editor.set_layout_viewport(40, 14);
+    assert_eq!(
+        editor.runtime.eval_str("eseq.patcher/menu-open").unwrap(),
+        Some(Value::Bool(false))
+    );
+
+    editor.handle_mouse(
+        mouse_event(MouseEventKind::Down(MouseButton::Right), 30, 10),
+        0,
+        0,
+        40,
+        14,
+    );
+
+    assert_eq!(
+        editor.runtime.eval_str("eseq.patcher/menu-open").unwrap(),
+        Some(Value::Bool(true)),
+        "right-click on the canvas opens the patcher context menu"
+    );
+    let entries = editor
+        .runtime
+        .eval_str("(len (eseq.patcher/menu-entries))")
+        .expect("menu entries evaluate");
+    assert!(
+        matches!(entries, Some(Value::Number(n)) if n >= 2.0),
+        "empty canvas still offers Ask Agent and Paste: {entries:?}"
+    );
+    assert_eq!(
+        editor
+            .runtime
+            .eval_str("(patcher-key-for-command \"open-bubble\")")
+            .unwrap(),
+        Some(Value::String(
+            crate::widget_render::patcher::resolve_default_binding_key("P-k")
+        )),
+        "the Lisp defaults populated the binding table"
+    );
+}
+
 #[test]
 fn cmd_k_opens_visible_patcher_agentic_bubble_without_widget_focus() {
     let path = temp_file_path("patcher-visible-cmd-k");

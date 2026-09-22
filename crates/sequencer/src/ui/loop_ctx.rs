@@ -50,6 +50,8 @@ pub(crate) struct EditSessionState {
     pub(crate) pending_effect_cancel_restore: Option<PendingEffectCancelRestore>,
     pub(crate) package_view_session: Option<PackageViewSession>,
     pub(crate) pending_agentic_bubbles: HashMap<String, PendingAgenticBubble>,
+    /// In-flight Jev ghost-cable requests (eseq-c049), one worker thread each.
+    pub(crate) pending_jev_suggestions: Vec<PendingJevSuggestion>,
     pub(crate) pending_learn_job: Option<PendingLearnJob>,
     pub(crate) learn_param_preview: Option<LearnParamPreview>,
     pub(crate) pending_lisp_history_transactions: HashMap<

@@ -33,7 +33,7 @@ use crate::tile::{
 };
 use crate::vm::{EffectTarget, PendingUiUpdate, ReactiveFieldKey, Value, format_lisp_value};
 use crate::widget_render::WidgetCursor;
-use commands::key_str;
+pub(crate) use commands::key_str;
 use natives::register_editor_natives;
 
 const TILE_GAP_PX_PER_UNIT: f32 = 15.0;
@@ -9600,6 +9600,14 @@ impl Editor {
             self.minibuffer = Some(format!("Error: {error:?}"));
         } else {
             self.minibuffer = None;
+        }
+        // A menu-item or other widget callback may have run a patcher command
+        // (content/ui/patcher.lisp); its :on-change output is queued because a
+        // native cannot invoke Lisp. Deliver it here, where every widget
+        // callback lands. Those outputs are patcher :on-change calls, which
+        // never queue further commands, so this cannot recurse unboundedly.
+        for pending in crate::widget_render::patcher::take_pending_patcher_command_outputs() {
+            let _ = self.apply_widget_output(Some(pending));
         }
         self.refresh_runtime_side_effects();
         self.remap_focused_widget_after_layout_change();

@@ -182,20 +182,28 @@ mod latency_tests {
 }
 
 pub(super) fn payload_from_patch(patch: &Patch) -> GraphPayload {
+    let mut payload = scope_payload_from_patch(patch);
+    payload.macros = patch.macros.iter().map(macro_entry).collect();
+    payload
+}
+
+fn scope_payload_from_patch(patch: &Patch) -> GraphPayload {
     // Normalize before serializing, not only after loading: a node created by
     // typing `phasor trigger` records the edge as a bare argument with no
     // `PatchConnection`, while the same node parsed back from source has both.
     // Canonicalizing on the way out keeps save → load → save byte-identical.
-    let mut normalized = patch.clone();
+    // Normalization only needs the scope's graph. The macro catalog belongs
+    // to the root and must not be cloned or recursively serialized for a body.
+    let mut normalized = Patch {
+        nodes: patch.nodes.clone(),
+        connections: patch.connections.clone(),
+        ..Patch::default()
+    };
     materialize_symbol_ref_connections(&mut normalized);
-    for macro_patch in &mut normalized.macros {
-        materialize_symbol_ref_connections(&mut macro_patch.patch);
-    }
-    let patch = &normalized;
     GraphPayload {
-        nodes: patch.nodes.iter().map(node_entry).collect(),
-        connections: patch.connections.iter().map(connection_entry).collect(),
-        macros: patch.macros.iter().map(macro_entry).collect(),
+        nodes: normalized.nodes.iter().map(node_entry).collect(),
+        connections: normalized.connections.iter().map(connection_entry).collect(),
+        macros: Vec::new(),
         host_modulators: patch
             .host_modulators
             .iter()
@@ -463,16 +471,9 @@ fn macro_entry(macro_patch: &MacroPatch) -> MacroEntry {
                 layout_path: layout_path.clone(),
             },
         },
-        // A macro body's own `macros` list is a projection artifact (the
-        // scope re-collects the defmacros visible to it, including itself).
-        // Serializing it would nest one level deeper on every save — the file
-        // grows without bound — and nothing reads a macro body's macro list:
-        // both consumers (`generate.rs:396`, `project.rs:418`) work off the
-        // root patch, where the flat list is already complete.
-        graph: GraphPayload {
-            macros: Vec::new(),
-            ..payload_from_patch(&macro_patch.patch)
-        },
+        // Serialize the body directly. Building a complete recursive payload
+        // and then replacing its macro list still pays for all that work.
+        graph: scope_payload_from_patch(&macro_patch.patch),
     }
 }
 

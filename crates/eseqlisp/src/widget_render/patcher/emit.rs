@@ -132,7 +132,7 @@ pub(super) fn debug_log_patch_lisp(view_key: &str, patch: &Patch) {
     );
 }
 
-fn debug_lisp_logging_enabled() -> bool {
+pub(super) fn debug_lisp_logging_enabled() -> bool {
     env::var(DEBUG_LISP_ENV)
         .ok()
         .is_some_and(|value| env_flag_enabled(&value))

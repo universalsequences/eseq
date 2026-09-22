@@ -29,6 +29,7 @@
 (import eseq.choose-model)
 (import eseq.patch-learn)
 (import eseq.packages)
+(import eseq.patcher)
 (import eseq.transport)
 (import eseq.midi-midimix)
 (import eseq.agent)

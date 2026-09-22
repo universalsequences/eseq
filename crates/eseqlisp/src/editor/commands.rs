@@ -377,7 +377,7 @@ impl Editor {
     }
 }
 
-pub(super) fn key_str(key: KeyEvent) -> String {
+pub(crate) fn key_str(key: KeyEvent) -> String {
     let mut prefix = String::new();
     for (modifier, name) in [
         (KeyModifiers::CONTROL, "C-"),

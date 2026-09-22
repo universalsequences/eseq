@@ -8,11 +8,13 @@ mod generate;
 mod geometry;
 mod graph_payload;
 mod interaction;
+mod jev;
 mod layout;
 mod lisp;
 mod metrics;
 mod model;
 mod project;
+mod preview;
 mod render;
 mod sidecar;
 mod state;
@@ -40,6 +42,12 @@ pub(crate) use assets::{resolve_asset_reference, resolve_registered_asset_refere
 #[cfg(test)]
 pub(crate) use assets::resolve_asset_reference_with_fallback_roots;
 pub use connect::{PatcherConnectOp, PatcherConnectReport};
+pub use jev::{
+    JEV_API_KEY_ENV, JevSuggestionRequest, jev_suggestions_enabled, resolve_jev_suggestions,
+    take_jev_suggestion_requests,
+};
+pub use preview::{PatcherPreviewRequest, PreparedPatcherPreview};
+use preview::patcher_preview_payload;
 pub use lisp::{parse_patch_source, parse_patch_source_with_library};
 pub use model::{
     ArgSource, ArgValue, AttributeSource, BindingId, BindingKind, BindingTarget, CableSegmentInfo,
@@ -1017,7 +1025,7 @@ pub fn handle_patcher_drop(
         .get_mut(&state::node_edit_key(&view_key, &created_id))?
         .text = lisp::normalize_editor_node_text(&node_text);
     state::set_patcher_interaction_state(key, state);
-    patcher_change_output(node, patcher_writeback_payload(node))
+    patcher_change_output(node, patcher_preview_payload(node))
 }
 
 #[cfg(any(test, feature = "patcher-test-support"))]
@@ -1308,11 +1316,33 @@ impl WidgetDefinition for PatcherWidget {
         cell_h: f32,
     ) -> MouseEventOutcome {
         match mouse_kind {
+            MouseEventKind::Down(MouseButton::Right)
+                if node.props.contains_key("on-right-click") =>
+            {
+                MouseEventOutcome::Dispatch(WidgetEvent::Custom(patcher_context_menu_info(
+                    node, modifiers, local_col, local_row,
+                )))
+            }
+            // macOS convention: ctrl+click is a right-click synonym, only when
+            // the widget opts in via :on-right-click (as box/tree do).
+            MouseEventKind::Down(MouseButton::Left)
+                if modifiers.contains(KeyModifiers::CONTROL)
+                    && node.props.contains_key("on-right-click") =>
+            {
+                MouseEventOutcome::Dispatch(WidgetEvent::Custom(patcher_context_menu_info(
+                    node, modifiers, local_col, local_row,
+                )))
+            }
             MouseEventKind::Down(MouseButton::Left) => {
                 // The chevron is drawn over a bubble, which is drawn over the
                 // canvas, so it has to claim the click before the patcher's own
                 // hit testing turns it into a selection or a marquee.
                 if let Some(event) = handle_agentic_send_click(node, local_col, local_row) {
+                    return MouseEventOutcome::Dispatch(event);
+                }
+                // Ghost cables and their Connect / × chips sit over the canvas
+                // the same way, so they claim the click ahead of selection.
+                if let Some(event) = jev::handle_jev_click(node, local_col, local_row) {
                     return MouseEventOutcome::Dispatch(event);
                 }
                 handle_patcher_pointer_down(node, local_col, local_row, modifiers, cell_w, cell_h);
@@ -1399,7 +1429,13 @@ impl WidgetDefinition for PatcherWidget {
         let key = patcher_state_key(node);
         let mut state = get_patcher_interaction_state(key);
         let view_key = active_patcher_view_key(&state);
-        let autocomplete_macros = autocomplete_macros_for_state(node, &state, &view_key);
+        let autocomplete_macros = if state.text_edit.is_some()
+            && !matches!(key_event.code, KeyCode::Enter | KeyCode::Esc)
+        {
+            autocomplete_macros_for_state(node, &state, &view_key)
+        } else {
+            Vec::new()
+        };
         let autocomplete_asset_paths = state.autocomplete_asset_paths.clone();
         if let Ok((path, _)) = load_patch_from_props(&node.props) {
             state::register_patcher_path_key(path, key);
@@ -1417,230 +1453,25 @@ impl WidgetDefinition for PatcherWidget {
         {
             return handle_agentic_bubble_follow_up_key(node, key, state, bubble_id, key_event);
         }
-        if has_primary_shortcut_modifier(key_event.modifiers) {
-            match key_event.code {
-                KeyCode::Enter => {
-                    let committed = commit_active_patcher_text_edit(node, &mut state, &view_key);
-                    if committed {
-                        // Flush the committed text edit as its own undo step
-                        // before the next created node opens a fresh gesture.
-                        set_patcher_interaction_state(key, state.clone());
-                    }
-                    create_patcher_node_below_anchor(node, &mut state, &view_key);
-                    set_patcher_interaction_state(key, state);
-                    return Some(patcher_semantic_event(committed));
-                }
-                KeyCode::Up => {
-                    let committed = commit_active_patcher_text_edit(node, &mut state, &view_key);
-                    if committed {
-                        set_patcher_interaction_state(key, state.clone());
-                    }
-                    let connected = connect_last_touched_nodes(node, &mut state, &view_key);
-                    if (committed || connected)
-                        && let Some(patch) = debug_patch_for_state(node, &state, &view_key)
-                    {
-                        debug_log_patch_lisp(&view_key, &patch);
-                    }
-                    set_patcher_interaction_state(key, state);
-                    return Some(patcher_semantic_event(committed || connected));
-                }
-                _ => {}
-            }
-        }
-        if state.text_edit.is_none() {
-            return match key_event.code {
-                // Cmd+Z / Cmd+Shift+Z: graph-level undo/redo. The app-level
-                // sequencer history shortcut yields to a focused patcher
-                // (input.rs sequencer_history_shortcut), so the key arrives
-                // here. Cmd+C/V arrive with SUPER rewritten to CONTROL by
-                // normalize_command_shortcuts, hence the intersects checks.
-                KeyCode::Char('z') | KeyCode::Char('Z')
-                    if key_event
-                        .modifiers
-                        .intersects(KeyModifiers::SUPER | KeyModifiers::CONTROL)
-                        && !key_event.modifiers.contains(KeyModifiers::ALT)
-                        && state.drag.is_none() =>
-                {
-                    let redo = key_event.modifiers.contains(KeyModifiers::SHIFT);
-                    if apply_patcher_history_step(key, &mut state, redo) {
-                        if let Some(patch) = debug_patch_for_state(node, &state, &view_key) {
-                            debug_log_patch_lisp(&view_key, &patch);
-                        }
-                        set_patcher_interaction_state_without_history(key, state);
-                        Some(patcher_semantic_event(true))
-                    } else {
-                        None
-                    }
-                }
-                KeyCode::Char('c') | KeyCode::Char('C')
-                    if key_event
-                        .modifiers
-                        .intersects(KeyModifiers::SUPER | KeyModifiers::CONTROL)
-                        && !state.selected_nodes.is_empty() =>
-                {
-                    if copy_selected_patcher_nodes(node, &state, &view_key) {
-                        Some(WidgetEvent::Custom(Value::Nil))
-                    } else {
-                        None
-                    }
-                }
-                // Cmd+E: encapsulate the selection into a new local defmacro.
-                KeyCode::Char('e') | KeyCode::Char('E')
-                    if key_event
-                        .modifiers
-                        .intersects(KeyModifiers::SUPER | KeyModifiers::CONTROL)
-                        && !key_event.modifiers.contains(KeyModifiers::ALT)
-                        && !state.selected_nodes.is_empty()
-                        && state.drag.is_none() =>
-                {
-                    let changed = encapsulate_patcher_selection(node, &mut state, &view_key);
-                    if changed && let Some(patch) = debug_patch_for_state(node, &state, &view_key) {
-                        debug_log_patch_lisp(&view_key, &patch);
-                    }
-                    if changed {
-                        set_patcher_interaction_state(key, state);
-                    }
-                    Some(patcher_semantic_event(changed))
-                }
-                KeyCode::Char('v') | KeyCode::Char('V')
-                    if key_event
-                        .modifiers
-                        .intersects(KeyModifiers::SUPER | KeyModifiers::CONTROL) =>
-                {
-                    let changed = paste_patcher_clipboard(node, &mut state, &view_key);
-                    if changed && let Some(patch) = debug_patch_for_state(node, &state, &view_key) {
-                        debug_log_patch_lisp(&view_key, &patch);
-                    }
-                    set_patcher_interaction_state(key, state);
-                    Some(patcher_semantic_event(changed))
-                }
-                KeyCode::Char('y') | KeyCode::Char('Y')
-                    if state.selected_cable.is_some()
-                        && has_primary_shortcut_modifier(key_event.modifiers) =>
-                {
-                    eprintln!(
-                        "[patcher cmd-y] widget received selected_cable={:?} view_key={view_key}",
-                        state.selected_cable
-                    );
-                    if toggle_selected_cable_segmented(node, &mut state, &view_key) {
-                        eprintln!("[patcher cmd-y] widget toggled selected cable segmentation");
-                        set_patcher_interaction_state(key, state);
-                        Some(patcher_widget_event(PatcherChangeKind::Layout))
-                    } else {
-                        eprintln!("[patcher cmd-y] widget could not toggle selected cable");
-                        None
-                    }
-                }
-                KeyCode::Char('r') | KeyCode::Char('R')
-                    if state.agentic_bubbles.values().any(|bubble| {
-                        !bubble.is_dismissed()
-                            && matches!(bubble.state, AgenticBubbleState::Error { .. })
-                    }) =>
-                {
-                    let bubble_id = state
-                        .agentic_bubbles
-                        .values()
-                        .find(|bubble| {
-                            !bubble.is_dismissed()
-                                && matches!(bubble.state, AgenticBubbleState::Error { .. })
-                        })
-                        .map(|bubble| bubble.id.clone())?;
-                    let view_key = active_patcher_view_key(&state);
-                    let retried = {
-                        let bubble = state.agentic_bubbles.get_mut(&bubble_id)?;
-                        bubble.generation = bubble.generation.wrapping_add(1);
-                        // The context is rebuilt from the view the retry is
-                        // fired in, so the recorded view moves with it.
-                        bubble.view_key = view_key;
-                        bubble.state = AgenticBubbleState::Pending {
-                            started_at: Instant::now(),
-                        };
-                        bubble.clone()
-                    };
-                    let payload = agentic_submit_payload(node, &retried, &state);
-                    set_patcher_interaction_state(key, state);
-                    Some(WidgetEvent::Custom(payload))
-                }
-                KeyCode::Esc if dismissable_agentic_bubble_id(&state).is_some() => {
-                    // Kept in the map so it can shrink out; `is_dismissed`
-                    // makes it invisible to everything else from here.
-                    if let Some(bubble_id) = dismissable_agentic_bubble_id(&state)
-                        && let Some(bubble) = state.agentic_bubbles.get_mut(&bubble_id)
-                    {
-                        bubble.closing_at = Some(Instant::now());
-                    }
-                    set_patcher_interaction_state(key, state);
-                    Some(WidgetEvent::Custom(Value::Nil))
-                }
-                // Cmd+Shift+K: ask the agent to wire the selected node into the
-                // surrounding patch (docs/patcher-agentic-connect-spec.md §2).
-                // A distinct binding rather than intent-detection on the prompt
-                // text: a modifier key is unambiguous.
-                KeyCode::Char('k') | KeyCode::Char('K')
-                    if has_primary_shortcut_modifier(key_event.modifiers)
-                        && key_event.modifiers.contains(KeyModifiers::SHIFT) =>
-                {
-                    let (instance_node_id, subject, position) =
-                        selected_connect_target(node, &state)?;
-                    allocate_agentic_bubble_with_target(
-                        &mut state,
-                        position,
-                        AgenticBubbleTarget::ConnectNode {
-                            instance_node_id,
-                            subject,
-                        },
-                    );
-                    set_patcher_interaction_state(key, state);
-                    Some(WidgetEvent::Custom(Value::Nil))
-                }
-                KeyCode::Char('k') | KeyCode::Char('K')
-                    if has_primary_shortcut_modifier(key_event.modifiers)
-                        && !key_event.modifiers.contains(KeyModifiers::SHIFT) =>
-                {
-                    open_agentic_bubble_for_context(node, key, &mut state)?;
-                    set_patcher_interaction_state(key, state);
-                    Some(WidgetEvent::Custom(Value::Nil))
-                }
-                KeyCode::Enter if open_selected_macro_node(node, &mut state) => {
-                    set_patcher_interaction_state(key, state);
-                    reset_patcher_pan(key);
-                    Some(WidgetEvent::Custom(Value::Nil))
-                }
-                KeyCode::Backspace | KeyCode::Delete if state.selected_cable.is_some() => {
-                    if let Some(cable_id) = state.selected_cable.clone() {
-                        let changed = delete_connection_edit_or_mark_deleted(
-                            &mut state, &view_key, &cable_id,
-                        );
-                        state.drag = None;
-                        if changed
-                            && let Some(patch) = debug_patch_for_state(node, &state, &view_key)
-                        {
-                            debug_log_patch_lisp(&view_key, &patch);
-                        }
-                        set_patcher_interaction_state(key, state);
-                        Some(patcher_semantic_event(changed))
-                    } else {
-                        None
-                    }
-                }
-                KeyCode::Backspace | KeyCode::Delete if !state.selected_nodes.is_empty() => {
-                    let changed = delete_selected_nodes(&mut state, &view_key);
-                    if changed {
-                        prune_unreferenced_created_macros(&mut state);
-                    }
-                    if changed && let Some(patch) = debug_patch_for_state(node, &state, &view_key) {
-                        debug_log_patch_lisp(&view_key, &patch);
-                    }
-                    set_patcher_interaction_state(key, state);
-                    Some(patcher_semantic_event(changed))
-                }
-                _ => None,
-            };
+        // Outside text entry every patcher key is a named command bound from
+        // Lisp (content/ui/patcher.lisp): the widget refuses the key, the
+        // editor hands it to the widget's :on-focus-key, and the binding
+        // there runs `patcher-command` against this node. The two chords
+        // that commit an open edit before acting (create-below, connect-
+        // last-two) are refused the same way; the command does the commit.
+        if state.text_edit.is_none()
+            || (has_primary_shortcut_modifier(key_event.modifiers)
+                && matches!(key_event.code, KeyCode::Enter | KeyCode::Up))
+        {
+            record_focus_key_target(node);
+            return None;
         }
         match key_event.code {
             KeyCode::Enter if state.text_edit.is_some() => {
                 let changed = commit_active_patcher_text_edit(node, &mut state, &view_key);
-                if changed && let Some(patch) = debug_patch_for_state(node, &state, &view_key) {
+                if changed && emit::debug_lisp_logging_enabled()
+                    && let Some(patch) = debug_patch_for_state(node, &state, &view_key)
+                {
                     debug_log_patch_lisp(&view_key, &patch);
                 }
                 set_patcher_interaction_state(key, state);
@@ -1702,33 +1533,6 @@ impl WidgetDefinition for PatcherWidget {
                 set_patcher_interaction_state(key, state);
                 Some(WidgetEvent::Custom(Value::Nil))
             }
-            KeyCode::Backspace | KeyCode::Delete if state.selected_cable.is_some() => {
-                if let Some(cable_id) = state.selected_cable.clone() {
-                    let changed =
-                        delete_connection_edit_or_mark_deleted(&mut state, &view_key, &cable_id);
-                    state.drag = None;
-                    if changed && let Some(patch) = debug_patch_for_state(node, &state, &view_key) {
-                        debug_log_patch_lisp(&view_key, &patch);
-                    }
-                    set_patcher_interaction_state(key, state);
-                    Some(patcher_semantic_event(changed))
-                } else {
-                    None
-                }
-            }
-            KeyCode::Backspace | KeyCode::Delete
-                if state.text_edit.is_none() && !state.selected_nodes.is_empty() =>
-            {
-                let changed = delete_selected_nodes(&mut state, &view_key);
-                if changed {
-                    prune_unreferenced_created_macros(&mut state);
-                }
-                if changed && let Some(patch) = debug_patch_for_state(node, &state, &view_key) {
-                    debug_log_patch_lisp(&view_key, &patch);
-                }
-                set_patcher_interaction_state(key, state);
-                Some(patcher_semantic_event(changed))
-            }
             _ => {
                 let edit = state.text_edit.as_mut()?;
                 match apply_text_entry_key(&edit.text, &mut edit.state, key_event, false, None)? {
@@ -1754,7 +1558,7 @@ impl WidgetDefinition for PatcherWidget {
     fn handle_event(&self, node: &LayoutNode, event: WidgetEvent) -> Option<super::EventOutput> {
         match event {
             WidgetEvent::Custom(Value::Keyword(kind)) if kind == "semantic-change" => {
-                patcher_change_output(node, patcher_writeback_payload(node))
+                patcher_change_output(node, patcher_preview_payload(node))
             }
             WidgetEvent::Custom(Value::Map(map))
                 if map.get("status").is_some_and(|value| {
@@ -1766,8 +1570,19 @@ impl WidgetDefinition for PatcherWidget {
             WidgetEvent::Custom(Value::Keyword(kind)) if kind == "layout-change" => {
                 patcher_change_output(node, patcher_layout_payload(node))
             }
+            WidgetEvent::Custom(Value::Map(map))
+                if map.get("phase").is_some_and(|value| {
+                    matches!(&*value.borrow(), Value::String(phase) if phase == "right-click")
+                }) =>
+            {
+                let callback = node.props.get("on-right-click")?.clone();
+                Some(super::EventOutput {
+                    callback,
+                    args: vec![Value::Map(map)],
+                })
+            }
             WidgetEvent::Custom(Value::Bool(true)) => {
-                patcher_change_output(node, patcher_writeback_payload(node))
+                patcher_change_output(node, patcher_preview_payload(node))
             }
             WidgetEvent::Custom(Value::Nil) | WidgetEvent::Custom(Value::Bool(false)) => None,
             _ => None,
@@ -2400,6 +2215,436 @@ fn slug_agentic_macro_name(prompt: &str) -> String {
     out
 }
 
+
+/// Every patcher command a key can name. Bound from Lisp in
+/// content/ui/patcher.lisp; `default_patcher_binding` is the checked-in copy
+/// of those defaults that tests drive.
+pub const PATCHER_COMMANDS: &[&str] = &[
+    "create-below",
+    "connect-last-two",
+    "undo",
+    "redo",
+    "copy",
+    "paste",
+    "encapsulate",
+    "toggle-cable-style",
+    "retry-bubble",
+    "dismiss-bubble",
+    "open-bubble",
+    "connect-bubble",
+    "open-macro",
+    "delete-selection",
+    "accept-suggestions",
+];
+
+/// The default key for each command, as `(key, command)` with `P-` standing
+/// for the platform's primary shortcut modifier (Cmd on macOS, Ctrl
+/// elsewhere) and `P-S-` for primary plus Shift. Key names follow the
+/// editor's `key_str`: RET, UP, BS, ESC, Tab, Delete, lowercase letters.
+pub const DEFAULT_PATCHER_BINDINGS: &[(&str, &str)] = &[
+    ("P-RET", "create-below"),
+    ("P-UP", "connect-last-two"),
+    ("P-z", "undo"),
+    ("P-S-z", "redo"),
+    ("P-c", "copy"),
+    ("P-v", "paste"),
+    ("P-e", "encapsulate"),
+    ("P-y", "toggle-cable-style"),
+    ("P-r", "retry-bubble"),
+    ("P-k", "open-bubble"),
+    ("P-S-k", "connect-bubble"),
+    ("RET", "open-macro"),
+    ("ESC", "dismiss-bubble"),
+    ("BS", "delete-selection"),
+    ("Delete", "delete-selection"),
+    ("Tab", "accept-suggestions"),
+    // The Ctrl spellings kept working on macOS alongside Cmd for these five,
+    // so they stay bound; on other platforms they duplicate the P- rows.
+    ("C-z", "undo"),
+    ("C-S-z", "redo"),
+    ("C-c", "copy"),
+    ("C-v", "paste"),
+    ("C-e", "encapsulate"),
+];
+
+/// Resolve a `P-` pattern from `DEFAULT_PATCHER_BINDINGS` to the editor's
+/// `key_str` spelling on this platform. `key_str` orders modifiers
+/// C-, M-, S-, s-, so Cmd+Shift is `S-s-` while Ctrl+Shift is `C-S-`.
+pub fn resolve_default_binding_key(pattern: &str) -> String {
+    let macos = crate::ui::platform::CURRENT_SHORTCUT_PLATFORM
+        == crate::ui::platform::ShortcutPlatform::MacOS;
+    if let Some(rest) = pattern.strip_prefix("P-S-") {
+        return format!("{}{rest}", if macos { "S-s-" } else { "C-S-" });
+    }
+    if let Some(rest) = pattern.strip_prefix("P-") {
+        return format!("{}{rest}", if macos { "s-" } else { "C-" });
+    }
+    pattern.to_string()
+}
+
+/// The command the default table binds to `key`, spelled as `key_str` spells
+/// it. Tests use this to drive commands the way the Lisp table would.
+pub fn default_patcher_binding(key: &str) -> Option<&'static str> {
+    DEFAULT_PATCHER_BINDINGS
+        .iter()
+        .find(|(pattern, _)| resolve_default_binding_key(pattern) == key)
+        .map(|(_, command)| *command)
+}
+
+thread_local! {
+    /// Key → command, keyed by the editor's `key_str` spelling. Filled from
+    /// content/ui/patcher.lisp at startup and by user init files.
+    static PATCHER_KEY_BINDINGS: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
+}
+
+/// Bind `pattern` (a `key_str` spelling, or a `P-`/`P-S-` pattern for the
+/// platform's primary modifier) to a named command.
+pub fn bind_patcher_key(pattern: &str, command: &str) -> Result<(), String> {
+    if !PATCHER_COMMANDS.contains(&command) {
+        return Err(format!(
+            "unknown patcher command '{command}' (one of: {})",
+            PATCHER_COMMANDS.join(", ")
+        ));
+    }
+    let key = resolve_default_binding_key(pattern);
+    PATCHER_KEY_BINDINGS.with(|cell| {
+        cell.borrow_mut().insert(key, command.to_string());
+    });
+    Ok(())
+}
+
+pub fn unbind_patcher_key(pattern: &str) {
+    let key = resolve_default_binding_key(pattern);
+    PATCHER_KEY_BINDINGS.with(|cell| {
+        cell.borrow_mut().remove(&key);
+    });
+}
+
+/// The command bound to `key` (a `key_str` spelling), if any.
+pub fn patcher_binding_for_key(key: &str) -> Option<String> {
+    PATCHER_KEY_BINDINGS.with(|cell| cell.borrow().get(key).cloned())
+}
+
+/// Every current binding as `(key, command)`, sorted by key.
+pub fn patcher_key_bindings() -> Vec<(String, String)> {
+    let mut bindings = PATCHER_KEY_BINDINGS.with(|cell| {
+        cell.borrow()
+            .iter()
+            .map(|(key, command)| (key.clone(), command.clone()))
+            .collect::<Vec<_>>()
+    });
+    bindings.sort();
+    bindings
+}
+
+thread_local! {
+    /// The patcher that last refused a key. The editor's :on-focus-key
+    /// callback fires synchronously right after that refusal, so this is the
+    /// node `patcher-command` acts on.
+    static FOCUS_KEY_TARGET: RefCell<Option<LayoutNode>> = const { RefCell::new(None) };
+}
+
+fn record_focus_key_target(node: &LayoutNode) {
+    FOCUS_KEY_TARGET.with(|cell| *cell.borrow_mut() = Some(node.clone()));
+}
+
+thread_local! {
+    /// Widget outputs (the patcher's :on-change callback and its payload)
+    /// produced by commands run from Lisp. A native cannot invoke Lisp, so the
+    /// editor drains these right after the :on-focus-key callback returns.
+    static PENDING_COMMAND_OUTPUTS: RefCell<Vec<super::EventOutput>> = const { RefCell::new(Vec::new()) };
+}
+
+pub fn take_pending_patcher_command_outputs() -> Vec<super::EventOutput> {
+    PENDING_COMMAND_OUTPUTS.with(|cell| std::mem::take(&mut *cell.borrow_mut()))
+}
+
+/// Run the command bound to `key` against the patcher that last refused a
+/// key. `false` when nothing is bound, no patcher is waiting, or the command
+/// does not apply, so the Lisp handler can let the key fall through.
+pub fn run_focus_key_patcher_key(key: &str) -> bool {
+    patcher_binding_for_key(key).is_some_and(|command| run_focus_key_patcher_command(&command))
+}
+
+pub fn run_focus_key_patcher_command(name: &str) -> bool {
+    let Some(node) = FOCUS_KEY_TARGET.with(|cell| cell.borrow().clone()) else {
+        return false;
+    };
+    let Some(event) = run_patcher_command(&node, name) else {
+        return false;
+    };
+    if let Some(output) = PATCHER_WIDGET.handle_event(&node, event) {
+        PENDING_COMMAND_OUTPUTS.with(|cell| cell.borrow_mut().push(output));
+    }
+    true
+}
+
+/// Run a named command against `node`. `None` means the command does not
+/// apply right now (nothing selected, no bubble to retry, an edit open where
+/// the command needs none), so a key bound to it falls through untouched.
+/// `Some` is the widget event a key press would have produced.
+pub fn run_patcher_command(node: &LayoutNode, name: &str) -> Option<WidgetEvent> {
+    let key = patcher_state_key(node);
+    let mut state = get_patcher_interaction_state(key);
+    let view_key = active_patcher_view_key(&state);
+    if let Ok((path, _)) = load_patch_from_props(&node.props) {
+        state::register_patcher_path_key(path, key);
+    }
+    if editing_agentic_bubble_id(&state).is_some() {
+        return None;
+    }
+    match name {
+        "create-below" => {
+            let committed = commit_active_patcher_text_edit(node, &mut state, &view_key);
+            if committed {
+                // Flush the committed text edit as its own undo step
+                // before the next created node opens a fresh gesture.
+                set_patcher_interaction_state(key, state.clone());
+            }
+            create_patcher_node_below_anchor(node, &mut state, &view_key);
+            set_patcher_interaction_state(key, state);
+            Some(patcher_semantic_event(committed))
+        }
+        "connect-last-two" => {
+            let committed = commit_active_patcher_text_edit(node, &mut state, &view_key);
+            if committed {
+                set_patcher_interaction_state(key, state.clone());
+            }
+            let connected = connect_last_touched_nodes(node, &mut state, &view_key);
+            if (committed || connected)
+                && let Some(patch) = debug_patch_for_state(node, &state, &view_key)
+            {
+                debug_log_patch_lisp(&view_key, &patch);
+            }
+            set_patcher_interaction_state(key, state);
+            Some(patcher_semantic_event(committed || connected))
+        }
+        _ if state.text_edit.is_some() => None,
+        // Graph-level undo/redo. The app-level sequencer history shortcut
+        // yields to a focused patcher (input.rs sequencer_history_shortcut).
+        "undo" | "redo" if state.drag.is_none() => {
+            if apply_patcher_history_step(key, &mut state, name == "redo") {
+                if let Some(patch) = debug_patch_for_state(node, &state, &view_key) {
+                    debug_log_patch_lisp(&view_key, &patch);
+                }
+                set_patcher_interaction_state_without_history(key, state);
+                Some(patcher_semantic_event(true))
+            } else {
+                None
+            }
+        }
+        "copy" if !state.selected_nodes.is_empty() => {
+            copy_selected_patcher_nodes(node, &state, &view_key)
+                .then_some(WidgetEvent::Custom(Value::Nil))
+        }
+        // Encapsulate the selection into a new local defmacro.
+        "encapsulate" if !state.selected_nodes.is_empty() && state.drag.is_none() => {
+            let changed = encapsulate_patcher_selection(node, &mut state, &view_key);
+            if changed && let Some(patch) = debug_patch_for_state(node, &state, &view_key) {
+                debug_log_patch_lisp(&view_key, &patch);
+            }
+            if changed {
+                set_patcher_interaction_state(key, state);
+            }
+            Some(patcher_semantic_event(changed))
+        }
+        "paste" => {
+            let changed = paste_patcher_clipboard(node, &mut state, &view_key);
+            if changed && let Some(patch) = debug_patch_for_state(node, &state, &view_key) {
+                debug_log_patch_lisp(&view_key, &patch);
+            }
+            set_patcher_interaction_state(key, state);
+            Some(patcher_semantic_event(changed))
+        }
+        "toggle-cable-style" if state.selected_cable.is_some() => {
+            if toggle_selected_cable_segmented(node, &mut state, &view_key) {
+                set_patcher_interaction_state(key, state);
+                Some(patcher_widget_event(PatcherChangeKind::Layout))
+            } else {
+                None
+            }
+        }
+        "retry-bubble" => {
+            let bubble_id = state
+                .agentic_bubbles
+                .values()
+                .find(|bubble| {
+                    !bubble.is_dismissed()
+                        && matches!(bubble.state, AgenticBubbleState::Error { .. })
+                })
+                .map(|bubble| bubble.id.clone())?;
+            let retried = {
+                let bubble = state.agentic_bubbles.get_mut(&bubble_id)?;
+                bubble.generation = bubble.generation.wrapping_add(1);
+                // The context is rebuilt from the view the retry is
+                // fired in, so the recorded view moves with it.
+                bubble.view_key = view_key;
+                bubble.state = AgenticBubbleState::Pending {
+                    started_at: Instant::now(),
+                };
+                bubble.clone()
+            };
+            let payload = agentic_submit_payload(node, &retried, &state);
+            set_patcher_interaction_state(key, state);
+            Some(WidgetEvent::Custom(payload))
+        }
+        "dismiss-bubble" => {
+            // Kept in the map so it can shrink out; `is_dismissed`
+            // makes it invisible to everything else from here.
+            let bubble_id = dismissable_agentic_bubble_id(&state)?;
+            if let Some(bubble) = state.agentic_bubbles.get_mut(&bubble_id) {
+                bubble.closing_at = Some(Instant::now());
+            }
+            set_patcher_interaction_state(key, state);
+            Some(WidgetEvent::Custom(Value::Nil))
+        }
+        // Ask the agent to wire the selected node into the surrounding
+        // patch (docs/patcher-agentic-connect-spec.md §2).
+        "connect-bubble" => {
+            let (instance_node_id, subject, position) = selected_connect_target(node, &state)?;
+            allocate_agentic_bubble_with_target(
+                &mut state,
+                position,
+                AgenticBubbleTarget::ConnectNode {
+                    instance_node_id,
+                    subject,
+                },
+            );
+            set_patcher_interaction_state(key, state);
+            Some(WidgetEvent::Custom(Value::Nil))
+        }
+        "open-bubble" => {
+            open_agentic_bubble_for_context(node, key, &mut state)?;
+            set_patcher_interaction_state(key, state);
+            Some(WidgetEvent::Custom(Value::Nil))
+        }
+        "open-macro" => {
+            if !open_selected_macro_node(node, &mut state) {
+                return None;
+            }
+            set_patcher_interaction_state(key, state);
+            reset_patcher_pan(key);
+            Some(WidgetEvent::Custom(Value::Nil))
+        }
+        "delete-selection" if state.selected_cable.is_some() => {
+            let cable_id = state.selected_cable.clone()?;
+            let changed = delete_connection_edit_or_mark_deleted(&mut state, &view_key, &cable_id);
+            state.drag = None;
+            if changed && let Some(patch) = debug_patch_for_state(node, &state, &view_key) {
+                debug_log_patch_lisp(&view_key, &patch);
+            }
+            set_patcher_interaction_state(key, state);
+            Some(patcher_semantic_event(changed))
+        }
+        "delete-selection" if !state.selected_nodes.is_empty() => {
+            let changed = delete_selected_nodes(&mut state, &view_key);
+            if changed {
+                prune_unreferenced_created_macros(&mut state);
+            }
+            if changed && let Some(patch) = debug_patch_for_state(node, &state, &view_key) {
+                debug_log_patch_lisp(&view_key, &patch);
+            }
+            set_patcher_interaction_state(key, state);
+            Some(patcher_semantic_event(changed))
+        }
+        "accept-suggestions" => jev::accept_all_ghosts(node),
+        _ => None,
+    }
+}
+
+/// The `:on-right-click` payload: the generic pointer event plus what sits
+/// under the pointer at the current view level — `:node` (id, op, kind,
+/// label, whether it is a macro instance) or nil, `:cable` (connection id) or
+/// nil, `:selected` (how many nodes are selected after the click) and
+/// `:ghosts` (whether Jev suggestions are showing). A right-click on an
+/// unselected node selects just it, so the menu's commands act on what the
+/// user pointed at; it also becomes the `patcher-command` target.
+pub(super) fn patcher_context_menu_info(
+    node: &LayoutNode,
+    modifiers: KeyModifiers,
+    local_col: f32,
+    local_row: f32,
+) -> Value {
+    let info = super::pointer_event_info("right-click", modifiers, node, local_col, local_row);
+    let Value::Map(mut info) = info else {
+        return info;
+    };
+    let key = patcher_state_key(node);
+    record_focus_key_target(node);
+    let mut hit_node = Value::Nil;
+    let mut hit_cable = Value::Nil;
+    if let Some((patch, pan_state, view_key)) = interaction::load_interactive_patch_for_node(node) {
+        let mut state = get_patcher_interaction_state(key);
+        let ordered = state::ordered_patch_nodes(&patch, &state, &view_key);
+        if let Some(node_id) = geometry::hit_patcher_node(
+            &patch,
+            &ordered,
+            node.rect,
+            &pan_state,
+            local_col,
+            local_row,
+        ) {
+            if !state.selected_nodes.contains(&node_id) {
+                state.selected_nodes.clear();
+                state.selected_nodes.insert(node_id.clone());
+                state.selected_cable = None;
+            }
+            if let Some(patch_node) = patch.nodes.iter().find(|candidate| candidate.id == node_id) {
+                hit_node = map_value(vec![
+                    ("id", Value::String(patch_node.id.clone())),
+                    ("op", Value::String(patch_node.op.clone())),
+                    ("kind", Value::String(format!("{:?}", patch_node.kind))),
+                    ("label", Value::String(display::node_display_label(patch_node))),
+                    (
+                        "macro?",
+                        Value::Bool(patch_node.kind == NodeKind::MacroInstance),
+                    ),
+                ]);
+            }
+        } else {
+            let input_indices = geometry::patch_input_indices(&patch);
+            let input_slot_counts = geometry::patch_input_slot_counts(&patch, &input_indices);
+            let output_counts = geometry::patch_output_counts(&patch);
+            if let Some(cable_id) = geometry::hit_patcher_cable(
+                &patch,
+                node.rect,
+                &pan_state,
+                &input_indices,
+                &input_slot_counts,
+                &output_counts,
+                local_col,
+                local_row,
+            ) {
+                state.selected_nodes.clear();
+                state.selected_cable = Some(cable_id.clone());
+                hit_cable = Value::String(cable_id);
+            }
+        }
+        let selected = state.selected_nodes.len();
+        let ghosts = state
+            .jev
+            .as_ref()
+            .is_some_and(|jev| !jev.cables.is_empty());
+        set_patcher_interaction_state(key, state);
+        info.insert(
+            "selected".to_string(),
+            Rc::new(RefCell::new(Value::Number(selected as f64))),
+        );
+        info.insert("ghosts".to_string(), Rc::new(RefCell::new(Value::Bool(ghosts))));
+    }
+    info.insert("node".to_string(), Rc::new(RefCell::new(hit_node)));
+    info.insert("cable".to_string(), Rc::new(RefCell::new(hit_cable)));
+    Value::Map(info)
+}
+
+/// The first key bound to `command`, for menu shortcut hints.
+pub fn patcher_key_for_command(command: &str) -> Option<String> {
+    patcher_key_bindings()
+        .into_iter()
+        .find(|(_, bound)| bound == command)
+        .map(|(key, _)| key)
+}
+
 fn patcher_widget_event(change: PatcherChangeKind) -> WidgetEvent {
     match change {
         PatcherChangeKind::None => WidgetEvent::Custom(Value::Nil),
@@ -2481,7 +2726,7 @@ fn defmacro_library_root_for_props(props: &HashMap<String, Value>) -> Option<Pat
 
 struct LibraryCacheEntry {
     fingerprint: u64,
-    library: Rc<DefmacroLibrary>,
+    library: std::sync::Arc<DefmacroLibrary>,
 }
 
 thread_local! {
@@ -2556,14 +2801,14 @@ pub fn macro_library_sidebar_entries() -> Vec<MacroLibrarySidebarEntry> {
         .collect()
 }
 
-fn cached_defmacro_library(root: &Path) -> (u64, Rc<DefmacroLibrary>) {
+fn cached_defmacro_library(root: &Path) -> (u64, std::sync::Arc<DefmacroLibrary>) {
     DEFMACRO_LIBRARY_CACHE.with(|cache| {
         let mut cache = cache.borrow_mut();
         let fingerprint = defmacro_library_fingerprint(root);
         if let Some(entry) = cache.get(root)
             && entry.fingerprint == fingerprint
         {
-            return (fingerprint, Rc::clone(&entry.library));
+            return (fingerprint, std::sync::Arc::clone(&entry.library));
         }
         let library = match crate::defmacro_library::DefmacroLibrary::load_available(root) {
             Ok((library, errors)) => {
@@ -2583,19 +2828,19 @@ fn cached_defmacro_library(root: &Path) -> (u64, Rc<DefmacroLibrary>) {
                 DefmacroLibrary::empty(root)
             }
         };
-        let library = Rc::new(library);
+        let library = std::sync::Arc::new(library);
         cache.insert(
             root.to_path_buf(),
             LibraryCacheEntry {
                 fingerprint,
-                library: Rc::clone(&library),
+                library: std::sync::Arc::clone(&library),
             },
         );
         (fingerprint, library)
     })
 }
 
-fn defmacro_library_for_props(props: &HashMap<String, Value>) -> Option<Rc<DefmacroLibrary>> {
+fn defmacro_library_for_props(props: &HashMap<String, Value>) -> Option<std::sync::Arc<DefmacroLibrary>> {
     let root = defmacro_library_root_for_props(props)?;
     Some(cached_defmacro_library(&root).1)
 }
@@ -3580,161 +3825,25 @@ fn merge_package_macro_layout(
 }
 
 fn patcher_writeback_payload(node: &LayoutNode) -> Value {
-    let path = prop_str(&node.props, "path").or_else(|| prop_str(&node.props, "file"));
-    let intent = patcher_intent_from_props(&node.props);
-    let key = patcher_state_key(node);
-    let state = get_patcher_interaction_state(key);
-
-    let Some(path_str) = path else {
-        return map_value(vec![
-            ("status", Value::Keyword("invalid".to_string())),
-            (
-                "diagnostic",
-                Value::String("patcher requires :path".to_string()),
-            ),
-        ]);
-    };
-    let root_patch = match load_patch_from_props(&node.props) {
-        Ok((_, patch)) => patch,
+    let path = prop_str(&node.props, "path").or_else(|| prop_str(&node.props, "file"))
+        .unwrap_or_default();
+    match PatcherPreviewRequest::capture(node).and_then(PatcherPreviewRequest::prepare) {
+        Ok(prepared) => map_value(vec![
+            ("status", Value::Keyword("valid".to_string())),
+            ("path", Value::String(path)),
+            ("source", Value::String(prepared.source)),
+            ("compile-source", Value::String(prepared.compile_source)),
+            ("layout", Value::String(prepared.layout)),
+        ]),
         Err(error) => {
-            debug_log_writeback_event(
-                "layout-source-load-failed",
-                format!("path={path_str}\nintent={intent:?}\nerror={error}"),
-            );
-            return map_value(vec![
+            debug_log_writeback_event("payload-invalid", &error);
+            map_value(vec![
                 ("status", Value::Keyword("invalid".to_string())),
-                ("path", Value::String(path_str)),
-                (
-                    "diagnostic",
-                    Value::String(format!(
-                        "failed to load current patch for layout persistence: {error}"
-                    )),
-                ),
-            ]);
-        }
-    };
-
-    let library = defmacro_library_for_props(&node.props);
-    let root_state = if library.is_some() {
-        interaction_state_without_library_macro_views(&state, &root_patch)
-    } else {
-        state.clone()
-    };
-    // Full deterministic regeneration from the in-memory model
-    // (docs/patch-vs-code-editor-spec.md §4): no surgical source rewriting,
-    // no source-position reasoning.
-    let visible = sidecar::root_patch_with_interaction(&root_patch, &root_state);
-    let generated = match generate::generate_patch_source(&visible, intent) {
-        Ok(generated) => generated,
-        Err(error) => {
-            debug_log_edit_event("generate-payload-invalid-state", &state);
-            debug_log_writeback_event(
-                "payload-invalid",
-                format!("path={path_str}\nintent={intent:?}\nerror={error}"),
-            );
-            return map_value(vec![
-                ("status", Value::Keyword("invalid".to_string())),
-                ("path", Value::String(path_str)),
+                ("path", Value::String(path)),
                 ("diagnostic", Value::String(error)),
-            ]);
+            ])
         }
-    };
-    let source = generated.source;
-    let mut emitted_patch = match parse_patch_source_for_props(&source, intent, &node.props) {
-        Ok(patch) => patch,
-        Err(error) => {
-            eprintln!(
-                "[patcher generate invalid]\npath={path_str}\nintent={intent:?}\nstage=parse-generated-source\nerror={error}\ngenerated-source:\n{source}\n[/patcher generate invalid]"
-            );
-            return map_value(vec![
-                ("status", Value::Keyword("invalid".to_string())),
-                ("path", Value::String(path_str)),
-                (
-                    "diagnostic",
-                    Value::String(format!("generated source failed to parse: {error}")),
-                ),
-            ]);
-        }
-    };
-    if !patch_is_fully_projectable(&emitted_patch) {
-        eprintln!(
-            "[patcher generate invalid]\npath={path_str}\nintent={intent:?}\nstage=projectability\ndiagnostics={:?}\ngenerated-source:\n{source}\n[/patcher generate invalid]",
-            emitted_patch.diagnostics
-        );
-        return map_value(vec![
-            ("status", Value::Keyword("invalid".to_string())),
-            ("path", Value::String(path_str)),
-            (
-                "diagnostic",
-                Value::String(format!(
-                    "generated source is not fully projectable: {}",
-                    emitted_patch.diagnostics.join("; ")
-                )),
-            ),
-        ]);
     }
-    let layout = match sidecar::emitted_layout_json_with_node_map(
-        &mut emitted_patch,
-        &root_patch,
-        &root_state,
-        &generated.renamed_node_ids,
-    ) {
-        Ok(layout) => layout,
-        Err(error) => {
-            return map_value(vec![
-                ("status", Value::Keyword("invalid".to_string())),
-                ("path", Value::String(path_str)),
-                (
-                    "diagnostic",
-                    Value::String(format!("failed to build emitted patcher layout: {error}")),
-                ),
-            ]);
-        }
-    };
-    debug_log_writeback_event(
-        "payload-valid",
-        format!("path={path_str}\nintent={intent:?}\nsource:\n{source}"),
-    );
-    let compile_source = if let Some(library) = library.as_ref() {
-        let staged_library =
-            match library_with_staged_macro_edits(&root_patch, intent, &state, library) {
-                Ok(library) => library,
-                Err(error) => {
-                    return map_value(vec![
-                        ("status", Value::Keyword("invalid".to_string())),
-                        ("path", Value::String(path_str)),
-                        (
-                            "diagnostic",
-                            Value::String(format!("failed to stage library macro edits: {error}")),
-                        ),
-                    ]);
-                }
-            };
-        match staged_library.materialize_source(&source) {
-            Ok(materialized) => materialized.source,
-            Err(error) => {
-                return map_value(vec![
-                    ("status", Value::Keyword("invalid".to_string())),
-                    ("path", Value::String(path_str)),
-                    (
-                        "diagnostic",
-                        Value::String(format!(
-                            "failed to materialize staged defmacro imports: {error}"
-                        )),
-                    ),
-                ]);
-            }
-        }
-    } else {
-        source.clone()
-    };
-    map_value(vec![
-        ("status", Value::Keyword("valid".to_string())),
-        ("path", Value::String(path_str)),
-        ("source", Value::String(source)),
-        ("compile-source", Value::String(compile_source)),
-        ("layout", Value::String(layout)),
-    ])
 }
 
 fn patcher_intent_from_props(props: &HashMap<String, Value>) -> PatcherIntent {

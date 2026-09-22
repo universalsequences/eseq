@@ -196,9 +196,9 @@ impl InstrumentEditSession {
 
 pub(super) struct PendingInstrumentPreview {
     pub(super) generation: u64,
-    pub(super) source: String,
+    /// Layout changes made after this revision was submitted win on completion.
     pub(super) layout: Option<String>,
-    pub(super) receiver: std::sync::mpsc::Receiver<Result<sequencer::lisp_host::CompileResult, String>>,
+    pub(super) receiver: std::sync::mpsc::Receiver<Result<CompiledPreview, String>>,
 }
 
 pub(super) struct PendingInstrumentCancelRestore {
@@ -488,18 +488,134 @@ impl EffectEditSession {
 
 pub(super) struct PendingEffectPreview {
     pub(super) generation: u64,
-    pub(super) source: String,
+    /// Layout changes made after this revision was submitted win on completion.
     pub(super) layout: Option<String>,
-    pub(super) receiver: std::sync::mpsc::Receiver<Result<sequencer::lisp_host::CompileResult, String>>,
+    pub(super) receiver: std::sync::mpsc::Receiver<Result<CompiledPreview, String>>,
 }
 
-/// Kick the preview compile pipeline for a source the host produced itself,
-/// rather than one the patcher handed over in a `preview-*-patch` payload.
-///
-/// The agentic macro edit rewrites `dsp.lisp` directly and touches no
-/// interaction state, so the patcher never emits a writeback payload and the
-/// usual compile never fires: the new macro showed up on the canvas but stayed
-/// inaudible until some unrelated edit forced a recompile.
+pub(super) enum PreviewSource {
+    Source { source: String, compile_source: String, layout: Option<String> },
+    Patch(eseqlisp::widget_render::patcher::PatcherPreviewRequest),
+}
+
+pub(super) struct CompiledPreview {
+    pub(super) source: String,
+    pub(super) layout: Option<String>,
+    pub(super) result: sequencer::lisp_host::CompileResult,
+}
+
+pub(super) fn preview_source_from_payload(
+    editor: &Editor,
+    payload: &Value,
+    path: &Path,
+) -> Result<PreviewSource, String> {
+    if extract_string_from_payload(payload, "status").as_deref() == Some("changed") {
+        if extract_string_from_payload(payload, "path").as_deref() != path.to_str() {
+            return Err("Patch preview belongs to a different editor session".to_string());
+        }
+        return editor.capture_patcher_preview_request(path).map(PreviewSource::Patch);
+    }
+    let source = extract_string_from_payload(payload, "source")
+        .ok_or_else(|| "Patch preview did not include emitted source".to_string())?;
+    let compile_source = extract_string_from_payload(payload, "compile-source")
+        .unwrap_or_else(|| source.clone());
+    Ok(PreviewSource::Source {
+        source, compile_source, layout: extract_string_from_payload(payload, "layout"),
+    })
+}
+
+/// Source regeneration, layout serialization, library materialization and
+/// native compilation all run in the same worker. Only immutable snapshots
+/// cross into it; the UI still owns generation checks and engine installation.
+pub(super) fn spawn_preview_compile(
+    input: PreviewSource,
+    sample_rate: u32,
+    asset_base: Option<PathBuf>,
+    intent: eseqlisp::widget_render::patcher::PatcherIntent,
+) -> std::sync::mpsc::Receiver<Result<CompiledPreview, String>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let worker_tx = tx.clone();
+    let spawn = std::thread::Builder::new()
+        .name("patch-preview".to_string())
+        .stack_size(sequencer::REQUIRED_THREAD_STACK_SIZE)
+        .spawn(move || {
+            let result = (|| {
+                let (source, compile_source, layout) = match input {
+                    PreviewSource::Source { source, compile_source, layout } =>
+                        (source, compile_source, layout),
+                    PreviewSource::Patch(request) => {
+                        let prepared = request.prepare()?;
+                        (prepared.source, prepared.compile_source, Some(prepared.layout))
+                    }
+                };
+                let compile = match intent {
+                    eseqlisp::widget_render::patcher::PatcherIntent::Instrument =>
+                        sequencer::lisp_host::compile_and_load_instrument_with_origin,
+                    eseqlisp::widget_render::patcher::PatcherIntent::Effect =>
+                        sequencer::lisp_host::compile_and_load_with_origin,
+                };
+                let result = compile(
+                    &compile_source, sample_rate, asset_base.as_deref(),
+                    sequencer::lisp_host::DGenSourceOrigin::Draft,
+                )?;
+                Ok(CompiledPreview { source, layout, result })
+            })();
+            let _ = worker_tx.send(result);
+        });
+    if let Err(error) = spawn {
+        let _ = tx.send(Err(format!("Failed to start patch preview worker: {error}")));
+    }
+    rx
+}
+
+#[cfg(test)]
+mod preview_tests {
+    use super::*;
+
+    #[test]
+    fn deferred_instrument_and_effect_previews_compile_from_visible_editor_snapshots() {
+        use eseqlisp::widget_render::patcher::PatcherIntent;
+        let dir = tempfile::tempdir().unwrap();
+        for (label, intent) in [
+            ("instrument", PatcherIntent::Instrument),
+            ("effect", PatcherIntent::Effect),
+        ] {
+            let path = dir.path().join(format!("{label}.lisp"));
+            std::fs::write(&path, "(def signal (* (in 1) 0.5))\n(out signal 1)").unwrap();
+            let mut editor = Editor::new(Runtime::new(), eseqlisp::editor::EditorConfig::default());
+            editor.set_layout_viewport(80, 30);
+            let escaped = escape_lisp_string(&path.to_string_lossy());
+            editor.runtime_mut().eval_str(&format!(
+                "(effect-buffer \"*preview*\" (patcher :intent :{label} \
+                 :deferred-preview true :width :fill :height :fill :path \"{escaped}\"))",
+            )).unwrap();
+            editor.refresh_runtime_side_effects();
+            let id = editor.buffers.iter().find(|buffer| buffer.name == "*preview*").unwrap().id;
+            editor.set_active_buffer(id);
+            editor.update_tile_rects(80, 30);
+            editor.sync_layout_to_active_leaf();
+            let payload = editor.runtime_mut().eval_str(&format!(
+                "(dict :status :changed :path \"{escaped}\")",
+            )).unwrap().unwrap();
+            let input = preview_source_from_payload(&editor, &payload, &path).unwrap();
+            assert!(matches!(input, PreviewSource::Patch(_)));
+            let receiver = spawn_preview_compile(input, 44_100, Some(dir.path().to_path_buf()), intent);
+            // The VM remains exclusively owned and usable by the UI while the
+            // worker prepares and compiles its independent revision.
+            editor.runtime_mut().eval_str("(def still-responsive 42)").unwrap();
+            let compiled = receiver.recv_timeout(Duration::from_secs(30)).unwrap().unwrap();
+            assert!(compiled.source.contains("0.5"));
+            assert!(compiled.layout.is_some());
+            assert_eq!(compiled.result.manifest.n_outputs, 1);
+            assert_eq!(std::fs::read_to_string(&path).unwrap(),
+                "(def signal (* (in 1) 0.5))\n(out signal 1)", "preview must not save the source");
+            assert!(preview_source_from_payload(&editor, &payload, &dir.path().join("another.lisp")).is_err());
+        }
+    }
+}
+
+/// Host-authored source changes use the same worker and generation discipline
+/// as interactive patch edits and the code editor's explicit Eval command.
 pub(super) fn queue_instrument_preview_compile(
     session: &mut InstrumentEditSession,
     pending: &mut Option<PendingInstrumentPreview>,
@@ -508,28 +624,17 @@ pub(super) fn queue_instrument_preview_compile(
 ) {
     session.preview_generation = session.preview_generation.wrapping_add(1);
     session.visible_revision_valid = false;
-    let generation = session.preview_generation;
-    let asset_base = session.path.parent().map(std::path::Path::to_path_buf);
-    let compile_source = source.clone();
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let result = sequencer::lisp_host::compile_and_load_instrument_with_origin(
-            &compile_source,
-            sample_rate,
-            asset_base.as_deref(),
-            sequencer::lisp_host::DGenSourceOrigin::Draft,
-        );
-        let _ = tx.send(result);
-    });
     *pending = Some(PendingInstrumentPreview {
-        generation,
-        source,
+        generation: session.preview_generation,
         layout: None,
-        receiver: rx,
+        receiver: spawn_preview_compile(
+            PreviewSource::Source { compile_source: source.clone(), source, layout: None },
+            sample_rate, session.path.parent().map(Path::to_path_buf),
+            eseqlisp::widget_render::patcher::PatcherIntent::Instrument,
+        ),
     });
 }
 
-/// Effect counterpart of `queue_instrument_preview_compile`.
 pub(super) fn queue_effect_preview_compile(
     session: &mut EffectEditSession,
     pending: &mut Option<PendingEffectPreview>,
@@ -538,24 +643,14 @@ pub(super) fn queue_effect_preview_compile(
 ) {
     session.preview_generation = session.preview_generation.wrapping_add(1);
     session.visible_revision_valid = false;
-    let generation = session.preview_generation;
-    let asset_base = session.path.parent().map(std::path::Path::to_path_buf);
-    let compile_source = source.clone();
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let result = sequencer::lisp_host::compile_and_load_with_origin(
-            &compile_source,
-            sample_rate,
-            asset_base.as_deref(),
-            sequencer::lisp_host::DGenSourceOrigin::Draft,
-        );
-        let _ = tx.send(result);
-    });
     *pending = Some(PendingEffectPreview {
-        generation,
-        source,
+        generation: session.preview_generation,
         layout: None,
-        receiver: rx,
+        receiver: spawn_preview_compile(
+            PreviewSource::Source { compile_source: source.clone(), source, layout: None },
+            sample_rate, session.path.parent().map(Path::to_path_buf),
+            eseqlisp::widget_render::patcher::PatcherIntent::Effect,
+        ),
     });
 }
 
@@ -755,6 +850,14 @@ pub(super) struct PendingEffectCancelRestore {
     pub(super) receiver: std::sync::mpsc::Receiver<Result<sequencer::lisp_host::CompileResult, String>>,
 }
 
+/// One Jev suggestion request in flight for a patcher widget. The fingerprint
+/// lets the widget drop an answer whose selection or patch has moved on.
+pub(super) struct PendingJevSuggestion {
+    pub(super) key: u64,
+    pub(super) fingerprint: u64,
+    pub(super) receiver: std::sync::mpsc::Receiver<Result<serde_json::Value, String>>,
+}
+
 pub(super) struct PendingAgenticBubble {
     pub(super) path: PathBuf,
     pub(super) intent: eseqlisp::widget_render::patcher::PatcherIntent,
@@ -923,7 +1026,7 @@ pub(super) fn instrument_patcher_buffer_source(buffer_name: &str, path: &Path) -
         // buffer rather than a sibling tile: a modal only receives pointer
         // input through the *active* tile's layout, and the patch editor's
         // canvas is the active tile. Closed, it has zero layout footprint.
-        "(effect-buffer \"{buffer_name}\"\n  (v-stack :width :fill :height :fill\n    (eseq.choose-model/panel)\n    (patcher\n      :intent :instrument\n      :width :fill\n      :height :fill\n      :flex 1\n      :path \"{path}\"\n      :agent-model (eseq.choose-model/current-label)\n      :on-change (lambda (event)\n        (if (= (get event :status) :agentic-choose-model)\n          (eseq.choose-model/open)\n          (host-command \"preview-instrument-patch\" event))))))\n"
+        "(effect-buffer \"{buffer_name}\"\n  (v-stack :width :fill :height :fill\n    (eseq.choose-model/panel)\n    (eseq.patcher/context-menu-panel)\n    (patcher\n      :intent :instrument\n      :deferred-preview true\n      :width :fill\n      :height :fill\n      :flex 1\n      :path \"{path}\"\n      :agent-model (eseq.choose-model/current-label)\n      :on-focus-key (lambda (key text) (eseq.patcher/handle-focus-key key text))\n      :on-right-click (lambda (event) (eseq.patcher/open-context-menu event))\n      :on-change (lambda (event)\n        (if (= (get event :status) :agentic-choose-model)\n          (eseq.choose-model/open)\n          (host-command \"preview-instrument-patch\" event))))))\n"
     )
 }
 
@@ -941,7 +1044,7 @@ pub(super) fn effect_patcher_buffer_source(buffer_name: &str, path: &Path) -> St
     format!(
         // Mounted alongside the patcher for the same reason as the
         // instrument variant above.
-        "(effect-buffer \"{buffer_name}\"\n  (v-stack :width :fill :height :fill\n    (eseq.choose-model/panel)\n    (patcher\n      :intent :effect\n      :width :fill\n      :height :fill\n      :path \"{path}\"\n      :agent-model (eseq.choose-model/current-label)\n      :on-change (lambda (event)\n        (if (= (get event :status) :agentic-choose-model)\n          (eseq.choose-model/open)\n          (host-command \"preview-effect-patch\" event))))))\n"
+        "(effect-buffer \"{buffer_name}\"\n  (v-stack :width :fill :height :fill\n    (eseq.choose-model/panel)\n    (eseq.patcher/context-menu-panel)\n    (patcher\n      :intent :effect\n      :deferred-preview true\n      :width :fill\n      :height :fill\n      :path \"{path}\"\n      :agent-model (eseq.choose-model/current-label)\n      :on-focus-key (lambda (key text) (eseq.patcher/handle-focus-key key text))\n      :on-right-click (lambda (event) (eseq.patcher/open-context-menu event))\n      :on-change (lambda (event)\n        (if (= (get event :status) :agentic-choose-model)\n          (eseq.choose-model/open)\n          (host-command \"preview-effect-patch\" event))))))\n"
     )
 }
 

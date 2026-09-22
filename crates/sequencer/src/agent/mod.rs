@@ -3,6 +3,7 @@ pub mod agentic_bubble;
 pub mod audition;
 pub mod catalog;
 pub mod dsp_validate;
+pub mod jev;
 pub mod model_choice;
 pub mod models;
 pub mod network;
