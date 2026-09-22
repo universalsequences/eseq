@@ -56,7 +56,7 @@
   :seed-on-reset 0
   :max-poly 4
   ;; Which fires survive when more than :max-poly land in one boundary. Options:
-  ;; :deterministic :propagation :random :loudest :lowest-transpose :highest-transpose
+  ;; :deterministic :propagation :random :markov :loudest :lowest-transpose :highest-transpose
   ;; :seed-first (seed-originated fires win their slots before neural-only ones).
   :max-poly-selection :propagation
   :duration (steps 1)
@@ -140,7 +140,7 @@
     (map (lambda (track) (nth track-colors track)) (ggm-route-tracks))
     track-colors))
 (def ggm-max-poly-selection-options
-  (list "deterministic" "propagation" "random" "loudest" "lowest-transpose" "highest-transpose" "seed-first"))
+  (list "deterministic" "propagation" "random" "markov" "loudest" "lowest-transpose" "highest-transpose" "seed-first"))
 ;; Neural-group assignment (docs/neural-groups-spec.md §3.1). The stored value IS the
 ;; dropdown index (group A = 0), so the numeric bind-graph handle seeds it directly.
 (def ggm-group-options (list "A" "B" "C" "D"))
@@ -444,6 +444,40 @@
 (def ggm-matrix-header-spacer-height ()
   (+ -0.5 (max 0 (- (+ ggm-row-panel-padding ggm-row-height ggm-row-gap) ggm-matrix-column-gap))))
 
+
+;; ── group matrices ──
+;; Both k×k group grids share one footprint; the row/column labels around them
+;; are sized from the cell pitch so "A" lines up with its row and column.
+(def ggm-group-matrix-width 16)
+(def ggm-group-matrix-height 9.2)
+(def ggm-group-grid-gap 0.2)
+(def ggm-group-label-width 1.6)
+(def ggm-group-label-height 1.0)
+(def ggm-group-cell-width () (/ ggm-group-matrix-width ggm-group-count))
+(def ggm-group-cell-height () (/ ggm-group-matrix-height ggm-group-count))
+;; Title row + column-label row; the read-only act/θΔ columns pad by this much
+;; so their cells sit level with the labeled grids' cells.
+(def ggm-group-grid-header-height ()
+  (+ ggm-group-label-height ggm-group-grid-gap ggm-group-label-height))
+
+(def ggm-group-label (text w h)
+  (label text :width w :height h :font-size 8 :h-align :center :color :dim :bg :transparent))
+
+;; Wrap a k×k group matrix with a title, "to" column labels across the top and
+;; "from" row labels down the left. Cell [A][B] = from group A, to group B.
+(def ggm-group-grid (title body)
+  (v-stack :gap ggm-group-grid-gap
+    (ggm-group-label title (+ ggm-group-label-width ggm-group-matrix-width) ggm-group-label-height)
+    (h-stack :gap 0
+      (ggm-group-label "" ggm-group-label-width ggm-group-label-height)
+      (each ggm-group-options |g|
+        (ggm-group-label (str "to " g) (ggm-group-cell-width) ggm-group-label-height)))
+    (h-stack :gap 0
+      (v-stack :gap 0
+        (each ggm-group-options |g|
+          (ggm-group-label g ggm-group-label-width (ggm-group-cell-height))))
+      body)))
+
 (def ggm-num (key value lo hi stp dec on-change)
   (number-picker
     :key key
@@ -609,7 +643,7 @@
         (v-stack :gap 0.5
           ;; ── sequencer-level config (on top) ──
           (box 
-            :width 90.5
+            :width 102
             :background-color :mixer-strip-bg :border-color :mixer-strip-border :padding 1 :corner-radius 16
             
             (h-stack
@@ -665,16 +699,43 @@
               ;; group activity traces. ~0.5 = beat-scale sidechain-style coupling;
               ;; 0.85+ = bar-scale swells (the back-off cycle time for excite +
               ;; self-limit diagonal patches).
-              (knob-number
-                :key "graph-group-matrix-trace-decay"
-                :debug-name "graph-group-matrix-trace-decay"
-                :label "trace decay"
-                :value (bind-graph-config ggm-name :group-trace-decay)
-                :min 0 :max 1 :decimals 2
-                :width 7.0 :height 3.0 :knob-size 2.2
-                :font-size 9.0 :label-font-size 9.0
-                :label-color :dim
-                :on-change (lambda (v) (ggm-edit-config :group-trace-decay v)))
+              (v-stack :gap 0.3
+                (knob-number
+                  :key "graph-group-matrix-trace-decay"
+                  :debug-name "graph-group-matrix-trace-decay"
+                  :label "trace decay"
+                  :value (bind-graph-config ggm-name :group-trace-decay)
+                  :min 0 :max 1 :decimals 2
+                  :width 7.0 :height 3.0 :knob-size 2.2
+                  :font-size 9.0 :label-font-size 9.0
+                  :label-color :dim
+                  :on-change (lambda (v) (ggm-edit-config :group-trace-decay v)))
+                ;; Global multiplier on the whole H matrix. H is touchy: a few
+                ;; tenths per cell already gates groups hard, so scale the layer
+                ;; here (0 = off, 1 = cells as drawn) instead of retouching cells.
+                (knob-number
+                  :key "graph-group-matrix-coupling-scale"
+                  :debug-name "graph-group-matrix-coupling-scale"
+                  :label "H scale"
+                  :value (bind-graph-config ggm-name :group-coupling-scale)
+                  :min 0 :max 2 :decimals 2
+                  :width 7.0 :height 3.0 :knob-size 2.2
+                  :font-size 9.0 :label-font-size 9.0
+                  :label-color :dim
+                  :on-change (lambda (v) (ggm-edit-config :group-coupling-scale v)))
+                ;; How far excitation (blue H cells) may lower a node's threshold,
+                ;; as a fraction of its authored value. 0 lets an excited group fire
+                ;; on zero energy (self-oscillates); 1 disables excitation entirely.
+                (knob-number
+                  :key "graph-group-matrix-excite-floor"
+                  :debug-name "graph-group-matrix-excite-floor"
+                  :label "exc floor"
+                  :value (bind-graph-config ggm-name :group-excite-floor)
+                  :min 0 :max 1 :decimals 2
+                  :width 7.0 :height 3.0 :knob-size 2.2
+                  :font-size 9.0 :label-font-size 9.0
+                  :label-color :dim
+                  :on-change (lambda (v) (ggm-edit-config :group-excite-floor v))))
               (matrix
                 :key "graph-group-matrix-dampening-matrix"
                 :rows active-count
@@ -690,45 +751,94 @@
                 :value (ggm-viz-matrix viz :dampening-matrix (ggm-zero-matrix) active-count active-count)
                 )
               
-              (event-view
-                :key "graph-group-matrix-event-view"
-                :events (if viz (get viz :event-history) (list))
-                :current-beat (if viz (get viz :current-beat) 0)
-                :renderer :isometric
-                :x :transpose
-                :x-min -24
-                :x-max 24
-                :y :node
-                :y-min 0
-                :y-max (- active-count 1)
-                :z :beat-phase
-                :z-min 0
-                :z-max 16
-                :phase-beats 16
-                :auto-rotate true
-                :window-beats 16
-                :brightness :velocity
-                :background :bg
-                :width 16
-                :height 7)              
-              	(spectrogram
-                :key "graph-group-matrix-master-spectrogram"
-                :source :master
-                :mode :waterfall
-                :freq-scale :log
-                :fft-size 2048
-                :time-slices 180
-                :min-db -64
-                :max-db 0
-                :smoothing 0.68
-                :width 20
-                :height 7.0
-                :background-color :bg
-                :min-color (rgba 0.05 0.05 0.11 1)
-                :mid-color (rgba 0.16 0.66 0.88 1)
-                :max-color (rgba 1.0 0.72 0.28 1)
-                		  )
-              
+              ;; ── group matrices (rows = FROM group, cols = TO group) ──
+          ;; ── G: group propagation gain (rows = from group A–D, cols = to group) ──
+          (ggm-group-grid "G gain"
+            (matrix
+              :key "graph-group-matrix-group-gain-matrix"
+              :rows ggm-group-count
+              :cols ggm-group-count
+              :width ggm-group-matrix-width
+              :height ggm-group-matrix-height
+              :min 0
+              :max 2
+              :default 1
+              :background :mixer-strip-bg
+              :color (rgba 0.16 0.66 0.44 1)
+              :empty-fill-color (rgba 0.04 0.04 0.05 1)
+              :stroke-color (rgba 0.36 0.62 0.57 1)
+              :stroke-width 1.5
+              :stroke-active-only true
+              :value ggm-group-gain
+              :on-cell-change (lambda (r c v)
+                (do
+                  (set! ggm-group-gain (ggm-set-cell ggm-group-gain r c v))
+                  (ggm-edit-group-cell "group-gain" r c v)))))
+
+          ;; ── H: activity→threshold coupling (positive = suppress, negative = excite) ──
+          ;; Bipolar, so :control :pie — wedge sweep = |H| from zero, clockwise
+          ;; orange = suppression, counter-clockwise blue = excitation; an empty
+          ;; ring is an untouched (zero) coupling.
+          (ggm-group-grid "H couple"
+            (matrix
+              :key "graph-group-matrix-group-coupling-matrix"
+              :rows ggm-group-count
+              :cols ggm-group-count
+              :width ggm-group-matrix-width
+              :height ggm-group-matrix-height
+              :min -2
+              :max 2
+              :default 0
+              :control :pie
+              :background :mixer-strip-bg
+              :color (rgba 0.9 0.5 0.16 1)
+              :negative-color (rgba 0.3 0.55 0.95 1)
+              ;; Zero cells draw only this outline ring (at 0.6 alpha) — it must
+              ;; clearly beat the matrix background or the 4x4 grid reads as
+              ;; just-the-nonzero-cells.
+              :empty-fill-color (rgba 0.42 0.44 0.5 1)
+              :stroke-color (rgba 0.62 0.5 0.36 1)
+              :stroke-width 1.5
+              :stroke-active-only true
+              :value ggm-group-coupling
+              :on-cell-change (lambda (r c v)
+                (do
+                  (set! ggm-group-coupling (ggm-set-cell ggm-group-coupling r c v))
+                  (ggm-edit-group-cell "group-coupling" r c v)))))
+
+          ;; ── live group state (read-only, rows = groups A–D like the H matrix) ──
+          ;; act: each group's leaky activity trace. θΔ: the signed threshold offset
+          ;; H imposes on that group this boundary — orange wedge = suppressed,
+          ;; blue = excited, empty ring = untouched.
+          (v-stack :gap ggm-group-grid-gap
+            (label "act" :width 2 :height (ggm-group-grid-header-height) :font-size 8 :h-align :center :color :dim :bg :transparent)
+            (matrix
+              :key "graph-group-matrix-group-activity-matrix"
+              :rows ggm-group-count
+              :cols 1
+              :width 2
+              :height ggm-group-matrix-height
+              :min 0
+              :max 2
+              :color (rgba 0.16 0.66 0.44 1)
+              :value (ggm-viz-matrix viz :group-activity-matrix (ggm-zero-group-column-matrix) ggm-group-count 1)))
+
+          (v-stack :gap ggm-group-grid-gap
+            (label "θΔ" :width 2.5 :height (ggm-group-grid-header-height) :font-size 8 :h-align :center :color :dim :bg :transparent)
+            (matrix
+              :key "graph-group-matrix-group-suppression-matrix"
+              :rows ggm-group-count
+              :cols 1
+              :width 2.5
+              :height ggm-group-matrix-height
+              :min -2
+              :max 2
+              :control :pie
+              :background :mixer-strip-bg
+              :color (rgba 0.9 0.5 0.16 1)
+              :negative-color (rgba 0.3 0.55 0.95 1)
+              :empty-fill-color (rgba 0.42 0.44 0.5 1)
+              :value (ggm-viz-matrix viz :group-suppression-matrix (ggm-zero-group-column-matrix) ggm-group-count 1)))
               ))
           
           (h-stack
@@ -791,93 +901,7 @@
                     (set! ggm-weights (ggm-set-cell ggm-weights r c v))
                     (graph-edge ggm-name :from r :to c :weight v)))))
 
-            ;; ── G: group propagation gain (rows = from group A–D, cols = to group) ──
-            (v-stack :gap ggm-matrix-column-gap
-              (label "G gain" :width 8 :height (ggm-matrix-header-spacer-height) :font-size 8 :h-align :center :color :dim :bg :transparent)
-              (matrix
-                :key "graph-group-matrix-group-gain-matrix"
-                :rows ggm-group-count
-                :cols ggm-group-count
-                :width 16
-                :height (* 2 (ggm-matrix-data-height ggm-group-count))
-                :min 0
-                :max 2
-                :background :mixer-strip-bg
-                :color (rgba 0.16 0.66 0.44 1)
-                :empty-fill-color (rgba 0.04 0.04 0.05 1)
-                :stroke-color (rgba 0.36 0.62 0.57 1)
-                :stroke-width 1.5
-                :stroke-active-only true
-                :value ggm-group-gain
-                :on-cell-change (lambda (r c v)
-                  (do
-                    (set! ggm-group-gain (ggm-set-cell ggm-group-gain r c v))
-                    (ggm-edit-group-cell "group-gain" r c v)))))
-
-            ;; ── H: activity→threshold coupling (positive = suppress, negative = excite) ──
-            ;; Bipolar, so :control :pie — wedge sweep = |H| from zero, clockwise
-            ;; orange = suppression, counter-clockwise blue = excitation; an empty
-            ;; ring is an untouched (zero) coupling.
-            (v-stack :gap ggm-matrix-column-gap
-              (label "H couple" :width 8 :height (ggm-matrix-header-spacer-height) :font-size 8 :h-align :center :color :dim :bg :transparent)
-              (matrix
-                :key "graph-group-matrix-group-coupling-matrix"
-                :rows ggm-group-count
-                :cols ggm-group-count
-                :width 16
-                :height (* 2 (ggm-matrix-data-height ggm-group-count))
-                :min -2
-                :max 2
-                :control :pie
-                :background :mixer-strip-bg
-                :color (rgba 0.9 0.5 0.16 1)
-                :negative-color (rgba 0.3 0.55 0.95 1)
-                ;; Zero cells draw only this outline ring (at 0.6 alpha) — it must
-                ;; clearly beat the matrix background or the 4x4 grid reads as
-                ;; just-the-nonzero-cells.
-                :empty-fill-color (rgba 0.42 0.44 0.5 1)
-                :stroke-color (rgba 0.62 0.5 0.36 1)
-                :stroke-width 1.5
-                :stroke-active-only true
-                :value ggm-group-coupling
-                :on-cell-change (lambda (r c v)
-                  (do
-                    (set! ggm-group-coupling (ggm-set-cell ggm-group-coupling r c v))
-                    (ggm-edit-group-cell "group-coupling" r c v)))))
-
-            ;; ── live group state (read-only, rows = groups A–D like the H matrix) ──
-            ;; act: each group's leaky activity trace. θΔ: the signed threshold offset
-            ;; H imposes on that group this boundary — orange wedge = suppressed,
-            ;; blue = excited, empty ring = untouched.
-            (v-stack :gap ggm-matrix-column-gap
-              (label "act" :width 2 :height (ggm-matrix-header-spacer-height) :font-size 8 :h-align :center :color :dim :bg :transparent)
-              (matrix
-                :key "graph-group-matrix-group-activity-matrix"
-                :rows ggm-group-count
-                :cols 1
-                :width 2
-                :height (* 2 (ggm-matrix-data-height ggm-group-count))
-                :min 0
-                :max 2
-                :color (rgba 0.16 0.66 0.44 1)
-                :value (ggm-viz-matrix viz :group-activity-matrix (ggm-zero-group-column-matrix) ggm-group-count 1)))
-
-            (v-stack :gap ggm-matrix-column-gap
-              (label "θΔ" :width 2.5 :height (ggm-matrix-header-spacer-height) :font-size 8 :h-align :center :color :dim :bg :transparent)
-              (matrix
-                :key "graph-group-matrix-group-suppression-matrix"
-                :rows ggm-group-count
-                :cols 1
-                :width 2.5
-                :height (* 2 (ggm-matrix-data-height ggm-group-count))
-                :min -2
-                :max 2
-                :control :pie
-                :background :mixer-strip-bg
-                :color (rgba 0.9 0.5 0.16 1)
-                :negative-color (rgba 0.3 0.55 0.95 1)
-                :empty-fill-color (rgba 0.42 0.44 0.5 1)
-                :value (ggm-viz-matrix viz :group-suppression-matrix (ggm-zero-group-column-matrix) ggm-group-count 1))))
+            )
           (box
             :debug-name "graph-group-matrix-piano-panel"
             :padding 1

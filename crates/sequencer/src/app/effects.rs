@@ -7639,6 +7639,7 @@ mod tests {
                     duration: None,
                     swing: None,
                     neural_group: None,
+                    process_chain: None,
                 }],
                 ..Default::default()
             }];
@@ -7932,6 +7933,7 @@ mod tests {
             duration: None,
             swing: None,
             neural_group: None,
+            process_chain: None,
         };
         app.state
             .edit_current_graph_overrides(|graphs| {

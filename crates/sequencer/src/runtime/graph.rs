@@ -92,6 +92,15 @@ pub enum GraphControlCommand {
         graph_name: String,
         factor: f32,
     },
+    /// Reset the graph now, as the periodic bar reset does, or only the
+    /// nodes of one neural group (`docs/graph-node-processes-spec.md`
+    /// §2.2.2). From a node process the graph fields are filled in by the
+    /// runner (`graph-reset!`).
+    Reset {
+        graph_id: u64,
+        graph_name: String,
+        group: Option<u8>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -268,6 +277,9 @@ pub struct GraphVisualizationSnapshot {
 }
 
 const GRAPH_EVENT_HISTORY_CAP: usize = 1024;
+/// How many of a node's recent emitted notes `(read (neuron k :key))` sees
+/// (`docs/graph-node-processes-spec.md` §4).
+pub const NEURON_RECENT_NOTES: usize = 8;
 
 impl GraphEdge {
     pub fn new(from: usize, to: usize, weight: f64) -> Self {
@@ -548,6 +560,17 @@ pub const GROUP_COUPLING_MIN: f64 = -2.0;
 pub const GROUP_COUPLING_MAX: f64 = 2.0;
 /// Per-beat decay of the per-group activity trace (spec §4.4).
 pub const GROUP_TRACE_DECAY_DEFAULT: f64 = 0.5;
+/// Global multiplier on the whole `H` matrix (spec §4.5). 1 = the authored
+/// cells as-is; 0 = coupling layer off. Lets a patch tame a sensitive matrix
+/// without retouching sixteen cells.
+pub const GROUP_COUPLING_SCALE_DEFAULT: f64 = 1.0;
+pub const GROUP_COUPLING_SCALE_MAX: f64 = 2.0;
+/// Fraction of a node's authored threshold that excitation (negative `H`) can
+/// never push `θ_eff` below (spec §4.5). At 0 a fully excited group fires on
+/// zero energy ("guaranteed wake-up"), which self-oscillates far too easily;
+/// the default keeps a quarter of the authored threshold so a node still needs
+/// real incoming energy to fire.
+pub const GROUP_EXCITE_FLOOR_DEFAULT: f64 = 0.25;
 /// Activity trace clamp ceiling (spec §4.4).
 const GROUP_ACTIVITY_MAX: f64 = 4.0;
 
@@ -603,6 +626,12 @@ pub struct ProjectGraphNodeIntrinsicOverride {
     /// which holds the prototype name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub neural_group: Option<u8>,
+    /// The node's process patch (`docs/graph-node-processes-spec.md`): track
+    /// process slots that run on the fire payload before it is emitted and
+    /// scattered. `None` = empty chain. Slots here are always node-local, never
+    /// project-layer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_chain: Option<crate::process::TrackProcessChain>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -652,6 +681,13 @@ pub struct ProjectGraphOverrides {
     /// Per-beat decay of the per-group activity trace (spec §4.4).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group_trace_decay: Option<f64>,
+    /// Global multiplier applied to every `H` cell (spec §4.5). None = 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_coupling_scale: Option<f64>,
+    /// Floor on `θ_eff` as a fraction of the authored threshold (spec §4.5).
+    /// None = `GROUP_EXCITE_FLOOR_DEFAULT`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_excite_floor: Option<f64>,
     /// `None` = project-owned: routes and seed tracks are track indices and the
     /// overrides live in the project scene. `Some(group id)` = owned by that
     /// drum rack: routes and seed tracks are MEMBER indices into the rack, the
@@ -779,6 +815,8 @@ pub struct GraphNode {
     /// Cluster assignment for group-scoped control (neural-groups spec §3.1),
     /// clamped to `0..NEURAL_GROUP_MAX`. Inert until per-group arbitration lands.
     pub neural_group: u8,
+    /// Process patch run on every accepted fire (spec §2). Empty = no hook.
+    pub process_chain: crate::process::TrackProcessChain,
 }
 
 impl Default for GraphNode {
@@ -800,6 +838,7 @@ impl Default for GraphNode {
             duration: GraphDurationSpec::default(),
             swing: GraphSwingSpec::default(),
             neural_group: 0,
+            process_chain: crate::process::TrackProcessChain::default(),
         }
     }
 }
@@ -849,6 +888,79 @@ pub struct EmitSpec {
 /// Context passed to the per-node `:update` predicate at one evaluation boundary.
 /// Carries only musical/symbolic coordinates and the node's resolved input — never
 /// samples (the engine owns all sample math).
+/// What the engine hands the host when an accepted fire is about to emit
+/// (`docs/graph-node-processes-spec.md` §2.2). The host runs the node's process
+/// patch on `payload` and says whether the emission is audible.
+#[derive(Clone, Debug)]
+pub struct NodeEmitContext {
+    pub node_index: usize,
+    /// The fire's musical position and sample.
+    pub beat: f64,
+    pub sample_time: u64,
+    /// The node's resolved route track, if any.
+    pub route: Option<usize>,
+    /// The node's resolution in quarter-note beats.
+    pub step_beats: f32,
+    /// The node's process patch. Empty chains never reach the hook.
+    pub process_chain: crate::process::TrackProcessChain,
+    /// Every node's recent emitted notes (oldest first), for neuron-sourced
+    /// harmony reads inside the patch (spec §4).
+    pub neuron_recent_notes: Vec<Vec<f32>>,
+    /// True on the node's first fire after a graph (or group) reset
+    /// (`(reset-fired?)` in the patch).
+    pub after_reset: bool,
+}
+
+/// The host side of `process_block`: the per-node fire predicate plus the
+/// emit-time hook. Plain `FnMut(&NodeEval) -> NodeFire` closures implement it
+/// with a no-op hook, so unit tests and legacy callers are unchanged.
+pub trait GraphDriver {
+    fn update(&mut self, eval: &NodeEval) -> NodeFire;
+    /// Run the node's process patch on the payload that is about to be emitted
+    /// AND scattered. Return `false` to mute the emission (a `veto!`); the fire
+    /// still scatters, zeroes energy and advances its cycle (spec §2.2).
+    fn emit(&mut self, _ctx: &NodeEmitContext, _payload: &mut GraphPayload) -> bool {
+        true
+    }
+    /// Extra propagation delay, in the node's steps, that the patch just run
+    /// by `emit` asked for (a write to the `delay` payload field). Read once
+    /// per fire, right after `emit`; applies to this fire's outgoing
+    /// propagations only. Default: none.
+    fn take_delay_offset_steps(&mut self) -> f32 {
+        0.0
+    }
+    /// Resets the patch just run by `emit` asked for (`graph-reset!`): one
+    /// entry per request, `None` = whole graph, `Some(group)` = that neural
+    /// group. Read once per fire, right after `emit`.
+    fn take_reset_requests(&mut self) -> Vec<Option<u8>> {
+        Vec::new()
+    }
+}
+
+impl<D: GraphDriver + ?Sized> GraphDriver for &mut D {
+    fn update(&mut self, eval: &NodeEval) -> NodeFire {
+        (**self).update(eval)
+    }
+    fn emit(&mut self, ctx: &NodeEmitContext, payload: &mut GraphPayload) -> bool {
+        (**self).emit(ctx, payload)
+    }
+    fn take_delay_offset_steps(&mut self) -> f32 {
+        (**self).take_delay_offset_steps()
+    }
+    fn take_reset_requests(&mut self) -> Vec<Option<u8>> {
+        (**self).take_reset_requests()
+    }
+}
+
+/// Adapts a bare fire-predicate closure to `GraphDriver` (no emit hook).
+pub struct FnDriver<F>(pub F);
+
+impl<F: FnMut(&NodeEval) -> NodeFire> GraphDriver for FnDriver<F> {
+    fn update(&mut self, eval: &NodeEval) -> NodeFire {
+        (self.0)(eval)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct NodeEval {
     pub node_index: usize,
@@ -958,6 +1070,10 @@ pub struct GraphRuntimeConfig {
     pub group_coupling: Vec<f64>,
     /// Per-beat activity trace decay (spec §4.4).
     pub group_trace_decay: f64,
+    /// Global multiplier on `group_coupling` (spec §4.5).
+    pub group_coupling_scale: f64,
+    /// Excitation floor as a fraction of the authored threshold (spec §4.5).
+    pub group_excite_floor: f64,
 }
 
 impl GraphRuntimeConfig {
@@ -1006,6 +1122,8 @@ impl GraphRuntimeConfig {
             group_gain: vec![GROUP_GAIN_DEFAULT; NEURAL_GROUP_CELLS],
             group_coupling: vec![GROUP_COUPLING_DEFAULT; NEURAL_GROUP_CELLS],
             group_trace_decay: GROUP_TRACE_DECAY_DEFAULT,
+            group_coupling_scale: GROUP_COUPLING_SCALE_DEFAULT,
+            group_excite_floor: GROUP_EXCITE_FLOOR_DEFAULT,
         }
     }
 
@@ -1041,12 +1159,32 @@ pub struct GraphRuntime {
     default_duration: GraphDurationSpec,
     default_swing: GraphSwingSpec,
     random_state: u64,
+    /// Per node, its last `NEURON_RECENT_NOTES` emitted notes, oldest first.
+    node_recent_notes: Vec<Vec<f32>>,
+    /// Per node: a reset (periodic, fire-authored or `graph-reset!`) happened
+    /// since the node last fired. Read into `NodeEmitContext::after_reset`
+    /// and cleared by the fire, so a patch sees it exactly once.
+    after_reset: Vec<bool>,
+    /// `graph-reset!` requests collected while committing a boundary's fires,
+    /// applied once the boundary's commits are done.
+    requested_resets: Vec<Option<u8>>,
+    /// The last boundary the block loop evaluated (for resets requested
+    /// from outside the block, e.g. a track process).
+    last_boundary_beats: f64,
+    /// Which nodes won the most recent `max_poly` arbitration, indexed by node.
+    /// The "previous state" that `markov` selection draws its transition
+    /// weights from. Cleared on reset.
+    last_accepted: Vec<bool>,
     /// `G` gain matrix over neural groups, dense row-major (spec §4.3).
     group_gain: Vec<f64>,
     /// `H` activity→threshold coupling matrix, dense row-major (spec §4.5).
     group_coupling: Vec<f64>,
     /// Per-beat decay factor of `group_activity` (spec §4.4).
     group_trace_decay: f64,
+    /// Global multiplier on `group_coupling` (spec §4.5).
+    group_coupling_scale: f64,
+    /// Excitation floor as a fraction of the authored threshold (spec §4.5).
+    group_excite_floor: f64,
 
     // ── ephemeral process regulation ──
     authored_nodes: Vec<GraphNode>,
@@ -1181,9 +1319,16 @@ impl GraphRuntime {
             default_duration: config.default_duration,
             default_swing: config.default_swing,
             random_state: config.id,
+            last_accepted: vec![false; num_nodes],
+            node_recent_notes: vec![Vec::new(); num_nodes],
+            after_reset: vec![false; num_nodes],
+            requested_resets: Vec::new(),
+            last_boundary_beats: 0.0,
             group_gain: dense_group_matrix(config.group_gain, GROUP_GAIN_DEFAULT),
             group_coupling: dense_group_matrix(config.group_coupling, GROUP_COUPLING_DEFAULT),
             group_trace_decay: config.group_trace_decay,
+            group_coupling_scale: config.group_coupling_scale,
+            group_excite_floor: config.group_excite_floor,
             authored_nodes,
             authored_edges,
             authored_node_params,
@@ -1315,6 +1460,8 @@ impl GraphRuntime {
         self.group_gain = dense_group_matrix(config.group_gain, GROUP_GAIN_DEFAULT);
         self.group_coupling = dense_group_matrix(config.group_coupling, GROUP_COUPLING_DEFAULT);
         self.group_trace_decay = config.group_trace_decay;
+        self.group_coupling_scale = config.group_coupling_scale;
+        self.group_excite_floor = config.group_excite_floor;
         // A live `H` edit changes what the held activity traces imply — refresh so the
         // next boundary doesn't read a suppression snapshot built from the old matrix.
         self.refresh_group_suppression();
@@ -1472,8 +1619,56 @@ impl GraphRuntime {
         self.reset_internal(total_beats, false);
     }
 
+    /// Reset only the nodes of one neural group: their energy, input, pending
+    /// propagations, incoming triggers, cycle position and recent notes, as
+    /// the whole-graph reset does per node. Graph-wide state (edge dampening,
+    /// group traces, event history) is left alone.
+    pub fn reset_group(&mut self, group: u8, total_beats: f64) {
+        for idx in 0..self.num_nodes {
+            if self.nodes[idx].neural_group != group {
+                continue;
+            }
+            self.reset_node_state(idx, total_beats, Vec::new());
+        }
+    }
+
+    /// Reset from outside the block loop (a track process or the UI): lands
+    /// at the last evaluated boundary.
+    pub fn reset_now(&mut self, group: Option<u8>) {
+        let beats = self.last_boundary_beats;
+        match group {
+            None => self.reset_clearing_pending(beats),
+            Some(group) => self.reset_group(group, beats),
+        }
+    }
+
+    fn reset_node_state(&mut self, idx: usize, total_beats: f64, pending: Vec<GraphPropagation>) {
+        self.node_recent_notes[idx].clear();
+        self.energy[idx] = self.nodes[idx].seed_on_reset;
+        self.trigger_activity[idx] = 0.0;
+        self.trigger_visual_until_beats[idx] = 0.0;
+        self.node_events[idx] = None;
+        self.input_accum[idx] = 0.0;
+        self.input_seen[idx] = false;
+        self.source_event[idx] = None;
+        self.source_event_seed[idx] = false;
+        self.source_event_strength[idx] = 0.0;
+        self.tick_count[idx] = 0;
+        self.cycle_pos[idx] = 0;
+        self.sync_cycle_slot(idx);
+        self.pending[idx] = pending;
+        self.incoming_triggers[idx].clear();
+        let step_beats = self.node_step_beats(idx);
+        self.last_eval_indices[idx] = grid_index_at(total_beats, step_beats);
+        self.after_reset[idx] = true;
+    }
+
     fn reset_internal(&mut self, total_beats: f64, preserve_external_seeds: bool) {
         self.event_history.clear();
+        self.last_accepted.fill(false);
+        for notes in &mut self.node_recent_notes {
+            notes.clear();
+        }
         for idx in 0..self.num_nodes {
             let preserved_external_seeds = if preserve_external_seeds {
                 self.pending[idx]
@@ -1486,22 +1681,7 @@ impl GraphRuntime {
             } else {
                 Vec::new()
             };
-            self.energy[idx] = self.nodes[idx].seed_on_reset;
-            self.trigger_activity[idx] = 0.0;
-            self.trigger_visual_until_beats[idx] = 0.0;
-            self.node_events[idx] = None;
-            self.input_accum[idx] = 0.0;
-            self.input_seen[idx] = false;
-            self.source_event[idx] = None;
-            self.source_event_seed[idx] = false;
-            self.source_event_strength[idx] = 0.0;
-            self.tick_count[idx] = 0;
-            self.cycle_pos[idx] = 0;
-            self.sync_cycle_slot(idx);
-            self.pending[idx] = preserved_external_seeds;
-            self.incoming_triggers[idx].clear();
-            let step_beats = self.node_step_beats(idx);
-            self.last_eval_indices[idx] = grid_index_at(total_beats, step_beats);
+            self.reset_node_state(idx, total_beats, preserved_external_seeds);
         }
         for (edge, default_dampening) in self.edges.iter_mut().zip(&self.edge_default_dampening) {
             edge.dampening = *default_dampening;
@@ -1560,10 +1740,35 @@ impl GraphRuntime {
         block_start_sample: u64,
         samples_per_quarter: f64,
         max_poly: u32,
-        mut update_fn: F,
+        update_fn: F,
         out: &mut Vec<GraphEmission>,
     ) where
         F: FnMut(&NodeEval) -> NodeFire,
+    {
+        self.process_block_with_driver(
+            start_beats,
+            end_beats,
+            block_start_sample,
+            samples_per_quarter,
+            max_poly,
+            FnDriver(update_fn),
+            out,
+        );
+    }
+
+    /// `process_block` with a full `GraphDriver`, whose `emit` hook runs each
+    /// node's process patch (`docs/graph-node-processes-spec.md`).
+    pub fn process_block_with_driver<D>(
+        &mut self,
+        start_beats: f64,
+        end_beats: f64,
+        block_start_sample: u64,
+        samples_per_quarter: f64,
+        max_poly: u32,
+        mut update_fn: D,
+        out: &mut Vec<GraphEmission>,
+    ) where
+        D: GraphDriver,
     {
         if !self.active || self.num_nodes == 0 || end_beats <= start_beats {
             return;
@@ -1602,6 +1807,7 @@ impl GraphRuntime {
                 samples_per_quarter,
                 boundary_beats,
             );
+            self.last_boundary_beats = boundary_beats;
 
             // Which nodes hit their own grid boundary here?
             let mut due = vec![false; self.num_nodes];
@@ -1656,7 +1862,7 @@ impl GraphRuntime {
                     params: self.node_params_with_group_threshold(idx),
                 };
                 self.tick_count[idx] = self.tick_count[idx].saturating_add(1);
-                let decision = update_fn(&eval);
+                let decision = update_fn.update(&eval);
                 decisions[idx] = decision.clone();
                 if decision.fired {
                     let (fire_sample, fire_beats) = self.quantized_fire_timing(
@@ -1713,12 +1919,25 @@ impl GraphRuntime {
             for (cand_idx, candidate) in candidates.iter().enumerate() {
                 if accepted[cand_idx] {
                     accepted_node[candidate.node_index] = true;
-                    self.commit_firing(candidate, out);
+                    self.commit_firing(candidate, &mut update_fn, out);
                     // Round-robin advances only on an accepted fire, after the firing has
                     // consumed this slot's resolution (duration) and quantize.
                     self.advance_cycle(candidate.node_index, boundary_beats);
                 } else {
                     rejected[candidate.node_index] = true;
+                }
+            }
+            // Patch-authored resets (`graph-reset!`) land after every fire of
+            // this boundary has committed, so the fire that asked for one
+            // still emits and scatters (a group reset then clears what it
+            // scattered into that group).
+            if !self.requested_resets.is_empty() {
+                let requests = std::mem::take(&mut self.requested_resets);
+                for group in requests {
+                    match group {
+                        None => self.reset_clearing_pending(boundary_beats),
+                        Some(group) => self.reset_group(group, boundary_beats),
+                    }
                 }
             }
             if reset_graph_state {
@@ -2138,17 +2357,17 @@ impl GraphRuntime {
             .any(|node| node.trigger_on_reset && node.seed_on_reset > 0.0)
     }
 
-    fn emit_pending_reset_seeded_nodes<F>(
+    fn emit_pending_reset_seeded_nodes<D>(
         &mut self,
         start_beats: f64,
         end_beats: f64,
         block_start_sample: u64,
         samples_per_quarter: f64,
         max_poly: u32,
-        update_fn: &mut F,
+        update_fn: &mut D,
         out: &mut Vec<GraphEmission>,
     ) where
-        F: FnMut(&NodeEval) -> NodeFire,
+        D: GraphDriver,
     {
         let Some(reset_beats) = self.pending_reset_seed_emit_beat else {
             return;
@@ -2177,16 +2396,16 @@ impl GraphRuntime {
         );
     }
 
-    fn emit_reset_seeded_nodes<F>(
+    fn emit_reset_seeded_nodes<D>(
         &mut self,
         reset_beats: f64,
         reset_sample: u64,
         samples_per_quarter: f64,
         max_poly: u32,
-        update_fn: &mut F,
+        update_fn: &mut D,
         out: &mut Vec<GraphEmission>,
     ) where
-        F: FnMut(&NodeEval) -> NodeFire,
+        D: GraphDriver,
     {
         // A reset just cleared the activity traces; refresh so arbitration and the
         // rule both read the post-reset (zero) suppression.
@@ -2208,7 +2427,7 @@ impl GraphRuntime {
                 params: self.node_params_with_group_threshold(idx),
             };
             self.tick_count[idx] = self.tick_count[idx].saturating_add(1);
-            let decision = update_fn(&eval);
+            let decision = update_fn.update(&eval);
             if !decision.fired {
                 continue;
             }
@@ -2237,7 +2456,7 @@ impl GraphRuntime {
         let accepted = self.max_poly_accept(&candidates, max_poly);
         for (cand_idx, candidate) in candidates.iter().enumerate() {
             if accepted[cand_idx] {
-                self.commit_reset_seed_emission(candidate, out);
+                self.commit_reset_seed_emission(candidate, update_fn, out);
                 self.advance_cycle(candidate.node_index, reset_beats);
                 self.bump_group_activity(candidate.node_index);
             }
@@ -2256,22 +2475,33 @@ impl GraphRuntime {
     /// implicit transpose — the author writes `(+ (in-note) (param :transpose))` if they
     /// want it). With no spec (a bare truthy `:update`), fall back to the legacy relay +
     /// `transpose`, preserving the native-neuron drop-in.
-    fn commit_firing(&mut self, candidate: &GraphFiringCandidate, out: &mut Vec<GraphEmission>) {
+    fn commit_firing<D: GraphDriver>(
+        &mut self,
+        candidate: &GraphFiringCandidate,
+        driver: &mut D,
+        out: &mut Vec<GraphEmission>,
+    ) {
         let node_index = candidate.node_index;
-        let payload = self.resolve_emission_payload(node_index, candidate.emit.as_ref());
-        self.push_emission_event(
-            node_index,
-            candidate.fire_sample,
-            candidate.fire_beats,
-            payload,
-            out,
-        );
+        let mut payload = self.resolve_emission_payload(node_index, candidate.emit.as_ref());
+        let audible = self.run_node_process_patch(driver, candidate, &mut payload);
+        let delay_offset_steps = driver.take_delay_offset_steps();
+        self.after_reset[node_index] = false;
+        self.requested_resets.extend(driver.take_reset_requests());
+        if audible {
+            self.push_emission_event(
+                node_index,
+                candidate.fire_sample,
+                candidate.fire_beats,
+                payload,
+                out,
+            );
+        }
         self.energy[node_index] = 0.0;
         if let Some(amount) = candidate.dampen_incoming {
             self.dampen_incoming(node_index, amount);
         }
         self.clear_incoming_triggers(node_index);
-        self.push_outgoing_propagations(node_index, candidate.fire_beats, payload, false);
+        self.push_outgoing_propagations(node_index, candidate.fire_beats, payload, false, delay_offset_steps);
     }
 
     fn resolve_emission_payload(&self, node_index: usize, emit: Option<&EmitSpec>) -> GraphPayload {
@@ -2333,6 +2563,14 @@ impl GraphRuntime {
             velocity: payload.velocity,
         };
         self.node_events[node_index] = Some(visualization_event);
+        if self.node_recent_notes.len() != self.num_nodes {
+            self.node_recent_notes.resize(self.num_nodes, Vec::new());
+        }
+        let recent = &mut self.node_recent_notes[node_index];
+        recent.push(payload.note);
+        if recent.len() > NEURON_RECENT_NOTES {
+            recent.remove(0);
+        }
         self.event_history.push(visualization_event);
         let overflow = self
             .event_history
@@ -2351,13 +2589,49 @@ impl GraphRuntime {
             self.trigger_visual_until_beats[node_index].max(beat + TRIGGER_VISUAL_HOLD_BEATS);
     }
 
-    fn commit_reset_seed_emission(
+    /// Run the node's process patch (spec §2) on the resolved payload. Returns
+    /// whether the emission is audible. Nodes with an empty chain skip the host
+    /// round-trip entirely, so a graph without patches is byte-identical to
+    /// the pre-processes engine.
+    fn run_node_process_patch<D: GraphDriver>(
+        &self,
+        driver: &mut D,
+        candidate: &GraphFiringCandidate,
+        payload: &mut GraphPayload,
+    ) -> bool {
+        let node = &self.nodes[candidate.node_index];
+        if node.process_chain.slots.is_empty() {
+            return true;
+        }
+        let ctx = NodeEmitContext {
+            node_index: candidate.node_index,
+            beat: candidate.fire_beats,
+            sample_time: candidate.fire_sample,
+            route: node.route,
+            step_beats: node.resolution.step_beats(16) as f32,
+            process_chain: node.process_chain.clone(),
+            neuron_recent_notes: self.node_recent_notes.clone(),
+            after_reset: self.after_reset[candidate.node_index],
+        };
+        driver.emit(&ctx, payload)
+    }
+
+    fn commit_reset_seed_emission<D: GraphDriver>(
         &mut self,
         candidate: &GraphFiringCandidate,
+        driver: &mut D,
         out: &mut Vec<GraphEmission>,
     ) {
         let node_index = candidate.node_index;
-        let payload = self.resolve_emission_payload(node_index, candidate.emit.as_ref());
+        let mut payload = self.resolve_emission_payload(node_index, candidate.emit.as_ref());
+        let audible = self.run_node_process_patch(driver, candidate, &mut payload);
+        let delay_offset_steps = driver.take_delay_offset_steps();
+        if !audible {
+            // Muted reset seed: still counts as fired for the graph.
+            self.energy[node_index] = 0.0;
+            self.push_outgoing_propagations(node_index, candidate.fire_beats, payload, false, delay_offset_steps);
+            return;
+        }
         self.push_emission_event(
             node_index,
             candidate.fire_sample,
@@ -2367,7 +2641,7 @@ impl GraphRuntime {
         );
         self.energy[node_index] = 0.0;
         self.clear_incoming_triggers(node_index);
-        self.push_outgoing_propagations(node_index, candidate.fire_beats, payload, true);
+        self.push_outgoing_propagations(node_index, candidate.fire_beats, payload, true, delay_offset_steps);
     }
 
     fn drop_firing(&mut self, node_index: usize) {
@@ -2416,6 +2690,27 @@ impl GraphRuntime {
     /// With every candidate in one group this delegates untouched, byte-identical to
     /// the pre-groups behavior.
     fn max_poly_accept(&mut self, candidates: &[GraphFiringCandidate], max_poly: u32) -> Vec<bool> {
+        let accepted = self.max_poly_accept_grouped(candidates, max_poly);
+        // Remember this boundary's winners as the Markov "previous state". Recorded
+        // even when nothing was cut, so an uncontested boundary still steers the
+        // next contested one.
+        if self.last_accepted.len() != self.num_nodes {
+            self.last_accepted.resize(self.num_nodes, false);
+        }
+        self.last_accepted.fill(false);
+        for (idx, candidate) in candidates.iter().enumerate() {
+            if accepted[idx] && candidate.node_index < self.num_nodes {
+                self.last_accepted[candidate.node_index] = true;
+            }
+        }
+        accepted
+    }
+
+    fn max_poly_accept_grouped(
+        &mut self,
+        candidates: &[GraphFiringCandidate],
+        max_poly: u32,
+    ) -> Vec<bool> {
         let mut accepted = vec![true; candidates.len()];
         if max_poly == 0 || candidates.len() <= max_poly as usize {
             return accepted;
@@ -2519,8 +2814,81 @@ impl GraphRuntime {
                         .then(l.node_index.cmp(&r.node_index))
                 });
             }
+            NeuralMaxPolySelection::Markov => {
+                let weights = self.markov_selection_weights(candidates);
+                for candidate_idx in self.weighted_sample_without_replacement(&weights, accepted_count)
+                {
+                    accepted[candidate_idx] = true;
+                }
+            }
         }
         accepted
+    }
+
+    /// Per-candidate transition weight for `markov` selection: the summed effective
+    /// weight (`gather` × group gain) of every edge from a node that won the previous
+    /// boundary into the candidate. When no previous winner reaches any candidate
+    /// (first boundary after a reset, or a disconnected step) every candidate's total
+    /// incoming weight stands in, so the matrix still shapes the draw; with no
+    /// incoming weight at all the draw is uniform.
+    fn markov_selection_weights(&self, candidates: &[GraphFiringCandidate]) -> Vec<f64> {
+        let incoming = |target: usize, only_last_winners: bool| -> f64 {
+            let mut total = 0.0;
+            for &edge_idx in &self.in_edges[target] {
+                let edge = self.edges[edge_idx];
+                if edge.from >= self.num_nodes {
+                    continue;
+                }
+                if only_last_winners && !self.last_accepted.get(edge.from).copied().unwrap_or(false)
+                {
+                    continue;
+                }
+                total += edge.gather() * self.group_gain_between(edge.from, target);
+            }
+            total
+        };
+        let transition: Vec<f64> = candidates
+            .iter()
+            .map(|candidate| incoming(candidate.node_index, true).max(0.0))
+            .collect();
+        if transition.iter().any(|&w| w > 0.0) {
+            return transition;
+        }
+        let total_in: Vec<f64> = candidates
+            .iter()
+            .map(|candidate| incoming(candidate.node_index, false).max(0.0))
+            .collect();
+        if total_in.iter().any(|&w| w > 0.0) {
+            return total_in;
+        }
+        vec![1.0; candidates.len()]
+    }
+
+    /// Draw `count` distinct indices, each proportional to its weight among the
+    /// indices not yet drawn. Zero-weight indices are only drawn once every positive
+    /// weight is exhausted (then uniformly), so `count` slots are always filled.
+    fn weighted_sample_without_replacement(&mut self, weights: &[f64], count: usize) -> Vec<usize> {
+        let mut remaining: Vec<usize> = (0..weights.len()).collect();
+        let mut chosen = Vec::with_capacity(count);
+        while chosen.len() < count && !remaining.is_empty() {
+            let total: f64 = remaining.iter().map(|&idx| weights[idx]).sum();
+            let pick = if total > 0.0 {
+                let mut target = self.next_random_unit() * total;
+                let mut pick = remaining.len() - 1;
+                for (pos, &idx) in remaining.iter().enumerate() {
+                    target -= weights[idx];
+                    if target < 0.0 {
+                        pick = pos;
+                        break;
+                    }
+                }
+                pick
+            } else {
+                self.random_index(remaining.len())
+            };
+            chosen.push(remaining.swap_remove(pick));
+        }
+        chosen
     }
 
     /// Sort candidate indices by `cmp` (best first) and mark the first `accepted_count`.
@@ -2561,6 +2929,11 @@ impl GraphRuntime {
     /// `nodes[idx].threshold` mirror, and the delta store are never mutated, so
     /// nothing transient can be committed into the user's patch. Returns the
     /// authored value untouched when suppression is zero (bit-identical inert path).
+    ///
+    /// Excitation (negative suppression) bottoms out at `group_excite_floor` × the
+    /// authored threshold rather than at 0: a zero `θ_eff` satisfies `(>= energy
+    /// threshold)` with no energy at all, so a cross-excited group would fire every
+    /// boundary forever with nothing driving it.
     fn effective_threshold(&self, node_index: usize) -> f64 {
         let authored = self.nodes[node_index].threshold;
         let suppression = self.group_suppression[self.node_group_index(node_index)];
@@ -2572,7 +2945,8 @@ impl GraphRuntime {
             .get("threshold")
             .map(|range| range.max as f64)
             .unwrap_or(f64::INFINITY);
-        (authored + suppression).clamp(0.0, theta_max)
+        let floor = (authored * self.group_excite_floor.clamp(0.0, 1.0)).min(theta_max);
+        (authored + suppression).clamp(floor, theta_max)
     }
 
     /// The params map a node rule sees this boundary: the resolved map, with the
@@ -2598,7 +2972,7 @@ impl GraphRuntime {
             for c in 0..k {
                 suppression += self.group_coupling[c * k + g] * self.group_activity[c];
             }
-            self.group_suppression[g] = suppression;
+            self.group_suppression[g] = suppression * self.group_coupling_scale;
         }
     }
 
@@ -2676,7 +3050,7 @@ impl GraphRuntime {
         ready_after_beats: f64,
         payload: GraphPayload,
     ) {
-        self.push_outgoing_propagations(node_index, ready_after_beats, payload, true);
+        self.push_outgoing_propagations(node_index, ready_after_beats, payload, true, 0.0);
     }
 
     fn push_propagation(
@@ -2685,15 +3059,19 @@ impl GraphRuntime {
         ready_after_beats: f64,
         payload: GraphPayload,
     ) {
-        self.push_outgoing_propagations(node_index, ready_after_beats, payload, false);
+        self.push_outgoing_propagations(node_index, ready_after_beats, payload, false, 0.0);
     }
 
+    /// `delay_offset_steps` is the fire's process-written delay change
+    /// (`docs/graph-node-processes-spec.md`, `delay` payload field): added to
+    /// the node / edge delay of every propagation this fire pushes.
     fn push_outgoing_propagations(
         &mut self,
         node_index: usize,
         ready_after_beats: f64,
         payload: GraphPayload,
         external_seed: bool,
+        delay_offset_steps: f32,
     ) {
         let outgoing = self.out_edges.get(node_index).cloned().unwrap_or_default();
         for distribution in [
@@ -2724,6 +3102,7 @@ impl GraphRuntime {
                             ready_after_beats,
                             payload,
                             external_seed,
+                            delay_offset_steps,
                         );
                     }
                 }
@@ -2735,6 +3114,7 @@ impl GraphRuntime {
                             ready_after_beats,
                             payload,
                             external_seed,
+                            delay_offset_steps,
                         );
                     }
                 }
@@ -2780,6 +3160,7 @@ impl GraphRuntime {
         ready_after_beats: f64,
         payload: GraphPayload,
         external_seed: bool,
+        delay_offset_steps: f32,
     ) {
         let Some(edge) = self.edges.get(edge_index).copied() else {
             return;
@@ -2791,6 +3172,11 @@ impl GraphRuntime {
             edge.delay_steps
         } else {
             self.nodes[node_index].delay_steps
+        };
+        let delay_steps = if delay_offset_steps.is_finite() && delay_offset_steps != 0.0 {
+            (delay_steps as f32 + delay_offset_steps).round().max(0.0) as u32
+        } else {
+            delay_steps
         };
         let remaining = delay_steps.max(1);
         self.pending[node_index].push(GraphPropagation {
@@ -3155,6 +3541,7 @@ impl GraphManifest {
                 .unwrap_or_else(|| self.duration.clone());
             let mut swing = self.node.swing.unwrap_or(self.swing);
             let mut neural_group = 0u8;
+            let mut process_chain = crate::process::TrackProcessChain::default();
             if let Some(overrides) = overrides {
                 for intrinsic in overrides.node_intrinsics.iter().filter(|intrinsic| {
                     intrinsic.group == self.node.name && intrinsic.instance == idx
@@ -3194,6 +3581,9 @@ impl GraphManifest {
                     if let Some(value) = intrinsic.neural_group {
                         neural_group = value.min(NEURAL_GROUP_MAX - 1);
                     }
+                    if let Some(value) = &intrinsic.process_chain {
+                        process_chain = value.clone();
+                    }
                 }
                 for param in overrides
                     .node_params
@@ -3224,6 +3614,7 @@ impl GraphManifest {
                 duration,
                 swing,
                 neural_group,
+                process_chain,
             });
         }
 
@@ -3306,6 +3697,16 @@ impl GraphManifest {
             .filter(|value| value.is_finite())
             .map(|value| value.clamp(0.0, 1.0))
             .unwrap_or(GROUP_TRACE_DECAY_DEFAULT);
+        config.group_coupling_scale = overrides
+            .and_then(|o| o.group_coupling_scale)
+            .filter(|value| value.is_finite())
+            .map(|value| value.clamp(0.0, GROUP_COUPLING_SCALE_MAX))
+            .unwrap_or(GROUP_COUPLING_SCALE_DEFAULT);
+        config.group_excite_floor = overrides
+            .and_then(|o| o.group_excite_floor)
+            .filter(|value| value.is_finite())
+            .map(|value| value.clamp(0.0, 1.0))
+            .unwrap_or(GROUP_EXCITE_FLOOR_DEFAULT);
         config.node_param_ranges = self
             .node
             .params
@@ -3396,6 +3797,7 @@ mod tests {
                 duration: None,
                 swing: None,
                 neural_group: None,
+                process_chain: None,
             }
         };
         let mut owned = ProjectGraphOverrides {
@@ -4322,6 +4724,98 @@ mod tests {
     }
 
     #[test]
+    fn group_coupling_scale_zero_neutralizes_the_h_matrix() {
+        // Same patch as the suppression test with H[A][B] = 2 (blocks B), but
+        // the global scale at 0 must make the layer inert again, while the
+        // default scale of 1 keeps the block.
+        let build = |scale: f64| {
+            let mut n0 = node(Timebase::Quarter);
+            n0.threshold = 0.5;
+            let mut n1 = node(Timebase::Quarter);
+            n1.threshold = 0.5;
+            n1.neural_group = 1;
+            let mut config = runtime_config(
+                14,
+                vec![n0, n1],
+                vec![GraphEdge::new(0, 0, 1.0), GraphEdge::new(0, 1, 0.3)],
+            );
+            config.node_params = vec![
+                HashMap::from([("threshold".to_string(), 0.5)]),
+                HashMap::from([("threshold".to_string(), 0.5)]),
+            ];
+            config.group_coupling[group_cell(0, 1)] = 2.0;
+            config.group_trace_decay = 1.0;
+            config.group_coupling_scale = scale;
+            let mut runtime = GraphRuntime::new_from_config(config);
+            runtime.push_propagation(0, 0.0, GraphPayload::default());
+            runtime
+        };
+
+        let mut off = build(0.0);
+        let fired: Vec<usize> = run_on_params(&mut off, 4.0)
+            .iter()
+            .map(|e| e.node_index)
+            .collect();
+        assert!(fired.contains(&1), "scale 0 must neutralize H: {fired:?}");
+
+        let mut full = build(GROUP_COUPLING_SCALE_DEFAULT);
+        let fired: Vec<usize> = run_on_params(&mut full, 4.0)
+            .iter()
+            .map(|e| e.node_index)
+            .collect();
+        assert!(
+            fired.iter().all(|&idx| idx == 0),
+            "scale 1 keeps the suppression: {fired:?}"
+        );
+    }
+
+    #[test]
+    fn group_excite_floor_keeps_excited_nodes_from_firing_on_zero_energy() {
+        // Node 0 (group A) fires every beat off its self-loop and is the only
+        // source of group activity. Node 1 (group B) has NO incoming edge, so its
+        // energy stays at zero; H[A][B] = -2 excites B hard. With the floor at 0
+        // (spec's original lever) B fires on nothing; with the default floor it
+        // cannot, because θ_eff never drops below a quarter of its authored 0.5.
+        let build = |floor: f64| {
+            let mut n0 = node(Timebase::Quarter);
+            n0.threshold = 0.5;
+            let mut n1 = node(Timebase::Quarter);
+            n1.threshold = 0.5;
+            n1.neural_group = 1;
+            let mut config =
+                runtime_config(15, vec![n0, n1], vec![GraphEdge::new(0, 0, 1.0)]);
+            config.node_params = vec![
+                HashMap::from([("threshold".to_string(), 0.5)]),
+                HashMap::from([("threshold".to_string(), 0.5)]),
+            ];
+            config.group_coupling[group_cell(0, 1)] = -2.0;
+            config.group_trace_decay = 1.0;
+            config.group_excite_floor = floor;
+            let mut runtime = GraphRuntime::new_from_config(config);
+            runtime.push_propagation(0, 0.0, GraphPayload::default());
+            runtime
+        };
+
+        let mut lever = build(0.0);
+        let fired: Vec<usize> = run_on_params(&mut lever, 4.0)
+            .iter()
+            .map(|e| e.node_index)
+            .collect();
+        assert!(fired.contains(&1), "floor 0 keeps the wake-up lever: {fired:?}");
+
+        let mut floored = build(GROUP_EXCITE_FLOOR_DEFAULT);
+        let fired: Vec<usize> = run_on_params(&mut floored, 4.0)
+            .iter()
+            .map(|e| e.node_index)
+            .collect();
+        assert!(
+            fired.iter().all(|&idx| idx == 0),
+            "an undriven excited node must not fire: {fired:?}"
+        );
+        assert!(floored.effective_threshold(1) >= 0.5 * GROUP_EXCITE_FLOOR_DEFAULT - 1e-9);
+    }
+
+    #[test]
     fn group_activity_trace_normalizes_by_member_count_and_decays() {
         // Two group-B members firing once each in the same boundary add 0.5 apiece
         // (member-count normalization, spec §4.4), driven through reset seeding.
@@ -5217,6 +5711,228 @@ mod tests {
     }
 
     #[test]
+    fn max_poly_markov_selection_follows_the_previous_winner_edge() {
+        // Boundary 1: node 0 fires alone. Boundary 2: nodes 1 and 2 both want to
+        // fire with max-poly 1. Only 0→2 carries weight, so markov must pick 2 for
+        // every random stream (`weighted_sample_never_repeats_and_prefers_heavy_weights`
+        // covers the sampler itself).
+        let build = |id: u64, mode: NeuralMaxPolySelection| {
+            let nodes = (0..3).map(|_| node(Timebase::Quarter)).collect();
+            let mut runtime = GraphRuntime::new_with_config(
+                id,
+                "g".into(),
+                nodes,
+                vec![GraphEdge::new(0, 2, 0.6), GraphEdge::new(0, 1, 0.0)],
+                1.0,
+                0.0,
+                0,
+                mode,
+                GraphDurationSpec::default(),
+                GraphSwingSpec::default(),
+                Vec::new(),
+            );
+            runtime.push_propagation(0, 0.0, GraphPayload::default());
+            runtime.push_propagation(1, 1.0, GraphPayload::default());
+            runtime.push_propagation(2, 1.0, GraphPayload::default());
+            runtime
+        };
+        let winners = |mode: NeuralMaxPolySelection| -> Vec<usize> {
+            (1..=12)
+                .map(|id| {
+                    let mut runtime = build(id, mode);
+                    let out = run(&mut runtime, 2.0, 1, vec![0.5; 3]);
+                    let second: Vec<usize> = out
+                        .iter()
+                        .filter(|e| e.node_index != 0)
+                        .map(|e| e.node_index)
+                        .collect();
+                    assert_eq!(second.len(), 1, "one survivor at the second boundary: {out:?}");
+                    second[0]
+                })
+                .collect()
+        };
+        assert!(winners(NeuralMaxPolySelection::Markov).iter().all(|&n| n == 2));
+    }
+
+    #[test]
+    fn weighted_sample_never_repeats_and_prefers_heavy_weights() {
+        let nodes = (0..1).map(|_| node(Timebase::Quarter)).collect();
+        let mut runtime = GraphRuntime::new(7, "g".into(), nodes, Vec::new(), 1.0, 0.0);
+        let weights = [0.0, 100.0, 1.0];
+        let picks = runtime.weighted_sample_without_replacement(&weights, 3);
+        let mut sorted = picks.clone();
+        sorted.sort_unstable();
+        assert_eq!(sorted, vec![0, 1, 2], "every index drawn exactly once");
+        assert_eq!(picks[0], 1, "the dominant weight is drawn first");
+        assert_eq!(picks[2], 0, "zero weight is drawn last");
+    }
+
+    /// Driver whose emit hook shifts node 0 up a fifth and mutes node 1, standing
+    /// in for a scheduler-run process patch.
+    struct ShiftAndMuteDriver;
+    impl GraphDriver for ShiftAndMuteDriver {
+        fn update(&mut self, eval: &NodeEval) -> NodeFire {
+            NodeFire {
+                fired: eval.energy >= 0.5,
+                ..NodeFire::default()
+            }
+        }
+        fn emit(&mut self, ctx: &NodeEmitContext, payload: &mut GraphPayload) -> bool {
+            match ctx.node_index {
+                1 => {
+                    payload.note += 7.0;
+                    true
+                }
+                2 => false,
+                _ => true,
+            }
+        }
+    }
+
+    fn node_with_patch() -> GraphNode {
+        let mut node = node(Timebase::Quarter);
+        node.process_chain.slots.push(crate::process::TrackProcessSlot {
+            instance_id: crate::process::ProcessInstanceId(77),
+            instance_name: None,
+            class_name: "stand-in".to_string(),
+            enabled: true,
+            project_layer: false,
+            inlets: Default::default(),
+            lanes: Default::default(),
+            fanout: Default::default(),
+            unbound_ports: Default::default(),
+            bindings: Default::default(),
+        });
+        node
+    }
+
+    #[test]
+    fn node_process_patch_edits_ride_the_scatter_and_veto_only_mutes() {
+        // 0 → 1 → 2 → 3 chain; a seed deposits along node 0's out-edge, so node 0
+        // is only the source. Node 1's patch adds +7 to the note: the emission AND
+        // what node 2 receives carry it. Node 2's patch vetoes: no emission, but
+        // node 2 still fires (energy zeroed) and scatters to node 3, which emits
+        // the shifted note. Nodes without a patch never call the hook.
+        let mut n0 = node(Timebase::Quarter);
+        n0.seed_track_mask = seed_track_mask(&[0]);
+        let nodes = vec![n0, node_with_patch(), node_with_patch(), node(Timebase::Quarter)];
+        let mut runtime = GraphRuntime::new(
+            3,
+            "g".into(),
+            nodes,
+            vec![
+                GraphEdge::new(0, 1, 1.0),
+                GraphEdge::new(1, 2, 1.0),
+                GraphEdge::new(2, 3, 1.0),
+            ],
+            1.0,
+            0.0,
+        );
+        runtime.seed(0, 0.0, GraphPayload { note: 2.0, ..GraphPayload::default() });
+        let mut out = Vec::new();
+        runtime.process_block_with_driver(0.0, 4.0, 0, 48_000.0, 0, ShiftAndMuteDriver, &mut out);
+        let fired: Vec<(usize, f32)> = out
+            .iter()
+            .map(|e| (e.node_index, e.event.resolved.transpose))
+            .collect();
+        assert_eq!(fired, vec![(1, 9.0), (3, 9.0)], "muted node 2 emits nothing: {fired:?}");
+        assert!((runtime.energy(2)).abs() < 1e-9, "the vetoed fire still zeroed node 2");
+    }
+
+    #[test]
+    fn node_process_chain_override_round_trips_and_stays_absent_when_empty() {
+        let mut with_chain = ProjectGraphNodeIntrinsicOverride {
+            group: "nrn".to_string(),
+            instance: 2,
+            resolution: None,
+            delay_steps: None,
+            quantize: None,
+            route: None,
+            seed_from: None,
+            seed_on_reset: None,
+            duration: None,
+            swing: None,
+            neural_group: None,
+            process_chain: None,
+        };
+        let json = serde_json::to_string(&with_chain).unwrap();
+        assert!(!json.contains("process_chain"), "empty chain is not serialized: {json}");
+        with_chain.process_chain = Some(node_with_patch().process_chain.clone());
+        let json = serde_json::to_string(&with_chain).unwrap();
+        let back: ProjectGraphNodeIntrinsicOverride = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, with_chain);
+        assert_eq!(
+            back.process_chain.as_ref().unwrap().slots[0].class_name,
+            "stand-in"
+        );
+    }
+
+    #[test]
+    fn emit_context_carries_each_nodes_recent_emitted_notes() {
+        // Node 0 fires every beat off its self-loop with note 3; node 1 (patched)
+        // fires from 0's scatter. On node 1's fires the emit context must show
+        // node 0's notes so far, capped at NEURON_RECENT_NOTES, and a reset
+        // clears them.
+        struct Capture(Vec<Vec<Vec<f32>>>);
+        impl GraphDriver for Capture {
+            fn update(&mut self, eval: &NodeEval) -> NodeFire {
+                NodeFire { fired: eval.energy >= 0.5, ..NodeFire::default() }
+            }
+            fn emit(&mut self, ctx: &NodeEmitContext, _payload: &mut GraphPayload) -> bool {
+                self.0.push(ctx.neuron_recent_notes.clone());
+                true
+            }
+        }
+        let mut n0 = node(Timebase::Quarter);
+        n0.seed_track_mask = seed_track_mask(&[0]);
+        let mut runtime = GraphRuntime::new(
+            5,
+            "g".into(),
+            vec![n0, node_with_patch()],
+            vec![GraphEdge::new(0, 0, 1.0), GraphEdge::new(0, 1, 1.0)],
+            1.0,
+            0.0,
+        );
+        runtime.seed(0, 0.0, GraphPayload { note: 3.0, ..GraphPayload::default() });
+        let mut driver = Capture(Vec::new());
+        let mut out = Vec::new();
+        runtime.process_block_with_driver(0.0, 12.0, 0, 48_000.0, 0, &mut driver, &mut out);
+        assert!(driver.0.len() >= 10, "node 1 fired repeatedly: {}", driver.0.len());
+        let first = &driver.0[0][0];
+        assert_eq!(first, &vec![3.0], "node 0 had emitted once when node 1 first fired");
+        let last = &driver.0[driver.0.len() - 1][0];
+        assert_eq!(last.len(), NEURON_RECENT_NOTES, "capped: {last:?}");
+        assert!(last.iter().all(|n| *n == 3.0));
+        runtime.reset(12.0);
+        assert!(runtime.node_recent_notes.iter().all(|n| n.is_empty()));
+    }
+
+    #[test]
+    fn empty_process_chain_never_calls_the_emit_hook() {
+        struct PanicOnEmit;
+        impl GraphDriver for PanicOnEmit {
+            fn update(&mut self, eval: &NodeEval) -> NodeFire {
+                NodeFire { fired: eval.energy >= 0.5, ..NodeFire::default() }
+            }
+            fn emit(&mut self, _ctx: &NodeEmitContext, _payload: &mut GraphPayload) -> bool {
+                panic!("emit hook must not run for a node without a patch");
+            }
+        }
+        let mut runtime = GraphRuntime::new(
+            4,
+            "g".into(),
+            vec![node(Timebase::Quarter)],
+            vec![GraphEdge::new(0, 0, 1.0)],
+            1.0,
+            0.0,
+        );
+        runtime.push_propagation(0, 0.0, GraphPayload::default());
+        let mut out = Vec::new();
+        runtime.process_block_with_driver(0.0, 2.0, 0, 48_000.0, 0, PanicOnEmit, &mut out);
+        assert!(!out.is_empty());
+    }
+
+    #[test]
     fn seed_from_can_differ_from_route() {
         let mut n0 = node(Timebase::Quarter);
         n0.seed_track_mask = seed_track_mask(&[0]);
@@ -5513,6 +6229,7 @@ mod tests {
                 duration: None,
                 swing: None,
                 neural_group,
+                process_chain: None,
             };
         let overrides = ProjectGraphOverrides {
             sequencer_id: manifest.id,
@@ -5590,6 +6307,7 @@ mod tests {
                 duration: None,
                 swing: None,
                 neural_group: None,
+                process_chain: None,
             }],
             node_params: vec![ProjectGraphNodeParamOverride {
                 group: "nrn".into(),

@@ -865,6 +865,7 @@
                 duration: None,
                 swing: None,
                 neural_group: None,
+                process_chain: None,
             }],
             node_params: Vec::new(),
             edge_params: Vec::new(),
@@ -875,6 +876,8 @@
             group_gain: None,
             group_coupling: None,
             group_trace_decay: None,
+            group_coupling_scale: None,
+            group_excite_floor: None,
         }
     }
 
@@ -3324,6 +3327,8 @@
                             resolved: test_resolved_step(),
                             note: 0.0,
                             event: Value::Nil,
+                            fire_seed: None,
+                            after_reset: false,
                         },
                     ) else {
                         continue;
@@ -6310,6 +6315,1496 @@
             .expect("scheduler routing harness panicked");
     }
 
+    /// Node process patches (docs/graph-node-processes-spec.md). The track-0
+    /// seed deposits along node 0's out-edge (node 0 is only the source). A
+    /// shift on node 1 rides the scatter into nodes 2 and 3; a veto on node 2
+    /// mutes its emission only, so node 3 still fires with the shifted note.
+    #[test]
+    fn node_process_patch_shift_rides_scatter_and_veto_mutes_only_the_emission() {
+        run_with_scheduler_stack(|| {
+            let state = Arc::new(SequencerState::new(
+                3,
+                (0..3).map(|_| default_empty_effect_chain()).collect(),
+            ));
+            state.toggle_play();
+            state.toggle_step_and_clear_plocks(0, 0);
+            state.set_step_param(0, 0, StepParam::Transpose, 2.0);
+
+            publish_test_graph_sequencer(
+                Arc::clone(&state),
+                r#"
+                (def-sequencer "node-patch-graph"
+                  :shape (line 4)
+                  :energy-decay 1
+                  :reset-every 0
+                  :seed-on-reset 0
+                  :max-poly 8
+                  :max-poly-selection :deterministic
+                  :duration (steps 1)
+                  (def-node nrn
+                    :resolution :16
+                    :delay 1
+                    :quantize :16
+                    :route 1
+                    :seed-from 0
+                    :reduce :sum
+                    :params ((threshold :float 0 4 :default 0.5))
+                    :state ((energy :leak (per-step :energy-decay)))
+                    :update (if (>= (energy) (param :threshold))
+                              (emit :note (in-note) :vel (in-vel))
+                              false))
+                  (edges
+                    :from nrn
+                    :to nrn
+                    :topology (all-to-all)
+                    :gather (edge :weight)
+                    :params ((weight :float -1 1 :default 0))))
+                "#,
+            );
+            let published = state
+                .published_sequencers()
+                .into_iter()
+                .find(|seq| seq.name == "node-patch-graph")
+                .expect("published graph");
+            let manifest = published.graph.as_ref().expect("graph manifest");
+            let edge_group = crate::graph::edge_set_group_id(&manifest.edge_sets[0]);
+            let slot = |id: u64, class: &str| crate::process::TrackProcessSlot {
+                instance_id: crate::process::ProcessInstanceId(id),
+                instance_name: None,
+                class_name: class.to_string(),
+                enabled: true,
+                project_layer: false,
+                inlets: Default::default(),
+                lanes: Default::default(),
+                fanout: Default::default(),
+                unbound_ports: Default::default(),
+                bindings: Default::default(),
+            };
+            let intrinsic = |instance: usize,
+                             seed: Option<ProjectGraphSeedFrom>,
+                             chain: Option<crate::process::TrackProcessChain>| {
+                ProjectGraphNodeIntrinsicOverride {
+                    group: "nrn".to_string(),
+                    instance,
+                    resolution: None,
+                    delay_steps: None,
+                    quantize: None,
+                    route: None,
+                    seed_from: seed,
+                    seed_on_reset: None,
+                    duration: None,
+                    swing: None,
+                    neural_group: None,
+                    process_chain: chain,
+                }
+            };
+            state
+                .edit_current_graph_overrides(|graphs| {
+                    graphs.push(ProjectGraphOverrides {
+                        sequencer_id: published.id,
+                        sequencer_name: published.name.clone(),
+                        owner_rack: None,
+                        node_intrinsics: vec![
+                            intrinsic(0, None, None),
+                            intrinsic(
+                                1,
+                                Some(ProjectGraphSeedFrom::Tracks(Vec::new())),
+                                Some(crate::process::TrackProcessChain {
+                                    slots: vec![slot(9001, "node-shift-test")],
+                                }),
+                            ),
+                            intrinsic(
+                                2,
+                                Some(ProjectGraphSeedFrom::Tracks(Vec::new())),
+                                Some(crate::process::TrackProcessChain {
+                                    slots: vec![slot(9002, "node-mute-test")],
+                                }),
+                            ),
+                            intrinsic(3, Some(ProjectGraphSeedFrom::Tracks(Vec::new())), None),
+                        ],
+                        node_params: Vec::new(),
+                        edge_params: vec![
+                            ProjectGraphEdgeParamOverride {
+                                group: edge_group.clone(),
+                                from: 0,
+                                to: 1,
+                                param: "weight".to_string(),
+                                value: 1.0,
+                            },
+                            ProjectGraphEdgeParamOverride {
+                                group: edge_group.clone(),
+                                from: 1,
+                                to: 2,
+                                param: "weight".to_string(),
+                                value: 1.0,
+                            },
+                            ProjectGraphEdgeParamOverride {
+                                group: edge_group,
+                                from: 2,
+                                to: 3,
+                                param: "weight".to_string(),
+                                value: 1.0,
+                            },
+                        ],
+                        reset_every_beats: None,
+                        max_poly: None,
+                        max_poly_selection: None,
+                        node_count: None,
+                        group_gain: None,
+                        group_coupling: None,
+                        group_trace_decay: None,
+                        group_coupling_scale: None,
+                        group_excite_floor: None,
+                    });
+                    Ok(())
+                })
+                .expect("install node patch overrides");
+
+            let snapshot = state.publish_scheduler_snapshot();
+            let mut scheduler = SchedulerLookaheadState::new(48_000);
+            let manifests = state
+                .published_sequencers()
+                .into_iter()
+                .filter_map(|seq| seq.graph)
+                .collect::<Vec<_>>();
+            reconcile_graph_runtimes(
+                manifests,
+                &snapshot.graph_overrides,
+                &[],
+                &mut scheduler.graph_runtimes,
+                &mut scheduler.graph_manifests,
+                scheduler.clock.total_beats,
+            );
+            let mut scratch = lisp_host::scratch_runtime_with_fallbacks(Arc::clone(&state), 0, 0);
+            scratch
+                .eval(&lisp_host::load_midi_fx_library_source())
+                .expect("load MIDI FX library");
+            scratch
+                .eval(
+                    r#"
+                    (def-process node-shift-test
+                      :target (step-param :transpose)
+                      :run (target-add! 7))
+                    (def-process node-mute-test
+                      :run (veto!))
+                    "#,
+                )
+                .expect("define node patch processes");
+            scheduler
+                .process_runtime
+                .sync_authoring(scratch.process_authoring_snapshot(), 0.0);
+            let mut scratch_runtime = Some(scratch);
+            let queue = ScheduledEventQueue::<64>::new();
+            let live_midi_fx_tracks: [LiveMidiFxTrackState; MAX_TRACKS] =
+                std::array::from_fn(|_| LiveMidiFxTrackState::default());
+            let samples_per_quarter = 48_000.0 * 60.0 / snapshot.transport.bpm as f64;
+            schedule_playing_lookahead(
+                &mut scheduler,
+                &state,
+                &snapshot,
+                &queue,
+                &mut scratch_runtime,
+                &live_midi_fx_tracks,
+                snapshot.transport.pattern_epoch,
+                0,
+                48_000,
+                48_000,
+                12_000,
+                samples_per_quarter,
+                0,
+                false,
+                false,
+            );
+            let events = observed_triggers(&queue);
+            let mut network: Vec<(u64, f32)> = events
+                .iter()
+                .filter(|event| event.kind == ScheduledTriggerKind::Network && event.track == 1)
+                .map(|event| (event.sample_time, event.transpose))
+                .collect();
+            network.sort_by_key(|(sample, _)| *sample);
+            assert_eq!(
+                network.len(),
+                2,
+                "node 1 and node 3 emit, muted node 2 does not: {events:#?}"
+            );
+            assert!(
+                network.iter().all(|(_, transpose)| (*transpose - 9.0).abs() < 1e-6),
+                "seed 2 + node 1's +7 rides the scatter through the muted node: {network:?}"
+            );
+            assert!(network[1].0 > network[0].0, "node 3 fires after node 1: {network:?}");
+        });
+    }
+
+    /// seed deposits along node 0's out-edge (node 0 is only the source). A
+    /// shift on node 1 rides the scatter into nodes 2 and 3; a veto on node 2
+    /// mutes its emission only, so node 3 still fires with the shifted note.
+    #[test]
+    fn node_process_patch_builtin_prob_mask_vetoes_at_zero_probability() {
+        run_with_scheduler_stack(|| {
+            let state = Arc::new(SequencerState::new(
+                3,
+                (0..3).map(|_| default_empty_effect_chain()).collect(),
+            ));
+            state.toggle_play();
+            state.toggle_step_and_clear_plocks(0, 0);
+            state.set_step_param(0, 0, StepParam::Transpose, 2.0);
+
+            publish_test_graph_sequencer(
+                Arc::clone(&state),
+                r#"
+                (def-sequencer "node-patch-graph"
+                  :shape (line 4)
+                  :energy-decay 1
+                  :reset-every 0
+                  :seed-on-reset 0
+                  :max-poly 8
+                  :max-poly-selection :deterministic
+                  :duration (steps 1)
+                  (def-node nrn
+                    :resolution :16
+                    :delay 1
+                    :quantize :16
+                    :route 1
+                    :seed-from 0
+                    :reduce :sum
+                    :params ((threshold :float 0 4 :default 0.5))
+                    :state ((energy :leak (per-step :energy-decay)))
+                    :update (if (>= (energy) (param :threshold))
+                              (emit :note (in-note) :vel (in-vel))
+                              false))
+                  (edges
+                    :from nrn
+                    :to nrn
+                    :topology (all-to-all)
+                    :gather (edge :weight)
+                    :params ((weight :float -1 1 :default 0))))
+                "#,
+            );
+            let published = state
+                .published_sequencers()
+                .into_iter()
+                .find(|seq| seq.name == "node-patch-graph")
+                .expect("published graph");
+            let manifest = published.graph.as_ref().expect("graph manifest");
+            let edge_group = crate::graph::edge_set_group_id(&manifest.edge_sets[0]);
+            let slot = |id: u64, class: &str| crate::process::TrackProcessSlot {
+                instance_id: crate::process::ProcessInstanceId(id),
+                instance_name: None,
+                class_name: class.to_string(),
+                enabled: true,
+                project_layer: false,
+                inlets: Default::default(),
+                lanes: Default::default(),
+                fanout: Default::default(),
+                unbound_ports: Default::default(),
+                bindings: Default::default(),
+            };
+            let intrinsic = |instance: usize,
+                             seed: Option<ProjectGraphSeedFrom>,
+                             chain: Option<crate::process::TrackProcessChain>| {
+                ProjectGraphNodeIntrinsicOverride {
+                    group: "nrn".to_string(),
+                    instance,
+                    resolution: None,
+                    delay_steps: None,
+                    quantize: None,
+                    route: None,
+                    seed_from: seed,
+                    seed_on_reset: None,
+                    duration: None,
+                    swing: None,
+                    neural_group: None,
+                    process_chain: chain,
+                }
+            };
+            state
+                .edit_current_graph_overrides(|graphs| {
+                    graphs.push(ProjectGraphOverrides {
+                        sequencer_id: published.id,
+                        sequencer_name: published.name.clone(),
+                        owner_rack: None,
+                        node_intrinsics: vec![
+                            intrinsic(0, None, None),
+                            intrinsic(
+                                1,
+                                Some(ProjectGraphSeedFrom::Tracks(Vec::new())),
+                                Some(crate::process::TrackProcessChain {
+                                    slots: vec![slot(9001, "node-shift-test")],
+                                }),
+                            ),
+                            intrinsic(
+                                2,
+                                Some(ProjectGraphSeedFrom::Tracks(Vec::new())),
+                                Some(crate::process::TrackProcessChain {
+                                    slots: vec![{ let mut s = slot(9002, "prob-mask"); s.inlets.insert("prob".to_string(), crate::process::ProcessLiteral::Number(0.0)); s }],
+                                }),
+                            ),
+                            intrinsic(3, Some(ProjectGraphSeedFrom::Tracks(Vec::new())), None),
+                        ],
+                        node_params: Vec::new(),
+                        edge_params: vec![
+                            ProjectGraphEdgeParamOverride {
+                                group: edge_group.clone(),
+                                from: 0,
+                                to: 1,
+                                param: "weight".to_string(),
+                                value: 1.0,
+                            },
+                            ProjectGraphEdgeParamOverride {
+                                group: edge_group.clone(),
+                                from: 1,
+                                to: 2,
+                                param: "weight".to_string(),
+                                value: 1.0,
+                            },
+                            ProjectGraphEdgeParamOverride {
+                                group: edge_group,
+                                from: 2,
+                                to: 3,
+                                param: "weight".to_string(),
+                                value: 1.0,
+                            },
+                        ],
+                        reset_every_beats: None,
+                        max_poly: None,
+                        max_poly_selection: None,
+                        node_count: None,
+                        group_gain: None,
+                        group_coupling: None,
+                        group_trace_decay: None,
+                        group_coupling_scale: None,
+                        group_excite_floor: None,
+                    });
+                    Ok(())
+                })
+                .expect("install node patch overrides");
+
+            let snapshot = state.publish_scheduler_snapshot();
+            let mut scheduler = SchedulerLookaheadState::new(48_000);
+            let manifests = state
+                .published_sequencers()
+                .into_iter()
+                .filter_map(|seq| seq.graph)
+                .collect::<Vec<_>>();
+            reconcile_graph_runtimes(
+                manifests,
+                &snapshot.graph_overrides,
+                &[],
+                &mut scheduler.graph_runtimes,
+                &mut scheduler.graph_manifests,
+                scheduler.clock.total_beats,
+            );
+            let mut scratch = lisp_host::scratch_runtime_with_fallbacks(Arc::clone(&state), 0, 0);
+            scratch
+                .eval(&lisp_host::load_midi_fx_library_source())
+                .expect("load MIDI FX library");
+            scratch
+                .eval(&lisp_host::load_process_library_source())
+                .expect("load builtin process library");
+            scratch
+                .eval(
+                    r#"
+                    (def-process node-shift-test
+                      :target (step-param :transpose)
+                      :run (target-add! 7))
+                    "#,
+                )
+                .expect("define node patch processes");
+            scheduler
+                .process_runtime
+                .sync_authoring(scratch.process_authoring_snapshot(), 0.0);
+            let mut scratch_runtime = Some(scratch);
+            let queue = ScheduledEventQueue::<64>::new();
+            let live_midi_fx_tracks: [LiveMidiFxTrackState; MAX_TRACKS] =
+                std::array::from_fn(|_| LiveMidiFxTrackState::default());
+            let samples_per_quarter = 48_000.0 * 60.0 / snapshot.transport.bpm as f64;
+            schedule_playing_lookahead(
+                &mut scheduler,
+                &state,
+                &snapshot,
+                &queue,
+                &mut scratch_runtime,
+                &live_midi_fx_tracks,
+                snapshot.transport.pattern_epoch,
+                0,
+                48_000,
+                48_000,
+                12_000,
+                samples_per_quarter,
+                0,
+                false,
+                false,
+            );
+            let events = observed_triggers(&queue);
+            let mut network: Vec<(u64, f32)> = events
+                .iter()
+                .filter(|event| event.kind == ScheduledTriggerKind::Network && event.track == 1)
+                .map(|event| (event.sample_time, event.transpose))
+                .collect();
+            network.sort_by_key(|(sample, _)| *sample);
+            assert_eq!(
+                network.len(),
+                2,
+                "node 1 and node 3 emit, muted node 2 does not: {events:#?}"
+            );
+            assert!(
+                network.iter().all(|(_, transpose)| (*transpose - 9.0).abs() < 1e-6),
+                "seed 2 + node 1's +7 rides the scatter through the muted node: {network:?}"
+            );
+            assert!(network[1].0 > network[0].0, "node 3 fires after node 1: {network:?}");
+        });
+    }
+
+    #[test]
+    fn node_process_patch_prob_mask_added_through_natives_vetoes() {
+        run_with_scheduler_stack(|| {
+            let state = Arc::new(SequencerState::new(
+                3,
+                (0..3).map(|_| default_empty_effect_chain()).collect(),
+            ));
+            state.toggle_play();
+            state.toggle_step_and_clear_plocks(0, 0);
+            state.set_step_param(0, 0, StepParam::Transpose, 2.0);
+
+            publish_test_graph_sequencer(
+                Arc::clone(&state),
+                r#"
+                (def-sequencer "node-patch-graph"
+                  :shape (line 4)
+                  :energy-decay 1
+                  :reset-every 0
+                  :seed-on-reset 0
+                  :max-poly 8
+                  :max-poly-selection :deterministic
+                  :duration (steps 1)
+                  (def-node nrn
+                    :resolution :16
+                    :delay 1
+                    :quantize :16
+                    :route 1
+                    :seed-from 0
+                    :reduce :sum
+                    :params ((threshold :float 0 4 :default 0.5))
+                    :state ((energy :leak (per-step :energy-decay)))
+                    :update (if (>= (energy) (param :threshold))
+                              (emit :note (in-note) :vel (in-vel))
+                              false))
+                  (edges
+                    :from nrn
+                    :to nrn
+                    :topology (all-to-all)
+                    :gather (edge :weight)
+                    :params ((weight :float -1 1 :default 0))))
+                "#,
+            );
+            let published = state
+                .published_sequencers()
+                .into_iter()
+                .find(|seq| seq.name == "node-patch-graph")
+                .expect("published graph");
+            let manifest = published.graph.as_ref().expect("graph manifest");
+            let edge_group = crate::graph::edge_set_group_id(&manifest.edge_sets[0]);
+            let slot = |id: u64, class: &str| crate::process::TrackProcessSlot {
+                instance_id: crate::process::ProcessInstanceId(id),
+                instance_name: None,
+                class_name: class.to_string(),
+                enabled: true,
+                project_layer: false,
+                inlets: Default::default(),
+                lanes: Default::default(),
+                fanout: Default::default(),
+                unbound_ports: Default::default(),
+                bindings: Default::default(),
+            };
+            let intrinsic = |instance: usize,
+                             seed: Option<ProjectGraphSeedFrom>,
+                             chain: Option<crate::process::TrackProcessChain>| {
+                ProjectGraphNodeIntrinsicOverride {
+                    group: "nrn".to_string(),
+                    instance,
+                    resolution: None,
+                    delay_steps: None,
+                    quantize: None,
+                    route: None,
+                    seed_from: seed,
+                    seed_on_reset: None,
+                    duration: None,
+                    swing: None,
+                    neural_group: None,
+                    process_chain: chain,
+                }
+            };
+            state
+                .edit_current_graph_overrides(|graphs| {
+                    graphs.push(ProjectGraphOverrides {
+                        sequencer_id: published.id,
+                        sequencer_name: published.name.clone(),
+                        owner_rack: None,
+                        node_intrinsics: vec![
+                            intrinsic(0, None, None),
+                            intrinsic(
+                                1,
+                                Some(ProjectGraphSeedFrom::Tracks(Vec::new())),
+                                Some(crate::process::TrackProcessChain {
+                                    slots: vec![slot(9001, "node-shift-test")],
+                                }),
+                            ),
+                            intrinsic(
+                                2,
+                                Some(ProjectGraphSeedFrom::Tracks(Vec::new())),
+                                None,
+                            ),
+                            intrinsic(3, Some(ProjectGraphSeedFrom::Tracks(Vec::new())), None),
+                        ],
+                        node_params: Vec::new(),
+                        edge_params: vec![
+                            ProjectGraphEdgeParamOverride {
+                                group: edge_group.clone(),
+                                from: 0,
+                                to: 1,
+                                param: "weight".to_string(),
+                                value: 1.0,
+                            },
+                            ProjectGraphEdgeParamOverride {
+                                group: edge_group.clone(),
+                                from: 1,
+                                to: 2,
+                                param: "weight".to_string(),
+                                value: 1.0,
+                            },
+                            ProjectGraphEdgeParamOverride {
+                                group: edge_group,
+                                from: 2,
+                                to: 3,
+                                param: "weight".to_string(),
+                                value: 1.0,
+                            },
+                        ],
+                        reset_every_beats: None,
+                        max_poly: None,
+                        max_poly_selection: None,
+                        node_count: None,
+                        group_gain: None,
+                        group_coupling: None,
+                        group_trace_decay: None,
+                        group_coupling_scale: None,
+                        group_excite_floor: None,
+                    });
+                    Ok(())
+                })
+                .expect("install node patch overrides");
+            {
+                // The app's UI scratch runtime publishes the builtin process
+                // defs when it loads the library; do the same before the
+                // natives look a class up.
+                let mut publisher = lisp_host::scratch_runtime_with_fallbacks(Arc::clone(&state), 0, 0);
+                publisher
+                    .eval(&lisp_host::load_process_library_source())
+                    .expect("publish builtin process library");
+                state.publish_process_authoring(
+                    publisher.process_authoring_snapshot().to_published().expect("publishable"),
+                );
+                let mut ui = Runtime::new();
+                crate::lisp_host::register_graph_authoring_natives(&mut ui, Arc::clone(&state));
+                let id = ui
+                    .eval_str("(graph-node-process-add \"node-patch-graph\" 2 \"prob-mask\")")
+                    .expect("add prob-mask through the native");
+                let Some(Value::Number(id)) = id else { panic!("add returns id: {id:?}") };
+                ui.eval_str(&format!("(graph-node-process-inlet \"node-patch-graph\" 2 {id} :prob 0.0)"))
+                    .expect("set prob through the native");
+            }
+
+            let snapshot = state.publish_scheduler_snapshot();
+            let mut scheduler = SchedulerLookaheadState::new(48_000);
+            let manifests = state
+                .published_sequencers()
+                .into_iter()
+                .filter_map(|seq| seq.graph)
+                .collect::<Vec<_>>();
+            reconcile_graph_runtimes(
+                manifests,
+                &snapshot.graph_overrides,
+                &[],
+                &mut scheduler.graph_runtimes,
+                &mut scheduler.graph_manifests,
+                scheduler.clock.total_beats,
+            );
+            let mut scratch = lisp_host::scratch_runtime_with_fallbacks(Arc::clone(&state), 0, 0);
+            scratch
+                .eval(&lisp_host::load_midi_fx_library_source())
+                .expect("load MIDI FX library");
+            scratch
+                .eval(&lisp_host::load_process_library_source())
+                .expect("load builtin process library");
+            scratch
+                .eval(
+                    r#"
+                    (def-process node-shift-test
+                      :target (step-param :transpose)
+                      :run (target-add! 7))
+                    "#,
+                )
+                .expect("define node patch processes");
+            scheduler
+                .process_runtime
+                .sync_authoring(scratch.process_authoring_snapshot(), 0.0);
+            let mut scratch_runtime = Some(scratch);
+            let queue = ScheduledEventQueue::<64>::new();
+            let live_midi_fx_tracks: [LiveMidiFxTrackState; MAX_TRACKS] =
+                std::array::from_fn(|_| LiveMidiFxTrackState::default());
+            let samples_per_quarter = 48_000.0 * 60.0 / snapshot.transport.bpm as f64;
+            schedule_playing_lookahead(
+                &mut scheduler,
+                &state,
+                &snapshot,
+                &queue,
+                &mut scratch_runtime,
+                &live_midi_fx_tracks,
+                snapshot.transport.pattern_epoch,
+                0,
+                48_000,
+                48_000,
+                12_000,
+                samples_per_quarter,
+                0,
+                false,
+                false,
+            );
+            let events = observed_triggers(&queue);
+            let mut network: Vec<(u64, f32)> = events
+                .iter()
+                .filter(|event| event.kind == ScheduledTriggerKind::Network && event.track == 1)
+                .map(|event| (event.sample_time, event.transpose))
+                .collect();
+            network.sort_by_key(|(sample, _)| *sample);
+            assert_eq!(
+                network.len(),
+                2,
+                "node 1 and node 3 emit, muted node 2 does not: {events:#?}"
+            );
+            assert!(
+                network.iter().all(|(_, transpose)| (*transpose - 9.0).abs() < 1e-6),
+                "seed 2 + node 1's +7 rides the scatter through the muted node: {network:?}"
+            );
+            assert!(network[1].0 > network[0].0, "node 3 fires after node 1: {network:?}");
+        });
+    }
+
+    /// The alez.neural variable-reset graph verbatim, node 1 patched through
+    /// the UI natives with `prob-mask` at `prob`; returns node 1's hit count.
+    fn variable_reset_track1_hits_with_prob_mask(prob: f64) -> usize {
+        variable_reset_track1_hits_with_prob_mask_over_seconds(prob, 4)
+    }
+
+    fn variable_reset_track1_hits_with_prob_mask_over_seconds(prob: f64, seconds: u64) -> usize {
+        variable_reset_track1_transposes(prob, seconds, "").len()
+    }
+
+    /// Node 1's emitted transposes; `extra` is more UI-native Lisp run after
+    /// the prob-mask slot is installed (`g` = graph handle, `id` = its slot).
+    fn variable_reset_track1_transposes(prob: f64, seconds: u64, extra: &'static str) -> Vec<f32> {
+        variable_reset_track1_hits(prob, seconds, extra).into_iter().map(|(_, t)| t).collect()
+    }
+
+    /// Node 1's emissions as (sample time, transpose), in time order.
+    fn variable_reset_track1_hits(prob: f64, seconds: u64, extra: &'static str) -> Vec<(u64, f32)> {
+        run_with_scheduler_stack(move || {
+            let state = Arc::new(SequencerState::new(
+                3,
+                (0..3).map(|_| default_empty_effect_chain()).collect(),
+            ));
+            state.toggle_play();
+            state.toggle_step_and_clear_plocks(0, 0);
+            state.set_step_param(0, 0, StepParam::Transpose, 2.0);
+
+            publish_test_graph_sequencer(
+                Arc::clone(&state),
+                r#"
+                (def-sequencer "variable-reset"
+                  :shape (line :default 8 :min 1 :max 16)
+                  :energy-decay 0.992
+                  :reset-every (bars 4)
+                  :seed-on-reset 0
+                  :max-poly 4
+                  ;; Which fires survive when more than :max-poly land in one boundary. Options:
+                  ;; :deterministic :propagation :random :markov :loudest :lowest-transpose :highest-transpose
+                  ;; :seed-first (seed-originated fires win their slots before neural-only ones).
+                  :max-poly-selection :propagation
+                  :duration (steps 1)
+                  
+                  (def-node nrn
+                    :resolution :16
+                    :delay 1
+                    :quantize :16
+                    :route 0
+                    :seed-from ()
+                    :reduce :sum
+                    ;; :reduce folds the ENERGY of coinciding inputs; :event folds the PAYLOAD
+                    ;; (note/velocity). :loudest keeps the highest-velocity arrival, so a full-velocity
+                    ;; seed punches through instead of being clobbered by a decayed neural hit (the old
+                    ;; :newest = last-writer-wins behavior). Options: :newest :loudest :seed-priority
+                    ;; :strongest.
+                    :event :newest
+                    :params ((threshold :float 0 4 :default 0.55)
+                      (global-transpose :int -48 48 :default 0)
+                      (transpose :int -48 48 :default 0)
+                      (transpose-reset :int 0 1 :default 0)
+                      (dur-factor :float 0 8 :default 1)
+                      (vel-decay :float 0 2 :default 0.9)
+                      (vel-reset :int 0 1 :default 0)
+                      (dampening :float 0 1 :default 0.14)
+                      (recovery :float 0 1 :default 0.94))
+                    :state ((energy :leak (per-step :energy-decay)))
+                    ;; Fire when energy clears threshold. The else-branch returns nil (no fire).
+                    :update (if (>= (energy) (param :threshold))
+                      (do
+                        (dampen-incoming (param :dampening))
+                        (emit :note (+ (param :global-transpose)
+                            (if (>= (param :transpose-reset) 1)
+                              (param :transpose)
+                              (+ (in-note) (param :transpose))))
+                          :dur (* (delay) (param :dur-factor))
+                          :vel  (if (>= (param :vel-reset) 1)
+                            1
+                            (* (in-vel) (param :vel-decay)))))
+                      (recover-incoming (param :recovery))))
+                  
+                  (edges
+                    :from nrn
+                    :to nrn
+                    :topology (all-to-all)
+                    :gather (- (edge :weight) (edge :dampening))
+                    :params ((weight :float -1 1 :default 0.0)
+                      (dampening :float 0 1 :default 0))))
+                "#,
+            );
+            let published = state
+                .published_sequencers()
+                .into_iter()
+                .find(|seq| seq.name == "variable-reset")
+                .expect("published graph");
+            let manifest = published.graph.as_ref().expect("graph manifest");
+            let edge_group = crate::graph::edge_set_group_id(&manifest.edge_sets[0]);
+            let slot = |id: u64, class: &str| crate::process::TrackProcessSlot {
+                instance_id: crate::process::ProcessInstanceId(id),
+                instance_name: None,
+                class_name: class.to_string(),
+                enabled: true,
+                project_layer: false,
+                inlets: Default::default(),
+                lanes: Default::default(),
+                fanout: Default::default(),
+                unbound_ports: Default::default(),
+                bindings: Default::default(),
+            };
+            let intrinsic = |instance: usize,
+                             seed: Option<ProjectGraphSeedFrom>,
+                             chain: Option<crate::process::TrackProcessChain>| {
+                ProjectGraphNodeIntrinsicOverride {
+                    group: "nrn".to_string(),
+                    instance,
+                    resolution: None,
+                    delay_steps: None,
+                    quantize: None,
+                    route: None,
+                    seed_from: seed,
+                    seed_on_reset: None,
+                    duration: None,
+                    swing: None,
+                    neural_group: None,
+                    process_chain: chain,
+                }
+            };
+            state
+                .edit_current_graph_overrides(|graphs| {
+                    graphs.push(ProjectGraphOverrides {
+                        sequencer_id: published.id,
+                        sequencer_name: published.name.clone(),
+                        owner_rack: None,
+                        node_intrinsics: vec![
+                            {
+                                let mut i = intrinsic(0, Some(ProjectGraphSeedFrom::Tracks(vec![0])), None);
+                                i.route = Some(ProjectGraphRouteOverride::Track(0));
+                                i
+                            },
+                            {
+                                let mut i = intrinsic(1, None, None);
+                                i.route = Some(ProjectGraphRouteOverride::Track(1));
+                                i
+                            },
+                        ],
+                        node_params: Vec::new(),
+                        edge_params: vec![ProjectGraphEdgeParamOverride {
+                            group: edge_group,
+                            from: 0,
+                            to: 1,
+                            param: "weight".to_string(),
+                            value: 1.0,
+                        }],
+                        reset_every_beats: None,
+                        max_poly: None,
+                        max_poly_selection: None,
+                        node_count: None,
+                        group_gain: None,
+                        group_coupling: None,
+                        group_trace_decay: None,
+                        group_coupling_scale: None,
+                        group_excite_floor: None,
+                    });
+                    Ok(())
+                })
+                .expect("install node patch overrides");
+            {
+                // The app's UI scratch runtime publishes the builtin process
+                // defs when it loads the library; do the same before the
+                // natives look a class up.
+                let mut publisher = lisp_host::scratch_runtime_with_fallbacks(Arc::clone(&state), 0, 0);
+                publisher
+                    .eval(&lisp_host::load_process_library_source())
+                    .expect("publish builtin process library");
+                state.publish_process_authoring(
+                    publisher.process_authoring_snapshot().to_published().expect("publishable"),
+                );
+                let mut ui = Runtime::new();
+                crate::lisp_host::register_graph_authoring_natives(&mut ui, Arc::clone(&state));
+                let id = ui
+                    .eval_str("(graph-node-process-add \"variable-reset\" 1 \"prob-mask\")")
+                    .expect("add prob-mask through the native");
+                let Some(Value::Number(id)) = id else { panic!("add returns id: {id:?}") };
+                ui.eval_str(&format!("(graph-node-process-inlet \"variable-reset\" 1 {id} :prob {prob})"))
+                    .expect("set prob through the native");
+                if !extra.is_empty() {
+                    ui.eval_str(&format!("(let ((g \"variable-reset\") (id {id})) {extra})"))
+                        .expect("extra node patch setup");
+                }
+            }
+
+            let snapshot = state.publish_scheduler_snapshot();
+            let mut scheduler = SchedulerLookaheadState::new(48_000);
+            let manifests = state
+                .published_sequencers()
+                .into_iter()
+                .filter_map(|seq| seq.graph)
+                .collect::<Vec<_>>();
+            reconcile_graph_runtimes(
+                manifests,
+                &snapshot.graph_overrides,
+                &[],
+                &mut scheduler.graph_runtimes,
+                &mut scheduler.graph_manifests,
+                scheduler.clock.total_beats,
+            );
+            let mut scratch = lisp_host::scratch_runtime_with_fallbacks(Arc::clone(&state), 0, 0);
+            scratch
+                .eval(&lisp_host::load_midi_fx_library_source())
+                .expect("load MIDI FX library");
+            scratch
+                .eval(&lisp_host::load_process_library_source())
+                .expect("load builtin process library");
+            scratch
+                .eval(
+                    r#"
+                    (def-process node-shift-test
+                      :target (step-param :transpose)
+                      :run (target-add! 7))
+                    "#,
+                )
+                .expect("define node patch processes");
+            scheduler
+                .process_runtime
+                .sync_authoring(scratch.process_authoring_snapshot(), 0.0);
+            let mut scratch_runtime = Some(scratch);
+            let queue = ScheduledEventQueue::<64>::new();
+            let live_midi_fx_tracks: [LiveMidiFxTrackState; MAX_TRACKS] =
+                std::array::from_fn(|_| LiveMidiFxTrackState::default());
+            let samples_per_quarter = 48_000.0 * 60.0 / snapshot.transport.bpm as f64;
+            schedule_playing_lookahead(
+                &mut scheduler,
+                &state,
+                &snapshot,
+                &queue,
+                &mut scratch_runtime,
+                &live_midi_fx_tracks,
+                snapshot.transport.pattern_epoch,
+                0,
+                48_000 * seconds,
+                48_000 * seconds as u32,
+                12_000,
+                samples_per_quarter,
+                0,
+                false,
+                false,
+            );
+            let events = observed_triggers(&queue);
+            let mut hits: Vec<(u64, f32)> = events
+                .iter()
+                .filter(|e| e.kind == ScheduledTriggerKind::Network && e.track == 1)
+                .map(|e| (e.sample_time, e.transpose))
+                .collect();
+            hits.sort_by_key(|(sample, _)| *sample);
+            hits
+        })
+    }
+
+    /// `reset` both ways on a self-feeding node 1: with trigger high every
+    /// fire resets the graph after it commits, so the self-loop dies and the
+    /// node only fires when the track re-seeds it each bar; `fired` wired
+    /// into `acc.reset` restarts the count, so the mapped transpose stays at
+    /// seed 2 + 1 instead of climbing.
+    #[test]
+    fn node_process_patch_reset_trigger_and_fired_port() {
+        let climbing = variable_reset_track1_hits(
+            1.0,
+            8,
+            r#"(let ((acc (graph-node-process-add g 1 "lane-acc")))
+                 (do
+                   (graph-edge g :from 1 :to 1 :weight 1)
+                   (graph-node-process-inlet g 1 acc :amount 1)
+                   (graph-node-process-map g 1 acc :out :transpose)))"#,
+        );
+        assert!(climbing.len() >= 3, "self-loop keeps firing: {climbing:?}");
+        assert!(climbing[1].0 - climbing[0].0 < 96_000, "self-loop re-fires within the bar: {climbing:?}");
+        // The write rides the propagation, so on a self-loop the count compounds.
+        assert!(climbing[1].1 > climbing[0].1, "acc climbs without a reset: {climbing:?}");
+
+        let resetting = variable_reset_track1_hits(
+            1.0,
+            8,
+            r#"(let ((rst (graph-node-process-add g 1 "neural-reset"))
+                     (acc (graph-node-process-add g 1 "lane-acc")))
+                 (do
+                   (graph-edge g :from 1 :to 1 :weight 1)
+                   (graph-node-process-inlet g 1 rst :trigger 1)
+                   (graph-node-process-wire g 1 rst :fired acc :reset)
+                   (graph-node-process-inlet g 1 acc :amount 1)
+                   (graph-node-process-map g 1 acc :out :transpose)))"#,
+        );
+        assert!(resetting.len() >= 2, "the track re-seeds node 1 each bar: {resetting:?}");
+        let gaps: Vec<u64> = resetting.windows(2).map(|w| w[1].0 - w[0].0).collect();
+        assert!(gaps.iter().all(|gap| *gap >= 96_000), "reset kills the self-loop, one hit per bar: {resetting:?}");
+        assert!(
+            resetting.iter().all(|(_, t)| (t - 3.0).abs() < 1e-6),
+            "fired -> acc.reset restarts the count each bar: {resetting:?}"
+        );
+    }
+
+    /// The periodic bar reset (variable-reset: every 4 bars = 16 beats =
+    /// sample 768000 at 120 bpm) also raises `fired`: with `fired` wired into
+    /// `acc.reset` the count restarts there, so the first hit after the reset
+    /// is seed 2 + 1 again instead of the climbing value.
+    #[test]
+    fn node_process_patch_reset_fired_on_the_periodic_bar_reset() {
+        let hits = variable_reset_track1_hits(
+            1.0,
+            20,
+            r#"(let ((rst (graph-node-process-add g 1 "neural-reset"))
+                     (acc (graph-node-process-add g 1 "lane-acc")))
+                 (do
+                   (graph-node-process-wire g 1 rst :fired acc :reset)
+                   (graph-node-process-inlet g 1 acc :amount 1)
+                   (graph-node-process-map g 1 acc :out :transpose)))"#,
+        );
+        let before: Vec<&(u64, f32)> = hits.iter().filter(|(s, _)| *s < 768_000).collect();
+        let after: Vec<&(u64, f32)> = hits.iter().filter(|(s, _)| *s >= 768_000).collect();
+        assert!(before.len() >= 2 && !after.is_empty(), "hits on both sides of the reset: {hits:?}");
+        assert!(before.last().unwrap().1 > 3.0, "the count climbed before the reset: {before:?}");
+        assert!((after[0].1 - 3.0).abs() < 1e-6, "first hit after the bar reset restarts the count: {after:?}");
+    }
+
+    /// `acc` (amount 1) mapped onto `delay`: node 1 feeds itself, and each
+    /// fire's propagation waits the node delay (1) plus the running count, so
+    /// successive self-hits sit 2, 3, 4 steps apart (6000 samples per node
+    /// step here).
+    #[test]
+    fn node_process_patch_delay_write_stretches_successive_propagations() {
+        let hits = variable_reset_track1_hits(
+            1.0,
+            8,
+            r#"(let ((acc (graph-node-process-add g 1 "lane-acc")))
+                 (do
+                   (graph-edge g :from 1 :to 1 :weight 1)
+                   (graph-node-process-inlet g 1 acc :amount 1)
+                   (graph-node-process-map g 1 acc :out :delay)))"#,
+        );
+        let gaps: Vec<u64> = hits.windows(2).map(|w| w[1].0 - w[0].0).collect();
+        assert!(gaps.len() >= 3, "node 1 keeps re-firing itself: {hits:?}");
+        assert_eq!(&gaps[..3], &[12_000, 18_000, 24_000], "gaps grow by one step per fire: {gaps:?} hits={hits:?}");
+    }
+
+    /// `neural-scale` snaps whatever earlier slots wrote: transpose +3 turns
+    /// the seed note 2 into 5 (F), and C major pentatonic pulls it to 4 (E).
+    /// With the gate low the note passes through unsnapped.
+    #[test]
+    fn node_process_patch_scale_snaps_the_written_transpose() {
+        let snapped = variable_reset_track1_transposes(
+            1.0,
+            4,
+            r#"(let ((xp (graph-node-process-add g 1 "neural-transpose"))
+                     (sc (graph-node-process-add g 1 "neural-scale")))
+                 (do
+                   (graph-node-process-inlet g 1 xp :amount 3)
+                   (graph-node-process-inlet g 1 sc :scale 9)
+                   (graph-node-process-inlet g 1 sc :root 0)))"#,
+        );
+        assert!(!snapped.is_empty() && snapped.iter().all(|t| (t - 4.0).abs() < 1e-6),
+            "F snaps to E in C major pentatonic: {snapped:?}");
+        let open = variable_reset_track1_transposes(
+            1.0,
+            4,
+            r#"(let ((xp (graph-node-process-add g 1 "neural-transpose"))
+                     (sc (graph-node-process-add g 1 "neural-scale")))
+                 (do
+                   (graph-node-process-inlet g 1 xp :amount 3)
+                   (graph-node-process-inlet g 1 sc :scale 9)
+                   (graph-node-process-inlet g 1 sc :gate 0)))"#,
+        );
+        assert!(!open.is_empty() && open.iter().all(|t| (t - 5.0).abs() < 1e-6),
+            "gate low leaves F alone: {open:?}");
+    }
+
+    /// A mappable port mapped onto the payload (`graph-node-process-map`):
+    /// lane-count stepping by 5 with its `out` on :transpose adds 5, then 10,
+    /// to the seed note 2 on successive node-1 fires.
+    #[test]
+    fn node_process_patch_mapped_port_writes_the_payload_transpose() {
+        let transposes = variable_reset_track1_transposes(
+            1.0,
+            4,
+            r#"(let ((count (graph-node-process-add g 1 "lane-count")))
+                 (do
+                   (graph-node-process-inlet g 1 count :step 5)
+                   (graph-node-process-inlet g 1 count :hi 100)
+                   (graph-node-process-map g 1 count :out :transpose)))"#,
+        );
+        assert_eq!(transposes.len(), 2, "two node-1 fires in 4s: {transposes:?}");
+        assert!((transposes[0] - 7.0).abs() < 1e-6 && (transposes[1] - 12.0).abs() < 1e-6,
+            "seed 2 + count 5, then + count 10: {transposes:?}");
+    }
+
+    #[test]
+    fn node_process_patch_prob_mask_on_variable_reset_package_graph() {
+        let open = variable_reset_track1_hits_with_prob_mask(1.0);
+        let masked = variable_reset_track1_hits_with_prob_mask(0.0);
+        assert!(open > 0, "prob 1 lets node 1 emit: open={open}");
+        assert_eq!(masked, 0, "prob 0 vetoes every node 1 emission: open={open} masked={masked}");
+        // A node fires at the same bar position every cycle; the roll must
+        // still differ per fire (bead eseq-waa9.7), so over many fires a
+        // middling probability is neither all nor nothing.
+        let half = variable_reset_track1_hits_with_prob_mask_over_seconds(0.5, 64);
+        let open_long = variable_reset_track1_hits_with_prob_mask_over_seconds(1.0, 64);
+        assert!(open_long >= 16, "enough fires to judge: {open_long}");
+        assert!(
+            half > 0 && half < open_long,
+            "prob 0.5 rolls fresh per fire: half={half} of {open_long}"
+        );
+    }
+
+    /// `lane-harmony :source -2` on node 2 follows neuron 1: node 1 emits 7
+    /// (seed 2 + transpose 5); node 2 would emit 8 (its own +1) but snaps to
+    /// neuron 1's pitch class, so every node-2 emission is 7.
+    #[test]
+    fn node_process_patch_harmony_follows_a_neuron_source() {
+        run_with_scheduler_stack(|| {
+            let state = Arc::new(SequencerState::new(
+                3,
+                (0..3).map(|_| default_empty_effect_chain()).collect(),
+            ));
+            state.toggle_play();
+            state.toggle_step_and_clear_plocks(0, 0);
+            state.set_step_param(0, 0, StepParam::Transpose, 2.0);
+            publish_test_graph_sequencer(
+                Arc::clone(&state),
+                r#"
+                (def-sequencer "node-harmony-graph"
+                  :shape (line 3)
+                  :energy-decay 1
+                  :reset-every 0
+                  :seed-on-reset 0
+                  :max-poly 8
+                  :max-poly-selection :deterministic
+                  :duration (steps 1)
+                  (def-node nrn
+                    :resolution :16
+                    :delay 1
+                    :quantize :16
+                    :route 1
+                    :seed-from 0
+                    :reduce :sum
+                    :params ((threshold :float 0 4 :default 0.5)
+                             (transpose :int -48 48 :default 0))
+                    :state ((energy :leak (per-step :energy-decay)))
+                    :update (if (>= (energy) (param :threshold))
+                              (emit :note (+ (in-note) (param :transpose)) :vel (in-vel))
+                              false))
+                  (edges
+                    :from nrn
+                    :to nrn
+                    :topology (all-to-all)
+                    :gather (edge :weight)
+                    :params ((weight :float -1 1 :default 0))))
+                "#,
+            );
+            let published = state
+                .published_sequencers()
+                .into_iter()
+                .find(|seq| seq.name == "node-harmony-graph")
+                .expect("published graph");
+            let manifest = published.graph.as_ref().expect("graph manifest");
+            let edge_group = crate::graph::edge_set_group_id(&manifest.edge_sets[0]);
+            let mut harmony = crate::process::TrackProcessSlot {
+                instance_id: crate::process::ProcessInstanceId(9201),
+                instance_name: None,
+                class_name: "lane-harmony".to_string(),
+                enabled: true,
+                project_layer: false,
+                inlets: Default::default(),
+                lanes: Default::default(),
+                fanout: Default::default(),
+                unbound_ports: Default::default(),
+                bindings: Default::default(),
+            };
+            harmony.inlets.insert("source".into(), crate::process::ProcessLiteral::Number(-2.0));
+            harmony.inlets.insert("amount".into(), crate::process::ProcessLiteral::Number(1.0));
+            let intrinsic = |instance: usize, seed: Option<ProjectGraphSeedFrom>, chain| {
+                ProjectGraphNodeIntrinsicOverride {
+                    group: "nrn".to_string(),
+                    instance,
+                    resolution: None,
+                    delay_steps: None,
+                    quantize: None,
+                    route: None,
+                    seed_from: seed,
+                    seed_on_reset: None,
+                    duration: None,
+                    swing: None,
+                    neural_group: None,
+                    process_chain: chain,
+                }
+            };
+            state
+                .edit_current_graph_overrides(|graphs| {
+                    graphs.push(ProjectGraphOverrides {
+                        sequencer_id: published.id,
+                        sequencer_name: published.name.clone(),
+                        owner_rack: None,
+                        node_intrinsics: vec![
+                            intrinsic(0, None, None),
+                            intrinsic(1, Some(ProjectGraphSeedFrom::Tracks(Vec::new())), None),
+                            intrinsic(
+                                2,
+                                Some(ProjectGraphSeedFrom::Tracks(Vec::new())),
+                                Some(crate::process::TrackProcessChain { slots: vec![harmony] }),
+                            ),
+                        ],
+                        node_params: vec![
+                            ProjectGraphNodeParamOverride {
+                                group: "nrn".to_string(),
+                                instance: 1,
+                                param: "transpose".to_string(),
+                                value: 5.0,
+                            },
+                            ProjectGraphNodeParamOverride {
+                                group: "nrn".to_string(),
+                                instance: 2,
+                                param: "transpose".to_string(),
+                                value: 1.0,
+                            },
+                        ],
+                        edge_params: vec![
+                            ProjectGraphEdgeParamOverride {
+                                group: edge_group.clone(),
+                                from: 0,
+                                to: 1,
+                                param: "weight".to_string(),
+                                value: 1.0,
+                            },
+                            ProjectGraphEdgeParamOverride {
+                                group: edge_group,
+                                from: 1,
+                                to: 2,
+                                param: "weight".to_string(),
+                                value: 1.0,
+                            },
+                        ],
+                        reset_every_beats: None,
+                        max_poly: None,
+                        max_poly_selection: None,
+                        node_count: None,
+                        group_gain: None,
+                        group_coupling: None,
+                        group_trace_decay: None,
+                        group_coupling_scale: None,
+                        group_excite_floor: None,
+                    });
+                    Ok(())
+                })
+                .expect("install node harmony overrides");
+            let snapshot = state.publish_scheduler_snapshot();
+            let mut scheduler = SchedulerLookaheadState::new(48_000);
+            let manifests = state
+                .published_sequencers()
+                .into_iter()
+                .filter_map(|seq| seq.graph)
+                .collect::<Vec<_>>();
+            reconcile_graph_runtimes(
+                manifests,
+                &snapshot.graph_overrides,
+                &[],
+                &mut scheduler.graph_runtimes,
+                &mut scheduler.graph_manifests,
+                scheduler.clock.total_beats,
+            );
+            let mut scratch = lisp_host::scratch_runtime_with_fallbacks(Arc::clone(&state), 0, 0);
+            scratch
+                .eval(&lisp_host::load_midi_fx_library_source())
+                .expect("load MIDI FX library");
+            scratch
+                .eval(&lisp_host::load_process_library_source())
+                .expect("builtin process library");
+            scheduler
+                .process_runtime
+                .sync_authoring(scratch.process_authoring_snapshot(), 0.0);
+            let mut scratch_runtime = Some(scratch);
+            let queue = ScheduledEventQueue::<64>::new();
+            let live_midi_fx_tracks: [LiveMidiFxTrackState; MAX_TRACKS] =
+                std::array::from_fn(|_| LiveMidiFxTrackState::default());
+            let samples_per_quarter = 48_000.0 * 60.0 / snapshot.transport.bpm as f64;
+            schedule_playing_lookahead(
+                &mut scheduler,
+                &state,
+                &snapshot,
+                &queue,
+                &mut scratch_runtime,
+                &live_midi_fx_tracks,
+                snapshot.transport.pattern_epoch,
+                0,
+                48_000,
+                48_000,
+                12_000,
+                samples_per_quarter,
+                0,
+                false,
+                false,
+            );
+            let events = observed_triggers(&queue);
+            let mut network: Vec<(u64, f32)> = events
+                .iter()
+                .filter(|event| event.kind == ScheduledTriggerKind::Network && event.track == 1)
+                .map(|event| (event.sample_time, event.transpose))
+                .collect();
+            network.sort_by_key(|(sample, _)| *sample);
+            assert_eq!(network.len(), 2, "node 1 then node 2: {events:#?}");
+            assert_eq!(network[0].1, 7.0, "node 1 = seed 2 + 5: {network:?}");
+            assert_eq!(network[1].1, 7.0, "node 2 snapped 8 onto neuron 1's pitch class: {network:?}");
+        });
+    }
+
+    /// Wires inside a node patch use the track patch bay's inlet-write
+    /// plumbing: `lane-rand` (pinned to 5) -> `lane-cmp` (a > 0) -> `lane-veto`
+    /// gate mutes every one of node 1's emissions, while node 2 downstream
+    /// still fires because a veto never breaks propagation.
+    #[test]
+    fn node_process_patch_wires_feed_later_slots() {
+        run_with_scheduler_stack(|| {
+            let state = Arc::new(SequencerState::new(
+                3,
+                (0..3).map(|_| default_empty_effect_chain()).collect(),
+            ));
+            state.toggle_play();
+            state.toggle_step_and_clear_plocks(0, 0);
+            state.set_step_param(0, 0, StepParam::Transpose, 2.0);
+            publish_test_graph_sequencer(
+                Arc::clone(&state),
+                r#"
+                (def-sequencer "node-wire-graph"
+                  :shape (line 3)
+                  :energy-decay 1
+                  :reset-every 0
+                  :seed-on-reset 0
+                  :max-poly 8
+                  :max-poly-selection :deterministic
+                  :duration (steps 1)
+                  (def-node nrn
+                    :resolution :16
+                    :delay 1
+                    :quantize :16
+                    :route 1
+                    :seed-from 0
+                    :reduce :sum
+                    :params ((threshold :float 0 4 :default 0.5))
+                    :state ((energy :leak (per-step :energy-decay)))
+                    :update (if (>= (energy) (param :threshold))
+                              (emit :note (in-note) :vel (in-vel))
+                              false))
+                  (edges
+                    :from nrn
+                    :to nrn
+                    :topology (all-to-all)
+                    :gather (edge :weight)
+                    :params ((weight :float -1 1 :default 0))))
+                "#,
+            );
+            let published = state
+                .published_sequencers()
+                .into_iter()
+                .find(|seq| seq.name == "node-wire-graph")
+                .expect("published graph");
+            let manifest = published.graph.as_ref().expect("graph manifest");
+            let edge_group = crate::graph::edge_set_group_id(&manifest.edge_sets[0]);
+            let slot = |id: u64, class: &str| crate::process::TrackProcessSlot {
+                instance_id: crate::process::ProcessInstanceId(id),
+                instance_name: None,
+                class_name: class.to_string(),
+                enabled: true,
+                project_layer: false,
+                inlets: Default::default(),
+                lanes: Default::default(),
+                fanout: Default::default(),
+                unbound_ports: Default::default(),
+                bindings: Default::default(),
+            };
+            let mut rand = slot(9101, "lane-rand");
+            rand.inlets.insert("lo".into(), crate::process::ProcessLiteral::Number(5.0));
+            rand.inlets.insert("hi".into(), crate::process::ProcessLiteral::Number(5.0));
+            rand.bindings.insert(
+                "wire".into(),
+                Some(crate::process::ParamTarget::ProcessInlet {
+                    process: "lane-cmp".into(),
+                    inlet: "a".into(),
+                    instance_id: Some(crate::process::ProcessInstanceId(9102)),
+                }),
+            );
+            let mut cmp = slot(9102, "lane-cmp");
+            cmp.bindings.insert(
+                "wire".into(),
+                Some(crate::process::ParamTarget::ProcessInlet {
+                    process: "lane-veto".into(),
+                    inlet: "gate".into(),
+                    instance_id: Some(crate::process::ProcessInstanceId(9103)),
+                }),
+            );
+            let veto = slot(9103, "lane-veto");
+            let intrinsic = |instance: usize, seed: Option<ProjectGraphSeedFrom>, chain| {
+                ProjectGraphNodeIntrinsicOverride {
+                    group: "nrn".to_string(),
+                    instance,
+                    resolution: None,
+                    delay_steps: None,
+                    quantize: None,
+                    route: None,
+                    seed_from: seed,
+                    seed_on_reset: None,
+                    duration: None,
+                    swing: None,
+                    neural_group: None,
+                    process_chain: chain,
+                }
+            };
+            state
+                .edit_current_graph_overrides(|graphs| {
+                    graphs.push(ProjectGraphOverrides {
+                        sequencer_id: published.id,
+                        sequencer_name: published.name.clone(),
+                        owner_rack: None,
+                        node_intrinsics: vec![
+                            intrinsic(0, None, None),
+                            intrinsic(
+                                1,
+                                Some(ProjectGraphSeedFrom::Tracks(Vec::new())),
+                                Some(crate::process::TrackProcessChain {
+                                    slots: vec![rand, cmp, veto],
+                                }),
+                            ),
+                            intrinsic(2, Some(ProjectGraphSeedFrom::Tracks(Vec::new())), None),
+                        ],
+                        node_params: Vec::new(),
+                        edge_params: vec![
+                            ProjectGraphEdgeParamOverride {
+                                group: edge_group.clone(),
+                                from: 0,
+                                to: 1,
+                                param: "weight".to_string(),
+                                value: 1.0,
+                            },
+                            ProjectGraphEdgeParamOverride {
+                                group: edge_group,
+                                from: 1,
+                                to: 2,
+                                param: "weight".to_string(),
+                                value: 1.0,
+                            },
+                        ],
+                        reset_every_beats: None,
+                        max_poly: None,
+                        max_poly_selection: None,
+                        node_count: None,
+                        group_gain: None,
+                        group_coupling: None,
+                        group_trace_decay: None,
+                        group_coupling_scale: None,
+                        group_excite_floor: None,
+                    });
+                    Ok(())
+                })
+                .expect("install node wire overrides");
+            let snapshot = state.publish_scheduler_snapshot();
+            let mut scheduler = SchedulerLookaheadState::new(48_000);
+            let manifests = state
+                .published_sequencers()
+                .into_iter()
+                .filter_map(|seq| seq.graph)
+                .collect::<Vec<_>>();
+            reconcile_graph_runtimes(
+                manifests,
+                &snapshot.graph_overrides,
+                &[],
+                &mut scheduler.graph_runtimes,
+                &mut scheduler.graph_manifests,
+                scheduler.clock.total_beats,
+            );
+            let mut scratch = lisp_host::scratch_runtime_with_fallbacks(Arc::clone(&state), 0, 0);
+            scratch
+                .eval(&lisp_host::load_midi_fx_library_source())
+                .expect("load MIDI FX library");
+            scratch
+                .eval(&lisp_host::load_process_library_source())
+                .expect("builtin process library");
+            scheduler
+                .process_runtime
+                .sync_authoring(scratch.process_authoring_snapshot(), 0.0);
+            let mut scratch_runtime = Some(scratch);
+            let queue = ScheduledEventQueue::<64>::new();
+            let live_midi_fx_tracks: [LiveMidiFxTrackState; MAX_TRACKS] =
+                std::array::from_fn(|_| LiveMidiFxTrackState::default());
+            let samples_per_quarter = 48_000.0 * 60.0 / snapshot.transport.bpm as f64;
+            schedule_playing_lookahead(
+                &mut scheduler,
+                &state,
+                &snapshot,
+                &queue,
+                &mut scratch_runtime,
+                &live_midi_fx_tracks,
+                snapshot.transport.pattern_epoch,
+                0,
+                48_000,
+                48_000,
+                12_000,
+                samples_per_quarter,
+                0,
+                false,
+                false,
+            );
+            let events = observed_triggers(&queue);
+            let network: Vec<(u64, f32)> = events
+                .iter()
+                .filter(|event| event.kind == ScheduledTriggerKind::Network && event.track == 1)
+                .map(|event| (event.sample_time, event.transpose))
+                .collect();
+            assert_eq!(network.len(), 1, "only node 2 is audible: {events:#?}");
+            assert!(network[0].0 > 6_000, "node 2 fires after the muted node 1: {network:?}");
+        });
+    }
+
     #[test]
     fn scene_transpose_routes_graph_and_midi_fx_exactly_once() {
         run_with_scheduler_stack(|| {
@@ -6397,6 +7892,7 @@
                         duration: None,
                         swing: None,
                         neural_group: None,
+                        process_chain: None,
                     }],
                     node_params: Vec::new(),
                     edge_params: vec![ProjectGraphEdgeParamOverride {
@@ -6413,6 +7909,8 @@
                     group_gain: None,
                     group_coupling: None,
                     group_trace_decay: None,
+                    group_coupling_scale: None,
+                    group_excite_floor: None,
                 });
                 Ok(())
             })

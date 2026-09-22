@@ -1,3 +1,9 @@
+;; alez.neural — factory neural / graph sequencers.
+;; variable-reset: the graph-mode neural sequencer with a variable node count,
+;; per-node seed / delay / transpose controls and the live NxN weight matrix.
+;; Attach the package (Packages tab) or (import alez.neural.variable-reset);
+;; the "var rst" tab appears next to the step sequencer tabs.
+;;
 ;; Graph-mode variable-count neural sequencer with reset/global timing controls — a playground for the lisp node-graph DSL.
 ;;
 ;; The graph defaults to eight all-to-all nodes and can be grown to sixteen without
@@ -25,17 +31,20 @@
 ;; instead of re-applying the full active matrix.
 ;;
 ;; Project scratch entrypoint:
-;;   (load "content/scripts/sequencers/graph-neural-variable-reset-demo.lisp")
+;;   (import alez.neural.variable-reset)
 ;;
 ;; Loading this file only publishes the graph/UI and syncs controls from the current
 ;; pattern. It does not write graph overrides. For a fresh demo patch, explicitly run:
-;;   (script-init-fn)
+;;   (alez.neural.variable-reset/gvr-init-ring-defaults)
 
-;; `def-sequencer` returns the instance handle. Every graph-* native below takes
-;; it, so this script also works when a drum rack owns it (attached via the
-;; rack menu or `attach-rack-sequencer`): the handle is unambiguous even when
-;; the project and a rack both run a copy, and routes then address rack members.
-(def gvr-name (def-sequencer "neural-variable-reset-demo"
+(module alez.neural.variable-reset)
+
+(export gvr-init-ring-defaults gvr-expand-node gvr-map-arm)
+
+;; `def-sequencer` returns the instance handle; every graph-* native below takes
+;; it, so this script also works when a drum rack owns it (routes then address
+;; rack members and the handle stays unambiguous next to a project-owned copy).
+(def gvr-name (def-sequencer "variable-reset"
   :shape (line :default 8 :min 1 :max 16)
   :energy-decay 0.992
   :reset-every (bars 4)
@@ -94,23 +103,17 @@
 
 (def gvr-min-node-count 1)
 (def gvr-max-node-count 16)
-(def script-buffer-name "*variable-reset*")
-;; Owned by a rack: the tab wears the rack's name and routes are its members.
-(def gvr-owner-rack (graph-owner gvr-name))
-(def gvr-route-tracks ()
-  ;; Read live so a member that joins the rack later shows up; SEQ.groups
-  ;; is read only to re-render when the membership changes.
-  (let ((groups SEQ.groups)) (graph-route-tracks gvr-name)))
-(def script-tab-label
-  (if gvr-owner-rack
-    (eseq.drum-rack-v2/group-name (eseq.drum-rack-v2/group-index-by-id gvr-owner-rack))
-    "var rst"))
-(def script-sequencer-name "neural-variable-reset-demo")
 
 ;; ── dropdown option lists (order is the index space bind-graph maps into) ──
 
 (def gvr-res-options (list "1" "2" "4" "8" "16" "32" "64"))
 (def gvr-quant-options (list "off" "1" "2" "4" "8" "16" "32" "64" "2T" "4T" "8T" "16T" "32T" "64T" "Prh"))
+;; Owned by a rack: routes address its members and the tab wears its name.
+(def gvr-owner-rack (graph-owner gvr-name))
+(def gvr-route-tracks ()
+  ;; Read live so a member that joins the rack later shows up; SEQ.groups
+  ;; is read only to re-render when the membership changes.
+  (let ((groups SEQ.groups)) (graph-route-tracks gvr-name)))
 ;; Route option n is track n (project-owned) or rack member n (rack-owned);
 ;; "Off" is always last. Either way the option index IS the route value.
 (def gvr-route-options ()
@@ -122,7 +125,7 @@
           "Track 9" "Track 10" "Track 11" "Track 12" "Track 13" "Track 14" "Track 15" "Track 16"
           "Off")))
 ;; Colors parallel to the route options: a rack-owned instance colors by the
-;; member's track, so `track-colors` below is re-indexed through the members.
+;; member's track, so the panel's track-colors are re-indexed through the members.
 (def gvr-route-track-colors (track-colors)
   (if (gvr-route-tracks)
     (map (lambda (track) (nth track-colors track)) (gvr-route-tracks))
@@ -192,6 +195,13 @@
 
 (defstate gvr-weights (list))
 (defstate gvr-selected-neuron -1)
+;; Expanded neuron editor (docs/graph-node-processes-spec.md §6): -1 = the
+;; compact row grid, n = one node's full editor with its process patch.
+(defstate gvr-expanded-node -1)
+;; Bumped after every node-patch edit so the patch re-reads; the natives
+;; write the project override directly and are not reactive on their own.
+(defstate gvr-proc-version 0)
+(defstate gvr-proc-add-class 0)
 (defstate gvr-threshold 0.55)
 (defstate gvr-global-transpose 0)
 (defstate gvr-dur-factor 1)
@@ -260,9 +270,6 @@
     (gvr-seed-if-active 2 2)
     (gvr-seed-if-active 3 4)
     ))
-
-(def script-init-fn ()
-  (gvr-init-ring-defaults))
 
 ;; ── edit helpers: dirty the bound widget (reactive-set) + persist the override ──
 ;; `graph-key` gives the canonical GRAPH field name a `bind-graph` handle reads, so a
@@ -394,7 +401,7 @@
 (def gvr-node-width 1.4)
 (def gvr-control-width 6.0)
 (def gvr-seed-control-width 4.8)
-(def gvr-group-width 3.0)
+(def gvr-group-width 4.0)
 
 (def gvr-matrix-data-height (count)
   (+ (* count gvr-row-height)
@@ -502,16 +509,16 @@
       (gvr-seed-toggle (str "graph-variable-reset-reset-seed-" n)
         (gvr-reset-seed-value n)
         (lambda (v) (gvr-edit-reset-seed n v)))
-      (gvr-num (str "graph-variable-reset-delay-" n)
+      (gvr-num-or-target n "delay" (str "graph-variable-reset-delay-" n)
         (bind-graph gvr-name n :delay) 0 16 1 0
         (lambda (v) (gvr-edit-num n :delay v)))
-      (gvr-num (str "graph-variable-reset-transpose-" n)
+      (gvr-num-or-target n "transpose" (str "graph-variable-reset-transpose-" n)
         (bind-graph gvr-name n :transpose) -48 48 1 0
         (lambda (v) (gvr-edit-param n :transpose v)))
       (gvr-toggle (str "graph-variable-reset-transpose-reset-" n)
         (gvr-reset-value n :transpose-reset)
         (lambda (v) (gvr-edit-param n :transpose-reset (if v 1 0))))
-      (gvr-num (str "graph-variable-reset-vel-decay-" n)
+      (gvr-num-or-target n "velocity" (str "graph-variable-reset-vel-decay-" n)
         (bind-graph gvr-name n :vel-decay) 0 2 0.01 2
         (lambda (v) (gvr-edit-param n :vel-decay v)))
       (gvr-toggle (str "graph-variable-reset-vel-reset-" n)
@@ -528,7 +535,8 @@
         (lambda (v) (gvr-edit-enum n :resolution gvr-res-options v v)))
       (gvr-pick (str "graph-variable-reset-quantize-" n)
         (bind-graph gvr-name n :quantize gvr-quant-options) gvr-quant-options
-        (lambda (v) (gvr-edit-enum n :quantize gvr-quant-options v v))))))
+        (lambda (v) (gvr-edit-enum n :quantize gvr-quant-options v v)))
+      (gvr-expand-button n))))
 
 (def gvr-header ()
   (h-stack :gap 0.4 :align :center
@@ -546,10 +554,364 @@
     (label "dampen" :width gvr-control-width :height 1.0 :font-size 8 :h-align :center :color :dim :bg :transparent)
     (label "recover" :width gvr-control-width :height 1.0 :font-size 8 :h-align :center :color :dim :bg :transparent)
     (label "res"    :width gvr-control-width :height 1.0 :font-size 8 :h-align :center :color :dim :bg :transparent)
-    (label "quant"  :width gvr-control-width :height 1.0 :font-size 8 :h-align :center :color :dim :bg :transparent)))
+    (label "quant"  :width gvr-control-width :height 1.0 :font-size 8 :h-align :center :color :dim :bg :transparent)
+    (label "proc"   :width gvr-expand-width :height 1.0 :font-size 8 :h-align :center :color :dim :bg :transparent)))
 
-(def gvr-panel (current-pattern graph-visualizations all-track-colors track-active-notes)
-  (let ((track-colors (gvr-route-track-colors all-track-colors)))
+
+;; ── Expanded neuron editor ─────────────────────────────────────────────────
+;; One node's full editor in place of the row grid: its compact row, its
+;; in/out edges as two strips of the weight matrix, and its process PATCH —
+;; the slots that run on every fire before the payload is emitted and
+;; scattered (docs/graph-node-processes-spec.md). Every inlet is a knob on a
+;; node (no lanes); a connectable port wires into a LATER slot's inlet, so
+;; `rand -> cmp -> veto` composes here exactly as in the track patch bay.
+
+(def gvr-expand-width 2.4)
+(def gvr-proc-card-width 15)
+(def gvr-proc-control-width 6.2)
+
+(def gvr-expand-button (n)
+  (button (if (= gvr-expanded-node n) "close" "edit")
+    :key (str "graph-variable-reset-expand-" n)
+    :width gvr-expand-width :height gvr-row-height :padding 0.15 :font-size 7
+    :background-color (if (>= (len (gvr-node-patch-slots n)) 1) :process-lane-accent :transparent)
+    :border-color :process-lane-accent
+    :color (if (>= (len (gvr-node-patch-slots n)) 1) :black :dim)
+    :on-click (lambda (event)
+      (gvr-expand-node (if (= gvr-expanded-node n) -1 n)))))
+
+;; Scripting entry: open node n's expanded editor (-1 = back to all nodes).
+;; Registers the node with the shared lane patchbay so its cables route to
+;; the graph-node-process-* natives (docs/graph-node-processes-spec.md §6).
+(def gvr-expand-node (n)
+  (do
+    (if (>= n 0) (eseq.sequencer/lane-patch-register-node gvr-name n) nil)
+    (eseq.sequencer/lane-patch-node-select -1)
+    (gvr-map-clear)
+    (set! gvr-expanded-node n)))
+
+;; Track-typed process inlets (lane-harmony :source, xpose-by-track :source, ...)
+;; store a real track index. The dropdown shows the route labels minus "Off",
+;; then one "neuron k" entry per active node: a neuron source is stored as
+;; -(k+1) (docs/graph-node-processes-spec.md §4; lane-harmony reads it via
+;; (neuron k :chord/:key)). A rack-owned instance maps member positions back
+;; to their tracks.
+(def gvr-track-inlet-track-options ()
+  (let ((opts (gvr-route-options)))
+    (map (lambda (i) (nth opts i)) (range 0 (- (len opts) 1)))))
+(def gvr-track-inlet-options ()
+  (append (gvr-track-inlet-track-options)
+          (map (lambda (k) (str "nrn " k)) (range 0 (gvr-node-count)))))
+(def gvr-track-inlet-index (value)
+  (if (< value 0)
+    (+ (len (gvr-track-inlet-track-options)) (- -1 value))
+    (if (gvr-route-tracks) (gvr-index-of (gvr-route-tracks) value) value)))
+(def gvr-track-inlet-value (index)
+  (let ((tracks (len (gvr-track-inlet-track-options))))
+    (if (>= index tracks)
+      (- -1 (- index tracks))
+      (if (gvr-route-tracks) (nth (gvr-route-tracks) index) index))))
+
+(def gvr-proc-touch ()
+  (do
+    (set! gvr-proc-version (+ gvr-proc-version 1))
+    (eseq.sequencer/lane-patch-node-touch)))
+
+;; The node's patch; both edit counters are read first so every edit, from
+;; this panel or from a cable in the bay, re-renders.
+(def gvr-node-patch-slots (n)
+  (do gvr-proc-version (eseq.sequencer/lane-patch-node-version-value) (graph-node-process-chain gvr-name n)))
+
+;; The bay's view of the same patch: per slot, which in ports have a cable.
+(def gvr-node-patch-entries (n)
+  (do gvr-proc-version (eseq.sequencer/lane-patch-node-version-value) (graph-node-lane-patch gvr-name n)))
+
+;; The picker's classes: node-flavoured labels over the library's class
+;; names (SEQ.process-library is read so a library reload re-renders).
+(def gvr-proc-classes ()
+  (do SEQ.process-library (graph-node-process-classes)))
+(def gvr-proc-class-labels () (map (lambda (c) (get c :label)) (gvr-proc-classes)))
+(def gvr-proc-class-at (index)
+  (let ((classes (gvr-proc-classes)))
+    (if (> (len classes) 0) (get (nth classes (min index (- (len classes) 1))) :class) nil)))
+
+;; Map arming (spec §6): a mappable port armed here lights the neuron row's
+;; transp / vel x pickers; clicking one binds the port to that payload field.
+(defstate gvr-map-instance -1)
+(defstate gvr-map-port "")
+(def gvr-map-active? () (>= gvr-map-instance 0))
+(def gvr-map-port-active? (id port-name)
+  (and (= gvr-map-instance id) (= gvr-map-port port-name)))
+(def gvr-map-clear ()
+  (do (set! gvr-map-instance -1) (set! gvr-map-port "")))
+(def gvr-map-arm (id port-name)
+  (if (gvr-map-port-active? id port-name)
+    (gvr-map-clear)
+    (do (set! gvr-map-instance id) (set! gvr-map-port port-name))))
+(def gvr-map-bind (n field)
+  (if (gvr-map-active?)
+    (do
+      (graph-node-process-map gvr-name n gvr-map-instance gvr-map-port field)
+      (gvr-map-clear)
+      (gvr-proc-touch))
+    nil))
+(def gvr-map-field-labels (list "transpose" "velocity" "duration" "delay"))
+(def gvr-map-field-short (field)
+  (if (= field "transpose") "tpose" (if (= field "velocity") "vel" (if (= field "duration") "dur" field))))
+
+(def gvr-proc-number (v fallback)
+  (if (number? v) v (if (= v true) 1 fallback)))
+
+;; Inlets a cable lands on: (list (list instance-id inlet) ...), from the bay
+;; entries so fan-out cables count too.
+(def gvr-proc-wired-inlets (entries)
+  (reduce
+    (lambda (acc entry)
+      (append acc
+        (map (lambda (port) (list (get entry :instance-id) (get port :name)))
+             (filter (lambda (port) (> (len (get port :writers)) 0)) (get entry :in-ports)))))
+    (list)
+    entries))
+
+(def gvr-proc-inlet-wired? (wired id inlet-name)
+  (> (len (filter (lambda (w) (and (= (nth w 0) id) (= (nth w 1) inlet-name))) wired)) 0))
+
+(def gvr-proc-inlet-row (n slot inlet wired)
+  (let ((id (get slot :instance-id))
+        (name (get inlet :name))
+        (kind (get inlet :kind))
+        (key (str "graph-variable-reset-proc-" n "-" id "-" name))
+        (current (gvr-proc-number (get inlet :value) 0))
+        (lo (gvr-proc-number (get inlet :min) 0))
+        (hi (gvr-proc-number (get inlet :max) 1))
+        (set-inlet (lambda (v) (do (graph-node-process-inlet gvr-name n id name v) (gvr-proc-touch)))))
+    (h-stack :gap 0.4 :align :center
+      (label name :width 4.2 :height gvr-row-height :font-size 8 :h-align :right :color :dim :bg :transparent)
+      (if (gvr-proc-inlet-wired? wired id name)
+        (label "wired" :width gvr-proc-control-width :height gvr-row-height :font-size 8 :h-align :center :color :process-lane-accent :bg :transparent)
+        (if (= kind "gate")
+          (gvr-toggle-sized key gvr-proc-control-width (>= current 0.5)
+            (lambda (v) (set-inlet (if v 1 0))))
+          (if (= kind "enum")
+            (dropdown
+              :key key
+              :value-index (floor current) :options (get inlet :options)
+              :badge-color :transparent :bg-color :bg :border-color :mixer-strip-selected-bg
+              :width gvr-proc-control-width :height gvr-row-height :font-size 6
+              :on-change (lambda (v) (set-inlet (gvr-index-of (get inlet :options) v))))
+            (if (= kind "track")
+              (let ((opts (gvr-track-inlet-options)))
+                (dropdown
+                  :key key
+                  :value-index (gvr-track-inlet-index (floor current)) :options opts
+                  :badge-color :transparent :bg-color :bg :border-color :mixer-strip-selected-bg
+                  :width gvr-proc-control-width :height gvr-row-height :font-size 6
+                  :on-change (lambda (v) (set-inlet (gvr-track-inlet-value (gvr-index-of opts v))))))
+            (number-picker
+              :key key :border-color :dim :background-color :bg
+              :value current
+              :min (if (= kind "track") 0 lo)
+              :max (if (= kind "track") 63 hi)
+              :step (if (or (= kind "int") (= kind "track")) 1 0.01)
+              :decimals (if (or (= kind "int") (= kind "track")) 0 2)
+              :width gvr-proc-control-width :height gvr-row-height :font-size 9
+              :on-change set-inlet))))))))
+
+(def gvr-proc-card (n slots index wired)
+  (let ((slot (nth slots index))
+        (id (get slot :instance-id))
+        (enabled (get slot :enabled)))
+    (box
+      :key (str "graph-variable-reset-proc-card-" n "-" id)
+      :width gvr-proc-card-width
+      :padding 0.5
+      :background-color :bg
+      :border-color (if enabled :process-lane-accent :mixer-strip-border)
+      :corner-radius 6
+      (v-stack :gap 0.3
+        (h-stack :gap 0.3 :align :center
+          (label (get slot :label) :width 6.2 :height gvr-row-height :font-size 8 :color :foreground :bg :transparent)
+          (button (if enabled "on" "off")
+            :key (str "graph-variable-reset-proc-enable-" n "-" id)
+            :width 2.0 :height gvr-row-height :padding 0.15 :font-size 7
+            :background-color (if enabled :process-lane-accent :transparent)
+            :border-color :process-lane-accent
+            :color (if enabled :black :dim)
+            :on-click (lambda (event)
+              (do (graph-node-process-enable gvr-name n id (not enabled)) (gvr-proc-touch))))
+          (button "<"
+            :key (str "graph-variable-reset-proc-left-" n "-" id)
+            :width 1.4 :height gvr-row-height :padding 0.1 :font-size 7
+            :background-color :transparent :border-color :dim :color :dim
+            :on-click (lambda (event)
+              (do (graph-node-process-move gvr-name n id -1) (gvr-proc-touch))))
+          (button ">"
+            :key (str "graph-variable-reset-proc-right-" n "-" id)
+            :width 1.4 :height gvr-row-height :padding 0.1 :font-size 7
+            :background-color :transparent :border-color :dim :color :dim
+            :on-click (lambda (event)
+              (do (graph-node-process-move gvr-name n id 1) (gvr-proc-touch))))
+          (button "x"
+            :key (str "graph-variable-reset-proc-remove-" n "-" id)
+            :width 1.4 :height gvr-row-height :padding 0.1 :font-size 7
+            :background-color :transparent :border-color :dim :color :dim
+            :on-click (lambda (event)
+              (do (graph-node-process-remove gvr-name n id) (gvr-proc-touch)))))
+        (each (get slot :inlet-defs) |inlet| (gvr-proc-inlet-row n slot inlet wired))
+        (each (filter (lambda (port) (get port :mappable)) (get slot :ports)) |port|
+          (gvr-proc-map-row n slot port))))))
+
+;; A mappable port (rand/count/acc `out`, ...) writes onto the fire payload:
+;; pick which field. Wire ports go through the bay's cables instead.
+(def gvr-proc-map-row (n slot port)
+  (let ((id (get slot :instance-id))
+        (port-name (get port :name))
+        (mapped (get port :mapped-to)))
+    (let ((armed (gvr-map-port-active? id port-name)))
+      (h-stack :gap 0.4 :align :center
+        (label (str port-name " ->") :width 4.2 :height gvr-row-height :font-size 8 :h-align :right :color :process-lane-accent :bg :transparent)
+        (label (if mapped (gvr-map-field-short mapped) (if armed "pick..." "unmapped"))
+          :width 4.0 :height gvr-row-height :font-size 8 :v-align :center
+          :color (if (or mapped armed) :process-lane-accent :dim) :bg :transparent)
+        (button "map"
+          :key (str "graph-variable-reset-proc-map-" n "-" id "-" port-name)
+          :width 2.0 :height gvr-row-height :padding 0.15 :font-size 7
+          :background-color (if armed :process-lane-accent :transparent)
+          :border-color :process-lane-accent
+          :color (if armed :black :process-lane-accent)
+          :on-click (lambda (event) (gvr-map-arm id port-name)))
+        (if mapped
+          (button "x"
+            :key (str "graph-variable-reset-proc-unmap-" n "-" id "-" port-name)
+            :width 1.4 :height gvr-row-height :padding 0.1 :font-size 7
+            :background-color :transparent :border-color :dim :color :dim
+            :on-click (lambda (event)
+              (do (graph-node-process-map gvr-name n id port-name nil) (gvr-proc-touch))))
+          nil)))))
+
+;; While a map is armed, a payload-backed picker turns into the target chip:
+;; clicking it binds the armed port to `field`.
+(def gvr-num-or-target (n field key value lo hi stp dec on-change)
+  (if (gvr-map-active?)
+    (button (str "-> " (gvr-map-field-short field))
+      :key (str key "-map-target")
+      :width gvr-control-width :height gvr-row-height :padding 0.15 :font-size 7
+      :background-color :process-map-arm-bg
+      :border-color :process-lane-accent
+      :color :process-lane-accent
+      :on-click (lambda (event) (gvr-map-bind n field)))
+    (gvr-num key value lo hi stp dec on-change)))
+
+(def gvr-proc-add-card (n)
+  (let ((classes (gvr-proc-class-labels)))
+    (box
+      :key (str "graph-variable-reset-proc-add-" n)
+      :width gvr-proc-card-width
+      :padding 0.5
+      :background-color :transparent
+      :border-color :mixer-strip-border
+      :corner-radius 6
+      (v-stack :gap 0.3
+        (dropdown
+          :key (str "graph-variable-reset-proc-add-class-" n)
+          :value-index (min gvr-proc-add-class (- (len classes) 1)) :options classes
+          :badge-color :transparent :bg-color :bg :border-color :mixer-strip-selected-bg
+          :width (- gvr-proc-card-width 1) :height gvr-row-height :font-size 9
+          :on-change (lambda (v) (set! gvr-proc-add-class (gvr-index-of classes v))))
+        (button "+ add process"
+          :key (str "graph-variable-reset-proc-add-button-" n)
+          :width (- gvr-proc-card-width 1) :height gvr-row-height :padding 0.15 :font-size 7
+          :background-color :transparent :border-color :process-lane-accent :color :process-lane-accent
+          :on-click (lambda (event)
+            (do
+              (graph-node-process-add gvr-name n (gvr-proc-class-at gvr-proc-add-class))
+              (gvr-proc-touch))))))))
+
+;; The slot the inspector card shows: the bay's selection, else the first.
+(def gvr-proc-selected-index (slots)
+  (let ((selected (eseq.sequencer/lane-patch-node-selected-id))
+        (hits (filter (lambda (i) (= (get (nth slots i) :instance-id) selected)) (range 0 (len slots)))))
+    (if (> (len hits) 0) (nth hits 0) (if (> (len slots) 0) 0 -1))))
+
+;; The node's patch: the shared lane patchbay (cards, ports, drag cables,
+;; cable select + × / Backspace, fan-out) over this node's chain, with the
+;; selected slot's inspector card (on/off, order, remove, inlet knobs) beside
+;; it. Wires pointing up the chain land next fire, as on a track.
+(def gvr-node-patch (n)
+  (let ((slots (gvr-node-patch-slots n))
+        (entries (gvr-node-patch-entries n))
+        (ns (eseq.sequencer/lane-patch-node-namespace n)))
+    (let ((wired (gvr-proc-wired-inlets entries))
+          (index (gvr-proc-selected-index slots)))
+      (v-stack :gap 0.4
+        (label "process patch: runs on every fire before emit + scatter. veto mutes, writes ride on. drag a port onto an inlet to wire it"
+          :width 70 :height 1.0 :font-size 8 :color :dim :bg :transparent)
+        (h-stack :gap 0.6 :align :top
+          (box :flex 1 :padding 0 :bg :transparent
+            :key (str "graph-variable-reset-proc-bay-" n)
+            (eseq.sequencer/lane-patchbay-node ns (gvr-proc-add-card n)))
+          (if (>= index 0) (gvr-proc-card n slots index wired) nil))))))
+
+;; One row / column of the weight matrix as a labeled 1xN strip.
+(def gvr-edge-strip (title n active-count direction)
+  (let ((values (if (= direction :out)
+                  (list (nth gvr-weights n))
+                  (list (map (lambda (r) (nth (nth gvr-weights r) n)) (range 0 active-count))))))
+    (v-stack :gap 0.2
+      (label title :width 10 :height 0.9 :font-size 8 :color :dim :bg :transparent)
+      (matrix
+        :key (str "graph-variable-reset-edge-strip-" (if (= direction :out) "out" "in") "-" n)
+        :rows 1
+        :cols active-count
+        :width (* active-count 2.2)
+        :height 2.2
+        :min 0 :max 1
+        :background :mixer-strip-bg
+        :color (rgba 0.14 0.3 0.9 1)
+        :empty-fill-color (rgba 0.04 0.04 0.05 1)
+        :stroke-color (rgba 0.36 0.62 0.57 1)
+        :stroke-width 1.5
+        :stroke-active-only true
+        :value values
+        :on-cell-change (lambda (r c v)
+          (let ((from (if (= direction :out) n c))
+                (to (if (= direction :out) c n)))
+            (do
+              (set! gvr-weights (gvr-set-cell gvr-weights from to v))
+              (graph-edge gvr-name :from from :to to :weight v))))))))
+
+(def gvr-expanded-editor (n active-count track-colors)
+  (box
+    :padding gvr-row-panel-padding
+    :border-color :mixer-strip-border
+    :background-color :mixer-strip-bg :corner-radius 16
+    (v-stack :gap 0.7
+      (h-stack :gap 0.5 :align :center
+        (button "all nodes"
+          :key "graph-variable-reset-expanded-back"
+          :width 5 :height gvr-row-height :padding 0.15 :font-size 7
+          :background-color :transparent :border-color :dim :color :dim
+          :on-click (lambda (event) (set! gvr-expanded-node -1)))
+        (button "<"
+          :key "graph-variable-reset-expanded-prev"
+          :width 1.6 :height gvr-row-height :padding 0.1 :font-size 7
+          :background-color :transparent :border-color :dim :color :dim
+          :on-click (lambda (event) (set! gvr-expanded-node (max 0 (- n 1)))))
+        (label (str "neuron " n) :width 6 :height 1.2 :font-size 11 :h-align :center :color :foreground :bg :transparent)
+        (button ">"
+          :key "graph-variable-reset-expanded-next"
+          :width 1.6 :height gvr-row-height :padding 0.1 :font-size 7
+          :background-color :transparent :border-color :dim :color :dim
+          :on-click (lambda (event) (set! gvr-expanded-node (min (- active-count 1) (+ n 1))))))
+      (v-stack :gap gvr-row-gap
+        (gvr-header)
+        (gvr-row n track-colors))
+      (h-stack :gap 1.5
+        (gvr-edge-strip (str "in  (from node -> " n ")") n active-count :in)
+        (gvr-edge-strip (str "out (" n " -> to node)") n active-count :out))
+      (gvr-node-patch n))))
+
+(def gvr-panel (current-pattern graph-visualizations track-colors track-active-notes)
   (do
     ;; Re-derive the matrix snapshot from the resolved current-pattern graph. The
     ;; per-node knobs need no sync — `bind-graph` re-seeds their slots as the rows
@@ -676,14 +1038,16 @@
               ))
           
           (h-stack
-            (box 
-              :padding gvr-row-panel-padding
-              :border-color :mixer-strip-border
-              :background-color :mixer-strip-bg :corner-radius 16
-              (v-stack :gap 0.5
-                (v-stack :gap gvr-row-gap
-                  (gvr-header)
-                  (each (range 0 active-count) |n| (gvr-row n track-colors)))))
+            (if (and (>= gvr-expanded-node 0) (< gvr-expanded-node active-count))
+              (gvr-expanded-editor gvr-expanded-node active-count track-colors)
+              (box 
+                :padding gvr-row-panel-padding
+                :border-color :mixer-strip-border
+                :background-color :mixer-strip-bg :corner-radius 16
+                (v-stack :gap 0.5
+                  (v-stack :gap gvr-row-gap
+                    (gvr-header)
+                    (each (range 0 active-count) |n| (gvr-row n track-colors))))))
             
             (v-stack :gap gvr-matrix-column-gap 
               (label "" :width 0.1 :height (gvr-matrix-header-spacer-height) :font-size 1 :bg :transparent)
@@ -751,7 +1115,9 @@
               :key-count 80
               :width 84
               :height 3.5))
-          ))))))
+          )))))
 
-(effect-buffer "*variable-reset*" (gvr-panel SEQ.current-pattern SEQ.graph-visualizations SEQ.track-colors SEQ.track-active-notes))
-(eseq.seq-step-tabs/seq-register-script-step-sequencer-tab script-tab-label script-buffer-name script-sequencer-name "")
+(effect-buffer "*var-reset*" (gvr-panel SEQ.current-pattern SEQ.graph-visualizations (gvr-route-track-colors SEQ.track-colors) SEQ.track-active-notes))
+(eseq.seq-step-tabs/seq-register-script-step-sequencer-tab
+  (if gvr-owner-rack (eseq.drum-rack-v2/group-name (eseq.drum-rack-v2/group-index-by-id gvr-owner-rack)) "var rst")
+  "*var-reset*" "variable-reset" "")

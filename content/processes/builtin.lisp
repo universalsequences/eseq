@@ -151,7 +151,7 @@
 ;; source steps keep the last note that played), so a source at a slower
 ;; timebase transposes a whole bar at once. Adds on top of this step's own
 ;; transpose and any accumulator, like every other transpose write.
-(def-process lane-xpose
+(def-process xpose-by-track
   :doc "Cirklon xpose by track: a high step transposes this track's note by the note on the step the source track is currently on (semitones from the root), on top of its own transpose. Empty source steps hold the last note that played."
   :target (step-param :transpose)
   :in ((gate :gate :default 0 :lane true)
@@ -165,7 +165,7 @@
 ;; source's note is taken AFTER its own bar transpose (manual 3-14 "Bar
 ;; Values"), so moving the source's bar XPOSE moves this track with it.
 ;; Plain `xpose` reads the authored note and ignores the source's bar.
-(def-process lane-xpose-b
+(def-process xpose-by-track-b
   :doc "Cirklon xpose by trk n+B: a high step transposes this track's note by the source track's current step note PLUS that source bar's transpose, on top of its own transpose."
   :target (step-param :transpose)
   :in ((gate :gate :default 0 :lane true)
@@ -244,6 +244,40 @@
              (target-add! :out held)
              (target-set! :wire held))
            nil)))
+
+(def-process neural-transpose
+  :doc "Adds amount to the trigger's transpose before it is emitted and propagated: turn the knob, or wire a generator (rand, count, acc) into amount. Works on tracks too."
+  :target (step-param :transpose)
+  :in ((amount :float -48 48 :default 0 :lane true))
+  :run (target-add! (in :amount)))
+
+(def-process neural-delay
+  :doc "Graph nodes: adds amount (steps) to this fire's propagation delay, so what this neuron feeds arrives later or sooner. Turn the knob, or wire a generator in: acc with amount 1 makes each successive fire wait one step longer. No effect on a track."
+  :target (step-param :delay)
+  :in ((amount :float -16 16 :default 0 :lane true))
+  :run (target-add! (in :amount)))
+
+(def-process neural-reset
+  :doc "Graph nodes: the neuron's reset, both ways. fired sends 1 on this node's first fire after a reset (the bar reset, or one triggered here): wire it into acc reset, count reset, ... A high trigger (knob, or wired from cmp / veto logic) resets the graph after this fire commits: group all, or one neural group only."
+  :targets ((fired :process-inlet))
+  :in ((trigger :gate :default 0 :lane true)
+       (group :enum ("all" "A" "B" "C" "D") :default 0))
+  :run (do
+         (if (reset-fired?) (target-set! :fired 1) nil)
+         (if (> (in :trigger) 0.5) (graph-reset! (in :group)) nil)))
+
+(def-process neural-scale
+  :doc "Snap the trigger's transpose to a scale (nearest pitch class, octave kept). Pick the scale and root; gate is a knob, or wire cmp/veto-style logic into it to switch the snap on by condition. Runs on whatever earlier slots wrote, so rand -> transpose -> scale gives an evolving melody inside a scale, and harmony -> scale keeps a follower inside its own scale. Works on tracks too."
+  :target (step-param :transpose)
+  :in ((gate :gate :default 1 :lane true)
+       (scale :enum ("major" "minor" "harm minor" "mel minor" "dorian" "phrygian" "lydian" "mixolydian" "locrian" "maj pent" "min pent" "blues" "whole tone" "chromatic") :default 0)
+       (root :enum ("C" "C#" "D" "D#" "E" "F" "F#" "G" "G#" "A" "A#" "B") :default 0))
+  :run (if (> (in :gate) 0.5)
+         (target-add!
+           (pitch-class-nearest-delta
+             (scale-pitch-classes (in :scale) (in :root))
+             (current-note)))
+         nil))
 
 (def-process lane-count
   :doc "Counter generator: each nonzero step advances the count by step and wraps from hi back to lo, then sends it. Zero steps send nothing, so a wired accumulator only moves when the count does; hold 1 sends the count every fire."
@@ -332,17 +366,22 @@
 ;; step the read is nil and the step plays untouched. Both tracks' pitches
 ;; are taken relative to their own roots, as with grab.
 (def-process lane-harmony
-  :doc "Harmony lane: hold this step's note to the chord and key of the source track's current step, same tick; empty source steps hold the last chord that played. Amount is strictness: 1 chord tones only, ~0.5 anything in key, ~0.3 anything but clashes, 0 free. A note that fails snaps to the nearest pitch class that passes. Grace is a dead zone in semitones."
+  :doc "Harmony lane: hold this step's note to the chord and key of the source track's current step, same tick; empty source steps hold the last chord that played. Amount is strictness: 1 chord tones only, ~0.5 anything in key, ~0.3 anything but clashes, 0 free. A note that fails snaps to the nearest pitch class that passes. Grace is a dead zone in semitones. On a graph node patch a negative source -(k+1) follows neuron k instead: its last note is the chord, its recent notes the key."
   :target (step-param :transpose)
   :in ((amount :float 0 1 :default 1 :lane true)
        (source :track :default 0)
        (grace :int 0 3 :default 0))
-  :run (let ((src (read (track (in :source) :chord :pattern))))
+  :run (let ((from-neuron (< (in :source) 0))
+             (src (if (< (in :source) 0)
+                    (read (neuron (- -1 (in :source)) :chord))
+                    (read (track (in :source) :chord :pattern)))))
          (if (= src nil)
            nil
            (target-add!
              (harmonic-snap src
-                            (read (track (in :source) :key :pattern))
+                            (if from-neuron
+                              (read (neuron (- -1 (in :source)) :key))
+                              (read (track (in :source) :key :pattern)))
                             (current-note)
                             (in :amount)
                             (in :grace))))))

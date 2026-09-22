@@ -17,6 +17,10 @@ pub(super) struct ProcessTargetOverlay {
     pub(super) instrument_effective: Vec<crate::process::ProcessEffectiveParam>,
     /// Same feed for bus-send writes, keyed by bus id.
     pub(super) send_effective: Vec<crate::process::ProcessEffectiveSend>,
+    /// Graph node fires only: change to the node's propagation delay, in
+    /// steps, written through the `delay` payload field
+    /// (`docs/graph-node-processes-spec.md`). Ignored on track steps.
+    pub(super) node_delay_offset_steps: f32,
 }
 
 impl Default for ProcessTargetOverlay {
@@ -28,6 +32,7 @@ impl Default for ProcessTargetOverlay {
             rack_macro_values: [None; crate::sequencer::RACK_MACRO_COUNT],
             instrument_effective: Vec::new(),
             send_effective: Vec::new(),
+            node_delay_offset_steps: 0.0,
         }
     }
 }
@@ -98,6 +103,15 @@ pub(super) fn process_target_label(target: &crate::process::ParamTarget) -> Stri
             format!("send:{}", crate::process::bus_send_label(*bus))
         }
     }
+}
+
+/// Payload fields a graph node patch can write that are not step params:
+/// `delay` (propagation delay in steps). Accepted as a `(step-param :delay)`
+/// target so the same authoring, mapping and wiring surface applies.
+pub(super) const NODE_PAYLOAD_PSEUDO_PARAMS: [&str; 1] = ["delay"];
+
+pub(super) fn is_node_payload_pseudo_param(name: &str) -> bool {
+    NODE_PAYLOAD_PSEUDO_PARAMS.contains(&name.trim_start_matches(':').to_ascii_lowercase().as_str())
 }
 
 pub(super) fn process_step_param_from_name(name: &str) -> Option<StepParam> {
@@ -556,7 +570,9 @@ pub(super) fn process_resolve_hint_to_target(
 ) -> Option<crate::process::ParamTarget> {
     match hint {
         crate::process::ProcessTargetHint::StepParam { param } => {
-            process_step_param_from_name(param)?;
+            if !is_node_payload_pseudo_param(param) {
+                process_step_param_from_name(param)?;
+            }
             Some(crate::process::ParamTarget::StepParam {
                 param: param.clone(),
             })
@@ -789,6 +805,26 @@ pub(super) fn process_apply_concrete_target_write(
     write: &crate::process::ProcessTargetWrite,
 ) {
     match target {
+        crate::process::ParamTarget::StepParam { param } if is_node_payload_pseudo_param(param) => {
+            // `delay` is not a step param: it lives on the fire's propagation
+            // (graph nodes), so it rides the overlay to the node runner.
+            overlay.node_delay_offset_steps = match write.op {
+                crate::process::ProcessTargetOp::Set => write.value,
+                crate::process::ProcessTargetOp::Add => overlay.node_delay_offset_steps + write.value,
+            };
+            process_trace(snapshot, || {
+                format!(
+                    "apply track={} step={} port={} target={} op={} value={} -> delay-offset={}",
+                    track + 1,
+                    step,
+                    write.port,
+                    process_target_label(target),
+                    process_target_op_label(write.op),
+                    write.value,
+                    overlay.node_delay_offset_steps
+                )
+            });
+        }
         crate::process::ParamTarget::StepParam { param } => {
             match process_apply_step_param_write(resolved, param, write.op, write.value) {
                 Some((step_param, applied)) => process_trace(snapshot, || {

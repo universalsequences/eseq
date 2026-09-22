@@ -24,6 +24,12 @@ pub enum NeuralMaxPolySelection {
     /// Keep seed-originated firings before neural-only ones (graph engine; the native
     /// neural engine has no per-candidate seed tag and falls back to deterministic).
     SeedFirst,
+    /// Weighted random draw over the candidates where each candidate's weight is the
+    /// summed edge weight from the PREVIOUS boundary's winners into it (a first-order
+    /// Markov transition on the connection matrix). Falls back to total incoming
+    /// weight when no previous winner connects, then to uniform. Graph engine only;
+    /// the native neural engine has no edge matrix and falls back to deterministic.
+    Markov,
 }
 
 impl NeuralMaxPolySelection {
@@ -36,6 +42,7 @@ impl NeuralMaxPolySelection {
             Self::LowestTranspose => "lowest-transpose",
             Self::HighestTranspose => "highest-transpose",
             Self::SeedFirst => "seed-first",
+            Self::Markov => "markov",
         }
     }
 }
@@ -1000,7 +1007,7 @@ impl NeuralRuntime {
             // The native neural engine has no per-candidate seed tag; fall back to the
             // deterministic earliest-sample order. `seed-first` is meaningful on the graph
             // engine (def-sequencer/def-node), which carries the seed origin.
-            NeuralMaxPolySelection::SeedFirst => {
+            NeuralMaxPolySelection::SeedFirst | NeuralMaxPolySelection::Markov => {
                 for candidate in candidates.iter().take(accepted_count) {
                     accepted[candidate.neuron_idx] = true;
                 }

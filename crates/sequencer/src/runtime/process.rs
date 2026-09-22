@@ -154,6 +154,11 @@ pub struct ProcessTrackReadSnapshot {
 #[derive(Clone, Debug, Default)]
 pub struct ProcessReadSnapshot {
     pub tracks: Arc<Vec<ProcessTrackReadSnapshot>>,
+    /// Per graph node, that node's most recent emitted notes (oldest first,
+    /// at most `NEURON_RECENT_NOTES`). Only populated while a graph node's
+    /// process patch runs (`docs/graph-node-processes-spec.md` §4); empty
+    /// otherwise, so `(read (neuron k ...))` is nil on a track.
+    pub neurons: Arc<Vec<Vec<f32>>>,
     pub process_values: HashMap<String, HashMap<String, Value>>,
     pub channels: HashMap<String, Value>,
     pub fields: HashMap<String, Value>,
@@ -1805,6 +1810,9 @@ pub struct ProcessStepEventContext {
     /// fire. Inlet writes are per fire, so `(in? :a)` is the only way a body
     /// can tell "nothing arrived" from "the default arrived".
     pub written_inlets: Vec<String>,
+    /// Graph nodes: this is the node's first fire after a reset
+    /// (`(reset-fired?)`). Always false on a track step.
+    pub after_reset: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -1857,6 +1865,8 @@ pub struct ProcessMidiFxParamOverride {
 #[derive(Clone, Debug, Default)]
 pub struct ProcessRuntime {
     defs: HashMap<String, ProcessDef>,
+    /// See `ProcessReadSnapshot::neurons`.
+    neuron_reads: Arc<Vec<Vec<f32>>>,
     instances: Vec<ProcessInstance>,
     handle_to_runtime: HashMap<AuthoredHandleId, u64>,
     channels: HashMap<String, ChannelState>,
@@ -2190,12 +2200,20 @@ impl ProcessRuntime {
         }
         ProcessReadSnapshot {
             tracks,
+            neurons: Arc::clone(&self.neuron_reads),
             process_values,
             channels,
             fields,
             conductor_observe_tracks: Vec::new(),
             conductor_play_tracks: Vec::new(),
         }
+    }
+
+    /// Publish the recent emitted notes of the graph whose node patch is about
+    /// to run, for `(read (neuron k :note|:key))`. Cleared with an empty list
+    /// once the patch has run.
+    pub fn set_neuron_reads(&mut self, neurons: Vec<Vec<f32>>) {
+        self.neuron_reads = Arc::new(neurons);
     }
 
     pub fn conductor_read_snapshot(
@@ -3230,19 +3248,32 @@ impl ProcessRuntime {
                 resolved: ctx.resolved,
                 note: ctx.note,
                 written_inlets: written_step_process_inlets(&def, inlet_writes),
+                after_reset: ctx.after_reset,
             }),
             ports,
             reads: ProcessReadSnapshot::default(),
-            seed: process_rng_seed(
-                instance_id.0,
-                seed_policy,
-                ProcessRngPosition::Step {
-                    cycle: ctx.cycle,
-                    step: ctx.step,
-                },
-            ),
+            seed: {
+                let seed = process_rng_seed(
+                    instance_id.0,
+                    seed_policy,
+                    ProcessRngPosition::Step {
+                        cycle: ctx.cycle,
+                        step: ctx.step,
+                    },
+                );
+                match ctx.fire_seed {
+                    Some(fire) => mix_fire_seed(seed, fire),
+                    None => seed,
+                }
+            },
         })
     }
+}
+
+/// Fold a per-fire value into a step seed; never yields zero.
+fn mix_fire_seed(seed: u64, fire: u64) -> u64 {
+    let mixed = seed ^ stable_mix64(fire.wrapping_add(0x5851_F42D_4C95_7F2D));
+    if mixed == 0 { 0x9E37_79B9_7F4A_7C15 } else { mixed }
 }
 
 #[derive(Clone, Debug)]
@@ -3257,6 +3288,13 @@ pub struct ProcessStepRunContext {
     /// See [`ProcessStepEventContext::note`].
     pub note: f32,
     pub event: Value,
+    /// Graph node fires are events, not bar positions: when set, the RNG is
+    /// seeded from this per-fire value on top of the class's `:seed` policy,
+    /// so a `:locked` class still rolls fresh on every fire
+    /// (`docs/graph-node-processes-spec.md`, bead eseq-waa9.7).
+    pub fire_seed: Option<u64>,
+    /// Graph nodes: first fire after a graph / group reset.
+    pub after_reset: bool,
 }
 
 fn defaulted_inlets(
@@ -4131,6 +4169,8 @@ mod tests {
                         resolved: test_step_context(track).resolved,
                         note: 0.0,
                         event: Value::Nil,
+                        fire_seed: None,
+                        after_reset: false,
                     },
                 )
                 .expect("build step process invocation");
@@ -4165,6 +4205,7 @@ mod tests {
             sample_time: 48_000,
             step_beats: 0.25,
             written_inlets: Vec::new(),
+            after_reset: false,
             note: 0.0,
             resolved: ResolvedStep {
                 duration: 1.0,
@@ -4658,9 +4699,49 @@ pub const DEFAULT_LANE_CLASSES: [&str; 11] = [
     "lane-cmp",
     "lane-veto",
     "lane-roll",
-    "lane-xpose",
-    "lane-xpose-b",
+    "xpose-by-track",
+    "xpose-by-track-b",
 ];
+
+/// Process classes renamed in place (old, new). Applied to every chain on
+/// project load (`project::migrate_legacy_process_class_names`) so saved
+/// slots, wires and rosters keep working under the new name.
+pub const LEGACY_PROCESS_CLASS_RENAMES: [(&str, &str); 2] = [
+    ("lane-xpose", "xpose-by-track"),
+    ("lane-xpose-b", "xpose-by-track-b"),
+];
+
+pub fn migrate_legacy_process_class_name(name: &mut String) -> bool {
+    for (old, new) in LEGACY_PROCESS_CLASS_RENAMES {
+        if name == old {
+            *name = new.to_string();
+            return true;
+        }
+    }
+    false
+}
+
+/// Rename legacy classes in a chain: slot classes plus every process-inlet
+/// target (primary bindings and fan-out) that names a class.
+pub fn migrate_legacy_process_class_names_in_chain(chain: &mut TrackProcessChain) -> bool {
+    let mut changed = false;
+    for slot in &mut chain.slots {
+        changed |= migrate_legacy_process_class_name(&mut slot.class_name);
+        for binding in slot.bindings.values_mut() {
+            if let Some(ParamTarget::ProcessInlet { process, .. }) = binding {
+                changed |= migrate_legacy_process_class_name(process);
+            }
+        }
+        for entries in slot.fanout.values_mut() {
+            for entry in entries {
+                if let ParamTarget::ProcessInlet { process, .. } = &mut entry.target {
+                    changed |= migrate_legacy_process_class_name(process);
+                }
+            }
+        }
+    }
+    changed
+}
 
 /// One default lane as installed on every scene's project layer, in chain
 /// order. `name` doubles as the dropdown label.
@@ -4691,8 +4772,8 @@ pub const DEFAULT_LANES: [DefaultLaneSpec; 14] = [
     DefaultLaneSpec { class_name: "lane-cmp", name: "cmp B" },
     DefaultLaneSpec { class_name: "lane-veto", name: "veto" },
     DefaultLaneSpec { class_name: "lane-roll", name: "roll" },
-    DefaultLaneSpec { class_name: "lane-xpose", name: "xpose" },
-    DefaultLaneSpec { class_name: "lane-xpose-b", name: "xpose+b" },
+    DefaultLaneSpec { class_name: "xpose-by-track", name: "xpose" },
+    DefaultLaneSpec { class_name: "xpose-by-track-b", name: "xpose+b" },
 ];
 
 /// Default lane slot ids sit in a fixed block below the UI handle base

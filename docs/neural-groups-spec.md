@@ -102,6 +102,8 @@ New sequencer-level config (per-pattern, `graph-config` / `bind-graph-config`
 | `:group-gain` | k×k float | all `1.0` | `0..2` | `G` — propagation gain, §4.3. |
 | `:group-coupling` | k×k float | all `0.0` | `-2..2` | `H` — activity→threshold, §4.5. |
 | `:group-trace-decay` | float | `0.5` | `0..1` | Per-beat decay of the activity trace, §4.4. |
+| `:group-coupling-scale` | float | `1.0` | `0..2` | Global multiplier on every `H` cell at suppression time, §4.5. One knob to tame or exaggerate a sensitive matrix without retouching cells. |
+| `:group-excite-floor` | float | `0.25` | `0..1` | Fraction of the authored threshold that excitation can never push `θ_eff` below, §4.5. `0` restores the zero-energy wake-up lever. |
 | `:group-debt-rate` | float | `0.15` | `0..1` | How fast the debt follower tracks suppression, §4.6. |
 | `:group-rebound` | float | `0.0` | `0..4` | Threshold undershoot gain on release, §4.6. |
 | `:group-surge` | float | `0.0` | `0..1` | Energy surge gain on release, §4.6. |
@@ -157,7 +159,7 @@ for a boundary and accepts `max_poly` of them under the selected
 Consequences worth stating explicitly:
 
 - Selection modes keep their exact semantics, now scoped per group.
-  `:loudest` picks the loudest *within* each group; `:seed-first` prioritizes
+  `:loudest` picks the loudest *within* each group; `:markov` draws winners at random weighted by the connection-matrix edges from the previous boundary's winners (a first-order transition on `W`); `:seed-first` prioritizes
   seeds within each group.
 - Determinism is preserved: partitioning is a stable filter over an
   already-sorted list, so the accepted set is a pure function of the candidate
@@ -248,7 +250,7 @@ threshold lookup out of the map.
 ```
 suppression[g] = Σ_c  H[c][g] * activity[c]
 θ_eff(i)       = clamp(θ(i) + suppression[group(i)] − rebound[group(i)],
-                       0, θ_max)
+                       θ(i) * group-excite-floor, θ_max)
 ```
 
 - **Positive** `H[c][g]`: activity in `c` *suppresses* `g` (raises its
@@ -259,10 +261,14 @@ suppression[g] = Σ_c  H[c][g] * activity[c]
   strictly simpler than) the global dynamic-threshold regulator sketched in
   §10.
 
-Clamping at `0` on the low end matters: at `θ_eff = 0` the standard rule
+The low-end clamp is a *fraction of the authored threshold*, not `0`
+(`:group-excite-floor`, default `0.25`). At `θ_eff = 0` the standard rule
 `(>= (energy) (param :threshold))` is satisfied even at zero energy, so a
-sufficiently excited group fires regardless of stored charge. That is the
-guaranteed-wake-up lever, and §4.6 depends on it.
+sufficiently excited group fires every boundary regardless of stored charge —
+in practice a self-oscillation trap that a couple of negative cells fall into
+(2026-09-21). With the floor, an excited node still needs real incoming
+energy, just less of it. Setting the floor to `0` restores the
+guaranteed-wake-up lever that §4.6 originally leaned on.
 
 `θ_max` is the declared param range max (4 in the demo).
 
