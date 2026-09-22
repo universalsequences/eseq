@@ -1202,9 +1202,14 @@
         (if (get (nth SEQ.groups gidx) :rack)
           (rack-group-menu-actions track-menu-group-id)
           group-menu-actions)))
-    (if (and (>= (len SEQ.selected-tracks) 2) (track-menu-target-selected?))
-      (append track-menu-actions (list (dict :id :group :label "Group Tracks")))
-      track-menu-actions)))
+    (append
+      track-menu-actions
+      (if (track-grouped? track-menu-track)
+        (list (dict :id :ungroup-track :label "Ungroup track"))
+        (list))
+      (if (and (>= (len SEQ.selected-tracks) 2) (track-menu-target-selected?))
+        (list (dict :id :group :label "Group Tracks"))
+        (list)))))
 
 (def select-track-menu-action (action)
   (if (= (get action :id) :rename)
@@ -1220,11 +1225,15 @@
         (do
           (set! track-menu-open false)
           (group-selected))
-        (if (= (get action :id) :ungroup)
+        (if (or (= (get action :id) :ungroup)
+                (= (get action :id) :ungroup-track))
           (do
             (set! track-menu-open false)
-            (host-command "ungroup-tracks"
-              (dict :group-id track-menu-group-id)))
+            (if (= (get action :id) :ungroup-track)
+              (host-command "remove-track-from-group"
+                (dict :track track-menu-track))
+              (host-command "ungroup-tracks"
+                (dict :group-id track-menu-group-id))))
           (if (= (get action :id) :export-kit)
             (do
               (set! track-menu-open false)
