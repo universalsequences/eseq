@@ -2022,6 +2022,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                     duration: None,
                     swing: None,
                     neural_group: None,
+                    process_chain: None,
                 });
             graph
                 .node_intrinsics
@@ -2037,6 +2038,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                     duration: None,
                     swing: None,
                     neural_group: None,
+                    process_chain: None,
                 });
             graph
                 .edge_params
@@ -3760,6 +3762,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                     duration: None,
                     swing: None,
                     neural_group: None,
+                    process_chain: None,
                 },
                 crate::graph::ProjectGraphNodeIntrinsicOverride {
                     group: "nrn".to_string(),
@@ -3773,6 +3776,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                     duration: None,
                     swing: None,
                     neural_group: None,
+                    process_chain: None,
                 },
                 crate::graph::ProjectGraphNodeIntrinsicOverride {
                     group: "nrn".to_string(),
@@ -3786,6 +3790,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                     duration: None,
                     swing: None,
                     neural_group: None,
+                    process_chain: None,
                 },
             ],
             node_params: vec![crate::graph::ProjectGraphNodeParamOverride {
@@ -3808,6 +3813,8 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             group_gain: None,
             group_coupling: None,
             group_trace_decay: None,
+            group_coupling_scale: None,
+            group_excite_floor: None,
         };
         state
             .edit_current_graph_overrides(|overrides| {
@@ -4211,6 +4218,287 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         );
     }
 
+    /// docs/graph-node-processes-spec.md §5: the node-side process natives edit
+    /// the node's override chain, the read reports it, and the chain reaches the
+    /// resolved runtime config.
+    #[test]
+    fn graph_node_process_natives_edit_the_node_patch_and_reach_runtime() {
+        use crate::graph::{EdgeSetSpec, GraphManifest, NodeProto, ParamSpec, ShapeSpec, Topology};
+        use crate::sequencer::{PublishedSequencer, Timebase};
+
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let manifest = GraphManifest {
+            id: 89,
+            name: "neural".into(),
+            owner_rack: None,
+            shape: ShapeSpec::Line(2),
+            energy_decay: 1.0,
+            reset_every_beats: 16.0,
+            seed_on_reset: 0.0,
+            max_poly: 4,
+            max_poly_selection: NeuralMaxPolySelection::Deterministic,
+            duration: crate::graph::GraphDurationSpec::default(),
+            swing: crate::graph::GraphSwingSpec::default(),
+            node: NodeProto {
+                name: "nrn".into(),
+                params: vec![ParamSpec {
+                    name: "threshold".into(),
+                    min: 0.0,
+                    max: 4.0,
+                    default: 1.0,
+                    is_int: false,
+                }],
+                ..NodeProto::default()
+            },
+            edge_sets: vec![EdgeSetSpec {
+                from: "nrn".into(),
+                to: "nrn".into(),
+                topology: Topology::AllToAll,
+                distribution: crate::graph::EdgeDistribution::BroadcastWeighted,
+                gather_source: None,
+                params: vec![ParamSpec {
+                    name: "weight".into(),
+                    min: -1.0,
+                    max: 1.0,
+                    default: 0.0,
+                    is_int: false,
+                }],
+            }],
+        };
+        state.publish_sequencer(PublishedSequencer {
+            id: manifest.id,
+            name: manifest.name.clone(),
+            resolution: Timebase::Sixteenth as u8,
+            tick_source: String::new(),
+            requires: Vec::new(),
+            graph: Some(manifest.clone()),
+        });
+        let mut runtime = Runtime::new();
+        register_graph_authoring_natives(&mut runtime, Arc::clone(&state));
+
+        // Empty until something is added.
+        assert_eq!(
+            runtime.eval_str("(len (graph-node-process-chain \"neural\" 1))").unwrap(),
+            Some(Value::Number(0.0))
+        );
+        // Builtin lane classes are accepted without a published def; unknown
+        // classes are not.
+        let _ = runtime.eval_str("(graph-node-process-add \"neural\" 1 \"lane-nope\")");
+        assert_eq!(
+            runtime.eval_str("(len (graph-node-process-chain \"neural\" 1))").unwrap(),
+            Some(Value::Number(0.0)),
+            "an unknown class adds nothing"
+        );
+        let first = runtime
+            .eval_str("(graph-node-process-add \"neural\" 1 \"lane-prob\")")
+            .unwrap();
+        let second = runtime
+            .eval_str("(graph-node-process-add \"neural\" 1 \"lane-veto\")")
+            .unwrap();
+        let (Some(Value::Number(first)), Some(Value::Number(second))) = (first, second) else {
+            panic!("add returns the new instance id");
+        };
+        assert_ne!(first, second);
+        assert!(first >= (1u64 << 45) as f64 && first < (1u64 << 46) as f64, "node band: {first}");
+        runtime
+            .eval_str(&format!("(graph-node-process-inlet \"neural\" 1 {first} :prob 0.25)"))
+            .unwrap();
+        runtime
+            .eval_str(&format!("(graph-node-process-enable \"neural\" 1 {second} false)"))
+            .unwrap();
+
+        let chain = runtime
+            .eval_str("(graph-node-process-chain \"neural\" 1)")
+            .unwrap();
+        let Some(Value::List(slots)) = chain else { panic!("chain is a list") };
+        assert_eq!(slots.len(), 2);
+        let slot0 = slots[0].borrow().clone();
+        let Value::Map(slot0) = slot0 else { panic!("slot map") };
+        assert_eq!(*slot0["class"].borrow(), Value::String("lane-prob".into()));
+        assert_eq!(*slot0["enabled"].borrow(), Value::Bool(true));
+        let Value::Map(inlets) = slot0["inlets"].borrow().clone() else { panic!("inlets map") };
+        assert_eq!(*inlets["prob"].borrow(), Value::Number(0.25));
+        let slot1 = slots[1].borrow().clone();
+        let Value::Map(slot1) = slot1 else { panic!("slot map") };
+        assert_eq!(*slot1["enabled"].borrow(), Value::Bool(false));
+
+        // Move the veto first, then the chain order flips; remove it and only
+        // prob remains.
+        runtime
+            .eval_str(&format!("(graph-node-process-move \"neural\" 1 {second} -1)"))
+            .unwrap();
+        let overrides = state.current_graph_overrides();
+        let chain = overrides[0].node_intrinsics[0].process_chain.as_ref().unwrap();
+        assert_eq!(chain.slots[0].class_name, "lane-veto");
+        assert_eq!(overrides[0].node_intrinsics[0].instance, 1);
+        let config = manifest.runtime_config_with_overrides(Some(&overrides[0]));
+        assert_eq!(config.nodes[1].process_chain.slots.len(), 2);
+        assert!(config.nodes[0].process_chain.slots.is_empty());
+
+        runtime
+            .eval_str(&format!("(graph-node-process-remove \"neural\" 1 {second})"))
+            .unwrap();
+        let overrides = state.current_graph_overrides();
+        let chain = overrides[0].node_intrinsics[0].process_chain.as_ref().unwrap();
+        assert_eq!(chain.slots.len(), 1);
+        assert_eq!(chain.slots[0].class_name, "lane-prob");
+        runtime
+            .eval_str(&format!("(graph-node-process-remove \"neural\" 1 {first})"))
+            .unwrap();
+        let overrides = state.current_graph_overrides();
+        assert!(overrides[0].node_intrinsics[0].process_chain.is_none(), "empty chain is dropped");
+    }
+
+    /// The node bay's natives: primary wire + fan-out out of one port, the
+    /// lane-patch projection (cable ids in the node namespace, writers on the
+    /// in ports, readers on the out port), then removal in both directions.
+    #[test]
+    fn graph_node_lane_patch_projection_and_fanout_natives() {
+        use crate::graph::{EdgeSetSpec, GraphManifest, NodeProto, ParamSpec, ShapeSpec, Topology};
+        use crate::sequencer::{PublishedSequencer, Timebase};
+
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let manifest = GraphManifest {
+            id: 91,
+            name: "neural".into(),
+            owner_rack: None,
+            shape: ShapeSpec::Line(4),
+            energy_decay: 1.0,
+            reset_every_beats: 16.0,
+            seed_on_reset: 0.0,
+            max_poly: 4,
+            max_poly_selection: NeuralMaxPolySelection::Deterministic,
+            duration: crate::graph::GraphDurationSpec::default(),
+            swing: crate::graph::GraphSwingSpec::default(),
+            node: NodeProto {
+                name: "nrn".into(),
+                params: vec![ParamSpec {
+                    name: "threshold".into(),
+                    min: 0.0,
+                    max: 4.0,
+                    default: 1.0,
+                    is_int: false,
+                }],
+                ..NodeProto::default()
+            },
+            edge_sets: vec![EdgeSetSpec {
+                from: "nrn".into(),
+                to: "nrn".into(),
+                topology: Topology::AllToAll,
+                distribution: crate::graph::EdgeDistribution::BroadcastWeighted,
+                gather_source: None,
+                params: vec![ParamSpec {
+                    name: "weight".into(),
+                    min: -1.0,
+                    max: 1.0,
+                    default: 0.0,
+                    is_int: false,
+                }],
+            }],
+        };
+        state.publish_sequencer(PublishedSequencer {
+            id: manifest.id,
+            name: manifest.name.clone(),
+            resolution: Timebase::Sixteenth as u8,
+            tick_source: String::new(),
+            requires: Vec::new(),
+            graph: Some(manifest.clone()),
+        });
+        // The wire natives look the port up on the published def, as the app
+        // does once the builtin library has loaded.
+        let mut publisher = crate::lisp_host::scratch_runtime_with_fallbacks(Arc::clone(&state), 0, 0);
+        publisher
+            .eval(&crate::lisp_host::load_process_library_source())
+            .expect("load builtin process library");
+        state.publish_process_authoring(
+            publisher.process_authoring_snapshot().to_published().expect("publishable"),
+        );
+
+        let mut runtime = Runtime::new();
+        register_graph_authoring_natives(&mut runtime, Arc::clone(&state));
+        let id = |value: Option<Value>| match value {
+            Some(Value::Number(id)) => id,
+            other => panic!("expected an id, got {other:?}"),
+        };
+        let rand = id(runtime.eval_str("(graph-node-process-add \"neural\" 2 \"lane-rand\")").unwrap());
+        let cmp = id(runtime.eval_str("(graph-node-process-add \"neural\" 2 \"lane-cmp\")").unwrap());
+        let mask = id(runtime.eval_str("(graph-node-process-add \"neural\" 2 \"prob-mask\")").unwrap());
+        assert_eq!(
+            runtime.eval_str(&format!("(graph-node-process-wire \"neural\" 2 {rand} :wire {cmp} :a)")).unwrap(),
+            Some(Value::Bool(true))
+        );
+        assert_eq!(
+            runtime.eval_str(&format!("(graph-node-process-fanout-add \"neural\" 2 {rand} :wire {mask} :prob)")).unwrap(),
+            Some(Value::Number(0.0))
+        );
+
+        let patch = runtime.eval_str("(graph-node-lane-patch \"neural\" 2)").unwrap();
+        let Some(Value::List(entries)) = patch else { panic!("entry list") };
+        assert_eq!(entries.len(), 3);
+        let entry = |index: usize| -> std::collections::HashMap<String, Value> {
+            let Value::Map(map) = entries[index].borrow().clone() else { panic!("entry map") };
+            map.into_iter().map(|(k, v)| (k, v.borrow().clone())).collect()
+        };
+        let rand_entry = entry(0);
+        assert_eq!(rand_entry["class"], Value::String("lane-rand".into()));
+        let Value::List(outs) = rand_entry["out-ports"].clone() else { panic!("out ports") };
+        assert_eq!(outs.len(), 1, "lane-rand has one connectable port");
+        let Value::Map(out) = outs[0].borrow().clone() else { panic!("out map") };
+        let expected_port_id = ((1024 + 2) * 4096 + 0) * 16 + 0;
+        assert_eq!(*out["port-id"].borrow(), Value::Number(expected_port_id as f64));
+        assert_eq!(*out["primary-free"].borrow(), Value::Bool(false));
+        let Value::List(readers) = out["readers"].borrow().clone() else { panic!("readers") };
+        assert_eq!(readers.len(), 2, "primary + fan-out reader");
+        let cmp_entry = entry(1);
+        let Value::List(ins) = cmp_entry["in-ports"].clone() else { panic!("in ports") };
+        let Value::Map(a) = ins[0].borrow().clone() else { panic!("in map") };
+        assert_eq!(*a["name"].borrow(), Value::String("a".into()));
+        let Value::List(writers) = a["writers"].borrow().clone() else { panic!("writers") };
+        assert_eq!(writers.len(), 1);
+        assert_eq!(*writers[0].borrow(), Value::Number(expected_port_id as f64));
+        let mask_entry = entry(2);
+        let Value::List(ins) = mask_entry["in-ports"].clone() else { panic!("in ports") };
+        let Value::Map(prob) = ins[0].borrow().clone() else { panic!("in map") };
+        let Value::List(writers) = prob["writers"].borrow().clone() else { panic!("writers") };
+        assert_eq!(writers.len(), 1, "the fan-out cable lands on prob");
+
+        // Remove both cables; the port frees up and the in ports go quiet.
+        runtime.eval_str(&format!("(graph-node-process-fanout-remove \"neural\" 2 {rand} :wire 0)")).unwrap();
+        runtime.eval_str(&format!("(graph-node-process-unwire \"neural\" 2 {rand} :wire)")).unwrap();
+        let patch = runtime.eval_str("(graph-node-lane-patch \"neural\" 2)").unwrap();
+        let Some(Value::List(entries)) = patch else { panic!("entry list") };
+        let Value::Map(rand_entry) = entries[0].borrow().clone() else { panic!("entry map") };
+        let Value::List(outs) = rand_entry["out-ports"].borrow().clone() else { panic!("out ports") };
+        let Value::Map(out) = outs[0].borrow().clone() else { panic!("out map") };
+        assert_eq!(*out["primary-free"].borrow(), Value::Bool(true));
+        let Value::List(readers) = out["readers"].borrow().clone() else { panic!("readers") };
+        assert!(readers.is_empty());
+
+        // Removing a fan-out target drops the cable into it, and the removed
+        // (highest) id is never minted again, so a re-added slot of the same
+        // class starts clean instead of inheriting the old cable and state.
+        runtime
+            .eval_str(&format!("(graph-node-process-fanout-add \"neural\" 2 {rand} :wire {mask} :prob)"))
+            .unwrap();
+        runtime.eval_str(&format!("(graph-node-process-remove \"neural\" 2 {mask})")).unwrap();
+        let fanout_left = |state: &SequencerState| {
+            state
+                .edit_current_graph_overrides(|graphs| {
+                    Ok(graphs
+                        .iter()
+                        .flat_map(|graph| graph.node_intrinsics.iter())
+                        .filter_map(|node| node.process_chain.as_ref())
+                        .flat_map(|chain| chain.slots.iter())
+                        .map(|slot| slot.fanout.len())
+                        .sum::<usize>())
+                })
+                .unwrap()
+        };
+        assert_eq!(fanout_left(&state), 0, "the fan-out cable into the removed slot is gone");
+        let readded = id(runtime.eval_str("(graph-node-process-add \"neural\" 2 \"prob-mask\")").unwrap());
+        assert_ne!(readded, mask, "a removed slot's id is not reused");
+    }
+
     #[test]
     fn graph_config_overrides_round_trip_and_reach_runtime() {
         use crate::graph::{EdgeSetSpec, GraphManifest, NodeProto, ParamSpec, ShapeSpec, Topology};
@@ -4368,6 +4656,12 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         runtime
             .eval_str("(graph-config \"neural\" :group-trace-decay 0.8)")
             .expect("set group-trace-decay");
+        runtime
+            .eval_str("(graph-config \"neural\" :group-coupling-scale 0.25)")
+            .expect("set group-coupling-scale");
+        runtime
+            .eval_str("(graph-config \"neural\" :group-excite-floor 0.5)")
+            .expect("set group-excite-floor");
         let overrides = state.current_graph_overrides();
         let k = crate::graph::NEURAL_GROUP_MAX as usize;
         let gain = overrides[0].group_gain.as_ref().expect("gain persisted");
@@ -4389,6 +4683,10 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         assert_eq!(config.group_gain[1], 0.25);
         assert_eq!(config.group_coupling[k], crate::graph::GROUP_COUPLING_MAX);
         assert_eq!(config.group_trace_decay, 0.8);
+        assert_eq!(overrides[0].group_coupling_scale, Some(0.25));
+        assert_eq!(config.group_coupling_scale, 0.25);
+        assert_eq!(overrides[0].group_excite_floor, Some(0.5));
+        assert_eq!(config.group_excite_floor, 0.5);
         // An out-of-range cell coordinate is rejected: nothing is written.
         let _ = runtime.eval_str("(graph-config \"neural\" :group-gain-9-0 1)");
         let overrides = state.current_graph_overrides();
@@ -4553,6 +4851,144 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             .find(|graph| graph.sequencer_name == "variable")
             .expect("variable graph overrides after clamp");
         assert_eq!(graph.node_count, Some(16));
+    }
+
+    /// The graph panel sizes its row loop from `:node-count` and every row
+    /// calls `bind-graph`, which range-checks against the memoized runtime
+    /// config. An override edit that reaches the scene bank without a
+    /// scheduler publish (rack clip plumbing) must not let the two disagree:
+    /// the rows a panel loops over are exactly the rows it can bind.
+    #[test]
+    fn graph_node_count_read_agrees_with_bind_graph_range_after_unpublished_edit() {
+        use crate::graph::{EdgeSetSpec, GraphManifest, NodeProto, ParamSpec, ShapeSpec, Topology};
+        use crate::sequencer::{PublishedSequencer, Timebase};
+
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let manifest = GraphManifest {
+            id: 190,
+            name: "variable".into(),
+            owner_rack: None,
+            shape: ShapeSpec::VariableLine {
+                default: 8,
+                min: 1,
+                max: 16,
+            },
+            energy_decay: 1.0,
+            reset_every_beats: 0.0,
+            seed_on_reset: 0.0,
+            max_poly: 4,
+            max_poly_selection: NeuralMaxPolySelection::Deterministic,
+            duration: crate::graph::GraphDurationSpec::default(),
+            swing: crate::graph::GraphSwingSpec::default(),
+            node: NodeProto {
+                name: "nrn".into(),
+                params: vec![ParamSpec {
+                    name: "threshold".into(),
+                    min: 0.0,
+                    max: 4.0,
+                    default: 1.0,
+                    is_int: false,
+                }],
+                ..NodeProto::default()
+            },
+            edge_sets: vec![EdgeSetSpec {
+                from: "nrn".into(),
+                to: "nrn".into(),
+                topology: Topology::AllToAll,
+                distribution: crate::graph::EdgeDistribution::BroadcastWeighted,
+                gather_source: None,
+                params: vec![ParamSpec {
+                    name: "weight".into(),
+                    min: -1.0,
+                    max: 1.0,
+                    default: 0.0,
+                    is_int: false,
+                }],
+            }],
+        };
+        state.publish_sequencer(PublishedSequencer {
+            id: manifest.id,
+            name: manifest.name.clone(),
+            resolution: Timebase::Sixteenth as u8,
+            tick_source: String::new(),
+            requires: Vec::new(),
+            graph: Some(manifest.clone()),
+        });
+        let mut runtime = Runtime::new();
+        register_graph_authoring_natives(&mut runtime, Arc::clone(&state));
+
+        let agree = |runtime: &mut Runtime, label: &str| -> usize {
+            runtime.take_status_message();
+            let Some(Value::Number(count)) = runtime
+                .eval_str("(graph-config-value \"variable\" :node-count)")
+                .expect("node-count")
+            else {
+                panic!("{label}: node-count is not a number");
+            };
+            let count = count as usize;
+            let last = runtime
+                .eval_str(&format!(
+                    "(reactive-value (bind-graph \"variable\" {} :threshold))",
+                    count - 1
+                ))
+                .expect("bind last row");
+            assert!(
+                matches!(last, Some(Value::Number(_))),
+                "{label}: row {} of {count} must bind, got {last:?} ({:?})",
+                count - 1,
+                runtime.take_status_message()
+            );
+            let beyond = runtime
+                .eval_str(&format!(
+                    "(reactive-value (bind-graph \"variable\" {count} :threshold))"
+                ))
+                .expect("bind past the last row is a diagnostic, not an abort");
+            assert_eq!(beyond, Some(Value::Bool(false)), "{label}: row {count} is out of range");
+            count
+        };
+
+        runtime
+            .eval_str("(graph-config \"variable\" :node-count 6)")
+            .expect("shrink node-count");
+        assert_eq!(agree(&mut runtime, "published 6"), 6);
+
+        // Grow the override behind the scheduler's back: no publish, so the
+        // memo key is unchanged.
+        let version = state.scheduler_snapshot_version();
+        state.with_scenes_mut(|scenes| {
+            let scene_idx = scenes.current_scene;
+            let mut composed = scenes.composed_graph_overrides(scene_idx);
+            let graph = composed
+                .iter_mut()
+                .find(|graph| graph.sequencer_id == manifest.id)
+                .expect("variable overrides");
+            graph.node_count = Some(16);
+            scenes.store_composed_graph_overrides(scene_idx, composed);
+        });
+        assert_eq!(state.scheduler_snapshot_version(), version, "edit stayed unpublished");
+        agree(&mut runtime, "unpublished 16");
+
+        state.publish_scheduler_snapshot();
+        assert_eq!(agree(&mut runtime, "published 16"), 16);
+    }
+
+    /// Rack membership rides in every scheduler snapshot (member routes are
+    /// resolved through it), so changing it must publish; republishing the
+    /// same list must not churn the snapshot.
+    #[test]
+    fn set_rack_memberships_publishes_only_when_the_list_changes() {
+        let state = Arc::new(SequencerState::new(4, (0..4).map(|_| default_empty_effect_chain()).collect()));
+        let members = vec![crate::graph::RackMembership { group_id: 3, members: vec![0, 1, 2] }];
+        let before = state.scheduler_snapshot_version();
+        state.set_rack_memberships(members.clone());
+        let after_change = state.scheduler_snapshot_version();
+        assert!(after_change > before, "a new membership list publishes");
+        assert_eq!(state.latest_scheduler_snapshot().rack_memberships, members);
+        state.set_rack_memberships(members.clone());
+        assert_eq!(state.scheduler_snapshot_version(), after_change, "same list, no publish");
+        state.set_rack_memberships(vec![crate::graph::RackMembership { group_id: 3, members: vec![0, 2] }]);
+        assert!(state.scheduler_snapshot_version() > after_change, "a member leaving publishes");
+        assert_eq!(state.latest_scheduler_snapshot().rack_memberships[0].members, vec![0, 2]);
     }
 
     #[test]
@@ -13031,6 +13467,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             sample_time: 0,
             step_beats: 0.25,
             written_inlets: Vec::new(),
+            after_reset: false,
             note: 0.0,
             resolved: ResolvedStep {
                 duration: 1.0,
@@ -13412,6 +13849,62 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         }));
     }
 
+    /// `(read (neuron k :note|:chord|:key))` reads the recent-note snapshot a
+    /// node patch runs with; on a track (empty snapshot) it is nil.
+    #[test]
+    fn process_neuron_reads_resolve_last_note_and_recent_key() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut scratch = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(1),
+            fallback_instrument_descriptors(1),
+            0,
+            0,
+        );
+        scratch
+            .eval(
+                r#"
+                (def-process neuron-read-probe
+                  :target (step-param :transpose)
+                  :run (let ((chord (read (neuron 1 :chord)))
+                             (key (read (neuron 1 :key)))
+                             (none (read (neuron 0 :note))))
+                         (target-add!
+                           (+ (nth chord 0)
+                              (* 100 (len key))
+                              (if (= none nil) 1000 0)))))
+                "#,
+            )
+            .expect("define neuron read probe");
+        let def = scratch
+            .process_authoring_snapshot()
+            .defs
+            .into_iter()
+            .find(|def| def.name == "neuron-read-probe")
+            .expect("probe def");
+        let reads = crate::process::ProcessReadSnapshot {
+            neurons: Arc::new(vec![Vec::new(), vec![14.0, 2.0, 7.0]]),
+            ..Default::default()
+        };
+        let result = scratch
+            .invoke_process_run(crate::process::ProcessRunInvocation {
+                runtime_id: 1,
+                source: def.run_source.expect("run source"),
+                beat: 1.0,
+                sample_time: 0,
+                inlets: HashMap::new(),
+                state: HashMap::new(),
+                event: None,
+                step_context: None,
+                ports: def.ports,
+                reads,
+                seed: 1,
+            })
+            .expect("invoke neuron read probe");
+        // last note 7; key = pitch classes {2, 7} (14 -> 2) = 2 entries; node 0 nil.
+        assert_eq!(result.target_writes[0].value, 7.0 + 200.0 + 1000.0);
+    }
+
     #[test]
     fn process_read_family_resolves_tracks_process_values_and_channels() {
         let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
@@ -13459,6 +13952,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                 trigs: vec![trig, trig, trig],
                 trig_beats: vec![0.9, 0.5, -3.1],
             }]),
+            neurons: Arc::new(Vec::new()),
             process_values: HashMap::from([(
                 "brain".to_string(),
                 HashMap::from([("value".to_string(), Value::Number(6.0))]),
@@ -15155,6 +15649,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             sample_time: 0,
             step_beats: 0.25,
             written_inlets: Vec::new(),
+            after_reset: false,
             note: 0.0,
             resolved: crate::accumulator::ResolvedStep {
                 duration: 1.0,
@@ -17278,4 +17773,39 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         for (a, b) in report.first_samples.iter().zip(single_sample.first_samples) {
             assert!((a - b).abs() < 0.00001, "gate timing depends on block size");
         }
+    }
+
+    /// The node picker offers only classes that do something on a fire, and
+    /// no two entries share a label: `lane-reset` used to show as "reset" next
+    /// to `neural-reset`, and picking it wired a port that never sends.
+    #[test]
+    fn graph_node_process_classes_hide_lane_only_classes_and_keep_labels_unique() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut publisher = crate::lisp_host::scratch_runtime_with_fallbacks(Arc::clone(&state), 0, 0);
+        publisher
+            .eval(&crate::lisp_host::load_process_library_source())
+            .expect("load builtin process library");
+        state.publish_process_authoring(
+            publisher.process_authoring_snapshot().to_published().expect("publishable"),
+        );
+        let mut runtime = Runtime::new();
+        register_graph_authoring_natives(&mut runtime, Arc::clone(&state));
+        let Some(Value::List(entries)) = runtime.eval_str("(graph-node-process-classes)").unwrap() else {
+            panic!("graph-node-process-classes returns a list");
+        };
+        let field = |entry: &Rc<RefCell<Value>>, key: &str| match &*entry.borrow() {
+            Value::Map(map) => match map.get(key).map(|cell| cell.borrow().clone()) {
+                Some(Value::String(text)) => text,
+                other => panic!("{key}: {other:?}"),
+            },
+            other => panic!("class entry is a map: {other:?}"),
+        };
+        let classes: Vec<String> = entries.iter().map(|entry| field(entry, "class")).collect();
+        let labels: Vec<String> = entries.iter().map(|entry| field(entry, "label")).collect();
+        assert!(classes.iter().any(|class| class == "neural-reset"), "{classes:?}");
+        for hidden in ["lane-reset", "lane-roll", "repeater", "lane-grab"] {
+            assert!(!classes.iter().any(|class| class == hidden), "{hidden} hidden: {classes:?}");
+        }
+        let unique: std::collections::HashSet<&String> = labels.iter().collect();
+        assert_eq!(unique.len(), labels.len(), "duplicate node picker labels: {labels:?}");
     }

@@ -241,3 +241,166 @@ fn borrowed_rack_note_reads_live_macro_edits_without_republishing() {
         assert_eq!(counts, crate::test_alloc::Counts::default());
     }
 }
+
+/// eseq-bw9v: a disabled slot is a parked instrument. It must not take a
+/// voice from a trigger, and its FX chain must be bypassed on the node so a
+/// silent chain is not rendered block after block.
+#[test]
+fn disabled_rack_slot_takes_no_voice_and_bypasses_its_effects() {
+    use crate::audiograph as graph;
+    use crate::effects::{filter, stereo_panner as pan};
+    use crate::instruments::sampler;
+    let engine = engine::init_headless_engine(48_000, 2).unwrap();
+    let lg = engine.lg_ptr.0;
+    let (_tx, rx) = std::sync::mpsc::channel();
+    let mut data = new_audio_callback_data(
+        lg, Arc::clone(&engine.state), 48_000, 2, 512,
+        Arc::clone(&engine.master_recorder), rx,
+        Arc::clone(&engine.buses.bus_effect_runtime),
+        Arc::new(ScheduledEventQueue::new()), Arc::new(AtomicU64::new(0)),
+    );
+    let mut slot = off_step_solo_tests::slot();
+    slot.instrument_slot = EffectSlotSnapshot::new_default(&EffectDescriptor::builtin_sampler(), 46);
+    slot.effect_slots[0] = EffectSlotSnapshot::new_default(&EffectDescriptor::builtin_filter(), 47);
+    // The bypass push finds each effect's `enabled` through the descriptor
+    // the graph build pairs with the slot, so keep the two aligned.
+    slot.effect_descriptors[0] = EffectDescriptor::builtin_filter();
+    let mut rack = RackTrackSnapshot::new(vec![slot.clone(), slot], default_rack_macros());
+    rack.slots[1].enabled = false;
+    let mut filters = Vec::new();
+    for (slot_idx, slot) in rack.slots.iter_mut().enumerate() {
+        let add = |vtable, cells, inputs, outputs| unsafe {
+            graph::add_node(lg, vtable, cells * 4, c"rack-enabled-test".as_ptr(),
+                inputs, outputs, std::ptr::null(), 0) as u32
+        };
+        let sampler_id = add(sampler::sampler_vtable(), sampler::SAMPLER_STATE_SIZE,
+            crate::instruments::voice_modulator::SLOT_COUNT as i32, 2);
+        let filter_id = add(filter::filter_vtable(), filter::FILTER_STATE_SIZE, 6, 2);
+        let pan_id = add(pan::stereo_panner_vtable(), pan::STEREO_PANNER_STATE_SIZE, 2, 2);
+        unsafe {
+            for channel in 0..2 {
+                assert!(graph::graph_connect(lg, sampler_id as i32, channel, filter_id as i32, channel));
+                assert!(graph::graph_connect(lg, filter_id as i32, channel, pan_id as i32, channel));
+                assert!(graph::graph_connect(lg, pan_id as i32, channel, 0, channel));
+            }
+            assert!(graph::add_node_to_watchlist(lg, filter_id as i32));
+        }
+        let pool = rack_slot_pool_index(0, slot_idx).unwrap();
+        data.voice_pools[pool].add_voice(sampler_id as u64, 0);
+        data.state.runtime.sampler_lids[pool].store(sampler_id as u64, Ordering::Release);
+        data.state.runtime.rack_slot_pan_lids[0][slot_idx].store(pan_id as u64, Ordering::Release);
+        slot.instrument_slot.sync_to_descriptor(&EffectDescriptor::builtin_sampler(), sampler_id);
+        slot.effect_slots[0].sync_to_descriptor(&EffectDescriptor::builtin_filter(), filter_id);
+        filters.push(filter_id as i32);
+    }
+    data.state.transport.num_tracks.store(1, Ordering::Release);
+    data.state.publish_scheduler_snapshot();
+    data.scheduler_snapshot = data.state.latest_scheduler_snapshot();
+    let snapshot = Arc::make_mut(&mut data.scheduler_snapshot);
+    Arc::make_mut(&mut snapshot.tracks[0]).rack_track = Some(rack);
+    let mut output = vec![0.0; 1024];
+    let render_for_watch = |output: &mut [f32]| {
+        for _ in 0..4 {
+            unsafe { graph::process_next_block(lg, output.as_mut_ptr(), 512); }
+        }
+    };
+    // A built chain starts with every effect running, as the graph build
+    // pushes the slot's stored `enabled` on creation.
+    for &filter_id in &filters {
+        unsafe {
+            graph::params_push_wrapper(lg, graph::ParamMsg {
+                idx: filter::FILTER_PARAM_ENABLED,
+                logical_id: filter_id as u64,
+                fvalue: 1.0,
+            });
+        }
+    }
+    render_for_watch(&mut output);
+
+    // Off-step param push: the enabled slot's filter keeps its stored
+    // enabled value, the disabled slot's filter is bypassed.
+    apply_rack_params_off_step(&mut data, 0, 4);
+    render_for_watch(&mut output);
+    let filter_enabled = |filter_id: i32| {
+        let mut values = [0.0_f32; filter::FILTER_STATE_SIZE];
+        let mut size = 0;
+        unsafe { assert!(graph::get_node_state_into(lg, filter_id,
+            values.as_mut_ptr().cast(), std::mem::size_of_val(&values), &mut size)); }
+        values[filter::FILTER_PARAM_ENABLED as usize]
+    };
+    assert_eq!(filter_enabled(filters[0]), 1.0, "enabled slot keeps its effect running");
+    assert_eq!(filter_enabled(filters[1]), 0.0, "disabled slot bypasses its effect");
+
+    // A live keyboard note only reaches the enabled slot.
+    let snapshot = Arc::clone(&data.scheduler_snapshot);
+    let rack = snapshot.tracks[0].rack_track.as_ref().unwrap();
+    let trigger = KeyboardTrigger {
+        generation: 1, source: None, track: 0, transpose: 0.0, velocity: 0.7, note_off: false,
+    };
+    // Simulate the enabled slot having been parked before a pattern switch:
+    // its filter is still bypassed on the node.
+    unsafe {
+        graph::params_push_wrapper(lg, graph::ParamMsg {
+            idx: filter::FILTER_PARAM_ENABLED,
+            logical_id: filters[0] as u64,
+            fvalue: 0.0,
+        });
+    }
+    render_for_watch(&mut output);
+    assert!(fire_live_keyboard_rack_note(&mut data, 0, &trigger, 0.0, rack));
+    assert!(data.voice_pools[rack_slot_pool_index(0, 0).unwrap()].voices[0].active);
+    assert!(
+        !data.voice_pools[rack_slot_pool_index(0, 1).unwrap()].voices[0].active,
+        "disabled slot must not take a voice"
+    );
+    render_for_watch(&mut output);
+    assert_eq!(filter_enabled(filters[0]), 1.0, "a live key restores the enabled slot's FX");
+    assert_eq!(filter_enabled(filters[1]), 0.0);
+    drop(snapshot);
+
+    // Parking the sounding slot releases its voice rather than leaving it
+    // ringing dry through the bypassed chain.
+    release_newly_disabled_rack_slots(&mut data, 0);
+    assert!(data.voice_pools[rack_slot_pool_index(0, 0).unwrap()].voices[0].active,
+        "an unchanged enabled slot keeps its voice");
+    let snapshot = Arc::make_mut(&mut data.scheduler_snapshot);
+    Arc::make_mut(&mut snapshot.tracks[0]).rack_track.as_mut().unwrap().slots[0].enabled = false;
+    release_newly_disabled_rack_slots(&mut data, 0);
+    assert!(!data.voice_pools[rack_slot_pool_index(0, 0).unwrap()].voices[0].active,
+        "a newly disabled slot releases its sounding voice");
+    drop(data);
+    unsafe { engine.destroy(); }
+}
+
+/// eseq-bw9v: a parked slot never sounds, so its solo must not mute the
+/// enabled slots beside it.
+#[test]
+fn disabled_soloed_slot_does_not_mute_enabled_slots() {
+    let mut rack = RackTrackSnapshot::new(
+        vec![off_step_solo_tests::slot(), off_step_solo_tests::slot()],
+        default_rack_macros(),
+    );
+    rack.slots[0].solo = true;
+    assert!(rack_has_enabled_solo(&RackParams::live(&rack, [None; 8])));
+    rack.slots[0].enabled = false;
+    assert!(!rack_has_enabled_solo(&RackParams::live(&rack, [None; 8])));
+    assert!(!rack_has_enabled_solo(&RackParams::at_step(&rack, 0, [None; 8], [None; 8])));
+}
+
+/// eseq-bw9v: `enabled` is a per-pattern authoring value like mute/solo, so
+/// history replay and "copy current values to all scenes" carry it.
+#[test]
+fn slot_enabled_flag_survives_history_replay_and_scene_copy() {
+    let mut slot = off_step_solo_tests::slot();
+    let before = slot.authoring_values();
+    slot.enabled = false;
+    let after = slot.authoring_values();
+    slot.apply_authoring_values(&before).unwrap();
+    assert!(slot.enabled, "undo restores the enable flag");
+    slot.apply_authoring_values(&after).unwrap();
+    assert!(!slot.enabled, "redo restores the enable flag");
+
+    let mut target = off_step_solo_tests::slot();
+    target.copy_scene_values_from(&slot);
+    assert!(!target.enabled, "copy to all scenes carries the enable flag");
+}

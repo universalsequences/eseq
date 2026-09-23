@@ -15,11 +15,13 @@ impl Editor {
             "delete" => KeyCode::Delete, _ => return false,
         };
         if self.focused_widget_id().is_some() {
-            let handled = self.handle_focused_widget_key(KeyEvent::new(code,
+            // A widget that refuses the key may still take it through its
+            // :on-focus-key (the patcher's Lisp-bound copy/paste/delete).
+            let handled = self.deliver_key_to_focused_widget(KeyEvent::new(code,
                 if action == "delete" { KeyModifiers::NONE } else { primary }));
             if !handled && action == "cut"
-                && self.handle_focused_widget_key(KeyEvent::new(KeyCode::Char('c'), primary)) {
-                self.handle_focused_widget_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
+                && self.deliver_key_to_focused_widget(KeyEvent::new(KeyCode::Char('c'), primary)) {
+                self.deliver_key_to_focused_widget(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
             }
             return true;
         }
@@ -317,8 +319,14 @@ impl Editor {
                     self.open_save_prompt(false);
                 } else {
                     match self.save_active_buffer() {
-                        Ok(path) => self.minibuffer = Some(format!("Saved {}", path.display())),
-                        Err(error) => self.minibuffer = Some(format!("Error: {error:?}")),
+                        Ok(path) => {
+                            self.minibuffer = Some(format!("Saved {}", path.display()));
+                            self.toast_buffer_saved(&path);
+                        }
+                        Err(error) => {
+                            self.minibuffer = Some(format!("Error: {error:?}"));
+                            self.toast_buffer_save_failed(&error);
+                        }
                     }
                 }
             }
@@ -377,7 +385,7 @@ impl Editor {
     }
 }
 
-pub(super) fn key_str(key: KeyEvent) -> String {
+pub(crate) fn key_str(key: KeyEvent) -> String {
     let mut prefix = String::new();
     for (modifier, name) in [
         (KeyModifiers::CONTROL, "C-"),

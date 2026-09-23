@@ -790,7 +790,9 @@ impl App {
         let solos = {
             let racks = self.state.pattern.rack_tracks.lock().unwrap();
             let Some(rack) = racks.get(track).and_then(Option::as_ref) else { return };
-            rack.slots.iter().map(|slot| slot.solo).collect::<Vec<_>>()
+            // A parked slot never sounds, so its solo must not mute the
+            // enabled slots around it (eseq-bw9v).
+            rack.slots.iter().map(|slot| slot.enabled && slot.solo).collect::<Vec<_>>()
         };
         let has_solo = solos.iter().any(|solo| *solo);
         let Some(track_nodes) = self.graph.track_node_ids.get(track) else {
@@ -856,6 +858,65 @@ impl App {
             );
         }
         updated
+    }
+
+    /// eseq-bw9v: flip a slot's live-set gate. The audio thread stops
+    /// triggering the slot on the next scheduler snapshot; the FX bypass is
+    /// pushed here too so a slot disabled while the track is silent does not
+    /// keep running its chain until the next trigger repushes it.
+    pub fn set_rack_slot_enabled(&mut self, track: usize, slot_idx: usize, value: bool) -> bool {
+        let updated = self
+            .state
+            .update_live_rack_slot(track, slot_idx, |slot| slot.enabled = value);
+        if !updated {
+            return false;
+        }
+        self.push_rack_slot_fx_gate(track, slot_idx);
+        self.push_rack_slot_solo_mutes(track);
+        self.state.publish_scheduler_snapshot();
+        true
+    }
+
+    /// Push each slot effect's `enabled` node param for the live slot's
+    /// enable state: 0 while the slot is parked, the effect's own stored value
+    /// once it plays again (eseq-bw9v).
+    pub fn push_rack_slot_fx_gate(&self, track: usize, slot_idx: usize) {
+        let slot = {
+            let racks = self.state.pattern.rack_tracks.lock().unwrap();
+            racks
+                .get(track)
+                .and_then(Option::as_ref)
+                .and_then(|rack| rack.slots.get(slot_idx))
+                .cloned()
+        };
+        if let Some(slot) = slot {
+            for (effect, descriptor) in slot.effect_slots.iter().zip(&slot.effect_descriptors) {
+                let Some(param_idx) = descriptor.enabled_param_idx() else {
+                    continue;
+                };
+                let Some(idx) = effect.node_param_idx(param_idx) else {
+                    continue;
+                };
+                if effect.node_id == 0
+                    || idx == u32::MAX
+                    || idx >= crate::instruments::voice_modulator::MOD_PARAM_BASE
+                {
+                    continue;
+                }
+                let stored = effect.defaults.get(param_idx).copied().unwrap_or(1.0);
+                let fvalue = if slot.enabled { stored } else { 0.0 };
+                unsafe {
+                    crate::audiograph::params_push_wrapper(
+                        self.graph.lg.0,
+                        crate::audiograph::ParamMsg {
+                            idx: idx as u64,
+                            logical_id: effect.node_id as u64,
+                            fvalue,
+                        },
+                    );
+                }
+            }
+        }
     }
 
     pub fn set_rack_slot_solo(&mut self, track: usize, slot_idx: usize, value: bool) -> bool {

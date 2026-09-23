@@ -40,7 +40,8 @@ use crate::backend::{
     AUTOCOMPLETE_ANCHOR_GAP_PX, AUTOCOMPLETE_PANEL_BORDER_WIDTH_PX,
     AUTOCOMPLETE_PANEL_CORNER_RADIUS_PX, AUTOCOMPLETE_ROW_CORNER_RADIUS_PX,
     AUTOCOMPLETE_TEXT_CELL_SCALE, Backend, BackendError, BackendEvent, Color, RenderFrame,
-    TiledRenderFrame, completion_panel_columns,
+    TOAST_BORDER_WIDTH_PX, TOAST_CORNER_RADIUS_PX, TiledRenderFrame, completion_panel_columns,
+    toast_placement,
 };
 use crate::layout::TextMeasurer;
 use crate::live_audio;
@@ -2533,6 +2534,103 @@ impl WgpuAppBackend {
                 full_scissor,
                 PipelineRef::Text { zoomed: false },
                 &popup_verts,
+            );
+        }
+
+        // ── Toast (bottom-right, above everything) ───────────────────────────
+        if let Some(toast) = &tiled.toast
+            && let Some(place) = toast_placement(
+                toast,
+                (vp_w / cell_w).floor().max(1.0) as usize,
+                (vp_h / cell_h).floor().max(1.0) as usize,
+            )
+        {
+            let bg = theme::TOAST_BG();
+            let accent = match toast.kind {
+                crate::host::ToastKind::Success => theme::TOAST_SUCCESS(),
+                crate::host::ToastKind::Error => theme::TOAST_ERROR(),
+            };
+            let border = match toast.kind {
+                crate::host::ToastKind::Success => theme::TOAST_BORDER(),
+                crate::host::ToastKind::Error => accent,
+            };
+            let mut rounded = Vec::new();
+            gpu_scene::push_rounded_instance_cells(
+                &mut rounded,
+                place.panel_col,
+                place.panel_row,
+                place.panel_cols,
+                place.panel_rows,
+                bg,
+                TOAST_CORNER_RADIUS_PX * ui_px_scale,
+                cell_w,
+                cell_h,
+                vp_w,
+                vp_h,
+            );
+            {
+                let gpu = self.gpu.as_ref().expect("gpu initialized");
+                if gpu.widget_pipelines.contains_key("dropdown") {
+                    Self::plan_widget_instances(
+                        &mut plan,
+                        &gpu.device,
+                        full_scissor,
+                        "dropdown",
+                        &rounded,
+                    );
+                }
+            }
+            let mut toast_verts = Vec::new();
+            gpu_scene::push_rounded_rect_border_px(
+                &mut toast_verts,
+                place.panel_col * cell_w,
+                place.panel_row * cell_h,
+                place.panel_cols * cell_w,
+                place.panel_rows * cell_h,
+                TOAST_BORDER_WIDTH_PX,
+                TOAST_CORNER_RADIUS_PX * ui_px_scale,
+                border,
+                vp_w,
+                vp_h,
+            );
+            if let Some(atlas) = self.atlas.as_mut() {
+                let mut icon = [0u8; 4];
+                gpu_scene::push_text_cells(
+                    &mut toast_verts,
+                    &mut atlas.atlas,
+                    toast.icon().encode_utf8(&mut icon),
+                    place.icon_col,
+                    place.text_row,
+                    1,
+                    to_rgba(accent),
+                    to_rgba(bg),
+                    cell_w,
+                    cell_h,
+                    vp_w,
+                    vp_h,
+                );
+                gpu_scene::push_text_cells(
+                    &mut toast_verts,
+                    &mut atlas.atlas,
+                    &toast.message,
+                    place.text_col,
+                    place.text_row,
+                    place.text_max_cols,
+                    to_rgba(theme::TOAST_FG()),
+                    to_rgba(bg),
+                    cell_w,
+                    cell_h,
+                    vp_w,
+                    vp_h,
+                );
+            }
+            let gpu = self.gpu.as_ref().expect("gpu initialized");
+            Self::plan_vertices(
+                &mut plan,
+                &gpu.device,
+                full_scissor,
+                PipelineRef::Text { zoomed: false },
+                &toast_verts,
             );
         }
 

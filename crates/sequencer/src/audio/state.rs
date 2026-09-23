@@ -255,6 +255,11 @@ pub(super) struct AudioCallbackData {
     /// brand-new voice and both fall silent; a track that triggered at the
     /// same sample is skipped by the choke pass instead.
     pub(super) rack_choke_last_trigger: [u64; MAX_TRACKS],
+    /// Bit per rack slot that the last seen scheduler snapshot had disabled
+    /// (eseq-bw9v). A slot whose bit newly sets has its sounding voices
+    /// released, so parking a slot mid-note cannot leave it ringing dry
+    /// through its bypassed FX chain.
+    pub(super) rack_slot_disabled_masks: [u32; MAX_TRACKS],
     /// Reused note-off buffer for the choke pass, so cutting voices allocates
     /// nothing on the audio thread after the first block that needs it.
     pub(super) rack_choke_note_offs: Vec<RackSlotNoteOff>,

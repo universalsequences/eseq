@@ -13,6 +13,7 @@ fn slot(instrument_type: InstrumentType) -> RackSlotSnapshot {
         pan: 0.0,
         mute: false,
         solo: false,
+        enabled: true,
         max_polyphony: 2,
         param_plocks: RackSlotParamPlocks::new(),
         instrument_slot: EffectSlotSnapshot::new_empty(),

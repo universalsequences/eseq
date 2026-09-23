@@ -389,6 +389,13 @@ impl CustomEnginePool {
         if needed < self.enabled_voice_count {
             self.enabled_voice_count = needed;
             crate::lisp_host::set_dgen_engine_enabled_voices(engine_id, needed);
+        } else if self.enabled_voice_count < minimum_enabled_voices.min(self.num_voices) {
+            // A FreePatch rack slot re-enabled after being parked at zero
+            // voices (eseq-bw9v) needs its idle voice back without waiting
+            // for a note to allocate one.
+            let minimum = minimum_enabled_voices.min(self.num_voices);
+            self.enabled_voice_count = minimum;
+            crate::lisp_host::set_dgen_engine_enabled_voices(engine_id, minimum);
         }
     }
 
@@ -416,7 +423,8 @@ pub(in crate::audio) fn custom_engine_requires_idle_voice(
             .as_ref()
             .is_some_and(|rack| {
                 rack.slots.iter().any(|slot| {
-                    slot.track_sound_state.engine_id == Some(engine_id)
+                    slot.enabled
+                        && slot.track_sound_state.engine_id == Some(engine_id)
                         && slot.instrument_run_mode == CustomInstrumentRunMode::FreePatch
                 })
             })
@@ -1190,6 +1198,48 @@ pub(in crate::audio) fn release_rack_slot_active_voices(
         release_sample,
     );
     dispatch_rack_slot_note_offs(data, frame_offset, note_offs);
+}
+
+/// Release the sounding voices of every rack slot the current scheduler
+/// snapshot newly disabled (eseq-bw9v). A disabled slot gets no new triggers,
+/// but a held key, long gate or one-shot started before the toggle would keep
+/// ringing — dry, since the slot's FX chain is bypassed at the same moment.
+pub(in crate::audio) fn release_newly_disabled_rack_slots(
+    data: &mut AudioCallbackData,
+    release_sample: u64,
+) {
+    let snapshot = Arc::clone(&data.scheduler_snapshot);
+    for track_idx in 0..MAX_TRACKS {
+        let rack = snapshot
+            .tracks
+            .get(track_idx)
+            .and_then(|track| track.rack_track.as_ref());
+        let mask = rack.map_or(0u32, |rack| {
+            rack.slots
+                .iter()
+                .enumerate()
+                .take(MAX_RACK_SLOTS.min(u32::BITS as usize))
+                .filter(|(_, slot)| !slot.enabled)
+                .fold(0u32, |mask, (slot_idx, _)| mask | (1 << slot_idx))
+        });
+        let newly_disabled = mask & !data.rack_slot_disabled_masks[track_idx];
+        data.rack_slot_disabled_masks[track_idx] = mask;
+        let Some(rack) = rack.filter(|_| newly_disabled != 0) else {
+            continue;
+        };
+        for (slot_idx, slot) in rack.slots.iter().enumerate() {
+            if slot_idx < u32::BITS as usize && newly_disabled & (1 << slot_idx) != 0 {
+                release_rack_slot_active_voices(
+                    data,
+                    track_idx,
+                    slot_idx,
+                    slot,
+                    release_sample,
+                    0,
+                );
+            }
+        }
+    }
 }
 
 pub(in crate::audio) fn release_rack_active_voices(

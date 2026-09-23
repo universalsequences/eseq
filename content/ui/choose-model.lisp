@@ -17,7 +17,7 @@
 ;;
 ;; The panel lives in the patcher's own buffer because a modal only receives
 ;; pointer input through the *active* tile, and the patch canvas is the active
-;; tile; closed, it costs no layout.
+;; tile; closed, it costs no layout and does not evaluate its body.
 ;;
 ;; The two mounts share the single global `open?` below, which is safe because
 ;; an instrument patcher buffer and an effect patcher buffer are never on
@@ -53,7 +53,12 @@
 (def default-label () "Default (auto)")
 
 (def options ()
-  (cons (default-label) (agent/models)))
+  (let ((models (agent/models)))
+    ;; Native errors report their diagnostic and return false. Keep the picker
+    ;; usable without replacing that diagnostic with a list type error.
+    (if (= models false)
+      (list (default-label))
+      (cons (default-label) models))))
 
 (def current ()
   (let ((chosen (agent/patch-model)))
@@ -80,12 +85,13 @@
   (open))
 
 (def select-model (value)
-  (do
-    (agent/set-patch-model
+  (if (agent/set-patch-model
       (if (= value (default-label)) "" value))
-    (set! generation (+ generation 1))
-    (status (str "Patch agent model: " value))
-    (close)))
+    (do
+      (set! generation (+ generation 1))
+      (status (str "Patch agent model: " value))
+      (close))
+    nil))
 
 ;; Widget `:key`s auto-qualify inside a declared module (spec §5): these hash
 ;; as `eseq.choose-model/title`, `…/dropdown`, and so on. Nothing serializes
@@ -135,4 +141,7 @@
          :width-px 620 :height-px 300
     (box :debug-name "choose-model-panel"
       :width :fill :height :fill :bg :transparent :padding 0.5
-      (body))))
+      ;; `modal` arguments evaluate eagerly and a closed modal only drops its
+      ;; children at layout, so gate the body: closed, the patcher buffer's
+      ;; every rebuild must not query the catalog (`agent/models`).
+      (if open? (body) (box :bg :transparent)))))

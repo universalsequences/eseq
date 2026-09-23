@@ -32,7 +32,10 @@
 (import eseq.export-song)
 (import eseq.file-dialogs)
 
-(export track-selected-binding
+(export lane-patchbay-node lane-patch-register-node lane-patch-node-namespace
+        lane-patch-node-touch lane-patch-node-version-value lane-patch-node-selected-id
+        lane-patch-node-select
+        track-selected-binding
         expanded-track-ids
         select-track-for-edit
         open-piano-roll-for-track
@@ -1740,9 +1743,14 @@
 ;; "all tracks"; roster and track lanes are per track already. Per pattern,
 ;; undoable, like every other slot edit.
 (def lane-toggle-enabled (track slot)
-  (seq-set-process-slot-enabled track (get slot :instance-id)
-    (not (get slot :enabled))
-    (if (and (get slot :project) (lane-edit-all?)) :all nil)))
+  (if (lane-patch-node? track)
+    (do
+      (graph-node-process-enable (lane-patch-node-graph track) (lane-patch-node-index track)
+        (get slot :instance-id) (not (get slot :enabled)))
+      (lane-patch-node-touch))
+    (seq-set-process-slot-enabled track (get slot :instance-id)
+      (not (get slot :enabled))
+      (if (and (get slot :project) (lane-edit-all?)) :all nil))))
 
 (def lane-strip-enable-button (track slot)
   (button (if (get slot :enabled) "on" "off")
@@ -2172,6 +2180,44 @@
 
 (def lane-patch-show (on) (set! lane-patch-view on))
 
+;; Node patches (docs/graph-node-processes-spec.md §6): the same patchbay
+;; drawn over a graph node's process chain. A node target is a cable
+;; namespace at or above `lane-patch-node-base` (1024 + node index, the band
+;; `graph-node-lane-patch` mints port ids in), registered by the panel that
+;; expands the node so every lane-patch-* function can find the graph handle
+;; behind a namespace and route edits to the graph-node-process-* natives.
+(def lane-patch-node-base 1024)
+(def lane-patch-node? (track) (>= track lane-patch-node-base))
+(def lane-patch-node-namespace (node) (+ lane-patch-node-base node))
+;; (namespace graph node) triples, newest first.
+(defstate lane-patch-node-targets '())
+;; Bumped after every node-patch edit: the graph natives are not reactive.
+(defstate lane-patch-node-version 0)
+;; The selected slot (instance id) in a node bay; -1 = none.
+(defstate lane-patch-node-selected -1)
+
+(def lane-patch-node-touch () (set! lane-patch-node-version (+ lane-patch-node-version 1)))
+(def lane-patch-node-version-value () lane-patch-node-version)
+(def lane-patch-node-selected-id () lane-patch-node-selected)
+(def lane-patch-node-select (instance-id) (set! lane-patch-node-selected instance-id))
+
+;; Call from the event that expands a node (never from a render): returns the
+;; namespace to draw the bay with.
+(def lane-patch-register-node (graph node)
+  (let ((ns (lane-patch-node-namespace node)))
+    (do
+      (set! lane-patch-node-targets
+        (append (list (list ns graph node))
+                (filter (lambda (t) (not (= (nth t 0) ns))) lane-patch-node-targets)))
+      (set! lane-patch-pending -1)
+      (set! lane-patch-selected nil)
+      ns)))
+
+(def lane-patch-node-target (ns)
+  (reduce |acc t| (if (and (= acc nil) (= (nth t 0) ns)) t acc) nil lane-patch-node-targets))
+(def lane-patch-node-graph (ns) (let ((t (lane-patch-node-target ns))) (if t (nth t 1) nil)))
+(def lane-patch-node-index (ns) (let ((t (lane-patch-node-target ns))) (if t (nth t 2) 0)))
+
 (def lane-patch-port-style
   (ui/style
     :hover (dict
@@ -2200,9 +2246,14 @@
         (material :color inner)))))
 
 (def track-lane-patch (track)
-  (if (< track (len SEQ.track-lane-patch))
-    (nth SEQ.track-lane-patch track)
-    '()))
+  (if (lane-patch-node? track)
+    (let ((graph (lane-patch-node-graph track)))
+      (if graph
+        (do lane-patch-node-version (graph-node-lane-patch graph (lane-patch-node-index track)))
+        '()))
+    (if (< track (len SEQ.track-lane-patch))
+      (nth SEQ.track-lane-patch track)
+      '())))
 
 (def lane-patch-entry (track slot-index)
   (let ((entries (track-lane-patch track)))
@@ -2279,16 +2330,24 @@
                   (writer-id (get writer :instance-id))
                   (port-name (get out-port :name)))
               (do
-                (if (get out-port :primary-free)
-                  (if (lane-edit-all?)
-                    (seq-bind-process-port track writer-id port-name target :all)
-                    (seq-bind-process-port track writer-id port-name target))
-                  (if (lane-edit-all?)
-                    (seq-add-process-port-fanout track writer-id port-name target :all)
-                    (seq-add-process-port-fanout track writer-id port-name target)))
+                (if (lane-patch-node? track)
+                  (let ((graph (lane-patch-node-graph track))
+                        (node (lane-patch-node-index track)))
+                    (do
+                      (if (get out-port :primary-free)
+                        (graph-node-process-wire graph node writer-id port-name (get reader :instance-id) (get in-port :name))
+                        (graph-node-process-fanout-add graph node writer-id port-name (get reader :instance-id) (get in-port :name)))
+                      (lane-patch-node-touch)))
+                  (if (get out-port :primary-free)
+                    (if (lane-edit-all?)
+                      (seq-bind-process-port track writer-id port-name target :all)
+                      (seq-bind-process-port track writer-id port-name target))
+                    (if (lane-edit-all?)
+                      (seq-add-process-port-fanout track writer-id port-name target :all)
+                      (seq-add-process-port-fanout track writer-id port-name target))))
                 (status (str "Wired " (get writer :name) " → " (get reader :name) " " (get in-port :name)
                              (if (< reader-slot (lane-patch-port-slot track port-id)) " (next fire)" "")
-                             (if (lane-edit-all?) " (all tracks)" ""))))))))))))
+                             (if (and (not (lane-patch-node? track)) (lane-edit-all?)) " (all tracks)" ""))))))))))))
 
 (def lane-patch-in-click (track slot-index ordinal)
   (if (< lane-patch-pending 0)
@@ -2331,13 +2390,21 @@
         (do
           (set! lane-patch-selected nil)
           (if writer
-            (if (= (get cable :source) "fanout")
-              (if (lane-edit-all?)
-                (seq-remove-process-port-fanout track (get writer :instance-id) (get cable :port) (get cable :fanout-index) :all)
-                (seq-remove-process-port-fanout track (get writer :instance-id) (get cable :port) (get cable :fanout-index)))
-              (if (lane-edit-all?)
-                (seq-clear-process-port-binding track (get writer :instance-id) (get cable :port) :all)
-                (seq-clear-process-port-binding track (get writer :instance-id) (get cable :port))))
+            (if (lane-patch-node? track)
+              (let ((graph (lane-patch-node-graph track))
+                    (node (lane-patch-node-index track)))
+                (do
+                  (if (= (get cable :source) "fanout")
+                    (graph-node-process-fanout-remove graph node (get writer :instance-id) (get cable :port) (get cable :fanout-index))
+                    (graph-node-process-unwire graph node (get writer :instance-id) (get cable :port)))
+                  (lane-patch-node-touch)))
+              (if (= (get cable :source) "fanout")
+                (if (lane-edit-all?)
+                  (seq-remove-process-port-fanout track (get writer :instance-id) (get cable :port) (get cable :fanout-index) :all)
+                  (seq-remove-process-port-fanout track (get writer :instance-id) (get cable :port) (get cable :fanout-index)))
+                (if (lane-edit-all?)
+                  (seq-clear-process-port-binding track (get writer :instance-id) (get cable :port) :all)
+                  (seq-clear-process-port-binding track (get writer :instance-id) (get cable :port)))))
             nil)))
       nil)))
 
@@ -2408,19 +2475,23 @@
       (range 0 (len lanes)))))
 
 (def lane-patch-lane-selected? (track track-id instance-id)
-  (let ((lane (selected-process-lane track (track-param-mode track-id))))
-    (if lane (= (get lane :instance-id) instance-id) false)))
+  (if (lane-patch-node? track)
+    (= lane-patch-node-selected instance-id)
+    (let ((lane (selected-process-lane track (track-param-mode track-id))))
+      (if lane (= (get lane :instance-id) instance-id) false))))
 
 ;; Clicking a box selects its lane in the strip, the same as picking it in
 ;; the dropdown, so the card and the painted lane follow the patchbay.
 (def lane-patch-select-lane (track track-id instance-id)
-  (let ((index (lane-patch-lane-index track instance-id)))
-    (if (< index 0)
-      nil
-      (do
-        (activate-track-for-edit track)
-        (set-track-param-mode track-id
-          (+ eseq.seqv-track-params/seqv-process-lane-mode-offset index))))))
+  (if (lane-patch-node? track)
+    (set! lane-patch-node-selected instance-id)
+    (let ((index (lane-patch-lane-index track instance-id)))
+      (if (< index 0)
+        nil
+        (do
+          (activate-track-for-edit track)
+          (set-track-param-mode track-id
+            (+ eseq.seqv-track-params/seqv-process-lane-mode-offset index)))))))
 
 (def lane-patch-column (track track-id entry)
   (let ((selected (lane-patch-lane-selected? track track-id (get entry :instance-id))))
@@ -2622,14 +2693,33 @@
 ;; cable pointing left lands next fire (marked ↑ on the in port). The strip
 ;; card's chip toggles it and holds the edit scope; the only control here is
 ;; the remove chip that appears while a cable is selected.
-(def lane-patch-grid-row (track track-id entries from to)
+(def lane-patch-grid-row-with (track track-id entries from to add-cell)
   (h-stack :width :fill :gap 0.2 :align :start
     :key (str "lane-patch-grid-row-" track-id "-" from)
     (each (range from to) |index|
       ;; The last entry of the grid is the + box, not a lane.
       (if (< index (len entries))
         (lane-patch-column track track-id (nth entries index))
-        (lane-patch-add-cell track track-id)))))
+        add-cell))))
+
+(def lane-patch-grid-row (track track-id entries from to)
+  (lane-patch-grid-row-with track track-id entries from to (lane-patch-add-cell track track-id)))
+
+;; A graph node's patch: the same cards, ports and cables over the node's
+;; chain (docs/graph-node-processes-spec.md §6). `ns` comes from
+;; `lane-patch-register-node`; `add-cell` is the host panel's add-process box.
+(def lane-patchbay-node (ns add-cell)
+  (let ((entries (track-lane-patch ns))
+        (count (+ (len (track-lane-patch ns)) 1))
+        (columns 6))
+    (v-stack :width :fill :gap 0.1 :padding 0.3
+      :key (str "lane-patchbay-" ns)
+      (each (range 0 (ceil (/ count columns))) |row|
+        (lane-patch-grid-row-with ns ns entries
+          (* row columns) (min count (* (+ row 1) columns)) add-cell))
+      (if (and lane-patch-selected (= (get lane-patch-selected :track) ns))
+        (lane-patch-remove-button ns)
+        nil))))
 
 ;; Wrap after six cells, read left to right then top to bottom. The + box
 ;; counts as an entry and follows the last lane onto a new row when needed.

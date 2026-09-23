@@ -261,6 +261,11 @@ pub struct RackSlotSnapshot {
     pub pan: f32,
     pub mute: bool,
     pub solo: bool,
+    /// Live-set gate (eseq-bw9v): a disabled slot receives no triggers, its
+    /// FX chain is bypassed and it never holds an idle engine voice, so it
+    /// costs nothing while another slot carries the part. Unlike mute this
+    /// is not a p-lockable param; it is per pattern like the rest of the slot.
+    pub enabled: bool,
     pub max_polyphony: usize,
     pub param_plocks: RackSlotParamPlocks,
     pub instrument_slot: EffectSlotSnapshot,
@@ -308,6 +313,7 @@ pub struct RackSlotValuesSnapshot {
     pub pan_bits: u32,
     pub mute: bool,
     pub solo: bool,
+    pub enabled: bool,
     pub max_polyphony: usize,
     pub param_plocks: RackSlotParamPlocks,
     pub instrument_slot: EffectSlotValuesSnapshot,
@@ -323,6 +329,7 @@ impl RackSlotValuesSnapshot {
             && self.pan_bits == other.pan_bits
             && self.mute == other.mute
             && self.solo == other.solo
+            && self.enabled == other.enabled
             && self.max_polyphony == other.max_polyphony
             && optional_f32_rows_bit_exact_eq(
                 &self.param_plocks.rows,
@@ -380,9 +387,9 @@ pub(super) fn optional_f32_rows_bit_exact_eq(
 
 impl RackSlotSnapshot {
     /// Copy the scene-level values of `source` onto this slot: the instrument
-    /// base values, base note, mixer fields and slot-FX base values.  P-locks,
-    /// descriptors, sound state and sample bindings are untouched.  Used by
-    /// "copy current values to all scenes".
+    /// base values, base note, mixer fields, the enable flag and slot-FX base
+    /// values.  P-locks, descriptors, sound state and sample bindings are
+    /// untouched.  Used by "copy current values to all scenes".
     pub fn copy_scene_values_from(&mut self, source: &Self) {
         self.instrument_slot
             .copy_base_values_from(&source.instrument_slot);
@@ -392,6 +399,7 @@ impl RackSlotSnapshot {
         self.pan = source.pan;
         self.mute = source.mute;
         self.solo = source.solo;
+        self.enabled = source.enabled;
         self.max_polyphony = source.max_polyphony;
         for (target, source) in self.effect_slots.iter_mut().zip(&source.effect_slots) {
             target.copy_base_values_from(source);
@@ -406,6 +414,7 @@ impl RackSlotSnapshot {
             pan_bits: self.pan.to_bits(),
             mute: self.mute,
             solo: self.solo,
+            enabled: self.enabled,
             max_polyphony: self.max_polyphony,
             param_plocks: self.param_plocks.clone(),
             instrument_slot: self.instrument_slot.authoring_values(),
@@ -437,6 +446,7 @@ impl RackSlotSnapshot {
         self.pan = f32::from_bits(values.pan_bits);
         self.mute = values.mute;
         self.solo = values.solo;
+        self.enabled = values.enabled;
         self.max_polyphony = values.max_polyphony;
         self.param_plocks = values.param_plocks.clone();
         self.instrument_slot = instrument_slot;

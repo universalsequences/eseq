@@ -103,6 +103,7 @@ pub(super) fn render_audio_block(
     // that drop freed the whole deep structure — per-step chord `Vec`s,
     // per-step effect p-locks, `String`-bearing effect descriptors, order tens
     // of thousands of frees — inside the block budget.
+    let previous_snapshot_version = data.scheduler_snapshot_version;
     data.state.snapshot_handoff().refresh(
         &mut data.scheduler_snapshot,
         &mut data.scheduler_snapshot_version,
@@ -151,6 +152,9 @@ pub(super) fn render_audio_block(
         }
     }
     let block_start_sample = data.rendered_samples.load(Ordering::Acquire);
+    if data.scheduler_snapshot_version != previous_snapshot_version {
+        release_newly_disabled_rack_slots(data, block_start_sample);
+    }
     let block_end_sample = block_start_sample + nframes as u64;
     let transport_playing = data.state.transport.playing.load(Ordering::Relaxed);
     if transport_playing && !data.transport_was_playing {

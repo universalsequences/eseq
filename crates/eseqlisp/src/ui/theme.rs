@@ -91,6 +91,11 @@ pub struct Theme {
     pub comp_doc_border: Color,
     pub comp_doc_fg: Color,
     pub comp_doc_title_fg: Color,
+    pub toast_bg: Color,
+    pub toast_fg: Color,
+    pub toast_border: Color,
+    pub toast_success: Color,
+    pub toast_error: Color,
     pub tree_row_alt_bg: Color,
     pub fx_panel_bg: Color,
     pub fx_inner_panel_bg: Color,
@@ -775,6 +780,12 @@ theme_slots!(
         COMP_DOC_TITLE_FG,
         Color::from_hex(0xd8, 0xdc, 0xe8)
     ),
+    // Window-level toast (bottom-right save confirmation / error).
+    (toast_bg, TOAST_BG, Color::from_hex(0x1c, 0x1d, 0x21)),
+    (toast_fg, TOAST_FG, Color::from_hex(0xd8, 0xdc, 0xe8)),
+    (toast_border, TOAST_BORDER, Color::from_hex(0x34, 0x37, 0x3e)),
+    (toast_success, TOAST_SUCCESS, Color::from_hex(0x4c, 0xe0, 0x72)),
+    (toast_error, TOAST_ERROR, Color::from_hex(0xff, 0x5c, 0x5c)),
     (
         tree_row_alt_bg,
         TREE_ROW_ALT_BG,
@@ -1021,7 +1032,7 @@ theme_slots!(
     (
         widget_toggle_on,
         WIDGET_TOGGLE_ON,
-        Color::from_hex(0xc8, 0xff, 0x00)
+        Color::from_hex(0x00, 0x7a, 0xff)
     ),
     (
         widget_toggle_off,

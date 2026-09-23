@@ -30,6 +30,26 @@ honors `ESEQ_DGENLISP_TOOL`. Compile artifacts stay in the audition cache, never
 in factory content. The explicit import expansion in this test adapter is
 separately covered by the production host probe.
 
+For performance work, save the baseline DSP before editing, then run:
+
+```sh
+python3 tools/digi-fm/performance.py --baseline-source /absolute/path/baseline.lisp \
+  --output /absolute/path/results
+```
+
+`--candidate-source` optionally selects an isolated experiment. The command
+first compares all algorithms, factory presets, real host modulation inputs,
+and regular/irregular process partitions at 32/128/512 frames. It then measures
+the native process ABI in alternating baseline/candidate order, using the shared
+C timing driver. Python, compilation and allocation are outside the timed
+region. Results are single-voice CPU time, not the parallel application DSP
+meter. Both sources use the current shared macros and pinned compiler. Sensitive
+feedback can amplify rounding differences; a failed waveform comparison needs
+investigation, not a looser threshold merely to accept a timing improvement.
+
+See `docs/digi-fm-performance-2026-09-22.md` for the measured bottleneck and the
+rejected execution-gating experiment.
+
 Capture the factory panel through the real sequencer (macOS):
 
 ```sh

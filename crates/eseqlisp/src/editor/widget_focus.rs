@@ -547,11 +547,27 @@ impl Editor {
                 self.mark_needs_redraw();
                 true
             }
+            // The widget's own :on-focus-key sees Enter and arrows first, so a
+            // view can bind them (the patcher's Cmd+Enter create-below and
+            // Cmd+Up connect-last-two). A modified chord it declines is not
+            // focus navigation; a plain key it declines still is.
             KeyCode::Up | KeyCode::Down | KeyCode::Left | KeyCode::Right if has_focus => {
+                if self.dispatch_focus_key(key) {
+                    return true;
+                }
+                if key.modifiers != KeyModifiers::NONE {
+                    return false;
+                }
                 self.navigate_focus(key.code);
                 true
             }
             KeyCode::Enter if has_focus => {
+                if self.dispatch_focus_key(key) {
+                    return true;
+                }
+                if key.modifiers != KeyModifiers::NONE {
+                    return false;
+                }
                 self.activate_focused();
                 true
             }
@@ -574,6 +590,9 @@ impl Editor {
         let Some(callback) = node.props.get("on-focus-key").cloned() else {
             return false;
         };
+        // `patcher-command` acts on the patcher this key is for, never on
+        // one an earlier refusal or right-click recorded.
+        crate::widget_render::patcher::set_focus_key_target(&node);
         let key_arg = Value::String(key_str(key));
         let text_arg = match key.code {
             KeyCode::Char(c)
@@ -597,12 +616,26 @@ impl Editor {
                 true
             }
         };
+        // A patcher command the callback ran (content/ui/patcher.lisp) may
+        // have produced the widget's :on-change output; deliver it now, the
+        // way a consumed key's output is delivered.
+        for output in crate::widget_render::patcher::take_pending_patcher_command_outputs() {
+            let _ = self.apply_widget_output(Some(output));
+        }
         if handled {
             self.refresh_runtime_side_effects();
             self.sync_runtime_context();
             self.mark_needs_redraw();
         }
         handled
+    }
+
+    /// Offer `key` to the focused widget and, if it refuses, to that widget's
+    /// `:on-focus-key` callback, without falling through to mode or global
+    /// bindings. For a host that has decided a key belongs to the focused
+    /// widget's view and nothing else (the patch editor's Tab).
+    pub fn deliver_key_to_focused_widget(&mut self, key: KeyEvent) -> bool {
+        self.handle_focused_widget_key(key) || self.dispatch_focus_key(key)
     }
 
     pub(super) fn handle_focused_widget_key(&mut self, key: KeyEvent) -> bool {
@@ -681,20 +714,24 @@ impl Editor {
                 .cloned()
         );
 
-        let gen_before = crate::widget_render::widget_state_generation();
-        let widget_event = map_key_event(
-            &node,
-            WidgetKeyEvent {
-                code: key.code,
-                modifiers: key.modifiers,
-            },
-        );
-        let consumed = widget_event.is_some();
-        eprintln!("[patcher cmd-y] patcher map_key_event consumed={consumed}");
-        let output = widget_event.and_then(|event| handle_event(&node, event));
-        if !consumed {
+        self.run_bound_patcher_command(&node, key)
+    }
+
+    /// Run the patcher command the key table binds to `key` against `node`,
+    /// delivering the widget output the way a consumed key's would be. The
+    /// table is filled by content/ui/patcher.lisp; before it loads (or in a
+    /// test without Lisp) the checked-in defaults answer instead. A key the
+    /// user unbound stays unbound.
+    fn run_bound_patcher_command(&mut self, node: &LayoutNode, key: KeyEvent) -> bool {
+        use crate::widget_render::patcher as patcher;
+        let Some(command) = patcher::bound_patcher_command(&crate::editor::key_str(key)) else {
             return false;
-        }
+        };
+        let gen_before = crate::widget_render::widget_state_generation();
+        let Some(event) = patcher::run_patcher_command(node, &command) else {
+            return false;
+        };
+        let output = handle_event(node, event);
         let _ = self.apply_widget_output(output);
         if crate::widget_render::widget_state_generation() != gen_before {
             self.runtime.invalidate_layout_deferred();
@@ -729,11 +766,18 @@ impl Editor {
         let Some(node) = patchers.into_iter().next() else {
             return false;
         };
+        // An unbound chord is not the patcher's: leave focus where it is and
+        // let the key reach mode and global bindings.
+        if crate::widget_render::patcher::bound_patcher_command(&crate::editor::key_str(key))
+            .is_none()
+        {
+            return false;
+        }
         // Focus follows, so the bubble's own key handling (typing, Enter,
         // Escape) lands on the patcher from here on.
         self.set_focused_widget(node.clone());
         self.clear_focus_on_other_tiles();
-        self.forward_key_to_widget(&node, key)
+        self.run_bound_patcher_command(&node, key)
     }
 
     /// Fire the semantic-change notification for the patcher showing `path`,
@@ -766,6 +810,25 @@ impl Editor {
         self.apply_widget_output(output);
         self.mark_needs_redraw();
         true
+    }
+
+    /// Snapshot the latest visible revision after a deferred patch notification.
+    /// The host moves the result to its compilation worker. No VM values or
+    /// mutable editor state cross that thread boundary.
+    pub fn capture_patcher_preview_request(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<crate::widget_render::patcher::PatcherPreviewRequest, String> {
+        for layout in self.visible_widget_layouts() {
+            let mut patchers = Vec::new();
+            collect_patcher_nodes(&layout, &mut patchers);
+            if let Some(node) = patchers.into_iter().find(|node| {
+                patcher_node_path(node).is_some_and(|node_path| node_path == path)
+            }) {
+                return crate::widget_render::patcher::PatcherPreviewRequest::capture(&node);
+            }
+        }
+        Err(format!("No visible patch editor for '{}'", path.display()))
     }
 
     /// Dispatch `key` to `node` as if it were focused, applying whatever the

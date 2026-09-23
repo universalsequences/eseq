@@ -2,6 +2,81 @@ use super::*;
 use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
 #[test]
+fn track_menu_ungroups_only_the_clicked_group_or_rack_member() {
+    let mut editor = full_grid_editor_for_scroll_tests();
+    set_full_grid_track_count(&mut editor, 3, 16);
+    let mixer_id = editor.buffers.iter().find(|b| b.name == "*mixer*").unwrap().id;
+    editor.set_active_buffer(mixer_id);
+    editor.set_layout_viewport(140, 30);
+
+    for rack in [false, true] {
+        let mut group = rack_group_fixture(false);
+        if !rack {
+            group.rack = None;
+        }
+        apply_group_bindings(&mut editor, group);
+        for collapsed in [false, true] {
+            editor.runtime_mut().set_reactive(
+                "SEQ", "track-collapsed", test_bool_list(&[collapsed; 3]),
+            );
+            for selected in [&[0.0][..], &[1.0, 2.0][..]] {
+                editor.runtime_mut().set_reactive(
+                    "SEQ", "selected-tracks", test_number_list(selected),
+                );
+                editor.runtime_mut().run_reactive_cycle();
+                editor.refresh_runtime_side_effects();
+                for track in [0, 1] {
+                    let layout = editor.widget_layout().expect("mixer layout");
+                    let strip = find_layout_node_by_stable_key(
+                        &layout, &format!("mixer-v2-track-{track}"),
+                    ).expect("visible track strip");
+                    assert_finite_nonzero_rect(strip, "right-click track strip");
+                    editor.runtime_mut().invoke(
+                        strip.props["on-right-click"].clone(),
+                        vec![map_value([
+                            ("col", Value::Number(30.0)),
+                            ("row", Value::Number(8.0)),
+                        ])],
+                    ).expect("open clicked track menu");
+                    editor.refresh_runtime_side_effects();
+                    let layout = editor.widget_layout().expect("track menu layout");
+                    let ungroup = find_layout_node_by_stable_key_suffix(
+                        &layout, "/track-menu-:ungroup-track",
+                    );
+                    if track == 0 {
+                        assert!(ungroup.is_none(), "ungroup is absent for a loose track");
+                        editor.runtime_mut().eval_str(
+                            "(set! eseq.mixer/track-menu-open false)",
+                        ).unwrap();
+                    } else {
+                        let ungroup = ungroup.expect("member track offers ungroup");
+                        assert_finite_nonzero_rect(ungroup, "ungroup track menu item");
+                        assert!(ungroup.rect.col >= 0.0 && ungroup.rect.row >= 0.0);
+                        assert!(ungroup.rect.col + ungroup.rect.width <= 140.0);
+                        assert!(ungroup.rect.row + ungroup.rect.height <= 30.0);
+                        editor.drain_host_commands();
+                        editor.runtime_mut().invoke(
+                            ungroup.props["on-select"].clone(), vec![Value::Nil],
+                        ).expect("select ungroup track");
+                        let commands = editor.drain_host_commands();
+                        assert_eq!(commands.len(), 1);
+                        let eseqlisp::host::HostCommand::Custom { name, payload } = &commands[0]
+                        else { panic!("expected ungroup track host command: {commands:?}") };
+                        assert_eq!(name, "remove-track-from-group");
+                        assert_eq!(payload, &map_value([("track", Value::Number(1.0))]));
+                        assert_eq!(
+                            editor.runtime_mut().eval_str("eseq.mixer/track-menu-open").unwrap(),
+                            Some(Value::Bool(false)),
+                        );
+                    }
+                    editor.refresh_runtime_side_effects();
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn rack_clip_scroll_owns_vertical_gestures_across_the_visible_list() {
     use eseqlisp::widget_render::scroll::{get_scroll_state, scroll_state_key, set_scroll_state};
 

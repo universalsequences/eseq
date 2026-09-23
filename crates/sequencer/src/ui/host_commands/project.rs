@@ -333,6 +333,7 @@ pub(super) fn handle(
                     editor.handle_host_event(HostEvent::Status(format!(
                         "Saved project '{save_name}'"
                     )));
+                    editor.show_toast(format!("Saved {save_name}"), eseqlisp::ToastKind::Success);
                     if then.as_deref() == Some("new-project") {
                         handle("new-project", Value::Nil, app, editor, ctx);
                     }
@@ -341,6 +342,7 @@ pub(super) fn handle(
                     editor.handle_host_event(HostEvent::Status(format!(
                         "Error saving project: {error}"
                     )));
+                    editor.show_toast(format!("Save failed: {error}"), eseqlisp::ToastKind::Error);
                 }
             }
         }

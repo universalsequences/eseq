@@ -902,6 +902,8 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                             &step_snapshot.params,
                         ),
                         event,
+                        fire_seed: None,
+                        after_reset: false,
                     },
                     Some(&slot_inlet_writes),
                 ) {
@@ -995,6 +997,7 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                     &step_snapshot.params,
                 ),
                 written_inlets: Vec::new(),
+                after_reset: false,
             };
             for invocation in process_runtime.track_fires_at(
                 trigger.track,
@@ -1997,33 +2000,33 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
             }
             let mut graph_emissions = Vec::new();
             let mut graph_eval_count = 0_usize;
-            if let Some(scratch) = scratch_runtime.as_mut() {
+            if scratch_runtime.is_some() {
                 let manifest = &graph_manifests[graph_index];
                 // Resolved (override-or-manifest) cap, carried on the runtime.
                 let max_poly = graph_runtimes[graph_index].max_poly();
-                graph_runtimes[graph_index].process_block(
+                // The driver pairs the node-rule predicate with the emit-time
+                // process-patch hook (scheduler/node_process.rs).
+                let mut driver = super::node_process::SchedulerGraphDriver {
+                    scratch_runtime,
+                    process_runtime,
+                    snapshot,
+                    manifest,
+                    debug_graph,
+                    debug_accum,
+                    eval_count: 0,
+                    last_delay_offset_steps: 0.0,
+                    pending_resets: Vec::new(),
+                };
+                graph_runtimes[graph_index].process_block_with_driver(
                     chunk_start_beats,
                     chunk_end_beats,
                     scheduled_until_sample,
                     samples_per_quarter,
                     max_poly,
-                    |eval| {
-                        graph_eval_count += 1;
-                        match scratch.invoke_graph_update(manifest, eval) {
-                            Ok(decision) => decision,
-                            Err(error) => {
-                                if debug_graph {
-                                    eprintln!(
-                                        "[graph-update-error] graph={} node={} beat={:.6} error={}",
-                                        manifest.name, eval.node_index, eval.beat, error
-                                    );
-                                }
-                                crate::graph::NodeFire::default()
-                            }
-                        }
-                    },
+                    &mut driver,
                     &mut graph_emissions,
                 );
+                graph_eval_count += driver.eval_count;
             } else if debug_routing_enabled() {
                 eprintln!(
                     "[routing] skip graph-block reason=no-scratch-runtime graph_index={} chunk=({:.6}..{:.6})",

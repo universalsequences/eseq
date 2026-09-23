@@ -325,6 +325,12 @@
 (def rack-slot-set-mute (slot v)
   (rack-slot-set-param-or-plock slot "mute" "set-rack-slot-mute" v))
 
+(def rack-slot-set-enabled (slot v)
+  (host-command "set-rack-slot-enabled"
+    (dict :track (get slot :track)
+          :slot (get slot :idx)
+          :value v)))
+
 (def rack-slot-set-solo (slot v)
   (rack-slot-set-param-or-plock slot "solo" "set-rack-slot-solo" v))
 
@@ -432,12 +438,15 @@
       :on-click |x y r| (rack-slot-select slot)
       (h-stack :width :fill :height :fill :gap 0.15 :align :center
         (box :width 1)
-        (label (str (+ (get slot :idx) 1))
-          :font-size 10
-          :color (if selected :white :gray)
-          :v-align :center
-          :width 1.0
-          :bg :transparent)
+        ;; The slot number doubles as the live-set enable toggle (eseq-bw9v):
+        ;; a disabled slot gets no triggers and runs no DSP, so a set can park
+        ;; one instrument per bank without paying for the parked ones.
+        (button (str (+ (get slot :idx) 1))
+          :width 1.5 :height 1.02 :padding 0 :font-size 10
+          :border-color :transparent
+          :background-color (if (get slot :enabled) :transparent :mixer-control-bg)
+          :color (if (get slot :enabled) (if selected :white :gray) :dim)
+          :on-click |x y r| (rack-slot-set-enabled slot (not (get slot :enabled))))
         (box :width 1)
         (box :key (str "rack-slot-label-" (get slot :idx))
           :width 9.5 :height :fill  :padding 0
@@ -450,7 +459,7 @@
             (box :height 0.2)
             (label (substring (get slot :display-name) 0 14)
               :font-size 10.5
-              :color :white
+              :color (if (get slot :enabled) :white :dim)
               :active delete-target
               :active-color :white
               :bg :transparent)))

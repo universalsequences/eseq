@@ -15,6 +15,7 @@ mod enqueue;
 mod geometry;
 mod lookahead;
 mod midi_fx;
+mod node_process;
 mod params;
 mod process;
 mod roll;

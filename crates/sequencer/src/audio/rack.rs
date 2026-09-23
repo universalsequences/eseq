@@ -601,6 +601,63 @@ pub(super) unsafe fn push_rack_slot_panner_params(
     );
 }
 
+/// A disabled slot's FX chain must not run on silence, so push every
+/// effect's `enabled` node param to 0. The enabled branch of the trigger loop
+/// pushes the effect's own stored value back, so re-enabling restores whatever
+/// bypass state the user had authored on each effect.
+pub(super) unsafe fn push_rack_slot_effects_bypassed(lg: *mut LiveGraph, slot: &RackSlotSnapshot) {
+    push_rack_slot_effects_gate(lg, slot, false);
+}
+
+/// Push each slot effect's `enabled` node param for the slot's enable state:
+/// 0 when the slot is parked, the effect's own stored value when it plays.
+/// Live keys use the enabled form so a slot that came back enabled through a
+/// pattern/scene switch is not left bypassed until the next sequenced trigger.
+pub(super) unsafe fn push_rack_slot_effects_gate(
+    lg: *mut LiveGraph,
+    slot: &RackSlotSnapshot,
+    enabled: bool,
+) {
+    for (effect, descriptor) in slot.effect_slots.iter().zip(&slot.effect_descriptors) {
+        if effect.node_id == 0 {
+            continue;
+        }
+        let Some(param_idx) = descriptor.enabled_param_idx() else {
+            continue;
+        };
+        let Some(idx) = effect.node_param_idx(param_idx) else {
+            continue;
+        };
+        if idx == u32::MAX || idx >= crate::instruments::voice_modulator::MOD_PARAM_BASE {
+            continue;
+        }
+        let fvalue = if enabled {
+            effect.defaults.get(param_idx).copied().unwrap_or(1.0)
+        } else {
+            0.0
+        };
+        params_push_wrapper(
+            lg,
+            ParamMsg {
+                idx: idx as u64,
+                logical_id: effect.node_id as u64,
+                fvalue,
+            },
+        );
+    }
+}
+
+/// Whether any slot that can sound is soloed. A parked (disabled) slot never
+/// triggers, so its solo must not mute the enabled slots around it.
+pub(super) fn rack_has_enabled_solo(update: &RackParams<'_>) -> bool {
+    update
+        .rack
+        .slots
+        .iter()
+        .enumerate()
+        .any(|(slot_idx, slot)| slot.enabled && update.slot_params(slot_idx).solo)
+}
+
 pub(super) fn rack_sampler_warp_runtime(
     state: &SequencerState,
     warp_enabled: f32,
@@ -664,6 +721,13 @@ pub(super) fn fire_live_keyboard_rack_note(
     };
 
     for (slot_idx, slot) in rack.slots.iter().enumerate() {
+        if !slot.enabled {
+            continue;
+        }
+        // A slot re-enabled by a pattern/scene switch may still have its FX
+        // chain bypassed from when it was parked; live keys never reach the
+        // sequenced trigger path that would restore it.
+        unsafe { push_rack_slot_effects_gate(data.lg.0, slot, true) };
         let slot_params = update.slot_params(slot_idx);
         if let Some(choke_group) = slot.choke_group {
             release_rack_choke_group_voices(
@@ -1535,7 +1599,7 @@ fn dispatch_rack_param_updates(
 ) {
     let rack = update.rack;
     let step = update.step;
-    let has_solo = (0..rack.slots.len()).any(|slot| update.slot_params(slot).solo);
+    let has_solo = rack_has_enabled_solo(update);
     let solo_state_changed = off_step_solo_state_changed(rack, step, update.targets());
     for (slot_idx, slot) in rack.slots.iter().enumerate() {
         let slot_param_locked = step
@@ -1571,7 +1635,11 @@ fn dispatch_rack_param_updates(
                 }
             }
         }
-        unsafe { dispatch_rack_slot_effect_plocks_at_step(data.lg.0, update, slot_idx); }
+        if slot.enabled {
+            unsafe { dispatch_rack_slot_effect_plocks_at_step(data.lg.0, update, slot_idx); }
+        } else {
+            unsafe { push_rack_slot_effects_bypassed(data.lg.0, slot) };
+        }
         let device = update.instrument(slot_idx);
         let params = resolve_rack_slot_instrument_updates(&slot.instrument_slot, step, |param| device.macro_value(param));
         dispatch_rack_slot_params_to_active_voices(data, track_idx, slot_idx, slot, &params);
@@ -1626,7 +1694,7 @@ pub(super) fn fire_rack_resolved(
         }
     }
 
-    let has_solo = (0..rack.slots.len()).any(|slot| update.slot_params(slot).solo);
+    let has_solo = rack_has_enabled_solo(&update);
     for (slot_idx, slot) in rack.slots.iter().enumerate() {
         let slot_params = update.slot_params(slot_idx);
         let muted_by_solo = has_solo && !slot_params.solo;
@@ -1634,6 +1702,13 @@ pub(super) fn fire_rack_resolved(
             data.state.runtime.rack_slot_pan_lids[track_idx][slot_idx].load(Ordering::Acquire);
         unsafe {
             push_rack_slot_panner_params(data.lg.0, slot_pan_lid, slot_params, muted_by_solo);
+        }
+        if !slot.enabled {
+            // eseq-bw9v: a disabled slot gets no note, so its engine idles
+            // down to zero voices, and its FX chain is bypassed so nothing
+            // downstream of the silent instrument burns a block either.
+            unsafe { push_rack_slot_effects_bypassed(data.lg.0, slot) };
+            continue;
         }
         for (effect_idx, effect) in slot.effect_slots.iter().enumerate() {
             let device = update.effect(slot_idx, effect_idx);
@@ -1870,6 +1945,7 @@ mod off_step_solo_tests {
             pan: 0.0,
             mute: false,
             solo: false,
+            enabled: true,
             max_polyphony: 1,
             param_plocks: RackSlotParamPlocks::new(),
             instrument_slot: EffectSlotSnapshot::new_empty(),

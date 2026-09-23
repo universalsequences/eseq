@@ -1173,6 +1173,7 @@ mod tests {
                     pan: 0.0,
                     mute: false,
                     solo: false,
+                    enabled: true,
                     max_polyphony: 8,
                     param_plocks: sequencer::sequencer::RackSlotParamPlocks::new(),
                     instrument_slot:

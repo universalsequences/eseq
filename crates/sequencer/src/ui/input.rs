@@ -1456,6 +1456,11 @@ pub(crate) fn handle_metal_command_shortcut_with_ui_epoch(
             }
             _ if is_plain_tab_shortcut(key) => {
                 if tab_locked_to_patch_editor(editor) {
+                    // Still the patcher's key: a focused patcher gets it for
+                    // its own bindings (content/ui/patcher.lisp, where Tab
+                    // accepts ghost-cable suggestions), and it stops here
+                    // either way rather than reaching the arrangement toggle.
+                    let _ = editor.deliver_key_to_focused_widget(*key);
                     return true;
                 }
                 if editor.active_vim_input_mode() == Some(eseqlisp::editor::VimInputMode::Insert) {

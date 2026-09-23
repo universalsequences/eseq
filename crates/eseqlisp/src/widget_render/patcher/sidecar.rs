@@ -13,7 +13,8 @@ use super::model::{
     connection_touches_hidden_inline_node, hidden_inline_node_ids, refresh_patch_inline_inputs,
 };
 use super::state::{
-    PatcherInteractionState, PatcherNodeOrigin, active_patcher_view_key, patch_with_created_macros,
+    PatcherInteractionState, PatcherNodeOrigin, active_patcher_view_key,
+    macro_signatures_with_visual_edits, patch_scope_with_interaction_state,
     patch_with_interaction_state, source_connection_id,
 };
 
@@ -627,32 +628,18 @@ pub(super) fn root_patch_with_interaction(
     interaction_state: &PatcherInteractionState,
 ) -> Patch {
     let mut root = patch_with_interaction_state(root_patch.clone(), interaction_state, "root");
-    let with_created_macros = patch_with_created_macros(root_patch.clone(), interaction_state);
-    root.macros = with_created_macros
-        .macros
-        .into_iter()
-        .map(|macro_patch| {
-            let view_key = format!("macro:{}", macro_patch.name);
-            // Seed the macro scope with the enclosing patch's macro table
-            // *before* staged edits are applied: `patch_with_interaction_state`
-            // classifies created-node text against `patch.macros`, so without
-            // this a node calling a local/library macro from inside a defmacro
-            // would be typed `Builtin` and the generator would skip its
-            // `(use-defmacro …)` import (the render path already seeds this in
-            // `active_patcher_patch`).
-            let mut scope = macro_patch.patch;
-            scope.macros = root.macros.clone();
-            let mut patch = patch_with_interaction_state(scope, interaction_state, &view_key);
-            patch.macros = root.macros.clone();
-            super::model::MacroPatch {
-                name: macro_patch.name,
-                params: macro_patch.params,
-                outputs: macro_patch.outputs,
-                patch,
-                origin: macro_patch.origin,
-            }
-        })
-        .collect();
+    let signatures = macro_signatures_with_visual_edits(&root, interaction_state);
+    for macro_patch in &mut root.macros {
+        let view_key = format!("macro:{}", macro_patch.name);
+        let mut scope = std::mem::take(&mut macro_patch.patch);
+        // The root owns the catalog. Per-scope tables are projection context,
+        // not nested definitions; retaining them duplicates the entire library
+        // in every body and makes preview generation scale quadratically.
+        scope.macros.clear();
+        macro_patch.patch = patch_scope_with_interaction_state(
+            scope, interaction_state, &view_key, &signatures,
+        );
+    }
     root
 }
 

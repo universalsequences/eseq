@@ -1251,6 +1251,10 @@ pub(super) fn build_rack_panel_value(
                 rack_slot_value_field(track, slot_idx, sequencer::sequencer::RackSlotParam::Solo),
             );
             slot_map.insert(
+                "enabled".to_string(),
+                value_cell(Value::Bool(slot.enabled)),
+            );
+            slot_map.insert(
                 "max-polyphony".to_string(),
                 value_cell(Value::Number(slot.param_value_at_step(
                     sequencer::sequencer::RackSlotParam::MaxPolyphony,

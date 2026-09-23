@@ -36,7 +36,21 @@ impl SequencerState {
             .lock()
             .unwrap()
             .sync_rack_members(&memberships);
-        *self.rack_memberships.lock().unwrap() = memberships;
+        let changed = {
+            let mut current = self.rack_memberships.lock().unwrap();
+            let changed = *current != memberships;
+            *current = memberships;
+            changed
+        };
+        // Every scheduler snapshot carries the membership list (rack-owned
+        // graph sequencers resolve member routes through it) and the UI's
+        // graph-config memo is keyed on the snapshot version, so a topology
+        // edit that changed nothing else must still publish: otherwise the
+        // audio thread keeps routing by the old members and the graph panel
+        // renders one half of its rows from a stale node list.
+        if changed {
+            self.publish_scheduler_snapshot();
+        }
     }
     pub fn rack_memberships(&self) -> Vec<crate::graph::RackMembership> {
         self.rack_memberships.lock().unwrap().clone()

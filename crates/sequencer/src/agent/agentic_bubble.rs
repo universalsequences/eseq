@@ -2,9 +2,10 @@ use eseqlisp::parser::{format_expression, ASTParser, Expression, Parser};
 use eseqlisp::widget_render::patcher::PatcherConnectOp;
 use std::collections::HashSet;
 
+use super::models::AgentModelCatalog;
 use super::network::AgentNetworkClient;
 use super::providers::{
-    default_model_presets, AgentMessage, AgentMessageRole, AgentProviderKind, AgentProviderState,
+    AgentMessage, AgentMessageRole, AgentProviderKind, AgentProviderState,
 };
 
 const MAX_RETRIES: usize = 1;
@@ -59,9 +60,13 @@ pub enum AgenticBubbleOutput {
 pub fn generate_agentic_bubble_macro(
     request: AgenticBubbleRequest,
 ) -> Result<AgenticBubbleOutput, String> {
-    let provider_state = AgentProviderState::from_env();
-    let provider = default_agentic_provider(&provider_state);
-    let model = fast_model_for_provider(&provider_state, provider);
+    let catalog = AgentModelCatalog::load()?;
+    let provider_state = AgentProviderState::from_catalog(&catalog);
+    let (provider, model) = resolve_bubble_model(
+        &catalog,
+        &provider_state,
+        super::model_choice::agentic_model().as_deref(),
+    )?;
     eprintln!(
         "[agentic-bubble] start macro={} provider={provider:?} model={} prompt={:?}",
         request.suggested_macro_name, model, request.prompt
@@ -155,60 +160,33 @@ pub fn generate_agentic_bubble_macro(
     ))
 }
 
-fn default_agentic_provider(state: &AgentProviderState) -> AgentProviderKind {
-    // An explicit `M-x choose-model` pick outranks the built-in preference.
-    if let Some(provider) = super::model_choice::agentic_provider() {
-        return provider;
+fn resolve_bubble_model(
+    catalog: &AgentModelCatalog,
+    state: &AgentProviderState,
+    chosen: Option<&str>,
+) -> Result<(AgentProviderKind, String), String> {
+    if let Some(id) = chosen {
+        let model = catalog.model(id)
+            .ok_or_else(|| format!("Selected patch agent model {id} is no longer in agent-models.lisp; choose a model again."))?;
+        return Ok((model.provider, model.id.clone()));
     }
-    if std::env::var(AgentProviderKind::Gemini.api_key_env())
-        .map(|value| !value.trim().is_empty())
-        .unwrap_or(false)
-    {
-        AgentProviderKind::Gemini
-    } else {
-        state.selected_provider
-    }
-}
-
-fn fast_model_for_provider(state: &AgentProviderState, provider: AgentProviderKind) -> String {
-    // A chosen model wins outright, but only for the provider it belongs to —
-    // if some other caller forced a different provider, fall through to that
-    // provider's own fast default rather than sending it a foreign model id.
-    if let Some(chosen) = super::model_choice::agentic_model() {
-        if super::model_choice::agentic_provider() == Some(provider) {
-            return chosen;
-        }
-    }
+    // Preserve the automatic preference for Gemini when its key is present.
+    let provider = state.providers
+        .iter()
+        .find(|entry| entry.provider == AgentProviderKind::Gemini && entry.api_key_present)
+        .map(|entry| entry.provider)
+        .unwrap_or(state.selected_provider);
     if let Ok(value) = std::env::var(provider.model_override_env()) {
         let trimmed = value.trim();
         if !trimmed.is_empty() {
-            return trimmed.to_string();
+            return Ok((provider, trimmed.to_string()));
         }
     }
-    if provider == AgentProviderKind::Gemini {
-        return "gemini-3.5-flash".to_string();
-    }
-    // Anthropic ids carry no "flash"/"mini"/"nano" marker for the scan below
-    // to find, so name the fast tier outright.
-    if provider == AgentProviderKind::Anthropic {
-        return "claude-haiku-4-5".to_string();
-    }
-    default_model_presets()
-        .into_iter()
-        .find(|preset| preset.provider == provider && preset.id.contains("flash"))
-        .or_else(|| {
-            default_model_presets()
-                .into_iter()
-                .find(|preset| preset.provider == provider && preset.id.contains("mini"))
-        })
-        .or_else(|| {
-            default_model_presets()
-                .into_iter()
-                .find(|preset| preset.provider == provider && preset.id.contains("nano"))
-        })
-        .map(|preset| preset.id)
-        .or_else(|| state.selected_model().map(str::to_string))
-        .unwrap_or_else(|| "gpt-5-mini".to_string())
+    let model = catalog.models()
+        .iter()
+        .find(|model| model.provider == provider && model.bubble_default)
+        .ok_or_else(|| format!("No default bubble model for {}", provider.display_name()))?;
+    Ok((provider, model.id.clone()))
 }
 
 fn system_prompt(follow_up: bool) -> String {
@@ -954,6 +932,56 @@ mod tests {
         AgenticBubbleConnect, AgenticBubbleFollowUp, AgenticBubbleOutput, AgenticBubbleRequest,
         PatcherConnectOp,
     };
+
+    #[test]
+    fn bubble_selection_uses_catalog_provider_and_reports_removed_models() {
+        use super::{resolve_bubble_model, AgentModelCatalog, AgentProviderKind, AgentProviderState};
+
+        let catalog = AgentModelCatalog::parse(
+            "'((:id \"future-model\" :name \"Future\" :provider :anthropic
+                :capability :balanced :default true :bubble-default true))",
+        ).unwrap();
+        let state = AgentProviderState::from_catalog(&catalog);
+        assert_eq!(state.selected_provider, AgentProviderKind::Anthropic);
+        assert_eq!(state.providers[0].available_models[0].id, "future-model");
+        // An explicit choice must outrank any model/provider environment setting.
+        assert_eq!(
+            resolve_bubble_model(&catalog, &state, Some("future-model")).unwrap(),
+            (AgentProviderKind::Anthropic, "future-model".to_string()),
+        );
+        let error = resolve_bubble_model(&catalog, &state, Some("removed-model")).unwrap_err();
+        assert!(error.contains("removed-model"));
+        assert!(error.contains("choose a model again"));
+    }
+
+    #[test]
+    fn automatic_bubble_model_uses_catalog_default_and_environment_override() {
+        use super::{resolve_bubble_model, AgentModelCatalog, AgentProviderKind, AgentProviderState};
+
+        // nextest runs this test in its own process. Restore the environment
+        // as well so an opt-in cargo test invocation leaves no persistent edit.
+        let key = AgentProviderKind::OpenAi.model_override_env();
+        let previous = std::env::var_os(key);
+        std::env::remove_var(key);
+        let catalog = AgentModelCatalog::parse(
+            "'((:id \"new-default\" :name \"Default\" :provider :openai
+                :capability :balanced :default true)
+               (:id \"new-fast\" :name \"Fast\" :provider :openai
+                :capability :fast :bubble-default true))",
+        ).unwrap();
+        let state = AgentProviderState::from_catalog(&catalog);
+        let default = state.selected_model().unwrap().to_string();
+        let bubble = resolve_bubble_model(&catalog, &state, None).unwrap();
+        std::env::set_var(key, " custom-model ");
+        let overridden = resolve_bubble_model(&catalog, &state, None).unwrap();
+        match previous {
+            Some(value) => std::env::set_var(key, value),
+            None => std::env::remove_var(key),
+        }
+        assert_eq!(default, "new-default");
+        assert_eq!(bubble, (AgentProviderKind::OpenAi, "new-fast".to_string()));
+        assert_eq!(overridden, (AgentProviderKind::OpenAi, "custom-model".to_string()));
+    }
 
     #[test]
     fn reference_lists_call_signatures_not_bare_names() {

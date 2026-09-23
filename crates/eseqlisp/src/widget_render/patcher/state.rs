@@ -150,6 +150,9 @@ pub(super) struct PatcherInteractionState {
     pub(super) last_pointer_model_position: Option<(f32, f32)>,
     pub(super) active_macro: Option<String>,
     pub(super) drag: Option<PatcherDragState>,
+    /// Jev ghost-cable suggestions for the single selected node, if any
+    /// (`jev.rs`). Never part of an undo gesture: written without history.
+    pub(super) jev: Option<super::jev::JevSuggestionState>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -641,6 +644,16 @@ pub(super) fn get_patcher_interaction_state(key: u64) -> PatcherInteractionState
 pub(super) fn active_macro_for_key(key: u64) -> Option<String> {
     PATCHER_INTERACTION_STATES
         .with(|states| states.borrow().get(&key)?.active_macro.clone())
+}
+
+/// The fingerprint of the Jev request `key` is still waiting on, if any,
+/// without cloning the whole interaction state (the host polls this per tick).
+pub(super) fn pending_jev_fingerprint_for_key(key: u64) -> Option<u64> {
+    PATCHER_INTERACTION_STATES.with(|states| {
+        let states = states.borrow();
+        let jev = states.get(&key)?.jev.as_ref()?;
+        (jev.status == super::jev::JevStatus::Pending).then_some(jev.fingerprint)
+    })
 }
 
 thread_local! {
@@ -1673,6 +1686,19 @@ pub(super) fn patch_with_interaction_state(
             macro_patch.outputs = signature.outputs.clone();
         }
     }
+    patch_scope_with_interaction_state(patch, interaction_state, view_key, &macro_signatures)
+}
+
+/// Apply one scope's edits using the enclosing patch's resolved signatures.
+/// Macro bodies borrow this context instead of owning copies of every body in
+/// the library. Creating macros and resolving their interfaces happens once
+/// at the root, before any scope is edited.
+pub(super) fn patch_scope_with_interaction_state(
+    mut patch: Patch,
+    interaction_state: &PatcherInteractionState,
+    view_key: &str,
+    macro_signatures: &HashMap<String, MacroSignature>,
+) -> Patch {
     patch.nodes.retain(|node| {
         !interaction_state
             .edit_state
@@ -1698,19 +1724,19 @@ pub(super) fn patch_with_interaction_state(
             && live_nodes.contains(connection.to_node.as_str())
     });
     for node in &mut patch.nodes {
-        refresh_macro_instance_outputs(node, &macro_signatures);
+        refresh_macro_instance_outputs(node, macro_signatures);
         let edit_key = node_edit_key(view_key, &node.id);
         if let Some(edit) = interaction_state.edit_state.nodes.get(&edit_key) {
             node.position = edit.position;
             node.width = edit.width;
-            apply_node_text_override(node, &edit.text, &macro_signatures);
+            apply_node_text_override(node, &edit.text, macro_signatures);
         }
         if let Some(edit) = interaction_state
             .text_edit
             .as_ref()
             .filter(|edit| edit.node_id == node.id)
         {
-            apply_node_text_override(node, &edit.text, &macro_signatures);
+            apply_node_text_override(node, &edit.text, macro_signatures);
             expand_node_for_autocomplete(node, edit);
         }
     }
@@ -1751,7 +1777,7 @@ pub(super) fn patch_with_interaction_state(
             &edit.id,
             &text,
             edit.position,
-            &macro_signatures,
+            macro_signatures,
             interaction_state
                 .text_edit
                 .as_ref()

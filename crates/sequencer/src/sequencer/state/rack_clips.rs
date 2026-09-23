@@ -729,6 +729,7 @@ mod tests {
             duration: None,
             swing: None,
             neural_group: None,
+            process_chain: None,
         }];
         graph
     }

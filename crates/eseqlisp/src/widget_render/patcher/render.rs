@@ -154,6 +154,43 @@ pub(super) fn build_primitives_for_patcher(
             let autocomplete_macros =
                 super::autocomplete_macros_for_patch(&node.props, Some(&patch));
             sync_patcher_z_order(&mut interaction_state, &view_key, &patch);
+            // Jev ghost cables follow the selection, and the render pass is
+            // the one place that sees every way the selection can change
+            // (click, marquee, paste, keyboard) with the effective patch.
+            {
+                let snapshot = interaction_state.clone();
+                let subject_for = |node_id: &str| -> Option<super::state::ConnectSubject> {
+                    let patch_node = patch.nodes.iter().find(|node| node.id == node_id)?;
+                    Some(if patch_node.kind == NodeKind::MacroInstance {
+                        let macro_name = patch_node.op.clone();
+                        let params =
+                            super::resolve_macro_params(&root_patch, &snapshot, &macro_name);
+                        let source = super::resolve_macro_source(&path, &snapshot, &macro_name)
+                            .unwrap_or_default();
+                        super::state::ConnectSubject::Macro {
+                            name: macro_name,
+                            params,
+                            source,
+                        }
+                    } else {
+                        super::state::ConnectSubject::Operator {
+                            op: patch_node.op.clone(),
+                        }
+                    })
+                };
+                if super::jev::sync_for_render(
+                    key,
+                    &mut interaction_state,
+                    &patch,
+                    &view_key,
+                    subject_for,
+                ) {
+                    super::state::set_patcher_interaction_state_without_history(
+                        key,
+                        interaction_state.clone(),
+                    );
+                }
+            }
             // Mirror the selected file-backed tensor for the sidebar's asset
             // inspector: the render pass is the one place that holds both the
             // effective patch and the selection every frame.
@@ -182,6 +219,22 @@ pub(super) fn build_primitives_for_patcher(
                 &view_key,
                 &autocomplete_macros,
             );
+            let mut ghost_prims = Vec::new();
+            let mut ghost_chip_prims = Vec::new();
+            let ghost_hits = draw_jev_ghosts(
+                &mut ghost_prims,
+                &mut ghost_chip_prims,
+                &patch,
+                node.rect,
+                viewport,
+                &pan_state,
+                &interaction_state,
+            );
+            push_z_layered(&mut prims, PATCHER_OVERLAY_Z + 30, ghost_prims);
+            // The Connect / × chips float over everything, bubbles included:
+            // they are the one thing the user is about to click.
+            push_z_layered(&mut prims, PATCHER_OVERLAY_Z + 110, ghost_chip_prims);
+            super::jev::set_overlay_hits(key, ghost_hits);
             let mut bubble_prims = Vec::new();
             draw_agentic_bubbles(
                 &mut bubble_prims,
@@ -2090,6 +2143,18 @@ fn push_cable(
             ConnectionKind::Feedback => theme::PATCHER_FEEDBACK_CABLE(),
         }
     };
+    push_cable_colored(prims, start, end, connection, origin_row, zoom, color);
+}
+
+fn push_cable_colored(
+    prims: &mut Vec<GpuPrimitive>,
+    start: (f32, f32),
+    end: (f32, f32),
+    connection: &PatchConnection,
+    origin_row: f32,
+    zoom: f32,
+    color: crate::backend::Color,
+) {
     let curve = super::super::cable::cable_curve(start, end);
     let is_segmented = connection
         .segment
@@ -2114,6 +2179,232 @@ fn push_cable(
         corner_radius_cells: SEGMENTED_CABLE_CORNER_RADIUS_CELLS * zoom,
     }));
 }
+
+/// Jev ghost cables (`jev.rs`): translucent proposals from the selected node,
+/// each with its probability at the midpoint; the focused one carries
+/// Connect / × chips there. Returns the geometry the pointer handler hit-tests
+/// against, in the same widget-local space the cables were drawn in.
+fn draw_jev_ghosts(
+    prims: &mut Vec<GpuPrimitive>,
+    chip_prims: &mut Vec<GpuPrimitive>,
+    patch: &Patch,
+    rect: Rect,
+    viewport: WidgetViewport,
+    pan_state: &PatcherPanState,
+    interaction_state: &PatcherInteractionState,
+) -> super::jev::JevOverlayHits {
+    use super::jev::{JevButtonKind, JevOverlayHits, JevStatus};
+    let mut hits = JevOverlayHits::default();
+    let Some(jev) = interaction_state.jev.as_ref() else {
+        return hits;
+    };
+    let zoom = patcher_zoom(pan_state);
+    hits.zoom = zoom;
+    if jev.status != JevStatus::Ready {
+        return hits;
+    }
+    let node_rects = patch_node_rects(patch, rect, pan_state);
+    hits.node_rects = node_rects
+        .values()
+        .map(|node_rect| (node_rect.col, node_rect.row, node_rect.width, node_rect.height))
+        .collect();
+    let input_indices = patch_input_indices(patch);
+    let input_slot_counts = patch_input_slot_counts(patch, &input_indices);
+    let output_counts = patch_output_counts(patch);
+    let hidden_node_ids = hidden_inline_node_ids(patch);
+    hits.real_cables = patch
+        .connections
+        .iter()
+        .filter(|connection| connection.presentation == InputPresentation::Cable)
+        .filter(|connection| !connection_touches_hidden_inline_node(connection, &hidden_node_ids))
+        .filter_map(|connection| {
+            connection_endpoints(
+                connection,
+                &node_rects,
+                &input_indices,
+                &input_slot_counts,
+                &output_counts,
+            )
+        })
+        .collect();
+    let base = theme::PATCHER_CABLE();
+    for (index, ghost) in jev.cables.iter().enumerate() {
+        let connection = PatchConnection {
+            from_node: ghost.from.node_id.clone(),
+            from_output: ghost.from.output_index,
+            to_node: ghost.to.node_id.clone(),
+            to_input: ghost.to.input_index,
+            kind: ConnectionKind::Forward,
+            segment: None,
+            presentation: InputPresentation::Cable,
+            presentation_override: None,
+            source: None,
+            authored_reference: None,
+        };
+        let Some((start, end)) = connection_endpoints(
+            &connection,
+            &node_rects,
+            &input_indices,
+            &input_slot_counts,
+            &output_counts,
+        ) else {
+            continue;
+        };
+        let focused = jev.focused == Some(index);
+        let alpha = if focused {
+            JEV_GHOST_FOCUSED_ALPHA
+        } else {
+            JEV_GHOST_MIN_ALPHA
+                + (JEV_GHOST_MAX_ALPHA - JEV_GHOST_MIN_ALPHA) * ghost.probability.clamp(0.0, 1.0)
+        };
+        let color = crate::backend::Color::rgba(base.r, base.g, base.b, alpha);
+        push_dotted_cable(prims, start, end, viewport, zoom, color);
+        hits.cables.push((index, start, end));
+
+        let mid = super::super::cable::cubic_bezier_point(
+            super::super::cable::cable_curve(start, end),
+            0.5,
+        );
+        if !focused {
+            let label = format!("{:.0}%", ghost.probability * 100.0);
+            let width = approx_text_width_cells(&label, JEV_PERCENT_FONT_SIZE) * zoom;
+            prims.push(GpuPrimitive::ProportionalText(GpuProportionalTextPrimitive {
+                row: mid.1 - JEV_PERCENT_TEXT_ROWS * zoom * 0.5,
+                col: mid.0 - width * 0.5,
+                align_width: width,
+                h_align: 0.5,
+                text: label,
+                font_size: JEV_PERCENT_FONT_SIZE,
+                scale: zoom,
+                fg: crate::backend::Color::rgba(base.r, base.g, base.b, JEV_GHOST_MAX_ALPHA),
+                bg: theme::PATCHER_BG(),
+                mono: false,
+            }));
+            continue;
+        }
+
+        // Focused: Connect and × chips side by side, centred on the midpoint.
+        let connect_label = format!("Connect {:.0}%", ghost.probability * 100.0);
+        let chips = [
+            (JevButtonKind::Connect, connect_label),
+            (JevButtonKind::Dismiss, "×".to_string()),
+        ];
+        let widths = chips
+            .iter()
+            .map(|(_, label)| {
+                (approx_text_width_cells(label, AGENTIC_MODEL_CHIP_FONT_SIZE)
+                    * AGENTIC_HEADER_WIDTH_SAFETY
+                    + AGENTIC_MODEL_CHIP_PAD_X * 2.0)
+                    * zoom
+            })
+            .collect::<Vec<_>>();
+        let gap = JEV_CHIP_GAP_CELLS * zoom;
+        let total = widths.iter().sum::<f32>() + gap;
+        let height = AGENTIC_MODEL_CHIP_HEIGHT * zoom;
+        let mut left = mid.0 - total * 0.5;
+        for ((kind, label), width) in chips.into_iter().zip(widths) {
+            let chip = Rect {
+                col: left,
+                row: mid.1 - height * 0.5,
+                width,
+                height,
+            };
+            let card = theme::PATCHER_AGENTIC_CARD_BG();
+            push_flat_panel_chrome(
+                chip_prims,
+                chip,
+                crate::backend::Color::rgba(card.r, card.g, card.b, 1.0),
+                theme::PATCHER_AGENTIC_CHIP_BORDER(),
+                viewport,
+                zoom,
+                ui_design_px(AGENTIC_MODEL_CHIP_RADIUS_PX),
+                AGENTIC_INNER_BORDER_WIDTH_PX * zoom,
+            );
+            chip_prims.push(GpuPrimitive::ProportionalText(GpuProportionalTextPrimitive {
+                row: chip.row + (chip.height - AGENTIC_MODEL_CHIP_TEXT_ROWS * zoom) * 0.5,
+                col: chip.col,
+                align_width: chip.width,
+                h_align: 0.5,
+                text: label,
+                font_size: AGENTIC_MODEL_CHIP_FONT_SIZE,
+                scale: zoom,
+                fg: theme::PATCHER_AGENTIC_CHIP_TEXT(),
+                bg: crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
+                mono: false,
+            }));
+            hits.buttons
+                .push((index, kind, (chip.col, chip.row, chip.width, chip.height)));
+            left += width + gap;
+        }
+    }
+    hits
+}
+
+/// A ghost cable as evenly spaced dots along the same bezier a real cable
+/// would take. The cable shader has no dash mode, and dots read as "proposed,
+/// not wired" at a glance.
+fn push_dotted_cable(
+    prims: &mut Vec<GpuPrimitive>,
+    start: (f32, f32),
+    end: (f32, f32),
+    viewport: WidgetViewport,
+    zoom: f32,
+    color: crate::backend::Color,
+) {
+    let curve = super::super::cable::cable_curve(start, end);
+    // Arc length in pixels, from a fine polyline, so spacing is uniform on
+    // screen whatever the cable's shape.
+    const SAMPLES: usize = 48;
+    let mut points = Vec::with_capacity(SAMPLES + 1);
+    let mut cumulative = Vec::with_capacity(SAMPLES + 1);
+    let mut length_px = 0.0;
+    let mut prev = curve.p0;
+    points.push(prev);
+    cumulative.push(0.0);
+    for i in 1..=SAMPLES {
+        let point = super::super::cable::cubic_bezier_point(curve, i as f32 / SAMPLES as f32);
+        let dx = (point.0 - prev.0) * viewport.cell_w;
+        let dy = (point.1 - prev.1) * viewport.cell_h;
+        length_px += (dx * dx + dy * dy).sqrt();
+        points.push(point);
+        cumulative.push(length_px);
+        prev = point;
+    }
+    let spacing_px = ui_design_px(JEV_DOT_SPACING_PX) * zoom;
+    if length_px <= 0.0 || spacing_px <= 0.0 {
+        return;
+    }
+    let count = ((length_px / spacing_px).floor() as usize).clamp(1, JEV_MAX_DOTS);
+    let radius_px = ui_design_px(JEV_DOT_RADIUS_PX) * zoom;
+    for dot in 0..=count {
+        let target = length_px * dot as f32 / count as f32;
+        let segment = cumulative
+            .iter()
+            .position(|&len| len >= target)
+            .unwrap_or(SAMPLES)
+            .max(1);
+        let (a, b) = (points[segment - 1], points[segment]);
+        let (la, lb) = (cumulative[segment - 1], cumulative[segment]);
+        let t = if lb > la { (target - la) / (lb - la) } else { 0.0 };
+        prims.push(GpuPrimitive::Circle(GpuCirclePrimitive {
+            center: [a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t],
+            radius_px,
+            color,
+            visible_half: GpuCircleVisibleHalf::Full,
+        }));
+    }
+}
+
+const JEV_DOT_SPACING_PX: f32 = 9.0;
+const JEV_DOT_RADIUS_PX: f32 = 2.0;
+const JEV_MAX_DOTS: usize = 400;
+const JEV_GHOST_MIN_ALPHA: f32 = 0.22;
+const JEV_GHOST_MAX_ALPHA: f32 = 0.55;
+const JEV_GHOST_FOCUSED_ALPHA: f32 = 0.85;
+const JEV_PERCENT_FONT_SIZE: f32 = 9.0;
+/// Rough line box of the percent label at its font size, in cells.
+const JEV_PERCENT_TEXT_ROWS: f32 = 0.8;
+const JEV_CHIP_GAP_CELLS: f32 = 0.3;
 
 fn push_preview_cable(
     prims: &mut Vec<GpuPrimitive>,

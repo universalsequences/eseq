@@ -17,7 +17,7 @@ use super::lisp::{
     normalize_editor_node_text, replace_label_attribute,
 };
 use super::model::{
-    ArgValue, ConnectionKind, HostModulatorInput, MacroOrigin, NodeKind, Patch, PatchConnection,
+    ArgValue, ConnectionKind, HostModulatorInput, MacroOrigin, MacroPatch, NodeKind, Patch, PatchConnection,
     PatchNode, PatcherIntent, hidden_inline_node_ids, is_param_options_connection,
     options_connection_is_valid, orphaned_inline_mod_node_ids,
 };
@@ -91,6 +91,7 @@ pub(super) fn generate_patch_source(
     for macro_patch in local_macros {
         let scope = ScopeEmitter::new(
             &macro_patch.patch,
+            &patch.macros,
             format!("macro:{}", macro_patch.name),
             intent,
             true,
@@ -119,7 +120,7 @@ pub(super) fn generate_patch_source(
         sections.push(lines.join("\n"));
     }
 
-    let scope = ScopeEmitter::new(patch, "root".to_string(), intent, false)?;
+    let scope = ScopeEmitter::new(patch, &patch.macros, "root".to_string(), intent, false)?;
     let emitted = scope.emit(&mut renames)?;
     for group in emitted.root_groups {
         if !group.is_empty() {
@@ -274,6 +275,9 @@ enum NodeRole {
 
 struct ScopeEmitter<'a> {
     patch: &'a Patch,
+    /// All scopes resolve calls against the root's catalog, without embedding
+    /// a copy of the catalog in each macro body.
+    macros: &'a [MacroPatch],
     view_key: String,
     is_macro: bool,
     roles: HashMap<&'a str, NodeRole>,
@@ -314,6 +318,7 @@ struct ScopeEmitter<'a> {
 impl<'a> ScopeEmitter<'a> {
     fn new(
         patch: &'a Patch,
+        macros: &'a [MacroPatch],
         view_key: String,
         _intent: PatcherIntent,
         is_macro: bool,
@@ -384,9 +389,10 @@ impl<'a> ScopeEmitter<'a> {
                 .or_default()
                 .push(connection);
         }
-        let omitted = omitted_dead_node_ids(patch, &roles, &inbound);
+        let omitted = omitted_dead_node_ids(patch, macros, &roles, &inbound);
         let mut emitter = Self {
             patch,
+            macros,
             view_key,
             is_macro,
             roles,
@@ -431,7 +437,7 @@ impl<'a> ScopeEmitter<'a> {
         for operator in dgenlisp_operator_names() {
             self.used_names.insert(operator.clone());
         }
-        for macro_patch in &self.patch.macros {
+        for macro_patch in self.macros {
             self.used_names.insert(macro_patch.name.clone());
         }
         for input in &self.patch.host_modulators {
@@ -772,7 +778,7 @@ impl<'a> ScopeEmitter<'a> {
         // broken patch surfaces a diagnostic) rather than silently emitting a
         // shorter call. Builtins keep the trailing-slot trim.
         let trimmed_count = last_needed.map_or(0, |last| last + 1);
-        let emit_count = fixed_macro_arity(self.patch, node)
+        let emit_count = fixed_macro_arity(self.macros, node)
             .filter(|arity| *arity > 0)
             .map_or(trimmed_count, |arity| arity.max(trimmed_count));
         for idx in 0..emit_count {
@@ -1178,6 +1184,7 @@ fn binding_base_for_node(node: &PatchNode) -> String {
 /// standalone `(def mod0 (mod gain))` behind.
 fn omitted_dead_node_ids(
     patch: &Patch,
+    macros: &[MacroPatch],
     roles: &HashMap<&str, NodeRole>,
     inbound: &BTreeMap<(&str, usize), Vec<&PatchConnection>>,
 ) -> HashSet<String> {
@@ -1189,7 +1196,7 @@ fn omitted_dead_node_ids(
         .filter(|node| roles.get(node.id.as_str()) == Some(&NodeRole::Value))
         .filter(|node| !live.contains(node.id.as_str()))
         .filter(|node| {
-            orphaned_inline_mods.contains(&node.id) || node_call_is_incomplete(patch, inbound, node)
+            orphaned_inline_mods.contains(&node.id) || node_call_is_incomplete(macros, inbound, node)
         })
         .map(|node| node.id.clone())
         .collect();
@@ -1265,11 +1272,10 @@ fn live_node_ids(patch: &Patch, roles: &HashMap<&str, NodeRole>) -> HashSet<Stri
 /// (arity from the bundled operator manifest — the same data that draws the
 /// node's inlets). `None` for builtin operators, which tolerate trailing-slot
 /// trimming.
-fn fixed_macro_arity(patch: &Patch, node: &PatchNode) -> Option<usize> {
+fn fixed_macro_arity(macros: &[MacroPatch], node: &PatchNode) -> Option<usize> {
     if node.kind == NodeKind::MacroInstance {
         return Some(
-            patch
-                .macros
+            macros
                 .iter()
                 .find(|macro_patch| macro_patch.name == node.op)
                 .map(|macro_patch| macro_patch.params.len())
@@ -1282,7 +1288,7 @@ fn fixed_macro_arity(patch: &Patch, node: &PatchNode) -> Option<usize> {
 }
 
 fn node_call_is_incomplete(
-    patch: &Patch,
+    macros: &[MacroPatch],
     inbound: &BTreeMap<(&str, usize), Vec<&PatchConnection>>,
     node: &PatchNode,
 ) -> bool {
@@ -1293,7 +1299,7 @@ fn node_call_is_incomplete(
         inbound.contains_key(&(node.id.as_str(), idx))
             || matches!(node.args.get(idx), Some(ArgValue::Literal(_)))
     };
-    if let Some(arity) = fixed_macro_arity(patch, node) {
+    if let Some(arity) = fixed_macro_arity(macros, node) {
         return (0..arity).any(|idx| !slot_filled(idx));
     }
     let mut last_filled: Option<usize> = None;

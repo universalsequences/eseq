@@ -1529,7 +1529,7 @@ pub(super) fn handle(
                 }
                 return;
             }
-            if status != "valid" {
+            if status != "valid" && status != "changed" {
                 session.preview_generation = session.preview_generation.wrapping_add(1);
                 session.visible_revision_valid = false;
                 ctx.sessions.pending_instrument_preview = None;
@@ -1541,48 +1541,28 @@ pub(super) fn handle(
                 editor.refresh_runtime_side_effects();
                 return;
             }
-            let Some(source) = extract_string_from_payload(&payload, "source") else {
-                session.preview_generation = session.preview_generation.wrapping_add(1);
-                session.visible_revision_valid = false;
-                ctx.sessions.pending_instrument_preview = None;
-                let rt = editor.runtime_mut();
-                rt.set_reactive(
-                    "SEQ",
-                    "editor-error",
-                    Value::String(
-                        "Patch preview did not include emitted source".to_string(),
-                    ),
-                );
-                rt.run_reactive_cycle();
-                editor.refresh_runtime_side_effects();
-                return;
+            let input = match preview_source_from_payload(editor, &payload, &session.path) {
+                Ok(input) => input,
+                Err(error) => {
+                    session.preview_generation = session.preview_generation.wrapping_add(1);
+                    session.visible_revision_valid = false;
+                    ctx.sessions.pending_instrument_preview = None;
+                    let rt = editor.runtime_mut();
+                    rt.set_reactive("SEQ", "editor-error", Value::String(error));
+                    rt.run_reactive_cycle();
+                    editor.refresh_runtime_side_effects();
+                    return;
+                }
             };
-
-            let compile_source =
-                extract_string_from_payload(&payload, "compile-source")
-                    .unwrap_or_else(|| source.clone());
-            let layout = extract_string_from_payload(&payload, "layout");
             session.preview_generation = session.preview_generation.wrapping_add(1);
             session.visible_revision_valid = false;
-            let generation = session.preview_generation;
-            let sample_rate = app.graph.sample_rate;
-            let asset_base = session.path.parent().map(|parent| parent.to_path_buf());
-            let (tx, rx) = std::sync::mpsc::channel();
-            std::thread::spawn(move || {
-                let result =
-                    sequencer::lisp_host::compile_and_load_instrument_with_origin(
-                        &compile_source,
-                        sample_rate,
-                        asset_base.as_deref(),
-                        sequencer::lisp_host::DGenSourceOrigin::Draft,
-                    );
-                let _ = tx.send(result);
-            });
             ctx.sessions.pending_instrument_preview = Some(PendingInstrumentPreview {
-                generation,
-                source,
-                layout,
-                receiver: rx,
+                generation: session.preview_generation,
+                layout: None,
+                receiver: spawn_preview_compile(
+                    input, app.graph.sample_rate, session.path.parent().map(Path::to_path_buf),
+                    eseqlisp::widget_render::patcher::PatcherIntent::Instrument,
+                ),
             });
             let rt = editor.runtime_mut();
             rt.set_reactive(
@@ -1703,7 +1683,7 @@ pub(super) fn handle(
                 }
                 return;
             }
-            if status != "valid" {
+            if status != "valid" && status != "changed" {
                 session.preview_generation = session.preview_generation.wrapping_add(1);
                 session.visible_revision_valid = false;
                 ctx.sessions.pending_effect_preview = None;
@@ -1715,47 +1695,28 @@ pub(super) fn handle(
                 editor.refresh_runtime_side_effects();
                 return;
             }
-            let Some(source) = extract_string_from_payload(&payload, "source") else {
-                session.preview_generation = session.preview_generation.wrapping_add(1);
-                session.visible_revision_valid = false;
-                ctx.sessions.pending_effect_preview = None;
-                let rt = editor.runtime_mut();
-                rt.set_reactive(
-                    "SEQ",
-                    "editor-error",
-                    Value::String(
-                        "Patch preview did not include emitted source".to_string(),
-                    ),
-                );
-                rt.run_reactive_cycle();
-                editor.refresh_runtime_side_effects();
-                return;
+            let input = match preview_source_from_payload(editor, &payload, &session.path) {
+                Ok(input) => input,
+                Err(error) => {
+                    session.preview_generation = session.preview_generation.wrapping_add(1);
+                    session.visible_revision_valid = false;
+                    ctx.sessions.pending_effect_preview = None;
+                    let rt = editor.runtime_mut();
+                    rt.set_reactive("SEQ", "editor-error", Value::String(error));
+                    rt.run_reactive_cycle();
+                    editor.refresh_runtime_side_effects();
+                    return;
+                }
             };
-
-            let compile_source =
-                extract_string_from_payload(&payload, "compile-source")
-                    .unwrap_or_else(|| source.clone());
-            let layout = extract_string_from_payload(&payload, "layout");
             session.preview_generation = session.preview_generation.wrapping_add(1);
             session.visible_revision_valid = false;
-            let generation = session.preview_generation;
-            let sample_rate = app.graph.sample_rate;
-            let asset_base = session.path.parent().map(|parent| parent.to_path_buf());
-            let (tx, rx) = std::sync::mpsc::channel();
-            std::thread::spawn(move || {
-                let result = sequencer::lisp_host::compile_and_load_with_origin(
-                    &compile_source,
-                    sample_rate,
-                    asset_base.as_deref(),
-                    sequencer::lisp_host::DGenSourceOrigin::Draft,
-                );
-                let _ = tx.send(result);
-            });
             ctx.sessions.pending_effect_preview = Some(PendingEffectPreview {
-                generation,
-                source,
-                layout,
-                receiver: rx,
+                generation: session.preview_generation,
+                layout: None,
+                receiver: spawn_preview_compile(
+                    input, app.graph.sample_rate, session.path.parent().map(Path::to_path_buf),
+                    eseqlisp::widget_render::patcher::PatcherIntent::Effect,
+                ),
             });
             let rt = editor.runtime_mut();
             rt.set_reactive(
@@ -1783,32 +1744,9 @@ pub(super) fn handle(
                     )));
                     return;
                 };
-                session.preview_generation =
-                    session.preview_generation.wrapping_add(1);
-                session.visible_revision_valid = false;
-                let generation = session.preview_generation;
-                let sample_rate = app.graph.sample_rate;
-                let asset_base =
-                    session.path.parent().map(|parent| parent.to_path_buf());
-                let compile_source = source.clone();
-                let (tx, rx) = std::sync::mpsc::channel();
-                std::thread::spawn(move || {
-                    let result =
-                        sequencer::lisp_host::compile_and_load_instrument_with_origin(
-                            &compile_source,
-                            sample_rate,
-                            asset_base.as_deref(),
-                            sequencer::lisp_host::DGenSourceOrigin::Draft,
-                        );
-                    let _ = tx.send(result);
-                });
-                ctx.sessions.pending_instrument_preview =
-                    Some(PendingInstrumentPreview {
-                        generation,
-                        source,
-                        layout: None,
-                        receiver: rx,
-                    });
+                queue_instrument_preview_compile(
+                    session, &mut ctx.sessions.pending_instrument_preview, source, app.graph.sample_rate,
+                );
                 let rt = editor.runtime_mut();
                 rt.set_reactive(
                     "SEQ",
@@ -1829,30 +1767,9 @@ pub(super) fn handle(
                     )));
                     return;
                 };
-                session.preview_generation =
-                    session.preview_generation.wrapping_add(1);
-                session.visible_revision_valid = false;
-                let generation = session.preview_generation;
-                let sample_rate = app.graph.sample_rate;
-                let asset_base =
-                    session.path.parent().map(|parent| parent.to_path_buf());
-                let compile_source = source.clone();
-                let (tx, rx) = std::sync::mpsc::channel();
-                std::thread::spawn(move || {
-                    let result = sequencer::lisp_host::compile_and_load_with_origin(
-                        &compile_source,
-                        sample_rate,
-                        asset_base.as_deref(),
-                        sequencer::lisp_host::DGenSourceOrigin::Draft,
-                    );
-                    let _ = tx.send(result);
-                });
-                ctx.sessions.pending_effect_preview = Some(PendingEffectPreview {
-                    generation,
-                    source,
-                    layout: None,
-                    receiver: rx,
-                });
+                queue_effect_preview_compile(
+                    session, &mut ctx.sessions.pending_effect_preview, source, app.graph.sample_rate,
+                );
                 let rt = editor.runtime_mut();
                 rt.set_reactive(
                     "SEQ",

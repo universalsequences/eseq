@@ -237,6 +237,18 @@ fn apply_graph_control_command(
                 let _ = runtime.set_delta_leak_per_beat(*factor);
             }
         }
+        crate::graph::GraphControlCommand::Reset {
+            graph_id,
+            graph_name,
+            group,
+        } => {
+            if let Some(runtime) = runtimes
+                .iter_mut()
+                .find(|runtime| runtime.matches_reference(*graph_id, graph_name))
+            {
+                runtime.reset_now(*group);
+            }
+        }
     }
 }
 

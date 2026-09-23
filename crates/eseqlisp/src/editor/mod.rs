@@ -18,7 +18,7 @@ use crossterm::event::{
 };
 
 use crate::buffer::{Buffer, InlineWidgetPlacement, debug_widget_tree_summary};
-use crate::host::{BufferId, CompileKind, HostCommand, HostEvent};
+use crate::host::{BufferId, CompileKind, HostCommand, HostEvent, ToastKind};
 use crate::hot_reload::{ReloadReport, SourceOverlay};
 use crate::layout::{LayoutNode, Rect};
 use crate::mode::{
@@ -33,7 +33,7 @@ use crate::tile::{
 };
 use crate::vm::{EffectTarget, PendingUiUpdate, ReactiveFieldKey, Value, format_lisp_value};
 use crate::widget_render::WidgetCursor;
-use commands::key_str;
+pub(crate) use commands::key_str;
 use natives::register_editor_natives;
 
 const TILE_GAP_PX_PER_UNIT: f32 = 15.0;
@@ -388,6 +388,15 @@ pub enum EditorError {
     Message(String),
 }
 
+impl std::fmt::Display for EditorError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Io(error) => write!(f, "{error}"),
+            Self::Message(message) => f.write_str(message),
+        }
+    }
+}
+
 impl From<std::io::Error> for EditorError {
     fn from(value: std::io::Error) -> Self {
         Self::Io(value)
@@ -631,6 +640,16 @@ impl RetainedTileLayout {
     }
 }
 
+const TOAST_SUCCESS_DURATION: Duration = Duration::from_millis(1200);
+const TOAST_ERROR_DURATION: Duration = Duration::from_secs(4);
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Toast {
+    pub message: String,
+    pub kind: ToastKind,
+    expires_at: Instant,
+}
+
 pub struct Editor {
     pub buffers: Vec<Buffer>,
     buffer_recency: Vec<BufferId>,
@@ -639,6 +658,9 @@ pub struct Editor {
     next_tile_id: TileId,
     pub minibuffer: Option<String>,
     minibuffer_expires_at: Option<Instant>,
+    /// Window-level toast (bottom-right). Drawn above every tile regardless of
+    /// focus or `:hide-status`; a newer toast replaces the current one.
+    toast: Option<Toast>,
 
     pending_key: Option<KeyEvent>,
     builtins: HashMap<KeyEvent, String>,
@@ -815,6 +837,7 @@ impl Editor {
             next_tile_id: 1,
             minibuffer: None,
             minibuffer_expires_at: None,
+            toast: None,
             pending_key: None,
             builtins: HashMap::new(),
             default_lisp_bindings: HashMap::new(),
@@ -3429,6 +3452,45 @@ impl Editor {
         self.mark_needs_redraw();
     }
 
+    /// Show a bottom-right toast. It does not touch the minibuffer; callers
+    /// that also want the status line keep reporting through it.
+    pub fn show_toast(&mut self, message: impl Into<String>, kind: ToastKind) {
+        let duration = match kind {
+            ToastKind::Success => TOAST_SUCCESS_DURATION,
+            ToastKind::Error => TOAST_ERROR_DURATION,
+        };
+        self.toast = Some(Toast {
+            message: message.into(),
+            kind,
+            expires_at: Instant::now() + duration,
+        });
+        self.mark_needs_redraw();
+    }
+
+    /// Report a code-buffer save on the toast overlay. Most tiles hide the
+    /// minibuffer, so the toast is the only save feedback they can see.
+    fn toast_buffer_saved(&mut self, path: &std::path::Path) {
+        let name = path.file_name().map_or_else(
+            || path.display().to_string(),
+            |name| name.to_string_lossy().into_owned(),
+        );
+        self.show_toast(format!("Saved {name}"), ToastKind::Success);
+    }
+
+    fn toast_buffer_save_failed(&mut self, error: impl std::fmt::Display) {
+        self.show_toast(format!("Save failed: {error}"), ToastKind::Error);
+    }
+
+    pub fn toast(&self) -> Option<&Toast> {
+        self.toast.as_ref()
+    }
+
+    pub fn dismiss_toast(&mut self) {
+        if self.toast.take().is_some() {
+            self.mark_needs_redraw();
+        }
+    }
+
     pub fn clear_minibuffer_message(&mut self) {
         self.minibuffer = None;
         self.minibuffer_expires_at = None;
@@ -3441,6 +3503,14 @@ impl Editor {
         {
             self.clear_minibuffer_message();
             self.mark_needs_redraw();
+        }
+
+        if self
+            .toast
+            .as_ref()
+            .is_some_and(|toast| Instant::now() >= toast.expires_at)
+        {
+            self.dismiss_toast();
         }
 
         if self
@@ -5801,6 +5871,7 @@ impl Editor {
                     buffer.set_path(path.clone());
                     buffer.dirty = false;
                 }
+                self.toast_buffer_saved(&path);
                 format!("Saved {}", path.display())
             }
         };
@@ -5948,6 +6019,10 @@ impl Editor {
         if !self.key_starts_text_insert(key) {
             self.finish_typing_undo_group();
         }
+        // Errors linger until acknowledged; any keypress counts.
+        if self.toast.as_ref().is_some_and(|toast| toast.kind == ToastKind::Error) {
+            self.toast = None;
+        }
 
         // Inspect mode outranks the modal keyboard boundary, same as it
         // outranks the overlay intercept for hit-testing: the toggle chord and
@@ -6025,7 +6100,13 @@ impl Editor {
             && key.modifiers == KeyModifiers::NONE
             && self.active_leaf().focused_widget_id.is_some()
         {
-            let _ = self.handle_focused_widget_key(key);
+            // A widget that refuses Escape may still bind it through its
+            // :on-focus-key (the patcher's dismiss-bubble); a handled binding
+            // consumes Escape and keeps focus.
+            if !self.handle_focused_widget_key(key) && self.dispatch_focus_key(key) {
+                self.mark_needs_redraw();
+                return;
+            }
             self.clear_focused_widget();
             self.mark_needs_redraw();
             let _ = self.run_direct_lisp_binding("ESC");
@@ -8425,6 +8506,7 @@ impl Editor {
                 match self.active_buffer_mut().save_as(target) {
                     Ok(path) => {
                         self.minibuffer = Some(format!("Saved {}", path.display()));
+                        self.toast_buffer_saved(&path);
                         self.save_prompt = None;
                         if quit_after_save {
                             self.should_quit = true;
@@ -8433,6 +8515,7 @@ impl Editor {
                     }
                     Err(error) => {
                         self.minibuffer = Some(format!("Error: {error}"));
+                        self.toast_buffer_save_failed(&error);
                     }
                 }
             }
@@ -9224,13 +9307,25 @@ impl Editor {
 
         if let Some(path) = self.runtime.take_pending_save_as() {
             match self.active_buffer_mut().save_as(path) {
-                Ok(path) => self.show_transient_message(format!("Saved {}", path.display())),
-                Err(error) => self.show_transient_message(format!("Error: {error}")),
+                Ok(path) => {
+                    self.show_transient_message(format!("Saved {}", path.display()));
+                    self.toast_buffer_saved(&path);
+                }
+                Err(error) => {
+                    self.show_transient_message(format!("Error: {error}"));
+                    self.toast_buffer_save_failed(&error);
+                }
             }
         } else if self.runtime.take_pending_save() {
             match self.save_active_buffer() {
-                Ok(path) => self.show_transient_message(format!("Saved {}", path.display())),
-                Err(error) => self.show_transient_message(format!("Error: {error:?}")),
+                Ok(path) => {
+                    self.show_transient_message(format!("Saved {}", path.display()));
+                    self.toast_buffer_saved(&path);
+                }
+                Err(error) => {
+                    self.show_transient_message(format!("Error: {error:?}"));
+                    self.toast_buffer_save_failed(&error);
+                }
             }
         } else if self.runtime.take_pending_load() {
             match self.load_active_buffer() {
@@ -9392,6 +9487,10 @@ impl Editor {
             }
         }
 
+        for (message, kind) in self.runtime.take_pending_toasts() {
+            self.show_toast(message, kind);
+        }
+
         if let Some(zoom) = self.runtime.take_pending_set_text_zoom() {
             match self.set_text_zoom(zoom as f32) {
                 Ok(applied) => self.show_transient_message(format!("Text zoom: {applied:.2}")),
@@ -9540,6 +9639,14 @@ impl Editor {
             self.minibuffer = Some(format!("Error: {error:?}"));
         } else {
             self.minibuffer = None;
+        }
+        // A menu-item or other widget callback may have run a patcher command
+        // (content/ui/patcher.lisp); its :on-change output is queued because a
+        // native cannot invoke Lisp. Deliver it here, where every widget
+        // callback lands. Those outputs are patcher :on-change calls, which
+        // never queue further commands, so this cannot recurse unboundedly.
+        for pending in crate::widget_render::patcher::take_pending_patcher_command_outputs() {
+            let _ = self.apply_widget_output(Some(pending));
         }
         self.refresh_runtime_side_effects();
         self.remap_focused_widget_after_layout_change();

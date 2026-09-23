@@ -2969,10 +2969,24 @@ impl App {
 
     pub fn remove_track_from_group_recorded(&mut self, track: usize) -> Result<(), String> {
         self.apply_recorded_bus_group_structure_mutation("Remove track from group", |app| {
-            let group = app.detach_group_member(track)
+            let group_id = app.groups.iter().find(|group| group.members.contains(&track))
+                .map(|group| group.id)
                 .ok_or_else(|| "Track is not grouped".to_string())?;
-            let group_id = app.groups[group].id;
-            app.set_track_output_all_scenes_unrecorded(track, crate::sequencer::TrackOutput::Mix);
+            // A pad leaving a rack nested in a plain group stays in that
+            // enclosing group, matching `ungroup_tracks_recorded`.
+            let parent_id = app.rack_parent_group(group_id)
+                .map(|parent| app.groups[parent].id);
+            app.detach_group_member(track)
+                .ok_or_else(|| "Track is not grouped".to_string())?;
+            let destination = if let Some(parent_id) = parent_id {
+                let parent = app.groups.iter_mut().find(|parent| parent.id == parent_id)
+                    .ok_or_else(|| format!("Parent track group {parent_id} disappeared"))?;
+                parent.members.push(track);
+                crate::sequencer::TrackOutput::Bus(BusId(parent.bus_id))
+            } else {
+                crate::sequencer::TrackOutput::Mix
+            };
+            app.set_track_output_all_scenes_unrecorded(track, destination);
             // A rack keeps existing with zero members: its pads are lazy.
             app.dissolve_group_if_undersized(group_id)?;
             Ok(())
@@ -5345,6 +5359,7 @@ fn validate_device_command_target(app: &App, cmd: &AppCommand) -> Result<(), Edi
         AppCommand::SetRackSlotGain { track, slot_idx, .. }
         | AppCommand::SetRackSlotPan { track, slot_idx, .. }
         | AppCommand::SetRackSlotMute { track, slot_idx, .. }
+        | AppCommand::SetRackSlotEnabled { track, slot_idx, .. }
         | AppCommand::SetRackSlotSolo { track, slot_idx, .. }
         | AppCommand::SetRackSlotMaxPolyphony { track, slot_idx, .. }
         | AppCommand::SetRackSlotChokeGroup { track, slot_idx, .. }
@@ -5582,6 +5597,7 @@ fn capture_barrier_witness(app: &App, cmd: &AppCommand) -> Result<BarrierWitness
         AppCommand::SetRackSlotGain { track, slot_idx, .. }
         | AppCommand::SetRackSlotPan { track, slot_idx, .. }
         | AppCommand::SetRackSlotMute { track, slot_idx, .. }
+        | AppCommand::SetRackSlotEnabled { track, slot_idx, .. }
         | AppCommand::SetRackSlotSolo { track, slot_idx, .. }
         | AppCommand::SetRackSlotMaxPolyphony { track, slot_idx, .. }
         | AppCommand::SetRackSlotChokeGroup { track, slot_idx, .. }
@@ -6513,6 +6529,7 @@ fn device_value_command_track(cmd: &AppCommand) -> Option<usize> {
         | AppCommand::SetRackSlotGain { track, .. }
         | AppCommand::SetRackSlotPan { track, .. }
         | AppCommand::SetRackSlotMute { track, .. }
+        | AppCommand::SetRackSlotEnabled { track, .. }
         | AppCommand::SetRackSlotSolo { track, .. }
         | AppCommand::SetRackSlotMaxPolyphony { track, .. }
         | AppCommand::SetRackSlotChokeGroup { track, .. }
@@ -6641,6 +6658,7 @@ fn resolve_device_value_target(
         AppCommand::SetRackSlotGain { slot_idx, .. }
         | AppCommand::SetRackSlotPan { slot_idx, .. }
         | AppCommand::SetRackSlotMute { slot_idx, .. }
+        | AppCommand::SetRackSlotEnabled { slot_idx, .. }
         | AppCommand::SetRackSlotSolo { slot_idx, .. }
         | AppCommand::SetRackSlotMaxPolyphony { slot_idx, .. }
         | AppCommand::SetRackSlotChokeGroup { slot_idx, .. }
@@ -6685,6 +6703,7 @@ fn device_value_label(cmd: &AppCommand) -> &'static str {
         AppCommand::SetRackSlotGain { .. } => "Set rack slot gain",
         AppCommand::SetRackSlotPan { .. } => "Set rack slot pan",
         AppCommand::SetRackSlotMute { .. } => "Set rack slot mute",
+        AppCommand::SetRackSlotEnabled { .. } => "Set rack slot enabled",
         AppCommand::SetRackSlotSolo { .. } => "Set rack slot solo",
         AppCommand::SetRackSlotMaxPolyphony { .. } => "Set rack slot max polyphony",
         AppCommand::SetRackSlotChokeGroup { .. } => "Set rack slot choke group",
@@ -12021,6 +12040,7 @@ mod tests {
                     pan: 0.0,
                     mute: false,
                     solo: false,
+                    enabled: true,
                     max_polyphony: 8,
                     param_plocks: crate::sequencer::RackSlotParamPlocks::new(),
                     instrument_slot:
@@ -12111,6 +12131,7 @@ mod tests {
                     pan: 0.0,
                     mute: false,
                     solo: false,
+                    enabled: true,
                     max_polyphony: 8,
                     param_plocks: crate::sequencer::RackSlotParamPlocks::new(),
                     instrument_slot: crate::effects::EffectSlotSnapshot::new_default_with_modulator(

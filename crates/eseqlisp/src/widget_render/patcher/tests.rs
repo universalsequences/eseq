@@ -1,5 +1,6 @@
 use super::super::WidgetDefinition;
 use super::super::WidgetKeyEvent;
+use super::super::WidgetEvent;
 use super::super::text_input::TextInputState;
 use super::alignment::*;
 use super::display::*;
@@ -39,6 +40,65 @@ use crossterm::event::{KeyCode, KeyModifiers};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+
+/// Press a key the way the editor does: the widget gets first refusal, and a
+/// refused key runs whatever the default binding table names
+/// (`DEFAULT_PATCHER_BINDINGS`), which is what content/ui/patcher.lisp
+/// installs at startup.
+fn press_patcher_key(node: &LayoutNode, key: WidgetKeyEvent) -> Option<WidgetEvent> {
+    if let Some(event) = PATCHER_WIDGET.key_event(node, key) {
+        return Some(event);
+    }
+    let spelled = crate::editor::key_str(crossterm::event::KeyEvent::new(
+        key.code,
+        key.modifiers,
+    ));
+    let command = super::default_patcher_binding(&spelled)?;
+    super::run_patcher_command(node, command)
+}
+
+#[test]
+fn lisp_default_bindings_match_the_rust_table() {
+    let source = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../content/ui/patcher.lisp"),
+    )
+    .expect("content/ui/patcher.lisp");
+    let mut lisp = Vec::new();
+    for line in source.lines() {
+        let Some(rest) = line.trim().strip_prefix("(bind-key \"") else {
+            continue;
+        };
+        let mut parts = rest.split('"');
+        let key = parts.next().unwrap_or_default().to_string();
+        let command = parts.nth(1).unwrap_or_default().to_string();
+        lisp.push((key, command));
+    }
+    let rust = super::DEFAULT_PATCHER_BINDINGS
+        .iter()
+        .map(|(key, command)| (key.to_string(), command.to_string()))
+        .collect::<Vec<_>>();
+    assert_eq!(lisp, rust, "content/ui/patcher.lisp and DEFAULT_PATCHER_BINDINGS drifted");
+    for (_, command) in &rust {
+        assert!(super::PATCHER_COMMANDS.contains(&command.as_str()), "{command}");
+    }
+}
+
+#[test]
+fn bound_keys_resolve_through_the_binding_table() {
+    super::bind_patcher_key("P-S-k", "connect-bubble").unwrap();
+    let cmd_shift_k = crate::editor::key_str(crossterm::event::KeyEvent::new(
+        KeyCode::Char('k'),
+        primary_shortcut_modifier() | KeyModifiers::SHIFT,
+    ));
+    assert_eq!(
+        super::patcher_binding_for_key(&cmd_shift_k).as_deref(),
+        Some("connect-bubble")
+    );
+    assert!(super::bind_patcher_key("Tab", "no-such-command").is_err());
+    super::unbind_patcher_key("P-S-k");
+    assert_eq!(super::patcher_binding_for_key(&cmd_shift_k), None);
+}
 
 fn parse(source: &str) -> Patch {
     parse_patch_source(source, PatcherIntent::Instrument).unwrap()
@@ -157,6 +217,38 @@ fn library_macro_used_inside_local_macro_emits_import() {
         "library macros referenced from inside a local defmacro must still be imported:\n{}",
         generated.source
     );
+}
+
+#[test]
+fn regenerated_macro_bodies_use_the_root_catalog_without_copying_it() {
+    let source = "(defmacro combine (a b) (+ a b))\n\
+        (defmacro voice (x) (combine x 2))\n\
+        (def signal (voice 440))\n(out signal 1)";
+    let root = parse(source);
+    let mut visible = sidecar::root_patch_with_interaction(
+        &root, &PatcherInteractionState::default(),
+    );
+    assert_eq!(visible.macros.len(), 2);
+    assert!(visible.macros.iter().all(|entry| entry.patch.macros.is_empty()),
+        "each body must borrow the enclosing catalog, not duplicate its graphs");
+    let generated = generate::generate_patch_source(&visible, PatcherIntent::Instrument).unwrap();
+    assert!(!generated.source.contains("__patcher_missing_input__"));
+    let restored = graph_payload::patch_from_payload(&graph_payload::payload_from_patch(&visible));
+    assert_eq!(
+        generate::generate_patch_source(&restored, PatcherIntent::Instrument).unwrap().source,
+        generated.source,
+        "a flat macro catalog must retain its calls through graph persistence",
+    );
+
+    // A body with no owned catalog must still use the callee's declared arity,
+    // rather than mistaking a shortened argument list for a complete call.
+    let voice = visible.macros.iter_mut().find(|entry| entry.name == "voice").unwrap();
+    let call = voice.patch.nodes.iter_mut().find(|node| node.op == "combine").unwrap();
+    call.args.truncate(1);
+    let call_id = call.id.clone();
+    voice.patch.connections.retain(|edge| edge.to_node != call_id || edge.to_input == 0);
+    let incomplete = generate::generate_patch_source(&visible, PatcherIntent::Instrument).unwrap();
+    assert!(incomplete.source.contains("__patcher_missing_input__"), "{}", incomplete.source);
 }
 
 #[test]
@@ -2072,6 +2164,87 @@ fn patcher_test_node(path: &std::path::Path) -> LayoutNode {
 }
 
 #[test]
+#[ignore = "manual patch edit latency probe with the installed macro library"]
+fn patcher_small_patch_enter_latency() {
+    let path = temp_patcher_source_path("patcher-enter-latency");
+    fs::write(&path, "(def signal (sin 440))\n(out signal 1)").unwrap();
+    let mut node = patcher_test_node(&path);
+    let deferred = std::env::var_os("ESEQ_PATCH_PREVIEW_DEFERRED").is_some();
+    node.props.insert("deferred-preview".to_string(), Value::Bool(deferred));
+    let key = patcher_state_key(&node);
+    let (_, root) = load_patch_from_props(&node.props).unwrap();
+    let signal = root.nodes.iter().find(|node| node.id == "signal").unwrap();
+    for round in 0..5 {
+        let mut state = get_patcher_interaction_state(key);
+        ensure_source_node_edit(&mut state, "root", signal, format!("sin {}", 440 + round));
+        state.text_edit = Some(PatcherTextEdit {
+            node_id: "signal".to_string(),
+            text: format!("sin {}", 441 + round),
+            original_text: "sin 440".to_string(),
+            state: TextInputState::default(),
+            autocomplete_selected: 0,
+        });
+        set_patcher_interaction_state(key, state);
+        let start = Instant::now();
+        let event = press_patcher_key(&node, WidgetKeyEvent {
+            code: KeyCode::Enter,
+            modifiers: KeyModifiers::empty(),
+        }).expect("Enter commits the node");
+        let key_time = start.elapsed();
+        let output = PATCHER_WIDGET.handle_event(&node, event).expect("preview callback");
+        let request = deferred.then(|| PatcherPreviewRequest::capture(&node).unwrap());
+        eprintln!("patcher-enter round={round} key={key_time:?} total={:?}", start.elapsed());
+        let Value::Map(payload) = &output.args[0] else { panic!("preview payload"); };
+        let expected_status = if deferred { "changed" } else { "valid" };
+        assert!(matches!(&*payload["status"].borrow(), Value::Keyword(status) if status == expected_status));
+        if let Some(request) = request {
+            std::thread::spawn(move || request.prepare()).join().unwrap().unwrap();
+        }
+        std::hint::black_box(output);
+    }
+    fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn deferred_patch_preview_keeps_the_captured_revision_and_measured_layout() {
+    let library = temp_defmacro_library("deferred-preview", &[("shape", "(defmacro shape (x) (* x 2))")]);
+    for intent in [PatcherIntent::Instrument, PatcherIntent::Effect] {
+        let path = temp_patcher_source_path("deferred-preview");
+        fs::write(&path, "(use-defmacro shape)\n(def signal (shape 440))\n(out signal 1)").unwrap();
+        let mut node = patcher_test_node(&path);
+        node.props.insert("intent".to_string(), Value::Keyword(
+            if intent == PatcherIntent::Instrument { "instrument" } else { "effect" }.to_string(),
+        ));
+        node.props.insert("defmacro-library-root".to_string(), Value::String(library.root().display().to_string()));
+        node.props.insert("deferred-preview".to_string(), Value::Bool(true));
+        let key = patcher_state_key(&node);
+        let (_, root) = load_patch_from_props(&node.props).unwrap();
+        prime_patcher_text_metrics(&root);
+        let mut state = PatcherInteractionState::default();
+        let signal = root.nodes.iter().find(|node| node.id == "signal").unwrap();
+        ensure_source_node_edit(&mut state, "root", signal, "shape 441".to_string());
+        set_patcher_interaction_state(key, state.clone());
+        let output = PATCHER_WIDGET.handle_event(&node, patcher_semantic_event(true)).unwrap();
+        let Value::Map(notification) = &output.args[0] else { panic!("notification"); };
+        assert!(matches!(&*notification["status"].borrow(), Value::Keyword(status) if status == "changed"));
+        assert!(!notification.contains_key("source"), "the UI only sends an edit notification");
+
+        let request = PatcherPreviewRequest::capture(&node).unwrap();
+        let expected = PatcherPreviewRequest::capture(&node).unwrap().prepare().unwrap();
+        state.edit_state.nodes.get_mut(&node_edit_key("root", "signal")).unwrap().text = "shape 882".to_string();
+        set_patcher_interaction_state(key, state);
+        let actual = std::thread::spawn(move || request.prepare()).join().unwrap().unwrap();
+        assert_eq!(actual.source, expected.source);
+        assert_eq!(actual.compile_source, expected.compile_source);
+        assert_eq!(actual.layout, expected.layout,
+            "worker preparation must preserve the editing thread's measured geometry");
+        assert!(actual.source.contains("441"));
+        assert!(!actual.source.contains("882"));
+        fs::remove_file(path).unwrap();
+    }
+}
+
+#[test]
 fn metal_patcher_primitives_are_clipped_to_the_widget_rect() {
     let path = temp_patcher_source_path("primitive-clip");
     fs::write(&path, "(def signal (sin 440))\n(out signal)").expect("write patch");
@@ -3096,7 +3269,7 @@ fn agentic_bubble_cmd_k_creates_ephemeral_prompt_without_source_write() {
     let node = patcher_test_node(&path);
     let before = fs::read_to_string(&path).expect("read source");
 
-    let event = PATCHER_WIDGET.key_event(
+    let event = press_patcher_key(
         &node,
         WidgetKeyEvent {
             code: KeyCode::Char('k'),
@@ -3128,7 +3301,7 @@ fn escape_dismisses_agentic_bubble_through_a_shrink_out_before_dropping_it() {
     settle_agentic_bubbles(&mut state);
     set_patcher_interaction_state(key, state);
 
-    PATCHER_WIDGET.key_event(
+    press_patcher_key(
         &node,
         WidgetKeyEvent {
             code: KeyCode::Esc,
@@ -3198,7 +3371,7 @@ fn agentic_bubble_cmd_k_uses_last_pointer_model_position() {
     let node = patcher_test_node(&path);
     handle_patcher_pointer_moved(&node, 23.0, 31.0, 1.0, 1.0);
 
-    PATCHER_WIDGET.key_event(
+    press_patcher_key(
         &node,
         WidgetKeyEvent {
             code: KeyCode::Char('k'),
@@ -3223,7 +3396,7 @@ fn agentic_bubble_enter_emits_submit_payload_and_pending_state() {
     let path = temp_patcher_source_path("agentic-bubble-submit");
     fs::write(&path, "(out 0)").expect("write source");
     let node = patcher_test_node(&path);
-    PATCHER_WIDGET.key_event(
+    press_patcher_key(
         &node,
         WidgetKeyEvent {
             code: KeyCode::Char('k'),
@@ -3240,8 +3413,7 @@ fn agentic_bubble_enter_emits_submit_payload_and_pending_state() {
         .prompt = "warm folded sine".to_string();
     set_patcher_interaction_state(key, state);
 
-    let event = PATCHER_WIDGET
-        .key_event(
+    let event = press_patcher_key(
             &node,
             WidgetKeyEvent {
                 code: KeyCode::Enter,
@@ -3582,7 +3754,7 @@ fn agentic_bubble_resolve_writes_macro_and_keeps_instance_edit_ephemeral() {
     let path = temp_patcher_source_path("agentic-bubble-resolve");
     fs::write(&path, "(out 0)").expect("write source");
     let node = patcher_test_node(&path);
-    PATCHER_WIDGET.key_event(
+    press_patcher_key(
         &node,
         WidgetKeyEvent {
             code: KeyCode::Char('k'),
@@ -3628,7 +3800,7 @@ fn agentic_bubble_resolve_ignores_unrelated_invalid_created_nodes() {
     let path = temp_patcher_source_path("agentic-bubble-resolve-isolated");
     fs::write(&path, "(out 0)").expect("write source");
     let node = patcher_test_node(&path);
-    PATCHER_WIDGET.key_event(
+    press_patcher_key(
         &node,
         WidgetKeyEvent {
             code: KeyCode::Char('k'),
@@ -3713,7 +3885,7 @@ fn cmd_k_on_a_library_macro_targets_that_macro_rather_than_creating_a_new_one() 
     state.selected_nodes.insert("voiced".to_string());
     set_patcher_interaction_state(key, state);
 
-    PATCHER_WIDGET.key_event(
+    press_patcher_key(
         &node,
         WidgetKeyEvent {
             code: KeyCode::Char('k'),
@@ -3751,7 +3923,7 @@ fn agentic_bubble_cmd_k_on_selected_macro_creates_edit_target() {
     state.selected_nodes.insert("shaped".to_string());
     set_patcher_interaction_state(key, state);
 
-    PATCHER_WIDGET.key_event(
+    press_patcher_key(
         &node,
         WidgetKeyEvent {
             code: KeyCode::Char('k'),
@@ -3796,7 +3968,7 @@ fn agentic_bubble_bound_to_a_macro_names_it_in_the_header() {
     let mut state = get_patcher_interaction_state(key);
     state.selected_nodes.insert("shaped".to_string());
     set_patcher_interaction_state(key, state);
-    PATCHER_WIDGET.key_event(
+    press_patcher_key(
         &node,
         WidgetKeyEvent {
             code: KeyCode::Char('k'),
@@ -3931,7 +4103,7 @@ fn agentic_bubble_edit_submit_payload_includes_macro_context() {
     let mut state = get_patcher_interaction_state(key);
     state.selected_nodes.insert("shaped".to_string());
     set_patcher_interaction_state(key, state);
-    PATCHER_WIDGET.key_event(
+    press_patcher_key(
         &node,
         WidgetKeyEvent {
             code: KeyCode::Char('k'),
@@ -3947,8 +4119,7 @@ fn agentic_bubble_edit_submit_payload_includes_macro_context() {
         .prompt = "explain it".to_string();
     set_patcher_interaction_state(key, state);
 
-    let event = PATCHER_WIDGET
-        .key_event(
+    let event = press_patcher_key(
             &node,
             WidgetKeyEvent {
                 code: KeyCode::Enter,
@@ -4059,7 +4230,7 @@ fn agentic_bubble_follow_up_submits_with_prior_turn_as_history() {
     resolve_agentic_bubble_answer(&path, &bubble_id, 1, "It crossfades toward amt.");
 
     for ch in "why?".chars() {
-        PATCHER_WIDGET.key_event(
+        press_patcher_key(
             &node,
             WidgetKeyEvent {
                 code: KeyCode::Char(ch),
@@ -4075,8 +4246,7 @@ fn agentic_bubble_follow_up_submits_with_prior_turn_as_history() {
         "the answer stays on screen while the follow-up is composed"
     );
 
-    let event = PATCHER_WIDGET
-        .key_event(
+    let event = press_patcher_key(
             &node,
             WidgetKeyEvent {
                 code: KeyCode::Enter,
@@ -4139,7 +4309,7 @@ fn agentic_bubble_follow_up_leaves_command_chords_to_the_patcher() {
     };
     set_patcher_interaction_state(key, state);
 
-    PATCHER_WIDGET.key_event(
+    press_patcher_key(
         &node,
         WidgetKeyEvent {
             code: KeyCode::Char('c'),
@@ -13880,8 +14050,7 @@ fn platform_primary_y_initializes_selected_cable_segment_at_rendered_midpoint_af
     .1;
 
     assert!(
-        PATCHER_WIDGET
-            .key_event(
+        press_patcher_key(
                 &node,
                 WidgetKeyEvent {
                     code: KeyCode::Char('y'),
@@ -15311,8 +15480,7 @@ fn double_clicking_macro_instance_edits_text_and_breadcrumb_returns_to_root() {
     state.selected_nodes.insert(macro_node.id.clone());
     set_patcher_interaction_state(key, state);
     assert!(
-        PATCHER_WIDGET
-            .key_event(
+        press_patcher_key(
                 &node,
                 WidgetKeyEvent {
                     code: KeyCode::Enter,
@@ -15397,8 +15565,7 @@ fn enter_on_macro_instance_inside_macro_opens_nested_macro() {
     set_patcher_interaction_state(key, state);
 
     assert!(
-        PATCHER_WIDGET
-            .key_event(
+        press_patcher_key(
                 &node,
                 WidgetKeyEvent {
                     code: KeyCode::Enter,
@@ -15495,8 +15662,7 @@ fn double_clicking_background_creates_editable_draft_node() {
     assert!(get_patcher_interaction_state(key).text_edit.is_some());
 
     assert!(
-        PATCHER_WIDGET
-            .key_event(
+        press_patcher_key(
                 &node,
                 WidgetKeyEvent {
                     code: KeyCode::Char('p'),
@@ -15506,8 +15672,7 @@ fn double_clicking_background_creates_editable_draft_node() {
             .is_some()
     );
     assert!(
-        PATCHER_WIDGET
-            .key_event(
+        press_patcher_key(
                 &node,
                 WidgetKeyEvent {
                     code: KeyCode::Char('h'),
@@ -15517,8 +15682,7 @@ fn double_clicking_background_creates_editable_draft_node() {
             .is_some()
     );
     assert!(
-        PATCHER_WIDGET
-            .key_event(
+        press_patcher_key(
                 &node,
                 WidgetKeyEvent {
                     code: KeyCode::Char(' '),
@@ -15535,8 +15699,7 @@ fn double_clicking_background_creates_editable_draft_node() {
         Some("ph ")
     );
     assert!(
-        PATCHER_WIDGET
-            .key_event(
+        press_patcher_key(
                 &node,
                 WidgetKeyEvent {
                     code: KeyCode::Enter,
@@ -15730,8 +15893,7 @@ fn double_clicking_node_edits_display_text_in_memory() {
         pitch_rect.row + pitch_rect.height * 0.5,
     ));
     assert!(
-        PATCHER_WIDGET
-            .key_event(
+        press_patcher_key(
                 &node,
                 WidgetKeyEvent {
                     code: KeyCode::Char('x'),
@@ -15741,8 +15903,7 @@ fn double_clicking_node_edits_display_text_in_memory() {
             .is_some()
     );
     assert!(
-        PATCHER_WIDGET
-            .key_event(
+        press_patcher_key(
                 &node,
                 WidgetKeyEvent {
                     code: KeyCode::Enter,
@@ -15814,8 +15975,7 @@ fn backspace_without_text_edit_deletes_selected_nodes() {
     set_patcher_interaction_state(key, state);
 
     assert!(
-        PATCHER_WIDGET
-            .key_event(
+        press_patcher_key(
                 &node,
                 WidgetKeyEvent {
                     code: KeyCode::Backspace,
@@ -16227,8 +16387,7 @@ fn patcher_text_edit_tab_autocompletes_operator_without_committing() {
     set_patcher_interaction_state(key, state);
 
     assert!(
-        PATCHER_WIDGET
-            .key_event(
+        press_patcher_key(
                 &node,
                 WidgetKeyEvent {
                     code: KeyCode::Tab,
@@ -16253,8 +16412,7 @@ fn patcher_text_edit_tab_autocompletes_operator_without_committing() {
     );
 
     assert!(
-        PATCHER_WIDGET
-            .key_event(
+        press_patcher_key(
                 &node,
                 WidgetKeyEvent {
                     code: KeyCode::Char('3'),
@@ -16264,8 +16422,7 @@ fn patcher_text_edit_tab_autocompletes_operator_without_committing() {
             .is_some()
     );
     assert!(
-        PATCHER_WIDGET
-            .key_event(
+        press_patcher_key(
                 &node,
                 WidgetKeyEvent {
                     code: KeyCode::Enter,
@@ -16326,8 +16483,7 @@ fn patcher_text_edit_tab_autocompletes_local_defmacro() {
     set_patcher_interaction_state(key, state);
 
     assert!(
-        PATCHER_WIDGET
-            .key_event(
+        press_patcher_key(
                 &node,
                 WidgetKeyEvent {
                     code: KeyCode::Tab,
@@ -16366,8 +16522,7 @@ fn patcher_text_edit_arrow_keys_cycle_autocomplete_selection() {
     set_patcher_interaction_state(key, state);
 
     assert!(
-        PATCHER_WIDGET
-            .key_event(
+        press_patcher_key(
                 &node,
                 WidgetKeyEvent {
                     code: KeyCode::Down,
@@ -16386,8 +16541,7 @@ fn patcher_text_edit_arrow_keys_cycle_autocomplete_selection() {
     );
 
     assert!(
-        PATCHER_WIDGET
-            .key_event(
+        press_patcher_key(
                 &node,
                 WidgetKeyEvent {
                     code: KeyCode::Up,
@@ -16429,8 +16583,7 @@ fn patcher_text_edit_consumes_tab_even_without_autocomplete_match() {
     set_patcher_interaction_state(key, state);
 
     assert!(
-        PATCHER_WIDGET
-            .key_event(
+        press_patcher_key(
                 &node,
                 WidgetKeyEvent {
                     code: KeyCode::Tab,
@@ -20652,7 +20805,7 @@ fn typing_into_created_node_never_mutates_source_nodes() {
 
     assert!(handle_patcher_double_click(&node, 90.0, 90.0));
     for ch in "tanh".chars() {
-        let event = PATCHER_WIDGET.key_event(
+        let event = press_patcher_key(
             &node,
             WidgetKeyEvent {
                 code: KeyCode::Char(ch),
@@ -21459,7 +21612,7 @@ fn cmd_enter_creates_empty_node_below_selected_node() {
     state.selected_nodes.insert(anchor.clone());
     set_patcher_interaction_state(key, state);
 
-    let event = PATCHER_WIDGET.key_event(
+    let event = press_patcher_key(
         &node,
         WidgetKeyEvent {
             code: KeyCode::Enter,
@@ -21514,7 +21667,7 @@ fn cmd_up_connects_last_two_touched_nodes_on_first_ports() {
     note_touched_node(&mut state, &lower);
     set_patcher_interaction_state(key, state);
 
-    let event = PATCHER_WIDGET.key_event(
+    let event = press_patcher_key(
         &node,
         WidgetKeyEvent {
             code: KeyCode::Up,
@@ -21571,7 +21724,7 @@ fn cmd_up_touch_order_ignores_vertical_order_for_direction() {
     note_touched_node(&mut state, &upper);
     set_patcher_interaction_state(key, state);
 
-    PATCHER_WIDGET.key_event(
+    press_patcher_key(
         &node,
         WidgetKeyEvent {
             code: KeyCode::Up,
@@ -21606,7 +21759,7 @@ fn patcher_undo_redo_round_trips_created_node() {
         "create is one undo step"
     );
 
-    let undone = PATCHER_WIDGET.key_event(
+    let undone = press_patcher_key(
         &node,
         WidgetKeyEvent {
             code: KeyCode::Char('z'),
@@ -21626,7 +21779,7 @@ fn patcher_undo_redo_round_trips_created_node() {
     assert_eq!(history.undo.len(), 0);
     assert_eq!(history.redo.len(), 1);
 
-    let redone = PATCHER_WIDGET.key_event(
+    let redone = press_patcher_key(
         &node,
         WidgetKeyEvent {
             code: KeyCode::Char('Z'),
@@ -21644,7 +21797,7 @@ fn patcher_undo_redo_round_trips_created_node() {
     );
 
     // Redo stack is now empty: a second redo is not consumed.
-    let empty_redo = PATCHER_WIDGET.key_event(
+    let empty_redo = press_patcher_key(
         &node,
         WidgetKeyEvent {
             code: KeyCode::Char('z'),
@@ -21669,7 +21822,7 @@ fn patcher_undo_restores_deleted_selection() {
     state.selected_nodes.insert(created.clone());
     set_patcher_interaction_state(key, state);
 
-    let deleted = PATCHER_WIDGET.key_event(
+    let deleted = press_patcher_key(
         &node,
         WidgetKeyEvent {
             code: KeyCode::Backspace,
@@ -21690,7 +21843,7 @@ fn patcher_undo_restores_deleted_selection() {
         "create and delete are separate undo steps"
     );
 
-    let undone = PATCHER_WIDGET.key_event(
+    let undone = press_patcher_key(
         &node,
         WidgetKeyEvent {
             code: KeyCode::Char('z'),
@@ -21753,7 +21906,7 @@ fn patcher_copy_paste_duplicates_selection_and_wires() {
     state.selected_nodes.insert(dest_node.clone());
     set_patcher_interaction_state(key, state);
 
-    let copied = PATCHER_WIDGET.key_event(
+    let copied = press_patcher_key(
         &node,
         WidgetKeyEvent {
             code: KeyCode::Char('c'),
@@ -21764,7 +21917,7 @@ fn patcher_copy_paste_duplicates_selection_and_wires() {
 
     // Paste arrives with SUPER rewritten to CONTROL by
     // normalize_command_shortcuts; the widget accepts either.
-    let pasted = PATCHER_WIDGET.key_event(
+    let pasted = press_patcher_key(
         &node,
         WidgetKeyEvent {
             code: KeyCode::Char('v'),
@@ -21815,7 +21968,7 @@ fn patcher_copy_paste_duplicates_selection_and_wires() {
     );
 
     // Undo removes the whole paste as one step.
-    let undone = PATCHER_WIDGET.key_event(
+    let undone = press_patcher_key(
         &node,
         WidgetKeyEvent {
             code: KeyCode::Char('z'),
@@ -21920,7 +22073,7 @@ fn body_text(plan: &EncapsulationPlan, key: &BodyKey) -> String {
 }
 
 fn encapsulate_via_key_event(node: &LayoutNode) -> Option<WidgetEvent> {
-    PATCHER_WIDGET.key_event(
+    press_patcher_key(
         node,
         WidgetKeyEvent {
             code: KeyCode::Char('e'),
@@ -22258,7 +22411,7 @@ fn cmd_e_encapsulation_is_a_single_undo_step() {
             .contains_key("sub1")
     );
 
-    let event = PATCHER_WIDGET.key_event(
+    let event = press_patcher_key(
         &node,
         WidgetKeyEvent {
             code: KeyCode::Char('z'),
@@ -22734,8 +22887,7 @@ fn deleting_the_last_instance_of_a_session_created_macro_collects_the_definition
     state.selected_nodes = std::iter::once(instance).collect();
     set_patcher_interaction_state(key, state);
     assert!(
-        PATCHER_WIDGET
-            .key_event(
+        press_patcher_key(
                 &node,
                 WidgetKeyEvent {
                     code: KeyCode::Backspace,
@@ -22802,7 +22954,7 @@ fn deleting_one_of_two_instances_keeps_a_session_created_macro() {
         .text = "sub1".to_string();
     state.selected_nodes = std::iter::once(first).collect();
     set_patcher_interaction_state(key, state);
-    PATCHER_WIDGET.key_event(
+    press_patcher_key(
         &node,
         WidgetKeyEvent {
             code: KeyCode::Backspace,
@@ -23356,7 +23508,7 @@ fn cmd_shift_k_opens_a_connect_bubble_for_the_selected_macro_instance() {
     state.selected_nodes.insert(instance.clone());
     set_patcher_interaction_state(key, state);
 
-    let event = PATCHER_WIDGET.key_event(
+    let event = press_patcher_key(
         &node,
         WidgetKeyEvent {
             code: KeyCode::Char('K'),
@@ -23397,7 +23549,7 @@ fn cmd_shift_k_opens_a_connect_bubble_for_the_selected_macro_instance() {
 #[test]
 fn cmd_shift_k_without_a_single_selection_is_not_consumed() {
     let (node, key, instance) = connect_test_node("connect-no-selection");
-    let event = PATCHER_WIDGET.key_event(
+    let event = press_patcher_key(
         &node,
         WidgetKeyEvent {
             code: KeyCode::Char('K'),
@@ -23410,7 +23562,7 @@ fn cmd_shift_k_without_a_single_selection_is_not_consumed() {
     state.selected_nodes.insert(instance);
     state.selected_nodes.insert("filtered".to_string());
     set_patcher_interaction_state(key, state);
-    let event = PATCHER_WIDGET.key_event(
+    let event = press_patcher_key(
         &node,
         WidgetKeyEvent {
             code: KeyCode::Char('K'),
@@ -23786,7 +23938,7 @@ fn connect_bubble_submit_payload_carries_the_patch_context() {
     let mut state = get_patcher_interaction_state(key);
     state.selected_nodes.insert(instance.clone());
     set_patcher_interaction_state(key, state);
-    PATCHER_WIDGET.key_event(
+    press_patcher_key(
         &node,
         WidgetKeyEvent {
             code: KeyCode::Char('K'),
@@ -23802,8 +23954,7 @@ fn connect_bubble_submit_payload_carries_the_patch_context() {
         .prompt = "connect it".to_string();
     set_patcher_interaction_state(key, state);
 
-    let event = PATCHER_WIDGET
-        .key_event(
+    let event = press_patcher_key(
             &node,
             WidgetKeyEvent {
                 code: KeyCode::Enter,
@@ -23846,7 +23997,7 @@ fn connect_bubble_renders_its_placeholder_and_subject_badge() {
     let mut state = get_patcher_interaction_state(key);
     state.selected_nodes.insert(instance);
     set_patcher_interaction_state(key, state);
-    PATCHER_WIDGET.key_event(
+    press_patcher_key(
         &node,
         WidgetKeyEvent {
             code: KeyCode::Char('K'),

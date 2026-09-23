@@ -10,6 +10,32 @@ thread_local! {
         RefCell::new(HashMap::new());
 }
 
+/// The measured geometry used by a preview belongs to the editing viewport,
+/// even when source/layout preparation runs on a worker.
+pub(super) struct TextMetricsSnapshot(HashMap<(u32, String), Vec<f32>>);
+
+impl TextMetricsSnapshot {
+    pub(super) fn capture() -> Self {
+        Self(GLYPH_ADVANCES.with(|cache| cache.borrow().clone()))
+    }
+
+    pub(super) fn with<R>(self, work: impl FnOnce() -> R) -> R {
+        struct Restore(TextMetricsSnapshot);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                GLYPH_ADVANCES.with(|cache| {
+                    *cache.borrow_mut() = std::mem::take(&mut self.0.0);
+                });
+            }
+        }
+        let previous = GLYPH_ADVANCES.with(|cache| {
+            std::mem::replace(&mut *cache.borrow_mut(), self.0)
+        });
+        let _restore = Restore(TextMetricsSnapshot(previous));
+        work()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct MeasuredLine {
     pub(super) start: usize,

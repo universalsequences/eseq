@@ -200,9 +200,10 @@ pub(in crate::lisp_host) fn parse_neural_max_poly_selection(value: &EValue) -> R
             Ok(NeuralMaxPolySelection::HighestTranspose)
         }
         "seed-first" | "seed" => Ok(NeuralMaxPolySelection::SeedFirst),
+        "markov" | "weighted" | "transition" => Ok(NeuralMaxPolySelection::Markov),
         _ => Err(
             "max-poly selection expects deterministic, propagation, random, loudest, \
-             lowest-transpose, highest-transpose, or seed-first"
+             lowest-transpose, highest-transpose, seed-first, or markov"
                 .to_string(),
         ),
     }

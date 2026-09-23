@@ -38,6 +38,24 @@ pub enum HostCommand {
     },
 }
 
+/// Tone of a window-level toast. Success toasts time out quickly; error
+/// toasts linger and also clear on the next keypress.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToastKind {
+    Success,
+    Error,
+}
+
+impl ToastKind {
+    pub fn from_label(label: &str) -> Option<Self> {
+        match label {
+            "success" | "ok" => Some(Self::Success),
+            "error" => Some(Self::Error),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum HostEvent {
     Status(String),

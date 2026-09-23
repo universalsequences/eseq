@@ -65,99 +65,74 @@ fn manifest_declares_modes_and_fixed_low_latency_without_fft() {
     assert!(manifest["totalMemorySlots"].as_u64().unwrap() < 32_768);
 }
 
-#[test]
-fn punch_coupled_rc_matches_double_precision_reference() {
-    let rate = 48000.0;
-    let source = observation("punch-next-a", "punch-next-b").replace(
+fn gated_observation(left: &str, right: &str, seconds: f64) -> String {
+    observation(left, right).replace(
         "(def left (in 1 @name Left))",
-        "(def raw-left (in 1 @name Left))\n\
-         (make-history test-clock)\n\
-         (def test-frame (read-history test-clock))\n\
-         (write-history test-clock (+ test-frame 1))\n\
-         (def left (* raw-left (gswitch (lt test-frame 6000) 0.7\n\
-           (gswitch (lt test-frame 11000) 0.035 0.28))))",
-    );
-    let mut o = options(rate as u32, 24000, &[]);
-    o.input_overrides = vec![(0, 1.0), (1, 0.0)];
-    let out = render(&source, &o);
-    let mut window = [0.0f64; 13];
-    let mut target = 0.0;
-    let mut a = 0.0;
-    let mut b = 0.0;
-    for (i, frame) in out.samples.chunks_exact(2).enumerate() {
-        window[i % 13] = if i < 6000 {
-            0.7f32
-        } else if i < 11000 {
-            0.035f32
-        } else {
-            0.28f32
-        } as f64;
-        let level = 20.0 * window.iter().copied().fold(1e-20f64, f64::max).log10();
-        let over = level - (-21.0);
-        let knee = (over + 3.0).clamp(0.0, 6.0);
-        target = (1.0 - 1.0 / 4.5) * (knee * knee / 12.0 + (over - 3.0).max(0.0));
-        let d = 1000.0 / (rate * if target > a { 40.0 } else { 120.0 });
-        let c = 1000.0 / (rate * 30.0);
-        let next_a = ((a + d * target) * (1.0 + c) + c * b) / (1.0 + d + 2.0 * c + d * c);
-        let next_b = (b + c * next_a) / (1.0 + c);
-        a = next_a;
-        b = next_b;
-        assert!(
-            (frame[0] as f64 - a).abs() < 0.005,
-            "a: {} vs {a}",
-            frame[0]
-        );
-        assert!(
-            (frame[1] as f64 - b).abs() < 0.005,
-            "b: {} vs {b}",
-            frame[1]
-        );
-        // Release retains charge even after the new target has fallen to 0.
-        assert!(frame[0] >= 0.0 && frame[0] <= 20.0);
-    }
-    assert!(a > 0.9 * target && b > 0.9 * target);
+        &format!("(def raw-left (in 1 @name Left))\n\
+            (make-history test-clock)\n\
+            (def test-frame (read-history test-clock))\n\
+            (write-history test-clock (+ test-frame 1))\n\
+            (def left (* raw-left (lt test-frame (* samplerate {seconds}))))"),
+    )
+}
+
+fn tone_options(rate: u32, frames: usize, params: &[(&str, f32)], hz: f32, peak: f32) -> EffectRenderOptions {
+    let mut o = options(rate, frames, params);
+    o.input_overrides = vec![(0, 0.0), (1, 0.0)];
+    o.input_tones = vec![(0, hz, peak)];
+    o
 }
 
 #[test]
-fn level_carriers_match_equations_and_keep_physical_bounds() {
-    // Reference uses n,p coordinates, while the DSP stores p and d=n-p.
-    // The two implicit reaction steps solve Eq. (4)'s quadratic equations.
-    let source = observation("n1", "p1");
-    for rate in [8000, 48000, 192000, 384000] {
-        let out = render(&source, &options(rate, rate as usize / 2, &[]));
-        let span = (rate as f64 * 0.00025).round() as usize;
-        let kn = 1000.0 / (120.0 * rate as f64);
-        let kp = 4.0 * kn;
-        let mut n = 0.0f64;
-        let mut p = 0.0f64;
-        let mut feedback = 0.0f64;
+fn punch_memory_envelope_matches_double_precision_reference() {
+    let source = gated_observation("punch-target", "punch-gr", 0.25);
+    for (rate, attack, release) in [(8000, 1.0, 20.0), (48000, 40.0, 120.0), (384000, 200.0, 2000.0)] {
+        let out = render(&source, &tone_options(rate, rate as usize * 2,
+            &[("attack", attack), ("release", release)], 1000.0, 0.7));
+        let mut memory = 0.0f64;
+        let mut gr = 0.0f64;
         for (i, frame) in out.samples.chunks_exact(2).enumerate() {
-            let drive = (feedback * 10.0f64.powf(21.0 / 20.0) - 1.0).max(0.0);
-            let limited = drive / (1.0 + drive / 8.0);
-            let generated = 0.5 * 1000.0 / (40.0 * rate as f64) * limited * limited;
-            n += generated;
-            p += generated;
-            let b = 1.0 + kn * p;
-            n = p + 2.0 * (n - p) / (b + (b * b + 4.0 * kn * (n - p)).sqrt());
-            let floor = (n - 1.0).max(0.0);
-            let b = 1.0 + kp * (1.0 - n).abs();
-            p = floor + 2.0 * (p - floor) / (b + (b * b + 4.0 * kp * (p - floor)).sqrt());
-            let gain = 1.0 / (1.0 + 0.5 * (n + 0.2 * p));
-            feedback = if i >= span {
-                (0.7f32 as f64) * gain
+            // Observe the gain computer separately, then integrate the authored
+            // envelope in f64. Static/detector behavior has its own tests below.
+            let target = frame[0] as f64;
+            let memory_ms = release as f64 * if target > memory { 1.4787 } else { 2.4024 };
+            memory += (target - memory) * -(-1000.0 / (rate as f64 * memory_ms)).exp_m1();
+            let (aim, tau) = if target > gr {
+                (target, 1.0475 * attack as f64)
             } else {
-                0.0
+                ((target + 0.15335 * (memory - target).max(0.0)).min(gr), 0.8444 * release as f64)
             };
-            for (actual, expected) in [(frame[0], n), (frame[1], p)] {
-                assert!(
-                    (actual as f64 - expected).abs() < 0.015,
-                    "rate={rate} frame={i}: {actual} vs {expected}"
-                );
-            }
-            assert!(frame[1] >= 0.0 && frame[0] >= frame[1]);
-            assert!(frame[0] - frame[1] <= 1.00001);
+            gr += (aim - gr) * -(-1000.0 / (rate as f64 * tau)).exp_m1();
+            assert!((frame[1] as f64 - gr).abs() < 0.003,
+                "rate={rate} frame={i}: {} vs {gr}", frame[1]);
+            assert!(frame[1] >= 0.0 && frame[1] <= 40.0);
         }
-        assert!(n > p && n > 1.0, "optical cell must actually charge");
+    }
+}
+
+#[test]
+fn level_gain_populations_match_double_precision_and_keep_bounds() {
+    let source = gated_observation("level-target", "level-attenuation", 0.25);
+    // At 384 kHz / Release 2000, the slow population has an 86.7-second
+    // time constant. This also guards the split accumulator under fast-math.
+    for (rate, attack, release) in [(8000, 1.0, 20.0), (48000, 40.0, 120.0), (384000, 200.0, 2000.0)] {
+        let out = render(&source, &tone_options(rate, rate as usize * 2,
+            &[("attack", attack), ("release", release)], 1000.0, 0.7));
+        let mut fast = 1.0f64;
+        let mut slow = 1.0f64;
+        for (i, frame) in out.samples.chunks_exact(2).enumerate() {
+            let reduction = frame[0] as f64;
+            let target = 10.0f64.powf(-reduction / 20.0);
+            let scale = 1.0 + 17.0739 / (1.0 + (reduction / 4.26775).powf(7.53749));
+            for (state, a, r) in [(&mut fast, 0.0817833, 2.30597), (&mut slow, 0.901311, 43.3357)] {
+                let tau = if target < *state { a * attack as f64 * scale } else { r * release as f64 };
+                *state += (target - *state) * -(-1000.0 / (rate as f64 * tau)).exp_m1();
+            }
+            let expected = 0.815406 * fast + 0.184594 * slow;
+            assert!((frame[1] as f64 - expected).abs() < 0.00001,
+                "rate={rate} frame={i}: {} vs {expected}", frame[1]);
+            assert!(frame[1] > 0.0 && frame[1] <= 1.000001);
+        }
     }
 }
 
@@ -371,9 +346,9 @@ fn controllers_release_after_a_burst_and_silence_stays_silent() {
         (write-history test-clock (+ test-frame 1))\n\
         (def left (* raw-left (lt test-frame samplerate)))";
     let source =
-        observation("punch-gain", "level-gain").replace("(def left (in 1 @name Left))", input);
-    let mut o = options(48000, 48000 * 12, &[("amount", 80.0)]);
-    o.input_overrides = vec![(0, 0.7), (1, 0.0)];
+        observation("punch-gain", "level-attenuation").replace("(def left (in 1 @name Left))", input);
+    // Level has AC input coupling; DC is not a sustained compression fixture.
+    let o = tone_options(48000, 48000 * 20, &[("amount", 80.0)], 1000.0, 0.7);
     let out = render(&source, &o);
     let end_burst = &out.samples[2 * 47999..2 * 48000];
     let recovered = &out.samples[out.samples.len() - 2..];
@@ -383,7 +358,7 @@ fn controllers_release_after_a_burst_and_silence_stays_silent() {
             "controller {c} must compress: {end_burst:?}"
         );
         assert!(
-            recovered[c] > 0.98,
+            recovered[c] > 0.99,
             "controller {c} must recover: {recovered:?}"
         );
     }
@@ -400,6 +375,72 @@ fn controllers_release_after_a_burst_and_silence_stays_silent() {
         );
         o.input_overrides = vec![(0, 0.0), (1, 0.0)];
         assert_eq!(render(dsp_source(), &o).peak, 0.0);
+    }
+}
+
+fn steady_reduction(hz: f32, peak_db: f32, amount: f32, detector_db: f32) -> [f64; 2] {
+    let out = render(&observation("punch-gr", "level-gr"), &tone_options(
+        48000, 96000, &[("amount", amount), ("detector-db", detector_db)],
+        hz, 10.0f32.powf(peak_db / 20.0)));
+    let mut mean = [0.0; 2];
+    for frame in out.samples[2 * 72000..].chunks_exact(2) {
+        for c in 0..2 { mean[c] += frame[c] as f64 / 24000.0; }
+    }
+    mean
+}
+
+#[test]
+fn amount_and_detector_engage_meaningful_compression_at_musical_levels() {
+    let quiet = steady_reduction(1000.0, -24.0, 50.0, 0.0);
+    let normal = steady_reduction(1000.0, -12.0, 50.0, 0.0);
+    // Functional voicing bounds, not copied reference code or sample fixtures.
+    assert!((2.0..4.0).contains(&quiet[0]), "Punch must engage quiet material: {quiet:?}");
+    assert!((8.0..11.0).contains(&normal[0]), "Punch reduction: {normal:?}");
+    assert!((0.8..2.5).contains(&normal[1]), "Level reduction: {normal:?}");
+    let strong = steady_reduction(1000.0, -24.0, 100.0, 0.0);
+    let driven = steady_reduction(1000.0, -12.0, 50.0, 12.0);
+    let off = steady_reduction(1000.0, -6.0, 0.0, 0.0);
+    for c in 0..2 {
+        assert!(strong[c] > quiet[c] + 3.0, "Amount must increase reduction: {quiet:?} -> {strong:?}");
+        assert!(driven[c] > normal[c] + 5.0, "Detector must drive compression: {normal:?} -> {driven:?}");
+        assert!(off[c].abs() < 0.0001, "Amount 0 disables reduction, not Level's nominal gain: {off:?}");
+    }
+}
+
+#[test]
+fn level_detector_weights_bass_and_treble_without_tone_coloration() {
+    let bass = steady_reduction(60.0, -12.0, 50.0, 0.0);
+    let mid = steady_reduction(1000.0, -12.0, 50.0, 0.0);
+    let high = steady_reduction(8000.0, -12.0, 50.0, 0.0);
+    assert!(bass[1] > mid[1] + 2.0, "Level bass sensitivity: {bass:?} vs {mid:?}");
+    assert!(high[1] > mid[1] + 4.0, "Level treble sensitivity: {high:?} vs {mid:?}");
+    assert!((bass[0] - mid[0]).abs() < 1.5, "Punch must not inherit Level's detector: {bass:?} vs {mid:?}");
+}
+
+#[test]
+fn level_recovery_remembers_exposure_and_timing_controls_remain_effective() {
+    let mut tails = Vec::new();
+    for seconds in [0.02, 2.0] {
+        let out = render(&gated_observation("punch-gr", "level-gr", seconds),
+            &tone_options(48000, ((seconds + 3.0) * 48000.0) as usize, &[], 1000.0, 0.5));
+        let frame = ((seconds + 1.0) * 48000.0) as usize;
+        tails.push(out.samples[frame * 2 + 1]);
+        assert!(out.samples[out.samples.len() - 1] < tails.last().copied().unwrap());
+    }
+    assert!(tails[1] > tails[0] + 0.35, "Long exposure must leave a longer recovery: {tails:?}");
+    let source = gated_observation("punch-gr", "level-gr", 0.02);
+    let fast = render(&source, &tone_options(48000, 96000, &[("attack", 1.0)], 1000.0, 0.5));
+    let slow = render(&source, &tone_options(48000, 96000, &[("attack", 200.0)], 1000.0, 0.5));
+    for c in 0..2 {
+        assert!(fast.samples[959 * 2 + c] > slow.samples[959 * 2 + c] + 2.0,
+            "Attack must change transient passage for mode {c}");
+    }
+    let source = gated_observation("punch-gr", "level-gr", 0.2);
+    let fast = render(&source, &tone_options(48000, 96000, &[("release", 20.0)], 1000.0, 0.5));
+    let slow = render(&source, &tone_options(48000, 96000, &[("release", 2000.0)], 1000.0, 0.5));
+    for c in 0..2 {
+        assert!(slow.samples[57600 * 2 + c] > fast.samples[57600 * 2 + c] + 0.5,
+            "Release must change recovery for mode {c}");
     }
 }
 

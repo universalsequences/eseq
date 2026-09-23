@@ -344,6 +344,8 @@ pub(crate) fn run_event_loop(
         pending_effect_cancel_restore: None,
         package_view_session: None,
         pending_agentic_bubbles: HashMap::new(),
+        pending_jev_suggestions: Vec::new(),
+        queued_jev_suggestions: Vec::new(),
         pending_learn_job: None,
         learn_param_preview: None,
         pending_lisp_history_transactions: HashMap::new(),
@@ -772,7 +774,7 @@ pub(crate) fn run_event_loop(
         #[cfg(not(target_os = "macos"))]
         let timeout = {
             let now = Instant::now();
-            frame_pacer.next_host_tick(now, editor.needs_redraw(), playing_now || sessions.pending_learn_job.is_some())
+            frame_pacer.next_host_tick(now, editor.needs_redraw(), playing_now || sessions.pending_learn_job.is_some() || !sessions.pending_jev_suggestions.is_empty() || !sessions.queued_jev_suggestions.is_empty())
                 .saturating_duration_since(now)
         };
         let mut input_batch = live_input_batch::LiveInputBatch::new();
@@ -2189,7 +2191,6 @@ pub(crate) fn run_event_loop(
                 .and_then(|pending| match pending.receiver.try_recv() {
                     Ok(result) => Some(Ok((
                         pending.generation,
-                        pending.source.clone(),
                         pending.layout.clone(),
                         result,
                     ))),
@@ -2200,11 +2201,11 @@ pub(crate) fn run_event_loop(
             let _ = sessions.pending_instrument_preview.take();
             let mut replan_after_preview = false;
             match completed_preview {
-                Ok((generation, source, layout, compile_result)) => {
+                Ok((generation, layout_override, compile_result)) => {
                     if let Some(session) = sessions.instrument_edit_session.as_mut() {
                         if session.preview_generation == generation {
                             match compile_result {
-                                Ok(result) => match app.apply_compiled_instrument_engine(
+                                Ok(CompiledPreview { source, layout, result }) => match app.apply_compiled_instrument_engine(
                                     session.engine_id,
                                     &session.name,
                                     &source,
@@ -2212,7 +2213,7 @@ pub(crate) fn run_event_loop(
                                 ) {
                                     Ok(()) => {
                                         session.last_valid_source = source;
-                                        session.last_valid_layout = layout;
+                                        session.last_valid_layout = layout_override.or(layout);
                                         session.visible_revision_valid = true;
                                         replan_after_preview = session.learn_target_path.is_some();
                                         let rt = editor.runtime_mut();
@@ -2318,7 +2319,6 @@ pub(crate) fn run_event_loop(
                 .and_then(|pending| match pending.receiver.try_recv() {
                     Ok(result) => Some(Ok((
                         pending.generation,
-                        pending.source.clone(),
                         pending.layout.clone(),
                         result,
                     ))),
@@ -2328,11 +2328,11 @@ pub(crate) fn run_event_loop(
         {
             let _ = sessions.pending_effect_preview.take();
             match completed_preview {
-                Ok((generation, source, layout, compile_result)) => {
+                Ok((generation, layout_override, compile_result)) => {
                     if let Some(session) = sessions.effect_edit_session.as_mut() {
                         if session.preview_generation == generation {
                             match compile_result {
-                                Ok(result) => {
+                                Ok(CompiledPreview { source, layout, result }) => {
                                     let name = session.name.clone();
                                     match apply_compiled_effect_edit_session(
                                         &mut app,
@@ -2345,7 +2345,7 @@ pub(crate) fn run_event_loop(
                                     ) {
                                         Ok(()) => {
                                             session.last_valid_source = source;
-                                            session.last_valid_layout = layout;
+                                            session.last_valid_layout = layout_override.or(layout);
                                             session.visible_revision_valid = true;
                                             let rt = editor.runtime_mut();
                                             rt.set_reactive(
@@ -2435,6 +2435,71 @@ pub(crate) fn run_event_loop(
             &mut editor,
             shared.current_track.load(Ordering::Relaxed),
         );
+        // Jev ghost-cable suggestions (eseq-c049): the patcher render pass
+        // queues one request per newly selected node. Hold each until the
+        // selection has settled on it (clicking through nodes sends one call,
+        // not one per node), send it on its own thread, and hand answers back
+        // as they land.
+        let due_jev_requests = take_due_jev_requests(
+            &mut sessions.queued_jev_suggestions,
+            eseqlisp::widget_render::patcher::take_jev_suggestion_requests(),
+            Instant::now(),
+            eseqlisp::widget_render::patcher::jev_suggestion_wanted,
+        );
+        for request in due_jev_requests {
+            // An older request for this widget is superseded: its answer would
+            // be dropped on arrival, so stop waiting on it now.
+            sessions
+                .pending_jev_suggestions
+                .retain(|pending| pending.key != request.key);
+            let (tx, rx) = std::sync::mpsc::channel();
+            let body = request.body;
+            std::thread::spawn(move || {
+                let _ = tx.send(sequencer::agent::jev::system_one(&body));
+            });
+            sessions.pending_jev_suggestions.push(PendingJevSuggestion {
+                key: request.key,
+                fingerprint: request.fingerprint,
+                receiver: rx,
+            });
+        }
+        let mut jev_changed = false;
+        let mut jev_errors = Vec::new();
+        sessions.pending_jev_suggestions.retain(|pending| {
+            // The selection moved on while this was in flight; nothing will
+            // draw its answer, so it must not hold the loop at active cadence.
+            if !eseqlisp::widget_render::patcher::jev_suggestion_wanted(
+                pending.key,
+                pending.fingerprint,
+            ) {
+                return false;
+            }
+            let result = match pending.receiver.try_recv() {
+                Ok(result) => result,
+                Err(std::sync::mpsc::TryRecvError::Empty) => return true,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    Err("jev worker disconnected".to_string())
+                }
+            };
+            let failed = result.as_ref().err().cloned();
+            if eseqlisp::widget_render::patcher::resolve_jev_suggestions(
+                pending.key,
+                pending.fingerprint,
+                result,
+            ) {
+                jev_changed = true;
+                jev_errors.extend(failed);
+            }
+            false
+        });
+        for error in jev_errors {
+            editor.handle_host_event(HostEvent::Status(format!(
+                "Jev suggestions failed: {error}"
+            )));
+        }
+        if jev_changed {
+            editor.mark_needs_redraw();
+        }
         let mut completed_agentic = Vec::new();
         for (key, pending) in &sessions.pending_agentic_bubbles {
             match pending.receiver.try_recv() {
@@ -2687,7 +2752,7 @@ pub(crate) fn run_event_loop(
         Ok(HostLoopControl::WaitUntil(frame_pacer.next_host_tick(
             Instant::now(),
             editor.needs_redraw() || host_animation_active(&editor, backend, &gesture),
-            shared.state.transport.playing.load(Ordering::Relaxed) || sessions.pending_learn_job.is_some(),
+            shared.state.transport.playing.load(Ordering::Relaxed) || sessions.pending_learn_job.is_some() || !sessions.pending_jev_suggestions.is_empty() || !sessions.queued_jev_suggestions.is_empty(),
         )))
     })?;
 

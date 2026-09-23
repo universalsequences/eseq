@@ -442,6 +442,106 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
     );
 
     runtime.register_native_with_docs(
+        "patcher-bind-key",
+        "(patcher-bind-key key command)",
+        "Bind a key (editor spelling, or P-/P-S- for the platform primary modifier) to a named patch editor command. See content/ui/patcher.lisp.",
+        |args, _ctx| {
+            let (Some(Value::String(key)), Some(Value::String(command))) =
+                (args.first(), args.get(1))
+            else {
+                return Err("patcher-bind-key expects (string string)".to_string());
+            };
+            crate::widget_render::patcher::bind_patcher_key(key, command)?;
+            Ok(Value::Bool(true))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "patcher-unbind-key",
+        "(patcher-unbind-key key)",
+        "Remove a patch editor key binding.",
+        |args, _ctx| {
+            let Some(Value::String(key)) = args.first() else {
+                return Err("patcher-unbind-key expects a key string".to_string());
+            };
+            crate::widget_render::patcher::unbind_patcher_key(key);
+            Ok(Value::Bool(true))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "patcher-key",
+        "(patcher-key key)",
+        "Run the patch editor command bound to a key against the patcher that just refused it. Returns whether a command applied.",
+        |args, _ctx| {
+            let Some(Value::String(key)) = args.first() else {
+                return Err("patcher-key expects a key string".to_string());
+            };
+            Ok(Value::Bool(
+                crate::widget_render::patcher::run_focus_key_patcher_key(key),
+            ))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "patcher-command",
+        "(patcher-command name)",
+        "Run a named patch editor command against the patcher that last refused a key. Returns whether it applied.",
+        |args, _ctx| {
+            let Some(Value::String(name)) = args.first() else {
+                return Err("patcher-command expects a command name".to_string());
+            };
+            Ok(Value::Bool(
+                crate::widget_render::patcher::run_focus_key_patcher_command(name),
+            ))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "patcher-key-for-command",
+        "(patcher-key-for-command name)",
+        "The first key bound to a patch editor command, or false.",
+        |args, _ctx| {
+            let Some(Value::String(name)) = args.first() else {
+                return Err("patcher-key-for-command expects a command name".to_string());
+            };
+            Ok(crate::widget_render::patcher::patcher_key_for_command(name)
+                .map(Value::String)
+                .unwrap_or(Value::Bool(false)))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "patcher-key-label",
+        "(patcher-key-label key)",
+        "A key spelling such as \"s-c\" or \"C-S-z\" rendered as a menu shortcut label (⌘C, ⌃⇧Z on macOS; Ctrl+Shift+Z elsewhere).",
+        |args, _ctx| {
+            let Some(Value::String(key)) = args.first() else {
+                return Err("patcher-key-label expects a key string".to_string());
+            };
+            Ok(Value::String(crate::widget_render::patcher::patcher_key_label(key)))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "shortcut-platform",
+        "(shortcut-platform)",
+        "The platform whose primary shortcut modifier is in effect: \"macos\" or \"other\".",
+        |_args, _ctx| {
+            Ok(Value::String(
+                if crate::ui::platform::CURRENT_SHORTCUT_PLATFORM
+                    == crate::ui::platform::ShortcutPlatform::MacOS
+                {
+                    "macos"
+                } else {
+                    "other"
+                }
+                .to_string(),
+            ))
+        },
+    );
+
+    runtime.register_native_with_docs(
         "host-command",
         "(host-command name payload)",
         "Send a command to the host application.",
@@ -1723,6 +1823,37 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
             }
             ctx.set_text_zoom(*zoom);
             Ok(Value::Number(*zoom))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "toast",
+        "(toast text &key :kind)",
+        "Show a bottom-right window toast. :kind is :success (default, ~1.2s) or :error (~4s, dismissed by the next keypress).",
+        |args, ctx| {
+            let Some(Value::String(text)) = args.first() else {
+                return Err("toast expects a text string".to_string());
+            };
+            let mut kind = crate::host::ToastKind::Success;
+            let mut i = 1;
+            while i < args.len() {
+                match (args.get(i), args.get(i + 1)) {
+                    (Some(Value::Keyword(key)), Some(Value::Keyword(label) | Value::String(label)))
+                        if key == "kind" =>
+                    {
+                        kind = crate::host::ToastKind::from_label(label).ok_or_else(|| {
+                            format!("toast :kind must be :success or :error, got {label}")
+                        })?;
+                    }
+                    (Some(other), _) => {
+                        return Err(format!("toast: unexpected argument {}", format_lisp_value(other)));
+                    }
+                    (None, _) => {}
+                }
+                i += 2;
+            }
+            ctx.show_toast(text.clone(), kind);
+            Ok(Value::Nil)
         },
     );
 

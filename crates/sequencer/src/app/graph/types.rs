@@ -28,6 +28,7 @@ pub struct RackSlotBuildSpec<'a> {
     pub pan: f32,
     pub mute: bool,
     pub solo: bool,
+    pub enabled: bool,
     pub max_polyphony: usize,
     pub param_plocks: Option<RackSlotParamPlocks>,
     pub instrument_slot: Option<EffectSlotSnapshot>,

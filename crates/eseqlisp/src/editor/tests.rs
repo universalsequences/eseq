@@ -3836,6 +3836,112 @@ fn transient_minibuffer_message_expires_without_input() {
 }
 
 #[test]
+fn buffer_saved_host_event_shows_success_toast_that_expires_without_input() {
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    let buffer_id = editor.active_buffer().id;
+
+    editor.handle_host_event(crate::host::HostEvent::BufferSaved {
+        buffer_id,
+        path: std::path::PathBuf::from("/tmp/songs/demo.lisp"),
+    });
+
+    // The minibuffer keeps its full-path message; the toast is additive.
+    assert_eq!(editor.minibuffer.as_deref(), Some("Saved /tmp/songs/demo.lisp"));
+    let toast = editor.toast().expect("save toast");
+    assert_eq!(toast.message, "Saved demo.lisp");
+    assert_eq!(toast.kind, crate::host::ToastKind::Success);
+    let frame = crate::frame::build_tiled_render_frame_borderless(&mut editor, 80, 24);
+    assert_eq!(
+        frame.toast,
+        Some(crate::backend::ToastFrame {
+            message: "Saved demo.lisp".to_string(),
+            kind: crate::host::ToastKind::Success,
+        })
+    );
+
+    // A success toast survives unrelated keys and clears on its own timer.
+    editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+    assert!(editor.toast().is_some());
+    editor.toast.as_mut().unwrap().expires_at =
+        std::time::Instant::now() - std::time::Duration::from_millis(1);
+    editor.clear_needs_redraw();
+    editor.update_timers();
+    assert!(editor.toast().is_none());
+    assert!(editor.needs_redraw(), "expiry must request the frame that erases the toast");
+    let frame = crate::frame::build_tiled_render_frame_borderless(&mut editor, 80, 24);
+    assert_eq!(frame.toast, None);
+}
+
+#[test]
+fn save_buffer_command_and_native_show_save_toasts() {
+    let dir = hot_reload_temp_dir("eseqlisp-save-buffer-toast");
+    let path = dir.join("demo.lisp");
+    std::fs::write(&path, "(+ 1 2)\n").unwrap();
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    editor.open_file_buffer(&path).unwrap();
+
+    // The `save-buffer` builtin (Ctrl+S).
+    editor.run_command("save-buffer");
+    let toast = editor.toast().expect("save-buffer toast");
+    assert_eq!(toast.message, "Saved demo.lisp");
+    assert_eq!(toast.kind, crate::host::ToastKind::Success);
+
+    // The `(save-buffer)` native, drained from the runtime.
+    editor.dismiss_toast();
+    editor.runtime_mut().eval_str("(save-buffer)").unwrap();
+    editor.refresh_runtime_side_effects();
+    let toast = editor.toast().expect("(save-buffer) toast");
+    assert_eq!(toast.message, "Saved demo.lisp");
+    assert_eq!(toast.kind, crate::host::ToastKind::Success);
+
+    // A failed write surfaces as an error toast, not only the hidden minibuffer.
+    editor.dismiss_toast();
+    let blocked = dir.join("not-a-dir").join("demo.lisp");
+    std::fs::write(dir.join("not-a-dir"), "").unwrap();
+    editor.active_buffer_mut().set_path(blocked);
+    editor.run_command("save-buffer");
+    let toast = editor.toast().expect("save failure toast");
+    assert!(toast.message.starts_with("Save failed: "), "{}", toast.message);
+    assert_eq!(toast.kind, crate::host::ToastKind::Error);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn error_toast_lingers_until_the_next_keypress() {
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+
+    editor.show_toast("Save failed: disk full", crate::host::ToastKind::Error);
+    editor.update_timers();
+    assert_eq!(editor.toast().map(|toast| toast.kind), Some(crate::host::ToastKind::Error));
+
+    editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+    assert!(editor.toast().is_none());
+}
+
+#[test]
+fn toast_native_queues_a_window_toast() {
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+
+    editor.runtime_mut().eval_str("(toast \"Exported kit\")").unwrap();
+    editor.refresh_runtime_side_effects();
+    let toast = editor.toast().expect("toast from Lisp");
+    assert_eq!(toast.message, "Exported kit");
+    assert_eq!(toast.kind, crate::host::ToastKind::Success);
+
+    editor.runtime_mut().eval_str("(toast \"Export failed\" :kind :error)").unwrap();
+    editor.refresh_runtime_side_effects();
+    let toast = editor.toast().expect("error toast from Lisp");
+    assert_eq!(toast.message, "Export failed");
+    assert_eq!(toast.kind, crate::host::ToastKind::Error);
+
+    // An unknown :kind is rejected rather than rendered as success.
+    let _ = editor.runtime_mut().eval_str("(toast \"x\" :kind :warning)");
+    editor.refresh_runtime_side_effects();
+    assert_eq!(editor.toast().map(|toast| toast.message.as_str()), Some("Export failed"));
+}
+
+#[test]
 fn quit_does_not_prompt_for_dirty_scratch_buffer() {
     let runtime = Runtime::new();
     let mut editor = Editor::new(runtime, EditorConfig::default());
@@ -5113,6 +5219,81 @@ fn cmd_y_toggles_visible_patcher_selected_cable_without_widget_focus() {
     assert_ne!(after, initially_segmented);
 }
 
+/// Load the REAL ui/patcher.lisp, mount a patcher the way the host's buffer
+/// template does, and right-click the canvas: the menu state opens and the
+/// entries evaluate without a Lisp error.
+#[test]
+fn real_patcher_lisp_right_click_opens_context_menu() {
+    let _overlay_guard = OverlayClearGuard;
+    let path = temp_file_path("patcher-context-menu");
+    std::fs::write(&path, "(def sig (in 1))\n(out sig 1)\n").unwrap();
+
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    let source_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../content/ui/patcher.lisp");
+    let source = std::fs::read_to_string(&source_path).expect("read real patcher.lisp");
+    editor
+        .runtime_mut()
+        .eval_source_at_path(source_path, &source)
+        .expect("load real patcher.lisp");
+    editor.active_buffer_mut().view_mode = super::ViewMode::UiOnly;
+    editor.set_layout_viewport(40, 14);
+    editor
+        .runtime
+        .eval_str(&format!(
+            r#"
+                (effect
+                  (v-stack :width :fill :height :fill
+                    (eseq.patcher/context-menu-panel)
+                    (patcher
+                      :height 12
+                      :path "{}"
+                      :on-focus-key (lambda (key text) (eseq.patcher/handle-focus-key key text))
+                      :on-right-click (lambda (event) (eseq.patcher/open-context-menu event)))))
+                "#,
+            path.display()
+        ))
+        .unwrap();
+    editor.set_layout_viewport(40, 14);
+    assert_eq!(
+        editor.runtime.eval_str("eseq.patcher/menu-open").unwrap(),
+        Some(Value::Bool(false))
+    );
+
+    editor.handle_mouse(
+        mouse_event(MouseEventKind::Down(MouseButton::Right), 30, 10),
+        0,
+        0,
+        40,
+        14,
+    );
+
+    assert_eq!(
+        editor.runtime.eval_str("eseq.patcher/menu-open").unwrap(),
+        Some(Value::Bool(true)),
+        "right-click on the canvas opens the patcher context menu"
+    );
+    let entries = editor
+        .runtime
+        .eval_str("(len (eseq.patcher/menu-entries))")
+        .expect("menu entries evaluate");
+    assert!(
+        matches!(entries, Some(Value::Number(n)) if n >= 2.0),
+        "empty canvas still offers Ask Agent and Paste: {entries:?}"
+    );
+    assert_eq!(
+        editor
+            .runtime
+            .eval_str("(patcher-key-for-command \"open-bubble\")")
+            .unwrap(),
+        Some(Value::String(
+            crate::widget_render::patcher::resolve_default_binding_key("P-k")
+        )),
+        "the Lisp defaults populated the binding table"
+    );
+}
+
 #[test]
 fn cmd_k_opens_visible_patcher_agentic_bubble_without_widget_focus() {
     let path = temp_file_path("patcher-visible-cmd-k");
@@ -5166,6 +5347,221 @@ fn cmd_k_opens_visible_patcher_agentic_bubble_without_widget_focus() {
             .widget_type,
         "patcher"
     );
+}
+
+/// An editor with the REAL ui/patcher.lisp loaded and one patcher per path,
+/// each mounted the way the host's buffer template mounts it.
+fn real_patcher_lisp_editor(paths: &[&std::path::Path]) -> Editor {
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    let source_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../content/ui/patcher.lisp");
+    let source = std::fs::read_to_string(&source_path).expect("read real patcher.lisp");
+    editor
+        .runtime_mut()
+        .eval_source_at_path(source_path, &source)
+        .expect("load real patcher.lisp");
+    editor.active_buffer_mut().view_mode = super::ViewMode::UiOnly;
+    editor.set_layout_viewport(40, 24);
+    let patchers = paths
+        .iter()
+        .map(|path| {
+            format!(
+                r#"(patcher
+                      :height 10
+                      :path "{}"
+                      :on-focus-key (lambda (key text) (eseq.patcher/handle-focus-key key text)))"#,
+                path.display()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    editor
+        .runtime
+        .eval_str(&format!(
+            "(effect (v-stack :width :fill :height :fill {patchers}))"
+        ))
+        .unwrap();
+    editor.set_layout_viewport(40, 24);
+    editor
+}
+
+fn patcher_layout_nodes(editor: &Editor) -> Vec<crate::layout::LayoutNode> {
+    fn collect(node: &crate::layout::LayoutNode, out: &mut Vec<crate::layout::LayoutNode>) {
+        if node.widget_type == "patcher" {
+            out.push(node.clone());
+        }
+        for child in &node.children {
+            collect(child, out);
+        }
+    }
+    let mut out = Vec::new();
+    collect(
+        editor.runtime.current_layout.as_ref().expect("patcher layout"),
+        &mut out,
+    );
+    out
+}
+
+/// Edit > Copy / Paste / Delete on a focused patcher run its Lisp-bound
+/// commands. The patcher refuses the synthetic key, so the action has to
+/// reach its :on-focus-key; driven through the editor, not `press_patcher_key`.
+#[test]
+fn edit_menu_copy_paste_delete_reach_a_focused_patcher() {
+    let path = temp_file_path("patcher-edit-menu");
+    std::fs::write(&path, "(def sig (in 1))\n(out sig 1)\n").unwrap();
+    let mut editor = real_patcher_lisp_editor(&[&path]);
+    let patcher = patcher_layout_nodes(&editor).remove(0);
+    editor.set_focused_widget(patcher.clone());
+    crate::widget_render::patcher::select_first_patcher_node_for_test(&patcher)
+        .expect("a node to select");
+    let before = crate::widget_render::patcher::patcher_visible_node_count_for_test(&patcher);
+    assert!(before > 0);
+
+    assert!(editor.perform_edit_action("copy"));
+    assert!(editor.perform_edit_action("paste"));
+    let pasted = crate::widget_render::patcher::patcher_visible_node_count_for_test(&patcher);
+    assert!(pasted > before, "Edit > Paste adds the copied node: {before} -> {pasted}");
+
+    crate::widget_render::patcher::select_first_patcher_node_for_test(&patcher)
+        .expect("a node to select");
+    assert!(editor.perform_edit_action("delete"));
+    assert_eq!(
+        crate::widget_render::patcher::patcher_visible_node_count_for_test(&patcher),
+        pasted - 1,
+        "Edit > Delete removes the selected node"
+    );
+}
+
+/// Escape dismisses an error bubble through the Lisp ESC binding. The patcher
+/// refuses Escape outside text entry, so the editor's Escape path must offer
+/// it to :on-focus-key before blurring.
+#[test]
+fn escape_through_editor_dismisses_an_error_bubble_on_a_focused_patcher() {
+    let path = temp_file_path("patcher-escape-error-bubble");
+    std::fs::write(&path, "(def sig (in 1))\n(out sig 1)\n").unwrap();
+    let mut editor = real_patcher_lisp_editor(&[&path]);
+    let patcher = patcher_layout_nodes(&editor).remove(0);
+    editor.set_focused_widget(patcher.clone());
+    let bubble_id = crate::widget_render::patcher::show_agentic_error_bubble_for_test(&patcher);
+
+    editor.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+    assert_eq!(
+        crate::widget_render::patcher::patcher_agentic_bubble_dismissed_for_test(
+            &patcher, &bubble_id
+        ),
+        Some(true),
+        "Escape dismisses the error bubble"
+    );
+    assert!(
+        editor.focused_widget_node().is_some(),
+        "a handled Escape keeps the patcher focused"
+    );
+
+    // With nothing left to dismiss, Escape blurs as before.
+    editor.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(editor.focused_widget_node().is_none());
+}
+
+/// A key handed to :on-focus-key runs against the focused patcher, never
+/// against one an earlier refusal or right-click recorded.
+#[test]
+fn patcher_command_targets_the_focused_patcher_not_a_stale_one() {
+    let path_a = temp_file_path("patcher-stale-target-a");
+    let path_b = temp_file_path("patcher-stale-target-b");
+    std::fs::write(&path_a, "(def sig (in 1))\n(out sig 1)\n").unwrap();
+    std::fs::write(&path_b, "(def sig (in 2))\n(out sig 1)\n").unwrap();
+    let mut editor = real_patcher_lisp_editor(&[&path_a, &path_b]);
+    // Space is refused before the patcher's key_event ever runs (it is not a
+    // text widget), so the widget never records itself as the target.
+    editor
+        .runtime_mut()
+        .eval_str(r#"(eseq.patcher/bind-key " " "dismiss-bubble")"#)
+        .unwrap();
+    let mut patchers = patcher_layout_nodes(&editor);
+    assert_eq!(patchers.len(), 2);
+    let b = patchers.remove(1);
+    let a = patchers.remove(0);
+    let bubble_a = crate::widget_render::patcher::show_agentic_error_bubble_for_test(&a);
+    // A right-click on A left it recorded.
+    crate::widget_render::patcher::set_focus_key_target(&a);
+    editor.set_focused_widget(b.clone());
+
+    editor.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+
+    assert_eq!(
+        crate::widget_render::patcher::patcher_agentic_bubble_dismissed_for_test(&a, &bubble_a),
+        Some(false),
+        "a key pressed in patcher B must not act on patcher A"
+    );
+}
+
+/// `unbind-key` removes a chord for good: Cmd+K no longer opens a bubble on a
+/// visible patcher, focus stays put, and the global binding gets the key.
+#[test]
+fn unbound_patcher_chord_falls_through_to_the_global_binding() {
+    let path = temp_file_path("patcher-unbind-cmd-k");
+    std::fs::write(&path, "(def sig (in 1))\n(out sig 1)\n").unwrap();
+    let mut editor = real_patcher_lisp_editor(&[&path]);
+    let primary = crate::ui::platform::primary_shortcut_modifier();
+    let chord = key_str(KeyEvent::new(KeyCode::Char('k'), primary));
+    editor
+        .runtime_mut()
+        .eval_str(&format!(
+            r#"
+            (eseq.patcher/unbind-key "P-k")
+            (def global-k-count (state 0))
+            (def count-global-k ()
+              (set! global-k-count (+ global-k-count 1)))
+            (bind-key "{chord}" "count-global-k")
+            "#
+        ))
+        .unwrap();
+    editor.refresh_runtime_side_effects();
+    let patcher = patcher_layout_nodes(&editor).remove(0);
+    editor.clear_focused_widget();
+
+    editor.handle_key(KeyEvent::new(KeyCode::Char('k'), primary));
+
+    assert_eq!(
+        crate::widget_render::patcher::patcher_agentic_bubble_count(&patcher),
+        0,
+        "an unbound Cmd+K must not revive its default open-bubble binding"
+    );
+    assert!(
+        editor.focused_widget_node().is_none(),
+        "an unbound chord must not move focus to the patcher"
+    );
+    assert_eq!(
+        editor.runtime_mut().eval_str("global-k-count").unwrap(),
+        Some(Value::Number(1.0)),
+        "the global binding receives the unbound chord"
+    );
+}
+
+/// Menu hints name the platform-primary chord, not the legacy Ctrl duplicate
+/// that sorts first, and render in platform notation.
+#[test]
+fn patcher_menu_hint_prefers_the_primary_chord() {
+    let path = temp_file_path("patcher-menu-hint");
+    std::fs::write(&path, "(def sig (in 1))\n(out sig 1)\n").unwrap();
+    let editor = real_patcher_lisp_editor(&[&path]);
+    let _ = editor;
+    for (pattern, command) in [("P-c", "copy"), ("P-z", "undo"), ("P-S-z", "redo"), ("P-e", "encapsulate")] {
+        assert_eq!(
+            crate::widget_render::patcher::patcher_key_for_command(command),
+            Some(crate::widget_render::patcher::resolve_default_binding_key(pattern)),
+            "{command} hint"
+        );
+    }
+    if crate::ui::platform::CURRENT_SHORTCUT_PLATFORM
+        == crate::ui::platform::ShortcutPlatform::MacOS
+    {
+        assert_eq!(crate::widget_render::patcher::patcher_key_label("s-c"), "⌘C");
+        assert_eq!(crate::widget_render::patcher::patcher_key_label("S-s-z"), "⇧⌘Z");
+    } else {
+        assert_eq!(crate::widget_render::patcher::patcher_key_label("C-S-z"), "Ctrl+Shift+Z");
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -15256,7 +15652,7 @@ fn real_choose_model_dropdown_row_click_selects() {
             if let Some(Value::String(v)) = args.first() {
                 *picked_for_set.borrow_mut() = v.clone();
             }
-            Ok(Value::Nil)
+            Ok(Value::Bool(true))
         });
     let source_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../content/ui/choose-model.lisp");
@@ -15333,6 +15729,29 @@ fn real_choose_model_dropdown_row_click_selects() {
     );
 }
 
+
+#[test]
+fn real_choose_model_reports_catalog_errors_without_closing_or_claiming_selection() {
+    let mut runtime = Runtime::new();
+    runtime.register_native("agent/models", |_args, _ctx| {
+        Err("invalid agent-models.lisp catalog".to_string())
+    });
+    runtime.register_native("agent/set-patch-model", |_args, _ctx| {
+        Err("selected model was removed from agent-models.lisp".to_string())
+    });
+    let source_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../content/ui/choose-model.lisp");
+    let source = std::fs::read_to_string(&source_path).unwrap();
+    runtime.eval_source_at_path(source_path, &source).unwrap();
+    runtime.eval_str("(eseq.choose-model/choose-model)").unwrap();
+    let options = runtime.eval_str("(eseq.choose-model/options)").unwrap();
+    assert!(matches!(options, Some(Value::List(rows)) if rows.len() == 1));
+    assert!(runtime.take_status_message().unwrap().contains("invalid agent-models.lisp"));
+    runtime.eval_str(r#"(eseq.choose-model/select-model "removed-model")"#).unwrap();
+    assert_eq!(runtime.eval_str("eseq.choose-model/open?").unwrap(), Some(Value::Bool(true)));
+    assert_eq!(runtime.eval_str("eseq.choose-model/generation").unwrap(), Some(Value::Number(0.0)));
+    assert!(runtime.take_status_message().unwrap().contains("selected model was removed"));
+}
 
 /// Differential probe: identical to module_dropdown_row_click test but the
 /// module fn is named `select` (a builtin widget name).

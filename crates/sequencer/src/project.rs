@@ -537,6 +537,7 @@ impl<'de> Deserialize<'de> for ProjectFile {
         };
         project.normalize_device_instances().map_err(D::Error::custom)?;
         migrate_legacy_chop_to_retrig(&mut project);
+        migrate_legacy_process_class_names(&mut project);
         // A take with no chunks is structurally impossible (registration
         // rejects empty chunk lists), and the loader would skip it silently
         // — desyncing the positional `track_sounds.takes` alignment so
@@ -2121,6 +2122,8 @@ pub struct ProjectRackSlotPattern {
     pub mute: bool,
     #[serde(default)]
     pub solo: bool,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
     #[serde(default = "default_max_polyphony")]
     pub max_polyphony: usize,
     #[serde(default)]
@@ -2720,6 +2723,7 @@ impl From<RackSlotSnapshot> for ProjectRackSlotPattern {
             pan: value.pan,
             mute: value.mute,
             solo: value.solo,
+            enabled: value.enabled,
             max_polyphony: value.max_polyphony,
             param_plocks: value.param_plocks.rows,
             instrument_slot: ProjectEffectSlot::from(&value.instrument_slot),
@@ -2767,6 +2771,7 @@ impl From<ProjectRackSlotPattern> for RackSlotSnapshot {
             pan: value.pan.clamp(-1.0, 1.0),
             mute: value.mute,
             solo: value.solo,
+            enabled: value.enabled,
             max_polyphony: value.max_polyphony.clamp(1, crate::audio::MAX_VOICES),
             param_plocks: RackSlotParamPlocks::from_rows(value.param_plocks),
             instrument_slot: value.instrument_slot.into_snapshot_with_node_ids(0, 0),
@@ -3285,6 +3290,84 @@ fn default_master_volume() -> f32 {
 /// value keeps round-tripping; this only fills the two new columns, and only
 /// where they are still at their defaults (a project already carrying retrig
 /// data was written by a build that had it, so its retrig columns win).
+/// Process classes renamed since the project was saved
+/// (`process::LEGACY_PROCESS_CLASS_RENAMES`): every chain the file holds,
+/// including graph node patches and rack clips, plus the lane rosters.
+fn migrate_legacy_process_class_names(project: &mut ProjectFile) {
+    use crate::process::{migrate_legacy_process_class_name, migrate_legacy_process_class_names_in_chain};
+    fn overrides(list: &mut [ProjectGraphOverrides]) {
+        for graph in list {
+            for node in &mut graph.node_intrinsics {
+                if let Some(chain) = node.process_chain.as_mut() {
+                    migrate_legacy_process_class_names_in_chain(chain);
+                }
+            }
+        }
+    }
+    for pattern in &mut project.patterns {
+        for chain in &mut pattern.process_chains {
+            migrate_legacy_process_class_names_in_chain(chain);
+        }
+        migrate_legacy_process_class_names_in_chain(&mut pattern.project_process_chain);
+        overrides(&mut pattern.graph_overrides);
+    }
+    for roster in &mut project.track_lane_rosters {
+        for slot in roster {
+            migrate_legacy_process_class_name(&mut slot.class_name);
+        }
+    }
+    for group in &mut project.groups {
+        if let Some(rack) = group.rack.as_mut() {
+            for clip in &mut rack.clips {
+                overrides(&mut clip.graph_overrides);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod legacy_process_class_tests {
+    use super::*;
+
+    #[test]
+    fn renamed_classes_migrate_in_chains_wires_rosters_and_node_patches() {
+        let mut chain = crate::process::TrackProcessChain::default();
+        let mut slot = crate::process::TrackProcessSlot {
+            instance_id: crate::process::ProcessInstanceId(7),
+            instance_name: None,
+            class_name: "lane-xpose".to_string(),
+            enabled: true,
+            project_layer: false,
+            inlets: Default::default(),
+            lanes: Default::default(),
+            fanout: Default::default(),
+            unbound_ports: Default::default(),
+            bindings: Default::default(),
+        };
+        slot.bindings.insert(
+            "wire".to_string(),
+            Some(crate::process::ParamTarget::ProcessInlet {
+                process: "lane-xpose-b".to_string(),
+                inlet: "gate".to_string(),
+                instance_id: None,
+            }),
+        );
+        chain.slots.push(slot);
+        assert!(crate::process::migrate_legacy_process_class_names_in_chain(&mut chain));
+        assert_eq!(chain.slots[0].class_name, "xpose-by-track");
+        let Some(Some(crate::process::ParamTarget::ProcessInlet { process, .. })) =
+            chain.slots[0].bindings.get("wire")
+        else {
+            panic!("wire target kept");
+        };
+        assert_eq!(process, "xpose-by-track-b");
+        assert!(!crate::process::migrate_legacy_process_class_names_in_chain(&mut chain), "idempotent");
+        let mut name = "lane-prob".to_string();
+        assert!(!crate::process::migrate_legacy_process_class_name(&mut name));
+        assert_eq!(name, "lane-prob");
+    }
+}
+
 fn migrate_legacy_chop_to_retrig(project: &mut ProjectFile) {
     use crate::sequencer::StepParam;
     let chop_idx = StepParam::Chop.index();
@@ -4260,6 +4343,7 @@ mod tests {
                         duration: None,
                         swing: None,
                         neural_group: None,
+                        process_chain: None,
                     }],
                     node_params: vec![crate::graph::ProjectGraphNodeParamOverride {
                         group: "nrn".to_string(),
@@ -4281,6 +4365,8 @@ mod tests {
                     group_gain: None,
                     group_coupling: None,
                     group_trace_decay: None,
+                    group_coupling_scale: None,
+                    group_excite_floor: None,
                 }],
                 scene_slots: std::collections::BTreeMap::new(),
                 sample_paths: vec![None, Some("samples/drums/kick.wav".to_string())],
@@ -6416,6 +6502,39 @@ mod tests {
         assert_eq!(restored_rack.slots[0].choke_group, Some(1));
     }
 
+    /// eseq-bw9v: files written before the slot enable toggle load with every
+    /// slot enabled, and a disabled slot survives a save/load.
+    #[test]
+    fn rack_slot_enabled_defaults_on_and_round_trips() {
+        let slot = ProjectRackSlotPattern {
+            instrument_type: ProjectInstrumentType::Sampler,
+            instrument_run_mode: ProjectCustomInstrumentRunMode::Instrument,
+            instrument_base_note_offset: 0.0,
+            choke_group: None,
+            gain: 1.0,
+            pan: 0.0,
+            mute: false,
+            solo: false,
+            enabled: false,
+            max_polyphony: 4,
+            param_plocks: Vec::new(),
+            instrument_slot: ProjectEffectSlot::default(),
+            effect_slots: Vec::new(),
+            custom_effects: Vec::new(),
+            track_sound_state: ProjectTrackSoundState::default(),
+            sample_path: None,
+            sample_name: None,
+        };
+        let mut value = serde_json::to_value(&slot).unwrap();
+        let restored: ProjectRackSlotPattern = serde_json::from_value(value.clone()).unwrap();
+        assert!(!restored.enabled, "a disabled slot round-trips");
+        value.as_object_mut().unwrap().remove("enabled");
+        let legacy: ProjectRackSlotPattern = serde_json::from_value(value).unwrap();
+        assert!(legacy.enabled, "legacy files load every slot enabled");
+        let snapshot = RackSlotSnapshot::from(restored);
+        assert!(!snapshot.enabled);
+    }
+
     #[test]
     fn legacy_by_pitch_rack_loads_as_a_plain_layering_rack() {
         let pattern = ProjectRackTrackPattern {
@@ -6429,6 +6548,7 @@ mod tests {
                 pan: 0.0,
                 mute: false,
                 solo: false,
+                enabled: true,
                 max_polyphony: 4,
                 param_plocks: Vec::new(),
                 instrument_slot: ProjectEffectSlot::default(),
@@ -6528,6 +6648,7 @@ mod tests {
                     pan: 0.0,
                     mute: false,
                     solo: false,
+                    enabled: true,
                     max_polyphony: 4,
                     param_plocks: Vec::new(),
                     instrument_slot: ProjectEffectSlot::default(),

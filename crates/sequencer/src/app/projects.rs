@@ -1477,6 +1477,7 @@ impl App {
                     pan: 0.0,
                     mute: false,
                     solo: false,
+                    enabled: true,
                     max_polyphony: crate::audio::MAX_VOICES,
                     param_plocks: Vec::new(),
                     instrument_slot: pattern.instrument_slots[track].clone(),
@@ -1529,6 +1530,7 @@ impl App {
                     pan: 0.0,
                     mute: false,
                     solo: false,
+                    enabled: true,
                     max_polyphony: crate::audio::MAX_VOICES,
                     param_plocks: Vec::new(),
                     instrument_slot: pattern.instrument_slots[track].clone(),
@@ -3895,6 +3897,10 @@ impl App {
                                         .as_ref()
                                         .map(|slot| slot.solo)
                                         .unwrap_or(false),
+                                    enabled: saved_slot
+                                        .as_ref()
+                                        .map(|slot| slot.enabled)
+                                        .unwrap_or(true),
                                     max_polyphony: saved_slot
                                         .as_ref()
                                         .map(|slot| slot.max_polyphony)
@@ -4020,6 +4026,22 @@ impl App {
                                     rack_slot,
                                     effect_slot,
                                 );
+                            }
+                            // A parked slot's whole chain (built-in FX with
+                            // no saved custom effect included) starts
+                            // bypassed, even on a track that is only ever
+                            // played live (eseq-bw9v).
+                            let slot_count = self
+                                .state
+                                .pattern
+                                .rack_tracks
+                                .lock()
+                                .unwrap()
+                                .get(track_idx)
+                                .and_then(Option::as_ref)
+                                .map_or(0, |rack| rack.slots.len());
+                            for rack_slot in 0..slot_count {
+                                self.push_rack_slot_fx_gate(track_idx, rack_slot);
                             }
                         }
                     }

@@ -127,9 +127,9 @@
                 (es-compressor-knob fx "tone / %" tone-p 0 "linear"))
               (es-compressor-caption
                 (let ((mode-value (reactive-value (pc/fx-param-value-for fx mode-p))))
-                  (if (= mode-value 1) "optical excitation / recovery · tone = darkness"
+                  (if (= mode-value 1) "leveling · +8.5 dB nominal gain"
                     (if (= mode-value 2) "grab-and-settle · automatic makeup"
-                      "coupled timing · manual output makeup"))))))
+                      "broad-knee punch · manual output makeup"))))))
           (es-compressor-surface 8 :instrument-control-bg
             (v-stack :gap 0.18 :align :start
               (es-compressor-heading "GAIN")

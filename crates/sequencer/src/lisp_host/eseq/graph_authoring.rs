@@ -22,6 +22,7 @@ pub fn register_graph_authoring_natives(
     // Writable mirror of resolved graph values; `bind-graph` reads it, `reactive-set`
     // dirties it. Dynamic-field namespace (no declared fields), like SEQV.
     runtime.register_reactive(GRAPH_REACTIVE_NS, vec![], true);
+    register_graph_node_process_natives(runtime, Arc::clone(&state));
 
     runtime.register_native_with_docs(
         "steps",
@@ -448,7 +449,7 @@ pub fn register_graph_authoring_natives(
     runtime.register_native_with_docs(
         "graph-config-value",
         "(graph-config-value sequencer :reset-bars)",
-        "Resolved sequencer-level config, override-or-manifest. Fields: :reset-bars, :max-poly, :max-poly-selection, :node-count, :group-trace-decay, and the neural-group matrix cells :group-gain-<row>-<col> (default 1) / :group-coupling-<row>-<col> (default 0), row = source group, col = target group.",
+        "Resolved sequencer-level config, override-or-manifest. Fields: :reset-bars, :max-poly, :max-poly-selection, :node-count, :group-trace-decay, :group-coupling-scale, :group-excite-floor, and the neural-group matrix cells :group-gain-<row>-<col> (default 1) / :group-coupling-<row>-<col> (default 0), row = source group, col = target group.",
         move |args, _ctx| {
             if args.len() != 2 {
                 return Err("graph-config-value expects graph and field".to_string());
@@ -464,7 +465,7 @@ pub fn register_graph_authoring_natives(
     runtime.register_native_with_docs(
         "graph-config",
         "(graph-config sequencer :reset-bars 4)",
-        "Set a sequencer-level config override: :reset-bars (in bars), :max-poly, :max-poly-selection, :node-count, :group-trace-decay (0-1 per-beat activity-trace decay), :group-gain-<row>-<col> (0-2, propagation gain from group row to group col), :group-coupling-<row>-<col> (-2 to 2, activity in group row offsets group col's threshold; positive suppresses, negative excites). Values clamp to their range; one call writes one matrix cell.",
+        "Set a sequencer-level config override: :reset-bars (in bars), :max-poly, :max-poly-selection, :node-count, :group-trace-decay (0-1 per-beat activity-trace decay), :group-coupling-scale (0-2 global multiplier on the whole H matrix, default 1), :group-excite-floor (0-1 fraction of the authored threshold excitation cannot push below, default 0.25; 0 = excited groups may fire on zero energy), :group-gain-<row>-<col> (0-2, propagation gain from group row to group col), :group-coupling-<row>-<col> (-2 to 2, activity in group row offsets group col's threshold; positive suppresses, negative excites). Values clamp to their range; one call writes one matrix cell.",
         move |args, ctx| {
             if args.len() != 3 {
                 return Err("graph-config expects graph, field, value".to_string());
@@ -642,6 +643,28 @@ fn cached_graph_runtime_config(
             }
         }
         let config = Rc::new(graph_runtime_config_for_current_pattern(state, manifest));
+        if std::env::var_os("ESEQ_DEBUG_GRAPH_MEMO").is_some() {
+            let overrides = resolved_graph_overrides_for_manifest(state, manifest);
+            eprintln!(
+                "[graph-memo] miss manifest={} ({}, owner {:?}) pattern={pattern} snapshot_v={snapshot_version} published_v={published_version} nodes={} overrides={} composed_total={}",
+                manifest.id,
+                manifest.name,
+                manifest.owner_rack,
+                config.nodes.len(),
+                overrides
+                    .as_ref()
+                    .map(|o| format!(
+                        "node_count={:?} intrinsics={} edges={} id={} owner={:?}",
+                        o.node_count,
+                        o.node_intrinsics.len(),
+                        o.edge_params.len(),
+                        o.sequencer_id,
+                        o.owner_rack
+                    ))
+                    .unwrap_or_else(|| "NONE".to_string()),
+                state.current_graph_overrides().len(),
+            );
+        }
         *slot = Some(GraphConfigCacheEntry {
             manifest_id: manifest.id,
             pattern,
@@ -814,15 +837,33 @@ fn resolved_graph_config_value(
             if !manifest.shape.is_variable_line() {
                 return Err("graph config :node-count requires a variable line shape".to_string());
             }
-            Ok(EValue::Number(
-                manifest.shape.resolved_node_count(overrides.as_ref()) as f64,
-            ))
+            // Read the count off the same memoized runtime config that
+            // `bind-graph` range-checks node indices against, so one render
+            // can never loop over more rows than it can bind: a panel that
+            // sized itself from a fresh override read while the memo lagged
+            // behind an unpublished edit failed every row past the memo's
+            // node list, and the error flood stalled the tab.
+            Ok(EValue::Number(graph_active_node_count(state, manifest) as f64))
         }
         "group-trace-decay" => {
             let value = overrides
                 .as_ref()
                 .and_then(|o| o.group_trace_decay)
                 .unwrap_or(crate::graph::GROUP_TRACE_DECAY_DEFAULT);
+            Ok(EValue::Number(value))
+        }
+        "group-coupling-scale" => {
+            let value = overrides
+                .as_ref()
+                .and_then(|o| o.group_coupling_scale)
+                .unwrap_or(crate::graph::GROUP_COUPLING_SCALE_DEFAULT);
+            Ok(EValue::Number(value))
+        }
+        "group-excite-floor" => {
+            let value = overrides
+                .as_ref()
+                .and_then(|o| o.group_excite_floor)
+                .unwrap_or(crate::graph::GROUP_EXCITE_FLOOR_DEFAULT);
             Ok(EValue::Number(value))
         }
         other => {
@@ -896,6 +937,8 @@ fn set_graph_config_value(
         GroupGainCell(usize, f64),
         GroupCouplingCell(usize, f64),
         GroupTraceDecay(f64),
+        GroupCouplingScale(f64),
+        GroupExciteFloor(f64),
     }
 
     let edit = match field {
@@ -925,6 +968,26 @@ fn set_graph_config_value(
                 return Err("graph config :group-trace-decay expects a finite value".to_string());
             }
             ConfigEdit::GroupTraceDecay(value.clamp(0.0, 1.0))
+        }
+        "group-coupling-scale" => {
+            let value = graph_number(value).ok_or_else(|| {
+                "graph config :group-coupling-scale expects a numeric value".to_string()
+            })?;
+            if !value.is_finite() {
+                return Err("graph config :group-coupling-scale expects a finite value".to_string());
+            }
+            ConfigEdit::GroupCouplingScale(
+                value.clamp(0.0, crate::graph::GROUP_COUPLING_SCALE_MAX),
+            )
+        }
+        "group-excite-floor" => {
+            let value = graph_number(value).ok_or_else(|| {
+                "graph config :group-excite-floor expects a numeric value".to_string()
+            })?;
+            if !value.is_finite() {
+                return Err("graph config :group-excite-floor expects a finite value".to_string());
+            }
+            ConfigEdit::GroupExciteFloor(value.clamp(0.0, 1.0))
         }
         other => {
             if let Some(index) = parse_group_cell_index(other, "group-gain-") {
@@ -981,6 +1044,8 @@ fn set_graph_config_value(
                 cells[index] = value;
             }
             ConfigEdit::GroupTraceDecay(value) => graph.group_trace_decay = Some(value),
+            ConfigEdit::GroupCouplingScale(value) => graph.group_coupling_scale = Some(value),
+            ConfigEdit::GroupExciteFloor(value) => graph.group_excite_floor = Some(value),
         }
         Ok(())
     })
@@ -1297,6 +1362,7 @@ fn ensure_graph_node_intrinsic<'a>(
             duration: None,
             swing: None,
             neural_group: None,
+            process_chain: None,
         });
     graph
         .node_intrinsics
@@ -1612,4 +1678,891 @@ fn graph_manifest_to_value(
         ),
     );
     EValue::Map(map)
+}
+
+
+// ── Node process patches (docs/graph-node-processes-spec.md §5) ──────────────
+//
+// A node's process patch lives on its intrinsic override as a
+// `TrackProcessChain`. These natives are the node-side twins of the track
+// natives (`seq-add-track-process-slot`, `seq-set-process-inlet`,
+// `seq-bind-process-port`, ...) with `(graph node)` in place of `track`, and one
+// read that hands the UI everything it needs to draw the patch.
+
+/// Node process slot ids live in their own band, below the track roster band
+/// (`TRACK_ROSTER_INSTANCE_ID_BASE`), so they can never collide with roster
+/// slots minted later on a track.
+const GRAPH_NODE_PROCESS_ID_BASE: u64 = 1 << 45;
+
+/// Session high-water mark of minted node slot ids. A removed slot's id is
+/// never handed out again in this session, so a re-added slot can neither
+/// resume the removed slot's runtime state (keyed by id) nor pick up a stale
+/// cable, and a slot minted in another scene never shares an id with one
+/// minted here.
+static GRAPH_NODE_PROCESS_ID_HIGH_WATER: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(GRAPH_NODE_PROCESS_ID_BASE);
+
+fn next_graph_node_process_id(graphs: &[crate::graph::ProjectGraphOverrides]) -> u64 {
+    let highest = graphs
+        .iter()
+        .flat_map(|graph| graph.node_intrinsics.iter())
+        .filter_map(|node| node.process_chain.as_ref())
+        .flat_map(|chain| chain.slots.iter())
+        .map(|slot| slot.instance_id.0)
+        .filter(|id| (GRAPH_NODE_PROCESS_ID_BASE..crate::process::TRACK_ROSTER_INSTANCE_ID_BASE).contains(id))
+        .max();
+    let next = highest.map(|id| id + 1).unwrap_or(GRAPH_NODE_PROCESS_ID_BASE);
+    next.max(GRAPH_NODE_PROCESS_ID_HIGH_WATER.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+/// Record that `id` was minted, so it is never minted again this session.
+fn claim_graph_node_process_id(id: u64) {
+    GRAPH_NODE_PROCESS_ID_HIGH_WATER.fetch_max(id + 1, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn graph_node_process_def(
+    state: &crate::sequencer::SequencerState,
+    class_name: &str,
+) -> Option<crate::process::PublishedProcessDef> {
+    state
+        .published_process_authoring()
+        .defs
+        .into_iter()
+        .find(|def| def.name == class_name)
+}
+
+/// Node-flavoured display name for a process class: the track lane classes
+/// drop their `lane-` prefix (a lane inlet is just a knob on a node), the
+/// Cirklon pair spell out what they read. Data keeps the class name.
+pub fn graph_node_process_label(class_name: &str) -> String {
+    match class_name {
+        "xpose-by-track" => "xpose by track".to_string(),
+        "xpose-by-track-b" => "xpose by track +b".to_string(),
+        "neural-transpose" => "transpose".to_string(),
+        "neural-scale" => "scale".to_string(),
+        "neural-delay" => "delay".to_string(),
+        "neural-reset" => "reset".to_string(),
+        other => other.strip_prefix("lane-").unwrap_or(other).to_string(),
+    }
+}
+
+/// Classes whose only effect is a command the node runner ignores
+/// (ratchet / roll), or that read the track's painted steps: hidden from the
+/// node picker so the list is what actually does something on a fire.
+/// `lane-reset` only sends when its own gate lane is high, and nodes have no
+/// lanes; it also shows as "reset", the same as `neural-reset`, which is the
+/// node's real reset (its `fired` port rises after a bar/graph reset).
+pub const GRAPH_NODE_HIDDEN_PROCESS_CLASSES: [&str; 4] =
+    ["lane-roll", "repeater", "lane-grab", "lane-reset"];
+
+fn graph_node_process_inlet_kind_value(kind: &crate::process::ProcessInletKind) -> EValue {
+    use crate::process::ProcessInletKind::*;
+    match kind {
+        Float => EValue::String("float".into()),
+        Int => EValue::String("int".into()),
+        Gate => EValue::String("gate".into()),
+        Track => EValue::String("track".into()),
+        Field => EValue::String("field".into()),
+        Any => EValue::String("any".into()),
+        Enum(_) => EValue::String("enum".into()),
+    }
+}
+
+/// One slot of a node patch as the UI sees it: identity, class metadata,
+/// scalar inlet values and, per connectable port, what it is wired to.
+fn graph_node_process_slot_value(
+    state: &crate::sequencer::SequencerState,
+    slot: &crate::process::TrackProcessSlot,
+) -> EValue {
+    let def = graph_node_process_def(state, &slot.class_name);
+    let mut map = HashMap::new();
+    map.insert("instance-id".to_string(), lisp_number(slot.instance_id.0 as f64));
+    map.insert("class".to_string(), lisp_string(slot.class_name.clone()));
+    map.insert("label".to_string(), lisp_string(graph_node_process_label(&slot.class_name)));
+    map.insert("enabled".to_string(), lisp_bool(slot.enabled));
+    map.insert(
+        "doc".to_string(),
+        lisp_string(def.as_ref().and_then(|d| d.doc.clone()).unwrap_or_default()),
+    );
+    map.insert("known".to_string(), lisp_bool(def.is_some()));
+    let mut inlets = HashMap::new();
+    for (name, value) in &slot.inlets {
+        inlets.insert(name.clone(), lisp_value(value.to_value()));
+    }
+    map.insert("inlets".to_string(), lisp_value(EValue::Map(inlets)));
+    let inlet_defs = def
+        .as_ref()
+        .map(|def| {
+            def.inlets
+                .iter()
+                .map(|inlet| {
+                    let mut m = HashMap::new();
+                    m.insert("name".to_string(), lisp_string(inlet.name.clone()));
+                    m.insert("kind".to_string(), lisp_value(graph_node_process_inlet_kind_value(&inlet.kind)));
+                    m.insert(
+                        "min".to_string(),
+                        lisp_value(inlet.min.map(|v| EValue::Number(v as f64)).unwrap_or(EValue::Nil)),
+                    );
+                    m.insert(
+                        "max".to_string(),
+                        lisp_value(inlet.max.map(|v| EValue::Number(v as f64)).unwrap_or(EValue::Nil)),
+                    );
+                    m.insert("default".to_string(), lisp_value(inlet.default.to_value()));
+                    // The slot's current scalar for this inlet (or the default), so
+                    // the UI never has to index the inlets map by a string key.
+                    m.insert(
+                        "value".to_string(),
+                        lisp_value(
+                            slot.inlets
+                                .get(&inlet.name)
+                                .map(|v| v.to_value())
+                                .unwrap_or_else(|| inlet.default.to_value()),
+                        ),
+                    );
+                    m.insert("lane".to_string(), lisp_bool(inlet.lane));
+                    m.insert("doc".to_string(), lisp_string(inlet.doc.clone().unwrap_or_default()));
+                    let options = match &inlet.kind {
+                        crate::process::ProcessInletKind::Enum(options) => {
+                            lisp_list(options.iter().map(|o| EValue::String(o.clone())).collect())
+                        }
+                        _ => EValue::Nil,
+                    };
+                    m.insert("options".to_string(), lisp_value(options));
+                    EValue::Map(m)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    map.insert("inlet-defs".to_string(), lisp_value(lisp_list(inlet_defs)));
+    let ports = def
+        .as_ref()
+        .map(|def| {
+            def.ports
+                .iter()
+                .map(|port| {
+                    let mut m = HashMap::new();
+                    m.insert("name".to_string(), lisp_string(port.name.clone()));
+                    m.insert("connectable".to_string(), lisp_bool(port.is_connectable()));
+                    m.insert("mappable".to_string(), lisp_bool(port.is_mappable()));
+                    let hint = match &port.target {
+                        Some(crate::process::ProcessTargetHint::StepParam { param }) => {
+                            format!("step:{param}")
+                        }
+                        Some(other) => format!("{other:?}"),
+                        None => String::new(),
+                    };
+                    m.insert("hint".to_string(), lisp_string(hint));
+                    m.insert("unbound".to_string(), lisp_bool(slot.unbound_ports.contains(&port.name)));
+                    let wired = match slot.bindings.get(&port.name) {
+                        Some(Some(crate::process::ParamTarget::ProcessInlet { inlet, instance_id, .. })) => {
+                            let mut w = HashMap::new();
+                            w.insert(
+                                "instance-id".to_string(),
+                                lisp_value(
+                                    instance_id
+                                        .map(|id| EValue::Number(id.0 as f64))
+                                        .unwrap_or(EValue::Nil),
+                                ),
+                            );
+                            w.insert("inlet".to_string(), lisp_string(inlet.clone()));
+                            EValue::Map(w)
+                        }
+                        _ => EValue::Nil,
+                    };
+                    m.insert("wired-to".to_string(), lisp_value(wired));
+                    let mapped = match slot.bindings.get(&port.name) {
+                        Some(Some(crate::process::ParamTarget::StepParam { param })) => {
+                            EValue::String(param.clone())
+                        }
+                        _ => EValue::Nil,
+                    };
+                    m.insert("mapped-to".to_string(), lisp_value(mapped));
+                    EValue::Map(m)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    map.insert("ports".to_string(), lisp_value(lisp_list(ports)));
+    EValue::Map(map)
+}
+
+fn graph_node_process_args(
+    state: &crate::sequencer::SequencerState,
+    native: &str,
+    args: &[EValue],
+) -> Result<(crate::graph::GraphManifest, usize), String> {
+    if args.len() < 2 {
+        return Err(format!("{native} expects graph id/name and node index"));
+    }
+    let manifest = resolve_graph_manifest(state, &args[0])?;
+    let instance = parse_nonnegative_usize(&args[1], "node index")?;
+    if instance >= graph_capacity_node_count(&manifest) {
+        return Err(format!("{native} node index out of range"));
+    }
+    Ok((manifest, instance))
+}
+
+fn graph_node_process_id_arg(value: Option<&EValue>, native: &str) -> Result<crate::process::ProcessInstanceId, String> {
+    let id = value
+        .and_then(graph_number)
+        .ok_or_else(|| format!("{native} expects a slot instance id"))?;
+    Ok(crate::process::ProcessInstanceId(id as u64))
+}
+
+/// Edit one node's chain in place; `edit` returns `Err` to reject.
+fn edit_graph_node_process_chain<R>(
+    state: &crate::sequencer::SequencerState,
+    manifest: &crate::graph::GraphManifest,
+    instance: usize,
+    edit: impl FnOnce(&mut crate::process::TrackProcessChain, u64) -> Result<R, String>,
+) -> Result<R, String> {
+    state.edit_current_graph_overrides(|graphs| {
+        let next_id = next_graph_node_process_id(graphs);
+        let graph = ensure_graph_overrides(graphs, manifest);
+        let node = ensure_graph_node_intrinsic(graph, &manifest.node.name, instance);
+        let mut chain = node.process_chain.take().unwrap_or_default();
+        let result = edit(&mut chain, next_id)?;
+        node.process_chain = if chain.slots.is_empty() { None } else { Some(chain) };
+        Ok(result)
+    })
+}
+
+/// Cable ids for node patches live above every track: the lane patchbay
+/// folds a namespace into each port id (`(ns * 4096 + slot) * 16 + ordinal`,
+/// mirroring `lane_patch_port_id` on the UI side) and tracks use their index.
+pub const GRAPH_NODE_LANE_PATCH_NAMESPACE_BASE: usize = 1024;
+const LANE_PATCH_PORT_STRIDE: usize = 16;
+const LANE_PATCH_TRACK_STRIDE: usize = 4096;
+
+fn lane_patch_port_id(namespace: usize, slot_index: usize, ordinal: usize) -> usize {
+    (namespace * LANE_PATCH_TRACK_STRIDE + slot_index) * LANE_PATCH_PORT_STRIDE + ordinal
+}
+
+/// The node patch as the lane patchbay draws it: the same entry shape the
+/// UI builds for `SEQ.track-lane-patch` (cable-level out/in ports), minus the
+/// track-only `param-ports`. Keep the two in step.
+fn graph_node_lane_patch_value(
+    state: &crate::sequencer::SequencerState,
+    chain: &crate::process::TrackProcessChain,
+    namespace: usize,
+) -> EValue {
+    use crate::process::{ParamTarget, ProcessInletKind};
+    let published = state.published_process_authoring();
+    let def_for = |slot: &crate::process::TrackProcessSlot| {
+        published.defs.iter().find(|def| def.name == slot.class_name)
+    };
+    let resolve = |target: &ParamTarget| -> Option<(usize, String)> {
+        let ParamTarget::ProcessInlet { process, inlet, instance_id } = target else {
+            return None;
+        };
+        let index = chain.slots.iter().position(|slot| {
+            slot.class_name == *process && instance_id.is_none_or(|id| slot.instance_id == id)
+        })?;
+        Some((index, inlet.clone()))
+    };
+    struct Reader {
+        slot_index: usize,
+        inlet: String,
+        source: &'static str,
+        fanout_index: Option<usize>,
+    }
+    let mut out_ports: Vec<Vec<(String, usize, bool, Vec<Reader>)>> = Vec::new();
+    let mut in_writers: std::collections::BTreeMap<(usize, String), Vec<usize>> = Default::default();
+    for (slot_index, slot) in chain.slots.iter().enumerate() {
+        let mut entries = Vec::new();
+        let connectable = def_for(slot)
+            .map(|def| def.ports.iter().filter(|port| port.is_connectable()).collect::<Vec<_>>())
+            .unwrap_or_default();
+        for (ordinal, port) in connectable.iter().enumerate() {
+            let port_id = lane_patch_port_id(namespace, slot_index, ordinal);
+            let mut readers = Vec::new();
+            let primary_free = slot.unbound_ports.contains(&port.name)
+                || !matches!(slot.bindings.get(&port.name), Some(Some(_)));
+            if !slot.unbound_ports.contains(&port.name) {
+                if let Some(Some(target)) = slot.bindings.get(&port.name) {
+                    if let Some((index, inlet)) = resolve(target) {
+                        readers.push(Reader { slot_index: index, inlet, source: "primary", fanout_index: None });
+                    }
+                }
+            }
+            let fanout = slot.fanout.get(&port.name).map(Vec::as_slice).unwrap_or(&[]);
+            for (fanout_index, entry) in fanout.iter().enumerate() {
+                if let Some((index, inlet)) = resolve(&entry.target) {
+                    readers.push(Reader { slot_index: index, inlet, source: "fanout", fanout_index: Some(fanout_index) });
+                }
+            }
+            for reader in &readers {
+                in_writers.entry((reader.slot_index, reader.inlet.clone())).or_default().push(port_id);
+            }
+            entries.push((port.name.clone(), port_id, primary_free, readers));
+        }
+        out_ports.push(entries);
+    }
+    let kind_name = |kind: &ProcessInletKind| -> &'static str {
+        match kind {
+            ProcessInletKind::Float => "float",
+            ProcessInletKind::Int => "int",
+            ProcessInletKind::Gate => "gate",
+            ProcessInletKind::Track => "track",
+            ProcessInletKind::Field => "field",
+            ProcessInletKind::Any => "any",
+            ProcessInletKind::Enum(_) => "enum",
+        }
+    };
+    let map = |entries: Vec<(&str, EValue)>| -> EValue {
+        let mut m = HashMap::new();
+        for (key, value) in entries {
+            m.insert(key.to_string(), lisp_value(value));
+        }
+        EValue::Map(m)
+    };
+    lisp_list(
+        chain
+            .slots
+            .iter()
+            .enumerate()
+            .map(|(slot_index, slot)| {
+                let def = def_for(slot);
+                let in_ports = def
+                    .map(|def| {
+                        def.inlets
+                            .iter()
+                            .filter(|inlet| {
+                                inlet.lane
+                                    || matches!(inlet.kind, ProcessInletKind::Gate)
+                                    || in_writers.contains_key(&(slot_index, inlet.name.clone()))
+                            })
+                            .enumerate()
+                            .map(|(ordinal, inlet)| {
+                                let writers = in_writers
+                                    .get(&(slot_index, inlet.name.clone()))
+                                    .map(Vec::as_slice)
+                                    .unwrap_or(&[]);
+                                map(vec![
+                                    ("name", EValue::String(inlet.name.clone())),
+                                    ("ordinal", EValue::Number(ordinal as f64)),
+                                    ("lane", EValue::Bool(inlet.lane)),
+                                    ("kind", EValue::String(kind_name(&inlet.kind).to_string())),
+                                    ("writers", lisp_list(writers.iter().map(|id| EValue::Number(*id as f64)).collect())),
+                                ])
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                let outs = out_ports[slot_index]
+                    .iter()
+                    .enumerate()
+                    .map(|(ordinal, (name, port_id, primary_free, readers))| {
+                        map(vec![
+                            ("name", EValue::String(name.clone())),
+                            ("ordinal", EValue::Number(ordinal as f64)),
+                            ("port-id", EValue::Number(*port_id as f64)),
+                            ("primary-free", EValue::Bool(*primary_free)),
+                            (
+                                "readers",
+                                lisp_list(
+                                    readers
+                                        .iter()
+                                        .map(|reader| {
+                                            map(vec![
+                                                ("slot-index", EValue::Number(reader.slot_index as f64)),
+                                                (
+                                                    "instance-id",
+                                                    EValue::Number(chain.slots[reader.slot_index].instance_id.0 as f64),
+                                                ),
+                                                ("inlet", EValue::String(reader.inlet.clone())),
+                                                ("source", EValue::String(reader.source.to_string())),
+                                                (
+                                                    "fanout-index",
+                                                    reader.fanout_index.map(|i| EValue::Number(i as f64)).unwrap_or(EValue::Nil),
+                                                ),
+                                            ])
+                                        })
+                                        .collect(),
+                                ),
+                            ),
+                        ])
+                    })
+                    .collect::<Vec<_>>();
+                let display_name = slot
+                    .instance_name
+                    .clone()
+                    .unwrap_or_else(|| graph_node_process_label(&slot.class_name));
+                map(vec![
+                    ("slot-index", EValue::Number(slot_index as f64)),
+                    ("instance-id", EValue::Number(slot.instance_id.0 as f64)),
+                    ("name", EValue::String(display_name)),
+                    ("class", EValue::String(slot.class_name.clone())),
+                    ("project", EValue::Bool(false)),
+                    ("enabled", EValue::Bool(slot.enabled)),
+                    ("default-lane", EValue::Bool(false)),
+                    ("out-ports", lisp_list(outs)),
+                    ("in-ports", lisp_list(in_ports)),
+                    ("param-ports", lisp_list(Vec::new())),
+                ])
+            })
+            .collect(),
+    )
+}
+
+fn register_graph_node_process_natives(
+    runtime: &mut Runtime,
+    state: Arc<crate::sequencer::SequencerState>,
+) {
+    let st = Arc::clone(&state);
+    runtime.register_native_with_docs(
+        "graph-node-process-chain",
+        "(graph-node-process-chain sequencer node-index)",
+        "The node's process patch as a list of slot maps: :instance-id :class :enabled :doc :inlets (name -> value) :inlet-defs (name kind min max default lane options doc) :ports (name connectable mappable hint unbound wired-to {:instance-id :inlet} mapped-to step-param-name-or-nil).",
+        move |args, _ctx| {
+            let (manifest, instance) = graph_node_process_args(&st, "graph-node-process-chain", &args)?;
+            let overrides = st.current_graph_overrides();
+            let chain = overrides
+                .iter()
+                .find(|o| manifest.matches_overrides(o))
+                .and_then(|o| {
+                    o.node_intrinsics
+                        .iter()
+                        .find(|n| n.group == manifest.node.name && n.instance == instance)
+                })
+                .and_then(|n| n.process_chain.clone())
+                .unwrap_or_default();
+            Ok(lisp_list(
+                chain
+                    .slots
+                    .iter()
+                    .map(|slot| graph_node_process_slot_value(&st, slot))
+                    .collect(),
+            ))
+        },
+    );
+
+    let st = Arc::clone(&state);
+    runtime.register_native_with_docs(
+        "graph-node-process-add",
+        "(graph-node-process-add sequencer node-index class-name)",
+        "Append a process slot of the given class to the node's patch; returns the new slot's instance id.",
+        move |args, ctx| {
+            let (manifest, instance) = graph_node_process_args(&st, "graph-node-process-add", &args)?;
+            let class_name = args
+                .get(2)
+                .and_then(graph_key_string)
+                .ok_or_else(|| "graph-node-process-add expects a class name".to_string())?;
+            if graph_node_process_def(&st, &class_name).is_none()
+                && !crate::process::DEFAULT_LANE_CLASSES.contains(&class_name.as_str())
+            {
+                return Err(format!("graph-node-process-add: unknown process class {class_name:?}"));
+            }
+            let id = edit_graph_node_process_chain(&st, &manifest, instance, |chain, next_id| {
+                chain.slots.push(crate::process::TrackProcessSlot {
+                    instance_id: crate::process::ProcessInstanceId(next_id),
+                    instance_name: None,
+                    class_name: class_name.clone(),
+                    enabled: true,
+                    project_layer: false,
+                    inlets: Default::default(),
+                    lanes: Default::default(),
+                    fanout: Default::default(),
+                    unbound_ports: Default::default(),
+                    bindings: Default::default(),
+                });
+                Ok(next_id)
+            })?;
+            claim_graph_node_process_id(id);
+            ctx.set_status(format!("node {instance}: added {class_name}"));
+            Ok(EValue::Number(id as f64))
+        },
+    );
+
+    let st = Arc::clone(&state);
+    runtime.register_native_with_docs(
+        "graph-node-process-remove",
+        "(graph-node-process-remove sequencer node-index instance-id)",
+        "Remove one slot from the node's patch and drop every wire and fan-out cable into it.",
+        move |args, _ctx| {
+            let (manifest, instance) = graph_node_process_args(&st, "graph-node-process-remove", &args)?;
+            let id = graph_node_process_id_arg(args.get(2), "graph-node-process-remove")?;
+            edit_graph_node_process_chain(&st, &manifest, instance, |chain, _| {
+                let before = chain.slots.len();
+                chain.slots.retain(|slot| slot.instance_id != id);
+                let targets_removed = |target: &crate::process::ParamTarget| {
+                    matches!(target, crate::process::ParamTarget::ProcessInlet { instance_id: Some(i), .. } if *i == id)
+                };
+                for slot in &mut chain.slots {
+                    slot.bindings
+                        .retain(|_, target| !target.as_ref().is_some_and(targets_removed));
+                    // Fan-out cables into the removed slot go too, as
+                    // `graph-node-process-fanout-remove` would drop them.
+                    for entries in slot.fanout.values_mut() {
+                        entries.retain(|entry| !targets_removed(&entry.target));
+                    }
+                    slot.fanout.retain(|_, entries| !entries.is_empty());
+                }
+                if chain.slots.len() == before {
+                    return Err(format!("graph-node-process-remove: no slot {}", id.0));
+                }
+                Ok(())
+            })?;
+            Ok(EValue::Bool(true))
+        },
+    );
+
+    let st = Arc::clone(&state);
+    runtime.register_native_with_docs(
+        "graph-node-process-enable",
+        "(graph-node-process-enable sequencer node-index instance-id enabled)",
+        "Enable or bypass one slot in the node's patch.",
+        move |args, _ctx| {
+            let (manifest, instance) = graph_node_process_args(&st, "graph-node-process-enable", &args)?;
+            let id = graph_node_process_id_arg(args.get(2), "graph-node-process-enable")?;
+            let enabled = !matches!(args.get(3), Some(EValue::Bool(false)) | Some(EValue::Nil) | None);
+            edit_graph_node_process_chain(&st, &manifest, instance, |chain, _| {
+                let slot = chain
+                    .slots
+                    .iter_mut()
+                    .find(|slot| slot.instance_id == id)
+                    .ok_or_else(|| format!("graph-node-process-enable: no slot {}", id.0))?;
+                slot.enabled = enabled;
+                Ok(())
+            })?;
+            Ok(EValue::Bool(true))
+        },
+    );
+
+    let st = Arc::clone(&state);
+    runtime.register_native_with_docs(
+        "graph-node-process-move",
+        "(graph-node-process-move sequencer node-index instance-id delta)",
+        "Move one slot earlier (negative) or later (positive) in the node's patch. Order is run order.",
+        move |args, _ctx| {
+            let (manifest, instance) = graph_node_process_args(&st, "graph-node-process-move", &args)?;
+            let id = graph_node_process_id_arg(args.get(2), "graph-node-process-move")?;
+            let delta = args.get(3).and_then(graph_number).unwrap_or(0.0) as i64;
+            edit_graph_node_process_chain(&st, &manifest, instance, |chain, _| {
+                let from = chain
+                    .slots
+                    .iter()
+                    .position(|slot| slot.instance_id == id)
+                    .ok_or_else(|| format!("graph-node-process-move: no slot {}", id.0))?;
+                let to = (from as i64 + delta).clamp(0, chain.slots.len() as i64 - 1) as usize;
+                let slot = chain.slots.remove(from);
+                chain.slots.insert(to, slot);
+                Ok(())
+            })?;
+            Ok(EValue::Bool(true))
+        },
+    );
+
+    let st = Arc::clone(&state);
+    runtime.register_native_with_docs(
+        "graph-node-process-inlet",
+        "(graph-node-process-inlet sequencer node-index instance-id inlet value)",
+        "Set a scalar inlet on one slot of the node's patch. On a node every inlet is a scalar (no lanes); a wired inlet reads its wire instead.",
+        move |args, _ctx| {
+            let (manifest, instance) = graph_node_process_args(&st, "graph-node-process-inlet", &args)?;
+            let id = graph_node_process_id_arg(args.get(2), "graph-node-process-inlet")?;
+            let inlet = args
+                .get(3)
+                .and_then(graph_key_string)
+                .ok_or_else(|| "graph-node-process-inlet expects an inlet name".to_string())?;
+            let value = args
+                .get(4)
+                .ok_or_else(|| "graph-node-process-inlet expects a value".to_string())?;
+            let literal = crate::process::ProcessLiteral::from_value(value)?;
+            edit_graph_node_process_chain(&st, &manifest, instance, |chain, _| {
+                let slot = chain
+                    .slots
+                    .iter_mut()
+                    .find(|slot| slot.instance_id == id)
+                    .ok_or_else(|| format!("graph-node-process-inlet: no slot {}", id.0))?;
+                slot.inlets.insert(inlet.clone(), literal);
+                Ok(())
+            })?;
+            Ok(EValue::Bool(true))
+        },
+    );
+
+    let st = Arc::clone(&state);
+    runtime.register_native_with_docs(
+        "graph-node-process-wire",
+        "(graph-node-process-wire sequencer node-index from-id port to-id inlet)",
+        "Wire a connectable port of one slot into an inlet of another slot in the same node patch (the primary binding; a wire pointing up the chain lands next fire, like the track patch bay).",
+        move |args, _ctx| {
+            let (manifest, instance) = graph_node_process_args(&st, "graph-node-process-wire", &args)?;
+            let from = graph_node_process_id_arg(args.get(2), "graph-node-process-wire")?;
+            let port = args
+                .get(3)
+                .and_then(graph_key_string)
+                .ok_or_else(|| "graph-node-process-wire expects a port name".to_string())?;
+            let to = graph_node_process_id_arg(args.get(4), "graph-node-process-wire")?;
+            let inlet = args
+                .get(5)
+                .and_then(graph_key_string)
+                .ok_or_else(|| "graph-node-process-wire expects an inlet name".to_string())?;
+            let st_inner = Arc::clone(&st);
+            edit_graph_node_process_chain(&st, &manifest, instance, |chain, _| {
+                let from_pos = chain.slots.iter().position(|s| s.instance_id == from)
+                    .ok_or_else(|| format!("graph-node-process-wire: no source slot {}", from.0))?;
+                let to_pos = chain.slots.iter().position(|s| s.instance_id == to)
+                    .ok_or_else(|| format!("graph-node-process-wire: no target slot {}", to.0))?;
+                // A wire pointing up the chain lands next fire, exactly as on a
+                // track (the node runner defers it); only a self-wire is refused.
+                if to_pos == from_pos {
+                    return Err("graph-node-process-wire: a slot cannot feed itself".to_string());
+                }
+                let to_class = chain.slots[to_pos].class_name.clone();
+                let source_def = graph_node_process_def(&st_inner, &chain.slots[from_pos].class_name)
+                    .ok_or_else(|| "graph-node-process-wire: unknown source class".to_string())?;
+                let port_def = source_def
+                    .ports
+                    .iter()
+                    .find(|p| p.name == port)
+                    .ok_or_else(|| format!("graph-node-process-wire: no port {port:?} on source"))?;
+                if !port_def.is_connectable() {
+                    return Err(format!("graph-node-process-wire: port {port:?} is not connectable"));
+                }
+                if let Some(target_def) = graph_node_process_def(&st_inner, &to_class) {
+                    if !target_def.inlets.iter().any(|i| i.name == inlet) {
+                        return Err(format!("graph-node-process-wire: no inlet {inlet:?} on target"));
+                    }
+                }
+                let slot = &mut chain.slots[from_pos];
+                slot.unbound_ports.retain(|p| p != &port);
+                slot.bindings.insert(
+                    port.clone(),
+                    Some(crate::process::ParamTarget::ProcessInlet {
+                        process: to_class,
+                        inlet: inlet.clone(),
+                        instance_id: Some(to),
+                    }),
+                );
+                Ok(())
+            })?;
+            Ok(EValue::Bool(true))
+        },
+    );
+
+    let st = Arc::clone(&state);
+    runtime.register_native_with_docs(
+        "graph-node-process-unwire",
+        "(graph-node-process-unwire sequencer node-index instance-id port)",
+        "Drop the wire out of one port of a slot in the node's patch.",
+        move |args, _ctx| {
+            let (manifest, instance) = graph_node_process_args(&st, "graph-node-process-unwire", &args)?;
+            let id = graph_node_process_id_arg(args.get(2), "graph-node-process-unwire")?;
+            let port = args
+                .get(3)
+                .and_then(graph_key_string)
+                .ok_or_else(|| "graph-node-process-unwire expects a port name".to_string())?;
+            edit_graph_node_process_chain(&st, &manifest, instance, |chain, _| {
+                let slot = chain
+                    .slots
+                    .iter_mut()
+                    .find(|slot| slot.instance_id == id)
+                    .ok_or_else(|| format!("graph-node-process-unwire: no slot {}", id.0))?;
+                slot.bindings.remove(&port);
+                slot.unbound_ports.remove(&port);
+                Ok(())
+            })?;
+            Ok(EValue::Bool(true))
+        },
+    );
+
+    let st = Arc::clone(&state);
+    runtime.register_native_with_docs(
+        "graph-node-process-fanout-add",
+        "(graph-node-process-fanout-add sequencer node-index from-id port to-id inlet)",
+        "Add a fan-out cable out of a connectable port into another slot's inlet (identity range, the value passes through); returns the new fan-out index.",
+        move |args, _ctx| {
+            let (manifest, instance) = graph_node_process_args(&st, "graph-node-process-fanout-add", &args)?;
+            let from = graph_node_process_id_arg(args.get(2), "graph-node-process-fanout-add")?;
+            let port = args
+                .get(3)
+                .and_then(graph_key_string)
+                .ok_or_else(|| "graph-node-process-fanout-add expects a port name".to_string())?;
+            let to = graph_node_process_id_arg(args.get(4), "graph-node-process-fanout-add")?;
+            let inlet = args
+                .get(5)
+                .and_then(graph_key_string)
+                .ok_or_else(|| "graph-node-process-fanout-add expects an inlet name".to_string())?;
+            let st_inner = Arc::clone(&st);
+            let index = edit_graph_node_process_chain(&st, &manifest, instance, |chain, _| {
+                let from_pos = chain.slots.iter().position(|s| s.instance_id == from)
+                    .ok_or_else(|| format!("graph-node-process-fanout-add: no source slot {}", from.0))?;
+                let to_pos = chain.slots.iter().position(|s| s.instance_id == to)
+                    .ok_or_else(|| format!("graph-node-process-fanout-add: no target slot {}", to.0))?;
+                // A wire pointing up the chain lands next fire, exactly as on a
+                // track (the node runner defers it); only a self-wire is refused.
+                if to_pos == from_pos {
+                    return Err("graph-node-process-fanout-add: a slot cannot feed itself".to_string());
+                }
+                let to_class = chain.slots[to_pos].class_name.clone();
+                let source_def = graph_node_process_def(&st_inner, &chain.slots[from_pos].class_name)
+                    .ok_or_else(|| "graph-node-process-fanout-add: unknown source class".to_string())?;
+                let port_def = source_def
+                    .ports
+                    .iter()
+                    .find(|p| p.name == port)
+                    .ok_or_else(|| format!("graph-node-process-fanout-add: no port {port:?} on source"))?;
+                if !port_def.is_connectable() {
+                    return Err(format!("graph-node-process-fanout-add: port {port:?} is not connectable"));
+                }
+                let slot = &mut chain.slots[from_pos];
+                let (lo, hi) = crate::process::process_slot_output_range(slot);
+                let entries = slot.fanout.entry(port.clone()).or_default();
+                entries.push(crate::process::ProcessPortFanout {
+                    target: crate::process::ParamTarget::ProcessInlet {
+                        process: to_class,
+                        inlet: inlet.clone(),
+                        instance_id: Some(to),
+                    },
+                    lo,
+                    hi,
+                });
+                Ok(entries.len() - 1)
+            })?;
+            Ok(EValue::Number(index as f64))
+        },
+    );
+
+    let st = Arc::clone(&state);
+    runtime.register_native_with_docs(
+        "graph-node-process-fanout-remove",
+        "(graph-node-process-fanout-remove sequencer node-index instance-id port index)",
+        "Remove one fan-out cable (by index) out of a port of a slot in the node's patch.",
+        move |args, _ctx| {
+            let (manifest, instance) = graph_node_process_args(&st, "graph-node-process-fanout-remove", &args)?;
+            let id = graph_node_process_id_arg(args.get(2), "graph-node-process-fanout-remove")?;
+            let port = args
+                .get(3)
+                .and_then(graph_key_string)
+                .ok_or_else(|| "graph-node-process-fanout-remove expects a port name".to_string())?;
+            let index = parse_nonnegative_usize(
+                args.get(4).ok_or_else(|| "graph-node-process-fanout-remove expects an index".to_string())?,
+                "fan-out index",
+            )?;
+            edit_graph_node_process_chain(&st, &manifest, instance, |chain, _| {
+                let slot = chain
+                    .slots
+                    .iter_mut()
+                    .find(|slot| slot.instance_id == id)
+                    .ok_or_else(|| format!("graph-node-process-fanout-remove: no slot {}", id.0))?;
+                let entries = slot
+                    .fanout
+                    .get_mut(&port)
+                    .ok_or_else(|| format!("graph-node-process-fanout-remove: no fan-out on {port:?}"))?;
+                if index >= entries.len() {
+                    return Err(format!("graph-node-process-fanout-remove: no fan-out {index}"));
+                }
+                entries.remove(index);
+                if entries.is_empty() {
+                    slot.fanout.remove(&port);
+                }
+                Ok(())
+            })?;
+            Ok(EValue::Bool(true))
+        },
+    );
+
+    let st = Arc::clone(&state);
+    runtime.register_native_with_docs(
+        "graph-node-process-map",
+        "(graph-node-process-map sequencer node-index instance-id port step-param)",
+        "Map a mappable port of a slot in the node's patch onto the fire payload: :transpose, :velocity, :duration or :delay (propagation delay in steps; the port's writes add to / set that field before emit + scatter). nil clears the mapping.",
+        move |args, _ctx| {
+            let (manifest, instance) = graph_node_process_args(&st, "graph-node-process-map", &args)?;
+            let id = graph_node_process_id_arg(args.get(2), "graph-node-process-map")?;
+            let port = args
+                .get(3)
+                .and_then(graph_key_string)
+                .ok_or_else(|| "graph-node-process-map expects a port name".to_string())?;
+            let param = match args.get(4) {
+                None | Some(EValue::Nil) | Some(EValue::Bool(false)) => None,
+                Some(value) => {
+                    let name = graph_key_string(value)
+                        .ok_or_else(|| "graph-node-process-map expects :transpose, :velocity, :duration or nil".to_string())?;
+                    match name.as_str() {
+                        "transpose" | "velocity" | "duration" | "delay" => Some(name),
+                        other => return Err(format!("graph-node-process-map: {other:?} is not a payload field")),
+                    }
+                }
+            };
+            let st_inner = Arc::clone(&st);
+            edit_graph_node_process_chain(&st, &manifest, instance, |chain, _| {
+                let slot = chain
+                    .slots
+                    .iter_mut()
+                    .find(|slot| slot.instance_id == id)
+                    .ok_or_else(|| format!("graph-node-process-map: no slot {}", id.0))?;
+                if let Some(def) = graph_node_process_def(&st_inner, &slot.class_name) {
+                    let port_def = def
+                        .ports
+                        .iter()
+                        .find(|p| p.name == port)
+                        .ok_or_else(|| format!("graph-node-process-map: no port {port:?}"))?;
+                    if !port_def.is_mappable() {
+                        return Err(format!("graph-node-process-map: port {port:?} is not mappable"));
+                    }
+                }
+                slot.unbound_ports.remove(&port);
+                match param {
+                    Some(param) => {
+                        slot.bindings
+                            .insert(port.clone(), Some(crate::process::ParamTarget::StepParam { param }));
+                    }
+                    None => {
+                        slot.bindings.remove(&port);
+                    }
+                }
+                Ok(())
+            })?;
+            Ok(EValue::Bool(true))
+        },
+    );
+
+    let st = Arc::clone(&state);
+    runtime.register_native_with_docs(
+        "graph-node-process-classes",
+        "(graph-node-process-classes)",
+        "Process classes a node patch can hold, as {:class :label :doc} maps in library order: node-flavoured labels, minus the classes that do nothing on a node fire.",
+        move |_args, _ctx| {
+            let published = st.published_process_authoring();
+            Ok(lisp_list(
+                published
+                    .defs
+                    .iter()
+                    .filter(|def| !GRAPH_NODE_HIDDEN_PROCESS_CLASSES.contains(&def.name.as_str()))
+                    .map(|def| {
+                        let mut m = HashMap::new();
+                        m.insert("class".to_string(), lisp_string(def.name.clone()));
+                        m.insert("label".to_string(), lisp_string(graph_node_process_label(&def.name)));
+                        m.insert("doc".to_string(), lisp_string(def.doc.clone().unwrap_or_default()));
+                        EValue::Map(m)
+                    })
+                    .collect(),
+            ))
+        },
+    );
+
+    let st = Arc::clone(&state);
+    runtime.register_native_with_docs(
+        "graph-node-lane-patch",
+        "(graph-node-lane-patch sequencer node-index)",
+        "The node's patch in the shape of one SEQ.track-lane-patch entry list (slot-index instance-id name class enabled out-ports{name ordinal port-id primary-free readers} in-ports{name ordinal lane kind writers}), with cable ids in the node namespace (1024 + node index) so it can share the lane patchbay renderer with tracks.",
+        move |args, _ctx| {
+            let (manifest, instance) = graph_node_process_args(&st, "graph-node-lane-patch", &args)?;
+            let overrides = st.current_graph_overrides();
+            let chain = overrides
+                .iter()
+                .find(|o| manifest.matches_overrides(o))
+                .and_then(|o| {
+                    o.node_intrinsics
+                        .iter()
+                        .find(|n| n.group == manifest.node.name && n.instance == instance)
+                })
+                .and_then(|n| n.process_chain.clone())
+                .unwrap_or_default();
+            Ok(graph_node_lane_patch_value(&st, &chain, GRAPH_NODE_LANE_PATCH_NAMESPACE_BASE + instance))
+        },
+    );
 }

@@ -42,7 +42,7 @@
   :seed-on-reset 0
   :max-poly 4
   ;; Which fires survive when more than :max-poly land in one boundary. Options:
-  ;; :deterministic :propagation :random :loudest :lowest-transpose :highest-transpose
+  ;; :deterministic :propagation :random :markov :loudest :lowest-transpose :highest-transpose
   ;; :seed-first (seed-originated fires win their slots before neural-only ones).
   :max-poly-selection :propagation
   :duration (steps 1)
@@ -128,7 +128,7 @@
     (map (lambda (track) (nth track-colors track)) (gvr-route-tracks))
     track-colors))
 (def gvr-max-poly-selection-options
-  (list "deterministic" "propagation" "random" "loudest" "lowest-transpose" "highest-transpose" "seed-first"))
+  (list "deterministic" "propagation" "random" "markov" "loudest" "lowest-transpose" "highest-transpose" "seed-first"))
 ;; Neural-group assignment (docs/neural-groups-spec.md §3.1). The stored value IS the
 ;; dropdown index (group A = 0), so the numeric bind-graph handle seeds it directly.
 (def gvr-group-options (list "A" "B" "C" "D"))

@@ -873,6 +873,31 @@ pub(in crate::lisp_host) fn register_process_natives(
             },
         );
     }
+    if runtime.global_value("neuron").is_none() {
+        runtime.register_native_with_docs(
+            "neuron",
+            "(neuron index :note | :chord | :key)",
+            "Construct a graph-node read source for a process running on a node patch: :note / :chord = a one-note list of that node's last emitted note (nil before it has fired since reset), :key = the pitch classes of its recent emitted notes. Reads nil on a track process.",
+            move |args, _ctx| {
+                if args.len() != 2 {
+                    return Err("neuron expects index and :note, :chord or :key".to_string());
+                }
+                let node = process_number_arg(args.first(), "neuron")?;
+                if !node.is_finite() || node < 0.0 || node.fract() != 0.0 {
+                    return Err("neuron index must be a non-negative integer".to_string());
+                }
+                let param = process_symbol_name(&args[1])?;
+                if !matches!(param.as_str(), "note" | "chord" | "key") {
+                    return Err(format!("neuron :{param} is not readable; use :note, :chord or :key"));
+                }
+                Ok(process_map([
+                    ("kind", EValue::Keyword("neuron-read".to_string())),
+                    ("node", EValue::Number(node)),
+                    ("param", EValue::Keyword(param)),
+                ]))
+            },
+        );
+    }
     if runtime.global_value("track").is_none() {
         runtime.register_native_with_docs(
             "track",
@@ -1149,6 +1174,138 @@ pub(in crate::lisp_host) fn register_process_natives(
         },
     );
 
+    let process_eval_for_reset_fired = Arc::clone(&process_eval);
+    runtime.register_native_with_docs(
+        "reset-fired?",
+        "(reset-fired?)",
+        "Graph nodes: true on the node's first fire after a graph or group reset (the periodic bar reset, a fire-authored reset or graph-reset!). Always false on a track step.",
+        move |args, _ctx| {
+            if !args.is_empty() {
+                return Err("reset-fired? expects no arguments".to_string());
+            }
+            let guard = process_eval_for_reset_fired
+                .lock()
+                .map_err(|_| "failed to lock process eval context".to_string())?;
+            let Some(ctx) = guard.as_ref() else {
+                return Err("reset-fired? called outside process execution".to_string());
+            };
+            Ok(EValue::Bool(
+                ctx.step_context.as_ref().is_some_and(|step| step.after_reset),
+            ))
+        },
+    );
+
+    let process_eval_for_graph_reset = Arc::clone(&process_eval);
+    runtime.register_native_with_docs(
+        "graph-reset!",
+        "(graph-reset! group)",
+        "From a graph node process: reset this node's graph after the current boundary commits, like the periodic bar reset. group is :all / 0 (whole graph) or a neural group as 1-based index (1 = A) or letter.",
+        move |args, _ctx| {
+            if args.len() > 1 {
+                return Err("graph-reset! expects at most a group".to_string());
+            }
+            let group: Option<u8> = match args.first() {
+                None | Some(EValue::Nil) => None,
+                Some(EValue::String(s)) | Some(EValue::Symbol(s)) | Some(EValue::Keyword(s)) => {
+                    let name = s.trim_start_matches(':').to_ascii_lowercase();
+                    if name == "all" {
+                        None
+                    } else {
+                        let letter = name.chars().next().ok_or_else(|| "graph-reset!: empty group".to_string())?;
+                        if !letter.is_ascii_lowercase() {
+                            return Err(format!("graph-reset!: unknown group {s:?}"));
+                        }
+                        Some((letter as u8 - b'a').min(crate::graph::NEURAL_GROUP_MAX - 1))
+                    }
+                }
+                Some(other) => {
+                    let index = process_number_arg(Some(other), "graph-reset!")?.round();
+                    if index <= 0.0 {
+                        None
+                    } else {
+                        Some(((index as u8) - 1).min(crate::graph::NEURAL_GROUP_MAX - 1))
+                    }
+                }
+            };
+            let mut guard = process_eval_for_graph_reset
+                .lock()
+                .map_err(|_| "failed to lock process eval context".to_string())?;
+            let Some(ctx) = guard.as_mut() else {
+                return Err("graph-reset! runs inside a graph node process".to_string());
+            };
+            if ctx.scope != ProcessEvalScope::Run {
+                return Err("graph-reset! runs inside a graph node process".to_string());
+            }
+            ctx.commands.push(crate::process::ProcessRunCommand::Graph(
+                crate::graph::GraphControlCommand::Reset {
+                    graph_id: 0,
+                    graph_name: String::new(),
+                    group,
+                },
+            ));
+            Ok(EValue::Bool(true))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "scale-pitch-classes",
+        "(scale-pitch-classes scale root)",
+        "The pitch classes (0-11) of a scale transposed to root: scale is an index into the SCALE_NAMES table (major, minor, harmonic minor, melodic minor, dorian, phrygian, lydian, mixolydian, locrian, major pentatonic, minor pentatonic, blues, whole tone, chromatic) or its name.",
+        move |args, _ctx| {
+            if args.len() != 2 {
+                return Err("scale-pitch-classes expects a scale and a root".to_string());
+            }
+            let scale = match &args[0] {
+                EValue::String(name) | EValue::Symbol(name) | EValue::Keyword(name) => {
+                    let name = name.trim_start_matches(':');
+                    crate::runtime::harmony::SCALES
+                        .iter()
+                        .position(|(scale_name, _)| *scale_name == name)
+                        .ok_or_else(|| format!("scale-pitch-classes: unknown scale {name:?}"))?
+                }
+                other => {
+                    let index = process_number_arg(Some(other), "scale-pitch-classes")?;
+                    (index.round().max(0.0) as usize).min(crate::runtime::harmony::SCALES.len() - 1)
+                }
+            };
+            let root = process_number_arg(args.get(1), "scale-pitch-classes")?;
+            let root = crate::runtime::harmony::pitch_class(root as f32) as u8;
+            Ok(EValue::List(
+                crate::runtime::harmony::SCALES[scale]
+                    .1
+                    .iter()
+                    .map(|interval| {
+                        Rc::new(RefCell::new(EValue::Number(((interval + root) % 12) as f64)))
+                    })
+                    .collect(),
+            ))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "pitch-class-nearest-delta",
+        "(pitch-class-nearest-delta pitch-classes current-pitch)",
+        "Signed semitone delta (-6..6) that moves current-pitch onto the nearest pitch class in the list; 0 when it is already one. A tie goes to the lower pitch class.",
+        move |args, _ctx| {
+            if args.len() != 2 {
+                return Err("pitch-class-nearest-delta expects a pitch-class list and a pitch".to_string());
+            }
+            let EValue::List(pitches) = &args[0] else {
+                return Err("pitch-class-nearest-delta expects a list of pitch classes".to_string());
+            };
+            let current = process_number_arg(args.get(1), "pitch-class-nearest-delta")?;
+            let mut best: Option<f64> = None;
+            for pitch in pitches {
+                let pitch = process_number_arg(Some(&pitch.borrow()), "pitch-class-nearest-delta")?;
+                let delta = (pitch - current + 6.0).rem_euclid(12.0) - 6.0;
+                if best.is_none_or(|best| delta.abs() < best.abs() || (delta.abs() == best.abs() && delta < best)) {
+                    best = Some(delta);
+                }
+            }
+            Ok(EValue::Number(best.ok_or_else(|| "pitch-class-nearest-delta: empty list".to_string())?))
+        },
+    );
+
     runtime.register_native_with_docs(
         "field-nearest-delta",
         "(field-nearest-delta pitch-field current-pitch grace)",
@@ -1403,6 +1560,28 @@ pub(in crate::lisp_host) fn register_process_natives(
                         Some(_) => return Err("unknown track read history mode".to_string()),
                     };
                     Ok(EValue::Number(values[param.index()] as f64))
+                }
+                "neuron-read" => {
+                    let node = match source.get("node").map(|value| value.borrow()) {
+                        Some(value) => process_number_arg(Some(&value), "read")? as usize,
+                        None => return Err("neuron read source missing node".to_string()),
+                    };
+                    let param = string_field("param")?;
+                    let Some(recent) = ctx.reads.neurons.get(node).filter(|notes| !notes.is_empty())
+                    else {
+                        return Ok(EValue::Nil);
+                    };
+                    if param == "key" {
+                        let mask = recent.iter().fold(0u16, |mask, note| {
+                            mask | (1 << crate::runtime::harmony::pitch_class(*note))
+                        });
+                        return Ok(process_list(
+                            crate::runtime::harmony::mask_pitch_classes(mask)
+                                .map(|pc| EValue::Number(f64::from(pc))),
+                        ));
+                    }
+                    let last = *recent.last().expect("non-empty");
+                    Ok(process_list(std::iter::once(EValue::Number(last as f64))))
                 }
                 "process-read" => {
                     let process = string_field("process")?;
@@ -2120,6 +2299,7 @@ fn commit_published_graph_deltas(
                                 duration: None,
                                 swing: None,
                                 neural_group: None,
+                                process_chain: None,
                             },
                         );
                     }

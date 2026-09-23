@@ -2416,11 +2416,20 @@ impl App {
         } else {
             SidebarTab::Sounds
         };
-        let provider_state = AgentProviderState::from_env();
-        let load_error = match AgentToolRuntime::load_default() {
-            Ok(_) => None,
-            Err(error) => Some(error),
+        let (provider_state, catalog_error) = match AgentProviderState::from_env() {
+            Ok(state) => (state, None),
+            Err(error) => {
+                eprintln!("[agent] {error}");
+                (
+                    AgentProviderState {
+                        selected_provider: crate::agent::providers::AgentProviderKind::OpenAi,
+                        providers: Vec::new(),
+                    },
+                    Some(error),
+                )
+            }
         };
+        let load_error = catalog_error.or_else(|| AgentToolRuntime::load_default().err());
         let browser_tree = BrowserNode::scan_root(crate::app_paths::app_paths().samples_dir());
 
         let mut app = Self {

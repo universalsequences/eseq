@@ -233,7 +233,7 @@ pub(super) fn connect_context(
 
 /// The inlet's name as the port tooltip would show it: a macro parameter, an
 /// operator's documented port, or the symbol the argument already reads.
-fn inlet_name(patch: &Patch, node: &PatchNode, index: usize) -> String {
+pub(super) fn inlet_name(patch: &Patch, node: &PatchNode, index: usize) -> String {
     if node.kind == NodeKind::Param && index == PARAM_OPTIONS_INPUT {
         return "options".to_string();
     }

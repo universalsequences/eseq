@@ -12621,6 +12621,7 @@ mod solo_binding_tests;
                     pan: -0.2,
                     mute: false,
                     solo: true,
+                    enabled: true,
                     max_polyphony: 4,
                     param_plocks: sequencer::sequencer::RackSlotParamPlocks::new(),
                     instrument_slot:
@@ -18828,6 +18829,14 @@ mod solo_binding_tests;
     #[test]
     fn metal_seq_choose_model_picker_renders_inside_the_patcher_buffer() {
         let mut editor = full_grid_editor_for_scroll_tests();
+        // A closed picker must not query the catalog: the patcher buffer
+        // rebuilds often, and `agent/models` reads a file.
+        let catalog_queries = Rc::new(std::cell::Cell::new(0usize));
+        let counter = catalog_queries.clone();
+        editor.runtime_mut().register_native("agent/models", move |_args, _ctx| {
+            counter.set(counter.get() + 1);
+            Ok(agent_test_string_list(&["gpt-5.5", "gemini-2.5-pro"]))
+        });
         editor
             .runtime_mut()
             .eval_str(&crate::edit_sessions::instrument_patcher_buffer_source(
@@ -18854,6 +18863,11 @@ mod solo_binding_tests;
             find_layout_node_by_stable_key_suffix(&layout, "/dropdown").is_none(),
             "picker must not render while closed"
         );
+        assert_eq!(
+            catalog_queries.get(),
+            0,
+            "closed picker must not evaluate its body"
+        );
 
         editor
             .runtime_mut()
@@ -18866,6 +18880,7 @@ mod solo_binding_tests;
         assert_finite_layout_tree(&layout);
         let dropdown = find_layout_node_by_stable_key_suffix(&layout, "/dropdown")
             .expect("model dropdown should render once the picker is open");
+        assert!(catalog_queries.get() > 0, "open picker lists the catalog");
         assert!(
             dropdown.rect.width > 0.0 && dropdown.rect.height > 0.0,
             "dropdown should occupy real space; got {:?}",
@@ -19651,6 +19666,34 @@ mod solo_binding_tests;
                 .unwrap(),
             Some(Value::String("Default (auto)".to_string())),
             "the stubbed native reports no choice, so the sentinel row is current"
+        );
+    }
+
+    #[test]
+    fn metal_seq_agent_catalog_error_preserves_conversation_and_allows_retry() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        editor.runtime_mut().register_native("agent/new", |_args, _ctx| {
+            Err("invalid agent-models.lisp catalog".to_string())
+        });
+        editor.runtime_mut().eval_str("(eseq.agent/agent-open)").unwrap();
+        assert_eq!(
+            editor.runtime_mut().eval_str("eseq.agent/agent-current-conv").unwrap(),
+            Some(Value::Number(0.0)),
+        );
+        assert!(editor.runtime_mut().take_status_message().unwrap().contains("agent-models.lisp"));
+        editor.runtime_mut().eval_str("(set! eseq.agent/agent-current-conv 7)").unwrap();
+        editor.runtime_mut().eval_str("(eseq.agent/new-conversation)").unwrap();
+        assert_eq!(
+            editor.runtime_mut().eval_str("eseq.agent/agent-current-conv").unwrap(),
+            Some(Value::Number(7.0)),
+        );
+        editor.runtime_mut().register_native("agent/new", |_args, _ctx| {
+            Ok(Value::Number(8.0))
+        });
+        editor.runtime_mut().eval_str("(eseq.agent/new-conversation)").unwrap();
+        assert_eq!(
+            editor.runtime_mut().eval_str("eseq.agent/agent-current-conv").unwrap(),
+            Some(Value::Number(8.0)),
         );
     }
 
