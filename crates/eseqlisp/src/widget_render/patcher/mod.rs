@@ -306,6 +306,69 @@ pub(crate) fn selected_patcher_cable_is_segmented_for_test(
         })
 }
 
+#[cfg(test)]
+pub(crate) fn select_first_patcher_node_for_test(
+    node: &crate::layout::LayoutNode,
+) -> Option<String> {
+    let Ok((_, root_patch)) = load_patch_from_props(&node.props) else {
+        return None;
+    };
+    let key = state::patcher_state_key(node);
+    let mut interaction = state::get_patcher_interaction_state(key);
+    let patch = active_patcher_patch(&root_patch, &interaction);
+    let selected = patch.nodes.first().map(|patch_node| patch_node.id.clone())?;
+    interaction.selected_nodes.clear();
+    interaction.selected_nodes.insert(selected.clone());
+    interaction.selected_cable = None;
+    state::set_patcher_interaction_state(key, interaction);
+    Some(selected)
+}
+
+/// Nodes the patcher currently shows at its active view level, interaction
+/// edits (pastes, deletions) included.
+#[cfg(test)]
+pub(crate) fn patcher_visible_node_count_for_test(node: &crate::layout::LayoutNode) -> usize {
+    let Ok((_, root_patch)) = load_patch_from_props(&node.props) else {
+        return 0;
+    };
+    let interaction = state::get_patcher_interaction_state(state::patcher_state_key(node));
+    let view_key = active_patcher_view_key(&interaction);
+    let patch = active_patcher_patch(&root_patch, &interaction);
+    let patch = patch_with_interaction_state(patch, &interaction, &view_key);
+    state::ordered_patch_nodes(&patch, &interaction, &view_key).len()
+}
+
+/// Put a settled agentic bubble showing an error on the patcher.
+#[cfg(test)]
+pub(crate) fn show_agentic_error_bubble_for_test(node: &crate::layout::LayoutNode) -> String {
+    let key = state::patcher_state_key(node);
+    let mut interaction = state::get_patcher_interaction_state(key);
+    let bubble_id = allocate_agentic_bubble(&mut interaction, (2.0, 3.0));
+    let bubble = interaction
+        .agentic_bubbles
+        .get_mut(&bubble_id)
+        .expect("allocated bubble");
+    bubble.state = AgenticBubbleState::Error {
+        summary: "the agent failed".to_string(),
+        raw_output: String::new(),
+        failed_at: Instant::now(),
+    };
+    bubble.created_at = Instant::now() - std::time::Duration::from_secs(5);
+    state::set_patcher_interaction_state(key, interaction);
+    bubble_id
+}
+
+#[cfg(test)]
+pub(crate) fn patcher_agentic_bubble_dismissed_for_test(
+    node: &crate::layout::LayoutNode,
+    bubble_id: &str,
+) -> Option<bool> {
+    state::get_patcher_interaction_state(state::patcher_state_key(node))
+        .agentic_bubbles
+        .get(bubble_id)
+        .map(|bubble| bubble.is_dismissed())
+}
+
 pub fn reset_patcher_state_for_path(path: impl AsRef<std::path::Path>, intent: PatcherIntent) {
     let path = path.as_ref();
     let path_string = path.to_string_lossy().to_string();
@@ -2307,6 +2370,7 @@ pub fn bind_patcher_key(pattern: &str, command: &str) -> Result<(), String> {
         ));
     }
     let key = resolve_default_binding_key(pattern);
+    PATCHER_KEY_BINDINGS_LOADED.with(|loaded| loaded.set(true));
     PATCHER_KEY_BINDINGS.with(|cell| {
         cell.borrow_mut().insert(key, command.to_string());
     });
@@ -2315,9 +2379,27 @@ pub fn bind_patcher_key(pattern: &str, command: &str) -> Result<(), String> {
 
 pub fn unbind_patcher_key(pattern: &str) {
     let key = resolve_default_binding_key(pattern);
+    PATCHER_KEY_BINDINGS_LOADED.with(|loaded| loaded.set(true));
     PATCHER_KEY_BINDINGS.with(|cell| {
         cell.borrow_mut().remove(&key);
     });
+}
+
+thread_local! {
+    /// Set once Lisp has written the binding table (bind or unbind). From
+    /// then on the table is the only source, so an unbound key stays unbound
+    /// instead of reviving its checked-in default.
+    static PATCHER_KEY_BINDINGS_LOADED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// The command `key` (a `key_str` spelling) runs: the Lisp table's binding,
+/// or, only before content/ui/patcher.lisp has written that table (a test
+/// without Lisp), the checked-in default.
+pub fn bound_patcher_command(key: &str) -> Option<String> {
+    if PATCHER_KEY_BINDINGS_LOADED.with(|loaded| loaded.get()) {
+        return patcher_binding_for_key(key);
+    }
+    patcher_binding_for_key(key).or_else(|| default_patcher_binding(key).map(str::to_string))
 }
 
 /// The command bound to `key` (a `key_str` spelling), if any.
@@ -2346,6 +2428,17 @@ thread_local! {
 
 fn record_focus_key_target(node: &LayoutNode) {
     FOCUS_KEY_TARGET.with(|cell| *cell.borrow_mut() = Some(node.clone()));
+}
+
+/// Point `patcher-command` at the focused patcher the editor is about to
+/// hand a key to through `:on-focus-key`. The widget records itself when it
+/// refuses a key, but some refusals (a bubble's prompt passing on Tab, the
+/// editor keeping Space from a non-text widget) happen before that, and the
+/// target must never be a patcher an earlier key or right-click left behind.
+pub fn set_focus_key_target(node: &LayoutNode) {
+    if node.widget_type == "patcher" {
+        record_focus_key_target(node);
+    }
 }
 
 thread_local! {
@@ -2637,12 +2730,56 @@ pub(super) fn patcher_context_menu_info(
     Value::Map(info)
 }
 
-/// The first key bound to `command`, for menu shortcut hints.
+/// The key bound to `command`, for menu shortcut hints. A command bound
+/// under both the platform-primary chord and a legacy Ctrl duplicate reports
+/// the primary one (Cmd on macOS); otherwise the first key in sorted order.
 pub fn patcher_key_for_command(command: &str) -> Option<String> {
-    patcher_key_bindings()
+    let keys = patcher_key_bindings()
         .into_iter()
-        .find(|(_, bound)| bound == command)
+        .filter(|(_, bound)| bound == command)
         .map(|(key, _)| key)
+        .collect::<Vec<_>>();
+    let primary = DEFAULT_PATCHER_BINDINGS
+        .iter()
+        .filter(|(pattern, bound)| *bound == command && pattern.starts_with("P-"))
+        .map(|(pattern, _)| resolve_default_binding_key(pattern))
+        .find(|key| keys.contains(key));
+    primary.or_else(|| keys.into_iter().next())
+}
+
+/// Render a `key_str` spelling ("s-c", "C-S-z", "RET") as a menu shortcut
+/// label in the platform's notation: "⌘C" / "⌃⇧Z" on macOS, "Ctrl+Shift+Z"
+/// elsewhere.
+pub fn patcher_key_label(key: &str) -> String {
+    let macos = crate::ui::platform::CURRENT_SHORTCUT_PLATFORM
+        == crate::ui::platform::ShortcutPlatform::MacOS;
+    let mut rest = key;
+    let mut label = String::new();
+    loop {
+        let modifier = match rest.get(..2) {
+            Some("C-") if rest.len() > 2 => if macos { "⌃" } else { "Ctrl+" },
+            Some("M-") if rest.len() > 2 => if macos { "⌥" } else { "Alt+" },
+            Some("S-") if rest.len() > 2 => if macos { "⇧" } else { "Shift+" },
+            Some("s-") if rest.len() > 2 => if macos { "⌘" } else { "Super+" },
+            _ => break,
+        };
+        label.push_str(modifier);
+        rest = &rest[2..];
+    }
+    let name = match rest {
+        "RET" => if macos { "↩" } else { "Enter" }.to_string(),
+        "UP" => "↑".to_string(),
+        "DOWN" => "↓".to_string(),
+        "LEFT" => "←".to_string(),
+        "RIGHT" => "→".to_string(),
+        "BS" => if macos { "⌫" } else { "Backspace" }.to_string(),
+        "Delete" => if macos { "⌦" } else { "Delete" }.to_string(),
+        "ESC" => "Esc".to_string(),
+        "SPC" => "Space".to_string(),
+        other => other.to_uppercase(),
+    };
+    label.push_str(&name);
+    label
 }
 
 fn patcher_widget_event(change: PatcherChangeKind) -> WidgetEvent {

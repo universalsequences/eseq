@@ -590,6 +590,9 @@ impl Editor {
         let Some(callback) = node.props.get("on-focus-key").cloned() else {
             return false;
         };
+        // `patcher-command` acts on the patcher this key is for, never on
+        // one an earlier refusal or right-click recorded.
+        crate::widget_render::patcher::set_focus_key_target(&node);
         let key_arg = Value::String(key_str(key));
         let text_arg = match key.code {
             KeyCode::Char(c)
@@ -717,13 +720,11 @@ impl Editor {
     /// Run the patcher command the key table binds to `key` against `node`,
     /// delivering the widget output the way a consumed key's would be. The
     /// table is filled by content/ui/patcher.lisp; before it loads (or in a
-    /// test without Lisp) the checked-in defaults answer instead.
+    /// test without Lisp) the checked-in defaults answer instead. A key the
+    /// user unbound stays unbound.
     fn run_bound_patcher_command(&mut self, node: &LayoutNode, key: KeyEvent) -> bool {
         use crate::widget_render::patcher as patcher;
-        let spelled = crate::editor::key_str(key);
-        let Some(command) = patcher::patcher_binding_for_key(&spelled)
-            .or_else(|| patcher::default_patcher_binding(&spelled).map(str::to_string))
-        else {
+        let Some(command) = patcher::bound_patcher_command(&crate::editor::key_str(key)) else {
             return false;
         };
         let gen_before = crate::widget_render::widget_state_generation();
@@ -765,6 +766,13 @@ impl Editor {
         let Some(node) = patchers.into_iter().next() else {
             return false;
         };
+        // An unbound chord is not the patcher's: leave focus where it is and
+        // let the key reach mode and global bindings.
+        if crate::widget_render::patcher::bound_patcher_command(&crate::editor::key_str(key))
+            .is_none()
+        {
+            return false;
+        }
         // Focus follows, so the bubble's own key handling (typing, Enter,
         // Escape) lands on the patcher from here on.
         self.set_focused_widget(node.clone());

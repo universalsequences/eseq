@@ -512,6 +512,18 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
     );
 
     runtime.register_native_with_docs(
+        "patcher-key-label",
+        "(patcher-key-label key)",
+        "A key spelling such as \"s-c\" or \"C-S-z\" rendered as a menu shortcut label (⌘C, ⌃⇧Z on macOS; Ctrl+Shift+Z elsewhere).",
+        |args, _ctx| {
+            let Some(Value::String(key)) = args.first() else {
+                return Err("patcher-key-label expects a key string".to_string());
+            };
+            Ok(Value::String(crate::widget_render::patcher::patcher_key_label(key)))
+        },
+    );
+
+    runtime.register_native_with_docs(
         "shortcut-platform",
         "(shortcut-platform)",
         "The platform whose primary shortcut modifier is in effect: \"macos\" or \"other\".",

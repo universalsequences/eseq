@@ -6100,7 +6100,13 @@ impl Editor {
             && key.modifiers == KeyModifiers::NONE
             && self.active_leaf().focused_widget_id.is_some()
         {
-            let _ = self.handle_focused_widget_key(key);
+            // A widget that refuses Escape may still bind it through its
+            // :on-focus-key (the patcher's dismiss-bubble); a handled binding
+            // consumes Escape and keeps focus.
+            if !self.handle_focused_widget_key(key) && self.dispatch_focus_key(key) {
+                self.mark_needs_redraw();
+                return;
+            }
             self.clear_focused_widget();
             self.mark_needs_redraw();
             let _ = self.run_direct_lisp_binding("ESC");

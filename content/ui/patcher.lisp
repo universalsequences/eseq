@@ -62,7 +62,7 @@
 
 (def shortcut-hint (name)
   (let ((key (patcher-key-for-command name)))
-    (if key key "")))
+    (if key (patcher-key-label key) "")))
 
 (def menu-entry (label name)
   (menu-item label
