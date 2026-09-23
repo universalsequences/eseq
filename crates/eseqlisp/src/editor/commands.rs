@@ -317,8 +317,14 @@ impl Editor {
                     self.open_save_prompt(false);
                 } else {
                     match self.save_active_buffer() {
-                        Ok(path) => self.minibuffer = Some(format!("Saved {}", path.display())),
-                        Err(error) => self.minibuffer = Some(format!("Error: {error:?}")),
+                        Ok(path) => {
+                            self.minibuffer = Some(format!("Saved {}", path.display()));
+                            self.toast_buffer_saved(&path);
+                        }
+                        Err(error) => {
+                            self.minibuffer = Some(format!("Error: {error:?}"));
+                            self.toast_buffer_save_failed(&error);
+                        }
                     }
                 }
             }

@@ -388,6 +388,15 @@ pub enum EditorError {
     Message(String),
 }
 
+impl std::fmt::Display for EditorError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Io(error) => write!(f, "{error}"),
+            Self::Message(message) => f.write_str(message),
+        }
+    }
+}
+
 impl From<std::io::Error> for EditorError {
     fn from(value: std::io::Error) -> Self {
         Self::Io(value)
@@ -3458,6 +3467,20 @@ impl Editor {
         self.mark_needs_redraw();
     }
 
+    /// Report a code-buffer save on the toast overlay. Most tiles hide the
+    /// minibuffer, so the toast is the only save feedback they can see.
+    fn toast_buffer_saved(&mut self, path: &std::path::Path) {
+        let name = path.file_name().map_or_else(
+            || path.display().to_string(),
+            |name| name.to_string_lossy().into_owned(),
+        );
+        self.show_toast(format!("Saved {name}"), ToastKind::Success);
+    }
+
+    fn toast_buffer_save_failed(&mut self, error: impl std::fmt::Display) {
+        self.show_toast(format!("Save failed: {error}"), ToastKind::Error);
+    }
+
     pub fn toast(&self) -> Option<&Toast> {
         self.toast.as_ref()
     }
@@ -5848,11 +5871,7 @@ impl Editor {
                     buffer.set_path(path.clone());
                     buffer.dirty = false;
                 }
-                let name = path.file_name().map_or_else(
-                    || path.display().to_string(),
-                    |name| name.to_string_lossy().into_owned(),
-                );
-                self.show_toast(format!("Saved {name}"), ToastKind::Success);
+                self.toast_buffer_saved(&path);
                 format!("Saved {}", path.display())
             }
         };
@@ -8481,6 +8500,7 @@ impl Editor {
                 match self.active_buffer_mut().save_as(target) {
                     Ok(path) => {
                         self.minibuffer = Some(format!("Saved {}", path.display()));
+                        self.toast_buffer_saved(&path);
                         self.save_prompt = None;
                         if quit_after_save {
                             self.should_quit = true;
@@ -8489,6 +8509,7 @@ impl Editor {
                     }
                     Err(error) => {
                         self.minibuffer = Some(format!("Error: {error}"));
+                        self.toast_buffer_save_failed(&error);
                     }
                 }
             }
@@ -9280,13 +9301,25 @@ impl Editor {
 
         if let Some(path) = self.runtime.take_pending_save_as() {
             match self.active_buffer_mut().save_as(path) {
-                Ok(path) => self.show_transient_message(format!("Saved {}", path.display())),
-                Err(error) => self.show_transient_message(format!("Error: {error}")),
+                Ok(path) => {
+                    self.show_transient_message(format!("Saved {}", path.display()));
+                    self.toast_buffer_saved(&path);
+                }
+                Err(error) => {
+                    self.show_transient_message(format!("Error: {error}"));
+                    self.toast_buffer_save_failed(&error);
+                }
             }
         } else if self.runtime.take_pending_save() {
             match self.save_active_buffer() {
-                Ok(path) => self.show_transient_message(format!("Saved {}", path.display())),
-                Err(error) => self.show_transient_message(format!("Error: {error:?}")),
+                Ok(path) => {
+                    self.show_transient_message(format!("Saved {}", path.display()));
+                    self.toast_buffer_saved(&path);
+                }
+                Err(error) => {
+                    self.show_transient_message(format!("Error: {error:?}"));
+                    self.toast_buffer_save_failed(&error);
+                }
             }
         } else if self.runtime.take_pending_load() {
             match self.load_active_buffer() {

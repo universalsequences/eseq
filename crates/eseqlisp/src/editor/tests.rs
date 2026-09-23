@@ -3873,6 +3873,41 @@ fn buffer_saved_host_event_shows_success_toast_that_expires_without_input() {
 }
 
 #[test]
+fn save_buffer_command_and_native_show_save_toasts() {
+    let dir = hot_reload_temp_dir("eseqlisp-save-buffer-toast");
+    let path = dir.join("demo.lisp");
+    std::fs::write(&path, "(+ 1 2)\n").unwrap();
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    editor.open_file_buffer(&path).unwrap();
+
+    // The `save-buffer` builtin (Ctrl+S).
+    editor.run_command("save-buffer");
+    let toast = editor.toast().expect("save-buffer toast");
+    assert_eq!(toast.message, "Saved demo.lisp");
+    assert_eq!(toast.kind, crate::host::ToastKind::Success);
+
+    // The `(save-buffer)` native, drained from the runtime.
+    editor.dismiss_toast();
+    editor.runtime_mut().eval_str("(save-buffer)").unwrap();
+    editor.refresh_runtime_side_effects();
+    let toast = editor.toast().expect("(save-buffer) toast");
+    assert_eq!(toast.message, "Saved demo.lisp");
+    assert_eq!(toast.kind, crate::host::ToastKind::Success);
+
+    // A failed write surfaces as an error toast, not only the hidden minibuffer.
+    editor.dismiss_toast();
+    let blocked = dir.join("not-a-dir").join("demo.lisp");
+    std::fs::write(dir.join("not-a-dir"), "").unwrap();
+    editor.active_buffer_mut().set_path(blocked);
+    editor.run_command("save-buffer");
+    let toast = editor.toast().expect("save failure toast");
+    assert!(toast.message.starts_with("Save failed: "), "{}", toast.message);
+    assert_eq!(toast.kind, crate::host::ToastKind::Error);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn error_toast_lingers_until_the_next_keypress() {
     let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
 
