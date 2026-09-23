@@ -1821,6 +1821,17 @@ pub struct ProcessOutput {
     pub value: Value,
 }
 
+/// Whose chain a deferred inlet write belongs to. Deferred writes land on the
+/// owner's next fire, so a track's lane patch and each graph node's patch keep
+/// separate queues even when the node is routed to that track.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum ProcessInletWriteOwner {
+    /// A track's lane patch (the track step path).
+    Track(usize),
+    /// A graph node's process patch, by graph name and node index.
+    Node { graph: String, node: usize },
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ProcessInletWrite {
     pub op: ProcessTargetOp,
@@ -1882,7 +1893,8 @@ pub struct ProcessRuntime {
     step_process_scope_epoch: u64,
     step_process_scope_published_epoch: u64,
     step_process_runtime_ids: HashSet<u64>,
-    pending_step_inlet_writes: HashMap<(usize, ProcessInstanceId, String), Vec<ProcessInletWrite>>,
+    pending_step_inlet_writes:
+        HashMap<(ProcessInletWriteOwner, ProcessInstanceId, String), Vec<ProcessInletWrite>>,
     resolved_track_history: Vec<ResolvedTrackHistory>,
     resolved_track_snapshot_cache: Option<(u64, Arc<Vec<ProcessTrackReadSnapshot>>)>,
     /// Named aliases are exact. Class aliases are retained only while unique;
@@ -2288,8 +2300,26 @@ impl ProcessRuntime {
         inlet: impl Into<String>,
         write: ProcessInletWrite,
     ) {
+        self.defer_owned_process_inlet_write(
+            ProcessInletWriteOwner::Track(track),
+            instance_id,
+            inlet,
+            write,
+        );
+    }
+
+    /// Queue a deferred inlet write for the chain `owner` runs next. Track
+    /// lane patches and graph node patches keep separate queues: a node routed
+    /// to track T must neither consume nor drop T's own deferred writes.
+    pub fn defer_owned_process_inlet_write(
+        &mut self,
+        owner: ProcessInletWriteOwner,
+        instance_id: ProcessInstanceId,
+        inlet: impl Into<String>,
+        write: ProcessInletWrite,
+    ) {
         self.pending_step_inlet_writes
-            .entry((track, instance_id, inlet.into()))
+            .entry((owner, instance_id, inlet.into()))
             .or_default()
             .push(write);
     }
@@ -2299,10 +2329,21 @@ impl ProcessRuntime {
         track: usize,
         chain: &TrackProcessChain,
     ) -> BTreeMap<usize, BTreeMap<String, Vec<ProcessInletWrite>>> {
+        self.take_owned_process_inlet_writes(&ProcessInletWriteOwner::Track(track), chain)
+    }
+
+    /// Take `owner`'s deferred inlet writes, keyed by slot index in `chain`.
+    /// Writes of that owner whose instance is no longer in its chain are stale
+    /// and dropped; every other owner's writes stay pending.
+    pub fn take_owned_process_inlet_writes(
+        &mut self,
+        owner: &ProcessInletWriteOwner,
+        chain: &TrackProcessChain,
+    ) -> BTreeMap<usize, BTreeMap<String, Vec<ProcessInletWrite>>> {
         let pending = std::mem::take(&mut self.pending_step_inlet_writes);
         let mut current = BTreeMap::<usize, BTreeMap<String, Vec<ProcessInletWrite>>>::new();
-        for ((pending_track, instance_id, inlet), writes) in pending {
-            if pending_track == track {
+        for ((pending_owner, instance_id, inlet), writes) in pending {
+            if &pending_owner == owner {
                 if let Some(slot_idx) = chain
                     .slots
                     .iter()
@@ -2319,7 +2360,7 @@ impl ProcessRuntime {
                 continue;
             }
             self.pending_step_inlet_writes
-                .insert((pending_track, instance_id, inlet), writes);
+                .insert((pending_owner, instance_id, inlet), writes);
         }
         current
     }
@@ -4313,7 +4354,7 @@ mod tests {
         assert!(current.is_empty());
         assert!(
             !runtime.pending_step_inlet_writes.contains_key(&(
-                0,
+                ProcessInletWriteOwner::Track(0),
                 ProcessInstanceId(7),
                 "amount".to_string()
             )),
@@ -4321,12 +4362,68 @@ mod tests {
         );
         assert!(
             runtime.pending_step_inlet_writes.contains_key(&(
-                1,
+                ProcessInletWriteOwner::Track(1),
                 ProcessInstanceId(9),
                 "amount".to_string()
             )),
             "writes for other tracks should remain pending"
         );
+    }
+
+    /// A node routed to track 1 defers an up-chain write. Neither track 1's
+    /// own lane patch nor another node on the same route may consume or drop
+    /// it; only that node's next fire takes it.
+    #[test]
+    fn deferred_node_inlet_writes_survive_other_owners_on_the_same_route() {
+        let node_a = ProcessInletWriteOwner::Node {
+            graph: "g".to_string(),
+            node: 1,
+        };
+        let node_b = ProcessInletWriteOwner::Node {
+            graph: "g".to_string(),
+            node: 2,
+        };
+        let slot = |id: u64| TrackProcessSlot {
+            instance_id: ProcessInstanceId(id),
+            instance_name: None,
+            class_name: "lane-acc".to_string(),
+            enabled: true,
+            project_layer: false,
+            inlets: Default::default(),
+            lanes: Default::default(),
+            fanout: Default::default(),
+            unbound_ports: Default::default(),
+            bindings: Default::default(),
+        };
+        let chain_a = TrackProcessChain {
+            slots: vec![slot(7)],
+        };
+        let chain_b = TrackProcessChain {
+            slots: vec![slot(8)],
+        };
+        let chain_track = TrackProcessChain {
+            slots: vec![slot(9)],
+        };
+        let write = ProcessInletWrite {
+            op: ProcessTargetOp::Set,
+            value: 1.0,
+        };
+        let mut runtime = ProcessRuntime::default();
+        runtime.defer_owned_process_inlet_write(node_a.clone(), ProcessInstanceId(7), "reset", write);
+        runtime.defer_step_process_inlet_write(1, ProcessInstanceId(9), "reset", write);
+
+        // Node B (same route) and track 1's lane patch fire in between.
+        assert!(runtime.take_owned_process_inlet_writes(&node_b, &chain_b).is_empty());
+        let track_writes = runtime.take_step_process_inlet_writes(1, &chain_track);
+        assert_eq!(track_writes.get(&0).and_then(|w| w.get("reset")), Some(&vec![write]));
+
+        let node_writes = runtime.take_owned_process_inlet_writes(&node_a, &chain_a);
+        assert_eq!(
+            node_writes.get(&0).and_then(|w| w.get("reset")),
+            Some(&vec![write]),
+            "node A's deferred write lands on its next fire"
+        );
+        assert!(runtime.pending_step_inlet_writes.is_empty());
     }
 
     #[test]

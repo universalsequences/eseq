@@ -4473,6 +4473,30 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         assert_eq!(*out["primary-free"].borrow(), Value::Bool(true));
         let Value::List(readers) = out["readers"].borrow().clone() else { panic!("readers") };
         assert!(readers.is_empty());
+
+        // Removing a fan-out target drops the cable into it, and the removed
+        // (highest) id is never minted again, so a re-added slot of the same
+        // class starts clean instead of inheriting the old cable and state.
+        runtime
+            .eval_str(&format!("(graph-node-process-fanout-add \"neural\" 2 {rand} :wire {mask} :prob)"))
+            .unwrap();
+        runtime.eval_str(&format!("(graph-node-process-remove \"neural\" 2 {mask})")).unwrap();
+        let fanout_left = |state: &SequencerState| {
+            state
+                .edit_current_graph_overrides(|graphs| {
+                    Ok(graphs
+                        .iter()
+                        .flat_map(|graph| graph.node_intrinsics.iter())
+                        .filter_map(|node| node.process_chain.as_ref())
+                        .flat_map(|chain| chain.slots.iter())
+                        .map(|slot| slot.fanout.len())
+                        .sum::<usize>())
+                })
+                .unwrap()
+        };
+        assert_eq!(fanout_left(&state), 0, "the fan-out cable into the removed slot is gone");
+        let readded = id(runtime.eval_str("(graph-node-process-add \"neural\" 2 \"prob-mask\")").unwrap());
+        assert_ne!(readded, mask, "a removed slot's id is not reused");
     }
 
     #[test]

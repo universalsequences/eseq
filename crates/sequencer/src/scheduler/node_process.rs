@@ -62,7 +62,8 @@ impl GraphDriver for SchedulerGraphDriver<'_> {
             self.debug_accum,
         );
         self.last_delay_offset_steps = outcome.delay_offset_steps;
-        self.pending_resets = outcome.reset_requests;
+        // Append: an untaken request must never be silently overwritten.
+        self.pending_resets.extend(outcome.reset_requests);
         outcome.audible
     }
 
@@ -122,7 +123,14 @@ pub(super) fn run_node_process_patch(
     let mut audible = true;
     let mut overlay = ProcessTargetOverlay::default();
     let chain = &ctx.process_chain;
-    let mut inlet_writes = process_runtime.take_step_process_inlet_writes(track, chain);
+    // Deferred (up-chain / same-slot) wires land on this node's next fire. The
+    // queue is the node's own, not its route track's: the track's lane patch
+    // and other nodes on the same route must not consume or drop these writes.
+    let write_owner = crate::process::ProcessInletWriteOwner::Node {
+        graph: manifest.name.clone(),
+        node: ctx.node_index,
+    };
+    let mut inlet_writes = process_runtime.take_owned_process_inlet_writes(&write_owner, chain);
     // `(read (neuron k ...))` inside this patch sees the graph's recent notes.
     process_runtime.set_neuron_reads(ctx.neuron_recent_notes.clone());
     let mut deferred_writes = Vec::new();
@@ -250,8 +258,8 @@ pub(super) fn run_node_process_patch(
     }
     process_runtime.set_neuron_reads(Vec::new());
     for deferred in deferred_writes.drain(..) {
-        process_runtime.defer_step_process_inlet_write(
-            deferred.track,
+        process_runtime.defer_owned_process_inlet_write(
+            write_owner.clone(),
             deferred.instance_id,
             deferred.inlet,
             deferred.write,

@@ -1165,9 +1165,10 @@ pub struct GraphRuntime {
     /// since the node last fired. Read into `NodeEmitContext::after_reset`
     /// and cleared by the fire, so a patch sees it exactly once.
     after_reset: Vec<bool>,
-    /// `graph-reset!` requests collected while committing a boundary's fires,
-    /// applied once the boundary's commits are done.
-    requested_resets: Vec<Option<u8>>,
+    /// `graph-reset!` requests collected while committing a boundary's (or a
+    /// reset seed's) fires, applied once those commits are done: the
+    /// requesting node and the group (`None` = whole graph).
+    requested_resets: Vec<(usize, Option<u8>)>,
     /// The last boundary the block loop evaluated (for resets requested
     /// from outside the block, e.g. a track process).
     last_boundary_beats: f64,
@@ -1619,16 +1620,73 @@ impl GraphRuntime {
         self.reset_internal(total_beats, false);
     }
 
-    /// Reset only the nodes of one neural group: their energy, input, pending
-    /// propagations, incoming triggers, cycle position and recent notes, as
-    /// the whole-graph reset does per node. Graph-wide state (edge dampening,
-    /// group traces, event history) is left alone.
+    /// Reset only the nodes of one neural group: their energy, input,
+    /// incoming triggers, cycle position and recent notes, as the whole-graph
+    /// reset does per node, and every propagation in flight *into* the group
+    /// (from any source, members included). Propagations from members into
+    /// other groups are those groups' input and keep flying. Graph-wide state
+    /// (edge dampening, group traces, event history) is left alone.
     pub fn reset_group(&mut self, group: u8, total_beats: f64) {
+        let in_group =
+            |runtime: &Self, node: usize| runtime.nodes.get(node).is_some_and(|n| n.neural_group == group);
+        for src in 0..self.num_nodes {
+            let pending = std::mem::take(&mut self.pending[src]);
+            self.pending[src] = pending
+                .into_iter()
+                .filter(|prop| {
+                    self.edges
+                        .get(prop.edge_index)
+                        .is_none_or(|edge| !in_group(self, edge.to))
+                })
+                .collect();
+        }
         for idx in 0..self.num_nodes {
             if self.nodes[idx].neural_group != group {
                 continue;
             }
-            self.reset_node_state(idx, total_beats, Vec::new());
+            let kept = std::mem::take(&mut self.pending[idx]);
+            self.reset_node_state(idx, total_beats, kept);
+        }
+    }
+
+    /// Whole-graph reset authored by fires (the rule's reset flag or a patch's
+    /// `graph-reset!`): clears everything, but each resetting fire keeps its
+    /// trigger visuals. A `(node, true)` firer (the rule's reset flag) also
+    /// keeps the scatter it pushed after `pending_lengths_before`, so it still
+    /// scatters; a patch's `graph-reset!` clears its own scatter too.
+    fn reset_preserving_firings(
+        &mut self,
+        firers: &[(usize, bool)],
+        pending_lengths_before: &[usize],
+        total_beats: f64,
+    ) {
+        let preserved = firers
+            .iter()
+            .map(|&(node_index, keep_scatter)| {
+                let pending = match pending_lengths_before.get(node_index) {
+                    Some(&start) if keep_scatter => {
+                        let start = start.min(self.pending[node_index].len());
+                        self.pending[node_index][start..].to_vec()
+                    }
+                    _ => Vec::new(),
+                };
+                (
+                    node_index,
+                    pending,
+                    self.trigger_activity[node_index],
+                    self.trigger_visual_until_beats[node_index],
+                    self.node_events[node_index].clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        self.reset_clearing_pending(total_beats);
+        for (node_index, pending, trigger_activity, trigger_visual_until_beats, node_event) in
+            preserved
+        {
+            self.pending[node_index].extend(pending);
+            self.trigger_activity[node_index] = trigger_activity;
+            self.trigger_visual_until_beats[node_index] = trigger_visual_until_beats;
+            self.node_events[node_index] = node_event;
         }
     }
 
@@ -1905,11 +1963,11 @@ impl GraphRuntime {
             // ── max_poly selection (deterministic: earliest sample, then index). ──
             candidates.sort_by_key(|c| (c.fire_sample, c.node_index));
             let accepted = self.max_poly_accept(&candidates, max_poly);
-            let reset_graph_state = candidates
+            let fire_reset = candidates
                 .iter()
                 .enumerate()
                 .any(|(cand_idx, candidate)| accepted[cand_idx] && candidate.reset_graph_state);
-            let pending_lengths_before_commit = if reset_graph_state {
+            let pending_lengths_before_commit = if fire_reset {
                 self.pending.iter().map(Vec::len).collect::<Vec<_>>()
             } else {
                 Vec::new()
@@ -1928,49 +1986,30 @@ impl GraphRuntime {
                 }
             }
             // Patch-authored resets (`graph-reset!`) land after every fire of
-            // this boundary has committed, so the fire that asked for one
-            // still emits and scatters (a group reset then clears what it
-            // scattered into that group).
-            if !self.requested_resets.is_empty() {
-                let requests = std::mem::take(&mut self.requested_resets);
-                for group in requests {
-                    match group {
-                        None => self.reset_clearing_pending(boundary_beats),
-                        Some(group) => self.reset_group(group, boundary_beats),
-                    }
-                }
-            }
+            // this boundary has committed. A whole-graph request takes the
+            // fire-authored reset path: the fire that asked for one still
+            // emits (its own scatter is cleared with the rest), and the
+            // drop / recover / trace pass below is skipped so the reset
+            // state stays clean.
+            let requested_resets = std::mem::take(&mut self.requested_resets);
+            let patch_reset_nodes = requested_resets
+                .iter()
+                .filter(|(_, group)| group.is_none())
+                .map(|(node_index, _)| *node_index)
+                .collect::<Vec<_>>();
+            let reset_graph_state = fire_reset || !patch_reset_nodes.is_empty();
             if reset_graph_state {
-                let mut preserved_reset_firings = Vec::new();
-                for (cand_idx, candidate) in candidates.iter().enumerate() {
-                    if !accepted[cand_idx] || !candidate.reset_graph_state {
-                        continue;
-                    }
-                    let node_index = candidate.node_index;
-                    let pending_start = pending_lengths_before_commit[node_index];
-                    let pending = self.pending[node_index][pending_start..].to_vec();
-                    preserved_reset_firings.push((
-                        node_index,
-                        pending,
-                        self.trigger_activity[node_index],
-                        self.trigger_visual_until_beats[node_index],
-                        self.node_events[node_index].clone(),
-                    ));
-                }
-                self.reset_clearing_pending(boundary_beats);
-                for (
-                    node_index,
-                    pending,
-                    trigger_activity,
-                    trigger_visual_until_beats,
-                    node_event,
-                ) in preserved_reset_firings
-                {
-                    self.pending[node_index].extend(pending);
-                    self.trigger_activity[node_index] = trigger_activity;
-                    self.trigger_visual_until_beats[node_index] = trigger_visual_until_beats;
-                    self.node_events[node_index] = node_event;
-                }
+                let firers = candidates
+                    .iter()
+                    .enumerate()
+                    .filter(|(cand_idx, candidate)| {
+                        accepted[*cand_idx]
+                            && (candidate.reset_graph_state
+                                || patch_reset_nodes.contains(&candidate.node_index))
+                    })
+                    .map(|(_, candidate)| (candidate.node_index, candidate.reset_graph_state))
+                    .collect::<Vec<_>>();
+                self.reset_preserving_firings(&firers, &pending_lengths_before_commit, boundary_beats);
             }
             if !reset_graph_state {
                 for idx in 0..self.num_nodes {
@@ -1995,6 +2034,14 @@ impl GraphRuntime {
                 for (cand_idx, candidate) in candidates.iter().enumerate() {
                     if accepted[cand_idx] {
                         self.bump_group_activity(candidate.node_index);
+                    }
+                }
+                // Group requests land last, after the drop / recover pass,
+                // so a rejected member keeps its `seed_on_reset` energy; they
+                // clear what this boundary scattered into the group.
+                for (_, group) in &requested_resets {
+                    if let Some(group) = *group {
+                        self.reset_group(group, boundary_beats);
                     }
                 }
             }
@@ -2461,6 +2508,22 @@ impl GraphRuntime {
                 self.bump_group_activity(candidate.node_index);
             }
         }
+        // `graph-reset!` from a reset-seed fire, applied as on a boundary.
+        let requested_resets = std::mem::take(&mut self.requested_resets);
+        let patch_reset_nodes = requested_resets
+            .iter()
+            .filter(|(_, group)| group.is_none())
+            .map(|(node_index, _)| (*node_index, false))
+            .collect::<Vec<_>>();
+        if !patch_reset_nodes.is_empty() {
+            self.reset_preserving_firings(&patch_reset_nodes, &[], reset_beats);
+        } else {
+            for (_, group) in requested_resets {
+                if let Some(group) = group {
+                    self.reset_group(group, reset_beats);
+                }
+            }
+        }
     }
 
     /// Emit the firing, reset the node's energy, and schedule its delayed scatter.
@@ -2486,7 +2549,8 @@ impl GraphRuntime {
         let audible = self.run_node_process_patch(driver, candidate, &mut payload);
         let delay_offset_steps = driver.take_delay_offset_steps();
         self.after_reset[node_index] = false;
-        self.requested_resets.extend(driver.take_reset_requests());
+        self.requested_resets
+            .extend(driver.take_reset_requests().into_iter().map(|group| (node_index, group)));
         if audible {
             self.push_emission_event(
                 node_index,
@@ -2626,6 +2690,12 @@ impl GraphRuntime {
         let mut payload = self.resolve_emission_payload(node_index, candidate.emit.as_ref());
         let audible = self.run_node_process_patch(driver, candidate, &mut payload);
         let delay_offset_steps = driver.take_delay_offset_steps();
+        // Same bookkeeping as `commit_firing`: the seed fire consumed the
+        // node's `(reset-fired?)`, and its `graph-reset!` requests are applied
+        // once every reset-seed fire has committed.
+        self.after_reset[node_index] = false;
+        self.requested_resets
+            .extend(driver.take_reset_requests().into_iter().map(|group| (node_index, group)));
         if !audible {
             // Muted reset seed: still counts as fired for the graph.
             self.energy[node_index] = 0.0;
@@ -5930,6 +6000,119 @@ mod tests {
         let mut out = Vec::new();
         runtime.process_block_with_driver(0.0, 2.0, 0, 48_000.0, 0, PanicOnEmit, &mut out);
         assert!(!out.is_empty());
+    }
+
+    /// Stand-in for a scheduler-run patch: logs each emit's `(beat, node,
+    /// after_reset)` and asks for `graph-reset!` (`reset`) when node
+    /// `reset_node` fires at `reset_beat`.
+    struct ResetLogDriver {
+        log: Vec<(f64, usize, bool)>,
+        reset_node: Option<usize>,
+        reset_beat: f64,
+        reset: Option<u8>,
+        pending: Vec<Option<u8>>,
+    }
+    impl ResetLogDriver {
+        fn new(reset_node: Option<usize>, reset_beat: f64, reset: Option<u8>) -> Self {
+            Self { log: Vec::new(), reset_node, reset_beat, reset, pending: Vec::new() }
+        }
+    }
+    impl GraphDriver for ResetLogDriver {
+        fn update(&mut self, eval: &NodeEval) -> NodeFire {
+            NodeFire { fired: eval.energy >= 0.5, ..NodeFire::default() }
+        }
+        fn emit(&mut self, ctx: &NodeEmitContext, _payload: &mut GraphPayload) -> bool {
+            self.log.push((ctx.beat, ctx.node_index, ctx.after_reset));
+            if self.reset_node == Some(ctx.node_index) && (ctx.beat - self.reset_beat).abs() < 1e-9 {
+                self.pending.push(self.reset);
+            }
+            true
+        }
+        fn take_reset_requests(&mut self) -> Vec<Option<u8>> {
+            std::mem::take(&mut self.pending)
+        }
+    }
+
+    fn reset_seeded_self_loop() -> GraphRuntime {
+        let mut n0 = node_with_patch();
+        n0.seed_on_reset = 1.0;
+        n0.trigger_on_reset = true;
+        GraphRuntime::new(8, "g".into(), vec![n0], vec![GraphEdge::new(0, 0, 1.0)], 1.0, 4.0)
+    }
+
+    /// A reset-seed fire consumes `(reset-fired?)`: the periodic reset's seed
+    /// fire sees it, the node's next ordinary fire does not.
+    #[test]
+    fn reset_seed_fire_consumes_reset_fired() {
+        let mut runtime = reset_seeded_self_loop();
+        let mut driver = ResetLogDriver::new(None, 0.0, None);
+        let mut out = Vec::new();
+        runtime.process_block_with_driver(0.0, 6.0, 0, 48_000.0, 0, &mut driver, &mut out);
+        let at = |beat: f64| {
+            driver
+                .log
+                .iter()
+                .find(|(b, _, _)| (b - beat).abs() < 1e-9)
+                .map(|(_, _, after_reset)| *after_reset)
+        };
+        assert_eq!(at(4.0), Some(true), "the reset seed fire sees the reset: {:?}", driver.log);
+        assert_eq!(at(5.0), Some(false), "the next ordinary fire does not: {:?}", driver.log);
+    }
+
+    /// `graph-reset!` from a reset-seed fire is applied, not dropped: the whole
+    /// reset clears the fire's own self-loop scatter.
+    #[test]
+    fn reset_seed_fire_graph_reset_is_applied() {
+        let mut runtime = reset_seeded_self_loop();
+        let mut driver = ResetLogDriver::new(Some(0), 4.0, None);
+        let mut out = Vec::new();
+        runtime.process_block_with_driver(0.0, 4.0, 0, 48_000.0, 0, &mut driver, &mut out);
+        assert!(driver.log.iter().any(|(b, _, _)| (b - 4.0).abs() < 1e-9), "{:?}", driver.log);
+        assert!(driver.pending.is_empty(), "the request was taken");
+        assert!(runtime.requested_resets.is_empty(), "and applied");
+        assert_eq!(runtime.pending_count_for_node(0), Some(0), "the reset cleared the self-loop");
+        assert_eq!(runtime.energy[0], 1.0, "and re-seeded the node's reset energy");
+    }
+
+    /// A patch's whole-graph `graph-reset!` takes the fire-authored reset
+    /// path: a max-poly-rejected node keeps its `seed_on_reset` energy and the
+    /// group traces stay cleared.
+    #[test]
+    fn patch_whole_graph_reset_skips_the_drop_and_trace_pass() {
+        let mut n1 = node(Timebase::Quarter);
+        n1.seed_on_reset = 1.0;
+        let mut runtime =
+            GraphRuntime::new(9, "g".into(), vec![node_with_patch(), n1], Vec::new(), 1.0, 0.0);
+        runtime.energy = vec![1.0, 1.0];
+        let mut driver = ResetLogDriver::new(Some(0), 1.0, None);
+        let mut out = Vec::new();
+        runtime.process_block_with_driver(0.0, 1.0, 0, 48_000.0, 1, &mut driver, &mut out);
+        assert_eq!(out.len(), 1, "max_poly 1 accepts node 0 only");
+        assert_eq!(out[0].node_index, 0);
+        assert_eq!(runtime.energy[1], 1.0, "the rejected node keeps its reset seed");
+        assert!(runtime.group_activity.iter().all(|a| *a == 0.0), "{:?}", runtime.group_activity);
+    }
+
+    /// A group reset cancels every propagation in flight into the group and
+    /// leaves propagations into other groups alone.
+    #[test]
+    fn group_reset_cancels_propagations_into_the_group() {
+        let n0 = node(Timebase::Quarter);
+        let mut n1 = node(Timebase::Quarter);
+        n1.neural_group = 1;
+        let mut runtime = GraphRuntime::new(
+            10,
+            "g".into(),
+            vec![n0, n1],
+            vec![GraphEdge::new(0, 1, 1.0), GraphEdge::new(1, 0, 1.0)],
+            1.0,
+            0.0,
+        );
+        runtime.push_propagation(0, 0.0, GraphPayload::default());
+        runtime.push_propagation(1, 0.0, GraphPayload::default());
+        runtime.reset_group(1, 0.0);
+        assert_eq!(runtime.pending_count_for_node(0), Some(0), "0 -> 1 lands in group 1");
+        assert_eq!(runtime.pending_count_for_node(1), Some(1), "1 -> 0 lands in group 0");
     }
 
     #[test]

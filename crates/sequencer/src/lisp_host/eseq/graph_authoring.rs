@@ -1694,6 +1694,14 @@ fn graph_manifest_to_value(
 /// slots minted later on a track.
 const GRAPH_NODE_PROCESS_ID_BASE: u64 = 1 << 45;
 
+/// Session high-water mark of minted node slot ids. A removed slot's id is
+/// never handed out again in this session, so a re-added slot can neither
+/// resume the removed slot's runtime state (keyed by id) nor pick up a stale
+/// cable, and a slot minted in another scene never shares an id with one
+/// minted here.
+static GRAPH_NODE_PROCESS_ID_HIGH_WATER: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(GRAPH_NODE_PROCESS_ID_BASE);
+
 fn next_graph_node_process_id(graphs: &[crate::graph::ProjectGraphOverrides]) -> u64 {
     let highest = graphs
         .iter()
@@ -1703,7 +1711,13 @@ fn next_graph_node_process_id(graphs: &[crate::graph::ProjectGraphOverrides]) ->
         .map(|slot| slot.instance_id.0)
         .filter(|id| (GRAPH_NODE_PROCESS_ID_BASE..crate::process::TRACK_ROSTER_INSTANCE_ID_BASE).contains(id))
         .max();
-    highest.map(|id| id + 1).unwrap_or(GRAPH_NODE_PROCESS_ID_BASE)
+    let next = highest.map(|id| id + 1).unwrap_or(GRAPH_NODE_PROCESS_ID_BASE);
+    next.max(GRAPH_NODE_PROCESS_ID_HIGH_WATER.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+/// Record that `id` was minted, so it is never minted again this session.
+fn claim_graph_node_process_id(id: u64) {
+    GRAPH_NODE_PROCESS_ID_HIGH_WATER.fetch_max(id + 1, std::sync::atomic::Ordering::Relaxed);
 }
 
 fn graph_node_process_def(
@@ -2154,6 +2168,7 @@ fn register_graph_node_process_natives(
                 });
                 Ok(next_id)
             })?;
+            claim_graph_node_process_id(id);
             ctx.set_status(format!("node {instance}: added {class_name}"));
             Ok(EValue::Number(id as f64))
         },
@@ -2163,17 +2178,25 @@ fn register_graph_node_process_natives(
     runtime.register_native_with_docs(
         "graph-node-process-remove",
         "(graph-node-process-remove sequencer node-index instance-id)",
-        "Remove one slot from the node's patch and drop every wire into it.",
+        "Remove one slot from the node's patch and drop every wire and fan-out cable into it.",
         move |args, _ctx| {
             let (manifest, instance) = graph_node_process_args(&st, "graph-node-process-remove", &args)?;
             let id = graph_node_process_id_arg(args.get(2), "graph-node-process-remove")?;
             edit_graph_node_process_chain(&st, &manifest, instance, |chain, _| {
                 let before = chain.slots.len();
                 chain.slots.retain(|slot| slot.instance_id != id);
+                let targets_removed = |target: &crate::process::ParamTarget| {
+                    matches!(target, crate::process::ParamTarget::ProcessInlet { instance_id: Some(i), .. } if *i == id)
+                };
                 for slot in &mut chain.slots {
-                    slot.bindings.retain(|_, target| {
-                        !matches!(target, Some(crate::process::ParamTarget::ProcessInlet { instance_id: Some(i), .. }) if *i == id)
-                    });
+                    slot.bindings
+                        .retain(|_, target| !target.as_ref().is_some_and(targets_removed));
+                    // Fan-out cables into the removed slot go too, as
+                    // `graph-node-process-fanout-remove` would drop them.
+                    for entries in slot.fanout.values_mut() {
+                        entries.retain(|entry| !targets_removed(&entry.target));
+                    }
+                    slot.fanout.retain(|_, entries| !entries.is_empty());
                 }
                 if chain.slots.len() == before {
                     return Err(format!("graph-node-process-remove: no slot {}", id.0));
