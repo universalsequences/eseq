@@ -317,8 +317,8 @@ sample error 2.05e-8 and maximum NRMSE 1.73e-7.
 M1 Max, 48 kHz, 512 frames, one voice; seven rotating repetitions per condition,
 with compilation and other experiments finished before measurement. These are
 complete native instrument calls, including filters, envelopes and modulation
-support. Both sides use the pinned v0.1.25 compiler. The best prototype does not
-require the unpublished compiler fix described below.
+support. Both sides use the then-pinned v0.1.25 compiler. The best prototype does
+not require the compiler fix described below, subsequently released in v0.1.26.
 
 | Algorithm | Original, µs | Switchable table prototype, µs | Speedup |
 | --- | ---: | ---: | ---: |
@@ -386,7 +386,7 @@ Sampling the locally built debug compiler confirmed the earlier stall was in
 sorting growing conjunction sets. A depth-first worklist explored narrow paths
 through feedback before pending broader demands could subsume them.
 
-The local DGen change processes conjunctions by increasing predicate count and
+The DGen change processes conjunctions by increasing predicate count and
 canonicalizes demands once after convergence. Propagation only preserves or
 adds predicates, so this order processes every possible broader term first.
 There is no cap, dropped condition or change to execution semantics. It avoids
@@ -398,12 +398,44 @@ with the local release compiler, versus the earlier run stopped after 182 s.
 Sixteen focused Swift tests pass, including new shared-history growth and
 Boolean reachability regressions. Original, table and eight-algorithm Digi FM
 sources generate byte-identical C before/after the compiler fix, and 75 audio
-comparisons are sample-identical. The fix and tests are local in
-`~/code/swift/dgen`; no compiler release, eseq pin change or factory DSP change
-has been made.
+comparisons are sample-identical. The fix and tests were subsequently published
+in v0.1.26, as recorded below. Factory DSP remains unchanged.
 
 Reproduction and raw results live under `.local/benchmarks/digi-fm-2026-09-22/`:
 `switching-experiment.py`, `switching-final-validation.py`,
 `compiler-gate-validation.py`, the `switching-*` result folders, host-probe JSON,
 and `compiler-blowup-debug.sample.txt`. The final timing/state/audio report is
 `switching-final-validation/results.json`. Tracking: eseq-c519.4 and dgen-8pj.
+
+### Published compiler, 2026-09-23
+
+[DGenLisp v0.1.26](https://github.com/universalsequences/dgen-audio/releases/tag/dgenlisp-v0.1.26)
+publishes the macOS arm64 fix from source commit
+`e0751d26a280bfd0de4da79472f9a6e84f603a2e`. Eseq's macOS compiler pin is updated
+and installed through `scripts/fetch_dgenlisp.sh`; the Linux pin and hermetic
+Clang/lld stage are unchanged. The anonymous public download and installed
+archive match SHA256
+`f00cedfbdef7aa64a051a1b363621deed55a270612a5e40b6f0f63120e6fcc16`.
+
+The release was built in a clean isolated checkout with Apple Swift 6.2.3 and
+Xcode 26.2, stripped and ad-hoc signed. All 16 focused execution-gate tests pass.
+Both the package and installed symlink pass scalar and grouped-parameter compile
+checks, including the bundled binary audit, without resource-path overrides.
+Four complete Digi FM sources produce byte-identical C to the previously
+validated compiler. The formerly stalled source compiles in 3.06 seconds from
+the package and 3.09 seconds through the installed symlink.
+
+With the installed compiler, the production `instrument_probe` load/init path
+passes for both factory Digi FM and `user:Experiments/Digi FM Fast Test` at
+48 kHz / 512 frames, algorithm 6, Harmonics=5. Both render 8,192 frames with
+finite audio/state and nonzero signal. The test instrument also switches to
+algorithm 2 at frame 1,031 and back to 6 at frame 3,077. Peak/RMS are
+0.05112/0.02088 for the factory instrument and 0.05105/0.02062 for the test
+instrument. Fetching again confirms the installed distribution matches the pin.
+
+This release fixes compiler analysis time; it does not itself change Digi FM's
+audio-thread CPU cost or promote the experimental instrument into the factory
+library. Release notes, packaged/installed checks and host-probe results are
+under `.local/benchmarks/digi-fm-2026-09-22/release-v0.1.26/`; the fresh focused
+test log is `compiler-release-tests.log` in its parent directory. Tracking:
+eseq-c519.6.
