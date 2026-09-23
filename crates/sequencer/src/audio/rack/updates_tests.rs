@@ -337,13 +337,70 @@ fn disabled_rack_slot_takes_no_voice_and_bypasses_its_effects() {
     let trigger = KeyboardTrigger {
         generation: 1, source: None, track: 0, transpose: 0.0, velocity: 0.7, note_off: false,
     };
+    // Simulate the enabled slot having been parked before a pattern switch:
+    // its filter is still bypassed on the node.
+    unsafe {
+        graph::params_push_wrapper(lg, graph::ParamMsg {
+            idx: filter::FILTER_PARAM_ENABLED,
+            logical_id: filters[0] as u64,
+            fvalue: 0.0,
+        });
+    }
+    render_for_watch(&mut output);
     assert!(fire_live_keyboard_rack_note(&mut data, 0, &trigger, 0.0, rack));
     assert!(data.voice_pools[rack_slot_pool_index(0, 0).unwrap()].voices[0].active);
     assert!(
         !data.voice_pools[rack_slot_pool_index(0, 1).unwrap()].voices[0].active,
         "disabled slot must not take a voice"
     );
+    render_for_watch(&mut output);
+    assert_eq!(filter_enabled(filters[0]), 1.0, "a live key restores the enabled slot's FX");
+    assert_eq!(filter_enabled(filters[1]), 0.0);
     drop(snapshot);
+
+    // Parking the sounding slot releases its voice rather than leaving it
+    // ringing dry through the bypassed chain.
+    release_newly_disabled_rack_slots(&mut data, 0);
+    assert!(data.voice_pools[rack_slot_pool_index(0, 0).unwrap()].voices[0].active,
+        "an unchanged enabled slot keeps its voice");
+    let snapshot = Arc::make_mut(&mut data.scheduler_snapshot);
+    Arc::make_mut(&mut snapshot.tracks[0]).rack_track.as_mut().unwrap().slots[0].enabled = false;
+    release_newly_disabled_rack_slots(&mut data, 0);
+    assert!(!data.voice_pools[rack_slot_pool_index(0, 0).unwrap()].voices[0].active,
+        "a newly disabled slot releases its sounding voice");
     drop(data);
     unsafe { engine.destroy(); }
+}
+
+/// eseq-bw9v: a parked slot never sounds, so its solo must not mute the
+/// enabled slots beside it.
+#[test]
+fn disabled_soloed_slot_does_not_mute_enabled_slots() {
+    let mut rack = RackTrackSnapshot::new(
+        vec![off_step_solo_tests::slot(), off_step_solo_tests::slot()],
+        default_rack_macros(),
+    );
+    rack.slots[0].solo = true;
+    assert!(rack_has_enabled_solo(&RackParams::live(&rack, [None; 8])));
+    rack.slots[0].enabled = false;
+    assert!(!rack_has_enabled_solo(&RackParams::live(&rack, [None; 8])));
+    assert!(!rack_has_enabled_solo(&RackParams::at_step(&rack, 0, [None; 8], [None; 8])));
+}
+
+/// eseq-bw9v: `enabled` is a per-pattern authoring value like mute/solo, so
+/// history replay and "copy current values to all scenes" carry it.
+#[test]
+fn slot_enabled_flag_survives_history_replay_and_scene_copy() {
+    let mut slot = off_step_solo_tests::slot();
+    let before = slot.authoring_values();
+    slot.enabled = false;
+    let after = slot.authoring_values();
+    slot.apply_authoring_values(&before).unwrap();
+    assert!(slot.enabled, "undo restores the enable flag");
+    slot.apply_authoring_values(&after).unwrap();
+    assert!(!slot.enabled, "redo restores the enable flag");
+
+    let mut target = off_step_solo_tests::slot();
+    target.copy_scene_values_from(&slot);
+    assert!(!target.enabled, "copy to all scenes carries the enable flag");
 }

@@ -71,6 +71,7 @@ pub(super) fn new_audio_callback_data(
         host_transport_clock: HostTransportClockRuntime::default(),
         free_patch_transport_routes: [FreePatchTransportRouteState::default(); MAX_TRACKS],
         rack_choke_last_trigger: [u64::MAX; MAX_TRACKS],
+        rack_slot_disabled_masks: [0; MAX_TRACKS],
         rack_choke_note_offs: Vec::with_capacity(MAX_VOICES * 2),
         pending_accum_reset: [false; MAX_TRACKS],
         scheduled_events: Arc::clone(&scheduled_events),

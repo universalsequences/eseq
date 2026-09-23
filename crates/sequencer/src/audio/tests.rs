@@ -2221,6 +2221,28 @@ fn idle_instrument_engine_disables_all_voices() {
 }
 
 #[test]
+fn reenabled_free_patch_engine_regrows_idle_voice() {
+    // eseq-bw9v: parking a FreePatch rack slot drops its engine to zero
+    // voices; re-enabling it must restore the idle voice on the next block
+    // rather than waiting for a note to allocate one.
+    let engine_id = 0;
+    let mut pool = CustomEnginePool::new();
+    for lid in 1..=4 {
+        pool.add_voice(lid);
+    }
+    pool.enabled_voice_count = 1;
+    crate::lisp_host::set_dgen_engine_enabled_voices(engine_id, 1);
+
+    pool.shrink_released_voices(engine_id, 0, 1_000, 0);
+    assert_eq!(crate::lisp_host::get_dgen_engine_enabled_voices(engine_id), 0);
+
+    pool.shrink_released_voices(engine_id, 0, 1_000, 1);
+    assert_eq!(pool.enabled_voice_count, 1);
+    assert_eq!(crate::lisp_host::get_dgen_engine_enabled_voices(engine_id), 1);
+    crate::lisp_host::reset_dgen_engine_enabled_voices(engine_id);
+}
+
+#[test]
 fn custom_engine_pool_steals_same_tracks_active_voice_first() {
     let mut pool = CustomEnginePool::new();
     for lid in 1..=2 {

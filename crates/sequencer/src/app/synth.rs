@@ -790,7 +790,9 @@ impl App {
         let solos = {
             let racks = self.state.pattern.rack_tracks.lock().unwrap();
             let Some(rack) = racks.get(track).and_then(Option::as_ref) else { return };
-            rack.slots.iter().map(|slot| slot.solo).collect::<Vec<_>>()
+            // A parked slot never sounds, so its solo must not mute the
+            // enabled slots around it (eseq-bw9v).
+            rack.slots.iter().map(|slot| slot.enabled && slot.solo).collect::<Vec<_>>()
         };
         let has_solo = solos.iter().any(|solo| *solo);
         let Some(track_nodes) = self.graph.track_node_ids.get(track) else {
@@ -869,6 +871,16 @@ impl App {
         if !updated {
             return false;
         }
+        self.push_rack_slot_fx_gate(track, slot_idx);
+        self.push_rack_slot_solo_mutes(track);
+        self.state.publish_scheduler_snapshot();
+        true
+    }
+
+    /// Push each slot effect's `enabled` node param for the live slot's
+    /// enable state: 0 while the slot is parked, the effect's own stored value
+    /// once it plays again (eseq-bw9v).
+    pub fn push_rack_slot_fx_gate(&self, track: usize, slot_idx: usize) {
         let slot = {
             let racks = self.state.pattern.rack_tracks.lock().unwrap();
             racks
@@ -892,7 +904,7 @@ impl App {
                     continue;
                 }
                 let stored = effect.defaults.get(param_idx).copied().unwrap_or(1.0);
-                let fvalue = if value { stored } else { 0.0 };
+                let fvalue = if slot.enabled { stored } else { 0.0 };
                 unsafe {
                     crate::audiograph::params_push_wrapper(
                         self.graph.lg.0,
@@ -905,8 +917,6 @@ impl App {
                 }
             }
         }
-        self.state.publish_scheduler_snapshot();
-        true
     }
 
     pub fn set_rack_slot_solo(&mut self, track: usize, slot_idx: usize, value: bool) -> bool {

@@ -4027,6 +4027,22 @@ impl App {
                                     effect_slot,
                                 );
                             }
+                            // A parked slot's whole chain (built-in FX with
+                            // no saved custom effect included) starts
+                            // bypassed, even on a track that is only ever
+                            // played live (eseq-bw9v).
+                            let slot_count = self
+                                .state
+                                .pattern
+                                .rack_tracks
+                                .lock()
+                                .unwrap()
+                                .get(track_idx)
+                                .and_then(Option::as_ref)
+                                .map_or(0, |rack| rack.slots.len());
+                            for rack_slot in 0..slot_count {
+                                self.push_rack_slot_fx_gate(track_idx, rack_slot);
+                            }
                         }
                     }
                     // Device-less tracks use the current automatic name, but

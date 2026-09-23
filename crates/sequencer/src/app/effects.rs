@@ -5167,17 +5167,27 @@ impl App {
         let Some(descriptor) = rack.effect_descriptors.get(effect_slot) else {
             return;
         };
+        // A parked slot keeps its FX bypassed (eseq-bw9v): load, recompile
+        // and undo replay all funnel through here and must not un-bypass it.
+        let bypassed_param = (!rack.enabled)
+            .then(|| descriptor.enabled_param_idx())
+            .flatten();
         for (param_idx, param) in descriptor.params.iter().enumerate() {
             if param.node_param_idx == u32::MAX || param_idx >= slot.defaults.len() {
                 continue;
             }
+            let value = if bypassed_param == Some(param_idx) {
+                0.0
+            } else {
+                slot.defaults[param_idx]
+            };
             push_fx_param(
                 self.graph.lg.0,
                 slot.node_id,
                 slot.modulator_node_id,
                 param.node_param_idx,
                 param.node_param_span,
-                slot.defaults[param_idx],
+                value,
             );
         }
     }

@@ -3034,4 +3034,30 @@ mod tests {
         assert!(published_enabled(&h));
     }
 
+    #[test]
+    fn set_rack_slot_enabled_undo_and_redo_restore_the_flag() {
+        let mut h = RackHarness::new(HashSet::new());
+        let slot_enabled = |h: &RackHarness| {
+            rack_slot_snapshot_for_host(&h.state, TRACK, SLOT).unwrap().enabled
+        };
+        let published_enabled = |h: &RackHarness| {
+            h.state.latest_scheduler_snapshot().tracks[TRACK]
+                .rack_track.as_ref().unwrap().slots[SLOT].enabled
+        };
+        let mut map: std::collections::HashMap<String, Rc<RefCell<Value>>> =
+            std::collections::HashMap::new();
+        map.insert("track".into(), Rc::new(RefCell::new(Value::Number(TRACK as f64))));
+        map.insert("slot".into(), Rc::new(RefCell::new(Value::Number(SLOT as f64))));
+        map.insert("value".into(), Rc::new(RefCell::new(Value::Bool(false))));
+        h.dispatch("set-rack-slot-enabled", Value::Map(map.into_iter().collect()));
+        assert!(!slot_enabled(&h));
+
+        assert!(matches!(app::edit::undo(&mut h.app), app::history::HistoryReplay::Applied(_)));
+        assert!(slot_enabled(&h), "undo re-enables the live slot");
+        assert!(published_enabled(&h), "undo republishes the enabled slot");
+        assert!(matches!(app::edit::redo(&mut h.app), app::history::HistoryReplay::Applied(_)));
+        assert!(!slot_enabled(&h), "redo parks the slot again");
+        assert!(!published_enabled(&h), "redo republishes the parked slot");
+    }
+
 }
