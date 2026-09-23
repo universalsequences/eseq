@@ -1,4 +1,6 @@
 #include "graph_nodes.h"
+#include <math.h>
+#include <string.h>
 
 // ===================== Oscillator Implementation =====================
 
@@ -46,6 +48,10 @@ void gain_process(float *const *in, float *const *out, int n, void *memory,
   (void)buffers;
   float *mem = (float *)memory;
   float gain = mem[GAIN_VALUE];
+  if (isfinite(gain) && ap_inputs_silent()) {
+    ap_emit_silence(out, n);
+    return;
+  }
   const float *a = in[0];
   float *y = out[0];
   for (int i = 0; i < n; i++)
@@ -122,6 +128,10 @@ void sum_process(float *const *in, float *const *out, int n, void *memory,
                  void *buffers) {
   (void)memory;
   (void)buffers;
+  if (ap_inputs_silent()) {
+    ap_emit_silence(out, n);
+    return;
+  }
   float *y = out[0];
 
   // Zero output buffer

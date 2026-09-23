@@ -22,6 +22,8 @@ pub(super) fn record_output_callback(
     if elapsed_secs > budget_secs {
         transport.audio_deadline_misses.fetch_add(1, Ordering::Relaxed);
     }
+    transport.callback_busy_ns.fetch_add(elapsed.as_nanos() as u64, Ordering::Relaxed);
+    transport.callback_budget_ns.fetch_add((budget_secs * 1e9) as u64, Ordering::Relaxed);
     let raw_load_pct = (elapsed_secs / budget_secs * 100.0) as f32;
     let previous = f32::from_bits(transport.cpu_load_pct.load(Ordering::Relaxed));
     let smoothed = if previous <= 0.0 {

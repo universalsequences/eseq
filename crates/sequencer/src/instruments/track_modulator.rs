@@ -239,6 +239,13 @@ unsafe extern "C" fn mod_in_clip_process(
     state: *mut c_void,
     _buffers: *mut c_void,
 ) {
+    if crate::effects::silence::inputs_silent() {
+        crate::effects::silence::emit(out, 1, nframes);
+        if !state.is_null() {
+            *(state as *mut f32).add(MOD_TAP_STATE_LEVEL) = 0.0;
+        }
+        return;
+    }
     let input = *inp.add(0);
     let output = *out.add(0);
     let mut peak = 0.0_f32;

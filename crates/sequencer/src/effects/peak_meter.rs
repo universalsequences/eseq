@@ -28,6 +28,11 @@ unsafe extern "C" fn peak_meter_process(
     _buffers: *mut c_void,
 ) {
     let s = state as *mut f32;
+    if super::silence::inputs_silent() {
+        *s.add(STATE_PEAK_L) = 0.0_f32.max(*s.add(STATE_PEAK_L) * 0.92);
+        *s.add(STATE_PEAK_R) = 0.0_f32.max(*s.add(STATE_PEAK_R) * 0.92);
+        return;
+    }
     let left = *inp.add(0);
     let right = *inp.add(1);
     let mut peak_l = 0.0_f32;

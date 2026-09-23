@@ -21,7 +21,11 @@ pub const PDC_MAX_DELAY_SAMPLES: usize = 16384;
 pub const PDC_CHANNELS: usize = 2;
 
 /// State float count: header + interleaved-per-channel rings.
-pub const PDC_DELAY_STATE_SIZE: usize = STATE_RING + PDC_CHANNELS * PDC_MAX_DELAY_SAMPLES;
+/// Trailing frames of the ring known to be zero (silence propagation). Once
+/// it covers the delay, silent input means silent output; once it covers the
+/// ring, even the ring writes can be skipped.
+const STATE_ZERO_RUN: usize = STATE_RING + PDC_CHANNELS * PDC_MAX_DELAY_SAMPLES;
+pub const PDC_DELAY_STATE_SIZE: usize = STATE_ZERO_RUN + 1;
 
 /// Float offset of the delay amount inside the node state, for
 /// `write_node_state` updates from the latency planner.
@@ -43,6 +47,7 @@ unsafe extern "C" fn pdc_init(
     *s.add(STATE_DELAY) = initial_delay;
     *s.add(STATE_CAPACITY) = PDC_MAX_DELAY_SAMPLES as f32;
     *s.add(STATE_WRITE_POS) = 0.0;
+    *s.add(STATE_ZERO_RUN) = 0.0;
 }
 
 unsafe extern "C" fn pdc_reset(state: *mut c_void) {
@@ -77,6 +82,44 @@ unsafe extern "C" fn pdc_process(
     let delay = (*s.add(STATE_DELAY)).max(0.0).round() as usize;
     let delay = delay.min(capacity - 1);
     let mut write_pos = (*s.add(STATE_WRITE_POS)) as usize % capacity;
+    let nf = nframes.max(0) as usize;
+    let zero_run = *s.add(STATE_ZERO_RUN) as usize;
+    // The bulk zero write below runs ahead of the reads; that equals the
+    // per-sample order only while no read can land on a cell this block has
+    // not reached yet, i.e. while delay + nf fits the ring.
+    if delay + nf <= capacity && crate::effects::silence::inputs_silent() {
+        if zero_run >= capacity {
+            // Every ring cell is already zero; writing more zeros is a no-op.
+            write_pos = (write_pos + nf) % capacity;
+        } else {
+            for ch in 0..PDC_CHANNELS {
+                let ring = s.add(STATE_RING + ch * capacity);
+                for i in 0..nf {
+                    *ring.add((write_pos + i) % capacity) = 0.0;
+                }
+            }
+            write_pos = (write_pos + nf) % capacity;
+        }
+        *s.add(STATE_WRITE_POS) = write_pos as f32;
+        *s.add(STATE_ZERO_RUN) = (zero_run + nf).min(capacity) as f32;
+        if zero_run >= delay {
+            // Reads this block land in zeros written before it (or in this
+            // block's own zeros when the delay is shorter than it).
+            crate::effects::silence::emit(out, PDC_CHANNELS, nframes);
+            return;
+        }
+        // Delayed audio is still draining out of the ring: copy it normally.
+        let start = (write_pos + capacity - nf % capacity) % capacity;
+        for i in 0..nf {
+            let read_pos = (start + i + capacity - delay) % capacity;
+            for ch in 0..PDC_CHANNELS {
+                let ring = s.add(STATE_RING + ch * capacity);
+                *(*out.add(ch)).add(i) = *ring.add(read_pos);
+            }
+        }
+        return;
+    }
+    *s.add(STATE_ZERO_RUN) = 0.0;
 
     if delay == 0 {
         for ch in 0..PDC_CHANNELS {

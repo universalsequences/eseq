@@ -32,7 +32,7 @@ impl GraphController<'_> {
         for (v, &lid) in voice_lids.iter().enumerate() {
             self.app.state.runtime.voice_lids[idx][v].store(lid, Ordering::Release);
         }
-        self.app.state.runtime.voice_counts[idx].store(voice_lids.len() as u32, Ordering::Release);
+        self.app.state.runtime.voice_counts.store(idx, voice_lids.len() as u32, Ordering::Release);
         self.app.state.runtime.sampler_lids[idx]
             .store(voice_lids.first().copied().unwrap_or(0), Ordering::Release);
         self.app.state.runtime.modulator_lids[idx].store(

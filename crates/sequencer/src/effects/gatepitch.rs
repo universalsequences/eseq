@@ -17,8 +17,15 @@ const PARAM_TIMELINE_BASE: usize = 10;
 
 // State layout starts with the public ParamMsg slots, then a fixed per-slice
 // event timeline: [count, event(frame, kind, pitch, velocity, legato, pressure, bend, wheel) * MAX_STEPS].
-pub const GATEPITCH_STATE_SIZE: usize =
+// After the timeline: the constant-lane cache (`effects::output_lanes`).
+const OUTPUT_LANE_CACHE: usize =
     PARAM_TIMELINE_BASE + GATEPITCH_TIMELINE_CAPACITY * TIMELINE_EVENT_WIDTH;
+/// Every output except the clock ramp is constant between events.
+const CACHED_LANES: [usize; 10] = [
+    0, 1, 2, 3, 5, OUTPUT_NOTE_ON, OUTPUT_LEGATO, OUTPUT_PRESSURE, OUTPUT_PITCH_BEND, OUTPUT_MOD_WHEEL,
+];
+pub const GATEPITCH_STATE_SIZE: usize =
+    OUTPUT_LANE_CACHE + super::output_lanes::state_cells(CACHED_LANES.len());
 pub const OUTPUT_NOTE_ON: usize = 6;
 pub const OUTPUT_LEGATO: usize = 7;
 pub const OUTPUT_PRESSURE: usize = 8;
@@ -137,6 +144,134 @@ unsafe extern "C" fn gatepitch_process(
     let event_count = event_count.min(GATEPITCH_TIMELINE_CAPACITY);
     let mut event_index = 0usize;
     let nf = nframes as usize;
+    let lane = |output: usize| std::slice::from_raw_parts_mut(*out.add(output), nf);
+    let (gate_out, pitch_out, velocity_out, trigger_out, clock_out, clock_inc_out) =
+        (lane(0), lane(1), lane(2), lane(3), lane(4), lane(5));
+    let (note_on_out, legato_out) = (lane(OUTPUT_NOTE_ON), lane(OUTPUT_LEGATO));
+    let (pressure_out, pitch_bend_out, mod_wheel_out) =
+        (lane(OUTPUT_PRESSURE), lane(OUTPUT_PITCH_BEND), lane(OUTPUT_MOD_WHEEL));
+    let event_frame =
+        |index: usize| (*s.add(PARAM_TIMELINE_BASE + index * TIMELINE_EVENT_WIDTH + TIMELINE_FRAME)).max(0.0) as usize;
+    let cache = super::output_lanes::OutputLanes::begin(s.add(OUTPUT_LANE_CACHE));
+
+    // Every lane but the clock only changes on event frames, so render one
+    // constant segment per event run instead of eleven stores per frame.
+    let mut i = 0usize;
+    while i < nf {
+        let mut trigger = 0.0;
+        let mut note_on = 0.0;
+        let mut legato = 0.0;
+        while event_index < event_count {
+            let base = PARAM_TIMELINE_BASE + event_index * TIMELINE_EVENT_WIDTH;
+            if event_frame(event_index) != i {
+                break;
+            }
+            let kind = *s.add(base + TIMELINE_KIND) as u32;
+            if kind == GBE_NOTE_ON {
+                pressure = *s.add(base + TIMELINE_PRESSURE);
+                pitch_bend = 0.0;
+                mod_wheel = 0.0;
+                pitch = *s.add(base + TIMELINE_PITCH);
+                velocity = *s.add(base + TIMELINE_VELOCITY);
+                let continues_note = gate > 0.5 && *s.add(base + TIMELINE_LEGATO) > 0.5;
+                note_on = 1.0;
+                if continues_note {
+                    legato = 1.0;
+                } else {
+                    trigger = 1.0;
+                }
+                gate = 1.0;
+            } else if kind == GBE_EXPRESSION {
+                pressure = *s.add(base + TIMELINE_PRESSURE);
+                pitch_bend = *s.add(base + TIMELINE_PITCH_BEND);
+                mod_wheel = *s.add(base + TIMELINE_MOD_WHEEL);
+            } else if kind == GBE_PRESSURE {
+                pressure = *s.add(base + TIMELINE_PRESSURE);
+            } else if kind == GBE_GATE_OFF {
+                gate = 0.0;
+            }
+            event_index += 1;
+        }
+        // An unconsumed event only ever fires on its own frame; one already
+        // behind `i` blocks the rest of the timeline, as in the reference.
+        let end = if event_index < event_count {
+            let next = event_frame(event_index);
+            if next > i { next.min(nf) } else { nf }
+        } else {
+            nf
+        };
+        if i == 0 && end == nf && trigger == 0.0 && note_on == 0.0 && legato == 0.0 {
+            // One constant segment for the whole call: let the lane cache
+            // skip lanes that already hold these values.
+            let values = [gate, pitch, velocity, 0.0, clock_inc, 0.0, 0.0, pressure, pitch_bend, mod_wheel];
+            let lanes: [&mut [f32]; 10] = [
+                &mut *gate_out, &mut *pitch_out, &mut *velocity_out, &mut *trigger_out,
+                &mut *clock_inc_out, &mut *note_on_out, &mut *legato_out, &mut *pressure_out,
+                &mut *pitch_bend_out, &mut *mod_wheel_out,
+            ];
+            for (index, (lane, value)) in lanes.into_iter().zip(values).enumerate() {
+                cache.fill(index, lane, value);
+            }
+        } else {
+            gate_out[i..end].fill(gate);
+            pitch_out[i..end].fill(pitch);
+            velocity_out[i..end].fill(velocity);
+            clock_inc_out[i..end].fill(clock_inc);
+            pressure_out[i..end].fill(pressure);
+            pitch_bend_out[i..end].fill(pitch_bend);
+            mod_wheel_out[i..end].fill(mod_wheel);
+            trigger_out[i..end].fill(0.0);
+            note_on_out[i..end].fill(0.0);
+            legato_out[i..end].fill(0.0);
+            trigger_out[i] = trigger;
+            note_on_out[i] = note_on;
+            legato_out[i] = legato;
+            for index in 0..CACHED_LANES.len() {
+                cache.written(index);
+            }
+        }
+        for value in &mut clock_out[i..end] {
+            *value = clock_phase;
+            clock_phase += clock_inc;
+            if clock_phase >= 1.0 {
+                clock_phase -= clock_phase.floor();
+            }
+        }
+        i = end;
+    }
+    *s.add(PARAM_PRESSURE as usize) = pressure;
+    *s.add(PARAM_PITCH_BEND as usize) = pitch_bend;
+    *s.add(PARAM_MOD_WHEEL as usize) = mod_wheel;
+    *s.add(PARAM_GATE as usize) = gate;
+    *s.add(PARAM_PITCH as usize) = pitch;
+    *s.add(PARAM_VELOCITY as usize) = velocity;
+    *s.add(PARAM_TRIGGER as usize) = 0.0;
+    *s.add(PARAM_CLOCK_PHASE as usize) = clock_phase;
+}
+
+/// Per-sample reference for `gatepitch_process`, pinned bit-for-bit by
+/// `segment_renderer_matches_per_sample_reference`.
+#[cfg(test)]
+unsafe extern "C" fn gatepitch_process_reference(
+    _inp: *const *mut f32,
+    out: *const *mut f32,
+    nframes: c_int,
+    state: *mut c_void,
+    _buffers: *mut c_void,
+) {
+    let s = state as *mut f32;
+    let mut gate = *s.add(PARAM_GATE as usize);
+    let mut pitch = *s.add(PARAM_PITCH as usize);
+    let mut velocity = *s.add(PARAM_VELOCITY as usize);
+    let mut pressure = *s.add(PARAM_PRESSURE as usize);
+    let mut pitch_bend = *s.add(PARAM_PITCH_BEND as usize);
+    let mut mod_wheel = *s.add(PARAM_MOD_WHEEL as usize);
+    let mut clock_phase = *s.add(PARAM_CLOCK_PHASE as usize);
+    let clock_inc = *s.add(PARAM_CLOCK_INC as usize);
+    let event_count = (*s.add(PARAM_TIMELINE_COUNT)).max(0.0) as usize;
+    let event_count = event_count.min(GATEPITCH_TIMELINE_CAPACITY);
+    let mut event_index = 0usize;
+    let nf = nframes as usize;
     let out0 = *out.add(0); // gate output
     let out1 = *out.add(1); // pitch output
     let out2 = *out.add(2); // velocity output
@@ -232,6 +367,110 @@ mod tests {
         };
         event.aux[..aux.len()].copy_from_slice(aux);
         event
+    }
+
+    #[test]
+    fn cached_lanes_follow_param_changes_and_rewired_buffers() {
+        use crate::audiograph as graph;
+        use std::ffi::CString;
+        graph::initialize_engine_for_test(64, 48_000);
+        let label = CString::new("gatepitch-lane-cache").unwrap();
+        let lg = unsafe { graph::create_live_graph(32, 64, label.as_ptr(), 1) };
+        assert!(!lg.is_null());
+        let name = CString::new("gp").unwrap();
+        let gp = unsafe {
+            graph::add_node(lg, gatepitch_vtable(), GATEPITCH_STATE_SIZE * std::mem::size_of::<f32>(),
+                name.as_ptr(), 0, OUTPUT_COUNT as c_int, std::ptr::null(), 0)
+        };
+        assert!(gp > 0);
+        let set_pitch = |value: f32| unsafe {
+            assert!(graph::params_push_wrapper(lg, graph::ParamMsg {
+                idx: PARAM_PITCH, logical_id: gp as u64, fvalue: value,
+            }));
+        };
+        let render = || {
+            let mut output = vec![f32::NAN; 64];
+            unsafe { graph::process_next_block(lg, output.as_mut_ptr(), 64) };
+            output
+        };
+        assert!(unsafe { graph::graph_connect(lg, gp, 1, 0, 0) });
+        set_pitch(440.0);
+        // Repeated identical blocks take the cached path and must keep
+        // delivering the value already in the buffer.
+        for _ in 0..3 {
+            assert!(render().iter().all(|v| *v == 440.0));
+        }
+        set_pitch(220.0);
+        assert!(render().iter().all(|v| *v == 220.0));
+        assert!(render().iter().all(|v| *v == 220.0));
+        // A rewire hands the node a fresh zeroed edge buffer; the unchanged
+        // value must be written into it, not assumed present.
+        assert!(unsafe { graph::graph_disconnect(lg, gp, 1, 0, 0) });
+        assert!(render().iter().all(|v| *v == 0.0));
+        assert!(unsafe { graph::graph_connect(lg, gp, 1, 0, 0) });
+        assert!(render().iter().all(|v| *v == 220.0), "rewired buffer must be refilled");
+        unsafe { graph::destroy_live_graph(lg) };
+    }
+
+    #[test]
+    fn segment_renderer_matches_per_sample_reference() {
+        let mut seed = 0x9e37_79b9u64;
+        let mut next = move |n: u64| {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (seed >> 33) % n
+        };
+        for trial in 0..400 {
+            let frames = 1 + next(300) as usize;
+            let mut state = vec![0.0_f32; GATEPITCH_STATE_SIZE];
+            for param in 0..=8 {
+                state[param] = next(1000) as f32 / 250.0 - 1.0;
+            }
+            state[PARAM_CLOCK_PHASE as usize] = next(1000) as f32 / 1000.0;
+            state[PARAM_CLOCK_INC as usize] = if trial % 3 == 0 { 0.0 } else { next(1000) as f32 / 20_000.0 };
+            let events = next(8) as usize;
+            state[PARAM_TIMELINE_COUNT] = events as f32;
+            let mut frame = 0u64;
+            for event in 0..events {
+                let base = PARAM_TIMELINE_BASE + event * TIMELINE_EVENT_WIDTH;
+                // Mostly ascending frames, with duplicates, stale (earlier)
+                // frames and frames past the block, as a real timeline can.
+                frame = match next(6) {
+                    0 => frame,
+                    1 => frame.saturating_sub(next(5)),
+                    2 => frames as u64 + next(4),
+                    _ => frame + next(80),
+                };
+                state[base + TIMELINE_FRAME] = frame as f32;
+                state[base + TIMELINE_KIND] =
+                    [GBE_NOTE_ON, GBE_GATE_OFF, GBE_EXPRESSION, GBE_PRESSURE, 99][next(5) as usize] as f32;
+                for field in 2..TIMELINE_EVENT_WIDTH {
+                    state[base + field] = next(1000) as f32 / 500.0;
+                }
+            }
+            let mut reference_state = state.clone();
+            let render = |state: &mut Vec<f32>, reference: bool| {
+                let mut outputs = vec![vec![f32::NAN; frames]; OUTPUT_COUNT];
+                let pointers: Vec<*mut f32> = outputs.iter_mut().map(|lane| lane.as_mut_ptr()).collect();
+                unsafe {
+                    let process = if reference { gatepitch_process_reference } else { gatepitch_process };
+                    process(std::ptr::null(), pointers.as_ptr(), frames as c_int,
+                        state.as_mut_ptr().cast(), std::ptr::null_mut());
+                }
+                outputs
+            };
+            let segmented = render(&mut state, false);
+            let reference = render(&mut reference_state, true);
+            for lane in 0..OUTPUT_COUNT {
+                for i in 0..frames {
+                    assert_eq!(segmented[lane][i].to_bits(), reference[lane][i].to_bits(),
+                        "trial {trial} lane {lane} frame {i}");
+                }
+            }
+            // The lane cache after the timeline is the fast path's own bookkeeping.
+            for idx in 0..OUTPUT_LANE_CACHE {
+                assert_eq!(state[idx].to_bits(), reference_state[idx].to_bits(), "trial {trial} state[{idx}]");
+            }
+        }
     }
 
     #[test]

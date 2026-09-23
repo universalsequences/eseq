@@ -7,6 +7,67 @@ pub fn default_empty_effect_chain() -> Vec<EffectSlotState> {
         .collect()
 }
 
+/// Per-engine / per-pool voice counts plus a bitmap of the nonzero entries.
+///
+/// The audio callback walks these tables every block, and they are sized for
+/// every possible engine or pool (over a thousand entries) while a project
+/// uses a handful. Scanning the counts directly touches ~70 cold cache lines
+/// per table per block; the bitmap is three. A nonzero count sets its bit
+/// before the count is published and a zero count clears it after, so a
+/// bitmap walk observes every count a full scan would.
+pub struct VoiceCountTable {
+    counts: Vec<AtomicU32>,
+    live: Vec<AtomicU64>,
+}
+
+impl VoiceCountTable {
+    pub fn new(len: usize) -> Self {
+        Self {
+            counts: (0..len).map(|_| AtomicU32::new(0)).collect(),
+            live: (0..len.div_ceil(64)).map(|_| AtomicU64::new(0)).collect(),
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.counts.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.counts.is_empty()
+    }
+
+    pub fn load(&self, idx: usize, order: Ordering) -> u32 {
+        self.counts[idx].load(order)
+    }
+
+    pub fn store(&self, idx: usize, count: u32, order: Ordering) {
+        let (word, bit) = (idx / 64, 1u64 << (idx % 64));
+        if count != 0 {
+            self.live[word].fetch_or(bit, Ordering::Release);
+            self.counts[idx].store(count, order);
+        } else {
+            self.counts[idx].store(0, order);
+            self.live[word].fetch_and(!bit, Ordering::Release);
+        }
+    }
+
+    /// Indices whose count may be nonzero, ascending. Callers still load the
+    /// count (it can be zero while a store races the walk).
+    pub fn live_indices(&self) -> impl Iterator<Item = usize> + '_ {
+        self.live.iter().enumerate().flat_map(|(word_idx, word)| {
+            let mut bits = word.load(Ordering::Acquire);
+            std::iter::from_fn(move || {
+                if bits == 0 {
+                    return None;
+                }
+                let bit = bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                Some(word_idx * 64 + bit)
+            })
+        })
+    }
+}
+
 pub struct PatternState {
     pub patterns: Vec<TrackPattern>,
     pub neural_reset_patterns: Vec<TrackPattern>,
@@ -94,6 +155,11 @@ pub struct TransportState {
     /// Complete device callbacks exceeding their frame/sample-rate budget.
     /// Monotonic event count so an isolated miss survives slow UI polling.
     pub audio_deadline_misses: AtomicU64,
+    /// Monotonic device-callback wall time and budget (ns). Differences over
+    /// any window give that window's exact load, unlike the startup-seeded
+    /// `cpu_load_pct` EMA; the workgroup policy reads them.
+    pub callback_busy_ns: AtomicU64,
+    pub callback_budget_ns: AtomicU64,
     pub trigger_flash: Vec<AtomicU32>,
     pub num_tracks: AtomicU32,
     pub track_playheads: Vec<AtomicU32>,
@@ -250,7 +316,7 @@ pub struct RuntimeBindingState {
     pub send_lids: Vec<AtomicU64>,
     pub rack_slot_pan_lids: Vec<[AtomicU64; MAX_RACK_SLOTS]>,
     pub voice_lids: Vec<[AtomicU64; MAX_VOICES]>,
-    pub voice_counts: Vec<AtomicU32>,
+    pub voice_counts: VoiceCountTable,
     pub instrument_type_flags: Vec<AtomicU32>,
     pub instrument_run_mode_flags: Vec<AtomicU32>,
     pub synth_node_ids: Vec<[AtomicU32; MAX_VOICES]>,
@@ -260,7 +326,7 @@ pub struct RuntimeBindingState {
     pub engine_voice_lids: Vec<[AtomicU64; MAX_VOICES]>,
     pub engine_synth_node_ids: Vec<[AtomicU32; MAX_VOICES]>,
     pub engine_modulator_node_ids: Vec<[AtomicU32; MAX_VOICES]>,
-    pub engine_voice_counts: Vec<AtomicU32>,
+    pub engine_voice_counts: VoiceCountTable,
     pub engine_route_lids: Vec<[[AtomicU64; MAX_TRACKS]; MAX_VOICES]>,
     pub engine_route_lids_r: Vec<[[AtomicU64; MAX_TRACKS]; MAX_VOICES]>,
     pub engine_ext_route_lids: Vec<[[[AtomicU64; EXT_MOD_INPUT_COUNT]; MAX_TRACKS]; MAX_VOICES]>,
@@ -865,4 +931,28 @@ pub(super) fn restore_track_params_snapshot(track_params: &TrackParams, snapshot
     track_params.set_voice_priority(snapshot.voice_priority);
     track_params.set_mute_group(snapshot.mute_group);
     track_params.set_global_transpose(snapshot.global_transpose);
+}
+
+#[cfg(test)]
+mod voice_count_table_tests {
+    use super::VoiceCountTable;
+    use std::sync::atomic::Ordering;
+
+    #[test]
+    fn live_indices_track_nonzero_counts_across_words() {
+        let table = VoiceCountTable::new(130);
+        assert_eq!(table.live_indices().count(), 0);
+        for idx in [0, 63, 64, 129] {
+            table.store(idx, 12, Ordering::Release);
+        }
+        table.store(63, 0, Ordering::Release);
+        table.store(129, 3, Ordering::Release);
+        assert_eq!(table.live_indices().collect::<Vec<_>>(), vec![0, 64, 129]);
+        assert_eq!(table.load(129, Ordering::Acquire), 3);
+        assert_eq!(table.load(63, Ordering::Acquire), 0);
+        for idx in 0..table.len() {
+            let listed = table.live_indices().any(|live| live == idx);
+            assert_eq!(listed, table.load(idx, Ordering::Relaxed) != 0, "index {idx}");
+        }
+    }
 }

@@ -190,7 +190,7 @@ impl SequencerState {
         self.transport.trigger_flash[track].store(0, Ordering::Relaxed);
         self.runtime.sampler_lids[track].store(0, Ordering::Relaxed);
         self.runtime.modulator_lids[track].store(0, Ordering::Relaxed);
-        self.runtime.voice_counts[track].store(0, Ordering::Relaxed);
+        self.runtime.voice_counts.store(track, 0, Ordering::Relaxed);
         self.runtime.instrument_type_flags[track].store(0, Ordering::Relaxed);
         self.runtime.instrument_run_mode_flags[track].store(
             CustomInstrumentRunMode::Instrument.runtime_flag(),
@@ -266,8 +266,8 @@ impl SequencerState {
                     Ordering::Relaxed,
                 );
             }
-            self.runtime.voice_counts[idx].store(
-                self.runtime.voice_counts[next].load(Ordering::Relaxed),
+            self.runtime.voice_counts.store(idx, 
+                self.runtime.voice_counts.load(next, Ordering::Relaxed),
                 Ordering::Relaxed,
             );
             self.runtime.instrument_type_flags[idx].store(
@@ -362,7 +362,7 @@ impl SequencerState {
         for slot in 0..MAX_RACK_SLOTS {
             self.runtime.rack_slot_pan_lids[last][slot].store(0, Ordering::Relaxed);
         }
-        self.runtime.voice_counts[last].store(0, Ordering::Relaxed);
+        self.runtime.voice_counts.store(last, 0, Ordering::Relaxed);
         self.runtime.instrument_type_flags[last].store(0, Ordering::Relaxed);
         self.runtime.instrument_run_mode_flags[last].store(
             CustomInstrumentRunMode::Instrument.runtime_flag(),

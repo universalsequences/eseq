@@ -47,6 +47,9 @@ pub(crate) mod chorus;
 pub mod stereo_panner;
 #[allow(dead_code)]
 pub(crate) mod str8_delay;
+pub(crate) mod tail_sleep;
+pub(crate) mod output_lanes;
+pub(crate) mod silence;
 #[allow(dead_code)]
 pub(crate) mod tape;
 

@@ -513,6 +513,23 @@ pub fn instrument_descriptor_from_manifest(
     desc
 }
 
+/// Every modulation depth lane as the voice modulator's lease table wants it:
+/// the synth node state cell holding the lane's depth.
+pub fn mod_lease_lanes(manifest: &DGenManifest) -> Vec<crate::instruments::voice_modulator::ModLeaseLane> {
+    let span_by_cell: std::collections::HashMap<usize, usize> =
+        manifest.params.iter().map(|p| (p.cell_id, p.cell_span.max(1))).collect();
+    manifest
+        .mod_destinations
+        .iter()
+        .flat_map(|dest| &dest.depth_lanes)
+        .map(|lane| crate::instruments::voice_modulator::ModLeaseLane {
+            slot: lane.slot,
+            state_idx: HEADER_SLOTS + lane.depth_cell_id,
+            span: span_by_cell.get(&lane.depth_cell_id).copied().unwrap_or(1),
+        })
+        .collect()
+}
+
 pub fn effect_has_host_modulation(manifest: &DGenManifest) -> bool {
     !manifest.mod_destinations.is_empty()
 }

@@ -173,9 +173,17 @@ pub(super) fn render_audio_block(
         data.metronome = MetronomeState::default();
     }
     data.transport_was_playing = transport_playing;
+    #[cfg(feature = "audio-experiments")]
+    let snapshot_refresh_us = super::experiment::phase_elapsed(&mut phase_clock.clone());
+    #[cfg(feature = "audio-experiments")]
+    let mut sub_clock = Instant::now();
     let host_transport_clock = compute_host_transport_clock(data, block_start_sample);
     sync_instrument_host_clock_params(data, host_transport_clock);
+    #[cfg(feature = "audio-experiments")]
+    let instrument_clock_us = super::experiment::phase_elapsed(&mut sub_clock);
     sync_effect_modulator_transport_clock_params(data, host_transport_clock);
+    #[cfg(feature = "audio-experiments")]
+    let effect_clock_us = super::experiment::phase_elapsed(&mut sub_clock);
     sync_dj_mixer_transport_phase(data, block_start_sample);
 
     #[cfg(feature = "audio-experiments")]
@@ -773,8 +781,8 @@ pub(super) fn render_audio_block(
 
     let custom_release_tail_samples =
         (CUSTOM_ENGINE_RELEASE_TAIL_SECONDS * data.sample_rate).round() as u64;
-    for engine_id in 0..data.state.runtime.engine_voice_counts.len() {
-        if data.state.runtime.engine_voice_counts[engine_id].load(Ordering::Acquire) == 0 {
+    for engine_id in data.state.runtime.engine_voice_counts.live_indices() {
+        if data.state.runtime.engine_voice_counts.load(engine_id, Ordering::Acquire) == 0 {
             continue;
         }
         let minimum_enabled_voices = usize::from(custom_engine_requires_idle_voice(
@@ -965,6 +973,7 @@ pub(super) fn render_audio_block(
         super::experiment::record_block(callback_start, super::experiment::CallbackPhases {
             snapshot_transport_us, pool_sync_us, live_input_us, control_params_us,
             scheduled_events_us, voice_retirement_us, render_us, post_render_us,
+            snapshot_refresh_us, instrument_clock_us, effect_clock_us,
         }, data, output);
     }
 }

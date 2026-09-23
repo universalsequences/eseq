@@ -342,6 +342,9 @@ impl GraphController<'_> {
         };
         self.silence_engine_routes(engine_id, &engine);
         lisp_host::reset_dgen_engine_enabled_voices(engine_id);
+        // Old lanes and synth ids are stale until the rebuild publishes new
+        // ones; until then every modulator slot renders.
+        crate::instruments::voice_modulator::publish_engine_mod_lease(engine_id, &[], None);
 
         let audio_output_channels = manifest_audio_output_channels(manifest);
         let mod_output_channels = manifest_mod_output_channels(manifest);
@@ -516,6 +519,11 @@ impl GraphController<'_> {
         }
 
         engine.synth_ids = new_synth_ids;
+        crate::instruments::voice_modulator::publish_engine_mod_lease(
+            engine_id,
+            &engine.synth_ids,
+            Some(&lisp_host::mod_lease_lanes(manifest)),
+        );
         engine.synth_inputs = manifest.n_inputs;
         engine.synth_outputs = audio_output_channels.len();
         engine.audio_output_channels = audio_output_channels;
