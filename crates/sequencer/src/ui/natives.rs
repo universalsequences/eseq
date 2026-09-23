@@ -7513,8 +7513,14 @@ fn register_agent_mode_natives(
         },
     );
 
+    // Views call this on every rebuild: the catalog is cached per file
+    // identity, and an invalid catalog's error is reported once per file
+    // state rather than clobbering the status line on each render. A repeat
+    // returns false, the same sentinel a reported native error leaves.
     runtime.register_native("agent/models", move |_args, _ctx| {
-        let catalog = sequencer::agent::models::AgentModelCatalog::load()?;
+        let Some(catalog) = sequencer::agent::models::AgentModelCatalog::load_for_ui()? else {
+            return Ok(Value::Bool(false));
+        };
         Ok(Value::List(
             catalog.models()
                 .iter()
@@ -8377,6 +8383,7 @@ mod tests {
         use sequencer::agent::store::{AgentKind, ConversationStore};
 
         let mut runtime = Runtime::new();
+        sequencer::agent::models::AgentModelCatalog::use_factory_only_for_tests();
         let store = ConversationStore::new(44_100);
         let id = store.new_conversation(AgentKind::General).unwrap();
         register_agent_mode_natives(&mut runtime, store.clone());
@@ -9320,6 +9327,7 @@ mod tests {
 
     #[test]
     fn applied_general_effect_artifact_can_finalize_but_not_apply_again() {
+        sequencer::agent::models::AgentModelCatalog::use_factory_only_for_tests();
         let store = sequencer::agent::store::ConversationStore::new(44_100);
         let id = store.new_conversation(sequencer::agent::store::AgentKind::General).unwrap();
         let mut state = store.snapshot(id).unwrap().state;
@@ -9345,6 +9353,7 @@ mod tests {
 
     #[test]
     fn updated_applied_effect_artifact_can_apply_again() {
+        sequencer::agent::models::AgentModelCatalog::use_factory_only_for_tests();
         let store = sequencer::agent::store::ConversationStore::new(44_100);
         let id = store.new_conversation(sequencer::agent::store::AgentKind::Effect).unwrap();
         let mut state = store.snapshot(id).unwrap().state;
@@ -9370,6 +9379,7 @@ mod tests {
 
     #[test]
     fn updated_applied_instrument_artifact_can_apply_again() {
+        sequencer::agent::models::AgentModelCatalog::use_factory_only_for_tests();
         let store = sequencer::agent::store::ConversationStore::new(44_100);
         let id = store.new_conversation(sequencer::agent::store::AgentKind::Instrument).unwrap();
         let mut state = store.snapshot(id).unwrap().state;

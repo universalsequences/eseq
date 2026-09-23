@@ -10,7 +10,8 @@ use super::dsp_validate::{validate_effect_dsp_source, validate_instrument_dsp_so
 use super::network::{AgentNetworkClient, AgentTurnResult};
 use super::parse::{instrument_artifacts, last_dgenlisp_block, InstrumentArtifacts};
 use super::protocol::{ToolCall, ToolCallOutcome};
-use super::providers::{AgentMessage, AgentMessageRole};
+use super::models::AgentModelCatalog;
+use super::providers::{AgentMessage, AgentMessageRole, AgentProviderKind};
 use super::store::EffectDraft;
 use super::store::{
     bump, push_message, push_message_with_reasoning, AgentKind, AgentStatus, ConvId,
@@ -52,12 +53,21 @@ impl ConversationStore {
             }
         }
 
+        // The catalog is reread at runtime, so a conversation's stored model
+        // may have been removed since it was chosen. Fail here, before the
+        // prompt is recorded, rather than at the provider. Load outside the
+        // store lock: it may touch the filesystem.
+        let catalog = AgentModelCatalog::load()?;
         {
             let inner = self.inner();
             let mut inner = inner.lock().unwrap();
             let state = inner
                 .get_mut(&id)
                 .ok_or_else(|| format!("unknown agent conversation {id}"))?;
+            if let Err(error) = conversation_model_provider(&catalog, &state.model) {
+                eprintln!("[agent] send rejected conv={id}: {error}");
+                return Err(error);
+            }
             eprintln!(
                 "[agent] conv={id} transition {:?} -> Streaming",
                 state.status
@@ -429,7 +439,30 @@ struct TurnRequest {
     messages: Vec<AgentMessage>,
 }
 
+/// Route a conversation's stored model through the current catalog. Wording
+/// matches the patcher bubble's `resolve_bubble_model`.
+fn conversation_model_provider(
+    catalog: &AgentModelCatalog,
+    model: &str,
+) -> Result<AgentProviderKind, String> {
+    catalog
+        .model(model)
+        .map(|preset| preset.provider)
+        .ok_or_else(|| {
+            format!("agent model {model} is no longer in agent-models.lisp; choose a model again")
+        })
+}
+
 fn build_request(store: &ConversationStore, id: ConvId) -> Result<TurnRequest, String> {
+    let catalog = AgentModelCatalog::load()?;
+    build_request_with_catalog(store, id, &catalog)
+}
+
+fn build_request_with_catalog(
+    store: &ConversationStore,
+    id: ConvId,
+    catalog: &AgentModelCatalog,
+) -> Result<TurnRequest, String> {
     let inner = store.inner();
     let inner = inner.lock().unwrap();
     let state = inner
@@ -437,7 +470,7 @@ fn build_request(store: &ConversationStore, id: ConvId) -> Result<TurnRequest, S
         .ok_or_else(|| format!("unknown agent conversation {id}"))?;
     Ok(TurnRequest {
         kind: state.kind,
-        provider: state.provider,
+        provider: conversation_model_provider(catalog, &state.model)?,
         model: state.model.clone(),
         messages: state
             .messages
@@ -1177,6 +1210,26 @@ mod tests {
         assert_eq!(request.messages.len(), 2);
         assert_eq!(request.messages[0].content, "make a bass");
         assert_eq!(request.messages[1].content, "compile error");
+    }
+
+    #[test]
+    fn removed_conversation_model_fails_with_catalog_error() {
+        let store = ConversationStore::new(48_000);
+        let id = store.new_conversation(AgentKind::General).unwrap();
+        let model = store.snapshot(id).unwrap().state.model;
+        let catalog = crate::agent::models::AgentModelCatalog::parse(
+            "'((:id \"other-model\" :name \"Other\" :provider :openai :capability :balanced :default true :bubble-default true))",
+        )
+        .unwrap();
+        let Err(error) = super::build_request_with_catalog(&store, id, &catalog) else {
+            panic!("a model missing from the catalog must not build a request");
+        };
+        assert_eq!(
+            error,
+            format!("agent model {model} is no longer in agent-models.lisp; choose a model again")
+        );
+        let request = super::build_request(&store, id).unwrap();
+        assert_eq!(request.model, model);
     }
 
     #[test]

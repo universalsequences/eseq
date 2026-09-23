@@ -2,24 +2,117 @@
 //! requests and the picker use the same schema and see edits without a rebuild.
 
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
+use std::time::SystemTime;
 
 use eseqlisp::parser::{Expr, ExprKind, Parser, SpannedASTParser};
 
 use super::providers::{AgentModelPreset, AgentProviderKind, ModelCapability};
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AgentModelCatalog {
     models: Vec<AgentModelPreset>,
 }
 
+/// Identity of the file a cached parse came from: views call `agent/models`
+/// on every rebuild, so an unchanged file must cost a stat, not a reparse.
+/// Any edit changes the mtime (or length), which is what keeps "edit the file,
+/// no rebuild needed" working.
+type CatalogKey = (PathBuf, Option<SystemTime>, u64);
+
+struct CachedCatalog {
+    key: CatalogKey,
+    result: Result<AgentModelCatalog, String>,
+    /// Whether `load_for_ui` already surfaced `result`'s error.
+    error_reported: bool,
+}
+
+static CACHE: Mutex<Option<CachedCatalog>> = Mutex::new(None);
+static FACTORY_ONLY: AtomicBool = AtomicBool::new(false);
+
 impl AgentModelCatalog {
+    /// The active catalog: the user override when present, else the factory
+    /// file. Cached per file identity, so repeated calls only stat.
     pub fn load() -> Result<Self, String> {
+        Self::load_cached(false).map(|(result, _)| result)?
+    }
+
+    /// For views that call this on every rebuild. `Ok(None)` means the
+    /// catalog is invalid and that error was already returned once for the
+    /// unchanged file, so the caller should not report it again.
+    pub fn load_for_ui() -> Result<Option<Self>, String> {
+        match Self::load_cached(true)? {
+            (Ok(catalog), _) => Ok(Some(catalog)),
+            (Err(error), true) => Err(error),
+            (Err(_), false) => Ok(None),
+        }
+    }
+
+    /// Test isolation: read only the factory file, never the developer's
+    /// user-root override. Library unit tests get this automatically; other
+    /// test targets (the `metal_seq` UI tests) call this first.
+    #[doc(hidden)]
+    pub fn use_factory_only_for_tests() {
+        FACTORY_ONLY.store(true, Ordering::Relaxed);
+    }
+
+    /// Returns the (cached) load result and whether its error is new to
+    /// `load_for_ui` callers; only those (`mark_reported`) consume that flag.
+    fn load_cached(mark_reported: bool) -> Result<(Result<Self, String>, bool), String> {
         let paths = crate::app_paths::app_paths();
-        Self::load_from_paths(
-            &paths.ui_dir().join("agent-models.lisp"),
-            &paths.user_lisp_root().join("agent-models.lisp"),
-        )
+        let factory = paths.ui_dir().join("agent-models.lisp");
+        let user = if cfg!(test) || FACTORY_ONLY.load(Ordering::Relaxed) {
+            None
+        } else {
+            Some(paths.user_lisp_root().join("agent-models.lisp"))
+        };
+        Self::load_cached_from(&factory, user.as_deref(), mark_reported)
+    }
+
+    fn load_cached_from(
+        factory: &Path,
+        user: Option<&Path>,
+        mark_reported: bool,
+    ) -> Result<(Result<Self, String>, bool), String> {
+        let key = match user.map(catalog_key) {
+            Some(Ok(Some(key))) => key,
+            Some(Err(error)) => return Err(error),
+            Some(Ok(None)) | None => match catalog_key(factory)? {
+                Some(key) => key,
+                None => {
+                    return Err(format!(
+                        "Agent models {}: file not found",
+                        factory.display()
+                    ))
+                }
+            },
+        };
+        let mut cache = CACHE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if cache.as_ref().map_or(true, |cached| cached.key != key) {
+            let result = match user {
+                Some(user) => Self::load_from_paths(factory, user),
+                None => Self::load_from_path(factory),
+            };
+            *cache = Some(CachedCatalog {
+                key,
+                result,
+                error_reported: false,
+            });
+        }
+        let cached = cache.as_mut().expect("catalog cache filled above");
+        let first_error = cached.result.is_err() && !cached.error_reported;
+        if cached.result.is_err() && mark_reported {
+            cached.error_reported = true;
+        }
+        Ok((cached.result.clone(), first_error))
+    }
+
+    fn load_from_path(path: &Path) -> Result<Self, String> {
+        let source = std::fs::read_to_string(path)
+            .map_err(|error| format!("Agent models {}: {error}", path.display()))?;
+        Self::parse(&source).map_err(|error| format!("Agent models {}: {error}", path.display()))
     }
 
     fn load_from_paths(factory: &Path, user: &Path) -> Result<Self, String> {
@@ -91,6 +184,15 @@ impl AgentModelCatalog {
             }
         }
         Ok(Self { models })
+    }
+}
+
+/// `Ok(None)` when the file does not exist.
+fn catalog_key(path: &Path) -> Result<Option<CatalogKey>, String> {
+    match std::fs::metadata(path) {
+        Ok(meta) => Ok(Some((path.to_path_buf(), meta.modified().ok(), meta.len()))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!("Agent models {}: {error}", path.display())),
     }
 }
 
@@ -194,6 +296,40 @@ mod tests {
             .is_some());
         std::fs::remove_file(&factory).unwrap();
         assert!(AgentModelCatalog::load_from_paths(&factory, &user).is_err());
+    }
+
+    #[test]
+    fn cached_catalog_reparses_on_edit_and_reports_each_error_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let factory = dir.path().join("factory.lisp");
+        let user = dir.path().join("user.lisp");
+        let source = format!("'({MODEL})");
+        std::fs::write(&factory, &source).unwrap();
+        let ui = |user: &Path| {
+            match AgentModelCatalog::load_cached_from(&factory, Some(user), true).unwrap() {
+                (Ok(catalog), _) => Ok(Some(catalog)),
+                (Err(error), true) => Err(error),
+                (Err(_), false) => Ok(None),
+            }
+        };
+        assert!(ui(&user).unwrap().unwrap().model("test-model").is_some());
+
+        std::fs::write(&user, source.replace(":openai", ":opnai")).unwrap();
+        assert!(ui(&user).unwrap_err().contains("unsupported provider"));
+        // Unchanged file: cached, and the error is not reported again.
+        assert!(ui(&user).unwrap().is_none());
+        // Plain `load` callers still see the error.
+        assert!(AgentModelCatalog::load_cached_from(&factory, Some(&user), false)
+            .unwrap()
+            .0
+            .is_err());
+
+        // An edit (different length, so the key changes even with a coarse
+        // mtime) is reparsed without a restart.
+        std::fs::write(&user, source.replace("test-model", "user-model-2")).unwrap();
+        assert!(ui(&user).unwrap().unwrap().model("user-model-2").is_some());
+        std::fs::remove_file(&user).unwrap();
+        assert!(ui(&user).unwrap().unwrap().model("test-model").is_some());
     }
 
     #[test]

@@ -17,7 +17,7 @@
 ;;
 ;; The panel lives in the patcher's own buffer because a modal only receives
 ;; pointer input through the *active* tile, and the patch canvas is the active
-;; tile; closed, it costs no layout.
+;; tile; closed, it costs no layout and does not evaluate its body.
 ;;
 ;; The two mounts share the single global `open?` below, which is safe because
 ;; an instrument patcher buffer and an effect patcher buffer are never on
@@ -141,4 +141,7 @@
          :width-px 620 :height-px 300
     (box :debug-name "choose-model-panel"
       :width :fill :height :fill :bg :transparent :padding 0.5
-      (body))))
+      ;; `modal` arguments evaluate eagerly and a closed modal only drops its
+      ;; children at layout, so gate the body: closed, the patcher buffer's
+      ;; every rebuild must not query the catalog (`agent/models`).
+      (if open? (body) (box :bg :transparent)))))
