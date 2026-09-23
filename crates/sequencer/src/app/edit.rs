@@ -2969,10 +2969,24 @@ impl App {
 
     pub fn remove_track_from_group_recorded(&mut self, track: usize) -> Result<(), String> {
         self.apply_recorded_bus_group_structure_mutation("Remove track from group", |app| {
-            let group = app.detach_group_member(track)
+            let group_id = app.groups.iter().find(|group| group.members.contains(&track))
+                .map(|group| group.id)
                 .ok_or_else(|| "Track is not grouped".to_string())?;
-            let group_id = app.groups[group].id;
-            app.set_track_output_all_scenes_unrecorded(track, crate::sequencer::TrackOutput::Mix);
+            // A pad leaving a rack nested in a plain group stays in that
+            // enclosing group, matching `ungroup_tracks_recorded`.
+            let parent_id = app.rack_parent_group(group_id)
+                .map(|parent| app.groups[parent].id);
+            app.detach_group_member(track)
+                .ok_or_else(|| "Track is not grouped".to_string())?;
+            let destination = if let Some(parent_id) = parent_id {
+                let parent = app.groups.iter_mut().find(|parent| parent.id == parent_id)
+                    .ok_or_else(|| format!("Parent track group {parent_id} disappeared"))?;
+                parent.members.push(track);
+                crate::sequencer::TrackOutput::Bus(BusId(parent.bus_id))
+            } else {
+                crate::sequencer::TrackOutput::Mix
+            };
+            app.set_track_output_all_scenes_unrecorded(track, destination);
             // A rack keeps existing with zero members: its pads are lazy.
             app.dissolve_group_if_undersized(group_id)?;
             Ok(())

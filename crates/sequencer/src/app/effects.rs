@@ -6892,6 +6892,53 @@ mod tests {
     }
 
     #[test]
+    fn remove_track_from_nested_rack_keeps_it_in_the_enclosing_group() {
+        let graph = TestLiveGraph::new("remove-nested-rack-pad-test", 64, 44_100, 2);
+        let mut app = test_app_for_live_graph(&graph, 0);
+        let (rack_id, rack_bus) = app.create_drum_rack_recorded(Some("Kit".to_string()))
+            .expect("drum rack");
+        let kick = app.graph_controller().add_blank_sampler_track().expect("kick track");
+        let snare = app.graph_controller().add_blank_sampler_track().expect("snare track");
+        app.assign_rack_pad_track_recorded(rack_id, 36, kick).expect("kick pad");
+        app.assign_rack_pad_track_recorded(rack_id, 38, snare).expect("snare pad");
+        let loose = app.graph_controller().add_blank_sampler_track().expect("loose track");
+        let parent_bus = app.group_tracks_and_racks_recorded(vec![loose], vec![rack_id])
+            .expect("rack should nest in a plain group");
+        let parent_id = app.groups.iter().find(|group| group.bus_id == parent_bus.0)
+            .expect("parent group exists").id;
+
+        app.remove_track_from_group_recorded(kick).expect("kick leaves the rack");
+
+        let rack = app.groups.iter().find(|group| group.id == rack_id).expect("rack stays");
+        assert_eq!(rack.members, vec![snare]);
+        let parent = app.groups.iter().find(|group| group.id == parent_id)
+            .expect("parent survives");
+        assert_eq!(parent.members, vec![loose, kick]);
+        assert_eq!(parent.rack_members, vec![rack_id]);
+        assert_eq!(
+            app.state.with_scene_track_pattern(0, kick, |pattern| {
+                pattern.track_params.output.clone()
+            }),
+            Some(crate::sequencer::TrackOutput::Bus(parent_bus)),
+        );
+
+        assert!(matches!(
+            crate::app::edit::undo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
+        ));
+        let parent = app.groups.iter().find(|group| group.id == parent_id)
+            .expect("parent restored");
+        assert_eq!(parent.members, vec![loose]);
+        assert_eq!(
+            app.state.with_scene_track_pattern(0, kick, |pattern| {
+                pattern.track_params.output.clone()
+            }),
+            Some(crate::sequencer::TrackOutput::Bus(rack_bus)),
+        );
+        graph.process_block();
+    }
+
+    #[test]
     fn ungroup_tracks_reparents_nested_rack_members_and_undo_restores_rack_identity() {
         let graph = TestLiveGraph::new("ungroup-nested-rack-test", 64, 44_100, 2);
         let mut app = test_app_for_live_graph(&graph, 0);
