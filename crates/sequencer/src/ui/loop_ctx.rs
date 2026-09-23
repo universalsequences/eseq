@@ -56,6 +56,9 @@ pub(crate) struct EditSessionState {
     pub(crate) queued_jev_suggestions: Vec<QueuedJevSuggestion>,
     pub(crate) pending_learn_job: Option<PendingLearnJob>,
     pub(crate) learn_param_preview: Option<LearnParamPreview>,
+    /// Set once the user chose Don't Save in the quit prompt, so the next
+    /// quit request exits even though the project is still dirty.
+    pub(crate) quit_confirmed: bool,
     pub(crate) pending_lisp_history_transactions: HashMap<
         u64,
         (

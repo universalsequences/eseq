@@ -48,7 +48,11 @@
       (application-menu-entry "file-menu-open-scratch" "Open Project Scratch" "" (lambda () (host-command "packages-open-scratch" (dict))))
       nil
       (application-menu-entry "file-menu-help" "Help" "" (lambda () (host-command "open-help" (dict))))
-      (application-menu-entry "file-menu-about" "About eseq" "" (lambda () (host-command "about-open" (dict)))))
+      (application-menu-entry "file-menu-about" "About eseq" "" (lambda () (host-command "about-open" (dict))))
+      nil
+      ;; No shortcut: Cmd+Q lives on the application menu's Quit item. Both
+      ;; go through the unsaved-changes prompt.
+      (application-menu-entry "file-menu-quit" "Quit eseq" "" (lambda () (host-command "app-quit-request" (dict)))))
     (if (= name "Create")
       (list
         (application-menu-entry "create-menu-instrument" "Create Instrument…" ""

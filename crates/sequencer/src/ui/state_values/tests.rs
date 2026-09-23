@@ -57018,12 +57018,19 @@ mod solo_binding_tests;
             "/file-menu-customize",
             "/file-menu-help",
             "/file-menu-about",
+            "/file-menu-quit",
         ] {
             let node = find_layout_node_by_stable_key_suffix(&layout, key)
                 .unwrap_or_else(|| panic!("missing {key}"));
             assert_finite_nonzero_rect(node, key);
         }
         editor.drain_host_commands();
+        editor
+            .runtime_mut()
+            .eval_str(r#"((get (nth (filter (lambda (item) (and item (= (get item :id) "file-menu-quit"))) (eseq.application-menus/application-menu-items "File")) 0) :on-select))"#)
+            .unwrap();
+        assert!(editor.drain_host_commands().iter().any(|command| matches!(command,
+            HostCommand::Custom { name, .. } if name == "app-quit-request")));
         editor.runtime_mut().eval_str("(eseq.transport/file-menu-save-as)").unwrap();
         assert!(editor.drain_host_commands().iter().any(|command| matches!(command,
             HostCommand::Custom { name, payload } if name == "project-save-open"
@@ -57096,6 +57103,31 @@ mod solo_binding_tests;
         assert!(editor.drain_host_commands().iter().any(|command| matches!(command,
             HostCommand::Custom { name, payload } if name == "project-save-open"
                 && value_contains_string(payload, "new-project"))));
+        editor.runtime_mut().eval_str("(eseq.file-dialogs/open-unsaved-prompt)").unwrap();
+        editor.runtime_mut().eval_str("(eseq.file-dialogs/unsaved-prompt-discard)").unwrap();
+        assert!(editor.drain_host_commands().iter().any(|command| matches!(command,
+            HostCommand::Custom { name, .. } if name == "new-project")));
+
+        // Quitting with unsaved changes reuses the prompt: Save chains the
+        // save into a quit, Don't Save confirms the quit, and a later New
+        // Project prompt is back to starting a new project.
+        editor.runtime_mut().eval_str("(eseq.file-dialogs/open-unsaved-quit-prompt)").unwrap();
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let layout = editor.widget_layout().unwrap();
+        let message = find_layout_node_by_stable_key_suffix(&layout, "/unsaved-prompt-message").unwrap();
+        assert_eq!(message.props.get("text"), Some(&Value::String("Quitting discards unsaved changes.".into())));
+        editor.runtime_mut().eval_str("(eseq.file-dialogs/unsaved-prompt-save)").unwrap();
+        assert!(editor.drain_host_commands().iter().any(|command| matches!(command,
+            HostCommand::Custom { name, payload } if name == "project-save-open"
+                && value_contains_string(payload, "quit"))));
+        editor.runtime_mut().eval_str("(eseq.file-dialogs/open-unsaved-quit-prompt)").unwrap();
+        editor.runtime_mut().eval_str("(eseq.file-dialogs/unsaved-prompt-discard)").unwrap();
+        let commands = editor.drain_host_commands();
+        assert!(commands.iter().any(|command| matches!(command,
+            HostCommand::Custom { name, .. } if name == "project-quit-confirmed")));
+        assert!(!commands.iter().any(|command| matches!(command,
+            HostCommand::Custom { name, .. } if name == "new-project")));
         editor.runtime_mut().eval_str("(eseq.file-dialogs/open-unsaved-prompt)").unwrap();
         editor.runtime_mut().eval_str("(eseq.file-dialogs/unsaved-prompt-discard)").unwrap();
         assert!(editor.drain_host_commands().iter().any(|command| matches!(command,

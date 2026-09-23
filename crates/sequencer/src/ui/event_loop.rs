@@ -348,6 +348,7 @@ pub(crate) fn run_event_loop(
         queued_jev_suggestions: Vec::new(),
         pending_learn_job: None,
         learn_param_preview: None,
+        quit_confirmed: false,
         pending_lisp_history_transactions: HashMap::new(),
     };
     let mut frame = FrameDiffState {

@@ -3,6 +3,8 @@ use crate::*;
 pub(super) const COMMANDS: &[&str] = &[
     "project-save-open",
     "project-new-request",
+    "project-quit-confirmed",
+    "app-quit-request",
     "open-help",
     "open-url",
     "about-open",
@@ -34,6 +36,34 @@ pub(crate) fn activate_dialog_tile(editor: &mut Editor) {
         editor.refresh_runtime_side_effects();
         editor.switch_active_tile_to_buffer_named("*sequencer*");
     }
+}
+
+/// Every quit route (window close button, Quit eseq, the editor's quit
+/// command) lands on `editor.should_quit()`. With unsaved project changes the
+/// quit is held back and the Save / Don't Save / Cancel prompt opens instead;
+/// returns true when it did.
+pub(crate) fn intercept_unsaved_quit(
+    app: &app::App,
+    editor: &mut Editor,
+    ctx: &mut LoopCtx<'_>,
+) -> bool {
+    if ctx.sessions.quit_confirmed || !app.has_unsaved_changes() {
+        return false;
+    }
+    editor.clear_quit_request();
+    activate_dialog_tile(editor);
+    if let Err(error) = editor
+        .runtime_mut()
+        .eval_str("(eseq.file-dialogs/open-unsaved-quit-prompt)")
+    {
+        // Never trap the user in the app because the prompt failed to open.
+        eprintln!("unsaved quit prompt failed: {error:?}");
+        return false;
+    }
+    editor.runtime_mut().run_reactive_cycle();
+    editor.refresh_runtime_side_effects();
+    editor.mark_needs_redraw();
+    true
 }
 
 pub(super) fn lisp_string(text: &str) -> String {
@@ -131,6 +161,13 @@ pub(super) fn handle(
                     .runtime_mut()
                     .eval_str("(eseq.file-dialogs/open-unsaved-prompt)")
                     .map_err(|e| format!("{e:?}"))?;
+            }
+            // File > Quit eseq. Only requests the quit; `intercept_unsaved_quit`
+            // decides whether the unsaved-changes prompt comes first.
+            "app-quit-request" => editor.request_quit(),
+            "project-quit-confirmed" => {
+                ctx.sessions.quit_confirmed = true;
+                editor.request_quit();
             }
             "open-help" => {
                 // The File menu lives in the transport strip; open the manual

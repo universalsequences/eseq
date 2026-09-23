@@ -2091,7 +2091,9 @@ pub(crate) fn reactive_tick_and_render(
     }
 
     if editor.should_quit() {
-        return Ok(TickFlow::Quit);
+        if !host_commands::intercept_unsaved_quit(app, editor, ctx) {
+            return Ok(TickFlow::Quit);
+        }
     }
     Ok(TickFlow::Continue)
 }
