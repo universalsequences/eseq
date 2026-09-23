@@ -345,6 +345,7 @@ pub(crate) fn run_event_loop(
         package_view_session: None,
         pending_agentic_bubbles: HashMap::new(),
         pending_jev_suggestions: Vec::new(),
+        queued_jev_suggestions: Vec::new(),
         pending_learn_job: None,
         learn_param_preview: None,
         pending_lisp_history_transactions: HashMap::new(),
@@ -773,7 +774,7 @@ pub(crate) fn run_event_loop(
         #[cfg(not(target_os = "macos"))]
         let timeout = {
             let now = Instant::now();
-            frame_pacer.next_host_tick(now, editor.needs_redraw(), playing_now || sessions.pending_learn_job.is_some() || !sessions.pending_jev_suggestions.is_empty())
+            frame_pacer.next_host_tick(now, editor.needs_redraw(), playing_now || sessions.pending_learn_job.is_some() || !sessions.pending_jev_suggestions.is_empty() || !sessions.queued_jev_suggestions.is_empty())
                 .saturating_duration_since(now)
         };
         let mut input_batch = live_input_batch::LiveInputBatch::new();
@@ -2435,9 +2436,22 @@ pub(crate) fn run_event_loop(
             shared.current_track.load(Ordering::Relaxed),
         );
         // Jev ghost-cable suggestions (eseq-c049): the patcher render pass
-        // queues one request per newly selected node; send each on its own
-        // thread and hand answers back as they land.
-        for request in eseqlisp::widget_render::patcher::take_jev_suggestion_requests() {
+        // queues one request per newly selected node. Hold each until the
+        // selection has settled on it (clicking through nodes sends one call,
+        // not one per node), send it on its own thread, and hand answers back
+        // as they land.
+        let due_jev_requests = take_due_jev_requests(
+            &mut sessions.queued_jev_suggestions,
+            eseqlisp::widget_render::patcher::take_jev_suggestion_requests(),
+            Instant::now(),
+            eseqlisp::widget_render::patcher::jev_suggestion_wanted,
+        );
+        for request in due_jev_requests {
+            // An older request for this widget is superseded: its answer would
+            // be dropped on arrival, so stop waiting on it now.
+            sessions
+                .pending_jev_suggestions
+                .retain(|pending| pending.key != request.key);
             let (tx, rx) = std::sync::mpsc::channel();
             let body = request.body;
             std::thread::spawn(move || {
@@ -2452,6 +2466,14 @@ pub(crate) fn run_event_loop(
         let mut jev_changed = false;
         let mut jev_errors = Vec::new();
         sessions.pending_jev_suggestions.retain(|pending| {
+            // The selection moved on while this was in flight; nothing will
+            // draw its answer, so it must not hold the loop at active cadence.
+            if !eseqlisp::widget_render::patcher::jev_suggestion_wanted(
+                pending.key,
+                pending.fingerprint,
+            ) {
+                return false;
+            }
             let result = match pending.receiver.try_recv() {
                 Ok(result) => result,
                 Err(std::sync::mpsc::TryRecvError::Empty) => return true,
@@ -2730,7 +2752,7 @@ pub(crate) fn run_event_loop(
         Ok(HostLoopControl::WaitUntil(frame_pacer.next_host_tick(
             Instant::now(),
             editor.needs_redraw() || host_animation_active(&editor, backend, &gesture),
-            shared.state.transport.playing.load(Ordering::Relaxed) || sessions.pending_learn_job.is_some() || !sessions.pending_jev_suggestions.is_empty(),
+            shared.state.transport.playing.load(Ordering::Relaxed) || sessions.pending_learn_job.is_some() || !sessions.pending_jev_suggestions.is_empty() || !sessions.queued_jev_suggestions.is_empty(),
         )))
     })?;
 

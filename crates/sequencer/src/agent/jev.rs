@@ -7,6 +7,7 @@
 //! `network.rs` there is no conversation: the answer is structured data the
 //! widget decodes itself, so this stays a thin POST.
 
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use reqwest::blocking::Client;
@@ -16,11 +17,24 @@ pub const JEV_API_KEY_ENV: &str = "JEV_API_KEY";
 const SYSTEM_ONE_URL: &str = "https://api.typesafe.ai/v1/systemone";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// The same trimmed rule the patcher's feature gate uses, so the gate and the
+/// reader cannot disagree about a blank key.
 pub fn api_key() -> Option<String> {
-    std::env::var(JEV_API_KEY_ENV)
-        .ok()
-        .map(|key| key.trim().to_string())
-        .filter(|key| !key.is_empty())
+    eseqlisp::widget_render::patcher::jev_api_key()
+}
+
+/// One pooled client for every request: keeps the TLS connection warm across
+/// selections instead of paying a handshake per suggestion.
+fn client() -> Result<&'static Client, String> {
+    static CLIENT: OnceLock<Client> = OnceLock::new();
+    if let Some(client) = CLIENT.get() {
+        return Ok(client);
+    }
+    let client = Client::builder()
+        .timeout(REQUEST_TIMEOUT)
+        .build()
+        .map_err(|error| format!("jev client: {error}"))?;
+    Ok(CLIENT.get_or_init(|| client))
 }
 
 /// POST `body` (a complete `/v1/systemone` payload) and return the parsed
@@ -28,11 +42,7 @@ pub fn api_key() -> Option<String> {
 /// status line can show why a suggestion never arrived.
 pub fn system_one(body: &serde_json::Value) -> Result<serde_json::Value, String> {
     let key = api_key().ok_or_else(|| format!("{JEV_API_KEY_ENV} is not set"))?;
-    let client = Client::builder()
-        .timeout(REQUEST_TIMEOUT)
-        .build()
-        .map_err(|error| format!("jev client: {error}"))?;
-    let response = client
+    let response = client()?
         .post(SYSTEM_ONE_URL)
         .header(AUTHORIZATION, format!("Bearer {key}"))
         .header(CONTENT_TYPE, "application/json")

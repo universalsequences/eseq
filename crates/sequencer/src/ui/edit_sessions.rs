@@ -858,6 +858,49 @@ pub(super) struct PendingJevSuggestion {
     pub(super) receiver: std::sync::mpsc::Receiver<Result<serde_json::Value, String>>,
 }
 
+/// How long a patcher's Jev request must stay the newest one before it is
+/// sent. Clicking through nodes queues one per node; only the node the
+/// selection settles on costs a System One call.
+pub(super) const JEV_REQUEST_DEBOUNCE: Duration = Duration::from_millis(350);
+
+/// A Jev request the render pass queued, held until it survives the debounce.
+pub(super) struct QueuedJevSuggestion {
+    pub(super) queued_at: Instant,
+    pub(super) request: eseqlisp::widget_render::patcher::JevSuggestionRequest,
+}
+
+/// Queue fresh requests, one per widget key (a newer one replaces an older one
+/// still waiting), and return the ones that have held for the debounce and are
+/// still what their widget is waiting on. Requests the widget stopped wanting
+/// (selection moved on or cleared) are dropped unsent.
+pub(super) fn take_due_jev_requests(
+    queued: &mut Vec<QueuedJevSuggestion>,
+    fresh: Vec<eseqlisp::widget_render::patcher::JevSuggestionRequest>,
+    now: Instant,
+    wanted: impl Fn(u64, u64) -> bool,
+) -> Vec<eseqlisp::widget_render::patcher::JevSuggestionRequest> {
+    for request in fresh {
+        queued.retain(|entry| entry.request.key != request.key);
+        queued.push(QueuedJevSuggestion {
+            queued_at: now,
+            request,
+        });
+    }
+    let mut due = Vec::new();
+    let mut index = 0;
+    while index < queued.len() {
+        let entry = &queued[index];
+        if !wanted(entry.request.key, entry.request.fingerprint) {
+            queued.remove(index);
+        } else if now.saturating_duration_since(entry.queued_at) >= JEV_REQUEST_DEBOUNCE {
+            due.push(queued.remove(index).request);
+        } else {
+            index += 1;
+        }
+    }
+    due
+}
+
 pub(super) struct PendingAgenticBubble {
     pub(super) path: PathBuf,
     pub(super) intent: eseqlisp::widget_render::patcher::PatcherIntent,
@@ -1590,4 +1633,60 @@ pub(super) fn metal_agent_instrument_preset_schema(
         existing_presets,
         params,
     })
+}
+
+#[cfg(test)]
+mod jev_debounce_tests {
+    use super::*;
+    use eseqlisp::widget_render::patcher::JevSuggestionRequest;
+
+    fn request(key: u64, fingerprint: u64) -> JevSuggestionRequest {
+        JevSuggestionRequest {
+            key,
+            fingerprint,
+            body: serde_json::Value::Null,
+        }
+    }
+
+    #[test]
+    fn jev_requests_debounce_to_the_newest_per_widget() {
+        let mut queued = Vec::new();
+        let start = Instant::now();
+        // Clicking through three nodes inside the debounce window.
+        let due = take_due_jev_requests(
+            &mut queued,
+            vec![request(1, 10), request(1, 11)],
+            start,
+            |_, _| true,
+        );
+        assert!(due.is_empty());
+        let due = take_due_jev_requests(&mut queued, vec![request(1, 12)], start, |_, _| true);
+        assert!(due.is_empty());
+        assert_eq!(queued.len(), 1, "older requests for the widget are replaced");
+        // Nothing is sent before the selection has held for the debounce.
+        let early = start + JEV_REQUEST_DEBOUNCE / 2;
+        assert!(take_due_jev_requests(&mut queued, Vec::new(), early, |_, _| true).is_empty());
+        let settled = start + JEV_REQUEST_DEBOUNCE;
+        let due = take_due_jev_requests(&mut queued, Vec::new(), settled, |_, _| true);
+        assert_eq!(
+            due.iter().map(|request| request.fingerprint).collect::<Vec<_>>(),
+            vec![12]
+        );
+        assert!(queued.is_empty());
+    }
+
+    #[test]
+    fn jev_requests_the_widget_stopped_wanting_are_dropped_unsent() {
+        let mut queued = Vec::new();
+        let start = Instant::now();
+        take_due_jev_requests(&mut queued, vec![request(1, 10)], start, |_, _| true);
+        let due = take_due_jev_requests(
+            &mut queued,
+            Vec::new(),
+            start + JEV_REQUEST_DEBOUNCE,
+            |_, _| false,
+        );
+        assert!(due.is_empty());
+        assert!(queued.is_empty());
+    }
 }

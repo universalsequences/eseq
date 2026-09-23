@@ -2204,9 +2204,29 @@ fn draw_jev_ghosts(
         return hits;
     }
     let node_rects = patch_node_rects(patch, rect, pan_state);
+    hits.node_rects = node_rects
+        .values()
+        .map(|node_rect| (node_rect.col, node_rect.row, node_rect.width, node_rect.height))
+        .collect();
     let input_indices = patch_input_indices(patch);
     let input_slot_counts = patch_input_slot_counts(patch, &input_indices);
     let output_counts = patch_output_counts(patch);
+    let hidden_node_ids = hidden_inline_node_ids(patch);
+    hits.real_cables = patch
+        .connections
+        .iter()
+        .filter(|connection| connection.presentation == InputPresentation::Cable)
+        .filter(|connection| !connection_touches_hidden_inline_node(connection, &hidden_node_ids))
+        .filter_map(|connection| {
+            connection_endpoints(
+                connection,
+                &node_rects,
+                &input_indices,
+                &input_slot_counts,
+                &output_counts,
+            )
+        })
+        .collect();
     let base = theme::PATCHER_CABLE();
     for (index, ghost) in jev.cables.iter().enumerate() {
         let connection = PatchConnection {

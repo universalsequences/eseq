@@ -43,8 +43,8 @@ pub(crate) use assets::{resolve_asset_reference, resolve_registered_asset_refere
 pub(crate) use assets::resolve_asset_reference_with_fallback_roots;
 pub use connect::{PatcherConnectOp, PatcherConnectReport};
 pub use jev::{
-    JEV_API_KEY_ENV, JevSuggestionRequest, jev_suggestions_enabled, resolve_jev_suggestions,
-    take_jev_suggestion_requests,
+    JEV_API_KEY_ENV, JevSuggestionRequest, jev_api_key, jev_suggestion_wanted,
+    jev_suggestions_enabled, resolve_jev_suggestions, take_jev_suggestion_requests,
 };
 pub use preview::{PatcherPreviewRequest, PreparedPatcherPreview};
 use preview::patcher_preview_payload;

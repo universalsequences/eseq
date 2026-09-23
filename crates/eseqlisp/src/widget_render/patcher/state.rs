@@ -646,6 +646,16 @@ pub(super) fn active_macro_for_key(key: u64) -> Option<String> {
         .with(|states| states.borrow().get(&key)?.active_macro.clone())
 }
 
+/// The fingerprint of the Jev request `key` is still waiting on, if any,
+/// without cloning the whole interaction state (the host polls this per tick).
+pub(super) fn pending_jev_fingerprint_for_key(key: u64) -> Option<u64> {
+    PATCHER_INTERACTION_STATES.with(|states| {
+        let states = states.borrow();
+        let jev = states.get(&key)?.jev.as_ref()?;
+        (jev.status == super::jev::JevStatus::Pending).then_some(jev.fingerprint)
+    })
+}
+
 thread_local! {
     /// The `@file` reference of the single selected file-backed tensor node,
     /// per patcher key. Derived state, mirrored by the render pass (which has

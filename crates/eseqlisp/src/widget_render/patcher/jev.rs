@@ -14,7 +14,11 @@
 //! (`take_jev_suggestion_requests`), and the host hands the raw JSON answer
 //! back through `resolve_jev_suggestions`. Every request carries a
 //! fingerprint of (view, subject, context) so an answer that arrives after the
-//! selection or the patch moved on is dropped rather than drawn.
+//! selection moved on is dropped rather than drawn. Edits that leave the
+//! selection alone (accepting a ghost, wiring other nodes) keep the ghosts
+//! that still apply rather than re-asking; only a subject port opening that the
+//! last request did not cover asks again. The host debounces the queue, so
+//! clicking through nodes sends one request for where the selection settles.
 //!
 //! Enabled only when `JEV_API_KEY` is set in the environment.
 
@@ -54,8 +58,26 @@ const NONE_KEY: &str = "none";
 /// more click, a stolen cable drag costs a whole gesture.
 const JEV_GHOST_END_GUARD_CELLS: f32 = 1.2;
 
+/// The trimmed `JEV_API_KEY`, or `None` when it is unset or blank. The one
+/// rule both the feature gate and the host's HTTP client read, so a stray
+/// whitespace-only value never turns the feature on only to fail every call.
+pub fn jev_api_key() -> Option<String> {
+    std::env::var(JEV_API_KEY_ENV)
+        .ok()
+        .map(|key| key.trim().to_string())
+        .filter(|key| !key.is_empty())
+}
+
 pub fn jev_suggestions_enabled() -> bool {
-    std::env::var_os(JEV_API_KEY_ENV).is_some_and(|value| !value.is_empty())
+    jev_api_key().is_some()
+}
+
+/// Whether the widget at `key` is still waiting on the request with
+/// `fingerprint`. The host checks this before sending a debounced request and
+/// while one is in flight, so a superseded request is neither sent nor keeps
+/// the loop at the active cadence.
+pub fn jev_suggestion_wanted(key: u64, fingerprint: u64) -> bool {
+    super::state::pending_jev_fingerprint_for_key(key) == Some(fingerprint)
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -82,6 +104,14 @@ pub(super) struct JevSuggestionState {
     pub(super) cables: Vec<JevGhostCable>,
     /// Index into `cables` of the ghost showing its Connect / × chips.
     pub(super) focused: Option<usize>,
+    /// The subject's open ports (`in0`, `out1`, ...) when the request went
+    /// out. Patch edits that only close ports (a ghost accepted, a cable
+    /// dragged in) or touch other nodes keep the ghosts; only a port opening
+    /// that was not asked about re-queries.
+    pub(super) open_ports: Vec<String>,
+    /// The subject's label when the request went out. Retyping the node's
+    /// operator keeps its id but makes the old answer meaningless.
+    pub(super) subject_label: String,
 }
 
 /// One request the host should send. `body` is the full `/v1/systemone`
@@ -117,6 +147,32 @@ fn port_key(node_id: &str, index: usize) -> String {
 fn parse_port_key(key: &str) -> Option<(String, usize)> {
     let (node_id, index) = key.rsplit_once(':')?;
     Some((node_id.to_string(), index.parse().ok()?))
+}
+
+/// The subject's free inlets and uncabled outlets, keyed like the request's
+/// questions. Cheap enough for every render: no candidate strings, no context.
+fn open_subject_ports(
+    patch: &Patch,
+    node: &super::model::PatchNode,
+    drawn_ports: &HashMap<String, Vec<usize>>,
+) -> Vec<String> {
+    let mut open = arg_occupancies(patch, node, drawn_ports)
+        .into_iter()
+        .enumerate()
+        .filter(|(_, occupancy)| *occupancy == ArgOccupancy::Free)
+        .map(|(index, _)| format!("in{index}"))
+        .collect::<Vec<_>>();
+    for index in 0..node.outputs.len() {
+        let cabled = patch.connections.iter().any(|connection| {
+            connection.from_node == node.id
+                && connection.from_output == index
+                && connection.presentation == InputPresentation::Cable
+        });
+        if !cabled {
+            open.push(format!("out{index}"));
+        }
+    }
+    open
 }
 
 fn choice_question(instructions: String, criteria: JsonMap<String, Json>) -> Json {
@@ -193,7 +249,9 @@ pub(super) fn build_request(
                         .find(|candidate| &candidate.id == from_node)
                         .map(node_display_label)
                         .unwrap_or_else(|| from_node.clone());
-                    format!(" (already fed by {source} outlet {from_output}; another cable would sum with it)")
+                    format!(
+                        " (already fed by {source} outlet {from_output}; another cable would sum with it)"
+                    )
                 }
                 _ => continue,
             };
@@ -366,8 +424,11 @@ pub(super) fn decode_answers(subject_node_id: &str, response: &Json) -> Vec<JevG
 
 /// Called from the render pass with the effective patch for the active view.
 /// Keeps `state.jev` in step with the selection: queues a request when a
-/// single node with open ports is newly selected (or the patch around it
-/// changed), clears it when the selection goes away. Returns whether `state`
+/// single node with open ports is newly selected (or a port on it opened that
+/// the last request did not ask about), prunes ghosts that edits made moot,
+/// clears it when the selection goes away. Per render with the selection
+/// unchanged this costs one port scan: the request body is only built when a
+/// request will actually be queued. Returns whether `state`
 /// changed so the caller can persist it.
 pub(super) fn sync_for_render(
     key: u64,
@@ -379,6 +440,17 @@ pub(super) fn sync_for_render(
     if !jev_suggestions_enabled() {
         return false;
     }
+    sync_selection(key, state, patch, view_key, subject_for)
+}
+
+/// `sync_for_render` past the API-key gate.
+fn sync_selection(
+    key: u64,
+    state: &mut PatcherInteractionState,
+    patch: &Patch,
+    view_key: &str,
+    subject_for: impl FnOnce(&str) -> Option<ConnectSubject>,
+) -> bool {
     // Mid-gesture the selection is not settled; leave whatever is there alone.
     if state.drag.is_some() || state.text_edit.is_some() {
         return false;
@@ -396,6 +468,27 @@ pub(super) fn sync_for_render(
         NodeKind::MacroDefinition | NodeKind::CodeIsland | NodeKind::Constant
     ) {
         return clear(state);
+    }
+    let drawn_ports = patch_input_indices(patch);
+    let open_ports = open_subject_ports(patch, node, &drawn_ports);
+    if let Some(jev) = state.jev.as_mut()
+        && jev.subject_node_id == node.id
+        && jev.view_key == view_key
+        && jev.subject_label == node_display_label(node)
+        && open_ports.iter().all(|port| jev.open_ports.contains(port))
+    {
+        // Same subject, and nothing opened on it that the pending or landed
+        // answer did not cover: the patch moved around it (a ghost accepted,
+        // an unrelated edit). Keep the ghosts, dropping the ones the edit
+        // made moot, and do not pay for another request.
+        let before = jev.cables.len();
+        jev.cables
+            .retain(|cable| ghost_applicable(patch, &drawn_ports, cable));
+        if jev.cables.len() == before {
+            return false;
+        }
+        jev.focused = None;
+        return true;
     }
     let Some(subject) = subject_for(&node.id) else {
         return clear(state);
@@ -417,6 +510,8 @@ pub(super) fn sync_for_render(
         status: JevStatus::Pending,
         cables: Vec::new(),
         focused: None,
+        open_ports,
+        subject_label: node_display_label(node),
     });
     JEV_REQUESTS.with(|cell| {
         cell.borrow_mut().push(JevSuggestionRequest {
@@ -477,6 +572,12 @@ pub(super) struct JevOverlayHits {
     pub(super) buttons: Vec<(usize, JevButtonKind, (f32, f32, f32, f32))>,
     /// `(ghost index, start, end)`
     pub(super) cables: Vec<(usize, (f32, f32), (f32, f32))>,
+    /// Every drawn node's `(col, row, width, height)`. A ghost passing over a
+    /// node must not steal the press that selects or drags that node.
+    pub(super) node_rects: Vec<(f32, f32, f32, f32)>,
+    /// Every drawn real cable's `(start, end)`. A press on a real cable
+    /// selects that cable even where a ghost runs alongside it.
+    pub(super) real_cables: Vec<((f32, f32), (f32, f32))>,
     pub(super) zoom: f32,
 }
 
@@ -565,6 +666,148 @@ mod tests {
     }
 
     #[test]
+    fn accepting_one_ghost_keeps_the_others_without_requerying() {
+        use super::super::state::patch_with_interaction_state;
+        let mut base = parse_patch_source(
+            "(def trigger (in 1 @name trigger))\n\
+             (def pitch (in 2 @name pitch))\n\
+             (def env (adsrexp trigger 0.05 3 0 3 1 6))\n\
+             (def osc (saw pitch))\n\
+             (out (* osc 0.5) 1)",
+            PatcherIntent::Instrument,
+        )
+        .unwrap();
+        base.nodes.push(super::super::state::node_from_editor_text(
+            "typed-svf",
+            "svf",
+            (10.0, 10.0),
+            &HashMap::new(),
+            false,
+        ));
+        let subject = || {
+            Some(ConnectSubject::Operator {
+                op: "svf".to_string(),
+            })
+        };
+        let key = 0x6a65_7654;
+        let view_key = "root";
+        let _ = take_jev_suggestion_requests();
+        let mut state = PatcherInteractionState::default();
+        state.selected_nodes.insert("typed-svf".to_string());
+
+        let effective = patch_with_interaction_state(base.clone(), &state, view_key);
+        assert!(sync_selection(
+            key,
+            &mut state,
+            &effective,
+            view_key,
+            |_| subject()
+        ));
+        let requests = take_jev_suggestion_requests();
+        assert_eq!(requests.len(), 1);
+        // Answer every question with its first real candidate, each on a
+        // distinct source so the ghosts are independent.
+        let mut answers = JsonMap::new();
+        let mut used = Vec::new();
+        for (question_id, question) in requests[0].body["questions"].as_object().unwrap() {
+            let Some(choice) = question["criteria"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .find(|candidate| *candidate != NONE_KEY && !used.contains(*candidate))
+                .cloned()
+            else {
+                continue;
+            };
+            used.push(choice.clone());
+            answers.insert(
+                question_id.clone(),
+                json!({"type": "choice", "choice": choice, "confidence": 0.9,
+                       "probabilities": {choice.as_str(): 0.9}}),
+            );
+        }
+        let jev = state.jev.as_mut().unwrap();
+        jev.cables = decode_answers("typed-svf", &json!({ "answers": answers }));
+        jev.status = JevStatus::Ready;
+        let ghosts = jev.cables.clone();
+        assert!(ghosts.len() >= 2, "{ghosts:?}");
+
+        // Connect the first ghost, then let the next render see the patch
+        // with the new cable in it.
+        assert!(apply_ghost(&mut state, &effective, view_key, &ghosts[0]));
+        let effective = patch_with_interaction_state(base.clone(), &state, view_key);
+        sync_selection(key, &mut state, &effective, view_key, |_| subject());
+        let jev = state.jev.as_ref().unwrap();
+        assert_eq!(jev.status, JevStatus::Ready);
+        assert_eq!(jev.cables, ghosts[1..].to_vec());
+        assert!(
+            take_jev_suggestion_requests().is_empty(),
+            "accepting a ghost must not send another request"
+        );
+
+        // An unrelated edit (another node typed elsewhere on the canvas, which
+        // changes the context every request carries) leaves the ghosts alone.
+        let mut edited = effective.clone();
+        edited
+            .nodes
+            .push(super::super::state::node_from_editor_text(
+                "typed-phasor",
+                "phasor",
+                (30.0, 30.0),
+                &HashMap::new(),
+                false,
+            ));
+        assert_ne!(
+            connect_context(&effective, "typed-svf", &subject().unwrap()),
+            connect_context(&edited, "typed-svf", &subject().unwrap()),
+        );
+        assert!(!sync_selection(key, &mut state, &edited, view_key, |_| {
+            subject()
+        }));
+        assert_eq!(state.jev.as_ref().unwrap().cables, ghosts[1..].to_vec());
+        assert!(take_jev_suggestion_requests().is_empty());
+
+        // Retyping the subject keeps its id but not its meaning: the old
+        // ghosts go and a fresh request is queued.
+        let mut retyped = edited.clone();
+        let subject_node = retyped
+            .nodes
+            .iter_mut()
+            .find(|node| node.id == "typed-svf")
+            .unwrap();
+        *subject_node = super::super::state::node_from_editor_text(
+            "typed-svf",
+            "lores",
+            (10.0, 10.0),
+            &HashMap::new(),
+            false,
+        );
+        let lores = || {
+            Some(ConnectSubject::Operator {
+                op: "lores".to_string(),
+            })
+        };
+        assert!(sync_selection(key, &mut state, &retyped, view_key, |_| lores()));
+        let jev = state.jev.as_ref().unwrap();
+        assert_eq!(jev.status, JevStatus::Pending);
+        assert!(jev.cables.is_empty());
+        assert_eq!(take_jev_suggestion_requests().len(), 1);
+    }
+
+    #[test]
+    fn blank_api_key_does_not_enable_suggestions() {
+        // Nextest runs each test in its own process, so the variable does
+        // not leak into other tests.
+        unsafe { std::env::set_var(JEV_API_KEY_ENV, " \n") };
+        assert_eq!(jev_api_key(), None);
+        assert!(!jev_suggestions_enabled());
+        unsafe { std::env::set_var(JEV_API_KEY_ENV, " key \n") };
+        assert_eq!(jev_api_key().as_deref(), Some("key"));
+        assert!(jev_suggestions_enabled());
+        unsafe { std::env::remove_var(JEV_API_KEY_ENV) };
+    }
+
+    #[test]
     fn decode_keeps_one_ghost_per_inlet_and_drops_none() {
         let response = json!({
             "answers": {
@@ -589,23 +832,20 @@ mod tests {
     }
 }
 
-/// Wire one ghost into `state` if its ports still exist and the inlet is still
-/// free; otherwise drop it. Returns whether a connection was allocated.
-fn apply_ghost(
-    state: &mut PatcherInteractionState,
+/// Whether `ghost` can still be wired into `patch`: both ports exist and this
+/// exact cable is not already there.
+fn ghost_applicable(
     patch: &Patch,
-    view_key: &str,
+    drawn: &HashMap<String, Vec<usize>>,
     ghost: &JevGhostCable,
 ) -> bool {
-    use super::state::allocate_created_connection;
-    let drawn = patch_input_indices(patch);
     // The inlet must still be a port (free or cabled: cables into one inlet
     // sum), and this exact cable must not already exist.
     let target_is_port = patch
         .nodes
         .iter()
         .find(|candidate| candidate.id == ghost.to.node_id)
-        .map(|candidate| arg_occupancies(patch, candidate, &drawn))
+        .map(|candidate| arg_occupancies(patch, candidate, drawn))
         .and_then(|occupancies| occupancies.get(ghost.to.input_index).cloned())
         .is_some_and(|occupancy| {
             matches!(occupancy, ArgOccupancy::Free | ArgOccupancy::Cabled { .. })
@@ -620,7 +860,19 @@ fn apply_ghost(
     let source_exists = patch.nodes.iter().any(|candidate| {
         candidate.id == ghost.from.node_id && ghost.from.output_index < candidate.outputs.len()
     });
-    let applied = target_is_port && !duplicate && source_exists;
+    target_is_port && !duplicate && source_exists
+}
+
+/// Wire one ghost into `state` if its ports still exist and the inlet is still
+/// free; otherwise drop it. Returns whether a connection was allocated.
+fn apply_ghost(
+    state: &mut PatcherInteractionState,
+    patch: &Patch,
+    view_key: &str,
+    ghost: &JevGhostCable,
+) -> bool {
+    use super::state::allocate_created_connection;
+    let applied = ghost_applicable(patch, &patch_input_indices(patch), ghost);
     if applied {
         allocate_created_connection(state, view_key, ghost.from.clone(), ghost.to.clone());
     }
@@ -744,7 +996,26 @@ pub(super) fn handle_jev_click(
             }
         }
     } else {
+        // Ghosts are drawn over the canvas, not over the nodes' purpose: a
+        // press on a node body belongs to that node even where a ghost runs
+        // across it.
+        let on_node = hits.node_rects.iter().any(|(col, row, width, height)| {
+            local_col >= *col
+                && local_col <= col + width
+                && local_row >= *row
+                && local_row <= row + height
+        });
+        if on_node {
+            return None;
+        }
         let zoom = hits.zoom.max(0.01);
+        let hit_radius = CABLE_HIT_RADIUS_CELLS * zoom;
+        let on_real_cable = hits.real_cables.iter().any(|(start, end)| {
+            distance_to_cable_px(*start, *end, (local_col, local_row)) <= hit_radius
+        });
+        if on_real_cable {
+            return None;
+        }
         // A ghost runs into the very ports it proposes, and a press there is
         // the start of a cable drag, not a click on the ghost. Leave the
         // ends alone so the port underneath keeps the pointer.
@@ -758,7 +1029,7 @@ pub(super) fn handle_jev_click(
             .filter(|(_, start, end)| !near(*start) && !near(*end))
             .filter_map(|(index, start, end)| {
                 let distance = distance_to_cable_px(*start, *end, (local_col, local_row));
-                (distance <= CABLE_HIT_RADIUS_CELLS * zoom).then_some((distance, *index))
+                (distance <= hit_radius).then_some((distance, *index))
             })
             .min_by(|a, b| a.0.total_cmp(&b.0))
             .map(|(_, index)| index)?;
