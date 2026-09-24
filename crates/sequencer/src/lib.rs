@@ -64,6 +64,7 @@ pub mod audio;
 pub use audio::{audiograph, engine};
 pub mod audio_tap;
 pub mod crash;
+pub mod groove;
 #[allow(dead_code)]
 pub mod effects;
 pub mod instruments;

@@ -2382,12 +2382,23 @@ impl App {
                 group.name.clone_from(&kit_name_for_group);
                 group.color = kit_color;
                 group.members = members;
+                // Grooves are the rack's feel, not part of this kit payload
+                // (kits carry them from eseq-groove.7): keep the rack's own.
+                // Pad rows key on pad note, so pads the kit no longer has
+                // simply fall back to the shared row.
+                let (grooves, groove) = group
+                    .rack
+                    .take()
+                    .map(|rack| (rack.grooves, rack.groove))
+                    .unwrap_or_default();
                 group.rack = Some(crate::project::ProjectRackConfig {
                     sequencers: Vec::new(),
                     pads,
                     choke_groups: desired_for_group.iter().map(|(_, choke, _)| *choke).collect(),
                     clips: Vec::new(),
                     next_clip_id: 0,
+                    grooves,
+                    groove,
                 });
                 Ok(())
             })?;
@@ -4715,6 +4726,11 @@ impl App {
                 let group_name = group.name.clone();
                 if let Some(rack) = group.rack.as_mut() {
                     rack.sanitize(member_count);
+                    if rack.repair_grooves() {
+                        eprintln!(
+                            "Project load: repaired malformed groove data on drum rack '{group_name}'"
+                        );
+                    }
                     // Repair projects saved before every attach path mapped a
                     // pad: a member with no pad is unreachable from the grid,
                     // so give it the next free note in member order.

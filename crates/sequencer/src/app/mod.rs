@@ -53,6 +53,7 @@ mod params;
 mod projects;
 mod break_kits;
 mod rack_clips;
+pub mod rack_grooves;
 mod rack_sequencers;
 mod bus_outputs;
 pub mod pending_capture;

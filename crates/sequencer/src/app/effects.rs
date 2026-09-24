@@ -7312,6 +7312,137 @@ mod tests {
         graph.process_block();
     }
 
+    /// Rack grooves (docs/rack-groove-spec.md, eseq-groove.1): "Extract
+    /// Groove" with "Quantize source" straightens every source member (step
+    /// Delay, chord delays, swing), adds the groove to the rack and activates
+    /// it, and ONE undo restores all of it; redo re-applies all of it.
+    #[test]
+    fn extract_groove_with_quantize_source_is_one_undo_step() {
+        use crate::app::rack_grooves::RackGrooveExtractRequest;
+        use crate::groove::{GrooveExtractOptions, GrooveRef, GrooveSlotSource};
+        use crate::sequencer::StepParam;
+
+        let graph = TestLiveGraph::new("drum-rack-groove-extract-test", 64, 44_100, 2);
+        let mut app = test_app_for_live_graph(&graph, 0);
+        let (group_id, _) = app
+            .create_drum_rack_recorded(None)
+            .expect("drum rack should be created");
+        let kick = app.graph_controller().add_blank_sampler_track().expect("kick track");
+        let hat = app.graph_controller().add_blank_sampler_track().expect("hat track");
+        app.assign_rack_pad_track_recorded(group_id, 36, kick).expect("kick pad");
+        app.assign_rack_pad_track_recorded(group_id, 42, hat).expect("hat pad");
+
+        // Author the played take directly in the scenes (setup, unrecorded):
+        // a kick pushed early (captured chord delay, late on step 3) and on
+        // the downbeat, and swung hats nudged by a step Delay.
+        let mut scenes = app.capture_synchronized_scene_structure_state().expect("scenes");
+        let mut kick_data = scenes.effective_track_pattern(kick).expect("kick pattern");
+        kick_data.clear_step_content();
+        for (step, delay) in [(0usize, 0.05f32), (3, 0.9)] {
+            kick_data.track_bits[0] |= 1 << step;
+            kick_data.chord_snapshot.steps[step].push(0.0);
+            kick_data.chord_snapshot.durations[step].push(1.0);
+            kick_data.chord_snapshot.delays[step].push(delay);
+        }
+        let mut hat_data = scenes.effective_track_pattern(hat).expect("hat pattern");
+        hat_data.clear_step_content();
+        hat_data.track_params.swing = 60.0;
+        for step in [0usize, 1, 2, 3] {
+            hat_data.track_bits[0] |= 1 << step;
+            hat_data.step_data[step][StepParam::Delay.index()] = 0.1;
+        }
+        assert!(scenes.save_effective_track_pattern(kick, kick_data));
+        assert!(scenes.save_effective_track_pattern(hat, hat_data));
+        app.restore_scene_structure_state(&scenes).expect("install the take");
+
+        let read = |app: &mut App, track: usize| {
+            app.capture_synchronized_scene_structure_state()
+                .expect("scenes")
+                .effective_track_pattern(track)
+                .expect("pattern")
+        };
+        let rack = |app: &App| app.groups[0].rack.clone().expect("rack config");
+        let undo_len = app.history.undo_len();
+
+        let groove_id = app
+            .extract_rack_groove_recorded(group_id, &RackGrooveExtractRequest {
+                options: GrooveExtractOptions {
+                    name: "Take".to_string(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .expect("groove extracts");
+        assert_eq!(app.history.undo_len(), undo_len + 1, "exactly one history entry");
+
+        let quantized = |app: &mut App| {
+            let kick_data = read(app, kick);
+            let hat_data = read(app, hat);
+            let rack = rack(app);
+            assert_eq!(rack.grooves.len(), 1);
+            assert_eq!(rack.groove.active, Some(GrooveRef::Rack(groove_id)));
+            let groove = rack.active_rack_groove().expect("active groove");
+            assert_eq!(groove.name, "Take");
+            let kick_row = groove.pad_row(36).expect("kick row");
+            assert_eq!(kick_row.slots[4].source, GrooveSlotSource::Measured);
+            assert!((kick_row.slots[4].offset + 0.1).abs() < 1e-5, "early kick");
+            assert!(groove.pad_row(42).is_some(), "hat row");
+            // Source straightened: the early kick sits on step 4, no delays,
+            // no swing.
+            assert_eq!(kick_data.track_bits[0] & 0b1_1111, 0b1_0001);
+            assert!(kick_data.chord_snapshot.delays.iter().flatten().all(|d| *d == 0.0));
+            assert_eq!(hat_data.track_params.swing, 50.0);
+            assert!(hat_data
+                .step_data
+                .iter()
+                .all(|params| params[StepParam::Delay.index()] == 0.0));
+        };
+        quantized(&mut app);
+
+        assert!(matches!(
+            crate::app::edit::undo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(app.history.undo_len(), undo_len);
+        let rack_after_undo = rack(&app);
+        assert!(rack_after_undo.grooves.is_empty(), "the groove is gone");
+        assert_eq!(rack_after_undo.groove.active, None);
+        let kick_data = read(&mut app, kick);
+        assert_eq!(kick_data.track_bits[0] & 0b1_1111, 0b0_1001, "kick back on step 3");
+        assert_eq!(kick_data.chord_snapshot.delays[3], vec![0.9]);
+        assert_eq!(kick_data.chord_snapshot.delays[0], vec![0.05]);
+        let hat_data = read(&mut app, hat);
+        assert_eq!(hat_data.track_params.swing, 60.0, "swing restored");
+        assert_eq!(hat_data.step_data[1][StepParam::Delay.index()], 0.1, "Delay restored");
+
+        assert!(matches!(
+            crate::app::edit::redo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
+        ));
+        quantized(&mut app);
+
+        // Without quantizing, the groove is only added: activating it over
+        // its own unquantized source would double the feel.
+        let second = app
+            .extract_rack_groove_recorded(group_id, &RackGrooveExtractRequest {
+                quantize_source: false,
+                ..Default::default()
+            })
+            .expect("second groove");
+        assert_ne!(second, groove_id);
+        assert_eq!(rack(&app).grooves.len(), 2);
+        assert_eq!(rack(&app).groove.active, Some(GrooveRef::Rack(groove_id)));
+        app.set_rack_active_groove_recorded(group_id, Some(GrooveRef::Rack(second)))
+            .expect("pick the second groove");
+        assert!(app.set_rack_active_groove_recorded(group_id, Some(GrooveRef::Rack(99))).is_err());
+        assert!(matches!(
+            crate::app::edit::undo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(rack(&app).groove.active, Some(GrooveRef::Rack(groove_id)));
+        graph.process_block();
+    }
+
     /// Drum rack v2 slice 6: the pad-note badge moves a pad on the pad
     /// keyboard without disturbing anything else about it, and refuses to
     /// collide with a pad that is already there.

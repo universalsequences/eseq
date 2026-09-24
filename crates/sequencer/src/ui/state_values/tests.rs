@@ -55355,6 +55355,8 @@ mod solo_binding_tests;
             rack: Some(sequencer::project::ProjectRackConfig {
                 clips: Vec::new(),
                 next_clip_id: 0,
+                grooves: Vec::new(),
+                groove: Default::default(),
                 sequencers: Vec::new(),
                 pads: vec![
                     sequencer::project::ProjectRackPad {
