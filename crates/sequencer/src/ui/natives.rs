@@ -3753,6 +3753,7 @@ pub(crate) fn init_runtime(
     );
     runtime.register_reactive("SEQV", vec![], true);
     crate::midi_dispatch::register_device_state(&mut runtime);
+    crate::host_commands::audio_settings::register_state(&mut runtime);
     crate::roll_input::register_natives(&mut runtime, state.clone());
     crate::retrospective::register_state(&mut runtime);
     crate::host_commands::resample::register_state(&mut runtime);

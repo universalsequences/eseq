@@ -147,6 +147,7 @@ pub(super) fn handle(
                 activate_dialog_tile(editor);
                 editor.runtime_mut().eval_str("(eseq.settings/open-settings)")
                     .map_err(|e| format!("{e:?}"))?;
+                super::audio_settings::publish(editor, None);
                 if let Some(commands) = &ctx.sessions.midi_commands {
                     commands.send(sequencer::midi_input::service::Command::Refresh)
                         .map_err(|e| e.to_string())?;

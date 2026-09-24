@@ -19,11 +19,28 @@
       :key (str "midi-toggle-" (get device :id))
       :on-click (lambda (event) (set-device-enabled device (not (get device :enabled)))))))
 
+;; The engine reads the worker count once at start; AUDIO.workers-note says
+;; what is running now and what the saved choice becomes after a restart.
+(def audio-section ()
+  (v-stack :width :fill :gap 0.2
+    (h-stack :width :fill :height 1.6 :gap 0.6 :align :center
+      (label "Audio workers" :font-size 14 :color :white :bg :transparent)
+      (box :flex 1 :bg :transparent)
+      (dropdown :key "audio-workers" :width 10 :height 1.2 :font-size 12
+        :value (reactive-get "AUDIO" "workers-choice")
+        :options (reactive-get "AUDIO" "workers-options")
+        :on-change (lambda (v) (host-command "audio-set-workers" (dict :choice v)))))
+    (label (reactive-get "AUDIO" "workers-note") :key "audio-workers-note"
+      :font-size 11 :color :dim :bg :transparent)
+    (label "Helper threads for the audio graph. Changes apply on next launch."
+      :font-size 11 :color :dim :bg :transparent)))
+
 (def settings-body ()
   (let ((devices (reactive-get "MIDI" "devices"))
         (error (reactive-get "MIDI" "error")))
     (v-stack :width :fill :height :fill :gap 0.3
       (label "Settings" :font-size 18 :color :white :bg :transparent)
+      (audio-section)
       (h-stack :width :fill :gap 0.6 :align :center
         (label "MIDI inputs" :font-size 14 :color :white :bg :transparent)
         (box :flex 1 :bg :transparent)
@@ -49,6 +66,6 @@
           :on-click (lambda (event) (close-settings)))))))
 
 (def panel ()
-  (modal :is-open settings-open? :on-close close-settings :width-px 680 :height-px 560
+  (modal :is-open settings-open? :on-close close-settings :width-px 680 :height-px 640
     (box :debug-name "settings-panel" :width :fill :height :fill :padding 0.8 :bg :transparent
       (if settings-open? (settings-body) (box :width 0 :height 0 :bg :transparent)))))

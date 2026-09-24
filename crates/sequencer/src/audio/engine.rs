@@ -81,7 +81,7 @@ fn env_i32(name: &str) -> Option<i32> {
 }
 
 fn recommended_worker_count() -> i32 {
-    4
+    super::worker_prefs::startup_worker_count() as i32
 }
 
 struct EngineParts {
@@ -391,9 +391,10 @@ fn init_engine_parts(
         audiograph::graph_connect(lg, reverb_node_id, 1, bus_r_id, 0);
     }
 
-    let workers = env_i32("TINYSEQ_AUDIOGRAPH_WORKERS")
+    let workers = env_i32(super::worker_prefs::ENV_OVERRIDE)
         .unwrap_or(worker_count)
         .max(0);
+    super::worker_prefs::record_running(workers as u32);
     let rt_default = cfg!(any(target_os = "macos", target_os = "linux")) && workers > 0;
     // Keep the old macOS-specific flag as a fallback while exposing one
     // platform-neutral switch for both Mach and SCHED_FIFO scheduling.

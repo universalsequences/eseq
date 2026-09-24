@@ -1,4 +1,5 @@
 mod agent;
+pub(crate) mod audio_settings;
 mod customize;
 mod dispatch;
 mod drum_rack_v2;
