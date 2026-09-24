@@ -160,6 +160,14 @@ pub(crate) struct FrameDiffState {
     pub(crate) prev_song_row_mirror_epoch: u64,
     /// Last `published_sequencers_version` mirrored into `SEQ.graph-sequencers`.
     pub(crate) prev_published_sequencers_version: u64,
+    /// (scheduler snapshot version, published sequencers version, pattern)
+    /// at the last sweep of tracked graph reads (`queue_graph_read_invalidations`).
+    pub(crate) prev_graph_read_key: (u64, u64, usize),
+    /// (instance revision, kind registry version) at the last instance sync.
+    pub(crate) prev_instance_key: (u64, u64, u64, u64),
+    /// Fingerprint of the last `SEQ.instances` value (the Packages tab and
+    /// the rack menu read it; owner names follow rack renames).
+    pub(crate) prev_instances_fingerprint: u64,
     pub(crate) prev_current_track: usize,
     pub(crate) prev_cpu_load_bits: u32,
     pub(crate) cpu_overload: CpuOverloadIndicator,

@@ -2083,6 +2083,8 @@ fn homeostat_graph_manifest(
         EValue::Number(value) if value.is_finite() && *value >= 0.0 && value.fract() == 0.0 => {
             Some(*value as u64)
         }
+        // An instance value (`self`) is its sequencer id (instance-kinds spec §4).
+        EValue::Instance(id) => Some(*id),
         _ => None,
     };
     let name = process_symbol_name(reference).ok();

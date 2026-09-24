@@ -8,6 +8,7 @@ pub(crate) mod export;
 mod file_menu;
 pub(crate) use file_menu::{activate_dialog_tile, intercept_unsaved_quit};
 mod menu_actions;
+pub(crate) mod instances;
 mod instrument_authoring;
 mod instrument_params;
 mod learn;

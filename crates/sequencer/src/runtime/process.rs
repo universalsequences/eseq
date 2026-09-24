@@ -1307,7 +1307,8 @@ impl ProcessLiteral {
             | Value::OverrideOriginal(_)
             | Value::NodeRef(_)
             | Value::ReactiveRef { .. }
-            | Value::HostHandle { .. } => Err(format!(
+            | Value::HostHandle { .. }
+            | Value::Instance(_) => Err(format!(
                 "process authoring literal cannot publish {}",
                 eseqlisp::vm::format_lisp_value(value)
             )),

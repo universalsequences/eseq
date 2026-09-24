@@ -77,7 +77,12 @@ use crate::track_color::TrackColor;
 //       them (`ProjectFile::scene_rack_clips`). Older files have neither, so
 //       every rack loads as a LEGACY rack (empty bank) whose members resolve
 //       through the project scenes exactly as before.
-const PROJECT_FILE_VERSION: u32 = 13;
+//  14 - instances of package kinds (docs/instance-kinds-spec.md 5, 10):
+//       `ProjectFile::instances`. Older files load with none; on open, a
+//       rack's recorded `(import m)` of a kind module and (below 14 only) a
+//       project scratch `(import m)` of one migrate to instances that keep
+//       the legacy sequencer id (`app::migrate_legacy_kind_sources`).
+const PROJECT_FILE_VERSION: u32 = 14;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ProjectSoundPreset {
@@ -119,13 +124,23 @@ pub struct ProjectKitPreset {
     /// Absent (pre-feature `.kit` files) reads as 1.
     #[serde(default = "default_kit_version")]
     pub kit_version: u32,
-    /// The graph sequencers the rack owned, recorded exactly as
-    /// `ProjectRackConfig::sequencers` records them: an `(import module)` for a
-    /// package script, a `(load \"path\")` for a plain file, the script text
-    /// itself otherwise. The ids are the EXPORTING rack's namespaced ids; the
+    /// The LEGACY graph sequencers the rack owned (plain scripts; kinds
+    /// travel in `instances`), recorded exactly as
+    /// `ProjectRackConfig::sequencers` records them: a `(load \"path\")` for a
+    /// plain file, the script text itself otherwise (older kits may also hold
+    /// an `(import module)`, migrated on load). The ids are the EXPORTING rack's namespaced ids; the
     /// importer re-derives them for the rack it builds (§7.3).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sequencers: Vec<ProjectRackSequencer>,
+    /// The instances of package kinds the rack owned, as data
+    /// (instance-kinds spec §9): kind, label and overrides, never code. A
+    /// loaded kit always gives each one a FRESH instance id and re-keys its
+    /// overrides (and the clip overrides below) to it, so two kits, or one
+    /// kit loaded twice, never share an instance. Kits written before
+    /// instances recorded an `(import m)` in `sequencers` instead; loading
+    /// migrates those whose module declares exactly one kind.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub instances: Vec<ProjectKitInstance>,
     /// The rack's internal modulation cables (§7.5): every current-scene
     /// route from a modulator pad to a member pad or to the rack bus, in pad
     /// space. Cables are scene state in a project; a kit carries ONE set, the
@@ -149,8 +164,28 @@ fn default_kit_version() -> u32 {
 
 /// The break-kit payload generation this build writes (§7.1).
 /// 1 = pads + color + optional bus chain; 2 = also sequencers and clips;
-/// 3 = also modulator pads and the rack's internal mod cables (§7.5).
-pub const KIT_PRESET_VERSION: u32 = 3;
+/// 3 = also modulator pads and the rack's internal mod cables (§7.5);
+/// 4 = also `instances` (instance-kinds spec §9).
+pub const KIT_PRESET_VERSION: u32 = 4;
+
+/// One rack-owned instance a kit carries (instance-kinds spec §9).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ProjectKitInstance {
+    /// Kit-local key only: the id the instance had in the EXPORTING project,
+    /// which the kit's clip overrides are still keyed by. Loading never
+    /// reuses it; it maps it to a fresh id.
+    pub id: u64,
+    /// `<package name>:<kind name>`.
+    pub kind: String,
+    #[serde(default)]
+    pub label: String,
+    /// The instance's graph overrides as the rack played them in the current
+    /// scene at export, routes in PAD space. Applied (to every scene, or to
+    /// every clip of a clip-bearing target rack) only when the kit carries no
+    /// clips: a break kit's clips carry their own per-clip overrides.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overrides: Option<ProjectGraphOverrides>,
+}
 
 /// A rack bus insert chain as a kit carries it: one entry per occupied slot in
 /// chain order. Effect identities are not carried (a kit is not a project
@@ -304,6 +339,10 @@ pub struct ProjectFile {
     /// racks are all legacy.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub scene_rack_clips: Vec<Vec<(u64, RackClipId)>>,
+    /// Host-owned instances of package kinds (instance-kinds spec §5).
+    /// Absent in older files, which load with none.
+    #[serde(default, skip_serializing_if = "ProjectInstances::is_unused")]
+    pub instances: ProjectInstances,
 }
 
 impl ProjectFile {
@@ -494,6 +533,8 @@ struct ProjectFileWire {
     track_lane_rosters: Vec<crate::process::TrackLaneRoster>,
     #[serde(default)]
     scene_rack_clips: Vec<Vec<(u64, RackClipId)>>,
+    #[serde(default)]
+    instances: ProjectInstances,
 }
 
 impl<'de> Deserialize<'de> for ProjectFile {
@@ -534,6 +575,7 @@ impl<'de> Deserialize<'de> for ProjectFile {
             track_sounds: wire.track_sounds,
             track_lane_rosters: wire.track_lane_rosters,
             scene_rack_clips: wire.scene_rack_clips,
+            instances: wire.instances,
         };
         project.normalize_device_instances().map_err(D::Error::custom)?;
         migrate_legacy_chop_to_retrig(&mut project);
@@ -1381,6 +1423,95 @@ pub struct ProjectRackSequencer {
     pub sequencer_name: String,
     #[serde(default)]
     pub source: String,
+}
+
+/// Who owns an instance of a kind (instance-kinds spec §5).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectInstanceOwner {
+    #[default]
+    Project,
+    /// A drum rack, by stable group id: the instance's routes are member
+    /// indices, exactly like a rack-owned graph sequencer.
+    Rack(u64),
+}
+
+impl ProjectInstanceOwner {
+    pub fn rack(self) -> Option<u64> {
+        match self {
+            Self::Project => None,
+            Self::Rack(group_id) => Some(group_id),
+        }
+    }
+}
+
+/// One host-owned instance of a package-defined kind (instance-kinds spec
+/// §5). `id` is host-assigned, stable within the project, and IS the id its
+/// sequencer publishes under, so graph overrides key on it directly.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectInstance {
+    pub id: u64,
+    /// `<package name>:<kind name>`, never a module path.
+    pub kind: String,
+    #[serde(default)]
+    pub owner: ProjectInstanceOwner,
+    #[serde(default)]
+    pub label: String,
+}
+
+/// Every instance in the project, whatever owns it, in creation order, plus
+/// the id allocator. One flat list: rack-owned instances carry
+/// `ProjectInstanceOwner::Rack` rather than living in the rack config, so
+/// create/delete/duplicate/rename/move are one kind of edit.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ProjectInstances {
+    #[serde(default)]
+    pub list: Vec<ProjectInstance>,
+    /// Next id to try. Allocation skips ids already in use by an instance, a
+    /// published sequencer, or any scene's graph overrides.
+    #[serde(default)]
+    pub next_id: u64,
+    /// Host bookkeeping, never saved: bumped on every change so the UI can
+    /// re-sync its instance records.
+    #[serde(skip)]
+    pub revision: u64,
+    /// Host bookkeeping, never saved: bumped when the whole list is replaced
+    /// (project open / new project). The UI drops every live record when it
+    /// moves, so view state never carries from one project into the next
+    /// (spec §2: view state is not saved in v1).
+    #[serde(skip)]
+    pub generation: u64,
+}
+
+impl PartialEq for ProjectInstances {
+    fn eq(&self, other: &Self) -> bool {
+        self.list == other.list && self.next_id == other.next_id
+    }
+}
+
+impl ProjectInstances {
+    pub fn is_empty(&self) -> bool {
+        self.list.is_empty()
+    }
+
+    /// Nothing to save: no instance, and no id ever handed out. Once an id
+    /// was, `next_id` is saved even with an empty list, so a reload never
+    /// hands a deleted instance's id out again.
+    pub fn is_unused(&self) -> bool {
+        self.list.is_empty() && self.next_id <= 1
+    }
+
+    pub fn get(&self, id: u64) -> Option<&ProjectInstance> {
+        self.list.iter().find(|instance| instance.id == id)
+    }
+
+    pub fn get_mut(&mut self, id: u64) -> Option<&mut ProjectInstance> {
+        self.list.iter_mut().find(|instance| instance.id == id)
+    }
+
+    pub fn contains(&self, id: u64) -> bool {
+        self.get(id).is_some()
+    }
 }
 
 /// One pad: the MIDI note it answers to and the member track backing it.
@@ -4106,6 +4237,7 @@ mod tests {
     fn sample_project() -> ProjectFile {
         ProjectFile {
             scene_rack_clips: Vec::new(),
+            instances: ProjectInstances::default(),
             version: project_file_version(),
             name: "roundtrip".to_string(),
             bpm: 120,
@@ -6749,6 +6881,12 @@ mod tests {
                 sequencer_name: "break".to_string(),
                 source: "(import demos.break)".to_string(),
             }],
+            instances: vec![ProjectKitInstance {
+                id: 7,
+                kind: "alez/neural:neural".to_string(),
+                label: "neural 1".to_string(),
+                overrides: None,
+            }],
             clips: vec![ProjectRackClip {
                 id: 1,
                 name: "Verse".to_string(),
@@ -6786,6 +6924,8 @@ mod tests {
         assert_eq!(restored.mod_connections[0].destination, ProjectKitModDestination::RackBus);
         assert_eq!(restored.sequencers.len(), 1);
         assert_eq!(restored.sequencers[0].source, "(import demos.break)");
+        assert_eq!(restored.instances.len(), 1);
+        assert_eq!(restored.instances[0].kind, "alez/neural:neural");
         assert_eq!(restored.clips.len(), 1);
         assert_eq!(restored.clips[0].name, "Verse");
         assert_eq!(restored.clips[0].members, vec![true, false]);
@@ -6793,7 +6933,8 @@ mod tests {
         // sequencers, no clips, and every other field unchanged.
         let pre_feature: ProjectKitPreset = serde_json::from_str(
             &json
-                .replace(",\"kit_version\":3", "")
+                .replace(&format!(",\"kit_version\":{KIT_PRESET_VERSION}"), "")
+                .replace(",\"instances\":[", ",\"instances_unused\":[")
                 .replace(",\"mod_connections\":[", ",\"mod_connections_unused\":[")
                 .replace(",\"sequencers\":[", ",\"sequencers_unused\":[")
                 .replace(",\"clips\":[", ",\"clips_unused\":["),
@@ -6801,6 +6942,7 @@ mod tests {
         .expect("a kit saved before break kits still loads");
         assert_eq!(pre_feature.kit_version, 1);
         assert!(pre_feature.sequencers.is_empty());
+        assert!(pre_feature.instances.is_empty());
         assert!(pre_feature.clips.is_empty());
         assert_eq!(pre_feature.pads.len(), 2);
         match &restored.pads[1].sound.as_ref().expect("instrument pad").track.kind {

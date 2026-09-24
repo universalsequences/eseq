@@ -24,6 +24,13 @@
 ;; weight matrix uses `:on-cell-change`, so dragging one cell writes ONE edge override
 ;; instead of re-applying the full active matrix.
 ;;
+;; LEGACY plain script. The supported form of this sequencer is the alez/neural
+;; package's `neural` instance kind (content/packages/alez.neural): each instance
+;; is host-created, keeps its own id, :state view cells and overrides, and renders
+;; in its own `*neural · <label>*` buffer and tab. This copy stays as the reference
+;; kind-less script (one global `gvr-name` handle, one `*variable-reset*` buffer),
+;; the path plain rack scripts and their tests still exercise.
+;;
 ;; Project scratch entrypoint:
 ;;   (load "content/scripts/sequencers/graph-neural-variable-reset-demo.lisp")
 ;;

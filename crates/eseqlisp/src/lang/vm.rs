@@ -15,6 +15,14 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+mod instances;
+mod view_buffers;
+pub use instances::{
+    INSTANCE_HOST_FIELDS, INSTANCE_NAMESPACE_PREFIX, InstanceError, InstanceHostField,
+    InstanceId, InstanceKindSchema, InstanceLabelHook,
+};
+pub use view_buffers::BoundView;
+
 static RAND_STATE: AtomicU64 = AtomicU64::new(0x9e37_79b9_7f4a_7c15);
 pub const SOURCE_BUFFER_ID_PROP: &str = "__source-buffer-id";
 pub const SOURCE_MODULE_PATH_PROP: &str = "__source-module-path";
@@ -50,6 +58,9 @@ pub enum VMError {
         error: Box<VMError>,
         diagnostic: String,
     },
+    /// An instance record misuse (unknown field, read-only field, unknown
+    /// instance); the message names the kind and its fields.
+    Instance(String),
 }
 
 pub type NativeFn = Rc<dyn Fn(Vec<Value>, &mut VM) -> Value>;
@@ -237,6 +248,10 @@ pub enum Value {
         id: u64,
         callable: NativeFn,
     },
+    /// A host-owned instance of a package kind (instance-kinds spec §4).
+    /// `x.field` reads a tracked per-(instance, field) cell; see
+    /// `VM::register_instance_kind` / `VM::create_instance`.
+    Instance(InstanceId),
 }
 
 #[derive(Clone)]
@@ -452,6 +467,7 @@ fn subtree_input_value_equal(a: &Value, b: &Value) -> bool {
         (Value::Symbol(x), Value::Symbol(y)) => x == y,
         (Value::Keyword(x), Value::Keyword(y)) => x == y,
         (Value::NodeRef(x), Value::NodeRef(y)) => x == y,
+        (Value::Instance(x), Value::Instance(y)) => x == y,
         (Value::List(x), Value::List(y)) => {
             x.len() == y.len()
                 && x.iter()
@@ -929,6 +945,7 @@ pub fn format_lisp_value(value: &Value) -> String {
         Value::OverrideDispatcher(name) => format!("<override:{name}>"),
         Value::OverrideOriginal(name) => format!("<original:{name}>"),
         Value::HostHandle { kind, id, .. } => format!("<{kind}:{id}>"),
+        Value::Instance(id) => format!("<instance:{id}>"),
     }
 }
 
@@ -992,6 +1009,7 @@ pub fn format_lisp_source(value: &Value) -> String {
         Value::OverrideDispatcher(name) => format!("<override:{name}>"),
         Value::OverrideOriginal(name) => format!("<original:{name}>"),
         Value::HostHandle { kind, id, .. } => format!("<{kind}:{id}>"),
+        Value::Instance(id) => format!("<instance:{id}>"),
     }
 }
 
@@ -1155,6 +1173,7 @@ impl PartialEq for Value {
             (Self::Closure(a, _), Self::Closure(b, _)) => a == b,
             (Self::Function(a), Self::Function(b)) => a == b,
             (Self::NodeRef(a), Self::NodeRef(b)) => a == b,
+            (Self::Instance(a), Self::Instance(b)) => a == b,
             (Self::OverrideDispatcher(a), Self::OverrideDispatcher(b)) => a == b,
             (Self::OverrideOriginal(a), Self::OverrideOriginal(b)) => a == b,
             (
@@ -1225,6 +1244,7 @@ impl Clone for Value {
                 id: *id,
                 callable: callable.clone(),
             },
+            Self::Instance(id) => Self::Instance(*id),
         }
     }
 }
@@ -2051,6 +2071,7 @@ impl Value {
                 id: *id,
                 callable: callable.clone(),
             },
+            Self::Instance(id) => Self::Instance(*id),
         }
     }
 }
@@ -2547,6 +2568,10 @@ pub struct VM {
     /// Lisp `nil`. Sandbox violations must never be swallowed that way.
     expansion_violation: Option<VMError>,
     active_execution_origins: Vec<ExpansionOrigin>,
+    /// Kind schemas and per-instance field cells (instance-kinds spec §4).
+    instances: instances::InstanceStore,
+    /// Host-bound view buffers (instance-kinds spec §7).
+    view_buffers: view_buffers::ViewBufferStore,
 }
 
 pub struct VmStateSnapshot {
@@ -2589,6 +2614,8 @@ pub struct VmStateSnapshot {
     module_exports: crate::modules::ModuleExportRegistry,
     imported_at_epoch: HashMap<String, u64>,
     import_pass_epoch: u64,
+    instances: instances::InstanceStore,
+    view_buffers: view_buffers::ViewBufferStore,
 }
 
 fn clone_globals_for_snapshot(
@@ -2705,24 +2732,7 @@ pub fn register_core_natives(vm: &mut VM) {
         else {
             return Value::Bool(false);
         };
-        if !vm.writable_reactive_namespaces.contains(namespace) {
-            return Value::Bool(false);
-        }
-        let value = value.clone();
-        match &value {
-            Value::Number(number) => vm
-                .reactive_float_slots
-                .write_float(namespace, field, *number),
-            Value::Bool(true) => vm.reactive_float_slots.write_float(namespace, field, 1.0),
-            Value::Bool(false) => vm.reactive_float_slots.write_float(namespace, field, 0.0),
-            _ => {}
-        }
-        vm.update_reactive_global(namespace, field, value.clone());
-        vm.pending_reactive_sets
-            .push((namespace.clone(), field.clone(), value.clone()));
-        let source_id = vm.get_or_create_source_node(namespace, field);
-        vm.mark_source_dependents_dirty(source_id, value);
-        Value::Bool(true)
+        Value::Bool(vm.host_reactive_set(namespace, field, value.clone()))
     });
 
     vm.register_native_with_vm("bind", |args, vm| {
@@ -2797,8 +2807,47 @@ pub fn register_core_natives(vm: &mut VM) {
         let Some(stable_key) = subtree_key_string(key_value) else {
             return Value::Nil;
         };
+        let stable_key = vm.scope_key_for_current_target(stable_key);
         vm.evaluate_subtree_owner(&stable_key, callable.clone())
             .unwrap_or(Value::Nil)
+    });
+
+    // (bind-view-buffer "*name*" f arg ...) → render (f arg ...) into a
+    // runtime-named buffer: effect-buffer with a computed name and a
+    // closure body (instance-kinds spec §7). Rebinding a name replaces its
+    // view in place.
+    vm.register_native_with_vm("bind-view-buffer", |args, vm| {
+        let (Some(Value::String(target)), Some(callable)) = (args.first(), args.get(1)) else {
+            return Value::Bool(false);
+        };
+        if !matches!(callable, Value::Closure(..) | Value::Function(_) | Value::NativeFunction(_)) {
+            return Value::Bool(false);
+        }
+        let view = BoundView::Call {
+            callable: callable.clone(),
+            args: args[2..].to_vec(),
+        };
+        vm.bind_view_buffer(target, view, None);
+        Value::Bool(true)
+    });
+
+    // (instance-ref id) → the live instance `id` as a value (what a kind's
+    // :view receives as `self`), or nil when no live record has that id.
+    // For scripts and capture fixtures that address a host-created
+    // instance by its id (instance-kinds spec §4).
+    vm.register_native_with_vm("instance-ref", |args, vm| match args.first() {
+        Some(Value::Number(id))
+            if *id >= 0.0 && id.fract() == 0.0 && vm.instance_is_live(*id as InstanceId) =>
+        {
+            Value::Instance(*id as InstanceId)
+        }
+        _ => Value::Nil,
+    });
+
+    // (unbind-view-buffer "*name*") → stop rendering a bound buffer.
+    vm.register_native_with_vm("unbind-view-buffer", |args, vm| match args.first() {
+        Some(Value::String(target)) => Value::Bool(vm.unbind_view_buffer(target)),
+        _ => Value::Bool(false),
     });
 
     // (merge map :key val ...) → new map with overrides
@@ -4516,6 +4565,8 @@ impl VM {
             active_execution_origins: Vec::new(),
             global_store_hooks: Vec::new(),
             inline_widget_metadata_resolver: None,
+            instances: instances::InstanceStore::default(),
+            view_buffers: view_buffers::ViewBufferStore::default(),
         };
         vm.register_native(SOURCE_ORIGIN_NATIVE, source_origin_native);
         vm
@@ -4612,7 +4663,7 @@ impl VM {
             | OpCode::InitNamedEffect(_, _, _) | OpCode::InitState(_) => {
                 Some("reactive definition")
             }
-            OpCode::EmitTree => Some("widget emission"),
+            OpCode::EmitTree | OpCode::CallBoundView(_) => Some("widget emission"),
             _ => None,
         }
     }
@@ -4714,12 +4765,16 @@ impl VM {
     /// hashing here, layout's FNV `stable_key_to_widget_id`) prefers
     /// `__stable-key`. Vanilla chunks change nothing, which keeps
     /// serialized layout/p-lock identity stable until a file converts.
+    ///
+    /// Inside a host-bound view buffer with a key scope (instance-kinds
+    /// spec §7) the stable key is further prefixed with that scope, so the
+    /// same authored `:key` in two instances' views is two identities.
     pub fn qualify_widget_stable_key(&self, widget: &mut Value) {
         let module = self.current_module_name();
-        if module == crate::modules::IMPLICIT_MODULE {
+        let scope = self.current_key_scope();
+        if module == crate::modules::IMPLICIT_MODULE && scope.is_none() {
             return;
         }
-        let module = module.to_string();
         let Value::Map(map) = widget else {
             return;
         };
@@ -4729,14 +4784,23 @@ impl VM {
         let Some(key) = stable_key_value(map) else {
             return;
         };
-        if crate::modules::is_qualified(&key) {
-            return;
-        }
+        let key = if module == crate::modules::IMPLICIT_MODULE || crate::modules::is_qualified(&key)
+        {
+            // Already qualified (or vanilla): only a scope changes it.
+            match scope {
+                Some(_) => key,
+                None => return,
+            }
+        } else {
+            crate::modules::qualify(module, &key)
+        };
+        let key = match scope {
+            Some(scope) => view_buffers::scoped_key(scope, &key),
+            None => key,
+        };
         map.insert(
             STABLE_KEY_PROP.to_string(),
-            Rc::new(RefCell::new(Value::String(crate::modules::qualify(
-                &module, &key,
-            )))),
+            Rc::new(RefCell::new(Value::String(key))),
         );
     }
 
@@ -5366,6 +5430,8 @@ impl VM {
             module_exports: self.module_exports.clone(),
             imported_at_epoch: self.imported_at_epoch.clone(),
             import_pass_epoch: self.import_pass_epoch,
+            instances: self.instances.snapshot(),
+            view_buffers: self.view_buffers.snapshot(),
         }
     }
 
@@ -5412,6 +5478,8 @@ impl VM {
         self.module_exports = snapshot.module_exports;
         self.imported_at_epoch = snapshot.imported_at_epoch;
         self.import_pass_epoch = snapshot.import_pass_epoch;
+        self.instances.restore_from(snapshot.instances);
+        self.view_buffers = snapshot.view_buffers;
     }
 
     pub fn take_pending_reactive_sets(&mut self) -> Vec<(String, String, Value)> {
@@ -6378,6 +6446,33 @@ impl VM {
         self.dag.add_edge(source_id, effect_id);
     }
 
+    /// [`Self::inject_reactive_read`] plus the generation the read observed.
+    /// A source with no other reader adopts it without dirtying anything, so
+    /// a later invalidation carrying the same generation is a no-op. A source
+    /// that already has readers keeps its generation: one of them may have
+    /// rendered an older value that only a pending invalidation will fix.
+    pub(crate) fn inject_reactive_read_with_generation(
+        &mut self,
+        namespace: &str,
+        field: &str,
+        generation: Value,
+    ) {
+        let Some(effect_id) = self.tracking_stack.last().copied() else {
+            return;
+        };
+        self.record_reactive_read(namespace, field);
+        let source_id = self.get_or_create_source_node(namespace, field);
+        if let Some(ReactiveNode::Source {
+            value, dependents, ..
+        }) = self.dag.nodes.get_mut(&source_id)
+        {
+            if dependents.is_empty() || (dependents.len() == 1 && dependents.contains(&effect_id)) {
+                *value = generation;
+            }
+        }
+        self.dag.add_edge(source_id, effect_id);
+    }
+
     /// Return the fields in a host-owned namespace which currently have
     /// reactive readers. Detached subtree readers remain subscribers so a
     /// change while they are hidden is observed when they are reattached.
@@ -6398,6 +6493,29 @@ impl VM {
             .collect::<Vec<_>>();
         subscribed.sort();
         subscribed
+    }
+
+    /// `(reactive-set namespace field value)`: write the float binding slot,
+    /// the namespace global and the DAG source, and queue the registry write
+    /// that dirties bound widgets. Returns false for a non-writable namespace.
+    pub(crate) fn host_reactive_set(&mut self, namespace: &str, field: &str, value: Value) -> bool {
+        if !self.writable_reactive_namespaces.contains(namespace) {
+            return false;
+        }
+        match &value {
+            Value::Number(number) => self
+                .reactive_float_slots
+                .write_float(namespace, field, *number),
+            Value::Bool(true) => self.reactive_float_slots.write_float(namespace, field, 1.0),
+            Value::Bool(false) => self.reactive_float_slots.write_float(namespace, field, 0.0),
+            _ => {}
+        }
+        self.update_reactive_global(namespace, field, value.clone());
+        self.pending_reactive_sets
+            .push((namespace.to_string(), field.to_string(), value.clone()));
+        let source_id = self.get_or_create_source_node(namespace, field);
+        self.mark_source_dependents_dirty(source_id, value);
+        true
     }
 
     /// Advance a host-owned source and dirty only effects which read it.
@@ -7962,29 +8080,42 @@ impl VM {
                     };
                     let field = self.chunks[self.current_chunk].strings[field_idx].clone();
                     let new_value = value.borrow().clone();
-                    let owner_path = match &*target.borrow() {
-                        Value::Map(map) => map.get("__eseq_owner").and_then(|entry| match &*entry
-                            .borrow()
-                        {
-                            Value::String(path) => Some(path.clone()),
-                            _ => None,
-                        }),
+                    // `(set! self.field v)`: the existing dotted set! path
+                    // lands here; instance cells dirty only their readers.
+                    let instance = match &*target.borrow() {
+                        Value::Instance(id) => Some(*id),
                         _ => None,
                     };
-                    debug_assert_cell_not_frozen(&target, "OpCode::StoreField");
-                    match &mut *target.borrow_mut() {
-                        Value::Map(map) => {
-                            if let Some(slot) = map.get(&field) {
-                                debug_assert_cell_not_frozen(slot, "OpCode::StoreField");
-                                *slot.borrow_mut() = new_value.clone();
-                            } else {
-                                map.insert(field.clone(), Rc::new(RefCell::new(new_value.clone())));
+                    if let Some(id) = instance {
+                        self.write_instance_field(id, &field, new_value.clone())?;
+                    } else {
+                        let owner_path = match &*target.borrow() {
+                            Value::Map(map) => {
+                                map.get("__eseq_owner").and_then(|entry| match &*entry.borrow() {
+                                    Value::String(path) => Some(path.clone()),
+                                    _ => None,
+                                })
                             }
+                            _ => None,
+                        };
+                        debug_assert_cell_not_frozen(&target, "OpCode::StoreField");
+                        match &mut *target.borrow_mut() {
+                            Value::Map(map) => {
+                                if let Some(slot) = map.get(&field) {
+                                    debug_assert_cell_not_frozen(slot, "OpCode::StoreField");
+                                    *slot.borrow_mut() = new_value.clone();
+                                } else {
+                                    map.insert(
+                                        field.clone(),
+                                        Rc::new(RefCell::new(new_value.clone())),
+                                    );
+                                }
+                            }
+                            _ => return Err(VMError::IncorrectType),
                         }
-                        _ => return Err(VMError::IncorrectType),
-                    }
-                    if let Some(owner) = owner_path {
-                        self.mark_owner_path_dirty(&owner);
+                        if let Some(owner) = owner_path {
+                            self.mark_owner_path_dirty(&owner);
+                        }
                     }
                     stack.push(Rc::new(RefCell::new(new_value)));
                     if let Some(frame) = frames.last_mut() {
@@ -8212,6 +8343,11 @@ impl VM {
                     self.dag.clear_dirty(node_id);
                     frames.last_mut().unwrap().pc += 1;
                 }
+                OpCode::CallBoundView(node_id) => {
+                    let value = self.call_bound_view(node_id)?;
+                    stack.push(Rc::new(RefCell::new(value)));
+                    frames.last_mut().unwrap().pc += 1;
+                }
                 OpCode::SubtreeBegin => {
                     let Some(key_value) = stack.pop() else {
                         return Err(VMError::StackUnderflow);
@@ -8219,6 +8355,7 @@ impl VM {
                     let Some(stable_key) = subtree_key_string(&key_value.borrow()) else {
                         return Err(VMError::IncorrectType);
                     };
+                    let stable_key = self.scope_key_for_current_target(stable_key);
                     let parent_root_id = self
                         .current_subtree_capture_stack
                         .last()
@@ -8517,12 +8654,20 @@ impl VM {
                     let key = self.chunks[self.current_chunk].strings[idx].clone();
                     match stack.pop() {
                         Some(val) => {
-                            let result = match &*val.borrow() {
-                                Value::Map(m) => m
-                                    .get(&key)
-                                    .cloned()
-                                    .unwrap_or_else(|| Rc::new(RefCell::new(Value::Nil))),
-                                _ => return Err(VMError::IncorrectType),
+                            let instance = match &*val.borrow() {
+                                Value::Instance(id) => Some(*id),
+                                _ => None,
+                            };
+                            let result = if let Some(id) = instance {
+                                Rc::new(RefCell::new(self.read_instance_field_tracked(id, &key)?))
+                            } else {
+                                match &*val.borrow() {
+                                    Value::Map(m) => m
+                                        .get(&key)
+                                        .cloned()
+                                        .unwrap_or_else(|| Rc::new(RefCell::new(Value::Nil))),
+                                    _ => return Err(VMError::IncorrectType),
+                                }
                             };
                             stack.push(result);
                             frames.last_mut().unwrap().pc += 1;

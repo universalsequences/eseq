@@ -1330,6 +1330,55 @@ pub(crate) fn sync_reactive_tick(
                     sync_piano_roll_playhead(editor.runtime_mut(), &app, ct, playhead as usize);
             }
         }
+        // Kind instances (instance-kinds spec §5): an instance edit, undo/redo,
+        // project open or a (re)registered kind publishes each instance's
+        // sequencer under its id and mirrors the list into the VM's records.
+        // The UI VM's own kind set is part of the key: whether a record can
+        // exist depends on this VM holding the schema, and another runtime
+        // registering an identical definition first leaves the host
+        // registry version unchanged when the UI VM catches up.
+        let ui_kinds = {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            editor.runtime_mut().instance_kind_ids().hash(&mut hasher);
+            hasher.finish()
+        };
+        let instance_key = (
+            app.instances.revision,
+            sequencer::lisp_host::kind_registry_version(),
+            ui_kinds,
+            app.instances.generation,
+        );
+        if instance_key != ctx.frame.prev_instance_key {
+            // A replaced list (project open / new project) starts from fresh
+            // records: the previous project's view state never carries over.
+            let replaced = instance_key.3 != ctx.frame.prev_instance_key.3;
+            if replaced {
+                needs_reactive_cycle |=
+                    sequencer::lisp_host::drop_all_instance_records(editor.runtime_mut());
+            }
+            ctx.frame.prev_instance_key = instance_key;
+            app.publish_instance_sequencers();
+            needs_reactive_cycle |=
+                sequencer::lisp_host::sync_instance_records(editor.runtime_mut(), &app.instances);
+            // Per-instance view buffers and step tabs (spec §7), and with
+            // a replaced list, fresh ones.
+            needs_reactive_cycle |= host_commands::instances::sync_instance_views(
+                editor,
+                &app.instances,
+                replaced,
+            );
+        }
+        // `SEQ.instances` (Packages tab rows and badges, rack menu labels):
+        // republished only when an instance, its owner's name or its kind's
+        // registration changed.
+        if let Some(value) = host_commands::instances::instances_value_if_changed(
+            &app,
+            &mut ctx.frame.prev_instances_fingerprint,
+        ) {
+            needs_reactive_cycle |=
+                editor.runtime_mut().set_reactive("SEQ", "instances", value).effects_dirty;
+        }
         // Registering or unpublishing a sequencer bumps only the UI epoch, so
         // the instance list the rack menu reads is mirrored on its own version.
         let sequencers_version = ctx.shared.state.published_sequencers_version();
@@ -1343,6 +1392,22 @@ pub(crate) fn sync_reactive_tick(
                     build_graph_sequencers_value(&ctx.shared.state),
                 )
                 .effects_dirty;
+        }
+        // Tracked graph reads (`graph-edge-value` & co., instance-kinds spec
+        // §6): Lisp `graph-*` writes dirty their readers synchronously; this
+        // sweep catches everything else that can move a resolved graph value.
+        // Generations are the resolved values, so unchanged reads stay clean.
+        let graph_read_key = (
+            ctx.shared.state.scheduler_snapshot_version(),
+            sequencers_version,
+            ctx.shared.state.current_pattern_index(),
+        );
+        if graph_read_key != ctx.frame.prev_graph_read_key {
+            ctx.frame.prev_graph_read_key = graph_read_key;
+            needs_reactive_cycle |= sequencer::lisp_host::queue_graph_read_invalidations(
+                editor.runtime_mut(),
+                &ctx.shared.state,
+            );
         }
         let mirror_epoch = app.song_row_mirror_epoch;
         if (epoch != ctx.frame.prev_pattern_epoch

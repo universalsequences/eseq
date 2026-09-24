@@ -124,7 +124,7 @@ The factory packages are listed under **Factory** in the Packages tab. None of t
 
 A **graph sequencer** makes notes from a network of **nodes** connected by weighted **edges**. The pattern is not written down anywhere; it emerges from how the network is wired and what sets it off.
 
-The module is `alez.neural.variable-reset`. Attach it, and a **var rst** tab appears next to **Seq** with the sequencer's controls. The network has 8 nodes by default and up to 16. Every node begins routed to Track 1, so every note it makes plays on that track's instrument.
+The module is `alez.neural.variable-reset`, and it defines a sequencer **kind** called **neural**. Attaching the package creates nothing; each sequencer you want is an **instance** of the kind. Double-click the module row in the Packages tab (or pick **New neural** from its menu) to create one, or pick **New neural in rack** from a rack's menu to create one the rack owns. Each instance gets its own tab next to **Seq**, labelled with its name (**neural 1**, **neural 2**, …), and its own weights, routes and settings; a project or a rack can hold as many as you like. Rename, duplicate, move or delete an instance from its row in the Packages tab. The network has 8 nodes by default and up to 16. Every node begins routed to Track 1, so every note it makes plays on that track's instrument.
 
 What happens, in outline, at each step boundary of a node's grid:
 
@@ -168,12 +168,12 @@ Below that is one row per node:
 - **res** and **quant**: the node's timing grid, and the grid its fires snap to.
 - **edit**: opens the node's full editor.
 
-Beside the rows, two meters show each node's fires and its current energy; the energy meter is the quickest way to see how close a node is to its threshold. Next to them is the **weight matrix**, one cell per edge from a row's node to a column's node. Drag a cell to set that weight between 0 and 1. The engine accepts weights from −1 to 1, and a negative weight inhibits the node it points at, but a negative weight has to be set from Lisp, for example `(graph-edge "variable-reset" :from 0 :to 1 :weight -0.5)`. The top block also shows the current edge dampening, a 3D history of recent fires and a spectrogram of the master output, and a keyboard along the bottom shows each track's sounding notes.
+Beside the rows, two meters show each node's fires and its current energy; the energy meter is the quickest way to see how close a node is to its threshold. Next to them is the **weight matrix**, one cell per edge from a row's node to a column's node. Drag a cell to set that weight between 0 and 1. The engine accepts weights from −1 to 1, and a negative weight inhibits the node it points at, but a negative weight has to be set from Lisp, for example `(graph-edge (instance-ref 1) :from 0 :to 1 :weight -0.5)`, where 1 is the instance's id. The top block also shows the current edge dampening, a 3D history of recent fires and a spectrogram of the master output, and a keyboard along the bottom shows each track's sounding notes.
 
-For a first network, the module includes a starting point that wires the nodes into a ring, each feeding the next at full weight.
+A new instance starts as a working network: its nodes are wired into a ring, each feeding the next at full weight, and node 0 has **seed rt** on. A duplicate keeps its source's settings instead.
 
-1. Attach `alez.neural.variable-reset` to the project, and load an instrument on Track 1.
-2. Run the setup once with `M-x alez.neural.variable-reset/gvr-init-ring-defaults`. It sets the ring weights, and makes nodes 0 to 3 seed from Tracks 1, 2, 3 and 5. Every node still plays on Track 1. Do not put this call in the project scratch: the scratch runs every time the project opens, and the call would overwrite your weight and seed edits each time.
+1. Load an instrument on Track 1, and create a **neural** instance.
+2. Every node plays on Track 1, and node 0 listens to it. To write the ring again later, run `(alez.neural.variable-reset/gvr-init-ring-defaults (instance-ref 1))` once, with the instance's id; do not put it in the project scratch, which runs every time the project opens.
 3. Put one step on Track 1 and press Play. The step charges node 0, and its note travels round the ring one node per delay, a sixteenth at a time. Each hop scales the velocity by that node's **vel x**, 0.9 by default, so the note fades as it goes.
 4. On node 0, set **transp** to 7 and turn **vel rst** on, leaving **trn rst** off. Each time the note comes round to node 0, it rises a fifth and returns to full velocity, so the figure climbs lap by lap until a fresh seed or the reset starts it again.
 

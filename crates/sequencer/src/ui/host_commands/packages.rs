@@ -1,4 +1,8 @@
 use crate::*;
+use sequencer::app::{
+    import_modules, source_forms, source_with_import, source_with_leading_import,
+    source_without_import,
+};
 
 const PACKAGES_BUFFER_NAME: &str = "*packages*";
 const LISTING_START_LINE: usize = 5;
@@ -26,6 +30,10 @@ pub(super) const COMMANDS: &[&str] = &[
     "packages-create",
     "packages-copy-to-local",
     "packages-refresh",
+    // Instance kinds (docs/instance-kinds-spec.md §8.3): `{:module :kind
+    // [:group-id]}` attaches the module to the project when it is not yet,
+    // then creates an instance of the kind (rack-owned with :group-id).
+    "packages-new-instance",
 ];
 
 // ── Export Package… ──
@@ -370,6 +378,14 @@ pub(super) fn handle(
     match name {
         "open-packages-view" => open_packages_view(editor, ctx),
         "packages-view-key" => handle_packages_key(&payload, app, editor, ctx),
+        "packages-new-instance" => {
+            new_instance_from_package(&payload, app, editor, ctx);
+        }
+        "packages-detach" if !module_instance_ids_from_payload(app, &payload).is_empty() => {
+            if detach_with_instances_command(&payload, app, editor) {
+                refresh_package_listings(editor, ctx);
+            }
+        }
         "packages-attach" | "packages-detach" | "packages-always-load"
         | "packages-stop-always-load" => {
             let result = payload_module(&payload).and_then(|module| {
@@ -380,8 +396,9 @@ pub(super) fn handle(
                     _ => (AttachmentDestination::UserInit, false),
                 };
                 if attach {
-                    attach_module(editor, app, &module, destination)
-                        .map(|already| attachment_status(&module, destination, already))
+                    attach_module(editor, app, &module, destination).map(|(already, warnings)| {
+                        with_warnings(attachment_status(&module, destination, already), &warnings)
+                    })
                 } else {
                     detach_module(editor, app, &module, destination)
                         .map(|removed| detachment_status(&module, destination, removed))
@@ -951,22 +968,6 @@ fn scan_directory(directory: &Path) -> Result<Vec<PackageEntry>, String> {
     Ok(entries)
 }
 
-/// Parse complete top-level forms only. A draft may end in an unfinished
-/// form; never reinterpret its nested forms, quoted examples or string
-/// contents as attachment records.
-fn source_forms(source: &str) -> Vec<eseqlisp::parser::Expr> {
-    let Ok(tokens) = Parser::new(source.to_string()).parse_spanned() else {
-        return Vec::new();
-    };
-    let mut parser = eseqlisp::parser::SpannedASTParser::new(tokens);
-    let mut forms = Vec::new();
-    while parser.peek().is_some() {
-        let Ok(form) = parser.parse_expression() else { break };
-        forms.push(form);
-    }
-    forms
-}
-
 fn declared_module(source: &str) -> Option<String> {
     use eseqlisp::parser::ExprKind;
     source_forms(source).into_iter().find_map(|form| {
@@ -981,26 +982,6 @@ fn declared_module(source: &str) -> Option<String> {
             _ => None,
         }
     })
-}
-
-fn import_forms(source: &str) -> Vec<(String, eseqlisp::parser::SourceSpan)> {
-    use eseqlisp::parser::ExprKind;
-    source_forms(source).into_iter().filter_map(|form| {
-        let ExprKind::List(items) = form.kind else { return None };
-        match items.as_slice() {
-            [head, name, ..] if matches!(&head.kind, ExprKind::Symbol(s) if s == "import") => {
-                match &name.kind {
-                    ExprKind::Symbol(name) => Some((name.clone(), form.origin.primary_span)),
-                    _ => None,
-                }
-            }
-            _ => None,
-        }
-    }).collect()
-}
-
-fn import_modules(source: &str) -> HashSet<String> {
-    import_forms(source).into_iter().map(|(name, _)| name).collect()
 }
 
 fn create_target(root: &Path, input: &str) -> Result<CreateTarget, String> {
@@ -1118,8 +1099,9 @@ fn attach_selected_package(
 
     let result = attach_module(editor, app, module, destination);
     match result {
-        Ok(already_present) => {
-            let message = attachment_status(module, destination, already_present);
+        Ok((already_present, warnings)) => {
+            let message =
+                with_warnings(attachment_status(module, destination, already_present), &warnings);
             editor.handle_host_event(HostEvent::Status(message));
             refresh_packages_view(editor, ctx);
         }
@@ -1127,7 +1109,240 @@ fn attach_selected_package(
     }
 }
 
-/// Attach `module` to one destination. `Ok(true)` when it was already there.
+/// The ids of every project instance of a kind `module` defines (its
+/// manifest `kinds` plus registered `def-kind`s), whatever owns it.
+pub(crate) fn module_instance_ids(app: &app::App, module: &str) -> Vec<u64> {
+    let catalog = sequencer::app_paths::app_paths().package_catalog();
+    let kinds: Vec<String> = module_kinds(&catalog, &registered_tree_kinds())
+        .into_iter()
+        .filter(|kind| kind.module == module)
+        .map(|kind| kind.id)
+        .collect();
+    instance_ids_of_kinds(app, &kinds)
+}
+
+fn instance_ids_of_kinds(app: &app::App, kinds: &[String]) -> Vec<u64> {
+    app.instances
+        .list
+        .iter()
+        .filter(|instance| kinds.contains(&instance.kind))
+        .map(|instance| instance.id)
+        .collect()
+}
+
+fn module_instance_ids_from_payload(app: &app::App, payload: &Value) -> Vec<u64> {
+    payload_module(payload).map(|module| module_instance_ids(app, &module)).unwrap_or_default()
+}
+
+/// `packages-detach` of a module whose kinds have instances. Detaching
+/// deletes them, so the first request only asks (spec §8.3): it opens
+/// `eseq.file-dialogs/open-confirm`, whose Continue re-sends the command
+/// with `:confirmed true`, and that rerun detaches. Returns true once it
+/// detached (the package listings then need a refresh).
+pub(crate) fn detach_with_instances_command(
+    payload: &Value,
+    app: &mut app::App,
+    editor: &mut Editor,
+) -> bool {
+    let module = payload_module(payload).unwrap_or_default();
+    if !extract_bool_from_payload(payload, "confirmed") {
+        let count = module_instance_ids(app, &module).len();
+        let package = sequencer::lisp_host::package_name_for_module(&module)
+            .unwrap_or_else(|| module.clone());
+        let message = detach_confirm_message(&package, count);
+        super::file_menu::activate_dialog_tile(editor);
+        let form = format!(
+            "(eseq.file-dialogs/open-confirm {} (lambda () (host-command \"packages-detach\" (dict :module {} :confirmed true))))",
+            super::file_menu::lisp_string(&message),
+            super::file_menu::lisp_string(&module),
+        );
+        if let Err(error) = editor.runtime_mut().eval_str(&form) {
+            editor.show_transient_message(format!("Could not ask to detach {module}: {error:?}"));
+        }
+        editor.refresh_runtime_side_effects();
+        editor.mark_needs_redraw();
+        return false;
+    }
+    let result = detach_module_with_instances(editor, app, &module);
+    super::instances::sync_instances_to_editor(app, editor);
+    match result {
+        Ok(message) => editor.show_transient_message(message),
+        Err(error) => editor.show_transient_message(error),
+    }
+    true
+}
+
+/// "Detach alez/neural and delete its 3 instances?"
+pub(crate) fn detach_confirm_message(package: &str, count: usize) -> String {
+    if count == 1 {
+        format!("Detach {package} and delete its instance?")
+    } else {
+        format!("Detach {package} and delete its {count} instances?")
+    }
+}
+
+/// Detach `module` from the project together with every instance of its
+/// kinds, as ONE undoable edit: the instances (and their overrides) and the
+/// evaluated scratch's import line go in one `delete_instances_recorded`,
+/// so one undo brings the instances back AND re-records the import (the
+/// module stays loaded this session anyway: `import` cannot unload, so the
+/// kind is still registered and the instances revive at once). The draft
+/// scratch buffer and the module's `override` toggle live outside history;
+/// [`apply_replayed_scratch_imports`] mirrors undo/redo into both.
+pub(crate) fn detach_module_with_instances(
+    editor: &mut Editor,
+    app: &mut app::App,
+    module: &str,
+) -> Result<String, String> {
+    let ids = module_instance_ids(app, module);
+    let removed_from_evaluated = import_modules(&app.state.scratch_source()).contains(module);
+    let removed = app.delete_instances_recorded(&ids, "Detach package", Some(module))?;
+    // The evaluated import is gone already, so this reports (and switches
+    // the overrides off for) the draft line only.
+    let removed_line = detach_module(editor, app, module, AttachmentDestination::Scratch)?;
+    if removed_from_evaluated
+        && !removed_line
+        && !module_still_attached_elsewhere(&app.state, module, AttachmentDestination::Scratch)
+    {
+        set_module_overrides_enabled(editor, module, false);
+    }
+    let mut status = detachment_status(module, AttachmentDestination::Scratch, removed_line || removed_from_evaluated);
+    if !removed.is_empty() {
+        let noun = if removed.len() == 1 { "instance" } else { "instances" };
+        status.push_str(&format!("; deleted {} {noun}", removed.len()));
+    }
+    Ok(status)
+}
+
+/// After an undo/redo that re-added or re-removed a module's evaluated
+/// scratch import (detach with instances), bring the parts history does not
+/// hold along: the draft scratch buffer's line (else the next scratch
+/// evaluation would overwrite the evaluated scratch with a draft that
+/// disagrees) and the module's `override` entries.
+pub(crate) fn apply_replayed_scratch_imports(
+    editor: &mut Editor,
+    state: &SequencerState,
+    imports: &[app::history::ScratchImportState],
+) {
+    for import in imports {
+        let module = import.module.as_str();
+        let Some(buffer) = editor
+            .buffers
+            .iter_mut()
+            .find(|buffer| buffer.name == PROJECT_SCRATCH_BUFFER_NAME)
+        else {
+            continue;
+        };
+        let draft = buffer.text();
+        if import.present {
+            if let Some(updated) = source_with_leading_import(&draft, module) {
+                buffer.set_text(&updated);
+            }
+            set_module_overrides_enabled(editor, module, true);
+        } else {
+            let (updated, removed) = source_without_import(&draft, module);
+            if removed {
+                buffer.set_text(&updated);
+            }
+            if !module_still_attached_elsewhere(state, module, AttachmentDestination::Scratch) {
+                set_module_overrides_enabled(editor, module, false);
+            }
+        }
+        editor.mark_needs_redraw();
+    }
+}
+
+/// `packages-new-instance {:module :kind [:group-id]}`: "New <kind>" from a
+/// module row's menu, the double-click that creates a module's first
+/// instance, and the rack menu's kind picker. Attaches the module to the
+/// project first when it is not (the attach loads it, which registers the
+/// kind), then creates the instance through `instance-create`, which
+/// syncs the records and opens the new instance's tab.
+fn new_instance_from_package(
+    payload: &Value,
+    app: &mut app::App,
+    editor: &mut Editor,
+    ctx: &mut LoopCtx<'_>,
+) {
+    let result = (|| -> Result<Option<String>, String> {
+        let kind = extract_string_from_payload(payload, "kind")
+            .map(|kind| kind.trim().to_string())
+            .filter(|kind| !kind.is_empty())
+            .ok_or("packages-new-instance needs a :kind")?;
+        let module = extract_string_from_payload(payload, "module")
+            .map(|module| module.trim().to_string())
+            .filter(|module| !module.is_empty());
+        let mut warnings = None;
+        if let Some(module) = &module {
+            if !import_modules(&app.state.scratch_source()).contains(module) {
+                let (_, attach_warnings) =
+                    attach_module(editor, app, module, AttachmentDestination::Scratch)?;
+                if !attach_warnings.is_empty() {
+                    warnings = Some(with_warnings(format!("Attached {module}"), &attach_warnings));
+                }
+            }
+        }
+        if sequencer::lisp_host::registered_kind(&kind).is_none() {
+            return Err(match &module {
+                Some(module) => format!("{module} did not define kind {kind}"),
+                None => format!("Kind {kind} is not loaded; attach its package first"),
+            });
+        }
+        Ok(warnings)
+    })();
+    match result {
+        Ok(warnings) => {
+            let mut fields = vec![(
+                "kind",
+                Value::String(extract_string_from_payload(payload, "kind").unwrap_or_default().trim().to_string()),
+            )];
+            if let Some(group_id) = extract_usize_from_payload(payload, "group-id") {
+                fields.push(("group-id", Value::Number(group_id as f64)));
+            }
+            super::instances::handle(
+                "instance-create",
+                crate::values::map_value(fields),
+                app,
+                editor,
+                ctx,
+            );
+            if let Some(warnings) = warnings {
+                editor.show_transient_message(warnings);
+            }
+        }
+        Err(error) => editor.show_transient_message(error),
+    }
+    refresh_package_listings(editor, ctx);
+}
+
+/// Append attach warnings (e.g. a `def-kind` missing from the manifest) to a
+/// status line.
+fn with_warnings(status: String, warnings: &[String]) -> String {
+    if warnings.is_empty() {
+        status
+    } else {
+        format!("{status} (warning: {})", warnings.join("; "))
+    }
+}
+
+/// Check the attached module's kinds against its package manifest
+/// (instance-kinds spec §8.1): a declared kind the module never `def-kind`s
+/// is an error, an undeclared `def-kind` a warning. Modules outside any
+/// installed package have no manifest to check.
+pub(crate) fn check_attached_module_kinds(module: &str) -> Result<Vec<String>, String> {
+    let catalog = sequencer::app_paths::app_paths().package_catalog();
+    let Some(package) = catalog.package_for_module(module) else {
+        return Ok(Vec::new());
+    };
+    let warnings = sequencer::lisp_host::check_manifest_kinds(&package.manifest, module)?;
+    for warning in &warnings {
+        eprintln!("metal_seq: {warning}");
+    }
+    Ok(warnings)
+}
+
+/// Attach `module` to one destination. `Ok((true, _))` when it was already
+/// there; the second part lists attach warnings.
 ///
 /// Attaching to the project loads the module on the spot, the way clicking
 /// a script in the Scripts tab used to: the module registers its step tab,
@@ -1139,12 +1354,14 @@ pub(crate) fn attach_module(
     app: &mut app::App,
     module: &str,
     destination: AttachmentDestination,
-) -> Result<bool, String> {
+) -> Result<(bool, Vec<String>), String> {
     let result = match destination {
-        AttachmentDestination::Scratch => load_module(editor, module)
-            .and_then(|()| attach_to_scratch(editor, module))
-            .inspect(|_| record_evaluated_project_import(app, module)),
-        AttachmentDestination::UserInit => attach_to_user_init_at(editor, &user_init_path(), module),
+        AttachmentDestination::Scratch => {
+            attach_module_to_scratch(editor, app, module, check_attached_module_kinds)
+        }
+        AttachmentDestination::UserInit => {
+            attach_to_user_init_at(editor, &user_init_path(), module).map(|already| (already, Vec::new()))
+        }
     };
     if result.is_ok() {
         // A module detached earlier this session had its overrides switched
@@ -1152,6 +1369,31 @@ pub(crate) fn attach_module(
         set_module_overrides_enabled(editor, module, true);
     }
     result
+}
+
+/// The scratch half of [`attach_module`]: load the module, check its kinds,
+/// and only then write the import line. `check_kinds` is the manifest check
+/// (split out so tests can supply a manifest without an installed package).
+/// A failed check writes nothing and forgets the kinds the module just
+/// registered with the host, so `instance-create` cannot instantiate a kind
+/// whose attach was refused.
+fn attach_module_to_scratch(
+    editor: &mut Editor,
+    app: &mut app::App,
+    module: &str,
+    check_kinds: impl FnOnce(&str) -> Result<Vec<String>, String>,
+) -> Result<(bool, Vec<String>), String> {
+    load_module(editor, module)?;
+    let warnings = match check_kinds(module) {
+        Ok(warnings) => warnings,
+        Err(error) => {
+            sequencer::lisp_host::unregister_module_kinds(module);
+            return Err(error);
+        }
+    };
+    let already = attach_to_scratch(editor, module)?;
+    record_evaluated_project_import(app, module);
+    Ok((already, warnings))
 }
 
 /// Switch a module's `override` entries on or off in the UI runtime, the
@@ -1372,29 +1614,6 @@ fn detach_from_user_init_at(editor: &mut Editor, path: &Path, module: &str) -> R
     Ok(removed || draft_removed)
 }
 
-/// Remove only parsed top-level imports, including multiline forms. Preserve
-/// neighboring code, comments and strings byte-for-byte. A form on a line of
-/// its own also owns that line's indentation and newline, not surrounding
-/// blank lines or comments.
-fn source_without_import(source: &str, module: &str) -> (String, bool) {
-    let mut updated = source.to_string();
-    let mut removed = false;
-    for (name, span) in import_forms(source).into_iter().rev() {
-        if name != module { continue; }
-        let mut start = span.start_byte;
-        let mut end = span.end_byte;
-        let line_start = source[..start].rfind('\n').map_or(0, |i| i + 1);
-        let line_end = source[end..].find('\n').map_or(source.len(), |i| end + i + 1);
-        if source[line_start..start].trim().is_empty() && source[end..line_end].trim().is_empty() {
-            start = line_start;
-            end = line_end;
-        }
-        updated.replace_range(start..end, "");
-        removed = true;
-    }
-    (updated, removed)
-}
-
 pub(super) fn write_text_atomically(path: &Path, source: &str) -> Result<(), String> {
     use std::io::Write;
 
@@ -1427,23 +1646,6 @@ pub(super) fn write_text_atomically(path: &Path, source: &str) -> Result<(), Str
         return Err(format!("Could not write '{}': {error}", path.display()));
     }
     Ok(())
-}
-
-fn source_with_import(source: &str, module: &str) -> (String, usize, bool) {
-    if import_modules(source).contains(module) {
-        let line = source
-            .lines()
-            .position(|line| line.contains(module))
-            .unwrap_or(0);
-        return (source.to_string(), line, true);
-    }
-    let mut updated = source.trim_end().to_string();
-    if !updated.is_empty() {
-        updated.push_str("\n\n");
-    }
-    let line = updated.lines().count();
-    updated.push_str(&format!("(import {module})\n"));
-    (updated, line, false)
 }
 
 fn open_user_init(editor: &mut Editor, ctx: &mut LoopCtx<'_>) {
@@ -1655,31 +1857,273 @@ pub(crate) struct PackageTreeNode {
     /// Imported by `~/.eseq.d/init.lisp`.
     always: bool,
     children: Vec<PackageTreeNode>,
+    /// Instance kinds this module defines (manifest `kinds` plus any
+    /// `def-kind` the registry saw), instance-kinds spec §8.2.
+    kinds: Vec<TreeKind>,
+    /// Instances of those kinds, whatever owns them (the count badge).
+    instance_count: usize,
+    /// Set on "instance" rows only.
+    instance: Option<TreeInstance>,
+}
+
+/// One kind a module row offers as `New <kind>`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TreeKind {
+    /// `<package>:<kind>`.
+    pub id: String,
+    /// The authored kind name.
+    pub name: String,
+    /// The module that defines it.
+    pub module: String,
+}
+
+/// One project instance as the Packages tab lists it (read from
+/// `SEQ.instances`, which the reactive tick publishes).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TreeInstance {
+    pub id: u64,
+    pub kind: String,
+    pub label: String,
+    /// "project" or the owning rack's name.
+    pub owner: String,
+    pub owner_rack: Option<u64>,
+    /// Whether the kind is registered in this session. An unregistered
+    /// kind's instance is a placeholder (spec §5): kept, not published.
+    pub registered: bool,
 }
 
 pub(crate) fn register_package_tree_natives(runtime: &mut Runtime, state: Arc<SequencerState>) {
     runtime.register_native_with_docs(
         "seq-package-tree",
-        "(seq-package-tree query)",
-        "Return the Packages browser tree (Local / Installed / Factory roots) filtered by query.",
+        "(seq-package-tree query [instances])",
+        "Return the Packages browser tree (Local / Installed / Factory roots) filtered by query. \
+         `instances` is `SEQ.instances`: module rows that define kinds get a count badge and one \
+         child row per instance.",
         move |args, _ctx| {
             let query = match args.first() {
                 Some(Value::String(query)) => query.as_str(),
                 _ => "",
             };
+            let instances = args.get(1).map(tree_instances_from_value).unwrap_or_default();
             let app_paths = sequencer::app_paths::app_paths();
             let catalog = app_paths.package_catalog();
             let init = std::fs::read_to_string(user_init_path()).unwrap_or_default();
-            let tree = build_package_tree(
+            let mut tree = build_package_tree(
                 &app_paths.local_modules_dir(),
                 &catalog,
                 &app_paths.packages_dir(),
                 &state.scratch_source(),
                 &init,
             );
+            let kinds = module_kinds(&catalog, &registered_tree_kinds());
+            annotate_package_kinds(&mut tree, &kinds, &instances);
             Ok(package_tree_to_value(&filter_package_tree(&tree, &query.trim().to_lowercase())))
         },
     );
+    runtime.register_native_with_docs(
+        "seq-instance-kinds",
+        "(seq-instance-kinds)",
+        "Every kind an instance can be created from: each installed package's manifest `kinds`, \
+         then registered kinds no manifest declares. Each is a dict with :id :name :module \
+         (nil for project code) and :registered?.",
+        move |_args, _ctx| {
+            let catalog = sequencer::app_paths::app_paths().package_catalog();
+            let registered = sequencer::lisp_host::registered_kinds();
+            let mut kinds = module_kinds(&catalog, &registered_tree_kinds());
+            // Project-code kinds (no module) can be instantiated too.
+            for kind in &registered {
+                if kind.module.is_none() && !kinds.iter().any(|known| known.id == kind.id) {
+                    kinds.push(TreeKind { id: kind.id.clone(), name: kind.name.clone(), module: String::new() });
+                }
+            }
+            Ok(Value::List(
+                kinds
+                    .into_iter()
+                    .map(|kind| {
+                        let registered = registered.iter().any(|known| known.id == kind.id);
+                        Rc::new(RefCell::new(crate::values::map_value(vec![
+                            ("id", Value::String(kind.id)),
+                            ("name", Value::String(kind.name)),
+                            (
+                                "module",
+                                if kind.module.is_empty() { Value::Nil } else { Value::String(kind.module) },
+                            ),
+                            ("registered?", Value::Bool(registered)),
+                        ])))
+                    })
+                    .collect(),
+            ))
+        },
+    );
+}
+
+/// Registered kinds that belong to a module, as tree kinds.
+fn registered_tree_kinds() -> Vec<TreeKind> {
+    sequencer::lisp_host::registered_kinds()
+        .into_iter()
+        .filter_map(|kind| {
+            Some(TreeKind { module: kind.module?, id: kind.id, name: kind.name })
+        })
+        .collect()
+}
+
+/// Every module's kinds: the manifest `kinds` of each installed package
+/// (so `New <kind>` is offered before anything is evaluated, spec §8.1),
+/// then any registered kind a manifest does not declare.
+pub(crate) fn module_kinds(
+    catalog: &eseqlisp::package::PackageCatalog,
+    registered: &[TreeKind],
+) -> Vec<TreeKind> {
+    let mut kinds: Vec<TreeKind> = catalog
+        .ordered()
+        .flat_map(|package| {
+            package.manifest.kinds.iter().map(|kind| TreeKind {
+                id: package.manifest.kind_id(&kind.name),
+                name: kind.name.clone(),
+                module: kind.module.clone(),
+            })
+        })
+        .collect();
+    for kind in registered {
+        if !kinds.iter().any(|known| known.id == kind.id) {
+            kinds.push(kind.clone());
+        }
+    }
+    kinds
+}
+
+/// Parse `SEQ.instances` (see `build_instances_value`).
+pub(crate) fn tree_instances_from_value(value: &Value) -> Vec<TreeInstance> {
+    let Value::List(items) = value else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(|item| {
+            let Value::Map(map) = &*item.borrow() else {
+                return None;
+            };
+            let field = |key: &str| map.get(key).map(|value| value.borrow().clone());
+            let text = |key: &str| match field(key) {
+                Some(Value::String(text)) => Some(text),
+                _ => None,
+            };
+            let id = match field("id") {
+                Some(Value::Number(id)) if id >= 0.0 => id as u64,
+                _ => return None,
+            };
+            Some(TreeInstance {
+                id,
+                kind: text("kind")?,
+                label: text("label").unwrap_or_else(|| format!("instance {id}")),
+                owner: text("owner-label").unwrap_or_else(|| "project".to_string()),
+                owner_rack: match field("owner-rack") {
+                    Some(Value::Number(group_id)) if group_id >= 0.0 => Some(group_id as u64),
+                    _ => None,
+                },
+                registered: !matches!(field("registered?"), Some(Value::Bool(false))),
+            })
+        })
+        .collect()
+}
+
+fn instance_tree_node(instance: &TreeInstance) -> PackageTreeNode {
+    let detail = if instance.registered {
+        instance.owner.clone()
+    } else {
+        format!("{} · not loaded", instance.owner)
+    };
+    PackageTreeNode {
+        label: instance.label.clone(),
+        kind: "instance",
+        tier: "loaded",
+        path: None,
+        module: None,
+        detail: Some(detail),
+        read_only: true,
+        attached: false,
+        always: false,
+        children: Vec::new(),
+        kinds: Vec::new(),
+        instance_count: 0,
+        instance: Some(instance.clone()),
+    }
+}
+
+/// Instance-kinds spec §8.2: every module row that defines kinds lists
+/// them, counts every instance of them (any owner) for its badge, and
+/// expands to one row per instance showing the owner. Instances no module
+/// row claims (their package is missing, or the kind lives in project code)
+/// are grouped per kind at the end of the Loaded section, so a placeholder
+/// is visible and can still be deleted.
+pub(crate) fn annotate_package_kinds(
+    roots: &mut [PackageTreeNode],
+    kinds: &[TreeKind],
+    instances: &[TreeInstance],
+) {
+    fn walk(nodes: &mut [PackageTreeNode], kinds: &[TreeKind], instances: &[TreeInstance]) {
+        for node in nodes {
+            if let (true, Some(module)) = (node.kind == "module", node.module.as_ref()) {
+                node.kinds =
+                    kinds.iter().filter(|kind| &kind.module == module).cloned().collect();
+                let rows: Vec<PackageTreeNode> = instances
+                    .iter()
+                    .filter(|instance| node.kinds.iter().any(|kind| kind.id == instance.kind))
+                    .map(instance_tree_node)
+                    .collect();
+                node.instance_count = rows.len();
+                // Module rows are files: their only children are instances.
+                node.children = rows;
+                continue;
+            }
+            walk(&mut node.children, kinds, instances);
+        }
+    }
+    walk(roots, kinds, instances);
+
+    let claimed = |kind_id: &str| kinds.iter().any(|kind| kind.id == kind_id && !kind.module.is_empty());
+    let mut orphan_kinds: Vec<&str> = Vec::new();
+    for instance in instances {
+        if !claimed(&instance.kind) && !orphan_kinds.contains(&instance.kind.as_str()) {
+            orphan_kinds.push(&instance.kind);
+        }
+    }
+    let Some(loaded) = roots.iter_mut().find(|root| root.kind == "root" && root.tier == "loaded") else {
+        return;
+    };
+    for kind_id in orphan_kinds {
+        let rows: Vec<PackageTreeNode> = instances
+            .iter()
+            .filter(|instance| instance.kind == kind_id)
+            .map(instance_tree_node)
+            .collect();
+        let registered = rows.iter().any(|row| row.instance.as_ref().is_some_and(|i| i.registered));
+        let name = sequencer::lisp_host::kind_name_of(kind_id);
+        let package = sequencer::lisp_host::kind_package_of(kind_id);
+        let (label, row_kinds) = if registered {
+            (
+                format!("{name} (project code)"),
+                vec![TreeKind { id: kind_id.to_string(), name: name.to_string(), module: String::new() }],
+            )
+        } else {
+            (format!("{name} (package {package} missing)"), Vec::new())
+        };
+        loaded.children.push(PackageTreeNode {
+            label,
+            kind: "orphan",
+            tier: "loaded",
+            path: None,
+            module: None,
+            detail: None,
+            read_only: true,
+            attached: false,
+            always: false,
+            instance_count: rows.len(),
+            children: rows,
+            kinds: row_kinds,
+            instance: None,
+        });
+    }
 }
 
 pub(crate) fn build_package_tree(
@@ -1713,6 +2157,9 @@ pub(crate) fn build_package_tree(
             attached: false,
             always: false,
             children: scan_tree_nodes(local_root, "local", false),
+            kinds: Vec::new(),
+            instance_count: 0,
+            instance: None,
         },
         PackageTreeNode {
             label: "Installed".to_string(),
@@ -1725,6 +2172,9 @@ pub(crate) fn build_package_tree(
             attached: false,
             always: false,
             children: installed,
+            kinds: Vec::new(),
+            instance_count: 0,
+            instance: None,
         },
         PackageTreeNode {
             label: "Factory".to_string(),
@@ -1737,6 +2187,9 @@ pub(crate) fn build_package_tree(
             attached: false,
             always: false,
             children: factory,
+            kinds: Vec::new(),
+            instance_count: 0,
+            instance: None,
         },
     ];
     let scratch_imports = import_modules(scratch_source);
@@ -1792,6 +2245,9 @@ fn loaded_section(
                 attached,
                 always,
                 children: Vec::new(),
+                kinds: Vec::new(),
+                instance_count: 0,
+                instance: None,
             }
         })
         .collect();
@@ -1806,6 +2262,9 @@ fn loaded_section(
         attached: false,
         always: false,
         children,
+        kinds: Vec::new(),
+        instance_count: 0,
+        instance: None,
     }
 }
 
@@ -1840,6 +2299,9 @@ fn package_node(package: &eseqlisp::package::InstalledPackage, tier: &'static st
         attached: false,
         always: false,
         children,
+        kinds: Vec::new(),
+        instance_count: 0,
+        instance: None,
     }
 }
 
@@ -1868,6 +2330,9 @@ fn scan_tree_nodes(
                     read_only,
                     attached: false,
                     always: false,
+                    kinds: Vec::new(),
+                    instance_count: 0,
+                    instance: None,
                 }
             } else {
                 let module = entry.module;
@@ -1886,6 +2351,9 @@ fn scan_tree_nodes(
                     attached: false,
                     always: false,
                     children: Vec::new(),
+                    kinds: Vec::new(),
+                    instance_count: 0,
+                    instance: None,
                 }
             }
         })
@@ -1899,12 +2367,18 @@ pub(crate) fn filter_package_tree(items: &[PackageTreeNode], query: &str) -> Vec
     items
         .iter()
         .filter_map(|item| {
-            let children = filter_package_tree(&item.children, query);
             let matches = item.label.to_lowercase().contains(query)
                 || item
                     .module
                     .as_ref()
                     .is_some_and(|module| module.to_lowercase().contains(query));
+            // A matching module keeps every instance row: they are its
+            // contents, not separate search hits.
+            let children = if matches && item.kind == "module" {
+                item.children.clone()
+            } else {
+                filter_package_tree(&item.children, query)
+            };
             if item.kind == "root" || matches || !children.is_empty() {
                 let mut filtered = item.clone();
                 filtered.children = children;
@@ -1944,7 +2418,8 @@ fn package_nodes_to_value(items: &[PackageTreeNode]) -> Value {
             .map(|item| {
                 let icon = match item.kind {
                     "root" | "folder" => "folder",
-                    "package" => "project",
+                    "package" | "orphan" => "project",
+                    "instance" => "midi-fx",
                     _ => "document",
                 };
                 let mut fields: Vec<(&str, Value)> = vec![
@@ -1975,6 +2450,39 @@ fn package_nodes_to_value(items: &[PackageTreeNode]) -> Value {
                 if let Some(detail) = &item.detail {
                     fields.push(("detail", Value::String(detail.clone())));
                 }
+                if !item.kinds.is_empty() || item.kind == "orphan" {
+                    fields.push((
+                        "kinds",
+                        Value::List(
+                            item.kinds
+                                .iter()
+                                .map(|kind| {
+                                    Rc::new(RefCell::new(crate::values::map_value(vec![
+                                        ("id", Value::String(kind.id.clone())),
+                                        ("name", Value::String(kind.name.clone())),
+                                    ])))
+                                })
+                                .collect(),
+                        ),
+                    ));
+                    fields.push(("instance-count", Value::Number(item.instance_count as f64)));
+                }
+                // The circled count after the check; none at zero.
+                if item.instance_count > 0 {
+                    fields.push(("badge", Value::Number(item.instance_count as f64)));
+                }
+                if let Some(instance) = &item.instance {
+                    // Tree identity: sibling-unique and stable across renames.
+                    fields.push(("name", Value::String(format!("instance:{}", instance.id))));
+                    fields.push(("instance-id", Value::Number(instance.id as f64)));
+                    fields.push(("kind-id", Value::String(instance.kind.clone())));
+                    fields.push(("owner", Value::String(instance.owner.clone())));
+                    fields.push((
+                        "owner-rack",
+                        instance.owner_rack.map(|gid| Value::Number(gid as f64)).unwrap_or(Value::Nil),
+                    ));
+                    fields.push(("registered?", Value::Bool(instance.registered)));
+                }
                 if !item.children.is_empty() {
                     fields.push(("children", package_nodes_to_value(&item.children)));
                 }
@@ -1987,6 +2495,263 @@ fn package_nodes_to_value(items: &[PackageTreeNode]) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn kind_test_app() -> app::App {
+        let state = std::sync::Arc::new(sequencer::sequencer::SequencerState::new(
+            1,
+            vec![sequencer::sequencer::default_empty_effect_chain()],
+        ));
+        let (keyboard_tx, _keyboard_rx) = std::sync::mpsc::channel();
+        let mut app = app::App::new(
+            state,
+            sequencer::audiograph::LiveGraphPtr(std::ptr::null_mut()),
+            44_100,
+            app::AudioBuses {
+                bus_l_id: 0,
+                bus_r_id: 0,
+                default_bus_nodes: Vec::new(),
+                bus_effect_runtime: std::sync::Arc::new(std::sync::Mutex::new(
+                    std::sync::Arc::new(Vec::new()),
+                )),
+                reverb_bus_id: 0,
+                reverb_node_id: 0,
+            },
+            std::sync::Arc::new(sequencer::recorder::MasterRecorder::new(44_100, 2)),
+            keyboard_tx,
+        );
+        app.tracks = vec!["Track 1".to_string()];
+        app.track_registry =
+            sequencer::sequencer::TrackRegistry::for_legacy_track_count(1).unwrap();
+        app
+    }
+
+    /// Instance-kinds spec §8.1 at the attach seam: a manifest kind the
+    /// module never `def-kind`s fails the attach before the import line is
+    /// written and un-registers the module's kinds; a warning-only check
+    /// attaches and hands its warnings back for the status line.
+    #[test]
+    fn scratch_attach_refuses_a_missing_manifest_kind_before_writing_the_import() {
+        sequencer::lisp_host::clear_kind_registry();
+        let mut app = kind_test_app();
+        let mut runtime = Runtime::new();
+        runtime.register_reactive("SEQ", Vec::new(), true);
+        sequencer::lisp_host::register_graph_authoring_natives(
+            &mut runtime,
+            std::sync::Arc::clone(&app.state),
+        );
+        let mut editor = Editor::new(runtime, eseqlisp::EditorConfig::default());
+        let root = temp_root("kind-attach");
+        std::fs::create_dir_all(root.join("tk")).unwrap();
+        std::fs::write(
+            root.join("tk/kinds.lisp"),
+            "(module tk.kinds)\n(def-kind real :state ((sel -1)))\n",
+        )
+        .unwrap();
+        editor.runtime_mut().set_scoped_module_load_path(vec![eseqlisp::ModuleLoadRoot {
+            path: root.clone(),
+            module_prefix: None,
+        }]);
+        let scratch = |editor: &Editor| {
+            editor
+                .buffers
+                .iter()
+                .find(|buffer| buffer.name == PROJECT_SCRATCH_BUFFER_NAME)
+                .expect("default scratch buffer")
+                .text()
+        };
+        let draft_before = scratch(&editor);
+        let evaluated_before = app.state.scratch_source();
+        let manifest: eseqlisp::package::PackageManifest =
+            serde_json::from_value(serde_json::json!({
+                "name": "alec/tk",
+                "version": "1",
+                "kinds": [{"name": "missing", "module": "tk.kinds"}],
+            }))
+            .unwrap();
+
+        let error = attach_module_to_scratch(&mut editor, &mut app, "tk.kinds", |module| {
+            sequencer::lisp_host::check_manifest_kinds(&manifest, module)
+        })
+        .expect_err("a declared kind the module never def-kinds fails the attach");
+        assert!(error.contains("'missing'"), "{error}");
+        assert_eq!(scratch(&editor), draft_before, "the draft gains no import line");
+        assert_eq!(app.state.scratch_source(), evaluated_before);
+        assert!(
+            sequencer::lisp_host::kinds_defined_in_module("tk.kinds").is_empty(),
+            "a refused attach forgets the module's kinds"
+        );
+        assert!(
+            app.create_instance_recorded(
+                "tk.kinds:real",
+                sequencer::project::ProjectInstanceOwner::Project,
+                None
+            )
+            .is_err(),
+            "instance-create cannot instantiate a kind whose attach was refused"
+        );
+
+        // Warnings only: the import is written and the warnings come back.
+        let (already, warnings) =
+            attach_module_to_scratch(&mut editor, &mut app, "tk.kinds", |_| {
+                Ok(vec!["def-kind 'real' is missing from the manifest".to_string()])
+            })
+            .expect("warnings do not fail the attach");
+        assert!(!already);
+        assert_eq!(warnings.len(), 1);
+        assert!(scratch(&editor).contains("(import tk.kinds)"));
+        assert_eq!(
+            with_warnings("Attached tk.kinds".to_string(), &warnings),
+            "Attached tk.kinds (warning: def-kind 'real' is missing from the manifest)"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Spec §8.3 at the host seam: `packages-detach` of a module with
+    /// instances first asks, the confirm's Continue re-sends it with
+    /// `:confirmed true`, and that rerun deletes the instances and drops the
+    /// import from BOTH scratch texts and switches the overrides off, as one
+    /// edit whose undo/redo (plus the replay hook) brings all of it back and
+    /// takes it away again. Also: an import only the evaluated scratch still
+    /// has (draft already edited) still switches the overrides off.
+    #[test]
+    fn detach_with_instances_confirms_then_detaches_and_undo_restores_everything() {
+        sequencer::lisp_host::clear_kind_registry();
+        let mut app = kind_test_app();
+        let mut runtime = Runtime::new();
+        runtime.register_reactive("SEQ", Vec::new(), true);
+        sequencer::lisp_host::register_graph_authoring_natives(
+            &mut runtime,
+            std::sync::Arc::clone(&app.state),
+        );
+        let mut editor = Editor::new(runtime, eseqlisp::EditorConfig::default());
+        let root = temp_root("detach-instances");
+        for dir in ["t", "tk"] {
+            std::fs::create_dir_all(root.join(dir)).unwrap();
+        }
+        std::fs::write(
+            root.join("t/factory.lisp"),
+            "(module t.factory)\n(export seam)\n(def seam () \"factory\")\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("tk/kinds.lisp"),
+            "(module tk.kinds)\n(import t.factory)\n(def-kind real :state ((sel -1)))\n(override t.factory/seam () \"package\")\n",
+        )
+        .unwrap();
+        // The real confirm modal's state machine, without its view.
+        std::fs::write(
+            // `eseq.*` modules resolve at the load root itself.
+            root.join("file-dialogs.lisp"),
+            "(module eseq.file-dialogs)\n(export open-confirm accept-confirm confirm-message confirm-open?)\n\
+             (defstate confirm-open? false)\n(defstate confirm-message \"\")\n(defstate confirm-action nil)\n\
+             (def open-confirm (message action) (set! confirm-message message) (set! confirm-action action) (set! confirm-open? true))\n\
+             (def accept-confirm () (let ((action confirm-action)) (set! confirm-open? false) (if action (action) nil)))\n",
+        )
+        .unwrap();
+        editor.runtime_mut().set_scoped_module_load_path(vec![eseqlisp::ModuleLoadRoot {
+            path: root.clone(),
+            module_prefix: None,
+        }]);
+        editor.runtime_mut().eval_str("(import eseq.file-dialogs)").unwrap();
+        let draft = |editor: &Editor| {
+            editor
+                .buffers
+                .iter()
+                .find(|buffer| buffer.name == PROJECT_SCRATCH_BUFFER_NAME)
+                .expect("default scratch buffer")
+                .text()
+        };
+        let seam = |editor: &mut Editor| editor.runtime_mut().eval_str("(t.factory/seam)").unwrap();
+        let payload = |confirmed: bool| {
+            crate::values::map_value(vec![
+                ("module", Value::String("tk.kinds".into())),
+                ("confirmed", Value::Bool(confirmed)),
+            ])
+        };
+
+        attach_module_to_scratch(&mut editor, &mut app, "tk.kinds", |_| Ok(Vec::new()))
+            .expect("attach");
+        let kind = sequencer::lisp_host::kinds_defined_in_module("tk.kinds")
+            .pop()
+            .expect("the module registered its kind")
+            .id;
+        let owner = sequencer::project::ProjectInstanceOwner::Project;
+        let a = app.create_instance_recorded(&kind, owner, None).unwrap();
+        let b = app.create_instance_recorded(&kind, owner, None).unwrap();
+        assert_eq!(module_instance_ids(&app, "tk.kinds"), vec![a, b]);
+        assert_eq!(seam(&mut editor), Some(Value::String("package".into())));
+        editor.drain_host_commands();
+
+        // First request: only the confirm opens; nothing is detached.
+        assert!(!detach_with_instances_command(&payload(false), &mut app, &mut editor));
+        let confirm = editor.runtime_mut().eval_str("eseq.file-dialogs/confirm-message").unwrap();
+        assert_eq!(
+            confirm,
+            Some(Value::String(detach_confirm_message("tk.kinds", 2).into())),
+            "{confirm:?}"
+        );
+        assert_eq!(module_instance_ids(&app, "tk.kinds").len(), 2);
+        assert!(draft(&editor).contains("(import tk.kinds)"));
+
+        // Continue re-sends the command confirmed.
+        editor.runtime_mut().eval_str("(eseq.file-dialogs/accept-confirm)").unwrap();
+        let resent: Vec<Value> = editor
+            .drain_host_commands()
+            .into_iter()
+            .filter_map(|command| match command {
+                eseqlisp::host::HostCommand::Custom { name, payload } if name == "packages-detach" => {
+                    Some(payload)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(resent.len(), 1, "Continue sends packages-detach once");
+        assert!(extract_bool_from_payload(&resent[0], "confirmed"));
+        assert!(detach_with_instances_command(&resent[0], &mut app, &mut editor));
+        assert!(app.instances.list.is_empty(), "its instances are deleted");
+        assert!(!draft(&editor).contains("(import tk.kinds)"));
+        assert!(!import_modules(&app.state.scratch_source()).contains("tk.kinds"));
+        assert_eq!(seam(&mut editor), Some(Value::String("factory".into())), "overrides off");
+
+        // Undo, then the event loop's replay hook: instances, both scratch
+        // lines and the overrides are back. Redo takes them away again.
+        let replay = |app: &mut app::App, editor: &mut Editor, undo: bool| {
+            let imports = if undo { app.history.next_undo_patch() } else { app.history.next_redo_patch() }
+                .expect("a history entry")
+                .replayed_scratch_imports(undo);
+            let replayed = if undo { app::edit::undo(app) } else { app::edit::redo(app) };
+            assert!(matches!(replayed, app::history::HistoryReplay::Applied(_)));
+            let state = std::sync::Arc::clone(&app.state);
+            apply_replayed_scratch_imports(editor, &state, &imports);
+        };
+        replay(&mut app, &mut editor, true);
+        assert_eq!(module_instance_ids(&app, "tk.kinds"), vec![a, b]);
+        assert!(draft(&editor).contains("(import tk.kinds)"));
+        assert!(import_modules(&app.state.scratch_source()).contains("tk.kinds"));
+        assert_eq!(seam(&mut editor), Some(Value::String("package".into())));
+        replay(&mut app, &mut editor, false);
+        assert!(app.instances.list.is_empty());
+        assert!(!draft(&editor).contains("(import tk.kinds)"));
+        assert!(!import_modules(&app.state.scratch_source()).contains("tk.kinds"));
+        assert_eq!(seam(&mut editor), Some(Value::String("factory".into())));
+
+        // The import lives only in the evaluated scratch (the draft line was
+        // deleted without evaluating): detach still switches overrides off.
+        replay(&mut app, &mut editor, true);
+        let without = source_without_import(&draft(&editor), "tk.kinds").0;
+        editor
+            .buffers
+            .iter_mut()
+            .find(|buffer| buffer.name == PROJECT_SCRATCH_BUFFER_NAME)
+            .unwrap()
+            .set_text(&without);
+        assert_eq!(seam(&mut editor), Some(Value::String("package".into())));
+        assert!(detach_with_instances_command(&payload(true), &mut app, &mut editor));
+        assert!(app.instances.list.is_empty());
+        assert!(!import_modules(&app.state.scratch_source()).contains("tk.kinds"));
+        assert_eq!(seam(&mut editor), Some(Value::String("factory".into())));
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     /// Reopening a project replays its *evaluated* scratch, not the draft
     /// buffer, so an import the host evaluated itself has to land there too.
@@ -2411,6 +3176,145 @@ mod tests {
         assert!(copy_module_to_local(&copied, "alec.drums.kit", &local)
             .unwrap_err()
             .contains("already has"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn module_rows_badge_their_instances_and_expand_to_one_row_per_instance() {
+        let root = temp_root("kinds-tree");
+        let local = root.join("local");
+        std::fs::create_dir_all(&local).unwrap();
+        let installed = root.join("packages");
+        std::fs::create_dir_all(installed.join("alez.neural/src")).unwrap();
+        std::fs::write(
+            installed.join("alez.neural/manifest.json"),
+            r#"{"name":"alez/neural","version":"1","entry":"alez.neural.variable-reset",
+                "kinds":[{"name":"neural","module":"alez.neural.variable-reset"}]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            installed.join("alez.neural/src/variable-reset.lisp"),
+            "(module alez.neural.variable-reset)\n",
+        )
+        .unwrap();
+        std::fs::write(installed.join("alez.neural/src/other.lisp"), "(module alez.neural.other)\n")
+            .unwrap();
+        let (catalog, errors) =
+            eseqlisp::package::PackageCatalog::scan_layered_reporting(&[installed.clone()]);
+        assert!(errors.is_empty(), "{errors:?}");
+
+        let instance = |id: u64, kind: &str, label: &str, owner: &str, rack: Option<u64>, registered: bool| {
+            TreeInstance {
+                id,
+                kind: kind.to_string(),
+                label: label.to_string(),
+                owner: owner.to_string(),
+                owner_rack: rack,
+                registered,
+            }
+        };
+        let instances = vec![
+            instance(1, "alez/neural:neural", "neural 1", "project", None, true),
+            instance(2, "alez/neural:neural", "neural 2", "Kit A", Some(9), true),
+            instance(3, "gone/pkg:thing", "thing 1", "project", None, false),
+        ];
+        // `SEQ.instances` round-trips into tree instances.
+        let value = Value::List(
+            instances
+                .iter()
+                .map(|instance| {
+                    Rc::new(RefCell::new(crate::values::map_value(vec![
+                        ("id", Value::Number(instance.id as f64)),
+                        ("kind", Value::String(instance.kind.clone())),
+                        ("label", Value::String(instance.label.clone())),
+                        ("owner-label", Value::String(instance.owner.clone())),
+                        (
+                            "owner-rack",
+                            instance.owner_rack.map(|gid| Value::Number(gid as f64)).unwrap_or(Value::Nil),
+                        ),
+                        ("registered?", Value::Bool(instance.registered)),
+                    ])))
+                })
+                .collect(),
+        );
+        assert_eq!(tree_instances_from_value(&value), instances);
+
+        let mut tree =
+            build_package_tree(&local, &catalog, &installed, "(import alez.neural.variable-reset)\n", "");
+        let kinds = module_kinds(&catalog, &[]);
+        assert_eq!(
+            kinds,
+            vec![TreeKind {
+                id: "alez/neural:neural".into(),
+                name: "neural".into(),
+                module: "alez.neural.variable-reset".into(),
+            }]
+        );
+        annotate_package_kinds(&mut tree, &kinds, &instances);
+
+        // Loaded: the attached module row, then the missing package's
+        // placeholder group.
+        let loaded = &tree[0].children;
+        assert_eq!(loaded.len(), 2, "{loaded:#?}");
+        let module = &loaded[0];
+        assert_eq!(module.kinds.len(), 1);
+        assert_eq!(module.instance_count, 2);
+        assert_eq!(
+            module
+                .children
+                .iter()
+                .map(|row| (row.kind, row.label.as_str(), row.detail.as_deref()))
+                .collect::<Vec<_>>(),
+            [("instance", "neural 1", Some("project")), ("instance", "neural 2", Some("Kit A"))]
+        );
+        let missing = &loaded[1];
+        assert_eq!((missing.kind, missing.label.as_str()), ("orphan", "thing (package gone/pkg missing)"));
+        assert_eq!(missing.instance_count, 1);
+        assert_eq!(missing.children[0].detail.as_deref(), Some("project · not loaded"));
+        assert!(missing.kinds.is_empty(), "a missing package offers no New");
+
+        // The Installed tier's module row carries the same badge; a sibling
+        // module without kinds gets none.
+        let package = &tree[2].children[0];
+        let row = |label: &str| {
+            package.children.iter().find(|row| row.label == label).expect(label).clone()
+        };
+        assert_eq!(row("variable-reset.lisp").instance_count, 2);
+        assert_eq!(row("other.lisp").instance_count, 0);
+        assert!(row("other.lisp").kinds.is_empty());
+
+        // A search hit on the module keeps all its instance rows.
+        let filtered = filter_package_tree(&tree, "variable");
+        assert_eq!(filtered[2].children[0].children[0].children.len(), 2);
+
+        let Value::List(rows) = package_tree_to_value(&tree) else {
+            panic!("tree value is a list");
+        };
+        let get = |item: &Value, key: &str| -> Option<Value> {
+            let Value::Map(map) = item else { return None };
+            map.get(key).map(|value| value.borrow().clone())
+        };
+        let module_value = rows[1].borrow().clone();
+        assert_eq!(get(&module_value, "badge"), Some(Value::Number(2.0)));
+        assert_eq!(get(&module_value, "instance-count"), Some(Value::Number(2.0)));
+        assert_eq!(get(&module_value, "status-icon"), Some(Value::Keyword("check".into())));
+        let Some(Value::List(children)) = get(&module_value, "children") else {
+            panic!("the module row expands to its instances");
+        };
+        let second = children[1].borrow().clone();
+        assert_eq!(get(&second, "kind"), Some(Value::String("instance".into())));
+        assert_eq!(get(&second, "instance-id"), Some(Value::Number(2.0)));
+        assert_eq!(get(&second, "owner-rack"), Some(Value::Number(9.0)));
+        assert_eq!(get(&second, "name"), Some(Value::String("instance:2".into())));
+        // No badge at zero.
+        annotate_package_kinds(&mut tree, &kinds, &[]);
+        let Value::List(rows) = package_tree_to_value(&tree) else { panic!() };
+        let module_value = rows[1].borrow().clone();
+        assert_eq!(get(&module_value, "badge"), None);
+        assert_eq!(get(&module_value, "instance-count"), Some(Value::Number(0.0)));
+
+        assert_eq!(detach_confirm_message("alez/neural", 3), "Detach alez/neural and delete its 3 instances?");
+        assert_eq!(detach_confirm_message("alez/neural", 1), "Detach alez/neural and delete its instance?");
         std::fs::remove_dir_all(root).unwrap();
     }
 

@@ -8,6 +8,8 @@ mod rack_sequencer_restore_tests;
 mod graph_visualization_ui_tests;
 #[path = "graph_node_notes_ui_tests.rs"]
 mod graph_node_notes_ui_tests;
+#[path = "instance_views_ui_tests.rs"]
+mod instance_views_ui_tests;
 #[path = "custom_ui_scope_tests.rs"]
 mod custom_ui_scope_tests;
 #[path = "rack_view_tests.rs"]
@@ -3693,6 +3695,178 @@ mod solo_binding_tests;
         }
         let rendered = render_layout_cells(&layout, 90, 70);
         assert!(rendered.contains("my.euclid"), "module row should render visibly: {rendered}");
+    }
+
+    #[test]
+    fn metal_seq_browser_packages_tab_instance_rows_menus_and_double_click() {
+        let mut editor = browser_editor_on_instrument_tab();
+        let items = editor.runtime_mut().eval_str(r#"
+            (list (dict :kind "header" :label "Loaded" :tier "loaded")
+                  (dict :kind "module" :label "alez.neural.variable-reset"
+                        :module "alez.neural.variable-reset" :tier "installed"
+                        :path "/pk/alez.neural/src/variable-reset.lisp"
+                        :attached? true :always? false :read-only? true
+                        :status-icon :check :badge 2 :instance-count 2
+                        :kinds (list (dict :id "alez/neural:neural" :name "neural"))
+                        :children (list
+                          (dict :kind "instance" :label "neural 1" :detail "project"
+                                :name "instance:1" :instance-id 1 :kind-id "alez/neural:neural"
+                                :owner "project" :owner-rack nil :registered? true)
+                          (dict :kind "instance" :label "neural 2" :detail "Kit A"
+                                :name "instance:2" :instance-id 2 :kind-id "alez/neural:neural"
+                                :owner "Kit A" :owner-rack 9 :registered? true))))
+        "#).unwrap().unwrap();
+        let tree_items = items.clone();
+        editor
+            .runtime_mut()
+            .register_native("seq-package-tree", move |_args, _ctx| Ok(tree_items.clone()));
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "groups",
+            test_list(vec![
+                map_value([
+                    ("id", Value::Number(9.0)),
+                    ("name", Value::String("Kit A".into())),
+                    ("rack", Value::Bool(true)),
+                ]),
+                map_value([
+                    ("id", Value::Number(11.0)),
+                    ("name", Value::String("Kit B".into())),
+                    ("rack", Value::Bool(true)),
+                ]),
+            ]),
+        );
+        editor.runtime_mut().eval_str("(set! sbrowser-tab \"packages\")").unwrap();
+        editor.runtime_mut().eval_str("(eseq.browser/refresh-buffer)").unwrap();
+        editor.refresh_runtime_side_effects();
+        editor.set_active_buffer(browser_id(&editor));
+        editor.set_layout_viewport(90, 70);
+        let layout = editor.widget_layout().expect("packages browser layout");
+        let tree = find_layout_node_by_stable_key_suffix(&layout, "/packages-tab-tree").unwrap();
+        assert_eq!(
+            tree.props.get("activate-parents"),
+            Some(&Value::Bool(true)),
+            "a module row with instances still reaches on-activate"
+        );
+        editor.drain_host_commands();
+
+        fn commands(editor: &mut Editor) -> Vec<(String, String)> {
+            editor
+                .drain_host_commands()
+                .into_iter()
+                .filter_map(|command| match command {
+                    eseqlisp::host::HostCommand::Custom { name, payload } => {
+                        Some((name, eseqlisp::vm::format_lisp_value(&payload)))
+                    }
+                    _ => None,
+                })
+                .collect()
+        }
+        let module = "(nth items 1)";
+        let first = "(nth (get (nth items 1) :children) 0)";
+        let second = "(nth (get (nth items 1) :children) 1)";
+        editor.runtime_mut().set_global_value("items", items.clone());
+        let eval = |editor: &mut Editor, source: &str| {
+            editor.runtime_mut().eval_str(source).unwrap_or_else(|error| panic!("{source}: {error:?}"))
+        };
+
+        // Double-click: an instance opens its tab; a module with instances
+        // only toggled (its first click); a one-kind module with none creates
+        // the first; a module without kinds attaches.
+        eval(&mut editor, &format!("(eseq.browser/activate-package-item {first})"));
+        let sent = commands(&mut editor);
+        assert_eq!(sent.len(), 1, "{sent:?}");
+        assert_eq!(sent[0].0, "instance-open");
+        assert!(sent[0].1.contains(":id 1"), "{sent:?}");
+        // A placeholder row has no view: double-click only explains, like
+        // its menu, which has no Open.
+        eval(
+            &mut editor,
+            "(eseq.browser/activate-package-item
+               (dict :kind \"instance\" :label \"neural 3\" :instance-id 3 :registered? false))",
+        );
+        assert!(commands(&mut editor).is_empty(), "a placeholder row sends no instance-open");
+        eval(&mut editor, &format!("(eseq.browser/activate-package-item {module})"));
+        assert!(commands(&mut editor).is_empty(), "a parent row's double-click is its toggle");
+        eval(
+            &mut editor,
+            "(eseq.browser/activate-package-item
+               (dict :kind \"module\" :module \"alez.neural.variable-reset\" :instance-count 0
+                     :kinds (list (dict :id \"alez/neural:neural\" :name \"neural\"))))",
+        );
+        let sent = commands(&mut editor);
+        assert_eq!(sent[0].0, "packages-new-instance");
+        assert!(sent[0].1.contains("alez/neural:neural") && sent[0].1.contains("alez.neural.variable-reset"));
+        assert!(!sent[0].1.contains("group-id"), "{sent:?}");
+        eval(&mut editor, "(eseq.browser/activate-package-item (dict :kind \"module\" :module \"my.euclid\"))");
+        assert_eq!(commands(&mut editor)[0].0, "packages-attach");
+
+        let menu_labels = |editor: &mut Editor, target: &str| -> Vec<String> {
+            editor
+                .runtime_mut()
+                .eval_str(&format!(
+                    "(do (eseq.browser/open-package-menu (dict :item {target} :col 1 :row 1))
+                         (map (lambda (action) (get action :label)) (eseq.browser/package-menu-actions)))"
+                ))
+                .unwrap()
+                .map(|value| match value {
+                    Value::List(labels) => labels
+                        .iter()
+                        .map(|label| match &*label.borrow() {
+                            Value::String(label) => label.clone(),
+                            other => panic!("label {other:?}"),
+                        })
+                        .collect(),
+                    other => panic!("labels {other:?}"),
+                })
+                .unwrap()
+        };
+        assert_eq!(
+            menu_labels(&mut editor, module),
+            ["New neural", "Remove from Project", "Always Load", "View Source", "Copy to Local"]
+        );
+        assert_eq!(
+            menu_labels(&mut editor, first),
+            ["Open", "Rename", "Duplicate", "Move to Kit A", "Move to Kit B", "Delete"]
+        );
+        assert_eq!(
+            menu_labels(&mut editor, second),
+            ["Open", "Rename", "Duplicate", "Move to Kit B", "Give back to project", "Delete"],
+            "a rack-owned instance moves to the other racks or back to the project"
+        );
+
+        let select = |editor: &mut Editor, target: &str, label: &str| {
+            editor
+                .runtime_mut()
+                .eval_str(&format!(
+                    "(do (eseq.browser/open-package-menu (dict :item {target} :col 1 :row 1))
+                         (eseq.browser/select-package-menu-action
+                           (nth (filter (lambda (action) (= (get action :label) \"{label}\"))
+                                  (eseq.browser/package-menu-actions)) 0)))"
+                ))
+                .unwrap_or_else(|error| panic!("{label}: {error:?}"));
+            commands(editor)
+        };
+        let sent = select(&mut editor, second, "Give back to project");
+        assert_eq!(sent[0].0, "instance-move");
+        assert!(sent[0].1.contains(":id 2") && !sent[0].1.contains("group-id"), "{sent:?}");
+        let sent = select(&mut editor, first, "Move to Kit B");
+        assert!(sent[0].1.contains(":group-id 11"), "{sent:?}");
+        assert_eq!(select(&mut editor, first, "Duplicate")[0].0, "instance-duplicate");
+        assert_eq!(select(&mut editor, first, "Delete")[0].0, "instance-delete");
+        assert_eq!(select(&mut editor, first, "Open")[0].0, "instance-open");
+        assert_eq!(select(&mut editor, module, "New neural")[0].0, "packages-new-instance");
+        let sent = select(&mut editor, module, "Remove from Project");
+        assert_eq!(sent[0].0, "packages-detach", "the host asks before deleting instances");
+
+        // Rename edits inline, then commits through instance-rename.
+        assert!(select(&mut editor, first, "Rename").is_empty());
+        editor.runtime_mut().eval_str("(eseq.browser/refresh-buffer)").unwrap();
+        editor.refresh_runtime_side_effects();
+        let layout = editor.widget_layout().expect("layout with the rename field");
+        assert!(find_layout_node_by_stable_key_suffix(&layout, "/instance-rename-name").is_some());
+        let rendered = render_layout_cells(&layout, 90, 70);
+        assert!(rendered.contains("alez.neural.variable-reset"), "{rendered}");
     }
 
     #[test]
@@ -16514,6 +16688,11 @@ mod solo_binding_tests;
             1, vec![default_empty_effect_chain()])));
         sequencer::lisp_host::register_scene_slot_authoring_natives(
             editor.runtime_mut(), scene_state);
+        // The rack menu's kind picker (instance-kinds spec §8.3); no
+        // package catalog here, so no kinds unless a test registers some.
+        editor.runtime_mut().register_native("seq-instance-kinds", |_args, _ctx| {
+            Ok(test_list(vec![]))
+        });
         editor.runtime_mut().register_native("seq-arrangement-pattern", |args, _ctx| {
             Ok(map_value(vec![
                 ("pattern-id", args.get(1).filter(|v| !matches!(v, Value::Nil)).cloned()
@@ -33081,6 +33260,42 @@ mod solo_binding_tests;
             menu_action_ids(&mut editor, 8.0),
             vec!["rename", "convert-to-clips", "export-kit", "ungroup"],
         );
+
+        // The kind picker (instance-kinds spec §8.3): one "New <kind> in
+        // rack" per kind, creating a rack-owned instance.
+        editor.runtime_mut().register_native("seq-instance-kinds", |_args, _ctx| {
+            Ok(test_list(vec![map_value([
+                ("id", Value::String("alez/neural:neural".into())),
+                ("name", Value::String("neural".into())),
+                ("module", Value::String("alez.neural.variable-reset".into())),
+                ("registered?", Value::Bool(false)),
+            ])]))
+        });
+        assert_eq!(
+            menu_action_ids(&mut editor, 8.0),
+            vec!["rename", "convert-to-clips", "new-rack-instance", "export-kit", "ungroup"],
+        );
+        editor.drain_host_commands();
+        editor.runtime_mut().eval_str(
+            "(eseq.mixer/select-track-menu-action
+               (nth (filter (lambda (action) (= (get action :id) :new-rack-instance))
+                      (eseq.mixer/track-context-menu-actions)) 0))",
+        ).expect("select New neural in rack");
+        let commands = editor.drain_host_commands();
+        match &commands[..] {
+            [eseqlisp::host::HostCommand::Custom { name, payload }] => {
+                assert_eq!(name, "packages-new-instance");
+                let Value::Map(payload) = payload else { panic!("{payload:?}") };
+                let field = |key: &str| payload.get(key).map(|value| value.borrow().clone());
+                assert_eq!(field("group-id"), Some(Value::Number(8.0)));
+                assert_eq!(field("kind"), Some(Value::String("alez/neural:neural".into())));
+                assert_eq!(field("module"), Some(Value::String("alez.neural.variable-reset".into())));
+            }
+            other => panic!("expected one packages-new-instance command, got {other:?}"),
+        }
+        editor.runtime_mut().register_native("seq-instance-kinds", |_args, _ctx| {
+            Ok(test_list(vec![]))
+        });
 
         editor.drain_host_commands();
         editor.runtime_mut().eval_str(
@@ -51670,6 +51885,11 @@ mod solo_binding_tests;
                     Ok(Value::Bool(true))
                 });
         }
+        // The rack menu's kind picker (instance-kinds spec §8.3); no package
+        // catalog in this harness, so no kinds.
+        editor
+            .runtime_mut()
+            .register_native("seq-instance-kinds", |_args, _ctx| Ok(Value::List(Vec::new())));
 
         let selected_tracks = Arc::new(Mutex::new(std::collections::HashSet::from([0usize])));
         for name in [

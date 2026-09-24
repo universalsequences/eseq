@@ -33,6 +33,33 @@ pub struct PackageManifest {
     pub entry: Option<String>,
     #[serde(default, alias = "assets")]
     pub external_assets: Vec<ExternalAsset>,
+    /// Instance kinds this package's modules define with `def-kind`
+    /// (instance-kinds spec §8.1). Declared here so the Packages tab can offer
+    /// `New <kind>` before any code is evaluated.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub kinds: Vec<PackageKind>,
+}
+
+/// One `kinds` entry of a package manifest: a kind name and the module whose
+/// `def-kind` defines it. The kind id is `<package name>:<name>`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PackageKind {
+    pub name: String,
+    pub module: String,
+    /// The graph `def-sequencer` name `module` published before it declared
+    /// this kind, if it did. Project migration (instance-kinds spec §10)
+    /// turns a project-owned `(import module)` into one instance of the kind
+    /// that keeps that sequencer's id (`stable_sequencer_id(name)`), so its
+    /// saved overrides still match. Absent: the kind name is assumed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub legacy_sequencer: Option<String>,
+}
+
+impl PackageManifest {
+    /// `<package name>:<kind name>`, the id instances of a declared kind carry.
+    pub fn kind_id(&self, kind: &str) -> String {
+        format!("{}:{kind}", self.name)
+    }
 }
 
 /// The content directories a package may carry beside `src/`. Each mirrors
@@ -229,6 +256,14 @@ impl PackageCatalog {
             .collect()
     }
 
+    /// The installed package whose owned namespace contains `module`.
+    pub fn package_for_module(&self, module: &str) -> Option<&InstalledPackage> {
+        self.ordered().find(|package| {
+            module == package.module_prefix
+                || module.starts_with(&format!("{}.", package.module_prefix))
+        })
+    }
+
     /// Installed packages in load order: earlier tiers first, then by name.
     pub fn ordered(&self) -> impl Iterator<Item = &InstalledPackage> {
         self.load_order
@@ -271,6 +306,35 @@ impl InstalledPackage {
                     path: root.join("manifest.json"),
                     message: format!(
                         "entry module `{entry}` is outside owned namespace `{module_prefix}`"
+                    ),
+                });
+            }
+        }
+        let mut kind_names = BTreeSet::new();
+        for kind in &manifest.kinds {
+            let valid_name = !kind.name.is_empty()
+                && kind
+                    .name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'));
+            if !valid_name {
+                return Err(PackageError {
+                    path: manifest_path.clone(),
+                    message: format!("invalid kind name `{}`", kind.name),
+                });
+            }
+            if !kind_names.insert(kind.name.clone()) {
+                return Err(PackageError {
+                    path: manifest_path.clone(),
+                    message: format!("kind `{}` is declared twice", kind.name),
+                });
+            }
+            if !kind.module.starts_with(&format!("{module_prefix}.")) {
+                return Err(PackageError {
+                    path: manifest_path.clone(),
+                    message: format!(
+                        "kind `{}` module `{}` is outside owned namespace `{module_prefix}`",
+                        kind.name, kind.module
                     ),
                 });
             }
@@ -524,6 +588,50 @@ mod tests {
             catalog.module_roots(),
             vec![(package.join("src"), "alec.acid-tools".into())]
         );
+    }
+
+    #[test]
+    fn manifest_kinds_parse_resolve_and_validate() {
+        let root = temp_root("kinds");
+        let package = root.join("neural");
+        fs::create_dir_all(package.join("src")).unwrap();
+        fs::write(package.join("src/seq.lisp"), "(module alec.neural.seq)").unwrap();
+        fs::write(
+            package.join("manifest.json"),
+            r#"{"name":"alec/neural","version":"1","entry":"alec.neural.seq",
+                "kinds":[{"name":"neural","module":"alec.neural.seq"}]}"#,
+        )
+        .unwrap();
+        let catalog = PackageCatalog::scan(&root).expect("kinds manifest is valid");
+        let installed = catalog
+            .package_for_module("alec.neural.seq")
+            .expect("module resolves to its package");
+        assert_eq!(installed.manifest.name, "alec/neural");
+        assert_eq!(
+            installed.manifest.kinds,
+            vec![PackageKind {
+                name: "neural".into(),
+                module: "alec.neural.seq".into(),
+                legacy_sequencer: None,
+            }]
+        );
+        assert_eq!(installed.manifest.kind_id("neural"), "alec/neural:neural");
+        assert!(catalog.package_for_module("alec.neuralx.seq").is_none());
+
+        // A kind module outside the owned namespace, or a duplicate kind,
+        // rejects the manifest.
+        for kinds in [
+            r#"[{"name":"neural","module":"bob.other.seq"}]"#,
+            r#"[{"name":"neural","module":"alec.neural.seq"},{"name":"neural","module":"alec.neural.seq"}]"#,
+            r#"[{"name":"a:b","module":"alec.neural.seq"}]"#,
+        ] {
+            fs::write(
+                package.join("manifest.json"),
+                format!(r#"{{"name":"alec/neural","version":"1","kinds":{kinds}}}"#),
+            )
+            .unwrap();
+            assert!(InstalledPackage::load(&package).is_err(), "{kinds} must be rejected");
+        }
     }
 
     #[test]

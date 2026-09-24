@@ -917,6 +917,25 @@ fn apply_capture_macro_host_commands(
             applied = true;
             continue;
         }
+        // Instance lifecycle (instance-kinds spec §5), so a fixture that
+        // imports a kind's module can show its instances (Packages tab rows,
+        // badges) and render their views: the same path as the live host
+        // command (records, view buffers, tabs, `:on-create`). A failure is
+        // the setup's failure.
+        if name.starts_with("instance-") {
+            if name != "instance-open" {
+                let created_before = crate::host_commands::instances::instance_ids(app);
+                crate::host_commands::instances::apply_instance_command(&name, &payload, app)
+                    .map_err(|error| format!("capture setup {name} failed: {error}"))?;
+                crate::host_commands::instances::after_instance_command(
+                    &name, &created_before, app, editor,
+                );
+                applied = true;
+            } else {
+                crate::host_commands::instances::apply_on_editor(&name, payload, app, editor);
+            }
+            continue;
+        }
         // Sound-palette open/close so fixtures can capture the palette modal.
         if let Some(result) =
             crate::host_commands::apply_sound_palette_view_command(&name, &payload, app)
@@ -1311,6 +1330,13 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
         true,
     );
     publish_capture_sound_glyphs(&mut editor)?;
+    // The live tick publishes `SEQ.instances`; capture has no tick.
+    let mut instances_fingerprint = u64::MAX;
+    if let Some(value) =
+        crate::host_commands::instances::instances_value_if_changed(&app, &mut instances_fingerprint)
+    {
+        editor.runtime_mut().set_reactive("SEQ", "instances", value);
+    }
     editor.runtime_mut().run_reactive_cycle();
     editor.refresh_runtime_side_effects();
 

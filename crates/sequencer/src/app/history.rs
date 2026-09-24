@@ -62,6 +62,7 @@ pub enum EditPatch {
     SceneStructure(SceneStructurePatch),
     Arrangement(ArrangementStructurePatch),
     BusGroupStructure(BusGroupStructurePatch),
+    InstanceStructure(InstanceStructurePatch),
     MacroConfiguration(MacroConfigurationPatch),
     TransportParams(TransportParamsPatch),
     BarTranspose(BarTransposePatch),
@@ -113,6 +114,119 @@ pub struct BusGroupStructureState {
     pub buses: Vec<BusStructureState>,
     pub groups: Vec<GroupStructureState>,
     pub scenes: crate::sequencer::ProjectScenes,
+}
+
+/// The project's kind instances (docs/instance-kinds-spec.md §5) plus, for
+/// edits that touch graph overrides (delete/duplicate/move/kit load), the
+/// overrides keyed by the instances the edit touched. Create and rename
+/// leave `overrides` empty.
+#[derive(Clone, Debug)]
+pub struct InstanceStructureState {
+    pub instances: crate::project::ProjectInstances,
+    pub overrides: Option<InstanceOverridesState>,
+    /// Whether the evaluated project scratch imports a module, for an edit
+    /// that also changes that import record (detaching a package together
+    /// with its instances, spec §8.3). Replay adds or removes just that one
+    /// import in the CURRENT evaluated scratch, so scratch edits made since
+    /// (other attaches, evaluated code) survive undo/redo. `None` leaves the
+    /// scratch alone.
+    pub scratch_import: Option<ScratchImportState>,
+}
+
+/// Where one list of graph overrides lives in the scene bank: a scene's own
+/// list, or one clip of a rack's bank.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GraphOverrideSite {
+    Scene(SceneId),
+    Clip { group_id: u64, clip_id: crate::sequencer::RackClipId },
+}
+
+/// The graph overrides keyed by `ids`, wherever they live (every scene's own
+/// list and every clip of every rack bank, pointed at or not). Replay splices
+/// exactly these back: every entry keyed by one of `ids` is dropped and the
+/// recorded ones re-inserted at their site, so overrides of every OTHER
+/// sequencer, which graph edits change outside history, are left alone.
+#[derive(Clone, Debug, Default)]
+pub struct InstanceOverridesState {
+    pub ids: Vec<u64>,
+    pub sites: Vec<(GraphOverrideSite, Vec<crate::graph::ProjectGraphOverrides>)>,
+}
+
+impl InstanceOverridesState {
+    pub fn retained_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + self.ids.capacity() * std::mem::size_of::<u64>()
+            + self
+                .sites
+                .iter()
+                .map(|(_, graphs)| {
+                    std::mem::size_of::<GraphOverrideSite>()
+                        + graphs
+                            .iter()
+                            .map(|graph| {
+                                std::mem::size_of::<crate::graph::ProjectGraphOverrides>()
+                                    + graph.sequencer_name.capacity()
+                                    + graph.node_intrinsics.len() * 256
+                                    + graph.node_params.len() * 64
+                                    + graph.edge_params.len() * 64
+                            })
+                            .sum::<usize>()
+                })
+                .sum::<usize>()
+    }
+}
+
+/// One module's import presence in the evaluated project scratch.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ScratchImportState {
+    pub module: String,
+    pub present: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct InstanceStructurePatch {
+    pub before: InstanceStructureState,
+    pub after: InstanceStructureState,
+}
+
+impl EditPatch {
+    /// The scratch import records replaying this entry (undo: the
+    /// before-states, redo: the after-states) restores, so the host can
+    /// mirror them into the draft scratch buffer and the module's
+    /// `override` toggle, which live outside history.
+    pub fn replayed_scratch_imports(&self, undo: bool) -> Vec<ScratchImportState> {
+        match self {
+            EditPatch::InstanceStructure(patch) => {
+                let target = if undo { &patch.before } else { &patch.after };
+                target.scratch_import.iter().cloned().collect()
+            }
+            EditPatch::Composite(patches) => {
+                let mut imports: Vec<_> =
+                    patches.iter().flat_map(|patch| patch.replayed_scratch_imports(undo)).collect();
+                // Composite children replay in reverse on undo.
+                if undo {
+                    imports.reverse();
+                }
+                imports
+            }
+            _ => Vec::new(),
+        }
+    }
+}
+
+impl InstanceStructurePatch {
+    pub fn retained_bytes(&self) -> usize {
+        fn state_bytes(state: &InstanceStructureState) -> usize {
+            state.instances.list.iter().map(|instance| {
+                std::mem::size_of::<crate::project::ProjectInstance>()
+                    + instance.kind.capacity()
+                    + instance.label.capacity()
+            }).sum::<usize>()
+                + state.overrides.as_ref().map(InstanceOverridesState::retained_bytes).unwrap_or(0)
+                + state.scratch_import.as_ref().map(|import| import.module.capacity()).unwrap_or(0)
+        }
+        std::mem::size_of::<Self>() + state_bytes(&self.before) + state_bytes(&self.after)
+    }
 }
 
 #[derive(Clone, Debug)]

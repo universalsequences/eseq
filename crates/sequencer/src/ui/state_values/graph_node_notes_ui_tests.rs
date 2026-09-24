@@ -1,8 +1,8 @@
 use super::*;
 use sequencer::graph::{GraphSoundingNote, GraphVisualizationSnapshot};
 
-/// The alez.neural variable-reset panel, loaded as the package, with its
-/// graph published into `state`.
+/// A `neural` instance's panel (alez/neural), rendered in its host-created
+/// buffer, with the instance's graph published into `state`.
 fn var_reset_panel_editor() -> (Arc<SequencerState>, Editor, u64) {
     let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
     let mut editor = full_grid_editor_for_scroll_tests();
@@ -10,26 +10,13 @@ fn var_reset_panel_editor() -> (Arc<SequencerState>, Editor, u64) {
     assert!(errors.is_empty(), "{errors:?}");
     editor.runtime_mut().set_scoped_module_load_path(roots);
     sequencer::lisp_host::register_graph_authoring_natives(editor.runtime_mut(), Arc::clone(&state));
-    let published_state = Arc::clone(&state);
-    editor.runtime_mut().register_native("def-sequencer", move |args, ctx| {
-        let published = sequencer::lisp_host::published_sequencer_from_def_args_in_module(
-            &args, ctx.current_module().as_deref(),
-        )?;
-        let id = published.id;
-        published_state.publish_sequencer(published);
-        Ok(Value::Number(id as f64))
-    });
     editor.runtime_mut().set_reactive("SEQ", "graph-visualizations", test_list(vec![]));
     editor.runtime_mut().set_reactive("SEQ", "track-active-notes", test_list(vec![]));
-    let overlays = editor.snapshot_file_backed_sources();
-    let report = editor.runtime_mut()
-        .eval_source_transactional(None, "(import alez.neural.variable-reset)", overlays);
-    assert!(report.success, "{:?}", report.diagnostics);
-    editor.process_lisp_reload_report(report);
-    editor.runtime_mut().eval_str("(set-layout (list :buf \"*var-reset*\" :hide-status true))").unwrap();
+    let buffer = super::graph_visualization_ui_tests::neural_instance_view(&state, &mut editor, 1, "neural 1");
+    editor.runtime_mut().eval_str(&format!("(set-layout (list :buf \"{buffer}\" :hide-status true))")).unwrap();
     editor.runtime_mut().run_reactive_cycle();
     editor.refresh_runtime_side_effects();
-    let id = editor.buffers.iter().find(|item| item.name == "*var-reset*").expect("*var-reset*").id;
+    let id = editor.buffers.iter().find(|item| item.name == buffer).expect(&buffer).id;
     editor.set_active_buffer(id);
     editor.set_layout_viewport(240, 100);
     editor.runtime_mut().run_reactive_cycle();

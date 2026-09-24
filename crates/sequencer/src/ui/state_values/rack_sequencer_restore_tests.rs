@@ -13,17 +13,14 @@ fn rack_project_editor() -> (app::App, Editor) {
         }]}
     }])).unwrap();
     app.state.set_rack_memberships(app.rack_memberships());
-    app.publish_rack_owner_modules();
 
     let mut editor = full_grid_editor_for_scroll_tests();
     let (roots, errors) = sequencer::app_paths::app_paths().module_load_roots();
     assert!(errors.is_empty(), "{errors:?}");
     editor.runtime_mut().set_scoped_module_load_path(roots);
     sequencer::lisp_host::register_graph_authoring_natives(editor.runtime_mut(), Arc::clone(&state));
-    editor.runtime_mut().register_native("def-sequencer", move |args, ctx| {
-        let published = sequencer::lisp_host::published_sequencer_from_def_args_in_module(
-            &args, ctx.current_module().as_deref(),
-        )?;
+    editor.runtime_mut().register_native("def-sequencer", move |args, _ctx| {
+        let published = sequencer::lisp_host::published_sequencer_from_def_args(&args)?;
         let id = published.id;
         state.publish_sequencer(published);
         Ok(Value::Number(id as f64))
@@ -95,7 +92,6 @@ fn rack_member_churn_keeps_graph_tab_node_rows_consistent(clips: bool) {
         }]}
     }])).unwrap();
     app.state.set_rack_memberships(app.rack_memberships());
-    app.publish_rack_owner_modules();
 
     let mut editor = full_grid_editor_for_scroll_tests();
     let (roots, errors) = sequencer::app_paths::app_paths().module_load_roots();
@@ -103,10 +99,8 @@ fn rack_member_churn_keeps_graph_tab_node_rows_consistent(clips: bool) {
     editor.runtime_mut().set_scoped_module_load_path(roots);
     sequencer::lisp_host::register_graph_authoring_natives(editor.runtime_mut(), Arc::clone(&state));
     let def_state = Arc::clone(&state);
-    editor.runtime_mut().register_native("def-sequencer", move |args, ctx| {
-        let published = sequencer::lisp_host::published_sequencer_from_def_args_in_module(
-            &args, ctx.current_module().as_deref(),
-        )?;
+    editor.runtime_mut().register_native("def-sequencer", move |args, _ctx| {
+        let published = sequencer::lisp_host::published_sequencer_from_def_args(&args)?;
         let id = published.id;
         def_state.publish_sequencer(published);
         Ok(Value::Number(id as f64))

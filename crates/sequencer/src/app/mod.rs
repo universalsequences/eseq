@@ -42,13 +42,18 @@ mod fx_chain;
 mod graph;
 pub(crate) use graph::latency::LatencyPlan;
 mod hooks;
+mod instances;
+pub use instances::{
+    import_forms, import_modules, legacy_import_module, migrate_legacy_kind_sources,
+    source_forms, source_with_import, source_with_leading_import, source_without_import,
+    INSTANCE_KINDS_PROJECT_VERSION,
+};
 pub mod mixer_controls;
 mod params;
 mod projects;
 mod break_kits;
 mod rack_clips;
 mod rack_sequencers;
-pub use rack_sequencers::rack_sequencer_module;
 mod bus_outputs;
 pub mod pending_capture;
 pub mod retrospective;
@@ -263,6 +268,9 @@ struct PendingProjectLoad {
     fallback_samples: usize,
     strict_samples: bool,
     phase: PendingProjectLoadPhase,
+    /// Load-time migration notes (instance-kinds spec §10), appended to the
+    /// open status.
+    migration_notes: Vec<String>,
 }
 
 /// Immutable audio asset interned for the lifetime of one pending project load.
@@ -931,6 +939,8 @@ pub struct App {
     pub track_collapsed: Vec<bool>,
     pub buses: Vec<BusChannelState>,
     pub groups: Vec<crate::project::ProjectTrackGroup>,
+    /// Host-owned instances of package kinds (docs/instance-kinds-spec.md §5).
+    pub instances: crate::project::ProjectInstances,
     /// Engaged sequenced mute/solo holds keyed by resolved target
     /// (docs/jaki-mixer-control-routes-spec.md §3); values are release samples.
     pub(crate) mixer_control_holds: crate::mixer_control::MixerControlHolds<mixer_controls::MixerControlHoldKey>,
@@ -2327,7 +2337,6 @@ impl App {
         // is a group-topology change, which is exactly when rack-owned graph
         // sequencers' member routes need re-resolving.
         self.state.set_rack_memberships(self.rack_memberships());
-        self.publish_rack_owner_modules();
         let keys = &self.state.runtime.rack_choke_keys;
         for key in keys.iter() {
             key.store(0, Ordering::Release);
@@ -2448,6 +2457,7 @@ impl App {
             track_collapsed: Vec::new(),
             buses: BusChannelState::default_buses(),
             groups: Vec::new(),
+            instances: crate::project::ProjectInstances::default(),
             mixer_control_holds: crate::mixer_control::MixerControlHolds::default(),
             sampler_paths: Vec::new(),
             rack_selected_slots: Vec::new(),

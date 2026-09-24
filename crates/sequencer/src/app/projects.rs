@@ -978,6 +978,7 @@ impl App {
     pub fn start_new_project(&mut self) {
         self.editor.pending_project_load = None;
         self.groups.clear();
+        self.replace_instances(crate::project::ProjectInstances::default());
         self.publish_rack_choke_runtime();
         self.clear_project_arrangement_state();
 
@@ -1307,6 +1308,16 @@ impl App {
             })
             .map_err(|error| format!("Could not resolve project instrument id: {error}"))?;
         project.normalize_device_instances()?;
+        let migration_notes = super::instances::migrate_legacy_kind_sources(
+            project.version,
+            &mut project.groups,
+            &mut project.scratch,
+            &mut project.instances,
+            crate::lisp_host::declared_kinds_for_module,
+        );
+        for note in &migration_notes {
+            eprintln!("project-load: instance migration: {note}");
+        }
 
         self.editor.pending_project_load = Some(super::PendingProjectLoad {
             name: name.to_string(),
@@ -1318,6 +1329,7 @@ impl App {
             fallback_samples: 0,
             strict_samples: false,
             phase: super::PendingProjectLoadPhase::ClearExisting,
+            migration_notes,
         });
         Ok(())
     }
@@ -1853,7 +1865,8 @@ impl App {
         if roster.pads.iter().all(|pad| pad.modulator) {
             return Err("A kit needs at least one pad with a sound on it".to_string());
         }
-        let super::break_kits::CapturedKitContent { sequencers, clips, mut warnings } = content;
+        let super::break_kits::CapturedKitContent { sequencers, instances, clips, mut warnings } =
+            content;
         warnings.extend(roster.warnings.iter().cloned());
         // The rack's internal cables (§7.5), read before the pad captures
         // below, which snapshot the project.
@@ -1901,6 +1914,7 @@ impl App {
                 pads: kit_pads,
                 bus_chain,
                 sequencers,
+                instances,
                 mod_connections,
                 clips,
             },
@@ -2065,7 +2079,11 @@ impl App {
     }
 
     fn load_kit_as_rack_inner(&mut self, path: &Path) -> Result<(u64, Vec<String>), String> {
-        let kit = crate::project::load_kit_preset(path).map_err(|error| error.to_string())?;
+        let mut kit = crate::project::load_kit_preset(path).map_err(|error| error.to_string())?;
+        let migration_notes = super::break_kits::migrate_kit_sequencers(
+            &mut kit,
+            crate::lisp_host::declared_kinds_for_module,
+        );
         let fallback_name = path
             .file_stem()
             .and_then(|stem| stem.to_str())
@@ -2079,7 +2097,7 @@ impl App {
         if let Some(group) = self.groups.iter_mut().find(|group| group.id == group_id) {
             group.color = kit.color;
         }
-        let mut failures = Vec::new();
+        let mut failures = migration_notes;
         if let Some(chain) = &kit.bus_chain {
             if let Err(error) = self.restore_kit_bus_chain(bus.0, chain) {
                 failures.push(format!("bus effects: {error}"));
@@ -2117,10 +2135,17 @@ impl App {
                 }
             }
         }
-        // Break-kit payload (§7.3). The sequencer ids are re-derived for THIS
-        // rack and the clip overrides follow that map; the host evaluates each
-        // recorded source afterwards, because the App cannot run Lisp.
-        let id_map = self.register_kit_sequencers(group_id, &kit.sequencers, &mut failures);
+        // Break-kit payload (§7.3). Plain-script sequencer ids are re-derived
+        // for THIS rack, every instance gets a fresh id (instance-kinds spec
+        // §9), and the clip overrides follow that map; the host evaluates each
+        // recorded plain source afterwards, because the App cannot run Lisp.
+        let id_map = self.register_kit_sequencers(
+            group_id,
+            &kit.sequencers,
+            &kit.instances,
+            kit.clips.is_empty(),
+            &mut failures,
+        );
         if !kit.clips.is_empty() {
             if let Err(error) = self.install_kit_clips(group_id, kit.clips, &id_map) {
                 failures.push(format!("clips: {error}"));
@@ -2189,7 +2214,11 @@ impl App {
     /// and new notes receive new, empty member lanes. Undo restores the exact
     /// previous rack topology and every member instrument.
     pub fn load_kit_onto_rack(&mut self, group_id: u64, path: &Path) -> Result<String, String> {
-        let kit = crate::project::load_kit_preset(path).map_err(|error| error.to_string())?;
+        let mut kit = crate::project::load_kit_preset(path).map_err(|error| error.to_string())?;
+        let migration_notes = super::break_kits::migrate_kit_sequencers(
+            &mut kit,
+            crate::lisp_host::declared_kinds_for_module,
+        );
         let fallback_name = path
             .file_stem()
             .and_then(|stem| stem.to_str())
@@ -2240,6 +2269,9 @@ impl App {
             for sequencer in self.rack_sequencers(group_id) {
                 self.state.unpublish_sequencer_by_id(sequencer.sequencer_id);
             }
+            // The rack's instances go too, overrides included (recorded, so
+            // the audition's one undo entry brings them back).
+            self.delete_rack_instances_recorded(group_id)?;
             let mut desired = Vec::with_capacity(kit.pads.len());
             for pad in kit.pads {
                 let pad_name = if pad.name.trim().is_empty() {
@@ -2354,9 +2386,14 @@ impl App {
             // whole clip bank, in this same undo entry (§7.3 decision). A kit
             // with no clips of its own leaves the bank alone, which is what
             // keeps every pre-feature `.kit` file behaving exactly as before.
-            let mut notes = Vec::new();
-            let id_map =
-                self.register_kit_sequencers(group_id, &kit.sequencers, &mut notes);
+            let mut notes = migration_notes.clone();
+            let id_map = self.register_kit_sequencers(
+                group_id,
+                &kit.sequencers,
+                &kit.instances,
+                kit.clips.is_empty(),
+                &mut notes,
+            );
             if !kit.clips.is_empty() {
                 if let Err(error) = self.install_kit_clips(group_id, kit.clips, &id_map) {
                     notes.push(format!("clips: {error}"));
@@ -2459,6 +2496,8 @@ impl App {
             for track in removed {
                 self.delete_track_recorded(track)?;
             }
+            // The rack's instances die with it (instance-kinds spec §5).
+            self.delete_rack_instances_recorded(group_id)?;
             self.delete_group_recorded(group_id)?;
             crate::app::edit::squash_history_since(self, history_len, "Audition Sound on drum rack");
             self.track_registry.index_of(replacement_id)
@@ -3005,6 +3044,7 @@ impl App {
             },
             scene_cell_presence,
             scene_rack_clips,
+            instances: self.instances.clone(),
             take_pools,
             track_sounds,
             // Scene-independent per-track process slot rosters (eseq-53y7).
@@ -4431,6 +4471,7 @@ impl App {
             take_pools,
             track_sounds,
             track_lane_rosters,
+            instances,
         } = pending.project;
         let bank = pending.built_patterns;
         let bus_pattern_bank = pending.built_bus_patterns;
@@ -4858,6 +4899,10 @@ impl App {
         self.editor.scratch_buffer = scratch.buffer;
         self.editor.scratch_cursor = (scratch.cursor_row, scratch.cursor_col);
         self.editor.scratch_runtime = None;
+        // Instances before the scratch replays: their kinds register as the
+        // scratch imports the defining modules, and the UI publishes each
+        // instance once its kind is known (instance-kinds spec §5).
+        self.replace_instances(instances);
         self.state.set_scratch_source(evaluated_scratch);
         self.clear_project_authored_processes();
         self.clear_control_hooks();
@@ -4880,6 +4925,11 @@ impl App {
             format!("{status}; repaired {repaired_sidechains} sidechain effect route")
         } else {
             status
+        };
+        let status = if pending.migration_notes.is_empty() {
+            status
+        } else {
+            format!("{status}; {}", pending.migration_notes.join("; "))
         };
         eprintln!("project-load: finish complete status={status}");
         // Effect slots restore before the full track list settles, so any
@@ -6471,6 +6521,7 @@ mod tests {
     ) -> ProjectFile {
         ProjectFile {
             scene_rack_clips: Vec::new(),
+            instances: crate::project::ProjectInstances::default(),
             version: project::project_file_version(),
             name: "test".to_string(),
             bpm: 120,

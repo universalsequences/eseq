@@ -6405,14 +6405,11 @@ pub(crate) fn init_runtime(
         sequencer::lisp_host::DEF_SEQUENCER_SIGNATURE,
         sequencer::lisp_host::DEF_SEQUENCER_DOCS,
         sequencer::lisp_host::DEF_SEQUENCER_KEYWORDS.iter().copied(),
-        move |args, ctx| {
-            // A def-sequencer inside a module a drum rack owns publishes as
-            // that rack's instance, whoever imported the module (spec §5.1).
-            let module = ctx.current_module();
-            let published = sequencer::lisp_host::published_sequencer_from_def_args_in_module(
-                &args,
-                module.as_deref(),
-            )?;
+        move |args, _ctx| {
+            // Only a legacy rack scope (a plain script the host evaluates
+            // for a rack) makes a graph def-sequencer rack-owned; kind
+            // instances carry their owner as project data.
+            let published = sequencer::lisp_host::published_sequencer_from_def_args(&args)?;
             // The instance id is the handle every graph-* native accepts. It
             // is the only unambiguous reference once a rack owns a copy of a
             // script the project also runs (spec §5.2).
@@ -6430,6 +6427,11 @@ pub(crate) fn init_runtime(
     );
 
     register_song_natives(&mut runtime);
+
+    // `(set! self.label v)` on a kind instance is a rename: an undoable
+    // project edit the host applies, then pushes back into the record
+    // (instance-kinds spec §4).
+    runtime.route_instance_labels_to_host_command("instance-rename");
 
     let st_unpublish_sequencer = state.clone();
     let ui_ep_unpublish_sequencer = ui_epoch.clone();

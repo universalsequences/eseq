@@ -9,6 +9,7 @@ pub mod graph_authoring;
 pub mod graph_dsl;
 pub mod graph_manifest;
 pub mod graph_update;
+pub mod kinds;
 pub mod midi_fx;
 pub mod neural_natives;
 pub mod process_dsl_parse;

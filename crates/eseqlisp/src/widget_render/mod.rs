@@ -1624,6 +1624,7 @@ fn hash_value(value: &Value, hasher: &mut DefaultHasher) {
         }
         Value::Closure(idx, _) | Value::Function(idx) => idx.hash(hasher),
         Value::NodeRef(id) => id.hash(hasher),
+        Value::Instance(id) => id.hash(hasher),
         Value::ReactiveRef {
             namespace,
             field,

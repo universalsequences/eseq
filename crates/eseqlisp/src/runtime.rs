@@ -938,10 +938,17 @@ pub(crate) struct RuntimeBridgeState {
 
 pub(crate) type SharedBridgeState = Rc<RefCell<RuntimeBridgeState>>;
 
+/// Generation callback for [`NativeContext::invalidate_subscribed_reactive_fields`]:
+/// `Some(generation)` advances the field, `None` leaves it alone.
+pub type ReactiveFieldGeneration = Box<dyn FnMut(&str) -> Option<Value>>;
+
 pub struct NativeContext {
     shared: SharedBridgeState,
-    reactive_reads: Vec<ReactiveFieldKey>,
+    reactive_reads: Vec<(ReactiveFieldKey, Option<Value>)>,
     reactive_invalidations: Vec<(ReactiveFieldKey, Value)>,
+    namespace_invalidations: Vec<(String, ReactiveFieldGeneration)>,
+    reactive_sets: Vec<(String, String, Value)>,
+    instance_kinds: Vec<crate::vm::InstanceKindSchema>,
 }
 
 impl NativeContext {
@@ -950,14 +957,65 @@ impl NativeContext {
             shared,
             reactive_reads: Vec::new(),
             reactive_invalidations: Vec::new(),
+            namespace_invalidations: Vec::new(),
+            reactive_sets: Vec::new(),
+            instance_kinds: Vec::new(),
         }
+    }
+
+    /// Register (or re-register) an instance kind's `:state` schema and
+    /// `:view` in the calling VM once the native returns successfully
+    /// (`def-kind`, instance-kinds spec §3). A schema the VM rejects turns
+    /// the call into an error status.
+    pub fn register_instance_kind(&mut self, schema: crate::vm::InstanceKindSchema) {
+        self.instance_kinds.push(schema);
     }
 
     /// Inject a reactive dependency for the currently rendering effect.
     /// Calls made outside reactive rendering are intentionally inert.
     pub fn track_reactive_read(&mut self, namespace: impl Into<String>, field: impl Into<String>) {
         self.reactive_reads
-            .push(ReactiveFieldKey::new(namespace, field));
+            .push((ReactiveFieldKey::new(namespace, field), None));
+    }
+
+    /// Like [`Self::track_reactive_read`], but also states the generation the
+    /// read observed. When the host-owned source has no other reader yet, the
+    /// source adopts that generation, so the first later invalidation that
+    /// hands over the same generation dirties nothing. Hosts whose
+    /// generation is the resolved value itself get value-equality
+    /// suppression for free.
+    pub fn track_reactive_read_with_generation(
+        &mut self,
+        namespace: impl Into<String>,
+        field: impl Into<String>,
+        generation: Value,
+    ) {
+        self.reactive_reads
+            .push((ReactiveFieldKey::new(namespace, field), Some(generation)));
+    }
+
+    /// After the native returns, advance every currently subscribed field of a
+    /// host-owned namespace for which `generation` returns `Some`. Fields
+    /// whose generation is unchanged dirty nothing.
+    pub fn invalidate_subscribed_reactive_fields(
+        &mut self,
+        namespace: impl Into<String>,
+        generation: impl FnMut(&str) -> Option<Value> + 'static,
+    ) {
+        self.namespace_invalidations
+            .push((namespace.into(), Box::new(generation)));
+    }
+
+    /// The host-side equivalent of `(reactive-set namespace field value)`,
+    /// applied after the native returns. Only writable namespaces accept it.
+    pub fn reactive_set(
+        &mut self,
+        namespace: impl Into<String>,
+        field: impl Into<String>,
+        value: Value,
+    ) {
+        self.reactive_sets
+            .push((namespace.into(), field.into(), value));
     }
 
     /// Dirty effects which previously tracked this host-owned reactive source.
@@ -2071,10 +2129,29 @@ impl Runtime {
             shared.borrow_mut().current_native_module =
                 (module != crate::modules::IMPLICIT_MODULE).then(|| module.to_string());
             let mut ctx = NativeContext::new(shared.clone());
-            match f(args, &mut ctx) {
+            let result = f(args, &mut ctx);
+            // A read that failed still depended on its source: when the
+            // source changes, the failing reader must get another chance.
+            for (field, generation) in std::mem::take(&mut ctx.reactive_reads) {
+                match generation {
+                    Some(generation) => vm.inject_reactive_read_with_generation(
+                        &field.namespace,
+                        &field.field,
+                        generation,
+                    ),
+                    None => vm.inject_reactive_read(&field.namespace, &field.field),
+                }
+            }
+            let result = result.and_then(|value| {
+                for schema in std::mem::take(&mut ctx.instance_kinds) {
+                    vm.register_instance_kind(schema).map_err(|error| error.to_string())?;
+                }
+                Ok(value)
+            });
+            match result {
                 Ok(value) => {
-                    for field in ctx.reactive_reads {
-                        vm.inject_reactive_read(&field.namespace, &field.field);
+                    for (namespace, field, value) in ctx.reactive_sets {
+                        vm.host_reactive_set(&namespace, &field, value);
                     }
                     for (field, generation) in ctx.reactive_invalidations {
                         vm.invalidate_injected_reactive_source(
@@ -2082,6 +2159,17 @@ impl Runtime {
                             &field.field,
                             generation,
                         );
+                    }
+                    for (namespace, mut generation_for_field) in ctx.namespace_invalidations {
+                        for field in vm.subscribed_injected_reactive_fields(&namespace) {
+                            if let Some(generation) = generation_for_field(&field) {
+                                vm.invalidate_injected_reactive_source(
+                                    &namespace,
+                                    &field,
+                                    generation,
+                                );
+                            }
+                        }
                     }
                     value
                 }
@@ -2625,6 +2713,135 @@ impl Runtime {
         profile.flush_widget_trees = flush_started.elapsed();
 
         Ok((result, profile))
+    }
+
+    // ---- instance records (instance-kinds spec §4/§5) ------------------
+    //
+    // Thin host-facing wrappers over the VM's instance store. Field writes
+    // only dirty readers; the host runs its usual reactive cycle afterwards.
+
+    pub fn instance_kind_schema(&self, kind: &str) -> Option<&crate::vm::InstanceKindSchema> {
+        self.vm.instance_kind_schema(kind)
+    }
+
+    // ---- host-bound view buffers (instance-kinds spec §7) ---------------
+
+    /// Bind buffer `target` to `view` (see [`crate::vm::VM::bind_view_buffer`]).
+    /// The next reactive cycle renders it; the editor creates the buffer on
+    /// the first tree like any named effect target.
+    pub fn bind_view_buffer(
+        &mut self,
+        target: &str,
+        view: crate::vm::BoundView,
+        key_scope: Option<String>,
+    ) {
+        self.vm.bind_view_buffer(target, view, key_scope);
+    }
+
+    /// Unbind `target` and drop every tree still queued for it.
+    pub fn unbind_view_buffer(&mut self, target: &str) -> bool {
+        let unbound = self.vm.unbind_view_buffer(target);
+        self.drop_queued_trees_for_target(target);
+        unbound
+    }
+
+    /// Move a binding to a new buffer name (an instance rename).
+    pub fn retarget_view_buffer(&mut self, old: &str, new: &str) -> bool {
+        let moved = self.vm.retarget_view_buffer(old, new);
+        if moved && old != new {
+            self.drop_queued_trees_for_target(old);
+        }
+        moved
+    }
+
+    /// Every bound view buffer, sorted by target.
+    pub fn bound_view_buffers(&self) -> Vec<(String, crate::vm::BoundView)> {
+        self.vm.bound_view_buffers()
+    }
+
+    fn drop_queued_trees_for_target(&mut self, target: &str) {
+        let target = EffectTarget::BufferName(target.to_string());
+        self.shared
+            .borrow_mut()
+            .pending_buffer_widget_trees
+            .retain(|pending| *pending.target() != target);
+    }
+
+    /// Every kind id this runtime's VM holds a schema for, sorted.
+    pub fn instance_kind_ids(&self) -> Vec<String> {
+        self.vm.instance_kind_ids()
+    }
+
+    pub fn create_instance(
+        &mut self,
+        id: crate::vm::InstanceId,
+        kind: &str,
+    ) -> Result<Value, crate::vm::InstanceError> {
+        self.vm.create_instance(id, kind)
+    }
+
+    pub fn drop_instance(&mut self, id: crate::vm::InstanceId) -> bool {
+        self.vm.drop_instance(id)
+    }
+
+    pub fn instance_is_live(&self, id: crate::vm::InstanceId) -> bool {
+        self.vm.instance_is_live(id)
+    }
+
+    pub fn live_instances(&self) -> Vec<crate::vm::InstanceId> {
+        self.vm.live_instances()
+    }
+
+    pub fn instance_kind(&self, id: crate::vm::InstanceId) -> Option<String> {
+        self.vm.instance_kind(id).map(str::to_string)
+    }
+
+    pub fn instance_field(
+        &self,
+        id: crate::vm::InstanceId,
+        field: &str,
+    ) -> Result<Value, crate::vm::InstanceError> {
+        self.vm.instance_field(id, field)
+    }
+
+    pub fn set_instance_field(
+        &mut self,
+        id: crate::vm::InstanceId,
+        field: &str,
+        value: Value,
+    ) -> Result<(), crate::vm::InstanceError> {
+        self.vm.set_instance_field(id, field, value)
+    }
+
+    pub fn set_instance_host_field(
+        &mut self,
+        id: crate::vm::InstanceId,
+        field: crate::vm::InstanceHostField,
+        value: Value,
+    ) -> Result<(), crate::vm::InstanceError> {
+        self.vm.set_instance_host_field(id, field, value)
+    }
+
+    /// Route Lisp `(set! x.label v)` to the host as a queued
+    /// `HostCommand::Custom { name: command, payload: {:id :label} }`, so a
+    /// rename is the host's (undoable) edit; the host pushes the accepted
+    /// label back with [`Self::set_instance_host_field`].
+    pub fn route_instance_labels_to_host_command(&mut self, command: &str) {
+        let shared = self.shared.clone();
+        let command = command.to_string();
+        self.vm
+            .set_instance_label_hook(Some(Rc::new(move |id, label: &Value| {
+                let mut payload = HashMap::new();
+                payload.insert(
+                    "id".to_string(),
+                    Rc::new(RefCell::new(Value::Number(id as f64))),
+                );
+                payload.insert("label".to_string(), Rc::new(RefCell::new(label.clone())));
+                shared.borrow_mut().queued_commands.push(HostCommand::Custom {
+                    name: command.clone(),
+                    payload: Value::Map(payload),
+                });
+            })));
     }
 
     pub fn set_global_value(&mut self, name: &str, value: Value) {

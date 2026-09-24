@@ -2750,7 +2750,7 @@ impl App {
                     app.groups.iter().find(|group| group.id == *rack).map(|group| group.color)
                 }))
                 .unwrap_or([0.5, 0.5, 0.5]);
-            let group_id = app.groups.iter().map(|group| group.id).max().unwrap_or(0) + 1;
+            let group_id = app.next_group_id();
             app.groups.push(crate::project::ProjectTrackGroup {
                 id: group_id,
                 name: format!("Group {group_index}"),
@@ -2998,7 +2998,16 @@ impl App {
     /// rack, or back to the master mix otherwise. Child racks follow the same
     /// scope. The group bus and rack-only pad metadata disappear in the same
     /// recorded topology edit, so undo restores the complete group identity.
+    /// Instances a dissolved rack owned go back to the project first (their
+    /// member routes expand to the tracks, which stay), in the same undo
+    /// entry.
     pub fn ungroup_tracks_recorded(&mut self, group_id: u64) -> Result<(), String> {
+        self.with_rack_instances_released(&[group_id], "Ungroup tracks", |app| {
+            app.ungroup_tracks_structure_recorded(group_id)
+        })
+    }
+
+    fn ungroup_tracks_structure_recorded(&mut self, group_id: u64) -> Result<(), String> {
         self.apply_recorded_bus_group_structure_mutation("Ungroup tracks", |app| {
             let group_index = app.groups.iter().position(|group| group.id == group_id)
                 .ok_or_else(|| format!("Track group {group_id} does not exist"))?;
@@ -3042,7 +3051,16 @@ impl App {
         })
     }
 
+    /// Dissolve a group, keeping its tracks. Instances a deleted rack owned
+    /// go back to the project first, in the same undo entry, so they never
+    /// outlive their rack as `Rack(gid)` (instance-kinds spec §5).
     pub fn delete_group_recorded(&mut self, group_id: u64) -> Result<(), String> {
+        self.with_rack_instances_released(&[group_id], "Delete track group", |app| {
+            app.delete_group_structure_recorded(group_id)
+        })
+    }
+
+    fn delete_group_structure_recorded(&mut self, group_id: u64) -> Result<(), String> {
         self.apply_recorded_bus_group_structure_mutation("Delete track group", |app| {
             let group = app.groups.iter().position(|group| group.id == group_id)
                 .ok_or_else(|| format!("Track group {group_id} does not exist"))?;
@@ -3100,6 +3118,18 @@ impl App {
         let checkpoint = self.history.clone();
         let checkpoint_len = self.history.undo_len();
         let result = (|| {
+            // The racks' instances die with their tracks (spec §5): delete
+            // them, with their overrides, before the racks go.
+            let mut racks = child_racks.clone();
+            racks.push(group_id);
+            let owned: Vec<u64> = self
+                .instances
+                .list
+                .iter()
+                .filter(|instance| instance.owner.rack().is_some_and(|gid| racks.contains(&gid)))
+                .map(|instance| instance.id)
+                .collect();
+            self.delete_instances_recorded(&owned, "Delete track group", None)?;
             // Remove containers first. Track-deletion patches then capture the
             // already-unlinked structure, so undo restores tracks before it
             // restores group membership and bus routing.
@@ -3142,7 +3172,7 @@ impl App {
         self.apply_recorded_bus_group_structure_mutation("Create drum rack", move |app| {
             let name = name.unwrap_or_else(|| format!("Drum Rack {}", app.groups.len() + 1));
             let bus = app.add_bus_channel(name.clone());
-            let group_id = app.groups.iter().map(|group| group.id).max().unwrap_or(0) + 1;
+            let group_id = app.next_group_id();
             app.groups.push(crate::project::ProjectTrackGroup {
                 id: group_id,
                 name,
@@ -10102,6 +10132,19 @@ fn replay_patch(app: &mut App, patch: &EditPatch, mode: ApplyMode) -> Result<(),
             app.restore_bus_group_structure_state(target)
                 .map_err(EditError::ReplayFailed)
         }
+        EditPatch::InstanceStructure(patch) => {
+            let target = match mode {
+                ApplyMode::Undo => &patch.before,
+                ApplyMode::Redo => &patch.after,
+                ApplyMode::UserEdit | ApplyMode::ProjectLoad => {
+                    return Err(EditError::ReplayFailed(
+                        "instance-structure replay requires undo or redo mode".to_string(),
+                    ));
+                }
+            };
+            app.restore_instance_structure_state(target)
+                .map_err(EditError::ReplayFailed)
+        }
         EditPatch::MacroConfiguration(patch) => {
             let target = match mode {
                 ApplyMode::Undo => &patch.before,
@@ -10189,6 +10232,7 @@ fn pending_gesture_publishes_scheduler(patch: &EditPatch) -> bool {
         // The arrangement's compiled song has no scheduler runtime.
         EditPatch::Arrangement(_) => false,
         EditPatch::BusGroupStructure(_) => true,
+        EditPatch::InstanceStructure(_) => true,
         EditPatch::MacroConfiguration(_) => true,
         EditPatch::EffectChain(_) => true,
         EditPatch::BusEffectChain(_) => true,
@@ -10355,6 +10399,7 @@ fn edit_patch_retained_bytes(patch: &EditPatch) -> usize {
         EditPatch::SceneStructure(patch) => patch.retained_bytes(),
         EditPatch::Arrangement(patch) => patch.retained_bytes(),
         EditPatch::BusGroupStructure(patch) => patch.retained_bytes(),
+        EditPatch::InstanceStructure(patch) => patch.retained_bytes(),
         EditPatch::RackClipAssignment(_) => std::mem::size_of::<super::history::RackClipAssignmentPatch>(),
         EditPatch::MacroConfiguration(patch) => patch.retained_bytes(),
         EditPatch::TransportParams(patch) => patch.retained_bytes(),
@@ -10501,7 +10546,9 @@ pub fn cancel_active_gesture(app: &mut App) -> Result<bool, EditError> {
         EditPatch::Arrangement(_) => {
             replay_patch(app, &patch, ApplyMode::Undo)?;
         }
-        EditPatch::BusGroupStructure(_) | EditPatch::RackClipAssignment(_) => {
+        EditPatch::BusGroupStructure(_)
+        | EditPatch::RackClipAssignment(_)
+        | EditPatch::InstanceStructure(_) => {
             replay_patch(app, &patch, ApplyMode::Undo)?;
         }
         EditPatch::MacroConfiguration(_) => {

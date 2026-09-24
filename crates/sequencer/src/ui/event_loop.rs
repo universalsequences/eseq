@@ -365,6 +365,9 @@ pub(crate) fn run_event_loop(
         prev_pattern_epoch: 0,
         prev_song_row_mirror_epoch: 0,
         prev_published_sequencers_version: u64::MAX,
+        prev_graph_read_key: (u64::MAX, u64::MAX, usize::MAX),
+        prev_instance_key: (u64::MAX, u64::MAX, u64::MAX, 0),
+        prev_instances_fingerprint: u64::MAX,
         prev_current_track: usize::MAX,
         prev_cpu_load_bits: u32::MAX,
         cpu_overload: CpuOverloadIndicator::default(),
@@ -925,6 +928,12 @@ pub(crate) fn run_event_loop(
                             replayed_patch.map_or_else(Vec::new, scene_slot_replay_targets);
                         let scene_slots_only = !scene_slot_targets.is_empty()
                             && replayed_patch.is_some_and(patch_is_only_scene_slots);
+                        let replayed_scratch_imports = replayed_patch.map_or_else(Vec::new, |patch| {
+                            patch.replayed_scratch_imports(matches!(
+                                shortcut,
+                                SequencerHistoryShortcut::Undo
+                            ))
+                        });
                         let replay = match shortcut {
                             SequencerHistoryShortcut::Undo => app::edit::undo(&mut app),
                             SequencerHistoryShortcut::Redo => app::edit::redo(&mut app),
@@ -934,6 +943,11 @@ pub(crate) fn run_event_loop(
                                 &mut editor,
                                 &shared.state,
                                 &scene_slot_targets,
+                            );
+                            host_commands::packages::apply_replayed_scratch_imports(
+                                &mut editor,
+                                &shared.state,
+                                &replayed_scratch_imports,
                             );
                         }
                         let message = match (replay, scene_slots_only) {

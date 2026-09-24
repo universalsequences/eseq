@@ -74,7 +74,13 @@
         enter-preset-save
         build-widgets
         refresh-buffer
-        sample-browser-here)
+        sample-browser-here
+        ;; Packages tab rows (instance-kinds spec §8.3); exported for the
+        ;; host-command tests in src/ui/state_values/tests.rs.
+        activate-package-item
+        open-package-menu
+        package-menu-actions
+        select-package-menu-action)
 
 ;; ── State ──
 ;; The `eseq.vanilla/` names below are the §3 cross-module def escape hatch
@@ -96,6 +102,9 @@
 (def package-menu-item (state nil))
 (def package-new-mode (state false))
 (def package-new-name (state ""))
+;; Inline rename field for a kind instance row (instance-kinds spec §8.3).
+(def instance-rename-id (state -1))
+(def instance-rename-draft (state ""))
 (def source-buffer "")
 (defstate mode "audition")
 (defstate eseq.vanilla/sbrowser-tab "samples")
@@ -1459,9 +1468,29 @@
       (box :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0 :flex 1
         (empty-message "Presets are available for instrument tracks.")))))
 
+;; Rows of the Packages tree (see `seq-package-tree`): "module" rows carry
+;; :module plus, when the module defines instance kinds, :kinds (list of
+;; {:id :name}) and :instance-count, and expand to one "instance" row per
+;; instance (:instance-id :kind-id :owner :owner-rack :registered?). An
+;; "orphan" row groups instances whose package is missing (or whose kind
+;; lives in project code) at the end of Loaded.
 (def package-item-attachable? (item)
-  (let ((module (get item :module)))
-    (and (not (= module nil)) (not (= module "")))))
+  (let ((module (get item :module))
+        (kind (get item :kind)))
+    (and (not (= module nil))
+         (not (= module ""))
+         (or (= kind "module") (= kind "package")))))
+
+(def package-item-kinds (item)
+  (let ((kinds (get item :kinds)))
+    (if (= kinds nil) (list) kinds)))
+
+(def package-item-instance-count (item)
+  (let ((count (get item :instance-count)))
+    (if (= count nil) 0 count)))
+
+(def instance-item? (item)
+  (= (get item :kind) "instance"))
 
 (def describe-package-item (item)
   (let ((kind (get item :kind))
@@ -1469,22 +1498,54 @@
     (if (= kind "module")
       (status (str (get item :module)
         (if (get item :attached?) "  (attached to project)" "")
-        (if (get item :always?) "  (always loaded)" "")))
-      (if (= kind "package")
-        (status (str label " " (get item :detail)))
-        (if (= kind "file")
-          (status (str label ": no (module ...) header, so it cannot be attached"))
-          (status (str label)))))))
+        (if (get item :always?) "  (always loaded)" "")
+        (if (> (package-item-instance-count item) 0)
+          (str "  " (package-item-instance-count item) " instance"
+            (if (= (package-item-instance-count item) 1) "" "s"))
+          "")))
+      (if (= kind "instance")
+        (status (str label ": " (get item :kind-id) " instance, owned by " (get item :owner)
+          (if (get item :registered?) "" " (its package is not loaded)")))
+        (if (= kind "package")
+          (status (str label " " (get item :detail)))
+          (if (= kind "file")
+            (status (str label ": no (module ...) header, so it cannot be attached"))
+            (status (str label))))))))
 
-;; Enter or double-click on a leaf attaches it to the project. The host
-;; loads the module first and only writes the import line once it
-;; evaluates, and answers "already attached" for a second press.
+(def new-instance-of (item kind-id group-id)
+  (host-command "packages-new-instance"
+    (if (< group-id 0)
+      (dict :module (get item :module) :kind kind-id)
+      (dict :module (get item :module) :kind kind-id :group-id group-id))))
+
+;; Enter or double-click (instance-kinds spec §8.3). An instance row opens
+;; its tab (a placeholder row only says why it cannot). A module row: no kinds -> attach it (the host loads the module
+;; first, writes the import line once it evaluates, and answers "already
+;; attached" for a second press); exactly one kind and no instances ->
+;; create the first instance, attaching first. A module row with instances
+;; is a parent: its first click already toggled it open or shut, which is
+;; the whole gesture. Package and folder rows only toggle.
 (def activate-package-item (item)
-  (if (package-item-attachable? item)
-    (host-command "packages-attach" (dict :module (get item :module)))
-    (if (= (get item :kind) "file")
-      (status "This file has no (module ...) header, so it cannot be attached")
-      nil)))
+  (let ((kind (get item :kind)))
+    (if (= kind "instance")
+      ;; A placeholder (its kind not registered) has no view to open; its
+      ;; menu leaves Open out too.
+      (if (get item :registered?)
+        (host-command "instance-open" (dict :id (get item :instance-id)))
+        (status (str (get item :label) ": its package is not loaded, so it has no view to open")))
+      (if (= kind "module")
+        (if (> (package-item-instance-count item) 0)
+          nil
+          (if (= (len (package-item-kinds item)) 1)
+            (new-instance-of item (get (nth (package-item-kinds item) 0) :id) -1)
+            (host-command "packages-attach" (dict :module (get item :module)))))
+        (if (and (= kind "package") (= (get item :children) nil)
+                 (package-item-attachable? item))
+          ;; A package with no source rows to expand attaches its entry.
+          (host-command "packages-attach" (dict :module (get item :module)))
+          (if (= kind "file")
+            (status "This file has no (module ...) header, so it cannot be attached")
+            nil))))))
 
 (def open-package-menu (event)
   (let ((item (get event :item)))
@@ -1498,37 +1559,146 @@
         (set! package-menu-open true))
       nil)))
 
+(def package-action (id key label)
+  (dict :id id :key key :label label))
+
+(def rack-groups ()
+  (filter (lambda (group) (get group :rack)) (or SEQ.groups (list))))
+
+;; Instance row: Open, Rename, Duplicate, Move to <rack> per other rack /
+;; Give back to project, Delete. A placeholder (kind not loaded) has no view
+;; to open and cannot be duplicated until its package comes back.
+(def instance-menu-actions (item)
+  (let ((owner-rack (get item :owner-rack))
+        (live (get item :registered?)))
+    (append
+      (append
+        (if live
+          (list (package-action :open "open" "Open")
+                (package-action :rename "rename" "Rename")
+                (package-action :duplicate "duplicate" "Duplicate"))
+          (list (package-action :rename "rename" "Rename")))
+        (append
+          (map (lambda (group)
+                 (dict :id :move-to-rack
+                       :key (str "move-" (get group :id))
+                       :group-id (get group :id)
+                       :label (str "Move to " (get group :name))))
+            (filter (lambda (group) (not (= (get group :id) owner-rack))) (rack-groups)))
+          (if (= owner-rack nil)
+            (list)
+            (list (package-action :give-back "give-back" "Give back to project")))))
+      (list (package-action :delete-instance "delete" "Delete")))))
+
+;; Module row: `New <kind>` per kind first (attaching first if needed),
+;; then Attach/Remove, Always Load and the source actions.
+(def module-menu-actions (item)
+  (append
+    (append
+      (map (lambda (kind)
+             (dict :id :new-instance
+                   :key (str "new-" (get kind :id))
+                   :kind-id (get kind :id)
+                   :label (str "New " (get kind :name))))
+        (package-item-kinds item))
+      (if (package-item-attachable? item)
+        (list
+          (if (get item :attached?)
+            (package-action :detach "detach" "Remove from Project")
+            (package-action :attach "attach" "Attach to Project"))
+          (if (get item :always?)
+            (package-action :stop-always "stop-always" "Stop Always Loading")
+            (package-action :always "always" "Always Load")))
+        (list)))
+    (if (and (not (= (get item :path) nil)) (not (= (get item :kind) "package")))
+      (append
+        (list (package-action :view "view"
+                (if (get item :read-only?) "View Source" "Edit Source")))
+        (if (and (get item :read-only?) (package-item-attachable? item))
+          (list (package-action :copy "copy" "Copy to Local"))
+          (list)))
+      (list))))
+
 (def package-menu-actions ()
   (let ((item package-menu-item))
     (if (= item nil)
       (list)
-      (append
-        (if (package-item-attachable? item)
-          (list
-            (if (get item :attached?)
-              (dict :id :detach :label "Remove from Project")
-              (dict :id :attach :label "Attach to Project"))
-            (if (get item :always?)
-              (dict :id :stop-always :label "Stop Always Loading")
-              (dict :id :always :label "Always Load")))
-          (list))
-        (if (and (not (= (get item :path) nil)) (not (= (get item :kind) "package")))
-          (append
-            (list (dict :id :view
-                    :label (if (get item :read-only?) "View Source" "Edit Source")))
-            (if (and (get item :read-only?) (package-item-attachable? item))
-              (list (dict :id :copy :label "Copy to Local"))
-              (list)))
-          (list))))))
+      (if (instance-item? item)
+        (instance-menu-actions item)
+        (module-menu-actions item)))))
 
-(def select-package-menu-action (action)
-  (let ((item package-menu-item)
-        (id (get action :id)))
+(def begin-instance-rename (item)
+  (do
+    (set! instance-rename-draft (get item :label))
+    (set! instance-rename-id (get item :instance-id))))
+
+(def cancel-instance-rename ()
+  (set! instance-rename-id -1))
+
+(def commit-instance-rename ()
+  (if (< instance-rename-id 0)
+    nil
     (do
-      (set! package-menu-open false)
+      (if (> (len instance-rename-draft) 0)
+        (host-command "instance-rename"
+          (dict :id instance-rename-id :label instance-rename-draft))
+        nil)
+      (set! instance-rename-id -1))))
+
+(def instance-rename-panel ()
+  (box :key "instance-rename-panel" :width :fill :padding 0.25
+    (v-stack :width :fill :gap 0.4
+      (text-input
+        :key "instance-rename-name"
+        :width :fill
+        :value instance-rename-draft
+        :placeholder "instance name..."
+        :auto-focus true
+        :select-all-on-focus true
+        :on-change (lambda (value) (set! instance-rename-draft value))
+        :on-submit (lambda () (commit-instance-rename))
+        :on-cancel (lambda () (cancel-instance-rename))
+        :height 1.5
+        :font-size 12)
+      (h-stack :width :fill :gap 0.5 :align :center
+        (button "Rename"
+          :key "instance-rename-confirm"
+          :variant :primary
+          :flex 1 :height 1.2 :font-size 10
+          :on-click |x y r| (commit-instance-rename)
+          :color :white)
+        (button "Cancel"
+          :key "instance-rename-cancel"
+          :variant :ghost
+          :flex 1 :height 1.2 :font-size 10
+          :on-click |x y r| (cancel-instance-rename)
+          :color :gray)))))
+
+(def select-instance-menu-action (item action)
+  (let ((id (get action :id))
+        (instance (get item :instance-id)))
+    (if (= id :open)
+      (host-command "instance-open" (dict :id instance))
+      (if (= id :rename)
+        (begin-instance-rename item)
+        (if (= id :duplicate)
+          (host-command "instance-duplicate" (dict :id instance))
+          (if (= id :move-to-rack)
+            (host-command "instance-move" (dict :id instance :group-id (get action :group-id)))
+            (if (= id :give-back)
+              (host-command "instance-move" (dict :id instance))
+              (if (= id :delete-instance)
+                (host-command "instance-delete" (dict :id instance))
+                nil))))))))
+
+(def select-module-menu-action (item action)
+  (let ((id (get action :id)))
+    (if (= id :new-instance)
+      (new-instance-of item (get action :kind-id) -1)
       (if (= id :attach)
         (host-command "packages-attach" (dict :module (get item :module)))
         (if (= id :detach)
+          ;; The host asks first when the module's kinds have instances.
           (host-command "packages-detach" (dict :module (get item :module)))
           (if (= id :always)
             (host-command "packages-always-load" (dict :module (get item :module)))
@@ -1541,6 +1711,14 @@
                   (host-command "packages-copy-to-local" (dict :path (get item :path)))
                   nil)))))))))
 
+(def select-package-menu-action (action)
+  (let ((item package-menu-item))
+    (do
+      (set! package-menu-open false)
+      (if (instance-item? item)
+        (select-instance-menu-action item action)
+        (select-module-menu-action item action)))))
+
 (def package-context-menu ()
   (context-menu :is-open package-menu-open
     :anchor-col package-menu-col
@@ -1548,7 +1726,7 @@
     :on-close (lambda () (set! package-menu-open false))
     (each (package-menu-actions) |action|
       (menu-item (get action :label)
-        :key (str "package-menu-" (get action :id))
+        :key (str "package-menu-" (get action :key))
         :on-select (lambda (event) (select-package-menu-action action))))))
 
 (def begin-new-package ()
@@ -1601,7 +1779,7 @@
 ;; check / bookmark glyphs read those files back. The C-x p text view
 ;; drives the same host commands.
 (def packages-tab-panel ()
-  (let ((items (seq-package-tree search-filter)))
+  (let ((items (seq-package-tree search-filter (or SEQ.instances (list)))))
     (v-stack :key "packages-tab-panel" :width :fill :gap 0.5 :flex 1
       (box :width :fill :padding 0.25
         (h-stack :width :fill :gap 0.5 :align :center
@@ -1624,6 +1802,9 @@
       (if package-new-mode
         (package-new-panel)
         (box :width :fill :height 0))
+      (if (>= instance-rename-id 0)
+        (instance-rename-panel)
+        (box :width :fill :height 0))
       (box :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0 :flex 1
         (if (= (len items) 0)
           (empty-message "No packages found.")
@@ -1636,6 +1817,9 @@
               :font-size 12
               :expand-all (not (= search-filter ""))
               :focusable true
+              ;; A module row with instances is a parent; its double-click
+              ;; still reaches `activate-package-item` (spec §8.3).
+              :activate-parents true
               :on-select (lambda (item) (describe-package-item item))
               :on-cursor-change (lambda (item) (describe-package-item item))
               :on-activate (lambda (item) (activate-package-item item))

@@ -2211,13 +2211,16 @@
 
 ;; Node patches (docs/graph-node-processes-spec.md §6): the same patchbay
 ;; drawn over a graph node's process chain. A node target is a cable
-;; namespace at or above `lane-patch-node-base` (1024 + node index, the band
-;; `graph-node-lane-patch` mints port ids in), registered by the panel that
+;; namespace at or above `lane-patch-node-base`, registered by the panel that
 ;; expands the node so every lane-patch-* function can find the graph handle
 ;; behind a namespace and route edits to the graph-node-process-* natives.
+;; The host derives a node's namespace from its graph (instance) id and the
+;; node (`graph-node-patch-namespace`, the band `graph-node-lane-patch` mints
+;; port ids in), so node k of two graphs never shares one
+;; (docs/instance-kinds-spec.md §7).
 (def lane-patch-node-base 1024)
 (def lane-patch-node? (track) (>= track lane-patch-node-base))
-(def lane-patch-node-namespace (node) (+ lane-patch-node-base node))
+(def lane-patch-node-namespace (graph node) (graph-node-patch-namespace graph node))
 ;; (namespace graph node) triples, newest first.
 (defstate lane-patch-node-targets '())
 ;; Bumped after every node-patch edit: the graph natives are not reactive.
@@ -2233,7 +2236,7 @@
 ;; Call from the event that expands a node (never from a render): returns the
 ;; namespace to draw the bay with.
 (def lane-patch-register-node (graph node)
-  (let ((ns (lane-patch-node-namespace node)))
+  (let ((ns (lane-patch-node-namespace graph node)))
     (do
       (set! lane-patch-node-targets
         (append (list (list ns graph node))

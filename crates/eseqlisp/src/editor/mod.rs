@@ -5406,6 +5406,43 @@ impl Editor {
         Ok(emitted_buffer_name)
     }
 
+    /// Make sure a scratch buffer named `name` exists (a host-bound view
+    /// buffer's home, instance-kinds spec §7) and, with `mode`, give it that
+    /// named mode (its keymap), exactly as `set-buffer-mode-for` would.
+    pub fn ensure_view_buffer(&mut self, name: &str, mode: Option<&str>) {
+        let idx = self.ensure_scratch_buffer_named(name);
+        let Some(mode) = mode else {
+            return;
+        };
+        let mode_name = self.resolve_mode_name(mode.to_string());
+        let read_only = self
+            .mode_registry
+            .get(&mode_name)
+            .map(|mode_def| mode_def.read_only);
+        let buffer = &mut self.buffers[idx];
+        buffer.mode = BufferMode::Named(mode_name);
+        if let Some(read_only) = read_only {
+            buffer.read_only = read_only;
+        }
+    }
+
+    /// Rename a buffer in place (an instance rename): tiles and tabs that
+    /// show it keep showing it. Fails when `old` is missing or `new` taken.
+    pub fn rename_buffer(&mut self, old: &str, new: &str) -> bool {
+        if old == new {
+            return self.buffers.iter().any(|buffer| buffer.name == old);
+        }
+        if self.buffers.iter().any(|buffer| buffer.name == new) {
+            return false;
+        }
+        let Some(buffer) = self.buffers.iter_mut().find(|buffer| buffer.name == old) else {
+            return false;
+        };
+        buffer.name = new.to_string();
+        self.mark_needs_redraw();
+        true
+    }
+
     /// Remove a buffer by name. Returns true if found and removed.
     pub fn remove_buffer_by_name(&mut self, name: &str) -> bool {
         if let Some(idx) = self.buffers.iter().position(|b| b.name == name) {
