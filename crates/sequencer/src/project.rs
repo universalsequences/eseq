@@ -133,7 +133,8 @@ pub struct ProjectKitPreset {
     /// PROJECT file generation because a kit's clip patterns are
     /// `ProjectPattern`s and parse by that generation, while this counts the
     /// kit's own payload. 1 = pads + color + optional bus chain; 2 = also
-    /// `sequencers` and `clips`; 3 = also modulator pads and `mod_connections`.
+    /// `sequencers` and `clips`; 3 = also modulator pads and `mod_connections`;
+    /// 4 = also `instances`; 5 = also `grooves` and `groove`.
     /// Absent (pre-feature `.kit` files) reads as 1.
     #[serde(default = "default_kit_version")]
     pub kit_version: u32,
@@ -169,6 +170,23 @@ pub struct ProjectKitPreset {
     /// The importer maps pad position -> the member track it just built.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub clips: Vec<ProjectRackClip>,
+    /// The rack's grooves (docs/rack-groove-spec.md, kit version 5), so a
+    /// saved kit brings its pocket. Pad rows key on `pad_note`, which is kit
+    /// space already; ids are kit-local and re-derived by the importer.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub grooves: Vec<ProjectGroove>,
+    /// The rack's groove selection and amounts at export (kit version 5).
+    #[serde(default, skip_serializing_if = "RackGrooveSettings::is_default")]
+    pub groove: RackGrooveSettings,
+}
+
+impl ProjectKitPreset {
+    /// Whether this kit's groove fields are authoritative: a kit written
+    /// before grooves travelled says nothing about them, so loading it onto a
+    /// rack must leave the rack's own grooves and selection alone.
+    pub fn carries_grooves(&self) -> bool {
+        self.kit_version >= KIT_PRESET_GROOVES_VERSION
+    }
 }
 
 fn default_kit_version() -> u32 {
@@ -178,8 +196,12 @@ fn default_kit_version() -> u32 {
 /// The break-kit payload generation this build writes (§7.1).
 /// 1 = pads + color + optional bus chain; 2 = also sequencers and clips;
 /// 3 = also modulator pads and the rack's internal mod cables (§7.5);
-/// 4 = also `instances` (instance-kinds spec §9).
-pub const KIT_PRESET_VERSION: u32 = 4;
+/// 4 = also `instances` (instance-kinds spec §9);
+/// 5 = also the rack's `grooves` and groove settings (rack-groove spec).
+pub const KIT_PRESET_VERSION: u32 = 5;
+
+/// The first kit generation whose `grooves`/`groove` fields mean something.
+pub const KIT_PRESET_GROOVES_VERSION: u32 = 5;
 
 /// One rack-owned instance a kit carries (instance-kinds spec §9).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -7110,6 +7132,14 @@ mod tests {
                 graph_overrides: Vec::new(),
                 bus_chain: None,
             }],
+            // Kit version 5: the rack's grooves and its selection travel.
+            grooves: vec![test_groove(1, "Dilla"), test_groove(4, "Madlib")],
+            groove: RackGrooveSettings {
+                active: Some(GrooveRef::Rack(4)),
+                timing_amount: 1.25,
+                velocity_amount: 0.5,
+                random_amount: 0.1,
+            },
         };
 
         let json = serde_json::to_string(&kit).expect("serialize kit");
@@ -7138,6 +7168,9 @@ mod tests {
         assert_eq!(restored.clips.len(), 1);
         assert_eq!(restored.clips[0].name, "Verse");
         assert_eq!(restored.clips[0].members, vec![true, false]);
+        assert_eq!(restored.grooves, kit.grooves, "grooves round-trip exactly");
+        assert_eq!(restored.groove, kit.groove, "groove selection round-trips");
+        assert!(restored.carries_grooves());
         // A pre-feature `.kit` file is a kit with no break: version 1, no
         // sequencers, no clips, and every other field unchanged.
         let pre_feature: ProjectKitPreset = serde_json::from_str(
@@ -7146,10 +7179,17 @@ mod tests {
                 .replace(",\"instances\":[", ",\"instances_unused\":[")
                 .replace(",\"mod_connections\":[", ",\"mod_connections_unused\":[")
                 .replace(",\"sequencers\":[", ",\"sequencers_unused\":[")
-                .replace(",\"clips\":[", ",\"clips_unused\":["),
+                .replace(",\"clips\":[", ",\"clips_unused\":[")
+                .replace(",\"grooves\":[", ",\"grooves_unused\":[")
+                .replace(",\"groove\":{", ",\"groove_unused\":{"),
         )
         .expect("a kit saved before break kits still loads");
         assert_eq!(pre_feature.kit_version, 1);
+        assert!(pre_feature.grooves.is_empty());
+        assert_eq!(pre_feature.groove, RackGrooveSettings::default());
+        assert!(!pre_feature.carries_grooves(), "an old kit says nothing about grooves");
+        let rewritten = serde_json::to_string(&pre_feature).expect("serialize groove-less kit");
+        assert!(!rewritten.contains("\"groove"), "a groove-less kit writes no groove keys: {rewritten}");
         assert!(pre_feature.sequencers.is_empty());
         assert!(pre_feature.instances.is_empty());
         assert!(pre_feature.clips.is_empty());

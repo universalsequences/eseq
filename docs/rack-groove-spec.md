@@ -1,6 +1,6 @@
 # Rack Grooves — Extracted Feel, Applied to Every Trig Source
 
-Status: rev 1; slices 1–2 built (model/extraction, late-only application). Epic: `eseq-groove` (slices `.1`–`.7` below).
+Status: rev 1; slices 1–2 built (model/extraction, late-only application) and slice 7 (kit carry, cross-rack). Epic: `eseq-groove` (slices `.1`–`.7` below).
 
 ## Problem
 
@@ -330,6 +330,16 @@ a "groove" hint, so there is one visible source of truth for the feel.
    straight phase. Pair with eseq-k0v8.
 7. **Kit preset carry + cross-rack.** Grooves in kit presets; applying another
    rack's groove maps pad rows by `pad_note`, falling back to the shared row.
+   *Built (eseq-groove.7):* `KIT_PRESET_VERSION` 5 adds
+   `ProjectKitPreset::grooves`/`groove`. Loading a kit as a new rack installs
+   them (ids re-derived, selection re-pointed); auditioning a v5 kit onto a
+   rack ADDS its grooves beside the rack's own (an identical groove is reused,
+   not duplicated) and takes the kit's selection and amounts; a pre-v5 kit
+   leaves the rack's grooves alone. `App::apply_rack_groove_from_rack_recorded`
+   copies another rack's groove into the target and activates it (one undo
+   step). Both go through `groove::import_grooves`
+   (`groove/transfer.rs`); no per-pad remap is stored, because the scheduler
+   table already resolves each member's row by its own pad note.
 
 ## Acceptance
 

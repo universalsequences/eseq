@@ -8,11 +8,17 @@
 //! project scenes, so "extract, quantize the source and activate" is a single
 //! `BusGroupStructure` patch: one undo step restores the patterns, the swing
 //! and the rack's groove list together.
+//!
+//! Grooves also move between racks (eseq-groove.7): a kit carries its rack's
+//! grooves, and a groove picked from another rack is copied into the target's
+//! list (`crate::groove::import_grooves`). Nothing is remapped per pad on the
+//! way: pad rows key on `pad_note`, so the target's pads play the rows with
+//! their own notes and every other pad plays the shared row.
 
 use super::*;
 use crate::groove::{
-    extract_groove, heard_hits, quantize_groove_source, GrooveExtractOptions, GrooveId,
-    GroovePadSource, GrooveRef,
+    extract_groove, heard_hits, import_grooves, install_groove_settings, quantize_groove_source,
+    GrooveExtractOptions, GrooveId, GroovePadSource, GrooveRef, ProjectGroove, RackGrooveSettings,
 };
 use crate::sequencer::{PatternId, ProjectScenes, RackClipId};
 
@@ -219,6 +225,101 @@ impl App {
             }
             rack.groove.active = active;
             Ok(())
+        })
+    }
+    /// Installs a loaded kit's grooves and selection on a rack (kit version
+    /// 5), as one recorded edit. Grooves merge into the rack's list under
+    /// fresh ids; a kit reference to one of its own grooves follows the id
+    /// map. Nothing to install (no grooves, default settings) records nothing.
+    pub(super) fn install_kit_grooves(
+        &mut self,
+        group_id: u64,
+        grooves: &[ProjectGroove],
+        settings: &RackGrooveSettings,
+    ) -> Result<(), String> {
+        if grooves.is_empty() && settings.is_default() {
+            return Ok(());
+        }
+        let grooves = grooves.to_vec();
+        let settings = settings.clone();
+        self.apply_recorded_bus_group_structure_mutation("Load kit grooves", move |app| {
+            let rack = app
+                .groups
+                .iter_mut()
+                .find(|group| group.id == group_id)
+                .and_then(|group| group.rack.as_mut())
+                .ok_or_else(|| format!("Track group {group_id} is not a drum rack"))?;
+            let id_map = import_grooves(rack, &grooves);
+            install_groove_settings(rack, &settings, &id_map);
+            Ok(())
+        })
+    }
+
+    /// Plays one rack's groove on another: copies `groove_id` from
+    /// `source_group_id`'s list into `target_group_id`'s (reusing an identical
+    /// groove already there) and activates it, as one undo step. The target's
+    /// own amounts stay. Returns the groove's id in the target rack.
+    ///
+    /// Pads map by `pad_note`: a target pad whose note has a row in the
+    /// groove plays that row, every other pad the shared row. On the source
+    /// rack itself this just activates the groove; re-applying a groove the
+    /// target already plays records nothing.
+    pub fn apply_rack_groove_from_rack_recorded(
+        &mut self,
+        target_group_id: u64,
+        source_group_id: u64,
+        groove_id: GrooveId,
+    ) -> Result<GrooveId, String> {
+        let groove = self
+            .groups
+            .iter()
+            .find(|group| group.id == source_group_id)
+            .ok_or_else(|| format!("Track group {source_group_id} does not exist"))?
+            .rack
+            .as_ref()
+            .ok_or_else(|| format!("Track group {source_group_id} is not a drum rack"))?
+            .groove_by_id(groove_id)
+            .cloned()
+            .ok_or_else(|| format!("Drum rack has no groove {groove_id}"))?;
+        if target_group_id == source_group_id {
+            let active = Some(GrooveRef::Rack(groove_id));
+            let already = self
+                .groups
+                .iter()
+                .find(|group| group.id == target_group_id)
+                .and_then(|group| group.rack.as_ref())
+                .is_some_and(|rack| rack.groove.active == active);
+            if !already {
+                self.set_rack_active_groove_recorded(target_group_id, active)?;
+            }
+            return Ok(groove_id);
+        }
+        // Already copied and playing: nothing to record.
+        let target = self
+            .groups
+            .iter()
+            .find(|group| group.id == target_group_id)
+            .and_then(|group| group.rack.as_ref())
+            .ok_or_else(|| format!("Track group {target_group_id} is not a drum rack"))?;
+        if let Some(existing) = target.grooves.iter().find(|own| own.same_feel(&groove)) {
+            if target.groove.active == Some(GrooveRef::Rack(existing.id)) {
+                return Ok(existing.id);
+            }
+        }
+        self.apply_recorded_bus_group_structure_mutation("Apply groove from rack", move |app| {
+            let rack = app
+                .groups
+                .iter_mut()
+                .find(|group| group.id == target_group_id)
+                .and_then(|group| group.rack.as_mut())
+                .ok_or_else(|| format!("Track group {target_group_id} is not a drum rack"))?;
+            let id_map = import_grooves(rack, std::slice::from_ref(&groove));
+            let (_, id) = id_map
+                .first()
+                .copied()
+                .ok_or_else(|| format!("Groove '{}' is malformed", groove.name))?;
+            rack.groove.active = Some(GrooveRef::Rack(id));
+            Ok(id)
         })
     }
 }

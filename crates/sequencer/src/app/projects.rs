@@ -1870,9 +1870,13 @@ impl App {
             .iter()
             .find(|group| group.id == group_id)
             .ok_or_else(|| format!("Track group {group_id} does not exist"))?;
-        if group.rack.is_none() {
+        let Some(rack) = group.rack.as_ref() else {
             return Err(format!("Track group {group_id} is not a drum rack"));
-        }
+        };
+        // The rack's pocket travels with it (kit version 5). Pad rows are
+        // keyed by pad note, which is already kit space.
+        let grooves = rack.grooves.clone();
+        let groove = rack.groove.clone();
         let color = group.color;
         let bus_id = group.bus_id;
         // Resolve every pad against the member list up front: capturing a pad
@@ -1935,6 +1939,8 @@ impl App {
                 instances,
                 mod_connections,
                 clips,
+                grooves,
+                groove,
             },
             warnings,
         ))
@@ -2122,6 +2128,7 @@ impl App {
                 failures.push(format!("bus effects: {error}"));
             }
         }
+        let carries_grooves = kit.carries_grooves();
         let kit_pad_notes: Vec<i32> = kit.pads.iter().map(|pad| pad.pad_note).collect();
         for pad in kit.pads {
             let pad_name = if pad.name.trim().is_empty() {
@@ -2175,6 +2182,13 @@ impl App {
         // The rack's internal cables (§7.5), once every member exists.
         if let Err(error) = self.install_kit_mod_connections(group_id, &kit.mod_connections, &kit_pad_notes) {
             failures.push(format!("modulation cables: {error}"));
+        }
+        // The kit's grooves and selection (kit version 5): a fresh rack has
+        // none of its own, so they become its list.
+        if carries_grooves {
+            if let Err(error) = self.install_kit_grooves(group_id, &kit.grooves, &kit.groove) {
+                failures.push(format!("grooves: {error}"));
+            }
         }
         Ok((group_id, failures))
     }
@@ -2280,6 +2294,7 @@ impl App {
             return Err("A kit cannot remove the last remaining track".to_string());
         }
 
+        let kit_carries_grooves = kit.carries_grooves();
         let history_checkpoint = self.history.clone();
         let history_len = self.history.undo_len();
         let result = (|| {
@@ -2351,6 +2366,8 @@ impl App {
             let desired_for_group = desired.clone();
             let kit_name_for_group = kit_name.clone();
             let kit_color = kit.color;
+            let kit_grooves = kit_carries_grooves
+                .then(|| (kit.grooves.clone(), kit.groove.clone()));
             self.apply_recorded_bus_group_structure_mutation("Load kit into drum rack", |app| {
                 let group_index = app.groups.iter().position(|group| group.id == group_id)
                     .ok_or_else(|| format!("Track group {group_id} does not exist"))?;
@@ -2382,16 +2399,20 @@ impl App {
                 group.name.clone_from(&kit_name_for_group);
                 group.color = kit_color;
                 group.members = members;
-                // Grooves are the rack's feel, not part of this kit payload
-                // (kits carry them from eseq-groove.7): keep the rack's own.
-                // Pad rows key on pad note, so pads the kit no longer has
-                // simply fall back to the shared row.
+                // The rack keeps its own grooves either way: they are feel
+                // the user extracted, and the kit's are ADDED beside them
+                // (an identical one is reused, so re-auditioning a kit does
+                // not pile up copies). A kit that carries grooves (version 5)
+                // also brings its selection and amounts; an older kit says
+                // nothing about grooves and leaves the rack's selection
+                // alone. Pad rows key on pad note, so pads without a row in
+                // the chosen groove play its shared row.
                 let (grooves, groove) = group
                     .rack
                     .take()
                     .map(|rack| (rack.grooves, rack.groove))
                     .unwrap_or_default();
-                group.rack = Some(crate::project::ProjectRackConfig {
+                let mut rack = crate::project::ProjectRackConfig {
                     sequencers: Vec::new(),
                     pads,
                     choke_groups: desired_for_group.iter().map(|(_, choke, _)| *choke).collect(),
@@ -2399,7 +2420,12 @@ impl App {
                     next_clip_id: 0,
                     grooves,
                     groove,
-                });
+                };
+                if let Some((kit_grooves, kit_groove)) = &kit_grooves {
+                    let id_map = crate::groove::import_grooves(&mut rack, kit_grooves);
+                    crate::groove::install_groove_settings(&mut rack, kit_groove, &id_map);
+                }
+                group.rack = Some(rack);
                 Ok(())
             })?;
 

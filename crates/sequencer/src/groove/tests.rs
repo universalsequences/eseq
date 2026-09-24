@@ -871,3 +871,121 @@ fn track_groove_snapshots_resolve_pad_rows_by_note_else_shared() {
     let table = track_groove_snapshots([(&[9usize][..], &rack)], 6);
     assert!(table.iter().all(Option::is_none));
 }
+
+// --- moving grooves between racks (eseq-groove.7) ----------------------------
+
+/// A two-slot 16th groove with rows for `pad_notes` (each row distinct) and
+/// a shared row of `[0.0, shared]`.
+fn two_slot_groove(id: GrooveId, name: &str, shared: f32, pad_notes: &[i32]) -> ProjectGroove {
+    let mut groove = mpc_swing_groove(50, 0.25);
+    groove.id = id;
+    groove.name = name.to_string();
+    groove.shared_row = row_of(&[0.0, shared]);
+    groove.pad_rows = pad_notes
+        .iter()
+        .map(|&pad_note| GroovePadRow {
+            pad_note,
+            row: row_of(&[0.01 * pad_note as f32, 0.3]),
+        })
+        .collect();
+    groove
+}
+
+fn rack_with_pads(notes: &[i32]) -> crate::project::ProjectRackConfig {
+    crate::project::ProjectRackConfig {
+        pads: notes
+            .iter()
+            .enumerate()
+            .map(|(member, &pad_note)| crate::project::ProjectRackPad { pad_note, member })
+            .collect(),
+        choke_groups: vec![None; notes.len()],
+        ..Default::default()
+    }
+}
+
+/// Importing grooves (a kit's, another rack's) appends them under the
+/// target's fresh ids, reuses an identical groove instead of duplicating it,
+/// skips malformed ones, and returns the id map.
+#[test]
+fn import_grooves_takes_fresh_ids_reuses_identical_and_skips_malformed() {
+    let mut rack = rack_with_pads(&[36, 42]);
+    rack.grooves = vec![two_slot_groove(1, "Own", 0.2, &[36])];
+    let mut broken = two_slot_groove(5, "Broken", 0.1, &[]);
+    broken.shared_row.slots.pop();
+    let incoming = vec![
+        two_slot_groove(1, "Dilla", 0.4, &[42]),
+        broken,
+        // Same feel as the rack's own groove, different id: reused.
+        two_slot_groove(9, "Own", 0.2, &[36]),
+    ];
+    let map = import_grooves(&mut rack, &incoming);
+    assert_eq!(map, vec![(1, 2), (9, 1)], "fresh id for Dilla, Own reused");
+    assert_eq!(rack.grooves.len(), 2);
+    let dilla = rack.groove_by_id(2).expect("Dilla imported");
+    assert_eq!(dilla.name, "Dilla");
+    assert!(dilla.same_feel(&incoming[0]));
+    assert_eq!(rack.groove_by_id(1).unwrap().name, "Own", "the rack's own groove is untouched");
+
+    // Importing the same set again changes nothing.
+    let again = import_grooves(&mut rack, &incoming);
+    assert_eq!(again, map);
+    assert_eq!(rack.grooves.len(), 2, "re-importing does not pile up copies");
+}
+
+/// An incoming selection follows the import's id map; a reference to a
+/// groove that did not land (malformed, missing) becomes Off; built-ins pass
+/// through; amounts are sanitized.
+#[test]
+fn install_groove_settings_remaps_the_selection_through_the_id_map() {
+    let mut rack = rack_with_pads(&[36]);
+    let settings = RackGrooveSettings {
+        active: Some(GrooveRef::Rack(4)),
+        timing_amount: 1.25,
+        velocity_amount: 9.0,
+        random_amount: 0.5,
+    };
+    install_groove_settings(&mut rack, &settings, &[(1, 3), (4, 7)]);
+    assert_eq!(rack.groove.active, Some(GrooveRef::Rack(7)));
+    assert_eq!(rack.groove.timing_amount, 1.25);
+    assert_eq!(rack.groove.velocity_amount, GROOVE_VELOCITY_AMOUNT_MAX, "sanitized");
+    assert_eq!(rack.groove.random_amount, 0.5);
+
+    install_groove_settings(&mut rack, &settings, &[(1, 3)]);
+    assert_eq!(rack.groove.active, None, "the referenced groove did not land");
+
+    let builtin = RackGrooveSettings {
+        active: Some(GrooveRef::Builtin("mpc-16-58".to_string())),
+        ..RackGrooveSettings::default()
+    };
+    install_groove_settings(&mut rack, &builtin, &[]);
+    assert_eq!(rack.groove, builtin);
+}
+
+/// Cross-rack application: a groove extracted on one rack, copied to a rack
+/// with a different pad set, plays each target pad through the source row of
+/// the SAME pad note and every other pad through the shared row.
+#[test]
+fn a_copied_groove_maps_target_pads_by_note_and_falls_back_to_shared() {
+    let groove = two_slot_groove(3, "Take", 0.25, &[36, 42]);
+    // Target: hat (42) and snare (38); no kick.
+    let mut target = rack_with_pads(&[42, 38]);
+    assert_eq!(
+        target.groove_row_mapping(&groove),
+        vec![GrooveRowChoice::Pad, GrooveRowChoice::Shared]
+    );
+    let map = import_grooves(&mut target, std::slice::from_ref(&groove));
+    let (_, id) = map[0];
+    target.groove.active = Some(GrooveRef::Rack(id));
+    let members = vec![5usize, 2];
+    let table = track_groove_snapshots([(members.as_slice(), &target)], 6);
+    assert_eq!(
+        *table[5].as_ref().expect("hat grooved").row,
+        *groove.pad_row(42).unwrap(),
+        "the hat pad plays the source's hat row"
+    );
+    assert_eq!(
+        *table[2].as_ref().expect("snare grooved").row,
+        groove.shared_row,
+        "the snare has no source row: shared"
+    );
+}

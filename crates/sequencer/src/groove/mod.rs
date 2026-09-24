@@ -16,7 +16,8 @@
 //!
 //! Application (eseq-groove.2) lives in [`apply`]: the scheduler's
 //! pre-resolved per-track table, the shared timing function and the built-in
-//! MPC swing grooves.
+//! MPC swing grooves. Moving grooves between racks (kit presets, another
+//! rack's groove) lives in [`transfer`] (eseq-groove.7).
 
 use serde::{Deserialize, Serialize};
 
@@ -28,11 +29,13 @@ use crate::sequencer::{
 mod apply;
 #[cfg(test)]
 mod tests;
+mod transfer;
 
 pub use apply::{
     builtin_groove, builtin_grooves, groove_delay_samples, grooved_sample_time, mpc_swing_groove,
     track_groove_snapshots, BuiltinGroove, TrackGrooveSnapshot, BUILTIN_MPC_SWING_PERCENTS,
 };
+pub use transfer::{import_grooves, install_groove_settings, GrooveRowChoice};
 
 /// Stable identity of one groove within its rack's list.
 pub type GrooveId = u64;
