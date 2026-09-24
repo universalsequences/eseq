@@ -1002,6 +1002,11 @@ pub(crate) fn sync_reactive_tick(
                 &mut ctx.meters.visualization_liveness,
             );
         }
+        needs_reactive_cycle |= sync_graph_node_notes_fields(
+            editor.runtime_mut(),
+            &ctx.shared.state,
+            &mut ctx.meters.visualization_liveness.graph_node_notes,
+        );
         // Drum-rack pad lights (eseq-4b5.16). The flags are read every tick —
         // reading is what consumes the audio thread's trigger latch, so it must
         // not be skipped — but publishing is gated on the panel that draws

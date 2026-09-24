@@ -25,6 +25,32 @@ impl SequencerState {
         self.graph_visualizations.lock().unwrap().clone()
     }
 
+    /// Per published graph: its id and, per node, the `(note, velocity)`
+    /// pairs whose gate is open at audio-clock `sample`, oldest first. Reads only the sounding
+    /// windows, so it is cheap enough to poll every UI tick.
+    pub fn graph_node_sounding_at(&self, sample: u64) -> Vec<(u64, Vec<Vec<(f32, f32)>>)> {
+        self.graph_visualizations
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|snapshot| {
+                let nodes = (0..snapshot.num_nodes)
+                    .map(|node| {
+                        snapshot
+                            .node_sounding
+                            .get(node)
+                            .into_iter()
+                            .flatten()
+                            .filter(|note| note.is_sounding_at(sample))
+                            .map(|note| (note.note, note.velocity))
+                            .collect()
+                    })
+                    .collect();
+                (snapshot.id, nodes)
+            })
+            .collect()
+    }
+
     pub fn has_graph_visualizations(&self) -> bool {
         !self.graph_visualizations.lock().unwrap().is_empty()
     }

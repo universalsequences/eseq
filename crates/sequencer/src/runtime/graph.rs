@@ -255,6 +255,24 @@ pub struct GraphVisualizationEvent {
     pub velocity: f32,
 }
 
+/// One audible emission's note and gate window, in the scheduler's absolute
+/// sample clock (the one `SequencerState::audio_rendered_sample` advances), so
+/// the UI can ask "what is this node sounding right now" against the audio
+/// clock instead of the lookahead frontier.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GraphSoundingNote {
+    pub note: f32,
+    pub velocity: f32,
+    pub start_sample: u64,
+    pub end_sample: u64,
+}
+
+impl GraphSoundingNote {
+    pub fn is_sounding_at(&self, sample: u64) -> bool {
+        self.start_sample <= sample && sample < self.end_sample
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct GraphVisualizationSnapshot {
     pub id: u64,
@@ -266,6 +284,9 @@ pub struct GraphVisualizationSnapshot {
     pub trigger_activity: Vec<f32>,
     pub node_events: Vec<Option<GraphVisualizationEvent>>,
     pub event_history: Vec<GraphVisualizationEvent>,
+    /// Per node, its recent audible notes with gate windows (oldest first,
+    /// at most `NODE_SOUNDING_CAP`); filter with `is_sounding_at`.
+    pub node_sounding: Vec<Vec<GraphSoundingNote>>,
     pub edges: Vec<GraphVisualizationEdge>,
     pub deltas: Vec<GraphDeltaEntry>,
     pub delta_leak_per_beat: f32,
@@ -280,6 +301,19 @@ const GRAPH_EVENT_HISTORY_CAP: usize = 1024;
 /// How many of a node's recent emitted notes `(read (neuron k :key))` sees
 /// (`docs/graph-node-processes-spec.md` §4).
 pub const NEURON_RECENT_NOTES: usize = 8;
+/// How many overlapping notes per node the sounding readout tracks.
+pub const NODE_SOUNDING_CAP: usize = 16;
+/// How many sounding notes per node the UI readout publishes.
+pub const NODE_SOUNDING_DISPLAY: usize = 8;
+/// Per-node block width in the `SEQ.graph-node-notes-<id>` flat list:
+/// `[count, note_0 .. note_{DISPLAY-1}, velocity_0 .. velocity_{DISPLAY-1}]`,
+/// so one node's change touches only that node's indices (and so only the
+/// widget bound to them).
+pub const NODE_SOUNDING_STRIDE: usize = 1 + 2 * NODE_SOUNDING_DISPLAY;
+
+pub fn node_sounding_field(graph_id: u64) -> String {
+    format!("graph-node-notes-{graph_id}")
+}
 
 impl GraphEdge {
     pub fn new(from: usize, to: usize, weight: f64) -> Self {
@@ -1161,6 +1195,12 @@ pub struct GraphRuntime {
     random_state: u64,
     /// Per node, its last `NEURON_RECENT_NOTES` emitted notes, oldest first.
     node_recent_notes: Vec<Vec<f32>>,
+    /// Per node, audible notes whose gate may still be open at the audio
+    /// clock. Deliberately untouched by resets: a reset does not cut notes
+    /// that are already scheduled.
+    node_sounding: Vec<Vec<GraphSoundingNote>>,
+    /// `samples_per_quarter` of the block being processed, for gate ends.
+    block_samples_per_quarter: f64,
     /// Per node: a reset (periodic, fire-authored or `graph-reset!`) happened
     /// since the node last fired. Read into `NodeEmitContext::after_reset`
     /// and cleared by the fire, so a patch sees it exactly once.
@@ -1322,6 +1362,8 @@ impl GraphRuntime {
             random_state: config.id,
             last_accepted: vec![false; num_nodes],
             node_recent_notes: vec![Vec::new(); num_nodes],
+            node_sounding: vec![Vec::new(); num_nodes],
+            block_samples_per_quarter: 0.0,
             after_reset: vec![false; num_nodes],
             requested_resets: Vec::new(),
             last_boundary_beats: 0.0,
@@ -1390,6 +1432,7 @@ impl GraphRuntime {
             trigger_activity: self.trigger_activity.clone(),
             node_events: self.node_events.clone(),
             event_history: self.event_history.clone(),
+            node_sounding: self.node_sounding.clone(),
             edges: self
                 .edges
                 .iter()
@@ -1831,6 +1874,7 @@ impl GraphRuntime {
         if !self.active || self.num_nodes == 0 || end_beats <= start_beats {
             return;
         }
+        self.block_samples_per_quarter = samples_per_quarter;
         let appended_from = out.len();
         self.emit_pending_reset_seeded_nodes(
             start_beats,
@@ -2568,6 +2612,32 @@ impl GraphRuntime {
         self.push_outgoing_propagations(node_index, candidate.fire_beats, payload, false, delay_offset_steps);
     }
 
+    fn record_sounding_note(&mut self, node_index: usize, sample_time: u64, payload: GraphPayload) {
+        if self.node_sounding.len() != self.num_nodes {
+            self.node_sounding.resize(self.num_nodes, Vec::new());
+        }
+        let spq = self.block_samples_per_quarter;
+        if !spq.is_finite() || spq <= 0.0 {
+            return;
+        }
+        let gate_samples = (payload.duration_beats.max(0.0) as f64 * spq).round() as u64;
+        // The scheduler runs ahead of the audio clock by its lookahead; keep
+        // anything that could still be sounding there (two beats covers any
+        // lookahead) and drop the rest.
+        let stale_before = sample_time.saturating_sub((2.0 * spq) as u64);
+        let sounding = &mut self.node_sounding[node_index];
+        sounding.retain(|note| note.end_sample >= stale_before);
+        if sounding.len() >= NODE_SOUNDING_CAP {
+            sounding.remove(0);
+        }
+        sounding.push(GraphSoundingNote {
+            note: payload.note,
+            velocity: payload.velocity,
+            start_sample: sample_time,
+            end_sample: sample_time.saturating_add(gate_samples.max(1)),
+        });
+    }
+
     fn resolve_emission_payload(&self, node_index: usize, emit: Option<&EmitSpec>) -> GraphPayload {
         let incoming = self.source_event[node_index].unwrap_or_default();
         match emit {
@@ -2635,6 +2705,7 @@ impl GraphRuntime {
         if recent.len() > NEURON_RECENT_NOTES {
             recent.remove(0);
         }
+        self.record_sounding_note(node_index, sample_time, payload);
         self.event_history.push(visualization_event);
         let overflow = self
             .event_history
@@ -5427,6 +5498,50 @@ mod tests {
         assert_eq!(reset.trigger_activity[1], 0.0);
         assert!(reset.node_events[1].is_none());
         assert!(reset.event_history.is_empty());
+    }
+
+    #[test]
+    fn node_sounding_records_gate_windows_that_survive_resets() {
+        let nodes = vec![node(Timebase::Quarter), node(Timebase::Quarter)];
+        let edges = vec![GraphEdge::new(0, 1, 1.0)];
+        let mut runtime = GraphRuntime::new(1, "g".into(), nodes, edges, 1.0, 0.0);
+        let mut out = Vec::new();
+        let payload = GraphPayload { note: -3.0, velocity: 1.0, duration_beats: 0.5 };
+        runtime.push_propagation(0, 0.0, payload);
+        runtime.process_block(0.0, 1.0, 0, 48_000.0, 0, always_fire_with_dampen(0.0), &mut out);
+        let emission = out.iter().find(|e| e.node_index == 1).expect("node 1 fires");
+        let fired = emission.sample_time;
+        let gate = (emission.event.resolved.duration as f64 * 48_000.0).round() as u64;
+
+        runtime.reset(1.0);
+        let snapshot = runtime.visualization_snapshot();
+        let sounding = &snapshot.node_sounding[1];
+        assert_eq!(sounding.len(), 1, "a reset must not cut notes already scheduled");
+        assert_eq!(sounding[0].note, emission.event.resolved.transpose);
+        assert_eq!(sounding[0].velocity, emission.event.resolved.velocity);
+        assert_eq!((sounding[0].start_sample, sounding[0].end_sample), (fired, fired + gate));
+        assert!(sounding[0].is_sounding_at(fired));
+        assert!(!sounding[0].is_sounding_at(fired + gate));
+    }
+
+    #[test]
+    fn node_sounding_is_bounded_per_node() {
+        let mut long = node(Timebase::Quarter);
+        long.duration = GraphDurationSpec::Beats { value: 1_000.0 };
+        let nodes = vec![node(Timebase::Quarter), long];
+        let edges = vec![GraphEdge::new(0, 1, 1.0)];
+        let mut runtime = GraphRuntime::new(1, "g".into(), nodes, edges, 1.0, 0.0);
+        let mut out = Vec::new();
+        // Long gates so nothing ages out: only the cap bounds the list.
+        let payload = GraphPayload::default();
+        for idx in 0..(NODE_SOUNDING_CAP + 4) {
+            let start = idx as f64;
+            runtime.push_propagation(0, start, payload);
+            runtime.process_block(start, start + 1.0, idx as u64 * 48_000, 48_000.0, 0,
+                always_fire_with_dampen(0.0), &mut out);
+        }
+        let snapshot = runtime.visualization_snapshot();
+        assert_eq!(snapshot.node_sounding[1].len(), NODE_SOUNDING_CAP);
     }
 
     #[test]

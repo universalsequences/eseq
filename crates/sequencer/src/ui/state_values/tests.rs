@@ -1,3 +1,5 @@
+#[path = "graph_node_notes_ui_tests.rs"]
+mod graph_node_notes_ui_tests;
 #[path = "chorus_ui_tests.rs"]
 mod chorus_ui_tests;
 #[path = "rack_sequencer_restore_tests.rs"]
@@ -644,6 +646,7 @@ mod solo_binding_tests;
                 transpose: -7.25,
                 velocity: 0.625,
             }],
+            node_sounding: Vec::new(),
             edges: vec![sequencer::graph::GraphVisualizationEdge {
                 from: 0,
                 to: 1,

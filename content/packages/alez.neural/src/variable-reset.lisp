@@ -536,7 +536,29 @@
       (gvr-pick (str "graph-variable-reset-quantize-" n)
         (bind-graph gvr-name n :quantize gvr-quant-options) gvr-quant-options
         (lambda (v) (gvr-edit-enum n :quantize gvr-quant-options v v)))
-      (gvr-expand-button n))))
+      (gvr-expand-button n)
+      (gvr-sounding n))))
+
+;; What the node is sounding right now: one chip per open gate, so overlapping
+;; notes on a poly route all show, each as opaque as its velocity. Element
+;; bindings (not a SEQ read), so a note starting or ending repaints this widget
+;; alone.
+(def gvr-sounding-width 12)
+
+(def gvr-sounding (n)
+  (let ((notes (bind-graph-node-notes gvr-name n)))
+    (number-list
+      :key (str "graph-variable-reset-sounding-" n)
+      :count (get notes :count)
+      :values (get notes :values)
+      :levels (get notes :levels)
+      :signed true
+      :chip-width 2.2
+      :gap 0.2
+      :chip-color :mixer-strip-selected-bg
+      :font-size 8
+      :width gvr-sounding-width
+      :height gvr-row-height)))
 
 (def gvr-header ()
   (h-stack :gap 0.4 :align :center
@@ -555,7 +577,8 @@
     (label "recover" :width gvr-control-width :height 1.0 :font-size 8 :h-align :center :color :dim :bg :transparent)
     (label "res"    :width gvr-control-width :height 1.0 :font-size 8 :h-align :center :color :dim :bg :transparent)
     (label "quant"  :width gvr-control-width :height 1.0 :font-size 8 :h-align :center :color :dim :bg :transparent)
-    (label "proc"   :width gvr-expand-width :height 1.0 :font-size 8 :h-align :center :color :dim :bg :transparent)))
+    (label "proc"   :width gvr-expand-width :height 1.0 :font-size 8 :h-align :center :color :dim :bg :transparent)
+    (label "playing" :width gvr-sounding-width :height 1.0 :font-size 8 :h-align :left :color :dim :bg :transparent)))
 
 
 ;; ── Expanded neuron editor ─────────────────────────────────────────────────

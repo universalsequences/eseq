@@ -356,6 +356,47 @@ pub fn register_graph_authoring_natives(
         },
     );
 
+    let state_for_node_notes = Arc::clone(&state);
+    let bindings_for_node_notes = runtime.reactive_binding_store();
+    runtime.register_native_with_docs(
+        "bind-graph-node-notes",
+        "(bind-graph-node-notes sequencer node-index)",
+        "Bindings to the notes a graph node is sounding right now: a map with \
+         :count, :values and :levels (velocities; NODE_SOUNDING_DISPLAY element \
+         bindings each), shaped for \
+         `number-list`. The host republishes them from the audio clock, so a bound \
+         widget repaints without re-running Lisp.",
+        move |args, _ctx| {
+            if args.len() != 2 {
+                return Err("bind-graph-node-notes expects graph and node index".to_string());
+            }
+            let manifest = resolve_graph_manifest(&state_for_node_notes, &args[0])?;
+            let node = parse_nonnegative_usize(&args[1], "node index")?;
+            let field = crate::graph::node_sounding_field(manifest.id);
+            let base = node * crate::graph::NODE_SOUNDING_STRIDE;
+            let display = crate::graph::NODE_SOUNDING_DISPLAY;
+            let refs = |first: usize| -> EValue {
+                EValue::List(
+                    (first..first + display)
+                        .map(|index| {
+                            lisp_value(bindings_for_node_notes.indexed_float_ref("SEQ", field.clone(), index))
+                        })
+                        .collect(),
+                )
+            };
+            let values = refs(base + 1);
+            let levels = refs(base + 1 + display);
+            let mut map = HashMap::new();
+            map.insert(
+                "count".to_string(),
+                lisp_value(bindings_for_node_notes.indexed_float_ref("SEQ", field.clone(), base)),
+            );
+            map.insert("values".to_string(), lisp_value(values));
+            map.insert("levels".to_string(), lisp_value(levels));
+            Ok(EValue::Map(map))
+        },
+    );
+
     let state_for_graph_key = Arc::clone(&state);
     runtime.register_native_with_docs(
         "graph-key",

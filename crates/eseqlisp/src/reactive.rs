@@ -71,6 +71,19 @@ impl ReactiveBindingStore {
         }
     }
 
+    /// Handle to element `index` of a numeric-list field (what `bind-nth`
+    /// returns), for host natives that hand Lisp a batch of element bindings.
+    pub fn indexed_float_ref(&self, namespace: &str, field: impl Into<String>, index: usize) -> Value {
+        let field = field.into();
+        Value::ReactiveRef {
+            namespace: namespace.to_string(),
+            slot: self.indexed_slot(namespace, &field, index),
+            field,
+            index: Some(index),
+            kind: crate::vm::BindingKind::Float,
+        }
+    }
+
     pub(crate) fn store_value(&self, namespace: &str, field: &str, value: &Value) {
         let Some(number) = numeric_value(value) else {
             if let Value::List(items) = value {
