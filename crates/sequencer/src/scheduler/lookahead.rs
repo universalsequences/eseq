@@ -786,32 +786,16 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                 }
             }
             let step_snapshot = &track.steps[trigger.step];
-            let swing_pct = step_snapshot.swing_override.unwrap_or(track.params.swing);
-            let swing_resolution = step_snapshot
-                .swing_resolution_override
-                .unwrap_or(track.params.swing_resolution);
-            let swing_step = swing_bucket_index(trigger.cycle_start_beats, swing_resolution);
-            let is_odd_step = swing_step % 2 == 1;
             let step_boundary_sample_time = scheduled_until_sample + trigger.offset as u64;
-            let mut sample_time = if step_snapshot.chord.is_empty() {
-                delayed_step_sample_time(
-                    step_boundary_sample_time,
-                    &step_snapshot.params,
-                    trigger.samples_per_step,
-                )
-            } else {
-                step_boundary_sample_time
-            };
-            if is_odd_step && swing_pct > 50.0 {
-                let swing_delay = swing_delay_samples(
-                    sample_rate as f64,
-                    snapshot.transport.bpm as f64,
-                    swing_pct,
-                    swing_resolution,
-                )
-                .round();
-                sample_time = sample_time.saturating_add(swing_delay.max(0.0) as u64);
-            }
+            // Step Delay, then the feel: the member's rack groove replaces
+            // track/step swing when it has one (rack groove spec §Sites 1).
+            let sample_time = step_trigger_sample_time(
+                snapshot,
+                &trigger,
+                step_boundary_sample_time,
+                sample_rate,
+                samples_per_quarter,
+            );
 
             let mut resolved = ResolvedStep {
                 duration: step_snapshot.params[StepParam::Duration.index()],
@@ -1735,7 +1719,7 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                 output.sample_time,
                 samples_per_quarter,
             );
-            output.sample_time = swung_network_sample_time(
+            output.sample_time = grooved_or_swung_network_sample_time(
                 snapshot,
                 &output.event,
                 output.sample_time,
@@ -1869,7 +1853,27 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
             }
             // Velocity-merge coincident hits only when they are the same note.
             // Different notes at the same sample/track are polyphony.
-            for emission in merge_generator_emission_accents(generator_emissions) {
+            for mut emission in merge_generator_emission_accents(generator_emissions) {
+                // Generator hits aimed at a rack member play through its
+                // groove like every other trig source; their sample time is
+                // their straight beat.
+                if let Some(track) = emission.event.track {
+                    if snapshot.track_groove(track).is_some() {
+                        let straight_beats = sample_time_to_beats(
+                            chunk_start_beats,
+                            scheduled_until_sample,
+                            emission.sample_time,
+                            samples_per_quarter,
+                        );
+                        emission.sample_time = grooved_emission_sample_time(
+                            snapshot,
+                            Some(track),
+                            emission.sample_time,
+                            straight_beats,
+                            samples_per_quarter,
+                        );
+                    }
+                }
                 let event_beats = sample_time_to_beats(
                     chunk_start_beats,
                     scheduled_until_sample,
@@ -2108,7 +2112,17 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
             }
             // Velocity-merge coincident hits only when they are the same note.
             // Different notes at the same sample/track are polyphony.
-            for emission in merge_graph_emission_accents(graph_emissions) {
+            for mut emission in merge_graph_emission_accents(graph_emissions) {
+                // A fire aimed at a rack member plays through the rack's
+                // groove, keyed on its straight (quantized) beat (rack
+                // groove spec §Sites 2). No groove: unchanged.
+                emission.sample_time = grooved_emission_sample_time(
+                    snapshot,
+                    emission.event.track,
+                    emission.sample_time,
+                    emission.grid_beats,
+                    samples_per_quarter,
+                );
                 let event_beats = sample_time_to_beats(
                     chunk_start_beats,
                     scheduled_until_sample,

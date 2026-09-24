@@ -108,6 +108,11 @@ pub struct SequencerSnapshot {
     /// Drum-rack member lists at capture time, for resolving rack-owned graph
     /// sequencers' member-relative routes (`crate::graph::resolve_rack_member_routes`).
     pub rack_memberships: Vec<crate::graph::RackMembership>,
+    /// Pre-resolved rack groove per track, indexed like `tracks` (entries
+    /// past its end, and `None`, mean no groove: today's timing bit for bit).
+    /// Built when rack config or membership changes, so the hot path never
+    /// looks a groove up by pad note (docs/rack-groove-spec.md).
+    pub track_grooves: Arc<Vec<Option<crate::groove::TrackGrooveSnapshot>>>,
     pub scene_slots: SceneSlotStore,
     /// Live scene-slot overrides for EVERY scene, indexed by scene position.
     ///
@@ -127,6 +132,12 @@ pub struct SequencerSnapshot {
 }
 
 impl SequencerSnapshot {
+    /// The rack groove `track` plays through, if any.
+    #[inline]
+    pub fn track_groove(&self, track: usize) -> Option<&crate::groove::TrackGrooveSnapshot> {
+        self.track_grooves.get(track).and_then(Option::as_ref)
+    }
+
     pub fn empty() -> Self {
         Self {
             transport: SequencerTransportSnapshot {
@@ -142,6 +153,7 @@ impl SequencerSnapshot {
             neural_networks: Vec::new(),
             graph_overrides: Vec::new(),
             rack_memberships: Vec::new(),
+            track_grooves: Arc::new(Vec::new()),
             scene_slots: SceneSlotStore::default(),
             scene_slot_table: Arc::new(Vec::new()),
             process_trace: false,
@@ -197,6 +209,7 @@ impl SequencerSnapshot {
             neural_networks,
             graph_overrides,
             rack_memberships: state.rack_memberships(),
+            track_grooves: state.track_grooves(),
             scene_slots,
             scene_slot_table,
             process_trace: state.process_trace_enabled(),
@@ -308,6 +321,7 @@ impl SequencerSnapshot {
             neural_networks,
             graph_overrides,
             rack_memberships: state.rack_memberships(),
+            track_grooves: state.track_grooves(),
             scene_slots,
             // Prebuilt row snapshots are frozen at preflight; the table is
             // rebuilt from live state on every full publish, so readers take

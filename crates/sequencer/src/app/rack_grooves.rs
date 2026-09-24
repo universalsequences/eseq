@@ -96,6 +96,20 @@ fn groove_source_lanes(
 }
 
 impl App {
+    /// The scheduler's per-track groove table: every rack member of a rack
+    /// with an active groove gets its pad row (or the shared row).
+    pub fn track_groove_snapshots(&self) -> Vec<Option<crate::groove::TrackGrooveSnapshot>> {
+        crate::groove::track_groove_snapshots(
+            self.groups.iter().filter_map(|group| {
+                group
+                    .rack
+                    .as_ref()
+                    .map(|rack| (group.members.as_slice(), rack))
+            }),
+            self.tracks.len(),
+        )
+    }
+
     /// "Extract Groove…": reads the rack's source patterns, extracts a groove
     /// into the rack's list and, with `quantize_source`, straightens the
     /// source (`crate::groove::quantize_groove_source` on every source lane)

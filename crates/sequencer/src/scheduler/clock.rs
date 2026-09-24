@@ -24,6 +24,13 @@ pub(super) struct SnapshotTrigger {
     pub(super) cycle: u64,
     pub(super) cycle_start_beats: f64,
     pub(super) absolute_beats: f64,
+    /// The step's STRAIGHT boundary in transport beats: `absolute_beats` (the
+    /// first sample at or after the boundary) minus how far past the boundary
+    /// that sample sits in the track's read position. It resolves anchors,
+    /// clip offsets, length re-phase and roll windows through the same
+    /// projection that picked the step, so a rack groove keys every step on
+    /// the transport bar exactly (docs/rack-groove-spec.md, "Beat frame").
+    pub(super) boundary_beats: f64,
     pub(super) samples_per_step: f32,
 }
 
@@ -618,6 +625,8 @@ impl SnapshotSequencerClock {
                                     cycle: (local_beats / cycle).floor().max(0.0) as u64,
                                     cycle_start_beats: tc.boundaries[step],
                                     absolute_beats: self.total_beats,
+                                    boundary_beats: self.total_beats
+                                        - (pos_in_cycle - tc.boundaries[step]).max(0.0),
                                     samples_per_step,
                                 });
                             }
@@ -893,6 +902,104 @@ pub(super) fn swing_delay_samples_from_quarter(
 ) -> f64 {
     let resolution_samples = resolution.step_beats() * samples_per_quarter;
     ((swing_pct as f64 / 100.0) - 0.5) * 2.0 * resolution_samples
+}
+
+/// A step trig's sample time: the straight boundary plus its step Delay
+/// (chord steps apply their per-note delays later), plus the feel.
+///
+/// The feel is the member's rack groove when it has one (keyed on the
+/// trig's straight transport boundary), which REPLACES the track swing and
+/// any per-step swing override (docs/rack-groove-spec.md §Sites 1). Otherwise
+/// it is today's swing, bit for bit.
+pub(super) fn step_trigger_sample_time(
+    snapshot: &SequencerSnapshot,
+    trigger: &SnapshotTrigger,
+    step_boundary_sample_time: u64,
+    sample_rate: u32,
+    samples_per_quarter: f64,
+) -> u64 {
+    let track = &snapshot.tracks[trigger.track];
+    let step_snapshot = &track.steps[trigger.step];
+    let mut sample_time = if step_snapshot.chord.is_empty() {
+        delayed_step_sample_time(
+            step_boundary_sample_time,
+            &step_snapshot.params,
+            trigger.samples_per_step,
+        )
+    } else {
+        step_boundary_sample_time
+    };
+    if let Some(groove) = snapshot.track_groove(trigger.track) {
+        return sample_time.saturating_add(crate::groove::groove_delay_samples(
+            groove,
+            trigger.boundary_beats,
+            samples_per_quarter,
+        ));
+    }
+    let swing_pct = step_snapshot.swing_override.unwrap_or(track.params.swing);
+    let swing_resolution = step_snapshot
+        .swing_resolution_override
+        .unwrap_or(track.params.swing_resolution);
+    let swing_step = swing_bucket_index(trigger.cycle_start_beats, swing_resolution);
+    let is_odd_step = swing_step % 2 == 1;
+    if is_odd_step && swing_pct > 50.0 {
+        let swing_delay = swing_delay_samples(
+            sample_rate as f64,
+            snapshot.transport.bpm as f64,
+            swing_pct,
+            swing_resolution,
+        )
+        .round();
+        sample_time = sample_time.saturating_add(swing_delay.max(0.0) as u64);
+    }
+    sample_time
+}
+
+/// An emitted trig (graph, generator or process emission) aimed at `track`,
+/// moved by the track's rack groove when it has one. `boundary_beats` is the
+/// emission's straight transport beat. No groove: `sample_time` unchanged.
+pub(super) fn grooved_emission_sample_time(
+    snapshot: &SequencerSnapshot,
+    track: Option<usize>,
+    sample_time: u64,
+    boundary_beats: f64,
+    samples_per_quarter: f64,
+) -> u64 {
+    match track.and_then(|track| snapshot.track_groove(track)) {
+        Some(groove) => crate::groove::grooved_sample_time(
+            groove,
+            boundary_beats,
+            sample_time,
+            samples_per_quarter,
+        ),
+        None => sample_time,
+    }
+}
+
+/// Legacy neural outputs: the target member's rack groove when it has one
+/// (replacing the track swing), else the track swing exactly as before.
+pub(super) fn grooved_or_swung_network_sample_time(
+    snapshot: &SequencerSnapshot,
+    event: &StepEvent,
+    sample_time: u64,
+    event_beats: f64,
+    samples_per_quarter: f64,
+) -> u64 {
+    match snapshot.track_groove(event.track) {
+        Some(groove) => crate::groove::grooved_sample_time(
+            groove,
+            event_beats,
+            sample_time,
+            samples_per_quarter,
+        ),
+        None => swung_network_sample_time(
+            snapshot,
+            event,
+            sample_time,
+            event_beats,
+            samples_per_quarter,
+        ),
+    }
 }
 
 pub(super) fn swung_network_sample_time(

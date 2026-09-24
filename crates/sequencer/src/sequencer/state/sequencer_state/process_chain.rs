@@ -55,6 +55,26 @@ impl SequencerState {
     pub fn rack_memberships(&self) -> Vec<crate::graph::RackMembership> {
         self.rack_memberships.lock().unwrap().clone()
     }
+    /// Mirror of every rack member's resolved groove (rack groove spec,
+    /// "Scheduler snapshot"), read into every scheduler snapshot. Publishes
+    /// only when the table changed, so the topology funnel that calls this on
+    /// every group edit costs nothing when grooves are untouched.
+    pub fn set_track_grooves(&self, grooves: Vec<Option<crate::groove::TrackGrooveSnapshot>>) {
+        let changed = {
+            let mut current = self.track_grooves.lock().unwrap();
+            let changed = **current != grooves;
+            if changed {
+                *current = Arc::new(grooves);
+            }
+            changed
+        };
+        if changed {
+            self.publish_scheduler_snapshot();
+        }
+    }
+    pub fn track_grooves(&self) -> Arc<Vec<Option<crate::groove::TrackGrooveSnapshot>>> {
+        Arc::clone(&self.track_grooves.lock().unwrap())
+    }
     /// The graph overrides of every scene, by scene position.
     pub fn all_scene_graph_overrides(&self) -> Vec<Vec<ProjectGraphOverrides>> {
         let bank = self.pattern.scenes.lock().unwrap();

@@ -704,8 +704,22 @@ pub(super) fn enqueue_due_process_emissions(
     debug_accum: bool,
 ) -> bool {
     for item in process_runtime.take_due_events(up_to_beat) {
-        let sample_time = chunk_start_sample.saturating_add(
+        let straight_sample_time = chunk_start_sample.saturating_add(
             ((item.beat - chunk_start_beats).max(0.0) * samples_per_quarter).round() as u64,
+        );
+        // Process emissions aimed at a rack member play through its groove
+        // (rack groove spec §Sites 4), keyed on the emission's straight beat,
+        // so step processes land in the same pocket as the step trigs.
+        let target_track = match &item.event {
+            crate::process::ProcessScheduledEvent::Emission(event) => event.track,
+            crate::process::ProcessScheduledEvent::Step(spawned) => Some(spawned.event.track),
+        };
+        let sample_time = grooved_emission_sample_time(
+            snapshot,
+            target_track,
+            straight_sample_time,
+            item.beat,
+            samples_per_quarter,
         );
         match item.event {
             crate::process::ProcessScheduledEvent::Emission(event) => {

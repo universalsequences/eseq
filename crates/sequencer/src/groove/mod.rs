@@ -14,7 +14,9 @@
 //! - [`quantize_groove_source`] straightens the source pattern so it sounds
 //!   the same through the groove as it did before extraction.
 //!
-//! Nothing here touches playback; application is eseq-groove.2.
+//! Application (eseq-groove.2) lives in [`apply`]: the scheduler's
+//! pre-resolved per-track table, the shared timing function and the built-in
+//! MPC swing grooves.
 
 use serde::{Deserialize, Serialize};
 
@@ -23,8 +25,14 @@ use crate::sequencer::{
     bar_of_step, StepParam, SwingResolution, Timebase, TrackPatternData, MAX_STEPS,
 };
 
+mod apply;
 #[cfg(test)]
 mod tests;
+
+pub use apply::{
+    builtin_groove, builtin_grooves, groove_delay_samples, grooved_sample_time, mpc_swing_groove,
+    track_groove_snapshots, BuiltinGroove, TrackGrooveSnapshot, BUILTIN_MPC_SWING_PERCENTS,
+};
 
 /// Stable identity of one groove within its rack's list.
 pub type GrooveId = u64;

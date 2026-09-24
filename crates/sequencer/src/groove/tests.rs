@@ -666,3 +666,208 @@ fn settings_default_to_timing_only_and_sanitize_into_range() {
     let partial: RackGrooveSettings = serde_json::from_str("{}").expect("empty object");
     assert_eq!(partial, RackGrooveSettings::default());
 }
+
+// --- application (eseq-groove.2) --------------------------------------------
+
+fn row_of(offsets: &[f32]) -> GrooveRow {
+    GrooveRow {
+        slots: offsets
+            .iter()
+            .map(|&offset| GrooveSlot {
+                offset,
+                ..GrooveSlot::default()
+            })
+            .collect(),
+    }
+}
+
+fn track_groove(period: f64, resolution: f64, offsets: &[f32]) -> TrackGrooveSnapshot {
+    TrackGrooveSnapshot {
+        period_beats: period,
+        resolution_beats: resolution,
+        row: std::sync::Arc::new(row_of(offsets)),
+        timing_amount: 1.0,
+        velocity_amount: 0.0,
+        random_amount: 0.0,
+    }
+}
+
+/// `offset_beats` reads the slot at the transport beat, interpolates between
+/// slots (a 16th groove shapes 32nds), wraps at the period and scales by the
+/// timing amount.
+#[test]
+fn applied_offset_interpolates_wraps_and_scales_by_timing_amount() {
+    let groove = track_groove(1.0, 0.25, &[0.0, 0.4, 0.2, 0.0]);
+    let at = |beats: f64| groove.offset_beats(beats);
+    assert_eq!(at(0.0), 0.0);
+    assert!((at(0.25) - 0.1).abs() < 1e-6, "slot 1: 0.4 of a 16th");
+    assert!((at(0.5) - 0.05).abs() < 1e-6, "slot 2");
+    // A 32nd between slots 1 and 2: halfway between 0.4 and 0.2 slots.
+    assert!((at(0.375) - 0.3 * 0.25).abs() < 1e-6);
+    // Between slot 3 and the wrap back to slot 0.
+    assert!((at(0.875) - 0.0).abs() < 1e-6);
+    // Period wrap, bar 7: same pocket.
+    assert!((at(7.25) - at(0.25)).abs() < 1e-12);
+    // A boundary a hair either side of a slot reads as that slot.
+    assert!((at(0.25 - 1e-9) - at(0.25)).abs() < 1e-12);
+    assert!((at(0.25 + 1e-9) - at(0.25)).abs() < 1e-12);
+    assert!(
+        (at(4.0 - 1e-10) - at(0.0)).abs() < 1e-12,
+        "wrap edge snaps to slot 0"
+    );
+
+    let mut half = groove.clone();
+    half.timing_amount = 0.5;
+    assert!((half.offset_beats(0.25) - 0.05).abs() < 1e-6);
+    let mut off = groove.clone();
+    off.timing_amount = 0.0;
+    assert_eq!(off.offset_beats(0.25), 0.0);
+}
+
+/// Late-only slice: negative (early) offsets are clamped to the grid until
+/// the lookahead can discover trigs ahead of the chunk edge (eseq-groove.3).
+#[test]
+fn applied_offset_is_late_only_in_this_slice() {
+    let groove = track_groove(1.0, 0.25, &[-0.3, 0.2, -0.1, 0.0]);
+    assert_eq!(
+        groove.offset_beats(0.0),
+        0.0,
+        "early kick lands on the grid"
+    );
+    assert_eq!(groove.offset_beats(0.5), 0.0);
+    assert!(groove.offset_beats(0.25) > 0.0);
+    // Interpolating across an early slot never goes negative either.
+    assert!(groove.offset_beats(0.125) >= 0.0);
+    assert_eq!(groove_delay_samples(&groove, 0.0, 24_000.0), 0);
+    assert_eq!(groove_delay_samples(&groove, 0.25, 24_000.0), 1_200);
+    assert_eq!(grooved_sample_time(&groove, 0.25, 6_000, 24_000.0), 7_200);
+    // Degenerate inputs never move a trig.
+    assert_eq!(groove_delay_samples(&groove, f64::NAN, 24_000.0), 0);
+    assert_eq!(groove_delay_samples(&groove, 0.25, 0.0), 0);
+    assert_eq!(track_groove(1.0, 0.25, &[]).offset_beats(0.25), 0.0);
+}
+
+/// The built-in MPC swings are two-slot grooves that delay exactly what
+/// track swing delays at the same percentage and resolution.
+#[test]
+fn builtin_mpc_swings_match_track_swing_delays() {
+    let ids: Vec<&str> = builtin_grooves().iter().map(|b| b.id.as_str()).collect();
+    assert_eq!(ids.len(), 2 * BUILTIN_MPC_SWING_PERCENTS.len());
+    assert!(ids.contains(&"mpc-16-58"));
+    assert!(ids.contains(&"mpc-8-66"));
+    assert!(builtin_groove("mpc-16-99").is_none());
+    let samples_per_quarter = 24_000.0;
+    for builtin in builtin_grooves() {
+        let groove = &builtin.groove;
+        assert!(groove.is_well_formed(), "{}", builtin.id);
+        assert!(groove.pad_rows.is_empty());
+        assert_eq!(groove.slot_count(), 2);
+        let percent: u32 = builtin.id.rsplit('-').next().unwrap().parse().unwrap();
+        let snapshot = TrackGrooveSnapshot {
+            period_beats: groove.period_beats,
+            resolution_beats: groove.resolution_beats,
+            row: std::sync::Arc::new(groove.shared_row.clone()),
+            timing_amount: 1.0,
+            velocity_amount: 0.0,
+            random_amount: 0.0,
+        };
+        let res = groove.resolution_beats;
+        let swing = (((percent as f64 / 100.0) - 0.5) * 2.0 * res * samples_per_quarter).round();
+        for bucket in 0..8u64 {
+            let beats = bucket as f64 * res;
+            let expected = if bucket % 2 == 1 { swing as u64 } else { 0 };
+            assert_eq!(
+                groove_delay_samples(&snapshot, beats, samples_per_quarter),
+                expected,
+                "{} bucket {bucket}",
+                builtin.id
+            );
+        }
+    }
+}
+
+/// The scheduler table: each member of a rack with an active groove gets its
+/// pad's row by pad note, else the shared row (also for a member with no
+/// pad); tracks outside racks, and racks with no (or a dangling) active
+/// groove, get `None`.
+#[test]
+fn track_groove_snapshots_resolve_pad_rows_by_note_else_shared() {
+    use crate::project::{ProjectRackConfig, ProjectRackPad};
+    let mut groove = mpc_swing_groove(50, 0.25);
+    groove.id = 7;
+    groove.period_beats = 0.5;
+    groove.pad_rows = vec![GroovePadRow {
+        pad_note: 42,
+        row: row_of(&[0.1, 0.3]),
+    }];
+    let rack = ProjectRackConfig {
+        pads: vec![
+            ProjectRackPad {
+                pad_note: 36,
+                member: 0,
+            },
+            ProjectRackPad {
+                pad_note: 42,
+                member: 1,
+            },
+        ],
+        grooves: vec![groove.clone()],
+        groove: RackGrooveSettings {
+            active: Some(GrooveRef::Rack(7)),
+            timing_amount: 0.75,
+            velocity_amount: 0.5,
+            random_amount: 0.25,
+        },
+        ..Default::default()
+    };
+    // Members: track 3 = kick (36), track 1 = hat (42), track 4 = no pad.
+    let members = vec![3usize, 1, 4];
+    let table = track_groove_snapshots([(members.as_slice(), &rack)], 6);
+    assert_eq!(table.len(), 6);
+    for track in [0usize, 2, 5] {
+        assert!(table[track].is_none(), "track {track} is outside the rack");
+    }
+    let kick = table[3].as_ref().expect("kick groove");
+    let hat = table[1].as_ref().expect("hat groove");
+    let loose = table[4].as_ref().expect("member without a pad");
+    assert_eq!(*kick.row, groove.shared_row, "no kick row: shared");
+    assert_eq!(*hat.row, row_of(&[0.1, 0.3]), "hat plays its own row");
+    assert_eq!(*loose.row, groove.shared_row);
+    assert_eq!(kick.period_beats, 0.5);
+    assert_eq!(kick.resolution_beats, 0.25);
+    assert_eq!(kick.timing_amount, 0.75);
+    assert_eq!(kick.velocity_amount, 0.5);
+    assert_eq!(kick.random_amount, 0.25);
+
+    // Pad rows follow the NOTE: swap the notes and the hat row moves.
+    let mut swapped = rack.clone();
+    swapped.pads[0].pad_note = 42;
+    swapped.pads[1].pad_note = 36;
+    let table = track_groove_snapshots([(members.as_slice(), &swapped)], 6);
+    assert_eq!(*table[3].as_ref().unwrap().row, row_of(&[0.1, 0.3]));
+    assert_eq!(*table[1].as_ref().unwrap().row, groove.shared_row);
+
+    // A built-in reference resolves to its shared row for every member.
+    let mut builtin = rack.clone();
+    builtin.groove.active = Some(GrooveRef::Builtin("mpc-16-66".to_string()));
+    let table = track_groove_snapshots([(members.as_slice(), &builtin)], 6);
+    let expected = builtin_groove("mpc-16-66").unwrap();
+    for track in [3usize, 1, 4] {
+        assert_eq!(*table[track].as_ref().unwrap().row, expected.shared_row);
+    }
+
+    // Off, dangling, or unknown built-in: nothing.
+    for active in [
+        None,
+        Some(GrooveRef::Rack(99)),
+        Some(GrooveRef::Builtin("nope".to_string())),
+    ] {
+        let mut off = rack.clone();
+        off.groove.active = active;
+        let table = track_groove_snapshots([(members.as_slice(), &off)], 6);
+        assert!(table.iter().all(Option::is_none));
+    }
+    // A member index past the table is ignored rather than panicking.
+    let table = track_groove_snapshots([(&[9usize][..], &rack)], 6);
+    assert!(table.iter().all(Option::is_none));
+}

@@ -1556,7 +1556,8 @@ impl ProjectRackConfig {
     }
 
     /// The rack's active groove when it is one of its own. A built-in
-    /// reference resolves elsewhere (eseq-groove.2).
+    /// reference resolves through `resolved_active_groove`
+    /// (`crate::groove::apply`).
     pub fn active_rack_groove(&self) -> Option<&ProjectGroove> {
         match self.groove.active.as_ref()? {
             GrooveRef::Rack(id) => self.groove_by_id(*id),

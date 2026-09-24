@@ -2338,6 +2338,11 @@ impl App {
         // is a group-topology change, which is exactly when rack-owned graph
         // sequencers' member routes need re-resolving.
         self.state.set_rack_memberships(self.rack_memberships());
+        // Rack grooves ride the same funnel: every rack config edit (groove
+        // pick, amounts, pad notes, extraction) and every membership change
+        // lands here, so the scheduler's per-track groove table is rebuilt
+        // exactly when it can change (docs/rack-groove-spec.md).
+        self.state.set_track_grooves(self.track_groove_snapshots());
         let keys = &self.state.runtime.rack_choke_keys;
         for key in keys.iter() {
             key.store(0, Ordering::Release);

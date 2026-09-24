@@ -1042,6 +1042,11 @@ pub struct NodeFire {
 #[derive(Clone, Debug, PartialEq)]
 pub struct GraphEmission {
     pub sample_time: u64,
+    /// The fire's STRAIGHT beat: the node boundary after `:quantize`, before
+    /// the node's own swing. A rack groove keys on it (rack groove spec
+    /// §Sites 2), so a groove lands the same whether the pad was hit by a
+    /// step or by a node.
+    pub grid_beats: f64,
     pub node_index: usize,
     pub event: EmittedAccumulatorEvent,
 }
@@ -1063,6 +1068,8 @@ struct GraphFiringCandidate {
     node_index: usize,
     fire_sample: u64,
     fire_beats: f64,
+    /// `fire_beats` before the node's swing (see `GraphEmission::grid_beats`).
+    grid_beats: f64,
     emit: Option<EmitSpec>,
     reset_graph_state: bool,
     dampen_incoming: Option<f64>,
@@ -1978,6 +1985,7 @@ impl GraphRuntime {
                         .as_ref()
                         .and_then(|emit| emit.swing)
                         .unwrap_or(self.nodes[idx].swing);
+                    let grid_beats = fire_beats;
                     let (fire_sample, fire_beats) =
                         swing.apply_to_timing(fire_sample, fire_beats, samples_per_quarter);
                     // Mirror commit_firing's payload resolution so max_poly selection
@@ -1994,6 +2002,7 @@ impl GraphRuntime {
                         node_index: idx,
                         fire_sample,
                         fire_beats,
+                        grid_beats,
                         emit: decision.emit,
                         reset_graph_state: decision.reset_graph_state,
                         dampen_incoming: decision.dampen_incoming,
@@ -2534,6 +2543,7 @@ impl GraphRuntime {
                 node_index: idx,
                 fire_sample,
                 fire_beats,
+                grid_beats: reset_beats,
                 emit: decision.emit,
                 reset_graph_state: false,
                 dampen_incoming: None,
@@ -2600,6 +2610,7 @@ impl GraphRuntime {
                 node_index,
                 candidate.fire_sample,
                 candidate.fire_beats,
+                candidate.grid_beats,
                 payload,
                 out,
             );
@@ -2671,6 +2682,7 @@ impl GraphRuntime {
         node_index: usize,
         sample_time: u64,
         beat: f64,
+        grid_beats: f64,
         payload: GraphPayload,
         out: &mut Vec<GraphEmission>,
     ) {
@@ -2716,6 +2728,7 @@ impl GraphRuntime {
         }
         out.push(GraphEmission {
             sample_time,
+            grid_beats,
             node_index,
             event,
         });
@@ -2777,6 +2790,7 @@ impl GraphRuntime {
             node_index,
             candidate.fire_sample,
             candidate.fire_beats,
+            candidate.grid_beats,
             payload,
             out,
         );

@@ -1,6 +1,6 @@
 # Rack Grooves — Extracted Feel, Applied to Every Trig Source
 
-Status: rev 1, unbuilt. Epic: `eseq-groove` (slices `.1`–`.7` below).
+Status: rev 1; slices 1–2 built (model/extraction, late-only application). Epic: `eseq-groove` (slices `.1`–`.7` below).
 
 ## Problem
 
@@ -257,6 +257,13 @@ fn grooved_sample_time(g: &TrackGrooveSnapshot, boundary_beats, straight_sample,
    groove when the target track has one. Otherwise keep today's swing behavior.
 4. **Process emissions** (`enqueue_due_process_emissions`) that target a rack
    member: apply the groove, so step processes behave like the sources above.
+   *Built (eseq-groove.2):* sites 1–4 plus generator emissions share
+   `groove::groove_delay_samples` (`groove/apply.rs`), keyed on the trig's
+   straight transport beat: `SnapshotTrigger::boundary_beats` for steps,
+   `GraphEmission::grid_beats` (post-`:quantize`, pre-node-swing) for graph
+   fires, `item.beat` for process events. A graph node's own `:swing` still
+   adds on top of the groove, like step Delay. The per-track table is
+   rebuilt by `App::publish_rack_choke_runtime`, the group-topology funnel.
 5. **Roll hits** (`roll_swung_sample_time`) and **live-keyboard record**: the
    groove replaces swing the same way. Recording through a grooved rack must
    **unwind** the groove offset before storing phase, or playback applies it

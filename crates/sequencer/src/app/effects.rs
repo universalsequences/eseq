@@ -7443,6 +7443,88 @@ mod tests {
         graph.process_block();
     }
 
+    /// Rack grooves reach the scheduler (eseq-groove.2): picking a groove on
+    /// a rack publishes a per-member groove table into the scheduler
+    /// snapshot (pad row by pad note, else the shared row), a built-in
+    /// resolves to its shared row, pad-note edits move the rows, and turning
+    /// the groove off (or undoing the pick) clears every entry.
+    #[test]
+    fn rack_groove_selection_publishes_the_scheduler_groove_table() {
+        use crate::groove::{builtin_groove, mpc_swing_groove, GroovePadRow, GrooveRef, GrooveRow, GrooveSlot};
+
+        let graph = TestLiveGraph::new("drum-rack-groove-publish-test", 64, 44_100, 2);
+        let mut app = test_app_for_live_graph(&graph, 0);
+        let (group_id, _) = app
+            .create_drum_rack_recorded(None)
+            .expect("drum rack should be created");
+        let kick = app.graph_controller().add_blank_sampler_track().expect("kick track");
+        let hat = app.graph_controller().add_blank_sampler_track().expect("hat track");
+        app.assign_rack_pad_track_recorded(group_id, 36, kick).expect("kick pad");
+        app.assign_rack_pad_track_recorded(group_id, 42, hat).expect("hat pad");
+        let table = |app: &App| app.state.latest_scheduler_snapshot().track_grooves.clone();
+        assert!(table(&app).iter().all(Option::is_none), "no active groove: no entries");
+
+        let hat_row = GrooveRow {
+            slots: vec![
+                GrooveSlot { offset: 0.1, ..GrooveSlot::default() },
+                GrooveSlot { offset: 0.3, ..GrooveSlot::default() },
+            ],
+        };
+        let mut groove = mpc_swing_groove(58, 0.25);
+        groove.id = 1;
+        groove.name = "Pocket".to_string();
+        groove.pad_rows = vec![GroovePadRow { pad_note: 42, row: hat_row.clone() }];
+        let rack_index = app.groups.iter().position(|g| g.id == group_id).expect("rack group");
+        app.groups[rack_index].rack.as_mut().expect("rack").grooves.push(groove.clone());
+
+        app.set_rack_active_groove_recorded(group_id, Some(GrooveRef::Rack(1)))
+            .expect("pick the rack groove");
+        let grooves = table(&app);
+        let kick_groove = grooves[kick].as_ref().expect("kick member grooved");
+        let hat_groove = grooves[hat].as_ref().expect("hat member grooved");
+        assert_eq!(*kick_groove.row, groove.shared_row, "kick has no row: shared");
+        assert_eq!(*hat_groove.row, hat_row, "hat plays its own row");
+        assert_eq!(hat_groove.period_beats, 0.5);
+        assert_eq!(hat_groove.timing_amount, 1.0);
+        for (track, entry) in grooves.iter().enumerate() {
+            if track != kick && track != hat {
+                assert!(entry.is_none(), "track {track} is outside the rack");
+            }
+        }
+
+        // Swapping the pad notes moves the hat row to the kick member.
+        app.set_rack_pad_note_recorded(group_id, 36, 42).expect("swap pad notes");
+        let grooves = table(&app);
+        assert_eq!(*grooves[kick].as_ref().unwrap().row, hat_row);
+        assert_eq!(*grooves[hat].as_ref().unwrap().row, groove.shared_row);
+        assert!(matches!(
+            crate::app::edit::undo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(*table(&app)[hat].as_ref().unwrap().row, hat_row);
+
+        app.set_rack_active_groove_recorded(group_id, Some(GrooveRef::Builtin("mpc-16-66".to_string())))
+            .expect("pick a built-in");
+        let expected = &builtin_groove("mpc-16-66").unwrap().shared_row;
+        let grooves = table(&app);
+        assert_eq!(&*grooves[kick].as_ref().unwrap().row, expected);
+        assert_eq!(&*grooves[hat].as_ref().unwrap().row, expected);
+
+        app.set_rack_active_groove_recorded(group_id, None).expect("groove off");
+        assert!(table(&app).iter().all(Option::is_none));
+        assert!(matches!(
+            crate::app::edit::undo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
+        ));
+        assert!(table(&app)[hat].is_some(), "undo restores the built-in");
+        assert!(matches!(
+            crate::app::edit::undo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(*table(&app)[hat].as_ref().unwrap().row, hat_row, "back to the rack groove");
+        graph.process_block();
+    }
+
     /// Drum rack v2 slice 6: the pad-note badge moves a pad on the pad
     /// keyboard without disturbing anything else about it, and refuses to
     /// collide with a pad that is already there.
