@@ -274,15 +274,25 @@ pub(crate) fn sync_reactive_tick(
     let process_scope_values_version = ctx.shared.state.process_scope_values_version();
     let track_scopes = editor.runtime().has_live_reactive_consumers("SEQ", "track-process-scopes");
     let scope_cells = editor.runtime().has_live_reactive_consumers("SEQ", "process-scope-cells");
-    if process_scope_values_version != ctx.frame.prev_process_scope_values_version
-        && (track_scopes || scope_cells)
-    {
-        ctx.frame.prev_process_scope_values_version = process_scope_values_version;
+    let (publish_tracks, publish_cells) = process_scope_publish(
+        process_scope_values_version,
+        ctx.frame.prev_process_scope_values_version,
+        ctx.frame.prev_process_scope_cells_version,
+        track_scopes,
+        scope_cells,
+    );
+    if publish_tracks || publish_cells {
+        if publish_tracks {
+            ctx.frame.prev_process_scope_values_version = process_scope_values_version;
+        }
+        if publish_cells {
+            ctx.frame.prev_process_scope_cells_version = process_scope_values_version;
+        }
         state_values::sync_process_scope_state(
             editor.runtime_mut(),
             &ctx.shared.state,
-            track_scopes,
-            scope_cells,
+            publish_tracks,
+            publish_cells,
         );
         editor.runtime_mut().run_reactive_cycle();
         editor.mark_needs_redraw();
@@ -2190,4 +2200,35 @@ pub(crate) fn reactive_tick_and_render(
         }
     }
     Ok(TickFlow::Continue)
+}
+
+/// Which process-scope fields to republish this frame. Each field keeps its
+/// own watermark, so a version consumed while only one field had a consumer
+/// is still published to the other once it gains one.
+fn process_scope_publish(
+    version: u64,
+    prev_tracks: u64,
+    prev_cells: u64,
+    track_consumer: bool,
+    cells_consumer: bool,
+) -> (bool, bool) {
+    (
+        track_consumer && version != prev_tracks,
+        cells_consumer && version != prev_cells,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::process_scope_publish;
+
+    #[test]
+    fn process_scope_cells_publish_after_tracks_consumed_version() {
+        // Only the lane strip is live: tracks consume version 5.
+        assert_eq!(process_scope_publish(5, 4, 4, true, false), (true, false));
+        // A cells consumer opens later with the version still at 5.
+        assert_eq!(process_scope_publish(5, 5, 4, true, true), (false, true));
+        // Both caught up: nothing to publish.
+        assert_eq!(process_scope_publish(5, 5, 5, true, true), (false, false));
+    }
 }

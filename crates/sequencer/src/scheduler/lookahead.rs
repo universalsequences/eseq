@@ -413,6 +413,14 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                         midi_fx_quantizer_state.reset();
                         neural_runtime.reset_state(0.0);
                         generator_runtime.reset(0.0);
+                        // Hand the reads the previous run's tail first, so
+                        // the reset drops it instead of the next chunk's
+                        // feed replaying it into the new run.
+                        feed_track_output_reads(
+                            process_runtime,
+                            &track_output_events,
+                            &mut track_output_read_cursor,
+                        );
                         process_runtime.reset_transport(0.0);
                         for graph in graph_runtimes.iter_mut() {
                             graph.reset_transport(0.0);

@@ -322,14 +322,26 @@ impl App {
         }
         let steps = bars * 16;
         let scale = steps as f64 / (end - start);
+        // A quarter step of slop at each crop edge, so the loop reads as a
+        // quantized cycle: an early first hit still lands on step one, and
+        // the next repetition's early downbeat is left out of the last step.
+        // A quarter keeps 16th triplets (a third of a step off the grid) out
+        // of the slop.
+        let slop = (end - start) / steps as f64 / 4.0;
         let mut lanes = BTreeMap::<usize, BTreeMap<usize, Vec<ImportedNote>>>::new();
-        for note in &draft.notes {
-            // A trig is selected by its onset. A note crossing the right crop
-            // edge is shortened; cropping never invents a note-on at the left.
-            if note.start < start || note.start >= end { continue; }
+        // Notes before the crop start go last, and only onto a track whose
+        // step one is still empty, so a pickup or flam never doubles the
+        // downbeat.
+        for early in [false, true] { for note in &draft.notes {
+            // A trig is selected by its onset, inside the crop window shifted
+            // back by the slop. A note crossing the right crop edge is
+            // shortened; cropping never invents a note-on at the left.
+            if (note.start < start) != early
+                || note.start < start - slop || note.start >= end - slop { continue; }
             let track = self.track_registry.index_of(note.track)
                 .ok_or("A captured track was deleted. Reopen MIDI capture")?;
-            let position = (note.start - start) * scale;
+            if early && lanes.get(&track).is_some_and(|steps| steps.contains_key(&0)) { continue; }
+            let position = ((note.start - start) * scale).max(0.0);
             let step = position.floor() as usize;
             let delay = (position - step as f64) as f32;
             let duration = ((note.end.min(end) - note.start).max(0.000001) * scale) as f32;
@@ -348,7 +360,7 @@ impl App {
             notes.push(ImportedNote {
                 transpose: note.transpose, duration, delay, velocity: note.velocity,
             });
-        }
+        } }
         if lanes.is_empty() { return Err("The crop contains no trigs".into()); }
         let note_count = lanes.values().flat_map(|steps| steps.values()).map(Vec::len).sum();
         let tracks = lanes.keys().copied().collect();
@@ -681,6 +693,60 @@ mod tests {
         super::super::edit::redo(&mut app);
         assert_eq!(app.state.effective_track_pattern_id(0), Some(imported));
         assert_eq!(app.state.pattern.chord_data[0].count(0), 2);
+    }
+
+    /// A detected crop snaps to the grid line nearest an early first hit, so
+    /// it starts after that hit. Import must still put the downbeat on step
+    /// one and leave the next bar's early downbeat out of the last step.
+    #[test]
+    fn retrospective_import_of_a_detected_crop_keeps_an_early_downbeat_on_step_one() {
+        const BPM: f64 = 113.0;
+        const EARLY: f64 = 0.008;
+        let pattern = [(0, 1), (10, 1), (0, 2), (4, 2), (8, 2), (12, 2)];
+        let mut notes = loose_groove(9.263, BPM, &pattern, 1, 4, 0.0);
+        let bar = 240.0 / BPM;
+        for note in &mut notes {
+            let in_bar = (note.start - 9.263).rem_euclid(bar);
+            if note.track == TrackId(1) && (in_bar < 1e-6 || bar - in_bar < 1e-6) {
+                note.start -= EARLY;
+                note.end -= EARLY;
+            }
+        }
+        notes.sort_by(|a, b| a.start.total_cmp(&b.start));
+        let first_kick = notes.iter().find(|note| note.track == TrackId(1)).unwrap().start;
+        let guess = detect_capture_loop(&notes).unwrap();
+        assert!(guess.start > first_kick, "{guess:?} vs first kick {first_kick}");
+        let bars = guess.bars;
+        let mut app = app();
+        let duration = notes.last().unwrap().end + 1.0;
+        app.retrospective.draft = Some(CaptureDraft {
+            duration, truncated: false, scene: app.state.current_scene_id().unwrap(), notes,
+        });
+        let end = guess.start + 240.0 * bars as f64 / guess.bpm as f64;
+        app.import_retrospective(guess.start, end, bars).unwrap();
+        assert!(app.state.pattern.patterns[0].is_active(0));
+        assert_eq!(app.state.pattern.chord_data[0].get_delay(0, 0), 0.0);
+        assert!(!app.state.pattern.patterns[0].is_active(bars * 16 - 1));
+    }
+
+    /// A flam just before the crop start must not move onto a step one that
+    /// already has its own hit: that would double the downbeat, or fail the
+    /// import on the mismatched velocity.
+    #[test]
+    fn retrospective_import_leaves_a_pre_start_flam_off_an_occupied_step_one() {
+        let sixteenth = 15.0 / 120.0;
+        let note = |start: f64, velocity: f32| CapturedNote {
+            track: TrackId(1), transpose: 0.0, velocity, start, end: start + 0.05,
+        };
+        let notes = vec![note(1.0 - 0.2 * sixteenth, 0.4), note(1.0, 1.0), note(1.0 + 8.0 * sixteenth, 1.0)];
+        let mut app = app();
+        app.retrospective.draft = Some(CaptureDraft {
+            duration: 4.0, truncated: false, scene: app.state.current_scene_id().unwrap(), notes,
+        });
+        app.import_retrospective(1.0, 3.0, 1).unwrap();
+        assert!(app.state.pattern.patterns[0].is_active(0));
+        assert_eq!(app.state.pattern.chord_data[0].count(0), 1);
+        assert_eq!(app.state.pattern.step_data[0].get(0, StepParam::Velocity), 1.0);
     }
 
     /// Kit pads in a rack with clips read their pattern from the active clip,

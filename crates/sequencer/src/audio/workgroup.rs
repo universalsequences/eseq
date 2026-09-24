@@ -237,7 +237,12 @@ mod tests {
         // policy verifies an unbound pool (every helper out of the group).
         assert_eq!(initial.policy, Policy::Adaptive);
         assert!(!initial.enabled);
-        assert_eq!(initial.binding.worker_count, 4);
+        assert!(initial.binding.worker_count > 0);
+        assert_eq!(
+            initial.binding.worker_count as u32,
+            crate::audio::worker_prefs::running_worker_count()
+                .expect("engine recorded its worker count")
+        );
         assert_eq!(initial.binding.joined_workers, 0);
         std::thread::sleep(Duration::from_millis(350));
         let observed = engine._stream.workgroup.as_ref().unwrap().report();

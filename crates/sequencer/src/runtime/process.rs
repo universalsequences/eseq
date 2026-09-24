@@ -2360,6 +2360,14 @@ impl ProcessRuntime {
                 clock.realign(total_beats);
             }
         }
+        // Sounded output only means something on the current beat timeline.
+        // A rewind (play from stop, song start, loop wrap) forgets the old
+        // run; a realign at the current beat drops only notes enqueued at or
+        // after it, which the rescheduled lookahead records again.
+        for history in &mut self.resolved_track_history {
+            history.output.retain(|note| note.beat < total_beats - 1e-9);
+        }
+        self.resolved_track_snapshot_cache = None;
     }
 
     /// Forget every def-process `:state` cell (lane accumulators' `value`,
@@ -4115,6 +4123,23 @@ mod tests {
             next_tick.tracks[0].steps[1][StepParam::Transpose.index()],
             0.0
         );
+    }
+
+    #[test]
+    fn output_reads_forget_previous_run_after_transport_rewind() {
+        let mut runtime = ProcessRuntime::default();
+        runtime.ensure_resolved_track_bases(&[read_values(0.0)]);
+        runtime.record_track_output(0, 0.0, 0.25, &[60.0]);
+        runtime.record_track_output(0, 4.0, 4.25, &[67.0]);
+        assert_eq!(runtime.read_snapshot(0.0).tracks[0].output_chord, vec![60.0]);
+
+        runtime.reset_transport(0.0);
+        let rewound = runtime.read_snapshot(0.0);
+        assert!(rewound.tracks[0].output_chord.is_empty());
+        assert_eq!(rewound.tracks[0].output_key_mask, 0);
+
+        runtime.record_track_output(0, 0.0, 0.25, &[62.0]);
+        assert_eq!(runtime.read_snapshot(0.0).tracks[0].output_chord, vec![62.0]);
     }
 
     #[test]

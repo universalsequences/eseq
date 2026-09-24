@@ -2103,6 +2103,7 @@ impl App {
                 failures.push(format!("bus effects: {error}"));
             }
         }
+        let kit_pad_notes: Vec<i32> = kit.pads.iter().map(|pad| pad.pad_note).collect();
         for pad in kit.pads {
             let pad_name = if pad.name.trim().is_empty() {
                 format!("Pad {}", pad.pad_note)
@@ -2144,15 +2145,16 @@ impl App {
             &kit.sequencers,
             &kit.instances,
             kit.clips.is_empty(),
+            &kit_pad_notes,
             &mut failures,
         );
         if !kit.clips.is_empty() {
-            if let Err(error) = self.install_kit_clips(group_id, kit.clips, &id_map) {
+            if let Err(error) = self.install_kit_clips(group_id, kit.clips, &id_map, &kit_pad_notes) {
                 failures.push(format!("clips: {error}"));
             }
         }
         // The rack's internal cables (§7.5), once every member exists.
-        if let Err(error) = self.install_kit_mod_connections(group_id, &kit.mod_connections) {
+        if let Err(error) = self.install_kit_mod_connections(group_id, &kit.mod_connections, &kit_pad_notes) {
             failures.push(format!("modulation cables: {error}"));
         }
         Ok((group_id, failures))
@@ -2273,6 +2275,7 @@ impl App {
             // the audition's one undo entry brings them back).
             self.delete_rack_instances_recorded(group_id)?;
             let mut desired = Vec::with_capacity(kit.pads.len());
+            let kit_pad_notes: Vec<i32> = kit.pads.iter().map(|pad| pad.pad_note).collect();
             for pad in kit.pads {
                 let pad_name = if pad.name.trim().is_empty() {
                     format!("Pad {}", pad.pad_note)
@@ -2392,14 +2395,15 @@ impl App {
                 &kit.sequencers,
                 &kit.instances,
                 kit.clips.is_empty(),
+                &kit_pad_notes,
                 &mut notes,
             );
             if !kit.clips.is_empty() {
-                if let Err(error) = self.install_kit_clips(group_id, kit.clips, &id_map) {
+                if let Err(error) = self.install_kit_clips(group_id, kit.clips, &id_map, &kit_pad_notes) {
                     notes.push(format!("clips: {error}"));
                 }
             }
-            if let Err(error) = self.install_kit_mod_connections(group_id, &kit.mod_connections) {
+            if let Err(error) = self.install_kit_mod_connections(group_id, &kit.mod_connections, &kit_pad_notes) {
                 notes.push(format!("modulation cables: {error}"));
             }
             crate::app::edit::squash_history_since(self, history_len, "Audition kit on drum rack");

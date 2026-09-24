@@ -207,7 +207,10 @@ pub(crate) struct FrameDiffState {
     /// Scheduler → UI channel mirror generation last offered to a render
     /// frame. A change requests a frame so inline bindings are polled.
     pub(crate) prev_process_channel_values_version: u64,
+    /// Scope version last published to `track-process-scopes`.
     pub(crate) prev_process_scope_values_version: u64,
+    /// Scope version last published to `process-scope-cells`.
+    pub(crate) prev_process_scope_cells_version: u64,
     pub(crate) prev_process_effective_params_version: u64,
     /// Last published `(display value, clamped)` per `(track, param)` of the
     /// process effective-value feed, so the tick only writes deltas.

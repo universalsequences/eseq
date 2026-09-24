@@ -343,28 +343,26 @@ impl App {
     /// member track it became, RackBus -> the rack's bus, into EVERY scene,
     /// since the kit carries one patch and the rack must sound the same
     /// whichever scene launches one of its clips. Cables whose pad did not
-    /// load are skipped. Idempotent per scene.
+    /// load are skipped. Idempotent per scene. `pad_notes` is the kit's pad
+    /// notes in kit pad order (see `kit_pad_to_position`).
     pub(super) fn install_kit_mod_connections(
         &mut self,
         group_id: u64,
         cables: &[ProjectKitModConnection],
+        pad_notes: &[i32],
     ) -> Result<(), String> {
         if cables.is_empty() {
             return Ok(());
         }
+        let pad_to_position = self.kit_pad_to_position(group_id, pad_notes)?;
         let group = self
             .groups
             .iter()
             .find(|group| group.id == group_id)
             .ok_or_else(|| format!("Track group {group_id} does not exist"))?;
-        let rack = group
-            .rack
-            .as_ref()
-            .ok_or_else(|| format!("Track group {group_id} is not a drum rack"))?;
-        let pad_to_track: Vec<Option<usize>> = rack
-            .pads
+        let pad_to_track: Vec<Option<usize>> = pad_to_position
             .iter()
-            .map(|pad| group.members.get(pad.member).copied())
+            .map(|position| position.and_then(|position| group.members.get(position).copied()))
             .collect();
         let bus = BusId(group.bus_id);
         let resolved: Vec<ModConnection> = cables
@@ -470,6 +468,7 @@ impl App {
         sequencers: &[ProjectRackSequencer],
         instances: &[ProjectKitInstance],
         install_instance_overrides: bool,
+        pad_notes: &[i32],
         failures: &mut Vec<String>,
     ) -> HashMap<u64, KitSequencerRekey> {
         let mut id_map = HashMap::new();
@@ -489,7 +488,12 @@ impl App {
                 failures.push(format!("sequencer '{}': {error}", sequencer.sequencer_name));
             }
         }
-        match self.add_kit_instances_recorded(group_id, instances, install_instance_overrides) {
+        match self.add_kit_instances_recorded(
+            group_id,
+            instances,
+            install_instance_overrides,
+            pad_notes,
+        ) {
             Ok(instance_map) => id_map.extend(instance_map),
             Err(error) => failures.push(format!("instances: {error}")),
         }
@@ -504,11 +508,12 @@ impl App {
         group_id: u64,
         records: &[ProjectKitInstance],
         install_overrides: bool,
+        pad_notes: &[i32],
     ) -> Result<HashMap<u64, KitSequencerRekey>, String> {
         if records.is_empty() {
             return Ok(HashMap::new());
         }
-        let pad_to_position = self.kit_pad_to_position(group_id)?;
+        let pad_to_position = self.kit_pad_to_position(group_id, pad_notes)?;
         let install_overrides =
             install_overrides && records.iter().any(|record| record.overrides.is_some());
         let records = records.to_vec();
@@ -623,9 +628,16 @@ impl App {
         })
     }
 
-    /// pad position -> member position of `group_id`, through the pad map a
-    /// kit load just built. A pad whose Sound failed to load has no member.
-    fn kit_pad_to_position(&self, group_id: u64) -> Result<Vec<Option<usize>>, String> {
+    /// kit pad position -> member position of `group_id`, matched by pad
+    /// note: `pad_notes` is the kit's pad notes in kit pad order. A pad that
+    /// failed to load has no rack pad, so it maps to no member; matching by
+    /// note keeps every later pad on its own member, where the rack's pad
+    /// order would shift them onto their neighbours.
+    fn kit_pad_to_position(
+        &self,
+        group_id: u64,
+        pad_notes: &[i32],
+    ) -> Result<Vec<Option<usize>>, String> {
         let group = self
             .groups
             .iter()
@@ -635,10 +647,13 @@ impl App {
             .rack
             .as_ref()
             .ok_or_else(|| format!("Track group {group_id} is not a drum rack"))?;
-        Ok(rack
-            .pads
+        Ok(pad_notes
             .iter()
-            .map(|pad| (pad.member < group.members.len()).then_some(pad.member))
+            .map(|note| {
+                rack.pad_index_for_note(*note)
+                    .map(|index| rack.pads[index].member)
+                    .filter(|member| *member < group.members.len())
+            })
             .collect())
     }
 
@@ -651,27 +666,18 @@ impl App {
         group_id: u64,
         clips: Vec<ProjectRackClip>,
         id_map: &HashMap<u64, KitSequencerRekey>,
+        pad_notes: &[i32],
     ) -> Result<(), String> {
+        // kit pad position -> member position, by pad note. A pad that failed
+        // to load has no rack pad and its lane is simply dropped.
+        let pad_to_position = self.kit_pad_to_position(group_id, pad_notes)?;
         let group = self
             .groups
             .iter()
             .find(|group| group.id == group_id)
             .ok_or_else(|| format!("Track group {group_id} does not exist"))?;
-        let rack = group
-            .rack
-            .as_ref()
-            .ok_or_else(|| format!("Track group {group_id} is not a drum rack"))?;
         let members = group.members.clone();
         let bus = BusId(group.bus_id);
-        // pad position -> member position, through the pad map the loader just
-        // built. A pad whose Sound failed to load has no member and its lane is
-        // simply dropped.
-        let pad_to_position: Vec<Option<usize>> = (0..rack.pads.len())
-            .map(|pad| {
-                let member = rack.pads.get(pad)?.member;
-                (member < members.len()).then_some(member)
-            })
-            .collect();
         let num_tracks = self.tracks.len();
 
         let mut assets: HashMap<PathBuf, ProjectSampleAsset> = HashMap::new();
@@ -1122,6 +1128,54 @@ mod tests {
         assert!(![source, fresh].contains(&swapped));
         assert!(!app.instances.contains(fresh), "the rack's previous instance is gone");
         assert_eq!(published_owner(&app, fresh), None);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// A kit pad that fails to load leaves no rack pad, so later kit pads sit
+    /// one rack pad earlier. Their instance routes must still land on the
+    /// member that plays their own note, not on a neighbour.
+    #[test]
+    fn kit_load_with_a_failed_pad_keeps_later_pads_on_their_own_members() {
+        let mut app = headless_app();
+        let mut runtime = neural_runtime(&app);
+        let (rack, id) = rack_with_neural(&mut app, &mut runtime, "Gappy", 0.25);
+        for note in [38, 42] {
+            let track = app.graph_controller().add_track(Path::new(SAMPLE)).expect("pad track");
+            app.assign_rack_pad_track_recorded(rack, note, track).expect("pad");
+        }
+        let hat_member = {
+            let group = app.groups.iter().find(|group| group.id == rack).unwrap();
+            let rack = group.rack.as_ref().unwrap();
+            rack.pads[rack.pad_index_for_note(42).unwrap()].member
+        };
+        runtime.set_global_value("src", Value::Instance(id));
+        runtime
+            .eval_str(&format!("(graph-node src 0 :route {hat_member})"))
+            .expect("route to the hat");
+        let path = save_kit(&mut app, rack, "Gappy-Kit", &[]);
+        let mut kit = crate::project::load_kit_preset(&path).expect("kit reads back");
+        let snare = kit.pads.iter_mut().find(|pad| pad.pad_note == 38).expect("snare pad");
+        snare.sound = None;
+        snare.modulator = None;
+        std::fs::write(&path, serde_json::to_string(&kit).unwrap()).unwrap();
+
+        let (loaded, failures) = app.load_kit_as_rack(&path).expect("kit loads");
+        assert_eq!(failures.len(), 1, "{failures:?}");
+        assert!(failures[0].contains("carries neither"), "{failures:?}");
+        let group = app.groups.iter().find(|group| group.id == loaded).unwrap();
+        let loaded_rack = group.rack.as_ref().unwrap();
+        assert_eq!(loaded_rack.pads.len(), 2);
+        let loaded_hat = loaded_rack.pads[loaded_rack.pad_index_for_note(42).unwrap()].member;
+        let fresh = only_instance(&app, loaded);
+        let route = app
+            .state
+            .current_graph_overrides()
+            .into_iter()
+            .find(|graph| graph.sequencer_id == fresh)
+            .and_then(|graph| {
+                graph.node_intrinsics.iter().find(|n| n.instance == 0).and_then(|n| n.route.clone())
+            });
+        assert_eq!(route, Some(ProjectGraphRouteOverride::Track(loaded_hat)));
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
