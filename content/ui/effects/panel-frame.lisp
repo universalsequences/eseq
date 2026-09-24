@@ -93,13 +93,32 @@
     :hover-bg :dropdown-hover-bg
     :on-change (lambda (item) (action item))))
 
-(def fx-header-actions-menu (fx)
+(def fx-header-actions-menu (fx title)
   (header-actions-menu
     (str "effect-header-actions-" (fx-effect-chain-kind fx) "-"
          (if (get fx :bus-fx) (get fx :bus-idx) (get fx :track-idx)) "-"
          (get fx :slot-idx))
-    (list "Copy current values to all scenes")
-    (lambda (item) (fx-copy-values-to-all-scenes fx))))
+    (if (fx-editable? fx)
+      (list "Copy current values to all scenes" "Edit")
+      (list "Copy current values to all scenes"))
+    (lambda (item)
+      (if (= item "Edit")
+        (fx-edit-source fx title)
+        (fx-copy-values-to-all-scenes fx)))))
+
+;; Only user-authored audio/bus effects have source to open; the Edit item
+;; lives in the ••• menu rather than as a header button so it is not hit by
+;; accident.
+(def fx-editable? (fx)
+  (and (not (get fx :rack-fx)) (not (get fx :midi-fx)) (not (get fx :builtin))))
+
+(def fx-edit-source (fx title)
+  (do
+    (fx-clear-selected-effect)
+    (host-command "enter-edit-effect"
+      (if (get fx :bus-fx)
+        (dict :name title :slot (get fx :slot-idx) :bus (get fx :bus-idx))
+        (dict :name title :slot (get fx :slot-idx))))))
 
 (def instrument-group-rack (inst)
   (host-command "group-track-to-instrument-rack"
@@ -208,18 +227,8 @@
         (ep/effect-mods-toggle-button fx)
         (box))
       (box :flex 1 :height 0.15)
-      (if (get fx :rack-fx) (box) (fx-header-actions-menu fx))
-      (if (and (not (get fx :rack-fx)) (not (get fx :midi-fx)) (not (get fx :builtin)))
-        (button "edit" :background-color :black :width 4 :height 0.75 :align :center :font-size 10
-          :on-click (lambda (info)
-            (do
-              (fx-clear-selected-effect)
-              (host-command "enter-edit-effect"
-                (if (get fx :bus-fx)
-                  (dict :name title :slot (get fx :slot-idx) :bus (get fx :bus-idx))
-                  (dict :name title :slot (get fx :slot-idx))))))
-	  )
-        (box)))))
+      (if (get fx :rack-fx) (box) (fx-header-actions-menu fx title))
+      (box :width 0.1 :height 0.2))))
 
 (def fx-clear-delete-selection ()
   (do
