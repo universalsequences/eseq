@@ -4508,6 +4508,42 @@ mod solo_binding_tests;
         }
     }
 
+    /// The scene checklist grows with the sidebar like the other browser
+    /// lists. A fixed 8-unit scroll showed only scenes 1-7 of a 14-scene
+    /// project and read as if the rest were missing.
+    #[test]
+    fn metal_seq_kit_save_panel_checklist_grows_to_show_every_scene() {
+        let mut editor = browser_editor_on_instrument_tab();
+        let names: Vec<Value> = (1..=14)
+            .map(|i| Value::String(format!("Scene {i}")))
+            .collect();
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "scene-names", test_list(names));
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.browser/enter-kit-save 8 \"Break\")")
+            .expect("enter kit save mode");
+        editor.refresh_runtime_side_effects();
+        let id = browser_id(&editor);
+        editor.set_active_buffer(id);
+        editor.set_layout_viewport(72, 60);
+        let layout = editor.widget_layout().expect("kit save layout");
+        assert_finite_layout_tree(&layout);
+
+        let scroll = find_layout_node_by_stable_key_suffix(&layout, "/kit-save-scenes-scroll")
+            .expect("scene checklist scroll");
+        let last = find_layout_node_by_stable_key_suffix(&layout, "/kit-save-scene-13")
+            .expect("last scene row");
+        assert_finite_nonzero_rect(last, "/kit-save-scene-13");
+        assert!(
+            last.rect.row + last.rect.height <= scroll.rect.row + scroll.rect.height + 0.01,
+            "scene 14 should be visible without scrolling: row {:?}, scroll {:?}",
+            last.rect,
+            scroll.rect,
+        );
+    }
+
     #[test]
     fn metal_seq_browser_projects_tab_renders_visible_new_project_button() {
         fn node_text(node: &eseqlisp::layout::LayoutNode) -> Option<&str> {

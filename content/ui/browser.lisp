@@ -1130,17 +1130,17 @@
       :font-size 11 :color :white :bg :transparent :flex 1)))
 
 (def kit-scene-checklist ()
-  (v-stack :width :fill :gap 0.3
+  (v-stack :width :fill :gap 0.3 :flex 1
     (label "Scenes to export as clips"
       :key "kit-save-scenes-title"
       :font-size 10 :color :dim :bg :transparent)
-    (scroll :key "kit-save-scenes-scroll" :width :fill :height 8
+    (scroll :key "kit-save-scenes-scroll" :width :fill :flex 1
       (v-stack :width :fill :gap 0.15
         (each (range 0 (len SEQ.scene-names)) |i| (kit-scene-row i))))))
 
 (def kit-save-panel ()
-  (box :key "kit-save-panel" :width :fill :padding 0.5
-    (v-stack :width :fill :gap 0.5
+  (box :key "kit-save-panel" :width :fill :padding 0.5 :flex 1
+    (v-stack :width :fill :gap 0.5 :flex 1
       (h-stack :width :fill :gap 0.5 :align :center
         (label "Save Kit" :font-size 12 :color :white :bg :transparent)
         (box :flex 1 :height 0)

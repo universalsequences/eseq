@@ -133,7 +133,7 @@ How a take replaces what its lane held, launch capture, clip editing and Back to
 
 eseq keeps the last 30 seconds of live notes played on armed tracks and Drum Racks, whether or not Record or the transport is running. Rolled notes are not kept. Capture MIDI turns part of that history into patterns, so a phrase found while noodling does not have to be played again.
 
-1. Choose **Pattern > Capture MIDI…**. The dialog freezes a copy of the history and shows it as a roll, one row per track and pitch. Playing continues to be captured in the background; **Refresh capture** replaces the frozen copy with the latest.
+1. Choose **Pattern > Capture MIDI…**. The dialog freezes a copy of the history and shows it as a roll, one row per track and pitch. Playing continues to be captured in the background; reopen the dialog to see the latest.
 2. eseq looks for a repeating groove and sets the crop to it: a start, a whole-number tempo, and a bar count. **Detect** runs that search again. To crop by hand, drag across the roll.
 3. Adjust **Start (s)**, **Bars** (1 to 16) and **BPM**. The crop's end follows from the other three, so every crop is a loop of whole bars at a whole BPM. A crop that would come out slower than 70 BPM is read in double time: the bar count doubles and the notes keep their timing.
 4. Press the dialog's play button to loop the crop through the original tracks' sounds and effects. The transport must be stopped; if it is running, the dialog offers **Stop playback** in place of the send button.

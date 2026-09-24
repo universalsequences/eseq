@@ -105,18 +105,26 @@
     :title "Capture MIDI" :width-px 1120 :height-px 720
     (if open?
     (v-stack :width :fill :height :fill :gap 0.6
-      (h-stack :width :fill :gap 1 :align :center
-        (label "Your last 30 seconds" :bg :transparent :font-size 18 :flex 1)
-        (button "Zoom to crop" :variant :ghost :on-click |event|
-          (do (set! view-start crop-start) (set! view-duration (max 0.1 (- crop-end crop-start)))))
-        (button "Show all" :variant :ghost :on-click |event|
-          (do (set! view-start 0) (set! view-duration (max 0.1 RETRO.duration))))
-        (button "Refresh capture" :variant :ghost
-          :on-click |event| (host-command "retrospective-open" (dict))))
-      (label "Detect finds the repeating groove. Drag in the roll to crop by hand; the end snaps to a whole BPM."
-        :bg :transparent :font-size 11 :color :dim)
+      ;; Loop preview sits above the roll in a raised pill, like the
+      ;; transport's playback controls.
+      (h-stack :width :fill :gap 0.8 :align :center
+        (box :key "retrospective-playback" :background-color :mixer-control-bg :corner-radius 72
+          :padding 0.015 :height 1.4
+          (h-stack :gap 0.2 :align :center
+            (box :key "retrospective-loop-stop" :width 2.5
+              :on-click |x y r| (stop-loop)
+              (stop-icon))
+            (box :key "retrospective-audition" :width 2.5
+              :on-click |x y r|
+              (if (or SEQ.playing (= (len RETRO.items) 0)) nil (toggle-loop))
+              (play-icon :active (if RETRO.playing 1 0)))))
+        (label (if SEQ.playing "Stop the song to preview the loop."
+                 (str "Loop " (/ (round (* 1000 (loop-seconds))) 1000) " s, ends at "
+                      (/ (round (* 1000 crop-end)) 1000) " s"
+                      (if (> crop-end RETRO.duration) " (past the capture: rest)" "")))
+          :key "retrospective-loop-info" :bg :transparent :font-size 11 :color :dim :flex 1))
       (if (= (len RETRO.items) 0)
-        (label "Play an armed track or drum rack, then refresh the capture." :bg :transparent :font-size 12)
+        (label "Play an armed track or drum rack, then reopen Capture MIDI." :bg :transparent :font-size 12)
         (box :height 0 :width 0))
       (box :key "retrospective-roll-container" :width :fill :flex 1 :height 0
         (timeline :key "retrospective-roll" :width :fill :height :fill
@@ -143,25 +151,9 @@
           :on-change |value| (set-bpm value))
         (button "Detect" :key "retrospective-detect" :variant :ghost
           :disabled (= (len RETRO.items) 0)
-          :on-click |event| (host-command "retrospective-detect" (dict)))
-        (box :height 0 :flex 1))
+          :on-click |event| (host-command "retrospective-detect" (dict))))
       (h-stack :width :fill :gap 0.8 :align :center
-        ;; Same pill and icons as the transport's playback controls.
-        (box :key "retrospective-playback" :background-color :mixer-strip-bg :corner-radius 72
-          :padding 0.015 :height 1.4
-          (h-stack :gap 0.2 :align :center
-            (box :key "retrospective-loop-stop" :width 2.5
-              :on-click |x y r| (stop-loop)
-              (stop-icon))
-            (box :key "retrospective-audition" :width 2.5
-              :on-click |x y r|
-              (if (or SEQ.playing (= (len RETRO.items) 0)) nil (toggle-loop))
-              (play-icon :active (if RETRO.playing 1 0)))))
-        (label (if SEQ.playing "Stop the song to preview the loop."
-                 (str "Loop " (/ (round (* 1000 (loop-seconds))) 1000) " s, ends at "
-                      (/ (round (* 1000 crop-end)) 1000) " s"
-                      (if (> crop-end RETRO.duration) " (past the capture: rest)" "")))
-          :key "retrospective-loop-info" :bg :transparent :font-size 11 :color :dim :flex 1)
+        (box :height 0 :flex 1)
         (button "Cancel" :variant :ghost :on-click |event| (cancel))
         (if SEQ.playing
           (button "Stop playback" :key "retrospective-stop" :on-click |event| (seq-toggle-play))
@@ -170,7 +162,7 @@
       (if RETRO.truncated
         (label "Capture was very dense; only the most recent 8192 trigs are available." :bg :transparent :font-size 11)
         (box :height 0 :width 0))
-      (label "Send creates new patterns and sets the project BPM. Undo restores the patterns and tempo together."
-        :bg :transparent :font-size 10 :color :dim)
-      (label RETRO.error :key "retrospective-error" :bg :transparent :font-size 11 :color :red))
+      (if (or (= RETRO.error nil) (= RETRO.error ""))
+        (box :height 0 :width 0)
+        (label RETRO.error :key "retrospective-error" :bg :transparent :font-size 11 :color :red)))
     (box :height 0 :width 0))))

@@ -768,19 +768,37 @@ fn project_slot_matches_descriptor_param_layout(
     desc: &crate::effects::EffectDescriptor,
 ) -> bool {
     let num_params = desc.params.len();
-    slot.num_params as usize == num_params
-        && slot.defaults.len() >= num_params
-        && slot.param_node_indices.len() >= num_params
-        && slot.param_node_spans.len() >= num_params
-        && desc
-            .params
-            .iter()
-            .zip(slot.param_node_indices.iter())
-            .zip(slot.param_node_spans.iter())
-            .all(|((param, saved_node_idx), saved_node_span)| {
-                param.node_param_idx == *saved_node_idx
-                    && param.node_param_span.max(1) == (*saved_node_span).max(1)
-            })
+    if slot.num_params as usize != num_params
+        || slot.defaults.len() < num_params
+        || slot.param_node_indices.len() < num_params
+        || slot.param_node_spans.len() < num_params
+    {
+        return false;
+    }
+    // A DSP revision that adds state ahead of its params (Digi FM's harmonic
+    // table) moves every cell by the same amount without changing the params.
+    // Positions still line up, and the fallback remap below would drop every
+    // generated modulation lane, so accept one uniform DGen cell shift.
+    let mut cell_shift = None;
+    desc.params
+        .iter()
+        .zip(slot.param_node_indices.iter())
+        .zip(slot.param_node_spans.iter())
+        .all(|((param, &saved_node_idx), saved_node_span)| {
+            if param.node_param_span.max(1) != (*saved_node_span).max(1) {
+                return false;
+            }
+            let live_node_idx = param.node_param_idx;
+            let is_dgen_cell = |idx: u32| {
+                idx >= crate::lisp_host::HEADER_SLOTS as u32
+                    && idx < crate::instruments::voice_modulator::MOD_PARAM_BASE
+            };
+            if !is_dgen_cell(live_node_idx) || !is_dgen_cell(saved_node_idx) {
+                return live_node_idx == saved_node_idx;
+            }
+            let shift = i64::from(live_node_idx) - i64::from(saved_node_idx);
+            *cell_shift.get_or_insert(shift) == shift
+        })
 }
 
 fn is_generated_mod_runtime_param_name(name: &str) -> bool {
@@ -2084,6 +2102,7 @@ impl App {
             &mut kit,
             crate::lisp_host::declared_kinds_for_module,
         );
+        super::break_kits::lift_plain_pad_clip_lanes(&mut kit);
         let fallback_name = path
             .file_stem()
             .and_then(|stem| stem.to_str())
@@ -2221,6 +2240,7 @@ impl App {
             &mut kit,
             crate::lisp_host::declared_kinds_for_module,
         );
+        super::break_kits::lift_plain_pad_clip_lanes(&mut kit);
         let fallback_name = path
             .file_stem()
             .and_then(|stem| stem.to_str())
@@ -7071,6 +7091,60 @@ mod tests {
                 .iter()
                 .map(|param| param.node_param_idx)
                 .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn custom_instrument_project_restore_keeps_generated_host_mod_lanes_across_cell_shift() {
+        // Saved against a DSP whose cells started at 10; the new revision put
+        // a table ahead of every param (Digi FM, markovic-2).
+        let shift = 917_504;
+        let desc = crate::effects::EffectDescriptor {
+            name: "test".to_string(),
+            input_channels: 0,
+            output_channels: 2,
+            instrument_modulators: Vec::new(),
+            declared_latency_samples: None,
+            instrument_modulation_targets: Vec::new(),
+            tensor_params: Vec::new(),
+            params: vec![
+                test_param("attack", 0.01, 10 + shift),
+                test_param("__host_mod__attack__lane2__source", 0.0, 14 + shift),
+                test_param("__host_mod__attack__lane2__depth", 0.0, 18 + shift),
+                test_param(
+                    "mod1_source",
+                    0.0,
+                    crate::instruments::voice_modulator::MOD_PARAM_BASE,
+                ),
+            ],
+        };
+        let mut plocks = vec![vec![None; 4]; MAX_STEPS];
+        plocks[3][2] = Some(0.91);
+        let saved_slot = project::ProjectEffectSlot {
+            num_params: 4,
+            defaults: vec![0.12, 1.0, 0.31, 5.0],
+            plocks,
+            plock_param_ids: vec![vec![None; 4]; MAX_STEPS],
+            key_locks: std::collections::BTreeMap::from([(66, vec![Some(0.5), None, Some(0.7), None])]),
+            key_lock_param_ids: std::collections::BTreeMap::new(),
+            param_node_indices: vec![10, 14, 18, crate::instruments::voice_modulator::MOD_PARAM_BASE],
+            param_node_spans: vec![1, 1, 1, 1],
+            tensor_params: Vec::new(),
+            ir: None,
+            table: None,
+            sampler_slice_edits: None,
+        };
+
+        let restored =
+            project_custom_instrument_slot_into_synced_snapshot(saved_slot, &desc, 42, 0);
+
+        assert_eq!(restored.defaults, vec![0.12, 1.0, 0.31, 5.0]);
+        assert_eq!(restored.plocks[3][2], Some(0.91));
+        assert_eq!(restored.key_locks[&66][0], Some(0.5));
+        assert_eq!(restored.key_locks[&66][2], Some(0.7));
+        assert_eq!(
+            restored.param_node_indices,
+            desc.params.iter().map(|param| param.node_param_idx).collect::<Vec<_>>()
         );
     }
 

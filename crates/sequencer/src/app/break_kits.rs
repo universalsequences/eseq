@@ -835,6 +835,72 @@ pub(super) fn migrate_kit_sequencers(
     notes
 }
 
+/// Give every clip lane the rack slot its pad plays from.
+///
+/// A kit pad is always a one-slot rack Sound, even when the exporting rack's
+/// member was a plain instrument or sampler track. Such a member's clips carry
+/// their sound in the TRACK-level `instrument_slots` / `effect_slots`, which a
+/// rack track never reads, so every clip used to play the pad's single saved
+/// Sound. Build each such lane's rack slot the way the Sounds browser captures
+/// a plain track, keeping the pad Sound's slot-level settings (gain, pan,
+/// polyphony, effect names) and taking the clip's own sound. Lanes that
+/// already carry rack data, modulator pads and multi-slot racks are left
+/// alone. Idempotent.
+pub(super) fn lift_plain_pad_clip_lanes(kit: &mut ProjectKitPreset) {
+    use crate::project::ProjectInstrumentType as Kind;
+    for clip in &mut kit.clips {
+        let pattern = &mut clip.pattern;
+        for (pad, kit_pad) in kit.pads.iter().enumerate() {
+            let Some(sound) = &kit_pad.sound else {
+                continue;
+            };
+            let [template] = sound.rack.slots.as_slice() else {
+                continue;
+            };
+            let is_sampler = match (pattern.instrument_types.get(pad), template.instrument_type) {
+                (Some(Kind::Custom), Kind::Custom) => false,
+                (Some(Kind::Sampler), Kind::Sampler) => true,
+                _ => continue,
+            };
+            if pattern.rack_tracks.get(pad).is_some_and(Option::is_some) {
+                continue;
+            }
+            let Some(instrument_slot) = pattern.instrument_slots.get(pad).cloned() else {
+                continue;
+            };
+            let mut slot = template.clone();
+            slot.instrument_slot = instrument_slot;
+            if let Some(effects) = pattern.effect_slots.get(pad) {
+                slot.effect_slots = effects.clone();
+            }
+            if let Some(state) = pattern.track_sound_states.get(pad) {
+                slot.track_sound_state = state.clone();
+            }
+            if let Some(mode) = pattern.instrument_run_modes.get(pad) {
+                slot.instrument_run_mode = *mode;
+            }
+            if let Some(offset) = pattern.instrument_base_note_offsets.get(pad) {
+                slot.instrument_base_note_offset = *offset;
+            }
+            if is_sampler {
+                if let Some(Some(path)) = pattern.sample_paths.get(pad) {
+                    slot.sample_path = Some(path.clone());
+                    slot.sample_name = pattern.sample_names.get(pad).cloned();
+                }
+            }
+            if pattern.rack_tracks.len() <= pad {
+                pattern.rack_tracks.resize_with(pad + 1, || None);
+            }
+            pattern.rack_tracks[pad] = Some(crate::project::ProjectRackTrackPattern {
+                routing: sound.rack.routing,
+                slots: vec![slot],
+                macros: sound.rack.macros.clone(),
+            });
+            pattern.instrument_types[pad] = Kind::Rack;
+        }
+    }
+}
+
 /// `Some(path)` when a recorded sequencer source is a `(load "path")` form.
 fn load_form_path(source: &str) -> Option<String> {
     let inner = source
@@ -1453,6 +1519,69 @@ mod tests {
         applied(crate::app::edit::undo(&mut app));
         assert_eq!(app.instances.get(id).unwrap().owner, ProjectInstanceOwner::Rack(rack));
         assert_eq!(weight(&mut runtime, id), Some(Value::Number(0.25)), "overrides come back");
+    }
+
+    /// A plain (non-rack) member's clips keep their own sound through a kit
+    /// round trip. The kit pad is a one-slot rack Sound, but the clips carry
+    /// the member's sound at track level; the load used to drop it, so every
+    /// clip played the pad's single saved Sound (ChickenShit Kit's Digi FM).
+    #[test]
+    fn plain_member_clips_keep_their_own_sound_through_a_kit() {
+        let mut app = headless_app();
+        let mut runtime = neural_runtime(&app);
+        let (rack, _) = rack_with_neural(&mut app, &mut runtime, "Plain", 0.25);
+        app.convert_rack_to_clips_recorded(rack).expect("convert to clips");
+        let track = app.groups.iter().find(|group| group.id == rack).unwrap().members[0];
+        // Two clips whose sampler slot differs in its first param, each
+        // launched by its own scene.
+        let second_scene = app.state.with_scenes_mut(|scenes| {
+            let first = scenes.rack_bank(rack).unwrap().clips[0].clone();
+            let cell = first.cells[0].expect("the pad lane");
+            let mut data = scenes.track_pools[track].get(cell).unwrap().clone();
+            assert!(!data.instrument_slot.defaults.is_empty(), "sampler slot params");
+            data.instrument_slot.defaults[0] = 0.2;
+            let first_cell = scenes.track_pools[track].insert(data.clone());
+            data.instrument_slot.defaults[0] = 0.8;
+            let second_cell = scenes.track_pools[track].insert(data);
+            let bank = scenes.rack_bank_mut(rack).unwrap();
+            bank.clips[0].cells[0] = Some(first_cell);
+            let mut second = bank.clips[0].clone();
+            second.id = bank.next_clip_id;
+            bank.next_clip_id += 1;
+            second.cells[0] = Some(second_cell);
+            let second_id = second.id;
+            bank.clips.push(second);
+            let scene = scenes.new_scene();
+            scenes.scenes[scene].rack_clips = vec![(rack, second_id)];
+            scene
+        });
+        let path = save_kit(&mut app, rack, "Plain-Kit", &[0, second_scene]);
+        let kit = crate::project::load_kit_preset(&path).expect("kit reads back");
+        assert_eq!(kit.clips.len(), 2);
+        assert!(
+            kit.clips[0].pattern.rack_tracks[0].is_none(),
+            "a plain member's clip carries its sound at track level"
+        );
+
+        let (loaded, failures) = app.load_kit_as_rack(&path).expect("kit loads");
+        assert!(failures.is_empty(), "{failures:?}");
+        let pad_track = app.groups.iter().find(|group| group.id == loaded).unwrap().members[0];
+        let played: Vec<f32> = app.state.with_scenes(|scenes| {
+            scenes
+                .rack_bank(loaded)
+                .unwrap()
+                .clips
+                .iter()
+                .map(|clip| {
+                    let cell = clip.cells[0].expect("pad lane");
+                    let data = scenes.track_pools[pad_track].get(cell).unwrap();
+                    let rack = data.rack_track.as_ref().expect("the pad plays a rack slot");
+                    rack.slots[0].instrument_slot.defaults[0]
+                })
+                .collect()
+        });
+        assert_eq!(played, vec![0.2, 0.8], "each clip keeps its own sound");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
     /// Id-keyed instance edits reach every clip of a rack's bank, launched
