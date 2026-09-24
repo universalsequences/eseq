@@ -14209,6 +14209,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                 step_pattern: None,
                 trigs: vec![trig, trig, trig],
                 trig_beats: vec![0.9, 0.5, -3.1],
+                ..Default::default()
             }]),
             neurons: Arc::new(Vec::new()),
             process_values: HashMap::from([(

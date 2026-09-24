@@ -272,13 +272,17 @@ pub(crate) fn sync_reactive_tick(
     // Lane strip scopes: republish the state histories whenever the
     // scheduler fired a step process since the last frame.
     let process_scope_values_version = ctx.shared.state.process_scope_values_version();
+    let track_scopes = editor.runtime().has_live_reactive_consumers("SEQ", "track-process-scopes");
+    let scope_cells = editor.runtime().has_live_reactive_consumers("SEQ", "process-scope-cells");
     if process_scope_values_version != ctx.frame.prev_process_scope_values_version
-        && editor.runtime().has_live_reactive_consumers("SEQ", "track-process-scopes")
+        && (track_scopes || scope_cells)
     {
         ctx.frame.prev_process_scope_values_version = process_scope_values_version;
         state_values::sync_process_scope_state(
             editor.runtime_mut(),
             &ctx.shared.state,
+            track_scopes,
+            scope_cells,
         );
         editor.runtime_mut().run_reactive_cycle();
         editor.mark_needs_redraw();

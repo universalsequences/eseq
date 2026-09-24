@@ -62,6 +62,7 @@ pub use state::{
     StepCellSnapshot,
     StepSlotPlocks, StepSnapshot, TrackId,
     TrackInstrumentPatternState, TrackInstrumentPatternStateSnapshot, TrackOutputEvent,
+    TrackOutputPitches,
     Mix, MixId, Patch, PatchId, SoundEntityMeta, SoundRefs, StoredPattern, TrackPatternSeq,
     TrackSoundPool, SOUND_COLOR_SET,
     Scene, SceneBank, SceneBankId, SceneId, TrackPatternCellView, TrackPatternData, TrackPatternId, TrackPatternPool, TrackRegistry, TrackRegistryError,

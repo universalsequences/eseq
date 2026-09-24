@@ -149,6 +149,57 @@ pub struct ProcessTrackReadSnapshot {
     pub trigs: Vec<ProcessResolvedValues>,
     /// Beat timestamps aligned with `trigs`, used by bounded window reads.
     pub trig_beats: Vec<f64>,
+    /// What the track's instrument is sounding at the read beat, whatever
+    /// drove it (steps, graph nodes, processes), after MIDI FX: the pitches
+    /// whose gate spans the read beat, else the newest onset's pitches held
+    /// until the next one. Lowest first, so the bass is the chord's root.
+    /// Empty until the track has sounded. See [`OutputNote`].
+    pub output_chord: Vec<f32>,
+    /// Pitch classes the track sounded over the last
+    /// [`PROCESS_OUTPUT_KEY_WINDOW_BEATS`] up to the read beat.
+    pub output_key_mask: u16,
+}
+
+/// How far back a `:key :output` read gathers pitch classes: four bars.
+pub const PROCESS_OUTPUT_KEY_WINDOW_BEATS: f64 = 16.0;
+/// Sounded pitches kept per track for `:output` reads.
+const PROCESS_OUTPUT_HISTORY_DEPTH: usize = 256;
+
+/// One pitch a track's instrument was sent: onset and gate end in beats,
+/// pitch in semitones from the track root before global transpose.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct OutputNote {
+    beat: f64,
+    end_beat: f64,
+    pitch: f32,
+}
+
+/// `output_chord` / `output_key_mask` of a track's sounded notes at `beat`.
+/// Onsets at the read beat count (same tick, once enqueued ahead of the
+/// reader).
+fn output_reads_at(output: &VecDeque<OutputNote>, beat: f64) -> (Vec<f32>, u16) {
+    const EPS: f64 = 1e-6;
+    let visible = || output.iter().filter(move |note| note.beat <= beat + EPS);
+    let mut chord = visible()
+        .filter(|note| note.end_beat > beat + EPS)
+        .map(|note| note.pitch)
+        .collect::<Vec<_>>();
+    if chord.is_empty() {
+        if let Some(newest) = visible().map(|note| note.beat).reduce(f64::max) {
+            chord = visible()
+                .filter(|note| (note.beat - newest).abs() <= EPS)
+                .map(|note| note.pitch)
+                .collect();
+        }
+    }
+    chord.sort_by(|a, b| a.total_cmp(b));
+    chord.dedup_by(|a, b| (*a - *b).abs() < 1e-3);
+    let key_mask = visible()
+        .filter(|note| note.beat > beat - PROCESS_OUTPUT_KEY_WINDOW_BEATS)
+        .fold(0u16, |mask, note| {
+            mask | (1 << crate::runtime::harmony::pitch_class(note.pitch))
+        });
+    (chord, key_mask)
 }
 
 #[derive(Clone, Debug, Default)]
@@ -183,6 +234,8 @@ struct ResolvedTrackHistory {
     /// Pattern of the newest active step recorded so far; what an empty
     /// step's boundary carries in its place.
     held_pattern: Option<ProcessStepPattern>,
+    /// Pitches the instrument was sent, oldest first, for `:output` reads.
+    output: VecDeque<OutputNote>,
 }
 
 impl ResolvedTrackHistory {
@@ -193,6 +246,7 @@ impl ResolvedTrackHistory {
             steps: VecDeque::new(),
             trigs: VecDeque::new(),
             held_pattern: None,
+            output: VecDeque::new(),
         }
     }
 }
@@ -2057,6 +2111,27 @@ impl ProcessRuntime {
         }
     }
 
+    /// Record pitches the scheduler just sent a track's instrument (after MIDI
+    /// FX, before global transpose), for `(read (track n :chord|:key :output))`.
+    pub fn record_track_output(&mut self, track: usize, beat: f64, end_beat: f64, pitches: &[f32]) {
+        let Some(history) = self.resolved_track_history.get_mut(track) else {
+            return;
+        };
+        for pitch in pitches {
+            history.output.push_back(OutputNote {
+                beat,
+                end_beat,
+                pitch: *pitch,
+            });
+        }
+        while history.output.len() > PROCESS_OUTPUT_HISTORY_DEPTH {
+            history.output.pop_front();
+        }
+        // Output lands out of beat order across graphs and chunks, so any
+        // cached snapshot may now be missing a visible note.
+        self.resolved_track_snapshot_cache = None;
+    }
+
     pub fn record_track_fire(
         &mut self,
         track: usize,
@@ -2154,12 +2229,16 @@ impl ProcessRuntime {
                             .rev()
                             .filter(|entry| step_is_visible(entry.beat))
                             .find_map(|entry| entry.pattern);
+                        let (output_chord, output_key_mask) =
+                            output_reads_at(&history.output, before_beat);
                         ProcessTrackReadSnapshot {
                             current,
                             steps,
                             step_pattern,
                             trigs,
                             trig_beats,
+                            output_chord,
+                            output_key_mask,
                         }
                     })
                     .collect(),

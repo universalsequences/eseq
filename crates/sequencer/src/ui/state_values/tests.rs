@@ -546,6 +546,7 @@ mod solo_binding_tests;
         ], true);
         state.append_track_output_events([sequencer::sequencer::TrackOutputEvent {
             track: 0, sample_time: 1, beat: 2.0, transpose: 0.0, velocity: 1.0,
+            ..Default::default()
         }]);
         state.set_track_output_current_beat(2.0);
         let mut neural = sequencer::neural::NeuralVisualizationSnapshot::default();
@@ -829,6 +830,7 @@ mod solo_binding_tests;
             beat: 8.25,
             transpose: 7.0,
             velocity: 0.75,
+            ..Default::default()
         }]);
 
         assert_eq!(

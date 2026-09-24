@@ -213,7 +213,7 @@ pub(super) fn run(editor: &mut Editor, app: &mut app::App, shared: &SharedHandle
             shared.state.transport.playhead.store(index, Ordering::Relaxed);
             shared.state.append_track_output_events([sequencer::sequencer::TrackOutputEvent {
                 track: 0, sample_time: index as u64 * 512, beat: index as f64 / 6.0,
-                transpose: 0.0, velocity: 1.0,
+                transpose: 0.0, velocity: 1.0, ..Default::default()
             }]);
             let started = Instant::now();
             if phase == "scroll" { editor.apply_smooth_widget_scroll(0.0, if index % 60 < 30 { -0.5 } else { 0.5 }); }

@@ -114,7 +114,7 @@ mod tests {
             assert!(graph::graph_connect(lg, source, 0, gain, 0));
             assert!(graph::graph_connect(lg, gain, 0, 0, 0));
         }
-        let mut render = |mode: u32, frames: usize| {
+        let render = |mode: u32, frames: usize| {
             VARIABLE_SOURCE_MODE.store(mode, Ordering::Relaxed);
             let mut output = vec![f32::NAN; frames];
             unsafe { graph::process_next_block(lg, output.as_mut_ptr(), frames as c_int) };

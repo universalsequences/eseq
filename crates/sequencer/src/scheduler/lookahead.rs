@@ -273,6 +273,9 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
     let song_playback = &mut scheduler.song;
     let parked_generators = &mut scheduler.parked_generators;
     let mut track_output_events = Vec::new();
+    // How many of `track_output_events` the process reads have seen; see
+    // `feed_track_output_reads`.
+    let mut track_output_read_cursor = 0_usize;
 
     process_runtime.sync_step_process_aliases(
         base_snapshot
@@ -638,6 +641,11 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
         let mut pending_pattern_lengths: Vec<(usize, usize, f64)> = Vec::new();
         for trigger in triggers {
             let trigger_sample_time = scheduled_until_sample + trigger.offset as u64;
+            feed_track_output_reads(
+                process_runtime,
+                &track_output_events,
+                &mut track_output_read_cursor,
+            );
             let conductor_invocations =
                 process_runtime.take_conductor_invocations_before(trigger.absolute_beats);
             if !invoke_conductor_invocations(
@@ -2038,6 +2046,13 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
             if graph_runtimes[graph_index].is_empty() {
                 continue;
             }
+            // Graphs earlier in the order, and everything the trigger loop
+            // enqueued, are what this graph's `:output` reads can see.
+            feed_track_output_reads(
+                process_runtime,
+                &track_output_events,
+                &mut track_output_read_cursor,
+            );
             let mut graph_emissions = Vec::new();
             let mut graph_eval_count = 0_usize;
             if scratch_runtime.is_some() {
@@ -2269,4 +2284,25 @@ pub(super) fn rack_off_step_has_params(
             .values_for_track(track)
             .iter()
             .any(Option::is_some)
+}
+
+/// Hand the process reads every output event enqueued since the last call, so
+/// `(read (track n :chord|:key :output))` follows what each instrument is
+/// actually sent. Reads see output enqueued before them: a follower firing on
+/// the same boundary as its source sees the source's new notes only when the
+/// source was enqueued first (an earlier graph, or the trigger loop).
+fn feed_track_output_reads(
+    process_runtime: &mut crate::process::ProcessRuntime,
+    events: &[TrackOutputEvent],
+    cursor: &mut usize,
+) {
+    for event in events.get(*cursor..).unwrap_or(&[]) {
+        process_runtime.record_track_output(
+            event.track,
+            event.beat,
+            event.harmony.end_beat,
+            event.harmony.pitches(),
+        );
+    }
+    *cursor = events.len();
 }

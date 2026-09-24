@@ -366,23 +366,61 @@
 ;; changes harmonizes every follower step. Before the source has played any
 ;; step the read is nil and the step plays untouched. Both tracks' pitches
 ;; are taken relative to their own roots, as with grab.
+;;
+;; A source with no step pattern (a track only graph nodes or processes
+;; play) is followed by what its instrument is actually sent instead: the
+;; :output reads, after its MIDI FX and fit-to-scale. The chord is what is
+;; sounding (lowest pitch as root), the key what it sounded over four bars.
+;; Output is seen once enqueued, so a follower firing on the very boundary
+;; its source changes chord may hear the previous chord for that one note.
 (def-process lane-harmony
-  :doc "Harmony lane: hold this step's note to the chord and key of the source track's current step, same tick; empty source steps hold the last chord that played. Amount is strictness: 1 chord tones only, ~0.5 anything in key, ~0.3 anything but clashes, 0 free. A note that fails snaps to the nearest pitch class that passes. Grace is a dead zone in semitones. On a graph node patch a negative source -(k+1) follows neuron k instead: its last note is the chord, its recent notes the key."
+  :doc "Harmony lane: hold this step's note to the chord and key of the source track's current step, same tick; empty source steps hold the last chord that played. A source with no step pattern (driven only by neurons or processes) is followed by what its instrument actually sounds, after MIDI FX. Amount is strictness: 1 chord tones only, ~0.5 anything in key, ~0.3 anything but clashes, 0 free. A note that fails snaps to the nearest pitch class that passes. Grace is a dead zone in semitones. On a graph node patch a negative source -(k+1) follows neuron k instead: its last note is the chord, its recent notes the key."
   :target (step-param :transpose)
   :in ((amount :float 0 1 :default 1 :lane true)
        (source :track :default 0)
        (grace :int 0 3 :default 0))
-  :run (let ((from-neuron (< (in :source) 0))
-             (src (if (< (in :source) 0)
-                    (read (neuron (- -1 (in :source)) :chord))
-                    (read (track (in :source) :chord :pattern)))))
-         (if (= src nil)
+;; The last fire's decision, for the card's snap meter (scope history per
+  ;; cell): the move, the pitch classes either side of it, the chord and key
+  ;; it was judged against (bit masks) and their tier scores. source-kind:
+  ;; 0 no source yet, 1 pattern, 2 sounded output, 3 neuron. `analysis` parks
+  ;; the whole map between the writes: state writes stay at the top level of
+  ;; the body (a `set!` inside a nested `let` does not reach the cell).
+  :state ((snap 0) (in-pc 0) (out-pc 0) (root 0) (chord-mask 0) (key-mask 0)
+          (in-score 1) (out-score 1) (source-kind 0) (analysis nil))
+  :run (do
+         (set! source-kind
+           (if (< (in :source) 0)
+             3
+             (if (= (read (track (in :source) :chord :pattern)) nil)
+               (if (= (read (track (in :source) :chord :output)) nil) 0 2)
+               1)))
+         (set! analysis
+           (if (= source-kind 0)
+             nil
+             (harmonic-analysis
+               (if (= source-kind 3)
+                 (read (neuron (- -1 (in :source)) :chord))
+                 (if (= source-kind 2)
+                   (read (track (in :source) :chord :output))
+                   (read (track (in :source) :chord :pattern))))
+               (if (= source-kind 3)
+                 (read (neuron (- -1 (in :source)) :key))
+                 (if (= source-kind 2)
+                   (read (track (in :source) :key :output))
+                   (read (track (in :source) :key :pattern))))
+               (current-note)
+               (in :amount)
+               (in :grace))))
+         (if (= analysis nil) (set! source-kind 0) nil)
+         (set! snap (if (= analysis nil) 0 (get analysis :delta)))
+         (if (= analysis nil)
            nil
-           (target-add!
-             (harmonic-snap src
-                            (if from-neuron
-                              (read (neuron (- -1 (in :source)) :key))
-                              (read (track (in :source) :key :pattern)))
-                            (current-note)
-                            (in :amount)
-                            (in :grace))))))
+           (do
+             (set! in-pc (get analysis :in-pc))
+             (set! out-pc (get analysis :out-pc))
+             (set! root (get analysis :root))
+             (set! chord-mask (get analysis :chord-mask))
+             (set! key-mask (get analysis :key-mask))
+             (set! in-score (get analysis :in-score))
+             (set! out-score (get analysis :out-score))))
+         (if (= analysis nil) nil (target-add! (get analysis :delta)))))

@@ -481,9 +481,9 @@
     (button (if (= expanded n) "close" "edit")
       :key (str "graph-variable-reset-expand-" n)
       :width gvr-expand-width :height gvr-row-height :padding 0.15 :font-size 7
-      :background-color (if patched :process-lane-accent :transparent)
-      :border-color :process-lane-accent
-      :color (if patched :black :dim)
+      :background-color (if patched :effect-mode-on-bg :transparent)
+      :border-color :effect-mode-on-bg
+      :color (if patched :control-on-fg :dim)
       :on-click (lambda (event)
         (gvr-expand-node self (if (= self.expanded-node n) -1 n))))))
 
@@ -590,7 +590,7 @@
     (h-stack :gap 0.4 :align :center
       (label name :width 4.2 :height gvr-row-height :font-size 8 :h-align :right :color :dim :bg :transparent)
       (if (gvr-proc-inlet-wired? wired id name)
-        (label "wired" :width gvr-proc-control-width :height gvr-row-height :font-size 8 :h-align :center :color :process-lane-accent :bg :transparent)
+        (label "wired" :width gvr-proc-control-width :height gvr-row-height :font-size 8 :h-align :center :color :accent :bg :transparent)
         (if (= kind "gate")
           (gvr-toggle-sized key gvr-proc-control-width (>= current 0.5)
             (lambda (v) (set-inlet (if v 1 0))))
@@ -657,7 +657,20 @@
             :on-click (lambda (event) (graph-node-process-remove self n id))))
         (each (get slot :inlet-defs) |inlet| (gvr-proc-inlet-row self n slot inlet wired))
         (each (filter (lambda (port) (get port :mappable)) (get slot :ports)) |port|
-          (gvr-proc-map-row self n slot port))))))
+          (gvr-proc-map-row self n slot port))
+        (gvr-proc-meter n slot)))))
+
+;; A live readout under the inlets for slots that have one: lane-harmony's
+;; snap meter. Its scope is read inside the subtree, so a fire repaints the
+;; meter alone.
+(def gvr-proc-meter (n slot)
+  (let ((id (get slot :instance-id)))
+    (if (= (get slot :class) "lane-harmony")
+      (subtree :key (str "graph-variable-reset-proc-meter-" n "-" id)
+        (eseq.sequencer/harmony-snap-meter (str "graph-variable-reset-harmony-" n "-" id)
+          (eseq.sequencer/process-scope-cells-for id)
+          (- gvr-proc-card-width 1)))
+      nil)))
 
 ;; A mappable port (rand/count/acc `out`, ...) writes onto the fire payload:
 ;; pick which field. Wire ports go through the bay's cables instead.

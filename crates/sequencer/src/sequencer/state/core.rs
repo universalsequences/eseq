@@ -834,13 +834,32 @@ pub struct SequencerState {
     pub(super) sound_binding_patterns: Mutex<HashMap<usize, PatternId>>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct TrackOutputEvent {
     pub track: usize,
     pub sample_time: u64,
     pub beat: f64,
     pub transpose: f32,
     pub velocity: f32,
+    /// What the instrument sounds, for `(read (track n :chord :output))`.
+    pub harmony: TrackOutputPitches,
+}
+
+/// The pitches one enqueued trigger sounds (semitones from the track root,
+/// after MIDI FX and fit-to-scale, before the project's global transpose so
+/// they share a space with a follower's own pre-global note) and the beat
+/// its gate closes.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct TrackOutputPitches {
+    pub end_beat: f64,
+    pub count: usize,
+    pub pitches: [f32; crate::audio::MAX_VOICES],
+}
+
+impl TrackOutputPitches {
+    pub fn pitches(&self) -> &[f32] {
+        &self.pitches[..self.count.min(self.pitches.len())]
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

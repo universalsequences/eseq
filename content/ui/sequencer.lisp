@@ -34,6 +34,7 @@
 (import eseq.file-dialogs)
 
 (export lane-patchbay-node lane-patch-register-node lane-patch-node-namespace
+        harmony-snap-meter process-scope-cells-for
         lane-patch-node-touch lane-patch-node-version-value lane-patch-node-selected-id
         lane-patch-node-select
         track-selected-binding
@@ -2167,6 +2168,10 @@
 
 (def lane-strip-scope-row (track slot)
   (let ((entry (lane-scope-entry track slot)))
+    (if (= (get slot :class) "lane-harmony")
+      (harmony-snap-meter (str "lane-harmony-meter-" track "-" (get slot :instance-id))
+        (if entry (get entry :cells) nil)
+        13.5)
     (if (and entry (> (len (get entry :values)) 0))
       (v-stack :width :fill :gap 0.15
         (h-stack :width :fill :gap 0.3 :align :center
@@ -2187,8 +2192,137 @@
             :max (lane-scope-bound slot "hi" 1)
             :line-color :process-lane-accent
             :area true)))
-      nil)))
+      nil))))
 
+
+;; ── Harmony snap meter ──────────────────────────────────────────────────────
+;; What `lane-harmony` did on its last fires, from its scope cells (see the
+;; process's :state): a compressor-style bar of the move (±6 semitones from
+;; the centre), the scale degree it came from and went to over the chord
+;; root, the twelve degrees above that root (chord tones solid, key tones
+;; faint, the landing lit, a moved-from note outlined), the tier of each side
+;; and where the chord came from. `cells` is nil until the slot has fired.
+
+(def harmony-degree-names (list "R" "b9" "9" "b3" "3" "11" "#11" "5" "b13" "13" "b7" "7"))
+(def harmony-bit-values (list 1 2 4 8 16 32 64 128 256 512 1024 2048))
+(def harmony-meter-miss (rgba 0.92 0.42 0.36 1))
+
+(def harmony-bit? (mask pc)
+  (>= (mod (floor (/ mask (nth harmony-bit-values pc))) 2) 1))
+
+(def harmony-cell (cells name fallback)
+  (let ((values (get cells name)))
+    (if (and values (> (len values) 0)) (nth values (- (len values) 1)) fallback)))
+
+(def harmony-degree-name (pc root)
+  (nth harmony-degree-names (mod (+ (- pc root) 12) 12)))
+
+(def harmony-tier (score)
+  (if (>= score 0.99) "chord" (if (>= score 0.6) "key" (if (>= score 0.3) "color" "clash"))))
+
+(def harmony-source-label (kind)
+  (if (= kind 1) "src: pattern"
+    (if (= kind 2) "src: output"
+      (if (= kind 3) "src: neuron" "no source"))))
+
+(def harmony-signed (snap)
+  (if (> snap 0) (str "+" (fmt "{:.0}" snap)) (fmt "{:.0}" snap)))
+
+;; [      |===>    ]: a fill from the centre tick toward the move, 6 semitones
+;; to each edge.
+(def harmony-snap-bar (snap width)
+  (let ((tick 0.1)
+        (unit (/ (- width 0.1) 12))
+        (fill (* (min 6 (abs snap)) (/ (- width 0.1) 12)))
+        (half (/ (- width 0.1) 2)))
+    (box :width width :height 0.9 :padding 0 :corner-radius 3
+      :background-color (rgba 0 0 0 0.35)
+      (h-stack :gap 0 :align :center
+        (box :width (- half (if (< snap 0) fill 0)) :height 0.9 :bg :transparent)
+        (if (< snap 0)
+          (box :width fill :height 0.56 :corner-radius 2 :background-color :process-lane-accent)
+          nil)
+        (box :width tick :height 0.9 :background-color (rgba 1 1 1 0.45))
+        (if (> snap 0)
+          (box :width fill :height 0.56 :corner-radius 2 :background-color :process-lane-accent)
+          nil)))))
+
+(def harmony-degree-cell (key i root chord key-mask in-pc out-pc snap)
+  (let ((pc (mod (+ root i) 12)))
+    (let ((landed (= pc out-pc))
+          (moved-from (and (not (= snap 0)) (= pc in-pc))))
+      (box
+        :key (str key "-deg-" i)
+        :width 1.06 :height 0.95 :padding 0 :corner-radius 2
+        :h-align :center :v-align :center
+        :background-color (if landed :process-lane-accent
+                            (if (harmony-bit? chord pc) (rgba 1 1 1 0.30)
+                              (if (harmony-bit? key-mask pc) (rgba 1 1 1 0.10)
+                                (rgba 0 0 0 0.30))))
+        :border-color (if moved-from harmony-meter-miss :transparent)
+        :border-width (if moved-from 0.1 0)
+        (label (nth harmony-degree-names i)
+          :font-size 6.5 :h-align :center :v-align :center :bg :transparent
+          :color (if landed :black
+                   (if (harmony-bit? chord pc) :foreground :dim)))))))
+
+(def harmony-snap-meter (key cells width)
+  (let ((kind (if cells (harmony-cell cells :source-kind 0) 0))
+        (history (if cells (get cells :snap) nil)))
+    (if (or (= cells nil) (= kind 0))
+      (label (if cells "no source sounding: nothing to follow yet" "waiting for a fire")
+        :width width :height 1.0 :font-size 8 :color :dim :bg :transparent)
+      (let ((snap (harmony-cell cells :snap 0))
+            (root (harmony-cell cells :root 0))
+            (in-pc (harmony-cell cells :in-pc 0))
+            (out-pc (harmony-cell cells :out-pc 0))
+            (chord (harmony-cell cells :chord-mask 0))
+            (key-mask (harmony-cell cells :key-mask 0))
+            (in-score (harmony-cell cells :in-score 1))
+            (out-score (harmony-cell cells :out-score 1)))
+        (v-stack :gap 0.25 :width width
+          (h-stack :gap 0.3 :align :center
+            (label (if (= snap 0)
+                     (str (harmony-degree-name out-pc root) " held")
+                     (str (harmony-degree-name in-pc root) " -> " (harmony-degree-name out-pc root)))
+              :width (- width 3.2) :height 1.1 :font-size 10 :bg :transparent
+              :color (if (= snap 0) :foreground :process-lane-accent))
+            (label (harmony-signed snap)
+              :width 3.0 :height 1.1 :font-size 11 :h-align :right :bg :transparent
+              :color (if (= snap 0) :dim :process-lane-accent)))
+          (harmony-snap-bar snap width)
+          (box :width width :height 1.5 :padding 0.1 :corner-radius 3
+            :background-color (rgba 0 0 0 0.3)
+            (linegraph
+              :key (str key "-history")
+              :width :fill :height :fill
+              :values history
+              :total-points (max 8 (len history))
+              :min -6 :max 6
+              :line-color :process-lane-accent
+              :area false))
+          (h-stack :gap 0.05 :align :center
+            (each (range 0 12) |i|
+              (harmony-degree-cell key i root chord key-mask in-pc out-pc snap)))
+          (h-stack :gap 0.3 :align :center
+            (label (if (= snap 0)
+                     (harmony-tier out-score)
+                     (str (harmony-tier in-score) " -> " (harmony-tier out-score)))
+              :width (/ width 2) :height 0.9 :font-size 7.5 :color :dim :bg :transparent)
+            (label (harmony-source-label kind)
+              :width (- (/ width 2) 0.3) :height 0.9 :font-size 7.5 :h-align :right
+              :color :dim :bg :transparent)))))))
+
+;; Scope cells of the process instance whose runtime id is `id` (a graph
+;; node's patch slot: its instance id), or nil before it has fired. Reads
+;; SEQ.process-scope-cells, so call it inside a subtree.
+(def process-scope-cells-for (id)
+  (let ((entries SEQ.process-scope-cells))
+    (if entries
+      (reduce |acc entry| (if (= (get entry :runtime-id) id) (get entry :cells) acc)
+        nil
+        entries)
+      nil)))
 
 ;; ---------------------------------------------------------------------------
 ;; Lane patchbay (docs/default-process-lanes-spec.md, patchbay): every lane of

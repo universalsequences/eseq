@@ -164,41 +164,79 @@ pub fn harmonic_score(pc: u8, chord: &[u8], key_mask: u16) -> f64 {
 /// is within `grace` semitones. Ties between an upward and a downward move
 /// go down. `chord` is the source step's authored pitches, root first.
 pub fn harmonic_snap(chord: &[f32], key_mask: u16, current: f64, amount: f64, grace: f64) -> f64 {
+    harmonic_analysis(chord, key_mask, current, amount, grace).map_or(0.0, |analysis| analysis.delta)
+}
+
+/// Everything one snap decided, for the harmony lane's scope: the move, the
+/// pitch classes on either side of it, and the chord / widened key it was
+/// judged against (masks of pitch classes, bit n = pitch class n).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HarmonicAnalysis {
+    pub delta: f64,
+    pub in_pc: u8,
+    pub out_pc: u8,
+    pub root: u8,
+    pub chord_mask: u16,
+    pub key_mask: u16,
+    pub in_score: f64,
+    pub out_score: f64,
+}
+
+/// [`harmonic_snap`] with its working shown. `None` for an empty chord.
+pub fn harmonic_analysis(
+    chord: &[f32],
+    key_mask: u16,
+    current: f64,
+    amount: f64,
+    grace: f64,
+) -> Option<HarmonicAnalysis> {
     if chord.is_empty() {
-        return 0.0;
+        return None;
     }
     let chord = chord.iter().map(|note| pitch_class(*note)).collect::<Vec<_>>();
     let key_mask = harmonic_key_mask(&chord, key_mask);
+    let chord_mask = chord.iter().fold(0, |mask, pc| mask | bit(*pc));
     let threshold = amount.clamp(0.0, 1.0) - 1e-9;
     let current_pc = pitch_class(current as f32);
-    if harmonic_score(current_pc, &chord, key_mask) >= threshold {
-        return 0.0;
-    }
-    let mut best: Option<(f64, f64)> = None;
-    for pc in 0..12u8 {
-        let score = harmonic_score(pc, &chord, key_mask);
-        if score < threshold {
-            continue;
-        }
-        let delta = f64::from((pc as i32 - current_pc as i32 + 6).rem_euclid(12) - 6);
-        let better = match best {
-            None => true,
-            Some((best_delta, best_score)) => {
-                delta.abs() < best_delta.abs()
-                    || (delta.abs() == best_delta.abs()
-                        && (score > best_score || (score == best_score && delta < best_delta)))
+    let in_score = harmonic_score(current_pc, &chord, key_mask);
+    let mut delta = 0.0;
+    if in_score < threshold {
+        let mut best: Option<(f64, f64)> = None;
+        for pc in 0..12u8 {
+            let score = harmonic_score(pc, &chord, key_mask);
+            if score < threshold {
+                continue;
             }
-        };
-        if better {
-            best = Some((delta, score));
+            let candidate = f64::from((pc as i32 - current_pc as i32 + 6).rem_euclid(12) - 6);
+            let better = match best {
+                None => true,
+                Some((best_delta, best_score)) => {
+                    candidate.abs() < best_delta.abs()
+                        || (candidate.abs() == best_delta.abs()
+                            && (score > best_score
+                                || (score == best_score && candidate < best_delta)))
+                }
+            };
+            if better {
+                best = Some((candidate, score));
+            }
+        }
+        delta = best.map(|(delta, _)| delta).unwrap_or(0.0);
+        if delta.abs() <= grace.max(0.0) {
+            delta = 0.0;
         }
     }
-    let delta = best.map(|(delta, _)| delta).unwrap_or(0.0);
-    if delta.abs() <= grace.max(0.0) {
-        0.0
-    } else {
-        delta
-    }
+    let out_pc = pitch_class((current + delta) as f32);
+    Some(HarmonicAnalysis {
+        delta,
+        in_pc: current_pc,
+        out_pc,
+        root: chord[0],
+        chord_mask,
+        key_mask,
+        in_score,
+        out_score: harmonic_score(out_pc, &chord, key_mask),
+    })
 }
 
 #[cfg(test)]
@@ -258,6 +296,22 @@ mod tests {
         assert_eq!(harmonic_snap(&chord, C_MAJOR_KEY, 1.0, 1.0, 1.0), 0.0);
         // Octaves and negative offsets are pitch classes.
         assert_eq!(harmonic_snap(&chord, C_MAJOR_KEY, -9.0, 1.0, 0.0), 1.0);
+    }
+
+    #[test]
+    fn analysis_shows_the_move_and_what_it_was_judged_against() {
+        // C# over a C triad: a clash (b9) that snaps down to the root.
+        let analysis = harmonic_analysis(&[0.0, 4.0, 7.0], 0, 13.0, 1.0, 0.0).expect("chord");
+        assert_eq!(analysis.delta, -1.0);
+        assert_eq!((analysis.in_pc, analysis.out_pc, analysis.root), (1, 0, 0));
+        assert_eq!(analysis.chord_mask, 0b1001_0001);
+        // A thin pattern borrows the ionian scale the triad implies.
+        assert_eq!(analysis.key_mask, C_MAJOR_KEY);
+        assert!(analysis.in_score < 0.2 && analysis.out_score == 1.0);
+        // A chord tone stays put and scores 1 on both sides.
+        let held = harmonic_analysis(&[0.0, 4.0, 7.0], 0, 7.0, 1.0, 0.0).expect("chord");
+        assert_eq!((held.delta, held.in_pc, held.out_pc), (0.0, 7, 7));
+        assert_eq!(harmonic_analysis(&[], 0, 7.0, 1.0, 0.0), None);
     }
 
     #[test]

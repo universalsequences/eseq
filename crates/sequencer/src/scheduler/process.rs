@@ -2195,6 +2195,9 @@ pub(super) fn enqueue_network_trigger(
     rack_macro_values: [Option<f32>; crate::sequencer::RACK_MACRO_COUNT],
 ) -> bool {
     let (resolved, chord) = apply_fit_to_scale_to_trigger(snapshot, track_idx, resolved, chord);
+    // What the track sounds, relative to its root: harmony followers read it
+    // before global transpose, in the space their own notes are judged in.
+    let harmonic_resolved = resolved;
     let resolved =
         apply_global_transpose_to_resolved(snapshot, track_idx, global_transpose, resolved);
     apply_sampler_instrument_param_overrides(
@@ -2274,6 +2277,13 @@ pub(super) fn enqueue_network_trigger(
                     note_sample_time,
                     note_beat,
                     resolved,
+                    track_output_pitches(
+                        &harmonic_resolved,
+                        &note_chord,
+                        note_beat,
+                        samples_per_step,
+                        samples_per_quarter,
+                    ),
                 );
             }
             return ok;
@@ -2308,6 +2318,13 @@ pub(super) fn enqueue_network_trigger(
             sample_time,
             event_beat,
             resolved,
+            track_output_pitches(
+                &harmonic_resolved,
+                &chord,
+                event_beat,
+                samples_per_step,
+                samples_per_quarter,
+            ),
         );
     }
     enqueued
