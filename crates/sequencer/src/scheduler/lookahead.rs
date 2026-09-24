@@ -1103,6 +1103,22 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                 chunk_enqueued = false;
                 break;
             }
+            // Groove accent (rack groove spec §Application, eseq-groove.5):
+            // the member's groove scales the base trig's resolved velocity at
+            // the same straight transport beat that keyed its timing. It lands
+            // AFTER the process chain, exactly once per sounding event: the
+            // chain reads the straight velocity (as it reads straight timing),
+            // and everything the chain spawns (ratchets, `emit`s) is a process
+            // event that `enqueue_due_process_emissions` grooves at its own
+            // beat. Grooving here first would scale those spawned events twice.
+            // The accumulator below builds on the grooved base like any other
+            // base-event consumer.
+            resolved.velocity = grooved_velocity(
+                snapshot,
+                Some(trigger.track),
+                resolved.velocity,
+                trigger.boundary_beats,
+            );
             let rs = &mut accumulator_states[trigger.track];
             let builtin_count = ACCUMULATOR_REGISTRY.len();
             let actions = if let Some(def) = ACCUMULATOR_REGISTRY.get(track.params.accumulator_idx)
@@ -1726,6 +1742,12 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                 event_beats,
                 samples_per_quarter,
             );
+            output.event.resolved.velocity = grooved_velocity(
+                snapshot,
+                Some(output.event.track),
+                output.event.resolved.velocity,
+                event_beats,
+            );
         }
         neural_events.sort_by_key(|output| {
             let neuron = match output.event.source {
@@ -1871,6 +1893,12 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                             emission.sample_time,
                             straight_beats,
                             samples_per_quarter,
+                        );
+                        emission.event.resolved.velocity = grooved_velocity(
+                            snapshot,
+                            Some(track),
+                            emission.event.resolved.velocity,
+                            straight_beats,
                         );
                     }
                 }
@@ -2122,6 +2150,12 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                     emission.sample_time,
                     emission.grid_beats,
                     samples_per_quarter,
+                );
+                emission.event.resolved.velocity = grooved_velocity(
+                    snapshot,
+                    emission.event.track,
+                    emission.event.resolved.velocity,
+                    emission.grid_beats,
                 );
                 let event_beats = sample_time_to_beats(
                     chunk_start_beats,

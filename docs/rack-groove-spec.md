@@ -326,6 +326,20 @@ a "groove" hint, so there is one visible source of truth for the feel.
 4. **Rack panel UI.** Groove section, Extract Groove modal, heatmap, member swing
    hint.
 5. **Velocity + random amounts.** Velocity scaling and deterministic jitter.
+   *Built (eseq-groove.5):* `TrackGrooveSnapshot::offset_beats` adds
+   `random * spread[k] * groove_hash_noise(absolute slot, pad_note)` before the
+   timing amount (a splitmix hash, no RNG state, so any render from any start
+   point is reproducible); `pad_note` rides on the snapshot, and a padless
+   member seeds with `padless_seed_key(member)`, below the pad-note domain.
+   `apply_velocity` scales by `lerp(1, lerp(scale[k], scale[k+1], t), amount)`
+   clamped to Velocity's 0..1 and is a bit-for-bit no-op at amount 0. Every
+   site calls `scheduler::grooved_velocity` at the same straight beat that keys
+   its timing, exactly once per sounding event: the base step trig AFTER its
+   process chain (and before the accumulator), graph and generator emissions,
+   legacy neural outputs, and process steps/emissions at enqueue. The process
+   chain reads the straight velocity, as it reads straight timing: a ratchet
+   or `emit` built from the step's velocity is a process event that enqueue
+   grooves at its own beat, so grooving the step first would scale it twice.
 6. **Record/roll unwind.** Roll and live-record through a grooved rack store
    straight phase. Pair with eseq-k0v8.
 7. **Kit preset carry + cross-rack.** Grooves in kit presets; applying another

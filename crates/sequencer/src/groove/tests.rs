@@ -689,6 +689,7 @@ fn track_groove(period: f64, resolution: f64, offsets: &[f32]) -> TrackGrooveSna
         timing_amount: 1.0,
         velocity_amount: 0.0,
         random_amount: 0.0,
+        pad_note: 0,
     }
 }
 
@@ -770,6 +771,7 @@ fn builtin_mpc_swings_match_track_swing_delays() {
             timing_amount: 1.0,
             velocity_amount: 0.0,
             random_amount: 0.0,
+            pad_note: 0,
         };
         let res = groove.resolution_beats;
         let swing = (((percent as f64 / 100.0) - 0.5) * 2.0 * res * samples_per_quarter).round();
@@ -838,6 +840,13 @@ fn track_groove_snapshots_resolve_pad_rows_by_note_else_shared() {
     assert_eq!(kick.timing_amount, 0.75);
     assert_eq!(kick.velocity_amount, 0.5);
     assert_eq!(kick.random_amount, 0.25);
+    // Random is seeded by pad note; a padless member gets a key outside the
+    // pad-note domain, distinct per member.
+    assert_eq!(kick.pad_note, 36);
+    assert_eq!(hat.pad_note, 42);
+    assert_eq!(loose.pad_note, padless_seed_key(2));
+    assert!(loose.pad_note < -1000);
+    assert_ne!(padless_seed_key(2), padless_seed_key(3));
 
     // Pad rows follow the NOTE: swap the notes and the hat row moves.
     let mut swapped = rack.clone();
@@ -924,12 +933,20 @@ fn import_grooves_takes_fresh_ids_reuses_identical_and_skips_malformed() {
     let dilla = rack.groove_by_id(2).expect("Dilla imported");
     assert_eq!(dilla.name, "Dilla");
     assert!(dilla.same_feel(&incoming[0]));
-    assert_eq!(rack.groove_by_id(1).unwrap().name, "Own", "the rack's own groove is untouched");
+    assert_eq!(
+        rack.groove_by_id(1).unwrap().name,
+        "Own",
+        "the rack's own groove is untouched"
+    );
 
     // Importing the same set again changes nothing.
     let again = import_grooves(&mut rack, &incoming);
     assert_eq!(again, map);
-    assert_eq!(rack.grooves.len(), 2, "re-importing does not pile up copies");
+    assert_eq!(
+        rack.grooves.len(),
+        2,
+        "re-importing does not pile up copies"
+    );
 }
 
 /// An incoming selection follows the import's id map; a reference to a
@@ -947,11 +964,17 @@ fn install_groove_settings_remaps_the_selection_through_the_id_map() {
     install_groove_settings(&mut rack, &settings, &[(1, 3), (4, 7)]);
     assert_eq!(rack.groove.active, Some(GrooveRef::Rack(7)));
     assert_eq!(rack.groove.timing_amount, 1.25);
-    assert_eq!(rack.groove.velocity_amount, GROOVE_VELOCITY_AMOUNT_MAX, "sanitized");
+    assert_eq!(
+        rack.groove.velocity_amount, GROOVE_VELOCITY_AMOUNT_MAX,
+        "sanitized"
+    );
     assert_eq!(rack.groove.random_amount, 0.5);
 
     install_groove_settings(&mut rack, &settings, &[(1, 3)]);
-    assert_eq!(rack.groove.active, None, "the referenced groove did not land");
+    assert_eq!(
+        rack.groove.active, None,
+        "the referenced groove did not land"
+    );
 
     let builtin = RackGrooveSettings {
         active: Some(GrooveRef::Builtin("mpc-16-58".to_string())),
@@ -987,5 +1010,198 @@ fn a_copied_groove_maps_target_pads_by_note_and_falls_back_to_shared() {
         *table[2].as_ref().expect("snare grooved").row,
         groove.shared_row,
         "the snare has no source row: shared"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Velocity + random amounts (eseq-groove.5)
+// ---------------------------------------------------------------------------
+
+/// A groove whose slots carry accents and spreads, for the velocity and
+/// random amounts.
+fn accented_groove(
+    offsets: &[f32],
+    velocity_scales: &[f32],
+    spreads: &[f32],
+) -> TrackGrooveSnapshot {
+    let mut groove = track_groove(offsets.len() as f64 * 0.25, 0.25, offsets);
+    let row = std::sync::Arc::make_mut(&mut groove.row);
+    for (index, slot) in row.slots.iter_mut().enumerate() {
+        slot.velocity_scale = velocity_scales[index];
+        slot.spread = spreads[index];
+    }
+    groove
+}
+
+/// Velocity amount 0 (the default) leaves every velocity bit for bit, even
+/// on a heavily accented row, and even an out-of-range source velocity.
+#[test]
+fn velocity_amount_zero_leaves_velocity_unchanged() {
+    let groove = accented_groove(&[0.0, 0.2], &[1.8, 0.2], &[0.0, 0.0]);
+    assert_eq!(groove.velocity_amount, 0.0);
+    for beats in [0.0, 0.125, 0.25, 0.3, 7.75, -3.0] {
+        assert_eq!(groove.velocity_scale(beats), 1.0);
+        for velocity in [0.0_f32, 0.37, 1.0, 1.4, -0.2] {
+            assert_eq!(
+                groove.apply_velocity(velocity, beats).to_bits(),
+                velocity.to_bits(),
+                "beat {beats} velocity {velocity}"
+            );
+        }
+    }
+    // A neutral row at full amount is also a no-op.
+    let mut neutral = accented_groove(&[0.0, 0.2], &[1.0, 1.0], &[0.0, 0.0]);
+    neutral.velocity_amount = 1.5;
+    assert_eq!(
+        neutral.apply_velocity(0.37, 0.25).to_bits(),
+        0.37_f32.to_bits()
+    );
+}
+
+/// `velocity_amount` lerps the slot accent into the resolved velocity:
+/// `lerp(1, lerp(scale[k], scale[k+1], t), amount)`, interpolating between
+/// slots and clamping the product to the Velocity param's range.
+#[test]
+fn velocity_amount_lerps_slot_accent_and_clamps() {
+    let mut groove = accented_groove(&[0.0, 0.0, 0.0, 0.0], &[1.5, 0.5, 1.0, 0.25], &[0.0; 4]);
+    groove.velocity_amount = 1.0;
+    let close = |a: f32, b: f32| (a - b).abs() < 1e-6;
+    assert!(close(groove.velocity_scale(0.0), 1.5));
+    assert!(close(groove.velocity_scale(0.25), 0.5));
+    assert!(close(groove.velocity_scale(0.75), 0.25));
+    // A 32nd between slots 0 and 1: halfway between the accents.
+    assert!(close(groove.velocity_scale(0.125), 1.0));
+    // Period wrap: bar 3 reads the same accents.
+    assert!(close(groove.velocity_scale(8.25), 0.5));
+    // Between the last slot and the wrap to slot 0.
+    assert!(close(groove.velocity_scale(0.875), (0.25 + 1.5) / 2.0));
+
+    assert!(close(groove.apply_velocity(0.6, 0.25), 0.3));
+    assert!(close(groove.apply_velocity(0.6, 0.0), 0.9));
+    assert_eq!(
+        groove.apply_velocity(0.8, 0.0),
+        1.0,
+        "0.8 * 1.5 clamps to max"
+    );
+
+    groove.velocity_amount = 0.5;
+    assert!(close(groove.velocity_scale(0.0), 1.25));
+    assert!(close(groove.velocity_scale(0.25), 0.75));
+    assert!(close(groove.apply_velocity(0.4, 0.25), 0.3));
+
+    // Over-amount can push a scale below zero: floored, never negative.
+    let mut deep = accented_groove(&[0.0, 0.0], &[0.1, 1.0], &[0.0; 2]);
+    deep.velocity_amount = 1.5;
+    assert_eq!(deep.velocity_scale(0.0), 0.0);
+    assert_eq!(deep.apply_velocity(0.9, 0.0), 0.0);
+    // Degenerate beats never touch velocity.
+    assert_eq!(deep.velocity_scale(f64::NAN), 1.0);
+    assert_eq!(deep.apply_velocity(0.9, f64::INFINITY), 0.9);
+}
+
+/// The noise is a pure function of (absolute slot, pad note), in [-1, 1),
+/// and decorrelated across slots and pads.
+#[test]
+fn groove_hash_noise_is_deterministic_bounded_and_varied() {
+    let mut sum = 0.0;
+    let mut distinct = std::collections::BTreeSet::new();
+    for slot in -64..512_i64 {
+        let value = groove_hash_noise(slot, 42);
+        assert_eq!(value.to_bits(), groove_hash_noise(slot, 42).to_bits());
+        assert!((-1.0..1.0).contains(&value), "{value}");
+        sum += value;
+        distinct.insert(value.to_bits());
+    }
+    assert_eq!(distinct.len(), 576, "every slot draws its own value");
+    assert!(
+        (sum / 576.0).abs() < 0.15,
+        "roughly centered: mean {}",
+        sum / 576.0
+    );
+    assert_ne!(groove_hash_noise(17, 36), groove_hash_noise(17, 42));
+    assert_ne!(groove_hash_noise(17, 42), groove_hash_noise(18, 42));
+}
+
+/// Random adds `random * spread[k] * noise(absolute slot, pad)` (in slots,
+/// then scaled by timing): the same boundary always jitters the same way,
+/// the same slot in another bar jitters differently, and zero random or zero
+/// spread is exactly the un-randomized offset.
+#[test]
+fn random_amount_jitters_by_spread_reproducibly_and_varies_bar_to_bar() {
+    let offsets = [0.3_f32, 0.3, 0.3, 0.3];
+    let spreads = [0.1_f32, 0.1, 0.0, 0.1];
+    let plain = accented_groove(&offsets, &[1.0; 4], &spreads);
+    let mut random = plain.clone();
+    random.random_amount = 1.0;
+    random.pad_note = 42;
+
+    // Zero random = today's offset, bit for bit, whatever the spread.
+    for beats in [0.0, 0.25, 0.625, 3.5] {
+        assert_eq!(plain.offset_beats(beats).to_bits(), {
+            let mut no_spread = plain.clone();
+            std::sync::Arc::make_mut(&mut no_spread.row)
+                .slots
+                .iter_mut()
+                .for_each(|slot| slot.spread = 0.0);
+            no_spread.offset_beats(beats).to_bits()
+        });
+    }
+
+    let mut per_bar = Vec::new();
+    for bar in 0..8 {
+        let beats = bar as f64 * 1.0 + 0.25; // slot 1 of every bar
+        let value = random.offset_beats(beats);
+        // Reproducible: same boundary, same value.
+        assert_eq!(value.to_bits(), random.offset_beats(beats).to_bits());
+        assert_eq!(
+            value.to_bits(),
+            random.clone().offset_beats(beats).to_bits()
+        );
+        // Bounded by random * spread (0.1 slot = 0.025 beats) around 0.3.
+        let base = 0.3 * 0.25;
+        assert!(
+            (value - base).abs() <= 0.1 * 0.25 + 1e-9,
+            "bar {bar}: {value}"
+        );
+        // Matches the documented formula.
+        let expected = (0.3 + 0.1 * groove_hash_noise(bar * 4 + 1, 42)) * 0.25;
+        assert!(
+            (value - expected).abs() < 1e-7,
+            "bar {bar}: {value} vs {expected}"
+        );
+        per_bar.push(value.to_bits());
+    }
+    let distinct: std::collections::BTreeSet<_> = per_bar.iter().collect();
+    assert_eq!(
+        distinct.len(),
+        per_bar.len(),
+        "each bar jitters differently"
+    );
+
+    // A slot with no spread never jitters.
+    for bar in 0..4 {
+        let beats = bar as f64 + 0.5;
+        assert_eq!(
+            random.offset_beats(beats).to_bits(),
+            plain.offset_beats(beats).to_bits()
+        );
+    }
+    // Another pad on the same slot draws other noise.
+    let mut other_pad = random.clone();
+    other_pad.pad_note = 36;
+    assert_ne!(other_pad.offset_beats(0.25), random.offset_beats(0.25));
+    // Half random halves the jitter; timing scales it with the offset.
+    let mut half = random.clone();
+    half.random_amount = 0.5;
+    let jitter = |g: &TrackGrooveSnapshot| g.offset_beats(0.25) - plain.offset_beats(0.25);
+    assert!((jitter(&half) - jitter(&random) * 0.5).abs() < 1e-7);
+    let mut slow = random.clone();
+    slow.timing_amount = 0.5;
+    assert!((slow.offset_beats(0.25) - random.offset_beats(0.25) * 0.5).abs() < 1e-7);
+    // A boundary a hair off the slot (float noise from another source) reads
+    // the same slot AND the same seed.
+    assert_eq!(
+        random.offset_beats(0.25 - 1e-9).to_bits(),
+        random.offset_beats(0.25).to_bits()
     );
 }

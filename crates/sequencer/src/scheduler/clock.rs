@@ -976,6 +976,23 @@ pub(super) fn grooved_emission_sample_time(
     }
 }
 
+/// A trig's resolved `velocity` through `track`'s rack groove accent
+/// (docs/rack-groove-spec.md §Application: "Velocity multiplies the source's
+/// resolved velocity and is clamped to its valid range"), keyed on the same
+/// straight transport beat as its timing. No groove, or a zero velocity
+/// amount: `velocity` unchanged, bit for bit.
+pub(super) fn grooved_velocity(
+    snapshot: &SequencerSnapshot,
+    track: Option<usize>,
+    velocity: f32,
+    boundary_beats: f64,
+) -> f32 {
+    match track.and_then(|track| snapshot.track_groove(track)) {
+        Some(groove) => groove.apply_velocity(velocity, boundary_beats),
+        None => velocity,
+    }
+}
+
 /// Legacy neural outputs: the target member's rack groove when it has one
 /// (replacing the track swing), else the track swing exactly as before.
 pub(super) fn grooved_or_swung_network_sample_time(

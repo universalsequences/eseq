@@ -722,7 +722,9 @@ pub(super) fn enqueue_due_process_emissions(
             samples_per_quarter,
         );
         match item.event {
-            crate::process::ProcessScheduledEvent::Emission(event) => {
+            crate::process::ProcessScheduledEvent::Emission(mut event) => {
+                event.resolved.velocity =
+                    grooved_velocity(snapshot, event.track, event.resolved.velocity, item.beat);
                 if debug_routing_enabled() {
                     eprintln!(
                         "[routing] process-emission process={} track={:?} sample={} beat={:.6} transpose={} vel={}",
@@ -754,7 +756,16 @@ pub(super) fn enqueue_due_process_emissions(
                     return false;
                 }
             }
-            crate::process::ProcessScheduledEvent::Step(spawned) => {
+            crate::process::ProcessScheduledEvent::Step(mut spawned) => {
+                // Step-chain ratchets are materialized from the step's
+                // STRAIGHT velocity (the lookahead grooves the base trig only
+                // after its process chain), so this is their one groove pass.
+                spawned.event.resolved.velocity = grooved_velocity(
+                    snapshot,
+                    Some(spawned.event.track),
+                    spawned.event.resolved.velocity,
+                    item.beat,
+                );
                 if debug_routing_enabled() {
                     eprintln!(
                         "[routing] process-step process={} track={} sample={} beat={:.6} transpose={} vel={} midi_fx_overrides={}",

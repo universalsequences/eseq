@@ -10,8 +10,13 @@
 //!
 //! This slice is LATE-ONLY: applied offsets are clamped to `>= 0` until the
 //! lookahead can discover trigs ahead of the chunk edge (eseq-groove.3).
-//! Velocity and random amounts are carried on the snapshot but not applied
-//! yet (eseq-groove.5).
+//!
+//! Velocity and random amounts (eseq-groove.5): `velocity_amount` lerps the
+//! slot's `velocity_scale` into the trig's resolved velocity
+//! ([`TrackGrooveSnapshot::apply_velocity`]); `random_amount` adds
+//! `spread * noise` to the offset, where the noise is a pure hash of the
+//! absolute transport slot index and the member's pad note, so an offline
+//! render or bounce is reproducible while every bar still varies.
 
 use std::sync::Arc;
 
@@ -35,52 +40,149 @@ pub struct TrackGrooveSnapshot {
     pub resolution_beats: f64,
     pub row: Arc<GrooveRow>,
     pub timing_amount: f32,
-    /// Carried for eseq-groove.5; not applied in this slice.
+    /// How much of the slot's `velocity_scale` reaches the trig: 0 leaves
+    /// velocity untouched, 1 applies the measured accent.
     pub velocity_amount: f32,
-    /// Carried for eseq-groove.5; not applied in this slice.
+    /// How much of the slot's `spread` (MAD, in slots) jitters the offset.
     pub random_amount: f32,
+    /// The Random seed's pad half: the member's pad note, or
+    /// [`padless_seed_key`] for a member with no pad. Two members on the
+    /// same pad note jitter together, like one drummer's hand.
+    pub pad_note: i32,
+}
+
+/// The seed key of a rack member without a pad: below the pad-note domain,
+/// so it never collides with a real pad, and distinct per member.
+pub fn padless_seed_key(member: usize) -> i32 {
+    i32::MIN.saturating_add(member.min(i32::MAX as usize) as i32)
+}
+
+/// Where a transport beat falls in the groove: the slot `k` (and the one
+/// after it, wrapping) with the fraction `t` between them, plus the ABSOLUTE
+/// transport slot index (not wrapped by the period) that seeds Random.
+struct SlotPosition {
+    k: usize,
+    next: usize,
+    t: f64,
+    absolute: i64,
+}
+
+/// Deterministic noise in `[-1, 1)` from `(absolute slot index, pad note)`:
+/// a splitmix64 finalizer over both, so neighbouring slots and pads are
+/// uncorrelated and the same inputs always give the same value.
+pub fn groove_hash_noise(absolute_slot: i64, pad_note: i32) -> f64 {
+    let mut z = (absolute_slot as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        ^ (pad_note as i64 as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F)
+        ^ 0x6772_6f6f_7665_5f35; // "groove_5"
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^= z >> 31;
+    // Top 53 bits -> [0, 1) -> [-1, 1).
+    ((z >> 11) as f64 / (1u64 << 53) as f64) * 2.0 - 1.0
 }
 
 impl TrackGrooveSnapshot {
+    fn slot_position(&self, boundary_beats: f64) -> Option<SlotPosition> {
+        let n = self.row.slots.len();
+        if n == 0
+            || !boundary_beats.is_finite()
+            || !(self.period_beats > 0.0)
+            || !(self.resolution_beats > 0.0)
+        {
+            return None;
+        }
+        let snap = |mut pos: f64| {
+            let nearest = pos.round();
+            if (pos - nearest).abs() < SLOT_SNAP {
+                pos = nearest;
+            }
+            pos
+        };
+        let pos = snap(boundary_beats.rem_euclid(self.period_beats) / self.resolution_beats);
+        let k = pos.floor();
+        let t = pos - k;
+        let k = (k.max(0.0) as usize) % n;
+        let absolute = snap(boundary_beats / self.resolution_beats).floor();
+        let absolute = if absolute.is_finite() {
+            absolute.clamp(i64::MIN as f64, i64::MAX as f64) as i64
+        } else {
+            0
+        };
+        Some(SlotPosition {
+            k,
+            next: (k + 1) % n,
+            t,
+            absolute,
+        })
+    }
+
     /// The groove's offset at `boundary_beats` (transport beats, bar
-    /// aligned), in beats, after the timing amount:
+    /// aligned), in beats, after the random and timing amounts:
     ///
     /// ```text
-    /// pos = boundary.rem_euclid(period) / resolution
-    /// off = lerp(row[k].offset, row[k+1 mod n].offset, frac(pos)) * timing
+    /// pos  = boundary.rem_euclid(period) / resolution
+    /// off  = lerp(row[k].offset, row[k+1 mod n].offset, frac(pos))
+    /// off += random * row[k].spread * noise(absolute slot, pad note)
+    /// off *= timing
     /// ```
     ///
     /// The interpolation is what lets a 16th groove shape 32nd hats or
     /// triplet-quantized neurons; two-slot swing is exactly this warp.
     /// Clamped to `>= 0` (late-only, eseq-groove.3 lifts the clamp).
     pub fn offset_beats(&self, boundary_beats: f64) -> f64 {
-        let slots = &self.row.slots;
-        let n = slots.len();
-        if n == 0
-            || !boundary_beats.is_finite()
-            || !(self.period_beats > 0.0)
-            || !(self.resolution_beats > 0.0)
-        {
+        let Some(at) = self.slot_position(boundary_beats) else {
             return 0.0;
+        };
+        let slots = &self.row.slots;
+        let a = slots[at.k].offset as f64;
+        let b = slots[at.next].offset as f64;
+        let mut offset_slots = a + (b - a) * at.t;
+        let jitter = self.random_amount as f64 * slots[at.k].spread as f64;
+        if jitter != 0.0 && jitter.is_finite() {
+            offset_slots += jitter * groove_hash_noise(at.absolute, self.pad_note);
         }
-        let mut pos = boundary_beats.rem_euclid(self.period_beats) / self.resolution_beats;
-        let nearest = pos.round();
-        if (pos - nearest).abs() < SLOT_SNAP {
-            pos = nearest;
-        }
-        let k = pos.floor();
-        let t = pos - k;
-        let k = (k.max(0.0) as usize) % n;
-        let next = (k + 1) % n;
-        let a = slots[k].offset as f64;
-        let b = slots[next].offset as f64;
-        let offset_slots = (a + (b - a) * t) * self.timing_amount as f64;
+        let offset_slots = offset_slots * self.timing_amount as f64;
         let beats = offset_slots * self.resolution_beats;
         if beats.is_finite() {
             beats.max(0.0)
         } else {
             0.0
         }
+    }
+
+    /// The velocity multiplier at `boundary_beats`:
+    /// `lerp(1, lerp(row[k].velocity_scale, row[k+1].velocity_scale, t),
+    /// velocity_amount)`. Exactly `1.0` at a zero amount (and for any
+    /// degenerate input), so a timing-only groove leaves velocity untouched.
+    pub fn velocity_scale(&self, boundary_beats: f64) -> f32 {
+        if self.velocity_amount == 0.0 {
+            return 1.0;
+        }
+        let Some(at) = self.slot_position(boundary_beats) else {
+            return 1.0;
+        };
+        let slots = &self.row.slots;
+        let a = slots[at.k].velocity_scale as f64;
+        let b = slots[at.next].velocity_scale as f64;
+        let slot_scale = a + (b - a) * at.t;
+        let scale = 1.0 + (slot_scale - 1.0) * self.velocity_amount as f64;
+        if scale.is_finite() {
+            scale.max(0.0) as f32
+        } else {
+            1.0
+        }
+    }
+
+    /// The trig's resolved `velocity` through the groove's accent, clamped to
+    /// the Velocity step param's range. A neutral scale returns `velocity`
+    /// bit for bit (even out of range), so velocity amount 0 changes nothing.
+    pub fn apply_velocity(&self, velocity: f32, boundary_beats: f64) -> f32 {
+        let scale = self.velocity_scale(boundary_beats);
+        if scale == 1.0 {
+            return velocity;
+        }
+        let param = crate::sequencer::StepParam::Velocity;
+        (velocity * scale).clamp(param.min(), param.max())
     }
 }
 
@@ -214,28 +316,27 @@ pub fn track_groove_snapshots<'a>(
             continue;
         }
         let shared = Arc::new(groove.shared_row.clone());
-        let entry = |row: Arc<GrooveRow>| TrackGrooveSnapshot {
+        let entry = |row: Arc<GrooveRow>, pad_note: i32| TrackGrooveSnapshot {
             period_beats: groove.period_beats,
             resolution_beats: groove.resolution_beats,
             row,
             timing_amount: rack.groove.timing_amount,
             velocity_amount: rack.groove.velocity_amount,
             random_amount: rack.groove.random_amount,
+            pad_note,
         };
         for (member, &track) in members.iter().enumerate() {
             let Some(slot) = out.get_mut(track) else {
                 continue;
             };
-            let pad_row = rack
-                .pads
-                .iter()
-                .find(|pad| pad.member == member)
-                .and_then(|pad| groove.pad_row(pad.pad_note));
+            let pad = rack.pads.iter().find(|pad| pad.member == member);
+            let pad_row = pad.and_then(|pad| groove.pad_row(pad.pad_note));
             let row = match pad_row {
                 Some(row) => Arc::new(row.clone()),
                 None => Arc::clone(&shared),
             };
-            *slot = Some(entry(row));
+            let pad_note = pad.map_or_else(|| padless_seed_key(member), |pad| pad.pad_note);
+            *slot = Some(entry(row, pad_note));
         }
     }
     out

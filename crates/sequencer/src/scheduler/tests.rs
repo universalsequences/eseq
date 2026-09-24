@@ -14157,7 +14157,7 @@ fn scene_transpose_follows_live_scene_values_without_a_scratch_runtime() {
             builtin_groove, groove_delay_samples, GrooveRow, GrooveSlot, TrackGrooveSnapshot,
         };
         use crate::scheduler::{
-            enqueue_due_process_emissions, grooved_or_swung_network_sample_time,
+            enqueue_due_process_emissions, grooved_or_swung_network_sample_time, grooved_velocity,
             step_trigger_sample_time,
         };
 
@@ -14176,6 +14176,7 @@ fn scene_transpose_follows_live_scene_values_without_a_scratch_runtime() {
                 timing_amount: 1.0,
                 velocity_amount: 0.0,
                 random_amount: 0.0,
+                pad_note: 0,
             }
         }
 
@@ -14188,6 +14189,7 @@ fn scene_transpose_follows_live_scene_values_without_a_scratch_runtime() {
                 timing_amount: 1.0,
                 velocity_amount: 0.0,
                 random_amount: 0.0,
+                pad_note: 0,
             }
         }
 
@@ -14210,6 +14212,18 @@ fn scene_transpose_follows_live_scene_values_without_a_scratch_runtime() {
             snapshot: &crate::sequencer::SequencerSnapshot,
             samples: u64,
         ) -> Vec<ObservedTrigger> {
+            observed_triggers(&lookahead_queue(state, snapshot, samples, 6_000))
+        }
+
+        /// The production lookahead from sample 0 over `samples` with a
+        /// FRESH scheduler state (as an offline render/bounce starts), in
+        /// scheduler blocks of `block_size`; returns the filled queue.
+        fn lookahead_queue(
+            state: &Arc<SequencerState>,
+            snapshot: &crate::sequencer::SequencerSnapshot,
+            samples: u64,
+            block_size: usize,
+        ) -> ScheduledEventQueue<512> {
             let mut scheduler = SchedulerLookaheadState::new(SAMPLE_RATE);
             let manifests = state
                 .published_sequencers()
@@ -14243,13 +14257,31 @@ fn scene_transpose_follows_live_scene_values_without_a_scratch_runtime() {
                 0,
                 samples,
                 SAMPLE_RATE,
-                6_000,
+                block_size,
                 samples_per_quarter(snapshot),
                 0,
                 false,
                 false,
             );
-            observed_triggers(&queue)
+            queue
+        }
+
+        /// Every enqueued trigger as `(track, sample, velocity bits)`, in
+        /// queue order: what an offline render of these trigs would play.
+        fn trig_velocities<const CAP: usize>(
+            queue: &ScheduledEventQueue<CAP>,
+        ) -> Vec<(usize, u64, u32)> {
+            let mut out = Vec::new();
+            while let Some(event) = queue.pop_owned() {
+                match &event.kind {
+                    ScheduledEventKind::ResolvedTrigger { track, resolved, .. }
+                    | ScheduledEventKind::NetworkTrigger { track, resolved, .. } => {
+                        out.push((*track, event.sample_time, resolved.velocity.to_bits()))
+                    }
+                    _ => {}
+                }
+            }
+            out
         }
 
         fn step_times(events: &[ObservedTrigger], track: usize) -> Vec<u64> {
@@ -14371,6 +14403,91 @@ fn scene_transpose_follows_live_scene_values_without_a_scratch_runtime() {
             });
         }
 
+        /// Three tracks: track 0 (kick) on the beats seeds a variable-reset
+        /// graph whose fires route to track 1 (hat), which also plays every
+        /// 16th from its own steps. `grooves` (when given) is the published
+        /// per-track groove table.
+        fn variable_reset_rack_fixture(
+            grooves: Option<Vec<Option<TrackGrooveSnapshot>>>,
+        ) -> (
+            Arc<SequencerState>,
+            Arc<crate::sequencer::SequencerSnapshot>,
+        ) {
+            let state = Arc::new(SequencerState::new(
+                3,
+                (0..3).map(|_| default_empty_effect_chain()).collect(),
+            ));
+            state.toggle_play();
+            // Track 0 (kick) seeds the graph on the beats; track 1 (hat)
+            // plays every 16th from its own steps.
+            for step in [0usize, 4, 8, 12] {
+                state.toggle_step_and_clear_plocks(0, step);
+            }
+            for step in 0..16 {
+                state.toggle_step_and_clear_plocks(1, step);
+            }
+            publish_test_graph_sequencer(Arc::clone(&state), VARIABLE_RESET_SOURCE);
+            let published = state
+                .published_sequencers()
+                .into_iter()
+                .find(|seq| seq.name == "variable-reset")
+                .expect("published graph");
+            let manifest = published.graph.as_ref().expect("graph manifest");
+            let edge_group = crate::graph::edge_set_group_id(&manifest.edge_sets[0]);
+            let intrinsic = |instance: usize, seed: Option<ProjectGraphSeedFrom>| {
+                ProjectGraphNodeIntrinsicOverride {
+                    group: "nrn".to_string(),
+                    instance,
+                    resolution: None,
+                    delay_steps: None,
+                    quantize: None,
+                    route: Some(ProjectGraphRouteOverride::Track(1)),
+                    seed_from: seed,
+                    seed_on_reset: None,
+                    duration: None,
+                    swing: None,
+                    neural_group: None,
+                    process_chain: None,
+                }
+            };
+            state
+                .edit_current_graph_overrides(|graphs| {
+                    graphs.push(ProjectGraphOverrides {
+                        sequencer_id: published.id,
+                        sequencer_name: published.name.clone(),
+                        owner_rack: None,
+                        node_intrinsics: vec![
+                            intrinsic(0, Some(ProjectGraphSeedFrom::Tracks(vec![0]))),
+                            intrinsic(1, None),
+                        ],
+                        node_params: Vec::new(),
+                        edge_params: vec![ProjectGraphEdgeParamOverride {
+                            group: edge_group,
+                            from: 0,
+                            to: 1,
+                            param: "weight".to_string(),
+                            value: 1.0,
+                        }],
+                        reset_every_beats: None,
+                        max_poly: None,
+                        max_poly_selection: None,
+                        node_count: None,
+                        group_gain: None,
+                        group_coupling: None,
+                        group_trace_decay: None,
+                        group_coupling_scale: None,
+                        group_excite_floor: None,
+                    });
+                    Ok(())
+                })
+                .expect("install graph overrides");
+            if let Some(grooves) = grooves {
+                state.set_track_grooves(grooves);
+            }
+            let snapshot = state.publish_scheduler_snapshot();
+            (state, snapshot)
+        }
+
         /// Acceptance: a grooved rack moves step trigs and variable-reset
         /// emissions by the same number of samples for the same pad and
         /// position, and the groove is what moved them (without it, the
@@ -14378,84 +14495,15 @@ fn scene_transpose_follows_live_scene_values_without_a_scratch_runtime() {
         #[test]
         fn grooved_rack_delays_step_trigs_and_variable_reset_emissions_identically() {
             fn run(grooved: bool) -> (f64, Vec<ObservedTrigger>) {
-                let state = Arc::new(SequencerState::new(
-                    3,
-                    (0..3).map(|_| default_empty_effect_chain()).collect(),
-                ));
-                state.toggle_play();
-                // Track 0 (kick) seeds the graph on the beats; track 1 (hat)
-                // plays every 16th from its own steps.
-                for step in [0usize, 4, 8, 12] {
-                    state.toggle_step_and_clear_plocks(0, step);
-                }
-                for step in 0..16 {
-                    state.toggle_step_and_clear_plocks(1, step);
-                }
-                publish_test_graph_sequencer(Arc::clone(&state), VARIABLE_RESET_SOURCE);
-                let published = state
-                    .published_sequencers()
-                    .into_iter()
-                    .find(|seq| seq.name == "variable-reset")
-                    .expect("published graph");
-                let manifest = published.graph.as_ref().expect("graph manifest");
-                let edge_group = crate::graph::edge_set_group_id(&manifest.edge_sets[0]);
-                let intrinsic = |instance: usize, seed: Option<ProjectGraphSeedFrom>| {
-                    ProjectGraphNodeIntrinsicOverride {
-                        group: "nrn".to_string(),
-                        instance,
-                        resolution: None,
-                        delay_steps: None,
-                        quantize: None,
-                        route: Some(ProjectGraphRouteOverride::Track(1)),
-                        seed_from: seed,
-                        seed_on_reset: None,
-                        duration: None,
-                        swing: None,
-                        neural_group: None,
-                        process_chain: None,
-                    }
-                };
-                state
-                    .edit_current_graph_overrides(|graphs| {
-                        graphs.push(ProjectGraphOverrides {
-                            sequencer_id: published.id,
-                            sequencer_name: published.name.clone(),
-                            owner_rack: None,
-                            node_intrinsics: vec![
-                                intrinsic(0, Some(ProjectGraphSeedFrom::Tracks(vec![0]))),
-                                intrinsic(1, None),
-                            ],
-                            node_params: Vec::new(),
-                            edge_params: vec![ProjectGraphEdgeParamOverride {
-                                group: edge_group,
-                                from: 0,
-                                to: 1,
-                                param: "weight".to_string(),
-                                value: 1.0,
-                            }],
-                            reset_every_beats: None,
-                            max_poly: None,
-                            max_poly_selection: None,
-                            node_count: None,
-                            group_gain: None,
-                            group_coupling: None,
-                            group_trace_decay: None,
-                            group_coupling_scale: None,
-                            group_excite_floor: None,
-                        });
-                        Ok(())
-                    })
-                    .expect("install graph overrides");
-                if grooved {
-                    // One rack: kick plays the shared (straight) row, the hat
-                    // its own pocket.
-                    state.set_track_grooves(vec![
+                // One rack: kick plays the shared (straight) row, the hat its
+                // own pocket.
+                let (state, snapshot) = variable_reset_rack_fixture(grooved.then(|| {
+                    vec![
                         Some(groove(4.0, 0.25, &[0.0; 16])),
                         Some(groove(4.0, 0.25, &HAT_POCKET)),
                         None,
-                    ]);
-                }
-                let snapshot = state.publish_scheduler_snapshot();
+                    ]
+                }));
                 let spq = samples_per_quarter(&snapshot);
                 (spq, run_lookahead(&state, &snapshot, (spq * 8.0) as u64))
             }
@@ -14728,5 +14776,440 @@ fn scene_transpose_follows_live_scene_values_without_a_scratch_runtime() {
                 assert_eq!(swing - boundary, swing_expected);
             }
             assert_eq!(groove_delay_samples(&mpc, 8.25, spq), delay);
+        }
+
+        /// A groove row with per-slot accents and spreads (eseq-groove.5).
+        fn accented(offsets: &[f32], velocity_scales: &[f32], spread: f32) -> TrackGrooveSnapshot {
+            let mut g = groove(offsets.len() as f64 * 0.25, 0.25, offsets);
+            for (index, slot) in Arc::make_mut(&mut g.row).slots.iter_mut().enumerate() {
+                slot.velocity_scale = velocity_scales[index];
+                slot.spread = spread;
+            }
+            g
+        }
+
+        /// Two tracks, every 16th active on both, every step at velocity
+        /// 0.5; track 0 plays through `groove`, track 1 does not.
+        fn render_two_tracks(
+            groove: Option<TrackGrooveSnapshot>,
+            bars: u64,
+            block_size: usize,
+        ) -> Vec<(usize, u64, u32)> {
+            run_with_scheduler_stack(move || {
+                let state = Arc::new(SequencerState::new(2, vec![
+                    default_empty_effect_chain(),
+                    default_empty_effect_chain(),
+                ]));
+                state.toggle_play();
+                for track in 0..2 {
+                    for step in 0..16 {
+                        state.toggle_step_and_clear_plocks(track, step);
+                        state.set_step_param(track, step, StepParam::Velocity, 0.5);
+                    }
+                }
+                state.set_track_grooves(vec![groove, None]);
+                let snapshot = state.latest_scheduler_snapshot();
+                let spq = samples_per_quarter(&snapshot);
+                let queue = lookahead_queue(
+                    &state,
+                    &snapshot,
+                    (spq * 4.0 * bars as f64) as u64,
+                    block_size,
+                );
+                trig_velocities(&queue)
+            })
+        }
+
+        /// Acceptance (eseq-groove.5): with Random > 0 an offline render is
+        /// reproducible run to run (fresh scheduler, and a different block
+        /// size) yet the same slot lands differently from bar to bar; with
+        /// velocity amount 0 every velocity is unchanged, even on a heavily
+        /// accented row.
+        #[test]
+        fn random_groove_render_is_reproducible_and_varies_bar_to_bar() {
+            let accents: Vec<f32> = (0..16).map(|i| if i % 4 == 0 { 1.8 } else { 0.4 }).collect();
+            let mut random = accented(&HAT_POCKET, &accents, 0.2);
+            random.random_amount = 1.0;
+            random.pad_note = 42;
+            assert_eq!(random.velocity_amount, 0.0);
+            const BARS: u64 = 4;
+
+            let first = render_two_tracks(Some(random.clone()), BARS, 6_000);
+            let second = render_two_tracks(Some(random.clone()), BARS, 6_000);
+            let small_blocks = render_two_tracks(Some(random.clone()), BARS, 512);
+            assert_eq!(first.len(), (2 * 16 * BARS) as usize);
+            assert_eq!(first, second, "run to run: identical render");
+            let sorted = |mut v: Vec<(usize, u64, u32)>| {
+                v.sort();
+                v
+            };
+            assert_eq!(
+                sorted(first.clone()),
+                sorted(small_blocks),
+                "the scheduler block size does not change the jitter"
+            );
+
+            // Per-slot offset from the straight grid, bar by bar.
+            let spq = 24_000.0;
+            let step = spq / 4.0;
+            let mut times: Vec<u64> =
+                first.iter().filter(|e| e.0 == 0).map(|e| e.1).collect();
+            times.sort();
+            assert_eq!(times.len(), (16 * BARS) as usize);
+            let offset = |index: usize| times[index] as i64 - (index as f64 * step) as i64;
+            let mut varying_slots = 0;
+            for slot in 0..16 {
+                let per_bar: std::collections::BTreeSet<i64> =
+                    (0..BARS as usize).map(|bar| offset(bar * 16 + slot)).collect();
+                if per_bar.len() > 1 {
+                    varying_slots += 1;
+                }
+                // Jitter stays within random * spread of the pocket (late-only
+                // clamp can only pull it up to the grid).
+                let pocket = HAT_POCKET[slot] as f64 * 0.25 * spq;
+                let bound = 0.2 * 0.25 * spq + 1.0;
+                for bar in 0..BARS as usize {
+                    let got = offset(bar * 16 + slot) as f64;
+                    assert!(got >= 0.0);
+                    assert!(
+                        (got - pocket).abs() <= bound || got == 0.0,
+                        "slot {slot} bar {bar}: {got} vs pocket {pocket}"
+                    );
+                }
+            }
+            assert!(
+                varying_slots >= 12,
+                "most slots land differently bar to bar ({varying_slots}/16)"
+            );
+
+            // Without Random the same pocket repeats exactly every bar.
+            let mut steady = random.clone();
+            steady.random_amount = 0.0;
+            let steady = render_two_tracks(Some(steady), BARS, 6_000);
+            let mut steady_times: Vec<u64> =
+                steady.iter().filter(|e| e.0 == 0).map(|e| e.1).collect();
+            steady_times.sort();
+            for index in 16..steady_times.len() {
+                assert_eq!(
+                    steady_times[index] - steady_times[index - 16],
+                    (spq * 4.0) as u64,
+                    "no random: bar {} repeats bar 0",
+                    index / 16
+                );
+            }
+
+            // Velocity amount 0: every velocity is the source's, bit for bit,
+            // and the ungrooved track is untouched by the groove entirely.
+            let ungrooved = render_two_tracks(None, BARS, 6_000);
+            assert!(first.iter().all(|e| e.2 == 0.5_f32.to_bits()));
+            let track1 = |v: &[(usize, u64, u32)]| {
+                sorted(v.iter().copied().filter(|e| e.0 == 1).collect())
+            };
+            assert_eq!(track1(&first), track1(&ungrooved));
+        }
+
+        /// Velocity amount: step trigs on a grooved member take the slot
+        /// accent (lerped by the amount, clamped to 0..1) at their straight
+        /// transport boundary; the ungrooved track keeps its velocity.
+        #[test]
+        fn groove_velocity_amount_scales_step_trig_velocity() {
+            let scales = [1.5_f32, 0.5, 1.0, 0.25];
+            let mut g = accented(&[0.0, 0.1, 0.0, 0.1], &scales, 0.0);
+            g.velocity_amount = 1.0;
+            let events = render_two_tracks(Some(g.clone()), 2, 6_000);
+            let velocities = |track: usize| -> Vec<f32> {
+                let mut v: Vec<(u64, u32)> = events
+                    .iter()
+                    .filter(|e| e.0 == track)
+                    .map(|e| (e.1, e.2))
+                    .collect();
+                v.sort();
+                v.into_iter().map(|(_, bits)| f32::from_bits(bits)).collect()
+            };
+            let grooved = velocities(0);
+            assert_eq!(grooved.len(), 32);
+            for (index, velocity) in grooved.iter().enumerate() {
+                let expected = (0.5 * scales[index % 4]).clamp(0.0, 1.0);
+                assert!(
+                    (velocity - expected).abs() < 1e-6,
+                    "step {index}: {velocity} vs {expected}"
+                );
+            }
+            assert!(velocities(1).iter().all(|v| *v == 0.5));
+
+            // Half amount: halfway to the accent.
+            g.velocity_amount = 0.5;
+            let events = render_two_tracks(Some(g), 1, 6_000);
+            let mut v: Vec<(u64, f32)> = events
+                .iter()
+                .filter(|e| e.0 == 0)
+                .map(|e| (e.1, f32::from_bits(e.2)))
+                .collect();
+            v.sort_by_key(|e| e.0);
+            assert!((v[0].1 - 0.625).abs() < 1e-6, "{}", v[0].1);
+            assert!((v[1].1 - 0.375).abs() < 1e-6, "{}", v[1].1);
+        }
+
+        /// Velocity at the emission sites: process-scheduled steps and
+        /// emissions aimed at a grooved member take the accent at their
+        /// straight beat, and the helper every emission site shares leaves an
+        /// ungrooved (or zero-amount) target alone.
+        #[test]
+        fn groove_velocity_applies_to_process_emissions_and_emission_helper() {
+            let mut g = accented(&[0.0, 0.3, 0.0, 0.1], &[1.5, 0.5, 1.0, 1.2], 0.0);
+            g.velocity_amount = 1.0;
+            let state = Arc::new(SequencerState::new(2, vec![
+                default_empty_effect_chain(),
+                default_empty_effect_chain(),
+            ]));
+            state.set_track_grooves(vec![None, Some(g.clone())]);
+            let snapshot = state.latest_scheduler_snapshot();
+            let spq = 24_000.0;
+            let mut process_runtime = crate::process::ProcessRuntime::default();
+            let step_event = |track: usize| crate::process::ProcessScheduledStepEvent {
+                event: StepEvent {
+                    track,
+                    samples_per_step: 6_000.0,
+                    resolved: ResolvedStep { velocity: 0.6, ..test_resolved_step() },
+                    chord: ScheduledChordData {
+                        live_origins: [None; crate::audio::MAX_VOICES],
+                        count: 0,
+                        notes: [0.0; crate::audio::MAX_VOICES],
+                        durations: [0.0; crate::audio::MAX_VOICES],
+                        delays: [0.0; crate::audio::MAX_VOICES],
+                        step_transpose: 0.0,
+                    },
+                    effect_params: Vec::new(),
+                    instrument_params: ScheduledInstrumentParams::new(),
+                    instrument_tensor_params: ScheduledInstrumentTensorParams::new(),
+                    sampler_params: ScheduledSamplerParams::default(),
+                    rack_macro_values: [None; crate::sequencer::RACK_MACRO_COUNT],
+                    source: EventSource::Step { track, step: 0, instrument_fingerprint: 0 },
+                },
+                midi_fx_params: Vec::new(),
+            };
+            for (beat, track) in [(0.0, 1usize), (0.25, 1), (0.75, 1), (0.25, 0)] {
+                process_runtime.schedule_step_event_at(1, beat, step_event(track));
+            }
+            let queue = ScheduledEventQueue::<16>::new();
+            let mut track_output_events = Vec::new();
+            let mut scratch_runtime = None;
+            let mut quantizer = MidiFxQuantizerState::default();
+            assert!(enqueue_due_process_emissions(
+                &queue,
+                &snapshot,
+                &mut track_output_events,
+                &mut scratch_runtime,
+                &mut quantizer,
+                &mut process_runtime,
+                0,
+                0.0,
+                0,
+                2.0,
+                spq,
+                false,
+            ));
+            let mut got: Vec<(usize, u64, f32)> = trig_velocities(&queue)
+                .into_iter()
+                .map(|(track, time, bits)| (track, time, f32::from_bits(bits)))
+                .collect();
+            got.sort_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
+            let expected = [(0, 6_000, 0.6), (1, 0, 0.9), (1, 6_000 + 1_800, 0.3), (1, 18_000 + 600, 0.72)];
+            assert_eq!(got.len(), expected.len());
+            for (got, want) in got.iter().zip(expected) {
+                assert_eq!((got.0, got.1), (want.0, want.1));
+                assert!((got.2 - want.2).abs() < 1e-6, "{got:?} vs {want:?}");
+            }
+
+            // The shared emission helper (graph, generator, legacy neural).
+            let close = |a: f32, b: f32| (a - b).abs() < 1e-6;
+            assert!(close(grooved_velocity(&snapshot, Some(1), 0.6, 0.25), 0.3));
+            assert!(close(grooved_velocity(&snapshot, Some(1), 0.8, 4.0), 1.0), "clamped");
+            assert_eq!(grooved_velocity(&snapshot, Some(0), 0.6, 0.25), 0.6);
+            assert_eq!(grooved_velocity(&snapshot, None, 0.6, 0.25), 0.6);
+            assert_eq!(grooved_velocity(&snapshot, Some(9), 0.6, 0.25), 0.6);
+            let mut off = g;
+            off.velocity_amount = 0.0;
+            state.set_track_grooves(vec![None, Some(off)]);
+            let snapshot = state.latest_scheduler_snapshot();
+            assert_eq!(
+                grooved_velocity(&snapshot, Some(1), 0.6, 0.25).to_bits(),
+                0.6_f32.to_bits()
+            );
+        }
+
+        /// One track, step 0 active at velocity 0.8, a groove whose every
+        /// slot accents by 0.5 at full velocity amount, and `lisp` evaluated
+        /// into the scheduling scratch runtime (process definitions and
+        /// attachments). Drives the production lookahead from sample 0 over
+        /// one beat and returns every enqueued `(sample, velocity)`, sorted.
+        fn render_grooved_process_fixture(lisp: &'static str) -> Vec<(u64, f32)> {
+            run_with_scheduler_stack(move || {
+                let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+                state.pattern.track_params[0].set_num_steps(16);
+                state.pattern.patterns[0].set_step_active(0, true);
+                state.pattern.step_data[0].set(0, StepParam::Velocity, 0.8);
+                let mut g = accented(&[0.0; 4], &[0.5; 4], 0.0);
+                g.velocity_amount = 1.0;
+                state.set_track_grooves(vec![Some(g)]);
+                let mut scratch = lisp_host::ScratchControlRuntime::new(
+                    Arc::clone(&state),
+                    vec![Vec::new()],
+                    vec![EffectDescriptor::builtin_sampler()],
+                    0,
+                    0,
+                );
+                scratch.eval(lisp).expect("define grooved process fixture");
+                state.transport.playing.store(true, Ordering::Relaxed);
+                let snapshot = state.publish_scheduler_snapshot();
+                assert!(snapshot.track_groove(0).is_some());
+                let mut scheduler = SchedulerLookaheadState::new(SAMPLE_RATE);
+                scheduler
+                    .process_runtime
+                    .sync_authoring(scratch.process_authoring_snapshot(), 0.0);
+                let live_midi_fx_tracks: [LiveMidiFxTrackState; MAX_TRACKS] =
+                    std::array::from_fn(|_| LiveMidiFxTrackState::default());
+                let mut scratch_runtime = Some(scratch);
+                let queue = ScheduledEventQueue::<64>::new();
+                let spq = samples_per_quarter(&snapshot);
+                schedule_playing_lookahead(
+                    &mut scheduler,
+                    &state,
+                    &snapshot,
+                    &queue,
+                    &mut scratch_runtime,
+                    &live_midi_fx_tracks,
+                    snapshot.transport.pattern_epoch,
+                    0,
+                    spq as u64,
+                    SAMPLE_RATE,
+                    6_000,
+                    spq,
+                    0,
+                    false,
+                    false,
+                );
+                let mut out: Vec<(u64, f32)> = trig_velocities(&queue)
+                    .into_iter()
+                    .map(|(_, time, bits)| (time, f32::from_bits(bits)))
+                    .collect();
+                out.sort_by_key(|e| e.0);
+                out
+            })
+        }
+
+        fn assert_velocities(got: &[(u64, f32)], times: &[u64], velocity: f32) {
+            assert_eq!(
+                got.iter().map(|e| e.0).collect::<Vec<_>>(),
+                times,
+                "{got:?}"
+            );
+            for (time, v) in got {
+                assert!(
+                    (v - velocity).abs() < 1e-6,
+                    "sample {time}: velocity {v}, want {velocity} (grooved exactly once): {got:?}"
+                );
+            }
+        }
+
+        /// Regression (eseq-groove.5 review): a step-chain ratchet on a
+        /// velocity-grooved member carries the accent ONCE. The ratchet is
+        /// materialized from the step's resolved velocity and grooved again
+        /// at enqueue, so grooving the step before its process chain scaled
+        /// it twice (0.8 -> 0.2 instead of 0.4).
+        #[test]
+        fn step_process_ratchet_on_velocity_grooved_member_is_grooved_once() {
+            let vetoed = render_grooved_process_fixture(
+                r#"
+                (def-process groove-ratchet
+                  :run (do
+                    (veto!)
+                    (ratchet! :times 2 :mode :subdivide :span 0.25)))
+                (processes :track 0 (groove-ratchet))
+                "#,
+            );
+            assert_velocities(&vetoed, &[0, 3_000], 0.4);
+
+            // Base trig kept: it and the ratchets all sound at 0.4.
+            let with_base = render_grooved_process_fixture(
+                r#"
+                (def-process groove-ratchet-keep
+                  :run (ratchet! :times 2 :mode :repeat :span 0.125))
+                (processes :track 0 (groove-ratchet-keep))
+                "#,
+            );
+            assert_eq!(with_base.len(), 3, "{with_base:?}");
+            assert!(
+                with_base.iter().all(|e| (e.1 - 0.4).abs() < 1e-6),
+                "{with_base:?}"
+            );
+        }
+
+        /// Regression (eseq-groove.5 review): a process emission that builds
+        /// its velocity from the firing step's velocity carries the accent
+        /// once, like the base trig it echoes.
+        #[test]
+        fn step_derived_process_emission_on_velocity_grooved_member_is_grooved_once() {
+            let events = render_grooved_process_fixture(
+                r#"
+                (on (track-fires 0)
+                  (lambda (ev)
+                    (emit :track 0 :after 0.5 :vel (get ev :velocity))))
+                "#,
+            );
+            assert_velocities(&events, &[0, 12_000], 0.4);
+        }
+
+        /// End to end through the graph site (eseq-groove.5 review note):
+        /// variable-reset fires routed to a velocity-grooved hat take the
+        /// accent once at the graph emission site, like the hat's own step
+        /// trigs; the ungrooved kick is untouched.
+        #[test]
+        fn graph_emissions_on_velocity_grooved_member_take_the_accent() {
+            fn run(grooved: bool) -> Vec<(bool, usize, u64, f32)> {
+                let (state, snapshot) = variable_reset_rack_fixture(grooved.then(|| {
+                    let mut hat = accented(&[0.0; 16], &[0.5; 16], 0.0);
+                    hat.velocity_amount = 1.0;
+                    vec![None, Some(hat), None]
+                }));
+                let spq = samples_per_quarter(&snapshot);
+                let queue = lookahead_queue(&state, &snapshot, (spq * 8.0) as u64, 6_000);
+                let mut out = Vec::new();
+                while let Some(event) = queue.pop_owned() {
+                    match &event.kind {
+                        ScheduledEventKind::ResolvedTrigger {
+                            track, resolved, ..
+                        } => out.push((false, *track, event.sample_time, resolved.velocity)),
+                        ScheduledEventKind::NetworkTrigger {
+                            track, resolved, ..
+                        } => out.push((true, *track, event.sample_time, resolved.velocity)),
+                        _ => {}
+                    }
+                }
+                out.sort_by(|a, b| (a.0, a.1, a.2).cmp(&(b.0, b.1, b.2)));
+                out
+            }
+
+            run_with_scheduler_stack(|| {
+                let straight = run(false);
+                let grooved = run(true);
+                assert!(
+                    grooved.iter().filter(|e| e.0 && e.1 == 1).count() >= 4,
+                    "the variable-reset graph fires on the hat: {grooved:?}"
+                );
+                assert_eq!(straight.len(), grooved.len());
+                for (before, after) in straight.iter().zip(&grooved) {
+                    assert_eq!((before.0, before.1, before.2), (after.0, after.1, after.2));
+                    let want = if after.1 == 1 {
+                        (before.3 * 0.5).clamp(0.0, 1.0)
+                    } else {
+                        before.3
+                    };
+                    assert!(
+                        (after.3 - want).abs() < 1e-6,
+                        "{after:?}: want velocity {want} (from {before:?})"
+                    );
+                }
+            });
         }
     }
