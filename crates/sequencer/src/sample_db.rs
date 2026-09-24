@@ -194,6 +194,17 @@ enum UserFact {
 }
 
 impl SampleDb {
+    /// A query-only connection to an already initialized sample index. Readers
+    /// must not replay the import journal or migrate the schema when opening.
+    pub fn open_read_only(path: &Path) -> Result<Self> {
+        let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        Ok(Self {
+            conn,
+            journal_path: None,
+            store_path: Some(path.parent().unwrap_or_else(|| Path::new(".")).join("samples")),
+        })
+    }
+
     pub fn open(path: &Path) -> Result<Self> {
         let existed = path.is_file();
         let conn = Connection::open(path)?;
@@ -1345,6 +1356,24 @@ fn clean_display_title_str(title: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn read_only_browser_connection_observes_commits_without_replaying_the_journal() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("samples.db");
+        let mut writer = SampleDb::open(&path).unwrap();
+        writer.insert_sample_with_tags("abc123", Some("Kick"), &["drum".to_string()]).unwrap();
+        // Opening a reader must not interpret or rewrite the import journal.
+        let journal = dir.path().join("samples.jsonl");
+        fs::write(&journal, "not a journal record\n").unwrap();
+        let reader = SampleDb::open_read_only(&path).unwrap();
+        assert_eq!(reader.query_samples_for_browser(&[], Some("Kick")).unwrap().len(), 1);
+        assert!(reader.connection().execute("DELETE FROM samples", []).is_err());
+        writer.connection().execute("UPDATE samples SET title = 'Snare'", []).unwrap();
+        assert!(reader.query_samples_for_browser(&[], Some("Kick")).unwrap().is_empty());
+        assert_eq!(reader.query_samples_for_browser(&[], Some("Snare")).unwrap().len(), 1);
+        assert_eq!(fs::read_to_string(journal).unwrap(), "not a journal record\n");
+    }
 
     fn insert_sample(db: &SampleDb, hash: &str, title: Option<&str>, favorited: bool) {
         db.connection()

@@ -1,77 +1,140 @@
 # Your first session
 
-Make a repeating four-note synth part, change one note, and save the project. This walkthrough uses **Digi Drift**, an instrument included with eseq.
+This chapter builds a short synth part from an empty project. It follows the path from sound to pattern to scene that [Concepts](concepts) describes, one step at a time.
 
-Keep the [workspace map](index) handy. You will choose a sound in the **browser**, enter notes in the **step sequencer**, start playback in the **transport**, and edit the sound in the **device panel**. These are different parts of the same workspace.
+By the end you will have:
+
+- loaded a factory instrument onto a track;
+- entered a four-note pattern on the step grid;
+- given one step its own pitch and its own filter setting;
+- made a second scene with a variation of the part, and switched between the two;
+- saved the project.
+
+The walkthrough uses **Digi Drift**, a two-oscillator subtractive synth in the factory library. It enters notes only with the step grid and the step inspector. The other ways of making notes are covered in later chapters, and the last section of this one says where to find them.
 
 ## Start a project
 
-Choose **File > New Project**. If eseq asks about unsaved changes, save the project you were working on before continuing.
+Choose **File > New Project** (Command-N). If the current project has unsaved changes, eseq asks whether to save them first.
 
-The new project starts with two empty tracks. You will use the first one.
+A new project contains:
 
-Use the session view shown in the map, with the browser on the left and devices along the bottom. If the middle of the screen shows a timeline, click the session-view button beside the arrangement button at the far right of the transport.
+- two empty tracks named **MIDI**, with no instrument loaded;
+- one scene;
+- two buses: Bus A with **Reverb** in plate mode, and Bus B with **Str8 Delay**;
+- a tempo of 120 BPM.
 
-## Load a sound from the browser
+Each track's pattern is 16 steps long at a timebase of 16th notes, so one pass of the pattern is one bar. Track 1 is selected.
 
-1. In the **step sequencer**, click the name area of the first track to select it.
-2. In the **browser**, click **Instruments**. Click **Search instruments** and type **Digi Drift**. The matching factory instrument appears under **Synths**.
-3. Double-click that **Digi Drift** result. The selected track now uses that instrument.
+The walkthrough uses the session view. If the middle of the screen shows a timeline, click the left of the two view buttons at the right end of the transport.
 
-![Searching for Digi Drift narrows the browser to the matching factory instrument. Double-click the result under Synths to load it.](images/first-sound-browser.png)
+## Load an instrument
 
-Look back at the **sequencer**: the track is now named **Digi Drift**. Then look along the bottom of the window: the **device panel** shows Digi Drift's sound controls. The browser chose the instrument; these controls edit the instrument you loaded.
+A track makes no sound until it has a sound source. Load one from the browser:
 
-![Digi Drift in the bottom device panel. Its FILTER section contains the Cutoff Hz control used later in this walkthrough.](images/digi-drift.png)
+1. Click **Instruments** in the browser.
+2. Click the search field (**Search instruments...**) and type `digi drift`. The factory instrument appears under **Synths**.
+3. Double-click **Digi Drift**.
 
-Double-clicking an instrument replaces the sound on the selected track. When you want to add another track, drag an instrument onto **Drop sounds here** instead.
+![Searching for Digi Drift narrows the browser to the matching factory instrument under Synths.](images/first-sound-browser.png)
 
-## Put four notes on the row
+The track takes the instrument's name, and Digi Drift's controls appear in the device panel. Its sections are the two oscillators and noise on the left, the envelopes in the middle, and the filter, LFO and pitch controls on the right.
 
-Find the round step buttons to the right of the Digi Drift name. They run from left to right. A new pattern has 16 steps; count them from 1 at the left edge.
+![Digi Drift in the device panel. The FILTER section holds the Cutoff Hz control used later in this chapter.](images/digi-drift.png)
 
-1. Click the first unlit step. It lights up, showing that it now contains a note.
-2. Click steps **5**, **9**, and **13**. You should have four lit steps, with three unlit steps between each pair.
+Double-clicking an instrument replaces the sound on the selected track. The track keeps its pattern. To add a new track with the instrument instead, drag it onto **Drop sounds here** at the end of the mixer. You can also drag an instrument onto an existing track to replace that track's sound.
 
-![The Digi Drift row after entering the notes: steps 1, 5, 9, and 13 are lit. Each lit button will play the same instrument.](images/step-pattern.png)
+## Enter four notes
 
-If you add a note in the wrong place, double-click its lit step to remove it. A single click on a lit step selects the note for editing; it does not erase it.
+The round buttons in the track's row are the pattern's 16 steps, numbered from 1 at the left. A lit step has a note on it.
+
+Click steps **1**, **5**, **9** and **13**. Each click on an unlit step adds a note at C4 (Transpose 0).
+
+![The Digi Drift track with notes on steps 1, 5, 9 and 13.](images/step-pattern.png)
+
+Clicks on a lit step behave differently from clicks on an unlit one:
+
+- A single click on a lit step selects it for editing. It does not remove the note.
+- A double-click on a lit step removes its note.
+- Dragging a lit step moves its note to another step.
+- Dragging across unlit steps adds a note to each one.
+
+The keyboard works as well. Up and Down select the previous or next track. With no steps selected, Left and Right move the step cursor and Return toggles the step under it. With steps selected, Left and Right move the selected notes instead. Shift-Left and Shift-Right extend the selection, and Backspace deletes the selected steps.
 
 ## Play the pattern
 
-Click the triangular **Play** button in the **transport**, across the top of the window.
+Press Space, or click **Play** in the transport. Press Space again, or click **Stop**, to stop.
 
-![Playback controls in the top transport. The square stops playback; the triangle starts it.](images/record-controls.png)
+![Transport playback controls. The square stops playback and the triangle starts it.](images/record-controls.png)
 
-Watch the position indicator travel along the row. Each time it reaches one of your lit steps, you should hear Digi Drift play. After the last step, playback returns to the beginning and repeats. This repeating sequence is the track's **pattern**.
+The playhead moves along the steps and Digi Drift sounds on steps 1, 5, 9 and 13: four quarter notes per bar. When it reaches the end of the pattern, playback returns to step 1. The meter on the track's mixer strip moves with each note. If the playhead moves but you hear nothing, see [Troubleshooting](troubleshooting).
 
-Look down at the **mixer**: Digi Drift's meter should move when a note sounds. Click the square **Stop** button to stop playback. If the indicator moves but you hear nothing, check [Troubleshooting](troubleshooting) before continuing.
+Leave the pattern playing until the Save section. An edit is heard the next time the playhead reaches the step.
 
-## Change the first note's pitch
+## Change one note's pitch
 
-Now use the **step inspector**, at the upper right, to change one note without changing the other three.
+Click step 1 once. The step inspector shows **step 1 · 1 selected**. The count tells you how many steps the next edit applies to.
 
-Single-click the first lit step in the Digi Drift row. Look at the inspector: it should show **1 selected**. This confirms that the next note edit applies to one step.
+![The step inspector with one step selected. Transpose sets that step's pitch in semitones.](images/selected-step.png)
 
-![The step inspector with one note selected. Transpose changes its pitch; the selection count shows the scope of the edit.](images/selected-step.png)
+Drag the value beside **Transpose** up to **12**. Transpose is the step's pitch in semitones, where 0 is C4; the inspector reaches -48 to +48. At 12, step 1 plays C5, an octave above the other three steps.
 
-Drag the number beside **Transpose** upward until it reads **12**. Transpose counts semitones; 12 raises the note by one octave.
+The inspector's other values work the same way on the selected steps: **Velocity**, **Duration**, **Pan**, and **Retrig** and **Rate** for repeats within a step. They are covered in [Step sequencer](sequencer-tour).
 
-Click **Play**. The first note now sounds higher. The following three notes keep their original pitch, and the higher note returns at the start of each loop.
+## Give one step its own filter setting
 
-## Give that note a different tone
+Keep step 1 selected. In Digi Drift's **FILTER** section, turn **Cutoff Hz** down. Step 1 becomes darker. Steps 5, 9 and 13 keep their tone.
 
-Keep the first step selected. Look down at Digi Drift in the **device panel** and find **Cutoff Hz** in its **FILTER** section. Lower the cutoff while the pattern plays. You should hear the first note become darker while the other notes keep their original tone.
+With steps selected, a device control writes a **parameter lock** on them; with none selected it sets the pattern's base value ([Concepts](concepts)). A small marker on the control shows that the parameter has locks in the pattern.
 
-You have given one step its own control value. eseq calls this a **parameter lock**: when that step plays, it uses the value stored for it. This is why the step selection also matters when you work in the device panel.
+![Digi Drift with a cutoff lock on the selected step. The marker on Cutoff Hz shows that the parameter is locked.](images/locked-cutoff.png)
 
-Command-click the first step to deselect it, and check that the inspector shows **0 selected**. Turning Cutoff Hz now changes the pattern's base tone; the first note keeps the cutoff you stored for it. See [Parameter locks](parameter-locks) for editing and removing these values.
+Press Esc to clear the selection (Command-clicking a selected step also deselects it). The inspector shows **0 selected**. Turn Cutoff Hz up. Steps 5, 9 and 13 get brighter, and step 1 keeps the dark value locked on it.
 
-## Save what you made
+Locks are not limited to instrument controls. Effect parameters, MIDI effect parameters, rack macros, sends, timebase and swing can all be locked per step. [Parameter locks](parameter-locks) covers them in full, including recording locks by turning a control during playback and clearing them afterwards.
 
-1. Click **Stop** in the transport.
-2. Choose **File > Save As**, enter a project name, and click **Save**.
+## Make a variation in a second scene
 
-The project stores the instrument, notes, and edits you made. You can reopen it from **Projects** in the browser or **File > Open Project**. Use **File > Save** to keep later changes.
+A scene points each track at one of its patterns. The project has one scene, shown as scene button **1** among the numbered scene buttons in the transport. The **+** and **-** buttons beside it add and remove scenes.
 
-You now have a saved loop and have used the browser, sequencer, transport, inspector, devices, and mixer together. To continue, try [Audio effects](effects) to add a delay to this sound, or [Step sequencer](sequencer-tour) to learn more ways to enter and edit notes.
+![The scene controls in the transport. The numbered scene buttons launch scenes; + adds one to the current bank.](images/scene-bank.png)
+
+Click **+**. eseq creates scene **2** and makes it the current scene. **+** copies each track's pattern and sound into the new scene, so scene 2 starts identical and independent ([Concepts](concepts)).
+
+Edit the copy in scene 2:
+
+1. Double-click step 13 to remove its note.
+2. Click steps 15 and 16 to add two notes that lead back into the start of the bar.
+3. With no steps selected, turn Cutoff Hz further up.
+
+Click scene button **1**. The original part returns: four notes, with the base cutoff you set earlier. Click scene button **2** to go back to the variation.
+
+By default a scene switches at once, even partway through a bar. The launch-quantize menu in the transport reads **off** when eseq starts. Set it to **1 bar** and the next scene waits for the start of the next bar. The setting belongs to the session, not the project.
+
+Scenes can also share a pattern; see [Patterns and scenes](patterns-and-scenes).
+
+## Save the project
+
+1. Choose **File > Save As…** (Command-Shift-S).
+2. Type a project name and click **Save**.
+
+![The Save As dialog. The project is saved into the projects folder as a single JSON file.](images/save-project.png)
+
+The project file holds both scenes, their patterns and locks, the instrument settings, the buses and the tempo. Command-S saves; on an unnamed project it opens this dialog. Reopen the project from the browser's **Projects** tab (File > Open Project…, Command-O, opens it). Quitting with unsaved changes asks whether to save them.
+
+If an edit goes wrong along the way, Command-Z undoes it and Command-Shift-Z redoes it.
+
+## Where to go next
+
+The part you built uses one way of entering notes and one kind of per-step value. The rest of the manual covers the others, roughly in the order you will want them:
+
+- Step values in detail, pattern length, timebase (including triplets and Prh), swing, chords, voice settings and the Pattern menu: [Step sequencer](sequencer-tour).
+- Every lockable parameter, lock recording, lock variants and the track lock table: [Parameter locks](parameter-locks).
+- Per-step probability, accumulators, grabs from other tracks, comparators and rolls, computed as the pattern plays: [Process lanes](process-lanes).
+- The same pattern edited by pitch, time and length, with an automation lane: [Piano roll](piano-roll).
+- Live input from a MIDI or computer keyboard, record quantize, the metronome and Capture MIDI: [Recording](recording).
+- Patterns and recorded takes laid out as clips on a timeline: [Arrangement](arrangement).
+- Other factory instruments and presets: [Instruments and presets](instruments).
+- Samples, slicing and drum kits: [Samples and sounds](sample-browser) and [Racks](racks).
+- Arpeggiator and other note processors: [MIDI effects](midi-effects).
+- Effect chains on the track, and the sends that reach this project's Bus A reverb and Bus B delay: [Audio effects](effects) and [Mixer](mixer).
+- Graph and neural sequencers, the tracker view and other sequencers written in Lisp: [Packages](packages).

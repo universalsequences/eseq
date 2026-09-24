@@ -528,6 +528,7 @@
           (ep/instrument-synth-button)
           (ep/instrument-mods-toggle-button)
           (box :flex 1 :height 0.15)
+          (ip/instrument-polyphony-control)
           (pf/instrument-header-actions-menu inst)
           (box :width 0.25 :height 0.1)))
       (pf/fx-panel-body "sampler-panel-content"

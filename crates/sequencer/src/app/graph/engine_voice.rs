@@ -218,6 +218,9 @@ impl GraphController<'_> {
         param_indices.sort_by_key(|param_idx| slot.resolve_node_idx(*param_idx));
         for param_idx in param_indices {
             let idx = slot.resolve_node_idx(param_idx);
+            if idx == u32::MAX as u64 {
+                continue;
+            }
             let is_mod_param = idx as u32 >= crate::instruments::voice_modulator::MOD_PARAM_BASE;
             let logical_id = if is_mod_param { modulator_id } else { synth_id };
             let resolved_idx = if is_mod_param {

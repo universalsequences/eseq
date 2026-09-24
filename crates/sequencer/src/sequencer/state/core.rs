@@ -163,6 +163,10 @@ pub struct TransportState {
     pub trigger_flash: Vec<AtomicU32>,
     pub num_tracks: AtomicU32,
     pub track_playheads: Vec<AtomicU32>,
+    /// Per-track step count a `length!` process last set (the length lane),
+    /// or 0 while none drives the track. Published by the scheduler every
+    /// chunk; the step grids underline that step.
+    pub track_process_lengths: Vec<AtomicU32>,
     /// Per-track phase within the active step, normalized to 0.0..=1.0.
     pub track_playhead_phases: Vec<AtomicU32>,
     /// Per-track sampler playhead as normalized 0.0–1.0 (f32 bits).

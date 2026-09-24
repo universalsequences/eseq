@@ -3889,6 +3889,189 @@
         });
     }
 
+    /// One 8-step track on `timebase` with every step on, the default layer
+    /// plus a per-track `length` lane edited by `edit`, scheduled from zero
+    /// to `horizon` samples at 120 bpm (24 000 samples per beat). Returns
+    /// (sample, step) for every resolved trigger.
+    fn length_lane_fixture(
+        timebase: Timebase,
+        horizon: u64,
+        edit: impl FnOnce(&mut crate::process::TrackProcessChain) + Send + 'static,
+    ) -> Vec<(u64, usize)> {
+        run_with_scheduler_stack(move || {
+            let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+            state.pattern.track_params[0].set_num_steps(8);
+            state.pattern.track_params[0].set_timebase(timebase);
+            for step in 0..MAX_STEPS {
+                state.pattern.patterns[0].set_step_active(step, true);
+            }
+            let mut scratch = lisp_host::ScratchControlRuntime::new(
+                Arc::clone(&state),
+                vec![Vec::new()],
+                vec![EffectDescriptor::builtin_sampler()],
+                0,
+                0,
+            );
+            scratch
+                .eval(&lisp_host::load_process_library_source())
+                .expect("builtin process library");
+            let mut chain = crate::process::default_project_layer();
+            chain.slots.push(crate::process::TrackProcessSlot {
+                instance_id: crate::process::ProcessInstanceId(1 << 40),
+                instance_name: Some("length".to_string()),
+                class_name: "lane-length".to_string(),
+                enabled: true,
+                project_layer: true,
+                inlets: Default::default(),
+                lanes: Default::default(),
+                fanout: Default::default(),
+                unbound_ports: Default::default(),
+                bindings: Default::default(),
+            });
+            edit(&mut chain);
+            assert!(state.set_project_process_chain(chain));
+
+            state.transport.playing.store(true, Ordering::Relaxed);
+            let snapshot = state.publish_scheduler_snapshot();
+            let queue = ScheduledEventQueue::<64>::new();
+            let mut scheduler = SchedulerLookaheadState::new(48_000);
+            scheduler
+                .process_runtime
+                .sync_authoring(scratch.process_authoring_snapshot(), 0.0);
+            let live_midi_fx_tracks: [LiveMidiFxTrackState; MAX_TRACKS] =
+                std::array::from_fn(|_| LiveMidiFxTrackState::default());
+            let mut scratch_runtime = Some(scratch);
+            // Blocks that do not divide the bar, so a length boundary has to
+            // split a chunk to land exactly.
+            schedule_playing_lookahead(
+                &mut scheduler,
+                &state,
+                &snapshot,
+                &queue,
+                &mut scratch_runtime,
+                &live_midi_fx_tracks,
+                snapshot.transport.pattern_epoch,
+                0,
+                horizon,
+                48_000,
+                7_000,
+                24_000.0,
+                0,
+                false,
+                false,
+            );
+            let mut hits = Vec::new();
+            while let Some(event) = queue.pop_owned() {
+                if let ScheduledEventKind::ResolvedTrigger { step, .. } = event.kind {
+                    hits.push((event.sample_time, step));
+                }
+            }
+            hits
+        })
+    }
+
+    #[test]
+    fn scheduler_length_lane_changes_prh_subdivision_each_bar() {
+        // count (lo 2, hi 4, +1 on step 0) wired into length: bar 1 plays
+        // the authored 8, then 4, 2, 3 steps per bar. Under Prh every cycle
+        // is one bar (96 000 samples), so each bar is its own subdivision.
+        let hits = length_lane_fixture(Timebase::Polyrhythm, 384_000, |chain| {
+            let count = default_lane_slot_mut(chain, "count");
+            count
+                .lanes
+                .insert("step".to_string(), lane(&[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]));
+            count
+                .inlets
+                .insert("lo".to_string(), crate::process::ProcessLiteral::Number(2.0));
+            count
+                .inlets
+                .insert("hi".to_string(), crate::process::ProcessLiteral::Number(4.0));
+            wire_default_lane(chain, "count", "length", "steps");
+        });
+        let mut expected: Vec<(u64, usize)> = (0..8).map(|s| (s as u64 * 12_000, s)).collect();
+        expected.extend((0..4).map(|s| (96_000 + s as u64 * 24_000, s)));
+        expected.extend((0..2).map(|s| (192_000 + s as u64 * 48_000, s)));
+        expected.extend((0..3).map(|s| (288_000 + s as u64 * 32_000, s)));
+        assert_eq!(hits.len(), expected.len(), "{hits:?}");
+        for (hit, want) in hits.iter().zip(&expected) {
+            // Thirds of a bar are not exact in f64 beats; the clock fires on
+            // the first sample at or past the boundary.
+            assert!(
+                hit.1 == want.1 && hit.0.abs_diff(want.0) <= 1,
+                "{hit:?} vs {want:?} in {hits:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn scheduler_length_lane_restarts_a_fixed_timebase_cycle_on_step_zero() {
+        // 1/16 steps (6 000 samples). Step 0 asks for 3 steps: the authored
+        // 8-step cycle finishes, then the 3-step cycle starts on step 0 at
+        // the boundary even though 48 000 is not a multiple of its length.
+        let hits = length_lane_fixture(Timebase::Sixteenth, 84_000, |chain| {
+            default_lane_slot_mut(chain, "length")
+                .lanes
+                .insert("steps".to_string(), lane(&[3.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]));
+        });
+        let mut expected: Vec<(u64, usize)> = (0..8).map(|s| (s as u64 * 6_000, s)).collect();
+        expected.extend((0..6).map(|i| (48_000 + i as u64 * 6_000, i % 3)));
+        assert_eq!(hits, expected);
+    }
+
+    #[test]
+    fn pattern_length_override_rewinds_across_its_boundary_and_clears_on_reset() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        state.pattern.track_params[0].set_num_steps(8);
+        state.pattern.track_params[0].set_timebase(Timebase::Polyrhythm);
+        state.toggle_play();
+        let snapshot = state.publish_scheduler_snapshot();
+        let mut clock = SnapshotSequencerClock::new(48_000);
+        clock.seek_beats(1.0);
+        clock.was_playing = true;
+        clock.adopt_track_source(0, &snapshot);
+
+        clock.request_pattern_length(&snapshot, 0, 5, 0.5);
+        assert_eq!(clock.next_pattern_length_boundary(1), Some(4.0), "end of the bar");
+        clock.apply_due_pattern_lengths(&snapshot);
+        assert_eq!(clock.pattern_length_override(0), None, "not due before the bar line");
+
+        clock.seek_beats(4.0);
+        clock.apply_due_pattern_lengths(&snapshot);
+        assert_eq!(clock.pattern_length_override(0), Some(5));
+        assert_eq!(clock.pattern_length_marker(0), Some(5));
+        let patched = clock.patch_pattern_lengths(&snapshot).expect("patched snapshot");
+        assert_eq!(patched.tracks[0].params.num_steps, 5);
+        assert!(
+            Arc::ptr_eq(
+                &patched.tracks[0],
+                &clock.patch_pattern_lengths(&snapshot).unwrap().tracks[0]
+            ),
+            "the patched track is cached per source"
+        );
+
+        // A re-seek back into the old bar replays it at the old length and
+        // re-arms the change at the same bar line.
+        clock.seek_beats(4.5);
+        clock.seek_to_rendered_position(&snapshot, 0, 24_000);
+        assert!((clock.total_beats - 3.5).abs() < 1.0e-9);
+        assert_eq!(clock.pattern_length_override(0), None);
+        assert_eq!(clock.pattern_length_marker(0), None, "marker rewinds too");
+        assert_eq!(clock.next_pattern_length_boundary(1), Some(4.0));
+
+        // Asking for the authored length installs no override but still
+        // marks the step for the grid.
+        clock.seek_beats(4.0);
+        clock.request_pattern_length(&snapshot, 0, 8, 4.0);
+        clock.seek_beats(8.0);
+        clock.apply_due_pattern_lengths(&snapshot);
+        assert_eq!(clock.pattern_length_override(0), None);
+        assert_eq!(clock.pattern_length_marker(0), Some(8));
+
+        clock.reset();
+        assert_eq!(clock.next_pattern_length_boundary(1), None, "stop drops it");
+        assert!(clock.patch_pattern_lengths(&snapshot).is_none());
+    }
+
     #[test]
     fn process_roll_engages_once_arms_roll_mode_and_releases_on_its_deadline() {
         let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
@@ -5361,6 +5544,18 @@
             scratch
                 .eval(
                     r#"
+                    (def-process follow-harmony
+                      :target (step-param :transpose)
+                      :in ((listen :field :default :harmony)
+                           (amount :float 0 1 :default 1 :lane true)
+                           (grace :int 0 3 :default 0))
+                      :run (let ((field (hear (in :listen))))
+                             (if field
+                               (target-add!
+                                 (* (in :amount)
+                                    (field-weight field)
+                                    (field-nearest-delta field (current-note) (in :grace))))
+                               nil)))
                     (def-process harmony-publisher
                       :run (suggest :harmony
                              (pitch-field (list 0 4 7) :root 0 :weight 1)))
@@ -8708,6 +8903,35 @@
         assert_eq!(params.slice_sensitivity, 0.8);
         assert!(params.start_point_locked);
         assert!(!params.end_point_locked);
+    }
+
+    #[test]
+    fn unbound_instrument_params_are_not_routed_to_the_modulator() {
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        let track = 0;
+        let step = 3;
+        let desc = EffectDescriptor::builtin_sampler();
+        state.pattern.instrument_slots[track].apply_descriptor_with_modulator(&desc, 12, 13);
+        state.pattern.instrument_slots[track].set_plock(step, 2, 0.25);
+
+        // `u32::MAX` marks a param with no backing node state. It is numerically
+        // above MOD_PARAM_BASE, so an unguarded split would send it to the
+        // modulator as idx `u32::MAX - MOD_PARAM_BASE`.
+        let mut snapshot = (*state.publish_scheduler_snapshot()).clone();
+        Arc::make_mut(&mut snapshot.tracks[track])
+            .instrument_slot
+            .param_node_indices[2] = u32::MAX;
+
+        let sentinel_as_mod =
+            (u32::MAX - crate::instruments::voice_modulator::MOD_PARAM_BASE) as u64;
+        for params in [
+            super::resolve_instrument_defaults(&snapshot, track),
+            super::resolve_instrument_params(&snapshot, track, step, None),
+        ] {
+            assert!(!params.is_empty());
+            assert!(params.iter().all(|param| param.idx != sentinel_as_mod
+                && param.idx != u32::MAX as u64));
+        }
     }
 
     #[test]

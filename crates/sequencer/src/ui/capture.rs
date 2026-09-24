@@ -1183,7 +1183,7 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
         runtime,
         accumulator_names,
         midi_fx_names: _,
-        sample_browser: _,
+        sample_browser,
         piano_roll_clipboard: _,
         process_authoring: _,
     } = init_runtime(
@@ -1356,6 +1356,17 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
     }
     editor.refresh_runtime_side_effects();
     editor.clear_minibuffer_message();
+
+    // The interactive event loop polls search completions without waiting.
+    // Headless capture must settle them before taking its single frame.
+    let browser_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while sample_browser.borrow().is_pending() {
+        let ready = publish_sample_browser_results(&mut editor, &sample_browser)?;
+        if std::time::Instant::now() >= browser_deadline {
+            return Err("sample browser query timed out during capture".into());
+        }
+        if !ready { std::thread::sleep(std::time::Duration::from_millis(1)); }
+    }
 
     application_menu::sync_context(&menu_state, &mut editor);
     let mut backend = create_capture_backend(&mut editor, args.width, args.height)?;

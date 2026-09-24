@@ -175,6 +175,7 @@ impl SequencerState {
                 trigger_flash,
                 num_tracks: AtomicU32::new(num_tracks as u32),
                 track_playheads: (0..MAX_TRACKS).map(|_| AtomicU32::new(0)).collect(),
+                track_process_lengths: (0..MAX_TRACKS).map(|_| AtomicU32::new(0)).collect(),
                 track_playhead_phases: (0..MAX_TRACKS)
                     .map(|_| AtomicU32::new(0.0_f32.to_bits()))
                     .collect(),

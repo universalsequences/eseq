@@ -8,12 +8,13 @@
 (import eseq.effects.instrument-modulation :as im)
 (import eseq.effects.builtin.audio-fx :as afx)
 
-(export instrument-key-note-active?
+(export instrument-key-active-notes
         instrument-key-note-variant-row
         instrument-key-lock-variant-items
         instrument-key-lock-chip-current?
         instrument-key-lock-chip-click
         instrument-key-select-note
+        instrument-key-unselect-all
         instrument-synth-panel-body
         midi-fx-panel-body
         audio-fx-panel-body
@@ -24,7 +25,7 @@
 ;; nothing strips. Callers: effects/instrument-panel.lisp (unconverted,
 ;; instrument-synth-panel-body) plus the Rust test harnesses in
 ;; src/ui/state_values/tests.rs that eval the flat spellings.
-;; instrument-key-note-active? is special: ui/capture-fixtures/
+;; instrument-key-active-notes is special: ui/capture-fixtures/
 ;; instrument-keys-activity-panel.lisp REDEFINES it headerless to light keys
 ;; in a capture — the alias covers writes too (last-writer-wins into this
 ;; module's slot), and the fixture compiles long after this file loads.
@@ -32,52 +33,52 @@
 ;; audio-fx-panel-body, fx-panel-selected?) import this module instead —
 ;; no alias for names only they reference. Deleted as callers convert.
 
-(def instrument-key-note-names '("C" "C#" "D" "D#" "E" "F" "F#" "G" "G#" "A" "A#" "B"))
-(def instrument-key-count 12)
+;; Keys tab: a multi-octave `piano-keyboard` for choosing which notes the
+;; synth knobs key-lock, plus the variant chips that stamp a lock set onto
+;; the selected keys. Live note activity rides SEQ.track-active-notes INSIDE
+;; the piano's own subtree, so playback only rebuilds the keyboard — the old
+;; per-key buttons read SEQ.instrument-active-notes from the panel body and
+;; rebuilt the whole instrument panel on every note.
+(def instrument-key-white-width 1.3)
+(def instrument-key-piano-height 4.0)
 (def instrument-key-panel-padding 0.35)
-(def instrument-key-white-width 2.9)
-(def instrument-key-black-width 1.85)
-(def instrument-key-white-height 3.25)
-(def instrument-key-black-height 2.45)
-(def instrument-key-strip-height 0.34)
-(def instrument-key-activity-height 0.42)
-(def instrument-key-button-gap 0.08)
-(def instrument-key-row-width
-  (+ (* 7 instrument-key-white-width)
-     (* 5 instrument-key-black-width)
-     (* (- instrument-key-count 1) instrument-key-button-gap)))
-(def instrument-key-panel-width (+ instrument-key-row-width (* 2 instrument-key-panel-padding) 0.1))
-(def instrument-key-panel-outer-width (+ instrument-key-panel-width 4))
+(def instrument-key-min-piano-width 24)
+(def instrument-key-max-octaves 7)
+(def instrument-key-unlocked-mark-color (list 0.62 0.62 0.66))
 
-(def instrument-key-note-number (idx)
-  (+ (* (+ st/instrument-key-lock-octave 1) 12) idx))
+(def instrument-key-start-note ()
+  (* (+ st/instrument-key-lock-octave 1) 12))
 
-(def instrument-key-note-name (idx)
-  (nth instrument-key-note-names idx))
+;; Whole octaves plus the closing C, so the view reads C3..C6.
+(def instrument-key-key-count ()
+  (+ (* st/instrument-key-lock-octave-count 12) 1))
 
-(def instrument-key-black? (idx)
-  (or (= idx 1) (= idx 3) (= idx 6) (= idx 8) (= idx 10)))
+(def instrument-key-piano-width ()
+  (max instrument-key-min-piano-width
+    (* (+ (* st/instrument-key-lock-octave-count 7) 1) instrument-key-white-width)))
 
-(def instrument-key-width (idx)
-  (if (instrument-key-black? idx) instrument-key-black-width instrument-key-white-width))
+(def instrument-key-panel-width ()
+  (+ (instrument-key-piano-width) (* 2 instrument-key-panel-padding) 1.1))
 
-(def instrument-key-height (idx)
-  (if (instrument-key-black? idx) instrument-key-black-height instrument-key-white-height))
+(def instrument-key-max-start-octave ()
+  (- 9 st/instrument-key-lock-octave-count))
 
-(def instrument-key-label-height (idx)
-  (- (instrument-key-height idx) instrument-key-strip-height instrument-key-activity-height))
+(def instrument-key-shift-octave (delta)
+  (set! st/instrument-key-lock-octave
+    (max -1 (min (instrument-key-max-start-octave) (+ st/instrument-key-lock-octave delta)))))
+
+(def instrument-key-set-octave-count (v)
+  (do
+    (set! st/instrument-key-lock-octave-count
+      (max 1 (min instrument-key-max-octaves (round v))))
+    (instrument-key-shift-octave 0)))
+
+(def instrument-key-range-label ()
+  (str "C" st/instrument-key-lock-octave
+       "–C" (+ st/instrument-key-lock-octave st/instrument-key-lock-octave-count)))
 
 (def instrument-key-note-selected? (note)
   (pg/fx-list-contains? st/instrument-key-lock-selected-notes note))
-
-(def instrument-key-note-active? (note)
-  (pg/fx-list-contains? SEQ.instrument-active-notes note))
-
-(def instrument-key-param-has-lock? (p note)
-  (if (pc/instrument-param-key-lock-row p note) true false))
-
-(def instrument-key-note-has-lock? (inst note)
-  (> (len (filter |p| (instrument-key-param-has-lock? p note) (get inst :synth))) 0))
 
 (def instrument-key-note-variant-row (inst note)
   (nth
@@ -85,36 +86,29 @@
       (if (get inst :key-lock-note-variants) (get inst :key-lock-note-variants) '()))
     0))
 
-(def instrument-key-note-variant-color (row alpha)
-  (rgba (get row :color-r) (get row :color-g) (get row :color-b) alpha))
+;; One `{:note :color}` per key-locked note: its variant color, or neutral
+;; gray for locks that belong to no variant.
+(def instrument-key-note-marks (inst)
+  (let ((variant-rows (if (get inst :key-lock-note-variants) (get inst :key-lock-note-variants) '()))
+        (locked (if (get inst :key-locked-notes) (get inst :key-locked-notes) '())))
+    (append
+      (map (lambda (row)
+             (dict :note (get row :note)
+                   :color (list (get row :color-r) (get row :color-g) (get row :color-b))))
+        variant-rows)
+      (map (lambda (note) (dict :note note :color instrument-key-unlocked-mark-color))
+        (filter |note| (not (instrument-key-note-variant-row inst note)) locked)))))
 
-(def instrument-key-strip-color (inst note variant-row)
-  (if variant-row
-    (instrument-key-note-variant-color variant-row 1.0)
-    (if (instrument-key-note-has-lock? inst note)
-      (rgba 0.72 0.72 0.76 0.92)
-      :transparent)))
+;; Notes currently sounding on the instrument's track, as the piano's
+;; single-source `:notes-by-track`. Capture fixtures override this to light
+;; keys without a running note source.
+(def instrument-key-active-notes (inst)
+  (let ((notes (nth SEQ.track-active-notes (get inst :track))))
+    (if notes notes '())))
 
-(def instrument-key-base-color (idx selected)
-  (if (instrument-key-black? idx)
-    (if selected (rgba 0.10 0.10 0.11 1.0) (rgba 0.135 0.135 0.14 0.8))
-    (if selected (rgba 1.0 0.94 0.70 1.0) (rgba 1.0 1.0 1.0 0.9))))
-
-(def instrument-key-text-color (idx selected)
-  (if (instrument-key-black? idx)
-    (if selected :yellow :white)
-    :black))
-
-(def instrument-key-border-color (inst idx note variant-row selected)
-  (if selected
-    (rgba 0.95 0.74 0.22 1.0)
-    (if variant-row
-      (instrument-key-note-variant-color variant-row 0.85)
-      (if (instrument-key-black? idx)
-        (rgba 1 1 1 0.13)
-        (if (instrument-key-note-has-lock? inst note)
-          (rgba 0.46 0.46 0.50 0.9)
-          (rgba 0.0 0.0 0.0 0.55))))))
+(def instrument-key-activity-color (inst)
+  (let ((c (nth SEQ.track-colors (get inst :track))))
+    (if c c (list 1.0 0.72 0.10))))
 
 (def instrument-key-lock-variant-items (inst)
   (if (get inst :key-lock-variants) (get inst :key-lock-variants) '()))
@@ -153,131 +147,143 @@
       (dict :label (get chip :label)
             :notes st/instrument-key-lock-selected-notes))))
 
+;; Same boxy chip as the *step* buffer's p-lock variants (track-panels
+;; plock-chip): fixed width, color tick, dark label on the current chip.
 (def instrument-key-lock-chip (inst chip)
   (let ((current (instrument-key-lock-chip-current? inst chip))
       (def-chip (= (get chip :kind) "def"))
       (c (instrument-key-lock-chip-color chip 1.0)))
     (box :key (str "instrument-key-lock-chip-" (get chip :kind) "-" (get chip :label))
-      :height 1.08
+      :height 1.0
+      :width 3.5
       :align :baseline
-      :padding 0.12
+      :padding 0.014
       :background-color (if current
-        (instrument-key-lock-chip-color chip 0.12)
-        (rgba 1 1 1 0.025))
+        (instrument-key-lock-chip-color chip 0.11)
+        :mixer-strip-bg)
       :border-width (if current 0.75 0.35)
-      :border-color (if current c (rgba 1 1 1 0.10))
-      :corner-radius 5
+      :border-color (if current c :mixer-strip-selected-bg)
+      :corner-radius 4
       :on-click |x y r| (instrument-key-lock-chip-click chip)
-      (h-stack :gap 0.14 :align :baseline
-        (box :width 0.18 :height 0.64
+      (h-stack :gap 0.16 :align :baseline
+        (box :width 0.18 :height 0.28
           :corner-radius 2
           :background-color (if def-chip :transparent c)
           :border-width (if def-chip 1 0)
           :border-color c)
+        (box :width 0.2)
         (label (instrument-key-lock-chip-label chip)
-          :font-size 8.4 :color (if current :white :dim) :bg :transparent)))))
+          :align :center :flex 1
+          :font-size 10.0 :color (if current :black :dim) :bg :transparent)
+        (box :width 0.2)))))
 
-(def instrument-key-select-note (note)
-  (let ((already-selected (instrument-key-note-selected? note))
-        (next
-          (if (instrument-key-note-selected? note)
-            (filter |selected| (not (= selected note)) st/instrument-key-lock-selected-notes)
-            (append st/instrument-key-lock-selected-notes (list note)))))
-    (do
-      (set! st/instrument-key-lock-selected-notes next)
-      (if (and st/instrument-key-lock-audition (not already-selected))
-        (host-command "audition-instrument-key" (dict :note note))
-        false))))
-
-(def instrument-key-clear-selected ()
-  (if (> (len st/instrument-key-lock-selected-notes) 0)
-    (host-command "stamp-key-lock-variant"
-      (dict :label "def" :notes st/instrument-key-lock-selected-notes))
+(def instrument-key-audition (note)
+  (if (and st/instrument-key-lock-audition (instrument-key-note-selected? note))
+    (host-command "audition-instrument-key" (dict :note note))
     false))
 
-(def instrument-key-button (inst idx)
-  (let ((note (instrument-key-note-number idx))
-        (name (instrument-key-note-name idx))
-        (variant-row (instrument-key-note-variant-row inst note))
-        (selected (instrument-key-note-selected? note)))
-    (box
-      :key (str "instrument-key-" note)
-      :width (instrument-key-width idx)
-      :height (instrument-key-height idx)
-      :padding 0
-      :background-color (instrument-key-base-color idx selected)
-      :border-width 1
-      :border-color (instrument-key-border-color inst idx note variant-row selected)
-      :corner-radius 4
-      :on-click |x y r| (instrument-key-select-note note)
-      (v-stack :width :fill :height :fill :gap 0 :align :center
-        (label name
-          :width :fill
-          :height (instrument-key-label-height idx)
-          :font-size (if (instrument-key-black? idx) 9.0 10.4)
-          :h-align :center
-          :color (instrument-key-text-color idx selected)
-          :bg :transparent)
-        (box
-          :key (str "instrument-key-activity-row-" note)
-          :debug-name (str "instrument-key-activity-row-" note)
-          :width :fill
-          :height instrument-key-activity-height
-          :padding 0
-          :h-align :center
-          :v-align :center
-          :background-color :transparent
-          (if (instrument-key-note-active? note)
-            (label "●"
-              :key (str "instrument-key-activity-" note)
-              :debug-name (str "instrument-key-activity-" note)
-              :width 0.6
-              :height instrument-key-activity-height
-              :font-size 6.0
-              :h-align :center
-              :bg :transparent
-              :color (rgba 1.0 0.72 0.10 1.0))
-            (box
-              :key (str "instrument-key-activity-" note)
-              :debug-name (str "instrument-key-activity-" note)
-              :width 0.6
-              :height instrument-key-activity-height
-              :background-color :transparent)))
-        (box
-          :key (str "instrument-key-strip-" note)
-          :width :fill
-          :height instrument-key-strip-height
-          :background-color (instrument-key-strip-color inst note variant-row)
-          :corner-radius 1)))))
+;; Plain click selects just this key (clicking the sole selected key clears
+;; it); cmd toggles it into the selection; shift selects the range from the
+;; last plain/cmd-clicked key.
+(def instrument-key-select-note (note additive extend)
+  (let ((selected st/instrument-key-lock-selected-notes)
+        (anchor st/instrument-key-lock-anchor)
+        (already (instrument-key-note-selected? note)))
+    (do
+      (if (and extend (>= anchor 0))
+        (set! st/instrument-key-lock-selected-notes
+          (range (min anchor note) (+ (max anchor note) 1)))
+        (do
+          (set! st/instrument-key-lock-anchor note)
+          (set! st/instrument-key-lock-selected-notes
+            (if additive
+              (if already
+                (filter |n| (not (= n note)) selected)
+                (append selected (list note)))
+              (if (and already (= (len selected) 1))
+                '()
+                (list note))))))
+      (instrument-key-audition note))))
+
+(def instrument-key-unselect-all ()
+  (do
+    (set! st/instrument-key-lock-selected-notes '())
+    (set! st/instrument-key-lock-anchor -1)))
+
+(defwidget instrument-key-audition-icon
+  :width 1.6 :height 1.1
+  :paint-margin 0.2
+  :state (active)
+  :shader
+  (let ((badge-col (if (= active 1) (rgba 0.95 0.74 0.22 1.0) (rgba 0.22 0.23 0.25 1.0)))
+        (glyph-col (if (= active 1) (rgba 0.08 0.08 0.09 1.0) (rgba 0.66 0.68 0.72 1.0)))
+        (band (max (- (abs (- (sqrt (+ (* x x) (* y y))) 0.36)) 0.06) y)))
+    (sdf/layer
+      (sdf/fill (sdf/circle 0.72) (material :color badge-col))
+      (sdf/fill band (material :color glyph-col))
+      (sdf/fill (sdf/translate -0.36 0.12 (sdf/rounded-rect 0.14 0.34 0.11))
+        (material :color glyph-col))
+      (sdf/fill (sdf/translate 0.36 0.12 (sdf/rounded-rect 0.14 0.34 0.11))
+        (material :color glyph-col)))))
+
+(def instrument-key-piano (inst)
+  (subtree :key (str "instrument-key-piano-" (get inst :track) "-" (get inst :rack-slot))
+    (box :debug-name "instrument-keys-frame"
+      :padding 0.3 :background-color :mixer-strip-bg
+      :border-color :mixer-strip-border :corner-radius 8
+      (piano-keyboard
+        :key "instrument-key-piano"
+        :debug-name "instrument-key-piano"
+        :start-note (instrument-key-start-note)
+        :key-count (instrument-key-key-count)
+        :width (instrument-key-piano-width)
+        :height instrument-key-piano-height
+        :notes-by-track (list (instrument-key-active-notes inst))
+        :track-colors (list (instrument-key-activity-color inst))
+        :tracks (list 0)
+        :overlap-mode :loudest
+        :press-depth 0.6
+        :selected-notes st/instrument-key-lock-selected-notes
+        :note-marks (instrument-key-note-marks inst)
+        :label-octaves true
+        :on-click (lambda (info)
+          (instrument-key-select-note (get info :note)
+            (get info :additive-selection) (get info :shift)))))))
 
 (def instrument-key-lock-control-panel (inst)
-  (box :width instrument-key-panel-outer-width :background-color :black :corner-radius 16 :padding 1
-    (v-stack  :debug-name "instrument-key-lock-control-panel" :width instrument-key-panel-width :height st/fx-panel-body-content-height :gap 0.35 :padding instrument-key-panel-padding
-      (h-stack :gap 0.35 :height 1.2 :align :center
-        (button "<" :width 2 :height 1.1 :padding 0 :font-size 10
-          :on-click |x y r| (set! st/instrument-key-lock-octave (max -1 (- st/instrument-key-lock-octave 1))))
-        (label (str "OCT " st/instrument-key-lock-octave) :font-size 10 :width 5.2 :color :dim :bg :transparent)
-        (button ">" :width 2 :height 1.1 :padding 0 :font-size 10
-          :on-click |x y r| (set! st/instrument-key-lock-octave (min 8 (+ st/instrument-key-lock-octave 1))))
-        (button "audition" :width 8 :height 1.1 :padding 0 :font-size 10
-          :background-color (if st/instrument-key-lock-audition
-            (rgba 0.95 0.74 0.22 1.0)
-            (rgba 0.12 0.12 0.13 0.70))
-          :color (if st/instrument-key-lock-audition :black :dim)
-          :border-color (rgba 0.0 0.0 0.0 0.65)
-          :on-click |x y r| (set! st/instrument-key-lock-audition (not st/instrument-key-lock-audition))))
-      (box :padding 0.5 :background-color :gray :corner-radius 12
-      (h-stack :debug-name "instrument-key-row" :gap instrument-key-button-gap :height instrument-key-white-height :width instrument-key-row-width :align :start
-        (each (range instrument-key-count) |idx|
-          (instrument-key-button inst idx))))
-      (wrap :key "instrument-key-lock-variant-strip"
-        :width :fill :gap 0.18 :row-gap 0.14 :align :start
-        (each (instrument-key-lock-variant-items inst) |chip idx|
-          (instrument-key-lock-chip inst chip)))
-      (button "clear key" :width 6.5 :height 1.1 :padding 0 :font-size 10
-        :background-color (rgba 0.12 0.12 0.13 0.70)
-        :border-color (rgba 0.0 0.0 0.0 0.65)
-        :on-click |x y r| (instrument-key-clear-selected)))))
+  (let ((selected-count (len st/instrument-key-lock-selected-notes)))
+    (box :width (+ (instrument-key-panel-width) 2) :background-color :black :corner-radius 16 :padding 1
+      (v-stack :debug-name "instrument-key-lock-control-panel"
+        :width (instrument-key-panel-width) :height st/fx-panel-body-content-height
+        :gap 0.4 :padding instrument-key-panel-padding
+        (h-stack :debug-name "instrument-key-header" :gap 0.35 :height 1.2 :align :center :width :fill
+          (button "<" :width 1.6 :height 1.1 :padding 0 :font-size 10
+            :on-click |x y r| (instrument-key-shift-octave -1))
+          (label (instrument-key-range-label) :font-size 10 :width 4.4 :h-align :center
+            :color :dim :bg :transparent)
+          (button ">" :width 1.6 :height 1.1 :padding 0 :font-size 10
+            :on-click |x y r| (instrument-key-shift-octave 1))
+          (box :width 0.4)
+          (label "oct" :font-size 9 :width 1.8 :color :dim :bg :transparent)
+          (number-picker :debug-name "instrument-key-octave-count"
+            :width 2.4 :height 1.0 :noui true :font-size 9.5 :decimals 0 :step 1
+            :value st/instrument-key-lock-octave-count :min 1 :max instrument-key-max-octaves
+            :on-change (lambda (v) (instrument-key-set-octave-count v)))
+          (box :flex 1 :height 0.1)
+          (if (> selected-count 0)
+            (button "unselect all" :debug-name "instrument-key-unselect-all"
+              :width 6 :height 1.0 :padding 0 :font-size 9
+              :on-click |x y r| (instrument-key-unselect-all))
+            (box :width 0 :height 0))
+          (box :key "instrument-key-audition" :debug-name "instrument-key-audition"
+            :width 1.8 :height 1.2 :align :center
+            :on-click |x y r| (set! st/instrument-key-lock-audition (not st/instrument-key-lock-audition))
+            (instrument-key-audition-icon :active (if st/instrument-key-lock-audition 1 0))))
+        (instrument-key-piano inst)
+        (wrap :key "instrument-key-lock-variant-strip"
+          :width :fill :gap 0.18 :row-gap 0.04 :align :start
+          (each (instrument-key-lock-variant-items inst) |chip idx|
+            (instrument-key-lock-chip inst chip)))))))
 
 ;; The custom-*-ui dispatchers and custom-ui-current-kind are a host->script
 ;; protocol: src/ui/custom_ui.rs GENERATES headerless lisp that (re)defines

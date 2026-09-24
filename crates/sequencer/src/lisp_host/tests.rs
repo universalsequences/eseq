@@ -13837,10 +13837,6 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         assert!(names.iter().any(|name| name == "dice"), "{names:?}");
         assert!(names.iter().any(|name| name == "echo-track"), "{names:?}");
         assert!(names.iter().any(|name| name == "wrap-crash"), "{names:?}");
-        assert!(
-            names.iter().any(|name| name == "follow-harmony"),
-            "{names:?}"
-        );
         assert!(names.iter().any(|name| name == "lane-harmony"), "{names:?}");
         assert!(defs.iter().all(|def| {
             def.source_path
@@ -14602,40 +14598,6 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             .channels
             .iter()
             .any(|channel| channel.name.as_deref() == Some("phase7-demo-density")));
-    }
-
-    #[test]
-    fn process_fields_band_demo_loads_publisher_and_independent_followers() {
-        let state = Arc::new(SequencerState::new(
-            3,
-            (0..3).map(|_| default_empty_effect_chain()).collect(),
-        ));
-        let mut scratch = ScratchControlRuntime::new(
-            Arc::clone(&state),
-            fallback_effect_descriptors(3),
-            fallback_instrument_descriptors(3),
-            0,
-            0,
-        );
-        scratch
-            .eval(&super::load_process_library_source())
-            .expect("load builtin process library");
-        let script_path = crate::app_paths::app_paths().scripts_dir().join("processes/process-fields-band-demo.lisp");
-        let source = std::fs::read_to_string(&script_path).expect("read fields band demo");
-
-        scratch
-            .eval_source_at_path(script_path, &source)
-            .expect("evaluate fields band demo");
-
-        assert_eq!(
-            state.track_process_chain(0).expect("publisher chain").slots[0].class_name,
-            "fields-band-publisher"
-        );
-        for track in [1, 2] {
-            let chain = state.track_process_chain(track).expect("follower chain");
-            assert_eq!(chain.slots.len(), 1);
-            assert_eq!(chain.slots[0].class_name, "follow-harmony");
-        }
     }
 
     #[test]
@@ -17803,7 +17765,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         let classes: Vec<String> = entries.iter().map(|entry| field(entry, "class")).collect();
         let labels: Vec<String> = entries.iter().map(|entry| field(entry, "label")).collect();
         assert!(classes.iter().any(|class| class == "neural-reset"), "{classes:?}");
-        for hidden in ["lane-reset", "lane-roll", "repeater", "lane-grab"] {
+        for hidden in ["lane-reset", "lane-roll", "repeater", "lane-grab", "lane-length"] {
             assert!(!classes.iter().any(|class| class == hidden), "{hidden} hidden: {classes:?}");
         }
         let unique: std::collections::HashSet<&String> = labels.iter().collect();

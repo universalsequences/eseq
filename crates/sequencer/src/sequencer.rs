@@ -20,7 +20,7 @@ pub use data::{
     LiveTriggerStamp, LiveTriggerStampRing, RollCommand, RollHitRecorded, SequenceRollSource,
     StepData, StepParam, SwingResolution, Timebase, TimebasePLockData, TrackOutput, TrackParams,
     TrackParamsSnapshot, TrackPattern, TrackSendBaseline, TrackSendPLockData,
-    TrackSendRuntimeTarget, TrackSendSnapshot, TrackSoundState, Trigger, DEFAULT_BPM,
+    TrackSendRuntimeTarget, TrackSendSnapshot, TRACK_ATTACK_MAX_MS, TrackSoundState, Trigger, DEFAULT_BPM,
     DEFAULT_BUS_A_ID, DEFAULT_BUS_B_ID, DRUM_RACK_FIRST_PAD_NOTE, DRUM_RACK_LAST_PAD_NOTE,
     DRUM_RACK_TOTAL_PAD_NOTES, EXT_MOD_INPUT_COUNT, MAX_INSTRUMENT_ENGINES, MAX_RACK_SLOTS,
     BARS_PER_PATTERN, BAR_TRANSPOSE_LIMIT,

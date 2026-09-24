@@ -1091,6 +1091,26 @@ pub(crate) fn sync_reactive_tick(
             ctx.frame.prev_mod_display_values = ctx.meters.cached_mod_display_values.clone();
         }
         if sequencer_visible {
+            // Length-lane marker (`length!`): changes at most once per cycle,
+            // so republish only the tracks whose marker moved.
+            let lengths = track_process_lengths_snapshot(&ctx.shared.state, &app);
+            if lengths != ctx.frame.prev_track_process_lengths {
+                let rt = editor.runtime_mut();
+                for (track, marker) in lengths.iter().enumerate() {
+                    if ctx.frame.prev_track_process_lengths.get(track) == Some(marker) {
+                        continue;
+                    }
+                    needs_reactive_cycle |=
+                        sync_track_length_row_fields(rt, &ctx.shared.state, track);
+                    for viewport in ctx.shared.expanded_step_projection.all_viewports() {
+                        if viewport.track == track {
+                            needs_reactive_cycle |=
+                                sync_expanded_step_viewport_length(rt, &ctx.shared.state, viewport);
+                        }
+                    }
+                }
+                ctx.frame.prev_track_process_lengths = lengths;
+            }
             let previous_track_playheads = ctx.frame.prev_track_playheads.clone();
             if sync_track_playhead_field_delta(
                 editor.runtime_mut(),

@@ -43,25 +43,32 @@ fn retrospective_command_opens_real_capture_and_cancel_keeps_patterns() {
     assert!(!state.pattern.patterns[0].is_active(0));
 }
 
+fn eval_number(editor: &mut Editor, source: &str) -> f64 {
+    match editor.runtime_mut().eval_str(source).unwrap() {
+        Some(Value::Number(value)) => value,
+        other => panic!("{source} = {other:?}"),
+    }
+}
+
 #[test]
-fn retrospective_modal_recalculates_usable_bars_when_cropping() {
+fn retrospective_modal_derives_the_crop_end_from_bars_and_whole_bpm() {
     let mut editor = full_grid_editor_for_scroll_tests();
     editor.runtime_mut().eval_str(include_str!("../../../ui/capture-fixtures/retrospective-preview.lisp")).unwrap();
     editor.runtime_mut().eval_str(
         "(set-layout (list :buf \"*sequencer*\" :hide-status true)) (eseq.retrospective/open 0 30)").unwrap();
     let id = editor.buffers.iter().find(|b| b.name == "*sequencer*").unwrap().id;
     editor.set_active_buffer(id);
-    assert_eq!(editor.runtime_mut().eval_str("eseq.retrospective/bars").unwrap(), Some(Value::Number(16.0)));
-    // Crop adjustments recompute from the requested meter; an explicit bar
-    // choice persists across cropping, while automatic doubling does not stick.
-    for (key, value, expected) in [
-        ("/retrospective-end", 2.0, 1.0),
-        ("/retrospective-end", 5.0, 2.0),
-        ("/retrospective-start", 1.0, 2.0),
-        ("/retrospective-start", 3.0, 1.0),
-        ("/retrospective-bars", 3.0, 3.0),
-        ("/retrospective-end", 30.0, 12.0),
-        ("/retrospective-end", 5.0, 3.0),
+    // A 30 s free crop doubles to 16 bars and lands exactly on 128 BPM.
+    assert_eq!(eval_number(&mut editor, "eseq.retrospective/bars"), 16.0);
+    assert_eq!(eval_number(&mut editor, "eseq.retrospective/bpm"), 128.0);
+    assert!((eval_number(&mut editor, "eseq.retrospective/crop-end") - 30.0).abs() < 1e-9);
+    // Pickers move start, bars and tempo; the end always follows them.
+    for (key, value, start, bars, bpm) in [
+        ("/retrospective-bars", 2.0, 0.0, 2.0, 128.0),
+        ("/retrospective-bpm", 120.0, 0.0, 2.0, 120.0),
+        ("/retrospective-start", 3.0, 3.0, 2.0, 120.0),
+        ("/retrospective-bpm", 40.0, 3.0, 2.0, 70.0),
+        ("/retrospective-bars", 4.0, 3.0, 4.0, 70.0),
     ] {
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
@@ -70,16 +77,45 @@ fn retrospective_modal_recalculates_usable_bars_when_cropping() {
         let picker = find_layout_node_by_stable_key_suffix(&layout, key).unwrap();
         assert_finite_nonzero_rect(picker, key);
         editor.runtime_mut().invoke(picker.props["on-change"].clone(), vec![Value::Number(value)]).unwrap();
-        assert_eq!(editor.runtime_mut().eval_str("eseq.retrospective/bars").unwrap(), Some(Value::Number(expected)), "{key} = {value}");
+        assert_eq!(eval_number(&mut editor, "eseq.retrospective/crop-start"), start, "{key} = {value}");
+        assert_eq!(eval_number(&mut editor, "eseq.retrospective/bars"), bars, "{key} = {value}");
+        assert_eq!(eval_number(&mut editor, "eseq.retrospective/bpm"), bpm, "{key} = {value}");
+        let end = eval_number(&mut editor, "eseq.retrospective/crop-end");
+        assert!((end - (start + 240.0 * bars / bpm)).abs() < 1e-9, "{key} = {value}: end {end}");
     }
-    editor.runtime_mut().eval_str("(eseq.retrospective/open 20 24)").unwrap();
-    editor.runtime_mut().run_reactive_cycle();
-    editor.refresh_runtime_side_effects();
-    let _ = eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 160, 60);
-    let layout = editor.widget_layout().unwrap();
-    let bars = find_layout_node_by_stable_key_suffix(&layout, "/retrospective-bars").unwrap();
-    assert_eq!(bars.props.get("value"), Some(&Value::Number(2.0)));
+    // A detected groove replaces all three; a later marquee keeps its bars.
+    editor.runtime_mut().eval_str("(eseq.retrospective/apply-guess 9.263 113 2)").unwrap();
+    assert!((eval_number(&mut editor, "eseq.retrospective/crop-end") - (9.263 + 480.0 / 113.0)).abs() < 1e-9);
+    editor.runtime_mut().eval_str(
+        "(eseq.retrospective/action (dict :type :finish-marquee-select :time-a 20 :time-b 24.1))").unwrap();
+    assert_eq!(eval_number(&mut editor, "eseq.retrospective/bars"), 2.0);
+    assert_eq!(eval_number(&mut editor, "eseq.retrospective/bpm"), 117.0);
     eseqlisp::widget_render::clear_overlay();
+}
+
+#[test]
+fn retrospective_detect_command_seeds_the_crop_from_the_groove() {
+    let mut editor = full_grid_editor_for_scroll_tests();
+    let state = Arc::new(SequencerState::new(1, vec![]));
+    state.replace_pattern_repository(vec![sequencer::sequencer::PatternSnapshot::new_default(1, &[])], 0);
+    let mut app = test_app_for_track_visual_state(state);
+    let track = app.track_registry.id_at(0).unwrap();
+    // A stray hit, silence, then two bars of eighth notes at 100 BPM.
+    let mut starts = vec![0.5];
+    starts.extend((0..16).map(|i| 6.0 + i as f64 * 0.3));
+    app.retrospective.draft = Some(sequencer::app::retrospective::CaptureDraft {
+        notes: starts.iter().map(|&start| sequencer::app::retrospective::CapturedNote {
+            track, transpose: 0.0, velocity: 1.0, start, end: start + 0.05 }).collect(),
+        duration: 11.0, truncated: false, scene: app.state.current_scene_id().unwrap(),
+    });
+    crate::retrospective::handle("retrospective-detect", Value::Nil, &mut app, &mut editor);
+    assert!((eval_number(&mut editor, "eseq.retrospective/crop-start") - 6.0).abs() < 0.005);
+    assert_eq!(eval_number(&mut editor, "eseq.retrospective/bpm"), 100.0);
+    assert_eq!(editor.runtime_mut().eval_str("RETRO.error").unwrap(), Some(Value::String(String::new())));
+    app.retrospective.draft.as_mut().unwrap().notes.truncate(2);
+    crate::retrospective::handle("retrospective-detect", Value::Nil, &mut app, &mut editor);
+    assert!(matches!(editor.runtime_mut().eval_str("RETRO.error").unwrap(),
+        Some(Value::String(error)) if error.contains("No repeating groove")));
 }
 
 #[test]
@@ -102,8 +138,9 @@ fn retrospective_modal_crops_unsnapped_time_and_sends_one_import_command() {
         let offset = (tile.rect.col, tile.rect.row);
         let layout = editor.widget_layout().unwrap();
         assert_finite_layout_tree(&layout);
-        for key in ["/retrospective-roll", "/retrospective-start", "/retrospective-end",
-            "/retrospective-bars", "/retrospective-send", "/retrospective-audition"] {
+        for key in ["/retrospective-roll", "/retrospective-start", "/retrospective-bpm",
+            "/retrospective-bars", "/retrospective-detect", "/retrospective-send",
+            "/retrospective-audition", "/retrospective-loop-stop"] {
             let node = find_layout_node_by_stable_key_suffix(&layout, key)
                 .unwrap_or_else(|| panic!("missing {key} in {buffer}"));
             assert_finite_nonzero_rect(node, key);
@@ -134,7 +171,9 @@ fn retrospective_modal_crops_unsnapped_time_and_sends_one_import_command() {
         editor.runtime_mut().eval_str(
             "(eseq.retrospective/action (dict :type :finish-marquee-select :time-a 20.123 :time-b 23.789))").unwrap();
         assert_eq!(editor.runtime_mut().eval_str("eseq.retrospective/crop-start").unwrap(), Some(Value::Number(20.123)));
-        assert_eq!(editor.runtime_mut().eval_str("eseq.retrospective/crop-end").unwrap(), Some(Value::Number(23.789)));
+        // The marquee's 3.666 s over 2 bars snaps to 131 BPM.
+        let end = 20.123 + 480.0 / 131.0;
+        assert!((eval_number(&mut editor, "eseq.retrospective/crop-end") - end).abs() < 1e-9);
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
         let _ = eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 160, 60);
@@ -159,13 +198,30 @@ fn retrospective_modal_crops_unsnapped_time_and_sends_one_import_command() {
         assert_eq!(*auditions[0]["bars"].borrow(), Value::Number(2.0));
         editor.runtime_mut().set_reactive("RETRO", "playing", Value::Bool(true));
         editor.runtime_mut().set_reactive("RETRO", "position", Value::Number(0.25));
+        // A playing preview must not restart itself from redraws alone:
+        // each restart cancels the notes it just scheduled.
+        editor.drain_host_commands();
+        for frame in 0..4 {
+            editor.runtime_mut().set_reactive("RETRO", "position", Value::Number(0.25 + frame as f64 * 0.1));
+            editor.runtime_mut().run_reactive_cycle();
+            editor.refresh_runtime_side_effects();
+            let layout_frame = eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 160, 60);
+            drop(layout_frame);
+            paint_modal(&editor.widget_layout().unwrap());
+        }
+        let restarts: Vec<_> = editor.drain_host_commands().into_iter().filter_map(|command| match command {
+            HostCommand::Custom { name, .. } if name.starts_with("retrospective-") => Some(name),
+            _ => None,
+        }).collect();
+        assert!(restarts.is_empty(), "redraws restarted the preview: {restarts:?}");
+        editor.runtime_mut().set_reactive("RETRO", "position", Value::Number(0.25));
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
         let _ = eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 160, 60);
         let layout = editor.widget_layout().unwrap();
         let roll = find_layout_node_by_stable_key_suffix(&layout, "/retrospective-roll").unwrap();
         let Some(Value::Number(playhead)) = roll.props.get("playhead-time") else { panic!("preview playhead"); };
-        assert!((*playhead - (20.123 + (23.789 - 20.123) * 0.25)).abs() < 1e-6, "preview playhead in {buffer}: {playhead}");
+        assert!((*playhead - (20.123 + (end - 20.123) * 0.25)).abs() < 1e-6, "preview playhead in {buffer}: {playhead}");
         editor.runtime_mut().eval_str(
             "(eseq.retrospective/action (dict :type :finish-marquee-select :time-a 20.123 :time-b 23.789))").unwrap();
         assert_eq!(editor.drain_host_commands().into_iter().filter(|command| matches!(command,
@@ -223,7 +279,7 @@ fn retrospective_modal_crops_unsnapped_time_and_sends_one_import_command() {
         }).collect();
         assert_eq!(imports.len(), 1);
         assert_eq!(*imports[0]["start"].borrow(), Value::Number(20.123));
-        assert_eq!(*imports[0]["end"].borrow(), Value::Number(23.789));
+        assert_eq!(*imports[0]["end"].borrow(), Value::Number(end));
         assert_eq!(*imports[0]["bars"].borrow(), Value::Number(2.0));
         eseqlisp::widget_render::clear_overlay();
         editor.runtime_mut().eval_str("(eseq.retrospective/close)").unwrap();

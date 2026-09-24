@@ -68,20 +68,6 @@
            nil)
          (target-add! acc)))
 
-(def-process follow-harmony
-  :doc "Move the current note toward the previous-tick pitch field. Missing publishers are inert; amount is sequenceable obedience."
-  :target (step-param :transpose)
-  :in ((listen :field :default :harmony)
-       (amount :float 0 1 :default 1 :lane true)
-       (grace :int 0 3 :default 0))
-  :run (let ((field (hear (in :listen))))
-         (if field
-           (target-add!
-             (* (in :amount)
-                (field-weight field)
-                (field-nearest-delta field (current-note) (in :grace))))
-           nil)))
-
 ;; ---------------------------------------------------------------------------
 ;; Default project lanes (docs/default-process-lanes-spec.md).
 ;;
@@ -344,10 +330,25 @@
          (roll! (in :rate))
          nil))
 
-;; Harmony by track: the lane-UI cousin of `follow-harmony`. Where that one
-;; listens to a named channel some scripted publisher must `suggest` into,
-;; this one points at a source track like grab/xpose do and reads the step
-;; the source is currently on, same tick: its chord (or single note) and the
+;; Pattern length: the own-track `length!` the default-lanes spec deferred.
+;; Pull, never push: a lane only ever sets the length of the track it runs
+;; on. The change is scheduler-side and lands at the end of the current
+;; cycle, so a pattern always finishes before it changes; under the Prh
+;; timebase a cycle is exactly one bar, which turns `rand -> length` into a
+;; bar-by-bar polyrhythm generator. The authored length (the *track* steps
+;; picker) is never written; Stop or a pattern switch restores it.
+(def-process lane-length
+  :doc "Length lane: a nonzero step sets this track's pattern length to that many steps from the end of the current cycle; 0 leaves it alone. Wire rand or count into steps for algorithmic lengths. Under the Prh timebase every cycle is one bar, so each bar plays its own subdivision. The authored length is untouched: Stop or a pattern switch restores it."
+  :in ((steps :int 0 64 :default 0 :lane true))
+  :state ((len 0))
+  :run (if (>= (in :steps) 1)
+         (do
+           (set! len (floor (+ (in :steps) 0.5)))
+           (length! len))
+         nil))
+
+;; Harmony by track: points at a source track like grab/xpose do and reads
+;; the step the source is currently on, same tick: its chord (or single note) and the
 ;; key its whole pattern implies (the union of every pitch it authors, or
 ;; the scale its chord quality suggests when that set is thin).
 ;;

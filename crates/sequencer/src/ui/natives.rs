@@ -563,7 +563,7 @@ fn expanded_step_viewport_from_numbers(
     })
 }
 
-fn value_string_list(value: Option<&Value>) -> Vec<String> {
+pub(super) fn value_string_list(value: Option<&Value>) -> Vec<String> {
     let Some(Value::List(items)) = value else {
         return Vec::new();
     };
@@ -1861,7 +1861,7 @@ pub(crate) fn register_song_natives(runtime: &mut Runtime) {
 fn toggle_master_recording_capture(
     master_recording: &AtomicBool,
     master_recorder: &sequencer::recorder::MasterRecorder,
-) -> Result<(bool, String), String> {
+) -> Result<(bool, String, Option<std::path::PathBuf>), String> {
     toggle_master_recording_capture_in(
         master_recording,
         master_recorder,
@@ -1873,7 +1873,7 @@ fn toggle_master_recording_capture_in(
     master_recording: &AtomicBool,
     master_recorder: &sequencer::recorder::MasterRecorder,
     recordings_dir: &std::path::Path,
-) -> Result<(bool, String), String> {
+) -> Result<(bool, String, Option<std::path::PathBuf>), String> {
     if master_recording.load(Ordering::Acquire) {
         let take = match master_recorder.stop() {
             Ok(take) => take,
@@ -1890,12 +1890,13 @@ fn toggle_master_recording_capture_in(
         Ok((
             false,
             format!("Saved master recording to {}", path.display()),
+            Some(path),
         ))
     } else {
         match master_recorder.start() {
             Ok(()) => {
                 master_recording.store(true, Ordering::Release);
-                Ok((true, "Master WAV recording started".to_string()))
+                Ok((true, "Master WAV recording started".to_string(), None))
             }
             Err(error) => {
                 master_recording.store(false, Ordering::Release);
@@ -3754,6 +3755,7 @@ pub(crate) fn init_runtime(
     crate::midi_dispatch::register_device_state(&mut runtime);
     crate::roll_input::register_natives(&mut runtime, state.clone());
     crate::retrospective::register_state(&mut runtime);
+    crate::host_commands::resample::register_state(&mut runtime);
     runtime.register_reactive("AGENT", vec![("generation", Value::Number(0.0))], false);
     if track_count > 0 {
         sync_fx_param_binding_fields(&mut runtime, app, &state, 0, &selected_steps);
@@ -6087,7 +6089,7 @@ pub(crate) fn init_runtime(
                 let Some(val) = numeric_value else {
                     return Err("seq-set-track-param: :attack expects a number".into());
                 };
-                let v = (val as f32).clamp(0.0, 500.0);
+                let v = (val as f32).clamp(0.0, sequencer::sequencer::TRACK_ATTACK_MAX_MS);
                 ctx.enqueue_command(slice3_numeric_history_command(
                     "attack", Some(track), v as f64,
                 ));
@@ -6951,8 +6953,14 @@ pub(crate) fn init_runtime(
         let result = toggle_master_recording_capture(&master_rec, &master);
         ui_ep.fetch_add(1, Ordering::Relaxed);
         match result {
-            Ok((active, status)) => {
+            Ok((active, status, saved)) => {
                 ctx.set_status(status);
+                if let Some(path) = saved {
+                    ctx.enqueue_command(HostCommand::Custom {
+                        name: "master-recording-saved".to_string(),
+                        payload: Value::String(path.to_string_lossy().into_owned()),
+                    });
+                }
                 Ok(Value::Bool(active))
             }
             Err(error) => Err(error.into()),
@@ -7139,24 +7147,11 @@ pub(crate) fn init_runtime(
     });
 
     let sample_browser = Rc::new(RefCell::new(DebouncedSampleBrowser::new(
-        sample_db.clone(),
+        sequencer::sample_db::SampleDb::open_read_only(&sequencer::app_paths::app_paths().sample_db_path())
+            .expect("open sample browser query connection"),
         Duration::from_millis(150),
     )));
-    let sample_browser_for_native = sample_browser.clone();
-    runtime.register_native("seq-sample-browser", move |args, _ctx| {
-        let query = match args.first() {
-            Some(Value::String(s)) => s.as_str(),
-            _ => "",
-        };
-        let selected_tags = value_string_list(args.get(1));
-        let selected_tag_refs: Vec<&str> = selected_tags.iter().map(String::as_str).collect();
-        let selected_origins = value_string_list(args.get(2));
-        let selected_origin_refs: Vec<&str> = selected_origins.iter().map(String::as_str).collect();
-        sample_browser_for_native
-            .borrow_mut()
-            .query_with_origins(query, &selected_tag_refs, &selected_origin_refs)
-            .map_err(|error| format!("failed to query samples.db browser state: {error}"))
-    });
+    register_sample_browser_native(&mut runtime, sample_browser.clone());
 
     let sample_db_for_tree = sample_db.clone();
     runtime.register_native("seq-sample-tree", move |_args, _ctx| {
@@ -8317,8 +8312,8 @@ fn document_metal_seq_natives(runtime: &mut Runtime) {
         ),
         (
             "seq-sample-browser",
-            "(seq-sample-browser query selected-tags)",
-            "Return DB-backed sample tag facets and a flat sample list.",
+            "(seq-sample-browser query selected-tags [selected-origins])",
+            "Request an asynchronous sample search and return its latest completed tag facets and flat list. Reactive readers update when the current search completes.",
         ),
         (
             "seq-sample-tags-for-path",
@@ -9202,9 +9197,10 @@ mod tests {
         let recorder = sequencer::recorder::MasterRecorder::new(44_100, 2);
         let master_recording = AtomicBool::new(false);
 
-        let (active, status) =
+        let (active, status, saved) =
             toggle_master_recording_capture_in(&master_recording, &recorder, &recordings.path)
                 .expect("start capture");
+        assert_eq!(saved, None, "starting a take saves nothing");
         assert!(active, "start should return active");
         assert!(
             status.contains("started"),
@@ -9214,7 +9210,7 @@ mod tests {
         assert!(recorder.is_active());
 
         recorder.capture(&[0.25, -0.25, 0.5, -0.5]);
-        let (active, status) =
+        let (active, status, saved_path) =
             toggle_master_recording_capture_in(&master_recording, &recorder, &recordings.path)
                 .expect("stop capture");
         assert!(!active, "stop should return inactive");
@@ -9227,6 +9223,7 @@ mod tests {
 
         let saved = wav_files(&recordings.path);
         assert_eq!(saved.len(), 1, "expected one saved WAV in recordings/");
+        assert_eq!(saved_path.as_ref(), Some(&saved[0]), "stop reports the written file");
         assert!(
             std::fs::metadata(&saved[0])
                 .expect("saved WAV metadata")
@@ -9235,7 +9232,7 @@ mod tests {
             "saved WAV should contain audio samples"
         );
 
-        let (active, _) =
+        let (active, _, _) =
             toggle_master_recording_capture_in(&master_recording, &recorder, &recordings.path)
                 .expect("start empty take");
         assert!(active);

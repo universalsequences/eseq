@@ -390,6 +390,7 @@ pub(crate) fn run_event_loop(
         prev_rack_pad_triggers: Vec::new(),
         rack_pad_triggered_at: Vec::new(),
         prev_track_playheads: Vec::new(),
+        prev_track_process_lengths: Vec::new(),
         prev_track_button_states: track_button_state_snapshot(&shared.state),
         prev_current_track_playhead_visible: false,
         prev_process_channel_values_version: shared.state.process_channel_values_version(),
@@ -652,21 +653,10 @@ pub(crate) fn run_event_loop(
             editor.mark_needs_redraw();
             frame.prev_queued_track_clips = queued_track_clips;
         }
-        let sample_browser_ready = { shared.sample_browser.borrow_mut().poll_ready() };
-        match sample_browser_ready {
-            Ok(true) => {
-                if let Err(error) = refresh_sample_browser_buffer(&mut editor) {
-                    editor.handle_host_event(HostEvent::Error(format!(
-                        "Failed to refresh sample browser search: {error}"
-                    )));
-                }
-            }
-            Ok(false) => {}
-            Err(error) => {
-                editor.handle_host_event(HostEvent::Error(format!(
-                    "Failed to query samples.db browser state: {error}"
-                )));
-            }
+        if let Err(error) = publish_sample_browser_results(&mut editor, &shared.sample_browser) {
+            editor.handle_host_event(HostEvent::Error(format!(
+                "Failed to query samples.db browser state: {error}"
+            )));
         }
         if let Some(watcher) = lisp_hot_reload_watcher.as_mut() {
             let source_revision = editor.runtime().lisp_source_revision();

@@ -361,6 +361,13 @@ fn node_is_patch_port(node: &LayoutNode) -> bool {
     node_bool_prop(node, "patch-port")
 }
 
+/// A press on a port or a button keeps it even where a cable's curve passes
+/// over: cables sag across the controls below a patch bay (its "× cable"
+/// chip among them), and those controls have no other way to be reached.
+fn node_wins_over_patch_cable(node: &LayoutNode) -> bool {
+    node_is_patch_port(node) || node.widget_type == "button"
+}
+
 fn patch_cable_click_output(
     layout: &LayoutNode,
     layout_col: f32,
@@ -997,6 +1004,11 @@ impl Editor {
         }
 
         let gen_before = widget_render::widget_state_generation();
+        // The widget under a left press, hit-tested before on-patch-miss runs:
+        // the miss callback re-lays out, and a control it hides (the patch
+        // bay's "× cable" chip, shown only while a cable is selected) must
+        // still receive the press that landed on it.
+        let mut pressed_node = None;
         if matches!(
             mouse.kind,
             MouseEventKind::Down(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left)
@@ -1005,10 +1017,10 @@ impl Editor {
                 let layout_pos = self.active_layout_pos(local_col, local_row);
                 match mouse.kind {
                     MouseEventKind::Down(MouseButton::Left) => {
-                        let hit_patch_port = hit_test_layout(layout, layout_pos.1, layout_pos.0)
-                            .is_some_and(node_is_patch_port);
+                        let hit_over_cable = hit_test_layout(layout, layout_pos.1, layout_pos.0)
+                            .is_some_and(node_wins_over_patch_cable);
                         let (cell_w, cell_h) = self.runtime.layout_cell_dims();
-                        if !hit_patch_port
+                        if !hit_over_cable
                             && let Some(output) = patch_cable_click_output(
                                 layout,
                                 layout_pos.0,
@@ -1020,6 +1032,7 @@ impl Editor {
                             return self.apply_widget_output(Some(output));
                         }
                         if let Some(output) = patch_miss_output(layout) {
+                            pressed_node = self.widget_node_at_local(local_col, local_row);
                             let _ = self.apply_widget_output(Some(output));
                         }
                     }
@@ -1034,7 +1047,9 @@ impl Editor {
             }
         }
         let output = {
-            let Some(node) = self.widget_node_at_local(local_col, local_row) else {
+            let Some(node) =
+                pressed_node.or_else(|| self.widget_node_at_local(local_col, local_row))
+            else {
                 return false;
             };
             let node = self
@@ -2203,11 +2218,30 @@ impl Editor {
         else {
             return;
         };
-        let Some(node) = self.widget_node_at_local(local_col, local_row) else {
-            return;
-        };
         let scrolled_col = local_col + self.widget_layout_scroll_left();
         let scrolled_row = local_row + self.total_scroll_top();
+        // Like scroll: a topmost modal traps the pinch and hit-tests only its
+        // own subtree. A whole-layout hit test lets underlay widgets later in
+        // tree order win wherever they sit behind the panel.
+        let node = match widget_render::topmost_overlay() {
+            Some(entry) if entry.kind == widget_render::OverlayKind::Modal => {
+                if !widget_render::overlay_contains(local_col, local_row) {
+                    return;
+                }
+                let Some(layout) = self.runtime.current_layout.as_deref() else {
+                    return;
+                };
+                find_node_by_id(layout, entry.widget_id)
+                    .or_else(|| super::widget_focus::find_open_modal_node(layout).cloned())
+                    .and_then(|modal| {
+                        hit_test_layout(&modal, scrolled_row, scrolled_col).cloned()
+                    })
+            }
+            _ => self.widget_node_at_local(local_col, local_row),
+        };
+        let Some(node) = node else {
+            return;
+        };
         let gen_before = widget_render::widget_state_generation();
         let offset =
             event_scroll_offset_for(self.runtime.current_layout.as_deref(), node.widget_id);

@@ -192,6 +192,8 @@ pub(crate) struct FrameDiffState {
     pub(crate) prev_rack_pad_triggers: Vec<bool>,
     pub(crate) rack_pad_triggered_at: Vec<Option<Instant>>,
     pub(crate) prev_track_playheads: Vec<u32>,
+    /// Last published length-lane marker step per track (`length!`).
+    pub(crate) prev_track_process_lengths: Vec<Option<usize>>,
     pub(crate) prev_track_button_states: Vec<(bool, bool)>,
     pub(crate) prev_current_track_playhead_visible: bool,
     /// Scheduler → UI channel mirror generation last offered to a render

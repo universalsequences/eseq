@@ -3298,16 +3298,17 @@ impl App {
             crate::sequencer::TrackOutput::Bus(bus_id),
         );
         let group = &mut self.groups[group_index];
-        // Members stay sorted; pads address members by position, so pads at or
-        // after the insertion point shift up with them.
-        let position = group.members.partition_point(|member| *member < track);
+        // Rack members are append-only: pads, rack clips and rack-owned
+        // sequencer routes all address members by position, and a script's
+        // literal route numbers are beyond any remap, so a joining member must
+        // never shift the members already routed. Plain groups keep track order.
+        let position = if group.rack.is_some() {
+            group.members.len()
+        } else {
+            group.members.partition_point(|member| *member < track)
+        };
         group.members.insert(position, track);
         if let Some(rack) = group.rack.as_mut() {
-            for pad in &mut rack.pads {
-                if pad.member >= position {
-                    pad.member += 1;
-                }
-            }
             if let Some(pad_note) = pad_note {
                 rack.push_pad(crate::project::ProjectRackPad { pad_note, member: position });
             }

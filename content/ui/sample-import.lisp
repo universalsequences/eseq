@@ -39,7 +39,10 @@
         select-node
         add-batch-tag
         add-selection-tag
-        add-file-tag)
+        add-file-tag
+        ;; Tag editing pieces shared with the resample modal.
+        chip-row
+        tag-entry)
 
 (defstate open? false)
 ;; Bumped after every draft mutation: the natives are plain calls and are

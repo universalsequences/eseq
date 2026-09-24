@@ -5,6 +5,8 @@ pub(super) const COMMANDS: &[&str] = &[
     "project-new-request",
     "project-quit-confirmed",
     "app-quit-request",
+    "master-recording-saved",
+    "reveal-path",
     "open-help",
     "open-url",
     "about-open",
@@ -86,6 +88,52 @@ fn open_url(url: &str) -> Result<(), String> {
     }
 }
 
+/// Label for the toast link that reveals a file, named for the platform's
+/// file manager.
+const REVEAL_LABEL: &str = if cfg!(target_os = "macos") {
+    "Show in Finder"
+} else if cfg!(target_os = "windows") {
+    "Show in Explorer"
+} else {
+    "Open Folder"
+};
+
+/// Show `path` in the platform file manager: selected in Finder / Explorer,
+/// or its folder opened elsewhere.
+pub(super) fn reveal_in_file_manager(path: &std::path::Path) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        // Explorer exits non-zero even when it opened the window.
+        let mut select = std::ffi::OsString::from("/select,");
+        select.push(path);
+        std::process::Command::new("explorer")
+            .arg(select)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut c = std::process::Command::new("open");
+        c.arg("-R").arg(path);
+        c
+    };
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let mut command = {
+        let mut c = std::process::Command::new("xdg-open");
+        c.arg(path.parent().unwrap_or(path));
+        c
+    };
+    #[cfg(not(target_os = "windows"))]
+    {
+        let status = command.status().map_err(|e| e.to_string())?;
+        if !status.success() {
+            return Err(format!("Could not show {} ({status})", path.display()));
+        }
+        Ok(())
+    }
+}
+
 pub(super) fn handle(
     name: &str,
     payload: Value,
@@ -161,6 +209,34 @@ pub(super) fn handle(
                     .runtime_mut()
                     .eval_str("(eseq.file-dialogs/open-unsaved-prompt)")
                     .map_err(|e| format!("{e:?}"))?;
+            }
+            // The WAV transport button finished a take: keep the toast up
+            // until dismissed, with a link to the file.
+            "master-recording-saved" => {
+                let Value::String(path) = payload else {
+                    return Err("master-recording-saved expects a path".to_string());
+                };
+                let file = std::path::Path::new(&path)
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path.clone());
+                editor.show_sticky_toast(
+                    format!("Saved recording {file}"),
+                    eseqlisp::ToastKind::Success,
+                    Some(eseqlisp::ToastAction {
+                        label: REVEAL_LABEL.to_string(),
+                        command: HostCommand::Custom {
+                            name: "reveal-path".to_string(),
+                            payload: Value::String(path),
+                        },
+                    }),
+                );
+            }
+            "reveal-path" => {
+                let Value::String(path) = payload else {
+                    return Err("reveal-path expects a path".to_string());
+                };
+                reveal_in_file_manager(std::path::Path::new(&path))?;
             }
             // File > Quit eseq. Only requests the quit; `intercept_unsaved_quit`
             // decides whether the unsaved-changes prompt comes first.

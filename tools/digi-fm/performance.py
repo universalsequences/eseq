@@ -9,12 +9,14 @@ import ctypes as C
 import hashlib
 import json
 import platform
+import re
+import shutil
 import subprocess
 from pathlib import Path
 
 import numpy as np
 
-from validate import COMPILER, DEST, ROOT, compile_source
+from validate import COMPILER, DEST, ROOT, compile_source, expand
 
 
 def digest(path):
@@ -109,9 +111,20 @@ def main():
                   baseline_source_sha256=digest(args.baseline_source),
                   source_sha256=digest(args.candidate_source), audio=[], timings=[], artifacts={})
     pairs = {}
+    sources = [('baseline', args.baseline_source, baseline),
+               ('candidate', args.candidate_source, candidate)]
+    # Each revision owns its assets. In particular, do not accidentally test
+    # an old DSP against the candidate's new harmonic bank.
+    for name, path, source in sources:
+        directory = args.output / name
+        directory.mkdir(exist_ok=True)
+        for asset in set(re.findall(r'@file "([^"]+)"', expand(source))):
+            destination = directory / asset
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(path.parent / asset, destination)
     for block in [32, 128, 512]:
-        pairs[block] = [compile_source(args.output, f'{name}-{block}', source, block=block)
-                        for name, source in [('baseline', baseline), ('candidate', candidate)]]
+        pairs[block] = [compile_source(args.output / name, f'{name}-{block}', source, block=block)
+                        for name, _, source in sources]
         report['artifacts'][block] = [i.build_dir for i in pairs[block]]
         print('Compiled block size', block, flush=True)
 

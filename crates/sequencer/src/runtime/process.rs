@@ -1747,6 +1747,11 @@ pub enum ProcessRunCommand {
     /// firing step for that step's duration (docs/default-process-lanes-spec.md,
     /// roll lane). The lookahead collects it; the scheduler owns roll state.
     Roll(ProcessRollRequest),
+    /// `(length! steps)`: set the firing track's own pattern length from its
+    /// next cycle boundary (docs/default-process-lanes-spec.md, length lane).
+    /// A scheduler-side override: pattern data is never written. The
+    /// lookahead collects it; the clock owns the override.
+    PatternLength(usize),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

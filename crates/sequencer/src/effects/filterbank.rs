@@ -162,7 +162,7 @@ const STATE_BPM: usize = 169; // host-pushed transport BPM
 
 // Second wave of §5a mod targets (performance controls). Time targets and
 // sense/lfo-rate apply at block rate (their coefficients are per-block);
-// lfo depth is per-sample like the other linear targets.
+// lfo depth and ar depth are per-sample like the other linear targets.
 const STATE_MOD_SENSE_DEPTH_1: usize = 170;
 const STATE_MOD_ATTACK_DEPTH_1: usize = 174;
 const STATE_MOD_DECAY_DEPTH_1: usize = 178;
@@ -172,38 +172,40 @@ const STATE_MOD_LFO_RATE_DEPTH_1: usize = 190;
 const STATE_MOD_LFO_DEPTH_DEPTH_1: usize = 194;
 const STATE_MOD_AR_ATTACK_DEPTH_1: usize = 198;
 const STATE_MOD_AR_RELEASE_DEPTH_1: usize = 202;
+const STATE_MOD_AR_DEPTH_DEPTH_1: usize = 206;
 // ── Second runtime block (everything from here to STATE_SIZE is runtime
 // state, zeroed in bypass — it sits past the depth params, so the main
 // reset span can't cover it) ──
 const RUNTIME2_START: usize = STATE_LAG_LFO_DEPTH;
-// Per-sample lag for the lfo-depth target.
-const STATE_LAG_LFO_DEPTH: usize = 206;
+// Per-sample lag for the lfo-depth and ar-depth targets.
+const STATE_LAG_LFO_DEPTH: usize = 210;
+const STATE_LAG_AR_DEPTH: usize = 211;
 // Drive realism (§2): 4× oversampling second-stage biquads, pre/de-emphasis
 // one-poles, and the dynamic-bias envelope (coupling-cap sag).
-const STATE_OS_UP2_Z1_L: usize = 207;
-const STATE_OS_UP2_Z2_L: usize = 208;
-const STATE_OS_DOWN2_Z1_L: usize = 209;
-const STATE_OS_DOWN2_Z2_L: usize = 210;
-const STATE_OS_UP2_Z1_R: usize = 211;
-const STATE_OS_UP2_Z2_R: usize = 212;
-const STATE_OS_DOWN2_Z1_R: usize = 213;
-const STATE_OS_DOWN2_Z2_R: usize = 214;
-const STATE_EMPH_LP_L: usize = 215;
-const STATE_EMPH_LP_R: usize = 216;
-const STATE_DEEMPH_LP_L: usize = 217;
-const STATE_DEEMPH_LP_R: usize = 218;
-const STATE_BIAS_ENV_L: usize = 219;
-const STATE_BIAS_ENV_R: usize = 220;
+const STATE_OS_UP2_Z1_L: usize = 212;
+const STATE_OS_UP2_Z2_L: usize = 213;
+const STATE_OS_DOWN2_Z1_L: usize = 214;
+const STATE_OS_DOWN2_Z2_L: usize = 215;
+const STATE_OS_UP2_Z1_R: usize = 216;
+const STATE_OS_UP2_Z2_R: usize = 217;
+const STATE_OS_DOWN2_Z1_R: usize = 218;
+const STATE_OS_DOWN2_Z2_R: usize = 219;
+const STATE_EMPH_LP_L: usize = 220;
+const STATE_EMPH_LP_R: usize = 221;
+const STATE_DEEMPH_LP_L: usize = 222;
+const STATE_DEEMPH_LP_R: usize = 223;
+const STATE_BIAS_ENV_L: usize = 224;
+const STATE_BIAS_ENV_R: usize = 225;
 // Clock-tracking smoothing per SVF block (aa_in, recon_lp, recon_bp): the
 // analog physics the raw ZOH lacks — input band-limiting before the sampled
 // core and reconstruction of the staircase after it (§4).
 const SVF_SMOOTH_LEN: usize = 3;
-const STATE_F1L_SMOOTH: usize = 221;
-const STATE_F1R_SMOOTH: usize = 224;
-const STATE_F2L_SMOOTH: usize = 227;
-const STATE_F2R_SMOOTH: usize = 230;
+const STATE_F1L_SMOOTH: usize = 226;
+const STATE_F1R_SMOOTH: usize = 229;
+const STATE_F2L_SMOOTH: usize = 232;
+const STATE_F2R_SMOOTH: usize = 235;
 
-pub const FILTERBANK_STATE_SIZE: usize = 233;
+pub const FILTERBANK_STATE_SIZE: usize = 238;
 // Bypass resets [FIRST_RUNTIME_RESET, RUNTIME_RESET_END): SVF blocks through
 // SPLIT_PREV. The appended param slots above survive.
 const RUNTIME_RESET_END: usize = STATE_LFO_SYNC;
@@ -329,6 +331,10 @@ pub const FILTERBANK_PARAM_MOD_AR_RELEASE_DEPTH_1: u64 = STATE_MOD_AR_RELEASE_DE
 pub const FILTERBANK_PARAM_MOD_AR_RELEASE_DEPTH_2: u64 = STATE_MOD_AR_RELEASE_DEPTH_1 as u64 + 1;
 pub const FILTERBANK_PARAM_MOD_AR_RELEASE_DEPTH_3: u64 = STATE_MOD_AR_RELEASE_DEPTH_1 as u64 + 2;
 pub const FILTERBANK_PARAM_MOD_AR_RELEASE_DEPTH_4: u64 = STATE_MOD_AR_RELEASE_DEPTH_1 as u64 + 3;
+pub const FILTERBANK_PARAM_MOD_AR_DEPTH_DEPTH_1: u64 = STATE_MOD_AR_DEPTH_DEPTH_1 as u64;
+pub const FILTERBANK_PARAM_MOD_AR_DEPTH_DEPTH_2: u64 = STATE_MOD_AR_DEPTH_DEPTH_1 as u64 + 1;
+pub const FILTERBANK_PARAM_MOD_AR_DEPTH_DEPTH_3: u64 = STATE_MOD_AR_DEPTH_DEPTH_1 as u64 + 2;
+pub const FILTERBANK_PARAM_MOD_AR_DEPTH_DEPTH_4: u64 = STATE_MOD_AR_DEPTH_DEPTH_1 as u64 + 3;
 
 // Meter tail (read-only for the host).
 pub const FILTERBANK_METER_INPUT_DB: usize = STATE_METER_INPUT_DB;
@@ -908,6 +914,7 @@ unsafe extern "C" fn filterbank_process(
     let d_lfo_depth = read_depths(STATE_MOD_LFO_DEPTH_DEPTH_1);
     let d_ar_attack = read_depths(STATE_MOD_AR_ATTACK_DEPTH_1);
     let d_ar_release = read_depths(STATE_MOD_AR_RELEASE_DEPTH_1);
+    let d_ar_depth = read_depths(STATE_MOD_AR_DEPTH_DEPTH_1);
 
     // ── Block-rate mod targets (§5a second wave) ──
     // These params feed per-block coefficients, so their modulation samples
@@ -1013,6 +1020,7 @@ unsafe extern "C" fn filterbank_process(
     let mut lag_ser_par = *s.add(STATE_LAG_SER_PAR);
     let mut lag_crunch = *s.add(STATE_LAG_CRUNCH);
     let mut lag_lfo_depth = *s.add(STATE_LAG_LFO_DEPTH);
+    let mut lag_ar_depth = *s.add(STATE_LAG_AR_DEPTH);
     let mut meter_input = *s.add(STATE_METER_INPUT_DB);
     if noise_seed == 0.0 {
         noise_seed = 0x2f_6e_2b as f32;
@@ -1164,6 +1172,7 @@ unsafe extern "C" fn filterbank_process(
         lag_ser_par += lag_coeff * (mod_sum(&d_ser_par) - lag_ser_par);
         lag_crunch += lag_coeff * (mod_sum(&d_crunch) - lag_crunch);
         lag_lfo_depth += lag_coeff * (mod_sum(&d_lfo_depth) - lag_lfo_depth);
+        lag_ar_depth += lag_coeff * (mod_sum(&d_ar_depth) - lag_ar_depth);
 
         // ── FM (§5): normalled to the post-drive input unless ext active ──
         let fm_eff = (sm_fm + lag_fm).clamp(0.0, 1.0);
@@ -1367,7 +1376,8 @@ unsafe extern "C" fn filterbank_process(
         } else {
             ar_env += ar_release_coeff * (0.0 - ar_env);
         }
-        let ar_gain = 1.0 + sm_ar_depth * (ar_env - 1.0);
+        let ar_depth_eff = (sm_ar_depth + lag_ar_depth).clamp(0.0, 1.0);
+        let ar_gain = 1.0 + ar_depth_eff * (ar_env - 1.0);
         wet_l *= ar_gain * sm_output_gain;
         wet_r *= ar_gain * sm_output_gain;
 
@@ -1434,6 +1444,7 @@ unsafe extern "C" fn filterbank_process(
     *s.add(STATE_LAG_SER_PAR) = lag_ser_par;
     *s.add(STATE_LAG_CRUNCH) = lag_crunch;
     *s.add(STATE_LAG_LFO_DEPTH) = lag_lfo_depth;
+    *s.add(STATE_LAG_AR_DEPTH) = lag_ar_depth;
 
     // ── §9 live-meter tail ──
     *s.add(STATE_METER_INPUT_DB) = meter_input;
@@ -1849,6 +1860,97 @@ mod tests {
         );
     }
 
+    #[test]
+    fn ar_depth_modulation_sums_all_slots_and_clamps_wet_gain() {
+        let n = 4096;
+        let in_l = sine(220.0, 0.1, n);
+        let in_r = sine(330.0, 0.1, n);
+        let dc = vec![1.0; n];
+        let z = vec![0.0; n];
+        let mut initial = init_state();
+        initial[STATE_ENABLED] = 1.0;
+        initial[STATE_SENSE] = 0.0; // Keep the AR gate closed: gain = 1 - depth.
+        let reference = render(&mut initial.clone(), &in_l, &in_r);
+        assert!(rms(&reference.0[n / 2..]) > 0.01);
+        assert!(rms(&reference.1[n / 2..]) > 0.01);
+
+        let mut cases = vec![
+            ([0.0; 4], 0.5),
+            ([0.1; 4], 0.1),
+            ([1.0; 4], 0.0),
+            ([-1.0; 4], 1.0),
+        ];
+        for slot in 0..4 {
+            for depth in [-0.25, 0.25] {
+                let mut depths = [0.0; 4];
+                depths[slot] = depth;
+                cases.push((depths, 0.5 - depth));
+            }
+        }
+        for (depths, expected_gain) in cases {
+            let mut state = initial.clone();
+            state[STATE_AR_DEPTH] = 50.0;
+            state[STATE_SM_AR_DEPTH] = 0.5;
+            state[STATE_MOD_AR_DEPTH_DEPTH_1..STATE_MOD_AR_DEPTH_DEPTH_1 + 4]
+                .copy_from_slice(&depths);
+            let (out_l, out_r) = process_block(
+                &mut state, &[&in_l, &in_r, &dc, &dc, &dc, &dc, &z, &z],
+            );
+            assert_eq!(state[STATE_TRIG_COUNT], 0.0, "test gate must stay closed");
+            for (output, reference) in [(&out_l, &reference.0), (&out_r, &reference.1)] {
+                for i in n / 2..n {
+                    assert!(
+                        (output[i] - reference[i] * expected_gain).abs() < 1.0e-5,
+                        "depths {depths:?}: sample {i} must have gain {expected_gain}",
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ar_depth_modulation_follows_in_block_changes_and_survives_block_boundaries() {
+        let segment = 2048;
+        let n = segment * 3;
+        let input = sine(220.0, 0.1, n);
+        let mut modulation = vec![0.0; n];
+        modulation[segment..segment * 2].fill(1.0);
+        modulation[segment * 2..].fill(-1.0);
+        let z = vec![0.0; n];
+        let mut initial = init_state();
+        initial[STATE_ENABLED] = 1.0;
+        initial[STATE_SENSE] = 0.0;
+        let reference = render(&mut initial.clone(), &input, &input);
+        let zero_depth = process_block(
+            &mut initial.clone(), &[&input, &input, &modulation, &z, &z, &z, &z, &z],
+        );
+        assert_eq!(zero_depth, reference, "unassigned modulation must not change audio");
+
+        initial[STATE_AR_DEPTH] = 50.0;
+        initial[STATE_SM_AR_DEPTH] = 0.5;
+        initial[STATE_MOD_AR_DEPTH_DEPTH_1] = 0.5;
+        let output = process_block(
+            &mut initial.clone(), &[&input, &input, &modulation, &z, &z, &z, &z, &z],
+        );
+        for (part, gain) in [0.5, 0.0, 1.0].into_iter().enumerate() {
+            for i in part * segment + segment / 2..(part + 1) * segment {
+                assert!((output.0[i] - reference.0[i] * gain).abs() < 1.0e-5);
+            }
+        }
+
+        let mut streamed = (Vec::new(), Vec::new());
+        for start in (0..n).step_by(128) {
+            let end = (start + 128).min(n);
+            let (left, right) = process_block(&mut initial, &[
+                &input[start..end], &input[start..end], &modulation[start..end],
+                &z[start..end], &z[start..end], &z[start..end], &z[start..end], &z[start..end],
+            ]);
+            streamed.0.extend(left);
+            streamed.1.extend(right);
+        }
+        assert_eq!(streamed, output, "modulation lag must persist across audio blocks");
+    }
+
     // ── 8b. stability canary: res > 100% with the cutoff modulated to the
     // top of its range puts the per-sample branch in linearly-unstable
     // territory (g·k < −1). The −0.9/g floor in svf_core guarantees
@@ -2031,6 +2133,10 @@ mod tests {
         state[STATE_LFO_SYNC] = 1.0;
         state[STATE_LFO_DIV] = 3.0;
         state[STATE_BPM] = 174.0;
+        let ar_depths = [0.25, -0.5, 0.75, -1.0];
+        state[STATE_MOD_AR_DEPTH_DEPTH_1..STATE_MOD_AR_DEPTH_DEPTH_1 + 4]
+            .copy_from_slice(&ar_depths);
+        state[RUNTIME2_START..].fill(0.75);
         let (_, _) = render(&mut state, &in_l, &in_r);
         for idx in FIRST_RUNTIME_RESET..RUNTIME_RESET_END {
             if idx == STATE_METER_INPUT_DB {
@@ -2042,6 +2148,12 @@ mod tests {
         assert_eq!(state[STATE_LFO_SYNC], 1.0);
         assert_eq!(state[STATE_LFO_DIV], 3.0);
         assert_eq!(state[STATE_BPM], 174.0);
+        assert_eq!(
+            &state[STATE_MOD_AR_DEPTH_DEPTH_1..STATE_MOD_AR_DEPTH_DEPTH_1 + 4],
+            &ar_depths,
+            "bypass must preserve all AR depth assignments",
+        );
+        assert!(state[RUNTIME2_START..].iter().all(|value| *value == 0.0));
 
         // Re-enable: starts from silence, no stale-state click.
         state[STATE_ENABLED] = 1.0;

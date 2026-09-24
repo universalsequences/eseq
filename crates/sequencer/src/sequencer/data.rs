@@ -1140,6 +1140,10 @@ impl VoicePriority {
     }
 }
 
+/// Longest sampler/track amp attack, in ms. Shared by the sampler descriptor,
+/// `seq-set-track-param :attack`, and `TrackParams::set_attack_ms`.
+pub const TRACK_ATTACK_MAX_MS: f32 = 5000.0;
+
 pub struct TrackParams {
     pub gate: AtomicBool,
     pub attack_ms: AtomicU32,
@@ -1213,7 +1217,7 @@ impl TrackParams {
     }
     pub fn set_attack_ms(&self, val: f32) {
         self.attack_ms
-            .store(val.clamp(0.0, 500.0).to_bits(), Ordering::Relaxed);
+            .store(val.clamp(0.0, TRACK_ATTACK_MAX_MS).to_bits(), Ordering::Relaxed);
     }
     pub fn get_release_ms(&self) -> f32 {
         f32::from_bits(self.release_ms.load(Ordering::Relaxed))

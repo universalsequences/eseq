@@ -29,6 +29,7 @@
 ;; Drag-and-drop sample import modal (zero footprint while closed).
 (import eseq.sample-import)
 (import eseq.retrospective)
+(import eseq.resample)
 (import eseq.export-song)
 (import eseq.file-dialogs)
 
@@ -690,9 +691,23 @@
 (defwidget seqv-playhead-row-bar
   :width 48.8 :height 0.24
   :paint-margin 0.18
-  :state (col)
-  :bindable (col)
+  :state (col len-col)
+  :bindable (col len-col)
   :shader
+  (sdf/layer
+  ;; Length-lane marker (`length!`): an amber underline beneath the step the
+  ;; lane last set the pattern length to. Drawn first so the playhead passes
+  ;; over it.
+  (if (< len-col 0)
+    (rgba 0 0 0 0)
+    (let ((len-start (/ (+ len-col 0.08) 16.0))
+          (len-end (/ (+ len-col 0.92) 16.0))
+          (len-half-w (* 0.5 aspect (- len-end len-start))))
+      (sdf/fill
+        (let ((x (+ (* 0.5 x) (* 0.5 aspect (- 1.0 (+ len-start len-end)))))
+              (y (* 0.5 y)))
+          (sdf/rounded-rect len-half-w 0.2 0.06))
+        (material :color (rgba 0.94 0.63 0.24 0.95)))))
   (if (< col 0)
     (rgba 0 0 0 0)
     (let ((step-w (/ 1.0 16.0))
@@ -728,7 +743,7 @@
             :shadow (shadow
               :color (rgba 0.25 0.45 1.0 0.72)
               :blur 0.12
-              :offset (vec2 0 0))))))))
+              :offset (vec2 0 0)))))))))
 
 (defwidget seqv-step-shell
   :width 1.5 :height 2.5
@@ -1183,7 +1198,21 @@
     :key (str "playhead-row-" track-id "-" row)
     :width (* row-width step-cell-width) :height 0.24
     :background "seqv-playhead-row-bar"
-    :col (bind-seq (str "track-playhead-row-" track "-" row))))
+    :col (bind-seq (str "track-playhead-row-" track "-" row))
+    :len-col (bind-seq (str "track-length-row-" track "-" row))))
+
+;; Expanded view twin of the grid's length underline: amber bar beneath the
+;; step number of the step a length lane last set the pattern length to.
+(defwidget seqv-slot-length-mark
+  :width 2.8 :height 0.3
+  :state (active)
+  :bindable (active)
+  :shader
+  (if (= active 1)
+    (sdf/layer
+      (sdf/fill (sdf/rounded-rect (* 0.62 aspect) 0.5 0.2)
+        (material :color (rgba 0.94 0.63 0.24 0.95))))
+    (rgba 0 0 0 0)))
 
 (def track-num-steps (track)
   (if (< track (len SEQ.track-num-steps))
@@ -2372,7 +2401,7 @@
                     :inlet (get in-port :name)
                     :source (get reader :source)
                     :fanout-index (get reader :fanout-index)))
-            (status "Cable selected: × removes it"))
+            (status "Cable selected: × or Backspace removes it"))
           nil))
       nil)))
 
@@ -2383,9 +2412,12 @@
     (list (get lane-patch-selected :port-id))
     '()))
 
-(def lane-patch-remove-selected (track)
-  (let ((cable lane-patch-selected))
-    (if cable
+;; Remove `cable` (a lane-patch-selected dict). The × chip passes the cable
+;; it rendered with: its click lands on mouse-down, after the host's
+;; on-patch-miss for that same press has already cleared the selection.
+(def lane-patch-remove-cable (cable)
+  (if cable
+    (let ((track (get cable :track)))
       (let ((writer (lane-patch-entry track (get cable :writer-slot))))
         (do
           (set! lane-patch-selected nil)
@@ -2405,8 +2437,10 @@
                 (if (lane-edit-all?)
                   (seq-clear-process-port-binding track (get writer :instance-id) (get cable :port) :all)
                   (seq-clear-process-port-binding track (get writer :instance-id) (get cable :port)))))
-            nil)))
-      nil)))
+            nil))))
+    nil))
+
+(def lane-patch-remove-selected (track) (lane-patch-remove-cable lane-patch-selected))
 
 (def lane-patch-cable-selected? () (if lane-patch-selected true false))
 (def lane-patch-pending-port () lane-patch-pending)
@@ -2553,10 +2587,11 @@
 
 (def lane-add-close () (set! lane-add-target nil))
 
-;; The default lane classes, in project-layer order (process.rs DEFAULT_LANES).
+;; The default lane classes, in project-layer order (process.rs DEFAULT_LANES),
+;; then lane classes that are only ever added per track (length).
 (def lane-add-default-classes ()
   (list "lane-prob" "lane-reset" "lane-rand" "lane-count" "lane-acc"
-        "lane-grab" "lane-cmp" "lane-veto" "lane-roll"))
+        "lane-grab" "lane-cmp" "lane-veto" "lane-roll" "lane-length"))
 
 ;; Library defs carry their class name as the label; the default lanes read
 ;; better without the `lane-` prefix every def-process name needs.
@@ -2681,12 +2716,13 @@
       (lane-add-body))))
 
 (def lane-patch-remove-button (track)
-  (button "× cable"
-    :key "lane-patch-remove-cable"
-    :height 1.0 :padding 0.2 :font-size 7.5
-    :background-color :transparent :border-color :process-lane-accent
-    :color :process-lane-accent
-    :on-click (lambda (event) (lane-patch-remove-selected track))))
+  (let ((cable lane-patch-selected))
+    (button "× cable"
+      :key "lane-patch-remove-cable"
+      :height 1.0 :padding 0.2 :font-size 7.5
+      :background-color :transparent :border-color :process-lane-accent
+      :color :process-lane-accent
+      :on-click (lambda (event) (lane-patch-remove-cable cable)))))
 
 ;; The patchbay sits under the step sliders and the lane strip, spanning the
 ;; expanded track: one box per lane in fire order (left fires first), so a
@@ -3000,6 +3036,10 @@
                         :h-align :center
                         :font-size 10 :bg :transparent
                         :color :dim)
+                      (box :key (str "expanded-step-length-" track-id "-" i)
+                        :width 2.8 :height 0.3
+                        :background "seqv-slot-length-mark"
+                        :active (bind-seq (str "seqv-slot-length-active-" track-id "-" i)))
                       (subtree :key (str "seqv-expanded-step-playhead-probe-" track-id "-" i)
                         (step-playhead-dot
                           :active (slot-playhead-binding track-id i)))))))
@@ -3877,6 +3917,8 @@
       (eseq.sample-import/panel))
     (subtree :key "seq-retrospective"
       (eseq.retrospective/panel))
+    (subtree :key "seq-resample"
+      (eseq.resample/panel))
     ;; Lane class picker for the patch bay's + box: a modal only gets pointer
     ;; input through the active tile, so it mounts in this buffer.
     (subtree :key "seq-lane-add"

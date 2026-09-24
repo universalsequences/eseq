@@ -548,7 +548,9 @@
     (label "res"    :width gvr-control-width :height 1.0 :font-size 8 :h-align :center :color :dim :bg :transparent)
     (label "quant"  :width gvr-control-width :height 1.0 :font-size 8 :h-align :center :color :dim :bg :transparent)))
 
-(def gvr-panel (current-pattern graph-visualizations all-track-colors track-active-notes)
+;; Read playback activity only inside the visualizers' subtrees: changing a
+;; firing history or a track's notes must not rebuild the graph controls.
+(def gvr-panel (current-pattern all-track-colors)
   (let ((track-colors (gvr-route-track-colors all-track-colors)))
   (do
     ;; Re-derive the matrix snapshot from the resolved current-pattern graph. The
@@ -559,8 +561,7 @@
     (set! gvr-threshold (graph-param-value gvr-name 0 :threshold))
     (set! gvr-global-transpose (graph-param-value gvr-name 0 :global-transpose))
     (set! gvr-dur-factor (graph-param-value gvr-name 0 :dur-factor))
-    (let ((active-count (gvr-node-count))
-        (viz (gvr-viz graph-visualizations)))
+    (let ((active-count (gvr-node-count)))
       (box 
         :padding 0.85
         :gap 0.6
@@ -619,42 +620,46 @@
                         (gvr-edit-global-param :dur-factor v)))))
                 
                 )
-              (matrix
-                :key "graph-variable-reset-dampening-matrix"
-                :rows active-count
-                :cols active-count
-                :width 16 
-                :height 7
-                
-                :control :grid
-                :background-color :bg
-                :fill :primary
-                :min 0
-                :max 1
-                :value (gvr-viz-matrix viz :dampening-matrix (gvr-zero-matrix) active-count active-count)
-                )
+              (subtree :key "graph-variable-reset-dampening-matrix"
+                (let ((viz (gvr-viz SEQ.graph-visualizations)))
+                  (matrix
+                    :key "graph-variable-reset-dampening-matrix"
+                    :rows active-count
+                    :cols active-count
+                    :width 16
+                    :height 7
+
+                    :control :grid
+                    :background-color :bg
+                    :fill :primary
+                    :min 0
+                    :max 1
+                    :value (gvr-viz-matrix viz :dampening-matrix (gvr-zero-matrix) active-count active-count)
+                    )))
               
-              (event-view
-                :key "graph-variable-reset-event-view"
-                :events (if viz (get viz :event-history) (list))
-                :current-beat (if viz (get viz :current-beat) 0)
-                :renderer :isometric
-                :x :transpose
-                :x-min -24
-                :x-max 24
-                :y :node
-                :y-min 0
-                :y-max (- active-count 1)
-                :z :beat-phase
-                :z-min 0
-                :z-max 16
-                :phase-beats 16
-                :auto-rotate true
-                :window-beats 16
-                :brightness :velocity
-                :background :bg
-                :width 16
-                :height 7)              
+              (subtree :key "graph-variable-reset-event-view"
+                (let ((viz (gvr-viz SEQ.graph-visualizations)))
+                  (event-view
+                    :key "graph-variable-reset-event-view"
+                    :events (if viz (get viz :event-history) (list))
+                    :current-beat (if viz (get viz :current-beat) 0)
+                    :renderer :isometric
+                    :x :transpose
+                    :x-min -24
+                    :x-max 24
+                    :y :node
+                    :y-min 0
+                    :y-max (- active-count 1)
+                    :z :beat-phase
+                    :z-min 0
+                    :z-max 16
+                    :phase-beats 16
+                    :auto-rotate true
+                    :window-beats 16
+                    :brightness :velocity
+                    :background :bg
+                    :width 16
+                    :height 7)))
               	(spectrogram
                 :key "graph-variable-reset-master-spectrogram"
                 :source :master
@@ -687,27 +692,31 @@
             
             (v-stack :gap gvr-matrix-column-gap 
               (label "" :width 0.1 :height (gvr-matrix-header-spacer-height) :font-size 1 :bg :transparent)
-              (matrix
-                :key "graph-variable-reset-trigger-matrix"
-                :rows active-count
-                :cols 1
-                :width 1
-                :height (gvr-matrix-data-height active-count)
-                :min 0
-                :max 1
-                :value (gvr-viz-matrix viz :trigger-matrix (gvr-zero-column-matrix) active-count 1)))            
+              (subtree :key "graph-variable-reset-trigger-matrix"
+                (let ((viz (gvr-viz SEQ.graph-visualizations)))
+                  (matrix
+                    :key "graph-variable-reset-trigger-matrix"
+                    :rows active-count
+                    :cols 1
+                    :width 1
+                    :height (gvr-matrix-data-height active-count)
+                    :min 0
+                    :max 1
+                    :value (gvr-viz-matrix viz :trigger-matrix (gvr-zero-column-matrix) active-count 1)))))
             
             (v-stack :gap gvr-matrix-column-gap
               (label "" :width 0.1 :height (gvr-matrix-header-spacer-height) :font-size 1 :bg :transparent)
-              (matrix
-                :key "graph-variable-reset-energy-matrix"
-                :rows active-count
-                :cols 1
-                :width 2
-                :height (gvr-matrix-data-height active-count)
-                :min 0
-                :max 4
-                :value (gvr-viz-matrix viz :energy-matrix (gvr-zero-column-matrix) active-count 1)))            
+              (subtree :key "graph-variable-reset-energy-matrix"
+                (let ((viz (gvr-viz SEQ.graph-visualizations)))
+                  (matrix
+                    :key "graph-variable-reset-energy-matrix"
+                    :rows active-count
+                    :cols 1
+                    :width 2
+                    :height (gvr-matrix-data-height active-count)
+                    :min 0
+                    :max 4
+                    :value (gvr-viz-matrix viz :energy-matrix (gvr-zero-column-matrix) active-count 1)))))
            
             (v-stack :gap gvr-matrix-column-gap
               (label "" :width 0.1 :height (gvr-matrix-header-spacer-height) :font-size 1 :bg :transparent)
@@ -740,18 +749,19 @@
             :background-color :mixer-strip-bg
             :border-color :mixer-strip-border
             :corner-radius 12
-            (piano-keyboard
-              :key "graph-variable-reset-piano"
-              :notes-by-track track-active-notes
-              :track-colors track-colors
-              :tracks (range 0 active-count)
-              :overlap-mode :loudest
-              :press-depth gvr-piano-press-depth
-              :start-note 12
-              :key-count 80
-              :width 84
-              :height 3.5))
+            (subtree :key "graph-variable-reset-piano"
+              (piano-keyboard
+                :key "graph-variable-reset-piano"
+                :notes-by-track SEQ.track-active-notes
+                :track-colors track-colors
+                :tracks (range 0 active-count)
+                :overlap-mode :loudest
+                :press-depth gvr-piano-press-depth
+                :start-note 12
+                :key-count 80
+                :width 84
+                :height 3.5)))
           ))))))
 
-(effect-buffer "*variable-reset*" (gvr-panel SEQ.current-pattern SEQ.graph-visualizations SEQ.track-colors SEQ.track-active-notes))
+(effect-buffer "*variable-reset*" (gvr-panel SEQ.current-pattern SEQ.track-colors))
 (eseq.seq-step-tabs/seq-register-script-step-sequencer-tab script-tab-label script-buffer-name script-sequencer-name "")

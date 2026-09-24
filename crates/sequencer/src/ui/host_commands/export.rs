@@ -188,22 +188,7 @@ pub(super) fn handle(
                             .map(|j| j.destination.clone())
                     })
                     .ok_or("No completed export to reveal")?;
-                #[cfg(target_os = "macos")]
-                let mut command = {
-                    let mut c = std::process::Command::new("open");
-                    c.arg("-R").arg(&path);
-                    c
-                };
-                #[cfg(not(target_os = "macos"))]
-                let mut command = {
-                    let mut c = std::process::Command::new("xdg-open");
-                    c.arg(path.parent().unwrap());
-                    c
-                };
-                let status = command.status().map_err(|e| e.to_string())?;
-                if !status.success() {
-                    return Err(format!("Could not open the recordings folder ({status})"));
-                }
+                super::file_menu::reveal_in_file_manager(&path)?;
             }
             _ => {}
         }

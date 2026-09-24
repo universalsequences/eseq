@@ -781,6 +781,33 @@ pub(in crate::lisp_host) fn register_process_natives(
         },
     );
 
+    let process_eval_for_length = Arc::clone(&process_eval);
+    runtime.register_native_with_docs(
+        "length!",
+        "(length! steps)",
+        "Set this track's pattern length to steps (1-256) from its next cycle boundary. The pattern data is untouched: the override lasts until another length! or Stop, and a pattern switch drops it. Under the Prh timebase every cycle is one bar, so each bar can play a different number of steps. The last request before the boundary wins.",
+        move |args, _ctx| {
+            let steps = match args.first() {
+                Some(EValue::Number(value)) if value.is_finite() => *value,
+                _ => return Err("length! expects a numeric step count".to_string()),
+            };
+            let steps = steps.round().clamp(1.0, crate::sequencer::MAX_STEPS as f64) as usize;
+            let mut guard = process_eval_for_length
+                .lock()
+                .map_err(|_| "failed to lock process eval context".to_string())?;
+            let Some(ctx) = guard.as_mut() else {
+                return Err("length! called outside process execution".to_string());
+            };
+            ensure_process_run_scope(ctx, "length!")?;
+            if ctx.step_context.is_none() {
+                return Err("length! requires a scheduler step event context".to_string());
+            }
+            ctx.commands
+                .push(crate::process::ProcessRunCommand::PatternLength(steps));
+            Ok(EValue::Bool(true))
+        },
+    );
+
     let process_eval_for_now_beats = Arc::clone(&process_eval);
     runtime.register_native_with_docs(
         "now-beats",

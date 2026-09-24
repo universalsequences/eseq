@@ -131,3 +131,14 @@
   (def type1 (drift-type1 x cutoff resonance))
   (def type2 (drift-type2 x cutoff resonance))
   (svf (mix type1 type2 type-mix) hp-cutoff 1.469 2))
+
+; The unselected topology sleeps once the blend reaches an endpoint. During
+; a crossfade both filters run. Callers provide the smoothed blend; snap its
+; last -80 dB of contribution so an exponential smoother can finish the fade.
+; Unlike drift-filter-morph, inactive filter state is frozen between calls.
+(defmacro drift-filter-morph-gated (x cutoff resonance hp-cutoff type-mix)
+  (def blend (gswitch (lte type-mix .0001) 0
+               (gswitch (gte type-mix .9999) 1 type-mix)))
+  (def type1 (block-gate (lt blend 1) (drift-type1 x cutoff resonance)))
+  (def type2 (block-gate (gt blend 0) (drift-type2 x cutoff resonance)))
+  (svf (mix type1 type2 blend) hp-cutoff 1.469 2))

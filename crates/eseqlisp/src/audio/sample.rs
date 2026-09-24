@@ -80,6 +80,24 @@ impl SampleBuffer {
         })
     }
 
+    /// A waveform for audio that has no file yet (a frozen resample). `path`
+    /// is only the registry key; nothing is read from it.
+    pub fn from_pcm(path: PathBuf, sample_rate: u32, channels: u16, samples: Vec<f32>) -> Self {
+        let channels = channels.max(1);
+        let frames = samples.len() / usize::from(channels);
+        let decoded = DecodedWav { sample_rate, channels, frames, samples, warnings: Vec::new() };
+        let peaks = build_peak_pyramid(&decoded_mono_samples(&decoded));
+        Self {
+            id: path.file_name().and_then(|name| name.to_str()).unwrap_or("sample").to_string(),
+            path,
+            sample_rate,
+            channels,
+            frames,
+            duration_seconds: frames as f64 / sample_rate.max(1) as f64,
+            peaks,
+        }
+    }
+
     pub fn to_value(&self) -> Value {
         map_value(vec![
             ("id", Value::String(self.id.clone())),

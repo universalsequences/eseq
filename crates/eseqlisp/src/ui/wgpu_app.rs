@@ -41,7 +41,7 @@ use crate::backend::{
     AUTOCOMPLETE_PANEL_CORNER_RADIUS_PX, AUTOCOMPLETE_ROW_CORNER_RADIUS_PX,
     AUTOCOMPLETE_TEXT_CELL_SCALE, Backend, BackendError, BackendEvent, Color, RenderFrame,
     TOAST_BORDER_WIDTH_PX, TOAST_CORNER_RADIUS_PX, TiledRenderFrame, completion_panel_columns,
-    toast_placement,
+    toast_placement, TOAST_CLOSE_GLYPH,
 };
 use crate::layout::TextMeasurer;
 use crate::live_audio;
@@ -2623,6 +2623,38 @@ impl WgpuAppBackend {
                     vp_w,
                     vp_h,
                 );
+                if let (Some(label), Some(col)) = (&toast.action_label, place.action_col) {
+                    gpu_scene::push_text_cells(
+                        &mut toast_verts,
+                        &mut atlas.atlas,
+                        label,
+                        col,
+                        place.text_row,
+                        place.action_cols,
+                        to_rgba(accent),
+                        to_rgba(bg),
+                        cell_w,
+                        cell_h,
+                        vp_w,
+                        vp_h,
+                    );
+                }
+                if let Some(col) = place.close_col {
+                    gpu_scene::push_text_cells(
+                        &mut toast_verts,
+                        &mut atlas.atlas,
+                        TOAST_CLOSE_GLYPH,
+                        col,
+                        place.text_row,
+                        1,
+                        to_rgba(theme::TOAST_FG()),
+                        to_rgba(bg),
+                        cell_w,
+                        cell_h,
+                        vp_w,
+                        vp_h,
+                    );
+                }
             }
             let gpu = self.gpu.as_ref().expect("gpu initialized");
             Self::plan_vertices(

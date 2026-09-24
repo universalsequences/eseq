@@ -1,7 +1,7 @@
 # Digi FM authoring and validation
 
-`build.py` owns the routing table, spectral anchors, parameter declarations and
-explicit 4× DSP integration. `build_ui.py` derives routing/spectrum graphics from
+`build.py` owns the routing table, spectral anchors, parameter declarations,
+8192-sample harmonic bank and explicit 4× DSP integration. `build_ui.py` derives routing/spectrum graphics from
 that data and combines them with the authored `ui-controls.lisp` and
 `ui-body.lisp`. Generated factory files are checked in; regenerate with:
 
@@ -11,8 +11,16 @@ python3 tools/digi-fm/build_ui.py
 ```
 
 The shared filter and envelope implementations live under `content/defmacros`.
-The existing host materializes those imports; no external runtime files are
-needed. Presets are authored independently in the adjacent factory preset bank.
+The host materializes those imports and loads the checked-in `spectra.json`
+beside the factory DSP. Keep that asset with the instrument when copying it.
+Presets are authored independently in the adjacent factory preset bank.
+
+Each of the eight literal algorithms specializes a state-free four-substep
+core behind `block-gate`. Phase, feedback and decimator histories remain shared
+outside the gates, preserving live algorithm changes. The selected nonlinear
+filter runs continuously; the other sleeps after their smoothed crossfade
+reaches an endpoint. The table, algorithm dispatch and filter behavior match
+the approved Digi FM Fast Test. Generation requires NumPy; runtime does not.
 
 ```sh
 ./scripts/fetch_dgenlisp.sh
@@ -30,7 +38,8 @@ honors `ESEQ_DGENLISP_TOOL`. Compile artifacts stay in the audition cache, never
 in factory content. The explicit import expansion in this test adapter is
 separately covered by the production host probe.
 
-For performance work, save the baseline DSP before editing, then run:
+For performance work, save the baseline DSP and its assets together before
+editing, then run:
 
 ```sh
 python3 tools/digi-fm/performance.py --baseline-source /absolute/path/baseline.lisp \
@@ -43,12 +52,13 @@ and regular/irregular process partitions at 32/128/512 frames. It then measures
 the native process ABI in alternating baseline/candidate order, using the shared
 C timing driver. Python, compilation and allocation are outside the timed
 region. Results are single-voice CPU time, not the parallel application DSP
-meter. Both sources use the current shared macros and pinned compiler. Sensitive
+meter. Each source loads its own adjacent assets; both use the current shared
+macros and pinned compiler. Sensitive
 feedback can amplify rounding differences; a failed waveform comparison needs
 investigation, not a looser threshold merely to accept a timing improvement.
 
-See `docs/digi-fm-performance-2026-09-22.md` for the measured bottleneck and the
-rejected execution-gating experiment.
+See `docs/digi-fm-performance-2026-09-22.md` for the measured bottleneck,
+optimization experiments and factory promotion evidence.
 
 Capture the factory panel through the real sequencer (macOS):
 

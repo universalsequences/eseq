@@ -15,6 +15,7 @@ mod misc;
 pub(crate) mod packages;
 mod project;
 mod rack;
+pub(crate) mod resample;
 mod routing;
 mod sample_import;
 mod samples;

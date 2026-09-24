@@ -647,7 +647,18 @@ const TOAST_ERROR_DURATION: Duration = Duration::from_secs(4);
 pub struct Toast {
     pub message: String,
     pub kind: ToastKind,
-    expires_at: Instant,
+    /// `None` for a sticky toast: it stays until its close button (or a
+    /// newer toast) removes it.
+    expires_at: Option<Instant>,
+    pub action: Option<ToastAction>,
+}
+
+/// A clickable link on a toast. Clicking it queues `command` for the host
+/// and dismisses the toast.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ToastAction {
+    pub label: String,
+    pub command: HostCommand,
 }
 
 pub struct Editor {
@@ -661,6 +672,10 @@ pub struct Editor {
     /// Window-level toast (bottom-right). Drawn above every tile regardless of
     /// focus or `:hide-status`; a newer toast replaces the current one.
     toast: Option<Toast>,
+    /// Where the last frame placed the toast, for pointer hit-testing.
+    toast_placement: Option<crate::backend::ToastPlacement>,
+    /// A left press landed on an interactive toast; its release is ours too.
+    toast_pointer_pressed: bool,
 
     pending_key: Option<KeyEvent>,
     builtins: HashMap<KeyEvent, String>,
@@ -838,6 +853,8 @@ impl Editor {
             minibuffer: None,
             minibuffer_expires_at: None,
             toast: None,
+            toast_placement: None,
+            toast_pointer_pressed: false,
             pending_key: None,
             builtins: HashMap::new(),
             default_lisp_bindings: HashMap::new(),
@@ -2060,6 +2077,11 @@ impl Editor {
         border_inset: u16,
     ) {
         self.last_pointer_screen = Some((precise_col, precise_row));
+
+        // The toast floats above every tile and modal.
+        if self.handle_toast_mouse(mouse, precise_col, precise_row) {
+            return;
+        }
 
         // Inspect mode outranks the overlay intercept: inspecting a modal's
         // widgets needs the raw hover/click, and the inspect path does its
@@ -3462,9 +3484,82 @@ impl Editor {
         self.toast = Some(Toast {
             message: message.into(),
             kind,
-            expires_at: Instant::now() + duration,
+            expires_at: Some(Instant::now() + duration),
+            action: None,
         });
         self.mark_needs_redraw();
+    }
+
+    /// Show a toast that stays until the user closes it, optionally with a
+    /// clickable action link.
+    pub fn show_sticky_toast(
+        &mut self,
+        message: impl Into<String>,
+        kind: ToastKind,
+        action: Option<ToastAction>,
+    ) {
+        self.toast = Some(Toast {
+            message: message.into(),
+            kind,
+            expires_at: None,
+            action,
+        });
+        self.mark_needs_redraw();
+    }
+
+    pub(crate) fn toast_frame(&self) -> Option<crate::backend::ToastFrame> {
+        self.toast.as_ref().map(|toast| crate::backend::ToastFrame {
+            message: toast.message.clone(),
+            kind: toast.kind,
+            action_label: toast.action.as_ref().map(|action| action.label.clone()),
+            closable: toast.expires_at.is_none(),
+        })
+    }
+
+    pub(crate) fn set_toast_placement(
+        &mut self,
+        placement: Option<crate::backend::ToastPlacement>,
+    ) {
+        self.toast_placement = placement;
+    }
+
+    /// Clicks on a sticky or actionable toast: the action link runs its
+    /// command, the close button dismisses, and any press on the panel is
+    /// kept from the tile underneath. Plain timed toasts stay click-through.
+    fn handle_toast_mouse(&mut self, mouse: MouseEvent, col: f32, row: f32) -> bool {
+        use crate::backend::ToastHit;
+        let interactive = self
+            .toast
+            .as_ref()
+            .is_some_and(|toast| toast.expires_at.is_none() || toast.action.is_some());
+        let hit = self
+            .toast_placement
+            .filter(|_| interactive)
+            .and_then(|place| place.hit(col, row));
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) if hit.is_some() => {
+                self.toast_pointer_pressed = true;
+                true
+            }
+            MouseEventKind::Drag(MouseButton::Left) if self.toast_pointer_pressed => true,
+            MouseEventKind::Up(MouseButton::Left) if self.toast_pointer_pressed => {
+                self.toast_pointer_pressed = false;
+                match hit {
+                    Some(ToastHit::Action) => {
+                        if let Some(action) =
+                            self.toast.as_ref().and_then(|toast| toast.action.clone())
+                        {
+                            self.runtime.enqueue_host_command(action.command);
+                        }
+                        self.dismiss_toast();
+                    }
+                    Some(ToastHit::Close) => self.dismiss_toast(),
+                    _ => {}
+                }
+                true
+            }
+            _ => false,
+        }
     }
 
     /// Report a code-buffer save on the toast overlay. Most tiles hide the
@@ -3508,7 +3603,8 @@ impl Editor {
         if self
             .toast
             .as_ref()
-            .is_some_and(|toast| Instant::now() >= toast.expires_at)
+            .and_then(|toast| toast.expires_at)
+            .is_some_and(|expires_at| Instant::now() >= expires_at)
         {
             self.dismiss_toast();
         }

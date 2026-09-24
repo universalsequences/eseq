@@ -84,6 +84,10 @@
           nil
           (application-menu-entry "pattern-menu-clone" "Clone Track Pattern" ""
             (lambda () (host-command "menu-pattern-clone" (dict))))
+          (application-menu-entry "pattern-menu-capture-midi" "Capture MIDI…" ""
+            (lambda () (host-command "retrospective-open" (dict))))
+          (application-menu-entry "pattern-menu-capture-resample" "Resample Last 30 s…" ""
+            (lambda () (host-command "resample-open" (dict))))
           nil
           (application-menu-entry "pattern-menu-left" "Shift Steps Left" ""
             (lambda () (host-command "menu-pattern-transform" (dict :operation "left"))))
@@ -179,7 +183,9 @@
   (menus/register-menu (dict :id "Pattern" :label "Pattern" :enabled-when pattern-commands-enabled?
     :items (map (lambda (item)
       (if (and item (not (= (get item :id) "pattern-menu-double"))
-                    (not (= (get item :id) "pattern-menu-half")))
+                    (not (= (get item :id) "pattern-menu-half"))
+                    (not (= (get item :id) "pattern-menu-capture-midi"))
+                    (not (= (get item :id) "pattern-menu-capture-resample")))
         (merge item :enabled-when track-pattern-enabled?) item))
       (application-menu-items "Pattern")))))
 

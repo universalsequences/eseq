@@ -9,6 +9,8 @@
         instrument-mods-open
         instrument-selected-mod-slot
         instrument-key-lock-octave
+        instrument-key-lock-octave-count
+        instrument-key-lock-anchor
         instrument-key-lock-selected-notes
         instrument-key-lock-audition
         rack-panel-slot-list-open
@@ -45,7 +47,11 @@
 (defstate instrument-source-tab 0)
 (defstate instrument-mods-open false)
 (defstate instrument-selected-mod-slot 1)
-(defstate instrument-key-lock-octave 4)
+(defstate instrument-key-lock-octave 3)
+(defstate instrument-key-lock-octave-count 3)
+;; Last plain/cmd-clicked key; shift-click selects the range from it. -1 = none
+;; (0 is a valid MIDI note but falsy in eseqlisp, so never test it bare).
+(defstate instrument-key-lock-anchor -1)
 (defstate instrument-key-lock-selected-notes '())
 (defstate instrument-key-lock-audition true)
 ;; Presentation state belongs to stable track identities, never dense indices.

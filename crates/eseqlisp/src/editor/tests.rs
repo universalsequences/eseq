@@ -3856,20 +3856,74 @@ fn buffer_saved_host_event_shows_success_toast_that_expires_without_input() {
         Some(crate::backend::ToastFrame {
             message: "Saved demo.lisp".to_string(),
             kind: crate::host::ToastKind::Success,
+            action_label: None,
+            closable: false,
         })
     );
 
     // A success toast survives unrelated keys and clears on its own timer.
     editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
     assert!(editor.toast().is_some());
-    editor.toast.as_mut().unwrap().expires_at =
-        std::time::Instant::now() - std::time::Duration::from_millis(1);
+    editor.toast.as_mut().unwrap().expires_at = Some(
+        std::time::Instant::now() - std::time::Duration::from_millis(1));
     editor.clear_needs_redraw();
     editor.update_timers();
     assert!(editor.toast().is_none());
     assert!(editor.needs_redraw(), "expiry must request the frame that erases the toast");
     let frame = crate::frame::build_tiled_render_frame_borderless(&mut editor, 80, 24);
     assert_eq!(frame.toast, None);
+}
+
+#[test]
+fn sticky_toast_action_and_close_are_clickable_and_never_expire() {
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+    fn click(editor: &mut Editor, col: f32, row: f32) {
+        for kind in [MouseEventKind::Down(MouseButton::Left), MouseEventKind::Up(MouseButton::Left)] {
+            let mouse = MouseEvent { kind, column: col as u16, row: row as u16, modifiers: KeyModifiers::NONE };
+            editor.handle_tiled_mouse_precise(mouse, col, row, 0);
+        }
+    }
+    let reveal = crate::host::HostCommand::Custom {
+        name: "reveal-path".to_string(),
+        payload: crate::Value::String("/tmp/take.wav".to_string()),
+    };
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    editor.show_sticky_toast(
+        "Saved take.wav",
+        crate::host::ToastKind::Success,
+        Some(crate::editor::ToastAction { label: "Show in Finder".to_string(), command: reveal.clone() }),
+    );
+    let frame = crate::frame::build_tiled_render_frame_borderless(&mut editor, 120, 40);
+    let toast = frame.toast.expect("sticky toast frame");
+    assert_eq!(toast.action_label.as_deref(), Some("Show in Finder"));
+    assert!(toast.closable);
+    let place = crate::backend::toast_placement(&toast, 120, 40).unwrap();
+    let row = place.text_row as f32 + 0.5;
+
+    // No timer and no keypress clears it.
+    editor.toast.as_mut().unwrap().expires_at = None;
+    editor.update_timers();
+    editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+    assert!(editor.toast().is_some());
+
+    // A click on the panel body is swallowed but keeps the toast.
+    editor.drain_host_commands();
+    click(&mut editor, place.icon_col as f32 + 0.5, row);
+    assert!(editor.toast().is_some());
+    assert!(editor.drain_host_commands().is_empty());
+
+    // The link queues its command and dismisses.
+    click(&mut editor, place.action_col.unwrap() as f32 + 0.5, row);
+    assert!(editor.toast().is_none());
+    assert_eq!(editor.drain_host_commands(), vec![reveal.clone()]);
+
+    // The close button dismisses without running the action.
+    editor.show_sticky_toast("Saved take.wav", crate::host::ToastKind::Success,
+        Some(crate::editor::ToastAction { label: "Show in Finder".to_string(), command: reveal }));
+    crate::frame::build_tiled_render_frame_borderless(&mut editor, 120, 40);
+    click(&mut editor, place.close_col.unwrap() as f32 + 0.5, row);
+    assert!(editor.toast().is_none());
+    assert!(editor.drain_host_commands().is_empty());
 }
 
 #[test]
@@ -14406,6 +14460,63 @@ fn touchpad_scroll_over_modal_stays_in_the_modal_tile() {
     assert!(
         !eval_bool(&mut editor, "modal-open"),
         "escape must close the modal after scrolling over a neighbouring tile"
+    );
+}
+
+/// Regression: pinch-to-zoom hit-tested the whole tile layout while a modal
+/// was open, so any underlay widget later in tree order won wherever it sat
+/// behind the panel and the modal's timeline only zoomed in the gaps (MIDI
+/// capture). The pinch must hit-test the modal subtree like scroll does.
+#[test]
+fn touchpad_magnify_over_modal_reaches_modal_timeline_not_underlay() {
+    let _overlay_guard = OverlayClearGuard;
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.set_layout_viewport(60, 20);
+    editor
+        .runtime
+        .eval_str(
+            r#"
+                (def last-action (state nil))
+                (def modal-open (state true))
+                (effect
+                  (v-stack
+                    (modal :is-open modal-open :on-close (lambda () (set! modal-open false))
+                      (timeline :width :fill :height 8
+                        :lanes (list (dict :id 0 :label "L0"))
+                        :items (list (dict :id 10 :lane 0 :start 4 :end 8))
+                        :view-start 0 :view-duration 16
+                        :on-action |e| (set! last-action e)))
+                    (timeline :width 60 :height 18
+                      :lanes (list (dict :id 0 :label "U0"))
+                      :items (list)
+                      :view-start 0 :view-duration 16
+                      :on-action |e| nil)))
+                "#,
+        )
+        .unwrap();
+    editor.set_layout_viewport(60, 20);
+    register_active_layout_overlays(&mut editor);
+    let entry = crate::widget_render::topmost_overlay().expect("modal overlay entry");
+    assert_eq!(entry.kind, crate::widget_render::OverlayKind::Modal);
+
+    let layout = editor.runtime.current_layout.clone().expect("layout");
+    let modal = super::widget_focus::find_open_modal_node(&layout).expect("open modal");
+    let timeline = find_widget_of_type(modal, "timeline").expect("modal timeline").clone();
+    let col = timeline.rect.col + timeline.rect.width * 0.6;
+    let row = timeline.rect.row + timeline.rect.height * 0.5;
+    let underlay = crate::layout::hit_test_layout(&layout, row, col).expect("underlay hit");
+    assert_ne!(
+        underlay.widget_id, timeline.widget_id,
+        "the point must sit over an underlay widget later in tree order"
+    );
+
+    editor.handle_touchpad_magnify(0, 0, col, row, 0.2);
+
+    let action = editor.runtime.eval_str("last-action").unwrap().unwrap();
+    assert_eq!(
+        super::get_map_field_keyword(&action, "type"),
+        Some("zoom-view".to_string())
     );
 }
 

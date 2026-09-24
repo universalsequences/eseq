@@ -1,13 +1,15 @@
 ;; A frozen view of the rolling 30-second live MIDI history. All time values
-;; here are seconds. Only Send converts them to the chosen number of bars.
+;; here are seconds. The crop is a start, a bar count and a whole-number BPM;
+;; its end follows from those, so every crop is a loop Send can reproduce.
 (module eseq.retrospective)
-(export panel open close action crop-start crop-end bars open?)
+(export panel open close action apply-guess crop-start crop-end bars bpm open?)
 
 (defstate open? false)
 (defstate crop-start 0)
 (defstate crop-end 1)
 (defstate bars 1)
-;; Keep the user's choice separate so shrinking a crop can undo automatic
+(defstate bpm 120)
+;; Keep the user's choice separate so a marquee crop can undo automatic
 ;; double-time interpretation instead of retaining an inflated bar count.
 (defstate requested-bars 1)
 (defstate view-start 0)
@@ -15,46 +17,71 @@
 (defstate lane-scroll 0)
 (defstate lane-height 1.7)
 
-(def update-bars ()
-  (set! bars (seq-capture-bar-count (max 0.001 (- crop-end crop-start)) requested-bars)))
+(def loop-seconds () (/ (* 240 bars) bpm))
+(def sync-end () (set! crop-end (+ crop-start (loop-seconds))))
+
+(def stop-loop ()
+  (if RETRO.playing
+    (host-command "retrospective-stop" (dict)) nil))
+(def audition ()
+  (host-command "retrospective-audition" (dict :start crop-start :end crop-end :bars bars)))
+;; Tuning while the preview plays restarts it on the new loop, so the tempo
+;; can be adjusted by ear.
+(def crop-changed ()
+  (sync-end)
+  (if RETRO.playing (audition) nil))
+
+;; A free crop (marquee) picks the whole BPM nearest to its length, doubling
+;; slow phrases, then snaps its end onto that tempo. A drag streams these, so
+;; it stops the preview rather than restarting it on every event.
+(def fit-crop (start end)
+  (let ((duration (max 0.001 (- end start))))
+    (stop-loop)
+    (set! crop-start start)
+    (set! bars (seq-capture-bar-count duration requested-bars))
+    (set! bpm (max 70 (min 999 (round (/ (* 240 bars) duration)))))
+    (sync-end)))
 
 (def open (start end)
-  (set! crop-start start)
-  (set! crop-end end)
   (set! requested-bars 1)
-  (update-bars)
+  (fit-crop start end)
   (set! view-start 0)
   (set! view-duration (max 0.1 RETRO.duration))
   (set! lane-scroll 0)
   (set! open? true))
 
+;; Host-detected groove: its first hit, tempo and loop length in bars.
+(def apply-guess (start tempo loop-bars)
+  (set! crop-start start)
+  (set! bpm tempo)
+  (set! bars loop-bars)
+  (set! requested-bars loop-bars)
+  (crop-changed))
+
 (def close () (set! open? false))
 (def cancel () (host-command "retrospective-close" (dict)))
-(def stop-loop ()
-  (if RETRO.playing
-    (host-command "retrospective-stop" (dict)) nil))
+(def toggle-loop ()
+  (if RETRO.playing (stop-loop) (audition)))
 
 (def set-start (value)
-  (stop-loop)
-  (set! crop-start (max 0 (min (- crop-end 0.001) value)))
-  (update-bars))
-(def set-end (value)
-  (stop-loop)
-  (set! crop-end (min RETRO.duration (max (+ crop-start 0.001) value)))
-  (update-bars))
+  (set! crop-start (max 0 (min (- RETRO.duration 0.001) value)))
+  (crop-changed))
+(def set-bars (value)
+  (set! requested-bars (max 1 (min 16 (round value))))
+  (set! bars requested-bars)
+  (crop-changed))
+(def set-bpm (value)
+  (set! bpm (max 70 (min 999 (round value))))
+  (crop-changed))
 
 (def action (event)
   (match event.type
     :marquee-select
     (if (> (- event.time-b event.time-a) 0.001)
-      (do
-        (set! crop-start (max 0 (min (- RETRO.duration 0.001) event.time-a)))
-        (set-end event.time-b)) nil)
+      (fit-crop (max 0 (min (- RETRO.duration 0.001) event.time-a)) event.time-b) nil)
     :finish-marquee-select
     (if (> (- event.time-b event.time-a) 0.001)
-      (do
-        (set! crop-start (max 0 (min (- RETRO.duration 0.001) event.time-a)))
-        (set-end event.time-b)) nil)
+      (fit-crop (max 0 (min (- RETRO.duration 0.001) event.time-a)) event.time-b) nil)
     :scroll-view
     (do
       (if (= event.view-start nil) nil
@@ -80,9 +107,13 @@
     (v-stack :width :fill :height :fill :gap 0.6
       (h-stack :width :fill :gap 1 :align :center
         (label "Your last 30 seconds" :bg :transparent :font-size 18 :flex 1)
+        (button "Zoom to crop" :variant :ghost :on-click |event|
+          (do (set! view-start crop-start) (set! view-duration (max 0.1 (- crop-end crop-start)))))
+        (button "Show all" :variant :ghost :on-click |event|
+          (do (set! view-start 0) (set! view-duration (max 0.1 RETRO.duration))))
         (button "Refresh capture" :variant :ghost
           :on-click |event| (host-command "retrospective-open" (dict))))
-      (label "Crop a phrase, choose its bar count, and loop it. Editing the crop stops the preview."
+      (label "Detect finds the repeating groove. Drag in the roll to crop by hand; the end snaps to a whole BPM."
         :bg :transparent :font-size 11 :color :dim)
       (if (= (len RETRO.items) 0)
         (label "Play an armed track or drum rack, then refresh the capture." :bg :transparent :font-size 12)
@@ -102,28 +133,36 @@
       (h-stack :width :fill :gap 0.8 :align :center
         (label "Start (s)" :bg :transparent :font-size 11)
         (number-picker :key "retrospective-start" :value crop-start
-          :min 0 :max crop-end :step 0.01 :decimals 3 :width 9
+          :min 0 :max RETRO.duration :step 0.01 :decimals 3 :width 9
           :on-change |value| (set-start value))
-        (label "End (s)" :bg :transparent :font-size 11)
-        (number-picker :key "retrospective-end" :value crop-end
-          :min crop-start :max RETRO.duration :step 0.01 :decimals 3 :width 9
-          :on-change |value| (set-end value))
-        (button "Zoom to crop" :variant :ghost :on-click |event|
-          (do (set! view-start crop-start) (set! view-duration (max 0.1 (- crop-end crop-start)))))
-        (button "Show all" :variant :ghost :on-click |event|
-          (do (set! view-start 0) (set! view-duration (max 0.1 RETRO.duration)))))
-      (h-stack :width :fill :gap 0.8 :align :center
         (label "Bars" :bg :transparent :font-size 11)
         (number-picker :key "retrospective-bars" :value bars :min 1 :max 16 :step 1 :decimals 0 :width 6
-          :on-change |value| (do (stop-loop) (set! requested-bars (round value)) (update-bars)))
-        (label (str (round (/ (* 240 bars) (max 0.001 (- crop-end crop-start)))) " BPM on send (rounded)")
-          :bg :transparent :font-size 11 :color :dim :flex 1)
+          :on-change |value| (set-bars value))
+        (label "BPM" :bg :transparent :font-size 11)
+        (number-picker :key "retrospective-bpm" :value bpm :min 70 :max 240 :step 1 :decimals 0 :width 7
+          :on-change |value| (set-bpm value))
+        (button "Detect" :key "retrospective-detect" :variant :ghost
+          :disabled (= (len RETRO.items) 0)
+          :on-click |event| (host-command "retrospective-detect" (dict)))
+        (box :height 0 :flex 1))
+      (h-stack :width :fill :gap 0.8 :align :center
+        ;; Same pill and icons as the transport's playback controls.
+        (box :key "retrospective-playback" :background-color :mixer-strip-bg :corner-radius 72
+          :padding 0.015 :height 1.4
+          (h-stack :gap 0.2 :align :center
+            (box :key "retrospective-loop-stop" :width 2.5
+              :on-click |x y r| (stop-loop)
+              (stop-icon))
+            (box :key "retrospective-audition" :width 2.5
+              :on-click |x y r|
+              (if (or SEQ.playing (= (len RETRO.items) 0)) nil (toggle-loop))
+              (play-icon :active (if RETRO.playing 1 0)))))
+        (label (if SEQ.playing "Stop the song to preview the loop."
+                 (str "Loop " (/ (round (* 1000 (loop-seconds))) 1000) " s, ends at "
+                      (/ (round (* 1000 crop-end)) 1000) " s"
+                      (if (> crop-end RETRO.duration) " (past the capture: rest)" "")))
+          :key "retrospective-loop-info" :bg :transparent :font-size 11 :color :dim :flex 1)
         (button "Cancel" :variant :ghost :on-click |event| (cancel))
-        (button (if RETRO.playing "Stop loop" "Loop crop") :key "retrospective-audition"
-          :disabled (or SEQ.playing (= (len RETRO.items) 0))
-          :on-click |event|
-          (if RETRO.playing (stop-loop)
-            (host-command "retrospective-audition" (dict :start crop-start :end crop-end :bars bars))))
         (if SEQ.playing
           (button "Stop playback" :key "retrospective-stop" :on-click |event| (seq-toggle-play))
           (button "Send to tracks" :key "retrospective-send" :disabled (= (len RETRO.items) 0)

@@ -1543,6 +1543,11 @@ pub(super) fn apply_step_process_commands(
                 // and applied by the lookahead pass, which owns the scheduler
                 // roll state (`roll::collect_process_roll_requests`).
             }
+            crate::process::ProcessRunCommand::PatternLength(_) => {
+                // Length requests are stamped with the firing track's next
+                // cycle boundary by the lookahead pass; the clock owns the
+                // override (`SnapshotSequencerClock::request_pattern_length`).
+            }
         }
     }
 }

@@ -45,7 +45,43 @@ pub(super) struct SnapshotTrackClockState {
     /// installs the current row's anchor every chunk.
     anchor_beat: f64,
     offset_steps: f64,
+    /// Process-driven pattern length (`length!`, docs/default-process-lanes-spec.md
+    /// length lane). `Some(n)` while the track plays `n` steps instead of its
+    /// authored `num_steps`; the lookahead patches the chunk snapshot with it
+    /// so every reader agrees. Pattern data is never written.
+    length_override: Option<usize>,
+    /// The latest `length!` request, due at the end of the cycle it fired in.
+    pending_length: Option<PendingPatternLength>,
+    /// Re-phase applied when a length change takes effect, so the new cycle
+    /// starts on step 0 at the boundary even when its length does not divide
+    /// the transport position (fixed timebases). Zero under Prh, whose cycle
+    /// is always one bar.
+    length_phase_beats: f64,
+    /// Where the current length took effect and what it replaced, so a
+    /// re-seek back across that boundary restores the previous length.
+    length_applied: Option<AppliedPatternLength>,
+    /// The length the last applied `length!` asked for, kept even when it
+    /// equals the authored length (no override then), for the grid marker.
+    length_marker: Option<usize>,
 }
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct PendingPatternLength {
+    steps: usize,
+    at_beats: f64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct AppliedPatternLength {
+    at_beats: f64,
+    previous_override: Option<usize>,
+    previous_phase_beats: f64,
+    previous_marker: Option<usize>,
+}
+
+/// A due length change lands within this many beats of its boundary; well
+/// under one sample at any tempo, so chunk-clamp rounding never defers it.
+pub(super) const PATTERN_LENGTH_EPS_BEATS: f64 = 1.0e-6;
 
 pub(super) struct SnapshotSequencerClock {
     pub(super) sample_rate: f64,
@@ -57,6 +93,16 @@ pub(super) struct SnapshotSequencerClock {
     tempo_bpm: u32,
     last_global_16th: u32,
     last_bar: u32,
+    /// Per-track copies of the chunk snapshot's track with `num_steps` set to
+    /// the length override, keyed by the source `Arc`, so a held override
+    /// costs one track clone per source publish rather than one per chunk.
+    length_patch_cache: Vec<Option<LengthPatchedTrack>>,
+}
+
+struct LengthPatchedTrack {
+    source: Arc<crate::sequencer::SequencerTrackSnapshot>,
+    steps: usize,
+    patched: Arc<crate::sequencer::SequencerTrackSnapshot>,
 }
 
 impl SnapshotSequencerClock {
@@ -70,6 +116,11 @@ impl SnapshotSequencerClock {
                 cycle_beats: 4.0,
                 anchor_beat: 0.0,
                 offset_steps: 0.0,
+                length_override: None,
+                pending_length: None,
+                length_phase_beats: 0.0,
+                length_applied: None,
+                length_marker: None,
             })
             .collect();
         Self {
@@ -82,6 +133,7 @@ impl SnapshotSequencerClock {
             tempo_bpm: 0,
             last_global_16th: 0,
             last_bar: 0,
+            length_patch_cache: (0..MAX_TRACKS).map(|_| None).collect(),
         }
     }
 
@@ -94,6 +146,7 @@ impl SnapshotSequencerClock {
             track.anchor_beat = 0.0;
             track.offset_steps = 0.0;
         }
+        self.clear_pattern_lengths();
     }
 
     /// Establish a new musical clock origin after a seek or tempo change.
@@ -114,13 +167,22 @@ impl SnapshotSequencerClock {
     /// `clear_track_anchors` so session-mode playback keeps free-running.
     pub(super) fn set_song_row_anchors(&mut self, anchor_beat: f64, lane_offsets: &[f64]) {
         for (track, clock) in self.track_clocks.iter_mut().enumerate() {
+            let offset_steps = lane_offsets.get(track).copied().unwrap_or(0.0);
+            if clock.anchor_beat != anchor_beat || clock.offset_steps != offset_steps {
+                // A new clip anchor restarts the lane's phase; a length
+                // override re-phased against the old anchor would be wrong.
+                Self::clear_track_length(clock);
+            }
             clock.anchor_beat = anchor_beat;
-            clock.offset_steps = lane_offsets.get(track).copied().unwrap_or(0.0);
+            clock.offset_steps = offset_steps;
         }
     }
 
     pub(super) fn clear_track_anchors(&mut self) {
         for clock in &mut self.track_clocks {
+            if clock.anchor_beat != 0.0 || clock.offset_steps != 0.0 {
+                Self::clear_track_length(clock);
+            }
             clock.anchor_beat = 0.0;
             clock.offset_steps = 0.0;
         }
@@ -131,6 +193,8 @@ impl SnapshotSequencerClock {
     /// Still allow an onset whose first representable sample is this frame,
     /// even when the outgoing source last played the same step index.
     pub(super) fn adopt_track_source(&mut self, track: usize, snapshot: &SequencerSnapshot) {
+        // A new source is a new pattern: its authored length governs.
+        self.clear_pattern_length(track);
         self.precompute_boundaries(snapshot, track);
         let ns = snapshot.tracks[track].params.num_steps;
         let clock = &mut self.track_clocks[track];
@@ -155,6 +219,9 @@ impl SnapshotSequencerClock {
     /// every other lane keeps its song-row anchor.
     pub(super) fn clear_track_anchor(&mut self, track: usize) {
         if let Some(clock) = self.track_clocks.get_mut(track) {
+            if clock.anchor_beat != 0.0 || clock.offset_steps != 0.0 {
+                Self::clear_track_length(clock);
+            }
             clock.anchor_beat = 0.0;
             clock.offset_steps = 0.0;
         }
@@ -169,7 +236,7 @@ impl SnapshotSequencerClock {
         total_beats: f64,
         num_steps: usize,
     ) -> f64 {
-        total_beats - tc.anchor_beat + Self::offset_beats(tc, num_steps)
+        total_beats - tc.anchor_beat + Self::offset_beats(tc, num_steps) - tc.length_phase_beats
     }
 
     /// Track-local (step, sub-step delay, step length in beats) for an
@@ -273,8 +340,9 @@ impl SnapshotSequencerClock {
 
         let num_tracks = snapshot.transport.num_tracks;
         for t in 0..num_tracks {
+            self.rewind_pattern_length(t, snapshot.tracks[t].params.num_steps);
             self.precompute_boundaries(snapshot, t);
-            let ns = snapshot.tracks[t].params.num_steps;
+            let ns = self.effective_num_steps(snapshot, t);
             let tc = &self.track_clocks[t];
             let pos_in_cycle =
                 Self::anchored_local_beats(tc, self.total_beats, ns).rem_euclid(tc.cycle_beats);
@@ -289,9 +357,20 @@ impl SnapshotSequencerClock {
     }
 
     fn precompute_boundaries(&mut self, snapshot: &SequencerSnapshot, track: usize) {
+        let ns = self.effective_num_steps(snapshot, track);
+        self.precompute_boundaries_for(&snapshot.tracks[track], ns, track);
+    }
+
+    /// Boundaries for `ns` steps of `track_snapshot`. `ns` may exceed the
+    /// authored length under a `length!` override; snapshots carry every
+    /// step up to `MAX_STEPS`.
+    fn precompute_boundaries_for(
+        &mut self,
+        track_snapshot: &crate::sequencer::SequencerTrackSnapshot,
+        ns: usize,
+        track: usize,
+    ) {
         const EPS: f64 = 1e-9;
-        let track_snapshot = &snapshot.tracks[track];
-        let ns = track_snapshot.params.num_steps;
         let default_tb = track_snapshot.params.timebase;
         let tc = &mut self.track_clocks[track];
 
@@ -591,6 +670,204 @@ impl SnapshotSequencerClock {
             .store(phase_16th.to_bits(), Ordering::Relaxed);
 
         triggers
+    }
+}
+
+/// Process-driven pattern length (`length!`). The override lives on the
+/// clock because it is timing state: it changes the cycle, and the re-phase
+/// that starts the new cycle on step 0 is a term of the track's position.
+impl SnapshotSequencerClock {
+    /// The step count the track plays: its `length!` override, else the
+    /// authored length.
+    pub(super) fn effective_num_steps(&self, snapshot: &SequencerSnapshot, track: usize) -> usize {
+        self.track_clocks[track]
+            .length_override
+            .unwrap_or(snapshot.tracks[track].params.num_steps)
+    }
+
+    /// The step count the track's length lane last set, for the UI marker.
+    pub(super) fn pattern_length_marker(&self, track: usize) -> Option<usize> {
+        self.track_clocks[track].length_marker
+    }
+
+    #[cfg(test)]
+    pub(super) fn pattern_length_override(&self, track: usize) -> Option<usize> {
+        self.track_clocks[track].length_override
+    }
+
+    fn clear_track_length(clock: &mut SnapshotTrackClockState) {
+        clock.length_override = None;
+        clock.pending_length = None;
+        clock.length_phase_beats = 0.0;
+        clock.length_applied = None;
+        clock.length_marker = None;
+    }
+
+    /// Drop one track's override and any pending request: its authored
+    /// length governs again from the current position.
+    pub(super) fn clear_pattern_length(&mut self, track: usize) {
+        if let Some(clock) = self.track_clocks.get_mut(track) {
+            Self::clear_track_length(clock);
+        }
+        if let Some(entry) = self.length_patch_cache.get_mut(track) {
+            *entry = None;
+        }
+    }
+
+    pub(super) fn clear_pattern_lengths(&mut self) {
+        for track in 0..self.track_clocks.len() {
+            self.clear_pattern_length(track);
+        }
+    }
+
+    /// Record a `length!` request from a step that fired at `fired_beats`.
+    /// It takes effect at the end of the cycle that step belongs to; when that
+    /// boundary is already behind the frontier (the last step fired in the
+    /// same chunk its cycle ended), at the end of the following cycle. The
+    /// last request before a boundary wins.
+    pub(super) fn request_pattern_length(
+        &mut self,
+        snapshot: &SequencerSnapshot,
+        track: usize,
+        steps: usize,
+        fired_beats: f64,
+    ) {
+        let steps = steps.clamp(1, MAX_STEPS);
+        let total_beats = self.total_beats;
+        if track >= snapshot.tracks.len() {
+            return;
+        }
+        let ns = self.effective_num_steps(snapshot, track);
+        let Some(tc) = self.track_clocks.get_mut(track) else {
+            return;
+        };
+        let cycle = tc.cycle_beats;
+        if cycle <= PATTERN_LENGTH_EPS_BEATS {
+            return;
+        }
+        let local = Self::anchored_local_beats(tc, fired_beats, ns);
+        let mut at_beats = fired_beats - local.rem_euclid(cycle) + cycle;
+        while at_beats <= total_beats + PATTERN_LENGTH_EPS_BEATS {
+            at_beats += cycle;
+        }
+        tc.pending_length = Some(PendingPatternLength { steps, at_beats });
+    }
+
+    /// Earliest pending length boundary ahead of the frontier. The lookahead
+    /// clamps chunks to it so a change always lands on a chunk start.
+    pub(super) fn next_pattern_length_boundary(&self, num_tracks: usize) -> Option<f64> {
+        self.track_clocks
+            .iter()
+            .take(num_tracks)
+            .filter_map(|clock| clock.pending_length.map(|pending| pending.at_beats))
+            .reduce(f64::min)
+    }
+
+    /// Apply every pending length whose boundary the frontier has reached.
+    /// `snapshot` is the chunk's authored snapshot (before length patching).
+    pub(super) fn apply_due_pattern_lengths(&mut self, snapshot: &SequencerSnapshot) {
+        let num_tracks = snapshot.transport.num_tracks.min(snapshot.tracks.len());
+        for track in 0..num_tracks {
+            let Some(pending) = self.track_clocks[track].pending_length else {
+                continue;
+            };
+            if pending.at_beats > self.total_beats + PATTERN_LENGTH_EPS_BEATS {
+                continue;
+            }
+            self.track_clocks[track].pending_length = None;
+            let authored = snapshot.tracks[track].params.num_steps;
+            let next = (pending.steps != authored).then_some(pending.steps);
+            if next == self.track_clocks[track].length_override {
+                self.track_clocks[track].length_marker = Some(pending.steps);
+                continue;
+            }
+            let tc = &mut self.track_clocks[track];
+            tc.length_applied = Some(AppliedPatternLength {
+                at_beats: pending.at_beats,
+                previous_override: tc.length_override,
+                previous_phase_beats: tc.length_phase_beats,
+                previous_marker: tc.length_marker,
+            });
+            tc.length_marker = Some(pending.steps);
+            tc.length_override = next;
+            tc.length_phase_beats = 0.0;
+            self.precompute_boundaries_for(&snapshot.tracks[track], pending.steps, track);
+            // Re-phase so the boundary is position 0 of the new cycle.
+            let tc = &mut self.track_clocks[track];
+            let local = Self::anchored_local_beats(tc, pending.at_beats, pending.steps);
+            tc.length_phase_beats = local.rem_euclid(tc.cycle_beats);
+            // The boundary sample has not been evaluated yet (the chunk was
+            // clamped to it): fire step 0 even if the old cycle's last step
+            // had the same index (a one-step pattern).
+            tc.last_local_step = u32::MAX;
+            tc.last_read_position = f64::NAN;
+        }
+    }
+
+    /// A re-seek that lands before the boundary where the current length took
+    /// effect restores the previous one and re-arms the change at that
+    /// boundary, so the replayed tail of the old cycle keeps its geometry.
+    fn rewind_pattern_length(&mut self, track: usize, authored_steps: usize) {
+        let total_beats = self.total_beats;
+        let tc = &mut self.track_clocks[track];
+        let Some(applied) = tc.length_applied else {
+            return;
+        };
+        if total_beats + PATTERN_LENGTH_EPS_BEATS >= applied.at_beats {
+            return;
+        }
+        let current = tc.length_override.unwrap_or(authored_steps);
+        let steps = tc.pending_length.map_or(current, |pending| pending.steps);
+        tc.length_override = applied.previous_override;
+        tc.length_phase_beats = applied.previous_phase_beats;
+        tc.length_marker = applied.previous_marker;
+        tc.length_applied = None;
+        tc.pending_length = Some(PendingPatternLength {
+            steps,
+            at_beats: applied.at_beats,
+        });
+    }
+
+    /// The chunk snapshot with each overridden track's `num_steps` replaced,
+    /// or `None` when no track holds an override. Patched tracks are cached
+    /// per source `Arc`.
+    pub(super) fn patch_pattern_lengths(
+        &mut self,
+        snapshot: &SequencerSnapshot,
+    ) -> Option<Arc<SequencerSnapshot>> {
+        let num_tracks = snapshot.tracks.len().min(MAX_TRACKS);
+        if !self.track_clocks[..num_tracks]
+            .iter()
+            .any(|clock| clock.length_override.is_some())
+        {
+            return None;
+        }
+        let mut patched = snapshot.clone();
+        for track in 0..num_tracks {
+            let Some(steps) = self.track_clocks[track].length_override else {
+                continue;
+            };
+            let source = &snapshot.tracks[track];
+            let cached = self.length_patch_cache[track].as_ref().filter(|entry| {
+                entry.steps == steps && Arc::ptr_eq(&entry.source, source)
+            });
+            let track_snapshot = match cached {
+                Some(entry) => Arc::clone(&entry.patched),
+                None => {
+                    let mut copy = (**source).clone();
+                    copy.params.num_steps = steps;
+                    let copy = Arc::new(copy);
+                    self.length_patch_cache[track] = Some(LengthPatchedTrack {
+                        source: Arc::clone(source),
+                        steps,
+                        patched: Arc::clone(&copy),
+                    });
+                    copy
+                }
+            };
+            patched.tracks[track] = track_snapshot;
+        }
+        Some(Arc::new(patched))
     }
 }
 

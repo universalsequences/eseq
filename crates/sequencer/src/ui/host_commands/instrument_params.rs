@@ -1201,9 +1201,7 @@ mod tests {
         let current_track = Arc::new(AtomicUsize::new(TRACK));
         let ui_epoch = Arc::new(AtomicUsize::new(0));
         let fx_epoch = Arc::new(AtomicUsize::new(0));
-        let sample_db = Rc::new(
-            sequencer::sample_db::SampleDb::open_in_memory().expect("open in-memory sample db"),
-        );
+        let sample_db = sequencer::sample_db::SampleDb::open_in_memory().expect("open in-memory sample db");
         let shared = SharedHandles {
             state: state.clone(),
             lg_raw: std::ptr::null_mut(),

@@ -2,11 +2,11 @@
 //! to App; Lisp owns the crop/view gestures, with validation again on commit.
 
 use super::*;
-use sequencer::app::retrospective::{capture_bar_count, CaptureDraft};
+use sequencer::app::retrospective::{capture_bar_count, detect_capture_loop, CaptureDraft};
 
 pub(crate) const COMMANDS: &[&str] = &[
     "retrospective-open", "retrospective-close", "retrospective-import",
-    "retrospective-audition", "retrospective-stop",
+    "retrospective-audition", "retrospective-stop", "retrospective-detect",
 ];
 
 pub(crate) fn register_state(runtime: &mut eseqlisp::Runtime) {
@@ -69,9 +69,21 @@ pub(crate) fn publish(editor: &mut Editor, app: &app::App, draft: &CaptureDraft)
     let open = rt.global_value("eseq.retrospective/open").ok_or("MIDI capture UI is unavailable")?;
     rt.invoke(open, vec![Value::Number(start), Value::Number(end)])
         .map_err(|error| format!("{error:?}"))?;
+    apply_guess(editor, draft)?;
     editor.refresh_runtime_side_effects();
     editor.mark_needs_redraw();
     Ok(())
+}
+
+/// Seed the crop from the detected groove. False when nothing repeats; the
+/// crop then stays wherever it was.
+fn apply_guess(editor: &mut Editor, draft: &CaptureDraft) -> Result<bool, String> {
+    let Some(guess) = detect_capture_loop(&draft.notes) else { return Ok(false) };
+    let rt = editor.runtime_mut();
+    let apply = rt.global_value("eseq.retrospective/apply-guess").ok_or("MIDI capture UI is unavailable")?;
+    rt.invoke(apply, vec![Value::Number(guess.start), Value::Number(guess.bpm as f64),
+        Value::Number(guess.bars as f64)]).map_err(|error| format!("{error:?}"))?;
+    Ok(true)
 }
 
 pub(crate) fn handle(name: &str, payload: Value, app: &mut app::App, editor: &mut Editor) {
@@ -87,6 +99,14 @@ pub(crate) fn handle(name: &str, payload: Value, app: &mut app::App, editor: &mu
                 publish(editor, app, &draft)?;
             }
             "retrospective-stop" => app.state.note_audition.stop(),
+            "retrospective-detect" => {
+                // A playing preview restarts on the detected loop.
+                let draft = app.retrospective.draft.as_ref().ok_or("Open MIDI capture first")?;
+                if !apply_guess(editor, draft)? {
+                    return Err("No repeating groove found. Set the crop by hand".into());
+                }
+                editor.runtime_mut().set_reactive("RETRO", "error", Value::String(String::new()));
+            }
             "retrospective-close" => {
                 app.state.note_audition.stop();
                 app.retrospective.draft = None;

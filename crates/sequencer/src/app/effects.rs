@@ -7054,6 +7054,37 @@ mod tests {
         graph.process_block();
     }
 
+    /// Pads, rack clips and rack-owned sequencer routes address members by
+    /// position, so a lower-numbered track joining a rack must land after the
+    /// existing members instead of shifting them (which silently re-pointed a
+    /// graph sequencer's routes at the wrong tracks).
+    #[test]
+    fn joining_a_rack_appends_without_shifting_existing_members() {
+        let graph = TestLiveGraph::new("drum-rack-append-join-test", 64, 44_100, 2);
+        let mut app = test_app_for_live_graph(&graph, 0);
+        let loose = app.graph_controller().add_blank_sampler_track().expect("loose track");
+        let (group_id, _) = app
+            .create_drum_rack_recorded(Some("Kit".to_string()))
+            .expect("drum rack should be created");
+        let kick = app.graph_controller().add_blank_sampler_track().expect("kick track");
+        let snare = app.graph_controller().add_blank_sampler_track().expect("snare track");
+        app.attach_track_to_group(kick, group_id, None).expect("kick joins");
+        app.attach_track_to_group(snare, group_id, None).expect("snare joins");
+        assert!(loose < kick, "the joining track must sort before the members");
+
+        app.attach_track_to_group(loose, group_id, None).expect("loose track joins");
+
+        let rack_group = &app.groups[0];
+        assert_eq!(rack_group.members, vec![kick, snare, loose]);
+        let rack = rack_group.rack.as_ref().expect("rack config");
+        let member_of = |note| rack.pads[rack.pad_index_for_note(note).expect("pad")].member;
+        assert_eq!(member_of(DRUM_RACK_FIRST_PAD_NOTE), 0, "kick keeps position 0");
+        assert_eq!(member_of(DRUM_RACK_FIRST_PAD_NOTE + 1), 1, "snare keeps position 1");
+        assert_eq!(member_of(DRUM_RACK_FIRST_PAD_NOTE + 2), 2, "the joiner takes the end");
+        assert_eq!(rack_group.rack_pad_track(DRUM_RACK_FIRST_PAD_NOTE + 2), Some(loose));
+        graph.process_block();
+    }
+
     /// eseq-4b5.8: dragging a track badge onto a rack (move-track-to-group)
     /// maps a pad too, and undoing the move takes that pad back off the grid.
     #[test]

@@ -110,6 +110,25 @@
 (def gvr-quant-options (list "off" "1" "2" "4" "8" "16" "32" "64" "2T" "4T" "8T" "16T" "32T" "64T" "Prh"))
 ;; Owned by a rack: routes address its members and the tab wears its name.
 (def gvr-owner-rack (graph-owner gvr-name))
+;; "attached to <rack>" chip in the config block's top-right corner, dressed
+;; like the sample browser's tag chips. Resolved at render so a rack rename shows at once;
+;; SEQ.groups is read only to re-render on that change.
+(def gvr-owner-rack-badge ()
+  (if gvr-owner-rack
+    (let ((groups SEQ.groups)
+        (gidx (eseq.drum-rack-v2/group-index-by-id gvr-owner-rack)))
+      (if (>= gidx 0)
+        (h-stack
+          (button (str "attached to " (substring (eseq.drum-rack-v2/group-name gidx) 0 14))
+            :key "graph-variable-reset-owner-rack"
+            :variant :ghost
+            :background-color :mixer-control-bg
+            :color :dimmer
+            :border-color :none
+            :height 1.0 :padding 0.8532 :font-size 12.0 :corner-radius 13)
+          )
+          nil))
+      nil))
 (def gvr-route-tracks ()
   ;; Read live so a member that joins the rack later shows up; SEQ.groups
   ;; is read only to re-render when the membership changes.
@@ -934,7 +953,9 @@
         (gvr-edge-strip (str "out (" n " -> to node)") n active-count :out))
       (gvr-node-patch n))))
 
-(def gvr-panel (current-pattern graph-visualizations track-colors track-active-notes)
+;; Read playback activity only inside the visualizers' subtrees: changing a
+;; firing history or a track's notes must not rebuild the graph controls.
+(def gvr-panel (current-pattern track-colors)
   (do
     ;; Re-derive the matrix snapshot from the resolved current-pattern graph. The
     ;; per-node knobs need no sync — `bind-graph` re-seeds their slots as the rows
@@ -944,15 +965,15 @@
     (set! gvr-threshold (graph-param-value gvr-name 0 :threshold))
     (set! gvr-global-transpose (graph-param-value gvr-name 0 :global-transpose))
     (set! gvr-dur-factor (graph-param-value gvr-name 0 :dur-factor))
-    (let ((active-count (gvr-node-count))
-        (viz (gvr-viz graph-visualizations)))
+    (let ((active-count (gvr-node-count)))
       (box 
         :padding 0.85
         :gap 0.6
         (v-stack :gap 0.5
           ;; ── sequencer-level config (on top) ──
           (box 
-            :width 90.5
+            ;; Rack-owned: room for the corner chip past the spectrogram.
+            :width (if gvr-owner-rack 102 90.5)
             :background-color :mixer-strip-bg :border-color :mixer-strip-border :padding 1 :corner-radius 16
             
             (h-stack
@@ -1004,42 +1025,46 @@
                         (gvr-edit-global-param :dur-factor v)))))
                 
                 )
-              (matrix
-                :key "graph-variable-reset-dampening-matrix"
-                :rows active-count
-                :cols active-count
-                :width 16 
-                :height 7
-                
-                :control :grid
-                :background-color :bg
-                :fill :primary
-                :min 0
-                :max 1
-                :value (gvr-viz-matrix viz :dampening-matrix (gvr-zero-matrix) active-count active-count)
-                )
+              (subtree :key "graph-variable-reset-dampening-matrix"
+                (let ((viz (gvr-viz SEQ.graph-visualizations)))
+                  (matrix
+                    :key "graph-variable-reset-dampening-matrix"
+                    :rows active-count
+                    :cols active-count
+                    :width 16
+                    :height 7
+
+                    :control :grid
+                    :background-color :bg
+                    :fill :primary
+                    :min 0
+                    :max 1
+                    :value (gvr-viz-matrix viz :dampening-matrix (gvr-zero-matrix) active-count active-count)
+                    )))
               
-              (event-view
-                :key "graph-variable-reset-event-view"
-                :events (if viz (get viz :event-history) (list))
-                :current-beat (if viz (get viz :current-beat) 0)
-                :renderer :isometric
-                :x :transpose
-                :x-min -24
-                :x-max 24
-                :y :node
-                :y-min 0
-                :y-max (- active-count 1)
-                :z :beat-phase
-                :z-min 0
-                :z-max 16
-                :phase-beats 16
-                :auto-rotate true
-                :window-beats 16
-                :brightness :velocity
-                :background :bg
-                :width 16
-                :height 7)              
+              (subtree :key "graph-variable-reset-event-view"
+                (let ((viz (gvr-viz SEQ.graph-visualizations)))
+                  (event-view
+                    :key "graph-variable-reset-event-view"
+                    :events (if viz (get viz :event-history) (list))
+                    :current-beat (if viz (get viz :current-beat) 0)
+                    :renderer :isometric
+                    :x :transpose
+                    :x-min -24
+                    :x-max 24
+                    :y :node
+                    :y-min 0
+                    :y-max (- active-count 1)
+                    :z :beat-phase
+                    :z-min 0
+                    :z-max 16
+                    :phase-beats 16
+                    :auto-rotate true
+                    :window-beats 16
+                    :brightness :velocity
+                    :background :bg
+                    :width 16
+                    :height 7)))
               	(spectrogram
                 :key "graph-variable-reset-master-spectrogram"
                 :source :master
@@ -1057,7 +1082,10 @@
                 :mid-color (rgba 0.16 0.66 0.88 1)
                 :max-color (rgba 1.0 0.72 0.28 1)
                 		  )
-              
+              ;; Top-right corner of the config block, past the spectrogram.
+              (box :flex 1 :height 1.0)
+              (gvr-owner-rack-badge)
+              (box :width 1 :height 1.0)
               ))
           
           (h-stack
@@ -1074,27 +1102,31 @@
             
             (v-stack :gap gvr-matrix-column-gap 
               (label "" :width 0.1 :height (gvr-matrix-header-spacer-height) :font-size 1 :bg :transparent)
-              (matrix
-                :key "graph-variable-reset-trigger-matrix"
-                :rows active-count
-                :cols 1
-                :width 1
-                :height (gvr-matrix-data-height active-count)
-                :min 0
-                :max 1
-                :value (gvr-viz-matrix viz :trigger-matrix (gvr-zero-column-matrix) active-count 1)))            
+              (subtree :key "graph-variable-reset-trigger-matrix"
+                (let ((viz (gvr-viz SEQ.graph-visualizations)))
+                  (matrix
+                    :key "graph-variable-reset-trigger-matrix"
+                    :rows active-count
+                    :cols 1
+                    :width 1
+                    :height (gvr-matrix-data-height active-count)
+                    :min 0
+                    :max 1
+                    :value (gvr-viz-matrix viz :trigger-matrix (gvr-zero-column-matrix) active-count 1)))))
             
             (v-stack :gap gvr-matrix-column-gap
               (label "" :width 0.1 :height (gvr-matrix-header-spacer-height) :font-size 1 :bg :transparent)
-              (matrix
-                :key "graph-variable-reset-energy-matrix"
-                :rows active-count
-                :cols 1
-                :width 2
-                :height (gvr-matrix-data-height active-count)
-                :min 0
-                :max 4
-                :value (gvr-viz-matrix viz :energy-matrix (gvr-zero-column-matrix) active-count 1)))            
+              (subtree :key "graph-variable-reset-energy-matrix"
+                (let ((viz (gvr-viz SEQ.graph-visualizations)))
+                  (matrix
+                    :key "graph-variable-reset-energy-matrix"
+                    :rows active-count
+                    :cols 1
+                    :width 2
+                    :height (gvr-matrix-data-height active-count)
+                    :min 0
+                    :max 4
+                    :value (gvr-viz-matrix viz :energy-matrix (gvr-zero-column-matrix) active-count 1)))))
            
             (v-stack :gap gvr-matrix-column-gap
               (label "" :width 0.1 :height (gvr-matrix-header-spacer-height) :font-size 1 :bg :transparent)
@@ -1127,20 +1159,24 @@
             :background-color :mixer-strip-bg
             :border-color :mixer-strip-border
             :corner-radius 12
-            (piano-keyboard
-              :key "graph-variable-reset-piano"
-              :notes-by-track track-active-notes
-              :track-colors track-colors
-              :tracks (range 0 active-count)
-              :overlap-mode :loudest
-              :press-depth gvr-piano-press-depth
-              :start-note 12
-              :key-count 80
-              :width 84
-              :height 3.5))
+            (subtree :key "graph-variable-reset-piano"
+              (piano-keyboard
+                :key "graph-variable-reset-piano"
+                :notes-by-track SEQ.track-active-notes
+                :track-colors track-colors
+                :tracks (range 0 active-count)
+                :overlap-mode :loudest
+                :press-depth gvr-piano-press-depth
+                :start-note 12
+                :key-count 80
+                :width 84
+                :height 3.5)))
           )))))
 
-(effect-buffer "*var-reset*" (gvr-panel SEQ.current-pattern SEQ.graph-visualizations (gvr-route-track-colors SEQ.track-colors) SEQ.track-active-notes))
+(effect-buffer "*var-reset*" (gvr-panel SEQ.current-pattern (gvr-route-track-colors SEQ.track-colors)))
+;; The shared sequencer keymap: Backspace / Delete removes the cable selected
+;; in a node's patch bay, and the arrows / RET keep driving the step grid.
+(set-buffer-mode-for "*var-reset*" "eseq.sequencer-keys/sequencer-keys")
 (eseq.seq-step-tabs/seq-register-script-step-sequencer-tab
   (if gvr-owner-rack (eseq.drum-rack-v2/group-name (eseq.drum-rack-v2/group-index-by-id gvr-owner-rack)) "var rst")
   "*var-reset*" "variable-reset" "")

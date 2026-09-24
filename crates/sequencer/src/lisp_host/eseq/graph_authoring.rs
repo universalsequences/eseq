@@ -1788,13 +1788,13 @@ pub fn graph_node_process_label(class_name: &str) -> String {
 }
 
 /// Classes whose only effect is a command the node runner ignores
-/// (ratchet / roll), or that read the track's painted steps: hidden from the
+/// (ratchet / roll / pattern length), or that read the track's painted steps: hidden from the
 /// node picker so the list is what actually does something on a fire.
 /// `lane-reset` only sends when its own gate lane is high, and nodes have no
 /// lanes; it also shows as "reset", the same as `neural-reset`, which is the
 /// node's real reset (its `fired` port rises after a bar/graph reset).
-pub const GRAPH_NODE_HIDDEN_PROCESS_CLASSES: [&str; 4] =
-    ["lane-roll", "repeater", "lane-grab", "lane-reset"];
+pub const GRAPH_NODE_HIDDEN_PROCESS_CLASSES: [&str; 5] =
+    ["lane-roll", "repeater", "lane-grab", "lane-reset", "lane-length"];
 
 fn graph_node_process_inlet_kind_value(kind: &crate::process::ProcessInletKind) -> EValue {
     use crate::process::ProcessInletKind::*;

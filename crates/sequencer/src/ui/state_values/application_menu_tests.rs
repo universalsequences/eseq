@@ -81,6 +81,7 @@ fn application_menus_share_actions_and_fallback_layout() {
                 ("pattern-menu-double", "menu-pattern-double"),
                 ("pattern-menu-half", "menu-pattern-half"),
                 ("pattern-menu-clone", "menu-pattern-clone"),
+                ("pattern-menu-capture-midi", "retrospective-open"),
             ],
         ),
     ] {

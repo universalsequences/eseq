@@ -1,9 +1,13 @@
-#[path = "graph_node_notes_ui_tests.rs"]
-mod graph_node_notes_ui_tests;
+#[path = "sample_search_tests.rs"]
+mod sample_search_tests;
 #[path = "chorus_ui_tests.rs"]
 mod chorus_ui_tests;
 #[path = "rack_sequencer_restore_tests.rs"]
 mod rack_sequencer_restore_tests;
+#[path = "graph_visualization_ui_tests.rs"]
+mod graph_visualization_ui_tests;
+#[path = "graph_node_notes_ui_tests.rs"]
+mod graph_node_notes_ui_tests;
 #[path = "custom_ui_scope_tests.rs"]
 mod custom_ui_scope_tests;
 #[path = "rack_view_tests.rs"]
@@ -24,6 +28,8 @@ mod rack_effect_modulation_tests;
 mod instrument_header_ui_tests;
 #[path = "retrospective_ui_tests.rs"]
 mod retrospective_ui_tests;
+#[path = "resample_ui_tests.rs"]
+mod resample_ui_tests;
 #[path = "midi_midimix_tests.rs"]
 mod midi_midimix_tests;
 #[path = "mixer_hit_tests.rs"]
@@ -8292,9 +8298,18 @@ mod solo_binding_tests;
             Rc::new(RefCell::new(Value::Number(0.8))),
         );
         let mut inst = test_instrument_map();
+        inst.insert("track".to_string(), Rc::new(RefCell::new(Value::Number(0.0))));
         inst.insert(
             "synth".to_string(),
             Rc::new(RefCell::new(test_list(vec![Value::Map(cutoff)]))),
+        );
+        // 71 is locked outside any variant: it must get the neutral mark.
+        inst.insert(
+            "key-locked-notes".to_string(),
+            Rc::new(RefCell::new(test_list(vec![
+                Value::Number(69.0),
+                Value::Number(71.0),
+            ]))),
         );
         inst.insert(
             "key-locks".to_string(),
@@ -8351,8 +8366,8 @@ mod solo_binding_tests;
                 ("midi-effects", test_list(vec![])),
                 ("instrument-panel", test_list(vec![Value::Map(inst)])),
                 (
-                    "instrument-active-notes",
-                    test_list(vec![Value::Number(69.0)]),
+                    "track-active-notes",
+                    test_list(vec![test_list(vec![Value::Number(69.0)])]),
                 ),
                 ("bus-effects", test_list(vec![])),
                 ("track-plocks", test_list(vec![])),
@@ -8383,10 +8398,30 @@ mod solo_binding_tests;
             .eval_str("(do (set! eseq.effects.state/instrument-panel-tab 1) (set! eseq.effects.state/instrument-key-lock-selected-notes (list 69)))")
             .expect("select key");
 
+        let selected_notes = |editor: &mut eseqlisp::Editor| -> Vec<f64> {
+            match editor
+                .runtime_mut()
+                .eval_str("eseq.effects.state/instrument-key-lock-selected-notes")
+                .expect("read selected keys")
+            {
+                Some(Value::List(items)) => items
+                    .iter()
+                    .map(|item| match &*item.borrow() {
+                        Value::Number(n) => *n,
+                        other => panic!("selected note should be a number: {other:?}"),
+                    })
+                    .collect(),
+                Some(Value::Nil) | None => Vec::new(),
+                other => panic!("selected notes should be a list: {other:?}"),
+            }
+        };
+
+        // Plain click replaces the selection and auditions the key.
         editor
             .runtime_mut()
-            .eval_str("(eseq.effects.panel-bodies/instrument-key-select-note 72)")
-            .expect("select key for audition");
+            .eval_str("(eseq.effects.panel-bodies/instrument-key-select-note 72 false false)")
+            .expect("plain-click a key");
+        assert_eq!(selected_notes(&mut editor), vec![72.0]);
         let audition_commands = editor.drain_host_commands();
         assert_eq!(
             audition_commands.len(),
@@ -8406,24 +8441,45 @@ mod solo_binding_tests;
             }
             other => panic!("expected audition-instrument-key host command, got {other:?}"),
         }
+        // Cmd-click adds; shift-click selects the range from the anchor
+        // (the last plain/cmd-clicked key).
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.effects.panel-bodies/instrument-key-select-note 60 true false)")
+            .expect("cmd-click a key");
+        assert_eq!(selected_notes(&mut editor), vec![72.0, 60.0]);
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.effects.panel-bodies/instrument-key-select-note 63 false true)")
+            .expect("shift-click a key");
+        assert_eq!(selected_notes(&mut editor), vec![60.0, 61.0, 62.0, 63.0]);
+        // Cmd-click on a selected key removes only that key.
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.effects.panel-bodies/instrument-key-select-note 61 true false)")
+            .expect("cmd-click a selected key");
+        assert_eq!(selected_notes(&mut editor), vec![60.0, 62.0, 63.0]);
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.effects.panel-bodies/instrument-key-unselect-all)")
+            .expect("unselect all");
+        assert!(selected_notes(&mut editor).is_empty());
+        editor.drain_host_commands();
+
         editor
             .runtime_mut()
             .eval_str("(set! eseq.effects.state/instrument-key-lock-selected-notes (list 69))")
             .expect("restore selected key");
         editor
             .runtime_mut()
-            .eval_str("(eseq.effects.panel-bodies/instrument-key-select-note 69)")
+            .eval_str("(eseq.effects.panel-bodies/instrument-key-select-note 69 false false)")
             .expect("deselect the last selected key");
         let commands = editor.drain_host_commands();
         assert!(
             commands.is_empty(),
             "deselecting an already-selected key should not audition or force a replacement selection: {commands:?}"
         );
-        let selected_count = editor
-            .runtime_mut()
-            .eval_str("(len eseq.effects.state/instrument-key-lock-selected-notes)")
-            .expect("read selected key count");
-        assert_eq!(selected_count, Some(Value::Number(0.0)));
+        assert!(selected_notes(&mut editor).is_empty());
         let default_chip_current = editor
             .runtime_mut()
             .eval_str(
@@ -8485,36 +8541,17 @@ mod solo_binding_tests;
         let key_panel =
             find_layout_node_by_debug_name(&layout, "instrument-key-lock-control-panel")
                 .unwrap_or_else(|| panic!("key lock control panel; layout={layout_summaries:#?}"));
-        let key_row = find_layout_node_by_debug_name(&layout, "instrument-key-row")
-            .unwrap_or_else(|| panic!("key row; layout={layout_summaries:#?}"));
+        let piano = find_layout_node_by_debug_name(&layout, "instrument-key-piano")
+            .unwrap_or_else(|| panic!("keys piano; layout={layout_summaries:#?}"));
         let synth = find_layout_node_by_debug_name(&layout, "fallback-synth-wrapper")
             .unwrap_or_else(|| panic!("fallback synth wrapper; layout={layout_summaries:#?}"));
         let variant_chip =
             find_layout_node_by_stable_key_suffix(&layout, "/instrument-key-lock-chip-variant-A")
                 .unwrap_or_else(|| panic!("key-lock variant chip; layout={layout_summaries:#?}"));
-        let white_key = find_layout_node_by_stable_key_suffix(&layout, "/instrument-key-60")
-            .unwrap_or_else(|| panic!("white key; layout={layout_summaries:#?}"));
-        let black_key = find_layout_node_by_stable_key_suffix(&layout, "/instrument-key-61")
-            .unwrap_or_else(|| panic!("black key; layout={layout_summaries:#?}"));
-        let variant_key = find_layout_node_by_stable_key_suffix(&layout, "/instrument-key-69")
-            .unwrap_or_else(|| panic!("key with variant strip; layout={layout_summaries:#?}"));
-        let variant_strip = find_layout_node_by_stable_key_suffix(&layout, "/instrument-key-strip-69")
-            .unwrap_or_else(|| panic!("key-lock variant strip; layout={layout_summaries:#?}"));
-        let active_indicator =
-            find_layout_node_by_stable_key_suffix(&layout, "/instrument-key-activity-69")
-                .unwrap_or_else(|| panic!("active note indicator; layout={layout_summaries:#?}"));
-        let inactive_indicator =
-            find_layout_node_by_stable_key_suffix(&layout, "/instrument-key-activity-60")
-                .unwrap_or_else(|| panic!("inactive note indicator; layout={layout_summaries:#?}"));
 
-        assert!(
-            key_row.rect.col >= key_panel.rect.col
-                && key_row.rect.col + key_row.rect.width
-                    <= key_panel.rect.col + key_panel.rect.width + 0.01,
-            "key row must fit inside the key panel; key_row={:?} key_panel={:?}; layout={layout_summaries:#?}",
-            key_row.rect,
-            key_panel.rect
-        );
+        assert_eq!(piano.widget_type, "piano-keyboard");
+        assert_finite_nonzero_rect(piano, "keys piano");
+        assert_layout_inside(piano, key_panel, "keys piano");
         assert!(
             key_panel.rect.col + key_panel.rect.width <= synth.rect.col + 0.01,
             "key panel must reserve enough horizontal space before the synth body; key_panel={:?} synth={:?}; layout={layout_summaries:#?}",
@@ -8523,66 +8560,50 @@ mod solo_binding_tests;
         );
         assert_finite_nonzero_rect(variant_chip, "key-lock variant chip");
         assert_layout_inside(variant_chip, key_panel, "key-lock variant chip");
-        assert_finite_nonzero_rect(white_key, "white piano key");
-        assert_finite_nonzero_rect(black_key, "black piano key");
-        assert!(
-            white_key.rect.height > black_key.rect.height,
-            "white keys should be taller than black keys; white={:?} black={:?}",
-            white_key.rect,
-            black_key.rect
-        );
-        assert!(
-            white_key.rect.width > black_key.rect.width,
-            "white keys should be wider than black keys; white={:?} black={:?}",
-            white_key.rect,
-            black_key.rect
-        );
-        assert_finite_nonzero_rect(variant_strip, "key-lock variant strip");
-        assert_layout_inside(variant_strip, variant_key, "key-lock variant strip");
-        assert_finite_nonzero_rect(active_indicator, "active note indicator");
-        assert_layout_inside(active_indicator, variant_key, "active note indicator");
-        assert_finite_nonzero_rect(inactive_indicator, "inactive note indicator");
-        assert_layout_inside(inactive_indicator, white_key, "inactive note indicator");
-        assert!(
-            matches!(active_indicator.props.get("text"), Some(Value::String(text)) if text == "●"),
-            "active note indicator should be lit; props={:?}",
-            active_indicator.props
-        );
-        assert!(
-            inactive_indicator.props.get("text").is_none(),
-            "inactive note indicator should remain transparent; props={:?}",
-            inactive_indicator.props
-        );
-        assert!(
-            variant_strip.rect.height < variant_key.rect.height * 0.25,
-            "variant color should be a strip, not the whole key; strip={:?} key={:?}",
-            variant_strip.rect,
-            variant_key.rect
-        );
+        // Three octaves from C3 by default, closing on C6.
+        assert_eq!(piano.props.get("start-note"), Some(&Value::Number(48.0)));
+        assert_eq!(piano.props.get("key-count"), Some(&Value::Number(37.0)));
+        assert!(piano.props.contains_key("on-click"), "piano keys must be clickable");
+        let prop_notes = |value: Option<&Value>| -> Vec<f64> {
+            let Some(Value::List(items)) = value else {
+                return Vec::new();
+            };
+            items
+                .iter()
+                .filter_map(|item| match &*item.borrow() {
+                    Value::Number(n) => Some(*n),
+                    Value::Map(map) => map.get("note").and_then(|note| match &*note.borrow() {
+                        Value::Number(n) => Some(*n),
+                        _ => None,
+                    }),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(prop_notes(piano.props.get("selected-notes")), vec![69.0]);
+        assert_eq!(prop_notes(piano.props.get("note-marks")), vec![69.0, 71.0]);
+        let active_notes = |piano: &eseqlisp::layout::LayoutNode| -> Vec<f64> {
+            let Some(Value::List(tracks)) = piano.props.get("notes-by-track") else {
+                panic!("notes-by-track should be a list: {:?}", piano.props);
+            };
+            prop_notes(Some(&tracks[0].borrow()))
+        };
+        assert_eq!(active_notes(piano), vec![69.0]);
 
         editor.runtime_mut().set_reactive(
             "SEQ",
-            "instrument-active-notes",
-            test_list(vec![Value::Number(60.0)]),
+            "track-active-notes",
+            test_list(vec![test_list(vec![Value::Number(60.0)])]),
         );
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_visible_layouts_for_buffer_named("*fx*");
         let updated_layout = editor.widget_layout().expect("updated keys tab layout");
-        let now_active =
-            find_layout_node_by_stable_key_suffix(&updated_layout, "/instrument-key-activity-60")
-                .expect("reactively active note indicator");
-        let now_inactive =
-            find_layout_node_by_stable_key_suffix(&updated_layout, "/instrument-key-activity-69")
-                .expect("reactively inactive note indicator");
-        assert!(
-            matches!(now_active.props.get("text"), Some(Value::String(text)) if text == "●"),
-            "reactive note-on should light the indicator; props={:?}",
-            now_active.props
-        );
-        assert!(
-            now_inactive.props.get("text").is_none(),
-            "reactive note-off should clear the indicator; props={:?}",
-            now_inactive.props
+        let updated_piano = find_layout_node_by_debug_name(&updated_layout, "instrument-key-piano")
+            .expect("updated keys piano");
+        assert_eq!(
+            active_notes(updated_piano),
+            vec![60.0],
+            "reactive note activity should reach the piano"
         );
 
         let variant_label = editor
@@ -9494,6 +9515,48 @@ mod solo_binding_tests;
             assert_eq!(reactive_field_value(&runtime, "SEQ", &track_playhead_active_field(0, step)),
                 Value::Bool(step == 0));
         }
+    }
+
+    /// The length-lane marker (`length!`): the grid row field carries the
+    /// column of the step the lane set the length to, the expanded slot
+    /// field a 0/1 on the page that holds it, and both go dark when stopped.
+    #[test]
+    fn track_length_marker_fields_follow_the_process_length_while_playing() {
+        let state = Arc::new(SequencerState::new(1, vec![]));
+        state.pattern.track_params[0].set_num_steps(32);
+        let app = test_app_for_track_visual_state(state.clone());
+        let mut runtime = Runtime::new();
+        runtime.register_reactive("SEQ", vec![], false);
+        let row = |runtime: &Runtime, row: usize| {
+            reactive_field_value(runtime, "SEQ", &track_length_row_field(0, row))
+        };
+        let slot = |runtime: &Runtime, slot: usize| {
+            reactive_field_value(runtime, "SEQ", &expanded_step_slot_length_field(7, slot))
+        };
+        let viewport = ExpandedStepViewport { track: 0, track_id: 7, page: 1, mode: 0, cursor_step: 16 };
+
+        // 19 steps: the marker is step 19 (index 18), row 1 column 2.
+        state.transport.track_process_lengths[0].store(19, Ordering::Relaxed);
+        sync_track_length_row_fields(&mut runtime, &state, 0);
+        assert_eq!(row(&runtime, 1), Value::Number(-1.0), "stopped: no marker");
+
+        state.transport.playing.store(true, Ordering::Relaxed);
+        sync_track_length_row_fields(&mut runtime, &state, 0);
+        sync_expanded_step_viewport_length(&mut runtime, &state, viewport);
+        assert_eq!(row(&runtime, 0), Value::Number(-1.0));
+        assert_eq!(row(&runtime, 1), Value::Number(2.0));
+        assert_eq!(slot(&runtime, 2), Value::Bool(true));
+        assert_eq!(slot(&runtime, 1), Value::Bool(false));
+        assert_eq!(
+            track_process_lengths_snapshot(&state, &app),
+            vec![Some(18)]
+        );
+
+        state.transport.track_process_lengths[0].store(0, Ordering::Relaxed);
+        sync_track_length_row_fields(&mut runtime, &state, 0);
+        sync_expanded_step_viewport_length(&mut runtime, &state, viewport);
+        assert_eq!(row(&runtime, 1), Value::Number(-1.0));
+        assert_eq!(slot(&runtime, 2), Value::Bool(false));
     }
 
     fn value_list_maps(value: &Value) -> Vec<HashMap<String, Rc<RefCell<Value>>>> {
@@ -16444,6 +16507,7 @@ mod solo_binding_tests;
         let menu_state = crate::application_menu::register_natives(editor.runtime_mut());
         register_full_grid_test_natives(&mut editor);
         crate::retrospective::register_state(editor.runtime_mut());
+        crate::host_commands::resample::register_state(editor.runtime_mut());
         // Transport owns a real defscene value, so full-UI fixtures need the
         // same scene authoring natives as the application.
         let scene_state = scene_state.unwrap_or_else(|| Arc::new(SequencerState::new(
@@ -40743,6 +40807,15 @@ mod solo_binding_tests;
             actions.rect,
             header.rect
         );
+        let polyphony = find_layout_node_by_debug_name(header, "instrument-polyphony")
+            .expect("sampler header should carry the shared poly/mono toggle");
+        assert_finite_nonzero_rect(polyphony, "sampler poly/mono toggle");
+        assert!(
+            polyphony.rect.col + polyphony.rect.width <= actions.rect.col,
+            "poly/mono toggle should sit left of the action menu; poly={:?}, action={:?}",
+            polyphony.rect,
+            actions.rect
+        );
         assert!(
             panel.props.contains_key("on-drop"),
             "sampler panel should expose an on-drop callback"
@@ -43096,6 +43169,77 @@ mod solo_binding_tests;
         );
 
         eseqlisp::widget_render::wavetable_viewer::remove_published_bank(table_key);
+    }
+
+    #[test]
+    fn metal_seq_filterbank_ar_depth_modulation_controls_all_four_slots() {
+        let desc = sequencer::effects::EffectDescriptor::builtin_filterbank();
+        let ar_idx = desc.params.iter().position(|param| param.name == "ar depth").unwrap();
+        let state = Arc::new(SequencerState::new(
+            1,
+            vec![sequencer::sequencer::default_empty_effect_chain()],
+        ));
+        state.pattern.effect_chains[0][0].apply_descriptor(&desc, 42);
+        let effects = build_effects_value(
+            &state, 0, &[vec![desc.clone()]], &Arc::new(Mutex::new(HashSet::new())),
+        );
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let mut projection_app = test_app_for_track_visual_state(Arc::clone(&state));
+        projection_app.graph.effect_descriptors = vec![vec![desc.clone()]];
+        for idx in 0..desc.params.len() {
+            sync_track_effect_param_value_field(editor.runtime_mut(), &projection_app, 0, 0, idx, None);
+        }
+        editor.runtime_mut().set_reactive("SEQ", "effects", effects);
+        editor.runtime_mut().eval_str(r#"
+            (set-layout (list :buf "*fx*" :hide-status true))
+            (set! eseq.effects.state/effect-mods-chain "audio")
+            (set! eseq.effects.state/effect-mods-track 0)
+            (set! eseq.effects.state/effect-mods-slot 0)
+            (set! eseq.effects.state/effect-mods-rack-slot -1)
+            (set! eseq.effects.state/effect-mods-bus -1)
+            (set! eseq.effects.state/effect-mods-open true)
+        "#).expect("open Filterbank modulation controls");
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let id = editor.buffers.iter().find(|buffer| buffer.name == "*fx*").unwrap().id;
+        editor.set_active_buffer(id);
+        editor.set_layout_viewport(220, 30);
+        for slot in 1..=4 {
+            editor.runtime_mut().eval_str(&format!(
+                "(set! eseq.effects.state/effect-selected-mod-slot {slot})",
+            )).unwrap();
+            editor.runtime_mut().run_reactive_cycle();
+            editor.refresh_runtime_side_effects();
+            let layout = editor.widget_layout().expect("Filterbank modulation layout");
+            let wrapper = find_layout_node_by_stable_key(
+                &layout, &format!("filterbank-param-{ar_idx}-mod-wrapper"),
+            ).expect("AR depth should expose its modulation wrapper");
+            let knob = find_layout_node_by_widget_type(wrapper, "knob-number")
+                .expect("AR depth modulation knob");
+            assert_finite_nonzero_rect(knob, "AR depth modulation");
+            assert_layout_inside(knob, &layout, "AR depth modulation visible");
+            assert!(matches!(knob.props.get("value"), Some(Value::ReactiveRef { .. })));
+            assert_eq!(
+                eseqlisp::widget_render::get_f32_prop(&knob.props, "selected-mod-slot", -1.0),
+                slot as f32,
+            );
+            editor.drain_host_commands();
+            editor.runtime_mut().invoke(
+                knob.props["on-change"].clone(), vec![Value::Number(-0.25)],
+            ).expect("edit AR modulation depth");
+            let commands = editor.drain_host_commands();
+            let [eseqlisp::host::HostCommand::Custom { name, payload: Value::Map(payload) }] =
+                commands.as_slice() else {
+                    panic!("expected one modulation edit, got {commands:?}");
+                };
+            let target = desc.instrument_modulation_targets.iter().find(|target| {
+                target.base_param_idx == ar_idx && target.modulator_slot == slot
+            }).expect("AR depth modulation target");
+            assert_eq!(name, "set-effect-param");
+            assert_eq!(*payload["slot-idx"].borrow(), Value::Number(0.0));
+            assert_eq!(*payload["param-idx"].borrow(), Value::Number(target.depth_param_idx as f64));
+            assert_eq!(*payload["value"].borrow(), Value::Number(-0.25));
+        }
     }
 
     #[test]
@@ -57333,6 +57477,95 @@ mod solo_binding_tests;
             editor.runtime_mut().eval_str("(eseq.sequencer/lane-patch-delete-selected)").unwrap(),
             Some(Value::Bool(false)),
             "nothing selected: the cable handler declines the key"
+        );
+
+        // The × chip, clicked for real: the host dispatches on-patch-miss
+        // (which clears the selection) before the chip's on-click for the
+        // same mouse-down, so the chip must remove the cable it rendered
+        // with, not re-read the selection.
+        let cleared = Arc::new(std::sync::Mutex::new(Vec::<Vec<Value>>::new()));
+        {
+            let cleared = Arc::clone(&cleared);
+            editor
+                .runtime_mut()
+                .register_native("seq-clear-process-port-binding", move |args, _ctx| {
+                    cleared.lock().unwrap().push(args.to_vec());
+                    Ok(Value::Bool(true))
+                });
+        }
+        let select_rand_cable = |editor: &mut eseqlisp::Editor| {
+            editor
+                .runtime_mut()
+                .eval_str(&format!(
+                    "(eseq.sequencer/lane-patch-select-cable 0 {rand_port_id} {cmp_index} 0)"
+                ))
+                .unwrap();
+            editor.runtime_mut().run_reactive_cycle();
+            editor.refresh_runtime_side_effects();
+        };
+        select_rand_cable(&mut editor);
+        let layout = editor.widget_layout().unwrap();
+        fn node_by_key<'a>(node: &'a LayoutNode, key: &str) -> Option<&'a LayoutNode> {
+            if matches!(node.props.get("key"), Some(Value::String(value)) if value == key) {
+                return Some(node);
+            }
+            node.children.iter().find_map(|child| node_by_key(child, key))
+        }
+        let chip = node_by_key(&layout, "lane-patch-remove-cable")
+            .expect("× chip shows while a cable is selected")
+            .clone();
+        let (col, row) = (
+            chip.rect.col + chip.rect.width * 0.5,
+            chip.rect.row + chip.rect.height * 0.5,
+        );
+        editor.handle_mouse_precise(
+            crossterm::event::MouseEvent {
+                kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                column: col.floor() as u16,
+                row: row.floor() as u16,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            },
+            0,
+            0,
+            220,
+            90,
+            col,
+            row,
+        );
+        editor.refresh_runtime_side_effects();
+        let rand_instance = state
+            .composed_track_process_chain(0)
+            .expect("composed chain")
+            .slots
+            .iter()
+            .find(|slot| slot.instance_name.as_deref() == Some("rand"))
+            .map(|slot| slot.instance_id.0)
+            .expect("rand lane");
+        let expected_clear = vec![
+            Value::Number(0.0),
+            Value::Number(rand_instance as f64),
+            Value::String("wire".to_string()),
+        ];
+        assert_eq!(
+            std::mem::take(&mut *cleared.lock().unwrap()),
+            vec![expected_clear.clone()],
+            "clicking × unbinds rand's wire"
+        );
+
+        // Backspace through the shared sequencer keymap (the one package
+        // views such as the graph node bay use) removes the cable too.
+        select_rand_cable(&mut editor);
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(eseq.sequencer-keys/delete-selected-steps)")
+                .unwrap(),
+            Some(Value::Bool(true))
+        );
+        assert_eq!(
+            std::mem::take(&mut *cleared.lock().unwrap()),
+            vec![expected_clear],
+            "Backspace in sequencer-keys unbinds the selected cable"
         );
 
         // A box click selects its lane in the strip, and the box knows it.

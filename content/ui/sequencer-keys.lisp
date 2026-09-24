@@ -36,13 +36,16 @@
 (def cursor-select-right () (do (eseq.step-grid-interactions/cursor-select-right) true))
 (def cursor-toggle () (do (eseq.step-grid-interactions/cursor-toggle) true))
 
-;; BS / Delete: delete the selected steps when there are any and no p-lock
-;; row owns the selection; otherwise leave the key to the next binding
-;; (a child mode's own delete, then the global map).
+;; BS / Delete: a selected patch-bay cable goes first (a graph node's bay
+;; lives in a package view, not *sequencer*); then the selected steps when
+;; there are any and no p-lock row owns the selection; otherwise leave the
+;; key to the next binding (a child mode's own delete, then the global map).
 (def delete-selected-steps ()
-  (if (and (seq-has-selection?) (not (eseq.effects.track-panels/plock-row-selected?)))
-    (do (eseq.step-grid-interactions/delete-selected-steps) true)
-    false))
+  (if (eseq.sequencer/lane-patch-delete-selected)
+    true
+    (if (and (seq-has-selection?) (not (eseq.effects.track-panels/plock-row-selected?)))
+      (do (eseq.step-grid-interactions/delete-selected-steps) true)
+      false)))
 
 ;; UP / DOWN: select the previous / next track in visual order. The drum
 ;; rack owns the visual order (group members are not contiguous); a nil or

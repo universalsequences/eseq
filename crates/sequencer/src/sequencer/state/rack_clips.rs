@@ -654,6 +654,33 @@ impl ProjectScenes {
     /// Editing a member under a `None` pointer creates the clip and points the
     /// scene at it; a member with no cell in the active clip mints a pattern.
     /// Returns the pattern id the edit should land in.
+    /// Install pattern `id` where scene `scene_idx` reads `track` from: the
+    /// scene's active clip for a member of a clip-bearing rack (minting the
+    /// clip under a `None` pointer), otherwise the scene cell. Writing only
+    /// the scene cell of a clip-bearing rack member is silently ignored by
+    /// `composed_scene_cell`.
+    pub fn set_composed_scene_cell(&mut self, scene_idx: usize, track: usize, id: PatternId) -> bool {
+        let Some((group_id, position)) = self.rack_member_slot(track) else {
+            let Some(cell) = self.scenes.get_mut(scene_idx).and_then(|scene| scene.cells.get_mut(track)) else {
+                return false;
+            };
+            *cell = Some(id);
+            return true;
+        };
+        let Some(clip_id) = self.ensure_scene_rack_clip(scene_idx, group_id) else {
+            return false;
+        };
+        let Some(cell) = self
+            .rack_bank_mut(group_id)
+            .and_then(|bank| bank.clip_mut(clip_id))
+            .and_then(|clip| clip.cells.get_mut(position))
+        else {
+            return false;
+        };
+        *cell = Some(id);
+        true
+    }
+
     pub fn ensure_rack_clip_cell(
         &mut self,
         scene_idx: usize,

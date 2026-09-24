@@ -28,6 +28,7 @@
         rack-selected-fx-panel
         rack-slot-fx-drop-panel
         rack-slot-track-fx-divider
+        instrument-polyphony-control
         instrument-panel)
 
 ;; Migration aliases (module spec §10), all identity: every name below keeps

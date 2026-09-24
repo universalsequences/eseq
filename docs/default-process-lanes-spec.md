@@ -1,6 +1,6 @@
 # Default Process Lanes: Cirklon parity out of the box
 
-Status: spec rev 6, 2026-09-15. Rev 1 was the plan; rev 2 records what shipped (epic eseq-ks8x) and where it deviates; rev 3 (eseq-38k8) gives `grab` the Cirklon replace semantics; rev 4 is the lane patchbay (eseq-jrab), rev 5 bus-send targets (eseq-jmi9), rev 6 user-added track lanes (epic eseq-53y7); rev 7, 2026-09-15, per-bar transpose and the `+B` family (epic eseq-m14x). Companion to
+Status: spec rev 6, 2026-09-15 (rev 8, 2026-09-23: length lane). Rev 1 was the plan; rev 2 records what shipped (epic eseq-ks8x) and where it deviates; rev 3 (eseq-38k8) gives `grab` the Cirklon replace semantics; rev 4 is the lane patchbay (eseq-jrab), rev 5 bus-send targets (eseq-jmi9), rev 6 user-added track lanes (epic eseq-53y7); rev 7, 2026-09-15, per-bar transpose and the `+B` family (epic eseq-m14x). Companion to
 `docs/cirklon-process-accumulator-brainstorm.md` (normative process model) and
 `docs/cirklon-endgame-trajectory.md`. Design canvas (approved):
 https://claude.ai/code/artifact/b53be653-e637-4314-9332-23011c7be9ac
@@ -90,9 +90,7 @@ accumulators advance state (spec: the ramp continues under masked trigs).
 
 ## Out of scope for launch (follow-ups)
 
-- `length!`: set the *own* track's pattern length at the next cycle
-  boundary. Track 2 reads track 1's accumulator outlet and sets its own
-  length. Pull, never push; no cross-track writes.
+- ~~`length!`~~: shipped in rev 8 (see "Length lane" below).
 - Fan-out: `bindings[port]` is `Option<ParamTarget>` today, so one OUT binds
   one target. Stack two accumulators until fan-out lands.
 - Conductor/"player" packs as browser tabs (end-game doc).
@@ -539,3 +537,54 @@ an expanded track, `trn`-style formatting, undoable, per scene.
 
 **Open follow-up** (eseq-m14x.4): pattern duplicate/halve does not copy bar
 transposes yet.
+
+## Length lane (rev 8, 2026-09-23; bead eseq-npo6)
+
+`(length! steps)` sets the firing track's *own* pattern length; the
+`lane-length` class (label `length`, added per track from the patch bay's
++ cell, not a default lane) wraps it. Pull, never push: no cross-track
+writes. Motivating patch: `rand (lo 3, hi 16) → length.steps` on a Prh
+track, one new subdivision per bar.
+
+- **Lane**: `steps :int 0..64`, painted or wired. A step `>= 1` requests
+  that length (rounded); 0 leaves it alone. State cell `len` feeds the
+  strip scope.
+- **Timing**: the request lands at the end of the cycle the firing step
+  belongs to, so a pattern always finishes before it changes; the last
+  request before the boundary wins. Under Prh a cycle is one bar at any
+  length, so changes are bar-aligned. If the firing step's cycle already
+  ended inside the same chunk, the change waits one more cycle.
+- **Runtime override, not an edit**: the clock
+  (`SnapshotSequencerClock`, `scheduler/clock.rs`) holds
+  `length_override` per track. The lookahead applies due changes at chunk
+  start, clamps chunks so none straddles a pending boundary, and patches the
+  chunk snapshot's `num_steps` (patched track cached per source `Arc`), so
+  geometry, playhead, midi-fx and processes all see the effective length.
+  The *track* steps picker and pattern data keep the authored length. Snapshot
+  steps run to `MAX_STEPS`, so a longer override plays the steps past the
+  authored end as they are stored.
+- **Re-phase**: at the boundary the clock sets `length_phase_beats` so the new
+  cycle starts on step 0 even when its length does not divide the transport
+  position (fixed timebases). It is 0 under Prh.
+- **Lifetime**: dropped on Stop/clock reset, song-loop wrap, direct pattern
+  switch, quantized launch installs, song-row source adoption and any clip
+  anchor change. A destructive-edit re-seek keeps it; a re-seek back across
+  the boundary where it took effect restores the previous length and re-arms
+  the change there.
+- **Chunk clamp rounding**: the clamp subtracts `PATTERN_LENGTH_EPS_BEATS`
+  before the ceil. Without it, float noise ceiled one frame past the bar
+  line: the boundary step fired under the old length, and its own request
+  displaced the pending one.
+- **Length marker** (eseq-ks8x.1): an amber underline beneath the step the
+  lane last set the length to, in the grid (drawn inside
+  `seqv-playhead-row-bar` via its `len-col` binding, field
+  `track-length-row-{track}-{row}`) and the expanded view
+  (`seqv-slot-length-mark`, field `seqv-slot-length-active-{id}-{slot}`).
+  The clock keeps `length_marker` even when the request equals the authored
+  length (no override then); the lookahead publishes it to
+  `transport.track_process_lengths`; the UI shows it only while playing. The
+  steps picker still shows the authored length.
+- **Layers**: default lanes are project-layer slots and `+ add lane` lanes
+  are track-layer, and wires never cross layers
+  (`resolve_process_inlet_target`), so `acc A → length` does not connect;
+  wire a track-layer generator (an added `acc`, `rand`, `count`) instead.

@@ -224,6 +224,55 @@ fn path_derived_tags(path: &Path, roots: &[PathBuf]) -> Vec<String> {
     )
 }
 
+/// A clip rendered inside the app (a resample) that lands in the library.
+pub struct ImportedPcm {
+    /// `<sample_dir>/<hash>.wav`, the file tracks should reference.
+    pub path: PathBuf,
+    pub hash: String,
+    /// False when identical audio was already in the library; its existing
+    /// title and tags are kept.
+    pub inserted: bool,
+}
+
+/// Store interleaved PCM as a library sample with a title and tags. The hash
+/// is of the stored WAV's bytes, like any other store entry.
+pub fn import_pcm_sample(
+    samples: Vec<f32>,
+    sample_rate: u32,
+    channels: u16,
+    title: &str,
+    tags: &[String],
+    sample_dir: &Path,
+    db: &mut SampleDb,
+) -> Result<ImportedPcm, String> {
+    if samples.is_empty() || channels == 0 || sample_rate == 0 {
+        return Err("The clip is empty".into());
+    }
+    fs::create_dir_all(sample_dir)
+        .map_err(|error| format!("failed to create {}: {error}", sample_dir.display()))?;
+    let tmp = sample_dir.join(format!(
+        "pcm.wav.tmp-{}-{}",
+        std::process::id(),
+        STORE_TEMP_ID.fetch_add(1, Ordering::Relaxed),
+    ));
+    write_wav(&tmp, &DecodedAudio { sample_rate, channels, samples })?;
+    let bytes = fs::read(&tmp).map_err(|error| {
+        let _ = fs::remove_file(&tmp);
+        format!("failed to read {}: {error}", tmp.display())
+    })?;
+    let hash = hex_sha256(&bytes);
+    let path = sample_dir.join(format!("{hash}.wav"));
+    let moved = if path.is_file() { fs::remove_file(&tmp) } else { fs::rename(&tmp, &path) };
+    moved.map_err(|error| {
+        let _ = fs::remove_file(&tmp);
+        format!("failed to store {}: {error}", path.display())
+    })?;
+    let inserted = db
+        .insert_sample_with_tags(&hash, Some(title), &normalize_tags(tags))
+        .map_err(|error| format!("failed to insert sample row: {error}"))?;
+    Ok(ImportedPcm { path, hash, inserted })
+}
+
 pub fn transcode_to_store(source: &Path, hash: &str, sample_dir: &Path) -> Result<PathBuf, String> {
     fs::create_dir_all(sample_dir)
         .map_err(|error| format!("failed to create {}: {error}", sample_dir.display()))?;
@@ -553,6 +602,30 @@ mod tests {
         );
         assert_eq!(summary.duplicates, 1);
         assert!(db.tags_for(&hash).unwrap().is_empty());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn pcm_import_stores_a_titled_tagged_sample_and_dedups_identical_audio() {
+        let dir = unique_temp_dir("pcm");
+        let samples_dir = dir.join("samples");
+        let mut db = SampleDb::open_in_memory().unwrap();
+        let clip: Vec<f32> = (0..400).map(|i| (i as f32 * 0.01).sin() * 0.5).collect();
+        let tags = vec!["Resampled".to_string(), " resampled ".to_string(), "loop".to_string()];
+        let first = import_pcm_sample(clip.clone(), 44_100, 2, "Resample 12:00", &tags, &samples_dir, &mut db).unwrap();
+        assert!(first.inserted);
+        assert!(first.path.is_file());
+        assert_eq!(first.path, samples_dir.join(format!("{}.wav", first.hash)));
+        assert_eq!(db.title_for_hash(&first.hash).unwrap(), Some("Resample 12:00".to_string()));
+        assert_eq!(db.tags_for(&first.hash).unwrap(), vec!["loop", "Resampled"]);
+        assert_eq!(decode_audio_file(&first.path).unwrap().samples.len(), 400);
+
+        let again = import_pcm_sample(clip, 44_100, 2, "Other", &[], &samples_dir, &mut db).unwrap();
+        assert!(!again.inserted);
+        assert_eq!(again.path, first.path);
+        assert_eq!(db.title_for_hash(&first.hash).unwrap(), Some("Resample 12:00".to_string()));
+        assert!(fs::read_dir(&samples_dir).unwrap().count() == 1, "no temp files left behind");
+        assert!(import_pcm_sample(vec![], 44_100, 2, "x", &[], &samples_dir, &mut db).is_err());
         let _ = fs::remove_dir_all(dir);
     }
 }

@@ -51,7 +51,7 @@ mod inner {
         AUTOCOMPLETE_PANEL_CORNER_RADIUS_PX, AUTOCOMPLETE_ROW_CORNER_RADIUS_PX,
         AUTOCOMPLETE_TEXT_CELL_SCALE, Backend, BackendError, BackendEvent, Color, RenderFrame,
         TOAST_BORDER_WIDTH_PX, TOAST_CORNER_RADIUS_PX, TiledRenderFrame, completion_panel_columns,
-        toast_placement,
+        toast_placement, TOAST_CLOSE_GLYPH,
     };
     use crate::glyph_atlas::{
         MetalGlyphAtlas as GlyphAtlas,
@@ -6430,6 +6430,38 @@ fragment float4 live_spectrogram_frag(
                         vp_w,
                         vp_h,
                     );
+                    if let (Some(label), Some(col)) = (&toast.action_label, place.action_col) {
+                        push_text_cells(
+                            &mut toast_verts,
+                            atlas,
+                            label,
+                            col,
+                            place.text_row,
+                            place.action_cols,
+                            to_rgba(accent),
+                            to_rgba(bg),
+                            cell_w,
+                            cell_h,
+                            vp_w,
+                            vp_h,
+                        );
+                    }
+                    if let Some(col) = place.close_col {
+                        push_text_cells(
+                            &mut toast_verts,
+                            atlas,
+                            TOAST_CLOSE_GLYPH,
+                            col,
+                            place.text_row,
+                            1,
+                            to_rgba(theme::TOAST_FG()),
+                            to_rgba(bg),
+                            cell_w,
+                            cell_h,
+                            vp_w,
+                            vp_h,
+                        );
+                    }
                     draw_vertices(
                         &enc,
                         &self.device,

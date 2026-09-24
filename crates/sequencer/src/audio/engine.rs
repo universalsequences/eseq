@@ -437,7 +437,9 @@ fn init_engine_parts(
 
     // Create shared sequencer state (start with 0 tracks)
     let state = Arc::new(SequencerState::new(0, vec![]));
-    let master_recorder = Arc::new(MasterRecorder::new(sample_rate, channels));
+    let master_recorder = Arc::new(MasterRecorder::with_history(
+        sample_rate, channels, crate::recorder::RESAMPLE_WINDOW,
+    ));
 
     // Create channel for keyboard triggers
     let (keyboard_tx, keyboard_rx) = std::sync::mpsc::channel();

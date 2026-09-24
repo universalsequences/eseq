@@ -139,6 +139,10 @@ impl Cell {
 pub struct ToastFrame {
     pub message: String,
     pub kind: crate::host::ToastKind,
+    /// Clickable link text after the message (e.g. "Show in Finder").
+    pub action_label: Option<String>,
+    /// Sticky toasts carry a close button instead of a timer.
+    pub closable: bool,
 }
 
 pub const TOAST_CORNER_RADIUS_PX: f32 = 10.0;
@@ -150,6 +154,9 @@ const TOAST_HEIGHT_ROWS: f32 = 2.2;
 const TOAST_MARGIN_COLS: usize = 2;
 /// Rows between the text row and the window bottom, clear of a status line.
 const TOAST_BOTTOM_ROWS: usize = 4;
+/// Gap, in cells, before the action link and before the close button.
+const TOAST_SEGMENT_GAP_COLS: usize = 3;
+pub const TOAST_CLOSE_GLYPH: &str = "×";
 
 impl ToastFrame {
     pub fn icon(&self) -> char {
@@ -173,28 +180,81 @@ pub struct ToastPlacement {
     pub text_col: usize,
     pub text_row: usize,
     pub text_max_cols: usize,
+    /// First column and width of the action link, when the toast has one.
+    pub action_col: Option<usize>,
+    pub action_cols: usize,
+    /// Column of the close glyph, when the toast is closable.
+    pub close_col: Option<usize>,
+}
+
+/// What a pointer at `(col, row)` lands on inside a placed toast.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ToastHit {
+    Action,
+    Close,
+    Panel,
+}
+
+impl ToastPlacement {
+    pub fn hit(&self, col: f32, row: f32) -> Option<ToastHit> {
+        let inside = col >= self.panel_col
+            && col < self.panel_col + self.panel_cols
+            && row >= self.panel_row
+            && row < self.panel_row + self.panel_rows;
+        if !inside {
+            return None;
+        }
+        // One cell of slack either side: the close glyph is a single cell.
+        if let Some(close) = self.close_col
+            && col >= close as f32 - 1.0
+            && col < close as f32 + 2.0
+        {
+            return Some(ToastHit::Close);
+        }
+        if let Some(action) = self.action_col
+            && col >= action as f32
+            && col < (action + self.action_cols) as f32
+        {
+            return Some(ToastHit::Action);
+        }
+        Some(ToastHit::Panel)
+    }
 }
 
 pub fn toast_placement(toast: &ToastFrame, total_cols: usize, total_rows: usize) -> Option<ToastPlacement> {
-    // icon, gap, message
-    let chrome_cols = TOAST_PAD_COLS * 2 + 2 + TOAST_MARGIN_COLS * 2;
+    // icon, gap, message[, gap, action][, gap, close]; the action and close
+    // button keep their width and the message is what gets clipped.
+    let action_cols = toast.action_label.as_ref().map_or(0, |label| label.chars().count());
+    let action_extra = if action_cols > 0 { TOAST_SEGMENT_GAP_COLS + action_cols } else { 0 };
+    let close_extra = if toast.closable { TOAST_SEGMENT_GAP_COLS + 1 } else { 0 };
+    let chrome_cols =
+        TOAST_PAD_COLS * 2 + 2 + TOAST_MARGIN_COLS * 2 + action_extra + close_extra;
     let text_max_cols = total_cols.checked_sub(chrome_cols)?.min(80);
     if text_max_cols == 0 || total_rows < TOAST_BOTTOM_ROWS + 2 {
         return None;
     }
     let text_cols = toast.message.chars().count().min(text_max_cols);
-    let panel_cols = TOAST_PAD_COLS * 2 + 2 + text_cols;
+    let panel_cols = TOAST_PAD_COLS * 2 + 2 + text_cols + action_extra + close_extra;
     let panel_col = total_cols - TOAST_MARGIN_COLS - panel_cols;
     let text_row = total_rows - TOAST_BOTTOM_ROWS;
+    let text_col = panel_col + TOAST_PAD_COLS + 2;
+    let action_col =
+        (action_cols > 0).then_some(text_col + text_cols + TOAST_SEGMENT_GAP_COLS);
+    let close_col = toast
+        .closable
+        .then_some(text_col + text_cols + action_extra + TOAST_SEGMENT_GAP_COLS);
     Some(ToastPlacement {
         panel_col: panel_col as f32,
         panel_row: text_row as f32 - (TOAST_HEIGHT_ROWS - 1.0) / 2.0,
         panel_cols: panel_cols as f32,
         panel_rows: TOAST_HEIGHT_ROWS,
         icon_col: panel_col + TOAST_PAD_COLS,
-        text_col: panel_col + TOAST_PAD_COLS + 2,
+        text_col,
         text_row,
-        text_max_cols,
+        text_max_cols: text_cols,
+        action_col,
+        action_cols,
+        close_col,
     })
 }
 
@@ -204,7 +264,38 @@ mod toast_tests {
     use crate::host::ToastKind;
 
     fn toast(message: &str) -> ToastFrame {
-        ToastFrame { message: message.to_string(), kind: ToastKind::Success }
+        ToastFrame {
+            message: message.to_string(),
+            kind: ToastKind::Success,
+            action_label: None,
+            closable: false,
+        }
+    }
+
+    #[test]
+    fn sticky_toast_places_action_and_close_after_the_message() {
+        let frame = ToastFrame {
+            action_label: Some("Show in Finder".to_string()),
+            closable: true,
+            ..toast("Saved take.wav")
+        };
+        let place = toast_placement(&frame, 120, 40).unwrap();
+        assert_eq!(place.panel_col + place.panel_cols, 118.0);
+        let action = place.action_col.unwrap();
+        let close = place.close_col.unwrap();
+        assert!(place.text_col + "Saved take.wav".len() < action);
+        assert!(action + "Show in Finder".len() < close);
+        assert!(((close + 1 + 2) as f32) <= place.panel_col + place.panel_cols);
+        let row = place.text_row as f32 + 0.5;
+        assert_eq!(place.hit(action as f32 + 0.5, row), Some(ToastHit::Action));
+        assert_eq!(place.hit(close as f32 + 0.5, row), Some(ToastHit::Close));
+        assert_eq!(place.hit(place.icon_col as f32 + 0.5, row), Some(ToastHit::Panel));
+        assert_eq!(place.hit(place.panel_col - 1.0, row), None);
+
+        // A narrow window clips the message, never the link or close button.
+        let narrow = toast_placement(&ToastFrame { message: "x".repeat(200), ..frame }, 60, 20).unwrap();
+        assert_eq!(narrow.panel_col, 2.0);
+        assert_eq!(narrow.close_col.unwrap() + 1 + 2, 58);
     }
 
     #[test]
