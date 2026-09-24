@@ -32,7 +32,8 @@ pub unsafe fn emit(out: *const *mut f32, ports: usize, nframes: c_int) {
     }
 }
 
-/// Zero output `port` unless it already holds zeros, and declare it silent.
+/// Zero output `port` unless it already holds zeros over all of `lane`, and
+/// declare it silent.
 ///
 /// # Safety
 /// `lane` must be the running kernel's buffer for output `port`.
@@ -74,6 +75,61 @@ mod tests {
                 lane[0] = 1.0;
             }
         }
+    }
+
+    /// 0 = declared silence, 1 = constant 0.5 (undeclared).
+    static VARIABLE_SOURCE_MODE: AtomicU32 = AtomicU32::new(0);
+
+    unsafe extern "C" fn variable_source_process(
+        _inp: *const *mut f32,
+        out: *const *mut f32,
+        nframes: c_int,
+        _state: *mut c_void,
+        _buffers: *mut c_void,
+    ) {
+        let lane = std::slice::from_raw_parts_mut(*out, nframes as usize);
+        match VARIABLE_SOURCE_MODE.load(Ordering::Relaxed) {
+            0 => emit_port(0, lane),
+            _ => lane.fill(0.5),
+        }
+    }
+
+    #[test]
+    fn short_silent_pass_does_not_vouch_for_a_longer_one() {
+        graph::initialize_engine_for_test(64, 48_000);
+        let label = CString::new("silence-variable-pass").unwrap();
+        let lg = unsafe { graph::create_live_graph(32, 64, label.as_ptr(), 1) };
+        let source_name = CString::new("source").unwrap();
+        let source = unsafe {
+            graph::add_node(
+                lg,
+                graph::NodeVTable { process: Some(variable_source_process), ..graph::NodeVTable::default() },
+                4, source_name.as_ptr(), 0, 1, std::ptr::null(), 0,
+            )
+        };
+        assert!(source > 0);
+        let gain_name = CString::new("gain").unwrap();
+        let gain = unsafe { graph::add_gain_node(lg, 2.0, gain_name.as_ptr()) };
+        unsafe {
+            assert!(graph::graph_connect(lg, source, 0, gain, 0));
+            assert!(graph::graph_connect(lg, gain, 0, 0, 0));
+        }
+        let mut render = |mode: u32, frames: usize| {
+            VARIABLE_SOURCE_MODE.store(mode, Ordering::Relaxed);
+            let mut output = vec![f32::NAN; frames];
+            unsafe { graph::process_next_block(lg, output.as_mut_ptr(), frames as c_int) };
+            output
+        };
+        assert!(render(1, 64).iter().all(|v| *v == 1.0), "gain 2 x 0.5");
+        // A short silent pass clears only its own frames, so the rest of each
+        // edge still holds the signal above.
+        assert!(render(0, 16).iter().all(|v| *v == 0.0));
+        let full = render(0, 64);
+        assert!(full.iter().all(|v| *v == 0.0), "stale signal leaked: {full:?}");
+        // Once a full pass is cleared, shorter and full silent passes stay clean.
+        assert!(render(0, 16).iter().all(|v| *v == 0.0));
+        assert!(render(0, 64).iter().all(|v| *v == 0.0));
+        unsafe { graph::destroy_live_graph(lg) };
     }
 
     #[test]

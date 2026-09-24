@@ -354,20 +354,30 @@ int ap_inputs_silent(void) {
 }
 
 /* Declare output `port` all zeros for this block. The caller must have made
- * the buffer zero (ap_output_was_silent tells when it already is). */
+ * the buffer zero (ap_output_was_silent tells when it already is). Zeros
+ * past this pass's frames survive from a silent previous pass, so the
+ * covered span only grows while the edge stays silent. */
 void ap_set_output_silent(int port) {
   RTNode *node = g_current_processing_node;
-  LiveEdge *edge = current_edge(g_current_processing_graph, node ? node->outEdgeId : NULL,
-                                node ? node->nOutputs : 0, port);
-  if (edge)
-    edge->silent_pass = g_current_processing_graph->render_pass;
+  LiveGraph *lg = g_current_processing_graph;
+  LiveEdge *edge = current_edge(lg, node ? node->outEdgeId : NULL, node ? node->nOutputs : 0, port);
+  if (!edge)
+    return;
+  int covered = lg->render_nframes;
+  if (edge->silent_pass + 1 == lg->render_pass && edge->silent_frames > covered)
+    covered = edge->silent_frames;
+  edge->silent_pass = lg->render_pass;
+  edge->silent_frames = covered;
 }
 
+/* True when output `port` still holds zeros over all of this pass's frames:
+ * declared silent last pass across at least as many frames as this one. */
 int ap_output_was_silent(int port) {
   RTNode *node = g_current_processing_node;
-  LiveEdge *edge = current_edge(g_current_processing_graph, node ? node->outEdgeId : NULL,
-                                node ? node->nOutputs : 0, port);
-  return edge && edge->silent_pass + 1 == g_current_processing_graph->render_pass;
+  LiveGraph *lg = g_current_processing_graph;
+  LiveEdge *edge = current_edge(lg, node ? node->outEdgeId : NULL, node ? node->nOutputs : 0, port);
+  return edge && edge->silent_pass + 1 == lg->render_pass &&
+         edge->silent_frames >= lg->render_nframes;
 }
 
 /* Zero every output that is not already zero and declare it silent. */
@@ -2413,6 +2423,7 @@ static void update_watched_node_states(LiveGraph *lg);
 
 static void process_live_block_internal(LiveGraph *lg, int nframes, bool update_watch) {
   lg->render_pass++; // silence declarations are per pass
+  lg->render_nframes = nframes;
   graph_profile_begin(lg, nframes);
   // Initialize pending counts and seed ready queue
   init_pending_and_seed(lg, nframes);

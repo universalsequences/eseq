@@ -22,8 +22,11 @@ typedef struct {
   // source kernel last declared this buffer all zeros. Silent this pass iff
   // it equals LiveGraph.render_pass; a kernel that never declares leaves it
   // stale, so nothing needs resetting. Equal to the previous pass means the
-  // buffer still holds zeros (only its source writes it).
+  // buffer still holds zeros (only its source writes it) over frames
+  // 0..silent_frames; passes vary in length, so a shorter silent pass must
+  // not vouch for the frames a longer one reads.
   uint64_t silent_pass;
+  int silent_frames;
 } LiveEdge;
 
 typedef struct RTNode {
@@ -77,6 +80,7 @@ typedef struct LiveGraph {
   // --- Node & edge storage ---
   RTNode *nodes;
   uint64_t render_pass; // bumped per process_live_block_internal (silence)
+  int render_nframes;   // that pass's frame count
   BufferDesc *buffers;
   int node_count, node_capacity, buffer_count, buffer_capacity;
   LiveEdge *edges;
