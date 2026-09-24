@@ -3856,7 +3856,7 @@
         (h-stack :key (str "rack-clip-run-" gid) :gap 0.4 :align :center :width :fill :flex 1
           ;; Lines the first cell up with the member rows' step grids.
           (box :width 2.2 :height 0.0 :bg :transparent)
-          (box :background-color '(rgba 0.1 0.1 0.1 0.5) :corner-radius 10 :padding 0.2
+          (box :background-color '(rgba 0.1 0.1 0.1 0.2) :corner-radius 10 :padding 0.2
             (wrap :key (str "rack-clip-grid-" gid)
               :width 50 :gap 0.12 :row-gap 0.12 :align :center
               (each clips |clip i|
