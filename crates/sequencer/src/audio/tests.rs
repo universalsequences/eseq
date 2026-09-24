@@ -19,7 +19,7 @@ use super::{
     mute_group_winner_for_block_events, remap_route_after_track_delete,
     resolve_live_instrument_defaults, resolve_live_keyboard_transpose, resolve_slice,
     resolve_snapshot_instrument_defaults, resolved_chord_transpose, resolved_slot_param_value,
-    sampler_warp_runtime, select_output_channels, select_output_config,
+    coreaudio_client_channels, sampler_warp_runtime, select_output_channels, select_output_config,
     select_output_config_with_preferred_rate, store_active_keyboard_note, swing_delay_samples,
     take_active_keyboard_note, track_accepts_scheduled_trigger, ActiveKeyboardNote,
     ActiveKeyboardVoice, ActiveKeyboardVoiceTarget, BlockEvent, BlockEventKind, CountdownEvent,
@@ -1469,6 +1469,15 @@ fn output_config_keeps_default_channels_at_selected_rate() {
     ];
 
     assert_eq!(select_output_channels(48_000, 6, ranges), Some(6));
+}
+
+#[test]
+fn coreaudio_opens_multi_stream_devices_as_stereo() {
+    // Aggregate BlackHole 2ch + speakers, an Apollo's summed MON/LINE/HP/virtual outputs.
+    assert_eq!(coreaudio_client_channels(4), 2);
+    assert_eq!(coreaudio_client_channels(14), 2);
+    assert_eq!(coreaudio_client_channels(2), 2);
+    assert_eq!(coreaudio_client_channels(1), 1);
 }
 
 #[test]

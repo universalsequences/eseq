@@ -242,6 +242,18 @@ pub fn query_device_config() -> Result<(u32, u16), String> {
         )
     })?;
 
+    #[cfg(target_os = "macos")]
+    let selected = {
+        let channels = coreaudio_client_channels(selected.channels);
+        if channels != selected.channels {
+            eprintln!(
+                "audio: device reports {} output channels; opening a {channels}-channel stream on outputs 1/2",
+                selected.channels
+            );
+        }
+        OutputDeviceConfig { channels, ..selected }
+    };
+
     if let Some(graph_rate) = preferred_sample_rate {
         if selected.sample_rate == graph_rate {
             eprintln!("audio: matched output to the PipeWire graph rate at {graph_rate} Hz");
