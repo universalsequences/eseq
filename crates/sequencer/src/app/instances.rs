@@ -504,12 +504,16 @@ impl App {
 
     /// Move an instance between the project and a rack (or between racks):
     /// "Move to rack ▸" / "Give back to project" (spec §5, §8.3). Its graph
-    /// overrides follow: routes and seed tracks expand from the old rack's
-    /// member indices to the tracks they resolve to, then contract to the new
-    /// rack's member indices (a track outside the new rack becomes "off",
-    /// exactly like moving a legacy sequencer into a rack), and `owner_rack`
-    /// follows. The instance keeps its id, so nothing else re-keys and no
-    /// script re-runs. Moving to the current owner is a quiet no-op.
+    /// overrides follow. Between the project and a rack, routes and seed
+    /// tracks expand from the old rack's member indices to the tracks they
+    /// resolve to, then contract to the new rack's member indices (a track
+    /// outside the new rack becomes "off", exactly like moving a legacy
+    /// sequencer into a rack). Rack to rack they keep their member indices:
+    /// the two kits share no tracks, so pad n drives pad n, and a pad the new
+    /// rack lacks plays and shows as off but comes back on a rack that has
+    /// it. `owner_rack` follows. The instance keeps its id, so nothing else
+    /// re-keys and no script re-runs. Moving to the current owner is a quiet
+    /// no-op.
     ///
     /// Where the overrides land: each scene's view of the instance (its own
     /// list, or the clip it points at in a clip-bearing old rack) is read
@@ -534,9 +538,11 @@ impl App {
             return Ok(());
         }
         self.validate_instance_owner(owner)?;
+        // Rack to rack, member indices carry over unchanged (pad for pad).
+        let rack_to_rack = current.rack().is_some() && owner.rack().is_some();
         // A rack that no longer exists has no members to expand through:
         // its member routes go "off" rather than guessing.
-        let from_members = current.rack().map(|group_id| {
+        let from_members = current.rack().filter(|_| !rack_to_rack).map(|group_id| {
             self.groups
                 .iter()
                 .find(|group| group.id == group_id)
@@ -545,6 +551,7 @@ impl App {
         });
         let to_members = owner
             .rack()
+            .filter(|_| !rack_to_rack)
             .map(|group_id| self.rack_member_tracks(group_id))
             .transpose()?;
         self.apply_recorded_instance_mutation("Move instance", Some(vec![id]), move |app| {
@@ -1617,6 +1624,46 @@ mod tests {
         assert_eq!(published_owner(&app, a), None);
         applied(redo(&mut app));
         assert_eq!(routes(&app, a), (Some(1), Some(Track(1)), Some(Off)));
+    }
+
+    #[test]
+    fn move_between_racks_keeps_member_routes_pad_for_pad() {
+        use crate::graph::ProjectGraphRouteOverride::Track;
+        let (mut app, mut runtime) = fixture_with_tracks(4);
+        // Kit 1 has members [1, 2]; kit 2 has only [3], so it lacks pad 1.
+        app.groups = serde_json::from_value(serde_json::json!([
+            {"id": 1, "name": "Kit", "members": [1, 2], "bus_id": 0,
+             "rack": {"pads": [{"pad_note": 36, "member": 0}, {"pad_note": 37, "member": 1}]}},
+            {"id": 2, "name": "Quas", "members": [3], "bus_id": 0,
+             "rack": {"pads": [{"pad_note": 36, "member": 0}]}}
+        ]))
+        .unwrap();
+        app.state.set_rack_memberships(app.rack_memberships());
+        let a = app.create_instance_recorded(KIND, ProjectInstanceOwner::Rack(1), None).unwrap();
+        runtime.set_global_value("a", Value::Instance(a));
+        runtime.eval_str("(graph-node a 0 :route 1)").unwrap();
+        runtime.eval_str("(graph-node a 1 :route 0)").unwrap();
+        assert_eq!(routes(&app, a), (Some(1), Some(Track(1)), Some(Track(0))));
+
+        app.move_instance_owner_recorded(a, ProjectInstanceOwner::Rack(2)).expect("to kit 2");
+        assert_eq!(
+            routes(&app, a),
+            (Some(2), Some(Track(1)), Some(Track(0))),
+            "pad for pad; pad 1 is kept although kit 2 lacks it"
+        );
+        assert_eq!(published_owner(&app, a), Some(2));
+        assert_eq!(
+            runtime.eval_str("(len (graph-route-tracks a))").unwrap(),
+            Some(Value::Number(1.0)),
+            "kit 2 offers one route, so pad 1 reads as off in the panel"
+        );
+
+        app.move_instance_owner_recorded(a, ProjectInstanceOwner::Rack(1)).expect("back to kit 1");
+        assert_eq!(
+            routes(&app, a),
+            (Some(1), Some(Track(1)), Some(Track(0))),
+            "moving back loses nothing"
+        );
     }
 
     #[test]

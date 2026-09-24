@@ -219,11 +219,15 @@ Built (stage 3, part 1: `def-kind`, registry, project model):
 - Every `graph-*` native resolves an instance value to its sequencer
   (`resolve_graph_manifest`, and the homeostat natives).
 - Built (part 2): **move-owner** is `App::move_instance_owner_recorded`
-  (recorded with the instance's overrides). The instance keeps its id; its
-  overrides expand through the old rack's members
-  (`expand_member_routes_to_tracks`) and contract to the new rack's
-  (`contract_track_routes_to_members`, a track outside the rack goes off),
-  and `owner_rack` follows. Each scene's view of the instance is read once
+  (recorded with the instance's overrides). The instance keeps its id.
+  Between the project and a rack its overrides expand through the old rack's
+  members (`expand_member_routes_to_tracks`) and contract to the new rack's
+  (`contract_track_routes_to_members`, a track outside the rack goes off).
+  Rack to rack they keep their member indices, pad for pad: two kits share
+  no tracks, so contracting would turn every route off and moving back could
+  not restore them. A pad the new rack lacks routes nowhere and shows as off
+  (`resolve_rack_member_routes`, `gvr-route-option-index`) until the
+  instance lands on a rack that has it. `owner_rack` follows. Each scene's view of the instance is read once
   before anything moves (two scenes sharing a clip both keep it). Into a
   clip-bearing rack every clip of the bank gets the entry of the first scene
   pointing at it, else the current scene's; out of one, a scene that launched
