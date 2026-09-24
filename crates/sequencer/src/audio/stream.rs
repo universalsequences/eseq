@@ -128,6 +128,8 @@ fn start_cpal_output_stream(
     #[cfg(feature = "audio-rtsan")]
     rtsan_standalone::ensure_initialized();
     let channels = cb_data.num_channels;
+    #[cfg(target_os = "macos")]
+    let load_state = Arc::clone(&cb_data.state);
     // CPAL honors `BufferSize::Fixed` only as a hint on ALSA; PipeWire answers a
     // 512-frame request with whatever `avail_update` reports (235 frames on the
     // Linux workstation). Render exact graph blocks and serve the device out of
@@ -189,7 +191,12 @@ fn start_cpal_output_stream(
     };
     #[cfg(target_os = "macos")]
     {
-        output.workgroup = Some(super::workgroup::Monitor::start(&output.stream)?);
+        let callback_load_ns = move || {
+            use std::sync::atomic::Ordering::Relaxed;
+            let transport = &load_state.transport;
+            (transport.callback_busy_ns.load(Relaxed), transport.callback_budget_ns.load(Relaxed))
+        };
+        output.workgroup = Some(super::workgroup::Monitor::start(&output.stream, callback_load_ns)?);
     }
     Ok(output)
 }
@@ -234,6 +241,18 @@ pub fn query_device_config() -> Result<(u32, u16), String> {
             default_config.sample_rate().0
         )
     })?;
+
+    #[cfg(target_os = "macos")]
+    let selected = {
+        let channels = coreaudio_client_channels(selected.channels);
+        if channels != selected.channels {
+            eprintln!(
+                "audio: device reports {} output channels; opening a {channels}-channel stream on outputs 1/2",
+                selected.channels
+            );
+        }
+        OutputDeviceConfig { channels, ..selected }
+    };
 
     if let Some(graph_rate) = preferred_sample_rate {
         if selected.sample_rate == graph_rate {

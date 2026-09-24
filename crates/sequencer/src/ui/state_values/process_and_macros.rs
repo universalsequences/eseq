@@ -1456,6 +1456,7 @@ pub(crate) fn build_track_process_scopes_value(state: &Arc<SequencerState>) -> V
                     "values",
                     list_value(values.iter().map(|value| Value::Number(*value as f64))),
                 ),
+                ("cells", process_scope_cells_value(cells)),
             ]))
         });
         list_value(entries.collect::<Vec<_>>())
@@ -1519,12 +1520,50 @@ pub(crate) fn process_bound_bus_sends(state: &SequencerState, track: usize) -> H
     bound
 }
 
-pub(crate) fn sync_process_scope_state(rt: &mut Runtime, state: &Arc<SequencerState>) {
-    rt.set_reactive(
-        "SEQ",
-        "track-process-scopes",
-        build_track_process_scopes_value(state),
-    );
+/// Every numeric state cell's history of one process instance, by cell
+/// name: `{:snap (0 -1 ...) :root (...)}`.
+fn process_scope_cells_value(cells: &HashMap<String, Vec<f32>>) -> Value {
+    let mut map = HashMap::new();
+    for (name, values) in cells {
+        map.insert(
+            name.clone(),
+            value_cell(list_value(values.iter().map(|value| Value::Number(*value as f64)))),
+        );
+    }
+    Value::Map(map)
+}
+
+/// `SEQ.process-scope-cells`: one `{:runtime-id :cells}` entry per process
+/// instance that has fired, for scopes a track chain does not reach — a
+/// graph node's patch slots, whose runtime id is their instance id.
+pub(crate) fn build_process_scope_cells_value(state: &Arc<SequencerState>) -> Value {
+    let scopes = state.process_scope_values();
+    let mut ids = scopes.keys().copied().collect::<Vec<_>>();
+    ids.sort_unstable();
+    list_value(ids.into_iter().map(|id| {
+        map_value([
+            ("runtime-id", Value::Number(id as f64)),
+            ("cells", process_scope_cells_value(&scopes[&id])),
+        ])
+    }))
+}
+
+pub(crate) fn sync_process_scope_state(
+    rt: &mut Runtime,
+    state: &Arc<SequencerState>,
+    track_scopes: bool,
+    scope_cells: bool,
+) {
+    if track_scopes {
+        rt.set_reactive(
+            "SEQ",
+            "track-process-scopes",
+            build_track_process_scopes_value(state),
+        );
+    }
+    if scope_cells {
+        rt.set_reactive("SEQ", "process-scope-cells", build_process_scope_cells_value(state));
+    }
 }
 
 pub(crate) fn sync_process_chain_state(

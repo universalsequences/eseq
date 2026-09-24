@@ -31,6 +31,7 @@ pub const BUILTIN_WIDGET_NAMES: &[&str] = &[
     "textbox",
     "number-picker",
     "number-label",
+    "number-list",
     "patcher",
     "response-curve-editor",
     "eq8-editor",

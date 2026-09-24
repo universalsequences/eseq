@@ -207,6 +207,7 @@ static bool using_inline_out_cache(const RTNode *node) {
 
 // Thread-local storage for current node being processed
 static __thread RTNode *g_current_processing_node = NULL;
+static __thread LiveGraph *g_current_processing_graph = NULL;
 
 #if AUDIOGRAPH_ENABLE_STALL_DIAGNOSTICS || defined(AUDIOGRAPH_EXPERIMENTS)
 static __thread int g_current_execution_slot = 0;
@@ -293,6 +294,105 @@ static inline bool claim_ready_node(LiveGraph *lg, int32_t nid) {
   return false;
 }
 #endif
+
+/* Read-only view of another node's state for the kernel that is running now.
+ * Graph edits and param messages are applied between node executions, so the
+ * returned memory is stable for the duration of the caller's process call.
+ * Callers must only read cells the target's own kernel does not write (its
+ * params), since the target may run concurrently on another worker unless a
+ * graph edge orders it after the caller. NULL outside a kernel, for unknown
+ * or reused ids, and for nodes without state. */
+const float *ap_graph_node_state(uint64_t logical_id, int *out_slots) {
+  LiveGraph *lg = g_current_processing_graph;
+  if (!lg || logical_id >= (uint64_t)lg->node_count)
+    return NULL;
+  RTNode *node = &lg->nodes[logical_id];
+  if (!node->state || node->logical_id != logical_id)
+    return NULL;
+  if (out_slots)
+    *out_slots = (int)(node->state_size / sizeof(float));
+  return (const float *)node->state;
+}
+
+/* Changes whenever the running node's input/output buffers are rebound, so a
+ * kernel may keep facts about what its own output buffers still hold (only a
+ * buffer's source node writes it) and skip rewriting identical contents.
+ * Zero outside a kernel. */
+uint32_t ap_current_node_io_generation(void) {
+  return g_current_processing_node ? g_current_processing_node->io_generation : 0;
+}
+
+/* ===================== Silence propagation =====================
+ * A kernel whose inputs are all declared silent may skip its DSP and declare
+ * its own outputs silent (after making sure they hold zeros), so idle buses,
+ * sends and meters cost almost nothing. Only opted-in kernels declare
+ * silence; a kernel that never declares leaves its edges "not silent". */
+
+static inline LiveEdge *current_edge(LiveGraph *lg, const int32_t *ids, int count, int port) {
+  if (!lg || !ids || port < 0 || port >= count)
+    return NULL;
+  int eid = ids[port];
+  if (eid < 0 || eid >= lg->edge_capacity || !lg->edges[eid].buf)
+    return NULL;
+  return &lg->edges[eid];
+}
+
+/* True when every input port reads silence: unconnected (the shared silence
+ * buffer) or fed by a source that declared this block silent. False outside
+ * a kernel. */
+int ap_inputs_silent(void) {
+  RTNode *node = g_current_processing_node;
+  LiveGraph *lg = g_current_processing_graph;
+  if (!node || !lg)
+    return 0;
+  for (int port = 0; port < node->nInputs; port++) {
+    LiveEdge *edge = current_edge(lg, node->inEdgeId, node->nInputs, port);
+    if (edge && edge->silent_pass != lg->render_pass)
+      return 0;
+  }
+  return 1;
+}
+
+/* Declare output `port` all zeros for this block. The caller must have made
+ * the buffer zero (ap_output_was_silent tells when it already is). Zeros
+ * past this pass's frames survive from a silent previous pass, so the
+ * covered span only grows while the edge stays silent. */
+void ap_set_output_silent(int port) {
+  RTNode *node = g_current_processing_node;
+  LiveGraph *lg = g_current_processing_graph;
+  LiveEdge *edge = current_edge(lg, node ? node->outEdgeId : NULL, node ? node->nOutputs : 0, port);
+  if (!edge)
+    return;
+  int covered = lg->render_nframes;
+  if (edge->silent_pass + 1 == lg->render_pass && edge->silent_frames > covered)
+    covered = edge->silent_frames;
+  edge->silent_pass = lg->render_pass;
+  edge->silent_frames = covered;
+}
+
+/* True when output `port` still holds zeros over all of this pass's frames:
+ * declared silent last pass across at least as many frames as this one. */
+int ap_output_was_silent(int port) {
+  RTNode *node = g_current_processing_node;
+  LiveGraph *lg = g_current_processing_graph;
+  LiveEdge *edge = current_edge(lg, node ? node->outEdgeId : NULL, node ? node->nOutputs : 0, port);
+  return edge && edge->silent_pass + 1 == lg->render_pass &&
+         edge->silent_frames >= lg->render_nframes;
+}
+
+/* Zero every output that is not already zero and declare it silent. */
+void ap_emit_silence(float *const *out, int n) {
+  RTNode *node = g_current_processing_node;
+  if (!node || !out)
+    return;
+  for (int port = 0; port < node->nOutputs; port++) {
+    if (!out[port])
+      continue;
+    if (!ap_output_was_silent(port))
+      memset(out[port], 0, sizeof(float) * (size_t)n);
+    ap_set_output_silent(port);
+  }
+}
 
 int ap_current_node_ninputs(void) {
   if (g_current_processing_node) {
@@ -1064,6 +1164,7 @@ static void *worker_main(void *arg) {
       release_work_session();
       continue;
     }
+    graph_profile_worker_join((int)worker_slot);
 
     // The reference protects all graph accesses, including the queue wait and
     // the last job's bookkeeping. Inactive workers stay parked on sess_cv.
@@ -1413,6 +1514,12 @@ static void rebuild_node_io_cache(LiveGraph *lg, RTNode *node, int nframes) {
   }
 
   node->io_cache_valid = true;
+  // Unique across all nodes, so state copied from another node can never
+  // claim this node's buffers. Zero means "no generation"; skip it on wrap.
+  static _Atomic uint32_t next_io_generation = 1;
+  uint32_t generation = atomic_fetch_add_explicit(&next_io_generation, 1, memory_order_relaxed);
+  node->io_generation = generation ? generation : atomic_fetch_add_explicit(
+      &next_io_generation, 1, memory_order_relaxed);
 }
 
 static void rebuild_invalid_io_caches(LiveGraph *lg, int nframes) {
@@ -1441,6 +1548,7 @@ void bind_and_run_live(LiveGraph *lg, int nid, int nframes) {
 
   // Set thread-local context for SUM nodes to access input count
   g_current_processing_node = node;
+  g_current_processing_graph = lg;
 
   // === Use pre-cached IO pointers ===
   // Rebuild lazily if cache is invalid (topology changed). This is the
@@ -1478,6 +1586,7 @@ void bind_and_run_live(LiveGraph *lg, int nid, int nframes) {
 
   // Clear thread-local context
   g_current_processing_node = NULL;
+  g_current_processing_graph = NULL;
 }
 
 
@@ -2313,6 +2422,8 @@ static void drain_retire_list(LiveGraph *lg) {
 static void update_watched_node_states(LiveGraph *lg);
 
 static void process_live_block_internal(LiveGraph *lg, int nframes, bool update_watch) {
+  lg->render_pass++; // silence declarations are per pass
+  lg->render_nframes = nframes;
   graph_profile_begin(lg, nframes);
   // Initialize pending counts and seed ready queue
   init_pending_and_seed(lg, nframes);
@@ -2356,7 +2467,8 @@ static void process_live_block_internal(LiveGraph *lg, int nframes, bool update_
     assert(atomic_load_explicit(&g_engine.sessionUsers, memory_order_relaxed) == SESSION_CLOSED);
     atomic_store_explicit(&g_engine.sessionUsers, 0, memory_order_release);
 
-    // wake workers
+    // wake workers (profile slot 0 records the broadcast moment)
+    graph_profile_worker_join(0);
     pthread_mutex_lock(&g_engine.sess_mtx);
     pthread_cond_broadcast(&g_engine.sess_cv);
     pthread_mutex_unlock(&g_engine.sess_mtx);

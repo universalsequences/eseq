@@ -11,13 +11,14 @@ import os
 import platform
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
 import time
 import numpy as np
 sys.dont_write_bytecode = True
-from build import ROOT, DEST, ALGORITHMS, anchors
+from build import ROOT, DEST, ALGORITHMS, PARTIALS, TABLE_SAMPLES, anchors
 sys.path.insert(0, str(ROOT / 'tools/audition'))
 from audition import Instrument
 
@@ -45,6 +46,7 @@ def main():
     results = {}
     with tempfile.TemporaryDirectory(prefix='digi-fm-validation-') as tmp:
         directory = Path(tmp)
+        shutil.copyfile(DEST / 'spectra.json', directory / 'spectra.json')
         source = (DEST/'dsp.lisp').read_text()
         inst = compile_source(directory, 'fm', source)
         small = compile_source(directory, 'block16', source, block=16)
@@ -70,7 +72,15 @@ def main():
         old = dict(a=.12,b1=-.23,b2=.34)
         def wave(phase, h):
             pos = abs(h); lo = min(5,int(pos)); frac = pos-lo
-            return sum(((1-frac)*anchors(n)[lo]+frac*anchors(n)[lo+1])*np.sin(2*np.pi*n*phase) for n in range(1,17))
+            # Independent table oracle: sum the original coefficients at the
+            # two surrounding phase samples, then linearly interpolate.
+            index = (phase % 1) * TABLE_SAMPLES
+            left = np.floor(index)
+            def at(sample):
+                return sum(((1-frac)*anchors(n)[lo]+frac*anchors(n)[lo+1])
+                           * np.sin(2*np.pi*n*sample/TABLE_SAMPLES)
+                           for n in range(1, PARTIALS+1))
+            return at(left) + (index-left) * (at(left+1)-at(left))
         for i, graph in enumerate(ALGORITHMS,1):
             for harm in [-6,-2.5,0,2.5,6]:
                 values = {}
@@ -81,12 +91,12 @@ def main():
                         if end==op:
                             phase += evaluate(start)*gains[start]*(.6*1.2 if start=='a' else .4*1.7)
                     color = -harm if op=='c' and harm<0 else (harm if op in ['a','b1'] and harm>0 else 0)
-                    values[op] = wave(phase,color)
+                    values[op] = np.sin(2*np.pi*phase) if op=='b2' else wave(phase,color)
                     return values[op]
                 expected = [sum(evaluate(op)*gains[op]*((.6 if op=='a' else .4) if envelope else 1) for op,envelope in graph[bus]) for bus in ['x','y']]
                 y,_ = kernel.render(.003,params={'algorithm':i,'harmonics':harm})
                 np.testing.assert_allclose(y[-1],expected,atol=2e-5,rtol=2e-5,err_msg=f'algorithm {i}, harmonic {harm}')
-        results['routing_spectrum_checks'] = '8 graphs × 5 bipolar spectra match direct additive reference'
+        results['routing_spectrum_checks'] = '8 graphs × 5 bipolar spectra match independent graph/table reference'
         # All anchor spectra and both directions must survive high notes/feedback.
         for h in range(-6, 7):
             y, state = inst.render(.12, pitch=3500, params={'harmonics':h,'feedback':2,'source_db':12,'resonance':1})

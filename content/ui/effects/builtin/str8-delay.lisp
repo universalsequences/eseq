@@ -234,7 +234,7 @@
               :corner-radius 16
               :grid-color (rgba 0.34 0.34 0.36 0.55)
               :stroke-color :blue
-              :point-color (rgba 1.0 0.62 0.25 1.0)
+              :point-color :accent
               :on-action |event| (handle-curve-action fx filter-freq-p filter-q-p event))))
           (box :width 20.4 :height 1.92 :padding 0.36
                :background-color :fx-inner-panel-bg :corner-radius 7

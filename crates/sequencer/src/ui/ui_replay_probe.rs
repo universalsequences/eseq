@@ -213,7 +213,7 @@ pub(super) fn run(editor: &mut Editor, app: &mut app::App, shared: &SharedHandle
             shared.state.transport.playhead.store(index, Ordering::Relaxed);
             shared.state.append_track_output_events([sequencer::sequencer::TrackOutputEvent {
                 track: 0, sample_time: index as u64 * 512, beat: index as f64 / 6.0,
-                transpose: 0.0, velocity: 1.0,
+                transpose: 0.0, velocity: 1.0, ..Default::default()
             }]);
             let started = Instant::now();
             if phase == "scroll" { editor.apply_smooth_widget_scroll(0.0, if index % 60 < 30 { -0.5 } else { 0.5 }); }
@@ -259,6 +259,7 @@ pub(super) fn run(editor: &mut Editor, app: &mut app::App, shared: &SharedHandle
     editor.update_tile_rects(cols as u16, rows as u16);
     editor.sync_reactive_bindings_for_visible_layouts();
     let scope_version_before_reopen = frame.prev_process_scope_values_version;
+    let cells_version_before_reopen = frame.prev_process_scope_cells_version;
     meters.cached_peak_l_level = -1.0;
     meters.cached_track_peak_levels.clear();
     meters.last_meter_poll_at = Instant::now();
@@ -277,6 +278,11 @@ pub(super) fn run(editor: &mut Editor, app: &mut app::App, shared: &SharedHandle
         // Open track groups do not imply expanded lane editors. A restored
         // layout without scope consumers must continue leaving histories alone.
         assert_eq!(frame.prev_process_scope_values_version, scope_version_before_reopen);
+    }
+    if editor.runtime().has_live_reactive_consumers("SEQ", "process-scope-cells") {
+        assert_eq!(frame.prev_process_scope_cells_version, shared.state.process_scope_values_version());
+    } else {
+        assert_eq!(frame.prev_process_scope_cells_version, cells_version_before_reopen);
     }
     let tiled = eseqlisp::frame::build_tiled_render_frame_borderless(editor, cols, rows);
     backend.render_tiled_capture(&tiled, &target).unwrap_or_else(|_| panic!("render reopened panels"));

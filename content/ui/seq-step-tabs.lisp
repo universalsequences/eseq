@@ -56,6 +56,13 @@
         seq-register-step-sequencer-tab
         seq-register-script-step-sequencer-tab
         seq-register-source-tab
+        seq-instance-step-tab?
+        seq-step-tab-instance-id
+        seq-instance-tab-buffer
+        seq-register-instance-tab
+        seq-update-instance-tab
+        seq-unregister-instance-tab
+        seq-open-instance-tab
         seq-select-main-step-tab-by-buffer
         seq-unregister-step-sequencer-tab
         seq-clear-project-script-tabs
@@ -98,7 +105,7 @@
   (nth tab 1))
 
 (def seq-step-tab-sequencer-name (tab)
-  (if (and (> (len tab) 2) (not (seq-source-step-tab? tab))) (nth tab 2) ""))
+  (if (seq-script-step-tab? tab) (nth tab 2) ""))
 
 ;; A source tab is a plain closable view onto a file (a package module,
 ;; init.lisp, the project scratch), registered as (label buffer :source).
@@ -108,10 +115,27 @@
   (and (> (len tab) 2) (= (nth tab 2) :source)))
 
 (def seq-step-tab-source-path (tab)
-  (if (> (len tab) 3) (nth tab 3) ""))
+  (if (and (> (len tab) 3) (not (seq-instance-step-tab? tab))) (nth tab 3) ""))
+
+;; An instance tab (docs/instance-kinds-spec.md §7) is a kind instance's
+;; view, registered by the host as (label buffer :instance id): the label is
+;; the instance's label, the buffer the one the host renders (view self)
+;; into. It is keyed by instance id, not buffer name, so a rename (a new
+;; buffer name) updates the same tab in place. Its × closes the tab only;
+;; the instance, its buffer and its view state live on (deleting an
+;; instance is a menu action).
+(def seq-instance-step-tab? (tab)
+  (and (> (len tab) 3) (= (nth tab 2) :instance)))
+
+(def seq-step-tab-instance-id (tab)
+  (if (seq-instance-step-tab? tab) (nth tab 3) nil))
+
+(def seq-instance-tab-matches? (tab id)
+  (and (seq-instance-step-tab? tab) (= (nth tab 3) id)))
 
 (def seq-script-step-tab? (tab)
-  (and (> (len tab) 2) (not (seq-source-step-tab? tab))))
+  (and (> (len tab) 2)
+       (and (not (seq-source-step-tab? tab)) (not (seq-instance-step-tab? tab)))))
 
 (def seq-step-tab-matches-buffer? (tab buffer)
   (= (seq-step-tab-buffer tab) buffer))
@@ -124,13 +148,19 @@
         :on-close
         (lambda (closed-buffer tab-index)
           (host-command "packages-close-source" (dict :buffer closed-buffer))))
+    (if (seq-instance-step-tab? tab)
+      (list (seq-step-tab-label tab)
+        buffer
+        :on-close
+        (lambda (closed-buffer tab-index)
+          (seq-unregister-step-sequencer-tab closed-buffer)))
     (if (seq-script-step-tab? tab)
       (list (seq-step-tab-label tab)
         buffer
         :on-close
         (lambda (closed-buffer tab-index)
           (eseq.seq-script-picker/seq-delete-script-sequencer-by-buffer closed-buffer)))
-      (list (seq-step-tab-label tab) buffer)))))
+      (list (seq-step-tab-label tab) buffer))))))
 
 (def seq-main-step-tabs ()
   (append (list (list "Seq" "*sequencer*"))
@@ -206,6 +236,61 @@
           seq-registered-step-tabs)
         (list (list label buffer :source))))
     (seq-refresh-step-tabs-if-present)))
+
+(def seq-instance-tab-buffer (id)
+  (reduce |acc tab|
+    (if (and (= acc nil) (seq-instance-tab-matches? tab id)) (seq-step-tab-buffer tab) acc)
+    nil
+    seq-registered-step-tabs))
+
+;; Host: a new instance (or one reopened) gets its tab at the end. An
+;; existing tab of the same instance or buffer is replaced.
+(def seq-register-instance-tab (id label buffer)
+  (do
+    (set! seq-registered-step-tabs
+      (append
+        (filter
+          (lambda (tab)
+            (not (or (seq-instance-tab-matches? tab id) (seq-step-tab-matches-buffer? tab buffer))))
+          seq-registered-step-tabs)
+        (list (list label buffer :instance id))))
+    (seq-refresh-step-tabs-if-present)))
+
+;; Host: an instance was renamed. Updates its tab in place (a closed tab
+;; stays closed) and follows the buffer rename if the tab is showing.
+(def seq-update-instance-tab (id label buffer)
+  (let ((old (seq-instance-tab-buffer id)))
+    (if (= old nil)
+      false
+      (do
+        (set! seq-registered-step-tabs
+          (map
+            (lambda (tab)
+              (if (seq-instance-tab-matches? tab id) (list label buffer :instance id) tab))
+            seq-registered-step-tabs))
+        (if (= remembered-step-panel-buffer old) (set! remembered-step-panel-buffer buffer) nil)
+        (if (= step-panel-buffer old)
+          (do
+            (set! step-panel-buffer buffer)
+            (eseq.seq-layout/refresh-current-layout))
+          nil)
+        (seq-refresh-step-tabs-if-present)
+        true))))
+
+;; Host: the instance is gone (deleted, or its project closed).
+(def seq-unregister-instance-tab (id)
+  (let ((buffer (seq-instance-tab-buffer id)))
+    (if (= buffer nil)
+      false
+      (do
+        (seq-unregister-step-sequencer-tab buffer)
+        true))))
+
+;; Open (reopening a closed tab if needed) and select an instance's view.
+(def seq-open-instance-tab (id label buffer)
+  (do
+    (if (= (seq-instance-tab-buffer id) nil) (seq-register-instance-tab id label buffer) nil)
+    (seq-select-main-step-tab-by-buffer buffer)))
 
 (def seq-select-main-step-tab-by-buffer (buffer)
   (let ((tabs (seq-main-step-tabs))

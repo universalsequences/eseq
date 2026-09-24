@@ -56,6 +56,9 @@ pub(crate) struct EditSessionState {
     pub(crate) queued_jev_suggestions: Vec<QueuedJevSuggestion>,
     pub(crate) pending_learn_job: Option<PendingLearnJob>,
     pub(crate) learn_param_preview: Option<LearnParamPreview>,
+    /// Set once the user chose Don't Save in the quit prompt, so the next
+    /// quit request exits even though the project is still dirty.
+    pub(crate) quit_confirmed: bool,
     pub(crate) pending_lisp_history_transactions: HashMap<
         u64,
         (
@@ -157,6 +160,14 @@ pub(crate) struct FrameDiffState {
     pub(crate) prev_song_row_mirror_epoch: u64,
     /// Last `published_sequencers_version` mirrored into `SEQ.graph-sequencers`.
     pub(crate) prev_published_sequencers_version: u64,
+    /// (scheduler snapshot version, published sequencers version, pattern)
+    /// at the last sweep of tracked graph reads (`queue_graph_read_invalidations`).
+    pub(crate) prev_graph_read_key: (u64, u64, usize),
+    /// (instance revision, kind registry version) at the last instance sync.
+    pub(crate) prev_instance_key: (u64, u64, u64, u64),
+    /// Fingerprint of the last `SEQ.instances` value (the Packages tab and
+    /// the rack menu read it; owner names follow rack renames).
+    pub(crate) prev_instances_fingerprint: u64,
     pub(crate) prev_current_track: usize,
     pub(crate) prev_cpu_load_bits: u32,
     pub(crate) cpu_overload: CpuOverloadIndicator,
@@ -189,12 +200,17 @@ pub(crate) struct FrameDiffState {
     pub(crate) prev_rack_pad_triggers: Vec<bool>,
     pub(crate) rack_pad_triggered_at: Vec<Option<Instant>>,
     pub(crate) prev_track_playheads: Vec<u32>,
+    /// Last published length-lane marker step per track (`length!`).
+    pub(crate) prev_track_process_lengths: Vec<Option<usize>>,
     pub(crate) prev_track_button_states: Vec<(bool, bool)>,
     pub(crate) prev_current_track_playhead_visible: bool,
     /// Scheduler → UI channel mirror generation last offered to a render
     /// frame. A change requests a frame so inline bindings are polled.
     pub(crate) prev_process_channel_values_version: u64,
+    /// Scope version last published to `track-process-scopes`.
     pub(crate) prev_process_scope_values_version: u64,
+    /// Scope version last published to `process-scope-cells`.
+    pub(crate) prev_process_scope_cells_version: u64,
     pub(crate) prev_process_effective_params_version: u64,
     /// Last published `(display value, clamped)` per `(track, param)` of the
     /// process effective-value feed, so the tick only writes deltas.

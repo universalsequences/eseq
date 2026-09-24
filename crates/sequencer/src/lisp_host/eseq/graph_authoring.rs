@@ -7,7 +7,11 @@ natives a graph-editing UI script uses: reactive bindings (`bind-graph`,
 `bind-graph-edge`, `bind-graph-config`, `graph-key`/`graph-edge-key`/
 `graph-config-key`), inspection (`graph-list`, `graph-describe`, `graph-node`,
 `graph-param`, `graph-edge`, `graph-config`), and the duration/swing spec
-forms (`steps`, `beats`, `swing`, `delay`, `seed`). Spec values are parsed
+forms (`steps`, `beats`, `swing`, `delay`, `seed`). The value reads
+(`graph-node-value`, `graph-edge-value`, `graph-config-value`, the node
+process-chain reads, ...) are tracked per graph field through the host-owned
+`__graph` namespace, and the `graph-*` writes dirty their readers (see
+`GRAPH_READ_REACTIVE_NAMESPACE`). Spec values are parsed
 with the helpers in the sibling `graph_dsl` module; the runtime node `:update`
 natives live in `graph_update`.
 */
@@ -23,6 +27,9 @@ pub fn register_graph_authoring_natives(
     // dirties it. Dynamic-field namespace (no declared fields), like SEQV.
     runtime.register_reactive(GRAPH_REACTIVE_NS, vec![], true);
     register_graph_node_process_natives(runtime, Arc::clone(&state));
+    // `def-kind` (instance-kinds spec §3) lives beside the graph natives
+    // because its `:sequencer` slot is a graph body.
+    super::kinds::register_def_kind_native(runtime);
 
     runtime.register_native_with_docs(
         "steps",
@@ -169,8 +176,9 @@ pub fn register_graph_authoring_natives(
     runtime.register_native_with_docs(
         "graph-node-value",
         "(graph-node-value sequencer node-index :delay)",
-        "Return one resolved current-pattern graph node intrinsic value.",
-        move |args, _ctx| {
+        "Return one resolved current-pattern graph node intrinsic value. Tracked: a \
+         rendering effect re-runs when this value changes.",
+        move |args, ctx| {
             if args.len() != 3 {
                 return Err(
                     "graph-node-value expects graph id/name, node index, and field".to_string(),
@@ -180,7 +188,10 @@ pub fn register_graph_authoring_natives(
             let instance = parse_nonnegative_usize(&args[1], "node index")?;
             let field = graph_key_string(&args[2])
                 .ok_or_else(|| "graph-node-value expects a field name".to_string())?;
-            resolved_graph_node_value(&state_for_graph_node_value, &manifest, instance, &field)
+            let key = GraphReadKey::Node { node: instance, field };
+            let result = resolve_graph_read(&state_for_graph_node_value, &manifest, &key);
+            track_graph_read(ctx, &manifest, &key, &result);
+            result
         },
     );
 
@@ -188,8 +199,9 @@ pub fn register_graph_authoring_natives(
     runtime.register_native_with_docs(
         "graph-param-value",
         "(graph-param-value sequencer node-index :threshold)",
-        "Return one resolved current-pattern graph node param value.",
-        move |args, _ctx| {
+        "Return one resolved current-pattern graph node param value. Tracked: a \
+         rendering effect re-runs when this value changes.",
+        move |args, ctx| {
             if args.len() != 3 {
                 return Err(
                     "graph-param-value expects graph id/name, node index, and param".to_string(),
@@ -199,7 +211,10 @@ pub fn register_graph_authoring_natives(
             let instance = parse_nonnegative_usize(&args[1], "node index")?;
             let param = graph_key_string(&args[2])
                 .ok_or_else(|| "graph-param-value expects a param name".to_string())?;
-            resolved_graph_param_value(&state_for_graph_param_value, &manifest, instance, &param)
+            let key = GraphReadKey::Param { node: instance, param };
+            let result = resolve_graph_read(&state_for_graph_param_value, &manifest, &key);
+            track_graph_read(ctx, &manifest, &key, &result);
+            result
         },
     );
 
@@ -207,8 +222,9 @@ pub fn register_graph_authoring_natives(
     runtime.register_native_with_docs(
         "graph-edge-value",
         "(graph-edge-value sequencer :from 0 :to 1 :weight)",
-        "Return one resolved current-pattern graph edge param value.",
-        move |args, _ctx| {
+        "Return one resolved current-pattern graph edge param value. Tracked per \
+         edge param: a rendering effect re-runs when this value changes.",
+        move |args, ctx| {
             if args.len() < 4 {
                 return Err(
                     "graph-edge-value expects graph, from/to coordinates, and param".to_string(),
@@ -216,11 +232,19 @@ pub fn register_graph_authoring_natives(
             }
             let manifest = resolve_graph_manifest(&state_for_graph_edge_value, &args[0])?;
             let query = parse_graph_edge_query(&manifest, &args[1..])?;
-            resolved_graph_edge_value(&state_for_graph_edge_value, &manifest, query)
+            let key = GraphReadKey::Edge {
+                from: query.from,
+                to: query.to,
+                param: query.param,
+            };
+            let result = resolve_graph_read(&state_for_graph_edge_value, &manifest, &key);
+            track_graph_read(ctx, &manifest, &key, &result);
+            result
         },
     );
 
     let state_for_graph_node = Arc::clone(&state);
+    let bindings_for_graph_node = runtime.reactive_binding_store();
     runtime.register_native_with_docs(
         "graph-node",
         "(graph-node sequencer node-index :delay 2 :route 0 :seed-from 1)",
@@ -242,12 +266,27 @@ pub fn register_graph_authoring_natives(
                 apply_graph_node_edit(node, edit);
                 Ok(())
             })?;
+            invalidate_graph_reads(
+                ctx,
+                &state_for_graph_node,
+                &manifest,
+                GraphReadScope::Node(instance),
+            );
+            for field in GRAPH_NODE_NUMERIC_FIELDS {
+                echo_graph_binding(
+                    ctx,
+                    &bindings_for_graph_node,
+                    graph_node_reactive_field(manifest.id, instance, field),
+                    graph_node_numeric_value(&state_for_graph_node, &manifest, instance, field),
+                );
+            }
             ctx.set_status(format!("updated graph '{sequencer_name}' node {instance}"));
             Ok(EValue::Bool(true))
         },
     );
 
     let state_for_graph_param = Arc::clone(&state);
+    let bindings_for_graph_param = runtime.reactive_binding_store();
     runtime.register_native_with_docs(
         "graph-param",
         "(graph-param sequencer node-index :threshold 0.75)",
@@ -269,6 +308,18 @@ pub fn register_graph_authoring_natives(
                 upsert_graph_node_param(graph, &manifest.node.name, instance, &param, value);
                 Ok(())
             })?;
+            invalidate_graph_reads(
+                ctx,
+                &state_for_graph_param,
+                &manifest,
+                GraphReadScope::Node(instance),
+            );
+            echo_graph_binding(
+                ctx,
+                &bindings_for_graph_param,
+                graph_node_reactive_field(manifest.id, instance, &param),
+                graph_node_numeric_value(&state_for_graph_param, &manifest, instance, &param),
+            );
             ctx.set_status(format!(
                 "updated graph '{sequencer_name}' node {instance} param {param}"
             ));
@@ -277,6 +328,7 @@ pub fn register_graph_authoring_natives(
     );
 
     let state_for_graph_edge = Arc::clone(&state);
+    let bindings_for_graph_edge = runtime.reactive_binding_store();
     runtime.register_native_with_docs(
         "graph-edge",
         "(graph-edge sequencer :from 0 :to 1 :weight 0.5)",
@@ -289,11 +341,37 @@ pub fn register_graph_authoring_natives(
             let edit = parse_graph_edge_edit(&manifest, &args[1..])?;
             let sequencer_name = manifest.name.clone();
             let param_name = edit.param.clone();
+            let (from, to, group) = (edit.from, edit.to, edit.group.clone());
             state_for_graph_edge.edit_current_graph_overrides(|graphs| {
                 let graph = ensure_graph_overrides(graphs, &manifest);
                 upsert_graph_edge_param(graph, edit);
                 Ok(())
             })?;
+            invalidate_graph_reads(
+                ctx,
+                &state_for_graph_edge,
+                &manifest,
+                GraphReadScope::Edge { from, to },
+            );
+            let resolved = resolved_graph_edge_value(
+                &state_for_graph_edge,
+                &manifest,
+                GraphEdgeQuery {
+                    group,
+                    from,
+                    to,
+                    param: param_name.clone(),
+                },
+            )
+            .and_then(|value| {
+                graph_number(&value).ok_or_else(|| "edge param is not numeric".to_string())
+            });
+            echo_graph_binding(
+                ctx,
+                &bindings_for_graph_edge,
+                graph_edge_reactive_field(manifest.id, from, to, &param_name),
+                resolved,
+            );
             ctx.set_status(format!(
                 "updated graph '{sequencer_name}' edge {param_name}"
             ));
@@ -320,6 +398,13 @@ pub fn register_graph_authoring_natives(
             }
             let field = graph_key_string(&args[2])
                 .ok_or_else(|| "bind-graph expects a field name".to_string())?;
+            if args.get(3).is_some() {
+                note_option_bound_graph_field(&graph_node_reactive_field(
+                    manifest.id,
+                    instance,
+                    &field,
+                ));
+            }
             let value = match args.get(3) {
                 // A route is already an index into the route option list
                 // (track n / rack member n at position n), with "Off" as the
@@ -353,6 +438,47 @@ pub fn register_graph_authoring_natives(
                 graph_node_reactive_field(manifest.id, instance, &field),
                 value,
             ))
+        },
+    );
+
+    let state_for_node_notes = Arc::clone(&state);
+    let bindings_for_node_notes = runtime.reactive_binding_store();
+    runtime.register_native_with_docs(
+        "bind-graph-node-notes",
+        "(bind-graph-node-notes sequencer node-index)",
+        "Bindings to the notes a graph node is sounding right now: a map with \
+         :count, :values and :levels (velocities; NODE_SOUNDING_DISPLAY element \
+         bindings each), shaped for \
+         `number-list`. The host republishes them from the audio clock, so a bound \
+         widget repaints without re-running Lisp.",
+        move |args, _ctx| {
+            if args.len() != 2 {
+                return Err("bind-graph-node-notes expects graph and node index".to_string());
+            }
+            let manifest = resolve_graph_manifest(&state_for_node_notes, &args[0])?;
+            let node = parse_nonnegative_usize(&args[1], "node index")?;
+            let field = crate::graph::node_sounding_field(manifest.id);
+            let base = node * crate::graph::NODE_SOUNDING_STRIDE;
+            let display = crate::graph::NODE_SOUNDING_DISPLAY;
+            let refs = |first: usize| -> EValue {
+                EValue::List(
+                    (first..first + display)
+                        .map(|index| {
+                            lisp_value(bindings_for_node_notes.indexed_float_ref("SEQ", field.clone(), index))
+                        })
+                        .collect(),
+                )
+            };
+            let values = refs(base + 1);
+            let levels = refs(base + 1 + display);
+            let mut map = HashMap::new();
+            map.insert(
+                "count".to_string(),
+                lisp_value(bindings_for_node_notes.indexed_float_ref("SEQ", field.clone(), base)),
+            );
+            map.insert("values".to_string(), lisp_value(values));
+            map.insert("levels".to_string(), lisp_value(levels));
+            Ok(EValue::Map(map))
         },
     );
 
@@ -450,18 +576,22 @@ pub fn register_graph_authoring_natives(
         "graph-config-value",
         "(graph-config-value sequencer :reset-bars)",
         "Resolved sequencer-level config, override-or-manifest. Fields: :reset-bars, :max-poly, :max-poly-selection, :node-count, :group-trace-decay, :group-coupling-scale, :group-excite-floor, and the neural-group matrix cells :group-gain-<row>-<col> (default 1) / :group-coupling-<row>-<col> (default 0), row = source group, col = target group.",
-        move |args, _ctx| {
+        move |args, ctx| {
             if args.len() != 2 {
                 return Err("graph-config-value expects graph and field".to_string());
             }
             let manifest = resolve_graph_manifest(&state_for_graph_config_value, &args[0])?;
             let field = graph_key_string(&args[1])
                 .ok_or_else(|| "graph-config-value expects a field name".to_string())?;
-            resolved_graph_config_value(&state_for_graph_config_value, &manifest, &field)
+            let key = GraphReadKey::Config { field };
+            let result = resolve_graph_read(&state_for_graph_config_value, &manifest, &key);
+            track_graph_read(ctx, &manifest, &key, &result);
+            result
         },
     );
 
     let state_for_graph_config = Arc::clone(&state);
+    let bindings_for_graph_config = runtime.reactive_binding_store();
     runtime.register_native_with_docs(
         "graph-config",
         "(graph-config sequencer :reset-bars 4)",
@@ -475,6 +605,15 @@ pub fn register_graph_authoring_natives(
                 .ok_or_else(|| "graph-config expects a field name".to_string())?;
             let sequencer_name = manifest.name.clone();
             set_graph_config_value(&state_for_graph_config, &manifest, &field, &args[2])?;
+            // Config can move anything (`:node-count` changes which nodes and
+            // edges exist), so every tracked read of this graph re-resolves.
+            invalidate_graph_reads(ctx, &state_for_graph_config, &manifest, GraphReadScope::All);
+            echo_graph_binding(
+                ctx,
+                &bindings_for_graph_config,
+                graph_config_reactive_field(manifest.id, &field),
+                graph_config_numeric_value(&state_for_graph_config, &manifest, &field),
+            );
             ctx.set_status(format!("updated graph '{sequencer_name}' config {field}"));
             Ok(EValue::Bool(true))
         },
@@ -512,6 +651,9 @@ pub fn register_graph_authoring_natives(
             let manifest = resolve_graph_manifest(&state_for_bind_graph_config, &args[0])?;
             let field = graph_key_string(&args[1])
                 .ok_or_else(|| "bind-graph-config expects a field name".to_string())?;
+            if args.get(2).is_some() {
+                note_option_bound_graph_field(&graph_config_reactive_field(manifest.id, &field));
+            }
             let value = match args.get(2) {
                 Some(options) => {
                     let display = graph_config_display_value(
@@ -606,6 +748,309 @@ fn graph_capacity_node_count(manifest: &crate::graph::GraphManifest) -> usize {
 /// bind widgets directly (`bind-graph`) instead of shadowing every knob in a
 /// per-node `defstate`. Writes flow back via `reactive-set` + `graph-*` setters.
 const GRAPH_REACTIVE_NS: &str = "GRAPH";
+
+/// Host-owned reactive namespace behind the tracked graph reads
+/// (docs/instance-kinds-spec.md §6). `graph-node-value`, `graph-param-value`,
+/// `graph-edge-value`, `graph-config-value`, `graph-node-process-chain` and
+/// `graph-node-lane-patch` each inject one dependency per (graph instance,
+/// node/edge/config field) read, so a rendering effect re-runs when exactly
+/// what it read changes. The generation a source carries is the resolved
+/// value itself (a fingerprint for lists), so an invalidation that resolves
+/// to the same value dirties nothing. Lisp `graph-*` writes invalidate the
+/// fields they can change before the handler returns; every other change
+/// (pattern switch, kit load, Rust-side edits) is swept by
+/// [`queue_graph_read_invalidations`] from the UI tick.
+pub const GRAPH_READ_REACTIVE_NAMESPACE: &str = "__graph";
+
+/// One tracked graph read. Field strings (`graph_read_field`) round-trip
+/// through `parse_graph_read_field`, so the host sweep can re-resolve any
+/// subscribed field from its name alone.
+#[derive(Clone, Debug, PartialEq)]
+enum GraphReadKey {
+    Node { node: usize, field: String },
+    Param { node: usize, param: String },
+    Edge { from: usize, to: usize, param: String },
+    Config { field: String },
+    Process { node: usize },
+}
+
+/// Which tracked reads one write can change.
+#[derive(Clone, Copy, Debug)]
+enum GraphReadScope {
+    /// Node intrinsics and node params of one node.
+    Node(usize),
+    Edge { from: usize, to: usize },
+    Process(usize),
+    All,
+}
+
+impl GraphReadScope {
+    fn covers(self, key: &GraphReadKey) -> bool {
+        match (self, key) {
+            (GraphReadScope::All, _) => true,
+            (
+                GraphReadScope::Node(target),
+                GraphReadKey::Node { node, .. } | GraphReadKey::Param { node, .. },
+            ) => *node == target,
+            (GraphReadScope::Edge { from, to }, GraphReadKey::Edge { from: f, to: t, .. }) => {
+                *f == from && *t == to
+            }
+            (GraphReadScope::Process(target), GraphReadKey::Process { node }) => *node == target,
+            _ => false,
+        }
+    }
+}
+
+fn graph_read_field(manifest_id: u64, key: &GraphReadKey) -> String {
+    match key {
+        GraphReadKey::Node { node, field } => format!("{manifest_id}|n{node}|{field}"),
+        GraphReadKey::Param { node, param } => format!("{manifest_id}|p{node}|{param}"),
+        GraphReadKey::Edge { from, to, param } => format!("{manifest_id}|e{from}_{to}|{param}"),
+        GraphReadKey::Config { field } => format!("{manifest_id}|cfg|{field}"),
+        GraphReadKey::Process { node } => format!("{manifest_id}|proc{node}"),
+    }
+}
+
+fn parse_graph_read_field(field: &str) -> Option<(u64, GraphReadKey)> {
+    let mut parts = field.splitn(3, '|');
+    let manifest_id = parts.next()?.parse().ok()?;
+    let kind = parts.next()?;
+    let rest = parts.next();
+    let key = if kind == "cfg" {
+        GraphReadKey::Config {
+            field: rest?.to_string(),
+        }
+    } else if let Some(node) = kind.strip_prefix("proc") {
+        if rest.is_some() {
+            return None;
+        }
+        GraphReadKey::Process {
+            node: node.parse().ok()?,
+        }
+    } else if let Some(node) = kind.strip_prefix('n') {
+        GraphReadKey::Node {
+            node: node.parse().ok()?,
+            field: rest?.to_string(),
+        }
+    } else if let Some(node) = kind.strip_prefix('p') {
+        GraphReadKey::Param {
+            node: node.parse().ok()?,
+            param: rest?.to_string(),
+        }
+    } else if let Some(pair) = kind.strip_prefix('e') {
+        let (from, to) = pair.split_once('_')?;
+        GraphReadKey::Edge {
+            from: from.parse().ok()?,
+            to: to.parse().ok()?,
+            param: rest?.to_string(),
+        }
+    } else {
+        return None;
+    };
+    Some((manifest_id, key))
+}
+
+/// The node's authored process chain for the current pattern (empty when
+/// the node has none).
+fn graph_node_process_chain(
+    state: &crate::sequencer::SequencerState,
+    manifest: &crate::graph::GraphManifest,
+    instance: usize,
+) -> crate::process::TrackProcessChain {
+    state
+        .current_graph_overrides()
+        .iter()
+        .find(|o| manifest.matches_overrides(o))
+        .and_then(|o| {
+            o.node_intrinsics
+                .iter()
+                .find(|n| n.group == manifest.node.name && n.instance == instance)
+        })
+        .and_then(|n| n.process_chain.clone())
+        .unwrap_or_default()
+}
+
+fn graph_fingerprint(text: &str) -> EValue {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut hasher);
+    EValue::String(format!("\u{1}#{:016x}", hasher.finish()))
+}
+
+/// Resolve one tracked read the way its native does. A process read
+/// resolves to a fingerprint of the chain plus the published process
+/// library version (slot maps embed the class definitions).
+fn resolve_graph_read(
+    state: &crate::sequencer::SequencerState,
+    manifest: &crate::graph::GraphManifest,
+    key: &GraphReadKey,
+) -> Result<EValue, String> {
+    match key {
+        GraphReadKey::Node { node, field } => {
+            resolved_graph_node_value(state, manifest, *node, field)
+        }
+        GraphReadKey::Param { node, param } => {
+            resolved_graph_param_value(state, manifest, *node, param)
+        }
+        GraphReadKey::Edge { from, to, param } => {
+            let group = manifest
+                .edge_sets
+                .first()
+                .map(crate::graph::edge_set_group_id)
+                .unwrap_or_default();
+            resolved_graph_edge_value(
+                state,
+                manifest,
+                GraphEdgeQuery {
+                    group,
+                    from: *from,
+                    to: *to,
+                    param: param.clone(),
+                },
+            )
+        }
+        GraphReadKey::Config { field } => resolved_graph_config_value(state, manifest, field),
+        GraphReadKey::Process { node } => {
+            let chain = graph_node_process_chain(state, manifest, *node);
+            Ok(graph_fingerprint(&format!(
+                "{}|{chain:?}",
+                state.published_process_authoring_version()
+            )))
+        }
+    }
+}
+
+/// A scalar generation for a resolved read: scalars stand for themselves,
+/// compound values and errors are fingerprinted (a scalar generation keeps
+/// the DAG's change test whole-value rather than per-index).
+fn graph_read_generation(result: &Result<EValue, String>) -> EValue {
+    match result {
+        Ok(value @ (EValue::Number(_) | EValue::Bool(_) | EValue::Nil | EValue::Keyword(_))) => {
+            value.clone()
+        }
+        Ok(EValue::String(text)) => EValue::String(text.clone()),
+        Ok(other) => graph_fingerprint(&eseqlisp::vm::format_lisp_value(other)),
+        Err(error) => EValue::String(format!("\u{1}error:{error}")),
+    }
+}
+
+/// Record that the rendering effect read `key` of `manifest` and observed
+/// `result`.
+fn track_graph_read(
+    ctx: &mut eseqlisp::NativeContext,
+    manifest: &crate::graph::GraphManifest,
+    key: &GraphReadKey,
+    result: &Result<EValue, String>,
+) {
+    ctx.track_reactive_read_with_generation(
+        GRAPH_READ_REACTIVE_NAMESPACE,
+        graph_read_field(manifest.id, key),
+        graph_read_generation(result),
+    );
+}
+
+/// After a Lisp graph write, re-resolve every subscribed read of this graph
+/// that `scope` covers; readers whose value changed re-run in this handler's
+/// reactive pass.
+fn invalidate_graph_reads(
+    ctx: &mut eseqlisp::NativeContext,
+    state: &Arc<crate::sequencer::SequencerState>,
+    manifest: &crate::graph::GraphManifest,
+    scope: GraphReadScope,
+) {
+    let state = Arc::clone(state);
+    let manifest = manifest.clone();
+    ctx.invalidate_subscribed_reactive_fields(GRAPH_READ_REACTIVE_NAMESPACE, move |field| {
+        let (manifest_id, key) = parse_graph_read_field(field)?;
+        if manifest_id != manifest.id || !scope.covers(&key) {
+            return None;
+        }
+        Some(graph_read_generation(&resolve_graph_read(&state, &manifest, &key)))
+    });
+}
+
+/// Keep a `bind-graph*` handle in step with a write made through a `graph-*`
+/// native, so Lisp no longer echoes it with `reactive-set "GRAPH"`. Only
+/// fields someone bound are echoed, and only numeric ones: an enum binding
+/// holds an index into the caller's own options list, which the write
+/// cannot know.
+fn echo_graph_binding(
+    ctx: &mut eseqlisp::NativeContext,
+    bindings: &eseqlisp::reactive::ReactiveBindingStore,
+    field: String,
+    value: Result<f64, String>,
+) {
+    let Ok(value) = value else {
+        return;
+    };
+    if OPTION_BOUND_GRAPH_FIELDS.with(|fields| fields.borrow().contains(&field)) {
+        return;
+    }
+    if bindings.has_field(GRAPH_REACTIVE_NS, &field) {
+        ctx.reactive_set(GRAPH_REACTIVE_NS, field, EValue::Number(value));
+    }
+}
+
+thread_local! {
+    // GRAPH fields some `bind-graph*` call bound through an options list:
+    // their slot holds a dropdown index, not the value, so writes never echo
+    // a number into them.
+    static OPTION_BOUND_GRAPH_FIELDS: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+}
+
+fn note_option_bound_graph_field(field: &str) {
+    OPTION_BOUND_GRAPH_FIELDS.with(|fields| {
+        if !fields.borrow().contains(field) {
+            fields.borrow_mut().insert(field.to_string());
+        }
+    });
+}
+
+/// Node fields `bind-graph` serves as plain numbers (see
+/// `graph_node_numeric_value`); a `graph-node` write echoes the bound ones.
+const GRAPH_NODE_NUMERIC_FIELDS: &[&str] = &[
+    "delay",
+    "delay-steps",
+    "seed-on-reset",
+    "reset-seed",
+    "seed-route",
+    "seed-from-route",
+    "group",
+    "grp",
+];
+
+/// Re-resolve every subscribed graph read against current state and queue
+/// the changed ones for the next reactive cycle. The UI tick calls this
+/// whenever the pattern, the published scheduler snapshot or the published
+/// sequencer set moves, which covers every graph change not made through a
+/// Lisp `graph-*` write (those invalidate synchronously). Returns whether any
+/// read is subscribed, i.e. whether a reactive cycle has work to consider.
+pub fn queue_graph_read_invalidations(
+    runtime: &mut Runtime,
+    state: &crate::sequencer::SequencerState,
+) -> bool {
+    let mut manifests: Option<HashMap<u64, crate::graph::GraphManifest>> = None;
+    let mut queued = false;
+    runtime.queue_reactive_namespace_invalidation(GRAPH_READ_REACTIVE_NAMESPACE, |field| {
+        queued = true;
+        let Some((manifest_id, key)) = parse_graph_read_field(field) else {
+            return EValue::Nil;
+        };
+        let manifests = manifests.get_or_insert_with(|| {
+            state
+                .published_sequencers()
+                .into_iter()
+                .filter_map(|published| published.graph)
+                .map(|manifest| (manifest.id, manifest))
+                .collect()
+        });
+        match manifests.get(&manifest_id) {
+            Some(manifest) => graph_read_generation(&resolve_graph_read(state, manifest, &key)),
+            None => EValue::String("\u{1}missing".to_string()),
+        }
+    });
+    queued
+}
 
 struct GraphConfigCacheEntry {
     manifest_id: u64,
@@ -1268,6 +1713,15 @@ fn resolve_graph_manifest(
     reference: &EValue,
 ) -> Result<crate::graph::GraphManifest, String> {
     let published = state.published_sequencers();
+    // An instance value (`self`) is its sequencer id (instance-kinds spec §4).
+    let instance_id;
+    let reference = match reference {
+        EValue::Instance(id) => {
+            instance_id = EValue::Number(*id as f64);
+            &instance_id
+        }
+        other => other,
+    };
     match reference {
         EValue::Number(id) if id.is_finite() && *id >= 0.0 => {
             let id = *id as u64;
@@ -1720,6 +2174,78 @@ fn claim_graph_node_process_id(id: u64) {
     GRAPH_NODE_PROCESS_ID_HIGH_WATER.fetch_max(id + 1, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// Hands node process slots copied to another instance fresh slot ids
+/// (instance-kinds spec §5, §9). The scheduler keys a node slot's runtime
+/// state by its `instance_id` alone, never by graph, so a duplicate or a
+/// kit loaded twice that kept the source's slot ids would share counters,
+/// accumulators and rand streams with it. One reminter maps each
+/// `(scope, old slot id)` to one new id, so every copy of one instance's
+/// chain (one per scene or clip) keeps a single identity, and rewrites the
+/// `ProcessInlet` wires and fan-out cables into those slots to match.
+pub struct GraphNodeProcessReminter {
+    next: u64,
+    map: HashMap<(u64, u64), u64>,
+}
+
+impl GraphNodeProcessReminter {
+    /// `existing` is every override the project holds, so a minted id never
+    /// collides with a saved slot; the session high-water covers the rest.
+    pub fn new<'a>(existing: impl IntoIterator<Item = &'a crate::graph::ProjectGraphOverrides>) -> Self {
+        let mut next = next_graph_node_process_id(&[]);
+        for graph in existing {
+            next = next.max(next_graph_node_process_id(std::slice::from_ref(graph)));
+        }
+        Self { next, map: HashMap::new() }
+    }
+
+    /// Re-mint every node slot id in `graph`. `scope` groups the copies
+    /// that must agree (the new instance id).
+    pub fn remint(&mut self, scope: u64, graph: &mut crate::graph::ProjectGraphOverrides) {
+        let mut local: HashMap<u64, u64> = HashMap::new();
+        for node in &mut graph.node_intrinsics {
+            let Some(chain) = node.process_chain.as_mut() else {
+                continue;
+            };
+            for slot in &mut chain.slots {
+                let old = slot.instance_id.0;
+                let new = *self.map.entry((scope, old)).or_insert_with(|| {
+                    let id = self.next;
+                    self.next += 1;
+                    claim_graph_node_process_id(id);
+                    id
+                });
+                local.insert(old, new);
+                slot.instance_id = crate::process::ProcessInstanceId(new);
+            }
+        }
+        if local.is_empty() {
+            return;
+        }
+        let rewrite = |target: &mut crate::process::ParamTarget| {
+            if let crate::process::ParamTarget::ProcessInlet { instance_id: Some(id), .. } = target {
+                if let Some(new) = local.get(&id.0) {
+                    *id = crate::process::ProcessInstanceId(*new);
+                }
+            }
+        };
+        for node in &mut graph.node_intrinsics {
+            let Some(chain) = node.process_chain.as_mut() else {
+                continue;
+            };
+            for slot in &mut chain.slots {
+                for target in slot.bindings.values_mut().flatten() {
+                    rewrite(target);
+                }
+                for entries in slot.fanout.values_mut() {
+                    for entry in entries {
+                        rewrite(&mut entry.target);
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn graph_node_process_def(
     state: &crate::sequencer::SequencerState,
     class_name: &str,
@@ -1747,13 +2273,13 @@ pub fn graph_node_process_label(class_name: &str) -> String {
 }
 
 /// Classes whose only effect is a command the node runner ignores
-/// (ratchet / roll), or that read the track's painted steps: hidden from the
+/// (ratchet / roll / pattern length), or that read the track's painted steps: hidden from the
 /// node picker so the list is what actually does something on a fire.
 /// `lane-reset` only sends when its own gate lane is high, and nodes have no
 /// lanes; it also shows as "reset", the same as `neural-reset`, which is the
 /// node's real reset (its `fired` port rises after a bar/graph reset).
-pub const GRAPH_NODE_HIDDEN_PROCESS_CLASSES: [&str; 4] =
-    ["lane-roll", "repeater", "lane-grab", "lane-reset"];
+pub const GRAPH_NODE_HIDDEN_PROCESS_CLASSES: [&str; 5] =
+    ["lane-roll", "repeater", "lane-grab", "lane-reset", "lane-length"];
 
 fn graph_node_process_inlet_kind_value(kind: &crate::process::ProcessInletKind) -> EValue {
     use crate::process::ProcessInletKind::*;
@@ -1909,14 +2435,17 @@ fn graph_node_process_id_arg(value: Option<&EValue>, native: &str) -> Result<cra
     Ok(crate::process::ProcessInstanceId(id as u64))
 }
 
-/// Edit one node's chain in place; `edit` returns `Err` to reject.
+/// Edit one node's chain in place; `edit` returns `Err` to reject. A
+/// successful edit re-runs the effects that read this node's chain
+/// (`graph-node-process-chain` / `graph-node-lane-patch`).
 fn edit_graph_node_process_chain<R>(
-    state: &crate::sequencer::SequencerState,
+    ctx: &mut eseqlisp::NativeContext,
+    state: &Arc<crate::sequencer::SequencerState>,
     manifest: &crate::graph::GraphManifest,
     instance: usize,
     edit: impl FnOnce(&mut crate::process::TrackProcessChain, u64) -> Result<R, String>,
 ) -> Result<R, String> {
-    state.edit_current_graph_overrides(|graphs| {
+    let result = state.edit_current_graph_overrides(|graphs| {
         let next_id = next_graph_node_process_id(graphs);
         let graph = ensure_graph_overrides(graphs, manifest);
         let node = ensure_graph_node_intrinsic(graph, &manifest.node.name, instance);
@@ -1924,7 +2453,9 @@ fn edit_graph_node_process_chain<R>(
         let result = edit(&mut chain, next_id)?;
         node.process_chain = if chain.slots.is_empty() { None } else { Some(chain) };
         Ok(result)
-    })
+    })?;
+    invalidate_graph_reads(ctx, state, manifest, GraphReadScope::Process(instance));
+    Ok(result)
 }
 
 /// Cable ids for node patches live above every track: the lane patchbay
@@ -1933,6 +2464,31 @@ fn edit_graph_node_process_chain<R>(
 pub const GRAPH_NODE_LANE_PATCH_NAMESPACE_BASE: usize = 1024;
 const LANE_PATCH_PORT_STRIDE: usize = 16;
 const LANE_PATCH_TRACK_STRIDE: usize = 4096;
+/// Node namespaces one graph spans (`graph_node_lane_patch_namespace`).
+pub const GRAPH_NODE_LANE_PATCH_NODE_STRIDE: usize = 4096;
+/// Graph slots below this are graph ids used as-is (kind instance ids count
+/// up from 1); larger ids (legacy name hashes) fold into
+/// `[DIRECT, 2 * DIRECT)`. Keeps the largest port id
+/// (`(ns * 4096 + slot) * 16 + ordinal`) under 2^53, exact in a Lisp f64.
+const GRAPH_NODE_LANE_PATCH_DIRECT_GRAPH_SLOTS: u64 = 1 << 23;
+
+/// The lane patch-bay namespace of node `node` of graph `graph_id`
+/// (instance-kinds spec §7, fixing §1.7): every graph owns its own band of
+/// `GRAPH_NODE_LANE_PATCH_NODE_STRIDE` namespaces above the tracks, so node
+/// k of two graphs (two instances of one kind) never shares cable ids or a
+/// patch target. Instance ids map one-to-one; two legacy hashed ids can
+/// only collide if their hashes agree modulo 2^23.
+pub fn graph_node_lane_patch_namespace(graph_id: u64, node: usize) -> usize {
+    let direct = GRAPH_NODE_LANE_PATCH_DIRECT_GRAPH_SLOTS;
+    let slot = if graph_id < direct {
+        graph_id
+    } else {
+        direct + graph_id % direct
+    };
+    GRAPH_NODE_LANE_PATCH_NAMESPACE_BASE
+        + slot as usize * GRAPH_NODE_LANE_PATCH_NODE_STRIDE
+        + node.min(GRAPH_NODE_LANE_PATCH_NODE_STRIDE - 1)
+}
 
 fn lane_patch_port_id(namespace: usize, slot_index: usize, ordinal: usize) -> usize {
     (namespace * LANE_PATCH_TRACK_STRIDE + slot_index) * LANE_PATCH_PORT_STRIDE + ordinal
@@ -2114,19 +2670,11 @@ fn register_graph_node_process_natives(
         "graph-node-process-chain",
         "(graph-node-process-chain sequencer node-index)",
         "The node's process patch as a list of slot maps: :instance-id :class :enabled :doc :inlets (name -> value) :inlet-defs (name kind min max default lane options doc) :ports (name connectable mappable hint unbound wired-to {:instance-id :inlet} mapped-to step-param-name-or-nil).",
-        move |args, _ctx| {
+        move |args, ctx| {
             let (manifest, instance) = graph_node_process_args(&st, "graph-node-process-chain", &args)?;
-            let overrides = st.current_graph_overrides();
-            let chain = overrides
-                .iter()
-                .find(|o| manifest.matches_overrides(o))
-                .and_then(|o| {
-                    o.node_intrinsics
-                        .iter()
-                        .find(|n| n.group == manifest.node.name && n.instance == instance)
-                })
-                .and_then(|n| n.process_chain.clone())
-                .unwrap_or_default();
+            let chain = graph_node_process_chain(&st, &manifest, instance);
+            let key = GraphReadKey::Process { node: instance };
+            track_graph_read(ctx, &manifest, &key, &resolve_graph_read(&st, &manifest, &key));
             Ok(lisp_list(
                 chain
                     .slots
@@ -2153,7 +2701,7 @@ fn register_graph_node_process_natives(
             {
                 return Err(format!("graph-node-process-add: unknown process class {class_name:?}"));
             }
-            let id = edit_graph_node_process_chain(&st, &manifest, instance, |chain, next_id| {
+            let id = edit_graph_node_process_chain(ctx, &st, &manifest, instance, |chain, next_id| {
                 chain.slots.push(crate::process::TrackProcessSlot {
                     instance_id: crate::process::ProcessInstanceId(next_id),
                     instance_name: None,
@@ -2179,10 +2727,10 @@ fn register_graph_node_process_natives(
         "graph-node-process-remove",
         "(graph-node-process-remove sequencer node-index instance-id)",
         "Remove one slot from the node's patch and drop every wire and fan-out cable into it.",
-        move |args, _ctx| {
+        move |args, ctx| {
             let (manifest, instance) = graph_node_process_args(&st, "graph-node-process-remove", &args)?;
             let id = graph_node_process_id_arg(args.get(2), "graph-node-process-remove")?;
-            edit_graph_node_process_chain(&st, &manifest, instance, |chain, _| {
+            edit_graph_node_process_chain(ctx, &st, &manifest, instance, |chain, _| {
                 let before = chain.slots.len();
                 chain.slots.retain(|slot| slot.instance_id != id);
                 let targets_removed = |target: &crate::process::ParamTarget| {
@@ -2212,11 +2760,11 @@ fn register_graph_node_process_natives(
         "graph-node-process-enable",
         "(graph-node-process-enable sequencer node-index instance-id enabled)",
         "Enable or bypass one slot in the node's patch.",
-        move |args, _ctx| {
+        move |args, ctx| {
             let (manifest, instance) = graph_node_process_args(&st, "graph-node-process-enable", &args)?;
             let id = graph_node_process_id_arg(args.get(2), "graph-node-process-enable")?;
             let enabled = !matches!(args.get(3), Some(EValue::Bool(false)) | Some(EValue::Nil) | None);
-            edit_graph_node_process_chain(&st, &manifest, instance, |chain, _| {
+            edit_graph_node_process_chain(ctx, &st, &manifest, instance, |chain, _| {
                 let slot = chain
                     .slots
                     .iter_mut()
@@ -2234,11 +2782,11 @@ fn register_graph_node_process_natives(
         "graph-node-process-move",
         "(graph-node-process-move sequencer node-index instance-id delta)",
         "Move one slot earlier (negative) or later (positive) in the node's patch. Order is run order.",
-        move |args, _ctx| {
+        move |args, ctx| {
             let (manifest, instance) = graph_node_process_args(&st, "graph-node-process-move", &args)?;
             let id = graph_node_process_id_arg(args.get(2), "graph-node-process-move")?;
             let delta = args.get(3).and_then(graph_number).unwrap_or(0.0) as i64;
-            edit_graph_node_process_chain(&st, &manifest, instance, |chain, _| {
+            edit_graph_node_process_chain(ctx, &st, &manifest, instance, |chain, _| {
                 let from = chain
                     .slots
                     .iter()
@@ -2258,7 +2806,7 @@ fn register_graph_node_process_natives(
         "graph-node-process-inlet",
         "(graph-node-process-inlet sequencer node-index instance-id inlet value)",
         "Set a scalar inlet on one slot of the node's patch. On a node every inlet is a scalar (no lanes); a wired inlet reads its wire instead.",
-        move |args, _ctx| {
+        move |args, ctx| {
             let (manifest, instance) = graph_node_process_args(&st, "graph-node-process-inlet", &args)?;
             let id = graph_node_process_id_arg(args.get(2), "graph-node-process-inlet")?;
             let inlet = args
@@ -2269,7 +2817,7 @@ fn register_graph_node_process_natives(
                 .get(4)
                 .ok_or_else(|| "graph-node-process-inlet expects a value".to_string())?;
             let literal = crate::process::ProcessLiteral::from_value(value)?;
-            edit_graph_node_process_chain(&st, &manifest, instance, |chain, _| {
+            edit_graph_node_process_chain(ctx, &st, &manifest, instance, |chain, _| {
                 let slot = chain
                     .slots
                     .iter_mut()
@@ -2287,7 +2835,7 @@ fn register_graph_node_process_natives(
         "graph-node-process-wire",
         "(graph-node-process-wire sequencer node-index from-id port to-id inlet)",
         "Wire a connectable port of one slot into an inlet of another slot in the same node patch (the primary binding; a wire pointing up the chain lands next fire, like the track patch bay).",
-        move |args, _ctx| {
+        move |args, ctx| {
             let (manifest, instance) = graph_node_process_args(&st, "graph-node-process-wire", &args)?;
             let from = graph_node_process_id_arg(args.get(2), "graph-node-process-wire")?;
             let port = args
@@ -2300,7 +2848,7 @@ fn register_graph_node_process_natives(
                 .and_then(graph_key_string)
                 .ok_or_else(|| "graph-node-process-wire expects an inlet name".to_string())?;
             let st_inner = Arc::clone(&st);
-            edit_graph_node_process_chain(&st, &manifest, instance, |chain, _| {
+            edit_graph_node_process_chain(ctx, &st, &manifest, instance, |chain, _| {
                 let from_pos = chain.slots.iter().position(|s| s.instance_id == from)
                     .ok_or_else(|| format!("graph-node-process-wire: no source slot {}", from.0))?;
                 let to_pos = chain.slots.iter().position(|s| s.instance_id == to)
@@ -2347,14 +2895,14 @@ fn register_graph_node_process_natives(
         "graph-node-process-unwire",
         "(graph-node-process-unwire sequencer node-index instance-id port)",
         "Drop the wire out of one port of a slot in the node's patch.",
-        move |args, _ctx| {
+        move |args, ctx| {
             let (manifest, instance) = graph_node_process_args(&st, "graph-node-process-unwire", &args)?;
             let id = graph_node_process_id_arg(args.get(2), "graph-node-process-unwire")?;
             let port = args
                 .get(3)
                 .and_then(graph_key_string)
                 .ok_or_else(|| "graph-node-process-unwire expects a port name".to_string())?;
-            edit_graph_node_process_chain(&st, &manifest, instance, |chain, _| {
+            edit_graph_node_process_chain(ctx, &st, &manifest, instance, |chain, _| {
                 let slot = chain
                     .slots
                     .iter_mut()
@@ -2373,7 +2921,7 @@ fn register_graph_node_process_natives(
         "graph-node-process-fanout-add",
         "(graph-node-process-fanout-add sequencer node-index from-id port to-id inlet)",
         "Add a fan-out cable out of a connectable port into another slot's inlet (identity range, the value passes through); returns the new fan-out index.",
-        move |args, _ctx| {
+        move |args, ctx| {
             let (manifest, instance) = graph_node_process_args(&st, "graph-node-process-fanout-add", &args)?;
             let from = graph_node_process_id_arg(args.get(2), "graph-node-process-fanout-add")?;
             let port = args
@@ -2386,7 +2934,7 @@ fn register_graph_node_process_natives(
                 .and_then(graph_key_string)
                 .ok_or_else(|| "graph-node-process-fanout-add expects an inlet name".to_string())?;
             let st_inner = Arc::clone(&st);
-            let index = edit_graph_node_process_chain(&st, &manifest, instance, |chain, _| {
+            let index = edit_graph_node_process_chain(ctx, &st, &manifest, instance, |chain, _| {
                 let from_pos = chain.slots.iter().position(|s| s.instance_id == from)
                     .ok_or_else(|| format!("graph-node-process-fanout-add: no source slot {}", from.0))?;
                 let to_pos = chain.slots.iter().position(|s| s.instance_id == to)
@@ -2430,7 +2978,7 @@ fn register_graph_node_process_natives(
         "graph-node-process-fanout-remove",
         "(graph-node-process-fanout-remove sequencer node-index instance-id port index)",
         "Remove one fan-out cable (by index) out of a port of a slot in the node's patch.",
-        move |args, _ctx| {
+        move |args, ctx| {
             let (manifest, instance) = graph_node_process_args(&st, "graph-node-process-fanout-remove", &args)?;
             let id = graph_node_process_id_arg(args.get(2), "graph-node-process-fanout-remove")?;
             let port = args
@@ -2441,7 +2989,7 @@ fn register_graph_node_process_natives(
                 args.get(4).ok_or_else(|| "graph-node-process-fanout-remove expects an index".to_string())?,
                 "fan-out index",
             )?;
-            edit_graph_node_process_chain(&st, &manifest, instance, |chain, _| {
+            edit_graph_node_process_chain(ctx, &st, &manifest, instance, |chain, _| {
                 let slot = chain
                     .slots
                     .iter_mut()
@@ -2469,7 +3017,7 @@ fn register_graph_node_process_natives(
         "graph-node-process-map",
         "(graph-node-process-map sequencer node-index instance-id port step-param)",
         "Map a mappable port of a slot in the node's patch onto the fire payload: :transpose, :velocity, :duration or :delay (propagation delay in steps; the port's writes add to / set that field before emit + scatter). nil clears the mapping.",
-        move |args, _ctx| {
+        move |args, ctx| {
             let (manifest, instance) = graph_node_process_args(&st, "graph-node-process-map", &args)?;
             let id = graph_node_process_id_arg(args.get(2), "graph-node-process-map")?;
             let port = args
@@ -2488,7 +3036,7 @@ fn register_graph_node_process_natives(
                 }
             };
             let st_inner = Arc::clone(&st);
-            edit_graph_node_process_chain(&st, &manifest, instance, |chain, _| {
+            edit_graph_node_process_chain(ctx, &st, &manifest, instance, |chain, _| {
                 let slot = chain
                     .slots
                     .iter_mut()
@@ -2548,21 +3096,26 @@ fn register_graph_node_process_natives(
     runtime.register_native_with_docs(
         "graph-node-lane-patch",
         "(graph-node-lane-patch sequencer node-index)",
-        "The node's patch in the shape of one SEQ.track-lane-patch entry list (slot-index instance-id name class enabled out-ports{name ordinal port-id primary-free readers} in-ports{name ordinal lane kind writers}), with cable ids in the node namespace (1024 + node index) so it can share the lane patchbay renderer with tracks.",
-        move |args, _ctx| {
+        "The node's patch in the shape of one SEQ.track-lane-patch entry list (slot-index instance-id name class enabled out-ports{name ordinal port-id primary-free readers} in-ports{name ordinal lane kind writers}), with cable ids in the node's own namespace (graph-node-patch-namespace) so it can share the lane patchbay renderer with tracks.",
+        move |args, ctx| {
             let (manifest, instance) = graph_node_process_args(&st, "graph-node-lane-patch", &args)?;
-            let overrides = st.current_graph_overrides();
-            let chain = overrides
-                .iter()
-                .find(|o| manifest.matches_overrides(o))
-                .and_then(|o| {
-                    o.node_intrinsics
-                        .iter()
-                        .find(|n| n.group == manifest.node.name && n.instance == instance)
-                })
-                .and_then(|n| n.process_chain.clone())
-                .unwrap_or_default();
-            Ok(graph_node_lane_patch_value(&st, &chain, GRAPH_NODE_LANE_PATCH_NAMESPACE_BASE + instance))
+            let chain = graph_node_process_chain(&st, &manifest, instance);
+            let key = GraphReadKey::Process { node: instance };
+            track_graph_read(ctx, &manifest, &key, &resolve_graph_read(&st, &manifest, &key));
+            let namespace = graph_node_lane_patch_namespace(manifest.id, instance);
+            Ok(graph_node_lane_patch_value(&st, &chain, namespace))
+        },
+    );
+
+    let st = Arc::clone(&state);
+    runtime.register_native_with_docs(
+        "graph-node-patch-namespace",
+        "(graph-node-patch-namespace sequencer node-index)",
+        "The lane patch-bay namespace of a graph node: the cable-id band graph-node-lane-patch mints this node's port ids in. Derived from the graph (instance) id and the node, so node k of two graphs never shares one.",
+        move |args, _ctx| {
+            let (manifest, instance) =
+                graph_node_process_args(&st, "graph-node-patch-namespace", &args)?;
+            Ok(EValue::Number(graph_node_lane_patch_namespace(manifest.id, instance) as f64))
         },
     );
 }

@@ -294,7 +294,7 @@ impl GraphController<'_> {
             .allocate()
             .map_err(|error| format!("Failed to allocate stable track id: {error:?}"))?;
         let rack_signature = rack_topology_signature(&rack_track);
-        self.app.state.runtime.voice_counts[idx].store(0, Ordering::Release);
+        self.app.state.runtime.voice_counts.store(idx, 0, Ordering::Release);
         self.app.state.runtime.sampler_lids[idx].store(0, Ordering::Release);
         self.app.state.runtime.modulator_lids[idx].store(0, Ordering::Release);
         self.app.state.runtime.pan_lids[idx].store(shell.pan_id as u64, Ordering::Release);
@@ -606,7 +606,7 @@ impl GraphController<'_> {
             self.app.state.runtime.sampler_modulator_node_ids[pool_id][v]
                 .store(modulator_ids[v] as u32, Ordering::Release);
         }
-        self.app.state.runtime.voice_counts[pool_id].store(voice_count as u32, Ordering::Release);
+        self.app.state.runtime.voice_counts.store(pool_id, voice_count as u32, Ordering::Release);
         self.app.state.runtime.sampler_lids[pool_id]
             .store(voice_lids.first().copied().unwrap_or(0), Ordering::Release);
     }
@@ -615,7 +615,7 @@ impl GraphController<'_> {
         if pool_id >= self.app.state.runtime.voice_lids.len() {
             return;
         }
-        self.app.state.runtime.voice_counts[pool_id].store(0, Ordering::Release);
+        self.app.state.runtime.voice_counts.store(pool_id, 0, Ordering::Release);
         self.app.state.runtime.sampler_lids[pool_id].store(0, Ordering::Release);
         for v in 0..MAX_VOICES {
             self.app.state.runtime.voice_lids[pool_id][v].store(0, Ordering::Release);
@@ -869,8 +869,7 @@ impl GraphController<'_> {
         for (v, &lid) in voice_lids.iter().enumerate() {
             self.app.state.runtime.engine_voice_lids[engine_id][v].store(lid, Ordering::Release);
         }
-        self.app.state.runtime.engine_voice_counts[engine_id]
-            .store(MAX_VOICES as u32, Ordering::Release);
+        self.app.state.runtime.engine_voice_counts.store(engine_id, MAX_VOICES as u32, Ordering::Release);
         lisp_host::reset_dgen_engine_enabled_voices(engine_id);
         if let Some(engine) = &self.app.graph.engine_node_ids[engine_id] {
             for (v, &sid) in engine.synth_ids.iter().enumerate() {
@@ -881,6 +880,11 @@ impl GraphController<'_> {
                 self.app.state.runtime.engine_modulator_node_ids[engine_id][v]
                     .store(mid as u32, Ordering::Release);
             }
+            crate::instruments::voice_modulator::publish_engine_mod_lease(
+                engine_id,
+                &engine.synth_ids,
+                Some(&lisp_host::mod_lease_lanes(manifest)),
+            );
         }
         Ok(())
     }

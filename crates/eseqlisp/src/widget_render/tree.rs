@@ -83,6 +83,10 @@ struct TreeRow {
     /// Trailing glyph at the row's right edge (`:status-icon`), for state
     /// such as "attached" that is not part of the item's identity.
     status_icon: Option<f32>,
+    /// Count badge (`:badge`, a positive number) drawn as a small circled
+    /// number at the row's right edge, after the status glyph. Zero or
+    /// absent draws nothing.
+    badge: Option<u32>,
     has_children: bool,
     expanded: bool,
     is_header: bool,
@@ -207,6 +211,13 @@ fn item_status_icon_value(item: &Value) -> Option<f32> {
     super::button::icon_name_value(&item_string_field(item, "status-icon")?)
 }
 
+fn item_badge_value(item: &Value) -> Option<u32> {
+    match get_item_field(item, "badge") {
+        Some(Value::Number(count)) if count.is_finite() && count >= 1.0 => Some(count as u32),
+        _ => None,
+    }
+}
+
 fn item_is_header(item: &Value) -> bool {
     matches!(item_string_field(item, "kind").as_deref(), Some("header"))
 }
@@ -283,6 +294,7 @@ fn flatten_items_inner(
             detail,
             icon: item_icon_value(&item),
             status_icon: item_status_icon_value(&item),
+            badge: item_badge_value(&item),
             has_children,
             expanded: is_expanded,
             is_header,
@@ -539,6 +551,10 @@ fn hash_tree_item_value(value: &Value, state: &mut DefaultHasher) {
         Value::NodeRef(index) => {
             9_u8.hash(state);
             index.hash(state);
+        }
+        Value::Instance(id) => {
+            13_u8.hash(state);
+            id.hash(state);
         }
         Value::ReactiveRef {
             namespace,
@@ -1540,17 +1556,78 @@ impl WidgetDefinition for TreeWidget {
                     is_background: false,
                 });
             }
-            // Trailing status glyph hugs the right edge; the detail text,
-            // when present, moves left to make room for it.
+            // Trailing count badge hugs the right edge, the status glyph
+            // sits just before it, and the detail text, when present, moves
+            // left to make room for both.
+            let badge_layout = row.badge.map(|count| {
+                let text = count.to_string();
+                let height = (rh * 0.78).min(0.95);
+                // A circle for one digit (square in pixels), a pill beyond.
+                let circle = height * cell_aspect.max(1.0);
+                let width = circle.max(
+                    text.chars().count() as f32 * DETAIL_APPROX_CHAR_WIDTH * 0.9 + height,
+                );
+                (text, width, height)
+            });
+            let badge_width = badge_layout
+                .as_ref()
+                .map(|(_, width, _)| width + 0.45)
+                .unwrap_or(0.0);
+            if let Some((text, width, height)) = &badge_layout {
+                let badge_rect = Rect {
+                    row: y + (rh - height) * 0.5,
+                    col: node.rect.col + node.rect.width - width - 0.8,
+                    width: *width,
+                    height: *height,
+                };
+                let (ndc_min, ndc_max) = ndc_bounds(badge_rect, _viewport);
+                let px_w = badge_rect.width * _viewport.cell_w;
+                let px_h = badge_rect.height * _viewport.cell_h;
+                let muted = theme::FG_MUTED();
+                prims.push(GpuPrimitive::WidgetInstance {
+                    widget_type: "box".to_string(),
+                    instance: WidgetInstance {
+                        ndc_min,
+                        ndc_max,
+                        value_t: 0.0,
+                        orientation: 0.0,
+                        itime: _viewport.time_seconds,
+                        uniform_a: [0.0; 4],
+                        uniform_b: [0.0; 4],
+                        uniform_c: [0.0; 4],
+                        uniform_d: [0.0; 4],
+                        color_a: [muted.r, muted.g, muted.b, 0.32],
+                        color_b: [0.0; 4],
+                        color_c: [0.0; 4],
+                        color_d: [0.0; 4],
+                        // Fully rounded: the shader clamps to the half height.
+                        corner_radius: 1.0,
+                        pixel_aspect: if px_h > 0.0 { px_w / px_h } else { 1.0 },
+                    },
+                    is_background: false,
+                });
+                prims.push(GpuPrimitive::ProportionalText(GpuProportionalTextPrimitive {
+                    row: y + (rh - 1.0) * 0.5,
+                    col: badge_rect.col,
+                    align_width: badge_rect.width,
+                    h_align: 0.5,
+                    text: text.clone(),
+                    font_size: font_size * 0.78,
+                    scale: 1.0,
+                    fg: theme::FG(),
+                    bg: Color { r: 0.0, g: 0.0, b: 0.0, a: 0.0 },
+                    mono: false,
+                }));
+            }
             let status_width = if row.status_icon.is_some() {
                 icon_width + 0.6
             } else {
                 0.0
-            };
+            } + badge_width;
             if let Some(icon) = row.status_icon {
                 let icon_rect = Rect {
                     row: y + (rh - icon_height) * 0.5 - 0.08,
-                    col: node.rect.col + node.rect.width - icon_width - 0.9,
+                    col: node.rect.col + node.rect.width - icon_width - 0.9 - badge_width,
                     width: icon_width + 0.12,
                     height: icon_height + 0.12,
                 };
@@ -1929,6 +2006,62 @@ mod expansion_identity_tests {
             cursor.depth, 1,
             "cursor should stay on the library copy, not the engine row"
         );
+    }
+
+    #[test]
+    fn badge_reads_positive_counts_and_draws_a_circled_number() {
+        let mut with_badge = item("mod", "module", vec![]);
+        let mut zero = item("none", "module", vec![]);
+        for (value, count) in [(&mut with_badge, 3.0), (&mut zero, 0.0)] {
+            let Value::Map(map) = value else { unreachable!() };
+            map.insert("badge".into(), Rc::new(RefCell::new(Value::Number(count))));
+            map.insert("status-icon".into(), Rc::new(RefCell::new(Value::Keyword("check".into()))));
+        }
+        let mut rows = Vec::new();
+        flatten_items(&list(vec![with_badge, zero]), 0, &[], &HashSet::new(), false, &mut rows);
+        assert_eq!(rows[0].badge, Some(3));
+        assert_eq!(rows[1].badge, None, "no badge at zero");
+
+        let mut props = HashMap::new();
+        props.insert("items".to_string(), list(vec![{
+            let mut row = item("mod", "module", vec![]);
+            let Value::Map(map) = &mut row else { unreachable!() };
+            map.insert("badge".into(), Rc::new(RefCell::new(Value::Number(12.0))));
+            row
+        }]));
+        let node = LayoutNode {
+            widget_id: 89003,
+            stable_widget_id: None,
+            subtree_root_id: None,
+            parent_subtree_root_id: None,
+            stable_key: None,
+            widget_type: "tree".to_string(),
+            rect: Rect { row: 0.0, col: 0.0, width: 30.0, height: 5.0 },
+            props,
+            children: Vec::new(),
+            focusable: true,
+            animation: Default::default(),
+        };
+        let viewport = WidgetViewport {
+            vp_w: 240.0,
+            vp_h: 80.0,
+            cell_w: 8.0,
+            cell_h: 16.0,
+            scroll_top: 0.0,
+            focused_widget_id: None,
+            focused_branch: false,
+            overlay_viewport_bottom: 5.0,
+            inherited_hover: false,
+            time_seconds: 0.0,
+            scroll_left: 0.0,
+        };
+        let prims = TREE_WIDGET.build_primitives("tree", &node, viewport);
+        assert!(prims.iter().any(|prim| matches!(prim,
+            GpuPrimitive::ProportionalText(text) if text.text == "12")),
+            "the badge draws its count");
+        assert!(prims.iter().any(|prim| matches!(prim,
+            GpuPrimitive::WidgetInstance { widget_type, .. } if widget_type == "box")),
+            "inside a round chip");
     }
 
     #[test]

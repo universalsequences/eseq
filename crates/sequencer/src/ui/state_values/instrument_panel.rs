@@ -981,6 +981,9 @@ pub(crate) fn build_instrument_panel_value(
     let source_actual = selected_voice_mod_source_indices(desc, slot, plock_step);
     let slot_num_params = slot.num_params.load(Ordering::Relaxed) as usize;
     let mut key_locks_by_param = vec![Vec::<(u8, f32)>::new(); desc.params.len()];
+    // Ascending notes with at least one visible key lock, so the keys tab can
+    // mark them without scanning every param's rows per key.
+    let mut key_locked_notes = Vec::<u8>::new();
     for note in 0..sequencer::effects::MAX_MIDI_NOTES {
         let note = note as u8;
         if !slot.key_locks.note_has_any_lock(note, slot_num_params) {
@@ -995,6 +998,9 @@ pub(crate) fn build_instrument_panel_value(
             }
             if let Some(rows) = key_locks_by_param.get_mut(param_idx) {
                 rows.push((note, pdesc.stored_to_user(value)));
+                if key_locked_notes.last() != Some(&note) {
+                    key_locked_notes.push(note);
+                }
             }
         }
     }
@@ -1470,6 +1476,15 @@ pub(crate) fn build_instrument_panel_value(
     panel_map.insert(
         "key-locks".to_string(),
         Rc::new(RefCell::new(Value::List(key_locks))),
+    );
+    panel_map.insert(
+        "key-locked-notes".to_string(),
+        Rc::new(RefCell::new(Value::List(
+            key_locked_notes
+                .iter()
+                .map(|note| Rc::new(RefCell::new(Value::Number(*note as f64))))
+                .collect(),
+        ))),
     );
     panel_map.insert(
         "key-lock-note-variants".to_string(),

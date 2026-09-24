@@ -2,6 +2,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::rc::Rc;
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use eseqlisp::vm::Value;
@@ -231,6 +232,38 @@ pub(crate) fn build_sample_browser_value_with_origins_from_db(
     selected_tags: &[&str],
     selected_origins: &[&str],
 ) -> rusqlite::Result<Value> {
+    query_sample_browser(db, query, selected_tags, selected_origins).map(SampleBrowserData::into_value)
+}
+
+// Only owned, Send data crosses the worker boundary. Lisp Values contain
+// mutable Rc cells and must be created and retained on the UI thread.
+struct SampleBrowserData {
+    tags: Vec<TagFacet>,
+    origins: Vec<TagFacet>,
+    items: Vec<SampleTreeNode>,
+}
+
+impl SampleBrowserData {
+    fn into_value(self) -> Value {
+        map_value([
+            ("tags", tag_facets_to_value(&self.tags)),
+            ("origins", list_value(self.origins.iter().map(|origin| map_value([
+                ("name", Value::String(origin.name.clone())),
+                ("label", Value::String(sample_origin_label(&origin.name).to_string())),
+                ("count", Value::Number(origin.count as f64)),
+                ("selected", Value::Bool(origin.selected)),
+            ])))),
+            ("items", sample_tree_nodes_to_value(&self.items)),
+        ])
+    }
+}
+
+fn query_sample_browser(
+    db: &SampleDb,
+    query: &str,
+    selected_tags: &[&str],
+    selected_origins: &[&str],
+) -> rusqlite::Result<SampleBrowserData> {
     let query = query.trim();
     let has_active_filter = !query.is_empty()
         || selected_tags.iter().any(|tag| !tag.trim().is_empty())
@@ -252,9 +285,9 @@ pub(crate) fn build_sample_browser_value_with_origins_from_db(
             (!query.is_empty()).then_some(query),
             SAMPLE_BROWSER_MAX_RESULTS,
         )?;
-        sample_tree_nodes_to_value(&sample_rows_to_tree_nodes(rows, false))
+        sample_rows_to_tree_nodes(rows, false)
     } else {
-        Value::List(vec![])
+        Vec::new()
     };
     let selected_origin_names: HashSet<_> = selected_origins
         .iter()
@@ -264,16 +297,7 @@ pub(crate) fn build_sample_browser_value_with_origins_from_db(
     for origin in &mut origins {
         origin.selected = selected_origin_names.contains(&origin.name.to_lowercase());
     }
-    Ok(map_value([
-        ("tags", tag_facets_to_value(&tags)),
-        ("origins", list_value(origins.iter().map(|origin| map_value([
-            ("name", Value::String(origin.name.clone())),
-            ("label", Value::String(sample_origin_label(&origin.name).to_string())),
-            ("count", Value::Number(origin.count as f64)),
-            ("selected", Value::Bool(origin.selected)),
-        ])))),
-        ("items", items),
-    ]))
+    Ok(SampleBrowserData { tags, origins, items })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -310,29 +334,100 @@ impl SampleBrowserRequest {
 }
 
 pub(crate) struct DebouncedSampleBrowser {
-    db: Rc<SampleDb>,
     debounce: Duration,
     last_requested: Option<SampleBrowserRequest>,
-    last_request_at: Option<Instant>,
-    last_executed: Option<SampleBrowserRequest>,
-    cached_value: Option<Value>,
-    pending_text_query: bool,
+    generation: u64,
+    pending: bool,
+    cached_value: Value,
+    requests: Sender<SampleBrowserWork>,
+    results: Receiver<(u64, Result<SampleBrowserData, String>)>,
+}
+
+struct SampleBrowserWork {
+    generation: u64,
+    request: SampleBrowserRequest,
+    ready_at: Instant,
+}
+
+pub(crate) fn register_sample_browser_native(
+    runtime: &mut eseqlisp::Runtime,
+    browser: Rc<RefCell<DebouncedSampleBrowser>>,
+) {
+    runtime.register_reactive("SAMPLE_BROWSER", vec![("generation", Value::Number(0.0))], false);
+    runtime.register_native("seq-sample-browser", move |args, ctx| {
+        ctx.track_reactive_read("SAMPLE_BROWSER", "generation");
+        let query = match args.first() { Some(Value::String(s)) => s.as_str(), _ => "" };
+        let tags = super::natives::value_string_list(args.get(1));
+        let origins = super::natives::value_string_list(args.get(2));
+        browser.borrow_mut().query_with_origins(
+            query,
+            &tags.iter().map(String::as_str).collect::<Vec<_>>(),
+            &origins.iter().map(String::as_str).collect::<Vec<_>>(),
+        )
+    });
+}
+
+pub(crate) fn publish_sample_browser_results(
+    editor: &mut eseqlisp::Editor,
+    browser: &RefCell<DebouncedSampleBrowser>,
+) -> Result<bool, String> {
+    let generation = {
+        let mut browser = browser.borrow_mut();
+        if !browser.poll_ready()? { return Ok(false); }
+        browser.generation
+    };
+    // Notify every reader, including the embedded learning-target browser.
+    // A direct refresh of *samples* alone would leave other consumers stale.
+    let runtime = editor.runtime_mut();
+    runtime.set_reactive("SAMPLE_BROWSER", "generation", Value::Number(generation as f64));
+    runtime.run_reactive_cycle();
+    editor.refresh_runtime_side_effects();
+    editor.mark_needs_redraw();
+    Ok(true)
 }
 
 impl DebouncedSampleBrowser {
-    pub(crate) fn new(db: Rc<SampleDb>, debounce: Duration) -> Self {
+    pub(crate) fn new(db: SampleDb, debounce: Duration) -> Self {
+        Self::with_query(debounce, move |request| {
+            query_sample_browser(
+                &db, &request.query, &request.selected_tag_refs(), &request.selected_origin_refs(),
+            ).map_err(|error| error.to_string())
+        })
+    }
+
+    fn with_query(
+        debounce: Duration,
+        mut query: impl FnMut(&SampleBrowserRequest) -> Result<SampleBrowserData, String> + Send + 'static,
+    ) -> Self {
+        let (requests, receiver) = mpsc::channel::<SampleBrowserWork>();
+        let (sender, results) = mpsc::channel();
+        std::thread::Builder::new().name("sample-browser".to_string()).spawn(move || {
+            while let Ok(mut work) = receiver.recv() {
+                // Coalesce edits before starting SQL. Edits arriving during a
+                // query replace its result by generation on the UI thread.
+                loop {
+                    match receiver.recv_timeout(work.ready_at.saturating_duration_since(Instant::now())) {
+                        Ok(newer) => work = newer,
+                        Err(mpsc::RecvTimeoutError::Timeout) => break,
+                        Err(mpsc::RecvTimeoutError::Disconnected) => return,
+                    }
+                }
+                let result = query(&work.request);
+                if sender.send((work.generation, result)).is_err() { return; }
+            }
+        }).expect("start sample browser query worker");
         Self {
-            db,
             debounce,
             last_requested: None,
-            last_request_at: None,
-            last_executed: None,
-            cached_value: None,
-            pending_text_query: false,
+            generation: 0,
+            pending: false,
+            cached_value: empty_sample_browser_value(),
+            requests,
+            results,
         }
     }
 
-    pub(crate) fn query(&mut self, query: &str, selected_tags: &[&str]) -> rusqlite::Result<Value> {
+    pub(crate) fn query(&mut self, query: &str, selected_tags: &[&str]) -> Result<Value, String> {
         self.query_with_origins(query, selected_tags, &[])
     }
 
@@ -341,29 +436,29 @@ impl DebouncedSampleBrowser {
         query: &str,
         selected_tags: &[&str],
         selected_origins: &[&str],
-    ) -> rusqlite::Result<Value> {
+    ) -> Result<Value, String> {
         self.query_at(query, selected_tags, selected_origins, Instant::now())
     }
 
-    pub(crate) fn poll_ready(&mut self) -> rusqlite::Result<bool> {
-        let Some(request) = self.last_requested.clone() else {
-            return Ok(false);
-        };
-        if !self.pending_text_query || self.last_executed.as_ref() == Some(&request) {
-            return Ok(false);
-        }
-        let ready_at = self.last_request_at.unwrap_or_else(Instant::now) + self.debounce;
-        if Instant::now() < ready_at {
-            return Ok(false);
-        }
-        match self.execute_request(request) {
-            Ok(_) => Ok(true),
-            Err(error) => {
-                self.pending_text_query = false;
-                Err(error)
+    pub(crate) fn poll_ready(&mut self) -> Result<bool, String> {
+        loop {
+            match self.results.try_recv() {
+                Ok((generation, result)) if generation == self.generation => {
+                    self.pending = false;
+                    self.cached_value = result?.into_value();
+                    return Ok(true);
+                }
+                Ok(_) => continue,
+                Err(mpsc::TryRecvError::Empty) => return Ok(false),
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    let pending = std::mem::replace(&mut self.pending, false);
+                    return if pending { Err("sample browser worker stopped".to_string()) } else { Ok(false) };
+                }
             }
         }
     }
+
+    pub(crate) fn is_pending(&self) -> bool { self.pending }
 
     fn query_at(
         &mut self,
@@ -371,49 +466,21 @@ impl DebouncedSampleBrowser {
         selected_tags: &[&str],
         selected_origins: &[&str],
         now: Instant,
-    ) -> rusqlite::Result<Value> {
+    ) -> Result<Value, String> {
         let request = SampleBrowserRequest::new(query, selected_tags, selected_origins);
-        let previous_request = self.last_requested.as_ref();
-        let request_changed = previous_request != Some(&request);
-        let query_changed =
-            previous_request.is_some_and(|previous| previous.query != request.query);
-
-        if request_changed {
-            self.pending_text_query = query_changed && !request.query.is_empty();
-            self.last_requested = Some(request.clone());
-            self.last_request_at = Some(now);
+        if self.last_requested.as_ref() != Some(&request) {
+            let text_edit = self.last_requested.as_ref().is_some_and(|previous|
+                previous.query != request.query && !request.query.is_empty());
+            self.generation += 1;
+            self.requests.send(SampleBrowserWork {
+                generation: self.generation,
+                ready_at: now + if text_edit { self.debounce } else { Duration::ZERO },
+                request: request.clone(),
+            }).map_err(|_| "sample browser worker stopped".to_string())?;
+            self.last_requested = Some(request);
+            self.pending = true;
         }
-
-        if self.last_executed.as_ref() == Some(&request) {
-            if let Some(value) = &self.cached_value {
-                return Ok(value.deep_clone());
-            }
-        }
-
-        if self.pending_text_query {
-            let ready_at = self.last_request_at.unwrap_or(now) + self.debounce;
-            if now < ready_at {
-                return Ok(self
-                    .cached_value
-                    .as_ref()
-                    .map(Value::deep_clone)
-                    .unwrap_or_else(empty_sample_browser_value));
-            }
-        }
-
-        self.execute_request(request)
-    }
-
-    fn execute_request(&mut self, request: SampleBrowserRequest) -> rusqlite::Result<Value> {
-        let selected_tag_refs = request.selected_tag_refs();
-        let selected_origin_refs = request.selected_origin_refs();
-        let value = build_sample_browser_value_with_origins_from_db(
-            &self.db, &request.query, &selected_tag_refs, &selected_origin_refs,
-        )?;
-        self.last_executed = Some(request);
-        self.cached_value = Some(value.deep_clone());
-        self.pending_text_query = false;
-        Ok(value)
+        Ok(self.cached_value.deep_clone())
     }
 }
 
@@ -1467,8 +1534,8 @@ mod tests {
         }
     }
 
-    fn sample_browser_db() -> Rc<SampleDb> {
-        let db = Rc::new(SampleDb::open_in_memory().expect("open db"));
+    fn sample_browser_db() -> SampleDb {
+        let db = SampleDb::open_in_memory().expect("open db");
         db.connection()
             .execute(
                 "INSERT INTO samples(hash, title) VALUES ('aaa111', 'Kick 808')",
@@ -1931,81 +1998,106 @@ mod tests {
         assert_eq!(items.len(), 2);
     }
 
+    fn settle_sample_browser(browser: &mut DebouncedSampleBrowser) -> Result<(), String> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while browser.is_pending() {
+            browser.poll_ready()?;
+            assert!(Instant::now() < deadline, "sample browser worker stalled");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        Ok(())
+    }
+
     #[test]
     fn debounced_sample_browser_waits_for_stable_text_query() {
-        let db = sample_browser_db();
-        let mut browser = DebouncedSampleBrowser::new(db.clone(), Duration::from_millis(100));
-        let start = Instant::now();
-
-        let initial = browser.query_at("", &[], &[], start).expect("initial browser");
-        assert!(sample_browser_item_labels(&initial).is_empty());
-
-        let pending_first_char = browser
-            .query_at("k", &[], &[], start + Duration::from_millis(10))
-            .expect("pending first char");
-        assert!(
-            sample_browser_item_labels(&pending_first_char).is_empty(),
-            "first text change should return cached browser state before querying"
-        );
-
-        let pending_second_char = browser
-            .query_at("ki", &[], &[], start + Duration::from_millis(50))
-            .expect("pending second char");
-        assert!(
-            sample_browser_item_labels(&pending_second_char).is_empty(),
-            "new text should restart the debounce window"
-        );
-
-        let ready = browser
-            .query_at("ki", &[], &[], start + Duration::from_millis(151))
-            .expect("debounced query");
-        assert_eq!(
-            sample_browser_item_labels(&ready),
-            vec!["Kick 808".to_string(), "Kick 909".to_string()]
-        );
+        let mut browser = DebouncedSampleBrowser::new(sample_browser_db(), Duration::from_millis(100));
+        browser.query("", &[]).unwrap();
+        settle_sample_browser(&mut browser).unwrap();
+        // Neither of these edits may start until the debounce deadline. A
+        // tag change replaces them immediately, without querying either one.
+        let later = Instant::now() + Duration::from_secs(60);
+        browser.query_at("k", &[], &[], later).unwrap();
+        browser.query_at("ki", &[], &[], later).unwrap();
+        assert!(!browser.poll_ready().unwrap());
+        assert!(sample_browser_item_labels(&browser.cached_value).is_empty());
+        browser.query("", &["kick"]).unwrap();
+        settle_sample_browser(&mut browser).unwrap();
+        assert_eq!(sample_browser_item_labels(&browser.cached_value), vec!["Kick 808", "Kick 909"]);
     }
 
     #[test]
-    fn debounced_sample_browser_poll_ready_executes_pending_query() {
-        let db = sample_browser_db();
-        let mut browser = DebouncedSampleBrowser::new(db.clone(), Duration::from_millis(1));
-        let start = Instant::now();
-
-        browser.query_at("", &[], &[], start).expect("initial browser");
-        let pending = browser
-            .query_at("ki", &[], &[], start + Duration::from_millis(1))
-            .expect("pending query");
+    fn debounced_sample_browser_poll_ready_publishes_pending_query() {
+        let mut browser = DebouncedSampleBrowser::new(sample_browser_db(), Duration::from_millis(10));
+        browser.query("", &[]).unwrap();
+        settle_sample_browser(&mut browser).unwrap();
+        let pending = browser.query("ki", &[]).unwrap();
         assert!(sample_browser_item_labels(&pending).is_empty());
-
-        std::thread::sleep(Duration::from_millis(2));
-        assert!(
-            browser.poll_ready().expect("poll pending query"),
-            "poll_ready should execute a matured pending text query"
-        );
-        let cached = browser
-            .query_at("ki", &[], &[], start + Duration::from_millis(2))
-            .expect("cached debounced query");
-        assert_eq!(
-            sample_browser_item_labels(&cached),
-            vec!["Kick 808".to_string(), "Kick 909".to_string()]
-        );
+        settle_sample_browser(&mut browser).unwrap();
+        assert_eq!(sample_browser_item_labels(&browser.query("ki", &[]).unwrap()),
+            vec!["Kick 808", "Kick 909"]);
+        assert!(!browser.is_pending(), "unchanged filters must reuse the completed result");
     }
 
     #[test]
-    fn debounced_sample_browser_applies_tag_changes_immediately() {
-        let db = sample_browser_db();
-        let mut browser = DebouncedSampleBrowser::new(db.clone(), Duration::from_millis(100));
-        let start = Instant::now();
+    fn debounced_sample_browser_keeps_input_nonblocking_and_rejects_stale_results() {
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let mut browser = DebouncedSampleBrowser::with_query(Duration::ZERO, move |request| {
+            started_tx.send(request.query.clone()).unwrap();
+            release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            if request.query == "old-error" { return Err("obsolete failure".to_string()); }
+            Ok(SampleBrowserData {
+                tags: vec![], origins: vec![],
+                items: sample_rows_to_tree_nodes(vec![sample("hash", Some(&request.query), &[])], false),
+            })
+        });
+        browser.query("old-error", &[]).unwrap();
+        assert_eq!(started_rx.recv_timeout(Duration::from_secs(5)).unwrap(), "old-error");
+        // The worker is deliberately blocked. Both typing and polling must
+        // return without its help, and superseded queued edits must coalesce.
+        browser.query("intermediate", &[]).unwrap();
+        browser.query("latest", &[]).unwrap();
+        assert!(!browser.poll_ready().unwrap());
+        release_tx.send(()).unwrap();
+        assert_eq!(started_rx.recv_timeout(Duration::from_secs(5)).unwrap(), "latest");
+        assert!(!browser.poll_ready().unwrap(), "obsolete errors must not surface");
+        assert!(sample_browser_item_labels(&browser.cached_value).is_empty());
+        release_tx.send(()).unwrap();
+        settle_sample_browser(&mut browser).unwrap();
+        assert_eq!(sample_browser_item_labels(&browser.cached_value), vec!["latest"]);
+    }
 
-        browser.query_at("", &[], &[], start).expect("initial browser");
-        let tagged = browser
-            .query_at("", &["kick"], &[], start + Duration::from_millis(1))
-            .expect("tagged browser");
+    #[test]
+    fn debounced_sample_browser_reports_current_error_and_recovers() {
+        let mut browser = DebouncedSampleBrowser::with_query(Duration::ZERO, move |request| {
+            if request.query == "bad" { return Err("query failed".to_string()); }
+            Ok(SampleBrowserData { tags: vec![], origins: vec![], items: vec![] })
+        });
+        browser.query("bad", &[]).unwrap();
+        assert_eq!(settle_sample_browser(&mut browser), Err("query failed".to_string()));
+        assert!(!browser.poll_ready().unwrap(), "report each error once");
+        browser.query("good", &[]).unwrap();
+        settle_sample_browser(&mut browser).unwrap();
+    }
 
-        assert_eq!(
-            sample_browser_item_labels(&tagged),
-            vec!["Kick 808".to_string(), "Kick 909".to_string()]
-        );
+    #[test]
+    fn debounced_sample_browser_does_not_publish_results_for_cleared_search() {
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let mut browser = DebouncedSampleBrowser::with_query(Duration::ZERO, move |request| {
+            started_tx.send(request.query.clone()).unwrap();
+            release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            Ok(SampleBrowserData { tags: vec![], origins: vec![], items: vec![] })
+        });
+        browser.query("kick", &[]).unwrap();
+        assert_eq!(started_rx.recv_timeout(Duration::from_secs(5)).unwrap(), "kick");
+        browser.query("", &[]).unwrap();
+        release_tx.send(()).unwrap();
+        assert_eq!(started_rx.recv_timeout(Duration::from_secs(5)).unwrap(), "");
+        assert!(!browser.poll_ready().unwrap(), "completed obsolete results must stay unpublished");
+        assert!(browser.is_pending());
+        release_tx.send(()).unwrap();
+        settle_sample_browser(&mut browser).unwrap();
     }
 
     #[test]

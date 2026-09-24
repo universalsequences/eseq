@@ -1,9 +1,10 @@
 //! Per-voice modulation DSP and modulation-parameter metadata.
 
 use std::os::raw::{c_int, c_void};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use crate::audiograph::NodeVTable;
+use crate::effects::output_lanes::OutputLanes;
 use crate::effects::{ParamDescriptor, ParamKind, ParamScaling, SyncDivision};
 use crate::sequencer::{MAX_INSTRUMENT_ENGINES, MAX_SAMPLER_POOLS};
 
@@ -122,7 +123,12 @@ pub const STATE_DISPLAY_SLOT_VALUE: usize = PARAM_LFO_PHASE_BASE + SLOT_COUNT;
 /// watchlist between blocks.
 pub const STATE_DISPLAY_SLOT_PHASE: usize = STATE_DISPLAY_SLOT_VALUE + SLOT_COUNT;
 
-pub const STATE_SIZE: usize = STATE_DISPLAY_SLOT_PHASE + SLOT_COUNT;
+/// Runtime cache of which output lanes already hold zeros
+/// (`effects::output_lanes`); idle and unleased slots skip rewriting them.
+const OUTPUT_LANE_CACHE: usize = STATE_DISPLAY_SLOT_PHASE + SLOT_COUNT;
+
+pub const STATE_SIZE: usize =
+    OUTPUT_LANE_CACHE + crate::effects::output_lanes::state_cells(NUM_OUTPUTS);
 
 /// No marker: the slot's source has no cycle to place one on.
 pub const DISPLAY_PHASE_NONE: f32 = -1.0;
@@ -730,7 +736,14 @@ impl BarTracker {
 /// the bar phase alone; longer ones fold the running bar count in, so a
 /// 4-bar LFO no longer restarts at every bar line.
 fn synced_phase_from_bar_phase(div_idx: usize, bar_phase: f32, bar_count: f32) -> f32 {
-    let beats = SyncDivision::from_index(div_idx).to_beats() as f32;
+    synced_phase_from_bar_phase_beats(
+        SyncDivision::from_index(div_idx).to_beats() as f32,
+        bar_phase,
+        bar_count,
+    )
+}
+
+fn synced_phase_from_bar_phase_beats(beats: f32, bar_phase: f32, bar_count: f32) -> f32 {
     let cycle_bars = beats / 4.0;
     if cycle_bars <= 1.0 {
         return normalize_phase(normalize_phase(bar_phase) * 4.0 / beats.max(0.0001));
@@ -1169,22 +1182,13 @@ unsafe extern "C" fn voice_modulator_begin_event_slice(
     *s.add(IDX_EVENT_SLICE_START) = slice_start.max(0) as f32;
 }
 
-unsafe fn clear_outputs(out: *const *mut f32, nf: usize) {
-    if out.is_null() {
-        return;
-    }
+unsafe fn clear_outputs(lanes: &OutputLanes, out: *const *mut f32, nf: usize) {
     for slot in 0..NUM_OUTPUTS {
-        let out_slot = *out.add(slot);
-        if out_slot.is_null() {
-            continue;
-        }
-        for i in 0..nf {
-            *out_slot.add(i) = 0.0;
-        }
+        clear_output_slot(lanes, out, slot, nf);
     }
 }
 
-unsafe fn clear_output_slot(out: *const *mut f32, slot: usize, nf: usize) {
+unsafe fn clear_output_slot(lanes: &OutputLanes, out: *const *mut f32, slot: usize, nf: usize) {
     if out.is_null() || slot >= NUM_OUTPUTS {
         return;
     }
@@ -1192,9 +1196,8 @@ unsafe fn clear_output_slot(out: *const *mut f32, slot: usize, nf: usize) {
     if out_slot.is_null() {
         return;
     }
-    for i in 0..nf {
-        *out_slot.add(i) = 0.0;
-    }
+    lanes.fill(slot, std::slice::from_raw_parts_mut(out_slot, nf), 0.0);
+    crate::effects::silence::declare_port(slot);
 }
 
 /// Copy the block's last output frame into the display tail
@@ -1297,6 +1300,139 @@ unsafe fn sampler_identity(s: *const f32) -> Option<(usize, usize)> {
     Some((track_idx as usize, voice_idx as usize))
 }
 
+// ── Slot leases ──
+//
+// A custom-engine voice modulator only renders a slot while some depth lane of
+// that slot is nonzero in its own synth voice. The check reads the synth's
+// param cells directly at the start of every process call (one per event
+// slice), so defaults, p-locks, key locks, macros and process writes all
+// count the moment they land, with no host-side bookkeeping. An unleased
+// slot outputs zero and holds its state; the synth multiplies that output by
+// a zero depth anyway. Slots without a published table stay leased.
+
+/// Depth lanes one engine can publish. More lanes, or a lane spanning several
+/// cells, leases its slot permanently.
+const MAX_LEASE_LANES: usize = 64;
+const LEASE_LANE_SLOT_SHIFT: u32 = 24;
+const LEASE_LANE_CELL_MASK: u32 = (1 << LEASE_LANE_SLOT_SHIFT) - 1;
+const ALL_SLOTS_LEASED: u8 = (1 << SLOT_COUNT) - 1;
+const MAX_LEASE_VOICES: usize = crate::audio::MAX_VOICES;
+
+extern "C" {
+    fn ap_graph_node_state(logical_id: u64, out_slots: *mut c_int) -> *const f32;
+}
+
+struct EngineModLease {
+    /// Seqlock: odd while the host rewrites the table.
+    seq: AtomicU32,
+    known: AtomicBool,
+    /// Slots leased regardless of lane values.
+    always: AtomicU32,
+    lane_count: AtomicU32,
+    /// `(slot << LEASE_LANE_SLOT_SHIFT) | synth state cell`, slot zero-based.
+    lanes: [AtomicU32; MAX_LEASE_LANES],
+    synth_ids: [AtomicU64; MAX_LEASE_VOICES],
+}
+
+static ENGINE_MOD_LEASES: [EngineModLease; MAX_INSTRUMENT_ENGINES] = {
+    #[allow(clippy::declare_interior_mutable_const)]
+    const LANE: AtomicU32 = AtomicU32::new(0);
+    #[allow(clippy::declare_interior_mutable_const)]
+    const SYNTH: AtomicU64 = AtomicU64::new(0);
+    #[allow(clippy::declare_interior_mutable_const)]
+    const INIT: EngineModLease = EngineModLease {
+        seq: AtomicU32::new(0),
+        known: AtomicBool::new(false),
+        always: AtomicU32::new(0),
+        lane_count: AtomicU32::new(0),
+        lanes: [LANE; MAX_LEASE_LANES],
+        synth_ids: [SYNTH; MAX_LEASE_VOICES],
+    };
+    [INIT; MAX_INSTRUMENT_ENGINES]
+};
+
+/// One modulation depth lane: `slot` is one-based as in the DGen manifest,
+/// `state_idx` the synth node state cell holding its depth.
+#[derive(Clone, Copy, Debug)]
+pub struct ModLeaseLane {
+    pub slot: usize,
+    pub state_idx: usize,
+    pub span: usize,
+}
+
+/// Publish (or with `lanes: None`, withdraw) an engine's lease table. Call
+/// after the synth node ids are final; a withdrawn table leases every slot.
+pub fn publish_engine_mod_lease(engine_id: usize, synth_ids: &[i32], lanes: Option<&[ModLeaseLane]>) {
+    let Some(lease) = ENGINE_MOD_LEASES.get(engine_id) else {
+        return;
+    };
+    lease.seq.fetch_add(1, Ordering::AcqRel);
+    std::sync::atomic::fence(Ordering::Release);
+    lease.known.store(lanes.is_some(), Ordering::Relaxed);
+    let mut always = 0u32;
+    let mut count = 0usize;
+    for lane in lanes.unwrap_or(&[]) {
+        if !(1..=SLOT_COUNT).contains(&lane.slot) {
+            continue;
+        }
+        let slot = lane.slot - 1;
+        if lane.span != 1 || lane.state_idx > LEASE_LANE_CELL_MASK as usize || count == MAX_LEASE_LANES {
+            always |= 1 << slot;
+            continue;
+        }
+        lease.lanes[count].store(
+            ((slot as u32) << LEASE_LANE_SLOT_SHIFT) | lane.state_idx as u32,
+            Ordering::Relaxed,
+        );
+        count += 1;
+    }
+    lease.always.store(always, Ordering::Relaxed);
+    lease.lane_count.store(count as u32, Ordering::Relaxed);
+    for (voice, synth) in lease.synth_ids.iter().enumerate() {
+        let id = synth_ids.get(voice).copied().unwrap_or(0).max(0) as u64;
+        synth.store(id, Ordering::Relaxed);
+    }
+    lease.seq.fetch_add(1, Ordering::Release);
+}
+
+/// Slots of this voice with a nonzero depth lane, as a bitmask.
+unsafe fn leased_slots(engine_id: usize, voice_idx: usize) -> u8 {
+    let (Some(lease), true) = (ENGINE_MOD_LEASES.get(engine_id), voice_idx < MAX_LEASE_VOICES) else {
+        return ALL_SLOTS_LEASED;
+    };
+    let seq = lease.seq.load(Ordering::Acquire);
+    if seq & 1 == 1 || !lease.known.load(Ordering::Relaxed) {
+        return ALL_SLOTS_LEASED;
+    }
+    let synth_id = lease.synth_ids[voice_idx].load(Ordering::Relaxed);
+    let mut slots: c_int = 0;
+    let memory = if synth_id == 0 {
+        std::ptr::null()
+    } else {
+        ap_graph_node_state(synth_id, &mut slots)
+    };
+    if memory.is_null() {
+        return ALL_SLOTS_LEASED;
+    }
+    let mut mask = lease.always.load(Ordering::Relaxed) as u8;
+    let count = (lease.lane_count.load(Ordering::Relaxed) as usize).min(MAX_LEASE_LANES);
+    for lane in &lease.lanes[..count] {
+        let lane = lane.load(Ordering::Relaxed);
+        let cell = (lane & LEASE_LANE_CELL_MASK) as usize;
+        if cell >= slots.max(0) as usize {
+            return ALL_SLOTS_LEASED;
+        }
+        if *memory.add(cell) != 0.0 {
+            mask |= 1 << (lane >> LEASE_LANE_SLOT_SHIFT);
+        }
+    }
+    std::sync::atomic::fence(Ordering::Acquire);
+    if lease.seq.load(Ordering::Relaxed) != seq {
+        return ALL_SLOTS_LEASED;
+    }
+    mask & ALL_SLOTS_LEASED
+}
+
 fn sampler_voice_is_active(track_idx: usize, voice_idx: usize) -> bool {
     if track_idx >= MAX_SAMPLER_POOLS || voice_idx >= 64 {
         return false;
@@ -1371,6 +1507,9 @@ fn record_rendered_call(
     }
 }
 
+/// Per-sample reference renderer. Production renders a whole block per slot
+/// in `render_slot_block`; the equivalence test pins the two bit-for-bit.
+#[cfg(test)]
 unsafe fn render_slot(
     s: *mut f32,
     ext_inputs: &[*mut f32; EXT_INPUT_COUNT],
@@ -1566,6 +1705,7 @@ unsafe extern "C" fn voice_modulator_process(
 ) {
     let nf = nframes as usize;
     let s = state as *mut f32;
+    let lanes = OutputLanes::begin(s.add(OUTPUT_LANE_CACHE));
 
     let custom_identity = custom_engine_identity(s);
     let sampler_identity = sampler_identity(s);
@@ -1631,7 +1771,7 @@ unsafe extern "C" fn voice_modulator_process(
         let enabled = crate::lisp_host::get_dgen_engine_enabled_voices(engine_id);
         if voice_idx >= enabled {
             record_disabled_custom_skip(engine_id, nf);
-            clear_outputs(out, nf);
+            clear_outputs(&lanes, out, nf);
             publish_slot_display_values(s, out, nf);
             bars.skip_block(&clock, nf);
             bars.store(s);
@@ -1644,7 +1784,7 @@ unsafe extern "C" fn voice_modulator_process(
         let sampler_active = sampler_voice_is_active(track_idx, voice_idx);
         if !sampler_active && !gate_timeline_has_activity(gate_in, trigger_in, nf, prev_gate) {
             record_disabled_sampler_skip(track_idx, nf);
-            clear_outputs(out, nf);
+            clear_outputs(&lanes, out, nf);
             publish_slot_display_values(s, out, nf);
             bars.skip_block(&clock, nf);
             bars.store(s);
@@ -1653,15 +1793,25 @@ unsafe extern "C" fn voice_modulator_process(
         }
     }
 
-    let slot_sources = [
+    let mut slot_sources = [
         slot_source(s, 0),
         slot_source(s, 1),
         slot_source(s, 2),
         slot_source(s, 3),
     ];
+    if let Some((engine_id, voice_idx)) = custom_identity {
+        let leased = leased_slots(engine_id, voice_idx);
+        for (slot, source) in slot_sources.iter_mut().enumerate() {
+            // Envelopes follow the gate history, so they keep running to be
+            // in the right stage the moment a lease starts mid-note.
+            if leased & (1 << slot) == 0 && *source != SOURCE_ENV {
+                *source = SOURCE_OFF;
+            }
+        }
+    }
     if slot_sources.iter().all(|source| *source == SOURCE_OFF) {
         record_all_slots_off(nf);
-        clear_outputs(out, nf);
+        clear_outputs(&lanes, out, nf);
         // The depth lanes and `__dgen_mod_active__` stay set when a source is
         // switched to Off, so the host keeps reading the display tail. Publish
         // the just-zeroed outputs or the visualizer freezes at the last
@@ -1679,11 +1829,430 @@ unsafe extern "C" fn voice_modulator_process(
 
     for (slot, source) in slot_sources.iter().copied().enumerate() {
         if source == SOURCE_OFF {
-            clear_output_slot(out, slot, nf);
+            clear_output_slot(&lanes, out, slot, nf);
         }
     }
 
     let mut sampler_voice_started = sampler_identity.is_none() || prev_gate > 0.5;
+    #[cfg(test)]
+    let render_frames = if tests::REFERENCE_RENDER.with(|reference| reference.get()) {
+        render_frames_reference
+    } else {
+        render_frames
+    };
+    render_frames(
+        s,
+        out,
+        &ext_inputs,
+        &slot_sources,
+        gate_in,
+        trigger_in,
+        &clock,
+        &mut bars,
+        &mut prev_gate,
+        &mut sampler_voice_started,
+        sampler_identity.is_some(),
+        nf,
+        sample_rate,
+        bpm,
+    );
+    for (slot, source) in slot_sources.iter().enumerate() {
+        if *source != SOURCE_OFF {
+            lanes.written(slot);
+        }
+    }
+
+    *s.add(IDX_PREV_GATE) = prev_gate;
+    bars.store(s);
+    *s.add(IDX_LAST_RESET_COUNTER) = last_reset_counter;
+    publish_slot_display_values(s, out, nf);
+}
+
+/// Frames per pre-pass chunk in `render_frames`; bounds its stack arrays.
+const RENDER_CHUNK: usize = 128;
+
+/// Per-frame facts shared by every slot of one chunk.
+struct ChunkFrames {
+    len: usize,
+    /// `false` for a sampler voice still waiting for its first gate: every
+    /// output is zero and no slot state advances.
+    active: [bool; RENDER_CHUNK],
+    note_on: [bool; RENDER_CHUNK],
+    gate: [f32; RENDER_CHUNK],
+    bar_phase: [f32; RENDER_CHUNK],
+    clock_advancing: [bool; RENDER_CHUNK],
+    bar_count: [f32; RENDER_CHUNK],
+    /// Every frame active, none a note-on: lets steady envelopes fill.
+    steady: bool,
+    all_gate_high: bool,
+}
+
+/// Render every non-Off slot for the block. The gate/clock pre-pass runs once
+/// per chunk, then each slot runs its own loop with its params hoisted and its
+/// state in locals. Slots share no state, so this is equivalent to the
+/// frame-major reference loop (pinned bit-for-bit by
+/// `block_renderer_matches_per_sample_reference`).
+#[allow(clippy::too_many_arguments)]
+unsafe fn render_frames(
+    s: *mut f32,
+    out: *const *mut f32,
+    ext_inputs: &[*mut f32; EXT_INPUT_COUNT],
+    slot_sources: &[usize; SLOT_COUNT],
+    gate_in: *const f32,
+    trigger_in: *const f32,
+    clock: &BlockTransportClock,
+    bars: &mut BarTracker,
+    prev_gate: &mut f32,
+    sampler_voice_started: &mut bool,
+    is_sampler: bool,
+    nf: usize,
+    sample_rate: f32,
+    bpm: f32,
+) {
+    let mut frames = ChunkFrames {
+        len: 0,
+        active: [false; RENDER_CHUNK],
+        note_on: [false; RENDER_CHUNK],
+        gate: [0.0; RENDER_CHUNK],
+        bar_phase: [0.0; RENDER_CHUNK],
+        clock_advancing: [false; RENDER_CHUNK],
+        bar_count: [0.0; RENDER_CHUNK],
+        steady: true,
+        all_gate_high: true,
+    };
+    // Only a synced LFO reads the per-frame transport clock; the bar counter
+    // itself still advances on every frame below.
+    let needs_clock = slot_sources.iter().enumerate().any(|(slot, source)| {
+        *source == SOURCE_LFO && *s.add(slot_param_idx(slot, PARAM_LFO_SYNC)) > 0.5
+    });
+    let mut start = 0;
+    while start < nf {
+        let len = (nf - start).min(RENDER_CHUNK);
+        frames.len = len;
+        frames.steady = true;
+        frames.all_gate_high = true;
+        for j in 0..len {
+            let i = start + j;
+            let gate = (*gate_in.add(i)).clamp(0.0, 1.0);
+            let trigger = (*trigger_in.add(i)).max(0.0);
+            // Bar wraps are counted before the not-yet-started skip below, so a
+            // sampler voice waiting for its first gate stays on the bar grid.
+            let (transport_bar_phase, transport_clock_advancing) = clock.frame(i);
+            bars.note_frame(transport_bar_phase, transport_clock_advancing);
+            if !*sampler_voice_started && gate <= 0.5 && trigger <= 0.5 {
+                frames.active[j] = false;
+                frames.steady = false;
+                *prev_gate = gate;
+                continue;
+            }
+            if is_sampler && (gate > 0.5 || trigger > 0.5) {
+                *sampler_voice_started = true;
+            }
+            frames.active[j] = true;
+            frames.note_on[j] = (gate > 0.5 && *prev_gate <= 0.5) || trigger > 0.5;
+            frames.steady &= !frames.note_on[j];
+            frames.all_gate_high &= gate > 0.5;
+            frames.gate[j] = gate;
+            if needs_clock {
+                frames.bar_phase[j] = transport_bar_phase;
+                frames.clock_advancing[j] = transport_clock_advancing;
+                frames.bar_count[j] = bars.bar_count;
+            }
+            *prev_gate = gate;
+        }
+        for (slot, source) in slot_sources.iter().copied().enumerate() {
+            if source == SOURCE_OFF {
+                continue;
+            }
+            let out_slot = std::slice::from_raw_parts_mut((*out.add(slot)).add(start), len);
+            render_slot_block(s, ext_inputs, slot, source, start, &frames, out_slot, sample_rate, bpm);
+        }
+        start += len;
+    }
+}
+
+/// Reproduces the reference's per-sample `u32 -> f32` RNG state round trip:
+/// the state lives in an `f32` slot, so every stored value is rounded.
+struct SlotRng {
+    stored: f32,
+    seed: u32,
+}
+
+impl SlotRng {
+    unsafe fn load(s: *const f32, slot: usize) -> Self {
+        Self {
+            stored: *s.add(slot_state_idx(slot, IDX_RNG)),
+            seed: 0x1234_5678u32.wrapping_add(slot as u32),
+        }
+    }
+
+    /// The state one sample sees on entry.
+    fn current(&self) -> u32 {
+        let state = self.stored as u32;
+        if state == 0 {
+            self.seed
+        } else {
+            state
+        }
+    }
+
+    fn finish_sample(&mut self, state: u32) {
+        self.stored = state as f32;
+    }
+
+    unsafe fn store(&self, s: *mut f32, slot: usize) {
+        *s.add(slot_state_idx(slot, IDX_RNG)) = self.stored;
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe fn render_slot_block(
+    s: *mut f32,
+    ext_inputs: &[*mut f32; EXT_INPUT_COUNT],
+    slot: usize,
+    source: usize,
+    start: usize,
+    frames: &ChunkFrames,
+    out: &mut [f32],
+    sample_rate: f32,
+    bpm: f32,
+) {
+    let len = frames.len;
+    if (SOURCE_EXT1..=SOURCE_EXT4).contains(&source) {
+        let ptr = ext_inputs[source - SOURCE_EXT1];
+        for j in 0..len {
+            out[j] = if !frames.active[j] || ptr.is_null() {
+                0.0
+            } else {
+                (*ptr.add(start + j)).clamp(0.0, 1.0)
+            };
+        }
+        return;
+    }
+    let param = |offset: usize| *s.add(slot_param_idx(slot, offset));
+    let state = |offset: usize| s.add(slot_state_idx(slot, offset));
+    let mut rng = SlotRng::load(s, slot);
+    let mut rendered = false;
+
+    match source {
+        SOURCE_LFO => {
+            let mut phase = *state(IDX_LFO_PHASE);
+            let mut anchor = *state(IDX_LFO_SYNC_ANCHOR);
+            let sync = param(PARAM_LFO_SYNC) > 0.5;
+            let div = param(PARAM_LFO_DIV).round() as usize;
+            let beats = SyncDivision::from_index(div).to_beats() as f32;
+            let retrigger = param(PARAM_LFO_RETRIGGER) > 0.5;
+            let rate = if sync {
+                synced_rate_hz(div, bpm)
+            } else {
+                param(PARAM_LFO_RATE_HZ).clamp(0.01, 20.0)
+            };
+            let increment = rate / sample_rate;
+            let shape = param(PARAM_LFO_SHAPE).round() as usize;
+            let pw = param(PARAM_LFO_PW).clamp(0.05, 0.95);
+            let offset_degrees = *s.add(slot_lfo_phase_param_idx(slot));
+            for j in 0..len {
+                if !frames.active[j] {
+                    out[j] = 0.0;
+                    continue;
+                }
+                rendered = true;
+                let note_on = frames.note_on[j];
+                if sync && frames.clock_advancing[j] {
+                    let bar_derived = synced_phase_from_bar_phase_beats(
+                        beats,
+                        frames.bar_phase[j],
+                        frames.bar_count[j],
+                    );
+                    phase = if retrigger {
+                        if note_on {
+                            anchor = bar_derived;
+                        }
+                        normalize_phase(bar_derived - anchor)
+                    } else {
+                        bar_derived
+                    };
+                } else {
+                    if note_on && retrigger {
+                        phase = 0.0;
+                    }
+                    phase = normalize_phase(phase + increment);
+                }
+                let effective = lfo_effective_phase(phase, offset_degrees);
+                out[j] = bipolar_to_unipolar(shape_value(shape, effective, pw)).clamp(0.0, 1.0);
+            }
+            *state(IDX_LFO_PHASE) = phase;
+            *state(IDX_LFO_SYNC_ANCHOR) = anchor;
+            let current = rng.current();
+            rng.finish_sample(current);
+        }
+        SOURCE_ENV => {
+            let mut env = *state(IDX_ENV);
+            let mut stage = *state(IDX_ENV_STAGE);
+            let attack = 1.0
+                / (param(PARAM_ENV_ATTACK_MS).clamp(1.0, ENV_TIME_MAX_MS) * 0.001 * sample_rate);
+            let decay = 1.0
+                / (param(PARAM_ENV_DECAY_MS).clamp(5.0, ENV_TIME_MAX_MS) * 0.001 * sample_rate);
+            let sustain = param(PARAM_ENV_SUSTAIN).clamp(0.0, 1.0);
+            let release = 1.0
+                / (param(PARAM_ENV_RELEASE_MS).clamp(5.0, ENV_TIME_MAX_MS) * 0.001 * sample_rate);
+            // Held sustain and idle are fixed points of the per-frame stage
+            // machine below; fill them instead of stepping every frame.
+            let fixed = frames.steady
+                && ((stage == ENV_STAGE_SUSTAIN && frames.all_gate_high) || stage == ENV_STAGE_IDLE);
+            if fixed {
+                if stage == ENV_STAGE_SUSTAIN {
+                    env = sustain;
+                }
+                env = env.clamp(0.0, 1.0);
+                out.fill(env);
+                rendered = len > 0;
+            }
+            for j in 0..if fixed { 0 } else { len } {
+                if !frames.active[j] {
+                    out[j] = 0.0;
+                    continue;
+                }
+                rendered = true;
+                let gate = frames.gate[j];
+                if frames.note_on[j] {
+                    env = 0.0;
+                    stage = ENV_STAGE_ATTACK;
+                }
+                if gate <= 0.5 && stage != ENV_STAGE_IDLE && stage != ENV_STAGE_RELEASE {
+                    stage = ENV_STAGE_RELEASE;
+                }
+                if stage == ENV_STAGE_ATTACK {
+                    env = (env + attack).min(1.0);
+                    if env >= 0.999 {
+                        env = 1.0;
+                        stage = ENV_STAGE_DECAY;
+                    }
+                } else if stage == ENV_STAGE_DECAY {
+                    env += (sustain - env) * decay;
+                    if (env - sustain).abs() <= 0.001 {
+                        env = sustain;
+                        stage = if gate > 0.5 {
+                            ENV_STAGE_SUSTAIN
+                        } else {
+                            ENV_STAGE_RELEASE
+                        };
+                    }
+                } else if stage == ENV_STAGE_SUSTAIN {
+                    env = sustain;
+                    if gate <= 0.5 {
+                        stage = ENV_STAGE_RELEASE;
+                    }
+                } else if stage == ENV_STAGE_RELEASE {
+                    env += (0.0 - env) * release;
+                    if env <= 0.0005 {
+                        env = 0.0;
+                        stage = ENV_STAGE_IDLE;
+                    }
+                }
+                env = env.clamp(0.0, 1.0);
+                out[j] = env;
+            }
+            *state(IDX_ENV) = env;
+            *state(IDX_ENV_STAGE) = stage;
+            let current = rng.current();
+            rng.finish_sample(current);
+        }
+        SOURCE_RAND => {
+            let mut phase = *state(IDX_RAND_PHASE);
+            let mut hold = *state(IDX_RAND_HOLD);
+            let mut smooth = *state(IDX_RAND_SMOOTH);
+            let rate = if param(PARAM_RAND_SYNC) > 0.5 {
+                synced_rate_hz(param(PARAM_RAND_DIV).round() as usize, bpm)
+            } else {
+                param(PARAM_RAND_RATE_HZ).clamp(0.01, 20.0)
+            };
+            let increment = rate / sample_rate;
+            let slew = param(PARAM_RAND_SLEW).clamp(0.0, 0.999);
+            for j in 0..len {
+                if !frames.active[j] {
+                    out[j] = 0.0;
+                    continue;
+                }
+                rendered = true;
+                let mut rng_state = rng.current();
+                if frames.note_on[j] {
+                    hold = next_rand(&mut rng_state);
+                }
+                let prev_phase = phase;
+                phase = (phase + increment).fract();
+                if phase < prev_phase {
+                    hold = next_rand(&mut rng_state);
+                }
+                smooth += (hold - smooth) * (1.0 - slew);
+                rng.finish_sample(rng_state);
+                out[j] = bipolar_to_unipolar(smooth).clamp(0.0, 1.0);
+            }
+            *state(IDX_RAND_PHASE) = phase;
+            *state(IDX_RAND_HOLD) = hold;
+            *state(IDX_RAND_SMOOTH) = smooth;
+        }
+        SOURCE_DRIFT => {
+            let mut from = *state(IDX_DRIFT);
+            let mut target = *state(IDX_DRIFT_TARGET);
+            let mut phase = *state(IDX_DRIFT_PHASE);
+            let rate = if param(PARAM_DRIFT_SYNC) > 0.5 {
+                synced_rate_hz(param(PARAM_DRIFT_DIV).round() as usize, bpm)
+            } else {
+                param(PARAM_DRIFT_RATE).clamp(DRIFT_RATE_MIN_HZ, DRIFT_RATE_MAX_HZ)
+            };
+            let increment = rate / sample_rate;
+            for j in 0..len {
+                if !frames.active[j] {
+                    out[j] = 0.0;
+                    continue;
+                }
+                rendered = true;
+                let mut rng_state = rng.current();
+                phase += increment;
+                if phase >= 1.0 {
+                    phase = normalize_phase(phase);
+                    from = target;
+                    target = next_rand(&mut rng_state);
+                }
+                rng.finish_sample(rng_state);
+                out[j] = bipolar_to_unipolar(drift_value(from, target, phase)).clamp(0.0, 1.0);
+            }
+            *state(IDX_DRIFT) = from;
+            *state(IDX_DRIFT_TARGET) = target;
+            *state(IDX_DRIFT_PHASE) = phase;
+        }
+        _ => {
+            for value in out.iter_mut() {
+                *value = 0.0;
+            }
+            return;
+        }
+    }
+    if rendered {
+        rng.store(s, slot);
+    }
+}
+
+/// Frame-major per-sample reference for `render_frames`.
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+unsafe fn render_frames_reference(
+    s: *mut f32,
+    out: *const *mut f32,
+    ext_inputs: &[*mut f32; EXT_INPUT_COUNT],
+    slot_sources: &[usize; SLOT_COUNT],
+    gate_in: *const f32,
+    trigger_in: *const f32,
+    clock: &BlockTransportClock,
+    bars: &mut BarTracker,
+    prev_gate: &mut f32,
+    sampler_voice_started: &mut bool,
+    is_sampler: bool,
+    nf: usize,
+    sample_rate: f32,
+    bpm: f32,
+) {
     for i in 0..nf {
         let gate = (*gate_in.add(i)).clamp(0.0, 1.0);
         let trigger = (*trigger_in.add(i)).max(0.0);
@@ -1691,15 +2260,15 @@ unsafe extern "C" fn voice_modulator_process(
         // sampler voice waiting for its first gate stays on the bar grid.
         let (transport_bar_phase, transport_clock_advancing) = clock.frame(i);
         bars.note_frame(transport_bar_phase, transport_clock_advancing);
-        if !sampler_voice_started && gate <= 0.5 && trigger <= 0.5 {
+        if !*sampler_voice_started && gate <= 0.5 && trigger <= 0.5 {
             clear_output_frame(out, i);
-            prev_gate = gate;
+            *prev_gate = gate;
             continue;
         }
-        if sampler_identity.is_some() && (gate > 0.5 || trigger > 0.5) {
-            sampler_voice_started = true;
+        if is_sampler && (gate > 0.5 || trigger > 0.5) {
+            *sampler_voice_started = true;
         }
-        let note_on = (gate > 0.5 && prev_gate <= 0.5) || trigger > 0.5;
+        let note_on = (gate > 0.5 && *prev_gate <= 0.5) || trigger > 0.5;
 
         for (slot, source) in slot_sources.iter().copied().enumerate() {
             if source == SOURCE_OFF {
@@ -1708,7 +2277,7 @@ unsafe extern "C" fn voice_modulator_process(
             let out_slot = *out.add(slot);
             *out_slot.add(i) = render_slot(
                 s,
-                &ext_inputs,
+                ext_inputs,
                 slot,
                 source,
                 i,
@@ -1722,13 +2291,8 @@ unsafe extern "C" fn voice_modulator_process(
             );
         }
 
-        prev_gate = gate;
+        *prev_gate = gate;
     }
-
-    *s.add(IDX_PREV_GATE) = prev_gate;
-    bars.store(s);
-    *s.add(IDX_LAST_RESET_COUNTER) = last_reset_counter;
-    publish_slot_display_values(s, out, nf);
 }
 
 pub fn voice_modulator_vtable() -> NodeVTable {
@@ -1797,6 +2361,166 @@ pub fn modulator_slot_label_static(slot: usize) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    thread_local! {
+        /// Routes `voice_modulator_process` through the per-sample reference.
+        pub(super) static REFERENCE_RENDER: std::cell::Cell<bool> =
+            const { std::cell::Cell::new(false) };
+    }
+
+    struct TestRng(u64);
+
+    impl TestRng {
+        fn next(&mut self) -> u64 {
+            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            self.0 >> 33
+        }
+        fn unit(&mut self) -> f32 {
+            (self.next() % 1_000_000) as f32 / 1_000_000.0
+        }
+        fn below(&mut self, n: u64) -> u64 {
+            self.next() % n
+        }
+    }
+
+    fn process_block(
+        state: &mut [f32],
+        inputs: &[Vec<f32>; INPUT_COUNT],
+        frames: usize,
+        reference: bool,
+    ) -> [Vec<f32>; NUM_OUTPUTS] {
+        let input_ptrs: Vec<*mut f32> = inputs.iter().map(|lane| lane.as_ptr() as *mut f32).collect();
+        // Poison outputs so a frame the renderer forgets to write shows up.
+        let mut outputs: [Vec<f32>; NUM_OUTPUTS] = std::array::from_fn(|_| vec![f32::NAN; frames]);
+        let output_ptrs: Vec<*mut f32> = outputs.iter_mut().map(|lane| lane.as_mut_ptr()).collect();
+        REFERENCE_RENDER.with(|flag| flag.set(reference));
+        unsafe {
+            voice_modulator_process(
+                input_ptrs.as_ptr(),
+                output_ptrs.as_ptr(),
+                frames as c_int,
+                state.as_mut_ptr().cast(),
+                std::ptr::null_mut(),
+            );
+        }
+        REFERENCE_RENDER.with(|flag| flag.set(false));
+        outputs
+    }
+
+    #[test]
+    #[ignore = "timing probe; run with --release --run-ignored only"]
+    fn source_cost_probe() {
+        for source in [SOURCE_OFF, SOURCE_LFO, SOURCE_ENV, SOURCE_RAND, SOURCE_DRIFT, 99] {
+            let mut state = init_state();
+            for slot in 0..SLOT_COUNT {
+                state[slot_param_idx(slot, PARAM_SLOT_SOURCE)] =
+                    if source == 99 { default_source(slot) } else if slot == 0 { source as f32 } else { 0.0 };
+            }
+            let mut inputs: [Vec<f32>; INPUT_COUNT] = std::array::from_fn(|_| vec![0.0; 512]);
+            inputs[INPUT_GATE].iter_mut().for_each(|g| *g = 1.0);
+            let start = std::time::Instant::now();
+            for _ in 0..20_000 {
+                std::hint::black_box(process_block(&mut state, &inputs, 512, false));
+            }
+            eprintln!("source {source}: {:.2} us/block", start.elapsed().as_secs_f64() * 1e6 / 20_000.0);
+        }
+    }
+
+    #[test]
+    fn block_renderer_matches_per_sample_reference() {
+        let mut rng = TestRng(0x5eed);
+        let divisions = SyncDivision::ALL.len() as u64;
+        for trial in 0..300 {
+            let sampler = trial % 5 == 4;
+            let mut state = if sampler {
+                init_sampler_voice_state(MAX_SAMPLER_POOLS - 1, 63)
+            } else {
+                init_state()
+            };
+            for slot in 0..SLOT_COUNT {
+                let mut set = |offset: usize, value: f32| state[slot_param_idx(slot, offset)] = value;
+                set(PARAM_SLOT_SOURCE, rng.below(9) as f32);
+                set(PARAM_LFO_RATE_HZ, rng.unit() * 25.0);
+                set(PARAM_LFO_SYNC, rng.below(2) as f32);
+                set(PARAM_LFO_DIV, rng.below(divisions) as f32);
+                set(PARAM_LFO_SHAPE, rng.below(4) as f32);
+                set(PARAM_LFO_PW, rng.unit());
+                set(PARAM_LFO_RETRIGGER, rng.below(2) as f32);
+                let env_scale = if trial % 2 == 0 { 1.0 } else { 0.1 };
+                set(PARAM_ENV_ATTACK_MS, rng.unit() * 30.0 * env_scale);
+                set(PARAM_ENV_DECAY_MS, rng.unit() * 60.0 * env_scale);
+                set(PARAM_ENV_SUSTAIN, rng.unit());
+                set(PARAM_ENV_RELEASE_MS, rng.unit() * 60.0);
+                set(PARAM_RAND_RATE_HZ, rng.unit() * 400.0);
+                set(PARAM_RAND_SYNC, rng.below(2) as f32);
+                set(PARAM_RAND_DIV, rng.below(divisions) as f32);
+                set(PARAM_RAND_SLEW, rng.unit());
+                set(PARAM_DRIFT_RATE, rng.unit() * 10.0);
+                set(PARAM_DRIFT_SYNC, rng.below(2) as f32);
+                set(PARAM_DRIFT_DIV, rng.below(divisions) as f32);
+                state[slot_lfo_phase_param_idx(slot)] = rng.unit() * 400.0 - 20.0;
+            }
+            state[PARAM_BPM] = 40.0 + rng.unit() * 300.0;
+            state[IDX_TRANSPORT_CLOCK_SOURCE] = rng.below(2) as f32;
+            let mut reference_state = state.clone();
+
+            let mut bar_phase = rng.unit();
+            let mut gate = 0.0f32;
+            for block in 0..40 {
+                let frames = 1 + rng.below(300) as usize;
+                let phase_inc = if rng.below(4) == 0 { 0.0 } else { rng.unit() * 0.002 };
+                for target in [&mut state, &mut reference_state] {
+                    target[PARAM_TRANSPORT_BAR_PHASE] = bar_phase;
+                    target[PARAM_TRANSPORT_BAR_PHASE_INC] = phase_inc;
+                    target[IDX_EVENT_SLICE_START] = (block % 3) as f32 * 7.0;
+                    if block == 20 {
+                        target[PARAM_RESET_COUNTER] += 1.0;
+                    }
+                }
+                let mut inputs: [Vec<f32>; INPUT_COUNT] = std::array::from_fn(|_| vec![0.0; frames]);
+                for i in 0..frames {
+                    // Odd trials hold gates long enough to reach steady
+                    // sustain and idle across whole chunks.
+                    if rng.below(if trial % 2 == 0 { 40 } else { 1500 }) == 0 {
+                        gate = if gate > 0.5 { 0.0 } else { 1.0 };
+                    }
+                    inputs[INPUT_GATE][i] = gate;
+                    inputs[INPUT_PITCH][i] = 440.0;
+                    inputs[INPUT_VELOCITY][i] = 1.0;
+                    inputs[INPUT_TRIGGER][i] =
+                        if rng.below(if trial % 2 == 0 { 150 } else { 5000 }) == 0 { 1.0 } else { 0.0 };
+                    for ext in 0..EXT_INPUT_COUNT {
+                        inputs[INPUT_EXT_BASE + ext][i] = rng.unit() * 1.4 - 0.2;
+                    }
+                    bar_phase = normalize_phase(bar_phase + phase_inc);
+                    inputs[INPUT_TRANSPORT_BAR_PHASE][i] = bar_phase;
+                    inputs[INPUT_TRANSPORT_BAR_PHASE_INC][i] = phase_inc;
+                }
+                let block_out = process_block(&mut state, &inputs, frames, false);
+                let reference_out = process_block(&mut reference_state, &inputs, frames, true);
+                for slot in 0..NUM_OUTPUTS {
+                    for i in 0..frames {
+                        assert_eq!(
+                            block_out[slot][i].to_bits(),
+                            reference_out[slot][i].to_bits(),
+                            "trial {trial} block {block} slot {slot} frame {i}: {} vs {}",
+                            block_out[slot][i],
+                            reference_out[slot][i],
+                        );
+                    }
+                }
+                for idx in 0..STATE_SIZE {
+                    assert_eq!(
+                        state[idx].to_bits(),
+                        reference_state[idx].to_bits(),
+                        "trial {trial} block {block} state[{idx}]: {} vs {}",
+                        state[idx],
+                        reference_state[idx],
+                    );
+                }
+            }
+        }
+    }
 
     fn render_voice_modulator(
         state: &mut [f32; STATE_SIZE],

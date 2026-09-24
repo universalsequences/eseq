@@ -47,6 +47,9 @@ pub(crate) mod chorus;
 pub mod stereo_panner;
 #[allow(dead_code)]
 pub(crate) mod str8_delay;
+pub(crate) mod tail_sleep;
+pub(crate) mod output_lanes;
+pub(crate) mod silence;
 #[allow(dead_code)]
 pub(crate) mod tape;
 
@@ -2800,8 +2803,8 @@ mod tests {
             other => panic!("lfo wave should be enum, got {other:?}"),
         }
 
-        // §5a: 19 targets × 4 slots, base params resolved by name.
-        assert_eq!(desc.instrument_modulation_targets.len(), 76);
+        // §5a: 20 targets × 4 slots, base params resolved by name.
+        assert_eq!(desc.instrument_modulation_targets.len(), 80);
         let target_names: Vec<&str> = desc
             .instrument_modulation_targets
             .iter()
@@ -2810,7 +2813,7 @@ mod tests {
         for name in [
             "f1 freq", "f2 freq", "f1 res", "f2 res", "f1 mode", "f2 mode", "fm amount",
             "am depth", "ser/par", "crunch", "sense", "attack", "decay", "sustain", "release",
-            "lfo rate", "lfo depth", "ar attack", "ar release",
+            "lfo rate", "lfo depth", "ar attack", "ar release", "ar depth",
         ] {
             assert_eq!(
                 target_names.iter().filter(|n| **n == name).count(),
@@ -5381,6 +5384,16 @@ impl EffectDescriptor {
                 fb::FILTERBANK_PARAM_MOD_AR_RELEASE_DEPTH_2,
                 fb::FILTERBANK_PARAM_MOD_AR_RELEASE_DEPTH_3,
                 fb::FILTERBANK_PARAM_MOD_AR_RELEASE_DEPTH_4,
+            ],
+        );
+        append_depth_targets(
+            "ar depth",
+            "ar depth",
+            [
+                fb::FILTERBANK_PARAM_MOD_AR_DEPTH_DEPTH_1,
+                fb::FILTERBANK_PARAM_MOD_AR_DEPTH_DEPTH_2,
+                fb::FILTERBANK_PARAM_MOD_AR_DEPTH_DEPTH_3,
+                fb::FILTERBANK_PARAM_MOD_AR_DEPTH_DEPTH_4,
             ],
         );
 
@@ -8065,7 +8078,7 @@ impl EffectDescriptor {
             ParamDescriptor {
                 name: "attack".to_string(),
                 min: 0.0,
-                max: 500.0,
+                max: crate::sequencer::TRACK_ATTACK_MAX_MS,
                 default: 0.0,
                 kind: ParamKind::Continuous {
                     unit: Some("ms".to_string()),
@@ -10937,8 +10950,13 @@ impl EffectSlotSnapshot {
     /// `param_idx` as a node index silently writes knob-scale values into
     /// unrelated state — which is how a zeroed sample rate reached the audio
     /// worker and aborted the process.
+    /// Params with no backing node state (stored as `u32::MAX`) also resolve to
+    /// `None`; the sentinel must never reach the `MOD_PARAM_BASE` split.
     pub fn node_param_idx(&self, param_idx: usize) -> Option<u32> {
-        self.param_node_indices.get(param_idx).copied()
+        self.param_node_indices
+            .get(param_idx)
+            .copied()
+            .filter(|&idx| idx != u32::MAX)
     }
 
     fn param_node_id(&self, param_idx: usize) -> Option<ParamNodeId> {

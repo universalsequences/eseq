@@ -2518,7 +2518,7 @@
         let snapshot = app.state.latest_scheduler_snapshot();
         assert_eq!(snapshot.tracks[track].instrument_type, InstrumentType::Empty);
         assert!(snapshot.tracks[track].instrument_descriptor.params.is_empty());
-        assert_eq!(app.state.runtime.voice_counts[track].load(Ordering::Acquire), 0);
+        assert_eq!(app.state.runtime.voice_counts.load(track, Ordering::Acquire), 0);
         assert_eq!(app.state.runtime.sampler_lids[track].load(Ordering::Acquire), 0);
         assert_eq!(app.state.runtime.track_engine_ids[track].load(Ordering::Acquire), u32::MAX);
         assert_eq!(app.state.runtime.instrument_type_flags[track].load(Ordering::Acquire),
@@ -3103,7 +3103,7 @@
         assert_eq!(app.graph.engine_node_ids.len(), 1);
         assert!(app.graph.engine_node_ids[0].is_none());
         assert_eq!(
-            app.state.runtime.engine_voice_counts[0].load(Ordering::Acquire),
+            app.state.runtime.engine_voice_counts.load(0, Ordering::Acquire),
             0
         );
         for voice in 0..MAX_VOICES {
@@ -3181,7 +3181,7 @@
         assert_eq!(engine.modulator_ids.len(), MAX_VOICES);
         assert_eq!(engine.synth_ids.len(), MAX_VOICES);
         assert_eq!(
-            app.state.runtime.engine_voice_counts[0].load(Ordering::Acquire),
+            app.state.runtime.engine_voice_counts.load(0, Ordering::Acquire),
             MAX_VOICES as u32
         );
         for voice in 0..MAX_VOICES {
@@ -3384,7 +3384,7 @@
         assert!(app.graph.track_node_ids[0].sampler_ids.is_empty());
         assert!(app.graph.track_voice_lids[0].is_empty());
         assert_eq!(app.graph.track_buffer_ids[0], -1);
-        assert_eq!(app.state.runtime.voice_counts[0].load(Ordering::Acquire), 0);
+        assert_eq!(app.state.runtime.voice_counts.load(0, Ordering::Acquire), 0);
         assert!(sampler_ids
             .iter()
             .all(|node_id| { !app.graph.track_node_ids[0].sampler_ids.contains(node_id) }));
@@ -5922,7 +5922,7 @@
         assert_eq!(app.graph.track_sample_rates[0], 48_000);
         assert!(app.graph.engine_node_ids[0].is_none());
         assert_eq!(
-            app.state.runtime.voice_counts[0].load(Ordering::Acquire),
+            app.state.runtime.voice_counts.load(0, Ordering::Acquire),
             MAX_VOICES as u32
         );
         assert_eq!(
@@ -5987,7 +5987,7 @@
         assert_eq!(app.graph.track_node_ids[0].voice_sum_id, old_sum);
         assert!(app.graph.track_node_ids[0].sampler_ids.is_empty());
         assert_eq!(app.graph.track_buffer_ids, vec![-1]);
-        assert_eq!(app.state.runtime.voice_counts[0].load(Ordering::Acquire), 0);
+        assert_eq!(app.state.runtime.voice_counts.load(0, Ordering::Acquire), 0);
         assert_test_slot_snapshot_eq(
             &EffectSlotSnapshot::capture(&app.state.pattern.instrument_slots[0]),
             &old_slot,

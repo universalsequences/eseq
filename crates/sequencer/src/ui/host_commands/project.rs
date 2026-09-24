@@ -313,9 +313,9 @@ pub(super) fn handle(
             } else {
                 None
             };
-            // `:then "new-project"` chains the File > New "Save first" path;
-            // it runs only after the write succeeded so a failed save never
-            // discards the project.
+            // `:then "new-project"` / `:then "quit"` chain the unsaved-changes
+            // prompt's Save; they run only after the write succeeded so a
+            // failed save never discards the project.
             let then = if let Value::Map(ref map) = payload {
                 map.get("then").and_then(|cell| match &*cell.borrow() {
                     Value::String(name) => Some(name.clone()),
@@ -334,8 +334,10 @@ pub(super) fn handle(
                         "Saved project '{save_name}'"
                     )));
                     editor.show_toast(format!("Saved {save_name}"), eseqlisp::ToastKind::Success);
-                    if then.as_deref() == Some("new-project") {
-                        handle("new-project", Value::Nil, app, editor, ctx);
+                    match then.as_deref() {
+                        Some("new-project") => handle("new-project", Value::Nil, app, editor, ctx),
+                        Some("quit") => editor.request_quit(),
+                        _ => {}
                     }
                 }
                 Err(error) => {

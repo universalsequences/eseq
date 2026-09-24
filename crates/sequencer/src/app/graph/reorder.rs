@@ -168,8 +168,7 @@ impl GraphController<'_> {
         for track in 0..self.app.tracks.len() {
             let nodes = &self.app.graph.track_node_ids[track];
             let voices = &self.app.graph.track_voice_lids[track];
-            self.app.state.runtime.voice_counts[track]
-                .store(voices.len() as u32, Ordering::Release);
+            self.app.state.runtime.voice_counts.store(track, voices.len() as u32, Ordering::Release);
             self.app.state.runtime.sampler_lids[track]
                 .store(voices.first().copied().unwrap_or(0), Ordering::Release);
             self.app.state.runtime.pan_lids[track].store(nodes.pan_id as u64, Ordering::Release);

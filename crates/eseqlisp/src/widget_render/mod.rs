@@ -27,6 +27,7 @@ pub mod modal;
 pub mod modulator_curve;
 pub mod multiband_meter;
 pub mod number_label;
+pub mod number_list;
 pub mod number_picker;
 pub mod patcher;
 pub mod phaser_notch;
@@ -1313,6 +1314,7 @@ static WIDGET_DEFINITIONS: &[&dyn WidgetDefinition] = &[
     &modulator_curve::MODULATOR_CURVE_WIDGET,
     &lfo_curve::LFO_CURVE_WIDGET,
     &number_label::NUMBER_LABEL_WIDGET,
+    &number_list::NUMBER_LIST_WIDGET,
     &patcher::PATCHER_WIDGET,
     &adsr_editor::ADSR_EDITOR_WIDGET,
     &tabs::TABS_WIDGET,
@@ -1622,6 +1624,7 @@ fn hash_value(value: &Value, hasher: &mut DefaultHasher) {
         }
         Value::Closure(idx, _) | Value::Function(idx) => idx.hash(hasher),
         Value::NodeRef(id) => id.hash(hasher),
+        Value::Instance(id) => id.hash(hasher),
         Value::ReactiveRef {
             namespace,
             field,

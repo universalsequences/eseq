@@ -31,6 +31,139 @@ pub fn capture_bar_count(duration: f64, requested_bars: usize) -> Result<usize, 
     Ok(bars)
 }
 
+/// A suggested crop: the phrase's first onset, a whole-number tempo whose
+/// power-of-two bar count matches the repeat the player looped, and that
+/// bar count. The crop end follows as `start + 240 * bars / bpm`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CaptureGuess {
+    pub start: f64,
+    pub bpm: u32,
+    pub bars: usize,
+}
+
+/// Onsets closer than this collapse into one hit (chords, flams).
+const ONSET_MERGE: f64 = 0.03;
+/// Tempo window, one octave wide so the choice of octave is unique. Placed
+/// low so hip-hop tempos stay put; faster grooves read as half time, which
+/// keeps the loop's duration.
+const GUESS_MIN_BPM: f64 = 70.0;
+const GUESS_MAX_BPM: f64 = 140.0;
+
+/// How strongly onsets line up on a grid of `spacing` seconds, 0..1, and
+/// where (seconds, modulo `spacing`) that grid's lines fall.
+fn grid_fit(onsets: &[f64], spacing: f64) -> (f64, f64) {
+    let (mut cos, mut sin) = (0.0, 0.0);
+    for &time in onsets {
+        let angle = std::f64::consts::TAU * time / spacing;
+        cos += angle.cos();
+        sin += angle.sin();
+    }
+    let phase = sin.atan2(cos) / std::f64::consts::TAU * spacing;
+    ((cos * cos + sin * sin).sqrt() / onsets.len() as f64, phase)
+}
+
+/// Pulse strength of a tempo: every hit of every sound should land on its
+/// sixteenth, eighth and quarter grids. Wrong tempos may fit one level by
+/// accident but not all three, and timing slop costs every candidate alike.
+fn tempo_fit(onsets: &[f64], bpm: f64) -> f64 {
+    let beat = 60.0 / bpm;
+    [beat / 4.0, beat / 2.0, beat].iter().map(|&spacing| grid_fit(onsets, spacing).0).sum()
+}
+
+/// Guess where the looped phrase starts, its tempo and its length in bars.
+///
+/// 1. Isolated hits (a stray note seconds before the groove) are dropped by
+///    splitting the onsets at long silences and keeping the densest phrase.
+/// 2. The tempo is the pulse that all hits, across all sounds, fit best
+///    (`tempo_fit`), searched within one octave.
+/// 3. The start is the phrase's first hit, snapped onto the tempo's grid.
+/// 4. The loop length is the shortest power-of-two bar count after which
+///    each sound's quantized steps repeat about as well as at any longer one.
+///
+/// Returns `None` when the phrase has too few hits or no steady pulse.
+pub fn detect_capture_loop(notes: &[CapturedNote]) -> Option<CaptureGuess> {
+    let mut hits: Vec<(f64, (TrackId, i32))> = notes.iter()
+        .filter(|note| note.start.is_finite())
+        .map(|note| (note.start, (note.track, (note.transpose * 100.0).round() as i32)))
+        .collect();
+    hits.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut all: Vec<f64> = Vec::new();
+    for &(time, _) in &hits {
+        if all.last().is_none_or(|last| time - last > ONSET_MERGE) {
+            all.push(time);
+        }
+    }
+    if all.len() < 4 { return None; }
+
+    // Phrase: split at silences much longer than the typical gap.
+    let mut gaps: Vec<f64> = all.windows(2).map(|w| w[1] - w[0]).collect();
+    gaps.sort_by(f64::total_cmp);
+    let split = (4.0 * gaps[gaps.len() / 2]).max(2.5);
+    let mut phrase = (0, 0);
+    let mut first = 0;
+    for index in 1..=all.len() {
+        if index == all.len() || all[index] - all[index - 1] > split {
+            // Ties keep the later phrase: it is what was just played.
+            if index - first >= phrase.1 - phrase.0 { phrase = (first, index); }
+            first = index;
+        }
+    }
+    let onsets = &all[phrase.0..phrase.1];
+    if onsets.len() < 4 { return None; }
+    let (from, to) = (onsets[0], onsets[onsets.len() - 1]);
+
+    // Coarse scan in 0.1 BPM, then refine around the winner.
+    let mut best = (0.0, f64::NEG_INFINITY);
+    for tenth in (GUESS_MIN_BPM * 10.0) as u32..(GUESS_MAX_BPM * 10.0) as u32 {
+        let bpm = tenth as f64 / 10.0;
+        let fit = tempo_fit(onsets, bpm);
+        if fit > best.1 { best = (bpm, fit); }
+    }
+    for hundredth in -10..=10 {
+        let bpm = best.0 + hundredth as f64 / 100.0;
+        let fit = tempo_fit(onsets, bpm);
+        if fit > best.1 { best = (bpm, fit); }
+    }
+    let (exact_bpm, fit) = best;
+    let sixteenth = 15.0 / exact_bpm;
+    let (sixteenth_fit, phase) = grid_fit(onsets, sixteenth);
+    // Steady: the three grid levels agree, or every hit sits tightly on the
+    // sixteenth grid (busy off-beat playing leaves the coarser levels empty).
+    // Calibrated against random timing (fit ~0.84, z ~1.6).
+    if fit < 0.95 && sixteenth_fit * (onsets.len() as f64).sqrt() < 3.0 { return None; }
+    let bpm = exact_bpm.round().clamp(GUESS_MIN_BPM, GUESS_MAX_BPM);
+
+    // Start on the grid line nearest the first hit, not on its slop.
+    let start = (phase + ((from - phase) / sixteenth).round() * sixteenth).max(0.0);
+
+    // Loop length. Quantize every hit to the grid, which absorbs loose
+    // timing, then ask how many of each sound's steps recur 1, 2, 4 or 8
+    // bars later. Take the shortest length about as good as the best.
+    let mut steps = std::collections::BTreeSet::<((TrackId, i32), i64)>::new();
+    for &(time, lane) in &hits {
+        if time >= from - ONSET_MERGE && time <= to + ONSET_MERGE {
+            steps.insert((lane, ((time - start) / sixteenth).round() as i64));
+        }
+    }
+    let last = steps.iter().map(|&(_, step)| step).max().unwrap_or(0);
+    let repeats: Vec<(usize, f64)> = [1usize, 2, 4, 8].into_iter().filter_map(|bars| {
+        let lag = 16 * bars as i64;
+        let eligible: Vec<_> = steps.iter().filter(|&&(_, step)| step + lag <= last).collect();
+        // A length needs enough hits that it can recur before the phrase ends.
+        (eligible.len() >= 4 && eligible.len() * 4 >= steps.len()).then(|| {
+            let matched = eligible.iter().filter(|&&&(lane, step)| steps.contains(&(lane, step + lag))).count();
+            (bars, matched as f64 / eligible.len() as f64)
+        })
+    }).collect();
+    let most = repeats.iter().map(|r| r.1).fold(0.0, f64::max);
+    let bars = match repeats.iter().find(|r| most >= 0.5 && r.1 >= 0.9 * most) {
+        Some(&(bars, _)) => bars,
+        // Nothing repeats: cover the whole phrase.
+        None => ((last + 1) as f64 / 16.0).ceil().clamp(1.0, 16.0) as usize,
+    }.next_power_of_two().min(16);
+    Some(CaptureGuess { start, bpm: bpm as u32, bars })
+}
+
 #[derive(Clone, Debug)]
 struct LiveNote {
     generation: u64,
@@ -169,8 +302,10 @@ impl App {
     /// The previous patterns remain in their pools and undo restores the cells.
     fn prepare_retrospective(&mut self, start: f64, end: f64, bars: usize) -> Result<PreparedCapture, String> {
         let draft = self.retrospective.draft.as_ref().ok_or("Open MIDI capture first")?;
+        // The end may pass the snapshot: a tempo-driven crop can run into the
+        // silence after the last note, which loops as a rest.
         if !start.is_finite() || !end.is_finite() || start < 0.0
-            || end <= start || end > draft.duration + 1e-9
+            || end <= start || start >= draft.duration
         {
             return Err("Choose a non-empty crop inside the captured time range".into());
         }
@@ -187,14 +322,26 @@ impl App {
         }
         let steps = bars * 16;
         let scale = steps as f64 / (end - start);
+        // A quarter step of slop at each crop edge, so the loop reads as a
+        // quantized cycle: an early first hit still lands on step one, and
+        // the next repetition's early downbeat is left out of the last step.
+        // A quarter keeps 16th triplets (a third of a step off the grid) out
+        // of the slop.
+        let slop = (end - start) / steps as f64 / 4.0;
         let mut lanes = BTreeMap::<usize, BTreeMap<usize, Vec<ImportedNote>>>::new();
-        for note in &draft.notes {
-            // A trig is selected by its onset. A note crossing the right crop
-            // edge is shortened; cropping never invents a note-on at the left.
-            if note.start < start || note.start >= end { continue; }
+        // Notes before the crop start go last, and only onto a track whose
+        // step one is still empty, so a pickup or flam never doubles the
+        // downbeat.
+        for early in [false, true] { for note in &draft.notes {
+            // A trig is selected by its onset, inside the crop window shifted
+            // back by the slop. A note crossing the right crop edge is
+            // shortened; cropping never invents a note-on at the left.
+            if (note.start < start) != early
+                || note.start < start - slop || note.start >= end - slop { continue; }
             let track = self.track_registry.index_of(note.track)
                 .ok_or("A captured track was deleted. Reopen MIDI capture")?;
-            let position = (note.start - start) * scale;
+            if early && lanes.get(&track).is_some_and(|steps| steps.contains_key(&0)) { continue; }
+            let position = ((note.start - start) * scale).max(0.0);
             let step = position.floor() as usize;
             let delay = (position - step as f64) as f32;
             let duration = ((note.end.min(end) - note.start).max(0.000001) * scale) as f32;
@@ -213,7 +360,7 @@ impl App {
             notes.push(ImportedNote {
                 transpose: note.transpose, duration, delay, velocity: note.velocity,
             });
-        }
+        } }
         if lanes.is_empty() { return Err("The crop contains no trigs".into()); }
         let note_count = lanes.values().flat_map(|steps| steps.values()).map(Vec::len).sum();
         let tracks = lanes.keys().copied().collect();
@@ -239,9 +386,16 @@ impl App {
             let pool = &mut scenes.track_pools[track];
             let id = pool.insert(data);
             let sound = pool.refs(id).ok_or("Imported pattern has no sound")?;
-            let scene = &mut scenes.scenes[scenes.current_scene];
-            scene.cells[track] = Some(id);
-            scene.cell_sounds[track] = sound;
+            // Kit pads in a rack with clips play their clip's cell, not the
+            // scene's; writing only the scene cell imported (and previewed)
+            // nothing for them.
+            let scene = scenes.current_scene;
+            if scenes.rack_member_slot(track).is_none() {
+                scenes.scenes[scene].cell_sounds[track] = sound;
+            }
+            if !scenes.set_composed_scene_cell(scene, track, id) {
+                return Err(format!("Track {} has no pattern slot in this scene", track + 1));
+            }
             scenes.track_overrides[track] = None;
         }
         Ok(PreparedCapture { scenes, bpm: bpm as u32, steps, note_count, tracks })
@@ -328,6 +482,103 @@ mod tests {
                 CapturedNote { track: TrackId(1), transpose: 12.0, velocity: 0.8, start: 3.0, end: 3.2 },
             ],
         });
+    }
+
+    /// Hits of a groove repeated `bars` times from `start`, with a small
+    /// deterministic timing wobble. `pattern` is (sixteenth, track) per bar
+    /// and may span several bars.
+    fn groove(start: f64, bpm: f64, pattern: &[(usize, u64)], pattern_bars: usize, repeats: usize) -> Vec<CapturedNote> {
+        loose_groove(start, bpm, pattern, pattern_bars, repeats, 0.02)
+    }
+
+    /// `slop` is the peak-to-peak timing wobble in seconds.
+    fn loose_groove(start: f64, bpm: f64, pattern: &[(usize, u64)], pattern_bars: usize, repeats: usize, slop: f64) -> Vec<CapturedNote> {
+        let sixteenth = 15.0 / bpm;
+        let mut notes = Vec::new();
+        let mut wobble = 0x9e37_79b9u32;
+        for repeat in 0..repeats {
+            for &(step, track) in pattern {
+                wobble = wobble.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                let jitter = ((wobble >> 16) as f64 / 65_536.0 - 0.5) * slop;
+                let time = start + ((repeat * pattern_bars * 16 + step) as f64) * sixteenth + jitter;
+                notes.push(CapturedNote { track: TrackId(track), transpose: 0.0, velocity: 1.0, start: time, end: time + 0.05 });
+            }
+        }
+        notes.sort_by(|a, b| a.start.total_cmp(&b.start));
+        notes
+    }
+
+    const BOOM_BAP: &[(usize, u64)] = &[
+        (0, 1), (10, 1), (4, 3), (12, 3),
+        (0, 2), (2, 2), (4, 2), (6, 2), (8, 2), (10, 2), (12, 2), (14, 2),
+    ];
+
+    #[test]
+    fn capture_loop_detection_skips_a_stray_hit_and_finds_the_groove_tempo() {
+        let mut notes = vec![CapturedNote { track: TrackId(1), transpose: 0.0, velocity: 1.0, start: 1.2, end: 1.25 }];
+        notes.extend(groove(9.263, 113.0, BOOM_BAP, 1, 4));
+        let guess = detect_capture_loop(&notes).unwrap();
+        assert!((guess.start - 9.263).abs() < 0.015, "{guess:?}");
+        assert_eq!((guess.bpm, guess.bars), (113, 1));
+    }
+
+    /// Slow, hand-played hip-hop: quarter hats, kick on 1 and the and-of-2,
+    /// clap on 2 and 4, each hit up to ±35 ms off the grid.
+    #[test]
+    fn capture_loop_detection_finds_a_loose_slow_groove_without_doubling() {
+        let pattern = [(0, 1), (6, 1), (4, 3), (12, 3), (0, 2), (4, 2), (8, 2), (12, 2)];
+        for bpm in [72.0, 78.0, 85.0, 92.0] {
+            let guess = detect_capture_loop(&loose_groove(3.0, bpm, &pattern, 1, 5, 0.07)).unwrap();
+            assert!((guess.bpm as f64 - bpm).abs() <= 1.0, "{bpm}: {guess:?}");
+            assert_eq!(guess.bars, 1, "{bpm}: {guess:?}");
+        }
+    }
+
+    /// Hit times read off a real capture that used to report ~150 BPM.
+    #[test]
+    fn capture_loop_detection_reads_a_recorded_slow_backbeat() {
+        let lanes: [(u64, &[f64]); 3] = [
+            (1, &[12.87, 18.99, 20.63, 22.19, 23.82, 25.25]),
+            (2, &[13.18, 16.34, 18.07, 18.65, 19.57, 20.46, 21.24, 21.95, 22.80, 23.65, 24.37, 25.05]),
+            (3, &[18.21, 19.78, 21.44, 23.04, 24.54]),
+        ];
+        let notes: Vec<_> = lanes.iter().flat_map(|(track, times)| times.iter().map(|&start|
+            CapturedNote { track: TrackId(*track), transpose: 0.0, velocity: 1.0, start, end: start + 0.1 }))
+            .collect();
+        let guess = detect_capture_loop(&notes).unwrap();
+        assert!((70..=90).contains(&guess.bpm), "{guess:?}");
+    }
+
+    #[test]
+    fn capture_loop_detection_keeps_a_two_bar_variation_whole() {
+        let mut pattern = BOOM_BAP.to_vec();
+        pattern.extend(BOOM_BAP.iter().map(|&(step, track)| (step + 16, track)));
+        pattern.retain(|&(step, track)| !(track == 1 && step == 26));
+        pattern.extend([(23, 1), (30, 1), (31, 1)]);
+        let guess = detect_capture_loop(&groove(2.0, 128.0, &pattern, 2, 3)).unwrap();
+        assert_eq!((guess.bpm, guess.bars), (128, 2));
+    }
+
+    #[test]
+    fn capture_loop_detection_folds_fast_grooves_into_half_time() {
+        // 170 BPM drum-and-bass reads as half time: same loop duration.
+        let guess = detect_capture_loop(&groove(0.5, 170.0, BOOM_BAP, 1, 6)).unwrap();
+        assert_eq!(guess.bpm, 85);
+        let guess = detect_capture_loop(&groove(0.5, 90.0, BOOM_BAP, 1, 4)).unwrap();
+        assert_eq!((guess.bpm, guess.bars), (90, 1));
+    }
+
+    #[test]
+    fn capture_loop_detection_rejects_unsteady_playing() {
+        let mut wobble = 0x1234_5678u32;
+        let mut time = 0.3;
+        let notes: Vec<_> = (0..24).map(|i| {
+            wobble = wobble.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            time += 0.15 + (wobble >> 16) as f64 / 65_536.0 * 0.6;
+            CapturedNote { track: TrackId(1 + i % 3), transpose: 0.0, velocity: 1.0, start: time, end: time + 0.1 }
+        }).collect();
+        assert_eq!(detect_capture_loop(&notes), None);
+        assert_eq!(detect_capture_loop(&notes[..3]), None);
     }
 
     #[test]
@@ -444,6 +695,82 @@ mod tests {
         assert_eq!(app.state.pattern.chord_data[0].count(0), 2);
     }
 
+    /// A detected crop snaps to the grid line nearest an early first hit, so
+    /// it starts after that hit. Import must still put the downbeat on step
+    /// one and leave the next bar's early downbeat out of the last step.
+    #[test]
+    fn retrospective_import_of_a_detected_crop_keeps_an_early_downbeat_on_step_one() {
+        const BPM: f64 = 113.0;
+        const EARLY: f64 = 0.008;
+        let pattern = [(0, 1), (10, 1), (0, 2), (4, 2), (8, 2), (12, 2)];
+        let mut notes = loose_groove(9.263, BPM, &pattern, 1, 4, 0.0);
+        let bar = 240.0 / BPM;
+        for note in &mut notes {
+            let in_bar = (note.start - 9.263).rem_euclid(bar);
+            if note.track == TrackId(1) && (in_bar < 1e-6 || bar - in_bar < 1e-6) {
+                note.start -= EARLY;
+                note.end -= EARLY;
+            }
+        }
+        notes.sort_by(|a, b| a.start.total_cmp(&b.start));
+        let first_kick = notes.iter().find(|note| note.track == TrackId(1)).unwrap().start;
+        let guess = detect_capture_loop(&notes).unwrap();
+        assert!(guess.start > first_kick, "{guess:?} vs first kick {first_kick}");
+        let bars = guess.bars;
+        let mut app = app();
+        let duration = notes.last().unwrap().end + 1.0;
+        app.retrospective.draft = Some(CaptureDraft {
+            duration, truncated: false, scene: app.state.current_scene_id().unwrap(), notes,
+        });
+        let end = guess.start + 240.0 * bars as f64 / guess.bpm as f64;
+        app.import_retrospective(guess.start, end, bars).unwrap();
+        assert!(app.state.pattern.patterns[0].is_active(0));
+        assert_eq!(app.state.pattern.chord_data[0].get_delay(0, 0), 0.0);
+        assert!(!app.state.pattern.patterns[0].is_active(bars * 16 - 1));
+    }
+
+    /// A flam just before the crop start must not move onto a step one that
+    /// already has its own hit: that would double the downbeat, or fail the
+    /// import on the mismatched velocity.
+    #[test]
+    fn retrospective_import_leaves_a_pre_start_flam_off_an_occupied_step_one() {
+        let sixteenth = 15.0 / 120.0;
+        let note = |start: f64, velocity: f32| CapturedNote {
+            track: TrackId(1), transpose: 0.0, velocity, start, end: start + 0.05,
+        };
+        let notes = vec![note(1.0 - 0.2 * sixteenth, 0.4), note(1.0, 1.0), note(1.0 + 8.0 * sixteenth, 1.0)];
+        let mut app = app();
+        app.retrospective.draft = Some(CaptureDraft {
+            duration: 4.0, truncated: false, scene: app.state.current_scene_id().unwrap(), notes,
+        });
+        app.import_retrospective(1.0, 3.0, 1).unwrap();
+        assert!(app.state.pattern.patterns[0].is_active(0));
+        assert_eq!(app.state.pattern.chord_data[0].count(0), 1);
+        assert_eq!(app.state.pattern.step_data[0].get(0, StepParam::Velocity), 1.0);
+    }
+
+    /// Kit pads in a rack with clips read their pattern from the active clip,
+    /// so import and preview must write there, not only the scene cell.
+    #[test]
+    fn retrospective_import_writes_the_active_clip_of_a_clip_bearing_rack() {
+        for seeded in [true, false] {
+            let mut app = app();
+            if seeded { app.state.pattern.patterns[0].toggle_step(8); }
+            app.capture_synchronized_scene_structure_state().unwrap();
+            app.state.with_scenes_mut(|scenes| scenes.convert_rack_to_clips(9, &[0, 1])).unwrap();
+            draft(&mut app);
+            let prepared = app.prepare_retrospective(1.0, 3.0, 1).unwrap();
+            let previewed = prepared.scenes.effective_track_pattern(0).unwrap();
+            assert_eq!(previewed.chord_snapshot.steps[0].len(), 2, "seeded {seeded}");
+            assert_eq!(app.import_retrospective(1.0, 3.0, 1).unwrap(), 3);
+            assert_eq!(app.state.pattern.chord_data[0].count(0), 2, "seeded {seeded}");
+            assert!(!app.state.pattern.patterns[0].is_active(8));
+            super::super::edit::undo(&mut app);
+            assert_eq!(app.state.pattern.chord_data[0].count(0), 0);
+            assert_eq!(app.state.pattern.patterns[0].is_active(8), seeded);
+        }
+    }
+
     #[test]
     fn retrospective_import_resolves_stable_tracks_after_reordering() {
         let mut app = app();
@@ -484,7 +811,7 @@ mod tests {
         let mut app = app();
         draft(&mut app);
         let original = app.state.effective_track_pattern_id(0);
-        for (start, end, bars) in [(f64::NAN, 3.0, 1), (3.0, 1.0, 1), (0.0, 5.0, 1),
+        for (start, end, bars) in [(f64::NAN, 3.0, 1), (3.0, 1.0, 1), (4.5, 6.0, 1),
             (0.0, 3.0, 0), (0.0, 3.0, 17), (0.0, 0.5, 1)] {
             assert!(app.import_retrospective(start, end, bars).is_err());
         }

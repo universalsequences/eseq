@@ -348,6 +348,7 @@ pub(crate) fn run_event_loop(
         queued_jev_suggestions: Vec::new(),
         pending_learn_job: None,
         learn_param_preview: None,
+        quit_confirmed: false,
         pending_lisp_history_transactions: HashMap::new(),
     };
     let mut frame = FrameDiffState {
@@ -364,6 +365,9 @@ pub(crate) fn run_event_loop(
         prev_pattern_epoch: 0,
         prev_song_row_mirror_epoch: 0,
         prev_published_sequencers_version: u64::MAX,
+        prev_graph_read_key: (u64::MAX, u64::MAX, usize::MAX),
+        prev_instance_key: (u64::MAX, u64::MAX, u64::MAX, 0),
+        prev_instances_fingerprint: u64::MAX,
         prev_current_track: usize::MAX,
         prev_cpu_load_bits: u32::MAX,
         cpu_overload: CpuOverloadIndicator::default(),
@@ -389,10 +393,12 @@ pub(crate) fn run_event_loop(
         prev_rack_pad_triggers: Vec::new(),
         rack_pad_triggered_at: Vec::new(),
         prev_track_playheads: Vec::new(),
+        prev_track_process_lengths: Vec::new(),
         prev_track_button_states: track_button_state_snapshot(&shared.state),
         prev_current_track_playhead_visible: false,
         prev_process_channel_values_version: shared.state.process_channel_values_version(),
         prev_process_scope_values_version: shared.state.process_scope_values_version(),
+        prev_process_scope_cells_version: shared.state.process_scope_values_version(),
         prev_process_effective_params_version: shared.state.process_effective_params_version(),
         prev_process_effective_params: Default::default(),
         prev_process_effective_sends: Default::default(),
@@ -651,21 +657,10 @@ pub(crate) fn run_event_loop(
             editor.mark_needs_redraw();
             frame.prev_queued_track_clips = queued_track_clips;
         }
-        let sample_browser_ready = { shared.sample_browser.borrow_mut().poll_ready() };
-        match sample_browser_ready {
-            Ok(true) => {
-                if let Err(error) = refresh_sample_browser_buffer(&mut editor) {
-                    editor.handle_host_event(HostEvent::Error(format!(
-                        "Failed to refresh sample browser search: {error}"
-                    )));
-                }
-            }
-            Ok(false) => {}
-            Err(error) => {
-                editor.handle_host_event(HostEvent::Error(format!(
-                    "Failed to query samples.db browser state: {error}"
-                )));
-            }
+        if let Err(error) = publish_sample_browser_results(&mut editor, &shared.sample_browser) {
+            editor.handle_host_event(HostEvent::Error(format!(
+                "Failed to query samples.db browser state: {error}"
+            )));
         }
         if let Some(watcher) = lisp_hot_reload_watcher.as_mut() {
             let source_revision = editor.runtime().lisp_source_revision();
@@ -934,6 +929,12 @@ pub(crate) fn run_event_loop(
                             replayed_patch.map_or_else(Vec::new, scene_slot_replay_targets);
                         let scene_slots_only = !scene_slot_targets.is_empty()
                             && replayed_patch.is_some_and(patch_is_only_scene_slots);
+                        let replayed_scratch_imports = replayed_patch.map_or_else(Vec::new, |patch| {
+                            patch.replayed_scratch_imports(matches!(
+                                shortcut,
+                                SequencerHistoryShortcut::Undo
+                            ))
+                        });
                         let replay = match shortcut {
                             SequencerHistoryShortcut::Undo => app::edit::undo(&mut app),
                             SequencerHistoryShortcut::Redo => app::edit::redo(&mut app),
@@ -943,6 +944,11 @@ pub(crate) fn run_event_loop(
                                 &mut editor,
                                 &shared.state,
                                 &scene_slot_targets,
+                            );
+                            host_commands::packages::apply_replayed_scratch_imports(
+                                &mut editor,
+                                &shared.state,
+                                &replayed_scratch_imports,
                             );
                         }
                         let message = match (replay, scene_slots_only) {

@@ -317,8 +317,8 @@ sample error 2.05e-8 and maximum NRMSE 1.73e-7.
 M1 Max, 48 kHz, 512 frames, one voice; seven rotating repetitions per condition,
 with compilation and other experiments finished before measurement. These are
 complete native instrument calls, including filters, envelopes and modulation
-support. Both sides use the pinned v0.1.25 compiler. The best prototype does not
-require the unpublished compiler fix described below.
+support. Both sides use the then-pinned v0.1.25 compiler. The best prototype does
+not require the compiler fix described below, subsequently released in v0.1.26.
 
 | Algorithm | Original, µs | Switchable table prototype, µs | Speedup |
 | --- | ---: | ---: | ---: |
@@ -386,7 +386,7 @@ Sampling the locally built debug compiler confirmed the earlier stall was in
 sorting growing conjunction sets. A depth-first worklist explored narrow paths
 through feedback before pending broader demands could subsume them.
 
-The local DGen change processes conjunctions by increasing predicate count and
+The DGen change processes conjunctions by increasing predicate count and
 canonicalizes demands once after convergence. Propagation only preserves or
 adds predicates, so this order processes every possible broader term first.
 There is no cap, dropped condition or change to execution semantics. It avoids
@@ -398,12 +398,253 @@ with the local release compiler, versus the earlier run stopped after 182 s.
 Sixteen focused Swift tests pass, including new shared-history growth and
 Boolean reachability regressions. Original, table and eight-algorithm Digi FM
 sources generate byte-identical C before/after the compiler fix, and 75 audio
-comparisons are sample-identical. The fix and tests are local in
-`~/code/swift/dgen`; no compiler release, eseq pin change or factory DSP change
-has been made.
+comparisons are sample-identical. The fix and tests were subsequently published
+in v0.1.26, as recorded below. Factory DSP remains unchanged.
 
 Reproduction and raw results live under `.local/benchmarks/digi-fm-2026-09-22/`:
 `switching-experiment.py`, `switching-final-validation.py`,
 `compiler-gate-validation.py`, the `switching-*` result folders, host-probe JSON,
 and `compiler-blowup-debug.sample.txt`. The final timing/state/audio report is
 `switching-final-validation/results.json`. Tracking: eseq-c519.4 and dgen-8pj.
+
+### Published compiler, 2026-09-23
+
+[DGenLisp v0.1.26](https://github.com/universalsequences/dgen-audio/releases/tag/dgenlisp-v0.1.26)
+publishes the macOS arm64 fix from source commit
+`e0751d26a280bfd0de4da79472f9a6e84f603a2e`. Eseq's macOS compiler pin is updated
+and installed through `scripts/fetch_dgenlisp.sh`; the Linux pin and hermetic
+Clang/lld stage are unchanged. The anonymous public download and installed
+archive match SHA256
+`f00cedfbdef7aa64a051a1b363621deed55a270612a5e40b6f0f63120e6fcc16`.
+
+The release was built in a clean isolated checkout with Apple Swift 6.2.3 and
+Xcode 26.2, stripped and ad-hoc signed. All 16 focused execution-gate tests pass.
+Both the package and installed symlink pass scalar and grouped-parameter compile
+checks, including the bundled binary audit, without resource-path overrides.
+Four complete Digi FM sources produce byte-identical C to the previously
+validated compiler. The formerly stalled source compiles in 3.06 seconds from
+the package and 3.09 seconds through the installed symlink.
+
+With the installed compiler, the production `instrument_probe` load/init path
+passes for both factory Digi FM and `user:Experiments/Digi FM Fast Test` at
+48 kHz / 512 frames, algorithm 6, Harmonics=5. Both render 8,192 frames with
+finite audio/state and nonzero signal. The test instrument also switches to
+algorithm 2 at frame 1,031 and back to 6 at frame 3,077. Peak/RMS are
+0.05112/0.02088 for the factory instrument and 0.05105/0.02062 for the test
+instrument. Fetching again confirms the installed distribution matches the pin.
+
+This release fixes compiler analysis time; it does not itself change Digi FM's
+audio-thread CPU cost or promote the experimental instrument into the factory
+library. Release notes, packaged/installed checks and host-probe results are
+under `.local/benchmarks/digi-fm-2026-09-22/release-v0.1.26/`; the fresh focused
+test log is `compiler-release-tests.log` in its parent directory. Tracking:
+eseq-c519.6.
+
+## Further 30% reduction: remaining cost ceilings, 2026-09-23
+
+The user auditioned `Digi FM Fast Test`, reported that it works well and feels
+approximately twice as fast, and asked what another 30% reduction would take.
+The target is about 220–238 µs per voice, relative to the measured 315–340 µs
+Fast Test baseline below. These figures are single-voice native CPU time at
+48 kHz / 512 frames, not a new measurement of the transport meter.
+
+The installed source, SHA256
+`2b68a9f9c8337e3f044e67eca96a22152a674d7fb78adbd7527a02fc0b755efd`,
+was copied into isolated diagnostic variants. All use the pinned v0.1.26
+compiler, algorithms 2 and 6, Harmonics 0 and 5, Type I selected, and seven
+rotating-order repetitions. Compilation and Python are outside the native
+timed region. Fourfold integration and live algorithm dispatch are retained.
+
+| Diagnostic variant | Algorithm 2, µs | Algorithm 6, µs | CPU reduction vs Fast Test |
+| --- | ---: | ---: | ---: |
+| Unchanged Fast Test | 314.8–316.1 | 339.3–340.3 | — |
+| Replace modulation accessors with bare parameters | 231.8–232.5 | 258.1–258.4 | 23.8–26.4% |
+| Remove unselected Type II filter | 251.5–255.2 | 276.4–278.3 | 18.2–20.4% |
+| Both changes together | 173.8–174.0 | 199.0–199.6 | 41.2–45.0% |
+| Remove all filters | 220.1–221.7 | 246.3–247.8 | 27.0–30.4% |
+| Replace harmonic waveforms with sine | 271.4–271.6 | 273.5–275.0 | 13.8–19.6% |
+
+These are cost ceilings from feature-removing ablations, not shippable
+optimizations. The combined result was measured directly; it is not the sum of
+the individual percentages. Six static renders per variant (algorithms 2/6,
+Harmonics 0/5/-5, no assigned modulation, Type I selected, including release)
+showed maximum sample differences of 2.61e-8 for bare parameters, 1.12e-8 for
+Type I only, and 2.89e-8 combined. They do not validate modulation assignment
+changes, Type II, filter transitions, all algorithms or all presets.
+
+The strongest first implementation target is compiler rate specialization for
+unassigned modulation (`dgen-7tx`). `ModulationGateLoweringPass` already gates
+the modulation arithmetic. Its inactive result still has audio-rate downstream
+scheduling, including buffers and calculations that could otherwise be
+block-invariant. A production solution must select the efficient unassigned
+path at runtime while preserving parameter identities, smoothers, shared
+state, and sample timing when assignments are added or removed. Removing
+modulation accessors globally would violate that contract.
+
+The other substantial target is the always-running pair of nonlinear filters.
+`drift-filter-morph` deliberately advances both state histories. Sleeping the
+inaudible filter can save work during a fixed selection, but waking it with
+stale or reset state changes the existing transition. Warm-up/crossfade behavior
+would need explicit design and qualification; it cannot be called bit-identical
+to an always-running nonlinear filter. If exact current filter transitions are
+required, keep both states running and seek the remaining saving in compiler
+scheduling/control work instead.
+
+This establishes credible headroom for a further 30% reduction, not a guarantee
+for patches with many actively modulated parameters. No installed instrument,
+factory DSP, compiler source or oversampling setting was changed. Reproduction:
+`.local/benchmarks/digi-fm-2026-09-22/remaining-costs.py`; source snapshots, raw
+timings and comparison metrics are in `remaining-costs/results.json` and its
+`assets/` directory. Tracking: eseq-c519.7.
+
+## Filter gating and compiler qualification, 2026-09-23
+
+The user accepts freezing an unselected filter because filter-type plocks are
+rare. `drift-filter-morph-gated` now provides that explicit policy alongside
+the existing continuously running morph macro. Both filters run during the
+existing smoothed crossfade. Contributions below 0.0001 (-80 dB) snap to zero,
+so an exponential fade actually reaches the endpoint and the unused filter can
+sleep. Its integrators resume from their retained state when selected again.
+Filter-type changes consequently do **not** reproduce the old continuously
+running filter histories, and may depend on callback boundaries while waking
+or sleeping. Fixed selections retain the existing filter calculation.
+
+The installed `user:Experiments/Digi FM Fast Test` uses the new macro. Its DSP
+SHA256 is `979795a5f088b2db60703b9ec18ce8e8622281c7bc1e810fc3a095e65a8643d7`.
+Factory instrument call sites and the compiler pin remain unchanged. Reload
+the instrument/project to use the updated experimental DSP.
+
+Native CPU time, one voice, 48 kHz / 512 frames, Harmonics=5, seven alternating
+repetitions, compiler v0.1.26:
+
+| Selected filter | Algorithm | Previous Fast Test, µs | Gated, µs | Reduction |
+| --- | ---: | ---: | ---: | ---: |
+| Type I | 2 | 316.8 | 255.8 | 19.3% |
+| Type I | 6 | 344.4 | 283.3 | 17.7% |
+| Type II | 2 | 317.1 | 294.7 | 7.1% |
+| Type II | 6 | 345.5 | 324.6 | 6.1% |
+
+This achieves part of the requested additional 30%, not the whole target.
+For these Type-I cases another approximately 13–15% reduction from the gated
+version would reach 30% relative to the previous Fast Test. These are isolated
+DSP timings, not transport-meter measurements.
+
+Validation against the saved pre-gating source:
+
+- 180 fixed-selection comparisons: all eight algorithms at Harmonics -5/0/5,
+  six factory presets, both filter types, and three pitches. Maximum absolute
+  sample difference 7.45e-8.
+- 54 additional comparisons cover all nine installed Fast Test presets at
+  three notes and both types, with changing modulation inputs. Maximum
+  difference 7.45e-8; maximum normalized RMS error 1.53e-6. Host LFO programs
+  are not recreated by this native harness.
+- All 56 ordered algorithm transitions, with retriggers and irregular process
+  sizes, pass for both filters (112 comparisons; maximum difference 2.42e-8).
+- Audio-rate harmonic modulation, release to silence, and repeated filter
+  switches at zero/maximum resonance remain finite. Filter-switch output is
+  checked for bounded signal rather than equality to the old running state.
+- `instrument_probe` passes the real compile/load/init path for the installed
+  name with Type II, and for the candidate source with Type I→II→I changes at
+  frames 4099/10003. Both have finite state/audio and nonzero output.
+
+Reproduction: `tools/digi-fm/validate_filter_gating.py --baseline <saved-dsp>
+--candidate <gated-dsp> --output <results-dir>`. Both DSP files must be expanded
+and have their `spectra.json` asset beside them. Source snapshots, timings,
+supplementary preset/switch tests and results are in
+`.local/benchmarks/digi-fm-2026-09-23/filter-gating/`.
+
+Two compiler prototypes were investigated and **rejected**, then removed from
+the dgen working tree:
+
+1. Conditional static control expressions duplicated only pure arithmetic,
+   selecting a block-level path when modulation was unassigned. Shared DSP
+   state remained single-owned. It saved only about 0–2% on Fast Test. More
+   importantly, it failed numerical sound comparisons in eight drum engines:
+   909 Open Hat, Digi Cymbal, Digi Hat, Membrane Snare, Modal Kick, Modal Snare,
+   Orbit Tom 66, and Virus B BassDrum 23. Generated code changes between scalar
+   and SIMD math; in Membrane Snare the first difference is floating-point
+   roundoff, then grows through the nonlinear model. This is evidence against
+   shipping, not proof that every waveform difference is audible.
+2. Direct reads through block-uniform buffer selections preserved the existing
+   arithmetic schedule. Fast Test comparisons passed, including all eight
+   algorithms/both filters, but timings were within measurement noise. Only
+   eight selections qualified there; adding this machinery does not currently
+   justify its complexity. A focused native test also covered changing two
+   modulation assignments around shared history at block sizes 1, 7 and 64.
+
+`tools/digi-fm/compare_factory_compilers.py` snapshots all 40 factory instruments,
+assets and recursively expanded macros, plus all 296 factory presets. Each
+instrument runs in an isolated process through the native production ABI at
+48 kHz / 512 frames. Default plus every preset is rendered at three notes for
+1.5 seconds, with release and retrigger: 1,008 baseline recordings. The first
+compiler prototype compiled all 40 instruments, but 124 recordings exceeded
+the comparison limits (peak error 2e-5 or normalized RMS error 1e-4), across the
+eight engines above. The checker also now records one audio-rate modulation /
+assignment-change case per instrument using irregular callback lengths, for
+1,048 baseline recordings in total. It checks DSP directly; host audio effects
+and host preset LFO programs are outside this coverage, and unused stored
+preset fields are explicitly recorded.
+
+After removing the prototypes, both local compiler build profiles were rebuilt
+from the clean tracked source. A final control comparison of the restored
+release compiler against the installed v0.1.26 distribution passed all 40
+instruments and all 1,048 recordings **bit-for-bit**, with zero compilation or
+signal failures (`factory/restored-control.json`). This validates the reference
+comparison and the compiler restoration; it is not an optimization result.
+Factory Digi Drift also passes `instrument_probe` with the expanded shared
+macro module after the new, unused gated macro definition was added.
+
+The failed compiler source/patches and numerical results remain under
+`.local/benchmarks/digi-fm-2026-09-23/compiler/` and `factory/`. Disposable native
+build caches from rejected/older Digi FM experiments were removed after the
+disk filled; their source snapshots and result data remain. No compiler release
+or vendor update was made. Assignment-aware scheduling remains open as
+`dgen-7tx`; its next design must preserve the existing arithmetic precision and
+SIMD behavior as well as DSP-state ownership. Merely hoisting calculations or
+relaxing comparison tolerances is not an acceptable completion.
+
+## Factory promotion — 2026-09-23
+
+At the user's request, the approved Digi FM Fast Test now supplies the factory
+`Synths/Digi FM` implementation. `tools/digi-fm/build.py` generates the cumulative
+8192 × 112 harmonic bank, eight gated literal-algorithm cores and the gated
+Drift filter call directly. This replaces the experimental source-rewriting
+pipeline with maintained generation. Fourfold integration, shared phase and
+feedback histories, reconstruction filtering and live algorithm changes are
+unchanged from the approved experiment.
+
+The expanded factory DSP has exactly the same 6,390 Lisp tokens as the installed
+Fast Test after removing comments/whitespace. The generated bank is byte-for-byte
+identical: SHA256
+`95050052aff4e269971efd001169280cdc75ff02094b9a796b384f192a387e91`.
+Generation is idempotent for DSP, table and parameter defaults. The factory
+identity, UI, all parameter declarations and the six-preset bank are unchanged.
+Existing projects and the separate Fast Test instrument were not edited.
+
+Validation with the pinned macOS v0.1.26 compiler:
+
+- 270 audio comparisons against the approved Fast Test are **bit-for-bit
+  identical**, including all eight algorithms with both filter types at
+  44.1/48 kHz; all nine audition-bank presets at three notes and both filter
+  types; every ordered algorithm transition; filter changes with/without
+  retriggers; and audio-rate Harmonics modulation with irregular callbacks.
+- `python3 tools/digi-fm/validate.py` passes its independent routing/table
+  reference, 16/128-frame parity, envelope/retrigger/hold/release, output gain,
+  high-rate spectral reference and unchanged Digi Drift checks. Its existing
+  eight-voice 128-frame benchmark measured 0.587 ms versus a 2.667 ms deadline;
+  this excludes host graph scheduling.
+- `performance.py` now stages each revision's own adjacent assets. Its 66 audio
+  checks pass at 32/128/512 frames. A single paired timing run checks the harness
+  and gives similar Fast Test/factory timings; it is not a new performance claim.
+- Production `instrument_probe` loads all six factory presets with finite,
+  audible output. A separate 16,384-frame run changes algorithm at frame 1,031
+  and filter type at 4,099/10,003, also without non-finite samples or state.
+
+Evidence is in `.local/benchmarks/digi-fm-2026-09-23/factory-promotion/`,
+`factory-promotion-validation.log` and `factory-promotion-host.log`. No compiler
+source or pin changed. Linux was not exercised during this promotion.
+
+The sound reference for this promotion is the user-approved Fast Test. As
+documented above, table interpolation is not bit-identical to the original
+additive synth in feedback-sensitive patches, and the gated filter freezes
+inactive topology state. This promotion adds no further numerical changes.

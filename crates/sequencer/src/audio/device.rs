@@ -52,6 +52,18 @@ pub(super) fn select_output_channels(
         })
 }
 
+/// Channels to open on a CoreAudio output device reporting `device_channels`.
+///
+/// CPAL reports a macOS device's channel count as the sum over all of its
+/// output streams, so a multi-stream interface (an Apollo's MON/LINE/HP/virtual
+/// outputs, an aggregate device) would be opened as one wide interleaved
+/// stream. The engine only renders a stereo mix, and the output unit accepts a
+/// narrower client format than the device, routing it to the device's first
+/// pair: outputs 1/2, which is what a DAW does by default.
+pub(super) fn coreaudio_client_channels(device_channels: u16) -> u16 {
+    device_channels.min(2)
+}
+
 pub(super) fn select_output_config(
     default_sample_rate: u32,
     default_channels: u16,

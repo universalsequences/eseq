@@ -45,6 +45,10 @@
 (def capture-midi ()
   (host-command "retrospective-open" (dict)))
 
+;; Print the last 30 seconds of master output into a crop-and-keep modal.
+(def capture-resample ()
+  (host-command "resample-open" (dict)))
+
 (def seq-clear-ui-selection ()
   (do
     (seq-clear-selection)))

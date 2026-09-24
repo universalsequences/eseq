@@ -18,6 +18,15 @@ typedef struct {
   int src_node;  // who writes this edge
   int src_port;  // which output port
   int next_free; // free-list link (-1 = end of list; only valid when !in_use)
+  // Silence propagation (ap_set_output_silent): the render pass in which the
+  // source kernel last declared this buffer all zeros. Silent this pass iff
+  // it equals LiveGraph.render_pass; a kernel that never declares leaves it
+  // stale, so nothing needs resetting. Equal to the previous pass means the
+  // buffer still holds zeros (only its source writes it) over frames
+  // 0..silent_frames; passes vary in length, so a shorter silent pass must
+  // not vouch for the frames a longer one reads.
+  uint64_t silent_pass;
+  int silent_frames;
 } LiveEdge;
 
 typedef struct RTNode {
@@ -47,6 +56,7 @@ typedef struct RTNode {
   float *cached_inInline[MAX_IO];
   float *cached_outInline[MAX_IO];
   bool io_cache_valid;     // False if topology changed, needs rebuild
+  uint32_t io_generation;  // Bumped per IO rebuild; see ap_current_node_io_generation
 
   // scheduling
   int32_t *succ; // successor node indices
@@ -69,6 +79,8 @@ typedef struct RetireEntry {
 typedef struct LiveGraph {
   // --- Node & edge storage ---
   RTNode *nodes;
+  uint64_t render_pass; // bumped per process_live_block_internal (silence)
+  int render_nframes;   // that pass's frame count
   BufferDesc *buffers;
   int node_count, node_capacity, buffer_count, buffer_capacity;
   LiveEdge *edges;

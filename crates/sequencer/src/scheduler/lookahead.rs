@@ -273,6 +273,9 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
     let song_playback = &mut scheduler.song;
     let parked_generators = &mut scheduler.parked_generators;
     let mut track_output_events = Vec::new();
+    // How many of `track_output_events` the process reads have seen; see
+    // `feed_track_output_reads`.
+    let mut track_output_read_cursor = 0_usize;
 
     process_runtime.sync_step_process_aliases(
         base_snapshot
@@ -336,6 +339,8 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                     // Scene launches restart accumulator evolution on every
                     // track, matching the control-side launch path.
                     *pending_accum_reset = [true; MAX_TRACKS];
+                    // The launched patterns' authored lengths govern.
+                    clock.clear_pattern_lengths();
                     for graph in graph_runtimes.iter_mut() {
                         graph.clear_deltas();
                     }
@@ -344,6 +349,7 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                     for track in tracks {
                         if track < MAX_TRACKS {
                             pending_accum_reset[track] = true;
+                            clock.clear_pattern_length(track);
                         }
                     }
                 }
@@ -407,6 +413,14 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                         midi_fx_quantizer_state.reset();
                         neural_runtime.reset_state(0.0);
                         generator_runtime.reset(0.0);
+                        // Hand the reads the previous run's tail first, so
+                        // the reset drops it instead of the next chunk's
+                        // feed replaying it into the new run.
+                        feed_track_output_reads(
+                            process_runtime,
+                            &track_output_events,
+                            &mut track_output_read_cursor,
+                        );
                         process_runtime.reset_transport(0.0);
                         for graph in graph_runtimes.iter_mut() {
                             graph.reset_transport(0.0);
@@ -503,6 +517,28 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
             .as_deref()
             .or(session_launch_snapshot.as_deref())
             .unwrap_or(base_snapshot);
+        // Process-driven pattern length (`length!`): a change due at this
+        // chunk's start lands before the clock steps, no chunk straddles the
+        // next pending boundary, and the chunk snapshot carries each track's
+        // effective `num_steps` so every reader below agrees.
+        clock.apply_due_pattern_lengths(snapshot);
+        for track in 0..snapshot.tracks.len().min(MAX_TRACKS) {
+            let marker = clock.pattern_length_marker(track).unwrap_or(0) as u32;
+            state.transport.track_process_lengths[track].store(marker, Ordering::Relaxed);
+        }
+        if let Some(at_beats) = clock.next_pattern_length_boundary(snapshot.tracks.len()) {
+            // The tolerance keeps float noise in `remaining * spq` from
+            // ceiling one frame past the boundary: that frame would fire the
+            // boundary step under the old length.
+            let remaining_beats = at_beats - clock.total_beats - super::clock::PATTERN_LENGTH_EPS_BEATS;
+            if remaining_beats > 0.0 {
+                let remaining_frames =
+                    (remaining_beats * samples_per_quarter).ceil().max(1.0) as usize;
+                chunk_frames = chunk_frames.min(remaining_frames);
+            }
+        }
+        let length_snapshot = clock.patch_pattern_lengths(snapshot);
+        let snapshot: &SequencerSnapshot = length_snapshot.as_deref().unwrap_or(snapshot);
         let chunk_slots = scene_slots_for_chunk(base_snapshot, snapshot);
         process_runtime.set_scene_transpose(&chunk_slots);
         if let Some(scratch) = scratch_runtime.as_ref() {
@@ -608,8 +644,16 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
         // trigger loop: the remap only touches later chunks, and the roll
         // state is borrowed by the clock pass above.
         let mut pending_process_rolls: Vec<super::roll::PendingProcessRoll> = Vec::new();
+        // `length!` requests (track, steps, firing beat), stamped with the
+        // track's next cycle boundary once the trigger loop is done.
+        let mut pending_pattern_lengths: Vec<(usize, usize, f64)> = Vec::new();
         for trigger in triggers {
             let trigger_sample_time = scheduled_until_sample + trigger.offset as u64;
+            feed_track_output_reads(
+                process_runtime,
+                &track_output_events,
+                &mut track_output_read_cursor,
+            );
             let conductor_invocations =
                 process_runtime.take_conductor_invocations_before(trigger.absolute_beats);
             if !invoke_conductor_invocations(
@@ -920,6 +964,12 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                                 resolved.duration,
                                 &mut pending_process_rolls,
                             );
+                            collect_pattern_length_requests(
+                                commands,
+                                trigger.track,
+                                trigger.absolute_beats,
+                                &mut pending_pattern_lengths,
+                            );
                             let mut inlet_context = ProcessInletWriteContext {
                                 chain: process_chain,
                                 current_slot_index: Some(slot_index),
@@ -1018,6 +1068,12 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                             step_beats,
                             resolved.duration,
                             &mut pending_process_rolls,
+                        );
+                        collect_pattern_length_requests(
+                            commands,
+                            trigger.track,
+                            trigger.absolute_beats,
+                            &mut pending_pattern_lengths,
                         );
                         apply_step_process_commands(
                             scratch,
@@ -1998,6 +2054,13 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
             if graph_runtimes[graph_index].is_empty() {
                 continue;
             }
+            // Graphs earlier in the order, and everything the trigger loop
+            // enqueued, are what this graph's `:output` reads can see.
+            feed_track_output_reads(
+                process_runtime,
+                &track_output_events,
+                &mut track_output_read_cursor,
+            );
             let mut graph_emissions = Vec::new();
             let mut graph_eval_count = 0_usize;
             if scratch_runtime.is_some() {
@@ -2145,6 +2208,9 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                 scheduler.roll.publish_windows(state, request.grid_beats);
             }
         }
+        for (track, steps, fired_beats) in pending_pattern_lengths.drain(..) {
+            clock.request_pattern_length(snapshot, track, steps, fired_beats);
+        }
 
         // Track rolling (docs/rolling-core-spec.md 4.2): emit held-note roll
         // hits on every roll-grid boundary inside this chunk, layered on top
@@ -2189,6 +2255,20 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
     }
 }
 
+/// Collect the `length!` commands of one process run on `track`.
+fn collect_pattern_length_requests(
+    commands: &[crate::process::ProcessRunCommand],
+    track: usize,
+    fired_beats: f64,
+    pending: &mut Vec<(usize, usize, f64)>,
+) {
+    for command in commands {
+        if let crate::process::ProcessRunCommand::PatternLength(steps) = command {
+            pending.push((track, *steps, fired_beats));
+        }
+    }
+}
+
 /// Whether an inactive step on `track` needs a `RackParams` event: the track
 /// is an Instrument Rack and either something in the rack is p-locked at
 /// `step` or a rack-macro print latch is held for the track (so a printing
@@ -2212,4 +2292,25 @@ pub(super) fn rack_off_step_has_params(
             .values_for_track(track)
             .iter()
             .any(Option::is_some)
+}
+
+/// Hand the process reads every output event enqueued since the last call, so
+/// `(read (track n :chord|:key :output))` follows what each instrument is
+/// actually sent. Reads see output enqueued before them: a follower firing on
+/// the same boundary as its source sees the source's new notes only when the
+/// source was enqueued first (an earlier graph, or the trigger loop).
+fn feed_track_output_reads(
+    process_runtime: &mut crate::process::ProcessRuntime,
+    events: &[TrackOutputEvent],
+    cursor: &mut usize,
+) {
+    for event in events.get(*cursor..).unwrap_or(&[]) {
+        process_runtime.record_track_output(
+            event.track,
+            event.beat,
+            event.harmony.end_beat,
+            event.harmony.pitches(),
+        );
+    }
+    *cursor = events.len();
 }

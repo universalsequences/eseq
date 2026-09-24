@@ -15,8 +15,21 @@ mod pcm;
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 static WORKGROUPS_ENABLED: AtomicBool = AtomicBool::new(true);
+static WORKGROUPS_ALWAYS: AtomicBool = AtomicBool::new(false);
 fn default_workgroups() -> bool { true }
-pub(super) fn workgroups_enabled() -> bool { WORKGROUPS_ENABLED.load(Ordering::Relaxed) }
+/// `workgroups: false` keeps helpers out; `workgroups_always` restores the old
+/// unconditional membership; otherwise the shipping adaptive policy applies.
+#[cfg(target_os = "macos")]
+pub(super) fn workgroup_policy() -> super::workgroup::Policy {
+    use super::workgroup::Policy;
+    if !WORKGROUPS_ENABLED.load(Ordering::Relaxed) {
+        Policy::Never
+    } else if WORKGROUPS_ALWAYS.load(Ordering::Relaxed) {
+        Policy::Always
+    } else {
+        Policy::Adaptive
+    }
+}
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Config {
@@ -40,10 +53,17 @@ pub struct Config {
     pub rtsan_measure_only: bool,
     #[serde(default = "default_workgroups")]
     pub workgroups: bool,
+    #[serde(default)]
+    pub workgroups_always: bool,
     /// Optional, unmodified float PCM from the measured interval, before device
     /// silencing. The file is written after the audio engine has stopped.
     #[serde(default)]
     pub output_wav: Option<PathBuf>,
+    /// Ignore `project` and measure the startup/New Project topology (two
+    /// empty tracks, Reverb on Bus A, Str8 Delay on Bus B). Its output is
+    /// silent, so the silent-render guard is skipped.
+    #[serde(default)]
+    pub new_project: bool,
 }
 
 #[derive(Serialize)]
@@ -56,6 +76,12 @@ pub(super) struct CallbackPhases {
     pub voice_retirement_us: f64,
     pub render_us: f64,
     pub post_render_us: f64,
+    /// Sub-phases of `snapshot_transport_us`: everything before the clock
+    /// syncs, instrument/sampler gatepitch clock pushes, effect-modulator
+    /// clock pushes.
+    pub snapshot_refresh_us: f64,
+    pub instrument_clock_us: f64,
+    pub effect_clock_us: f64,
 }
 
 /// A phase boundary uses only the monotonic clock; all formatting and storage
@@ -161,6 +187,7 @@ pub(super) fn record_block(
 }
 
 extern "C" {
+    static g_param_push_count: std::sync::atomic::AtomicU64;
     fn audiograph_configure_experiment(worker_spins: i32, worker_wait_us: i32,
         callback_spins: i32, callback_wait_us: i32, queue_hint: i32);
 }
@@ -174,6 +201,15 @@ fn cpu_seconds() -> io::Result<f64> {
 }
 
 fn load(app: &mut App, config: &Config, offline: bool) -> Result<()> {
+    if config.new_project {
+        app.initialize_default_project()?;
+        app.refresh_latency_compensation();
+        if offline && !unsafe { prepare_graph_for_render(app.graph.lg.0) } {
+            return Err("Default project graph preparation failed".into());
+        }
+        eprintln!("[audio-experiment] default new project, {} tracks", app.tracks.len());
+        return Ok(());
+    }
     let project = crate::project::load_project_from_path(&config.project)?;
     let name = project.name.clone();
     app.sample_analysis = crate::analysis::AnalysisService::synchronous();
@@ -200,6 +236,11 @@ fn load(app: &mut App, config: &Config, offline: bool) -> Result<()> {
     if offline && !unsafe { prepare_graph_for_render(app.graph.lg.0) } {
         return Err("Scene graph preparation failed".into());
     }
+    let runtime = &app.state.runtime;
+    let live = |counts: &crate::sequencer::VoiceCountTable| counts.live_indices().count();
+    eprintln!("[audio-experiment] live engines {} / {}, live sampler pools {} / {}",
+        live(&runtime.engine_voice_counts), runtime.engine_voice_counts.len(),
+        live(&runtime.voice_counts), runtime.voice_counts.len());
     eprintln!("[audio-experiment] loaded {} tracks, scene {}, {} BPM",
         app.tracks.len(), config.pattern, app.state.latest_scheduler_snapshot().transport.bpm);
     Ok(())
@@ -246,7 +287,7 @@ fn instrument_voice_stats(app: &App) -> Vec<serde_json::Value> {
         Some(serde_json::json!({
             "engine_id": stats.engine_id, "name": engine.name,
             "source_sha256": format!("{:x}", Sha256::digest(engine.source.as_bytes())),
-            "configured_voices": app.state.runtime.engine_voice_counts[stats.engine_id].load(Ordering::Acquire),
+            "configured_voices": app.state.runtime.engine_voice_counts.load(stats.engine_id, Ordering::Acquire),
             "enabled_voices_at_end": stats.enabled_voices,
             "process_calls": stats.process_calls, "voice_zero_calls": stats.process_blocks,
         }))
@@ -255,6 +296,7 @@ fn instrument_voice_stats(app: &App) -> Vec<serde_json::Value> {
 
 pub fn run(mut config: Config) -> Result<serde_json::Value> {
     WORKGROUPS_ENABLED.store(config.workgroups, Ordering::Relaxed);
+    WORKGROUPS_ALWAYS.store(config.workgroups_always, Ordering::Relaxed);
     #[cfg(feature = "audio-heap-audit")]
     let heap_calibration = Some(crate::heap_audit::calibrate()?);
     #[cfg(not(feature = "audio-heap-audit"))]
@@ -276,7 +318,7 @@ pub fn run(mut config: Config) -> Result<serde_json::Value> {
         || !config.measure_seconds.is_finite() || !(0.1..=60.0).contains(&config.measure_seconds)
         || !(8_000..=192_000).contains(&config.sample_rate)
     { return Err("Invalid experiment config".into()); }
-    config.project = config.project.canonicalize()?;
+    if !config.new_project { config.project = config.project.canonicalize()?; }
     if let Some(path) = &mut config.output_wav {
         if path.is_relative() { *path = std::env::current_dir()?.join(&*path); }
         if path.exists() { return Err("Audio output path already exists".into()); }
@@ -295,6 +337,8 @@ pub fn run(mut config: Config) -> Result<serde_json::Value> {
     let mut workgroup_start = None::<serde_json::Value>;
     let mut workgroup_end = None::<serde_json::Value>;
     let mut workgroup_verified = None::<bool>;
+    // All-thread param pushes during the live measured interval.
+    let mut param_pushes = None::<u64>;
     let (sample_rate, channels, cpu, wall, audio_hash, instrument_stats) = if config.offline {
         let owner = OfflineOwner(engine::init_headless_engine(config.sample_rate, 2)?);
         let engine = &owner.0;
@@ -368,9 +412,11 @@ pub fn run(mut config: Config) -> Result<serde_json::Value> {
         super::rt_audit::set_enabled(true);
         #[cfg(feature = "audio-heap-audit")]
         crate::heap_audit::begin();
+        let pushes_start = unsafe { g_param_push_count.load(Ordering::Relaxed) };
         capture.enabled.store(true, Ordering::Release);
         live_interval(app, config.measure_seconds)?;
         capture.enabled.store(false, Ordering::Release);
+        param_pushes = Some(unsafe { g_param_push_count.load(Ordering::Relaxed) } - pushes_start);
         #[cfg(feature = "audio-heap-audit")]
         crate::heap_audit::end();
         #[cfg(feature = "audio-rtsan")]
@@ -415,7 +461,7 @@ pub fn run(mut config: Config) -> Result<serde_json::Value> {
     let audio_seconds = frames as f64 / sample_rate as f64;
     let peak = blocks.iter().map(|block| block.peak).fold(0.0, f32::max);
     let nonfinite: usize = blocks.iter().map(|block| block.nonfinite).sum();
-    if nonfinite != 0 || peak < 0.0001 { return Err(format!("Invalid/silent render: peak={peak}, nonfinite={nonfinite}").into()); }
+    if nonfinite != 0 || (peak < 0.0001 && !config.new_project) { return Err(format!("Invalid/silent render: peak={peak}, nonfinite={nonfinite}").into()); }
     let recorded_audio = config.output_wav.as_ref().map(|path| {
         PCM_CAPTURE.get().ok_or("Missing PCM capture")?
             .write_wav(path, sample_rate, channels, frames * channels)
@@ -428,6 +474,7 @@ pub fn run(mut config: Config) -> Result<serde_json::Value> {
         "rust_heap_audit_passed": heap_passed,
         "workgroup_start": workgroup_start, "workgroup_end": workgroup_end,
         "workgroup_verified": workgroup_verified,
+        "param_pushes": param_pushes,
         "audio_seconds": audio_seconds, "wall_seconds": wall, "process_cpu_seconds": cpu,
         "process_cpu_pct": cpu / wall * 100.0, "cpu_pct_per_audio_second": cpu / audio_seconds * 100.0,
         "callback_mean_pct": loads.iter().sum::<f64>() / loads.len() as f64,

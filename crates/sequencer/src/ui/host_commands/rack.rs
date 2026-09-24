@@ -2456,10 +2456,8 @@ mod tests {
                 );
             }
 
-            let sample_db = Rc::new(
-                sequencer::sample_db::SampleDb::open_in_memory()
-                    .expect("open in-memory sample db"),
-            );
+            let sample_db = sequencer::sample_db::SampleDb::open_in_memory()
+                .expect("open in-memory sample db");
             let shared = SharedHandles {
                 state: state.clone(),
                 lg_raw: std::ptr::null_mut(),

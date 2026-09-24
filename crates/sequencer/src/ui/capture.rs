@@ -917,6 +917,25 @@ fn apply_capture_macro_host_commands(
             applied = true;
             continue;
         }
+        // Instance lifecycle (instance-kinds spec §5), so a fixture that
+        // imports a kind's module can show its instances (Packages tab rows,
+        // badges) and render their views: the same path as the live host
+        // command (records, view buffers, tabs, `:on-create`). A failure is
+        // the setup's failure.
+        if name.starts_with("instance-") {
+            if name != "instance-open" {
+                let created_before = crate::host_commands::instances::instance_ids(app);
+                crate::host_commands::instances::apply_instance_command(&name, &payload, app)
+                    .map_err(|error| format!("capture setup {name} failed: {error}"))?;
+                crate::host_commands::instances::after_instance_command(
+                    &name, &created_before, app, editor,
+                );
+                applied = true;
+            } else {
+                crate::host_commands::instances::apply_on_editor(&name, payload, app, editor);
+            }
+            continue;
+        }
         // Sound-palette open/close so fixtures can capture the palette modal.
         if let Some(result) =
             crate::host_commands::apply_sound_palette_view_command(&name, &payload, app)
@@ -1183,7 +1202,7 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
         runtime,
         accumulator_names,
         midi_fx_names: _,
-        sample_browser: _,
+        sample_browser,
         piano_roll_clipboard: _,
         process_authoring: _,
     } = init_runtime(
@@ -1311,6 +1330,13 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
         true,
     );
     publish_capture_sound_glyphs(&mut editor)?;
+    // The live tick publishes `SEQ.instances`; capture has no tick.
+    let mut instances_fingerprint = u64::MAX;
+    if let Some(value) =
+        crate::host_commands::instances::instances_value_if_changed(&app, &mut instances_fingerprint)
+    {
+        editor.runtime_mut().set_reactive("SEQ", "instances", value);
+    }
     editor.runtime_mut().run_reactive_cycle();
     editor.refresh_runtime_side_effects();
 
@@ -1356,6 +1382,17 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
     }
     editor.refresh_runtime_side_effects();
     editor.clear_minibuffer_message();
+
+    // The interactive event loop polls search completions without waiting.
+    // Headless capture must settle them before taking its single frame.
+    let browser_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while sample_browser.borrow().is_pending() {
+        let ready = publish_sample_browser_results(&mut editor, &sample_browser)?;
+        if std::time::Instant::now() >= browser_deadline {
+            return Err("sample browser query timed out during capture".into());
+        }
+        if !ready { std::thread::sleep(std::time::Duration::from_millis(1)); }
+    }
 
     application_menu::sync_context(&menu_state, &mut editor);
     let mut backend = create_capture_backend(&mut editor, args.width, args.height)?;

@@ -39,12 +39,18 @@ void graph_profile_begin(LiveGraph *graph, int frames) {
   profile.overflow = graph->node_count > GRAPH_PROFILE_NODES;
   if (!profile.overflow)
     memset(profile.nodes, 0, sizeof(*profile.nodes) * (size_t)graph->node_count);
+  memset(profile.worker_join_ns, 0, sizeof(profile.worker_join_ns));
   profile_active = !profile.overflow;
   profile.start_ns = nsec_now();
 }
 
 uint64_t graph_profile_node_begin(void) {
   return profile_active ? nsec_now() : 0;
+}
+
+void graph_profile_worker_join(int slot) {
+  if (profile_active && slot >= 0 && slot < GRAPH_PROFILE_SLOTS)
+    profile.worker_join_ns[slot] = nsec_now();
 }
 
 void graph_profile_node_end(int node, int worker, uint64_t start) {
@@ -96,9 +102,13 @@ static void json_string(FILE *file, const char *s) {
 }
 
 static bool write_profile(FILE *file, const GraphProfile *p) {
-  fprintf(file, "{\"start_ns\":%llu,\"end_ns\":%llu,\"frames\":%d,\"workers\":%d,\"overflow\":%d,\"nodes\":[",
+  fprintf(file, "{\"start_ns\":%llu,\"end_ns\":%llu,\"frames\":%d,\"workers\":%d,\"overflow\":%d,",
       (unsigned long long)p->start_ns, (unsigned long long)p->end_ns,
       p->frames, p->workers, p->overflow);
+  fputs("\"worker_join_ns\":[", file);
+  for (int i = 0; i < GRAPH_PROFILE_SLOTS; i++)
+    fprintf(file, "%s%llu", i ? "," : "", (unsigned long long)p->worker_join_ns[i]);
+  fputs("],\"nodes\":[", file);
   bool first = true;
   for (int i = 0; !p->overflow && i < p->node_count; i++) {
     const GraphProfileNode *n = &p->nodes[i];

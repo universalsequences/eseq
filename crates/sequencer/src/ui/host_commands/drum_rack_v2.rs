@@ -212,6 +212,22 @@ pub(super) fn handle(
                 ));
                 return;
             };
+            // A kind instance is project data: giving it back is an owner
+            // move, with nothing to re-run (instance-kinds spec §5).
+            if app.instances.contains(sequencer_id) {
+                let owner = sequencer::project::ProjectInstanceOwner::Project;
+                match super::instances::move_instance_status(app, sequencer_id, owner) {
+                    Ok(status) => {
+                        super::instances::sync_instances_to_editor(app, editor);
+                        sync_rack_pad_map(app, editor, &track_groups, &ui_epoch);
+                        if !status.is_empty() {
+                            editor.handle_host_event(HostEvent::Status(status));
+                        }
+                    }
+                    Err(error) => editor.handle_host_event(HostEvent::Status(error)),
+                }
+                return;
+            }
             match app.detach_rack_sequencer_recorded(group_id, sequencer_id) {
                 Ok((name, source)) => {
                     sync_rack_pad_map(app, editor, &track_groups, &ui_epoch);
@@ -244,13 +260,28 @@ pub(super) fn handle(
                 ));
                 return;
             };
+            if app.instances.contains(sequencer_id) {
+                let owner = sequencer::project::ProjectInstanceOwner::Rack(group_id);
+                match super::instances::move_instance_status(app, sequencer_id, owner) {
+                    Ok(status) => {
+                        super::instances::sync_instances_to_editor(app, editor);
+                        sync_rack_pad_map(app, editor, &track_groups, &ui_epoch);
+                        if !status.is_empty() {
+                            editor.handle_host_event(HostEvent::Status(status));
+                        }
+                    }
+                    Err(error) => editor.handle_host_event(HostEvent::Status(error)),
+                }
+                return;
+            }
             match app.move_sequencer_into_rack_recorded(group_id, sequencer_id, &source) {
                 Ok(_) => {
                     sync_rack_pad_map(app, editor, &track_groups, &ui_epoch);
                     let rack = group_name(app, group_id).unwrap_or_else(|| "rack".to_string());
                     let mut status = format!("{rack} now owns the sequencer; routes are its members");
-                    // Re-run the script now that the rack owns it, so its tab
-                    // and route dropdown switch over right away. The scope
+                    // LEGACY plain scripts only (kind instances returned
+                    // above). Re-run the script now that the rack owns it, so
+                    // its tab and route dropdown switch over right away. The scope
                     // pins the owner explicitly: a module source would find
                     // it in the published owner map, but a `(load …)` scratch
                     // script has no module and would otherwise republish a
@@ -396,7 +427,8 @@ pub(super) fn handle(
                         // `SEQ.groups` (its tab wears the rack's name) and
                         // must see the members it now has.
                         sync_after_rack_structure_change(app, editor, ctx, None);
-                        let failures = evaluate_rack_sequencers(editor, app, group_id);
+                        let mut failures = attach_rack_instance_packages(editor, app, group_id);
+                        failures.extend(evaluate_rack_sequencers(editor, app, group_id));
                         refresh_after_rack_scripts(editor);
                         let mut status = format!("Auditioned kit '{name}'");
                         if !failures.is_empty() {
@@ -426,6 +458,7 @@ pub(super) fn handle(
                         // rolls the script's panel and tab back while the
                         // def-sequencer it already published stays behind.
                         sync_after_rack_structure_change(app, editor, ctx, focus);
+                        failures.extend(attach_rack_instance_packages(editor, app, group_id));
                         failures.extend(evaluate_rack_sequencers(editor, app, group_id));
                         refresh_after_rack_scripts(editor);
                         let status = if failures.is_empty() {
@@ -582,12 +615,57 @@ fn evaluate_rack_sequencers(
         if let Err(error) =
             evaluate_rack_sequencer_source(editor, app, group_id, &sequencer.source)
         {
-            let what = sequencer::app::rack_sequencer_module(&sequencer.source)
-                .unwrap_or_else(|| sequencer.sequencer_name.clone());
-            failures.push(format!("{what}: {error}"));
+            failures.push(format!("{}: {error}", sequencer.sequencer_name));
         }
     }
     failures
+}
+
+/// The host half of loading a kit's instances (instance-kinds spec §9):
+/// every kind the rack's instances use whose package is installed gets its
+/// defining module attached to the project (idempotent: already attached is
+/// fine), so the kind registers now and on every reopen. A kind no installed
+/// package declares, and that is not registered, is reported: its instance
+/// stays a placeholder and publishes once the package is installed and
+/// attached. The instances are then published and mirrored into the UI
+/// (records, view buffers, tabs) right away.
+fn attach_rack_instance_packages(
+    editor: &mut Editor,
+    app: &mut app::App,
+    group_id: u64,
+) -> Vec<String> {
+    let mut notes = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let instances = app.rack_instances(group_id);
+    for instance in &instances {
+        if !seen.insert(instance.kind.clone()) {
+            continue;
+        }
+        match sequencer::lisp_host::declared_module_for_kind(&instance.kind) {
+            Some(module) => {
+                if let Err(error) = super::packages::attach_module(
+                    editor,
+                    app,
+                    &module,
+                    super::packages::AttachmentDestination::Scratch,
+                ) {
+                    notes.push(format!("{}: {error}", instance.label));
+                }
+            }
+            None if sequencer::lisp_host::registered_kind(&instance.kind).is_none() => {
+                notes.push(format!(
+                    "'{}' waits for package {} (not installed)",
+                    instance.label,
+                    sequencer::lisp_host::kind_package_of(&instance.kind)
+                ));
+            }
+            None => {}
+        }
+    }
+    if !instances.is_empty() {
+        super::instances::sync_instances_to_editor(app, editor);
+    }
+    notes
 }
 
 /// Settle the UI runtime after rack scripts were evaluated as a follow-up to a

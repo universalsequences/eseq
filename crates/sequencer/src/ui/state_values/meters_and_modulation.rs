@@ -1864,7 +1864,7 @@ pub(crate) fn sync_track_peak_fields(rt: &mut Runtime, levels: &[f64]) -> bool {
     effects_dirty
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct VisualizationLiveness {
     neural_energy: Option<bool>,
     neural_trigger: Option<bool>,
@@ -1872,6 +1872,8 @@ pub(crate) struct VisualizationLiveness {
     graph: Option<bool>,
     track_output: Option<bool>,
     track_beat: Option<bool>,
+    /// Last published `graph-node-notes-<id>` list per graph.
+    pub(crate) graph_node_notes: HashMap<u64, Vec<f64>>,
 }
 
 /// Hidden displays do not pull or convert scheduler histories. Forget their
@@ -1914,6 +1916,50 @@ pub(crate) fn sync_neural_visualization_fields(
         || state.has_track_output_events(), || build_track_output_events_value(state));
     dirty |= sync_visualization_field(rt, "track-event-current-beat", &mut previous.track_beat,
         || state.has_track_output_events(), || build_track_output_current_beat_value(state));
+    dirty
+}
+
+/// Publish `SEQ.graph-node-notes-<id>` for every graph a visible widget binds
+/// (`bind-graph-node-notes` -> `number-list`): per node
+/// `[count, notes.., velocities..]` at
+/// `NODE_SOUNDING_STRIDE`. Polled every tick against the audio clock so a
+/// short note is shown for its real gate. Only element bindings read these
+/// fields, so a change dirties just the bound widgets and never re-runs Lisp;
+/// `previous` skips building a value when nothing moved.
+pub(crate) fn sync_graph_node_notes_fields(
+    rt: &mut Runtime,
+    state: &Arc<SequencerState>,
+    previous: &mut HashMap<u64, Vec<f64>>,
+) -> bool {
+    use sequencer::graph::{NODE_SOUNDING_DISPLAY, NODE_SOUNDING_STRIDE, node_sounding_field};
+    let mut dirty = false;
+    let playing = state.is_playing();
+    let sample = state.audio_rendered_sample();
+    for (graph_id, nodes) in state.graph_node_sounding_at(sample) {
+        let field = node_sounding_field(graph_id);
+        if !rt.has_live_reactive_consumers("SEQ", &field) {
+            previous.remove(&graph_id);
+            continue;
+        }
+        let mut flat = vec![0.0; nodes.len() * NODE_SOUNDING_STRIDE];
+        if playing {
+            for (node, notes) in nodes.iter().enumerate() {
+                let base = node * NODE_SOUNDING_STRIDE;
+                let shown = notes.len().min(NODE_SOUNDING_DISPLAY);
+                flat[base] = shown as f64;
+                for (offset, (note, velocity)) in notes.iter().take(shown).enumerate() {
+                    flat[base + 1 + offset] = *note as f64;
+                    flat[base + 1 + NODE_SOUNDING_DISPLAY + offset] = *velocity as f64;
+                }
+            }
+        }
+        if previous.get(&graph_id) == Some(&flat) {
+            continue;
+        }
+        let value = Value::List(flat.iter().map(|n| value_cell(Value::Number(*n))).collect());
+        dirty |= rt.set_reactive("SEQ", &field, value).effects_dirty;
+        previous.insert(graph_id, flat);
+    }
     dirty
 }
 

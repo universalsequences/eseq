@@ -63,6 +63,7 @@ mod session;
 pub(crate) mod offline;
 mod stream;
 mod voices;
+pub mod worker_prefs;
 
 pub use voices::MAX_VOICES;
 

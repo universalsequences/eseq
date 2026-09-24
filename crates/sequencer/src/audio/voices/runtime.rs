@@ -432,7 +432,7 @@ pub(in crate::audio) fn custom_engine_requires_idle_voice(
 }
 
 pub(in crate::audio) fn sync_sampler_voice_pool(state: &SequencerState, track: usize, pool: &mut VoicePool) {
-    let desired_count = state.runtime.voice_counts[track].load(Ordering::Acquire) as usize;
+    let desired_count = state.runtime.voice_counts.load(track, Ordering::Acquire) as usize;
     let desired_count = desired_count.min(MAX_VOICES);
 
     let mut needs_reset = pool.num_voices != desired_count;
@@ -473,7 +473,7 @@ pub(in crate::audio) fn sync_sampler_voice_pool(state: &SequencerState, track: u
 
 pub(in crate::audio) fn sync_custom_engine_pool(state: &SequencerState, engine_id: usize, pool: &mut CustomEnginePool) {
     let desired_count =
-        state.runtime.engine_voice_counts[engine_id].load(Ordering::Acquire) as usize;
+        state.runtime.engine_voice_counts.load(engine_id, Ordering::Acquire) as usize;
     let desired_count = desired_count.min(MAX_VOICES);
 
     let mut needs_reset = pool.num_voices != desired_count;
@@ -905,7 +905,7 @@ pub(in crate::audio) fn reset_audio_runtime_for_track_topology(
     // not hang after tracks are compacted.
     for engine_id in 0..data.state.runtime.engine_voice_counts.len() {
         let voice_count =
-            data.state.runtime.engine_voice_counts[engine_id].load(Ordering::Acquire) as usize;
+            data.state.runtime.engine_voice_counts.load(engine_id, Ordering::Acquire) as usize;
         for voice_idx in 0..voice_count.min(MAX_VOICES) {
             let lid =
                 data.state.runtime.engine_voice_lids[engine_id][voice_idx].load(Ordering::Acquire);

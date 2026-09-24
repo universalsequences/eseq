@@ -2198,9 +2198,7 @@ mod tests {
             let expanded_step_projection = Arc::new(ExpandedStepProjectionRegistry::new());
             let ui_epoch = Arc::new(AtomicUsize::new(0));
             let ui_invalidations = Arc::new(UiInvalidationQueue::new());
-            let sample_db = Rc::new(
-                sequencer::sample_db::SampleDb::open_in_memory().expect("in-memory sample db"),
-            );
+            let sample_db = sequencer::sample_db::SampleDb::open_in_memory().expect("in-memory sample db");
             let shared = SharedHandles {
                 state: state.clone(),
                 lg_raw: std::ptr::null_mut(),

@@ -1,42 +1,26 @@
 //! Rack-owned graph sequencers (`docs/rack-clips-and-break-kits-spec.md` §5).
 //!
-//! A graph `def-sequencer` can belong to a drum rack instead of the project.
-//! Its routes and seed tracks are then MEMBER indices into the rack, its
-//! instance id is namespaced by the rack (`graph_instance_id`), and the rack
-//! config records how to bring it back (`ProjectRackSequencer::source`). The
+//! A graph sequencer can belong to a drum rack instead of the project. Its
+//! routes and seed tracks are then MEMBER indices into the rack, and the
 //! scheduler resolves member -> track from the membership mirror this module
 //! publishes; nothing here touches the runtime.
+//!
+//! Two kinds of rack-owned sequencer exist:
+//!
+//! - instances of package kinds (`docs/instance-kinds-spec.md` §5), owned
+//!   through `ProjectInstance::owner`; moving one between the project and a
+//!   rack is `App::move_instance_owner_recorded` (`app/instances.rs`), which
+//!   reuses the route contraction/expansion below;
+//! - LEGACY plain scripts recorded in `ProjectRackConfig::sequencers`, whose
+//!   instance id is namespaced by the rack (`graph_instance_id`) and which the
+//!   host re-evaluates under a rack scope. Recorded `(import …)` sources of
+//!   modules that declare a kind migrate to instances on project open.
 
 use super::*;
 use crate::graph::{ProjectGraphOverrides, ProjectGraphRouteOverride, ProjectGraphSeedFrom, RackMembership};
 use crate::project::ProjectRackSequencer;
 
-/// `Some(module)` when a recorded rack sequencer source is a one-line
-/// `(import module)` form, which is how package scripts are recorded.
-pub fn rack_sequencer_module(source: &str) -> Option<String> {
-    let inner = source.trim().strip_prefix("(import ")?.strip_suffix(')')?.trim();
-    let module = inner.split_whitespace().next()?;
-    (!module.is_empty() && !module.starts_with(':')).then(|| module.to_string())
-}
-
 impl App {
-    /// Tell the Lisp side which modules' graph sequencers belong to which
-    /// rack, so a `def-sequencer` inside an imported module publishes as
-    /// rack-owned however the module gets imported (spec §5.1).
-    pub fn publish_rack_owner_modules(&self) {
-        let owners = self
-            .groups
-            .iter()
-            .filter_map(|group| group.rack.as_ref().map(|rack| (group.id, rack)))
-            .flat_map(|(group_id, rack)| {
-                rack.sequencers
-                    .iter()
-                    .filter_map(move |s| rack_sequencer_module(&s.source).map(|m| (m, group_id)))
-            })
-            .collect();
-        crate::lisp_host::set_rack_owner_modules(owners);
-    }
-
     /// Every drum rack's member tracks in member order, for the scheduler's
     /// member-route resolution.
     pub fn rack_memberships(&self) -> Vec<RackMembership> {
@@ -55,6 +39,18 @@ impl App {
             .and_then(|group| group.rack.as_ref())
             .map(|rack| rack.sequencers.clone())
             .unwrap_or_default()
+    }
+
+    /// The kind instances a rack owns, in project list order (the rack's
+    /// half of "instances are listed in the project and in each rack",
+    /// instance-kinds spec §5; the list itself is the project's).
+    pub fn rack_instances(&self, group_id: u64) -> Vec<crate::project::ProjectInstance> {
+        self.instances
+            .list
+            .iter()
+            .filter(|instance| instance.owner.rack() == Some(group_id))
+            .cloned()
+            .collect()
     }
 
     /// Record a sequencer instance the host just evaluated under `group_id`.
@@ -77,7 +73,6 @@ impl App {
                 Some(existing) => *existing = entry,
                 None => rack.sequencers.push(entry),
             }
-            app.publish_rack_owner_modules();
             Ok(())
         })
     }
@@ -117,7 +112,6 @@ impl App {
                 changed
             });
             app.state.unpublish_sequencer_by_id(sequencer_id);
-            app.publish_rack_owner_modules();
             Ok((entry.sequencer_name, entry.source))
         })
     }
@@ -183,7 +177,6 @@ impl App {
             });
             app.state.unpublish_sequencer_by_id(sequencer_id);
             app.state.publish_sequencer(rack_published);
-            app.publish_rack_owner_modules();
             Ok(rack_id)
         })
     }
@@ -207,7 +200,12 @@ impl App {
             .iter()
             .find(|group| group.id == group_id)
             .and_then(|group| group.rack.as_ref())
-            .is_some_and(|rack| !rack.sequencers.is_empty());
+            .is_some_and(|rack| !rack.sequencers.is_empty())
+            || self
+                .instances
+                .list
+                .iter()
+                .any(|instance| instance.owner.rack() == Some(group_id));
         if !owns_sequencers {
             return;
         }
@@ -220,7 +218,7 @@ impl App {
         });
     }
 
-    fn rack_member_tracks(&self, group_id: u64) -> Result<Vec<usize>, String> {
+    pub(super) fn rack_member_tracks(&self, group_id: u64) -> Result<Vec<usize>, String> {
         let group = self
             .groups
             .iter()
@@ -268,7 +266,7 @@ pub(crate) fn remap_graph_member_routes(graph: &mut ProjectGraphOverrides, map: 
     }
 }
 
-fn expand_member_routes_to_tracks(graph: &mut ProjectGraphOverrides, members: &[usize]) {
+pub(super) fn expand_member_routes_to_tracks(graph: &mut ProjectGraphOverrides, members: &[usize]) {
     for intrinsic in &mut graph.node_intrinsics {
         if let Some(ProjectGraphRouteOverride::Track(member)) = intrinsic.route {
             intrinsic.route = Some(
@@ -286,7 +284,7 @@ fn expand_member_routes_to_tracks(graph: &mut ProjectGraphOverrides, members: &[
     }
 }
 
-fn contract_track_routes_to_members(graph: &mut ProjectGraphOverrides, members: &[usize]) {
+pub(super) fn contract_track_routes_to_members(graph: &mut ProjectGraphOverrides, members: &[usize]) {
     let member_of = |track: usize| members.iter().position(|member| *member == track);
     for intrinsic in &mut graph.node_intrinsics {
         if let Some(ProjectGraphRouteOverride::Track(track)) = intrinsic.route {

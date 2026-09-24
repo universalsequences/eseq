@@ -272,13 +272,27 @@ pub(crate) fn sync_reactive_tick(
     // Lane strip scopes: republish the state histories whenever the
     // scheduler fired a step process since the last frame.
     let process_scope_values_version = ctx.shared.state.process_scope_values_version();
-    if process_scope_values_version != ctx.frame.prev_process_scope_values_version
-        && editor.runtime().has_live_reactive_consumers("SEQ", "track-process-scopes")
-    {
-        ctx.frame.prev_process_scope_values_version = process_scope_values_version;
+    let track_scopes = editor.runtime().has_live_reactive_consumers("SEQ", "track-process-scopes");
+    let scope_cells = editor.runtime().has_live_reactive_consumers("SEQ", "process-scope-cells");
+    let (publish_tracks, publish_cells) = process_scope_publish(
+        process_scope_values_version,
+        ctx.frame.prev_process_scope_values_version,
+        ctx.frame.prev_process_scope_cells_version,
+        track_scopes,
+        scope_cells,
+    );
+    if publish_tracks || publish_cells {
+        if publish_tracks {
+            ctx.frame.prev_process_scope_values_version = process_scope_values_version;
+        }
+        if publish_cells {
+            ctx.frame.prev_process_scope_cells_version = process_scope_values_version;
+        }
         state_values::sync_process_scope_state(
             editor.runtime_mut(),
             &ctx.shared.state,
+            publish_tracks,
+            publish_cells,
         );
         editor.runtime_mut().run_reactive_cycle();
         editor.mark_needs_redraw();
@@ -1002,6 +1016,11 @@ pub(crate) fn sync_reactive_tick(
                 &mut ctx.meters.visualization_liveness,
             );
         }
+        needs_reactive_cycle |= sync_graph_node_notes_fields(
+            editor.runtime_mut(),
+            &ctx.shared.state,
+            &mut ctx.meters.visualization_liveness.graph_node_notes,
+        );
         // Drum-rack pad lights (eseq-4b5.16). The flags are read every tick —
         // reading is what consumes the audio thread's trigger latch, so it must
         // not be skipped — but publishing is gated on the panel that draws
@@ -1086,6 +1105,26 @@ pub(crate) fn sync_reactive_tick(
             ctx.frame.prev_mod_display_values = ctx.meters.cached_mod_display_values.clone();
         }
         if sequencer_visible {
+            // Length-lane marker (`length!`): changes at most once per cycle,
+            // so republish only the tracks whose marker moved.
+            let lengths = track_process_lengths_snapshot(&ctx.shared.state, &app);
+            if lengths != ctx.frame.prev_track_process_lengths {
+                let rt = editor.runtime_mut();
+                for (track, marker) in lengths.iter().enumerate() {
+                    if ctx.frame.prev_track_process_lengths.get(track) == Some(marker) {
+                        continue;
+                    }
+                    needs_reactive_cycle |=
+                        sync_track_length_row_fields(rt, &ctx.shared.state, track);
+                    for viewport in ctx.shared.expanded_step_projection.all_viewports() {
+                        if viewport.track == track {
+                            needs_reactive_cycle |=
+                                sync_expanded_step_viewport_length(rt, &ctx.shared.state, viewport);
+                        }
+                    }
+                }
+                ctx.frame.prev_track_process_lengths = lengths;
+            }
             let previous_track_playheads = ctx.frame.prev_track_playheads.clone();
             if sync_track_playhead_field_delta(
                 editor.runtime_mut(),
@@ -1305,6 +1344,55 @@ pub(crate) fn sync_reactive_tick(
                     sync_piano_roll_playhead(editor.runtime_mut(), &app, ct, playhead as usize);
             }
         }
+        // Kind instances (instance-kinds spec §5): an instance edit, undo/redo,
+        // project open or a (re)registered kind publishes each instance's
+        // sequencer under its id and mirrors the list into the VM's records.
+        // The UI VM's own kind set is part of the key: whether a record can
+        // exist depends on this VM holding the schema, and another runtime
+        // registering an identical definition first leaves the host
+        // registry version unchanged when the UI VM catches up.
+        let ui_kinds = {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            editor.runtime_mut().instance_kind_ids().hash(&mut hasher);
+            hasher.finish()
+        };
+        let instance_key = (
+            app.instances.revision,
+            sequencer::lisp_host::kind_registry_version(),
+            ui_kinds,
+            app.instances.generation,
+        );
+        if instance_key != ctx.frame.prev_instance_key {
+            // A replaced list (project open / new project) starts from fresh
+            // records: the previous project's view state never carries over.
+            let replaced = instance_key.3 != ctx.frame.prev_instance_key.3;
+            if replaced {
+                needs_reactive_cycle |=
+                    sequencer::lisp_host::drop_all_instance_records(editor.runtime_mut());
+            }
+            ctx.frame.prev_instance_key = instance_key;
+            app.publish_instance_sequencers();
+            needs_reactive_cycle |=
+                sequencer::lisp_host::sync_instance_records(editor.runtime_mut(), &app.instances);
+            // Per-instance view buffers and step tabs (spec §7), and with
+            // a replaced list, fresh ones.
+            needs_reactive_cycle |= host_commands::instances::sync_instance_views(
+                editor,
+                &app.instances,
+                replaced,
+            );
+        }
+        // `SEQ.instances` (Packages tab rows and badges, rack menu labels):
+        // republished only when an instance, its owner's name or its kind's
+        // registration changed.
+        if let Some(value) = host_commands::instances::instances_value_if_changed(
+            &app,
+            &mut ctx.frame.prev_instances_fingerprint,
+        ) {
+            needs_reactive_cycle |=
+                editor.runtime_mut().set_reactive("SEQ", "instances", value).effects_dirty;
+        }
         // Registering or unpublishing a sequencer bumps only the UI epoch, so
         // the instance list the rack menu reads is mirrored on its own version.
         let sequencers_version = ctx.shared.state.published_sequencers_version();
@@ -1318,6 +1406,22 @@ pub(crate) fn sync_reactive_tick(
                     build_graph_sequencers_value(&ctx.shared.state),
                 )
                 .effects_dirty;
+        }
+        // Tracked graph reads (`graph-edge-value` & co., instance-kinds spec
+        // §6): Lisp `graph-*` writes dirty their readers synchronously; this
+        // sweep catches everything else that can move a resolved graph value.
+        // Generations are the resolved values, so unchanged reads stay clean.
+        let graph_read_key = (
+            ctx.shared.state.scheduler_snapshot_version(),
+            sequencers_version,
+            ctx.shared.state.current_pattern_index(),
+        );
+        if graph_read_key != ctx.frame.prev_graph_read_key {
+            ctx.frame.prev_graph_read_key = graph_read_key;
+            needs_reactive_cycle |= sequencer::lisp_host::queue_graph_read_invalidations(
+                editor.runtime_mut(),
+                &ctx.shared.state,
+            );
         }
         let mirror_epoch = app.song_row_mirror_epoch;
         if (epoch != ctx.frame.prev_pattern_epoch
@@ -2091,7 +2195,40 @@ pub(crate) fn reactive_tick_and_render(
     }
 
     if editor.should_quit() {
-        return Ok(TickFlow::Quit);
+        if !host_commands::intercept_unsaved_quit(app, editor, ctx) {
+            return Ok(TickFlow::Quit);
+        }
     }
     Ok(TickFlow::Continue)
+}
+
+/// Which process-scope fields to republish this frame. Each field keeps its
+/// own watermark, so a version consumed while only one field had a consumer
+/// is still published to the other once it gains one.
+fn process_scope_publish(
+    version: u64,
+    prev_tracks: u64,
+    prev_cells: u64,
+    track_consumer: bool,
+    cells_consumer: bool,
+) -> (bool, bool) {
+    (
+        track_consumer && version != prev_tracks,
+        cells_consumer && version != prev_cells,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::process_scope_publish;
+
+    #[test]
+    fn process_scope_cells_publish_after_tracks_consumed_version() {
+        // Only the lane strip is live: tracks consume version 5.
+        assert_eq!(process_scope_publish(5, 4, 4, true, false), (true, false));
+        // A cells consumer opens later with the version still at 5.
+        assert_eq!(process_scope_publish(5, 5, 4, true, true), (false, true));
+        // Both caught up: nothing to publish.
+        assert_eq!(process_scope_publish(5, 5, 5, true, true), (false, false));
+    }
 }

@@ -55,6 +55,24 @@ impl ReactiveBindingStore {
             .clone()
     }
 
+    /// Whether anything ever bound (or wrote) this field's float slot. Lets a
+    /// host skip echoing writes nobody has a handle to.
+    pub fn has_field(&self, namespace: &str, field: &str) -> bool {
+        self.slots
+            .lock()
+            .expect("reactive float store lock poisoned")
+            .contains_key(&ReactiveBindingKey::field(namespace, field))
+    }
+
+    /// Current value of a field's float slot, if it exists.
+    pub fn read_field(&self, namespace: &str, field: &str) -> Option<f64> {
+        self.slots
+            .lock()
+            .expect("reactive float store lock poisoned")
+            .get(&ReactiveBindingKey::field(namespace, field))
+            .map(|slot| read_float_slot(slot))
+    }
+
     pub fn write_float(&self, namespace: &str, field: &str, value: f64) {
         store_float_slot(&self.slot(namespace, field), value);
     }
@@ -68,6 +86,19 @@ impl ReactiveBindingStore {
             index: None,
             kind: crate::vm::BindingKind::Float,
             slot: self.slot(namespace, &field),
+        }
+    }
+
+    /// Handle to element `index` of a numeric-list field (what `bind-nth`
+    /// returns), for host natives that hand Lisp a batch of element bindings.
+    pub fn indexed_float_ref(&self, namespace: &str, field: impl Into<String>, index: usize) -> Value {
+        let field = field.into();
+        Value::ReactiveRef {
+            namespace: namespace.to_string(),
+            slot: self.indexed_slot(namespace, &field, index),
+            field,
+            index: Some(index),
+            kind: crate::vm::BindingKind::Float,
         }
     }
 

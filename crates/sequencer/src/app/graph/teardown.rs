@@ -932,8 +932,9 @@ impl GraphController<'_> {
             }
         }
 
-        self.app.state.runtime.engine_voice_counts[engine_id].store(0, Ordering::Release);
+        self.app.state.runtime.engine_voice_counts.store(engine_id, 0, Ordering::Release);
         lisp_host::set_dgen_engine_enabled_voices(engine_id, 0);
+        crate::instruments::voice_modulator::publish_engine_mod_lease(engine_id, &[], None);
         for voice in 0..MAX_VOICES {
             self.app.state.runtime.engine_voice_lids[engine_id][voice].store(0, Ordering::Release);
             self.app.state.runtime.engine_synth_node_ids[engine_id][voice]

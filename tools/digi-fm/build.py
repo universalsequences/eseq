@@ -2,7 +2,8 @@
 """Generate the FM routing/spectral arithmetic from auditable musical data.
 
 Only this file owns algorithm connectivity and harmonic anchors. Authored UI
-and state-machine macros remain separate. Generated Lisp is checked in.
+and state-machine macros remain separate. Generated Lisp and spectra.json are
+checked in; neither generation nor NumPy is required at runtime.
 """
 import json
 import math
@@ -22,6 +23,8 @@ ALGORITHMS = [
     dict(edges=[('a','c')], feedback='b1', x=[('c',False),('b2',True)], y=[('b1',True)]),
 ]
 PARTIALS = 16
+TABLE_SAMPLES = 8192
+ANCHOR_COUNT = 7
 
 def anchors(h):
     """Fundamental stays one. Bell is a harmonic color, not inharmonic tuning."""
@@ -36,6 +39,26 @@ def anchors(h):
 
 def choice(values):
     return '(selector alg ' + ' '.join(str(v) for v in values) + ')'
+
+def build_spectra():
+    """Cumulative spectra: seven morph anchors for each partial limit.
+
+    Interpolating adjacent limits retains the additive renderer's fractional
+    final-partial fade. Phase is periodic; do not duplicate its end sample.
+    Accumulate in float64, then round each completed waveform to float32, as
+    in the auditioned Fast Test bank.
+    """
+    import numpy as np
+
+    phase = np.arange(TABLE_SAMPLES) / TABLE_SAMPLES
+    waves = np.zeros((ANCHOR_COUNT, TABLE_SAMPLES))
+    bank = []
+    for partial in range(1, PARTIALS + 1):
+        waves += np.array(anchors(partial))[:, None] * np.sin(2 * np.pi * partial * phase)
+        bank.extend(waves.astype(np.float32).ravel().tolist())
+    (DEST / 'spectra.json').write_text(json.dumps(
+        {'shape': [TABLE_SAMPLES, ANCHOR_COUNT * PARTIALS], 'data': bank},
+        separators=(',', ':')))
 
 def build():
     DEST.mkdir(parents=True, exist_ok=True)
@@ -83,28 +106,25 @@ def build():
   (write-history h value)
   value)
 (defmacro df-db (db) (exp (* .11512925465 db)))
-; Periodic additive spectrum evaluated at the phase INCLUDING incoming PM.
-; Sine recurrence avoids a transcendental call for every harmonic.
-(defmacro df-wave (phase frequency morph)
-  (def theta (* twopi phase))
-  (def sine (sin theta))
-  (def cosine2 (* 2 (cos theta)))
-  (def pos (clip morph 0 6))
-  (def idx (min 5 (floor pos)))
-  (def frac (- pos idx))
-  (def h0 0)
-  (def h1 sine)
+; Cumulative harmonic tables evaluated at the phase INCLUDING incoming PM.
+; sample wraps phase and interpolates phase and morph; limit interpolation
+; preserves the frequency-dependent partial fade at the 4x internal rate.
 ''')
-    terms=['h1']
-    for h in range(2,PARTIALS+1):
-        coeff=anchors(h)
-        vals=' '.join(f'{a:.10g}' for a in coeff)
-        emit(f'  (def h{h} (- (* cosine2 h{h-1}) h{h-2}))')
-        emit(f'  (def a{h} (mix (selector (+ idx 1) {vals}) (selector (+ idx 2) {vals}) frac))')
-        # 4x internal Nyquist, fade one partial spacing to avoid hard truncation.
-        emit(f'  (def band{h} (clip (- (/ (* samplerate 1.8) (max frequency 1)) {h-1}) 0 1))')
-        terms.append(f'(* h{h} a{h} band{h})')
-    emit('  (+ '+' '.join(terms)+'))')
+    emit(f'(def spectrum_bank (tensor @shape [{TABLE_SAMPLES} {ANCHOR_COUNT * PARTIALS}] @file "spectra.json"))')
+    emit(f'''
+(defmacro df-wave (phase frequency morph)
+  (def p phase)
+  (def pos (clip morph 0 {ANCHOR_COUNT - 1}))
+  (def limit (clip (/ (* samplerate 1.8) (max frequency 1)) 1 {PARTIALS}))
+  (def lower (floor limit))
+  (def upper (min {PARTIALS} (+ lower 1)))
+  (def lower_wave (+ (* {ANCHOR_COUNT} (- lower 1)) pos))
+  (def upper_wave (+ (* {ANCHOR_COUNT} (- upper 1)) pos))
+  (mix (sample spectrum_bank p lower_wave)
+       (sample spectrum_bank p upper_wave) (- limit lower)))
+; B2 is structurally sine-only in every algorithm.
+(defmacro df-sine (phase frequency morph) (sin (* twopi phase)))
+''')
     # One state-free internal step. A without incoming PM is used by algorithms
     # where A precedes B; algorithms where B precedes A use the later A node.
     args='alg pc pa p1 p2 fc fa f1 f2 gc ga g1 g2 ea eb da db harm fb olda old1 old2'
@@ -112,7 +132,7 @@ def build():
     for op in ('a','b1','b2'):
         emit(f'  (def fb_{op} (* fb {choice([int(a["feedback"]==op) for a in ALGORITHMS])}))')
     emit('  (def aclean (df-wave (+ pa (* fb_a olda)) fa (max harm 0)))')
-    emit('  (def b2 (df-wave (+ p2 (* fb_b2 old2) (* aclean ga ea da '+choice([int(('a','b2') in a['edges']) for a in ALGORITHMS])+')) f2 0))')
+    emit('  (def b2 (df-sine (+ p2 (* fb_b2 old2) (* aclean ga ea da '+choice([int(('a','b2') in a['edges']) for a in ALGORITHMS])+')) f2 0))')
     emit('  (def b1 (df-wave (+ p1 (* fb_b1 old1) (* b2 g2 eb db '+choice([int(('b2','b1') in a['edges']) for a in ALGORITHMS])+') (* aclean ga ea da '+choice([int(('a','b1') in a['edges']) for a in ALGORITHMS])+')) f1 (max harm 0)))')
     emit('  (def a (df-wave (+ pa (* fb_a olda) (* b1 g1 eb db '+choice([int(('b1','a') in a['edges']) for a in ALGORITHMS])+') (* b2 g2 eb db '+choice([int(('b2','a') in a['edges']) for a in ALGORITHMS])+')) fa (max harm 0)))')
     emit('  (def c (df-wave (+ pc (* a ga ea da) (* b1 g1 eb db '+choice([int(('b1','c') in a['edges']) for a in ALGORITHMS])+') (* b2 g2 eb db '+choice([int(('b2','c') in a['edges']) for a in ALGORITHMS])+')) fc (max (- 0 harm) 0)))')
@@ -124,6 +144,23 @@ def build():
             vals.append(terms[0] if len(terms)==1 else '(+ '+' '.join(terms)+')')
         emit(f'  (def {bus} {choice(vals)})')
     emit('  (tuple x y a b1 b2))')
+    # A literal algorithm at each call lets the compiler eliminate unused
+    # edges/operators. The four substeps stay together inside one gate. All
+    # persistent phase, feedback and decimator state lives outside the gates.
+    core_args = [f'p_{op}_{step}' for step in range(1, 5) for op in OPS]
+    core_args += [f'f_{op}' for op in OPS] + [f'g_{op}' for op in OPS]
+    core_args += ['env_a', 'env_b', 'ctl_a_depth', 'ctl_b_depth', 'ctl_harmonics',
+                  'ctl_feedback', 'raw_a_0', 'raw_b1_0', 'raw_b2_0', 'ctl_mix_xy']
+    core_outputs = [f'mixed_{step}' for step in range(1, 5)]
+    core_outputs += ['raw_a_4', 'raw_b1_4', 'raw_b2_4']
+    emit('\n; State-free four-substep core, specialized by the literal algorithm.')
+    emit(f'(defmacro df-core (alg {" ".join(core_args)})')
+    for step in range(1, 5):
+        call = ' '.join(f'p_{op}_{step}' for op in OPS) + ' '
+        call += ' '.join(f'f_{op}' for op in OPS) + ' ' + ' '.join(f'g_{op}' for op in OPS)
+        emit(f'  (def (x_{step} y_{step} raw_a_{step} raw_b1_{step} raw_b2_{step}) (df-step alg {call} env_a env_b ctl_a_depth ctl_b_depth ctl_harmonics ctl_feedback raw_a_{step-1} raw_b1_{step-1} raw_b2_{step-1}))')
+        emit(f'  (def mixed_{step} (mix x_{step} y_{step} ctl_mix_xy))')
+    emit(f'  (tuple {" ".join(core_outputs)}))')
     emit('''
 ; Explicit 4x FM integration. Four substeps share phase and feedback state.
 ; Eighth-order Butterworth reconstruction filter: cutoff .10 of internal rate.
@@ -151,6 +188,10 @@ def build():
 (def routing-gain (gswitch reset 1
   (clip (+ old-routing-gain (* (/ 1 (* .002 samplerate))
     (gswitch (eq requested-algorithm alg) 1 -1))) 0 1)))
+""")
+    for algorithm in range(1, len(ALGORITHMS) + 1):
+        emit(f'(def active_{algorithm} (eq alg {algorithm}))')
+    emit("""
 (write-history algorithm-h alg)
 (write-history routing-gain-h routing-gain)
 """)
@@ -176,9 +217,13 @@ def build():
         emit(f'(def ctl_{name} (df-smooth (clip (mod {name}) {lo} {hi}) reset))')
     for step in range(1,5):
         for op in OPS:emit(f'(def p_{op}_{step} (wrap (+ p_{op}_{step-1} (/ f_{op} (* 4 samplerate))) 0 1))')
-        call=' '.join(f'p_{op}_{step}' for op in OPS)+' '+' '.join(f'f_{op}' for op in OPS)+' '+' '.join(f'g_{op}' for op in OPS)
-        emit(f'(def (x_{step} y_{step} raw_a_{step} raw_b1_{step} raw_b2_{step}) (df-step alg {call} env_a env_b ctl_a_depth ctl_b_depth ctl_harmonics ctl_feedback raw_a_{step-1} raw_b1_{step-1} raw_b2_{step-1}))')
-        emit(f'(def mixed_{step} (mix x_{step} y_{step} ctl_mix_xy))')
+    for algorithm in range(1, len(ALGORITHMS) + 1):
+        outputs = ' '.join(f'a{algorithm}_{name}' for name in core_outputs)
+        emit(f'(def ({outputs}) (block-gate active_{algorithm} (df-core {algorithm} {" ".join(core_args)})))')
+    for name in core_outputs:
+        outputs = ' '.join(f'a{algorithm}_{name}' for algorithm in range(1, len(ALGORITHMS) + 1))
+        emit(f'(def {name} (+ {outputs}))')
+    for step in range(1,5):
         sig=f'mixed_{step}'
         for section,q in enumerate((.5097955791,.6013448869,.8999762231,2.5629154477)):
             a=section*2;b=a+1
@@ -192,7 +237,7 @@ def build():
 (def cutoff_hz (clip (* (df-smooth (clip (mod cutoff) 20 16000) reset)
   (pow (/ (max pitch 1) 261.6256) (clip (mod keytrack) 0 1))
   (pow 2 (* env_filter (clip (mod filter_depth) -8 8)))) 20 (min 16000 (* samplerate .36))))
-(def filtered (drift-filter-morph source cutoff_hz
+(def filtered (drift-filter-morph-gated source cutoff_hz
   (df-smooth (clip (mod resonance) 0 1) reset)
   (df-smooth (clip (mod highpass) 20 (min 12000 (* samplerate .36))) reset) (df-smooth (clip filter_type 0 1) reset)))
 (def vel (+ 1 (* (- velocity 1) (clip (mod velocity_amount) 0 1))))
@@ -203,6 +248,7 @@ def build():
 ''')
     (DEST/'dsp.lisp').write_text('\n'.join(lines).rstrip()+'\n')
     (Path(__file__).parent/'parameters.json').write_text(json.dumps(params,indent=2)+'\n')
+    build_spectra()
     return params
 
 if __name__=='__main__':build()

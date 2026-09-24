@@ -3889,6 +3889,189 @@
         });
     }
 
+    /// One 8-step track on `timebase` with every step on, the default layer
+    /// plus a per-track `length` lane edited by `edit`, scheduled from zero
+    /// to `horizon` samples at 120 bpm (24 000 samples per beat). Returns
+    /// (sample, step) for every resolved trigger.
+    fn length_lane_fixture(
+        timebase: Timebase,
+        horizon: u64,
+        edit: impl FnOnce(&mut crate::process::TrackProcessChain) + Send + 'static,
+    ) -> Vec<(u64, usize)> {
+        run_with_scheduler_stack(move || {
+            let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+            state.pattern.track_params[0].set_num_steps(8);
+            state.pattern.track_params[0].set_timebase(timebase);
+            for step in 0..MAX_STEPS {
+                state.pattern.patterns[0].set_step_active(step, true);
+            }
+            let mut scratch = lisp_host::ScratchControlRuntime::new(
+                Arc::clone(&state),
+                vec![Vec::new()],
+                vec![EffectDescriptor::builtin_sampler()],
+                0,
+                0,
+            );
+            scratch
+                .eval(&lisp_host::load_process_library_source())
+                .expect("builtin process library");
+            let mut chain = crate::process::default_project_layer();
+            chain.slots.push(crate::process::TrackProcessSlot {
+                instance_id: crate::process::ProcessInstanceId(1 << 40),
+                instance_name: Some("length".to_string()),
+                class_name: "lane-length".to_string(),
+                enabled: true,
+                project_layer: true,
+                inlets: Default::default(),
+                lanes: Default::default(),
+                fanout: Default::default(),
+                unbound_ports: Default::default(),
+                bindings: Default::default(),
+            });
+            edit(&mut chain);
+            assert!(state.set_project_process_chain(chain));
+
+            state.transport.playing.store(true, Ordering::Relaxed);
+            let snapshot = state.publish_scheduler_snapshot();
+            let queue = ScheduledEventQueue::<64>::new();
+            let mut scheduler = SchedulerLookaheadState::new(48_000);
+            scheduler
+                .process_runtime
+                .sync_authoring(scratch.process_authoring_snapshot(), 0.0);
+            let live_midi_fx_tracks: [LiveMidiFxTrackState; MAX_TRACKS] =
+                std::array::from_fn(|_| LiveMidiFxTrackState::default());
+            let mut scratch_runtime = Some(scratch);
+            // Blocks that do not divide the bar, so a length boundary has to
+            // split a chunk to land exactly.
+            schedule_playing_lookahead(
+                &mut scheduler,
+                &state,
+                &snapshot,
+                &queue,
+                &mut scratch_runtime,
+                &live_midi_fx_tracks,
+                snapshot.transport.pattern_epoch,
+                0,
+                horizon,
+                48_000,
+                7_000,
+                24_000.0,
+                0,
+                false,
+                false,
+            );
+            let mut hits = Vec::new();
+            while let Some(event) = queue.pop_owned() {
+                if let ScheduledEventKind::ResolvedTrigger { step, .. } = event.kind {
+                    hits.push((event.sample_time, step));
+                }
+            }
+            hits
+        })
+    }
+
+    #[test]
+    fn scheduler_length_lane_changes_prh_subdivision_each_bar() {
+        // count (lo 2, hi 4, +1 on step 0) wired into length: bar 1 plays
+        // the authored 8, then 4, 2, 3 steps per bar. Under Prh every cycle
+        // is one bar (96 000 samples), so each bar is its own subdivision.
+        let hits = length_lane_fixture(Timebase::Polyrhythm, 384_000, |chain| {
+            let count = default_lane_slot_mut(chain, "count");
+            count
+                .lanes
+                .insert("step".to_string(), lane(&[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]));
+            count
+                .inlets
+                .insert("lo".to_string(), crate::process::ProcessLiteral::Number(2.0));
+            count
+                .inlets
+                .insert("hi".to_string(), crate::process::ProcessLiteral::Number(4.0));
+            wire_default_lane(chain, "count", "length", "steps");
+        });
+        let mut expected: Vec<(u64, usize)> = (0..8).map(|s| (s as u64 * 12_000, s)).collect();
+        expected.extend((0..4).map(|s| (96_000 + s as u64 * 24_000, s)));
+        expected.extend((0..2).map(|s| (192_000 + s as u64 * 48_000, s)));
+        expected.extend((0..3).map(|s| (288_000 + s as u64 * 32_000, s)));
+        assert_eq!(hits.len(), expected.len(), "{hits:?}");
+        for (hit, want) in hits.iter().zip(&expected) {
+            // Thirds of a bar are not exact in f64 beats; the clock fires on
+            // the first sample at or past the boundary.
+            assert!(
+                hit.1 == want.1 && hit.0.abs_diff(want.0) <= 1,
+                "{hit:?} vs {want:?} in {hits:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn scheduler_length_lane_restarts_a_fixed_timebase_cycle_on_step_zero() {
+        // 1/16 steps (6 000 samples). Step 0 asks for 3 steps: the authored
+        // 8-step cycle finishes, then the 3-step cycle starts on step 0 at
+        // the boundary even though 48 000 is not a multiple of its length.
+        let hits = length_lane_fixture(Timebase::Sixteenth, 84_000, |chain| {
+            default_lane_slot_mut(chain, "length")
+                .lanes
+                .insert("steps".to_string(), lane(&[3.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]));
+        });
+        let mut expected: Vec<(u64, usize)> = (0..8).map(|s| (s as u64 * 6_000, s)).collect();
+        expected.extend((0..6).map(|i| (48_000 + i as u64 * 6_000, i % 3)));
+        assert_eq!(hits, expected);
+    }
+
+    #[test]
+    fn pattern_length_override_rewinds_across_its_boundary_and_clears_on_reset() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        state.pattern.track_params[0].set_num_steps(8);
+        state.pattern.track_params[0].set_timebase(Timebase::Polyrhythm);
+        state.toggle_play();
+        let snapshot = state.publish_scheduler_snapshot();
+        let mut clock = SnapshotSequencerClock::new(48_000);
+        clock.seek_beats(1.0);
+        clock.was_playing = true;
+        clock.adopt_track_source(0, &snapshot);
+
+        clock.request_pattern_length(&snapshot, 0, 5, 0.5);
+        assert_eq!(clock.next_pattern_length_boundary(1), Some(4.0), "end of the bar");
+        clock.apply_due_pattern_lengths(&snapshot);
+        assert_eq!(clock.pattern_length_override(0), None, "not due before the bar line");
+
+        clock.seek_beats(4.0);
+        clock.apply_due_pattern_lengths(&snapshot);
+        assert_eq!(clock.pattern_length_override(0), Some(5));
+        assert_eq!(clock.pattern_length_marker(0), Some(5));
+        let patched = clock.patch_pattern_lengths(&snapshot).expect("patched snapshot");
+        assert_eq!(patched.tracks[0].params.num_steps, 5);
+        assert!(
+            Arc::ptr_eq(
+                &patched.tracks[0],
+                &clock.patch_pattern_lengths(&snapshot).unwrap().tracks[0]
+            ),
+            "the patched track is cached per source"
+        );
+
+        // A re-seek back into the old bar replays it at the old length and
+        // re-arms the change at the same bar line.
+        clock.seek_beats(4.5);
+        clock.seek_to_rendered_position(&snapshot, 0, 24_000);
+        assert!((clock.total_beats - 3.5).abs() < 1.0e-9);
+        assert_eq!(clock.pattern_length_override(0), None);
+        assert_eq!(clock.pattern_length_marker(0), None, "marker rewinds too");
+        assert_eq!(clock.next_pattern_length_boundary(1), Some(4.0));
+
+        // Asking for the authored length installs no override but still
+        // marks the step for the grid.
+        clock.seek_beats(4.0);
+        clock.request_pattern_length(&snapshot, 0, 8, 4.0);
+        clock.seek_beats(8.0);
+        clock.apply_due_pattern_lengths(&snapshot);
+        assert_eq!(clock.pattern_length_override(0), None);
+        assert_eq!(clock.pattern_length_marker(0), Some(8));
+
+        clock.reset();
+        assert_eq!(clock.next_pattern_length_boundary(1), None, "stop drops it");
+        assert!(clock.patch_pattern_lengths(&snapshot).is_none());
+    }
+
     #[test]
     fn process_roll_engages_once_arms_roll_mode_and_releases_on_its_deadline() {
         let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
@@ -5361,6 +5544,18 @@
             scratch
                 .eval(
                     r#"
+                    (def-process follow-harmony
+                      :target (step-param :transpose)
+                      :in ((listen :field :default :harmony)
+                           (amount :float 0 1 :default 1 :lane true)
+                           (grace :int 0 3 :default 0))
+                      :run (let ((field (hear (in :listen))))
+                             (if field
+                               (target-add!
+                                 (* (in :amount)
+                                    (field-weight field)
+                                    (field-nearest-delta field (current-note) (in :grace))))
+                               nil)))
                     (def-process harmony-publisher
                       :run (suggest :harmony
                              (pitch-field (list 0 4 7) :root 0 :weight 1)))
@@ -7599,6 +7794,397 @@
         });
     }
 
+    /// Node 0 seeds from track 0 (note 4, E) and feeds itself, adding +1 per
+    /// hop. Track 2 authors a C major triad on every step. Returns node 0's
+    /// emitted transposes in order, with `lane-harmony :source 2` at `amount`
+    /// on node 0 (or no patch at all when `amount` is `None`).
+    fn node_self_feedback_harmony_on_track_source(amount: Option<f64>) -> Vec<f32> {
+        let state = Arc::new(SequencerState::new(
+            3,
+            (0..3).map(|_| default_empty_effect_chain()).collect(),
+        ));
+        state.toggle_play();
+        state.toggle_step_and_clear_plocks(0, 0);
+        state.set_step_param(0, 0, StepParam::Transpose, 4.0);
+        for step in 0..16 {
+            state.pattern.patterns[2].set_step_active(step, true);
+            for note in [0.0, 4.0, 7.0] {
+                assert!(state.pattern.chord_data[2].add_note(step, note));
+            }
+        }
+        publish_test_graph_sequencer(
+            Arc::clone(&state),
+            r#"
+            (def-sequencer "node-track-harmony-graph"
+              :shape (line 1)
+              :energy-decay 1
+              :reset-every 0
+              :seed-on-reset 0
+              :max-poly 8
+              :max-poly-selection :deterministic
+              :duration (steps 1)
+              (def-node nrn
+                :resolution :16
+                :delay 1
+                :quantize :16
+                :route 1
+                :seed-from 0
+                :reduce :sum
+                :params ((threshold :float 0 4 :default 0.5)
+                         (transpose :int -48 48 :default 0))
+                :state ((energy :leak (per-step :energy-decay)))
+                :update (if (>= (energy) (param :threshold))
+                          (emit :note (+ (in-note) (param :transpose)) :vel (in-vel))
+                          false))
+              (edges
+                :from nrn
+                :to nrn
+                :topology (all-to-all)
+                :gather (edge :weight)
+                :params ((weight :float -1 1 :default 0))))
+            "#,
+        );
+        let published = state
+            .published_sequencers()
+            .into_iter()
+            .find(|seq| seq.name == "node-track-harmony-graph")
+            .expect("published graph");
+        let manifest = published.graph.as_ref().expect("graph manifest");
+        let edge_group = crate::graph::edge_set_group_id(&manifest.edge_sets[0]);
+        let chain = amount.map(|amount| {
+            let mut harmony = crate::process::TrackProcessSlot {
+                instance_id: crate::process::ProcessInstanceId(9301),
+                instance_name: None,
+                class_name: "lane-harmony".to_string(),
+                enabled: true,
+                project_layer: false,
+                inlets: Default::default(),
+                lanes: Default::default(),
+                fanout: Default::default(),
+                unbound_ports: Default::default(),
+                bindings: Default::default(),
+            };
+            harmony.inlets.insert("source".into(), crate::process::ProcessLiteral::Number(2.0));
+            harmony.inlets.insert("amount".into(), crate::process::ProcessLiteral::Number(amount));
+            crate::process::TrackProcessChain { slots: vec![harmony] }
+        });
+        state
+            .edit_current_graph_overrides(|graphs| {
+                graphs.push(ProjectGraphOverrides {
+                    sequencer_id: published.id,
+                    sequencer_name: published.name.clone(),
+                    owner_rack: None,
+                    node_intrinsics: vec![ProjectGraphNodeIntrinsicOverride {
+                        group: "nrn".to_string(),
+                        instance: 0,
+                        resolution: None,
+                        delay_steps: None,
+                        quantize: None,
+                        route: None,
+                        seed_from: None,
+                        seed_on_reset: None,
+                        duration: None,
+                        swing: None,
+                        neural_group: None,
+                        process_chain: chain,
+                    }],
+                    node_params: vec![ProjectGraphNodeParamOverride {
+                        group: "nrn".to_string(),
+                        instance: 0,
+                        param: "transpose".to_string(),
+                        value: 1.0,
+                    }],
+                    edge_params: vec![ProjectGraphEdgeParamOverride {
+                        group: edge_group,
+                        from: 0,
+                        to: 0,
+                        param: "weight".to_string(),
+                        value: 1.0,
+                    }],
+                    reset_every_beats: None,
+                    max_poly: None,
+                    max_poly_selection: None,
+                    node_count: None,
+                    group_gain: None,
+                    group_coupling: None,
+                    group_trace_decay: None,
+                    group_coupling_scale: None,
+                    group_excite_floor: None,
+                });
+                Ok(())
+            })
+            .expect("install node harmony overrides");
+        schedule_one_second_of_graph_network(&state, 1)
+    }
+
+    /// Schedule one second of the published graphs on `state`, in 512-sample
+    /// chunks, and return the graph notes sent to `track`, in time order.
+    fn schedule_one_second_of_graph_network(state: &Arc<SequencerState>, track: usize) -> Vec<f32> {
+        let snapshot = state.publish_scheduler_snapshot();
+        let mut scheduler = SchedulerLookaheadState::new(48_000);
+        let manifests = state
+            .published_sequencers()
+            .into_iter()
+            .filter_map(|seq| seq.graph)
+            .collect::<Vec<_>>();
+        reconcile_graph_runtimes(
+            manifests,
+            &snapshot.graph_overrides,
+            &[],
+            &mut scheduler.graph_runtimes,
+            &mut scheduler.graph_manifests,
+            scheduler.clock.total_beats,
+        );
+        let mut scratch = lisp_host::scratch_runtime_with_fallbacks(Arc::clone(state), 0, 0);
+        scratch
+            .eval(&lisp_host::load_midi_fx_library_source())
+            .expect("load MIDI FX library");
+        scratch
+            .eval(&lisp_host::load_process_library_source())
+            .expect("builtin process library");
+        scheduler
+            .process_runtime
+            .sync_authoring(scratch.process_authoring_snapshot(), 0.0);
+        let mut scratch_runtime = Some(scratch);
+        let queue = ScheduledEventQueue::<64>::new();
+        let live_midi_fx_tracks: [LiveMidiFxTrackState; MAX_TRACKS] =
+            std::array::from_fn(|_| LiveMidiFxTrackState::default());
+        let samples_per_quarter = 48_000.0 * 60.0 / snapshot.transport.bpm as f64;
+        schedule_playing_lookahead(
+            &mut scheduler,
+            state,
+            &snapshot,
+            &queue,
+            &mut scratch_runtime,
+            &live_midi_fx_tracks,
+            snapshot.transport.pattern_epoch,
+            0,
+            48_000,
+            48_000,
+            // An audio-block-sized chunk, as the app schedules: `:output`
+            // reads see what earlier chunks enqueued.
+            512,
+            samples_per_quarter,
+            0,
+            false,
+            false,
+        );
+        let mut network: Vec<(u64, f32)> = observed_triggers(&queue)
+            .iter()
+            .filter(|event| event.kind == ScheduledTriggerKind::Network && event.track == track)
+            .map(|event| (event.sample_time, event.transpose))
+            .collect();
+        network.sort_by_key(|(sample, _)| *sample);
+        network.into_iter().map(|(_, transpose)| transpose).collect()
+    }
+
+    /// Without a patch the +1 self-feedback climbs chromatically from the
+    /// seed; with `lane-harmony` following a chord TRACK, each hop's +1 snaps
+    /// back onto the C major triad, and because the snapped note is what
+    /// rides the scatter, the loop holds on chord tones instead of climbing.
+    #[test]
+    fn node_process_patch_harmony_follows_a_track_source_through_self_feedback() {
+        let free = run_with_scheduler_stack(|| node_self_feedback_harmony_on_track_source(None));
+        assert!(free.len() >= 4, "enough self-feedback fires to judge: {free:?}");
+        assert_eq!(&free[..4], &[5.0, 6.0, 7.0, 8.0], "no patch climbs by 1: {free:?}");
+
+        // Chord tones only: E+1 = F snaps back down to E every hop.
+        let strict = run_with_scheduler_stack(|| node_self_feedback_harmony_on_track_source(Some(1.0)));
+        assert_eq!(strict.len(), free.len(), "harmony never vetoes: {strict:?}");
+        assert!(
+            strict.iter().all(|note| (note - 4.0).abs() < 1e-6),
+            "every hop snaps onto E of the C triad: {strict:?}"
+        );
+
+        // The panel's 0.71: F (11th over C, a clash over major) still snaps
+        // to E, so the loop holds there too.
+        let panel = run_with_scheduler_stack(|| node_self_feedback_harmony_on_track_source(Some(0.71)));
+        assert!(
+            panel.iter().all(|note| (note - 4.0).abs() < 1e-6),
+            "0.71 holds the loop on E: {panel:?}"
+        );
+    }
+
+    /// Track 2 has NO step pattern: nodes 0, 2 and 3 play C, E and G on it
+    /// every step (self-loops, seeded once from track 0's note 0). Node 1 is
+    /// the follower: routed to track 1, adding +3 per hop around its own loop,
+    /// with `lane-harmony :source 2` at `amount` (no patch when `None`).
+    /// Returns node 1's notes in order.
+    fn node_harmony_follows_a_neuron_driven_track(amount: Option<f64>) -> Vec<f32> {
+        let state = Arc::new(SequencerState::new(
+            3,
+            (0..3).map(|_| default_empty_effect_chain()).collect(),
+        ));
+        state.toggle_play();
+        state.toggle_step_and_clear_plocks(0, 0);
+        publish_test_graph_sequencer(
+            Arc::clone(&state),
+            r#"
+            (def-sequencer "node-output-harmony-graph"
+              :shape (line 4)
+              :energy-decay 1
+              :reset-every 0
+              :seed-on-reset 0
+              :max-poly 8
+              :max-poly-selection :deterministic
+              :duration (steps 1)
+              (def-node nrn
+                :resolution :16
+                :delay 1
+                :quantize :16
+                :route 2
+                :seed-from 0
+                :reduce :sum
+                :params ((threshold :float 0 4 :default 0.5)
+                         (transpose :int -48 48 :default 0)
+                         (transpose-reset :int 0 1 :default 0))
+                :state ((energy :leak (per-step :energy-decay)))
+                :update (if (>= (energy) (param :threshold))
+                          (emit :note (if (>= (param :transpose-reset) 1)
+                                        (param :transpose)
+                                        (+ (in-note) (param :transpose)))
+                                :vel (in-vel))
+                          false))
+              (edges
+                :from nrn
+                :to nrn
+                :topology (all-to-all)
+                :gather (edge :weight)
+                :params ((weight :float -1 1 :default 0))))
+            "#,
+        );
+        let published = state
+            .published_sequencers()
+            .into_iter()
+            .find(|seq| seq.name == "node-output-harmony-graph")
+            .expect("published graph");
+        let manifest = published.graph.as_ref().expect("graph manifest");
+        let edge_group = crate::graph::edge_set_group_id(&manifest.edge_sets[0]);
+        let chain = amount.map(|amount| {
+            let mut harmony = crate::process::TrackProcessSlot {
+                instance_id: crate::process::ProcessInstanceId(9401),
+                instance_name: None,
+                class_name: "lane-harmony".to_string(),
+                enabled: true,
+                project_layer: false,
+                inlets: Default::default(),
+                lanes: Default::default(),
+                fanout: Default::default(),
+                unbound_ports: Default::default(),
+                bindings: Default::default(),
+            };
+            harmony.inlets.insert("source".into(), crate::process::ProcessLiteral::Number(2.0));
+            harmony.inlets.insert("amount".into(), crate::process::ProcessLiteral::Number(amount));
+            crate::process::TrackProcessChain { slots: vec![harmony] }
+        });
+        let param = |instance: usize, param: &str, value: f64| ProjectGraphNodeParamOverride {
+            group: "nrn".to_string(),
+            instance,
+            param: param.to_string(),
+            value,
+        };
+        state
+            .edit_current_graph_overrides(|graphs| {
+                graphs.push(ProjectGraphOverrides {
+                    sequencer_id: published.id,
+                    sequencer_name: published.name.clone(),
+                    owner_rack: None,
+                    node_intrinsics: vec![ProjectGraphNodeIntrinsicOverride {
+                        group: "nrn".to_string(),
+                        instance: 1,
+                        resolution: None,
+                        delay_steps: None,
+                        quantize: None,
+                        route: Some(ProjectGraphRouteOverride::Track(1)),
+                        seed_from: None,
+                        seed_on_reset: None,
+                        duration: None,
+                        swing: None,
+                        neural_group: None,
+                        process_chain: chain,
+                    }],
+                    // The chord voices hold their pitch (transpose-reset);
+                    // the follower accumulates +3 per hop.
+                    node_params: vec![
+                        param(0, "transpose", 0.0),
+                        param(0, "transpose-reset", 1.0),
+                        param(1, "transpose", 3.0),
+                        param(2, "transpose", 4.0),
+                        param(2, "transpose-reset", 1.0),
+                        param(3, "transpose", 7.0),
+                        param(3, "transpose-reset", 1.0),
+                    ],
+                    edge_params: (0..4)
+                        .map(|node| ProjectGraphEdgeParamOverride {
+                            group: edge_group.clone(),
+                            from: node,
+                            to: node,
+                            param: "weight".to_string(),
+                            value: 1.0,
+                        })
+                        .collect(),
+                    reset_every_beats: None,
+                    max_poly: None,
+                    max_poly_selection: None,
+                    node_count: None,
+                    group_gain: None,
+                    group_coupling: None,
+                    group_trace_decay: None,
+                    group_coupling_scale: None,
+                    group_excite_floor: None,
+                });
+                Ok(())
+            })
+            .expect("install output harmony overrides");
+        let chord = schedule_one_second_of_graph_network(&state, 2);
+        assert!(
+            chord.iter().all(|note| [0.0, 4.0, 7.0].contains(note)) && chord.len() >= 12,
+            "the chord voices play C E G on track 2 every step: {chord:?}"
+        );
+        let followed = schedule_one_second_of_graph_network(&state, 1);
+        if amount.is_some() {
+            // The slot's decision rides its scope cells to the card's meter.
+            let scopes = state.process_scope_values();
+            let cells = scopes.get(&9401).expect("harmony slot scope");
+            let last = |cell: &str| {
+                *cells
+                    .get(cell)
+                    .and_then(|values| values.last())
+                    .unwrap_or_else(|| panic!("scope cell {cell}: {cells:?}"))
+            };
+            assert_eq!(last("source-kind"), 2.0, "followed the sounded output");
+            assert_eq!(last("chord-mask"), 0b1001_0001 as f32, "C E G");
+            assert_eq!(last("root"), 0.0);
+            assert!(
+                cells["snap"].iter().any(|snap| *snap != 0.0),
+                "some hop was moved: {cells:?}"
+            );
+        }
+        followed
+    }
+
+    /// A source track with no step pattern, driven only by neurons, is
+    /// followed by what its instrument is sent (`:output` reads). Unpatched,
+    /// the +3 loop walks the diminished chord 3 6 9 12 ...; harmonized, its
+    /// first note (fired on the same boundary the chord voices first sound,
+    /// before their output is visible) plays untouched and every later hop
+    /// lands on a C major chord tone.
+    #[test]
+    fn node_process_patch_harmony_follows_a_neuron_driven_track() {
+        let free = run_with_scheduler_stack(|| node_harmony_follows_a_neuron_driven_track(None));
+        assert!(free.len() >= 5, "enough follower fires to judge: {free:?}");
+        assert_eq!(&free[..4], &[3.0, 6.0, 9.0, 12.0], "no patch climbs by 3: {free:?}");
+
+        let followed = run_with_scheduler_stack(|| node_harmony_follows_a_neuron_driven_track(Some(1.0)));
+        assert_eq!(followed.len(), free.len(), "harmony never vetoes: {followed:?}");
+        let pitch_class = |note: f32| (note.round() as i32).rem_euclid(12);
+        assert!(
+            followed[1..].iter().all(|note| [0, 4, 7].contains(&pitch_class(*note))),
+            "every hop after the first snaps onto C E G: {followed:?}"
+        );
+        assert_ne!(followed, free, "harmony changed what the follower plays");
+    }
+
     /// Wires inside a node patch use the track patch bay's inlet-write
     /// plumbing: `lane-rand` (pinned to 5) -> `lane-cmp` (a > 0) -> `lane-veto`
     /// gate mutes every one of node 1's emissions, while node 2 downstream
@@ -8708,6 +9294,35 @@
         assert_eq!(params.slice_sensitivity, 0.8);
         assert!(params.start_point_locked);
         assert!(!params.end_point_locked);
+    }
+
+    #[test]
+    fn unbound_instrument_params_are_not_routed_to_the_modulator() {
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        let track = 0;
+        let step = 3;
+        let desc = EffectDescriptor::builtin_sampler();
+        state.pattern.instrument_slots[track].apply_descriptor_with_modulator(&desc, 12, 13);
+        state.pattern.instrument_slots[track].set_plock(step, 2, 0.25);
+
+        // `u32::MAX` marks a param with no backing node state. It is numerically
+        // above MOD_PARAM_BASE, so an unguarded split would send it to the
+        // modulator as idx `u32::MAX - MOD_PARAM_BASE`.
+        let mut snapshot = (*state.publish_scheduler_snapshot()).clone();
+        Arc::make_mut(&mut snapshot.tracks[track])
+            .instrument_slot
+            .param_node_indices[2] = u32::MAX;
+
+        let sentinel_as_mod =
+            (u32::MAX - crate::instruments::voice_modulator::MOD_PARAM_BASE) as u64;
+        for params in [
+            super::resolve_instrument_defaults(&snapshot, track),
+            super::resolve_instrument_params(&snapshot, track, step, None),
+        ] {
+            assert!(!params.is_empty());
+            assert!(params.iter().all(|param| param.idx != sentinel_as_mod
+                && param.idx != u32::MAX as u64));
+        }
     }
 
     #[test]

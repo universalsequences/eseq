@@ -82,6 +82,7 @@ pub(super) fn record_track_output_event(
     sample_time: u64,
     beat: f64,
     resolved: ResolvedStep,
+    harmony: crate::sequencer::TrackOutputPitches,
 ) {
     events.push(TrackOutputEvent {
         track,
@@ -89,7 +90,39 @@ pub(super) fn record_track_output_event(
         beat,
         transpose: resolved.transpose,
         velocity: resolved.velocity,
+        harmony,
     });
+}
+
+/// The pitches a trigger sounds and when its gate closes. `resolved` is the
+/// step after fit-to-scale but before global transpose; chord notes sound at
+/// `resolved_chord_transpose`, a plain trigger at its resolved transpose.
+pub(super) fn track_output_pitches(
+    resolved: &ResolvedStep,
+    chord: &ScheduledChordData,
+    beat: f64,
+    samples_per_step: f32,
+    samples_per_quarter: f32,
+) -> crate::sequencer::TrackOutputPitches {
+    let mut out = crate::sequencer::TrackOutputPitches::default();
+    let step_beats = samples_per_step.max(0.0) as f64 / samples_per_quarter.max(1.0) as f64;
+    let mut duration_steps = resolved.duration;
+    if chord.count > 0 {
+        for index in 0..chord.count.min(MAX_VOICES) {
+            out.pitches[index] = crate::scheduled_event::resolved_chord_transpose(
+                chord.notes[index],
+                chord.step_transpose,
+                resolved.transpose,
+            );
+            duration_steps = duration_steps.max(chord.durations[index]);
+        }
+        out.count = chord.count.min(MAX_VOICES);
+    } else {
+        out.pitches[0] = resolved.transpose;
+        out.count = 1;
+    }
+    out.end_beat = beat + duration_steps.max(0.0) as f64 * step_beats;
+    out
 }
 
 pub(super) fn neural_outputs_are_same_accent(existing: &NeuralOutput, incoming: &NeuralOutput) -> bool {

@@ -67,6 +67,8 @@ int alloc_edge(LiveGraph *lg) {
   }
   memset(lg->edges[i].buf, 0,
          sizeof(float) * (lg->block_size + EDGE_BUFFER_PAD_FLOATS));
+  lg->edges[i].silent_pass = 0; // freshly zeroed; never "silent this pass"
+  lg->edges[i].silent_frames = 0;
   return i;
 }
 

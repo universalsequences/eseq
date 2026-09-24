@@ -170,9 +170,12 @@ impl SequencerState {
                 peak_r: AtomicU32::new(0.0_f32.to_bits()),
                 cpu_load_pct: AtomicU32::new(0.0_f32.to_bits()),
                 audio_deadline_misses: AtomicU64::new(0),
+                callback_busy_ns: AtomicU64::new(0),
+                callback_budget_ns: AtomicU64::new(0),
                 trigger_flash,
                 num_tracks: AtomicU32::new(num_tracks as u32),
                 track_playheads: (0..MAX_TRACKS).map(|_| AtomicU32::new(0)).collect(),
+                track_process_lengths: (0..MAX_TRACKS).map(|_| AtomicU32::new(0)).collect(),
                 track_playhead_phases: (0..MAX_TRACKS)
                     .map(|_| AtomicU32::new(0.0_f32.to_bits()))
                     .collect(),
@@ -217,7 +220,7 @@ impl SequencerState {
                 voice_lids: (0..MAX_SAMPLER_POOLS)
                     .map(|_| std::array::from_fn(|_| AtomicU64::new(0)))
                     .collect(),
-                voice_counts: (0..MAX_SAMPLER_POOLS).map(|_| AtomicU32::new(0)).collect(),
+                voice_counts: VoiceCountTable::new(MAX_SAMPLER_POOLS),
                 instrument_type_flags: (0..MAX_TRACKS).map(|_| AtomicU32::new(0)).collect(),
                 instrument_run_mode_flags: (0..MAX_TRACKS)
                     .map(|_| AtomicU32::new(CustomInstrumentRunMode::Instrument.runtime_flag()))
@@ -241,9 +244,7 @@ impl SequencerState {
                 engine_modulator_node_ids: (0..MAX_INSTRUMENT_ENGINES)
                     .map(|_| std::array::from_fn(|_| AtomicU32::new(0)))
                     .collect(),
-                engine_voice_counts: (0..MAX_INSTRUMENT_ENGINES)
-                    .map(|_| AtomicU32::new(0))
-                    .collect(),
+                engine_voice_counts: VoiceCountTable::new(MAX_INSTRUMENT_ENGINES),
                 engine_route_lids: (0..MAX_INSTRUMENT_ENGINES)
                     .map(|_| std::array::from_fn(|_| std::array::from_fn(|_| AtomicU64::new(0))))
                     .collect(),

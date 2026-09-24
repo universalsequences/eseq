@@ -311,6 +311,14 @@ unpublished). All three are recorded group-structure edits, and the
 structure state captures the scene bank, so the override rewrites undo with
 them.
 
+> **Superseded (2026-09-24, `docs/instance-kinds-spec.md` §5, §10).** The
+> module owner map below is deleted. Package code now defines kinds, and a
+> rack owns kind *instances* through `ProjectInstance::owner`; recorded
+> `(import m)` sources of kind modules migrate to instances on open. Only
+> plain `(load …)`/script sources still use the rack scope
+> (`with_graph_owner_rack`), and every recorded source is replayed under its
+> rack, whether or not the scratch imports it.
+
 **Ownership is a property of the module.** The app publishes a map
 module name → owning rack (`set_rack_owner_modules`, rebuilt from every
 rack's recorded imports on each group-topology change), and the UI

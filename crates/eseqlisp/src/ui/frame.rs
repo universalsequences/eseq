@@ -1494,10 +1494,12 @@ fn build_tiled_render_frame_impl(
         }
     }
 
-    let toast = editor.toast().map(|toast| crate::backend::ToastFrame {
-        message: toast.message.clone(),
-        kind: toast.kind,
-    });
+    let toast = editor.toast_frame();
+    editor.set_toast_placement(
+        toast
+            .as_ref()
+            .and_then(|toast| crate::backend::toast_placement(toast, total_width, total_height)),
+    );
     TiledRenderFrame { tiles, completion, toast }
 }
 

@@ -29,10 +29,12 @@
 ;; Drag-and-drop sample import modal (zero footprint while closed).
 (import eseq.sample-import)
 (import eseq.retrospective)
+(import eseq.resample)
 (import eseq.export-song)
 (import eseq.file-dialogs)
 
 (export lane-patchbay-node lane-patch-register-node lane-patch-node-namespace
+        harmony-snap-meter process-scope-cells-for
         lane-patch-node-touch lane-patch-node-version-value lane-patch-node-selected-id
         lane-patch-node-select
         track-selected-binding
@@ -690,9 +692,23 @@
 (defwidget seqv-playhead-row-bar
   :width 48.8 :height 0.24
   :paint-margin 0.18
-  :state (col)
-  :bindable (col)
+  :state (col len-col)
+  :bindable (col len-col)
   :shader
+  (sdf/layer
+  ;; Length-lane marker (`length!`): an amber underline beneath the step the
+  ;; lane last set the pattern length to. Drawn first so the playhead passes
+  ;; over it.
+  (if (< len-col 0)
+    (rgba 0 0 0 0)
+    (let ((len-start (/ (+ len-col 0.08) 16.0))
+          (len-end (/ (+ len-col 0.92) 16.0))
+          (len-half-w (* 0.5 aspect (- len-end len-start))))
+      (sdf/fill
+        (let ((x (+ (* 0.5 x) (* 0.5 aspect (- 1.0 (+ len-start len-end)))))
+              (y (* 0.5 y)))
+          (sdf/rounded-rect len-half-w 0.2 0.06))
+        (material :color (rgba 0.94 0.63 0.24 0.95)))))
   (if (< col 0)
     (rgba 0 0 0 0)
     (let ((step-w (/ 1.0 16.0))
@@ -728,7 +744,7 @@
             :shadow (shadow
               :color (rgba 0.25 0.45 1.0 0.72)
               :blur 0.12
-              :offset (vec2 0 0))))))))
+              :offset (vec2 0 0)))))))))
 
 (defwidget seqv-step-shell
   :width 1.5 :height 2.5
@@ -1183,7 +1199,21 @@
     :key (str "playhead-row-" track-id "-" row)
     :width (* row-width step-cell-width) :height 0.24
     :background "seqv-playhead-row-bar"
-    :col (bind-seq (str "track-playhead-row-" track "-" row))))
+    :col (bind-seq (str "track-playhead-row-" track "-" row))
+    :len-col (bind-seq (str "track-length-row-" track "-" row))))
+
+;; Expanded view twin of the grid's length underline: amber bar beneath the
+;; step number of the step a length lane last set the pattern length to.
+(defwidget seqv-slot-length-mark
+  :width 2.8 :height 0.3
+  :state (active)
+  :bindable (active)
+  :shader
+  (if (= active 1)
+    (sdf/layer
+      (sdf/fill (sdf/rounded-rect (* 0.62 aspect) 0.5 0.2)
+        (material :color (rgba 0.94 0.63 0.24 0.95))))
+    (rgba 0 0 0 0)))
 
 (def track-num-steps (track)
   (if (< track (len SEQ.track-num-steps))
@@ -2138,6 +2168,10 @@
 
 (def lane-strip-scope-row (track slot)
   (let ((entry (lane-scope-entry track slot)))
+    (if (= (get slot :class) "lane-harmony")
+      (harmony-snap-meter (str "lane-harmony-meter-" track "-" (get slot :instance-id))
+        (if entry (get entry :cells) nil)
+        13.5)
     (if (and entry (> (len (get entry :values)) 0))
       (v-stack :width :fill :gap 0.15
         (h-stack :width :fill :gap 0.3 :align :center
@@ -2158,8 +2192,137 @@
             :max (lane-scope-bound slot "hi" 1)
             :line-color :process-lane-accent
             :area true)))
-      nil)))
+      nil))))
 
+
+;; ── Harmony snap meter ──────────────────────────────────────────────────────
+;; What `lane-harmony` did on its last fires, from its scope cells (see the
+;; process's :state): a compressor-style bar of the move (±6 semitones from
+;; the centre), the scale degree it came from and went to over the chord
+;; root, the twelve degrees above that root (chord tones solid, key tones
+;; faint, the landing lit, a moved-from note outlined), the tier of each side
+;; and where the chord came from. `cells` is nil until the slot has fired.
+
+(def harmony-degree-names (list "R" "b9" "9" "b3" "3" "11" "#11" "5" "b13" "13" "b7" "7"))
+(def harmony-bit-values (list 1 2 4 8 16 32 64 128 256 512 1024 2048))
+(def harmony-meter-miss (rgba 0.92 0.42 0.36 1))
+
+(def harmony-bit? (mask pc)
+  (>= (mod (floor (/ mask (nth harmony-bit-values pc))) 2) 1))
+
+(def harmony-cell (cells name fallback)
+  (let ((values (get cells name)))
+    (if (and values (> (len values) 0)) (nth values (- (len values) 1)) fallback)))
+
+(def harmony-degree-name (pc root)
+  (nth harmony-degree-names (mod (+ (- pc root) 12) 12)))
+
+(def harmony-tier (score)
+  (if (>= score 0.99) "chord" (if (>= score 0.6) "key" (if (>= score 0.3) "color" "clash"))))
+
+(def harmony-source-label (kind)
+  (if (= kind 1) "src: pattern"
+    (if (= kind 2) "src: output"
+      (if (= kind 3) "src: neuron" "no source"))))
+
+(def harmony-signed (snap)
+  (if (> snap 0) (str "+" (fmt "{:.0}" snap)) (fmt "{:.0}" snap)))
+
+;; [      |===>    ]: a fill from the centre tick toward the move, 6 semitones
+;; to each edge.
+(def harmony-snap-bar (snap width)
+  (let ((tick 0.1)
+        (unit (/ (- width 0.1) 12))
+        (fill (* (min 6 (abs snap)) (/ (- width 0.1) 12)))
+        (half (/ (- width 0.1) 2)))
+    (box :width width :height 0.9 :padding 0 :corner-radius 3
+      :background-color (rgba 0 0 0 0.35)
+      (h-stack :gap 0 :align :center
+        (box :width (- half (if (< snap 0) fill 0)) :height 0.9 :bg :transparent)
+        (if (< snap 0)
+          (box :width fill :height 0.56 :corner-radius 2 :background-color :process-lane-accent)
+          nil)
+        (box :width tick :height 0.9 :background-color (rgba 1 1 1 0.45))
+        (if (> snap 0)
+          (box :width fill :height 0.56 :corner-radius 2 :background-color :process-lane-accent)
+          nil)))))
+
+(def harmony-degree-cell (key i root chord key-mask in-pc out-pc snap)
+  (let ((pc (mod (+ root i) 12)))
+    (let ((landed (= pc out-pc))
+          (moved-from (and (not (= snap 0)) (= pc in-pc))))
+      (box
+        :key (str key "-deg-" i)
+        :width 1.06 :height 0.95 :padding 0 :corner-radius 2
+        :h-align :center :v-align :center
+        :background-color (if landed :process-lane-accent
+                            (if (harmony-bit? chord pc) (rgba 1 1 1 0.30)
+                              (if (harmony-bit? key-mask pc) (rgba 1 1 1 0.10)
+                                (rgba 0 0 0 0.30))))
+        :border-color (if moved-from harmony-meter-miss :transparent)
+        :border-width (if moved-from 0.1 0)
+        (label (nth harmony-degree-names i)
+          :font-size 6.5 :h-align :center :v-align :center :bg :transparent
+          :color (if landed :black
+                   (if (harmony-bit? chord pc) :foreground :dim)))))))
+
+(def harmony-snap-meter (key cells width)
+  (let ((kind (if cells (harmony-cell cells :source-kind 0) 0))
+        (history (if cells (get cells :snap) nil)))
+    (if (or (= cells nil) (= kind 0))
+      (label (if cells "no source sounding: nothing to follow yet" "waiting for a fire")
+        :width width :height 1.0 :font-size 8 :color :dim :bg :transparent)
+      (let ((snap (harmony-cell cells :snap 0))
+            (root (harmony-cell cells :root 0))
+            (in-pc (harmony-cell cells :in-pc 0))
+            (out-pc (harmony-cell cells :out-pc 0))
+            (chord (harmony-cell cells :chord-mask 0))
+            (key-mask (harmony-cell cells :key-mask 0))
+            (in-score (harmony-cell cells :in-score 1))
+            (out-score (harmony-cell cells :out-score 1)))
+        (v-stack :gap 0.25 :width width
+          (h-stack :gap 0.3 :align :center
+            (label (if (= snap 0)
+                     (str (harmony-degree-name out-pc root) " held")
+                     (str (harmony-degree-name in-pc root) " -> " (harmony-degree-name out-pc root)))
+              :width (- width 3.2) :height 1.1 :font-size 10 :bg :transparent
+              :color (if (= snap 0) :foreground :process-lane-accent))
+            (label (harmony-signed snap)
+              :width 3.0 :height 1.1 :font-size 11 :h-align :right :bg :transparent
+              :color (if (= snap 0) :dim :process-lane-accent)))
+          (harmony-snap-bar snap width)
+          (box :width width :height 1.5 :padding 0.1 :corner-radius 3
+            :background-color (rgba 0 0 0 0.3)
+            (linegraph
+              :key (str key "-history")
+              :width :fill :height :fill
+              :values history
+              :total-points (max 8 (len history))
+              :min -6 :max 6
+              :line-color :process-lane-accent
+              :area false))
+          (h-stack :gap 0.05 :align :center
+            (each (range 0 12) |i|
+              (harmony-degree-cell key i root chord key-mask in-pc out-pc snap)))
+          (h-stack :gap 0.3 :align :center
+            (label (if (= snap 0)
+                     (harmony-tier out-score)
+                     (str (harmony-tier in-score) " -> " (harmony-tier out-score)))
+              :width (/ width 2) :height 0.9 :font-size 7.5 :color :dim :bg :transparent)
+            (label (harmony-source-label kind)
+              :width (- (/ width 2) 0.3) :height 0.9 :font-size 7.5 :h-align :right
+              :color :dim :bg :transparent)))))))
+
+;; Scope cells of the process instance whose runtime id is `id` (a graph
+;; node's patch slot: its instance id), or nil before it has fired. Reads
+;; SEQ.process-scope-cells, so call it inside a subtree.
+(def process-scope-cells-for (id)
+  (let ((entries SEQ.process-scope-cells))
+    (if entries
+      (reduce |acc entry| (if (= (get entry :runtime-id) id) (get entry :cells) acc)
+        nil
+        entries)
+      nil)))
 
 ;; ---------------------------------------------------------------------------
 ;; Lane patchbay (docs/default-process-lanes-spec.md, patchbay): every lane of
@@ -2182,13 +2345,16 @@
 
 ;; Node patches (docs/graph-node-processes-spec.md §6): the same patchbay
 ;; drawn over a graph node's process chain. A node target is a cable
-;; namespace at or above `lane-patch-node-base` (1024 + node index, the band
-;; `graph-node-lane-patch` mints port ids in), registered by the panel that
+;; namespace at or above `lane-patch-node-base`, registered by the panel that
 ;; expands the node so every lane-patch-* function can find the graph handle
 ;; behind a namespace and route edits to the graph-node-process-* natives.
+;; The host derives a node's namespace from its graph (instance) id and the
+;; node (`graph-node-patch-namespace`, the band `graph-node-lane-patch` mints
+;; port ids in), so node k of two graphs never shares one
+;; (docs/instance-kinds-spec.md §7).
 (def lane-patch-node-base 1024)
 (def lane-patch-node? (track) (>= track lane-patch-node-base))
-(def lane-patch-node-namespace (node) (+ lane-patch-node-base node))
+(def lane-patch-node-namespace (graph node) (graph-node-patch-namespace graph node))
 ;; (namespace graph node) triples, newest first.
 (defstate lane-patch-node-targets '())
 ;; Bumped after every node-patch edit: the graph natives are not reactive.
@@ -2204,7 +2370,7 @@
 ;; Call from the event that expands a node (never from a render): returns the
 ;; namespace to draw the bay with.
 (def lane-patch-register-node (graph node)
-  (let ((ns (lane-patch-node-namespace node)))
+  (let ((ns (lane-patch-node-namespace graph node)))
     (do
       (set! lane-patch-node-targets
         (append (list (list ns graph node))
@@ -2372,7 +2538,7 @@
                     :inlet (get in-port :name)
                     :source (get reader :source)
                     :fanout-index (get reader :fanout-index)))
-            (status "Cable selected: × removes it"))
+            (status "Cable selected: × or Backspace removes it"))
           nil))
       nil)))
 
@@ -2383,9 +2549,12 @@
     (list (get lane-patch-selected :port-id))
     '()))
 
-(def lane-patch-remove-selected (track)
-  (let ((cable lane-patch-selected))
-    (if cable
+;; Remove `cable` (a lane-patch-selected dict). The × chip passes the cable
+;; it rendered with: its click lands on mouse-down, after the host's
+;; on-patch-miss for that same press has already cleared the selection.
+(def lane-patch-remove-cable (cable)
+  (if cable
+    (let ((track (get cable :track)))
       (let ((writer (lane-patch-entry track (get cable :writer-slot))))
         (do
           (set! lane-patch-selected nil)
@@ -2405,8 +2574,10 @@
                 (if (lane-edit-all?)
                   (seq-clear-process-port-binding track (get writer :instance-id) (get cable :port) :all)
                   (seq-clear-process-port-binding track (get writer :instance-id) (get cable :port)))))
-            nil)))
-      nil)))
+            nil))))
+    nil))
+
+(def lane-patch-remove-selected (track) (lane-patch-remove-cable lane-patch-selected))
 
 (def lane-patch-cable-selected? () (if lane-patch-selected true false))
 (def lane-patch-pending-port () lane-patch-pending)
@@ -2553,10 +2724,11 @@
 
 (def lane-add-close () (set! lane-add-target nil))
 
-;; The default lane classes, in project-layer order (process.rs DEFAULT_LANES).
+;; The default lane classes, in project-layer order (process.rs DEFAULT_LANES),
+;; then lane classes that are only ever added per track (length).
 (def lane-add-default-classes ()
   (list "lane-prob" "lane-reset" "lane-rand" "lane-count" "lane-acc"
-        "lane-grab" "lane-cmp" "lane-veto" "lane-roll"))
+        "lane-grab" "lane-cmp" "lane-veto" "lane-roll" "lane-length"))
 
 ;; Library defs carry their class name as the label; the default lanes read
 ;; better without the `lane-` prefix every def-process name needs.
@@ -2681,12 +2853,13 @@
       (lane-add-body))))
 
 (def lane-patch-remove-button (track)
-  (button "× cable"
-    :key "lane-patch-remove-cable"
-    :height 1.0 :padding 0.2 :font-size 7.5
-    :background-color :transparent :border-color :process-lane-accent
-    :color :process-lane-accent
-    :on-click (lambda (event) (lane-patch-remove-selected track))))
+  (let ((cable lane-patch-selected))
+    (button "× cable"
+      :key "lane-patch-remove-cable"
+      :height 1.0 :padding 0.2 :font-size 7.5
+      :background-color :transparent :border-color :process-lane-accent
+      :color :process-lane-accent
+      :on-click (lambda (event) (lane-patch-remove-cable cable)))))
 
 ;; The patchbay sits under the step sliders and the lane strip, spanning the
 ;; expanded track: one box per lane in fire order (left fires first), so a
@@ -3000,6 +3173,10 @@
                         :h-align :center
                         :font-size 10 :bg :transparent
                         :color :dim)
+                      (box :key (str "expanded-step-length-" track-id "-" i)
+                        :width 2.8 :height 0.3
+                        :background "seqv-slot-length-mark"
+                        :active (bind-seq (str "seqv-slot-length-active-" track-id "-" i)))
                       (subtree :key (str "seqv-expanded-step-playhead-probe-" track-id "-" i)
                         (step-playhead-dot
                           :active (slot-playhead-binding track-id i)))))))
@@ -3813,7 +3990,7 @@
         (h-stack :key (str "rack-clip-run-" gid) :gap 0.4 :align :center :width :fill :flex 1
           ;; Lines the first cell up with the member rows' step grids.
           (box :width 2.2 :height 0.0 :bg :transparent)
-          (box :background-color '(rgba 0.1 0.1 0.1 0.5) :corner-radius 10 :padding 0.2
+          (box :background-color '(rgba 0.1 0.1 0.1 0.2) :corner-radius 10 :padding 0.2
             (wrap :key (str "rack-clip-grid-" gid)
               :width 50 :gap 0.12 :row-gap 0.12 :align :center
               (each clips |clip i|
@@ -3877,6 +4054,8 @@
       (eseq.sample-import/panel))
     (subtree :key "seq-retrospective"
       (eseq.retrospective/panel))
+    (subtree :key "seq-resample"
+      (eseq.resample/panel))
     ;; Lane class picker for the patch bay's + box: a modal only gets pointer
     ;; input through the active tile, so it mounts in this buffer.
     (subtree :key "seq-lane-add"

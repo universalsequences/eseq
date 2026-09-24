@@ -93,6 +93,10 @@ pub(crate) fn expanded_step_slot_playhead_field(track_id: usize, slot: usize) ->
     format!("seqv-slot-playhead-active-{track_id}-{slot}")
 }
 
+pub(crate) fn expanded_step_slot_length_field(track_id: usize, slot: usize) -> String {
+    format!("seqv-slot-length-active-{track_id}-{slot}")
+}
+
 pub(crate) fn expanded_step_slot_cursor_field(track_id: usize, slot: usize) -> String {
     format!("seqv-slot-cursor-active-{track_id}-{slot}")
 }
@@ -401,6 +405,13 @@ pub(crate) fn sync_expanded_step_slot(
     dirty |= rt
         .set_reactive(
             "SEQ",
+            &expanded_step_slot_length_field(viewport.track_id, slot),
+            Value::Bool(track_process_length_step(state, viewport.track) == Some(step)),
+        )
+        .effects_dirty;
+    dirty |= rt
+        .set_reactive(
+            "SEQ",
             &expanded_step_slot_playhead_field(viewport.track_id, slot),
             Value::Bool(visible && step == track_active_playhead_step(state, viewport.track)),
         )
@@ -489,6 +500,27 @@ pub(crate) fn sync_expanded_step_viewport_playhead(
                 "SEQ",
                 &expanded_step_slot_playhead_field(viewport.track_id, slot),
                 Value::Bool(step < num_steps && step == active_step),
+            )
+            .effects_dirty;
+    }
+    dirty
+}
+
+/// Re-mark the expanded viewport's length-lane step (`length!`).
+pub(crate) fn sync_expanded_step_viewport_length(
+    rt: &mut Runtime,
+    state: &Arc<SequencerState>,
+    viewport: ExpandedStepViewport,
+) -> bool {
+    let marker = track_process_length_step(state, viewport.track);
+    let mut dirty = false;
+    for slot in 0..PAGE_SIZE {
+        let step = viewport.page.saturating_mul(PAGE_SIZE).saturating_add(slot);
+        dirty |= rt
+            .set_reactive(
+                "SEQ",
+                &expanded_step_slot_length_field(viewport.track_id, slot),
+                Value::Bool(marker == Some(step)),
             )
             .effects_dirty;
     }
@@ -771,6 +803,48 @@ pub(super) fn track_playhead_row_field(track: usize, row: usize) -> String {
     format!("track-playhead-row-{track}-{row}")
 }
 
+/// Column of the length-lane step in this grid row, or -1 (`length!`).
+pub(crate) fn track_length_row_field(track: usize, row: usize) -> String {
+    format!("track-length-row-{track}-{row}")
+}
+
+/// The step a length lane (`length!`) last set the track's length to, as a
+/// 0-based index, while the transport plays; `None` when no lane drives it.
+pub(crate) fn track_process_length_step(state: &Arc<SequencerState>, track: usize) -> Option<usize> {
+    if !state.transport.playing.load(Ordering::Relaxed) {
+        return None;
+    }
+    let steps = state.transport.track_process_lengths.get(track)?.load(Ordering::Relaxed) as usize;
+    (steps > 0).then(|| steps.min(MAX_STEPS) - 1)
+}
+
+/// Publish every grid row's length-lane column for `track`.
+pub(crate) fn sync_track_length_row_fields(
+    rt: &mut Runtime,
+    state: &Arc<SequencerState>,
+    track: usize,
+) -> bool {
+    let marker = track_process_length_step(state, track);
+    let max_rows = (MAX_STEPS + PAGE_SIZE - 1) / PAGE_SIZE;
+    let mut dirty = false;
+    for row in 0..max_rows {
+        let col = match marker {
+            Some(step) if step / PAGE_SIZE == row => (step % PAGE_SIZE) as f64,
+            _ => -1.0,
+        };
+        dirty |= rt
+            .set_reactive("SEQ", &track_length_row_field(track, row), Value::Number(col))
+            .effects_dirty;
+    }
+    dirty
+}
+
+pub(crate) fn track_process_lengths_snapshot(state: &Arc<SequencerState>, app: &app::App) -> Vec<Option<usize>> {
+    (0..app.tracks.len())
+        .map(|track| track_process_length_step(state, track))
+        .collect()
+}
+
 /// Row-granular companion to [`track_playhead_row_field`]. That field carries the
 /// active column and uses -1 for "inactive", which a widget's float `active` prop
 /// can't read (column 0 is falsy, -1 is truthy). This publishes a plain 0/1 so
@@ -833,6 +907,7 @@ pub(crate) fn sync_all_track_playhead_fields(
         let active_row = active_step / PAGE_SIZE;
         let active_col = active_step % PAGE_SIZE;
         let row_count = track_playhead_row_count(state, track);
+        sync_track_length_row_fields(rt, state, track);
         rt.set_reactive(
             "SEQ",
             &track_playhead_page_field(track),
@@ -888,6 +963,11 @@ pub(crate) fn clear_all_track_playhead_fields(rt: &mut Runtime, app: &app::App) 
             );
         }
         for row in 0..max_rows {
+            rt.set_reactive(
+                "SEQ",
+                &track_length_row_field(track, row),
+                Value::Number(-1.0),
+            );
             rt.set_reactive(
                 "SEQ",
                 &track_playhead_row_field(track, row),

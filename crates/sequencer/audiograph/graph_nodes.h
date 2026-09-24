@@ -54,6 +54,13 @@ void sum_process(float *const *in, float *const *out, int n, void *memory,
 
 // Get the number of inputs for the currently processing node
 int ap_current_node_ninputs(void);
+const float *ap_graph_node_state(uint64_t logical_id, int *out_slots);
+uint32_t ap_current_node_io_generation(void);
+/* Silence propagation for the running kernel; see graph_engine.c. */
+int ap_inputs_silent(void);
+void ap_set_output_silent(int port);
+int ap_output_was_silent(int port);
+void ap_emit_silence(float *const *out, int n);
 
 // ===================== Node VTables =====================
 

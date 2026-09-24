@@ -289,27 +289,17 @@ pub(crate) fn push_project_scratch_to_named_buffer(editor: &mut Editor, app: &ap
     }
 }
 
-/// Bring back every rack-owned graph sequencer the scratch replay did not:
-/// a module the scratch already imports has published as rack-owned during
-/// that replay (its module is in the owner map), so only sources the scratch
-/// does not mention are evaluated here, under their rack.
+/// Bring back every LEGACY rack-owned graph sequencer (a plain script a rack
+/// recorded), each evaluated under its rack. Kind instances never come
+/// through here: they are project data, published once their kind registers
+/// (instance-kinds spec §5), and recorded `(import …)` sources of kind
+/// modules were migrated to instances when the project opened (§10).
 fn replay_rack_sequencer_sources(editor: &mut Editor, app: &app::App) -> Result<(), String> {
-    let scratch_modules: std::collections::HashSet<String> = app
-        .state
-        .scratch_source()
-        .lines()
-        .filter_map(project_script_import_module)
-        .collect();
     let mut failures = Vec::new();
     for group in &app.groups {
         let Some(rack) = group.rack.as_ref() else { continue };
         for sequencer in &rack.sequencers {
             if sequencer.source.trim().is_empty() {
-                continue;
-            }
-            if sequencer::app::rack_sequencer_module(&sequencer.source)
-                .is_some_and(|module| scratch_modules.contains(&module))
-            {
                 continue;
             }
             if let Err(error) = crate::host_commands::evaluate_rack_sequencer_source(

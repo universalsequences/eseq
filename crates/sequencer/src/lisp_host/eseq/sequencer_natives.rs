@@ -813,6 +813,9 @@ pub(in crate::lisp_host) fn register_sequencer_natives_with_accumulators(
         DEF_SEQUENCER_KEYWORDS.iter().copied(),
         move |args, _ctx| register_sequencer_impl(&args, &sequencers_for_register),
     );
+    // Modules that define instance kinds import cleanly here too; the
+    // registration is idempotent, and only the host publishes instances.
+    super::kinds::register_def_kind_native(runtime);
     let sequencers_for_register_alias = Arc::clone(&sequencers);
     runtime.register_native_with_docs(
         "__register-sequencer",
@@ -2988,17 +2991,10 @@ pub fn stable_sequencer_id(name: &str) -> u64 {
     }
 }
 
+/// A graph manifest takes its owner from the legacy rack scope in effect
+/// (`with_graph_owner_rack`), else the project. Which module evaluated the
+/// form no longer matters: kind instances carry their owner as data.
 pub fn published_sequencer_from_def_args(args: &[EValue]) -> Result<PublishedSequencer, String> {
-    published_sequencer_from_def_args_in_module(args, None)
-}
-
-/// [`published_sequencer_from_def_args`] for a `def-sequencer` evaluated
-/// inside `module`; a graph manifest then takes its owner from the module's
-/// recorded rack (`graph_owner_for_module`).
-pub fn published_sequencer_from_def_args_in_module(
-    args: &[EValue],
-    module: Option<&str>,
-) -> Result<PublishedSequencer, String> {
     let name = match args.first() {
         Some(EValue::String(s) | EValue::Symbol(s) | EValue::Keyword(s)) => {
             s.trim_start_matches('@').to_string()
@@ -3006,7 +3002,7 @@ pub fn published_sequencer_from_def_args_in_module(
         _ => return Err("def-sequencer expects a name".to_string()),
     };
     if graph_mode_present(args) {
-        let manifest = parse_graph_manifest_in_module(args, module)?;
+        let manifest = parse_graph_manifest(args)?;
         return Ok(PublishedSequencer {
             id: manifest.id,
             name,

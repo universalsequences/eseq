@@ -5946,7 +5946,7 @@
         );
 
         state.runtime.sampler_lids[last_rack_pool].store(123, Ordering::Relaxed);
-        state.runtime.voice_counts[last_rack_pool].store(1, Ordering::Relaxed);
+        state.runtime.voice_counts.store(last_rack_pool, 1, Ordering::Relaxed);
         state.runtime.voice_lids[last_rack_pool][0].store(456, Ordering::Relaxed);
         state.runtime.synth_node_ids[last_rack_pool][0].store(789, Ordering::Relaxed);
         state.runtime.sampler_gatepitch_node_ids[last_rack_pool][0].store(101, Ordering::Relaxed);
@@ -6027,7 +6027,7 @@
             state.runtime.pan_lids[track].store((track as u64) + 20, Ordering::Relaxed);
             state.runtime.delay_lids[track].store((track as u64) + 30, Ordering::Relaxed);
             state.runtime.send_lids[track].store((track as u64) + 40, Ordering::Relaxed);
-            state.runtime.voice_counts[track].store((track + 1) as u32, Ordering::Relaxed);
+            state.runtime.voice_counts.store(track, (track + 1) as u32, Ordering::Relaxed);
             state.runtime.instrument_type_flags[track].store((track % 2) as u32, Ordering::Relaxed);
             state.runtime.instrument_run_mode_flags[track]
                 .store(run_mode.runtime_flag(), Ordering::Relaxed);
@@ -6111,7 +6111,7 @@
         assert_eq!(state.runtime.pan_lids[1].load(Ordering::Relaxed), 22);
         assert_eq!(state.runtime.delay_lids[1].load(Ordering::Relaxed), 32);
         assert_eq!(state.runtime.send_lids[1].load(Ordering::Relaxed), 42);
-        assert_eq!(state.runtime.voice_counts[1].load(Ordering::Relaxed), 3);
+        assert_eq!(state.runtime.voice_counts.load(1, Ordering::Relaxed), 3);
         assert_eq!(
             state.runtime.instrument_type_flags[1].load(Ordering::Relaxed),
             0

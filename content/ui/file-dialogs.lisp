@@ -8,7 +8,7 @@
 (import eseq.settings)
 (import eseq.customize)
 (export open-confirm panel open-save close-save save-open? save-draft commit-save
-        open-unsaved-prompt close-unsaved-prompt unsaved-prompt-open?
+        open-unsaved-prompt open-unsaved-quit-prompt close-unsaved-prompt unsaved-prompt-open?
         unsaved-prompt-save unsaved-prompt-discard
         open-about close-about about-open?
         open-package-import close-package-import package-import-open?
@@ -23,6 +23,9 @@
 ;; "" or a host command to run after a successful save ("new-project").
 (defstate save-then "")
 (defstate unsaved-prompt-open? false)
+;; What the prompt guards: "new-project" (File > New) or "quit" (window
+;; close / Quit eseq).
+(defstate unsaved-prompt-then "new-project")
 (defstate about-open? false)
 (defstate about-version "")
 
@@ -44,19 +47,27 @@
       (host-command "save-project" (dict :name save-draft :then save-then))
       (close-save))))
 
-;; File > New Project on a project with unsaved changes. Save routes through
-;; the normal save path (naming first when needed) and only then starts the
-;; new project; Don't Save starts it immediately; Cancel does nothing.
-(def open-unsaved-prompt () (set! unsaved-prompt-open? true))
+;; File > New Project, or quitting, on a project with unsaved changes. Save
+;; routes through the normal save path (naming first when needed) and only
+;; then starts the new project / quits; Don't Save does it immediately;
+;; Cancel does nothing.
+(def open-unsaved-prompt ()
+  (set! unsaved-prompt-then "new-project")
+  (set! unsaved-prompt-open? true))
+(def open-unsaved-quit-prompt ()
+  (set! unsaved-prompt-then "quit")
+  (set! unsaved-prompt-open? true))
 (def close-unsaved-prompt () (set! unsaved-prompt-open? false))
 
 (def unsaved-prompt-save ()
   (close-unsaved-prompt)
-  (host-command "project-save-open" (dict :mode "save" :then "new-project")))
+  (host-command "project-save-open" (dict :mode "save" :then unsaved-prompt-then)))
 
 (def unsaved-prompt-discard ()
   (close-unsaved-prompt)
-  (host-command "new-project" (dict)))
+  (if (= unsaved-prompt-then "quit")
+    (host-command "project-quit-confirmed" (dict))
+    (host-command "new-project" (dict))))
 
 (def open-about (version)
   (set! about-version version)
@@ -89,7 +100,10 @@
   (v-stack :width :fill :height :fill :gap 0.5
     (label "Save changes first?" :key "unsaved-prompt-title"
       :font-size 16 :color :white :bg :transparent)
-    (label "Starting a new project discards unsaved changes." :width :fill :wrap true
+    (label (if (= unsaved-prompt-then "quit")
+             "Quitting discards unsaved changes."
+             "Starting a new project discards unsaved changes.")
+      :key "unsaved-prompt-message" :width :fill :wrap true
       :font-size 11 :color :dim :bg :transparent)
     (box :flex 1 :bg :transparent)
     (h-stack :width :fill :gap 0.5

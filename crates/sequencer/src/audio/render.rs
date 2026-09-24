@@ -158,9 +158,9 @@ pub(super) fn compute_host_transport_clock(
 }
 
 pub(super) fn sync_instrument_host_clock_params(data: &mut AudioCallbackData, clock: HostTransportClock) {
-    for engine_id in 0..data.state.runtime.engine_voice_counts.len() {
+    for engine_id in data.state.runtime.engine_voice_counts.live_indices() {
         let voice_count =
-            data.state.runtime.engine_voice_counts[engine_id].load(Ordering::Acquire) as usize;
+            data.state.runtime.engine_voice_counts.load(engine_id, Ordering::Acquire) as usize;
         for voice_idx in 0..voice_count.min(MAX_VOICES) {
             let lid =
                 data.state.runtime.engine_voice_lids[engine_id][voice_idx].load(Ordering::Acquire);
@@ -188,8 +188,8 @@ pub(super) fn sync_instrument_host_clock_params(data: &mut AudioCallbackData, cl
         }
     }
 
-    for pool_id in 0..data.state.runtime.voice_counts.len() {
-        let voice_count = data.state.runtime.voice_counts[pool_id].load(Ordering::Acquire) as usize;
+    for pool_id in data.state.runtime.voice_counts.live_indices() {
+        let voice_count = data.state.runtime.voice_counts.load(pool_id, Ordering::Acquire) as usize;
         for voice_idx in 0..voice_count.min(MAX_VOICES) {
             let gatepitch_id = data.state.runtime.sampler_gatepitch_node_ids[pool_id][voice_idx]
                 .load(Ordering::Acquire);
@@ -222,7 +222,11 @@ pub(super) fn sync_effect_modulator_transport_clock_params(
     data: &mut AudioCallbackData,
     clock: HostTransportClock,
 ) {
-    for chain in &data.state.pattern.effect_chains {
+    // Chains are indexed by track and padded to MAX_TRACKS; only live tracks
+    // can hold effects, and touching every padded slot costs a cold cache
+    // line each block.
+    let live_tracks = data.scheduler_snapshot.transport.num_tracks;
+    for chain in data.state.pattern.effect_chains.iter().take(live_tracks) {
         for slot in chain {
             let modulator_id = slot.modulator_node_id.load(Ordering::Relaxed);
             if modulator_id == 0 {
@@ -283,7 +287,8 @@ pub(super) fn sync_dj_mixer_transport_phase(data: &mut AudioCallbackData, block_
     };
     let beat_phase = crate::effects::dj_mixer::transport_beat_phase(total_beats);
 
-    for chain in &data.state.pattern.effect_chains {
+    let live_tracks = data.scheduler_snapshot.transport.num_tracks;
+    for chain in data.state.pattern.effect_chains.iter().take(live_tracks) {
         for slot in chain {
             let param_idx = slot.transport_phase_param_idx.load(Ordering::Relaxed);
             if param_idx == crate::effects::NO_TRANSPORT_PHASE_PARAM {
@@ -365,3 +370,4 @@ pub(super) fn zero_output_frames(output: &mut [f32], start_frame: usize, num_cha
         output[start..].fill(0.0);
     }
 }
+

@@ -82,6 +82,13 @@ const ST_MOD_DECAY_DEPTH_1: usize = 38;
 const ST_MOD_SIZE_DEPTH_1: usize = 42;
 const ST_MOD_DEPTH_DEPTH_1: usize = 46;
 const ST_MOD_MIX_DEPTH_1: usize = 50;
+/// Frames the input has been silent and the tank below -120 dB
+/// (`effects::tail_sleep`). Runtime only, never a param.
+const ST_QUIET_FRAMES: usize = 54;
+const _: () = assert!(ST_MOD_MIX_DEPTH_1 + 4 <= ST_QUIET_FRAMES && ST_QUIET_FRAMES < GALAXY_RT);
+/// Quiet time before the reverb sleeps: past the 250 ms predelay ceiling plus
+/// the longest tank loop, so nothing audible can still be in flight.
+const TAIL_SLEEP_HOLD_SECONDS: f32 = 1.0;
 
 const GALAXY_RT: usize = 56;
 const PLATE_RT: usize = GALAXY_RT + galaxy::RUNTIME_SLOTS;
@@ -427,6 +434,21 @@ unsafe extern "C" fn reverb_process(
         active_mode = desired_mode;
         fade = 1.0;
     }
+
+    // ── Tail sleep: silent input and a decayed tank skip the whole block ──
+    let input_silent = crate::effects::tail_sleep::inputs_silent(&[in_l, in_r], nf);
+    let sleep_allowed = !decay_modulated
+        && !size_modulated
+        && !depth_modulated
+        && !mix_modulated
+        && desired_mode == active_mode
+        && fade >= 1.0;
+    if sleep_allowed
+        && crate::effects::tail_sleep::asleep(s.add(ST_QUIET_FRAMES), input_silent, fs * TAIL_SLEEP_HOLD_SECONDS)
+    {
+        crate::effects::silence::emit(out, 2, nframes);
+        return;
+    }
     let mut sm_predelay = *s.add(ST_SM_PREDELAY);
     let mut sm_scale = *s.add(ST_SM_SCALE);
     if sm_scale <= 0.0 {
@@ -616,6 +638,9 @@ unsafe extern "C" fn reverb_process(
         }
     }
 
+    // `out` holds the pure tank output here, before the mix can hide it.
+    let tank_peak = crate::effects::tail_sleep::peak(&[out_l, out_r], nf);
+
     // ── Back end: chorus → width → makeup → fade → mix with the untouched dry ──
     // Galaxy's cube mix law and ±1 clamp are part of the legacy identity (old
     // slots load with `mix law` = cube); everything else is a plain linear
@@ -708,6 +733,12 @@ unsafe extern "C" fn reverb_process(
     }
 
     // ── Store shared state ──
+    crate::effects::tail_sleep::note_block(
+        s.add(ST_QUIET_FRAMES),
+        input_silent && sleep_allowed,
+        tank_peak,
+        nf,
+    );
     *s.add(ST_ACTIVE_MODE) = active_mode as f32;
     *s.add(ST_FADE) = fade;
     *s.add(ST_SM_PREDELAY) = sm_predelay;
@@ -976,13 +1007,52 @@ mod tests {
                 state[ST_MODE] = mode;
                 state[ST_MIX] = 1.0;
                 state[ST_DECAY] = decay;
-                let (out_l, _) = impulse_render(&mut state, 3.0, fs);
-                late.push(energy(&out_l[fs * 2..fs * 3]));
+                // Half a second in, every decay is still well above the
+                // -120 dB tail-sleep floor; later windows compare residue.
+                let (out_l, _) = impulse_render(&mut state, 1.0, fs);
+                late.push(energy(&out_l[fs / 2..fs]));
             }
             assert!(
                 late[0] < late[1] && late[1] < late[2],
                 "mode {mode}: late energy not monotonic in decay: {late:?}"
             );
+        }
+    }
+
+    #[test]
+    fn tail_sleep_skips_decayed_silence_and_wakes_on_input() {
+        let fs = 44_100;
+        let mut state = init_state(fs as i32);
+        state[ST_MODE] = MODE_PLATE;
+        state[ST_MIX] = 0.5;
+        state[ST_DECAY] = 0.2;
+        let _ = impulse_render(&mut state, 4.0, fs);
+        assert!(state[ST_QUIET_FRAMES] >= fs as f32 * TAIL_SLEEP_HOLD_SECONDS);
+
+        let before = state.clone();
+        let (ol, or) = process(&mut state, &mut vec![0.0; 256], &mut vec![0.0; 256]);
+        assert!(ol.iter().chain(&or).all(|v| *v == 0.0));
+        assert!(state.iter().zip(&before).all(|(a, b)| a.to_bits() == b.to_bits()), "sleep must not touch state");
+
+        let mut in_l = vec![0.0; 256];
+        let mut in_r = vec![0.0; 256];
+        in_l[0] = 1.0;
+        in_r[0] = 1.0;
+        let (ol, _) = process(&mut state, &mut in_l, &mut in_r);
+        assert!(ol[0] != 0.0, "input must wake the reverb in the same block");
+        assert_eq!(state[ST_QUIET_FRAMES], 0.0);
+    }
+
+    #[test]
+    fn tail_sleep_waits_for_a_ringing_tank_even_at_zero_mix() {
+        let fs = 44_100;
+        for mix in [1.0, 0.0] {
+            let mut state = init_state(fs as i32);
+            state[ST_MODE] = MODE_HALL;
+            state[ST_MIX] = mix;
+            state[ST_DECAY] = 0.95;
+            let _ = impulse_render(&mut state, 3.0, fs);
+            assert_eq!(state[ST_QUIET_FRAMES], 0.0, "mix {mix}: a ringing tank must never count as quiet");
         }
     }
 

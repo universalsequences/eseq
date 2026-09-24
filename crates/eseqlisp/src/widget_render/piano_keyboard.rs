@@ -1,4 +1,4 @@
-//! Read-only piano keyboard activity display.
+//! Piano keyboard activity display, optionally clickable.
 //!
 //! `:notes-by-track` is a list of note-activity lists, indexed by track. Each
 //! activity is a `{:note n :velocity v}` map; bare MIDI-note numbers remain
@@ -10,12 +10,25 @@
 //! A `:trigger-id` change is treated as a new note-on even if that pitch was
 //! already active. Note-on compresses the key; removal from the active set
 //! releases it back to its resting geometry.
+//!
+//! Interaction and annotation props (all optional):
+//! - `:on-click (lambda (info) ...)` makes keys clickable. `info` is the usual
+//!   pointer map (`:shift`, `:cmd`, `:additive-selection`, ...) plus `:note`,
+//!   the MIDI note under the pointer (black keys win where they overlap).
+//! - `:selected-notes` lists MIDI notes drawn with a selection tint.
+//! - `:note-marks` lists `{:note n :color c}` maps drawn as a strip along the
+//!   bottom of each key (e.g. key-lock variant colors).
+//! - `:label-octaves true` prints `C<octave>` on every C key (60 = C4).
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
-use super::{CellBuffer, WidgetDefinition, styled_cell};
-use super::{GpuPrimitive, GpuRectPrimitive, WidgetViewport};
+use std::rc::Rc;
+
+use crossterm::event::{KeyModifiers, MouseButton, MouseEventKind};
+
+use super::{CellBuffer, EventOutput, MouseEventOutcome, WidgetDefinition, WidgetEvent, styled_cell};
+use super::{GpuPrimitive, GpuProportionalTextPrimitive, GpuRectPrimitive, WidgetViewport};
 use crate::backend::Color;
 use crate::layout::{Constraints, LayoutNode, MeasureCtx, Rect, Size, f64_to_f32, get_prop_num};
 use crate::theme;
@@ -372,6 +385,23 @@ fn key_geometry(
     key_count: usize,
     viewport: WidgetViewport,
 ) -> Vec<PianoKeyGeometry> {
+    let white_count = (start_note as usize..start_note as usize + key_count)
+        .filter(|note| !is_black(*note as u8))
+        .count()
+        .max(1);
+    let white_width = rect.width / white_count as f32;
+    let gap = (1.0 / viewport.cell_w.max(1.0)).min(white_width * 0.2);
+    let vertical_inset = (1.0 / viewport.cell_h.max(1.0)).min(rect.height * 0.1);
+    key_geometry_with_gaps(rect, start_note, key_count, gap, vertical_inset)
+}
+
+fn key_geometry_with_gaps(
+    rect: Rect,
+    start_note: u8,
+    key_count: usize,
+    gap: f32,
+    vertical_inset: f32,
+) -> Vec<PianoKeyGeometry> {
     let notes = (start_note as usize..start_note as usize + key_count).map(|note| note as u8);
     let white_count = notes.clone().filter(|note| !is_black(*note)).count();
     if white_count == 0 {
@@ -385,8 +415,6 @@ fn key_geometry(
     let white_width = rect.width / white_count as f32;
     let black_width = white_width * 0.62;
     let black_height = rect.height * 0.64;
-    let gap = (1.0 / viewport.cell_w.max(1.0)).min(white_width * 0.2);
-    let vertical_inset = (1.0 / viewport.cell_h.max(1.0)).min(rect.height * 0.1);
     let mut whites_before = 0usize;
     let mut keys = Vec::with_capacity(key_count);
     for note in notes {
@@ -415,6 +443,63 @@ fn key_geometry(
         });
     }
     keys
+}
+
+/// The key under a point in the widget's own (layout) coordinate space.
+/// Black keys sit on top of the whites they overlap, so they are tested first.
+fn key_at(rect: Rect, start_note: u8, key_count: usize, col: f32, row: f32) -> Option<u8> {
+    let keys = key_geometry_with_gaps(rect, start_note, key_count, 0.0, 0.0);
+    let contains = |key: &&PianoKeyGeometry| {
+        col >= key.rect.col
+            && col < key.rect.col + key.rect.width
+            && row >= key.rect.row
+            && row < key.rect.row + key.rect.height
+    };
+    keys.iter()
+        .filter(|key| key.black)
+        .find(contains)
+        .or_else(|| keys.iter().filter(|key| !key.black).find(contains))
+        .map(|key| key.note)
+}
+
+fn note_list(props: &HashMap<String, Value>, name: &str) -> HashSet<u8> {
+    let Some(Value::List(items)) = props.get(name) else {
+        return HashSet::new();
+    };
+    items
+        .iter()
+        .filter_map(|item| value_number(&item.borrow()))
+        .filter(|note| (0.0..=127.0).contains(note))
+        .map(|note| note.round() as u8)
+        .collect()
+}
+
+fn note_marks(props: &HashMap<String, Value>) -> HashMap<u8, Color> {
+    let Some(Value::List(items)) = props.get("note-marks") else {
+        return HashMap::new();
+    };
+    items
+        .iter()
+        .filter_map(|item| {
+            let Value::Map(mark) = &*item.borrow() else {
+                return None;
+            };
+            let note = mark
+                .get("note")
+                .and_then(|note| value_number(&note.borrow()))?;
+            if !(0.0..=127.0).contains(&note) {
+                return None;
+            }
+            let color = mark
+                .get("color")
+                .and_then(|color| theme::parse_color_value(&color.borrow()))?;
+            Some((note.round() as u8, color))
+        })
+        .collect()
+}
+
+fn octave_label(note: u8) -> String {
+    format!("C{}", note as i32 / 12 - 1)
 }
 
 fn mix_with(color: Color, other: Color, amount: f32) -> Color {
@@ -471,6 +556,48 @@ impl WidgetDefinition for PianoKeyboardWidget {
         Some(Size { width, height })
     }
 
+    fn mouse_event(
+        &self,
+        node: &LayoutNode,
+        mouse_kind: MouseEventKind,
+        local_col: f32,
+        local_row: f32,
+        _drag_start: Option<(f32, f32)>,
+        _gesture: Option<&Value>,
+        modifiers: KeyModifiers,
+        _cell_w: f32,
+        _cell_h: f32,
+    ) -> MouseEventOutcome {
+        if !matches!(mouse_kind, MouseEventKind::Down(MouseButton::Left))
+            || !node.props.contains_key("on-click")
+        {
+            return MouseEventOutcome::Ignore;
+        }
+        let (start_note, key_count) = prop_note_range(&node.props);
+        let Some(note) = key_at(node.rect, start_note, key_count, local_col, local_row) else {
+            return MouseEventOutcome::Ignore;
+        };
+        let mut info = super::pointer_event_info("click", modifiers, node, local_col, local_row);
+        if let Value::Map(map) = &mut info {
+            map.insert(
+                "note".to_string(),
+                Rc::new(RefCell::new(Value::Number(note as f64))),
+            );
+        }
+        MouseEventOutcome::Dispatch(WidgetEvent::Custom(info))
+    }
+
+    fn handle_event(&self, node: &LayoutNode, event: WidgetEvent) -> Option<EventOutput> {
+        let WidgetEvent::Custom(info) = event else {
+            return None;
+        };
+        let callback = node.props.get("on-click")?.clone();
+        Some(EventOutput {
+            callback,
+            args: vec![info],
+        })
+    }
+
     fn tui_render(&self, props: &HashMap<String, Value>, rect: Rect, buf: &mut CellBuffer) {
         let (start_note, key_count) = prop_note_range(props);
         let active = active_note_sources(props);
@@ -511,8 +638,13 @@ impl WidgetDefinition for PianoKeyboardWidget {
         let press_strength = press_strength(&node.props);
         let press_depths = observe_key_activity(node.widget_id, &active, viewport.time_seconds);
         let keys = key_geometry(node.rect, start_note, key_count, viewport);
+        let selected = note_list(&node.props, "selected-notes");
+        let marks = note_marks(&node.props);
+        let label_octaves = super::get_bool_prop(&node.props, "label-octaves", false);
         let white = Color::rgba(0.88, 0.89, 0.91, 1.0);
         let black = Color::rgba(0.055, 0.058, 0.065, 1.0);
+        let selected_white = Color::rgba(1.0, 0.84, 0.42, 1.0);
+        let selected_black = Color::rgba(0.62, 0.44, 0.10, 1.0);
         let chassis = Color::rgba(0.018, 0.020, 0.024, 1.0);
         let mut primitives = vec![GpuPrimitive::Rect(GpuRectPrimitive {
             rect: node.rect,
@@ -523,10 +655,42 @@ impl WidgetDefinition for PianoKeyboardWidget {
             for key in keys.iter().filter(|key| key.black == black_pass) {
                 let key_rect =
                     pressed_key_rect(key.rect, press_depths[key.note as usize], press_strength);
+                let is_selected = selected.contains(&key.note);
                 primitives.push(GpuPrimitive::Rect(GpuRectPrimitive {
                     rect: key_rect,
-                    color: if key.black { black } else { white },
+                    color: match (key.black, is_selected) {
+                        (true, true) => selected_black,
+                        (true, false) => black,
+                        (false, true) => selected_white,
+                        (false, false) => white,
+                    },
                 }));
+                if let Some(mark) = marks.get(&key.note) {
+                    let strip_height = (key_rect.height * 0.14).min(0.5);
+                    primitives.push(GpuPrimitive::Rect(GpuRectPrimitive {
+                        rect: Rect {
+                            row: key_rect.row + key_rect.height - strip_height,
+                            col: key_rect.col,
+                            width: key_rect.width,
+                            height: strip_height,
+                        },
+                        color: *mark,
+                    }));
+                }
+                if label_octaves && key.note % 12 == 0 {
+                    primitives.push(GpuPrimitive::ProportionalText(GpuProportionalTextPrimitive {
+                        row: key_rect.row + key_rect.height - 1.25,
+                        col: key_rect.col,
+                        align_width: key_rect.width,
+                        h_align: 0.5,
+                        text: octave_label(key.note),
+                        font_size: 7.5,
+                        scale: 1.0,
+                        fg: Color::rgba(0.0, 0.0, 0.0, 0.55),
+                        bg: Color::rgba(0.0, 0.0, 0.0, 0.0),
+                        mono: false,
+                    }));
+                }
                 let sources = displayed_sources(&active[key.note as usize], mode);
                 for (index, source) in sources.iter().enumerate() {
                     let segment_width = key_rect.width / sources.len() as f32;
@@ -891,6 +1055,139 @@ mod tests {
             !activity_alphas.contains(&0.4),
             "the quieter colliding source must not emit a stripe"
         );
+    }
+
+    fn clickable_node() -> LayoutNode {
+        LayoutNode {
+            widget_id: 77,
+            stable_widget_id: None,
+            subtree_root_id: None,
+            parent_subtree_root_id: None,
+            stable_key: None,
+            widget_type: "piano-keyboard".to_string(),
+            // One octave from C4: 7 white keys, 1 cell each.
+            rect: Rect {
+                row: 10.0,
+                col: 5.0,
+                width: 7.0,
+                height: 4.0,
+            },
+            props: HashMap::from([
+                ("start-note".to_string(), Value::Number(60.0)),
+                ("key-count".to_string(), Value::Number(12.0)),
+                ("on-click".to_string(), Value::Symbol("cb".to_string())),
+            ]),
+            children: Vec::new(),
+            focusable: false,
+            animation: Default::default(),
+        }
+    }
+
+    #[test]
+    fn hit_test_prefers_black_keys_over_the_whites_they_overlap() {
+        let node = clickable_node();
+        let (start, count) = prop_note_range(&node.props);
+        // Upper half on the C/D boundary is C#; lower half is the white key.
+        assert_eq!(key_at(node.rect, start, count, 5.95, 10.5), Some(61));
+        assert_eq!(key_at(node.rect, start, count, 5.95, 13.5), Some(60));
+        assert_eq!(key_at(node.rect, start, count, 6.5, 13.5), Some(62));
+        assert_eq!(key_at(node.rect, start, count, 11.5, 13.5), Some(71));
+        assert_eq!(key_at(node.rect, start, count, 4.0, 13.5), None);
+    }
+
+    #[test]
+    fn click_dispatches_note_and_modifiers_to_on_click() {
+        let node = clickable_node();
+        let outcome = PIANO_KEYBOARD_WIDGET.mouse_event(
+            &node,
+            MouseEventKind::Down(MouseButton::Left),
+            6.5,
+            13.5,
+            None,
+            None,
+            KeyModifiers::SHIFT,
+            10.0,
+            20.0,
+        );
+        let MouseEventOutcome::Dispatch(event) = outcome else {
+            panic!("click on a key must dispatch");
+        };
+        let output = PIANO_KEYBOARD_WIDGET
+            .handle_event(&node, event)
+            .expect("on-click output");
+        let Value::Map(info) = &output.args[0] else {
+            panic!("info map");
+        };
+        assert!(matches!(&*info["note"].borrow(), Value::Number(n) if *n == 62.0));
+        assert!(matches!(&*info["shift"].borrow(), Value::Bool(true)));
+
+        let mut passive = clickable_node();
+        passive.props.remove("on-click");
+        assert!(matches!(
+            PIANO_KEYBOARD_WIDGET.mouse_event(
+                &passive,
+                MouseEventKind::Down(MouseButton::Left),
+                6.5,
+                13.5,
+                None,
+                None,
+                KeyModifiers::empty(),
+                10.0,
+                20.0,
+            ),
+            MouseEventOutcome::Ignore
+        ));
+    }
+
+    #[test]
+    fn selection_and_marks_tint_keys() {
+        let mut node = clickable_node();
+        node.props.insert(
+            "selected-notes".to_string(),
+            list(vec![Value::Number(62.0)]),
+        );
+        node.props.insert(
+            "note-marks".to_string(),
+            list(vec![Value::Map(HashMap::from([
+                ("note".to_string(), Rc::new(RefCell::new(Value::Number(64.0)))),
+                (
+                    "color".to_string(),
+                    Rc::new(RefCell::new(list(vec![
+                        Value::Number(0.0),
+                        Value::Number(1.0),
+                        Value::Number(0.0),
+                    ]))),
+                ),
+            ]))]),
+        );
+        node.props.insert("label-octaves".to_string(), Value::Bool(true));
+        let viewport = WidgetViewport {
+            cell_w: 10.0,
+            cell_h: 20.0,
+            vp_w: 1000.0,
+            vp_h: 400.0,
+            time_seconds: 0.0,
+            focused_widget_id: None,
+            focused_branch: false,
+            overlay_viewport_bottom: 20.0,
+            scroll_top: 0.0,
+            scroll_left: 0.0,
+            inherited_hover: false,
+        };
+        let primitives = PIANO_KEYBOARD_WIDGET.build_primitives("piano-keyboard", &node, viewport);
+        let colors: Vec<Color> = primitives
+            .iter()
+            .filter_map(|primitive| match primitive {
+                GpuPrimitive::Rect(rect) => Some(rect.color),
+                _ => None,
+            })
+            .collect();
+        assert!(colors.contains(&Color::rgba(1.0, 0.84, 0.42, 1.0)));
+        assert!(colors.contains(&Color::rgba(0.0, 1.0, 0.0, 1.0)));
+        assert!(primitives.iter().any(|primitive| matches!(
+            primitive,
+            GpuPrimitive::ProportionalText(text) if text.text == "C4"
+        )));
     }
 
     #[test]

@@ -152,6 +152,39 @@ unsafe extern "C" fn stereo_panner_process(
     };
 
     let event_count = (*s.add(STATE_EVENT_COUNT) as usize).min(STEREO_PANNER_TIMELINE_CAPACITY);
+    // Settled: no timeline events and each smoother already at its fixed
+    // point (`s + c·(t − s) == s`, which float rounding reaches even when `s`
+    // never equals `t`). Every per-sample update below would then be the
+    // identity, so a constant-gain pass is bit-identical and vectorizes.
+    let settled = rendered
+        && event_count == 0
+        && smooth_l + smooth_coeff * (target_l - smooth_l) == smooth_l
+        && smooth_r + smooth_coeff * (target_r - smooth_r) == smooth_r;
+    if settled && super::silence::inputs_silent() {
+        // Silent in, settled gain: silent out. Peaks only decay.
+        super::silence::emit(out, 2, nframes);
+        *s.add(STATE_PEAK_L) = prev_peak_l * 0.92;
+        *s.add(STATE_PEAK_R) = prev_peak_r * 0.92;
+        return;
+    }
+    if settled {
+        let nf = nframes.max(0) as usize;
+        let (src_l, src_r) = (
+            std::slice::from_raw_parts(in0 as *const f32, nf),
+            std::slice::from_raw_parts(in1 as *const f32, nf),
+        );
+        for i in 0..nf {
+            let sample_l = src_l[i] * smooth_l;
+            let sample_r = src_r[i] * smooth_r;
+            *out0.add(i) = sample_l;
+            *out1.add(i) = sample_r;
+            peak_l = peak_l.max(sample_l.abs());
+            peak_r = peak_r.max(sample_r.abs());
+        }
+        *s.add(STATE_PEAK_L) = peak_l.max(prev_peak_l * 0.92);
+        *s.add(STATE_PEAK_R) = peak_r.max(prev_peak_r * 0.92);
+        return;
+    }
     let mut next_event = 0;
     for i in 0..nframes as usize {
         let first_event = next_event;
@@ -218,6 +251,39 @@ mod tests {
         let mut state = vec![0.0; STEREO_PANNER_STATE_SIZE];
         unsafe { stereo_panner_init(state.as_mut_ptr().cast(), 48000, 128, std::ptr::null()); }
         state
+    }
+
+    #[test]
+    fn settled_gain_pass_matches_the_per_sample_smoother() {
+        let mut state = state();
+        state[STATE_VOLUME] = 0.7;
+        state[STATE_PAN] = -0.3;
+        let _ = render(&mut state, 48_000);
+        let (smooth_l, smooth_r) = (state[STATE_SMOOTH_L], state[STATE_SMOOTH_R]);
+        let coeff = 1.0 - (-2.0 * std::f32::consts::PI * 60.0 / 48_000.0f32).exp();
+        let (target_l, target_r) = balance_gains_for(0.7, -0.3);
+        assert_eq!(smooth_l + coeff * (target_l - smooth_l), smooth_l, "smoother should have settled");
+        assert_eq!(smooth_r + coeff * (target_r - smooth_r), smooth_r);
+
+        let frames = 300;
+        let mut in_l: Vec<f32> = (0..frames).map(|i| ((i * 7919) % 1000) as f32 / 500.0 - 1.0).collect();
+        let mut in_r: Vec<f32> = in_l.iter().rev().copied().collect();
+        let mut out_l = vec![0.0f32; frames];
+        let mut out_r = vec![0.0f32; frames];
+        let inputs = [in_l.as_mut_ptr(), in_r.as_mut_ptr()];
+        let outputs = [out_l.as_mut_ptr(), out_r.as_mut_ptr()];
+        unsafe {
+            stereo_panner_process(inputs.as_ptr(), outputs.as_ptr(), frames as c_int,
+                state.as_mut_ptr().cast(), std::ptr::null_mut());
+        }
+        for i in 0..frames {
+            assert_eq!(out_l[i].to_bits(), (in_l[i] * smooth_l).to_bits());
+            assert_eq!(out_r[i].to_bits(), (in_r[i] * smooth_r).to_bits());
+        }
+        assert_eq!(state[STATE_SMOOTH_L], smooth_l);
+        assert_eq!(state[STATE_SMOOTH_R], smooth_r);
+        let peak_l = in_l.iter().map(|v| (v * smooth_l).abs()).fold(0.0f32, f32::max);
+        assert!(state[STATE_PEAK_L] >= peak_l);
     }
 
     fn render(state: &mut [f32], frames: usize) -> Vec<[f32; 2]> {

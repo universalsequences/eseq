@@ -74,11 +74,25 @@ pub(crate) fn declared_effect_latency_samples(source: &str, sample_rate: u32) ->
 }
 
 // -- eseqlisp: live-coding / sequencing natives --
-pub use eseq::graph_authoring::register_graph_authoring_natives;
+pub use eseq::graph_authoring::{
+    GRAPH_NODE_LANE_PATCH_NAMESPACE_BASE, GRAPH_READ_REACTIVE_NAMESPACE,
+    GraphNodeProcessReminter, graph_node_lane_patch_namespace, queue_graph_read_invalidations,
+    register_graph_authoring_natives,
+};
 pub use eseq::graph_manifest::{
-    current_graph_owner_rack, graph_instance_id, graph_mode_present, graph_owner_for_module,
-    parse_graph_manifest, parse_graph_manifest_in_module, rack_owner_for_module,
-    set_rack_owner_modules, with_graph_owner_rack,
+    current_graph_owner_rack, graph_instance_id, graph_mode_present, parse_graph_manifest,
+    parse_graph_manifest_owned, with_graph_owner_rack,
+};
+pub use eseq::kinds::{
+    DEF_KIND_DOCS, DEF_KIND_KEYWORDS, DEF_KIND_SIGNATURE, DeclaredKind, KindDefinition,
+    SCRATCH_KIND_PACKAGE, declared_kinds_for_module, declared_module_for_kind,
+    check_manifest_kinds, clear_kind_registry, drop_all_instance_records, instance_owner_value,
+    instance_published_sequencer, instance_sequencer_name, sync_instance_records, kind_id,
+    kind_name_of, kind_package_of, kind_registry_version,
+    kinds_defined_in_module, package_name_for_module, parse_def_kind, register_def_kind_native,
+    kind_is_registered, register_kind, registered_kind, registered_kinds, unregister_module_kinds,
+    InstanceView, InstanceViewChange, desired_instance_views, instance_key_scope,
+    instance_view_buffer_name, run_instance_on_create, sync_instance_view_buffers,
 };
 use eseq::graph_update; // qualified `graph_update::` calls in shared_state/process_natives
 use eseq::graph_update::{CompiledGraphUpdate, SharedGraphNodeContext};

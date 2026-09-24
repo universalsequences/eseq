@@ -153,6 +153,15 @@
 ;; "Attach … to rack" hands it to the rack (routes become rack members, and
 ;; the pair travels together into kits), and "Detach …" gives it back
 ;; (docs/rack-clips-and-break-kits-spec.md §5.1).
+;; An instance's sequencer shows the instance's label; a legacy script its
+;; published name.
+(def graph-sequencer-label (graph)
+  (let ((hits (filter (lambda (instance) (= (get instance :id) (get graph :id)))
+                (or SEQ.instances (list)))))
+    (if (> (len hits) 0)
+      (get (nth hits 0) :label)
+      (get graph :name))))
+
 (def rack-group-menu-actions (gid)
   (append
     (append
@@ -164,21 +173,35 @@
       (if (eseq.drum-rack-v2/has-clips? gid)
         (list (dict :id :save-rack-clip :label "Save clip as..."))
         (list (dict :id :convert-to-clips :label "Convert to clips"))))
-    (map
-      (lambda (graph)
-        (if (= (get graph :owner-rack) gid)
-          (dict :id :detach-sequencer
-                :sequencer-id (get graph :id)
-                :sequencer-name (get graph :name)
-                :label (str "Detach " (get graph :name)))
-          (dict :id :move-sequencer-into-rack
-                :sequencer-id (get graph :id)
-                :sequencer-name (get graph :name)
-                :label (str "Attach " (get graph :name) " to rack"))))
-      (filter (lambda (graph)
-                (or (= (get graph :owner-rack) nil)
-                    (= (get graph :owner-rack) gid)))
-        (or SEQ.graph-sequencers (list))))
+    (append
+      ;; The kind picker (docs/instance-kinds-spec.md §8.3): a new instance
+      ;; of any kind, owned by this rack. The host attaches the kind's
+      ;; package to the project first when it is not yet.
+      (map
+        (lambda (kind)
+          (dict :id :new-rack-instance
+                :key (str "new-" (get kind :id))
+                :kind-id (get kind :id)
+                :module (get kind :module)
+                :label (str "New " (get kind :name) " in rack")))
+        (seq-instance-kinds))
+      (map
+        (lambda (graph)
+          (if (= (get graph :owner-rack) gid)
+            (dict :id :detach-sequencer
+                  :key (str "detach-" (get graph :id))
+                  :sequencer-id (get graph :id)
+                  :sequencer-name (get graph :name)
+                  :label (str "Detach " (graph-sequencer-label graph)))
+            (dict :id :move-sequencer-into-rack
+                  :key (str "attach-" (get graph :id))
+                  :sequencer-id (get graph :id)
+                  :sequencer-name (get graph :name)
+                  :label (str "Attach " (graph-sequencer-label graph) " to rack"))))
+        (filter (lambda (graph)
+                  (or (= (get graph :owner-rack) nil)
+                      (= (get graph :owner-rack) gid)))
+          (or SEQ.graph-sequencers (list)))))
     (list
       ;; Break kits (docs/rack-clips-and-break-kits-spec.md 7.2): the kit save
       ;; panel, which carries a scene checklist for the clip bank.
@@ -1239,6 +1262,13 @@
               (set! track-menu-open false)
               (eseq.browser/enter-kit-save track-menu-group-id
                 (get (nth SEQ.groups (group-index-by-id track-menu-group-id)) :name)))
+          (if (= (get action :id) :new-rack-instance)
+            (do
+              (set! track-menu-open false)
+              (host-command "packages-new-instance"
+                (dict :module (get action :module)
+                      :kind (get action :kind-id)
+                      :group-id track-menu-group-id)))
           (if (= (get action :id) :move-sequencer-into-rack)
             (do
               (set! track-menu-open false)
@@ -1260,16 +1290,19 @@
                   (do
                     (set! track-menu-open false)
                     (eseq.drum-rack-v2/save-clip-as track-menu-group-id ""))
-                  nil))))))))))
+                  nil)))))))))))
 
 (def track-context-menu ()
   (context-menu :is-open track-menu-open
     :anchor-col track-menu-col
     :anchor-row track-menu-row
     :on-close (lambda () (set! track-menu-open false))
-    (each (track-context-menu-actions) |action|
+    ;; Build the items only while the menu is open: the rack branch asks the
+    ;; host for its kind list (`seq-instance-kinds`), which a closed menu
+    ;; must not pay for (or depend on) on every mixer render.
+    (each (if track-menu-open (track-context-menu-actions) (list)) |action|
       (menu-item (get action :label)
-        :key (str "track-menu-" (get action :id))
+        :key (str "track-menu-" (get action :id) (or (get action :key) ""))
         :on-select (lambda (event) (select-track-menu-action action))))))
 
 (def rename-input (key width font-size value on-change on-submit on-cancel)

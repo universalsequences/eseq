@@ -1106,19 +1106,13 @@ unsafe extern "C" fn dgenlisp_instrument_wrapper_process(
             .load(Ordering::Acquire)
             .min(MAX_VOICES);
         if voice_idx >= enabled {
-            let nf = nframes as usize;
             let output_count = DGEN_INSTRUMENT_OUTPUT_COUNTS[slot_id % INSTRUMENT_REGISTRY_SIZE]
                 .load(Ordering::Acquire)
                 .max(1);
             if !out.is_null() {
-                for ch in 0..output_count {
-                    let out_ch = *out.add(ch);
-                    if !out_ch.is_null() {
-                        for i in 0..nf {
-                            *out_ch.add(i) = 0.0;
-                        }
-                    }
-                }
+                // An idle voice is silent: zero once, then let downstream
+                // routes skip it (silence propagation).
+                crate::effects::silence::emit(out, output_count, nframes);
             }
             return;
         }

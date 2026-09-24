@@ -731,6 +731,8 @@ impl SchedulerDriver {
             // (the skipped-first-trigger bug).
             let previous_scheduled_until = self.scheduled_until_sample;
             queue.clear();
+            // The new pattern's authored lengths govern (`length!`).
+            self.lookahead_state.clock.clear_pattern_lengths();
             self.lookahead_state.midi_fx_quantizer_state.reset();
             self.lookahead_state.clock.seek_to_rendered_position(&snapshot, rendered, previous_scheduled_until);
             self.scheduled_until_sample = rendered;

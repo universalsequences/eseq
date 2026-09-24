@@ -68,20 +68,6 @@
            nil)
          (target-add! acc)))
 
-(def-process follow-harmony
-  :doc "Move the current note toward the previous-tick pitch field. Missing publishers are inert; amount is sequenceable obedience."
-  :target (step-param :transpose)
-  :in ((listen :field :default :harmony)
-       (amount :float 0 1 :default 1 :lane true)
-       (grace :int 0 3 :default 0))
-  :run (let ((field (hear (in :listen))))
-         (if field
-           (target-add!
-             (* (in :amount)
-                (field-weight field)
-                (field-nearest-delta field (current-note) (in :grace))))
-           nil)))
-
 ;; ---------------------------------------------------------------------------
 ;; Default project lanes (docs/default-process-lanes-spec.md).
 ;;
@@ -344,10 +330,25 @@
          (roll! (in :rate))
          nil))
 
-;; Harmony by track: the lane-UI cousin of `follow-harmony`. Where that one
-;; listens to a named channel some scripted publisher must `suggest` into,
-;; this one points at a source track like grab/xpose do and reads the step
-;; the source is currently on, same tick: its chord (or single note) and the
+;; Pattern length: the own-track `length!` the default-lanes spec deferred.
+;; Pull, never push: a lane only ever sets the length of the track it runs
+;; on. The change is scheduler-side and lands at the end of the current
+;; cycle, so a pattern always finishes before it changes; under the Prh
+;; timebase a cycle is exactly one bar, which turns `rand -> length` into a
+;; bar-by-bar polyrhythm generator. The authored length (the *track* steps
+;; picker) is never written; Stop or a pattern switch restores it.
+(def-process lane-length
+  :doc "Length lane: a nonzero step sets this track's pattern length to that many steps from the end of the current cycle; 0 leaves it alone. Wire rand or count into steps for algorithmic lengths. Under the Prh timebase every cycle is one bar, so each bar plays its own subdivision. The authored length is untouched: Stop or a pattern switch restores it."
+  :in ((steps :int 0 64 :default 0 :lane true))
+  :state ((len 0))
+  :run (if (>= (in :steps) 1)
+         (do
+           (set! len (floor (+ (in :steps) 0.5)))
+           (length! len))
+         nil))
+
+;; Harmony by track: points at a source track like grab/xpose do and reads
+;; the step the source is currently on, same tick: its chord (or single note) and the
 ;; key its whole pattern implies (the union of every pitch it authors, or
 ;; the scale its chord quality suggests when that set is thin).
 ;;
@@ -365,23 +366,61 @@
 ;; changes harmonizes every follower step. Before the source has played any
 ;; step the read is nil and the step plays untouched. Both tracks' pitches
 ;; are taken relative to their own roots, as with grab.
+;;
+;; A source with no step pattern (a track only graph nodes or processes
+;; play) is followed by what its instrument is actually sent instead: the
+;; :output reads, after its MIDI FX and fit-to-scale. The chord is what is
+;; sounding (lowest pitch as root), the key what it sounded over four bars.
+;; Output is seen once enqueued, so a follower firing on the very boundary
+;; its source changes chord may hear the previous chord for that one note.
 (def-process lane-harmony
-  :doc "Harmony lane: hold this step's note to the chord and key of the source track's current step, same tick; empty source steps hold the last chord that played. Amount is strictness: 1 chord tones only, ~0.5 anything in key, ~0.3 anything but clashes, 0 free. A note that fails snaps to the nearest pitch class that passes. Grace is a dead zone in semitones. On a graph node patch a negative source -(k+1) follows neuron k instead: its last note is the chord, its recent notes the key."
+  :doc "Harmony lane: hold this step's note to the chord and key of the source track's current step, same tick; empty source steps hold the last chord that played. A source with no step pattern (driven only by neurons or processes) is followed by what its instrument actually sounds, after MIDI FX. Amount is strictness: 1 chord tones only, ~0.5 anything in key, ~0.3 anything but clashes, 0 free. A note that fails snaps to the nearest pitch class that passes. Grace is a dead zone in semitones. On a graph node patch a negative source -(k+1) follows neuron k instead: its last note is the chord, its recent notes the key."
   :target (step-param :transpose)
   :in ((amount :float 0 1 :default 1 :lane true)
        (source :track :default 0)
        (grace :int 0 3 :default 0))
-  :run (let ((from-neuron (< (in :source) 0))
-             (src (if (< (in :source) 0)
-                    (read (neuron (- -1 (in :source)) :chord))
-                    (read (track (in :source) :chord :pattern)))))
-         (if (= src nil)
+;; The last fire's decision, for the card's snap meter (scope history per
+  ;; cell): the move, the pitch classes either side of it, the chord and key
+  ;; it was judged against (bit masks) and their tier scores. source-kind:
+  ;; 0 no source yet, 1 pattern, 2 sounded output, 3 neuron. `analysis` parks
+  ;; the whole map between the writes: state writes stay at the top level of
+  ;; the body (a `set!` inside a nested `let` does not reach the cell).
+  :state ((snap 0) (in-pc 0) (out-pc 0) (root 0) (chord-mask 0) (key-mask 0)
+          (in-score 1) (out-score 1) (source-kind 0) (analysis nil))
+  :run (do
+         (set! source-kind
+           (if (< (in :source) 0)
+             3
+             (if (= (read (track (in :source) :chord :pattern)) nil)
+               (if (= (read (track (in :source) :chord :output)) nil) 0 2)
+               1)))
+         (set! analysis
+           (if (= source-kind 0)
+             nil
+             (harmonic-analysis
+               (if (= source-kind 3)
+                 (read (neuron (- -1 (in :source)) :chord))
+                 (if (= source-kind 2)
+                   (read (track (in :source) :chord :output))
+                   (read (track (in :source) :chord :pattern))))
+               (if (= source-kind 3)
+                 (read (neuron (- -1 (in :source)) :key))
+                 (if (= source-kind 2)
+                   (read (track (in :source) :key :output))
+                   (read (track (in :source) :key :pattern))))
+               (current-note)
+               (in :amount)
+               (in :grace))))
+         (if (= analysis nil) (set! source-kind 0) nil)
+         (set! snap (if (= analysis nil) 0 (get analysis :delta)))
+         (if (= analysis nil)
            nil
-           (target-add!
-             (harmonic-snap src
-                            (if from-neuron
-                              (read (neuron (- -1 (in :source)) :key))
-                              (read (track (in :source) :key :pattern)))
-                            (current-note)
-                            (in :amount)
-                            (in :grace))))))
+           (do
+             (set! in-pc (get analysis :in-pc))
+             (set! out-pc (get analysis :out-pc))
+             (set! root (get analysis :root))
+             (set! chord-mask (get analysis :chord-mask))
+             (set! key-mask (get analysis :key-mask))
+             (set! in-score (get analysis :in-score))
+             (set! out-score (get analysis :out-score))))
+         (if (= analysis nil) nil (target-add! (get analysis :delta)))))

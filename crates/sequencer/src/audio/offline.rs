@@ -152,7 +152,7 @@ mod tests {
         let runtime = &engine.state.runtime;
         runtime.instrument_type_flags[0].store(InstrumentType::Sampler.runtime_flag(), Ordering::Relaxed);
         runtime.sampler_lids[0].store(node.logical_id, Ordering::Relaxed);
-        runtime.voice_counts[0].store(1, Ordering::Relaxed);
+        runtime.voice_counts.store(0, 1, Ordering::Relaxed);
         runtime.voice_lids[0][0].store(node.logical_id, Ordering::Relaxed);
         runtime.synth_node_ids[0][0].store(node.node_id as u32, Ordering::Relaxed);
         engine.state.toggle_step_and_clear_plocks(0, 0);

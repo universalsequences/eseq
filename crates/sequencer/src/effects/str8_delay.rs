@@ -55,7 +55,10 @@ const STATE_MOD_CUTOFF_DEPTH_1: usize = 48;
 const STATE_MOD_CUTOFF_DEPTH_2: usize = 49;
 const STATE_MOD_CUTOFF_DEPTH_3: usize = 50;
 const STATE_MOD_CUTOFF_DEPTH_4: usize = 51;
-const STATE_BUF_OFFSET: usize = 52;
+/// Frames the input and every delay-line write have stayed quiet
+/// (`effects::tail_sleep`). Runtime only, never a param.
+const STATE_QUIET_FRAMES: usize = 52;
+const STATE_BUF_OFFSET: usize = 53;
 const STATE_BUF_R_OFFSET: usize = STATE_BUF_OFFSET + MAX_DELAY_SAMPLES;
 const STATE_END: usize = STATE_BUF_OFFSET + MAX_DELAY_SAMPLES * 2;
 
@@ -268,7 +271,7 @@ unsafe extern "C" fn str8_delay_init(
     *s.add(STATE_HP_Z2_R) = 0.0;
     *s.add(STATE_LP_Z1_R) = 0.0;
     *s.add(STATE_LP_Z2_R) = 0.0;
-    for i in STATE_MOD_TIME_DEPTH_1..STATE_BUF_OFFSET {
+    for i in STATE_MOD_TIME_DEPTH_1..STATE_BUF_OFFSET {  // includes STATE_QUIET_FRAMES
         *s.add(i) = 0.0;
     }
     for i in STATE_BUF_OFFSET..STATE_END {
@@ -304,6 +307,16 @@ unsafe extern "C" fn str8_delay_process(
         *s.add(STATE_LP_Z2_R) = 0.0;
         return;
     }
+
+    // Once the input is silent and nothing audible has been written for a
+    // whole buffer length, the line holds only decayed residue: every read,
+    // whatever the delay time, wet or modulation, is inaudible. Sleep.
+    let input_silent = super::tail_sleep::inputs_silent(&[in0, in1], nf);
+    if super::tail_sleep::asleep(s.add(STATE_QUIET_FRAMES), input_silent, MAX_DELAY_SAMPLES as f32) {
+        super::silence::emit(out, 2, nframes);
+        return;
+    }
+    let mut write_peak = 0.0f32;
 
     let sr = super::safe_sample_rate(*s.add(STATE_SAMPLE_RATE));
     let bpm = *s.add(STATE_BPM);
@@ -440,8 +453,15 @@ unsafe extern "C" fn str8_delay_process(
             .map(|(input, depth)| (*input.add(i)).clamp(0.0, 1.0) * depth)
             .sum::<f32>();
         let feedback = (smooth_feedback + feedback_mod).clamp(0.0, 0.95);
-        *buf_l.add(write_pos_l) = input_l + filtered_l * feedback;
-        *buf_r.add(write_pos_r) = input_r + filtered_r * feedback;
+        let written_l = input_l + filtered_l * feedback;
+        let written_r = input_r + filtered_r * feedback;
+        *buf_l.add(write_pos_l) = written_l;
+        *buf_r.add(write_pos_r) = written_r;
+        // `!(x <= peak)` also catches NaN, which must never read as quiet.
+        let written = written_l.abs().max(written_r.abs());
+        if !(written <= write_peak) {
+            write_peak = if written.is_nan() { f32::INFINITY } else { written };
+        }
 
         let wet_mod = mod_inputs
             .iter()
@@ -456,6 +476,7 @@ unsafe extern "C" fn str8_delay_process(
         write_pos_r = (write_pos_r + 1) % MAX_DELAY_SAMPLES;
     }
 
+    super::tail_sleep::note_block(s.add(STATE_QUIET_FRAMES), input_silent, write_peak, nf);
     *s.add(STATE_SMOOTH_WET) = smooth_wet;
     *s.add(STATE_SMOOTH_FEEDBACK) = smooth_feedback;
     *s.add(STATE_SMOOTH_LEFT_SAMPLES) = smooth_left;
@@ -494,6 +515,7 @@ mod tests {
         STATE_MOD_TIME_DEPTH_1, STATE_MOD_WET_DEPTH_1, STATE_RIGHT_SYNC, STATE_RIGHT_TIME_MS,
         STATE_SMOOTH_FEEDBACK, STATE_SMOOTH_FILTER_FREQ, STATE_SMOOTH_LEFT_SAMPLES,
         STATE_SMOOTH_RIGHT_SAMPLES, STATE_SMOOTH_WET, STATE_WET, STR8_DELAY_STATE_SIZE,
+        MAX_DELAY_SAMPLES, STATE_QUIET_FRAMES,
     };
     use std::ffi::c_void;
 
@@ -530,6 +552,93 @@ mod tests {
         }
 
         out_l
+    }
+
+    /// Render `frames` in 512-frame blocks, impulse at frame 0.
+    fn render_blocks(state: &mut [f32], frames: usize) -> Vec<f32> {
+        let mut rendered = Vec::with_capacity(frames * 2);
+        let mut done = 0;
+        while done < frames {
+            let n = 512.min(frames - done);
+            let mut left = vec![0.0_f32; n];
+            if done == 0 {
+                left[0] = 1.0;
+            }
+            let mut right = left.clone();
+            let mut mods: [Vec<f32>; 4] = std::array::from_fn(|_| vec![0.0; n]);
+            let [m1, m2, m3, m4] = &mut mods;
+            let inputs = [
+                left.as_mut_ptr(),
+                right.as_mut_ptr(),
+                m1.as_mut_ptr(),
+                m2.as_mut_ptr(),
+                m3.as_mut_ptr(),
+                m4.as_mut_ptr(),
+            ];
+            let mut out_l = vec![f32::NAN; n];
+            let mut out_r = vec![f32::NAN; n];
+            let outputs = [out_l.as_mut_ptr(), out_r.as_mut_ptr()];
+            unsafe {
+                str8_delay_process(
+                    inputs.as_ptr(),
+                    outputs.as_ptr(),
+                    n as i32,
+                    state.as_mut_ptr().cast::<c_void>(),
+                    std::ptr::null_mut(),
+                );
+            }
+            rendered.extend(out_l.into_iter().chain(out_r));
+            done += n;
+        }
+        rendered
+    }
+
+    #[test]
+    fn tail_sleep_keeps_a_long_echo_in_flight() {
+        // A 1.9 s echo spends most of its life silent inside the line; the
+        // delay must not sleep before it comes back out.
+        let mut state = initialized_state(1900.0, 1.0, 0.0, 1140.0);
+        let out = render_blocks(&mut state, (SAMPLE_RATE as usize * 21) / 10);
+        let echo_start = (SAMPLE_RATE as usize * 18) / 10 * 2;
+        let echo_peak = out[echo_start..].iter().fold(0.0f32, |peak, v| peak.max(v.abs()));
+        assert!(echo_peak > 1.0e-3, "echo lost: peak {echo_peak}");
+    }
+
+    #[test]
+    fn tail_sleep_silences_a_drained_line_without_touching_state() {
+        let mut state = initialized_state(100.0, 0.5, 0.3, 1140.0);
+        let _ = render_blocks(&mut state, MAX_DELAY_SAMPLES + SAMPLE_RATE as usize);
+        assert!(state[STATE_QUIET_FRAMES] >= MAX_DELAY_SAMPLES as f32);
+        let before = state.clone();
+        let mut silent = vec![0.0f32; 512];
+        let mut silent_r = silent.clone();
+        let mut mods: [Vec<f32>; 4] = std::array::from_fn(|_| vec![0.0; 512]);
+        let [m1, m2, m3, m4] = &mut mods;
+        let inputs = [
+            silent.as_mut_ptr(),
+            silent_r.as_mut_ptr(),
+            m1.as_mut_ptr(),
+            m2.as_mut_ptr(),
+            m3.as_mut_ptr(),
+            m4.as_mut_ptr(),
+        ];
+        let mut out_l = vec![f32::NAN; 512];
+        let mut out_r = vec![f32::NAN; 512];
+        let outputs = [out_l.as_mut_ptr(), out_r.as_mut_ptr()];
+        unsafe {
+            str8_delay_process(
+                inputs.as_ptr(),
+                outputs.as_ptr(),
+                512,
+                state.as_mut_ptr().cast::<c_void>(),
+                std::ptr::null_mut(),
+            );
+        }
+        assert!(out_l.iter().chain(&out_r).all(|v| *v == 0.0));
+        assert!(state.iter().zip(&before).all(|(a, b)| a.to_bits() == b.to_bits()));
+        // Fresh input wakes it and restarts the quiet count.
+        let _ = render_blocks(&mut state, 512);
+        assert_eq!(state[STATE_QUIET_FRAMES], 0.0);
     }
 
     fn initialized_state(delay_ms: f32, wet: f32, feedback: f32, cutoff_hz: f32) -> Vec<f32> {

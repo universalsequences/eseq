@@ -116,6 +116,11 @@ pub enum OpCode {
     DerivedEnd(u32),
     EffectBegin(u32),
     EffectEnd(u32),
+    /// Render a host-bound view buffer's view (instance-kinds spec §7): the
+    /// effect node's bound callable, or its instance's kind `:view` called
+    /// with the instance. Only chunks the VM synthesizes for
+    /// `VM::bind_view_buffer` contain it.
+    CallBoundView(u32),
     SubtreeBegin,
     SubtreeEnd,
     LoadReactive(usize, usize),    // namespace idx, field idx
@@ -1787,6 +1792,133 @@ impl<'a> Compiler<'a> {
         Ok(())
     }
 
+    /// `(def-kind name :sequencer (...) :state ((field default) ...) :view f)`
+    /// (instance-kinds spec §3). Compiles to a call of the `def-kind` native
+    /// with the name as a symbol and keyword/value pairs:
+    ///
+    /// - `:sequencer` is a graph `def-sequencer` body without the name,
+    ///   captured as data exactly like graph-mode `def-sequencer` (each
+    ///   element macro-expanded and quoted; a top-level `,x` still evaluates).
+    /// - `:state` becomes a list of `(field value)` pairs: the field name as a
+    ///   symbol and the default EVALUATED here (`field` or `(field)` means nil).
+    /// - every other slot (`:view`, ...) evaluates normally.
+    fn compile_def_kind_form(&mut self, list: &[Expression]) -> Result<(), CompilerError> {
+        let Some(name) = list.get(1).map(|name| strip_source_origin_wrappers(name.clone())) else {
+            return Err(CompilerError::Message("def-kind expects a kind name".to_string()));
+        };
+        let Expression::Symbol(name) = name else {
+            return Err(CompilerError::Message(
+                "def-kind expects a kind name symbol".to_string(),
+            ));
+        };
+        let name_idx = self.use_string_constant(&name);
+        self.emit(OpCode::PushSymbol(name_idx));
+        let mut arity = 1;
+        let mut i = 2;
+        while i < list.len() {
+            let Expression::Keyword(key) = strip_source_origin_wrappers(list[i].clone()) else {
+                return Err(CompilerError::Message(format!(
+                    "def-kind {name}: expected a :slot keyword at position {}",
+                    i - 1
+                )));
+            };
+            let Some(value) = list.get(i + 1) else {
+                return Err(CompilerError::Message(format!(
+                    "def-kind {name}: missing value for :{key}"
+                )));
+            };
+            let key_idx = self.use_string_constant(&key);
+            self.emit(OpCode::PushKeyword(key_idx));
+            match key.as_str() {
+                "sequencer" => self.compile_def_kind_sequencer(&name, value)?,
+                "state" => self.compile_def_kind_state(&name, value)?,
+                // `:keymap eseq.sequencer-keys/sequencer-keys` names a mode;
+                // a bare symbol is its name, never a variable read.
+                "keymap" => match strip_source_origin_wrappers(value.clone()) {
+                    Expression::Symbol(mode) if mode != "nil" => {
+                        let mode_idx = self.use_string_constant(&mode);
+                        self.emit(OpCode::PushSymbol(mode_idx));
+                    }
+                    _ => self.compile_expression(value)?,
+                },
+                _ => self.compile_expression(value)?,
+            }
+            arity += 2;
+            i += 2;
+        }
+        self.emit_symbol_load("def-kind");
+        self.emit(OpCode::Call(arity));
+        Ok(())
+    }
+
+    fn compile_def_kind_sequencer(
+        &mut self,
+        kind: &str,
+        value: &Expression,
+    ) -> Result<(), CompilerError> {
+        match strip_source_origin_wrappers(value.clone()) {
+            Expression::List(items) | Expression::QuoteList(items) => {
+                for item in &items {
+                    match item {
+                        Expression::Unquote(inner) => self.compile_expression(inner)?,
+                        _ => self.compile_expanded_quoted_expression(item)?,
+                    }
+                }
+                self.emit(OpCode::MakeList(items.len()));
+                Ok(())
+            }
+            Expression::Symbol(symbol) if symbol == "nil" => {
+                self.emit(OpCode::PushNil);
+                Ok(())
+            }
+            Expression::Unquote(inner) => self.compile_expression(&inner),
+            _ => Err(CompilerError::Message(format!(
+                "def-kind {kind}: :sequencer expects a def-sequencer body list"
+            ))),
+        }
+    }
+
+    fn compile_def_kind_state(&mut self, kind: &str, value: &Expression) -> Result<(), CompilerError> {
+        let items = match strip_source_origin_wrappers(value.clone()) {
+            Expression::List(items) | Expression::QuoteList(items) => items,
+            Expression::Symbol(symbol) if symbol == "nil" => Vec::new(),
+            _ => {
+                return Err(CompilerError::Message(format!(
+                    "def-kind {kind}: :state expects ((field default) ...)"
+                )));
+            }
+        };
+        for item in &items {
+            let (field, default) = match strip_source_origin_wrappers(item.clone()) {
+                Expression::Symbol(field) => (field, None),
+                Expression::List(pair) if pair.len() == 1 || pair.len() == 2 => {
+                    match strip_source_origin_wrappers(pair[0].clone()) {
+                        Expression::Symbol(field) => (field, pair.get(1).cloned()),
+                        _ => {
+                            return Err(CompilerError::Message(format!(
+                                "def-kind {kind}: :state field names must be symbols"
+                            )));
+                        }
+                    }
+                }
+                _ => {
+                    return Err(CompilerError::Message(format!(
+                        "def-kind {kind}: each :state entry is (field default)"
+                    )));
+                }
+            };
+            let field_idx = self.use_string_constant(&field);
+            self.emit(OpCode::PushSymbol(field_idx));
+            match default {
+                Some(default) => self.compile_expression(&default)?,
+                None => self.emit(OpCode::PushNil),
+            }
+            self.emit(OpCode::MakeList(2));
+        }
+        self.emit(OpCode::MakeList(items.len()));
+        Ok(())
+    }
+
     fn compile_effect_buffer_form(&mut self, body: &[Expression]) -> Result<(), CompilerError> {
         if body.len() < 2 {
             return Err(CompilerError::InvalidArg);
@@ -3128,6 +3260,9 @@ impl<'a> Compiler<'a> {
             }
             if s == "effect-buffer" {
                 return self.compile_effect_buffer_form(&list[1..]);
+            }
+            if s == "def-kind" {
+                return self.compile_def_kind_form(list);
             }
             if s == "subtree" {
                 return self.compile_subtree_form(&list[1..]);

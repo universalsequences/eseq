@@ -3,9 +3,12 @@
   (track :instrument "core/drift"))
 
 ;; The headless capture has no running note source. Override only the activity
-;; predicate so the production keys widget can be inspected in its lit state.
-(def eseq.effects.panel-bodies/instrument-key-note-active? (note)
-  (eseq.effects.param-grid/fx-list-contains? '(60 64 67) note))
+;; source so the production keys widget can be inspected in its lit state, with
+;; two keys selected to show the selection tint.
+(def eseq.effects.panel-bodies/instrument-key-active-notes (inst)
+  '(60 64 67))
 
 (def capture-after-sync ()
-  (set! eseq.effects.state/instrument-panel-tab 1))
+  (do
+    (set! eseq.effects.state/instrument-panel-tab 1)
+    (set! eseq.effects.state/instrument-key-lock-selected-notes '(62 69))))

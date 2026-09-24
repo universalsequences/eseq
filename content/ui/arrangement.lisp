@@ -25,6 +25,7 @@
 (import eseq.sound-palette)
 (import eseq.sample-import)
 (import eseq.retrospective)
+(import eseq.resample)
 (import eseq.export-song)
 (import eseq.file-dialogs)
 
@@ -2051,6 +2052,8 @@
       (eseq.sample-import/panel))
     (subtree :key "arr-retrospective"
       (eseq.retrospective/panel))
+    (subtree :key "arr-resample"
+      (eseq.resample/panel))
     (subtree :key "arr-scene-row"
       (box :width :fill
         (h-stack :width :fill :align :start :gap 0
