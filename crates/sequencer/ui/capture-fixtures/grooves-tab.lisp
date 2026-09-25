@@ -22,11 +22,11 @@
 
 (def capture-after-sync ()
   (do
-    ;; Standard-layout pads (C4 kick, D4 snare, F#4 closed hat), so the
-    ;; extracted rows record roles and the preview labels them by role.
-    (eseq.drum-rack-v2/move-pad-to-note 0 -36 0)
-    (eseq.drum-rack-v2/move-pad-to-note 0 -35 2)
-    (eseq.drum-rack-v2/move-pad-to-note 0 -34 6)
+    ;; Standard-layout pads (C1 kick, D1 snare, F#1 closed hat), so the
+    ;; extracted rows record roles and the preview labels them by role. The
+    ;; kick already sits on C1; the hat leaves D1 before the snare takes it.
+    (eseq.drum-rack-v2/move-pad-to-note 0 -34 -30)
+    (eseq.drum-rack-v2/move-pad-to-note 0 -35 -34)
     (eseq.drum-rack-v2/extract-groove (eseq.drum-rack-v2/group-id 0)
       "Dilla take" 1 "1/16" true)
     (host-command "set-rack-groove"

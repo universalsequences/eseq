@@ -1,7 +1,7 @@
 use super::*;
 
 /// The spec's standard-layout table, pad note by pad note (GM drum map
-/// shifted so C4 = pad note 0), plus the edges that have no role.
+/// on the rack's home octave, C1 = kick), plus the edges that have no role.
 #[test]
 fn standard_layout_inference_table() {
     use PadRole::*;
@@ -30,30 +30,33 @@ fn standard_layout_inference_table() {
     ];
     for (pad_note, role) in expected {
         assert_eq!(
-            PadRole::standard(pad_note),
+            PadRole::standard(STANDARD_LAYOUT_FIRST_PAD_NOTE + pad_note),
             Some(role),
             "pad note {pad_note}"
         );
     }
-    // Pad note 0 is GM 36 (bass drum 1): the table is the GM map shifted.
-    assert_eq!(STANDARD_LAYOUT_GM_BASE, 36);
-    for pad_note in [-36, -1, 21, 36, 51] {
+    // The layout starts on the home octave a new rack fills first.
+    assert_eq!(STANDARD_LAYOUT_FIRST_PAD_NOTE, -36);
+    for pad_note in [-37, -15, 0, 2, 36, 51] {
         assert_eq!(PadRole::standard(pad_note), None, "pad note {pad_note}");
     }
 }
 
 #[test]
 fn an_explicit_role_overrides_the_standard_layout() {
-    assert_eq!(PadRole::effective(None, 2), Some(PadRole::Snare));
+    // D1: the standard layout's snare.
+    let d1 = STANDARD_LAYOUT_FIRST_PAD_NOTE + 2;
+    assert_eq!(PadRole::effective(None, d1), Some(PadRole::Snare));
     assert_eq!(
-        PadRole::effective(Some(PadRole::Clap), 2),
+        PadRole::effective(Some(PadRole::Clap), d1),
         Some(PadRole::Clap)
     );
+    // E4: outside the standard layout.
     assert_eq!(
-        PadRole::effective(Some(PadRole::Perc), 40),
+        PadRole::effective(Some(PadRole::Perc), 4),
         Some(PadRole::Perc)
     );
-    assert_eq!(PadRole::effective(None, 40), None);
+    assert_eq!(PadRole::effective(None, 4), None);
 }
 
 #[test]

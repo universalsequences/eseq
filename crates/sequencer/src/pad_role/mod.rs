@@ -6,7 +6,8 @@
 //! same drum when both kits share a layout. A role is optional pad metadata:
 //! set explicitly on a pad (`ProjectRackPad::role` / `ProjectKitPad::role`),
 //! or inferred from the pad note through the standard layout — the General
-//! MIDI drum map shifted so C4 = pad note 0 ([`PadRole::standard`]). Grooves
+//! MIDI drum map on the rack's home octave, kick on C1 = pad note -36
+//! ([`PadRole::standard`]). Grooves
 //! are the first consumer (role-aware row lookup); pattern transfer between
 //! kits and MIDI note maps can use it later.
 
@@ -34,10 +35,14 @@ pub enum PadRole {
     Perc,
 }
 
-/// General MIDI drum note of pad note 0 (C4 on the pad keyboard).
-pub const STANDARD_LAYOUT_GM_BASE: i32 = 36;
+/// Pad note the standard layout starts on: the rack's home octave, C1
+/// (`DRUM_RACK_FIRST_PAD_NOTE`), where `next_free_pad_note` puts a new rack's
+/// first pads. Kick C1, snare D1, closed hat F#1 — the GM drum map under the
+/// note names drum racks conventionally use.
+pub const STANDARD_LAYOUT_FIRST_PAD_NOTE: i32 = crate::sequencer::DRUM_RACK_FIRST_PAD_NOTE;
 
-/// The standard layout, indexed by pad note from 0: GM notes 36..=56.
+/// The standard layout, indexed from `STANDARD_LAYOUT_FIRST_PAD_NOTE`: GM
+/// notes 36..=56.
 const STANDARD_LAYOUT: [PadRole; 21] = [
     PadRole::Kick,      // 0  GM 36 bass drum 1
     PadRole::Rim,       // 1  GM 37 side stick
@@ -83,7 +88,7 @@ impl PadRole {
 
     /// The role the standard layout gives `pad_note`, or `None` outside it.
     pub fn standard(pad_note: i32) -> Option<PadRole> {
-        usize::try_from(pad_note)
+        usize::try_from(pad_note - STANDARD_LAYOUT_FIRST_PAD_NOTE)
             .ok()
             .and_then(|index| STANDARD_LAYOUT.get(index).copied())
     }

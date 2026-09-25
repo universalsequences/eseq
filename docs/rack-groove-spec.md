@@ -477,11 +477,14 @@ pub role: Option<PadRole>,
 ```
 
 **Standard layout.** A pad without an explicit role gets one inferred from its
-`pad_note` using the General MIDI drum map shifted so C4 = pad note 0
-(`gm_note - 36`): 0 kick (C4), 1 rim, 2 snare (D4), 3 clap, 4 snare,
-5 tom-low, 6 closed-hat (F#4), 7 tom-low, 8 pedal-hat, 9 tom-mid,
-10 open-hat (A#4), 11 tom-mid, 12 tom-high, 13 crash, 14 tom-high, 15 ride,
-16 crash, 17 ride, 18 shaker, 19 crash, 20 perc; anything else has no role.
+`pad_note` using the General MIDI drum map on the rack's home octave
+(`STANDARD_LAYOUT_FIRST_PAD_NOTE` = `DRUM_RACK_FIRST_PAD_NOTE` = -36, C1,
+where a new rack fills its first pads; pad note = `gm_note - 72`): -36 kick
+(C1), -35 rim (C#1), -34 snare (D1), -33 clap (D#1), -32 snare (E1),
+-31 tom-low (F1), -30 closed-hat (F#1), -29 tom-low, -28 pedal-hat (G#1),
+-27 tom-mid, -26 open-hat (A#1), -25 tom-mid, -24 tom-high (C2), -23 crash,
+-22 tom-high, -21 ride, -20 crash, -19 ride, -18 shaker, -17 crash,
+-16 perc (G#2); anything else has no role.
 Kits authored in this layout (factory kits, eseq-2k9p.25, should) need no
 tagging; other kits set roles explicitly. `effective_role(pad)` = explicit role
 else inferred.

@@ -5338,7 +5338,8 @@ mod tests {
     #[test]
     fn rack_pad_roles_round_trip_and_old_projects_load_without_roles() {
         let mut project = sample_project();
-        let mut snare = ProjectRackPad::new(5, 1);
+        // F1 (the layout's low tom), tagged Snare.
+        let mut snare = ProjectRackPad::new(DRUM_RACK_FIRST_PAD_NOTE + 5, 1);
         snare.role = Some(PadRole::Snare);
         project.groups = vec![ProjectTrackGroup {
             id: 3,
@@ -5348,7 +5349,8 @@ mod tests {
             members: vec![0, 1],
             bus_id: 7,
             rack: Some(ProjectRackConfig {
-                pads: vec![ProjectRackPad::new(0, 0), snare],
+                // C1: the layout's kick.
+                pads: vec![ProjectRackPad::new(DRUM_RACK_FIRST_PAD_NOTE, 0), snare],
                 choke_groups: vec![None, None],
                 ..Default::default()
             }),
@@ -5364,7 +5366,7 @@ mod tests {
         assert_eq!(
             rack.pads[1].effective_role(),
             Some(PadRole::Snare),
-            "explicit beats the layout's low tom at note 5"
+            "explicit beats the layout's low tom on F1"
         );
 
         let old = json.replace(",\"role\":\"snare\"", "");

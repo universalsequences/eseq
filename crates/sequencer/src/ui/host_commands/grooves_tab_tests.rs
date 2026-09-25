@@ -226,23 +226,27 @@ fn grooves_tab_menu_actions_through_the_real_handler() {
         eng.keyboard_tx,
     );
 
-    // Setup (not under test): two drum racks, A (kick at pad note 0, a hat
-    // at 6 — standard-layout roles) and B; a played take on A extracted into
+    // Setup (not under test): two drum racks, A (kick on C1, a closed hat on
+    // F#1 — standard-layout roles) and B; a played take on A extracted into
     // the pool and played by BOTH racks.
+    let (kick_c1, hat_fs1) = (
+        sequencer::sequencer::DRUM_RACK_FIRST_PAD_NOTE,
+        sequencer::sequencer::DRUM_RACK_FIRST_PAD_NOTE + 6,
+    );
     for _ in 0..4 {
         app.graph_controller()
             .add_blank_sampler_track()
             .expect("sampler track");
     }
     let (rack_a, _) = app.create_drum_rack_recorded(None).expect("rack A");
-    app.assign_rack_pad_track_recorded(rack_a, 0, 0)
+    app.assign_rack_pad_track_recorded(rack_a, kick_c1, 0)
         .expect("kick");
-    app.assign_rack_pad_track_recorded(rack_a, 6, 1)
+    app.assign_rack_pad_track_recorded(rack_a, hat_fs1, 1)
         .expect("hat");
     let (rack_b, _) = app.create_drum_rack_recorded(None).expect("rack B");
-    app.assign_rack_pad_track_recorded(rack_b, 0, 2)
+    app.assign_rack_pad_track_recorded(rack_b, kick_c1, 2)
         .expect("B kick");
-    app.assign_rack_pad_track_recorded(rack_b, 6, 3)
+    app.assign_rack_pad_track_recorded(rack_b, hat_fs1, 3)
         .expect("B hat");
     for (track, step, delay) in [
         (0usize, 0usize, 0.02f32),

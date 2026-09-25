@@ -56018,8 +56018,9 @@ mod solo_binding_tests;
         let mut group = rack_group_fixture(false);
         {
             let rack = group.rack.as_mut().unwrap();
-            rack.pads[0].pad_note = 2; // Standard: the layout's snare
-            rack.pads[1].pad_note = 5; // the layout's low tom, tagged Clap
+            let c1 = sequencer::sequencer::DRUM_RACK_FIRST_PAD_NOTE;
+            rack.pads[0].pad_note = c1 + 2; // D1, Standard: the layout's snare
+            rack.pads[1].pad_note = c1 + 5; // F1, the layout's low tom, tagged Clap
             rack.pads[1].role = Some(PadRole::Clap);
         }
         let Value::List(items) = build_groups_value(&[group]) else {

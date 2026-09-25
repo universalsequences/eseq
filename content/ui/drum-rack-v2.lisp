@@ -388,8 +388,8 @@
 ;; ── Pad roles (docs/rack-groove-spec.md, "Pad roles") ──────────────────
 ;; What drum a pad IS, independent of its note. The host publishes each pad's
 ;; explicit `:role` key ("" = Standard), its effective `:role-tag` / `:role-label`
-;; and the `:standard-role-label` the standard layout (GM drum map, C4 = pad 0)
-;; infers from the note. The option list mirrors `PadRole::ALL` in menu order
+;; and the `:standard-role-label` the standard layout (GM drum map on the
+;; rack's home octave, kick on C1) infers from the note. The option list mirrors `PadRole::ALL` in menu order
 ;; (keys are the serde names); a test keeps the two in sync.
 (def pad-role-options ()
   (list

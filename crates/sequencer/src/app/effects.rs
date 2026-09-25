@@ -7798,9 +7798,13 @@ mod tests {
         let (group_id, _) = app.create_drum_rack_recorded(Some("Roles".to_string())).expect("rack");
         let kick = app.graph_controller().add_track(sample).expect("kick");
         let snare = app.graph_controller().add_track(sample).expect("snare");
-        app.assign_rack_pad_track_recorded(group_id, 0, kick).expect("kick pad");
-        app.assign_rack_pad_track_recorded(group_id, 20, snare).expect("snare pad");
-        // A groove from a standard-layout kit: kick row at 0, snare row at 2.
+        // Standard layout on the home octave: C1 kick, D1 snare; C1 + 20
+        // (G#2) is the layout's perc.
+        let c1 = crate::sequencer::DRUM_RACK_FIRST_PAD_NOTE;
+        let perc_note = c1 + 20;
+        app.assign_rack_pad_track_recorded(group_id, c1, kick).expect("kick pad");
+        app.assign_rack_pad_track_recorded(group_id, perc_note, snare).expect("snare pad");
+        // A groove from a standard-layout kit: kick row on C1, snare row on D1.
         let row = |offset: f32| GrooveRow {
             slots: vec![
                 GrooveSlot { offset, ..GrooveSlot::default() },
@@ -7810,23 +7814,23 @@ mod tests {
         let mut groove = crate::groove::mpc_swing_groove(50, 0.25);
         groove.id = 4;
         groove.pad_rows = vec![
-            GroovePadRow { pad_note: 0, role: Some(PadRole::Kick), row: row(0.1) },
-            GroovePadRow { pad_note: 2, role: Some(PadRole::Snare), row: row(0.2) },
+            GroovePadRow { pad_note: c1, role: Some(PadRole::Kick), row: row(0.1) },
+            GroovePadRow { pad_note: c1 + 2, role: Some(PadRole::Snare), row: row(0.2) },
         ];
         app.grooves = vec![groove.clone()];
         app.set_rack_active_groove_recorded(group_id, Some(4)).expect("play it");
         let table = |app: &App| app.state.latest_scheduler_snapshot().track_grooves.clone();
         let row_at = |app: &App, track: usize| (*table(app)[track].as_ref().expect("grooved").row).clone();
         assert_eq!(row_at(&app, kick), row(0.1), "standard kick: the kick row");
-        // Pad 20 infers Perc: no perc row, so the shared row.
+        // The G#2 pad infers Perc: no perc row, so the shared row.
         assert_eq!(row_at(&app, snare), groove.shared_row);
 
         let undo_len = app.history.undo_len();
-        app.set_rack_pad_role_recorded(group_id, 20, Some(PadRole::Snare)).expect("tag snare");
+        app.set_rack_pad_role_recorded(group_id, perc_note, Some(PadRole::Snare)).expect("tag snare");
         assert_eq!(app.history.undo_len(), undo_len + 1, "one undo step");
         assert_eq!(row_at(&app, snare), row(0.2), "tagged snare: the snare row");
         assert!(
-            app.set_rack_pad_role_recorded(group_id, 20, Some(PadRole::Snare)).is_err(),
+            app.set_rack_pad_role_recorded(group_id, perc_note, Some(PadRole::Snare)).is_err(),
             "unchanged"
         );
         assert!(app.set_rack_pad_role_recorded(group_id, 99, Some(PadRole::Snare)).is_err());
@@ -7846,8 +7850,8 @@ mod tests {
             .capture_rack_as_kit(group_id, "Roles", Vec::new(), String::new(), &[])
             .expect("capture kit");
         let kit_role = |note: i32| kit.pads.iter().find(|pad| pad.pad_note == note).unwrap().role;
-        assert_eq!(kit_role(0), None);
-        assert_eq!(kit_role(20), Some(PadRole::Snare));
+        assert_eq!(kit_role(c1), None);
+        assert_eq!(kit_role(perc_note), Some(PadRole::Snare));
         let directory = std::env::temp_dir().join(format!(
             "eseq-kit-roles-{}-{:?}",
             std::process::id(),
@@ -7863,23 +7867,23 @@ mod tests {
 
         let (loaded, failures) = app.load_kit_as_rack(&path).expect("load as rack");
         assert!(failures.is_empty(), "{failures:?}");
-        assert_eq!(pad_role(&app, loaded, 20), Some(PadRole::Snare));
-        assert_eq!(pad_role(&app, loaded, 0), None);
+        assert_eq!(pad_role(&app, loaded, perc_note), Some(PadRole::Snare));
+        assert_eq!(pad_role(&app, loaded, c1), None);
         let loaded_snare = app
             .groups
             .iter()
             .find(|g| g.id == loaded)
-            .and_then(|g| g.rack_pad_track(20))
+            .and_then(|g| g.rack_pad_track(perc_note))
             .expect("loaded snare");
         assert_eq!(row_at(&app, loaded_snare), row(0.2), "the loaded kit's snare is grooved as one");
 
-        // Audition onto a rack whose pad 20 is untagged.
+        // Audition onto a rack whose G#2 pad is untagged.
         let (target, _) = app.create_drum_rack_recorded(None).expect("target rack");
         let other = app.graph_controller().add_track(sample).expect("other");
-        app.assign_rack_pad_track_recorded(target, 20, other).expect("target pad");
-        assert_eq!(pad_role(&app, target, 20), None);
+        app.assign_rack_pad_track_recorded(target, perc_note, other).expect("target pad");
+        assert_eq!(pad_role(&app, target, perc_note), None);
         app.load_kit_onto_rack(target, &path).expect("audition kit");
-        assert_eq!(pad_role(&app, target, 20), Some(PadRole::Snare));
+        assert_eq!(pad_role(&app, target, perc_note), Some(PadRole::Snare));
 
         std::fs::remove_dir_all(&directory).expect("clean kit test directory");
         graph.process_block();

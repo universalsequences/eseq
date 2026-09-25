@@ -1717,17 +1717,22 @@ fn pocket_offset_excludes_random_jitter() {
 
 // --- pad roles (eseq-groove.10) ------------------------------------------------
 
-/// A groove extracted from a standard-layout kit: kick (pad 0), snare (pad 2)
-/// and closed hat (pad 6), each pad late by its own amount, so every pad row
+/// Standard-layout pad notes on the rack's home octave.
+const KICK_C1: i32 = crate::pad_role::STANDARD_LAYOUT_FIRST_PAD_NOTE;
+const SNARE_D1: i32 = KICK_C1 + 2;
+const HAT_FS1: i32 = KICK_C1 + 6;
+
+/// A groove extracted from a standard-layout kit: kick (C1), snare (D1)
+/// and closed hat (F#1), each pad late by its own amount, so every pad row
 /// is distinguishable. Roles come from the pads' effective roles, the way
 /// `App::extract_rack_groove_recorded` passes them.
 fn standard_kit_groove() -> (crate::project::ProjectRackConfig, ProjectGroove) {
     use crate::project::{ProjectRackConfig, ProjectRackPad};
     let kit = ProjectRackConfig {
         pads: vec![
-            ProjectRackPad::new(0, 0),
-            ProjectRackPad::new(2, 1),
-            ProjectRackPad::new(6, 2),
+            ProjectRackPad::new(KICK_C1, 0),
+            ProjectRackPad::new(SNARE_D1, 1),
+            ProjectRackPad::new(HAT_FS1, 2),
         ],
         groove: RackGrooveSettings {
             active: Some(1),
@@ -1742,9 +1747,9 @@ fn standard_kit_groove() -> (crate::project::ProjectRackConfig, ProjectGroove) {
             .collect::<Vec<_>>()
     };
     let sources = [
-        (0, late(&[0.0, 2.0], 0.05)),
-        (2, late(&[1.0, 3.0], 0.2)),
-        (6, late(&[0.5, 1.5, 2.5, 3.5], 0.35)),
+        (KICK_C1, late(&[0.0, 2.0], 0.05)),
+        (SNARE_D1, late(&[1.0, 3.0], 0.2)),
+        (HAT_FS1, late(&[0.5, 1.5, 2.5, 3.5], 0.35)),
     ]
     .into_iter()
     .map(|(pad_note, hits)| GroovePadSource {
@@ -1773,9 +1778,9 @@ fn extraction_records_each_source_pads_role_on_its_row() {
     assert_eq!(
         roles,
         vec![
-            (0, Some(PadRole::Kick)),
-            (2, Some(PadRole::Snare)),
-            (6, Some(PadRole::ClosedHat)),
+            (KICK_C1, Some(PadRole::Kick)),
+            (SNARE_D1, Some(PadRole::Snare)),
+            (HAT_FS1, Some(PadRole::ClosedHat)),
         ]
     );
     // A pad without a role records none, and its row writes no role key.
@@ -1860,10 +1865,10 @@ fn cross_kit_rows_follow_roles_not_notes() {
     };
     let other_kit = ProjectRackConfig {
         pads: vec![
-            tagged(12, 0, PadRole::Kick),
-            tagged(20, 1, PadRole::Snare),
-            tagged(2, 2, PadRole::ClosedHat),
-            tagged(6, 3, PadRole::Perc),
+            tagged(KICK_C1 + 12, 0, PadRole::Kick),
+            tagged(KICK_C1 + 20, 1, PadRole::Snare),
+            tagged(SNARE_D1, 2, PadRole::ClosedHat),
+            tagged(HAT_FS1, 3, PadRole::Perc),
         ],
         groove: RackGrooveSettings {
             active: Some(1),
@@ -1876,16 +1881,20 @@ fn cross_kit_rows_follow_roles_not_notes() {
     let table = track_groove_snapshots([(&members[..], &other_kit)], &pool, 14);
     let row_of_track = |track: usize| (*table[track].as_ref().expect("grooved").row).clone();
     let source = |note: i32| groove.pad_row(note).unwrap().clone();
-    assert_eq!(row_of_track(10), source(0), "kick at pad 12: the kick row");
+    assert_eq!(
+        row_of_track(10),
+        source(KICK_C1),
+        "kick at C2: the kick row"
+    );
     assert_eq!(
         row_of_track(11),
-        source(2),
-        "snare at pad 20: the snare row"
+        source(SNARE_D1),
+        "snare at G#2: the snare row"
     );
-    assert_ne!(source(2), source(6));
+    assert_ne!(source(SNARE_D1), source(HAT_FS1));
     assert_eq!(
         row_of_track(12),
-        source(6),
+        source(HAT_FS1),
         "a hat on the source snare's note takes the hat row, not the snare row"
     );
     assert_eq!(
@@ -1918,7 +1927,7 @@ fn same_kit_and_role_less_grooves_resolve_by_pad_note_as_before() {
     let with_roles = track_groove_snapshots([(&members[..], &kit)], &[groove.clone()], 3);
     let without = track_groove_snapshots([(&members[..], &kit)], &[role_less.clone()], 3);
     assert_eq!(with_roles, without);
-    for (track, note) in [(0usize, 0), (1, 2), (2, 6)] {
+    for (track, note) in [(0usize, KICK_C1), (1, SNARE_D1), (2, HAT_FS1)] {
         assert_eq!(
             *with_roles[track].as_ref().unwrap().row,
             *groove.pad_row(note).unwrap(),
@@ -1933,12 +1942,12 @@ fn same_kit_and_role_less_grooves_resolve_by_pad_note_as_before() {
         track_groove_snapshots([(&members[..], &tagged)], &[groove.clone()], 3),
         with_roles
     );
-    // A role-less groove on a kit whose pad 2 is a hat: by note, as before.
+    // A role-less groove on a kit whose D1 pad is a hat: by note, as before.
     let mut relaid = kit.clone();
     relaid.pads[1].role = Some(PadRole::ClosedHat);
     let table = track_groove_snapshots([(&members[..], &relaid)], &[role_less.clone()], 3);
     assert_eq!(
         *table[1].as_ref().unwrap().row,
-        *role_less.pad_row(2).unwrap()
+        *role_less.pad_row(SNARE_D1).unwrap()
     );
 }
