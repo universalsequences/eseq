@@ -7783,6 +7783,103 @@ mod tests {
         graph.process_block();
     }
 
+    /// Rack groove UI edits (eseq-groove.4): rename and delete are one undo
+    /// step each, deleting the active groove turns the rack's groove off, and
+    /// an amount knob drag coalesces into ONE undo step when the gesture ends
+    /// while every drag frame reaches the scheduler's groove table at once.
+    #[test]
+    fn rack_groove_rename_delete_and_amount_drag_record_one_step_each() {
+        use crate::app::rack_grooves::RackGrooveExtractRequest;
+        use crate::groove::GrooveRef;
+        use crate::sequencer::StepParam;
+
+        let graph = TestLiveGraph::new("drum-rack-groove-ui-test", 64, 44_100, 2);
+        let mut app = test_app_for_live_graph(&graph, 0);
+        let (group_id, _) = app.create_drum_rack_recorded(None).expect("rack");
+        let hat = app.graph_controller().add_blank_sampler_track().expect("hat");
+        app.assign_rack_pad_track_recorded(group_id, 42, hat).expect("hat pad");
+        let mut scenes = app.capture_synchronized_scene_structure_state().expect("scenes");
+        let mut data = scenes.effective_track_pattern(hat).expect("hat pattern");
+        data.clear_step_content();
+        for step in [0usize, 2] {
+            data.track_bits[0] |= 1 << step;
+            data.step_data[step][StepParam::Delay.index()] = 0.2;
+        }
+        assert!(scenes.save_effective_track_pattern(hat, data));
+        app.restore_scene_structure_state(&scenes).expect("install the take");
+        let groove_id = app
+            .extract_rack_groove_recorded(group_id, &RackGrooveExtractRequest::default())
+            .expect("extract");
+        let rack = |app: &App| app.groups[0].rack.clone().expect("rack");
+        let settings = |app: &App| rack(app).groove.clone();
+        let timing_in_table = |app: &App| {
+            app.state.track_grooves()[hat].as_ref().map(|groove| groove.timing_amount)
+        };
+
+        // Rename: one step, refuses empty and unchanged names.
+        let undo_len = app.history.undo_len();
+        app.rename_rack_groove_recorded(group_id, groove_id, " Pocket ").expect("rename");
+        assert_eq!(rack(&app).grooves[0].name, "Pocket");
+        assert_eq!(app.history.undo_len(), undo_len + 1);
+        assert!(app.rename_rack_groove_recorded(group_id, groove_id, "  ").is_err());
+        assert!(app.rename_rack_groove_recorded(group_id, groove_id, "Pocket").is_err());
+        assert!(app.rename_rack_groove_recorded(group_id, 99, "X").is_err());
+        assert_eq!(app.history.undo_len(), undo_len + 1, "refusals record nothing");
+
+        // Amount drag: live on every frame, one undo step at the end.
+        let undo_len = app.history.undo_len();
+        for value in [0.9f32, 0.7, 0.4, 7.0] {
+            assert!(crate::app::edit::apply_rack_groove_amount_drag(&mut app, group_id, |s| {
+                s.timing_amount = value
+            })
+            .expect("drag"));
+            let clamped = value.min(crate::groove::GROOVE_TIMING_AMOUNT_MAX);
+            assert_eq!(settings(&app).timing_amount, clamped);
+            assert_eq!(timing_in_table(&app), Some(clamped), "the scheduler sees each frame");
+        }
+        assert!(!crate::app::edit::apply_rack_groove_amount_drag(&mut app, group_id, |s| {
+            s.timing_amount = 1.5
+        })
+        .expect("unchanged"), "an unchanged value is not an edit");
+        assert_eq!(app.history.undo_len(), undo_len, "nothing recorded mid-drag");
+        crate::app::edit::finish_active_gesture(&mut app);
+        assert_eq!(app.history.undo_len(), undo_len + 1, "one step per drag");
+        // A second drag on another amount is its own step.
+        crate::app::edit::apply_rack_groove_amount_drag(&mut app, group_id, |s| {
+            s.random_amount = 0.5
+        })
+        .expect("random drag");
+        crate::app::edit::finish_active_gesture(&mut app);
+        assert_eq!(app.history.undo_len(), undo_len + 2);
+        assert!(matches!(
+            crate::app::edit::undo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(settings(&app).random_amount, 0.0);
+        assert_eq!(settings(&app).timing_amount, 1.5);
+        assert!(matches!(
+            crate::app::edit::undo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(settings(&app).timing_amount, 1.0, "the drag's start value");
+        assert_eq!(timing_in_table(&app), Some(1.0));
+
+        // Delete the active groove: gone, and the rack plays straight again.
+        assert_eq!(settings(&app).active, Some(GrooveRef::Rack(groove_id)));
+        app.delete_rack_groove_recorded(group_id, groove_id).expect("delete");
+        assert!(rack(&app).grooves.is_empty());
+        assert_eq!(settings(&app).active, None);
+        assert!(app.state.track_grooves()[hat].is_none());
+        assert!(app.delete_rack_groove_recorded(group_id, groove_id).is_err());
+        assert!(matches!(
+            crate::app::edit::undo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(rack(&app).grooves.len(), 1);
+        assert_eq!(settings(&app).active, Some(GrooveRef::Rack(groove_id)));
+        graph.process_block();
+    }
+
     /// Drum rack v2 slice 6: the pad-note badge moves a pad on the pad
     /// keyboard without disturbing anything else about it, and refuses to
     /// collide with a pad that is already there.

@@ -10306,6 +10306,105 @@ pub fn apply_process_lane_drag_steps(
     Ok(())
 }
 
+/// One rack groove amount drag in flight (docs/rack-groove-spec.md, "UI").
+/// Amount writes during the drag go straight to the rack config and the
+/// scheduler's groove table; the bus/group structure captured before the
+/// first write becomes the single history entry when the gesture ends, the
+/// same shape as [`ProcessLaneDrag`]: capturing per drag event would
+/// serialize every scene per frame.
+pub(crate) struct RackGrooveDrag {
+    pub(crate) merge_key: MergeKey,
+    pub(crate) before: BusGroupStructureState,
+}
+
+const RACK_GROOVE_DRAG_GESTURE_ID: GestureId = GestureId(0x7267_726f_6f76_6564);
+
+/// Sets a rack's groove amounts during a knob drag: `mutate` edits the
+/// rack's [`crate::groove::RackGrooveSettings`], the result is clamped into
+/// range and published to the scheduler immediately, and the whole drag
+/// lands as ONE undo step when the gesture finishes (pointer release, idle
+/// timeout, or the next edit). Returns whether anything changed; an edit
+/// that leaves the settings as they are records nothing.
+pub fn apply_rack_groove_amount_drag(
+    app: &mut App,
+    group_id: u64,
+    mutate: impl FnOnce(&mut crate::groove::RackGrooveSettings),
+) -> Result<bool, String> {
+    let current = app
+        .groups
+        .iter()
+        .find(|group| group.id == group_id)
+        .and_then(|group| group.rack.as_ref())
+        .map(|rack| rack.groove.clone())
+        .ok_or_else(|| format!("Track group {group_id} is not a drum rack"))?;
+    let mut next = current.clone();
+    mutate(&mut next);
+    next.sanitize();
+    if next == current {
+        return Ok(false);
+    }
+    let merge_key = MergeKey::new(format!("rack-groove-amounts:{group_id}"));
+    let continuing = app
+        .history
+        .active_gesture()
+        .is_some_and(|gesture| gesture.merge_key == merge_key)
+        && app
+            .rack_groove_drag
+            .as_ref()
+            .is_some_and(|drag| drag.merge_key == merge_key);
+    if continuing {
+        app.history.touch_active_gesture();
+    } else {
+        // Closes any other gesture (an earlier groove drag commits through
+        // the hook in `finish_active_gesture`).
+        finish_active_gesture(app);
+        let before = app.capture_bus_group_structure_state()?;
+        app.history
+            .begin_gesture(ActiveGesture {
+                id: RACK_GROOVE_DRAG_GESTURE_ID,
+                merge_key: merge_key.clone(),
+            })
+            .map_err(|_| "Another edit gesture is still active".to_string())?;
+        app.rack_groove_drag = Some(RackGrooveDrag { merge_key, before });
+    }
+    if let Some(rack) = app
+        .groups
+        .iter_mut()
+        .find(|group| group.id == group_id)
+        .and_then(|group| group.rack.as_mut())
+    {
+        rack.groove = next;
+    }
+    app.publish_rack_choke_runtime();
+    Ok(true)
+}
+
+/// Commits a finished rack groove amount drag as one bus/group structure
+/// history entry.
+fn commit_rack_groove_drag(app: &mut App, drag: RackGrooveDrag) {
+    let after = match app.capture_bus_group_structure_state() {
+        Ok(after) => after,
+        Err(error) => {
+            app.editor.status_message = Some((
+                format!("Groove amount edit could not be recorded: {error}"),
+                Instant::now(),
+            ));
+            return;
+        }
+    };
+    let patch = BusGroupStructurePatch {
+        before: drag.before,
+        after,
+    };
+    let retained_bytes = patch.retained_bytes();
+    app.history.commit(
+        "Set rack groove amounts",
+        None,
+        EditPatch::BusGroupStructure(patch),
+        retained_bytes,
+    );
+}
+
 pub fn finish_active_gesture(app: &mut App) -> bool {
     let publish_scheduler = app
         .history
@@ -10317,9 +10416,14 @@ pub fn finish_active_gesture(app: &mut App) -> bool {
     if finished && publish_scheduler {
         app.state.publish_scheduler_snapshot();
     }
-    if let (Some(gesture), Some(drag)) = (finished_gesture, app.process_lane_drag.take()) {
+    if let (Some(gesture), Some(drag)) = (finished_gesture.as_ref(), app.process_lane_drag.take()) {
         if gesture.merge_key == drag.merge_key {
             app.commit_applied_scene_structure_mutation(drag.before, "Edit process lane");
+        }
+    }
+    if let (Some(gesture), Some(drag)) = (finished_gesture.as_ref(), app.rack_groove_drag.take()) {
+        if gesture.merge_key == drag.merge_key {
+            commit_rack_groove_drag(app, drag);
         }
     }
     if finished {

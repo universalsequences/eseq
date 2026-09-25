@@ -17,6 +17,7 @@ mod misc;
 pub(crate) mod packages;
 mod project;
 mod rack;
+pub(crate) mod rack_grooves;
 pub(crate) mod resample;
 mod routing;
 mod sample_import;
@@ -33,6 +34,7 @@ mod tracks;
 pub(crate) use dispatch::dispatch_custom_host_command;
 pub(crate) use routing::apply_bus_routing_command;
 pub(crate) use rack::initialize_loaded_rack_view;
+pub(crate) use rack_grooves::apply_rack_groove_command;
 #[cfg(test)]
 pub(crate) use learn::open_patch_learn_buffer;
 #[cfg(test)]

@@ -73,7 +73,19 @@
         save-clip-as
         delete-clip
         rename-clip
-        convert-to-clips)
+        convert-to-clips
+        groove-state
+        groove-active?
+        groove-of-track
+        groove-active-for-track?
+        groove-picker-labels
+        groove-key-for-label
+        set-groove
+        set-groove-amount
+        groove-amount-field
+        extract-groove
+        rename-groove
+        delete-groove)
 
 (def contains? (xs v)
   (> (len (filter (lambda (x) (= x v)) xs)) 0))
@@ -556,3 +568,76 @@
 
 (def convert-to-clips (gid)
   (host-command "convert-rack-to-clips" (dict :group-id gid)))
+
+
+;; ── Rack grooves (docs/rack-groove-spec.md, "UI") ───────────────────────
+;; A groove is the rack's extracted feel, applied wherever a trig aimed at a
+;; pad becomes a sample time. The host publishes one SEQ.rack-grooves entry
+;; per drum rack: the picker (labels + parallel keys: `rack:<id>`,
+;; `builtin:<id>`, `off`), the active groove and its heatmap. The Timing /
+;; Velocity / Random amounts are scalar fields of their own
+;; (`rack-groove-<amount>-<gid>`), so a knob drag never rebuilds its section.
+
+(def groove-state (gid)
+  (let ((hits (filter (lambda (entry) (= (get entry :group-id) gid))
+                (or SEQ.rack-grooves (list)))))
+    (if (> (len hits) 0) (nth hits 0) nil)))
+
+(def groove-active? (gid)
+  (let ((state (groove-state gid)))
+    (if state (not (= (get state :active-key) "off")) false)))
+
+;; The rack groove a member track plays through: the rack's groove entry, or
+;; nil when the track is loose or its rack plays straight.
+(def groove-of-track (track)
+  (let ((gidx (rack-of-track track)))
+    (if (< gidx 0)
+      nil
+      (let ((gid (group-id gidx)))
+        (if (groove-active? gid) (groove-state gid) nil)))))
+
+;; A member of a grooved rack: the groove, not the track's swing, sets its
+;; feel (the scheduler replaces swing with the groove), so the track panel
+;; shows swing disabled with a groove hint.
+(def groove-active-for-track? (track)
+  (not (= (groove-of-track track) nil)))
+
+(def groove-picker-labels (gid)
+  (let ((state (groove-state gid)))
+    (if state (get state :picker-labels) (list "Off"))))
+
+(def groove-key-for-label (gid label)
+  (let ((state (groove-state gid)))
+    (if (= state nil)
+      "off"
+      (let ((labels (get state :picker-labels))
+            (keys (get state :picker-keys)))
+        (reduce |acc i| (if (= (nth labels i) label) (nth keys i) acc)
+          "off"
+          (range 0 (len labels)))))))
+
+(def set-groove (gid label)
+  (host-command "set-rack-groove"
+    (dict :group-id gid :key (groove-key-for-label gid label))))
+
+;; `amount` is "timing", "velocity" or "random".
+(def groove-amount-field (amount gid)
+  (str "rack-groove-" amount "-" gid))
+
+(def set-groove-amount (gid amount value)
+  (host-command "set-rack-groove-amount"
+    (dict :group-id gid :amount amount :value value)))
+
+;; `bars` 1 or 2, `resolution` "1/16" or "1/32". With `quantize` the source
+;; patterns are straightened and the new groove activated, one undo step.
+(def extract-groove (gid name bars resolution quantize)
+  (host-command "extract-rack-groove"
+    (dict :group-id gid :name name :bars bars
+          :resolution resolution :quantize quantize)))
+
+(def rename-groove (gid groove-id name)
+  (host-command "rename-rack-groove"
+    (dict :group-id gid :groove-id groove-id :name name)))
+
+(def delete-groove (gid groove-id)
+  (host-command "delete-rack-groove" (dict :group-id gid :groove-id groove-id)))

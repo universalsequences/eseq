@@ -1075,6 +1075,11 @@ pub struct App {
     /// before its first write, committed as one history entry when the
     /// gesture finishes (see `edit::apply_process_lane_drag_steps`).
     pub(crate) process_lane_drag: Option<edit::ProcessLaneDrag>,
+    /// An in-flight rack groove amount drag (Timing / Velocity / Random):
+    /// the bus/group structure captured before its first write, committed
+    /// as one history entry when the gesture finishes (see
+    /// `edit::apply_rack_groove_amount_drag`).
+    pub(crate) rack_groove_drag: Option<edit::RackGrooveDrag>,
     /// Bumped whenever a track's loaded binding actually moves. The device
     /// panels are rebuilt from epochs, not polled, so swapping the mirror is
     /// invisible until this tells the reactive tick to republish them.
@@ -2609,6 +2614,7 @@ impl App {
             sound_binding_monitored: Vec::new(),
             pending_song_row_invalidation: None,
             process_lane_drag: None,
+            rack_groove_drag: None,
             sound_binding_epoch: 0,
             graph: GraphState {
                 lg,

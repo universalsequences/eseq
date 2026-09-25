@@ -1,6 +1,6 @@
 # Rack Grooves — Extracted Feel, Applied to Every Trig Source
 
-Status: rev 1; slices 1–2 built (model/extraction, late-only application) and slice 7 (kit carry, cross-rack). Epic: `eseq-groove` (slices `.1`–`.7` below).
+Status: rev 1; slices 1–5 and 7 built (model/extraction, application incl. early offsets, rack panel UI, velocity/random, kit carry and cross-rack). Epic: `eseq-groove` (slices `.1`–`.7` below).
 
 ## Problem
 
@@ -364,6 +364,22 @@ a "groove" hint, so there is one visible source of truth for the feel.
    see §Early hits.
 4. **Rack panel UI.** Groove section, Extract Groove modal, heatmap, member swing
    hint.
+   *Built (eseq-groove.4):* `content/ui/effects/rack-groove.lisp` renders the
+   section beside the pad grid in the rack's *fx* panel; lookups and host
+   commands live in `eseq.drum-rack-v2` (`extract-groove`, `set-groove`,
+   `set-groove-amount`, `rename-groove`, `delete-groove`). The host publishes
+   `SEQ.rack-grooves` (structural: picker labels + keys `rack:<id>` /
+   `builtin:<id>` / `off`, active groove, heatmap rows All + pads with
+   per-cell offset and measured flags; sub-bar grooves tile to one bar) and
+   scalar `SEQ.rack-groove-{timing,velocity,random}-<gid>` the knobs bind to,
+   so a drag never rebuilds its section. Commands go through
+   `ui/host_commands/rack_grooves.rs`; an amount drag writes through live and
+   lands as ONE undo step when the gesture ends
+   (`edit::apply_rack_groove_amount_drag`, the `ProcessLaneDrag` shape).
+   Rename/delete are one step each; deleting the active groove turns it off.
+   A grooved member's track panel shows swing as a "groove" hint. Capture
+   fixture: `crates/sequencer/ui/capture-fixtures/rack-groove-panel.lisp`
+   (new `(drum-rack TRACK...)` capture form).
 5. **Velocity + random amounts.** Velocity scaling and deterministic jitter.
    *Built (eseq-groove.5):* `TrackGrooveSnapshot::offset_beats` adds
    `random * spread[k] * groove_hash_noise(absolute slot, pad_note)` before the

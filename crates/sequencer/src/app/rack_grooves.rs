@@ -227,6 +227,63 @@ impl App {
             Ok(())
         })
     }
+    /// Renames one of the rack's own grooves. One undo step; an empty or
+    /// unchanged name is refused.
+    pub fn rename_rack_groove_recorded(
+        &mut self,
+        group_id: u64,
+        groove_id: GrooveId,
+        name: &str,
+    ) -> Result<(), String> {
+        let name = name.trim().to_string();
+        if name.is_empty() {
+            return Err("Groove name cannot be empty".to_string());
+        }
+        self.apply_recorded_bus_group_structure_mutation("Rename rack groove", move |app| {
+            let groove = app
+                .groups
+                .iter_mut()
+                .find(|group| group.id == group_id)
+                .and_then(|group| group.rack.as_mut())
+                .ok_or_else(|| format!("Track group {group_id} is not a drum rack"))?
+                .grooves
+                .iter_mut()
+                .find(|groove| groove.id == groove_id)
+                .ok_or_else(|| format!("Drum rack has no groove {groove_id}"))?;
+            if groove.name == name {
+                return Err("Groove name is unchanged".to_string());
+            }
+            groove.name = name;
+            Ok(())
+        })
+    }
+
+    /// Deletes one of the rack's own grooves. Deleting the groove the rack
+    /// plays through turns the rack's groove off in the same undo step.
+    pub fn delete_rack_groove_recorded(
+        &mut self,
+        group_id: u64,
+        groove_id: GrooveId,
+    ) -> Result<(), String> {
+        self.apply_recorded_bus_group_structure_mutation("Delete rack groove", move |app| {
+            let rack = app
+                .groups
+                .iter_mut()
+                .find(|group| group.id == group_id)
+                .and_then(|group| group.rack.as_mut())
+                .ok_or_else(|| format!("Track group {group_id} is not a drum rack"))?;
+            let before = rack.grooves.len();
+            rack.grooves.retain(|groove| groove.id != groove_id);
+            if rack.grooves.len() == before {
+                return Err(format!("Drum rack has no groove {groove_id}"));
+            }
+            if rack.groove.active == Some(GrooveRef::Rack(groove_id)) {
+                rack.groove.active = None;
+            }
+            Ok(())
+        })
+    }
+
     /// Installs a loaded kit's grooves and selection on a rack (kit version
     /// 5), as one recorded edit. Grooves merge into the rack's list under
     /// fresh ids; a kit reference to one of its own grooves follows the id

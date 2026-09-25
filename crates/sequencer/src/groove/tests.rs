@@ -1345,3 +1345,15 @@ fn random_amount_jitters_by_spread_reproducibly_and_varies_bar_to_bar() {
         random.offset_beats(0.25).to_bits()
     );
 }
+
+#[test]
+fn picker_keys_round_trip_and_reject_unknown_grooves() {
+    for groove in [GrooveRef::Rack(7), GrooveRef::Builtin("mpc-16-58".to_string())] {
+        assert_eq!(GrooveRef::from_picker_key(&groove.picker_key()), Ok(Some(groove)));
+    }
+    assert_eq!(GrooveRef::from_picker_key("off"), Ok(None));
+    assert_eq!(GrooveRef::from_picker_key(""), Ok(None));
+    assert!(GrooveRef::from_picker_key("builtin:mpc-16-99").is_err());
+    assert!(GrooveRef::from_picker_key("rack:x").is_err());
+    assert!(GrooveRef::from_picker_key("swing").is_err());
+}

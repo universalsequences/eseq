@@ -634,6 +634,10 @@ pub(crate) fn sync_groups_bindings(
         "group-collapsed",
         build_group_collapsed_value(groups),
     );
+    // Rack grooves derive from the same rack configs, so every path that
+    // republishes group topology (undo/redo, project load, pad-map edits)
+    // republishes the groove section too.
+    sync_rack_groove_state(rt, groups);
 }
 
 pub(crate) fn set_current_track_reactive(

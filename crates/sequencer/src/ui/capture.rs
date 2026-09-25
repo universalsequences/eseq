@@ -208,6 +208,9 @@ struct CaptureTrackSpec {
 #[derive(Debug, Clone, PartialEq)]
 struct CaptureProjectSpec {
     groups: Vec<Vec<usize>>,
+    /// `(drum-rack TRACK...)`: a drum rack whose pads are these tracks, on
+    /// consecutive pad notes from C1 (the rack's home note).
+    drum_racks: Vec<Vec<usize>>,
     tracks: Vec<CaptureTrackSpec>,
     rack_slot_macros: Vec<(usize, sequencer::sequencer::RackMacroId, sequencer::sequencer::RackMacroMapping)>,
     /// Source track, destination track, zero-based external modulation input.
@@ -301,6 +304,7 @@ fn parse_capture_project(expression: &Expression) -> Result<CaptureProjectSpec, 
     };
     let mut tracks = Vec::new();
     let mut groups = Vec::new();
+    let mut drum_racks = Vec::new();
     let mut rack_slot_macros = Vec::new();
     let mut mod_routes = Vec::new();
     let mut scenes = 1usize;
@@ -317,6 +321,17 @@ fn parse_capture_project(expression: &Expression) -> Result<CaptureProjectSpec, 
             continue;
         }
 
+        if expression_name(expression_head_item(expression)) == Some("drum-rack") {
+            let Expression::List(items) = expression else { unreachable!() };
+            let members = items.iter().skip(1).map(|item| match item {
+                Expression::Number(value) if value.is_finite() && *value >= 0.0 && value.fract() == 0.0 => Some(*value as usize),
+                _ => None,
+            })
+                .collect::<Option<Vec<_>>>().ok_or("(drum-rack TRACK...) expects zero-based track indices")?;
+            if members.is_empty() { return Err("a capture drum rack needs at least one track".into()); }
+            drum_racks.push(members);
+            continue;
+        }
         if expression_name(expression_head_item(expression)) == Some("rack-slot-macro") {
             use sequencer::sequencer::{RackMacroCurve, RackMacroId, RackMacroMapping, RackMacroTarget, RackSlotParam};
             let Expression::List(items) = expression else { unreachable!() };
@@ -397,12 +412,12 @@ fn parse_capture_project(expression: &Expression) -> Result<CaptureProjectSpec, 
         }
     }
     let mut grouped = std::collections::HashSet::new();
-    for track in groups.iter().flatten() {
+    for track in groups.iter().chain(drum_racks.iter()).flatten() {
         if *track >= tracks.len() || !grouped.insert(*track) {
             return Err("capture groups require distinct existing track indices".into());
         }
     }
-    Ok(CaptureProjectSpec { tracks, groups, rack_slot_macros, mod_routes, scenes })
+    Ok(CaptureProjectSpec { tracks, groups, drum_racks, rack_slot_macros, mod_routes, scenes })
 }
 
 /// The head item of a list expression, for dispatching `capture-project`
@@ -807,6 +822,16 @@ fn apply_capture_project(app: &mut app::App, project: &CaptureProjectSpec) -> Re
     for members in &project.groups {
         app.group_tracks_recorded(members.clone())?;
     }
+    for members in &project.drum_racks {
+        let (group_id, _) = app.create_drum_rack_recorded(None)?;
+        for (pad, track) in members.iter().enumerate() {
+            app.assign_rack_pad_track_recorded(
+                group_id,
+                sequencer::sequencer::DRUM_RACK_FIRST_PAD_NOTE + pad as i32,
+                *track,
+            )?;
+        }
+    }
 
     // :steps write the live pattern; persist them into the scene's pattern
     // pool through the production scene-launch path (capture current
@@ -934,6 +959,13 @@ fn apply_capture_macro_host_commands(
             } else {
                 crate::host_commands::instances::apply_on_editor(&name, payload, app, editor);
             }
+            continue;
+        }
+        // Rack grooves (extract / pick / amounts), so a fixture can show the
+        // drum rack panel's Groove section with a real extracted groove.
+        if let Some(result) = crate::host_commands::apply_rack_groove_command(&name, &payload, app) {
+            result.map_err(|error| format!("capture setup {name} failed: {error}"))?;
+            applied = true;
             continue;
         }
         // Sound-palette open/close so fixtures can capture the palette modal.
@@ -1295,6 +1327,7 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
     editor.refresh_runtime_side_effects();
     if apply_capture_macro_host_commands(&mut editor, &mut app, &state, args.track)? {
         sync_macro_state(editor.runtime_mut(), &app);
+        sync_groups_bindings(editor.runtime_mut(), &app.groups);
         sync_song_state(
             editor.runtime_mut(),
             &app,
@@ -1603,6 +1636,22 @@ mod tests {
         for group in ["(group 0)", "(group 0 0)", "(group 0 2)", "(group -1 1)", "(group 0 1.5)"] {
             assert!(parse_capture_source(&format!("(capture-project {prefix} {group})")).is_err());
         }
+    }
+
+    #[test]
+    fn capture_drum_racks_validate_member_indices() {
+        let prefix = "(track :sampler) (track :sampler) (track :sampler)";
+        let parsed =
+            parse_capture_source(&format!("(capture-project {prefix} (drum-rack 0 2))")).unwrap();
+        assert_eq!(parsed.project.drum_racks, vec![vec![0, 2]]);
+        for rack in ["(drum-rack)", "(drum-rack 0 0)", "(drum-rack 3)", "(drum-rack 0.5)"] {
+            assert!(parse_capture_source(&format!("(capture-project {prefix} {rack})")).is_err());
+        }
+        // A track is in at most one group or rack.
+        assert!(parse_capture_source(&format!(
+            "(capture-project {prefix} (group 0 1) (drum-rack 1 2))"
+        ))
+        .is_err());
     }
 
     #[test]

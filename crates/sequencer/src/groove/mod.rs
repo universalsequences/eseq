@@ -157,6 +157,37 @@ pub enum GrooveRef {
     Builtin(String),
 }
 
+impl GrooveRef {
+    /// The UI's stable picker key: `rack:<id>` or `builtin:<id>`.
+    pub fn picker_key(&self) -> String {
+        match self {
+            Self::Rack(id) => format!("rack:{id}"),
+            Self::Builtin(id) => format!("builtin:{id}"),
+        }
+    }
+
+    /// Parses a picker key back; `off` (or an empty key) is `Ok(None)`.
+    pub fn from_picker_key(key: &str) -> Result<Option<Self>, String> {
+        let key = key.trim();
+        if key.is_empty() || key == "off" {
+            return Ok(None);
+        }
+        if let Some(id) = key.strip_prefix("rack:") {
+            return id
+                .parse::<GrooveId>()
+                .map(|id| Some(Self::Rack(id)))
+                .map_err(|_| format!("Bad rack groove key {key:?}"));
+        }
+        if let Some(id) = key.strip_prefix("builtin:") {
+            if apply::builtin_groove(id).is_none() {
+                return Err(format!("Unknown built-in groove {id:?}"));
+            }
+            return Ok(Some(Self::Builtin(id.to_string())));
+        }
+        Err(format!("Bad groove key {key:?}"))
+    }
+}
+
 /// The rack's groove selection and amounts. Every field defaults, so racks
 /// saved before grooves existed load with no active groove.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

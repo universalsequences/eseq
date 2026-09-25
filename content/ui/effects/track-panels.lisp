@@ -4,6 +4,7 @@
 (import eseq.effects.state :as st)
 (import eseq.effects.param-controls :as pc)
 (import eseq.macro-state :as ms)
+(import eseq.drum-rack-v2)
 
 (export selected-plock-row
         plock-row-selected?
@@ -528,6 +529,26 @@
               :on-change (lambda (v) (do (eseq.seq-core-state/cool-off-follow) (seq-set-accum-limit v)))
               :width 5.2 :height 1.15)))))))
 
+
+;; A member of a drum rack playing a groove: the scheduler replaces track
+;; swing with the rack's groove (docs/rack-groove-spec.md, "UI"), so the
+;; swing control shows disabled with a hint naming the groove instead of a
+;; value that would do nothing.
+(def groove-swing-hint (track)
+  (let ((groove (eseq.drum-rack-v2/groove-of-track track)))
+    (v-stack :gap 0.15 :align :center
+      (label "swing" :font-size 8 :color :dim :bg :transparent :v-align :center)
+      (box :key "track-swing-groove-hint"
+        :debug-name "track-swing-groove-hint"
+        :width 5.2 :height 1.0 :padding 0
+        :h-align :center :v-align :center
+        :background-color '(rgba 0.12 0.13 0.14 1.0)
+        :corner-radius 3
+        (label (str "groove")
+          :font-size 8 :color :blue :bg :transparent :v-align :center))
+      (label (substring (if groove (get groove :active-label) "") 0 12)
+        :font-size 6.5 :color :dim :bg :transparent :v-align :center))))
+
 (def track-parameters-panel ()
   (box :debug-name "track-parameters-strip" :padding 0.0
     (v-stack :gap 0.25
@@ -593,6 +614,8 @@
             :plock-color-b (pc/param-plock-color-b)
             :width 5.0 :height 1.0 :font-size 9))
         (v-stack :align :center :gap 0.22
+          (if (eseq.drum-rack-v2/groove-active-for-track? SEQ.current-track)
+            (groove-swing-hint SEQ.current-track)
           (v-stack :gap 0.15 :align :center
             (label "swing" :font-size 8 :color :dim :bg :transparent :v-align :center)
             (number-picker :value SEQ.tp-swing :min 50 :max 75 :decimals 1
@@ -605,7 +628,7 @@
               :plock-color-g (pc/param-plock-color-g)
               :plock-color-b (pc/param-plock-color-b)
               :on-change (lambda (v) (do (eseq.seq-core-state/cool-off-follow) (seq-set-track-param :swing v)))
-              :width 5.2 :height 1.0))
+              :width 5.2 :height 1.0)))
           )
         
         (v-stack :align :center :gap 0.15
