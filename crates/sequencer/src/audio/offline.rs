@@ -109,7 +109,9 @@ impl<'a> OfflineAudioSession<'a> {
                     ticks.iter().map(|tick| format!("{}: {}", tick.name, tick.error))
                         .collect::<Vec<_>>().join("; "))));
             }
-            if advance.queue_rejections != 0 || advance.scheduled_until_sample != horizon {
+            // An early rack groove schedules past the horizon by its
+            // discovery lead (rack groove spec §Early hits).
+            if advance.queue_rejections != 0 || advance.scheduled_until_sample < horizon {
                 return Err(io::Error::other(format!(
                     "Offline scheduler did not complete sample {horizon}: reached {}, rejected {} events",
                     advance.scheduled_until_sample, advance.queue_rejections,

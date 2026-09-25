@@ -258,7 +258,7 @@ fn grooved_sample_time(g: &TrackGrooveSnapshot, boundary_beats, straight_sample,
 4. **Process emissions** (`enqueue_due_process_emissions`) that target a rack
    member: apply the groove, so step processes behave like the sources above.
    *Built (eseq-groove.2):* sites 1–4 plus generator emissions share
-   `groove::groove_delay_samples` (`groove/apply.rs`), keyed on the trig's
+   `groove::groove_offset_samples` (`groove/apply.rs`), keyed on the trig's
    straight transport beat: `SnapshotTrigger::boundary_beats` for steps,
    `GraphEmission::grid_beats` (post-`:quantize`, pre-node-swing) for graph
    fires, `item.beat` for process events. A graph node's own `:swing` still
@@ -291,12 +291,49 @@ Requirement: for every source, trigs are discovered at least
 `E` is bounded: snapping keeps `|offset| < 0.5` slot, and `timing_amount <= 1.5`
 gives `E <= 0.75 * resolution_beats`.
 
-Until that slice lands, clamp applied offsets to `>= 0` (grooves play correctly
-for late feels, and early hits land on the grid).
-
 Must hold: an early trig is never enqueued at a sample the audio thread has
 already passed. Add a test that pins this at the smallest supported buffer
 size.
+
+*Built (eseq-groove.3):* the late-only clamp is gone; `offset_beats` is signed
+and floored at `-MAX_EARLY_SLOTS` (0.75) slots, which is what bounds `E` even
+under Random jitter. `TrackGrooveSnapshot::max_early_beats` is the exact lead
+of one groove (lowest `min(off[k], off[k+1]) - random * spread[k]` after
+timing) and `SequencerSnapshot::groove_early_lead_beats` the table's maximum.
+`schedule_playing_lookahead` extends its horizon by `ceil(E * spq)` samples,
+which is the discovery requirement for every source at once: the step clock's
+trigger window, graph runtimes (their boundaries run `E` sooner, in order, so
+runtime state matches a non-ahead run to the same beat), and the
+process/neural/generator layers. The scheduling frontier is the dedupe: the
+next call starts where this one stopped, so no boundary is handled twice, and
+no per-source "already handled" bookkeeping can drift across song rows,
+launches or roll windows. Every site passes a `GrooveFloor`
+(`SnapshotSequencerClock::groove_floor(rendered)`): an early offset never
+lands before the audio frontier `rendered` (the transport-start downbeat and
+the first chunk after a seek, or a groove made early mid-play, are the cases
+it clamps). The one place the frontier stops being a dedupe is a mid-play
+resync (topology change, pattern-epoch bump, pattern switch, live-MIDI-FX
+toggle): the queue is cleared and the clock rewound to `rendered`, so it finds
+again the boundaries of early hits that already SOUNDED before `rendered`.
+`seek_to_rendered_position` records the old frontier as
+`GrooveFloor::replayed_until`, and an early trig whose straight sample is
+below it and whose move lands before `rendered` is dropped (`None`), not
+clamped, so it is not played twice. Transport start and other seeks reset the
+window to zero. `E` is zero for late-only and ungrooved projects, so they
+schedule bit-identically. The cost is up to `E` extra lookahead (at most 0.75
+slot) while an early groove plays. The offline renderer accepts a frontier
+past its horizon. Pinned by `scheduler::tests::rack_groove::early_groove_*`
+(16-frame offline advances, and a resync inside an early window),
+`graph_runtime_ahead_by_the_lead_matches_a_non_ahead_run` (against a grooved
+and an ungrooved single-call reference) and
+`groove::tests::grooved_sample_time_*`.
+
+*Known gaps (eseq-groove.8):* the same resyncs still lose (1) a LATE hit whose
+straight boundary is before `rendered` but whose grooved sample is after it
+(eseq-groove.2), and (2) graph emissions already produced for the discarded
+lookahead. The pattern-epoch and live-MIDI-FX resyncs do not rewind graph
+runtimes. That loss predates grooves, but the early lead `E` widens its
+window by up to 0.75 slot.
 
 ## UI
 
@@ -319,10 +356,12 @@ a "groove" hint, so there is one visible source of truth for the feel.
    tested on synthetic patterns. No playback change.
 2. **Apply, late-only, all sources.** `track_grooves` snapshot table, the
    `grooved_sample_time` function, wired at step, graph-emission, legacy-neural
-   and process sites with offsets clamped `>= 0`. Built-in MPC swing grooves.
+   and process sites with offsets clamped `>= 0` (lifted by slice 3). Built-in
+   MPC swing grooves.
    After this slice, the headline workflow works for late feels.
 3. **Early offsets.** Lookahead discovery `E` ahead for step triggers and graph
-   runtimes; remove the clamp; no-past-sample test.
+   runtimes; remove the clamp; no-past-sample test. *Built (eseq-groove.3):*
+   see §Early hits.
 4. **Rack panel UI.** Groove section, Extract Groove modal, heatmap, member swing
    hint.
 5. **Velocity + random amounts.** Velocity scaling and deterministic jitter.

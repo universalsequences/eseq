@@ -689,6 +689,10 @@ pub(super) fn enqueue_emitted_network_event_with_midi_fx(
     )
 }
 
+/// Enqueue every process event due before `up_to_beat`. Events aimed at a
+/// rack member play through its groove; `groove_floor` is the audio
+/// frontier an early groove offset may not cross, and drops an early hit that
+/// already sounded before a mid-play resync (rack groove spec §Early hits).
 pub(super) fn enqueue_due_process_emissions(
     queue: &impl ScheduledEventSink,
     snapshot: &SequencerSnapshot,
@@ -701,6 +705,7 @@ pub(super) fn enqueue_due_process_emissions(
     chunk_start_sample: u64,
     up_to_beat: f64,
     samples_per_quarter: f64,
+    groove_floor: crate::groove::GrooveFloor,
     debug_accum: bool,
 ) -> bool {
     for item in process_runtime.take_due_events(up_to_beat) {
@@ -714,13 +719,17 @@ pub(super) fn enqueue_due_process_emissions(
             crate::process::ProcessScheduledEvent::Emission(event) => event.track,
             crate::process::ProcessScheduledEvent::Step(spawned) => Some(spawned.event.track),
         };
-        let sample_time = grooved_emission_sample_time(
+        let Some(sample_time) = grooved_emission_sample_time(
             snapshot,
             target_track,
             straight_sample_time,
             item.beat,
             samples_per_quarter,
-        );
+            groove_floor,
+        ) else {
+            // An early hit that already sounded before a mid-play resync.
+            continue;
+        };
         match item.event {
             crate::process::ProcessScheduledEvent::Emission(mut event) => {
                 event.resolved.velocity =

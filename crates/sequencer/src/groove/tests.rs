@@ -725,27 +725,167 @@ fn applied_offset_interpolates_wraps_and_scales_by_timing_amount() {
     assert_eq!(off.offset_beats(0.25), 0.0);
 }
 
-/// Late-only slice: negative (early) offsets are clamped to the grid until
-/// the lookahead can discover trigs ahead of the chunk edge (eseq-groove.3).
+/// Early offsets (eseq-groove.3): negative slots move a trig BEFORE its
+/// straight boundary, interpolation passes through zero between an early and
+/// a late slot, and degenerate inputs never move a trig.
 #[test]
-fn applied_offset_is_late_only_in_this_slice() {
+fn applied_offset_is_signed_and_early_slots_move_trigs_early() {
     let groove = track_groove(1.0, 0.25, &[-0.3, 0.2, -0.1, 0.0]);
-    assert_eq!(
-        groove.offset_beats(0.0),
-        0.0,
-        "early kick lands on the grid"
+    assert!(
+        (groove.offset_beats(0.0) + 0.3 * 0.25).abs() < 1e-7,
+        "early kick"
     );
-    assert_eq!(groove.offset_beats(0.5), 0.0);
+    assert!((groove.offset_beats(0.5) + 0.1 * 0.25).abs() < 1e-7);
     assert!(groove.offset_beats(0.25) > 0.0);
-    // Interpolating across an early slot never goes negative either.
-    assert!(groove.offset_beats(0.125) >= 0.0);
-    assert_eq!(groove_delay_samples(&groove, 0.0, 24_000.0), 0);
-    assert_eq!(groove_delay_samples(&groove, 0.25, 24_000.0), 1_200);
-    assert_eq!(grooved_sample_time(&groove, 0.25, 6_000, 24_000.0), 7_200);
+    // Halfway between -0.3 and 0.2 slots: -0.05 of a 16th.
+    assert!((groove.offset_beats(0.125) + 0.05 * 0.25).abs() < 1e-7);
+    assert_eq!(groove_offset_samples(&groove, 0.0, 24_000.0), -1_800);
+    assert_eq!(groove_offset_samples(&groove, 0.25, 24_000.0), 1_200);
+    assert_eq!(groove_offset_samples(&groove, 0.5, 24_000.0), -600);
+    assert_eq!(
+        grooved_sample_time(&groove, 0.25, 6_000, 24_000.0, GrooveFloor::at(0)),
+        Some(7_200)
+    );
+    assert_eq!(
+        grooved_sample_time(&groove, 1.0, 24_000, 24_000.0, GrooveFloor::at(0)),
+        Some(22_200)
+    );
+    assert_eq!(
+        grooved_sample_time(&groove, 1.5, 36_000, 24_000.0, GrooveFloor::at(0)),
+        Some(35_400)
+    );
     // Degenerate inputs never move a trig.
-    assert_eq!(groove_delay_samples(&groove, f64::NAN, 24_000.0), 0);
-    assert_eq!(groove_delay_samples(&groove, 0.25, 0.0), 0);
+    assert_eq!(groove_offset_samples(&groove, f64::NAN, 24_000.0), 0);
+    assert_eq!(groove_offset_samples(&groove, 0.25, 0.0), 0);
     assert_eq!(track_groove(1.0, 0.25, &[]).offset_beats(0.25), 0.0);
+    let mut nan = groove.clone();
+    nan.timing_amount = f32::NAN;
+    assert_eq!(
+        nan.offset_beats(0.0),
+        0.0,
+        "a NaN amount is no move, not the cap"
+    );
+}
+
+/// The audio-frontier floor: an early offset never lands before
+/// `not_before`, never delays a trig that was already before it, and never
+/// touches a late offset.
+#[test]
+fn grooved_sample_time_floors_early_offsets_at_the_frontier() {
+    let groove = track_groove(1.0, 0.25, &[-0.3, 0.2, -0.1, 0.0]);
+    // Straight 24_000, groove wants 22_200.
+    assert_eq!(
+        grooved_sample_time(&groove, 1.0, 24_000, 24_000.0, GrooveFloor::at(22_200)),
+        Some(22_200)
+    );
+    assert_eq!(
+        grooved_sample_time(&groove, 1.0, 24_000, 24_000.0, GrooveFloor::at(23_000)),
+        Some(23_000)
+    );
+    // A frontier past the straight sample: the trig was already late, the
+    // floor never makes it later.
+    assert_eq!(
+        grooved_sample_time(&groove, 1.0, 24_000, 24_000.0, GrooveFloor::at(30_000)),
+        Some(24_000)
+    );
+    // Late offsets ignore the floor entirely.
+    assert_eq!(
+        grooved_sample_time(&groove, 0.25, 6_000, 24_000.0, GrooveFloor::at(9_000)),
+        Some(7_200)
+    );
+    // Transport start: an early downbeat cannot go below sample 0.
+    assert_eq!(
+        grooved_sample_time(&groove, 0.0, 0, 24_000.0, GrooveFloor::at(0)),
+        Some(0)
+    );
+}
+
+/// The resync dedupe: after a mid-play resync rewinds the clock to the audio
+/// frontier, a trig discovered before the resync whose early move lands
+/// before the frontier has already sounded, so it is dropped instead of
+/// clamped (which would play it twice). Outside the replayed window, or when
+/// the move still lands at or after the frontier, it plays as usual.
+#[test]
+fn grooved_sample_time_drops_early_hits_already_played_before_a_resync() {
+    let groove = track_groove(1.0, 0.25, &[-0.3, 0.2, -0.1, 0.0]);
+    let resynced = |not_before, replayed_until| GrooveFloor {
+        not_before,
+        replayed_until,
+    };
+    // Straight 24_000 wants 22_200; the resync landed at 23_000 with the
+    // old frontier at 30_000: the hit played at 22_200 already.
+    assert_eq!(
+        grooved_sample_time(&groove, 1.0, 24_000, 24_000.0, resynced(23_000, 30_000)),
+        None
+    );
+    // Not yet played (lands at or after the frontier): re-enqueued as usual.
+    assert_eq!(
+        grooved_sample_time(&groove, 1.0, 24_000, 24_000.0, resynced(22_000, 30_000)),
+        Some(22_200)
+    );
+    // Never discovered before the resync (straight past the old frontier):
+    // it cannot have sounded, so it clamps like a transport start.
+    assert_eq!(
+        grooved_sample_time(&groove, 1.0, 24_000, 24_000.0, resynced(23_000, 24_000)),
+        Some(23_000)
+    );
+    // Late offsets are never dropped.
+    assert_eq!(
+        grooved_sample_time(&groove, 0.25, 6_000, 24_000.0, resynced(9_000, 30_000)),
+        Some(7_200)
+    );
+}
+
+/// `max_early_beats` is the most negative applied offset as a lead: zero for
+/// a late-only groove, scaled by timing, widened by Random spread, and never
+/// past the 0.75-slot cap (which also bounds the applied offset itself).
+#[test]
+fn max_early_beats_bounds_every_applied_offset() {
+    assert_eq!(
+        track_groove(1.0, 0.25, &[0.0, 0.3, 0.1, 0.2]).max_early_beats(),
+        0.0
+    );
+    assert_eq!(track_groove(1.0, 0.25, &[]).max_early_beats(), 0.0);
+    let groove = track_groove(1.0, 0.25, &[-0.3, 0.2, -0.1, 0.0]);
+    assert!((groove.max_early_beats() - 0.3 * 0.25).abs() < 1e-7);
+    let mut heavy = groove.clone();
+    heavy.timing_amount = 1.5;
+    assert!((heavy.max_early_beats() - 0.45 * 0.25).abs() < 1e-7);
+    // A negative amount flips late slots early.
+    let mut flipped = groove.clone();
+    flipped.timing_amount = -1.0;
+    assert!((flipped.max_early_beats() - 0.2 * 0.25).abs() < 1e-7);
+    // Random widens the lead by `random * spread` slots.
+    let mut jittery = accented_groove(&[-0.3, 0.2, -0.1, 0.0], &[1.0; 4], &[0.2; 4]);
+    jittery.random_amount = 1.0;
+    jittery.pad_note = 36;
+    assert!((jittery.max_early_beats() - 0.5 * 0.25).abs() < 1e-7);
+    // The bound holds for every position and bar.
+    for groove in [&groove, &heavy, &flipped, &jittery] {
+        let lead = groove.max_early_beats();
+        for index in 0..(64 * 8) {
+            let beats = index as f64 / 32.0;
+            assert!(
+                groove.offset_beats(beats) >= -lead - 1e-12,
+                "{beats}: {} vs lead {lead}",
+                groove.offset_beats(beats)
+            );
+        }
+    }
+    // The cap: E <= 0.75 * resolution, and no applied offset goes earlier.
+    let mut capped = accented_groove(&[-0.49, -0.49, -0.49, -0.49], &[1.0; 4], &[0.5; 4]);
+    capped.timing_amount = 1.5;
+    capped.random_amount = 1.0;
+    assert!((capped.max_early_beats() - MAX_EARLY_SLOTS * 0.25).abs() < 1e-12);
+    for index in 0..64 {
+        assert!(capped.offset_beats(index as f64 * 0.25) >= -MAX_EARLY_SLOTS * 0.25 - 1e-12);
+    }
+    // The table lead is the largest track lead; `None` tracks add nothing.
+    assert_eq!(max_early_lead_beats(&[]), 0.0);
+    assert_eq!(
+        max_early_lead_beats(&[None, Some(groove.clone()), Some(heavy.clone()), None]),
+        heavy.max_early_beats()
+    );
 }
 
 /// The built-in MPC swings are two-slot grooves that delay exactly what
@@ -779,8 +919,8 @@ fn builtin_mpc_swings_match_track_swing_delays() {
             let beats = bucket as f64 * res;
             let expected = if bucket % 2 == 1 { swing as u64 } else { 0 };
             assert_eq!(
-                groove_delay_samples(&snapshot, beats, samples_per_quarter),
-                expected,
+                groove_offset_samples(&snapshot, beats, samples_per_quarter),
+                expected as i64,
                 "{} bucket {bucket}",
                 builtin.id
             );

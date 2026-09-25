@@ -5,11 +5,18 @@
 //! The app resolves each rack member's row once, when rack config or rack
 //! membership changes ([`track_groove_snapshots`]); the scheduler then only
 //! indexes `SequencerSnapshot::track_grooves` by track and calls
-//! [`groove_delay_samples`] with the trig's straight boundary beat. A track
+//! [`grooved_sample_time`] with the trig's straight boundary beat. A track
 //! with no entry plays exactly as before.
 //!
-//! This slice is LATE-ONLY: applied offsets are clamped to `>= 0` until the
-//! lookahead can discover trigs ahead of the chunk edge (eseq-groove.3).
+//! Early hits (eseq-groove.3): offsets are signed. A negative offset moves a
+//! trig BEFORE its straight boundary, so the scheduler discovers trigs
+//! [`TrackGrooveSnapshot::max_early_beats`] ahead of where they must sound
+//! (see [`max_early_lead_beats`] and the lookahead horizon), and every site
+//! floors the grooved sample at the audio frontier ([`GrooveFloor`]), so an
+//! early trig is never enqueued at a passed sample, and drops (rather than
+//! re-plays) an early hit that already sounded before a mid-play resync.
+//! Applied offsets are bounded below by [`MAX_EARLY_SLOTS`] slots, which
+//! bounds the lead: `E <= 0.75 * resolution_beats`.
 //!
 //! Velocity and random amounts (eseq-groove.5): `velocity_amount` lerps the
 //! slot's `velocity_scale` into the trig's resolved velocity
@@ -30,6 +37,14 @@ use crate::project::ProjectRackConfig;
 /// snap keeps coincident trigs from different sources on the same slot.
 /// 1e-4 of a 16th is about 0.3 samples at 120 BPM / 48 kHz.
 const SLOT_SNAP: f64 = 1.0e-4;
+
+/// The earliest an applied offset may land, in slots before the straight
+/// boundary. Extraction keeps `|offset| < 0.5` and `timing_amount <= 1.5`, so
+/// a measured pocket never reaches it; the cap only bounds Random jitter and
+/// hand-built rows, which is what keeps the scheduler's discovery lead
+/// `E = max early offset` at most `0.75 * resolution_beats` (rack groove spec
+/// §Early hits).
+pub const MAX_EARLY_SLOTS: f64 = 0.75;
 
 /// One member track's resolved groove: its pad row (or the shared row when
 /// the pad has none) plus the rack's amounts. Parallel to the snapshot's
@@ -128,7 +143,7 @@ impl TrackGrooveSnapshot {
     ///
     /// The interpolation is what lets a 16th groove shape 32nd hats or
     /// triplet-quantized neurons; two-slot swing is exactly this warp.
-    /// Clamped to `>= 0` (late-only, eseq-groove.3 lifts the clamp).
+    /// Signed (negative = early), never earlier than [`MAX_EARLY_SLOTS`].
     pub fn offset_beats(&self, boundary_beats: f64) -> f64 {
         let Some(at) = self.slot_position(boundary_beats) else {
             return 0.0;
@@ -144,10 +159,47 @@ impl TrackGrooveSnapshot {
         let offset_slots = offset_slots * self.timing_amount as f64;
         let beats = offset_slots * self.resolution_beats;
         if beats.is_finite() {
-            beats.max(0.0)
+            // `max` after the finiteness check: `f64::max` would turn a NaN
+            // into the cap instead of "no move".
+            offset_slots.max(-MAX_EARLY_SLOTS) * self.resolution_beats
         } else {
             0.0
         }
+    }
+
+    /// How far before its straight boundary this groove can move a trig, in
+    /// beats: the most negative [`offset_beats`](Self::offset_beats) over
+    /// every position, as a non-negative lead. Interpolation stays between
+    /// neighbouring slot offsets and Random adds at most
+    /// `random * spread[k]` slots, so the scan is exact per slot pair (and
+    /// conservative only in assuming the noise reaches its bound). Zero for a
+    /// late-only (or degenerate) groove, so it changes nothing there.
+    pub fn max_early_beats(&self) -> f64 {
+        let slots = &self.row.slots;
+        let n = slots.len();
+        if n == 0 || !(self.period_beats > 0.0) || !(self.resolution_beats > 0.0) {
+            return 0.0;
+        }
+        let timing = self.timing_amount as f64;
+        let random = self.random_amount as f64;
+        let mut earliest_slots = 0.0_f64;
+        for k in 0..n {
+            let a = slots[k].offset as f64;
+            let b = slots[(k + 1) % n].offset as f64;
+            let jitter = (random * slots[k].spread as f64).abs();
+            // The lowest offset this slot span can produce after timing: the
+            // low end of `[min - jitter, max + jitter]` for a positive
+            // amount, the high end mirrored for a negative one.
+            let low = if timing >= 0.0 {
+                (a.min(b) - jitter) * timing
+            } else {
+                (a.max(b) + jitter) * timing
+            };
+            if low.is_finite() {
+                earliest_slots = earliest_slots.min(low);
+            }
+        }
+        (-earliest_slots).min(MAX_EARLY_SLOTS) * self.resolution_beats
     }
 
     /// The velocity multiplier at `boundary_beats`:
@@ -186,39 +238,95 @@ impl TrackGrooveSnapshot {
     }
 }
 
-/// The groove delay in samples for a trig whose straight boundary is
-/// `boundary_beats`: the one timing function every trig site shares, so the
-/// same pad at the same position moves by the same number of samples no
-/// matter which source fired it.
-pub fn groove_delay_samples(
+/// The groove offset in samples for a trig whose straight boundary is
+/// `boundary_beats` (negative = early): the one timing function every trig
+/// site shares, so the same pad at the same position moves by the same number
+/// of samples no matter which source fired it.
+pub fn groove_offset_samples(
     groove: &TrackGrooveSnapshot,
     boundary_beats: f64,
     samples_per_quarter: f64,
-) -> u64 {
+) -> i64 {
     if !(samples_per_quarter > 0.0) {
         return 0;
     }
     let samples = (groove.offset_beats(boundary_beats) * samples_per_quarter).round();
     if samples.is_finite() {
-        samples.max(0.0) as u64
+        samples.clamp(i64::MIN as f64, i64::MAX as f64) as i64
     } else {
         0
     }
 }
 
+/// Where an early groove offset may land relative to the audio frontier
+/// (rack groove spec §Early hits). Built per lookahead call by the scheduler.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct GrooveFloor {
+    /// The audio frontier (`rendered`): an early trig is never enqueued at a
+    /// sample the audio thread has already passed.
+    pub not_before: u64,
+    /// The previous scheduling frontier when playback last resynced mid-play
+    /// (queue cleared, clock rewound to `rendered`); zero after a transport
+    /// start or seek. A trig whose straight sample lies below it was already
+    /// discovered and enqueued before the resync, so an early move that lands
+    /// before `not_before` already SOUNDED: it is dropped, not clamped, or the
+    /// resync would play it a second time.
+    pub replayed_until: u64,
+}
+
+impl GrooveFloor {
+    /// A floor with no resync history: early trigs clamp at `not_before`.
+    pub fn at(not_before: u64) -> Self {
+        Self {
+            not_before,
+            replayed_until: 0,
+        }
+    }
+}
+
 /// The straight sample moved by the groove (spec's `grooved_sample_time`,
 /// timing half).
+///
+/// `floor.not_before` is the audio frontier the scheduler is extending from:
+/// an early offset never lands before it, so a trig is never enqueued at a
+/// sample the audio thread has already passed. The floor never delays a
+/// trig whose straight sample is itself earlier (that trig was already late
+/// before the groove touched it), and a late offset ignores it.
+///
+/// `None` means "already played": the early move lands before the frontier
+/// and the straight sample was discovered before a mid-play resync
+/// ([`GrooveFloor::replayed_until`]), so the hit sounded before the queue was
+/// cleared. Callers skip the trig. A late or zero offset is never `None`.
 pub fn grooved_sample_time(
     groove: &TrackGrooveSnapshot,
     boundary_beats: f64,
     straight_sample: u64,
     samples_per_quarter: f64,
-) -> u64 {
-    straight_sample.saturating_add(groove_delay_samples(
-        groove,
-        boundary_beats,
-        samples_per_quarter,
-    ))
+    floor: GrooveFloor,
+) -> Option<u64> {
+    let offset = groove_offset_samples(groove, boundary_beats, samples_per_quarter);
+    let moved = straight_sample.saturating_add_signed(offset);
+    if offset >= 0 || moved >= floor.not_before {
+        return Some(moved);
+    }
+    if straight_sample < floor.replayed_until {
+        return None;
+    }
+    Some(moved.max(floor.not_before.min(straight_sample)))
+}
+
+/// The scheduler's discovery lead for a groove table: the largest
+/// [`TrackGrooveSnapshot::max_early_beats`] over every grooved track. The
+/// lookahead schedules this far past its horizon, so a trig whose straight
+/// boundary lies up to this far beyond the audio's next block is already
+/// enqueued when its early offset makes it due. Zero when no groove can move
+/// a trig early, which keeps late-only (and ungrooved) scheduling unchanged.
+pub fn max_early_lead_beats(grooves: &[Option<TrackGrooveSnapshot>]) -> f64 {
+    grooves
+        .iter()
+        .flatten()
+        .map(TrackGrooveSnapshot::max_early_beats)
+        .fold(0.0, f64::max)
 }
 
 // ---------------------------------------------------------------------------

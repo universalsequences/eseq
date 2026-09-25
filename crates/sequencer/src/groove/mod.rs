@@ -32,9 +32,9 @@ mod tests;
 mod transfer;
 
 pub use apply::{
-    builtin_groove, builtin_grooves, groove_delay_samples, groove_hash_noise, grooved_sample_time,
-    mpc_swing_groove, padless_seed_key, track_groove_snapshots, BuiltinGroove, TrackGrooveSnapshot,
-    BUILTIN_MPC_SWING_PERCENTS,
+    builtin_groove, builtin_grooves, groove_hash_noise, GrooveFloor, groove_offset_samples, grooved_sample_time,
+    max_early_lead_beats, mpc_swing_groove, padless_seed_key, track_groove_snapshots,
+    BuiltinGroove, TrackGrooveSnapshot, BUILTIN_MPC_SWING_PERCENTS, MAX_EARLY_SLOTS,
 };
 pub use transfer::{import_grooves, install_groove_settings, GrooveRowChoice};
 

@@ -138,6 +138,13 @@ impl SequencerSnapshot {
         self.track_grooves.get(track).and_then(Option::as_ref)
     }
 
+    /// How far ahead of the audio the scheduler must discover trigs so rack
+    /// grooves can play them early (rack groove spec §Early hits), in beats.
+    /// Zero when no groove moves anything early.
+    pub fn groove_early_lead_beats(&self) -> f64 {
+        crate::groove::max_early_lead_beats(&self.track_grooves)
+    }
+
     pub fn empty() -> Self {
         Self {
             transport: SequencerTransportSnapshot {

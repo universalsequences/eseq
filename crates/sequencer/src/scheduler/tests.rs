@@ -14154,7 +14154,7 @@ fn scene_transpose_follows_live_scene_values_without_a_scratch_runtime() {
     mod rack_groove {
         use super::*;
         use crate::groove::{
-            builtin_groove, groove_delay_samples, GrooveRow, GrooveSlot, TrackGrooveSnapshot,
+            builtin_groove, groove_offset_samples, GrooveRow, GrooveSlot, TrackGrooveSnapshot,
         };
         use crate::scheduler::{
             enqueue_due_process_emissions, grooved_or_swung_network_sample_time, grooved_velocity,
@@ -14224,25 +14224,7 @@ fn scene_transpose_follows_live_scene_values_without_a_scratch_runtime() {
             samples: u64,
             block_size: usize,
         ) -> ScheduledEventQueue<512> {
-            let mut scheduler = SchedulerLookaheadState::new(SAMPLE_RATE);
-            let manifests = state
-                .published_sequencers()
-                .into_iter()
-                .filter_map(|seq| seq.graph)
-                .collect::<Vec<_>>();
-            reconcile_graph_runtimes(
-                manifests,
-                &snapshot.graph_overrides,
-                &[],
-                &mut scheduler.graph_runtimes,
-                &mut scheduler.graph_manifests,
-                scheduler.clock.total_beats,
-            );
-            let mut scratch = lisp_host::scratch_runtime_with_fallbacks(Arc::clone(state), 0, 0);
-            scratch
-                .eval(&lisp_host::load_midi_fx_library_source())
-                .expect("load MIDI FX library");
-            let mut scratch_runtime = Some(scratch);
+            let (mut scheduler, mut scratch_runtime) = fresh_scheduler(state, snapshot);
             let queue = ScheduledEventQueue::<512>::new();
             let live_midi_fx_tracks: [LiveMidiFxTrackState; MAX_TRACKS] =
                 std::array::from_fn(|_| LiveMidiFxTrackState::default());
@@ -14264,6 +14246,34 @@ fn scene_transpose_follows_live_scene_values_without_a_scratch_runtime() {
                 false,
             );
             queue
+        }
+
+        /// A FRESH scheduler state (as an offline render/bounce starts) with
+        /// any published graph sequencers reconciled, plus a scheduler-side
+        /// scratch runtime with the MIDI FX library loaded.
+        fn fresh_scheduler(
+            state: &Arc<SequencerState>,
+            snapshot: &crate::sequencer::SequencerSnapshot,
+        ) -> (SchedulerLookaheadState, Option<lisp_host::ScratchControlRuntime>) {
+            let mut scheduler = SchedulerLookaheadState::new(SAMPLE_RATE);
+            let manifests = state
+                .published_sequencers()
+                .into_iter()
+                .filter_map(|seq| seq.graph)
+                .collect::<Vec<_>>();
+            reconcile_graph_runtimes(
+                manifests,
+                &snapshot.graph_overrides,
+                &[],
+                &mut scheduler.graph_runtimes,
+                &mut scheduler.graph_manifests,
+                scheduler.clock.total_beats,
+            );
+            let mut scratch = lisp_host::scratch_runtime_with_fallbacks(Arc::clone(state), 0, 0);
+            scratch
+                .eval(&lisp_host::load_midi_fx_library_source())
+                .expect("load MIDI FX library");
+            (scheduler, Some(scratch))
         }
 
         /// Every enqueued trigger as `(track, sample, velocity bits)`, in
@@ -14604,7 +14614,15 @@ fn scene_transpose_follows_live_scene_values_without_a_scratch_runtime() {
                 },
             };
             let at = |track: usize, sample: u64, beats: f64| {
-                grooved_or_swung_network_sample_time(&snapshot, &event(track), sample, beats, 48_000.0)
+                grooved_or_swung_network_sample_time(
+                    &snapshot,
+                    &event(track),
+                    sample,
+                    beats,
+                    48_000.0,
+                    crate::groove::GrooveFloor::at(0),
+                )
+                .expect("no resync: never dropped")
             };
             // Ungrooved: the target's swing, unchanged.
             assert_eq!(at(0, 12_000, 0.25), 18_000);
@@ -14675,6 +14693,7 @@ fn scene_transpose_follows_live_scene_values_without_a_scratch_runtime() {
                 0,
                 2.0,
                 spq,
+                crate::groove::GrooveFloor::at(0),
                 false,
             ));
             let mut times: Vec<(usize, u64)> = observed_triggers(&queue)
@@ -14730,8 +14749,16 @@ fn scene_transpose_follows_live_scene_values_without_a_scratch_runtime() {
                         out.push((
                             trigger.step,
                             boundary,
-                            step_trigger_sample_time(&swung, &trigger, boundary, SAMPLE_RATE, spq),
-                            step_trigger_sample_time(&grooved, &trigger, boundary, SAMPLE_RATE, spq),
+                            step_trigger_sample_time(
+                                &swung, &trigger, boundary, SAMPLE_RATE, spq,
+                                crate::groove::GrooveFloor::at(0),
+                            )
+                            .expect("never dropped"),
+                            step_trigger_sample_time(
+                                &grooved, &trigger, boundary, SAMPLE_RATE, spq,
+                                crate::groove::GrooveFloor::at(0),
+                            )
+                            .expect("never dropped"),
                             trigger.boundary_beats,
                             trigger.absolute_beats,
                         ));
@@ -14775,7 +14802,7 @@ fn scene_transpose_follows_live_scene_values_without_a_scratch_runtime() {
                 let swing_expected = if clip_bucket % 2 == 1 { delay } else { 0 };
                 assert_eq!(swing - boundary, swing_expected);
             }
-            assert_eq!(groove_delay_samples(&mpc, 8.25, spq), delay);
+            assert_eq!(groove_offset_samples(&mpc, 8.25, spq), delay as i64);
         }
 
         /// A groove row with per-slot accents and spreads (eseq-groove.5).
@@ -14837,7 +14864,10 @@ fn scene_transpose_follows_live_scene_values_without_a_scratch_runtime() {
             let first = render_two_tracks(Some(random.clone()), BARS, 6_000);
             let second = render_two_tracks(Some(random.clone()), BARS, 6_000);
             let small_blocks = render_two_tracks(Some(random.clone()), BARS, 512);
-            assert_eq!(first.len(), (2 * 16 * BARS) as usize);
+            // Jitter can push a slot early (eseq-groove.3), so the render
+            // also discovers the next bar's downbeats through its lead.
+            assert!(random.max_early_beats() > 0.0);
+            assert_eq!(first.len(), (2 * 16 * BARS + 2) as usize);
             assert_eq!(first, second, "run to run: identical render");
             let sorted = |mut v: Vec<(usize, u64, u32)>| {
                 v.sort();
@@ -14855,7 +14885,7 @@ fn scene_transpose_follows_live_scene_values_without_a_scratch_runtime() {
             let mut times: Vec<u64> =
                 first.iter().filter(|e| e.0 == 0).map(|e| e.1).collect();
             times.sort();
-            assert_eq!(times.len(), (16 * BARS) as usize);
+            times.truncate((16 * BARS) as usize);
             let offset = |index: usize| times[index] as i64 - (index as f64 * step) as i64;
             let mut varying_slots = 0;
             for slot in 0..16 {
@@ -14864,13 +14894,14 @@ fn scene_transpose_follows_live_scene_values_without_a_scratch_runtime() {
                 if per_bar.len() > 1 {
                     varying_slots += 1;
                 }
-                // Jitter stays within random * spread of the pocket (late-only
-                // clamp can only pull it up to the grid).
+                // Jitter stays within random * spread of the pocket, early
+                // included; only the transport-start downbeat is floored at
+                // sample 0.
                 let pocket = HAT_POCKET[slot] as f64 * 0.25 * spq;
                 let bound = 0.2 * 0.25 * spq + 1.0;
                 for bar in 0..BARS as usize {
                     let got = offset(bar * 16 + slot) as f64;
-                    assert!(got >= 0.0);
+                    assert!(got >= 0.0 || bar > 0 || slot > 0);
                     assert!(
                         (got - pocket).abs() <= bound || got == 0.0,
                         "slot {slot} bar {bar}: {got} vs pocket {pocket}"
@@ -14902,8 +14933,9 @@ fn scene_transpose_follows_live_scene_values_without_a_scratch_runtime() {
             // and the ungrooved track is untouched by the groove entirely.
             let ungrooved = render_two_tracks(None, BARS, 6_000);
             assert!(first.iter().all(|e| e.2 == 0.5_f32.to_bits()));
+            let end = (spq * 4.0) as u64 * BARS;
             let track1 = |v: &[(usize, u64, u32)]| {
-                sorted(v.iter().copied().filter(|e| e.0 == 1).collect())
+                sorted(v.iter().copied().filter(|e| e.0 == 1 && e.1 < end).collect())
             };
             assert_eq!(track1(&first), track1(&ungrooved));
         }
@@ -15007,6 +15039,7 @@ fn scene_transpose_follows_live_scene_values_without_a_scratch_runtime() {
                 0,
                 2.0,
                 spq,
+                crate::groove::GrooveFloor::at(0),
                 false,
             ));
             let mut got: Vec<(usize, u64, f32)> = trig_velocities(&queue)
@@ -15210,6 +15243,490 @@ fn scene_transpose_follows_live_scene_values_without_a_scratch_runtime() {
                         "{after:?}: want velocity {want} (from {before:?})"
                     );
                 }
+            });
+        }
+
+        // -----------------------------------------------------------------
+        // Early hits (eseq-groove.3)
+        // -----------------------------------------------------------------
+
+        /// A one-bar pocket at 16ths that pushes half its slots EARLY (down
+        /// to -0.45 slot) and drags the rest late. The graph fixture fires on
+        /// the 16th after each kick (slots 1, 5, 9, 13), three of which are
+        /// early; slot 0 is early too, so the transport-start floor is
+        /// exercised.
+        const EARLY_POCKET: [f32; 16] = [
+            -0.20, -0.20, 0.10, 0.25, -0.05, -0.35, 0.30, 0.00, -0.15, 0.20, -0.30, 0.05, 0.15,
+            -0.45, -0.10, 0.15,
+        ];
+
+        /// The early-pocket hat in the variable-reset rack fixture: the
+        /// kick (graph seed) plays straight, the hat (steps + graph fires)
+        /// plays `EARLY_POCKET`.
+        fn early_rack_fixture(
+            grooved: bool,
+        ) -> (Arc<SequencerState>, Arc<crate::sequencer::SequencerSnapshot>) {
+            variable_reset_rack_fixture(
+                grooved.then(|| vec![None, Some(groove(4.0, 0.25, &EARLY_POCKET)), None]),
+            )
+        }
+
+        /// Offline-style driving of the production lookahead: every call
+        /// extends the schedule exactly `block` samples past the audio
+        /// (`rendered`), as the offline renderer's `horizon = start + block`
+        /// does, so there is no lookahead slack besides the groove's own lead.
+        /// Returns the scheduler, the final frontier and every trigger with
+        /// the `rendered` sample of the call that enqueued it.
+        fn lookahead_in_blocks(
+            state: &Arc<SequencerState>,
+            snapshot: &crate::sequencer::SequencerSnapshot,
+            samples: u64,
+            block: usize,
+        ) -> (SchedulerLookaheadState, u64, Vec<(u64, ObservedTrigger)>) {
+            let (mut scheduler, mut scratch_runtime) = fresh_scheduler(state, snapshot);
+            let queue = ScheduledEventQueue::<512>::new();
+            let live_midi_fx_tracks: [LiveMidiFxTrackState; MAX_TRACKS] =
+                std::array::from_fn(|_| LiveMidiFxTrackState::default());
+            let mut frontier = 0;
+            let mut events = Vec::new();
+            let mut rendered = 0;
+            while rendered < samples {
+                frontier = schedule_playing_lookahead(
+                    &mut scheduler,
+                    state,
+                    snapshot,
+                    &queue,
+                    &mut scratch_runtime,
+                    &live_midi_fx_tracks,
+                    snapshot.transport.pattern_epoch,
+                    rendered,
+                    block as u64,
+                    SAMPLE_RATE,
+                    block,
+                    samples_per_quarter(snapshot),
+                    frontier,
+                    false,
+                    false,
+                )
+                .scheduled_until_sample;
+                assert!(frontier >= rendered + block as u64, "the call reached its horizon");
+                events.extend(observed_triggers(&queue).into_iter().map(|e| (rendered, e)));
+                rendered += block as u64;
+            }
+            (scheduler, frontier, events)
+        }
+
+        fn times_of(
+            events: &[ObservedTrigger],
+            kind: ScheduledTriggerKind,
+            track: usize,
+        ) -> Vec<u64> {
+            let mut times: Vec<u64> = events
+                .iter()
+                .filter(|e| e.kind == kind && e.track == track)
+                .map(|e| e.sample_time)
+                .collect();
+            times.sort_unstable();
+            times
+        }
+
+        /// Acceptance: negative offsets sound EARLY for step trigs and for
+        /// graph emissions, by the same number of samples for the same pad
+        /// and slot (the graph's fires are keyed on their straight grid
+        /// beat), and the downbeat at transport start is floored at sample 0
+        /// instead of being lost or wrapped.
+        #[test]
+        fn early_groove_moves_step_trigs_and_graph_emissions_before_the_grid() {
+            run_with_scheduler_stack(|| {
+                let (state, snapshot) = early_rack_fixture(false);
+                let spq = samples_per_quarter(&snapshot);
+                let samples = (spq * 8.0) as u64;
+                let step = (spq / 4.0) as u64;
+                let straight = run_lookahead(&state, &snapshot, samples);
+                let (state, grooved_snapshot) = early_rack_fixture(true);
+                let lead = grooved_snapshot.groove_early_lead_beats();
+                assert!((lead - 0.45 * 0.25).abs() < 1e-7, "E is the earliest slot: {lead}");
+                let grooved = run_lookahead(&state, &grooved_snapshot, samples);
+
+                let offset = |straight_time: u64| -> i64 {
+                    let slot = (straight_time / step) as usize % 16;
+                    (EARLY_POCKET[slot] as f64 * 0.25 * spq).round() as i64
+                };
+                // Straight trigs well inside the window (the grooved run also
+                // discovers the next bar's early hits through its lead).
+                let limit = samples - 2 * step;
+                for kind in [ScheduledTriggerKind::Step, ScheduledTriggerKind::Network] {
+                    let before: Vec<u64> = times_of(&straight, kind, 1)
+                        .into_iter()
+                        .filter(|t| *t < limit)
+                        .collect();
+                    assert!(before.len() >= 4, "{kind:?} hits on the hat: {before:?}");
+                    let after = times_of(&grooved, kind, 1);
+                    assert!(after.len() >= before.len());
+                    let mut early = 0;
+                    for (straight_time, grooved_time) in before.iter().zip(&after) {
+                        let want = straight_time.saturating_add_signed(offset(*straight_time));
+                        assert_eq!(
+                            *grooved_time, want,
+                            "{kind:?} at 16th {}: straight {straight_time}",
+                            straight_time / step
+                        );
+                        if grooved_time < straight_time {
+                            early += 1;
+                        }
+                    }
+                    assert!(
+                        early >= 3,
+                        "{kind:?}: the early slots really sound early: {before:?}"
+                    );
+                }
+                // Steps and graph fires on the same slot move identically.
+                let steps = times_of(&grooved, ScheduledTriggerKind::Step, 1);
+                for fire in times_of(&grooved, ScheduledTriggerKind::Network, 1) {
+                    assert!(steps.contains(&fire), "graph fire {fire} lands on a grooved step");
+                }
+                // Transport start: the early downbeat cannot sound before 0.
+                assert_eq!(times_of(&grooved, ScheduledTriggerKind::Step, 1)[0], 0);
+                // The straight kick is untouched.
+                assert_eq!(
+                    times_of(&grooved, ScheduledTriggerKind::Step, 0)
+                        .into_iter()
+                        .filter(|t| *t < limit)
+                        .collect::<Vec<_>>(),
+                    times_of(&straight, ScheduledTriggerKind::Step, 0)
+                        .into_iter()
+                        .filter(|t| *t < limit)
+                        .collect::<Vec<_>>(),
+                );
+            });
+        }
+
+        /// Acceptance, pinned at the smallest buffer: driven like the offline
+        /// renderer (each advance schedules exactly one buffer past the audio
+        /// and nothing more), no trigger is ever enqueued at a sample the
+        /// audio thread has already passed, even though early hits land in
+        /// buffers that end BEFORE their straight boundary. The lead is what
+        /// makes that possible, and the frontier dedupes: small buffers
+        /// schedule exactly the trigs one big call does, none lost or doubled.
+        #[test]
+        fn early_groove_never_enqueues_a_passed_sample_at_the_smallest_buffer() {
+            /// Below any audio host's minimum fixed buffer; the scheduler
+            /// contract is per advance, so this is the worst case.
+            const SMALLEST_BUFFER: usize = 16;
+            run_with_scheduler_stack(|| {
+                let (state, snapshot) = early_rack_fixture(true);
+                let spq = samples_per_quarter(&snapshot);
+                let step = (spq / 4.0) as u64;
+                let end = (spq * 4.0) as u64;
+                let queue = Arc::new(ScheduledEventQueue::<4096>::new());
+                let mut driver = super::super::worker::SchedulerDriver::new(
+                    Arc::clone(&state),
+                    SAMPLE_RATE,
+                    SMALLEST_BUFFER,
+                    queue.clone(),
+                );
+                let mut events: Vec<ObservedTrigger> = Vec::new();
+                let mut needed_the_lead = 0;
+                let mut rendered = 0;
+                while rendered < end {
+                    let horizon = rendered + SMALLEST_BUFFER as u64;
+                    let advanced = driver.advance(
+                        rendered,
+                        horizon,
+                        super::super::worker::SchedulerInput::Offline,
+                    );
+                    assert_eq!(advanced.queue_rejections, 0);
+                    assert!(advanced.scheduled_until_sample >= horizon);
+                    for event in observed_triggers(&queue) {
+                        assert!(
+                            event.sample_time >= rendered,
+                            "{event:?} enqueued at {} after the audio passed {rendered}",
+                            event.sample_time
+                        );
+                        // An early hat hit (the pocket's early slots sit in
+                        // the back half of the previous 16th) whose straight
+                        // boundary lies past the end of the buffer it sounds
+                        // in: discovered at its boundary, it would be late.
+                        let buffer = SMALLEST_BUFFER as u64;
+                        let buffer_end = (event.sample_time / buffer + 1) * buffer;
+                        if event.track == 1 && event.sample_time % step > step / 2 {
+                            let straight_boundary = event.sample_time.div_ceil(step) * step;
+                            if straight_boundary >= buffer_end {
+                                needed_the_lead += 1;
+                            }
+                        }
+                        events.push(event);
+                    }
+                    rendered = horizon;
+                }
+                assert!(
+                    needed_the_lead >= 4,
+                    "early hits were due before their boundary's buffer: {needed_the_lead}"
+                );
+
+                // One big call over the same span schedules the same trigs.
+                let big = run_lookahead(&state, &snapshot, end);
+                let lead = (snapshot.groove_early_lead_beats() * spq).ceil() as u64;
+                for kind in [ScheduledTriggerKind::Step, ScheduledTriggerKind::Network] {
+                    for track in 0..2 {
+                        let small: Vec<u64> = times_of(&events, kind, track)
+                            .into_iter()
+                            .filter(|t| *t < end - lead)
+                            .collect();
+                        let big: Vec<u64> = times_of(&big, kind, track)
+                            .into_iter()
+                            .filter(|t| *t < end - lead)
+                            .collect();
+                        assert!(!small.is_empty() || kind == ScheduledTriggerKind::Network);
+                        assert_eq!(small, big, "{kind:?} track {track}");
+                    }
+                }
+            });
+        }
+
+        /// Acceptance: running the graph runtime `E` ahead leaves its state
+        /// identical to a run that never looked ahead, for the same
+        /// boundaries. The early-grooved rack in small offline buffers (every
+        /// call runs the graph cursor `E` past the audio) is compared with
+        /// two single-call references that reach the same frontier: the SAME
+        /// grooved rack (its target shortened by the lead, so the groove path
+        /// runs on both sides and a groove-dependent drift in graph state
+        /// shows up), and the ungrooved rack (the groove moves only sound,
+        /// never graph state). All three evaluate the same boundaries in the
+        /// same order, so energy, event history, gates, deltas and group
+        /// traces all match.
+        #[test]
+        fn graph_runtime_ahead_by_the_lead_matches_a_non_ahead_run() {
+            fn one_call(
+                state: &Arc<SequencerState>,
+                snapshot: &crate::sequencer::SequencerSnapshot,
+                target: u64,
+            ) -> (SchedulerLookaheadState, u64) {
+                let (mut scheduler, mut scratch_runtime) = fresh_scheduler(state, snapshot);
+                let queue = ScheduledEventQueue::<512>::new();
+                let live_midi_fx_tracks: [LiveMidiFxTrackState; MAX_TRACKS] =
+                    std::array::from_fn(|_| LiveMidiFxTrackState::default());
+                let reached = schedule_playing_lookahead(
+                    &mut scheduler,
+                    state,
+                    snapshot,
+                    &queue,
+                    &mut scratch_runtime,
+                    &live_midi_fx_tracks,
+                    snapshot.transport.pattern_epoch,
+                    0,
+                    target,
+                    SAMPLE_RATE,
+                    6_000,
+                    samples_per_quarter(snapshot),
+                    0,
+                    false,
+                    false,
+                )
+                .scheduled_until_sample;
+                (scheduler, reached)
+            }
+
+            fn assert_same_graph_state(
+                ahead: &SchedulerLookaheadState,
+                reference: &SchedulerLookaheadState,
+                label: &str,
+            ) {
+                assert_eq!(ahead.graph_runtimes.len(), 1);
+                let beat = ahead.clock.total_beats;
+                assert!((beat - reference.clock.total_beats).abs() < 1e-9, "{label}");
+                let ahead_state = ahead.graph_runtimes[0].visualization_snapshot_at(beat);
+                let reference_state = reference.graph_runtimes[0].visualization_snapshot_at(beat);
+                assert!(
+                    !ahead_state.event_history.is_empty(),
+                    "the graph fired during the run"
+                );
+                assert_eq!(ahead_state, reference_state, "{label}");
+                for node in 0..ahead.graph_runtimes[0].num_nodes() {
+                    assert_eq!(
+                        ahead.graph_runtimes[0].pending_count_for_node(node),
+                        reference.graph_runtimes[0].pending_count_for_node(node),
+                        "{label}: node {node} propagations in flight"
+                    );
+                }
+            }
+
+            run_with_scheduler_stack(|| {
+                let (state, grooved_snapshot) = early_rack_fixture(true);
+                let spq = samples_per_quarter(&grooved_snapshot);
+                let (ahead, frontier, _) =
+                    lookahead_in_blocks(&state, &grooved_snapshot, (spq * 6.0) as u64, 64);
+                let lead = (grooved_snapshot.groove_early_lead_beats() * spq).ceil() as u64;
+                assert!(lead > 0);
+                assert!(
+                    frontier >= (spq * 6.0) as u64 + lead,
+                    "the frontier runs the lead past the audio"
+                );
+
+                let (grooved_reference, reached) =
+                    one_call(&state, &grooved_snapshot, frontier - lead);
+                assert_eq!(reached, frontier, "one grooved call adds exactly the lead");
+                assert_same_graph_state(&ahead, &grooved_reference, "grooved one-call");
+
+                let (state, straight_snapshot) = early_rack_fixture(false);
+                assert_eq!(straight_snapshot.groove_early_lead_beats(), 0.0);
+                let (straight_reference, reached) = one_call(&state, &straight_snapshot, frontier);
+                assert_eq!(reached, frontier, "no lead without an early groove");
+                assert_same_graph_state(&ahead, &straight_reference, "ungrooved one-call");
+            });
+        }
+
+        /// Drives `schedule_playing_lookahead` in `block`-sample calls like
+        /// the offline renderer, playing each queued trig once the audio
+        /// passes it, and at `resync_at` does the worker's destructive
+        /// mid-play resync (the production `reconcile_playing_topology_change`
+        /// path: queue cleared, clock rewound to `rendered`, frontier reset;
+        /// the pattern-epoch, pattern-switch and live-MIDI-FX branches do the
+        /// same). Returns the (track, sample) of every step trig that SOUNDED
+        /// before `end`.
+        fn played_step_trigs_with_resync(
+            state: &Arc<SequencerState>,
+            snapshot: &crate::sequencer::SequencerSnapshot,
+            end: u64,
+            block: usize,
+            resync_at: Option<u64>,
+        ) -> Vec<(usize, u64)> {
+            let (mut scheduler, mut scratch_runtime) = fresh_scheduler(state, snapshot);
+            let queue = ScheduledEventQueue::<512>::new();
+            let live_midi_fx_tracks: [LiveMidiFxTrackState; MAX_TRACKS] =
+                std::array::from_fn(|_| LiveMidiFxTrackState::default());
+            let epoch = snapshot.transport.pattern_epoch;
+            let mut frontier = 0;
+            let mut pending: Vec<ObservedTrigger> = Vec::new();
+            let mut played = Vec::new();
+            let mut rendered = 0;
+            while rendered < end {
+                // The audio thread consumed everything before `rendered`.
+                pending.retain(|event| {
+                    if event.sample_time < rendered {
+                        if event.kind == ScheduledTriggerKind::Step {
+                            played.push((event.track, event.sample_time));
+                        }
+                        false
+                    } else {
+                        true
+                    }
+                });
+                if resync_at == Some(rendered) {
+                    // What is still queued is dropped by the clear.
+                    pending.clear();
+                    super::super::worker::reconcile_playing_topology_change(
+                        &mut scheduler,
+                        state,
+                        snapshot,
+                        &queue,
+                        rendered,
+                        &mut frontier,
+                        snapshot.transport.num_tracks,
+                        epoch.wrapping_add(1),
+                    );
+                    assert_eq!(frontier, rendered, "the resync rewound the frontier");
+                }
+                frontier = schedule_playing_lookahead(
+                    &mut scheduler,
+                    state,
+                    snapshot,
+                    &queue,
+                    &mut scratch_runtime,
+                    &live_midi_fx_tracks,
+                    epoch,
+                    rendered,
+                    block as u64,
+                    SAMPLE_RATE,
+                    block,
+                    samples_per_quarter(snapshot),
+                    frontier,
+                    false,
+                    false,
+                )
+                .scheduled_until_sample;
+                for event in observed_triggers(&queue) {
+                    assert!(
+                        event.sample_time >= rendered,
+                        "{event:?} enqueued after the audio passed {rendered}"
+                    );
+                    pending.push(event);
+                }
+                rendered += block as u64;
+            }
+            played.sort_unstable();
+            played
+        }
+
+        /// Regression (eseq-groove.3 review): a mid-play resync inside an
+        /// early hit's window, after the hit already SOUNDED ahead of its
+        /// straight boundary but before that boundary, must not play it a
+        /// second time. The rewound clock finds the boundary again; the
+        /// frontier floor would clamp the re-found trig to `rendered`, so the
+        /// resync window drops it instead. A resync before the early hit
+        /// sounds (it was only queued) re-enqueues it at the same sample.
+        #[test]
+        fn early_groove_hit_is_not_replayed_by_a_mid_play_resync() {
+            const BLOCK: usize = 64;
+            run_with_scheduler_stack(|| {
+                let (state, snapshot) = early_rack_fixture(true);
+                let spq = samples_per_quarter(&snapshot);
+                let step = (spq / 4.0) as u64;
+                let end = (spq * 4.0) as u64;
+                let reference = played_step_trigs_with_resync(&state, &snapshot, end, BLOCK, None);
+                let hats = |played: &[(usize, u64)]| {
+                    played.iter().filter(|(track, _)| *track == 1).count()
+                };
+                assert!(hats(&reference) >= 16, "a bar of hats: {reference:?}");
+                // Slot 1 (straight 6000) sounds at 4800; slot 5 (straight
+                // 30000) at 27900. Resync after the early hit sounded and
+                // before its straight boundary, at both ends of that window,
+                // and once while the early hit is only queued.
+                let slot_1_early = 6_000 - (0.20 * step as f64).round() as u64;
+                let slot_5_early = 30_000 - (0.35 * step as f64).round() as u64;
+                assert_eq!((slot_1_early, slot_5_early), (4_800, 27_900));
+                for resync_at in [4_864, 5_504, 5_952, 27_904, 29_952, 4_736] {
+                    assert_eq!(resync_at % BLOCK as u64, 0);
+                    let played = played_step_trigs_with_resync(
+                        &state,
+                        &snapshot,
+                        end,
+                        BLOCK,
+                        Some(resync_at),
+                    );
+                    assert_eq!(
+                        hats(&played),
+                        hats(&reference),
+                        "resync at {resync_at}: an early hat played twice (or was lost)"
+                    );
+                    // Same trigs at the same samples. The resync re-derives
+                    // the clock's beat from `rendered` in floating point, so
+                    // a later boundary may land one sample off (true of any
+                    // resync, grooved or not); that is not a replay.
+                    assert_eq!(played.len(), reference.len(), "resync at {resync_at}");
+                    for (got, want) in played.iter().zip(&reference) {
+                        assert!(
+                            got.0 == want.0 && got.1.abs_diff(want.1) <= 1,
+                            "resync at {resync_at}: {got:?} vs {want:?} in {played:?}"
+                        );
+                    }
+                }
+            });
+        }
+
+        /// A late-only groove (and no groove) adds no lead: the frontier
+        /// stops exactly at the horizon, as before early hits existed.
+        #[test]
+        fn late_only_groove_adds_no_discovery_lead() {
+            run_with_scheduler_stack(|| {
+                let (state, snapshot) = variable_reset_rack_fixture(Some(vec![
+                    None,
+                    Some(groove(4.0, 0.25, &HAT_POCKET)),
+                    None,
+                ]));
+                assert_eq!(snapshot.groove_early_lead_beats(), 0.0);
+                let (_, frontier, _) = lookahead_in_blocks(&state, &snapshot, 24_000, 512);
+                assert_eq!(frontier, 24_064, "the last 512 block ends at 24064");
             });
         }
     }
