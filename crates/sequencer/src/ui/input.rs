@@ -2874,14 +2874,8 @@ mod live_keyboard_tests {
                 groove: Default::default(),
                 sequencers: Vec::new(),
                 pads: vec![
-                    sequencer::project::ProjectRackPad {
-                        pad_note: 36,
-                        member: 0,
-                    },
-                    sequencer::project::ProjectRackPad {
-                        pad_note: 38,
-                        member: 1,
-                    },
+                    sequencer::project::ProjectRackPad::new(36, 0),
+                    sequencer::project::ProjectRackPad::new(38, 1),
                 ],
                 choke_groups: vec![None, None],
             }),

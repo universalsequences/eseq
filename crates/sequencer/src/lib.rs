@@ -76,6 +76,7 @@ pub mod midi_input;
 pub mod mixer_control;
 pub mod mixer_volume;
 pub mod neural;
+pub mod pad_role;
 pub mod patch_fork;
 pub mod paths;
 pub mod plock_variants;

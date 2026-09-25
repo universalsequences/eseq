@@ -8,6 +8,7 @@ use crate::*;
 pub(super) const COMMANDS: &[&str] = &[
     "set-rack-pad-note",
     "set-rack-pad-choke-group",
+    "set-rack-pad-role",
     "trigger-rack-pad",
     "save-rack-as-kit",
     "load-kit",
@@ -22,6 +23,57 @@ pub(super) const COMMANDS: &[&str] = &[
     "delete-rack-clip",
     "rename-rack-clip",
 ];
+
+/// Applies one pad-map edit by rack group id and pad note — `set-rack-pad-note`
+/// (move; an occupied note swaps), `set-rack-pad-choke-group` (`value` 0
+/// clears; choke groups start at 1 because 0 is the packed "unassigned"
+/// runtime key) or `set-rack-pad-role` (a `PadRole` key, or `standard` to
+/// clear back to the role the standard layout infers from the note). `None`
+/// for any other command. Shared by the live handler and the capture harness.
+pub(crate) fn apply_rack_pad_map_command(
+    name: &str,
+    payload: &Value,
+    app: &mut app::App,
+) -> Option<Result<(), String>> {
+    let group_id = extract_usize_from_payload(payload, "group-id").map(|id| id as u64);
+    let pad_note = extract_i32_from_payload(payload, "pad-note");
+    Some(match name {
+        "set-rack-pad-note" => {
+            match (group_id, pad_note, extract_i32_from_payload(payload, "note")) {
+                (Some(group_id), Some(pad_note), Some(note)) => {
+                    app.set_rack_pad_note_recorded(group_id, pad_note, note)
+                }
+                _ => Err("set-rack-pad-note needs a group id, pad note and note".to_string()),
+            }
+        }
+        "set-rack-pad-choke-group" => {
+            match (group_id, pad_note, extract_i32_from_payload(payload, "value")) {
+                (Some(group_id), Some(pad_note), Some(value)) => {
+                    let choke = u8::try_from(value).ok().filter(|value| *value > 0);
+                    app.set_rack_pad_choke_group_recorded(group_id, pad_note, choke)
+                }
+                _ => Err(
+                    "set-rack-pad-choke-group needs a group id, pad note and value".to_string(),
+                ),
+            }
+        }
+        "set-rack-pad-role" => {
+            match (group_id, pad_note, extract_string_from_payload(payload, "role")) {
+                (Some(group_id), Some(pad_note), Some(role)) => {
+                    let role = match role.as_str() {
+                        "standard" => Ok(None),
+                        key => sequencer::project::PadRole::from_key(key)
+                            .map(Some)
+                            .ok_or_else(|| format!("Unknown pad role {key}")),
+                    };
+                    role.and_then(|role| app.set_rack_pad_role_recorded(group_id, pad_note, role))
+                }
+                _ => Err("set-rack-pad-role needs a group id, pad note and role".to_string()),
+            }
+        }
+        _ => return None,
+    })
+}
 
 /// How long a pad-grid hit sounds before its note-off. The pad grid is a
 /// performance view, not a latch: a click is a hit, exactly as a key press is.
@@ -38,39 +90,14 @@ pub(super) fn handle(
     let track_groups = ctx.shared.track_groups.clone();
     let keyboard_tx = ctx.shared.keyboard_tx.clone();
     match name {
-        // Move a pad to another note on the pad keyboard. The pad keeps its
-        // grid position, member track and choke group.
-        "set-rack-pad-note" => {
-            let group_id = extract_usize_from_payload(&payload, "group-id").map(|id| id as u64);
-            let pad_note = extract_i32_from_payload(&payload, "pad-note");
-            let note = extract_i32_from_payload(&payload, "note");
-            let (Some(group_id), Some(pad_note), Some(note)) = (group_id, pad_note, note) else {
-                editor.handle_host_event(HostEvent::Status(
-                    "set-rack-pad-note needs a group id, pad note and note".to_string(),
-                ));
-                return;
-            };
-            match app.set_rack_pad_note_recorded(group_id, pad_note, note) {
-                Ok(()) => sync_rack_pad_map(app, editor, &track_groups, &ui_epoch),
-                Err(error) => editor.handle_host_event(HostEvent::Status(error)),
-            }
-        }
-        // Choke group of a pad; `value` 0 clears it (choke groups start at 1,
-        // because 0 is the packed "unassigned" runtime key).
-        "set-rack-pad-choke-group" => {
-            let group_id = extract_usize_from_payload(&payload, "group-id").map(|id| id as u64);
-            let pad_note = extract_i32_from_payload(&payload, "pad-note");
-            let value = extract_i32_from_payload(&payload, "value");
-            let (Some(group_id), Some(pad_note), Some(value)) = (group_id, pad_note, value) else {
-                editor.handle_host_event(HostEvent::Status(
-                    "set-rack-pad-choke-group needs a group id, pad note and value".to_string(),
-                ));
-                return;
-            };
-            let choke = u8::try_from(value).ok().filter(|value| *value > 0);
-            match app.set_rack_pad_choke_group_recorded(group_id, pad_note, choke) {
-                Ok(()) => sync_rack_pad_map(app, editor, &track_groups, &ui_epoch),
-                Err(error) => editor.handle_host_event(HostEvent::Status(error)),
+        // Pad map edits (note move/swap, choke group, drum role): the same
+        // App-level funnel the capture harness uses, then the pad map is
+        // republished.
+        "set-rack-pad-note" | "set-rack-pad-choke-group" | "set-rack-pad-role" => {
+            match apply_rack_pad_map_command(name, &payload, app) {
+                Some(Ok(())) => sync_rack_pad_map(app, editor, &track_groups, &ui_epoch),
+                Some(Err(error)) => editor.handle_host_event(HostEvent::Status(error)),
+                None => {}
             }
         }
         // Pad grid hit: the same live path a pad key takes — the pad's member

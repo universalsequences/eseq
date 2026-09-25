@@ -961,6 +961,13 @@ fn apply_capture_macro_host_commands(
             }
             continue;
         }
+        // Pad map edits (note, choke, role), so a fixture can lay a rack out
+        // on the standard layout and tag pads.
+        if let Some(result) = crate::host_commands::apply_rack_pad_map_command(&name, &payload, app) {
+            result.map_err(|error| format!("capture setup {name} failed: {error}"))?;
+            applied = true;
+            continue;
+        }
         // Rack grooves (extract / pick / amounts), so a fixture can show the
         // drum rack panel's Groove section with a real extracted groove.
         if let Some(result) = crate::host_commands::apply_rack_groove_command(&name, &payload, app) {

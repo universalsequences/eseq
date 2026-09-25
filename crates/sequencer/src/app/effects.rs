@@ -7332,6 +7332,10 @@ mod tests {
         let hat = app.graph_controller().add_blank_sampler_track().expect("hat track");
         app.assign_rack_pad_track_recorded(group_id, 36, kick).expect("kick pad");
         app.assign_rack_pad_track_recorded(group_id, 42, hat).expect("hat pad");
+        // Pad roles (eseq-groove.10): the hat is tagged, the kick's note (36)
+        // is outside the standard layout, so only the hat row records a role.
+        app.set_rack_pad_role_recorded(group_id, 42, Some(crate::project::PadRole::OpenHat))
+            .expect("tag the hat");
 
         // Author the played take directly in the scenes (setup, unrecorded):
         // a kick pushed early (captured chord delay, late on step 3) and on
@@ -7388,6 +7392,8 @@ mod tests {
             assert_eq!(kick_row.slots[4].source, GrooveSlotSource::Measured);
             assert!((kick_row.slots[4].offset + 0.1).abs() < 1e-5, "early kick");
             assert!(groove.pad_row(42).is_some(), "hat row");
+            let roles = groove.pad_rows.iter().map(|row| (row.pad_note, row.role)).collect::<Vec<_>>();
+            assert_eq!(roles, vec![(36, None), (42, Some(crate::project::PadRole::OpenHat))]);
             // Source straightened: the early kick sits on step 4, no delays,
             // no swing.
             assert_eq!(kick_data.track_bits[0] & 0b1_1111, 0b1_0001);
@@ -7475,7 +7481,7 @@ mod tests {
         let mut groove = mpc_swing_groove(58, 0.25);
         groove.id = 1;
         groove.name = "Pocket".to_string();
-        groove.pad_rows = vec![GroovePadRow { pad_note: 42, row: hat_row.clone() }];
+        groove.pad_rows = vec![GroovePadRow { pad_note: 42, role: None, row: hat_row.clone() }];
         app.grooves.push(groove.clone());
 
         app.set_rack_active_groove_recorded(group_id, Some(1))
@@ -7550,7 +7556,7 @@ mod tests {
         groove.shared_row = row(0.0, shared);
         groove.pad_rows = pad_notes
             .iter()
-            .map(|&pad_note| GroovePadRow { pad_note, row: row(0.01 * pad_note as f32, 0.3) })
+            .map(|&pad_note| GroovePadRow { pad_note, role: None, row: row(0.01 * pad_note as f32, 0.3) })
             .collect();
         groove
     }
@@ -7773,6 +7779,109 @@ mod tests {
         ));
         assert!(table(&app)[hat2].is_none());
         assert!(table(&app)[hat].is_some(), "the source rack is untouched");
+        graph.process_block();
+    }
+
+    /// Pad roles (eseq-groove.10): tagging a pad is one undo step that
+    /// re-resolves the scheduler's groove table (a snare off the standard
+    /// layout's snare note picks up the groove's snare row once tagged), and
+    /// the explicit role travels in kit presets both ways — load as a new
+    /// rack and audition onto an existing one.
+    #[test]
+    fn pad_role_edits_regroove_the_pad_and_travel_in_kits() {
+        use crate::groove::{GroovePadRow, GrooveRow, GrooveSlot};
+        use crate::project::PadRole;
+
+        let graph = TestLiveGraph::new("drum-rack-pad-role-test", 64, 44_100, 2);
+        let mut app = test_app_for_live_graph(&graph, 0);
+        let sample = std::path::Path::new("../../content/impulses/lexicon-300-rich-plate.wav");
+        let (group_id, _) = app.create_drum_rack_recorded(Some("Roles".to_string())).expect("rack");
+        let kick = app.graph_controller().add_track(sample).expect("kick");
+        let snare = app.graph_controller().add_track(sample).expect("snare");
+        app.assign_rack_pad_track_recorded(group_id, 0, kick).expect("kick pad");
+        app.assign_rack_pad_track_recorded(group_id, 20, snare).expect("snare pad");
+        // A groove from a standard-layout kit: kick row at 0, snare row at 2.
+        let row = |offset: f32| GrooveRow {
+            slots: vec![
+                GrooveSlot { offset, ..GrooveSlot::default() },
+                GrooveSlot::default(),
+            ],
+        };
+        let mut groove = crate::groove::mpc_swing_groove(50, 0.25);
+        groove.id = 4;
+        groove.pad_rows = vec![
+            GroovePadRow { pad_note: 0, role: Some(PadRole::Kick), row: row(0.1) },
+            GroovePadRow { pad_note: 2, role: Some(PadRole::Snare), row: row(0.2) },
+        ];
+        app.grooves = vec![groove.clone()];
+        app.set_rack_active_groove_recorded(group_id, Some(4)).expect("play it");
+        let table = |app: &App| app.state.latest_scheduler_snapshot().track_grooves.clone();
+        let row_at = |app: &App, track: usize| (*table(app)[track].as_ref().expect("grooved").row).clone();
+        assert_eq!(row_at(&app, kick), row(0.1), "standard kick: the kick row");
+        // Pad 20 infers Perc: no perc row, so the shared row.
+        assert_eq!(row_at(&app, snare), groove.shared_row);
+
+        let undo_len = app.history.undo_len();
+        app.set_rack_pad_role_recorded(group_id, 20, Some(PadRole::Snare)).expect("tag snare");
+        assert_eq!(app.history.undo_len(), undo_len + 1, "one undo step");
+        assert_eq!(row_at(&app, snare), row(0.2), "tagged snare: the snare row");
+        assert!(
+            app.set_rack_pad_role_recorded(group_id, 20, Some(PadRole::Snare)).is_err(),
+            "unchanged"
+        );
+        assert!(app.set_rack_pad_role_recorded(group_id, 99, Some(PadRole::Snare)).is_err());
+        assert!(matches!(
+            crate::app::edit::undo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(row_at(&app, snare), groove.shared_row, "undo un-tags");
+        assert!(matches!(
+            crate::app::edit::redo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(row_at(&app, snare), row(0.2));
+
+        // Kits carry the explicit role; Standard pads carry none.
+        let (kit, _) = app
+            .capture_rack_as_kit(group_id, "Roles", Vec::new(), String::new(), &[])
+            .expect("capture kit");
+        let kit_role = |note: i32| kit.pads.iter().find(|pad| pad.pad_note == note).unwrap().role;
+        assert_eq!(kit_role(0), None);
+        assert_eq!(kit_role(20), Some(PadRole::Snare));
+        let directory = std::env::temp_dir().join(format!(
+            "eseq-kit-roles-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&directory).expect("kit test directory");
+        let path = directory.join("Roles.kit");
+        std::fs::write(&path, serde_json::to_string(&kit).expect("serialize kit")).expect("write kit");
+        let pad_role = |app: &App, id: u64, note: i32| {
+            let rack = app.groups.iter().find(|g| g.id == id).and_then(|g| g.rack.clone()).unwrap();
+            rack.pads.iter().find(|pad| pad.pad_note == note).expect("pad").role
+        };
+
+        let (loaded, failures) = app.load_kit_as_rack(&path).expect("load as rack");
+        assert!(failures.is_empty(), "{failures:?}");
+        assert_eq!(pad_role(&app, loaded, 20), Some(PadRole::Snare));
+        assert_eq!(pad_role(&app, loaded, 0), None);
+        let loaded_snare = app
+            .groups
+            .iter()
+            .find(|g| g.id == loaded)
+            .and_then(|g| g.rack_pad_track(20))
+            .expect("loaded snare");
+        assert_eq!(row_at(&app, loaded_snare), row(0.2), "the loaded kit's snare is grooved as one");
+
+        // Audition onto a rack whose pad 20 is untagged.
+        let (target, _) = app.create_drum_rack_recorded(None).expect("target rack");
+        let other = app.graph_controller().add_track(sample).expect("other");
+        app.assign_rack_pad_track_recorded(target, 20, other).expect("target pad");
+        assert_eq!(pad_role(&app, target, 20), None);
+        app.load_kit_onto_rack(target, &path).expect("audition kit");
+        assert_eq!(pad_role(&app, target, 20), Some(PadRole::Snare));
+
+        std::fs::remove_dir_all(&directory).expect("clean kit test directory");
         graph.process_block();
     }
 
@@ -8842,6 +8951,7 @@ mod tests {
         let new_pad = crate::project::ProjectKitPad {
             pad_note: 42,
             choke_group: Some(3),
+            role: None,
             name: "Hat".to_string(),
             sound: kit.pads[0].sound.clone(),
             modulator: None,

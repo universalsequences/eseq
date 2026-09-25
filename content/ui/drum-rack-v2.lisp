@@ -44,6 +44,11 @@
         choke-options
         choke-value-index
         set-pad-choke
+        pad-role-options
+        pad-role-tag
+        pad-role-explicit?
+        pad-role-standard-label
+        set-pad-role
         move-pad-to-note
         trigger-pad
         note-label
@@ -380,6 +385,49 @@
     (dict :group-id (group-id gidx)
           :pad-note (get pad :pad-note)
           :value (choke-value-from-label label))))
+
+;; ── Pad roles (docs/rack-groove-spec.md, "Pad roles") ──────────────────
+;; What drum a pad IS, independent of its note. The host publishes each pad's
+;; explicit `:role` key ("" = Standard), its effective `:role-tag` / `:role-label`
+;; and the `:standard-role-label` the standard layout (GM drum map, C4 = pad 0)
+;; infers from the note. The option list mirrors `PadRole::ALL` in menu order
+;; (keys are the serde names); a test keeps the two in sync.
+(def pad-role-options ()
+  (list
+    (dict :key "kick" :label "Kick")
+    (dict :key "snare" :label "Snare")
+    (dict :key "rim" :label "Rim")
+    (dict :key "clap" :label "Clap")
+    (dict :key "closed-hat" :label "Closed Hat")
+    (dict :key "pedal-hat" :label "Pedal Hat")
+    (dict :key "open-hat" :label "Open Hat")
+    (dict :key "tom-low" :label "Low Tom")
+    (dict :key "tom-mid" :label "Mid Tom")
+    (dict :key "tom-high" :label "High Tom")
+    (dict :key "crash" :label "Crash")
+    (dict :key "ride" :label "Ride")
+    (dict :key "shaker" :label "Shaker")
+    (dict :key "perc" :label "Perc")))
+
+;; Short tag drawn on the pad ("" when neither the pad nor the layout names one).
+(def pad-role-tag (pad)
+  (if (= pad nil) "" (or (get pad :role-tag) "")))
+
+(def pad-role-explicit? (pad)
+  (and (not (= pad nil))
+    (not (= (or (get pad :role) "") ""))))
+
+;; "Standard (Snare)": the default entry names what the layout infers.
+(def pad-role-standard-label (pad)
+  (let ((inferred (or (get pad :standard-role-label) "")))
+    (str "Standard (" (if (= inferred "") "none" inferred) ")")))
+
+;; `key` is a role key, or "standard" to clear back to the inferred role.
+(def set-pad-role (gidx pad key)
+  (host-command "set-rack-pad-role"
+    (dict :group-id (group-id gidx)
+          :pad-note (get pad :pad-note)
+          :role key)))
 
 ;; A pad-grid hit takes the same live path a pad key takes: the pad's member
 ;; track at base pitch, so choke groups and the member's fx chain apply.

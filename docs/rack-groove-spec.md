@@ -452,11 +452,31 @@ else inferred.
 on each `GroovePadRow` (`role: Option<PadRole>`, serde default). Row lookup for
 a member pad (`ProjectGroove::row_for_pad(pad_note, role)`), in order:
 
-1. a row with the same `pad_note` whose role is unrecorded, or equal to the
-   pad's effective role — the same kit, or a kit in the same layout;
+1. a row with the same `pad_note` whose role is compatible with the pad's
+   effective role — equal, or unknown on either side (a row recorded without
+   a role, or a pad with none) — the same kit, or a kit in the same layout;
 2. a row with the same role (first by `pad_note` order) — the snare row lands
    on this kit's snare wherever it sits;
 3. the shared all-pads row.
+
+*Built (eseq-groove.10):* `PadRole` lives in `crate::pad_role` (re-exported
+from `project`; serde keys kebab-case, `closed-hat`), with
+`PadRole::standard(pad_note)` the layout table and `effective_role()` on
+`ProjectRackPad` / `ProjectKitPad`. The lookup is
+`ProjectGroove::resolve_pad_row(pad_note, role)` (`row_for_pad` falls back to
+the shared row); `track_groove_snapshots`, `groove_row_mapping` and the rack
+panel heatmap all use it. No file-version bump: every new field is
+`serde(default)` and skipped when `None`. Kit save/load (new rack and
+audition) carries explicit roles. `App::set_rack_pad_role_recorded` is one
+undo step through the bus/group funnel, which republishes the groove table;
+host command `set-rack-pad-role {group-id pad-note role}` takes a role key or
+`standard`, and shares `apply_rack_pad_map_command` with the capture harness.
+`SEQ.groups` pads carry `:role` (explicit key, "" = Standard), `:role-tag`,
+`:role-label` and `:standard-role-label`. The pad cell's right-click opens
+the pad menu (Role ▸ Standard (<inferred>), then every role), mounted in the
+*fx* rack panel; the tag (BD, SD, CH, ...) sits top-right, bright when
+explicit, dim when inferred. Capture fixture:
+`crates/sequencer/ui/capture-fixtures/rack-pad-roles.lisp`.
 
 Roles are general pad metadata; grooves are their first consumer. Pattern
 transfer between kits, MIDI note maps and Jev can use them later.

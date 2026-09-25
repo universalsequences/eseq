@@ -1919,6 +1919,7 @@ impl App {
             kit_pads.push(crate::project::ProjectKitPad {
                 pad_note: pad.pad_note,
                 choke_group: pad.choke_group,
+                role: pad.role,
                 name: pad.name,
                 sound,
                 modulator,
@@ -2164,6 +2165,12 @@ impl App {
                     failures.push(format!("{pad_name}: {error}"));
                 }
             }
+            if pad.role.is_some() {
+                if let Err(error) = self.set_rack_pad_role_recorded(group_id, pad.pad_note, pad.role)
+                {
+                    failures.push(format!("{pad_name}: {error}"));
+                }
+            }
         }
         // Break-kit payload (§7.3). Plain-script sequencer ids are re-derived
         // for THIS rack, every instance gets a fresh id (instance-kinds spec
@@ -2362,10 +2369,10 @@ impl App {
                     self.track_registry.id_at(track)
                         .ok_or_else(|| format!("Kit pad {pad_name} has no stable identity"))?
                 };
-                desired.push((pad.pad_note, pad.choke_group, track_id));
+                desired.push((pad.pad_note, pad.choke_group, track_id, pad.role));
             }
 
-            let desired_ids = desired.iter().map(|(_, _, id)| *id)
+            let desired_ids = desired.iter().map(|(_, _, id, _)| *id)
                 .collect::<std::collections::HashSet<_>>();
             let desired_for_group = desired.clone();
             let kit_name_for_group = kit_name.clone();
@@ -2375,7 +2382,7 @@ impl App {
                 let group_index = app.groups.iter().position(|group| group.id == group_id)
                     .ok_or_else(|| format!("Track group {group_id} does not exist"))?;
                 let bus = BusId(app.groups[group_index].bus_id);
-                let mut members = desired_for_group.iter().map(|(_, _, id)| {
+                let mut members = desired_for_group.iter().map(|(_, _, id, _)| {
                     app.track_registry.index_of(*id)
                         .ok_or_else(|| "A loaded kit member disappeared".to_string())
                 }).collect::<Result<Vec<_>, String>>()?;
@@ -2391,12 +2398,12 @@ impl App {
                         }
                     }
                 }
-                let pads = desired_for_group.iter().map(|(note, _, id)| {
+                let pads = desired_for_group.iter().map(|(note, _, id, role)| {
                     let track = app.track_registry.index_of(*id)
                         .ok_or_else(|| "A loaded kit member disappeared".to_string())?;
                     let member = members.binary_search(&track)
                         .map_err(|_| "A loaded kit member was not assigned to the rack".to_string())?;
-                    Ok(crate::project::ProjectRackPad { pad_note: *note, member })
+                    Ok(crate::project::ProjectRackPad { pad_note: *note, member, role: *role })
                 }).collect::<Result<Vec<_>, String>>()?;
                 let group = &mut app.groups[group_index];
                 group.name.clone_from(&kit_name_for_group);
@@ -2418,7 +2425,7 @@ impl App {
                 let mut rack = crate::project::ProjectRackConfig {
                     sequencers: Vec::new(),
                     pads,
-                    choke_groups: desired_for_group.iter().map(|(_, choke, _)| *choke).collect(),
+                    choke_groups: desired_for_group.iter().map(|(_, choke, _, _)| *choke).collect(),
                     clips: Vec::new(),
                     next_clip_id: 0,
                     groove,

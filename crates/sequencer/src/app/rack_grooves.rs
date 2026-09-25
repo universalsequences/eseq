@@ -60,6 +60,7 @@ impl Default for RackGrooveExtractRequest {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct GrooveSourceLane {
     pad_note: i32,
+    role: Option<crate::project::PadRole>,
     track: usize,
     pattern: PatternId,
 }
@@ -96,6 +97,7 @@ fn groove_source_lanes(
         if let Some(pattern) = pattern {
             lanes.push(GrooveSourceLane {
                 pad_note: pad.pad_note,
+                role: pad.effective_role(),
                 track,
                 pattern,
             });
@@ -189,6 +191,7 @@ impl App {
                     .ok_or_else(|| format!("Track {} lost its pattern", lane.track + 1))?;
                 Ok(GroovePadSource {
                     pad_note: lane.pad_note,
+                    role: lane.role,
                     hits: heard_hits(&data),
                 })
             })

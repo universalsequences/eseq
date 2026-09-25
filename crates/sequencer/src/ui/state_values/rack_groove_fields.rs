@@ -72,9 +72,15 @@ fn heat_repeats(groove: &ProjectGroove) -> usize {
 /// One heatmap row: label, whether the row is the pad's own (measured) row
 /// or the shared fallback, per-cell offsets in slots (negative = early) and
 /// per-cell `measured` flags (filled/guessed cells are drawn dimmed).
-fn heat_row(label: String, pad_note: Option<i32>, own: bool, groove: &ProjectGroove) -> Value {
-    let row = match pad_note {
-        Some(note) => groove.row_for_pad(note),
+fn heat_row(
+    label: String,
+    pad: Option<(i32, Option<sequencer::project::PadRole>)>,
+    own: bool,
+    groove: &ProjectGroove,
+) -> Value {
+    let pad_note = pad.map(|(note, _)| note);
+    let row = match pad {
+        Some((note, role)) => groove.row_for_pad(note, role),
         None => &groove.shared_row,
     };
     let repeats = heat_repeats(groove);
@@ -101,14 +107,20 @@ fn heat_row(label: String, pad_note: Option<i32>, own: bool, groove: &ProjectGro
 /// The heatmap of the groove a rack plays through: an "All" row (the shared
 /// row) then one row per pad in pad-note order.
 fn heatmap(rack: &ProjectRackConfig, groove: &ProjectGroove) -> Value {
-    let mut pads: Vec<i32> = rack.pads.iter().map(|pad| pad.pad_note).collect();
-    pads.sort_unstable();
+    let mut pads: Vec<(i32, Option<sequencer::project::PadRole>)> = rack
+        .pads
+        .iter()
+        .map(|pad| (pad.pad_note, pad.effective_role()))
+        .collect();
+    pads.sort_unstable_by_key(|(note, _)| *note);
     let mut rows = vec![heat_row("All".to_string(), None, true, groove)];
-    for note in pads {
+    for (note, role) in pads {
+        // Same lookup the scheduler uses: a pad plays the row with its note,
+        // else the row recorded with its role, else the shared row.
         rows.push(heat_row(
             drum_rack_pad_label(note),
-            Some(note),
-            groove.pad_row(note).is_some(),
+            Some((note, role)),
+            groove.resolve_pad_row(note, role).is_some(),
             groove,
         ));
     }

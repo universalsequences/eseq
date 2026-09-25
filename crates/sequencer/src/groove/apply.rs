@@ -394,8 +394,9 @@ impl ProjectRackConfig {
 /// The scheduler's per-track groove table for `num_tracks` tracks, from each
 /// drum rack's `(members, config)` and the project groove `pool` the racks
 /// reference. Every member of a rack with an active, well-formed groove gets
-/// an entry: its pad's own row when the groove has one for the pad's note,
-/// else the shared row (a member without a pad, too). Everything else is
+/// an entry: the pad row [`ProjectGroove::resolve_pad_row`] picks for the
+/// pad's note and effective role (same note, then same role), else the
+/// shared row (a member without a pad, too). Everything else is
 /// `None`, which the scheduler treats as "no groove".
 pub fn track_groove_snapshots<'a>(
     racks: impl IntoIterator<Item = (&'a [usize], &'a ProjectRackConfig)>,
@@ -425,7 +426,11 @@ pub fn track_groove_snapshots<'a>(
                 continue;
             };
             let pad = rack.pads.iter().find(|pad| pad.member == member);
-            let pad_row = pad.and_then(|pad| groove.pad_row(pad.pad_note));
+            let pad_row = pad.and_then(|pad| {
+                groove
+                    .resolve_pad_row(pad.pad_note, pad.effective_role())
+                    .map(|row| &row.row)
+            });
             let row = match pad_row {
                 Some(row) => Arc::new(row.clone()),
                 None => Arc::clone(&shared),

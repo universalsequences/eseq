@@ -3219,7 +3219,7 @@ impl App {
                 .take(group.members.len())
                 .enumerate()
             {
-                rack.push_pad(crate::project::ProjectRackPad { pad_note, member });
+                rack.push_pad(crate::project::ProjectRackPad::new(pad_note, member));
             }
             if rack.pads.len() != group.members.len() {
                 return Err("Could not assign every group member to a drum rack pad".to_string());
@@ -3342,7 +3342,7 @@ impl App {
         group.members.insert(position, track);
         if let Some(rack) = group.rack.as_mut() {
             if let Some(pad_note) = pad_note {
-                rack.push_pad(crate::project::ProjectRackPad { pad_note, member: position });
+                rack.push_pad(crate::project::ProjectRackPad::new(pad_note, position));
             }
         }
         // Rack clips are positional over members (rack-clips spec §3): the
@@ -3398,6 +3398,31 @@ impl App {
                 return Err("Pad choke group is unchanged".to_string());
             }
             rack.set_choke_group(pad_index, choke);
+            Ok(())
+        })
+    }
+
+    /// Sets (or, with `None`, clears back to "Standard") a rack pad's explicit
+    /// drum role (docs/rack-groove-spec.md, "Pad roles"). The groove table
+    /// resolves rows by role, so the recorded mutation's republish is what
+    /// moves a grooved pad onto its new row.
+    pub fn set_rack_pad_role_recorded(
+        &mut self,
+        group_id: u64,
+        pad_note: i32,
+        role: Option<crate::project::PadRole>,
+    ) -> Result<(), String> {
+        self.apply_recorded_bus_group_structure_mutation("Set drum rack pad role", |app| {
+            let group = app.groups.iter_mut().find(|group| group.id == group_id)
+                .ok_or_else(|| format!("Track group {group_id} does not exist"))?;
+            let rack = group.rack.as_mut()
+                .ok_or_else(|| format!("Track group {group_id} is not a drum rack"))?;
+            let pad_index = rack.pad_index_for_note(pad_note)
+                .ok_or_else(|| format!("Drum rack has no pad {pad_note}"))?;
+            if rack.pads[pad_index].role == role {
+                return Err("Pad role is unchanged".to_string());
+            }
+            rack.pads[pad_index].role = role;
             Ok(())
         })
     }

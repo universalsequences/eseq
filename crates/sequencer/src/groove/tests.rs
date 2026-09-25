@@ -51,7 +51,11 @@ fn options(period_beats: f64, resolution_beats: f64) -> GrooveExtractOptions {
 }
 
 fn pad(pad_note: i32, hits: Vec<HeardHit>) -> GroovePadSource {
-    GroovePadSource { pad_note, hits }
+    GroovePadSource {
+        pad_note,
+        role: None,
+        hits,
+    }
 }
 
 fn assert_close(actual: f64, expected: f64, what: &str) {
@@ -322,7 +326,7 @@ fn pads_that_were_never_heard_get_no_row_and_fall_back_to_shared() {
     .expect("groove");
     assert!(groove.pad_row(36).is_some());
     assert!(groove.pad_row(38).is_none());
-    assert_eq!(groove.row_for_pad(38), &groove.shared_row);
+    assert_eq!(groove.row_for_pad(38, None), &groove.shared_row);
     assert!(groove.is_well_formed());
 }
 
@@ -483,7 +487,7 @@ fn fill_order_prefers_other_half_over_neighbours_over_shared() {
 
 /// Where a straight hit at `beat` lands through a groove row.
 fn through_groove(groove: &ProjectGroove, pad_note: i32, beat: f64) -> f64 {
-    let row = groove.row_for_pad(pad_note);
+    let row = groove.row_for_pad(pad_note, None);
     let slots = row.slots.len() as f64;
     let position = (beat.rem_euclid(groove.period_beats)) / groove.resolution_beats;
     let slot = (position.round() as usize) % slots as usize;
@@ -980,19 +984,11 @@ fn track_groove_snapshots_resolve_pad_rows_by_note_else_shared() {
     groove.period_beats = 0.5;
     groove.pad_rows = vec![GroovePadRow {
         pad_note: 42,
+        role: None,
         row: row_of(&[0.1, 0.3]),
     }];
     let rack = ProjectRackConfig {
-        pads: vec![
-            ProjectRackPad {
-                pad_note: 36,
-                member: 0,
-            },
-            ProjectRackPad {
-                pad_note: 42,
-                member: 1,
-            },
-        ],
+        pads: vec![ProjectRackPad::new(36, 0), ProjectRackPad::new(42, 1)],
         groove: RackGrooveSettings {
             active: Some(7),
             timing_amount: 0.75,
@@ -1075,6 +1071,7 @@ fn two_slot_groove(id: GrooveId, name: &str, shared: f32, pad_notes: &[i32]) -> 
         .iter()
         .map(|&pad_note| GroovePadRow {
             pad_note,
+            role: None,
             row: row_of(&[0.01 * pad_note as f32, 0.3]),
         })
         .collect();
@@ -1086,7 +1083,7 @@ fn rack_with_pads(notes: &[i32]) -> crate::project::ProjectRackConfig {
         pads: notes
             .iter()
             .enumerate()
-            .map(|(member, &pad_note)| crate::project::ProjectRackPad { pad_note, member })
+            .map(|(member, &pad_note)| crate::project::ProjectRackPad::new(pad_note, member))
             .collect(),
         choke_groups: vec![None; notes.len()],
         ..Default::default()
@@ -1673,5 +1670,233 @@ fn pocket_offset_excludes_random_jitter() {
         groove.offset_beats(beat),
         pocket,
         "the played offset does jitter"
+    );
+}
+
+// --- pad roles (eseq-groove.10) ------------------------------------------------
+
+/// A groove extracted from a standard-layout kit: kick (pad 0), snare (pad 2)
+/// and closed hat (pad 6), each pad late by its own amount, so every pad row
+/// is distinguishable. Roles come from the pads' effective roles, the way
+/// `App::extract_rack_groove_recorded` passes them.
+fn standard_kit_groove() -> (crate::project::ProjectRackConfig, ProjectGroove) {
+    use crate::project::{ProjectRackConfig, ProjectRackPad};
+    let kit = ProjectRackConfig {
+        pads: vec![
+            ProjectRackPad::new(0, 0),
+            ProjectRackPad::new(2, 1),
+            ProjectRackPad::new(6, 2),
+        ],
+        groove: RackGrooveSettings {
+            active: Some(1),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let late = |beats: &[f64], by: f64| {
+        beats
+            .iter()
+            .map(|&beat| hit(beat + by * SIXTEENTH, 0.8))
+            .collect::<Vec<_>>()
+    };
+    let sources = [
+        (0, late(&[0.0, 2.0], 0.05)),
+        (2, late(&[1.0, 3.0], 0.2)),
+        (6, late(&[0.5, 1.5, 2.5, 3.5], 0.35)),
+    ]
+    .into_iter()
+    .map(|(pad_note, hits)| GroovePadSource {
+        pad_note,
+        role: kit
+            .pads
+            .iter()
+            .find(|pad| pad.pad_note == pad_note)
+            .and_then(|pad| pad.effective_role()),
+        hits,
+    })
+    .collect::<Vec<_>>();
+    let groove =
+        extract_groove(1, &options(GROOVE_PERIOD_ONE_BAR, SIXTEENTH), &sources).expect("extract");
+    (kit, groove)
+}
+
+#[test]
+fn extraction_records_each_source_pads_role_on_its_row() {
+    let (_, groove) = standard_kit_groove();
+    let roles = groove
+        .pad_rows
+        .iter()
+        .map(|row| (row.pad_note, row.role))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        roles,
+        vec![
+            (0, Some(PadRole::Kick)),
+            (2, Some(PadRole::Snare)),
+            (6, Some(PadRole::ClosedHat)),
+        ]
+    );
+    // A pad without a role records none, and its row writes no role key.
+    let groove = extract_groove(
+        2,
+        &options(GROOVE_PERIOD_ONE_BAR, SIXTEENTH),
+        &[pad(40, vec![hit(0.0, 1.0)])],
+    )
+    .unwrap();
+    assert_eq!(groove.pad_rows[0].role, None);
+    let json = serde_json::to_string(&groove).unwrap();
+    assert!(!json.contains("\"role\""), "{json}");
+    // A groove saved before roles loads with unrecorded roles.
+    let (_, tagged) = standard_kit_groove();
+    let json = serde_json::to_string(&tagged).unwrap();
+    assert!(json.contains("\"role\":\"closed-hat\""), "{json}");
+    let old = json
+        .replace(",\"role\":\"kick\"", "")
+        .replace(",\"role\":\"snare\"", "")
+        .replace(",\"role\":\"closed-hat\"", "");
+    let old: ProjectGroove = serde_json::from_str(&old).expect("pre-role groove loads");
+    assert!(old.pad_rows.iter().all(|row| row.role.is_none()));
+    assert!(old.is_well_formed());
+}
+
+/// `row_for_pad` order: same pad note when the roles are compatible (equal,
+/// or either unknown), then the lowest-note row with the pad's role, then
+/// the shared row.
+#[test]
+fn row_lookup_prefers_same_note_then_same_role_then_shared() {
+    let mut groove = mpc_swing_groove(50, 0.25);
+    let row = |pad_note: i32, role: Option<PadRole>, offset: f32| GroovePadRow {
+        pad_note,
+        role,
+        row: row_of(&[offset, 0.0]),
+    };
+    groove.pad_rows = vec![
+        row(0, Some(PadRole::Kick), 0.01),
+        row(4, Some(PadRole::Snare), 0.04),
+        row(2, Some(PadRole::Snare), 0.02),
+        row(30, None, 0.30),
+    ];
+    let pick = |pad_note: i32, role: Option<PadRole>| {
+        groove
+            .resolve_pad_row(pad_note, role)
+            .map(|row| row.pad_note)
+    };
+    // 1. Same note, same role (the same kit).
+    assert_eq!(pick(0, Some(PadRole::Kick)), Some(0));
+    // 1. Same note wins over the lower-note row with the same role.
+    assert_eq!(pick(4, Some(PadRole::Snare)), Some(4));
+    // 1. Unknown on either side is compatible.
+    assert_eq!(pick(0, None), Some(0));
+    assert_eq!(pick(30, Some(PadRole::Ride)), Some(30));
+    // 2. The note's row is another drum: the row with the pad's role.
+    assert_eq!(pick(2, Some(PadRole::Kick)), Some(0));
+    // 2. No row at this note: the lowest-note row with the role.
+    assert_eq!(pick(9, Some(PadRole::Snare)), Some(2));
+    // 3. Nothing fits: the shared row.
+    assert_eq!(pick(2, Some(PadRole::Clap)), None);
+    assert_eq!(pick(9, Some(PadRole::Clap)), None);
+    assert_eq!(pick(9, None), None);
+    assert_eq!(groove.row_for_pad(9, None), &groove.shared_row);
+    assert_eq!(
+        groove.row_for_pad(9, Some(PadRole::Snare)),
+        &groove.pad_rows[2].row
+    );
+}
+
+/// Cross-kit: a groove extracted on a standard-layout kit, applied to a kit
+/// laid out differently. The snare row lands on the snare wherever it sits,
+/// a pad on the source's snare NOTE that is a hat takes the hat row, and a
+/// pad on the source hat's note that is a perc (no perc row) plays shared.
+#[test]
+fn cross_kit_rows_follow_roles_not_notes() {
+    use crate::project::{ProjectRackConfig, ProjectRackPad};
+    let (_, groove) = standard_kit_groove();
+    let tagged = |pad_note: i32, member: usize, role: PadRole| ProjectRackPad {
+        pad_note,
+        member,
+        role: Some(role),
+    };
+    let other_kit = ProjectRackConfig {
+        pads: vec![
+            tagged(12, 0, PadRole::Kick),
+            tagged(20, 1, PadRole::Snare),
+            tagged(2, 2, PadRole::ClosedHat),
+            tagged(6, 3, PadRole::Perc),
+        ],
+        groove: RackGrooveSettings {
+            active: Some(1),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let members = [10usize, 11, 12, 13];
+    let pool = vec![groove.clone()];
+    let table = track_groove_snapshots([(&members[..], &other_kit)], &pool, 14);
+    let row_of_track = |track: usize| (*table[track].as_ref().expect("grooved").row).clone();
+    let source = |note: i32| groove.pad_row(note).unwrap().clone();
+    assert_eq!(row_of_track(10), source(0), "kick at pad 12: the kick row");
+    assert_eq!(
+        row_of_track(11),
+        source(2),
+        "snare at pad 20: the snare row"
+    );
+    assert_ne!(source(2), source(6));
+    assert_eq!(
+        row_of_track(12),
+        source(6),
+        "a hat on the source snare's note takes the hat row, not the snare row"
+    );
+    assert_eq!(
+        row_of_track(13),
+        groove.shared_row,
+        "a perc on the source hat's note: no perc row, the shared row"
+    );
+    assert_eq!(
+        other_kit.groove_row_mapping(&groove),
+        vec![
+            GrooveRowChoice::Pad,
+            GrooveRowChoice::Pad,
+            GrooveRowChoice::Pad,
+            GrooveRowChoice::Shared
+        ]
+    );
+}
+
+/// Same kit: every pad still plays its own-note row, exactly as a groove
+/// without recorded roles resolves (the pre-role behavior); and a role-less
+/// groove on a re-laid-out kit keeps the old by-note mapping.
+#[test]
+fn same_kit_and_role_less_grooves_resolve_by_pad_note_as_before() {
+    let (kit, groove) = standard_kit_groove();
+    let mut role_less = groove.clone();
+    for row in &mut role_less.pad_rows {
+        row.role = None;
+    }
+    let members = [0usize, 1, 2];
+    let with_roles = track_groove_snapshots([(&members[..], &kit)], &[groove.clone()], 3);
+    let without = track_groove_snapshots([(&members[..], &kit)], &[role_less.clone()], 3);
+    assert_eq!(with_roles, without);
+    for (track, note) in [(0usize, 0), (1, 2), (2, 6)] {
+        assert_eq!(
+            *with_roles[track].as_ref().unwrap().row,
+            *groove.pad_row(note).unwrap(),
+            "pad {note} plays its own row"
+        );
+    }
+    // Explicitly tagging a same-kit pad with the role it already infers
+    // changes nothing.
+    let mut tagged = kit.clone();
+    tagged.pads[1].role = Some(PadRole::Snare);
+    assert_eq!(
+        track_groove_snapshots([(&members[..], &tagged)], &[groove.clone()], 3),
+        with_roles
+    );
+    // A role-less groove on a kit whose pad 2 is a hat: by note, as before.
+    let mut relaid = kit.clone();
+    relaid.pads[1].role = Some(PadRole::ClosedHat);
+    let table = track_groove_snapshots([(&members[..], &relaid)], &[role_less.clone()], 3);
+    assert_eq!(
+        *table[1].as_ref().unwrap().row,
+        *role_less.pad_row(2).unwrap()
     );
 }

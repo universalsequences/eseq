@@ -28,6 +28,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::effects::EffectSlotSnapshot;
+use crate::pad_role::PadRole;
 use crate::sequencer::{
     bar_of_step, StepParam, SwingResolution, Timebase, TrackPatternData, MAX_STEPS,
 };
@@ -100,6 +101,11 @@ pub struct ProjectGroove {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct GroovePadRow {
     pub pad_note: i32,
+    /// The source pad's effective drum role at extraction (spec "Pad roles"),
+    /// so the row can land on the same drum in a kit with another layout.
+    /// `None`: the pad had no role, or the groove predates roles.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<PadRole>,
     pub row: GrooveRow,
 }
 
@@ -324,9 +330,40 @@ impl ProjectGroove {
             .map(|row| &row.row)
     }
 
-    /// The row a pad plays through: its own, else the shared row.
-    pub fn row_for_pad(&self, pad_note: i32) -> &GrooveRow {
-        self.pad_row(pad_note).unwrap_or(&self.shared_row)
+    /// The pad row a member pad plays through (spec "Pad roles"), given its
+    /// note and effective role, in order:
+    ///
+    /// 1. the row with the same `pad_note` when the roles are compatible —
+    ///    either side unknown, or equal (the same kit, or one in the same
+    ///    layout);
+    /// 2. the lowest-`pad_note` row recorded with the pad's role, so a snare
+    ///    row lands on this kit's snare wherever it sits;
+    /// 3. none: the pad plays the shared row.
+    ///
+    /// Grooves without recorded roles (and pads without roles) resolve by
+    /// `pad_note` alone, exactly as before roles existed.
+    pub fn resolve_pad_row(&self, pad_note: i32, role: Option<PadRole>) -> Option<&GroovePadRow> {
+        let compatible = |row: &GroovePadRow| match (row.role, role) {
+            (Some(recorded), Some(pad)) => recorded == pad,
+            _ => true,
+        };
+        self.pad_rows
+            .iter()
+            .find(|row| row.pad_note == pad_note && compatible(row))
+            .or_else(|| {
+                let role = role?;
+                self.pad_rows
+                    .iter()
+                    .filter(|row| row.role == Some(role))
+                    .min_by_key(|row| row.pad_note)
+            })
+    }
+
+    /// The row a pad plays through: [`Self::resolve_pad_row`], else the
+    /// shared row.
+    pub fn row_for_pad(&self, pad_note: i32, role: Option<PadRole>) -> &GrooveRow {
+        self.resolve_pad_row(pad_note, role)
+            .map_or(&self.shared_row, |row| &row.row)
     }
 
     /// Grid is valid, every row has exactly the grid's slot count, pad notes
@@ -371,6 +408,8 @@ pub struct HeardHit {
 #[derive(Clone, Debug, PartialEq)]
 pub struct GroovePadSource {
     pub pad_note: i32,
+    /// The pad's effective role, recorded on its extracted row.
+    pub role: Option<PadRole>,
     pub hits: Vec<HeardHit>,
 }
 
@@ -724,6 +763,7 @@ pub fn extract_groove(
 
     struct PadSamples {
         pad_note: i32,
+        role: Option<PadRole>,
         per_slot: Vec<Vec<SlotSample>>,
         velocity_ref: f32,
     }
@@ -756,6 +796,7 @@ pub fn extract_groove(
         }
         pad_samples.push(PadSamples {
             pad_note: pad.pad_note,
+            role: pad.role,
             per_slot,
             velocity_ref,
         });
@@ -793,6 +834,7 @@ pub fn extract_groove(
         {
             pad_rows.push(GroovePadRow {
                 pad_note: pad.pad_note,
+                role: pad.role,
                 row,
             });
         }

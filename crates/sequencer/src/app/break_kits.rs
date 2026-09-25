@@ -51,6 +51,8 @@ pub(super) struct KitSequencerRekey {
 pub(super) struct KitPadSource {
     pub pad_note: i32,
     pub choke_group: Option<u8>,
+    /// The pad's explicit drum role (`None` = Standard).
+    pub role: Option<crate::project::PadRole>,
     pub track: usize,
     pub name: String,
     /// A modulator member (§7.5): travels as its instrument slot, not a Sound.
@@ -283,6 +285,7 @@ impl App {
             pads.push(KitPadSource {
                 pad_note: pad.pad_note,
                 choke_group: rack.choke_group(pad_index),
+                role: pad.role,
                 track,
                 name,
                 modulator,

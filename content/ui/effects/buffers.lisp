@@ -196,6 +196,8 @@
       ;; amounts and the pads x slots offset heatmap, beside the kit.
       (groove/panel gidx)
       (groove/extract-modal)
+      ;; The pad grid's right-click menu (Role ▸ …), overlaying the grid.
+      (eseq.sequencer/rack-pad-context-menu)
       ;; Rack-level fx still matter: the bus chain stays right here, edited the
       ;; same way an ordinary bus selection edits it.
       (each (filter |fx| (> (len (get fx :params)) 0) (selected-bus-effects)) |fx slot-idx|

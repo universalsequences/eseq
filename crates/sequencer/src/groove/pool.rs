@@ -10,21 +10,24 @@
 //! auditioning the same kit twice, does not pile up copies.
 //!
 //! No per-pad remapping happens on import, on purpose: pad rows key on
-//! `pad_note`, and the scheduler table (`track_groove_snapshots`) resolves
-//! each member through its OWN rack's pad note. So a groove extracted on one
-//! kit plays a pad of another kit through the row with the same note and
-//! every other pad through the shared row; [`ProjectGroove::pad_row_mapping`]
-//! reports which.
+//! `pad_note` plus the source pad's role, and the scheduler table
+//! (`track_groove_snapshots`) resolves each member through its OWN rack's pad
+//! note and effective role ([`ProjectGroove::resolve_pad_row`]). So a groove
+//! extracted on one kit plays a pad of another kit through the row with the
+//! same note (roles compatible), else the row with the same role, else the
+//! shared row; [`ProjectGroove::pad_row_mapping`] reports which.
 
 use super::{GrooveId, ProjectGroove};
+use crate::pad_role::PadRole;
 use crate::project::ProjectRackConfig;
 
 /// Which row a pad plays through when a groove is applied to a rack.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GrooveRowChoice {
-    /// The groove has a row for this pad note.
+    /// A pad row: the one with this pad's note, or one recorded with its
+    /// role.
     Pad,
-    /// No row for this pad note: the all-pads shared row.
+    /// No pad row fits: the all-pads shared row.
     Shared,
 }
 
@@ -38,12 +41,12 @@ impl ProjectGroove {
             && self.shared_row == other.shared_row
     }
 
-    /// For each of `pad_notes` (in order), the row it plays through.
-    pub fn pad_row_mapping(&self, pad_notes: &[i32]) -> Vec<GrooveRowChoice> {
-        pad_notes
-            .iter()
-            .map(|&note| {
-                if self.pad_row(note).is_some() {
+    /// For each `(pad_note, effective role)` (in order), the row it plays
+    /// through.
+    pub fn pad_row_mapping(&self, pads: &[(i32, Option<PadRole>)]) -> Vec<GrooveRowChoice> {
+        pads.iter()
+            .map(|&(note, role)| {
+                if self.resolve_pad_row(note, role).is_some() {
                     GrooveRowChoice::Pad
                 } else {
                     GrooveRowChoice::Shared
@@ -57,8 +60,12 @@ impl ProjectRackConfig {
     /// For each of the rack's pads (in pad order), the row `groove` plays it
     /// through.
     pub fn groove_row_mapping(&self, groove: &ProjectGroove) -> Vec<GrooveRowChoice> {
-        let notes = self.pads.iter().map(|pad| pad.pad_note).collect::<Vec<_>>();
-        groove.pad_row_mapping(&notes)
+        let pads = self
+            .pads
+            .iter()
+            .map(|pad| (pad.pad_note, pad.effective_role()))
+            .collect::<Vec<_>>();
+        groove.pad_row_mapping(&pads)
     }
 
     /// Load-time repair of the rack's groove selection against the project

@@ -26,6 +26,7 @@ use crate::track_color::TrackColor;
 // Grooves are project data (docs/rack-groove-spec.md): the project groove
 // pool plus each rack's selection. They live in `crate::groove` beside their
 // extraction and are re-exported with the rest of the project wire types.
+pub use crate::pad_role::PadRole;
 pub use crate::groove::{
     GrooveId, GroovePadRow, GrooveRow, GrooveSlot, GrooveSlotSource, KitGroove, KitGrooveField,
     ProjectGroove, RackGrooveSettings,
@@ -271,6 +272,10 @@ pub struct ProjectKitPad {
     pub pad_note: i32,
     #[serde(default)]
     pub choke_group: Option<u8>,
+    /// The rack pad's explicit drum role at save time (`None` = Standard,
+    /// inferred from `pad_note`). Older kits have none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<PadRole>,
     /// Member track name at save time; the rebuilt track is renamed to it.
     #[serde(default)]
     pub name: String,
@@ -289,6 +294,11 @@ pub struct ProjectKitPad {
 impl ProjectKitPad {
     pub fn is_modulator(&self) -> bool {
         self.modulator.is_some()
+    }
+
+    /// The explicit role, else the standard layout's for `pad_note`.
+    pub fn effective_role(&self) -> Option<PadRole> {
+        PadRole::effective(self.role, self.pad_note)
     }
 }
 
@@ -1591,6 +1601,27 @@ pub struct ProjectRackPad {
     pub pad_note: i32,
     /// Index into `ProjectTrackGroup::members`. A member backs at most one pad.
     pub member: usize,
+    /// Explicit drum role (docs/rack-groove-spec.md, "Pad roles"); `None`
+    /// means "Standard": the role the standard layout infers from `pad_note`.
+    /// It travels with the pad, so a note move or swap keeps it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<PadRole>,
+}
+
+impl ProjectRackPad {
+    /// A pad with no explicit role.
+    pub const fn new(pad_note: i32, member: usize) -> Self {
+        Self {
+            pad_note,
+            member,
+            role: None,
+        }
+    }
+
+    /// The explicit role, else the standard layout's for `pad_note`.
+    pub fn effective_role(&self) -> Option<PadRole> {
+        PadRole::effective(self.role, self.pad_note)
+    }
 }
 
 impl ProjectRackConfig {
@@ -1624,7 +1655,7 @@ impl ProjectRackConfig {
             let Some(pad_note) = self.next_free_pad_note() else {
                 break;
             };
-            self.push_pad(ProjectRackPad { pad_note, member });
+            self.push_pad(ProjectRackPad::new(pad_note, member));
             created += 1;
         }
         created
@@ -5275,8 +5306,8 @@ mod tests {
                 groove: Default::default(),
                 sequencers: Vec::new(),
                 pads: vec![
-                    ProjectRackPad { pad_note: 36, member: 0 },
-                    ProjectRackPad { pad_note: 38, member: 1 },
+                    ProjectRackPad::new(36, 0),
+                    ProjectRackPad::new(38, 1),
                 ],
                 choke_groups: vec![None, Some(1)],
             }),
@@ -5285,8 +5316,8 @@ mod tests {
         let json = serde_json::to_string(&project).expect("serialize project");
         let restored: ProjectFile = serde_json::from_str(&json).expect("deserialize project");
         let rack = restored.groups[0].rack.as_ref().expect("rack survives the round trip");
-        assert_eq!(rack.pads[0], ProjectRackPad { pad_note: 36, member: 0 });
-        assert_eq!(rack.pads[1], ProjectRackPad { pad_note: 38, member: 1 });
+        assert_eq!(rack.pads[0], ProjectRackPad::new(36, 0));
+        assert_eq!(rack.pads[1], ProjectRackPad::new(38, 1));
         assert_eq!(rack.choke_groups, vec![None, Some(1)]);
 
         // A project written before drum rack v2 has no `rack` key at all.
@@ -5299,6 +5330,49 @@ mod tests {
             serde_json::from_value(value).expect("deserialize pre-rack project");
         assert!(restored.groups[0].rack.is_none());
         assert!(!restored.groups[0].is_rack());
+    }
+
+    /// Pad roles (eseq-groove.10): an explicit role round-trips on its pad, a
+    /// Standard pad writes no `role` key, and a project saved before roles
+    /// loads with every pad Standard (its role inferred from its note).
+    #[test]
+    fn rack_pad_roles_round_trip_and_old_projects_load_without_roles() {
+        let mut project = sample_project();
+        let mut snare = ProjectRackPad::new(5, 1);
+        snare.role = Some(PadRole::Snare);
+        project.groups = vec![ProjectTrackGroup {
+            id: 3,
+            name: "Kit".to_string(),
+            color: [0.4, 0.2, 0.6],
+            collapsed: false,
+            members: vec![0, 1],
+            bus_id: 7,
+            rack: Some(ProjectRackConfig {
+                pads: vec![ProjectRackPad::new(0, 0), snare],
+                choke_groups: vec![None, None],
+                ..Default::default()
+            }),
+            rack_members: Vec::new(),
+        }];
+        let json = serde_json::to_string(&project).expect("serialize project");
+        assert_eq!(json.matches("\"role\"").count(), 1, "only the tagged pad: {json}");
+        let restored: ProjectFile = serde_json::from_str(&json).expect("deserialize project");
+        let rack = restored.groups[0].rack.as_ref().expect("rack");
+        assert_eq!(rack.pads[0].role, None);
+        assert_eq!(rack.pads[0].effective_role(), Some(PadRole::Kick), "standard layout");
+        assert_eq!(rack.pads[1].role, Some(PadRole::Snare));
+        assert_eq!(
+            rack.pads[1].effective_role(),
+            Some(PadRole::Snare),
+            "explicit beats the layout's low tom at note 5"
+        );
+
+        let old = json.replace(",\"role\":\"snare\"", "");
+        assert!(!old.contains("\"role\""));
+        let restored: ProjectFile = serde_json::from_str(&old).expect("pre-role project loads");
+        let rack = restored.groups[0].rack.as_ref().expect("rack");
+        assert!(rack.pads.iter().all(|pad| pad.role.is_none()));
+        assert_eq!(rack.pads[1].effective_role(), Some(PadRole::TomLow));
     }
 
     /// Rack clips (rack-clips spec 3): the bank, the per-scene pointers and the
@@ -5318,8 +5392,8 @@ mod tests {
             rack: Some(ProjectRackConfig {
                 sequencers: Vec::new(),
                 pads: vec![
-                    ProjectRackPad { pad_note: 36, member: 0 },
-                    ProjectRackPad { pad_note: 38, member: 1 },
+                    ProjectRackPad::new(36, 0),
+                    ProjectRackPad::new(38, 1),
                 ],
                 choke_groups: vec![None, None],
                 clips: vec![ProjectRackClip {
@@ -5391,7 +5465,7 @@ mod tests {
             name: name.to_string(),
             period_beats: 4.0,
             resolution_beats: 0.25,
-            pad_rows: vec![GroovePadRow { pad_note: 42, row: row(0.2) }],
+            pad_rows: vec![GroovePadRow { pad_note: 42, role: None, row: row(0.2) }],
             shared_row: row(0.1),
         }
     }
@@ -5407,8 +5481,8 @@ mod tests {
         let mut project = sample_project();
         let mut rack = ProjectRackConfig {
             pads: vec![
-                ProjectRackPad { pad_note: 36, member: 0 },
-                ProjectRackPad { pad_note: 42, member: 1 },
+                ProjectRackPad::new(36, 0),
+                ProjectRackPad::new(42, 1),
             ],
             choke_groups: vec![None, None],
             ..Default::default()
@@ -5441,8 +5515,8 @@ mod tests {
             Some("Madlib")
         );
         let dilla = crate::groove::pool_groove(&restored.grooves, 1).unwrap();
-        assert_eq!(dilla.row_for_pad(42).slots[0].offset, 0.2);
-        assert_eq!(dilla.row_for_pad(36).slots[0].offset, 0.1, "no row: the shared row");
+        assert_eq!(dilla.row_for_pad(42, None).slots[0].offset, 0.2);
+        assert_eq!(dilla.row_for_pad(36, None).slots[0].offset, 0.1, "no row: the shared row");
         assert_eq!(crate::groove::next_pool_groove_id(&restored.grooves), 3);
         let value: serde_json::Value = serde_json::from_str(&json).expect("parse json");
         assert_eq!(value["groups"][0]["rack"]["groove"]["active"], 2, "a plain pool id");
@@ -5525,14 +5599,14 @@ mod tests {
             groove: Default::default(),
             sequencers: Vec::new(),
             pads: vec![
-                ProjectRackPad { pad_note: 36, member: 0 },
+                ProjectRackPad::new(36, 0),
                 // Duplicate pad note.
-                ProjectRackPad { pad_note: 36, member: 1 },
+                ProjectRackPad::new(36, 1),
                 // Member already backs pad 0.
-                ProjectRackPad { pad_note: 40, member: 0 },
+                ProjectRackPad::new(40, 0),
                 // Member is out of range.
-                ProjectRackPad { pad_note: 42, member: 9 },
-                ProjectRackPad { pad_note: 44, member: 2 },
+                ProjectRackPad::new(42, 9),
+                ProjectRackPad::new(44, 2),
             ],
             choke_groups: vec![Some(1), Some(2), Some(3), Some(4), Some(5)],
         };
@@ -5540,8 +5614,8 @@ mod tests {
         assert_eq!(
             rack.pads,
             vec![
-                ProjectRackPad { pad_note: 36, member: 0 },
-                ProjectRackPad { pad_note: 44, member: 2 },
+                ProjectRackPad::new(36, 0),
+                ProjectRackPad::new(44, 2),
             ],
         );
         assert_eq!(rack.choke_groups, vec![Some(1), Some(5)]);
@@ -5558,9 +5632,9 @@ mod tests {
             groove: Default::default(),
             sequencers: Vec::new(),
             pads: vec![
-                ProjectRackPad { pad_note: 36, member: 0 },
+                ProjectRackPad::new(36, 0),
                 // Legal before eseq-4b5.15, above D#8 now.
-                ProjectRackPad { pad_note: 96, member: 1 },
+                ProjectRackPad::new(96, 1),
             ],
             choke_groups: vec![Some(1), Some(2)],
         };
@@ -5568,8 +5642,8 @@ mod tests {
         assert_eq!(
             rack.pads,
             vec![
-                ProjectRackPad { pad_note: 36, member: 0 },
-                ProjectRackPad { pad_note: DRUM_RACK_FIRST_PAD_NOTE, member: 1 },
+                ProjectRackPad::new(36, 0),
+                ProjectRackPad::new(DRUM_RACK_FIRST_PAD_NOTE, 1),
             ],
             "the out-of-domain pad lands on the next free in-domain note"
         );
@@ -5591,8 +5665,8 @@ mod tests {
             groove: Default::default(),
             sequencers: Vec::new(),
             pads: vec![
-                ProjectRackPad { pad_note: 90, member: 0 },
-                ProjectRackPad { pad_note: 91, member: 1 },
+                ProjectRackPad::new(90, 0),
+                ProjectRackPad::new(91, 1),
             ],
             choke_groups: vec![Some(1), Some(1)],
         };
@@ -5623,10 +5697,10 @@ mod tests {
     fn rack_sanitize_drops_a_migrated_pad_when_no_free_note_remains() {
         let mut rack = ProjectRackConfig::default();
         for (member, pad_note) in (DRUM_RACK_FIRST_PAD_NOTE..=DRUM_RACK_LAST_PAD_NOTE).enumerate() {
-            rack.push_pad(ProjectRackPad { pad_note, member });
+            rack.push_pad(ProjectRackPad::new(pad_note, member));
         }
         let full = rack.pads.len();
-        rack.push_pad(ProjectRackPad { pad_note: 120, member: full });
+        rack.push_pad(ProjectRackPad::new(120, full));
         rack.set_choke_group(full, Some(3));
 
         rack.sanitize(full + 1);
@@ -5642,7 +5716,7 @@ mod tests {
     #[test]
     fn rack_maps_unmapped_members_onto_free_pad_notes() {
         let mut rack = ProjectRackConfig::default();
-        rack.push_pad(ProjectRackPad { pad_note: 36, member: 1 });
+        rack.push_pad(ProjectRackPad::new(36, 1));
         rack.set_choke_group(0, Some(2));
 
         // Members 0, 2 and 3 arrived through a mixer drop and got no pad.
@@ -5650,10 +5724,10 @@ mod tests {
         assert_eq!(
             rack.pads,
             vec![
-                ProjectRackPad { pad_note: 36, member: 1 },
-                ProjectRackPad { pad_note: DRUM_RACK_FIRST_PAD_NOTE, member: 0 },
-                ProjectRackPad { pad_note: DRUM_RACK_FIRST_PAD_NOTE + 1, member: 2 },
-                ProjectRackPad { pad_note: DRUM_RACK_FIRST_PAD_NOTE + 2, member: 3 },
+                ProjectRackPad::new(36, 1),
+                ProjectRackPad::new(DRUM_RACK_FIRST_PAD_NOTE, 0),
+                ProjectRackPad::new(DRUM_RACK_FIRST_PAD_NOTE + 1, 2),
+                ProjectRackPad::new(DRUM_RACK_FIRST_PAD_NOTE + 2, 3),
             ],
             "free notes are claimed lowest-first, skipping the taken one",
         );
@@ -5674,7 +5748,7 @@ mod tests {
     fn rack_with_every_pad_note_taken_has_no_free_note() {
         let mut rack = ProjectRackConfig::default();
         for (member, pad_note) in (DRUM_RACK_FIRST_PAD_NOTE..=DRUM_RACK_LAST_PAD_NOTE).enumerate() {
-            rack.push_pad(ProjectRackPad { pad_note, member });
+            rack.push_pad(ProjectRackPad::new(pad_note, member));
         }
         assert_eq!(rack.next_free_pad_note(), None);
         let members = rack.pads.len();
@@ -5685,9 +5759,9 @@ mod tests {
     #[test]
     fn rack_remap_after_member_removed_drops_its_pad_and_shifts_the_rest() {
         let mut rack = ProjectRackConfig::default();
-        rack.push_pad(ProjectRackPad { pad_note: 36, member: 0 });
-        rack.push_pad(ProjectRackPad { pad_note: 38, member: 1 });
-        rack.push_pad(ProjectRackPad { pad_note: 40, member: 2 });
+        rack.push_pad(ProjectRackPad::new(36, 0));
+        rack.push_pad(ProjectRackPad::new(38, 1));
+        rack.push_pad(ProjectRackPad::new(40, 2));
         rack.set_choke_group(2, Some(4));
 
         rack.remap_after_member_removed(1);
@@ -5695,8 +5769,8 @@ mod tests {
         assert_eq!(
             rack.pads,
             vec![
-                ProjectRackPad { pad_note: 36, member: 0 },
-                ProjectRackPad { pad_note: 40, member: 1 },
+                ProjectRackPad::new(36, 0),
+                ProjectRackPad::new(40, 1),
             ],
         );
         assert_eq!(rack.choke_groups, vec![None, Some(4)]);
@@ -7075,6 +7149,7 @@ mod tests {
                 ProjectKitPad {
                     pad_note: 36,
                     choke_group: None,
+                    role: None,
                     name: "Kick".to_string(),
                     sound: Some(pad_sound("Kick", "samples/kick.wav")),
                     modulator: None,
@@ -7082,6 +7157,7 @@ mod tests {
                 ProjectKitPad {
                     pad_note: 42,
                     choke_group: Some(1),
+                    role: Some(PadRole::OpenHat),
                     name: "Hat".to_string(),
                     sound: Some(pad_sound("Hat", "samples/hat.wav")),
                     modulator: None,
@@ -7144,6 +7220,12 @@ mod tests {
         assert_eq!(restored.pads[1].pad_note, 42);
         assert_eq!(restored.pads[1].choke_group, Some(1));
         assert_eq!(restored.pads[1].name, "Hat");
+        // Pad roles (eseq-groove.10): an explicit role round-trips; a
+        // Standard pad writes no key and infers from its note.
+        assert_eq!(restored.pads[1].role, Some(PadRole::OpenHat));
+        assert_eq!(restored.pads[1].effective_role(), Some(PadRole::OpenHat));
+        assert_eq!(restored.pads[0].role, None);
+        assert_eq!(json.matches("\"role\"").count(), 1, "only the tagged pad: {json}");
         let chain = restored.bus_chain.as_ref().expect("kits carry the rack bus chain");
         assert_eq!(chain.effects.len(), 1);
         assert_eq!(chain.effects[0].name, "builtin:Filter");
@@ -7178,9 +7260,11 @@ mod tests {
                 .replace(",\"sequencers\":[", ",\"sequencers_unused\":[")
                 .replace(",\"clips\":[", ",\"clips_unused\":[")
                 .replace(",\"grooves\":[", ",\"grooves_unused\":[")
-                .replace(",\"groove\":{", ",\"groove_unused\":{"),
+                .replace(",\"groove\":{", ",\"groove_unused\":{")
+                .replace(",\"role\":\"open-hat\"", ""),
         )
         .expect("a kit saved before break kits still loads");
+        assert!(pre_feature.pads.iter().all(|pad| pad.role.is_none()), "old kits have no roles");
         assert_eq!(pre_feature.kit_version, 1);
         assert_eq!(pre_feature.groove, None);
         assert!(!pre_feature.carries_grooves(), "an old kit says nothing about grooves");

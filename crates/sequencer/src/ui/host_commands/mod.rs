@@ -3,7 +3,7 @@ pub(crate) mod audio_settings;
 mod customize;
 mod dispatch;
 mod drum_rack_v2;
-pub(crate) use drum_rack_v2::evaluate_rack_sequencer_source;
+pub(crate) use drum_rack_v2::{apply_rack_pad_map_command, evaluate_rack_sequencer_source};
 mod effects;
 pub(crate) mod export;
 mod file_menu;
@@ -762,10 +762,7 @@ mod tests {
                 next_clip_id: 0,
                 groove: Default::default(),
                 sequencers: Vec::new(),
-                pads: vec![sequencer::project::ProjectRackPad {
-                    pad_note: 36,
-                    member: 0,
-                }],
+                pads: vec![sequencer::project::ProjectRackPad::new(36, 0)],
                 choke_groups: vec![None],
             }),
             rack_members: Vec::new(),
