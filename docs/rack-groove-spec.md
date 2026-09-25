@@ -1,6 +1,6 @@
 # Rack Grooves — Extracted Feel, Applied to Every Trig Source
 
-Status: rev 1; slices 1–7 built (model/extraction, application incl. early offsets, rack panel UI, velocity/random, record/roll unwind, kit carry and cross-rack). Epic: `eseq-groove` (slices `.1`–`.7` below).
+Status: rev 2. Slices 1–7 built (model/extraction, application incl. early offsets, rack panel UI, velocity/random, record/roll unwind, kit carry and cross-rack). Rev 2 (§Groove pool, library and pad roles; slices 8–11 = beads `.9`–`.12`) moves grooves off the rack into a project pool backed by a factory/user groove library, adds typed pad roles for cross-kit row matching, and adds a Grooves sidebar tab. Where rev 2 contradicts the rev-1 text below (rack-owned `grooves`, `GrooveRef::Rack`, built-ins in code, the rack-panel heatmap), rev 2 wins. Epic: `eseq-groove`.
 
 ## Problem
 
@@ -356,6 +356,97 @@ lookahead. The pattern-epoch and live-MIDI-FX resyncs do not rewind graph
 runtimes. That loss predates grooves, but the early lead `E` widens its
 window by up to 0.75 slot.
 
+## Groove pool, library and pad roles (rev 2)
+
+Rev 1 stored grooves on the rack. That makes the question "which grooves do I
+have, and where is each one applied?" unanswerable without opening every rack,
+and it makes a groove extracted on one kit a second-class citizen on another.
+Rev 2 follows Ableton's groove pool and eseq's own content tiers. Rev-1 rack
+storage never shipped (the branch was unmerged), so there is no migration of
+rack-owned grooves; `PROJECT_FILE_VERSION` is bumped once for the pool.
+
+### Three tiers
+
+| Tier | Where | Mutable | Used by playback |
+|---|---|---|---|
+| Project pool | `Project::grooves: Vec<ProjectGroove>` | yes | yes — the only tier racks reference |
+| User library | `AppPaths::user_grooves_dir()` = `user_data_root()/grooves/*.groove` | yes | no |
+| Factory library | `AppPaths::grooves_dir()` = `factory_root()/grooves/*.groove` (bundle `content/grooves/`) | no | no |
+
+- This mirrors kits (`kits_dir` / `user_kits_dir`), presets, effects and
+  instruments. The Grooves tab lists user + factory merged, like
+  `project::list_kit_presets`.
+- A `.groove` file is a versioned JSON `ProjectGroove` without `id`
+  (`GROOVE_FILE_VERSION`), named by its file stem unless `name` is set.
+- The rev-1 built-in MPC swings become factory `.groove` files
+  (`mpc-swing-54-16th.groove`, …). `GrooveRef::Builtin` is deleted.
+- **Copy-on-apply.** Applying a library groove to a rack first imports it into
+  the project pool (reusing an existing pool groove with the same feel —
+  `ProjectGroove::same_feel`), then points the rack at the pool id. A project
+  therefore plays identically on a machine without that library file, and
+  editing the library never changes an existing project. "Save to Library"
+  is the reverse copy; it never links.
+- `GrooveId` is unique within the project pool.
+- `RackGrooveSettings::active: Option<GrooveId>` (a pool id). Deleting a pool
+  groove that racks use asks first and turns it off on those racks, as one
+  undo step. Extract Groove adds the result to the pool and activates it on
+  the source rack.
+- **Kit presets** carry a copy of the kit's active groove (plus its settings),
+  not a list. Loading a kit imports that copy into the pool through the same
+  dedupe as copy-on-apply. `KIT_PRESET_VERSION` bumps; v5 kits (rack groove
+  list + selection) load by importing their selected groove only.
+- The scheduler is unchanged: `track_groove_snapshots` resolves each member's
+  row from the pool groove its rack references.
+
+### Pad roles (typed slots)
+
+`pad_note` identifies a pad within one kit; across kits it only means the same
+drum if both kits follow the same layout. Rev 2 adds an explicit, optional
+drum role per pad:
+
+```rust
+pub enum PadRole {
+    Kick, Snare, Rim, Clap, ClosedHat, PedalHat, OpenHat,
+    TomLow, TomMid, TomHigh, Crash, Ride, Shaker, Perc,
+}
+// ProjectRackPad and ProjectKitPad:
+#[serde(default, skip_serializing_if = "Option::is_none")]
+pub role: Option<PadRole>,
+```
+
+**Standard layout.** A pad without an explicit role gets one inferred from its
+`pad_note` using the General MIDI drum map shifted so C4 = pad note 0
+(`gm_note - 36`): 0 kick (C4), 1 rim, 2 snare (D4), 3 clap, 4 snare,
+5 tom-low, 6 closed-hat (F#4), 7 tom-low, 8 pedal-hat, 9 tom-mid,
+10 open-hat (A#4), 11 tom-mid, 12 tom-high, 13 crash, 14 tom-high, 15 ride,
+16 crash, 17 ride, 18 shaker, 19 crash, 20 perc; anything else has no role.
+Kits authored in this layout (factory kits, eseq-2k9p.25, should) need no
+tagging; other kits set roles explicitly. `effective_role(pad)` = explicit role
+else inferred.
+
+**Groove rows record roles.** Extraction stores the source pad's effective role
+on each `GroovePadRow` (`role: Option<PadRole>`, serde default). Row lookup for
+a member pad (`ProjectGroove::row_for_pad(pad_note, role)`), in order:
+
+1. a row with the same `pad_note` whose role is unrecorded, or equal to the
+   pad's effective role — the same kit, or a kit in the same layout;
+2. a row with the same role (first by `pad_note` order) — the snare row lands
+   on this kit's snare wherever it sits;
+3. the shared all-pads row.
+
+Roles are general pad metadata; grooves are their first consumer. Pattern
+transfer between kits, MIDI note maps and Jev can use them later.
+Auto-suggesting a role from sample names or the sound classifier is a
+follow-up, not rev 2.
+
+### Out of scope for rev 2
+
+- **Commit** (bake a groove into member step `Delay` p-locks and turn it off).
+  Only step patterns could be baked — graph, neural and process emissions have
+  no stored notes — so on a mixed rack it would half-work. Revisit as a
+  step-only action if wanted.
+- Editing groove cells by hand.
+
 ## UI
 
 On the drum rack panel (`content/ui/drum-rack-v2.lisp`), a **Groove** section:
@@ -368,6 +459,32 @@ On the drum rack panel (`content/ui/drum-rack-v2.lisp`), a **Groove** section:
 
 Member tracks with an active rack groove show their swing control disabled with
 a "groove" hint, so there is one visible source of truth for the feel.
+
+**Rev 2 UI.**
+
+*Grooves sidebar tab* (a browser tab beside Packages, same tree widget and
+conventions — see the Packages tab: header rows, `:status-icon`,
+`:on-right-click` context menus routed to host commands):
+- Header sections **In use** / **Project** / **Library** (user) / **Factory**.
+- A project groove row expands to its instances, one row per rack using it:
+  `<rack name> · T 100% V 40% R 0%`. Clicking an instance focuses that rack.
+  In use lists only pool grooves with at least one instance.
+- Selecting a groove shows its pads × slots heatmap (rows labelled by role
+  where known, filled cells dimmed) and its period/grid below the tree.
+- Context menus. Project groove: Apply to Selected Rack, Rename, Duplicate,
+  Save to Library, Delete (confirms and lists affected racks when in use).
+  Library/factory groove: Apply to Selected Rack (copy-on-apply), and for
+  user files Rename and Delete. All edits are single undo steps; library file
+  edits are not undoable and say so in their confirm.
+
+*Rack panel* keeps only: the groove picker (pool grooves, then a *Library*
+section whose entries copy-on-apply, then Off), the Timing / Velocity /
+Random knobs, "Extract Groove…", and a "Grooves tab" link that opens the tab
+with this rack's groove selected. The heatmap and rename/delete move to the tab.
+
+*Pad role* is set from the rack pad's context menu (Role ▸ …, with
+"Standard (<inferred>)" as the default entry), and shown as a short tag on
+the pad.
 
 ## Slices
 
@@ -432,6 +549,19 @@ a "groove" hint, so there is one visible source of truth for the feel.
    (`groove/transfer.rs`); no per-pad remap is stored, because the scheduler
    table already resolves each member's row by its own pad note.
 
+8. (eseq-groove.9) **Project groove pool + library.** `Project::grooves`, `active: Option<GrooveId>`,
+   delete `GrooveRef::Builtin`/rack storage, `grooves_dir`/`user_grooves_dir`,
+   `.groove` file format + list/save/delete, factory MPC swing files,
+   copy-on-apply with dedupe, kit presets carry the active groove copy.
+   Existing host commands and the rack panel keep working against the pool.
+9. (eseq-groove.10) **Pad roles.** `PadRole`, `role` on rack + kit pads, standard-layout
+   inference, role recorded on extracted rows, role-aware row lookup in the
+   scheduler table, pad context-menu role picker + pad tag.
+10. (eseq-groove.11) **Grooves sidebar tab.** Tree, instances, heatmap preview, context menus,
+    host commands shared with the rack panel.
+11. (eseq-groove.12) **Slim rack panel.** Picker with Library section, knobs, Extract, link to
+    the tab; heatmap and rename/delete removed from the panel.
+
 ## Acceptance
 
 - Extract from a captured Dilla-style take, quantize source, play: the take
@@ -442,3 +572,6 @@ a "groove" hint, so there is one visible source of truth for the feel.
 - Rack with no active groove: scheduler output is bit-identical to today
   (existing swing/neural tests untouched).
 - Offline render of a grooved rack with Random > 0 is reproducible run to run.
+- Rev 2: a groove extracted on kit A, saved to the library, applied to kit B
+  (different layout, roles set) puts A's snare row on B's snare; the project
+  still plays it after the library file is deleted.
