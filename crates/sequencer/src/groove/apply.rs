@@ -209,6 +209,39 @@ impl TrackGrooveSnapshot {
         (-earliest_slots).min(MAX_EARLY_SLOTS) * self.resolution_beats
     }
 
+    /// How far AFTER its straight boundary this groove can move a trig, in
+    /// beats: the largest [`offset_beats`](Self::offset_beats) over every
+    /// position (the mirror of [`max_early_beats`](Self::max_early_beats),
+    /// exact per slot pair, conservative only in assuming Random reaches
+    /// its bound). Zero for an early-only (or degenerate) groove. A mid-play
+    /// resync looks this far back for late hits whose straight boundary it
+    /// already passed but which have not sounded yet (rack groove spec
+    /// §Early hits, eseq-groove.8).
+    pub fn max_late_beats(&self) -> f64 {
+        let slots = &self.row.slots;
+        let n = slots.len();
+        if n == 0 || !(self.period_beats > 0.0) || !(self.resolution_beats > 0.0) {
+            return 0.0;
+        }
+        let timing = self.timing_amount as f64;
+        let random = self.random_amount as f64;
+        let mut latest_slots = 0.0_f64;
+        for k in 0..n {
+            let a = slots[k].offset as f64;
+            let b = slots[(k + 1) % n].offset as f64;
+            let jitter = (random * slots[k].spread as f64).abs();
+            let high = if timing >= 0.0 {
+                (a.max(b) + jitter) * timing
+            } else {
+                (a.min(b) - jitter) * timing
+            };
+            if high.is_finite() {
+                latest_slots = latest_slots.max(high);
+            }
+        }
+        latest_slots * self.resolution_beats
+    }
+
     /// The velocity multiplier at `boundary_beats`:
     /// `lerp(1, lerp(row[k].velocity_scale, row[k+1].velocity_scale, t),
     /// velocity_amount)`. Exactly `1.0` at a zero amount (and for any
@@ -333,6 +366,17 @@ pub fn max_early_lead_beats(grooves: &[Option<TrackGrooveSnapshot>]) -> f64 {
         .iter()
         .flatten()
         .map(TrackGrooveSnapshot::max_early_beats)
+        .fold(0.0, f64::max)
+}
+
+/// The resync look-back for a groove table: the largest
+/// [`TrackGrooveSnapshot::max_late_beats`] over every grooved track. Zero
+/// when no groove can move a trig late.
+pub fn max_late_lead_beats(grooves: &[Option<TrackGrooveSnapshot>]) -> f64 {
+    grooves
+        .iter()
+        .flatten()
+        .map(TrackGrooveSnapshot::max_late_beats)
         .fold(0.0, f64::max)
 }
 

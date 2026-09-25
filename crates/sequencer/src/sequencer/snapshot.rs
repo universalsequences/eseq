@@ -145,6 +145,14 @@ impl SequencerSnapshot {
         crate::groove::max_early_lead_beats(&self.track_grooves)
     }
 
+    /// How far after its straight boundary a rack groove can move a trig, in
+    /// beats: how far back a mid-play resync looks for late hits it would
+    /// otherwise lose (rack groove spec §Early hits). Zero when no groove
+    /// moves anything late.
+    pub fn groove_late_lead_beats(&self) -> f64 {
+        crate::groove::max_late_lead_beats(&self.track_grooves)
+    }
+
     pub fn empty() -> Self {
         Self {
             transport: SequencerTransportSnapshot {

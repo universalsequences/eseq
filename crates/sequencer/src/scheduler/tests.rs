@@ -15592,6 +15592,41 @@ fn scene_transpose_follows_live_scene_values_without_a_scratch_runtime() {
             block: usize,
             resync_at: Option<u64>,
         ) -> Vec<(usize, u64)> {
+            played_trigs_with_resync(state, snapshot, end, block, block as u64, resync_at)
+                .into_iter()
+                .filter(|(kind, _, _)| *kind == ScheduledTriggerKind::Step)
+                .map(|(_, track, sample)| (track, sample))
+                .collect()
+        }
+
+        /// [`played_step_trigs_with_resync`] with every trig kind (step and
+        /// graph fires), each call scheduling `lookahead` samples past the
+        /// audio (a live scheduler's slack, so a resync discards real
+        /// lookahead). Sorted by track, sample, then kind.
+        fn played_trigs_with_resync(
+            state: &Arc<SequencerState>,
+            snapshot: &crate::sequencer::SequencerSnapshot,
+            end: u64,
+            block: usize,
+            lookahead: u64,
+            resync_at: Option<u64>,
+        ) -> Vec<(ScheduledTriggerKind, usize, u64)> {
+            run_with_resync(state, snapshot, end, block, lookahead, resync_at).0
+        }
+
+        /// [`played_trigs_with_resync`], also returning the scheduler state
+        /// the run ended in.
+        fn run_with_resync(
+            state: &Arc<SequencerState>,
+            snapshot: &crate::sequencer::SequencerSnapshot,
+            end: u64,
+            block: usize,
+            lookahead: u64,
+            resync_at: Option<u64>,
+        ) -> (
+            Vec<(ScheduledTriggerKind, usize, u64)>,
+            SchedulerLookaheadState,
+        ) {
             let (mut scheduler, mut scratch_runtime) = fresh_scheduler(state, snapshot);
             let queue = ScheduledEventQueue::<512>::new();
             let live_midi_fx_tracks: [LiveMidiFxTrackState; MAX_TRACKS] =
@@ -15605,9 +15640,7 @@ fn scene_transpose_follows_live_scene_values_without_a_scratch_runtime() {
                 // The audio thread consumed everything before `rendered`.
                 pending.retain(|event| {
                     if event.sample_time < rendered {
-                        if event.kind == ScheduledTriggerKind::Step {
-                            played.push((event.track, event.sample_time));
-                        }
+                        played.push((event.kind, event.track, event.sample_time));
                         false
                     } else {
                         true
@@ -15637,7 +15670,7 @@ fn scene_transpose_follows_live_scene_values_without_a_scratch_runtime() {
                     &live_midi_fx_tracks,
                     epoch,
                     rendered,
-                    block as u64,
+                    lookahead,
                     SAMPLE_RATE,
                     block,
                     samples_per_quarter(snapshot),
@@ -15655,8 +15688,58 @@ fn scene_transpose_follows_live_scene_values_without_a_scratch_runtime() {
                 }
                 rendered += block as u64;
             }
-            played.sort_unstable();
-            played
+            sort_played(&mut played);
+            (played, scheduler)
+        }
+
+        fn sort_played(played: &mut [(ScheduledTriggerKind, usize, u64)]) {
+            played.sort_by_key(|(kind, track, sample)| {
+                (*track, *sample, *kind == ScheduledTriggerKind::Network)
+            });
+        }
+
+        /// `played` is `reference`: the same trigs, kind for kind and track
+        /// for track, each within one sample (a resync re-derives the clock's
+        /// beat from `rendered` in floating point, so a later boundary may
+        /// land one sample off; true of any resync, grooved or not).
+        fn assert_same_played(
+            played: &[(ScheduledTriggerKind, usize, u64)],
+            reference: &[(ScheduledTriggerKind, usize, u64)],
+            label: &str,
+        ) {
+            for kind in [ScheduledTriggerKind::Step, ScheduledTriggerKind::Network] {
+                for track in 0..3 {
+                    let count = |list: &[(ScheduledTriggerKind, usize, u64)]| {
+                        list.iter()
+                            .filter(|(k, t, _)| *k == kind && *t == track)
+                            .count()
+                    };
+                    assert_eq!(
+                        count(played),
+                        count(reference),
+                        "{label}: {kind:?} on track {track} lost or doubled\n\
+                             played {played:?}\nreference {reference:?}"
+                    );
+                }
+            }
+            for kind in [ScheduledTriggerKind::Step, ScheduledTriggerKind::Network] {
+                for track in 0..3 {
+                    let times = |list: &[(ScheduledTriggerKind, usize, u64)]| {
+                        list.iter()
+                            .filter(|(k, t, _)| *k == kind && *t == track)
+                            .map(|(_, _, sample)| *sample)
+                            .collect::<Vec<_>>()
+                    };
+                    for (got, want) in times(played).iter().zip(times(reference)) {
+                        assert!(
+                            got.abs_diff(want) <= 1,
+                            "{label}: {kind:?} on track {track} at {got} vs {want}\n\
+                                 played {played:?}\nreference {reference:?}"
+                        );
+                    }
+                }
+            }
+            assert_eq!(played.len(), reference.len(), "{label}");
         }
 
         /// Regression (eseq-groove.3 review): a mid-play resync inside an
@@ -15711,6 +15794,360 @@ fn scene_transpose_follows_live_scene_values_without_a_scratch_runtime() {
                             "resync at {resync_at}: {got:?} vs {want:?} in {played:?}"
                         );
                     }
+                }
+            });
+        }
+
+        /// The late hat pocket in the variable-reset rack fixture: the kick
+        /// (graph seed) plays straight; the hat's steps and its graph fires
+        /// (slots 1, 5, 9, 13) all sit late by `HAT_POCKET`.
+        fn late_rack_fixture() -> (
+            Arc<SequencerState>,
+            Arc<crate::sequencer::SequencerSnapshot>,
+        ) {
+            variable_reset_rack_fixture(Some(vec![None, Some(groove(4.0, 0.25, &HAT_POCKET)), None]))
+        }
+
+        /// Regression (eseq-groove.8): a mid-play resync inside a LATE hit's
+        /// window (after its straight boundary, before its grooved sample)
+        /// cleared the queued hit, and the rewound clock only finds
+        /// boundaries from `rendered` on, so the hit was lost (a probe showed
+        /// 17 hats becoming 16). The first chunk after the resync now
+        /// re-finds grooved steps within the groove's late reach before
+        /// `rendered` and keeps those whose grooved sample has not sounded;
+        /// the graph fire on the same slot is replayed. Same trigs, same
+        /// samples, for steps and graph fires, whether the resync lands just
+        /// after the straight boundary, just before the grooved hit, or
+        /// before the boundary (nothing to recover).
+        #[test]
+        fn late_groove_hit_survives_a_mid_play_resync() {
+            const BLOCK: usize = 64;
+            run_with_scheduler_stack(|| {
+                let (state, snapshot) = late_rack_fixture();
+                assert_eq!(snapshot.groove_early_lead_beats(), 0.0);
+                assert!((snapshot.groove_late_lead_beats() - 0.40 * 0.25).abs() < 1e-7);
+                let spq = samples_per_quarter(&snapshot);
+                let step = (spq / 4.0) as u64;
+                let end = (spq * 4.0) as u64;
+                let reference =
+                    played_trigs_with_resync(&state, &snapshot, end, BLOCK, BLOCK as u64, None);
+                let hats = |played: &[(ScheduledTriggerKind, usize, u64)], kind| {
+                    played
+                        .iter()
+                        .filter(|(k, t, _)| *k == kind && *t == 1)
+                        .count()
+                };
+                assert_eq!(hats(&reference, ScheduledTriggerKind::Step), 16);
+                assert!(hats(&reference, ScheduledTriggerKind::Network) >= 3);
+                // Slot 1 (straight 6000) sounds at 7800, slot 5 (30000) at
+                // 32100, slot 13 (78000) at 80400; graph fires land there too.
+                let late = |slot: usize| {
+                    slot as u64 * step + (HAT_POCKET[slot] as f64 * step as f64).round() as u64
+                };
+                assert_eq!((late(1), late(5), late(13)), (7_800, 32_100, 80_400));
+                for resync_at in [6_016, 7_744, 30_016, 32_064, 78_016, 80_384, 5_952] {
+                    assert_eq!(resync_at % BLOCK as u64, 0);
+                    let played = played_trigs_with_resync(
+                        &state,
+                        &snapshot,
+                        end,
+                        BLOCK,
+                        BLOCK as u64,
+                        Some(resync_at),
+                    );
+                    assert_same_played(&played, &reference, &format!("resync at {resync_at}"));
+                }
+            });
+        }
+
+        /// Regression (eseq-groove.8): graph runtimes are not rewound by a
+        /// mid-play resync. They had already evaluated every boundary up to
+        /// the old frontier, so what they emitted for the discarded
+        /// lookahead `(rendered, old frontier]` was cleared and never
+        /// emitted again. The lookahead now replays those emissions (through
+        /// the current groove), and a step the clock re-finds below the old
+        /// frontier does not seed the graph a second time. With a live-sized
+        /// lookahead, resyncs ahead of a graph fire, just before it, and
+        /// while the kick that seeds the next fire is already scheduled all
+        /// play exactly what an undisturbed run plays, grooved (late) or not.
+        #[test]
+        fn graph_emissions_in_the_discarded_lookahead_survive_a_mid_play_resync() {
+            const BLOCK: usize = 64;
+            const LOOKAHEAD: u64 = 4_096;
+            run_with_scheduler_stack(|| {
+                for grooved in [false, true] {
+                    let (state, snapshot) = if grooved {
+                        late_rack_fixture()
+                    } else {
+                        variable_reset_rack_fixture(None)
+                    };
+                    let end = (samples_per_quarter(&snapshot) * 4.0) as u64;
+                    let (reference, reference_scheduler) =
+                        run_with_resync(&state, &snapshot, end, BLOCK, LOOKAHEAD, None);
+                    let beat = reference_scheduler.clock.total_beats;
+                    let fires = reference
+                        .iter()
+                        .filter(|(kind, _, _)| *kind == ScheduledTriggerKind::Network)
+                        .count();
+                    assert!(
+                        fires >= 3,
+                        "the graph fires in the reference: {reference:?}"
+                    );
+                    // Graph fires sit on 6000, 30000, 54000, 78000 (plus the
+                    // pocket when grooved); kicks seed on 0, 24000, 48000.
+                    for resync_at in [3_008, 5_952, 20_032, 27_008, 29_952, 51_008, 75_008] {
+                        let (played, scheduler) =
+                            run_with_resync(&state, &snapshot, end, BLOCK, LOOKAHEAD, Some(resync_at));
+                        let label = format!("grooved={grooved} resync at {resync_at}");
+                        assert_same_played(&played, &reference, &label);
+                        // The graph was neither rewound nor seeded twice: its
+                        // state (energy, history, propagations in flight)
+                        // is the undisturbed run's.
+                        let graph = &scheduler.graph_runtimes[0];
+                        let reference_graph = &reference_scheduler.graph_runtimes[0];
+                        assert_eq!(
+                            graph.visualization_snapshot_at(beat),
+                            reference_graph.visualization_snapshot_at(beat),
+                            "{label}"
+                        );
+                        for node in 0..graph.num_nodes() {
+                            assert_eq!(
+                                graph.pending_count_for_node(node),
+                                reference_graph.pending_count_for_node(node),
+                                "{label}: node {node} propagations in flight"
+                            );
+                        }
+                        // Right after the resync call too, while the kick the
+                        // clock re-found (below the old frontier) would have
+                        // pushed a second propagation had it seeded again.
+                        let stop = resync_at + BLOCK as u64;
+                        let (_, early) =
+                            run_with_resync(&state, &snapshot, stop, BLOCK, LOOKAHEAD, Some(resync_at));
+                        let (_, early_reference) =
+                            run_with_resync(&state, &snapshot, stop, BLOCK, LOOKAHEAD, None);
+                        for node in 0..graph.num_nodes() {
+                            assert_eq!(
+                                early.graph_runtimes[0].pending_count_for_node(node),
+                                early_reference.graph_runtimes[0].pending_count_for_node(node),
+                                "{label}: node {node} propagations just after the resync"
+                            );
+                        }
+                    }
+                }
+            });
+        }
+
+        /// [`run_with_resync`], republishing the groove table as `grooves`
+        /// when the audio reaches `change_at` (a groove pick, amount edit or
+        /// rack membership change: `set_track_grooves` with no resync), so
+        /// every later call schedules from the new snapshot.
+        fn played_with_groove_change_and_resync(
+            state: &Arc<SequencerState>,
+            snapshot: &Arc<crate::sequencer::SequencerSnapshot>,
+            end: u64,
+            block: usize,
+            lookahead: u64,
+            change: (u64, Vec<Option<TrackGrooveSnapshot>>),
+            resync_at: Option<u64>,
+        ) -> Vec<(ScheduledTriggerKind, usize, u64)> {
+            let (mut scheduler, mut scratch_runtime) = fresh_scheduler(state, snapshot);
+            let queue = ScheduledEventQueue::<512>::new();
+            let live_midi_fx_tracks: [LiveMidiFxTrackState; MAX_TRACKS] =
+                std::array::from_fn(|_| LiveMidiFxTrackState::default());
+            let epoch = snapshot.transport.pattern_epoch;
+            let mut snapshot = Arc::clone(snapshot);
+            let (change_at, grooves) = change;
+            let mut grooves = Some(grooves);
+            let mut frontier = 0;
+            let mut pending: Vec<ObservedTrigger> = Vec::new();
+            let mut played = Vec::new();
+            let mut rendered = 0;
+            while rendered < end {
+                pending.retain(|event| {
+                    if event.sample_time < rendered {
+                        played.push((event.kind, event.track, event.sample_time));
+                        false
+                    } else {
+                        true
+                    }
+                });
+                if rendered == change_at {
+                    state.set_track_grooves(grooves.take().expect("one change"));
+                    snapshot = state.publish_scheduler_snapshot();
+                }
+                if resync_at == Some(rendered) {
+                    pending.clear();
+                    super::super::worker::reconcile_playing_topology_change(
+                        &mut scheduler,
+                        state,
+                        &snapshot,
+                        &queue,
+                        rendered,
+                        &mut frontier,
+                        snapshot.transport.num_tracks,
+                        epoch.wrapping_add(1),
+                    );
+                    assert_eq!(frontier, rendered, "the resync rewound the frontier");
+                }
+                frontier = schedule_playing_lookahead(
+                    &mut scheduler,
+                    state,
+                    &snapshot,
+                    &queue,
+                    &mut scratch_runtime,
+                    &live_midi_fx_tracks,
+                    epoch,
+                    rendered,
+                    lookahead,
+                    SAMPLE_RATE,
+                    block,
+                    samples_per_quarter(&snapshot),
+                    frontier,
+                    false,
+                    false,
+                )
+                .scheduled_until_sample;
+                for event in observed_triggers(&queue) {
+                    assert!(
+                        event.sample_time >= rendered,
+                        "{event:?} enqueued after the audio passed {rendered}"
+                    );
+                    pending.push(event);
+                }
+                rendered += block as u64;
+            }
+            sort_played(&mut played);
+            played
+        }
+
+        /// Regression (eseq-groove.8 review): a hit that already SOUNDED
+        /// straight, whose track then gets a late groove (no resync), must
+        /// not play again when a resync lands inside the NEW groove's late
+        /// window. The step recovery keeps a re-found trig only if it was
+        /// still queued under the groove it was scheduled with, and the graph
+        /// replay skips emissions enqueued before `rendered`. The hat's slot
+        /// 1 step and its graph fire sound straight at 6000; the pocket
+        /// would move them to 7800. A resync right after the change, and at
+        /// the far end of the new window, plays what an undisturbed run with
+        /// the same groove change plays.
+        #[test]
+        fn groove_change_after_a_straight_hit_does_not_replay_it_on_resync() {
+            const BLOCK: usize = 64;
+            const LOOKAHEAD: u64 = 4_096;
+            run_with_scheduler_stack(|| {
+                let (state, snapshot) = variable_reset_rack_fixture(None);
+                let end = (samples_per_quarter(&snapshot) * 2.0) as u64;
+                let late = || vec![None, Some(groove(4.0, 0.25, &HAT_POCKET)), None];
+                let change_at = 6_016;
+                let reference = played_with_groove_change_and_resync(
+                    &state,
+                    &snapshot,
+                    end,
+                    BLOCK,
+                    LOOKAHEAD,
+                    (change_at, late()),
+                    None,
+                );
+                let at_6000 = |played: &[(ScheduledTriggerKind, usize, u64)], kind| {
+                    played
+                        .iter()
+                        .filter(|(k, t, sample)| *k == kind && *t == 1 && *sample == 6_000)
+                        .count()
+                };
+                assert_eq!(at_6000(&reference, ScheduledTriggerKind::Step), 1);
+                assert_eq!(
+                    at_6000(&reference, ScheduledTriggerKind::Network),
+                    1,
+                    "the graph fire on slot 1 sounds straight too: {reference:?}"
+                );
+                for resync_at in [6_016, 6_080, 7_744] {
+                    let (state, snapshot) = variable_reset_rack_fixture(None);
+                    let played = played_with_groove_change_and_resync(
+                        &state,
+                        &snapshot,
+                        end,
+                        BLOCK,
+                        LOOKAHEAD,
+                        (change_at, late()),
+                        Some(resync_at),
+                    );
+                    assert_same_played(&played, &reference, &format!("resync at {resync_at}"));
+                }
+            });
+        }
+
+        /// The worker's pattern-epoch resync (a destructive edit bumps the
+        /// epoch without a pattern switch) did not rewind graph runtimes;
+        /// through the real `SchedulerDriver`, a bump inside a late hit's
+        /// window and inside a graph fire's lookahead now plays exactly what
+        /// an undisturbed run plays (eseq-groove.8).
+        #[test]
+        fn pattern_epoch_resync_keeps_late_hits_and_graph_fires() {
+            const BLOCK: usize = 64;
+            const LOOKAHEAD: u64 = 2_048;
+            fn run(
+                state: &Arc<SequencerState>,
+                end: u64,
+                bump_at: Option<u64>,
+            ) -> Vec<(ScheduledTriggerKind, usize, u64)> {
+                let queue = Arc::new(ScheduledEventQueue::<4096>::new());
+                let mut driver = super::super::worker::SchedulerDriver::new(
+                    Arc::clone(state),
+                    SAMPLE_RATE,
+                    BLOCK,
+                    queue.clone(),
+                );
+                let mut pending: Vec<ObservedTrigger> = Vec::new();
+                let mut played = Vec::new();
+                let mut rendered = 0;
+                while rendered < end {
+                    pending.retain(|event| {
+                        if event.sample_time < rendered {
+                            played.push((event.kind, event.track, event.sample_time));
+                            false
+                        } else {
+                            true
+                        }
+                    });
+                    if bump_at == Some(rendered) {
+                        state
+                            .transport
+                            .pattern_epoch
+                            .fetch_add(1, Ordering::Relaxed);
+                        state.publish_scheduler_snapshot();
+                        // The driver clears the queue on the resync.
+                        pending.clear();
+                    }
+                    let advanced = driver.advance(
+                        rendered,
+                        rendered + LOOKAHEAD,
+                        super::super::worker::SchedulerInput::Offline,
+                    );
+                    assert_eq!(advanced.queue_rejections, 0);
+                    for event in observed_triggers(&queue) {
+                        assert!(event.sample_time >= rendered, "{event:?} at {rendered}");
+                        pending.push(event);
+                    }
+                    rendered += BLOCK as u64;
+                }
+                sort_played(&mut played);
+                played
+            }
+
+            run_with_scheduler_stack(|| {
+                let end = {
+                    let (_, snapshot) = late_rack_fixture();
+                    (samples_per_quarter(&snapshot) * 4.0) as u64
+                };
+                let reference = run(&late_rack_fixture().0, end, None);
+                assert!(reference
+                    .iter()
+                    .any(|(kind, _, _)| *kind == ScheduledTriggerKind::Network));
+                // Inside slot 1's late window (and ahead of its graph fire),
+                // before the graph fire on slot 5, inside slot 5's window.
+                for bump_at in [6_016, 28_032, 30_016] {
+                    let played = run(&late_rack_fixture().0, end, Some(bump_at));
+                    assert_same_played(&played, &reference, &format!("epoch bump at {bump_at}"));
                 }
             });
         }

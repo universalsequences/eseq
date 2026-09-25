@@ -892,6 +892,48 @@ fn max_early_beats_bounds_every_applied_offset() {
     );
 }
 
+/// `max_late_beats` mirrors `max_early_beats`: the largest applied offset,
+/// zero for an early-only groove, scaled by timing (a negative amount flips
+/// early slots late), widened by Random spread, and an upper bound on every
+/// applied offset. It is how far back a mid-play resync looks for late hits
+/// it would otherwise lose (eseq-groove.8).
+#[test]
+fn max_late_beats_bounds_every_applied_offset() {
+    assert_eq!(
+        track_groove(1.0, 0.25, &[0.0, -0.3, -0.1, -0.2]).max_late_beats(),
+        0.0
+    );
+    assert_eq!(track_groove(1.0, 0.25, &[]).max_late_beats(), 0.0);
+    let groove = track_groove(1.0, 0.25, &[-0.3, 0.2, -0.1, 0.0]);
+    assert!((groove.max_late_beats() - 0.2 * 0.25).abs() < 1e-7);
+    let mut heavy = groove.clone();
+    heavy.timing_amount = 1.5;
+    assert!((heavy.max_late_beats() - 0.3 * 0.25).abs() < 1e-7);
+    let mut flipped = groove.clone();
+    flipped.timing_amount = -1.0;
+    assert!((flipped.max_late_beats() - 0.3 * 0.25).abs() < 1e-7);
+    let mut jittery = accented_groove(&[-0.3, 0.2, -0.1, 0.0], &[1.0; 4], &[0.2; 4]);
+    jittery.random_amount = 1.0;
+    jittery.pad_note = 36;
+    assert!((jittery.max_late_beats() - 0.4 * 0.25).abs() < 1e-7);
+    for groove in [&groove, &heavy, &flipped, &jittery] {
+        let reach = groove.max_late_beats();
+        for index in 0..(64 * 8) {
+            let beats = index as f64 / 32.0;
+            assert!(
+                groove.offset_beats(beats) <= reach + 1e-12,
+                "{beats}: {} vs reach {reach}",
+                groove.offset_beats(beats)
+            );
+        }
+    }
+    assert_eq!(max_late_lead_beats(&[]), 0.0);
+    assert_eq!(
+        max_late_lead_beats(&[None, Some(groove.clone()), Some(heavy.clone()), None]),
+        heavy.max_late_beats()
+    );
+}
+
 /// The MPC swings (factory library content) are two-slot grooves that delay
 /// exactly what track swing delays at the same percentage and resolution.
 #[test]

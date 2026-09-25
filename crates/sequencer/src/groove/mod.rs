@@ -43,8 +43,9 @@ mod unwind;
 
 pub use apply::{
     groove_hash_noise, groove_offset_samples, grooved_sample_time, max_early_lead_beats,
-    mpc_swing_file_stem, mpc_swing_groove, padless_seed_key, track_groove_snapshots, GrooveFloor,
-    TrackGrooveSnapshot, MAX_EARLY_SLOTS, MPC_SWING_PERCENTS, MPC_SWING_RESOLUTIONS,
+    max_late_lead_beats, mpc_swing_file_stem, mpc_swing_groove, padless_seed_key,
+    track_groove_snapshots, GrooveFloor, TrackGrooveSnapshot, MAX_EARLY_SLOTS, MPC_SWING_PERCENTS,
+    MPC_SWING_RESOLUTIONS,
 };
 pub(crate) use kit::resolve_v5_selection;
 pub use kit::{

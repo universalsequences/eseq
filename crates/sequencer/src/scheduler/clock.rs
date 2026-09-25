@@ -32,6 +32,22 @@ pub(super) struct SnapshotTrigger {
     /// the transport bar exactly (docs/rack-groove-spec.md, "Beat frame").
     pub(super) boundary_beats: f64,
     pub(super) samples_per_step: f32,
+    /// `Some(lag)` for a trig RECOVERED by the first chunk after a mid-play
+    /// resync (rack groove spec §Early hits, eseq-groove.8): a grooved step
+    /// whose straight boundary the resync already passed, `lag` samples
+    /// before the chunk start (`offset` is 0), re-found so a LATE groove
+    /// offset that has not sounded yet is not lost with the cleared queue.
+    /// The lookahead keeps it only when its grooved sample is at or after
+    /// the audio frontier; everything else about it already happened.
+    pub(super) recovered_lag: Option<u64>,
+}
+
+impl SnapshotTrigger {
+    /// The first sample at or after the step's straight boundary, for a
+    /// chunk starting at `chunk_start_sample`.
+    pub(super) fn straight_sample(&self, chunk_start_sample: u64) -> u64 {
+        (chunk_start_sample + self.offset as u64).saturating_sub(self.recovered_lag.unwrap_or(0))
+    }
 }
 
 pub(super) struct SnapshotTrackClockState {
@@ -110,6 +126,46 @@ pub(super) struct SnapshotSequencerClock {
     /// hits discovered before that resync already sounded; see
     /// [`groove_floor`](Self::groove_floor).
     groove_replayed_until: u64,
+    /// Set by a mid-play resync, taken by the next chunk: grooved steps whose
+    /// straight boundary lies within their groove's late reach before the
+    /// resync point are re-found as [`SnapshotTrigger::recovered_lag`] trigs
+    /// (eseq-groove.8). Any other seek clears it.
+    late_recovery_pending: bool,
+    /// The scheduling frontier's beat at the last mid-play resync (zero
+    /// after any other seek). Graph runtimes are not rewound by a resync:
+    /// they already consumed every boundary up to here, and the lookahead
+    /// replays their enqueued emissions instead. A step re-found below this
+    /// beat already seeded the graphs before the resync, so it does not
+    /// seed them again (eseq-groove.8).
+    graph_seeded_until_beats: f64,
+    /// Bumped by every seek. Graph emissions the lookahead retains for a
+    /// resync replay are tagged with it, so a replay never re-plays
+    /// emissions from before a transport start, song wrap or other seek.
+    pub(super) seek_generation: u64,
+    /// The generation a mid-play resync left (the tag of the emissions it
+    /// discarded with the queue), until the next lookahead replays them.
+    graph_replay_generation: Option<u64>,
+    /// Step trigs the lookahead scheduled at or after the audio frontier,
+    /// i.e. still in the queue when a mid-play resync clears it. A trig the
+    /// resync re-finds below `rendered` ([`SnapshotTrigger::recovered_lag`])
+    /// is replayed only when it is here: the groove it was scheduled with
+    /// put it at or after `rendered`, so it has not sounded. Without this a
+    /// groove change between the hit and the resync could move a hit that
+    /// already sounded straight into the late window and play it twice
+    /// (eseq-groove.8). Pruned by the lookahead to what can still be queued;
+    /// cleared by any seek other than a resync.
+    queued_step_hits: Vec<QueuedStepHit>,
+}
+
+/// One scheduled step trig, for [`SnapshotSequencerClock::queued_step_hits`].
+#[derive(Clone, Copy, Debug)]
+struct QueuedStepHit {
+    track: usize,
+    step: usize,
+    /// The first sample at or after the step's straight boundary.
+    straight_sample: u64,
+    /// The sample it was scheduled at (after Step Delay and the groove).
+    sample: u64,
 }
 
 struct LengthPatchedTrack {
@@ -148,7 +204,76 @@ impl SnapshotSequencerClock {
             last_bar: 0,
             length_patch_cache: (0..MAX_TRACKS).map(|_| None).collect(),
             groove_replayed_until: 0,
+            late_recovery_pending: false,
+            graph_seeded_until_beats: 0.0,
+            seek_generation: 0,
+            graph_replay_generation: None,
+            queued_step_hits: Vec::new(),
         }
+    }
+
+    /// Remember a step trig the lookahead scheduled at `sample` (see
+    /// [`queued_step_hits`](Self::queued_step_hits)).
+    pub(super) fn record_queued_step_hit(
+        &mut self,
+        track: usize,
+        step: usize,
+        straight_sample: u64,
+        sample: u64,
+    ) {
+        self.queued_step_hits.push(QueuedStepHit {
+            track,
+            step,
+            straight_sample,
+            sample,
+        });
+    }
+
+    /// Forget the scheduled step trigs the audio has reached: they sounded.
+    pub(super) fn forget_sounded_step_hits(&mut self, rendered: u64) {
+        self.queued_step_hits.retain(|hit| hit.sample >= rendered);
+    }
+
+    /// Whether the step trig of `track`/`step` whose straight boundary is at
+    /// `straight_sample` was scheduled at or after `rendered`, so it was
+    /// still queued when a resync cleared the queue. The resync re-derives
+    /// the boundary from beats, so one sample of slack absorbs float noise;
+    /// two passes of the same step are a whole cycle apart.
+    pub(super) fn step_hit_was_queued(
+        &self,
+        track: usize,
+        step: usize,
+        straight_sample: u64,
+        rendered: u64,
+    ) -> bool {
+        self.queued_step_hits.iter().any(|hit| {
+            hit.track == track
+                && hit.step == step
+                && hit.straight_sample.abs_diff(straight_sample) <= 1
+                && hit.sample >= rendered
+        })
+    }
+
+    /// Whether a step at `seed_beats` should seed the graph runtimes: false
+    /// for a step the clock re-found below the last mid-play resync's old
+    /// frontier, which seeded them before the resync (the graphs are not
+    /// rewound; eseq-groove.8). Half a sample of slack absorbs the resync's
+    /// floating-point beat re-derivation, so the step AT the old frontier
+    /// (not yet found then) still seeds.
+    pub(super) fn graph_seed_is_new(&self, seed_beats: f64, samples_per_quarter: f64) -> bool {
+        let slack = if samples_per_quarter > 0.0 {
+            0.5 / samples_per_quarter
+        } else {
+            0.0
+        };
+        seed_beats >= self.graph_seeded_until_beats - slack
+    }
+
+    /// The generation whose retained graph emissions the last mid-play
+    /// resync discarded with the queue, once: the lookahead replays them
+    /// (eseq-groove.8).
+    pub(super) fn take_graph_replay_generation(&mut self) -> Option<u64> {
+        self.graph_replay_generation.take()
     }
 
     /// The rack groove floor for a lookahead call extending from the audio
@@ -184,6 +309,11 @@ impl SnapshotSequencerClock {
         self.last_global_16th = (beat / 0.25) as u32;
         self.last_bar = (beat / 4.0) as u32;
         self.groove_replayed_until = 0;
+        self.late_recovery_pending = false;
+        self.graph_seeded_until_beats = 0.0;
+        self.seek_generation = self.seek_generation.wrapping_add(1);
+        self.graph_replay_generation = None;
+        self.queued_step_hits.clear();
     }
 
     /// Install the active song row's per-lane phase anchors (takes spec
@@ -480,7 +610,26 @@ impl SnapshotSequencerClock {
         let beats_per_sample = bpm / (self.sample_rate * 60.0);
         let ahead_samples = scheduled_until_sample.saturating_sub(rendered_sample) as f64;
         let previous_replayed_until = self.groove_replayed_until;
+        let previous_seeded_until = self.graph_seeded_until_beats;
+        let previous_frontier_beats = self.total_beats;
+        let previous_replay_generation =
+            self.graph_replay_generation.unwrap_or(self.seek_generation);
+        // What the cleared queue held survives the seek: the next chunk
+        // replays a recovered late hit only if it was still queued.
+        let queued_step_hits = std::mem::take(&mut self.queued_step_hits);
         self.seek_beats((self.total_beats - ahead_samples * beats_per_sample).max(0.0));
+        self.queued_step_hits = queued_step_hits;
+        // Late groove hits (eseq-groove.8): a grooved step whose straight
+        // boundary is before `rendered_sample` but whose grooved sample is
+        // not was queued and just cleared; the rewound clock would only find
+        // boundaries from here on, so the next chunk re-finds it.
+        self.late_recovery_pending = true;
+        // Graph runtimes already ran to the old frontier; the lookahead
+        // replays what they emitted (tagged with the pre-seek generation,
+        // or the first resync's when two land before a lookahead runs), and
+        // steps re-found below the old frontier do not seed them twice.
+        self.graph_seeded_until_beats = previous_frontier_beats.max(previous_seeded_until);
+        self.graph_replay_generation = Some(previous_replay_generation);
         // Everything with a straight boundary below the old frontier was
         // already discovered (and enqueued); the queue was just cleared, so
         // the clock will find those boundaries again from `rendered_sample`.
@@ -693,6 +842,14 @@ impl SnapshotSequencerClock {
         }
 
         let mut triggers = Vec::new();
+        if std::mem::take(&mut self.late_recovery_pending) {
+            self.recover_late_groove_triggers(
+                snapshot,
+                window_start.as_deref(),
+                samples_per_quarter,
+                &mut triggers,
+            );
+        }
         // These indices describe the last evaluated sample, not the next
         // sample at total_beats. Keep them across chunk boundaries.
         for offset in 0..nframes {
@@ -774,6 +931,7 @@ impl SnapshotSequencerClock {
                                     boundary_beats: self.total_beats
                                         - (pos_in_cycle - tc.boundaries[step]).max(0.0),
                                     samples_per_step,
+                                    recovered_lag: None,
                                 });
                             }
                             state.transport.track_playheads[t].store(step_u32, Ordering::Relaxed);
@@ -825,6 +983,106 @@ impl SnapshotSequencerClock {
             .store(phase_16th.to_bits(), Ordering::Relaxed);
 
         triggers
+    }
+}
+
+impl SnapshotSequencerClock {
+    /// The first chunk after a mid-play resync (eseq-groove.8): re-find
+    /// every ACTIVE step of a grooved track whose straight boundary lies
+    /// within that track's groove late reach ([`max_late_beats`]) before the
+    /// resync point, at or before it. The resync marked the step under the
+    /// playhead as already triggered and never looks further back, so these
+    /// are exactly the boundaries it passed. The lookahead keeps one only
+    /// when its grooved sample has not sounded yet (the mirror of the early
+    /// drop, [`GrooveFloor::replayed_until`]).
+    ///
+    /// Skipped for a scene-silenced track, a track under a sequence-roll
+    /// window (the roll remaps its reads) and boundaries before the
+    /// transport start or the lane's clip anchor. Recovered trigs come
+    /// first, earliest first, each with `offset` 0 and its `recovered_lag`.
+    ///
+    /// [`max_late_beats`]: crate::groove::TrackGrooveSnapshot::max_late_beats
+    /// [`GrooveFloor::replayed_until`]: crate::groove::GrooveFloor::replayed_until
+    fn recover_late_groove_triggers(
+        &self,
+        snapshot: &SequencerSnapshot,
+        window_start: Option<&[Option<f64>; MAX_TRACKS]>,
+        samples_per_quarter: f64,
+        out: &mut Vec<SnapshotTrigger>,
+    ) {
+        const EPS: f64 = 1.0e-9;
+        let now = self.total_beats;
+        let first = out.len();
+        for t in 0..snapshot.transport.num_tracks.min(snapshot.tracks.len()) {
+            let Some(groove) = snapshot.track_groove(t) else {
+                continue;
+            };
+            let reach = groove.max_late_beats();
+            let track = &snapshot.tracks[t];
+            if !(reach > 0.0)
+                || track.scene_silenced
+                || window_start.is_some_and(|starts| starts[t].is_some())
+            {
+                continue;
+            }
+            let ns = track.params.num_steps;
+            let tc = &self.track_clocks[t];
+            let cycle = tc.cycle_beats;
+            if ns == 0 || cycle <= EPS {
+                continue;
+            }
+            let local = Self::anchored_local_beats(tc, now, ns);
+            let position = local.rem_euclid(cycle);
+            let mut cycle_base = local - position;
+            let mut step = tc.boundaries[..ns + 1]
+                .partition_point(|&b| b <= position)
+                .saturating_sub(1)
+                .min(ns - 1);
+            let earliest = (now - reach).max(tc.anchor_beat).max(0.0);
+            // Walk back one step at a time; a cycle has at most `ns` steps,
+            // so the reach (under one cycle for any real groove) is bounded.
+            for _ in 0..(2 * MAX_STEPS) {
+                let boundary_local = cycle_base + tc.boundaries[step];
+                let boundary = now - (local - boundary_local);
+                if boundary + EPS < earliest || boundary > now + EPS {
+                    break;
+                }
+                // The first sample at or after the boundary, `lag` samples
+                // back; the epsilon keeps a boundary exactly on a sample
+                // (float noise in the resync's re-derived beat) on it.
+                let lag = ((now - boundary) * samples_per_quarter + 1.0e-6)
+                    .floor()
+                    .max(0.0);
+                if track.steps[step].active && lag.is_finite() {
+                    let lag = lag as u64;
+                    let tb = track.steps[step]
+                        .timebase_override
+                        .unwrap_or(track.params.timebase);
+                    out.push(SnapshotTrigger {
+                        track: t,
+                        step,
+                        offset: 0,
+                        cycle: (boundary_local / cycle).floor().max(0.0) as u64,
+                        cycle_start_beats: tc.boundaries[step],
+                        absolute_beats: now - lag as f64 / samples_per_quarter,
+                        boundary_beats: boundary,
+                        samples_per_step: (tb.step_beats(ns) * samples_per_quarter) as f32,
+                        recovered_lag: Some(lag),
+                    });
+                }
+                if step == 0 {
+                    step = ns - 1;
+                    cycle_base -= cycle;
+                } else {
+                    step -= 1;
+                }
+            }
+        }
+        out[first..].sort_by(|a, b| {
+            b.recovered_lag
+                .cmp(&a.recovered_lag)
+                .then(a.track.cmp(&b.track))
+        });
     }
 }
 

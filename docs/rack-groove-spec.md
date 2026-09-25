@@ -349,12 +349,50 @@ past its horizon. Pinned by `scheduler::tests::rack_groove::early_groove_*`
 and an ungrooved single-call reference) and
 `groove::tests::grooved_sample_time_*`.
 
-*Known gaps (eseq-groove.8):* the same resyncs still lose (1) a LATE hit whose
-straight boundary is before `rendered` but whose grooved sample is after it
-(eseq-groove.2), and (2) graph emissions already produced for the discarded
-lookahead. The pattern-epoch and live-MIDI-FX resyncs do not rewind graph
-runtimes. That loss predates grooves, but the early lead `E` widens its
-window by up to 0.75 slot.
+*Built (eseq-groove.8):* the same resyncs used to lose (1) a LATE hit whose
+straight boundary is before `rendered` but whose grooved sample is after it,
+and (2) graph emissions already produced for the discarded lookahead
+`(rendered, old frontier]` (the resyncs never rewound graph runtimes; that
+loss predates grooves, but `E` widened it). Both are fixed at the one seam
+every resync shares, `SnapshotSequencerClock::seek_to_rendered_position`:
+- *Late hits.* `TrackGrooveSnapshot::max_late_beats` is the mirror of
+  `max_early_beats` (the largest applied offset after timing and Random;
+  `SequencerSnapshot::groove_late_lead_beats` is the table's maximum). The
+  first chunk after a resync re-finds, per grooved track, every active step
+  whose straight boundary lies within that track's late reach before (or
+  at) `rendered`, as `SnapshotTrigger::recovered_lag` trigs. The lookahead
+  keeps one only when it was still queued, i.e. scheduled at or after
+  `rendered` under the groove it was scheduled with (the clock records each
+  scheduled step trig, `queued_step_hits`, pruned to what the audio has not
+  reached, and a resync keeps the record), AND its grooved sample under the
+  current groove is at or after `rendered` (the mirror of the early drop).
+  A groove change between a hit and a resync (a pick, an amount edit or a
+  rack membership change republishes with no resync) therefore cannot move
+  a hit that already sounded into the new late window and play it twice.
+  It skips the trig before any side effect otherwise,
+  so early, straight and off-step boundaries that already happened are
+  untouched. Scene-silenced tracks, tracks under a sequence-roll window
+  and boundaries before transport start or the lane's clip anchor are not
+  recovered.
+- *Graph emissions.* Graph runtimes are still not rewound: they already
+  evaluated every boundary up to the old frontier, so re-running them would
+  fire those boundaries twice. Instead the lookahead retains each enqueued
+  graph emission (pre-groove, tagged with the clock's seek generation) until
+  it can no longer sound, and the first call after a resync replays the ones
+  the cleared queue held through the CURRENT snapshot's groove, routing and
+  MIDI fx, keeping what was enqueued at or after `rendered` (so still in the
+  cleared queue) and lands at or after it again. A routed fire follows
+  its node's current route (a track move or delete moves or drops it). A
+  step the rewound clock re-finds below the old frontier
+  (`graph_seeded_until_beats`, with half a sample of slack) does not seed
+  the graphs again: it seeded them before the resync. Transport start, song
+  wraps and other seeks bump the generation, so nothing replays across them.
+Pinned by `scheduler::tests::rack_groove::{late_groove_hit_survives_a_mid_play_resync,
+graph_emissions_in_the_discarded_lookahead_survive_a_mid_play_resync,
+pattern_epoch_resync_keeps_late_hits_and_graph_fires,
+groove_change_after_a_straight_hit_does_not_replay_it_on_resync}` (played trigs and
+graph state match an undisturbed run) and
+`groove::tests::max_late_beats_bounds_every_applied_offset`.
 
 ## Groove pool, library and pad roles (rev 2)
 
