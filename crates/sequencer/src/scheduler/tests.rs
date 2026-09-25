@@ -15729,4 +15729,231 @@ fn scene_transpose_follows_live_scene_values_without_a_scratch_runtime() {
                 assert_eq!(frontier, 24_064, "the last 512 block ends at 24064");
             });
         }
+
+        // ── Record unwind (eseq-groove.6 / eseq-k0v8) ─────────────────────
+
+        /// One bar of 16ths with late AND early slots (every |offset| < 0.5).
+        const MIXED_POCKET: [f32; 16] = [
+            -0.2, 0.3, 0.1, -0.15, 0.05, 0.35, -0.1, 0.2, -0.05, 0.25, 0.0, -0.3, 0.15, 0.4,
+            -0.25, 0.1,
+        ];
+
+        fn mixed_groove_feel(state: &SequencerState) {
+            state.set_track_grooves(vec![Some(groove(4.0, 0.25, &MIXED_POCKET))]);
+        }
+
+        fn swing_75_feel(state: &SequencerState) {
+            state.pattern.track_params[0].set_swing(75.0);
+            state.pattern.track_params[0].set_swing_resolution(SwingResolution::Sixteenth);
+        }
+
+        /// A one-track, 16-step, 16th-timebase state playing through `feel`.
+        fn felt_state(feel: fn(&SequencerState)) -> Arc<SequencerState> {
+            let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+            state.toggle_play();
+            feel(&state);
+            state
+        }
+
+        /// Plays back ONE recorded hit, stored the way the recorder stores a
+        /// position (`step` with a sub-step delay of `phase`), through
+        /// `feel`, and returns the sample of the sounding trig nearest
+        /// `near` over the first two bars.
+        fn replay_recorded_hit(
+            feel: fn(&SequencerState),
+            step: usize,
+            phase: f32,
+            near: u64,
+        ) -> u64 {
+            let state = felt_state(feel);
+            state.toggle_step_and_clear_plocks(0, step);
+            state.set_step_param(0, step, StepParam::Delay, phase);
+            let snapshot = state.publish_scheduler_snapshot();
+            let spq = samples_per_quarter(&snapshot);
+            let times = step_times(&run_lookahead(&state, &snapshot, (spq * 8.0) as u64), 0);
+            *times
+                .iter()
+                .min_by_key(|time| time.abs_diff(near))
+                .expect("the recorded hit plays back")
+        }
+
+        /// Live record through a grooved rack member (acceptance of
+        /// eseq-groove.6): a hit heard at `straight + phase + pocket` is
+        /// stored at its straight phase, and playback through the groove
+        /// sounds it at the heard time, for late and early slots alike,
+        /// including an early first step heard before the loop point.
+        #[test]
+        fn live_record_through_a_groove_replays_at_the_heard_time() {
+            run_with_scheduler_stack(|| {
+                let state = felt_state(mixed_groove_feel);
+                let spq = samples_per_quarter(&state.latest_scheduler_snapshot());
+                let groove = state.track_grooves()[0].clone().expect("grooved member");
+                for step in 0..16 {
+                    for phase in [0.0_f64, 0.4] {
+                        let straight = 4.0 + step as f64 * 0.25;
+                        let heard = straight + phase * 0.25 + groove.pocket_offset_beats(straight);
+                        let position = state
+                            .record_position_at_beat(0, heard)
+                            .unwrap_or_else(|| panic!("step {step} phase {phase}: no position"));
+                        if phase == 0.0 {
+                            // On the pocket itself the reading is unique.
+                            assert_eq!(position.step, step, "step {step}: stored step");
+                            assert!(
+                                position.phase.abs() < 1.0e-5,
+                                "step {step}: stored phase {} is straight 0",
+                                position.phase
+                            );
+                        }
+                        let heard_sample = (heard * spq).round() as u64;
+                        let played = replay_recorded_hit(
+                            mixed_groove_feel,
+                            position.step,
+                            position.phase,
+                            heard_sample,
+                        );
+                        assert!(
+                            played.abs_diff(heard_sample) <= 1,
+                            "step {step} phase {phase}: recorded {position:?}, replays at \
+                             {played}, heard at {heard_sample}"
+                        );
+                    }
+                }
+            });
+        }
+
+        /// eseq-k0v8: live record on a swung track stores the straight phase
+        /// of the heard step (swing bucket keyed like the step scheduler), so
+        /// playback re-applies the swing once and lands on the heard time.
+        #[test]
+        fn live_record_through_track_swing_replays_at_the_heard_time() {
+            run_with_scheduler_stack(|| {
+                let state = felt_state(swing_75_feel);
+                let spq = samples_per_quarter(&state.latest_scheduler_snapshot());
+                for step in 0..16 {
+                    for phase in [0.0_f64, 0.3] {
+                        let straight = step as f64 * 0.25;
+                        let swing = if step % 2 == 1 { 0.125 } else { 0.0 };
+                        let heard = straight + phase * 0.25 + swing;
+                        let position = state
+                            .record_position_at_beat(0, heard)
+                            .unwrap_or_else(|| panic!("step {step} phase {phase}: no position"));
+                        assert_eq!(position.step, step, "step {step} phase {phase}");
+                        assert!(
+                            (position.phase as f64 - phase).abs() < 1.0e-5,
+                            "step {step}: stored phase {} vs straight {phase}",
+                            position.phase
+                        );
+                        let heard_sample = (heard * spq).round() as u64;
+                        let played = replay_recorded_hit(
+                            swing_75_feel,
+                            position.step,
+                            position.phase,
+                            heard_sample,
+                        );
+                        assert!(
+                            played.abs_diff(heard_sample) <= 1,
+                            "step {step} phase {phase}: replays at {played}, heard at \
+                             {heard_sample}"
+                        );
+                    }
+                }
+                // Per-step swing p-locks are part of the feel playback
+                // applies, so they unwind too.
+                state.pattern.swing_plocks[0].set(3, 60.0);
+                let heard = 0.75 + 0.2 * 0.25;
+                let position = state.record_position_at_beat(0, heard).expect("position");
+                assert_eq!(position.step, 3);
+                assert!(position.phase.abs() < 1.0e-5, "phase {}", position.phase);
+            });
+        }
+
+        /// Straight tracks (no groove, swing 50) record exactly as before.
+        #[test]
+        fn live_record_on_a_straight_track_is_unchanged() {
+            let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+            for (beat, step, phase) in [(0.0, 0, 0.0), (0.3, 1, 0.2), (3.99, 15, 0.96)] {
+                let position = state.record_position_at_beat(0, beat).expect("position");
+                assert_eq!(position.step, step);
+                assert!((position.phase - phase).abs() < 1.0e-4);
+            }
+        }
+
+        /// Roll through a grooved member (and, for eseq-767.10's swing, a
+        /// swung track) at a roll grid FINER than the steps: every rolled
+        /// hit sounds through the feel keyed on its own straight grid line
+        /// (the groove replacing swing), and is recorded at the straight
+        /// (step, delay) whose playback reproduces the heard sample.
+        #[test]
+        fn roll_through_a_feel_records_what_playback_reproduces() {
+            run_with_scheduler_stack(|| {
+                for (label, feel) in [
+                    ("groove", mixed_groove_feel as fn(&SequencerState)),
+                    ("swing", swing_75_feel as fn(&SequencerState)),
+                ] {
+                    let (state, mut scheduler) = roll_test_state(&[(0, 3.0)]);
+                    feel(&state);
+                    state.set_roll_rate(crate::sequencer::Timebase::ThirtySecond);
+                    let queue = ScheduledEventQueue::<64>::new();
+                    // Skip the first quarter: an early hit at transport
+                    // start is floored at the audio frontier (§Early hits),
+                    // so it is not heard at its pocket.
+                    let until = drive_roll_chunks(&state, &mut scheduler, &queue, 0, 0);
+                    drain_roll_triggers(&queue);
+                    state.drain_roll_recorded_hits();
+                    drive_roll_chunks(&state, &mut scheduler, &queue, 24_000, until);
+                    let played = drain_roll_triggers(&queue);
+                    let hits = state.drain_roll_recorded_hits();
+                    assert!(hits.len() >= 8, "{label}: rolled {}", hits.len());
+                    assert_eq!(played.len(), hits.len(), "{label}");
+                    let mut moved = 0;
+                    for ((sample, ..), hit) in played.iter().zip(&hits) {
+                        let straight = (hit.beat * ROLL_TEST_SPQ).round() as u64;
+                        if *sample != straight {
+                            moved += 1;
+                        }
+                        let replayed = replay_recorded_hit(feel, hit.step, hit.delay, *sample);
+                        assert!(
+                            replayed.abs_diff(*sample) <= 1,
+                            "{label}: hit at beat {} sounded at {sample}, recorded as step {} \
+                             delay {}, replays at {replayed}",
+                            hit.beat,
+                            hit.step,
+                            hit.delay
+                        );
+                    }
+                    assert!(moved > 0, "{label}: the feel moved the rolled hits");
+                }
+            });
+        }
+
+        /// Roll hits on a grooved member take the groove INSTEAD of the
+        /// track swing, and a hit on a step's grid line records that step's
+        /// straight boundary (no printed pocket).
+        #[test]
+        fn grooved_roll_replaces_swing_and_records_straight_boundaries() {
+            run_with_scheduler_stack(|| {
+                let (state, mut scheduler) = roll_test_state(&[(0, 3.0)]);
+                swing_75_feel(&state);
+                let late = [0.0_f32, 0.3, 0.1, 0.2];
+                state.set_track_grooves(vec![Some(groove(1.0, 0.25, &late))]);
+                let queue = ScheduledEventQueue::<64>::new();
+                drive_roll_chunks(&state, &mut scheduler, &queue, 0, 0);
+                let played = drain_roll_triggers(&queue)
+                    .iter()
+                    .map(|(sample, ..)| *sample)
+                    .collect::<Vec<_>>();
+                let pocket =
+                    |slot: usize| (late[slot] as f64 * 0.25 * ROLL_TEST_SPQ).round() as u64;
+                assert_eq!(
+                    played,
+                    vec![0, 6_000 + pocket(1), 12_000 + pocket(2), 18_000 + pocket(3)],
+                    "the groove pocket, not the 75% swing"
+                );
+                let hits = state.drain_roll_recorded_hits();
+                assert_eq!(
+                    hits.iter().map(|hit| (hit.step, hit.delay)).collect::<Vec<_>>(),
+                    vec![(0, 0.0), (1, 0.0), (2, 0.0), (3, 0.0)],
+                );
+            });
+        }
     }

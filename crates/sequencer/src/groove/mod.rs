@@ -30,6 +30,7 @@ mod apply;
 #[cfg(test)]
 mod tests;
 mod transfer;
+mod unwind;
 
 pub use apply::{
     builtin_groove, builtin_grooves, groove_hash_noise, GrooveFloor, groove_offset_samples, grooved_sample_time,
@@ -37,6 +38,7 @@ pub use apply::{
     BuiltinGroove, TrackGrooveSnapshot, BUILTIN_MPC_SWING_PERCENTS, MAX_EARLY_SLOTS,
 };
 pub use transfer::{import_grooves, install_groove_settings, GrooveRowChoice};
+pub use unwind::{swing_shift_beats, unwind_step_feel, UnwoundPosition};
 
 /// Stable identity of one groove within its rack's list.
 pub type GrooveId = u64;
@@ -356,11 +358,7 @@ fn step_swing_beats(pattern: &TrackPatternData, step: usize, cycle_start_beats: 
     let resolution = pattern.swing_resolution_plock_snapshot[step]
         .map(SwingResolution::from_index)
         .unwrap_or(pattern.track_params.swing_resolution);
-    let bucket = ((cycle_start_beats + EPS) / resolution.step_beats()).floor() as u64;
-    if bucket % 2 == 0 {
-        return 0.0;
-    }
-    ((swing_pct as f64 / 100.0) - 0.5) * 2.0 * resolution.step_beats()
+    swing_shift_beats(swing_pct, resolution, cycle_start_beats)
 }
 
 /// Where every hit of `pattern` was heard, in the pattern's cycle beats (one

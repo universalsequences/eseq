@@ -1357,3 +1357,109 @@ fn picker_keys_round_trip_and_reject_unknown_grooves() {
     assert!(GrooveRef::from_picker_key("rack:x").is_err());
     assert!(GrooveRef::from_picker_key("swing").is_err());
 }
+
+// ---------------------------------------------------------------------------
+// Record unwind (eseq-groove.6 / eseq-k0v8)
+// ---------------------------------------------------------------------------
+
+/// Straight 16th geometry for `n` steps: (boundaries, step ends, cycle).
+fn sixteenth_geometry(n: usize) -> (Vec<f64>, Vec<f64>, f64) {
+    let boundaries = (0..n).map(|s| s as f64 * SIXTEENTH).collect::<Vec<_>>();
+    let ends = (0..n)
+        .map(|s| (s + 1) as f64 * SIXTEENTH)
+        .collect::<Vec<_>>();
+    (boundaries, ends, n as f64 * SIXTEENTH)
+}
+
+fn assert_unwound(got: Option<UnwoundPosition>, step: usize, phase: f64, what: &str) {
+    let got = got.unwrap_or_else(|| panic!("{what}: expected a position"));
+    assert_eq!(got.step, step, "{what}: step");
+    assert!(
+        (got.phase - phase).abs() < 1.0e-6,
+        "{what}: phase {} vs {phase}",
+        got.phase
+    );
+}
+
+/// Swing at 75/16th: an odd step's hit heard on its swung position (or past
+/// it) stores the straight phase; even steps are untouched; the downbeat
+/// right after a swung step reads as the downbeat, not the swung step's tail.
+#[test]
+fn unwind_swing_stores_the_straight_phase_of_the_heard_step() {
+    let (boundaries, ends, cycle) = sixteenth_geometry(16);
+    let swing = |step: usize, _base: f64| {
+        swing_shift_beats(75.0, SwingResolution::Sixteenth, boundaries[step])
+    };
+    assert_eq!(swing(1, 0.0), 0.125);
+    assert_eq!(swing(2, 0.0), 0.0);
+    let unwind = |heard: f64| unwind_step_feel(heard, cycle, &boundaries, &ends, swing);
+    assert_unwound(unwind(0.25 + 0.125), 1, 0.0, "on the swung 16th");
+    assert_unwound(unwind(0.25 + 0.125 + 0.05), 1, 0.2, "past the swung 16th");
+    assert_unwound(unwind(0.5), 2, 0.0, "downbeat after a swung step");
+    assert_unwound(unwind(0.5 + 0.05), 2, 0.2, "inside an even step");
+    // The gap a late step opens: heard before its swung position reads as
+    // slightly early for it.
+    assert_unwound(unwind(0.25 + 0.05), 1, 0.0, "early for the swung 16th");
+}
+
+/// A groove with late and early slots: the stored phase is the heard beat
+/// minus the pocket of the step it lands on, including an early first step
+/// heard at the end of the previous cycle.
+#[test]
+fn unwind_groove_pocket_late_and_early_slots_and_cycle_wrap() {
+    let (boundaries, ends, cycle) = sixteenth_geometry(4);
+    let groove = track_groove(1.0, SIXTEENTH, &[-0.2, 0.3, 0.0, -0.1]);
+    let cycle_start = 8.0; // transport beat of the heard cycle
+    let pocket =
+        |step: usize, base: f64| groove.pocket_offset_beats(cycle_start + base + boundaries[step]);
+    let unwind = |heard: f64| unwind_step_feel(heard, cycle, &boundaries, &ends, pocket);
+    for (step, phase) in [(1, 0.0), (1, 0.4), (2, 0.0), (2, 0.5), (3, 0.0), (3, 0.3)] {
+        let heard = boundaries[step]
+            + phase * SIXTEENTH
+            + groove.pocket_offset_beats(cycle_start + boundaries[step]);
+        assert_unwound(
+            unwind(heard),
+            step,
+            phase,
+            &format!("step {step} phase {phase}"),
+        );
+    }
+    // Step 0 is early by 0.2 slot: heard before the cycle's end.
+    assert_unwound(
+        unwind(cycle - 0.2 * SIXTEENTH),
+        0,
+        0.0,
+        "early step 0 wraps forward",
+    );
+    assert_unwound(unwind(0.1 * SIXTEENTH), 0, 0.3, "inside early step 0");
+}
+
+/// No feel: the unwind is the plain lookup, and a straight Sync gap stays
+/// unresolved exactly as before.
+#[test]
+fn unwind_without_feel_matches_the_plain_lookup_and_keeps_sync_gaps() {
+    // Two steps with a Sync wait between them: [0, 0.25) then [0.5, 0.75).
+    let boundaries = [0.0, 0.5];
+    let ends = [0.25, 0.75];
+    let unwind = |heard: f64| unwind_step_feel(heard, 1.0, &boundaries, &ends, |_, _| 0.0);
+    assert_unwound(unwind(0.1), 0, 0.4, "plain");
+    assert_unwound(unwind(0.6), 1, 0.4, "plain second step");
+    assert_eq!(unwind(0.3), None, "a Sync wait is no step");
+}
+
+/// Recording unwinds the deterministic pocket: Random's jitter is not part
+/// of it, so a recorded hit is not printed with one bar's noise.
+#[test]
+fn pocket_offset_excludes_random_jitter() {
+    let mut groove = accented_groove(&[0.1, 0.3], &[1.0, 1.0], &[0.4, 0.4]);
+    let beat = 0.25;
+    let pocket = groove.pocket_offset_beats(beat);
+    assert!((pocket - 0.3 * 0.25).abs() < 1.0e-7);
+    groove.random_amount = 1.0;
+    assert_eq!(groove.pocket_offset_beats(beat), pocket);
+    assert_ne!(
+        groove.offset_beats(beat),
+        pocket,
+        "the played offset does jitter"
+    );
+}

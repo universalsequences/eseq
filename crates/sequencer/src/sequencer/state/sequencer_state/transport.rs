@@ -11,6 +11,15 @@ impl SequencerState {
     /// Resolve a track-local step and phase from the transport beat clock.
     /// This mirrors the scheduler's timebase-override and sync-boundary rules
     /// so live recording does not accidentally use the global 16th-note phase.
+    ///
+    /// `beats` is where the hit was HEARD. Playback moves a stored step by
+    /// its feel: the member's rack groove pocket at the step's transport
+    /// boundary, or otherwise the track swing (per-step swing p-locks
+    /// included) of the step's bucket. The returned phase is the STRAIGHT
+    /// one that feel moves back onto `beats` (docs/rack-groove-spec.md
+    /// §Sites 5, eseq-groove.6 / eseq-k0v8), so recording through swing or
+    /// a groove does not apply the feel twice. See
+    /// [`crate::groove::unwind_step_feel`] for the ambiguous spans.
     pub fn record_position_at_beat(&self, track: usize, beats: f64) -> Option<RecordPosition> {
         if track >= self.active_track_count() || !beats.is_finite() {
             return None;
@@ -43,6 +52,16 @@ impl SequencerState {
         }
         .max(f64::EPSILON);
         let position = beats.max(0.0) % cycle_beats;
+        if let Some(unwound) = self.unwind_record_feel(
+            track,
+            beats.max(0.0) - position,
+            position,
+            cycle_beats,
+            &boundaries[..num_steps],
+            &step_ends[..num_steps],
+        ) {
+            return unwound;
+        }
         let idx = boundaries[..=num_steps].partition_point(|&boundary| boundary <= position);
         let step = idx.saturating_sub(1).min(num_steps - 1);
         (position < step_ends[step]).then(|| RecordPosition {
@@ -50,6 +69,64 @@ impl SequencerState {
             phase: ((position - boundaries[step]) / (step_ends[step] - boundaries[step]))
                 .clamp(0.0, 1.0) as f32,
         })
+    }
+
+    /// The feel-unwound record position (see [`Self::record_position_at_beat`]),
+    /// or `None` when the track plays straight (no rack groove, no swing
+    /// above 50 on any step) and the plain lookup already is the answer.
+    /// `cycle_start` is the transport beat the heard cycle starts at.
+    fn unwind_record_feel(
+        &self,
+        track: usize,
+        cycle_start: f64,
+        position: f64,
+        cycle_beats: f64,
+        boundaries: &[f64],
+        step_ends: &[f64],
+    ) -> Option<Option<RecordPosition>> {
+        let grooves = self.track_grooves();
+        let unwound = if let Some(groove) = grooves.get(track).and_then(Option::as_ref) {
+            // The groove is keyed on the step's straight TRANSPORT boundary,
+            // the beat `SnapshotTrigger::boundary_beats` carries.
+            crate::groove::unwind_step_feel(
+                position,
+                cycle_beats,
+                boundaries,
+                step_ends,
+                |step, base| groove.pocket_offset_beats(cycle_start + base + boundaries[step]),
+            )
+        } else {
+            let params = &self.pattern.track_params[track];
+            let swing = params.get_swing();
+            let resolution = params.get_swing_resolution();
+            let swings: Vec<f64> = boundaries
+                .iter()
+                .enumerate()
+                .map(|(step, &boundary)| {
+                    crate::groove::swing_shift_beats(
+                        self.pattern.swing_plocks[track].get(step).unwrap_or(swing),
+                        self.pattern.swing_resolution_plocks[track]
+                            .get(step)
+                            .unwrap_or(resolution),
+                        boundary,
+                    )
+                })
+                .collect();
+            if swings.iter().all(|&shift| shift == 0.0) {
+                return None;
+            }
+            crate::groove::unwind_step_feel(
+                position,
+                cycle_beats,
+                boundaries,
+                step_ends,
+                |step, _| swings[step],
+            )
+        };
+        Some(unwound.map(|unwound| RecordPosition {
+            step: unwound.step,
+            phase: unwound.phase as f32,
+        }))
     }
 
     /// Interpolate the audio clock at a keyboard press and compensate the

@@ -265,42 +265,150 @@ impl SnapshotSequencerClock {
         total_beats - tc.anchor_beat + Self::offset_beats(tc, num_steps) - tc.length_phase_beats
     }
 
-    /// Track-local (step, sub-step delay, step length in beats) for an
-    /// absolute transport beat, from the same precomputed boundary geometry
-    /// that scheduled the chunk. Used to stamp rolled hits for recording
-    /// (docs/rolling-core-spec.md 6): the roll grid can be finer than the
-    /// track timebase, so the remainder lands as a 0..1 step-unit delay.
+    /// Track-local (step, sub-step delay, step length in beats) to RECORD a
+    /// roll hit heard at `heard_beats` (absolute transport beats), from the
+    /// same precomputed boundary geometry that scheduled the chunk. Used to
+    /// stamp rolled hits for recording (docs/rolling-core-spec.md 6): the
+    /// roll grid can be finer than the track timebase, so the remainder
+    /// lands as a 0..1 step-unit delay.
+    ///
+    /// The position is unwound through the feel playback applies to the
+    /// step it lands on (rack groove pocket, or track swing with per-step
+    /// overrides; docs/rack-groove-spec.md §Sites 5, eseq-groove.6): the
+    /// stored phase is the straight one that playback moves back onto
+    /// `heard_beats`, so the feel is never applied twice. A roll hit on a
+    /// straight grid line heard through the feel of the step it starts
+    /// records that step's straight boundary with no delay.
     pub(super) fn roll_record_position(
         &self,
+        snapshot: &SequencerSnapshot,
         track: usize,
-        total_beats: f64,
+        heard_beats: f64,
         num_steps: usize,
     ) -> (usize, f32, f64) {
         const EPS: f64 = 1.0e-6;
         let tc = &self.track_clocks[track];
         let num_steps = num_steps.max(1);
-        let pos = Self::anchored_local_beats(tc, total_beats, num_steps)
-            .rem_euclid(tc.cycle_beats.max(EPS));
-        let idx = tc.boundaries[..num_steps + 1].partition_point(|&b| b <= pos + EPS);
-        let step = idx.saturating_sub(1).min(num_steps - 1);
-        let step_dur = (tc.step_ends[step] - tc.boundaries[step]).max(EPS);
-        let delay = ((pos - tc.boundaries[step]).max(0.0) / step_dur).clamp(0.0, 1.0) as f32;
+        let cycle = tc.cycle_beats.max(EPS);
+        let pos = Self::anchored_local_beats(tc, heard_beats, num_steps).rem_euclid(cycle);
+        let (step, delay) =
+            match self.unwind_roll_feel(snapshot, track, heard_beats, pos, num_steps) {
+                Some(unwound) => (unwound.step, unwound.phase.clamp(0.0, 1.0) as f32),
+                None => {
+                    let idx = tc.boundaries[..num_steps + 1].partition_point(|&b| b <= pos + EPS);
+                    let step = idx.saturating_sub(1).min(num_steps - 1);
+                    let step_dur = (tc.step_ends[step] - tc.boundaries[step]).max(EPS);
+                    let delay =
+                        ((pos - tc.boundaries[step]).max(0.0) / step_dur).clamp(0.0, 1.0) as f32;
+                    (step, delay)
+                }
+            };
         // A hit an epsilon shy of the next boundary IS that boundary.
         if delay >= 1.0 - 1.0e-4 {
             let next = (step + 1) % num_steps;
             return (next, 0.0, (tc.step_ends[next] - tc.boundaries[next]).max(EPS));
         }
-        (step, delay, step_dur)
+        (
+            step,
+            delay,
+            (tc.step_ends[step] - tc.boundaries[step]).max(EPS),
+        )
     }
 
-    /// Swung sample time for a live roll hit (eseq-767.10): delay the audible
+    /// The feel-unwound (step, phase) for a roll hit heard at local cycle
+    /// position `pos`, or `None` for a track that plays straight.
+    fn unwind_roll_feel(
+        &self,
+        snapshot: &SequencerSnapshot,
+        track: usize,
+        heard_beats: f64,
+        pos: f64,
+        num_steps: usize,
+    ) -> Option<crate::groove::UnwoundPosition> {
+        let tc = &self.track_clocks[track];
+        let boundaries = &tc.boundaries[..num_steps];
+        let step_ends = &tc.step_ends[..num_steps];
+        let cycle = tc.cycle_beats.max(1.0e-6);
+        if let Some(groove) = snapshot.track_groove(track) {
+            // Transport beat of the heard cycle's start: the frame the
+            // scheduler's `boundary_beats` (and so the groove) is keyed in.
+            let cycle_start = heard_beats - pos;
+            return crate::groove::unwind_step_feel(
+                pos,
+                cycle,
+                boundaries,
+                step_ends,
+                |step, base| groove.pocket_offset_beats(cycle_start + base + boundaries[step]),
+            );
+        }
+        let track_snapshot = snapshot.tracks.get(track)?;
+        let params = &track_snapshot.params;
+        let swings: Vec<f64> = boundaries
+            .iter()
+            .enumerate()
+            .map(|(step, &boundary)| {
+                let step_snapshot = track_snapshot.steps.get(step);
+                crate::groove::swing_shift_beats(
+                    step_snapshot
+                        .and_then(|s| s.swing_override)
+                        .unwrap_or(params.swing),
+                    step_snapshot
+                        .and_then(|s| s.swing_resolution_override)
+                        .unwrap_or(params.swing_resolution),
+                    boundary,
+                )
+            })
+            .collect();
+        if swings.iter().all(|&shift| shift == 0.0) {
+            return None;
+        }
+        crate::groove::unwind_step_feel(pos, cycle, boundaries, step_ends, |step, _| swings[step])
+    }
+
+    /// Where a live roll hit on the straight roll-grid line
+    /// `boundary_beats` is HEARD, in transport beats, minus any groove
+    /// Random (the recorder unwinds the pocket, not the jitter): the
+    /// straight line plus the member's groove pocket at that line, or,
+    /// with no groove, the swing [`Self::roll_swung_sample_time`] adds.
+    pub(super) fn roll_heard_beats(
+        &self,
+        snapshot: &SequencerSnapshot,
+        track: usize,
+        boundary_beats: f64,
+    ) -> f64 {
+        if let Some(groove) = snapshot.track_groove(track) {
+            return boundary_beats + groove.pocket_offset_beats(boundary_beats);
+        }
+        let Some(params) = snapshot.tracks.get(track).map(|t| &t.params) else {
+            return boundary_beats;
+        };
+        let tc = &self.track_clocks[track];
+        let local_beats = Self::anchored_local_beats(tc, boundary_beats, params.num_steps)
+            .rem_euclid(tc.cycle_beats.max(1.0e-6));
+        boundary_beats
+            + crate::groove::swing_shift_beats(params.swing, params.swing_resolution, local_beats)
+    }
+
+    /// Sample time for a live roll hit (eseq-767.10): delay the audible
     /// event exactly as the step scheduler delays a sequenced step at this
-    /// position — the swing bucket is keyed to the track-local beat, the same
-    /// frame as the `cycle_start_beats` the lookahead feeds
-    /// `swing_bucket_index`. Track-level swing only: roll hits are live
-    /// events with no per-step overrides. The caller records the STRAIGHT
-    /// boundary, so playback through the track swing reproduces this feel and
-    /// nothing is printed.
+    /// position.
+    ///
+    /// A rack member with a groove plays the hit through it, keyed on the
+    /// hit's straight transport beat like every other trig source (rack
+    /// groove spec §Sites 5): the groove REPLACES the swing, an early offset
+    /// never lands before the audio frontier, and `None` drops an early hit
+    /// that already sounded before a mid-play resync ([`GrooveFloor`]).
+    ///
+    /// Otherwise it is the track swing: the swing bucket is keyed to the
+    /// track-local beat, the same frame as the `cycle_start_beats` the
+    /// lookahead feeds `swing_bucket_index`. Track-level swing only: roll
+    /// hits are live events with no per-step overrides.
+    ///
+    /// Either way the caller records the position unwound through the feel
+    /// ([`Self::roll_record_position`]), so playback reproduces what was
+    /// heard and the feel is not printed.
+    ///
+    /// [`GrooveFloor`]: crate::groove::GrooveFloor
     pub(super) fn roll_swung_sample_time(
         &self,
         snapshot: &SequencerSnapshot,
@@ -308,18 +416,28 @@ impl SnapshotSequencerClock {
         boundary_beats: f64,
         sample_time: u64,
         samples_per_quarter: f64,
-    ) -> u64 {
+        groove_floor: crate::groove::GrooveFloor,
+    ) -> Option<u64> {
+        if let Some(groove) = snapshot.track_groove(track) {
+            return crate::groove::grooved_sample_time(
+                groove,
+                boundary_beats,
+                sample_time,
+                samples_per_quarter,
+                groove_floor,
+            );
+        }
         let Some(params) = snapshot.tracks.get(track).map(|t| &t.params) else {
-            return sample_time;
+            return Some(sample_time);
         };
         if params.swing <= 50.0 {
-            return sample_time;
+            return Some(sample_time);
         }
         let tc = &self.track_clocks[track];
         let local_beats = Self::anchored_local_beats(tc, boundary_beats, params.num_steps)
             .rem_euclid(tc.cycle_beats.max(1.0e-6));
         if swing_bucket_index(local_beats, params.swing_resolution) % 2 == 0 {
-            return sample_time;
+            return Some(sample_time);
         }
         let swing_delay = swing_delay_samples_from_quarter(
             samples_per_quarter,
@@ -327,7 +445,7 @@ impl SnapshotSequencerClock {
             params.swing_resolution,
         )
         .round();
-        sample_time.saturating_add(swing_delay.max(0.0) as u64)
+        Some(sample_time.saturating_add(swing_delay.max(0.0) as u64))
     }
 
     fn offset_beats(tc: &SnapshotTrackClockState, num_steps: usize) -> f64 {

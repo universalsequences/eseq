@@ -1,6 +1,6 @@
 # Rack Grooves — Extracted Feel, Applied to Every Trig Source
 
-Status: rev 1; slices 1–5 and 7 built (model/extraction, application incl. early offsets, rack panel UI, velocity/random, kit carry and cross-rack). Epic: `eseq-groove` (slices `.1`–`.7` below).
+Status: rev 1; slices 1–7 built (model/extraction, application incl. early offsets, rack panel UI, velocity/random, record/roll unwind, kit carry and cross-rack). Epic: `eseq-groove` (slices `.1`–`.7` below).
 
 ## Problem
 
@@ -269,6 +269,27 @@ fn grooved_sample_time(g: &TrackGrooveSnapshot, boundary_beats, straight_sample,
    **unwind** the groove offset before storing phase, or playback applies it
    twice. This is the same bug class as eseq-k0v8 for swing, so fix them
    together.
+   *Built (eseq-groove.6 + eseq-k0v8):* one inverse,
+   `groove::unwind_step_feel` (`groove/unwind.rs`), maps a HEARD position to
+   the straight `(step, phase)` playback moves back onto it. Playback shifts
+   a stored hit by the feel of the step it sits on (the groove pocket at the
+   step's straight transport boundary, else the track swing of the step's
+   bucket with per-step swing p-locks), so the inverse tries every step and
+   keeps `heard - shift[s]` when it falls inside step `s`. Overlapping
+   readings (an early step reaching back into the one before) keep the
+   smaller phase; the gap a later-than-previous step opens reads as early
+   for that step (phase 0); a straight Sync wait stays unresolved as before.
+   The unwind uses the deterministic pocket (`pocket_offset_beats`), not
+   Random's jitter, so one bar's noise is never printed. Live record:
+   `SequencerState::record_position_at_beat` (audio stamps, press estimate
+   and frontier fallback all go through it). Roll: a grooved member's hit
+   plays through `grooved_sample_time` keyed on its grid line (replacing
+   swing, floored like other sites, plus the velocity accent), and
+   `roll_record_position` unwinds `roll_heard_beats`, so a 32nd roll on 16th
+   steps records the delay that replays each hit where it sounded. Pinned by
+   `scheduler::tests::rack_groove::{live_record_*, roll_through_a_feel_*,
+   grooved_roll_*}` (record, write, replay through the scheduler, within one
+   sample) and `groove::tests::unwind_*`.
 
 MIDI fx order: the groove applies to the trig's source time **before** the
 member's MIDI fx chain, the same place swing applies today. A member MIDI-fx
@@ -397,6 +418,7 @@ a "groove" hint, so there is one visible source of truth for the feel.
    grooves at its own beat, so grooving the step first would scale it twice.
 6. **Record/roll unwind.** Roll and live-record through a grooved rack store
    straight phase. Pair with eseq-k0v8.
+   *Built (eseq-groove.6, with eseq-k0v8):* see §Sites 5.
 7. **Kit preset carry + cross-rack.** Grooves in kit presets; applying another
    rack's groove maps pad rows by `pad_note`, falling back to the shared row.
    *Built (eseq-groove.7):* `KIT_PRESET_VERSION` 5 adds

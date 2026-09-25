@@ -145,6 +145,13 @@ impl TrackGrooveSnapshot {
     /// triplet-quantized neurons; two-slot swing is exactly this warp.
     /// Signed (negative = early), never earlier than [`MAX_EARLY_SLOTS`].
     pub fn offset_beats(&self, boundary_beats: f64) -> f64 {
+        self.offset_beats_with_random(boundary_beats, true)
+    }
+
+    /// [`offset_beats`](Self::offset_beats), with the Random jitter only
+    /// when `with_random` (the record unwind reads the bare pocket, see
+    /// `pocket_offset_beats`).
+    pub(super) fn offset_beats_with_random(&self, boundary_beats: f64, with_random: bool) -> f64 {
         let Some(at) = self.slot_position(boundary_beats) else {
             return 0.0;
         };
@@ -153,7 +160,7 @@ impl TrackGrooveSnapshot {
         let b = slots[at.next].offset as f64;
         let mut offset_slots = a + (b - a) * at.t;
         let jitter = self.random_amount as f64 * slots[at.k].spread as f64;
-        if jitter != 0.0 && jitter.is_finite() {
+        if with_random && jitter != 0.0 && jitter.is_finite() {
             offset_slots += jitter * groove_hash_noise(at.absolute, self.pad_note);
         }
         let offset_slots = offset_slots * self.timing_amount as f64;
