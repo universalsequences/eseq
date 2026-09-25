@@ -564,6 +564,20 @@ conventions — see the Packages tab: header rows, `:status-icon`,
 section whose entries copy-on-apply, then Off), the Timing / Velocity /
 Random knobs, "Extract Groove…", and a "Grooves tab" link that opens the tab
 with this rack's groove selected. The heatmap and rename/delete move to the tab.
+*Built (eseq-groove.12):* `content/ui/effects/rack-groove.lisp` is now one
+14-column controls column. `SEQ.rack-grooves` entries gain
+`:picker-headers` (option indices) and lose `:heatmap` (the map is the
+tab's, on `SEQ.groove-pool`); the Library header is a picker label with key
+"" that `eseq.drum-rack-v2/set-groove` ignores. The dropdown widget gained
+an opt-in `:headers` prop (`crates/eseqlisp/src/widget_render/dropdown.rs`):
+header rows render dimmed with no check mark, keys step over them, and a
+click or Enter on one picks nothing. The link calls
+`eseq.grooves-tab/show-rack-groove`, which opens the sidebar on the Grooves
+tab (`eseq.browser/open-grooves-tab`, late-bound since the browser imports
+the tab) and selects the rack's groove on its In use row
+(`in-use/pool:<id>`); a rack playing straight just opens the tab. The
+rack panel's Rename/Delete (and `eseq.drum-rack-v2/rename-groove` /
+`delete-groove`) are gone, so the unconfirmed panel delete path is closed.
 
 *Pad role* is set from the rack pad's context menu (Role ▸ …, with
 "Standard (<inferred>)" as the default entry), and shown as a short tag on

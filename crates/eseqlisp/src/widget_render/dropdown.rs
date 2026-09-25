@@ -272,6 +272,58 @@ fn get_options(props: &HashMap<String, Value>) -> Vec<String> {
     }
 }
 
+/// Option indices that are section headers (`:headers '(3)`): drawn dimmed
+/// with no check mark, and never hovered, picked or announced by
+/// `:on-change`, so a menu can group its options ("Library" above library
+/// entries) without a header row selecting anything.
+fn get_header_indices(props: &HashMap<String, Value>) -> Vec<usize> {
+    match props.get("headers") {
+        Some(Value::List(list)) => list
+            .iter()
+            .filter_map(|v| match &*v.borrow() {
+                Value::Number(n) if *n >= 0.0 => Some(n.round() as usize),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// The nearest selectable option from `from` stepping `forward` (or back),
+/// skipping headers; `from` itself when every option past it is a header.
+fn step_selectable(
+    option_count: usize,
+    headers: &[usize],
+    from: Option<usize>,
+    forward: bool,
+) -> Option<usize> {
+    if option_count == 0 {
+        return None;
+    }
+    let mut idx = match from {
+        None => {
+            return (0..option_count).find(|i| !headers.contains(i));
+        }
+        Some(i) => i,
+    };
+    loop {
+        if forward {
+            if idx + 1 >= option_count {
+                return from;
+            }
+            idx += 1;
+        } else {
+            if idx == 0 {
+                return from;
+            }
+            idx -= 1;
+        }
+        if !headers.contains(&idx) {
+            return Some(idx);
+        }
+    }
+}
+
 fn get_numeric_prop(props: &HashMap<String, Value>, key: &str) -> Option<f64> {
     match props.get(key) {
         Some(Value::Number(value)) => Some(*value),
@@ -399,7 +451,7 @@ fn initial_keyboard_hovered_index(
     options: &[String],
 ) -> Option<usize> {
     if is_action_menu(props) {
-        (!options.is_empty()).then_some(0)
+        step_selectable(options.len(), &get_header_indices(props), None, true)
     } else {
         selected_index(options, &get_selected(props))
     }
@@ -497,6 +549,7 @@ impl WidgetDefinition for DropdownWidget {
     fn size_affecting_props(&self) -> &'static [&'static str] {
         &[
             "options",
+            "headers",
             "value",
             "value-index",
             "value-index-offset",
@@ -521,8 +574,8 @@ impl WidgetDefinition for DropdownWidget {
 
     fn completion_props(&self) -> &'static [&'static str] {
         &[
-            "options", "value", "value-index", "value-index-offset", "width", "height",
-            "font-size", "icon", "focusable", "action-menu", "badge-color", "bg-color",
+            "options", "headers", "value", "value-index", "value-index-offset", "width",
+            "height", "font-size", "icon", "focusable", "action-menu", "badge-color", "bg-color",
             "border-color", "border-width", "check-color", "chevron-color", "corner-radius", "hover-bg",
             "menu-bg", "menu-border-color", "ring-color", "scrollbar-color", "text-color",
             "on-change", "plock-active", "plock-color-r", "plock-color-g", "plock-color-b",
@@ -620,6 +673,11 @@ impl WidgetDefinition for DropdownWidget {
                 // Account for scroll offset: the visible window starts at scroll_offset
                 let content_row = menu_row + state.scroll_offset;
                 let item_idx = ((content_row - MENU_PADDING_V) / MENU_ROW_HEIGHT).floor() as usize;
+                if item_idx < options.len() && get_header_indices(&node.props).contains(&item_idx)
+                {
+                    // A section header is not an option: the menu stays open.
+                    return MouseEventOutcome::Consume;
+                }
                 if item_idx < options.len() {
                     state.hovered_idx = Some(item_idx);
                     set_state(node.widget_id, state);
@@ -688,23 +746,31 @@ impl WidgetDefinition for DropdownWidget {
         // Menu is open
         match key.code {
             KeyCode::Down => {
-                let next = state
-                    .hovered_idx
-                    .map(|i| (i + 1).min(options.len() - 1))
-                    .unwrap_or(0);
-                state.hovered_idx = Some(next);
+                let headers = get_header_indices(&node.props);
+                state.hovered_idx =
+                    step_selectable(options.len(), &headers, state.hovered_idx, true);
                 ensure_visible(&mut state, options.len());
                 set_state(node.widget_id, state);
                 Some(WidgetEvent::Custom(Value::Nil))
             }
             KeyCode::Up => {
-                let prev = state.hovered_idx.map(|i| i.saturating_sub(1)).unwrap_or(0);
-                state.hovered_idx = Some(prev);
+                let headers = get_header_indices(&node.props);
+                state.hovered_idx = match state.hovered_idx {
+                    None => step_selectable(options.len(), &headers, None, true),
+                    from => step_selectable(options.len(), &headers, from, false),
+                };
                 ensure_visible(&mut state, options.len());
                 set_state(node.widget_id, state);
                 Some(WidgetEvent::Custom(Value::Nil))
             }
             KeyCode::Enter => {
+                if state
+                    .hovered_idx
+                    .is_some_and(|idx| get_header_indices(&node.props).contains(&idx))
+                {
+                    // Enter on a header (reached by the mouse) picks nothing.
+                    return Some(WidgetEvent::Custom(Value::Nil));
+                }
                 if let Some(idx) = state.hovered_idx {
                     let value = options.get(idx).cloned().unwrap_or_default();
                     state.open = false;
@@ -1046,6 +1112,7 @@ impl WidgetDefinition for DropdownWidget {
 
             // Menu items — only emit those within the visible scroll window
             let sel_idx = selected_index(&options, &selected);
+            let headers = get_header_indices(&node.props);
             let scroll_off = state.scroll_offset;
             let label_col = menu_col + PADDING_H;
             let item_text_col = label_col + check_col_width;
@@ -1065,7 +1132,8 @@ impl WidgetDefinition for DropdownWidget {
                 let item_y = geo.menu_top + visible_y;
 
                 // Hover/selected highlight
-                let is_hovered = state.hovered_idx == Some(i);
+                let is_header = headers.contains(&i);
+                let is_hovered = state.hovered_idx == Some(i) && !is_header;
                 if is_hovered {
                     let hl_rect = Rect {
                         row: item_y,
@@ -1077,7 +1145,7 @@ impl WidgetDefinition for DropdownWidget {
                 }
 
                 // Check mark for selected item
-                if !action_menu && sel_idx == Some(i) {
+                if !action_menu && !is_header && sel_idx == Some(i) {
                     super::push_overlay_primitive(super::menu_style::checkmark_primitive(
                         Rect { row: item_y, col: menu_col, width: menu_width, height: MENU_ROW_HEIGHT },
                         menu_font_size,
@@ -1087,22 +1155,29 @@ impl WidgetDefinition for DropdownWidget {
                 }
 
                 // Option label
+                // A header starts at the check column, dimmed, so the
+                // options under it read as its members.
+                let (text_col, text_width) = if is_header {
+                    (label_col, item_text_width + (item_text_col - label_col))
+                } else {
+                    (item_text_col, item_text_width)
+                };
                 let option_display =
-                    truncate_text_to_width(option, item_text_width, menu_font_size, viewport.cell_w);
+                    truncate_text_to_width(option, text_width, menu_font_size, viewport.cell_w);
                 if option_display.is_empty() {
                     continue;
                 }
                 super::push_overlay_primitive(GpuPrimitive::ProportionalText(
                     GpuProportionalTextPrimitive {
                         row: item_y + (MENU_ROW_HEIGHT - 1.0) * 0.5,
-                        col: item_text_col,
+                        col: text_col,
                         align_width: 0.0,
                         h_align: 0.0,
                         text: option_display,
                         font_size: menu_font_size,
                         scale: 1.0,
                         // Popup labels are chrome, not the trigger's colored value.
-                        fg: theme::FG(),
+                        fg: if is_header { theme::DIM() } else { theme::FG() },
                         bg: transparent,
                         mono: false,
                     },
@@ -1588,6 +1663,130 @@ mod tests {
             GpuPrimitive::WidgetInstance { widget_type, .. }
                 if widget_type == "dropdown-checkmark"
         )));
+
+        set_state(widget_id, DropdownState::default());
+        super::super::clear_overlay();
+    }
+
+    /// `:headers` marks section-header options: the keyboard steps over
+    /// them, a click on one keeps the menu open and picks nothing, and the
+    /// header renders dimmed with no check mark while the options pick.
+    #[test]
+    fn header_options_are_drawn_but_never_picked() {
+        let widget_id = 91_338;
+        let mut props = HashMap::new();
+        props.insert(
+            "options".to_string(),
+            string_list(&["Take", "Library", "Swing 58", "Off"]),
+        );
+        props.insert(
+            "headers".to_string(),
+            Value::List(vec![Rc::new(RefCell::new(Value::Number(1.0)))]),
+        );
+        props.insert("value".to_string(), Value::String("Take".to_string()));
+        let node = LayoutNode {
+            widget_id,
+            stable_widget_id: None,
+            subtree_root_id: None,
+            parent_subtree_root_id: None,
+            stable_key: None,
+            widget_type: "dropdown".to_string(),
+            rect: Rect {
+                row: 0.25,
+                col: 8.0,
+                width: 6.0,
+                height: 1.0,
+            },
+            props,
+            children: Vec::new(),
+            focusable: true,
+            animation: Default::default(),
+        };
+        let viewport = WidgetViewport {
+            cell_w: 10.0,
+            cell_h: 20.0,
+            vp_w: 800.0,
+            vp_h: 400.0,
+            time_seconds: 0.0,
+            focused_widget_id: None,
+            focused_branch: false,
+            overlay_viewport_bottom: 20.0,
+            scroll_top: 0.0,
+            scroll_left: 0.0,
+            inherited_hover: false,
+        };
+        let key = |code| WidgetKeyEvent {
+            code,
+            modifiers: KeyModifiers::NONE,
+        };
+        super::super::clear_overlay();
+        set_state(widget_id, DropdownState::default());
+
+        // Keyboard: open on "Take", Down skips the header to "Swing 58",
+        // Up skips it back to "Take".
+        DROPDOWN_WIDGET.key_event(&node, key(KeyCode::Enter));
+        assert_eq!(get_state(widget_id).hovered_idx, Some(0));
+        DROPDOWN_WIDGET.key_event(&node, key(KeyCode::Down));
+        assert_eq!(get_state(widget_id).hovered_idx, Some(2));
+        DROPDOWN_WIDGET.key_event(&node, key(KeyCode::Up));
+        assert_eq!(get_state(widget_id).hovered_idx, Some(0));
+        DROPDOWN_WIDGET.key_event(&node, key(KeyCode::Down));
+
+        // Render: the header row is dimmed, the options are not.
+        let (_tile, overlay) =
+            crate::widget_render::collect_gpu_primitives(&node, viewport, 0.0, 2);
+        let text_color = |label: &str| {
+            overlay
+                .iter()
+                .find_map(|primitive| match primitive {
+                    GpuPrimitive::ProportionalText(text) if text.text == label => Some(text.fg),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{label} renders"))
+        };
+        assert_eq!(text_color("Library"), theme::DIM());
+        assert_eq!(text_color("Swing 58"), theme::FG());
+
+        // A header on a hovered Enter (the mouse can rest on it) picks
+        // nothing and keeps the menu open.
+        let mut state = get_state(widget_id);
+        state.hovered_idx = Some(1);
+        set_state(widget_id, state);
+        assert!(matches!(
+            DROPDOWN_WIDGET.key_event(&node, key(KeyCode::Enter)),
+            Some(WidgetEvent::Custom(Value::Nil))
+        ));
+        assert!(get_state(widget_id).open);
+
+        // Mouse: a click on the header row is consumed, the menu stays open;
+        // a click on the option under it picks that option.
+        let overlay_rect = super::super::get_overlay_rect().expect("open menu bounds");
+        let row_of =
+            |idx: usize| overlay_rect.row + MENU_PADDING_V + (idx as f32 + 0.5) * MENU_ROW_HEIGHT;
+        let click = |row: f32| {
+            DROPDOWN_WIDGET.mouse_event(
+                &node,
+                MouseEventKind::Down(MouseButton::Left),
+                overlay_rect.col + 1.0,
+                row,
+                None,
+                None,
+                KeyModifiers::NONE,
+                viewport.cell_w,
+                viewport.cell_h,
+            )
+        };
+        assert!(matches!(click(row_of(1)), MouseEventOutcome::Consume));
+        assert!(
+            get_state(widget_id).open,
+            "a header click keeps the menu open"
+        );
+        match click(row_of(2)) {
+            MouseEventOutcome::Dispatch(WidgetEvent::Custom(Value::String(picked))) => {
+                assert_eq!(picked, "Swing 58")
+            }
+            _ => panic!("the option under the header picks"),
+        }
 
         set_state(widget_id, DropdownState::default());
         super::super::clear_overlay();

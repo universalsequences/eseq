@@ -1,9 +1,10 @@
 //! End to end: the drum rack panel's Groove section drives the production
-//! host path (docs/rack-groove-spec.md, "UI"; bead eseq-groove.4). The UI
-//! actions are the real Lisp ones — the Extract Groove modal's
-//! `open-extract` / `commit-extract`, the picker's `set-groove`, the amount
-//! knobs' `set-groove-amount` — evaluated in the UI runtime, drained as host
-//! commands and routed through `dispatch_custom_host_command`. "Play" is the
+//! host path (docs/rack-groove-spec.md, "UI"; beads eseq-groove.4 and the
+//! slimmed rev-2 section, eseq-groove.12). The UI actions are the real Lisp
+//! ones — the Extract Groove modal's `open-extract` / `commit-extract`, the
+//! picker dropdown's `:on-change`, the amount knobs' `set-groove-amount`, the
+//! "Grooves tab" link's `:on-click` — evaluated in the UI runtime, drained as
+//! host commands and routed through `dispatch_custom_host_command`. "Play" is the
 //! scheduler's input: the per-track groove table the lookahead reads, pushed
 //! through the scheduler's own timing function.
 
@@ -75,6 +76,13 @@ fn string(value: &Value) -> String {
         Value::String(s) => s.to_string(),
         other => panic!("expected a string, got {other:?}"),
     }
+}
+
+/// One UI action for the test's `drive`: Lisp source, or a widget's own
+/// callback with its arguments.
+enum UiAction {
+    Eval(String),
+    Call(Value, Vec<Value>),
 }
 
 fn find_debug<'a>(
@@ -167,7 +175,9 @@ fn extract_pick_and_play_a_rack_groove_through_the_ui() {
     sync_groups_bindings(editor.runtime_mut(), &app.groups, &app.grooves);
     editor
         .runtime_mut()
-        .eval_str("(import eseq.drum-rack-v2) (import eseq.effects.rack-groove)")
+        .eval_str(
+            "(import eseq.drum-rack-v2) (import eseq.effects.rack-groove) (import eseq.browser)",
+        )
         .expect("load the rack groove UI modules");
 
     let sample_db = sequencer::sample_db::SampleDb::open_in_memory().expect("sample db");
@@ -237,13 +247,24 @@ fn extract_pick_and_play_a_rack_groove_through_the_ui() {
     };
     let mut track_names = app.tracks.clone();
 
-    // Evaluates UI Lisp and routes every host command it emits through the
-    // production dispatcher. Returns the command names, in order.
-    let mut ui = |source: &str, app: &mut app::App, editor: &mut Editor| -> Vec<String> {
-        editor
-            .runtime_mut()
-            .eval_str(source)
-            .unwrap_or_else(|e| panic!("{source}: {e:?}"));
+    // Evaluates UI Lisp (or runs a widget's own callback) and routes every
+    // host command it emits through the production dispatcher. Returns the
+    // command names, in order.
+    let mut drive = |action: UiAction, app: &mut app::App, editor: &mut Editor| -> Vec<String> {
+        match action {
+            UiAction::Eval(source) => {
+                editor
+                    .runtime_mut()
+                    .eval_str(&source)
+                    .unwrap_or_else(|e| panic!("{source}: {e:?}"));
+            }
+            UiAction::Call(callback, args) => {
+                editor
+                    .runtime_mut()
+                    .invoke(callback, args)
+                    .expect("widget callback");
+            }
+        }
         let mut names = Vec::new();
         for command in editor.drain_host_commands() {
             let eseqlisp::HostCommand::Custom { name, payload } = command else {
@@ -281,17 +302,16 @@ fn extract_pick_and_play_a_rack_groove_through_the_ui() {
 
     // Nothing active yet: the section says Off and the swing control is live.
     assert_eq!(string(&get(&rack_state(&editor), "active-key")), "off");
-    assert_eq!(get(&rack_state(&editor), "heatmap"), Value::Nil);
     assert!(played(KICK, 0.0).is_none());
 
     // 1. Extract Groove… : open the modal, name it, commit (1 bar, 1/16,
     //    quantize source on — the modal's defaults).
-    let sent = ui(
-        &format!(
+    let sent = drive(
+        UiAction::Eval(format!(
             "(eseq.effects.rack-groove/open-extract {group_id})
              (set! eseq.effects.rack-groove/extract-name \"Take\")
              (eseq.effects.rack-groove/commit-extract)"
-        ),
+        )),
         &mut app,
         &mut editor,
     );
@@ -316,13 +336,25 @@ fn extract_pick_and_play_a_rack_groove_through_the_ui() {
         number(&get(&entry, "active-groove-id")),
         app.grooves[0].id as f64
     );
-    // The picker: the pool, then the library (the factory MPC swings), then
-    // Off; library entries carry `factory:` / `user:` keys.
+    // The picker: the pool, then a "Library" header (a `:headers` row with
+    // no key) over the library (the factory MPC swings), then Off; library
+    // entries carry `factory:` / `user:` keys.
     let keys = list(&get(&entry, "picker-keys"))
         .iter()
         .map(string)
         .collect::<Vec<_>>();
+    let labels = list(&get(&entry, "picker-labels"))
+        .iter()
+        .map(string)
+        .collect::<Vec<_>>();
     assert_eq!(keys[0], format!("pool:{}", app.grooves[0].id));
+    assert_eq!(
+        list(&get(&entry, "picker-headers")),
+        vec![Value::Number(1.0)],
+        "one header, right after the pool"
+    );
+    assert_eq!((labels[1].as_str(), keys[1].as_str()), ("Library", ""));
+    assert!(keys[2].starts_with("factory:"), "{keys:?}");
     assert!(
         keys.contains(&"factory:mpc-swing-66-16th".to_string()),
         "{keys:?}"
@@ -337,15 +369,22 @@ fn extract_pick_and_play_a_rack_groove_through_the_ui() {
         .iter()
         .any(|entry| string(&get(entry, "key")) == "factory:mpc-swing-58-16th"));
     assert_eq!(string(&get(&entry, "active-grid")), "1 bar · 1/16");
-    let heat = get(&entry, "heatmap");
+    // The rack entry carries no heatmap any more (eseq-groove.12); the
+    // groove's own map, on its pool entry, is what the Grooves tab draws.
+    assert_eq!(get(&entry, "heatmap"), Value::Nil);
+    let heat = get(&pool_field[0], "heatmap");
     assert_eq!(number(&get(&heat, "slots")), 16.0);
     let rows = list(&get(&heat, "rows"));
     assert_eq!(
         rows.iter()
-            .map(|row| string(&get(row, "label")))
+            .map(|row| get(row, "pad-note"))
             .collect::<Vec<_>>(),
-        vec!["All", "C1", "F#1"],
-        "an All row, then one row per pad in pad-note order"
+        vec![
+            Value::Nil,
+            Value::Number(DRUM_RACK_FIRST_PAD_NOTE as f64),
+            Value::Number((DRUM_RACK_FIRST_PAD_NOTE + 6) as f64),
+        ],
+        "an All row, then one recorded row per pad in pad-note order"
     );
     let kick_row = &rows[1];
     let kick_cells = list(&get(kick_row, "cells"));
@@ -378,8 +417,8 @@ fn extract_pick_and_play_a_rack_groove_through_the_ui() {
         Some(Value::Bool(true))
     );
 
-    // The section itself lays out: panel, picker, knobs and a heatmap with
-    // one cell per slot per row.
+    // The slim section itself lays out (eseq-groove.12): panel, picker,
+    // knobs, Extract and the Grooves tab link; no heatmap, rename or delete.
     editor
         .runtime_mut()
         .eval_str("(effect-buffer \"*groove-test*\" (eseq.effects.rack-groove/panel 0))")
@@ -399,8 +438,8 @@ fn extract_pick_and_play_a_rack_groove_through_the_ui() {
     assert_visible(panel, "groove panel");
     for name in [
         "rack-groove-picker",
-        "rack-groove-heatmap",
         "rack-groove-extract",
+        "rack-groove-tab-link",
         "rack-groove-timing",
         "rack-groove-velocity",
         "rack-groove-random",
@@ -410,9 +449,85 @@ fn extract_pick_and_play_a_rack_groove_through_the_ui() {
             name,
         );
     }
-    let heatmap = find_debug(panel, "rack-groove-heatmap").unwrap();
-    // 3 rows + the beat ruler.
-    assert_eq!(heatmap.children.len(), 4);
+    assert!(find_debug(panel, "rack-groove-heatmap").is_none());
+    fn has_stable_key(node: &eseqlisp::layout::LayoutNode, part: &str) -> bool {
+        node.stable_key
+            .as_deref()
+            .is_some_and(|key| key.contains(part))
+            || node
+                .children
+                .iter()
+                .any(|child| has_stable_key(child, part))
+    }
+    for gone in [
+        "rack-groove-rename",
+        "rack-groove-delete",
+        "rack-groove-heat",
+    ] {
+        assert!(!has_stable_key(panel, gone), "{gone} left the panel");
+    }
+    let picker = find_debug(panel, "rack-groove-picker").unwrap();
+    assert_eq!(
+        picker.props.get("headers").map(list),
+        Some(vec![Value::Number(1.0)]),
+        "the picker draws the Library header as a header"
+    );
+    let picker_on_change = picker
+        .props
+        .get("on-change")
+        .expect("picker on-change")
+        .clone();
+    let link_on_click = find_debug(panel, "rack-groove-tab-link")
+        .unwrap()
+        .props
+        .get("on-click")
+        .expect("link on-click")
+        .clone();
+
+    // The Grooves tab link opens the browser on the Grooves tab with this
+    // rack's groove selected: its In use row, a row the tab's tree has.
+    let tab_state = |editor: &mut Editor| -> (Value, Value, Value) {
+        let mut eval = |source: &str| editor.runtime_mut().eval_str(source).unwrap().unwrap();
+        (
+            eval("eseq.vanilla/sbrowser-tab"),
+            eval("eseq.grooves-tab/selected-key"),
+            eval("eseq.grooves-tab/selected-path"),
+        )
+    };
+    editor
+        .runtime_mut()
+        .eval_str("(eseq.browser/select-tab \"samples\")")
+        .unwrap();
+    let sent = drive(
+        UiAction::Call(
+            link_on_click.clone(),
+            vec![Value::Number(0.0), Value::Number(0.0), Value::Nil],
+        ),
+        &mut app,
+        &mut editor,
+    );
+    assert!(sent.is_empty(), "the link is UI only: {sent:?}");
+    let take_id = app.grooves[0].id;
+    let in_use_path = format!("in-use/pool:{take_id}");
+    assert_eq!(
+        tab_state(&mut editor),
+        (
+            Value::String("grooves".into()),
+            Value::String(format!("pool:{take_id}").into()),
+            Value::String(in_use_path.clone().into()),
+        )
+    );
+    let tree = super::super::grooves_tab::groove_tree_value(
+        "",
+        &field(&editor, "groove-pool"),
+        &field(&editor, "groove-library"),
+    );
+    assert!(
+        list(&tree)
+            .iter()
+            .any(|row| get(row, "path") == Value::String(in_use_path.clone().into())),
+        "the selected path is the tree's In use row for the take"
+    );
 
     // 2. Play: the quantized source through the groove lands where the take
     //    was heard (one repeat, so the slot median IS the hit).
@@ -430,14 +545,24 @@ fn extract_pick_and_play_a_rack_groove_through_the_ui() {
     check_take(&[2, 6, 10, 14], &hat_heard, HAT);
     assert!(played(KICK, 2.0).unwrap() < 2.0, "the kick is pushed EARLY");
 
-    // 3. Pick through the picker: Off plays straight, a factory library
-    //    swing is copied into the pool (copy-on-apply) and plays its shared
-    //    row on every pad, and the extracted groove comes back.
-    ui(
-        &format!("(eseq.drum-rack-v2/set-groove {group_id} \"Off\")"),
+    // 3. Pick through the picker dropdown's own `:on-change`: the Library
+    //    header picks nothing, Off plays straight, a factory library swing
+    //    is copied into the pool (copy-on-apply) and activated, playing its
+    //    shared row on every pad, and the extracted groove comes back.
+    let pick = |label: &str| vec![Value::String(label.into())];
+    let sent = drive(
+        UiAction::Call(picker_on_change.clone(), pick("Library")),
         &mut app,
         &mut editor,
     );
+    assert!(sent.is_empty(), "the header is not a groove: {sent:?}");
+    assert_eq!(app.grooves.len(), 1);
+    let sent = drive(
+        UiAction::Call(picker_on_change.clone(), pick("Off")),
+        &mut app,
+        &mut editor,
+    );
+    assert_eq!(sent, vec!["set-rack-groove".to_string()]);
     assert_eq!(string(&get(&rack_state(&editor), "active-key")), "off");
     assert!(played(KICK, 2.0).is_none() && played(HAT, 0.5).is_none());
     assert_eq!(
@@ -449,8 +574,9 @@ fn extract_pick_and_play_a_rack_groove_through_the_ui() {
             .unwrap(),
         Some(Value::Bool(false))
     );
-    ui(
-        &format!("(eseq.drum-rack-v2/set-groove {group_id} \"MPC 16 Swing 66%\")"),
+    let undo_before_library = app.history.undo_len();
+    drive(
+        UiAction::Call(picker_on_change.clone(), pick("MPC 16 Swing 66%")),
         &mut app,
         &mut editor,
     );
@@ -461,8 +587,38 @@ fn extract_pick_and_play_a_rack_groove_through_the_ui() {
     );
     assert_eq!(app.grooves[1].name, "MPC 16 Swing 66%");
     assert_eq!(
+        app.history.undo_len(),
+        undo_before_library + 1,
+        "import + activate is one undo step"
+    );
+    assert_eq!(
         string(&get(&rack_state(&editor), "active-key")),
         format!("pool:{}", app.grooves[1].id)
+    );
+    // The imported groove is now a pool groove in the picker, above the
+    // header, and the one the rack's link selects in the tab.
+    let entry = rack_state(&editor);
+    let labels = list(&get(&entry, "picker-labels"))
+        .iter()
+        .map(string)
+        .collect::<Vec<_>>();
+    assert_eq!(&labels[..3], ["Take", "MPC 16 Swing 66%", "Library"]);
+    assert_eq!(
+        list(&get(&entry, "picker-headers")),
+        vec![Value::Number(2.0)]
+    );
+    assert_eq!(string(&get(&entry, "active-label")), "MPC 16 Swing 66%");
+    drive(
+        UiAction::Call(
+            link_on_click.clone(),
+            vec![Value::Number(0.0), Value::Number(0.0), Value::Nil],
+        ),
+        &mut app,
+        &mut editor,
+    );
+    assert_eq!(
+        tab_state(&mut editor).1,
+        Value::String(format!("pool:{}", app.grooves[1].id).into())
     );
     let swung = played(HAT, 0.25).unwrap();
     assert!(
@@ -470,8 +626,8 @@ fn extract_pick_and_play_a_rack_groove_through_the_ui() {
         "66% swing: {swung}"
     );
     assert!((played(KICK, 0.0).unwrap()).abs() < 1.0 / spq);
-    ui(
-        &format!("(eseq.drum-rack-v2/set-groove {group_id} \"Take\")"),
+    drive(
+        UiAction::Call(picker_on_change.clone(), pick("Take")),
         &mut app,
         &mut editor,
     );
@@ -481,8 +637,10 @@ fn extract_pick_and_play_a_rack_groove_through_the_ui() {
     //    undo step when the gesture ends.
     let undo_len = app.history.undo_len();
     for value in [0.8, 0.6, 0.5] {
-        let sent = ui(
-            &format!("(eseq.drum-rack-v2/set-groove-amount {group_id} \"timing\" {value})"),
+        let sent = drive(
+            UiAction::Eval(format!(
+                "(eseq.drum-rack-v2/set-groove-amount {group_id} \"timing\" {value})"
+            )),
             &mut app,
             &mut editor,
         );

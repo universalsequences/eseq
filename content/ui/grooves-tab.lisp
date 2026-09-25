@@ -23,6 +23,7 @@
         selected-rack-id
         focus-rack
         show-groove
+        show-rack-groove
         select-item
         activate-item
         open-menu
@@ -109,6 +110,19 @@
     (set! selected-path path)
     (set! library-heat
       (if (or (= key "") (pool-key? key)) nil (seq-groove-library-heatmap key)))))
+
+;; The Rack panel's "Grooves tab" link: open the browser on this tab with
+;; the rack's groove selected (its In use row, which a played groove always
+;; has). A rack playing straight just opens the tab. eseq.browser imports
+;; this module, so the call is late-bound, not imported.
+(def show-rack-groove (gid)
+  (let ((state (rack/groove-state gid)))
+    (let ((id (if (= state nil) -1 (get state :active-groove-id))))
+      (do
+        (eseq.browser/open-grooves-tab)
+        (if (>= id 0)
+          (show-groove (str "pool:" id) (str "in-use/pool:" id))
+          nil)))))
 
 ;; A click (or cursor move) selects the row's groove; an instance row also
 ;; focuses its rack.

@@ -4,9 +4,10 @@
 //! is dragging in:
 //!
 //! - `SEQ.rack-grooves` is STRUCTURAL: one entry per drum rack with the
-//!   project pool's grooves, the picker (labels + parallel keys), the active
-//!   groove and the heatmap of the active groove. It changes on extract /
-//!   pick / rename / delete / pad-map edits.
+//!   project pool's grooves, the picker (labels + parallel keys + header
+//!   indices) and the active groove. It changes on extract / pick / rename /
+//!   delete. The rack panel no longer draws a heatmap (eseq-groove.12): a
+//!   groove's map is the Grooves tab's preview, on `SEQ.groove-pool`.
 //! - `SEQ.rack-groove-{timing,velocity,random}-<group id>` are the amounts,
 //!   scalar fields the Timing / Velocity / Random knobs bind to.
 //!
@@ -22,25 +23,49 @@ use sequencer::project::{ProjectRackConfig, ProjectTrackGroup};
 
 /// Picker label for "no groove".
 pub(crate) const GROOVE_PICKER_OFF: &str = "Off";
+/// The picker's section header above the library entries: a dropdown
+/// `:headers` row, drawn dimmed and never picked, with no key of its own.
+pub(crate) const GROOVE_PICKER_LIBRARY_HEADER: &str = "Library";
 
 pub(crate) fn rack_groove_amount_field(amount: &str, group_id: u64) -> String {
     format!("rack-groove-{amount}-{group_id}")
 }
 
-/// Project pool grooves first, then the library (factory, then user; picking
-/// one copies it into the pool), then Off. Labels are made unique (a
-/// duplicate pool name gets its id, a library name already in the pool gets
+/// The rack panel's groove picker: parallel labels and keys, plus the
+/// indices of section-header rows (the dropdown's `:headers`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct GroovePicker {
+    pub(crate) labels: Vec<String>,
+    /// A header's key is "" (it picks nothing).
+    pub(crate) keys: Vec<String>,
+    pub(crate) headers: Vec<usize>,
+}
+
+/// Project pool grooves first, then a *Library* header over the library
+/// entries (factory, then user; picking one copies it into the pool), then
+/// Off. Labels are made unique (a duplicate pool name, or one spelled like
+/// the header or Off, gets its id; a library name already taken gets
 /// "(library)"), so the dropdown's label round-trips to exactly one key.
-fn picker(pool: &[ProjectGroove], library: &[GrooveLibraryEntry]) -> (Vec<String>, Vec<String>) {
+pub(crate) fn picker(pool: &[ProjectGroove], library: &[GrooveLibraryEntry]) -> GroovePicker {
     let mut labels: Vec<String> = Vec::new();
     let mut keys = Vec::new();
+    let mut headers = Vec::new();
     for groove in pool {
         let mut label = groove.name.clone();
-        if label.is_empty() || labels.contains(&label) || label == GROOVE_PICKER_OFF {
+        if label.is_empty()
+            || labels.contains(&label)
+            || label == GROOVE_PICKER_OFF
+            || label == GROOVE_PICKER_LIBRARY_HEADER
+        {
             label = format!("{} #{}", groove.name, groove.id);
         }
         labels.push(label);
         keys.push(GrooveChoice::Pool(groove.id).picker_key());
+    }
+    if !library.is_empty() {
+        headers.push(labels.len());
+        labels.push(GROOVE_PICKER_LIBRARY_HEADER.to_string());
+        keys.push(String::new());
     }
     for entry in library {
         let mut label = entry.name.clone();
@@ -55,7 +80,11 @@ fn picker(pool: &[ProjectGroove], library: &[GrooveLibraryEntry]) -> (Vec<String
     }
     labels.push(GROOVE_PICKER_OFF.to_string());
     keys.push(GrooveChoice::Off.picker_key());
-    (labels, keys)
+    GroovePicker {
+        labels,
+        keys,
+        headers,
+    }
 }
 
 /// How many times the groove's period repeats across the heatmap: a groove
@@ -67,70 +96,6 @@ fn heat_repeats(groove: &ProjectGroove) -> usize {
     } else {
         ((GROOVE_PERIOD_ONE_BAR / groove.period_beats).round() as usize).max(1)
     }
-}
-
-/// One heatmap row: label, whether the row is the pad's own (measured) row
-/// or the shared fallback, per-cell offsets in slots (negative = early) and
-/// per-cell `measured` flags (filled/guessed cells are drawn dimmed).
-fn heat_row(
-    label: String,
-    pad: Option<(i32, Option<sequencer::project::PadRole>)>,
-    own: bool,
-    groove: &ProjectGroove,
-) -> Value {
-    let pad_note = pad.map(|(note, _)| note);
-    let row = match pad {
-        Some((note, role)) => groove.row_for_pad(note, role),
-        None => &groove.shared_row,
-    };
-    let repeats = heat_repeats(groove);
-    let cells = (0..repeats).flat_map(|_| row.slots.iter());
-    map_value([
-        ("label", Value::String(label.into())),
-        (
-            "pad-note",
-            pad_note.map_or(Value::Nil, |note| Value::Number(note as f64)),
-        ),
-        ("own", Value::Bool(own)),
-        (
-            "cells",
-            list_value(cells.clone().map(|slot| Value::Number(slot.offset as f64))),
-        ),
-        (
-            "measured",
-            // A pad playing the shared row has nothing measured of its own.
-            list_value(cells.map(|slot| Value::Bool(own && slot.source.is_measured()))),
-        ),
-    ])
-}
-
-/// The heatmap of the groove a rack plays through: an "All" row (the shared
-/// row) then one row per pad in pad-note order.
-fn heatmap(rack: &ProjectRackConfig, groove: &ProjectGroove) -> Value {
-    let mut pads: Vec<(i32, Option<sequencer::project::PadRole>)> = rack
-        .pads
-        .iter()
-        .map(|pad| (pad.pad_note, pad.effective_role()))
-        .collect();
-    pads.sort_unstable_by_key(|(note, _)| *note);
-    let mut rows = vec![heat_row("All".to_string(), None, true, groove)];
-    for (note, role) in pads {
-        // Same lookup the scheduler uses: a pad plays the row with its note,
-        // else the row recorded with its role, else the shared row.
-        rows.push(heat_row(
-            drum_rack_pad_label(note),
-            Some((note, role)),
-            groove.resolve_pad_row(note, role).is_some(),
-            groove,
-        ));
-    }
-    let slots = groove.slot_count() * heat_repeats(groove);
-    map_value([
-        ("slots", Value::Number(slots as f64)),
-        ("period-beats", Value::Number(groove.period_beats)),
-        ("resolution-beats", Value::Number(groove.resolution_beats)),
-        ("rows", list_value(rows.into_iter())),
-    ])
 }
 
 /// A groove's own heatmap, independent of any rack (the Grooves tab's
@@ -221,9 +186,13 @@ fn rack_groove_entry(
     group: &ProjectTrackGroup,
     rack: &ProjectRackConfig,
     pool: &[ProjectGroove],
-    picker: &(Vec<String>, Vec<String>),
+    picker: &GroovePicker,
 ) -> Value {
-    let (labels, keys) = picker.clone();
+    let GroovePicker {
+        labels,
+        keys,
+        headers,
+    } = picker.clone();
     let resolved = rack.active_groove(pool);
     let active_key = match resolved {
         Some(groove) => GrooveChoice::Pool(groove.id).picker_key(),
@@ -254,6 +223,10 @@ fn rack_groove_entry(
             list_value(keys.into_iter().map(|key| Value::String(key.into()))),
         ),
         (
+            "picker-headers",
+            list_value(headers.into_iter().map(|index| Value::Number(index as f64))),
+        ),
+        (
             "grooves",
             list_value(pool.iter().map(|groove| {
                 map_value([
@@ -262,10 +235,6 @@ fn rack_groove_entry(
                     ("grid", Value::String(groove_grid_label(groove).into())),
                 ])
             })),
-        ),
-        (
-            "heatmap",
-            resolved.map_or(Value::Nil, |groove| heatmap(rack, groove)),
         ),
     ])
 }

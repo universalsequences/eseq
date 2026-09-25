@@ -84,13 +84,12 @@
         groove-of-track
         groove-active-for-track?
         groove-picker-labels
+        groove-picker-headers
         groove-key-for-label
         set-groove
         set-groove-amount
         groove-amount-field
-        extract-groove
-        rename-groove
-        delete-groove)
+        extract-groove)
 
 (def contains? (xs v)
   (> (len (filter (lambda (x) (= x v)) xs)) 0))
@@ -622,12 +621,13 @@
 ;; A groove is an extracted feel, applied wherever a trig aimed at a pad
 ;; becomes a sample time. Grooves live in the project groove pool; a rack
 ;; points at one. The host publishes one SEQ.rack-grooves entry per drum
-;; rack: the picker (labels + parallel keys: `pool:<id>`, then library files
+;; rack: the picker (labels + parallel keys: `pool:<id>`, then a "Library"
+;; header row (`:picker-headers` indices, key "") over library files
 ;; `factory:<stem>` / `user:<stem>` that copy into the pool when picked, then
-;; `off`), the active groove (`:active-groove-id`, a pool id or -1) and its
-;; heatmap. The Timing /
-;; Velocity / Random amounts are scalar fields of their own
+;; `off`) and the active groove (`:active-groove-id`, a pool id or -1). The
+;; Timing / Velocity / Random amounts are scalar fields of their own
 ;; (`rack-groove-<amount>-<gid>`), so a knob drag never rebuilds its section.
+;; Rename / delete / the heatmap live in the Grooves tab (eseq.grooves-tab).
 
 (def groove-state (gid)
   (let ((hits (filter (lambda (entry) (= (get entry :group-id) gid))
@@ -667,12 +667,16 @@
           "off"
           (range 0 (len labels)))))))
 
-(def set-groove (gid label)
-  (host-command "set-rack-groove"
-    (dict :group-id gid :key (groove-key-for-label gid label))))
+(def groove-picker-headers (gid)
+  (let ((state (groove-state gid)))
+    (if state (or (get state :picker-headers) (list)) (list))))
 
-;; Rename / delete act on the project pool groove; deleting one turns it off
-;; on every rack playing it, in one undo step.
+;; A header row has key "" and picks nothing.
+(def set-groove (gid label)
+  (let ((key (groove-key-for-label gid label)))
+    (if (= key "")
+      nil
+      (host-command "set-rack-groove" (dict :group-id gid :key key)))))
 
 ;; `amount` is "timing", "velocity" or "random".
 (def groove-amount-field (amount gid)
@@ -689,9 +693,3 @@
     (dict :group-id gid :name name :bars bars
           :resolution resolution :quantize quantize)))
 
-(def rename-groove (gid groove-id name)
-  (host-command "rename-rack-groove"
-    (dict :group-id gid :groove-id groove-id :name name)))
-
-(def delete-groove (gid groove-id)
-  (host-command "delete-rack-groove" (dict :group-id gid :groove-id groove-id)))

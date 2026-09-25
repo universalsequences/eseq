@@ -614,6 +614,16 @@
     (if (not (= name "samples"))
       (set! selected-tags (list)))))
 
+;; The rack panel's "Grooves tab" link (eseq.grooves-tab/show-rack-groove):
+;; show the sidebar on the Grooves tab.
+(def open-grooves-tab ()
+  (do
+    (set! mode "audition")
+    (select-tab "grooves")
+    (if eseq.seq-core-state/samples-sidebar-visible
+      nil
+      (eseq.seq-panels/seq-toggle-samples-sidebar))))
+
 (def next-tab-name ()
   (if (= sbrowser-tab "samples") "sounds"
     (if (= sbrowser-tab "sounds") "instruments"
