@@ -22,6 +22,7 @@
 
 (import eseq.track-collapse)
 (import eseq.drum-rack-v2)
+(import eseq.grooves-tab)
 
 (export search-filter
         selected-sample
@@ -620,8 +621,9 @@
       (if (= sbrowser-tab "audio-fx") "midi-fx"
         (if (= sbrowser-tab "midi-fx") "presets"
           (if (= sbrowser-tab "presets") "packages"
-            (if (= sbrowser-tab "packages") "projects"
-              "samples"))))))))
+            (if (= sbrowser-tab "packages") "grooves"
+              (if (= sbrowser-tab "grooves") "projects"
+                "samples")))))))))
 
 (def next-tab ()
   (select-tab (next-tab-name)))
@@ -643,7 +645,8 @@
         (if (= sbrowser-tab "midi-fx") (tree-key "midi-fx-tab-tree")
           (if (= sbrowser-tab "presets") (tree-key "presets-tab-tree")
             (if (= sbrowser-tab "packages") (tree-key "packages-tab-tree")
-              (tree-key "projects-tab-tree"))))))))))
+              (if (= sbrowser-tab "grooves") (eseq.grooves-tab/tree-key)
+                (tree-key "projects-tab-tree")))))))))))
 
 (def list-contains? (items value)
   (> (len (filter (lambda (item) (= item value)) items)) 0))
@@ -718,7 +721,8 @@
         (if (= sbrowser-tab "midi-fx") "Search MIDI effects..."
           (if (= sbrowser-tab "presets") "Search presets..."
             (if (= sbrowser-tab "packages") "Search packages..."
-              "Search projects..."))))))))
+              (if (= sbrowser-tab "grooves") "Search grooves..."
+                "Search projects...")))))))))
 
 (def empty-message (message)
   (box :width :fill :height :fill :padding 1
@@ -1026,6 +1030,7 @@
     (dict :name "midi-fx" :label "MIDI FX" :icon :note-arrow)
     (dict :name "presets" :label "Presets" :icon :dial)
     (dict :name "packages" :label "Packages" :icon :project)
+    (dict :name "grooves" :label "Grooves" :icon :sine)
     (dict :name "projects" :label "Projects" :icon :project)))
 
 (def visible-sounds ()
@@ -1868,7 +1873,8 @@
         (if (= sbrowser-tab "midi-fx") (midi-fx-panel)
           (if (= sbrowser-tab "presets") (presets-tab-panel)
             (if (= sbrowser-tab "packages") (packages-tab-panel)
-              (projects-tab-panel))))))))))
+              (if (= sbrowser-tab "grooves") (eseq.grooves-tab/panel search-filter)
+                (projects-tab-panel)))))))))))
 
 (def tabbed-content ()
   (h-stack :key "tabbed-content" :width :fill :gap 0.5 :flex 1 :align :stretch
@@ -2235,7 +2241,8 @@
 (def root-widget ()
   (v-stack :width :fill :height :fill :gap 0.4 :padding 0.15
     (build-widgets)
-    (package-context-menu)))
+    (package-context-menu)
+    (eseq.grooves-tab/groove-context-menu)))
 
 (def refresh-buffer ()
   (render-widget-to-buffer "*samples*" (root-widget)))

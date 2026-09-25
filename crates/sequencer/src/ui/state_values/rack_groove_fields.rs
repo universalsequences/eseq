@@ -133,6 +133,65 @@ fn heatmap(rack: &ProjectRackConfig, groove: &ProjectGroove) -> Value {
     ])
 }
 
+/// A groove's own heatmap, independent of any rack (the Grooves tab's
+/// preview): the "All" (shared) row, then one row per recorded pad row in
+/// pad-note order, labelled by its role where the row recorded one, else by
+/// its pad note. Same cell shape as the rack panel's map.
+pub(crate) fn groove_preview_heatmap(groove: &ProjectGroove) -> Value {
+    let repeats = heat_repeats(groove);
+    let row_value = |label: String,
+                     pad_note: Option<i32>,
+                     role: Option<&str>,
+                     row: &sequencer::groove::GrooveRow| {
+        let cells = (0..repeats).flat_map(|_| row.slots.iter());
+        map_value([
+            ("label", Value::String(label.into())),
+            (
+                "pad-note",
+                pad_note.map_or(Value::Nil, |note| Value::Number(note as f64)),
+            ),
+            (
+                "role",
+                role.map_or(Value::Nil, |role| Value::String(role.to_string().into())),
+            ),
+            ("own", Value::Bool(true)),
+            (
+                "cells",
+                list_value(cells.clone().map(|slot| Value::Number(slot.offset as f64))),
+            ),
+            (
+                "measured",
+                list_value(cells.map(|slot| Value::Bool(slot.source.is_measured()))),
+            ),
+        ])
+    };
+    let mut pad_rows: Vec<&sequencer::groove::GroovePadRow> = groove.pad_rows.iter().collect();
+    pad_rows.sort_by_key(|row| row.pad_note);
+    let mut rows = vec![row_value("All".to_string(), None, None, &groove.shared_row)];
+    for pad_row in pad_rows {
+        let label = pad_row
+            .role
+            .map(|role| role.label().to_string())
+            .unwrap_or_else(|| drum_rack_pad_label(pad_row.pad_note));
+        rows.push(row_value(
+            label,
+            Some(pad_row.pad_note),
+            pad_row.role.map(|role| role.key()),
+            &pad_row.row,
+        ));
+    }
+    map_value([
+        (
+            "slots",
+            Value::Number((groove.slot_count() * repeats) as f64),
+        ),
+        ("period-beats", Value::Number(groove.period_beats)),
+        ("resolution-beats", Value::Number(groove.resolution_beats)),
+        ("grid", Value::String(groove_grid_label(groove).into())),
+        ("rows", list_value(rows.into_iter())),
+    ])
+}
+
 fn resolution_label(resolution_beats: f64) -> &'static str {
     if (resolution_beats - 0.125).abs() < 1e-9 {
         "1/32"
@@ -255,6 +314,7 @@ pub(crate) fn build_groove_pool_value(
             ),
             ("name", Value::String(groove.name.clone().into())),
             ("grid", Value::String(groove_grid_label(groove).into())),
+            ("heatmap", groove_preview_heatmap(groove)),
             (
                 "instances",
                 list_value(instances.collect::<Vec<_>>().into_iter()),

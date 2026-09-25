@@ -4917,6 +4917,112 @@ fn tree_right_click_reaches_on_right_click_with_the_hit_item() {
     );
 }
 
+/// `:detail-yields true`: on a row too narrow for both, the label keeps
+/// its whole text and the detail drops out; wide rows still show both. A
+/// tree without the prop keeps the detail and truncates the label. Checked
+/// on both renderers: the GPU primitives (whose width check counts the
+/// status icon and badge columns) and the text cells (which draw neither).
+#[test]
+fn tree_detail_yields_to_the_label_on_narrow_rows() {
+    let render = |yields: bool, width: u16| -> (Vec<String>, String) {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor.set_layout_viewport(width, 6);
+        editor
+            .runtime_mut()
+            .eval_str(&format!(
+                r#"(effect-buffer "*tree*"
+                     (tree :width :fill :row-height 1.0 :detail-yields {yields}
+                       :items '((:label "Dilla take" :path "/a" :detail "1 bar · 1/16"
+                                 :status-icon :check :badge 2))))"#
+            ))
+            .unwrap();
+        editor.refresh_runtime_side_effects();
+        let id = editor
+            .buffers
+            .iter()
+            .find(|b| b.name == "*tree*")
+            .unwrap()
+            .id;
+        editor.set_active_buffer(id);
+        let layout = editor.widget_layout().expect("tree layout");
+        let tree = find_widget_of_type(&layout, "tree").expect("tree node");
+        let viewport = crate::widget_render::WidgetViewport {
+            cell_w: 10.0,
+            cell_h: 10.0,
+            vp_w: width as f32 * 10.0,
+            vp_h: 60.0,
+            time_seconds: 0.0,
+            focused_widget_id: None,
+            focused_branch: false,
+            overlay_viewport_bottom: 6.0,
+            scroll_top: 0.0,
+            scroll_left: 0.0,
+            inherited_hover: false,
+        };
+        let texts = crate::widget_render::widget_primitives_for_node(tree, viewport)
+            .iter()
+            .filter_map(|primitive| match primitive {
+                crate::widget_render::GpuPrimitive::ProportionalText(text) => {
+                    Some(text.text.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        let mut cells = crate::widget_render::CellBuffer::new(width, 6);
+        crate::widget_render::render_widget_tree(&layout, &mut cells);
+        let cells = cells
+            .cells
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .map(|cell| cell.as_ref().map(|cell| cell.ch).unwrap_or(' '))
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        (texts, cells)
+    };
+    let (narrow, narrow_cells) = render(true, 20);
+    assert!(
+        narrow.iter().any(|t| t == "Dilla take"),
+        "label wins: {narrow:?}"
+    );
+    assert!(
+        !narrow.iter().any(|t| t == "1 bar · 1/16"),
+        "detail drops: {narrow:?}"
+    );
+    assert!(
+        narrow_cells.contains("Dilla take"),
+        "text label wins: {narrow_cells}"
+    );
+    assert!(
+        !narrow_cells.contains("1 bar"),
+        "text detail drops: {narrow_cells}"
+    );
+    let (wide, wide_cells) = render(true, 40);
+    assert!(wide.iter().any(|t| t == "Dilla take"), "{wide:?}");
+    assert!(
+        wide.iter().any(|t| t == "1 bar · 1/16"),
+        "room for both: {wide:?}"
+    );
+    assert!(
+        wide_cells.contains("Dilla take") && wide_cells.contains("1 bar · 1/16"),
+        "{wide_cells}"
+    );
+    let (default, default_cells) = render(false, 20);
+    assert!(default.iter().any(|t| t == "1 bar · 1/16"), "{default:?}");
+    assert!(
+        !default.iter().any(|t| t == "Dilla take"),
+        "label truncates: {default:?}"
+    );
+    assert!(default_cells.contains("1 bar · 1/16"), "{default_cells}");
+    assert!(
+        !default_cells.contains("Dilla take"),
+        "text label truncates: {default_cells}"
+    );
+}
+
 #[test]
 fn tree_without_right_click_handler_swallows_right_clicks() {
     let runtime = Runtime::new();

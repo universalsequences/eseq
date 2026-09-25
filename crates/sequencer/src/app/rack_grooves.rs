@@ -123,6 +123,20 @@ pub(super) fn kit_groove_settings(
     }
 }
 
+/// "<name> copy", then "<name> copy 2", ... — the first not already a pool
+/// groove's name.
+fn unique_copy_name(pool: &[ProjectGroove], name: &str) -> String {
+    let base = format!("{name} copy");
+    let taken = |candidate: &str| pool.iter().any(|groove| groove.name == candidate);
+    if !taken(&base) {
+        return base;
+    }
+    (2..)
+        .map(|n| format!("{base} {n}"))
+        .find(|candidate| !taken(candidate))
+        .expect("an unbounded range always finds a free name")
+}
+
 impl App {
     /// The scheduler's per-track groove table: every rack member of a rack
     /// with an active pool groove gets its pad row (or the shared row).
@@ -312,6 +326,26 @@ impl App {
                 .ok_or_else(|| format!("The project has no groove {groove_id}"))?;
             groove.name = name;
             Ok(())
+        })
+    }
+
+    /// "Duplicate" (Grooves tab): adds a copy of pool groove `groove_id` to
+    /// the pool under a fresh id and a unique "<name> copy" name, so it can
+    /// be renamed and applied independently. One undo step; returns the new
+    /// id. No rack changes.
+    pub fn duplicate_pool_groove_recorded(
+        &mut self,
+        groove_id: GrooveId,
+    ) -> Result<GrooveId, String> {
+        let source = pool_groove(&self.grooves, groove_id)
+            .ok_or_else(|| format!("The project has no groove {groove_id}"))?;
+        let mut copy = source.clone();
+        copy.id = next_pool_groove_id(&self.grooves);
+        copy.name = unique_copy_name(&self.grooves, &source.name);
+        let id = copy.id;
+        self.apply_recorded_bus_group_structure_mutation("Duplicate groove", move |app| {
+            app.grooves.push(copy);
+            Ok(id)
         })
     }
 

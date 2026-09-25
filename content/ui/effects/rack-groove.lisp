@@ -13,13 +13,13 @@
 (import eseq.drum-rack-v2 :as rack)
 (import eseq.effects.state :as st)
 (import eseq.effects.panel-frame :as pf)
+(import eseq.grooves-tab :as gt)
 
 (export panel
         extract-modal
         open-extract
         extract-open?
-        commit-extract
-        offset-color)
+        commit-extract)
 
 ;; ── Extract Groove modal state ──────────────────────────────────────────
 (defstate extract-open? false)
@@ -68,24 +68,8 @@
     (set! groove-rename-draft "")))
 
 ;; ── Heatmap ─────────────────────────────────────────────────────────────
-;; Offsets are in slots, extraction keeps them within half a slot; 0.4 slot
-;; saturates. Measured cells are drawn at full strength, filled ones at a
-;; fraction so the eye reads what was played versus what was guessed.
-(def heat-base '(0.13 0.14 0.155))
-(def heat-late '(0.30 0.62 1.0))
-(def heat-early '(1.0 0.64 0.24))
-
-(def mix (a b t) (+ a (* (- b a) t)))
-
-(def offset-color (offset measured)
-  (let ((m (min 1 (* 2.5 (abs offset))))
-        (hue (if (< offset 0) heat-early heat-late))
-        (strength (if measured 1.0 0.38)))
-    (rgba (mix (nth heat-base 0) (nth hue 0) (* m strength))
-          (mix (nth heat-base 1) (nth hue 1) (* m strength))
-          (mix (nth heat-base 2) (nth hue 2) (* m strength))
-          (if measured 1.0 0.7))))
-
+;; Cell colors (amber early, blue late, filled cells dimmed) are the Grooves
+;; tab's `offset-color`, so both maps read the same.
 (def heat-width 23)
 (def heat-label-width 3.4)
 (def heat-height 7.2)
@@ -118,7 +102,7 @@
           (box :width (- cell-w 0.06) :height (- row-h 0.06)
             :corner-radius 1
             :background-color
-              (offset-color (nth cells i) (nth measured i))))))))
+              (gt/offset-color (nth cells i) (nth measured i))))))))
 
 ;; Beat ticks under the map: one per quarter note, so a 16th groove reads as
 ;; groups of four.

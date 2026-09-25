@@ -7,7 +7,7 @@
 (module eseq.file-dialogs)
 (import eseq.settings)
 (import eseq.customize)
-(export open-confirm panel open-save close-save save-open? save-draft commit-save
+(export open-confirm confirm-open? confirm-message accept-confirm panel open-save close-save save-open? save-draft commit-save
         open-unsaved-prompt open-unsaved-quit-prompt close-unsaved-prompt unsaved-prompt-open?
         unsaved-prompt-save unsaved-prompt-discard
         open-about close-about about-open?

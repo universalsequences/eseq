@@ -520,6 +520,45 @@ conventions — see the Packages tab: header rows, `:status-icon`,
   Library/factory groove: Apply to Selected Rack (copy-on-apply), and for
   user files Rename and Delete. All edits are single undo steps; library file
   edits are not undoable and say so in their confirm.
+- *Built (eseq-groove.11):* `content/ui/grooves-tab.lisp` (`eseq.grooves-tab`,
+  mounted by `browser.lisp` as the Grooves rail tab after Packages; tree key
+  `eseq.grooves-tab/grooves-tab-tree`). Rows come from
+  `(seq-groove-tree query SEQ.groove-pool SEQ.groove-library)`
+  (`src/ui/host_commands/grooves_tab.rs`); a played pool groove carries the
+  check `:status-icon` and a rack-count `:badge`, and each row's `:path`
+  (`in-use/pool:<id>`, `project/pool:<id>/rack:<gid>`, `library/user:<stem>`)
+  keeps its expansion and highlight per section. Empty sections show a
+  placeholder row; a search keeps matching grooves or matching racks. The
+  "selected rack" is the rack whose bus is selected, else the current
+  track's rack; clicking an instance (or its menu's Show Rack) selects the
+  rack's bus. Instance rows also offer "Turn Off on <rack>". An "Instances"
+  button expands every groove. The preview reads a pool groove's `:heatmap`
+  on its `SEQ.groove-pool` entry (`groove_preview_heatmap`: All, then its
+  recorded rows by role label, else pad note) and loads a library file's
+  through `(seq-groove-library-heatmap key)`. New host command
+  `duplicate-pool-groove {groove-id}` ("<name> copy", one undo step). The
+  host confirms `delete-rack-groove` when racks play the groove and
+  `delete-library-groove` always, by opening `eseq.file-dialogs/open-confirm`
+  with a rerun carrying `:confirmed true` — so the rack panel's Delete now
+  confirms too. *Deviation:* user-file Rename has no confirm, contrary to
+  "say so in their confirm" above: the rename is already an explicit
+  two-step inline field (type, then Rename/Enter), so its "Renames the file
+  in your library; this cannot be undone." note stands in for the confirm.
+  The context menu is mounted in `browser.lisp`'s `root-widget` beside the
+  package menu. The heatmap's cells (and the ruler's boxes above them)
+  are `:flex 1`, so a row's slots share the preview's width and all of a
+  1 bar · 1/16 map fits the 34-column sidebar; they sit on a surface
+  lighter than `:buffer-bg` (filled cells' dim base vanished on it). The
+  Grooves tree sets a new opt-in tree prop, `:detail-yields true`
+  (`crates/eseqlisp/src/widget_render/tree.rs`, both the text-cell and GPU
+  renderers): a row's detail ("1 bar · 1/16") shows only when the whole
+  label fits beside it, so a narrow sidebar drops the detail before cutting
+  the groove's name short. Trees without the prop keep the detail and
+  truncate the label as before. *Deviation:* instance rows use the compact
+  `<rack> · T100 V40 R0` (percentages) rather than `T 100% V 40% R 0%`, so
+  a default rack name ("Drum Rack 1") keeps all three amounts at 34
+  columns. Capture fixture:
+  `crates/sequencer/ui/capture-fixtures/grooves-tab.lisp` (`--buffer samples`).
 
 *Rack panel* keeps only: the groove picker (pool grooves, then a *Library*
 section whose entries copy-on-apply, then Off), the Timing / Velocity /

@@ -307,7 +307,24 @@ pub fn delete_library_groove_in(user_dir: &Path, stem: &str) -> io::Result<()> {
 
 // --- the app's tiers --------------------------------------------------------
 
+/// Test-only redirect of the app's (factory, user) groove directories, so a
+/// host-command test saves, renames and deletes library files in a temp dir
+/// instead of the developer's `.local/grooves`. Process-wide: nextest runs
+/// each test in its own process.
+static TEST_LIBRARY_DIRS: Mutex<Option<(PathBuf, PathBuf)>> = Mutex::new(None);
+
+#[doc(hidden)]
+pub fn override_groove_library_dirs_for_tests(dirs: Option<(PathBuf, PathBuf)>) {
+    if let Ok(mut slot) = TEST_LIBRARY_DIRS.lock() {
+        *slot = dirs;
+    }
+    invalidate_library_listing();
+}
+
 fn app_dirs() -> (PathBuf, PathBuf) {
+    if let Some(dirs) = TEST_LIBRARY_DIRS.lock().ok().and_then(|slot| slot.clone()) {
+        return dirs;
+    }
     let paths = crate::app_paths::app_paths();
     (paths.grooves_dir(), paths.user_grooves_dir())
 }

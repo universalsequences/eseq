@@ -19,6 +19,7 @@ pub(super) const COMMANDS: &[&str] = &[
     "set-rack-groove",
     "set-rack-groove-amount",
     "rename-rack-groove",
+    "duplicate-pool-groove",
     "delete-rack-groove",
     "save-groove-to-library",
     "rename-library-groove",
@@ -29,6 +30,7 @@ pub(super) const COMMANDS: &[&str] = &[
 /// `group-id` needed.
 const POOL_COMMANDS: &[&str] = &[
     "rename-rack-groove",
+    "duplicate-pool-groove",
     "delete-rack-groove",
     "save-groove-to-library",
     "rename-library-groove",
@@ -187,6 +189,10 @@ fn apply_pool_command(
             let new_name = extract_string_from_payload(payload, "name").unwrap_or_default();
             app.rename_pool_groove_recorded(groove, &new_name)?;
         }
+        "duplicate-pool-groove" => {
+            let groove = groove_id(payload, name)?;
+            app.duplicate_pool_groove_recorded(groove)?;
+        }
         "delete-rack-groove" => {
             let groove = groove_id(payload, name)?;
             app.delete_pool_groove_recorded(groove)?;
@@ -210,6 +216,99 @@ fn apply_pool_command(
     Ok(RackGrooveEdit::Structure)
 }
 
+/// The racks' names, in group order, joined for a sentence: "Kit A",
+/// "Kit A and Kit B", "Kit A, Kit B and Kit C".
+fn join_names(names: &[String]) -> String {
+    match names {
+        [] => String::new(),
+        [one] => one.clone(),
+        [init @ .., last] => format!("{} and {last}", init.join(", ")),
+    }
+}
+
+/// "Delete groove 'Take'? Kit A and Kit B play it; they will play straight."
+/// The whole delete is one undo step, which the message says.
+pub(crate) fn delete_pool_groove_confirm_message(groove: &str, racks: &[String]) -> String {
+    let verb = if racks.len() == 1 { "plays" } else { "play" };
+    let pronoun = if racks.len() == 1 { "it" } else { "they" };
+    format!(
+        "Delete groove '{groove}'? {} {verb} it; {pronoun} will play straight (undo restores it).",
+        join_names(racks)
+    )
+}
+
+/// "Delete library groove 'X'? Its file is deleted; this cannot be undone."
+pub(crate) fn delete_library_groove_confirm_message(groove: &str) -> String {
+    format!("Delete library groove '{groove}'? Its file is deleted; this cannot be undone.")
+}
+
+/// Commands the host confirms first (docs/rack-groove-spec.md, "Rev 2
+/// UI"): deleting a pool groove some rack plays (the message lists the
+/// racks) and deleting a user library file (not undoable). Returns the
+/// confirm message and the Lisp payload that reruns the command with
+/// `:confirmed true`; `None` runs the command at once.
+pub(crate) fn confirm_before(
+    name: &str,
+    payload: &Value,
+    app: &app::App,
+) -> Option<(String, String)> {
+    if extract_bool_from_payload(payload, "confirmed") {
+        return None;
+    }
+    match name {
+        "delete-rack-groove" => {
+            let id = extract_usize_from_payload(payload, "groove-id")? as u64;
+            let groove = sequencer::groove::pool_groove(&app.grooves, id)?;
+            let racks: Vec<String> = app
+                .racks_using_groove(id)
+                .into_iter()
+                .filter_map(|gid| app.groups.iter().find(|group| group.id == gid))
+                .map(|group| group.name.clone())
+                .collect();
+            if racks.is_empty() {
+                return None;
+            }
+            Some((
+                delete_pool_groove_confirm_message(&groove.name, &racks),
+                format!(
+                    "(host-command \"delete-rack-groove\" (dict :groove-id {id} :confirmed true))"
+                ),
+            ))
+        }
+        "delete-library-groove" => {
+            let stem = extract_string_from_payload(payload, "stem")?;
+            let label = sequencer::groove::library::list_groove_library()
+                .into_iter()
+                .find(|entry| {
+                    entry.tier == sequencer::groove::library::GrooveLibraryTier::User
+                        && entry.stem == stem
+                })
+                .map_or_else(|| stem.clone(), |entry| entry.name);
+            Some((
+                delete_library_groove_confirm_message(&label),
+                format!(
+                    "(host-command \"delete-library-groove\" (dict :stem {} :confirmed true))",
+                    super::file_menu::lisp_string(&stem)
+                ),
+            ))
+        }
+        _ => None,
+    }
+}
+
+fn open_groove_confirm(editor: &mut Editor, message: &str, rerun: &str) {
+    super::file_menu::activate_dialog_tile(editor);
+    let form = format!(
+        "(eseq.file-dialogs/open-confirm {} (lambda () {rerun}))",
+        super::file_menu::lisp_string(message)
+    );
+    if let Err(error) = editor.runtime_mut().eval_str(&form) {
+        editor.show_transient_message(format!("Could not ask to delete the groove: {error:?}"));
+    }
+    editor.refresh_runtime_side_effects();
+    editor.mark_needs_redraw();
+}
+
 pub(super) fn handle(
     name: &str,
     payload: Value,
@@ -217,9 +316,33 @@ pub(super) fn handle(
     editor: &mut Editor,
     ctx: &mut LoopCtx<'_>,
 ) {
+    if !COMMANDS.contains(&name) {
+        return;
+    }
+    if let Some((message, rerun)) = confirm_before(name, &payload, app) {
+        open_groove_confirm(editor, &message, &rerun);
+        return;
+    }
+    let saved_name = (name == "save-groove-to-library")
+        .then(|| {
+            let id = extract_usize_from_payload(&payload, "groove-id")? as u64;
+            let own = sequencer::groove::pool_groove(&app.grooves, id)?
+                .name
+                .clone();
+            Some(
+                extract_string_from_payload(&payload, "name")
+                    .map(|name| name.trim().to_string())
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or(own),
+            )
+        })
+        .flatten();
     let Some(result) = apply_rack_groove_command(name, &payload, app) else {
         return;
     };
+    if let (Ok(_), Some(saved)) = (&result, saved_name) {
+        editor.show_transient_message(format!("Saved '{saved}' to the groove library"));
+    }
     match result {
         Ok(RackGrooveEdit::Amount(false)) => {}
         Ok(RackGrooveEdit::Amount(true)) => {

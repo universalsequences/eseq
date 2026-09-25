@@ -1104,6 +1104,7 @@ mod solo_binding_tests;
             "ui/themes.lisp",
             "ui/materials.lisp",
             "ui/browser.lisp",
+            "ui/grooves-tab.lisp",
             "ui/builtin-effects.lisp",
             "ui/effects/builtin/filter-core.lisp",
             "ui/effects/builtin/eq8.lisp",
@@ -2738,6 +2739,9 @@ mod solo_binding_tests;
                 );
                 Ok(crate::host_commands::packages::package_tree_to_value(&tree))
             });
+        // The real Grooves tab natives: the tree is a pure function of the
+        // SEQ.groove-pool / SEQ.groove-library fields a test publishes.
+        crate::host_commands::grooves_tab::register_groove_tab_natives(editor.runtime_mut());
         editor
             .runtime_mut()
             .register_native("seq-preset-tree", |_args, _ctx| Ok(test_list(vec![])));
@@ -3697,6 +3701,408 @@ mod solo_binding_tests;
         }
         let rendered = render_layout_cells(&layout, 90, 70);
         assert!(rendered.contains("my.euclid"), "module row should render visibly: {rendered}");
+    }
+
+    /// Slots in the fixture's heatmap: 1 bar at 1/16, the common case.
+    const GROOVES_TAB_SLOTS: usize = 16;
+
+    /// The browser on its Grooves tab over one pool groove ("Dilla take",
+    /// `pool:3`, 16 slots x 3 rows, played by rack 8) and one factory file,
+    /// rendered at 90x70 with every instance expanded and the take selected.
+    fn grooves_tab_browser_editor() -> eseqlisp::Editor {
+        let mut editor = browser_editor_on_instrument_tab();
+        let cells = || {
+            test_list(
+                (0..GROOVES_TAB_SLOTS)
+                    .map(|i| Value::Number([0.1, -0.2, 0.0, 0.3][i % 4]))
+                    .collect(),
+            )
+        };
+        let flags = || {
+            test_list(
+                (0..GROOVES_TAB_SLOTS)
+                    .map(|i| Value::Bool(i % 2 == 0))
+                    .collect(),
+            )
+        };
+        let heat_row = |label: &str, note: Value| {
+            map_value([
+                ("label", Value::String(label.into())),
+                ("pad-note", note),
+                ("own", Value::Bool(true)),
+                ("cells", cells()),
+                ("measured", flags()),
+            ])
+        };
+        let pool = test_list(vec![map_value([
+            ("id", Value::Number(3.0)),
+            ("key", Value::String("pool:3".into())),
+            ("name", Value::String("Dilla take".into())),
+            ("grid", Value::String("1 bar · 1/16".into())),
+            (
+                "heatmap",
+                map_value([
+                    ("slots", Value::Number(GROOVES_TAB_SLOTS as f64)),
+                    ("resolution-beats", Value::Number(0.25)),
+                    ("grid", Value::String("1 bar · 1/16".into())),
+                    (
+                        "rows",
+                        test_list(vec![
+                            heat_row("All", Value::Nil),
+                            heat_row("Kick", Value::Number(0.0)),
+                            heat_row("Closed Hat", Value::Number(6.0)),
+                        ]),
+                    ),
+                ]),
+            ),
+            (
+                "instances",
+                test_list(vec![map_value([
+                    ("group-id", Value::Number(8.0)),
+                    ("name", Value::String("Drum Rack 1".into())),
+                    ("timing", Value::Number(1.0)),
+                    ("velocity", Value::Number(0.4)),
+                    ("random", Value::Number(0.0)),
+                ])]),
+            ),
+        ])]);
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "groove-pool", pool);
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "groove-library",
+            test_list(vec![map_value([
+                ("key", Value::String("factory:mpc-swing-58-16th".into())),
+                ("name", Value::String("MPC 16 Swing 58%".into())),
+                ("tier", Value::String("factory".into())),
+                ("stem", Value::String("mpc-swing-58-16th".into())),
+            ])]),
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                "(eseq.browser/select-tab \"grooves\")
+                 (set! eseq.grooves-tab/expand-instances true)
+                 (eseq.grooves-tab/show-groove \"pool:3\" \"project/pool:3\")",
+            )
+            .expect("open the Grooves tab");
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(eseq.browser/active-tree-key)")
+                .unwrap(),
+            Some(Value::String("eseq.grooves-tab/grooves-tab-tree".into())),
+            "Rust focuses the tab's tree by its qualified key"
+        );
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.browser/refresh-buffer)")
+            .unwrap();
+        editor.refresh_runtime_side_effects();
+        editor.set_active_buffer(browser_id(&editor));
+        editor.set_layout_viewport(90, 70);
+        editor
+    }
+
+    /// The Grooves tab (docs/rack-groove-spec.md, "Rev 2 UI") mounts in the
+    /// browser beside Packages: its rail button, the sectioned tree with a
+    /// pool groove's instances expanded, and the selected groove's heatmap
+    /// with role-labelled rows and its grid.
+    #[test]
+    fn metal_seq_browser_grooves_tab_renders_tree_instances_and_heatmap() {
+        let mut editor = grooves_tab_browser_editor();
+        let layout = editor.widget_layout().expect("grooves browser layout");
+        let panel = find_layout_node_by_stable_key_suffix(&layout, "/grooves-tab-panel")
+            .expect("grooves panel");
+        for key in [
+            "/grooves-tab-tree",
+            "/groove-expand-button",
+            "/groove-tab-preview",
+            "/groove-tab-heatmap",
+        ] {
+            let node = find_layout_node_by_stable_key_suffix(&layout, key).expect(key);
+            assert_finite_nonzero_rect(node, key);
+            assert_layout_inside(node, panel, key);
+        }
+        let tree = find_layout_node_by_stable_key_suffix(&layout, "/grooves-tab-tree").unwrap();
+        for handler in ["on-select", "on-activate", "on-right-click"] {
+            assert!(
+                tree.props.contains_key(handler),
+                "groove tree needs {handler}"
+            );
+        }
+        let rendered = render_layout_cells(&layout, 90, 70);
+        for text in [
+            "In use",
+            "Project",
+            "Library",
+            "Factory",
+            "Dilla take",
+            "Drum Rack 1 · T100 V40 R0",
+            "MPC 16 Swing 58%",
+            "Kick",
+            "1 bar · 1/16",
+        ] {
+            assert!(
+                rendered.contains(text),
+                "{text:?} should render: {rendered}"
+            );
+        }
+        // The text-cell renderer wraps the narrow row label; the widget
+        // carries the whole role name.
+        let browser = editor
+            .buffers
+            .iter()
+            .find(|b| b.name == "*samples*")
+            .unwrap();
+        assert!(value_contains_string(
+            browser.widget_tree.as_ref().unwrap(),
+            "Closed Hat"
+        ));
+
+        // Every slot of every row is a visible cell: `slots` cells of equal
+        // non-zero width, side by side, inside the heatmap's backdrop.
+        let heatmap =
+            find_layout_node_by_stable_key_suffix(&layout, "/groove-tab-heatmap").unwrap();
+        let backdrop =
+            find_layout_node_by_stable_key_suffix(&layout, "/groove-tab-heat-backdrop").unwrap();
+        assert_layout_inside(heatmap, backdrop, "heatmap on its backdrop");
+        // A filled (unmeasured) zero-offset cell must read against its
+        // surface: on bare :buffer-bg it vanished and a 1/16 map showed
+        // every other slot.
+        let rgba = |value: &Value| -> Vec<f64> {
+            format!("{value:?}")
+                .split(|c: char| c.is_whitespace() || c == '(' || c == ')')
+                .filter_map(|token| token.parse::<f64>().ok())
+                .collect()
+        };
+        let surface = rgba(
+            backdrop
+                .props
+                .get("background-color")
+                .expect("backdrop color"),
+        );
+        let filled = rgba(
+            &editor
+                .runtime_mut()
+                .eval_str("(eseq.grooves-tab/offset-color 0 false)")
+                .unwrap()
+                .unwrap(),
+        );
+        assert_eq!(
+            (surface.len(), filled.len()),
+            (4, 4),
+            "{surface:?} {filled:?}"
+        );
+        let contrast: f64 = (0..3)
+            .map(|c| (filled[c] * filled[3] + surface[c] * (1.0 - filled[3]) - surface[c]).abs())
+            .sum();
+        assert!(
+            contrast > 0.08,
+            "filled cells blend into the heatmap surface: {contrast}"
+        );
+        let slots = GROOVES_TAB_SLOTS;
+        for row in 0..3 {
+            let cells: Vec<_> = (0..slots)
+                .map(|i| {
+                    let key = format!("/groove-tab-heat-{row}-{i}");
+                    let cell = find_layout_node_by_stable_key_suffix(heatmap, &key)
+                        .unwrap_or_else(|| panic!("{key} missing"));
+                    assert_finite_nonzero_rect(cell, &key);
+                    let fill = cell
+                        .children
+                        .first()
+                        .unwrap_or_else(|| panic!("{key} fill"));
+                    assert_finite_nonzero_rect(fill, &key);
+                    cell
+                })
+                .collect();
+            for pair in cells.windows(2) {
+                assert!(
+                    (pair[0].rect.width - pair[1].rect.width).abs() < 1e-3,
+                    "row {row}: cells share one width"
+                );
+                assert!(
+                    pair[1].rect.col >= pair[0].rect.col + pair[0].rect.width - 1e-3,
+                    "row {row}: cells sit side by side, not overlapping"
+                );
+            }
+        }
+    }
+
+    /// At real sidebar widths (seq-layout.lisp sizes *samples* to 34-42
+    /// columns, the tab rail included) a 1 bar 1/16 map keeps all 16 slots
+    /// and the ruler on its backdrop and inside the preview (fixed cell
+    /// widths overflowed the panel and clipped half the slots), and an
+    /// instance row still shows its amounts.
+    #[test]
+    fn metal_seq_browser_grooves_tab_heatmap_fits_the_sidebar() {
+        for columns in [34, 42] {
+            let mut editor = grooves_tab_browser_editor();
+            editor.set_layout_viewport(columns, 70);
+            let layout = editor.widget_layout().expect("grooves browser layout");
+            let find = |key: &str| {
+                find_layout_node_by_stable_key_suffix(&layout, key)
+                    .unwrap_or_else(|| panic!("{key} missing at {columns} columns"))
+            };
+            let panel = find("/grooves-tab-panel");
+            let preview = find("/groove-tab-preview");
+            let backdrop = find("/groove-tab-heat-backdrop");
+            assert_layout_inside(preview, panel, &format!("preview at {columns}"));
+            assert_layout_inside(backdrop, preview, &format!("backdrop at {columns}"));
+            for row in 0..3 {
+                for i in [0, GROOVES_TAB_SLOTS - 1] {
+                    let key = format!("/groove-tab-heat-{row}-{i}");
+                    let cell = find(&key);
+                    assert_finite_nonzero_rect(cell, &key);
+                    let label = format!("{key} at {columns} columns");
+                    assert_layout_inside(cell, backdrop, &label);
+                    assert_layout_inside(cell, preview, &label);
+                }
+            }
+            let ruler = find("/groove-tab-heat-ruler");
+            for node in [
+                ruler,
+                find(&format!("/groove-tab-heat-ruler-{}", GROOVES_TAB_SLOTS - 1)),
+            ] {
+                let label = format!("ruler at {columns} columns");
+                assert_layout_inside(node, backdrop, &label);
+                assert_layout_inside(node, preview, &label);
+            }
+            // The ruler's beats sit on the rows' columns.
+            let last_cell = find(&format!("/groove-tab-heat-0-{}", GROOVES_TAB_SLOTS - 1));
+            let last_tick = find(&format!("/groove-tab-heat-ruler-{}", GROOVES_TAB_SLOTS - 1));
+            assert!(
+                (last_cell.rect.col - last_tick.rect.col).abs() < 0.05,
+                "ruler aligns with the cells at {columns} columns"
+            );
+            // An instance row keeps its Timing / Velocity / Random amounts
+            // beside a default rack name, untruncated, in the GPU renderer
+            // the app draws with.
+            let tree = find("/grooves-tab-tree");
+            let viewport = eseqlisp::widget_render::WidgetViewport {
+                cell_w: 16.0,
+                cell_h: 32.0,
+                vp_w: columns as f32 * 16.0,
+                vp_h: 70.0 * 32.0,
+                time_seconds: 0.0,
+                focused_widget_id: None,
+                focused_branch: false,
+                overlay_viewport_bottom: 70.0,
+                scroll_top: 0.0,
+                scroll_left: 0.0,
+                inherited_hover: false,
+            };
+            let texts: Vec<String> =
+                eseqlisp::widget_render::widget_primitives_for_node(tree, viewport)
+                    .iter()
+                    .filter_map(|primitive| match primitive {
+                        eseqlisp::widget_render::GpuPrimitive::ProportionalText(text) => {
+                            Some(text.text.clone())
+                        }
+                        _ => None,
+                    })
+                    .collect();
+            assert!(
+                texts.iter().any(|text| text == "Drum Rack 1 · T100 V40 R0"),
+                "instance amounts render at {columns} columns: {texts:?}"
+            );
+        }
+    }
+
+    /// The menu is reachable from the real UI: a right-click on the pool
+    /// groove's tree row opens the mounted `context-menu`, whose
+    /// `groove-menu-duplicate` item is found in the browser's layout and
+    /// selected through its `:on-select`.
+    #[test]
+    fn metal_seq_browser_grooves_tab_right_click_opens_mounted_menu() {
+        let mut editor = grooves_tab_browser_editor();
+        let layout = editor.widget_layout().expect("grooves browser layout");
+        assert!(
+            find_layout_node_by_stable_key_suffix(&layout, "/groove-menu-duplicate").is_none(),
+            "no menu before a right-click"
+        );
+        let tree = find_layout_node_by_stable_key_suffix(&layout, "/grooves-tab-tree").unwrap();
+        let (col, top, height) = (tree.rect.col + 4.0, tree.rect.row, tree.rect.height);
+        // Walk the rows until a right-click lands on the pool groove.
+        let mut row = top + 0.5;
+        let mut hit = false;
+        while row < top + height {
+            eseqlisp::widget_render::clear_overlay();
+            editor.handle_mouse_precise(
+                crossterm::event::MouseEvent {
+                    kind: crossterm::event::MouseEventKind::Down(
+                        crossterm::event::MouseButton::Right,
+                    ),
+                    column: col as u16,
+                    row: row as u16,
+                    modifiers: crossterm::event::KeyModifiers::NONE,
+                },
+                0,
+                0,
+                90,
+                70,
+                col,
+                row,
+            );
+            editor.refresh_runtime_side_effects();
+            // Only a pool groove offers five actions (library: 1 or 3,
+            // instance: 2).
+            let actions = editor
+                .runtime_mut()
+                .eval_str("(len (eseq.grooves-tab/menu-actions))")
+                .unwrap();
+            if actions == Some(Value::Number(5.0)) {
+                hit = true;
+                break;
+            }
+            row += 1.0;
+        }
+        assert!(
+            hit,
+            "a right-click on some tree row targets the pool groove"
+        );
+        let layout = editor.widget_layout().expect("layout with the menu open");
+        let item = find_layout_node_by_stable_key_suffix(&layout, "/groove-menu-duplicate")
+            .expect("the right-click mounts the groove menu in the browser root");
+        assert_eq!(item.widget_type, "menu-item");
+        assert_finite_nonzero_rect(item, "/groove-menu-duplicate");
+        for key in [
+            "/groove-menu-apply",
+            "/groove-menu-rename",
+            "/groove-menu-save",
+            "/groove-menu-delete",
+        ] {
+            assert!(
+                find_layout_node_by_stable_key_suffix(&layout, key).is_some(),
+                "{key}"
+            );
+        }
+        let on_select = item
+            .props
+            .get("on-select")
+            .expect("menu-item on-select")
+            .clone();
+        editor.drain_host_commands();
+        editor
+            .runtime_mut()
+            .invoke(on_select, vec![Value::Nil])
+            .unwrap();
+        let commands = editor.drain_host_commands();
+        assert!(
+            commands.iter().any(|command| matches!(command,
+                eseqlisp::host::HostCommand::Custom { name, payload }
+                    if name == "duplicate-pool-groove"
+                        && *payload == map_value([("groove-id", Value::Number(3.0))]))),
+            "Duplicate routes to the host: {commands:?}"
+        );
+        editor.refresh_runtime_side_effects();
+        let layout = editor.widget_layout().expect("layout after the choice");
+        assert!(
+            find_layout_node_by_stable_key_suffix(&layout, "/groove-menu-duplicate").is_none(),
+            "choosing an action closes the menu"
+        );
     }
 
     #[test]
@@ -16548,6 +16954,9 @@ mod solo_binding_tests;
                 );
                 Ok(crate::host_commands::packages::package_tree_to_value(&tree))
             });
+        // The real Grooves tab natives: the tree is a pure function of the
+        // SEQ.groove-pool / SEQ.groove-library fields a test publishes.
+        crate::host_commands::grooves_tab::register_groove_tab_natives(editor.runtime_mut());
         editor
             .runtime_mut()
             .register_native("seq-preset-tree", |_args, _ctx| Ok(test_list(vec![])));
