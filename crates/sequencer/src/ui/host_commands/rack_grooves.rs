@@ -1,21 +1,38 @@
 use crate::*;
 
 use sequencer::app::rack_grooves::RackGrooveExtractRequest;
+use sequencer::groove::library::{
+    delete_library_groove, load_library_groove, rename_library_groove,
+};
 use sequencer::groove::{
-    GrooveExtractOptions, GrooveRef, GROOVE_PERIOD_ONE_BAR, GROOVE_PERIOD_TWO_BARS,
+    GrooveChoice, GrooveExtractOptions, GROOVE_PERIOD_ONE_BAR, GROOVE_PERIOD_TWO_BARS,
     GROOVE_RESOLUTION_SIXTEENTH, GROOVE_RESOLUTION_THIRTY_SECOND,
 };
 
-/// Rack groove commands (docs/rack-groove-spec.md, "UI"): the drum rack
-/// panel's Groove section and its Extract Groove modal. Every command
-/// addresses a rack by its stable `GroupId` and a groove by its id within
-/// the rack.
+/// Groove commands (docs/rack-groove-spec.md, "UI"): the drum rack panel's
+/// Groove section, its Extract Groove modal, and the pool/library edits the
+/// Grooves tab shares. Rack commands address a rack by its stable `GroupId`;
+/// a groove is a project POOL id (`groove-id`), a library file a
+/// `stem` in the user tier.
 pub(super) const COMMANDS: &[&str] = &[
     "extract-rack-groove",
     "set-rack-groove",
     "set-rack-groove-amount",
     "rename-rack-groove",
     "delete-rack-groove",
+    "save-groove-to-library",
+    "rename-library-groove",
+    "delete-library-groove",
+];
+
+/// Commands that act on the pool or the library, not on one rack: no
+/// `group-id` needed.
+const POOL_COMMANDS: &[&str] = &[
+    "rename-rack-groove",
+    "delete-rack-groove",
+    "save-groove-to-library",
+    "rename-library-groove",
+    "delete-library-groove",
 ];
 
 /// What an applied groove command changed, so the caller republishes only
@@ -86,6 +103,9 @@ pub(crate) fn apply_rack_groove_command(
 }
 
 fn apply(name: &str, payload: &Value, app: &mut app::App) -> Result<RackGrooveEdit, String> {
+    if POOL_COMMANDS.contains(&name) {
+        return apply_pool_command(name, payload, app);
+    }
     let group = group_id(payload, name)?;
     match name {
         "extract-rack-groove" => {
@@ -97,10 +117,21 @@ fn apply(name: &str, payload: &Value, app: &mut app::App) -> Result<RackGrooveEd
                 RackGrooveEdit::Structure
             })
         }
-        // `key` is a picker key: `rack:<id>`, `builtin:<id>` or `off`.
+        // `key` is a picker key: `pool:<id>`, `factory:<stem>`,
+        // `user:<stem>` or `off`. A library key copies the file's groove
+        // into the pool first (copy-on-apply).
         "set-rack-groove" => {
             let key = extract_string_from_payload(payload, "key").unwrap_or_default();
-            let active = GrooveRef::from_picker_key(&key)?;
+            let active = match GrooveChoice::from_picker_key(&key)? {
+                GrooveChoice::Off => None,
+                GrooveChoice::Pool(id) => Some(id),
+                GrooveChoice::Library { tier, stem } => {
+                    let groove = load_library_groove(tier, &stem)
+                        .map_err(|error| format!("Could not load groove {key:?}: {error}"))?;
+                    app.apply_library_groove_recorded(group, &groove)?;
+                    return Ok(RackGrooveEdit::Structure);
+                }
+            };
             let unchanged = app
                 .groups
                 .iter()
@@ -132,19 +163,51 @@ fn apply(name: &str, payload: &Value, app: &mut app::App) -> Result<RackGrooveEd
             })?;
             Ok(RackGrooveEdit::Amount(changed))
         }
+        other => Err(format!("Unknown rack groove command {other}")),
+    }
+}
+
+/// Pool and library edits. `rename-rack-groove` / `delete-rack-groove` act
+/// on the project pool (deleting a groove turns it off on every rack using
+/// it, in one undo step); the library commands edit user `.groove` files,
+/// which is not undoable.
+fn apply_pool_command(
+    name: &str,
+    payload: &Value,
+    app: &mut app::App,
+) -> Result<RackGrooveEdit, String> {
+    let stem = || {
+        extract_string_from_payload(payload, "stem")
+            .filter(|stem| !stem.trim().is_empty())
+            .ok_or_else(|| format!("{name} needs a library groove stem"))
+    };
+    match name {
         "rename-rack-groove" => {
             let groove = groove_id(payload, name)?;
             let new_name = extract_string_from_payload(payload, "name").unwrap_or_default();
-            app.rename_rack_groove_recorded(group, groove, &new_name)?;
-            Ok(RackGrooveEdit::Structure)
+            app.rename_pool_groove_recorded(groove, &new_name)?;
         }
         "delete-rack-groove" => {
             let groove = groove_id(payload, name)?;
-            app.delete_rack_groove_recorded(group, groove)?;
-            Ok(RackGrooveEdit::Structure)
+            app.delete_pool_groove_recorded(groove)?;
         }
-        other => Err(format!("Unknown rack groove command {other}")),
+        "save-groove-to-library" => {
+            let groove = groove_id(payload, name)?;
+            let new_name = extract_string_from_payload(payload, "name");
+            app.save_pool_groove_to_library(groove, new_name.as_deref())?;
+        }
+        "rename-library-groove" => {
+            let new_name = extract_string_from_payload(payload, "name").unwrap_or_default();
+            rename_library_groove(&stem()?, &new_name)
+                .map_err(|error| format!("Could not rename the groove: {error}"))?;
+        }
+        "delete-library-groove" => {
+            delete_library_groove(&stem()?)
+                .map_err(|error| format!("Could not delete the groove: {error}"))?;
+        }
+        other => return Err(format!("Unknown groove command {other}")),
     }
+    Ok(RackGrooveEdit::Structure)
 }
 
 pub(super) fn handle(
@@ -170,7 +233,7 @@ pub(super) fn handle(
         Ok(edit) => {
             *ctx.shared.track_groups.lock().unwrap() = app.groups.clone();
             let rt = editor.runtime_mut();
-            sync_groups_bindings(rt, &app.groups);
+            sync_groups_bindings(rt, &app.groups, &app.grooves);
             rt.run_reactive_cycle();
             editor.refresh_runtime_side_effects();
             if edit == RackGrooveEdit::StructureAndPatterns {

@@ -2537,6 +2537,7 @@ impl App {
             buses,
             groups,
             scenes: self.state.capture_project_scenes(),
+            grooves: self.grooves.clone(),
         })
     }
 
@@ -2606,6 +2607,7 @@ impl App {
             bus.output = target_bus.output;
         }
         self.groups = groups;
+        self.grooves.clone_from(&target.grooves);
         // Chained bus outputs are replayed as part of the topology: the
         // destination bus may only have just been recreated above.
         self.graph_controller().apply_all_bus_output_routing();

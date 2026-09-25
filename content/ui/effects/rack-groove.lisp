@@ -56,7 +56,7 @@
 
 (def begin-rename (state)
   (do
-    (set! groove-renaming (get state :active-rack-id))
+    (set! groove-renaming (get state :active-groove-id))
     (set! groove-rename-draft (get state :active-label))))
 
 (def finish-rename (gid commit)
@@ -172,8 +172,8 @@
     :on-click on-click))
 
 (def active-groove-row (gid state)
-  (let ((rack-id (get state :active-rack-id)))
-    (if (and (>= rack-id 0) (= groove-renaming rack-id))
+  (let ((pool-id (get state :active-groove-id)))
+    (if (and (>= pool-id 0) (= groove-renaming pool-id))
       (text-input :key (str "rack-groove-rename-" gid)
         :width 12.8 :height 1.0 :font-size 9
         :value groove-rename-draft
@@ -187,12 +187,12 @@
         (label (if (= (get state :active-grid) "") "straight" (get state :active-grid))
           :font-size 7.5 :color :dim :bg :transparent :v-align :center)
         (box :flex 1 :height 0.1 :bg :transparent)
-        (if (>= rack-id 0)
+        (if (>= pool-id 0)
           (h-stack :gap 0.2 :align :center
             (small-button (str "rack-groove-rename-button-" gid) "Rename"
               |x y r| (begin-rename state))
             (small-button (str "rack-groove-delete-button-" gid) "Delete"
-              |x y r| (rack/delete-groove gid rack-id)))
+              |x y r| (rack/delete-groove gid pool-id)))
           (box :width 0 :height 0 :bg :transparent))))))
 
 (def controls (gid state)
@@ -222,7 +222,7 @@
 (def panel (gidx)
   (let ((gid (rack/group-id gidx))
         (state (or (rack/groove-state gid)
-                   (dict :active-key "off" :active-label "Off" :active-rack-id -1
+                   (dict :active-key "off" :active-label "Off" :active-groove-id -1
                          :active-grid "" :picker-labels (list "Off")
                          :picker-keys (list "off") :grooves (list) :heatmap nil))))
     (box :debug-name "rack-groove-panel"

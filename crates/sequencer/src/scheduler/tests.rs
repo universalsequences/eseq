@@ -14154,7 +14154,7 @@ fn scene_transpose_follows_live_scene_values_without_a_scratch_runtime() {
     mod rack_groove {
         use super::*;
         use crate::groove::{
-            builtin_groove, groove_offset_samples, GrooveRow, GrooveSlot, TrackGrooveSnapshot,
+            groove_offset_samples, mpc_swing_groove, GrooveRow, GrooveSlot, TrackGrooveSnapshot,
         };
         use crate::scheduler::{
             enqueue_due_process_emissions, grooved_or_swung_network_sample_time, grooved_velocity,
@@ -14180,8 +14180,9 @@ fn scene_transpose_follows_live_scene_values_without_a_scratch_runtime() {
             }
         }
 
-        fn builtin(id: &str) -> TrackGrooveSnapshot {
-            let groove = builtin_groove(id).expect("builtin groove");
+        /// An MPC swing (the factory library's `mpc-swing-<pct>-<16th|8th>`).
+        fn mpc(percent: u32, resolution_beats: f64) -> TrackGrooveSnapshot {
+            let groove = mpc_swing_groove(percent, resolution_beats);
             TrackGrooveSnapshot {
                 period_beats: groove.period_beats,
                 resolution_beats: groove.resolution_beats,
@@ -14353,7 +14354,7 @@ fn scene_transpose_follows_live_scene_values_without_a_scratch_runtime() {
                 default_empty_effect_chain(),
                 default_empty_effect_chain(),
             ]);
-            let table = vec![None, Some(builtin("mpc-8-58"))];
+            let table = vec![None, Some(mpc(58, 0.5))];
             state.set_track_grooves(table.clone());
             let published = state.latest_scheduler_snapshot();
             assert_eq!(*published.track_grooves, table);
@@ -14732,7 +14733,7 @@ fn scene_transpose_follows_live_scene_values_without_a_scratch_runtime() {
             state.pattern.track_params[0].set_swing_resolution(SwingResolution::Sixteenth);
             let swung = state.publish_scheduler_snapshot();
             let mut grooved = (*swung).clone();
-            let mpc = builtin("mpc-16-62");
+            let mpc = mpc(62, 0.25);
             grooved.track_grooves = Arc::new(vec![Some(mpc.clone())]);
             let spq = samples_per_quarter(&swung);
 

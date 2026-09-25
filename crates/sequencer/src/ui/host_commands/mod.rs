@@ -375,7 +375,7 @@ pub(crate) fn finish_added_instrument_track(idx: usize, ctx: AddTrackInstrumentC
     rt.set_reactive("SEQ", "steps", build_steps_value(state, selected));
     sync_step_param_lists(rt, state, selected);
     sync_track_mixer_state(rt, app, state);
-    sync_groups_bindings(rt, &app.groups);
+    sync_groups_bindings(rt, &app.groups, &app.grooves);
     sync_track_peak_fields(rt, cached_track_peak_levels);
     rt.set_reactive(
         "SEQ",
@@ -760,7 +760,6 @@ mod tests {
             rack: Some(sequencer::project::ProjectRackConfig {
                 clips: Vec::new(),
                 next_clip_id: 0,
-                grooves: Vec::new(),
                 groove: Default::default(),
                 sequencers: Vec::new(),
                 pads: vec![sequencer::project::ProjectRackPad {

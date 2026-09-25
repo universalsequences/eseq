@@ -940,6 +940,11 @@ pub struct App {
     pub track_collapsed: Vec<bool>,
     pub buses: Vec<BusChannelState>,
     pub groups: Vec<crate::project::ProjectTrackGroup>,
+    /// The project groove pool (docs/rack-groove-spec.md §Three tiers): every
+    /// groove a drum rack can play; racks point into it by id
+    /// (`RackGrooveSettings::active`). Undo/redo carries it with the group
+    /// structure (`BusGroupStructureState::grooves`).
+    pub grooves: Vec<crate::project::ProjectGroove>,
     /// Host-owned instances of package kinds (docs/instance-kinds-spec.md §5).
     pub instances: crate::project::ProjectInstances,
     /// Engaged sequenced mute/solo holds keyed by resolved target
@@ -2468,6 +2473,7 @@ impl App {
             track_collapsed: Vec::new(),
             buses: BusChannelState::default_buses(),
             groups: Vec::new(),
+            grooves: Vec::new(),
             instances: crate::project::ProjectInstances::default(),
             mixer_control_holds: crate::mixer_control::MixerControlHolds::default(),
             sampler_paths: Vec::new(),

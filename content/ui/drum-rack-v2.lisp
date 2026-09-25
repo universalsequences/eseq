@@ -571,10 +571,13 @@
 
 
 ;; ── Rack grooves (docs/rack-groove-spec.md, "UI") ───────────────────────
-;; A groove is the rack's extracted feel, applied wherever a trig aimed at a
-;; pad becomes a sample time. The host publishes one SEQ.rack-grooves entry
-;; per drum rack: the picker (labels + parallel keys: `rack:<id>`,
-;; `builtin:<id>`, `off`), the active groove and its heatmap. The Timing /
+;; A groove is an extracted feel, applied wherever a trig aimed at a pad
+;; becomes a sample time. Grooves live in the project groove pool; a rack
+;; points at one. The host publishes one SEQ.rack-grooves entry per drum
+;; rack: the picker (labels + parallel keys: `pool:<id>`, then library files
+;; `factory:<stem>` / `user:<stem>` that copy into the pool when picked, then
+;; `off`), the active groove (`:active-groove-id`, a pool id or -1) and its
+;; heatmap. The Timing /
 ;; Velocity / Random amounts are scalar fields of their own
 ;; (`rack-groove-<amount>-<gid>`), so a knob drag never rebuilds its section.
 
@@ -619,6 +622,9 @@
 (def set-groove (gid label)
   (host-command "set-rack-groove"
     (dict :group-id gid :key (groove-key-for-label gid label))))
+
+;; Rename / delete act on the project pool groove; deleting one turns it off
+;; on every rack playing it, in one undo step.
 
 ;; `amount` is "timing", "velocity" or "random".
 (def groove-amount-field (amount gid)

@@ -1,0 +1,22 @@
+{
+  "groove_version": 1,
+  "name": "MPC 16 Swing 54%",
+  "period_beats": 0.5,
+  "resolution_beats": 0.25,
+  "shared_row": {
+    "slots": [
+      {
+        "offset": 0.0,
+        "velocity_scale": 1.0,
+        "spread": 0.0,
+        "source": "measured"
+      },
+      {
+        "offset": 0.08000004,
+        "velocity_scale": 1.0,
+        "spread": 0.0,
+        "source": "measured"
+      }
+    ]
+  }
+}

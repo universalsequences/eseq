@@ -23,12 +23,12 @@ use crate::sequencer::{
 };
 use crate::track_color::TrackColor;
 
-// Rack grooves are rack config data (docs/rack-groove-spec.md); they live in
-// `crate::groove` beside their extraction and are re-exported with the rest
-// of the project wire types.
+// Grooves are project data (docs/rack-groove-spec.md): the project groove
+// pool plus each rack's selection. They live in `crate::groove` beside their
+// extraction and are re-exported with the rest of the project wire types.
 pub use crate::groove::{
-    GrooveId, GroovePadRow, GrooveRef, GrooveRow, GrooveSlot, GrooveSlotSource, ProjectGroove,
-    RackGrooveSettings,
+    GrooveId, GroovePadRow, GrooveRow, GrooveSlot, GrooveSlotSource, KitGroove, KitGrooveField,
+    ProjectGroove, RackGrooveSettings,
 };
 
 // Version history:
@@ -90,11 +90,12 @@ pub use crate::groove::{
 //       rack's recorded `(import m)` of a kind module and (below 14 only) a
 //       project scratch `(import m)` of one migrate to instances that keep
 //       the legacy sequencer id (`app::migrate_legacy_kind_sources`).
-//  15 - rack grooves (docs/rack-groove-spec.md, eseq-groove.1): each rack's
-//       extracted grooves (`ProjectRackConfig::grooves`) and its groove
-//       selection/amounts (`ProjectRackConfig::groove`). Both default, so
-//       older files load every rack with no grooves and no active groove,
-//       which plays exactly as before.
+//  15 - grooves (docs/rack-groove-spec.md, rev 2 / eseq-groove.9): the
+//       project groove pool (`ProjectFile::grooves`) and each rack's groove
+//       selection/amounts (`ProjectRackConfig::groove`, `active` = a pool
+//       id). Both default, so older files load with an empty pool and every
+//       rack ungrooved, which plays exactly as before. (Rev-1 rack-owned
+//       groove lists never shipped and are not read.)
 const PROJECT_FILE_VERSION: u32 = 15;
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -134,7 +135,8 @@ pub struct ProjectKitPreset {
     /// `ProjectPattern`s and parse by that generation, while this counts the
     /// kit's own payload. 1 = pads + color + optional bus chain; 2 = also
     /// `sequencers` and `clips`; 3 = also modulator pads and `mod_connections`;
-    /// 4 = also `instances`; 5 = also `grooves` and `groove`.
+    /// 4 = also `instances`; 5 = also `grooves` and `groove` (rev-1 list +
+    /// selection); 6 = `groove` is a copy of the active groove.
     /// Absent (pre-feature `.kit` files) reads as 1.
     #[serde(default = "default_kit_version")]
     pub kit_version: u32,
@@ -170,22 +172,42 @@ pub struct ProjectKitPreset {
     /// The importer maps pad position -> the member track it just built.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub clips: Vec<ProjectRackClip>,
-    /// The rack's grooves (docs/rack-groove-spec.md, kit version 5), so a
-    /// saved kit brings its pocket. Pad rows key on `pad_note`, which is kit
-    /// space already; ids are kit-local and re-derived by the importer.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub grooves: Vec<ProjectGroove>,
-    /// The rack's groove selection and amounts at export (kit version 5).
-    #[serde(default, skip_serializing_if = "RackGrooveSettings::is_default")]
-    pub groove: RackGrooveSettings,
+    /// The rack's groove (docs/rack-groove-spec.md §Three tiers, "Kit
+    /// presets"), so a saved kit brings its pocket. Kit version 6 writes a
+    /// copy of the active groove plus the amounts; a version-5 kit holds its
+    /// selection into `legacy_grooves` here. Read through
+    /// [`ProjectKitPreset::carried_groove`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub groove: Option<KitGrooveField>,
+    /// Kit version 5 only (read, never written): the rack's whole groove
+    /// list, which the version-5 `groove` selection points into. Loading
+    /// imports the selected groove only.
+    #[serde(default, rename = "grooves", skip_serializing)]
+    pub legacy_grooves: Vec<ProjectGroove>,
 }
 
 impl ProjectKitPreset {
-    /// Whether this kit's groove fields are authoritative: a kit written
+    /// Whether this kit's groove field is authoritative: a kit written
     /// before grooves travelled says nothing about them, so loading it onto a
-    /// rack must leave the rack's own grooves and selection alone.
+    /// rack must leave the rack's selection alone.
     pub fn carries_grooves(&self) -> bool {
         self.kit_version >= KIT_PRESET_GROOVES_VERSION
+    }
+
+    /// The groove this kit brings (with its amounts): the version-6 copy, or
+    /// a version-5 kit's SELECTED groove (a rack groove from its list, or a
+    /// rev-1 built-in MPC swing). `None` when the kit's rack played no groove
+    /// or the kit predates grooves.
+    pub fn carried_groove(&self) -> Option<KitGroove> {
+        if !self.carries_grooves() {
+            return None;
+        }
+        match self.groove.as_ref()? {
+            KitGrooveField::Copy(kit) => Some(kit.clone()),
+            KitGrooveField::V5Selection(selection) => {
+                crate::groove::resolve_v5_selection(selection, &self.legacy_grooves)
+            }
+        }
     }
 }
 
@@ -197,10 +219,12 @@ fn default_kit_version() -> u32 {
 /// 1 = pads + color + optional bus chain; 2 = also sequencers and clips;
 /// 3 = also modulator pads and the rack's internal mod cables (§7.5);
 /// 4 = also `instances` (instance-kinds spec §9);
-/// 5 = also the rack's `grooves` and groove settings (rack-groove spec).
-pub const KIT_PRESET_VERSION: u32 = 5;
+/// 5 = also the rack's `grooves` and groove settings (rack-groove spec rev 1);
+/// 6 = `groove` is a copy of the rack's active groove plus its amounts, not a
+///     list (rack-groove spec rev 2).
+pub const KIT_PRESET_VERSION: u32 = 6;
 
-/// The first kit generation whose `grooves`/`groove` fields mean something.
+/// The first kit generation whose groove fields mean something.
 pub const KIT_PRESET_GROOVES_VERSION: u32 = 5;
 
 /// One rack-owned instance a kit carries (instance-kinds spec §9).
@@ -378,6 +402,10 @@ pub struct ProjectFile {
     /// Absent in older files, which load with none.
     #[serde(default, skip_serializing_if = "ProjectInstances::is_unused")]
     pub instances: ProjectInstances,
+    /// The project groove pool (docs/rack-groove-spec.md §Three tiers): every
+    /// groove a rack can play, referenced by `RackGrooveSettings::active`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub grooves: Vec<ProjectGroove>,
 }
 
 impl ProjectFile {
@@ -570,6 +598,8 @@ struct ProjectFileWire {
     scene_rack_clips: Vec<Vec<(u64, RackClipId)>>,
     #[serde(default)]
     instances: ProjectInstances,
+    #[serde(default)]
+    grooves: Vec<ProjectGroove>,
 }
 
 impl<'de> Deserialize<'de> for ProjectFile {
@@ -611,6 +641,7 @@ impl<'de> Deserialize<'de> for ProjectFile {
             track_lane_rosters: wire.track_lane_rosters,
             scene_rack_clips: wire.scene_rack_clips,
             instances: wire.instances,
+            grooves: wire.grooves,
         };
         project.normalize_device_instances().map_err(D::Error::custom)?;
         migrate_legacy_chop_to_retrig(&mut project);
@@ -1387,12 +1418,8 @@ pub struct ProjectRackConfig {
     pub clips: Vec<ProjectRackClip>,
     #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub next_clip_id: RackClipId,
-    /// The rack's own grooves (docs/rack-groove-spec.md), extracted from its
-    /// played patterns. Pad rows key on `pad_note`, so they survive member
-    /// reorder.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub grooves: Vec<ProjectGroove>,
-    /// Which groove the rack plays through, and how much of it.
+    /// Which project pool groove the rack plays through (docs/rack-groove-
+    /// spec.md), and how much of it.
     #[serde(default, skip_serializing_if = "RackGrooveSettings::is_default")]
     pub groove: RackGrooveSettings,
 }
@@ -1567,49 +1594,6 @@ pub struct ProjectRackPad {
 }
 
 impl ProjectRackConfig {
-    pub fn groove_by_id(&self, id: GrooveId) -> Option<&ProjectGroove> {
-        self.grooves.iter().find(|groove| groove.id == id)
-    }
-
-    /// The id the next extracted groove takes: one past the largest in use,
-    /// never 0.
-    pub fn next_groove_id(&self) -> GrooveId {
-        self.grooves.iter().map(|groove| groove.id).max().unwrap_or(0) + 1
-    }
-
-    /// The rack's active groove when it is one of its own. A built-in
-    /// reference resolves through `resolved_active_groove`
-    /// (`crate::groove::apply`).
-    pub fn active_rack_groove(&self) -> Option<&ProjectGroove> {
-        match self.groove.active.as_ref()? {
-            GrooveRef::Rack(id) => self.groove_by_id(*id),
-            GrooveRef::Builtin(_) => None,
-        }
-    }
-
-    /// Load-time repair: drops malformed grooves (and duplicate ids, keeping
-    /// the first), clears an active reference to a rack groove that no longer
-    /// exists, and clamps the amounts. Returns whether anything changed.
-    pub fn repair_grooves(&mut self) -> bool {
-        let before_len = self.grooves.len();
-        let mut seen = Vec::with_capacity(self.grooves.len());
-        self.grooves.retain(|groove| {
-            let keep = groove.is_well_formed() && !seen.contains(&groove.id);
-            seen.push(groove.id);
-            keep
-        });
-        let mut repaired = self.grooves.len() != before_len;
-        if let Some(GrooveRef::Rack(id)) = self.groove.active {
-            if self.groove_by_id(id).is_none() {
-                self.groove.active = None;
-                repaired = true;
-            }
-        }
-        let amounts = self.groove.clone();
-        self.groove.sanitize();
-        repaired | (amounts != self.groove)
-    }
-
     pub fn pad_index_for_note(&self, pad_note: i32) -> Option<usize> {
         self.pads.iter().position(|pad| pad.pad_note == pad_note)
     }
@@ -4323,6 +4307,7 @@ mod tests {
     fn sample_project() -> ProjectFile {
         ProjectFile {
             scene_rack_clips: Vec::new(),
+            grooves: Vec::new(),
             instances: ProjectInstances::default(),
             version: project_file_version(),
             name: "roundtrip".to_string(),
@@ -5287,7 +5272,6 @@ mod tests {
             rack: Some(ProjectRackConfig {
                 clips: Vec::new(),
                 next_clip_id: 0,
-                grooves: Vec::new(),
                 groove: Default::default(),
                 sequencers: Vec::new(),
                 pads: vec![
@@ -5353,7 +5337,6 @@ mod tests {
                     bus_chain: None,
                 }],
                 next_clip_id: 5,
-                grooves: Vec::new(),
                 groove: Default::default(),
             }),
             rack_members: Vec::new(),
@@ -5413,12 +5396,14 @@ mod tests {
         }
     }
 
-    /// Rack grooves (docs/rack-groove-spec.md, eseq-groove.1): the groove list
-    /// and settings survive a round trip, and a pre-v15 rack (neither key)
-    /// loads exactly as before: no grooves, no active groove, and nothing new
-    /// written back out for a rack that never had one.
+    /// The project groove pool (docs/rack-groove-spec.md rev 2,
+    /// eseq-groove.9): the pool and each rack's pool reference survive a
+    /// round trip; a pre-v15 file (no pool, no rack `groove` key) loads with
+    /// an empty pool and ungrooved racks and writes nothing groove-related
+    /// back out; a rev-1 rack reference (`{"rack": id}`, never shipped) reads
+    /// as no groove instead of failing the load.
     #[test]
-    fn rack_grooves_round_trip_and_older_racks_load_unchanged() {
+    fn groove_pool_round_trips_and_older_projects_load_unchanged() {
         let mut project = sample_project();
         let mut rack = ProjectRackConfig {
             pads: vec![
@@ -5429,13 +5414,13 @@ mod tests {
             ..Default::default()
         };
         let plain_rack = rack.clone();
-        rack.grooves = vec![test_groove(1, "Dilla"), test_groove(2, "Madlib")];
         rack.groove = RackGrooveSettings {
-            active: Some(GrooveRef::Rack(2)),
+            active: Some(2),
             timing_amount: 0.8,
             velocity_amount: 0.5,
             random_amount: 0.25,
         };
+        project.grooves = vec![test_groove(1, "Dilla"), test_groove(2, "Madlib")];
         project.groups = vec![ProjectTrackGroup {
             id: 3,
             name: "Kit".to_string(),
@@ -5448,76 +5433,88 @@ mod tests {
         }];
         let json = serde_json::to_string(&project).expect("serialize project");
         let restored: ProjectFile = serde_json::from_str(&json).expect("deserialize project");
+        assert_eq!(restored.grooves, project.grooves, "the pool round-trips exactly");
         let restored_rack = restored.groups[0].rack.as_ref().expect("rack");
-        assert_eq!(restored_rack, &rack, "grooves and settings round-trip exactly");
-        assert_eq!(restored_rack.active_rack_groove().map(|g| g.name.as_str()), Some("Madlib"));
-        assert_eq!(restored_rack.groove_by_id(1).unwrap().row_for_pad(42).slots[0].offset, 0.2);
+        assert_eq!(restored_rack, &rack, "the rack's pool reference round-trips");
         assert_eq!(
-            restored_rack.groove_by_id(1).unwrap().row_for_pad(36).slots[0].offset,
-            0.1,
-            "a pad without a row plays the shared row"
+            restored_rack.active_groove(&restored.grooves).map(|g| g.name.as_str()),
+            Some("Madlib")
         );
-        assert_eq!(restored_rack.next_groove_id(), 3);
+        let dilla = crate::groove::pool_groove(&restored.grooves, 1).unwrap();
+        assert_eq!(dilla.row_for_pad(42).slots[0].offset, 0.2);
+        assert_eq!(dilla.row_for_pad(36).slots[0].offset, 0.1, "no row: the shared row");
+        assert_eq!(crate::groove::next_pool_groove_id(&restored.grooves), 3);
+        let value: serde_json::Value = serde_json::from_str(&json).expect("parse json");
+        assert_eq!(value["groups"][0]["rack"]["groove"]["active"], 2, "a plain pool id");
+        assert!(value["groups"][0]["rack"].get("grooves").is_none(), "no rack-owned list");
 
-        // A pre-v15 file has neither key.
-        let mut value: serde_json::Value = serde_json::from_str(&json).expect("parse json");
-        let rack_json = value["groups"][0]["rack"].as_object_mut().expect("rack object");
-        rack_json.remove("grooves");
-        rack_json.remove("groove");
+        // A pre-v15 file has no pool and no rack groove key.
+        let mut value = value;
+        value.as_object_mut().unwrap().remove("grooves");
+        value["groups"][0]["rack"].as_object_mut().unwrap().remove("groove");
         let restored: ProjectFile =
-            serde_json::from_value(value).expect("deserialize pre-groove project");
+            serde_json::from_value(value.clone()).expect("deserialize pre-groove project");
+        assert!(restored.grooves.is_empty());
         let old_rack = restored.groups[0].rack.as_ref().expect("rack");
-        assert_eq!(old_rack, &plain_rack, "an old rack loads with no grooves");
-        assert!(old_rack.grooves.is_empty());
-        assert_eq!(old_rack.groove, RackGrooveSettings::default());
-        assert!(old_rack.active_rack_groove().is_none());
-        assert_eq!(old_rack.next_groove_id(), 1);
-
-        // ... and writes nothing groove-related back out.
-        let rewritten = serde_json::to_value(old_rack).expect("serialize rack");
-        let keys = rewritten.as_object().expect("rack object");
-        assert!(!keys.contains_key("grooves"), "{rewritten}");
-        assert!(!keys.contains_key("groove"), "{rewritten}");
+        assert_eq!(old_rack, &plain_rack, "an old rack loads ungrooved");
+        assert!(old_rack.active_groove(&restored.grooves).is_none());
+        let rewritten = serde_json::to_value(&restored).expect("serialize old project");
+        assert!(rewritten.get("grooves").is_none(), "an empty pool writes no key");
+        assert!(rewritten["groups"][0]["rack"].get("groove").is_none());
         assert_eq!(
             serde_json::to_value(&plain_rack).expect("plain rack"),
-            rewritten,
+            rewritten["groups"][0]["rack"],
             "a groove-less rack serializes exactly as before the feature"
         );
+
+        // A rev-1 rack reference reads as no groove; the rest of the rack
+        // settings still load.
+        value["groups"][0]["rack"]["groove"] =
+            serde_json::json!({"active": {"rack": 2}, "timing_amount": 0.5});
+        value["groups"][0]["rack"]["grooves"] = serde_json::json!([]);
+        let restored: ProjectFile =
+            serde_json::from_value(value).expect("a rev-1 rack reference still loads");
+        let rack = restored.groups[0].rack.as_ref().unwrap();
+        assert_eq!(rack.groove.active, None);
+        assert_eq!(rack.groove.timing_amount, 0.5);
         assert!(project_file_version() >= 15);
     }
 
     #[test]
-    fn rack_repair_grooves_drops_malformed_grooves_and_dangling_selection() {
+    fn groove_pool_repair_drops_malformed_grooves_and_racks_drop_dangling_selection() {
         let mut short = test_groove(2, "Short");
         short.shared_row.slots.pop();
         let mut bad_grid = test_groove(3, "Bad grid");
         bad_grid.resolution_beats = 0.3;
         let mut duplicate_pad = test_groove(4, "Duplicate pad");
         duplicate_pad.pad_rows.push(duplicate_pad.pad_rows[0].clone());
+        let mut pool = vec![
+            test_groove(1, "Good"),
+            short,
+            bad_grid,
+            duplicate_pad,
+            test_groove(1, "Same id"),
+            test_groove(0, "Zero id"),
+        ];
+        assert!(crate::groove::repair_groove_pool(&mut pool));
+        assert_eq!(pool.len(), 1);
+        assert_eq!(pool[0].name, "Good");
+        assert!(!crate::groove::repair_groove_pool(&mut pool), "a repaired pool is stable");
+
         let mut rack = ProjectRackConfig {
-            grooves: vec![
-                test_groove(1, "Good"),
-                short,
-                bad_grid,
-                duplicate_pad,
-                test_groove(1, "Same id"),
-            ],
             groove: RackGrooveSettings {
-                active: Some(GrooveRef::Rack(2)),
+                active: Some(2),
                 timing_amount: 7.0,
                 ..Default::default()
             },
             ..Default::default()
         };
-        assert!(rack.repair_grooves());
-        assert_eq!(rack.grooves.len(), 1);
-        assert_eq!(rack.grooves[0].name, "Good");
+        assert!(rack.repair_groove_selection(&pool));
         assert_eq!(rack.groove.active, None, "the selected groove was dropped");
         assert_eq!(rack.groove.timing_amount, 1.5);
-        assert!(!rack.repair_grooves(), "a repaired rack is stable");
-
-        rack.groove.active = Some(GrooveRef::Builtin("mpc-16-58".to_string()));
-        assert!(!rack.repair_grooves(), "built-in references are not rack data");
+        assert!(!rack.repair_groove_selection(&pool), "a repaired rack is stable");
+        rack.groove.active = Some(1);
+        assert!(!rack.repair_groove_selection(&pool), "a live reference stays");
     }
 
     #[test]
@@ -5525,7 +5522,6 @@ mod tests {
         let mut rack = ProjectRackConfig {
             clips: Vec::new(),
             next_clip_id: 0,
-            grooves: Vec::new(),
             groove: Default::default(),
             sequencers: Vec::new(),
             pads: vec![
@@ -5559,7 +5555,6 @@ mod tests {
         let mut rack = ProjectRackConfig {
             clips: Vec::new(),
             next_clip_id: 0,
-            grooves: Vec::new(),
             groove: Default::default(),
             sequencers: Vec::new(),
             pads: vec![
@@ -5593,7 +5588,6 @@ mod tests {
         let mut rack = ProjectRackConfig {
             clips: Vec::new(),
             next_clip_id: 0,
-            grooves: Vec::new(),
             groove: Default::default(),
             sequencers: Vec::new(),
             pads: vec![
@@ -7132,14 +7126,14 @@ mod tests {
                 graph_overrides: Vec::new(),
                 bus_chain: None,
             }],
-            // Kit version 5: the rack's grooves and its selection travel.
-            grooves: vec![test_groove(1, "Dilla"), test_groove(4, "Madlib")],
-            groove: RackGrooveSettings {
-                active: Some(GrooveRef::Rack(4)),
+            // Kit version 6: a copy of the rack's active groove and amounts.
+            groove: Some(KitGrooveField::Copy(KitGroove {
+                groove: test_groove(4, "Madlib"),
                 timing_amount: 1.25,
                 velocity_amount: 0.5,
                 random_amount: 0.1,
-            },
+            })),
+            legacy_grooves: Vec::new(),
         };
 
         let json = serde_json::to_string(&kit).expect("serialize kit");
@@ -7168,9 +7162,12 @@ mod tests {
         assert_eq!(restored.clips.len(), 1);
         assert_eq!(restored.clips[0].name, "Verse");
         assert_eq!(restored.clips[0].members, vec![true, false]);
-        assert_eq!(restored.grooves, kit.grooves, "grooves round-trip exactly");
-        assert_eq!(restored.groove, kit.groove, "groove selection round-trips");
+        assert_eq!(restored.groove, kit.groove, "the groove copy round-trips exactly");
         assert!(restored.carries_grooves());
+        let carried = restored.carried_groove().expect("a v6 kit carries its groove");
+        assert_eq!(carried.groove, test_groove(4, "Madlib"));
+        assert_eq!(carried.timing_amount, 1.25);
+        assert!(!json.contains("\"grooves\""), "v6 writes no groove list: {json}");
         // A pre-feature `.kit` file is a kit with no break: version 1, no
         // sequencers, no clips, and every other field unchanged.
         let pre_feature: ProjectKitPreset = serde_json::from_str(
@@ -7185,9 +7182,9 @@ mod tests {
         )
         .expect("a kit saved before break kits still loads");
         assert_eq!(pre_feature.kit_version, 1);
-        assert!(pre_feature.grooves.is_empty());
-        assert_eq!(pre_feature.groove, RackGrooveSettings::default());
+        assert_eq!(pre_feature.groove, None);
         assert!(!pre_feature.carries_grooves(), "an old kit says nothing about grooves");
+        assert!(pre_feature.carried_groove().is_none());
         let rewritten = serde_json::to_string(&pre_feature).expect("serialize groove-less kit");
         assert!(!rewritten.contains("\"groove"), "a groove-less kit writes no groove keys: {rewritten}");
         assert!(pre_feature.sequencers.is_empty());
@@ -7208,6 +7205,59 @@ mod tests {
                 .and_then(|name| name.to_str()),
             Some("House-Kit.kit"),
         );
+    }
+
+    /// Kit version 5 (rev 1, never shipped) carried the rack's whole groove
+    /// list plus a selection into it or at a built-in MPC swing. Such a kit
+    /// imports its SELECTED groove only (eseq-groove.9); a v5 kit whose rack
+    /// played no groove carries none.
+    #[test]
+    fn v5_kit_carries_only_its_selected_groove() {
+        let base = serde_json::json!({
+            "version": project_file_version(),
+            "kit_version": 5,
+            "metadata": {"name": "Old Kit", "tags": [], "author": ""},
+            "pads": [],
+        });
+        let mut v5 = base.clone();
+        v5["grooves"] =
+            serde_json::to_value(vec![test_groove(1, "Dilla"), test_groove(4, "Madlib")]).unwrap();
+        v5["groove"] = serde_json::json!({
+            "active": {"rack": 4},
+            "timing_amount": 1.25,
+            "velocity_amount": 0.5,
+        });
+        let kit: ProjectKitPreset = serde_json::from_value(v5.clone()).expect("v5 kit loads");
+        assert!(matches!(kit.groove, Some(KitGrooveField::V5Selection(_))));
+        let carried = kit.carried_groove().expect("the selected groove");
+        assert_eq!(carried.groove, test_groove(4, "Madlib"), "only the selected one");
+        assert_eq!(carried.timing_amount, 1.25);
+        assert_eq!(carried.velocity_amount, 0.5);
+        assert_eq!(carried.random_amount, 0.0);
+        let rewritten = serde_json::to_value(&kit).expect("serialize");
+        assert!(rewritten.get("grooves").is_none(), "the v5 list is never written back");
+
+        // A rev-1 built-in selection resolves to the same MPC swing the
+        // factory library now ships.
+        v5["groove"] = serde_json::json!({"active": {"builtin": "mpc-16-66"}});
+        let kit: ProjectKitPreset = serde_json::from_value(v5.clone()).expect("v5 kit loads");
+        let carried = kit.carried_groove().expect("the built-in swing");
+        assert_eq!(carried.groove, crate::groove::mpc_swing_groove(66, 0.25));
+        assert_eq!(carried.timing_amount, 1.0);
+
+        // No selection, a dangling one, or an unknown built-in: nothing.
+        for groove in [
+            serde_json::json!({"timing_amount": 0.5}),
+            serde_json::json!({"active": {"rack": 9}}),
+            serde_json::json!({"active": {"builtin": "mpc-16-99"}}),
+        ] {
+            v5["groove"] = groove;
+            let kit: ProjectKitPreset = serde_json::from_value(v5.clone()).expect("v5 kit loads");
+            assert!(kit.carries_grooves());
+            assert!(kit.carried_groove().is_none());
+        }
+        let kit: ProjectKitPreset = serde_json::from_value(base).expect("groove-less v5 kit");
+        assert!(kit.carries_grooves() && kit.carried_groove().is_none());
     }
 
     #[test]

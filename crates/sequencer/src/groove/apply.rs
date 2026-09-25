@@ -27,7 +27,7 @@
 
 use std::sync::Arc;
 
-use super::{GrooveRef, GrooveRow, ProjectGroove};
+use super::{GrooveRow, ProjectGroove};
 use crate::project::ProjectRackConfig;
 
 /// A slot position this close (in slot units) to a slot boundary IS that
@@ -337,25 +337,20 @@ pub fn max_early_lead_beats(grooves: &[Option<TrackGrooveSnapshot>]) -> f64 {
 }
 
 // ---------------------------------------------------------------------------
-// Built-in generic grooves
+// MPC swing (factory library content)
 // ---------------------------------------------------------------------------
 
-/// A generic groove shipped with the app: MPC-style swing as a two-slot,
-/// shared-row-only groove.
-#[derive(Clone, Debug, PartialEq)]
-pub struct BuiltinGroove {
-    /// Stable id, the payload of `GrooveRef::Builtin`: `mpc-16-58`,
-    /// `mpc-8-66`, ...
-    pub id: String,
-    pub groove: ProjectGroove,
-}
+/// The MPC swing amounts (the classic 50/54/58/62/66/71/75 ladder) the
+/// factory library ships as `.groove` files.
+pub const MPC_SWING_PERCENTS: [u32; 7] = [50, 54, 58, 62, 66, 71, 75];
 
-/// The MPC swing amounts (the classic 50/54/58/62/66/71/75 ladder).
-pub const BUILTIN_MPC_SWING_PERCENTS: [u32; 7] = [50, 54, 58, 62, 66, 71, 75];
+/// The resolutions the factory MPC swings ship at: 16ths, then 8ths.
+pub const MPC_SWING_RESOLUTIONS: [f64; 2] = [0.25, 0.5];
 
 /// One MPC swing as a groove: period = two slots at `resolution_beats`, the
 /// off slot late by the same amount track swing would delay it,
-/// `(pct/100 - 0.5) * 2` slots.
+/// `(pct/100 - 0.5) * 2` slots. The factory `content/grooves/mpc-swing-*`
+/// files are this function's output (a test keeps them in sync).
 pub fn mpc_swing_groove(percent: u32, resolution_beats: f64) -> ProjectGroove {
     let offset = ((percent as f32 / 100.0) - 0.5) * 2.0;
     let slot = |offset: f32| super::GrooveSlot {
@@ -377,54 +372,39 @@ pub fn mpc_swing_groove(percent: u32, resolution_beats: f64) -> ProjectGroove {
     }
 }
 
-/// Every built-in generic groove, in picker order: MPC 16th swings, then 8th
-/// swings.
-pub fn builtin_grooves() -> &'static [BuiltinGroove] {
-    static BUILTINS: std::sync::OnceLock<Vec<BuiltinGroove>> = std::sync::OnceLock::new();
-    BUILTINS.get_or_init(|| {
-        let mut out = Vec::new();
-        for (label, resolution) in [("16", 0.25), ("8", 0.5)] {
-            for percent in BUILTIN_MPC_SWING_PERCENTS {
-                out.push(BuiltinGroove {
-                    id: format!("mpc-{label}-{percent}"),
-                    groove: mpc_swing_groove(percent, resolution),
-                });
-            }
-        }
-        out
-    })
-}
-
-pub fn builtin_groove(id: &str) -> Option<&'static ProjectGroove> {
-    builtin_grooves()
-        .iter()
-        .find(|builtin| builtin.id == id)
-        .map(|builtin| &builtin.groove)
+/// The factory file stem of one MPC swing: `mpc-swing-58-16th`,
+/// `mpc-swing-66-8th`.
+pub fn mpc_swing_file_stem(percent: u32, resolution_beats: f64) -> String {
+    let label = if resolution_beats < 0.375 {
+        "16th"
+    } else {
+        "8th"
+    };
+    format!("mpc-swing-{percent}-{label}")
 }
 
 impl ProjectRackConfig {
-    /// The groove the rack plays through: one of its own, or a built-in.
-    /// `None` when nothing is active or the reference does not resolve.
-    pub fn resolved_active_groove(&self) -> Option<&ProjectGroove> {
-        match self.groove.active.as_ref()? {
-            GrooveRef::Rack(id) => self.groove_by_id(*id),
-            GrooveRef::Builtin(id) => builtin_groove(id),
-        }
+    /// The pool groove the rack plays through. `None` when nothing is active
+    /// or the id is not in `pool`.
+    pub fn active_groove<'a>(&self, pool: &'a [ProjectGroove]) -> Option<&'a ProjectGroove> {
+        super::pool_groove(pool, self.groove.active?)
     }
 }
 
 /// The scheduler's per-track groove table for `num_tracks` tracks, from each
-/// drum rack's `(members, config)`. Every member of a rack with an active,
-/// well-formed groove gets an entry: its pad's own row when the groove has
-/// one for the pad's note, else the shared row (a member without a pad, too).
-/// Everything else is `None`, which the scheduler treats as "no groove".
+/// drum rack's `(members, config)` and the project groove `pool` the racks
+/// reference. Every member of a rack with an active, well-formed groove gets
+/// an entry: its pad's own row when the groove has one for the pad's note,
+/// else the shared row (a member without a pad, too). Everything else is
+/// `None`, which the scheduler treats as "no groove".
 pub fn track_groove_snapshots<'a>(
     racks: impl IntoIterator<Item = (&'a [usize], &'a ProjectRackConfig)>,
+    pool: &[ProjectGroove],
     num_tracks: usize,
 ) -> Vec<Option<TrackGrooveSnapshot>> {
     let mut out = vec![None; num_tracks];
     for (members, rack) in racks {
-        let Some(groove) = rack.resolved_active_groove() else {
+        let Some(groove) = rack.active_groove(pool) else {
             continue;
         };
         if !groove.is_well_formed() {

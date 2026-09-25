@@ -694,7 +694,7 @@ fn sync_rack_pad_map(
 ) {
     *track_groups.lock().unwrap() = app.groups.clone();
     let rt = editor.runtime_mut();
-    sync_groups_bindings(rt, &app.groups);
+    sync_groups_bindings(rt, &app.groups, &app.grooves);
     // Clip bank edits (create/rename/delete/convert/launch) do not bump the
     // pattern epoch, so the clip run's source is republished here explicitly.
     sync_rack_clip_state(rt, &app.state);
@@ -754,7 +754,7 @@ pub(super) fn sync_after_rack_structure_change(
         &ctx.shared.record_armed,
         &ctx.meters.cached_track_peak_levels,
     );
-    sync_groups_bindings(rt, &app.groups);
+    sync_groups_bindings(rt, &app.groups, &app.grooves);
     sync_bus_mixer_state(rt, app);
     sync_bus_peak_fields(rt, &ctx.meters.cached_bus_peak_levels);
     sync_modulator_phase_fields(rt, &ctx.meters.cached_modulator_phases);

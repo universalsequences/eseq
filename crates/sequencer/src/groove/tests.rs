@@ -650,7 +650,7 @@ fn settings_default_to_timing_only_and_sanitize_into_range() {
     assert!(settings.is_default());
 
     let mut wild = RackGrooveSettings {
-        active: Some(GrooveRef::Builtin("mpc-16-62".to_string())),
+        active: Some(7),
         timing_amount: 9.0,
         velocity_amount: -1.0,
         random_amount: f32::NAN,
@@ -888,50 +888,90 @@ fn max_early_beats_bounds_every_applied_offset() {
     );
 }
 
-/// The built-in MPC swings are two-slot grooves that delay exactly what
-/// track swing delays at the same percentage and resolution.
+/// The MPC swings (factory library content) are two-slot grooves that delay
+/// exactly what track swing delays at the same percentage and resolution.
 #[test]
-fn builtin_mpc_swings_match_track_swing_delays() {
-    let ids: Vec<&str> = builtin_grooves().iter().map(|b| b.id.as_str()).collect();
-    assert_eq!(ids.len(), 2 * BUILTIN_MPC_SWING_PERCENTS.len());
-    assert!(ids.contains(&"mpc-16-58"));
-    assert!(ids.contains(&"mpc-8-66"));
-    assert!(builtin_groove("mpc-16-99").is_none());
+fn mpc_swings_match_track_swing_delays() {
     let samples_per_quarter = 24_000.0;
-    for builtin in builtin_grooves() {
-        let groove = &builtin.groove;
-        assert!(groove.is_well_formed(), "{}", builtin.id);
-        assert!(groove.pad_rows.is_empty());
-        assert_eq!(groove.slot_count(), 2);
-        let percent: u32 = builtin.id.rsplit('-').next().unwrap().parse().unwrap();
-        let snapshot = TrackGrooveSnapshot {
-            period_beats: groove.period_beats,
-            resolution_beats: groove.resolution_beats,
-            row: std::sync::Arc::new(groove.shared_row.clone()),
-            timing_amount: 1.0,
-            velocity_amount: 0.0,
-            random_amount: 0.0,
-            pad_note: 0,
-        };
-        let res = groove.resolution_beats;
-        let swing = (((percent as f64 / 100.0) - 0.5) * 2.0 * res * samples_per_quarter).round();
-        for bucket in 0..8u64 {
-            let beats = bucket as f64 * res;
-            let expected = if bucket % 2 == 1 { swing as u64 } else { 0 };
-            assert_eq!(
-                groove_offset_samples(&snapshot, beats, samples_per_quarter),
-                expected as i64,
-                "{} bucket {bucket}",
-                builtin.id
-            );
+    for resolution in MPC_SWING_RESOLUTIONS {
+        for percent in MPC_SWING_PERCENTS {
+            let groove = mpc_swing_groove(percent, resolution);
+            let stem = mpc_swing_file_stem(percent, resolution);
+            assert!(groove.is_well_formed(), "{stem}");
+            assert!(groove.pad_rows.is_empty());
+            assert_eq!(groove.slot_count(), 2);
+            let snapshot = TrackGrooveSnapshot {
+                period_beats: groove.period_beats,
+                resolution_beats: groove.resolution_beats,
+                row: std::sync::Arc::new(groove.shared_row.clone()),
+                timing_amount: 1.0,
+                velocity_amount: 0.0,
+                random_amount: 0.0,
+                pad_note: 0,
+            };
+            let res = groove.resolution_beats;
+            let swing =
+                (((percent as f64 / 100.0) - 0.5) * 2.0 * res * samples_per_quarter).round();
+            for bucket in 0..8u64 {
+                let beats = bucket as f64 * res;
+                let expected = if bucket % 2 == 1 { swing as u64 } else { 0 };
+                assert_eq!(
+                    groove_offset_samples(&snapshot, beats, samples_per_quarter),
+                    expected as i64,
+                    "{stem} bucket {bucket}"
+                );
+            }
+        }
+    }
+    assert_eq!(mpc_swing_file_stem(58, 0.25), "mpc-swing-58-16th");
+    assert_eq!(mpc_swing_file_stem(66, 0.5), "mpc-swing-66-8th");
+}
+
+/// The rev-1 built-in MPC swings are factory library files now: every file
+/// in `content/grooves/mpc-swing-*` is exactly the generator's output, and
+/// every generated swing ships.
+#[test]
+fn factory_mpc_swing_files_match_the_generator() {
+    let factory = crate::app_paths::app_paths().grooves_dir();
+    let listed = library::list_groove_library_in(&factory, &factory.join("no-user-tier"));
+    for resolution in MPC_SWING_RESOLUTIONS {
+        for percent in MPC_SWING_PERCENTS {
+            let stem = mpc_swing_file_stem(percent, resolution);
+            let entry = listed
+                .iter()
+                .find(|entry| entry.stem == stem)
+                .unwrap_or_else(|| panic!("factory groove {stem} is missing"));
+            assert_eq!(entry.tier, GrooveLibraryTier::Factory);
+            let groove = library::read_groove_file(&entry.path).expect("factory file reads");
+            assert_eq!(groove, mpc_swing_groove(percent, resolution), "{stem}");
+            assert_eq!(entry.name, groove.name);
         }
     }
 }
 
-/// The scheduler table: each member of a rack with an active groove gets its
-/// pad's row by pad note, else the shared row (also for a member with no
-/// pad); tracks outside racks, and racks with no (or a dangling) active
-/// groove, get `None`.
+/// Writes the factory MPC swing files from the generator. Run once after
+/// changing `mpc_swing_groove` (`--run-ignored only`), then commit them.
+#[test]
+#[ignore = "regenerates content/grooves; run explicitly"]
+fn regenerate_factory_mpc_swing_files() {
+    let factory = crate::app_paths::app_paths().grooves_dir();
+    std::fs::create_dir_all(&factory).expect("factory grooves dir");
+    for resolution in MPC_SWING_RESOLUTIONS {
+        for percent in MPC_SWING_PERCENTS {
+            let path = factory.join(format!(
+                "{}.{GROOVE_FILE_EXTENSION}",
+                mpc_swing_file_stem(percent, resolution)
+            ));
+            library::write_groove_file(&path, &mpc_swing_groove(percent, resolution))
+                .expect("write factory groove");
+        }
+    }
+}
+
+/// The scheduler table: each member of a rack with an active pool groove
+/// gets its pad's row by pad note, else the shared row (also for a member
+/// with no pad); tracks outside racks, and racks with no (or a dangling)
+/// active groove, get `None`.
 #[test]
 fn track_groove_snapshots_resolve_pad_rows_by_note_else_shared() {
     use crate::project::{ProjectRackConfig, ProjectRackPad};
@@ -953,18 +993,20 @@ fn track_groove_snapshots_resolve_pad_rows_by_note_else_shared() {
                 member: 1,
             },
         ],
-        grooves: vec![groove.clone()],
         groove: RackGrooveSettings {
-            active: Some(GrooveRef::Rack(7)),
+            active: Some(7),
             timing_amount: 0.75,
             velocity_amount: 0.5,
             random_amount: 0.25,
         },
         ..Default::default()
     };
+    let mut swing = mpc_swing_groove(66, 0.25);
+    swing.id = 3;
+    let pool = vec![swing, groove.clone()];
     // Members: track 3 = kick (36), track 1 = hat (42), track 4 = no pad.
     let members = vec![3usize, 1, 4];
-    let table = track_groove_snapshots([(members.as_slice(), &rack)], 6);
+    let table = track_groove_snapshots([(members.as_slice(), &rack)], &pool, 6);
     assert_eq!(table.len(), 6);
     for track in [0usize, 2, 5] {
         assert!(table[track].is_none(), "track {track} is outside the rack");
@@ -992,32 +1034,31 @@ fn track_groove_snapshots_resolve_pad_rows_by_note_else_shared() {
     let mut swapped = rack.clone();
     swapped.pads[0].pad_note = 42;
     swapped.pads[1].pad_note = 36;
-    let table = track_groove_snapshots([(members.as_slice(), &swapped)], 6);
+    let table = track_groove_snapshots([(members.as_slice(), &swapped)], &pool, 6);
     assert_eq!(*table[3].as_ref().unwrap().row, row_of(&[0.1, 0.3]));
     assert_eq!(*table[1].as_ref().unwrap().row, groove.shared_row);
 
-    // A built-in reference resolves to its shared row for every member.
-    let mut builtin = rack.clone();
-    builtin.groove.active = Some(GrooveRef::Builtin("mpc-16-66".to_string()));
-    let table = track_groove_snapshots([(members.as_slice(), &builtin)], 6);
-    let expected = builtin_groove("mpc-16-66").unwrap();
+    // A shared-row-only pool groove (an applied MPC swing) plays its shared
+    // row on every member.
+    let mut swing = rack.clone();
+    swing.groove.active = Some(3);
+    let table = track_groove_snapshots([(members.as_slice(), &swing)], &pool, 6);
     for track in [3usize, 1, 4] {
-        assert_eq!(*table[track].as_ref().unwrap().row, expected.shared_row);
+        assert_eq!(*table[track].as_ref().unwrap().row, pool[0].shared_row);
     }
 
-    // Off, dangling, or unknown built-in: nothing.
-    for active in [
-        None,
-        Some(GrooveRef::Rack(99)),
-        Some(GrooveRef::Builtin("nope".to_string())),
-    ] {
+    // Off, or an id not in the pool: nothing.
+    for active in [None, Some(99)] {
         let mut off = rack.clone();
         off.groove.active = active;
-        let table = track_groove_snapshots([(members.as_slice(), &off)], 6);
+        let table = track_groove_snapshots([(members.as_slice(), &off)], &pool, 6);
         assert!(table.iter().all(Option::is_none));
     }
+    // The same rack against an empty pool plays straight.
+    let table = track_groove_snapshots([(members.as_slice(), &rack)], &[], 6);
+    assert!(table.iter().all(Option::is_none));
     // A member index past the table is ignored rather than panicking.
-    let table = track_groove_snapshots([(&[9usize][..], &rack)], 6);
+    let table = track_groove_snapshots([(&[9usize][..], &rack)], &pool, 6);
     assert!(table.iter().all(Option::is_none));
 }
 
@@ -1052,81 +1093,98 @@ fn rack_with_pads(notes: &[i32]) -> crate::project::ProjectRackConfig {
     }
 }
 
-/// Importing grooves (a kit's, another rack's) appends them under the
-/// target's fresh ids, reuses an identical groove instead of duplicating it,
-/// skips malformed ones, and returns the id map.
+/// Copy-on-apply into the pool: a new groove takes the next pool id (the
+/// incoming id means nothing here), a groove with the same feel as a pool
+/// groove reuses it instead of duplicating, and a malformed one is refused.
 #[test]
-fn import_grooves_takes_fresh_ids_reuses_identical_and_skips_malformed() {
-    let mut rack = rack_with_pads(&[36, 42]);
-    rack.grooves = vec![two_slot_groove(1, "Own", 0.2, &[36])];
+fn import_into_pool_takes_fresh_ids_reuses_same_feel_and_skips_malformed() {
+    let mut pool = vec![two_slot_groove(1, "Own", 0.2, &[36])];
     let mut broken = two_slot_groove(5, "Broken", 0.1, &[]);
     broken.shared_row.slots.pop();
     let incoming = vec![
         two_slot_groove(1, "Dilla", 0.4, &[42]),
-        broken,
-        // Same feel as the rack's own groove, different id: reused.
+        broken.clone(),
+        // Same feel as the pool's own groove, different id: reused.
         two_slot_groove(9, "Own", 0.2, &[36]),
     ];
-    let map = import_grooves(&mut rack, &incoming);
+    let map = import_grooves(&mut pool, &incoming);
     assert_eq!(map, vec![(1, 2), (9, 1)], "fresh id for Dilla, Own reused");
-    assert_eq!(rack.grooves.len(), 2);
-    let dilla = rack.groove_by_id(2).expect("Dilla imported");
+    assert_eq!(pool.len(), 2);
+    let dilla = pool_groove(&pool, 2).expect("Dilla imported");
     assert_eq!(dilla.name, "Dilla");
     assert!(dilla.same_feel(&incoming[0]));
     assert_eq!(
-        rack.groove_by_id(1).unwrap().name,
+        pool_groove(&pool, 1).unwrap().name,
         "Own",
-        "the rack's own groove is untouched"
+        "the pool's own groove is untouched"
     );
+    assert_eq!(import_groove(&mut pool, &broken), None);
 
     // Importing the same set again changes nothing.
-    let again = import_grooves(&mut rack, &incoming);
+    let again = import_grooves(&mut pool, &incoming);
     assert_eq!(again, map);
-    assert_eq!(
-        rack.grooves.len(),
-        2,
-        "re-importing does not pile up copies"
-    );
+    assert_eq!(pool.len(), 2, "re-importing does not pile up copies");
+    // A renamed copy is a different groove (the name is part of the feel a
+    // user picks by), so it lands beside the original.
+    let mut renamed = two_slot_groove(9, "Own", 0.2, &[36]);
+    renamed.name = "Own (edit)".to_string();
+    assert_eq!(import_groove(&mut pool, &renamed), Some(3));
+    assert_eq!(next_pool_groove_id(&pool), 4);
+    assert_eq!(next_pool_groove_id(&[]), 1);
 }
 
-/// An incoming selection follows the import's id map; a reference to a
-/// groove that did not land (malformed, missing) becomes Off; built-ins pass
-/// through; amounts are sanitized.
+/// A kit's groove copy installs its amounts (sanitized) under the pool id
+/// its copy landed at; a rack's settings export as a copy of its active
+/// pool groove, or nothing when it plays none.
 #[test]
-fn install_groove_settings_remaps_the_selection_through_the_id_map() {
-    let mut rack = rack_with_pads(&[36]);
+fn kit_groove_copies_the_active_pool_groove_and_its_amounts() {
+    let pool = vec![
+        two_slot_groove(1, "Dilla", 0.2, &[36]),
+        two_slot_groove(4, "Madlib", 0.4, &[]),
+    ];
     let settings = RackGrooveSettings {
-        active: Some(GrooveRef::Rack(4)),
+        active: Some(4),
         timing_amount: 1.25,
-        velocity_amount: 9.0,
-        random_amount: 0.5,
+        velocity_amount: 0.5,
+        random_amount: 0.1,
     };
-    install_groove_settings(&mut rack, &settings, &[(1, 3), (4, 7)]);
-    assert_eq!(rack.groove.active, Some(GrooveRef::Rack(7)));
-    assert_eq!(rack.groove.timing_amount, 1.25);
+    let kit = KitGroove::from_rack(&settings, &pool).expect("an active groove travels");
+    assert_eq!(kit.groove, pool[1]);
+    assert_eq!(kit.timing_amount, 1.25);
     assert_eq!(
-        rack.groove.velocity_amount, GROOVE_VELOCITY_AMOUNT_MAX,
+        kit.settings(Some(7)),
+        RackGrooveSettings {
+            active: Some(7),
+            ..settings.clone()
+        }
+    );
+    let wild = KitGroove {
+        velocity_amount: 9.0,
+        ..kit.clone()
+    };
+    assert_eq!(
+        wild.settings(Some(2)).velocity_amount,
+        GROOVE_VELOCITY_AMOUNT_MAX,
         "sanitized"
     );
-    assert_eq!(rack.groove.random_amount, 0.5);
 
-    install_groove_settings(&mut rack, &settings, &[(1, 3)]);
-    assert_eq!(
-        rack.groove.active, None,
-        "the referenced groove did not land"
-    );
-
-    let builtin = RackGrooveSettings {
-        active: Some(GrooveRef::Builtin("mpc-16-58".to_string())),
-        ..RackGrooveSettings::default()
+    assert!(KitGroove::from_rack(&RackGrooveSettings::default(), &pool).is_none());
+    let dangling = RackGrooveSettings {
+        active: Some(99),
+        ..settings
     };
-    install_groove_settings(&mut rack, &builtin, &[]);
-    assert_eq!(rack.groove, builtin);
+    assert!(KitGroove::from_rack(&dangling, &pool).is_none());
+    assert_eq!(
+        legacy_builtin_groove("mpc-8-54"),
+        Some(mpc_swing_groove(54, 0.5))
+    );
+    assert_eq!(legacy_builtin_groove("mpc-16-99"), None);
+    assert_eq!(legacy_builtin_groove("swing"), None);
 }
 
-/// Cross-rack application: a groove extracted on one rack, copied to a rack
-/// with a different pad set, plays each target pad through the source row of
-/// the SAME pad note and every other pad through the shared row.
+/// Cross-kit application: a pool groove extracted on one rack, applied to a
+/// rack with a different pad set, plays each target pad through the source
+/// row of the SAME pad note and every other pad through the shared row.
 #[test]
 fn a_copied_groove_maps_target_pads_by_note_and_falls_back_to_shared() {
     let groove = two_slot_groove(3, "Take", 0.25, &[36, 42]);
@@ -1136,11 +1194,11 @@ fn a_copied_groove_maps_target_pads_by_note_and_falls_back_to_shared() {
         target.groove_row_mapping(&groove),
         vec![GrooveRowChoice::Pad, GrooveRowChoice::Shared]
     );
-    let map = import_grooves(&mut target, std::slice::from_ref(&groove));
-    let (_, id) = map[0];
-    target.groove.active = Some(GrooveRef::Rack(id));
+    let mut pool = Vec::new();
+    let id = import_groove(&mut pool, &groove).expect("groove lands in the pool");
+    target.groove.active = Some(id);
     let members = vec![5usize, 2];
-    let table = track_groove_snapshots([(members.as_slice(), &target)], 6);
+    let table = track_groove_snapshots([(members.as_slice(), &target)], &pool, 6);
     assert_eq!(
         *table[5].as_ref().expect("hat grooved").row,
         *groove.pad_row(42).unwrap(),
@@ -1348,14 +1406,168 @@ fn random_amount_jitters_by_spread_reproducibly_and_varies_bar_to_bar() {
 
 #[test]
 fn picker_keys_round_trip_and_reject_unknown_grooves() {
-    for groove in [GrooveRef::Rack(7), GrooveRef::Builtin("mpc-16-58".to_string())] {
-        assert_eq!(GrooveRef::from_picker_key(&groove.picker_key()), Ok(Some(groove)));
+    for choice in [
+        GrooveChoice::Off,
+        GrooveChoice::Pool(7),
+        GrooveChoice::Library {
+            tier: GrooveLibraryTier::Factory,
+            stem: "mpc-swing-58-16th".to_string(),
+        },
+        GrooveChoice::Library {
+            tier: GrooveLibraryTier::User,
+            stem: "Dilla-take".to_string(),
+        },
+    ] {
+        assert_eq!(
+            GrooveChoice::from_picker_key(&choice.picker_key()),
+            Ok(choice)
+        );
     }
-    assert_eq!(GrooveRef::from_picker_key("off"), Ok(None));
-    assert_eq!(GrooveRef::from_picker_key(""), Ok(None));
-    assert!(GrooveRef::from_picker_key("builtin:mpc-16-99").is_err());
-    assert!(GrooveRef::from_picker_key("rack:x").is_err());
-    assert!(GrooveRef::from_picker_key("swing").is_err());
+    assert_eq!(GrooveChoice::Pool(7).picker_key(), "pool:7");
+    assert_eq!(GrooveChoice::from_picker_key(""), Ok(GrooveChoice::Off));
+    for bad in [
+        "pool:x",
+        "swing",
+        "rack:1",
+        "builtin:mpc-16-58",
+        "user:",
+        "user:../x",
+        "factory:a/b",
+    ] {
+        assert!(GrooveChoice::from_picker_key(bad).is_err(), "{bad}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Groove library (eseq-groove.9)
+// ---------------------------------------------------------------------------
+
+fn write(path: &std::path::Path, groove: &ProjectGroove) {
+    library::write_groove_file(path, groove).expect("write groove file");
+}
+
+/// A `.groove` file is a versioned `ProjectGroove` without `id`: it round
+/// trips everything but the id, is named by its stem when it sets no name,
+/// and a newer generation or malformed grid is refused.
+#[test]
+fn groove_file_round_trips_without_id_and_refuses_newer_or_malformed_files() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let groove = two_slot_groove(42, "Dilla Pocket", 0.2, &[36, 42]);
+    let path = dir.path().join("dilla.groove");
+    write(&path, &groove);
+    let json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(json["groove_version"], GROOVE_FILE_VERSION);
+    assert!(json.get("id").is_none(), "ids are pool-local: {json}");
+    let read = library::read_groove_file(&path).expect("read back");
+    assert_eq!(read.id, 0);
+    assert!(read.same_feel(&groove), "everything but the id round-trips");
+
+    // No name: the file stem names it.
+    let mut unnamed = json.clone();
+    unnamed.as_object_mut().unwrap().remove("name");
+    unnamed.as_object_mut().unwrap().remove("groove_version");
+    let stem_path = dir.path().join("Stem-Name.groove");
+    std::fs::write(&stem_path, unnamed.to_string()).unwrap();
+    assert_eq!(
+        library::read_groove_file(&stem_path).unwrap().name,
+        "Stem-Name"
+    );
+
+    let mut newer = json.clone();
+    newer["groove_version"] = serde_json::json!(GROOVE_FILE_VERSION + 1);
+    std::fs::write(&path, newer.to_string()).unwrap();
+    assert!(library::read_groove_file(&path).is_err());
+    let mut broken = json;
+    broken["shared_row"]["slots"] = serde_json::json!([]);
+    std::fs::write(&path, broken.to_string()).unwrap();
+    assert!(library::read_groove_file(&path).is_err());
+    let mut malformed = groove.clone();
+    malformed.resolution_beats = 0.3;
+    assert!(library::write_groove_file(&path, &malformed).is_err());
+}
+
+/// The library lists factory files first, then user files, each sorted,
+/// skipping anything that is not a valid `.groove`; a missing tier is empty.
+/// Save never overwrites, rename moves the file and its name, delete removes
+/// it, and loading goes by tier + stem.
+#[test]
+fn library_lists_factory_then_user_and_edits_only_user_files() {
+    let factory = tempfile::tempdir().expect("factory dir");
+    let user_root = tempfile::tempdir().expect("user dir");
+    let user = user_root.path().join("grooves");
+    write(
+        &factory.path().join("b-swing.groove"),
+        &mpc_swing_groove(58, 0.25),
+    );
+    write(
+        &factory.path().join("a-swing.groove"),
+        &mpc_swing_groove(66, 0.5),
+    );
+    std::fs::write(factory.path().join("junk.groove"), "not json").unwrap();
+    std::fs::write(factory.path().join("notes.txt"), "ignored").unwrap();
+    assert!(
+        library::list_groove_library_in(factory.path(), &user)
+            .iter()
+            .all(|entry| entry.tier == GrooveLibraryTier::Factory),
+        "a missing user tier is empty"
+    );
+
+    let take = two_slot_groove(3, "Dilla Take", 0.2, &[36]);
+    let saved = library::save_groove_to_library_in(&user, "Dilla Take", &take).expect("save");
+    assert_eq!(saved.file_name().unwrap(), "Dilla-Take.groove");
+    let again = library::save_groove_to_library_in(&user, "Dilla Take", &take).expect("save again");
+    assert_eq!(
+        again.file_name().unwrap(),
+        "Dilla-Take-2.groove",
+        "a save never overwrites"
+    );
+    assert!(library::save_groove_to_library_in(&user, "  ", &take).is_err());
+
+    let listed = library::list_groove_library_in(factory.path(), &user);
+    let names = listed
+        .iter()
+        .map(|entry| (entry.tier, entry.stem.as_str(), entry.name.as_str()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        names,
+        vec![
+            (GrooveLibraryTier::Factory, "a-swing", "MPC 8 Swing 66%"),
+            (GrooveLibraryTier::Factory, "b-swing", "MPC 16 Swing 58%"),
+            (GrooveLibraryTier::User, "Dilla-Take", "Dilla Take"),
+            (GrooveLibraryTier::User, "Dilla-Take-2", "Dilla Take"),
+        ],
+        "factory first, then user; junk skipped"
+    );
+    assert_eq!(listed[2].choice().picker_key(), "user:Dilla-Take");
+    let loaded = library::load_library_groove_in(
+        factory.path(),
+        &user,
+        GrooveLibraryTier::User,
+        "Dilla-Take",
+    )
+    .expect("load by stem");
+    assert!(loaded.same_feel(&take));
+    assert!(library::load_library_groove_in(
+        factory.path(),
+        &user,
+        GrooveLibraryTier::Factory,
+        "../grooves/Dilla-Take",
+    )
+    .is_err());
+
+    let renamed =
+        library::rename_library_groove_in(&user, "Dilla-Take-2", "Madlib").expect("rename");
+    assert_eq!(renamed.file_name().unwrap(), "Madlib.groove");
+    assert!(!user.join("Dilla-Take-2.groove").exists());
+    assert_eq!(library::read_groove_file(&renamed).unwrap().name, "Madlib");
+    library::delete_library_groove_in(&user, "Madlib").expect("delete");
+    let stems = library::list_groove_library_in(factory.path(), &user)
+        .into_iter()
+        .map(|entry| entry.stem)
+        .collect::<Vec<_>>();
+    assert_eq!(stems, vec!["a-swing", "b-swing", "Dilla-Take"]);
+    assert!(library::delete_library_groove_in(&user, "Madlib").is_err());
 }
 
 // ---------------------------------------------------------------------------

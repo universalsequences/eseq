@@ -7312,14 +7312,15 @@ mod tests {
         graph.process_block();
     }
 
-    /// Rack grooves (docs/rack-groove-spec.md, eseq-groove.1): "Extract
+    /// Rack grooves (docs/rack-groove-spec.md, eseq-groove.1/.9): "Extract
     /// Groove" with "Quantize source" straightens every source member (step
-    /// Delay, chord delays, swing), adds the groove to the rack and activates
-    /// it, and ONE undo restores all of it; redo re-applies all of it.
+    /// Delay, chord delays, swing), adds the groove to the PROJECT POOL and
+    /// activates it on the rack, and ONE undo restores all of it; redo
+    /// re-applies all of it.
     #[test]
     fn extract_groove_with_quantize_source_is_one_undo_step() {
         use crate::app::rack_grooves::RackGrooveExtractRequest;
-        use crate::groove::{GrooveExtractOptions, GrooveRef, GrooveSlotSource};
+        use crate::groove::{GrooveExtractOptions, GrooveSlotSource};
         use crate::sequencer::StepParam;
 
         let graph = TestLiveGraph::new("drum-rack-groove-extract-test", 64, 44_100, 2);
@@ -7379,9 +7380,9 @@ mod tests {
             let kick_data = read(app, kick);
             let hat_data = read(app, hat);
             let rack = rack(app);
-            assert_eq!(rack.grooves.len(), 1);
-            assert_eq!(rack.groove.active, Some(GrooveRef::Rack(groove_id)));
-            let groove = rack.active_rack_groove().expect("active groove");
+            assert_eq!(app.grooves.len(), 1, "the groove is in the project pool");
+            assert_eq!(rack.groove.active, Some(groove_id));
+            let groove = rack.active_groove(&app.grooves).expect("active groove");
             assert_eq!(groove.name, "Take");
             let kick_row = groove.pad_row(36).expect("kick row");
             assert_eq!(kick_row.slots[4].source, GrooveSlotSource::Measured);
@@ -7405,7 +7406,7 @@ mod tests {
         ));
         assert_eq!(app.history.undo_len(), undo_len);
         let rack_after_undo = rack(&app);
-        assert!(rack_after_undo.grooves.is_empty(), "the groove is gone");
+        assert!(app.grooves.is_empty(), "the groove is gone from the pool");
         assert_eq!(rack_after_undo.groove.active, None);
         let kick_data = read(&mut app, kick);
         assert_eq!(kick_data.track_bits[0] & 0b1_1111, 0b0_1001, "kick back on step 3");
@@ -7430,27 +7431,28 @@ mod tests {
             })
             .expect("second groove");
         assert_ne!(second, groove_id);
-        assert_eq!(rack(&app).grooves.len(), 2);
-        assert_eq!(rack(&app).groove.active, Some(GrooveRef::Rack(groove_id)));
-        app.set_rack_active_groove_recorded(group_id, Some(GrooveRef::Rack(second)))
+        assert_eq!(app.grooves.len(), 2);
+        assert_eq!(rack(&app).groove.active, Some(groove_id));
+        app.set_rack_active_groove_recorded(group_id, Some(second))
             .expect("pick the second groove");
-        assert!(app.set_rack_active_groove_recorded(group_id, Some(GrooveRef::Rack(99))).is_err());
+        assert!(app.set_rack_active_groove_recorded(group_id, Some(99)).is_err());
         assert!(matches!(
             crate::app::edit::undo(&mut app),
             crate::app::history::HistoryReplay::Applied(_)
         ));
-        assert_eq!(rack(&app).groove.active, Some(GrooveRef::Rack(groove_id)));
+        assert_eq!(rack(&app).groove.active, Some(groove_id));
         graph.process_block();
     }
 
-    /// Rack grooves reach the scheduler (eseq-groove.2): picking a groove on
-    /// a rack publishes a per-member groove table into the scheduler
-    /// snapshot (pad row by pad note, else the shared row), a built-in
-    /// resolves to its shared row, pad-note edits move the rows, and turning
-    /// the groove off (or undoing the pick) clears every entry.
+    /// Rack grooves reach the scheduler (eseq-groove.2/.9): picking a pool
+    /// groove on a rack publishes a per-member groove table into the
+    /// scheduler snapshot (pad row by pad note, else the shared row), an
+    /// applied factory MPC swing resolves to its shared row, pad-note edits
+    /// move the rows, and turning the groove off (or undoing the pick) clears
+    /// every entry.
     #[test]
     fn rack_groove_selection_publishes_the_scheduler_groove_table() {
-        use crate::groove::{builtin_groove, mpc_swing_groove, GroovePadRow, GrooveRef, GrooveRow, GrooveSlot};
+        use crate::groove::{mpc_swing_groove, GroovePadRow, GrooveRow, GrooveSlot};
 
         let graph = TestLiveGraph::new("drum-rack-groove-publish-test", 64, 44_100, 2);
         let mut app = test_app_for_live_graph(&graph, 0);
@@ -7474,10 +7476,9 @@ mod tests {
         groove.id = 1;
         groove.name = "Pocket".to_string();
         groove.pad_rows = vec![GroovePadRow { pad_note: 42, row: hat_row.clone() }];
-        let rack_index = app.groups.iter().position(|g| g.id == group_id).expect("rack group");
-        app.groups[rack_index].rack.as_mut().expect("rack").grooves.push(groove.clone());
+        app.grooves.push(groove.clone());
 
-        app.set_rack_active_groove_recorded(group_id, Some(GrooveRef::Rack(1)))
+        app.set_rack_active_groove_recorded(group_id, Some(1))
             .expect("pick the rack groove");
         let grooves = table(&app);
         let kick_groove = grooves[kick].as_ref().expect("kick member grooved");
@@ -7503,9 +7504,12 @@ mod tests {
         ));
         assert_eq!(*table(&app)[hat].as_ref().unwrap().row, hat_row);
 
-        app.set_rack_active_groove_recorded(group_id, Some(GrooveRef::Builtin("mpc-16-66".to_string())))
-            .expect("pick a built-in");
-        let expected = &builtin_groove("mpc-16-66").unwrap().shared_row;
+        let swing = mpc_swing_groove(66, 0.25);
+        let swing_id = app
+            .apply_library_groove_recorded(group_id, &swing)
+            .expect("apply a factory swing");
+        assert_eq!(swing_id, 2, "copied into the pool");
+        let expected = &swing.shared_row;
         let grooves = table(&app);
         assert_eq!(&*grooves[kick].as_ref().unwrap().row, expected);
         assert_eq!(&*grooves[hat].as_ref().unwrap().row, expected);
@@ -7516,7 +7520,7 @@ mod tests {
             crate::app::edit::undo(&mut app),
             crate::app::history::HistoryReplay::Applied(_)
         ));
-        assert!(table(&app)[hat].is_some(), "undo restores the built-in");
+        assert!(table(&app)[hat].is_some(), "undo restores the swing");
         assert!(matches!(
             crate::app::edit::undo(&mut app),
             crate::app::history::HistoryReplay::Applied(_)
@@ -7551,16 +7555,17 @@ mod tests {
         groove
     }
 
-    /// Kit presets carry grooves (eseq-groove.7, kit version 5): a saved kit
-    /// brings the rack's groove list and selection; loading it as a new rack
-    /// installs them (selection re-pointed to the new ids) and publishes the
-    /// scheduler table; auditioning it onto a rack ADDS the kit's grooves
-    /// beside the rack's own (no duplicates on re-audition) and takes the
-    /// kit's selection, in the audition's one undo step; a pre-groove kit
-    /// leaves the target rack's grooves alone.
+    /// Kit presets carry grooves (eseq-groove.7/.9, kit version 6): a saved
+    /// kit brings a COPY of the rack's active pool groove plus its amounts.
+    /// Loading it as a new rack imports the copy into the pool through the
+    /// copy-on-apply dedupe (an identical pool groove is reused) and plays
+    /// it; auditioning it onto a rack re-points that rack (no duplicates on
+    /// re-audition) in the audition's one undo step; a pre-groove kit leaves
+    /// the target rack's selection alone. A v5 kit (rev-1 list + selection)
+    /// imports its selected groove only.
     #[test]
-    fn a_kit_carries_its_rack_grooves() {
-        use crate::groove::GrooveRef;
+    fn a_kit_carries_a_copy_of_its_active_groove() {
+        use crate::project::KitGrooveField;
 
         let graph = TestLiveGraph::new("drum-rack-kit-grooves-test", 64, 44_100, 2);
         let mut app = test_app_for_live_graph(&graph, 0);
@@ -7575,16 +7580,15 @@ mod tests {
         let dilla = two_slot_test_groove(3, "Dilla", 0.2, &[42]);
         let madlib = two_slot_test_groove(8, "Madlib", 0.4, &[36, 42]);
         let settings = crate::groove::RackGrooveSettings {
-            active: Some(GrooveRef::Rack(8)),
+            active: Some(8),
             timing_amount: 1.25,
             velocity_amount: 0.0,
             random_amount: 0.0,
         };
+        app.grooves = vec![dilla.clone(), madlib.clone()];
         {
             let rack_index = app.groups.iter().position(|g| g.id == group_id).expect("rack");
-            let rack = app.groups[rack_index].rack.as_mut().expect("rack config");
-            rack.grooves = vec![dilla.clone(), madlib.clone()];
-            rack.groove = settings.clone();
+            app.groups[rack_index].rack.as_mut().expect("rack config").groove = settings.clone();
         }
 
         let (kit, _) = app
@@ -7592,8 +7596,12 @@ mod tests {
             .expect("rack should capture as a kit");
         assert_eq!(kit.kit_version, crate::project::KIT_PRESET_VERSION);
         assert!(kit.carries_grooves());
-        assert_eq!(kit.grooves, vec![dilla.clone(), madlib.clone()]);
-        assert_eq!(kit.groove, settings);
+        let Some(KitGrooveField::Copy(copy)) = &kit.groove else {
+            panic!("a v6 kit carries a groove copy: {:?}", kit.groove);
+        };
+        assert_eq!(copy.groove, madlib, "only the active groove travels");
+        assert_eq!(copy.timing_amount, 1.25);
+        assert!(kit.legacy_grooves.is_empty());
 
         let directory = std::env::temp_dir().join(format!(
             "eseq-kit-grooves-{}-{:?}",
@@ -7604,20 +7612,18 @@ mod tests {
         let path = directory.join("Pocket-Kit.kit");
         std::fs::write(&path, serde_json::to_string(&kit).expect("serialize kit")).expect("write kit");
 
-        // Load as a NEW rack: the grooves are its list, re-id'd, and the
-        // selection follows Madlib to its new id.
+        // Load as a NEW rack: Madlib is already in the pool, so the copy is
+        // deduped onto it and the new rack plays it with the kit's amounts.
         let (loaded_id, failures) = app.load_kit_as_rack(&path).expect("kit should load");
         assert!(failures.is_empty(), "{failures:?}");
         let rack_of = |app: &App, id: u64| {
             app.groups.iter().find(|g| g.id == id).and_then(|g| g.rack.clone()).expect("rack")
         };
+        assert_eq!(app.grooves.len(), 2, "the identical pool groove is reused");
         let loaded = rack_of(&app, loaded_id);
-        assert_eq!(loaded.grooves.len(), 2);
-        assert!(loaded.grooves[0].same_feel(&dilla));
-        assert!(loaded.grooves[1].same_feel(&madlib));
-        let madlib_id = loaded.grooves[1].id;
-        assert_eq!(loaded.groove.active, Some(GrooveRef::Rack(madlib_id)));
+        assert_eq!(loaded.groove.active, Some(8));
         assert_eq!(loaded.groove.timing_amount, 1.25);
+        assert_eq!(app.racks_using_groove(8), vec![group_id, loaded_id]);
         let loaded_group = app.groups.iter().find(|g| g.id == loaded_id).unwrap().clone();
         let loaded_hat = loaded_group.rack_pad_track(42).expect("loaded hat");
         let loaded_kick = loaded_group.rack_pad_track(36).expect("loaded kick");
@@ -7626,37 +7632,36 @@ mod tests {
         assert_eq!(*table[loaded_kick].as_ref().expect("kick grooved").row, *madlib.pad_row(36).unwrap());
         assert_eq!(table[loaded_hat].as_ref().unwrap().timing_amount, 1.25);
 
+        // In a fresh project (no pool), the kit's copy lands as a new pool
+        // groove.
+        app.grooves.clear();
+        let (fresh_id, _) = app.load_kit_as_rack(&path).expect("kit loads into an empty pool");
+        assert_eq!(app.grooves.len(), 1);
+        assert!(app.grooves[0].same_feel(&madlib));
+        assert_eq!(rack_of(&app, fresh_id).groove.active, Some(app.grooves[0].id));
+        app.grooves = vec![dilla.clone(), madlib.clone()];
+
         // Audition onto another rack that has its own groove playing.
         let (other_id, _) = app
             .create_drum_rack_recorded(Some("Other".to_string()))
             .expect("second rack");
         let other_member = app.graph_controller().add_track(sample).expect("other member");
         app.assign_rack_pad_track_recorded(other_id, 36, other_member).expect("other pad");
-        let own = two_slot_test_groove(1, "Own", 0.1, &[]);
-        {
-            let rack_index = app.groups.iter().position(|g| g.id == other_id).expect("rack");
-            app.groups[rack_index].rack.as_mut().unwrap().grooves = vec![own.clone()];
-        }
-        app.set_rack_active_groove_recorded(other_id, Some(GrooveRef::Rack(1)))
+        let own = two_slot_test_groove(20, "Own", 0.1, &[]);
+        app.grooves.push(own.clone());
+        app.set_rack_active_groove_recorded(other_id, Some(20))
             .expect("pick own groove");
         let before_audition = rack_of(&app, other_id);
+        let pool_before = app.grooves.clone();
 
         app.load_kit_onto_rack(other_id, &path).expect("kit auditions onto the other rack");
         let other = rack_of(&app, other_id);
-        assert_eq!(other.grooves.len(), 3, "own groove kept, kit grooves added");
-        assert_eq!(other.grooves[0], own);
-        let madlib_there = other
-            .grooves
-            .iter()
-            .find(|g| g.same_feel(&madlib))
-            .expect("Madlib added")
-            .id;
-        assert_ne!(madlib_there, 1, "no id collision with the rack's own");
-        assert_eq!(other.groove.active, Some(GrooveRef::Rack(madlib_there)), "kit selection wins");
+        assert_eq!(app.grooves, pool_before, "Madlib is reused; the rack's old groove stays in the pool");
+        assert_eq!(other.groove.active, Some(8), "kit selection wins");
         assert_eq!(other.groove.timing_amount, 1.25);
-        // Auditioning the same kit again does not duplicate its grooves.
+        // Auditioning the same kit again does not duplicate its groove.
         app.load_kit_onto_rack(other_id, &path).expect("audition again");
-        assert_eq!(rack_of(&app, other_id).grooves.len(), 3);
+        assert_eq!(app.grooves.len(), pool_before.len());
         assert!(matches!(
             crate::app::edit::undo(&mut app),
             crate::app::history::HistoryReplay::Applied(_)
@@ -7666,39 +7671,58 @@ mod tests {
             crate::app::history::HistoryReplay::Applied(_)
         ));
         let restored = rack_of(&app, other_id);
-        assert_eq!(restored.grooves, before_audition.grooves, "undo restores the rack's own list");
-        assert_eq!(restored.groove, before_audition.groove, "... and its selection");
+        assert_eq!(restored.groove, before_audition.groove, "undo restores the selection");
+        assert_eq!(app.grooves, pool_before);
 
-        // A kit written before grooves travelled (version 4, no groove keys)
-        // says nothing about grooves: the rack keeps its own.
+        // A kit written before grooves travelled (version 4, no groove key)
+        // says nothing about grooves: the rack keeps its selection.
         let mut old_kit = serde_json::to_value(&kit).expect("kit json");
         let object = old_kit.as_object_mut().expect("kit object");
-        object.remove("grooves");
         object.remove("groove");
         object.insert("kit_version".to_string(), serde_json::json!(4));
         let old_path = directory.join("Old-Kit.kit");
         std::fs::write(&old_path, old_kit.to_string()).expect("write old kit");
         app.load_kit_onto_rack(other_id, &old_path).expect("old kit auditions");
-        let after_old = rack_of(&app, other_id);
-        assert_eq!(after_old.grooves, before_audition.grooves);
-        assert_eq!(after_old.groove, before_audition.groove);
+        assert_eq!(rack_of(&app, other_id).groove, before_audition.groove);
         let (old_loaded, _) = app.load_kit_as_rack(&old_path).expect("old kit loads");
-        let old_rack = rack_of(&app, old_loaded);
-        assert!(old_rack.grooves.is_empty());
-        assert_eq!(old_rack.groove, crate::groove::RackGrooveSettings::default());
+        assert_eq!(rack_of(&app, old_loaded).groove, crate::groove::RackGrooveSettings::default());
+
+        // A v5 kit (rev 1: the rack's whole list + a selection into it)
+        // imports its SELECTED groove only.
+        let mut v5 = old_kit.clone();
+        let object = v5.as_object_mut().expect("kit object");
+        object.insert("kit_version".to_string(), serde_json::json!(5));
+        let take = two_slot_test_groove(1, "Take", 0.3, &[36]);
+        let unused = two_slot_test_groove(2, "Unused", 0.35, &[]);
+        object.insert("grooves".to_string(), serde_json::to_value(vec![&unused, &take]).unwrap());
+        object.insert(
+            "groove".to_string(),
+            serde_json::json!({"active": {"rack": 1}, "timing_amount": 0.75}),
+        );
+        let v5_path = directory.join("V5-Kit.kit");
+        std::fs::write(&v5_path, v5.to_string()).expect("write v5 kit");
+        let pool_len = app.grooves.len();
+        let (v5_loaded, failures) = app.load_kit_as_rack(&v5_path).expect("v5 kit loads");
+        assert!(failures.is_empty(), "{failures:?}");
+        assert_eq!(app.grooves.len(), pool_len + 1, "only the selected groove is imported");
+        let imported = app.grooves.last().unwrap().clone();
+        assert!(imported.same_feel(&take));
+        assert!(!app.grooves.iter().any(|g| g.same_feel(&unused)));
+        let v5_rack = rack_of(&app, v5_loaded);
+        assert_eq!(v5_rack.groove.active, Some(imported.id));
+        assert_eq!(v5_rack.groove.timing_amount, 0.75);
 
         std::fs::remove_dir_all(&directory).expect("clean kit test directory");
         graph.process_block();
     }
 
-    /// Cross-rack groove application (eseq-groove.7): picking rack A's groove
-    /// on rack B copies it into B's list and activates it as one undo step.
-    /// B's pads map by pad note: a pad whose note has a row in the groove
-    /// plays it, every other pad the shared row. Re-applying reuses the copy;
-    /// applying on the source rack just activates it.
+    /// Cross-kit application through the pool (eseq-groove.7/.9): a pool
+    /// groove extracted on rack A plays on rack B by pad note (a pad whose
+    /// note has a row plays it, every other pad the shared row), and both
+    /// racks are its instances.
     #[test]
-    fn applying_another_racks_groove_maps_pad_rows_by_pad_note() {
-        use crate::groove::{GrooveRef, GrooveRowChoice};
+    fn a_pool_groove_on_another_rack_maps_pad_rows_by_pad_note() {
+        use crate::groove::GrooveRowChoice;
 
         let graph = TestLiveGraph::new("drum-rack-cross-groove-test", 64, 44_100, 2);
         let mut app = test_app_for_live_graph(&graph, 0);
@@ -7708,10 +7732,8 @@ mod tests {
         app.assign_rack_pad_track_recorded(source_id, 36, kick).expect("kick pad");
         app.assign_rack_pad_track_recorded(source_id, 42, hat).expect("hat pad");
         let take = two_slot_test_groove(5, "Take", 0.25, &[36, 42]);
-        {
-            let index = app.groups.iter().position(|g| g.id == source_id).unwrap();
-            app.groups[index].rack.as_mut().unwrap().grooves = vec![take.clone()];
-        }
+        app.grooves = vec![take.clone()];
+        app.set_rack_active_groove_recorded(source_id, Some(5)).expect("source plays it");
 
         let (target_id, _) = app.create_drum_rack_recorded(None).expect("target rack");
         let hat2 = app.graph_controller().add_blank_sampler_track().expect("hat 2");
@@ -7726,15 +7748,11 @@ mod tests {
             vec![GrooveRowChoice::Pad, GrooveRowChoice::Shared]
         );
         let table = |app: &App| app.state.latest_scheduler_snapshot().track_grooves.clone();
-        assert!(table(&app).iter().all(Option::is_none));
+        assert!(table(&app)[hat2].is_none() && table(&app)[snare].is_none());
 
-        let copied = app
-            .apply_rack_groove_from_rack_recorded(target_id, source_id, 5)
-            .expect("apply the source rack's groove");
-        let target = rack_of(&app, target_id);
-        assert_eq!(target.grooves.len(), 1);
-        assert!(target.grooves[0].same_feel(&take));
-        assert_eq!(target.groove.active, Some(GrooveRef::Rack(copied)));
+        app.set_rack_active_groove_recorded(target_id, Some(5)).expect("apply on the target");
+        assert_eq!(app.grooves, vec![take.clone()], "one pool groove, two instances");
+        assert_eq!(app.racks_using_groove(5), vec![source_id, target_id]);
         let grooves = table(&app);
         assert_eq!(
             *grooves[hat2].as_ref().expect("target hat grooved").row,
@@ -7746,51 +7764,148 @@ mod tests {
             take.shared_row,
             "no row for the snare's note: shared row"
         );
-        assert!(grooves[kick].is_none() && grooves[hat].is_none(), "the source rack is untouched");
-        assert_eq!(rack_of(&app, source_id).grooves, vec![take.clone()]);
-
-        // Re-applying reuses the copy and records no undo step.
-        let undo_len = app.history.undo_len();
-        assert_eq!(
-            app.apply_rack_groove_from_rack_recorded(target_id, source_id, 5).expect("again"),
-            copied
-        );
-        assert_eq!(rack_of(&app, target_id).grooves.len(), 1);
-        assert_eq!(app.history.undo_len(), undo_len);
-        assert!(app.apply_rack_groove_from_rack_recorded(target_id, source_id, 99).is_err());
-
-        // On the source rack itself it just activates.
-        assert_eq!(
-            app.apply_rack_groove_from_rack_recorded(source_id, source_id, 5).expect("self"),
-            5
-        );
-        assert_eq!(*table(&app)[hat].as_ref().unwrap().row, *take.pad_row(42).unwrap());
+        assert_eq!(*grooves[kick].as_ref().unwrap().row, *take.pad_row(36).unwrap());
+        assert!(app.set_rack_active_groove_recorded(target_id, Some(5)).is_err(), "unchanged");
+        assert!(app.set_rack_active_groove_recorded(target_id, Some(99)).is_err(), "not in the pool");
         assert!(matches!(
             crate::app::edit::undo(&mut app),
             crate::app::history::HistoryReplay::Applied(_)
         ));
-        assert!(table(&app)[hat].is_none());
-
-        // The re-apply recorded nothing, so one undo removes the copy.
-        assert!(matches!(
-            crate::app::edit::undo(&mut app),
-            crate::app::history::HistoryReplay::Applied(_)
-        ));
-        let target = rack_of(&app, target_id);
-        assert!(target.grooves.is_empty(), "one undo step per apply removes the copy");
-        assert_eq!(target.groove.active, None);
-        assert!(table(&app).iter().all(Option::is_none));
+        assert!(table(&app)[hat2].is_none());
+        assert!(table(&app)[hat].is_some(), "the source rack is untouched");
         graph.process_block();
     }
 
-    /// Rack groove UI edits (eseq-groove.4): rename and delete are one undo
-    /// step each, deleting the active groove turns the rack's groove off, and
-    /// an amount knob drag coalesces into ONE undo step when the gesture ends
-    /// while every drag frame reaches the scheduler's groove table at once.
+    /// Copy-on-apply (eseq-groove.9): applying a library groove imports it
+    /// into the project pool (reusing a pool groove with the same feel) and
+    /// activates it, as ONE undo step; re-applying records nothing. The
+    /// project then plays it without the library file: after the file is
+    /// deleted, a save/load round trip still plays the copy.
+    #[test]
+    fn copy_on_apply_dedupes_and_survives_deleting_the_library_file() {
+        use crate::groove::library;
+
+        // A real headless engine: the save/load round trip below rebuilds the
+        // bus graph.
+        let engine = crate::audio::engine::init_headless_engine(44_100, 2).expect("engine");
+        struct HeadlessGuard(LiveGraphPtr);
+        impl Drop for HeadlessGuard {
+            fn drop(&mut self) {
+                unsafe {
+                    crate::audiograph::engine_stop_workers();
+                    crate::audiograph::destroy_live_graph(self.0 .0);
+                }
+            }
+        }
+        let _guard = HeadlessGuard(engine.lg_ptr);
+        let mut app = App::new(
+            engine.state,
+            engine.lg_ptr,
+            engine.sample_rate,
+            engine.buses,
+            engine.master_recorder,
+            engine.keyboard_tx,
+        );
+        let process_block = || {
+            let mut output = [0.0_f32; 1024];
+            unsafe { engine.lg_ptr.process_next_block(output.as_mut_ptr(), 512) };
+        };
+        app.start_new_project();
+        let (group_id, _) = app.create_drum_rack_recorded(None).expect("rack");
+        let hat = app.graph_controller().add_blank_sampler_track().expect("hat");
+        app.assign_rack_pad_track_recorded(group_id, 42, hat).expect("hat pad");
+        let take = two_slot_test_groove(5, "Take", 0.25, &[42]);
+        app.grooves = vec![take.clone()];
+        let table = |app: &App| app.state.latest_scheduler_snapshot().track_grooves.clone();
+
+        let library_dir = tempfile::tempdir().expect("library dir");
+        let user = library_dir.path().join("grooves");
+        // "Save to Library" then apply back: the same feel dedupes onto the
+        // pool groove it came from.
+        library::save_groove_to_library_in(&user, "Take", &take).expect("save take");
+        let madlib = two_slot_test_groove(1, "Madlib", 0.4, &[42]);
+        let madlib_path = library::save_groove_to_library_in(&user, "Madlib", &madlib).expect("save madlib");
+        let load = |stem: &str| {
+            library::load_library_groove_in(
+                library_dir.path(),
+                &user,
+                crate::groove::GrooveLibraryTier::User,
+                stem,
+            )
+            .expect("load library groove")
+        };
+        let undo_len = app.history.undo_len();
+        assert_eq!(app.apply_library_groove_recorded(group_id, &load("Take")).expect("apply take"), 5);
+        assert_eq!(app.grooves.len(), 1, "deduped onto the pool groove");
+        assert_eq!(app.history.undo_len(), undo_len + 1);
+
+        let id = app.apply_library_groove_recorded(group_id, &load("Madlib")).expect("apply madlib");
+        assert_eq!(id, 6, "a new pool groove");
+        assert_eq!(app.grooves.len(), 2);
+        assert!(app.grooves[1].same_feel(&madlib));
+        assert_eq!(app.history.undo_len(), undo_len + 2, "one undo step per apply");
+        assert_eq!(*table(&app)[hat].as_ref().unwrap().row, *madlib.pad_row(42).unwrap());
+        assert_eq!(app.apply_library_groove_recorded(group_id, &load("Madlib")).unwrap(), 6);
+        assert_eq!(app.grooves.len(), 2, "re-applying does not duplicate");
+        assert_eq!(app.history.undo_len(), undo_len + 2, "and records nothing");
+
+        // Undo removes the copy and the selection together.
+        assert!(matches!(
+            crate::app::edit::undo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(app.grooves, vec![take.clone()]);
+        assert_eq!(rack_active(&app, group_id), Some(5));
+        assert!(matches!(
+            crate::app::edit::redo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(rack_active(&app, group_id), Some(6));
+
+        // The library file goes away; the project keeps playing its copy,
+        // through a save/load round trip too.
+        std::fs::remove_file(&madlib_path).expect("delete the library file");
+        assert_eq!(*table(&app)[hat].as_ref().unwrap().row, *madlib.pad_row(42).unwrap());
+        let project = app.capture_project("copy-on-apply").expect("capture project");
+        assert_eq!(project.grooves, app.grooves);
+        let project_path = library_dir.path().join("copy-on-apply.json");
+        std::fs::write(&project_path, serde_json::to_string(&project).unwrap()).unwrap();
+        app.start_new_project();
+        assert!(app.grooves.is_empty());
+        app.queue_project_load_from_path("copy-on-apply", &project_path).expect("queue load");
+        for _ in 0..100 {
+            if !app.has_pending_project_load() {
+                break;
+            }
+            app.advance_pending_project_load().expect("load step");
+            process_block();
+        }
+        assert!(!app.has_pending_project_load());
+        assert_eq!(app.grooves.len(), 2);
+        assert!(app.grooves[1].same_feel(&madlib));
+        let group = app.groups.iter().find(|g| g.rack.is_some()).expect("the rack reloads");
+        assert_eq!(group.rack.as_ref().unwrap().groove.active, Some(6));
+        let hat_track = group.rack_pad_track(42).expect("hat reloads");
+        assert_eq!(*table(&app)[hat_track].as_ref().unwrap().row, *madlib.pad_row(42).unwrap());
+        process_block();
+    }
+
+    fn rack_active(app: &App, group_id: u64) -> Option<crate::groove::GrooveId> {
+        app.groups
+            .iter()
+            .find(|g| g.id == group_id)
+            .and_then(|g| g.rack.as_ref())
+            .and_then(|rack| rack.groove.active)
+    }
+
+    /// Groove UI edits (eseq-groove.4/.9): renaming a pool groove is one undo
+    /// step, deleting a pool groove turns it off on EVERY rack playing it in
+    /// one undo step, and an amount knob drag coalesces into ONE undo step
+    /// when the gesture ends while every drag frame reaches the scheduler's
+    /// groove table at once.
     #[test]
     fn rack_groove_rename_delete_and_amount_drag_record_one_step_each() {
         use crate::app::rack_grooves::RackGrooveExtractRequest;
-        use crate::groove::GrooveRef;
         use crate::sequencer::StepParam;
 
         let graph = TestLiveGraph::new("drum-rack-groove-ui-test", 64, 44_100, 2);
@@ -7818,12 +7933,12 @@ mod tests {
 
         // Rename: one step, refuses empty and unchanged names.
         let undo_len = app.history.undo_len();
-        app.rename_rack_groove_recorded(group_id, groove_id, " Pocket ").expect("rename");
-        assert_eq!(rack(&app).grooves[0].name, "Pocket");
+        app.rename_pool_groove_recorded(groove_id, " Pocket ").expect("rename");
+        assert_eq!(app.grooves[0].name, "Pocket");
         assert_eq!(app.history.undo_len(), undo_len + 1);
-        assert!(app.rename_rack_groove_recorded(group_id, groove_id, "  ").is_err());
-        assert!(app.rename_rack_groove_recorded(group_id, groove_id, "Pocket").is_err());
-        assert!(app.rename_rack_groove_recorded(group_id, 99, "X").is_err());
+        assert!(app.rename_pool_groove_recorded(groove_id, "  ").is_err());
+        assert!(app.rename_pool_groove_recorded(groove_id, "Pocket").is_err());
+        assert!(app.rename_pool_groove_recorded(99, "X").is_err());
         assert_eq!(app.history.undo_len(), undo_len + 1, "refusals record nothing");
 
         // Amount drag: live on every frame, one undo step at the end.
@@ -7864,19 +7979,45 @@ mod tests {
         assert_eq!(settings(&app).timing_amount, 1.0, "the drag's start value");
         assert_eq!(timing_in_table(&app), Some(1.0));
 
-        // Delete the active groove: gone, and the rack plays straight again.
-        assert_eq!(settings(&app).active, Some(GrooveRef::Rack(groove_id)));
-        app.delete_rack_groove_recorded(group_id, groove_id).expect("delete");
-        assert!(rack(&app).grooves.is_empty());
-        assert_eq!(settings(&app).active, None);
+        // A second rack plays the same pool groove, and a third plays
+        // another one.
+        let (second_id, _) = app.create_drum_rack_recorded(None).expect("second rack");
+        let hat2 = app.graph_controller().add_blank_sampler_track().expect("hat 2");
+        app.assign_rack_pad_track_recorded(second_id, 42, hat2).expect("hat 2 pad");
+        app.set_rack_active_groove_recorded(second_id, Some(groove_id)).expect("second plays it");
+        let (third_id, _) = app.create_drum_rack_recorded(None).expect("third rack");
+        let other = app
+            .apply_library_groove_recorded(third_id, &crate::groove::mpc_swing_groove(58, 0.25))
+            .expect("third plays a swing");
+        assert_eq!(app.racks_using_groove(groove_id), vec![group_id, second_id]);
+        let active_of = |app: &App, id: u64| {
+            app.groups.iter().find(|g| g.id == id).unwrap().rack.as_ref().unwrap().groove.active
+        };
+
+        // Delete the in-use groove: gone from the pool, and BOTH racks play
+        // straight again, in ONE undo step.
+        let undo_len = app.history.undo_len();
+        let turned_off = app.delete_pool_groove_recorded(groove_id).expect("delete");
+        assert_eq!(turned_off, vec![group_id, second_id]);
+        assert_eq!(app.history.undo_len(), undo_len + 1, "one undo step");
+        assert!(app.grooves.iter().all(|g| g.id != groove_id));
+        assert_eq!(active_of(&app, group_id), None);
+        assert_eq!(active_of(&app, second_id), None);
+        assert_eq!(active_of(&app, third_id), Some(other), "another groove's rack is untouched");
         assert!(app.state.track_grooves()[hat].is_none());
-        assert!(app.delete_rack_groove_recorded(group_id, groove_id).is_err());
+        assert!(app.state.track_grooves()[hat2].is_none());
+        assert!(app.delete_pool_groove_recorded(groove_id).is_err());
         assert!(matches!(
             crate::app::edit::undo(&mut app),
             crate::app::history::HistoryReplay::Applied(_)
         ));
-        assert_eq!(rack(&app).grooves.len(), 1);
-        assert_eq!(settings(&app).active, Some(GrooveRef::Rack(groove_id)));
+        assert_eq!(app.grooves.len(), 2);
+        assert_eq!(active_of(&app, group_id), Some(groove_id));
+        assert_eq!(active_of(&app, second_id), Some(groove_id));
+        assert!(app.state.track_grooves()[hat2].is_some(), "undo re-grooves both racks");
+        // Deleting the swing turns off only the rack playing it.
+        assert_eq!(app.delete_pool_groove_recorded(other).expect("delete swing"), vec![third_id]);
+        assert_eq!(active_of(&app, group_id), Some(groove_id));
         graph.process_block();
     }
 

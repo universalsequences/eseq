@@ -1327,7 +1327,7 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
     editor.refresh_runtime_side_effects();
     if apply_capture_macro_host_commands(&mut editor, &mut app, &state, args.track)? {
         sync_macro_state(editor.runtime_mut(), &app);
-        sync_groups_bindings(editor.runtime_mut(), &app.groups);
+        sync_groups_bindings(editor.runtime_mut(), &app.groups, &app.grooves);
         sync_song_state(
             editor.runtime_mut(),
             &app,

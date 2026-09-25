@@ -114,6 +114,9 @@ pub struct BusGroupStructureState {
     pub buses: Vec<BusStructureState>,
     pub groups: Vec<GroupStructureState>,
     pub scenes: crate::sequencer::ProjectScenes,
+    /// The project groove pool: racks reference it, so a groove edit (pick,
+    /// extract, delete-in-use) is one step over both.
+    pub grooves: Vec<crate::project::ProjectGroove>,
 }
 
 /// The project's kind instances (docs/instance-kinds-spec.md §5) plus, for
@@ -258,6 +261,12 @@ impl BusGroupStructurePatch {
                 + state.groups.capacity()
                     * std::mem::size_of::<GroupStructureState>()
                 + SceneStructurePatch::state_bytes(&state.scenes)
+                + state.grooves.iter().map(|groove| {
+                    std::mem::size_of::<crate::project::ProjectGroove>()
+                        + (groove.pad_rows.len() + 1)
+                            * groove.shared_row.slots.len()
+                            * std::mem::size_of::<crate::project::GrooveSlot>()
+                }).sum::<usize>()
         }
         std::mem::size_of::<Self>() + state_bytes(&self.before) + state_bytes(&self.after)
     }

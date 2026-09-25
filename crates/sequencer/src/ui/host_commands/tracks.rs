@@ -189,7 +189,7 @@ pub(super) fn handle(
                     *track_groups.lock().unwrap() = app.groups.clone();
                     *bus_state.lock().unwrap() = app.buses.clone();
                     let rt = editor.runtime_mut();
-                    sync_groups_bindings(rt, &app.groups);
+                    sync_groups_bindings(rt, &app.groups, &app.grooves);
                     sync_bus_mixer_state(rt, &app);
                     rt.run_reactive_cycle();
                     editor.refresh_runtime_side_effects();
@@ -597,7 +597,7 @@ pub(super) fn handle(
                         rt.set_reactive("SEQ", "steps", build_steps_value(&state, selected));
                         sync_step_param_lists(rt, &state, selected);
                         sync_track_mixer_state(rt, &app, &state);
-                        sync_groups_bindings(rt, &app.groups);
+                        sync_groups_bindings(rt, &app.groups, &app.grooves);
                         sync_bus_mixer_state(rt, &app);
                         sync_track_peak_fields(rt, &ctx.meters.cached_track_peak_levels);
                         sync_bus_peak_fields(rt, &ctx.meters.cached_bus_peak_levels);
@@ -1207,7 +1207,7 @@ pub(super) fn handle(
                 let rt = editor.runtime_mut();
                 sync_track_mixer_state(rt, &app, &state);
                 sync_bus_mixer_state(rt, &app);
-                sync_groups_bindings(rt, &app.groups);
+                sync_groups_bindings(rt, &app.groups, &app.grooves);
                 sync_selected_tracks_bindings(
                     rt,
                     app.tracks.len(),
@@ -1234,7 +1234,7 @@ pub(super) fn handle(
                     let rt = editor.runtime_mut();
                     sync_track_mixer_state(rt, &app, &state);
                     sync_bus_mixer_state(rt, &app);
-                    sync_groups_bindings(rt, &app.groups);
+                    sync_groups_bindings(rt, &app.groups, &app.grooves);
                     rt.run_reactive_cycle();
                     editor.refresh_runtime_side_effects();
                     ui_epoch.fetch_add(1, Ordering::Relaxed);
@@ -1253,7 +1253,7 @@ pub(super) fn handle(
                     let rt = editor.runtime_mut();
                     sync_track_mixer_state(rt, &app, &state);
                     sync_bus_mixer_state(rt, &app);
-                    sync_groups_bindings(rt, &app.groups);
+                    sync_groups_bindings(rt, &app.groups, &app.grooves);
                     rt.run_reactive_cycle();
                     editor.refresh_runtime_side_effects();
                     ui_epoch.fetch_add(1, Ordering::Relaxed);
@@ -1274,7 +1274,7 @@ pub(super) fn handle(
                         let rt = editor.runtime_mut();
                         sync_track_mixer_state(rt, &app, &state);
                         sync_bus_mixer_state(rt, &app);
-                        sync_groups_bindings(rt, &app.groups);
+                        sync_groups_bindings(rt, &app.groups, &app.grooves);
                         rt.run_reactive_cycle();
                         editor.refresh_runtime_side_effects();
                         ui_epoch.fetch_add(1, Ordering::Relaxed);
@@ -1293,7 +1293,7 @@ pub(super) fn handle(
                     let rt = editor.runtime_mut();
                     sync_track_mixer_state(rt, &app, &state);
                     sync_bus_mixer_state(rt, &app);
-                    sync_groups_bindings(rt, &app.groups);
+                    sync_groups_bindings(rt, &app.groups, &app.grooves);
                     rt.run_reactive_cycle();
                     editor.refresh_runtime_side_effects();
                     ui_epoch.fetch_add(1, Ordering::Relaxed);

@@ -3,18 +3,21 @@
 //! Two kinds of fields, split so a knob drag never rebuilds the section it
 //! is dragging in:
 //!
-//! - `SEQ.rack-grooves` is STRUCTURAL: one entry per drum rack with its
-//!   groove list, the picker (labels + parallel keys), the active groove and
-//!   the heatmap of the active groove. It changes on extract / pick /
-//!   rename / delete / pad-map edits.
+//! - `SEQ.rack-grooves` is STRUCTURAL: one entry per drum rack with the
+//!   project pool's grooves, the picker (labels + parallel keys), the active
+//!   groove and the heatmap of the active groove. It changes on extract /
+//!   pick / rename / delete / pad-map edits.
 //! - `SEQ.rack-groove-{timing,velocity,random}-<group id>` are the amounts,
 //!   scalar fields the Timing / Velocity / Random knobs bind to.
 //!
-//! `SEQ.groove-builtins` lists the generic grooves (`{key name}`), which
-//! never change at runtime.
+//! Rev 2 (eseq-groove.9): grooves live in the project pool and racks point
+//! into it. `SEQ.groove-pool` lists the pool with each groove's instances
+//! (the racks playing it); `SEQ.groove-library` lists the factory + user
+//! `.groove` files (`{key name tier}`), whose picker entries copy-on-apply.
 
 use super::*;
-use sequencer::groove::{builtin_grooves, GrooveRef, ProjectGroove, GROOVE_PERIOD_ONE_BAR};
+use sequencer::groove::library::list_groove_library;
+use sequencer::groove::{GrooveChoice, GrooveLibraryEntry, ProjectGroove, GROOVE_PERIOD_ONE_BAR};
 use sequencer::project::{ProjectRackConfig, ProjectTrackGroup};
 
 /// Picker label for "no groove".
@@ -24,30 +27,34 @@ pub(crate) fn rack_groove_amount_field(amount: &str, group_id: u64) -> String {
     format!("rack-groove-{amount}-{group_id}")
 }
 
-/// Rack grooves first (This rack), then the generic built-ins, then Off.
-/// Labels are made unique (a duplicate rack groove name gets its id), so the
-/// dropdown's label round-trips to exactly one key.
-fn picker(rack: &ProjectRackConfig) -> (Vec<String>, Vec<String>) {
+/// Project pool grooves first, then the library (factory, then user; picking
+/// one copies it into the pool), then Off. Labels are made unique (a
+/// duplicate pool name gets its id, a library name already in the pool gets
+/// "(library)"), so the dropdown's label round-trips to exactly one key.
+fn picker(pool: &[ProjectGroove], library: &[GrooveLibraryEntry]) -> (Vec<String>, Vec<String>) {
     let mut labels: Vec<String> = Vec::new();
     let mut keys = Vec::new();
-    for groove in &rack.grooves {
+    for groove in pool {
         let mut label = groove.name.clone();
-        if label.is_empty() || labels.contains(&label) {
+        if label.is_empty() || labels.contains(&label) || label == GROOVE_PICKER_OFF {
             label = format!("{} #{}", groove.name, groove.id);
         }
         labels.push(label);
-        keys.push(GrooveRef::Rack(groove.id).picker_key());
+        keys.push(GrooveChoice::Pool(groove.id).picker_key());
     }
-    for builtin in builtin_grooves() {
-        let mut label = builtin.groove.name.clone();
+    for entry in library {
+        let mut label = entry.name.clone();
+        if labels.contains(&label) || label == GROOVE_PICKER_OFF {
+            label = format!("{label} (library)");
+        }
         if labels.contains(&label) {
-            label = format!("{label} (generic)");
+            label = format!("{} ({}:{})", entry.name, entry.tier.key(), entry.stem);
         }
         labels.push(label);
-        keys.push(GrooveRef::Builtin(builtin.id.clone()).picker_key());
+        keys.push(entry.choice().picker_key());
     }
     labels.push(GROOVE_PICKER_OFF.to_string());
-    keys.push("off".to_string());
+    keys.push(GrooveChoice::Off.picker_key());
     (labels, keys)
 }
 
@@ -139,30 +146,30 @@ pub(crate) fn groove_grid_label(groove: &ProjectGroove) -> String {
     format!("{period} · {}", resolution_label(groove.resolution_beats))
 }
 
-fn rack_groove_entry(group: &ProjectTrackGroup, rack: &ProjectRackConfig) -> Value {
-    let (labels, keys) = picker(rack);
-    let active = rack.groove.active.as_ref();
-    let resolved = rack.resolved_active_groove();
-    let active_key = match (active, resolved) {
-        (Some(active), Some(_)) => active.picker_key(),
-        _ => "off".to_string(),
+fn rack_groove_entry(
+    group: &ProjectTrackGroup,
+    rack: &ProjectRackConfig,
+    pool: &[ProjectGroove],
+    picker: &(Vec<String>, Vec<String>),
+) -> Value {
+    let (labels, keys) = picker.clone();
+    let resolved = rack.active_groove(pool);
+    let active_key = match resolved {
+        Some(groove) => GrooveChoice::Pool(groove.id).picker_key(),
+        None => GrooveChoice::Off.picker_key(),
     };
     let active_label = keys
         .iter()
         .position(|key| *key == active_key)
         .map(|index| labels[index].clone())
         .unwrap_or_else(|| GROOVE_PICKER_OFF.to_string());
-    let active_rack_id = match active {
-        Some(GrooveRef::Rack(id)) if resolved.is_some() => *id as f64,
-        _ => -1.0,
-    };
+    let active_groove_id = resolved.map_or(-1.0, |groove| groove.id as f64);
     map_value([
         ("group-id", Value::Number(group.id as f64)),
         ("active-key", Value::String(active_key.into())),
         ("active-label", Value::String(active_label.into())),
-        // The active groove's id when it is one of the rack's own (rename /
-        // delete act on it), else -1.
-        ("active-rack-id", Value::Number(active_rack_id)),
+        // The active pool groove's id (rename / delete act on it), else -1.
+        ("active-groove-id", Value::Number(active_groove_id)),
         (
             "active-grid",
             Value::String(resolved.map(groove_grid_label).unwrap_or_default().into()),
@@ -177,7 +184,7 @@ fn rack_groove_entry(group: &ProjectTrackGroup, rack: &ProjectRackConfig) -> Val
         ),
         (
             "grooves",
-            list_value(rack.grooves.iter().map(|groove| {
+            list_value(pool.iter().map(|groove| {
                 map_value([
                     ("id", Value::Number(groove.id as f64)),
                     ("name", Value::String(groove.name.clone().into())),
@@ -192,23 +199,65 @@ fn rack_groove_entry(group: &ProjectTrackGroup, rack: &ProjectRackConfig) -> Val
     ])
 }
 
-pub(crate) fn build_rack_grooves_value(groups: &[ProjectTrackGroup]) -> Value {
+pub(crate) fn build_rack_grooves_value(
+    groups: &[ProjectTrackGroup],
+    pool: &[ProjectGroove],
+    library: &[GrooveLibraryEntry],
+) -> Value {
+    let picker = picker(pool, library);
     list_value(groups.iter().filter_map(|group| {
         group
             .rack
             .as_ref()
-            .map(|rack| rack_groove_entry(group, rack))
+            .map(|rack| rack_groove_entry(group, rack, pool, &picker))
     }))
 }
 
-fn build_groove_builtins_value() -> Value {
-    list_value(builtin_grooves().iter().map(|builtin| {
+/// `SEQ.groove-pool`: every pool groove with its instances (the racks
+/// playing it, with their amounts).
+pub(crate) fn build_groove_pool_value(
+    groups: &[ProjectTrackGroup],
+    pool: &[ProjectGroove],
+) -> Value {
+    list_value(pool.iter().map(|groove| {
+        let instances = groups.iter().filter_map(|group| {
+            let rack = group.rack.as_ref()?;
+            (rack.groove.active == Some(groove.id)).then(|| {
+                map_value([
+                    ("group-id", Value::Number(group.id as f64)),
+                    ("name", Value::String(group.name.clone().into())),
+                    ("timing", Value::Number(rack.groove.timing_amount as f64)),
+                    (
+                        "velocity",
+                        Value::Number(rack.groove.velocity_amount as f64),
+                    ),
+                    ("random", Value::Number(rack.groove.random_amount as f64)),
+                ])
+            })
+        });
         map_value([
+            ("id", Value::Number(groove.id as f64)),
             (
                 "key",
-                Value::String(GrooveRef::Builtin(builtin.id.clone()).picker_key().into()),
+                Value::String(GrooveChoice::Pool(groove.id).picker_key().into()),
             ),
-            ("name", Value::String(builtin.groove.name.clone().into())),
+            ("name", Value::String(groove.name.clone().into())),
+            ("grid", Value::String(groove_grid_label(groove).into())),
+            (
+                "instances",
+                list_value(instances.collect::<Vec<_>>().into_iter()),
+            ),
+        ])
+    }))
+}
+
+fn build_groove_library_value(library: &[GrooveLibraryEntry]) -> Value {
+    list_value(library.iter().map(|entry| {
+        map_value([
+            ("key", Value::String(entry.choice().picker_key().into())),
+            ("name", Value::String(entry.name.clone().into())),
+            ("tier", Value::String(entry.tier.key().into())),
+            ("stem", Value::String(entry.stem.clone().into())),
         ])
     }))
 }
@@ -234,9 +283,30 @@ pub(crate) fn sync_rack_groove_amount_fields(rt: &mut Runtime, groups: &[Project
     }
 }
 
-/// Publishes every rack groove field. Called wherever `SEQ.groups` is.
-pub(crate) fn sync_rack_groove_state(rt: &mut Runtime, groups: &[ProjectTrackGroup]) {
-    rt.set_reactive("SEQ", "rack-grooves", build_rack_grooves_value(groups));
-    rt.set_reactive("SEQ", "groove-builtins", build_groove_builtins_value());
+/// Publishes every rack groove field. Called wherever `SEQ.groups` is. Reads
+/// the groove library only when the project has a drum rack or a pool groove
+/// to show it beside, through `list_groove_library`'s cached listing (re-read
+/// only when a tier directory changes or the app saves/renames/deletes).
+pub(crate) fn sync_rack_groove_state(
+    rt: &mut Runtime,
+    groups: &[ProjectTrackGroup],
+    pool: &[ProjectGroove],
+) {
+    let library = if groups.iter().any(|group| group.rack.is_some()) || !pool.is_empty() {
+        list_groove_library()
+    } else {
+        Vec::new()
+    };
+    rt.set_reactive(
+        "SEQ",
+        "rack-grooves",
+        build_rack_grooves_value(groups, pool, &library),
+    );
+    rt.set_reactive("SEQ", "groove-pool", build_groove_pool_value(groups, pool));
+    rt.set_reactive(
+        "SEQ",
+        "groove-library",
+        build_groove_library_value(&library),
+    );
     sync_rack_groove_amount_fields(rt, groups);
 }

@@ -164,7 +164,7 @@ fn extract_pick_and_play_a_rack_groove_through_the_ui() {
     assert!(errors.is_empty(), "{errors:?}");
     editor.runtime_mut().set_load_root(paths.factory_root());
     editor.runtime_mut().set_scoped_module_load_path(roots);
-    sync_groups_bindings(editor.runtime_mut(), &app.groups);
+    sync_groups_bindings(editor.runtime_mut(), &app.groups, &app.grooves);
     editor
         .runtime_mut()
         .eval_str("(import eseq.drum-rack-v2) (import eseq.effects.rack-groove)")
@@ -306,7 +306,36 @@ fn extract_pick_and_play_a_rack_groove_through_the_ui() {
     );
     let entry = rack_state(&editor);
     assert_eq!(string(&get(&entry, "active-label")), "Take");
-    assert!(string(&get(&entry, "active-key")).starts_with("rack:"));
+    assert!(string(&get(&entry, "active-key")).starts_with("pool:"));
+    assert_eq!(
+        app.grooves.len(),
+        1,
+        "the extracted groove is in the project pool"
+    );
+    assert_eq!(
+        number(&get(&entry, "active-groove-id")),
+        app.grooves[0].id as f64
+    );
+    // The picker: the pool, then the library (the factory MPC swings), then
+    // Off; library entries carry `factory:` / `user:` keys.
+    let keys = list(&get(&entry, "picker-keys"))
+        .iter()
+        .map(string)
+        .collect::<Vec<_>>();
+    assert_eq!(keys[0], format!("pool:{}", app.grooves[0].id));
+    assert!(
+        keys.contains(&"factory:mpc-swing-66-16th".to_string()),
+        "{keys:?}"
+    );
+    assert_eq!(keys.last().map(String::as_str), Some("off"));
+    let pool_field = list(&field(&editor, "groove-pool"));
+    assert_eq!(pool_field.len(), 1);
+    let instances = list(&get(&pool_field[0], "instances"));
+    assert_eq!(instances.len(), 1, "the source rack plays it");
+    assert_eq!(number(&get(&instances[0], "group-id")) as u64, group_id);
+    assert!(list(&field(&editor, "groove-library"))
+        .iter()
+        .any(|entry| string(&get(entry, "key")) == "factory:mpc-swing-58-16th"));
     assert_eq!(string(&get(&entry, "active-grid")), "1 bar · 1/16");
     let heat = get(&entry, "heatmap");
     assert_eq!(number(&get(&heat, "slots")), 16.0);
@@ -401,8 +430,9 @@ fn extract_pick_and_play_a_rack_groove_through_the_ui() {
     check_take(&[2, 6, 10, 14], &hat_heard, HAT);
     assert!(played(KICK, 2.0).unwrap() < 2.0, "the kick is pushed EARLY");
 
-    // 3. Pick through the picker: Off plays straight, a generic swing plays
-    //    its shared row on every pad, and the extracted groove comes back.
+    // 3. Pick through the picker: Off plays straight, a factory library
+    //    swing is copied into the pool (copy-on-apply) and plays its shared
+    //    row on every pad, and the extracted groove comes back.
     ui(
         &format!("(eseq.drum-rack-v2/set-groove {group_id} \"Off\")"),
         &mut app,
@@ -425,8 +455,14 @@ fn extract_pick_and_play_a_rack_groove_through_the_ui() {
         &mut editor,
     );
     assert_eq!(
+        app.grooves.len(),
+        2,
+        "the library swing was copied into the pool"
+    );
+    assert_eq!(app.grooves[1].name, "MPC 16 Swing 66%");
+    assert_eq!(
         string(&get(&rack_state(&editor), "active-key")),
-        "builtin:mpc-16-66"
+        format!("pool:{}", app.grooves[1].id)
     );
     let swung = played(HAT, 0.25).unwrap();
     assert!(

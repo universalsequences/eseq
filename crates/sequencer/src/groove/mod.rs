@@ -15,9 +15,15 @@
 //!   the same through the groove as it did before extraction.
 //!
 //! Application (eseq-groove.2) lives in [`apply`]: the scheduler's
-//! pre-resolved per-track table, the shared timing function and the built-in
-//! MPC swing grooves. Moving grooves between racks (kit presets, another
-//! rack's groove) lives in [`transfer`] (eseq-groove.7).
+//! pre-resolved per-track table, the shared timing function and the MPC
+//! swing generator behind the factory swing files.
+//!
+//! Rev 2 (eseq-groove.9, spec §Groove pool, library and pad roles): grooves
+//! live in the PROJECT pool (`ProjectFile::grooves` / `App::grooves`), and a
+//! rack only points into it (`RackGrooveSettings::active`). [`pool`] holds
+//! the pool helpers (copy-on-apply dedupe, load repair), [`library`] the
+//! versioned `.groove` files of the factory and user libraries, and [`kit`]
+//! the copy of the active groove a kit preset carries.
 
 use serde::{Deserialize, Serialize};
 
@@ -27,20 +33,33 @@ use crate::sequencer::{
 };
 
 mod apply;
+mod kit;
+pub mod library;
+mod pool;
 #[cfg(test)]
 mod tests;
-mod transfer;
 mod unwind;
 
 pub use apply::{
-    builtin_groove, builtin_grooves, groove_hash_noise, GrooveFloor, groove_offset_samples, grooved_sample_time,
-    max_early_lead_beats, mpc_swing_groove, padless_seed_key, track_groove_snapshots,
-    BuiltinGroove, TrackGrooveSnapshot, BUILTIN_MPC_SWING_PERCENTS, MAX_EARLY_SLOTS,
+    groove_hash_noise, groove_offset_samples, grooved_sample_time, max_early_lead_beats,
+    mpc_swing_file_stem, mpc_swing_groove, padless_seed_key, track_groove_snapshots, GrooveFloor,
+    TrackGrooveSnapshot, MAX_EARLY_SLOTS, MPC_SWING_PERCENTS, MPC_SWING_RESOLUTIONS,
 };
-pub use transfer::{import_grooves, install_groove_settings, GrooveRowChoice};
+pub(crate) use kit::resolve_v5_selection;
+pub use kit::{
+    legacy_builtin_groove, KitGroove, KitGrooveField, LegacyGrooveRef, LegacyKitGrooveSettings,
+};
+pub use library::{
+    GrooveFile, GrooveLibraryEntry, GrooveLibraryTier, GROOVE_FILE_EXTENSION, GROOVE_FILE_VERSION,
+};
+pub use pool::{
+    import_groove, import_grooves, next_pool_groove_id, pool_groove, repair_groove_pool,
+    GrooveRowChoice,
+};
 pub use unwind::{swing_shift_beats, unwind_step_feel, UnwoundPosition};
 
-/// Stable identity of one groove within its rack's list.
+/// Stable identity of one groove in the project groove pool
+/// (`ProjectFile::grooves`); unique within the pool, never 0.
 pub type GrooveId = u64;
 
 pub const GROOVE_TIMING_AMOUNT_MAX: f32 = 1.5;
@@ -149,42 +168,56 @@ impl GrooveSlotSource {
     }
 }
 
-/// Which groove a rack plays through.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum GrooveRef {
-    /// One of the rack's own grooves, by id.
-    Rack(GrooveId),
-    /// A generic groove shipped with the app (MPC swings), by its stable id.
-    Builtin(String),
+/// One entry of a groove picker: off, a project pool groove, or a library
+/// file (which applies copy-on-apply: it is imported into the pool first).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GrooveChoice {
+    Off,
+    Pool(GrooveId),
+    Library {
+        tier: GrooveLibraryTier,
+        /// The file stem within the tier's directory.
+        stem: String,
+    },
 }
 
-impl GrooveRef {
-    /// The UI's stable picker key: `rack:<id>` or `builtin:<id>`.
+impl GrooveChoice {
+    /// The UI's stable picker key: `off`, `pool:<id>`, `factory:<stem>` or
+    /// `user:<stem>`.
     pub fn picker_key(&self) -> String {
         match self {
-            Self::Rack(id) => format!("rack:{id}"),
-            Self::Builtin(id) => format!("builtin:{id}"),
+            Self::Off => "off".to_string(),
+            Self::Pool(id) => format!("pool:{id}"),
+            Self::Library { tier, stem } => format!("{}:{stem}", tier.key()),
         }
     }
 
-    /// Parses a picker key back; `off` (or an empty key) is `Ok(None)`.
-    pub fn from_picker_key(key: &str) -> Result<Option<Self>, String> {
+    /// Parses a picker key back; `off` or an empty key is [`Self::Off`].
+    /// Library stems must be plain file stems (no path separators).
+    pub fn from_picker_key(key: &str) -> Result<Self, String> {
         let key = key.trim();
         if key.is_empty() || key == "off" {
-            return Ok(None);
+            return Ok(Self::Off);
         }
-        if let Some(id) = key.strip_prefix("rack:") {
+        if let Some(id) = key.strip_prefix("pool:") {
             return id
                 .parse::<GrooveId>()
-                .map(|id| Some(Self::Rack(id)))
-                .map_err(|_| format!("Bad rack groove key {key:?}"));
+                .map(Self::Pool)
+                .map_err(|_| format!("Bad pool groove key {key:?}"));
         }
-        if let Some(id) = key.strip_prefix("builtin:") {
-            if apply::builtin_groove(id).is_none() {
-                return Err(format!("Unknown built-in groove {id:?}"));
+        for tier in [GrooveLibraryTier::Factory, GrooveLibraryTier::User] {
+            if let Some(stem) = key
+                .strip_prefix(tier.key())
+                .and_then(|rest| rest.strip_prefix(':'))
+            {
+                if !library::is_plain_stem(stem) {
+                    return Err(format!("Bad library groove key {key:?}"));
+                }
+                return Ok(Self::Library {
+                    tier,
+                    stem: stem.to_string(),
+                });
             }
-            return Ok(Some(Self::Builtin(id.to_string())));
         }
         Err(format!("Bad groove key {key:?}"))
     }
@@ -194,8 +227,15 @@ impl GrooveRef {
 /// saved before grooves existed load with no active groove.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RackGrooveSettings {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub active: Option<GrooveRef>,
+    /// The project pool groove the rack plays through. Any value that is not
+    /// a pool id (a rev-1 `{"rack": id}` reference from an unshipped dev
+    /// build) reads as no groove rather than failing the project load.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "lenient_groove_id"
+    )]
+    pub active: Option<GrooveId>,
     /// 0..1.5, default 1.0.
     #[serde(default = "default_timing_amount")]
     pub timing_amount: f32,
@@ -209,6 +249,14 @@ pub struct RackGrooveSettings {
 
 fn default_timing_amount() -> f32 {
     1.0
+}
+
+fn lenient_groove_id<'de, D>(deserializer: D) -> Result<Option<GrooveId>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(value.as_u64())
 }
 
 impl Default for RackGrooveSettings {

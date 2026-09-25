@@ -627,6 +627,7 @@ pub(crate) fn build_group_collapsed_value(
 pub(crate) fn sync_groups_bindings(
     rt: &mut Runtime,
     groups: &[sequencer::project::ProjectTrackGroup],
+    grooves: &[sequencer::project::ProjectGroove],
 ) {
     rt.set_reactive("SEQ", "groups", build_groups_value(groups));
     rt.set_reactive(
@@ -634,10 +635,11 @@ pub(crate) fn sync_groups_bindings(
         "group-collapsed",
         build_group_collapsed_value(groups),
     );
-    // Rack grooves derive from the same rack configs, so every path that
-    // republishes group topology (undo/redo, project load, pad-map edits)
-    // republishes the groove section too.
-    sync_rack_groove_state(rt, groups);
+    // Rack grooves derive from the same rack configs (plus the project
+    // groove pool they point into), so every path that republishes group
+    // topology (undo/redo, project load, pad-map edits) republishes the
+    // groove section too.
+    sync_rack_groove_state(rt, groups, grooves);
 }
 
 pub(crate) fn set_current_track_reactive(
