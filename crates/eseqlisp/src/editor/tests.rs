@@ -16522,6 +16522,103 @@ fn context_menu_outside_click_closes_without_firing_items() {
     );
 }
 
+const CELL_CHANGE: &str =
+    ":on-cell-change (lambda (r c v) (set! calls (+ calls 1)) (set! last (list r c v)))";
+const FULL_CHANGE: &str = ":on-change (lambda (m) (set! calls (+ calls 1)) (set! last m))";
+
+fn eval_lisp(editor: &mut Editor, expr: &str) -> String {
+    crate::vm::format_lisp_value(&editor.runtime_mut().eval_str(expr).unwrap().unwrap())
+}
+
+fn matrix_menu_program(callback: &str) -> String {
+    format!(
+        r#"
+    (def calls (state 0))
+    (def last (state nil))
+    (def parent-menu (state false))
+    (effect-buffer "*panel*"
+      (box :on-right-click (lambda (event) (set! parent-menu true))
+        (matrix :rows 2 :cols 2 :width 20 :height 6
+          :value (list (list 1 0) (list 0 0.5))
+          {callback})))
+    (effect-buffer "*sequencer*" (label "underlay"))
+    (set-layout
+      (list :rows :gap 0
+        0.5 (list :buf "*panel*" :hide-status true)
+        0.5 (list :buf "*sequencer*" :hide-status true)))
+"#
+    )
+}
+
+fn click_menu_item(editor: &mut Editor, text: &str) {
+    let layout = editor.runtime.current_layout.clone().expect("panel layout");
+    let item = find_menu_item(&layout, text).expect("menu item").clone();
+    let col = item.rect.col + item.rect.width * 0.5;
+    let row = item.rect.row + item.rect.height * 0.5;
+    for kind in [
+        MouseEventKind::Down(MouseButton::Left),
+        MouseEventKind::Up(MouseButton::Left),
+    ] {
+        editor.handle_tiled_mouse_precise(mouse_event(kind, col as u16, row as u16), col, row, 0);
+    }
+    let _ = crate::ui::frame::build_tiled_render_frame_borderless(editor, 60, 20);
+}
+
+#[test]
+fn matrix_right_click_clear_resets_changed_cells_per_cell() {
+    let _overlay_guard = OverlayClearGuard;
+    let mut editor = context_menu_two_tile_editor_for(&matrix_menu_program(CELL_CHANGE));
+    right_click_at(&mut editor, 5.0, 2.0);
+
+    assert!(!eval_bool(&mut editor, "parent-menu"), "the matrix keeps the right-click");
+    let entry = crate::widget_render::topmost_overlay().expect("stock matrix menu overlay");
+    assert_eq!(entry.kind, crate::widget_render::OverlayKind::Modal);
+
+    click_menu_item(&mut editor, "Clear");
+
+    assert_eq!(
+        eval_lisp(&mut editor, "calls"),
+        "2",
+        "one on-cell-change per non-default cell"
+    );
+    assert_eq!(
+        eval_lisp(&mut editor, "last"),
+        "(1 1 0)"
+    );
+    let layout = editor.runtime.current_layout.clone().expect("panel layout");
+    assert!(find_menu_item(&layout, "Clear").is_none(), "selecting Clear closes the menu");
+}
+
+#[test]
+fn matrix_right_click_clear_sends_one_full_matrix_on_change() {
+    let _overlay_guard = OverlayClearGuard;
+    let mut editor = context_menu_two_tile_editor_for(&matrix_menu_program(FULL_CHANGE));
+    right_click_at(&mut editor, 5.0, 2.0);
+    click_menu_item(&mut editor, "Clear");
+
+    assert_eq!(eval_lisp(&mut editor, "calls"), "1");
+    assert_eq!(
+        eval_lisp(&mut editor, "last"),
+        "((0 0) (0 0))"
+    );
+    let layout = editor.runtime.current_layout.clone().expect("panel layout");
+    assert!(find_menu_item(&layout, "Clear").is_none(), "selecting Clear closes the menu");
+}
+
+#[test]
+fn matrix_stock_menu_escape_closes_without_clearing() {
+    let _overlay_guard = OverlayClearGuard;
+    let mut editor = context_menu_two_tile_editor_for(&matrix_menu_program(CELL_CHANGE));
+    right_click_at(&mut editor, 5.0, 2.0);
+    assert!(editor.modal_is_open());
+    editor.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    let _ = crate::ui::frame::build_tiled_render_frame_borderless(&mut editor, 60, 20);
+
+    assert_eq!(eval_lisp(&mut editor, "calls"), "0");
+    let layout = editor.runtime.current_layout.clone().expect("panel layout");
+    assert!(find_menu_item(&layout, "Clear").is_none());
+}
+
 #[test]
 fn context_menu_escape_closes_without_firing_items() {
     let _overlay_guard = OverlayClearGuard;

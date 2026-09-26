@@ -299,7 +299,13 @@ impl Editor {
             return;
         };
         self.sync_runtime_source_context();
+        let gen_before = crate::widget_render::widget_state_generation();
         let result = self.runtime.invoke(callback, vec![]);
+        // A host-owned menu (a matrix's stock menu) closes by flipping widget
+        // state rather than a reactive binding; relayout so it disappears.
+        if crate::widget_render::widget_state_generation() != gen_before {
+            self.runtime.invalidate_layout();
+        }
         if let Some(status) = self.runtime.take_status_message() {
             self.minibuffer = Some(status);
         } else if let Err(error) = result {

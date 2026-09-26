@@ -4001,7 +4001,10 @@
           :on-submit (lambda () (finish-clip-rename gid id true))
           :on-cancel (lambda () (finish-clip-rename gid id false))
           :on-blur (lambda () (finish-clip-rename gid id true)))
-        nil))))
+        (label id :color :dimmer :active (bind-seq (str "rack-clip-active-" gid "-" id)) :active-color :white :font-size 6 :bg :transparent :v-align :center :h-align :center)
+        )
+      
+      )))
 
 ;; The last cell is a number picker showing the lit clip's number: read it at
 ;; a glance, or type/drag a number to launch that clip (quantized like a
