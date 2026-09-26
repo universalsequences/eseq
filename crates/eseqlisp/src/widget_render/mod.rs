@@ -423,6 +423,12 @@ pub fn any_overlay_active() -> bool {
     OVERLAY_STACK.with(|stack| !stack.borrow().is_empty())
 }
 
+/// Widget ids of every active overlay entry, bottom to top. Their painters
+/// emit overlay primitives every frame, so retained scenes must repaint them.
+pub fn overlay_owner_ids() -> Vec<u64> {
+    OVERLAY_STACK.with(|stack| stack.borrow().iter().map(|entry| entry.widget_id).collect())
+}
+
 /// Widget id of the topmost overlay entry.
 pub fn overlay_widget_id() -> Option<u64> {
     topmost_overlay().map(|entry| entry.widget_id)
