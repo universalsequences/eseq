@@ -13,7 +13,10 @@
         track-plocks-panel
         step-parameters-panel
         track-parameters-panel
-        toggle-polyphony)
+        toggle-polyphony
+        open-polyphony-menu
+        apply-polyphony-to-all-scenes
+        polyphony-context-menu)
 
 ;; Aliases for unconverted lisp callers (effects/panel-frame.lisp,
 ;; effects/step-buffer.lisp), the production by-name read of
@@ -29,8 +32,40 @@
     (eseq.seq-core-state/cool-off-follow)
     (if SEQ.tp-is-rack
       (host-command "set-rack-slot-max-polyphony"
-        (dict :track SEQ.current-track :slot SEQ.tp-rack-slot-idx :value (if SEQ.tp-poly 1 4)))
+        (dict :track SEQ.current-track :slot SEQ.tp-rack-slot-idx :value (if SEQ.tp-poly 1 6)))
       (seq-set-track-param :poly (if SEQ.tp-poly 0 1)))))
+
+;; Right-click on the mono/poly button: copy just this choice to every scene.
+;; The menu is an overlay, so the *fx* buffer renders it once; the button only
+;; sets this state. The target is captured at open time so a selection change
+;; while the menu is up cannot redirect it.
+(defstate polyphony-menu-open false)
+(defstate polyphony-menu-col 0)
+(defstate polyphony-menu-row 0)
+(defstate polyphony-menu-target nil)
+
+(def open-polyphony-menu (event)
+  (do
+    (set! polyphony-menu-target
+      (if SEQ.tp-is-rack
+        (dict :track SEQ.current-track :rack-slot SEQ.tp-rack-slot-idx)
+        (dict :track SEQ.current-track)))
+    (set! polyphony-menu-col (get event :col))
+    (set! polyphony-menu-row (get event :row))
+    (set! polyphony-menu-open true)))
+
+(def apply-polyphony-to-all-scenes ()
+  (do
+    (set! polyphony-menu-open false)
+    (host-command "apply-polyphony-to-all-scenes" polyphony-menu-target)))
+
+(def polyphony-context-menu ()
+  (context-menu :is-open polyphony-menu-open
+    :anchor-col polyphony-menu-col :anchor-row polyphony-menu-row
+    :on-close (lambda () (set! polyphony-menu-open false))
+    (menu-item (str "Apply " (if SEQ.tp-poly "poly" "mono") " to all scenes")
+      :key "polyphony-apply-all-scenes"
+      :on-select (lambda (event) (apply-polyphony-to-all-scenes)))))
 
 (def track-bus-send-field (bus)
   (str "tp-bus-" bus "-send"))

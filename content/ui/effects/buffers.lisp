@@ -273,7 +273,8 @@
       (box :debug-name "fx-param-map-active-root" :padding 0
         (track-selection-panel))
       (track-selection-panel)))))
-  (subtree :key "fx-param-plock-menu" (pc/param-plock-context-menu))))
+  (subtree :key "fx-param-plock-menu" (pc/param-plock-context-menu))
+  (subtree :key "fx-polyphony-menu" (tp/polyphony-context-menu))))
 
 (def copy-selected-effect ()
   (seq-copy-selected-effect))

@@ -1789,6 +1789,41 @@
     }
 
     #[test]
+    fn copy_current_polyphony_updates_only_the_poly_choice_in_every_pattern() {
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        let mut first = sample_pattern_snapshot(1);
+        let mut second = sample_pattern_snapshot(1);
+        first.rack_tracks[0] = Some(sample_rack_track_snapshot());
+        second.rack_tracks[0] = Some(sample_rack_track_snapshot());
+        first.track_params[0].polyphonic = false;
+        second.track_params[0].polyphonic = false;
+        second.rack_tracks[0].as_mut().unwrap().slots[0].max_polyphony = 4;
+        second.rack_tracks[0].as_mut().unwrap().slots[0].gain = 0.3;
+        state.replace_pattern_repository(vec![first, second], 0);
+
+        state.pattern.track_params[0]
+            .polyphonic
+            .store(true, Ordering::Relaxed);
+        let mut live_rack = sample_rack_track_snapshot();
+        live_rack.slots[0].max_polyphony = 1;
+        live_rack.slots[0].gain = 1.7;
+        state.pattern.rack_tracks.lock().unwrap()[0] = Some(live_rack);
+
+        // 2 scene patterns + the track-sound carrier.
+        assert_eq!(state.copy_current_polyphony_to_all_track_patterns(0, None), 3);
+        assert_eq!(state.copy_current_polyphony_to_all_track_patterns(0, Some(0)), 3);
+        assert_eq!(state.copy_current_polyphony_to_all_track_patterns(0, Some(9)), 0);
+
+        let patterns = state.export_pattern_repository();
+        for pattern in &patterns {
+            assert!(pattern.track_params[0].polyphonic);
+            let rack_slot = &pattern.rack_tracks[0].as_ref().unwrap().slots[0];
+            assert_eq!(rack_slot.max_polyphony, 1);
+        }
+        assert_eq!(patterns[1].rack_tracks[0].as_ref().unwrap().slots[0].gain, 0.3);
+    }
+
+    #[test]
     fn copy_current_rack_values_updates_every_slot_and_macro_in_every_pattern() {
         let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
         let two_slots = || {

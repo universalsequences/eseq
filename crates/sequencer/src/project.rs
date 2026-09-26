@@ -3480,7 +3480,7 @@ fn default_accum_limit() -> f32 {
 }
 
 fn default_max_polyphony() -> usize {
-    6
+    crate::audio::DEFAULT_RACK_SLOT_MAX_POLYPHONY
 }
 
 fn default_true() -> bool {

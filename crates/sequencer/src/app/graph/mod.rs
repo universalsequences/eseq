@@ -33,7 +33,7 @@ fn first_graph_node_identity(ids: &[i32]) -> u32 {
         .unwrap_or(0)
 }
 
-const DEFAULT_LAYER_SLOT_MAX_POLYPHONY: usize = 4;
+const DEFAULT_LAYER_SLOT_MAX_POLYPHONY: usize = crate::audio::DEFAULT_RACK_SLOT_MAX_POLYPHONY;
 const DEFAULT_DRUM_SLOT_MAX_POLYPHONY: usize = 1;
 const RACK_TEARDOWN_TAIL: Duration = Duration::from_secs(8);
 const MAX_DEFERRED_RACK_TEARDOWNS: usize = 16;

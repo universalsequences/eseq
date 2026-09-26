@@ -65,7 +65,7 @@ mod stream;
 mod voices;
 pub mod worker_prefs;
 
-pub use voices::MAX_VOICES;
+pub use voices::{DEFAULT_RACK_SLOT_MAX_POLYPHONY, MAX_VOICES};
 
 // Flat namespace across the audio submodules: every file starts with
 // `use super::*;`, so items resolve exactly as they did in the old

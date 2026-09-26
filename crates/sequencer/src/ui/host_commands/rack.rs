@@ -1253,6 +1253,18 @@ pub(super) fn handle(
                             value,
                         },
                     );
+                    // The *track* panel, mixer strip and instrument header show
+                    // the selected slot's voices through the tp-* fields; the
+                    // slot refresh below only covers the rack's own "V" field.
+                    if track == ctx.shared.current_track.load(Ordering::Relaxed) {
+                        let dirty = sync_track_polyphony_fields(
+                            editor.runtime_mut(),
+                            &app,
+                            &state,
+                            track,
+                        );
+                        flush_reactive_display_edit(&mut editor, dirty);
+                    }
                     refresh_rack_direct_param_reactive(
                         &mut editor,
                         &app,
@@ -2990,6 +3002,34 @@ mod tests {
             assert_eq!(
                 reactive_number(&h.editor, &value_field),
                 param.stored_to_user(expected) as f64
+            );
+        }
+    }
+
+    /// The *track* buffer's voices picker reads SEQ.tp-max-polyphony, which
+    /// for a rack shows the selected slot. The slot-voices command only
+    /// refreshed the rack's own "V" field, so that picker stayed at its old
+    /// value (12) and every drag restarted from it.
+    #[test]
+    fn set_rack_slot_max_polyphony_republishes_track_panel_voices() {
+        let mut h = RackHarness::new(HashSet::new());
+        let mut types = vec![sequencer::sequencer::InstrumentType::Rack];
+        types.resize(h.app.graph.track_instrument_types.len().max(1),
+            sequencer::sequencer::InstrumentType::Rack);
+        h.app.graph.track_instrument_types = types;
+        for voices in [2.0, 3.0, 1.0, 6.0] {
+            h.dispatch(
+                "set-rack-slot-max-polyphony",
+                number_payload(&[("track", TRACK as f64), ("slot", SLOT as f64), ("value", voices)]),
+            );
+            assert_eq!(
+                rack_slot_snapshot_for_host(&h.state, TRACK, SLOT).unwrap().max_polyphony,
+                voices as usize
+            );
+            assert_eq!(reactive_number(&h.editor, "tp-max-polyphony"), voices);
+            assert_eq!(
+                h.editor.runtime().reactive_field_value("SEQ", "tp-poly"),
+                Some(&Value::Bool(voices > 1.0))
             );
         }
     }

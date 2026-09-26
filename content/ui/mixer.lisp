@@ -2085,7 +2085,7 @@
                 :on-click |x y r| (do (eseq.seq-core-state/cool-off-follow)
                   (if SEQ.tp-is-rack
                     (host-command "set-rack-slot-max-polyphony"
-                      (dict :track SEQ.current-track :slot SEQ.tp-rack-slot-idx :value (if SEQ.tp-poly 1 4)))
+                      (dict :track SEQ.current-track :slot SEQ.tp-rack-slot-idx :value (if SEQ.tp-poly 1 6)))
                     (seq-set-track-param :poly (if SEQ.tp-poly 0 1))))))
             (v-stack :align :center :gap 0.5
               (label "voices" :font-size 8 :color :dim :bg :transparent)

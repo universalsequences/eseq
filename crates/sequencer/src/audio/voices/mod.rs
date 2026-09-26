@@ -11,5 +11,5 @@ mod runtime;
 pub(super) use legato::{SequencedLegatoHold, SequencedLegatoHolds};
 pub(super) use mono::{MonoHeldNotes, MonoRelease};
 pub(super) use pool::VoicePool;
-pub use pool::MAX_VOICES;
+pub use pool::{DEFAULT_RACK_SLOT_MAX_POLYPHONY, MAX_VOICES};
 pub(super) use runtime::*;
