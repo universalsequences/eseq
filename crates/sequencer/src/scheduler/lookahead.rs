@@ -43,6 +43,60 @@ pub(super) struct SchedulerLookaheadState {
     /// can replay them: graph runtimes are not rewound, and already ran their
     /// boundaries up to the old frontier (eseq-groove.8).
     pub(super) graph_replay: Vec<RetainedGraphEmission>,
+    /// The last prebuilt chunk snapshot patched with the live groove table
+    /// ([`with_live_track_grooves`]), so a song row that plays for many
+    /// chunks after a groove edit is cloned once, not per chunk.
+    pub(super) live_groove_chunk: Option<LiveGrooveChunk>,
+}
+
+/// A prebuilt chunk snapshot (`source`) re-pointed at the live groove table
+/// `grooves`: `patched`.
+pub(super) struct LiveGrooveChunk {
+    source: Arc<SequencerSnapshot>,
+    grooves: Arc<Vec<Option<crate::groove::TrackGrooveSnapshot>>>,
+    patched: Arc<SequencerSnapshot>,
+}
+
+/// `prebuilt` (a song row's snapshot, a quantized launch's, or a merge of
+/// either) with the LIVE rack groove table published with `base`.
+///
+/// Rack grooves are project-level rack config, not scene or pattern content,
+/// but every prebuilt snapshot copied the table at preflight — and Play
+/// always preflights (the song runtime, plus the auto-latched launch merged
+/// over its rows). Scheduling from the frozen copy made a groove pick, an
+/// amount drag or Off inaudible until the next Play. The live table is also
+/// what the early/late leads, the resync recovery and the record unwind
+/// already read, so every groove reader now agrees. A table that has not
+/// changed since preflight is the same `Arc`, so this is free until an edit.
+pub(super) fn with_live_track_grooves(
+    cache: &mut Option<LiveGrooveChunk>,
+    mut prebuilt: Arc<SequencerSnapshot>,
+    base: &SequencerSnapshot,
+) -> Arc<SequencerSnapshot> {
+    if Arc::ptr_eq(&prebuilt.track_grooves, &base.track_grooves) {
+        return prebuilt;
+    }
+    // A merge built for this chunk alone: patch it in place.
+    if let Some(unique) = Arc::get_mut(&mut prebuilt) {
+        unique.track_grooves = Arc::clone(&base.track_grooves);
+        return prebuilt;
+    }
+    if let Some(cached) = cache.as_ref() {
+        if Arc::ptr_eq(&cached.source, &prebuilt)
+            && Arc::ptr_eq(&cached.grooves, &base.track_grooves)
+        {
+            return Arc::clone(&cached.patched);
+        }
+    }
+    let mut patched = (*prebuilt).clone();
+    patched.track_grooves = Arc::clone(&base.track_grooves);
+    let patched = Arc::new(patched);
+    *cache = Some(LiveGrooveChunk {
+        source: prebuilt,
+        grooves: Arc::clone(&base.track_grooves),
+        patched: Arc::clone(&patched),
+    });
+    patched
 }
 
 /// One enqueued graph emission, as the graph produced it (before the rack
@@ -83,6 +137,7 @@ impl SchedulerLookaheadState {
             parked_generators: std::collections::HashSet::new(),
             last_scene_slot_debug: None,
             graph_replay: Vec::new(),
+            live_groove_chunk: None,
         }
     }
 }
@@ -602,10 +657,14 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                 }
             }
         }
-        let snapshot: &SequencerSnapshot = song_row_snapshot
-            .as_deref()
-            .or(session_launch_snapshot.as_deref())
-            .unwrap_or(base_snapshot);
+        // Prebuilt snapshots play with the live groove table (see
+        // `with_live_track_grooves`).
+        let prebuilt_snapshot = song_row_snapshot
+            .or(session_launch_snapshot)
+            .map(|prebuilt| {
+                with_live_track_grooves(&mut scheduler.live_groove_chunk, prebuilt, base_snapshot)
+            });
+        let snapshot: &SequencerSnapshot = prebuilt_snapshot.as_deref().unwrap_or(base_snapshot);
         // Process-driven pattern length (`length!`): a change due at this
         // chunk's start lands before the clock steps, no chunk straddles the
         // next pending boundary, and the chunk snapshot carries each track's

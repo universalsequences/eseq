@@ -7535,6 +7535,127 @@ mod tests {
         graph.process_block();
     }
 
+    /// Regression: rack groove edits made WHILE THE TRANSPORT PLAYS must
+    /// reach the trigs scheduled after them. Play always runs the song
+    /// runtime, whose row snapshots (and the auto-latched launch merged over
+    /// them) were preflighted at Play with the groove table of that moment;
+    /// the scheduler kept reading that frozen table, so a pick, a Timing
+    /// drag or Off only sounded after a stop and restart. Driven like the
+    /// app: `song_transport_play` (empty arrangement → auto-latched scene,
+    /// and an authored scene row), the real `SchedulerDriver`, and the same
+    /// App entry points the groove commands call. Trigs already inside the
+    /// lookahead when an edit lands may keep their old time; every later
+    /// hat 16th follows the edit.
+    #[test]
+    fn rack_groove_edits_apply_while_the_transport_plays() {
+        use crate::scheduler::scheduled_event::{ScheduledEventKind, ScheduledEventQueue};
+        use crate::scheduler::{SchedulerDriver, SchedulerInput};
+
+        const BLOCK: usize = 256;
+        const LOOKAHEAD: u64 = 2_048;
+        const SAMPLE_RATE: u32 = 44_100;
+
+        for authored_scene_row in [false, true] {
+            let graph = TestLiveGraph::new("drum-rack-groove-live-edit-test", 64, 44_100, 2);
+            let mut app = test_app_for_live_graph(&graph, 0);
+            let (group_id, _) = app
+                .create_drum_rack_recorded(None)
+                .expect("drum rack should be created");
+            let hat = app.graph_controller().add_blank_sampler_track().expect("hat track");
+            app.assign_rack_pad_track_recorded(group_id, 42, hat).expect("hat pad");
+            for step in 0..16 {
+                app.state.toggle_step_and_clear_plocks(hat, step);
+            }
+            // Odd 16ths late by 0.4 of a step at full Timing.
+            app.grooves.push(two_slot_test_groove(1, "Late", 0.4, &[]));
+            if authored_scene_row {
+                app.arr_replace_rows(
+                    vec![crate::app::song_edit::SongRowSpec {
+                        start_beat: 0.0,
+                        scene: 0,
+                        overrides: Vec::new(),
+                    }],
+                    64.0,
+                    false,
+                )
+                .expect("arrangement row");
+            }
+            app.song_transport_play(false).expect("song playback starts");
+
+            let bpm = app.state.latest_scheduler_snapshot().transport.bpm.max(1) as f64;
+            let spq = SAMPLE_RATE as f64 * 60.0 / bpm;
+            let step_samples = spq / 4.0;
+            let queue = Arc::new(ScheduledEventQueue::<4096>::new());
+            let mut driver =
+                SchedulerDriver::new(Arc::clone(&app.state), SAMPLE_RATE, BLOCK, queue.clone());
+            let mut hits: Vec<u64> = Vec::new();
+            let mut rendered = 0_u64;
+            let run_until = |driver: &mut SchedulerDriver,
+                             rendered: &mut u64,
+                             until: u64,
+                             hits: &mut Vec<u64>| {
+                while *rendered < until {
+                    driver.advance(*rendered, *rendered + LOOKAHEAD, SchedulerInput::Offline);
+                    while let Some(event) = queue.pop_owned() {
+                        if let ScheduledEventKind::ResolvedTrigger { track, .. } = event.kind {
+                            if track == hat {
+                                hits.push(event.sample_time);
+                            }
+                        }
+                    }
+                    *rendered += BLOCK as u64;
+                }
+            };
+            let beats = |b: f64| ((b * spq) as u64 / BLOCK as u64) * BLOCK as u64;
+            // Groove off for two beats, then pick it, then Timing 50%, then Off.
+            let (pick_at, timing_at, off_at, end) = (beats(2.0), beats(4.0), beats(6.0), beats(8.0));
+            run_until(&mut driver, &mut rendered, pick_at, &mut hits);
+            app.set_rack_active_groove_recorded(group_id, Some(1)).expect("pick groove");
+            run_until(&mut driver, &mut rendered, timing_at, &mut hits);
+            crate::app::edit::apply_rack_groove_amount_drag(&mut app, group_id, |settings| {
+                settings.timing_amount = 0.5;
+            })
+            .expect("timing drag");
+            run_until(&mut driver, &mut rendered, off_at, &mut hits);
+            app.set_rack_active_groove_recorded(group_id, None).expect("groove off");
+            run_until(&mut driver, &mut rendered, end, &mut hits);
+
+            let label = if authored_scene_row { "scene row" } else { "auto-latched scene" };
+            let settled = |edit_at: u64, straight: f64| {
+                straight >= (edit_at + LOOKAHEAD) as f64 + step_samples
+            };
+            let mut checked = 0;
+            for &hit in &hits {
+                let step = (hit as f64 / step_samples).round();
+                let straight = step * step_samples;
+                let offset = (hit as f64 - straight) / step_samples;
+                let odd = step as u64 % 2 == 1;
+                let expected = if straight < pick_at as f64 {
+                    Some(0.0)
+                } else if straight < timing_at as f64 {
+                    settled(pick_at, straight).then_some(0.4)
+                } else if straight < off_at as f64 {
+                    settled(timing_at, straight).then_some(0.2)
+                } else if straight < end as f64 {
+                    settled(off_at, straight).then_some(0.0)
+                } else {
+                    None
+                };
+                let Some(expected) = expected else { continue };
+                let expected = if odd { expected } else { 0.0 };
+                assert!(
+                    (offset - expected).abs() < 0.01,
+                    "{label}: hat 16th {step} at {hit} sits {offset:.3} of a step late, \
+                     expected {expected} (hits {hits:?})"
+                );
+                checked += 1;
+            }
+            assert!(checked >= 20, "{label}: enough settled hat 16ths checked: {checked} of {hits:?}");
+            app.song_transport_stop().expect("stop");
+            graph.process_block();
+        }
+    }
+
     /// A two-slot 16th groove with a row per `pad_notes` note (each row
     /// distinct) and a `[0, shared]` shared row.
     fn two_slot_test_groove(
