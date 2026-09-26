@@ -153,8 +153,23 @@ impl App {
         )
     }
 
-    /// The racks (group ids, in group order) whose active groove is pool
-    /// groove `groove_id`: its instances.
+    /// Every groove table scenes pick among: each rack on its own settings,
+    /// plus one variant per clip that plays its own groove.
+    pub fn rack_groove_variants(&self) -> crate::groove::RackGrooveVariants {
+        crate::groove::RackGrooveVariants::build(
+            self.groups.iter().filter_map(|group| {
+                group
+                    .rack
+                    .as_ref()
+                    .map(|rack| (group.id, group.members.as_slice(), rack))
+            }),
+            &self.grooves,
+            self.tracks.len(),
+        )
+    }
+
+    /// The racks (group ids, in group order) whose active groove — the rack
+    /// default or one of its clips' own — is pool groove `groove_id`.
     pub fn racks_using_groove(&self, groove_id: GrooveId) -> Vec<u64> {
         self.groups
             .iter()
@@ -162,10 +177,32 @@ impl App {
                 group
                     .rack
                     .as_ref()
-                    .is_some_and(|rack| rack.groove.active == Some(groove_id))
+                    .is_some_and(|rack| {
+                        rack.groove.active == Some(groove_id)
+                            || rack
+                                .clip_grooves
+                                .iter()
+                                .any(|own| own.settings.active == Some(groove_id))
+                    })
             })
             .map(|group| group.id)
             .collect()
+    }
+
+    /// The clip rack `group_id` plays in the current scene (`None` for a
+    /// rack without clips): the source clip of an extraction.
+    pub fn current_rack_clip(&self, group_id: u64) -> Option<RackClipId> {
+        self.state.with_scenes(|scenes| scenes.current_rack_clip(group_id))
+    }
+
+    /// The settings an edit aimed at `clip` changes (see
+    /// `ProjectRackConfig::groove_target_mut`), read-only.
+    fn rack_groove(
+        &self,
+        group_id: u64,
+        clip: Option<RackClipId>,
+    ) -> Result<&crate::groove::RackGrooveSettings, String> {
+        Ok(self.rack_config(group_id)?.groove_for_clip(clip))
     }
 
     fn rack_config(&self, group_id: u64) -> Result<&crate::project::ProjectRackConfig, String> {
@@ -213,6 +250,9 @@ impl App {
         let groove = extract_groove(groove_id, &request.options, &sources)
             .map_err(|error| error.to_string())?;
         let quantize = request.quantize_source;
+        // The clip the source patterns belong to: quantizing straightened
+        // THAT clip, so it (not every clip of the rack) plays the new groove.
+        let source_clip = self.current_rack_clip(group_id);
         let label = if quantize {
             "Extract groove and quantize source"
         } else {
@@ -246,10 +286,66 @@ impl App {
             }
             let rack = app.rack_config_mut(group_id)?;
             if quantize {
-                rack.groove.active = Some(groove_id);
+                match source_clip {
+                    Some(clip) => {
+                        if rack.clip_groove(clip).is_none() {
+                            let settings = rack.groove.clone();
+                            rack.clip_grooves.push(crate::project::RackClipGroove { clip, settings });
+                        }
+                        rack.groove_target_mut(Some(clip)).active = Some(groove_id);
+                    }
+                    None => rack.groove.active = Some(groove_id),
+                }
             }
             app.grooves.push(groove);
             Ok(groove_id)
+        })
+    }
+
+    /// Gives clip `clip` its own groove (a copy of what it plays now, the
+    /// rack's), or, with `own == false`, returns it to the rack's. One undo
+    /// step.
+    pub fn set_rack_clip_own_groove_recorded(
+        &mut self,
+        group_id: u64,
+        clip: RackClipId,
+        own: bool,
+    ) -> Result<(), String> {
+        if self.rack_config(group_id)?.clip_groove(clip).is_some() == own {
+            return Err("Clip groove is unchanged".to_string());
+        }
+        let label = if own { "Give clip its own groove" } else { "Use rack groove for clip" };
+        self.apply_recorded_bus_group_structure_mutation(label, move |app| {
+            let rack = app.rack_config_mut(group_id)?;
+            if own {
+                let settings = rack.groove.clone();
+                rack.clip_grooves.push(crate::project::RackClipGroove { clip, settings });
+            } else {
+                rack.clip_grooves.retain(|entry| entry.clip != clip);
+            }
+            Ok(())
+        })
+    }
+
+    /// "Apply to All Clips in This Rack": the groove `clip` plays (its own,
+    /// else the rack's) becomes the rack's, and every clip follows it again.
+    /// One undo step.
+    pub fn apply_rack_groove_to_all_clips_recorded(
+        &mut self,
+        group_id: u64,
+        clip: Option<RackClipId>,
+    ) -> Result<(), String> {
+        let settings = self.rack_groove(group_id, clip)?.clone();
+        let rack = self.rack_config(group_id)?;
+        if rack.clip_grooves.is_empty() && rack.groove == settings {
+            // Every clip already plays it: nothing to record.
+            return Ok(());
+        }
+        self.apply_recorded_bus_group_structure_mutation("Apply groove to all clips", move |app| {
+            let rack = app.rack_config_mut(group_id)?;
+            rack.groove = settings;
+            rack.clip_grooves.clear();
+            Ok(())
         })
     }
 
@@ -258,6 +354,7 @@ impl App {
     pub fn set_rack_active_groove_recorded(
         &mut self,
         group_id: u64,
+        clip: Option<RackClipId>,
         active: Option<GrooveId>,
     ) -> Result<(), String> {
         if let Some(id) = active {
@@ -265,11 +362,83 @@ impl App {
                 return Err(format!("The project has no groove {id}"));
             }
         }
-        if self.rack_config(group_id)?.groove.active == active {
+        if self.rack_groove(group_id, clip)?.active == active {
             return Err("Rack groove is unchanged".to_string());
         }
         self.apply_recorded_bus_group_structure_mutation("Set rack groove", move |app| {
-            app.rack_config_mut(group_id)?.groove.active = active;
+            app.rack_config_mut(group_id)?.groove_target_mut(clip).active = active;
+            Ok(())
+        })
+    }
+
+    /// The rack groove buffer's on/off switch: bypasses the rack's groove
+    /// (every member plays straight) without forgetting the selection, the
+    /// amounts or the pad shares. One undo step.
+    pub fn set_rack_groove_enabled_recorded(
+        &mut self,
+        group_id: u64,
+        clip: Option<RackClipId>,
+        enabled: bool,
+    ) -> Result<(), String> {
+        if self.rack_groove(group_id, clip)?.enabled == enabled {
+            return Err("Rack groove is unchanged".to_string());
+        }
+        let label = if enabled {
+            "Turn rack groove on"
+        } else {
+            "Turn rack groove off"
+        };
+        self.apply_recorded_bus_group_structure_mutation(label, move |app| {
+            app.rack_config_mut(group_id)?.groove_target_mut(clip).enabled = enabled;
+            Ok(())
+        })
+    }
+
+    /// The rack groove's time scale (one of [`crate::groove::GROOVE_SCALES`]):
+    /// its grid stretches by this much when it plays. One undo step.
+    pub fn set_rack_groove_scale_recorded(
+        &mut self,
+        group_id: u64,
+        clip: Option<RackClipId>,
+        scale: f32,
+    ) -> Result<(), String> {
+        if !crate::groove::GROOVE_SCALES.contains(&scale) {
+            return Err(format!("A groove scale is ½×, 1× or 2×, not {scale}"));
+        }
+        if self.rack_groove(group_id, clip)?.scale == scale {
+            return Err("Rack groove is unchanged".to_string());
+        }
+        self.apply_recorded_bus_group_structure_mutation("Set groove scale", move |app| {
+            app.rack_config_mut(group_id)?.groove_target_mut(clip).scale = scale;
+            Ok(())
+        })
+    }
+
+    /// Includes pad `pad_note` in the rack's groove or leaves it straight
+    /// (its amount is kept for when it comes back). One undo step.
+    pub fn set_rack_groove_pad_enabled_recorded(
+        &mut self,
+        group_id: u64,
+        clip: Option<RackClipId>,
+        pad_note: i32,
+        enabled: bool,
+    ) -> Result<(), String> {
+        let rack = self.rack_config(group_id)?;
+        if !rack.pads.iter().any(|pad| pad.pad_note == pad_note) {
+            return Err(format!("The rack has no pad at note {pad_note}"));
+        }
+        if rack.groove_for_clip(clip).pad(pad_note).enabled == enabled {
+            return Err("Pad groove is unchanged".to_string());
+        }
+        let label = if enabled {
+            "Include pad in groove"
+        } else {
+            "Exclude pad from groove"
+        };
+        self.apply_recorded_bus_group_structure_mutation(label, move |app| {
+            let settings = app.rack_config_mut(group_id)?.groove_target_mut(clip);
+            settings.pad_mut(pad_note).enabled = enabled;
+            settings.sanitize();
             Ok(())
         })
     }
@@ -282,6 +451,7 @@ impl App {
     pub fn apply_library_groove_recorded(
         &mut self,
         group_id: u64,
+        clip: Option<RackClipId>,
         groove: &ProjectGroove,
     ) -> Result<GrooveId, String> {
         if !groove.is_well_formed() {
@@ -289,7 +459,7 @@ impl App {
         }
         let rack = self.rack_config(group_id)?;
         if let Some(existing) = self.grooves.iter().find(|own| own.same_feel(groove)) {
-            if rack.groove.active == Some(existing.id) {
+            if rack.groove_for_clip(clip).active == Some(existing.id) {
                 return Ok(existing.id);
             }
         }
@@ -297,7 +467,7 @@ impl App {
         self.apply_recorded_bus_group_structure_mutation("Apply groove", move |app| {
             let id = import_groove(&mut app.grooves, &groove)
                 .ok_or_else(|| format!("Groove '{}' is malformed", groove.name))?;
-            app.rack_config_mut(group_id)?.groove.active = Some(id);
+            app.rack_config_mut(group_id)?.groove_target_mut(clip).active = Some(id);
             Ok(id)
         })
     }
@@ -361,8 +531,10 @@ impl App {
             app.grooves.retain(|groove| groove.id != groove_id);
             for group in &mut app.groups {
                 if let Some(rack) = group.rack.as_mut() {
-                    if rack.groove.active == Some(groove_id) {
-                        rack.groove.active = None;
+                    for settings in rack.all_groove_settings_mut() {
+                        if settings.active == Some(groove_id) {
+                            settings.active = None;
+                        }
                     }
                 }
             }

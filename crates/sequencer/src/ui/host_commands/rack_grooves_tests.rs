@@ -1,12 +1,13 @@
-//! End to end: the drum rack panel's Groove section drives the production
-//! host path (docs/rack-groove-spec.md, "UI"; beads eseq-groove.4 and the
-//! slimmed rev-2 section, eseq-groove.12). The UI actions are the real Lisp
-//! ones — the Extract Groove modal's `open-extract` / `commit-extract`, the
-//! picker dropdown's `:on-change`, the amount knobs' `set-groove-amount`, the
-//! "Grooves tab" link's `:on-click` — evaluated in the UI runtime, drained as
-//! host commands and routed through `dispatch_custom_host_command`. "Play" is the
-//! scheduler's input: the per-track groove table the lookahead reads, pushed
-//! through the scheduler's own timing function.
+//! End to end: the *groove* buffer (the selected drum rack's groove, stacked
+//! under the browser; bead eseq-yks3) drives the production host path
+//! (docs/rack-groove-spec.md, "UI"). The UI actions are the real Lisp ones —
+//! the Extract Groove modal's `open-extract` / `commit-extract`, the picker
+//! dropdown's `:on-change`, the amount pickers' `set-groove-amount`, a pad's
+//! Amt picker `:on-change` and include dot `:on-click`, the on/off toggle's
+//! `:on-change` — evaluated in the UI runtime, drained as host commands and
+//! routed through `dispatch_custom_host_command`. "Play" is the scheduler's
+//! input: the per-track groove table the lookahead reads, pushed through the
+//! scheduler's own timing function.
 
 use super::*;
 use std::cell::RefCell;
@@ -173,10 +174,19 @@ fn extract_pick_and_play_a_rack_groove_through_the_ui() {
     editor.runtime_mut().set_load_root(paths.factory_root());
     editor.runtime_mut().set_scoped_module_load_path(roots);
     sync_groups_bindings(editor.runtime_mut(), &app.groups, &app.grooves);
+    // The kick is the current track, so its rack is the selected rack.
+    editor
+        .runtime_mut()
+        .set_reactive("SEQ", "num-tracks", Value::Number(2.0));
+    editor
+        .runtime_mut()
+        .set_reactive("SEQ", "current-track", Value::Number(KICK as f64));
     editor
         .runtime_mut()
         .eval_str(
-            "(import eseq.drum-rack-v2) (import eseq.effects.rack-groove) (import eseq.browser)",
+            "(import eseq.drum-rack-v2) (import eseq.rack-groove-buffer)
+             ;; No sidebar: the split observer has no layout to redo here.
+             (set! eseq.seq-core-state/samples-sidebar-visible false)",
         )
         .expect("load the rack groove UI modules");
 
@@ -300,17 +310,36 @@ fn extract_pick_and_play_a_rack_groove_through_the_ui() {
         Some(sample as f64 / spq)
     };
 
-    // Nothing active yet: the section says Off and the swing control is live.
+    // Nothing active yet: no groove, and the swing control is live.
     assert_eq!(string(&get(&rack_state(&editor), "active-key")), "off");
     assert!(played(KICK, 0.0).is_none());
+    assert_eq!(
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.rack-groove-buffer/selected-rack-id)")
+            .unwrap(),
+        Some(Value::Number(group_id as f64)),
+        "the current track's rack is the buffer's rack"
+    );
+    // Straight lanes: one per pad in pad-note order, a bar of 16ths with no
+    // cells, so the buffer draws the pads' hits instead.
+    let lanes = get(&rack_state(&editor), "lanes");
+    assert_eq!(number(&get(&lanes, "slots")), 16.0);
+    assert!(list(&get(&lanes, "all-cells")).is_empty());
+    let pads = list(&get(&lanes, "pads"));
+    assert_eq!(
+        pads.iter().map(|pad| number(&get(pad, "track")) as usize).collect::<Vec<_>>(),
+        vec![KICK, HAT]
+    );
+    assert!(list(&get(&pads[0], "cells")).is_empty());
 
     // 1. Extract Groove… : open the modal, name it, commit (1 bar, 1/16,
     //    quantize source on — the modal's defaults).
     let sent = drive(
         UiAction::Eval(format!(
-            "(eseq.effects.rack-groove/open-extract {group_id})
-             (set! eseq.effects.rack-groove/extract-name \"Take\")
-             (eseq.effects.rack-groove/commit-extract)"
+            "(eseq.rack-groove-buffer/open-extract {group_id})
+             (set! eseq.rack-groove-buffer/extract-name \"Take\")
+             (eseq.rack-groove-buffer/commit-extract)"
         )),
         &mut app,
         &mut editor,
@@ -319,7 +348,7 @@ fn extract_pick_and_play_a_rack_groove_through_the_ui() {
     assert_eq!(
         editor
             .runtime_mut()
-            .eval_str("eseq.effects.rack-groove/extract-open?")
+            .eval_str("eseq.rack-groove-buffer/extract-open?")
             .unwrap(),
         Some(Value::Bool(false)),
         "the modal closes on commit"
@@ -327,6 +356,7 @@ fn extract_pick_and_play_a_rack_groove_through_the_ui() {
     let entry = rack_state(&editor);
     assert_eq!(string(&get(&entry, "active-label")), "Take");
     assert!(string(&get(&entry, "active-key")).starts_with("pool:"));
+    assert_eq!(get(&entry, "enabled"), Value::Bool(true));
     assert_eq!(
         app.grooves.len(),
         1,
@@ -336,9 +366,9 @@ fn extract_pick_and_play_a_rack_groove_through_the_ui() {
         number(&get(&entry, "active-groove-id")),
         app.grooves[0].id as f64
     );
-    // The picker: the pool, then a "Library" header (a `:headers` row with
-    // no key) over the library (the factory MPC swings), then Off; library
-    // entries carry `factory:` / `user:` keys.
+    // The picker: No groove, then a "This project" header over the pool and
+    // a "Factory" header over the factory MPC swings (`:headers` rows with
+    // no key); library entries carry `factory:` / `user:` keys.
     let keys = list(&get(&entry, "picker-keys"))
         .iter()
         .map(string)
@@ -347,48 +377,41 @@ fn extract_pick_and_play_a_rack_groove_through_the_ui() {
         .iter()
         .map(string)
         .collect::<Vec<_>>();
-    assert_eq!(keys[0], format!("pool:{}", app.grooves[0].id));
+    assert_eq!((labels[0].as_str(), keys[0].as_str()), ("No groove", "off"));
+    assert_eq!((labels[1].as_str(), keys[1].as_str()), ("This project", ""));
+    assert_eq!(keys[2], format!("pool:{}", app.grooves[0].id));
+    assert_eq!((labels[3].as_str(), keys[3].as_str()), ("Factory", ""));
     assert_eq!(
-        list(&get(&entry, "picker-headers")),
-        vec![Value::Number(1.0)],
-        "one header, right after the pool"
+        list(&get(&entry, "picker-headers"))[..2],
+        [Value::Number(1.0), Value::Number(3.0)]
     );
-    assert_eq!((labels[1].as_str(), keys[1].as_str()), ("Library", ""));
-    assert!(keys[2].starts_with("factory:"), "{keys:?}");
+    assert!(keys[4].starts_with("factory:"), "{keys:?}");
+
     assert!(
         keys.contains(&"factory:mpc-swing-66-16th".to_string()),
         "{keys:?}"
     );
-    assert_eq!(keys.last().map(String::as_str), Some("off"));
     let pool_field = list(&field(&editor, "groove-pool"));
     assert_eq!(pool_field.len(), 1);
     let instances = list(&get(&pool_field[0], "instances"));
     assert_eq!(instances.len(), 1, "the source rack plays it");
     assert_eq!(number(&get(&instances[0], "group-id")) as u64, group_id);
-    assert!(list(&field(&editor, "groove-library"))
-        .iter()
-        .any(|entry| string(&get(entry, "key")) == "factory:mpc-swing-58-16th"));
     assert_eq!(string(&get(&entry, "active-grid")), "1 bar · 1/16");
-    // The rack entry carries no heatmap any more (eseq-groove.12); the
-    // groove's own map, on its pool entry, is what the Grooves tab draws.
-    assert_eq!(get(&entry, "heatmap"), Value::Nil);
-    let heat = get(&pool_field[0], "heatmap");
-    assert_eq!(number(&get(&heat, "slots")), 16.0);
-    let rows = list(&get(&heat, "rows"));
+    // The lanes: the All row and each pad's own row (the one it plays).
+    let lanes = get(&entry, "lanes");
+    assert_eq!(number(&get(&lanes, "slots")), 16.0);
+    assert_eq!(list(&get(&lanes, "all-cells")).len(), 16);
+    let pads = list(&get(&lanes, "pads"));
     assert_eq!(
-        rows.iter()
-            .map(|row| get(row, "pad-note"))
-            .collect::<Vec<_>>(),
+        pads.iter().map(|pad| get(pad, "pad-note")).collect::<Vec<_>>(),
         vec![
-            Value::Nil,
             Value::Number(DRUM_RACK_FIRST_PAD_NOTE as f64),
             Value::Number((DRUM_RACK_FIRST_PAD_NOTE + 6) as f64),
         ],
-        "an All row, then one recorded row per pad in pad-note order"
+        "one lane per pad in pad-note order"
     );
-    let kick_row = &rows[1];
-    let kick_cells = list(&get(kick_row, "cells"));
-    let kick_measured = list(&get(kick_row, "measured"));
+    let kick_cells = list(&get(&pads[0], "cells"));
+    let kick_measured = list(&get(&pads[0], "measured"));
     assert!(
         (number(&kick_cells[8]) + 0.15).abs() < 1e-4,
         "the early kick"
@@ -399,6 +422,9 @@ fn extract_pick_and_play_a_rack_groove_through_the_ui() {
         Value::Bool(false),
         "an unplayed slot is filled, dimmed"
     );
+    assert_eq!(get(&pads[0], "enabled"), Value::Bool(true));
+    let kick_share_field = string(&get(&pads[0], "amount-field"));
+    assert_eq!(number(&field(&editor, &kick_share_field)), 1.0);
     // Quantize source: the take is now on the grid (kick step 7 -> 8), no
     // Delay left.
     let patterns = &app.state.pattern;
@@ -407,127 +433,92 @@ fn extract_pick_and_play_a_rack_groove_through_the_ui() {
         assert_eq!(patterns.step_data[KICK].get(step, StepParam::Delay), 0.0);
     }
     // The member's swing control shows the groove hint instead.
-    assert_eq!(
+    let groove_active_for_kick = |editor: &mut Editor| {
         editor
             .runtime_mut()
             .eval_str(&format!(
                 "(eseq.drum-rack-v2/groove-active-for-track? {KICK})"
             ))
-            .unwrap(),
-        Some(Value::Bool(true))
-    );
+            .unwrap()
+    };
+    assert_eq!(groove_active_for_kick(&mut editor), Some(Value::Bool(true)));
 
-    // The slim section itself lays out (eseq-groove.12): panel, picker,
-    // knobs, Extract and the Grooves tab link; no heatmap, rename or delete.
-    editor
-        .runtime_mut()
-        .eval_str("(effect-buffer \"*groove-test*\" (eseq.effects.rack-groove/panel 0))")
-        .expect("mount the groove panel");
-    editor.set_layout_viewport(160, 30);
+    // The buffer lays out: header, amounts and a lane per pad.
+    editor.set_layout_viewport(40, 24);
     editor.refresh_runtime_side_effects();
     let buffer = editor
         .buffers
         .iter()
-        .find(|b| b.name == "*groove-test*")
-        .unwrap()
+        .find(|b| b.name == "*groove*")
+        .expect("the *groove* buffer")
         .id;
     editor.set_active_buffer(buffer);
     editor.refresh_runtime_side_effects();
-    let layout = editor.widget_layout().expect("groove panel layout");
-    let panel = find_debug(&layout, "rack-groove-panel").expect("groove panel");
-    assert_visible(panel, "groove panel");
+    let layout = editor.widget_layout().expect("groove buffer layout");
+    let panel = find_debug(&layout, "rack-groove-buffer").expect("groove buffer");
+    assert_visible(panel, "groove buffer");
     for name in [
         "rack-groove-picker",
-        "rack-groove-extract",
-        "rack-groove-tab-link",
+        "rack-groove-actions",
+        "rack-groove-enabled",
         "rack-groove-timing",
         "rack-groove-velocity",
         "rack-groove-random",
+        "rack-groove-all",
+        "rack-groove-lanes-scroll",
+        "rack-groove-pad",
+        "rack-groove-pad-amount",
+        "rack-groove-pad-enabled",
+        "rack-groove-scale",
     ] {
         assert_visible(
             find_debug(panel, name).unwrap_or_else(|| panic!("{name}")),
             name,
         );
     }
-    assert!(find_debug(panel, "rack-groove-heatmap").is_none());
-    fn has_stable_key(node: &eseqlisp::layout::LayoutNode, part: &str) -> bool {
-        node.stable_key
-            .as_deref()
-            .is_some_and(|key| key.contains(part))
-            || node
-                .children
-                .iter()
-                .any(|child| has_stable_key(child, part))
-    }
-    for gone in [
-        "rack-groove-rename",
-        "rack-groove-delete",
-        "rack-groove-heat",
-    ] {
-        assert!(!has_stable_key(panel, gone), "{gone} left the panel");
-    }
     let picker = find_debug(panel, "rack-groove-picker").unwrap();
+    assert_eq!(picker.props.get("filterable"), Some(&Value::Bool(true)));
     assert_eq!(
-        picker.props.get("headers").map(list),
-        Some(vec![Value::Number(1.0)]),
-        "the picker draws the Library header as a header"
+        picker.props.get("detail"),
+        Some(&Value::String("1 bar · 1/16".into())),
+        "the trigger shows the groove's grid before its chevron"
     );
-    let picker_on_change = picker
-        .props
-        .get("on-change")
-        .expect("picker on-change")
-        .clone();
-    let link_on_click = find_debug(panel, "rack-groove-tab-link")
-        .unwrap()
-        .props
-        .get("on-click")
-        .expect("link on-click")
-        .clone();
-
-    // The Grooves tab link opens the browser on the Grooves tab with this
-    // rack's groove selected: its In use row, a row the tab's tree has.
-    let tab_state = |editor: &mut Editor| -> (Value, Value, Value) {
-        let mut eval = |source: &str| editor.runtime_mut().eval_str(source).unwrap().unwrap();
-        (
-            eval("eseq.vanilla/sbrowser-tab"),
-            eval("eseq.grooves-tab/selected-key"),
-            eval("eseq.grooves-tab/selected-path"),
-        )
+    let details = list(picker.props.get("details").expect("picker details"));
+    assert_eq!(details.len(), labels.len(), "a detail per option");
+    assert_eq!(details[2], Value::String("1 bar · 1/16".into()), "the take's grid");
+    let footer = string(picker.props.get("footer").expect("the Extract footer"));
+    // The ≡ menu beside the picker: Extract, then the playing groove's
+    // Save / Rename / Duplicate / Delete.
+    let actions = find_debug(panel, "rack-groove-actions").unwrap();
+    assert_eq!(
+        list(actions.props.get("options").expect("actions")).iter().map(string).collect::<Vec<_>>(),
+        [
+            "Extract from this rack’s clip…",
+            "Save to Library",
+            "Rename…",
+            "Duplicate",
+            "Delete from Project"
+        ]
+    );
+    let actions_on_change = actions.props.get("on-change").expect("actions on-change").clone();
+    let picker_on_change = picker.props.get("on-change").expect("picker on-change").clone();
+    let on = |node: &str, prop: &str| {
+        find_debug(panel, node)
+            .unwrap_or_else(|| panic!("{node}"))
+            .props
+            .get(prop)
+            .unwrap_or_else(|| panic!("{node} {prop}"))
+            .clone()
     };
-    editor
-        .runtime_mut()
-        .eval_str("(eseq.browser/select-tab \"samples\")")
-        .unwrap();
-    let sent = drive(
-        UiAction::Call(
-            link_on_click.clone(),
-            vec![Value::Number(0.0), Value::Number(0.0), Value::Nil],
-        ),
-        &mut app,
-        &mut editor,
-    );
-    assert!(sent.is_empty(), "the link is UI only: {sent:?}");
-    let take_id = app.grooves[0].id;
-    let in_use_path = format!("in-use/pool:{take_id}");
-    assert_eq!(
-        tab_state(&mut editor),
-        (
-            Value::String("grooves".into()),
-            Value::String(format!("pool:{take_id}").into()),
-            Value::String(in_use_path.clone().into()),
-        )
-    );
-    let tree = super::super::grooves_tab::groove_tree_value(
-        "",
-        &field(&editor, "groove-pool"),
-        &field(&editor, "groove-library"),
-    );
-    assert!(
-        list(&tree)
-            .iter()
-            .any(|row| get(row, "path") == Value::String(in_use_path.clone().into())),
-        "the selected path is the tree's In use row for the take"
-    );
+    // The first pad row is the kick (pad-note order).
+    let kick_share_on_change = on("rack-groove-pad-amount", "on-change");
+    let kick_include_on_click = on("rack-groove-pad-enabled", "on-click");
+    let enabled_on_change = on("rack-groove-enabled", "on-change");
+    let scale_on_change = on("rack-groove-scale", "on-change");
+    // No role was set, so no lane carries a role badge (never a role
+    // guessed from a pad's note, like "Kick" for C1).
+    assert!(find_debug(panel, "rack-groove-role").is_none());
+    assert_eq!(get(&pads[0], "role-tag"), Value::String("".into()));
 
     // 2. Play: the quantized source through the groove lands where the take
     //    was heard (one repeat, so the slot median IS the hit).
@@ -545,41 +536,43 @@ fn extract_pick_and_play_a_rack_groove_through_the_ui() {
     check_take(&[2, 6, 10, 14], &hat_heard, HAT);
     assert!(played(KICK, 2.0).unwrap() < 2.0, "the kick is pushed EARLY");
 
-    // 3. Pick through the picker dropdown's own `:on-change`: the Library
-    //    header picks nothing, Off plays straight, a factory library swing
-    //    is copied into the pool (copy-on-apply) and activated, playing its
-    //    shared row on every pad, and the extracted groove comes back.
+    // 3. Pick through the picker dropdown's own `:on-change`: the footer
+    //    opens the Extract Groove modal, No groove plays straight, a factory
+    //    library swing is copied into the pool (copy-on-apply) and
+    //    activated, playing its shared row on every pad, and the extracted
+    //    groove comes back.
     let pick = |label: &str| vec![Value::String(label.into())];
     let sent = drive(
-        UiAction::Call(picker_on_change.clone(), pick("Library")),
+        UiAction::Call(picker_on_change.clone(), pick(&footer)),
         &mut app,
         &mut editor,
     );
-    assert!(sent.is_empty(), "the header is not a groove: {sent:?}");
-    assert_eq!(app.grooves.len(), 1);
+    assert!(sent.is_empty(), "the footer is UI only: {sent:?}");
+    assert_eq!(
+        editor.runtime_mut().eval_str("eseq.rack-groove-buffer/extract-open?").unwrap(),
+        Some(Value::Bool(true)),
+        "the footer opens the Extract Groove modal"
+    );
+    editor
+        .runtime_mut()
+        .eval_str("(set! eseq.rack-groove-buffer/extract-open? false)")
+        .unwrap();
     let sent = drive(
-        UiAction::Call(picker_on_change.clone(), pick("Off")),
+        UiAction::Call(picker_on_change.clone(), pick("No groove")),
         &mut app,
         &mut editor,
     );
     assert_eq!(sent, vec!["set-rack-groove".to_string()]);
     assert_eq!(string(&get(&rack_state(&editor), "active-key")), "off");
     assert!(played(KICK, 2.0).is_none() && played(HAT, 0.5).is_none());
-    assert_eq!(
-        editor
-            .runtime_mut()
-            .eval_str(&format!(
-                "(eseq.drum-rack-v2/groove-active-for-track? {KICK})"
-            ))
-            .unwrap(),
-        Some(Value::Bool(false))
-    );
+    assert_eq!(groove_active_for_kick(&mut editor), Some(Value::Bool(false)));
     let undo_before_library = app.history.undo_len();
-    drive(
+    let sent = drive(
         UiAction::Call(picker_on_change.clone(), pick("MPC 16 Swing 66%")),
         &mut app,
         &mut editor,
     );
+    assert_eq!(sent, vec!["set-rack-groove".to_string()]);
     assert_eq!(
         app.grooves.len(),
         2,
@@ -591,35 +584,23 @@ fn extract_pick_and_play_a_rack_groove_through_the_ui() {
         undo_before_library + 1,
         "import + activate is one undo step"
     );
+    let entry = rack_state(&editor);
     assert_eq!(
-        string(&get(&rack_state(&editor), "active-key")),
+        string(&get(&entry, "active-key")),
         format!("pool:{}", app.grooves[1].id)
     );
-    // The imported groove is now a pool groove in the picker, above the
-    // header, and the one the rack's link selects in the tab.
-    let entry = rack_state(&editor);
+    // The imported groove is now a pool groove under This project.
     let labels = list(&get(&entry, "picker-labels"))
         .iter()
         .map(string)
         .collect::<Vec<_>>();
-    assert_eq!(&labels[..3], ["Take", "MPC 16 Swing 66%", "Library"]);
     assert_eq!(
-        list(&get(&entry, "picker-headers")),
-        vec![Value::Number(2.0)]
+        &labels[..5],
+        ["No groove", "This project", "Take", "MPC 16 Swing 66%", "Factory"]
     );
     assert_eq!(string(&get(&entry, "active-label")), "MPC 16 Swing 66%");
-    drive(
-        UiAction::Call(
-            link_on_click.clone(),
-            vec![Value::Number(0.0), Value::Number(0.0), Value::Nil],
-        ),
-        &mut app,
-        &mut editor,
-    );
-    assert_eq!(
-        tab_state(&mut editor).1,
-        Value::String(format!("pool:{}", app.grooves[1].id).into())
-    );
+    // A two-slot swing tiles out to a bar of lanes.
+    assert_eq!(number(&get(&get(&entry, "lanes"), "slots")), 16.0);
     let swung = played(HAT, 0.25).unwrap();
     assert!(
         (swung - (0.25 + 0.32 * 0.25)).abs() < 2.0 / spq,
@@ -631,10 +612,25 @@ fn extract_pick_and_play_a_rack_groove_through_the_ui() {
         &mut app,
         &mut editor,
     );
+    assert_eq!(
+        string(&get(&rack_state(&editor), "active-key")),
+        format!("pool:{}", app.grooves[0].id)
+    );
     check_take(&[0, 8, 10], &kick_heard, KICK);
 
-    // 4. Amount knobs: a drag writes through immediately and lands as ONE
+    // 4. Amount pickers: a drag writes through immediately and lands as ONE
     //    undo step when the gesture ends.
+    let rack_settings = |app: &app::App| {
+        app.groups
+            .iter()
+            .find(|g| g.id == group_id)
+            .unwrap()
+            .rack
+            .as_ref()
+            .unwrap()
+            .groove
+            .clone()
+    };
     let undo_len = app.history.undo_len();
     for value in [0.8, 0.6, 0.5] {
         let sent = drive(
@@ -665,18 +661,200 @@ fn extract_pick_and_play_a_rack_groove_through_the_ui() {
         app::edit::undo(&mut app),
         app::history::HistoryReplay::Applied(_)
     ));
-    let timing = app
-        .groups
-        .iter()
-        .find(|g| g.id == group_id)
-        .unwrap()
-        .rack
-        .as_ref()
-        .unwrap()
-        .groove
-        .timing_amount;
-    assert_eq!(timing, 1.0, "undo restores the pre-drag amount");
+    assert_eq!(
+        rack_settings(&app).timing_amount,
+        1.0,
+        "undo restores the pre-drag amount"
+    );
     check_take(&[0, 8, 10], &kick_heard, KICK);
+
+    // 5. A pad's share: the kick's Amt picker halves only the kick; its
+    //    include dot leaves it straight (still grooved, so no track swing)
+    //    while the hat keeps the pocket. Both undo.
+    let undo_len = app.history.undo_len();
+    let sent = drive(
+        UiAction::Call(kick_share_on_change.clone(), vec![Value::Number(0.5)]),
+        &mut app,
+        &mut editor,
+    );
+    assert_eq!(sent, vec!["set-rack-groove-pad-amount".to_string()]);
+    assert_eq!(number(&field(&editor, &kick_share_field)), 0.5);
+    let half = played(KICK, 2.0).unwrap();
+    assert!(
+        (half - (2.0 - 0.5 * 0.15 * STEP_BEATS)).abs() < 2.0 / spq,
+        "half kick share: {half}"
+    );
+    check_take(&[2, 6, 10, 14], &hat_heard, HAT);
+    app::edit::finish_active_gesture(&mut app);
+    assert_eq!(app.history.undo_len(), undo_len + 1);
+    let sent = drive(
+        UiAction::Call(
+            kick_include_on_click.clone(),
+            vec![Value::Number(0.0), Value::Number(0.0), Value::Nil],
+        ),
+        &mut app,
+        &mut editor,
+    );
+    assert_eq!(sent, vec!["set-rack-groove-pad-enabled".to_string()]);
+    assert_eq!(
+        rack_settings(&app).pad(DRUM_RACK_FIRST_PAD_NOTE),
+        sequencer::groove::RackGroovePad {
+            pad_note: DRUM_RACK_FIRST_PAD_NOTE,
+            amount: 0.5,
+            enabled: false,
+        },
+        "excluding keeps the pad's amount"
+    );
+    let pads = list(&get(&get(&rack_state(&editor), "lanes"), "pads"));
+    assert_eq!(get(&pads[0], "enabled"), Value::Bool(false));
+    assert_eq!(played(KICK, 2.0), Some(2.0), "an excluded pad plays straight");
+    check_take(&[2, 6, 10, 14], &hat_heard, HAT);
+    for _ in 0..2 {
+        assert!(matches!(
+            app::edit::undo(&mut app),
+            app::history::HistoryReplay::Applied(_)
+        ));
+    }
+    assert!(rack_settings(&app).pads.is_empty(), "undo restores every pad");
+    check_take(&[0, 8, 10], &kick_heard, KICK);
+
+    // 6. The on/off switch bypasses the groove and keeps the selection.
+    let sent = drive(
+        UiAction::Call(enabled_on_change.clone(), vec![Value::Bool(false)]),
+        &mut app,
+        &mut editor,
+    );
+    assert_eq!(sent, vec!["set-rack-groove-enabled".to_string()]);
+    let entry = rack_state(&editor);
+    assert_eq!(get(&entry, "enabled"), Value::Bool(false));
+    assert_eq!(string(&get(&entry, "active-label")), "Take");
+    assert!(played(KICK, 2.0).is_none() && played(HAT, 0.5).is_none());
+    assert_eq!(groove_active_for_kick(&mut editor), Some(Value::Bool(false)));
+    drive(
+        UiAction::Call(enabled_on_change.clone(), vec![Value::Bool(true)]),
+        &mut app,
+        &mut editor,
+    );
+    check_take(&[0, 8, 10], &kick_heard, KICK);
+
+    // 7. The ≡ menu acts on the playing groove.
+    let pool_len = app.grooves.len();
+    let sent = drive(
+        UiAction::Call(actions_on_change.clone(), vec![Value::String("Duplicate".into())]),
+        &mut app,
+        &mut editor,
+    );
+    assert_eq!(sent, vec!["duplicate-pool-groove".to_string()]);
+    assert_eq!(app.grooves.len(), pool_len + 1);
+    assert_eq!(app.grooves.last().unwrap().name, "Take copy");
+
+    // 8. Scale 2×: the take's grid doubles (the picker reads 2 bars · 1/8)
+    //    and the early kick of step 8 lands at beat 4, half a slot-width
+    //    scaled: the same pocket for the pattern on 1/8 steps.
+    let sent = drive(
+        UiAction::Call(scale_on_change.clone(), vec![Value::String("2×".into())]),
+        &mut app,
+        &mut editor,
+    );
+    assert_eq!(sent, vec!["set-rack-groove-scale".to_string()]);
+    let entry = rack_state(&editor);
+    assert_eq!(string(&get(&entry, "active-grid")), "2 bars · 1/8");
+    assert_eq!(string(&get(&entry, "scale-label")), "2×");
+    let doubled = played(KICK, 4.0).unwrap();
+    assert!(
+        (doubled - (4.0 - 0.15 * 2.0 * STEP_BEATS)).abs() < 2.0 / spq,
+        "2× kick: {doubled}"
+    );
+    drive(
+        UiAction::Call(scale_on_change.clone(), vec![Value::String("1×".into())]),
+        &mut app,
+        &mut editor,
+    );
+    check_take(&[0, 8, 10], &kick_heard, KICK);
+
+    // 9. A role set on the pad (the pad grid's Role ▸ menu) reaches the
+    //    kick's lane as its tag; clearing it back to Standard removes it.
+    let set_role = |role: &str| {
+        format!(
+            "(host-command \"set-rack-pad-role\" (dict :group-id {group_id} :pad-note {DRUM_RACK_FIRST_PAD_NOTE} :role \"{role}\"))"
+        )
+    };
+    let sent = drive(UiAction::Eval(set_role("closed-hat")), &mut app, &mut editor);
+    assert_eq!(sent, vec!["set-rack-pad-role".to_string()]);
+    let pads = list(&get(&get(&rack_state(&editor), "lanes"), "pads"));
+    assert_eq!(get(&pads[0], "role-tag"), Value::String("CH".into()));
+    drive(UiAction::Eval(set_role("standard")), &mut app, &mut editor);
+    let pads = list(&get(&get(&rack_state(&editor), "lanes"), "pads"));
+    assert_eq!(get(&pads[0], "role-tag"), Value::String("".into()));
+
+    // 10. Clips: grooves are per clip. Converted, a clip shows the rack's
+    //     groove until its first edit gives it its own: Timing 50% on one
+    //     clip leaves the other at the rack's; 75% there leaves the first at
+    //     50%. "Use Rack Groove" hands a clip back; "Apply to All" makes a
+    //     clip's groove every clip's.
+    let eval = |editor: &mut Editor, source: &str| editor.runtime_mut().eval_str(source).unwrap();
+    let sent = drive(
+        UiAction::Eval(format!("(eseq.drum-rack-v2/convert-to-clips {group_id})")),
+        &mut app,
+        &mut editor,
+    );
+    assert_eq!(sent, vec!["convert-rack-to-clips".to_string()]);
+    let verse = app.current_rack_clip(group_id).expect("the playing clip");
+    let chorus = app.save_rack_clip_as_recorded(group_id, "Chorus").expect("second clip");
+    let view_clip = |editor: &mut Editor| {
+        eval(editor, &format!("(eseq.drum-rack-v2/groove-clip-id {group_id})"))
+    };
+    let launch = |clip: u64| {
+        UiAction::Eval(format!(
+            "(eseq.drum-rack-v2/launch-clip {group_id} {clip})"
+        ))
+    };
+    let set_timing = |value: f64| {
+        UiAction::Eval(format!(
+            "(eseq.drum-rack-v2/set-groove-amount {group_id} \"timing\" {value})"
+        ))
+    };
+    let timing_of = |app: &app::App, clip: u64| {
+        app.groups.iter().find(|g| g.id == group_id).unwrap().rack.as_ref().unwrap()
+            .groove_for_clip(Some(clip)).timing_amount
+    };
+    drive(launch(verse), &mut app, &mut editor);
+    assert_eq!(view_clip(&mut editor), Some(Value::Number(-1.0)), "the verse shows the rack's");
+    let menu = list(&eval(&mut editor, &format!("(eseq.rack-groove-buffer/menu-actions {group_id})")).unwrap());
+    assert!(menu.contains(&Value::String("Apply to All Clips in This Rack".into())), "{menu:?}");
+    assert!(!menu.contains(&Value::String("Use Rack Groove for This Clip".into())));
+
+    drive(set_timing(0.5), &mut app, &mut editor);
+    app::edit::finish_active_gesture(&mut app);
+    assert_eq!(view_clip(&mut editor), Some(Value::Number(verse as f64)), "the edit forked it");
+    assert_eq!(
+        number(&field(&editor, &format!("rack-groove-timing-{group_id}-c{verse}"))),
+        0.5
+    );
+    drive(launch(chorus), &mut app, &mut editor);
+    assert_eq!(app.current_rack_clip(group_id), Some(chorus));
+    assert_eq!(timing_of(&app, chorus), 1.0, "the chorus is untouched");
+    drive(set_timing(0.75), &mut app, &mut editor);
+    app::edit::finish_active_gesture(&mut app);
+    drive(launch(verse), &mut app, &mut editor);
+    assert_eq!(timing_of(&app, verse), 0.5, "the verse kept its own");
+    assert_eq!(timing_of(&app, chorus), 0.75);
+    let rack = app.groups.iter().find(|g| g.id == group_id).unwrap().rack.clone().unwrap();
+    assert_eq!(rack.groove.timing_amount, 1.0, "the rack's own groove is untouched");
+
+    let menu = list(&eval(&mut editor, &format!("(eseq.rack-groove-buffer/menu-actions {group_id})")).unwrap());
+    assert!(menu.contains(&Value::String("Use Rack Groove for This Clip".into())), "{menu:?}");
+    let sent = drive(
+        UiAction::Call(
+            actions_on_change.clone(),
+            vec![Value::String("Apply to All Clips in This Rack".into())],
+        ),
+        &mut app,
+        &mut editor,
+    );
+    assert_eq!(sent, vec!["apply-rack-groove-to-all-clips".to_string()]);
+    assert_eq!((timing_of(&app, verse), timing_of(&app, chorus)), (0.5, 0.5));
+    assert_eq!(view_clip(&mut editor), Some(Value::Number(-1.0)), "every clip follows again");
 }
 
 #[test]
@@ -699,4 +877,19 @@ fn extract_modal_payload_maps_to_the_extract_request() {
     assert_eq!(request.options.period_beats, 8.0);
     assert_eq!(request.options.resolution_beats, 0.125);
     assert!(!request.quantize_source);
+}
+
+#[test]
+fn groove_confirm_messages_list_racks() {
+    assert_eq!(
+        super::delete_pool_groove_confirm_message("Take", &["Kit A".to_string()]),
+        "Delete groove 'Take'? Kit A plays it; it will play straight (undo restores it)."
+    );
+    assert_eq!(
+        super::delete_pool_groove_confirm_message(
+            "Take",
+            &["Kit A".into(), "Kit B".into(), "Kit C".into()]
+        ),
+        "Delete groove 'Take'? Kit A, Kit B and Kit C play it; they will play straight (undo restores it)."
+    );
 }

@@ -10355,6 +10355,7 @@ const RACK_GROOVE_DRAG_GESTURE_ID: GestureId = GestureId(0x7267_726f_6f76_6564);
 pub fn apply_rack_groove_amount_drag(
     app: &mut App,
     group_id: u64,
+    clip: Option<crate::sequencer::RackClipId>,
     mutate: impl FnOnce(&mut crate::groove::RackGrooveSettings),
 ) -> Result<bool, String> {
     let current = app
@@ -10362,7 +10363,7 @@ pub fn apply_rack_groove_amount_drag(
         .iter()
         .find(|group| group.id == group_id)
         .and_then(|group| group.rack.as_ref())
-        .map(|rack| rack.groove.clone())
+        .map(|rack| rack.groove_for_clip(clip).clone())
         .ok_or_else(|| format!("Track group {group_id} is not a drum rack"))?;
     let mut next = current.clone();
     mutate(&mut next);
@@ -10370,7 +10371,7 @@ pub fn apply_rack_groove_amount_drag(
     if next == current {
         return Ok(false);
     }
-    let merge_key = MergeKey::new(format!("rack-groove-amounts:{group_id}"));
+    let merge_key = MergeKey::new(format!("rack-groove-amounts:{group_id}:{clip:?}"));
     let continuing = app
         .history
         .active_gesture()
@@ -10400,7 +10401,7 @@ pub fn apply_rack_groove_amount_drag(
         .find(|group| group.id == group_id)
         .and_then(|group| group.rack.as_mut())
     {
-        rack.groove = next;
+        *rack.groove_target_mut(clip) = next;
     }
     app.publish_rack_choke_runtime();
     Ok(true)

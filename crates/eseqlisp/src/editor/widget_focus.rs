@@ -644,9 +644,7 @@ impl Editor {
         };
         // Space bar should only be consumed by text-entry widgets (for typing).
         // All other widgets let space fall through to keybindings.
-        let is_text_input = node.widget_type == "text-input"
-            || node.widget_type == "textbox"
-            || crate::widget_render::patcher::patcher_has_text_edit(&node);
+        let is_text_input = node_captures_text_input(&node);
         if key.code == KeyCode::Char(' ') && !is_text_input {
             return false;
         }
@@ -1353,6 +1351,7 @@ fn find_node_by_id_ref(node: &LayoutNode, id: u64) -> Option<&LayoutNode> {
 fn node_captures_text_input(node: &LayoutNode) -> bool {
     matches!(node.widget_type.as_str(), "text-input" | "textbox")
         || crate::widget_render::patcher::patcher_has_text_edit(node)
+        || crate::widget_render::dropdown::filter_captures_text(node)
 }
 
 /// The patch file a patcher node is showing, from the props the widget itself

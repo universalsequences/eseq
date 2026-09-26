@@ -658,6 +658,7 @@ fn settings_default_to_timing_only_and_sanitize_into_range() {
         timing_amount: 9.0,
         velocity_amount: -1.0,
         random_amount: f32::NAN,
+        ..Default::default()
     };
     wild.sanitize();
     assert_eq!(wild.timing_amount, GROOVE_TIMING_AMOUNT_MAX);
@@ -1036,6 +1037,7 @@ fn track_groove_snapshots_resolve_pad_rows_by_note_else_shared() {
             timing_amount: 0.75,
             velocity_amount: 0.5,
             random_amount: 0.25,
+            ..Default::default()
         },
         ..Default::default()
     };
@@ -1186,6 +1188,7 @@ fn kit_groove_copies_the_active_pool_groove_and_its_amounts() {
         timing_amount: 1.25,
         velocity_amount: 0.5,
         random_amount: 0.1,
+        ..Default::default()
     };
     let kit = KitGroove::from_rack(&settings, &pool).expect("an active groove travels");
     assert_eq!(kit.groove, pool[1]);
@@ -1950,4 +1953,118 @@ fn same_kit_and_role_less_grooves_resolve_by_pad_note_as_before() {
         *table[1].as_ref().unwrap().row,
         *role_less.pad_row(SNARE_D1).unwrap()
     );
+}
+
+/// The rack groove buffer's switches: a bypassed rack plays no groove (and
+/// keeps its selection); a pad's share scales that pad's three amounts, and
+/// an excluded pad keeps a groove entry at zero amounts, so it plays straight
+/// instead of falling back to its track's swing.
+#[test]
+fn track_groove_snapshots_honour_bypass_and_pad_shares() {
+    use crate::project::{ProjectRackConfig, ProjectRackPad};
+    let mut groove = mpc_swing_groove(62, 0.25);
+    groove.id = 5;
+    let mut rack = ProjectRackConfig {
+        pads: vec![ProjectRackPad::new(36, 0), ProjectRackPad::new(42, 1)],
+        groove: RackGrooveSettings {
+            active: Some(5),
+            timing_amount: 1.2,
+            velocity_amount: 0.8,
+            random_amount: 0.4,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    rack.groove.pad_mut(36).amount = 0.5;
+    rack.groove.pad_mut(42).enabled = false;
+    let pool = vec![groove];
+    let members = vec![0usize, 1];
+    let table = track_groove_snapshots([(members.as_slice(), &rack)], &pool, 2);
+    let kick = table[0].as_ref().expect("kick");
+    assert_eq!(
+        (kick.timing_amount, kick.velocity_amount, kick.random_amount),
+        (0.6, 0.4, 0.2)
+    );
+    let hat = table[1].as_ref().expect("an excluded pad still has an entry");
+    assert_eq!(
+        (hat.timing_amount, hat.velocity_amount, hat.random_amount),
+        (0.0, 0.0, 0.0)
+    );
+    assert_eq!(hat.offset_beats(0.25), 0.0, "an excluded pad plays straight");
+
+    rack.groove.enabled = false;
+    let table = track_groove_snapshots([(members.as_slice(), &rack)], &pool, 2);
+    assert!(table.iter().all(Option::is_none), "a bypassed rack plays no groove");
+    assert_eq!(rack.groove.active, Some(5), "bypass keeps the selection");
+}
+
+/// Sanitize keeps one entry per pad, in pad-note order, clamps the share and
+/// drops entries that only restate the default; the new fields round-trip
+/// and are omitted from the file at their defaults.
+#[test]
+fn rack_groove_pad_settings_sanitize_and_round_trip() {
+    let mut settings = RackGrooveSettings::default();
+    settings.pad_mut(42).amount = 0.25;
+    settings.pad_mut(36).enabled = false;
+    settings.pad_mut(36).amount = -2.0;
+    // Clamped to the maximum share, which is the default: dropped.
+    settings.pad_mut(40).amount = 3.0;
+    // Set, then restored: dropped.
+    settings.pad_mut(38).amount = 0.7;
+    settings.pad_mut(38).amount = 1.0;
+    // A duplicate entry for the same pad: the first wins.
+    settings.pads.push(RackGroovePad { pad_note: 42, amount: 0.1, enabled: true });
+    settings.sanitize();
+    assert_eq!(
+        settings.pads,
+        vec![
+            RackGroovePad { pad_note: 36, amount: 0.0, enabled: false },
+            RackGroovePad { pad_note: 42, amount: 0.25, enabled: true },
+        ]
+    );
+    assert_eq!(settings.pad(40).amount, GROOVE_PAD_AMOUNT_MAX);
+    assert_eq!(settings.pad(38), RackGroovePad::new(38));
+    let json = serde_json::to_value(&RackGrooveSettings::default()).unwrap();
+    assert!(json.get("enabled").is_none() && json.get("pads").is_none());
+    let mut bypassed = settings.clone();
+    bypassed.enabled = false;
+    let back: RackGrooveSettings =
+        serde_json::from_value(serde_json::to_value(&bypassed).unwrap()).unwrap();
+    assert_eq!(back, bypassed);
+}
+
+/// The rack's Scale stretches the groove's grid: at 2× a 1/16 groove plays
+/// on 1/8 slots with the same offsets in slots, so an off-beat 8th lands
+/// exactly as far into its (longer) slot as the 16th did; sanitize keeps
+/// only the offered scales.
+#[test]
+fn track_groove_snapshots_stretch_the_grid_by_the_rack_scale() {
+    use crate::project::{ProjectRackConfig, ProjectRackPad};
+    let mut groove = mpc_swing_groove(62, 0.25);
+    groove.id = 2;
+    let mut rack = ProjectRackConfig {
+        pads: vec![ProjectRackPad::new(36, 0)],
+        groove: RackGrooveSettings { active: Some(2), ..Default::default() },
+        ..Default::default()
+    };
+    let pool = vec![groove];
+    let at = |rack: &ProjectRackConfig| {
+        track_groove_snapshots([([0usize].as_slice(), rack)], &pool, 1)[0]
+            .clone()
+            .expect("grooved")
+    };
+    let plain = at(&rack);
+    rack.groove.scale = 2.0;
+    let doubled = at(&rack);
+    assert_eq!((doubled.period_beats, doubled.resolution_beats), (1.0, 0.5));
+    assert!((doubled.offset_beats(0.5) - 2.0 * plain.offset_beats(0.25)).abs() < 1e-12);
+    assert_eq!(doubled.offset_beats(0.25), plain.offset_beats(0.125) * 2.0);
+
+    let mut odd = RackGrooveSettings { scale: 3.0, ..Default::default() };
+    odd.sanitize();
+    assert_eq!(odd.scale, 1.0);
+    assert!(serde_json::to_value(&RackGrooveSettings::default())
+        .unwrap()
+        .get("scale")
+        .is_none());
 }

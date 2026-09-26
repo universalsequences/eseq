@@ -1432,6 +1432,17 @@ pub struct ProjectRackConfig {
     /// spec.md), and how much of it.
     #[serde(default, skip_serializing_if = "RackGrooveSettings::is_default")]
     pub groove: RackGrooveSettings,
+    /// Clips that play their OWN groove instead of `groove` (the rack
+    /// default), keyed by clip id. A clip with no entry follows the rack.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub clip_grooves: Vec<RackClipGroove>,
+}
+
+/// One clip's own groove settings (see `ProjectRackConfig::clip_grooves`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RackClipGroove {
+    pub clip: RackClipId,
+    pub settings: RackGrooveSettings,
 }
 
 fn is_zero_u64(value: &u64) -> bool {
@@ -1625,6 +1636,47 @@ impl ProjectRackPad {
 }
 
 impl ProjectRackConfig {
+    /// The groove settings clip `clip` plays: its own, else the rack's.
+    /// `None` (no clip, or a legacy rack) is the rack's.
+    pub fn groove_for_clip(&self, clip: Option<RackClipId>) -> &RackGrooveSettings {
+        clip.and_then(|clip| self.clip_groove(clip))
+            .unwrap_or(&self.groove)
+    }
+
+    /// Clip `clip`'s own groove, if it has one.
+    pub fn clip_groove(&self, clip: RackClipId) -> Option<&RackGrooveSettings> {
+        self.clip_grooves
+            .iter()
+            .find(|entry| entry.clip == clip)
+            .map(|entry| &entry.settings)
+    }
+
+    /// The settings an edit aimed at clip `clip` changes. Grooves are per
+    /// clip: a clip that still follows the rack gets its own groove first
+    /// (a copy of the rack's), so editing one clip never changes another.
+    /// `None` (a rack without clips) edits the rack's own groove, which
+    /// "Apply to All Clips" also sets.
+    pub fn groove_target_mut(&mut self, clip: Option<RackClipId>) -> &mut RackGrooveSettings {
+        let Some(clip) = clip else {
+            return &mut self.groove;
+        };
+        let index = match self.clip_grooves.iter().position(|entry| entry.clip == clip) {
+            Some(index) => index,
+            None => {
+                let settings = self.groove.clone();
+                self.clip_grooves.push(RackClipGroove { clip, settings });
+                self.clip_grooves.len() - 1
+            }
+        };
+        &mut self.clip_grooves[index].settings
+    }
+
+    /// Every groove setting the rack holds: the rack's, then each clip's.
+    pub fn all_groove_settings_mut(&mut self) -> impl Iterator<Item = &mut RackGrooveSettings> {
+        std::iter::once(&mut self.groove)
+            .chain(self.clip_grooves.iter_mut().map(|entry| &mut entry.settings))
+    }
+
     pub fn pad_index_for_note(&self, pad_note: i32) -> Option<usize> {
         self.pads.iter().position(|pad| pad.pad_note == pad_note)
     }
@@ -5310,6 +5362,7 @@ mod tests {
                     ProjectRackPad::new(38, 1),
                 ],
                 choke_groups: vec![None, Some(1)],
+                clip_grooves: Vec::new(),
             }),
             rack_members: Vec::new(),
         }];
@@ -5414,6 +5467,7 @@ mod tests {
                 }],
                 next_clip_id: 5,
                 groove: Default::default(),
+                clip_grooves: Vec::new(),
             }),
             rack_members: Vec::new(),
         }];
@@ -5495,6 +5549,7 @@ mod tests {
             timing_amount: 0.8,
             velocity_amount: 0.5,
             random_amount: 0.25,
+            ..Default::default()
         };
         project.grooves = vec![test_groove(1, "Dilla"), test_groove(2, "Madlib")];
         project.groups = vec![ProjectTrackGroup {
@@ -5611,6 +5666,7 @@ mod tests {
                 ProjectRackPad::new(44, 2),
             ],
             choke_groups: vec![Some(1), Some(2), Some(3), Some(4), Some(5)],
+            clip_grooves: Vec::new(),
         };
         rack.sanitize(3);
         assert_eq!(
@@ -5639,6 +5695,7 @@ mod tests {
                 ProjectRackPad::new(96, 1),
             ],
             choke_groups: vec![Some(1), Some(2)],
+            clip_grooves: Vec::new(),
         };
         rack.sanitize(2);
         assert_eq!(
@@ -5671,6 +5728,7 @@ mod tests {
                 ProjectRackPad::new(91, 1),
             ],
             choke_groups: vec![Some(1), Some(1)],
+            clip_grooves: Vec::new(),
         };
         rack.sanitize(2);
         assert_eq!(rack.map_unmapped_members(2), 0);
@@ -7210,6 +7268,9 @@ mod tests {
                 timing_amount: 1.25,
                 velocity_amount: 0.5,
                 random_amount: 0.1,
+                enabled: true,
+                pads: Vec::new(),
+                scale: 1.0,
             })),
             legacy_grooves: Vec::new(),
         };

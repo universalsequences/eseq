@@ -2429,6 +2429,8 @@ impl App {
                     clips: Vec::new(),
                     next_clip_id: 0,
                     groove,
+                    // A kit installs no clips, so no clip plays its own groove.
+                    clip_grooves: Vec::new(),
                 };
                 if let Some(kit_groove) = &kit_groove {
                     rack.groove = super::rack_grooves::kit_groove_settings(

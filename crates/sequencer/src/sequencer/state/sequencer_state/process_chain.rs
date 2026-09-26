@@ -56,15 +56,17 @@ impl SequencerState {
         self.rack_memberships.lock().unwrap().clone()
     }
     /// Mirror of every rack member's resolved groove (rack groove spec,
-    /// "Scheduler snapshot"), read into every scheduler snapshot. Publishes
-    /// only when the table changed, so the topology funnel that calls this on
-    /// every group edit costs nothing when grooves are untouched.
-    pub fn set_track_grooves(&self, grooves: Vec<Option<crate::groove::TrackGrooveSnapshot>>) {
+    /// "Scheduler snapshot"), read into every scheduler snapshot: the rack
+    /// defaults plus each clip's own groove, which scenes pick among by the
+    /// clip they point at. Publishes only when something changed, so the
+    /// topology funnel that calls this on every group edit costs nothing when
+    /// grooves are untouched.
+    pub fn set_rack_groove_variants(&self, variants: crate::groove::RackGrooveVariants) {
         let changed = {
-            let mut current = self.track_grooves.lock().unwrap();
-            let changed = **current != grooves;
+            let mut current = self.rack_groove_variants.lock().unwrap();
+            let changed = **current != variants;
             if changed {
-                *current = Arc::new(grooves);
+                *current = Arc::new(variants);
             }
             changed
         };
@@ -72,9 +74,47 @@ impl SequencerState {
             self.publish_scheduler_snapshot();
         }
     }
-    pub fn track_grooves(&self) -> Arc<Vec<Option<crate::groove::TrackGrooveSnapshot>>> {
-        Arc::clone(&self.track_grooves.lock().unwrap())
+
+    /// A table with no clip grooves: every scene plays `grooves`.
+    pub fn set_track_grooves(&self, grooves: Vec<Option<crate::groove::TrackGrooveSnapshot>>) {
+        self.set_rack_groove_variants(crate::groove::RackGrooveVariants {
+            base: Arc::new(grooves),
+            clips: Vec::new(),
+        });
     }
+
+    fn rack_groove_variants(&self) -> Arc<crate::groove::RackGrooveVariants> {
+        Arc::clone(&self.rack_groove_variants.lock().unwrap())
+    }
+
+    /// The groove table of the CURRENT scene: each rack on the groove of the
+    /// clip the scene plays (its own, else the rack's).
+    pub fn track_grooves(&self) -> Arc<Vec<Option<crate::groove::TrackGrooveSnapshot>>> {
+        let variants = self.rack_groove_variants();
+        if !variants.has_clip_grooves() {
+            return Arc::clone(&variants.base);
+        }
+        let bank = self.pattern.scenes.lock().unwrap();
+        variants.resolve(|group| bank.current_rack_clip(group))
+    }
+
+    /// The groove table of EVERY scene, by scene position, so a chunk
+    /// scheduled from a prebuilt snapshot (a quantized launch, a song row)
+    /// plays the grooves of ITS scene's clips. Empty when no clip has its
+    /// own groove: every scene then plays `track_grooves`.
+    pub fn scene_track_grooves(
+        &self,
+    ) -> Vec<Arc<Vec<Option<crate::groove::TrackGrooveSnapshot>>>> {
+        let variants = self.rack_groove_variants();
+        if !variants.has_clip_grooves() {
+            return Vec::new();
+        }
+        let bank = self.pattern.scenes.lock().unwrap();
+        (0..bank.scenes.len())
+            .map(|scene| variants.resolve(|group| bank.scene_rack_clip(scene, group)))
+            .collect()
+    }
+
     /// The graph overrides of every scene, by scene position.
     pub fn all_scene_graph_overrides(&self) -> Vec<Vec<ProjectGraphOverrides>> {
         let bank = self.pattern.scenes.lock().unwrap();

@@ -80,6 +80,10 @@
         rename-clip
         convert-to-clips
         groove-state
+        rack-groove-entry
+        clip-owns-groove?
+        groove-clip-id
+        groove-edit-clip-id
         groove-active?
         groove-of-track
         groove-active-for-track?
@@ -621,22 +625,60 @@
 ;; A groove is an extracted feel, applied wherever a trig aimed at a pad
 ;; becomes a sample time. Grooves live in the project groove pool; a rack
 ;; points at one. The host publishes one SEQ.rack-grooves entry per drum
-;; rack: the picker (labels + parallel keys: `pool:<id>`, then a "Library"
-;; header row (`:picker-headers` indices, key "") over library files
-;; `factory:<stem>` / `user:<stem>` that copy into the pool when picked, then
-;; `off`) and the active groove (`:active-groove-id`, a pool id or -1). The
-;; Timing / Velocity / Random amounts are scalar fields of their own
-;; (`rack-groove-<amount>-<gid>`), so a knob drag never rebuilds its section.
-;; Rename / delete / the heatmap live in the Grooves tab (eseq.grooves-tab).
+;; rack: the picker (labels + parallel keys: `off` first, then section
+;; header rows (`:picker-headers` indices, key "") over the pool's
+;; `pool:<id>` and the library's `factory:<stem>` / `user:<stem>` files,
+;; which copy into the pool when picked), the active groove
+;; (`:active-groove-id`, a pool id or -1), its on/off switch (`:enabled`)
+;; and the per-pad lanes (`:lanes`). The Timing / Velocity / Random amounts
+;; and every pad's share are scalar fields of their own
+;; (`rack-groove-<amount>-<gid>`, `rack-groove-pad-<gid>-<note>`), so a drag
+;; never rebuilds the lanes. The view is the *groove* buffer
+;; (ui/rack-groove-buffer.lisp).
 
-(def groove-state (gid)
+;; The rack's entry, whatever clip plays: its own groove at the top level
+;; and each clip's own under :clip-grooves.
+(def rack-groove-entry (gid)
   (let ((hits (filter (lambda (entry) (= (get entry :group-id) gid))
                 (or SEQ.rack-grooves (list)))))
     (if (> (len hits) 0) (nth hits 0) nil)))
 
+;; The groove the rack plays now: the playing clip's own when it has one,
+;; else the rack's. Its :clip-id (-1 for the rack's) is what edits target.
+(def groove-state (gid)
+  (let ((entry (rack-groove-entry gid)))
+    (if (= entry nil)
+      nil
+      (let ((clip (active-clip gid))
+            (own (filter (lambda (view) (= (get view :clip-id) clip))
+                   (or (get entry :clip-grooves) (list)))))
+        (if (and (>= clip 0) (> (len own) 0)) (nth own 0) entry)))))
+
+;; Whether clip `clip` plays its own groove.
+(def clip-owns-groove? (gid clip)
+  (let ((entry (rack-groove-entry gid)))
+    (and (not (= entry nil))
+         (> (len (filter (lambda (view) (= (get view :clip-id) clip))
+                   (or (get entry :clip-grooves) (list))))
+            0))))
+
+;; The view's clip (-1: the rack's own groove is what shows): its amount
+;; fields carry that clip's suffix.
+(def groove-clip-id (gid)
+  (let ((state (groove-state gid)))
+    (if state (get state :clip-id) -1)))
+
+;; The clip an edit targets: the playing clip (it gets its own groove on the
+;; first edit, so clips never share edits), -1 for a rack without clips.
+(def groove-edit-clip-id (gid)
+  (active-clip gid))
+
+;; A rack plays a groove when one is picked and its switch is on.
 (def groove-active? (gid)
   (let ((state (groove-state gid)))
-    (if state (not (= (get state :active-key) "off")) false)))
+    (if state
+      (and (not (= (get state :active-key) "off")) (get state :enabled))
+      false)))
 
 ;; The rack groove a member track plays through: the rack's groove entry, or
 ;; nil when the track is loose or its rack plays straight.
@@ -655,7 +697,7 @@
 
 (def groove-picker-labels (gid)
   (let ((state (groove-state gid)))
-    (if state (get state :picker-labels) (list "Off"))))
+    (if state (get state :picker-labels) (list "No groove"))))
 
 (def groove-key-for-label (gid label)
   (let ((state (groove-state gid)))
@@ -676,15 +718,18 @@
   (let ((key (groove-key-for-label gid label)))
     (if (= key "")
       nil
-      (host-command "set-rack-groove" (dict :group-id gid :key key)))))
+      (host-command "set-rack-groove"
+        (dict :group-id gid :clip-id (groove-edit-clip-id gid) :key key)))))
 
-;; `amount` is "timing", "velocity" or "random".
+;; `amount` is "timing", "velocity" or "random"; a clip's own groove
+;; publishes its amounts with a "-c<clip>" suffix.
 (def groove-amount-field (amount gid)
-  (str "rack-groove-" amount "-" gid))
+  (let ((clip (groove-clip-id gid)))
+    (str "rack-groove-" amount "-" gid (if (>= clip 0) (str "-c" clip) ""))))
 
 (def set-groove-amount (gid amount value)
   (host-command "set-rack-groove-amount"
-    (dict :group-id gid :amount amount :value value)))
+    (dict :group-id gid :clip-id (groove-edit-clip-id gid) :amount amount :value value)))
 
 ;; `bars` 1 or 2, `resolution` "1/16" or "1/32". With `quantize` the source
 ;; patterns are straightened and the new groove activated, one undo step.

@@ -137,6 +137,23 @@ pub(crate) fn checkmark_primitive(
     shape_primitive("dropdown-checkmark", rect, color, 0.0, false, viewport)
 }
 
+/// The search glyph at the left of a filterable dropdown's filter row,
+/// sized to the row's font like [`checkmark_primitive`].
+pub(crate) fn magnifier_primitive(
+    row_rect: Rect, col: f32, font_size: f32, color: Color, viewport: WidgetViewport,
+) -> GpuPrimitive {
+    let size_px = super::ui_design_px(font_size * super::UI_DESIGN_REFERENCE_SCALE * 0.95);
+    let width = size_px / viewport.cell_w.max(1.0);
+    let height = size_px / viewport.cell_h.max(1.0);
+    let rect = Rect {
+        row: row_rect.row + (row_rect.height - height) * 0.5,
+        col,
+        width,
+        height,
+    };
+    shape_primitive("dropdown-magnifier", rect, color, 0.0, false, viewport)
+}
+
 /// Marker prop stamped by the layout pass next to an *inherited* `font-size`
 /// injection (see `ui::layout::build_layout_node`). Popup rows use it to tell
 /// "the tile around me happens to use this font" apart from "the call site

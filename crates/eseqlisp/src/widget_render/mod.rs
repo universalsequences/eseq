@@ -18,6 +18,7 @@ pub mod knob_number;
 pub mod label;
 pub mod lfo_curve;
 pub mod lane_preview;
+pub mod groove_lane;
 pub mod live_audio;
 pub mod linegraph;
 pub mod matrix;
@@ -1296,6 +1297,7 @@ pub enum AnimationFramePolicy {
 static WIDGET_DEFINITIONS: &[&dyn WidgetDefinition] = &[
     &label::LABEL_WIDGET,
     &lane_preview::LANE_PREVIEW_WIDGET,
+    &groove_lane::GROOVE_LANE_WIDGET,
     &hslider::HSLIDER_WIDGET,
     &vslider::VSLIDER_WIDGET,
     &button::BUTTON_WIDGET,

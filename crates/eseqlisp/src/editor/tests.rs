@@ -1761,6 +1761,73 @@ fn clicking_inactive_tile_uses_target_tile_viewport_for_hit_testing() {
     );
 }
 
+/// A `:filterable` dropdown takes typed text while open, space included
+/// (which otherwise falls through to keybindings), and Enter picks the first
+/// match; its footer is picked like an option.
+#[test]
+fn filterable_dropdown_types_into_its_filter_and_enter_picks_the_first_match() {
+    fn find_dropdown(node: &crate::layout::LayoutNode) -> Option<&crate::layout::LayoutNode> {
+        if node.widget_type == "dropdown" {
+            return Some(node);
+        }
+        node.children.iter().find_map(find_dropdown)
+    }
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor
+        .runtime_mut()
+        .eval_str(
+            r#"
+            (def picked (state ""))
+            (effect
+              (v-stack
+                (dropdown :value "No groove"
+                  :options '("No groove" "Factory" "MPC 16 Swing 54%" "MPC 16 Swing 66%")
+                  :headers '(1)
+                  :filterable true
+                  :footer "Extract…"
+                  :width 20
+                  :on-change (lambda (v) (set! picked v)))))
+            "#,
+        )
+        .unwrap();
+    editor.set_layout_viewport(30, 20);
+    let dropdown = editor
+        .runtime
+        .current_layout
+        .as_ref()
+        .and_then(|layout| find_dropdown(layout))
+        .expect("dropdown")
+        .clone();
+    let col = dropdown.rect.col + dropdown.rect.width * 0.5;
+    let row = dropdown.rect.row + dropdown.rect.height * 0.5;
+    for kind in [
+        MouseEventKind::Down(MouseButton::Left),
+        MouseEventKind::Up(MouseButton::Left),
+    ] {
+        editor.handle_mouse_precise(
+            mouse_event(kind, col.floor() as u16, row.floor() as u16),
+            0,
+            0,
+            30,
+            20,
+            col,
+            row,
+        );
+    }
+    assert!(crate::widget_render::dropdown::is_dropdown_open(dropdown.widget_id));
+    for ch in "swing 66".chars() {
+        editor.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+    }
+    editor.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(
+        editor.runtime.eval_str("picked").unwrap(),
+        Some(Value::String("MPC 16 Swing 66%".into())),
+        "the typed filter (with its space) narrowed the list to one match"
+    );
+    assert!(!crate::widget_render::dropdown::is_dropdown_open(dropdown.widget_id));
+}
+
 #[test]
 fn first_click_opens_an_unfocused_conditionally_replaced_dropdown() {
     fn find_dropdown(node: &crate::layout::LayoutNode) -> Option<&crate::layout::LayoutNode> {

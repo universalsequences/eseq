@@ -75,6 +75,13 @@ struct DropdownState {
     visible_height: f32,
     /// Full content height (set at render time).
     content_height: f32,
+    /// A `:filterable` menu's typed filter (cleared whenever it closes).
+    filter: String,
+    /// Height of the pinned filter row above the list (0 without one); set
+    /// at render time for hit-testing.
+    list_top: f32,
+    /// Rows the open menu shows after filtering (set at render time).
+    row_count: usize,
 }
 
 thread_local! {
@@ -167,6 +174,7 @@ fn close_other_dropdowns(active_widget_id: u64) {
             state.open = false;
             state.hovered_idx = None;
             state.scroll_offset = 0.0;
+            state.filter.clear();
             changed = true;
         }
         if changed {
@@ -183,12 +191,21 @@ pub fn close_dropdown(widget_id: u64) {
             state.open = false;
             state.hovered_idx = None;
             state.scroll_offset = 0.0;
+            state.filter.clear();
         }
     });
 }
 
 pub fn is_dropdown_open(widget_id: u64) -> bool {
     get_state(widget_id).open
+}
+
+/// An open `:filterable` dropdown is typing into its filter, so the editor
+/// routes every printable key (space included) to it before any keybinding.
+pub fn filter_captures_text(node: &LayoutNode) -> bool {
+    matches!(node.widget_type.as_str(), "dropdown")
+        && is_filterable(&node.props)
+        && get_state_for_node(node).open
 }
 
 /// Update hovered item based on mouse position in tile-local overlay space.
@@ -212,13 +229,9 @@ pub fn hover_overlay(widget_id: u64, local_row: f32) -> bool {
             return false;
         };
 
-        let new_idx = if menu_row >= 0.0 {
-            let content_row = menu_row + state.scroll_offset;
-            let idx = ((content_row - MENU_PADDING_V) / MENU_ROW_HEIGHT).floor() as isize;
-            // Derive option count from content_height
-            let option_count =
-                ((state.content_height - MENU_PADDING_V * 2.0) / MENU_ROW_HEIGHT).round() as usize;
-            if idx >= 0 && (idx as usize) < option_count {
+        let new_idx = if menu_row >= state.list_top + MENU_PADDING_V {
+            let idx = list_row_index(menu_row, state.list_top, state.scroll_offset);
+            if idx >= 0 && (idx as usize) < state.row_count {
                 Some(idx as usize)
             } else {
                 state.hovered_idx
@@ -287,6 +300,136 @@ fn get_header_indices(props: &HashMap<String, Value>) -> Vec<usize> {
             .collect(),
         _ => Vec::new(),
     }
+}
+
+/// One row of the open menu: an option (by index into `:options`), a
+/// section header, or the `:footer` action.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MenuRow {
+    Option(usize),
+    Header(usize),
+    Footer,
+}
+
+/// `:filterable true` pins a filter field above the list: typing while the
+/// menu is open narrows it.
+fn is_filterable(props: &HashMap<String, Value>) -> bool {
+    matches!(props.get("filterable"), Some(Value::Bool(true)))
+}
+
+fn string_prop(props: &HashMap<String, Value>, key: &str) -> Option<String> {
+    match props.get(key) {
+        Some(Value::String(text)) if !text.is_empty() => Some(text.clone()),
+        _ => None,
+    }
+}
+
+/// `:footer "Extract…"`: an action row under the options; picking it calls
+/// `:on-change` with the footer's own text. Never filtered away.
+fn get_footer(props: &HashMap<String, Value>) -> Option<String> {
+    string_prop(props, "footer")
+}
+
+/// `:details`: dim text drawn right-aligned on each option's row, parallel
+/// to `:options` ("" for none).
+fn get_details(props: &HashMap<String, Value>) -> Vec<String> {
+    match props.get("details") {
+        Some(Value::List(list)) => list
+            .iter()
+            .map(|v| match &*v.borrow() {
+                Value::String(s) => s.clone(),
+                _ => String::new(),
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Height of the filter row pinned above a `:filterable` list.
+const FILTER_ROW_HEIGHT: f32 = MENU_ROW_HEIGHT + 0.35;
+
+fn list_top(props: &HashMap<String, Value>) -> f32 {
+    if is_filterable(props) { FILTER_ROW_HEIGHT } else { 0.0 }
+}
+
+/// The rows an open menu shows: every option and header, or, with a filter,
+/// the options containing it (case-insensitive) and the headers that still
+/// have a match under them; then the footer.
+fn menu_rows(props: &HashMap<String, Value>, filter: &str) -> Vec<MenuRow> {
+    let options = get_options(props);
+    let headers = get_header_indices(props);
+    let needle = filter.trim().to_lowercase();
+    let mut rows = Vec::with_capacity(options.len() + 1);
+    let mut pending_header = None;
+    for (i, option) in options.iter().enumerate() {
+        if headers.contains(&i) {
+            if needle.is_empty() {
+                rows.push(MenuRow::Header(i));
+            } else {
+                pending_header = Some(i);
+            }
+            continue;
+        }
+        if needle.is_empty() || option.to_lowercase().contains(&needle) {
+            if let Some(header) = pending_header.take() {
+                rows.push(MenuRow::Header(header));
+            }
+            rows.push(MenuRow::Option(i));
+        }
+    }
+    if get_footer(props).is_some() {
+        rows.push(MenuRow::Footer);
+    }
+    rows
+}
+
+/// What picking `row` reports through `:on-change` (headers pick nothing).
+fn row_value(props: &HashMap<String, Value>, row: MenuRow) -> Option<String> {
+    match row {
+        MenuRow::Option(i) => get_options(props).get(i).cloned(),
+        MenuRow::Footer => get_footer(props),
+        MenuRow::Header(_) => None,
+    }
+}
+
+/// The nearest pickable row from `from`, stepping `forward` (or back).
+fn step_row(rows: &[MenuRow], from: Option<usize>, forward: bool) -> Option<usize> {
+    let pickable = |i: usize| !matches!(rows[i], MenuRow::Header(_));
+    match from {
+        None => (0..rows.len()).find(|&i| pickable(i)),
+        Some(start) => {
+            let mut idx = start;
+            loop {
+                if forward {
+                    if idx + 1 >= rows.len() {
+                        return Some(start);
+                    }
+                    idx += 1;
+                } else {
+                    if idx == 0 {
+                        return Some(start);
+                    }
+                    idx -= 1;
+                }
+                if pickable(idx) {
+                    return Some(idx);
+                }
+            }
+        }
+    }
+}
+
+/// The list row under `menu_row` (rows from the menu's top), below the
+/// pinned filter row and shifted by the list's scroll.
+fn list_row_index(menu_row: f32, list_top: f32, scroll: f32) -> isize {
+    ((menu_row - list_top + scroll - MENU_PADDING_V) / MENU_ROW_HEIGHT).floor() as isize
+}
+
+/// The row index of the selected option in `rows`, if it is shown.
+fn selected_row(props: &HashMap<String, Value>, rows: &[MenuRow]) -> Option<usize> {
+    let options = get_options(props);
+    let selected = selected_index(&options, &get_selected(props))?;
+    rows.iter().position(|row| *row == MenuRow::Option(selected))
 }
 
 /// The nearest selectable option from `from` stepping `forward` (or back),
@@ -435,25 +578,20 @@ fn selected_index(options: &[String], selected: &str) -> Option<usize> {
     options.iter().position(|o| o == selected)
 }
 
-fn initial_mouse_hovered_index(
-    props: &HashMap<String, Value>,
-    options: &[String],
-) -> Option<usize> {
+fn initial_mouse_hovered_index(props: &HashMap<String, Value>) -> Option<usize> {
     if is_action_menu(props) {
         None
     } else {
-        selected_index(options, &get_selected(props))
+        selected_row(props, &menu_rows(props, ""))
     }
 }
 
-fn initial_keyboard_hovered_index(
-    props: &HashMap<String, Value>,
-    options: &[String],
-) -> Option<usize> {
+fn initial_keyboard_hovered_index(props: &HashMap<String, Value>) -> Option<usize> {
+    let rows = menu_rows(props, "");
     if is_action_menu(props) {
-        step_selectable(options.len(), &get_header_indices(props), None, true)
+        step_row(&rows, None, true)
     } else {
-        selected_index(options, &get_selected(props))
+        selected_row(props, &rows)
     }
 }
 
@@ -480,7 +618,28 @@ fn compute_menu_geometry(
     viewport_top: f32,
     viewport_bottom: f32,
 ) -> MenuGeometry {
-    let content_height = option_count as f32 * MENU_ROW_HEIGHT + MENU_PADDING_V * 2.0;
+    compute_menu_geometry_with_top(
+        trigger_row,
+        trigger_height,
+        option_count,
+        0.0,
+        viewport_top,
+        viewport_bottom,
+    )
+}
+
+/// [`compute_menu_geometry`] with a pinned filter row of `list_top` rows
+/// above the list.
+fn compute_menu_geometry_with_top(
+    trigger_row: f32,
+    trigger_height: f32,
+    option_count: usize,
+    list_top: f32,
+    viewport_top: f32,
+    viewport_bottom: f32,
+) -> MenuGeometry {
+    let content_height =
+        list_top + option_count as f32 * MENU_ROW_HEIGHT + MENU_PADDING_V * 2.0;
     let gap = 0.15;
     // Reserve space for the border so it isn't clipped by the frame edge.
     let border_inset = 0.1;
@@ -518,15 +677,18 @@ fn ensure_visible(state: &mut DropdownState, option_count: usize) {
     if state.visible_height <= 0.0 {
         return;
     }
-    let content_height = option_count as f32 * MENU_ROW_HEIGHT + MENU_PADDING_V * 2.0;
+    let content_height =
+        state.list_top + option_count as f32 * MENU_ROW_HEIGHT + MENU_PADDING_V * 2.0;
     let max_scroll = (content_height - state.visible_height).max(0.0);
+    // In list space: the pinned filter row takes `list_top` of the window.
     let item_top = MENU_PADDING_V + idx as f32 * MENU_ROW_HEIGHT;
     let item_bottom = item_top + MENU_ROW_HEIGHT;
+    let window = state.visible_height - state.list_top;
 
     if item_top < state.scroll_offset {
         state.scroll_offset = item_top;
-    } else if item_bottom > state.scroll_offset + state.visible_height {
-        state.scroll_offset = item_bottom - state.visible_height;
+    } else if item_bottom > state.scroll_offset + window {
+        state.scroll_offset = item_bottom - window;
     }
     state.scroll_offset = state.scroll_offset.clamp(0.0, max_scroll);
 }
@@ -543,6 +705,7 @@ impl WidgetDefinition for DropdownWidget {
             "menu-button",
             "dropdown-chevron",
             "dropdown-checkmark",
+            "dropdown-magnifier",
         ]
     }
 
@@ -557,6 +720,7 @@ impl WidgetDefinition for DropdownWidget {
             "height",
             "font-size",
             "icon",
+            "detail",
         ]
     }
 
@@ -579,6 +743,7 @@ impl WidgetDefinition for DropdownWidget {
             "border-color", "border-width", "check-color", "chevron-color", "corner-radius", "hover-bg",
             "menu-bg", "menu-border-color", "ring-color", "scrollbar-color", "text-color",
             "on-change", "plock-active", "plock-color-r", "plock-color-g", "plock-color-b",
+            "detail", "details", "filterable", "filter-placeholder", "footer", "footer-color",
         ]
     }
 
@@ -619,8 +784,15 @@ impl WidgetDefinition for DropdownWidget {
             text_width(&selected)
         };
         let chevron_width = height * 0.48 * 1.8;
-        let min_width =
-            PADDING_H + selected_width + TEXT_CHEVRON_GAP + chevron_width + CHEVRON_RIGHT_PAD;
+        let detail_width = string_prop(&props, "detail")
+            .map(|detail| text_width(&detail) + TEXT_CHEVRON_GAP)
+            .unwrap_or(0.0);
+        let min_width = PADDING_H
+            + selected_width
+            + TEXT_CHEVRON_GAP
+            + detail_width
+            + chevron_width
+            + CHEVRON_RIGHT_PAD;
         Some(Size {
             width: explicit_width.unwrap_or_else(|| width.max(min_width)),
             height,
@@ -649,7 +821,6 @@ impl WidgetDefinition for DropdownWidget {
         }
 
         let mut state = get_state_for_node(node);
-        let options = get_options(&node.props);
 
         if state.open {
             if matches!(mouse_kind, MouseEventKind::Up(MouseButton::Left))
@@ -659,6 +830,7 @@ impl WidgetDefinition for DropdownWidget {
                 set_state(node.widget_id, state);
                 return MouseEventOutcome::Consume;
             }
+            let rows = menu_rows(&node.props, &state.filter);
             // Use the overlay rect (registered at render time) for hit-testing.
             // The overlay rect is in screen-space; local_row is in layout-space.
             let overlay_rect = super::overlay_rect_for_widget(node.widget_id);
@@ -669,16 +841,19 @@ impl WidgetDefinition for DropdownWidget {
                 -1.0
             };
 
+            if menu_row >= 0.0 && menu_row < state.list_top + MENU_PADDING_V {
+                // The pinned filter row: typing edits it, a click keeps the
+                // menu open.
+                return MouseEventOutcome::Consume;
+            }
             if menu_row >= 0.0 {
-                // Account for scroll offset: the visible window starts at scroll_offset
-                let content_row = menu_row + state.scroll_offset;
-                let item_idx = ((content_row - MENU_PADDING_V) / MENU_ROW_HEIGHT).floor() as usize;
-                if item_idx < options.len() && get_header_indices(&node.props).contains(&item_idx)
-                {
-                    // A section header is not an option: the menu stays open.
-                    return MouseEventOutcome::Consume;
-                }
-                if item_idx < options.len() {
+                let item_idx = list_row_index(menu_row, state.list_top, state.scroll_offset);
+                if item_idx >= 0 && (item_idx as usize) < rows.len() {
+                    let item_idx = item_idx as usize;
+                    let Some(value) = row_value(&node.props, rows[item_idx]) else {
+                        // A section header is not an option: the menu stays open.
+                        return MouseEventOutcome::Consume;
+                    };
                     state.hovered_idx = Some(item_idx);
                     set_state(node.widget_id, state);
                     if matches!(mouse_kind, MouseEventKind::Down(MouseButton::Left)) {
@@ -687,10 +862,11 @@ impl WidgetDefinition for DropdownWidget {
                         state.hovered_idx = None;
                         state.ignore_opening_mouse_up = false;
                         state.scroll_offset = 0.0;
+                        state.filter.clear();
                         set_state(node.widget_id, state);
                         super::remove_overlay(node.widget_id);
                         return MouseEventOutcome::Dispatch(WidgetEvent::Custom(Value::String(
-                            options[item_idx].clone(),
+                            value,
                         )));
                     }
                     return MouseEventOutcome::Consume;
@@ -702,6 +878,7 @@ impl WidgetDefinition for DropdownWidget {
                 state.hovered_idx = None;
                 state.ignore_opening_mouse_up = false;
                 state.scroll_offset = 0.0;
+                state.filter.clear();
                 set_state(node.widget_id, state);
                 super::remove_overlay(node.widget_id);
             }
@@ -713,7 +890,8 @@ impl WidgetDefinition for DropdownWidget {
             // Open the dropdown
             close_other_dropdowns(node.widget_id);
             state.open = true;
-            state.hovered_idx = initial_mouse_hovered_index(&node.props, &options);
+            state.filter.clear();
+            state.hovered_idx = initial_mouse_hovered_index(&node.props);
             state.ignore_opening_mouse_up = true;
             state.scroll_offset = 0.0;
             set_state(node.widget_id, state);
@@ -723,8 +901,7 @@ impl WidgetDefinition for DropdownWidget {
 
     fn key_event(&self, node: &LayoutNode, key: WidgetKeyEvent) -> Option<WidgetEvent> {
         let mut state = get_state_for_node(node);
-        let options = get_options(&node.props);
-        if options.is_empty() {
+        if get_options(&node.props).is_empty() && get_footer(&node.props).is_none() {
             return None;
         }
 
@@ -735,7 +912,8 @@ impl WidgetDefinition for DropdownWidget {
                 KeyCode::Enter => {
                     close_other_dropdowns(node.widget_id);
                     state.open = true;
-                    state.hovered_idx = initial_keyboard_hovered_index(&node.props, &options);
+                    state.filter.clear();
+                    state.hovered_idx = initial_keyboard_hovered_index(&node.props);
                     set_state(node.widget_id, state);
                     return Some(WidgetEvent::Custom(Value::Nil));
                 }
@@ -744,55 +922,73 @@ impl WidgetDefinition for DropdownWidget {
         }
 
         // Menu is open
+        let close = |mut state: DropdownState| {
+            state.open = false;
+            state.hovered_idx = None;
+            state.scroll_offset = 0.0;
+            state.filter.clear();
+            set_state(node.widget_id, state);
+            super::remove_overlay(node.widget_id);
+        };
+        let rows = menu_rows(&node.props, &state.filter);
+        let typing = is_filterable(&node.props)
+            && !key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER | KeyModifiers::ALT);
         match key.code {
+            // The filter: every printable key narrows the list and hovers
+            // its first match, so Enter picks it.
+            KeyCode::Char(ch) if typing => {
+                state.filter.push(ch);
+                let rows = menu_rows(&node.props, &state.filter);
+                state.hovered_idx = step_row(&rows, None, true);
+                state.scroll_offset = 0.0;
+                set_state(node.widget_id, state);
+                Some(WidgetEvent::Custom(Value::Nil))
+            }
+            KeyCode::Backspace if typing => {
+                state.filter.pop();
+                let rows = menu_rows(&node.props, &state.filter);
+                state.hovered_idx = step_row(&rows, None, true);
+                state.scroll_offset = 0.0;
+                set_state(node.widget_id, state);
+                Some(WidgetEvent::Custom(Value::Nil))
+            }
             KeyCode::Down => {
-                let headers = get_header_indices(&node.props);
-                state.hovered_idx =
-                    step_selectable(options.len(), &headers, state.hovered_idx, true);
-                ensure_visible(&mut state, options.len());
+                state.hovered_idx = step_row(&rows, state.hovered_idx, true);
+                ensure_visible(&mut state, rows.len());
                 set_state(node.widget_id, state);
                 Some(WidgetEvent::Custom(Value::Nil))
             }
             KeyCode::Up => {
-                let headers = get_header_indices(&node.props);
                 state.hovered_idx = match state.hovered_idx {
-                    None => step_selectable(options.len(), &headers, None, true),
-                    from => step_selectable(options.len(), &headers, from, false),
+                    None => step_row(&rows, None, true),
+                    from => step_row(&rows, from, false),
                 };
-                ensure_visible(&mut state, options.len());
+                ensure_visible(&mut state, rows.len());
                 set_state(node.widget_id, state);
                 Some(WidgetEvent::Custom(Value::Nil))
             }
             KeyCode::Enter => {
-                if state
+                let picked = state
                     .hovered_idx
-                    .is_some_and(|idx| get_header_indices(&node.props).contains(&idx))
-                {
+                    .and_then(|idx| rows.get(idx).copied())
+                    .map(|row| row_value(&node.props, row));
+                match picked {
                     // Enter on a header (reached by the mouse) picks nothing.
-                    return Some(WidgetEvent::Custom(Value::Nil));
-                }
-                if let Some(idx) = state.hovered_idx {
-                    let value = options.get(idx).cloned().unwrap_or_default();
-                    state.open = false;
-                    state.hovered_idx = None;
-                    state.scroll_offset = 0.0;
-                    set_state(node.widget_id, state);
-                    super::remove_overlay(node.widget_id);
-                    Some(WidgetEvent::Custom(Value::String(value)))
-                } else {
-                    state.open = false;
-                    state.scroll_offset = 0.0;
-                    set_state(node.widget_id, state);
-                    super::remove_overlay(node.widget_id);
-                    Some(WidgetEvent::Custom(Value::Nil))
+                    Some(None) => Some(WidgetEvent::Custom(Value::Nil)),
+                    Some(Some(value)) => {
+                        close(state);
+                        Some(WidgetEvent::Custom(Value::String(value)))
+                    }
+                    None => {
+                        close(state);
+                        Some(WidgetEvent::Custom(Value::Nil))
+                    }
                 }
             }
             KeyCode::Esc => {
-                state.open = false;
-                state.hovered_idx = None;
-                state.scroll_offset = 0.0;
-                set_state(node.widget_id, state);
-                super::remove_overlay(node.widget_id);
+                close(state);
                 Some(WidgetEvent::Custom(Value::Nil))
             }
             _ => None,
@@ -848,6 +1044,7 @@ impl WidgetDefinition for DropdownWidget {
             "dropdown" | "menu-button" => super::ROUNDED_RECT_SHADER.source(backend),
             "dropdown-chevron" => DROPDOWN_CHEVRON_SHADER.source(backend),
             "dropdown-checkmark" => DROPDOWN_CHECKMARK_SHADER.source(backend),
+            "dropdown-magnifier" => DROPDOWN_MAGNIFIER_SHADER.source(backend),
             _ => None,
         }
     }
@@ -967,12 +1164,35 @@ impl WidgetDefinition for DropdownWidget {
                 },
             ));
         } else {
-            // ── Selected text ──
+            // ── Detail (`:detail`): dim text just before the chevron ──
             let text_col = node.rect.col + PADDING_H;
+            let mut text_right = ch_rect.col - TEXT_CHEVRON_GAP;
+            if let Some(detail) = string_prop(&node.props, "detail") {
+                let room = (text_right - text_col) * 0.55;
+                let detail = truncate_text_to_width(&detail, room, font_size * 0.9, viewport.cell_w);
+                let width = render_text_width_cells(&detail, font_size * 0.9, viewport.cell_w);
+                if !detail.is_empty() {
+                    prims.push(GpuPrimitive::ProportionalText(GpuProportionalTextPrimitive {
+                        row: text_row,
+                        col: text_right - width,
+                        align_width: 0.0,
+                        h_align: 0.0,
+                        text: detail,
+                        font_size: font_size * 0.9,
+                        scale: 1.0,
+                        fg: theme::DIM(),
+                        bg: transparent,
+                        mono: false,
+                    }));
+                    text_right -= width + TEXT_CHEVRON_GAP;
+                }
+            }
+
+            // ── Selected text ──
             let text_clip_rect = Rect {
                 row: node.rect.row + 0.08,
                 col: text_col,
-                width: (ch_rect.col - TEXT_CHEVRON_GAP - text_col).max(0.0),
+                width: (text_right - text_col).max(0.0),
                 height: (node.rect.height - 0.16).max(0.0),
             };
             let selected_display =
@@ -1040,30 +1260,36 @@ impl WidgetDefinition for DropdownWidget {
         }
 
         // ── Menu overlay (when open) ──
-        if state.open && !options.is_empty() {
+        let rows = menu_rows(&node.props, &state.filter);
+        let filterable = is_filterable(&node.props);
+        if state.open && (!rows.is_empty() || filterable) {
             let screen_col = node.rect.col - viewport.scroll_left;
             let screen_row = node.rect.row - viewport.scroll_top;
             let viewport_rows = viewport.vp_h / viewport.cell_h.max(1.0);
             let viewport_bottom = viewport.overlay_viewport_bottom;
             let viewport_top = viewport_bottom - viewport_rows;
+            let list_top = list_top(&node.props);
 
-            let geo = compute_menu_geometry(
+            let geo = compute_menu_geometry_with_top(
                 screen_row,
                 node.rect.height,
-                options.len(),
+                rows.len(),
+                list_top,
                 viewport_top,
                 viewport_bottom,
             );
 
-            // Persist geometry so key_event/scroll can operate correctly
+            // Persist geometry so key_event/scroll/hover can operate correctly
             state.visible_height = geo.visible_height;
             state.content_height = geo.content_height;
+            state.list_top = list_top;
+            state.row_count = rows.len();
             state.scroll_offset = state.scroll_offset.clamp(0.0, geo.max_scroll);
             // Ensure the hovered item is visible (e.g. when opening with a far-down selection)
-            ensure_visible(&mut state, options.len());
+            ensure_visible(&mut state, rows.len());
             set_state(node.widget_id, state.clone());
 
-            // Menu width: at least trigger width, expanded to fit longest option
+            // Menu width: at least trigger width, expanded to fit longest row
             let needs_scrollbar = geo.content_height > geo.visible_height;
             let check_col_width = if action_menu { 0.0 } else { 1.5 }; // selected-item mark
             let text_left_pad = PADDING_H + check_col_width;
@@ -1072,11 +1298,22 @@ impl WidgetDefinition for DropdownWidget {
             } else {
                 0.0
             };
-            let max_option_width = options
+            let details = get_details(&node.props);
+            let footer = get_footer(&node.props);
+            let detail_font_size = menu_font_size * 0.88;
+            let text_w = |text: &str, size: f32| render_text_width_cells(text, size, viewport.cell_w);
+            let max_row_width = options
                 .iter()
-                .map(|o| render_text_width_cells(o, menu_font_size, viewport.cell_w))
+                .enumerate()
+                .map(|(i, option)| {
+                    let detail = details.get(i).map_or(0.0, |detail| {
+                        if detail.is_empty() { 0.0 } else { 2.0 + text_w(detail, detail_font_size) }
+                    });
+                    text_w(option, menu_font_size) + detail
+                })
+                .chain(footer.iter().map(|footer| text_w(footer, menu_font_size)))
                 .fold(0.0_f32, f32::max);
-            let content_width = text_left_pad + max_option_width + PADDING_H + scrollbar_pad;
+            let content_width = text_left_pad + max_row_width + PADDING_H + scrollbar_pad;
             let menu_width = content_width.max(node.rect.width);
 
             let viewport_cols = viewport.vp_w / viewport.cell_w.max(1.0);
@@ -1108,62 +1345,155 @@ impl WidgetDefinition for DropdownWidget {
                 border_color,
                 viewport,
             );
-            super::push_overlay_primitive(GpuPrimitive::PushClipRect(menu_rect));
 
-            // Menu items — only emit those within the visible scroll window
+            // ── Filter row (pinned above the list) ──
+            if filterable {
+                let field = Rect {
+                    row: geo.menu_top + MENU_PADDING_V + 0.12,
+                    col: menu_col + 0.35,
+                    width: (menu_width - 0.7).max(0.0),
+                    height: MENU_ROW_HEIGHT,
+                };
+                super::menu_style::emit_rounded_rect_overlay(
+                    field,
+                    Color { r: 0.0, g: 0.0, b: 0.0, a: 0.28 },
+                    12.0,
+                    viewport,
+                );
+                let icon_col = field.col + 0.55;
+                super::push_overlay_primitive(super::menu_style::magnifier_primitive(
+                    field,
+                    icon_col,
+                    menu_font_size,
+                    theme::DIM(),
+                    viewport,
+                ));
+                let text_col = icon_col + 1.4;
+                let placeholder = string_prop(&node.props, "filter-placeholder")
+                    .unwrap_or_else(|| "Filter…".to_string());
+                let (text, fg) = if state.filter.is_empty() {
+                    (placeholder, theme::DIM())
+                } else {
+                    (state.filter.clone(), theme::FG())
+                };
+                let text_row = field.row + (field.height - 1.0) * 0.5;
+                super::push_overlay_primitive(GpuPrimitive::ProportionalText(
+                    GpuProportionalTextPrimitive {
+                        row: text_row,
+                        col: text_col,
+                        align_width: 0.0,
+                        h_align: 0.0,
+                        text,
+                        font_size: menu_font_size,
+                        scale: 1.0,
+                        fg,
+                        bg: transparent,
+                        mono: false,
+                    },
+                ));
+                // Caret after the typed text.
+                let caret_col = text_col
+                    + if state.filter.is_empty() { 0.0 } else { text_w(&state.filter, menu_font_size) }
+                    + 0.08;
+                super::menu_style::emit_rounded_rect_overlay(
+                    Rect { row: field.row + 0.25, col: caret_col, width: 0.09, height: field.height - 0.5 },
+                    theme::FG(),
+                    1.0,
+                    viewport,
+                );
+            }
+
+            let list_rect = Rect {
+                row: geo.menu_top + list_top,
+                col: menu_col,
+                width: menu_width,
+                height: (geo.visible_height - list_top).max(0.0),
+            };
+            super::push_overlay_primitive(GpuPrimitive::PushClipRect(list_rect));
+
+            // Rows — only emit those within the visible scroll window
             let sel_idx = selected_index(&options, &selected);
-            let headers = get_header_indices(&node.props);
             let scroll_off = state.scroll_offset;
             let label_col = menu_col + PADDING_H;
             let item_text_col = label_col + check_col_width;
-            let item_text_width =
-                (menu_width - (item_text_col - menu_col) - PADDING_H - scrollbar_pad).max(0.0);
-            for (i, option) in options.iter().enumerate() {
-                // Item position in content space (relative to menu content start)
+            let item_right = menu_col + menu_width - PADDING_H - scrollbar_pad;
+            let footer_color = resolve_named_color(
+                &node.props,
+                "footer-color",
+                Color { r: 0.45, g: 0.63, b: 1.0, a: 1.0 },
+            );
+            for (i, row) in rows.iter().enumerate() {
                 let content_y = MENU_PADDING_V + i as f32 * MENU_ROW_HEIGHT;
-                // Position in visible space (subtract scroll, add menu_top)
                 let visible_y = content_y - scroll_off;
-
-                // Skip items fully outside the visible window
-                if visible_y + MENU_ROW_HEIGHT < 0.0 || visible_y >= geo.visible_height {
+                if visible_y + MENU_ROW_HEIGHT < 0.0 || visible_y >= list_rect.height {
                     continue;
                 }
-
-                let item_y = geo.menu_top + visible_y;
-
-                // Hover/selected highlight
-                let is_header = headers.contains(&i);
+                let item_y = list_rect.row + visible_y;
+                let row_rect = Rect { row: item_y, col: menu_col, width: menu_width, height: MENU_ROW_HEIGHT };
+                let is_header = matches!(row, MenuRow::Header(_));
+                let is_footer = matches!(row, MenuRow::Footer);
                 let is_hovered = state.hovered_idx == Some(i) && !is_header;
+                if is_footer {
+                    // A hairline separates the action from the options.
+                    super::push_overlay_primitive(GpuPrimitive::Rect(super::GpuRectPrimitive {
+                        rect: Rect { row: item_y, col: menu_col + 0.35, width: menu_width - 0.7, height: 0.04 },
+                        color: Color { r: 1.0, g: 1.0, b: 1.0, a: 0.08 },
+                    }));
+                }
                 if is_hovered {
-                    let hl_rect = Rect {
-                        row: item_y,
-                        col: menu_col,
-                        width: menu_width,
-                        height: MENU_ROW_HEIGHT,
-                    };
-                    super::menu_style::emit_row_highlight(hl_rect, hover_bg, viewport);
+                    super::menu_style::emit_row_highlight(row_rect, hover_bg, viewport);
                 }
 
-                // Check mark for selected item
-                if !action_menu && !is_header && sel_idx == Some(i) {
-                    super::push_overlay_primitive(super::menu_style::checkmark_primitive(
-                        Rect { row: item_y, col: menu_col, width: menu_width, height: MENU_ROW_HEIGHT },
-                        menu_font_size,
-                        check_color,
-                        viewport,
-                    ));
-                }
-
-                // Option label
-                // A header starts at the check column, dimmed, so the
-                // options under it read as its members.
-                let (text_col, text_width) = if is_header {
-                    (label_col, item_text_width + (item_text_col - label_col))
-                } else {
-                    (item_text_col, item_text_width)
+                let (text, text_col, fg) = match *row {
+                    MenuRow::Option(idx) => {
+                        if !action_menu && sel_idx == Some(idx) {
+                            super::push_overlay_primitive(super::menu_style::checkmark_primitive(
+                                row_rect,
+                                menu_font_size,
+                                check_color,
+                                viewport,
+                            ));
+                        }
+                        // Detail, right-aligned and dim (white on the hover).
+                        if let Some(detail) = details.get(idx).filter(|d| !d.is_empty()) {
+                            super::push_overlay_primitive(GpuPrimitive::ProportionalText(
+                                GpuProportionalTextPrimitive {
+                                    row: item_y + (MENU_ROW_HEIGHT - 1.0) * 0.5,
+                                    col: item_text_col,
+                                    align_width: (item_right - item_text_col).max(0.0),
+                                    h_align: 1.0,
+                                    text: detail.clone(),
+                                    font_size: detail_font_size,
+                                    scale: 1.0,
+                                    fg: if is_hovered { theme::FG() } else { theme::DIM() },
+                                    bg: transparent,
+                                    mono: false,
+                                },
+                            ));
+                        }
+                        (options[idx].clone(), item_text_col, theme::FG())
+                    }
+                    // A header starts at the check column, dimmed, so the
+                    // options under it read as its members.
+                    MenuRow::Header(idx) => (options[idx].clone(), label_col, theme::DIM()),
+                    MenuRow::Footer => (
+                        footer.clone().unwrap_or_default(),
+                        item_text_col,
+                        if is_hovered { theme::FG() } else { footer_color },
+                    ),
                 };
-                let option_display =
-                    truncate_text_to_width(option, text_width, menu_font_size, viewport.cell_w);
+                let detail_room = match *row {
+                    MenuRow::Option(idx) => details.get(idx).map_or(0.0, |detail| {
+                        if detail.is_empty() { 0.0 } else { text_w(detail, detail_font_size) + 1.0 }
+                    }),
+                    _ => 0.0,
+                };
+                let option_display = truncate_text_to_width(
+                    &text,
+                    (item_right - text_col - detail_room).max(0.0),
+                    menu_font_size,
+                    viewport.cell_w,
+                );
                 if option_display.is_empty() {
                     continue;
                 }
@@ -1177,7 +1507,7 @@ impl WidgetDefinition for DropdownWidget {
                         font_size: menu_font_size,
                         scale: 1.0,
                         // Popup labels are chrome, not the trigger's colored value.
-                        fg: if is_header { theme::DIM() } else { theme::FG() },
+                        fg,
                         bg: transparent,
                         mono: false,
                     },
@@ -1189,9 +1519,9 @@ impl WidgetDefinition for DropdownWidget {
             if needs_scrollbar {
                 let track_margin = SCROLLBAR_MARGIN;
                 let bar_col = menu_col + menu_width - SCROLLBAR_WIDTH - track_margin;
-                let track_top = geo.menu_top + track_margin;
-                let track_height = geo.visible_height - track_margin * 2.0;
-                let thumb_ratio = (geo.visible_height / geo.content_height).clamp(0.05, 1.0);
+                let track_top = list_rect.row + track_margin;
+                let track_height = list_rect.height - track_margin * 2.0;
+                let thumb_ratio = (list_rect.height / (geo.content_height - list_top)).clamp(0.05, 1.0);
                 let thumb_height = (track_height * thumb_ratio).max(1.0);
                 let scroll_ratio = if geo.max_scroll > 0.0 {
                     scroll_off / geo.max_scroll
@@ -1352,6 +1682,34 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     return float4(in.color_a.rgb, in.color_a.a * mask);
 }
 "#, super::wgsl::DROPDOWN_CHECKMARK_SHADER);
+
+/// The filter row's search glyph: a ring with a handle to the lower right
+/// (uv y grows downward).
+const DROPDOWN_MAGNIFIER_SHADER: super::ShaderSources = super::ShaderSources::both(r#"
+fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
+{
+    float aspect = in.aspect;
+    float2 p = float2((in.uv.x - 0.5) * 2.0 * aspect, (in.uv.y - 0.5) * 2.0);
+
+    float2 c = float2(-0.18, -0.18);
+    float r = 0.52;
+    float ring = abs(length(p - c) - r);
+
+    float2 a = c + float2(0.707, 0.707) * r;
+    float2 b = float2(0.78, 0.78);
+    float2 pa = p - a; float2 ba = b - a;
+    float h = clamp(dot(pa, ba) / dot(ba, ba), 0.0, 1.0);
+    float grip = length(pa - ba * h);
+
+    float d = min(ring, grip);
+    float stroke = 0.11;
+    float edge = fwidth(d) * 1.2;
+    float mask = smoothstep(stroke + edge, stroke - edge, d);
+
+    if (mask < 0.002) { discard_fragment(); }
+    return float4(in.color_a.rgb, in.color_a.a * mask);
+}
+"#, super::wgsl::DROPDOWN_MAGNIFIER_SHADER);
 
 #[cfg(test)]
 mod tests {
@@ -1672,6 +2030,35 @@ mod tests {
     /// them, a click on one keeps the menu open and picks nothing, and the
     /// header renders dimmed with no check mark while the options pick.
     #[test]
+    fn filter_keeps_matching_options_their_headers_and_the_footer() {
+        let props = HashMap::from([
+            (
+                "options".to_string(),
+                string_list(&["No groove", "Project", "Take", "Factory", "MPC 16 Swing 54%", "MPC 8 Swing 66%"]),
+            ),
+            (
+                "headers".to_string(),
+                Value::List(vec![
+                    Rc::new(RefCell::new(Value::Number(1.0))),
+                    Rc::new(RefCell::new(Value::Number(3.0))),
+                ]),
+            ),
+            ("footer".to_string(), Value::String("Extract…".to_string())),
+        ]);
+        assert_eq!(menu_rows(&props, "").len(), 7, "everything, then the footer");
+        assert_eq!(
+            menu_rows(&props, "swing 66"),
+            vec![MenuRow::Header(3), MenuRow::Option(5), MenuRow::Footer],
+            "a header survives only over a match"
+        );
+        let rows = menu_rows(&props, "TAKE");
+        assert_eq!(rows, vec![MenuRow::Header(1), MenuRow::Option(2), MenuRow::Footer]);
+        assert_eq!(step_row(&rows, None, true), Some(1), "the first pickable row");
+        assert_eq!(row_value(&props, MenuRow::Footer).as_deref(), Some("Extract…"));
+        assert_eq!(row_value(&props, MenuRow::Header(1)), None);
+    }
+
+    #[test]
     fn header_options_are_drawn_but_never_picked() {
         let widget_id = 91_338;
         let mut props = HashMap::new();
@@ -1846,12 +2233,12 @@ mod tests {
         let props = props_from_node(&Value::Map(map));
         assert!(is_action_menu(&props));
         assert_eq!(
-            initial_mouse_hovered_index(&props, &get_options(&props)),
+            initial_mouse_hovered_index(&props),
             None,
             "mouse activation should not preselect an action"
         );
         assert_eq!(
-            initial_keyboard_hovered_index(&props, &get_options(&props)),
+            initial_keyboard_hovered_index(&props),
             Some(0),
             "keyboard activation should focus the first action immediately"
         );

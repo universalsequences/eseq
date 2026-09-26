@@ -58,42 +58,45 @@ pub(super) struct LiveGrooveChunk {
 }
 
 /// `prebuilt` (a song row's snapshot, a quantized launch's, or a merge of
-/// either) with the LIVE rack groove table published with `base`.
+/// either) with the LIVE rack groove table of ITS scene, published with
+/// `base`.
 ///
-/// Rack grooves are project-level rack config, not scene or pattern content,
-/// but every prebuilt snapshot copied the table at preflight — and Play
-/// always preflights (the song runtime, plus the auto-latched launch merged
-/// over its rows). Scheduling from the frozen copy made a groove pick, an
-/// amount drag or Off inaudible until the next Play. The live table is also
-/// what the early/late leads, the resync recovery and the record unwind
-/// already read, so every groove reader now agrees. A table that has not
-/// changed since preflight is the same `Arc`, so this is free until an edit.
+/// Rack grooves are project-level rack config (plus each clip's own groove),
+/// not frozen scene content, but every prebuilt snapshot copied the table at
+/// preflight — and Play always preflights (the song runtime, plus the
+/// auto-latched launch merged over its rows). Scheduling from the frozen copy
+/// made a groove pick, an amount drag or Off inaudible until the next Play.
+/// The table comes from `base.scene_track_grooves` for the prebuilt chunk's
+/// scene (`transport.current_pattern`), so a clip launch plays the new clip's
+/// groove from exactly the boundary its patterns start on. The live table is
+/// also what the early/late leads, the resync recovery and the record unwind
+/// read, so every groove reader agrees. A table that has not changed since
+/// preflight is the same `Arc`, so this is free until an edit.
 pub(super) fn with_live_track_grooves(
     cache: &mut Option<LiveGrooveChunk>,
     mut prebuilt: Arc<SequencerSnapshot>,
     base: &SequencerSnapshot,
 ) -> Arc<SequencerSnapshot> {
-    if Arc::ptr_eq(&prebuilt.track_grooves, &base.track_grooves) {
+    let live = base.scene_groove_table(prebuilt.transport.current_pattern);
+    if Arc::ptr_eq(&prebuilt.track_grooves, live) {
         return prebuilt;
     }
     // A merge built for this chunk alone: patch it in place.
     if let Some(unique) = Arc::get_mut(&mut prebuilt) {
-        unique.track_grooves = Arc::clone(&base.track_grooves);
+        unique.track_grooves = Arc::clone(live);
         return prebuilt;
     }
     if let Some(cached) = cache.as_ref() {
-        if Arc::ptr_eq(&cached.source, &prebuilt)
-            && Arc::ptr_eq(&cached.grooves, &base.track_grooves)
-        {
+        if Arc::ptr_eq(&cached.source, &prebuilt) && Arc::ptr_eq(&cached.grooves, live) {
             return Arc::clone(&cached.patched);
         }
     }
     let mut patched = (*prebuilt).clone();
-    patched.track_grooves = Arc::clone(&base.track_grooves);
+    patched.track_grooves = Arc::clone(live);
     let patched = Arc::new(patched);
     *cache = Some(LiveGrooveChunk {
         source: prebuilt,
-        grooves: Arc::clone(&base.track_grooves),
+        grooves: Arc::clone(live),
         patched: Arc::clone(&patched),
     });
     patched

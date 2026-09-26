@@ -10,6 +10,7 @@ use crate::vm::{
 pub const BUILTIN_WIDGET_NAMES: &[&str] = &[
     "label",
     "lane-preview",
+    "groove-lane",
     "button",
     "badge",
     "slider",

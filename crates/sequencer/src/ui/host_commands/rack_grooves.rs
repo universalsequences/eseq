@@ -18,6 +18,12 @@ pub(super) const COMMANDS: &[&str] = &[
     "extract-rack-groove",
     "set-rack-groove",
     "set-rack-groove-amount",
+    "set-rack-groove-enabled",
+    "set-rack-groove-scale",
+    "set-rack-clip-own-groove",
+    "apply-rack-groove-to-all-clips",
+    "set-rack-groove-pad-amount",
+    "set-rack-groove-pad-enabled",
     "rename-rack-groove",
     "duplicate-pool-groove",
     "delete-rack-groove",
@@ -109,6 +115,28 @@ fn apply(name: &str, payload: &Value, app: &mut app::App) -> Result<RackGrooveEd
         return apply_pool_command(name, payload, app);
     }
     let group = group_id(payload, name)?;
+    // The clip whose groove the edit targets (`clip-id`, absent or -1 for the
+    // rack's own): the buffer names the clip it shows, so a launch landing
+    // between drawing and clicking cannot redirect the edit.
+    let clip = extract_i32_from_payload(payload, "clip-id")
+        .filter(|clip| *clip >= 0)
+        .map(|clip| clip as u64);
+    let target = |app: &app::App| {
+        rack_of(app, group).map(|rack| rack.groove_for_clip(clip).clone())
+    };
+    // An edit to a clip that still follows the rack gives it its own groove
+    // (copy-on-write): a new entry the buffer must learn about, so even an
+    // amount drag's first step republishes the structure.
+    let follows_rack = |app: &app::App| {
+        clip.is_some_and(|clip| rack_of(app, group).is_some_and(|rack| rack.clip_groove(clip).is_none()))
+    };
+    let amount_edit = |changed: bool, forked: bool| {
+        if changed && forked {
+            RackGrooveEdit::Structure
+        } else {
+            RackGrooveEdit::Amount(changed)
+        }
+    };
     match name {
         "extract-rack-groove" => {
             let request = extract_request_from_payload(payload)?;
@@ -130,18 +158,13 @@ fn apply(name: &str, payload: &Value, app: &mut app::App) -> Result<RackGrooveEd
                 GrooveChoice::Library { tier, stem } => {
                     let groove = load_library_groove(tier, &stem)
                         .map_err(|error| format!("Could not load groove {key:?}: {error}"))?;
-                    app.apply_library_groove_recorded(group, &groove)?;
+                    app.apply_library_groove_recorded(group, clip, &groove)?;
                     return Ok(RackGrooveEdit::Structure);
                 }
             };
-            let unchanged = app
-                .groups
-                .iter()
-                .find(|candidate| candidate.id == group)
-                .and_then(|candidate| candidate.rack.as_ref())
-                .is_some_and(|rack| rack.groove.active == active);
+            let unchanged = target(app).is_some_and(|settings| settings.active == active);
             if !unchanged {
-                app.set_rack_active_groove_recorded(group, active)?;
+                app.set_rack_active_groove_recorded(group, clip, active)?;
             }
             Ok(RackGrooveEdit::Structure)
         }
@@ -155,7 +178,8 @@ fn apply(name: &str, payload: &Value, app: &mut app::App) -> Result<RackGrooveEd
             let value = extract_f32_from_payload(payload, "value")
                 .filter(|value| value.is_finite())
                 .ok_or_else(|| format!("{name} needs a finite value"))?;
-            let changed = app::edit::apply_rack_groove_amount_drag(app, group, |settings| {
+            let forked = follows_rack(app);
+            let changed = app::edit::apply_rack_groove_amount_drag(app, group, clip, |settings| {
                 match amount.as_str() {
                     "timing" => settings.timing_amount = value,
                     "velocity" => settings.velocity_amount = value,
@@ -163,11 +187,100 @@ fn apply(name: &str, payload: &Value, app: &mut app::App) -> Result<RackGrooveEd
                     _ => {}
                 }
             })?;
-            Ok(RackGrooveEdit::Amount(changed))
+            Ok(amount_edit(changed, forked))
+        }
+        // The rack groove buffer's on/off switch (keeps the selection).
+        "set-rack-groove-enabled" => {
+            let enabled = extract_bool_from_payload(payload, "enabled");
+            match app.set_rack_groove_enabled_recorded(group, clip, enabled) {
+                Ok(()) => Ok(RackGrooveEdit::Structure),
+                Err(_) if target(app).is_some_and(|settings| settings.enabled == enabled) => {
+                    Ok(RackGrooveEdit::Structure)
+                }
+                Err(error) => Err(error),
+            }
+        }
+        // The groove's time scale: 0.5, 1 or 2 (the buffer's Scale dropdown).
+        "set-rack-groove-scale" => {
+            let scale = extract_f32_from_payload(payload, "scale")
+                .ok_or_else(|| format!("{name} needs a scale"))?;
+            match app.set_rack_groove_scale_recorded(group, clip, scale) {
+                Ok(()) => Ok(RackGrooveEdit::Structure),
+                Err(_) if target(app).is_some_and(|settings| settings.scale == scale) => {
+                    Ok(RackGrooveEdit::Structure)
+                }
+                Err(error) => Err(error),
+            }
+        }
+        // One pad's share of the groove, 0..1 (the buffer's Amt column). A
+        // drag coalesces with the rack's amount knobs into one undo step.
+        "set-rack-groove-pad-amount" => {
+            let pad_note = pad_note(payload, name)?;
+            let value = extract_f32_from_payload(payload, "value")
+                .filter(|value| value.is_finite())
+                .ok_or_else(|| format!("{name} needs a finite value"))?;
+            require_pad(app, group, pad_note)?;
+            let forked = follows_rack(app);
+            let changed = app::edit::apply_rack_groove_amount_drag(app, group, clip, |settings| {
+                settings.pad_mut(pad_note).amount = value;
+            })?;
+            Ok(amount_edit(changed, forked))
+        }
+        // Include a pad in the groove or leave it straight.
+        "set-rack-groove-pad-enabled" => {
+            let pad_note = pad_note(payload, name)?;
+            let enabled = extract_bool_from_payload(payload, "enabled");
+            match app.set_rack_groove_pad_enabled_recorded(group, clip, pad_note, enabled) {
+                Ok(()) => Ok(RackGrooveEdit::Structure),
+                Err(_) if target(app).is_some_and(|settings| settings.pad(pad_note).enabled == enabled) => {
+                    Ok(RackGrooveEdit::Structure)
+                }
+                Err(error) => Err(error),
+            }
+        }
+        // Give the clip its own groove (`own` true), or return it to the
+        // rack's.
+        "set-rack-clip-own-groove" => {
+            let clip = clip.ok_or_else(|| format!("{name} needs a clip id"))?;
+            let own = extract_bool_from_payload(payload, "own");
+            match app.set_rack_clip_own_groove_recorded(group, clip, own) {
+                Ok(()) => Ok(RackGrooveEdit::Structure),
+                Err(_) if rack_of(app, group).is_some_and(|rack| rack.clip_groove(clip).is_some() == own) => {
+                    Ok(RackGrooveEdit::Structure)
+                }
+                Err(error) => Err(error),
+            }
+        }
+        // The groove `clip` plays becomes the rack's, for every clip.
+        "apply-rack-groove-to-all-clips" => {
+            app.apply_rack_groove_to_all_clips_recorded(group, clip)?;
+            Ok(RackGrooveEdit::Structure)
         }
         other => Err(format!("Unknown rack groove command {other}")),
     }
 }
+
+fn pad_note(payload: &Value, name: &str) -> Result<i32, String> {
+    extract_i32_from_payload(payload, "pad-note")
+        .ok_or_else(|| format!("{name} needs a pad note"))
+}
+
+fn rack_of(app: &app::App, group: u64) -> Option<&sequencer::project::ProjectRackConfig> {
+    app.groups
+        .iter()
+        .find(|candidate| candidate.id == group)
+        .and_then(|candidate| candidate.rack.as_ref())
+}
+
+fn require_pad(app: &app::App, group: u64, pad_note: i32) -> Result<(), String> {
+    let rack = rack_of(app, group).ok_or_else(|| format!("Track group {group} is not a drum rack"))?;
+    if rack.pads.iter().any(|pad| pad.pad_note == pad_note) {
+        Ok(())
+    } else {
+        Err(format!("The rack has no pad at note {pad_note}"))
+    }
+}
+
 
 /// Pool and library edits. `rename-rack-groove` / `delete-rack-groove` act
 /// on the project pool (deleting a groove turns it off on every rack using

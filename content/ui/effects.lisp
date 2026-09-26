@@ -30,5 +30,4 @@
 (load "@/ui/effects/sampler-panel.lisp")
 (load "@/ui/effects/modulator-panel.lisp")
 (load "@/ui/effects/instrument-panel.lisp")
-(load "@/ui/effects/rack-groove.lisp")
 (load "@/ui/effects/buffers.lisp")

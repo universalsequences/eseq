@@ -2878,6 +2878,7 @@ mod live_keyboard_tests {
                     sequencer::project::ProjectRackPad::new(38, 1),
                 ],
                 choke_groups: vec![None, None],
+                clip_grooves: Vec::new(),
             }),
             rack_members: Vec::new(),
         }

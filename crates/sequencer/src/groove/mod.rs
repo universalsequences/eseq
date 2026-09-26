@@ -44,7 +44,8 @@ mod unwind;
 pub use apply::{
     groove_hash_noise, groove_offset_samples, grooved_sample_time, max_early_lead_beats,
     max_late_lead_beats, mpc_swing_file_stem, mpc_swing_groove, padless_seed_key,
-    track_groove_snapshots, GrooveFloor, TrackGrooveSnapshot, MAX_EARLY_SLOTS, MPC_SWING_PERCENTS,
+    rack_member_grooves, track_groove_snapshots, ClipGrooveVariant, GrooveFloor,
+    RackGrooveVariants, TrackGrooveSnapshot, MAX_EARLY_SLOTS, MPC_SWING_PERCENTS,
     MPC_SWING_RESOLUTIONS,
 };
 pub(crate) use kit::resolve_v5_selection;
@@ -252,10 +253,86 @@ pub struct RackGrooveSettings {
     /// 0..1.0, default 0.0.
     #[serde(default)]
     pub random_amount: f32,
+    /// The rack groove buffer's on/off switch: `false` bypasses the active
+    /// groove (every member plays straight) while keeping the selection and
+    /// amounts, so it comes back exactly as it was.
+    #[serde(default = "default_enabled", skip_serializing_if = "is_true")]
+    pub enabled: bool,
+    /// Per-pad scaling of the groove (the buffer's Amt column and include
+    /// dot), keyed by pad note. A pad with no entry plays the whole groove;
+    /// [`sanitize`](Self::sanitize) drops entries that say exactly that.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pads: Vec<RackGroovePad>,
+    /// Time scale the groove plays at: its period and grid are multiplied by
+    /// this ([`GROOVE_SCALES`]). 2 plays a 1 bar · 1/16 groove as
+    /// 2 bars · 1/8, so a pattern moved to 1/8 steps at double tempo keeps
+    /// the same pocket in real time; 0.5 the reverse.
+    #[serde(default = "default_scale", skip_serializing_if = "is_unit_scale")]
+    pub scale: f32,
 }
+
+/// The time scales the rack groove's Scale control offers.
+pub const GROOVE_SCALES: [f32; 3] = [0.5, 1.0, 2.0];
+
+fn default_scale() -> f32 {
+    1.0
+}
+
+fn is_unit_scale(scale: &f32) -> bool {
+    *scale == 1.0
+}
+
+/// One pad's share of the rack groove: `amount` (0..1) scales the pad's
+/// timing, velocity and random amounts together; `enabled == false` leaves
+/// the pad straight while remembering its amount.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RackGroovePad {
+    pub pad_note: i32,
+    #[serde(default = "default_pad_amount")]
+    pub amount: f32,
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+}
+
+impl RackGroovePad {
+    pub fn new(pad_note: i32) -> Self {
+        Self {
+            pad_note,
+            amount: default_pad_amount(),
+            enabled: true,
+        }
+    }
+
+    /// The factor this pad's groove amounts are multiplied by.
+    pub fn scale(&self) -> f32 {
+        if self.enabled {
+            self.amount
+        } else {
+            0.0
+        }
+    }
+
+    fn is_default(&self) -> bool {
+        self.enabled && self.amount == default_pad_amount()
+    }
+}
+
+pub const GROOVE_PAD_AMOUNT_MAX: f32 = 1.0;
 
 fn default_timing_amount() -> f32 {
     1.0
+}
+
+fn default_pad_amount() -> f32 {
+    1.0
+}
+
+fn default_enabled() -> bool {
+    true
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
 }
 
 fn lenient_groove_id<'de, D>(deserializer: D) -> Result<Option<GrooveId>, D::Error>
@@ -273,6 +350,9 @@ impl Default for RackGrooveSettings {
             timing_amount: default_timing_amount(),
             velocity_amount: 0.0,
             random_amount: 0.0,
+            enabled: true,
+            pads: Vec::new(),
+            scale: default_scale(),
         }
     }
 }
@@ -280,6 +360,30 @@ impl Default for RackGrooveSettings {
 impl RackGrooveSettings {
     pub fn is_default(&self) -> bool {
         *self == Self::default()
+    }
+
+    /// Pad `pad_note`'s settings (the default when it has no entry).
+    pub fn pad(&self, pad_note: i32) -> RackGroovePad {
+        self.pads
+            .iter()
+            .find(|pad| pad.pad_note == pad_note)
+            .copied()
+            .unwrap_or_else(|| RackGroovePad::new(pad_note))
+    }
+
+    /// Edits pad `pad_note`'s entry, creating it first. [`sanitize`]
+    /// removes it again when the edit restores the default.
+    ///
+    /// [`sanitize`]: Self::sanitize
+    pub fn pad_mut(&mut self, pad_note: i32) -> &mut RackGroovePad {
+        let index = match self.pads.iter().position(|pad| pad.pad_note == pad_note) {
+            Some(index) => index,
+            None => {
+                self.pads.push(RackGroovePad::new(pad_note));
+                self.pads.len() - 1
+            }
+        };
+        &mut self.pads[index]
     }
 
     /// Clamps the amounts into their documented ranges (a non-finite value
@@ -300,6 +404,20 @@ impl RackGrooveSettings {
         );
         self.velocity_amount = clamp(self.velocity_amount, GROOVE_VELOCITY_AMOUNT_MAX, 0.0);
         self.random_amount = clamp(self.random_amount, GROOVE_RANDOM_AMOUNT_MAX, 0.0);
+        // Only the offered scales: anything else (a hand-edited file) plays
+        // the groove at its own grid.
+        if !GROOVE_SCALES.contains(&self.scale) {
+            self.scale = default_scale();
+        }
+        for pad in &mut self.pads {
+            pad.amount = clamp(pad.amount, GROOVE_PAD_AMOUNT_MAX, default_pad_amount());
+        }
+        // One entry per pad note (the first wins), none that only restate
+        // the default, in pad-note order so equal settings compare equal.
+        let mut seen = std::collections::BTreeSet::new();
+        self.pads
+            .retain(|pad| seen.insert(pad.pad_note) && !pad.is_default());
+        self.pads.sort_by_key(|pad| pad.pad_note);
     }
 }
 

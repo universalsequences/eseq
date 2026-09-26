@@ -2351,8 +2351,10 @@ impl App {
         // Rack grooves ride the same funnel: every rack config edit (groove
         // pick, amounts, pad notes, extraction) and every membership change
         // lands here, so the scheduler's per-track groove table is rebuilt
-        // exactly when it can change (docs/rack-groove-spec.md).
-        self.state.set_track_grooves(self.track_groove_snapshots());
+        // exactly when it can change (docs/rack-groove-spec.md). Clips with
+        // their own groove publish a variant each; scenes pick among them by
+        // the clip they point at, so a clip launch needs no republish.
+        self.state.set_rack_groove_variants(self.rack_groove_variants());
         let keys = &self.state.runtime.rack_choke_keys;
         for key in keys.iter() {
             key.store(0, Ordering::Release);

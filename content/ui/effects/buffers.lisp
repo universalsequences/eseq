@@ -14,7 +14,6 @@
 (import eseq.effects.panel-widgets :as pw)
 (import eseq.effects.param-controls :as pc)
 (import eseq.effects.process-panel :as pp)
-(import eseq.effects.rack-groove :as groove)
 (import eseq.effects.state :as st)
 (import eseq.effects.track-panels :as tp)
 
@@ -192,10 +191,6 @@
               (eseq.sequencer/rack-pad-map gidx)
               (eseq.sequencer/rack-pad-grid gidx)
               ))))
-      ;; The rack's feel (docs/rack-groove-spec.md, "UI"): groove picker,
-      ;; amounts and the pads x slots offset heatmap, beside the kit.
-      (groove/panel gidx)
-      (groove/extract-modal)
       ;; The pad grid's right-click menu (Role ▸ …), overlaying the grid.
       (eseq.sequencer/rack-pad-context-menu)
       ;; Rack-level fx still matter: the bus chain stays right here, edited the

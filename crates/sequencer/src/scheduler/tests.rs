@@ -16395,3 +16395,39 @@ fn scene_transpose_follows_live_scene_values_without_a_scratch_runtime() {
             });
         }
     }
+
+
+/// A prebuilt chunk (a quantized launch, a song row) plays the live groove
+/// table of ITS scene, so a rack clip with its own groove switches on the
+/// launch boundary rather than when the control thread catches up.
+#[test]
+fn prebuilt_chunks_take_their_scenes_live_groove_table() {
+    use std::sync::Arc;
+    let groove = |timing: f32| {
+        Some(crate::groove::TrackGrooveSnapshot {
+            period_beats: 0.5,
+            resolution_beats: 0.25,
+            row: Arc::new(crate::groove::GrooveRow::default()),
+            timing_amount: timing,
+            velocity_amount: 0.0,
+            random_amount: 0.0,
+            pad_note: 36,
+        })
+    };
+    let verse = Arc::new(vec![groove(1.0)]);
+    let chorus = Arc::new(vec![groove(0.5)]);
+    let mut base = crate::sequencer::SequencerSnapshot::empty();
+    base.track_grooves = Arc::clone(&verse);
+    base.scene_track_grooves = Arc::new(vec![Arc::clone(&verse), Arc::clone(&chorus)]);
+    let mut prebuilt = crate::sequencer::SequencerSnapshot::empty();
+    prebuilt.transport.current_pattern = 1;
+    let mut cache = None;
+    let patched =
+        super::lookahead::with_live_track_grooves(&mut cache, Arc::new(prebuilt), &base);
+    assert!(Arc::ptr_eq(&patched.track_grooves, &chorus), "the chorus scene's table");
+    let mut verse_chunk = crate::sequencer::SequencerSnapshot::empty();
+    verse_chunk.transport.current_pattern = 0;
+    let patched =
+        super::lookahead::with_live_track_grooves(&mut cache, Arc::new(verse_chunk), &base);
+    assert!(Arc::ptr_eq(&patched.track_grooves, &verse));
+}

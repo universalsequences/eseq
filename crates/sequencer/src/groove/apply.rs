@@ -437,11 +437,14 @@ impl ProjectRackConfig {
 
 /// The scheduler's per-track groove table for `num_tracks` tracks, from each
 /// drum rack's `(members, config)` and the project groove `pool` the racks
-/// reference. Every member of a rack with an active, well-formed groove gets
-/// an entry: the pad row [`ProjectGroove::resolve_pad_row`] picks for the
-/// pad's note and effective role (same note, then same role), else the
-/// shared row (a member without a pad, too). Everything else is
-/// `None`, which the scheduler treats as "no groove".
+/// reference, using each rack's own (default) settings. Every member of a
+/// rack with an active, well-formed groove gets an entry: the pad row
+/// [`ProjectGroove::resolve_pad_row`] picks for the pad's note and effective
+/// role (same note, then same role), else the shared row (a member without a
+/// pad, too), its amounts scaled by the pad's share
+/// ([`RackGrooveSettings::pad`](super::RackGrooveSettings::pad)). A bypassed
+/// rack (`enabled == false`) and everything else is `None`, which the
+/// scheduler treats as "no groove".
 pub fn track_groove_snapshots<'a>(
     racks: impl IntoIterator<Item = (&'a [usize], &'a ProjectRackConfig)>,
     pool: &[ProjectGroove],
@@ -449,26 +452,54 @@ pub fn track_groove_snapshots<'a>(
 ) -> Vec<Option<TrackGrooveSnapshot>> {
     let mut out = vec![None; num_tracks];
     for (members, rack) in racks {
-        let Some(groove) = rack.active_groove(pool) else {
-            continue;
-        };
-        if !groove.is_well_formed() {
-            continue;
+        for (track, groove) in rack_member_grooves(members, rack, &rack.groove, pool) {
+            if let Some(slot) = out.get_mut(track) {
+                *slot = groove;
+            }
         }
-        let shared = Arc::new(groove.shared_row.clone());
-        let entry = |row: Arc<GrooveRow>, pad_note: i32| TrackGrooveSnapshot {
-            period_beats: groove.period_beats,
-            resolution_beats: groove.resolution_beats,
-            row,
-            timing_amount: rack.groove.timing_amount,
-            velocity_amount: rack.groove.velocity_amount,
-            random_amount: rack.groove.random_amount,
-            pad_note,
-        };
-        for (member, &track) in members.iter().enumerate() {
-            let Some(slot) = out.get_mut(track) else {
-                continue;
-            };
+    }
+    out
+}
+
+/// One rack's members under `settings` (the rack's own groove or one of its
+/// clips'): `(track, groove)` for every member, `None` where it plays
+/// straight.
+pub fn rack_member_grooves(
+    members: &[usize],
+    rack: &ProjectRackConfig,
+    settings: &super::RackGrooveSettings,
+    pool: &[ProjectGroove],
+) -> Vec<(usize, Option<TrackGrooveSnapshot>)> {
+    let straight = || members.iter().map(|&track| (track, None)).collect();
+    if !settings.enabled {
+        return straight();
+    }
+    let Some(groove) = settings.active.and_then(|id| super::pool_groove(pool, id)) else {
+        return straight();
+    };
+    if !groove.is_well_formed() {
+        return straight();
+    }
+    let shared = Arc::new(groove.shared_row.clone());
+    // The Scale stretches the grid: offsets stay in slots, so each lands
+    // the same fraction of a (longer) slot late.
+    let scale = settings.scale as f64;
+    // A pad's share scales all three amounts, so an excluded pad (share 0)
+    // keeps its groove entry and still plays straight rather than falling
+    // back to its track's swing.
+    let entry = |row: Arc<GrooveRow>, pad_note: i32, share: f32| TrackGrooveSnapshot {
+        period_beats: groove.period_beats * scale,
+        resolution_beats: groove.resolution_beats * scale,
+        row,
+        timing_amount: settings.timing_amount * share,
+        velocity_amount: settings.velocity_amount * share,
+        random_amount: settings.random_amount * share,
+        pad_note,
+    };
+    members
+        .iter()
+        .enumerate()
+        .map(|(member, &track)| {
             let pad = rack.pads.iter().find(|pad| pad.member == member);
             let pad_row = pad.and_then(|pad| {
                 groove
@@ -480,8 +511,83 @@ pub fn track_groove_snapshots<'a>(
                 None => Arc::clone(&shared),
             };
             let pad_note = pad.map_or_else(|| padless_seed_key(member), |pad| pad.pad_note);
-            *slot = Some(entry(row, pad_note));
+            let share = pad.map_or(1.0, |pad| settings.pad(pad.pad_note).scale());
+            (track, Some(entry(row, pad_note, share)))
+        })
+        .collect()
+}
+
+/// Every groove table the scheduler may need, before scenes pick among them:
+/// the table with each rack on its own settings (`base`), plus, per clip
+/// that plays its own groove, that rack's members under the clip's settings.
+/// A scene's table is `base` with the overrides of the clips it points at
+/// ([`Self::resolve`]), so a clip launch — a scene relaunch — switches the
+/// groove on the same boundary as the clip's patterns.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RackGrooveVariants {
+    pub base: Arc<Vec<Option<TrackGrooveSnapshot>>>,
+    pub clips: Vec<ClipGrooveVariant>,
+}
+
+/// One clip's own groove, resolved for its rack's members.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ClipGrooveVariant {
+    pub group_id: u64,
+    pub clip: crate::sequencer::RackClipId,
+    pub members: Vec<(usize, Option<TrackGrooveSnapshot>)>,
+}
+
+impl RackGrooveVariants {
+    /// Variants from each drum rack's `(group id, members, config)`.
+    pub fn build<'a>(
+        racks: impl IntoIterator<Item = (u64, &'a [usize], &'a ProjectRackConfig)> + Clone,
+        pool: &[ProjectGroove],
+        num_tracks: usize,
+    ) -> Self {
+        let base = track_groove_snapshots(
+            racks.clone().into_iter().map(|(_, members, rack)| (members, rack)),
+            pool,
+            num_tracks,
+        );
+        let clips = racks
+            .into_iter()
+            .flat_map(|(group_id, members, rack)| {
+                rack.clip_grooves.iter().map(move |own| ClipGrooveVariant {
+                    group_id,
+                    clip: own.clip,
+                    members: rack_member_grooves(members, rack, &own.settings, pool),
+                })
+            })
+            .collect();
+        Self {
+            base: Arc::new(base),
+            clips,
         }
     }
-    out
+
+    pub fn has_clip_grooves(&self) -> bool {
+        !self.clips.is_empty()
+    }
+
+    /// The table for a scene whose rack `group` plays clip `clip_of(group)`:
+    /// `base` itself (shared, no copy) unless one of those clips has its own
+    /// groove.
+    pub fn resolve(
+        &self,
+        clip_of: impl Fn(u64) -> Option<crate::sequencer::RackClipId>,
+    ) -> Arc<Vec<Option<TrackGrooveSnapshot>>> {
+        let mut table: Option<Vec<Option<TrackGrooveSnapshot>>> = None;
+        for variant in &self.clips {
+            if clip_of(variant.group_id) != Some(variant.clip) {
+                continue;
+            }
+            let table = table.get_or_insert_with(|| (*self.base).clone());
+            for (track, groove) in &variant.members {
+                if let Some(slot) = table.get_mut(*track) {
+                    *slot = groove.clone();
+                }
+            }
+        }
+        table.map_or_else(|| Arc::clone(&self.base), Arc::new)
+    }
 }

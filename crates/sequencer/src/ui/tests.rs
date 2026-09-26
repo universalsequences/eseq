@@ -10826,6 +10826,17 @@
                 &mut frame_diff.song,
                 transport_visible,
             );
+            // These probes time track switches within ONE layout. Selecting
+            // a drum rack member splits the sidebar for the *groove* buffer
+            // (and a plain track joins it back), which is a layout change,
+            // not the switch cost measured here, so the split is off.
+            editor
+                .runtime_mut()
+                .eval_str(
+                    "(setopt eseq.rack-groove-buffer/groove-buffer-auto-split false)
+                     (eseq.seq-layout/refresh-current-layout)",
+                )
+                .expect("keep the probe's layout fixed");
             editor.runtime_mut().run_reactive_cycle();
             editor.refresh_runtime_side_effects();
             editor.update_tile_rects(vp_cols, vp_rows);

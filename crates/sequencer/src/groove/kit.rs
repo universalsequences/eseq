@@ -12,7 +12,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::{GrooveId, ProjectGroove, RackGrooveSettings};
+use super::{GrooveId, ProjectGroove, RackGroovePad, RackGrooveSettings};
 
 /// Kit v6: a copy of the rack's active groove and the rack's amounts.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -25,6 +25,31 @@ pub struct KitGroove {
     pub velocity_amount: f32,
     #[serde(default)]
     pub random_amount: f32,
+    /// The rack's on/off switch and per-pad shares (rack groove buffer);
+    /// kits written before them load with the groove on and every pad full.
+    #[serde(default = "yes", skip_serializing_if = "is_true")]
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pads: Vec<RackGroovePad>,
+    /// The rack's groove time scale (1 for kits written before it).
+    #[serde(default = "unit", skip_serializing_if = "is_unit")]
+    pub scale: f32,
+}
+
+fn unit() -> f32 {
+    1.0
+}
+
+fn is_unit(value: &f32) -> bool {
+    *value == 1.0
+}
+
+fn yes() -> bool {
+    true
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
 }
 
 fn one() -> f32 {
@@ -42,6 +67,9 @@ impl KitGroove {
             timing_amount: settings.timing_amount,
             velocity_amount: settings.velocity_amount,
             random_amount: settings.random_amount,
+            enabled: settings.enabled,
+            pads: settings.pads.clone(),
+            scale: settings.scale,
         })
     }
 
@@ -53,6 +81,9 @@ impl KitGroove {
             timing_amount: self.timing_amount,
             velocity_amount: self.velocity_amount,
             random_amount: self.random_amount,
+            enabled: self.enabled,
+            pads: self.pads.clone(),
+            scale: self.scale,
         };
         settings.sanitize();
         settings
@@ -124,5 +155,8 @@ pub(crate) fn resolve_v5_selection(
         timing_amount: selection.timing_amount,
         velocity_amount: selection.velocity_amount,
         random_amount: selection.random_amount,
+        enabled: true,
+        pads: Vec::new(),
+        scale: 1.0,
     })
 }

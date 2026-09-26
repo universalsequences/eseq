@@ -7439,14 +7439,111 @@ mod tests {
         assert_ne!(second, groove_id);
         assert_eq!(app.grooves.len(), 2);
         assert_eq!(rack(&app).groove.active, Some(groove_id));
-        app.set_rack_active_groove_recorded(group_id, Some(second))
+        app.set_rack_active_groove_recorded(group_id, None, Some(second))
             .expect("pick the second groove");
-        assert!(app.set_rack_active_groove_recorded(group_id, Some(99)).is_err());
+        assert!(app.set_rack_active_groove_recorded(group_id, None, Some(99)).is_err());
         assert!(matches!(
             crate::app::edit::undo(&mut app),
             crate::app::history::HistoryReplay::Applied(_)
         ));
         assert_eq!(rack(&app).groove.active, Some(groove_id));
+        graph.process_block();
+    }
+
+    /// Per-clip grooves (eseq-d12o): a clip with its own groove plays it
+    /// while the current scene points at that clip, every other clip plays
+    /// the rack's; the per-scene tables the scheduler switches on launch
+    /// agree with the current one; "Apply to All Clips" makes the clip's
+    /// groove the rack's for every clip; and each step undoes.
+    #[test]
+    fn rack_clips_play_their_own_groove_or_the_racks() {
+        use crate::groove::mpc_swing_groove;
+
+        let graph = TestLiveGraph::new("drum-rack-clip-groove-test", 64, 44_100, 2);
+        let mut app = test_app_for_live_graph(&graph, 0);
+        let (group_id, _) = app.create_drum_rack_recorded(None).expect("rack");
+        let hat = app.graph_controller().add_blank_sampler_track().expect("hat track");
+        app.assign_rack_pad_track_recorded(group_id, 42, hat).expect("hat pad");
+        app.apply_library_groove_recorded(group_id, None, &mpc_swing_groove(54, 0.25))
+            .expect("rack groove");
+        app.convert_rack_to_clips_recorded(group_id).expect("clips");
+        let first = app.current_rack_clip(group_id).expect("the scene's clip");
+        let second = app.save_rack_clip_as_recorded(group_id, "Chorus").expect("second clip");
+        app.set_current_rack_clip_recorded(group_id, Some(second)).expect("play the chorus");
+
+        // The hat's off-beat 16th, in beats, as the scheduler would play it.
+        let hat_push = |app: &App| {
+            app.state.track_grooves()[hat]
+                .as_ref()
+                .map(|groove| groove.offset_beats(0.25))
+                .unwrap_or(0.0)
+        };
+        let rack = |app: &App| {
+            app.groups
+                .iter()
+                .find(|group| group.id == group_id)
+                .and_then(|group| group.rack.clone())
+                .unwrap()
+        };
+        let swing54 = 0.08 * 0.25;
+        let swing66 = 0.32 * 0.25;
+        assert!((hat_push(&app) - swing54).abs() < 1e-6, "the chorus follows the rack");
+
+        app.set_rack_clip_own_groove_recorded(group_id, second, true).expect("own groove");
+        app.apply_library_groove_recorded(group_id, Some(second), &mpc_swing_groove(66, 0.25))
+            .expect("the chorus's groove");
+        assert!((hat_push(&app) - swing66).abs() < 1e-6, "the chorus plays its own");
+        assert_eq!(
+            rack(&app).groove.active.and_then(|id| crate::groove::pool_groove(&app.grooves, id))
+                .map(|groove| groove.name.clone()).as_deref(),
+            Some("MPC 16 Swing 54%"),
+            "the rack's own groove is untouched"
+        );
+        // The table the scheduler switches to on a launch of this scene is
+        // the one it plays now.
+        let scenes = app.state.scene_track_grooves();
+        let current = app.state.with_scenes(|scenes| scenes.current_scene);
+        assert_eq!(*scenes[current], *app.state.track_grooves());
+
+        app.set_current_rack_clip_recorded(group_id, Some(first)).expect("back to the verse");
+        assert!((hat_push(&app) - swing54).abs() < 1e-6, "the verse still follows the rack");
+
+        app.apply_rack_groove_to_all_clips_recorded(group_id, Some(second))
+            .expect("apply to all");
+        assert!(rack(&app).clip_grooves.is_empty());
+        assert!((hat_push(&app) - swing66).abs() < 1e-6, "every clip plays it now");
+        assert!(matches!(
+            crate::app::edit::undo(&mut app),
+            crate::app::history::HistoryReplay::Applied(_)
+        ));
+        assert_eq!(rack(&app).clip_grooves.len(), 1, "undo gives the chorus its own back");
+        assert!((hat_push(&app) - swing54).abs() < 1e-6);
+
+        // Extract + quantize from the verse (the playing clip): the verse,
+        // whose patterns were just straightened, owns the new groove; the
+        // rack's own groove stays for every other clip.
+        for (step, delay) in [(2usize, 0.3f32), (6, 0.3), (10, 0.3), (14, 0.3)] {
+            app.state.pattern.patterns[hat].set_step_active(step, true);
+            crate::app::try_apply_command(
+                &mut app,
+                crate::app::AppCommand::SetStepParam {
+                    track: hat,
+                    step,
+                    param: crate::sequencer::StepParam::Delay,
+                    value: delay,
+                },
+            )
+            .expect("take delay");
+        }
+        let extracted = app
+            .extract_rack_groove_recorded(group_id, &crate::app::rack_grooves::RackGrooveExtractRequest {
+                quantize_source: true,
+                ..Default::default()
+            })
+            .expect("extract from the verse");
+        let after = rack(&app);
+        assert_eq!(after.clip_groove(first).and_then(|own| own.active), Some(extracted));
+        assert_ne!(after.groove.active, Some(extracted), "the rack's own groove is kept");
         graph.process_block();
     }
 
@@ -7484,7 +7581,7 @@ mod tests {
         groove.pad_rows = vec![GroovePadRow { pad_note: 42, role: None, row: hat_row.clone() }];
         app.grooves.push(groove.clone());
 
-        app.set_rack_active_groove_recorded(group_id, Some(1))
+        app.set_rack_active_groove_recorded(group_id, None, Some(1))
             .expect("pick the rack groove");
         let grooves = table(&app);
         let kick_groove = grooves[kick].as_ref().expect("kick member grooved");
@@ -7512,7 +7609,7 @@ mod tests {
 
         let swing = mpc_swing_groove(66, 0.25);
         let swing_id = app
-            .apply_library_groove_recorded(group_id, &swing)
+            .apply_library_groove_recorded(group_id, None, &swing)
             .expect("apply a factory swing");
         assert_eq!(swing_id, 2, "copied into the pool");
         let expected = &swing.shared_row;
@@ -7520,7 +7617,7 @@ mod tests {
         assert_eq!(&*grooves[kick].as_ref().unwrap().row, expected);
         assert_eq!(&*grooves[hat].as_ref().unwrap().row, expected);
 
-        app.set_rack_active_groove_recorded(group_id, None).expect("groove off");
+        app.set_rack_active_groove_recorded(group_id, None, None).expect("groove off");
         assert!(table(&app).iter().all(Option::is_none));
         assert!(matches!(
             crate::app::edit::undo(&mut app),
@@ -7610,14 +7707,14 @@ mod tests {
             // Groove off for two beats, then pick it, then Timing 50%, then Off.
             let (pick_at, timing_at, off_at, end) = (beats(2.0), beats(4.0), beats(6.0), beats(8.0));
             run_until(&mut driver, &mut rendered, pick_at, &mut hits);
-            app.set_rack_active_groove_recorded(group_id, Some(1)).expect("pick groove");
+            app.set_rack_active_groove_recorded(group_id, None, Some(1)).expect("pick groove");
             run_until(&mut driver, &mut rendered, timing_at, &mut hits);
-            crate::app::edit::apply_rack_groove_amount_drag(&mut app, group_id, |settings| {
+            crate::app::edit::apply_rack_groove_amount_drag(&mut app, group_id, None, |settings| {
                 settings.timing_amount = 0.5;
             })
             .expect("timing drag");
             run_until(&mut driver, &mut rendered, off_at, &mut hits);
-            app.set_rack_active_groove_recorded(group_id, None).expect("groove off");
+            app.set_rack_active_groove_recorded(group_id, None, None).expect("groove off");
             run_until(&mut driver, &mut rendered, end, &mut hits);
 
             let label = if authored_scene_row { "scene row" } else { "auto-latched scene" };
@@ -7711,6 +7808,7 @@ mod tests {
             timing_amount: 1.25,
             velocity_amount: 0.0,
             random_amount: 0.0,
+            ..Default::default()
         };
         app.grooves = vec![dilla.clone(), madlib.clone()];
         {
@@ -7776,7 +7874,7 @@ mod tests {
         app.assign_rack_pad_track_recorded(other_id, 36, other_member).expect("other pad");
         let own = two_slot_test_groove(20, "Own", 0.1, &[]);
         app.grooves.push(own.clone());
-        app.set_rack_active_groove_recorded(other_id, Some(20))
+        app.set_rack_active_groove_recorded(other_id, None, Some(20))
             .expect("pick own groove");
         let before_audition = rack_of(&app, other_id);
         let pool_before = app.grooves.clone();
@@ -7860,7 +7958,7 @@ mod tests {
         app.assign_rack_pad_track_recorded(source_id, 42, hat).expect("hat pad");
         let take = two_slot_test_groove(5, "Take", 0.25, &[36, 42]);
         app.grooves = vec![take.clone()];
-        app.set_rack_active_groove_recorded(source_id, Some(5)).expect("source plays it");
+        app.set_rack_active_groove_recorded(source_id, None, Some(5)).expect("source plays it");
 
         let (target_id, _) = app.create_drum_rack_recorded(None).expect("target rack");
         let hat2 = app.graph_controller().add_blank_sampler_track().expect("hat 2");
@@ -7877,7 +7975,7 @@ mod tests {
         let table = |app: &App| app.state.latest_scheduler_snapshot().track_grooves.clone();
         assert!(table(&app)[hat2].is_none() && table(&app)[snare].is_none());
 
-        app.set_rack_active_groove_recorded(target_id, Some(5)).expect("apply on the target");
+        app.set_rack_active_groove_recorded(target_id, None, Some(5)).expect("apply on the target");
         assert_eq!(app.grooves, vec![take.clone()], "one pool groove, two instances");
         assert_eq!(app.racks_using_groove(5), vec![source_id, target_id]);
         let grooves = table(&app);
@@ -7892,8 +7990,8 @@ mod tests {
             "no row for the snare's note: shared row"
         );
         assert_eq!(*grooves[kick].as_ref().unwrap().row, *take.pad_row(36).unwrap());
-        assert!(app.set_rack_active_groove_recorded(target_id, Some(5)).is_err(), "unchanged");
-        assert!(app.set_rack_active_groove_recorded(target_id, Some(99)).is_err(), "not in the pool");
+        assert!(app.set_rack_active_groove_recorded(target_id, None, Some(5)).is_err(), "unchanged");
+        assert!(app.set_rack_active_groove_recorded(target_id, None, Some(99)).is_err(), "not in the pool");
         assert!(matches!(
             crate::app::edit::undo(&mut app),
             crate::app::history::HistoryReplay::Applied(_)
@@ -7939,7 +8037,7 @@ mod tests {
             GroovePadRow { pad_note: c1 + 2, role: Some(PadRole::Snare), row: row(0.2) },
         ];
         app.grooves = vec![groove.clone()];
-        app.set_rack_active_groove_recorded(group_id, Some(4)).expect("play it");
+        app.set_rack_active_groove_recorded(group_id, None, Some(4)).expect("play it");
         let table = |app: &App| app.state.latest_scheduler_snapshot().track_grooves.clone();
         let row_at = |app: &App, track: usize| (*table(app)[track].as_ref().expect("grooved").row).clone();
         assert_eq!(row_at(&app, kick), row(0.1), "standard kick: the kick row");
@@ -8069,17 +8167,17 @@ mod tests {
             .expect("load library groove")
         };
         let undo_len = app.history.undo_len();
-        assert_eq!(app.apply_library_groove_recorded(group_id, &load("Take")).expect("apply take"), 5);
+        assert_eq!(app.apply_library_groove_recorded(group_id, None, &load("Take")).expect("apply take"), 5);
         assert_eq!(app.grooves.len(), 1, "deduped onto the pool groove");
         assert_eq!(app.history.undo_len(), undo_len + 1);
 
-        let id = app.apply_library_groove_recorded(group_id, &load("Madlib")).expect("apply madlib");
+        let id = app.apply_library_groove_recorded(group_id, None, &load("Madlib")).expect("apply madlib");
         assert_eq!(id, 6, "a new pool groove");
         assert_eq!(app.grooves.len(), 2);
         assert!(app.grooves[1].same_feel(&madlib));
         assert_eq!(app.history.undo_len(), undo_len + 2, "one undo step per apply");
         assert_eq!(*table(&app)[hat].as_ref().unwrap().row, *madlib.pad_row(42).unwrap());
-        assert_eq!(app.apply_library_groove_recorded(group_id, &load("Madlib")).unwrap(), 6);
+        assert_eq!(app.apply_library_groove_recorded(group_id, None, &load("Madlib")).unwrap(), 6);
         assert_eq!(app.grooves.len(), 2, "re-applying does not duplicate");
         assert_eq!(app.history.undo_len(), undo_len + 2, "and records nothing");
 
@@ -8178,7 +8276,7 @@ mod tests {
         // Amount drag: live on every frame, one undo step at the end.
         let undo_len = app.history.undo_len();
         for value in [0.9f32, 0.7, 0.4, 7.0] {
-            assert!(crate::app::edit::apply_rack_groove_amount_drag(&mut app, group_id, |s| {
+            assert!(crate::app::edit::apply_rack_groove_amount_drag(&mut app, group_id, None, |s| {
                 s.timing_amount = value
             })
             .expect("drag"));
@@ -8186,7 +8284,7 @@ mod tests {
             assert_eq!(settings(&app).timing_amount, clamped);
             assert_eq!(timing_in_table(&app), Some(clamped), "the scheduler sees each frame");
         }
-        assert!(!crate::app::edit::apply_rack_groove_amount_drag(&mut app, group_id, |s| {
+        assert!(!crate::app::edit::apply_rack_groove_amount_drag(&mut app, group_id, None, |s| {
             s.timing_amount = 1.5
         })
         .expect("unchanged"), "an unchanged value is not an edit");
@@ -8194,7 +8292,7 @@ mod tests {
         crate::app::edit::finish_active_gesture(&mut app);
         assert_eq!(app.history.undo_len(), undo_len + 1, "one step per drag");
         // A second drag on another amount is its own step.
-        crate::app::edit::apply_rack_groove_amount_drag(&mut app, group_id, |s| {
+        crate::app::edit::apply_rack_groove_amount_drag(&mut app, group_id, None, |s| {
             s.random_amount = 0.5
         })
         .expect("random drag");
@@ -8218,10 +8316,10 @@ mod tests {
         let (second_id, _) = app.create_drum_rack_recorded(None).expect("second rack");
         let hat2 = app.graph_controller().add_blank_sampler_track().expect("hat 2");
         app.assign_rack_pad_track_recorded(second_id, 42, hat2).expect("hat 2 pad");
-        app.set_rack_active_groove_recorded(second_id, Some(groove_id)).expect("second plays it");
+        app.set_rack_active_groove_recorded(second_id, None, Some(groove_id)).expect("second plays it");
         let (third_id, _) = app.create_drum_rack_recorded(None).expect("third rack");
         let other = app
-            .apply_library_groove_recorded(third_id, &crate::groove::mpc_swing_groove(58, 0.25))
+            .apply_library_groove_recorded(third_id, None, &crate::groove::mpc_swing_groove(58, 0.25))
             .expect("third plays a swing");
         assert_eq!(app.racks_using_groove(groove_id), vec![group_id, second_id]);
         let active_of = |app: &App, id: u64| {
