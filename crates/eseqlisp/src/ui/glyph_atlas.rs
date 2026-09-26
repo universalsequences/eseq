@@ -185,18 +185,61 @@ impl FontFace {
         })
     }
 
+    fn font_for_char(&self, ch: char) -> Arc<Font> {
+        if self.font.lookup_glyph_index(ch) != 0 {
+            return self.font.clone();
+        }
+        fallback_font_for_char(ch).unwrap_or_else(|| self.font.clone())
+    }
+
     fn metrics(&self, ch: char, px: f32) -> GlyphMetrics {
-        convert_metrics(self.font.metrics(ch, px))
+        convert_metrics(self.font_for_char(ch).metrics(ch, px))
     }
 
     fn advance(&self, ch: char, px: f32) -> f32 {
-        self.font.metrics(ch, px).advance_width
+        self.metrics(ch, px).advance_width
     }
 
     fn rasterize(&self, ch: char, px: f32) -> (GlyphMetrics, Vec<u8>) {
-        let (metrics, pixels) = self.font.rasterize(ch, px);
+        let (metrics, pixels) = self.font_for_char(ch).rasterize(ch, px);
         (convert_metrics(metrics), pixels)
     }
+}
+
+/// Resolve missing characters once, shared by all sizes and atlases. Inspect
+/// the cmap before parsing outlines: eagerly parsing every installed font is
+/// particularly expensive on machines with large CJK collections. Measurement
+/// and rasterization must use the same face, including its advance width.
+#[cfg(not(target_os = "macos"))]
+fn fallback_font_for_char(ch: char) -> Option<Arc<Font>> {
+    static FALLBACKS: OnceLock<Mutex<HashMap<char, Option<Arc<Font>>>>> = OnceLock::new();
+    let mut cache = FALLBACKS.get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    cache.entry(ch).or_insert_with(|| {
+        let db = system_fonts();
+        // Prefer regular upright faces over bold/italic symbol variants.
+        for regular in [true, false] {
+            for face in db.faces().filter(|face| {
+                (face.style == fontdb::Style::Normal
+                    && face.weight == fontdb::Weight::NORMAL) == regular
+            }) {
+                let supports_char = db.with_face_data(face.id, |data, index| {
+                    ttf_parser::Face::parse(data, index).ok()
+                        .and_then(|face| face.glyph_index(ch))
+                        .is_some_and(|glyph| glyph.0 != 0)
+                }).unwrap_or(false);
+                if supports_char {
+                    if let Some(loaded) = load_font_by_id(face.id) {
+                        if loaded.face.font.lookup_glyph_index(ch) != 0 {
+                            return Some(loaded.face.font);
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }).clone()
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -1365,6 +1408,43 @@ mod tests {
         load_any_font(true)
             .map(|loaded| loaded.post_script_name)
             .expect("an installed monospace font")
+    }
+
+    #[test]
+    #[cfg(not(target_os = "macos"))]
+    fn missing_arrows_use_the_same_fallback_for_measurement_and_rasterization() {
+        // Like the other font-discovery tests, this exercises installed fonts.
+        // Select a face lacking arrows by coverage, not a distro-specific name.
+        let primary = system_fonts().faces().find_map(|face| {
+            let missing = system_fonts().with_face_data(face.id, |data, index| {
+                ttf_parser::Face::parse(data, index).is_ok_and(|face| {
+                    face.glyph_index('A').is_some()
+                        && face.glyph_index('←').is_none()
+                        && face.glyph_index('→').is_none()
+                })
+            }).unwrap_or(false);
+            missing.then(|| load_font_by_id(face.id)).flatten()
+        }).expect("an installed text face without arrow glyphs");
+        assert!(Arc::ptr_eq(&primary.face.font_for_char('A'), &primary.face.font));
+        for ch in ['←', '→'] {
+            assert_eq!(primary.face.font.lookup_glyph_index(ch), 0);
+            let fallback = primary.face.font_for_char(ch);
+            assert_ne!(fallback.lookup_glyph_index(ch), 0);
+            assert!(Arc::ptr_eq(&fallback, &primary.face.font_for_char(ch)));
+            for px in [12.0, 24.0] {
+                let expected = fallback.rasterize(ch, px);
+                let (metrics, pixels) = primary.face.rasterize(ch, px);
+                assert_eq!(metrics, convert_metrics(expected.0));
+                assert_eq!(pixels, expected.1);
+                assert!(pixels.iter().any(|value| *value > 0));
+                assert!(metrics.width > 0 && metrics.height > 0);
+                assert!(metrics.advance_width.is_finite() && metrics.advance_width > 0.0);
+                assert_eq!(primary.face.metrics(ch, px), metrics);
+                assert_eq!(primary.face.advance(ch, px), metrics.advance_width);
+            }
+        }
+        // An unsupported codepoint retains the primary face's missing glyph.
+        assert!(Arc::ptr_eq(&primary.face.font_for_char('\u{10ffff}'), &primary.face.font));
     }
 
     #[test]

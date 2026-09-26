@@ -353,6 +353,8 @@ struct LiveSpectrogramGpuResource {
     time_slices: u32,
     write_head: u32,
     sample_rate: f32,
+    waterfall: wgpu::Buffer,
+    smoothed: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
 }
 
@@ -440,7 +442,10 @@ enum DrawKind {
 struct DrawCmd {
     scissor: ScissorRect,
     pipeline: PipelineRef,
-    buffer: wgpu::Buffer,
+    /// Vertex/instance bytes. Packed into the shared frame geometry buffer at
+    /// encode time; `range` is this command's slice of it.
+    geometry: Vec<u8>,
+    range: std::ops::Range<u64>,
     kind: DrawKind,
 }
 
@@ -540,6 +545,10 @@ pub struct WgpuAppBackend {
     mod_patch_indices: HashMap<u32, crate::ui::patch_port_index::PatchPortIndex>,
     retained_widget_scenes: HashMap<u32, widget_render::retained_scene::RetainedScene>,
     // Resources
+    /// One vertex buffer shared by every draw command, rewritten each frame
+    /// and grown geometrically. Replaces a fresh buffer per command per frame.
+    frame_geometry: Option<wgpu::Buffer>,
+    frame_geometry_bytes: Vec<u8>,
     waveform_buffers: HashMap<(String, u32), WaveformGpuResource>,
     wavetable_buffers: HashMap<String, WavetableGpuResource>,
     live_spectrogram_buffers: HashMap<String, LiveSpectrogramGpuResource>,
@@ -626,6 +635,8 @@ impl WgpuAppBackend {
             prop_text_layout_cache: PropTextLayoutCache::new(),
             mod_patch_indices: HashMap::new(),
             retained_widget_scenes: HashMap::new(),
+            frame_geometry: None,
+            frame_geometry_bytes: Vec::new(),
             waveform_buffers: HashMap::new(),
             wavetable_buffers: HashMap::new(),
             live_spectrogram_buffers: HashMap::new(),
@@ -659,6 +670,7 @@ impl WgpuAppBackend {
         self.live_spectrogram_buffers.clear();
         self.wavetable_buffers.clear();
         self.waveform_buffers.clear();
+        drop(self.frame_geometry.take());
         drop(self.prop_atlas.take());
         drop(self.text_atlas.take());
         drop(self.atlas.take());
@@ -1119,16 +1131,27 @@ impl WgpuAppBackend {
         let Some(frame) = live_audio::spectrogram_frame(data_key) else {
             return false;
         };
-        let needs_upload = self
-            .live_spectrogram_buffers
-            .get(data_key)
-            .map(|resource| {
-                resource.revision != frame.revision
-                    || resource.bins != frame.bins
-                    || resource.time_slices != frame.time_slices
-            })
-            .unwrap_or(true);
-        if needs_upload {
+        let existing = self.live_spectrogram_buffers.get(data_key);
+        let needs_upload = existing.is_none_or(|resource| resource.revision != frame.revision);
+        let same_shape = existing.is_some_and(|resource| {
+            resource.bins == frame.bins
+                && resource.time_slices == frame.time_slices
+                && resource.waterfall.size() == std::mem::size_of_val(frame.waterfall.as_slice()) as u64
+                && resource.smoothed.size() == std::mem::size_of_val(frame.smoothed.as_slice()) as u64
+        });
+        if needs_upload && same_shape {
+            // Live data changes every analysis frame; rewrite the existing
+            // buffers rather than allocating and binding new ones each time.
+            let Some(gpu) = self.gpu.as_ref() else {
+                return false;
+            };
+            let resource = self.live_spectrogram_buffers.get_mut(data_key).expect("existing resource");
+            gpu.queue.write_buffer(&resource.waterfall, 0, bytemuck::cast_slice(frame.waterfall.as_slice()));
+            gpu.queue.write_buffer(&resource.smoothed, 0, bytemuck::cast_slice(frame.smoothed.as_slice()));
+            resource.revision = frame.revision;
+            resource.write_head = frame.write_head;
+            resource.sample_rate = frame.sample_rate;
+        } else if needs_upload {
             let Some(gpu) = self.gpu.as_ref() else {
                 return false;
             };
@@ -1137,14 +1160,14 @@ impl WgpuAppBackend {
                 .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some("eseqlisp spectrogram waterfall"),
                     contents: bytemuck::cast_slice(frame.waterfall.as_slice()),
-                    usage: wgpu::BufferUsages::STORAGE,
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
                 });
             let smoothed = gpu
                 .device
                 .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some("eseqlisp spectrogram smoothed"),
                     contents: bytemuck::cast_slice(frame.smoothed.as_slice()),
-                    usage: wgpu::BufferUsages::STORAGE,
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
                 });
             let bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("eseqlisp spectrogram bind group"),
@@ -1168,6 +1191,8 @@ impl WgpuAppBackend {
                     time_slices: frame.time_slices,
                     write_head: frame.write_head,
                     sample_rate: frame.sample_rate,
+                    waterfall,
+                    smoothed,
                     bind_group,
                 },
             );
@@ -1180,17 +1205,12 @@ impl WgpuAppBackend {
 
     // ── Draw planning ────────────────────────────────────────────────────────
 
-    fn vertex_buffer<T: bytemuck::Pod>(device: &wgpu::Device, data: &[T]) -> wgpu::Buffer {
-        device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("eseqlisp frame geometry"),
-            contents: bytemuck::cast_slice(data),
-            usage: wgpu::BufferUsages::VERTEX,
-        })
+    fn vertex_bytes<T: bytemuck::Pod>(data: &[T]) -> Vec<u8> {
+        bytemuck::cast_slice(data).to_vec()
     }
 
     fn plan_vertices(
         plan: &mut Vec<DrawCmd>,
-        device: &wgpu::Device,
         scissor: ScissorRect,
         pipeline: PipelineRef,
         verts: &[Vertex],
@@ -1201,14 +1221,14 @@ impl WgpuAppBackend {
         plan.push(DrawCmd {
             scissor,
             pipeline,
-            buffer: Self::vertex_buffer(device, verts),
+            geometry: Self::vertex_bytes(verts),
+            range: 0..0,
             kind: DrawKind::Vertices(verts.len() as u32),
         });
     }
 
     fn plan_widget_instances(
         plan: &mut Vec<DrawCmd>,
-        device: &wgpu::Device,
         scissor: ScissorRect,
         widget_type: &str,
         instances: &[WidgetInstance],
@@ -1219,14 +1239,14 @@ impl WgpuAppBackend {
         plan.push(DrawCmd {
             scissor,
             pipeline: PipelineRef::Widget(widget_type.to_string()),
-            buffer: Self::vertex_buffer(device, instances),
+            geometry: Self::vertex_bytes(instances),
+            range: 0..0,
             kind: DrawKind::Instanced(instances.len() as u32),
         });
     }
 
     fn plan_patch_cables(
         plan: &mut Vec<DrawCmd>,
-        device: &wgpu::Device,
         cables: &[PatchCableDrawInstance],
     ) {
         let mut run_start = 0;
@@ -1243,7 +1263,8 @@ impl WgpuAppBackend {
             plan.push(DrawCmd {
                 scissor: clip,
                 pipeline: PipelineRef::Cable,
-                buffer: Self::vertex_buffer(device, &run),
+                geometry: Self::vertex_bytes(&run),
+                range: 0..0,
                 kind: DrawKind::Instanced(run.len() as u32),
             });
             run_start = run_end;
@@ -1274,7 +1295,6 @@ impl WgpuAppBackend {
                     if gpu.widget_pipelines.contains_key(widget_type) {
                         Self::plan_widget_instances(
                             plan,
-                            &gpu.device,
                             seg_scissor,
                             widget_type,
                             instances,
@@ -1303,11 +1323,11 @@ impl WgpuAppBackend {
                 if verts.is_empty() {
                     continue;
                 }
-                let gpu = self.gpu.as_ref().expect("gpu initialized");
                 plan.push(DrawCmd {
                     scissor: seg_scissor,
                     pipeline: PipelineRef::Image(path),
-                    buffer: Self::vertex_buffer(&gpu.device, &verts),
+                    geometry: Self::vertex_bytes(&verts),
+                    range: 0..0,
                     kind: DrawKind::Vertices(verts.len() as u32),
                 });
             }
@@ -1319,10 +1339,8 @@ impl WgpuAppBackend {
                 };
                 let prim_quads =
                     gpu_scene::build_widget_primitive_quads(seg_prims, atlas, vp_w, vp_h);
-                let gpu = self.gpu.as_ref().expect("gpu initialized");
                 Self::plan_vertices(
                     plan,
-                    &gpu.device,
                     seg_scissor,
                     PipelineRef::Text { zoomed: false },
                     &prim_quads,
@@ -1339,8 +1357,7 @@ impl WgpuAppBackend {
                 vp_h,
             );
             {
-                let gpu = self.gpu.as_ref().expect("gpu initialized");
-                Self::plan_patch_cables(plan, &gpu.device, &cables);
+                Self::plan_patch_cables(plan, &cables);
             }
 
             // Waveforms
@@ -1359,11 +1376,11 @@ impl WgpuAppBackend {
                     vp_w,
                     vp_h,
                 );
-                let gpu = self.gpu.as_ref().expect("gpu initialized");
                 plan.push(DrawCmd {
                     scissor: seg_scissor,
                     pipeline: PipelineRef::Waveform(key),
-                    buffer: Self::vertex_buffer(&gpu.device, std::slice::from_ref(&instance)),
+                    geometry: Self::vertex_bytes(std::slice::from_ref(&instance)),
+                    range: 0..0,
                     kind: DrawKind::Instanced(1),
                 });
             }
@@ -1409,11 +1426,11 @@ impl WgpuAppBackend {
                     inactive_color: primitive.inactive_color.to_rgba(),
                     bg_color: primitive.bg_color.to_rgba(),
                 };
-                let gpu = self.gpu.as_ref().expect("gpu initialized");
                 plan.push(DrawCmd {
                     scissor: seg_scissor,
                     pipeline: PipelineRef::Wavetable(primitive.bank_key.clone()),
-                    buffer: Self::vertex_buffer(&gpu.device, std::slice::from_ref(&instance)),
+                    geometry: Self::vertex_bytes(std::slice::from_ref(&instance)),
+                    range: 0..0,
                     kind: DrawKind::Instanced(1),
                 });
             }
@@ -1460,11 +1477,11 @@ impl WgpuAppBackend {
                 } else {
                     PipelineRef::SpectrogramWaterfall(primitive.data_key.clone())
                 };
-                let gpu = self.gpu.as_ref().expect("gpu initialized");
                 plan.push(DrawCmd {
                     scissor: seg_scissor,
                     pipeline,
-                    buffer: Self::vertex_buffer(&gpu.device, std::slice::from_ref(&instance)),
+                    geometry: Self::vertex_bytes(std::slice::from_ref(&instance)),
+                    range: 0..0,
                     kind: DrawKind::Instanced(1),
                 });
             }
@@ -1475,7 +1492,6 @@ impl WgpuAppBackend {
                     if gpu.widget_pipelines.contains_key(widget_type) {
                         Self::plan_widget_instances(
                             plan,
-                            &gpu.device,
                             seg_scissor,
                             widget_type,
                             instances,
@@ -1487,7 +1503,6 @@ impl WgpuAppBackend {
                     gpu_scene::build_circle_quads(seg_prims, cell_w, cell_h, vp_w, vp_h);
                 Self::plan_vertices(
                     plan,
-                    &gpu.device,
                     seg_scissor,
                     PipelineRef::Text { zoomed: false },
                     &circle_quads,
@@ -1497,7 +1512,6 @@ impl WgpuAppBackend {
                     gpu_scene::build_foreground_rect_quads(seg_prims, cell_w, cell_h, vp_w, vp_h);
                 Self::plan_vertices(
                     plan,
-                    &gpu.device,
                     seg_scissor,
                     PipelineRef::Text { zoomed: false },
                     &foreground_rect_quads,
@@ -1515,8 +1529,7 @@ impl WgpuAppBackend {
                     vp_w,
                     vp_h,
                 );
-                let gpu = self.gpu.as_ref().expect("gpu initialized");
-                Self::plan_vertices(plan, &gpu.device, seg_scissor, PipelineRef::Prop, &prop_verts);
+                Self::plan_vertices(plan, seg_scissor, PipelineRef::Prop, &prop_verts);
             }
         }
     }
@@ -1686,7 +1699,6 @@ impl WgpuAppBackend {
                 if let Some(instance) = chrome {
                     Self::plan_widget_instances(
                         &mut plan,
-                        &gpu.device,
                         tile_scissor,
                         "tile-chrome",
                         std::slice::from_ref(&instance),
@@ -1706,7 +1718,6 @@ impl WgpuAppBackend {
                     );
                     Self::plan_vertices(
                         &mut plan,
-                        &gpu.device,
                         tile_scissor,
                         PipelineRef::Text { zoomed: false },
                         &tile_bg_verts,
@@ -1735,10 +1746,8 @@ impl WgpuAppBackend {
                         offset,
                         tile_bg,
                     );
-                    let gpu = self.gpu.as_ref().expect("gpu initialized");
                     Self::plan_vertices(
                         &mut plan,
-                        &gpu.device,
                         content_scissor,
                         PipelineRef::Text { zoomed },
                         &text_verts,
@@ -1908,10 +1917,8 @@ impl WgpuAppBackend {
                             vp_w,
                             vp_h,
                         );
-                        let gpu = self.gpu.as_ref().expect("gpu initialized");
                         Self::plan_vertices(
                             &mut plan,
-                            &gpu.device,
                             content_scissor,
                             PipelineRef::Text { zoomed: false },
                             &inspect_verts,
@@ -1947,10 +1954,8 @@ impl WgpuAppBackend {
                         vp_w,
                         vp_h,
                     );
-                    let gpu = self.gpu.as_ref().expect("gpu initialized");
                     Self::plan_vertices(
                         &mut plan,
-                        &gpu.device,
                         status_scissor,
                         PipelineRef::Text { zoomed: false },
                         &status_verts,
@@ -1987,7 +1992,6 @@ impl WgpuAppBackend {
                 if let Some(instance) = chrome {
                     Self::plan_widget_instances(
                         &mut plan,
-                        &gpu.device,
                         tile_scissor,
                         "tile-chrome",
                         std::slice::from_ref(&instance),
@@ -2008,7 +2012,6 @@ impl WgpuAppBackend {
                     );
                     Self::plan_vertices(
                         &mut plan,
-                        &gpu.device,
                         tile_scissor,
                         PipelineRef::Text { zoomed: false },
                         &bverts,
@@ -2143,7 +2146,7 @@ impl WgpuAppBackend {
                 None
             };
             if let Some(key) = tab_pipeline_key {
-                Self::plan_widget_instances(&mut plan, &gpu.device, full_scissor, key, &tab_instances);
+                Self::plan_widget_instances(&mut plan, full_scissor, key, &tab_instances);
             }
         }
         if let Some(prop_atlas) = self.prop_atlas.as_mut() {
@@ -2156,8 +2159,7 @@ impl WgpuAppBackend {
                 vp_w,
                 vp_h,
             );
-            let gpu = self.gpu.as_ref().expect("gpu initialized");
-            Self::plan_vertices(&mut plan, &gpu.device, full_scissor, PipelineRef::Prop, &prop_verts);
+            Self::plan_vertices(&mut plan, full_scissor, PipelineRef::Prop, &prop_verts);
         }
 
         // ── Global patch cables (no tile scissor) ────────────────────────────
@@ -2167,14 +2169,12 @@ impl WgpuAppBackend {
                 gpu_scene::build_mod_patch_cables(&mod_patch_ports, vp_w, vp_h, cursor_px);
             let highlight =
                 gpu_scene::build_mod_patch_drag_highlight(&mod_patch_ports, cursor_px, vp_w, vp_h);
-            let gpu = self.gpu.as_ref().expect("gpu initialized");
-            Self::plan_patch_cables(&mut plan, &gpu.device, &cables);
+            Self::plan_patch_cables(&mut plan, &cables);
             if let Some((highlight_verts, highlight_clip)) = highlight
                 && !highlight_verts.is_empty()
             {
                 Self::plan_vertices(
                     &mut plan,
-                    &gpu.device,
                     highlight_clip,
                     PipelineRef::Text { zoomed: false },
                     &highlight_verts,
@@ -2233,10 +2233,8 @@ impl WgpuAppBackend {
                 vp_w,
                 vp_h,
             );
-            let gpu = self.gpu.as_ref().expect("gpu initialized");
             Self::plan_vertices(
                 &mut plan,
-                &gpu.device,
                 full_scissor,
                 PipelineRef::Text { zoomed: false },
                 &inspect_verts,
@@ -2349,7 +2347,6 @@ impl WgpuAppBackend {
                 if gpu.widget_pipelines.contains_key("dropdown") {
                     Self::plan_widget_instances(
                         &mut plan,
-                        &gpu.device,
                         full_scissor,
                         "dropdown",
                         &rounded,
@@ -2407,7 +2404,6 @@ impl WgpuAppBackend {
                         if gpu.widget_pipelines.contains_key("dropdown") {
                             Self::plan_widget_instances(
                                 &mut plan,
-                                &gpu.device,
                                 full_scissor,
                                 "dropdown",
                                 &selected,
@@ -2527,10 +2523,8 @@ impl WgpuAppBackend {
                     }
                 }
             }
-            let gpu = self.gpu.as_ref().expect("gpu initialized");
             Self::plan_vertices(
                 &mut plan,
-                &gpu.device,
                 full_scissor,
                 PipelineRef::Text { zoomed: false },
                 &popup_verts,
@@ -2573,7 +2567,6 @@ impl WgpuAppBackend {
                 if gpu.widget_pipelines.contains_key("dropdown") {
                     Self::plan_widget_instances(
                         &mut plan,
-                        &gpu.device,
                         full_scissor,
                         "dropdown",
                         &rounded,
@@ -2656,10 +2649,8 @@ impl WgpuAppBackend {
                     );
                 }
             }
-            let gpu = self.gpu.as_ref().expect("gpu initialized");
             Self::plan_vertices(
                 &mut plan,
-                &gpu.device,
                 full_scissor,
                 PipelineRef::Text { zoomed: false },
                 &toast_verts,
@@ -2684,13 +2675,35 @@ impl WgpuAppBackend {
 
         sample.plan = plan_start.elapsed();
         sample.draw_commands = plan.len() as u64;
-        // The shell creates exactly one vertex/instance buffer per draw command
-        // and throws it away at end of frame. Reporting the count and the bytes
-        // makes that allocation load visible instead of implied.
-        sample.buffers_created = plan.len() as u64;
-        sample.buffer_bytes = plan.iter().map(|cmd| cmd.buffer.size() as usize).sum();
-
+        // Pack every command's geometry into the shared frame buffer. Offsets
+        // stay 4-byte aligned (wgpu's copy and vertex-offset alignment).
+        let bytes = &mut self.frame_geometry_bytes;
+        bytes.clear();
+        for cmd in &mut plan {
+            let start = bytes.len() as u64;
+            bytes.extend_from_slice(&cmd.geometry);
+            cmd.range = start..bytes.len() as u64;
+            bytes.resize(bytes.len().next_multiple_of(wgpu::COPY_BUFFER_ALIGNMENT as usize), 0);
+        }
+        sample.buffer_bytes = bytes.len();
+        sample.buffers_created = 0;
         let gpu = self.gpu.as_ref().expect("gpu initialized");
+        if !bytes.is_empty() {
+            let needed = bytes.len() as u64;
+            if self.frame_geometry.as_ref().is_none_or(|buffer| buffer.size() < needed) {
+                // The reported stat is the number of buffers created, so a
+                // regrowth shows up in it; steady state is zero.
+                sample.buffers_created = 1;
+                self.frame_geometry = Some(gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("eseqlisp frame geometry"),
+                    size: needed.next_power_of_two().max(64 * 1024),
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                }));
+            }
+            let buffer = self.frame_geometry.as_ref().expect("frame geometry buffer");
+            gpu.queue.write_buffer(buffer, 0, bytes);
+        }
         // Under `Fifo` this call blocks until a swapchain image frees up. It is
         // measured on its own so present backpressure is never mistaken for CPU
         // frame cost.
@@ -2808,7 +2821,11 @@ impl WgpuAppBackend {
                     }
                 }
                 pass.set_scissor_rect(clamped.x, clamped.y, clamped.width, clamped.height);
-                pass.set_vertex_buffer(0, cmd.buffer.slice(..));
+                if cmd.range.is_empty() {
+                    continue;
+                }
+                let geometry = self.frame_geometry.as_ref().expect("frame geometry buffer");
+                pass.set_vertex_buffer(0, geometry.slice(cmd.range.clone()));
                 match cmd.kind {
                     DrawKind::Vertices(count) => pass.draw(0..count, 0..1),
                     DrawKind::Instanced(count) => pass.draw(0..6, 0..count),

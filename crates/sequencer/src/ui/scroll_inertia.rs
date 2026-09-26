@@ -26,10 +26,12 @@ const MIN_FLING_SPEED: f32 = 120.0;
 /// Speed (px/s) below which an active fling stops. Kept high enough that the
 /// fling ends crisply instead of creeping for a second at a pixel per frame;
 /// macOS momentum visibly snaps to a stop rather than asymptoting.
-const STOP_SPEED: f32 = 80.0;
-/// Per-millisecond velocity retention (half-life ≈ 240ms). Chromium's 0.998
-/// (half-life ≈ 350ms) felt ~30% too floaty next to macOS momentum.
-const DECAY_PER_MS: f32 = 0.9971;
+const STOP_SPEED: f32 = 120.0;
+/// Per-millisecond velocity retention (half-life ≈ 150ms). Chromium's 0.998
+/// (half-life ≈ 350ms) and a later 240ms half-life both still coasted for
+/// well over a second after a hard flick; macOS momentum settles in well
+/// under one.
+const DECAY_PER_MS: f32 = 0.99539;
 /// A frame gap longer than this (stalled loop) would integrate into one huge
 /// jump; clamp it instead.
 const MAX_TICK_DT: Duration = Duration::from_millis(100);
@@ -202,6 +204,26 @@ mod tests {
             inertia.tick(t_end);
         }
         assert!(!inertia.fling_active(), "fling stops below the speed floor");
+    }
+
+    #[test]
+    fn hard_flick_settles_within_a_second() {
+        let mut inertia = ScrollInertia::default();
+        inertia.set_enabled(true);
+        // 24px per 8ms: a hard ~3000px/s horizontal flick.
+        let mut t = Instant::now();
+        for _ in 0..8 {
+            inertia.note_scroll(t, (24.0, 0.0), (0.0, 0.0));
+            t += ms(8);
+        }
+        inertia.note_phase_ended(t);
+        assert!(inertia.fling_active());
+        let start = t;
+        while inertia.fling_active() {
+            t += ms(16);
+            inertia.tick(t);
+        }
+        assert!(t - start < ms(800), "fling coasted for {:?}", t - start);
     }
 
     #[test]

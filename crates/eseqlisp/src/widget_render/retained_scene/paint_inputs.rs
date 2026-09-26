@@ -39,11 +39,46 @@ impl PaintInputs {
     /// this contract. Children are preserved because box paint reads geometry.
     pub(super) fn frozen_layout(&self, layout: &LayoutNode) -> Option<LayoutNode> {
         if !self.reactive { return None; }
-        let mut frozen = layout.clone();
-        frozen.props = self.props.iter().map(|(key, value)| (key.clone(), value.to_value())).collect();
-        Some(frozen)
+        Some(LayoutNode {
+            stable_key: layout.stable_key.clone(),
+            props: self.props.iter().map(|(key, value)| (key.clone(), value.to_value())).collect(),
+            children: layout.children.iter().map(geometry_skeleton).collect(),
+            focusable: layout.focusable,
+            ..geometry_skeleton_node(layout, Vec::new())
+        })
     }
 
+}
+
+/// A copy of `layout` carrying only what painters read from descendants:
+/// type, rect and nesting (box background extent). Descendant props are
+/// never painted by an ancestor, and a deep `LayoutNode::clone` of a large
+/// reactive box — rebuilt every frame while an overlay is open — dominated
+/// hover frames. Extent never recurses past scroll containers or overlay
+/// panels, so their subtrees are left out.
+fn geometry_skeleton(layout: &LayoutNode) -> LayoutNode {
+    let children = if layout.widget_type == "scroll" || is_overlay_panel_widget(&layout.widget_type) {
+        Vec::new()
+    } else {
+        layout.children.iter().map(geometry_skeleton).collect()
+    };
+    geometry_skeleton_node(layout, children)
+}
+
+fn geometry_skeleton_node(layout: &LayoutNode, children: Vec<LayoutNode>) -> LayoutNode {
+    LayoutNode {
+        widget_id: layout.widget_id,
+        stable_widget_id: layout.stable_widget_id,
+        subtree_root_id: layout.subtree_root_id,
+        parent_subtree_root_id: layout.parent_subtree_root_id,
+        stable_key: None,
+        widget_type: layout.widget_type.clone(),
+        rect: layout.rect,
+        props: HashMap::new(),
+        children,
+        focusable: false,
+        animation: layout.animation,
+    }
 }
 
 fn paint_prop(key: &str) -> bool {
