@@ -5646,6 +5646,22 @@ mod tests {
         assert!(!rack.repair_groove_selection(&pool), "a repaired rack is stable");
         rack.groove.active = Some(1);
         assert!(!rack.repair_groove_selection(&pool), "a live reference stays");
+
+        // A clip's own groove is repaired the same way: its dangling id would
+        // otherwise pick up the next groove the pool hands out as id 2.
+        rack.clip_grooves.push(RackClipGroove {
+            clip: 7,
+            settings: RackGrooveSettings {
+                active: Some(2),
+                timing_amount: 7.0,
+                ..Default::default()
+            },
+        });
+        assert!(rack.repair_groove_selection(&pool));
+        assert_eq!(rack.clip_grooves[0].settings.active, None);
+        assert_eq!(rack.clip_grooves[0].settings.timing_amount, 1.5);
+        assert_eq!(rack.groove.active, Some(1), "the rack's live reference stays");
+        assert!(!rack.repair_groove_selection(&pool), "a repaired clip is stable");
     }
 
     #[test]

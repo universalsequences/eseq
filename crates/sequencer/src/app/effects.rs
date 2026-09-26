@@ -7450,6 +7450,120 @@ mod tests {
         graph.process_block();
     }
 
+    /// Re-extracting from a rack that already plays a groove reads the
+    /// groove's pocket, not the (straightened) pattern: the quantized source
+    /// re-extracts to the same feel instead of a flat groove. Extract with
+    /// Quantize also activates the new groove at neutral settings, so a
+    /// bypassed or rescaled rack does not end up playing straight.
+    #[test]
+    fn extract_groove_reads_the_playing_groove_and_activates_it_neutral() {
+        use crate::app::rack_grooves::RackGrooveExtractRequest;
+        use crate::groove::RackGrooveSettings;
+        use crate::sequencer::StepParam;
+
+        let graph = TestLiveGraph::new("drum-rack-groove-reextract-test", 64, 44_100, 2);
+        let mut app = test_app_for_live_graph(&graph, 0);
+        let (group_id, _) = app.create_drum_rack_recorded(None).expect("rack");
+        let hat = app.graph_controller().add_blank_sampler_track().expect("hat track");
+        app.assign_rack_pad_track_recorded(group_id, 42, hat).expect("hat pad");
+        let mut scenes = app.capture_synchronized_scene_structure_state().expect("scenes");
+        let mut hat_data = scenes.effective_track_pattern(hat).expect("hat pattern");
+        hat_data.clear_step_content();
+        for step in 0..16usize {
+            hat_data.track_bits[0] |= 1 << step;
+            if step % 2 == 1 {
+                hat_data.step_data[step][StepParam::Delay.index()] = 0.3;
+            }
+        }
+        assert!(scenes.save_effective_track_pattern(hat, hat_data));
+        app.restore_scene_structure_state(&scenes).expect("install the take");
+        let hat_row = |app: &App, id| {
+            crate::groove::pool_groove(&app.grooves, id)
+                .and_then(|groove| groove.pad_row(42))
+                .map(|row| row.slots.iter().map(|slot| slot.offset).collect::<Vec<_>>())
+                .expect("hat row")
+        };
+
+        let first = app
+            .extract_rack_groove_recorded(group_id, &RackGrooveExtractRequest::default())
+            .expect("first groove");
+        assert!((hat_row(&app, first)[1] - 0.3).abs() < 1e-5, "late off-beats");
+        // Swing a grooved member never plays: it must not leak into the
+        // re-extraction below.
+        let mut scenes = app.capture_synchronized_scene_structure_state().expect("scenes");
+        let mut hat_data = scenes.effective_track_pattern(hat).expect("hat pattern");
+        hat_data.track_params.swing = 66.0;
+        assert!(scenes.save_effective_track_pattern(hat, hat_data));
+        app.restore_scene_structure_state(&scenes).expect("stray swing");
+
+        let second = app
+            .extract_rack_groove_recorded(group_id, &RackGrooveExtractRequest::default())
+            .expect("second groove");
+        let (a, b) = (hat_row(&app, first), hat_row(&app, second));
+        assert!(
+            a.iter().zip(&b).all(|(a, b)| (a - b).abs() < 1e-5),
+            "the quantized source re-extracts to the same pocket: {a:?} vs {b:?}"
+        );
+
+        // A bypassed, rescaled rack: Quantize still leaves it audible, as
+        // extracted.
+        app.set_rack_groove_scale_recorded(group_id, None, 2.0).expect("scale");
+        app.set_rack_groove_pad_enabled_recorded(group_id, None, 42, false)
+            .expect("exclude the hat");
+        app.set_rack_groove_enabled_recorded(group_id, None, false).expect("bypass");
+        let third = app
+            .extract_rack_groove_recorded(group_id, &RackGrooveExtractRequest::default())
+            .expect("third groove");
+        let rack = app.groups[0].rack.clone().expect("rack config");
+        assert_eq!(
+            rack.groove,
+            RackGrooveSettings {
+                active: Some(third),
+                ..RackGrooveSettings::default()
+            }
+        );
+        graph.process_block();
+    }
+
+    /// Extracting from a clip that is not playing straightens THAT clip and
+    /// gives it the new groove; the playing clip keeps the rack's.
+    #[test]
+    fn extract_groove_from_a_clip_grooves_that_clip() {
+        use crate::app::rack_grooves::{GrooveExtractSource, RackGrooveExtractRequest};
+        use crate::sequencer::StepParam;
+
+        let graph = TestLiveGraph::new("drum-rack-clip-groove-extract-test", 64, 44_100, 2);
+        let mut app = test_app_for_live_graph(&graph, 0);
+        let (group_id, _) = app.create_drum_rack_recorded(None).expect("rack");
+        let hat = app.graph_controller().add_blank_sampler_track().expect("hat track");
+        app.assign_rack_pad_track_recorded(group_id, 42, hat).expect("hat pad");
+        let mut scenes = app.capture_synchronized_scene_structure_state().expect("scenes");
+        let mut hat_data = scenes.effective_track_pattern(hat).expect("hat pattern");
+        hat_data.clear_step_content();
+        for step in [0usize, 1, 2, 3] {
+            hat_data.track_bits[0] |= 1 << step;
+            hat_data.step_data[step][StepParam::Delay.index()] = 0.2;
+        }
+        assert!(scenes.save_effective_track_pattern(hat, hat_data));
+        app.restore_scene_structure_state(&scenes).expect("install the take");
+        app.convert_rack_to_clips_recorded(group_id).expect("clips");
+        let first = app.current_rack_clip(group_id).expect("the scene's clip");
+        let second = app.save_rack_clip_as_recorded(group_id, "Chorus").expect("second clip");
+        app.set_current_rack_clip_recorded(group_id, Some(second)).expect("play the chorus");
+
+        let groove = app
+            .extract_rack_groove_recorded(group_id, &RackGrooveExtractRequest {
+                source: GrooveExtractSource::Clip(first),
+                ..Default::default()
+            })
+            .expect("groove");
+        let rack = app.groups[0].rack.clone().expect("rack config");
+        assert_eq!(rack.clip_groove(first).and_then(|own| own.active), Some(groove));
+        assert!(rack.clip_groove(second).is_none(), "the playing clip keeps the rack's");
+        assert_eq!(rack.groove.active, None);
+        graph.process_block();
+    }
+
     /// Per-clip grooves (eseq-d12o): a clip with its own groove plays it
     /// while the current scene points at that clip, every other clip plays
     /// the rack's; the per-scene tables the scheduler switches on launch

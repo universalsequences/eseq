@@ -581,6 +581,20 @@ fn step_swing_beats(pattern: &TrackPatternData, step: usize, cycle_start_beats: 
 /// delay, and the step scheduler ignores `StepParam::Delay` on chord steps, so
 /// this does too.
 pub fn heard_hits(pattern: &TrackPatternData) -> Vec<HeardHit> {
+    heard_hits_through(pattern, None)
+}
+
+/// [`heard_hits`] for a member that plays through `groove`: the scheduler
+/// replaces the pattern's swing with the groove's offset at each step's
+/// straight boundary (`scheduler::clock::step_trigger_sample_time`), so the
+/// feel heard is the groove's pocket, not the swing. Random jitter is left
+/// out (it is noise, not feel), and so is the velocity accent: the source
+/// keeps its own velocities, so an accent read back here would be applied
+/// twice by the groove extracted from it.
+pub fn heard_hits_through(
+    pattern: &TrackPatternData,
+    groove: Option<&TrackGrooveSnapshot>,
+) -> Vec<HeardHit> {
     let geometry = pattern.step_geometry();
     let num_steps = geometry.num_steps().min(MAX_STEPS);
     let mut hits = Vec::new();
@@ -593,7 +607,10 @@ pub fn heard_hits(pattern: &TrackPatternData) -> Vec<HeardHit> {
         };
         let start = geometry.beats_at_steps(step as f64);
         let step_beats = step_timebase(pattern, step).step_beats(num_steps);
-        let swing = step_swing_beats(pattern, step, start);
+        let swing = match groove {
+            Some(groove) => groove.offset_beats_with_random(start, false),
+            None => step_swing_beats(pattern, step, start),
+        };
         let velocity = params[StepParam::Velocity.index()];
         let chord_delays = pattern.chord_snapshot.delays.get(step).filter(|_| {
             pattern

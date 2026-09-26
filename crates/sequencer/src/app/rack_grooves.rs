@@ -19,7 +19,7 @@
 
 use super::*;
 use crate::groove::{
-    extract_groove, heard_hits, import_groove, next_pool_groove_id, pool_groove,
+    extract_groove, heard_hits_through, import_groove, next_pool_groove_id, pool_groove,
     quantize_groove_source, GrooveExtractOptions, GrooveId, GroovePadSource, KitGroove,
     ProjectGroove, RackGrooveSettings,
 };
@@ -41,8 +41,10 @@ pub enum GrooveExtractSource {
 pub struct RackGrooveExtractRequest {
     pub options: GrooveExtractOptions,
     pub source: GrooveExtractSource,
-    /// Zero the source's delays and swing and activate the new groove, so the
-    /// pattern sounds the same through it (spec: default on).
+    /// Zero the source's delays and swing and activate the new groove at
+    /// neutral settings (on, 1×, full timing, no accent or jitter, every pad
+    /// included), so the pattern sounds the same through it (spec: default
+    /// on).
     pub quantize_source: bool,
 }
 
@@ -231,10 +233,29 @@ impl App {
             .find(|group| group.id == group_id)
             .ok_or_else(|| format!("Track group {group_id} does not exist"))?;
         let lanes = groove_source_lanes(&scenes, group, request.source)?;
+        // The clip the source patterns belong to: quantizing straightens
+        // THAT clip, so it (not every clip of the rack) plays the new groove.
+        let source_clip = match request.source {
+            GrooveExtractSource::Clip(clip) => Some(clip),
+            GrooveExtractSource::CurrentPatterns => self.current_rack_clip(group_id),
+        };
+        // What the source clip plays through now: a grooved member heard the
+        // groove's pocket, not its pattern's swing.
+        let rack = self.rack_config(group_id)?;
+        let playing = crate::groove::rack_member_grooves(
+            &group.members,
+            rack,
+            rack.groove_for_clip(source_clip),
+            &self.grooves,
+        );
         let groove_id = next_pool_groove_id(&self.grooves);
         let sources = lanes
             .iter()
             .map(|lane| {
+                let groove = playing
+                    .iter()
+                    .find(|(track, _)| *track == lane.track)
+                    .and_then(|(_, groove)| groove.as_ref());
                 let data = scenes
                     .track_pools
                     .get(lane.track)
@@ -243,16 +264,13 @@ impl App {
                 Ok(GroovePadSource {
                     pad_note: lane.pad_note,
                     role: lane.role,
-                    hits: heard_hits(&data),
+                    hits: heard_hits_through(&data, groove),
                 })
             })
             .collect::<Result<Vec<_>, String>>()?;
         let groove = extract_groove(groove_id, &request.options, &sources)
             .map_err(|error| error.to_string())?;
         let quantize = request.quantize_source;
-        // The clip the source patterns belong to: quantizing straightened
-        // THAT clip, so it (not every clip of the rack) plays the new groove.
-        let source_clip = self.current_rack_clip(group_id);
         let label = if quantize {
             "Extract groove and quantize source"
         } else {
@@ -286,15 +304,24 @@ impl App {
             }
             let rack = app.rack_config_mut(group_id)?;
             if quantize {
+                // The straightened source sounds the same only through the
+                // groove exactly as extracted: on, 1× scale, full timing, no
+                // accent or jitter, every pad at its full share.
+                let settings = RackGrooveSettings {
+                    active: Some(groove_id),
+                    ..RackGrooveSettings::default()
+                };
                 match source_clip {
                     Some(clip) => {
                         if rack.clip_groove(clip).is_none() {
-                            let settings = rack.groove.clone();
-                            rack.clip_grooves.push(crate::project::RackClipGroove { clip, settings });
+                            rack.clip_grooves.push(crate::project::RackClipGroove {
+                                clip,
+                                settings: settings.clone(),
+                            });
                         }
-                        rack.groove_target_mut(Some(clip)).active = Some(groove_id);
+                        *rack.groove_target_mut(Some(clip)) = settings;
                     }
-                    None => rack.groove.active = Some(groove_id),
+                    None => rack.groove = settings,
                 }
             }
             app.grooves.push(groove);

@@ -68,20 +68,25 @@ impl ProjectRackConfig {
         groove.pad_row_mapping(&pads)
     }
 
-    /// Load-time repair of the rack's groove selection against the project
-    /// `pool`: an active id that is not in the pool turns the groove off, and
-    /// the amounts are clamped. Returns whether anything changed.
+    /// Load-time repair of the rack's groove selections (its own and every
+    /// clip's) against the project `pool`: an active id that is not in the
+    /// pool turns that groove off — a dangling id would otherwise pick up
+    /// whichever groove the pool hands that id to next — and the amounts are
+    /// clamped. Returns whether anything changed.
     pub fn repair_groove_selection(&mut self, pool: &[ProjectGroove]) -> bool {
-        let before = self.groove.clone();
-        if self
-            .groove
-            .active
-            .is_some_and(|id| pool_groove(pool, id).is_none())
-        {
-            self.groove.active = None;
+        let mut changed = false;
+        for settings in self.all_groove_settings_mut() {
+            let before = settings.clone();
+            if settings
+                .active
+                .is_some_and(|id| pool_groove(pool, id).is_none())
+            {
+                settings.active = None;
+            }
+            settings.sanitize();
+            changed |= before != *settings;
         }
-        self.groove.sanitize();
-        before != self.groove
+        changed
     }
 }
 
