@@ -94,7 +94,7 @@ pub(super) fn run(editor: &mut Editor, app: &mut app::App, shared: &SharedHandle
     // scripts, whose tab labels and owner bindings read SEQ.groups.
     *shared.bus_state.lock().unwrap() = app.buses.clone();
     *shared.track_groups.lock().unwrap() = app.groups.clone();
-    sync_groups_bindings(editor.runtime_mut(), &app.groups);
+    sync_groups_bindings(editor.runtime_mut(), &app.groups, &app.grooves);
     let paths = sequencer::app_paths::app_paths();
     let (roots, errors) = paths.module_load_roots();
     assert!(errors.is_empty(), "{errors:?}");

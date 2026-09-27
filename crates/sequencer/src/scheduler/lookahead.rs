@@ -38,6 +38,84 @@ pub(super) struct SchedulerLookaheadState {
     /// Last line emitted by the ESEQ_DEBUG_SCENE_SLOTS trace, so the seam
     /// reports changes rather than one line per chunk boundary.
     pub(super) last_scene_slot_debug: Option<(usize, usize, usize, String)>,
+    /// Graph emissions enqueued ahead of the audio, kept (pre-groove) until
+    /// they can no longer sound, so a mid-play resync that clears the queue
+    /// can replay them: graph runtimes are not rewound, and already ran their
+    /// boundaries up to the old frontier (eseq-groove.8).
+    pub(super) graph_replay: Vec<RetainedGraphEmission>,
+    /// The last prebuilt chunk snapshot patched with the live groove table
+    /// ([`with_live_track_grooves`]), so a song row that plays for many
+    /// chunks after a groove edit is cloned once, not per chunk.
+    pub(super) live_groove_chunk: Option<LiveGrooveChunk>,
+}
+
+/// A prebuilt chunk snapshot (`source`) re-pointed at the live groove table
+/// `grooves`: `patched`.
+pub(super) struct LiveGrooveChunk {
+    source: Arc<SequencerSnapshot>,
+    grooves: Arc<Vec<Option<crate::groove::TrackGrooveSnapshot>>>,
+    patched: Arc<SequencerSnapshot>,
+}
+
+/// `prebuilt` (a song row's snapshot, a quantized launch's, or a merge of
+/// either) with the LIVE rack groove table of ITS scene, published with
+/// `base`.
+///
+/// Rack grooves are project-level rack config (plus each clip's own groove),
+/// not frozen scene content, but every prebuilt snapshot copied the table at
+/// preflight — and Play always preflights (the song runtime, plus the
+/// auto-latched launch merged over its rows). Scheduling from the frozen copy
+/// made a groove pick, an amount drag or Off inaudible until the next Play.
+/// The table comes from `base.scene_track_grooves` for the prebuilt chunk's
+/// scene (`transport.current_pattern`), so a clip launch plays the new clip's
+/// groove from exactly the boundary its patterns start on. The live table is
+/// also what the early/late leads, the resync recovery and the record unwind
+/// read, so every groove reader agrees. A table that has not changed since
+/// preflight is the same `Arc`, so this is free until an edit.
+pub(super) fn with_live_track_grooves(
+    cache: &mut Option<LiveGrooveChunk>,
+    mut prebuilt: Arc<SequencerSnapshot>,
+    base: &SequencerSnapshot,
+) -> Arc<SequencerSnapshot> {
+    let live = base.scene_groove_table(prebuilt.transport.current_pattern);
+    if Arc::ptr_eq(&prebuilt.track_grooves, live) {
+        return prebuilt;
+    }
+    // A merge built for this chunk alone: patch it in place.
+    if let Some(unique) = Arc::get_mut(&mut prebuilt) {
+        unique.track_grooves = Arc::clone(live);
+        return prebuilt;
+    }
+    if let Some(cached) = cache.as_ref() {
+        if Arc::ptr_eq(&cached.source, &prebuilt) && Arc::ptr_eq(&cached.grooves, live) {
+            return Arc::clone(&cached.patched);
+        }
+    }
+    let mut patched = (*prebuilt).clone();
+    patched.track_grooves = Arc::clone(live);
+    let patched = Arc::new(patched);
+    *cache = Some(LiveGrooveChunk {
+        source: prebuilt,
+        grooves: Arc::clone(live),
+        patched: Arc::clone(&patched),
+    });
+    patched
+}
+
+/// One enqueued graph emission, as the graph produced it (before the rack
+/// groove), for a resync replay (`replay_retained_graph_emissions`).
+#[derive(Clone, Debug)]
+pub(super) struct RetainedGraphEmission {
+    /// `SnapshotSequencerClock::seek_generation` when it was emitted.
+    generation: u64,
+    graph_id: u64,
+    /// The node's route when it fired: a replay re-resolves a routed fire
+    /// through the node's CURRENT route, so a track move or delete that
+    /// remapped the graph also moves (or drops) its replayed fires.
+    route: Option<usize>,
+    /// The sample the emission was enqueued at (after the groove).
+    enqueued_sample: u64,
+    emission: crate::graph::GraphEmission,
 }
 
 impl SchedulerLookaheadState {
@@ -61,6 +139,8 @@ impl SchedulerLookaheadState {
             roll: RollState::new(),
             parked_generators: std::collections::HashSet::new(),
             last_scene_slot_debug: None,
+            graph_replay: Vec::new(),
+            live_groove_chunk: None,
         }
     }
 }
@@ -272,6 +352,7 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
     let mut debug_accum_invocations = scheduler.debug_accum_invocations;
     let song_playback = &mut scheduler.song;
     let parked_generators = &mut scheduler.parked_generators;
+    let graph_replay = &mut scheduler.graph_replay;
     let mut track_output_events = Vec::new();
     // How many of `track_output_events` the process reads have seen; see
     // `feed_track_output_reads`.
@@ -304,7 +385,73 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
         .map(|runtime| runtime.midi_fx_descriptors())
         .unwrap_or_default();
 
-    let horizon = rendered.saturating_add(lookahead_target_samples);
+    // Rack groove early hits (docs/rack-groove-spec.md §Early hits): a
+    // negative offset sounds a trig up to `E` beats BEFORE its straight
+    // boundary, so every source must be discovered at least `E` ahead of the
+    // audio block it lands in. Extending the horizon by `E` does that for all
+    // of them at once: the step clock's search window, every self-clocked
+    // runtime (graphs run their boundaries sooner, in the same order) and the
+    // process/neural/generator layers. The frontier itself is the dedupe:
+    // the next call starts where this one stopped, so no boundary is handled
+    // twice. Each site floors an early trig at `rendered`, so even the first
+    // chunk after a seek never enqueues at a sample the audio has passed.
+    // A mid-play resync (queue cleared, clock rewound to `rendered`) breaks
+    // the frontier dedupe for early hits that already SOUNDED before
+    // `rendered`: the clock finds their boundaries again, so the floor drops
+    // them instead of clamping them (`GrooveFloor::replayed_until`).
+    // `E` is zero unless a groove can move a trig early, which keeps
+    // late-only and ungrooved scheduling bit-identical.
+    let early_lead_samples = {
+        let lead = (base_snapshot.groove_early_lead_beats() * samples_per_quarter).ceil();
+        if lead.is_finite() && lead > 0.0 {
+            lead as u64
+        } else {
+            0
+        }
+    };
+    let horizon = rendered
+        .saturating_add(lookahead_target_samples)
+        .saturating_add(early_lead_samples);
+    let groove_floor = clock.groove_floor(rendered);
+    clock.forget_sounded_step_hits(rendered);
+    // Graph emissions a mid-play resync cleared from the queue: the graph
+    // runtimes already consumed those boundaries, so re-enqueue what they
+    // emitted instead (eseq-groove.8). Then forget what can no longer sound.
+    if let Some(generation) = clock.take_graph_replay_generation() {
+        replay_retained_graph_emissions(
+            graph_replay,
+            generation,
+            clock,
+            graph_runtimes,
+            queue,
+            base_snapshot,
+            &mut track_output_events,
+            scratch_runtime,
+            midi_fx_quantizer_state,
+            process_runtime.global_transpose(),
+            pattern_epoch,
+            rendered,
+            scheduled_until_sample,
+            samples_per_quarter,
+            debug_accum,
+        );
+    }
+    {
+        let late_reach = (base_snapshot.groove_late_lead_beats() * samples_per_quarter).ceil();
+        let late_reach = if late_reach.is_finite() && late_reach > 0.0 {
+            late_reach as u64
+        } else {
+            0
+        };
+        let generation = clock.seek_generation;
+        graph_replay.retain(|retained| {
+            retained.generation == generation
+                && retained
+                    .enqueued_sample
+                    .max(retained.emission.sample_time.saturating_add(late_reach))
+                    >= rendered
+        });
+    }
     while scheduled_until_sample < horizon {
         let max_chunk_frames = (horizon - scheduled_until_sample)
             .min(scheduler_block_size as u64) as usize;
@@ -513,10 +660,14 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                 }
             }
         }
-        let snapshot: &SequencerSnapshot = song_row_snapshot
-            .as_deref()
-            .or(session_launch_snapshot.as_deref())
-            .unwrap_or(base_snapshot);
+        // Prebuilt snapshots play with the live groove table (see
+        // `with_live_track_grooves`).
+        let prebuilt_snapshot = song_row_snapshot
+            .or(session_launch_snapshot)
+            .map(|prebuilt| {
+                with_live_track_grooves(&mut scheduler.live_groove_chunk, prebuilt, base_snapshot)
+            });
+        let snapshot: &SequencerSnapshot = prebuilt_snapshot.as_deref().unwrap_or(base_snapshot);
         // Process-driven pattern length (`length!`): a change due at this
         // chunk's start lands before the clock steps, no chunk straddles the
         // next pending boundary, and the chunk snapshot carries each track's
@@ -609,6 +760,11 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
         // track that steps, for `:key :pattern` reads.
         let mut key_masks: Vec<Option<u16>> = vec![None; snapshot.tracks.len()];
         for trigger in &triggers {
+            if trigger.recovered_lag.is_some() {
+                // A late groove hit recovered after a resync: its boundary
+                // was recorded (and any neural reset applied) before it.
+                continue;
+            }
             let source = &snapshot.tracks[trigger.track];
             let step = &source.steps[trigger.step];
             let key_mask = *key_masks[trigger.track].get_or_insert_with(|| {
@@ -648,6 +804,32 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
         // track's next cycle boundary once the trigger loop is done.
         let mut pending_pattern_lengths: Vec<(usize, usize, f64)> = Vec::new();
         for trigger in triggers {
+            if trigger.recovered_lag.is_some() {
+                // A grooved step whose straight boundary a mid-play resync
+                // already passed (eseq-groove.8): it is scheduled again only
+                // when it had not sounded yet, i.e. a LATE hit the cleared
+                // queue still held (scheduled at or after `rendered` under
+                // the groove it was scheduled with, which a groove change
+                // since may differ from), and the current groove still puts
+                // it there. Anything else about the step (off-step p-locks,
+                // early or straight hits) happened before the resync, so it
+                // is skipped before any side effect.
+                let straight = trigger.straight_sample(scheduled_until_sample);
+                let still_due = snapshot.tracks[trigger.track].steps[trigger.step].active
+                    && clock.step_hit_was_queued(trigger.track, trigger.step, straight, rendered)
+                    && step_trigger_sample_time(
+                        snapshot,
+                        &trigger,
+                        straight,
+                        sample_rate,
+                        samples_per_quarter,
+                        groove_floor,
+                    )
+                    .is_some_and(|sample| sample >= rendered);
+                if !still_due {
+                    continue;
+                }
+            }
             let trigger_sample_time = scheduled_until_sample + trigger.offset as u64;
             feed_track_output_reads(
                 process_runtime,
@@ -674,6 +856,7 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                 scheduled_until_sample,
                 trigger.absolute_beats,
                 samples_per_quarter,
+                groove_floor,
                 debug_accum,
             ) {
                 chunk_enqueued = false;
@@ -786,32 +969,28 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                 }
             }
             let step_snapshot = &track.steps[trigger.step];
-            let swing_pct = step_snapshot.swing_override.unwrap_or(track.params.swing);
-            let swing_resolution = step_snapshot
-                .swing_resolution_override
-                .unwrap_or(track.params.swing_resolution);
-            let swing_step = swing_bucket_index(trigger.cycle_start_beats, swing_resolution);
-            let is_odd_step = swing_step % 2 == 1;
-            let step_boundary_sample_time = scheduled_until_sample + trigger.offset as u64;
-            let mut sample_time = if step_snapshot.chord.is_empty() {
-                delayed_step_sample_time(
-                    step_boundary_sample_time,
-                    &step_snapshot.params,
-                    trigger.samples_per_step,
-                )
-            } else {
-                step_boundary_sample_time
+            let step_boundary_sample_time = trigger.straight_sample(scheduled_until_sample);
+            // Step Delay, then the feel: the member's rack groove replaces
+            // track/step swing when it has one (rack groove spec §Sites 1).
+            let Some(sample_time) = step_trigger_sample_time(
+                snapshot,
+                &trigger,
+                step_boundary_sample_time,
+                sample_rate,
+                samples_per_quarter,
+                groove_floor,
+            ) else {
+                // An early groove hit that already sounded before a mid-play
+                // resync: the whole step was handled then (rack groove spec
+                // §Early hits), so it is not handled again.
+                continue;
             };
-            if is_odd_step && swing_pct > 50.0 {
-                let swing_delay = swing_delay_samples(
-                    sample_rate as f64,
-                    snapshot.transport.bpm as f64,
-                    swing_pct,
-                    swing_resolution,
-                )
-                .round();
-                sample_time = sample_time.saturating_add(swing_delay.max(0.0) as u64);
-            }
+            clock.record_queued_step_hit(
+                trigger.track,
+                trigger.step,
+                step_boundary_sample_time,
+                sample_time,
+            );
 
             let mut resolved = ResolvedStep {
                 duration: step_snapshot.params[StepParam::Duration.index()],
@@ -1113,12 +1292,29 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                     scheduled_until_sample,
                     trigger.absolute_beats,
                     samples_per_quarter,
+                    groove_floor,
                     debug_accum,
                 )
             {
                 chunk_enqueued = false;
                 break;
             }
+            // Groove accent (rack groove spec §Application, eseq-groove.5):
+            // the member's groove scales the base trig's resolved velocity at
+            // the same straight transport beat that keyed its timing. It lands
+            // AFTER the process chain, exactly once per sounding event: the
+            // chain reads the straight velocity (as it reads straight timing),
+            // and everything the chain spawns (ratchets, `emit`s) is a process
+            // event that `enqueue_due_process_emissions` grooves at its own
+            // beat. Grooving here first would scale those spawned events twice.
+            // The accumulator below builds on the grooved base like any other
+            // base-event consumer.
+            resolved.velocity = grooved_velocity(
+                snapshot,
+                Some(trigger.track),
+                resolved.velocity,
+                trigger.boundary_beats,
+            );
             let rs = &mut accumulator_states[trigger.track];
             let builtin_count = ACCUMULATOR_REGISTRY.len();
             let actions = if let Some(def) = ACCUMULATOR_REGISTRY.get(track.params.accumulator_idx)
@@ -1586,12 +1782,14 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                         }
                         let seed_beats = trigger.absolute_beats;
                         neural_runtime.process_seed_at(&seed_event, seed_beats);
-                        seed_graph_runtimes(
-                            graph_runtimes,
-                            &seed_event,
-                            seed_beats,
-                            samples_per_quarter.into(),
-                        );
+                        if clock.graph_seed_is_new(seed_beats, samples_per_quarter.into()) {
+                            seed_graph_runtimes(
+                                graph_runtimes,
+                                &seed_event,
+                                seed_beats,
+                                samples_per_quarter.into(),
+                            );
+                        }
                     } else {
                         let mut chord = step_chord_data(snapshot, target_track, trigger.step);
                         if target_track == trigger.track {
@@ -1629,12 +1827,14 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                         );
                         let seed_beats = trigger.absolute_beats;
                         neural_runtime.process_seed_at(&step_event, seed_beats);
-                        seed_graph_runtimes(
-                            graph_runtimes,
-                            &step_event,
-                            seed_beats,
-                            samples_per_quarter.into(),
-                        );
+                        if clock.graph_seed_is_new(seed_beats, samples_per_quarter.into()) {
+                            seed_graph_runtimes(
+                                graph_runtimes,
+                                &step_event,
+                                seed_beats,
+                                samples_per_quarter.into(),
+                            );
+                        }
                         if !ok {
                             chunk_enqueued = false;
                             break;
@@ -1674,12 +1874,17 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                     );
                     let seed_beats = trigger.absolute_beats;
                     neural_runtime.process_seed_at(&step_event, seed_beats);
-                    seed_graph_runtimes(
-                        graph_runtimes,
-                        &step_event,
-                        seed_beats,
-                        samples_per_quarter.into(),
-                    );
+                    // A step the clock re-found below the last resync's old
+                    // frontier already seeded the graphs, which were not
+                    // rewound (their emissions are replayed instead).
+                    if clock.graph_seed_is_new(seed_beats, samples_per_quarter.into()) {
+                        seed_graph_runtimes(
+                            graph_runtimes,
+                            &step_event,
+                            seed_beats,
+                            samples_per_quarter.into(),
+                        );
+                    }
                     if !ok {
                         chunk_enqueued = false;
                         break;
@@ -1711,6 +1916,7 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                 scheduled_until_sample,
                 chunk_end_beats,
                 samples_per_quarter,
+                groove_floor,
                 debug_accum,
             );
         }
@@ -1725,9 +1931,9 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
             &mut neural_events,
         );
         state.set_neural_visualization(neural_runtime.visualization_snapshot());
-        for output in &mut neural_events {
+        neural_events.retain_mut(|output| {
             if !output.emit_trigger {
-                continue;
+                return true;
             }
             let event_beats = sample_time_to_beats(
                 chunk_start_beats,
@@ -1735,14 +1941,27 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                 output.sample_time,
                 samples_per_quarter,
             );
-            output.sample_time = swung_network_sample_time(
+            // `None`: an early groove hit that already sounded before a
+            // mid-play resync.
+            let Some(sample_time) = grooved_or_swung_network_sample_time(
                 snapshot,
                 &output.event,
                 output.sample_time,
                 event_beats,
                 samples_per_quarter,
+                groove_floor,
+            ) else {
+                return false;
+            };
+            output.sample_time = sample_time;
+            output.event.resolved.velocity = grooved_velocity(
+                snapshot,
+                Some(output.event.track),
+                output.event.resolved.velocity,
+                event_beats,
             );
-        }
+            true
+        });
         neural_events.sort_by_key(|output| {
             let neuron = match output.event.source {
                 EventSource::Network { neuron, .. } => neuron,
@@ -1869,7 +2088,39 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
             }
             // Velocity-merge coincident hits only when they are the same note.
             // Different notes at the same sample/track are polyphony.
-            for emission in merge_generator_emission_accents(generator_emissions) {
+            for mut emission in merge_generator_emission_accents(generator_emissions) {
+                // Generator hits aimed at a rack member play through its
+                // groove like every other trig source; their sample time is
+                // their straight beat.
+                if let Some(track) = emission.event.track {
+                    if snapshot.track_groove(track).is_some() {
+                        let straight_beats = sample_time_to_beats(
+                            chunk_start_beats,
+                            scheduled_until_sample,
+                            emission.sample_time,
+                            samples_per_quarter,
+                        );
+                        // `None`: an early hit that already sounded before
+                        // a mid-play resync.
+                        let Some(sample_time) = grooved_emission_sample_time(
+                            snapshot,
+                            Some(track),
+                            emission.sample_time,
+                            straight_beats,
+                            samples_per_quarter,
+                            groove_floor,
+                        ) else {
+                            continue;
+                        };
+                        emission.sample_time = sample_time;
+                        emission.event.resolved.velocity = grooved_velocity(
+                            snapshot,
+                            Some(track),
+                            emission.event.resolved.velocity,
+                            straight_beats,
+                        );
+                    }
+                }
                 let event_beats = sample_time_to_beats(
                     chunk_start_beats,
                     scheduled_until_sample,
@@ -1981,6 +2232,7 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                             scheduled_until_sample,
                             invocation_beat,
                             samples_per_quarter,
+                            groove_floor,
                             debug_accum,
                         ) {
                             chunk_enqueued = false;
@@ -2004,6 +2256,7 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                         scheduled_until_sample,
                         chunk_end_beats,
                         samples_per_quarter,
+                        groove_floor,
                         debug_accum,
                     )
                 {
@@ -2108,7 +2361,30 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
             }
             // Velocity-merge coincident hits only when they are the same note.
             // Different notes at the same sample/track are polyphony.
-            for emission in merge_graph_emission_accents(graph_emissions) {
+            for mut emission in merge_graph_emission_accents(graph_emissions) {
+                let straight_emission = emission.clone();
+                // A fire aimed at a rack member plays through the rack's
+                // groove, keyed on its straight (quantized) beat (rack
+                // groove spec §Sites 2). No groove: unchanged.
+                // `None`: an early hit that already sounded before a
+                // mid-play resync.
+                let Some(sample_time) = grooved_emission_sample_time(
+                    snapshot,
+                    emission.event.track,
+                    emission.sample_time,
+                    emission.grid_beats,
+                    samples_per_quarter,
+                    groove_floor,
+                ) else {
+                    continue;
+                };
+                emission.sample_time = sample_time;
+                emission.event.resolved.velocity = grooved_velocity(
+                    snapshot,
+                    emission.event.track,
+                    emission.event.resolved.velocity,
+                    emission.grid_beats,
+                );
                 let event_beats = sample_time_to_beats(
                     chunk_start_beats,
                     scheduled_until_sample,
@@ -2154,6 +2430,13 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                     chunk_enqueued = false;
                     break;
                 }
+                graph_replay.push(RetainedGraphEmission {
+                    generation: clock.seek_generation,
+                    graph_id: graph_runtimes[graph_index].id,
+                    route: graph_runtimes[graph_index].node_route(straight_emission.node_index),
+                    enqueued_sample: emission.sample_time,
+                    emission: straight_emission,
+                });
             }
             if !chunk_enqueued {
                 break;
@@ -2313,4 +2596,121 @@ fn feed_track_output_reads(
         );
     }
     *cursor = events.len();
+}
+
+/// Re-enqueue the graph emissions a mid-play resync cleared with the queue
+/// (docs/rack-groove-spec.md §Early hits, eseq-groove.8). The resync rewinds
+/// the step clock to `rendered` but not the graph runtimes, which already
+/// evaluated every boundary up to the old frontier: re-running them would
+/// fire those boundaries twice, and skipping them loses what they emitted.
+/// So what they emitted is replayed through the CURRENT snapshot's groove,
+/// routing and MIDI fx, exactly like a fresh emission, keeping only what
+/// has not sounded: it must have been enqueued at or after `rendered` (so
+/// it was still in the cleared queue) and its re-grooved sample must be at
+/// or after `rendered` too (an early move that lands before it is dropped). Replayed emissions stay
+/// retained under the current generation, for a later resync.
+#[allow(clippy::too_many_arguments)]
+fn replay_retained_graph_emissions<const QUEUE_CAP: usize>(
+    retained: &mut Vec<RetainedGraphEmission>,
+    generation: u64,
+    clock: &SnapshotSequencerClock,
+    graph_runtimes: &[crate::graph::GraphRuntime],
+    queue: &ScheduledEventQueue<QUEUE_CAP>,
+    snapshot: &SequencerSnapshot,
+    track_output_events: &mut Vec<TrackOutputEvent>,
+    scratch_runtime: &mut Option<lisp_host::ScratchControlRuntime>,
+    midi_fx_quantizer_state: &mut MidiFxQuantizerState,
+    global_transpose: f32,
+    pattern_epoch: u64,
+    rendered: u64,
+    chunk_start_sample: u64,
+    samples_per_quarter: f64,
+    debug_accum: bool,
+) {
+    let floor = crate::groove::GrooveFloor {
+        not_before: rendered,
+        // Every retained emission was discovered before the resync.
+        replayed_until: u64::MAX,
+    };
+    let chunk_start_beats = clock.total_beats;
+    let mut entries = std::mem::take(retained);
+    entries.retain(|entry| entry.generation == generation);
+    entries.sort_by_key(|entry| entry.emission.sample_time);
+    for mut entry in entries {
+        // The cleared queue only held samples at or after `rendered`: an
+        // entry enqueued before it already sounded, whatever a groove
+        // change since would now move it to.
+        if entry.enqueued_sample < rendered {
+            continue;
+        }
+        let Some(graph_index) = graph_runtimes
+            .iter()
+            .position(|graph| graph.id == entry.graph_id)
+        else {
+            continue;
+        };
+        let route_now = graph_runtimes[graph_index].node_route(entry.emission.node_index);
+        if entry.emission.event.track == entry.route && route_now != entry.route {
+            entry.emission.event.track = route_now;
+            entry.route = route_now;
+        }
+        if entry
+            .emission
+            .event
+            .track
+            .is_some_and(|track| track >= snapshot.tracks.len())
+        {
+            continue;
+        }
+        let mut emission = entry.emission.clone();
+        let Some(sample_time) = grooved_emission_sample_time(
+            snapshot,
+            emission.event.track,
+            emission.sample_time,
+            emission.grid_beats,
+            samples_per_quarter,
+            floor,
+        ) else {
+            continue;
+        };
+        if sample_time < rendered {
+            continue;
+        }
+        emission.sample_time = sample_time;
+        emission.event.resolved.velocity = grooved_velocity(
+            snapshot,
+            emission.event.track,
+            emission.event.resolved.velocity,
+            emission.grid_beats,
+        );
+        let event_beats = sample_time_to_beats(
+            chunk_start_beats,
+            chunk_start_sample,
+            sample_time,
+            samples_per_quarter,
+        ) as f32;
+        if !enqueue_emitted_network_event_with_midi_fx(
+            queue,
+            snapshot,
+            track_output_events,
+            scratch_runtime.as_mut(),
+            Some(&mut *midi_fx_quantizer_state),
+            pattern_epoch,
+            sample_time,
+            samples_per_quarter as f32,
+            event_beats,
+            global_transpose,
+            EmittedNetworkEventSource::Graph {
+                graph_index,
+                node_index: emission.node_index,
+            },
+            emission.event,
+            debug_accum,
+        ) {
+            break;
+        }
+        entry.generation = clock.seek_generation;
+        entry.enqueued_sample = sample_time;
+        retained.push(entry);
+    }
 }

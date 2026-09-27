@@ -201,9 +201,12 @@ fn pointer_dispatch_node(layout: &LayoutNode, hit_node: LayoutNode) -> LayoutNod
 
 /// Right-clicks dispatch to the nearest ancestor carrying an
 /// `:on-right-click` handler when the hit node itself has none — a
-/// right-click on a label inside a right-clickable box reaches the box.
+/// right-click on a label inside a right-clickable box reaches the box. A
+/// matrix with its stock menu keeps the click.
 fn right_click_dispatch_node(layout: &LayoutNode, hit_node: LayoutNode) -> LayoutNode {
-    if hit_node.props.contains_key("on-right-click") {
+    if hit_node.props.contains_key("on-right-click")
+        || widget_render::matrix::has_builtin_menu(&hit_node)
+    {
         return hit_node;
     }
     let mut path = Vec::new();

@@ -108,6 +108,19 @@ pub struct SequencerSnapshot {
     /// Drum-rack member lists at capture time, for resolving rack-owned graph
     /// sequencers' member-relative routes (`crate::graph::resolve_rack_member_routes`).
     pub rack_memberships: Vec<crate::graph::RackMembership>,
+    /// Pre-resolved rack groove per track, indexed like `tracks` (entries
+    /// past its end, and `None`, mean no groove: today's timing bit for bit).
+    /// Built when rack config or membership changes, so the hot path never
+    /// looks a groove up by pad note (docs/rack-groove-spec.md).
+    pub track_grooves: Arc<Vec<Option<crate::groove::TrackGrooveSnapshot>>>,
+    /// The groove table of EVERY scene, by scene position: a rack plays the
+    /// groove of the clip each scene points at (its own, else the rack's).
+    /// Like `scene_slot_table`, a chunk scheduled from a prebuilt snapshot
+    /// reads its scene's entry here (`with_live_track_grooves`), so a clip
+    /// launch switches grooves on the same boundary sample as its patterns.
+    /// Empty when no clip has its own groove: every scene plays
+    /// `track_grooves`.
+    pub scene_track_grooves: Arc<Vec<Arc<Vec<Option<crate::groove::TrackGrooveSnapshot>>>>>,
     pub scene_slots: SceneSlotStore,
     /// Live scene-slot overrides for EVERY scene, indexed by scene position.
     ///
@@ -127,6 +140,52 @@ pub struct SequencerSnapshot {
 }
 
 impl SequencerSnapshot {
+    /// The rack groove `track` plays through, if any.
+    #[inline]
+    pub fn track_groove(&self, track: usize) -> Option<&crate::groove::TrackGrooveSnapshot> {
+        self.track_grooves.get(track).and_then(Option::as_ref)
+    }
+
+    /// How far ahead of the audio the scheduler must discover trigs so rack
+    /// grooves can play them early (rack groove spec §Early hits), in beats.
+    /// Zero when no groove moves anything early.
+    pub fn groove_early_lead_beats(&self) -> f64 {
+        self.groove_tables()
+            .map(|table| crate::groove::max_early_lead_beats(table))
+            .fold(0.0, f64::max)
+    }
+
+    /// The current table and every scene's: the leads must cover a chunk
+    /// that crosses into another scene's (more pushed) groove.
+    fn groove_tables(
+        &self,
+    ) -> impl Iterator<Item = &Arc<Vec<Option<crate::groove::TrackGrooveSnapshot>>>> {
+        std::iter::once(&self.track_grooves).chain(
+            self.scene_track_grooves
+                .iter()
+                .filter(|table| !Arc::ptr_eq(table, &self.track_grooves)),
+        )
+    }
+
+    /// The groove table for a chunk of scene `scene` (its
+    /// `transport.current_pattern`): that scene's, else the current one.
+    pub fn scene_groove_table(
+        &self,
+        scene: usize,
+    ) -> &Arc<Vec<Option<crate::groove::TrackGrooveSnapshot>>> {
+        self.scene_track_grooves.get(scene).unwrap_or(&self.track_grooves)
+    }
+
+    /// How far after its straight boundary a rack groove can move a trig, in
+    /// beats: how far back a mid-play resync looks for late hits it would
+    /// otherwise lose (rack groove spec §Early hits). Zero when no groove
+    /// moves anything late.
+    pub fn groove_late_lead_beats(&self) -> f64 {
+        self.groove_tables()
+            .map(|table| crate::groove::max_late_lead_beats(table))
+            .fold(0.0, f64::max)
+    }
+
     pub fn empty() -> Self {
         Self {
             transport: SequencerTransportSnapshot {
@@ -142,6 +201,8 @@ impl SequencerSnapshot {
             neural_networks: Vec::new(),
             graph_overrides: Vec::new(),
             rack_memberships: Vec::new(),
+            track_grooves: Arc::new(Vec::new()),
+            scene_track_grooves: Arc::new(Vec::new()),
             scene_slots: SceneSlotStore::default(),
             scene_slot_table: Arc::new(Vec::new()),
             process_trace: false,
@@ -197,6 +258,8 @@ impl SequencerSnapshot {
             neural_networks,
             graph_overrides,
             rack_memberships: state.rack_memberships(),
+            track_grooves: state.track_grooves(),
+            scene_track_grooves: Arc::new(state.scene_track_grooves()),
             scene_slots,
             scene_slot_table,
             process_trace: state.process_trace_enabled(),
@@ -308,6 +371,8 @@ impl SequencerSnapshot {
             neural_networks,
             graph_overrides,
             rack_memberships: state.rack_memberships(),
+            track_grooves: state.track_grooves(),
+            scene_track_grooves: Arc::new(state.scene_track_grooves()),
             scene_slots,
             // Prebuilt row snapshots are frozen at preflight; the table is
             // rebuilt from live state on every full publish, so readers take

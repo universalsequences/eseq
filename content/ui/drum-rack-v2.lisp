@@ -44,6 +44,11 @@
         choke-options
         choke-value-index
         set-pad-choke
+        pad-role-options
+        pad-role-tag
+        pad-role-explicit?
+        pad-role-standard-label
+        set-pad-role
         move-pad-to-note
         trigger-pad
         note-label
@@ -73,7 +78,22 @@
         save-clip-as
         delete-clip
         rename-clip
-        convert-to-clips)
+        convert-to-clips
+        groove-state
+        rack-groove-entry
+        clip-owns-groove?
+        groove-clip-id
+        groove-edit-clip-id
+        groove-active?
+        groove-of-track
+        groove-active-for-track?
+        groove-picker-labels
+        groove-picker-headers
+        groove-key-for-label
+        set-groove
+        set-groove-amount
+        groove-amount-field
+        extract-groove)
 
 (def contains? (xs v)
   (> (len (filter (lambda (x) (= x v)) xs)) 0))
@@ -369,6 +389,49 @@
           :pad-note (get pad :pad-note)
           :value (choke-value-from-label label))))
 
+;; ── Pad roles (docs/rack-groove-spec.md, "Pad roles") ──────────────────
+;; What drum a pad IS, independent of its note. The host publishes each pad's
+;; explicit `:role` key ("" = Standard), its effective `:role-tag` / `:role-label`
+;; and the `:standard-role-label` the standard layout (GM drum map on the
+;; rack's home octave, kick on C1) infers from the note. The option list mirrors `PadRole::ALL` in menu order
+;; (keys are the serde names); a test keeps the two in sync.
+(def pad-role-options ()
+  (list
+    (dict :key "kick" :label "Kick")
+    (dict :key "snare" :label "Snare")
+    (dict :key "rim" :label "Rim")
+    (dict :key "clap" :label "Clap")
+    (dict :key "closed-hat" :label "Closed Hat")
+    (dict :key "pedal-hat" :label "Pedal Hat")
+    (dict :key "open-hat" :label "Open Hat")
+    (dict :key "tom-low" :label "Low Tom")
+    (dict :key "tom-mid" :label "Mid Tom")
+    (dict :key "tom-high" :label "High Tom")
+    (dict :key "crash" :label "Crash")
+    (dict :key "ride" :label "Ride")
+    (dict :key "shaker" :label "Shaker")
+    (dict :key "perc" :label "Perc")))
+
+;; Short tag drawn on the pad ("" when neither the pad nor the layout names one).
+(def pad-role-tag (pad)
+  (if (= pad nil) "" (or (get pad :role-tag) "")))
+
+(def pad-role-explicit? (pad)
+  (and (not (= pad nil))
+    (not (= (or (get pad :role) "") ""))))
+
+;; "Standard (Snare)": the default entry names what the layout infers.
+(def pad-role-standard-label (pad)
+  (let ((inferred (or (get pad :standard-role-label) "")))
+    (str "Standard (" (if (= inferred "") "none" inferred) ")")))
+
+;; `key` is a role key, or "standard" to clear back to the inferred role.
+(def set-pad-role (gidx pad key)
+  (host-command "set-rack-pad-role"
+    (dict :group-id (group-id gidx)
+          :pad-note (get pad :pad-note)
+          :role key)))
+
 ;; A pad-grid hit takes the same live path a pad key takes: the pad's member
 ;; track at base pitch, so choke groups and the member's fx chain apply.
 ;; Move a pad to an exact note: the pad-grid and octave-map drop targets. An
@@ -556,3 +619,122 @@
 
 (def convert-to-clips (gid)
   (host-command "convert-rack-to-clips" (dict :group-id gid)))
+
+
+;; ── Rack grooves (docs/rack-groove-spec.md, "UI") ───────────────────────
+;; A groove is an extracted feel, applied wherever a trig aimed at a pad
+;; becomes a sample time. Grooves live in the project groove pool; a rack
+;; points at one. The host publishes one SEQ.rack-grooves entry per drum
+;; rack: the picker (labels + parallel keys: `off` first, then section
+;; header rows (`:picker-headers` indices, key "") over the pool's
+;; `pool:<id>` and the library's `factory:<stem>` / `user:<stem>` files,
+;; which copy into the pool when picked), the active groove
+;; (`:active-groove-id`, a pool id or -1), its on/off switch (`:enabled`)
+;; and the per-pad lanes (`:lanes`). The Timing / Velocity / Random amounts
+;; and every pad's share are scalar fields of their own
+;; (`rack-groove-<amount>-<gid>`, `rack-groove-pad-<gid>-<note>`), so a drag
+;; never rebuilds the lanes. The view is the *groove* buffer
+;; (ui/rack-groove-buffer.lisp).
+
+;; The rack's entry, whatever clip plays: its own groove at the top level
+;; and each clip's own under :clip-grooves.
+(def rack-groove-entry (gid)
+  (let ((hits (filter (lambda (entry) (= (get entry :group-id) gid))
+                (or SEQ.rack-grooves (list)))))
+    (if (> (len hits) 0) (nth hits 0) nil)))
+
+;; The groove the rack plays now: the playing clip's own when it has one,
+;; else the rack's. Its :clip-id (-1 for the rack's) is what edits target.
+(def groove-state (gid)
+  (let ((entry (rack-groove-entry gid)))
+    (if (= entry nil)
+      nil
+      (let ((clip (active-clip gid))
+            (own (filter (lambda (view) (= (get view :clip-id) clip))
+                   (or (get entry :clip-grooves) (list)))))
+        (if (and (>= clip 0) (> (len own) 0)) (nth own 0) entry)))))
+
+;; Whether clip `clip` plays its own groove.
+(def clip-owns-groove? (gid clip)
+  (let ((entry (rack-groove-entry gid)))
+    (and (not (= entry nil))
+         (> (len (filter (lambda (view) (= (get view :clip-id) clip))
+                   (or (get entry :clip-grooves) (list))))
+            0))))
+
+;; The view's clip (-1: the rack's own groove is what shows): its amount
+;; fields carry that clip's suffix.
+(def groove-clip-id (gid)
+  (let ((state (groove-state gid)))
+    (if state (get state :clip-id) -1)))
+
+;; The clip an edit targets: the playing clip (it gets its own groove on the
+;; first edit, so clips never share edits), -1 for a rack without clips.
+(def groove-edit-clip-id (gid)
+  (active-clip gid))
+
+;; A rack plays a groove when one is picked and its switch is on.
+(def groove-active? (gid)
+  (let ((state (groove-state gid)))
+    (if state
+      (and (not (= (get state :active-key) "off")) (get state :enabled))
+      false)))
+
+;; The rack groove a member track plays through: the rack's groove entry, or
+;; nil when the track is loose or its rack plays straight.
+(def groove-of-track (track)
+  (let ((gidx (rack-of-track track)))
+    (if (< gidx 0)
+      nil
+      (let ((gid (group-id gidx)))
+        (if (groove-active? gid) (groove-state gid) nil)))))
+
+;; A member of a grooved rack: the groove, not the track's swing, sets its
+;; feel (the scheduler replaces swing with the groove), so the track panel
+;; shows swing disabled with a groove hint.
+(def groove-active-for-track? (track)
+  (not (= (groove-of-track track) nil)))
+
+(def groove-picker-labels (gid)
+  (let ((state (groove-state gid)))
+    (if state (get state :picker-labels) (list "No groove"))))
+
+(def groove-key-for-label (gid label)
+  (let ((state (groove-state gid)))
+    (if (= state nil)
+      "off"
+      (let ((labels (get state :picker-labels))
+            (keys (get state :picker-keys)))
+        (reduce |acc i| (if (= (nth labels i) label) (nth keys i) acc)
+          "off"
+          (range 0 (len labels)))))))
+
+(def groove-picker-headers (gid)
+  (let ((state (groove-state gid)))
+    (if state (or (get state :picker-headers) (list)) (list))))
+
+;; A header row has key "" and picks nothing.
+(def set-groove (gid label)
+  (let ((key (groove-key-for-label gid label)))
+    (if (= key "")
+      nil
+      (host-command "set-rack-groove"
+        (dict :group-id gid :clip-id (groove-edit-clip-id gid) :key key)))))
+
+;; `amount` is "timing", "velocity" or "random"; a clip's own groove
+;; publishes its amounts with a "-c<clip>" suffix.
+(def groove-amount-field (amount gid)
+  (let ((clip (groove-clip-id gid)))
+    (str "rack-groove-" amount "-" gid (if (>= clip 0) (str "-c" clip) ""))))
+
+(def set-groove-amount (gid amount value)
+  (host-command "set-rack-groove-amount"
+    (dict :group-id gid :clip-id (groove-edit-clip-id gid) :amount amount :value value)))
+
+;; `bars` 1 or 2, `resolution` "1/16" or "1/32". With `quantize` the source
+;; patterns are straightened and the new groove activated, one undo step.
+(def extract-groove (gid name bars resolution quantize)
+  (host-command "extract-rack-groove"
+    (dict :group-id gid :name name :bars bars
+          :resolution resolution :quantize quantize)))
+

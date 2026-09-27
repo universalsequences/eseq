@@ -9781,6 +9781,11 @@ impl Editor {
         for pending in crate::widget_render::patcher::take_pending_patcher_command_outputs() {
             let _ = self.apply_widget_output(Some(pending));
         }
+        // A matrix's stock "Clear" menu item queues its own change callbacks
+        // for the same reason.
+        for pending in crate::widget_render::matrix::take_pending_outputs() {
+            let _ = self.apply_widget_output(Some(pending));
+        }
         self.refresh_runtime_side_effects();
         self.remap_focused_widget_after_layout_change();
         self.completion = None;

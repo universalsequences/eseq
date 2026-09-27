@@ -25,7 +25,7 @@ fn rack_project_editor() -> (app::App, Editor) {
         state.publish_sequencer(published);
         Ok(Value::Number(id as f64))
     });
-    sync_groups_bindings(editor.runtime_mut(), &app.groups);
+    sync_groups_bindings(editor.runtime_mut(), &app.groups, &app.grooves);
     editor.runtime_mut().run_reactive_cycle();
     editor.refresh_runtime_side_effects();
     (app, editor)
@@ -105,7 +105,7 @@ fn rack_member_churn_keeps_graph_tab_node_rows_consistent(clips: bool) {
         def_state.publish_sequencer(published);
         Ok(Value::Number(id as f64))
     });
-    sync_groups_bindings(editor.runtime_mut(), &app.groups);
+    sync_groups_bindings(editor.runtime_mut(), &app.groups, &app.grooves);
     editor.runtime_mut().run_reactive_cycle();
     editor.refresh_runtime_side_effects();
     evaluate_project_scratch_on_ui_runtime(&mut editor, &app).expect("load rack script");
@@ -159,11 +159,11 @@ fn rack_member_churn_keeps_graph_tab_node_rows_consistent(clips: bool) {
     // Two members leave (their pads drop), then a loose track joins.
     app.remove_track_from_group_recorded(1).expect("member 1 leaves");
     app.remove_track_from_group_recorded(2).expect("member 2 leaves");
-    sync_groups_bindings(editor.runtime_mut(), &app.groups);
+    sync_groups_bindings(editor.runtime_mut(), &app.groups, &app.grooves);
     consistent(&mut editor, "after two members left");
     app.attach_track_to_group(4, 1, None).expect("track joins the rack");
     app.publish_rack_choke_runtime();
-    sync_groups_bindings(editor.runtime_mut(), &app.groups);
+    sync_groups_bindings(editor.runtime_mut(), &app.groups, &app.grooves);
     consistent(&mut editor, "after a track joined");
 
     // The tab itself renders every active row.

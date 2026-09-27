@@ -4,6 +4,7 @@
 (import eseq.effects.state :as st)
 (import eseq.effects.param-controls :as pc)
 (import eseq.macro-state :as ms)
+(import eseq.drum-rack-v2)
 
 (export selected-plock-row
         plock-row-selected?
@@ -12,7 +13,10 @@
         track-plocks-panel
         step-parameters-panel
         track-parameters-panel
-        toggle-polyphony)
+        toggle-polyphony
+        open-polyphony-menu
+        apply-polyphony-to-all-scenes
+        polyphony-context-menu)
 
 ;; Aliases for unconverted lisp callers (effects/panel-frame.lisp,
 ;; effects/step-buffer.lisp), the production by-name read of
@@ -28,8 +32,40 @@
     (eseq.seq-core-state/cool-off-follow)
     (if SEQ.tp-is-rack
       (host-command "set-rack-slot-max-polyphony"
-        (dict :track SEQ.current-track :slot SEQ.tp-rack-slot-idx :value (if SEQ.tp-poly 1 4)))
+        (dict :track SEQ.current-track :slot SEQ.tp-rack-slot-idx :value (if SEQ.tp-poly 1 6)))
       (seq-set-track-param :poly (if SEQ.tp-poly 0 1)))))
+
+;; Right-click on the mono/poly button: copy just this choice to every scene.
+;; The menu is an overlay, so the *fx* buffer renders it once; the button only
+;; sets this state. The target is captured at open time so a selection change
+;; while the menu is up cannot redirect it.
+(defstate polyphony-menu-open false)
+(defstate polyphony-menu-col 0)
+(defstate polyphony-menu-row 0)
+(defstate polyphony-menu-target nil)
+
+(def open-polyphony-menu (event)
+  (do
+    (set! polyphony-menu-target
+      (if SEQ.tp-is-rack
+        (dict :track SEQ.current-track :rack-slot SEQ.tp-rack-slot-idx)
+        (dict :track SEQ.current-track)))
+    (set! polyphony-menu-col (get event :col))
+    (set! polyphony-menu-row (get event :row))
+    (set! polyphony-menu-open true)))
+
+(def apply-polyphony-to-all-scenes ()
+  (do
+    (set! polyphony-menu-open false)
+    (host-command "apply-polyphony-to-all-scenes" polyphony-menu-target)))
+
+(def polyphony-context-menu ()
+  (context-menu :is-open polyphony-menu-open
+    :anchor-col polyphony-menu-col :anchor-row polyphony-menu-row
+    :on-close (lambda () (set! polyphony-menu-open false))
+    (menu-item (str "Apply " (if SEQ.tp-poly "poly" "mono") " to all scenes")
+      :key "polyphony-apply-all-scenes"
+      :on-select (lambda (event) (apply-polyphony-to-all-scenes)))))
 
 (def track-bus-send-field (bus)
   (str "tp-bus-" bus "-send"))
@@ -528,6 +564,26 @@
               :on-change (lambda (v) (do (eseq.seq-core-state/cool-off-follow) (seq-set-accum-limit v)))
               :width 5.2 :height 1.15)))))))
 
+
+;; A member of a drum rack playing a groove: the scheduler replaces track
+;; swing with the rack's groove (docs/rack-groove-spec.md, "UI"), so the
+;; swing control shows disabled with a hint naming the groove instead of a
+;; value that would do nothing.
+(def groove-swing-hint (track)
+  (let ((groove (eseq.drum-rack-v2/groove-of-track track)))
+    (v-stack :gap 0.15 :align :center
+      (label "swing" :font-size 8 :color :dim :bg :transparent :v-align :center)
+      (box :key "track-swing-groove-hint"
+        :debug-name "track-swing-groove-hint"
+        :width 5.2 :height 1.0 :padding 0
+        :h-align :center :v-align :center
+        :background-color '(rgba 0.12 0.13 0.14 1.0)
+        :corner-radius 3
+        (label (str "groove")
+          :font-size 8 :color :blue :bg :transparent :v-align :center))
+      (label (substring (if groove (get groove :active-label) "") 0 12)
+        :font-size 6.5 :color :dim :bg :transparent :v-align :center))))
+
 (def track-parameters-panel ()
   (box :debug-name "track-parameters-strip" :padding 0.0
     (v-stack :gap 0.25
@@ -593,6 +649,8 @@
             :plock-color-b (pc/param-plock-color-b)
             :width 5.0 :height 1.0 :font-size 9))
         (v-stack :align :center :gap 0.22
+          (if (eseq.drum-rack-v2/groove-active-for-track? SEQ.current-track)
+            (groove-swing-hint SEQ.current-track)
           (v-stack :gap 0.15 :align :center
             (label "swing" :font-size 8 :color :dim :bg :transparent :v-align :center)
             (number-picker :value SEQ.tp-swing :min 50 :max 75 :decimals 1
@@ -605,7 +663,7 @@
               :plock-color-g (pc/param-plock-color-g)
               :plock-color-b (pc/param-plock-color-b)
               :on-change (lambda (v) (do (eseq.seq-core-state/cool-off-follow) (seq-set-track-param :swing v)))
-              :width 5.2 :height 1.0))
+              :width 5.2 :height 1.0)))
           )
         
         (v-stack :align :center :gap 0.15

@@ -667,7 +667,7 @@ pub(crate) fn sync_reactive_tick(
             if groups_snapshot != ctx.frame.prev_groups {
                 app.groups = groups_snapshot.clone();
                 let rt = editor.runtime_mut();
-                sync_groups_bindings(rt, &app.groups);
+                sync_groups_bindings(rt, &app.groups, &app.grooves);
                 ctx.frame.prev_groups = groups_snapshot;
                 needs_reactive_cycle = true;
             }

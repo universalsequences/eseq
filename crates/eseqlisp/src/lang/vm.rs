@@ -71,6 +71,14 @@ pub struct NativeFunction {
     callable: NativeFn,
     expansion_safe: bool,
 }
+
+impl NativeFunction {
+    /// An anonymous native callable, for host code that hands a callback to
+    /// a widget prop without registering a global.
+    pub fn new(name: impl Into<String>, f: impl Fn(Vec<Value>, &mut VM) -> Value + 'static) -> Self {
+        Self { name: name.into(), callable: Rc::new(f), expansion_safe: false }
+    }
+}
 pub type GlobalStoreHook = Rc<dyn Fn(&str, &Value)>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

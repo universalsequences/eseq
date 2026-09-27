@@ -1276,7 +1276,7 @@ pub(super) fn build_rack_panel_value(
             );
             slot_map.insert(
                 "max-polyphony-max".to_string(),
-                value_cell(Value::Number(64.0)),
+                value_cell(Value::Number(sequencer::audio::MAX_VOICES as f64)),
             );
             slot_map.insert(
                 "selected".to_string(),

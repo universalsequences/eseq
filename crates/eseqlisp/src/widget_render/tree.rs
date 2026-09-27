@@ -87,6 +87,11 @@ struct TreeRow {
     /// number at the row's right edge, after the status glyph. Zero or
     /// absent draws nothing.
     badge: Option<u32>,
+    /// `:compact true`: the GPU renderer draws the label at the detail's
+    /// smaller size (and budgets its width to match), so a dense secondary
+    /// row such as a groove instance's `<rack> · T100 V40 R0` fits a narrow
+    /// sidebar. The text-cell renderer has one size and ignores it.
+    compact: bool,
     has_children: bool,
     expanded: bool,
     is_header: bool,
@@ -295,6 +300,7 @@ fn flatten_items_inner(
             icon: item_icon_value(&item),
             status_icon: item_status_icon_value(&item),
             badge: item_badge_value(&item),
+            compact: item_bool_field(&item, "compact", false),
             has_children,
             expanded: is_expanded,
             is_header,
@@ -838,6 +844,9 @@ const INDENT_CELLS: f32 = 1.5;
 const LABEL_APPROX_CHAR_WIDTH: f32 = 0.62;
 const DETAIL_APPROX_CHAR_WIDTH: f32 = 0.52;
 const LABEL_DETAIL_GAP: f32 = 1.2;
+/// Label size of a `:compact true` row, relative to the tree's font: the
+/// detail's size.
+const COMPACT_LABEL_SCALE: f32 = 0.82;
 
 /// The `:on-right-click` payload for a tree: the generic pointer event
 /// (`:x`, `:y`, modifier flags, `:phase "right-click"`) plus the hit row as
@@ -964,6 +973,7 @@ impl WidgetDefinition for TreeWidget {
         }
         let mut rows = Vec::new();
         flatten_items(&items, 0, &[], &expanded, expand_all, &mut rows);
+        let detail_yields = matches!(props.get("detail-yields"), Some(Value::Bool(true)));
 
         let fg = crate::backend::Color {
             r: 0.88,
@@ -1006,9 +1016,12 @@ impl WidgetDefinition for TreeWidget {
             let label_col = col_start + 2;
             let color = if row.has_children { fg } else { dim };
             let right_edge = rect.col.round() as u16 + rect.width.round() as u16;
-            let detail_width = row
-                .detail
-                .as_ref()
+            let detail = row.detail.as_ref().filter(|detail| {
+                !detail_yields
+                    || label_col as usize + row.label.chars().count() + detail.chars().count() + 3
+                        <= right_edge as usize
+            });
+            let detail_width = detail
                 .map(|detail| detail.chars().count() as u16)
                 .unwrap_or(0);
             let label_right_edge =
@@ -1027,7 +1040,7 @@ impl WidgetDefinition for TreeWidget {
                 buf.set(r, c, styled_cell(ch, color, None));
             }
 
-            if let Some(detail) = &row.detail {
+            if let Some(detail) = detail {
                 if detail_width + 1 < rect.width.round() as u16 {
                     let detail_col = right_edge.saturating_sub(detail_width + 1);
                     for (j, ch) in detail.chars().enumerate() {
@@ -1393,6 +1406,7 @@ impl WidgetDefinition for TreeWidget {
         };
         let triangle_fg = resolve_named_color(&node.props, "chevron-color", default_chevron);
         let detail_fg = resolve_named_color(&node.props, "detail-color", theme::STATUS_ACCENT());
+        let detail_yields = matches!(node.props.get("detail-yields"), Some(Value::Bool(true)));
 
         let mut prims = Vec::new();
 
@@ -1656,20 +1670,34 @@ impl WidgetDefinition for TreeWidget {
                     is_background: false,
                 });
             }
-            let detail_layout = row.detail.as_ref().map(|detail| {
-                let detail_width =
-                    (detail.chars().count() as f32 * DETAIL_APPROX_CHAR_WIDTH).max(1.0);
-                let detail_col =
-                    node.rect.col + node.rect.width - detail_width - 0.9 - status_width;
-                (detail, detail_width, detail_col)
-            });
+            let (label_font_scale, label_char_width) = if row.compact {
+                (COMPACT_LABEL_SCALE, LABEL_APPROX_CHAR_WIDTH * COMPACT_LABEL_SCALE)
+            } else {
+                (1.0, LABEL_APPROX_CHAR_WIDTH)
+            };
+            let detail_layout = row
+                .detail
+                .as_ref()
+                .map(|detail| {
+                    let detail_width =
+                        (detail.chars().count() as f32 * DETAIL_APPROX_CHAR_WIDTH).max(1.0);
+                    let detail_col =
+                        node.rect.col + node.rect.width - detail_width - 0.9 - status_width;
+                    (detail, detail_width, detail_col)
+                })
+                // `:detail-yields true`: the label wins a narrow row, the
+                // detail showing only when the whole label still fits.
+                .filter(|(_, _, detail_col)| {
+                    !detail_yields
+                        || row.label.chars().count() as f32 * label_char_width
+                            <= detail_col - label_x - LABEL_DETAIL_GAP
+                });
             let label_available_width = detail_layout
                 .as_ref()
                 .map(|(_, _, detail_col)| detail_col - label_x - LABEL_DETAIL_GAP)
                 .unwrap_or(node.rect.col + node.rect.width - label_x - 0.9 - status_width)
                 .max(0.0);
-            let label_max_chars =
-                (label_available_width / LABEL_APPROX_CHAR_WIDTH).floor() as usize;
+            let label_max_chars = (label_available_width / label_char_width).floor() as usize;
             let label_text = truncate_with_ellipsis(&row.label, label_max_chars);
             prims.push(GpuPrimitive::ProportionalText(
                 GpuProportionalTextPrimitive {
@@ -1681,7 +1709,7 @@ impl WidgetDefinition for TreeWidget {
                     font_size: if row.is_header {
                         (font_size * 0.82).min(10.0)
                     } else {
-                        font_size
+                        font_size * label_font_scale
                     },
                     scale: 1.0,
                     fg,

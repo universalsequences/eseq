@@ -191,6 +191,8 @@
               (eseq.sequencer/rack-pad-map gidx)
               (eseq.sequencer/rack-pad-grid gidx)
               ))))
+      ;; The pad grid's right-click menu (Role ▸ …), overlaying the grid.
+      (eseq.sequencer/rack-pad-context-menu)
       ;; Rack-level fx still matter: the bus chain stays right here, edited the
       ;; same way an ordinary bus selection edits it.
       (each (filter |fx| (> (len (get fx :params)) 0) (selected-bus-effects)) |fx slot-idx|
@@ -266,7 +268,8 @@
       (box :debug-name "fx-param-map-active-root" :padding 0
         (track-selection-panel))
       (track-selection-panel)))))
-  (subtree :key "fx-param-plock-menu" (pc/param-plock-context-menu))))
+  (subtree :key "fx-param-plock-menu" (pc/param-plock-context-menu))
+  (subtree :key "fx-polyphony-menu" (tp/polyphony-context-menu))))
 
 (def copy-selected-effect ()
   (seq-copy-selected-effect))

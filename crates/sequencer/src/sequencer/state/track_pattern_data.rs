@@ -83,6 +83,45 @@ impl TrackPatternData {
         }
     }
 
+    /// Strip one step's per-step content — exactly what
+    /// `copy_step_content_from` carries (activation, params, chord lanes,
+    /// timing and send p-locks) — back to defaults, plus that step's rack
+    /// macro p-locks. Device p-locks on the step are left alone.
+    pub fn clear_step_content_at(&mut self, step: usize) {
+        if step >= MAX_STEPS {
+            return;
+        }
+        self.track_bits[step / 64] &= !(1 << (step % 64));
+        self.neural_reset_bits[step / 64] &= !(1 << (step % 64));
+        if let Some(params) = self.step_data.get_mut(step) {
+            for param in StepParam::ALL {
+                params[param.index()] = param.default_value();
+            }
+        }
+        for lane in [
+            &mut self.chord_snapshot.steps,
+            &mut self.chord_snapshot.durations,
+            &mut self.chord_snapshot.delays,
+        ] {
+            if let Some(notes) = lane.get_mut(step) {
+                notes.clear();
+            }
+        }
+        self.timebase_plock_snapshot[step] = None;
+        self.swing_plock_snapshot[step] = None;
+        self.swing_resolution_plock_snapshot[step] = None;
+        if let Some(sends) = self.track_send_plock_snapshot.get_mut(step) {
+            sends.clear();
+        }
+        if let Some(rack) = &mut self.rack_track {
+            for rack_macro in &mut rack.macros {
+                if let Some(lock) = rack_macro.plocks.get_mut(step) {
+                    *lock = None;
+                }
+            }
+        }
+    }
+
     /// Copy one step's complete per-step content (activation, params,
     /// chord notes/durations/delays, timing plocks) from `src`'s
     /// `src_step` into this pattern's `dst_step`.

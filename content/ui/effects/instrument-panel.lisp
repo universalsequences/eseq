@@ -668,7 +668,8 @@
   (button (if SEQ.tp-poly "poly" "mono")
     :debug-name "instrument-polyphony" :width 4 :height 0.8 :padding 0
     :font-size 9 :color :white :background-color :transparent :border-color :transparent
-    :on-click |x y r| (tp/toggle-polyphony)))
+    :on-click |x y r| (tp/toggle-polyphony)
+    :on-right-click (lambda (event) (tp/open-polyphony-menu event))))
 
 ;; Host-owned pitch reference is available on every custom instrument page,
 ;; including selected rack-slot instruments, independently of the authored UI.

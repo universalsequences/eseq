@@ -585,8 +585,8 @@ pub(crate) fn build_groups_value(groups: &[sequencer::project::ProjectTrackGroup
 }
 
 /// Builds a rack group's `pads` entry: one map per pad with its note, its note
-/// name (the pad badge's label), member position, resolved track index and
-/// choke group (`-1` when unassigned).
+/// name (the pad badge's label), member position, resolved track index,
+/// choke group (`-1` when unassigned) and drum role.
 /// Empty for a plain group.
 fn build_rack_pads_value(group: &sequencer::project::ProjectTrackGroup) -> Value {
     let Some(rack) = group.rack.as_ref() else {
@@ -613,6 +613,30 @@ fn build_rack_pads_value(group: &sequencer::project::ProjectTrackGroup) -> Value
                 Value::Number(track.map(|t| t as f64).unwrap_or(-1.0)),
             ),
             ("choke", Value::Number(choke)),
+            // Pad role (docs/rack-groove-spec.md, "Pad roles"): the explicit
+            // key ("" = Standard), the effective role's short tag and name
+            // ("" when neither the pad nor the standard layout has one), and
+            // the standard layout's own name for the "Standard (...)" entry.
+            (
+                "role",
+                Value::String(pad.role.map_or("", |role| role.key()).into()),
+            ),
+            (
+                "role-tag",
+                Value::String(pad.effective_role().map_or("", |role| role.tag()).into()),
+            ),
+            (
+                "role-label",
+                Value::String(pad.effective_role().map_or("", |role| role.label()).into()),
+            ),
+            (
+                "standard-role-label",
+                Value::String(
+                    sequencer::project::PadRole::standard(pad.pad_note)
+                        .map_or("", |role| role.label())
+                        .into(),
+                ),
+            ),
         ])
     }))
 }
@@ -627,6 +651,7 @@ pub(crate) fn build_group_collapsed_value(
 pub(crate) fn sync_groups_bindings(
     rt: &mut Runtime,
     groups: &[sequencer::project::ProjectTrackGroup],
+    grooves: &[sequencer::project::ProjectGroove],
 ) {
     rt.set_reactive("SEQ", "groups", build_groups_value(groups));
     rt.set_reactive(
@@ -634,6 +659,11 @@ pub(crate) fn sync_groups_bindings(
         "group-collapsed",
         build_group_collapsed_value(groups),
     );
+    // Rack grooves derive from the same rack configs (plus the project
+    // groove pool they point into), so every path that republishes group
+    // topology (undo/redo, project load, pad-map edits) republishes the
+    // groove section too.
+    sync_rack_groove_state(rt, groups, grooves);
 }
 
 pub(crate) fn set_current_track_reactive(

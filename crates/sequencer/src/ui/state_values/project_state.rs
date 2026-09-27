@@ -715,6 +715,91 @@ pub(crate) fn extract_usize_list_from_payload(payload: &Value, key: &str) -> Vec
     out
 }
 
+/// Publish the poly/voices fields the *track* panel, mixer strip and
+/// instrument header read. Split out so a rack-slot voice edit can republish
+/// them: for a rack those fields show the selected slot, and a stale value
+/// left the *track* voices picker pinned at its old number while dragging.
+pub(crate) fn sync_track_polyphony_fields(
+    rt: &mut Runtime,
+    app: &app::App,
+    state: &Arc<SequencerState>,
+    track: usize,
+) -> bool {
+    let mut dirty = false;
+    let tp = &state.pattern.track_params[track];
+    // For a Rack track, playback polyphony is governed per-slot
+    // (RackSlotSnapshot::max_polyphony, read by fire_rack_slot_note /
+    // fire_live_keyboard_rack_note) — the track-level TrackParams poly/voices
+    // fields below are never consulted for Sampler/Custom rack slots. Surface
+    // the *selected slot's* values here (and which slot they'd be writing to)
+    // so this panel's poly/voices controls can be routed to the right place
+    // instead of silently editing a value playback ignores.
+    let rack_slot_poly = (app.graph.track_instrument_types.get(track)
+        == Some(&sequencer::sequencer::InstrumentType::Rack))
+    .then(|| {
+        let rack = app
+            .state
+            .pattern
+            .rack_tracks
+            .lock()
+            .unwrap()
+            .get(track)
+            .cloned()
+            .flatten()?;
+        let selected_slot = app.selected_rack_slot_index_for_rack(track, &rack)?;
+        let max_polyphony = rack.slots.get(selected_slot)?.max_polyphony;
+        Some((selected_slot, max_polyphony))
+    })
+    .flatten();
+    dirty |= changed(rt.set_reactive("SEQ", "tp-is-rack", Value::Bool(rack_slot_poly.is_some())));
+    dirty |= changed(rt.set_reactive(
+        "SEQ",
+        "tp-rack-slot-idx",
+        Value::Number(rack_slot_poly.map(|(slot_idx, _)| slot_idx).unwrap_or(0) as f64),
+    ));
+    let (tp_poly, max_polyphony) = match rack_slot_poly {
+        Some((_, max_polyphony)) => (max_polyphony > 1, max_polyphony),
+        // Non-rack tracks: `is_polyphonic` is its own independently-toggled
+        // flag, distinct from the voice-count value — don't derive it from
+        // max_polyphony or the toggle button's state gets stomped every
+        // render.
+        None => (tp.is_polyphonic(), tp.get_max_polyphony()),
+    };
+    dirty |= changed(rt.set_reactive("SEQ", "tp-poly", Value::Bool(tp_poly)));
+    // Rack tracks: every slot's note-on path (fire_rack_slot_note /
+    // fire_live_keyboard_rack_note) reads the parent track's mono trigger and
+    // voice priority, with "mono" decided per slot by its max_polyphony. So a
+    // rack slot at 1 voice gets legato from this same track-level control.
+    dirty |= changed(rt.set_reactive("SEQ", "tp-supports-mono-trigger", Value::Bool(matches!(
+        app.graph.track_instrument_types.get(track),
+        Some(sequencer::sequencer::InstrumentType::Custom)
+            | Some(sequencer::sequencer::InstrumentType::Rack)
+    ))));
+    dirty |= changed(rt.set_reactive("SEQ", "tp-voice-priority", Value::String(
+        match tp.get_voice_priority() {
+            sequencer::sequencer::VoicePriority::Last => "Last",
+            sequencer::sequencer::VoicePriority::High => "High",
+            sequencer::sequencer::VoicePriority::Low => "Low",
+        }.to_string(),
+    )));
+    dirty |= changed(rt.set_reactive("SEQ", "tp-mono-trigger", Value::String(
+        match tp.get_mono_trigger() {
+            sequencer::sequencer::MonoTrigger::Retrig => "retrig",
+            sequencer::sequencer::MonoTrigger::Legato => "legato",
+        }.to_string(),
+    )));
+    dirty |= changed(rt.set_reactive(
+        "SEQ",
+        "tp-max-polyphony",
+        Value::Number(max_polyphony as f64),
+    ));
+    dirty
+}
+
+fn changed(result: ReactiveSetResult) -> bool {
+    result.effects_dirty || result.widgets_dirty
+}
+
 /// Push individual tp-* reactive fields for the current track.
 fn sync_track_param_fields(
     rt: &mut Runtime,
@@ -745,72 +830,7 @@ fn sync_track_param_fields(
         Value::Number(tp.get_num_steps() as f64),
     );
     rt.set_reactive("SEQ", "tp-gate", Value::Bool(tp.is_gate_on()));
-    // For a Rack track, playback polyphony is governed per-slot
-    // (RackSlotSnapshot::max_polyphony, read by fire_rack_slot_note /
-    // fire_live_keyboard_rack_note) — the track-level TrackParams poly/voices
-    // fields below are never consulted for Sampler/Custom rack slots. Surface
-    // the *selected slot's* values here (and which slot they'd be writing to)
-    // so this panel's poly/voices controls can be routed to the right place
-    // instead of silently editing a value playback ignores.
-    let rack_slot_poly = (app.graph.track_instrument_types.get(track)
-        == Some(&sequencer::sequencer::InstrumentType::Rack))
-    .then(|| {
-        let rack = app
-            .state
-            .pattern
-            .rack_tracks
-            .lock()
-            .unwrap()
-            .get(track)
-            .cloned()
-            .flatten()?;
-        let selected_slot = app.selected_rack_slot_index_for_rack(track, &rack)?;
-        let max_polyphony = rack.slots.get(selected_slot)?.max_polyphony;
-        Some((selected_slot, max_polyphony))
-    })
-    .flatten();
-    rt.set_reactive("SEQ", "tp-is-rack", Value::Bool(rack_slot_poly.is_some()));
-    rt.set_reactive(
-        "SEQ",
-        "tp-rack-slot-idx",
-        Value::Number(rack_slot_poly.map(|(slot_idx, _)| slot_idx).unwrap_or(0) as f64),
-    );
-    let (tp_poly, max_polyphony) = match rack_slot_poly {
-        Some((_, max_polyphony)) => (max_polyphony > 1, max_polyphony),
-        // Non-rack tracks: `is_polyphonic` is its own independently-toggled
-        // flag, distinct from the voice-count value — don't derive it from
-        // max_polyphony or the toggle button's state gets stomped every
-        // render.
-        None => (tp.is_polyphonic(), tp.get_max_polyphony()),
-    };
-    rt.set_reactive("SEQ", "tp-poly", Value::Bool(tp_poly));
-    // Rack tracks: every slot's note-on path (fire_rack_slot_note /
-    // fire_live_keyboard_rack_note) reads the parent track's mono trigger and
-    // voice priority, with "mono" decided per slot by its max_polyphony. So a
-    // rack slot at 1 voice gets legato from this same track-level control.
-    rt.set_reactive("SEQ", "tp-supports-mono-trigger", Value::Bool(matches!(
-        app.graph.track_instrument_types.get(track),
-        Some(sequencer::sequencer::InstrumentType::Custom)
-            | Some(sequencer::sequencer::InstrumentType::Rack)
-    )));
-    rt.set_reactive("SEQ", "tp-voice-priority", Value::String(
-        match tp.get_voice_priority() {
-            sequencer::sequencer::VoicePriority::Last => "Last",
-            sequencer::sequencer::VoicePriority::High => "High",
-            sequencer::sequencer::VoicePriority::Low => "Low",
-        }.to_string(),
-    ));
-    rt.set_reactive("SEQ", "tp-mono-trigger", Value::String(
-        match tp.get_mono_trigger() {
-            sequencer::sequencer::MonoTrigger::Retrig => "retrig",
-            sequencer::sequencer::MonoTrigger::Legato => "legato",
-        }.to_string(),
-    ));
-    rt.set_reactive(
-        "SEQ",
-        "tp-max-polyphony",
-        Value::Number(max_polyphony as f64),
-    );
+    let _ = sync_track_polyphony_fields(rt, app, state, track);
     let _ = sync_track_selection_param_binding_fields(rt, state, track, selected);
     rt.set_reactive(
         "SEQ",

@@ -53,6 +53,7 @@ mod params;
 mod projects;
 mod break_kits;
 mod rack_clips;
+pub mod rack_grooves;
 mod rack_sequencers;
 mod bus_outputs;
 pub mod pending_capture;
@@ -939,6 +940,11 @@ pub struct App {
     pub track_collapsed: Vec<bool>,
     pub buses: Vec<BusChannelState>,
     pub groups: Vec<crate::project::ProjectTrackGroup>,
+    /// The project groove pool (docs/rack-groove-spec.md §Three tiers): every
+    /// groove a drum rack can play; racks point into it by id
+    /// (`RackGrooveSettings::active`). Undo/redo carries it with the group
+    /// structure (`BusGroupStructureState::grooves`).
+    pub grooves: Vec<crate::project::ProjectGroove>,
     /// Host-owned instances of package kinds (docs/instance-kinds-spec.md §5).
     pub instances: crate::project::ProjectInstances,
     /// Engaged sequenced mute/solo holds keyed by resolved target
@@ -1074,6 +1080,11 @@ pub struct App {
     /// before its first write, committed as one history entry when the
     /// gesture finishes (see `edit::apply_process_lane_drag_steps`).
     pub(crate) process_lane_drag: Option<edit::ProcessLaneDrag>,
+    /// An in-flight rack groove amount drag (Timing / Velocity / Random):
+    /// the bus/group structure captured before its first write, committed
+    /// as one history entry when the gesture finishes (see
+    /// `edit::apply_rack_groove_amount_drag`).
+    pub(crate) rack_groove_drag: Option<edit::RackGrooveDrag>,
     /// Bumped whenever a track's loaded binding actually moves. The device
     /// panels are rebuilt from epochs, not polled, so swapping the mirror is
     /// invisible until this tells the reactive tick to republish them.
@@ -2337,6 +2348,13 @@ impl App {
         // is a group-topology change, which is exactly when rack-owned graph
         // sequencers' member routes need re-resolving.
         self.state.set_rack_memberships(self.rack_memberships());
+        // Rack grooves ride the same funnel: every rack config edit (groove
+        // pick, amounts, pad notes, extraction) and every membership change
+        // lands here, so the scheduler's per-track groove table is rebuilt
+        // exactly when it can change (docs/rack-groove-spec.md). Clips with
+        // their own groove publish a variant each; scenes pick among them by
+        // the clip they point at, so a clip launch needs no republish.
+        self.state.set_rack_groove_variants(self.rack_groove_variants());
         let keys = &self.state.runtime.rack_choke_keys;
         for key in keys.iter() {
             key.store(0, Ordering::Release);
@@ -2457,6 +2475,7 @@ impl App {
             track_collapsed: Vec::new(),
             buses: BusChannelState::default_buses(),
             groups: Vec::new(),
+            grooves: Vec::new(),
             instances: crate::project::ProjectInstances::default(),
             mixer_control_holds: crate::mixer_control::MixerControlHolds::default(),
             sampler_paths: Vec::new(),
@@ -2603,6 +2622,7 @@ impl App {
             sound_binding_monitored: Vec::new(),
             pending_song_row_invalidation: None,
             process_lane_drag: None,
+            rack_groove_drag: None,
             sound_binding_epoch: 0,
             graph: GraphState {
                 lg,

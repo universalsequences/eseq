@@ -5,6 +5,11 @@
 
 pub const MAX_VOICES: usize = 12;
 
+/// Voices a new melodic rack slot starts with. The pool can hold
+/// `MAX_VOICES`, but a slot at the cap costs twice this in CPU for chords
+/// most parts never play; users raise or lower it per slot.
+pub const DEFAULT_RACK_SLOT_MAX_POLYPHONY: usize = 6;
+
 pub struct VoiceSlot {
     pub logical_id: u64,
     pub node_id: i32,

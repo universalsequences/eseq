@@ -84,6 +84,9 @@
         selected-pad
         open-pad-member-fx
         rack-pad-grid
+        rack-pad-context-menu
+        open-pad-menu
+        choose-pad-role
         rack-pad-map)
 
 (def track-peak (i)
@@ -3540,6 +3543,55 @@
       (select-track-for-edit track)
       nil)))
 
+;; Pad context menu (docs/rack-groove-spec.md, "Pad roles"): Role ▸ with
+;; "Standard (<inferred>)" first — the role the standard layout gives the
+;; pad's note — then every explicit role, the pad's current choice checked.
+;; Mounted once at the *fx* rack panel root (like the clip menu in the grid)
+;; so it overlays the pad grid instead of being clipped by its cell.
+(defstate pad-menu nil)
+
+(def open-pad-menu (event gidx pad)
+  (do
+    (select-pad gidx pad)
+    (set! pad-menu (dict :gidx gidx :pad pad
+      :col (get event :col) :row (get event :row)))))
+
+(def close-pad-menu ()
+  (set! pad-menu nil))
+
+(def choose-pad-role (gidx pad key)
+  (do
+    (close-pad-menu)
+    (eseq.drum-rack-v2/set-pad-role gidx pad key)))
+
+(def rack-pad-context-menu ()
+  (let ((menu pad-menu)
+      (gidx (get pad-menu :gidx))
+      (pad (get pad-menu :pad)))
+    (context-menu :is-open (not (= menu nil))
+      :anchor-col (or (get menu :col) 0)
+      :anchor-row (or (get menu :row) 0)
+      :on-close (lambda () (close-pad-menu))
+      (menu-item "Role" :key "rack-pad-menu-role"
+        (menu-item (eseq.drum-rack-v2/pad-role-standard-label pad)
+          :key "rack-pad-menu-role-standard"
+          :checked (not (eseq.drum-rack-v2/pad-role-explicit? pad))
+          :on-select (lambda (event) (choose-pad-role gidx pad "standard")))
+        (menu-separator)
+        (each (if (= menu nil) (list) (eseq.drum-rack-v2/pad-role-options)) |option|
+          (menu-item (get option :label)
+            :key (str "rack-pad-menu-role-" (get option :key))
+            :checked (= (or (get pad :role) "") (get option :key))
+            :on-select (lambda (event) (choose-pad-role gidx pad (get option :key)))))))))
+
+;; The role tag sits in the pad's top corner: bright when set on the pad,
+;; dim when it is only the standard layout's guess, absent when neither
+;; names a drum.
+(def pad-role-tag-label (pad)
+  (label (eseq.drum-rack-v2/pad-role-tag pad)
+    :width 1.4 :font-size 6.2 :bg :transparent :text-align :right
+    :color (if (eseq.drum-rack-v2/pad-role-explicit? pad) :white :dim)))
+
 ;; Pad trigger light (eseq-4b5.16): the host publishes one flag per rack member
 ;; track, lit for as long as that track is sounding whatever fired it — a hit on
 ;; this cell, an armed rack's keys, or its own sequenced steps. It rides the
@@ -3582,17 +3634,23 @@
       ;; A double-click opens the pad: its member track becomes the track under
       ;; edit, which swaps the *fx* panel to that member's own chain.
       :on-double-click |x y r| (if (= pad nil) nil (open-pad-member-fx gidx pad))
+      ;; Right-click: the pad menu (Role ▸ …).
+      :on-right-click (lambda (event) (if (= pad nil) nil (open-pad-menu event gidx pad)))
       (v-stack :width :fill :height :fill :gap 0.05
         ;; The note is the cell's own, so an empty cell still says which note
-        ;; a drop here would claim.
-        (label (if (= pad nil)
-            (eseq.drum-rack-v2/note-label (pad-cell-note gidx cell))
-            (get pad :label))
-          :font-size 8 :color (if (= pad nil) '(rgba 0.42 0.44 0.46 1.0) :dim)
-          :active (pad-trigger-binding pad)
-          :active-color :black
-          :bg :transparent
-          :width :fill :text-align :center)
+        ;; a drop here would claim. The role tag balances a same-width spacer
+        ;; on the left so the note stays centred.
+        (h-stack :width :fill :gap 0 :align :center
+          (box :width 1.4 :height 0.1 :bg :transparent)
+          (label (if (= pad nil)
+              (eseq.drum-rack-v2/note-label (pad-cell-note gidx cell))
+              (get pad :label))
+            :font-size 8 :color (if (= pad nil) '(rgba 0.42 0.44 0.46 1.0) :dim)
+            :active (pad-trigger-binding pad)
+            :active-color :black
+            :bg :transparent
+            :flex 1 :width :fill :text-align :center)
+          (pad-role-tag-label pad))
         (label (if (= pad nil) "" (substring (pad-cell-name pad) 0 12))
           :active (pad-trigger-binding pad)
           :active-color :black
@@ -3943,7 +4001,10 @@
           :on-submit (lambda () (finish-clip-rename gid id true))
           :on-cancel (lambda () (finish-clip-rename gid id false))
           :on-blur (lambda () (finish-clip-rename gid id true)))
-        nil))))
+        (label id :color :dimmer :active (bind-seq (str "rack-clip-active-" gid "-" id)) :active-color :white :font-size 6 :bg :transparent :v-align :center :h-align :center)
+        )
+      
+      )))
 
 ;; The last cell is a number picker showing the lit clip's number: read it at
 ;; a glance, or type/drag a number to launch that clip (quantized like a

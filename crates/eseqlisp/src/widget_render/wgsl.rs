@@ -778,6 +778,33 @@ fn widget_frag(input: WidgetVaryings) -> @location(0) vec4<f32>
     return vec4<f32>(input.color_a.rgb, input.color_a.a * mask);
 }"#;
 
+pub const DROPDOWN_MAGNIFIER_SHADER: &str = r#"
+@fragment
+fn widget_frag(input: WidgetVaryings) -> @location(0) vec4<f32>
+{
+    var aspect: f32 = input.aspect;
+    var p: vec2<f32> = vec2<f32>((input.uv.x - 0.5) * 2.0 * aspect, (input.uv.y - 0.5) * 2.0);
+
+    var c: vec2<f32> = vec2<f32>(-0.18, -0.18);
+    var r: f32 = 0.52;
+    var ring: f32 = abs(length(p - c) - r);
+
+    var a: vec2<f32> = c + vec2<f32>(0.707, 0.707) * r;
+    var b: vec2<f32> = vec2<f32>(0.78, 0.78);
+    var pa: vec2<f32> = p - a;
+    var ba: vec2<f32> = b - a;
+    var h: f32 = clamp(dot(pa, ba) / dot(ba, ba), 0.0, 1.0);
+    var grip: f32 = length(pa - ba * h);
+
+    var d: f32 = min(ring, grip);
+    var stroke: f32 = 0.11;
+    var edge: f32 = fwidth(d) * 1.2;
+    var mask: f32 = smoothstep(stroke + edge, stroke - edge, d);
+
+    if (mask < 0.002) { discard; }
+    return vec4<f32>(input.color_a.rgb, input.color_a.a * mask);
+}"#;
+
 pub const HSLIDER_FRAGMENT_SHADER: &str = r#"
 @fragment
 fn widget_frag(input: WidgetVaryings) -> @location(0) vec4<f32>

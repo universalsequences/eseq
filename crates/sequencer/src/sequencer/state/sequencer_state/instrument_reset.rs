@@ -519,6 +519,81 @@ impl SequencerState {
         updated
     }
 
+    /// "Apply to all scenes" for the instrument header's mono/poly button:
+    /// copy only the live polyphony choice into every pattern's Patch.  A
+    /// plain track copies its `polyphonic` flag; a rack slot copies that
+    /// slot's voice count (mono = 1), since rack playback reads the slot's
+    /// voices rather than the parent track's flag.  Returns the number of
+    /// patterns whose patch received the copy (each distinct Patch is
+    /// written once).
+    pub fn copy_current_polyphony_to_all_track_patterns(
+        &self,
+        track: usize,
+        rack_slot_idx: Option<usize>,
+    ) -> usize {
+        let source_voices = match rack_slot_idx {
+            Some(slot_idx) => {
+                let voices = self
+                    .pattern
+                    .rack_tracks
+                    .lock()
+                    .unwrap()
+                    .get(track)
+                    .and_then(Option::as_ref)
+                    .and_then(|rack| rack.slots.get(slot_idx))
+                    .map(|slot| slot.max_polyphony);
+                let Some(voices) = voices else {
+                    return 0;
+                };
+                Some(voices)
+            }
+            None => None,
+        };
+        let Some(source_poly) = self
+            .pattern
+            .track_params
+            .get(track)
+            .map(|params| params.is_polyphonic())
+        else {
+            return 0;
+        };
+        let mut scenes = self.pattern.scenes.lock().unwrap();
+        let Some(pool) = scenes.track_pools.get_mut(track) else {
+            return 0;
+        };
+        let TrackPatternPool { patterns, sounds, .. } = pool;
+        let mut updated = 0;
+        let mut seen: HashSet<PatchId> = HashSet::new();
+        for stored in patterns.values() {
+            let Some(patch) = sounds.patches.get_mut(&stored.sound.patch).map(Arc::make_mut)
+            else {
+                continue;
+            };
+            let first = seen.insert(stored.sound.patch);
+            match (rack_slot_idx, source_voices) {
+                (Some(slot_idx), Some(voices)) => {
+                    let Some(slot) = patch
+                        .rack_track
+                        .as_mut()
+                        .and_then(|rack| rack.slots.get_mut(slot_idx))
+                    else {
+                        continue;
+                    };
+                    if first {
+                        slot.max_polyphony = voices;
+                    }
+                }
+                _ => {
+                    if first {
+                        patch.params.polyphonic = source_poly;
+                    }
+                }
+            }
+            updated += 1;
+        }
+        updated
+    }
+
     /// Rack-wide "copy current values to all scenes": every slot's instrument
     /// values, base note, mixer fields (gain/pan/mute/solo/polyphony/choke)
     /// and slot-FX values, plus the macro knob positions.  Slots are matched

@@ -1,6 +1,6 @@
 # Rack Grooves — Extracted Feel, Applied to Every Trig Source
 
-Status: rev 1, unbuilt. Epic: `eseq-groove` (slices `.1`–`.7` below).
+Status: rev 2. Slices 1–7 built (model/extraction, application incl. early offsets, rack panel UI, velocity/random, record/roll unwind, kit carry and cross-rack). Rev 2 (§Groove pool, library and pad roles; slices 8–11 = beads `.9`–`.12`) moves grooves off the rack into a project pool backed by a factory/user groove library, adds typed pad roles for cross-kit row matching, and adds a Grooves sidebar tab. Where rev 2 contradicts the rev-1 text below (rack-owned `grooves`, `GrooveRef::Rack`, built-ins in code, the rack-panel heatmap), rev 2 wins. Epic: `eseq-groove`.
 
 ## Problem
 
@@ -257,11 +257,39 @@ fn grooved_sample_time(g: &TrackGrooveSnapshot, boundary_beats, straight_sample,
    groove when the target track has one. Otherwise keep today's swing behavior.
 4. **Process emissions** (`enqueue_due_process_emissions`) that target a rack
    member: apply the groove, so step processes behave like the sources above.
+   *Built (eseq-groove.2):* sites 1–4 plus generator emissions share
+   `groove::groove_offset_samples` (`groove/apply.rs`), keyed on the trig's
+   straight transport beat: `SnapshotTrigger::boundary_beats` for steps,
+   `GraphEmission::grid_beats` (post-`:quantize`, pre-node-swing) for graph
+   fires, `item.beat` for process events. A graph node's own `:swing` still
+   adds on top of the groove, like step Delay. The per-track table is
+   rebuilt by `App::publish_rack_choke_runtime`, the group-topology funnel.
 5. **Roll hits** (`roll_swung_sample_time`) and **live-keyboard record**: the
    groove replaces swing the same way. Recording through a grooved rack must
    **unwind** the groove offset before storing phase, or playback applies it
    twice. This is the same bug class as eseq-k0v8 for swing, so fix them
    together.
+   *Built (eseq-groove.6 + eseq-k0v8):* one inverse,
+   `groove::unwind_step_feel` (`groove/unwind.rs`), maps a HEARD position to
+   the straight `(step, phase)` playback moves back onto it. Playback shifts
+   a stored hit by the feel of the step it sits on (the groove pocket at the
+   step's straight transport boundary, else the track swing of the step's
+   bucket with per-step swing p-locks), so the inverse tries every step and
+   keeps `heard - shift[s]` when it falls inside step `s`. Overlapping
+   readings (an early step reaching back into the one before) keep the
+   smaller phase; the gap a later-than-previous step opens reads as early
+   for that step (phase 0); a straight Sync wait stays unresolved as before.
+   The unwind uses the deterministic pocket (`pocket_offset_beats`), not
+   Random's jitter, so one bar's noise is never printed. Live record:
+   `SequencerState::record_position_at_beat` (audio stamps, press estimate
+   and frontier fallback all go through it). Roll: a grooved member's hit
+   plays through `grooved_sample_time` keyed on its grid line (replacing
+   swing, floored like other sites, plus the velocity accent), and
+   `roll_record_position` unwinds `roll_heard_beats`, so a 32nd roll on 16th
+   steps records the delay that replays each hit where it sounded. Pinned by
+   `scheduler::tests::rack_groove::{live_record_*, roll_through_a_feel_*,
+   grooved_roll_*}` (record, write, replay through the scheduler, within one
+   sample) and `groove::tests::unwind_*`.
 
 MIDI fx order: the groove applies to the trig's source time **before** the
 member's MIDI fx chain, the same place swing applies today. A member MIDI-fx
@@ -284,12 +312,225 @@ Requirement: for every source, trigs are discovered at least
 `E` is bounded: snapping keeps `|offset| < 0.5` slot, and `timing_amount <= 1.5`
 gives `E <= 0.75 * resolution_beats`.
 
-Until that slice lands, clamp applied offsets to `>= 0` (grooves play correctly
-for late feels, and early hits land on the grid).
-
 Must hold: an early trig is never enqueued at a sample the audio thread has
 already passed. Add a test that pins this at the smallest supported buffer
 size.
+
+*Built (eseq-groove.3):* the late-only clamp is gone; `offset_beats` is signed
+and floored at `-MAX_EARLY_SLOTS` (0.75) slots, which is what bounds `E` even
+under Random jitter. `TrackGrooveSnapshot::max_early_beats` is the exact lead
+of one groove (lowest `min(off[k], off[k+1]) - random * spread[k]` after
+timing) and `SequencerSnapshot::groove_early_lead_beats` the table's maximum.
+`schedule_playing_lookahead` extends its horizon by `ceil(E * spq)` samples,
+which is the discovery requirement for every source at once: the step clock's
+trigger window, graph runtimes (their boundaries run `E` sooner, in order, so
+runtime state matches a non-ahead run to the same beat), and the
+process/neural/generator layers. The scheduling frontier is the dedupe: the
+next call starts where this one stopped, so no boundary is handled twice, and
+no per-source "already handled" bookkeeping can drift across song rows,
+launches or roll windows. Every site passes a `GrooveFloor`
+(`SnapshotSequencerClock::groove_floor(rendered)`): an early offset never
+lands before the audio frontier `rendered` (the transport-start downbeat and
+the first chunk after a seek, or a groove made early mid-play, are the cases
+it clamps). The one place the frontier stops being a dedupe is a mid-play
+resync (topology change, pattern-epoch bump, pattern switch, live-MIDI-FX
+toggle): the queue is cleared and the clock rewound to `rendered`, so it finds
+again the boundaries of early hits that already SOUNDED before `rendered`.
+`seek_to_rendered_position` records the old frontier as
+`GrooveFloor::replayed_until`, and an early trig whose straight sample is
+below it and whose move lands before `rendered` is dropped (`None`), not
+clamped, so it is not played twice. Transport start and other seeks reset the
+window to zero. `E` is zero for late-only and ungrooved projects, so they
+schedule bit-identically. The cost is up to `E` extra lookahead (at most 0.75
+slot) while an early groove plays. The offline renderer accepts a frontier
+past its horizon. Pinned by `scheduler::tests::rack_groove::early_groove_*`
+(16-frame offline advances, and a resync inside an early window),
+`graph_runtime_ahead_by_the_lead_matches_a_non_ahead_run` (against a grooved
+and an ungrooved single-call reference) and
+`groove::tests::grooved_sample_time_*`.
+
+*Built (eseq-groove.8):* the same resyncs used to lose (1) a LATE hit whose
+straight boundary is before `rendered` but whose grooved sample is after it,
+and (2) graph emissions already produced for the discarded lookahead
+`(rendered, old frontier]` (the resyncs never rewound graph runtimes; that
+loss predates grooves, but `E` widened it). Both are fixed at the one seam
+every resync shares, `SnapshotSequencerClock::seek_to_rendered_position`:
+- *Late hits.* `TrackGrooveSnapshot::max_late_beats` is the mirror of
+  `max_early_beats` (the largest applied offset after timing and Random;
+  `SequencerSnapshot::groove_late_lead_beats` is the table's maximum). The
+  first chunk after a resync re-finds, per grooved track, every active step
+  whose straight boundary lies within that track's late reach before (or
+  at) `rendered`, as `SnapshotTrigger::recovered_lag` trigs. The lookahead
+  keeps one only when it was still queued, i.e. scheduled at or after
+  `rendered` under the groove it was scheduled with (the clock records each
+  scheduled step trig, `queued_step_hits`, pruned to what the audio has not
+  reached, and a resync keeps the record), AND its grooved sample under the
+  current groove is at or after `rendered` (the mirror of the early drop).
+  A groove change between a hit and a resync (a pick, an amount edit or a
+  rack membership change republishes with no resync) therefore cannot move
+  a hit that already sounded into the new late window and play it twice.
+  It skips the trig before any side effect otherwise,
+  so early, straight and off-step boundaries that already happened are
+  untouched. Scene-silenced tracks, tracks under a sequence-roll window
+  and boundaries before transport start or the lane's clip anchor are not
+  recovered.
+- *Graph emissions.* Graph runtimes are still not rewound: they already
+  evaluated every boundary up to the old frontier, so re-running them would
+  fire those boundaries twice. Instead the lookahead retains each enqueued
+  graph emission (pre-groove, tagged with the clock's seek generation) until
+  it can no longer sound, and the first call after a resync replays the ones
+  the cleared queue held through the CURRENT snapshot's groove, routing and
+  MIDI fx, keeping what was enqueued at or after `rendered` (so still in the
+  cleared queue) and lands at or after it again. A routed fire follows
+  its node's current route (a track move or delete moves or drops it). A
+  step the rewound clock re-finds below the old frontier
+  (`graph_seeded_until_beats`, with half a sample of slack) does not seed
+  the graphs again: it seeded them before the resync. Transport start, song
+  wraps and other seeks bump the generation, so nothing replays across them.
+Pinned by `scheduler::tests::rack_groove::{late_groove_hit_survives_a_mid_play_resync,
+graph_emissions_in_the_discarded_lookahead_survive_a_mid_play_resync,
+pattern_epoch_resync_keeps_late_hits_and_graph_fires,
+groove_change_after_a_straight_hit_does_not_replay_it_on_resync}` (played trigs and
+graph state match an undisturbed run) and
+`groove::tests::max_late_beats_bounds_every_applied_offset`.
+
+## Groove pool, library and pad roles (rev 2)
+
+Rev 1 stored grooves on the rack. That makes the question "which grooves do I
+have, and where is each one applied?" unanswerable without opening every rack,
+and it makes a groove extracted on one kit a second-class citizen on another.
+Rev 2 follows Ableton's groove pool and eseq's own content tiers. Rev-1 rack
+storage never shipped (the branch was unmerged), so there is no migration of
+rack-owned grooves; `PROJECT_FILE_VERSION` is bumped once for the pool.
+
+### Three tiers
+
+| Tier | Where | Mutable | Used by playback |
+|---|---|---|---|
+| Project pool | `Project::grooves: Vec<ProjectGroove>` | yes | yes — the only tier racks reference |
+| User library | `AppPaths::user_grooves_dir()` = `user_data_root()/grooves/*.groove` | yes | no |
+| Factory library | `AppPaths::grooves_dir()` = `factory_root()/grooves/*.groove` (bundle `content/grooves/`) | no | no |
+
+- This mirrors kits (`kits_dir` / `user_kits_dir`), presets, effects and
+  instruments. The Grooves tab lists user + factory merged, like
+  `project::list_kit_presets`.
+- A `.groove` file is a versioned JSON `ProjectGroove` without `id`
+  (`GROOVE_FILE_VERSION`), named by its file stem unless `name` is set.
+- The rev-1 built-in MPC swings become factory `.groove` files
+  (`mpc-swing-54-16th.groove`, …). `GrooveRef::Builtin` is deleted.
+- **Copy-on-apply.** Applying a library groove to a rack first imports it into
+  the project pool (reusing an existing pool groove with the same feel —
+  `ProjectGroove::same_feel`), then points the rack at the pool id. A project
+  therefore plays identically on a machine without that library file, and
+  editing the library never changes an existing project. "Save to Library"
+  is the reverse copy; it never links.
+- `GrooveId` is unique within the project pool.
+- `RackGrooveSettings::active: Option<GrooveId>` (a pool id). Deleting a pool
+  groove that racks use asks first and turns it off on those racks, as one
+  undo step. Extract Groove adds the result to the pool and, with Quantize
+  source on (the modal's default), activates it on the source rack in the
+  same undo step; without quantizing it is only added, since playing it over
+  its own unquantized source would double the feel.
+- **Kit presets** carry a copy of the kit's active groove (plus its settings),
+  not a list. Loading a kit imports that copy into the pool through the same
+  dedupe as copy-on-apply. `KIT_PRESET_VERSION` bumps; v5 kits (rack groove
+  list + selection) load by importing their selected groove only.
+- *Built (eseq-groove.9):* the pool is `ProjectFile::grooves` / `App::grooves`
+  (`PROJECT_FILE_VERSION` 15, the one bump over main; a rev-1 `{"rack": id}`
+  reference reads as no groove rather than failing the load) and rides undo
+  in `BusGroupStructureState::grooves`. Pool helpers live in
+  `groove/pool.rs` (`import_groove` = copy-on-apply dedupe,
+  `repair_groove_pool`, `ProjectRackConfig::repair_groove_selection`), the
+  library in `groove/library.rs` (`GrooveFile`, `GROOVE_FILE_VERSION` 1;
+  list/load/save/rename/delete with `*_in(dir)` cores; entries sorted by
+  stem; save never overwrites, it picks `name-2`, ...), kit carry in
+  `groove/kit.rs`. Kit version 6 writes `groove: {groove, timing_amount,
+  velocity_amount, random_amount}`; a v5 kit's `groove` (a selection) and
+  `grooves` (its list, read only) resolve through
+  `ProjectKitPreset::carried_groove`, a rev-1 built-in id to the same MPC
+  swing. Factory swings are `content/grooves/mpc-swing-<pct>-<16th|8th>.groove`,
+  generated by `groove::mpc_swing_groove` (a test keeps them in sync).
+  Picker keys are `pool:<id>`, `factory:<stem>`, `user:<stem>`, `off`
+  (`GrooveChoice`); `set-rack-groove` with a library key copies on apply.
+  `rename-rack-groove` / `delete-rack-groove` act on the pool (group id
+  optional); `save-groove-to-library`, `rename-library-groove`,
+  `delete-library-groove` edit user files. The host also publishes
+  `SEQ.groove-pool` (grooves with their rack instances) and
+  `SEQ.groove-library`; the rack entry's `:active-groove-id` is the pool id.
+- The scheduler is unchanged: `track_groove_snapshots` resolves each member's
+  row from the pool groove its rack references.
+
+### Pad roles (typed slots)
+
+`pad_note` identifies a pad within one kit; across kits it only means the same
+drum if both kits follow the same layout. Rev 2 adds an explicit, optional
+drum role per pad:
+
+```rust
+pub enum PadRole {
+    Kick, Snare, Rim, Clap, ClosedHat, PedalHat, OpenHat,
+    TomLow, TomMid, TomHigh, Crash, Ride, Shaker, Perc,
+}
+// ProjectRackPad and ProjectKitPad:
+#[serde(default, skip_serializing_if = "Option::is_none")]
+pub role: Option<PadRole>,
+```
+
+**Standard layout.** A pad without an explicit role gets one inferred from its
+`pad_note` using the General MIDI drum map on the rack's home octave
+(`STANDARD_LAYOUT_FIRST_PAD_NOTE` = `DRUM_RACK_FIRST_PAD_NOTE` = -36, C1,
+where a new rack fills its first pads; pad note = `gm_note - 72`): -36 kick
+(C1), -35 rim (C#1), -34 snare (D1), -33 clap (D#1), -32 snare (E1),
+-31 tom-low (F1), -30 closed-hat (F#1), -29 tom-low, -28 pedal-hat (G#1),
+-27 tom-mid, -26 open-hat (A#1), -25 tom-mid, -24 tom-high (C2), -23 crash,
+-22 tom-high, -21 ride, -20 crash, -19 ride, -18 shaker, -17 crash,
+-16 perc (G#2); anything else has no role.
+Kits authored in this layout (factory kits, eseq-2k9p.25, should) need no
+tagging; other kits set roles explicitly. `effective_role(pad)` = explicit role
+else inferred.
+
+**Groove rows record roles.** Extraction stores the source pad's effective role
+on each `GroovePadRow` (`role: Option<PadRole>`, serde default). Row lookup for
+a member pad (`ProjectGroove::row_for_pad(pad_note, role)`), in order:
+
+1. a row with the same `pad_note` whose role is compatible with the pad's
+   effective role — equal, or unknown on either side (a row recorded without
+   a role, or a pad with none) — the same kit, or a kit in the same layout;
+2. a row with the same role (first by `pad_note` order) — the snare row lands
+   on this kit's snare wherever it sits;
+3. the shared all-pads row.
+
+*Built (eseq-groove.10):* `PadRole` lives in `crate::pad_role` (re-exported
+from `project`; serde keys kebab-case, `closed-hat`), with
+`PadRole::standard(pad_note)` the layout table and `effective_role()` on
+`ProjectRackPad` / `ProjectKitPad`. The lookup is
+`ProjectGroove::resolve_pad_row(pad_note, role)` (`row_for_pad` falls back to
+the shared row); `track_groove_snapshots`, `groove_row_mapping` and the rack
+panel heatmap all use it. No file-version bump: every new field is
+`serde(default)` and skipped when `None`. Kit save/load (new rack and
+audition) carries explicit roles. `App::set_rack_pad_role_recorded` is one
+undo step through the bus/group funnel, which republishes the groove table;
+host command `set-rack-pad-role {group-id pad-note role}` takes a role key or
+`standard`, and shares `apply_rack_pad_map_command` with the capture harness.
+`SEQ.groups` pads carry `:role` (explicit key, "" = Standard), `:role-tag`,
+`:role-label` and `:standard-role-label`. The pad cell's right-click opens
+the pad menu (Role ▸ Standard (<inferred>), then every role), mounted in the
+*fx* rack panel; the tag (BD, SD, CH, ...) sits top-right, bright when
+explicit, dim when inferred. Capture fixture:
+`crates/sequencer/ui/capture-fixtures/rack-pad-roles.lisp`.
+
+Roles are general pad metadata; grooves are their first consumer. Pattern
+transfer between kits, MIDI note maps and Jev can use them later.
+Auto-suggesting a role from sample names or the sound classifier is a
+follow-up, not rev 2.
+
+### Out of scope for rev 2
+
+- **Commit** (bake a groove into member step `Delay` p-locks and turn it off).
+  Only step patterns could be baked — graph, neural and process emissions have
+  no stored notes — so on a mixed rack it would half-work. Revisit as a
+  step-only action if wanted.
+- Editing groove cells by hand.
 
 ## UI
 
@@ -304,6 +545,85 @@ On the drum rack panel (`content/ui/drum-rack-v2.lisp`), a **Groove** section:
 Member tracks with an active rack groove show their swing control disabled with
 a "groove" hint, so there is one visible source of truth for the feel.
 
+**Rev 2 UI.**
+
+*Grooves sidebar tab* (a browser tab beside Packages, same tree widget and
+conventions — see the Packages tab: header rows, `:status-icon`,
+`:on-right-click` context menus routed to host commands):
+- Header sections **In use** / **Project** / **Library** (user) / **Factory**.
+- A project groove row expands to its instances, one row per rack using it:
+  `<rack name> · T 100% V 40% R 0%`. Clicking an instance focuses that rack.
+  In use lists only pool grooves with at least one instance.
+- Selecting a groove shows its pads × slots heatmap (rows labelled by role
+  where known, filled cells dimmed) and its period/grid below the tree.
+- Context menus. Project groove: Apply to Selected Rack, Rename, Duplicate,
+  Save to Library, Delete (confirms and lists affected racks when in use).
+  Library/factory groove: Apply to Selected Rack (copy-on-apply), and for
+  user files Rename and Delete. All edits are single undo steps; library file
+  edits are not undoable and say so in their confirm.
+- *Built (eseq-groove.11):* `content/ui/grooves-tab.lisp` (`eseq.grooves-tab`,
+  mounted by `browser.lisp` as the Grooves rail tab after Packages; tree key
+  `eseq.grooves-tab/grooves-tab-tree`). Rows come from
+  `(seq-groove-tree query SEQ.groove-pool SEQ.groove-library)`
+  (`src/ui/host_commands/grooves_tab.rs`); a played pool groove carries the
+  check `:status-icon` and a rack-count `:badge`, and each row's `:path`
+  (`in-use/pool:<id>`, `project/pool:<id>/rack:<gid>`, `library/user:<stem>`)
+  keeps its expansion and highlight per section. Empty sections show a
+  placeholder row; a search keeps matching grooves or matching racks. The
+  "selected rack" is the rack whose bus is selected, else the current
+  track's rack; clicking an instance (or its menu's Show Rack) selects the
+  rack's bus. Instance rows also offer "Turn Off on <rack>". An "Instances"
+  button expands every groove. The preview reads a pool groove's `:heatmap`
+  on its `SEQ.groove-pool` entry (`groove_preview_heatmap`: All, then its
+  recorded rows by role label, else pad note) and loads a library file's
+  through `(seq-groove-library-heatmap key)`. New host command
+  `duplicate-pool-groove {groove-id}` ("<name> copy", one undo step). The
+  host confirms `delete-rack-groove` when racks play the groove and
+  `delete-library-groove` always, by opening `eseq.file-dialogs/open-confirm`
+  with a rerun carrying `:confirmed true` — so the rack panel's Delete now
+  confirms too. *Deviation:* user-file Rename has no confirm, contrary to
+  "say so in their confirm" above: the rename is already an explicit
+  two-step inline field (type, then Rename/Enter), so its "Renames the file
+  in your library; this cannot be undone." note stands in for the confirm.
+  The context menu is mounted in `browser.lisp`'s `root-widget` beside the
+  package menu. The heatmap's cells (and the ruler's boxes above them)
+  are `:flex 1`, so a row's slots share the preview's width and all of a
+  1 bar · 1/16 map fits the 34-column sidebar; they sit on a surface
+  lighter than `:buffer-bg` (filled cells' dim base vanished on it). The
+  Grooves tree sets a new opt-in tree prop, `:detail-yields true`
+  (`crates/eseqlisp/src/widget_render/tree.rs`, both the text-cell and GPU
+  renderers): a row's detail ("1 bar · 1/16") shows only when the whole
+  label fits beside it, so a narrow sidebar drops the detail before cutting
+  the groove's name short. Trees without the prop keep the detail and
+  truncate the label as before. *Deviation:* instance rows use the compact
+  `<rack> · T100 V40 R0` (percentages) rather than `T 100% V 40% R 0%`, so
+  a default rack name ("Drum Rack 1") keeps all three amounts at 34
+  columns. Capture fixture:
+  `crates/sequencer/ui/capture-fixtures/grooves-tab.lisp` (`--buffer samples`).
+
+*Rack panel* keeps only: the groove picker (pool grooves, then a *Library*
+section whose entries copy-on-apply, then Off), the Timing / Velocity /
+Random knobs, "Extract Groove…", and a "Grooves tab" link that opens the tab
+with this rack's groove selected. The heatmap and rename/delete move to the tab.
+*Built (eseq-groove.12):* `content/ui/effects/rack-groove.lisp` is now one
+14-column controls column. `SEQ.rack-grooves` entries gain
+`:picker-headers` (option indices) and lose `:heatmap` (the map is the
+tab's, on `SEQ.groove-pool`); the Library header is a picker label with key
+"" that `eseq.drum-rack-v2/set-groove` ignores. The dropdown widget gained
+an opt-in `:headers` prop (`crates/eseqlisp/src/widget_render/dropdown.rs`):
+header rows render dimmed with no check mark, keys step over them, and a
+click or Enter on one picks nothing. The link calls
+`eseq.grooves-tab/show-rack-groove`, which opens the sidebar on the Grooves
+tab (`eseq.browser/open-grooves-tab`, late-bound since the browser imports
+the tab) and selects the rack's groove on its In use row
+(`in-use/pool:<id>`); a rack playing straight just opens the tab. The
+rack panel's Rename/Delete (and `eseq.drum-rack-v2/rename-groove` /
+`delete-groove`) are gone, so the unconfirmed panel delete path is closed.
+
+*Pad role* is set from the rack pad's context menu (Role ▸ …, with
+"Standard (<inferred>)" as the default entry), and shown as a short tag on
+the pad.
+
 ## Slices
 
 1. **Groove model + extraction.** Data types, serde, rack storage, pure
@@ -312,17 +632,75 @@ a "groove" hint, so there is one visible source of truth for the feel.
    tested on synthetic patterns. No playback change.
 2. **Apply, late-only, all sources.** `track_grooves` snapshot table, the
    `grooved_sample_time` function, wired at step, graph-emission, legacy-neural
-   and process sites with offsets clamped `>= 0`. Built-in MPC swing grooves.
+   and process sites with offsets clamped `>= 0` (lifted by slice 3). Built-in
+   MPC swing grooves.
    After this slice, the headline workflow works for late feels.
 3. **Early offsets.** Lookahead discovery `E` ahead for step triggers and graph
-   runtimes; remove the clamp; no-past-sample test.
+   runtimes; remove the clamp; no-past-sample test. *Built (eseq-groove.3):*
+   see §Early hits.
 4. **Rack panel UI.** Groove section, Extract Groove modal, heatmap, member swing
    hint.
+   *Built (eseq-groove.4):* `content/ui/effects/rack-groove.lisp` renders the
+   section beside the pad grid in the rack's *fx* panel; lookups and host
+   commands live in `eseq.drum-rack-v2` (`extract-groove`, `set-groove`,
+   `set-groove-amount`, `rename-groove`, `delete-groove`). The host publishes
+   `SEQ.rack-grooves` (structural: picker labels + keys `rack:<id>` /
+   `builtin:<id>` / `off`, active groove, heatmap rows All + pads with
+   per-cell offset and measured flags; sub-bar grooves tile to one bar) and
+   scalar `SEQ.rack-groove-{timing,velocity,random}-<gid>` the knobs bind to,
+   so a drag never rebuilds its section. Commands go through
+   `ui/host_commands/rack_grooves.rs`; an amount drag writes through live and
+   lands as ONE undo step when the gesture ends
+   (`edit::apply_rack_groove_amount_drag`, the `ProcessLaneDrag` shape).
+   Rename/delete are one step each; deleting the active groove turns it off.
+   A grooved member's track panel shows swing as a "groove" hint. Capture
+   fixture: `crates/sequencer/ui/capture-fixtures/rack-groove-panel.lisp`
+   (new `(drum-rack TRACK...)` capture form).
 5. **Velocity + random amounts.** Velocity scaling and deterministic jitter.
+   *Built (eseq-groove.5):* `TrackGrooveSnapshot::offset_beats` adds
+   `random * spread[k] * groove_hash_noise(absolute slot, pad_note)` before the
+   timing amount (a splitmix hash, no RNG state, so any render from any start
+   point is reproducible); `pad_note` rides on the snapshot, and a padless
+   member seeds with `padless_seed_key(member)`, below the pad-note domain.
+   `apply_velocity` scales by `lerp(1, lerp(scale[k], scale[k+1], t), amount)`
+   clamped to Velocity's 0..1 and is a bit-for-bit no-op at amount 0. Every
+   site calls `scheduler::grooved_velocity` at the same straight beat that keys
+   its timing, exactly once per sounding event: the base step trig AFTER its
+   process chain (and before the accumulator), graph and generator emissions,
+   legacy neural outputs, and process steps/emissions at enqueue. The process
+   chain reads the straight velocity, as it reads straight timing: a ratchet
+   or `emit` built from the step's velocity is a process event that enqueue
+   grooves at its own beat, so grooving the step first would scale it twice.
 6. **Record/roll unwind.** Roll and live-record through a grooved rack store
    straight phase. Pair with eseq-k0v8.
+   *Built (eseq-groove.6, with eseq-k0v8):* see §Sites 5.
 7. **Kit preset carry + cross-rack.** Grooves in kit presets; applying another
    rack's groove maps pad rows by `pad_note`, falling back to the shared row.
+   *Built (eseq-groove.7):* `KIT_PRESET_VERSION` 5 adds
+   `ProjectKitPreset::grooves`/`groove`. Loading a kit as a new rack installs
+   them (ids re-derived, selection re-pointed); auditioning a v5 kit onto a
+   rack ADDS its grooves beside the rack's own (an identical groove is reused,
+   not duplicated) and takes the kit's selection and amounts; a pre-v5 kit
+   leaves the rack's grooves alone. `App::apply_rack_groove_from_rack_recorded`
+   copies another rack's groove into the target and activates it (one undo
+   step). Both go through `groove::import_grooves`
+   (`groove/transfer.rs`); no per-pad remap is stored, because the scheduler
+   table already resolves each member's row by its own pad note.
+
+8. (eseq-groove.9) **Project groove pool + library.** `Project::grooves`, `active: Option<GrooveId>`,
+   delete `GrooveRef::Builtin`/rack storage, `grooves_dir`/`user_grooves_dir`,
+   `.groove` file format + list/save/delete, factory MPC swing files,
+   copy-on-apply with dedupe, kit presets carry the active groove copy.
+   Existing host commands and the rack panel keep working against the pool.
+   *Built (eseq-groove.9):* see §Three tiers. Until slice 11 the rack
+   panel's picker already lists pool grooves, then the library, then Off.
+9. (eseq-groove.10) **Pad roles.** `PadRole`, `role` on rack + kit pads, standard-layout
+   inference, role recorded on extracted rows, role-aware row lookup in the
+   scheduler table, pad context-menu role picker + pad tag.
+10. (eseq-groove.11) **Grooves sidebar tab.** Tree, instances, heatmap preview, context menus,
+    host commands shared with the rack panel.
+11. (eseq-groove.12) **Slim rack panel.** Picker with Library section, knobs, Extract, link to
+    the tab; heatmap and rename/delete removed from the panel.
 
 ## Acceptance
 
@@ -334,3 +712,6 @@ a "groove" hint, so there is one visible source of truth for the feel.
 - Rack with no active groove: scheduler output is bit-identical to today
   (existing swing/neural tests untouched).
 - Offline render of a grooved rack with Random > 0 is reproducible run to run.
+- Rev 2: a groove extracted on kit A, saved to the library, applied to kit B
+  (different layout, roles set) puts A's snare row on B's snare; the project
+  still plays it after the library file is deleted.

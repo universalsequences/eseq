@@ -17,6 +17,7 @@ pub(super) const COMMANDS: &[&str] = &[
     "set-instrument-plock-option",
     "set-instrument-base-note",
     "copy-instrument-values-to-all-scenes",
+    "apply-polyphony-to-all-scenes",
 ];
 
 #[allow(clippy::too_many_lines)]
@@ -934,6 +935,21 @@ pub(super) fn handle(
                         .to_string(),
                 ));
             }
+        }
+        // Right-click "Apply to all scenes" on the header's mono/poly button:
+        // only the polyphony choice, not the rest of the instrument values.
+        "apply-polyphony-to-all-scenes" => {
+            let track = extract_usize_from_payload(&payload, "track");
+            let rack_slot = extract_usize_from_payload(&payload, "rack-slot");
+            let updated = track
+                .map(|track| state.copy_current_polyphony_to_all_track_patterns(track, rack_slot))
+                .unwrap_or(0);
+            let status = if updated > 0 {
+                format!("Applied mono/poly to {updated} patterns/scenes")
+            } else {
+                "Could not apply mono/poly: invalid instrument target".to_string()
+            };
+            editor.handle_host_event(HostEvent::Status(status));
         }
         _ => {}
     }

@@ -67,6 +67,7 @@ pub const SCENES: &[&str] = &[
     "widget-patcher-back-chevron",
     "widget-patcher-node",
     "widget-dropdown-checkmark",
+    "widget-dropdown-magnifier",
 ];
 
 /// The `(vertex, fragment)` sources a `widget-<name>` scene draws with, in the

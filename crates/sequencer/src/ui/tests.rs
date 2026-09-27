@@ -10681,7 +10681,7 @@
             // 14-track topology are all live before the first click.
             {
                 let rt = editor.runtime_mut();
-                sync_groups_bindings(rt, &app.groups);
+                sync_groups_bindings(rt, &app.groups, &app.grooves);
                 sync_all_track_sequencer_state(rt, &state, &app, 0, &selected_steps);
                 sync_step_param_lists(rt, &state, 0);
                 rt.set_reactive("SEQ", "steps", build_steps_value(&state, 0));
@@ -10826,6 +10826,17 @@
                 &mut frame_diff.song,
                 transport_visible,
             );
+            // These probes time track switches within ONE layout. Selecting
+            // a drum rack member splits the sidebar for the *groove* buffer
+            // (and a plain track joins it back), which is a layout change,
+            // not the switch cost measured here, so the split is off.
+            editor
+                .runtime_mut()
+                .eval_str(
+                    "(setopt eseq.rack-groove-buffer/groove-buffer-auto-split false)
+                     (eseq.seq-layout/refresh-current-layout)",
+                )
+                .expect("keep the probe's layout fixed");
             editor.runtime_mut().run_reactive_cycle();
             editor.refresh_runtime_side_effects();
             editor.update_tile_rects(vp_cols, vp_rows);
@@ -11017,7 +11028,7 @@
                     let groups_snapshot = track_groups.lock().unwrap().clone();
                     if groups_snapshot != frame.prev_groups {
                         app.groups = groups_snapshot.clone();
-                        sync_groups_bindings(editor.runtime_mut(), &app.groups);
+                        sync_groups_bindings(editor.runtime_mut(), &app.groups, &app.grooves);
                         frame.prev_groups = groups_snapshot;
                     }
                 }

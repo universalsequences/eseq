@@ -10,7 +10,9 @@ use super::{
     ndc_bounds, resolve_named_color, styled_cell,
 };
 use crate::backend::Color;
-use crate::layout::{Constraints, LayoutNode, MeasureCtx, Rect, Size, f64_to_f32, get_prop_num};
+use crate::layout::{
+    Constraints, LayoutCtx, LayoutNode, MeasureCtx, Rect, Size, f64_to_f32, get_prop_num,
+};
 use crate::theme;
 use crate::vm::Value;
 
@@ -412,6 +414,148 @@ fn default_cell_value(props: &HashMap<String, Value>, row: usize, col: usize) ->
     value.clamp(lo, hi)
 }
 
+/// Stock right-click menu. Every editable matrix (one with `on-cell-change` or
+/// `on-change`) that declares no `:on-right-click` of its own gets a
+/// `context-menu` child with "Clear", without call sites opting in. The menu is
+/// the ordinary `context-menu` widget: the matrix only owns whether it is open.
+struct OpenMenu {
+    /// Identifies the owning matrix across relayouts: widget ids are assigned
+    /// after `layout_children` runs, but the laid-out rect is known there.
+    rect: Rect,
+    anchor_col: f32,
+    anchor_row: f32,
+    /// Props at right-click time; "Clear" resolves callbacks and defaults
+    /// from this snapshot.
+    props: HashMap<String, Value>,
+}
+
+thread_local! {
+    static OPEN_MENU: RefCell<Option<OpenMenu>> = const { RefCell::new(None) };
+    /// Callback invocations queued by "Clear": a native cannot invoke Lisp, so
+    /// the editor delivers these where widget callbacks land.
+    static PENDING_OUTPUTS: RefCell<Vec<EventOutput>> = const { RefCell::new(Vec::new()) };
+}
+
+/// True when the matrix shows the stock right-click menu.
+pub(crate) fn has_builtin_menu(node: &LayoutNode) -> bool {
+    node.widget_type == "matrix"
+        && !node.props.contains_key("on-right-click")
+        && (has_callback(node, "on-cell-change") || has_callback(node, "on-change"))
+}
+
+pub fn take_pending_outputs() -> Vec<EventOutput> {
+    PENDING_OUTPUTS.with(|cell| std::mem::take(&mut *cell.borrow_mut()))
+}
+
+fn open_menu(node: &LayoutNode, local_col: f32, local_row: f32) {
+    OPEN_MENU.with(|menu| {
+        *menu.borrow_mut() = Some(OpenMenu {
+            rect: node.rect,
+            anchor_col: local_col,
+            anchor_row: local_row,
+            props: node.props.clone(),
+        });
+    });
+    bump_widget_state_generation();
+}
+
+fn close_menu() -> Option<OpenMenu> {
+    let closed = OPEN_MENU.with(|menu| menu.borrow_mut().take());
+    if closed.is_some() {
+        bump_widget_state_generation();
+    }
+    closed
+}
+
+fn same_rect(a: Rect, b: Rect) -> bool {
+    const EPS: f32 = 1e-3;
+    (a.col - b.col).abs() < EPS
+        && (a.row - b.row).abs() < EPS
+        && (a.width - b.width).abs() < EPS
+        && (a.height - b.height).abs() < EPS
+}
+
+/// The events that reset every cell to its default (see `default_cell_value`):
+/// one `on-cell-change` per cell that differs, or a single full-matrix
+/// `on-change`.
+fn clear_outputs(props: &HashMap<String, Value>) -> Vec<EventOutput> {
+    let rows = matrix_rows_from_props(props);
+    let cols = matrix_cols_from_props(props);
+    let current = parse_matrix_value(props, rows, cols);
+    let defaults: Vec<Vec<f32>> = (0..rows)
+        .map(|row| (0..cols).map(|col| default_cell_value(props, row, col)).collect())
+        .collect();
+    let callback = |key: &str| {
+        props
+            .get(key)
+            .filter(|value| !matches!(value, Value::Nil | Value::Bool(false)))
+            .cloned()
+    };
+    if let Some(callback) = callback("on-cell-change") {
+        let mut outputs = Vec::new();
+        for (row, values) in defaults.iter().enumerate() {
+            for (col, value) in values.iter().enumerate() {
+                if current[row][col] != *value {
+                    outputs.push(EventOutput {
+                        callback: callback.clone(),
+                        args: vec![
+                            Value::Number(row as f64),
+                            Value::Number(col as f64),
+                            Value::Number(*value as f64),
+                        ],
+                    });
+                }
+            }
+        }
+        outputs
+    } else if let Some(callback) = callback("on-change") {
+        vec![EventOutput { callback, args: vec![matrix_value(defaults)] }]
+    } else {
+        Vec::new()
+    }
+}
+
+/// Selecting an item is always followed by the menu's `:on-close`, which
+/// closes it and triggers the relayout that removes the panel.
+fn clear_selected() {
+    let outputs = OPEN_MENU.with(|menu| menu.borrow().as_ref().map(|menu| clear_outputs(&menu.props)));
+    PENDING_OUTPUTS.with(|cell| cell.borrow_mut().extend(outputs.unwrap_or_default()));
+}
+
+fn native(name: &str, f: fn()) -> Value {
+    Value::NativeFunction(crate::vm::NativeFunction::new(name, move |_args, _vm| {
+        f();
+        Value::Nil
+    }))
+}
+
+fn builtin_menu_value(menu: &OpenMenu) -> Value {
+    let item = crate::widgets::build_widget(
+        "menu-item",
+        vec![
+            Value::String("Clear".to_string()),
+            Value::Keyword("on-select".to_string()),
+            native("matrix-menu-clear", clear_selected),
+        ],
+    );
+    crate::widgets::build_widget(
+        "context-menu",
+        vec![
+            Value::Keyword("is-open".to_string()),
+            Value::Bool(true),
+            Value::Keyword("anchor-col".to_string()),
+            Value::Number(menu.anchor_col as f64),
+            Value::Keyword("anchor-row".to_string()),
+            Value::Number(menu.anchor_row as f64),
+            Value::Keyword("on-close".to_string()),
+            native("matrix-menu-close", || {
+                close_menu();
+            }),
+            item,
+        ],
+    )
+}
+
 fn handle_toggle(node: &LayoutNode, local_col: f32, local_row: f32) -> MouseEventOutcome {
     let rows = matrix_rows_from_props(&node.props);
     let cols = matrix_cols_from_props(&node.props);
@@ -719,6 +863,28 @@ impl WidgetDefinition for MatrixWidget {
         tui_render(props, rect, buf);
     }
 
+    fn layout_children(
+        &self,
+        _node: &Value,
+        area: Rect,
+        _children: &[Value],
+        _aspect: f32,
+        _measure_ctx: &MeasureCtx<'_>,
+        layout_ctx: LayoutCtx,
+        _measure_child: &mut dyn FnMut(&Value, Constraints) -> Option<Size>,
+        build_child: &mut dyn FnMut(&Value, Rect, LayoutCtx) -> LayoutNode,
+    ) -> Vec<LayoutNode> {
+        // The stock menu is an overlay panel: it anchors at the pointer, so
+        // the rect it is handed does not affect the matrix's own layout.
+        OPEN_MENU.with(|menu| {
+            menu.borrow()
+                .as_ref()
+                .filter(|menu| same_rect(menu.rect, area))
+                .map(|menu| vec![build_child(&builtin_menu_value(menu), area, layout_ctx)])
+                .unwrap_or_default()
+        })
+    }
+
     fn mouse_event(
         &self,
         node: &LayoutNode,
@@ -735,6 +901,10 @@ impl WidgetDefinition for MatrixWidget {
             MouseEventKind::Moved => {
                 let cell = cell_index(node, local_col, local_row);
                 update_state(node.widget_id, |state| state.hovered_cell = Some(cell));
+                MouseEventOutcome::Consume
+            }
+            MouseEventKind::Down(MouseButton::Right) if has_builtin_menu(node) => {
+                open_menu(node, local_col, local_row);
                 MouseEventOutcome::Consume
             }
             MouseEventKind::Down(MouseButton::Left)

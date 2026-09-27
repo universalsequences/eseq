@@ -1761,6 +1761,73 @@ fn clicking_inactive_tile_uses_target_tile_viewport_for_hit_testing() {
     );
 }
 
+/// A `:filterable` dropdown takes typed text while open, space included
+/// (which otherwise falls through to keybindings), and Enter picks the first
+/// match; its footer is picked like an option.
+#[test]
+fn filterable_dropdown_types_into_its_filter_and_enter_picks_the_first_match() {
+    fn find_dropdown(node: &crate::layout::LayoutNode) -> Option<&crate::layout::LayoutNode> {
+        if node.widget_type == "dropdown" {
+            return Some(node);
+        }
+        node.children.iter().find_map(find_dropdown)
+    }
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor
+        .runtime_mut()
+        .eval_str(
+            r#"
+            (def picked (state ""))
+            (effect
+              (v-stack
+                (dropdown :value "No groove"
+                  :options '("No groove" "Factory" "MPC 16 Swing 54%" "MPC 16 Swing 66%")
+                  :headers '(1)
+                  :filterable true
+                  :footer "Extract…"
+                  :width 20
+                  :on-change (lambda (v) (set! picked v)))))
+            "#,
+        )
+        .unwrap();
+    editor.set_layout_viewport(30, 20);
+    let dropdown = editor
+        .runtime
+        .current_layout
+        .as_ref()
+        .and_then(|layout| find_dropdown(layout))
+        .expect("dropdown")
+        .clone();
+    let col = dropdown.rect.col + dropdown.rect.width * 0.5;
+    let row = dropdown.rect.row + dropdown.rect.height * 0.5;
+    for kind in [
+        MouseEventKind::Down(MouseButton::Left),
+        MouseEventKind::Up(MouseButton::Left),
+    ] {
+        editor.handle_mouse_precise(
+            mouse_event(kind, col.floor() as u16, row.floor() as u16),
+            0,
+            0,
+            30,
+            20,
+            col,
+            row,
+        );
+    }
+    assert!(crate::widget_render::dropdown::is_dropdown_open(dropdown.widget_id));
+    for ch in "swing 66".chars() {
+        editor.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+    }
+    editor.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(
+        editor.runtime.eval_str("picked").unwrap(),
+        Some(Value::String("MPC 16 Swing 66%".into())),
+        "the typed filter (with its space) narrowed the list to one match"
+    );
+    assert!(!crate::widget_render::dropdown::is_dropdown_open(dropdown.widget_id));
+}
+
 #[test]
 fn first_click_opens_an_unfocused_conditionally_replaced_dropdown() {
     fn find_dropdown(node: &crate::layout::LayoutNode) -> Option<&crate::layout::LayoutNode> {
@@ -4914,6 +4981,112 @@ fn tree_right_click_reaches_on_right_click_with_the_hit_item() {
     assert_eq!(
         editor.runtime.eval_str("selected").unwrap().unwrap(),
         Value::String(String::new())
+    );
+}
+
+/// `:detail-yields true`: on a row too narrow for both, the label keeps
+/// its whole text and the detail drops out; wide rows still show both. A
+/// tree without the prop keeps the detail and truncates the label. Checked
+/// on both renderers: the GPU primitives (whose width check counts the
+/// status icon and badge columns) and the text cells (which draw neither).
+#[test]
+fn tree_detail_yields_to_the_label_on_narrow_rows() {
+    let render = |yields: bool, width: u16| -> (Vec<String>, String) {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor.set_layout_viewport(width, 6);
+        editor
+            .runtime_mut()
+            .eval_str(&format!(
+                r#"(effect-buffer "*tree*"
+                     (tree :width :fill :row-height 1.0 :detail-yields {yields}
+                       :items '((:label "Dilla take" :path "/a" :detail "1 bar · 1/16"
+                                 :status-icon :check :badge 2))))"#
+            ))
+            .unwrap();
+        editor.refresh_runtime_side_effects();
+        let id = editor
+            .buffers
+            .iter()
+            .find(|b| b.name == "*tree*")
+            .unwrap()
+            .id;
+        editor.set_active_buffer(id);
+        let layout = editor.widget_layout().expect("tree layout");
+        let tree = find_widget_of_type(&layout, "tree").expect("tree node");
+        let viewport = crate::widget_render::WidgetViewport {
+            cell_w: 10.0,
+            cell_h: 10.0,
+            vp_w: width as f32 * 10.0,
+            vp_h: 60.0,
+            time_seconds: 0.0,
+            focused_widget_id: None,
+            focused_branch: false,
+            overlay_viewport_bottom: 6.0,
+            scroll_top: 0.0,
+            scroll_left: 0.0,
+            inherited_hover: false,
+        };
+        let texts = crate::widget_render::widget_primitives_for_node(tree, viewport)
+            .iter()
+            .filter_map(|primitive| match primitive {
+                crate::widget_render::GpuPrimitive::ProportionalText(text) => {
+                    Some(text.text.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        let mut cells = crate::widget_render::CellBuffer::new(width, 6);
+        crate::widget_render::render_widget_tree(&layout, &mut cells);
+        let cells = cells
+            .cells
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .map(|cell| cell.as_ref().map(|cell| cell.ch).unwrap_or(' '))
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        (texts, cells)
+    };
+    let (narrow, narrow_cells) = render(true, 20);
+    assert!(
+        narrow.iter().any(|t| t == "Dilla take"),
+        "label wins: {narrow:?}"
+    );
+    assert!(
+        !narrow.iter().any(|t| t == "1 bar · 1/16"),
+        "detail drops: {narrow:?}"
+    );
+    assert!(
+        narrow_cells.contains("Dilla take"),
+        "text label wins: {narrow_cells}"
+    );
+    assert!(
+        !narrow_cells.contains("1 bar"),
+        "text detail drops: {narrow_cells}"
+    );
+    let (wide, wide_cells) = render(true, 40);
+    assert!(wide.iter().any(|t| t == "Dilla take"), "{wide:?}");
+    assert!(
+        wide.iter().any(|t| t == "1 bar · 1/16"),
+        "room for both: {wide:?}"
+    );
+    assert!(
+        wide_cells.contains("Dilla take") && wide_cells.contains("1 bar · 1/16"),
+        "{wide_cells}"
+    );
+    let (default, default_cells) = render(false, 20);
+    assert!(default.iter().any(|t| t == "1 bar · 1/16"), "{default:?}");
+    assert!(
+        !default.iter().any(|t| t == "Dilla take"),
+        "label truncates: {default:?}"
+    );
+    assert!(default_cells.contains("1 bar · 1/16"), "{default_cells}");
+    assert!(
+        !default_cells.contains("Dilla take"),
+        "text label truncates: {default_cells}"
     );
 }
 
@@ -16347,6 +16520,103 @@ fn context_menu_outside_click_closes_without_firing_items() {
         !eval_bool(&mut editor, "underlay-clicked"),
         "the dismissing click must be consumed"
     );
+}
+
+const CELL_CHANGE: &str =
+    ":on-cell-change (lambda (r c v) (set! calls (+ calls 1)) (set! last (list r c v)))";
+const FULL_CHANGE: &str = ":on-change (lambda (m) (set! calls (+ calls 1)) (set! last m))";
+
+fn eval_lisp(editor: &mut Editor, expr: &str) -> String {
+    crate::vm::format_lisp_value(&editor.runtime_mut().eval_str(expr).unwrap().unwrap())
+}
+
+fn matrix_menu_program(callback: &str) -> String {
+    format!(
+        r#"
+    (def calls (state 0))
+    (def last (state nil))
+    (def parent-menu (state false))
+    (effect-buffer "*panel*"
+      (box :on-right-click (lambda (event) (set! parent-menu true))
+        (matrix :rows 2 :cols 2 :width 20 :height 6
+          :value (list (list 1 0) (list 0 0.5))
+          {callback})))
+    (effect-buffer "*sequencer*" (label "underlay"))
+    (set-layout
+      (list :rows :gap 0
+        0.5 (list :buf "*panel*" :hide-status true)
+        0.5 (list :buf "*sequencer*" :hide-status true)))
+"#
+    )
+}
+
+fn click_menu_item(editor: &mut Editor, text: &str) {
+    let layout = editor.runtime.current_layout.clone().expect("panel layout");
+    let item = find_menu_item(&layout, text).expect("menu item").clone();
+    let col = item.rect.col + item.rect.width * 0.5;
+    let row = item.rect.row + item.rect.height * 0.5;
+    for kind in [
+        MouseEventKind::Down(MouseButton::Left),
+        MouseEventKind::Up(MouseButton::Left),
+    ] {
+        editor.handle_tiled_mouse_precise(mouse_event(kind, col as u16, row as u16), col, row, 0);
+    }
+    let _ = crate::ui::frame::build_tiled_render_frame_borderless(editor, 60, 20);
+}
+
+#[test]
+fn matrix_right_click_clear_resets_changed_cells_per_cell() {
+    let _overlay_guard = OverlayClearGuard;
+    let mut editor = context_menu_two_tile_editor_for(&matrix_menu_program(CELL_CHANGE));
+    right_click_at(&mut editor, 5.0, 2.0);
+
+    assert!(!eval_bool(&mut editor, "parent-menu"), "the matrix keeps the right-click");
+    let entry = crate::widget_render::topmost_overlay().expect("stock matrix menu overlay");
+    assert_eq!(entry.kind, crate::widget_render::OverlayKind::Modal);
+
+    click_menu_item(&mut editor, "Clear");
+
+    assert_eq!(
+        eval_lisp(&mut editor, "calls"),
+        "2",
+        "one on-cell-change per non-default cell"
+    );
+    assert_eq!(
+        eval_lisp(&mut editor, "last"),
+        "(1 1 0)"
+    );
+    let layout = editor.runtime.current_layout.clone().expect("panel layout");
+    assert!(find_menu_item(&layout, "Clear").is_none(), "selecting Clear closes the menu");
+}
+
+#[test]
+fn matrix_right_click_clear_sends_one_full_matrix_on_change() {
+    let _overlay_guard = OverlayClearGuard;
+    let mut editor = context_menu_two_tile_editor_for(&matrix_menu_program(FULL_CHANGE));
+    right_click_at(&mut editor, 5.0, 2.0);
+    click_menu_item(&mut editor, "Clear");
+
+    assert_eq!(eval_lisp(&mut editor, "calls"), "1");
+    assert_eq!(
+        eval_lisp(&mut editor, "last"),
+        "((0 0) (0 0))"
+    );
+    let layout = editor.runtime.current_layout.clone().expect("panel layout");
+    assert!(find_menu_item(&layout, "Clear").is_none(), "selecting Clear closes the menu");
+}
+
+#[test]
+fn matrix_stock_menu_escape_closes_without_clearing() {
+    let _overlay_guard = OverlayClearGuard;
+    let mut editor = context_menu_two_tile_editor_for(&matrix_menu_program(CELL_CHANGE));
+    right_click_at(&mut editor, 5.0, 2.0);
+    assert!(editor.modal_is_open());
+    editor.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    let _ = crate::ui::frame::build_tiled_render_frame_borderless(&mut editor, 60, 20);
+
+    assert_eq!(eval_lisp(&mut editor, "calls"), "0");
+    let layout = editor.runtime.current_layout.clone().expect("panel layout");
+    assert!(find_menu_item(&layout, "Clear").is_none());
 }
 
 #[test]

@@ -3,7 +3,7 @@ pub(crate) mod audio_settings;
 mod customize;
 mod dispatch;
 mod drum_rack_v2;
-pub(crate) use drum_rack_v2::evaluate_rack_sequencer_source;
+pub(crate) use drum_rack_v2::{apply_rack_pad_map_command, evaluate_rack_sequencer_source};
 mod effects;
 pub(crate) mod export;
 mod file_menu;
@@ -17,6 +17,7 @@ mod misc;
 pub(crate) mod packages;
 mod project;
 mod rack;
+pub(crate) mod rack_grooves;
 pub(crate) mod resample;
 mod routing;
 mod sample_import;
@@ -33,6 +34,7 @@ mod tracks;
 pub(crate) use dispatch::dispatch_custom_host_command;
 pub(crate) use routing::apply_bus_routing_command;
 pub(crate) use rack::initialize_loaded_rack_view;
+pub(crate) use rack_grooves::apply_rack_groove_command;
 #[cfg(test)]
 pub(crate) use learn::open_patch_learn_buffer;
 #[cfg(test)]
@@ -373,7 +375,7 @@ pub(crate) fn finish_added_instrument_track(idx: usize, ctx: AddTrackInstrumentC
     rt.set_reactive("SEQ", "steps", build_steps_value(state, selected));
     sync_step_param_lists(rt, state, selected);
     sync_track_mixer_state(rt, app, state);
-    sync_groups_bindings(rt, &app.groups);
+    sync_groups_bindings(rt, &app.groups, &app.grooves);
     sync_track_peak_fields(rt, cached_track_peak_levels);
     rt.set_reactive(
         "SEQ",
@@ -758,12 +760,11 @@ mod tests {
             rack: Some(sequencer::project::ProjectRackConfig {
                 clips: Vec::new(),
                 next_clip_id: 0,
+                groove: Default::default(),
                 sequencers: Vec::new(),
-                pads: vec![sequencer::project::ProjectRackPad {
-                    pad_note: 36,
-                    member: 0,
-                }],
+                pads: vec![sequencer::project::ProjectRackPad::new(36, 0)],
                 choke_groups: vec![None],
+                clip_grooves: Vec::new(),
             }),
             rack_members: Vec::new(),
         }

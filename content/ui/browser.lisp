@@ -1031,7 +1031,7 @@
 (def visible-sounds ()
   (if (= search-filter "") SEQ.sound-presets
     (filter (lambda (item)
-      (string-contains? (lowercase (get item :label)) (lowercase search-filter)))
+      (string-contains? (string-downcase (get item :label)) (string-downcase search-filter)))
       SEQ.sound-presets)))
 
 (def load-sound (item)
@@ -1067,7 +1067,7 @@
 (def visible-kits ()
   (if (= search-filter "") SEQ.kit-presets
     (filter (lambda (item)
-      (string-contains? (lowercase (get item :label)) (lowercase search-filter)))
+      (string-contains? (string-downcase (get item :label)) (string-downcase search-filter)))
       SEQ.kit-presets)))
 
 (def load-kit (item)

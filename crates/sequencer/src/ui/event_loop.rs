@@ -1032,7 +1032,7 @@ pub(crate) fn run_event_loop(
                                     rt.clear_subtree_effects_for_named_target("*sequencer*");
                                 }
                                 sync_bus_mixer_state(rt, &app);
-                                sync_groups_bindings(rt, &app.groups);
+                                sync_groups_bindings(rt, &app.groups, &app.grooves);
                                 rt.set_reactive(
                                     "SEQ",
                                     "track-names",
@@ -1638,7 +1638,7 @@ pub(crate) fn run_event_loop(
                         // Rebuild bus reactive (incl. SEQ.bus-ids) and groups so the
                         // loaded group headers can resolve their backing bus index.
                         sync_bus_mixer_state(rt, &app);
-                        sync_groups_bindings(rt, &app.groups);
+                        sync_groups_bindings(rt, &app.groups, &app.grooves);
                         rt.set_reactive("SEQ", "playing", Value::Bool(playing));
                         rt.set_reactive("SEQ", "bpm", Value::Number(bpm as f64));
                         rt.set_reactive(

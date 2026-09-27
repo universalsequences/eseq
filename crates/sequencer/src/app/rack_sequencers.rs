@@ -230,7 +230,7 @@ impl App {
         Ok(group.members.clone())
     }
 
-    fn rack_config_mut(&mut self, group_id: u64) -> Result<&mut crate::project::ProjectRackConfig, String> {
+    pub(super) fn rack_config_mut(&mut self, group_id: u64) -> Result<&mut crate::project::ProjectRackConfig, String> {
         self.groups
             .iter_mut()
             .find(|group| group.id == group_id)

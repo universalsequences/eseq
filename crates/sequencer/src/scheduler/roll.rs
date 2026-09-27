@@ -352,6 +352,7 @@ pub(super) fn schedule_roll_hits<const QUEUE_CAP: usize>(
     // rendered is simply missed: the press waits for the next boundary (F1) —
     // emitting it would fire immediately and land audibly behind the grid,
     // which reads as a one-off swung hit.
+    let groove_floor = clock.groove_floor(rendered);
     let pressed = std::mem::take(&mut roll.newly_pressed);
     if !pressed.is_empty() {
         let line_beats = ((chunk_start_beats + EPS) / grid_beats).floor() * grid_beats;
@@ -388,6 +389,7 @@ pub(super) fn schedule_roll_hits<const QUEUE_CAP: usize>(
                     line_beats,
                     sample_time,
                     samples_per_quarter,
+                    groove_floor,
                     pattern_epoch,
                     global_transpose,
                 ) {
@@ -423,6 +425,7 @@ pub(super) fn schedule_roll_hits<const QUEUE_CAP: usize>(
                 boundary_beats,
                 sample_time,
                 samples_per_quarter,
+                groove_floor,
                 pattern_epoch,
                 global_transpose,
             ) {
@@ -450,9 +453,26 @@ fn emit_roll_hit<const QUEUE_CAP: usize>(
     boundary_beats: f64,
     sample_time: u64,
     samples_per_quarter: f64,
+    groove_floor: crate::groove::GrooveFloor,
     pattern_epoch: u64,
     global_transpose: f32,
 ) -> bool {
+    // Play the feel, record it unwound (eseq-767.10, rack groove spec
+    // §Sites 5): the audible enqueue gets the member's groove, or the
+    // track's swing, re-read from the snapshot each hit, so a knob turned
+    // mid-hold moves subsequent hits. `None` is an early grooved hit that
+    // already sounded before a mid-play resync: neither play nor record it
+    // again.
+    let Some(swung_sample_time) = clock.roll_swung_sample_time(
+        snapshot,
+        track,
+        boundary_beats,
+        sample_time,
+        samples_per_quarter,
+        groove_floor,
+    ) else {
+        return true;
+    };
     // Track defaults (F4): default step params; step and resolved transpose
     // stay at the shared default so `resolved_chord_transpose` passes the
     // notes through as-is.
@@ -468,9 +488,13 @@ fn emit_roll_hit<const QUEUE_CAP: usize>(
         retrig: StepParam::Retrig.default_value(),
         retrig_rate: StepParam::RetrigRate.default_value(),
     };
+    // The record feedback stores the position unwound through the feel
+    // playback applies to the step it lands on, so playback reproduces the
+    // heard hit instead of adding the feel a second time.
     let (step, delay, step_dur_beats) = clock.roll_record_position(
+        snapshot,
         track,
-        boundary_beats,
+        clock.roll_heard_beats(snapshot, track, boundary_beats),
         snapshot.tracks[track].params.num_steps,
     );
     // Live step-param printing (bead eseq-jc9): a latched velocity/duration
@@ -499,6 +523,11 @@ fn emit_roll_hit<const QUEUE_CAP: usize>(
         }
     }
     let chord = chord_data_from_parts(notes, &[], &[], resolved.duration, resolved.transpose);
+    // The groove's accent reaches the audible hit only; the record feedback
+    // keeps the straight velocity, which playback accents again.
+    let recorded_velocity = resolved.velocity;
+    resolved.velocity =
+        super::clock::grooved_velocity(snapshot, Some(track), resolved.velocity, boundary_beats);
     let event = StepEvent {
         track,
         samples_per_step: (grid_beats * samples_per_quarter) as f32,
@@ -518,17 +547,6 @@ fn emit_roll_hit<const QUEUE_CAP: usize>(
             instrument_fingerprint: 0,
         },
     };
-    // Play swung, record straight (eseq-767.10): the audible enqueue gets the
-    // track's swing offset — re-read from the snapshot each hit, so turning
-    // the knob mid-hold moves subsequent hits — while the record feedback
-    // below stays keyed to the straight boundary geometry.
-    let swung_sample_time = clock.roll_swung_sample_time(
-        snapshot,
-        track,
-        boundary_beats,
-        sample_time,
-        samples_per_quarter,
-    );
     if !enqueue_step_event(
         queue,
         snapshot,
@@ -549,7 +567,7 @@ fn emit_roll_hit<const QUEUE_CAP: usize>(
             step,
             delay,
             transpose: *transpose,
-            velocity: resolved.velocity,
+            velocity: recorded_velocity,
             duration_steps,
             beat: boundary_beats,
         });

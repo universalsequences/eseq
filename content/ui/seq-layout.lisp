@@ -11,6 +11,9 @@
 (import eseq.seq-step-tabs)
 
 (import eseq.effects.param-controls :as pc)
+;; The *groove* buffer that shares the sidebar while a drum rack is selected.
+;; It never imports this module back (it re-lays out late-bound).
+(import eseq.rack-groove-buffer :as groove)
 
 (export buffer-radius
         transport-height
@@ -104,12 +107,30 @@
     (lambda () (eseq.seq-panels/seq-hide-fx-panel))
     min-width max-width min-height max-height))
 
+(defcustom groove-buffer-ratio 0.3
+  :type :number :min 0.15 :max 0.6 :step 0.01
+  :doc "Share of the sidebar's height the *groove* buffer takes while a drum rack is selected.")
+
+(def groove-panel-layout-spec ()
+  (list :buf "*groove*"
+    :hide-status true
+    :border-radius (eseq.seq-core-state/radius buffer-radius)
+    :border-width border-width
+    :background-color :buffer-bg
+    :min-height 8))
+
+;; A selected drum rack splits the sidebar Ableton-style: the browser on top,
+;; the rack's groove below (ui/rack-groove-buffer.lisp).
 (def samples-sidebar-layout-spec ()
   (if (pc/param-macro-mapping-active?)
     (collapsible-panel-layout-spec "*macro-mappings*"
       (lambda () (eseq.macro-state/clear-mapping-arm))
       46 64 nil nil)
-    (samples-panel-layout-spec 34 42 nil nil)))
+    (if (groove/showing?)
+      (list :rows :gap 1 :remember "sidebar-groove-split"
+        (- 1.0 groove-buffer-ratio) (samples-panel-layout-spec 34 42 nil nil)
+        groove-buffer-ratio (groove-panel-layout-spec))
+      (samples-panel-layout-spec 34 42 nil nil))))
 
 (defcustom samples-sidebar-ratio 0.2
   :type :number :min 0.1 :max 0.5 :step 0.01

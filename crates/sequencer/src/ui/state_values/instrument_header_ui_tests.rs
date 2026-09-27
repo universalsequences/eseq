@@ -42,7 +42,7 @@ fn polyphony_header_follows_voice_mode_and_toggles_the_selected_owner() {
                         if name == "set-rack-slot-max-polyphony"
                             && *payload["track"].borrow() == Value::Number(2.0)
                             && *payload["slot"].borrow() == Value::Number(3.0)
-                            && *payload["value"].borrow() == Value::Number(if poly { 1.0 } else { 4.0 }))));
+                            && *payload["value"].borrow() == Value::Number(if poly { 1.0 } else { 6.0 }))));
             } else {
                 assert_eq!(*writes.borrow(), vec![vec![Value::Keyword("poly".into()),
                     Value::Number(if poly { 0.0 } else { 1.0 })]]);
@@ -50,6 +50,44 @@ fn polyphony_header_follows_voice_mode_and_toggles_the_selected_owner() {
                     eseqlisp::host::HostCommand::Custom { name, .. } if name == "set-rack-slot-max-polyphony")));
             }
         }
+    }
+}
+
+#[test]
+fn polyphony_header_right_click_applies_the_choice_to_all_scenes() {
+    let mut editor = full_grid_editor_for_scroll_tests();
+    editor.runtime_mut().eval_str(r#"
+        (effect-buffer "*polyphony-menu-test*"
+          (eseq.effects.instrument-panel/instrument-polyphony-control))
+    "#).unwrap();
+    editor.refresh_runtime_side_effects();
+    let buffer = editor.buffers.iter().find(|b| b.name == "*polyphony-menu-test*").unwrap().id;
+    editor.set_active_buffer(buffer);
+    editor.set_layout_viewport(80, 20);
+    for rack in [false, true] {
+        editor.runtime_mut().set_reactive("SEQ", "tp-is-rack", Value::Bool(rack));
+        editor.runtime_mut().set_reactive("SEQ", "current-track", Value::Number(2.0));
+        editor.runtime_mut().set_reactive("SEQ", "tp-rack-slot-idx", Value::Number(3.0));
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let layout = editor.widget_layout().unwrap();
+        let button = find_layout_node_by_debug_name(&layout, "instrument-polyphony").unwrap();
+        editor.runtime_mut().invoke(button.props["on-right-click"].clone(),
+            vec![map_value([("col", Value::Number(1.0)), ("row", Value::Number(1.0))])]).unwrap();
+        // The target is captured at open time, not at apply time.
+        editor.runtime_mut().set_reactive("SEQ", "current-track", Value::Number(5.0));
+        editor.drain_host_commands();
+        editor.runtime_mut()
+            .eval_str("(eseq.effects.track-panels/apply-polyphony-to-all-scenes)")
+            .unwrap();
+        let commands = editor.drain_host_commands();
+        assert!(commands.iter().any(|cmd| matches!(cmd,
+            eseqlisp::host::HostCommand::Custom { name, payload: Value::Map(payload) }
+                if name == "apply-polyphony-to-all-scenes"
+                    && *payload["track"].borrow() == Value::Number(2.0)
+                    && payload.get("rack-slot").map(|v| v.borrow().clone())
+                        == rack.then_some(Value::Number(3.0)))),
+            "rack={rack}: {commands:?}");
     }
 }
 

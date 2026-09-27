@@ -2583,6 +2583,68 @@ mod live_keyboard_tests {
         assert_eq!(held.lock().unwrap()[0].targets[0].position.step, 1);
     }
 
+    /// eseq-k0v8 / eseq-groove.6: a stamp is the HEARD beat, which already
+    /// contains the track's feel. The recorded position is the straight
+    /// phase playback moves back onto it: swing on a plain track, the rack
+    /// groove pocket on a grooved member.
+    #[test]
+    fn live_trigger_stamps_unwind_track_swing_and_rack_groove() {
+        let state = Arc::new(SequencerState::new(2, vec![]));
+        state.pattern.track_params[0].set_swing(75.0);
+        state.pattern.track_params[0]
+            .set_swing_resolution(sequencer::sequencer::SwingResolution::Sixteenth);
+        state.set_track_grooves(vec![
+            None,
+            Some(sequencer::groove::TrackGrooveSnapshot {
+                period_beats: 0.5,
+                resolution_beats: 0.25,
+                row: Arc::new(sequencer::groove::GrooveRow {
+                    slots: [0.0_f32, -0.2]
+                        .iter()
+                        .map(|&offset| sequencer::groove::GrooveSlot {
+                            offset,
+                            ..Default::default()
+                        })
+                        .collect(),
+                }),
+                timing_amount: 1.0,
+                velocity_amount: 0.0,
+                random_amount: 0.0,
+                pad_note: 36,
+            }),
+        ]);
+        let target = |track| LiveNoteTarget {
+            track,
+            transpose: 5.0,
+            position: RecordPosition {
+                step: 9,
+                phase: 0.9,
+            },
+            stamped: false,
+        };
+        let held = Arc::new(Mutex::new(vec![HeldKeyboardNote {
+            generation: 0,
+            source: LiveNoteSource::Key('a'),
+            sequence_roll_code: None,
+            transpose: 5.0,
+            velocity: 1.0,
+            press_time: Instant::now(),
+            targets: vec![target(0), target(1)],
+        }]));
+        // Track 0: heard on the swung 16th (0.25 + 0.125) plus 0.1 of a step.
+        state.push_live_trigger_stamp(0, 5.0, 0.375 + 0.025);
+        // Track 1: step 3's slot is early by 0.2 slot; heard on that pocket.
+        state.push_live_trigger_stamp(1, 5.0, 0.75 - 0.05);
+        apply_live_trigger_stamps(&state, &held);
+        let held = held.lock().unwrap();
+        let swung = held[0].targets[0].position;
+        assert_eq!(swung.step, 1);
+        assert!((swung.phase - 0.1).abs() < 1e-4, "phase {}", swung.phase);
+        let grooved = held[0].targets[1].position;
+        assert_eq!(grooved.step, 3);
+        assert!(grooved.phase.abs() < 1e-4, "phase {}", grooved.phase);
+    }
+
     #[test]
     fn roll_rate_keys_are_active_without_any_armed_track() {
         let state = SequencerState::new(1, vec![]);
@@ -2809,18 +2871,14 @@ mod live_keyboard_tests {
             rack: Some(sequencer::project::ProjectRackConfig {
                 clips: Vec::new(),
                 next_clip_id: 0,
+                groove: Default::default(),
                 sequencers: Vec::new(),
                 pads: vec![
-                    sequencer::project::ProjectRackPad {
-                        pad_note: 36,
-                        member: 0,
-                    },
-                    sequencer::project::ProjectRackPad {
-                        pad_note: 38,
-                        member: 1,
-                    },
+                    sequencer::project::ProjectRackPad::new(36, 0),
+                    sequencer::project::ProjectRackPad::new(38, 1),
                 ],
                 choke_groups: vec![None, None],
+                clip_grooves: Vec::new(),
             }),
             rack_members: Vec::new(),
         }

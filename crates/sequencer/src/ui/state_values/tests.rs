@@ -1104,6 +1104,7 @@ mod solo_binding_tests;
             "ui/themes.lisp",
             "ui/materials.lisp",
             "ui/browser.lisp",
+            "ui/rack-groove-buffer.lisp",
             "ui/builtin-effects.lisp",
             "ui/effects/builtin/filter-core.lisp",
             "ui/effects/builtin/eq8.lisp",
@@ -55355,18 +55356,14 @@ mod solo_binding_tests;
             rack: Some(sequencer::project::ProjectRackConfig {
                 clips: Vec::new(),
                 next_clip_id: 0,
+                groove: Default::default(),
                 sequencers: Vec::new(),
                 pads: vec![
-                    sequencer::project::ProjectRackPad {
-                        pad_note: 36,
-                        member: 0,
-                    },
-                    sequencer::project::ProjectRackPad {
-                        pad_note: 38,
-                        member: 1,
-                    },
+                    sequencer::project::ProjectRackPad::new(36, 0),
+                    sequencer::project::ProjectRackPad::new(38, 1),
                 ],
                 choke_groups: vec![None, Some(1)],
+                clip_grooves: Vec::new(),
             }),
             rack_members: Vec::new(),
         }
@@ -55603,6 +55600,73 @@ mod solo_binding_tests;
                 "pad field {field} should resolve"
             );
         }
+    }
+
+    /// Pad roles (eseq-groove.10): each pad publishes its explicit role key
+    /// ("" = Standard), the effective role's tag and name, and the standard
+    /// layout's own name for the menu's "Standard (...)" entry.
+    #[test]
+    fn metal_seq_groups_value_carries_pad_roles() {
+        use sequencer::project::PadRole;
+        let mut group = rack_group_fixture(false);
+        {
+            let rack = group.rack.as_mut().unwrap();
+            let c1 = sequencer::sequencer::DRUM_RACK_FIRST_PAD_NOTE;
+            rack.pads[0].pad_note = c1 + 2; // D1, Standard: the layout's snare
+            rack.pads[1].pad_note = c1 + 5; // F1, the layout's low tom, tagged Clap
+            rack.pads[1].role = Some(PadRole::Clap);
+        }
+        let Value::List(items) = build_groups_value(&[group]) else {
+            panic!("groups value should be a list");
+        };
+        let Some(Value::Map(group)) = items.first().map(|cell| cell.borrow().clone()) else {
+            panic!("one group map");
+        };
+        let Some(Value::List(pads)) = group.get("pads").map(|cell| cell.borrow().clone()) else {
+            panic!("rack pads");
+        };
+        let field = |pad: usize, name: &str| {
+            let Value::Map(pad) = pads[pad].borrow().clone() else { panic!("pad map") };
+            pad.get(name).map(|cell| cell.borrow().clone())
+        };
+        let string = |value: &str| Some(Value::String(value.to_string()));
+        assert_eq!(field(0, "role"), string(""));
+        assert_eq!(field(0, "role-tag"), string("SD"));
+        assert_eq!(field(0, "role-label"), string("Snare"));
+        assert_eq!(field(0, "standard-role-label"), string("Snare"));
+        assert_eq!(field(1, "role"), string("clap"));
+        assert_eq!(field(1, "role-tag"), string("CP"));
+        assert_eq!(field(1, "role-label"), string("Clap"));
+        assert_eq!(field(1, "standard-role-label"), string("Low Tom"));
+    }
+
+    /// The pad menu's role list (drum-rack-v2.lisp) mirrors `PadRole::ALL`:
+    /// same keys, labels and order.
+    #[test]
+    fn metal_seq_pad_role_options_match_pad_role_all() {
+        let mut editor = sequencer_perf_editor(2, 16);
+        let options = editor
+            .runtime_mut()
+            .eval_str(
+                "(map (lambda (option) (str (get option :key) \"=\" (get option :label)))
+                   (eseq.drum-rack-v2/pad-role-options))",
+            )
+            .expect("role options evaluate");
+        let Some(Value::List(options)) = options else {
+            panic!("a list of options: {options:?}");
+        };
+        let lisp = options
+            .iter()
+            .map(|cell| match &*cell.borrow() {
+                Value::String(text) => text.to_string(),
+                other => panic!("string option: {other:?}"),
+            })
+            .collect::<Vec<_>>();
+        let rust = sequencer::project::PadRole::ALL
+            .iter()
+            .map(|role| format!("{}={}", role.key(), role.label()))
+            .collect::<Vec<_>>();
+        assert_eq!(lisp, rust);
     }
 
     /// Slice 5 of docs/drum-rack-v2-spec.md: the mixer draws a nested rack
@@ -56858,6 +56922,122 @@ mod solo_binding_tests;
                 .cloned(),
             highlight,
             "the page the grid left is no longer highlighted"
+        );
+    }
+
+    /// Pad roles (eseq-groove.10): the rack *fx* panel draws each pad's role
+    /// tag, and a right-click on a pad opens the pad menu whose Role ▸
+    /// entries send `set-rack-pad-role` ("standard" clears).
+    #[test]
+    fn metal_seq_rack_pad_role_tag_and_menu() {
+        std::thread::Builder::new()
+            .stack_size(sequencer::REQUIRED_THREAD_STACK_SIZE)
+            .spawn(metal_seq_rack_pad_role_tag_and_menu_impl)
+            .expect("spawn test thread")
+            .join()
+            .expect("test thread panicked");
+    }
+
+    fn metal_seq_rack_pad_role_tag_and_menu_impl() {
+        fn find_label<'a>(node: &'a eseqlisp::layout::LayoutNode, text: &str) -> Option<&'a eseqlisp::layout::LayoutNode> {
+            if node.widget_type == "label"
+                && matches!(node.props.get("text"), Some(Value::String(t)) if t.as_str() == text)
+            {
+                return Some(node);
+            }
+            node.children.iter().find_map(|child| find_label(child, text))
+        }
+        let mut editor = rack_fx_panel_editor();
+        // Pad 38 tagged Clap; pad 36 is Standard with no layout role.
+        let mut group = rack_group_fixture(false);
+        group.rack.as_mut().unwrap().pads[1].role = Some(sequencer::project::PadRole::Clap);
+        apply_group_bindings(&mut editor, group);
+        editor
+            .runtime_mut()
+            .eval_str("(set! eseq.seq-core-state/selected-bus 2)")
+            .expect("select the rack");
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let fx_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("*fx* buffer")
+            .id;
+        editor.set_active_buffer(fx_id);
+        editor.set_layout_viewport(150, 24);
+        let layout = editor.widget_layout().expect("rack fx panel layout");
+        let grid = find_layout_node_by_stable_key_suffix(&layout, "/rack-pad-grid-7")
+            .expect("rack pad grid");
+        let clap_cell = find_layout_node_by_stable_key_suffix(grid, "/rack-pad-cell-7-14")
+            .expect("grid cell for note 38");
+        let tag = find_label(clap_cell, "CP").expect("the clap pad draws its role tag");
+        assert_finite_nonzero_rect(tag, "role tag");
+        assert!(clap_cell.props.contains_key("on-right-click"), "pads open the pad menu");
+        let kick_cell = find_layout_node_by_stable_key_suffix(grid, "/rack-pad-cell-7-12")
+            .expect("grid cell for note 36");
+        assert!(
+            find_label(kick_cell, "CP").is_none() && find_label(kick_cell, "BD").is_none(),
+            "a pad off the standard layout with no role draws no tag"
+        );
+
+        // Open the menu on the clap pad: the Role entry is mounted in *fx*.
+        editor
+            .runtime_mut()
+            .eval_str(
+                "(eseq.sequencer/open-pad-menu (dict :col 20 :row 5) 0
+                   (nth (eseq.drum-rack-v2/pads 0) 1))",
+            )
+            .expect("open the pad menu");
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_visible_layouts_for_buffer_named("*fx*");
+        let layout = editor.widget_layout().expect("layout with the pad menu");
+        assert!(
+            find_layout_node_by_stable_key_suffix(&layout, "/rack-pad-menu-role").is_some(),
+            "the pad menu offers Role"
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str(
+                    "(eseq.drum-rack-v2/pad-role-standard-label (nth (eseq.drum-rack-v2/pads 0) 1))"
+                )
+                .unwrap(),
+            Some(Value::String("Standard (none)".to_string()))
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(eseq.drum-rack-v2/pad-role-standard-label (dict :standard-role-label \"Kick\"))")
+                .unwrap(),
+            Some(Value::String("Standard (Kick)".to_string()))
+        );
+
+        for (key, expected) in [("snare", "snare"), ("standard", "standard")] {
+            let _ = editor.drain_host_commands();
+            editor
+                .runtime_mut()
+                .eval_str(&format!(
+                    "(eseq.sequencer/choose-pad-role 0 (nth (eseq.drum-rack-v2/pads 0) 1) \"{key}\")"
+                ))
+                .expect("choose a role");
+            let commands = editor.drain_host_commands();
+            let [eseqlisp::host::HostCommand::Custom { name, payload }] = commands.as_slice() else {
+                panic!("one host command: {commands:?}");
+            };
+            assert_eq!(name, "set-rack-pad-role");
+            let Value::Map(payload) = payload else { panic!("payload map") };
+            let get = |field: &str| payload.get(field).map(|cell| cell.borrow().clone());
+            assert_eq!(get("group-id"), Some(Value::Number(7.0)));
+            assert_eq!(get("pad-note"), Some(Value::Number(38.0)));
+            assert_eq!(get("role"), Some(Value::String(expected.to_string())));
+        }
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_visible_layouts_for_buffer_named("*fx*");
+        let layout = editor.widget_layout().expect("layout after choosing");
+        assert!(
+            find_layout_node_by_stable_key_suffix(&layout, "/rack-pad-menu-role").is_none(),
+            "choosing a role closes the menu"
         );
     }
 

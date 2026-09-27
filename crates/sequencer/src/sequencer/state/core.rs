@@ -735,6 +735,10 @@ pub struct SequencerState {
     /// Drum-rack member lists mirrored from the app's track groups, captured
     /// into every scheduler snapshot for rack-owned graph route resolution.
     pub(super) rack_memberships: Mutex<Vec<crate::graph::RackMembership>>,
+    /// Pre-resolved rack groove per track (docs/rack-groove-spec.md,
+    /// "Scheduler snapshot"), mirrored from the app's rack configs by the same
+    /// group-topology funnel as `rack_memberships`.
+    pub(super) rack_groove_variants: Mutex<Arc<crate::groove::RackGrooveVariants>>,
     pub(super) published_sequencers_version: AtomicU64,
     /// Scene-slot declarations (`defscene` name → default) shared across VMs.
     /// Each runtime keeps its own declaration table for the slots it evaluated

@@ -580,6 +580,12 @@ impl AppPaths {
     pub fn kits_dir(&self) -> PathBuf {
         self.factory_root().join("kits")
     }
+    /// Read-only factory `.groove` files (docs/rack-groove-spec.md §Three
+    /// tiers); merged with `user_grooves_dir()` by
+    /// `groove::library::list_groove_library`.
+    pub fn grooves_dir(&self) -> PathBuf {
+        self.factory_root().join("grooves")
+    }
     /// Read-only factory Sounds shipped in the bundle; merged with the
     /// user's `sounds_dir()` by `project::list_sound_presets`.
     pub fn factory_sounds_dir(&self) -> PathBuf {
@@ -657,6 +663,10 @@ impl AppPaths {
     }
     pub fn user_kits_dir(&self) -> PathBuf {
         self.user_data_root().join("kits")
+    }
+    /// The user's groove library ("Save to Library").
+    pub fn user_grooves_dir(&self) -> PathBuf {
+        self.user_data_root().join("grooves")
     }
 
     /// Factory effect and instrument trees are immutable. Authoring paths are
