@@ -76,6 +76,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn hidden_drag_restores_position_only_on_warp_capable_backends() {
+        let anchor = PhysicalPosition::new(120.0, 80.0);
+        for grabbed in [true, false] {
+            let mut drag = HiddenDrag::new(anchor, grabbed);
+            drag.accumulate((5000.0, -3000.0));
+            assert_eq!(hidden_drag_restore_position(Some(&drag), true), None);
+            assert_eq!(hidden_drag_restore_position(Some(&drag), false), Some(anchor));
+        }
+        assert_eq!(hidden_drag_restore_position(None, true), None);
+        assert_eq!(hidden_drag_restore_position(None, false), None);
+    }
+
+    #[test]
     fn discrete_wheel_detent_advances_platform_line_count() {
         assert_eq!(
             scroll_delta_pixels(MouseScrollDelta::LineDelta(-1.0, 1.0), 24.0),
@@ -154,8 +167,8 @@ mod tests {
 /// of the screen keeps receiving downward travel.
 #[derive(Debug, Clone, Copy)]
 pub struct HiddenDrag {
-    /// Physical-pixel position of the press. The cursor is warped back here
-    /// when the drag ends.
+    /// Physical-pixel position of the press. The cursor is restored here when
+    /// the drag ends; Wayland's pointer lock keeps it here without a warp.
     pub anchor: winit::dpi::PhysicalPosition<f64>,
     /// Unbounded virtual pointer position in physical pixels.
     pub virtual_pos: (f64, f64),
@@ -207,18 +220,41 @@ pub fn grab_pointer_for_hidden_drag(window: &winit::window::Window) -> bool {
     grabbed
 }
 
-/// Release the pointer grab, warp the cursor back to the press point and make
-/// it visible again. Safe to call when no drag is active.
+/// Wayland locks the actual pointer in place while reporting relative motion,
+/// so unlocking already leaves it at the press location. It does not support
+/// arbitrary warps (including when a grab failed or only confinement worked).
+/// Its locked-position hint is not a warp either: it is double-buffered surface
+/// state that must be committed before unlocking. No hint is needed here since
+/// we never move the real pointer during a locked drag.
+fn hidden_drag_restore_position(
+    drag: Option<&HiddenDrag>,
+    is_wayland: bool,
+) -> Option<winit::dpi::PhysicalPosition<f64>> {
+    if is_wayland {
+        None
+    } else {
+        drag.map(|drag| drag.anchor)
+    }
+}
+
+/// Release the pointer grab, restore its position where warping is supported,
+/// and make it visible again. Safe to call when no drag is active.
 pub fn release_pointer_after_hidden_drag(window: &winit::window::Window, drag: Option<HiddenDrag>) {
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
     use winit::window::CursorGrabMode;
+    // Detect the actual window backend, not the OS or environment: Linux can
+    // run either native Wayland or X11/XWayland.
+    let is_wayland = window.window_handle()
+        .is_ok_and(|handle| matches!(handle.as_raw(), RawWindowHandle::Wayland(_)));
+    let restore_position = hidden_drag_restore_position(drag.as_ref(), is_wayland);
     if let Some(drag) = drag.as_ref()
         && drag.grabbed
         && let Err(err) = window.set_cursor_grab(CursorGrabMode::None)
     {
         eprintln!("hidden drag: releasing cursor grab failed: {err}");
     }
-    if let Some(drag) = drag.as_ref()
-        && let Err(err) = window.set_cursor_position(drag.anchor)
+    if let Some(position) = restore_position
+        && let Err(err) = window.set_cursor_position(position)
     {
         eprintln!("hidden drag: warping cursor back to the press point failed: {err}");
     }

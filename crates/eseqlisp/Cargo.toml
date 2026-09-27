@@ -65,6 +65,7 @@ objc2-core-graphics = { version = "0.3", features = [
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 fontdb = "0.23"
 fontdue = "0.9"
+ttf-parser = "0.25"
 
 # Deterministic WGSL pipeline captures; see crates/eseqlisp/src/shader_capture.rs.
 [[bin]]

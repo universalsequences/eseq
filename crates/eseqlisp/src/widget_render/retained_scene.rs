@@ -144,6 +144,13 @@ pub struct RetainedScene {
     state_owners: HashMap<u64, Vec<usize>>,
     state_cursor: u64,
     resource_nodes: std::collections::BTreeSet<usize>,
+    /// Nodes whose painter owns an active overlay entry. They emit overlay
+    /// primitives as a paint side effect, drained every frame, so they repaint
+    /// every frame while open.
+    overlay_owners: HashSet<usize>,
+    /// Overlay owners plus their ancestors: never reused or culled, so the
+    /// owner is always reached. Everything else keeps its retained paint.
+    overlay_path: HashSet<usize>,
     previous_runs: Vec<PreparedRun>,
     layout_revision: u64,
     content_revision: u64,
@@ -235,8 +242,20 @@ impl RetainedScene {
         let changed_resources: Vec<_> = self.resource_nodes.iter().copied()
             .filter(|&index| self.nodes[index].resources.changed()).collect();
         for index in changed_resources { self.mark_visit(index); }
-        self.visit(layout, 0, viewport, visible, [0.0, 0.0],
-            any_overlay_active(), Some(0), &mut scene);
+        self.overlay_owners.clear();
+        self.overlay_path.clear();
+        for id in overlay_owner_ids() {
+            if let Some(&index) = self.by_id.get(&id) {
+                self.overlay_owners.insert(index);
+                let mut cursor = Some(index);
+                while let Some(index) = cursor {
+                    self.overlay_path.insert(index);
+                    self.nodes[index].needs_visit = true;
+                    cursor = self.nodes[index].parent;
+                }
+            }
+        }
+        self.visit(layout, 0, viewport, visible, [0.0, 0.0], Some(0), &mut scene);
         self.previous_runs.clone_from(&scene.runs);
         scene.overlay = drain_overlay_primitives();
         self.profile.record(layout.widget_id, started, &scene);
@@ -335,7 +354,7 @@ impl RetainedScene {
 
     fn visit(
         &mut self, layout: &LayoutNode, index: usize, viewport: WidgetViewport,
-        visible: Rect, translation: [f32; 2], overlays_active: bool,
+        visible: Rect, translation: [f32; 2],
         previous_start: Option<usize>, scene: &mut PreparedScene,
     ) {
         let presentation = PresentationContext {
@@ -344,8 +363,10 @@ impl RetainedScene {
             focus: viewport.focused_widget_id, focused_branch: viewport.focused_branch,
             inherited_hover: viewport.inherited_hover,
         };
+        let on_overlay_path = self.overlay_path.contains(&index);
+        let overlay_owner = self.overlay_owners.contains(&index);
         let node = &self.nodes[index];
-        if !overlays_active && !node.has_overlay && !node.needs_visit
+        if !on_overlay_path && !node.has_overlay && !node.needs_visit
             && node.presentation == Some(presentation)
             && let Some(previous_start) = previous_start
         {
@@ -361,7 +382,7 @@ impl RetainedScene {
         self.nodes[index].needs_visit = false;
         self.nodes[index].presentation = Some(presentation);
         let node = &self.nodes[index];
-        if !overlays_active && !node.has_overlay
+        if !on_overlay_path && !node.has_overlay
             && ((finite_bounds(visible) && (visible.width == 0.0 || visible.height == 0.0))
                 || node.bounds.is_some_and(|bounds| !intersects(bounds, visible)))
         {
@@ -396,7 +417,7 @@ impl RetainedScene {
         let inputs_changed = node.dirty && !unchanged_literal
             && (inputs.is_none() || node.inputs.as_ref() != inputs.as_ref());
         if inputs_changed || node.animation_dirty || node.context != Some(context)
-            || overlays_active || node.scroll_state != scroll_state || node.resources.changed()
+            || overlay_owner || node.scroll_state != scroll_state || node.resources.changed()
         {
             let reasons = &mut scene.paint_reasons;
             reasons.first_paint += usize::from(node.context.is_none());
@@ -407,7 +428,7 @@ impl RetainedScene {
             reasons.focus_hover += usize::from(node.context.is_some_and(|old|
                 old.focused != context.focused || old.focused_branch != context.focused_branch
                     || old.inherited_hover != context.inherited_hover));
-            reasons.overlay += usize::from(overlays_active);
+            reasons.overlay += usize::from(overlay_owner);
             reasons.scroll += usize::from(node.scroll_state != scroll_state);
             reasons.resource += usize::from(node.resources.changed());
             if !node.dirty || unchanged_literal { inputs = PaintInputs::capture(layout); }
@@ -474,7 +495,7 @@ impl RetainedScene {
                 .map(|start| start + self.nodes[child_index].run_offset);
             let child_run_offset = scene.runs.len() - run_start;
             self.visit(child, child_index, child_viewport, child_visible,
-                child_translation, overlays_active, child_previous_start, scene);
+                child_translation, child_previous_start, scene);
             self.nodes[child_index].run_offset = child_run_offset;
         }
         self.push_run(index, 1, translation, scene);
@@ -832,6 +853,29 @@ mod tests {
         let scene = cache.prepare(&root, 1, 1, &[], viewport(), rect(0.0, 0.0, 40.0, 20.0));
         assert!(scene.runs.iter().any(|run| run.widget_id == 80811));
         clear_overlay();
+    }
+
+    #[test]
+    fn open_overlay_repaints_only_its_owner() {
+        let root = node(80850, "hstack", rect(0.0, 0.0, 40.0, 20.0),
+            vec![panel(80860, 0.0), panel(80870, 20.0)]);
+        let visible = rect(0.0, 0.0, 40.0, 20.0);
+        let mut cache = RetainedScene::default();
+        set_overlay(80861, rect(1.0, 1.0, 10.0, 10.0));
+        let first = cache.prepare(&root, 1, 1, &[], viewport(), visible);
+        let bystander = first.runs.iter().find(|run| run.widget_id == 80871).unwrap().primitives.clone();
+        for _ in 0..2 {
+            let frame = cache.prepare(&root, 1, 1, &[], viewport(), visible);
+            assert_eq!(frame.rebuilt_nodes, 1, "only the overlay owner repaints");
+            assert_eq!(frame.paint_reasons.overlay, 1);
+            assert_eq!(frame.visited_nodes, 3, "root, owner's panel, owner");
+            let run = frame.runs.iter().find(|run| run.widget_id == 80871).unwrap();
+            assert!(Rc::ptr_eq(&bystander, &run.primitives), "bystander paint is retained");
+            assert!(frame.runs.iter().any(|run| run.widget_id == 80861));
+        }
+        clear_overlay();
+        let closed = cache.prepare(&root, 1, 1, &[], viewport(), visible);
+        assert!(closed.runs.iter().any(|run| run.widget_id == 80871));
     }
 
     #[test]
