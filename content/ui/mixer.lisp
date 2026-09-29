@@ -1040,7 +1040,7 @@
         (target (dict :track track :target "bus-send" :param-idx (get send :bus-idx))))
     (box :debug-name (str "track-" track "-send-" (get send :bus-idx) "-plock")
       :plock-any (if has-locks 1 0)
-      :on-right-click (lambda (event) (pc/open-target-plock-menu event target has-locks))
+      :on-right-click (lambda (event) (pc/open-host-plock-menu event "mixer" target has-locks))
       (pc/process-send-map-wrapper track send (str "track-" track "-send-" (get send :bus-idx))
       (knob-number :label (send-label (get send :name))
         :key (str "track-" track "-send-" (get send :bus-idx))
@@ -2141,7 +2141,7 @@
               (box :width 0.0 :height 0.0)
               (bus-strip i)))))
       (track-context-menu)
-      (subtree :key "mixer-param-plock-menu" (pc/param-plock-context-menu)))))
+      (subtree :key "mixer-param-plock-menu" (pc/param-plock-context-menu "mixer")))))
 
 (effect-buffer "*mixer*"
   (mixer-body))

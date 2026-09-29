@@ -39,6 +39,7 @@
         param-plock-context-menu
         target-plock-any?
         open-target-plock-menu
+        open-host-plock-menu
         param-plock-default
         param-plock-color-r
         param-plock-color-g
@@ -682,8 +683,12 @@
 ;; --- Right-click "clear p-locks" menu (bead eseq-1gy6) ---------------------
 ;; One menu state shared by every param control: nil, or the key tuple of the
 ;; param whose knob was right-clicked plus the anchor the menu opens at. The
-;; menu itself (param-plock-context-menu) is rendered once, by the buffer that
-;; hosts the knobs — an overlay has to live in the active tile.
+;; menu itself (param-plock-context-menu) is rendered by each buffer that
+;; hosts knobs — an overlay has to live in the active tile. More than one
+;; buffer hosts it (*fx* and *mixer*), and the anchor is tile-relative, so
+;; the state also records which host opened it: without that, every visible
+;; host draws a copy at the same offset in its own tile, and the stray copy
+;; steals the clicks meant for the real one.
 ;;
 ;; A param with no p-locks has nothing to offer, so its right-click is a no-op
 ;; and no empty menu opens. The wrappers only bind :on-right-click on the
@@ -693,6 +698,7 @@
 (defstate param-plock-menu nil)
 (defstate param-plock-menu-col 0)
 (defstate param-plock-menu-row 0)
+(defstate param-plock-menu-host "fx")
 
 ;; Key tuple the host command clears by. Mirrors param-plock-control-key's
 ;; families, but spells out the real slot indices: the projection key can say
@@ -711,8 +717,12 @@
   (open-target-plock-menu event (param-plock-menu-target fx p) (param-plock-any? fx p)))
 
 (def open-target-plock-menu (event target has-locks)
+  (open-host-plock-menu event "fx" target has-locks))
+
+(def open-host-plock-menu (event host target has-locks)
   (if has-locks
     (do
+      (set! param-plock-menu-host host)
       (set! param-plock-menu target)
       (set! param-plock-menu-col (get event :col))
       (set! param-plock-menu-row (get event :row))
@@ -755,8 +765,11 @@
                 :scope scope))
         false))))
 
-(def param-plock-context-menu ()
-  (context-menu :is-open (if param-plock-menu true false)
+(def param-plock-menu-open-in? (host)
+  (if (and param-plock-menu (= param-plock-menu-host host)) true false))
+
+(def param-plock-context-menu (host)
+  (context-menu :is-open (param-plock-menu-open-in? host)
     :anchor-col param-plock-menu-col
     :anchor-row param-plock-menu-row
     :on-close (lambda () (close-param-plock-menu))

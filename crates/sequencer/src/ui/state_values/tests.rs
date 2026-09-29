@@ -12794,6 +12794,16 @@ mod solo_binding_tests;
             Ok(Some(Value::Number(0.0))),
             "mapping must not repurpose the device control's value domain"
         );
+        // Only the host that opened the menu draws it: *mixer* renders the
+        // same menu state, and a second copy there steals the clicks.
+        assert_eq!(
+            editor.runtime_mut().eval_str(
+                r#"(list (eseq.effects.param-controls/param-plock-menu-open-in? "fx")
+                         (eseq.effects.param-controls/param-plock-menu-open-in? "mixer"))"#
+            ),
+            Ok(Some(test_bool_list(&[true, false]))),
+            "a param knob's menu opens in *fx* only"
+        );
         assert_eq!(
             editor.runtime_mut().eval_str(
                 "(eseq.effects.param-controls/instrument-param-control-max (nth (get (nth SEQ.instrument-panel 0) :synth) 0))"
