@@ -3180,9 +3180,11 @@
         assert_eq!(engine.gatepitch_ids.len(), MAX_VOICES);
         assert_eq!(engine.modulator_ids.len(), MAX_VOICES);
         assert_eq!(engine.synth_ids.len(), MAX_VOICES);
+        // The allocatable pool is the dylib's compiled voice count: voices past
+        // it would alias the last compiled voice's scratch in the shared image.
         assert_eq!(
             app.state.runtime.engine_voice_counts.load(0, Ordering::Acquire),
-            MAX_VOICES as u32
+            lisp_host::DGEN_INSTRUMENT_VOICES as u32
         );
         for voice in 0..MAX_VOICES {
             assert_eq!(

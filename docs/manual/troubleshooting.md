@@ -158,7 +158,7 @@ A project holds at most 64 tracks, and the status line reports "Maximum number o
 
 Check the track's voice settings in the track settings panel:
 
-- **voices** limits how many notes sound at once, from 1 to 12. A chord needs at least as many voices as it has notes; overlapping chords need more.
+- **voices** limits how many notes sound at once, from 1 to 16. A chord needs at least as many voices as it has notes; overlapping chords need more.
 - With **poly** off, or voices at 1, the track is monophonic and plays one note at a time.
 - **mute grp** makes tracks in the same group cut each other off. Two tracks that should overlap must not share a group.
 

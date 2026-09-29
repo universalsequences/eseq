@@ -869,7 +869,15 @@ impl GraphController<'_> {
         for (v, &lid) in voice_lids.iter().enumerate() {
             self.app.state.runtime.engine_voice_lids[engine_id][v].store(lid, Ordering::Release);
         }
-        self.app.state.runtime.engine_voice_counts.store(engine_id, MAX_VOICES as u32, Ordering::Release);
+        // The pool the audio thread allocates from is capped at the dylib's
+        // compiled voice count, not the graph's MAX_VOICES nodes: every track
+        // sharing this engine steals within these voices, so the extra nodes
+        // stay disabled instead of aliasing the last voice's scratch.
+        self.app.state.runtime.engine_voice_counts.store(
+            engine_id,
+            lisp_host::DGEN_INSTRUMENT_VOICES.min(MAX_VOICES) as u32,
+            Ordering::Release,
+        );
         lisp_host::reset_dgen_engine_enabled_voices(engine_id);
         if let Some(engine) = &self.app.graph.engine_node_ids[engine_id] {
             for (v, &sid) in engine.synth_ids.iter().enumerate() {

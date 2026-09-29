@@ -2093,7 +2093,7 @@
                     (seq-set-track-param :poly (if SEQ.tp-poly 0 1))))))
             (v-stack :align :center :gap 0.5
               (label "voices" :font-size 8 :color :dim :bg :transparent)
-              (number-picker :value SEQ.tp-max-polyphony :min 1 :max 12 :decimals 0
+              (number-picker :value SEQ.tp-max-polyphony :min 1 :max 16 :decimals 0
                 :noui false :font-size 8 :text-color :white
                 :background-color :mixer-strip-bg
                 :border-color :none

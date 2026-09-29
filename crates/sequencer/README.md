@@ -109,7 +109,7 @@ inspired by the voice pools in Elektron synthesizers. A saved instrument's
 `dsp.lisp` is compiled at runtime into a native dylib plus a manifest. Tracks
 and rack slots that resolve to the same saved instrument identity (name and
 source) use one canonical engine, one dylib process function, and one pool of
-12 voices. They do not instantiate private synth engines per track or per rack
+16 voices. They do not instantiate private synth engines per track or per rack
 slot.
 
 ```mermaid

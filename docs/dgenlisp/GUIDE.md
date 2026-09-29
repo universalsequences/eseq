@@ -409,7 +409,7 @@ The host block is at most 512 frames; spectral buffers are sized for that.
 
 ### Polyphony, voices, and the clock
 
-An instrument is compiled with 12 voices; the track's voice count decides how
+An instrument is compiled with 16 voices; the track's voice count decides how
 many are active. Each voice owns its history cells, phasors, and delays.
 Nothing in the source refers to voices. A patch that should ring past its own
 note-off gates the tail with the envelope rather than the input, as Revsynt

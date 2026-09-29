@@ -80,7 +80,14 @@ const CACHE_TARGET_TRIPLE: &str = "x86_64-unknown-linux-gnu";
 const CACHE_DEPLOYMENT_TARGET: Option<&str> = Some("11.0");
 #[cfg(target_os = "linux")]
 const CACHE_DEPLOYMENT_TARGET: Option<&str> = None;
-const INSTRUMENT_VOICES: u32 = 12;
+/// Voices a DGen instrument dylib is compiled for (`--voices`). The generated
+/// code sizes its per-voice scratch statics by this count and clamps any
+/// larger voice index onto the last voice, so an engine's runtime voice pool
+/// must never address more than this many voices: every instance sharing an
+/// engine shares these scratch slots, and two live voices on one index fight
+/// over the same memory (audible as heavy glitching, not CPU load).
+pub const DGEN_INSTRUMENT_VOICES: usize = 16;
+const INSTRUMENT_VOICES: u32 = DGEN_INSTRUMENT_VOICES as u32;
 
 /// The vendored ABI header is a build input: `dgen_ffi.rs` mirrors it as
 /// `#[repr(C)]` types compiled into this binary. Hashing the compiled-in

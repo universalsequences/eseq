@@ -742,7 +742,7 @@ pub(crate) fn compile_effective_dgen_source_to_dir(
         // Tools) dependency this path must not have.
         .arg("--skip-inline-audit");
     if kind == DGenCompileKind::Instrument {
-        command.args(["--voices", "12"]);
+        command.args(["--voices", &super::dylib_cache::DGEN_INSTRUMENT_VOICES.to_string()]);
     }
     let effective_asset_base = super::dylib_cache::effective_asset_base(asset_base);
     command.arg("--asset-base").arg(&effective_asset_base);

@@ -1953,6 +1953,25 @@ fn custom_voice_priority_never_rejects_sequenced_notes() {
 }
 
 #[test]
+fn shared_engine_tracks_never_allocate_past_compiled_dgen_voices() {
+    // Three tracks share one engine at poly 6 (18 wanted > 16 compiled). The
+    // generated code clamps any voice index >= its compiled count onto the
+    // last voice, so allocating past it made two live voices fight over one
+    // scratch slice. Stealing must stay inside the compiled pool instead.
+    let mut pool = CustomEnginePool::new();
+    for lid in 1..=crate::lisp_host::DGEN_INSTRUMENT_VOICES as u64 {
+        pool.add_voice(lid);
+    }
+    for note in 0..24 {
+        for route in 0..3 {
+            let allocation = pool
+                .allocate_voice(route, route, 48.0 + note as f32, true, 6);
+            assert!(allocation.voice_idx < crate::lisp_host::DGEN_INSTRUMENT_VOICES);
+        }
+    }
+}
+
+#[test]
 fn custom_engine_pool_reuses_inactive_same_track_voices_before_expanding() {
     let mut pool = CustomEnginePool::new();
     for lid in 1..=4 {

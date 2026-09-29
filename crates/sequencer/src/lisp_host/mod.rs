@@ -56,7 +56,7 @@ mod value_helpers;
 
 // -- dgenlisp: DSP-compile pipeline (source -> dgen -> dylib -> engine node) --
 pub use dgen::dylib_cache; // module path compat: `lisp_host::dylib_cache::`
-pub use dgen::dylib_cache::{DGenCompileKind, DGenSourceOrigin, DylibLease};
+pub use dgen::dylib_cache::{DGenCompileKind, DGenSourceOrigin, DylibLease, DGEN_INSTRUMENT_VOICES};
 pub use dgen::dgen_ffi::*;
 #[cfg(test)]
 use dgen::dgen_ffi::dgenlisp_wrapper_process;
