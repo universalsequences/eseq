@@ -1862,24 +1862,6 @@
 (def packages-tab-panel ()
   (let ((items (seq-package-tree search-filter (or SEQ.instances (list)))))
     (v-stack :key "packages-tab-panel" :width :fill :gap 0.5 :flex 1
-      (box :width :fill :padding 0.25
-        (h-stack :width :fill :gap 0.5 :align :center
-          (button "New Package"
-            :key "package-new-button"
-            :variant :secondary
-            :flex 1
-            :height 1.3
-            :font-size 10.5
-            :on-click |x y r| (begin-new-package)
-            :color :white)
-          (button "Refresh"
-            :key "package-refresh-button"
-            :variant :secondary
-            :width 6
-            :height 1.3
-            :font-size 10.5
-            :on-click |x y r| (host-command "packages-refresh" (dict))
-            :color :white)))
       (if package-new-mode
         (package-new-panel)
         (box :width :fill :height 0))
