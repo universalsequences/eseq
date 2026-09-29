@@ -145,6 +145,10 @@ fn transport_phase_cycle_beats() -> f32 {
     *SYNC_DIV_BEATS.last().unwrap_or(&8.0)
 }
 
+/// Pushed instead of a phase while the transport is stopped, so the first
+/// playing block (phase 0) is distinguishable from a stopped one.
+pub const TRANSPORT_STOPPED_PHASE: f32 = -1.0;
+
 #[inline]
 pub fn transport_beat_phase(total_beats: f64) -> f32 {
     total_beats.rem_euclid(transport_phase_cycle_beats() as f64) as f32
@@ -287,6 +291,7 @@ unsafe extern "C" fn dj_mixer_process(
     let div = finite_or(*s.add(STATE_DIV), 4.0).clamp(0.0, (SYNC_DIV_BEATS.len() - 1) as f32);
     let div_beats = sync_div_beats(div);
     let mut transport_beat_phase = finite_or(*s.add(STATE_TRANSPORT_BEAT_PHASE), 0.0)
+        .max(0.0) // TRANSPORT_STOPPED_PHASE reads as phase 0, as before.
         .rem_euclid(transport_phase_cycle_beats());
     let transport_beat_inc = if sync { bpm / (60.0 * sr) } else { 0.0 };
     let mut prev_sync_cycle = finite_or(*s.add(STATE_PREV_SYNC_CYCLE), -1.0);

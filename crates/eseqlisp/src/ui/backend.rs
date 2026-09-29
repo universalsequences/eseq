@@ -143,6 +143,11 @@ pub struct ToastFrame {
     pub action_label: Option<String>,
     /// Sticky toasts carry a close button instead of a timer.
     pub closable: bool,
+    /// Loading toasts only: completed fraction (0..=1) drawn as a bar under
+    /// the message. `None` shows the spinner alone.
+    pub progress: Option<f32>,
+    /// Seconds since the loading toast first appeared; drives the spinner.
+    pub elapsed_s: f32,
 }
 
 pub const TOAST_CORNER_RADIUS_PX: f32 = 10.0;
@@ -157,12 +162,25 @@ const TOAST_BOTTOM_ROWS: usize = 4;
 /// Gap, in cells, before the action link and before the close button.
 const TOAST_SEGMENT_GAP_COLS: usize = 3;
 pub const TOAST_CLOSE_GLYPH: &str = "×";
+/// Loading toasts keep at least this much text width, so the panel does not
+/// jitter as the host rewrites the message on every step.
+const TOAST_LOADING_MIN_TEXT_COLS: usize = 40;
+/// A progress toast grows downward to hold the bar under the text row.
+const TOAST_PROGRESS_HEIGHT_ROWS: f32 = 3.0;
+/// Text row to bar centre, in rows.
+const TOAST_PROGRESS_BAR_OFFSET_ROWS: f32 = 1.55;
+const TOAST_PROGRESS_BAR_THICKNESS_PX: f32 = 4.0;
+pub const TOAST_SPINNER_DOTS: usize = 10;
+/// Spinner revolutions per second.
+const TOAST_SPINNER_SPEED: f32 = 1.1;
 
 impl ToastFrame {
     pub fn icon(&self) -> char {
         match self.kind {
             crate::host::ToastKind::Success => '✓',
             crate::host::ToastKind::Error => '✕',
+            // The spinner is geometry, drawn by `toast_loading_shapes`.
+            crate::host::ToastKind::Loading => ' ',
         }
     }
 }
@@ -185,6 +203,8 @@ pub struct ToastPlacement {
     pub action_cols: usize,
     /// Column of the close glyph, when the toast is closable.
     pub close_col: Option<usize>,
+    /// Progress bar track `(col, cols, centre_row)`, when the toast has one.
+    pub progress_bar: Option<(f32, f32, f32)>,
 }
 
 /// What a pointer at `(col, row)` lands on inside a placed toast.
@@ -233,21 +253,32 @@ pub fn toast_placement(toast: &ToastFrame, total_cols: usize, total_rows: usize)
     if text_max_cols == 0 || total_rows < TOAST_BOTTOM_ROWS + 2 {
         return None;
     }
-    let text_cols = toast.message.chars().count().min(text_max_cols);
+    let loading = toast.kind == crate::host::ToastKind::Loading;
+    let min_text_cols = if loading { TOAST_LOADING_MIN_TEXT_COLS } else { 0 };
+    let text_cols = toast.message.chars().count().max(min_text_cols).min(text_max_cols);
     let panel_cols = TOAST_PAD_COLS * 2 + 2 + text_cols + action_extra + close_extra;
     let panel_col = total_cols - TOAST_MARGIN_COLS - panel_cols;
-    let text_row = total_rows - TOAST_BOTTOM_ROWS;
+    let with_bar = toast.kind == crate::host::ToastKind::Loading && toast.progress.is_some();
+    // A progress toast is one row taller; lift its text so the panel bottom
+    // stays where a plain toast's does, clear of the status line.
+    let text_row = total_rows - TOAST_BOTTOM_ROWS - usize::from(with_bar);
     let text_col = panel_col + TOAST_PAD_COLS + 2;
     let action_col =
         (action_cols > 0).then_some(text_col + text_cols + TOAST_SEGMENT_GAP_COLS);
     let close_col = toast
         .closable
         .then_some(text_col + text_cols + action_extra + TOAST_SEGMENT_GAP_COLS);
+    let panel_row = text_row as f32 - (TOAST_HEIGHT_ROWS - 1.0) / 2.0;
+    let panel_rows = if with_bar { TOAST_PROGRESS_HEIGHT_ROWS } else { TOAST_HEIGHT_ROWS };
+    let progress_bar = with_bar.then(|| {
+        let end = (panel_col + panel_cols - TOAST_PAD_COLS) as f32;
+        (text_col as f32, end - text_col as f32, text_row as f32 + TOAST_PROGRESS_BAR_OFFSET_ROWS)
+    });
     Some(ToastPlacement {
         panel_col: panel_col as f32,
-        panel_row: text_row as f32 - (TOAST_HEIGHT_ROWS - 1.0) / 2.0,
+        panel_row,
         panel_cols: panel_cols as f32,
-        panel_rows: TOAST_HEIGHT_ROWS,
+        panel_rows,
         icon_col: panel_col + TOAST_PAD_COLS,
         text_col,
         text_row,
@@ -255,7 +286,107 @@ pub fn toast_placement(toast: &ToastFrame, total_cols: usize, total_rows: usize)
         action_col,
         action_cols,
         close_col,
+        progress_bar,
     })
+}
+
+/// One filled rounded rect of loading-toast chrome, in window pixels.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ToastShape {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+    pub color: Color,
+    pub radius_px: f32,
+}
+
+fn mix(a: Color, b: Color, t: f32) -> Color {
+    let t = t.clamp(0.0, 1.0);
+    Color::rgb(a.r + (b.r - a.r) * t, a.g + (b.g - a.g) * t, a.b + (b.b - a.b) * t)
+}
+
+/// One dot of the loading spinner, centre and diameter in pixels.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SpinnerDot {
+    pub x: f32,
+    pub y: f32,
+    pub d: f32,
+    /// 0..1: how far toward the accent colour this dot is drawn.
+    pub intensity: f32,
+}
+
+/// The loading spinner: a comet of dots on a ring of radius `ring` around
+/// `(cx, cy)`. The brightest, largest dot sweeps clockwise and the tail
+/// fades behind it. Shared by the loading toast and the tree's loading row.
+pub fn spinner_dots(cx: f32, cy: f32, ring: f32, elapsed_s: f32) -> [SpinnerDot; TOAST_SPINNER_DOTS] {
+    use std::f32::consts::TAU;
+    let head = (elapsed_s * TOAST_SPINNER_SPEED).fract() * TAU;
+    std::array::from_fn(|i| {
+        let angle = i as f32 / TOAST_SPINNER_DOTS as f32 * TAU;
+        let behind = (head - angle).rem_euclid(TAU);
+        let t = 1.0 - behind / TAU;
+        // Angle 0 at twelve o'clock, turning clockwise on screen.
+        SpinnerDot {
+            x: cx + ring * angle.sin(),
+            y: cy - ring * angle.cos(),
+            d: ring * 0.5 * (0.45 + 0.55 * t),
+            intensity: 0.12 + 0.88 * t * t,
+        }
+    })
+}
+
+/// Spinner ring and progress bar for a loading toast. Colors are pre-blended
+/// over `bg`, so both backends draw them opaque on the panel. Empty for any
+/// other toast kind.
+pub fn toast_loading_shapes(
+    toast: &ToastFrame,
+    place: &ToastPlacement,
+    cell_w: f32,
+    cell_h: f32,
+    bg: Color,
+    fg: Color,
+    accent: Color,
+) -> Vec<ToastShape> {
+    let mut shapes = Vec::new();
+    if toast.kind != crate::host::ToastKind::Loading {
+        return shapes;
+    }
+    // Centred on the icon cell's left edge, the ring borrows the panel
+    // padding and stays clear of the message.
+    let cx = place.icon_col as f32 * cell_w;
+    let cy = (place.text_row as f32 + 0.5) * cell_h;
+    let ring = (cell_h * 0.42).min(cell_w * 1.3);
+    for dot in spinner_dots(cx, cy, ring, toast.elapsed_s) {
+        shapes.push(ToastShape {
+            x: dot.x - dot.d / 2.0,
+            y: dot.y - dot.d / 2.0,
+            w: dot.d,
+            h: dot.d,
+            color: mix(bg, accent, dot.intensity),
+            radius_px: dot.d / 2.0,
+        });
+    }
+    if let (Some(progress), Some((col, cols, row))) = (toast.progress, place.progress_bar) {
+        let h = TOAST_PROGRESS_BAR_THICKNESS_PX;
+        let (x, y, w) = (col * cell_w, row * cell_h - h / 2.0, cols * cell_w);
+        let pill = |x: f32, w: f32, color: Color| ToastShape { x, y, w, h, color, radius_px: h / 2.0 };
+        shapes.push(pill(x, w, mix(bg, fg, 0.12)));
+        let fill = w * progress.clamp(0.0, 1.0);
+        if fill >= h {
+            shapes.push(pill(x, fill, accent));
+            // A highlight glides along the filled part so the bar reads as
+            // alive between steps.
+            let sheen_w = (w * 0.18).min(fill);
+            let travel = fill + sheen_w;
+            let start = x - sheen_w + (toast.elapsed_s * 0.7).fract() * travel;
+            let (s0, s1) = (start.max(x), (start + sheen_w).min(x + fill));
+            if s1 - s0 >= h {
+                shapes.push(pill(s0, s1 - s0, mix(accent, Color::WHITE, 0.45)));
+            }
+        }
+    }
+    shapes
 }
 
 #[cfg(test)]
@@ -269,6 +400,8 @@ mod toast_tests {
             kind: ToastKind::Success,
             action_label: None,
             closable: false,
+            progress: None,
+            elapsed_s: 0.0,
         }
     }
 
@@ -315,6 +448,50 @@ mod toast_tests {
         assert_eq!(place.text_col + place.text_max_cols, 40 - 4);
         assert!(toast_placement(&toast("Saved"), 6, 20).is_none());
         assert!(toast_placement(&toast("Saved"), 80, 3).is_none());
+    }
+
+    #[test]
+    fn progress_toast_keeps_a_stable_width_and_draws_its_bar_below_the_text() {
+        let loading = |message: &str, progress| ToastFrame {
+            kind: ToastKind::Loading,
+            progress,
+            ..toast(message)
+        };
+        let short = toast_placement(&loading("Loading", Some(0.25)), 120, 40).unwrap();
+        let long = toast_placement(&loading("Loading project · track 3/12", Some(0.5)), 120, 40).unwrap();
+        assert_eq!(short.panel_cols, long.panel_cols, "the panel must not jitter per step");
+        let (col, cols, row) = long.progress_bar.unwrap();
+        assert_eq!(col, long.text_col as f32);
+        assert!(row > long.text_row as f32 + 1.0);
+        assert!(row < long.panel_row + long.panel_rows);
+        assert!(col + cols < long.panel_col + long.panel_cols);
+        assert_eq!(toast_placement(&loading("x", None), 120, 40).unwrap().progress_bar, None);
+
+        let (bg, fg, accent) = (Color::BLACK, Color::WHITE, Color::GREEN);
+        let frame = loading("Loading", Some(0.5));
+        let shapes = toast_loading_shapes(&frame, &long, 8.0, 16.0, bg, fg, accent);
+        // Ten spinner dots, the bar track, its fill, and (maybe) the sheen.
+        assert!(shapes.len() >= TOAST_SPINNER_DOTS + 2);
+        let track = shapes[TOAST_SPINNER_DOTS];
+        let fill = shapes[TOAST_SPINNER_DOTS + 1];
+        assert_eq!(fill.x, track.x);
+        assert!((fill.w - track.w * 0.5).abs() < 1e-3);
+        // Every dot stays left of the message.
+        for dot in &shapes[..TOAST_SPINNER_DOTS] {
+            assert!(dot.x + dot.w <= long.text_col as f32 * 8.0);
+        }
+        assert!(toast_loading_shapes(&toast("Saved"), &long, 8.0, 16.0, bg, fg, accent).is_empty());
+    }
+
+    #[test]
+    fn spinner_head_rotates_with_elapsed_time() {
+        let place = toast_placement(&toast("Loading"), 120, 40).unwrap();
+        let brightest = |elapsed_s| {
+            let frame = ToastFrame { kind: ToastKind::Loading, elapsed_s, ..toast("Loading") };
+            let shapes = toast_loading_shapes(&frame, &place, 8.0, 16.0, Color::BLACK, Color::WHITE, Color::WHITE);
+            (0..shapes.len()).max_by(|&a, &b| shapes[a].color.r.total_cmp(&shapes[b].color.r)).unwrap()
+        };
+        assert_ne!(brightest(0.0), brightest(0.3));
     }
 }
 

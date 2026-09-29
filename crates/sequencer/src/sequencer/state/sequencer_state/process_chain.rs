@@ -237,8 +237,57 @@ impl SequencerState {
         self.published_process_authoring_version
             .fetch_add(1, Ordering::AcqRel);
     }
+    /// The published authoring snapshot plus every compiled expr class
+    /// (`register_expr_process_def`) the UI VM did not publish itself.
     pub fn published_process_authoring(&self) -> crate::process::PublishedProcessAuthoringSnapshot {
-        self.published_process_authoring.lock().unwrap().clone()
+        let mut snapshot = self.published_process_authoring.lock().unwrap().clone();
+        let expr_defs = self.expr_process_defs.lock().unwrap();
+        for def in expr_defs.values() {
+            if !snapshot.defs.iter().any(|existing| existing.name == def.name) {
+                snapshot.defs.push(def.clone());
+            }
+        }
+        snapshot
+    }
+    /// Register (or replace) one compiled `expr#<hash>` class
+    /// (docs/expr-process-spec.md §2.1). Bumps the authoring version when the
+    /// class is new or changed, so the scheduler resyncs its definitions.
+    /// Returns whether anything changed.
+    pub fn register_expr_process_def(&self, def: crate::process::PublishedProcessDef) -> bool {
+        let mut defs = self.expr_process_defs.lock().unwrap();
+        if defs.get(&def.name) == Some(&def) {
+            return false;
+        }
+        defs.insert(def.name.clone(), def);
+        drop(defs);
+        self.published_process_authoring_version
+            .fetch_add(1, Ordering::AcqRel);
+        true
+    }
+    /// Whether a compiled expr class is registered under `name`.
+    pub fn has_expr_process_def(&self, name: &str) -> bool {
+        self.expr_process_defs.lock().unwrap().contains_key(name)
+    }
+    /// Scheduler side: replace the process run error mirror.
+    pub fn publish_process_run_errors(&self, errors: std::collections::BTreeMap<u64, String>) {
+        let mut published = self.process_run_errors.lock().unwrap();
+        if *published != errors {
+            *published = errors;
+            self.process_run_errors_version
+                .fetch_add(1, Ordering::Release);
+        }
+    }
+    /// The last run error of one process runtime id (a node slot's instance
+    /// id), if its latest run failed.
+    pub fn process_run_error(&self, runtime_id: u64) -> Option<String> {
+        self.process_run_errors.lock().unwrap().get(&runtime_id).cloned()
+    }
+    /// Every current run error, keyed by process runtime id.
+    pub fn process_run_errors(&self) -> std::collections::BTreeMap<u64, String> {
+        self.process_run_errors.lock().unwrap().clone()
+    }
+    pub fn process_run_errors_version(&self) -> u64 {
+        self.process_run_errors_version.load(Ordering::Acquire)
     }
     pub fn published_process_authoring_version(&self) -> u64 {
         self.published_process_authoring_version

@@ -241,6 +241,13 @@ fn doom_kick_surface_controls_and_pages() {
 }
 
 #[test]
+fn pm_bongos_surface_controls_and_pages() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tools/pm-bongos");
+    check_resonant_surface_at(&root, "model.lisp", "PM Bongos", 5);
+}
+
+#[test]
 fn break_kick_53_surface_controls_and_pages() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../tools/pm-break-kick");

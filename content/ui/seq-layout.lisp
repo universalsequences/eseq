@@ -14,6 +14,9 @@
 ;; The *groove* buffer that shares the sidebar while a drum rack is selected.
 ;; It never imports this module back (it re-lays out late-bound).
 (import eseq.rack-groove-buffer :as groove)
+;; The *processes* dock that takes the right column (*step*/*track*) while a
+;; node editor is open (ui/processes-buffer.lisp); late-bound back the same way.
+(import eseq.processes-buffer :as procs)
 
 (export buffer-radius
         transport-height
@@ -60,12 +63,16 @@
 ;; edit it there and every tile follows, including *sequencer*.
 (def border-width eseq.seq-step-tabs/seq-tile-border-width)
 
+;; The right column: *step* over *track* — or, while a node editor is open
+;; in the main tile, the *processes* dock (processes-dock-layout-spec).
 (def step-and-track-panel-layout-spec ()
   (list :cols :gap 1
     0.78 (eseq.seq-step-tabs/seq-main-step-tile-layout-spec)
-    0.22 (list :rows :gap 1
-      0.48 (list :buf "*step*" :hide-status true :border-radius (eseq.seq-core-state/radius buffer-radius) :border-width border-width :background-color :buffer-bg :min-width 28 :max-width 28)
-      0.52 (list :buf "*track*" :hide-status true :border-radius (eseq.seq-core-state/radius buffer-radius) :border-width border-width :background-color :buffer-bg :max-height 7 :min-height 7 :min-width 28 :max-width 28))))
+    0.22 (if (procs/showing?)
+      (processes-dock-layout-spec)
+      (list :rows :gap 1
+        0.48 (list :buf "*step*" :hide-status true :border-radius (eseq.seq-core-state/radius buffer-radius) :border-width border-width :background-color :buffer-bg :min-width 28 :max-width 28)
+        0.52 (list :buf "*track*" :hide-status true :border-radius (eseq.seq-core-state/radius buffer-radius) :border-width border-width :background-color :buffer-bg :max-height 7 :min-height 7 :min-width 28 :max-width 28)))))
 
 (def main-panel-layout-spec ()
   (if (eseq.seq-step-tabs/seq-arrangement-view?)
@@ -118,6 +125,33 @@
     :border-width border-width
     :background-color :buffer-bg
     :min-height 8))
+
+(defcustom processes-code-ratio 0.5
+  :type :number :min 0.2 :max 0.8 :step 0.01
+  :doc "Share of the right column's height the *processes* dock gives the selected expr card's code (the inspector keeps the rest).")
+
+;; A dock tile keeps the *step*/*track* column's width, so the main tile
+;; does not move when the dock comes and goes.
+(def dock-tile-spec (buffer min-height)
+  (list :buf buffer
+    :hide-status true
+    :border-radius (eseq.seq-core-state/radius buffer-radius)
+    :border-width border-width
+    :background-color :buffer-bg
+    :min-width 28
+    :max-width 28
+    :min-height min-height))
+
+;; The *processes* dock in place of *step* (inspector) and *track* (the
+;; selected expr card's code, a real editor tile, while code is shown);
+;; without code the inspector fills the column (docs/expr-process-spec.md §7).
+(def processes-dock-layout-spec ()
+  (let ((code (procs/code-layout-buffer)))
+    (if code
+      (list :rows :gap 1 :remember "processes-dock-code-split"
+        (- 1.0 processes-code-ratio) (dock-tile-spec "*processes*" 6)
+        processes-code-ratio (dock-tile-spec code 3))
+      (dock-tile-spec "*processes*" 6))))
 
 ;; A selected drum rack splits the sidebar Ableton-style: the browser on top,
 ;; the rack's groove below (ui/rack-groove-buffer.lisp).

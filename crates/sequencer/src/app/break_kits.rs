@@ -143,6 +143,7 @@ impl App {
             String,
             Vec<Option<TrackPatternData>>,
             Vec<ProjectGraphOverrides>,
+            std::collections::BTreeMap<String, crate::process::ProcessLiteral>,
         )> = self.state.with_scenes(|scenes| {
             let mut picked = Vec::new();
             for scene_idx in scene_selection {
@@ -172,13 +173,18 @@ impl App {
                     .get(*scene_idx)
                     .map(|scene| scene.name.clone())
                     .unwrap_or_else(|| clip.name.clone());
-                picked.push((name, lanes, clip.graph_overrides.clone()));
+                picked.push((
+                    name,
+                    lanes,
+                    clip.graph_overrides.clone(),
+                    clip.scene_slots.values().clone(),
+                ));
             }
             picked
         });
 
         let mut clips = Vec::with_capacity(picked.len());
-        for (index, (name, lanes, overrides)) in picked.into_iter().enumerate() {
+        for (index, (name, lanes, overrides, clip_slots)) in picked.into_iter().enumerate() {
             let mut snapshot = PatternSnapshot::new_default(pad_count, &[]);
             let mut sample_paths = vec![None; pad_count];
             let mut sample_names = vec![String::new(); pad_count];
@@ -233,6 +239,15 @@ impl App {
                     Vec::new(),
                 ),
                 graph_overrides,
+                // Only the carried instances' documents, still keyed by the
+                // exporting ids (the kit-local keys the loader re-keys).
+                scene_slots: clip_slots
+                    .into_iter()
+                    .filter(|(name, _)| {
+                        crate::lisp_host::instance_document_slot_owner(name)
+                            .is_some_and(|id| carried.contains(&id))
+                    })
+                    .collect(),
                 bus_chain: None,
             });
         }
@@ -417,6 +432,7 @@ impl App {
         }
         let member_to_pad = self.kit_pad_roster(group_id)?.member_to_pad;
         let current = self.state.current_graph_overrides();
+        let slots = self.state.current_scene_slots();
         Ok(instances
             .into_iter()
             .map(|instance| {
@@ -440,11 +456,22 @@ impl App {
                         );
                         graph
                     });
+                let document = slots
+                    .values()
+                    .iter()
+                    .filter_map(|(name, value)| {
+                        (crate::lisp_host::instance_document_slot_owner(name) == Some(instance.id))
+                            .then(|| name.rsplit_once('/'))
+                            .flatten()
+                            .map(|(_, field)| (field.to_string(), value.clone()))
+                    })
+                    .collect();
                 ProjectKitInstance {
                     id: instance.id,
                     kind: instance.kind,
                     label: instance.label,
                     overrides,
+                    document,
                 }
             })
             .collect())
@@ -519,13 +546,15 @@ impl App {
         let pad_to_position = self.kit_pad_to_position(group_id, pad_notes)?;
         let install_overrides =
             install_overrides && records.iter().any(|record| record.overrides.is_some());
+        let has_documents = records.iter().any(|record| !record.document.is_empty());
         let records = records.to_vec();
-        // The new instances' overrides are recorded (they are all this edit
-        // installs); no existing instance's overrides change.
-        let recorded = install_overrides.then(Vec::new);
+        // The new instances' overrides and documents are recorded (they are
+        // all this edit installs); no existing instance's change.
+        let recorded = (install_overrides || has_documents).then(Vec::new);
         self.apply_recorded_instance_mutation("Load kit instances", recorded, move |app| {
             let mut map = HashMap::new();
             let mut installs = Vec::new();
+            let mut documents: Vec<(String, crate::process::ProcessLiteral)> = Vec::new();
             let mut reminter = app.state.with_scenes(|scenes| {
                 crate::lisp_host::GraphNodeProcessReminter::new(
                     super::instances::all_override_entries(scenes),
@@ -564,9 +593,26 @@ impl App {
                     reminter.remint(id, &mut graph);
                     installs.push(graph);
                 }
+                documents.extend(record.document.iter().map(|(field, value)| {
+                    (crate::lisp_host::instance_document_slot(id, field), value.clone())
+                }));
                 map.insert(record.id, KitSequencerRekey { id, name });
             }
             app.install_kit_instance_overrides(group_id, installs);
+            if !documents.is_empty() {
+                // Into every clip of a clip-bearing rack, else every scene:
+                // wherever the rack's instances read their document from.
+                let banked = app.state.with_scenes(|scenes| {
+                    scenes.rack_bank(group_id).is_some_and(|bank| !bank.clips.is_empty())
+                });
+                let ids: Vec<u64> = map.values().map(|rekey| rekey.id).collect();
+                app.edit_instance_documents(&ids, |site, slots| match site {
+                    super::history::GraphOverrideSite::Clip { group_id: rack, .. }
+                        if banked && rack == group_id => documents.clone(),
+                    super::history::GraphOverrideSite::Scene(_) if !banked => documents.clone(),
+                    _ => slots,
+                });
+            }
             Ok(map)
         })
     }
@@ -735,11 +781,28 @@ impl App {
                     Some(graph)
                 })
                 .collect();
+            // Documents follow their instance to its fresh id; a slot of an
+            // id the kit does not record is dropped like its override.
+            let mut scene_slots = crate::sequencer::SceneSlotStore::default();
+            for (name, value) in clip.scene_slots {
+                let Some(rekey) = crate::lisp_host::instance_document_slot_owner(&name)
+                    .and_then(|id| id_map.get(&id))
+                else {
+                    continue;
+                };
+                let Some((_, field)) = name.rsplit_once('/') else {
+                    continue;
+                };
+                let _ = scene_slots.set_override(
+                    crate::lisp_host::instance_document_slot(rekey.id, field),
+                    Some(value),
+                );
+            }
             built.push((
                 index as crate::sequencer::RackClipId + 1,
                 clip.name,
                 clip.color,
-                graph_overrides,
+                (graph_overrides, scene_slots),
                 cells,
             ));
         }
@@ -751,7 +814,7 @@ impl App {
                 clips: Vec::with_capacity(built.len()),
                 next_clip_id: built.len() as u64 + 1,
             };
-            for (id, name, color, graph_overrides, cells) in built {
+            for (id, name, color, (graph_overrides, scene_slots), cells) in built {
                 let cells = cells
                     .into_iter()
                     .enumerate()
@@ -770,6 +833,7 @@ impl App {
                     color,
                     cells,
                     graph_overrides,
+                    scene_slots,
                 });
             }
             scenes.replace_rack_bank(bank);
@@ -820,6 +884,7 @@ pub(super) fn migrate_kit_sequencers(
                         kind: kind.id.clone(),
                         label: String::new(),
                         overrides: None,
+                        document: Default::default(),
                     });
                 }
             }
@@ -1270,6 +1335,7 @@ mod tests {
                 max_poly: Some(5),
                 ..Default::default()
             }),
+            document: Default::default(),
         });
         let directory = std::env::temp_dir().join(format!("eseq-kit-ghost-{}", std::process::id()));
         std::fs::create_dir_all(&directory).unwrap();
@@ -1336,6 +1402,7 @@ mod tests {
                 kind: NEURAL.to_string(),
                 label: String::new(),
                 overrides: None,
+                document: Default::default(),
             }]
         );
         let kept: Vec<_> = kit.sequencers.iter().map(|s| s.sequencer_name.as_str()).collect();
@@ -1435,6 +1502,7 @@ mod tests {
                 bindings: Default::default(),
                 fanout: Default::default(),
                 unbound_ports: Default::default(),
+                expr_source: None,
             };
             crate::process::track_process_slot_runtime_id(&slot, 0)
         };
@@ -1468,6 +1536,69 @@ mod tests {
                 assert!(seen.insert(slot), "slot {slot} is shared between two instances");
             }
         }
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// Expr cards (docs/expr-process-spec.md §2.1) store their body; the
+    /// hidden `expr#<hash>` class lives only in the session that compiled
+    /// it. A kit loaded into another session must compile its bodies on load,
+    /// or the scheduler skips the card (an unknown class) until something
+    /// happens to read that node's patch in the UI.
+    #[test]
+    fn a_loaded_kit_compiles_its_expr_card_classes() {
+        let mut app = headless_app();
+        let mut runtime = neural_runtime(&app);
+        let (rack, source) = rack_with_neural(&mut app, &mut runtime, "Expr", 0.25);
+        // The app's UI VM publishes the builtin process library (with the
+        // plain `expr` class) when it loads it; a headless app has no UI VM.
+        let mut publisher =
+            crate::lisp_host::scratch_runtime_with_fallbacks(Arc::clone(&app.state), 0, 0);
+        publisher
+            .eval(&crate::lisp_host::load_process_library_source())
+            .expect("builtin process library");
+        app.state.publish_process_authoring(
+            publisher.process_authoring_snapshot().to_published().expect("publishable"),
+        );
+        runtime.set_global_value("proc", Value::Instance(source));
+        let slot = match runtime
+            .eval_str("(graph-node-process-add proc 0 \"expr\")")
+            .expect("add an expr card")
+        {
+            Some(Value::Number(slot)) => slot as u64,
+            other => panic!("slot id, got {other:?}"),
+        };
+        let committed = runtime
+            .eval_str(&format!("(graph-node-process-expr-set proc 0 {slot} \"(* x 3)\")"))
+            .expect("commit")
+            .expect("result map");
+        let Value::Map(committed) = committed else { panic!("map, got {committed:?}") };
+        let Value::String(class) = committed["class"].borrow().clone() else {
+            panic!("class name: {committed:?}")
+        };
+        assert!(crate::process::is_expr_process_class(&class), "{class}");
+        let path = save_kit(&mut app, rack, "Expr-Kit", &[]);
+
+        let mut fresh = headless_app();
+        let _fresh_runtime = neural_runtime(&fresh);
+        assert!(!fresh.state.has_expr_process_def(&class), "a new session has no expr classes");
+        let (loaded, failures) = fresh.load_kit_as_rack(&path).expect("loads");
+        assert!(failures.is_empty(), "{failures:?}");
+        let instance = only_instance(&fresh, loaded);
+        let classes: Vec<String> = fresh
+            .state
+            .current_graph_overrides()
+            .iter()
+            .filter(|graph| graph.sequencer_id == instance)
+            .flat_map(|graph| graph.node_intrinsics.iter())
+            .filter_map(|node| node.process_chain.as_ref())
+            .flat_map(|chain| chain.slots.iter())
+            .map(|slot| slot.class_name.clone())
+            .collect();
+        assert_eq!(classes, vec![class.clone()], "the kit carries the expr card");
+        assert!(
+            fresh.state.has_expr_process_def(&class),
+            "kit load compiles the card's body without any UI read of the patch"
+        );
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 

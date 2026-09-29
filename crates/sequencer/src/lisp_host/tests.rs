@@ -1133,6 +1133,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                 tick_source: String::new(),
                 requires: Vec::new(),
                 graph: Some(manifest),
+                owner_rack: None,
             });
             // Mirrors the production natives: the handle is the instance id.
             Ok(Value::Number(id as f64))
@@ -3947,6 +3948,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             tick_source: String::new(),
             requires: Vec::new(),
             graph: Some(manifest),
+            owner_rack: None,
         });
 
         let mut runtime = Runtime::new();
@@ -4133,6 +4135,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             tick_source: String::new(),
             requires: Vec::new(),
             graph: Some(manifest),
+            owner_rack: None,
         });
 
         let mut runtime = Runtime::new();
@@ -4262,6 +4265,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             tick_source: String::new(),
             requires: Vec::new(),
             graph: Some(manifest),
+            owner_rack: None,
         });
         let mut runtime = Runtime::new();
         register_graph_authoring_natives(&mut runtime, Arc::clone(&state));
@@ -4506,6 +4510,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             tick_source: String::new(),
             requires: Vec::new(),
             graph: Some(manifest.clone()),
+            owner_rack: None,
         });
         let mut runtime = Runtime::new();
         register_graph_authoring_natives(&mut runtime, Arc::clone(&state));
@@ -4658,6 +4663,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             tick_source: String::new(),
             requires: Vec::new(),
             graph: Some(manifest.clone()),
+            owner_rack: None,
         });
         // The wire natives look the port up on the published def, as the app
         // does once the builtin library has loaded.
@@ -4812,6 +4818,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             tick_source: String::new(),
             requires: Vec::new(),
             graph: Some(manifest.clone()),
+            owner_rack: None,
         });
 
         let mut runtime = Runtime::new();
@@ -5019,6 +5026,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             tick_source: String::new(),
             requires: Vec::new(),
             graph: Some(manifest.clone()),
+            owner_rack: None,
         });
         state.publish_sequencer(PublishedSequencer {
             id: fixed.id,
@@ -5027,6 +5035,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             tick_source: String::new(),
             requires: Vec::new(),
             graph: Some(fixed),
+            owner_rack: None,
         });
 
         let mut runtime = Runtime::new();
@@ -5175,6 +5184,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             tick_source: String::new(),
             requires: Vec::new(),
             graph: Some(manifest.clone()),
+            owner_rack: None,
         });
         let mut runtime = Runtime::new();
         register_graph_authoring_natives(&mut runtime, Arc::clone(&state));
@@ -13041,6 +13051,65 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     }
 
     #[test]
+    fn def_process_run_body_steps_a_galois_lfsr_with_bitwise_natives() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut scratch = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(1),
+            fallback_instrument_descriptors(1),
+            0,
+            0,
+        );
+        scratch
+            .eval(
+                r#"
+                (def-process lfsr
+                  :out ((value :float))
+                  :state ((s 0xACE1))
+                  :every (beats 1)
+                  :run (do
+                    (set! s (bit-xor (shr s 1)
+                                     (if (= (bit-and s 1) 1) 0b1011010000000000 0)))
+                    (out :value s)))
+
+                (def shifter (lfsr))
+                (start shifter)
+                "#,
+            )
+            .expect("def-process lfsr");
+
+        let mut expected = Vec::new();
+        let mut s: u32 = 0xACE1;
+        for _ in 0..6 {
+            s = (s >> 1) ^ if s & 1 == 1 { 46_080 } else { 0 };
+            expected.push(f64::from(s));
+        }
+
+        let mut processes = crate::process::ProcessRuntime::default();
+        processes.sync_authoring(scratch.process_authoring_snapshot(), 0.0);
+        let mut actual = Vec::new();
+        for beat in 0..6u64 {
+            let invocations = processes.process_block(
+                beat as f64,
+                beat as f64 + 1.0,
+                beat * 48_000,
+                48_000.0,
+            );
+            assert_eq!(invocations.len(), 1, "one tick at beat {beat}");
+            let result = scratch
+                .invoke_process_run(invocations[0].clone())
+                .expect("lfsr tick");
+            let Value::Number(value) = result.outputs[0].value else {
+                panic!("lfsr outlet should be numeric");
+            };
+            actual.push(value);
+            processes.apply_run_result(result);
+        }
+        assert_eq!(actual, expected);
+        assert_eq!(&expected[..3], &[57_968.0, 28_984.0, 14_492.0]);
+    }
+
+    #[test]
     fn process_transpose_wander_demo_loads_and_ticks() {
         let state = Arc::new(SequencerState::new(
             2,
@@ -13222,6 +13291,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
 
         let result = scratch
             .invoke_process_run(crate::process::ProcessRunInvocation {
+                step_budget: None,
                 runtime_id: 77,
                 source: def.run_source.clone().expect("run source"),
                 beat: 0.0,
@@ -13284,6 +13354,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         scratch.set_scene_slot_snapshot(Arc::new(state.latest_scheduler_snapshot().scene_slots.clone()));
         let result = scratch
             .invoke_process_run(crate::process::ProcessRunInvocation {
+                step_budget: None,
                 runtime_id: 92,
                 source,
                 beat: 0.0,
@@ -13328,6 +13399,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             .find(|def| def.name == "cached-macro-process")
             .expect("cached macro process definition");
         let invocation = crate::process::ProcessRunInvocation {
+            step_budget: None,
             runtime_id: 91,
             source: def.run_source.expect("run source"),
             beat: 0.0,
@@ -13466,6 +13538,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
 
         let result = scratch
             .invoke_process_run(crate::process::ProcessRunInvocation {
+                step_budget: None,
                 runtime_id: 78,
                 source: def.run_source.clone().expect("run source"),
                 beat: 0.0,
@@ -13561,6 +13634,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
 
         let result = scratch
             .invoke_process_run(crate::process::ProcessRunInvocation {
+                step_budget: None,
                 runtime_id: 80,
                 source: def.run_source.clone().expect("run source"),
                 beat: 0.0,
@@ -13730,6 +13804,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             step_beats: 0.25,
             written_inlets: Vec::new(),
             after_reset: false,
+            delay_offset_steps: 0.0,
             note: 0.0,
             resolved: ResolvedStep {
                 duration: 1.0,
@@ -13823,6 +13898,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         step_context.written_inlets = vec!["a".to_string()];
         let result = scratch
             .invoke_process_run(crate::process::ProcessRunInvocation {
+                step_budget: None,
                 runtime_id: 702,
                 source: def.run_source.expect("run source"),
                 beat: 0.0,
@@ -13870,6 +13946,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             .expect("process definition");
         let source = def.run_source.expect("run source");
         let invocation = |step_context| crate::process::ProcessRunInvocation {
+            step_budget: None,
             runtime_id: 703,
             source: source.clone(),
             beat: 0.0,
@@ -13926,6 +14003,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
 
         let result = scratch
             .invoke_process_run(crate::process::ProcessRunInvocation {
+                step_budget: None,
                 runtime_id: 701,
                 source: def.run_source.expect("run source"),
                 beat: 0.0,
@@ -13997,6 +14075,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             .expect("process definition");
         let result = scratch
             .invoke_process_run(crate::process::ProcessRunInvocation {
+                step_budget: None,
                 runtime_id: 702,
                 source: def.run_source.expect("run source"),
                 beat: 0.0,
@@ -14060,6 +14139,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             .expect("process definition");
         let err = scratch
             .invoke_process_run(crate::process::ProcessRunInvocation {
+                step_budget: None,
                 runtime_id: 703,
                 source: def.run_source.expect("run source"),
                 beat: 0.0,
@@ -14146,6 +14226,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         };
         let result = scratch
             .invoke_process_run(crate::process::ProcessRunInvocation {
+                step_budget: None,
                 runtime_id: 1,
                 source: def.run_source.expect("run source"),
                 beat: 1.0,
@@ -14223,6 +14304,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         };
         let result = scratch
             .invoke_process_run(crate::process::ProcessRunInvocation {
+                step_budget: None,
                 runtime_id: 1,
                 source: def.run_source.expect("run source"),
                 beat: 1.0,
@@ -14299,6 +14381,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             .expect("homeostat command definition");
         let result = scratch
             .invoke_process_run(crate::process::ProcessRunInvocation {
+                step_budget: None,
                 runtime_id: 1,
                 source: def.run_source.expect("run source"),
                 beat: 1.0,
@@ -14363,6 +14446,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             .expect("invalid commit definition");
         assert!(scratch
             .invoke_process_run(crate::process::ProcessRunInvocation {
+                step_budget: None,
                 runtime_id: 2,
                 source: invalid.run_source.expect("run source"),
                 beat: 1.0,
@@ -14485,6 +14569,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             .expect("typed field publisher definition");
         let result = scratch
             .invoke_process_run(crate::process::ProcessRunInvocation {
+                step_budget: None,
                 runtime_id: 1,
                 source: def.run_source.expect("run source"),
                 beat: 0.0,
@@ -15285,6 +15370,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             lanes: std::collections::BTreeMap::new(),
             fanout: Default::default(),
             unbound_ports: Default::default(),
+            expr_source: None,
             bindings: std::collections::BTreeMap::new(),
         };
         let mut bypassed = slot(3, "third");
@@ -15351,6 +15437,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         let invoke = |scratch: &mut ScratchControlRuntime, seed| {
             scratch
                 .invoke_process_run(crate::process::ProcessRunInvocation {
+                    step_budget: None,
                     runtime_id: 99,
                     source: def.run_source.clone().expect("run source"),
                     beat: 0.0,
@@ -15791,6 +15878,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         ]);
         let result = scratch
             .invoke_process_run(crate::process::ProcessRunInvocation {
+                step_budget: None,
                 runtime_id: 1,
                 source: voice.run_source.expect("voice run source"),
                 beat: 0.0,
@@ -15835,6 +15923,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         ]);
         let result = scratch
             .invoke_process_run(crate::process::ProcessRunInvocation {
+                step_budget: None,
                 runtime_id: 2,
                 source: ear.run_source.clone().expect("ear run source"),
                 beat: 0.0,
@@ -15875,6 +15964,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             step_beats: 0.25,
             written_inlets: Vec::new(),
             after_reset: false,
+            delay_offset_steps: 0.0,
             note: 0.0,
             resolved: crate::accumulator::ResolvedStep {
                 duration: 1.0,
@@ -15891,6 +15981,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         };
         let result = scratch
             .invoke_process_run(crate::process::ProcessRunInvocation {
+                step_budget: None,
                 runtime_id: 3,
                 source: ear.run_source.expect("ear run source"),
                 beat: 0.0,

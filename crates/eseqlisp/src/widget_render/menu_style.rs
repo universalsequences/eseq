@@ -137,6 +137,50 @@ pub(crate) fn checkmark_primitive(
     shape_primitive("dropdown-checkmark", rect, color, 0.0, false, viewport)
 }
 
+/// Columns a `menu-item`'s leading `:icon` reserves before its label.
+pub(crate) const ICON_SLOT_COLS: f32 = 2.1;
+
+/// A `menu-item`'s leading `:icon`: the shared `button-icon` glyph in its
+/// stroke style, square in pixels and centered in an [`ICON_SLOT_COLS`] slot
+/// starting at `col`.
+pub(crate) fn icon_primitive(
+    row_rect: Rect, col: f32, font_size: f32, icon: f32, color: Color, viewport: WidgetViewport,
+) -> GpuPrimitive {
+    let size_px = super::ui_design_px(font_size * super::UI_DESIGN_REFERENCE_SCALE * 1.35);
+    let width = size_px / viewport.cell_w.max(1.0);
+    let height = size_px / viewport.cell_h.max(1.0);
+    let rect = Rect {
+        row: row_rect.row + (row_rect.height - height) * 0.5,
+        col: col + (ICON_SLOT_COLS - 0.5 - width) * 0.5,
+        width,
+        height,
+    };
+    let (ndc_min, ndc_max) = ndc_bounds(rect, viewport);
+    let px_w = rect.width * viewport.cell_w;
+    let px_h = rect.height * viewport.cell_h;
+    GpuPrimitive::WidgetInstance {
+        widget_type: "button-icon".to_string(),
+        instance: WidgetInstance {
+            ndc_min,
+            ndc_max,
+            value_t: icon,
+            orientation: 0.0,
+            itime: viewport.time_seconds,
+            uniform_a: [0.0; 4],
+            uniform_b: [0.0; 4],
+            uniform_c: [0.0; 4],
+            uniform_d: [0.0; 4],
+            color_a: [color.r, color.g, color.b, color.a],
+            color_b: [0.0; 4],
+            color_c: [0.0; 4],
+            color_d: [0.0; 4],
+            corner_radius: 0.0,
+            pixel_aspect: if px_h > 0.0 { px_w / px_h } else { 1.0 },
+        },
+        is_background: false,
+    }
+}
+
 /// The search glyph at the left of a filterable dropdown's filter row,
 /// sized to the row's font like [`checkmark_primitive`].
 pub(crate) fn magnifier_primitive(

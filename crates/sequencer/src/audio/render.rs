@@ -277,15 +277,20 @@ pub(super) fn sync_effect_modulator_transport_clock_params(
     }
 }
 
-pub(super) fn sync_dj_mixer_transport_phase(data: &mut AudioCallbackData, block_start_sample: u64) {
-    let playing = data.state.transport.playing.load(Ordering::Relaxed);
-    let bpm = data.state.transport.bpm.load(Ordering::Relaxed).max(1) as f64;
-    let total_beats = if playing {
-        block_start_sample as f64 * bpm / (data.sample_rate * 60.0)
+/// Beat phase pushed to transport-synced effects. It counts from the play
+/// edge (`transport_beats`, the metronome's clock), never from stream start:
+/// the stream's sample count is unrelated to the song's downbeat.
+pub(super) fn effect_transport_phase(playing: bool, transport_beats: f64) -> f32 {
+    if playing {
+        crate::effects::dj_mixer::transport_beat_phase(transport_beats)
     } else {
-        0.0
-    };
-    let beat_phase = crate::effects::dj_mixer::transport_beat_phase(total_beats);
+        crate::effects::dj_mixer::TRANSPORT_STOPPED_PHASE
+    }
+}
+
+pub(super) fn sync_dj_mixer_transport_phase(data: &mut AudioCallbackData) {
+    let playing = data.state.transport.playing.load(Ordering::Relaxed);
+    let beat_phase = effect_transport_phase(playing, data.transport_beats);
 
     let live_tracks = data.scheduler_snapshot.transport.num_tracks;
     for chain in data.state.pattern.effect_chains.iter().take(live_tracks) {

@@ -516,6 +516,82 @@ fn widget_frag(input: WidgetVaryings) -> @location(0) vec4<f32>
         } else {
             d = min(abs(drop) - stroke, glint);
         }
+    } else if (input.value_t > 20.5) {
+        // save: a tray with an arrow dropping into it (export's mirror).
+        var tray_l: f32 = button_icon_segment(p, vec2<f32>(-0.46, 0.08), vec2<f32>(-0.46, 0.44)) - stroke;
+        var tray_b: f32 = button_icon_segment(p, vec2<f32>(-0.46, 0.44), vec2<f32>(0.46, 0.44)) - stroke;
+        var tray_r: f32 = button_icon_segment(p, vec2<f32>(0.46, 0.44), vec2<f32>(0.46, 0.08)) - stroke;
+        var shaft: f32 = button_icon_segment(p, vec2<f32>(0.0, -0.48), vec2<f32>(0.0, 0.20)) - stroke;
+        var head_a: f32 = button_icon_segment(p, vec2<f32>(0.0, 0.20), vec2<f32>(-0.21, -0.01)) - stroke;
+        var head_b: f32 = button_icon_segment(p, vec2<f32>(0.0, 0.20), vec2<f32>(0.21, -0.01)) - stroke;
+        d = min(min(tray_l, min(tray_b, tray_r)), min(shaft, min(head_a, head_b)));
+    } else if (input.value_t > 19.5) {
+        // clips: three session-view clip rows, a launch square and a bar each.
+        d = 1.0;
+        for (var i: i32 = 0; i < 3; i = i + 1) {
+            var y: f32 = -0.34 + f32(i) * 0.34;
+            var launch: f32 = button_icon_round_rect(p - vec2<f32>(-0.38, y), vec2<f32>(0.10, 0.10), 0.03);
+            var bar: f32 = button_icon_round_rect(p - vec2<f32>(0.15, y), vec2<f32>(0.33, 0.10), 0.03);
+            d = min(d, min(launch, bar));
+        }
+    } else if (input.value_t > 18.5) {
+        // ungroup: two outlined squares pulled apart along the diagonal.
+        var a: f32 = abs(button_icon_round_rect(p - vec2<f32>(-0.24, -0.22), vec2<f32>(0.20, 0.20), 0.05)) - stroke;
+        var b: f32 = abs(button_icon_round_rect(p - vec2<f32>(0.24, 0.22), vec2<f32>(0.20, 0.20), 0.05)) - stroke;
+        d = min(a, b);
+    } else if (input.value_t > 17.5) {
+        // export: an open tray with an arrow rising out of it.
+        var tray_l: f32 = button_icon_segment(p, vec2<f32>(-0.46, 0.08), vec2<f32>(-0.46, 0.44)) - stroke;
+        var tray_b: f32 = button_icon_segment(p, vec2<f32>(-0.46, 0.44), vec2<f32>(0.46, 0.44)) - stroke;
+        var tray_r: f32 = button_icon_segment(p, vec2<f32>(0.46, 0.44), vec2<f32>(0.46, 0.08)) - stroke;
+        var shaft: f32 = button_icon_segment(p, vec2<f32>(0.0, 0.22), vec2<f32>(0.0, -0.48)) - stroke;
+        var head_a: f32 = button_icon_segment(p, vec2<f32>(0.0, -0.48), vec2<f32>(-0.21, -0.27)) - stroke;
+        var head_b: f32 = button_icon_segment(p, vec2<f32>(0.0, -0.48), vec2<f32>(0.21, -0.27)) - stroke;
+        d = min(min(tray_l, min(tray_b, tray_r)), min(shaft, min(head_a, head_b)));
+    } else if (input.value_t > 15.5) {
+        // link (16) / unlink (17): two chain links on the rising diagonal,
+        // interlocked, or pulled apart with break ticks between them.
+        var r: vec2<f32> = vec2<f32>(p.x - p.y, p.x + p.y) * 0.70711;
+        var broken: bool = input.value_t > 16.5;
+        var offset: f32 = select(0.19, 0.31, broken);
+        var half_len: f32 = select(0.25, 0.20, broken);
+        var la: f32 = button_icon_round_rect(r - vec2<f32>(-offset, 0.0), vec2<f32>(half_len, 0.13), 0.13);
+        var lb: f32 = button_icon_round_rect(r - vec2<f32>(offset, 0.0), vec2<f32>(half_len, 0.13), 0.13);
+        d = min(abs(la) - stroke, abs(lb) - stroke);
+        if (broken) {
+            var tick_a: f32 = button_icon_segment(r, vec2<f32>(0.0, -0.36), vec2<f32>(0.0, -0.22)) - 0.05;
+            var tick_b: f32 = button_icon_segment(r, vec2<f32>(0.0, 0.22), vec2<f32>(0.0, 0.36)) - 0.05;
+            d = min(d, min(tick_a, tick_b));
+        }
+    } else if (input.value_t > 14.5) {
+        // pencil: a diagonal barrel with an end cap, a ferrule band and a
+        // sharpened tip at the lower left.
+        var side_a: f32 = button_icon_segment(p, vec2<f32>(-0.115, 0.285), vec2<f32>(0.445, -0.275)) - stroke;
+        var side_b: f32 = button_icon_segment(p, vec2<f32>(-0.285, 0.115), vec2<f32>(0.275, -0.445)) - stroke;
+        var cap: f32 = button_icon_segment(p, vec2<f32>(0.445, -0.275), vec2<f32>(0.275, -0.445)) - stroke;
+        var band: f32 = button_icon_segment(p, vec2<f32>(0.305, -0.135), vec2<f32>(0.135, -0.305)) - stroke;
+        var tip_a: f32 = button_icon_segment(p, vec2<f32>(-0.46, 0.46), vec2<f32>(-0.115, 0.285)) - stroke;
+        var tip_b: f32 = button_icon_segment(p, vec2<f32>(-0.46, 0.46), vec2<f32>(-0.285, 0.115)) - stroke;
+        var base: f32 = button_icon_segment(p, vec2<f32>(-0.115, 0.285), vec2<f32>(-0.285, 0.115)) - stroke;
+        d = min(min(min(side_a, side_b), min(cap, band)), min(min(tip_a, tip_b), base));
+    } else if (input.value_t > 13.5) {
+        // heart: Inigo Quilez's exact heart SDF, flipped so the point is at
+        // the bottom (+y is down here) and scaled into the +-0.46 glyph box.
+        var hq: vec2<f32> = vec2<f32>(abs(p.x), 0.46 - p.y) / 0.84;
+        var heart: f32;
+        if (hq.y + hq.x > 1.0) {
+            heart = length(hq - vec2<f32>(0.25, 0.75)) - 0.35355;
+        } else {
+            var ha: vec2<f32> = hq - vec2<f32>(0.0, 1.0);
+            var hb: vec2<f32> = hq - vec2<f32>(0.5 * max(hq.x + hq.y, 0.0));
+            heart = sqrt(min(dot(ha, ha), dot(hb, hb))) * sign(hq.x - hq.y);
+        }
+        heart = heart * 0.84;
+        if (filled) {
+            d = heart;
+        } else {
+            d = abs(heart) - stroke;
+        }
     } else if (input.value_t > 12.5) {
         // bookmark: a ribbon, a tall rounded rect with a V notch cut out of
         // its bottom edge. Filled style is the silhouette; stroke style

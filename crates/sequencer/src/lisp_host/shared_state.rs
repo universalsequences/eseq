@@ -1326,6 +1326,10 @@ impl ScratchControlRuntime {
             });
         }
         let _ = self.runtime.take_status_message();
+        // Expr bodies run under a step budget (spec §10): armed only around
+        // the body itself, so compiling a callback on first use and every
+        // other process run on this VM stay unlimited.
+        let step_budget = invocation.step_budget;
         let execution_result = (|| -> Result<(), String> {
             if self.process_run_cache_enabled() {
                 let callback =
@@ -1344,13 +1348,15 @@ impl ScratchControlRuntime {
                             .insert(invocation.source.clone(), callback.clone());
                         callback
                     };
-                self.runtime
-                    .invoke(callback, Vec::new())
-                    .map_err(|error| format!("{error:?}"))?;
+                self.runtime.set_step_budget(step_budget);
+                let result = self.runtime.invoke(callback, Vec::new());
+                self.runtime.set_step_budget(None);
+                result.map_err(|error| format!("{error:?}"))?;
             } else {
-                self.runtime
-                    .eval_str(&invocation.source)
-                    .map_err(|error| format!("{error:?}"))?;
+                self.runtime.set_step_budget(step_budget);
+                let result = self.runtime.eval_str(&invocation.source);
+                self.runtime.set_step_budget(None);
+                result.map_err(|error| format!("{error:?}"))?;
             }
             Ok(())
         })();

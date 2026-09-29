@@ -61,6 +61,39 @@ pub(super) fn all_override_entries(
         )
 }
 
+/// Every scene-slot store in the scene bank with its site: each scene's own,
+/// then every clip of every rack bank. Kind `:document` slots live in either
+/// (docs/jaki-kind-spec.md §3): a clip-bearing rack's instances in its clips.
+pub(super) fn for_each_slot_store(
+    scenes: &mut ProjectScenes,
+    mut f: impl FnMut(GraphOverrideSite, &mut crate::sequencer::SceneSlotStore),
+) {
+    for scene in &mut scenes.scenes {
+        f(GraphOverrideSite::Scene(scene.id), &mut scene.scene_slots);
+    }
+    for bank in &mut scenes.rack_banks {
+        let group_id = bank.group_id;
+        for clip in &mut bank.clips {
+            f(GraphOverrideSite::Clip { group_id, clip_id: clip.id }, &mut clip.scene_slots);
+        }
+    }
+}
+
+/// The `:document` slots of instances `ids` in one store.
+fn owned_document_slots(
+    store: &crate::sequencer::SceneSlotStore,
+    ids: &[u64],
+) -> Vec<(String, crate::process::ProcessLiteral)> {
+    store
+        .values()
+        .iter()
+        .filter(|(name, _)| {
+            crate::lisp_host::instance_document_slot_owner(name).is_some_and(|id| ids.contains(&id))
+        })
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect()
+}
+
 impl App {
     /// `<kind name> <n>` with the smallest `n` no instance label uses yet.
     pub fn default_instance_label(&self, kind_id: &str) -> String {
@@ -85,6 +118,17 @@ impl App {
             .collect();
         self.state.with_scenes(|scenes| {
             taken.extend(all_override_entries(scenes).map(|graph| graph.sequencer_id));
+            // Undoing a create can leave document slots behind too.
+        });
+        self.state.with_scenes_mut(|scenes| {
+            for_each_slot_store(scenes, |_, store| {
+                taken.extend(
+                    store
+                        .values()
+                        .keys()
+                        .filter_map(|name| crate::lisp_host::instance_document_slot_owner(name)),
+                );
+            });
         });
         let mut id = self.instances.next_id.max(1);
         while self.instances.contains(id) || taken.contains(&id) {
@@ -116,6 +160,7 @@ impl App {
     /// replaying its scratch) stays unpublished until the kind registers.
     /// Returns how many sequencers were (un)published.
     pub fn publish_instance_sequencers(&self) -> usize {
+        self.sync_instance_racks();
         let published = self.state.published_sequencers();
         let mut changed = 0;
         for instance in &self.instances.list {
@@ -142,6 +187,29 @@ impl App {
             }
         }
         changed
+    }
+
+    /// Tell the scene bank which rack owns each instance, so a clip-bearing
+    /// rack's instance documents compose from its clips. Republishes the
+    /// scheduler snapshot when that moved.
+    pub(super) fn sync_instance_racks(&self) {
+        let racks: std::collections::BTreeMap<u64, u64> = self
+            .instances
+            .list
+            .iter()
+            .filter_map(|instance| instance.owner.rack().map(|rack| (instance.id, rack)))
+            .collect();
+        let changed = self.state.with_scenes_mut(|scenes| {
+            if scenes.instance_racks == racks {
+                false
+            } else {
+                scenes.instance_racks = racks;
+                true
+            }
+        });
+        if changed {
+            self.state.publish_scheduler_snapshot();
+        }
     }
 
     /// Replace the whole instance list (project open / new project): the
@@ -192,14 +260,64 @@ impl App {
                 }
             });
         });
-        InstanceOverridesState { ids, sites }
+        let mut documents = Vec::new();
+        self.state.with_scenes_mut(|scenes| {
+            for_each_slot_store(scenes, |site, store| {
+                let slots = owned_document_slots(store, &ids);
+                if !slots.is_empty() {
+                    documents.push((site, slots));
+                }
+            });
+        });
+        InstanceOverridesState { ids, sites, documents }
     }
 
-    /// Splice `state` back: drop every override keyed by one of its ids,
-    /// wherever it is, and re-insert the recorded ones at their sites (a
-    /// site that no longer exists is skipped). Every other sequencer's
-    /// overrides are untouched.
+    /// Rewrite the `:document` slots of `ids` wherever they live (every
+    /// scene, every rack clip): `edit` gets one store's slots of those
+    /// instances and returns what they should be. Returns whether anything
+    /// changed.
+    pub(super) fn edit_instance_documents(
+        &self,
+        ids: &[u64],
+        mut edit: impl FnMut(
+            GraphOverrideSite,
+            Vec<(String, crate::process::ProcessLiteral)>,
+        ) -> Vec<(String, crate::process::ProcessLiteral)>,
+    ) -> bool {
+        let mut changed = false;
+        self.state.with_scenes_mut(|scenes| {
+            for_each_slot_store(scenes, |site, store| {
+                let owned = owned_document_slots(store, ids);
+                let wanted = edit(site, owned.clone());
+                if wanted == owned {
+                    return;
+                }
+                for (name, _) in &owned {
+                    let _ = store.set_override(name.clone(), None);
+                }
+                for (name, value) in wanted {
+                    if let Err(error) = store.set_override(name.clone(), Some(value)) {
+                        eprintln!("metal_seq: instance document slot {name}: {error}");
+                    }
+                }
+                changed = true;
+            });
+        });
+        if changed {
+            self.state.publish_scheduler_snapshot();
+        }
+        changed
+    }
+
     fn restore_instance_overrides(&self, state: &InstanceOverridesState) {
+        self.edit_instance_documents(&state.ids, |site, _| {
+            state
+                .documents
+                .iter()
+                .find(|(recorded, _)| *recorded == site)
+                .map(|(_, slots)| slots.clone())
+                .unwrap_or_default()
+        });
         self.state.with_scenes_mut(|scenes| {
             for_each_override_list(scenes, |site, graphs| {
                 graphs.retain(|graph| !state.ids.contains(&graph.sequencer_id));
@@ -380,6 +498,7 @@ impl App {
                 .ok_or_else(|| format!("Instance {id} does not exist"))?;
             let removed = app.instances.list.remove(position);
             app.drop_instance_overrides(&[id]);
+            app.edit_instance_documents(&[id], |_, _| Vec::new());
             Ok(removed)
         })
     }
@@ -416,6 +535,7 @@ impl App {
                 }
             });
             app.drop_instance_overrides(&ids);
+            app.edit_instance_documents(&ids, |_, _| Vec::new());
             if let Some(module) = detach_import {
                 app.set_evaluated_scratch_import(&ScratchImportState {
                     module: module.to_string(),
@@ -481,6 +601,26 @@ impl App {
                 let changed = !copies.is_empty();
                 graphs.extend(copies);
                 changed
+            });
+            // The document follows, pattern for pattern.
+            app.edit_instance_documents(&[source.id, new_id], |_, slots| {
+                let copies: Vec<_> = slots
+                    .iter()
+                    .filter(|(name, _)| {
+                        crate::lisp_host::instance_document_slot_owner(name) == Some(source.id)
+                    })
+                    .filter_map(|(name, value)| {
+                        let field = name.rsplit_once('/')?.1;
+                        Some((crate::lisp_host::instance_document_slot(new_id, field), value.clone()))
+                    })
+                    .collect();
+                slots
+                    .into_iter()
+                    .filter(|(name, _)| {
+                        crate::lisp_host::instance_document_slot_owner(name) == Some(source.id)
+                    })
+                    .chain(copies)
+                    .collect()
             });
             let position = app
                 .instances
@@ -591,6 +731,65 @@ impl App {
                             .cloned()
                             .map(&remap)
                     });
+                // The document moves by the same rule (docs/jaki-kind-spec.md
+                // §3.1): each scene's composed view is read before anything
+                // moves, then lands in the new owner's home.
+                let per_scene_docs: Vec<Vec<(String, crate::process::ProcessLiteral)>> = (0
+                    ..scenes.scenes.len())
+                    .map(|scene_idx| owned_document_slots(&scenes.composed_scene_slots(scene_idx), &[id]))
+                    .collect();
+                let fallback_docs = per_scene_docs
+                    .get(current_scene)
+                    .filter(|docs| !docs.is_empty())
+                    .or_else(|| per_scene_docs.iter().find(|docs| !docs.is_empty()))
+                    .cloned()
+                    .unwrap_or_default();
+                for_each_slot_store(scenes, |_, store| {
+                    for (name, _) in owned_document_slots(store, &[id]) {
+                        let _ = store.set_override(name, None);
+                    }
+                });
+                match owner.rack() {
+                    Some(group_id) => scenes.instance_racks.insert(id, group_id),
+                    None => scenes.instance_racks.remove(&id),
+                };
+                let write_docs = |store: &mut crate::sequencer::SceneSlotStore,
+                                  docs: &[(String, crate::process::ProcessLiteral)]| {
+                    for (name, value) in docs {
+                        let _ = store.set_override(name.clone(), Some(value.clone()));
+                    }
+                };
+                match owner.rack().filter(|group_id| banked(scenes, *group_id)) {
+                    Some(group_id) => {
+                        let pointers: Vec<Option<crate::sequencer::RackClipId>> = (0..scenes
+                            .scenes
+                            .len())
+                            .map(|scene_idx| scenes.scene_rack_clip(scene_idx, group_id))
+                            .collect();
+                        if let Some(bank) = scenes.rack_bank_mut(group_id) {
+                            for clip in &mut bank.clips {
+                                let docs = pointers
+                                    .iter()
+                                    .enumerate()
+                                    .filter(|(_, pointer)| **pointer == Some(clip.id))
+                                    .map(|(scene_idx, _)| &per_scene_docs[scene_idx])
+                                    .next()
+                                    .unwrap_or(&fallback_docs);
+                                write_docs(&mut clip.scene_slots, docs);
+                            }
+                        }
+                    }
+                    None => {
+                        for (scene_idx, scene) in scenes.scenes.iter_mut().enumerate() {
+                            let docs = if per_scene_docs[scene_idx].is_empty() && from_banked {
+                                &fallback_docs
+                            } else {
+                                &per_scene_docs[scene_idx]
+                            };
+                            write_docs(&mut scene.scene_slots, docs);
+                        }
+                    }
+                }
                 for_each_override_list(scenes, |_, graphs| {
                     graphs.retain(|graph| graph.sequencer_id != id);
                 });
@@ -1624,6 +1823,53 @@ mod tests {
         assert_eq!(published_owner(&app, a), None);
         applied(redo(&mut app));
         assert_eq!(routes(&app, a), (Some(1), Some(Track(1)), Some(Off)));
+    }
+
+    fn doc(app: &App, id: u64) -> Option<crate::process::ProcessLiteral> {
+        app.state
+            .current_scene_slots()
+            .get(&crate::lisp_host::instance_document_slot(id, "figures"))
+            .cloned()
+    }
+
+    /// docs/jaki-kind-spec.md §3.1: the lifecycle carries `:document` slots,
+    /// and a move onto a clip-bearing rack re-homes them into its clip.
+    #[test]
+    fn documents_follow_duplicate_delete_undo_and_move() {
+        let (mut app, _runtime) = fixture_with_tracks(4);
+        with_rack(&mut app);
+        let value = crate::process::ProcessLiteral::Number(3.0);
+        let a = app.create_instance_recorded(KIND, ProjectInstanceOwner::Project, None).unwrap();
+        app.state
+            .write_current_scene_slot(crate::lisp_host::instance_document_slot(a, "figures"), value.clone())
+            .unwrap();
+        let b = app.duplicate_instance_recorded(a).expect("duplicate");
+        assert_eq!(doc(&app, b), Some(value.clone()), "the duplicate copies the document");
+
+        app.delete_instance_recorded(a).expect("delete");
+        assert_eq!(doc(&app, a), None);
+        assert_ne!(app.allocate_instance_id(), a, "a slot-holding id is never reused");
+        applied(undo(&mut app));
+        assert_eq!(doc(&app, a), Some(value.clone()), "undo brings the document back");
+
+        app.state.with_scenes_mut(|scenes| {
+            let clip = scenes.create_rack_clip_with_members(1, &[1, 2], "A");
+            assert!(scenes.set_scene_rack_clip(0, 1, Some(clip)));
+        });
+        app.move_instance_owner_recorded(a, ProjectInstanceOwner::Rack(1)).expect("into rack");
+        assert_eq!(doc(&app, a), Some(value.clone()), "still reads the same document");
+        app.state.with_scenes(|scenes| {
+            let name = crate::lisp_host::instance_document_slot(a, "figures");
+            assert!(scenes.scenes[0].scene_slots.get(&name).is_none(), "left the scene");
+            let clip = scenes.current_rack_clip(1).unwrap();
+            assert_eq!(
+                scenes.rack_bank(1).unwrap().clip(clip).unwrap().scene_slots.get(&name),
+                Some(&value),
+                "now lives in the rack's clip"
+            );
+        });
+        applied(undo(&mut app));
+        assert_eq!(doc(&app, a), Some(value));
     }
 
     #[test]

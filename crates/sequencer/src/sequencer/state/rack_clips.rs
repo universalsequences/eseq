@@ -37,6 +37,10 @@ pub struct RackClip {
     /// `rack_memberships`, so the snapshot carries these exactly as a scene
     /// carries its own overrides.
     pub graph_overrides: Vec<ProjectGraphOverrides>,
+    /// The `:document` scene slots of the instances this rack owns
+    /// (docs/jaki-kind-spec.md §3): a rack-owned instance is scene-locked to
+    /// the rack's clip, exactly like its graph overrides.
+    pub scene_slots: super::SceneSlotStore,
 }
 
 /// One rack's clip bank. `members` mirrors `group.members` so composition needs
@@ -362,6 +366,68 @@ impl ProjectScenes {
         }
     }
 
+    /// The clip-bearing rack whose clips hold scene slot `name`: set for a
+    /// `:document` slot of an instance a rack with a clip bank owns
+    /// (docs/jaki-kind-spec.md §3), `None` when the scene holds it.
+    pub fn document_slot_rack(&self, name: &str) -> Option<u64> {
+        let id = crate::lisp_host::instance_document_slot_owner(name)?;
+        let group_id = *self.instance_racks.get(&id)?;
+        self.rack_bank(group_id)
+            .is_some_and(|bank| !bank.clips.is_empty())
+            .then_some(group_id)
+    }
+
+    /// Scene `scene_idx`'s slots composed like its graph overrides: a
+    /// clip-bearing rack's instance documents come from its pointed clip (a
+    /// `None` pointer leaves them at their defaults), everything else from
+    /// the scene.
+    pub fn composed_scene_slots(&self, scene_idx: usize) -> super::SceneSlotStore {
+        let Some(scene) = self.scenes.get(scene_idx) else {
+            return super::SceneSlotStore::default();
+        };
+        let mut composed = scene.scene_slots.clone();
+        composed.retain_names(|name| self.document_slot_rack(name).is_none());
+        for bank in &self.rack_banks {
+            if bank.clips.is_empty() {
+                continue;
+            }
+            let Some(clip) = self
+                .scene_rack_clip(scene_idx, bank.group_id)
+                .and_then(|clip_id| bank.clip(clip_id))
+            else {
+                continue;
+            };
+            composed.overlay(&clip.scene_slots);
+        }
+        composed
+    }
+
+    /// [`Self::composed_scene_slots`] for every scene, by position.
+    pub fn composed_scene_slot_table(&self) -> Vec<std::sync::Arc<super::SceneSlotStore>> {
+        (0..self.scenes.len())
+            .map(|scene_idx| std::sync::Arc::new(self.composed_scene_slots(scene_idx)))
+            .collect()
+    }
+
+    /// Where a write of slot `name` in scene `scene_idx` lands: the rack's
+    /// active clip for a clip-bearing rack's instance document (minting the
+    /// clip under a `None` pointer, like a graph edit), else the scene.
+    pub fn scene_slot_store_mut(
+        &mut self,
+        scene_idx: usize,
+        name: &str,
+    ) -> Option<&mut super::SceneSlotStore> {
+        match self.document_slot_rack(name) {
+            Some(group_id) => {
+                let clip_id = self.ensure_scene_rack_clip(scene_idx, group_id)?;
+                self.rack_bank_mut(group_id)?
+                    .clip_mut(clip_id)
+                    .map(|clip| &mut clip.scene_slots)
+            }
+            None => self.scenes.get_mut(scene_idx).map(|scene| &mut scene.scene_slots),
+        }
+    }
+
     /// Scene overrides composed with every clip-bearing rack's active clip
     /// (§4.1). Rack-owned entries in the scene belong to legacy racks and stay;
     /// a rack with a bank contributes only through its pointed clip, so a
@@ -484,9 +550,14 @@ impl ProjectScenes {
             .map(|scene| scene.rack_clips.clone())
             .unwrap_or_default();
         for (group_id, source) in inherited {
-            let Some((members, cells, overrides)) = self.rack_bank(group_id).and_then(|bank| {
+            let Some((members, cells, overrides, slots)) = self.rack_bank(group_id).and_then(|bank| {
                 let clip = bank.clip(source)?;
-                Some((bank.members.clone(), clip.cells.clone(), clip.graph_overrides.clone()))
+                Some((
+                bank.members.clone(),
+                clip.cells.clone(),
+                clip.graph_overrides.clone(),
+                clip.scene_slots.clone(),
+            ))
             }) else {
                 continue;
             };
@@ -509,6 +580,7 @@ impl ProjectScenes {
                 color: None,
                 cells: forked,
                 graph_overrides: overrides,
+                scene_slots: slots,
             });
             self.set_scene_rack_clip(scene_idx, group_id, Some(id));
         }
@@ -525,6 +597,7 @@ impl ProjectScenes {
             color: None,
             cells: vec![None; members],
             graph_overrides: Vec::new(),
+            scene_slots: Default::default(),
         });
         Some(id)
     }
@@ -610,7 +683,17 @@ impl ProjectScenes {
                 .filter(|graph| graph.owner_rack == Some(group_id))
                 .cloned()
                 .collect();
-            if cells.iter().all(Option::is_none) && overrides.is_empty() {
+            let owned_slots: Vec<(String, crate::process::ProcessLiteral)> = scene
+                .scene_slots
+                .values()
+                .iter()
+                .filter(|(name, _)| {
+                    crate::lisp_host::instance_document_slot_owner(name)
+                        .is_some_and(|id| self.instance_racks.get(&id) == Some(&group_id))
+                })
+                .map(|(name, value)| (name.clone(), value.clone()))
+                .collect();
+            if cells.iter().all(Option::is_none) && overrides.is_empty() && owned_slots.is_empty() {
                 // An empty scene shares the one `None` pointer rather than
                 // producing an empty clip.
                 continue;
@@ -623,6 +706,9 @@ impl ProjectScenes {
             {
                 clip.cells = cells;
                 clip.graph_overrides = overrides;
+                for (name, value) in &owned_slots {
+                    let _ = clip.scene_slots.set_override(name.clone(), Some(value.clone()));
+                }
             }
             self.set_scene_rack_clip(scene_idx, group_id, Some(id));
             // The rack's slices now live in the clip: drop them from the scene
@@ -759,6 +845,60 @@ mod tests {
             process_chain: None,
         }];
         graph
+    }
+
+    fn write_doc(scenes: &mut ProjectScenes, scene_idx: usize, name: &str, value: f64) {
+        scenes
+            .scene_slot_store_mut(scene_idx, name)
+            .expect("a store")
+            .write_literal(name, crate::process::ProcessLiteral::Number(value))
+            .expect("write");
+    }
+
+    fn read_doc(scenes: &ProjectScenes, scene_idx: usize, name: &str) -> Option<f64> {
+        match scenes.composed_scene_slots(scene_idx).get(name) {
+            Some(crate::process::ProcessLiteral::Number(value)) => Some(*value),
+            _ => None,
+        }
+    }
+
+    /// docs/jaki-kind-spec.md §3: a project instance's document is locked to
+    /// the scene; a clip-bearing rack's instance's to the rack's clip, so two
+    /// scenes sharing a clip share it and a scene on another clip does not.
+    #[test]
+    fn instance_documents_lock_to_the_scene_or_the_racks_clip() {
+        let mut scenes = scenes();
+        let project_doc = crate::lisp_host::instance_document_slot(3, "figures");
+        write_doc(&mut scenes, 0, &project_doc, 1.0);
+        write_doc(&mut scenes, 1, &project_doc, 2.0);
+        assert_eq!(read_doc(&scenes, 0, &project_doc), Some(1.0));
+        assert_eq!(read_doc(&scenes, 1, &project_doc), Some(2.0));
+        assert_eq!(read_doc(&scenes, 2, &project_doc), None, "unset: the default");
+
+        let rack_doc = crate::lisp_host::instance_document_slot(5, "figures");
+        scenes.instance_racks.insert(5, RACK);
+        let a = scenes.create_rack_clip_with_members(RACK, &MEMBERS, "A");
+        let b = scenes.create_rack_clip(RACK, "B").expect("clip b");
+        assert!(scenes.set_scene_rack_clip(0, RACK, Some(a)));
+        assert!(scenes.set_scene_rack_clip(1, RACK, Some(a)));
+        assert!(scenes.set_scene_rack_clip(2, RACK, Some(b)));
+        write_doc(&mut scenes, 0, &rack_doc, 7.0);
+        assert!(scenes.scenes[0].scene_slots.get(&rack_doc).is_none(), "lands in the clip");
+        assert_eq!(read_doc(&scenes, 1, &rack_doc), Some(7.0), "scene 1 plays clip A too");
+        assert_eq!(read_doc(&scenes, 2, &rack_doc), None, "clip B keeps its own");
+        write_doc(&mut scenes, 2, &rack_doc, 9.0);
+        assert_eq!(read_doc(&scenes, 0, &rack_doc), Some(7.0));
+        assert_eq!(read_doc(&scenes, 2, &rack_doc), Some(9.0));
+        // Relaunching clip B on scene 0 brings B's document with it.
+        assert!(scenes.set_scene_rack_clip(0, RACK, Some(b)));
+        assert_eq!(read_doc(&scenes, 0, &rack_doc), Some(9.0));
+        // The project instance is untouched by any of it.
+        assert_eq!(read_doc(&scenes, 0, &project_doc), Some(1.0));
+        // A new scene forks the pointed clip, document included.
+        scenes.fork_rack_clips_for_new_scene(0);
+        let forked = scenes.scene_rack_clip(0, RACK).expect("forked");
+        assert_ne!(forked, b);
+        assert_eq!(read_doc(&scenes, 0, &rack_doc), Some(9.0));
     }
 
     #[test]

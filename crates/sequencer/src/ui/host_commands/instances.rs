@@ -466,6 +466,8 @@ mod tests {
             package: None,
             module: None,
             sequencer: None,
+            generator: None,
+            document: Vec::new(),
             state_fields: Vec::new(),
             has_view: false,
             keymap: None,

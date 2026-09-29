@@ -1368,6 +1368,17 @@ pub(crate) fn build_track_lane_patch_value(state: &Arc<SequencerState>, track: u
             ),
             ("in-ports", list_value(in_ports)),
             ("param-ports", list_value(param_ports)),
+            // Expr cards (docs/expr-process-spec.md §2); same keys as the
+            // node patch (`graph_node_lane_patch_value`).
+            ("expr", Value::Bool(slot.is_expr_card())),
+            (
+                "expr-line",
+                slot.expr_preview_line().map(Value::String).unwrap_or(Value::Nil),
+            ),
+            (
+                "compile-error",
+                slot.expr_compile_error(def.is_some()).map(Value::String).unwrap_or(Value::Nil),
+            ),
         ])
     }))
 }
@@ -1381,7 +1392,14 @@ pub(crate) fn build_all_track_lane_patch_value(
 
 pub(crate) fn build_process_library_value(state: &Arc<SequencerState>) -> Value {
     let published = state.published_process_authoring();
-    list_value(published.defs.iter().map(|def| {
+    // Compiled expr bodies (`expr#<hash>`) are reached through the plain
+    // `expr` card, never offered as classes (docs/expr-process-spec.md §2.1).
+    let defs: Vec<&sequencer::process::PublishedProcessDef> = published
+        .defs
+        .iter()
+        .filter(|def| !sequencer::process::is_expr_process_class(&def.name))
+        .collect();
+    list_value(defs.into_iter().map(|def| {
         map_value([
             ("name", Value::String(def.name.clone())),
             ("label", Value::String(def.name.clone())),
@@ -1544,6 +1562,19 @@ pub(crate) fn build_process_scope_cells_value(state: &Arc<SequencerState>) -> Va
         map_value([
             ("runtime-id", Value::Number(id as f64)),
             ("cells", process_scope_cells_value(&scopes[&id])),
+        ])
+    }))
+}
+
+/// `SEQ.process-run-errors`: one `{:runtime-id :error}` entry per process
+/// runtime whose latest run failed (an expr card's body raised or ran out of
+/// step budget; docs/expr-process-spec.md §2/§10). Node slots run under
+/// their instance id, so the node bay's error dot matches on `:instance-id`.
+pub(crate) fn build_process_run_errors_value(state: &Arc<SequencerState>) -> Value {
+    list_value(state.process_run_errors().into_iter().map(|(id, error)| {
+        map_value([
+            ("runtime-id", Value::Number(id as f64)),
+            ("error", Value::String(error)),
         ])
     }))
 }

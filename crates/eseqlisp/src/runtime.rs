@@ -775,6 +775,8 @@ pub enum TileOp {
         current: String,
         new_name: String,
     },
+    /// Focus the tile currently showing buffer `name` (no-op when none does).
+    SelectWindowFor(String),
     SetWindowTabsFor {
         current: String,
         tabs: Vec<LayoutTabSpec>,
@@ -791,6 +793,9 @@ pub struct LayoutTabSpec {
     pub label: String,
     pub buffer_name: String,
     pub on_close: Option<Value>,
+    /// `:on-select (lambda (buffer tab-index) ...)`: fired when a click on
+    /// the tab strip switches the tile to this tab's buffer.
+    pub on_select: Option<Value>,
 }
 
 #[derive(Debug, Clone)]
@@ -855,6 +860,9 @@ pub(crate) struct PendingModeDefinition {
     /// Parent mode whose keymap, on-key handler and live-keys opt-in this
     /// mode inherits (`define-mode … :inherit "parent"`).
     pub inherit: Option<String>,
+    /// Handler that saves a buffer in this mode instead of writing a file
+    /// (`define-mode … :on-save "fn"`).
+    pub on_save: Option<String>,
 }
 
 /// Buffer metadata mirrored into the runtime for `buffer-info-list`.
@@ -893,8 +901,14 @@ pub(crate) struct RuntimeBridgeState {
     pub current_buffer_read_only: bool,
     pub pending_set_read_only: Option<bool>,
     pub current_buffer_mode: String,
+    /// Whether the active buffer's mode saves it through an `:on-save`
+    /// handler rather than to a file.
+    pub current_buffer_saves_itself: bool,
     pub pending_mode_defs: Vec<PendingModeDefinition>,
     pub pending_mode_bindings: Vec<(String, String, String)>, // (mode, key, handler)
+    /// `(mode-add-completions mode items)`: extra completion candidates a
+    /// mode offers its buffers (mode, items).
+    pub pending_mode_completions: Vec<(String, Vec<crate::mode::CompletionItem>)>,
     pub pending_set_mode: Option<String>,
     pub pending_set_mode_for: Vec<(String, String)>, // (buffer_name, mode_name)
     pub pending_open_file: Option<String>,
@@ -924,7 +938,8 @@ pub(crate) struct RuntimeBridgeState {
     pub pending_set_view_mode: Option<String>,
     pub current_view_mode: String,
     pub pending_set_text_zoom: Option<f64>,
-    pub pending_toasts: Vec<(String, crate::host::ToastKind)>,
+    /// (message, kind, progress); progress only applies to loading toasts.
+    pub pending_toasts: Vec<(String, crate::host::ToastKind, Option<f32>)>,
     pub current_text_zoom: f64,
     // Tiling operations — processed in order enqueued
     pub pending_tile_ops: Vec<TileOp>,
@@ -1116,6 +1131,10 @@ impl NativeContext {
         self.shared.borrow().current_buffer_mode.clone()
     }
 
+    pub fn current_buffer_saves_itself(&self) -> bool {
+        self.shared.borrow().current_buffer_saves_itself
+    }
+
     pub fn define_mode(
         &mut self,
         name: String,
@@ -1124,6 +1143,7 @@ impl NativeContext {
         on_enter: Option<String>,
         on_key: Option<String>,
         inherit: Option<String>,
+        on_save: Option<String>,
     ) {
         // Registry auto-qualification (spec §5): a declared module's mode
         // name AND its late-bound handler strings capture the module
@@ -1131,6 +1151,7 @@ impl NativeContext {
         let name = self.qualify_registration_name(&name);
         let on_enter = on_enter.map(|h| self.qualify_registration_name(&h));
         let on_key = on_key.map(|h| self.qualify_registration_name(&h));
+        let on_save = on_save.map(|h| self.qualify_registration_name(&h));
         // The parent reference resolves like a mode-bind-key target: module
         // first, flat fallback in the editor (resolve_mode_name), lazily at
         // lookup time so a parent declared later still links.
@@ -1145,6 +1166,7 @@ impl NativeContext {
                 on_enter,
                 on_key,
                 inherit,
+                on_save,
             });
     }
 
@@ -1158,6 +1180,14 @@ impl NativeContext {
             .borrow_mut()
             .pending_mode_bindings
             .push((mode, key, handler));
+    }
+
+    pub fn mode_add_completions(&mut self, mode: String, items: Vec<crate::mode::CompletionItem>) {
+        let mode = self.qualify_registration_name(&mode);
+        self.shared
+            .borrow_mut()
+            .pending_mode_completions
+            .push((mode, items));
     }
 
     pub fn set_buffer_mode(&mut self, mode: String) {
@@ -1337,6 +1367,13 @@ impl NativeContext {
             .push(TileOp::SetWindowBufferFor { current, new_name });
     }
 
+    pub fn select_window_for(&mut self, name: String) {
+        self.shared
+            .borrow_mut()
+            .pending_tile_ops
+            .push(TileOp::SelectWindowFor(name));
+    }
+
     pub fn set_window_tabs_for(&mut self, current: String, tabs: Vec<LayoutTabSpec>) {
         self.shared
             .borrow_mut()
@@ -1376,7 +1413,16 @@ impl NativeContext {
     }
 
     pub fn show_toast(&mut self, message: String, kind: crate::host::ToastKind) {
-        self.shared.borrow_mut().pending_toasts.push((message, kind));
+        self.show_toast_with_progress(message, kind, None);
+    }
+
+    pub fn show_toast_with_progress(
+        &mut self,
+        message: String,
+        kind: crate::host::ToastKind,
+        progress: Option<f32>,
+    ) {
+        self.shared.borrow_mut().pending_toasts.push((message, kind, progress));
     }
 
     pub fn text_zoom(&self) -> f64 {
@@ -1956,8 +2002,8 @@ impl Runtime {
             ),
             (
                 "menu-item",
-                "(menu-item \"label\" :shortcut text :disabled bool :checked bool :on-select callback child ...)",
-                "One context-menu row with optional checkmark and shortcut. Child menu rows form a submenu opened by hover or Right; leaf selection closes the whole menu.",
+                "(menu-item \"label\" :icon name :shortcut text :disabled bool :checked bool :on-select callback child ...)",
+                "One context-menu row with optional checkmark, leading icon (a button :icon name), and shortcut. Child menu rows form a submenu opened by hover or Right; leaf selection closes the whole menu.",
             ),
             (
                 "menu-separator",
@@ -2034,6 +2080,12 @@ impl Runtime {
             ("clamp", "(clamp value low high)", "Clamp value to the inclusive numeric range."),
             ("mix", "(mix a b t)", "Linearly interpolate between a and b by t."),
             ("smoothstep", "(smoothstep edge0 edge1 x)", "Return smooth Hermite interpolation between two edges."),
+            ("bit-and", "(bit-and a b ...)", "Bitwise AND of two or more numbers as unsigned 32-bit integers."),
+            ("bit-or", "(bit-or a b ...)", "Bitwise OR of two or more numbers as unsigned 32-bit integers."),
+            ("bit-xor", "(bit-xor a b ...)", "Bitwise XOR of two or more numbers as unsigned 32-bit integers."),
+            ("bit-not", "(bit-not x)", "Bitwise NOT of x as an unsigned 32-bit integer."),
+            ("shl", "(shl x n)", "Shift x left by n bits (n masked to 0..31), wrapping to 32 bits."),
+            ("shr", "(shr x n)", "Logical right shift of x by n bits (n masked to 0..31)."),
             ("vec2", "(vec2 x y)", "Return a two-number vector list."),
             ("length", "(length vec2)", "Return the length of a two-number vector."),
             ("dot", "(dot a b)", "Return the dot product of two vec2 lists."),
@@ -2860,6 +2912,11 @@ impl Runtime {
     /// reactive flush. Unlike a global slot, this resolves the state's value.
     pub fn state_value(&self, name: &str) -> Option<Value> {
         self.vm.state_value(name)
+    }
+
+    /// See [`crate::vm::VM::set_step_budget`].
+    pub fn set_step_budget(&mut self, budget: Option<u64>) {
+        self.vm.set_step_budget(budget);
     }
 
     pub fn has_global(&self, name: &str) -> bool {
@@ -3739,6 +3796,12 @@ impl Runtime {
         std::mem::take(&mut self.shared.borrow_mut().pending_mode_bindings)
     }
 
+    pub(crate) fn take_pending_mode_completions(
+        &mut self,
+    ) -> Vec<(String, Vec<crate::mode::CompletionItem>)> {
+        std::mem::take(&mut self.shared.borrow_mut().pending_mode_completions)
+    }
+
     pub(crate) fn take_pending_set_mode(&mut self) -> Option<String> {
         self.shared.borrow_mut().pending_set_mode.take()
     }
@@ -3848,7 +3911,7 @@ impl Runtime {
         self.shared.borrow_mut().pending_set_view_mode.take()
     }
 
-    pub(crate) fn take_pending_toasts(&mut self) -> Vec<(String, crate::host::ToastKind)> {
+    pub(crate) fn take_pending_toasts(&mut self) -> Vec<(String, crate::host::ToastKind, Option<f32>)> {
         std::mem::take(&mut self.shared.borrow_mut().pending_toasts)
     }
 

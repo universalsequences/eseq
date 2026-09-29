@@ -354,6 +354,10 @@ pub struct ProjectScenes {
     /// save-back clone the stale live lanes over the newly pointed clip — the
     /// same hazard `stale_mask` covers for song-latched lanes.
     pub live_rack_clips: Vec<(u64, Option<RackClipId>)>,
+    /// Instance id -> owning rack, for every rack-owned kind instance. Set
+    /// by the App from its instance list (never serialized): it decides
+    /// which `:document` slots live in rack clips (`document_slot_rack`).
+    pub instance_racks: std::collections::BTreeMap<u64, u64>,
     pub(super) next_scene_id: u64,
     pub(super) next_bank_id: u64,
 }
@@ -445,6 +449,7 @@ impl ProjectScenes {
             banks: default_banks,
             rack_banks: Vec::new(),
             live_rack_clips: Vec::new(),
+            instance_racks: std::collections::BTreeMap::new(),
             next_scene_id: u64::try_from(snapshots.len().max(1))
                 .expect("scene count exceeds stable identity space")
                 .checked_add(1)
@@ -830,7 +835,7 @@ impl ProjectScenes {
         // member indices) exactly as a scene's do — the scheduler resolves
         // member -> track through `rack_memberships`.
         snapshot.graph_overrides = self.composed_graph_overrides(scene_idx);
-        snapshot.scene_slots = scene.scene_slots.clone();
+        snapshot.scene_slots = self.composed_scene_slots(scene_idx);
         snapshot.project_process_chain = scene.project_process_chain.clone();
         for track in 0..self.track_pools.len() {
             let Some(id) = self.composed_scene_cell(scene_idx, track) else {
@@ -944,6 +949,16 @@ impl ProjectScenes {
             .map(|track| self.rack_composed_cell(scene_idx, track))
             .collect();
         let composed_graph_overrides = snapshot.graph_overrides.clone();
+        // A composed snapshot carries clip-held instance documents too; the
+        // clip stays their home, so only the scene's own slots come back.
+        let mut scene_slots = snapshot.scene_slots.clone();
+        let clip_held: Vec<String> = scene_slots
+            .values()
+            .keys()
+            .filter(|name| self.document_slot_rack(name).is_some())
+            .cloned()
+            .collect();
+        scene_slots.retain_names(|name| !clip_held.iter().any(|held| held == name));
         let Some(scene) = self.scenes.get_mut(scene_idx) else {
             return false;
         };
@@ -958,7 +973,7 @@ impl ProjectScenes {
         }
         scene.mod_connections = snapshot.mod_connections.clone();
         scene.neural_networks = snapshot.neural_networks.clone();
-        scene.scene_slots = snapshot.scene_slots.clone();
+        scene.scene_slots = scene_slots;
         // Deliberately NOT copied from the snapshot: the scene itself is the
         // live authority for `project_process_chain` (edited in place via
         // edit_current_project_process_chain), and several callers save
@@ -1112,10 +1127,7 @@ impl ProjectScenes {
     }
 
     pub fn current_scene_slots(&self) -> SceneSlotStore {
-        self.scenes
-            .get(self.current_scene)
-            .map(|scene| scene.scene_slots.clone())
-            .unwrap_or_default()
+        self.composed_scene_slots(self.current_scene)
     }
 
     pub fn current_neural_networks(&self) -> Vec<ProjectNeuralNetwork> {

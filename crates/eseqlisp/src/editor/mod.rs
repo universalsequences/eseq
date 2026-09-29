@@ -22,7 +22,7 @@ use crate::host::{BufferId, CompileKind, HostCommand, HostEvent, ToastKind};
 use crate::hot_reload::{ReloadReport, SourceOverlay};
 use crate::layout::{LayoutNode, Rect};
 use crate::mode::{
-    BufferMode, CompletionItem, CompletionMatch, TokenSpan, completion_match,
+    BufferMode, CompletionItem, CompletionMatch, TokenSpan, completion_match_with_extras,
     has_completion_prefix, has_import_module_prefix,
 };
 use crate::runtime::Runtime;
@@ -530,6 +530,12 @@ pub struct MajorMode {
     /// Parent mode consulted after this one for keybindings, the on-key
     /// handler and the live-keys opt-in (`define-mode … :inherit`).
     pub inherit: Option<String>,
+    /// Saves a buffer in this mode instead of writing a file
+    /// (`define-mode … :on-save`); see `Editor::save_active_buffer_command`.
+    pub on_save: Option<String>,
+    /// Extra completion candidates for buffers in this mode (and modes that
+    /// inherit it), from `(mode-add-completions …)`.
+    pub completions: Vec<CompletionItem>,
 }
 
 #[derive(Debug, Clone)]
@@ -651,7 +657,17 @@ pub struct Toast {
     /// newer toast) removes it.
     expires_at: Option<Instant>,
     pub action: Option<ToastAction>,
+    /// Loading toasts: completed fraction for the progress bar.
+    pub progress: Option<f32>,
+    /// Spinner clock origin. Kept when a loading toast is updated in place so
+    /// the spinner does not restart on every progress step.
+    started_at: Instant,
+    /// Last spinner frame a redraw was requested for.
+    anim_frame: u64,
 }
+
+/// Spinner redraw cadence while a loading toast is up (~30 fps).
+const TOAST_ANIM_FRAME: Duration = Duration::from_millis(33);
 
 /// A clickable link on a toast. Clicking it queues `command` for the host
 /// and dismisses the toast.
@@ -1700,6 +1716,7 @@ impl Editor {
                             label: tab.label,
                             buffer_idx,
                             on_close: tab.on_close,
+                            on_select: tab.on_select,
                         });
                     }
                     if !resolved_tabs.is_empty()
@@ -3092,6 +3109,20 @@ impl Editor {
             // this buffer. Resume here, after the swap is complete, like every
             // other presentation path.
             self.resume_deferred_effects_for_presentation();
+            // The tab's `:on-select` hears the switch (the event the host's
+            // own view of the tile's buffer follows); only a real switch.
+            let on_select = self
+                .tile_root
+                .find_leaf(tile_id)
+                .and_then(|leaf| leaf.tabs.get(tab_index))
+                .and_then(|tab| tab.on_select.clone());
+            if let Some(callback) = on_select {
+                let buffer_name = self.buffers[new_buffer_idx].name.clone();
+                self.apply_widget_output(Some(crate::widget_render::EventOutput {
+                    callback,
+                    args: vec![Value::String(buffer_name), Value::Number(tab_index as f64)],
+                }));
+            }
         } else {
             self.active_leaf_mut().selected_tab = Some(tab_index);
         }
@@ -3480,14 +3511,58 @@ impl Editor {
         let duration = match kind {
             ToastKind::Success => TOAST_SUCCESS_DURATION,
             ToastKind::Error => TOAST_ERROR_DURATION,
+            ToastKind::Loading => return self.show_loading_toast(message, None),
         };
         self.toast = Some(Toast {
             message: message.into(),
             kind,
             expires_at: Some(Instant::now() + duration),
             action: None,
+            progress: None,
+            started_at: Instant::now(),
+            anim_frame: 0,
         });
         self.mark_needs_redraw();
+    }
+
+    /// Show (or update in place) a loading toast: an animated spinner, plus a
+    /// progress bar when `progress` is `Some(0..=1)`. It stays up until the
+    /// host replaces it with a result toast or calls `dismiss_toast`, and
+    /// clicks pass through it.
+    pub fn show_loading_toast(&mut self, message: impl Into<String>, progress: Option<f32>) {
+        let message = message.into();
+        let progress = progress.map(|p| p.clamp(0.0, 1.0));
+        if let Some(toast) = self.toast.as_mut().filter(|toast| toast.kind == ToastKind::Loading) {
+            if toast.message != message || toast.progress != progress {
+                toast.message = message;
+                toast.progress = progress;
+                self.mark_needs_redraw();
+            }
+            return;
+        }
+        self.toast = Some(Toast {
+            message,
+            kind: ToastKind::Loading,
+            expires_at: None,
+            action: None,
+            progress,
+            started_at: Instant::now(),
+            anim_frame: 0,
+        });
+        self.mark_needs_redraw();
+    }
+
+    /// Dismiss the toast only if it is still a loading toast, leaving any
+    /// result toast that already replaced it.
+    pub fn dismiss_loading_toast(&mut self) {
+        if self.toast.as_ref().is_some_and(|toast| toast.kind == ToastKind::Loading) {
+            self.dismiss_toast();
+        }
+    }
+
+    /// True while a loading toast is animating, so hosts keep ticking.
+    pub fn toast_animating(&self) -> bool {
+        self.toast.as_ref().is_some_and(|toast| toast.kind == ToastKind::Loading)
     }
 
     /// Show a toast that stays until the user closes it, optionally with a
@@ -3503,6 +3578,9 @@ impl Editor {
             kind,
             expires_at: None,
             action,
+            progress: None,
+            started_at: Instant::now(),
+            anim_frame: 0,
         });
         self.mark_needs_redraw();
     }
@@ -3512,7 +3590,13 @@ impl Editor {
             message: toast.message.clone(),
             kind: toast.kind,
             action_label: toast.action.as_ref().map(|action| action.label.clone()),
-            closable: toast.expires_at.is_none(),
+            closable: toast.expires_at.is_none() && toast.kind != ToastKind::Loading,
+            progress: toast.progress.filter(|_| toast.kind == ToastKind::Loading),
+            elapsed_s: if toast.kind == ToastKind::Loading {
+                toast.started_at.elapsed().as_secs_f32()
+            } else {
+                0.0
+            },
         })
     }
 
@@ -3531,7 +3615,10 @@ impl Editor {
         let interactive = self
             .toast
             .as_ref()
-            .is_some_and(|toast| toast.expires_at.is_none() || toast.action.is_some());
+            .is_some_and(|toast| {
+                toast.kind != ToastKind::Loading
+                    && (toast.expires_at.is_none() || toast.action.is_some())
+            });
         let hit = self
             .toast_placement
             .filter(|_| interactive)
@@ -3607,6 +3694,14 @@ impl Editor {
             .is_some_and(|expires_at| Instant::now() >= expires_at)
         {
             self.dismiss_toast();
+        }
+
+        if let Some(toast) = self.toast.as_mut().filter(|toast| toast.kind == ToastKind::Loading) {
+            let frame = (toast.started_at.elapsed().as_nanos() / TOAST_ANIM_FRAME.as_nanos()) as u64;
+            if frame != toast.anim_frame {
+                toast.anim_frame = frame;
+                self.mark_needs_redraw();
+            }
         }
 
         if self
@@ -5341,6 +5436,7 @@ impl Editor {
                 label: tab.label,
                 buffer_idx,
                 on_close: tab.on_close,
+                on_select: tab.on_select,
             });
         }
         if !resolved_tabs
@@ -6117,6 +6213,46 @@ impl Editor {
             .find_map(|mode| mode.on_key.clone())
     }
 
+    /// The handler that saves the active buffer instead of a file write: the
+    /// nearest mode in the chain that declares `:on-save`.
+    fn active_mode_on_save(&self) -> Option<String> {
+        self.active_mode_chain()
+            .into_iter()
+            .find_map(|mode| mode.on_save.clone())
+    }
+
+    /// Save a buffer whose mode declares `:on-save` (an expr card's edit
+    /// buffer commits its body): call the handler with the buffer active. A
+    /// truthy result marks that buffer saved; false/nil or an error leaves
+    /// it modified, so the edit is not mistaken for committed.
+    fn run_mode_save_handler(&mut self, handler: &str) {
+        let handler = self.runtime.resolve_handler_name(handler).to_string();
+        let buffer_id = self.active_buffer().id;
+        self.sync_runtime_source_context();
+        self.clear_minibuffer_message();
+        let saved = match self.runtime.invoke_global(&handler, Vec::new()) {
+            Ok(Some(value)) => !matches!(value, Value::Nil | Value::Bool(false)),
+            Ok(None) => false,
+            Err(error) => {
+                self.show_transient_message(format!("Error: {error:?}"));
+                false
+            }
+        };
+        // A handler that calls (save-buffer) itself would queue another save
+        // that the follow-up side-effect pass routes straight back here,
+        // recursing without end. This save is the one in flight; drop it.
+        let _ = self.runtime.take_pending_save();
+        if saved {
+            if let Some(buffer) = self.buffers.iter_mut().find(|buffer| buffer.id == buffer_id) {
+                buffer.dirty = false;
+            }
+        }
+        if let Some(status) = self.runtime.take_status_message() {
+            self.show_transient_message(status);
+        }
+        self.mark_needs_redraw();
+    }
+
     /// Whether the active major mode (or an ancestor) explicitly permits host
     /// live-keyboard shortcuts. Modes opt in so ordinary source and special
     /// text modes keep ownership of their bare keys by default.
@@ -6211,6 +6347,12 @@ impl Editor {
 
         if let Some(prefix) = self.pending_key.take() {
             let chord = format!("{} {}", key_str(prefix), key_str(key));
+            // A chord the buffer's mode binds outranks the global one, as a
+            // single key does (the expr edit buffer's C-c C-c commits the
+            // body instead of evaluating editor code).
+            if self.handle_mode_keybinding(&chord) {
+                return;
+            }
             if let Some(handler) = self.lisp_bindings.get(&chord).cloned() {
                 // Module-qualified handlers resolve against the binding
                 // module first, then fall back to the flat name (spec §5).
@@ -8509,12 +8651,18 @@ impl Editor {
             .as_ref()
             .and_then(|state| state.items.get(state.selected))
             .map(|item| item.label.clone());
-        self.completion = completion_match(
+        let mode_completions: Vec<CompletionItem> = self
+            .active_mode_chain()
+            .into_iter()
+            .flat_map(|mode| mode.completions.iter().cloned())
+            .collect();
+        self.completion = completion_match_with_extras(
             &self.active_buffer().mode,
             self.active_buffer(),
             &symbols,
             &metadata,
             &module_names,
+            &mode_completions,
         )
         .map(
             |CompletionMatch {
@@ -8552,13 +8700,19 @@ impl Editor {
         id
     }
 
+    /// Whether `prefix` opens a chord: a global binding or one in the active
+    /// buffer's mode chain continues with it.
     fn binding_has_prefix(&self, prefix: &str) -> bool {
-        self.lisp_bindings.keys().any(|binding| {
+        let continues = |binding: &String| {
             binding
                 .strip_prefix(prefix)
-                .map(|rest| rest.starts_with(' '))
-                .unwrap_or(false)
-        })
+                .is_some_and(|rest| rest.starts_with(' '))
+        };
+        self.lisp_bindings.keys().any(continues)
+            || self
+                .active_mode_chain()
+                .iter()
+                .any(|mode| mode.keybindings.keys().any(continues))
     }
 
     fn needs_save_as_prompt(&self) -> bool {
@@ -8793,20 +8947,42 @@ impl Editor {
             self.active_buffer_mut().read_only = read_only;
         }
 
-        // Process mode definitions
+        // Process mode definitions. Redefining a mode (a Lisp hot reload
+        // re-evaluates its `define-mode`) updates the declared fields but
+        // keeps the registrations other code made on it: `mode-bind-key`
+        // from another module or init.lisp, and `mode-add-completions` made
+        // lazily (an expr edit buffer registers its `$` completions when it
+        // opens, not at load), which nothing would re-run after the reload.
         for definition in self.runtime.take_pending_mode_defs() {
+            let (keybindings, completions) = self
+                .mode_registry
+                .remove(&definition.name)
+                .map(|previous| (previous.keybindings, previous.completions))
+                .unwrap_or_default();
             self.mode_registry.insert(
                 definition.name.clone(),
                 MajorMode {
                     name: definition.name,
                     read_only: definition.read_only,
                     live_keys: definition.live_keys,
-                    keybindings: HashMap::new(),
+                    keybindings,
                     on_enter: definition.on_enter,
                     on_key: definition.on_key,
                     inherit: definition.inherit,
+                    on_save: definition.on_save,
+                    completions,
                 },
             );
+        }
+
+        for (mode_name, items) in self.runtime.take_pending_mode_completions() {
+            let mode_name = self.resolve_mode_name(mode_name);
+            if let Some(mode) = self.mode_registry.get_mut(&mode_name) {
+                for item in items {
+                    mode.completions.retain(|existing| existing.label != item.label);
+                    mode.completions.push(item);
+                }
+            }
         }
 
         // Process mode keybindings
@@ -9450,14 +9626,22 @@ impl Editor {
                 }
             }
         } else if self.runtime.take_pending_save() {
-            match self.save_active_buffer() {
-                Ok(path) => {
-                    self.show_transient_message(format!("Saved {}", path.display()));
-                    self.toast_buffer_saved(&path);
-                }
-                Err(error) => {
-                    self.show_transient_message(format!("Error: {error:?}"));
-                    self.toast_buffer_save_failed(&error);
+            if let Some(handler) = self.active_mode_on_save() {
+                self.run_mode_save_handler(&handler);
+                // The handler's own side effects (styles, cursor, status)
+                // may sit before this point in the pass; run a full pass
+                // for them now rather than on some later refresh.
+                self.refresh_runtime_side_effects();
+            } else {
+                match self.save_active_buffer() {
+                    Ok(path) => {
+                        self.show_transient_message(format!("Saved {}", path.display()));
+                        self.toast_buffer_saved(&path);
+                    }
+                    Err(error) => {
+                        self.show_transient_message(format!("Error: {error:?}"));
+                        self.toast_buffer_save_failed(&error);
+                    }
                 }
             }
         } else if self.runtime.take_pending_load() {
@@ -9543,6 +9727,9 @@ impl Editor {
                         self.minibuffer = Some(format!("No buffer named '{name}'"));
                     }
                 }
+                crate::runtime::TileOp::SelectWindowFor(name) => {
+                    self.switch_active_tile_to_buffer_named(&name);
+                }
                 crate::runtime::TileOp::SetWindowBufferFor { current, new_name } => {
                     if !self.swap_buffer_in_tile_showing(&current, &new_name) {
                         self.minibuffer =
@@ -9620,7 +9807,11 @@ impl Editor {
             }
         }
 
-        for (message, kind) in self.runtime.take_pending_toasts() {
+        for (message, kind, progress) in self.runtime.take_pending_toasts() {
+            if kind == ToastKind::Loading {
+                self.show_loading_toast(message, progress);
+                continue;
+            }
             self.show_toast(message, kind);
         }
 

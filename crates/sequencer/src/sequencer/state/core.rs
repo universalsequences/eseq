@@ -391,6 +391,11 @@ pub struct PublishedSequencer {
     pub requires: Vec<String>,
     /// Present iff this is a graph-mode sequencer.
     pub graph: Option<crate::graph::GraphManifest>,
+    /// Tick mode only: the rack that owns this generator (a rack-owned kind
+    /// instance, docs/jaki-kind-spec.md §4). Its emissions' `:track` is a
+    /// member index, mapped through the rack's members by the scheduler.
+    /// Graph mode carries its owner on the manifest instead.
+    pub owner_rack: Option<u64>,
 }
 
 /// First tick failure of a registered generator, reported once by the
@@ -753,6 +758,19 @@ pub struct SequencerState {
     pub(super) generator_tick_errors: Mutex<Vec<GeneratorTickErrorNotice>>,
     pub(super) published_process_authoring: Mutex<crate::process::PublishedProcessAuthoringSnapshot>,
     pub(super) published_process_authoring_version: AtomicU64,
+    /// Hidden `expr#<hash>` classes compiled from expr card bodies
+    /// (docs/expr-process-spec.md §2.1), by class name. Merged into every
+    /// `published_process_authoring()` read. They live here rather than in
+    /// the UI VM's authoring registry because they are a pure function of
+    /// project data: the registry is reset on a project switch and rebuilt
+    /// with the UI runtime, while a class compiled from a body stays valid
+    /// for as long as any slot holds that body.
+    pub(super) expr_process_defs:
+        Mutex<std::collections::BTreeMap<String, crate::process::PublishedProcessDef>>,
+    /// Scheduler → UI mirror of the last process run error per runtime id
+    /// (a node slot's is its instance id); an expr card's error dot.
+    pub(super) process_run_errors: Mutex<std::collections::BTreeMap<u64, String>>,
+    pub(super) process_run_errors_version: AtomicU64,
     /// Control-thread channel writes awaiting the scheduler
     /// (docs/jaki-live-channel-widgets-spec.md 7). These deliberately do not
     /// ride `published_process_authoring`: `ProcessRuntime::sync_channels`

@@ -38,6 +38,8 @@ pub mod focus;
 pub mod history;
 mod effect_params;
 mod effects;
+mod factory_promote;
+pub use factory_promote::{PromotePreview, PromoteTarget};
 mod fx_chain;
 mod graph;
 pub(crate) use graph::latency::LatencyPlan;
@@ -272,6 +274,64 @@ struct PendingProjectLoad {
     /// Load-time migration notes (instance-kinds spec §10), appended to the
     /// open status.
     migration_notes: Vec<String>,
+}
+
+// Relative cost of each load step, for the progress bar. Tracks and effects
+// compile DSP; patterns only rebuild snapshots.
+const LOAD_WEIGHT_CLEAR: usize = 1;
+const LOAD_WEIGHT_TRACK: usize = 4;
+const LOAD_WEIGHT_EFFECT: usize = 2;
+const LOAD_WEIGHT_PATTERN: usize = 1;
+const LOAD_WEIGHT_FINALIZE: usize = 2;
+
+impl PendingProjectLoad {
+    /// Message and completed fraction for the loading toast. The message
+    /// names the step about to run, which is what the user waits on next.
+    fn progress(&self) -> (String, f32) {
+        let project = &self.project;
+        let tracks = project.tracks.len();
+        let effects_before = |track: usize| -> usize {
+            project.custom_effects.iter().take(track).map(Vec::len).sum()
+        };
+        let effects = effects_before(project.custom_effects.len());
+        let patterns = project.patterns.len();
+        let total = LOAD_WEIGHT_CLEAR
+            + tracks * LOAD_WEIGHT_TRACK
+            + effects * LOAD_WEIGHT_EFFECT
+            + patterns * LOAD_WEIGHT_PATTERN
+            + LOAD_WEIGHT_FINALIZE;
+        let after_tracks = LOAD_WEIGHT_CLEAR + tracks * LOAD_WEIGHT_TRACK;
+        let after_effects = after_tracks + effects * LOAD_WEIGHT_EFFECT;
+        let name = &self.name;
+        let (done, step) = match self.phase {
+            PendingProjectLoadPhase::ClearExisting => (0, String::new()),
+            PendingProjectLoadPhase::AddTrack(index) if index < tracks => {
+                let track = &project.tracks[index];
+                let label = match &track.kind {
+                    crate::project::ProjectTrackKind::Custom { instrument_name } => Some(
+                        instrument_name.rsplit(['/', ':']).next().unwrap_or(instrument_name).to_string(),
+                    ),
+                    _ => track.name.clone().filter(|name| !name.trim().is_empty()),
+                };
+                let step = match label {
+                    Some(label) => format!(" · track {}/{tracks} · {label}", index + 1),
+                    None => format!(" · track {}/{tracks}", index + 1),
+                };
+                (LOAD_WEIGHT_CLEAR + index * LOAD_WEIGHT_TRACK, step)
+            }
+            PendingProjectLoadPhase::AddTrack(_) => (after_tracks, " · effects".to_string()),
+            PendingProjectLoadPhase::AddEffect { track_idx, offset } => (
+                after_tracks + (effects_before(track_idx) + offset).min(effects) * LOAD_WEIGHT_EFFECT,
+                " · effects".to_string(),
+            ),
+            PendingProjectLoadPhase::BuildPattern(index) => (
+                after_effects + index.min(patterns) * LOAD_WEIGHT_PATTERN,
+                format!(" · pattern {}/{patterns}", (index + 1).min(patterns.max(1))),
+            ),
+            PendingProjectLoadPhase::Finalize => (total - LOAD_WEIGHT_FINALIZE, " · finishing".to_string()),
+        };
+        (format!("Loading {name}{step}"), done as f32 / total as f32)
+    }
 }
 
 /// Immutable audio asset interned for the lifetime of one pending project load.

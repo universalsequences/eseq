@@ -91,6 +91,7 @@ pub mod module_export_migration;
 pub mod package;
 pub mod reactive;
 pub mod runtime;
+pub mod sexp_slot;
 pub mod sound_glyph_data;
 pub mod text;
 pub mod text_capture;

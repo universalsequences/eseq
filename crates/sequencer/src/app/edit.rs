@@ -25,7 +25,7 @@ use super::history::{
     TrackCreationPatch, TrackDeletionPatch, TrackParamsBatchPatch, TrackParamsPatch,
     TrackPresentationChange, TrackPresentationPatch, TrackPresentationState,
     TransportAuthoringSnapshot, TransportParamsPatch,
-    BarTransposePatch,
+    BarTransposePatch, GraphNodeProcessChainPatch,
 };
 use super::App;
 use super::fx_chain::{
@@ -2145,6 +2145,66 @@ impl App {
                 "Edit scene slot",
                 &merge_key,
                 EditPatch::SceneSlot(patch),
+                retained_bytes,
+            )
+            .ok_or(EditError::UnsupportedCommand)?;
+        Ok(EditOutcome::Applied(history_move))
+    }
+
+    /// Record a graph node process-chain edit the UI VM has already applied
+    /// (eseq-waa9.23). A click records one entry; `merge` (a picker drag)
+    /// stages repeated edits of one inlet as one gesture entry, committed on
+    /// pointer release like any coalesced knob drag. The entry keeps the
+    /// chain from before the gesture's first edit.
+    pub fn record_applied_graph_node_process_edit(
+        &mut self,
+        patch: GraphNodeProcessChainPatch,
+        merge: Option<String>,
+    ) -> Result<EditOutcome, EditError> {
+        let Some(merge) = merge else {
+            finish_active_gesture(self);
+            if patch.before == patch.after {
+                return Ok(EditOutcome::NoOp);
+            }
+            let retained_bytes = patch.retained_bytes();
+            return Ok(EditOutcome::Applied(self.history.commit(
+                "Edit node process",
+                None,
+                EditPatch::GraphNodeProcessChain(patch),
+                retained_bytes,
+            )));
+        };
+        let merge_key = MergeKey::new(merge);
+        if self.history.active_gesture().map(|gesture| &gesture.merge_key) != Some(&merge_key) {
+            finish_active_gesture(self);
+        }
+        let before = self
+            .history
+            .active_gesture_patch(&merge_key)
+            .and_then(|staged| match staged {
+                EditPatch::GraphNodeProcessChain(staged)
+                    if staged.scene == patch.scene
+                        && staged.sequencer_id == patch.sequencer_id
+                        && staged.node == patch.node =>
+                {
+                    Some(staged.before.clone())
+                }
+                _ => None,
+            })
+            .unwrap_or(patch.before);
+        if before == patch.after {
+            self.history.discard_active_gesture_entry(&merge_key);
+            return Ok(EditOutcome::NoOp);
+        }
+        let patch = GraphNodeProcessChainPatch { before, ..patch };
+        let retained_bytes = patch.retained_bytes();
+        ensure_coalescing_gesture(self, &merge_key);
+        let history_move = self
+            .history
+            .stage_active_gesture(
+                "Edit node process inlet",
+                &merge_key,
+                EditPatch::GraphNodeProcessChain(patch),
                 retained_bytes,
             )
             .ok_or(EditError::UnsupportedCommand)?;
@@ -10082,6 +10142,25 @@ fn replay_patch(app: &mut App, patch: &EditPatch, mode: ApplyMode) -> Result<(),
                 .map(|_| ())
                 .map_err(EditError::ReplayFailed)
         }
+        EditPatch::GraphNodeProcessChain(patch) => {
+            let target = match mode {
+                ApplyMode::Undo => patch.before.clone(),
+                ApplyMode::Redo => patch.after.clone(),
+                ApplyMode::UserEdit | ApplyMode::ProjectLoad => {
+                    return Err(EditError::ReplayFailed(
+                        "node process replay requires undo or redo mode".to_string(),
+                    ));
+                }
+            };
+            crate::lisp_host::restore_graph_node_process_chain(
+                &app.state,
+                patch.scene,
+                patch.sequencer_id,
+                patch.node,
+                target,
+            )
+            .map_err(EditError::ReplayFailed)
+        }
         EditPatch::SceneSlots(patches) => {
             let writes = patches.iter().map(|patch| {
                 let target = match mode {
@@ -10254,6 +10333,7 @@ fn pending_gesture_publishes_scheduler(patch: &EditPatch) -> bool {
         EditPatch::TrackDeletion(_) => true,
         EditPatch::TrackPresentation(_) => false,
         EditPatch::SceneSlot(_) | EditPatch::SceneSlots(_) => true,
+        EditPatch::GraphNodeProcessChain(_) => true,
         EditPatch::SceneStructure(_) => true,
         EditPatch::RackClipAssignment(_) => true,
         // The arrangement's compiled song has no scheduler runtime.
@@ -10536,6 +10616,7 @@ fn edit_patch_retained_bytes(patch: &EditPatch) -> usize {
         EditPatch::MacroConfiguration(patch) => patch.retained_bytes(),
         EditPatch::TransportParams(patch) => patch.retained_bytes(),
         EditPatch::BarTranspose(patch) => patch.retained_bytes(),
+        EditPatch::GraphNodeProcessChain(patch) => patch.retained_bytes(),
     }
 }
 
@@ -10669,7 +10750,7 @@ pub fn cancel_active_gesture(app: &mut App) -> Result<bool, EditError> {
         EditPatch::TrackPresentation(_) => {
             replay_patch(app, &patch, ApplyMode::Undo)?;
         }
-        EditPatch::SceneSlot(_) | EditPatch::SceneSlots(_) => {
+        EditPatch::SceneSlot(_) | EditPatch::SceneSlots(_) | EditPatch::GraphNodeProcessChain(_) => {
             replay_patch(app, &patch, ApplyMode::Undo)?;
         }
         EditPatch::SceneStructure(_) => {

@@ -5,6 +5,8 @@
 (import eseq.effects.param-controls :as pc)
 (import eseq.macro-state :as ms)
 (import eseq.drum-rack-v2)
+;; The header pill + chip *step* shares with the *processes* dock.
+(import eseq.panel-header :as header)
 
 (export selected-plock-row
         plock-row-selected?
@@ -469,32 +471,18 @@
 (def step-track-badge ()
   (let ((track SEQ.current-track)
       (muted (bind-seq-nth "track-muted-effective" track)))
-    (box
-      :key "step-track-badge"
-      :width 4.55 :height 1.0
-      :padding 0
-      :corner-radius 8
-      :v-align :center
-      :muted muted
-      :background-color (rgba
+    (header/chip "step-track-badge" (eseq.mixer/track-collapsed-label track) 4.55
+      (rgba
         (eseq.mixer/track-color-r track false)
         (eseq.mixer/track-color-g track false)
         (eseq.mixer/track-color-b track false)
         1.0)
-      :muted-background-color (rgba
+      muted
+      (rgba
         (eseq.mixer/track-color-r track true)
         (eseq.mixer/track-color-g track true)
         (eseq.mixer/track-color-b track true)
-        1.0)
-      (label (eseq.mixer/track-collapsed-label track)
-        :width 4.55
-        :font-size 10
-        :v-align :center
-        :h-align :center
-        :active muted
-        :color :black
-        :active-color :dim
-        :bg :transparent))))
+        1.0))))
 
 (def step-parameters-panel ()
   (box :debug-name "step-parameters-panel" :padding 0.5
@@ -503,8 +491,7 @@
       :corner-radius 16
       :border-color :transparent ;:mixer-strip-border    
       (v-stack :gap 0.55
-        (box :padding 0.25 :background-color :mixer-strip-selected-bg :corner-radius 12 :v-align :center
-          (h-stack :gap 0.45 :align :start
+        (header/pill
             (step-track-badge)
             (h-stack :key "step-selection-summary" :gap 0.15 :align :center
               (number-label :key "step-cursor-label"
@@ -515,7 +502,7 @@
               (number-label :key "step-selection-count-label"
                 :value (bind-seq "fx-step-selection-count")
                 :suffix " selected" :decimals 0 :width 5.0
-                :font-size 8 :color :dim :bg :transparent))))
+                :font-size 8 :color :dim :bg :transparent)))
           (v-stack :gap 0.25 
             (h-stack :gap 0.55 :align :center
               (step-param-picker 3 "transpose" 4.2)

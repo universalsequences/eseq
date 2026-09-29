@@ -975,6 +975,8 @@
 ;;   `none`/`rest` the silent cycle — also useful as (every n rest));
 ;;   members must all be post-lowerable or all figure transforms
 ;;   (vel s) (note n)
+;;   any figure transform: (basevel v) (dotdecay v) (dashdecay v) (minvel v)
+;;   (maxvel v) (split t) (merge t) (L w) (R w)
 ;;   (gate s) / (dur s) — multiply every gate by s (per-cycle arg: number,
 ;;   (cyc …), (chan …)); applies in authored word order like stac
 ;; A route containing a (mute T) or (solo T) form — T a track number or
@@ -1080,7 +1082,9 @@
       'vel    (merge acc :opts (merge (get acc :opts) :vel-scale (nth args 0)))
       'note   (merge acc :opts (merge (get acc :opts) :note (nth args 0)))
       'inv    (merge acc :inv true)
-      _ acc)))
+      ;; Any other figure transform (basevel dotdecay dashdecay minvel
+      ;; maxvel split merge L R …) applies to every figure of the route.
+      _ (if (= (norm-xf w) nil) acc (merge acc :p (xform (get acc :p) w))))))
 
 (def run-route (p seg)
   (let ((r (reduce route-step (dict :p p :opts (dict)) (rest seg))))

@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -245,6 +245,12 @@ pub struct ProjectKitInstance {
     /// clips: a break kit's clips carry their own per-clip overrides.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub overrides: Option<ProjectGraphOverrides>,
+    /// The instance's `:document` fields as the current scene stored them at
+    /// export (docs/jaki-kind-spec.md §3.1); unset fields read their default.
+    /// Loading writes them into every scene under the fresh id. Values are
+    /// carried verbatim: a member-relative route stays member-relative.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub document: BTreeMap<String, crate::process::ProcessLiteral>,
 }
 
 /// A rack bus insert chain as a kit carries it: one entry per occupied slot in
@@ -656,6 +662,7 @@ impl<'de> Deserialize<'de> for ProjectFile {
         project.normalize_device_instances().map_err(D::Error::custom)?;
         migrate_legacy_chop_to_retrig(&mut project);
         migrate_legacy_process_class_names(&mut project);
+        rederive_expr_process_class_names(&mut project);
         // A take with no chunks is structurally impossible (registration
         // rejects empty chunk lists), and the loader would skip it silently
         // — desyncing the positional `track_sounds.takes` alignment so
@@ -1472,6 +1479,10 @@ pub struct ProjectRackClip {
     /// The rack-owned sequencer overrides, routes still MEMBER-relative.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub graph_overrides: Vec<ProjectGraphOverrides>,
+    /// The `:document` slots of the rack's kind instances in this clip
+    /// (docs/jaki-kind-spec.md §3), slot name -> value.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub scene_slots: BTreeMap<String, crate::process::ProcessLiteral>,
     /// Reserved for the per-clip rack bus chain snapshot (spec 10 open
     /// question). Round-trips; nothing applies it yet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3609,6 +3620,38 @@ fn migrate_legacy_process_class_names(project: &mut ProjectFile) {
     }
 }
 
+/// Expr cards store their body, not the hash (docs/expr-process-spec.md
+/// §2.1): re-derive every expr slot's `expr#<hash>` class from its stored
+/// body so the class name can never drift from the source. Compiling and
+/// registering the classes happens after load
+/// (`lisp_host::sync_expr_process_classes`).
+fn rederive_expr_process_class_names(project: &mut ProjectFile) {
+    use crate::lisp_host::rederive_expr_class_names_in_chain;
+    fn overrides(list: &mut [ProjectGraphOverrides]) {
+        for graph in list {
+            for node in &mut graph.node_intrinsics {
+                if let Some(chain) = node.process_chain.as_mut() {
+                    rederive_expr_class_names_in_chain(chain);
+                }
+            }
+        }
+    }
+    for pattern in &mut project.patterns {
+        for chain in &mut pattern.process_chains {
+            rederive_expr_class_names_in_chain(chain);
+        }
+        rederive_expr_class_names_in_chain(&mut pattern.project_process_chain);
+        overrides(&mut pattern.graph_overrides);
+    }
+    for group in &mut project.groups {
+        if let Some(rack) = group.rack.as_mut() {
+            for clip in &mut rack.clips {
+                overrides(&mut clip.graph_overrides);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod legacy_process_class_tests {
     use super::*;
@@ -3626,6 +3669,7 @@ mod legacy_process_class_tests {
             lanes: Default::default(),
             fanout: Default::default(),
             unbound_ports: Default::default(),
+            expr_source: None,
             bindings: Default::default(),
         };
         slot.bindings.insert(
@@ -4675,6 +4719,7 @@ mod tests {
                             )]),
                             fanout: Default::default(),
                             unbound_ports: Default::default(),
+                            expr_source: None,
                             bindings: std::collections::BTreeMap::from([(
                                 "shape".to_string(),
                                 Some(crate::process::ParamTarget::InstrumentParam {
@@ -4703,6 +4748,7 @@ mod tests {
                         )]),
                         fanout: Default::default(),
                         unbound_ports: Default::default(),
+                        expr_source: None,
                         bindings: std::collections::BTreeMap::new(),
                     }],
                 },
@@ -5463,6 +5509,7 @@ mod tests {
                         owner_rack: Some(3),
                         ..Default::default()
                     }],
+                    scene_slots: Default::default(),
                     bus_chain: None,
                 }],
                 next_clip_id: 5,
@@ -7263,6 +7310,7 @@ mod tests {
                 kind: "alez/neural:neural".to_string(),
                 label: "neural 1".to_string(),
                 overrides: None,
+                document: Default::default(),
             }],
             clips: vec![ProjectRackClip {
                 id: 1,
@@ -7276,6 +7324,7 @@ mod tests {
                     Vec::new(),
                 ),
                 graph_overrides: Vec::new(),
+                scene_slots: Default::default(),
                 bus_chain: None,
             }],
             // Kit version 6: a copy of the rack's active groove and amounts.

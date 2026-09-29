@@ -35,6 +35,10 @@ pub(super) struct SchedulerLookaheadState {
     /// Cleared when the worker re-syncs generator definitions, so an edited
     /// body gets a fresh attempt.
     pub(super) parked_generators: std::collections::HashSet<u64>,
+    /// Rack owner of each rack-owned generator (a kind instance on a rack,
+    /// docs/jaki-kind-spec.md §4): its emissions' `:track` is a member index.
+    /// Re-filled by the worker whenever it re-registers published sequencers.
+    pub(super) generator_owner_racks: std::collections::HashMap<u64, u64>,
     /// Last line emitted by the ESEQ_DEBUG_SCENE_SLOTS trace, so the seam
     /// reports changes rather than one line per chunk boundary.
     pub(super) last_scene_slot_debug: Option<(usize, usize, usize, String)>,
@@ -138,6 +142,7 @@ impl SchedulerLookaheadState {
             song: None,
             roll: RollState::new(),
             parked_generators: std::collections::HashSet::new(),
+            generator_owner_racks: std::collections::HashMap::new(),
             last_scene_slot_debug: None,
             graph_replay: Vec::new(),
             live_groove_chunk: None,
@@ -352,6 +357,7 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
     let mut debug_accum_invocations = scheduler.debug_accum_invocations;
     let song_playback = &mut scheduler.song;
     let parked_generators = &mut scheduler.parked_generators;
+    let generator_owner_racks = &scheduler.generator_owner_racks;
     let graph_replay = &mut scheduler.graph_replay;
     let mut track_output_events = Vec::new();
     // How many of `track_output_events` the process reads have seen; see
@@ -1127,6 +1133,7 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                         event,
                         fire_seed: None,
                         after_reset: false,
+                        delay_offset_steps: 0.0,
                     },
                     Some(&slot_inlet_writes),
                 ) {
@@ -1227,6 +1234,7 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                 ),
                 written_inlets: Vec::new(),
                 after_reset: false,
+                delay_offset_steps: 0.0,
             };
             for invocation in process_runtime.track_fires_at(
                 trigger.track,
@@ -2038,7 +2046,19 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                             return empty;
                         }
                         match scratch.invoke_sequencer_tick(generator_index, input) {
-                            Ok(result) => result,
+                            Ok(mut result) => {
+                                if let Some(group_id) = generator_owner_racks.get(&generator_id) {
+                                    map_rack_member_emissions(
+                                        &mut result.emitted,
+                                        crate::graph::rack_members(
+                                            &snapshot.rack_memberships,
+                                            *group_id,
+                                        )
+                                        .unwrap_or(&[]),
+                                    );
+                                }
+                                result
+                            }
                             Err(error) => {
                                 // Report the first failure and park: a broken
                                 // tick must be one loud notice, not silence
@@ -2282,6 +2302,9 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
         if let Some(scopes) = process_runtime.take_step_process_scopes_if_changed() {
             state.publish_process_scope_values(scopes);
         }
+        if let Some(errors) = process_runtime.take_run_errors_if_changed() {
+            state.publish_process_run_errors(errors);
+        }
         if !chunk_enqueued {
             break;
         }
@@ -2482,6 +2505,11 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                     break;
                 }
             }
+        }
+        // Graph node patches ran above; their run errors (expr cards) reach
+        // the UI with this chunk rather than the next.
+        if let Some(errors) = process_runtime.take_run_errors_if_changed() {
+            state.publish_process_run_errors(errors);
         }
         if !chunk_enqueued {
             break;
@@ -2713,4 +2741,24 @@ fn replay_retained_graph_emissions<const QUEUE_CAP: usize>(
         entry.enqueued_sample = sample_time;
         retained.push(entry);
     }
+}
+
+/// A rack-owned generator addresses its rack's members (docs/jaki-kind-spec.md
+/// §4): emission `:track` n is member n, the same member-relative rule graph
+/// routes use, so the instance plays its own pads wherever the rack sits. A
+/// member index past the rack's size (or an untracked emission) drops.
+fn map_rack_member_emissions(
+    emitted: &mut Vec<crate::lisp_host::EmittedAccumulatorEvent>,
+    members: &[usize],
+) {
+    emitted.retain_mut(|event| match event.track {
+        Some(member) => match members.get(member) {
+            Some(track) => {
+                event.track = Some(*track);
+                true
+            }
+            None => false,
+        },
+        None => false,
+    });
 }

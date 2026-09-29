@@ -1,14 +1,18 @@
 //! Control-thread ownership of the active AudioUnit's workgroup. CoreAudio
 //! property reads, reference releases and reporting never run on audio threads.
 //!
-//! Membership is adaptive. Joined helpers protect the callback tail on heavy
-//! graphs (garageddd B11: p99 5.92 -> 3.78 ms, docs/garageddd-b11-workgroups-
-//! 2026-09-14.md), but on light graphs the system wakes them 120-250 us after
-//! the block starts versus ~10 us unjoined, so they arrive after the callback
-//! thread has finished alone (superbasicsetting: 3.6% -> 2.5% transport CPU
-//! unjoined, eseq-v6te). Helpers therefore join only while the callback load
-//! (exact per 100 ms window) stays high, with hysteresis so membership does
-//! not flap.
+//! Helpers stay joined for the life of the stream. Joined helpers protect the
+//! callback tail on heavy graphs (garageddd B11: p99 5.92 -> 3.78 ms,
+//! docs/garageddd-b11-workgroups-2026-09-14.md). On light graphs the system
+//! wakes them 120-250 us after the block starts versus ~10 us unjoined
+//! (superbasicsetting: 3.6% -> 2.5% transport CPU unjoined, eseq-v6te), which
+//! the load-driven `Adaptive` policy exploited. It is no longer the default:
+//! live playing swings callback load across both thresholds, and every
+//! membership switch stalled the callback thread and all helpers together for
+//! 10-19 ms, a missed deadline (boombap test, 2026-09-27). The per-block cost
+//! of staying joined is small against a 10.7 ms budget; lowering the worker
+//! count is the user's lever. `ESEQ_AUDIO_WORKGROUP=adaptive|always|never`
+//! overrides the policy for diagnosis.
 
 use super::audiograph;
 use std::ffi::c_void;
@@ -27,13 +31,31 @@ const SWITCH_POLLS: u32 = 3;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "audio-experiments", derive(serde::Serialize))]
 pub(super) enum Policy {
-    /// Join only under heavy load (shipping default).
+    /// Join only under heavy load. Membership switches stall the callback.
     Adaptive,
+    /// Shipping default.
     Always,
     Never,
 }
 
+/// Diagnostic override for the shipping build: `adaptive`, `always`, `never`.
+const POLICY_ENV: &str = "ESEQ_AUDIO_WORKGROUP";
+
 impl Policy {
+    #[cfg_attr(feature = "audio-experiments", allow(dead_code))]
+    fn from_env() -> Option<Self> {
+        let value = std::env::var(POLICY_ENV).ok()?;
+        match value.trim().to_ascii_lowercase().as_str() {
+            "adaptive" => Some(Policy::Adaptive),
+            "always" => Some(Policy::Always),
+            "never" => Some(Policy::Never),
+            other => {
+                eprintln!("audio: ignoring {POLICY_ENV}={other:?} (expected adaptive|always|never)");
+                None
+            }
+        }
+    }
+
     fn wants_membership(self, joined: bool, load_pct: f32) -> bool {
         match self {
             Policy::Always => true,
@@ -158,7 +180,7 @@ impl Monitor {
         #[cfg(feature = "audio-experiments")]
         let policy = super::experiment::workgroup_policy();
         #[cfg(not(feature = "audio-experiments"))]
-        let policy = Policy::Adaptive;
+        let policy = Policy::from_env().unwrap_or(Policy::Always);
         let report = Arc::new(Mutex::new(Report::new(policy)));
         let shared = Arc::clone(&report);
         let (stop, receiver) = mpsc::channel();
@@ -233,17 +255,16 @@ mod tests {
         let engine = crate::audio::engine::init_engine().expect("start silent CoreAudio stream");
         let initial = engine._stream.workgroup.as_ref().unwrap().report();
         assert!(initial.verified(), "{initial:?}");
-        // A silent graph is far below the join threshold: the adaptive
-        // policy verifies an unbound pool (every helper out of the group).
-        assert_eq!(initial.policy, Policy::Adaptive);
-        assert!(!initial.enabled);
+        // The shipping policy binds every helper even to a silent graph.
+        assert_eq!(initial.policy, Policy::Always);
+        assert!(initial.enabled);
         assert!(initial.binding.worker_count > 0);
         assert_eq!(
             initial.binding.worker_count as u32,
             crate::audio::worker_prefs::running_worker_count()
                 .expect("engine recorded its worker count")
         );
-        assert_eq!(initial.binding.joined_workers, 0);
+        assert_eq!(initial.binding.joined_workers, initial.binding.worker_count);
         std::thread::sleep(Duration::from_millis(350));
         let observed = engine._stream.workgroup.as_ref().unwrap().report();
         assert!(observed.verified(), "{observed:?}");

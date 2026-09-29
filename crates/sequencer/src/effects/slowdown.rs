@@ -35,7 +35,9 @@ const TONE: usize = 6;
 const MIX: usize = 7;
 pub const PARAM_BPM: u64 = 8;
 const PARAM_COUNT: usize = 9;
-const DEFAULTS: [f32; PARAM_COUNT] = [1.0, 0.5, 1.0, 500.0, 1.0, 20.0, 20000.0, 1.0, 120.0];
+/// Beats defaults to one 4/4 bar: the classic half-time freeze of a bar's
+/// first half, restarting on every downbeat.
+const DEFAULTS: [f32; PARAM_COUNT] = [1.0, 0.5, 1.0, 500.0, 4.0, 20.0, 20000.0, 1.0, 120.0];
 /// Params appended after the transport input (see `PARAM_MODE`); their
 /// descriptor entries come last so every earlier saved index stays put.
 const EXTRA_COUNT: usize = 4;
@@ -517,7 +519,7 @@ unsafe extern "C" fn init(state: *mut c_void, sample_rate: c_int, _: c_int, _: *
         State {
             params: DEFAULTS,
             mod_depths: [[0.0; MOD_SLOTS]; MOD_TARGETS.len()],
-            transport_phase: 0.0,
+            transport_phase: super::dj_mixer::TRANSPORT_STOPPED_PHASE,
             extra: EXTRA_DEFAULTS,
             transport_seen: 0.0,
             transport_driven: false,
@@ -586,14 +588,17 @@ unsafe extern "C" fn process(
     let mod_inputs: [*mut f32; MOD_SLOTS] = std::array::from_fn(|slot| *inp.add(2 + slot));
     let coefficient = 1.0 - (-1.0 / (0.005 * s.sample_rate as f64)).exp();
     // A fresh block-start phase means the transport advanced since the last
-    // block: lock restarts to its beat grid. An unchanged one means stopped
-    // (or undriven), and the cycle keeps free-running from tempo alone.
-    let pushed = finite(s.transport_phase, 0.0, TRANSPORT_CYCLE_BEATS as f32, 0.0);
-    if pushed.to_bits() != s.transport_seen.to_bits() {
-        s.transport_seen = pushed;
+    // block: lock restarts to its beat grid. The stopped sentinel (or an
+    // unchanged value, when nobody drives the input) free-runs from tempo.
+    // Remembering the sentinel makes the first playing block, phase 0, fresh.
+    let raw = s.transport_phase;
+    let stopped = !(raw >= 0.0);
+    if !stopped && raw.to_bits() != s.transport_seen.to_bits() {
+        s.transport_seen = raw;
         s.transport_driven = true;
-        s.local_phase = pushed as f64;
-    } else if s.transport_driven {
+        s.local_phase = finite(raw, 0.0, TRANSPORT_CYCLE_BEATS as f32, 0.0) as f64;
+    } else if s.transport_driven || stopped {
+        s.transport_seen = raw;
         s.transport_driven = false;
         s.transport_cycle = -1;
     }

@@ -10,7 +10,7 @@
 //! ```lisp
 //! (context-menu :is-open (menu-open?) :anchor-col c :anchor-row r
 //!               :on-close (fn () (close-menu!))
-//!   (menu-item "Rename" :shortcut "⌘R" :on-select (fn (info) ...))
+//!   (menu-item "Rename" :icon :pencil :shortcut "⌘R" :on-select (fn (info) ...))
 //!   (menu-item "Change Pattern"
 //!     (menu-item "Pattern 1" :checked true :on-select (fn (info) ...))
 //!     (menu-item "Pattern 2" :on-select (fn (info) ...)))
@@ -338,6 +338,15 @@ fn measured_text_width(text: &str, font_size: f32, ctx: &MeasureCtx<'_>) -> f32 
     }
 }
 
+/// A `menu-item`'s `:icon` (keyword or string) as a `button-icon` glyph id;
+/// unknown names draw nothing and reserve no slot.
+fn item_icon_value(value: &Value) -> Option<f32> {
+    match value {
+        Value::Keyword(name) | Value::String(name) => super::button::icon_name_value(name),
+        _ => None,
+    }
+}
+
 pub(crate) fn menu_item_select_info(node: &LayoutNode) -> Value {
     let mut info = HashMap::new();
     let mut insert = |key: &str, value: Value| {
@@ -505,7 +514,7 @@ impl WidgetDefinition for MenuItemWidget {
     }
 
     fn size_affecting_props(&self) -> &'static [&'static str] {
-        &["text", "shortcut", "font-size", "checked"]
+        &["text", "shortcut", "font-size", "checked", "icon"]
     }
 
     fn measure(
@@ -526,6 +535,9 @@ impl WidgetDefinition for MenuItemWidget {
         }
         if !children.is_empty() { width += SHORTCUT_GAP_COLS; }
         if matches!(node, Value::Map(map) if map.contains_key("checked")) { width += 1.5; }
+        if matches!(node, Value::Map(map) if map.get("icon").is_some_and(|icon| item_icon_value(&icon.borrow()).is_some())) {
+            width += super::menu_style::ICON_SLOT_COLS;
+        }
         Some(Size {
             width,
             height: ITEM_ROW_HEIGHT,
@@ -596,11 +608,24 @@ impl WidgetDefinition for MenuItemWidget {
         }
         let font_size = super::menu_style::menu_font_size_from_props(&node.props);
         let text_row = node.rect.row + (ITEM_ROW_HEIGHT - 1.0) * 0.5;
+        let check_cols = if node.props.contains_key("checked") { 1.5 } else { 0.0 };
+        let icon = node.props.get("icon").and_then(item_icon_value);
+        if let Some(icon) = icon {
+            prims.push(super::menu_style::icon_primitive(
+                node.rect,
+                node.rect.col + ITEM_PADDING_COLS + check_cols,
+                font_size,
+                icon,
+                dim(resolve_named_color(&node.props, "text-color", crate::theme::DROPDOWN_FG())),
+                _viewport,
+            ));
+        }
+        let icon_cols = if icon.is_some() { super::menu_style::ICON_SLOT_COLS } else { 0.0 };
         if let Some(Value::String(text)) = node.props.get("text") {
             prims.push(GpuPrimitive::ProportionalText(
                 GpuProportionalTextPrimitive {
                     row: text_row,
-                    col: node.rect.col + ITEM_PADDING_COLS + if node.props.contains_key("checked") { 1.5 } else { 0.0 },
+                    col: node.rect.col + ITEM_PADDING_COLS + check_cols + icon_cols,
                     align_width: 0.0,
                     h_align: 0.0,
                     text: text.clone(),
@@ -878,6 +903,50 @@ mod tests {
                 assert!((instance.ndc_max[axis] - instance.ndc_min[axis]).abs() > 0.0);
             }
         }
+    }
+
+    #[test]
+    fn icon_row_draws_its_glyph_and_shifts_the_label_past_the_icon_slot() {
+        // Long enough to clear MIN_CONTENT_WIDTH, so the icon slot shows in the width.
+        const LABEL: &str = "Rename this drum rack pad";
+        let row = |icon: Option<&str>| {
+            let mut props = vec![("text", Value::String(LABEL.to_string()))];
+            if let Some(icon) = icon {
+                props.push(("icon", Value::Keyword(icon.to_string())));
+            }
+            let tree = widget_node("context-menu", &[("is-open", Value::Bool(true))], vec![
+                widget_node("menu-item", &props, vec![]),
+            ]);
+            let layout = crate::layout::LayoutEngine::new(80, 30, 1.0).layout(&tree).unwrap();
+            let item = find_widget(&layout, "menu-item").unwrap().clone();
+            let viewport = WidgetViewport {
+                cell_w: 14.0, cell_h: 28.0, vp_w: 1120.0, vp_h: 840.0,
+                time_seconds: 0.0, focused_widget_id: None,
+                focused_branch: false, overlay_viewport_bottom: 30.0,
+                scroll_top: 0.0, scroll_left: 0.0, inherited_hover: false,
+            };
+            let (primitives, _) = super::super::collect_gpu_primitives(&item, viewport, 0.0, 30);
+            let glyph = primitives.iter().find_map(|p| match p {
+                GpuPrimitive::WidgetInstance { widget_type, instance, .. }
+                    if widget_type == "button-icon" => Some(instance.value_t),
+                _ => None,
+            });
+            let label_col = primitives.iter().find_map(|p| match p {
+                GpuPrimitive::ProportionalText(text) if text.text == LABEL => Some(text.col - item.rect.col),
+                _ => None,
+            }).expect("label");
+            (item.rect.width, glyph, label_col)
+        };
+        let (plain_width, plain_glyph, plain_col) = row(None);
+        let (icon_width, icon_glyph, icon_col) = row(Some("pencil"));
+        let (unknown_width, unknown_glyph, _) = row(Some("no-such-icon"));
+        assert_eq!(plain_glyph, None);
+        assert_eq!(icon_glyph, super::super::button::icon_name_value("pencil"));
+        let slot = super::super::menu_style::ICON_SLOT_COLS;
+        assert!((icon_col - plain_col - slot).abs() < 0.001);
+        assert!((icon_width - plain_width - slot).abs() < 0.001);
+        assert_eq!(unknown_glyph, None, "unknown icon names draw nothing");
+        assert!((unknown_width - plain_width).abs() < 0.001, "and reserve no slot");
     }
 
     fn menu_item_node(props: &[(&str, Value)]) -> Value {

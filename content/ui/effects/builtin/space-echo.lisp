@@ -41,13 +41,15 @@
 
 
 ;; Mod-wrapped knob (same pattern as the Str8 Delay knobs, so intensity /
-;; rate / volumes pick up modulation rings and plock handling).
-(def parameter-knob (fx label-text p decimals)
+;; rate / volumes pick up modulation rings and plock handling). `taper` shapes
+;; base-value travel only; mod-depth editing stays linear.
+(def parameter-knob (fx label-text p decimals taper)
   (eseq.effects.param-controls/param-mod-wrapper fx p (str "space-echo-param-" (get p :idx) "-mod-wrapper")
     (subtree :key (str "space-echo-param-" (get p :idx) (eseq.effects.param-controls/param-control-key-mode fx p))
       (knob-number :label label-text
         :value (eseq.effects.param-controls/fx-param-value-for fx p)
         :min (eseq.effects.param-controls/param-control-min fx p) :max (eseq.effects.param-controls/param-control-max fx p) :decimals decimals
+        :taper (if (eseq.effects.param-controls/param-mods-open? fx) "linear" taper)
         :base-value (eseq.effects.param-controls/param-base-value-prop fx p)
         :mod-offset (eseq.effects.param-controls/param-mod-offset p)
         :mod-scale (eseq.effects.param-controls/param-mod-scale p)
@@ -211,7 +213,7 @@
       (label "ECHO" :font-size 8.0 :width 9.2 :color :dim :bg :transparent)
       (h-stack :gap 0.22 :align :center
         (percent-knob fx "intensity" intensity-p)
-        (parameter-knob fx "echo vol" echo-p 2))
+        (parameter-knob fx "echo vol" echo-p 2 "linear"))
       (box :height 0.85)
       (label "TONE" :font-size 8.0 :width 9.2 :color :dim :bg :transparent)
       (v-stack :gap 0.30 :align :baseline
@@ -250,7 +252,9 @@
     (v-stack :gap 0.16 :align :center
       (label "REVERB" :font-size 8.0 :width 9.2 :color :dim :bg :transparent)
       (h-stack :gap 0.22 :align :center
-        (parameter-knob fx "reverb vol" reverb-p 2)
+        ;; Cube taper: subtle spring lives around 0.001..0.05, which gets
+        ;; the bottom third of the arc instead of a sliver of it.
+        (parameter-knob fx "reverb vol" reverb-p 3 "cube")
         (if tension-p
           (percent-knob fx "tension" tension-p)
           (box :width 4.35 :height 2.45)))

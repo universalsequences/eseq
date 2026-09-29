@@ -49,6 +49,7 @@ pub(super) fn handle(
                 (Some(name), Some(folder)) => {
                     match sequencer::lisp_host::move_saved_instrument(&name, &folder) {
                         Ok(new_name) => {
+                            crate::instrument_favorites::rename_favorite_instrument(&name, &new_name);
                             if let Err(error) = editor
                                 .runtime_mut()
                                 .eval_str("(eseq.browser/refresh-buffer)")

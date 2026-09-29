@@ -424,3 +424,9 @@
              (set! in-score (get analysis :in-score))
              (set! out-score (get analysis :out-score))))
          (if (= analysis nil) nil (target-add! (get analysis :delta)))))
+
+(def-process expr
+  :doc "Expression card: type a Lisp body with the card's edit button. Free names in the body become inlets (knobs, or wire targets); the body's value goes out on wire and can be mapped like acc. nil sends nothing. An empty card passes nothing."
+  :targets ((out :mappable)
+            (wire :process-inlet))
+  :run nil)

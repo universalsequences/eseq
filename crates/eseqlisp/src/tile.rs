@@ -47,6 +47,7 @@ pub struct TileBufferTab {
     pub label: String,
     pub buffer_idx: usize,
     pub on_close: Option<Value>,
+    pub on_select: Option<Value>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -395,11 +396,13 @@ mod tests {
                     label: "iii".to_string(),
                     buffer_idx: 0,
                     on_close: None,
+                    on_select: None,
                 },
                 TileBufferTab {
                     label: "WWW".to_string(),
                     buffer_idx: 1,
                     on_close: None,
+                    on_select: None,
                 },
             ],
             Some(0),
@@ -428,11 +431,13 @@ mod tests {
                     label: "Seq".to_string(),
                     buffer_idx: 0,
                     on_close: None,
+                    on_select: None,
                 },
                 TileBufferTab {
                     label: "Matrix".to_string(),
                     buffer_idx: 1,
                     on_close: None,
+                    on_select: None,
                 },
             ],
             Some(0),

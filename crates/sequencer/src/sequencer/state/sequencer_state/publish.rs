@@ -489,4 +489,30 @@ impl SequencerState {
         self.publish_scheduler_snapshot();
         Ok(result)
     }
+
+    /// [`Self::edit_current_graph_overrides`] for the scene `scene` rather
+    /// than the current one: its own list composed with the rack clips it
+    /// points at, stored back the same way. Undo/redo of a graph override
+    /// edit uses it so the edit lands in the scene it was made in.
+    pub fn edit_scene_graph_overrides<F, R>(&self, scene: SceneId, edit: F) -> Result<R, String>
+    where
+        F: FnOnce(&mut Vec<ProjectGraphOverrides>) -> Result<R, String>,
+    {
+        let result = {
+            let mut bank = self
+                .pattern
+                .scenes
+                .lock()
+                .map_err(|_| "failed to lock pattern bank".to_string())?;
+            let scene_idx = bank
+                .scene_index(scene)
+                .ok_or_else(|| format!("scene {} no longer exists", scene.0))?;
+            let mut composed = bank.composed_graph_overrides(scene_idx);
+            let result = edit(&mut composed)?;
+            bank.store_composed_graph_overrides(scene_idx, composed);
+            result
+        };
+        self.publish_scheduler_snapshot();
+        Ok(result)
+    }
 }

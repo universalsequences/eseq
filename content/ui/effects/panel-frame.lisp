@@ -86,7 +86,7 @@
     :icon "•••"
     :options options
     :width 1.85 :height 0.70 :font-size 10
-    :bg-color :mixer-control-bg
+    :bg-color :mixer-strip-bg
     :text-color :dim
     :menu-bg :dropdown-menu-bg
     :menu-border-color :dropdown-menu-border

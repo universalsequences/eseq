@@ -78,6 +78,12 @@ pub(in crate::lisp_host) fn register_scene_slot_natives_with_snapshot(
     scheduler_slots: Option<SharedSceneSlotSnapshot>,
     record_history: bool,
 ) {
+    register_instance_document_natives(
+        runtime,
+        Arc::clone(&state),
+        scheduler_slots.clone(),
+        record_history,
+    );
     let declarations = Arc::new(Mutex::new(BTreeMap::<
         String,
         crate::process::ProcessLiteral,
@@ -248,6 +254,123 @@ pub(in crate::lisp_host) fn register_scene_slot_natives_with_snapshot(
             EValue::String(epoch.to_string()),
         );
         Ok(value.clone())
+    });
+}
+
+/// Kind `:document` fields (docs/jaki-kind-spec.md §3) are scene slots named
+/// `%instance/<id>/<field>`: the same per-pattern store, reactive source,
+/// scheduler snapshot and history command as a `defscene`, addressed by
+/// instance instead of by declaration. `__instance-doc-read` /
+/// `__instance-doc-write` back `self.field` / `(set! self.field v)` in the
+/// VM; `__instance-document` hands a generator tick the whole document.
+fn register_instance_document_natives(
+    runtime: &mut Runtime,
+    state: Arc<crate::sequencer::SequencerState>,
+    scheduler_slots: Option<SharedSceneSlotSnapshot>,
+    record_history: bool,
+) {
+    fn instance_id_arg(value: &EValue) -> Result<u64, String> {
+        match value {
+            EValue::Number(id) if *id >= 0.0 && id.fract() == 0.0 => Ok(*id as u64),
+            EValue::Instance(id) => Ok(*id),
+            other => Err(format!("expected an instance id, got {other:?}")),
+        }
+    }
+
+    // Resolve one slot against the scheduler chunk's pattern when this
+    // runtime is snapshot-backed, else the current pattern.
+    let resolver = {
+        let state = Arc::clone(&state);
+        let scheduler_slots = scheduler_slots.clone();
+        move |name: &str, default: &crate::process::ProcessLiteral|
+              -> Result<(crate::process::ProcessLiteral, u64), String> {
+            if let Some(slots) = &scheduler_slots {
+                let slots = slots
+                    .lock()
+                    .map_err(|_| "failed to lock scheduler scene-slot snapshot".to_string())?;
+                let resolved = slots.resolve(name, default);
+                Ok((resolved.value.clone(), resolved.epoch))
+            } else {
+                let (value, epoch, _) = state.resolve_current_scene_slot(name, default);
+                Ok((value, epoch))
+            }
+        }
+    };
+    let resolver = Arc::new(resolver);
+
+    let read_resolver = Arc::clone(&resolver);
+    runtime.register_native("__instance-doc-read", move |args, ctx| {
+        let [id, EValue::String(field), default] = args.as_slice() else {
+            return Err("instance document read expects an id, a field and a default".to_string());
+        };
+        let name = super::kinds::instance_document_slot(instance_id_arg(id)?, field);
+        let default = crate::process::ProcessLiteral::from_value(default)
+            .map_err(|error| format!("document field '{field}': {error}"))?;
+        let (value, _epoch) = read_resolver(&name, &default)?;
+        ctx.track_reactive_read(SCENE_SLOT_REACTIVE_NAMESPACE, name);
+        Ok(value.to_value())
+    });
+
+    let snapshot_backed = scheduler_slots.is_some();
+    runtime.register_native("__instance-doc-write", move |args, ctx| {
+        let [id, EValue::String(field), value] = args.as_slice() else {
+            return Err("instance document write expects an id, a field and a value".to_string());
+        };
+        if snapshot_backed {
+            return Err(format!(
+                "document field '{field}' cannot be written from a scheduler callback"
+            ));
+        }
+        let name = super::kinds::instance_document_slot(instance_id_arg(id)?, field);
+        let literal = crate::process::ProcessLiteral::from_value(value)
+            .map_err(|error| format!("document field '{field}': {error}"))?;
+        let (scene_id, previous, epoch) =
+            state.write_current_scene_slot_identified(name.clone(), literal.clone())?;
+        if let Some(diagnostic) =
+            crate::sequencer::SceneSlotStore::soft_size_diagnostic(&name, &literal)
+        {
+            ctx.set_status(diagnostic);
+        }
+        if record_history {
+            let mut payload = HashMap::new();
+            payload.insert("scene-id".to_string(), lisp_string(scene_id.0.to_string()));
+            payload.insert("slot".to_string(), lisp_string(name.clone()));
+            payload.insert("old-present".to_string(), lisp_bool(previous.is_some()));
+            payload.insert(
+                "old".to_string(),
+                lisp_value(previous.map_or(EValue::Nil, |value| value.to_value())),
+            );
+            payload.insert("new".to_string(), lisp_value(literal.to_value()));
+            ctx.enqueue_command(HostCommand::Custom {
+                name: "scene-slot-history-write".to_string(),
+                payload: EValue::Map(payload),
+            });
+        }
+        ctx.invalidate_reactive_source(
+            SCENE_SLOT_REACTIVE_NAMESPACE,
+            name,
+            EValue::String(epoch.to_string()),
+        );
+        Ok(value.clone())
+    });
+
+    let document_resolver = Arc::clone(&resolver);
+    runtime.register_native(super::kinds::INSTANCE_DOCUMENT_NATIVE, move |args, ctx| {
+        let [id, EValue::String(kind)] = args.as_slice() else {
+            return Err("__instance-document expects an instance id and a kind id".to_string());
+        };
+        let id = instance_id_arg(id)?;
+        let definition = super::kinds::registered_kind(kind)
+            .ok_or_else(|| format!("instance {id}: kind '{kind}' is not registered"))?;
+        let mut document = HashMap::new();
+        for (field, default) in &definition.document {
+            let name = super::kinds::instance_document_slot(id, field);
+            let (value, _epoch) = document_resolver(&name, default)?;
+            ctx.track_reactive_read(SCENE_SLOT_REACTIVE_NAMESPACE, name);
+            document.insert(field.clone(), lisp_value(value.to_value()));
+        }
+        document.insert("id".to_string(), lisp_number(id as f64));
+        Ok(EValue::Map(document))
     });
 }
 
@@ -3010,6 +3133,7 @@ pub fn published_sequencer_from_def_args(args: &[EValue]) -> Result<PublishedSeq
             tick_source: String::new(),
             requires: Vec::new(),
             graph: Some(manifest),
+            owner_rack: None,
         });
     }
 
@@ -3055,6 +3179,7 @@ pub fn published_sequencer_from_def_args(args: &[EValue]) -> Result<PublishedSeq
         tick_source,
         requires,
         graph: None,
+        owner_rack: None,
     })
 }
 

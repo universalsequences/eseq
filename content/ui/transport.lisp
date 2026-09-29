@@ -943,8 +943,13 @@
   (set! application-menu-open "")
   (set! file-menu-open false))
 
+;; Save follows the buffer in front: one whose mode saves itself (an expr
+;; card's edit buffer commits its body) takes the chord; everything else
+;; saves the project.
 (def file-menu-save ()
-  (host-command "project-save-open" (dict :mode "save")))
+  (if (current-buffer-saves-itself?)
+    (save-buffer)
+    (host-command "project-save-open" (dict :mode "save"))))
 
 (def file-menu-save-as ()
   (host-command "project-save-open" (dict :mode "save-as")))

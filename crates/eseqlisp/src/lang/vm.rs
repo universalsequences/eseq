@@ -61,6 +61,10 @@ pub enum VMError {
     /// An instance record misuse (unknown field, read-only field, unknown
     /// instance); the message names the kind and its fields.
     Instance(String),
+    /// The evaluation step budget armed with [`VM::set_step_budget`] ran
+    /// out: the running code executed more opcodes than the host allows for
+    /// one call (expr processes, docs/expr-process-spec.md §10).
+    StepBudgetExceeded,
 }
 
 pub type NativeFn = Rc<dyn Fn(Vec<Value>, &mut VM) -> Value>;
@@ -2509,6 +2513,9 @@ pub struct VM {
     reactive_function_profiles: Vec<ReactiveFunctionProfile>,
     last_reactive_error_context: Option<String>,
     last_reactive_error_detail: Option<String>,
+    /// Opcodes left before the running code fails with
+    /// [`VMError::StepBudgetExceeded`]; `None` (the default) is unlimited.
+    step_budget: Option<u64>,
     current_effect_source_buffer_id: Option<BufferId>,
     current_effect_target: EffectTarget,
     /// Named effect-buffer targets that hold a committed widget tree but are
@@ -3743,6 +3750,14 @@ pub fn register_core_natives(vm: &mut VM) {
         Value::String(s)
     });
 
+    // (read-string text) → one s-expression of data, never evaluated
+    // (docs/sexp-slot-spec.md §8.1); nil when the text is not exactly one
+    // piece of data.
+    vm.register_native("read-string", |args| match args.first() {
+        Some(Value::String(text)) => crate::sexp_slot::read_value(text).unwrap_or(Value::Nil),
+        _ => Value::Nil,
+    });
+
     // (substring s start [end]) → character-indexed substring
     vm.register_native("substring", |args| {
         let Some(Value::String(s)) = args.first() else {
@@ -3951,6 +3966,52 @@ pub fn register_math_natives(vm: &mut VM) {
         t * t * (3.0 - 2.0 * t)
     });
 
+    // Bitwise integer ops (expr-process spec §9). Numbers are f64, so each
+    // argument is truncated toward zero and wrapped into unsigned 32-bit;
+    // every result is a u32, which an f64 holds exactly. A missing,
+    // non-numeric or non-finite argument yields NaN, like the other math
+    // natives.
+    macro_rules! bit_fold {
+        ($name:expr, $op:expr) => {
+            vm.register_native($name, |args| {
+                if args.len() < 2 {
+                    return Value::Number(f64::NAN);
+                }
+                let mut acc: Option<u32> = None;
+                for arg in &args {
+                    let Some(word) = bitwise_u32(arg) else {
+                        return Value::Number(f64::NAN);
+                    };
+                    acc = Some(match acc {
+                        Some(acc) => $op(acc, word),
+                        None => word,
+                    });
+                }
+                Value::Number(f64::from(acc.unwrap_or(0)))
+            });
+        };
+    }
+    bit_fold!("bit-and", |a: u32, b: u32| a & b);
+    bit_fold!("bit-or", |a: u32, b: u32| a | b);
+    bit_fold!("bit-xor", |a: u32, b: u32| a ^ b);
+    vm.register_native("bit-not", |args| match args.first().and_then(bitwise_u32) {
+        Some(word) => Value::Number(f64::from(!word)),
+        None => Value::Number(f64::NAN),
+    });
+    macro_rules! bit_shift {
+        ($name:expr, $op:expr) => {
+            vm.register_native($name, |args| {
+                match (args.first().and_then(bitwise_u32), args.get(1).and_then(bitwise_u32)) {
+                    // Shift amount is masked to 0..31.
+                    (Some(word), Some(amount)) => Value::Number(f64::from($op(word, amount & 31))),
+                    _ => Value::Number(f64::NAN),
+                }
+            });
+        };
+    }
+    bit_shift!("shl", |w: u32, n: u32| w << n);
+    bit_shift!("shr", |w: u32, n: u32| w >> n);
+
     // Vec2 operations (represented as 2-element List)
     vm.register_native("vec2", |args| {
         let x = match args.first() {
@@ -4000,8 +4061,18 @@ pub fn register_math_natives(vm: &mut VM) {
 
     vm.mark_natives_expansion_safe(&[
         "abs", "sqrt", "sin", "cos", "floor", "ceil", "round", "fract", "log", "exp", "pow",
-        "atan2", "mod", "clamp", "mix", "smoothstep", "vec2", "length", "dot",
+        "atan2", "mod", "clamp", "mix", "smoothstep", "vec2", "length", "dot", "bit-and",
+        "bit-or", "bit-xor", "bit-not", "shl", "shr",
     ]);
+}
+
+/// Truncate a numeric `Value` toward zero and wrap it into unsigned 32-bit
+/// (so `-1` is `0xFFFFFFFF`). `None` for non-numbers and non-finite numbers.
+fn bitwise_u32(value: &Value) -> Option<u32> {
+    match value {
+        Value::Number(n) if n.is_finite() => Some(n.trunc().rem_euclid(4_294_967_296.0) as u32),
+        _ => None,
+    }
 }
 
 impl ReactiveDag {
@@ -4546,6 +4617,7 @@ impl VM {
             reactive_function_profiles: Vec::new(),
             last_reactive_error_context: None,
             last_reactive_error_detail: None,
+            step_budget: None,
             current_effect_source_buffer_id: None,
             current_effect_target: EffectTarget::BufferId(None),
             hidden_effect_buffer_names: HashSet::new(),
@@ -6425,6 +6497,20 @@ impl VM {
         self.last_reactive_error_context.take()
     }
 
+    /// Arm (or with `None` disarm) an evaluation step budget: every opcode
+    /// the VM executes, in this call and in any nested call a native makes
+    /// back into the VM, spends one step, and running out fails the call with
+    /// [`VMError::StepBudgetExceeded`]. Hosts arm it around untrusted code
+    /// (expr process bodies) and disarm it afterwards.
+    pub fn set_step_budget(&mut self, budget: Option<u64>) {
+        self.step_budget = budget;
+    }
+
+    /// Steps left in the armed budget, if any.
+    pub fn step_budget(&self) -> Option<u64> {
+        self.step_budget
+    }
+
     pub fn take_last_reactive_error_detail(&mut self) -> Option<String> {
         self.last_reactive_error_detail.take()
     }
@@ -7779,6 +7865,12 @@ impl VM {
         let mut stack: Vec<Rc<RefCell<Value>>> = vec![];
 
         while frames.last().unwrap().pc < self.chunks[self.current_chunk].ops.len() {
+            if let Some(remaining) = self.step_budget.as_mut() {
+                if *remaining == 0 {
+                    return Err(VMError::StepBudgetExceeded);
+                }
+                *remaining -= 1;
+            }
             let op = self.chunks[self.current_chunk].ops[frames.last().unwrap().pc].clone();
             if self.active_expander.is_some()
                 && let Some(operation) = Self::expansion_forbidden_opcode(&op)
@@ -8756,6 +8848,30 @@ mod tests {
         SOURCE_REVISION_PROP, SOURCE_START_BYTE_PROP, SOURCE_SYMBOL_PROP, STABLE_KEY_PROP, VM,
         VMError, Value, debug_assert_cell_not_frozen, freeze_widget_tree,
     };
+
+    /// The step budget (expr processes, docs/expr-process-spec.md §10)
+    /// stops runaway code, including code a native calls back into, and
+    /// leaves the VM unlimited again once disarmed.
+    #[test]
+    fn step_budget_stops_runaway_code_and_disarms() {
+        let mut vm = VM::new(Vec::new());
+        super::register_core_natives(&mut vm);
+        assert_eq!(vm.step_budget(), None, "unlimited by default");
+        vm.eval_str("(def spin (g) (g g))").expect("fixture");
+        vm.set_step_budget(Some(10_000));
+        let runaway = vm.eval_str("(spin spin)");
+        assert!(matches!(runaway, Err(VMError::StepBudgetExceeded)), "{runaway:?}");
+        assert_eq!(vm.step_budget(), Some(0), "the budget is spent");
+        vm.set_step_budget(None);
+        assert_eq!(vm.eval_str("(+ 1 2)").expect("unlimited again"), Some(Value::Number(3.0)));
+        vm.set_step_budget(Some(1_000));
+        assert_eq!(
+            vm.eval_str("(+ 1 2)").expect("small code fits the budget"),
+            Some(Value::Number(3.0))
+        );
+        assert!(vm.step_budget().is_some_and(|left| left < 1_000 && left > 900));
+        vm.set_step_budget(None);
+    }
 
     #[test]
     fn lisp_function_profiler_attributes_nested_calls_by_chunk_name() {
@@ -12176,63 +12292,6 @@ counter
                 panic!("expected captured source for {shifted_source}");
             };
             assert_eq!(shifted, captured, "{source}");
-        }
-    }
-
-    #[test]
-    fn process_sugar_captures_expand_macros_before_quoting() {
-        let mut vm = VM::new(Vec::new());
-        super::register_core_natives(&mut vm);
-        for name in ["every", "after", "on", "tap"] {
-            vm.register_native(name, |args| {
-                Value::String(super::format_lisp_source(
-                    args.last().expect("captured process-sugar body"),
-                ))
-            });
-        }
-        vm.eval_str("(defmacro process-kernel (value) `(target-set! ,value))")
-            .expect("define macro");
-
-        for name in ["every", "after", "on", "tap"] {
-            let source = format!("({name} :trigger (process-kernel 9))");
-            let result = vm
-                .eval_str(&source)
-                .expect("eval process sugar")
-                .expect("captured process-sugar source");
-            let Value::String(captured) = result else {
-                panic!("expected {name} to return captured source, got {result:?}");
-            };
-            assert_eq!(captured, "(target-set! 9)", "{name}");
-            assert!(!captured.contains("process-kernel"), "{name}: {captured}");
-            assert!(!captured.contains("__source-origin"), "{name}: {captured}");
-        }
-    }
-
-    #[test]
-    fn process_sugar_expands_the_trigger_argument_too() {
-        let mut vm = VM::new(Vec::new());
-        super::register_core_natives(&mut vm);
-        for name in ["every", "after", "on", "tap"] {
-            vm.register_native(name, |args| {
-                Value::String(super::format_lisp_source(
-                    args.first().expect("captured process-sugar trigger"),
-                ))
-            });
-        }
-        vm.eval_str("(defmacro trigger-kernel () `(beats 4))")
-            .expect("define macro");
-
-        for name in ["every", "after", "on", "tap"] {
-            let result = vm
-                .eval_str(&format!("({name} (trigger-kernel) (target-set! 1))"))
-                .expect("eval process sugar")
-                .expect("captured process-sugar trigger");
-            let Value::String(captured) = result else {
-                panic!("expected {name} to return the captured trigger, got {result:?}");
-            };
-            assert_eq!(captured, "(beats 4)", "{name}");
-            assert!(!captured.contains("trigger-kernel"), "{name}: {captured}");
-            assert!(!captured.contains("__source-origin"), "{name}: {captured}");
         }
     }
 

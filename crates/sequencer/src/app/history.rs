@@ -66,6 +66,7 @@ pub enum EditPatch {
     MacroConfiguration(MacroConfigurationPatch),
     TransportParams(TransportParamsPatch),
     BarTranspose(BarTransposePatch),
+    GraphNodeProcessChain(GraphNodeProcessChainPatch),
 }
 
 /// A scene's clip pointer is an edit, not a snapshot of the rack's topology
@@ -153,12 +154,22 @@ pub enum GraphOverrideSite {
 pub struct InstanceOverridesState {
     pub ids: Vec<u64>,
     pub sites: Vec<(GraphOverrideSite, Vec<crate::graph::ProjectGraphOverrides>)>,
+    /// The `:document` scene slots of `ids` (docs/jaki-kind-spec.md §3.1),
+    /// per scene: slot name -> stored value. Replay drops every document
+    /// slot of `ids` and writes these back.
+    pub documents: Vec<(GraphOverrideSite, Vec<(String, crate::process::ProcessLiteral)>)>,
 }
 
 impl InstanceOverridesState {
     pub fn retained_bytes(&self) -> usize {
         std::mem::size_of::<Self>()
             + self.ids.capacity() * std::mem::size_of::<u64>()
+            + self
+                .documents
+                .iter()
+                .flat_map(|(_, slots)| slots.iter())
+                .map(|(name, _)| name.capacity() + 256)
+                .sum::<usize>()
             + self
                 .sites
                 .iter()
@@ -176,6 +187,41 @@ impl InstanceOverridesState {
                             .sum::<usize>()
                 })
                 .sum::<usize>()
+    }
+}
+
+/// One graph node's process chain (docs/graph-node-processes-spec.md) before
+/// and after an edit made through a `graph-node-process-*` native
+/// (eseq-waa9.23). The native applies the edit; the host records this patch.
+/// Replay writes the recorded chain back into the scene the edit was made in
+/// and leaves every other override of the graph alone.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GraphNodeProcessChainPatch {
+    pub scene: SceneId,
+    pub sequencer_id: u64,
+    pub node: usize,
+    pub before: Option<crate::process::TrackProcessChain>,
+    pub after: Option<crate::process::TrackProcessChain>,
+}
+
+impl GraphNodeProcessChainPatch {
+    pub fn retained_bytes(&self) -> usize {
+        fn chain_bytes(chain: &Option<crate::process::TrackProcessChain>) -> usize {
+            chain.as_ref().map_or(0, |chain| {
+                chain
+                    .slots
+                    .iter()
+                    .map(|slot| {
+                        std::mem::size_of::<crate::process::TrackProcessSlot>()
+                            + slot.class_name.capacity()
+                            + slot.expr_source.as_ref().map_or(0, String::capacity)
+                            + (slot.inlets.len() + slot.bindings.len() + slot.fanout.len()) * 64
+                            + slot.lanes.len() * 512
+                    })
+                    .sum()
+            })
+        }
+        std::mem::size_of::<Self>() + chain_bytes(&self.before) + chain_bytes(&self.after)
     }
 }
 

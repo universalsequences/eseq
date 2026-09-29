@@ -49,6 +49,16 @@
 (def capture-resample ()
   (host-command "resample-open" (dict)))
 
+;; Promote to factory (dev checkouts): copy the current track as a Sound, its
+;; drum rack as a kit, or its current preset into content/ so it ships.
+;; Non-factory dependencies are listed in the modal and skipped.
+(def promote-sound-to-factory ()
+  (host-command "factory-promote-open" (dict :kind "sound")))
+(def promote-kit-to-factory ()
+  (host-command "factory-promote-open" (dict :kind "kit")))
+(def promote-preset-to-factory ()
+  (host-command "factory-promote-open" (dict :kind "preset")))
+
 (def seq-clear-ui-selection ()
   (do
     (seq-clear-selection)))

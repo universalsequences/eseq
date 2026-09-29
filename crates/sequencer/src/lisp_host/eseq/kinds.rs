@@ -24,9 +24,10 @@ use super::super::*;
 use crate::graph::GraphManifest;
 
 pub const DEF_KIND_SIGNATURE: &str =
-    "(def-kind name :sequencer (graph-body ...) :state ((field default) ...) :view f :keymap mode :on-create f)";
-pub const DEF_KIND_DOCS: &str = "Define an instance kind. The host owns instances of it: each one publishes the :sequencer graph body under its own id, carries its own :state cells, and renders (view instance) in its own buffer and step tab (whose keymap is the optional :keymap mode). The optional :on-create function runs once with a freshly created instance (not a duplicate, kit load or reopened project) to write document defaults the :sequencer body cannot express. Returns the kind id \"<package>:<name>\".";
-pub const DEF_KIND_KEYWORDS: &[&str] = &["sequencer", "state", "view", "keymap", "on-create"];
+    "(def-kind name :sequencer (graph-body ...) | :generator (:resolution r :requires (m ...) :tick body) :document ((field default) ...) :state ((field default) ...) :view f :keymap mode :on-create f)";
+pub const DEF_KIND_DOCS: &str = "Define an instance kind. The host owns instances of it: each one publishes the :sequencer graph body (or the :generator tick body, in which `self` reads the instance's document) under its own id, carries its own :document (per pattern, saved, undoable) and :state cells, and renders (view instance) in its own buffer and step tab (whose keymap is the optional :keymap mode). The optional :on-create function runs once with a freshly created instance (not a duplicate, kit load or reopened project) to write document defaults the :sequencer body cannot express. Returns the kind id \"<package>:<name>\".";
+pub const DEF_KIND_KEYWORDS: &[&str] =
+    &["sequencer", "generator", "document", "state", "view", "keymap", "on-create"];
 
 /// Kind id prefix for kinds defined in headerless (scratch) code.
 pub const SCRATCH_KIND_PACKAGE: &str = "scratch";
@@ -47,6 +48,13 @@ pub struct KindDefinition {
     /// The `:sequencer` resource slot as a parsed graph manifest template.
     /// Each instance publishes a copy with its own id, name and owner.
     pub sequencer: Option<GraphManifest>,
+    /// The `:generator` resource slot (docs/jaki-kind-spec.md §4): a
+    /// tick-mode template whose `tick_source` is the kind's raw tick body.
+    /// Each instance publishes it wrapped so `self` is its document.
+    pub generator: Option<PublishedSequencer>,
+    /// Declared `:document` fields with their defaults, in order
+    /// (docs/jaki-kind-spec.md §3). Values live in the scene-slot store.
+    pub document: Vec<(String, crate::process::ProcessLiteral)>,
     /// Declared `:state` field names, in order.
     pub state_fields: Vec<String>,
     pub has_view: bool,
@@ -234,6 +242,17 @@ pub fn instance_published_sequencer(
     id: u64,
     owner_rack: Option<u64>,
 ) -> Option<PublishedSequencer> {
+    if let Some(template) = &kind.generator {
+        return Some(PublishedSequencer {
+            id,
+            name: instance_sequencer_name(&kind.name, id),
+            resolution: template.resolution,
+            tick_source: instance_generator_tick_source(&kind.id, id, &template.tick_source),
+            requires: template.requires.clone(),
+            graph: None,
+            owner_rack,
+        });
+    }
     let mut manifest = kind.sequencer.clone()?;
     manifest.id = id;
     manifest.name = instance_sequencer_name(&kind.name, id);
@@ -245,8 +264,37 @@ pub fn instance_published_sequencer(
         tick_source: String::new(),
         requires: Vec::new(),
         graph: Some(manifest),
+        owner_rack: None,
     })
 }
+
+/// The scene-slot name that stores document `field` of instance `id`
+/// (docs/jaki-kind-spec.md §3). The `%` prefix cannot be a `defscene` name.
+pub fn instance_document_slot(id: u64, field: &str) -> String {
+    format!("{INSTANCE_DOCUMENT_SLOT_PREFIX}{id}/{field}")
+}
+
+/// Prefix of every instance document slot name.
+pub const INSTANCE_DOCUMENT_SLOT_PREFIX: &str = "%instance/";
+
+/// The instance id a document slot name belongs to, if it is one.
+pub fn instance_document_slot_owner(slot: &str) -> Option<u64> {
+    let rest = slot.strip_prefix(INSTANCE_DOCUMENT_SLOT_PREFIX)?;
+    rest.split_once('/')?.0.parse().ok()
+}
+
+/// A generator instance's shipped tick: the kind's body with `self` bound to
+/// the instance's document, resolved from the scheduler chunk's pattern.
+pub fn instance_generator_tick_source(kind_id: &str, id: u64, body: &str) -> String {
+    format!(
+        "(let ((self ({INSTANCE_DOCUMENT_NATIVE} {id} {}))) {body})",
+        eseqlisp::vm::format_lisp_source(&EValue::String(kind_id.to_string()))
+    )
+}
+
+/// Scheduler native `(__instance-document id kind)`: the instance's document
+/// fields as a map, so `self.field` in a generator tick reads them.
+pub const INSTANCE_DOCUMENT_NATIVE: &str = "__instance-document";
 
 /// Attach-time check of a package manifest's `kinds` against what `module`
 /// actually registered (spec §8.1). A declared kind of this module that it
@@ -330,6 +378,8 @@ pub fn parse_def_kind(
     }
     let id = kind_id(package, module, &name);
     let mut sequencer = None;
+    let mut generator = None;
+    let mut document = Vec::new();
     let mut schema = eseqlisp::vm::InstanceKindSchema::new(id.clone());
     let mut view = None;
     let mut keymap = None;
@@ -367,6 +417,41 @@ pub fn parse_def_kind(
                     let manifest = parse_graph_manifest_owned(&sequencer_args, None)
                         .map_err(|error| format!("def-kind {name} :sequencer: {error}"))?;
                     sequencer = Some(manifest);
+                }
+            }
+            "generator" => {
+                if matches!(value, EValue::Nil) {
+                    generator = None;
+                } else {
+                    let body = def_kind_list(value).ok_or_else(|| {
+                        format!("def-kind {name}: :generator expects a def-sequencer tick body")
+                    })?;
+                    let mut sequencer_args = Vec::with_capacity(body.len() + 1);
+                    sequencer_args.push(EValue::String(name.clone()));
+                    sequencer_args.extend(body);
+                    if graph_mode_present(&sequencer_args) {
+                        return Err(format!(
+                            "def-kind {name}: :generator takes a :tick body; a graph goes in :sequencer"
+                        ));
+                    }
+                    let template = published_sequencer_from_def_args(&sequencer_args)
+                        .map_err(|error| format!("def-kind {name} :generator: {error}"))?;
+                    generator = Some(template);
+                }
+            }
+            "document" => {
+                for entry in def_kind_list(value).unwrap_or_default() {
+                    let pair = def_kind_list(&entry).ok_or_else(|| {
+                        format!("def-kind {name}: each :document entry is (field default)")
+                    })?;
+                    let field = pair.first().and_then(def_kind_symbol).ok_or_else(|| {
+                        format!("def-kind {name}: :document field names must be symbols")
+                    })?;
+                    let default = pair.get(1).cloned().unwrap_or(EValue::Nil);
+                    let literal = crate::process::ProcessLiteral::from_value(&default)
+                        .map_err(|error| format!("def-kind {name} :document {field}: {error}"))?;
+                    schema = schema.document_field(field.clone(), default);
+                    document.push((field, literal));
                 }
             }
             "state" => {
@@ -410,12 +495,19 @@ pub fn parse_def_kind(
     // the process-wide registry, so a bad `:state` never leaves a kind the
     // host can instantiate but no VM can hold a record for.
     schema.validate().map_err(|error| format!("def-kind {name}: {error}"))?;
+    if sequencer.is_some() && generator.is_some() {
+        return Err(format!(
+            "def-kind {name}: a kind has one of :sequencer and :generator, not both"
+        ));
+    }
     let definition = KindDefinition {
         id,
         name,
         package: package.map(str::to_string),
         module: module.map(str::to_string),
         sequencer,
+        generator,
+        document,
         state_fields: schema.fields.iter().map(|(field, _)| field.clone()).collect(),
         has_view: view.is_some(),
         keymap: keymap.clone(),
@@ -706,6 +798,8 @@ mod tests {
             package: Some("alec/neural".to_string()),
             module: Some(module.to_string()),
             sequencer: None,
+            generator: None,
+            document: Vec::new(),
             state_fields: Vec::new(),
             has_view: false,
             keymap: None,

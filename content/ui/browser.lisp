@@ -895,6 +895,36 @@
       :corner-radius 24
       :on-click |x y r| (toggle-instrument-origin origin))))
 
+;; Favorites: right-click an instrument row to heart it; the heart chip
+;; narrows every section to hearted rows (it combines with the tier chips and
+;; the search). The set lives in favorites.json, owned by the host
+;; (src/ui/instrument_favorites.rs); `instrument-favorites-epoch` only exists
+;; so a toggle re-renders the tree, which reads the file-backed set natively.
+(defstate instrument-favorites-only false)
+(defstate instrument-favorites-epoch 0)
+(def instrument-menu-open (state false))
+(def instrument-menu-col (state 0))
+(def instrument-menu-row (state 0))
+(def instrument-menu-item (state nil))
+
+(def instrument-favorites-chip ()
+  (let ((selected instrument-favorites-only))
+    (button "Favorites"
+      :key "instrument-favorites-chip"
+      :icon :heart
+      :icon-color (if selected :red :gray)
+      :width 10.5
+      :variant :ghost
+      :background-color (if selected
+        :mixer-strip-selected-bg
+        :mixer-control-bg)
+      :color (if selected :fg :gray)
+      :border-color (if selected :buffer-bg :none)
+      :height 1.0
+      :font-size 12.0
+      :corner-radius 24
+      :on-click |x y r| (set! instrument-favorites-only (not instrument-favorites-only)))))
+
 (def instrument-origin-filter-row ()
   (box :key "instrument-origin-filter" :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0.35
     (h-stack :width :fill :gap 0.25 :align :center
@@ -903,7 +933,45 @@
       (instrument-origin-chip "pkg" "Packages"))))
 
 (def create-items ()
-  (seq-saved-instrument-tree search-filter SEQ.project-instrument-engines instrument-origin-filter))
+  (do
+    instrument-favorites-epoch
+    (seq-saved-instrument-tree search-filter SEQ.project-instrument-engines
+      instrument-origin-filter instrument-favorites-only)))
+
+(def toggle-instrument-favorite (item)
+  (let ((now (seq-toggle-favorite-instrument (get item :favorite-id))))
+    (do
+      (set! instrument-favorites-epoch (+ instrument-favorites-epoch 1))
+      (status (str (if now "Added to favorites: " "Removed from favorites: ")
+                   (get item :label))))))
+
+;; Only saved instruments (Factory / Library / package / Engines rows) can be
+;; hearted: builtins, headers and folders open no menu.
+(def open-instrument-menu (event)
+  (let ((item (get event :item)))
+    (if (and (not (= item nil)) (= (get item :kind) "instrument") (get item :favorite-id))
+      (do
+        (set! instrument-menu-item item)
+        (set! instrument-menu-col (get event :col))
+        (set! instrument-menu-row (get event :row))
+        (set! instrument-menu-open true))
+      nil)))
+
+(def instrument-context-menu ()
+  (context-menu :is-open instrument-menu-open
+    :anchor-col instrument-menu-col
+    :anchor-row instrument-menu-row
+    :on-close (lambda () (set! instrument-menu-open false))
+    (menu-item
+      (if (and instrument-menu-item
+               (seq-favorite-instrument? (get instrument-menu-item :favorite-id)))
+        "Remove from Favorites"
+        "Add to Favorites")
+      :key "instrument-menu-favorite"
+      :on-select (lambda (event)
+        (do
+          (set! instrument-menu-open false)
+          (toggle-instrument-favorite instrument-menu-item))))))
 
 (def enter-new-instrument-editor ()
   (set! sbrowser-editor-name "")
@@ -982,25 +1050,18 @@
           (status "Builtin instruments cannot be moved into a folder")
           (status "Drop instruments onto a folder"))))))
 
-(def loading-instrument? ()
-  (not (= sbrowser-loading-instrument-name "")))
-
-;; The row keeps its height while idle so the tree below does not jump when a
-;; load starts or finishes; only the contents swap.
-(def instrument-loading-row ()
-  (box :key "instrument-loading-row" :width :fill :height 0.8 :padding 0
-    (if (loading-instrument?)
-      (h-stack :width :fill :height 0.8 :gap 0.4 :align :center
-        (editor-spinner :width 2.0 :height 0.7)
-        (label (str "Loading " sbrowser-loading-instrument-name "...")
-          :font-size 9
-          :color :gray
-          :bg :transparent))
-      (box :width :fill :height 0.8))))
+;; The instrument the selected track plays, as the tree rows' :instrument-id.
+;; The tree greys that row (Finder's unfocused selection), leaving blue to
+;; mean "Enter loads this". The load itself is announced by the app toast;
+;; the row being compiled carries a spinner (:loading-value).
+(def current-track-instrument-id ()
+  (let ((ids SEQ.track-instrument-ids))
+    (if (and ids (< SEQ.current-track (len ids)))
+      (nth ids SEQ.current-track)
+      "")))
 
 (def create-picker ()
   (v-stack :key "create-picker-panel" :width :fill :gap 0.5 :flex 1
-    (instrument-loading-row)
     (instrument-origin-filter-row)
     (box :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0 :flex 1
       (scroll :key "create-picker-scroll" :width :fill :flex 1
@@ -1014,7 +1075,10 @@
           :drop-types (list "instrument")
           :on-drop (lambda (event) (drop-instrument-on-folder event))
           :on-select (lambda (item) (focus-create-item item))
-          :on-activate (lambda (item) (select-create-item item)))))))
+          :on-activate (lambda (item) (select-create-item item))
+          :current-key "instrument-id"
+          :current-value (current-track-instrument-id)
+          :loading-value sbrowser-loading-instrument-name)))))
 
 (def tab-items ()
   (list
@@ -1265,25 +1329,31 @@
         (origins (get browser :origins))
         (items (get browser :items)))
       (v-stack :key "samples-browser-panel" :width :fill :gap 0.35 :flex 1
-        (box :key "sample-tag-filter" :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0.35
-          (v-stack :width :fill :gap 0.35
-            (if (or (> (len selected-tags) 0) (> (len selected-origins) 0))
-              (button "Clear"
-                :variant :ghost
-                :width :fill
-                :height 1.35
-                :border-color :transparent
-                :font-size 12
-                :on-click |x y r| (clear-sample-filters)
-                :color :white))
-            (if (> (len origins) 0)
-              (wrap :width :fill :gap 0.25 :row-gap 0.18 :align :center
-                (each (range 0 (len origins)) |i|
-                  (origin-chip (nth origins i)))))
-            (wrap :width :fill :gap 0.20 :row-gap 0.10 :align :center
-              (each (range 0 (len tags)) |i|
-                (tag-chip (nth tags i))))))
+        ;; The filter chips size to their content but shrink (scrolling) once
+        ;; the results list would drop below its :min-height.
+        (box :key "sample-tag-filter" :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0.35 :shrink 1 :min-height 4
+          (scroll :key "sample-tag-filter-scroll" :width :fill :fit-content true
+            (v-stack :width :fill :gap 0.35
+              (if (or (> (len selected-tags) 0) (> (len selected-origins) 0))
+                (button "Clear"
+                  :variant :ghost
+                  :width :fill
+                  :height 1.35
+                  :border-color :transparent
+                  :font-size 12
+                  :on-click |x y r| (clear-sample-filters)
+                  :color :white))
+              (if (> (len origins) 0)
+                (wrap :width :fill :gap 0.25 :row-gap 0.18 :align :center
+                  (each (range 0 (len origins)) |i|
+                    (origin-chip (nth origins i)))))
+              (wrap :width :fill :gap 0.20 :row-gap 0.10 :align :center
+                (each (range 0 (len tags)) |i|
+                  (tag-chip (nth tags i)))))))
         (box :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0 :flex 1
+          ;; With no results only the empty message needs room, so the
+          ;; chips can take the rest instead of scrolling.
+          :min-height (if (= (len items) 0) 3 10)
           (if (= (len items) 0)
             (empty-message
               (if (and (= search-filter "") (= (len selected-tags) 0) (= (len selected-origins) 0))
@@ -1362,25 +1432,36 @@
             :color :white))))
     (tabbed-content)))
 
+(def instruments-filter-row ()
+  (h-stack :key "instruments-filter-row" :width :fill :gap 0.25 :align :center
+    (instrument-favorites-chip)))
+
 (def instruments-panel ()
-  (v-stack :key "instrument-tab-panel" :width :fill :gap 0.1 :flex 1
-    (instrument-loading-row)
+  (let ((items (create-items)))
+   (v-stack :key "instrument-tab-panel" :width :fill :gap 0.1 :flex 1
+    (instruments-filter-row)
     (box :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0 :flex 1
+     (if (and instrument-favorites-only (= (len items) 0))
+      (empty-message "No favorites yet. Right-click an instrument to add it.")
       (scroll :key "instruments-tab-scroll" :width :fill :flex 1
         (tree
           :key "instruments-tab-tree"
           :width :fill
           :background-color :buffer-bg
-          :items (create-items)
+          :items items
           :font-size 12
-          :expand-all (not (= search-filter ""))
+          :expand-all (if instrument-favorites-only true (not (= search-filter "")))
           :focusable true
           :drag-type "instrument"
           :drop-types (list "instrument")
           :on-drop (lambda (event) (drop-instrument-on-folder event))
           :on-select (lambda (item) (focus-create-item item))
           :on-activate (lambda (item) (select-create-item item))
-          :on-modified-activate (lambda (item) (select-create-item item)))))))
+          :on-modified-activate (lambda (item) (select-create-item item))
+          :on-right-click (lambda (event) (open-instrument-menu event))
+          :current-key "instrument-id"
+          :current-value (current-track-instrument-id)
+          :loading-value sbrowser-loading-instrument-name)))))))
 
 (def audio-fx-toolbar ()
   (box :width :fill :padding 0.25
@@ -2235,7 +2316,8 @@
 (def root-widget ()
   (v-stack :width :fill :height :fill :gap 0.4 :padding 0.15
     (build-widgets)
-    (package-context-menu)))
+    (package-context-menu)
+    (instrument-context-menu)))
 
 (def refresh-buffer ()
   (render-widget-to-buffer "*samples*" (root-widget)))

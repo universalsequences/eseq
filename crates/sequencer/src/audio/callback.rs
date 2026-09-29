@@ -184,7 +184,7 @@ pub(super) fn render_audio_block(
     sync_effect_modulator_transport_clock_params(data, host_transport_clock);
     #[cfg(feature = "audio-experiments")]
     let effect_clock_us = super::experiment::phase_elapsed(&mut sub_clock);
-    sync_dj_mixer_transport_phase(data, block_start_sample);
+    sync_dj_mixer_transport_phase(data);
 
     #[cfg(feature = "audio-experiments")]
     let snapshot_transport_us = super::experiment::phase_elapsed(&mut phase_clock);

@@ -82,6 +82,24 @@ impl SceneSlotStore {
         self.values.get(name)
     }
 
+    /// Keep only the slots `keep` accepts (values and generations together).
+    pub fn retain_names(&mut self, mut keep: impl FnMut(&str) -> bool) {
+        self.values.retain(|name, _| keep(name));
+        self.epochs.retain(|name, _| keep(name));
+    }
+
+    /// Lay `other`'s slots over this store, generations included, so a
+    /// composed store (a scene plus a rack clip's instance documents,
+    /// docs/jaki-kind-spec.md §3) reports each slot's own write epoch.
+    pub fn overlay(&mut self, other: &SceneSlotStore) {
+        for (name, value) in &other.values {
+            self.values.insert(name.clone(), value.clone());
+        }
+        for (name, epoch) in &other.epochs {
+            self.epochs.insert(name.clone(), *epoch);
+        }
+    }
+
     /// Return an authoring diagnostic without rejecting the value. The
     /// reported byte count uses the same serde representation embedded in
     /// project JSON, rather than an in-memory estimate that could miss

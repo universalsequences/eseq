@@ -23,7 +23,17 @@ impl WidgetDefinition for VStackWidget {
     }
 
     fn completion_props(&self) -> &'static [&'static str] {
-        &["padding", "gap", "align", "justify", "width", "height", "flex"]
+        &[
+            "padding",
+            "gap",
+            "align",
+            "justify",
+            "width",
+            "height",
+            "flex",
+            "min-height",
+            "shrink",
+        ]
     }
 
     fn measure(
@@ -45,9 +55,23 @@ impl WidgetDefinition for VStackWidget {
         if let Some(w) = own_width {
             inner.max_width = (w - padding * 2.0).max(0.0);
         }
-        let child_sizes = children
+        let mut child_sizes = children
             .iter()
-            .filter_map(|child| measure_child(child, inner))
+            .filter_map(|child| {
+                let mut size = measure_child(child, inner)?;
+                if let Some(min_height) = get_prop_num(child, "min-height").map(f64_to_f32) {
+                    size.height = size.height.max(min_height);
+                }
+                Some((child, size, 0.0))
+            })
+            .collect::<Vec<_>>();
+        if inner.max_height.is_finite() {
+            let total_gap = gap * (child_sizes.len() as f32 - 1.0).max(0.0);
+            shrink_to_fit(&mut child_sizes, inner.max_height - total_gap);
+        }
+        let child_sizes = child_sizes
+            .into_iter()
+            .map(|(_, size, _)| size)
             .collect::<Vec<_>>();
         let natural_width = child_sizes
             .iter()
@@ -91,11 +115,16 @@ impl WidgetDefinition for VStackWidget {
             aspect: 1.0,
         };
 
-        // Pass 1: measure all children, collect flex values
-        let measured: Vec<(&Value, Size, f32)> = children
+        // Pass 1: measure all children, collect flex values. A child's
+        // `:min-height` floors its measured height, so a flex child can
+        // reserve room it would otherwise only get from leftover space.
+        let mut measured: Vec<(&Value, Size, f32)> = children
             .iter()
             .filter_map(|child| {
-                let size = measure_child(child, inner_constraints)?;
+                let mut size = measure_child(child, inner_constraints)?;
+                if let Some(min_height) = get_prop_num(child, "min-height").map(f64_to_f32) {
+                    size.height = size.height.max(min_height);
+                }
                 let flex = get_prop_num(child, "flex").map(f64_to_f32).unwrap_or(0.0);
                 Some((child, size, flex))
             })
@@ -106,9 +135,11 @@ impl WidgetDefinition for VStackWidget {
             return vec![];
         }
 
+        let total_gap = gap * (count as f32 - 1.0).max(0.0);
+        shrink_to_fit(&mut measured, inner_height - total_gap);
+
         // Compute remaining space, then let flex children absorb it first
         let total_content_height: f32 = measured.iter().map(|(_, s, _)| s.height).sum();
-        let total_gap = gap * (count as f32 - 1.0).max(0.0);
         let remaining = (inner_height - total_content_height - total_gap).max(0.0);
         let total_flex: f32 = measured.iter().map(|(_, _, f)| *f).sum();
         let flex_consumed = if total_flex > 0.0 { remaining } else { 0.0 };
@@ -150,4 +181,58 @@ impl WidgetDefinition for VStackWidget {
             })
             .collect()
     }
+}
+
+/// When the children overflow `available`, take the overflow first out of
+/// flex children (their natural height is only a basis; flex hands leftover
+/// space back afterwards), then out of children marked `:shrink N` (weighted
+/// by N). Neither goes below its `:min-height`. A shrinking child is expected
+/// to be a scroll (or wrap one) so its clipped content stays reachable.
+/// Children with neither prop keep their size.
+fn shrink_to_fit(measured: &mut [(&Value, Size, f32)], available: f32) {
+    let total: f32 = measured.iter().map(|(_, s, _)| s.height).sum();
+    let mut overflow = total - available;
+    if overflow <= 0.0 || !measured.iter().any(|(c, _, _)| shrink_weight(c) > 0.0) {
+        return;
+    }
+    let flex_weight = |child: &Value| get_prop_num(child, "flex").map(f64_to_f32).unwrap_or(0.0);
+    overflow = take_overflow(measured, overflow, &flex_weight);
+    take_overflow(measured, overflow, &shrink_weight);
+}
+
+fn shrink_weight(child: &Value) -> f32 {
+    get_prop_num(child, "shrink").map(f64_to_f32).unwrap_or(0.0)
+}
+
+/// Removes up to `overflow` from children with a positive `weight`,
+/// proportionally, clamping each at its `:min-height`. Returns what is left.
+fn take_overflow(
+    measured: &mut [(&Value, Size, f32)],
+    mut overflow: f32,
+    weight: &dyn Fn(&Value) -> f32,
+) -> f32 {
+    // Each pass clamps children that hit their floor and redistributes the
+    // rest among those still able to give.
+    let mut active: Vec<usize> = (0..measured.len())
+        .filter(|&i| weight(measured[i].0) > 0.0)
+        .collect();
+    while overflow > 0.0 && !active.is_empty() {
+        let total_weight: f32 = active.iter().map(|&i| weight(measured[i].0)).sum();
+        let mut taken = 0.0;
+        active.retain(|&i| {
+            let (child, size, _) = &mut measured[i];
+            let floor = get_prop_num(child, "min-height").map(f64_to_f32).unwrap_or(0.0);
+            let give = (overflow * weight(child) / total_weight)
+                .min(size.height - floor)
+                .max(0.0);
+            size.height -= give;
+            taken += give;
+            size.height > floor
+        });
+        overflow -= taken;
+        if taken <= f32::EPSILON {
+            break;
+        }
+    }
+    overflow.max(0.0)
 }

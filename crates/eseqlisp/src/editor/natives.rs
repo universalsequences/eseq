@@ -310,6 +310,7 @@ fn parse_layout_tabs(value: &Value, primary_name: &str) -> Result<Vec<LayoutTabS
             return Err(":tabs entry buffer name must be a string".to_string());
         };
         let mut on_close = None;
+        let mut on_select = None;
         let mut option_index = 2;
         while option_index < parts.len() {
             let key = parts[option_index].borrow();
@@ -321,6 +322,7 @@ fn parse_layout_tabs(value: &Value, primary_name: &str) -> Result<Vec<LayoutTabS
             };
             match keyword.as_str() {
                 "on-close" => on_close = Some(value.borrow().clone()),
+                "on-select" => on_select = Some(value.borrow().clone()),
                 _ => return Err(format!("unknown :tabs entry option :{keyword}")),
             }
             option_index += 2;
@@ -329,6 +331,7 @@ fn parse_layout_tabs(value: &Value, primary_name: &str) -> Result<Vec<LayoutTabS
             label,
             buffer_name,
             on_close,
+            on_select,
         });
     }
     if tabs.is_empty() {
@@ -696,8 +699,8 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
 
     runtime.register_native_with_docs(
         "define-mode",
-        "(define-mode name :read-only bool :live-keys bool :on-enter fn-name :on-key fn-name :inherit parent-mode)",
-        "Register a named major mode. :live-keys opts the mode into host live-keyboard shortcuts; :inherit names a parent mode whose keymap, on-key handler and live-keys opt-in apply after this mode's own.",
+        "(define-mode name :read-only bool :live-keys bool :on-enter fn-name :on-key fn-name :inherit parent-mode :on-save fn-name)",
+        "Register a named major mode. :live-keys opts the mode into host live-keyboard shortcuts; :inherit names a parent mode whose keymap, on-key handler, on-save handler and live-keys opt-in apply after this mode's own. :on-save makes save-buffer call the handler (no arguments, the buffer active) instead of writing a file: a truthy result marks the buffer saved, false/nil leaves it modified.",
         |args, ctx| {
             let Some(Value::String(name)) = args.first() else {
                 return Err("define-mode expects a name string".to_string());
@@ -707,6 +710,7 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
             let mut on_enter: Option<String> = None;
             let mut on_key: Option<String> = None;
             let mut inherit: Option<String> = None;
+            let mut on_save: Option<String> = None;
             let mut i = 1;
             while i < args.len() {
                 match args.get(i) {
@@ -730,6 +734,12 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
                         }
                         i += 2;
                     }
+                    Some(Value::Keyword(k)) if k == "on-save" => {
+                        if let Some(Value::String(fn_name)) = args.get(i + 1) {
+                            on_save = Some(fn_name.clone());
+                        }
+                        i += 2;
+                    }
                     Some(Value::Keyword(k)) if k == "inherit" => {
                         if let Some(Value::String(parent)) = args.get(i + 1) {
                             inherit = Some(parent.clone());
@@ -739,7 +749,7 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
                     _ => i += 1,
                 }
             }
-            ctx.define_mode(name.clone(), read_only, live_keys, on_enter, on_key, inherit);
+            ctx.define_mode(name.clone(), read_only, live_keys, on_enter, on_key, inherit, on_save);
             Ok(Value::Bool(true))
         },
     );
@@ -755,6 +765,58 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
                 return Err("mode-bind-key expects (string string string)".to_string());
             };
             ctx.mode_bind_key(mode.clone(), key.clone(), handler.clone());
+            Ok(Value::Bool(true))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "mode-add-completions",
+        "(mode-add-completions mode-name items)",
+        "Offer extra completion candidates in buffers of a registered mode (and modes inheriting it). Each item is a label string, a list (label signature doc category), or a map with :label :signature :doc :category. Re-adding a label replaces it.",
+        |args, ctx| {
+            let (Some(Value::String(mode)), Some(Value::List(items))) = (args.first(), args.get(1)) else {
+                return Err("mode-add-completions expects a mode name and a list of items".to_string());
+            };
+            let text = |value: Option<&Value>| match value {
+                Some(Value::String(text)) => Some(text.clone()),
+                _ => None,
+            };
+            let mut completions = Vec::new();
+            for item in items {
+                let item = item.borrow();
+                let (label, signature, docs, category) = match &*item {
+                    Value::String(label) => (Some(label.clone()), None, None, None),
+                    Value::List(parts) => {
+                        let part = |index: usize| parts.get(index).map(|part| part.borrow().clone());
+                        (
+                            text(part(0).as_ref()),
+                            text(part(1).as_ref()),
+                            text(part(2).as_ref()),
+                            text(part(3).as_ref()),
+                        )
+                    }
+                    Value::Map(map) => {
+                        let field = |key: &str| map.get(key).map(|value| value.borrow().clone());
+                        (
+                            text(field("label").as_ref()),
+                            text(field("signature").as_ref()),
+                            text(field("doc").as_ref()),
+                            text(field("category").as_ref()),
+                        )
+                    }
+                    _ => (None, None, None, None),
+                };
+                let Some(label) = label else {
+                    return Err("mode-add-completions: each item needs a label string".to_string());
+                };
+                completions.push(crate::mode::CompletionItem {
+                    label,
+                    category,
+                    signature,
+                    docs,
+                });
+            }
+            ctx.mode_add_completions(mode.clone(), completions);
             Ok(Value::Bool(true))
         },
     );
@@ -792,6 +854,13 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
         "(current-buffer-mode)",
         "Return the current buffer's mode name.",
         |_args, ctx| Ok(Value::String(ctx.current_buffer_mode())),
+    );
+
+    runtime.register_native_with_docs(
+        "current-buffer-saves-itself?",
+        "(current-buffer-saves-itself?)",
+        "Whether the current buffer's mode (or an ancestor) declares an :on-save handler, so save-buffer commits it through that handler instead of writing a file.",
+        |_args, ctx| Ok(Value::Bool(ctx.current_buffer_saves_itself())),
     );
 
     runtime.register_native_with_docs(
@@ -1611,9 +1680,22 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
     );
 
     runtime.register_native_with_docs(
+        "select-window-for",
+        "(select-window-for name)",
+        "Focus the tile currently showing buffer name (applied with the other window ops, after a set-layout queued before it). No-ops if no tile is showing it.",
+        |args, ctx| {
+            let Some(Value::String(name)) = args.first() else {
+                return Err("select-window-for expects a buffer name string".to_string());
+            };
+            ctx.select_window_for(name.clone());
+            Ok(Value::Bool(true))
+        },
+    );
+
+    runtime.register_native_with_docs(
         "set-window-tabs-for",
         "(set-window-tabs-for current-name tabs)",
-        "Replace the tabs on a tile already showing current-name. No-ops if no tile is showing it.",
+        "Replace the tabs on a tile already showing current-name. No-ops if no tile is showing it. Each tab is (label buffer :on-close fn :on-select fn); both callbacks get (buffer tab-index), :on-select after a tab-strip click switches the tile to that tab.",
         |args, ctx| {
             let (Some(Value::String(current)), Some(tabs_value)) = (args.first(), args.get(1))
             else {
@@ -1828,13 +1910,14 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
 
     runtime.register_native_with_docs(
         "toast",
-        "(toast text &key :kind)",
-        "Show a bottom-right window toast. :kind is :success (default, ~1.2s) or :error (~4s, dismissed by the next keypress).",
+        "(toast text &key :kind :progress)",
+        "Show a bottom-right window toast. :kind is :success (default, ~1.2s), :error (~4s, dismissed by the next keypress), or :loading (animated spinner that stays until the next toast replaces it; calling again updates it in place). :progress 0..1 adds a progress bar to a :loading toast.",
         |args, ctx| {
             let Some(Value::String(text)) = args.first() else {
                 return Err("toast expects a text string".to_string());
             };
             let mut kind = crate::host::ToastKind::Success;
+            let mut progress = None;
             let mut i = 1;
             while i < args.len() {
                 match (args.get(i), args.get(i + 1)) {
@@ -1842,8 +1925,11 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
                         if key == "kind" =>
                     {
                         kind = crate::host::ToastKind::from_label(label).ok_or_else(|| {
-                            format!("toast :kind must be :success or :error, got {label}")
+                            format!("toast :kind must be :success, :error or :loading, got {label}")
                         })?;
+                    }
+                    (Some(Value::Keyword(key)), Some(Value::Number(value))) if key == "progress" => {
+                        progress = Some(*value as f32);
                     }
                     (Some(other), _) => {
                         return Err(format!("toast: unexpected argument {}", format_lisp_value(other)));
@@ -1852,7 +1938,7 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
                 }
                 i += 2;
             }
-            ctx.show_toast(text.clone(), kind);
+            ctx.show_toast_with_progress(text.clone(), kind, progress);
             Ok(Value::Nil)
         },
     );

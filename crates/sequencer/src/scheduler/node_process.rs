@@ -201,6 +201,7 @@ pub(super) fn run_node_process_patch(
                 event,
                 fire_seed: Some(ctx.sample_time),
                 after_reset: ctx.after_reset,
+                delay_offset_steps: overlay.node_delay_offset_steps,
             },
             Some(&slot_inlet_writes),
         ) else {

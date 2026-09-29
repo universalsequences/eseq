@@ -75,9 +75,10 @@ pub(crate) fn declared_effect_latency_samples(source: &str, sample_rate: u32) ->
 
 // -- eseqlisp: live-coding / sequencing natives --
 pub use eseq::graph_authoring::{
-    GRAPH_NODE_LANE_PATCH_NAMESPACE_BASE, GRAPH_READ_REACTIVE_NAMESPACE,
-    GraphNodeProcessReminter, graph_node_lane_patch_namespace, queue_graph_read_invalidations,
-    register_graph_authoring_natives,
+    GRAPH_NODE_LANE_PATCH_NAMESPACE_BASE, GRAPH_NODE_PROCESS_HISTORY_COMMAND,
+    GRAPH_READ_REACTIVE_NAMESPACE, GraphNodeProcessReminter, graph_node_lane_patch_namespace,
+    queue_graph_read_invalidations, register_graph_authoring_natives,
+    restore_graph_node_process_chain,
 };
 pub use eseq::graph_manifest::{
     current_graph_owner_rack, graph_instance_id, graph_mode_present, parse_graph_manifest,
@@ -88,11 +89,19 @@ pub use eseq::kinds::{
     SCRATCH_KIND_PACKAGE, declared_kinds_for_module, declared_module_for_kind,
     check_manifest_kinds, clear_kind_registry, drop_all_instance_records, instance_owner_value,
     instance_published_sequencer, instance_sequencer_name, sync_instance_records, kind_id,
+    instance_document_slot, instance_document_slot_owner, instance_generator_tick_source,
+    INSTANCE_DOCUMENT_NATIVE, INSTANCE_DOCUMENT_SLOT_PREFIX,
     kind_name_of, kind_package_of, kind_registry_version,
     kinds_defined_in_module, package_name_for_module, parse_def_kind, register_def_kind_native,
     kind_is_registered, register_kind, registered_kind, registered_kinds, unregister_module_kinds,
     InstanceView, InstanceViewChange, desired_instance_views, instance_key_scope,
     instance_view_buffer_name, run_instance_on_create, sync_instance_view_buffers,
+};
+pub use eseq::expr_process::{
+    CompiledExpr, EXPR_CONTEXT_VARS, EXPR_INLET_MAX, EXPR_INLET_MIN, EXPR_MAX_NESTING, ExprAnalysis,
+    ExprCompileError, ExprRebind, analyze_expr_source, compile_and_register_expr_source,
+    compile_expr_source, expr_class_name_for_source, expr_sources_in_scenes, is_expr_slot,
+    rebind_expr_slot, rebind_slot_class, rederive_expr_class_names_in_chain, sync_expr_process_classes,
 };
 use eseq::graph_update; // qualified `graph_update::` calls in shared_state/process_natives
 use eseq::graph_update::{CompiledGraphUpdate, SharedGraphNodeContext};
@@ -100,6 +109,16 @@ use eseq::midi_fx::*;
 pub use eseq::neural_natives::*;
 use eseq::process_dsl_parse::*;
 pub use eseq::process_natives::*;
+pub use eseq::process_library::{
+    is_my_processes_source, load_my_processes_source, my_processes_module_files,
+    my_processes_package_dir, set_my_processes_package_dir_override, MyProcessesDirOverrideGuard,
+    MY_PROCESSES_MODULE_PREFIX,
+    MY_PROCESSES_PACKAGE,
+};
+pub use eseq::expr_promote::{
+    promoted_class_name, promoted_process_module_source, validate_promote_name,
+    write_promoted_process, PromoteTarget,
+};
 pub use eseq::scratch_runtime::*;
 pub use eseq::sequencer_natives::*;
 

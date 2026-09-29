@@ -32,7 +32,7 @@
 ;;   instance's graph overrides, written with `graph-*` and read back with the
 ;;   tracked `graph-*-value` reads / `bind-graph` handles, so an edit re-renders
 ;;   exactly its readers with no echo and no cache;
-;; - view (expanded node, selected neuron, add-process class, map arming,
+;; - view (expanded node, selected neuron, map arming,
 ;;   piano depth) is the kind's `:state`, one cell per instance;
 ;; - nothing is global, so two instances never share a selection or a cache.
 ;;
@@ -493,7 +493,15 @@
 ;; (docs/graph-node-processes-spec.md §6).
 (def gvr-expand-node (self n)
   (do
-    (if (>= n 0) (eseq.sequencer/lane-patch-register-node self n) nil)
+    (if (>= n 0)
+      (do
+        (eseq.sequencer/lane-patch-register-node self n)
+        ;; The *processes* dock draws the selected card with gvr-proc-inspector.
+        ;; Through a lambda that calls it by name, not the function value, so
+        ;; re-evaluating this file restyles the dock without a re-expand.
+        (eseq.processes-buffer/register-node-inspector self.kind
+          (lambda (graph node slot-id) (gvr-proc-inspector graph node slot-id))))
+      nil)
     (eseq.sequencer/lane-patch-node-select -1)
     (gvr-map-clear self)
     (set! self.expanded-node n)))
@@ -609,28 +617,104 @@
                   :badge-color :transparent :bg-color :bg :border-color :mixer-strip-selected-bg
                   :width gvr-proc-control-width :height gvr-row-height :font-size 6
                   :on-change (lambda (v) (set-inlet (gvr-track-inlet-value self (gvr-index-of opts v))))))
-            (number-picker
-              :key key :border-color :dim :background-color :bg
-              :value current
-              :min (if (= kind "track") 0 lo)
-              :max (if (= kind "track") 63 hi)
-              :step (if (or (= kind "int") (= kind "track")) 1 0.01)
-              :decimals (if (or (= kind "int") (= kind "track")) 0 2)
-              :width gvr-proc-control-width :height gvr-row-height :font-size 9
-              :on-change set-inlet))))))))
+            (if (or (get slot :expr) (and (get slot :promoted-expr) (<= lo -1000000)))
+              (gvr-proc-expr-picker key current set-inlet)
+              (number-picker
+                :key key :border-color :dim :background-color :bg
+                :value current
+                :min (if (= kind "track") 0 lo)
+                :max (if (= kind "track") 63 hi)
+                :step (if (or (= kind "int") (= kind "track")) 1 0.01)
+                :decimals (if (or (= kind "int") (= kind "track")) 0 2)
+                :width gvr-proc-control-width :height gvr-row-height :font-size 9
+                :on-change set-inlet)))))))))
 
-(def gvr-proc-card (self n slots index wired)
+;; An expr card's inlet (docs/expr-process-spec.md §3.1): the body carries
+;; no range, so the picker is unbounded — a drag moves 0.1 per row, Shift
+;; ten times that, typing sets any value. A whole value shows no decimals
+;; (an lfsr's taps = 46080, not "46080.00" overflowing the box); the explicit
+;; :step keeps drags and arrow keys on 0.01 either way.
+(def gvr-proc-expr-picker (key current set-inlet)
+  (number-picker
+    :key key :border-color :dim :background-color :bg
+    :value current
+    :drag :relative :drag-step 0.1 :step 0.01
+    :decimals (if (and (number? current) (= current (floor current))) 0 2)
+    :width gvr-proc-control-width :height gvr-row-height :font-size 9
+    :on-change set-inlet))
+
+;; Why an expr card's error dot is lit, as text for the inspector: a failed
+;; commit from its edit buffer, a failed run, or a body with no compiled
+;; class. nil when it runs clean.
+(def gvr-proc-expr-error (self n slot)
+  (let ((id (get slot :instance-id)))
+    (let ((committed (eseq.expr-buffer/commit-error self n id)))
+      (if committed
+        committed
+        (let ((run (eseq.sequencer/lane-patch-run-error id)))
+          (if run
+            run
+            (if (and (get slot :expr-source) (not (get slot :known))) (get slot :error) nil)))))))
+
+(def gvr-proc-expr-error-row (self n slot)
+  (if (get slot :expr)
+    (subtree :key (str "graph-variable-reset-proc-expr-error-" n "-" (get slot :instance-id))
+      (let ((message (gvr-proc-expr-error self n slot)))
+        (v-stack :gap 0
+          (if message
+            (label message
+              :width (- gvr-proc-card-width 1) :height gvr-row-height :font-size 7.5
+              :color :toast-error :bg :transparent)
+            nil))))
+    nil))
+
+;; Promote / edit as expr (docs/expr-process-spec.md §8): an expr card with
+;; a body promotes to My processes under a name; a card whose class was
+;; promoted from one turns back into an expr card. On any other card "as
+;; expr" is dim and says why instead.
+(def gvr-proc-expr-actions (self n slot origin)
+  (let ((id (get slot :instance-id)))
+    (if (get slot :expr)
+      (if (get slot :expr-source)
+        (button "promote…"
+          :key (str "graph-variable-reset-proc-promote-" n "-" id)
+          :width 5.2 :height gvr-row-height :padding 0.15 :font-size 7
+          :background-color :transparent :border-color :process-lane-accent :color :process-lane-accent
+          :on-click (lambda (event) (eseq.expr-buffer/open-promote self n id origin)))
+        nil)
+      (button "as expr"
+        :key (str "graph-variable-reset-proc-as-expr-" n "-" id)
+        :width 5.2 :height gvr-row-height :padding 0.15 :font-size 7
+        :background-color :transparent
+        :border-color (if (get slot :promoted-expr) :process-lane-accent :mixer-strip-border)
+        :color (if (get slot :promoted-expr) :process-lane-accent :dim)
+        :on-click (lambda (event)
+          (if (get slot :promoted-expr)
+            (eseq.expr-buffer/edit-node-slot-as-expr self n id)
+            (status (str "as expr: " (get slot :as-expr-reason)))))))))
+
+;; The selected slot's inspector card: on/off, order, remove, inlet
+;; pickers, out mapping, promote… / as expr. One function for both homes:
+;; the *processes* dock (gvr-proc-inspector, `width` :fill, `origin` "dock")
+;; and, when the dock is not showing this node, beside the bay
+;; (gvr-node-patch, gvr-proc-card-width, "node"). `origin` is the mount of
+;; promote's name modal.
+(def gvr-proc-card (self n slots index wired width origin)
   (let ((slot (nth slots index))
         (id (get slot :instance-id))
-        (enabled (get slot :enabled)))
+        (enabled (get slot :enabled))
+        ;; Docked, the card is the dock's content: no second frame inside
+        ;; the tile's, tighter rows, and promote… / as expr join the title
+        ;; row so a card with a few inlets fits the inspector half.
+        (docked (= origin "dock")))
     (box
       :key (str "graph-variable-reset-proc-card-" n "-" id)
-      :width gvr-proc-card-width
-      :padding 0.5
-      :background-color :bg
-      :border-color (if enabled :process-lane-accent :mixer-strip-border)
+      :width width
+      :padding (if docked 0.1 0.5)
+      :background-color (if docked :transparent :bg)
+      :border-color (if docked :transparent (if enabled :process-lane-accent :mixer-strip-border))
       :corner-radius 6
-      (v-stack :gap 0.3
+      (v-stack :gap (if docked 0.15 0.3)
         (h-stack :gap 0.3 :align :center
           (label (get slot :label) :width 6.2 :height gvr-row-height :font-size 8 :color :foreground :bg :transparent)
           (button (if enabled "on" "off")
@@ -640,36 +724,50 @@
             :border-color :process-lane-accent
             :color (if enabled :black :dim)
             :on-click (lambda (event) (graph-node-process-enable self n id (not enabled))))
-          (button "<"
-            :key (str "graph-variable-reset-proc-left-" n "-" id)
-            :width 1.4 :height gvr-row-height :padding 0.1 :font-size 7
-            :background-color :transparent :border-color :dim :color :dim
-            :on-click (lambda (event) (graph-node-process-move self n id -1)))
-          (button ">"
-            :key (str "graph-variable-reset-proc-right-" n "-" id)
-            :width 1.4 :height gvr-row-height :padding 0.1 :font-size 7
-            :background-color :transparent :border-color :dim :color :dim
-            :on-click (lambda (event) (graph-node-process-move self n id 1)))
-          (button "x"
-            :key (str "graph-variable-reset-proc-remove-" n "-" id)
-            :width 1.4 :height gvr-row-height :padding 0.1 :font-size 7
-            :background-color :transparent :border-color :dim :color :dim
-            :on-click (lambda (event) (graph-node-process-remove self n id))))
+          (if docked (gvr-proc-expr-actions self n slot origin) nil))
+        (gvr-proc-expr-error-row self n slot)
+        (if docked nil (gvr-proc-expr-actions self n slot origin))
         (each (get slot :inlet-defs) |inlet| (gvr-proc-inlet-row self n slot inlet wired))
         (each (filter (lambda (port) (get port :mappable)) (get slot :ports)) |port|
           (gvr-proc-map-row self n slot port))
-        (gvr-proc-meter n slot)))))
+        (gvr-proc-meter n slot (if (number? width) (- width 1) (- gvr-proc-card-width 1)))
+        ;; Docked, the dock draws delete at its own bottom right (the whole
+        ;; inspector's corner); in the bay the card carries it.
+        (if docked
+          nil
+          (h-stack :width :fill :align :center
+            (box :flex 1 :height 0.5 :bg :transparent)
+            (gvr-proc-delete-button self n id)))))))
+
+;; Removes the card from node `n`'s chain. Reordering is by dragging cards,
+;; so the card has no < > x buttons.
+(def gvr-proc-delete-button (self n id)
+  (button "delete"
+    :key (str "graph-variable-reset-proc-remove-" n "-" id)
+    :width 4.0 :height gvr-row-height :padding 0.1 :font-size 7
+    :background-color :red :border-color :red :color :black
+    :on-click (lambda (event) (graph-node-process-remove self n id))))
+
+;; The *processes* dock's renderer (eseq.processes-buffer/register-node-inspector):
+;; node `n`'s card `slot-id`, full width, or nil when it is gone.
+(def gvr-proc-inspector (self n slot-id)
+  (let ((slots (gvr-node-patch-slots self n)))
+    (let ((index (reduce |acc i| (if (and (< acc 0) (= (get (nth slots i) :instance-id) slot-id)) i acc)
+                   -1 (range 0 (len slots)))))
+      (if (>= index 0)
+        (gvr-proc-card self n slots index (gvr-proc-wired-inlets (gvr-node-patch-entries self n)) :fill "dock")
+        nil))))
 
 ;; A live readout under the inlets for slots that have one: lane-harmony's
 ;; snap meter. Its scope is read inside the subtree, so a fire repaints the
 ;; meter alone.
-(def gvr-proc-meter (n slot)
+(def gvr-proc-meter (n slot width)
   (let ((id (get slot :instance-id)))
     (if (= (get slot :class) "lane-harmony")
       (subtree :key (str "graph-variable-reset-proc-meter-" n "-" id)
         (eseq.sequencer/harmony-snap-meter (str "graph-variable-reset-harmony-" n "-" id)
           (eseq.sequencer/process-scope-cells-for id)
-          (- gvr-proc-card-width 1)))
+          width))
       nil)))
 
 ;; A mappable port (rand/count/acc `out`, ...) writes onto the fire payload:
@@ -682,7 +780,7 @@
       (h-stack :gap 0.4 :align :center
         (label (str port-name " ->") :width 4.2 :height gvr-row-height :font-size 8 :h-align :right :color :process-lane-accent :bg :transparent)
         (label (if mapped (gvr-map-field-short mapped) (if armed "pick..." "unmapped"))
-          :width 4.0 :height gvr-row-height :font-size 8 :v-align :center
+          :width 5.2 :height gvr-row-height :font-size 8 :v-align :center
           :color (if (or mapped armed) :process-lane-accent :dim) :bg :transparent)
         (button "map"
           :key (str "graph-variable-reset-proc-map-" n "-" id "-" port-name)
@@ -712,28 +810,24 @@
       :on-click (lambda (event) (gvr-map-bind self n field)))
     (gvr-num key value lo hi stp dec on-change)))
 
+;; The add menu: the library's classes, then an "expr presets" heading over
+;; the expr preset rows (docs/expr-process-spec.md §6.1). A preset row adds
+;; an expr card with its body committed and inlets set.
+(def gvr-proc-preset-header "expr presets")
 (def gvr-proc-add-card (self n)
-  (let ((classes (gvr-proc-class-labels)))
-    (box
-      :key (str "graph-variable-reset-proc-add-" n)
-      :width gvr-proc-card-width
-      :padding 0.5
-      :background-color :transparent
-      :border-color :mixer-strip-border
-      :corner-radius 6
-      (v-stack :gap 0.3
-        (dropdown
-          :key (str "graph-variable-reset-proc-add-class-" n)
-          :value-index (min self.add-class (- (len classes) 1)) :options classes
-          :badge-color :transparent :bg-color :bg :border-color :mixer-strip-selected-bg
-          :width (- gvr-proc-card-width 1) :height gvr-row-height :font-size 9
-          :on-change (lambda (v) (set! self.add-class (gvr-index-of classes v))))
-        (button "+ add process"
-          :key (str "graph-variable-reset-proc-add-button-" n)
-          :width (- gvr-proc-card-width 1) :height gvr-row-height :padding 0.15 :font-size 7
-          :background-color :transparent :border-color :process-lane-accent :color :process-lane-accent
-          :on-click (lambda (event)
-            (graph-node-process-add self n (gvr-proc-class-at self.add-class))))))))
+  (let ((class-labels (gvr-proc-class-labels))
+        (preset-labels (eseq.expr-buffer/preset-labels)))
+    (let ((labels (append class-labels (list gvr-proc-preset-header) preset-labels))
+          (class-count (len class-labels)))
+      (eseq.sequencer/lane-patch-add-menu-grouped
+        (str "graph-variable-reset-proc-add-" n) "+  add process"
+        labels (list class-count) "Filter processes…"
+        (lambda (label)
+          (let ((index (gvr-index-of labels label)))
+            (if (< index class-count)
+              (graph-node-process-add self n (gvr-proc-class-at index))
+              (eseq.expr-buffer/add-node-preset self n
+                (eseq.expr-buffer/preset-named label)))))))))
 
 ;; The slot the inspector card shows: the bay's selection, else the first.
 (def gvr-proc-selected-index (slots)
@@ -742,9 +836,10 @@
     (if (> (len hits) 0) (nth hits 0) (if (> (len slots) 0) 0 -1))))
 
 ;; The node's patch: the shared lane patchbay (cards, ports, drag cables,
-;; cable select + × / Backspace, fan-out) over this node's chain, with the
-;; selected slot's inspector card (on/off, order, remove, inlet knobs) beside
-;; it. Wires pointing up the chain land next fire, as on a track. The bay's
+;; cable select + × / Backspace, fan-out) over this node's chain. The
+;; selected slot's inspector card lives in the *processes* dock while that
+;; shows this node; otherwise (dock setting off, sidebar hidden) the same
+;; card sits beside the bay. Wires pointing up the chain land next fire, as on a track. The bay's
 ;; namespace derives from the instance id, so two instances never share one.
 (def gvr-node-patch (self n)
   (let ((slots (gvr-node-patch-slots self n))
@@ -759,7 +854,12 @@
           (box :flex 1 :padding 0 :bg :transparent
             :key (str "graph-variable-reset-proc-bay-" n)
             (eseq.sequencer/lane-patchbay-node ns (gvr-proc-add-card self n)))
-          (if (>= index 0) (gvr-proc-card self n slots index wired) nil))))))
+          (if (and (>= index 0) (not (eseq.processes-buffer/docks? self n)))
+            (gvr-proc-card self n slots index wired gvr-proc-card-width "node")
+            nil))
+        ;; Promote's name modal (eseq.expr-buffer), zero footprint closed.
+        (subtree :key (str "graph-variable-reset-promote-modal-" n)
+          (eseq.expr-buffer/promote-panel "node"))))))
 
 ;; One row / column of the weight matrix as a labeled 1xN strip.
 (def gvr-edge-strip (self title n active-count direction)
@@ -1080,7 +1180,7 @@
       :gather (- (edge :weight) (edge :dampening))
       :params ((weight :float -1 1 :default 0.0)
         (dampening :float 0 1 :default 0))))
-  :state ((expanded-node -1) (selected-neuron -1) (add-class 0)
+  :state ((expanded-node -1) (selected-neuron -1)
           (map-slot -1) (map-port "") (piano-depth 0.6))
   :view gvr-panel
   :keymap eseq.sequencer-keys/sequencer-keys

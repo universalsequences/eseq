@@ -41,7 +41,7 @@ use crate::backend::{
     AUTOCOMPLETE_PANEL_CORNER_RADIUS_PX, AUTOCOMPLETE_ROW_CORNER_RADIUS_PX,
     AUTOCOMPLETE_TEXT_CELL_SCALE, Backend, BackendError, BackendEvent, Color, RenderFrame,
     TOAST_BORDER_WIDTH_PX, TOAST_CORNER_RADIUS_PX, TiledRenderFrame, completion_panel_columns,
-    toast_placement, TOAST_CLOSE_GLYPH,
+    toast_loading_shapes, toast_placement, TOAST_CLOSE_GLYPH,
 };
 use crate::layout::TextMeasurer;
 use crate::live_audio;
@@ -2543,9 +2543,12 @@ impl WgpuAppBackend {
             let accent = match toast.kind {
                 crate::host::ToastKind::Success => theme::TOAST_SUCCESS(),
                 crate::host::ToastKind::Error => theme::TOAST_ERROR(),
+                crate::host::ToastKind::Loading => theme::ACCENT(),
             };
             let border = match toast.kind {
-                crate::host::ToastKind::Success => theme::TOAST_BORDER(),
+                crate::host::ToastKind::Success | crate::host::ToastKind::Loading => {
+                    theme::TOAST_BORDER()
+                }
                 crate::host::ToastKind::Error => accent,
             };
             let mut rounded = Vec::new();
@@ -2562,6 +2565,29 @@ impl WgpuAppBackend {
                 vp_w,
                 vp_h,
             );
+            for shape in toast_loading_shapes(
+                toast,
+                &place,
+                cell_w,
+                cell_h,
+                bg,
+                theme::TOAST_FG(),
+                accent,
+            ) {
+                gpu_scene::push_rounded_instance_cells(
+                    &mut rounded,
+                    shape.x / cell_w,
+                    shape.y / cell_h,
+                    shape.w / cell_w,
+                    shape.h / cell_h,
+                    shape.color,
+                    shape.radius_px,
+                    cell_w,
+                    cell_h,
+                    vp_w,
+                    vp_h,
+                );
+            }
             {
                 let gpu = self.gpu.as_ref().expect("gpu initialized");
                 if gpu.widget_pipelines.contains_key("dropdown") {

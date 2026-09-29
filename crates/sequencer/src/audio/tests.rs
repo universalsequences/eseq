@@ -1273,6 +1273,18 @@ fn rack_v2_choke_clears_held_keyboard_notes_on_choked_tracks() {
 }
 
 #[test]
+fn effect_transport_phase_counts_from_the_play_edge() {
+    use super::render::effect_transport_phase;
+    use crate::effects::dj_mixer::TRANSPORT_STOPPED_PHASE;
+    // Beats since play, not since the stream opened: the first playing block
+    // is the downbeat and must read phase 0, distinct from the stopped value.
+    assert_eq!(effect_transport_phase(true, 0.0), 0.0);
+    assert_eq!(effect_transport_phase(true, 9.5), 1.5);
+    assert_eq!(effect_transport_phase(false, 9.5), TRANSPORT_STOPPED_PHASE);
+    assert_ne!(effect_transport_phase(true, 0.0), TRANSPORT_STOPPED_PHASE);
+}
+
+#[test]
 fn dj_mixer_slots_carry_explicit_transport_phase_param() {
     let dj = EffectDescriptor::builtin_dj_mixer();
     let dj_slot = EffectSlotState::new(&dj, 42);

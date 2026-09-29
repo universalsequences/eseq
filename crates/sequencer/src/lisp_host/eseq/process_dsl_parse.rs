@@ -427,6 +427,11 @@ pub(in crate::lisp_host) fn push_process_target_write(
 }
 
 pub(in crate::lisp_host) fn parse_process_def(name: &str, args: &[EValue]) -> Result<crate::process::ProcessDef, String> {
+    // `:expr "<body>"` (docs/expr-process-spec.md §8): the class is compiled
+    // from an expr body by the expr pipeline, exactly like an expr card.
+    if let Some(source) = super::expr_process::def_process_expr_option(args)? {
+        return super::expr_process::expr_process_def_from_args(name, &source, args);
+    }
     let mut inlets = Vec::new();
     let mut outlets = Vec::new();
     let mut state = Vec::new();
@@ -508,6 +513,7 @@ pub(in crate::lisp_host) fn parse_process_def(name: &str, args: &[EValue]) -> Re
         accumulator: None,
         run_source,
         listens,
+        expr_source: None,
     })
 }
 
@@ -1293,6 +1299,7 @@ pub(in crate::lisp_host) fn construct_anonymous_listener_process(
         id: crate::process::stable_process_id(&class_name),
         name: class_name.clone(),
         source_path: None,
+        expr_source: None,
         doc: None,
         inlets: Vec::new(),
         outlets: Vec::new(),

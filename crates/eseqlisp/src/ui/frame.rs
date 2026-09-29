@@ -103,17 +103,44 @@ fn join_status_sections(mut left: Vec<Cell>, right: Vec<Cell>, width: usize) -> 
     }
 
     if left.len() + right.len() >= width {
-        let right_budget = right.len().min(width / 3);
+        // Too narrow for both. The right section (mode, position) stays
+        // whole while that leaves the left a readable prefix, else keeps its
+        // tail. A cut buffer name ends in "…" and a space always separates it
+        // from the right section's text (never "*expr node 1 · slot 2mode").
+        const MIN_LEFT: usize = 12;
+        let right_budget = if right.len() + MIN_LEFT <= width {
+            right.len()
+        } else {
+            right.len().min(width / 3)
+        };
         let left_budget = width.saturating_sub(right_budget);
-        left.truncate(left_budget);
+        let right_tail: Vec<Cell> = {
+            let take = width.saturating_sub(left.len().min(left_budget));
+            let skip = right.len().saturating_sub(take);
+            let mut tail: Vec<Cell> = right.into_iter().skip(skip).collect();
+            // A cut chip loses its partial word ("mode" of "text-mode").
+            if skip > 0 {
+                let partial = tail.iter().take_while(|cell| cell.ch != ' ').count();
+                if partial < tail.len() {
+                    tail.drain(..partial);
+                }
+            }
+            tail
+        };
+        let right_opens_with_space = right_tail.first().is_none_or(|cell| cell.ch == ' ');
+        if left.len() > left_budget {
+            let tail = if right_opens_with_space { 1 } else { 2 };
+            let keep = left_budget.saturating_sub(tail);
+            let style = left[keep].style;
+            left.truncate(keep);
+            if left_budget >= tail {
+                left.push(Cell { ch: '…', style });
+                if !right_opens_with_space {
+                    left.push(status_space());
+                }
+            }
+        }
         let mut cells = left;
-        let right_tail = right
-            .into_iter()
-            .rev()
-            .take(width.saturating_sub(cells.len()))
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev();
         cells.extend(right_tail);
         return finalize_status_cells(cells, width);
     }
@@ -788,6 +815,32 @@ mod tests {
         assert_eq!(metal_content_cells(120.0), 120);
         assert_eq!(metal_content_cells(120.49), 120);
         assert_eq!(metal_content_cells(120.99), 120);
+    }
+
+    #[test]
+    fn narrow_status_row_ellipsizes_buffer_name_before_the_mode_chip() {
+        let text = |cells: &[crate::backend::Cell]| cells.iter().map(|c| c.ch).collect::<String>();
+        let cells_of = |s: &str| {
+            let mut v = Vec::new();
+            super::push_status_text(&mut v, s, crate::theme::STATUS_FG(), None, false);
+            v
+        };
+        let row = super::join_status_sections(
+            cells_of(" *expr node 1 · slot 2*"),
+            cells_of(" text-mode   1:1 "),
+            30,
+        );
+        assert_eq!(text(&row), " *expr node … text-mode   1:1 ");
+        // Too narrow for the whole right section: its tail, still spaced.
+        let row = super::join_status_sections(
+            cells_of(" *expr node 1 · slot 2*"),
+            cells_of(" text-mode   1:1 "),
+            24,
+        );
+        assert_eq!(text(&row), " *expr node 1 ·…   1:1  ");
+        // A row with room is unchanged: name, gap, then the right section.
+        let row = super::join_status_sections(cells_of(" *seq*"), cells_of(" m  1:1 "), 20);
+        assert_eq!(text(&row), " *seq*       m  1:1 ");
     }
 
     #[test]

@@ -2257,6 +2257,74 @@ fn graph_node_process_def(
         .find(|def| def.name == class_name)
 }
 
+/// The expr body a library class was promoted from (a `def-process …
+/// :expr` class, spec §8), or `None` — also for the hidden `expr#` classes,
+/// which are cards, not library classes.
+fn promoted_expr_source(def: &crate::process::PublishedProcessDef) -> Option<&str> {
+    if crate::process::is_expr_process_class(&def.name) {
+        return None;
+    }
+    def.expr_source.as_deref()
+}
+
+/// Why a class cannot be opened as an expr card.
+fn promoted_expr_reason(def: &crate::process::PublishedProcessDef) -> String {
+    format!(
+        "{} was not promoted from an expr card; only a def-process with :expr opens as expr",
+        graph_node_process_label(&def.name)
+    )
+}
+
+/// `{:ok :error …}` for the promote natives: `:ok` is true without an
+/// error; each extra field is a string or nil.
+fn promote_result_value(error: Option<&str>, fields: &[(&str, Option<String>)]) -> EValue {
+    let mut map = HashMap::new();
+    map.insert("ok".to_string(), lisp_bool(error.is_none()));
+    map.insert(
+        "error".to_string(),
+        lisp_value(error.map(|e| EValue::String(e.to_string())).unwrap_or(EValue::Nil)),
+    );
+    for (key, value) in fields {
+        map.insert(
+            key.to_string(),
+            lisp_value(value.clone().map(EValue::String).unwrap_or(EValue::Nil)),
+        );
+    }
+    EValue::Map(map)
+}
+
+/// [`super::expr_promote::validate_promote_name`], plus: a module file of
+/// that name already in My processes whose class did not load (a broken
+/// file) is the user's own too, so the promote updates it.
+fn promote_target(
+    name: &str,
+    defs: &[crate::process::PublishedProcessDef],
+) -> Result<super::expr_promote::PromoteTarget, String> {
+    use super::expr_promote::PromoteTarget;
+    let target = super::expr_promote::validate_promote_name(name, defs)?;
+    let file = super::expr_promote::promoted_module_path(&super::process_library::my_processes_package_dir(), name);
+    Ok(if target == PromoteTarget::New && file.exists() { PromoteTarget::Update } else { target })
+}
+
+/// The My processes name `class` was promoted under (`bounce` for
+/// `user.processes.bounce/bounce` defined in the package), or `None` for
+/// any other class.
+fn my_promoted_name(def: &crate::process::PublishedProcessDef) -> Option<String> {
+    let name = def.name.rsplit('/').next()?;
+    super::expr_promote::is_my_promoted_class(def, name).then(|| name.to_string())
+}
+
+fn rebind_result_value(class: &str, inlets: &[String], removed: &[String]) -> EValue {
+    let names = |list: &[String]| process_list(list.iter().map(|name| EValue::String(name.clone())));
+    let mut map = HashMap::new();
+    map.insert("ok".to_string(), lisp_bool(true));
+    map.insert("error".to_string(), lisp_value(EValue::Nil));
+    map.insert("class".to_string(), lisp_string(class.to_string()));
+    map.insert("inlets".to_string(), lisp_value(names(inlets)));
+    map.insert("removed".to_string(), lisp_value(names(removed)));
+    EValue::Map(map)
+}
+
 /// Node-flavoured display name for a process class: the track lane classes
 /// drop their `lane-` prefix (a lane inlet is just a knob on a node), the
 /// Cirklon pair spell out what they read. Data keeps the class name.
@@ -2268,7 +2336,16 @@ pub fn graph_node_process_label(class_name: &str) -> String {
         "neural-scale" => "scale".to_string(),
         "neural-delay" => "delay".to_string(),
         "neural-reset" => "reset".to_string(),
-        other => other.strip_prefix("lane-").unwrap_or(other).to_string(),
+        // Every compiled expr body shows as the card it came from.
+        other if crate::process::is_expr_process_class(other) => {
+            crate::process::EXPR_PROCESS_CLASS.to_string()
+        }
+        // A package class (`user.processes.bounce/bounce`, a promoted
+        // process) shows its own name.
+        other => {
+            let base = other.rsplit('/').next().unwrap_or(other);
+            base.strip_prefix("lane-").unwrap_or(base).to_string()
+        }
     }
 }
 
@@ -2311,6 +2388,36 @@ fn graph_node_process_slot_value(
         lisp_string(def.as_ref().and_then(|d| d.doc.clone()).unwrap_or_default()),
     );
     map.insert("known".to_string(), lisp_bool(def.is_some()));
+    // Expr cards (docs/expr-process-spec.md §2): the stored body, and the
+    // error dot — a body whose class is not compiled, or the scheduler's
+    // last run error for this slot (cleared by its next clean run).
+    map.insert(
+        "expr".to_string(),
+        lisp_bool(super::expr_process::is_expr_slot(slot)),
+    );
+    map.insert(
+        "expr-source".to_string(),
+        lisp_value(slot.expr_source.clone().map(EValue::String).unwrap_or(EValue::Nil)),
+    );
+    // A library card whose class was promoted from an expr card (spec §8):
+    // "edit as expr" can reopen it. `:as-expr-reason` says why not otherwise.
+    let promoted = !super::expr_process::is_expr_slot(slot)
+        && def.as_ref().and_then(promoted_expr_source).is_some();
+    map.insert("promoted-expr".to_string(), lisp_bool(promoted));
+    map.insert(
+        "as-expr-reason".to_string(),
+        lisp_value(match (&def, promoted || super::expr_process::is_expr_slot(slot)) {
+            (_, true) => EValue::Nil,
+            (Some(def), false) => EValue::String(promoted_expr_reason(def)),
+            (None, false) => EValue::String(format!("{} is not loaded", graph_node_process_label(&slot.class_name))),
+        }),
+    );
+    let error = slot.expr_compile_error(def.is_some())
+        .or_else(|| state.process_run_error(slot.instance_id.0));
+    map.insert(
+        "error".to_string(),
+        lisp_value(error.map(EValue::String).unwrap_or(EValue::Nil)),
+    );
     let mut inlets = HashMap::new();
     for (name, value) in &slot.inlets {
         inlets.insert(name.clone(), lisp_value(value.to_value()));
@@ -2412,6 +2519,27 @@ fn graph_node_process_slot_value(
     EValue::Map(map)
 }
 
+/// Compile the class of every expr slot in `chain` that has none yet
+/// (a chain that arrived by kit load, instance copy or project load before
+/// `sync_expr_process_classes`). Idempotent and cheap once registered.
+fn ensure_graph_node_expr_classes(
+    state: &crate::sequencer::SequencerState,
+    chain: &crate::process::TrackProcessChain,
+) {
+    for slot in &chain.slots {
+        let Some(source) = slot.expr_source.as_deref() else {
+            continue;
+        };
+        if crate::process::is_expr_process_class(&slot.class_name)
+            && !state.has_expr_process_def(&slot.class_name)
+        {
+            if let Err(error) = super::expr_process::compile_and_register_expr_source(state, source) {
+                eprintln!("[expr] slot {} body does not compile: {error}", slot.instance_id.0);
+            }
+        }
+    }
+}
+
 fn graph_node_process_args(
     state: &crate::sequencer::SequencerState,
     native: &str,
@@ -2445,17 +2573,110 @@ fn edit_graph_node_process_chain<R>(
     instance: usize,
     edit: impl FnOnce(&mut crate::process::TrackProcessChain, u64) -> Result<R, String>,
 ) -> Result<R, String> {
-    let result = state.edit_current_graph_overrides(|graphs| {
+    edit_graph_node_process_chain_recorded(ctx, state, manifest, instance, None, edit)
+}
+
+/// The host command a node process-chain edit enqueues so the host records
+/// it as one undo entry (eseq-waa9.23). The edit is already applied; the
+/// payload carries the node's chain before and after it (JSON), the scene it
+/// was made in, and, for a drag, a merge key that coalesces the gesture.
+pub const GRAPH_NODE_PROCESS_HISTORY_COMMAND: &str = "graph-node-process-history";
+
+/// [`edit_graph_node_process_chain`], recording the edit for undo. `merge`
+/// names a drag gesture (inlet pickers): repeated edits under one key stage
+/// a single history entry until the pointer is released.
+fn edit_graph_node_process_chain_recorded<R>(
+    ctx: &mut eseqlisp::NativeContext,
+    state: &Arc<crate::sequencer::SequencerState>,
+    manifest: &crate::graph::GraphManifest,
+    instance: usize,
+    merge: Option<String>,
+    edit: impl FnOnce(&mut crate::process::TrackProcessChain, u64) -> Result<R, String>,
+) -> Result<R, String> {
+    let (result, before, after) = state.edit_current_graph_overrides(|graphs| {
         let next_id = next_graph_node_process_id(graphs);
         let graph = ensure_graph_overrides(graphs, manifest);
         let node = ensure_graph_node_intrinsic(graph, &manifest.node.name, instance);
+        let before = node.process_chain.clone();
         let mut chain = node.process_chain.take().unwrap_or_default();
         let result = edit(&mut chain, next_id)?;
         node.process_chain = if chain.slots.is_empty() { None } else { Some(chain) };
-        Ok(result)
+        Ok((result, before, node.process_chain.clone()))
     })?;
     invalidate_graph_reads(ctx, state, manifest, GraphReadScope::Process(instance));
+    if before != after {
+        if let Some(scene) = state.current_scene_id() {
+            enqueue_graph_node_process_history(ctx, scene, manifest.id, instance, &before, &after, merge);
+        }
+    }
     Ok(result)
+}
+
+fn enqueue_graph_node_process_history(
+    ctx: &mut eseqlisp::NativeContext,
+    scene: crate::sequencer::SceneId,
+    sequencer_id: u64,
+    node: usize,
+    before: &Option<crate::process::TrackProcessChain>,
+    after: &Option<crate::process::TrackProcessChain>,
+    merge: Option<String>,
+) {
+    let chain_json = |chain: &Option<crate::process::TrackProcessChain>| match chain {
+        Some(chain) => serde_json::to_string(chain)
+            .map(EValue::String)
+            .unwrap_or(EValue::Nil),
+        None => EValue::Nil,
+    };
+    let mut payload = HashMap::new();
+    // Ids go as strings: legacy hashed sequencer ids exceed an f64's exact range.
+    payload.insert("scene-id".to_string(), lisp_string(scene.0.to_string()));
+    payload.insert("sequencer-id".to_string(), lisp_string(sequencer_id.to_string()));
+    payload.insert("node".to_string(), lisp_value(EValue::Number(node as f64)));
+    payload.insert("before".to_string(), lisp_value(chain_json(before)));
+    payload.insert("after".to_string(), lisp_value(chain_json(after)));
+    if let Some(merge) = merge {
+        payload.insert("merge".to_string(), lisp_string(merge));
+    }
+    ctx.enqueue_command(HostCommand::Custom {
+        name: GRAPH_NODE_PROCESS_HISTORY_COMMAND.to_string(),
+        payload: EValue::Map(payload),
+    });
+}
+
+/// Undo/redo target of a node process-chain edit: put `chain` back as node
+/// `node`'s chain of sequencer `sequencer_id` in scene `scene`, register any
+/// expr class the restored slots need (their bodies are on the slots), and
+/// republish. Errors when the sequencer or the scene no longer exists.
+pub fn restore_graph_node_process_chain(
+    state: &crate::sequencer::SequencerState,
+    scene: crate::sequencer::SceneId,
+    sequencer_id: u64,
+    node: usize,
+    chain: Option<crate::process::TrackProcessChain>,
+) -> Result<(), String> {
+    let manifest = state
+        .published_sequencers()
+        .into_iter()
+        .filter_map(|published| published.graph)
+        .find(|manifest| manifest.id == sequencer_id)
+        .ok_or_else(|| format!("graph sequencer {sequencer_id} is not loaded"))?;
+    if let Some(chain) = &chain {
+        ensure_graph_node_expr_classes(state, chain);
+        // A redo brings back ids minted before the undo; keep the session
+        // high-water above them so a later add never reuses one.
+        for slot in &chain.slots {
+            let id = slot.instance_id.0;
+            if (GRAPH_NODE_PROCESS_ID_BASE..crate::process::TRACK_ROSTER_INSTANCE_ID_BASE).contains(&id) {
+                claim_graph_node_process_id(id);
+            }
+        }
+    }
+    state.edit_scene_graph_overrides(scene, |graphs| {
+        let graph = ensure_graph_overrides(graphs, &manifest);
+        let intrinsic = ensure_graph_node_intrinsic(graph, &manifest.node.name, node);
+        intrinsic.process_chain = chain;
+        Ok(())
+    })
 }
 
 /// Cable ids for node patches live above every track: the lane patchbay
@@ -2655,6 +2876,12 @@ fn graph_node_lane_patch_value(
                     ("out-ports", lisp_list(outs)),
                     ("in-ports", lisp_list(in_ports)),
                     ("param-ports", lisp_list(Vec::new())),
+                    ("expr", EValue::Bool(slot.is_expr_card())),
+                    ("expr-line", slot.expr_preview_line().map(EValue::String).unwrap_or(EValue::Nil)),
+                    (
+                        "compile-error",
+                        slot.expr_compile_error(def.is_some()).map(EValue::String).unwrap_or(EValue::Nil),
+                    ),
                 ])
             })
             .collect(),
@@ -2673,6 +2900,7 @@ fn register_graph_node_process_natives(
         move |args, ctx| {
             let (manifest, instance) = graph_node_process_args(&st, "graph-node-process-chain", &args)?;
             let chain = graph_node_process_chain(&st, &manifest, instance);
+            ensure_graph_node_expr_classes(&st, &chain);
             let key = GraphReadKey::Process { node: instance };
             track_graph_read(ctx, &manifest, &key, &resolve_graph_read(&st, &manifest, &key));
             Ok(lisp_list(
@@ -2712,6 +2940,7 @@ fn register_graph_node_process_natives(
                     lanes: Default::default(),
                     fanout: Default::default(),
                     unbound_ports: Default::default(),
+                    expr_source: None,
                     bindings: Default::default(),
                 });
                 Ok(next_id)
@@ -2817,7 +3046,10 @@ fn register_graph_node_process_natives(
                 .get(4)
                 .ok_or_else(|| "graph-node-process-inlet expects a value".to_string())?;
             let literal = crate::process::ProcessLiteral::from_value(value)?;
-            edit_graph_node_process_chain(ctx, &st, &manifest, instance, |chain, _| {
+            // A picker drag writes one value per pointer event; the merge key
+            // folds the whole gesture into one undo step.
+            let merge = format!("graph-node-process-inlet:{}:{instance}:{}:{inlet}", manifest.id, id.0);
+            edit_graph_node_process_chain_recorded(ctx, &st, &manifest, instance, Some(merge), |chain, _| {
                 let slot = chain
                     .slots
                     .iter_mut()
@@ -3070,6 +3302,360 @@ fn register_graph_node_process_natives(
 
     let st = Arc::clone(&state);
     runtime.register_native_with_docs(
+        "graph-node-process-expr-set",
+        "(graph-node-process-expr-set sequencer node-index instance-id source)",
+        "Commit an expr card's body (docs/expr-process-spec.md §2): compile it to a hidden expr#<hash> class and rebind the slot in place (same id, same position, same outgoing wires). Inlets reconcile by name: survivors keep their values and cables, new ones start at 0, removed ones lose their cables. Returns {:ok :class :inlets :removed :error :span :where} (:span is (start end) byte offsets into the body, :where the same as (line column end-line end-column), 0-based with columns in chars; both nil without a span); on a parse/compile error the slot keeps its previous class and :ok is false.",
+        move |args, ctx| {
+            let (manifest, instance) =
+                graph_node_process_args(&st, "graph-node-process-expr-set", &args)?;
+            let id = graph_node_process_id_arg(args.get(2), "graph-node-process-expr-set")?;
+            let source = match args.get(3) {
+                Some(EValue::String(source)) => source.clone(),
+                Some(EValue::Nil) | None => String::new(),
+                Some(_) => return Err("graph-node-process-expr-set expects a source string".to_string()),
+            };
+            let chain = graph_node_process_chain(&st, &manifest, instance);
+            let slot = chain
+                .slots
+                .iter()
+                .find(|slot| slot.instance_id == id)
+                .ok_or_else(|| format!("graph-node-process-expr-set: no slot {}", id.0))?;
+            if !super::expr_process::is_expr_slot(slot) {
+                return Err(format!(
+                    "graph-node-process-expr-set: slot {} is a {} card, not an expr card",
+                    id.0, slot.class_name
+                ));
+            }
+            let old_class = slot.class_name.clone();
+            let old_inlets: Vec<String> = graph_node_process_def(&st, &old_class)
+                .map(|def| def.inlets.iter().map(|inlet| inlet.name.clone()).collect())
+                .unwrap_or_else(|| slot.inlets.keys().cloned().collect());
+            let compiled = match super::expr_process::compile_and_register_expr_source(&st, &source) {
+                Ok(compiled) => compiled,
+                Err(error) => {
+                    // The previous class keeps running (spec §2).
+                    return Ok(super::expr_process::expr_set_result_value(
+                        false,
+                        &old_class,
+                        &old_inlets,
+                        &[],
+                        Some(&error),
+                        &source,
+                    ));
+                }
+            };
+            let rebind = edit_graph_node_process_chain(ctx, &st, &manifest, instance, |chain, _| {
+                super::expr_process::rebind_expr_slot(chain, id, &old_inlets, &source, &compiled)
+            })?;
+            if !rebind.removed.is_empty() {
+                ctx.set_status(format!(
+                    "expr: removed inlet{} {}",
+                    if rebind.removed.len() == 1 { "" } else { "s" },
+                    rebind.removed.join(", ")
+                ));
+            }
+            Ok(super::expr_process::expr_set_result_value(
+                true,
+                &compiled.class_name,
+                &compiled.inlets,
+                &rebind.removed,
+                None,
+                &source,
+            ))
+        },
+    );
+
+    let st = Arc::clone(&state);
+    runtime.register_native_with_docs(
+        "graph-node-process-expr-source",
+        "(graph-node-process-expr-source sequencer node-index instance-id)",
+        "The stored body of an expr card on the node's patch, or nil when the slot has none (an empty expr card, or not an expr card).",
+        move |args, ctx| {
+            let (manifest, instance) =
+                graph_node_process_args(&st, "graph-node-process-expr-source", &args)?;
+            let id = graph_node_process_id_arg(args.get(2), "graph-node-process-expr-source")?;
+            let chain = graph_node_process_chain(&st, &manifest, instance);
+            let key = GraphReadKey::Process { node: instance };
+            track_graph_read(ctx, &manifest, &key, &resolve_graph_read(&st, &manifest, &key));
+            let slot = chain
+                .slots
+                .iter()
+                .find(|slot| slot.instance_id == id)
+                .ok_or_else(|| format!("graph-node-process-expr-source: no slot {}", id.0))?;
+            Ok(slot.expr_source.clone().map(EValue::String).unwrap_or(EValue::Nil))
+        },
+    );
+
+    // ── Promote to My processes / edit as expr (expr spec §8, eseq-waa9.17) ──
+    runtime.register_native_with_docs(
+        "graph-node-process-promote-check",
+        "(graph-node-process-promote-check sequencer name)",
+        "Whether `name` can name a promoted process (docs/expr-process-spec.md §8): {:ok :error :class :update}. A name is lowercase letters, digits and single dashes, starts with a letter, is not `expr`, and is not the name or label of an existing class — except the user's own My processes class of that name, which a promote then updates (:update true; confirm with graph-node-process-promote's replace argument).",
+        {
+            let st = Arc::clone(&state);
+            move |args, _ctx| {
+                let name = match args.get(1) {
+                    Some(EValue::String(name)) => name.trim().to_string(),
+                    _ => String::new(),
+                };
+                let defs = st.published_process_authoring().defs;
+                let checked = promote_target(&name, &defs);
+                let mut result = promote_result_value(
+                    checked.as_ref().err().map(String::as_str),
+                    &[("class", checked.is_ok().then(|| super::expr_promote::promoted_class_name(&name)))],
+                );
+                if let EValue::Map(map) = &mut result {
+                    let update = checked == Ok(super::expr_promote::PromoteTarget::Update);
+                    map.insert("update".to_string(), lisp_bool(update));
+                }
+                Ok(result)
+            }
+        },
+    );
+
+    let st = Arc::clone(&state);
+    runtime.register_native_with_docs(
+        "graph-node-process-promote",
+        "(graph-node-process-promote sequencer node-index instance-id name [replace])",
+        "Write expr card `instance-id` as a def-process named `name` into the My processes package (docs/expr-process-spec.md §8): <user lisp root>/packages/user.processes/src/<name>.lisp, module user.processes.<name>, the body verbatim under :expr, the card's inlet values as defaults. Creates the package on first use; refuses an illegal or taken name, an empty or failing body. A name that is already the user's own My processes class (or file) is an update: it needs `replace` true, then the file is rewritten atomically (builtin and other packages' classes are never replaced). Does not load the file or touch the slot: load :path (a reload replaces the class for every card using it), then graph-node-process-rebind-class the slot to :class. Returns {:ok :error :path :class :module :update}.",
+        move |args, _ctx| {
+            let (manifest, instance) = graph_node_process_args(&st, "graph-node-process-promote", &args)?;
+            let id = graph_node_process_id_arg(args.get(2), "graph-node-process-promote")?;
+            let name = match args.get(3) {
+                Some(EValue::String(name)) => name.trim().to_string(),
+                _ => return Err("graph-node-process-promote expects a name string".to_string()),
+            };
+            let fail = |error: String| Ok(promote_result_value(Some(&error), &[]));
+            let chain = graph_node_process_chain(&st, &manifest, instance);
+            let Some(slot) = chain.slots.iter().find(|slot| slot.instance_id == id) else {
+                return fail(format!("no slot {}", id.0));
+            };
+            if !super::expr_process::is_expr_slot(slot) {
+                return fail(format!("{} is not an expr card", graph_node_process_label(&slot.class_name)));
+            }
+            let source = slot.expr_source.clone().unwrap_or_default();
+            let compiled = match super::expr_process::compile_expr_source(&source) {
+                Ok(compiled) if compiled.def.is_some() => compiled,
+                Ok(_) => return fail("the card has no body to promote".to_string()),
+                Err(error) => return fail(format!("the body does not compile: {error}")),
+            };
+            let replace = matches!(args.get(4), Some(value) if !matches!(value, EValue::Nil | EValue::Bool(false)));
+            let defs = st.published_process_authoring().defs;
+            let update = match promote_target(&name, &defs) {
+                Ok(target) => target == super::expr_promote::PromoteTarget::Update,
+                Err(error) => return fail(error),
+            };
+            if update && !replace {
+                return fail(format!("`{name}` is already in My processes; confirm to update it"));
+            }
+            let inlets: Vec<(String, f64)> = compiled
+                .inlets
+                .iter()
+                .map(|inlet| {
+                    let value = match slot.inlets.get(inlet).map(|value| value.to_value()) {
+                        Some(EValue::Number(value)) => value,
+                        Some(EValue::Bool(value)) => f64::from(u8::from(value)),
+                        _ => 0.0,
+                    };
+                    (inlet.clone(), value)
+                })
+                .collect();
+            if let Err(error) = super::expr_promote::check_promoted_def(&name, &source, &inlets) {
+                return fail(error);
+            }
+            let text = match super::expr_promote::promoted_process_module_source(&name, &source, &inlets) {
+                Ok(text) => text,
+                Err(error) => return fail(error),
+            };
+            let dir = super::process_library::my_processes_package_dir();
+            match super::expr_promote::write_promoted_process(&dir, &name, &text, update) {
+                Ok(path) => {
+                    let mut result = promote_result_value(
+                        None,
+                        &[
+                            ("path", Some(path.to_string_lossy().into_owned())),
+                            ("class", Some(super::expr_promote::promoted_class_name(&name))),
+                            ("module", Some(super::expr_promote::promoted_module_name(&name))),
+                        ],
+                    );
+                    if let EValue::Map(map) = &mut result {
+                        map.insert("update".to_string(), lisp_bool(update));
+                    }
+                    Ok(result)
+                }
+                Err(error) => fail(error),
+            }
+        },
+    );
+
+    let st = Arc::clone(&state);
+    runtime.register_native_with_docs(
+        "graph-node-process-rebind-class",
+        "(graph-node-process-rebind-class sequencer node-index instance-id class)",
+        "Rebind slot `instance-id` to the published class `class` in place: same slot id, position and outgoing wires; inlets reconcile by name (survivors keep their values and incoming cables, removed ones lose theirs); the slot stops being an expr card. Promote (docs/expr-process-spec.md §8) calls it after loading the new module. Returns {:ok :error :class :inlets :removed}.",
+        move |args, ctx| {
+            let (manifest, instance) = graph_node_process_args(&st, "graph-node-process-rebind-class", &args)?;
+            let id = graph_node_process_id_arg(args.get(2), "graph-node-process-rebind-class")?;
+            let class = match args.get(3) {
+                Some(EValue::String(class)) | Some(EValue::Symbol(class)) => class.clone(),
+                _ => return Err("graph-node-process-rebind-class expects a class name".to_string()),
+            };
+            let Some(def) = graph_node_process_def(&st, &class) else {
+                return Ok(promote_result_value(Some(&format!("no process class {class}")), &[]));
+            };
+            let chain = graph_node_process_chain(&st, &manifest, instance);
+            let Some(slot) = chain.slots.iter().find(|slot| slot.instance_id == id) else {
+                return Ok(promote_result_value(Some(&format!("no slot {}", id.0)), &[]));
+            };
+            let old_inlets: Vec<String> = graph_node_process_def(&st, &slot.class_name)
+                .map(|def| def.inlets.iter().map(|inlet| inlet.name.clone()).collect())
+                .unwrap_or_else(|| slot.inlets.keys().cloned().collect());
+            let new_inlets: Vec<String> = def.inlets.iter().map(|inlet| inlet.name.clone()).collect();
+            let rebind = edit_graph_node_process_chain(ctx, &st, &manifest, instance, |chain, _| {
+                super::expr_process::rebind_slot_class(chain, id, &old_inlets, &class, &new_inlets, None)
+            })?;
+            Ok(rebind_result_value(&class, &new_inlets, &rebind.removed))
+        },
+    );
+
+    let st = Arc::clone(&state);
+    runtime.register_native_with_docs(
+        "graph-node-process-edit-as-expr",
+        "(graph-node-process-edit-as-expr sequencer node-index instance-id)",
+        "Turn slot `instance-id` back into an expr card holding its class's expr body (docs/expr-process-spec.md §8): only a class promoted from an expr card (a def-process with :expr) has one. Same slot id, position and wires; inlet values and cables kept by name, and every inlet's current value (a class default included) is written onto the slot, so the card sends what the class did. Returns {:ok :class :inlets :removed :error :span :where :origin} like graph-node-process-expr-set (:origin is the My processes name the class was promoted under, for promote to update it); :ok false with :error saying why otherwise.",
+        move |args, ctx| {
+            let (manifest, instance) = graph_node_process_args(&st, "graph-node-process-edit-as-expr", &args)?;
+            let id = graph_node_process_id_arg(args.get(2), "graph-node-process-edit-as-expr")?;
+            let chain = graph_node_process_chain(&st, &manifest, instance);
+            let refuse = |class: &str, message: String| {
+                Ok(super::expr_process::expr_set_result_value(
+                    false,
+                    class,
+                    &[],
+                    &[],
+                    Some(&super::expr_process::ExprCompileError::new(message)),
+                    "",
+                ))
+            };
+            let Some(slot) = chain.slots.iter().find(|slot| slot.instance_id == id) else {
+                return refuse("", format!("no slot {}", id.0));
+            };
+            let class = slot.class_name.clone();
+            if super::expr_process::is_expr_slot(slot) {
+                return refuse(&class, "the card is already an expr card".to_string());
+            }
+            let Some(def) = graph_node_process_def(&st, &class) else {
+                return refuse(&class, format!("{} is not loaded", graph_node_process_label(&class)));
+            };
+            let Some(source) = promoted_expr_source(&def).map(str::to_string) else {
+                return refuse(&class, promoted_expr_reason(&def));
+            };
+            let compiled = match super::expr_process::compile_and_register_expr_source(&st, &source) {
+                Ok(compiled) => compiled,
+                Err(error) => {
+                    return Ok(super::expr_process::expr_set_result_value(
+                        false, &class, &[], &[], Some(&error), &source,
+                    ))
+                }
+            };
+            let old_inlets: Vec<String> = def.inlets.iter().map(|inlet| inlet.name.clone()).collect();
+            let defaults: Vec<(String, crate::process::ProcessLiteral)> = def
+                .inlets
+                .iter()
+                .map(|inlet| (inlet.name.clone(), inlet.default.clone()))
+                .collect();
+            let rebind = edit_graph_node_process_chain(ctx, &st, &manifest, instance, |chain, _| {
+                // The class's defaults may differ from an expr card's 0:
+                // pin every inlet's current value on the slot first.
+                if let Some(slot) = chain.slots.iter_mut().find(|slot| slot.instance_id == id) {
+                    for (name, default) in &defaults {
+                        slot.inlets.entry(name.clone()).or_insert_with(|| default.clone());
+                    }
+                }
+                super::expr_process::rebind_expr_slot(chain, id, &old_inlets, &source, &compiled)
+            })?;
+            let mut result = super::expr_process::expr_set_result_value(
+                true,
+                &compiled.class_name,
+                &compiled.inlets,
+                &rebind.removed,
+                None,
+                &source,
+            );
+            // The My processes name the card came from: promoting it again
+            // under that name updates the class (spec §8).
+            if let EValue::Map(map) = &mut result {
+                map.insert(
+                    "origin".to_string(),
+                    lisp_value(my_promoted_name(&def).map(EValue::String).unwrap_or(EValue::Nil)),
+                );
+            }
+            Ok(result)
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "expr-context-completions",
+        "(expr-context-completions)",
+        "The names only expr card bodies know — the $ context variables, the direct writes, the state form, the stateful helpers, the shaping helpers, constants and -> / ->> — as (label signature doc category) lists, for the expr edit buffer's completion (mode-add-completions).",
+        move |_args, _ctx| {
+            let item = |label: &str, signature: &str, doc: &str, category: &str| {
+                process_list([
+                    EValue::String(label.to_string()),
+                    EValue::String(signature.to_string()),
+                    EValue::String(doc.to_string()),
+                    EValue::String(category.to_string()),
+                ])
+            };
+            Ok(process_list(
+                super::expr_process::EXPR_CONTEXT_VAR_DOCS
+                    .iter()
+                    .map(|(name, doc)| item(name, name, doc, "expr context"))
+                    .chain(super::expr_process::expr_write_verb_docs().map(
+                        |(name, signature, doc)| item(name, signature, doc, "expr write"),
+                    ))
+                    .chain(std::iter::once({
+                        let (name, signature, doc) = super::expr_process::EXPR_STATE_FORM_DOC;
+                        item(name, signature, doc, "expr state")
+                    }))
+                    .chain(super::expr_process::expr_helper_docs().map(
+                        |(name, signature, doc)| item(name, signature, doc, "expr helper"),
+                    ))
+                    .chain(super::expr_process::expr_pure_helper_docs().map(
+                        |(name, signature, doc)| item(name, signature, doc, "expr shaper"),
+                    ))
+                    .chain(super::expr_process::EXPR_CONSTANTS.iter().map(
+                        |(name, _, doc)| item(name, name, doc, "expr constant"),
+                    ))
+                    .chain(super::expr_process::EXPR_THREADING_DOCS.iter().map(
+                        |(name, signature, doc)| item(name, signature, doc, "expr form"),
+                    )),
+            ))
+        },
+    );
+
+    let st = Arc::clone(&state);
+    runtime.register_native_with_docs(
+        "graph-node-process-slot?",
+        "(graph-node-process-slot? sequencer node-index instance-id)",
+        "Whether the node's patch still holds slot instance-id. Never raises: an unknown graph, a node out of range or a removed slot all answer false, so an editor holding a slot id (the expr edit buffer) can check before it commits.",
+        move |args, ctx| {
+            let Ok((manifest, instance)) = graph_node_process_args(&st, "graph-node-process-slot?", &args)
+            else {
+                return Ok(EValue::Bool(false));
+            };
+            let Ok(id) = graph_node_process_id_arg(args.get(2), "graph-node-process-slot?") else {
+                return Ok(EValue::Bool(false));
+            };
+            let key = GraphReadKey::Process { node: instance };
+            track_graph_read(ctx, &manifest, &key, &resolve_graph_read(&st, &manifest, &key));
+            let chain = graph_node_process_chain(&st, &manifest, instance);
+            Ok(EValue::Bool(chain.slots.iter().any(|slot| slot.instance_id == id)))
+        },
+    );
+
+    let st = Arc::clone(&state);
+    runtime.register_native_with_docs(
         "graph-node-process-classes",
         "(graph-node-process-classes)",
         "Process classes a node patch can hold, as {:class :label :doc} maps in library order: node-flavoured labels, minus the classes that do nothing on a node fire.",
@@ -3080,6 +3666,9 @@ fn register_graph_node_process_natives(
                     .defs
                     .iter()
                     .filter(|def| !GRAPH_NODE_HIDDEN_PROCESS_CLASSES.contains(&def.name.as_str()))
+                    // Compiled expr bodies are reached through the plain
+                    // `expr` card, never picked directly (expr spec §2.1).
+                    .filter(|def| !crate::process::is_expr_process_class(&def.name))
                     .map(|def| {
                         let mut m = HashMap::new();
                         m.insert("class".to_string(), lisp_string(def.name.clone()));
@@ -3100,6 +3689,7 @@ fn register_graph_node_process_natives(
         move |args, ctx| {
             let (manifest, instance) = graph_node_process_args(&st, "graph-node-lane-patch", &args)?;
             let chain = graph_node_process_chain(&st, &manifest, instance);
+            ensure_graph_node_expr_classes(&st, &chain);
             let key = GraphReadKey::Process { node: instance };
             track_graph_read(ctx, &manifest, &key, &resolve_graph_read(&st, &manifest, &key));
             let namespace = graph_node_lane_patch_namespace(manifest.id, instance);

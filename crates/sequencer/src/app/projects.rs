@@ -1357,6 +1357,12 @@ impl App {
         self.editor.pending_project_load.is_some()
     }
 
+    /// Toast text and completed fraction for the pending project load, naming
+    /// the step the next `advance_pending_project_load` call will run.
+    pub fn pending_project_load_progress(&self) -> Option<(String, f32)> {
+        self.editor.pending_project_load.as_ref().map(super::PendingProjectLoad::progress)
+    }
+
     fn create_blank_project_sample(&mut self) -> Result<ProjectSampleAsset, String> {
         Ok(ProjectSampleAsset {
             buffer_id: self.create_blank_sampler_buffer()?,
@@ -1453,7 +1459,7 @@ impl App {
         Ok(())
     }
 
-    fn capture_track_as_container_preset(
+    pub(super) fn capture_track_as_container_preset(
         &mut self,
         track: usize,
         name: &str,
@@ -2101,8 +2107,20 @@ impl App {
         let result = self.load_kit_as_rack_inner(path);
         if result.is_ok() {
             crate::app::edit::squash_history_since(self, history_len, "Load kit");
+            self.sync_expr_process_classes_after_import();
         }
         result
+    }
+
+    /// Compile the class of every expr card body that arrived without one
+    /// (docs/expr-process-spec.md §2.1): a kit carries node patches whose
+    /// hidden `expr#<hash>` classes exist only in the session that saved it,
+    /// and the scheduler skips a slot whose class is unknown. Cheap when
+    /// every body is already registered.
+    fn sync_expr_process_classes_after_import(&self) {
+        for (source, error) in crate::lisp_host::sync_expr_process_classes(&self.state) {
+            eprintln!("[expr] imported body does not compile ({error}): {source}");
+        }
     }
 
     fn load_kit_as_rack_inner(&mut self, path: &Path) -> Result<(u64, Vec<String>), String> {
@@ -2484,7 +2502,10 @@ impl App {
             }
         })();
         match result {
-            Ok(name) => Ok(name),
+            Ok(name) => {
+                self.sync_expr_process_classes_after_import();
+                Ok(name)
+            }
             Err(error) => match crate::app::edit::rollback_history_to(self, history_checkpoint) {
                 Ok(()) => Err(error),
                 Err(rollback_error) => Err(format!(
@@ -4352,6 +4373,7 @@ impl App {
                         Vec::new(),
                     ),
                     graph_overrides: clip.graph_overrides.clone(),
+                    scene_slots: clip.scene_slots.values().clone(),
                     bus_chain: None,
                 });
             }
@@ -4414,7 +4436,7 @@ impl App {
                 crate::project::RackClipId,
                 String,
                 Option<[f32; 3]>,
-                Vec<crate::graph::ProjectGraphOverrides>,
+                (Vec<crate::graph::ProjectGraphOverrides>, crate::sequencer::SceneSlotStore),
                 Vec<Option<crate::sequencer::TrackPatternData>>,
             )>,
         )> = Vec::new();
@@ -4440,7 +4462,8 @@ impl App {
                             .flatten()
                     })
                     .collect();
-                built.push((clip.id, clip.name, clip.color, clip.graph_overrides, cells));
+                let slots = crate::sequencer::SceneSlotStore::from_values(clip.scene_slots)?;
+                built.push((clip.id, clip.name, clip.color, (clip.graph_overrides, slots), cells));
             }
             converted.push((group_id, members, next_clip_id, built));
         }
@@ -4458,7 +4481,7 @@ impl App {
                     clips: Vec::with_capacity(clips.len()),
                     next_clip_id: next_clip_id.max(1),
                 };
-                for (id, name, color, graph_overrides, cells) in clips {
+                for (id, name, color, (graph_overrides, scene_slots), cells) in clips {
                     let cells = cells
                         .into_iter()
                         .enumerate()
@@ -4477,6 +4500,7 @@ impl App {
                         color,
                         cells,
                         graph_overrides,
+                        scene_slots,
                     });
                 }
                 member_tracks.extend(members);
@@ -4992,6 +5016,12 @@ impl App {
         self.replace_instances(instances);
         self.state.set_scratch_source(evaluated_scratch);
         self.clear_project_authored_processes();
+        // Expr cards store their body: recompile every one this project holds
+        // (docs/expr-process-spec.md §2.1). A body that no longer compiles
+        // leaves its slot inert and says why on the card.
+        for (source, error) in crate::lisp_host::sync_expr_process_classes(&self.state) {
+            eprintln!("[expr] project body does not compile ({error}): {source}");
+        }
         self.clear_control_hooks();
         let repaired_sidechains = self.repair_stale_sidechain_effect_slots()?;
         let status = if pending.fallback_samples > 0 {
@@ -5949,11 +5979,17 @@ mod tests {
         assert!(encoded["tracks"][0].get("sample_path").is_none());
         let restored: ProjectFile = serde_json::from_value(encoded).unwrap();
         app.queue_loaded_project("blank-samplers", restored).unwrap();
+        let mut last_progress = 0.0;
         for _ in 0..100 {
-            if !app.has_pending_project_load() { break; }
+            let Some((message, progress)) = app.pending_project_load_progress() else { break; };
+            // The loading toast only ever moves forward and never reads done early.
+            assert!(message.starts_with("Loading blank-samplers"), "{message}");
+            assert!((last_progress..1.0).contains(&progress), "{last_progress} -> {progress}");
+            last_progress = progress;
             app.advance_pending_project_load().unwrap();
             unsafe { crate::audiograph::prepare_graph_for_render(lg.0); }
         }
+        assert!(last_progress > 0.5);
         assert!(!app.has_pending_project_load());
         assert_eq!(app.graph.track_instrument_types[0], InstrumentType::Sampler);
         assert!(app.sampler_path_for_track(0).is_none());
@@ -6036,6 +6072,7 @@ mod tests {
             tick_source: "(lambda () nil)".to_string(),
             requires: Vec::new(),
             graph: None,
+            owner_rack: None,
         });
         state.publish_scene_slot_declaration(
             "a-slot".to_string(),

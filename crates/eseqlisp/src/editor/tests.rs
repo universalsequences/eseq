@@ -51,6 +51,101 @@ fn ctrl_c_ctrl_c_binding_enqueues_host_command() {
     ));
 }
 
+/// `define-mode … :on-save`: save-buffer (the builtin, the native and a
+/// mode-bound chord) commits through the handler instead of a file write; a
+/// truthy result marks the buffer saved, false leaves it modified. The mode's
+/// `C-c C-c` chord outranks the global one.
+#[test]
+fn mode_on_save_handler_owns_save_and_its_chord_outranks_the_global_one() {
+    let init = r#"
+            (def committed "")
+            (def accept false)
+            (def global-chord "")
+            (def commit ()
+              (do (set! committed (current-buffer-text)) accept))
+            (def global-cc () (set! global-chord "ran"))
+            (bind-key "C-c C-c" "global-cc")
+            (define-mode "commit-mode" :on-save "commit")
+            (mode-bind-key "commit-mode" "C-c C-c" "save-buffer")
+        "#;
+    let runtime = Runtime::with_init_source(init);
+    let mut editor = Editor::new(
+        runtime,
+        EditorConfig {
+            init_source: Some(init.to_string()),
+            ..EditorConfig::default()
+        },
+    );
+    editor.open_scratch_buffer("*commit*", "");
+    editor.runtime_mut().eval_str("(set-buffer-mode \"commit-mode\")").unwrap();
+    editor.refresh_runtime_side_effects();
+    assert_eq!(
+        editor.runtime_mut().eval_str("(current-buffer-saves-itself?)"),
+        Ok(Some(Value::Bool(true)))
+    );
+
+    editor.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+    assert!(editor.active_buffer().dirty);
+
+    // Rejected: the handler ran on the buffer text, the buffer stays modified.
+    editor.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+    editor.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+    assert_eq!(editor.runtime_mut().eval_str("committed"), Ok(Some(Value::String("x".into()))));
+    assert_eq!(editor.runtime_mut().eval_str("global-chord"), Ok(Some(Value::String(String::new()))));
+    assert!(editor.active_buffer().dirty);
+    assert!(editor.active_buffer().path.is_none(), "no file write, no save-as prompt");
+
+    // Accepted through the builtin: saved.
+    editor.runtime_mut().eval_str("(set! accept true)").unwrap();
+    editor.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+    editor.run_command("save-buffer");
+    assert_eq!(editor.runtime_mut().eval_str("committed"), Ok(Some(Value::String("xy".into()))));
+    assert!(!editor.active_buffer().dirty);
+
+    // And through the native.
+    editor.handle_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE));
+    editor.runtime_mut().eval_str("(save-buffer)").unwrap();
+    editor.refresh_runtime_side_effects();
+    assert_eq!(editor.runtime_mut().eval_str("committed"), Ok(Some(Value::String("xyz".into()))));
+    assert!(!editor.active_buffer().dirty);
+
+    // Other buffers keep the global chord.
+    editor.open_scratch_buffer("*plain*", "");
+    editor.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+    editor.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+    assert_eq!(editor.runtime_mut().eval_str("global-chord"), Ok(Some(Value::String("ran".into()))));
+}
+
+/// An `:on-save` handler that itself calls `(save-buffer)` runs once per save
+/// instead of recursing through the follow-up side-effect pass.
+#[test]
+fn mode_on_save_handler_calling_save_buffer_does_not_recurse() {
+    let init = r#"
+            (def calls 0)
+            (def commit ()
+              (do (set! calls (+ calls 1)) (save-buffer) true))
+            (define-mode "resave-mode" :on-save "commit")
+        "#;
+    let runtime = Runtime::with_init_source(init);
+    let mut editor = Editor::new(
+        runtime,
+        EditorConfig {
+            init_source: Some(init.to_string()),
+            ..EditorConfig::default()
+        },
+    );
+    editor.open_scratch_buffer("*resave*", "");
+    editor.runtime_mut().eval_str("(set-buffer-mode \"resave-mode\")").unwrap();
+    editor.refresh_runtime_side_effects();
+
+    editor.run_command("save-buffer");
+    assert_eq!(editor.runtime_mut().eval_str("calls"), Ok(Some(Value::Number(1.0))));
+
+    editor.runtime_mut().eval_str("(save-buffer)").unwrap();
+    editor.refresh_runtime_side_effects();
+    assert_eq!(editor.runtime_mut().eval_str("calls"), Ok(Some(Value::Number(2.0))));
+}
+
 #[test]
 fn lisp_key_handler_source_context_tracks_buffer_revisions_and_switches() {
     let init = r#"
@@ -1828,6 +1923,70 @@ fn filterable_dropdown_types_into_its_filter_and_enter_picks_the_first_match() {
     assert!(!crate::widget_render::dropdown::is_dropdown_open(dropdown.widget_id));
 }
 
+/// A `:filterable` menu-button (an add-something trigger with no selected
+/// value) takes typed text the same way a filterable dropdown does.
+#[test]
+fn filterable_menu_button_types_into_its_filter_and_enter_picks_the_first_match() {
+    fn find_menu_button(node: &crate::layout::LayoutNode) -> Option<&crate::layout::LayoutNode> {
+        if node.widget_type == "menu-button" {
+            return Some(node);
+        }
+        node.children.iter().find_map(find_menu_button)
+    }
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor
+        .runtime_mut()
+        .eval_str(
+            r#"
+            (def picked (state ""))
+            (effect
+              (v-stack
+                (menu-button :icon "+ add"
+                  :options '("prob" "reset" "rand" "grab")
+                  :filterable true
+                  :width 20
+                  :on-change (lambda (v) (set! picked v)))))
+            "#,
+        )
+        .unwrap();
+    editor.set_layout_viewport(30, 20);
+    let button = editor
+        .runtime
+        .current_layout
+        .as_ref()
+        .and_then(|layout| find_menu_button(layout))
+        .expect("menu-button")
+        .clone();
+    let col = button.rect.col + button.rect.width * 0.5;
+    let row = button.rect.row + button.rect.height * 0.5;
+    for kind in [
+        MouseEventKind::Down(MouseButton::Left),
+        MouseEventKind::Up(MouseButton::Left),
+    ] {
+        editor.handle_mouse_precise(
+            mouse_event(kind, col.floor() as u16, row.floor() as u16),
+            0,
+            0,
+            30,
+            20,
+            col,
+            row,
+        );
+    }
+    assert!(crate::widget_render::dropdown::is_dropdown_open(button.widget_id));
+    for ch in "gr".chars() {
+        editor.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+    }
+    editor.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(
+        editor.runtime.eval_str("picked").unwrap(),
+        Some(Value::String("grab".into())),
+        "typing narrowed the menu to one row and Enter picked it"
+    );
+    assert!(!crate::widget_render::dropdown::is_dropdown_open(button.widget_id));
+}
+
 #[test]
 fn first_click_opens_an_unfocused_conditionally_replaced_dropdown() {
     fn find_dropdown(node: &crate::layout::LayoutNode) -> Option<&crate::layout::LayoutNode> {
@@ -3070,6 +3229,85 @@ fn ctrl_k_deletes_rest_of_line() {
     assert_eq!(editor.active_buffer().cursor, (0, 4));
 }
 
+/// `mode-add-completions`: a mode's own names (with signature and docs) are
+/// offered in its buffers, and only there.
+#[test]
+fn mode_completions_are_offered_only_in_that_modes_buffers() {
+    let init = r#"
+            (define-mode "ctx-mode")
+            (mode-add-completions "ctx-mode"
+              (list (list "$phase" "$phase" "bar position 0..1" "context")
+                    (dict :label "xpose!" :signature "(xpose! st)" :doc "add semitones")))
+        "#;
+    let runtime = Runtime::with_init_source(init);
+    let mut editor = Editor::new(
+        runtime,
+        EditorConfig {
+            init_source: Some(init.to_string()),
+            ..EditorConfig::default()
+        },
+    );
+    editor.open_scratch_buffer("*ctx*", "");
+    editor.runtime_mut().eval_str("(set-buffer-mode \"ctx-mode\")").unwrap();
+    editor.refresh_runtime_side_effects();
+    for ch in ['(', '+', ' ', '$', 'p'] {
+        editor.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+    }
+    let state = editor.completion_state().expect("completion open");
+    let item = state.items.iter().find(|item| item.label == "$phase").expect("$phase offered");
+    assert_eq!(item.docs.as_deref(), Some("bar position 0..1"));
+    assert_eq!(item.category.as_deref(), Some("context"));
+    editor.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    assert_eq!(editor.active_buffer().text(), "(+ $phase)");
+
+    editor.open_scratch_buffer("*plain*", "");
+    for ch in ['(', 'x', 'p', 'o'] {
+        editor.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+    }
+    assert!(
+        editor
+            .completion_state()
+            .is_none_or(|state| state.items.iter().all(|item| item.label != "xpose!")),
+        "other buffers do not see the mode's names"
+    );
+}
+
+/// Redefining a mode (a Lisp hot reload re-runs its `define-mode`) updates
+/// its declared fields but keeps the completions and key bindings other code
+/// registered on it; nothing would re-run a lazy registration after a reload.
+#[test]
+fn mode_redefinition_keeps_completions_and_bindings() {
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    editor
+        .runtime_mut()
+        .eval_str(
+            r#"(define-mode "redef-mode")
+               (mode-bind-key "redef-mode" "C-c C-c" "save-buffer")
+               (mode-add-completions "redef-mode" (list (list "$beat" "$beat" "beats" "context")))"#,
+        )
+        .unwrap();
+    editor.refresh_runtime_side_effects();
+    editor
+        .runtime_mut()
+        .eval_str(r#"(define-mode "redef-mode" :on-save "commit")"#)
+        .unwrap();
+    editor.refresh_runtime_side_effects();
+
+    let mode = editor.mode_registry.get("redef-mode").expect("mode");
+    assert_eq!(mode.on_save.as_deref(), Some("commit"), "the redefinition applies");
+    assert!(mode.completions.iter().any(|item| item.label == "$beat"), "completions survive");
+    assert_eq!(mode.keybindings.get("C-c C-c").map(String::as_str), Some("save-buffer"), "bindings survive");
+
+    editor.open_scratch_buffer("*redef*", "");
+    editor.runtime_mut().eval_str("(set-buffer-mode \"redef-mode\")").unwrap();
+    editor.refresh_runtime_side_effects();
+    for ch in ['(', '+', ' ', '$', 'b'] {
+        editor.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+    }
+    let state = editor.completion_state().expect("completion open");
+    assert!(state.items.iter().any(|item| item.label == "$beat"), "offered after the redefinition");
+}
+
 #[test]
 fn tab_accepts_completion_from_runtime_symbols() {
     let mut runtime = Runtime::new();
@@ -3925,6 +4163,8 @@ fn buffer_saved_host_event_shows_success_toast_that_expires_without_input() {
             kind: crate::host::ToastKind::Success,
             action_label: None,
             closable: false,
+            progress: None,
+            elapsed_s: 0.0,
         })
     );
 
@@ -3994,6 +4234,52 @@ fn sticky_toast_action_and_close_are_clickable_and_never_expire() {
 }
 
 #[test]
+fn loading_toast_updates_in_place_animates_and_passes_clicks_through() {
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    editor.show_loading_toast("Loading demo", Some(0.1));
+    let started = editor.toast.as_ref().unwrap().started_at;
+    editor.show_loading_toast("Loading demo · track 2/4", Some(0.5));
+    let toast = editor.toast().expect("loading toast");
+    assert_eq!(toast.message, "Loading demo · track 2/4");
+    assert_eq!(toast.progress, Some(0.5));
+    assert_eq!(toast.started_at, started, "an update must not restart the spinner");
+
+    let frame = crate::frame::build_tiled_render_frame_borderless(&mut editor, 120, 40)
+        .toast
+        .expect("loading toast frame");
+    assert_eq!(frame.kind, crate::host::ToastKind::Loading);
+    assert_eq!(frame.progress, Some(0.5));
+    assert!(!frame.closable, "loading toasts have no close button");
+    assert!(editor.toast_animating());
+
+    // Keys and timers leave it up; the spinner keeps requesting frames.
+    editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+    editor.toast.as_mut().unwrap().started_at -= std::time::Duration::from_millis(100);
+    editor.clear_needs_redraw();
+    editor.update_timers();
+    assert!(editor.toast().is_some());
+    assert!(editor.needs_redraw(), "the spinner must request its next frame");
+
+    // A click on the panel reaches the tile underneath.
+    let place = crate::backend::toast_placement(&frame, 120, 40).unwrap();
+    let (col, row) = (place.text_col as f32 + 0.5, place.text_row as f32 + 0.5);
+    let mouse = MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: col as u16,
+        row: row as u16,
+        modifiers: KeyModifiers::NONE,
+    };
+    assert!(!editor.handle_toast_mouse(mouse, col, row));
+
+    // A result toast replaces it; dismiss_loading_toast then leaves that alone.
+    editor.show_toast("Loaded demo", crate::host::ToastKind::Success);
+    editor.dismiss_loading_toast();
+    assert_eq!(editor.toast().map(|toast| toast.kind), Some(crate::host::ToastKind::Success));
+    assert!(!editor.toast_animating());
+}
+
+#[test]
 fn save_buffer_command_and_native_show_save_toasts() {
     let dir = hot_reload_temp_dir("eseqlisp-save-buffer-toast");
     let path = dir.join("demo.lisp");
@@ -4060,6 +4346,12 @@ fn toast_native_queues_a_window_toast() {
     let _ = editor.runtime_mut().eval_str("(toast \"x\" :kind :warning)");
     editor.refresh_runtime_side_effects();
     assert_eq!(editor.toast().map(|toast| toast.message.as_str()), Some("Export failed"));
+
+    editor.runtime_mut().eval_str("(toast \"Rendering\" :kind :loading :progress 0.4)").unwrap();
+    editor.refresh_runtime_side_effects();
+    let toast = editor.toast().expect("loading toast from Lisp");
+    assert_eq!(toast.kind, crate::host::ToastKind::Loading);
+    assert_eq!(toast.progress, Some(0.4));
 }
 
 #[test]
@@ -10366,11 +10658,13 @@ fn selecting_a_tile_tab_resumes_the_revealed_buffers_deferred_effect() {
                     label: "A".to_string(),
                     buffer_name: "*tab-a*".to_string(),
                     on_close: None,
+                    on_select: None,
                 },
                 crate::runtime::LayoutTabSpec {
                     label: "B".to_string(),
                     buffer_name: "*tab-b*".to_string(),
                     on_close: None,
+                    on_select: None,
                 },
             ],
         )
@@ -10408,6 +10702,35 @@ fn selecting_a_tile_tab_resumes_the_revealed_buffers_deferred_effect() {
         revealed_rendered.contains("b:7"),
         "tab selection must resume deferred work for the revealed buffer: {revealed_rendered}"
     );
+}
+
+/// A tab's `:on-select` hears a tab-strip click that switches the tile to
+/// it, with (buffer tab-index); re-clicking the showing tab does not fire.
+#[test]
+fn selecting_a_tile_tab_fires_its_on_select() {
+    let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+    editor.set_layout_viewport(60, 12);
+    editor
+        .runtime_mut()
+        .eval_str(
+            r#"
+            (def picked (list))
+            (effect-buffer "*tab-a*" (label "a"))
+            (effect-buffer "*tab-b*" (label "b"))
+            (set-layout (list :buf "*tab-a*"))
+            (set-window-tabs-for "*tab-a*"
+              (list (list "A" "*tab-a*" :on-select (lambda (b i) (set! picked (append picked (list b i)))))
+                    (list "B" "*tab-b*" :on-select (lambda (b i) (set! picked (append picked (list b i)))))))
+            "#,
+        )
+        .unwrap();
+    editor.refresh_runtime_side_effects();
+    let tile_id = editor.active_tile;
+    assert!(editor.select_tile_tab(tile_id, 1, 0));
+    assert!(editor.select_tile_tab(tile_id, 1, 0));
+    assert_eq!(editor.active_buffer().name, "*tab-b*");
+    let picked = editor.runtime_mut().eval_str("picked").unwrap().expect("picked");
+    assert_eq!(crate::vm::format_lisp_value(&picked), "(\"*tab-b*\" 1)");
 }
 
 #[test]
@@ -13045,6 +13368,77 @@ fn vec2_dot() {
     let mut rt = Runtime::new();
     assert_eq!(eval_number(&mut rt, "(dot (vec2 1 0) (vec2 0 1))"), 0.0);
     assert_eq!(eval_number(&mut rt, "(dot (vec2 2 3) (vec2 4 5))"), 23.0);
+}
+
+#[test]
+fn bitwise_and_or_xor_are_variadic_u32() {
+    let mut rt = Runtime::new();
+    assert_eq!(eval_number(&mut rt, "(bit-and 12 10)"), 8.0);
+    assert_eq!(eval_number(&mut rt, "(bit-or 12 10)"), 14.0);
+    assert_eq!(eval_number(&mut rt, "(bit-xor 12 10)"), 6.0);
+    assert_eq!(eval_number(&mut rt, "(bit-and 15 7 5)"), 5.0);
+    assert_eq!(eval_number(&mut rt, "(bit-or 1 2 4 8)"), 15.0);
+    assert_eq!(eval_number(&mut rt, "(bit-xor 1 3 7)"), 5.0);
+    assert_eq!(eval_number(&mut rt, "(bit-and 0xACE1 0xFF)"), 225.0);
+    // Fewer than two arguments, non-numbers and non-finite values are NaN.
+    assert!(eval_number(&mut rt, "(bit-and 5)").is_nan());
+    assert!(eval_number(&mut rt, "(bit-or)").is_nan());
+    assert!(eval_number(&mut rt, "(bit-xor 1 \"a\")").is_nan());
+    assert!(eval_number(&mut rt, "(bit-and 1 (/ 1 0))").is_nan());
+}
+
+#[test]
+fn bitwise_args_truncate_and_wrap_to_u32() {
+    let mut rt = Runtime::new();
+    // Non-integers truncate toward zero.
+    assert_eq!(eval_number(&mut rt, "(bit-or 5.9 0)"), 5.0);
+    assert_eq!(eval_number(&mut rt, "(bit-and -1.9 0xFF)"), 255.0);
+    // Negative numbers wrap: -1 is 0xFFFFFFFF.
+    assert_eq!(eval_number(&mut rt, "(bit-or -1 0)"), 4_294_967_295.0);
+    // 2^32 wraps to 0, 2^32 + 3 to 3.
+    assert_eq!(eval_number(&mut rt, "(bit-or 4294967296 0)"), 0.0);
+    assert_eq!(eval_number(&mut rt, "(bit-or 4294967299 0)"), 3.0);
+    assert_eq!(eval_number(&mut rt, "(bit-not 0)"), 4_294_967_295.0);
+    assert_eq!(eval_number(&mut rt, "(bit-not 0xFFFFFFFF)"), 0.0);
+    assert_eq!(eval_number(&mut rt, "(bit-not 0xF0F0F0F0)"), 252_645_135.0);
+    assert!(eval_number(&mut rt, "(bit-not nil)").is_nan());
+}
+
+#[test]
+fn bitwise_shifts_wrap_and_mask_amount() {
+    let mut rt = Runtime::new();
+    assert_eq!(eval_number(&mut rt, "(shl 1 4)"), 16.0);
+    assert_eq!(eval_number(&mut rt, "(shr 256 4)"), 16.0);
+    // Left shift drops bits past 32.
+    assert_eq!(eval_number(&mut rt, "(shl 0x80000001 1)"), 2.0);
+    assert_eq!(eval_number(&mut rt, "(shl 1 31)"), 2_147_483_648.0);
+    // Right shift is logical (no sign extension).
+    assert_eq!(eval_number(&mut rt, "(shr 0x80000000 31)"), 1.0);
+    assert_eq!(eval_number(&mut rt, "(shr -1 28)"), 15.0);
+    // Shift amount is masked to 0..31.
+    assert_eq!(eval_number(&mut rt, "(shl 1 32)"), 1.0);
+    assert_eq!(eval_number(&mut rt, "(shl 1 33)"), 2.0);
+    assert_eq!(eval_number(&mut rt, "(shr 8 35)"), 1.0);
+    assert_eq!(eval_number(&mut rt, "(shl 3 1.9)"), 6.0);
+    assert!(eval_number(&mut rt, "(shl 1)").is_nan());
+    // A negative shift amount wraps then masks: -1 -> 31.
+    assert_eq!(eval_number(&mut rt, "(shl 1 -1)"), 2_147_483_648.0);
+    assert_eq!(eval_number(&mut rt, "(shr 0x80000000 -1)"), 1.0);
+    assert!(eval_number(&mut rt, "(shr 8 (/ 0 0))").is_nan());
+}
+
+#[test]
+fn bitwise_extreme_inputs_stay_in_u32_range() {
+    let mut rt = Runtime::new();
+    // Huge finite values wrap exactly (1e300 is a multiple of 2^32).
+    assert_eq!(eval_number(&mut rt, "(bit-or 1e300 0)"), 0.0);
+    assert_eq!(eval_number(&mut rt, "(bit-or -1e300 0)"), 0.0);
+    // 2^52 + 2^32 + 5 wraps to 5; -(2^32) wraps to 0.
+    assert_eq!(eval_number(&mut rt, "(bit-or 4503603922337797 0)"), 5.0);
+    assert_eq!(eval_number(&mut rt, "(bit-or -4294967296 0)"), 0.0);
+    assert_eq!(eval_number(&mut rt, "(bit-or -0.5 0)"), 0.0);
+    assert!(eval_number(&mut rt, "(bit-not (/ 0 0))").is_nan());
+    assert!(eval_number(&mut rt, "(bit-not)").is_nan());
 }
 
 // ── SDF stdlib tests ──────────────────────────────────────────────────
@@ -17291,4 +17685,41 @@ fn subtree_device_strip_in_inactive_tile_reruns_when_reactive_list_grows() {
         vec!["Space Echo", "", "", "808 Kick", "Reverb", "", "Digiwave", "", ""],
         "new track's subtree in the inactive tile must pick up the later chain"
     );
+}
+
+/// `(select-window-for name)` focuses the tile showing `name`, after a
+/// `set-layout` queued in the same eval (the *processes* dock's edit button,
+/// docs/expr-process-spec.md §7); an unknown name leaves focus alone.
+#[test]
+fn select_window_for_focuses_the_tile_after_a_queued_layout() {
+    let mut editor = editor_with_tabbed_buffers();
+    editor
+        .runtime_mut()
+        .eval_str(
+            r#"
+            (effect-buffer "*left-pane*" (label "left"))
+            (effect-buffer "*right-pane*" (label "right"))
+            "#,
+        )
+        .unwrap();
+    editor.refresh_runtime_side_effects();
+    editor
+        .runtime_mut()
+        .eval_str(
+            r#"
+            (do
+              (set-layout (list :cols 0.5 "*left-pane*" 0.5 "*right-pane*"))
+              (select-window-for "*right-pane*"))
+            "#,
+        )
+        .unwrap();
+    editor.refresh_runtime_side_effects();
+    assert_eq!(editor.active_buffer().name, "*right-pane*");
+
+    editor
+        .runtime_mut()
+        .eval_str(r#"(select-window-for "*no-such-buffer*")"#)
+        .unwrap();
+    editor.refresh_runtime_side_effects();
+    assert_eq!(editor.active_buffer().name, "*right-pane*");
 }

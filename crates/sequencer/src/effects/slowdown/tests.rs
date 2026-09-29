@@ -122,6 +122,7 @@ fn every_modulator_input_drives_all_six_destinations_without_writing_base_values
     for slot in 0..MOD_SLOTS {
         let mut h = Harness::new(48000);
         h.state().params[SYNC] = 0.0;
+        h.state().params[BEATS] = 1.0;
         h.state().params[TONE] = 1000.0;
         h.state().params[MIX] = 0.5;
         let base = h.state().params;
@@ -494,12 +495,11 @@ fn run_transport(
     let mut restarts = Vec::new();
     for b in 0..blocks {
         let total = start_sample + (b * block) as u64;
-        let beats = if playing {
-            total as f64 * bpm / (60.0 * sr)
+        h.state().transport_phase = if playing {
+            super::super::dj_mixer::transport_beat_phase(total as f64 * bpm / (60.0 * sr))
         } else {
-            0.0
+            super::super::dj_mixer::TRANSPORT_STOPPED_PHASE
         };
-        h.state().transport_phase = super::super::dj_mixer::transport_beat_phase(beats);
         h.run(&input, block);
         // A restart at frame 0 leaves age == block, so use <= and let callers
         // warm the state past the first block before probing.
@@ -537,15 +537,16 @@ fn stopped_transport_free_runs_and_play_resumes_the_grid() {
     let mut h = Harness::new(48_000);
     h.state().params[SYNC] = 1.0;
     h.state().params[BEATS] = 1.0;
-    // Stopped: the host keeps pushing phase 0, so the tempo-derived period rules.
+    // Stopped: the host pushes the stopped sentinel, so the tempo-derived period rules.
     let stopped = run_transport(&mut h, 0, 200, 512, 120.0, false);
     assert!(
         stopped.windows(2).all(|w| w[1] - w[0] == 24_000),
         "free-run cadence while stopped: {stopped:?}"
     );
-    // Play from sample 0: the first block cannot be told apart from stopped,
-    // then every restart sits on a beat in transport samples.
+    // Play from sample 0: the capture restarts on the very first frame of
+    // the downbeat, then every restart sits on a beat in transport samples.
     let played = run_transport(&mut h, 0, 200, 512, 120.0, true);
+    assert_eq!(played[0], 0, "play must restart on the downbeat: {played:?}");
     for local in &played[1..] {
         let off = local % 24_000;
         assert!(off <= 1 || off >= 23_999, "{played:?}");
@@ -605,7 +606,10 @@ fn appended_params_land_after_the_transport_input_and_default_to_varispeed() {
         DEFAULTS,
         "the appended slots must not alias a parameter"
     );
-    assert_eq!(h.state().transport_phase, 0.0);
+    assert_eq!(
+        h.state().transport_phase,
+        super::super::dj_mixer::TRANSPORT_STOPPED_PHASE
+    );
 }
 
 #[test]

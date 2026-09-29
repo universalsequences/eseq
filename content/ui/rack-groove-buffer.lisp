@@ -229,7 +229,7 @@
     :icon "≡"
     :options (menu-actions gid)
     :width 1.9 :height 1.3 :font-size 13
-    :bg-color :mixer-control-bg
+    :bg-color :mixer-strip-bg
     :text-color :dim
     :menu-bg :dropdown-menu-bg
     :menu-border-color :dropdown-menu-border
@@ -268,19 +268,21 @@
         :detail (get state :active-grid)
         :options (get state :picker-labels)
         :headers (or (get state :picker-headers) (list))
+        :badge-color :transparent
+        :bg-color :mixer-strip-bg
         :details (or (get state :picker-details) (list))
         :filterable true
         :filter-placeholder "Filter grooves…"
         :footer extract-label
         :width :fill :height 1.3 :font-size 10
         :on-change (lambda (label)
-                     (if (= label extract-label)
-                       (open-extract gid)
-                       (rack/set-groove gid label)))))))
+          (if (= label extract-label)
+            (open-extract gid)
+            (rack/set-groove gid label)))))))
 
 (def header (gid state)
   (let ((grooved (>= (get state :active-groove-id) 0)))
-    (h-stack :key "rack-groove-header" :width :fill :gap 0.4 :align :center :height 1.6
+    (h-stack :key "rack-groove-header" :width :fill :gap 0.4 :align :center :height 1.6 :padding 0.4
       (picker gid state)
       (actions-menu gid)
       (if grooved

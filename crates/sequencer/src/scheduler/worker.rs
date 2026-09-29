@@ -326,6 +326,11 @@ impl SchedulerDriver {
                             )
                         })
                 });
+                self.lookahead_state.generator_owner_racks = published
+                    .iter()
+                    .filter(|seq| seq.graph.is_none())
+                    .filter_map(|seq| seq.owner_rack.map(|group_id| (seq.id, group_id)))
+                    .collect();
                 for seq in &published {
                     if seq.graph.is_some() {
                         continue; // graph-mode entries reconcile below, not as ticks

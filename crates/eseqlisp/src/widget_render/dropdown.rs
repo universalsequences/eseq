@@ -203,7 +203,7 @@ pub fn is_dropdown_open(widget_id: u64) -> bool {
 /// An open `:filterable` dropdown is typing into its filter, so the editor
 /// routes every printable key (space included) to it before any keybinding.
 pub fn filter_captures_text(node: &LayoutNode) -> bool {
-    matches!(node.widget_type.as_str(), "dropdown")
+    matches!(node.widget_type.as_str(), "dropdown" | "menu-button")
         && is_filterable(&node.props)
         && get_state_for_node(node).open
 }
@@ -744,6 +744,7 @@ impl WidgetDefinition for DropdownWidget {
             "menu-bg", "menu-border-color", "ring-color", "scrollbar-color", "text-color",
             "on-change", "plock-active", "plock-color-r", "plock-color-g", "plock-color-b",
             "detail", "details", "filterable", "filter-placeholder", "footer", "footer-color",
+            "menu-min-width",
         ]
     }
 
@@ -1314,7 +1315,18 @@ impl WidgetDefinition for DropdownWidget {
                 .chain(footer.iter().map(|footer| text_w(footer, menu_font_size)))
                 .fold(0.0_f32, f32::max);
             let content_width = text_left_pad + max_row_width + PADDING_H + scrollbar_pad;
-            let menu_width = content_width.max(node.rect.width);
+            // The filter field's placeholder sits after the magnifier (2.3
+            // cells in) and must not be clipped by a narrow option list.
+            let filter_width = if filterable {
+                let placeholder = string_prop(&node.props, "filter-placeholder")
+                    .unwrap_or_else(|| "Filter…".to_string());
+                2.3 + text_w(&placeholder, menu_font_size) + 0.35 + PADDING_H
+            } else {
+                0.0
+            };
+            // `:menu-min-width` (cells) widens a menu past its trigger.
+            let min_width = get_f32_prop(&node.props, "menu-min-width", 0.0);
+            let menu_width = content_width.max(filter_width).max(min_width).max(node.rect.width);
 
             let viewport_cols = viewport.vp_w / viewport.cell_w.max(1.0);
             let menu_col = if action_menu {

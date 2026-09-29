@@ -338,6 +338,7 @@
                 lanes: Default::default(),
                 fanout: Default::default(),
                 unbound_ports: Default::default(),
+                expr_source: None,
                 bindings: std::collections::BTreeMap::from([
                     (
                         "survives".to_string(),
@@ -680,6 +681,45 @@
             assert_eq!(slot.instrument_slot.defaults[0], instrument_default);
             assert_eq!(slot.effect_slots[0].defaults[0], effect_default);
             assert_eq!(slot.track_sound_state.engine_id, Some(7));
+        }
+    }
+
+    #[test]
+    fn group_flat_track_to_rack_keeps_each_patterns_voice_setting() {
+        let mut mono = sample_pattern_snapshot(1);
+        mono.instrument_types[0] = InstrumentType::Custom;
+        mono.track_params[0].polyphonic = false;
+        mono.track_params[0].max_polyphony = 6;
+        let mut poly = mono.clone();
+        poly.track_params[0].polyphonic = true;
+        poly.track_params[0].max_polyphony = 4;
+
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        state.replace_pattern_repository(vec![mono, poly], 0);
+        let scene_pattern_ids = {
+            let scenes = state.pattern.scenes.lock().unwrap();
+            scenes.scenes.iter().map(|scene| scene.cells[0].unwrap()).collect::<Vec<_>>()
+        };
+
+        let live = state
+            .group_flat_track_to_rack(
+                0,
+                InstrumentType::Custom,
+                CustomInstrumentRunMode::Instrument,
+                Some(7),
+                &[EffectDescriptor::builtin_filter()],
+                &[Some("filter".to_string())],
+            )
+            .expect("flat track should migrate");
+        // Scene 1 is live: a mono track becomes a one-voice slot, not a
+        // twelve-voice one.
+        assert_eq!(live.slots[0].max_polyphony, 1);
+
+        let scenes = state.pattern.scenes.lock().unwrap();
+        for (pattern_id, expected) in scene_pattern_ids.into_iter().zip([1, 4]) {
+            let pattern = scenes.track_pools[0].get(pattern_id).expect("migrated pattern");
+            let slot = &pattern.rack_track.as_ref().expect("rack pattern").slots[0];
+            assert_eq!(slot.max_polyphony, expected);
         }
     }
 
@@ -3180,6 +3220,7 @@
                 )]),
                 fanout: Default::default(),
                 unbound_ports: Default::default(),
+                expr_source: None,
                 bindings: std::collections::BTreeMap::new(),
             }],
         }
@@ -3202,6 +3243,7 @@
                 lanes: std::collections::BTreeMap::new(),
                 fanout: Default::default(),
                 unbound_ports: Default::default(),
+                expr_source: None,
                 bindings: std::collections::BTreeMap::from([(
                     port.to_string(),
                     Some(crate::process::ParamTarget::EffectParam {

@@ -993,6 +993,107 @@ pub fn save_instrument_presets(name: &str, presets: &[InstrumentPreset]) -> io::
     save_instrument_presets_with_paths(crate::app_paths::app_paths(), name, presets)
 }
 
+/// Write `preset` into the factory-shipped bank beside a factory
+/// instrument's source (promote to factory, eseq-jhmx), replacing a factory
+/// preset of the same name in place and appending otherwise: factory banks
+/// keep their authored order, whose first entry is the default. A same-name
+/// entry in the user overlay is removed, since it would shadow the promoted
+/// preset. Returns the bank written.
+pub fn promote_instrument_preset_to_factory(
+    name: &str,
+    preset: &InstrumentPreset,
+) -> io::Result<PathBuf> {
+    promote_instrument_preset_to_factory_with_paths(crate::app_paths::app_paths(), name, preset)
+}
+
+fn promote_instrument_preset_to_factory_with_paths(
+    paths: &crate::app_paths::AppPaths,
+    name: &str,
+    preset: &InstrumentPreset,
+) -> io::Result<PathBuf> {
+    let source = resolve_instrument_storage_path_with_paths(paths, name, "lisp")?;
+    let factory_root = factory_instruments_root(paths);
+    let relative = source
+        .strip_prefix(&factory_root)
+        .ok()
+        .filter(|_| source.is_file())
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("'{name}' is not a factory instrument; promote the instrument first"),
+            )
+        })?
+        .to_path_buf();
+    let logical = if relative.file_name().and_then(|file| file.to_str()) == Some("dsp.lisp") {
+        format!("{}/", relative.parent().unwrap_or(&relative).to_string_lossy())
+    } else {
+        relative.with_extension("").to_string_lossy().to_string()
+    }
+    .replace('\\', "/");
+    let bank_path = preset_path_for_writable_instrument_source(&source);
+    let mut bank = match std::fs::read_to_string(&bank_path) {
+        Ok(src) => serde_json::from_str::<InstrumentPresetBank>(&src).map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Failed to parse preset bank '{}': {e}", bank_path.display()),
+            )
+        })?,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => InstrumentPresetBank {
+            version: 1,
+            engine_name: logical.clone(),
+            source_file: format!("instruments/{}", relative.to_string_lossy().replace('\\', "/")),
+            presets: Vec::new(),
+        },
+        Err(e) => return Err(e),
+    };
+    match bank.presets.iter_mut().find(|existing| existing.name == preset.name) {
+        Some(existing) => *existing = preset.clone(),
+        None => bank.presets.push(preset.clone()),
+    }
+    // Factory banks are written with one-space indentation; match it so a
+    // promotion diffs as the preset it adds.
+    let mut json = Vec::new();
+    let formatter = serde_json::ser::PrettyFormatter::with_indent(b" ");
+    let mut serializer = serde_json::Serializer::with_formatter(&mut json, formatter);
+    serde::Serialize::serialize(&bank, &mut serializer).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::Other,
+            format!("Failed to serialize preset bank '{}': {e}", bank_path.display()),
+        )
+    })?;
+    let key = preset_bank_cache_key(paths, name);
+    let mut cache = preset_bank_cache().lock().unwrap();
+    std::fs::write(&bank_path, json)?;
+    cache.invalidate_key_and_path(&key, Some(&bank_path));
+
+    let overlay = user_tier_preset_path(paths, logical.trim_end_matches('/'));
+    if let Some(mut presets) = read_preset_bank(&overlay)? {
+        let before = presets.len();
+        presets.retain(|existing| existing.name != preset.name);
+        if presets.len() != before {
+            if presets.is_empty() {
+                std::fs::remove_file(&overlay)?;
+            } else {
+                let overlay_bank = InstrumentPresetBank {
+                    version: 1,
+                    engine_name: name.to_string(),
+                    source_file: format!("instruments/{name}.lisp"),
+                    presets,
+                };
+                let json = serde_json::to_string_pretty(&overlay_bank).map_err(|e| {
+                    io::Error::new(
+                        io::ErrorKind::Other,
+                        format!("Failed to serialize preset bank '{}': {e}", overlay.display()),
+                    )
+                })?;
+                std::fs::write(&overlay, json)?;
+            }
+            cache.invalidate_path(&overlay);
+        }
+    }
+    Ok(bank_path)
+}
+
 pub(in crate::lisp_host) const INSTRUMENT_REGISTRY_SIZE: usize = MAX_INSTRUMENT_ENGINES * MAX_VOICES;
 pub(in crate::lisp_host) static DGEN_INSTRUMENT_FNS: [AtomicUsize; INSTRUMENT_REGISTRY_SIZE] = {
     const INIT: AtomicUsize = AtomicUsize::new(0);
@@ -1498,6 +1599,50 @@ pub fn load_instrument_source(name: &str) -> io::Result<String> {
 #[cfg(test)]
 mod tier_id_tests {
     use super::*;
+
+    #[test]
+    fn promoting_a_preset_writes_the_factory_bank_and_clears_the_overlay_copy() {
+        let (paths, root) = test_paths("promote");
+        let factory = paths.instruments_dir();
+        write_folder_instrument(&factory, "Drums/Kick", "(factory)");
+        write_preset_bank(&factory.join("Drums/Kick.presets"), "Drums/Kick/", &["Default", "Old"]);
+        let overlay = paths.user_instruments_dir().join("Drums/Kick.presets");
+        std::fs::create_dir_all(overlay.parent().unwrap()).unwrap();
+        write_preset_bank(&overlay, "factory:Drums/Kick", &["Punchy", "Mine"]);
+
+        let mut punchy = preset("Punchy");
+        punchy.params.insert("decay".into(), 0.25);
+        let bank = promote_instrument_preset_to_factory_with_paths(
+            &paths,
+            "factory:Drums/Kick",
+            &punchy,
+        )
+        .unwrap();
+        assert_eq!(bank, factory.join("Drums/Kick.presets"));
+        let written: InstrumentPresetBank =
+            serde_json::from_str(&std::fs::read_to_string(&bank).unwrap()).unwrap();
+        let names: Vec<_> = written.presets.iter().map(|p| p.name.as_str()).collect();
+        // Authored order is kept; the default stays first.
+        assert_eq!(names, ["Default", "Old", "Punchy"]);
+        assert_eq!(written.presets[2].params.get("decay"), Some(&0.25));
+        let overlay_left = read_preset_bank(&overlay).unwrap().unwrap();
+        assert_eq!(overlay_left.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), ["Mine"]);
+
+        // Re-promoting replaces in place.
+        punchy.params.insert("decay".into(), 0.5);
+        promote_instrument_preset_to_factory_with_paths(&paths, "factory:Drums/Kick", &punchy)
+            .unwrap();
+        let written: InstrumentPresetBank =
+            serde_json::from_str(&std::fs::read_to_string(&bank).unwrap()).unwrap();
+        assert_eq!(written.presets.len(), 3);
+        assert_eq!(written.presets[2].params.get("decay"), Some(&0.5));
+
+        // A user-tier instrument has no factory bank to write.
+        write_folder_instrument(&paths.user_instruments_dir(), "Mine/Synth", "(user)");
+        assert!(promote_instrument_preset_to_factory_with_paths(&paths, "user:Mine/Synth", &punchy)
+            .is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     fn test_paths(label: &str) -> (crate::app_paths::AppPaths, PathBuf) {
         let unique = std::time::SystemTime::now()

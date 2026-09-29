@@ -161,6 +161,14 @@ pub(super) fn icon_name_value(value: &str) -> Option<f32> {
         "midi" => Some(11.0),
         "check" | "checkmark" => Some(12.0),
         "bookmark" => Some(13.0),
+        "heart" | "favorite" => Some(14.0),
+        "pencil" | "rename" => Some(15.0),
+        "link" | "attach" => Some(16.0),
+        "unlink" | "detach" => Some(17.0),
+        "export" | "upload" => Some(18.0),
+        "ungroup" => Some(19.0),
+        "clips" => Some(20.0),
+        "save" | "download" => Some(21.0),
         _ => None,
     }
 }
@@ -466,6 +474,82 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
             detail_d = glint;
         } else {
             d = min(abs(drop) - stroke, glint);
+        }
+    } else if (in.value_t > 20.5) {
+        // save: a tray with an arrow dropping into it (export's mirror).
+        float tray_l = button_icon_segment(p, float2(-0.46, 0.08), float2(-0.46, 0.44)) - stroke;
+        float tray_b = button_icon_segment(p, float2(-0.46, 0.44), float2(0.46, 0.44)) - stroke;
+        float tray_r = button_icon_segment(p, float2(0.46, 0.44), float2(0.46, 0.08)) - stroke;
+        float shaft = button_icon_segment(p, float2(0.0, -0.48), float2(0.0, 0.20)) - stroke;
+        float head_a = button_icon_segment(p, float2(0.0, 0.20), float2(-0.21, -0.01)) - stroke;
+        float head_b = button_icon_segment(p, float2(0.0, 0.20), float2(0.21, -0.01)) - stroke;
+        d = min(min(tray_l, min(tray_b, tray_r)), min(shaft, min(head_a, head_b)));
+    } else if (in.value_t > 19.5) {
+        // clips: three session-view clip rows, a launch square and a bar each.
+        d = 1.0;
+        for (int i = 0; i < 3; i++) {
+            float y = -0.34 + float(i) * 0.34;
+            float launch = button_icon_round_rect(p - float2(-0.38, y), float2(0.10, 0.10), 0.03);
+            float bar = button_icon_round_rect(p - float2(0.15, y), float2(0.33, 0.10), 0.03);
+            d = min(d, min(launch, bar));
+        }
+    } else if (in.value_t > 18.5) {
+        // ungroup: two outlined squares pulled apart along the diagonal.
+        float a = abs(button_icon_round_rect(p - float2(-0.24, -0.22), float2(0.20, 0.20), 0.05)) - stroke;
+        float b = abs(button_icon_round_rect(p - float2(0.24, 0.22), float2(0.20, 0.20), 0.05)) - stroke;
+        d = min(a, b);
+    } else if (in.value_t > 17.5) {
+        // export: an open tray with an arrow rising out of it.
+        float tray_l = button_icon_segment(p, float2(-0.46, 0.08), float2(-0.46, 0.44)) - stroke;
+        float tray_b = button_icon_segment(p, float2(-0.46, 0.44), float2(0.46, 0.44)) - stroke;
+        float tray_r = button_icon_segment(p, float2(0.46, 0.44), float2(0.46, 0.08)) - stroke;
+        float shaft = button_icon_segment(p, float2(0.0, 0.22), float2(0.0, -0.48)) - stroke;
+        float head_a = button_icon_segment(p, float2(0.0, -0.48), float2(-0.21, -0.27)) - stroke;
+        float head_b = button_icon_segment(p, float2(0.0, -0.48), float2(0.21, -0.27)) - stroke;
+        d = min(min(tray_l, min(tray_b, tray_r)), min(shaft, min(head_a, head_b)));
+    } else if (in.value_t > 15.5) {
+        // link (16) / unlink (17): two chain links on the rising diagonal,
+        // interlocked, or pulled apart with break ticks between them.
+        float2 r = float2(p.x - p.y, p.x + p.y) * 0.70711;
+        bool broken = in.value_t > 16.5;
+        float offset = broken ? 0.31 : 0.19;
+        float half_len = broken ? 0.20 : 0.25;
+        float la = button_icon_round_rect(r - float2(-offset, 0.0), float2(half_len, 0.13), 0.13);
+        float lb = button_icon_round_rect(r - float2(offset, 0.0), float2(half_len, 0.13), 0.13);
+        d = min(abs(la) - stroke, abs(lb) - stroke);
+        if (broken) {
+            float tick_a = button_icon_segment(r, float2(0.0, -0.36), float2(0.0, -0.22)) - 0.05;
+            float tick_b = button_icon_segment(r, float2(0.0, 0.22), float2(0.0, 0.36)) - 0.05;
+            d = min(d, min(tick_a, tick_b));
+        }
+    } else if (in.value_t > 14.5) {
+        // pencil: a diagonal barrel with an end cap, a ferrule band and a
+        // sharpened tip at the lower left.
+        float side_a = button_icon_segment(p, float2(-0.115, 0.285), float2(0.445, -0.275)) - stroke;
+        float side_b = button_icon_segment(p, float2(-0.285, 0.115), float2(0.275, -0.445)) - stroke;
+        float cap = button_icon_segment(p, float2(0.445, -0.275), float2(0.275, -0.445)) - stroke;
+        float band = button_icon_segment(p, float2(0.305, -0.135), float2(0.135, -0.305)) - stroke;
+        float tip_a = button_icon_segment(p, float2(-0.46, 0.46), float2(-0.115, 0.285)) - stroke;
+        float tip_b = button_icon_segment(p, float2(-0.46, 0.46), float2(-0.285, 0.115)) - stroke;
+        float base = button_icon_segment(p, float2(-0.115, 0.285), float2(-0.285, 0.115)) - stroke;
+        d = min(min(min(side_a, side_b), min(cap, band)), min(min(tip_a, tip_b), base));
+    } else if (in.value_t > 13.5) {
+        // heart: Inigo Quilez's exact heart SDF, flipped so the point is at
+        // the bottom (+y is down here) and scaled into the +-0.46 glyph box.
+        float2 hq = float2(abs(p.x), 0.46 - p.y) / 0.84;
+        float heart;
+        if (hq.y + hq.x > 1.0) {
+            heart = length(hq - float2(0.25, 0.75)) - 0.35355;
+        } else {
+            float2 ha = hq - float2(0.0, 1.0);
+            float2 hb = hq - float2(0.5 * max(hq.x + hq.y, 0.0));
+            heart = sqrt(min(dot(ha, ha), dot(hb, hb))) * sign(hq.x - hq.y);
+        }
+        heart *= 0.84;
+        if (filled) {
+            d = heart;
+        } else {
+            d = abs(heart) - stroke;
         }
     } else if (in.value_t > 12.5) {
         // bookmark: a ribbon, a tall rounded rect with a V notch cut out of
@@ -1231,6 +1315,7 @@ mod tests {
             "folder",
             "sine",
             "lfo",
+            "heart",
         ] {
             let props = HashMap::from([("icon".to_string(), Value::Keyword(icon.to_string()))]);
             assert!(icon_value(&props).is_some(), "{icon} should resolve");

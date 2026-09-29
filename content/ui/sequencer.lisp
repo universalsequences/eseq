@@ -23,6 +23,8 @@
 (import eseq.drum-rack-v2)
 
 (import eseq.seq-panels)
+;; Expr cards' edit buffers (the node bay's edit button, the error dot).
+(import eseq.expr-buffer)
 ;; Process-port arm/bind state shared with the fx panel (lane strip map button).
 (import eseq.effects.param-controls :as pc)
 
@@ -30,13 +32,15 @@
 (import eseq.sample-import)
 (import eseq.retrospective)
 (import eseq.resample)
+(import eseq.factory-promote)
 (import eseq.export-song)
 (import eseq.file-dialogs)
 
 (export lane-patchbay-node lane-patch-register-node lane-patch-node-namespace
         harmony-snap-meter process-scope-cells-for
+        lane-patch-run-error lane-patch-expr-error lane-patch-hidden-in-port-count
         lane-patch-node-touch lane-patch-node-version-value lane-patch-node-selected-id
-        lane-patch-node-select
+        lane-patch-node-select lane-patch-node-host?
         track-selected-binding
         expanded-track-ids
         select-track-for-edit
@@ -49,12 +53,10 @@
         lane-patch-delete-selected
         lane-patch-select-lane
         lane-patch-lane-selected?
-        lane-add-open
-        lane-add-close
-        lane-add-open?
         lane-add-pick
         lane-add-options
-        lane-add-panel
+        lane-add-labels
+        lane-patch-add-menu lane-patch-add-menu-grouped
         lane-patch-pending-port
         track-param-mode
         set-track-param-mode
@@ -2382,6 +2384,12 @@
       (set! lane-patch-selected nil)
       ns)))
 
+;; Whether `graph` (an instance) has registered a node bay: its kind hosts
+;; node editors, with the `expanded-node` view field the *processes* dock
+;; reads (ui/processes-buffer.lisp).
+(def lane-patch-node-host? (graph)
+  (reduce |acc t| (if acc true (= (nth t 1) graph)) false lane-patch-node-targets))
+
 (def lane-patch-node-target (ns)
   (reduce |acc t| (if (and (= acc nil) (= (nth t 0) ns)) t acc) nil lane-patch-node-targets))
 (def lane-patch-node-graph (ns) (let ((t (lane-patch-node-target ns))) (if t (nth t 1) nil)))
@@ -2658,6 +2666,8 @@
 ;; the dropdown, so the card and the painted lane follow the patchbay.
 (def lane-patch-select-lane (track track-id instance-id)
   (if (lane-patch-node? track)
+    ;; The *processes* dock follows the selection (its inspector, and an
+    ;; expr card's code tile; expr spec §7).
     (set! lane-patch-node-selected instance-id)
     (let ((index (lane-patch-lane-index track instance-id)))
       (if (< index 0)
@@ -2667,26 +2677,258 @@
           (set-track-param-mode track-id
             (+ eseq.seqv-track-params/seqv-process-lane-mode-offset index)))))))
 
+;; ── Expr cards (docs/expr-process-spec.md §2) ──────────────────────────
+;; The same uniform box as every card: the preview of its body rides the
+;; out-port row, and the title row gains the error dot and an edit button
+;; that opens the body's text buffer (eseq.expr-buffer).
+
+;; Latest scheduler run error of process runtime `runtime-id`, or nil. A
+;; node slot runs under its instance id. Read inside a subtree: the field
+;; republishes whenever any process's error set changes.
+(def lane-patch-run-error (runtime-id)
+  (let ((errors SEQ.process-run-errors))
+    (if errors
+      (reduce |acc e| (if (and (= acc nil) (= (get e :runtime-id) runtime-id)) (get e :error) acc)
+        nil errors)
+      nil)))
+
+;; Why an expr card shows its error dot, or nil: a body with no compiled
+;; class, a failed commit from its edit buffer, or a failed run. Commit and
+;; run errors are node-bay only until track expr cards (eseq-waa9.18).
+(def lane-patch-expr-error (track entry)
+  (let ((id (get entry :instance-id))
+        (compile-error (get entry :compile-error)))
+    (if compile-error
+      compile-error
+      (if (lane-patch-node? track)
+        (let ((committed (eseq.expr-buffer/commit-error
+                           (lane-patch-node-graph track) (lane-patch-node-index track) id)))
+          (if committed committed (lane-patch-run-error id)))
+        nil))))
+
+;; Red, where the enable dot is orange and ports are orange/blue.
+(defwidget lane-patch-error-dot-shape
+  :width 1.2 :height 0.8
+  :state (active)
+  :shader
+  (sdf/fill (sdf/circle 0.6)
+    (material :color (if (> active 0.5) :toast-error (rgba 0 0 0 0)))))
+
+;; Its own subtree: a run error changing on the scheduler repaints the dot,
+;; not the bay.
+(def lane-patch-expr-error-dot (track entry)
+  (subtree :key (str "lane-patch-expr-error-" (get entry :instance-id))
+    (box :width 1.2 :height 0.8 :padding 0
+      :background "lane-patch-error-dot-shape"
+      :active (if (lane-patch-expr-error track entry) 1 0))))
+
+(def lane-patch-expr-edit-button (track track-id entry)
+  (button "edit"
+    :key (str "lane-patch-expr-edit-" (get entry :instance-id))
+    :width 2.2 :height 0.8 :padding 0.05 :font-size 6.5
+    :background-color :transparent :border-color :process-lane-accent
+    :color :process-lane-accent
+    :on-click (lambda (event)
+      (do
+        (lane-patch-select-lane track track-id (get entry :instance-id))
+        (eseq.expr-buffer/open-node-slot
+          (lane-patch-node-graph track) (lane-patch-node-index track)
+          (get entry :instance-id) (get entry :slot-index))))))
+
+;; The body as one clipped line (the host collapses its whitespace).
+(def lane-patch-expr-preview-chars 13)
+(def lane-patch-expr-preview (entry)
+  (let ((line (get entry :expr-line)))
+    (if (or (= line nil) (= line ""))
+      "(empty)"
+      (if (> (len line) lane-patch-expr-preview-chars)
+        (str (substring line 0 (- lane-patch-expr-preview-chars 1)) "…")
+        line))))
+
+;; ── In-port overflow (expr spec §3.2, proposal (a)) ───────────────────────
+;; A card fits three in ports. With more, it shows two plus a `+n` badge; the
+;; rest are set in the selected-slot inspector only. A port a cable lands on
+;; always shows, so no cable loses its end.
+(def lane-patch-in-port-capacity 3)
+(def lane-patch-port-wired? (port) (> (len (lane-patch-list port :writers)) 0))
+
+(def lane-patch-visible-in-ports (entry)
+  (let ((ports (lane-patch-list entry :in-ports)))
+    (if (<= (len ports) lane-patch-in-port-capacity)
+      ports
+      (let ((wired (len (filter lane-patch-port-wired? ports))))
+        (nth
+          (reduce |st port|
+            (if (lane-patch-port-wired? port)
+              (list (append (nth st 0) (list port)) (nth st 1))
+              (if (> (nth st 1) 0)
+                (list (append (nth st 0) (list port)) (- (nth st 1) 1))
+                st))
+            (list '() (max 0 (- (- lane-patch-in-port-capacity 1) wired)))
+            ports)
+          0)))))
+
+(def lane-patch-hidden-in-port-count (entry)
+  (- (len (lane-patch-list entry :in-ports)) (len (lane-patch-visible-in-ports entry))))
+
+(def lane-patch-overflow-badge (entry)
+  (let ((hidden (lane-patch-hidden-in-port-count entry)))
+    (if (> hidden 0)
+      (label (str "+" hidden)
+        :key (str "lane-patch-in-overflow-" (get entry :instance-id))
+        :height 1.1 :font-size 8 :v-align :center :color :dim :bg :transparent)
+      nil)))
+
+;; ── Card delete + drag reorder ─────────────────────────────────────────
+;; Right-click a card for its menu; drag a card onto another to move it
+;; there (it takes the drop target's position, like the scene pills). Both
+;; the track bay and graph-node bays route through here.
+
+;; The open card menu: :track :instance-id :name :col :row, nil when closed.
+(defstate lane-patch-card-menu nil)
+
+(def lane-patch-open-card-menu (track entry event)
+  (set! lane-patch-card-menu
+    (dict :track track :instance-id (get entry :instance-id) :name (get entry :name)
+      :col (get event :col) :row (get event :row))))
+
+(def lane-patch-close-card-menu () (set! lane-patch-card-menu nil))
+
+(def lane-patch-entry-ids (track)
+  (map (lambda (entry) (get entry :instance-id)) (track-lane-patch track)))
+
+(def lane-patch-id-index (ids id)
+  (reduce |acc index| (if (and (< acc 0) (= (nth ids index) id)) index acc)
+    -1
+    (range 0 (len ids))))
+
+;; `ids` with the id at `from` moved to position `to`.
+(def lane-patch-ids-moved (ids from to)
+  (let ((rest (map (lambda (index) (nth ids index))
+                (filter (lambda (index) (not (= index from))) (range 0 (len ids))))))
+    (append
+      (map (lambda (index) (nth rest index)) (range 0 to))
+      (list (nth ids from))
+      (map (lambda (index) (nth rest index)) (range to (len rest))))))
+
+;; The track's lane selector is an index, so a reorder or delete would leave
+;; it on whichever lane slides into that index. Point it at the lane it was
+;; on in the new card order `ids` (or its neighbour when that lane is gone).
+;; Node bays select by instance id and need nothing here.
+(def lane-patch-reselect-lane (track track-id ids)
+  (let ((lane (selected-process-lane track (track-param-mode track-id)))
+        (lane-ids (map (lambda (lane) (get lane :instance-id))
+                    (eseq.seqv-track-params/seqv-track-process-lanes track))))
+    (if (= lane nil)
+      nil
+      (let ((new-lane-ids (filter (lambda (id) (>= (lane-patch-id-index lane-ids id) 0)) ids))
+            (old-index (lane-patch-id-index lane-ids (get lane :instance-id))))
+        (let ((index (lane-patch-id-index new-lane-ids (get lane :instance-id))))
+          (if (>= index 0)
+            (set-track-param-mode track-id
+              (+ eseq.seqv-track-params/seqv-process-lane-mode-offset index))
+            (if (> (len new-lane-ids) 0)
+              (set-track-param-mode track-id
+                (+ eseq.seqv-track-params/seqv-process-lane-mode-offset
+                   (min old-index (- (len new-lane-ids) 1))))
+              nil)))))))
+
+(def lane-patch-remove-card (track track-id instance-id)
+  (do
+    (set! lane-patch-pending -1)
+    (set! lane-patch-selected nil)
+    (if (lane-patch-node? track)
+      (do
+        (graph-node-process-remove (lane-patch-node-graph track) (lane-patch-node-index track)
+          instance-id)
+        (if (= lane-patch-node-selected instance-id) (set! lane-patch-node-selected -1) nil)
+        (lane-patch-node-touch))
+      (let ((ids (filter (lambda (id) (not (= id instance-id))) (lane-patch-entry-ids track))))
+        (do
+          (lane-patch-reselect-lane track track-id ids)
+          (seq-remove-process-slot track instance-id))))))
+
+(def lane-patch-move-card (track track-id instance-id target-id)
+  (let ((ids (lane-patch-entry-ids track)))
+    (let ((from (lane-patch-id-index ids instance-id))
+          (to (lane-patch-id-index ids target-id)))
+      (if (or (< from 0) (< to 0) (= from to))
+        nil
+        (do
+          (set! lane-patch-pending -1)
+          (set! lane-patch-selected nil)
+          (if (lane-patch-node? track)
+            (do
+              (graph-node-process-move (lane-patch-node-graph track) (lane-patch-node-index track)
+                instance-id (- to from))
+              (lane-patch-node-touch))
+            (let ((moved (lane-patch-ids-moved ids from to)))
+              (do
+                (lane-patch-reselect-lane track track-id moved)
+                (seq-move-process-slot-before track instance-id
+                  (if (< (+ to 1) (len moved)) (nth moved (+ to 1)) nil))))))))))
+
+(def lane-patch-card-drop (track track-id event)
+  (lane-patch-move-card track track-id
+    (get (get event :payload) :instance-id)
+    (get (get event :target) :instance-id)))
+
+;; Each bay drags its own type, so a card never drops into another bay.
+(def lane-patch-card-drag-type (track) (str "lane-patch-card-" track))
+
+;; Mounted inside each bay; only the bay the menu was opened from draws it.
+(def lane-patch-card-context-menu (track track-id)
+  (let ((menu lane-patch-card-menu))
+    (context-menu
+      :is-open (if (= menu nil) false (= (get menu :track) track))
+      :anchor-col (or (get menu :col) 0)
+      :anchor-row (or (get menu :row) 0)
+      :on-close (lambda () (lane-patch-close-card-menu))
+      (menu-item (str "Delete " (or (get menu :name) "process"))
+        :key (str "lane-patch-card-menu-delete-" track)
+        :on-select (lambda (event)
+          (do
+            (lane-patch-close-card-menu)
+            (lane-patch-remove-card track track-id (get menu :instance-id))))))))
+
 (def lane-patch-column (track track-id entry)
-  (let ((selected (lane-patch-lane-selected? track track-id (get entry :instance-id))))
+  (let ((selected (lane-patch-lane-selected? track track-id (get entry :instance-id)))
+      (expr (get entry :expr)))
     (box :padding 0.4 :corner-radius (eseq.seq-core-state/radius 12)
       :key (str "lane-patch-col-" (get entry :instance-id))
+      :drag-type (lane-patch-card-drag-type track)
+      :drag-modifier :none
+      :drag-payload (dict :instance-id (get entry :instance-id))
+      :drop-types (list (lane-patch-card-drag-type track))
+      :drop-meta (dict :instance-id (get entry :instance-id))
+      :drop-hover-border-color :mixer-strip-selected-border
+      :on-drop (lambda (event) (lane-patch-card-drop track track-id event))
+      :on-right-click (lambda (event) (lane-patch-open-card-menu track entry event))
       :background-color (if (get entry :enabled) (rgba 1 1 1 0.04) (rgba 1 1 1 0.015))
       :selected-background-color :mixer-strip-selected-bg
       :selected selected
+      :selected-border-color :mixer-strip-selected-border
       :height 3
       :on-click (lambda (event) (lane-patch-select-lane track track-id (get entry :instance-id)))
       (v-stack :width 10.0 :gap 0.0 :align :start
         (h-stack :width :fill :gap 0.3 :align :center
           (label (get entry :name) :flex 1 :font-size 8 :v-align :center
             :color (if (get entry :enabled) :process-lane-accent :dim) :bg :transparent)
+          (if expr (lane-patch-expr-error-dot track entry) nil)
+          (if (and expr (lane-patch-node? track)) (lane-patch-expr-edit-button track track-id entry) nil)
           (lane-patch-enable-dot track entry))
         (h-stack :width :fill :height 0.8 :gap 0.4 :align :center
-          (each (lane-patch-list entry :in-ports) |port|
-            (lane-patch-in-port-widget track entry port)))
+          (each (lane-patch-visible-in-ports entry) |port|
+            (lane-patch-in-port-widget track entry port))
+          (lane-patch-overflow-badge entry))
         (h-stack :width :fill :height 0.8 :gap 0.4 :align :center
           (each (lane-patch-list entry :out-ports) |port|
-            (lane-patch-out-port-widget track entry port)))
+            (lane-patch-out-port-widget track entry port))
+          (if expr
+            (label (lane-patch-expr-preview entry)
+              :key (str "lane-patch-expr-preview-" (get entry :instance-id))
+              :flex 1 :height 1.1 :font-size 7.5 :v-align :center :color :dim :bg :transparent)
+            nil))
         ))))
 
 (def lane-patch-toggle-chip ()
@@ -2705,27 +2947,14 @@
 ;; ---------------------------------------------------------------------------
 ;; The patch bay's + box (eseq-53y7.3): appends one process instance to THIS
 ;; track's roster, so the added lane exists on the track in every scene while
-;; its per-step values stay scene-locked. The class picker is a modal
-;; (docs/modal-widget-spec.md) mounted at the *sequencer* root, because a
-;; modal only receives pointer input through the active tile.
+;; its per-step values stay scene-locked. The box is a filterable
+;; menu-button: typing narrows the classes and picking one adds it at once.
 
-;; The track the picker is adding to: a dict of :track / :track-id; nil closed.
-(defstate lane-add-target nil)
 ;; The slot just added, waiting for the host to publish it so its lane can be
 ;; selected: a dict of :track / :track-id / :instance-id, nil when idle. The
 ;; roster edit runs off the command queue, so the lane index only exists a
 ;; frame or more later; `lane-add-resolve-pending` picks it up then.
 (defstate lane-add-pending nil)
-
-(def lane-add-open? () (if lane-add-target true false))
-
-(def lane-add-open (track track-id)
-  (do
-    (set! lane-patch-pending -1)
-    (set! lane-patch-selected nil)
-    (set! lane-add-target (dict :track track :track-id track-id))))
-
-(def lane-add-close () (set! lane-add-target nil))
 
 ;; The default lane classes, in project-layer order (process.rs DEFAULT_LANES),
 ;; then lane classes that are only ever added per track (length).
@@ -2763,24 +2992,33 @@
       (lambda (entry) (not (lane-add-default-class? (get entry :name))))
       SEQ.process-library)))
 
+;; The menu's rows, parallel to `lane-add-options`.
+(def lane-add-labels ()
+  (map (lambda (entry) (lane-add-entry-label entry)) (lane-add-options)))
+
+;; The menu hands back the row's label; map it back to its class name.
+(def lane-add-class-for-label (label)
+  (reduce |acc entry|
+    (if (= acc nil) (if (= (lane-add-entry-label entry) label) (get entry :name) nil) acc)
+    nil
+    (lane-add-options)))
+
 ;; Pick: mint the slot on the roster, then remember the id so the lane gets
 ;; selected (its strip opens) as soon as the host publishes the new chain.
-(def lane-add-pick (class-name)
-  (let ((target lane-add-target))
-    (if (= target nil)
-      nil
-      (let ((track (get target :track))
-            (track-id (get target :track-id)))
-        (let ((instance-id (seq-add-track-process-slot track class-name)))
+(def lane-add-pick (track track-id class-name)
+  (if (= class-name nil)
+    nil
+    (let ((instance-id (seq-add-track-process-slot track class-name)))
+      (do
+        (set! lane-patch-pending -1)
+        (set! lane-patch-selected nil)
+        (if (= instance-id nil)
+          nil
           (do
-            (set! lane-add-target nil)
-            (if (= instance-id nil)
-              nil
-              (do
-                (set! lane-add-pending
-                  (dict :track track :track-id track-id :instance-id instance-id))
-                (status (str "Added " (lane-add-class-label class-name)
-                             " to this track (every scene)"))))))))))
+            (set! lane-add-pending
+              (dict :track track :track-id track-id :instance-id instance-id))
+            (status (str "Added " (lane-add-class-label class-name)
+                         " to this track (every scene)"))))))))
 
 ;; Render-time resolution of the pending selection, the way scene-banks.lisp
 ;; waits for an appended bank: harmless while the lane is not published yet.
@@ -2797,63 +3035,37 @@
             (lane-patch-select-lane track track-id instance-id))))
       nil)))
 
-;; Same box footprint as a lane cell so the add control shares the grid.
+;; The patch bay's add control, shared with graph-node patch bays: same
+;; footprint as a lane cell, and a filterable menu so typing narrows the
+;; classes and picking a row adds it at once. `on-pick` gets the row label.
+(def lane-patch-add-menu (key text labels placeholder on-pick)
+  (lane-patch-add-menu-grouped key text labels (list) placeholder on-pick))
+
+;; `lane-patch-add-menu` with section headers: `headers` lists the indices
+;; of `labels` that are headings (drawn dim, never picked), e.g. the node
+;; bay's "expr presets" group (docs/expr-process-spec.md §6.1).
+(def lane-patch-add-menu-grouped (key text labels headers placeholder on-pick)
+  (menu-button
+    :key key
+    :debug-name "lane-patch-add"
+    :icon text
+    :options labels
+    :headers headers
+    :filterable true
+    :filter-placeholder placeholder
+    :width 10.8 :height 3 :font-size 10 :menu-min-width 22
+    :corner-radius (eseq.seq-core-state/radius 12)
+    :bg-color (rgba 0.28 0.20 0.11 1)
+    :text-color :process-lane-accent
+    :menu-bg :dropdown-menu-bg
+    :menu-border-color :dropdown-menu-border
+    :hover-bg :dropdown-hover-bg
+    :on-change on-pick))
+
 (def lane-patch-add-cell (track track-id)
-  (box :padding 0.4 :corner-radius (eseq.seq-core-state/radius 12)
-    :key (str "lane-patch-add-" track-id)
-    :background-color :transparent
-    :border-width 0.08 :border-color (rgba 0.94 0.63 0.24 0.16)
-    :height 3
-    :on-click (lambda (event) (lane-add-open track track-id))
-    (v-stack :width 10.0 :gap 0.0 :align :center
-      (label "+" :width :fill :height 1.6 :font-size 15
-        :h-align :center :v-align :center
-        :color :process-lane-accent :bg :transparent)
-      (label "add lane" :width :fill :height 0.8 :font-size 7
-        :h-align :center :v-align :center
-        :color :dim :bg :transparent))))
-
-(def lane-add-row (entry)
-  (let ((name (get entry :name)))
-    (button (lane-add-entry-label entry)
-      :key (str "lane-add-option-" name)
-      :width :fill :height 1.3 :padding 0.2 :font-size 10
-      :h-align :left
-      :background-color (rgba 1 1 1 0.04)
-      :border-color (rgba 1 1 1 0.10)
-      :color :process-lane-accent
-      :on-click |x y r| (lane-add-pick name))))
-
-(def lane-add-body ()
-  (v-stack :width :fill :height :fill :gap 0.4
-    (h-stack :width :fill :gap 0.3 :align :baseline
-      (label "Add a lane"
-        :key "lane-add-title"
-        :font-size 13 :color :white :bg :transparent)
-      (box :flex 1 :bg :transparent)
-      (button "x"
-        :key "lane-add-close"
-        :width 1.6 :height 1.2 :padding 0.1 :font-size 10
-        :background-color (rgba 1 1 1 0.05)
-        :border-color (rgba 1 1 1 0.14) :color :dim
-        :on-click |x y r| (lane-add-close)))
-    (label "On this track in every scene; values stay per scene."
-      :key "lane-add-subtitle"
-      :font-size 9 :color :dim :bg :transparent)
-    (scroll :width :fill :flex 1
-      :key "lane-add-scroll"
-      (v-stack :width :fill :gap 0.2
-        (each (lane-add-options) |entry|
-          (lane-add-row entry))))))
-
-;; Escape and a click on the scrim both reach :on-close (modal spec §4).
-(def lane-add-panel ()
-  (modal :is-open (lane-add-open?)
-         :on-close (lambda () (lane-add-close))
-         :width-px 460 :height-px 520
-    (box :debug-name "lane-add-panel"
-      :width :fill :height :fill :bg :transparent :padding 0.5
-      (lane-add-body))))
+  (lane-patch-add-menu (str "lane-patch-add-" track-id) "+  add lane"
+    (lane-add-labels) "Filter lanes…"
+    (lambda (label) (lane-add-pick track track-id (lane-add-class-for-label label)))))
 
 (def lane-patch-remove-button (track)
   (let ((cable lane-patch-selected))
@@ -2895,7 +3107,8 @@
           (* row columns) (min count (* (+ row 1) columns)) add-cell))
       (if (and lane-patch-selected (= (get lane-patch-selected :track) ns))
         (lane-patch-remove-button ns)
-        nil))))
+        nil)
+      (lane-patch-card-context-menu ns ns))))
 
 ;; Wrap after six cells, read left to right then top to bottom. The + box
 ;; counts as an entry and follows the last lane onto a new row when needed.
@@ -2910,7 +3123,8 @@
           (each (range 0 (ceil (/ count columns))) |row|
             (lane-patch-grid-row track track-id entries
               (* row columns) (min count (* (+ row 1) columns))))
-          (if lane-patch-selected (lane-patch-remove-button track) nil))))))
+          (if lane-patch-selected (lane-patch-remove-button track) nil)
+          (lane-patch-card-context-menu track track-id))))))
 
 (def lane-patchbay-under (track track-id mode)
   (if (and lane-patch-view (selected-process-lane track mode))
@@ -4117,10 +4331,8 @@
       (eseq.retrospective/panel))
     (subtree :key "seq-resample"
       (eseq.resample/panel))
-    ;; Lane class picker for the patch bay's + box: a modal only gets pointer
-    ;; input through the active tile, so it mounts in this buffer.
-    (subtree :key "seq-lane-add"
-      (lane-add-panel))
+    (subtree :key "seq-factory-promote"
+      (eseq.factory-promote/panel))
     (subtree :key "seq-rack-clip-menu"
       (rack-clip-context-menu))
     (v-stack :key "sequencer-tracks" :width :fill :gap 0

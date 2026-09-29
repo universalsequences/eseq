@@ -1830,8 +1830,11 @@ impl<'a> Compiler<'a> {
             let key_idx = self.use_string_constant(&key);
             self.emit(OpCode::PushKeyword(key_idx));
             match key.as_str() {
-                "sequencer" => self.compile_def_kind_sequencer(&name, value)?,
-                "state" => self.compile_def_kind_state(&name, value)?,
+                // `:generator` is captured as data like `:sequencer`
+                // (docs/jaki-kind-spec.md §4); `:document` defaults evaluate
+                // like `:state` ones (§3).
+                "sequencer" | "generator" => self.compile_def_kind_sequencer(&name, &key, value)?,
+                "state" | "document" => self.compile_def_kind_state(&name, &key, value)?,
                 // `:keymap eseq.sequencer-keys/sequencer-keys` names a mode;
                 // a bare symbol is its name, never a variable read.
                 "keymap" => match strip_source_origin_wrappers(value.clone()) {
@@ -1854,6 +1857,7 @@ impl<'a> Compiler<'a> {
     fn compile_def_kind_sequencer(
         &mut self,
         kind: &str,
+        slot: &str,
         value: &Expression,
     ) -> Result<(), CompilerError> {
         match strip_source_origin_wrappers(value.clone()) {
@@ -1873,18 +1877,23 @@ impl<'a> Compiler<'a> {
             }
             Expression::Unquote(inner) => self.compile_expression(&inner),
             _ => Err(CompilerError::Message(format!(
-                "def-kind {kind}: :sequencer expects a def-sequencer body list"
+                "def-kind {kind}: :{slot} expects a def-sequencer body list"
             ))),
         }
     }
 
-    fn compile_def_kind_state(&mut self, kind: &str, value: &Expression) -> Result<(), CompilerError> {
+    fn compile_def_kind_state(
+        &mut self,
+        kind: &str,
+        slot: &str,
+        value: &Expression,
+    ) -> Result<(), CompilerError> {
         let items = match strip_source_origin_wrappers(value.clone()) {
             Expression::List(items) | Expression::QuoteList(items) => items,
             Expression::Symbol(symbol) if symbol == "nil" => Vec::new(),
             _ => {
                 return Err(CompilerError::Message(format!(
-                    "def-kind {kind}: :state expects ((field default) ...)"
+                    "def-kind {kind}: :{slot} expects ((field default) ...)"
                 )));
             }
         };
@@ -1896,14 +1905,14 @@ impl<'a> Compiler<'a> {
                         Expression::Symbol(field) => (field, pair.get(1).cloned()),
                         _ => {
                             return Err(CompilerError::Message(format!(
-                                "def-kind {kind}: :state field names must be symbols"
+                                "def-kind {kind}: :{slot} field names must be symbols"
                             )));
                         }
                     }
                 }
                 _ => {
                     return Err(CompilerError::Message(format!(
-                        "def-kind {kind}: each :state entry is (field default)"
+                        "def-kind {kind}: each :{slot} entry is (field default)"
                     )));
                 }
             };
@@ -3292,8 +3301,6 @@ impl<'a> Compiler<'a> {
             let is_def_process = matches!(op, Expression::Symbol(s) if s == "def-process");
             let is_def_accumulator = matches!(op, Expression::Symbol(s) if s == "def-accumulator");
             let is_defchan = matches!(op, Expression::Symbol(s) if s == "defchan");
-            let is_process_sugar = matches!(op, Expression::Symbol(s)
-                if s == "every" || s == "after" || s == "on" || s == "tap");
             // `def-song` (song-mode declarative authoring): the whole body —
             // `(at <beat> :scene n :patterns ((track pat)...))` rows plus
             // :end/:loop — is a declaration for the host, not code, so it is
@@ -3350,20 +3357,6 @@ impl<'a> Compiler<'a> {
                 }
                 if is_def_accumulator && list.len() == 3 && i == 1 {
                     self.compile_captured_quoted_expression(elem)?;
-                    continue;
-                }
-                if is_process_sugar {
-                    // The trigger/source argument expands too, matching
-                    // `def-process`'s `:every`/`:listen` clauses: the native
-                    // parses it structurally in *this* VM, so leaving a macro
-                    // call unexpanded there fails to parse rather than working.
-                    // Remaining arguments are executable scheduler bodies and
-                    // therefore lower free scene references by name.
-                    if i == 0 {
-                        self.compile_expanded_quoted_expression(elem)?;
-                    } else {
-                        self.compile_expanded_shipped_expression(elem, false)?;
-                    }
                     continue;
                 }
                 if is_def_song {

@@ -269,6 +269,22 @@ pub(crate) fn sync_reactive_tick(
             editor.mark_needs_redraw();
         }
     }
+    // Process run errors (expr cards' error dot): republish when the
+    // scheduler's error set changed, and once for a reader that opened
+    // after it last changed.
+    let process_run_errors_version = ctx.shared.state.process_run_errors_version();
+    if ctx.frame.prev_process_run_errors_version != Some(process_run_errors_version)
+        && editor.runtime().has_live_reactive_consumers("SEQ", "process-run-errors")
+    {
+        ctx.frame.prev_process_run_errors_version = Some(process_run_errors_version);
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "process-run-errors",
+            state_values::build_process_run_errors_value(&ctx.shared.state),
+        );
+        editor.runtime_mut().run_reactive_cycle();
+        editor.mark_needs_redraw();
+    }
     // Lane strip scopes: republish the state histories whenever the
     // scheduler fired a step process since the last frame.
     let process_scope_values_version = ctx.shared.state.process_scope_values_version();

@@ -17,8 +17,9 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 static WORKGROUPS_ENABLED: AtomicBool = AtomicBool::new(true);
 static WORKGROUPS_ALWAYS: AtomicBool = AtomicBool::new(false);
 fn default_workgroups() -> bool { true }
-/// `workgroups: false` keeps helpers out; `workgroups_always` restores the old
-/// unconditional membership; otherwise the shipping adaptive policy applies.
+/// `workgroups: false` keeps helpers out; `workgroups_always` pins the
+/// shipping unconditional membership; otherwise the load-driven adaptive
+/// policy applies (kept for A/B runs against the pre-2026-09-27 default).
 #[cfg(target_os = "macos")]
 pub(super) fn workgroup_policy() -> super::workgroup::Policy {
     use super::workgroup::Policy;

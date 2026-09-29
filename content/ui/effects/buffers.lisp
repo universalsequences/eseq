@@ -174,7 +174,7 @@
               (box :flex 1 :height 0.15)
               (box :debug-name "rack-kit-save-button" :padding 0 :width 2 :align :center
                 (v-stack
-                  (box :width 2.05 :height 1.45
+                  (box :width 1.65 :height 0.85
                     (fx-mini-save-icon
                       :key (str "rack-fx-save-kit-" (eseq.drum-rack-v2/group-id gidx))
                       :on-click |x y r|

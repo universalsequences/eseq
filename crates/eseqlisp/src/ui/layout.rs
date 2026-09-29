@@ -2486,7 +2486,7 @@ pub(crate) fn prop_is_keyword(v: &Value, key: &str, expected: &str) -> bool {
     get_prop_keyword(v, key).is_some_and(|value| value == expected)
 }
 
-fn prop_is_true(v: &Value, key: &str) -> bool {
+pub(crate) fn prop_is_true(v: &Value, key: &str) -> bool {
     let Value::Map(map) = v else {
         return false;
     };
@@ -3158,6 +3158,62 @@ mod tests {
             args.push(child);
         }
         build_widget("grid", args)
+    }
+
+    #[test]
+    fn vstack_shrinks_fit_content_scroll_to_keep_flex_sibling_min_height() {
+        // Sample browser shape: a content-sized chip filter above a results
+        // list that must keep at least 8 rows of a 20-row viewport.
+        let engine = LayoutEngine::new(80, 20, 1.0);
+        for (content, expected_filter) in [(4.0, 4.0), (30.0, 12.0)] {
+            let tree = build_widget(
+                "v-stack",
+                vec![
+                    kw("width"),
+                    kw("fill"),
+                    kw("height"),
+                    kw("fill"),
+                    build_widget(
+                        "box",
+                        vec![
+                            kw("width"),
+                            kw("fill"),
+                            kw("shrink"),
+                            num(1.0),
+                            build_widget(
+                                "scroll",
+                                vec![
+                                    kw("width"),
+                                    kw("fill"),
+                                    kw("fit-content"),
+                                    Value::Bool(true),
+                                    build_widget("box", vec![kw("height"), num(content)]),
+                                ],
+                            ),
+                        ],
+                    ),
+                    // The results list's natural height can exceed the
+                    // viewport (an empty message or tree takes what it is
+                    // offered); flex space must give way before the filter.
+                    build_widget(
+                        "box",
+                        vec![
+                            kw("width"),
+                            kw("fill"),
+                            kw("flex"),
+                            num(1.0),
+                            kw("min-height"),
+                            num(8.0),
+                            build_widget("box", vec![kw("height"), num(25.0)]),
+                        ],
+                    ),
+                ],
+            );
+            let layout = engine.layout(&tree).expect("layout");
+            assert_f32_approx(layout.children[0].rect.height, expected_filter);
+            assert_f32_approx(layout.children[0].children[0].rect.height, expected_filter);
+            assert_f32_approx(layout.children[1].rect.height, 20.0 - expected_filter);
+        }
     }
 
     #[test]

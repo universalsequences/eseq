@@ -174,6 +174,29 @@ pub enum ParserError {
     UnexpectedEOF,
 }
 
+/// Parse a `0x`/`0X` hex or `0b`/`0B` binary integer literal, with an
+/// optional leading sign. Returns `None` unless the whole text is such a
+/// literal. Shared by the tokenizer and the editor highlighter.
+pub fn parse_radix_integer_literal(text: &str) -> Option<f64> {
+    let (negative, rest) = match text.as_bytes().first() {
+        Some(b'-') => (true, &text[1..]),
+        Some(b'+') => (false, &text[1..]),
+        _ => (false, text),
+    };
+    let (radix, digits) = if let Some(digits) = rest.strip_prefix("0x").or_else(|| rest.strip_prefix("0X")) {
+        (16, digits)
+    } else if let Some(digits) = rest.strip_prefix("0b").or_else(|| rest.strip_prefix("0B")) {
+        (2, digits)
+    } else {
+        return None;
+    };
+    if digits.is_empty() || !digits.bytes().all(|b| (b as char).is_digit(radix)) {
+        return None;
+    }
+    let magnitude = u64::from_str_radix(digits, radix).ok()? as f64;
+    Some(if negative { -magnitude } else { magnitude })
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token {
     LeftParen,
@@ -334,6 +357,28 @@ impl Parser {
         let start = self.pos;
         if matches!(self.peek(), Some(b'-' | b'+')) {
             self.next();
+        }
+        // `0x`/`0X` hex and `0b`/`0B` binary integer literals (spec
+        // expr-process §9). The whole run up to the next delimiter must be
+        // valid; `0x`, `0xZZ`, `0b102` are errors rather than a number
+        // followed by a symbol.
+        if self.peek() == Some(b'0') && matches!(self.peek_nth(1), Some(b'x' | b'X' | b'b' | b'B')) {
+            while let Some(ch) = self.peek() {
+                if ch.is_ascii_whitespace()
+                    || matches!(ch, b'(' | b')' | b'|' | b'\'' | b'"' | b'`' | b',' | b';')
+                {
+                    break;
+                }
+                if ch.is_ascii() {
+                    self.next();
+                } else {
+                    self.advance_char();
+                }
+            }
+            let text = &self.text[start..self.pos];
+            return parse_radix_integer_literal(text)
+                .map(Token::Number)
+                .ok_or(ParserError::ErrorParsingNumber);
         }
         let mut saw_digit = false;
         let mut saw_dot = false;
@@ -1050,6 +1095,66 @@ mod tests {
             Expression::Symbol("e".into()), Expression::Symbol("exp".into()),
             Expression::Symbol("+".into()), Expression::Symbol("-".into()),
         ]);
+    }
+
+    #[test]
+    fn hex_and_binary_literals_parse_with_spans() {
+        let source = "0xACE1 0XFF 0x0 0b1011 0B0 -0x10 +0b11 0xffffffff (f 0x1F)";
+        let tokens = Parser::new(source.into()).parse_spanned().unwrap();
+        let spellings = ["0xACE1", "0XFF", "0x0", "0b1011", "0B0", "-0x10", "+0b11", "0xffffffff"];
+        let expected = [44_257.0, 255.0, 0.0, 11.0, 0.0, -16.0, 3.0, 4_294_967_295.0];
+        for ((token, value), spelling) in tokens.iter().zip(expected).zip(spellings) {
+            assert_eq!(token.token, Token::Number(value), "{spelling}");
+            assert_eq!(&source[token.span.start_byte..token.span.end_byte], spelling);
+        }
+        assert_eq!(
+            tokens[8..].iter().map(|t| t.token.clone()).collect::<Vec<_>>(),
+            vec![Token::LeftParen, Token::Symbol("f".into()), Token::Number(31.0), Token::RightParen]
+        );
+        let exprs = parse_spanned_str("(bit-and s 0x7)");
+        let ExprKind::List(items) = &exprs[0].kind else { panic!("expected list") };
+        assert_eq!(items[2].kind, ExprKind::Number(7.0));
+        assert_eq!(items[2].origin.primary_span, SourceSpan::new(11, 14));
+        // Plain numbers starting with 0 are unaffected.
+        assert_eq!(parse_str("0 0.5 007"), vec![
+            Expression::Number(0.0), Expression::Number(0.5), Expression::Number(7.0),
+        ]);
+    }
+
+    #[test]
+    fn malformed_hex_and_binary_literals_are_errors() {
+        for source in ["0x", "0xZZ", "0x1G", "0b", "0b102", "0b12", "-0x", "(+ 0x 1)", "0x1.5", "0xAB_CD"] {
+            assert_eq!(Parser::new(source.into()).parse(), Err(ParserError::ErrorParsingNumber), "{source}");
+        }
+        assert_eq!(parse_radix_integer_literal("0xACE1"), Some(44_257.0));
+        assert_eq!(parse_radix_integer_literal("-0b10"), Some(-2.0));
+        assert_eq!(parse_radix_integer_literal("xACE1"), None);
+        assert_eq!(parse_radix_integer_literal("12"), None);
+    }
+
+    #[test]
+    fn radix_literal_branch_leaves_signs_symbols_and_decimals_alone() {
+        let tokens = Parser::new("- + -> -x +y x0b1 b0x1 0.5 -0.5 .5 1e3 10b 1x".into()).parse().unwrap();
+        assert_eq!(tokens, vec![
+            Token::Symbol("-".into()),
+            Token::Symbol("+".into()),
+            Token::Symbol("->".into()),
+            Token::Symbol("-x".into()),
+            Token::Symbol("+y".into()),
+            Token::Symbol("x0b1".into()),
+            Token::Symbol("b0x1".into()),
+            Token::Number(0.5),
+            Token::Number(-0.5),
+            Token::Number(0.5),
+            Token::Number(1000.0),
+            // Pre-existing split for non-radix digit+letter runs is unchanged.
+            Token::Number(10.0),
+            Token::Symbol("b".into()),
+            Token::Number(1.0),
+            Token::Symbol("x".into()),
+        ]);
+        // Hex literals end at a comment like any other delimiter.
+        assert_eq!(Parser::new("0xF;c\n1".into()).parse().unwrap(), vec![Token::Number(15.0), Token::Number(1.0)]);
     }
 
     #[test]

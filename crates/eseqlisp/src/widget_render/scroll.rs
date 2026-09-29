@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use super::{WidgetDefinition, WidgetEvent};
 use crate::layout::{
     Constraints, LayoutCtx, LayoutNode, MeasureCtx, Rect, Size, f64_to_f32, get_prop_num,
-    get_stable_widget_id, prop_is_keyword,
+    get_stable_widget_id, prop_is_keyword, prop_is_true,
 };
 use crate::vm::Value;
 
@@ -267,7 +267,7 @@ impl WidgetDefinition for ScrollWidget {
     }
 
     fn size_affecting_props(&self) -> &'static [&'static str] {
-        &["padding"]
+        &["padding", "fit-content"]
     }
 
     fn bindable_props(&self) -> &'static [&'static str] {
@@ -303,10 +303,17 @@ impl WidgetDefinition for ScrollWidget {
                 child_size.map(|s| s.width).unwrap_or(0.0)
             }
         });
-        Some(Size {
-            width,
-            height: get_prop_num(node, "height").map(f64_to_f32).unwrap_or(0.0),
-        })
+        // `:fit-content true` reports the content height as the natural height,
+        // so a parent can size the scroll to its content and only clip (via
+        // `:shrink`) when space runs out.
+        let height = match get_prop_num(node, "height").map(f64_to_f32) {
+            Some(height) => height,
+            None if prop_is_true(node, "fit-content") => {
+                child_size.map(|s| s.height).unwrap_or(0.0)
+            }
+            None => 0.0,
+        };
+        Some(Size { width, height })
     }
 
     fn layout_children(

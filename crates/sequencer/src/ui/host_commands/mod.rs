@@ -7,6 +7,7 @@ pub(crate) use drum_rack_v2::{apply_rack_pad_map_command, evaluate_rack_sequence
 mod effects;
 pub(crate) mod export;
 mod file_menu;
+pub(crate) mod graph_node_processes;
 pub(crate) use file_menu::{activate_dialog_tile, intercept_unsaved_quit};
 mod menu_actions;
 pub(crate) mod instances;
@@ -18,6 +19,7 @@ pub(crate) mod packages;
 mod project;
 mod rack;
 pub(crate) mod rack_grooves;
+pub(crate) mod factory_promote;
 pub(crate) mod resample;
 mod routing;
 mod sample_import;

@@ -39,11 +39,14 @@ pub enum HostCommand {
 }
 
 /// Tone of a window-level toast. Success toasts time out quickly; error
-/// toasts linger and also clear on the next keypress.
+/// toasts linger and also clear on the next keypress. Loading toasts draw an
+/// animated spinner (and an optional progress bar) and stay until the host
+/// replaces or dismisses them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToastKind {
     Success,
     Error,
+    Loading,
 }
 
 impl ToastKind {
@@ -51,6 +54,7 @@ impl ToastKind {
         match label {
             "success" | "ok" => Some(Self::Success),
             "error" => Some(Self::Error),
+            "loading" => Some(Self::Loading),
             _ => None,
         }
     }

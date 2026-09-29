@@ -172,16 +172,34 @@ pub(in crate::lisp_host) fn register_process_natives(
         },
     );
 
+    // A promoted expr body with a `"` in it (docs/expr-process-spec.md §8):
+    // eseqlisp strings have no escapes, so the My processes module spells
+    // the body `(str "…" (string-from-char-code 34) "…")` under `:expr`.
+    runtime.register_native_with_docs(
+        super::expr_promote::STRING_FROM_CHAR_CODE_NATIVE,
+        "(string-from-char-code code)",
+        "The one-character string of Unicode code point `code` (34 is a double quote, which string literals cannot hold).",
+        |args, _ctx| {
+            let code = match args.first() {
+                Some(EValue::Number(code)) if code.fract() == 0.0 && *code >= 0.0 => *code as u32,
+                _ => return Err("string-from-char-code expects a code point".to_string()),
+            };
+            char::from_u32(code)
+                .map(|ch| EValue::String(ch.to_string()))
+                .ok_or_else(|| format!("string-from-char-code: {code} is not a code point"))
+        },
+    );
+
     let process_authoring_for_def = Arc::clone(&process_authoring);
     let publish_for_def = publish.clone();
     let chain_state_for_def = process_chain_state.clone();
     runtime.register_vm_native_with_docs_and_keywords(
         "def-process",
-        "(def-process name :doc text :in (...) :out (...) :state (...) :every duration :seed policy :target target :targets (...) :listen (...) :phase value :init body :run body)",
-        "Define a scheduler-side musical process class. Event handlers use dynamic :on-<listen-name> keys and therefore are not a fixed completion set.",
+        "(def-process name :doc text :in (...) :out (...) :state (...) :every duration :seed policy :target target :targets (...) :listen (...) :phase value :init body :run body) or (def-process name :doc text :in (...) :expr \"body\")",
+        "Define a scheduler-side musical process class. Event handlers use dynamic :on-<listen-name> keys and therefore are not a fixed completion set. With :expr the class is compiled from an expr card body (docs/expr-process-spec.md §8): inlets, state, targets and the run body come from the body; :in only overrides derived inlets' range, default and doc.",
         [
             ":doc", ":in", ":out", ":state", ":every", ":seed", ":target", ":targets",
-            ":listen", ":phase", ":init", ":run",
+            ":listen", ":phase", ":init", ":run", ":expr",
         ],
         move |args, vm| match register_process_def(
             args,
@@ -1740,6 +1758,254 @@ pub(in crate::lisp_host) fn register_process_natives(
         },
     );
 
+    // The tail of every compiled expr body (docs/expr-process-spec.md §6):
+    // its value goes to both the mappable `out` port and the connectable
+    // `wire` port, as `lane-acc`/`lane-rand` do by hand. nil sends nothing,
+    // a bool sends 1/0, anything else fails the run (the card is bypassed).
+    // With a second argument (the card's `$prev`) it returns the value it
+    // sent, or that argument when it sent nothing, so the compiled body can
+    // store the card's last output (§4).
+    let process_eval_for_expr_send = Arc::clone(&process_eval);
+    runtime.register_native_with_docs(
+        super::expr_process::EXPR_SEND_NATIVE,
+        "(__expr-send! value [prev])",
+        "Internal: send an expr card's body value on its out and wire ports.",
+        move |args, _ctx| {
+            let (sent, unsent) = match args.as_slice() {
+                [sent] => (sent, EValue::Nil),
+                [sent, prev] => (sent, prev.clone()),
+                _ => return Err("__expr-send! expects a value".to_string()),
+            };
+            let value = match sent {
+                EValue::Nil => return Ok(unsent),
+                EValue::Number(value) => *value,
+                EValue::Bool(value) => {
+                    if *value { 1.0 } else { 0.0 }
+                }
+                other => {
+                    return Err(format!(
+                        "expr body must evaluate to a number, bool or nil, got {}",
+                        eseqlisp::vm::format_lisp_value(other)
+                    ));
+                }
+            };
+            if !value.is_finite() {
+                return Err(format!("expr body evaluated to {value}"));
+            }
+            push_process_target_write(
+                &process_eval_for_expr_send,
+                crate::process::ProcessTargetOp::Add,
+                Some("out".to_string()),
+                value as f32,
+            )?;
+            push_process_target_write(
+                &process_eval_for_expr_send,
+                crate::process::ProcessTargetOp::Set,
+                Some("wire".to_string()),
+                value as f32,
+            )?;
+            Ok(EValue::Number(value))
+        },
+    );
+
+    // `$` context reads of compiled expr bodies (docs/expr-process-spec.md
+    // §4): the compiler rewrites `$note` to `(__expr-ctx 0)` and so on, one
+    // index per variable (`EXPR_NATIVE_CONTEXT_VARS`). A number index keeps
+    // the per-read cost to one match; the payload fields read the step
+    // context, which the chain runner rebuilds per slot from the payload as
+    // the earlier slots left it.
+    let process_eval_for_expr_ctx = Arc::clone(&process_eval);
+    runtime.register_native_with_docs(
+        super::expr_process::EXPR_CONTEXT_NATIVE,
+        "(__expr-ctx index)",
+        "Internal: read an expr card's $ context variable.",
+        move |args, _ctx| {
+            let [EValue::Number(index)] = args.as_slice() else {
+                return Err("__expr-ctx expects an index".to_string());
+            };
+            let guard = process_eval_for_expr_ctx
+                .lock()
+                .map_err(|_| "failed to lock process eval context".to_string())?;
+            let Some(ctx) = guard.as_ref() else {
+                return Err("expr context read outside process execution".to_string());
+            };
+            let step = ctx.step_context.as_ref();
+            let payload = |read: fn(&crate::process::ProcessStepEventContext) -> f64| {
+                step.map(read)
+                    .ok_or_else(|| "expr context read requires a scheduler step event context".to_string())
+            };
+            let value = match *index as usize {
+                0 => payload(|step| step.resolved.transpose as f64)?,
+                1 => payload(|step| step.resolved.velocity as f64)?,
+                2 => payload(|step| step.resolved.duration as f64)?,
+                3 => payload(|step| step.delay_offset_steps as f64)?,
+                4 => ctx.beat,
+                5 => (ctx.beat / super::expr_process::EXPR_BAR_BEATS).rem_euclid(1.0),
+                6 => {
+                    if step.is_some_and(|step| step.after_reset) { 1.0 } else { 0.0 }
+                }
+                other => return Err(format!("__expr-ctx: unknown index {other}")),
+            };
+            Ok(EValue::Number(value))
+        },
+    );
+
+    // Expr state and stateful-helper cells (docs/expr-process-spec.md §5,
+    // §5.1): `(__expr-cell op :key args…)` reads or updates one cell of the
+    // invocation's state map in place, so a compiled body's `set!` on a
+    // state name reaches the cell at any depth. The key is borrowed from the
+    // keyword (no allocation); a failed run discards the whole map, so a
+    // bypassed fire stores nothing.
+    let process_eval_for_expr_cell = Arc::clone(&process_eval);
+    runtime.register_native_with_docs(
+        super::expr_process::EXPR_CELL_NATIVE,
+        "(__expr-cell op key args…)",
+        "Internal: read or update an expr card's state or helper cell.",
+        move |args, _ctx| {
+            use super::expr_process::expr_cell_op as op;
+            let (Some(EValue::Number(code)), Some(key)) = (args.first(), args.get(1)) else {
+                return Err("__expr-cell expects an op and a key".to_string());
+            };
+            let key = match key {
+                EValue::Keyword(key) | EValue::Symbol(key) | EValue::String(key) => key.as_str(),
+                _ => return Err("__expr-cell expects a key".to_string()),
+            };
+            let code = *code as u8;
+            let number = |index: usize, what: &str| match args.get(index) {
+                Some(EValue::Number(value)) => Ok(*value),
+                Some(EValue::Bool(value)) => Ok(if *value { 1.0 } else { 0.0 }),
+                Some(other) => Err(format!(
+                    "{what} expects a number, got {}",
+                    eseqlisp::vm::format_lisp_value(other)
+                )),
+                None => Err(format!("{what} expects a number")),
+            };
+            let mut guard = process_eval_for_expr_cell
+                .lock()
+                .map_err(|_| "failed to lock process eval context".to_string())?;
+            let Some(ctx) = guard.as_mut() else {
+                return Err("expr state used outside process execution".to_string());
+            };
+            let Some(cell) = ctx.state.get_mut(key) else {
+                return Err(format!("expr state cell `{key}` is not declared"));
+            };
+            let held = |cell: &EValue| match cell {
+                EValue::Number(value) if value.is_finite() => *value,
+                EValue::Bool(true) => 1.0,
+                _ => 0.0,
+            };
+            // A counter's modulus: a whole number >= 1.
+            let modulus = |k: f64| if k.is_finite() && k >= 1.0 { k.floor() } else { 1.0 };
+            let value = match code {
+                op::GET => cell.clone(),
+                op::SET => {
+                    let value = args.get(2).cloned().unwrap_or(EValue::Nil);
+                    *cell = value.clone();
+                    value
+                }
+                op::PREV => std::mem::replace(cell, args.get(2).cloned().unwrap_or(EValue::Nil)),
+                op::DELTA => {
+                    let x = number(2, "delta")?;
+                    let old = held(cell);
+                    *cell = EValue::Number(x);
+                    EValue::Number(x - old)
+                }
+                op::INTEG => {
+                    let sum = held(cell) + number(2, "integ")?;
+                    *cell = EValue::Number(sum);
+                    EValue::Number(sum)
+                }
+                op::SH => {
+                    if number(2, "sh")? > 0.5 {
+                        *cell = EValue::Number(number(3, "sh")?);
+                    }
+                    EValue::Number(held(cell))
+                }
+                op::SLEW => {
+                    let x = number(2, "slew")?;
+                    let amount = number(3, "slew")?;
+                    let amount = if amount.is_nan() { 0.0 } else { amount.clamp(0.0, 1.0) };
+                    let y = held(cell);
+                    let y = y + amount * (x - y);
+                    *cell = EValue::Number(y);
+                    EValue::Number(y)
+                }
+                op::EVERY | op::COUNT => {
+                    let k = modulus(number(2, if code == op::EVERY { "every" } else { "count" })?);
+                    let count = held(cell).floor().rem_euclid(k);
+                    *cell = EValue::Number((count + 1.0).rem_euclid(k));
+                    if code == op::COUNT {
+                        EValue::Number(count)
+                    } else if count == 0.0 {
+                        args.get(3).cloned().unwrap_or(EValue::Nil)
+                    } else {
+                        EValue::Nil
+                    }
+                }
+                other => return Err(format!("__expr-cell: unknown op {other}")),
+            };
+            Ok(value)
+        },
+    );
+
+    // Expr shaping helpers (docs/expr-process-spec.md §6.1): the expr
+    // compiler lowers `(quant …)`, `(fold …)`, `(sine …)` … to
+    // `(__expr-fn op args…)`, so the names exist only inside expr bodies and
+    // no scheduler global changes. Pure: no process context needed.
+    runtime.register_native_with_docs(
+        super::expr_process::EXPR_FN_NATIVE,
+        "(__expr-fn op args…)",
+        "Internal: an expr card's pure shaping helper (quant fold wrap scale clip euclid sine tri saw sqr unipolar bipolar).",
+        move |args, _ctx| {
+            let Some(EValue::Number(code)) = args.first() else {
+                return Err("__expr-fn expects an op".to_string());
+            };
+            let mut numbers = [0.0f64; 5];
+            let count = args.len() - 1;
+            if count > numbers.len() {
+                return Err("__expr-fn: too many arguments".to_string());
+            }
+            for (slot, value) in numbers.iter_mut().zip(&args[1..]) {
+                *slot = match value {
+                    EValue::Number(value) => *value,
+                    EValue::Bool(value) => if *value { 1.0 } else { 0.0 },
+                    other => {
+                        return Err(format!(
+                            "expr helper expects a number, got {}",
+                            eseqlisp::vm::format_lisp_value(other)
+                        ))
+                    }
+                };
+            }
+            super::expr_process::expr_pure_fn(*code as u8, &numbers[..count]).map(EValue::Number)
+        },
+    );
+
+    // `(choose a b …)` in an expr body: one argument, uniformly, drawn from
+    // the same per-fire process random stream `rand` advances.
+    let process_eval_for_choose = Arc::clone(&process_eval);
+    runtime.register_native_with_docs(
+        super::expr_process::EXPR_CHOOSE_NATIVE,
+        "(__expr-choose a b …)",
+        "Internal: an expr card's (choose a b …).",
+        move |args, _ctx| {
+            if args.is_empty() {
+                return Err("choose expects at least one value".to_string());
+            }
+            let mut guard = process_eval_for_choose
+                .lock()
+                .map_err(|_| "failed to lock process eval context".to_string())?;
+            let Some(ctx) = guard.as_mut() else {
+                return Err("choose called outside process execution".to_string());
+            };
+            ctx.random_state = ctx.random_state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let bits = gen_splitmix64(ctx.random_state);
+            let unit = ((bits >> 11) as f64) * (1.0 / ((1u64 << 53) as f64));
+            let index = ((unit * args.len() as f64) as usize).min(args.len() - 1);
+            Ok(args[index].clone())
+        },
+    );
+
     let process_eval_for_rand = Arc::clone(&process_eval);
     runtime.register_native_with_docs(
         "rand",
@@ -2713,6 +2979,7 @@ pub(in crate::lisp_host) fn process_chain_slot_from_handle(
         lanes,
         fanout: Default::default(),
         unbound_ports: Default::default(),
+        expr_source: None,
         bindings,
     })
 }
@@ -3218,10 +3485,22 @@ pub(in crate::lisp_host) fn register_process_def(
     def.source_path = vm
         .current_source_file()
         .map(|path| path.to_string_lossy().into_owned());
-    process_authoring
-        .lock()
-        .map_err(|_| "failed to lock process registry".to_string())?
-        .upsert_def(def.clone());
+    // A My processes module (a promoted expr card, expr spec §8) is a
+    // library declaration like builtin.lisp's: it survives a project switch
+    // whether it loaded at startup or was just promoted.
+    let library = def
+        .source_path
+        .as_deref()
+        .is_some_and(super::process_library::is_my_processes_source);
+    {
+        let mut registry = process_authoring
+            .lock()
+            .map_err(|_| "failed to lock process registry".to_string())?;
+        if library {
+            registry.package_def_ids.insert(def.id);
+        }
+        registry.upsert_def(def.clone());
+    }
     publish_process_authoring(process_authoring, &publish);
     register_process_constructor_native(vm, &name, process_authoring, process_chain_state, publish);
     Ok(EValue::String(name))
@@ -3399,6 +3678,7 @@ pub(in crate::lisp_host) fn parse_process_accumulator_def(
         id: crate::process::stable_process_id(name),
         name: name.to_string(),
         source_path: None,
+        expr_source: None,
         doc,
         inlets,
         outlets: Vec::new(),

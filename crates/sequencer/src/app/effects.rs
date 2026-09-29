@@ -9163,6 +9163,7 @@ mod tests {
             tick_source: String::new(),
             requires: Vec::new(),
             graph: Some(manifest),
+            owner_rack: None,
         });
         let intrinsic = |instance: usize, route: usize| ProjectGraphNodeIntrinsicOverride {
             group: "nrn".into(),

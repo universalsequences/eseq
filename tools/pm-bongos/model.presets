@@ -1,0 +1,133 @@
+{
+  "version": 1,
+  "engine_name": "Physical Models/PM Bongos",
+  "source_file": "instruments/Physical Models/PM Bongos/dsp.lisp",
+  "presets": [
+    {
+      "id": "reference",
+      "name": "Bird of Prey",
+      "base_note_offset": 0,
+      "params": {
+        "hand.hardness": 0.5,
+        "hand.dynamics": 0.5,
+        "hand.flam": 1.0,
+        "hand.flam_level": 1.0,
+        "head.tune": 0.0,
+        "head.decay": 1.0,
+        "head.muffle": 0.0,
+        "head.glide": 0.0,
+        "contact.skin": 1.0,
+        "contact.skin_tone": 0.0,
+        "output.width": 1.0,
+        "output.drive": 0.0,
+        "output.tone_hz": 16000.0,
+        "output.gain": 1.0
+      }
+    },
+    {
+      "id": "tight",
+      "name": "Tight Studio",
+      "base_note_offset": 0,
+      "params": {
+        "hand.hardness": 0.5,
+        "hand.dynamics": 0.5,
+        "hand.flam": 1.0,
+        "hand.flam_level": 1.0,
+        "head.tune": 0.0,
+        "head.decay": 0.7,
+        "head.muffle": 0.08,
+        "head.glide": 0.0,
+        "contact.skin": 1.0,
+        "contact.skin_tone": 0.0,
+        "output.width": 0.6,
+        "output.drive": 0.0,
+        "output.tone_hz": 16000.0,
+        "output.gain": 1.0
+      }
+    },
+    {
+      "id": "open",
+      "name": "Open Ring",
+      "base_note_offset": 0,
+      "params": {
+        "hand.hardness": 0.4,
+        "hand.dynamics": 0.5,
+        "hand.flam": 1.0,
+        "hand.flam_level": 1.0,
+        "head.tune": 0.0,
+        "head.decay": 1.6,
+        "head.muffle": 0.0,
+        "head.glide": 0.3,
+        "contact.skin": 1.0,
+        "contact.skin_tone": 0.0,
+        "output.width": 1.0,
+        "output.drive": 0.0,
+        "output.tone_hz": 16000.0,
+        "output.gain": 1.0
+      }
+    },
+    {
+      "id": "slappy",
+      "name": "Hard Hands",
+      "base_note_offset": 0,
+      "params": {
+        "hand.hardness": 0.8,
+        "hand.dynamics": 0.5,
+        "hand.flam": 1.0,
+        "hand.flam_level": 1.0,
+        "head.tune": 0.0,
+        "head.decay": 1.0,
+        "head.muffle": 0.0,
+        "head.glide": 0.6,
+        "contact.skin": 1.8,
+        "contact.skin_tone": 0.3,
+        "output.width": 1.0,
+        "output.drive": 0.0,
+        "output.tone_hz": 16000.0,
+        "output.gain": 1.0
+      }
+    },
+    {
+      "id": "soft",
+      "name": "Soft Fingers",
+      "base_note_offset": 0,
+      "params": {
+        "hand.hardness": 0.2,
+        "hand.dynamics": 0.8,
+        "hand.flam": 1.0,
+        "hand.flam_level": 1.0,
+        "head.tune": 0.0,
+        "head.decay": 1.0,
+        "head.muffle": 0.0,
+        "head.glide": 0.0,
+        "contact.skin": 0.5,
+        "contact.skin_tone": 0.0,
+        "output.width": 1.0,
+        "output.drive": 0.0,
+        "output.tone_hz": 16000.0,
+        "output.gain": 1.0
+      }
+    },
+    {
+      "id": "dusty",
+      "name": "Dusty Break",
+      "base_note_offset": 0,
+      "params": {
+        "hand.hardness": 0.5,
+        "hand.dynamics": 0.5,
+        "hand.flam": 1.0,
+        "hand.flam_level": 1.0,
+        "head.tune": 0.0,
+        "head.decay": 0.9,
+        "head.muffle": 0.0,
+        "head.glide": 0.0,
+        "contact.skin": 1.0,
+        "contact.skin_tone": 0.0,
+        "output.width": 0.5,
+        "output.drive": 0.35,
+        "output.tone_hz": 7000.0,
+        "output.gain": 1.0
+      }
+    }
+  ]
+}

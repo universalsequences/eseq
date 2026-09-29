@@ -140,7 +140,29 @@
 (def seq-step-tab-matches-buffer? (tab buffer)
   (= (seq-step-tab-buffer tab) buffer))
 
+;; A click on the main tile's tab strip swaps the tile's buffer inside the
+;; editor; this `:on-select` is how the Lisp side hears it. It keeps
+;; `step-panel-buffer` (what every layout and the *processes* dock read as
+;; the visible main buffer) on the clicked tab, so the dock's observer
+;; re-lays the sidebar from this event (eseq-waa9.22). No relayout here:
+;; the tile already shows the buffer.
+(def seq-main-step-tab-selected (buffer tab-index)
+  (if (and (seq-main-step-tab-buffer? buffer) (not (= step-panel-buffer buffer)))
+    (do
+      (set! step-panel-buffer buffer)
+      (set! remembered-step-panel-buffer buffer)
+      true)
+    false))
+
+(def seq-with-tab-select (rendered)
+  (append rendered
+    (list :on-select (lambda (selected-buffer tab-index)
+                       (seq-main-step-tab-selected selected-buffer tab-index)))))
+
 (def seq-render-step-tab (tab)
+  (seq-with-tab-select (seq-render-step-tab-base tab)))
+
+(def seq-render-step-tab-base (tab)
   (let ((buffer (seq-step-tab-buffer tab)))
     (if (seq-source-step-tab? tab)
       (list (seq-step-tab-label tab)
@@ -163,7 +185,7 @@
       (list (seq-step-tab-label tab) buffer))))))
 
 (def seq-main-step-tabs ()
-  (append (list (list "Seq" "*sequencer*"))
+  (append (list (seq-with-tab-select (list "Seq" "*sequencer*")))
     (map seq-render-step-tab seq-registered-step-tabs)))
 
 (def seq-main-step-tab-buffer? (buffer)

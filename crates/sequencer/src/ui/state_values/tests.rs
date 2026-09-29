@@ -6,6 +6,10 @@ mod chorus_ui_tests;
 mod rack_sequencer_restore_tests;
 #[path = "graph_visualization_ui_tests.rs"]
 mod graph_visualization_ui_tests;
+#[path = "processes_buffer_ui_tests.rs"]
+mod processes_buffer_ui_tests;
+#[path = "expr_card_ui_tests.rs"]
+mod expr_card_ui_tests;
 #[path = "graph_node_notes_ui_tests.rs"]
 mod graph_node_notes_ui_tests;
 #[path = "instance_views_ui_tests.rs"]
@@ -32,6 +36,8 @@ mod instrument_header_ui_tests;
 mod retrospective_ui_tests;
 #[path = "resample_ui_tests.rs"]
 mod resample_ui_tests;
+#[path = "factory_promote_ui_tests.rs"]
+mod factory_promote_ui_tests;
 #[path = "midi_midimix_tests.rs"]
 mod midi_midimix_tests;
 #[path = "mixer_hit_tests.rs"]
@@ -1105,6 +1111,7 @@ mod solo_binding_tests;
             "ui/materials.lisp",
             "ui/browser.lisp",
             "ui/rack-groove-buffer.lisp",
+            "ui/processes-buffer.lisp",
             "ui/builtin-effects.lisp",
             "ui/effects/builtin/filter-core.lisp",
             "ui/effects/builtin/eq8.lisp",
@@ -2606,6 +2613,7 @@ mod solo_binding_tests;
                 ("current-track", Value::Number(0.0)),
                 ("song-bound-clip", Value::Nil),
                 ("track-instrument-types", test_list(vec![])),
+                ("track-instrument-ids", test_list(vec![])),
                 // The real eseq.seq-core-state (imported by browser.lisp)
                 // gates seq-has-selected-bus? on the bus list length.
                 (
@@ -6090,7 +6098,7 @@ mod solo_binding_tests;
     }
 
     #[test]
-    fn metal_seq_browser_instrument_drop_shows_a_visible_loading_row() {
+    fn metal_seq_browser_instrument_drop_marks_the_loading_row_in_the_tree() {
         let mut editor = browser_editor_on_instrument_tab();
         editor
             .runtime_mut()
@@ -6100,6 +6108,16 @@ mod solo_binding_tests;
             "track-instrument-types",
             test_string_list(&["custom"]),
         );
+        editor.set_active_buffer(browser_id(&editor));
+        editor.set_layout_viewport(48, 24);
+        let idle_tree_y = find_layout_node_by_stable_key_suffix(
+            &editor.widget_layout().expect("idle instrument browser layout"),
+            "/instruments-tab-tree",
+        )
+        .expect("instrument tree")
+        .rect
+        .row;
+
         editor
             .runtime_mut()
             .eval_str(
@@ -6111,56 +6129,52 @@ mod solo_binding_tests;
             .expect("drop saved instrument on custom track");
         editor.refresh_runtime_side_effects();
         editor.set_active_buffer(browser_id(&editor));
-        editor.set_layout_viewport(48, 24);
 
+        // The app toast announces the load; the tab only marks the row being
+        // compiled (a spinner) and no longer inserts a status line above the
+        // tree, so the tree does not move.
         let layout = editor.widget_layout().expect("instrument browser layout");
-        let loading_row = find_layout_node_by_stable_key_suffix(&layout, "/instrument-loading-row")
-            .expect("instrument swap should render its loading row");
-        assert_finite_nonzero_rect(loading_row, "instrument loading row");
-        assert!(
-            find_layout_node_by_text(&layout, "Loading core/triton...").is_some(),
-            "loading row should name the instrument being compiled"
+        let tree = find_layout_node_by_stable_key_suffix(&layout, "/instruments-tab-tree")
+            .expect("instrument tree while loading");
+        assert_eq!(
+            tree.props.get("loading-value"),
+            Some(&Value::String("core/triton".to_string()))
         );
+        assert!(eseqlisp::widget_render::layout_wants_animation_frames(tree));
+        assert!((tree.rect.row - idle_tree_y).abs() < 0.01);
+        assert!(find_layout_node_by_text(&layout, "Loading core/triton...").is_none());
     }
 
     #[test]
-    fn metal_seq_browser_idle_loading_row_reserves_its_height() {
-        // The loading row must occupy the same space whether or not a load is
-        // in flight, so the tree below does not jump when a load starts.
+    fn metal_seq_browser_tree_greys_the_current_tracks_instrument() {
         let mut editor = browser_editor_on_instrument_tab();
-        editor.set_active_buffer(browser_id(&editor));
-        editor.set_layout_viewport(48, 24);
-        let layout = editor.widget_layout().expect("idle instrument browser layout");
-        let idle_row = find_layout_node_by_stable_key_suffix(&layout, "/instrument-loading-row")
-            .expect("idle browser should still render the loading row placeholder");
-        assert_finite_nonzero_rect(idle_row, "idle instrument loading row");
-        let idle_height = idle_row.rect.height;
-        let idle_tree_y = find_layout_node_by_stable_key_suffix(&layout, "/instruments-tab-tree")
-            .expect("instrument tree")
-            .rect
-            .row;
-
         editor
             .runtime_mut()
-            .eval_str(r#"(set! eseq.vanilla/sbrowser-loading-instrument-name "core/triton")"#)
-            .expect("mark instrument as loading");
+            .set_reactive("SEQ", "num-tracks", Value::Number(2.0));
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "track-instrument-ids",
+            test_string_list(&["builtin:sampler", "factory:core/triton"]),
+        );
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "current-track", Value::Number(1.0));
+        editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
-        let layout = editor.widget_layout().expect("loading instrument browser layout");
-        let loading_row = find_layout_node_by_stable_key_suffix(&layout, "/instrument-loading-row")
-            .expect("loading row");
-        assert!(
-            (loading_row.rect.height - idle_height).abs() < 0.01,
-            "loading row height changed from {idle_height} to {}",
-            loading_row.rect.height
+        editor.set_active_buffer(browser_id(&editor));
+        editor.set_layout_viewport(48, 24);
+        let layout = editor.widget_layout().expect("instrument browser layout");
+        let tree = find_layout_node_by_stable_key_suffix(&layout, "/instruments-tab-tree")
+            .expect("instrument tree");
+        assert_eq!(
+            tree.props.get("current-key"),
+            Some(&Value::String("instrument-id".to_string()))
         );
-        let loading_tree_y = find_layout_node_by_stable_key_suffix(&layout, "/instruments-tab-tree")
-            .expect("instrument tree while loading")
-            .rect
-            .row;
-        assert!(
-            (loading_tree_y - idle_tree_y).abs() < 0.01,
-            "instrument tree moved from row={idle_tree_y} to row={loading_tree_y} when loading began"
+        assert_eq!(
+            tree.props.get("current-value"),
+            Some(&Value::String("factory:core/triton".to_string()))
         );
+        assert!(!eseqlisp::widget_render::layout_wants_animation_frames(tree));
     }
 
     #[test]
@@ -15411,6 +15425,7 @@ mod solo_binding_tests;
                 lanes: BTreeMap::new(),
                 fanout: Default::default(),
                 unbound_ports: Default::default(),
+                expr_source: None,
                 bindings: BTreeMap::from([(
                     "out".to_string(),
                     Some(sequencer::process::ParamTarget::InstrumentParam {
@@ -15529,6 +15544,7 @@ mod solo_binding_tests;
                 lanes: BTreeMap::new(),
                 fanout: Default::default(),
                 unbound_ports: Default::default(),
+                expr_source: None,
                 bindings: BTreeMap::from([(
                     "out".to_string(),
                     Some(sequencer::process::ParamTarget::BusSend { bus: bus_a.0 }),
@@ -58545,6 +58561,209 @@ mod solo_binding_tests;
     }
 
     #[test]
+    fn lane_patchbay_cards_drag_to_reorder_and_right_click_to_delete() {
+        use crossterm::event::{MouseButton, MouseEventKind};
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let state = Arc::new(SequencerState::new(
+            1,
+            vec![sequencer::sequencer::default_empty_effect_chain()],
+        ));
+        let mut authoring = Runtime::new();
+        sequencer::lisp_host::register_published_process_authoring_natives(
+            &mut authoring,
+            Arc::clone(&state),
+            Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        );
+        authoring
+            .eval_str(&sequencer::lisp_host::load_process_library_source())
+            .expect("builtin process library");
+        let chain = sequencer::process::default_project_layer();
+        assert!(chain.slots.len() >= 3, "default layer has room to reorder");
+        let prob_index = chain
+            .slots
+            .iter()
+            .position(|slot| slot.instance_name.as_deref() == Some("prob"))
+            .expect("default prob lane");
+        assert_eq!(prob_index, 0, "prob fires first in the default layer");
+        let prob_id = chain.slots[0].instance_id;
+        let target_id = chain.slots[2].instance_id;
+        assert!(state.set_project_process_chain(chain));
+        let order = |state: &Arc<SequencerState>| -> Vec<u64> {
+            state
+                .composed_track_process_chain(0)
+                .unwrap()
+                .slots
+                .iter()
+                .map(|slot| slot.instance_id.0)
+                .collect()
+        };
+
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let id = editor.buffers.iter().find(|b| b.name == "*sequencer*").unwrap().id;
+        editor.set_active_buffer(id);
+        editor.set_layout_viewport(220, 90);
+        let publish = |editor: &mut eseqlisp::Editor, state: &Arc<SequencerState>| {
+            for (name, value) in [
+                ("track-process-lanes", build_all_track_process_lanes_value(state, 1)),
+                ("track-process-slots", build_all_track_process_slots_value(state, 1)),
+                ("track-lane-patch", build_all_track_lane_patch_value(state, 1)),
+            ] {
+                editor.runtime_mut().set_reactive("SEQ", name, value);
+            }
+            editor.runtime_mut().run_reactive_cycle();
+            editor.refresh_runtime_side_effects();
+        };
+        publish(&mut editor, &state);
+
+        // Stand in for the host commands: record, apply the way the
+        // `move-slot` / `remove-slot` history ops do, and let the test publish.
+        let calls: Rc<RefCell<Vec<(String, Vec<Value>)>>> = Rc::new(RefCell::new(Vec::new()));
+        {
+            let calls = Rc::clone(&calls);
+            let st = Arc::clone(&state);
+            editor
+                .runtime_mut()
+                .register_native("seq-move-process-slot-before", move |args, _ctx| {
+                    calls.borrow_mut().push(("move".into(), args.to_vec()));
+                    let (Some(Value::Number(track)), Some(Value::Number(id))) =
+                        (args.first(), args.get(1))
+                    else {
+                        return Err("expected (track id before)".into());
+                    };
+                    let before = match args.get(2) {
+                        Some(Value::Number(before)) => {
+                            Some(sequencer::process::ProcessInstanceId(*before as u64))
+                        }
+                        _ => None,
+                    };
+                    Ok(Value::Bool(st.move_track_process_slot_before(
+                        *track as usize,
+                        sequencer::process::ProcessInstanceId(*id as u64),
+                        before,
+                    )))
+                });
+        }
+        {
+            let calls = Rc::clone(&calls);
+            let st = Arc::clone(&state);
+            editor
+                .runtime_mut()
+                .register_native("seq-remove-process-slot", move |args, _ctx| {
+                    calls.borrow_mut().push(("remove".into(), args.to_vec()));
+                    let (Some(Value::Number(track)), Some(Value::Number(id))) =
+                        (args.first(), args.get(1))
+                    else {
+                        return Err("expected (track id)".into());
+                    };
+                    Ok(Value::Bool(st.remove_track_process_slot(
+                        *track as usize,
+                        sequencer::process::ProcessInstanceId(*id as u64),
+                    )))
+                });
+        }
+
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.sequencer/set-track-expanded (nth SEQ.track-ids 0) true)")
+            .unwrap();
+        editor
+            .runtime_mut()
+            .eval_str(
+                "(eseq.sequencer/set-track-param-mode (nth SEQ.track-ids 0) eseq.seqv-track-params/seqv-process-lane-mode-offset)",
+            )
+            .unwrap();
+        editor.runtime_mut().eval_str("(eseq.sequencer/lane-patch-show true)").unwrap();
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        editor.set_layout_viewport(220, 90);
+
+        let card_center = |editor: &mut eseqlisp::Editor, instance_id: u64| {
+            let frame = eseqlisp::frame::build_tiled_render_frame_borderless(editor, 220, 90);
+            let tile = frame
+                .tiles
+                .iter()
+                .find(|tile| tile.frame.buffer_name == "*sequencer*")
+                .expect("sequencer tile");
+            let layout = tile.frame.widget_layout.as_deref().expect("sequencer tile layout");
+            let key = format!("/lane-patch-col-{instance_id}");
+            let node = find_layout_node_by_stable_key_suffix(layout, &key)
+                .unwrap_or_else(|| panic!("missing {key}"));
+            // The card's top edge is its name row: no port or button there.
+            (
+                tile.rect.col + node.rect.col + node.rect.width * 0.5
+                    - tile.frame.widget_layout_scroll_left,
+                tile.rect.row + node.rect.row + 0.5 - tile.frame.widget_scroll_top,
+            )
+        };
+        let mouse = |editor: &mut eseqlisp::Editor, kind: MouseEventKind, at: (f32, f32)| {
+            editor.handle_tiled_mouse_precise(
+                crossterm::event::MouseEvent {
+                    kind,
+                    column: at.0 as u16,
+                    row: at.1 as u16,
+                    modifiers: crossterm::event::KeyModifiers::NONE,
+                },
+                at.0,
+                at.1,
+                0,
+            );
+            editor.runtime_mut().run_reactive_cycle();
+            editor.refresh_runtime_side_effects();
+        };
+        let card_selected = |editor: &mut eseqlisp::Editor, instance_id: u64| {
+            let layout = editor.widget_layout().unwrap();
+            let node = find_layout_node_by_stable_key_suffix(
+                &layout,
+                &format!("/lane-patch-col-{instance_id}"),
+            )
+            .expect("card");
+            layout_prop_bool(node, "selected")
+        };
+        assert_eq!(card_selected(&mut editor, prob_id.0), Some(true), "prob starts selected");
+
+        // Drag prob (first) onto the third card: it lands in the third slot.
+        let from = card_center(&mut editor, prob_id.0);
+        let to = card_center(&mut editor, target_id.0);
+        mouse(&mut editor, MouseEventKind::Down(MouseButton::Left), from);
+        mouse(&mut editor, MouseEventKind::Drag(MouseButton::Left), ((from.0 + to.0) * 0.5, to.1));
+        mouse(&mut editor, MouseEventKind::Drag(MouseButton::Left), to);
+        mouse(&mut editor, MouseEventKind::Up(MouseButton::Left), to);
+        publish(&mut editor, &state);
+        assert_eq!(calls.borrow().len(), 1, "one move call: {:?}", calls.borrow());
+        assert_eq!(calls.borrow()[0].0, "move");
+        assert_eq!(order(&state)[2], prob_id.0, "prob now fires third: {:?}", order(&state));
+        assert_eq!(
+            card_selected(&mut editor, prob_id.0),
+            Some(true),
+            "the lane selection follows the moved card"
+        );
+
+        // Right-click prob: the menu offers Delete, which removes the slot.
+        eseqlisp::widget_render::clear_overlay();
+        let at = card_center(&mut editor, prob_id.0);
+        mouse(&mut editor, MouseEventKind::Down(MouseButton::Right), at);
+        mouse(&mut editor, MouseEventKind::Up(MouseButton::Right), at);
+        let layout = editor.widget_layout().unwrap();
+        let delete = find_layout_node_by_stable_key_suffix(&layout, "/lane-patch-card-menu-delete-0")
+            .expect("the card menu offers Delete");
+        assert_eq!(delete.props.get("text"), Some(&Value::String("Delete prob".to_string())));
+        let callback = delete.props.get("on-select").unwrap().clone();
+        editor.runtime_mut().invoke(callback, vec![Value::Nil]).unwrap();
+        publish(&mut editor, &state);
+        assert_eq!(calls.borrow().len(), 2);
+        assert_eq!(calls.borrow()[1].0, "remove");
+        assert_eq!(calls.borrow()[1].1[1], Value::Number(prob_id.0 as f64));
+        assert!(!order(&state).contains(&prob_id.0), "prob is gone: {:?}", order(&state));
+        let layout = editor.widget_layout().unwrap();
+        assert!(
+            find_layout_node_by_stable_key_suffix(&layout, "/lane-patch-card-menu-delete-0").is_none(),
+            "deleting closes the menu"
+        );
+    }
+
+    #[test]
     fn lane_patchbay_add_box_picks_a_class_and_opens_the_new_lane() {
         use eseqlisp::layout::LayoutNode;
 
@@ -58641,102 +58860,38 @@ mod solo_binding_tests;
         };
         let add_key = format!("/lane-patch-add-{track_id}");
 
-        // The + cell is the last cell of the expanded track's patch bay.
-        let click = |editor: &mut eseqlisp::Editor, key: &str| {
-            use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
-            let frame = eseqlisp::frame::build_tiled_render_frame_borderless(editor, 220, 90);
-            let tile = frame
-                .tiles
-                .iter()
-                .find(|tile| tile.frame.buffer_name == "*sequencer*")
-                .expect("sequencer tile");
-            let layout = tile.frame.widget_layout.as_deref().expect("sequencer tile layout");
-            let node = find_layout_node_by_stable_key_suffix(layout, key)
-                .unwrap_or_else(|| panic!("missing {key}"));
-            let col = tile.rect.col + node.rect.col + node.rect.width * 0.5
-                - tile.frame.widget_layout_scroll_left;
-            let row = tile.rect.row + node.rect.row + node.rect.height * 0.5
-                - tile.frame.widget_scroll_top;
-            // A modal's children are hit-tested against the overlay regions
-            // primitive collection records, so the picker only takes clicks
-            // after a render pass (the settings-modal tests do the same).
-            eseqlisp::widget_render::clear_overlay();
-            let _ = eseqlisp::widget_render::collect_gpu_primitives(
-                layout,
-                eseqlisp::widget_render::WidgetViewport {
-                    cell_w: 8.0,
-                    cell_h: 16.0,
-                    vp_w: 1760.0,
-                    vp_h: 1440.0,
-                    time_seconds: 0.0,
-                    focused_widget_id: None,
-                    focused_branch: false,
-                    overlay_viewport_bottom: 90.0,
-                    scroll_top: 0.0,
-                    scroll_left: 0.0,
-                    inherited_hover: false,
-                },
-                0.0,
-                90,
-            );
-            for kind in [
-                MouseEventKind::Down(MouseButton::Left),
-                MouseEventKind::Up(MouseButton::Left),
-            ] {
-                editor.handle_tiled_mouse_precise(
-                    MouseEvent {
-                        kind,
-                        column: col as u16,
-                        row: row as u16,
-                        modifiers: crossterm::event::KeyModifiers::NONE,
-                    },
-                    col,
-                    row,
-                    0,
-                );
-            }
-            editor.runtime_mut().run_reactive_cycle();
-            editor.refresh_runtime_side_effects();
-        };
-
-        assert!(
-            find_layout_node_by_stable_key_suffix(&editor.widget_layout().unwrap(), &add_key)
-                .is_some(),
-            "the + box renders on the expanded track's patch bay"
-        );
-        assert_eq!(
-            editor.runtime_mut().eval_str("(eseq.sequencer/lane-add-open?)").unwrap(),
-            Some(Value::Bool(false)),
-            "the picker starts closed"
-        );
-
-        click(&mut editor, &add_key);
-        assert_eq!(
-            editor.runtime_mut().eval_str("(eseq.sequencer/lane-add-open?)").unwrap(),
-            Some(Value::Bool(true)),
-            "clicking the + box opens the class picker"
-        );
-        // Default lane classes come first, by their lane name.
+        // The + cell is the last cell of the expanded track's patch bay: a
+        // filterable menu-button whose rows are the lane classes.
         let layout = editor.widget_layout().unwrap();
-        for key in ["/lane-add-option-lane-prob", "/lane-add-option-lane-grab"] {
-            assert!(
-                find_layout_node_by_stable_key_suffix(&layout, key).is_some(),
-                "picker lists {key}"
-            );
-        }
-        let mut texts = Vec::new();
-        label_texts(&layout, &mut texts);
+        let add = find_layout_node_by_stable_key_suffix(&layout, &add_key)
+            .expect("the + box renders on the expanded track's patch bay");
+        assert_eq!(add.widget_type, "menu-button");
+        assert!(matches!(add.props.get("filterable"), Some(Value::Bool(true))));
+        let Some(Value::List(rows)) = add.props.get("options") else {
+            panic!("+ box options: {:?}", add.props.get("options"))
+        };
+        let rows: Vec<String> = rows
+            .iter()
+            .filter_map(|value| match &*value.borrow() {
+                Value::String(text) => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        // Default lane classes come first, by their lane name.
+        assert_eq!(rows.first().map(String::as_str), Some("prob"), "{rows:?}");
         assert!(
-            texts.iter().any(|text| text == "grab"),
-            "the picker shows the lane name, not the class name: {texts:?}"
+            rows.iter().any(|row| row == "grab") && !rows.iter().any(|row| row == "lane-grab"),
+            "the menu shows the lane name, not the class name: {rows:?}"
         );
 
-        click(&mut editor, "/lane-add-option-lane-grab");
-        assert_eq!(
-            editor.runtime_mut().eval_str("(eseq.sequencer/lane-add-open?)").unwrap(),
-            Some(Value::Bool(false)),
-            "picking a class closes the picker"
-        );
+        // Picking a row adds the lane at once: no separate add step.
+        let on_change = add.props.get("on-change").cloned().expect("+ box on-change");
+        editor
+            .runtime_mut()
+            .invoke(on_change, vec![Value::String("grab".to_string())])
+            .expect("pick grab");
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
 
         // The host publishes the new chain; the pending selection resolves
         // on the next render and opens the new lane's strip.

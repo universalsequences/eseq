@@ -1,7 +1,7 @@
 use super::*;
 use sequencer::graph::{GraphVisualizationEdge, GraphVisualizationEvent, GraphVisualizationSnapshot};
 
-fn graph_panel_editor(package: bool) -> (Arc<SequencerState>, Editor, u64) {
+pub(super) fn graph_panel_editor(package: bool) -> (Arc<SequencerState>, Editor, u64) {
     let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
     let mut editor = full_grid_editor_for_scroll_tests();
     let (roots, errors) = sequencer::app_paths::app_paths().module_load_roots();
@@ -309,7 +309,7 @@ fn importing_the_neural_package_registers_its_kind() {
     assert_eq!(kind.module.as_deref(), Some("alez.neural.variable-reset"));
     assert_eq!(
         kind.state_fields,
-        ["expanded-node", "selected-neuron", "add-class", "map-slot", "map-port", "piano-depth"]
+        ["expanded-node", "selected-neuron", "map-slot", "map-port", "piano-depth"]
             .map(str::to_string)
             .to_vec()
     );

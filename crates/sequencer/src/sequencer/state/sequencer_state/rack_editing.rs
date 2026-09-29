@@ -350,7 +350,13 @@ impl SequencerState {
                 mute: false,
                 solo: false,
                 enabled: true,
-                max_polyphony: crate::audio::MAX_VOICES,
+                // A slot has no separate mono flag: carry the track's voice
+                // setting, so a mono track stays one voice inside the kit.
+                max_polyphony: if data.params.polyphonic {
+                    data.params.max_polyphony.clamp(1, crate::audio::MAX_VOICES)
+                } else {
+                    1
+                },
                 param_plocks: RackSlotParamPlocks::new(),
                 instrument_slot: data.instrument_slot.clone(),
                 effect_slots: data.effect_slots.clone(),

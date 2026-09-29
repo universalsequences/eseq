@@ -2890,6 +2890,13 @@ pub(crate) fn init_runtime(
     if !process_library.trim().is_empty() {
         let _ = runtime.eval_str(&process_library);
     }
+    // My processes (expr spec §8): the classes promoted from expr cards, in
+    // the user's own package. Library declarations, like builtin.lisp's.
+    for line in sequencer::lisp_host::load_my_processes_source().lines() {
+        if let Err(error) = runtime.eval_str(line) {
+            eprintln!("[processes] My processes: {line}: {error:?}");
+        }
+    }
     // Everything registered up to here is the package layer and survives a
     // project switch; anything a project authors afterwards does not
     // (bead eseq-jo7.21).
@@ -3019,6 +3026,7 @@ pub(crate) fn init_runtime(
                 ("browser-preview-playhead", Value::Number(0.0)),
                 ("track-ids", build_track_ids(&app)),
                 ("track-instrument-types", build_track_instrument_types(&app)),
+                ("track-instrument-ids", build_track_instrument_ids(&app)),
                 (
                     "track-mod-output-available",
                     build_track_mod_output_available(&app),
@@ -3199,6 +3207,7 @@ pub(crate) fn init_runtime(
                     "track-lane-patch",
                     build_all_track_lane_patch_value(&state, track_count),
                 ),
+                ("process-run-errors", build_process_run_errors_value(&state)),
                 ("process-library", build_process_library_value(&state)),
                 ("sync-labels", build_sync_labels()),
                 ("track-volumes", build_track_volumes(&state)),
@@ -3757,6 +3766,7 @@ pub(crate) fn init_runtime(
     crate::roll_input::register_natives(&mut runtime, state.clone());
     crate::retrospective::register_state(&mut runtime);
     crate::host_commands::resample::register_state(&mut runtime);
+    crate::host_commands::factory_promote::register_state(&mut runtime);
     runtime.register_reactive("AGENT", vec![("generation", Value::Number(0.0))], false);
     if track_count > 0 {
         sync_fx_param_binding_fields(&mut runtime, app, &state, 0, &selected_steps);
@@ -7242,7 +7252,28 @@ pub(crate) fn init_runtime(
             Some(Value::String(s)) => s.as_str(),
             _ => "",
         };
-        build_instrument_tree_value(query, &project_engines, origin_filter)
+        let favorites_only = matches!(args.get(3), Some(Value::Bool(true)));
+        build_instrument_tree_value_with_favorites(
+            query,
+            &project_engines,
+            origin_filter,
+            &super::instrument_favorites::favorite_instruments(),
+            favorites_only,
+        )
+    });
+    runtime.register_native("seq-toggle-favorite-instrument", move |args, _ctx| {
+        match args.first() {
+            Some(Value::String(name)) if !name.is_empty() => Ok(Value::Bool(
+                super::instrument_favorites::toggle_favorite_instrument(name),
+            )),
+            _ => Err("seq-toggle-favorite-instrument expects an instrument name".to_string()),
+        }
+    });
+    runtime.register_native("seq-favorite-instrument?", move |args, _ctx| {
+        Ok(Value::Bool(match args.first() {
+            Some(Value::String(id)) => super::instrument_favorites::is_favorite_instrument(id),
+            _ => false,
+        }))
     });
     runtime.register_native("seq-audio-effect-tree", move |args, _ctx| {
         let query = match args.first() {
@@ -8355,8 +8386,18 @@ fn document_metal_seq_natives(runtime: &mut Runtime) {
         ),
         (
             "seq-saved-instrument-tree",
-            "(seq-saved-instrument-tree query [project-engines] [origin])",
-            "Return the saved instrument browser tree filtered by query. `origin` is \"factory\", \"user\", or \"\" for both tiers.",
+            "(seq-saved-instrument-tree query [project-engines] [origin] [favorites-only])",
+            "Return the saved instrument browser tree filtered by query. `origin` is \"factory\", \"user\", \"pkg\", or \"\" for every tier. Favorited rows carry `:status-icon :heart`; `favorites-only` true keeps only them.",
+        ),
+        (
+            "seq-toggle-favorite-instrument",
+            "(seq-toggle-favorite-instrument favorite-id)",
+            "Flip a saved instrument's favorite state (persisted in favorites.json) and return the new state. Pass a tree row's `:favorite-id`, the canonical tier-qualified id.",
+        ),
+        (
+            "seq-favorite-instrument?",
+            "(seq-favorite-instrument? favorite-id)",
+            "True when the saved instrument with that canonical id is favorited.",
         ),
         (
             "seq-audio-effect-tree",

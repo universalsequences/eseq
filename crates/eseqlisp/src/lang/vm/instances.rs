@@ -24,6 +24,13 @@
 //!
 //! A dropped instance keeps a tombstone naming its kind: reads answer the
 //! kind's defaults, writes are silent no-ops (spec §4 "stale self").
+//!
+//! A kind's `:document` fields (docs/jaki-kind-spec.md §3) read and write
+//! with the same syntax but are stored by the host, per pattern: a read calls
+//! the host native [`INSTANCE_DOC_READ_NATIVE`] and a write
+//! [`INSTANCE_DOC_WRITE_NATIVE`], which carry their own reactive edge and
+//! history. A VM without those natives keeps document fields in local cells,
+//! exactly like `:state`.
 
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -40,6 +47,14 @@ pub type InstanceLabelHook = Rc<dyn Fn(InstanceId, &Value)>;
 
 /// Reserved DAG namespace prefix for instance field sources.
 pub const INSTANCE_NAMESPACE_PREFIX: &str = "%instance/";
+
+/// Host native `(__instance-doc-read id field default)` backing document
+/// field reads. It tracks its own reactive dependency.
+pub const INSTANCE_DOC_READ_NATIVE: &str = "__instance-doc-read";
+
+/// Host native `(__instance-doc-write id field value)` backing document
+/// field writes. It dirties its own readers and records history.
+pub const INSTANCE_DOC_WRITE_NATIVE: &str = "__instance-doc-write";
 
 /// Host-owned field names every instance answers, in this order.
 pub const INSTANCE_HOST_FIELDS: [&str; 4] = ["id", "kind", "owner", "label"];
@@ -68,6 +83,9 @@ pub struct InstanceKindSchema {
     pub kind: String,
     /// `(field default)` pairs, in declaration order.
     pub fields: Vec<(String, Value)>,
+    /// `:document` `(field default)` pairs, in declaration order: stored by
+    /// the host per pattern (docs/jaki-kind-spec.md §3).
+    pub document: Vec<(String, Value)>,
     /// The kind's `:view`, a function of one argument (the instance). The
     /// host renders `(view self)` per instance; `None` for a view-less kind.
     pub view: Option<Value>,
@@ -87,6 +105,7 @@ impl InstanceKindSchema {
         Self {
             kind: kind.into(),
             fields: Vec::new(),
+            document: Vec::new(),
             view: None,
             keymap: None,
             on_create: None,
@@ -113,8 +132,24 @@ impl InstanceKindSchema {
         self
     }
 
+    pub fn document_field(mut self, name: impl Into<String>, default: Value) -> Self {
+        self.document.push((name.into(), default));
+        self
+    }
+
     fn index_of(&self, field: &str) -> Option<usize> {
         self.fields.iter().position(|(name, _)| name == field)
+    }
+
+    fn document_index_of(&self, field: &str) -> Option<usize> {
+        self.document.iter().position(|(name, _)| name == field)
+    }
+
+    fn document_default_of(&self, index: usize) -> Value {
+        self.document
+            .get(index)
+            .map(|(_, default)| default.deep_clone())
+            .unwrap_or(Value::Nil)
     }
 
     fn default_of(&self, index: usize) -> Value {
@@ -133,7 +168,7 @@ impl InstanceKindSchema {
             return Err(InstanceError::InvalidSchema("empty kind id".to_string()));
         }
         let mut seen = std::collections::HashSet::new();
-        for (name, _) in &self.fields {
+        for (name, _) in self.fields.iter().chain(self.document.iter()) {
             if INSTANCE_HOST_FIELDS.contains(&name.as_str()) {
                 return Err(InstanceError::InvalidSchema(format!(
                     "kind '{}' declares state field '{name}', which is a host field",
@@ -162,6 +197,7 @@ impl InstanceKindSchema {
             .iter()
             .map(|name| (*name).to_string())
             .chain(self.fields.iter().map(|(name, _)| name.clone()))
+            .chain(self.document.iter().map(|(name, _)| name.clone()))
             .collect()
     }
 }
@@ -217,6 +253,9 @@ struct InstanceRecord {
     kind: String,
     /// One value per schema field, in schema order.
     state: Vec<Value>,
+    /// Local document cells, one per `:document` field, used only when the
+    /// host has no document natives.
+    document: Vec<Value>,
     owner: Value,
     label: Value,
 }
@@ -229,6 +268,7 @@ enum FieldSlot {
     Owner,
     Label,
     State(usize),
+    Document(usize),
 }
 
 #[derive(Default)]
@@ -251,7 +291,7 @@ impl InstanceStore {
                 .iter()
                 .map(|(name, schema)| {
                     let mut schema = schema.clone();
-                    for (_, default) in &mut schema.fields {
+                    for (_, default) in schema.fields.iter_mut().chain(schema.document.iter_mut()) {
                         *default = clone_value_for_snapshot(default);
                     }
                     if let Some(view) = &mut schema.view {
@@ -272,6 +312,7 @@ impl InstanceStore {
                         InstanceRecord {
                             kind: record.kind.clone(),
                             state: record.state.iter().map(clone_value_for_snapshot).collect(),
+                            document: record.document.iter().map(clone_value_for_snapshot).collect(),
                             owner: clone_value_for_snapshot(&record.owner),
                             label: clone_value_for_snapshot(&record.label),
                         },
@@ -312,14 +353,17 @@ impl InstanceStore {
                     .kinds
                     .get(&kind)
                     .ok_or_else(|| InstanceError::UnknownKind(kind.clone()))?;
-                let index = schema
-                    .index_of(field)
-                    .ok_or_else(|| InstanceError::UnknownField {
-                        kind: kind.clone(),
-                        field: field.to_string(),
-                        fields: schema.all_field_names(),
-                    })?;
-                FieldSlot::State(index)
+                match (schema.index_of(field), schema.document_index_of(field)) {
+                    (Some(index), _) => FieldSlot::State(index),
+                    (None, Some(index)) => FieldSlot::Document(index),
+                    (None, None) => {
+                        return Err(InstanceError::UnknownField {
+                            kind: kind.clone(),
+                            field: field.to_string(),
+                            fields: schema.all_field_names(),
+                        });
+                    }
+                }
             }
         };
         Ok((kind, slot))
@@ -342,7 +386,18 @@ impl InstanceStore {
                     .map(|schema| schema.default_of(index))
                     .unwrap_or(Value::Nil),
             },
+            FieldSlot::Document(index) => match record.and_then(|r| r.document.get(index)) {
+                Some(value) => value.clone(),
+                None => self.document_default(kind, index),
+            },
         }
+    }
+
+    fn document_default(&self, kind: &str, index: usize) -> Value {
+        self.kinds
+            .get(kind)
+            .map(|schema| schema.document_default_of(index))
+            .unwrap_or(Value::Nil)
     }
 }
 
@@ -374,6 +429,17 @@ impl VM {
                 let Some(record) = self.instances.live.get_mut(&id) else {
                     continue;
                 };
+                let old_document = std::mem::take(&mut record.document);
+                record.document = schema
+                    .document
+                    .iter()
+                    .map(|(name, default)| {
+                        previous
+                            .document_index_of(name)
+                            .and_then(|old| old_document.get(old).cloned())
+                            .unwrap_or_else(|| default.deep_clone())
+                    })
+                    .collect();
                 let old_state = std::mem::take(&mut record.state);
                 record.state = schema
                     .fields
@@ -422,6 +488,11 @@ impl VM {
             kind: kind.to_string(),
             state: schema
                 .fields
+                .iter()
+                .map(|(_, default)| default.deep_clone())
+                .collect(),
+            document: schema
+                .document
                 .iter()
                 .map(|(_, default)| default.deep_clone())
                 .collect(),
@@ -556,6 +627,17 @@ impl VM {
             return Err(self.expansion_error("instance field read"));
         }
         let (kind, slot) = self.instances.resolve(id, field)?;
+        if let FieldSlot::Document(index) = slot {
+            if let Some(read) = self.instance_doc_native(INSTANCE_DOC_READ_NATIVE) {
+                // The host resolves the current pattern's value and injects
+                // its own reactive edge (the scene-slot source).
+                let default = self.instances.document_default(&kind, index);
+                return Ok(read(
+                    vec![Value::Number(id as f64), Value::String(field.to_string()), default],
+                    self,
+                ));
+            }
+        }
         let value = self.instances.value(id, &kind, slot);
         let namespace = instance_namespace(id);
         self.record_reactive_read(&namespace, field);
@@ -602,9 +684,34 @@ impl VM {
                     *cell = value.deep_clone();
                 }
             }
+            FieldSlot::Document(index) => {
+                if let Some(write) = self.instance_doc_native(INSTANCE_DOC_WRITE_NATIVE) {
+                    write(
+                        vec![Value::Number(id as f64), Value::String(field.to_string()), value],
+                        self,
+                    );
+                    return Ok(());
+                }
+                if let Some(cell) = self
+                    .instances
+                    .live
+                    .get_mut(&id)
+                    .and_then(|record| record.document.get_mut(index))
+                {
+                    *cell = value.deep_clone();
+                }
+            }
         }
         self.publish_instance_field(id, field, value);
         Ok(())
+    }
+
+    /// The host's document native `name`, if registered.
+    fn instance_doc_native(&self, name: &str) -> Option<super::NativeFn> {
+        match self.global_value(name)? {
+            Value::NativeFunction(native) => Some(native.callable.clone()),
+            _ => None,
+        }
     }
 
     fn get_or_create_instance_source_node(
@@ -706,6 +813,65 @@ mod tests {
 
     fn eval(vm: &mut VM, code: &str) -> Option<Value> {
         vm.eval_str(code).unwrap_or_else(|e| panic!("{code}: {e:?}"))
+    }
+
+    #[test]
+    fn document_fields_use_local_cells_without_host_natives() {
+        let mut vm = VM::new(Vec::new());
+        super::super::register_core_natives(&mut vm);
+        vm.register_instance_kind(
+            InstanceKindSchema::new(KIND)
+                .field("x", Value::Number(1.0))
+                .document_field("rows", Value::Number(8.0)),
+        )
+        .expect("register kind");
+        bind(&mut vm, "a", 1);
+        bind(&mut vm, "b", 2);
+        assert_eq!(eval(&mut vm, "a.rows"), Some(Value::Number(8.0)));
+        eval(&mut vm, "(set! a.rows 3)");
+        assert_eq!(eval(&mut vm, "a.rows"), Some(Value::Number(3.0)));
+        assert_eq!(eval(&mut vm, "b.rows"), Some(Value::Number(8.0)));
+    }
+
+    #[test]
+    fn document_fields_route_through_host_natives() {
+        let mut vm = VM::new(Vec::new());
+        super::super::register_core_natives(&mut vm);
+        vm.register_instance_kind(
+            InstanceKindSchema::new(KIND).document_field("rows", Value::Number(8.0)),
+        )
+        .expect("register kind");
+        bind(&mut vm, "a", 7);
+        let calls: Rc<RefCell<Vec<Vec<Value>>>> = Rc::new(RefCell::new(Vec::new()));
+        let reads = calls.clone();
+        vm.register_native_with_vm(super::INSTANCE_DOC_READ_NATIVE, move |args, _vm| {
+            reads.borrow_mut().push(args.clone());
+            Value::Number(42.0)
+        });
+        let writes = calls.clone();
+        vm.register_native_with_vm(super::INSTANCE_DOC_WRITE_NATIVE, move |args, _vm| {
+            writes.borrow_mut().push(args.clone());
+            Value::Nil
+        });
+        assert_eq!(eval(&mut vm, "a.rows"), Some(Value::Number(42.0)));
+        eval(&mut vm, "(set! a.rows 5)");
+        let calls = calls.borrow();
+        assert_eq!(
+            calls[0],
+            vec![Value::Number(7.0), Value::String("rows".into()), Value::Number(8.0)]
+        );
+        assert_eq!(
+            calls[1],
+            vec![Value::Number(7.0), Value::String("rows".into()), Value::Number(5.0)]
+        );
+    }
+
+    #[test]
+    fn schema_rejects_a_document_field_shadowing_a_state_field() {
+        let schema = InstanceKindSchema::new(KIND)
+            .field("rows", Value::Nil)
+            .document_field("rows", Value::Nil);
+        assert!(schema.validate().is_err());
     }
 
     #[test]

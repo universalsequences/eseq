@@ -122,11 +122,6 @@ const ESEQLISP_BUILTINS: &[(&str, &str, &str)] = &[
         "Evaluate the s-expression at the cursor.",
     ),
     (
-        "every",
-        "(every unit interval form)",
-        "Register a repeating hook that runs a quoted form on the host schedule.",
-    ),
-    (
         "find-by-key",
         "(find-by-key list :key value)",
         "First map in list whose :key field equals value, or nil.",
@@ -235,6 +230,19 @@ pub fn completion_match(
     runtime_metadata: &HashMap<String, SymbolMetadata>,
     module_names: &[String],
 ) -> Option<CompletionMatch> {
+    completion_match_with_extras(mode, buffer, runtime_symbols, runtime_metadata, module_names, &[])
+}
+
+/// [`completion_match`] with extra symbol candidates (a mode's own names,
+/// `mode-add-completions`), offered wherever runtime symbols are.
+pub fn completion_match_with_extras(
+    mode: &BufferMode,
+    buffer: &Buffer,
+    runtime_symbols: &[String],
+    runtime_metadata: &HashMap<String, SymbolMetadata>,
+    module_names: &[String],
+    extras: &[CompletionItem],
+) -> Option<CompletionMatch> {
     let line = buffer.lines.get(buffer.cursor.0)?;
     let cursor_col = buffer.cursor.1.min(line.len());
     let (start_col, prefix) = symbol_prefix(line, cursor_col).or_else(|| {
@@ -255,7 +263,10 @@ pub fn completion_match(
     } else if prefix.starts_with(':') {
         contextual_keyword_candidates(buffer, start_col, runtime_metadata)?
     } else {
-        completion_candidates(mode, runtime_symbols, buffer)
+        // Extras first, so their docs win the label de-duplication below.
+        let mut candidates = extras.to_vec();
+        candidates.extend(completion_candidates(mode, runtime_symbols, buffer));
+        candidates
     };
     let mut items = candidates
         .into_iter()
@@ -432,7 +443,7 @@ fn classify_token(
     if token.starts_with(':') || token.starts_with('@') {
         return Some(TokenClass::Keyword);
     }
-    if token.parse::<f64>().is_ok() {
+    if token.parse::<f64>().is_ok() || crate::parser::parse_radix_integer_literal(token).is_some() {
         return Some(TokenClass::Number);
     }
     if is_special_form(mode, token) {
@@ -865,6 +876,21 @@ mod tests {
     use crate::runtime::SymbolMetadata;
     use std::borrow::Cow;
     use std::collections::{HashMap, HashSet};
+
+    #[test]
+    fn hex_and_binary_literals_highlight_as_numbers() {
+        let line = "(bit-xor 0xACE1 0b1011 -0x10 0xZZ)";
+        let buffer = Buffer::from_text(0, "*test*", line);
+        let spans = highlight_line(&BufferMode::ESeqLisp, line, &[], &buffer);
+        let class_of = |text: &str| {
+            let start = line.find(text).unwrap();
+            spans.iter().find(|span| span.start == start).map(|span| span.class)
+        };
+        assert_eq!(class_of("0xACE1"), Some(TokenClass::Number));
+        assert_eq!(class_of("0b1011"), Some(TokenClass::Number));
+        assert_eq!(class_of("-0x10"), Some(TokenClass::Number));
+        assert_ne!(class_of("0xZZ"), Some(TokenClass::Number));
+    }
 
     #[test]
     fn eseqlisp_completion_uses_runtime_symbols() {

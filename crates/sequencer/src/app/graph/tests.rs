@@ -4927,6 +4927,7 @@
                 )]),
                 fanout: Default::default(),
                 unbound_ports: Default::default(),
+                expr_source: None,
                 bindings: std::collections::BTreeMap::new(),
             }],
         };

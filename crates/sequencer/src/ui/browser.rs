@@ -874,6 +874,7 @@ fn builtin_instrument_leaf(item: &BuiltinInstrumentDescriptor) -> Value {
         ("label", Value::String(item.label.to_string())),
         ("name", Value::String(item.name.to_string())),
         ("kind", Value::String("builtin-instrument".to_string())),
+        ("instrument-id", Value::String(builtin_instrument_id(item.name))),
         ("icon", Value::Keyword(item.icon.to_string())),
         // Every builtin row drags, not just Sampler: the drop zones dispatch on
         // the "builtin-instrument" kind, so Modulator/Drum Rack/Instrument Rack
@@ -881,6 +882,11 @@ fn builtin_instrument_leaf(item: &BuiltinInstrumentDescriptor) -> Value {
         ("draggable", Value::Bool(true)),
         ("drop-target", Value::Bool(false)),
     ])
+}
+
+/// `:instrument-id` of a builtin row, matched against `SEQ.track-instrument-ids`.
+pub(crate) fn builtin_instrument_id(name: &str) -> String {
+    format!("builtin:{name}")
 }
 
 fn builtin_instrument_values(query_lower: &str) -> Vec<Value> {
@@ -995,10 +1001,113 @@ pub(crate) fn build_instrument_tree_value(
     project_engines: &[String],
     origin_filter: &str,
 ) -> Result<Value, String> {
+    build_instrument_tree_value_with_favorites(
+        query,
+        project_engines,
+        origin_filter,
+        &std::collections::BTreeSet::new(),
+        false,
+    )
+}
+
+/// Keep only favorited instrument leaves, plus the folders that still hold
+/// one, so the favorites filter shows each favorite in its usual place.
+/// `section_tier` qualifies bare names (see `canonical_instrument_id`).
+fn retain_favorite_instrument_nodes(
+    items: &[InstrumentTreeNode],
+    favorites: &std::collections::BTreeSet<String>,
+    section_tier: Option<&sequencer::app_paths::ContentTier>,
+) -> Vec<InstrumentTreeNode> {
+    items
+        .iter()
+        .filter_map(|item| match &item.name {
+            Some(name) => favorites
+                .contains(&super::instrument_favorites::canonical_instrument_id(section_tier, name))
+                .then(|| item.clone()),
+            None => {
+                let children = retain_favorite_instrument_nodes(&item.children, favorites, section_tier);
+                (!children.is_empty()).then(|| InstrumentTreeNode {
+                    children,
+                    ..item.clone()
+                })
+            }
+        })
+        .collect()
+}
+
+/// Give every instrument row its canonical `:favorite-id` (what the
+/// right-click menu toggles) and put the trailing heart (`:status-icon
+/// :heart`) on the favorited ones, at any depth.
+fn mark_favorite_instrument_values(
+    items: &mut [Value],
+    favorites: &std::collections::BTreeSet<String>,
+    section_tier: Option<&sequencer::app_paths::ContentTier>,
+) {
+    for item in items {
+        mark_favorite_instrument_value(item, favorites, section_tier);
+    }
+}
+
+fn mark_favorite_instrument_value(
+    item: &mut Value,
+    favorites: &std::collections::BTreeSet<String>,
+    section_tier: Option<&sequencer::app_paths::ContentTier>,
+) {
+    let Value::Map(map) = item else {
+        return;
+    };
+    let field = |key: &str| match map.get(key).map(|v| v.borrow().clone()) {
+        Some(Value::String(text)) => Some(text),
+        _ => None,
+    };
+    if field("kind").as_deref() == Some("instrument") {
+        if let Some(name) = field("name") {
+            let id = super::instrument_favorites::canonical_instrument_id(section_tier, &name);
+            if favorites.contains(&id) {
+                map.insert(
+                    "status-icon".to_string(),
+                    Rc::new(RefCell::new(Value::Keyword("heart".to_string()))),
+                );
+            }
+            // The same canonical id marks the row the current track plays
+            // (`SEQ.track-instrument-ids`).
+            map.insert("instrument-id".to_string(), Rc::new(RefCell::new(Value::String(id.clone()))));
+            map.insert("favorite-id".to_string(), Rc::new(RefCell::new(Value::String(id))));
+        }
+    }
+    if let Some(children) = map.get("children") {
+        if let Value::List(children) = &*children.borrow() {
+            for child in children {
+                mark_favorite_instrument_value(&mut child.borrow_mut(), favorites, section_tier);
+            }
+        }
+    }
+}
+
+/// The Instruments tab tree. `favorites` puts a heart on those rows;
+/// `favorites_only` narrows every section to them and drops the builtins,
+/// which cannot be favorited.
+pub(crate) fn build_instrument_tree_value_with_favorites(
+    query: &str,
+    project_engines: &[String],
+    origin_filter: &str,
+    favorites: &std::collections::BTreeSet<String>,
+    favorites_only: bool,
+) -> Result<Value, String> {
     let query_lower = query.trim().to_lowercase();
+    let narrow = |nodes: Vec<InstrumentTreeNode>, tier: Option<&sequencer::app_paths::ContentTier>| {
+        if favorites_only {
+            retain_favorite_instrument_nodes(&nodes, favorites, tier)
+        } else {
+            nodes
+        }
+    };
     let paths = sequencer::app_paths::app_paths();
+    // `tier` is the section's tier for favorite ids; `qualify` is set only
+    // for packages, whose row names carry their qualifier.
     let tier_items = |root: std::path::PathBuf,
                       movable: bool,
+                      tier: &sequencer::app_paths::ContentTier,
                       qualify: Option<&sequencer::app_paths::ContentTier>| {
         let mut nodes = build_instrument_tree_nodes(&root, &root, !movable)?;
         if !movable {
@@ -1007,18 +1116,20 @@ pub(crate) fn build_instrument_tree_value(
         if let Some(tier) = qualify {
             qualify_instrument_tree_names(&mut nodes, tier);
         }
-        Ok::<_, String>(list_items(instrument_tree_nodes_to_value(&filter_instrument_tree_nodes(
-            &nodes,
+        let mut values = list_items(instrument_tree_nodes_to_value(&filter_instrument_tree_nodes(
+            &narrow(nodes, Some(tier)),
             &query_lower,
-        ))))
+        )));
+        mark_favorite_instrument_values(&mut values, favorites, Some(tier));
+        Ok::<_, String>(values)
     };
     let factory = if instrument_origin_visible(origin_filter, "factory") {
-        tier_items(paths.instruments_dir(), false, None)?
+        tier_items(paths.instruments_dir(), false, &sequencer::app_paths::ContentTier::Factory, None)?
     } else {
         Vec::new()
     };
     let library = if instrument_origin_visible(origin_filter, "user") {
-        tier_items(paths.user_instruments_dir(), true, None)?
+        tier_items(paths.user_instruments_dir(), true, &sequencer::app_paths::ContentTier::User, None)?
     } else {
         Vec::new()
     };
@@ -1030,14 +1141,20 @@ pub(crate) fn build_instrument_tree_value(
             if !root.tier.is_package() {
                 continue;
             }
-            let items = tier_items(root.path.clone(), false, Some(&root.tier))?;
+            let items = tier_items(root.path.clone(), false, &root.tier, Some(&root.tier))?;
             packages.push((root.tier.label(), items));
         }
     }
-    let builtin = builtin_instrument_values(&query_lower);
-    let engines = list_items(instrument_tree_nodes_to_value(
-        &filter_instrument_tree_nodes(&project_engine_nodes(project_engines), &query_lower),
-    ));
+    let builtin = if favorites_only {
+        Vec::new()
+    } else {
+        builtin_instrument_values(&query_lower)
+    };
+    let mut engines = list_items(instrument_tree_nodes_to_value(&filter_instrument_tree_nodes(
+        &narrow(project_engine_nodes(project_engines), None),
+        &query_lower,
+    )));
+    mark_favorite_instrument_values(&mut engines, favorites, None);
 
     let mut items = Vec::new();
     if query_lower.is_empty() {
@@ -1735,6 +1852,83 @@ mod tests {
             ]
         );
         assert_eq!(labels.iter().filter(|label| *label == "3d-drum").count(), 1);
+    }
+
+    #[test]
+    fn instrument_tree_favorites_only_keeps_hearted_rows_in_their_folders() {
+        let nodes = vec![
+            InstrumentTreeNode {
+                label: "Kicks".to_string(),
+                name: None,
+                folder: Some("Kicks".to_string()),
+                children: vec![
+                    InstrumentTreeNode {
+                        label: "Kick 1".to_string(),
+                        name: Some("Kicks/Kick 1/".to_string()),
+                        folder: None,
+                        children: Vec::new(),
+                    },
+                    InstrumentTreeNode {
+                        label: "Kick 2".to_string(),
+                        name: Some("Kicks/Kick 2/".to_string()),
+                        folder: None,
+                        children: Vec::new(),
+                    },
+                ],
+            },
+            InstrumentTreeNode {
+                label: "Snares".to_string(),
+                name: None,
+                folder: Some("Snares".to_string()),
+                children: vec![InstrumentTreeNode {
+                    label: "Snare".to_string(),
+                    name: Some("Snares/Snare/".to_string()),
+                    folder: None,
+                    children: Vec::new(),
+                }],
+            },
+        ];
+        let favorites: std::collections::BTreeSet<String> = ["user:Kicks/Kick 2".to_string()].into();
+        let kept = retain_favorite_instrument_nodes(&nodes, &favorites, Some(&sequencer::app_paths::ContentTier::User));
+
+        assert_eq!(kept.len(), 1, "a folder with no favorite disappears");
+        assert_eq!(kept[0].label, "Kicks");
+        assert_eq!(kept[0].children.len(), 1);
+        assert_eq!(kept[0].children[0].name.as_deref(), Some("Kicks/Kick 2/"));
+    }
+
+    #[test]
+    fn instrument_tree_hearts_favorites_and_favorites_only_drops_builtins() {
+        // Engines rows carry the project's qualified id; the stored key is
+        // the canonical one, with no trailing slash.
+        let engines = ["user:Kicks/3d-drum/".to_string(), "user:Studies/Other".to_string()];
+        let favorites: std::collections::BTreeSet<String> = ["user:Kicks/3d-drum".to_string()].into();
+        let field = |tree: &Value, label: &str, key: &str| {
+            let Value::List(items) = tree else { panic!("tree should be a list") };
+            items.iter().find_map(|item| match &*item.borrow() {
+                Value::Map(map)
+                    if map.get("label").map(|v| v.borrow().clone())
+                        == Some(Value::String(label.to_string())) =>
+                {
+                    Some(map.get(key).map(|v| v.borrow().clone()))
+                }
+                _ => None,
+            })
+        };
+
+        let all = build_instrument_tree_value_with_favorites("", &engines, "", &favorites, false).unwrap();
+        assert_eq!(field(&all, "3d-drum", "status-icon"), Some(Some(Value::Keyword("heart".into()))));
+        assert_eq!(field(&all, "Other", "status-icon"), Some(None));
+        assert_eq!(
+            field(&all, "Other", "favorite-id"),
+            Some(Some(Value::String("user:Studies/Other".into())))
+        );
+
+        let only = build_instrument_tree_value_with_favorites("", &engines, "", &favorites, true).unwrap();
+        let labels = top_level_tree_labels(&only);
+        assert!(!labels.iter().any(|label| label == "Built-in"));
+        assert!(labels.iter().any(|label| label == "3d-drum"));
+        assert!(!labels.iter().any(|label| label == "Other"));
     }
 
     #[test]

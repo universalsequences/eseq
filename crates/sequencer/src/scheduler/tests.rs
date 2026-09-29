@@ -2694,6 +2694,199 @@
         out
     }
 
+    /// docs/jaki-kind-spec.md §4-§5: a `jaki` kind instance publishes a
+    /// generator whose tick reads the instance's document (scene slots) as
+    /// `self`, and a rack-owned instance's route n plays rack member n.
+    fn jaki_instance_triggers(owner_rack: Option<(u64, Vec<usize>)>) -> Vec<(usize, u64)> {
+        jaki_instance_triggers_with(
+            owner_rack,
+            r#"(list (dict :route 0 :mods (list (dict :op "left" :args (list))))
+                     (dict :route 1 :mods (list)))"#,
+            "(list (list :dot :dot :dot :dot))",
+            96_000,
+        )
+    }
+
+    fn jaki_instance_triggers_with(
+        owner_rack: Option<(u64, Vec<usize>)>,
+        rows: &'static str,
+        figures: &'static str,
+        horizon: u64,
+    ) -> Vec<(usize, u64)> {
+        run_with_scheduler_stack(move || {
+            let state = Arc::new(SequencerState::new(
+                4,
+                (0..4).map(|_| default_empty_effect_chain()).collect(),
+            ));
+            let mut values = Runtime::new();
+            let mut literal = |source: &str| {
+                let value = values.eval_str(source).expect("literal").expect("a value");
+                crate::process::ProcessLiteral::from_value(&value).expect("portable")
+            };
+            let kind = lisp_host::KindDefinition {
+                id: "alez/jaki:jaki".to_string(),
+                name: "jaki".to_string(),
+                package: Some("alez/jaki".to_string()),
+                module: Some("alez.jaki.kind".to_string()),
+                sequencer: None,
+                generator: Some(crate::sequencer::PublishedSequencer {
+                    id: 0,
+                    name: "jaki".to_string(),
+                    resolution: crate::sequencer::Timebase::Sixteenth as u8,
+                    tick_source: "(alez.jaki.doc/tick self.figures self.rows self.row-count)"
+                        .to_string(),
+                    requires: vec!["alez.jaki.doc".to_string()],
+                    graph: None,
+                    owner_rack: None,
+                }),
+                document: vec![
+                    ("figures".to_string(), literal("(list (list :dot :dot :dot :dot))")),
+                    ("rows".to_string(), literal("(list)")),
+                    ("row-count".to_string(), literal("8")),
+                ],
+                state_fields: Vec::new(),
+                has_view: true,
+                keymap: None,
+            };
+            lisp_host::register_kind(kind.clone());
+            // The document lives in the current pattern: row 0 plays the
+            // first route with `left`, row 1 the second route untouched.
+            state
+                .write_current_scene_slot(lisp_host::instance_document_slot(5, "rows"), literal(rows))
+                .expect("rows");
+            state
+                .write_current_scene_slot(
+                    lisp_host::instance_document_slot(5, "figures"),
+                    literal(figures),
+                )
+                .expect("figures");
+            let owner = owner_rack.as_ref().map(|(group_id, _)| *group_id);
+            if let Some((group_id, members)) = &owner_rack {
+                state.set_rack_memberships(vec![crate::graph::RackMembership {
+                    group_id: *group_id,
+                    members: members.clone(),
+                }]);
+            }
+            let published = lisp_host::instance_published_sequencer(&kind, 5, owner)
+                .expect("a generator instance");
+            assert!(published.graph.is_none());
+            assert_eq!(published.owner_rack, owner);
+
+            let mut scratch = lisp_host::ScratchControlRuntime::new(
+                Arc::clone(&state),
+                vec![Vec::new(); 4],
+                vec![EffectDescriptor::builtin_sampler(); 4],
+                0,
+                0,
+            );
+            scratch
+                .register_published_sequencer(
+                    published.id,
+                    published.name.clone(),
+                    crate::sequencer::Timebase::from_index(published.resolution as u32),
+                    published.tick_source.clone(),
+                    &published.requires,
+                )
+                .expect("register the instance generator");
+
+            state.transport.playing.store(true, Ordering::Relaxed);
+            let mut scheduler = SchedulerLookaheadState::new(48_000);
+            scheduler
+                .generator_runtime
+                .sync_definitions(&scratch.sequencer_defs(), 0.0);
+            if let Some(group_id) = owner {
+                scheduler.generator_owner_racks.insert(published.id, group_id);
+            }
+            let mut scratch_runtime = Some(scratch);
+            let snapshot = state.publish_scheduler_snapshot();
+            let queue = ScheduledEventQueue::<256>::new();
+            let live_midi_fx_tracks: [LiveMidiFxTrackState; MAX_TRACKS] =
+                std::array::from_fn(|_| LiveMidiFxTrackState::default());
+            // One bar at 24000 samples per quarter.
+            schedule_playing_lookahead(
+                &mut scheduler,
+                &state,
+                &snapshot,
+                &queue,
+                &mut scratch_runtime,
+                &live_midi_fx_tracks,
+                snapshot.transport.pattern_epoch,
+                0,
+                horizon,
+                48_000,
+                6_000,
+                24_000.0,
+                0,
+                false,
+                false,
+            );
+            let errors: Vec<String> = state
+                .drain_generator_tick_errors()
+                .into_iter()
+                .map(|notice| notice.error)
+                .collect();
+            assert!(errors.is_empty(), "the instance tick must not fail: {errors:?}");
+            observed_triggers(&queue)
+                .into_iter()
+                .map(|trigger| (trigger.track, trigger.sample_time))
+                .collect()
+        })
+    }
+
+    #[test]
+    fn a_jaki_instance_plays_its_document() {
+        let triggers = jaki_instance_triggers(None);
+        // `. . . .` alternates hands L R L R: row 0 (`left`) hits units 0 and
+        // 2 of every 4-unit cycle on track 0; row 1 hits all four on track 1.
+        let on = |track: usize| triggers.iter().filter(|(t, _)| *t == track).count();
+        assert_eq!(on(0), 8, "{triggers:?}");
+        assert_eq!(on(1), 16, "{triggers:?}");
+        assert_eq!(on(2) + on(3), 0, "{triggers:?}");
+    }
+
+    #[test]
+    fn a_jaki_row_with_every_rev_keeps_playing() {
+        // `. . -` (4 units) over four bars = 16 cycles; `(every 4 rev)`
+        // reverses every fourth cycle but never silences the row.
+        let triggers = jaki_instance_triggers_with(
+            None,
+            r#"(list (dict :route 0 :mods (list (dict :op "left" :args (list))))
+                     (dict :route 1 :mods (list (dict :op "every" :args (list 4 "rev")))))"#,
+            "(list (list :dot :dot :dash))",
+            384_000,
+        );
+        let on = |track: usize| triggers.iter().filter(|(t, _)| *t == track).count();
+        assert!(on(0) > 0, "{triggers:?}");
+        assert!(on(1) >= 16 * 3, "row 1 must play every cycle: {triggers:?}");
+    }
+
+    #[test]
+    fn a_jaki_row_takes_figure_transforms_like_velocity_words() {
+        // Route words fall back to figure transforms: `(split last)` turns the
+        // dash into two dots (one more hit per cycle) and the velocity words
+        // are accepted instead of silently dropped.
+        let triggers = jaki_instance_triggers_with(
+            None,
+            r#"(list (dict :route 0 :mods (list (dict :op "dotdecay" :args (list 0.5))
+                                                (dict :op "minvel" :args (list 0.1))))
+                     (dict :route 1 :mods (list (dict :op "split" :args (list "last")))))"#,
+            "(list (list :dot :dot :dash))",
+            96_000,
+        );
+        let on = |track: usize| triggers.iter().filter(|(t, _)| *t == track).count();
+        assert!(on(0) > 0, "{triggers:?}");
+        assert_eq!(on(1), 16, "four dots per 4-unit cycle, four cycles: {triggers:?}");
+    }
+
+    #[test]
+    fn a_rack_owned_jaki_instance_routes_through_rack_members() {
+        // Member 0 is track 3; the rack has no member 1, so row 1 is silent.
+        let triggers = jaki_instance_triggers(Some((77, vec![3])));
+        assert!(!triggers.is_empty());
+        assert!(triggers.iter().all(|(track, _)| *track == 3), "{triggers:?}");
+        assert_eq!(triggers.len(), 8, "{triggers:?}");
+    }
+
     /// docs/jaki-mixer-control-routes-spec.md §2: control holds emitted from
     /// a generator tick ride the production lookahead into the mixer-control
     /// mailbox with absolute engage/release sample times.
@@ -3138,6 +3331,7 @@
                         )]),
                         fanout: Default::default(),
                         unbound_ports: Default::default(),
+                        expr_source: None,
                         bindings: std::collections::BTreeMap::new(),
                     }],
                 },
@@ -3330,6 +3524,7 @@
                             event: Value::Nil,
                             fire_seed: None,
                             after_reset: false,
+                            delay_offset_steps: 0.0,
                         },
                     ) else {
                         continue;
@@ -3927,6 +4122,7 @@
                 lanes: Default::default(),
                 fanout: Default::default(),
                 unbound_ports: Default::default(),
+                expr_source: None,
                 bindings: Default::default(),
             });
             edit(&mut chain);
@@ -6574,6 +6770,7 @@
                 lanes: Default::default(),
                 fanout: Default::default(),
                 unbound_ports: Default::default(),
+                expr_source: None,
                 bindings: Default::default(),
             };
             let intrinsic = |instance: usize,
@@ -6793,6 +6990,7 @@
                 lanes: Default::default(),
                 fanout: Default::default(),
                 unbound_ports: Default::default(),
+                expr_source: None,
                 bindings: Default::default(),
             };
             let intrinsic = |instance: usize,
@@ -7010,6 +7208,7 @@
                 lanes: Default::default(),
                 fanout: Default::default(),
                 unbound_ports: Default::default(),
+                expr_source: None,
                 bindings: Default::default(),
             };
             let intrinsic = |instance: usize,
@@ -7295,6 +7494,7 @@
                 lanes: Default::default(),
                 fanout: Default::default(),
                 unbound_ports: Default::default(),
+                expr_source: None,
                 bindings: Default::default(),
             };
             let intrinsic = |instance: usize,
@@ -7661,6 +7861,7 @@
                 lanes: Default::default(),
                 fanout: Default::default(),
                 unbound_ports: Default::default(),
+                expr_source: None,
                 bindings: Default::default(),
             };
             harmony.inlets.insert("source".into(), crate::process::ProcessLiteral::Number(-2.0));
@@ -7867,6 +8068,7 @@
                 lanes: Default::default(),
                 fanout: Default::default(),
                 unbound_ports: Default::default(),
+                expr_source: None,
                 bindings: Default::default(),
             };
             harmony.inlets.insert("source".into(), crate::process::ProcessLiteral::Number(2.0));
@@ -8076,6 +8278,7 @@
                 lanes: Default::default(),
                 fanout: Default::default(),
                 unbound_ports: Default::default(),
+                expr_source: None,
                 bindings: Default::default(),
             };
             harmony.inlets.insert("source".into(), crate::process::ProcessLiteral::Number(2.0));
@@ -8252,6 +8455,7 @@
                 lanes: Default::default(),
                 fanout: Default::default(),
                 unbound_ports: Default::default(),
+                expr_source: None,
                 bindings: Default::default(),
             };
             let mut rand = slot(9101, "lane-rand");
@@ -16431,3 +16635,4 @@ fn prebuilt_chunks_take_their_scenes_live_groove_table() {
         super::lookahead::with_live_track_grooves(&mut cache, Arc::new(verse_chunk), &base);
     assert!(Arc::ptr_eq(&patched.track_grooves, &verse));
 }
+

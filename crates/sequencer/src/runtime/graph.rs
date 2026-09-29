@@ -6000,6 +6000,7 @@ mod tests {
             lanes: Default::default(),
             fanout: Default::default(),
             unbound_ports: Default::default(),
+            expr_source: None,
             bindings: Default::default(),
         });
         node

@@ -89,9 +89,11 @@ impl Editor {
             self.runtime_context_cache.recency.clone_from(&self.buffer_recency);
         }
 
+        let saves_itself = self.active_mode_on_save().is_some();
         let active = self.active_buffer();
         {
             let mut shared = self.runtime.shared.borrow_mut();
+            shared.current_buffer_saves_itself = saves_itself;
             shared.current_buffer_id = Some(active.id);
             if shared.current_buffer_name != active.name {
                 shared.current_buffer_name.clone_from(&active.name);

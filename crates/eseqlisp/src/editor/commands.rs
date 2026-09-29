@@ -315,7 +315,10 @@ impl Editor {
             }
             "save-buffer" => {
                 self.completion = None;
-                if self.needs_save_as_prompt() {
+                if let Some(handler) = self.active_mode_on_save() {
+                    self.run_mode_save_handler(&handler);
+                    self.refresh_runtime_side_effects();
+                } else if self.needs_save_as_prompt() {
                     self.open_save_prompt(false);
                 } else {
                     match self.save_active_buffer() {

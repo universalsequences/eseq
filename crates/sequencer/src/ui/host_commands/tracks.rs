@@ -865,6 +865,10 @@ pub(super) fn handle(
             editor.handle_host_event(HostEvent::Status(format!(
                 "{action}: {instrument_name}"
             )));
+            editor.show_loading_toast(
+                format!("Loading {}", instrument_display_name(&instrument_name)),
+                None,
+            );
             editor.mark_needs_redraw();
         }
         "delete-track" => {

@@ -710,6 +710,39 @@ pub struct TrackProcessSlot {
     /// running.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub unbound_ports: BTreeSet<String>,
+    /// Body source of an `expr` card (docs/expr-process-spec.md §2.1). The
+    /// project stores this text, never the hash: `class_name` is the hidden
+    /// `expr#<hash>` class compiled from it and is re-derived on load.
+    /// `None` on every other slot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expr_source: Option<String>,
+}
+
+impl TrackProcessSlot {
+    /// An `expr` card (docs/expr-process-spec.md §2): the plain class, a
+    /// compiled `expr#<hash>` class, or any slot carrying a body.
+    pub fn is_expr_card(&self) -> bool {
+        self.class_name == EXPR_PROCESS_CLASS
+            || is_expr_process_class(&self.class_name)
+            || self.expr_source.is_some()
+    }
+
+    /// An expr card's body as one line (runs of whitespace, newlines
+    /// included, collapse to one space): the card's preview label.
+    pub fn expr_preview_line(&self) -> Option<String> {
+        self.expr_source
+            .as_deref()
+            .map(|source| source.split_whitespace().collect::<Vec<_>>().join(" "))
+    }
+
+    /// The error dot's compile half (expr spec §2): a stored body whose class
+    /// is not in the published library (`compiled` = the class was found).
+    /// Run errors are separate: they change on the scheduler thread and
+    /// reach the UI through `SEQ.process-run-errors`.
+    pub fn expr_compile_error(&self, compiled: bool) -> Option<String> {
+        (self.expr_source.is_some() && !compiled)
+            .then(|| format!("expr body is not compiled ({})", self.class_name))
+    }
 }
 
 fn default_true() -> bool {
@@ -1212,6 +1245,12 @@ pub struct ProcessDef {
     pub accumulator: Option<ProcessAccumulatorSpec>,
     pub run_source: Option<String>,
     pub listens: Vec<ProcessListenDef>,
+    /// The expr body a class was compiled from (docs/expr-process-spec.md
+    /// §2.1, §8): set on the hidden `expr#<hash>` classes and on a
+    /// `def-process … :expr "…"` class (a card promoted to My processes),
+    /// which runs under the same step budget and can be reopened as an
+    /// expr card. `None` on every hand-written class.
+    pub expr_source: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -1438,6 +1477,12 @@ pub struct PublishedProcessDef {
     pub accumulator: Option<ProcessAccumulatorSpec>,
     pub run_source: Option<String>,
     pub listens: Vec<ProcessListenDef>,
+    /// The expr body a class was compiled from (docs/expr-process-spec.md
+    /// §2.1, §8): set on the hidden `expr#<hash>` classes and on a
+    /// `def-process … :expr "…"` class (a card promoted to My processes),
+    /// which runs under the same step budget and can be reopened as an
+    /// expr card. `None` on every hand-written class.
+    pub expr_source: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1497,6 +1542,7 @@ impl ProcessAuthoringSnapshot {
                         id: def.id,
                         name: def.name.clone(),
                         source_path: def.source_path.clone(),
+                        expr_source: def.expr_source.clone(),
                         doc: def.doc.clone(),
                         inlets: def
                             .inlets
@@ -1620,6 +1666,7 @@ impl PublishedProcessAuthoringSnapshot {
                     id: def.id,
                     name: def.name.clone(),
                     source_path: def.source_path.clone(),
+                    expr_source: def.expr_source.clone(),
                     doc: def.doc.clone(),
                     inlets: def
                         .inlets
@@ -1777,6 +1824,11 @@ pub struct ProcessRunInvocation {
     pub ports: Vec<ProcessPortDef>,
     pub reads: ProcessReadSnapshot,
     pub seed: u64,
+    /// Evaluation step budget for this run (`None`: unlimited). Armed for
+    /// `expr#…` classes, whose bodies are typed live on a card
+    /// (docs/expr-process-spec.md §10); running out is a run error, so the
+    /// card is bypassed for that fire.
+    pub step_budget: Option<u64>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1873,6 +1925,11 @@ pub struct ProcessStepEventContext {
     /// Graph nodes: this is the node's first fire after a reset
     /// (`(reset-fired?)`). Always false on a track step.
     pub after_reset: bool,
+    /// Graph nodes: the propagation-delay change (steps) the earlier slots of
+    /// this fire's patch have written through `(step-param :delay)`, what an
+    /// expr body reads as `$delay` (docs/expr-process-spec.md §4). Always 0
+    /// on a track step.
+    pub delay_offset_steps: f32,
 }
 
 #[derive(Clone, Debug)]
@@ -1936,6 +1993,14 @@ pub struct ProcessMidiFxParamOverride {
 #[derive(Clone, Debug, Default)]
 pub struct ProcessRuntime {
     defs: HashMap<String, ProcessDef>,
+    /// Last run error per step-process runtime id (a node slot's is its
+    /// instance id), cleared by that runtime's next clean run. The UI reads
+    /// it as an expr card's error dot (docs/expr-process-spec.md §2).
+    run_errors: BTreeMap<u64, String>,
+    run_errors_changed: bool,
+    /// False until the map has been handed out once, so a fresh runtime
+    /// (scheduler rebuild) clears errors a previous runtime published.
+    run_errors_published: bool,
     /// See `ProcessReadSnapshot::neurons`.
     neuron_reads: Arc<Vec<Vec<f32>>>,
     instances: Vec<ProcessInstance>,
@@ -2544,6 +2609,39 @@ impl ProcessRuntime {
     }
 
     /// The scope rings, when any fire has landed since the last take.
+    /// Record the outcome of one process run for the error readout: an
+    /// error sticks to the runtime id until its next clean run.
+    pub fn note_run_outcome(&mut self, runtime_id: u64, error: Option<&str>) {
+        match error {
+            Some(error) => {
+                if self.run_errors.get(&runtime_id).map(String::as_str) != Some(error) {
+                    self.run_errors.insert(runtime_id, error.to_string());
+                    self.run_errors_changed = true;
+                }
+            }
+            None => {
+                if !self.run_errors.is_empty() && self.run_errors.remove(&runtime_id).is_some() {
+                    self.run_errors_changed = true;
+                }
+            }
+        }
+    }
+
+    /// The last run error of one runtime id, if its latest run failed.
+    pub fn run_error(&self, runtime_id: u64) -> Option<&str> {
+        self.run_errors.get(&runtime_id).map(String::as_str)
+    }
+
+    /// The whole error map, once per change (for the scheduler → UI mirror).
+    pub fn take_run_errors_if_changed(&mut self) -> Option<BTreeMap<u64, String>> {
+        if !self.run_errors_changed && self.run_errors_published {
+            return None;
+        }
+        self.run_errors_changed = false;
+        self.run_errors_published = true;
+        Some(self.run_errors.clone())
+    }
+
     pub fn take_step_process_scopes_if_changed(
         &mut self,
     ) -> Option<HashMap<u64, HashMap<String, Vec<f32>>>> {
@@ -2718,6 +2816,7 @@ impl ProcessRuntime {
                     .round()
                     .max(0.0) as u64;
                 invocations.push(ProcessRunInvocation {
+                    step_budget: None,
                     runtime_id: instance.runtime_id,
                     source,
                     beat: target_beat,
@@ -2761,6 +2860,7 @@ impl ProcessRuntime {
                 samples_per_quarter,
                 |beat, _idx, sample_time| {
                     invocations.push(ProcessRunInvocation {
+                        step_budget: None,
                         runtime_id,
                         source: source.clone(),
                         beat,
@@ -2850,6 +2950,7 @@ impl ProcessRuntime {
                     .map(|def| def.seed_policy)
                     .unwrap_or_default();
                 invocations.push(ProcessRunInvocation {
+                    step_budget: None,
                     runtime_id,
                     source,
                     beat: tick.beat,
@@ -3211,6 +3312,7 @@ impl ProcessRuntime {
                     continue;
                 }
                 invocations.push(ProcessRunInvocation {
+                    step_budget: None,
                     runtime_id: instance.runtime_id,
                     source: listen.handler_source.clone(),
                     beat,
@@ -3356,6 +3458,8 @@ impl ProcessRuntime {
         let source = def.run_source.clone()?;
         let ports = def.ports.clone();
         let seed_policy = def.seed_policy;
+        let step_budget = (is_expr_process_class(&def.name) || def.expr_source.is_some())
+            .then_some(EXPR_PROCESS_STEP_BUDGET);
         let instance_id = track_process_slot_runtime_id(slot, ctx.track);
         self.step_process_runtime_ids.insert(instance_id.0);
         let existing_state = self
@@ -3365,6 +3469,7 @@ impl ProcessRuntime {
         let state = reconciled_state(existing_state, Some(&def));
         self.step_process_states.insert(instance_id, state.clone());
         Some(ProcessRunInvocation {
+            step_budget,
             runtime_id: instance_id.0,
             source,
             beat: ctx.beat,
@@ -3383,6 +3488,7 @@ impl ProcessRuntime {
                 note: ctx.note,
                 written_inlets: written_step_process_inlets(&def, inlet_writes),
                 after_reset: ctx.after_reset,
+                delay_offset_steps: ctx.delay_offset_steps,
             }),
             ports,
             reads: ProcessReadSnapshot::default(),
@@ -3429,6 +3535,8 @@ pub struct ProcessStepRunContext {
     pub fire_seed: Option<u64>,
     /// Graph nodes: first fire after a graph / group reset.
     pub after_reset: bool,
+    /// See [`ProcessStepEventContext::delay_offset_steps`].
+    pub delay_offset_steps: f32,
 }
 
 fn defaulted_inlets(
@@ -4003,6 +4111,22 @@ pub fn track_process_slot_runtime_id(slot: &TrackProcessSlot, track: usize) -> P
     }
 }
 
+/// The plain, visible `expr` class: an empty expr card (passes nothing).
+pub const EXPR_PROCESS_CLASS: &str = "expr";
+/// Prefix of the hidden per-body classes an expr card compiles to
+/// (`expr#<hash>`, docs/expr-process-spec.md §2.1).
+pub const EXPR_PROCESS_CLASS_PREFIX: &str = "expr#";
+/// Opcodes one expr body may execute per fire before the run fails and the
+/// card is bypassed for that fire (spec §10). Generous for arithmetic and a
+/// few loops over short lists; a runaway recursion hits it in well under a
+/// millisecond.
+pub const EXPR_PROCESS_STEP_BUDGET: u64 = 20_000;
+
+/// A hidden `expr#<hash>` class compiled from an expr card's body.
+pub fn is_expr_process_class(name: &str) -> bool {
+    name.starts_with(EXPR_PROCESS_CLASS_PREFIX)
+}
+
 pub fn stable_process_id(name: &str) -> u64 {
     let mut hash = 0xcbf2_9ce4_8422_2325u64;
     for byte in name.as_bytes() {
@@ -4069,6 +4193,7 @@ mod tests {
                 lanes: BTreeMap::new(),
                 fanout: Default::default(),
                 unbound_ports: Default::default(),
+                expr_source: None,
                 bindings: BTreeMap::from([
                     ("unique".to_string(), Some(ParamTarget::InstrumentParam {
                         param: "cutoff".to_string(), param_id: None,
@@ -4268,6 +4393,7 @@ mod tests {
                     id: 1,
                     name: "reader-state".to_string(),
                     source_path: None,
+                    expr_source: None,
                     doc: None,
                     inlets: Vec::new(),
                     outlets: Vec::new(),
@@ -4296,6 +4422,7 @@ mod tests {
             lanes: BTreeMap::new(),
             fanout: Default::default(),
             unbound_ports: Default::default(),
+            expr_source: None,
             bindings: BTreeMap::new(),
         };
         let first = TrackProcessChain {
@@ -4322,6 +4449,7 @@ mod tests {
                         event: Value::Nil,
                         fire_seed: None,
                         after_reset: false,
+                        delay_offset_steps: 0.0,
                     },
                 )
                 .expect("build step process invocation");
@@ -4357,6 +4485,7 @@ mod tests {
             step_beats: 0.25,
             written_inlets: Vec::new(),
             after_reset: false,
+            delay_offset_steps: 0.0,
             note: 0.0,
             resolved: ResolvedStep {
                 duration: 1.0,
@@ -4503,6 +4632,7 @@ mod tests {
             lanes: Default::default(),
             fanout: Default::default(),
             unbound_ports: Default::default(),
+            expr_source: None,
             bindings: Default::default(),
         };
         let chain_a = TrackProcessChain {
@@ -4621,6 +4751,7 @@ mod tests {
                         id: 1,
                         name: "source".to_string(),
                         source_path: None,
+                        expr_source: None,
                         doc: None,
                         inlets: Vec::new(),
                         outlets: vec![ProcessOutletDef {
@@ -4638,6 +4769,7 @@ mod tests {
                         id: 2,
                         name: "listener".to_string(),
                         source_path: None,
+                        expr_source: None,
                         doc: None,
                         inlets: Vec::new(),
                         outlets: Vec::new(),
@@ -4726,6 +4858,7 @@ mod tests {
                     id: 1,
                     name: "listener".to_string(),
                     source_path: None,
+                    expr_source: None,
                     doc: None,
                     inlets: Vec::new(),
                     outlets: Vec::new(),
@@ -4782,6 +4915,7 @@ mod tests {
                     id: 1,
                     name: "sparse".to_string(),
                     source_path: None,
+                    expr_source: None,
                     doc: None,
                     inlets: vec![ProcessInletDef {
                         name: "amount".to_string(),
@@ -4829,6 +4963,7 @@ mod tests {
             )]),
             fanout: Default::default(),
             unbound_ports: Default::default(),
+            expr_source: None,
             bindings: BTreeMap::new(),
         };
 
@@ -5077,6 +5212,7 @@ fn default_lane_slot(spec: &DefaultLaneSpec) -> TrackProcessSlot {
         lanes: BTreeMap::new(),
         fanout,
         unbound_ports: Default::default(),
+        expr_source: None,
         bindings,
     }
 }
@@ -5255,6 +5391,7 @@ pub fn track_roster_chain_slot(entry: &TrackLaneRosterSlot) -> TrackProcessSlot 
         bindings: BTreeMap::new(),
         fanout: BTreeMap::new(),
         unbound_ports: BTreeSet::new(),
+        expr_source: None,
     }
 }
 
@@ -5433,6 +5570,7 @@ mod default_lane_tests {
                 bindings: BTreeMap::new(),
                 fanout: BTreeMap::new(),
                 unbound_ports: BTreeSet::new(),
+                expr_source: None,
             }],
         };
         assert!(reconcile_track_lane_roster(&mut chain, &roster));
@@ -5508,6 +5646,7 @@ mod default_lane_tests {
             bindings: BTreeMap::new(),
             fanout: BTreeMap::new(),
             unbound_ports: BTreeSet::new(),
+            expr_source: None,
         };
         // Roster says grab 3 runs before grab 2; the chain was saved the
         // other way round, with a script slot wedged between them.

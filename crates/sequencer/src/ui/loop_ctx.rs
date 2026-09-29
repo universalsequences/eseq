@@ -212,6 +212,10 @@ pub(crate) struct FrameDiffState {
     /// Scope version last published to `process-scope-cells`.
     pub(crate) prev_process_scope_cells_version: u64,
     pub(crate) prev_process_effective_params_version: u64,
+    /// Run-error version last published to `process-run-errors`; `None`
+    /// until the first publish, so a reader that opens after the errors
+    /// settled still gets them.
+    pub(crate) prev_process_run_errors_version: Option<u64>,
     /// Last published `(display value, clamped)` per `(track, param)` of the
     /// process effective-value feed, so the tick only writes deltas.
     pub(crate) prev_process_effective_params: HashMap<(usize, usize), (f32, bool)>,

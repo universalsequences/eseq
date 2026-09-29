@@ -1617,12 +1617,18 @@ where
         match scratch.invoke_process_run(invocation) {
             Ok(result) => {
                 let runtime_id = result.runtime_id;
+                process_runtime.note_run_outcome(runtime_id, None);
                 apply_commands(scratch, process_runtime, runtime_id, &result.commands);
                 let mut followups = process_runtime.apply_run_result(result);
                 followups.reverse();
                 pending_invocations.extend(followups);
             }
             Err(err) => {
+                // A failed run applies none of its commands: the slot is
+                // bypassed for this fire and the payload passes untouched
+                // (expr spec §2). The error sticks for the UI until the
+                // slot's next clean run.
+                process_runtime.note_run_outcome(process_runtime_id, Some(&err));
                 if debug_accum || debug_routing_enabled() {
                     eprintln!(
                         "[process] run error process={} beat={:.6} err={}",

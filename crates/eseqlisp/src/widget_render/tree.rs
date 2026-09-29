@@ -203,6 +203,7 @@ fn list_icon_fill(icon: f32) -> [f32; 4] {
         9 => theme::LIST_ICON_AUDIO_FX(),
         12 => theme::ACCENT(),
         13 => theme::LIST_ICON_PRESET(),
+        14 => theme::RED(),
         _ => theme::LIST_ICON_MISC(),
     };
     color.to_rgba()
@@ -360,6 +361,23 @@ fn selection_follows_external(props: &HashMap<String, Value>) -> bool {
         props.get("selection-follows-external"),
         Some(Value::Bool(true))
     )
+}
+
+/// The rows `:<prefix>-key` / `:<prefix>-value` pick out: items whose
+/// `<key>` field (default `name`) equals the non-empty value. Used for
+/// `:current-*` (the item already in use, drawn with a quiet grey highlight
+/// like Finder's unfocused selection) and `:loading-*` (the item being
+/// loaded, which carries an animated spinner).
+fn marked_item_value(props: &HashMap<String, Value>, prefix: &str) -> Option<(String, String)> {
+    let value = get_string_prop(props, &format!("{prefix}-value")).filter(|value| !value.is_empty())?;
+    let key = get_string_prop(props, &format!("{prefix}-key")).unwrap_or_else(|| "name".to_string());
+    Some((key, value))
+}
+
+fn row_is_marked(row: &TreeRow, mark: Option<&(String, String)>) -> bool {
+    mark.is_some_and(|(key, value)| {
+        !row.is_header && item_string_field(&row.item_value, key).as_deref() == Some(value.as_str())
+    })
 }
 
 /// With `:activate-parents true`, double-clicking a row that has children
@@ -908,6 +926,14 @@ impl WidgetDefinition for TreeWidget {
         TREE_CHEVRON_SHADER.source(backend)
     }
 
+    fn wants_animation_frames(&self, node: &LayoutNode) -> bool {
+        marked_item_value(&node.props, "loading").is_some()
+    }
+
+    fn animation_frame_policy(&self) -> super::AnimationFramePolicy {
+        super::AnimationFramePolicy::LayoutStatic
+    }
+
     fn size_affecting_props(&self) -> &'static [&'static str] {
         &[
             "items",
@@ -1392,6 +1418,12 @@ impl WidgetDefinition for TreeWidget {
 
         let bg_alt = resolve_named_color(&node.props, "row-bg-alt", theme::TREE_ROW_ALT_BG());
         let selected_bg = resolve_named_color(&node.props, "selected-bg", theme::WIDGET_FOCUS_BG());
+        let current_mark = marked_item_value(&node.props, "current");
+        let loading_mark = marked_item_value(&node.props, "loading");
+        let current_bg = resolve_named_color(&node.props, "current-bg", {
+            let muted = theme::FG_MUTED();
+            Color { a: 0.30, ..muted }
+        });
         let folder_fg = resolve_named_color(&node.props, "folder-color", theme::FG());
         let fg = theme::FG();
         // Leaves read at full foreground like folders (Finder does not dim
@@ -1423,9 +1455,19 @@ impl WidgetDefinition for TreeWidget {
                     state.external_selected_row == Some(i)
                 };
             let is_selected = is_interactive && raw_selected;
-            let show_bg = is_interactive && (is_selected || i % 2 == 1);
+            // The keyboard/click selection keeps the accent; the in-use row
+            // shows grey only while the selection is elsewhere.
+            let is_current = is_interactive && !is_selected && row_is_marked(row, current_mark.as_ref());
+            let is_loading = row_is_marked(row, loading_mark.as_ref());
+            let show_bg = is_interactive && (is_selected || is_current || i % 2 == 1);
             if show_bg {
-                let bg = if is_selected { selected_bg } else { bg_alt };
+                let bg = if is_selected {
+                    selected_bg
+                } else if is_current {
+                    current_bg
+                } else {
+                    bg_alt
+                };
                 let row_inset = 0.15; // horizontal inset for rounded rect
                 let row_rect = Rect {
                     row: y,
@@ -1633,12 +1675,49 @@ impl WidgetDefinition for TreeWidget {
                     mono: false,
                 }));
             }
-            let status_width = if row.status_icon.is_some() {
+            let status_width = if row.status_icon.is_some() || is_loading {
                 icon_width + 0.6
             } else {
                 0.0
             } + badge_width;
-            if let Some(icon) = row.status_icon {
+            if is_loading {
+                // The loading spinner takes the status glyph's slot.
+                let (cell_w, cell_h) = (_viewport.cell_w, _viewport.cell_h);
+                let cx = (node.rect.col + node.rect.width - 0.9 - badge_width - icon_width * 0.5) * cell_w;
+                let cy = (y + rh * 0.5) * cell_h;
+                let ring = (rh * cell_h * 0.30).min(icon_width * cell_w * 0.5);
+                let accent = theme::ACCENT();
+                for dot in crate::backend::spinner_dots(cx, cy, ring, _viewport.time_seconds) {
+                    let dot_rect = Rect {
+                        row: (dot.y - dot.d / 2.0) / cell_h,
+                        col: (dot.x - dot.d / 2.0) / cell_w,
+                        width: dot.d / cell_w,
+                        height: dot.d / cell_h,
+                    };
+                    let (ndc_min, ndc_max) = ndc_bounds(dot_rect, _viewport);
+                    prims.push(GpuPrimitive::WidgetInstance {
+                        widget_type: "box".to_string(),
+                        instance: WidgetInstance {
+                            ndc_min,
+                            ndc_max,
+                            value_t: 0.0,
+                            orientation: 0.0,
+                            itime: _viewport.time_seconds,
+                            uniform_a: [0.0; 4],
+                            uniform_b: [0.0; 4],
+                            uniform_c: [0.0; 4],
+                            uniform_d: [0.0; 4],
+                            color_a: [accent.r, accent.g, accent.b, dot.intensity],
+                            color_b: [0.0; 4],
+                            color_c: [0.0; 4],
+                            color_d: [0.0; 4],
+                            corner_radius: 1.0,
+                            pixel_aspect: 1.0,
+                        },
+                        is_background: false,
+                    });
+                }
+            } else if let Some(icon) = row.status_icon {
                 let icon_rect = Rect {
                     row: y + (rh - icon_height) * 0.5 - 0.08,
                     col: node.rect.col + node.rect.width - icon_width - 0.9 - badge_width,
@@ -2090,6 +2169,74 @@ mod expansion_identity_tests {
         assert!(prims.iter().any(|prim| matches!(prim,
             GpuPrimitive::WidgetInstance { widget_type, .. } if widget_type == "box")),
             "inside a round chip");
+    }
+
+    #[test]
+    fn current_row_is_grey_and_loading_row_spins() {
+        let mut props = HashMap::new();
+        props.insert(
+            "items".to_string(),
+            list(vec![item("melt", "instrument", vec![]), item("triton", "instrument", vec![])]),
+        );
+        props.insert("current-key".to_string(), Value::String("label".to_string()));
+        props.insert("current-value".to_string(), Value::String("melt".to_string()));
+        props.insert("loading-key".to_string(), Value::String("label".to_string()));
+        props.insert("loading-value".to_string(), Value::String("triton".to_string()));
+        let node = LayoutNode {
+            widget_id: 89004,
+            stable_widget_id: None,
+            subtree_root_id: None,
+            parent_subtree_root_id: None,
+            stable_key: None,
+            widget_type: "tree".to_string(),
+            rect: Rect { row: 0.0, col: 0.0, width: 30.0, height: 5.0 },
+            props,
+            children: Vec::new(),
+            focusable: true,
+            animation: Default::default(),
+        };
+        assert!(TREE_WIDGET.wants_animation_frames(&node), "a loading row animates the tree");
+        let viewport = |time_seconds| WidgetViewport {
+            vp_w: 240.0,
+            vp_h: 80.0,
+            cell_w: 8.0,
+            cell_h: 16.0,
+            scroll_top: 0.0,
+            focused_widget_id: None,
+            focused_branch: false,
+            overlay_viewport_bottom: 5.0,
+            inherited_hover: false,
+            time_seconds,
+            scroll_left: 0.0,
+        };
+        let dots = |prims: &[GpuPrimitive]| -> Vec<[f32; 4]> {
+            prims
+                .iter()
+                .filter_map(|prim| match prim {
+                    GpuPrimitive::WidgetInstance { widget_type, instance, .. } if widget_type == "box" => {
+                        Some(instance.color_a)
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        let prims = TREE_WIDGET.build_primitives("tree", &node, viewport(0.0));
+        // Row 0 is the cursor row (blue); the grey mark shows once the
+        // selection moves off it, so only the stripe/cursor rows paint here.
+        let row_bgs = prims
+            .iter()
+            .filter(|prim| matches!(prim, GpuPrimitive::WidgetInstance { widget_type, .. } if widget_type == "tree-row"))
+            .count();
+        assert!(row_bgs >= 1);
+        let first = dots(&prims);
+        assert_eq!(first.len(), crate::backend::TOAST_SPINNER_DOTS, "one spinner on the loading row");
+        let later = dots(&TREE_WIDGET.build_primitives("tree", &node, viewport(0.3)));
+        assert_ne!(first, later, "the spinner advances with time");
+
+        let mut idle = node.clone();
+        idle.props.remove("loading-value");
+        assert!(!TREE_WIDGET.wants_animation_frames(&idle));
+        assert!(dots(&TREE_WIDGET.build_primitives("tree", &idle, viewport(0.0))).is_empty());
     }
 
     #[test]

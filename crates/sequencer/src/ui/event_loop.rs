@@ -19,7 +19,7 @@ fn drive_host_loop(
 }
 
 fn host_animation_active(editor: &Editor, backend: &AppBackend, gesture: &GestureState) -> bool {
-    editor.visible_widgets_animating() || gesture.scroll_inertia.fling_active()
+    editor.visible_widgets_animating() || editor.toast_animating() || gesture.scroll_inertia.fling_active()
         || (!editor.visible_widget_layouts().is_empty()
             && eseqlisp::widget_render::sdf_widget::sdf_visual_animations_active(backend.time_seconds()))
 }
@@ -74,6 +74,23 @@ pub(super) fn patch_is_only_scene_slots(patch: &app::history::EditPatch) -> bool
         app::history::EditPatch::SceneSlot(_) | app::history::EditPatch::SceneSlots(_) => true,
         app::history::EditPatch::Composite(patches) => {
             !patches.is_empty() && patches.iter().all(patch_is_only_scene_slots)
+        }
+        _ => false,
+    }
+}
+
+/// True when replaying the entry needs no full topology/`ui_epoch` refresh:
+/// scene-slot writes repaint through their targeted invalidation, and node
+/// process-chain edits (eseq-waa9.23) republish the scheduler snapshot, whose
+/// version moves the tick's tracked graph-read sweep, which re-runs exactly
+/// the node bay / *processes* readers of that chain.
+pub(super) fn patch_replays_with_targeted_refresh(patch: &app::history::EditPatch) -> bool {
+    match patch {
+        app::history::EditPatch::SceneSlot(_)
+        | app::history::EditPatch::SceneSlots(_)
+        | app::history::EditPatch::GraphNodeProcessChain(_) => true,
+        app::history::EditPatch::Composite(patches) => {
+            !patches.is_empty() && patches.iter().all(patch_replays_with_targeted_refresh)
         }
         _ => false,
     }
@@ -400,6 +417,7 @@ pub(crate) fn run_event_loop(
         prev_process_scope_values_version: shared.state.process_scope_values_version(),
         prev_process_scope_cells_version: shared.state.process_scope_values_version(),
         prev_process_effective_params_version: shared.state.process_effective_params_version(),
+        prev_process_run_errors_version: None,
         prev_process_effective_params: Default::default(),
         prev_process_effective_sends: Default::default(),
         prev_track_tint: None,
@@ -927,8 +945,8 @@ pub(crate) fn run_event_loop(
                         // the entry is nothing but slot writes.
                         let scene_slot_targets =
                             replayed_patch.map_or_else(Vec::new, scene_slot_replay_targets);
-                        let scene_slots_only = !scene_slot_targets.is_empty()
-                            && replayed_patch.is_some_and(patch_is_only_scene_slots);
+                        let scene_slots_only =
+                            replayed_patch.is_some_and(patch_replays_with_targeted_refresh);
                         let replayed_scratch_imports = replayed_patch.map_or_else(Vec::new, |patch| {
                             patch.replayed_scratch_imports(matches!(
                                 shortcut,
@@ -1530,7 +1548,8 @@ pub(crate) fn run_event_loop(
             let was_pending = true;
             match app.advance_pending_project_load() {
                 Ok(()) => {
-                    if app.has_pending_project_load() {
+                    if let Some((message, progress)) = app.pending_project_load_progress() {
+                        editor.show_loading_toast(message, Some(progress));
                         project_load_still_pending = true;
                     } else if was_pending {
                         if let Err(error) = clear_project_script_tabs(&mut editor) {
@@ -1820,10 +1839,15 @@ pub(crate) fn run_event_loop(
                             eprintln!("metal_seq: project load status={status}");
                             editor.handle_host_event(HostEvent::Status(status));
                         }
+                        match app.current_project_name.as_deref() {
+                            Some(name) => editor.show_toast(format!("Loaded {name}"), eseqlisp::ToastKind::Success),
+                            None => editor.dismiss_loading_toast(),
+                        }
                     }
                 }
                 Err(error) => {
                     eprintln!("metal_seq: project load advance failed error={error}");
+                    editor.show_toast(format!("Project load failed: {error}"), eseqlisp::ToastKind::Error);
                     editor.handle_host_event(HostEvent::Status(format!(
                         "Error loading project: {error}"
                     )));
@@ -1873,6 +1897,14 @@ pub(crate) fn run_event_loop(
             let _ = editor
                 .runtime_mut()
                 .eval_str("(set! sbrowser-loading-instrument-name \"\")");
+            let display_name = instrument_display_name(&pending.name);
+            match &completed_load {
+                Ok(_) => editor.show_toast(format!("Loaded {display_name}"), eseqlisp::ToastKind::Success),
+                Err(error) => editor.show_toast(
+                    format!("Couldn't load {display_name}: {error}"),
+                    eseqlisp::ToastKind::Error,
+                ),
+            }
             match completed_load {
                 Ok(result) => match apply_compiled_saved_instrument(
                     &mut app,
@@ -1929,6 +1961,10 @@ pub(crate) fn run_event_loop(
                         editor.mark_needs_redraw();
                     }
                     Err(error) => {
+                        editor.show_toast(
+                            format!("Couldn't load {display_name}: {error}"),
+                            eseqlisp::ToastKind::Error,
+                        );
                         let action = match pending.target {
                             SavedInstrumentLoadTarget::AddTrack { .. } => "adding instrument track",
                             SavedInstrumentLoadTarget::SwapTrack { .. } => "swapping instrument",
@@ -2727,8 +2763,14 @@ pub(crate) fn run_event_loop(
             }
         }
         if project_load_still_pending {
-            // Loading skips the normal frame pass; keep asynchronous progress
-            // bounded by the existing UI cadence instead of spinning.
+            // Loading skips the reactive tick (App state is half-built), but
+            // the editor still holds the pre-load UI, so present it with the
+            // progress toast on top between steps.
+            if editor.needs_redraw() && frame_pacer.is_due(Instant::now()) {
+                render_live_resize(&mut editor, &mut backend, &mut frame_pacer, &mut ui_loop_stats);
+            }
+            // Keep asynchronous progress bounded by the existing UI cadence
+            // instead of spinning.
             return Ok(HostLoopControl::WaitUntil(Instant::now() + frame_interval));
         }
 

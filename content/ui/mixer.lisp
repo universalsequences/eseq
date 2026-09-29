@@ -140,13 +140,13 @@
 ;; Data, rather than menu-specific control flow, is the extension seam for
 ;; Duplicate/Delete/Group/color actions added later.
 (def track-menu-actions
-  (list (dict :id :rename :label "Rename")))
+  (list (dict :id :rename :label "Rename" :icon :pencil)))
 
 (def group-menu-actions
   (list
-    (dict :id :rename :label "Rename")
-    (dict :id :convert-drum-rack :label "Convert to Drum Rack")
-    (dict :id :ungroup :label "Ungroup")))
+    (dict :id :rename :label "Rename" :icon :pencil)
+    (dict :id :convert-drum-rack :label "Convert to Drum Rack" :icon :sampler)
+    (dict :id :ungroup :label "Ungroup" :icon :ungroup)))
 
 ;; A rack's menu also offers the graph sequencers it could own. A sequencer
 ;; that merely routes to tracks inside the rack is still project-owned;
@@ -166,13 +166,13 @@
   (append
     (append
       (list
-        (dict :id :rename :label "Rename"))
+        (dict :id :rename :label "Rename" :icon :pencil))
       ;; Rack clips (docs/rack-clips-and-break-kits-spec.md §6.3). A LEGACY
       ;; rack (no bank) is offered the one-shot conversion; a rack that already
       ;; has clips saves a new one here and deletes from the row's [-] button.
       (if (eseq.drum-rack-v2/has-clips? gid)
-        (list (dict :id :save-rack-clip :label "Save clip as..."))
-        (list (dict :id :convert-to-clips :label "Convert to clips"))))
+        (list (dict :id :save-rack-clip :label "Save clip as..." :icon :save))
+        (list (dict :id :convert-to-clips :label "Convert to clips" :icon :clips))))
     (append
       ;; The kind picker (docs/instance-kinds-spec.md §8.3): a new instance
       ;; of any kind, owned by this rack. The host attaches the kind's
@@ -183,7 +183,8 @@
                 :key (str "new-" (get kind :id))
                 :kind-id (get kind :id)
                 :module (get kind :module)
-                :label (str "New " (get kind :name) " in rack")))
+                :label (str "New " (get kind :name) " in rack")
+                :icon :plus))
         (seq-instance-kinds))
       (map
         (lambda (graph)
@@ -192,12 +193,14 @@
                   :key (str "detach-" (get graph :id))
                   :sequencer-id (get graph :id)
                   :sequencer-name (get graph :name)
-                  :label (str "Detach " (graph-sequencer-label graph)))
+                  :label (str "Detach " (graph-sequencer-label graph))
+                  :icon :unlink)
             (dict :id :move-sequencer-into-rack
                   :key (str "attach-" (get graph :id))
                   :sequencer-id (get graph :id)
                   :sequencer-name (get graph :name)
-                  :label (str "Attach " (graph-sequencer-label graph) " to rack"))))
+                  :label (str "Attach " (graph-sequencer-label graph) " to rack")
+                  :icon :link)))
         (filter (lambda (graph)
                   (or (= (get graph :owner-rack) nil)
                       (= (get graph :owner-rack) gid)))
@@ -205,8 +208,8 @@
     (list
       ;; Break kits (docs/rack-clips-and-break-kits-spec.md 7.2): the kit save
       ;; panel, which carries a scene checklist for the clip bank.
-      (dict :id :export-kit :label "Export as kit...")
-      (dict :id :ungroup :label "Ungroup"))))
+      (dict :id :export-kit :label "Export as kit..." :icon :export)
+      (dict :id :ungroup :label "Ungroup" :icon :ungroup))))
 
 ;; The path a project-owned script was loaded from, per the step-tab registry;
 ;; "" when unknown (the moved instance then does not come back by itself on
@@ -1228,10 +1231,10 @@
     (append
       track-menu-actions
       (if (track-grouped? track-menu-track)
-        (list (dict :id :ungroup-track :label "Ungroup track"))
+        (list (dict :id :ungroup-track :label "Ungroup track" :icon :ungroup))
         (list))
       (if (and (>= (len SEQ.selected-tracks) 2) (track-menu-target-selected?))
-        (list (dict :id :group :label "Group Tracks"))
+        (list (dict :id :group :label "Group Tracks" :icon :folder))
         (list)))))
 
 (def select-track-menu-action (action)
@@ -1303,6 +1306,7 @@
     (each (if track-menu-open (track-context-menu-actions) (list)) |action|
       (menu-item (get action :label)
         :key (str "track-menu-" (get action :id) (or (get action :key) ""))
+        :icon (get action :icon)
         :on-select (lambda (event) (select-track-menu-action action))))))
 
 (def rename-input (key width font-size value on-change on-submit on-cancel)

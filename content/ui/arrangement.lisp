@@ -26,6 +26,7 @@
 (import eseq.sample-import)
 (import eseq.retrospective)
 (import eseq.resample)
+(import eseq.factory-promote)
 (import eseq.export-song)
 (import eseq.file-dialogs)
 
@@ -2054,6 +2055,8 @@
       (eseq.retrospective/panel))
     (subtree :key "arr-resample"
       (eseq.resample/panel))
+    (subtree :key "arr-factory-promote"
+      (eseq.factory-promote/panel))
     (subtree :key "arr-scene-row"
       (box :width :fill
         (h-stack :width :fill :align :start :gap 0

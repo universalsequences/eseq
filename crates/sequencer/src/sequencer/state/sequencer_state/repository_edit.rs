@@ -324,10 +324,7 @@ impl SequencerState {
             .scenes
             .lock()
             .unwrap()
-            .scenes
-            .iter()
-            .map(|scene| std::sync::Arc::new(scene.scene_slots.clone()))
-            .collect()
+            .composed_scene_slot_table()
     }
 
     pub fn current_scene_slots(&self) -> SceneSlotStore {
@@ -335,10 +332,7 @@ impl SequencerState {
             .scenes
             .lock()
             .unwrap()
-            .scenes
-            .get(self.current_pattern_index())
-            .map(|scene| scene.scene_slots.clone())
-            .unwrap_or_default()
+            .composed_scene_slots(self.current_pattern_index())
     }
 
     pub fn resolve_current_scene_slot(
@@ -368,13 +362,18 @@ impl SequencerState {
                 .lock()
                 .map_err(|_| "failed to lock pattern bank".to_string())?;
             let current = self.current_pattern_index();
-            let scene = scenes
+            let scene_id = scenes
                 .scenes
-                .get_mut(current)
+                .get(current)
+                .ok_or_else(|| "current pattern out of range".to_string())?
+                .id;
+            // A rack-owned instance document lands in the rack's clip.
+            let store = scenes
+                .scene_slot_store_mut(current, &name)
                 .ok_or_else(|| "current pattern out of range".to_string())?;
-            let previous = scene.scene_slots.get(&name).cloned();
-            let epoch = scene.scene_slots.write_literal(name, value)?;
-            (scene.id, previous, epoch)
+            let previous = store.get(&name).cloned();
+            let epoch = store.write_literal(name, value)?;
+            (scene_id, previous, epoch)
         };
         self.publish_scheduler_snapshot();
         Ok((scene_id, previous, epoch))
@@ -407,8 +406,9 @@ impl SequencerState {
             let scene_idx = scenes
                 .scene_index(scene_id)
                 .ok_or_else(|| "scene-slot pattern no longer exists".to_string())?;
-            scenes.scenes[scene_idx]
-                .scene_slots
+            scenes
+                .scene_slot_store_mut(scene_idx, &name)
+                .ok_or_else(|| "scene-slot pattern no longer exists".to_string())?
                 .set_override(name, value)?
         };
         self.publish_scheduler_snapshot();
@@ -472,7 +472,10 @@ impl SequencerState {
                 indices.push(index);
             }
             for (index, (_, name, value)) in indices.into_iter().zip(writes) {
-                scenes.scenes[index].scene_slots.set_override(name.clone(), value.clone())?;
+                scenes
+                    .scene_slot_store_mut(index, name)
+                    .ok_or_else(|| "scene-slot scene no longer exists".to_string())?
+                    .set_override(name.clone(), value.clone())?;
             }
         }
         if !writes.is_empty() {

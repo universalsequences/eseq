@@ -67,6 +67,7 @@ pub mod crash;
 pub mod groove;
 #[allow(dead_code)]
 pub mod effects;
+pub mod factory_promote;
 pub mod instruments;
 pub mod learn_job;
 #[allow(dead_code)]

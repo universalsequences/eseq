@@ -7,6 +7,7 @@ mod custom_ui;
 mod editor_setup;
 mod host_commands;
 mod input;
+mod instrument_favorites;
 mod lisp_hot_reload;
 mod live_audio_analyzer;
 mod natives;

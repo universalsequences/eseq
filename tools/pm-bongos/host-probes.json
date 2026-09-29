@@ -1,0 +1,167 @@
+{
+ "command": "target/debug/instrument_probe \"user:Physical Models/PM Bongos\" --preset <name> --midi-note <n> --frames 24000 --sample-rate 48000 --min-peak 0.01 --min-rms 0.001 --json",
+ "results": [
+  {
+   "preset": "Bird of Prey",
+   "note": 60,
+   "exit": 0,
+   "peak": 0.23400595784187317,
+   "rms": 0.03593083843588829,
+   "non_finite_samples": 0,
+   "non_finite_state_slots": 0
+  },
+  {
+   "preset": "Bird of Prey",
+   "note": 66,
+   "exit": 0,
+   "peak": 0.15525346994400024,
+   "rms": 0.026540230959653854,
+   "non_finite_samples": 0,
+   "non_finite_state_slots": 0
+  },
+  {
+   "preset": "Bird of Prey",
+   "note": 72,
+   "exit": 0,
+   "peak": 0.284748375415802,
+   "rms": 0.02591828443109989,
+   "non_finite_samples": 0,
+   "non_finite_state_slots": 0
+  },
+  {
+   "preset": "Tight Studio",
+   "note": 60,
+   "exit": 0,
+   "peak": 0.18982841074466705,
+   "rms": 0.027473384514451027,
+   "non_finite_samples": 0,
+   "non_finite_state_slots": 0
+  },
+  {
+   "preset": "Tight Studio",
+   "note": 66,
+   "exit": 0,
+   "peak": 0.12845848500728607,
+   "rms": 0.021416299045085907,
+   "non_finite_samples": 0,
+   "non_finite_state_slots": 0
+  },
+  {
+   "preset": "Tight Studio",
+   "note": 72,
+   "exit": 0,
+   "peak": 0.27065178751945496,
+   "rms": 0.02295849844813347,
+   "non_finite_samples": 0,
+   "non_finite_state_slots": 0
+  },
+  {
+   "preset": "Open Ring",
+   "note": 60,
+   "exit": 0,
+   "peak": 0.24281252920627594,
+   "rms": 0.04386764019727707,
+   "non_finite_samples": 0,
+   "non_finite_state_slots": 0
+  },
+  {
+   "preset": "Open Ring",
+   "note": 66,
+   "exit": 0,
+   "peak": 0.16813060641288757,
+   "rms": 0.02872726321220398,
+   "non_finite_samples": 0,
+   "non_finite_state_slots": 0
+  },
+  {
+   "preset": "Open Ring",
+   "note": 72,
+   "exit": 0,
+   "peak": 0.28138479590415955,
+   "rms": 0.029701771214604378,
+   "non_finite_samples": 0,
+   "non_finite_state_slots": 0
+  },
+  {
+   "preset": "Hard Hands",
+   "note": 60,
+   "exit": 0,
+   "peak": 0.2534305155277252,
+   "rms": 0.03522449731826782,
+   "non_finite_samples": 0,
+   "non_finite_state_slots": 0
+  },
+  {
+   "preset": "Hard Hands",
+   "note": 66,
+   "exit": 0,
+   "peak": 0.15402011573314667,
+   "rms": 0.02417847327888012,
+   "non_finite_samples": 0,
+   "non_finite_state_slots": 0
+  },
+  {
+   "preset": "Hard Hands",
+   "note": 72,
+   "exit": 0,
+   "peak": 0.2530325651168823,
+   "rms": 0.022362085059285164,
+   "non_finite_samples": 0,
+   "non_finite_state_slots": 0
+  },
+  {
+   "preset": "Soft Fingers",
+   "note": 60,
+   "exit": 0,
+   "peak": 0.13795270025730133,
+   "rms": 0.026072315871715546,
+   "non_finite_samples": 0,
+   "non_finite_state_slots": 0
+  },
+  {
+   "preset": "Soft Fingers",
+   "note": 66,
+   "exit": 0,
+   "peak": 0.11046431958675385,
+   "rms": 0.01903672143816948,
+   "non_finite_samples": 0,
+   "non_finite_state_slots": 0
+  },
+  {
+   "preset": "Soft Fingers",
+   "note": 72,
+   "exit": 0,
+   "peak": 0.13550253212451935,
+   "rms": 0.014979329891502857,
+   "non_finite_samples": 0,
+   "non_finite_state_slots": 0
+  },
+  {
+   "preset": "Dusty Break",
+   "note": 60,
+   "exit": 0,
+   "peak": 0.2841983139514923,
+   "rms": 0.04716582968831062,
+   "non_finite_samples": 0,
+   "non_finite_state_slots": 0
+  },
+  {
+   "preset": "Dusty Break",
+   "note": 66,
+   "exit": 0,
+   "peak": 0.19780950248241425,
+   "rms": 0.03426718711853027,
+   "non_finite_samples": 0,
+   "non_finite_state_slots": 0
+  },
+  {
+   "preset": "Dusty Break",
+   "note": 72,
+   "exit": 0,
+   "peak": 0.3632453382015228,
+   "rms": 0.03675117716193199,
+   "non_finite_samples": 0,
+   "non_finite_state_slots": 0
+  }
+ ]
+}

@@ -227,6 +227,54 @@ mod tests {
         value as f32
     }
 
+    fn relative_props() -> HashMap<String, Value> {
+        let mut props = HashMap::new();
+        props.insert("drag".to_string(), Value::Keyword("relative".to_string()));
+        props.insert("drag-step".to_string(), Value::Number(0.1));
+        props.insert("step".to_string(), Value::Number(0.01));
+        props
+    }
+
+    fn relative_drag_event(node: &LayoutNode, gesture: &Value, to_row: f32, modifiers: KeyModifiers) -> f32 {
+        let outcome = NUMBER_PICKER_WIDGET.mouse_event(
+            node,
+            MouseEventKind::Drag(MouseButton::Left),
+            0.0,
+            to_row,
+            None,
+            Some(gesture),
+            modifiers,
+            10.0,
+            10.0,
+        );
+        let MouseEventOutcome::Dispatch(WidgetEvent::Custom(Value::Number(value))) = outcome else {
+            panic!("drag should dispatch a value");
+        };
+        value as f32
+    }
+
+    /// A relative (unbounded) picker moves `:drag-step` per row from where
+    /// the drag began, with no range and no 0..1 default clamp; Shift is
+    /// ten times coarser and re-anchors instead of jumping.
+    #[test]
+    fn relative_drag_moves_per_row_without_a_range() {
+        let near = |actual: f32, expected: f32| {
+            assert!((actual - expected).abs() < 1e-3, "{actual} != {expected}");
+        };
+        near(drag_to(relative_props(), 0.0, 10.0, 7.0), 0.3);
+        near(drag_to(relative_props(), 2.5, 10.0, 60.0), -2.5);
+        near(drag_to(relative_props(), 5000.0, 10.0, 0.0), 5001.0);
+
+        let node = test_number_picker_node(relative_props());
+        let gesture = NUMBER_PICKER_WIDGET
+            .begin_gesture(&node, 0.0, 10.0, KeyModifiers::empty())
+            .expect("gesture");
+        near(relative_drag_event(&node, &gesture, 8.0, KeyModifiers::empty()), 0.2);
+        // Shift from row 8 on: 0.2 plus two rows at 1.0 per row.
+        near(relative_drag_event(&node, &gesture, 8.0, KeyModifiers::SHIFT), 0.2);
+        near(relative_drag_event(&node, &gesture, 6.0, KeyModifiers::SHIFT), 2.2);
+    }
+
     /// Linear pickers keep their historical feel: no taper, no drag-rows,
     /// five rows of travel from a short strip spans the whole range.
     #[test]
@@ -553,6 +601,52 @@ fn quantize_step(props: &HashMap<String, Value>, decimals: u32) -> Option<f32> {
     }
 }
 
+/// `:drag :relative` — an unbounded picker (expr card inlets,
+/// docs/expr-process-spec.md §3.1): a drag moves the value by `:drag-step`
+/// per row of travel instead of mapping the travel onto a `min..max` range,
+/// Shift moves it ten times faster, and `:min`/`:max` bound it only when
+/// given.
+fn relative_drag(props: &HashMap<String, Value>) -> bool {
+    matches!(
+        props.get("drag"),
+        Some(Value::Keyword(mode) | Value::String(mode)) if mode == "relative"
+    )
+}
+
+/// Coarse-drag multiplier of a relative picker.
+const RELATIVE_DRAG_COARSE: f32 = 10.0;
+
+fn relative_drag_rate(modifiers: KeyModifiers) -> f32 {
+    if modifiers.contains(KeyModifiers::SHIFT) { RELATIVE_DRAG_COARSE } else { 1.0 }
+}
+
+/// The picker's value bounds: `:min`/`:max`, which default to 0..1 except on
+/// a relative picker, where a missing bound is open.
+fn picker_bounds(props: &HashMap<String, Value>) -> (f32, f32) {
+    if relative_drag(props) {
+        (
+            get_f32_prop(props, "min", f32::NEG_INFINITY),
+            get_f32_prop(props, "max", f32::INFINITY),
+        )
+    } else {
+        (get_f32_prop(props, "min", 0.0), get_f32_prop(props, "max", 1.0))
+    }
+}
+
+/// Snap `value` for this picker. A relative picker snaps to multiples of the
+/// step from zero: its bounds may be open or huge, and stepping from a huge
+/// `min` in f32 would lose the step itself.
+fn snap_value(props: &HashMap<String, Value>, value: f32, min: f32, max: f32, step: Option<f32>) -> f32 {
+    if !relative_drag(props) {
+        return quantize_value(value, min, max, step);
+    }
+    let snapped = match step.filter(|step| *step > 0.0) {
+        Some(step) => (value / step).round() * step,
+        None => value,
+    };
+    snapped.clamp(min, max)
+}
+
 fn quantize_value(value: f32, min: f32, max: f32, step: Option<f32>) -> f32 {
     let clamped = value.clamp(min, max);
     let Some(step) = step.filter(|step| *step > 0.0) else {
@@ -749,6 +843,8 @@ impl WidgetDefinition for NumberPickerWidget {
             "value-labels",
             "taper",
             "drag-rows",
+            "drag",
+            "drag-step",
             "width",
             "height",
             "font-size",
@@ -845,16 +941,20 @@ impl WidgetDefinition for NumberPickerWidget {
         node: &LayoutNode,
         _local_col: f32,
         local_row: f32,
-        _modifiers: KeyModifiers,
+        modifiers: KeyModifiers,
     ) -> Option<Value> {
         // Store start value and start row (layout-space).
         // local_row ≈ screen_row_from_content_top + scroll, so for non-scrolled
         // views it equals the screen distance from the content area top.
+        // A relative picker also stores its current drag rate, so switching
+        // Shift mid-drag re-anchors instead of jumping.
         let value = get_f32_prop(&node.props, "value", 0.0);
-        Some(Value::List(vec![
-            std::rc::Rc::new(std::cell::RefCell::new(Value::Number(value as f64))),
-            std::rc::Rc::new(std::cell::RefCell::new(Value::Number(local_row as f64))),
-        ]))
+        let cell = |v: f64| std::rc::Rc::new(std::cell::RefCell::new(Value::Number(v)));
+        let mut gesture = vec![cell(value as f64), cell(local_row as f64)];
+        if relative_drag(&node.props) {
+            gesture.push(cell(relative_drag_rate(modifiers) as f64));
+        }
+        Some(Value::List(gesture))
     }
 
     fn mouse_event(
@@ -865,7 +965,7 @@ impl WidgetDefinition for NumberPickerWidget {
         local_row: f32,
         _drag_start: Option<(f32, f32)>,
         gesture: Option<&Value>,
-        _modifiers: KeyModifiers,
+        modifiers: KeyModifiers,
         _cell_w: f32,
         _cell_h: f32,
     ) -> MouseEventOutcome {
@@ -896,11 +996,37 @@ impl WidgetDefinition for NumberPickerWidget {
                     _ => return MouseEventOutcome::Consume,
                 };
 
-                let min = get_f32_prop(&node.props, "min", 0.0);
-                let max = get_f32_prop(&node.props, "max", 1.0);
+                let (min, max) = picker_bounds(&node.props);
                 let decimals = get_f32_prop(&node.props, "decimals", 2.0) as u32;
                 let step = quantize_step(&node.props, decimals);
                 let delta_rows = start_row - local_row; // positive = dragging up
+
+                if relative_drag(&node.props) {
+                    let per_row = match get_f32_prop(&node.props, "drag-step", 0.0) {
+                        rate if rate > 0.0 => rate,
+                        _ => step.unwrap_or_else(|| 10f32.powi(-(decimals as i32))),
+                    };
+                    let stored_rate = gesture_list
+                        .get(2)
+                        .and_then(|cell| match &*cell.borrow() {
+                            Value::Number(rate) => Some(*rate as f32),
+                            _ => None,
+                        })
+                        .unwrap_or(1.0);
+                    let rate = relative_drag_rate(modifiers);
+                    let new_value = start_value + delta_rows * per_row * stored_rate;
+                    if rate != stored_rate && gesture_list.len() > 2 {
+                        // Shift toggled mid-drag: continue from here at the
+                        // new rate rather than rescaling the whole travel.
+                        *gesture_list[0].borrow_mut() = Value::Number(new_value as f64);
+                        *gesture_list[1].borrow_mut() = Value::Number(local_row as f64);
+                        *gesture_list[2].borrow_mut() = Value::Number(rate as f64);
+                    }
+                    let new_value = snap_value(&node.props, new_value, min, max, step);
+                    return MouseEventOutcome::Dispatch(WidgetEvent::Custom(Value::Number(
+                        new_value as f64,
+                    )));
+                }
 
                 // Dynamic sensitivity: dragging up to the content-area top
                 // (start_row rows above) reaches max; equal distance below → min.
@@ -962,8 +1088,8 @@ impl WidgetDefinition for NumberPickerWidget {
         let mut state = get_state(node.widget_id);
         let value = get_f32_prop(&node.props, "value", 0.0) as f64;
         let decimals = get_f32_prop(&node.props, "decimals", 2.0) as u32;
-        let min = get_f32_prop(&node.props, "min", 0.0) as f64;
-        let max = get_f32_prop(&node.props, "max", 1.0) as f64;
+        let (min, max) = picker_bounds(&node.props);
+        let (min, max) = (min as f64, max as f64);
         let displayed_value = display_value(&node.props, value as f32) as f64;
         let displayed_min = display_value(&node.props, min as f32) as f64;
         let displayed_max = display_value(&node.props, max as f32) as f64;
@@ -983,7 +1109,7 @@ impl WidgetDefinition for NumberPickerWidget {
             NumberPickerEditOutcome::Commit(value) => {
                 let value = model_value_from_display(&node.props, value as f32) as f64;
                 let step = quantize_step(&node.props, decimals);
-                let value = quantize_value(value as f32, min as f32, max as f32, step) as f64;
+                let value = snap_value(&node.props, value as f32, min as f32, max as f32, step) as f64;
                 set_state(node.widget_id, state);
                 Some(WidgetEvent::Custom(Value::Number(value)))
             }

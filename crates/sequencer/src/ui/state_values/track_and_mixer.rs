@@ -183,6 +183,43 @@ pub(crate) fn build_track_instrument_types(app: &app::App) -> Value {
     Value::List(items)
 }
 
+/// Per track, the id of the instrument it plays, in the Instruments tab's
+/// `:instrument-id` form: the canonical saved-instrument id for custom
+/// tracks, `builtin:<name>` for samplers and modulators, and "" otherwise
+/// (empty tracks and racks, which the tab does not load in place).
+pub(crate) fn build_track_instrument_ids(app: &app::App) -> Value {
+    let items = app
+        .graph
+        .track_instrument_types
+        .iter()
+        .enumerate()
+        .map(|(track, instrument_type)| {
+            let id = match instrument_type {
+                sequencer::sequencer::InstrumentType::Sampler => {
+                    crate::browser::builtin_instrument_id("sampler")
+                }
+                sequencer::sequencer::InstrumentType::Modulator => {
+                    crate::browser::builtin_instrument_id("modulator")
+                }
+                sequencer::sequencer::InstrumentType::Custom => app
+                    .graph
+                    .track_engine_ids
+                    .get(track)
+                    .copied()
+                    .flatten()
+                    .and_then(|engine_id| app.editor.engine_registry.get(engine_id))
+                    .map(|engine| {
+                        crate::instrument_favorites::canonical_instrument_id(None, &engine.name)
+                    })
+                    .unwrap_or_default(),
+                _ => String::new(),
+            };
+            Rc::new(RefCell::new(Value::String(id)))
+        })
+        .collect();
+    Value::List(items)
+}
+
 pub(crate) fn build_track_mod_output_available(app: &app::App) -> Value {
     let items: Vec<Rc<RefCell<Value>>> = (0..app.graph.track_instrument_types.len())
         .map(|track| {
@@ -221,6 +258,7 @@ pub(crate) fn sync_track_name_state(
         "track-instrument-types",
         build_track_instrument_types(app),
     );
+    rt.set_reactive("SEQ", "track-instrument-ids", build_track_instrument_ids(app));
     sync_all_rack_slot_selection_binding_fields(rt, app);
     rt.set_reactive(
         "SEQ",
@@ -750,6 +788,7 @@ pub(crate) fn sync_track_mixer_state(
         "track-instrument-types",
         build_track_instrument_types(app),
     );
+    rt.set_reactive("SEQ", "track-instrument-ids", build_track_instrument_ids(app));
     // Compact channel views list devices by name; this rides the same sync
     // as the instrument types so any mixer refresh (project load, effect
     // add/remove, dgen compile landing) carries the chain too.
@@ -888,6 +927,7 @@ pub(crate) fn sync_track_mixer_empty_state(rt: &mut Runtime) {
     rt.set_reactive("SEQ", "track-pattern-cells", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-active-pattern-ids", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-instrument-types", Value::List(vec![]));
+    rt.set_reactive("SEQ", "track-instrument-ids", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-mod-output-available", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-bus-sends", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-mutes", Value::List(vec![]));
