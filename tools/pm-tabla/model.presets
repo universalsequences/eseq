@@ -1,0 +1,133 @@
+{
+  "version": 1,
+  "engine_name": "Drums/PM Tabla",
+  "source_file": "instruments/Drums/PM Tabla/dsp.lisp",
+  "presets": [
+    {
+      "id": "reference",
+      "name": "Ajanta",
+      "base_note_offset": 0,
+      "params": {
+        "hand.hardness": 0.5,
+        "hand.dynamics": 0.5,
+        "hand.flam": 1.0,
+        "hand.flam_level": 1.0,
+        "head.tune": 0.0,
+        "head.decay": 1.0,
+        "head.muffle": 0.0,
+        "bayan.meend": 1.0,
+        "bayan.press": 0.0,
+        "contact.skin": 1.0,
+        "contact.skin_tone": 0.0,
+        "output.drive": 0.0,
+        "output.tone_hz": 16000.0,
+        "output.gain": 1.0
+      }
+    },
+    {
+      "id": "steady",
+      "name": "Steady Bayan",
+      "base_note_offset": 0,
+      "params": {
+        "hand.hardness": 0.5,
+        "hand.dynamics": 0.5,
+        "hand.flam": 1.0,
+        "hand.flam_level": 1.0,
+        "head.tune": 0.0,
+        "head.decay": 1.0,
+        "head.muffle": 0.0,
+        "bayan.meend": 0.0,
+        "bayan.press": 0.0,
+        "contact.skin": 1.0,
+        "contact.skin_tone": 0.0,
+        "output.drive": 0.0,
+        "output.tone_hz": 16000.0,
+        "output.gain": 1.0
+      }
+    },
+    {
+      "id": "long-meend",
+      "name": "Deep Meend",
+      "base_note_offset": 0,
+      "params": {
+        "hand.hardness": 0.5,
+        "hand.dynamics": 0.5,
+        "hand.flam": 1.0,
+        "hand.flam_level": 1.0,
+        "head.tune": 0.0,
+        "head.decay": 1.4,
+        "head.muffle": 0.0,
+        "bayan.meend": 1.8,
+        "bayan.press": 0.0,
+        "contact.skin": 1.0,
+        "contact.skin_tone": 0.0,
+        "output.drive": 0.0,
+        "output.tone_hz": 16000.0,
+        "output.gain": 1.0
+      }
+    },
+    {
+      "id": "dry",
+      "name": "Dry Room",
+      "base_note_offset": 0,
+      "params": {
+        "hand.hardness": 0.5,
+        "hand.dynamics": 0.5,
+        "hand.flam": 1.0,
+        "hand.flam_level": 1.0,
+        "head.tune": 0.0,
+        "head.decay": 0.65,
+        "head.muffle": 0.1,
+        "bayan.meend": 1.0,
+        "bayan.press": 0.0,
+        "contact.skin": 1.0,
+        "contact.skin_tone": 0.0,
+        "output.drive": 0.0,
+        "output.tone_hz": 16000.0,
+        "output.gain": 1.0
+      }
+    },
+    {
+      "id": "bright",
+      "name": "Bright Fingers",
+      "base_note_offset": 0,
+      "params": {
+        "hand.hardness": 0.8,
+        "hand.dynamics": 0.5,
+        "hand.flam": 1.0,
+        "hand.flam_level": 1.0,
+        "head.tune": 0.0,
+        "head.decay": 1.0,
+        "head.muffle": 0.0,
+        "bayan.meend": 1.0,
+        "bayan.press": 0.0,
+        "contact.skin": 1.6,
+        "contact.skin_tone": 0.3,
+        "output.drive": 0.0,
+        "output.tone_hz": 16000.0,
+        "output.gain": 1.0
+      }
+    },
+    {
+      "id": "dusty",
+      "name": "Dusty Record",
+      "base_note_offset": 0,
+      "params": {
+        "hand.hardness": 0.5,
+        "hand.dynamics": 0.5,
+        "hand.flam": 1.0,
+        "hand.flam_level": 1.0,
+        "head.tune": 0.0,
+        "head.decay": 0.9,
+        "head.muffle": 0.0,
+        "bayan.meend": 1.0,
+        "bayan.press": 0.0,
+        "contact.skin": 1.0,
+        "contact.skin_tone": 0.0,
+        "output.drive": 0.35,
+        "output.tone_hz": 7000.0,
+        "output.gain": 1.0
+      }
+    }
+  ]
+}

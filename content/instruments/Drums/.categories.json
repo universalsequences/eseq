@@ -6,6 +6,6 @@
     {"label": "Claps", "instruments": ["808 Clap", "Digi Clap"]},
     {"label": "Hats & Cymbals", "instruments": ["909 Open Hat", "Digi Cymbal", "Digi Hat", "VILLAIN Hat"]},
     {"label": "Toms", "instruments": ["808 Tom", "Orbit Tom 66"]},
-    {"label": "Percussion", "instruments": ["PM Bongos"]}
+    {"label": "Percussion", "instruments": ["PM Bongos", "PM Tabla"]}
   ]
 }

@@ -1,0 +1,51 @@
+{
+ "platform": "macOS-26.5.1-arm64-arm-64bit-Mach-O",
+ "sample_rate": 48000,
+ "unit": "microseconds per block (one voice)",
+ "blocks": {
+  "128": {
+   "PM Tabla": {
+    "median_us": 23.595333333333333,
+    "percent_of_one_core": 0.885
+   },
+   "PM Kethuk": {
+    "median_us": 26.770000000000003,
+    "percent_of_one_core": 1.004
+   },
+   "PM Kempyang": {
+    "median_us": 20.612000000000002,
+    "percent_of_one_core": 0.773
+   },
+   "PM Bonang": {
+    "median_us": 39.46333333333334,
+    "percent_of_one_core": 1.48
+   },
+   "PM Saron": {
+    "median_us": 29.154666666666667,
+    "percent_of_one_core": 1.093
+   }
+  },
+  "512": {
+   "PM Tabla": {
+    "median_us": 93.95733333333334,
+    "percent_of_one_core": 0.881
+   },
+   "PM Kethuk": {
+    "median_us": 107.48799999999984,
+    "percent_of_one_core": 1.008
+   },
+   "PM Kempyang": {
+    "median_us": 82.89866666666667,
+    "percent_of_one_core": 0.777
+   },
+   "PM Bonang": {
+    "median_us": 156.59733333333335,
+    "percent_of_one_core": 1.468
+   },
+   "PM Saron": {
+    "median_us": 118.55466666666668,
+    "percent_of_one_core": 1.111
+   }
+  }
+ }
+}

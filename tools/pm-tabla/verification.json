@@ -1,0 +1,27 @@
+{
+ "source_sha256": "aac8a8d82b07afe7e9e9184e76f4885b19a1681aa8a349741a499d226435e0f2",
+ "rates": {
+  "44100": {
+   "renders": 72,
+   "max_peak": 0.3016776740550995,
+   "block_partition_max_abs": 0.0,
+   "extreme_renders": 108,
+   "octave_repeat_max_abs": 0.0
+  },
+  "48000": {
+   "renders": 72,
+   "max_peak": 0.3000844120979309,
+   "block_partition_max_abs": 0.0,
+   "extreme_renders": 108,
+   "octave_repeat_max_abs": 0.0
+  },
+  "96000": {
+   "renders": 72,
+   "max_peak": 0.3004036247730255,
+   "block_partition_max_abs": 0.0,
+   "extreme_renders": 108,
+   "octave_repeat_max_abs": 0.0
+  }
+ },
+ "compiler_sha256": "09b3f28c08e0bff871f8abdbdff8c9886e1dcba7cf321d7c14e9a1ab0d13ce4e"
+}
