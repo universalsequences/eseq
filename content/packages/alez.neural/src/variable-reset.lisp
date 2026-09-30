@@ -367,7 +367,7 @@
     :badge-color :transparent
     :bg-color :mixer-strip-bg
     :border-color :mixer-strip-selected-bg
-    :width width :height gvr-row-height :font-size 6
+    :width width :height gvr-row-height :font-size 8
     :on-change on-change))
 
 (def gvr-pick (key value-index options on-change)

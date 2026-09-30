@@ -3475,6 +3475,298 @@
         });
     }
 
+    /// The jammingjaki project's live scene (its exact jaki document,
+    /// tests/fixtures/jaki/jammingjaki-scene.json) as instance 1 of a
+    /// five-pad rack (group 1, members = tracks 0..5), like the project.
+    fn jammingjaki_fixture() -> (Arc<SequencerState>, crate::sequencer::PublishedSequencer) {
+        const RACK: u64 = 1;
+        const TRACKS: usize = 5;
+        let fixture: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("tests/fixtures/jaki/jammingjaki-scene.json"),
+            )
+            .expect("fixture"),
+        )
+        .expect("fixture json");
+        let slot = |key: &str| -> crate::process::ProcessLiteral {
+            serde_json::from_value(fixture[key].clone()).expect("literal")
+        };
+        let state = Arc::new(SequencerState::new(
+            TRACKS,
+            (0..TRACKS).map(|_| default_empty_effect_chain()).collect(),
+        ));
+        let mut values = Runtime::new();
+        let mut literal = |source: &str| {
+            let value = values.eval_str(source).expect("literal").expect("a value");
+            crate::process::ProcessLiteral::from_value(&value).expect("portable")
+        };
+        let kind = lisp_host::KindDefinition {
+            id: "alez/jaki:jaki".to_string(),
+            name: "jaki".to_string(),
+            package: Some("alez/jaki".to_string()),
+            module: Some("alez.jaki.kind".to_string()),
+            sequencer: None,
+            generator: Some(crate::sequencer::PublishedSequencer {
+                id: 0,
+                name: "jaki".to_string(),
+                resolution: crate::sequencer::Timebase::Sixteenth as u8,
+                // JAKI_TICK replaces the tick, e.g. '(+ 1 2)' for the
+                // scheduler's own cost without the jaki evaluator
+                tick_source: std::env::var("JAKI_TICK").unwrap_or_else(|_| {
+                    "(alez.jaki.doc/tick self.figures self.rows self.row-count self.mode)".to_string()
+                }),
+                requires: vec!["alez.jaki.doc".to_string()],
+                graph: None,
+                owner_rack: None,
+            }),
+            document: vec![
+                ("figures".to_string(), literal("(list (list :dot :dot :dot :dot))")),
+                ("rows".to_string(), literal("(list)")),
+                ("row-count".to_string(), literal("8")),
+                ("mode".to_string(), literal(":loop")),
+            ],
+            state_fields: Vec::new(),
+            has_view: true,
+            keymap: None,
+        };
+        lisp_host::register_kind(kind.clone());
+        state
+            .write_current_scene_slot(lisp_host::instance_document_slot(1, "rows"), slot("rows"))
+            .expect("rows");
+        state
+            .write_current_scene_slot(
+                lisp_host::instance_document_slot(1, "figures"),
+                slot("figures"),
+            )
+            .expect("figures");
+        state.set_rack_memberships(vec![crate::graph::RackMembership {
+            group_id: RACK,
+            members: (0..TRACKS).collect(),
+        }]);
+        let published = lisp_host::instance_published_sequencer(&kind, 1, Some(RACK))
+            .expect("generator");
+        (state, published)
+    }
+
+    /// Perf probe: the jammingjaki project's live scene (its exact jaki
+    /// document, tests/fixtures/jaki/jammingjaki-scene.json) on a five-pad
+    /// rack at 120 BPM, scheduled the way the live worker does — one
+    /// lookahead call per 512-sample audio block with a 2048-sample horizon.
+    /// Prints total scheduler time per second of audio and per-call
+    /// percentiles. `JAKI_BARS` sets the length (default 32), `JAKI_DUMP`
+    /// writes every scheduled event for before/after output diffs.
+    /// cargo nextest run --release -p sequencer --run-ignored only -E 'test(jammingjaki_scheduler_cost_probe)' --no-capture
+    #[test]
+    #[ignore]
+    fn jammingjaki_scheduler_cost_probe() {
+        run_with_scheduler_stack(|| {
+            const RACK: u64 = 1;
+            const TRACKS: usize = 5;
+            const BLOCK: u64 = 512;
+            const HORIZON: u64 = 2_048;
+            let (state, published) = jammingjaki_fixture();
+            let mut scratch = lisp_host::ScratchControlRuntime::new(
+                Arc::clone(&state),
+                vec![Vec::new(); TRACKS],
+                vec![EffectDescriptor::builtin_sampler(); TRACKS],
+                0,
+                0,
+            );
+            scratch
+                .register_published_sequencer(
+                    published.id,
+                    published.name.clone(),
+                    crate::sequencer::Timebase::from_index(published.resolution as u32),
+                    published.tick_source.clone(),
+                    &published.requires,
+                )
+                .expect("register");
+            state.transport.playing.store(true, Ordering::Relaxed);
+            let mut scheduler = SchedulerLookaheadState::new(48_000);
+            scheduler
+                .generator_runtime
+                .sync_definitions(&scratch.sequencer_defs(), 0.0);
+            scheduler.generator_owner_racks.insert(published.id, RACK);
+            let mut scratch_runtime = Some(scratch);
+            let snapshot = state.publish_scheduler_snapshot();
+            let live_midi_fx_tracks: [LiveMidiFxTrackState; MAX_TRACKS] =
+                std::array::from_fn(|_| LiveMidiFxTrackState::default());
+            let queue = ScheduledEventQueue::<4096>::new();
+            // 24000 samples per quarter at 48 kHz = 120 BPM; one bar = 96000.
+            let bars: u64 = std::env::var("JAKI_BARS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(32);
+            let end = bars * 96_000;
+            let mut calls: Vec<Duration> = Vec::new();
+            let mut busy = Duration::ZERO;
+            let mut events = 0usize;
+            let mut dump = String::new();
+            let mut rendered = 0u64;
+            let mut until = 0u64;
+            // JAKI_LISP_PROFILE=1: per-Lisp-function timings of the ticks
+            let lisp_profile = std::env::var_os("JAKI_LISP_PROFILE").is_some();
+            if lisp_profile {
+                scratch_runtime.as_mut().expect("runtime").begin_lisp_profile();
+            }
+            while rendered < end {
+                let t = Instant::now();
+                let result = schedule_playing_lookahead(
+                    &mut scheduler,
+                    &state,
+                    &snapshot,
+                    &queue,
+                    &mut scratch_runtime,
+                    &live_midi_fx_tracks,
+                    snapshot.transport.pattern_epoch,
+                    rendered,
+                    HORIZON,
+                    48_000,
+                    BLOCK as usize,
+                    24_000.0,
+                    until,
+                    false,
+                    false,
+                );
+                let took = t.elapsed();
+                until = result.scheduled_until_sample;
+                calls.push(took);
+                busy += took;
+                while let Some(event) = queue.pop_owned() {
+                    events += 1;
+                    dump.push_str(&format!("{event:?}\n"));
+                }
+                rendered += BLOCK;
+            }
+            if lisp_profile {
+                let timings = scratch_runtime.as_mut().expect("runtime").finish_lisp_profile();
+                for t in timings.iter().take(45) {
+                    eprintln!(
+                        "{:>9.3}ms self {:>9.3}ms incl {:>9} calls  {}",
+                        t.self_time.as_secs_f64() * 1e3,
+                        t.inclusive_time.as_secs_f64() * 1e3,
+                        t.calls,
+                        t.function
+                    );
+                }
+            }
+            let errors: Vec<String> = state
+                .drain_generator_tick_errors()
+                .into_iter()
+                .map(|notice| notice.error)
+                .collect();
+            assert!(errors.is_empty(), "{errors:?}");
+            if let Ok(path) = std::env::var("JAKI_DUMP") {
+                std::fs::write(path, &dump).expect("dump");
+            }
+            let audio_secs = end as f64 / 48_000.0;
+            let ticks = bars * 16;
+            calls.sort();
+            let pct = |q: f64| calls[((calls.len() - 1) as f64 * q) as usize];
+            eprintln!(
+                "calls p50 {:?} p90 {:?} p99 {:?} max {:?}",
+                pct(0.5),
+                pct(0.9),
+                pct(0.99),
+                pct(1.0)
+            );
+            eprintln!(
+                "jammingjaki: {bars} bars ({audio_secs:.1}s audio), {} calls, {events} events, \
+                 busy {busy:?} = {:.3} ms per audio second, {:?} per 16th tick",
+                calls.len(),
+                busy.as_secs_f64() * 1_000.0 / audio_secs,
+                busy / ticks as u32,
+            );
+            // after the numbers, so an ablation (a stubbed stage) still reports
+            assert!(events > 0 || std::env::var_os("JAKI_TICK").is_some(), "the scene must sound");
+        });
+    }
+
+    /// Perf probe: [`jammingjaki_fixture`] through the production
+    /// `SchedulerDriver` (its own scheduler runtime, built the way the live
+    /// worker builds it), polled like `spawn_scheduler_thread`: every ~1 ms
+    /// against a render cursor that moves one 512-sample block at a time,
+    /// horizon = cursor + 4 blocks. Prints scheduler-thread busy time per
+    /// audio second. `JAKI_BARS` sets the length (default 32), `JAKI_DUMP`
+    /// writes every scheduled event.
+    /// cargo nextest run --release -p sequencer --run-ignored only -E 'test(jammingjaki_driver_cost_probe)' --no-capture
+    #[test]
+    #[ignore]
+    fn jammingjaki_driver_cost_probe() {
+        run_with_scheduler_stack(|| {
+            const BLOCK: u64 = 512;
+            // 512 samples at 48 kHz = 10.7 ms; the worker sleeps 1 ms a poll
+            const POLLS_PER_BLOCK: usize = 10;
+            let (state, published) = jammingjaki_fixture();
+            state.publish_sequencer(published);
+            state.transport.playing.store(true, Ordering::Relaxed);
+            state.publish_scheduler_snapshot();
+            let queue = Arc::new(ScheduledEventQueue::<4096>::new());
+            let mut driver =
+                super::worker::SchedulerDriver::new(Arc::clone(&state), 48_000, BLOCK as usize, queue.clone());
+            // The first advance builds the scheduler runtime; keep it out of
+            // the steady-state numbers.
+            let t = Instant::now();
+            driver.advance(0, 4 * BLOCK, super::worker::SchedulerInput::Offline);
+            let build = t.elapsed();
+            let bars: u64 = std::env::var("JAKI_BARS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(32);
+            let end = bars * 96_000; // 120 BPM at 48 kHz
+            let mut blocks: Vec<Duration> = Vec::new();
+            let mut busy = Duration::ZERO;
+            let mut events = 0usize;
+            let mut dump = String::new();
+            let mut rendered = 0u64;
+            while rendered < end {
+                let mut block = Duration::ZERO;
+                for _ in 0..POLLS_PER_BLOCK {
+                    let t = Instant::now();
+                    let advanced =
+                        driver.advance(rendered, rendered + 4 * BLOCK, super::worker::SchedulerInput::Offline);
+                    block += t.elapsed();
+                    assert_eq!(advanced.queue_rejections, 0);
+                }
+                busy += block;
+                blocks.push(block);
+                while let Some(event) = queue.pop_owned() {
+                    events += 1;
+                    dump.push_str(&format!("{event:?}\n"));
+                }
+                rendered += BLOCK;
+            }
+            let errors = driver.take_runtime_errors();
+            assert!(errors.is_empty(), "{errors:?}");
+            let ticks: Vec<String> =
+                state.drain_generator_tick_errors().into_iter().map(|n| n.error).collect();
+            assert!(ticks.is_empty(), "{ticks:?}");
+            if let Ok(path) = std::env::var("JAKI_DUMP") {
+                std::fs::write(path, &dump).expect("dump");
+            }
+            let audio_secs = end as f64 / 48_000.0;
+            blocks.sort();
+            let pct = |q: f64| blocks[((blocks.len() - 1) as f64 * q) as usize];
+            eprintln!(
+                "per block p50 {:?} p90 {:?} p99 {:?} max {:?} (runtime build {build:?})",
+                pct(0.5),
+                pct(0.9),
+                pct(0.99),
+                pct(1.0)
+            );
+            eprintln!(
+                "jammingjaki driver: {bars} bars ({audio_secs:.1}s audio), {} polls, {events} events, \
+                 busy {busy:?} = {:.3} ms per audio second, {:?} per 16th tick",
+                blocks.len() * POLLS_PER_BLOCK,
+                busy.as_secs_f64() * 1_000.0 / audio_secs,
+                busy / (bars * 16) as u32,
+            );
+            // after the numbers, so an ablation (a stubbed stage) still reports
+            assert!(events > 0 || std::env::var_os("JAKI_TICK").is_some(), "the scene must sound");
+        });
+    }
+
     #[test]
     fn a_rack_owned_jaki_instance_routes_through_rack_members() {
         // Member 0 is track 3; the rack has no member 1, so row 1 is silent.

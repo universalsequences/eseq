@@ -269,6 +269,12 @@ impl SnapshotSequencerClock {
         seed_beats >= self.graph_seeded_until_beats - slack
     }
 
+    /// Whether a mid-play resync left graph emissions for the lookahead to
+    /// replay (see [`Self::take_graph_replay_generation`]).
+    pub(super) fn graph_replay_pending(&self) -> bool {
+        self.graph_replay_generation.is_some()
+    }
+
     /// The generation whose retained graph emissions the last mid-play
     /// resync discarded with the queue, once: the lookahead replays them
     /// (eseq-groove.8).
@@ -814,6 +820,52 @@ impl SnapshotSequencerClock {
         }
     }
 
+    /// How many samples after the one just evaluated at `beats` provably
+    /// evaluate the same way: no track's derived step changes (step start,
+    /// step end, cycle wrap) and neither the global 16th nor the bar does.
+    /// A three-sample margin keeps float rounding in the edge distances from
+    /// ever skipping an edge sample.
+    fn quiet_frames_after(
+        &self,
+        snapshot: &SequencerSnapshot,
+        num_tracks: usize,
+        beats: f64,
+        samples_per_quarter: f64,
+    ) -> usize {
+        if !(beats >= 0.0) {
+            return 0;
+        }
+        let mut headroom = ((beats / 0.25).floor() + 1.0) * 0.25 - beats;
+        headroom = headroom.min(((beats / 4.0).floor() + 1.0) * 4.0 - beats);
+        for t in 0..num_tracks {
+            let tc = &self.track_clocks[t];
+            let cycle = tc.cycle_beats;
+            if cycle <= 0.0 {
+                continue;
+            }
+            let ns = snapshot.tracks[t].params.num_steps;
+            let pos = Self::anchored_local_beats(tc, beats, ns).rem_euclid(cycle);
+            let mut edge = cycle;
+            if pos < tc.boundaries[ns] {
+                let idx = tc.boundaries[..ns + 1].partition_point(|&b| b <= pos);
+                if idx <= ns {
+                    edge = edge.min(tc.boundaries[idx]);
+                }
+                let step = idx.saturating_sub(1);
+                if pos < tc.step_ends[step] {
+                    edge = edge.min(tc.step_ends[step]);
+                }
+            }
+            headroom = headroom.min(edge - pos);
+        }
+        let frames = (headroom * samples_per_quarter).floor() - 3.0;
+        if frames.is_finite() && frames > 0.0 {
+            frames as usize
+        } else {
+            0
+        }
+    }
+
     pub(super) fn process_chunk(
         &mut self,
         nframes: usize,
@@ -878,9 +930,15 @@ impl SnapshotSequencerClock {
                 &mut triggers,
             );
         }
+        // Under a sequence-roll window reads remap per sample, so every
+        // sample is evaluated; otherwise quiet stretches are skipped below.
+        let may_skip = !window_start
+            .as_deref()
+            .is_some_and(|starts| starts.iter().take(num_tracks).any(Option::is_some));
         // These indices describe the last evaluated sample, not the next
         // sample at total_beats. Keep them across chunk boundaries.
-        for offset in 0..nframes {
+        let mut offset = 0;
+        while offset < nframes {
             let global_16th = (self.total_beats / 0.25) as u32;
             if offset == 0 || global_16th != self.last_global_16th {
                 state
@@ -970,11 +1028,24 @@ impl SnapshotSequencerClock {
                     }
                 }
             }
+            // Samples that cannot reach a step, 16th or bar edge evaluate
+            // exactly like this one (no trigger, no store changes value), so
+            // jump over them. Positions derive from the frame count, never
+            // accumulate, so a jump lands on the same beats as stepping. The
+            // chunk's last sample is always evaluated: it leaves the
+            // per-track read positions a later roll window compares against.
+            let quiet = if may_skip && offset + 2 < nframes {
+                self.quiet_frames_after(snapshot, num_tracks, self.total_beats, samples_per_quarter)
+                    .min(nframes - offset - 2)
+            } else {
+                0
+            };
             // Sample zero observes beat zero. Only after evaluating this
             // sample do we advance to the next sample's musical position.
-            self.tempo_frames += 1;
+            self.tempo_frames += 1 + quiet as u64;
             self.total_beats = self.tempo_origin_beats
                 + self.tempo_frames as f64 / samples_per_quarter;
+            offset += 1 + quiet;
         }
 
         // Publish the local phase every scheduler block, not only on a step

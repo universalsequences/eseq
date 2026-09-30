@@ -1056,12 +1056,14 @@
 (def len-memo (list))
 (def prepared-memo (list))   ; `prepared` below: body → route records
 
-(def memo-find (m key)
-  (if (empty? m)
-      nil
-      (if (= (first (first m)) key)
-          (nth (first m) 1)
-          (memo-find (rest m) key))))
+(def memo-find (m key) (memo-find-at m key 0 (len m)))
+
+;; walks by index: `(rest m)` would copy the rest of the list every step
+(def memo-find-at (m key i n)
+  (if (>= i n) nil (memo-check m key i n (nth m i))))
+
+(def memo-check (m key i n entry)
+  (if (= (nth entry 0) key) (nth entry 1) (memo-find-at m key (+ i 1) n)))
 
 ;; ── evaluation period ───────────────────────────────────────────────────────
 ;; eval-at depends on the cycle index only through per-cycle arguments ((cyc
@@ -1205,7 +1207,10 @@
   (let ((pd (get p :period)))
     (if (and (number? pd) (> pd 0)) (imod cycle pd) cycle)))
 
-(def eval-cycle (p cycle hand st)
+(def eval-cycle (p cycle hand st) (first (eval-cycle-entry p cycle hand st)))
+
+;; (list result buckets): eval-cycle's result and its `unit-buckets`
+(def eval-cycle-entry (p cycle hand st)
   ;; Payload channels can alter evaluated event data but never cycle length.
   ;; Include their epoch here only: len-memo and lens-memo intentionally keep
   ;; their structural keys across channel writes.
@@ -1215,9 +1220,33 @@
     (let ((hit (memo-find memo-store key)))
       (if (= hit nil)
           (let ((r (eval-at p cycle hand st)))
-            (do (set! memo-store (cons (list key r) (take* 63 memo-store)))
-                r))
+            (let ((entry (list r (unit-buckets r))))
+              (do (set! memo-store (cons (list key entry) (take* 63 memo-store)))
+                  entry)))
           hit))))
+
+;; A cycle's events grouped by the unit they start in, (floor :off): bucket
+;; u holds, in order, exactly the events `emit-window` can emit for unit u,
+;; so a tick looks at those instead of the whole cycle.
+(def unit-buckets (r)
+  (reduce (lambda (buckets e) (add-to-bucket buckets (ev-unit e) e))
+          (repeat* (list) (max 1 (r-ceil (get r :len))))
+          (get r :events)))
+
+(def ev-unit (e) (idiv (r-num (get e :off)) (r-den (get e :off))))
+
+;; an event outside the cycle's buckets makes them unusable (nil)
+(def add-to-bucket (buckets u e)
+  (if (and (not (= buckets nil)) (>= u 0) (< u (len buckets)))
+      (set-nth buckets u (append (nth buckets u) (list e)))
+      nil))
+
+;; the events `emit-window` needs for unit u: its bucket when the cycle has
+;; buckets (nil: an event outside them), else every event
+(def window-events (r units u)
+  (if (and (not (= units nil)) (>= u 0) (< u (len units)))
+      (nth units u)
+      (get r :events)))
 
 ;; length-only figure evaluation: cycle length depends on the symbolic-event
 ;; transforms, the time-mod, and alignment — never on hands, velocities, or
@@ -1642,11 +1671,12 @@
     (let ((loc (locate p tick)))
       (let ((c (first loc)) (cstart (nth loc 1)))
         (do (ensure-state p c)
-            (let ((r (eval-cycle p c (n->hand (state-get (cell p "jaki-hand") 0))
-                                 (load-state p))))
-              (emit-window p (get r :events) (- tick cstart)
-                           (round-int (resolve-arg track c))
-                           opts c (r->f (get r :len)))))))))
+            (let ((entry (eval-cycle-entry p c (n->hand (state-get (cell p "jaki-hand") 0))
+                                           (load-state p))))
+              (let ((r (first entry)))
+                (emit-window p (window-events r (nth entry 1) (- tick cstart)) (- tick cstart)
+                             (round-int (resolve-arg track c))
+                             opts c (r->f (get r :len))))))))))
 
 (def emit (p track) (emit* p track (dict)))
 

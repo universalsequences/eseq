@@ -1087,7 +1087,10 @@ pub(super) fn schedule_live_midi_fx(
     }
     let samples_per_quarter = sample_rate as f32 * 60.0 / snapshot.transport.bpm as f32;
     let horizon = rendered_sample.saturating_add(lookahead_samples);
-    let midi_fx_descriptors = runtime.midi_fx_descriptors();
+    // Built on first use: most polls have no held live notes, and building
+    // clones every registered midi-fx's params.
+    let midi_fx_descriptor_source = runtime.midi_fx_descriptor_source();
+    let mut midi_fx_descriptors: Option<Vec<EffectDescriptor>> = None;
     let mut track_output_events = Vec::new();
 
     for track_idx in 0..snapshot.tracks.len().min(MAX_TRACKS) {
@@ -1100,8 +1103,10 @@ pub(super) fn schedule_live_midi_fx(
         let num_steps = snapshot.tracks[track_idx].params.num_steps.max(1);
         let step = (state.transport.track_playheads[track_idx].load(Ordering::Relaxed) as usize)
             % num_steps;
+        let midi_fx_descriptors =
+            midi_fx_descriptors.get_or_insert_with(|| midi_fx_descriptor_source.descriptors());
         let Some(live_tick_beats) =
-            midi_fx_clock_tick_beats(snapshot, &midi_fx_descriptors, track_idx, step)
+            midi_fx_clock_tick_beats(snapshot, midi_fx_descriptors, track_idx, step)
         else {
             let pending_notes = live_tracks[track_idx]
                 .notes

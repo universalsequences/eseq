@@ -325,6 +325,32 @@ fn shift_chord_durations_for_print(chord: &mut ScheduledChordData, delta: Option
     }
 }
 
+/// Forget retained graph emissions that can no longer sound (or belong to
+/// an older seek generation): only those still ahead of `rendered` can need
+/// a resync replay.
+fn retain_live_graph_emissions(
+    graph_replay: &mut Vec<RetainedGraphEmission>,
+    clock: &SnapshotSequencerClock,
+    base_snapshot: &SequencerSnapshot,
+    samples_per_quarter: f64,
+    rendered: u64,
+) {
+    let late_reach = (base_snapshot.groove_late_lead_beats() * samples_per_quarter).ceil();
+    let late_reach = if late_reach.is_finite() && late_reach > 0.0 {
+        late_reach as u64
+    } else {
+        0
+    };
+    let generation = clock.seek_generation;
+    graph_replay.retain(|retained| {
+        retained.generation == generation
+            && retained
+                .enqueued_sample
+                .max(retained.emission.sample_time.saturating_add(late_reach))
+                >= rendered
+    });
+}
+
 pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
     scheduler: &mut SchedulerLookaheadState,
     state: &Arc<SequencerState>,
@@ -364,33 +390,6 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
     // `feed_track_output_reads`.
     let mut track_output_read_cursor = 0_usize;
 
-    process_runtime.sync_step_process_aliases(
-        base_snapshot
-            .tracks
-            .iter()
-            .enumerate()
-            .map(|(track, snapshot)| (track, &snapshot.process_chain)),
-    );
-
-    let resolved_read_bases = vec![
-        std::array::from_fn(|index| StepParam::ALL[index].default_value());
-        base_snapshot.tracks.len()
-    ];
-    if scheduler.resolved_read_pattern_epoch != Some(pattern_epoch) {
-        process_runtime.reset_resolved_track_history(&resolved_read_bases);
-        for graph in graph_runtimes.iter_mut() {
-            graph.clear_deltas();
-        }
-        scheduler.resolved_read_pattern_epoch = Some(pattern_epoch);
-    } else {
-        process_runtime.ensure_resolved_track_bases(&resolved_read_bases);
-    }
-
-    let midi_fx_descriptors_for_scheduling = scratch_runtime
-        .as_ref()
-        .map(|runtime| runtime.midi_fx_descriptors())
-        .unwrap_or_default();
-
     // Rack groove early hits (docs/rack-groove-spec.md §Early hits): a
     // negative offset sounds a trig up to `E` beats BEFORE its straight
     // boundary, so every source must be discovered at least `E` ahead of the
@@ -418,6 +417,57 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
     let horizon = rendered
         .saturating_add(lookahead_target_samples)
         .saturating_add(early_lead_samples);
+    // The worker polls every ~1 ms against a render head that moves one
+    // audio block at a time, so most calls find the frontier already at the
+    // horizon. Those only keep the render-head bookkeeping every call does;
+    // the per-call setup below (process aliases, resolved-read bases, the
+    // chunk loop) waits for a call that schedules.
+    if scheduled_until_sample >= horizon && !clock.graph_replay_pending() {
+        clock.forget_sounded_step_hits(rendered);
+        retain_live_graph_emissions(graph_replay, clock, base_snapshot, samples_per_quarter, rendered);
+        state.set_track_output_current_beat(clock.total_beats);
+        return SchedulerLookaheadResult {
+            scheduled_until_sample,
+        };
+    }
+
+    process_runtime.sync_step_process_aliases(
+        base_snapshot
+            .tracks
+            .iter()
+            .enumerate()
+            .map(|(track, snapshot)| (track, &snapshot.process_chain)),
+    );
+
+    let resolved_read_bases = vec![
+        std::array::from_fn(|index| StepParam::ALL[index].default_value());
+        base_snapshot.tracks.len()
+    ];
+    if scheduler.resolved_read_pattern_epoch != Some(pattern_epoch) {
+        process_runtime.reset_resolved_track_history(&resolved_read_bases);
+        for graph in graph_runtimes.iter_mut() {
+            graph.clear_deltas();
+        }
+        scheduler.resolved_read_pattern_epoch = Some(pattern_epoch);
+    } else {
+        process_runtime.ensure_resolved_track_bases(&resolved_read_bases);
+    }
+
+    // Built on first use: only active step trigs read them, and building
+    // clones every registered midi-fx's params.
+    let midi_fx_descriptor_source = scratch_runtime
+        .as_ref()
+        .map(|runtime| runtime.midi_fx_descriptor_source());
+    let midi_fx_descriptors_cell = std::cell::OnceCell::new();
+    let midi_fx_descriptors_for_scheduling = || -> &Vec<EffectDescriptor> {
+        midi_fx_descriptors_cell.get_or_init(|| {
+            midi_fx_descriptor_source
+                .as_ref()
+                .map(|source| source.descriptors())
+                .unwrap_or_default()
+        })
+    };
+
     let groove_floor = clock.groove_floor(rendered);
     clock.forget_sounded_step_hits(rendered);
     // Graph emissions a mid-play resync cleared from the queue: the graph
@@ -443,22 +493,7 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
             debug_accum,
         );
     }
-    {
-        let late_reach = (base_snapshot.groove_late_lead_beats() * samples_per_quarter).ceil();
-        let late_reach = if late_reach.is_finite() && late_reach > 0.0 {
-            late_reach as u64
-        } else {
-            0
-        };
-        let generation = clock.seek_generation;
-        graph_replay.retain(|retained| {
-            retained.generation == generation
-                && retained
-                    .enqueued_sample
-                    .max(retained.emission.sample_time.saturating_add(late_reach))
-                    >= rendered
-        });
-    }
+    retain_live_graph_emissions(graph_replay, clock, base_snapshot, samples_per_quarter, rendered);
     while scheduled_until_sample < horizon {
         let max_chunk_frames = (horizon - scheduled_until_sample)
             .min(scheduler_block_size as u64) as usize;
@@ -961,7 +996,7 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
             if track_has_live_midi_fx_notes(
                 live_midi_fx_tracks,
                 snapshot,
-                &midi_fx_descriptors_for_scheduling,
+                midi_fx_descriptors_for_scheduling(),
                 trigger.track,
             ) {
                 continue;
@@ -1101,7 +1136,7 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                     };
                     apply_process_target_writes(
                         snapshot,
-                        &midi_fx_descriptors_for_scheduling,
+                        midi_fx_descriptors_for_scheduling(),
                         trigger.track,
                         trigger.step,
                         &mut resolved,
@@ -1171,7 +1206,7 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                                 process_runtime,
                                 runtime_id,
                                 snapshot,
-                                &midi_fx_descriptors_for_scheduling,
+                                midi_fx_descriptors_for_scheduling(),
                                 trigger.track,
                                 trigger.step,
                                 trigger.absolute_beats,
@@ -1271,7 +1306,7 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                             process_runtime,
                             runtime_id,
                             snapshot,
-                            &midi_fx_descriptors_for_scheduling,
+                            midi_fx_descriptors_for_scheduling(),
                             trigger.track,
                             trigger.step,
                             trigger.absolute_beats,
@@ -1594,7 +1629,7 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                                 if track_has_live_midi_fx_notes(
                                     live_midi_fx_tracks,
                                     snapshot,
-                                    &midi_fx_descriptors_for_scheduling,
+                                    midi_fx_descriptors_for_scheduling(),
                                     event.track,
                                 ) {
                                     continue;
@@ -1692,7 +1727,7 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                 if track_has_live_midi_fx_notes(
                     live_midi_fx_tracks,
                     snapshot,
-                    &midi_fx_descriptors_for_scheduling,
+                    midi_fx_descriptors_for_scheduling(),
                     target_track,
                 ) {
                     continue;
@@ -1752,7 +1787,7 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                         );
                         let mut events = midi_fx_window_events_from_step(
                             snapshot,
-                            &midi_fx_descriptors_for_scheduling,
+                            midi_fx_descriptors_for_scheduling(),
                             target_track,
                             trigger.step,
                             trigger.samples_per_step,

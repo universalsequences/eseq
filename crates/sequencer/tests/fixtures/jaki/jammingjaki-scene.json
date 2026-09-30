@@ -1,0 +1,454 @@
+{
+ "source": "jammingjaki.json current_pattern 8, bpm 120",
+ "figures": {
+  "List": [
+   {
+    "List": [
+     {
+      "Keyword": "dash"
+     },
+     {
+      "Keyword": "dot"
+     },
+     {
+      "Keyword": "dot"
+     }
+    ]
+   },
+   {
+    "List": [
+     {
+      "Keyword": "dot"
+     },
+     {
+      "Keyword": "dash"
+     }
+    ]
+   }
+  ]
+ },
+ "rows": {
+  "List": [
+   {
+    "Map": {
+     "mods": {
+      "List": [
+       {
+        "List": [
+         {
+          "String": "note"
+         },
+         {
+          "List": [
+           {
+            "String": "seq"
+           },
+           {
+            "String": ":hit"
+           },
+           {
+            "Number": -25.0
+           },
+           {
+            "List": [
+             {
+              "Number": -6.0
+             },
+             {
+              "Number": 1.0
+             }
+            ]
+           },
+           {
+            "Number": -13.0
+           }
+          ]
+         }
+        ]
+       },
+       {
+        "List": [
+         {
+          "String": "minvel"
+         },
+         {
+          "Number": 0.0
+         }
+        ]
+       },
+       {
+        "List": [
+         {
+          "String": "dashdecay"
+         },
+         {
+          "Number": 0.0
+         }
+        ]
+       },
+       {
+        "List": [
+         {
+          "String": "dotdecay"
+         },
+         {
+          "Number": 0.0
+         }
+        ]
+       },
+       {
+        "List": [
+         {
+          "String": "on"
+         },
+         {
+          "List": [
+           {
+            "String": "fig"
+           },
+           {
+            "Number": 1.0
+           }
+          ]
+         },
+         {
+          "List": [
+           {
+            "String": "every"
+           },
+           {
+            "Number": 2.0
+           },
+           {
+            "String": "half"
+           }
+          ]
+         }
+        ]
+       },
+       {
+        "List": [
+         {
+          "String": "on"
+         },
+         {
+          "List": [
+           {
+            "String": "fig"
+           },
+           {
+            "Number": 2.0
+           }
+          ]
+         },
+         {
+          "List": [
+           {
+            "String": "every"
+           },
+           {
+            "Number": 2.0
+           },
+           {
+            "List": [
+             {
+              "String": "fast"
+             },
+             {
+              "Number": 1.0
+             }
+            ]
+           }
+          ]
+         }
+        ]
+       },
+       {
+        "List": [
+         {
+          "String": "shift"
+         },
+         {
+          "Number": 2.0
+         }
+        ]
+       },
+       {
+        "List": [
+         {
+          "String": "on"
+         },
+         {
+          "List": [
+           {
+            "String": "fig"
+           },
+           {
+            "Number": 2.0
+           }
+          ]
+         },
+         {
+          "List": [
+           {
+            "String": "minvel"
+           },
+           {
+            "Number": 0.5
+           }
+          ]
+         }
+        ]
+       }
+      ]
+     },
+     "route": {
+      "Number": 0.0
+     }
+    }
+   },
+   {
+    "Map": {
+     "mods": {
+      "List": [
+       {
+        "String": "left"
+       },
+       {
+        "List": [
+         {
+          "String": "quant"
+         },
+         {
+          "String": ":8"
+         }
+        ]
+       },
+       {
+        "List": [
+         {
+          "String": "minvel"
+         },
+         {
+          "Number": 0.0
+         }
+        ]
+       },
+       {
+        "List": [
+         {
+          "String": "dotdecay"
+         },
+         {
+          "Number": 0.0
+         }
+        ]
+       },
+       {
+        "List": [
+         {
+          "String": "dashdecay"
+         },
+         {
+          "Number": 0.0
+         }
+        ]
+       }
+      ]
+     },
+     "route": {
+      "Number": 2.0
+     }
+    }
+   },
+   {
+    "Map": {
+     "mods": {
+      "List": [
+       {
+        "List": [
+         {
+          "String": "minvel"
+         },
+         {
+          "Number": 0.0
+         }
+        ]
+       },
+       {
+        "List": [
+         {
+          "String": "quant"
+         },
+         {
+          "String": ":4"
+         }
+        ]
+       },
+       {
+        "List": [
+         {
+          "String": "dashdecay"
+         },
+         {
+          "Number": 0.0
+         }
+        ]
+       },
+       {
+        "List": [
+         {
+          "String": "vel*"
+         },
+         {
+          "List": [
+           {
+            "String": "seq"
+           },
+           {
+            "String": ":fig"
+           },
+           {
+            "Number": 1.0
+           },
+           {
+            "Number": 0.15000000000000002
+           }
+          ]
+         }
+        ]
+       }
+      ]
+     },
+     "route": {
+      "Number": 1.0
+     }
+    }
+   },
+   {
+    "Map": {
+     "mods": {
+      "List": [
+       {
+        "List": [
+         {
+          "String": "on"
+         },
+         {
+          "List": [
+           {
+            "String": "fig"
+           },
+           {
+            "Number": 1.0
+           }
+          ]
+         },
+         {
+          "String": "left"
+         }
+        ]
+       },
+       {
+        "List": [
+         {
+          "String": "every"
+         },
+         {
+          "Number": 4.0
+         },
+         {
+          "String": "half"
+         }
+        ]
+       },
+       {
+        "List": [
+         {
+          "String": "minvel"
+         },
+         {
+          "Number": 0.42
+         }
+        ]
+       },
+       {
+        "List": [
+         {
+          "String": "dashdecay"
+         },
+         {
+          "Number": 0.48
+         }
+        ]
+       },
+       {
+        "List": [
+         {
+          "String": "dotdecay"
+         },
+         {
+          "Number": 0.44
+         }
+        ]
+       }
+      ]
+     },
+     "route": {
+      "Number": 3.0
+     }
+    }
+   },
+   {
+    "Map": {
+     "mods": {
+      "List": [
+       {
+        "String": "left"
+       },
+       {
+        "List": [
+         {
+          "String": "quant"
+         },
+         {
+          "String": ":4"
+         }
+        ]
+       },
+       {
+        "List": [
+         {
+          "String": "note"
+         },
+         {
+          "List": [
+           {
+            "String": "seq"
+           },
+           {
+            "String": ":hit"
+           },
+           {
+            "Number": 6.0
+           },
+           {
+            "Number": -8.0
+           },
+           {
+            "Number": -3.0
+           }
+          ]
+         }
+        ]
+       }
+      ]
+     },
+     "route": {
+      "Number": 4.0
+     }
+    }
+   }
+  ]
+ }
+}

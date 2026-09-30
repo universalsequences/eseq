@@ -51,6 +51,29 @@ pub(super) enum RegisteredAccumulatorCallback {
 
 pub(super) type SharedRegisteredAccumulators = Arc<Mutex<Vec<RegisteredAccumulator>>>;
 pub(super) type SharedRegisteredMidiFx = Arc<Mutex<Vec<RegisteredAccumulator>>>;
+
+/// A runtime's midi-fx registry, read into descriptors on demand
+/// ([`ScratchControlRuntime::midi_fx_descriptor_source`]).
+pub struct MidiFxDescriptorSource(SharedRegisteredMidiFx);
+
+impl MidiFxDescriptorSource {
+    pub fn descriptors(&self) -> Vec<EffectDescriptor> {
+        self.0
+            .lock()
+            .map(|registry| {
+                registry
+                    .iter()
+                    .map(|entry| {
+                        let mut desc = EffectDescriptor::empty_custom_slot();
+                        desc.name = entry.name.clone();
+                        desc.params = entry.params.clone();
+                        desc
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+}
 pub(super) type SharedPendingMidiFxParams = Arc<Mutex<Vec<crate::effects::ParamDescriptor>>>;
 pub(super) type SharedMidiFxState = Arc<Mutex<HashMap<String, EValue>>>;
 
@@ -695,20 +718,13 @@ impl ScratchControlRuntime {
     }
 
     pub fn midi_fx_descriptors(&self) -> Vec<EffectDescriptor> {
-        self.midi_fx
-            .lock()
-            .map(|registry| {
-                registry
-                    .iter()
-                    .map(|entry| {
-                        let mut desc = EffectDescriptor::empty_custom_slot();
-                        desc.name = entry.name.clone();
-                        desc.params = entry.params.clone();
-                        desc
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
+        self.midi_fx_descriptor_source().descriptors()
+    }
+
+    /// What [`Self::midi_fx_descriptors`] reads, for building them later
+    /// (on first need) without borrowing the runtime.
+    pub fn midi_fx_descriptor_source(&self) -> MidiFxDescriptorSource {
+        MidiFxDescriptorSource(Arc::clone(&self.midi_fx))
     }
 
     pub fn invoke_accumulator(
@@ -1215,6 +1231,16 @@ impl ScratchControlRuntime {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    /// Lisp function timings across every call on this runtime between the
+    /// two (eseqlisp's host profile window), for scheduler perf probes.
+    pub fn begin_lisp_profile(&mut self) {
+        self.runtime.begin_host_function_profile();
+    }
+
+    pub fn finish_lisp_profile(&mut self) -> Vec<eseqlisp::vm::LispFunctionTiming> {
+        self.runtime.finish_host_function_profile()
     }
 
     /// Invoke a registered generator's `:tick` closure for one boundary crossing,

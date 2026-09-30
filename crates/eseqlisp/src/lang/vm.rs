@@ -74,13 +74,21 @@ pub struct NativeFunction {
     name: String,
     callable: NativeFn,
     expansion_safe: bool,
+    /// The same native over borrowed arguments, for pure core natives
+    /// (`register_borrowing_native`). A direct call uses it on the stack
+    /// cells in place: the owned `callable` path deep-clones every argument
+    /// first, so `(get event :off)` would copy the whole map to read a key.
+    borrowed: Option<BorrowedNativeFn>,
 }
+
+/// A pure native over borrowed arguments; see [`NativeFunction::borrowed`].
+pub type BorrowedNativeFn = fn(&[&Value]) -> Value;
 
 impl NativeFunction {
     /// An anonymous native callable, for host code that hands a callback to
     /// a widget prop without registering a global.
     pub fn new(name: impl Into<String>, f: impl Fn(Vec<Value>, &mut VM) -> Value + 'static) -> Self {
-        Self { name: name.into(), callable: Rc::new(f), expansion_safe: false }
+        Self { name: name.into(), callable: Rc::new(f), expansion_safe: false, borrowed: None }
     }
 }
 pub type GlobalStoreHook = Rc<dyn Fn(&str, &Value)>;
@@ -2707,25 +2715,7 @@ pub fn register_core_natives(vm: &mut VM) {
 
     // (get collection :key) → value, or nil if missing.
     // Works on both Maps and keyword-value lists like (:label "foo" :children (...)).
-    vm.register_native("get", |args| {
-        let Some(Value::Keyword(k)) = args.get(1) else {
-            return Value::Nil;
-        };
-        match args.first() {
-            Some(Value::Map(m)) => m.get(k).map(|v| v.borrow().clone()).unwrap_or(Value::Nil),
-            Some(Value::List(list)) => {
-                let mut i = 0;
-                while i + 1 < list.len() {
-                    if matches!(&*list[i].borrow(), Value::Keyword(kk) if kk == k) {
-                        return list[i + 1].borrow().clone();
-                    }
-                    i += 2;
-                }
-                Value::Nil
-            }
-            _ => Value::Nil,
-        }
-    });
+    vm.register_borrowing_native("get", core_get);
 
     vm.register_native_with_vm("reactive-get", |args, vm| {
         let (Some(Value::String(namespace)), Some(Value::String(field))) =
@@ -2866,23 +2856,7 @@ pub fn register_core_natives(vm: &mut VM) {
     });
 
     // (merge map :key val ...) → new map with overrides
-    vm.register_native("merge", |args| {
-        let mut map = if let Some(Value::Map(m)) = args.first() {
-            m.iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect::<HashMap<_, _>>()
-        } else {
-            HashMap::new()
-        };
-        let mut i = 1;
-        while i + 1 < args.len() {
-            if let Value::Keyword(k) = &args[i] {
-                map.insert(k.clone(), Rc::new(RefCell::new(args[i + 1].clone())));
-            }
-            i += 2;
-        }
-        Value::Map(map)
-    });
+    vm.register_borrowing_native("merge", core_merge);
 
     // (keys map) → List of keywords, sorted. Maps are hash maps, so an
     // unsorted walk would vary per process; the same sort keeps `str`/`source`
@@ -2903,70 +2877,28 @@ pub fn register_core_natives(vm: &mut VM) {
     });
 
     // (first list) → first element or false
-    vm.register_native("first", |args| {
-        if let Some(Value::List(l)) = args.first() {
-            l.first().map(|v| v.borrow().clone()).unwrap_or(Value::Nil)
-        } else {
-            Value::Nil
-        }
-    });
+    vm.register_borrowing_native("first", core_first);
 
     // (rest list) → tail of list or empty list
-    vm.register_native("rest", |args| {
-        if let Some(Value::List(l)) = args.first() {
-            Value::List(l[1..].to_vec())
-        } else {
-            Value::List(vec![])
-        }
-    });
+    vm.register_borrowing_native("rest", core_rest);
 
     // (cons val list) → new list with val prepended
-    vm.register_native("cons", |args| {
-        if let (Some(head), Some(Value::List(tail))) = (args.first(), args.get(1)) {
-            let mut new = vec![Rc::new(RefCell::new(head.clone()))];
-            new.extend(tail.iter().cloned());
-            Value::List(new)
-        } else {
-            Value::List(vec![])
-        }
-    });
+    vm.register_borrowing_native("cons", core_cons);
 
     // (len list-or-string) → number
-    vm.register_native("len", |args| match args.first() {
-        Some(Value::List(l)) => Value::Number(l.len() as f64),
-        Some(Value::String(s)) => Value::Number(s.chars().count() as f64),
-        _ => Value::Number(0.0),
-    });
+    vm.register_borrowing_native("len", core_len);
 
     // (append list ...) → concatenated list
-    vm.register_native("append", |args| {
-        let mut result = vec![];
-        for arg in &args {
-            if let Value::List(l) = arg {
-                result.extend(l.iter().cloned());
-            }
-        }
-        Value::List(result)
-    });
+    vm.register_borrowing_native("append", core_append);
 
     // (list a b c) -> List
     vm.register_native("list", |args| list_from_values(args));
 
-    vm.register_native("empty?", |args| match args.first() {
-        Some(Value::List(items)) => Value::Bool(items.is_empty()),
-        Some(Value::String(s)) => Value::Bool(s.is_empty()),
-        Some(Value::Map(map)) => Value::Bool(map.is_empty()),
-        Some(Value::Nil) | None => Value::Bool(true),
-        _ => Value::Bool(false),
-    });
+    vm.register_borrowing_native("empty?", core_is_empty);
 
-    vm.register_native("number?", |args| {
-        Value::Bool(matches!(args.first(), Some(Value::Number(_))))
-    });
+    vm.register_borrowing_native("number?", core_is_number);
 
-    vm.register_native("string?", |args| {
-        Value::Bool(matches!(args.first(), Some(Value::String(_))))
-    });
+    vm.register_borrowing_native("string?", core_is_string);
 
     vm.register_native("set-nth", |args| {
         let (Some(Value::List(items)), Some(Value::Number(idx)), Some(value)) =
@@ -3637,18 +3569,7 @@ pub fn register_core_natives(vm: &mut VM) {
     });
 
     // (nth list idx) -> value or nil; idx is 0-based
-    vm.register_native("nth", |args| {
-        let (Some(Value::List(list)), Some(Value::Number(idx))) = (args.first(), args.get(1))
-        else {
-            return Value::Nil;
-        };
-        if *idx < 0.0 {
-            return Value::Nil;
-        }
-        list.get(*idx as usize)
-            .map(|value| value.borrow().clone())
-            .unwrap_or(Value::Nil)
-    });
+    vm.register_borrowing_native("nth", core_nth);
 
     // (reverse list) -> reversed list
     vm.register_native("reverse", |args| {
@@ -3851,6 +3772,125 @@ pub fn register_core_natives(vm: &mut VM) {
         "zip", "nth", "reverse", "chunks", "range", "not", "str", "substring",
         "str-contains?", "gensym", "source", "fmt", "number?", "string?",
     ]);
+}
+
+// Pure core natives over borrowed arguments (`VM::register_borrowing_native`):
+// a direct call reads the argument cells in place instead of cloning them.
+
+/// `(get collection :key)`: see `register_core_natives`.
+fn core_get(args: &[&Value]) -> Value {
+    let Some(Value::Keyword(k)) = args.get(1).copied() else {
+        return Value::Nil;
+    };
+    match args.first().copied() {
+        Some(Value::Map(m)) => m.get(k).map(|v| v.borrow().clone()).unwrap_or(Value::Nil),
+        Some(Value::List(list)) => {
+            let mut i = 0;
+            while i + 1 < list.len() {
+                if matches!(&*list[i].borrow(), Value::Keyword(kk) if kk == k) {
+                    return list[i + 1].borrow().clone();
+                }
+                i += 2;
+            }
+            Value::Nil
+        }
+        _ => Value::Nil,
+    }
+}
+
+fn core_merge(args: &[&Value]) -> Value {
+    let mut map = if let Some(Value::Map(m)) = args.first().copied() {
+        m.iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect::<HashMap<_, _>>()
+    } else {
+        HashMap::new()
+    };
+    let mut i = 1;
+    while i + 1 < args.len() {
+        if let Value::Keyword(k) = args[i] {
+            map.insert(k.clone(), Rc::new(RefCell::new(args[i + 1].clone())));
+        }
+        i += 2;
+    }
+    Value::Map(map)
+}
+
+fn core_first(args: &[&Value]) -> Value {
+    if let Some(Value::List(l)) = args.first().copied() {
+        l.first().map(|v| v.borrow().clone()).unwrap_or(Value::Nil)
+    } else {
+        Value::Nil
+    }
+}
+
+fn core_rest(args: &[&Value]) -> Value {
+    if let Some(Value::List(l)) = args.first().copied() {
+        Value::List(l[1..].to_vec())
+    } else {
+        Value::List(vec![])
+    }
+}
+
+fn core_cons(args: &[&Value]) -> Value {
+    if let (Some(head), Some(Value::List(tail))) = (args.first().copied(), args.get(1).copied()) {
+        let mut new = Vec::with_capacity(tail.len() + 1);
+        new.push(Rc::new(RefCell::new(head.clone())));
+        new.extend(tail.iter().cloned());
+        Value::List(new)
+    } else {
+        Value::List(vec![])
+    }
+}
+
+fn core_len(args: &[&Value]) -> Value {
+    match args.first().copied() {
+        Some(Value::List(l)) => Value::Number(l.len() as f64),
+        Some(Value::String(s)) => Value::Number(s.chars().count() as f64),
+        _ => Value::Number(0.0),
+    }
+}
+
+fn core_append(args: &[&Value]) -> Value {
+    let mut result = vec![];
+    for arg in args {
+        if let Value::List(l) = arg {
+            result.extend(l.iter().cloned());
+        }
+    }
+    Value::List(result)
+}
+
+fn core_is_empty(args: &[&Value]) -> Value {
+    match args.first().copied() {
+        Some(Value::List(items)) => Value::Bool(items.is_empty()),
+        Some(Value::String(s)) => Value::Bool(s.is_empty()),
+        Some(Value::Map(map)) => Value::Bool(map.is_empty()),
+        Some(Value::Nil) | None => Value::Bool(true),
+        _ => Value::Bool(false),
+    }
+}
+
+fn core_is_number(args: &[&Value]) -> Value {
+    Value::Bool(matches!(args.first().copied(), Some(Value::Number(_))))
+}
+
+fn core_is_string(args: &[&Value]) -> Value {
+    Value::Bool(matches!(args.first().copied(), Some(Value::String(_))))
+}
+
+fn core_nth(args: &[&Value]) -> Value {
+    let (Some(Value::List(list)), Some(Value::Number(idx))) =
+        (args.first().copied(), args.get(1).copied())
+    else {
+        return Value::Nil;
+    };
+    if *idx < 0.0 {
+        return Value::Nil;
+    }
+    list.get(*idx as usize)
+        .map(|value| value.borrow().clone())
+        .unwrap_or(Value::Nil)
 }
 
 fn reactive_float_ref(
@@ -4657,6 +4697,25 @@ impl VM {
         self.register_native_with_vm(name, move |args, _vm| f(args));
     }
 
+    /// Register a pure native written over borrowed arguments. Called by
+    /// name it runs on the argument cells in place; every other route
+    /// (`apply`, a native handed a callback, `invoke`) goes through the same
+    /// function, so both paths share one implementation.
+    pub fn register_borrowing_native(&mut self, name: &str, f: BorrowedNativeFn) {
+        self.register_native(name, move |args| {
+            let refs: Vec<&Value> = args.iter().collect();
+            f(&refs)
+        });
+        let Some(idx) = self.resolve_global_read_index(name) else {
+            return;
+        };
+        if let Some(cell) = self.globals.get(idx).and_then(Option::as_ref) {
+            if let Value::NativeFunction(native) = &mut *cell.borrow_mut() {
+                native.borrowed = Some(f);
+            }
+        }
+    }
+
     pub fn register_native_with_vm(
         &mut self,
         name: &str,
@@ -4677,6 +4736,7 @@ impl VM {
             name: name.to_string(),
             callable: Rc::new(f),
             expansion_safe: false,
+            borrowed: None,
         });
         // Re-registration mutates the existing cell in place instead of
         // replacing the slot Option: a converted module's healed alias slot
@@ -6394,6 +6454,24 @@ impl VM {
             EffectTarget::BufferId(None) => "active-buffer".to_string(),
             EffectTarget::BufferName(name) => name.clone(),
         }
+    }
+
+    /// Time every Lisp function call from now until
+    /// [`Self::finish_host_function_profile`]: a window the host chooses (a
+    /// scheduler perf probe) rather than one reactive effect.
+    pub fn begin_host_function_profile(&mut self) {
+        if self.active_function_profiler.is_none() {
+            self.active_function_profiler = Some(FunctionProfiler::new());
+        }
+    }
+
+    /// End a [`Self::begin_host_function_profile`] window: per-function call
+    /// counts and self/inclusive time, highest self time first.
+    pub fn finish_host_function_profile(&mut self) -> Vec<LispFunctionTiming> {
+        self.active_function_profiler
+            .take()
+            .map(|profiler| profiler.finish().1)
+            .unwrap_or_default()
     }
 
     fn begin_function_profile(&mut self) -> bool {
@@ -8258,8 +8336,10 @@ impl VM {
                 OpCode::LoadGlobal(idx) => {
                     if let Some(frame) = frames.last_mut() {
                         if let Some(val) = self.global_read_cell(idx) {
-                            if let Some(name) = self.global_names.get(idx).cloned() {
-                                self.record_symbol_read(&name);
+                            if self.current_effect_symbol_reads.is_some() {
+                                if let Some(name) = self.global_names.get(idx).cloned() {
+                                    self.record_symbol_read(&name);
+                                }
                             }
                             stack.push(val);
                             frame.pc += 1;
@@ -8659,6 +8739,29 @@ impl VM {
                                     self.profile_enter_chunk(chunk_idx);
                                 }
                                 frames.push(frame);
+                            }
+                            Value::NativeFunction(NativeFunction {
+                                borrowed: Some(f),
+                                expansion_safe,
+                                ..
+                            }) if *expansion_safe || self.active_expander.is_none() => {
+                                // A pure core native: run it on the argument
+                                // cells where they sit (no clones), then pop them.
+                                let f = *f;
+                                drop(borrowed);
+                                if stack.len() < arity {
+                                    return Err(VMError::StackUnderflow);
+                                }
+                                let base = stack.len() - arity;
+                                let result = {
+                                    let cells: Vec<std::cell::Ref<'_, Value>> =
+                                        stack[base..].iter().map(|cell| cell.borrow()).collect();
+                                    let args: Vec<&Value> = cells.iter().map(|cell| &**cell).collect();
+                                    f(&args)
+                                };
+                                stack.truncate(base);
+                                stack.push(Rc::new(RefCell::new(result)));
+                                frames.last_mut().unwrap().pc += 1;
                             }
                             Value::NativeFunction(native) => {
                                 // Clone the callable metadata so the stack cell can be released

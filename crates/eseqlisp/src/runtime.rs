@@ -2352,6 +2352,16 @@ impl Runtime {
         self.vm.source_manager.exclude_module_alias_scan_root(root);
     }
 
+    /// See [`crate::vm::VM::begin_host_function_profile`].
+    pub fn begin_host_function_profile(&mut self) {
+        self.vm.begin_host_function_profile();
+    }
+
+    /// See [`crate::vm::VM::finish_host_function_profile`].
+    pub fn finish_host_function_profile(&mut self) -> Vec<crate::vm::LispFunctionTiming> {
+        self.vm.finish_host_function_profile()
+    }
+
     pub fn eval_str(&mut self, src: &str) -> Result<Option<Value>, crate::vm::VMError> {
         let current_buffer_id = self.shared.borrow().current_buffer_id;
         self.vm.set_current_effect_context(current_buffer_id);
