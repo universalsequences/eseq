@@ -1,11 +1,11 @@
 # PM Bongos — modal hand-drum kit from the bongo-breaks loop
 
-One sample-free instrument, installed in the local user library as
-**Physical Models / PM Bongos**. It re-creates every hit of the sampler track
+One sample-free factory instrument, shipped as **Drums / PM Bongos**
+(browser category *Percussion*). It re-creates every hit of the sampler track
 `A4 Bird Of Prey.flac` in `.local/projects/bongo-breaks.json` (the exact file
 is `.local/samples/610ba5ad…d06.wav`, verified by SHA256 in `analysis.json`).
-The reference is a commercial record, so the instrument stays in `.local`; the
-tools here store coefficients only (no PCM, recorded frames or envelopes).
+The reference is a commercial record; the instrument and the tools here store
+fitted coefficients only (no PCM, recorded frames or envelopes).
 
 ## Playing it
 
@@ -207,6 +207,7 @@ $P tools/pm-bongos/verify.py
 $P tools/pm-bongos/performance.py
 ```
 
-`engine.lisp.in` is the implementation; `build.py` generates the installed
-`dsp.lisp`, `ui.lisp`, presets and attribution, plus the tracked `model.lisp`,
-`ui.lisp` and `model.presets` copies here.
+`engine.lisp.in` is the implementation; `build.py` generates the factory
+`content/instruments/Drums/PM Bongos/` (`dsp.lisp`, `ui.lisp`, presets and
+attribution), plus the `model.lisp`, `ui.lisp` and `model.presets` copies here
+that the surface test reads.

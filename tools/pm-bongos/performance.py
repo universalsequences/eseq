@@ -15,7 +15,7 @@ sys.path.insert(0, str(ROOT/'tools/pm-gamelan'))
 from common import instrument
 from performance import timer
 
-MODELS = {'PM Bongos': ROOT/'.local/instruments/Physical Models/PM Bongos/dsp.lisp'}
+MODELS = {'PM Bongos': ROOT/'content/instruments/Drums/PM Bongos/dsp.lisp'}
 for name in ['PM Kethuk', 'PM Kempyang', 'PM Bonang', 'PM Saron']:
     MODELS[name] = ROOT/'content/instruments/Physical Models'/name/'dsp.lisp'
 

@@ -15,7 +15,7 @@ import numpy as np
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 NAME = 'PM Bongos'
-DEST = ROOT/'.local/instruments/Physical Models'/NAME
+DEST = ROOT/'content/instruments/Drums'/NAME
 MODES = 32
 STRIKES = 3
 FIRST_KEY = 60                 # C4 (the default step note); one measured stroke per semitone
@@ -159,8 +159,8 @@ def presets():
                 ('slappy', 'Hard Hands', {'hand.hardness': .8, 'contact.skin': 1.8, 'contact.skin_tone': .3, 'head.glide': .6}),
                 ('soft', 'Soft Fingers', {'hand.hardness': .2, 'contact.skin': .5, 'hand.dynamics': .8}),
                 ('dusty', 'Dusty Break', {'output.drive': .35, 'output.tone_hz': 7000., 'output.width': .5, 'head.decay': .9})]
-    return {'version': 1, 'engine_name': 'Physical Models/'+NAME,
-            'source_file': f'instruments/Physical Models/{NAME}/dsp.lisp',
+    return {'version': 1, 'engine_name': 'Drums/'+NAME,
+            'source_file': f'instruments/Drums/{NAME}/dsp.lisp',
             'presets': [{'id': slug, 'name': name, 'base_note_offset': 0, 'params': defaults | values}
                         for slug, name, values in variants]}
 
@@ -276,8 +276,8 @@ def attribution(data):
     lines = [f'# {NAME} reference material', '',
              f'Identified from the sampler track "{ref["track"]}" in `{ref["project"]}`',
              f'(`{ref["sample"]}`, SHA256 `{ref["sha256"]}`). The recording is a commercial',
-             'record in the local sample library: no PCM, recorded phase or spectral frame is',
-             'stored here, but this instrument stays in the local user library.', '',
+             'record in the local sample library: only fitted modal coefficients are stored;',
+             'no PCM, recorded phase or spectral frame ships with the instrument.', '',
              'Twelve strokes repeat in every octave. The C4 octave plays them at the recorded',
              'pitch; each octave up or down transposes the whole kit by an octave.', '',
              '| Key (any octave) | Stroke | Contact events (ms) |', '| --- | --- | --- |']
@@ -299,8 +299,7 @@ def outputs():
             DEST/'ATTRIBUTION.md': attribution(data),
             DEST.parent/(NAME + '.presets'): json.dumps(presets(), indent=2) + '\n',
             HERE/'build-report.json': json.dumps(report, indent=1) + '\n',
-            # Tracked copies: the installed instrument lives in the local user
-            # library, but the surface test and reviews read these.
+            # Copies beside the generator; the surface test reads these.
             HERE/'model.lisp': dsp, HERE/'ui.lisp': ui_source(data),
             HERE/'model.presets': json.dumps(presets(), indent=2) + '\n'}
 
