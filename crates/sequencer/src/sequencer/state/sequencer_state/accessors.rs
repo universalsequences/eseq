@@ -291,6 +291,7 @@ impl SequencerState {
             rack_macro_runtime_values: Arc::new(RackMacroRuntimeValues::new()),
             neural_visualization: Mutex::new(NeuralVisualizationSnapshot::default()),
             graph_visualizations: Mutex::new(Vec::new()),
+            generator_marks: Mutex::new(HashMap::new()),
             graph_control_commands: Mutex::new(Vec::new()),
             roll_input: Mutex::new(crate::sequencer::RollInputState::default()),
             roll_recorded_hits: Mutex::new(Vec::new()),

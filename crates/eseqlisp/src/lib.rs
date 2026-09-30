@@ -1626,6 +1626,25 @@ mod tests {
     }
 
     #[test]
+    fn sexp_slot_lit_accepts_a_reactive_binding() {
+        let mut runtime = Runtime::new();
+        runtime.register_reactive("APP", vec![("mask", Value::Number(5.0))], true);
+
+        let value = runtime
+            .eval_str(r#"(sexp-slot :schema '(forms (word left)) :value '(left) :lit (bind "APP" "mask"))"#)
+            .expect("evaluate sexp-slot")
+            .expect("a widget");
+
+        let Value::Map(map) = value else {
+            panic!("sexp-slot should return a widget map, got {value:?}");
+        };
+        assert!(matches!(
+            map.get("type").map(|value| value.borrow().clone()),
+            Some(Value::Keyword(widget_type)) if widget_type == "sexp-slot"
+        ));
+    }
+
+    #[test]
     fn nested_widget_diagnostics_are_preserved_as_children() {
         let mut runtime = Runtime::new();
         runtime.register_reactive("APP", vec![("peak", Value::Number(0.1))], true);

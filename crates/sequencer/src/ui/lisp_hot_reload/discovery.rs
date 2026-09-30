@@ -17,6 +17,11 @@ pub(crate) struct ReloadBatch {
     pub paths: BTreeSet<PathBuf>,
     // Includes removed sources: classification must survive file deletion.
     pub custom_ui: BTreeSet<PathBuf>,
+    /// Something under an instrument/effect root changed (a folder appeared
+    /// or vanished, a dsp.lisp was written...). The browser's Instruments and
+    /// Audio FX trees re-list their tiers when this is set; it carries no
+    /// paths because the listing is a cheap rescan of its own.
+    pub library: bool,
 }
 
 impl ReloadBatch {
@@ -101,6 +106,7 @@ impl Mailbox {
         let mut ready = self.ready.lock().unwrap();
         ready.paths.extend(batch.paths);
         ready.custom_ui.extend(batch.custom_ui);
+        ready.library |= batch.library;
     }
 }
 
@@ -148,6 +154,8 @@ impl DiscoveryWorker {
                     let added = index.set_roots(roots(), &mut batch);
                     reconcile_watches(&mut watcher, &mut watches, index.watch_plan());
                     if index.initialized && !pending.rescan {
+                        // An installed/removed package adds or drops whole tiers.
+                        batch.library = true;
                         for root in added {
                             for path in index.scan(&root) { index.custom.insert(path.clone()); batch.custom(path); }
                         }
@@ -157,6 +165,7 @@ impl DiscoveryWorker {
                     index.scan_all();
                     index.initialized = true;
                 } else if pending.rescan {
+                    batch.library = true;
                     batch.paths.extend(index.sources.iter().cloned());
                     let previous = index.custom.clone();
                     index.scan_all();
@@ -278,6 +287,9 @@ impl DiscoveryIndex {
         for path in event.paths {
             let path = watch_path(&path);
             batch.paths.extend(self.sources.iter().filter(|source| source.starts_with(&path)).cloned());
+            if self.roots.custom.iter().any(|root| path.starts_with(root) || root.starts_with(&path)) {
+                batch.library = true;
+            }
             if matches!(path.file_name().and_then(|name| name.to_str()), Some("ui.lisp" | "dsp.lisp")) {
                 let ui = path.with_file_name("ui.lisp");
                 if !self.eligible_location(&ui) { continue; }
@@ -401,6 +413,37 @@ mod tests {
         assert!(index.custom.contains(&existing));
     }
 
+    /// eseq-63j4.4: the browser re-lists on any change under a content root,
+    /// including folders without a ui.lisp and DSP-only edits, which never
+    /// touch custom UI dispatch; changes elsewhere leave it alone.
+    #[test]
+    fn content_root_changes_flag_a_library_relist() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = watch_path(temp.path()).join("instruments");
+        std::fs::create_dir_all(&root).unwrap();
+        let mut index = DiscoveryIndex::new(roots(&root));
+        index.scan_all();
+
+        let dsp_only = root.join("dsp-only");
+        std::fs::create_dir_all(&dsp_only).unwrap();
+        let mut batch = ReloadBatch::default();
+        index.apply(Event::new(EventKind::Create(notify::event::CreateKind::Folder)).add_path(dsp_only.clone()), &mut batch);
+        std::fs::write(dsp_only.join("dsp.lisp"), "(out 0)").unwrap();
+        index.apply(edit(&dsp_only.join("dsp.lisp")), &mut batch);
+        assert!(batch.library, "a new DSP-only folder re-lists the library");
+        assert!(batch.custom_ui.is_empty(), "without ui.lisp there is no panel to rebuild");
+
+        let ui = instrument(&root.join("full"));
+        batch = ReloadBatch::default();
+        index.apply(edit(&ui.with_file_name("dsp.lisp")), &mut batch);
+        assert!(batch.library);
+
+        batch = ReloadBatch::default();
+        index.apply(edit(&watch_path(temp.path()).join("elsewhere.lisp")), &mut batch);
+        assert!(!batch.library, "changes outside content roots do not re-list");
+        assert!(batch.is_empty());
+    }
+
     #[test]
     fn moved_directories_and_removed_roots_reconcile_old_and_new_custom_sources() {
         let temp = tempfile::tempdir().unwrap();
@@ -446,6 +489,7 @@ mod tests {
             let batch = worker.poll();
             all.paths.extend(batch.paths);
             all.custom_ui.extend(batch.custom_ui);
+            all.library |= batch.library;
             let probe = worker.mailbox.probe.lock().unwrap().clone();
             if predicate(&probe, &all) { return all; }
             assert!(started.elapsed() < Duration::from_secs(12), "native watcher timed out: {label}; changes={all:?}");
@@ -463,6 +507,10 @@ mod tests {
         wait_for(&worker, "initial missing root", |probe, _| probe.passes > 0);
         let ui = instrument(&root.join("nested/synth"));
         wait_for(&worker, "new root and nested instrument", |probe, batch| probe.custom.contains(&ui) && batch.custom_ui.contains(&ui));
+        let dsp_only = root.join("dsp-only");
+        std::fs::create_dir_all(&dsp_only).unwrap();
+        std::fs::write(dsp_only.join("dsp.lisp"), "(out 0)").unwrap();
+        wait_for(&worker, "DSP-only folder re-lists the library", |_, batch| batch.library);
 
         let atomic = ui.with_file_name(".ui-save");
         std::fs::write(&atomic, "(defsynth-ui (label 2))").unwrap();

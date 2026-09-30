@@ -366,7 +366,53 @@
             :preserve-track-selection (get (get event :target) :from-pad)))
     (if (= (get event :drag-type) "instrument")
       (drop-instrument-on-track event)
-      (drop-sample-on-track event))))
+      (if (= (get event :drag-type) "instrument-preset")
+        (drop-preset-on-track event)
+        (drop-sample-on-track event)))))
+
+;; ── Dragged presets ──
+;; A preset row carries its :instrument and :preset (see `seq-preset-tree`), so
+;; it drops everywhere an instrument does: onto a track it swaps in that
+;; instrument at that preset (or, when the track already runs the instrument,
+;; only switches the preset), and onto a new-track zone it adds the instrument
+;; at that preset.
+
+;; The dragged row's instrument, or nil when the row names none (a rack
+;; track's rack presets are not an instrument's presets).
+(def preset-payload-instrument (payload)
+  (let ((instrument (get payload :instrument)))
+    (if (and instrument (not (= instrument "")) (get payload :preset))
+      instrument
+      nil)))
+
+;; group-id is nil for a loose track.
+(def drop-preset-new-track (payload group-id)
+  (let ((instrument (preset-payload-instrument payload)))
+    (if instrument
+      (do
+        (set! sbrowser-loading-instrument-name instrument)
+        (host-command "add-track-instrument"
+          (dict :name instrument :preset (get payload :preset) :group-id group-id))
+        (eseq.seq-panels/seq-show-fx-lower-panel)
+        (status (str "Loading preset: " (get payload :preset))))
+      (status "Drop an instrument preset"))))
+
+(def drop-preset-on-track (event)
+  (let ((payload (get event :payload))
+        (target (get event :target)))
+    (let ((instrument (preset-payload-instrument payload))
+          (track (get target :track)))
+      (if instrument
+        (if (eseq.track-collapse/replaceable-instrument? track)
+          (do
+            (set! sbrowser-loading-instrument-name instrument)
+            (host-command "swap-track-instrument"
+              (dict :track track :name instrument :preset (get payload :preset)
+                :preserve-track-selection (get target :from-pad)))
+            (eseq.seq-panels/seq-show-fx-lower-panel)
+            (status (str "Loading preset: " (get payload :preset))))
+          (status "This track cannot load an instrument"))
+        (status "Drop an instrument preset")))))
 
 (def activate-instrument (name)
   (if (>= (selected-drum-rack-id) 0)
@@ -796,9 +842,25 @@
   (let ((slot (selected-rack-preset-context)))
     (if slot (get slot :presets) SEQ.sidebar-presets)))
 
+;; The presets the user saved themselves, listed under Library (the rest are
+;; Factory).
+(def browser-user-preset-items ()
+  (let ((slot (selected-rack-preset-context)))
+    (if slot (get slot :user-presets) SEQ.sidebar-user-presets)))
+
 (def browser-loaded-preset ()
   (let ((slot (selected-rack-preset-context)))
     (if slot (get slot :loaded-preset) SEQ.sidebar-loaded-preset)))
+
+;; The instrument whose presets the list shows, stamped on each row so a dragged
+;; preset knows what to load; "" for a rack track's rack presets.
+(def browser-preset-instrument ()
+  (let ((slot (selected-rack-preset-context)))
+    (if slot
+      (get slot :instrument)
+      (if (eseq.track-collapse/custom-instrument? SEQ.sidebar-track-index)
+        SEQ.sidebar-instrument-name
+        ""))))
 
 (def load-preset (name)
   (let ((slot (selected-rack-preset-context)))
@@ -935,6 +997,9 @@
 (def create-items ()
   (do
     instrument-favorites-epoch
+    ;; Bumped by the host when an instrument/effect folder changes on disk, so
+    ;; a folder a coding agent just wrote lists without a restart.
+    SEQ.content-library-epoch
     (seq-saved-instrument-tree search-filter SEQ.project-instrument-engines
       instrument-origin-filter instrument-favorites-only)))
 
@@ -1485,7 +1550,7 @@
         :color :white))))
 
 (def audio-fx-panel ()
-  (let ((items (seq-audio-effect-tree search-filter)))
+  (let ((items (do SEQ.content-library-epoch (seq-audio-effect-tree search-filter))))
     (v-stack :key "audio-fx-tab-panel" :width :fill :gap 0.5 :flex 1
       (box :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0 :flex 1
         (if (= (len items) 0)
@@ -1529,7 +1594,8 @@
   (v-stack :key "presets-tab-panel" :width :fill :gap 0.22 :padding 0.25 :flex 1
     (instrument-header)
     (if (= SEQ.sidebar-kind "instrument")
-      (let ((items (seq-preset-tree (browser-preset-items) search-filter)))
+      (let ((items (seq-preset-tree (browser-preset-items) search-filter
+                     (browser-preset-instrument) (browser-user-preset-items))))
         (box :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0 :flex 1
           (if (= (len items) 0)
             (empty-message "No presets found.")
@@ -1538,13 +1604,16 @@
                 :key "presets-tab-tree"
                 :width :fill
                 :background-color :buffer-bg
+                ;; Like the instrument and effect lists, a click only
+                ;; selects (so the row can be dragged); double-click or
+                ;; Enter loads it onto the current instrument.
                 :items items
                 :font-size 12
-                :selected-label (browser-loaded-preset)
+                :current-key "label"
+                :current-value (browser-loaded-preset)
                 :expand-all false
                 :focusable true
                 :drag-type "instrument-preset"
-                :on-select (lambda (item) (load-preset (get item :label)))
                 :on-activate (lambda (item) (load-preset (get item :label))))))))
       (box :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0 :flex 1
         (empty-message "Presets are available for instrument tracks.")))))
@@ -1974,10 +2043,13 @@
           :key "preset-list-tree"
           :width :fill
           :background-color :buffer-bg
-          :items (seq-preset-tree (browser-preset-items) preset-filter)
-          :selected-label (browser-loaded-preset)
+          :items (seq-preset-tree (browser-preset-items) preset-filter
+                   (browser-preset-instrument))
+          :current-key "label"
+          :current-value (browser-loaded-preset)
           :expand-all false
-          :on-select (lambda (item) (load-preset (get item :label)))
+          :focusable true
+          :drag-type "instrument-preset"
           :on-activate (lambda (item) (load-preset (get item :label))))))))
 
 (def projects-panel ()

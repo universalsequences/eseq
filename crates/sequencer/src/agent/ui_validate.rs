@@ -16,23 +16,96 @@ pub fn validate_effect_ui_source(ui_source: &str, manifest: &DGenManifest) -> Re
     validate_ui_source(ui_source, manifest, UiRoot::Effect)
 }
 
+/// The panel checks that hold for any `ui.lisp` the host loads: it parses,
+/// has exactly one root form, and every string-literal param it names exists.
+pub fn check_ui_structure(
+    ui_source: &str,
+    manifest: &DGenManifest,
+    kind: super::verify::ArtifactKind,
+) -> Result<(), String> {
+    let exprs = parse_ui(ui_source)?;
+    check_structure(&exprs, manifest, UiRoot::from_kind(kind))?;
+    reject_pre_module_spellings(ui_source)
+}
+
+/// Bare helper names like `ui-lego-knob-s` are pre-module compatibility
+/// aliases. A panel on disk that relies on them fails to evaluate (an
+/// instrument panel) or silently drops the whole device (an effect panel).
+fn reject_pre_module_spellings(ui_source: &str) -> Result<(), String> {
+    use eseqlisp::module_alias_migration::{occurrences, OccurrenceKind};
+
+    let Ok(found) = occurrences(ui_source) else {
+        return Ok(());
+    };
+    let code = found
+        .iter()
+        .filter(|occurrence| occurrence.kind == OccurrenceKind::Code)
+        .collect::<Vec<_>>();
+    if code.is_empty() {
+        return Ok(());
+    }
+    let mut fixes = code
+        .iter()
+        .take(8)
+        .map(|occurrence| {
+            format!(
+                "  line {}:{}  `{}` -> `{}`",
+                occurrence.line, occurrence.column, occurrence.old, occurrence.new
+            )
+        })
+        .collect::<Vec<_>>();
+    if code.len() > 8 {
+        fixes.push(format!("  ... and {} more", code.len() - 8));
+    }
+    Err(format!(
+        "ui.lisp uses {} unqualified helper name(s); write the module-qualified name instead:\n{}",
+        code.len(),
+        fixes.join("\n")
+    ))
+}
+
+/// Agent Mode's panel layout contract. Hand-written panels may legitimately
+/// break it. (Agent Mode also evaluates against a stub runtime that knows only
+/// the `custom-ui-lego` helpers; library checks render with the real runtime
+/// instead.)
+pub fn lint_ui_layout(ui_source: &str) -> Result<(), String> {
+    for expr in &parse_ui(ui_source)? {
+        validate_layout_contract(expr, UiContext::Root)?;
+    }
+    Ok(())
+}
+
 fn validate_ui_source(
     ui_source: &str,
     manifest: &DGenManifest,
     root: UiRoot,
 ) -> Result<(), String> {
+    let exprs = parse_ui(ui_source)?;
+    for expr in &exprs {
+        validate_layout_contract(expr, UiContext::Root)?;
+    }
+    check_structure(&exprs, manifest, root)?;
+    validate_ui_evaluates(ui_source)
+}
+
+fn parse_ui(ui_source: &str) -> Result<Vec<Expression>, String> {
     let tokens = Parser::new(ui_source.to_string())
         .parse()
         .map_err(|error| format!("ui.lisp parse error: {error:?}"))?;
-    let exprs = ASTParser::new(tokens)
+    ASTParser::new(tokens)
         .parse()
-        .map_err(|error| format!("ui.lisp AST error: {error:?}"))?;
+        .map_err(|error| format!("ui.lisp AST error: {error:?}"))
+}
 
+fn check_structure(
+    exprs: &[Expression],
+    manifest: &DGenManifest,
+    root: UiRoot,
+) -> Result<(), String> {
     let mut root_count = 0;
     let mut referenced_params = BTreeSet::new();
-    for expr in &exprs {
+    for expr in exprs {
         collect_ui_validation_refs(expr, root, &mut root_count, &mut referenced_params);
-        validate_layout_contract(expr, UiContext::Root)?;
     }
 
     if root_count == 0 {
@@ -68,14 +141,17 @@ fn validate_ui_source(
         .collect::<Vec<_>>();
 
     if !unknown.is_empty() {
+        // `__mod__…` cells are host plumbing, never panel controls.
         return Err(format!(
             "ui.lisp references unknown parameter(s): {}. Valid DSP params: {}",
             unknown.join(", "),
-            valid_params.into_iter().collect::<Vec<_>>().join(", ")
+            valid_params
+                .into_iter()
+                .filter(|name| !name.starts_with("__"))
+                .collect::<Vec<_>>()
+                .join(", ")
         ));
     }
-
-    validate_ui_evaluates(ui_source)?;
 
     Ok(())
 }
@@ -87,6 +163,13 @@ enum UiRoot {
 }
 
 impl UiRoot {
+    fn from_kind(kind: super::verify::ArtifactKind) -> Self {
+        match kind {
+            super::verify::ArtifactKind::Instrument => UiRoot::Instrument,
+            super::verify::ArtifactKind::Effect => UiRoot::Effect,
+        }
+    }
+
     fn form_name(self) -> &'static str {
         match self {
             UiRoot::Instrument => "(defsynth-ui ...)",
@@ -560,10 +643,12 @@ fn collect_ui_validation_refs(
     }
 }
 
+/// Only a string literal names a param. A symbol is a variable (a helper's
+/// `name` argument) and a list is a computed name; neither can be checked
+/// against the manifest statically.
 fn ui_param_ref_name(expr: &Expression) -> Option<String> {
     match expr {
-        Expression::String(name) | Expression::Symbol(name) => Some(name.clone()),
-        Expression::List(items) => items.first().and_then(ui_param_ref_name),
+        Expression::String(name) => Some(name.clone()),
         _ => None,
     }
 }
@@ -636,6 +721,66 @@ mod tests {
             &manifest,
         )
         .unwrap();
+    }
+
+    #[test]
+    fn structure_check_reads_only_string_literals_as_param_refs() {
+        use super::check_ui_structure;
+        use crate::agent::verify::ArtifactKind;
+
+        let manifest = manifest_with_params(&["gain"]);
+        // A local helper passes its `name` argument on; `name` and the
+        // `(get …)` head are variables, not params. The helper module is not
+        // one Agent Mode's stub runtime knows, which structure does not care
+        // about.
+        let source = r#"
+            (def knob (section name title)
+              (eseq.effects.drum-surface/panel-knob section name title (get labels name)))
+            (defsynth-ui
+              (v-stack (knob 0 "gain" "Gain")))
+            "#;
+        check_ui_structure(source, &manifest, ArtifactKind::Instrument)
+            .expect("symbol arguments are not param refs");
+        assert!(validate_instrument_ui_source(source, &manifest).is_err());
+    }
+
+    #[test]
+    fn structure_check_rejects_unqualified_lego_helpers() {
+        use super::check_ui_structure;
+        use crate::agent::verify::ArtifactKind;
+
+        let manifest = manifest_with_params(&["gain"]);
+        let err = check_ui_structure(
+            r#"(defeffect-ui (ui-lego-knob-s 0 "gain" "Gain" 4.8 (ui-accent-blue) 2))"#,
+            &manifest,
+            ArtifactKind::Effect,
+        )
+        .unwrap_err();
+        assert!(err.contains("`ui-lego-knob-s` -> `eseq.effects.custom-ui-lego/ui-lego-knob-s`"), "{err}");
+
+        check_ui_structure(
+            r#"(defeffect-ui (eseq.effects.custom-ui-lego/ui-lego-knob-s 0 "gain" "Gain" 4.8 (eseq.effects.custom-ui-lego/ui-accent-blue) 2))"#,
+            &manifest,
+            ArtifactKind::Effect,
+        )
+        .expect("qualified helpers pass");
+    }
+
+    #[test]
+    fn unknown_param_error_lists_panel_params_without_host_mod_cells() {
+        use super::check_ui_structure;
+        use crate::agent::verify::ArtifactKind;
+
+        let manifest = manifest_with_params(&["gain", "__mod__gain__active"]);
+        let err = check_ui_structure(
+            r#"(defsynth-ui (v-stack (eseq.effects.custom-ui-lego/ui-lego-knob "gian" "Gain" 4 :blue 0)))"#,
+            &manifest,
+            ArtifactKind::Instrument,
+        )
+        .unwrap_err();
+        assert!(err.contains("gian"), "{err}");
+        assert!(err.contains("gain"), "{err}");
+        assert!(!err.contains("__mod__"), "{err}");
     }
 
     #[test]

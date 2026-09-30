@@ -32,6 +32,10 @@ pub(super) fn remap_graph_overrides_after_track_delete(
                     crate::graph::ProjectGraphRouteOverride::None => {
                         Some(crate::graph::ProjectGraphRouteOverride::None)
                     }
+                    generator @ (crate::graph::ProjectGraphRouteOverride::Generator(_)
+                    | crate::graph::ProjectGraphRouteOverride::GeneratorRestart(_)) => {
+                        Some(generator)
+                    }
                     crate::graph::ProjectGraphRouteOverride::Track(track) => {
                         remap_optional_track_after_delete(track, deleted_track)
                             .map(crate::graph::ProjectGraphRouteOverride::Track)

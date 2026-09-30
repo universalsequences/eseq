@@ -70,6 +70,7 @@ The chapters follow the order in which you meet eseq. Concepts and the first ses
 - [Patterns and scenes](patterns-and-scenes) — pattern variations, scene recall and scene banks
 - [Arrangement](arrangement) — clips, takes, scene markers and the timeline
 - [Instruments and presets](instruments) — the factory instruments, presets and building your own
+- [Making instruments with an agent](agent-authoring) — have a coding agent write, test and refine instruments and effects
 - [Samples and sounds](sample-browser) — the sample library, the sampler and saved sounds
 - [Racks](racks) — Instrument Racks, Drum Racks, macros and kits
 - [MIDI effects](midi-effects) — the note-processing chain

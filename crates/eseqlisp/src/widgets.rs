@@ -31,6 +31,7 @@ pub const BUILTIN_WIDGET_NAMES: &[&str] = &[
     "text-input",
     "textbox",
     "number-picker",
+    "sexp-slot",
     "number-label",
     "number-list",
     "patcher",
@@ -423,6 +424,7 @@ pub fn build_widget(widget_type: &str, args: Vec<Value>) -> Value {
         || widget_type == "text-input"
         || widget_type == "textbox"
         || widget_type == "number-picker"
+        || widget_type == "sexp-slot"
         || widget_type == "dropdown"
         || widget_type == "menu-button"
         || widget_type == "knob-number"

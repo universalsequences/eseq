@@ -8,13 +8,10 @@ use crate::agent::actions::{
     AgentAppAction, AgentInstrumentParamSchema, AgentInstrumentPresetDraft,
     AgentInstrumentPresetSchema, AgentSessionContext,
 };
-use crate::agent::audition::{audition_feedback, audition_loaded_effect};
-use crate::agent::dsp_validate::validate_effect_dsp_source;
 use crate::agent::network::{AgentTurnError, AgentTurnResult};
 use crate::agent::protocol::{AgentToolRuntime, ToolCallOutcome};
 use crate::agent::providers::{AgentMessage, AgentMessageRole, AgentProviderState};
 use crate::agent::store::{AgentKind, ConversationStore, EffectDraft};
-use crate::agent::ui_validate::validate_effect_ui_source;
 use crate::analysis::{AnalysisJob, AnalysisService};
 use crate::audiograph::LiveGraphPtr;
 use crate::effects::{EffectDescriptor, EffectSlotSnapshot, ParamKind, ParamScaling};
@@ -2864,12 +2861,7 @@ impl App {
     }
 
     fn current_agent_system_prompt(&self) -> String {
-        match self.agent_panel.kind {
-            AgentKind::General => include_str!("../agent/prompts/general.md"),
-            AgentKind::Instrument => include_str!("../agent/prompts/instrument.md"),
-            AgentKind::Effect => include_str!("../agent/prompts/effect.md"),
-        }
-        .to_string()
+        crate::agent::task::system_prompt_for(self.agent_panel.kind).to_string()
     }
 
     fn current_agent_session_context(&self) -> AgentSessionContext {
@@ -3226,19 +3218,16 @@ impl App {
         dsp_source: &str,
         ui_source: &str,
     ) -> Result<(), String> {
-        validate_effect_dsp_source(dsp_source)
-            .map_err(|error| format!("dsp.lisp validation error for '{name}':\n{error}"))?;
-        let compile_result = crate::lisp_host::compile_and_load(dsp_source, self.graph.sample_rate)
-            .map_err(|error| format!("compile error for '{name}':\n{error}"))?;
-        validate_effect_ui_source(ui_source, &compile_result.manifest)
-            .map_err(|error| format!("ui.lisp validation error for '{name}':\n{error}"))?;
-        let audition = audition_loaded_effect(&compile_result, self.graph.sample_rate)
-            .map_err(|error| format!("audition failed for '{name}':\n{error}"))?;
-        let feedback = audition_feedback(&audition);
-        if audition.silent || audition.clipped || audition.differs_from_input == Some(false) {
-            return Err(feedback);
-        }
-        Ok(())
+        crate::agent::verify::verify_sources(
+            crate::agent::verify::ArtifactKind::Effect,
+            crate::agent::verify::VerifyMode::Agent,
+            dsp_source,
+            Some(ui_source),
+            self.graph.sample_rate,
+            None,
+        )
+        .map(|_| ())
+        .map_err(|failure| format!("'{name}': {failure}"))
     }
 
     fn finalize_agent_effect_artifact(&mut self, name: String) -> Result<String, String> {

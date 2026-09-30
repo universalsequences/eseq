@@ -9647,9 +9647,11 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             .invoke_sequencer_tick(
                 0,
                 crate::generator::GeneratorTickInput {
+                    gate: Default::default(),
                     id: defs[0].id,
                     generator_index: 0,
                     tick_index: 0,
+                    boundary_sample: 0,
                     beat: 0.0,
                     resolution_beats: defs[0].resolution_beats,
                     samples_per_quarter: 48_000.0,
@@ -9690,9 +9692,11 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                 .invoke_sequencer_tick(
                     0,
                     crate::generator::GeneratorTickInput {
+                        gate: Default::default(),
                         id: defs[0].id,
                         generator_index: 0,
                         tick_index,
+                        boundary_sample: 0,
                         beat: tick_index as f64 * 0.25,
                         resolution_beats: 0.25,
                         samples_per_quarter: 48_000.0,
@@ -9761,9 +9765,11 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                 .invoke_sequencer_tick(
                     0,
                     crate::generator::GeneratorTickInput {
+                        gate: Default::default(),
                         id,
                         generator_index: 0,
                         tick_index,
+                        boundary_sample: 0,
                         beat: tick_index as f64 * 0.25,
                         resolution_beats: 0.25,
                         samples_per_quarter: 48_000.0,
@@ -10180,15 +10186,102 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             r#"(let ((p (jaki/pat . . - .)))
                  (do
                    (map (lambda (k) (jaki/eval-cycle p k :left jaki/default-state))
-                        (range 0 20))
+                        (range 0 80))
                    (let ((a (jaki/eval-cycle p 3 :left jaki/default-state))
                          (b (jaki/eval-cycle p 3 :left jaki/default-state)))
                      (list (len jaki/memo-store)
                            (if (= a b) 1 0)
                            (len (get a :events))))))"#,
         );
-        // the assoc memo caps at 16 entries and repeated lookups agree
-        assert_eq!(nums, vec![16.0, 1.0, 5.0]);
+        // the assoc memo caps at 64 entries and repeated lookups agree
+        assert_eq!(nums, vec![64.0, 1.0, 5.0]);
+    }
+
+    #[test]
+    fn jaki_fig_rep_plays_consecutive_copies() {
+        let mut rt = jaki_runtime();
+        // (rep 2) is two whole `. -` figures (3 units each), not (* 2): the
+        // cycle is 3 + 3 + 4 units and each copy has its own figure index.
+        let nums = jaki_eval_nums(
+            &mut rt,
+            r#"(let ((r (jaki/eval-at (jaki/pat (fig (. -) (rep 2)) (fig (. . -)))
+                                      0 :left jaki/default-state)))
+                 (cons (jaki/cycle-length (jaki/pat (fig (. -) (rep 2)) (fig (. . -))) 0)
+                       (map (lambda (e) (get e :fig)) (get r :events))))"#,
+        );
+        assert_eq!(
+            nums,
+            vec![10.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 2.0]
+        );
+    }
+
+    #[test]
+    fn jaki_every_fig_transforms_every_nth_figure() {
+        let mut rt = jaki_runtime();
+        // Four copies of `. -`; (every-fig 2 rev) reverses figures 1 and 3
+        // (0 = dot hit, 1 = dash hit).
+        let nums = jaki_eval_nums(
+            &mut rt,
+            r#"(let ((r (jaki/eval-at (jaki/every-fig (jaki/pat (fig (. -) (rep 4))) 2 'rev)
+                                      0 :left jaki/default-state)))
+                 (map (lambda (e) (if (= (get e :sym) :dash) 1 0)) (get r :events)))"#,
+        );
+        assert_eq!(
+            nums,
+            vec![0.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 0.0]
+        );
+    }
+
+    #[test]
+    fn jaki_doc_body_writes_figure_counts_and_every_fig() {
+        let mut rt = jaki_runtime();
+        let value = rt
+            .eval(
+                r#"(import alez.jaki.doc)
+                   (source (alez.jaki.doc/body
+                             (list (list 4 :dot :dash) (list :dot :dot :dash))
+                             (list (dict :route 0 :mods (list (list "every-fig" 2 "rev"))))
+                             1))"#,
+            )
+            .expect("eval")
+            .expect("value");
+        assert_eq!(
+            value,
+            Value::String("((fig (. -) (rep 4)) (fig (. . -)) -> 0 (every-fig 2 rev))".into())
+        );
+    }
+
+    #[test]
+    fn jaki_periodic_memo_matches_unmemoized_evaluation() {
+        let mut rt = jaki_runtime();
+        // `(every 3 rev)` and `(rot (1 2))` give period lcm(3, 2) = 6, so
+        // cycles 6..23 are memo hits keyed on c mod 6; each must equal a
+        // fresh eval-at with the same threaded hand and velocity state. An
+        // arbitrary expression argument is not provably periodic (0).
+        let nums = jaki_eval_nums(
+            &mut rt,
+            r#"(def periodic-p
+                 (jaki/with-period
+                   (jaki/rot (jaki/every (jaki/pat . . - . .) 3 'rev) '(1 2))))
+               (def periodic-walk
+                 (reduce
+                   (lambda (acc k)
+                     (let ((a (jaki/eval-at periodic-p k (get acc :hand) (get acc :st)))
+                           (b (jaki/eval-cycle periodic-p k (get acc :hand) (get acc :st))))
+                       (dict :hand (get a :end-hand) :st (get a :end-st)
+                             :ok (if (= a b) (get acc :ok) false))))
+                   (dict :hand :left :st jaki/default-state :ok true)
+                   (range 0 24)))
+               (list (get periodic-p :period)
+                     (if (get periodic-walk :ok) 1 0)
+                     (len jaki/memo-store)
+                     (jaki/eval-period (jaki/rot (jaki/pat . -) '(+ 1 0))))"#,
+        );
+        // 24 cycles, but the threaded state repeats with the period, so
+        // later cycles were served from the memo (fewer than 24 entries)
+        assert_eq!(nums.len(), 4, "{nums:?}");
+        assert_eq!((nums[0], nums[1], nums[3]), (6.0, 1.0, 0.0), "{nums:?}");
+        assert!(nums[2] < 24.0, "cycles past the first period must hit: {nums:?}");
     }
 
     #[test]
@@ -10218,9 +10311,11 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                 .invoke_sequencer_tick(
                     0,
                     crate::generator::GeneratorTickInput {
+                        gate: Default::default(),
                         id: definition.id,
                         generator_index: 0,
                         tick_index: 0,
+                        boundary_sample: 0,
                         beat: 0.0,
                         resolution_beats: 0.25,
                         samples_per_quarter: 48_000.0,
@@ -10974,9 +11069,11 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                 .invoke_sequencer_tick(
                     0,
                     crate::generator::GeneratorTickInput {
+                        gate: Default::default(),
                         id: definition.id,
                         generator_index: 0,
                         tick_index,
+                        boundary_sample: 0,
                         beat: tick_index as f64 * 0.25,
                         resolution_beats: 0.25,
                         samples_per_quarter: 48_000.0,
@@ -11058,9 +11155,11 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             .invoke_sequencer_tick(
                 0,
                 crate::generator::GeneratorTickInput {
+                    gate: Default::default(),
                     id: definition.id,
                     generator_index: 0,
                     tick_index: 0,
+                    boundary_sample: 0,
                     beat: 0.0,
                     resolution_beats: 0.25,
                     samples_per_quarter: 48_000.0,
@@ -11115,9 +11214,11 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                 .invoke_sequencer_tick(
                     0,
                     crate::generator::GeneratorTickInput {
+                        gate: Default::default(),
                         id: definitions[0].id,
                         generator_index: 0,
                         tick_index,
+                        boundary_sample: 0,
                         beat: tick_index as f64 * 0.25,
                         resolution_beats: 0.25,
                         samples_per_quarter: 48_000.0,
@@ -11195,9 +11296,11 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             .invoke_sequencer_tick(
                 0,
                 crate::generator::GeneratorTickInput {
+                    gate: Default::default(),
                     id: definition.id,
                     generator_index: 0,
                     tick_index: 0,
+                    boundary_sample: 0,
                     beat: 0.0,
                     resolution_beats: 0.25,
                     samples_per_quarter: 48_000.0,
@@ -11348,9 +11451,11 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             .invoke_sequencer_tick(
                 0,
                 crate::generator::GeneratorTickInput {
+                    gate: Default::default(),
                     id: definition.id,
                     generator_index: 0,
                     tick_index: 1,
+                    boundary_sample: 0,
                     beat: 0.25,
                     resolution_beats: 0.25,
                     samples_per_quarter: 48_000.0,
@@ -11593,9 +11698,11 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                 .invoke_sequencer_tick(
                     index,
                     crate::generator::GeneratorTickInput {
+                        gate: Default::default(),
                         id: definitions[index].id,
                         generator_index: index,
                         tick_index: 0,
+                        boundary_sample: 0,
                         beat: 0.0,
                         resolution_beats: 0.25,
                         samples_per_quarter: 48_000.0,
@@ -11734,9 +11841,11 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                 .invoke_sequencer_tick(
                     index,
                     crate::generator::GeneratorTickInput {
+                        gate: Default::default(),
                         id: definitions[index].id,
                         generator_index: index,
                         tick_index: 0,
+                        boundary_sample: 0,
                         beat: 0.0,
                         resolution_beats: 0.25,
                         samples_per_quarter: 48_000.0,
@@ -12075,9 +12184,11 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                 .invoke_sequencer_tick(
                     0,
                     crate::generator::GeneratorTickInput {
+                        gate: Default::default(),
                         id: published[0].id,
                         generator_index: 0,
                         tick_index: 0,
+                        boundary_sample: 0,
                         beat: 0.0,
                         resolution_beats: 0.25,
                         samples_per_quarter: 48_000.0,
@@ -12508,6 +12619,470 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             .map(|e| e.event.resolved.duration as f64)
             .collect();
         assert_close(&durations, &[0.5, 0.25, 0.5]);
+    }
+
+    // ── jaki (on SEL word…) scoped words (spec §7.1) ──
+
+    /// Per-event velocity ratio of `(jaki/on p 'SEL 'WORDS)` over plain `p`
+    /// at `cycle` (same threading state for both).
+    fn jaki_on_vel_ratio(rt: &mut ScratchControlRuntime, pat: &str, sel: &str, words: &str) -> Vec<f64> {
+        jaki_eval_nums(
+            rt,
+            &format!(
+                r#"(let ((p (jaki/pat {pat})))
+                     (let ((a (get (jaki/eval-at p 0 :left jaki/default-state) :events))
+                           (b (get (jaki/eval-at (jaki/on p '{sel} '{words}) 0 :left
+                                                 jaki/default-state) :events)))
+                       (map (lambda (i) (/ (get (nth b i) :vel) (get (nth a i) :vel)))
+                            (range 0 (len a)))))"#
+            ),
+        )
+    }
+
+    fn jaki_offsets(rt: &mut ScratchControlRuntime, pattern_expr: &str, cycle: u32) -> Vec<f64> {
+        jaki_eval_nums(
+            rt,
+            &format!(
+                r#"(let ((r (jaki/eval-at {pattern_expr} {cycle} :left jaki/default-state)))
+                     (map (lambda (e) (/ (nth (get e :off) 0) (nth (get e :off) 1)))
+                          (get r :events)))"#
+            ),
+        )
+    }
+
+    #[test]
+    fn jaki_on_scopes_event_words_to_matching_events_only() {
+        let mut rt = jaki_runtime();
+        // `. . . .` is L R L R: only the left hits are scaled.
+        let ratio = jaki_on_vel_ratio(&mut rt, ". . . .", "left", "((vel* 0.5))");
+        assert_close(&ratio, &[0.5, 1.0, 0.5, 1.0]);
+        // `- -`: `tail` is each dash's second (ghost) hit.
+        let ratio = jaki_on_vel_ratio(&mut rt, "- -", "tail", "((vel* 0.5))");
+        assert_close(&ratio, &[1.0, 0.5, 1.0, 0.5]);
+        // Figure + symbol: dots of figure 2 only. Figure 1 is `. -`, figure 2
+        // `. -`: hits 0 1 2 | 3 4 5, figure 2's dot is hit 3.
+        let ratio = jaki_on_vel_ratio(
+            &mut rt,
+            "(fig (. -)) (fig (. -))",
+            "(and (fig 2) dot)",
+            "((vel* 0.5))",
+        );
+        assert_close(&ratio, &[1.0, 1.0, 1.0, 0.5, 1.0, 1.0]);
+        // vel+ adds and clamps at 0.
+        let vels = jaki_eval_nums(
+            &mut rt,
+            r#"(map (lambda (e) (get e :vel))
+                    (get (jaki/eval-at (jaki/on (jaki/pat . .) 'right '((vel+ -5))) 0 :left
+                                       jaki/default-state) :events))"#,
+        );
+        assert_eq!(vels.len(), 2);
+        assert!(vels[0] > 0.0 && vels[1] == 0.0, "{vels:?}");
+    }
+
+    #[test]
+    fn jaki_on_retimes_and_transforms_only_the_selected_figures() {
+        let mut rt = jaki_runtime();
+        // (fig 2) doubled: figure 1 at 0 1, figure 2's two dots squeeze into
+        // 2..4 as four hits.
+        let offs = jaki_offsets(
+            &mut rt,
+            "(jaki/on (jaki/pat (fig (. .)) (fig (. .))) '(fig 2) '((fast 2)))",
+            0,
+        );
+        assert_close(&offs, &[0.0, 1.0, 2.0, 2.5, 3.0, 3.5]);
+        // (every 2 …) inside `on` narrows to odd cycles.
+        let expr = "(jaki/on (jaki/pat (fig (. .)) (fig (. .))) '(fig 2) '((every 2 (fast 2))))";
+        assert_eq!(jaki_offsets(&mut rt, expr, 0).len(), 4);
+        assert_eq!(jaki_offsets(&mut rt, expr, 1).len(), 6);
+        // A structural word under an event selector is ignored.
+        let offs = jaki_offsets(&mut rt, "(jaki/on (jaki/pat . . . .) 'left '((fast 2)))", 0);
+        assert_close(&offs, &[0.0, 1.0, 2.0, 3.0]);
+        // `rest` drops just the selection: figure 1's repetition 2.
+        let offs = jaki_offsets(
+            &mut rt,
+            "(jaki/on (jaki/pat (fig (. .) (rep 2)) (fig .)) '(and (fig 1) (rep 2)) '(rest))",
+            0,
+        );
+        assert_close(&offs, &[0.0, 1.0, 4.0]);
+    }
+
+    #[test]
+    fn jaki_on_nth_counts_occurrences_across_cycles() {
+        let mut rt = jaki_runtime();
+        // Figure 2 plays once a cycle: (nth 2 (fig 2)) picks cycles 1, 3 …
+        let expr = "(jaki/on (jaki/pat (fig (. .)) (fig .)) '(nth 2 (fig 2)) '(rest))";
+        assert_eq!(jaki_offsets(&mut rt, expr, 0).len(), 3);
+        assert_eq!(jaki_offsets(&mut rt, expr, 1).len(), 2);
+        // Figure 1 plays three times a cycle: occurrences 0 1 2 | 3 4 5, every
+        // 2nd is 1 | 3 5, so cycle 0 drops one copy and cycle 1 two.
+        let expr = "(jaki/on (jaki/pat (fig (. .) (rep 3))) '(nth 2 (fig 1)) '(rest))";
+        assert_eq!(jaki_offsets(&mut rt, expr, 0).len(), 4);
+        assert_eq!(jaki_offsets(&mut rt, expr, 1).len(), 2);
+        assert_eq!(jaki_offsets(&mut rt, expr, 2).len(), 4);
+    }
+
+    #[test]
+    fn jaki_row_schema_accepts_on_forms_and_rejects_non_selectors() {
+        use eseqlisp::sexp_slot::{read_value, schema::Schema};
+        let mut rt = jaki_runtime();
+        let value = rt
+            .eval("(import alez.jaki.doc)\nalez.jaki.doc/row-schema")
+            .expect("row schema")
+            .expect("a value");
+        let schema = Schema::parse(&value).expect("row schema parses");
+        let row = read_value(
+            "((on (and (fig 3) tail) (vel* 0.6)) (on (nth 2 (fig 2)) (fast 2)) \
+              (on (fig 2) (every 2 (fast 2))) (on left rest) (on (not dash) stac) \
+              (vel+ -0.1) (note+ 7))",
+        )
+        .expect("reads");
+        schema.check(&row).expect("on forms are valid row items");
+        // A bare (nth 2) fills its selector default.
+        let checked = schema.check(&read_value("((on (nth 2) ghost))").unwrap()).unwrap();
+        assert_eq!(
+            eseqlisp::vm::format_lisp_source(&checked),
+            r#"(("on" ("nth" 2 "any") "ghost"))"#
+        );
+        // A fresh (on …) is (on left (vel+ -0.1)).
+        let fresh = schema.form_default("on").expect("on is a form");
+        assert_eq!(eseqlisp::vm::format_lisp_source(&fresh), r#"("on" "left" ("vel+" -0.1))"#);
+        // Per-hit values take a value sequence; other words do not.
+        schema
+            .check(&read_value("((note (seq :hit 0 3 7)) (on left (vel* (seq :fig 1 0.5))) (gate (seq :span 1 0.5)))").unwrap())
+            .expect("seq on per-hit words");
+        // A seq's values may be seqs, a few levels deep.
+        schema
+            .check(&read_value("((note (seq :hit 2 (seq :cycle 5 9) 3)) (note (seq :hit 0 (seq :fig 1 (seq :cycle 2 3)))))").unwrap())
+            .expect("nested seqs");
+        assert!(schema.check(&read_value("((trunc (seq :hit 1 2)))").unwrap()).is_err());
+        // A structural word is not a selector.
+        assert!(schema.check(&read_value("((on (fast 2) left))").unwrap()).is_err());
+    }
+
+    #[test]
+    fn jaki_fast_expands_symbols_in_place_and_keeps_the_figure_length() {
+        let mut rt = jaki_runtime();
+        // (. . -)*2 then (. -): each dot becomes two hits, the dash becomes
+        // `. . -`, all squeezed into the figure's own 4 units — 8 hits at
+        // half-unit spacing — so figure 2 still starts at 4 and the cycle
+        // is 4 + 3 = 7, not the 2 + 3 = 5 of a naive double-speed pass.
+        let offs = jaki_offsets(&mut rt, "(jaki/pat (fig (. . -) (* 2)) (fig (. -)))", 0);
+        assert_close(&offs, &[0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 5.0, 6.0]);
+        // The route word and a figure-scoped `on` take the same path.
+        let routed = jaki_offsets(
+            &mut rt,
+            "(jaki/on (jaki/pat (fig (. . -)) (fig (. -))) '(fig 1) '((fast 2)))",
+            0,
+        );
+        assert_close(&routed, &offs);
+        // The last two hits of the doubled figure are the new dash (same hand).
+        let hands = jaki_eval_nums(
+            &mut rt,
+            r#"(map (lambda (e) (if (= (get e :hand) :left) 0 1))
+                    (get (jaki/eval-at (jaki/pat (fig (. . -) (* 2))) 0 :left jaki/default-state) :events))"#,
+        );
+        assert_eq!(hands, vec![0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn jaki_half_contracts_greedily_and_keeps_the_figure_length() {
+        let mut rt = jaki_runtime();
+        // `. . -` is one dash over the same 4 units: hits 0 and 2, the next
+        // figure still at 4. Its two hits share a hand; the next figure's
+        // first hit is the accent after it.
+        let offs = jaki_offsets(&mut rt, "(jaki/pat (fig (. . -) (half)) (fig (. -)))", 0);
+        assert_close(&offs, &[0.0, 2.0, 4.0, 5.0, 6.0]);
+        let r = r#"(get (jaki/eval-at (jaki/pat (fig (. . -) (half)) (fig (. -))) 0 :left
+                                    jaki/default-state) :events)"#;
+        let hands = jaki_eval_nums(&mut rt, &format!("(map (lambda (e) (if (= (get e :hand) :left) 0 1)) {r})"));
+        assert_eq!(hands, vec![0.0, 0.0, 1.0, 0.0, 0.0]);
+        let accents = jaki_eval_nums(&mut rt, &format!("(map (lambda (e) (if (get e :accent) 1 0)) {r})"));
+        assert_eq!(accents, vec![0.0, 0.0, 1.0, 0.0, 0.0]);
+        // Dashes first: `. . . -` is `.` (0) then a long dash (1, 3), and
+        // the hand after the figure is unchanged (2 symbols, like 4): the
+        // next figure starts on the left, as it would without `half`.
+        let offs = jaki_offsets(&mut rt, "(jaki/pat (fig (. . . -) (half)))", 0);
+        assert_close(&offs, &[0.0, 1.0, 3.0]);
+        let end_hand = |rt: &mut ScratchControlRuntime, pat: &str| {
+            jaki_eval_nums(rt, &format!(
+                "(list (if (= (get (jaki/eval-at (jaki/pat {pat}) 0 :left jaki/default-state) :end-hand) :left) 0 1))"
+            ))
+        };
+        assert_eq!(end_hand(&mut rt, "(fig (. . . -) (half))"), end_hand(&mut rt, "(fig (. . . -))"));
+        // Leftover dots pair left to right before the dash's claim:
+        // `. . . . . -` is `.`(×2) at 0, `.` at 2, long dash at 3 and 5.
+        let offs = jaki_offsets(&mut rt, "(jaki/pat (fig (. . . . . -) (half)))", 0);
+        assert_close(&offs, &[0.0, 2.0, 3.0, 5.0]);
+        // Nothing contracts: unchanged.
+        let offs = jaki_offsets(&mut rt, "(jaki/pat (fig (. - .) (half)))", 0);
+        assert_close(&offs, &[0.0, 1.0, 2.0, 3.0]);
+        // (* 2) after (half) undoes it; the route word and `on` take the
+        // same path.
+        let offs = jaki_offsets(&mut rt, "(jaki/pat (fig (. . -) (half) (* 2)))", 0);
+        assert_close(&offs, &[0.0, 1.0, 2.0, 3.0]);
+        let offs = jaki_offsets(
+            &mut rt,
+            "(jaki/on (jaki/pat (fig (. . -)) (fig (. . . .))) '(fig 2) '(half))",
+            0,
+        );
+        assert_close(&offs, &[0.0, 1.0, 2.0, 3.0, 4.0, 6.0]);
+    }
+
+    /// Every hit a `jak` body emits over `beats`, per track, as
+    /// (transpose, duration, velocity).
+    fn jaki_surface_hits(body: &str, beats: f64) -> Vec<Vec<(f64, f64, f64)>> {
+        let mut rt = jaki_runtime();
+        rt.eval(&format!("(import alez.jaki.surface :refer (jak))\n(jak \"s\" :16 {body})"))
+            .expect("jak");
+        let mut generators = crate::generator::GeneratorRuntime::default();
+        generators.sync_definitions(&rt.sequencer_defs(), 0.0);
+        let mut out = Vec::new();
+        generators.process_block(0.0, beats, 0, 48_000.0,
+            |input| rt.invoke_sequencer_tick(input.generator_index, input).expect("tick"), &mut out);
+        let mut tracks = vec![Vec::new(); 4];
+        for e in &out {
+            let r = &e.event.resolved;
+            tracks[e.event.track.unwrap_or(0)].push((r.transpose as f64, r.duration as f64, r.velocity as f64));
+        }
+        tracks
+    }
+
+    fn notes(hits: &[(f64, f64, f64)]) -> Vec<f64> {
+        hits.iter().map(|h| h.0).collect()
+    }
+
+    #[test]
+    fn jaki_seq_clocks_step_per_hit_figure_position_and_cycle() {
+        // `. . . .`, two cycles = 8 hits.
+        let t = jaki_surface_hits(
+            ". . . .
+             -> 0 (note (seq :hit 0 3 7))
+             -> 1 (note (seq :span 0 12))
+             -> 2 (note (seq :cycle 0 5))
+             -> 3 (note (0 5))",
+            2.0,
+        );
+        // :hit keeps counting across the cycle boundary.
+        assert_eq!(notes(&t[0]), [0., 3., 7., 0., 3., 7., 0., 3.]);
+        // :span: first half of each cycle 0, second half 12.
+        assert_eq!(notes(&t[1]), [0., 0., 12., 12., 0., 0., 12., 12.]);
+        // :cycle, and the plain list it is sugar for.
+        assert_eq!(notes(&t[2]), [0., 0., 0., 0., 5., 5., 5., 5.]);
+        assert_eq!(notes(&t[3]), notes(&t[2]));
+
+        // :fig moves on per figure played: `. .` `. .`.
+        let t = jaki_surface_hits("(fig (. .)) (fig (. .)) -> 0 (note (seq :fig 0 5 9))", 2.0);
+        assert_eq!(notes(&t[0]), [0., 0., 5., 5., 9., 9., 0., 0.]);
+    }
+
+    #[test]
+    fn jaki_seq_nests_per_visit_or_per_cycle_and_counts_only_matched_hits() {
+        let t = jaki_surface_hits(
+            ". . . .
+             -> 0 (note (seq :hit 0 (seq :hit 7 12)))
+             -> 1 (note (seq :hit 0 (7 12)))
+             -> 2 (on left (note+ (seq :hit 0 7 12)))
+             -> 3 (gate (seq :hit 1 0.5)) (vel* (seq :hit 1 0.5))",
+            2.0,
+        );
+        // A nested :hit seq steps once per visit.
+        assert_eq!(notes(&t[0]), [0., 7., 0., 12., 0., 7., 0., 12.]);
+        // A nested plain list moves per cycle.
+        assert_eq!(notes(&t[1]), [0., 7., 0., 7., 0., 12., 0., 12.]);
+        // …exactly like an explicit nested (seq :cycle …).
+        let explicit = jaki_surface_hits(". . . . -> 0 (note (seq :hit 0 (seq :cycle 3 5) 4))", 2.0);
+        assert_eq!(notes(&explicit[0]), [0., 3., 4., 0., 5., 4., 0., 5.]);
+        // Inside `on`, only left hits count: L R L R → 0 · 7 · | 12 · 0 ·.
+        assert_eq!(notes(&t[2]), [0., 0., 7., 0., 12., 0., 0., 0.]);
+        // Deferred gate and velocity words alternate per hit.
+        let durs: Vec<f64> = t[3].iter().map(|h| h.1).collect();
+        assert!((durs[1] - durs[0] * 0.5).abs() < 1e-6, "{durs:?}");
+        assert!((durs[3] - durs[2] * 0.5).abs() < 1e-6, "{durs:?}");
+        let vels: Vec<f64> = t[3].iter().map(|h| h.2).collect();
+        assert!(vels[1] < vels[0] * 0.8, "{vels:?}");
+    }
+
+    #[test]
+    fn jaki_marks_the_row_items_applied_to_each_hit_while_it_sounds() {
+        let state = Arc::new(SequencerState::new(
+            4,
+            (0..4).map(|_| default_empty_effect_chain()).collect(),
+        ));
+        let mut rt = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(4),
+            fallback_instrument_descriptors(4),
+            0,
+            0,
+        );
+        // Items: 0 (vel* 0.9) never lights; 1 (on left stac) lights left
+        // hits; 2 (every 2 (note 3)) lights every hit of odd cycles.
+        rt.eval(
+            r#"(import alez.jaki.surface :refer (jak))
+               (jak "lit" :16 . . . . -> 0 (vel* 0.9) (on left stac) (every 2 (note 3)))"#,
+        )
+        .expect("jak");
+        let id = rt.sequencer_defs()[0].id;
+        let mut generators = crate::generator::GeneratorRuntime::default();
+        generators.sync_definitions(&rt.sequencer_defs(), 0.0);
+        let mut out = Vec::new();
+        generators.process_block(0.0, 2.0, 0, 48_000.0,
+            |input| rt.invoke_sequencer_tick(input.generator_index, input).expect("tick"), &mut out);
+        // One unit = 12 000 samples, and this harness plays unit k at
+        // (k + 1) units; a stac'd left hit ends 3 000 in.
+        let unit = |k: u64| (k + 1) * 12_000;
+        let mask = |sample: u64| state.generator_mark_at(id, "0", sample);
+        assert_eq!(mask(unit(0) - 1), None, "nothing before the first hit");
+        assert_eq!(mask(unit(0)), Some(2.0), "cycle 0 left hit: the on");
+        assert_eq!(mask(unit(0) + 6_000), Some(0.0), "cleared at the stac'd hit's end");
+        assert_eq!(mask(unit(1)), Some(0.0), "cycle 0 right hit: nothing");
+        assert_eq!(mask(unit(4)), Some(6.0), "cycle 1 left hit: the on and the every");
+        assert_eq!(mask(unit(5)), Some(4.0), "cycle 1 right hit: the every");
+    }
+
+    #[test]
+    fn jaki_reports_the_list_member_each_hit_played() {
+        let state = Arc::new(SequencerState::new(
+            4,
+            (0..4).map(|_| default_empty_effect_chain()).collect(),
+        ));
+        let mut rt = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(4),
+            fallback_instrument_descriptors(4),
+            0,
+            0,
+        );
+        // Items: 0 (note (seq :hit 5 6 (7 9))), 1 (vel* (0.5 1)),
+        // 2 (on left (note+ (seq :hit 0 12))).
+        rt.eval(
+            r#"(import alez.jaki.surface :refer (jak))
+               (jak "picks" :16 . . . .
+                 -> 0 (note (seq :hit 5 6 (7 9))) (vel* (0.5 1)) (on left (note+ (seq :hit 0 12))))"#,
+        )
+        .expect("jak");
+        let id = rt.sequencer_defs()[0].id;
+        let mut generators = crate::generator::GeneratorRuntime::default();
+        generators.sync_definitions(&rt.sequencer_defs(), 0.0);
+        let mut out = Vec::new();
+        generators.process_block(0.0, 2.0, 0, 48_000.0,
+            |input| rt.invoke_sequencer_tick(input.generator_index, input).expect("tick"), &mut out);
+        // Codes: base-64 digits (element + 1) of the member's slot path
+        // below its item, least significant first.
+        let code = |rel: &[u64]| rel.iter().rev().fold(0u64, |acc, d| acc * 64 + d + 1) as f64;
+        let unit = |k: u64| (k + 1) * 12_000;
+        let pick = |item: usize, k: u64| state.generator_mark_at(id, &format!("0.{item}"), unit(k));
+        // (note (seq :hit 5 6 (7 9))): the seq is arg 1, its members start at
+        // element 2; hit 2 plays the nested cycle list's member 0 (cycle 0).
+        assert_eq!(pick(0, 0), Some(code(&[1, 2])));
+        assert_eq!(pick(0, 1), Some(code(&[1, 3])));
+        assert_eq!(pick(0, 2), Some(code(&[1, 4, 0])));
+        assert_eq!(pick(0, 5), Some(code(&[1, 4, 1])), "hit 5: cycle 1 of the nested list");
+        // (vel* (0.5 1)): one member per cycle.
+        assert_eq!(pick(1, 0), Some(code(&[1, 0])));
+        assert_eq!(pick(1, 4), Some(code(&[1, 1])));
+        // (on left (note+ (seq :hit 0 12))): the word is element 2 of the on,
+        // its seq arg 1; only left hits step it, and it holds between them.
+        assert_eq!(pick(2, 0), Some(code(&[2, 1, 2])));
+        assert_eq!(pick(2, 1), Some(code(&[2, 1, 2])), "a right hit keeps the last pick");
+        assert_eq!(pick(2, 2), Some(code(&[2, 1, 3])));
+    }
+
+    #[test]
+    fn jaki_preview_evaluates_a_window_of_cycles_from_start() {
+        let mut rt = jaki_runtime();
+        // `. -` then `. .`: 5 hits a cycle; the window
+        // starting at cycle 3 tags two cycles 3 and 4.
+        let cycles = jaki_eval_nums(
+            &mut rt,
+            "(map (lambda (e) (get e :cycle)) (jaki/preview '((fig (. -)) (fig (. .))) 3 2))",
+        );
+        assert_eq!(cycles, [[3.0; 5], [4.0; 5]].concat());
+    }
+
+    #[test]
+    fn gen_mark_stamps_values_at_the_boundary_audio_sample() {
+        let state = Arc::new(SequencerState::new(
+            4,
+            (0..4).map(|_| default_empty_effect_chain()).collect(),
+        ));
+        let mut runtime = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(4),
+            fallback_instrument_descriptors(4),
+            0,
+            0,
+        );
+        runtime
+            .eval(r#"(def-sequencer "marks" :resolution :16 :tick (gen-mark (+ (gen-tick) 1)))"#)
+            .expect("def-sequencer");
+        let id = runtime.sequencer_defs()[0].id;
+        let mut tick = |tick_index: u64, boundary_sample: u64| {
+            runtime
+                .invoke_sequencer_tick(
+                    0,
+                    crate::generator::GeneratorTickInput {
+                        gate: Default::default(),
+                        id,
+                        generator_index: 0,
+                        tick_index,
+                        boundary_sample,
+                        beat: tick_index as f64 * 0.25,
+                        resolution_beats: 0.25,
+                        samples_per_quarter: 48_000.0,
+                        random_state: 1,
+                        state: Default::default(),
+                    },
+                )
+                .expect("tick");
+        };
+        // Lookahead runs three ticks ahead of the audio clock.
+        tick(0, 1_000);
+        tick(1, 13_000);
+        tick(2, 25_000);
+        assert_eq!(state.generator_mark_at(id, "", 999), None);
+        assert_eq!(state.generator_mark_at(id, "", 1_000), Some(1.0));
+        assert_eq!(state.generator_mark_at(id, "", 20_000), Some(2.0));
+        // A relocation re-renders from an earlier sample: the stale future goes.
+        tick(0, 14_000);
+        assert_eq!(state.generator_mark_at(id, "", 30_000), Some(1.0));
+    }
+
+    #[test]
+    fn jaki_surface_on_sets_velocity_and_transpose_per_event() {
+        let mut rt = jaki_runtime();
+        rt.eval(
+            r#"(import alez.jaki.surface :refer (jak))
+               (jak "on" :16
+                 . . . .
+                 -> 0 (note 5) (on left (note+ 7) (vel* 0.5))
+                 -> 1 (on (every 2) (note 12)))"#,
+        )
+        .expect("jaki surface macro");
+
+        let mut generators = crate::generator::GeneratorRuntime::default();
+        generators.sync_definitions(&rt.sequencer_defs(), 0.0);
+        let mut out = Vec::new();
+        generators.process_block(
+            0.0,
+            2.0,
+            0,
+            48_000.0,
+            |input| rt.invoke_sequencer_tick(input.generator_index, input).expect("tick"),
+            &mut out,
+        );
+        let track = |t: usize| -> Vec<&crate::generator::GeneratorEmission> {
+            out.iter().filter(|e| e.event.track == Some(t)).collect()
+        };
+        let notes: Vec<f64> =
+            track(0).iter().map(|e| e.event.resolved.transpose as f64).collect();
+        assert_close(&notes[..4], &[12.0, 5.0, 12.0, 5.0]);
+        let vels: Vec<f64> = track(0).iter().map(|e| e.event.resolved.velocity as f64).collect();
+        assert!(vels[0] < vels[1] * 0.8, "left hits are halved: {vels:?}");
+        // (every 2) picks cycle 1 only: 0 0 0 0 then 12 12 12 12.
+        let notes: Vec<f64> =
+            track(1).iter().map(|e| e.event.resolved.transpose as f64).collect();
+        assert_close(&notes, &[0.0, 0.0, 0.0, 0.0, 12.0, 12.0, 12.0, 12.0]);
     }
 
     #[test]
@@ -16242,9 +16817,11 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             .invoke_sequencer_tick(
                 0,
                 crate::generator::GeneratorTickInput {
+                    gate: Default::default(),
                     id: 0,
                     generator_index: 0,
                     tick_index: 0,
+                    boundary_sample: 0,
                     beat: 0.30,
                     resolution_beats: 0.25,
                     samples_per_quarter: 48_000.0,

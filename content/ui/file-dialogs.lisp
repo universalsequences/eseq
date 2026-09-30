@@ -308,7 +308,7 @@
         :width-px 600 :height-px 480
       (box :debug-name "package-import-panel" :width :fill :height :fill :padding 0.6 :bg :transparent
         (if package-import-open? (package-import-body) (box :width 0 :height 0 :bg :transparent))))
-    (modal :is-open confirm-open? :on-close close-confirm :width-px 520 :height-px 220
+    (modal :is-open confirm-open? :on-close close-confirm :width-px 620 :height-px 220
       (v-stack :width :fill :height :fill :padding 1 :gap 1
         (label confirm-message :key "menu-confirm-message" :font-size 14 :bg :transparent)
         (h-stack :gap 1

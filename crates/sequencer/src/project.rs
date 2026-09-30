@@ -3270,13 +3270,34 @@ fn load_container_preset(path: &Path, kind: &str) -> std::io::Result<ProjectSoun
 
 mod rack_preset_catalog;
 
-pub fn list_rack_presets() -> std::io::Result<Vec<String>> {
+fn rack_preset_catalog() -> std::sync::MutexGuard<'static, rack_preset_catalog::RackPresetCatalog> {
     static CATALOG: std::sync::OnceLock<std::sync::Mutex<rack_preset_catalog::RackPresetCatalog>> =
         std::sync::OnceLock::new();
+    CATALOG.get_or_init(Default::default).lock().unwrap()
+}
+
+pub fn list_rack_presets() -> std::io::Result<Vec<String>> {
     let paths = crate::app_paths::app_paths();
     std::fs::create_dir_all(paths.user_rack_presets_dir())?;
-    let catalog = CATALOG.get_or_init(Default::default);
-    Ok(catalog.lock().unwrap().names(&[paths.rack_presets_dir(), paths.user_rack_presets_dir()]))
+    Ok(rack_preset_catalog().names(&[paths.rack_presets_dir(), paths.user_rack_presets_dir()]))
+}
+
+/// Rack preset names split into (factory, user). A user preset sharing a
+/// factory preset's name is listed only as factory, like instrument presets.
+pub fn list_rack_presets_by_tier() -> std::io::Result<(Vec<String>, Vec<String>)> {
+    let paths = crate::app_paths::app_paths();
+    std::fs::create_dir_all(paths.user_rack_presets_dir())?;
+    let mut tiers = rack_preset_catalog()
+        .names_by_directory(&[paths.rack_presets_dir(), paths.user_rack_presets_dir()])
+        .into_iter();
+    let factory = tiers.next().unwrap_or_default();
+    let user = tiers
+        .next()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|name| !factory.contains(name))
+        .collect();
+    Ok((factory, user))
 }
 
 pub fn kit_preset_path(name: &str) -> PathBuf {

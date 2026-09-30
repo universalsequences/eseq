@@ -1709,6 +1709,7 @@
                 effect_params: Vec::new(),
                 instrument_params: Vec::new(),
             },
+            None,
             false,
         ));
 
@@ -1800,6 +1801,7 @@
                 effect_params: Vec::new(),
                 instrument_params: Vec::new(),
             },
+            None,
             false,
         ));
 
@@ -2398,6 +2400,7 @@
                 node_index: graph_emissions[0].node_index,
             },
             graph_emissions.remove(0).event,
+            None,
             false,
         ));
 
@@ -2464,6 +2467,7 @@
                 effect_params: Vec::new(),
                 instrument_params: Vec::new(),
             },
+            None,
             false,
         ));
 
@@ -2531,6 +2535,7 @@
                 effect_params: Vec::new(),
                 instrument_params: Vec::new(),
             },
+            None,
             false,
         ));
 
@@ -2622,6 +2627,7 @@
         track: usize,
         sample_time: u64,
         transpose: f32,
+        velocity: f32,
         duration: f32,
         retrig: f32,
         retrig_rate: f32,
@@ -2645,6 +2651,7 @@
                     track,
                     sample_time: event.sample_time,
                     transpose: resolved.transpose,
+                    velocity: resolved.velocity,
                     duration: resolved.duration,
                     retrig: resolved.retrig,
                     retrig_rate: resolved.retrig_rate,
@@ -2666,6 +2673,7 @@
                     track,
                     sample_time: event.sample_time,
                     transpose: resolved.transpose,
+                    velocity: resolved.velocity,
                     duration: resolved.duration,
                     retrig: resolved.retrig,
                     retrig_rate: resolved.retrig_rate,
@@ -2713,6 +2721,52 @@
         figures: &'static str,
         horizon: u64,
     ) -> Vec<(usize, u64)> {
+        jaki_instance_observed(owner_rack, rows, figures, horizon, |_| {})
+            .into_iter()
+            .map(|trigger| (trigger.track, trigger.sample_time))
+            .collect()
+    }
+
+    fn jaki_instance_observed(
+        owner_rack: Option<(u64, Vec<usize>)>,
+        rows: &'static str,
+        figures: &'static str,
+        horizon: u64,
+        setup: impl FnOnce(&SequencerState) + Send + 'static,
+    ) -> Vec<ObservedTrigger> {
+        jaki_instance_observed_full(
+            owner_rack,
+            rows,
+            figures,
+            ":loop",
+            horizon,
+            6_000,
+            move |state, _| setup(state),
+            |_, _, _| {},
+        )
+    }
+
+    /// [`jaki_instance_observed`] with the instance's `mode`, the scheduler
+    /// chunk size, and a hook that sees the published snapshot and the
+    /// scheduler (to install graphs that gate the instance, whose generator
+    /// id it is handed).
+    #[allow(clippy::too_many_arguments)]
+    fn jaki_instance_observed_full(
+        owner_rack: Option<(u64, Vec<usize>)>,
+        rows: &'static str,
+        figures: &'static str,
+        mode: &'static str,
+        horizon: u64,
+        chunk_frames: usize,
+        setup: impl FnOnce(&Arc<SequencerState>, u64) + Send + 'static,
+        scheduler_setup: impl FnOnce(
+                &SequencerState,
+                &crate::sequencer::SequencerSnapshot,
+                &mut SchedulerLookaheadState,
+            )
+            + Send
+            + 'static,
+    ) -> Vec<ObservedTrigger> {
         run_with_scheduler_stack(move || {
             let state = Arc::new(SequencerState::new(
                 4,
@@ -2733,7 +2787,7 @@
                     id: 0,
                     name: "jaki".to_string(),
                     resolution: crate::sequencer::Timebase::Sixteenth as u8,
-                    tick_source: "(alez.jaki.doc/tick self.figures self.rows self.row-count)"
+                    tick_source: "(alez.jaki.doc/tick self.figures self.rows self.row-count self.mode)"
                         .to_string(),
                     requires: vec!["alez.jaki.doc".to_string()],
                     graph: None,
@@ -2743,6 +2797,7 @@
                     ("figures".to_string(), literal("(list (list :dot :dot :dot :dot))")),
                     ("rows".to_string(), literal("(list)")),
                     ("row-count".to_string(), literal("8")),
+                    ("mode".to_string(), literal(":loop")),
                 ],
                 state_fields: Vec::new(),
                 has_view: true,
@@ -2760,6 +2815,9 @@
                     literal(figures),
                 )
                 .expect("figures");
+            state
+                .write_current_scene_slot(lisp_host::instance_document_slot(5, "mode"), literal(mode))
+                .expect("mode");
             let owner = owner_rack.as_ref().map(|(group_id, _)| *group_id);
             if let Some((group_id, members)) = &owner_rack {
                 state.set_rack_memberships(vec![crate::graph::RackMembership {
@@ -2789,6 +2847,7 @@
                 )
                 .expect("register the instance generator");
 
+            setup(&state, published.id);
             state.transport.playing.store(true, Ordering::Relaxed);
             let mut scheduler = SchedulerLookaheadState::new(48_000);
             scheduler
@@ -2799,6 +2858,7 @@
             }
             let mut scratch_runtime = Some(scratch);
             let snapshot = state.publish_scheduler_snapshot();
+            scheduler_setup(&state, &snapshot, &mut scheduler);
             let queue = ScheduledEventQueue::<256>::new();
             let live_midi_fx_tracks: [LiveMidiFxTrackState; MAX_TRACKS] =
                 std::array::from_fn(|_| LiveMidiFxTrackState::default());
@@ -2814,7 +2874,7 @@
                 0,
                 horizon,
                 48_000,
-                6_000,
+                chunk_frames,
                 24_000.0,
                 0,
                 false,
@@ -2827,10 +2887,218 @@
                 .collect();
             assert!(errors.is_empty(), "the instance tick must not fail: {errors:?}");
             observed_triggers(&queue)
-                .into_iter()
-                .map(|trigger| (trigger.track, trigger.sample_time))
-                .collect()
         })
+    }
+
+    /// docs/jaki-trig-modes-spec.md: a neuron routed to a jaki instance
+    /// gates it. Track 0's step 0 seeds the neuron once; its self-edge
+    /// re-fires it every 4 sixteenths with note +5, velocity 0.5 and a
+    /// `dur_steps` gate. The instance's rows play `left` hits on track 1 and
+    /// `right` hits on track 2 of `. . . .` (L R L R). Chunks are audio-block
+    /// sized, so a fire must reach the instance on its own boundary.
+    fn jaki_gated_by_neuron(mode: &'static str, dur_steps: u32) -> Vec<ObservedTrigger> {
+        jaki_driven_by_neuron(mode, dur_steps, 4, false)
+    }
+
+    /// [`jaki_gated_by_neuron`] with the neuron's re-fire period in
+    /// sixteenths, and `restart` routing it to the instance's restart input
+    /// (spec §5) instead of its gate.
+    fn jaki_driven_by_neuron(
+        mode: &'static str,
+        dur_steps: u32,
+        delay_steps: u32,
+        restart: bool,
+    ) -> Vec<ObservedTrigger> {
+        jaki_instance_observed_full(
+            None,
+            r#"(list (dict :route 1 :mods (list "left")) (dict :route 2 :mods (list "right")))"#,
+            "(list (list :dot :dot :dot :dot))",
+            mode,
+            96_000,
+            512,
+            move |state, jaki_id| {
+                state.toggle_step_and_clear_plocks(0, 0);
+                publish_test_graph_sequencer(
+                    Arc::clone(state),
+                    &format!(
+                        r#"
+                        (def-sequencer "jaki-gate-graph"
+                          :shape (line 1)
+                          :energy-decay 1
+                          :reset-every 0
+                          :seed-on-reset 0
+                          :max-poly 8
+                          :max-poly-selection :deterministic
+                          :duration (steps {dur_steps})
+                          (def-node nrn
+                            :resolution :16
+                            :delay {delay_steps}
+                            :quantize :16
+                            :route 3
+                            :seed-from 0
+                            :reduce :sum
+                            :params ((threshold :float 0 4 :default 0.5))
+                            :state ((energy :leak (per-step :energy-decay)))
+                            :update (if (>= (energy) (param :threshold))
+                                      (emit :note 5 :vel 0.5)
+                                      false))
+                          (edges
+                            :from nrn
+                            :to nrn
+                            :topology (all-to-all)
+                            :gather (edge :weight)
+                            :params ((weight :float -1 1 :default 0))))
+                        "#
+                    ),
+                );
+                let published = state
+                    .published_sequencers()
+                    .into_iter()
+                    .find(|seq| seq.name == "jaki-gate-graph")
+                    .expect("published graph");
+                let manifest = published.graph.as_ref().expect("graph manifest");
+                let edge_group = crate::graph::edge_set_group_id(&manifest.edge_sets[0]);
+                state
+                    .edit_current_graph_overrides(|graphs| {
+                        graphs.push(ProjectGraphOverrides {
+                            sequencer_id: published.id,
+                            sequencer_name: published.name.clone(),
+                            owner_rack: None,
+                            node_intrinsics: vec![ProjectGraphNodeIntrinsicOverride {
+                                group: "nrn".to_string(),
+                                instance: 0,
+                                resolution: None,
+                                delay_steps: None,
+                                quantize: None,
+                                route: Some(if restart {
+                                    ProjectGraphRouteOverride::GeneratorRestart(jaki_id)
+                                } else {
+                                    ProjectGraphRouteOverride::Generator(jaki_id)
+                                }),
+                                seed_from: Some(ProjectGraphSeedFrom::Tracks(vec![0])),
+                                seed_on_reset: None,
+                                duration: None,
+                                swing: None,
+                                neural_group: None,
+                                process_chain: None,
+                            }],
+                            node_params: Vec::new(),
+                            edge_params: vec![ProjectGraphEdgeParamOverride {
+                                group: edge_group,
+                                from: 0,
+                                to: 0,
+                                param: "weight".to_string(),
+                                value: 1.0,
+                            }],
+                            reset_every_beats: None,
+                            max_poly: None,
+                            max_poly_selection: None,
+                            node_count: None,
+                            group_gain: None,
+                            group_coupling: None,
+                            group_trace_decay: None,
+                            group_coupling_scale: None,
+                            group_excite_floor: None,
+                        });
+                        Ok(())
+                    })
+                    .expect("route the neuron to the jaki instance");
+            },
+            |state, snapshot, scheduler| {
+                let manifests = state
+                    .published_sequencers()
+                    .into_iter()
+                    .filter_map(|seq| seq.graph)
+                    .collect::<Vec<_>>();
+                reconcile_graph_runtimes(
+                    manifests,
+                    &snapshot.graph_overrides,
+                    &[],
+                    &mut scheduler.graph_runtimes,
+                    &mut scheduler.graph_manifests,
+                    scheduler.clock.total_beats,
+                );
+                assert_eq!(scheduler.graph_runtimes.len(), 1);
+            },
+        )
+        .into_iter()
+        .filter(|trigger| trigger.kind == ScheduledTriggerKind::Network)
+        .collect()
+    }
+
+    #[test]
+    fn a_neuron_routed_to_a_retrig_jaki_restarts_it_on_every_fire() {
+        let hits = jaki_gated_by_neuron(":retrig", 2);
+        // The fire itself never sounds: the neuron routes to no track.
+        assert!(hits.iter().all(|hit| hit.track == 1 || hit.track == 2), "{hits:#?}");
+        assert!(hits.len() >= 6, "several two-unit windows: {hits:#?}");
+        let first = hits[0].sample_time;
+        assert_eq!(first % 6_000, 0, "the first hit lands on the fire's own boundary");
+        // The horizon may cut the last window after its first unit.
+        for (window, pair) in hits.chunks_exact(2).enumerate() {
+            let start = first + window as u64 * 24_000;
+            // Each fire rewinds to unit 0: left hand (track 1), then right.
+            assert_eq!(
+                (pair[0].track, pair[0].sample_time, pair[1].track, pair[1].sample_time),
+                (1, start, 2, start + 6_000),
+                "window {window}: {hits:#?}"
+            );
+        }
+        assert_eq!(
+            hits.chunks_exact(2).map(|pair| pair[0].velocity).collect::<Vec<_>>(),
+            vec![hits[0].velocity; hits.len() / 2],
+            "a rewind restarts the velocity model too: {hits:#?}"
+        );
+        for hit in &hits {
+            assert_eq!(hit.transpose, 5.0, "the fire's note adds: {hit:?}");
+            assert!(hit.velocity > 0.0 && hit.velocity <= 0.5 + 1e-6, "the fire's vel scales: {hit:?}");
+        }
+    }
+
+    #[test]
+    fn a_neuron_routed_to_a_continue_jaki_advances_it_one_window_per_fire() {
+        let hits = jaki_gated_by_neuron(":continue", 1);
+        assert!(hits.len() >= 3, "{hits:#?}");
+        let first = hits[0].sample_time;
+        for (k, hit) in hits.iter().enumerate() {
+            // One unit per fire, picking up where the last stopped: L R L R.
+            assert_eq!(
+                (hit.track, hit.sample_time),
+                (if k % 2 == 0 { 1 } else { 2 }, first + k as u64 * 24_000),
+                "hit {k}: {hits:#?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_neuron_on_a_jaki_restart_input_rewinds_a_looping_pattern() {
+        // The neuron fires on beat 1.5 and then every 3 units (2.25, 3.0,
+        // 3.75). The looping `. . . .` (L R L R on tracks 1 / 2) runs free
+        // until the first fire, then replays its first three units from
+        // every fire, velocity model fresh each time.
+        let hits = jaki_driven_by_neuron(":loop", 1, 3, true);
+        let tracks: Vec<usize> = hits.iter().map(|hit| hit.track).collect();
+        assert_eq!(
+            tracks,
+            vec![1, 2, 1, 2, 1, 1, 2, 1, 1, 2, 1, 1, 2, 1, 1, 2],
+            "rewound on every fire: {hits:#?}"
+        );
+        for fire_beat in [1.5_f64, 2.25, 3.0, 3.75] {
+            let hit = hits
+                .iter()
+                .find(|hit| hit.sample_time == (fire_beat * 24_000.0) as u64)
+                .expect("a hit on the fire's boundary");
+            assert_eq!((hit.track, hit.velocity), (1, hits[0].velocity), "fresh at {fire_beat}");
+        }
+        assert!(hits.iter().all(|hit| hit.transpose == 0.0), "a restart carries no payload");
+    }
+
+    #[test]
+    fn a_looping_jaki_ignores_a_neuron_routed_to_it() {
+        let hits = jaki_gated_by_neuron(":loop", 1);
+        // The transport clock plays every unit, at the pattern's own velocity.
+        assert_eq!(hits.len(), 16, "{hits:#?}");
+        assert!(hits.iter().all(|hit| hit.transpose == 0.0), "{hits:#?}");
     }
 
     #[test]
@@ -2842,6 +3110,38 @@
         assert_eq!(on(0), 8, "{triggers:?}");
         assert_eq!(on(1), 16, "{triggers:?}");
         assert_eq!(on(2) + on(3), 0, "{triggers:?}");
+    }
+
+    #[test]
+    fn jaki_hits_take_the_p_locks_of_the_untriggered_step_they_land_on() {
+        // Track 1 has no triggers, only off-step sampler-speed p-locks on
+        // steps 1 and 4. Row 1 hits every sixteenth, so a hit at sample
+        // k*6000 lands on step k: steps 1 and 4 play their locks AT the onset
+        // (a per-hit instrument latches there), every other step plays the
+        // base value.
+        let triggers = jaki_instance_observed(
+            None,
+            r#"(list (dict :route 0 :mods (list (dict :op "left" :args (list))))
+                     (dict :route 1 :mods (list)))"#,
+            "(list (list :dot :dot :dot :dot))",
+            96_000,
+            |state| {
+                let slot = &state.pattern.instrument_slots[1];
+                slot.apply_descriptor(&EffectDescriptor::builtin_sampler(), 12);
+                slot.set_plock(1, 12, 0.5);
+                slot.set_plock(4, 12, 2.0);
+            },
+        );
+        let speed_at = |step: u64| {
+            triggers
+                .iter()
+                .find(|trigger| trigger.track == 1 && trigger.sample_time == step * 6_000)
+                .and_then(|trigger| trigger.sampler_speed)
+        };
+        assert_eq!(speed_at(1), Some(0.5), "{triggers:?}");
+        assert_eq!(speed_at(2), Some(1.0), "{triggers:?}");
+        assert_eq!(speed_at(4), Some(2.0), "{triggers:?}");
+        assert_eq!(speed_at(5), Some(1.0), "{triggers:?}");
     }
 
     #[test]
@@ -2876,6 +3176,303 @@
         let on = |track: usize| triggers.iter().filter(|(t, _)| *t == track).count();
         assert!(on(0) > 0, "{triggers:?}");
         assert_eq!(on(1), 16, "four dots per 4-unit cycle, four cycles: {triggers:?}");
+    }
+
+    #[test]
+    fn a_jaki_row_plays_sexp_slot_items_with_per_cycle_lists() {
+        // docs/sexp-slot-spec.md §3: a row's mods are the slot's items, and
+        // any list in them cycles per cycle. `(fast (1 2))` doubles every
+        // other cycle; `(left left right)` picks a hand per cycle;
+        // `(every 2 (rev swap))` alternates its word and never silences.
+        let triggers = jaki_instance_triggers_with(
+            None,
+            r#"(list (dict :route 0 :mods (list (list "fast" (list 1 2))))
+                     (dict :route 1 :mods (list (list "left" "left" "right")))
+                     (dict :route 2 :mods (list (list "every" 2 (list "rev" "swap"))))
+                     (dict :route 3 :mods (list (dict :op "left" :args (list)))))"#,
+            "(list (list :dot :dot :dot :dot))",
+            96_000,
+        );
+        let on = |track: usize| triggers.iter().filter(|(t, _)| *t == track).count();
+        // Four 4-unit cycles: plain would be 16; fast 2 on cycles 1 and 3
+        // adds a second pass inside those cycles.
+        assert!(on(0) > 16, "fast (1 2) doubles alternate cycles: {triggers:?}");
+        // One hand per cycle: two hits a cycle whichever hand it is.
+        assert_eq!(on(1), 8, "{triggers:?}");
+        assert!(on(2) > 0, "{triggers:?}");
+        // A record saved before the slot still reads: `left` halves the
+        // plain row's 16 hits.
+        assert_eq!(on(3), 8, "{triggers:?}");
+    }
+
+    #[test]
+    fn a_jaki_figure_count_and_every_fig_row_play() {
+        // `. -` ×2 is one 6-unit cycle. Row 0 plays it plain: one hit per
+        // unit, 16 over the bar. Row 1 ghosts every 2nd figure, and a ghosted
+        // dash drops its first hit: one hit fewer per full cycle (cycles
+        // [0,6) and [6,12); [12,16) never reaches figure 1's dash).
+        let triggers = jaki_instance_triggers_with(
+            None,
+            r#"(list (dict :route 0 :mods (list))
+                     (dict :route 1 :mods (list (list "every-fig" 2 "ghost"))))"#,
+            "(list (list 2 :dot :dash))",
+            96_000,
+        );
+        let on = |track: usize| triggers.iter().filter(|(t, _)| *t == track).count();
+        assert_eq!(on(0), 16, "{triggers:?}");
+        assert_eq!(on(1), 14, "{triggers:?}");
+    }
+
+    #[test]
+    fn a_jaki_every_and_every_fig_gate_retiming_and_filter_words() {
+        let on = |triggers: &[(usize, u64)], track: usize| {
+            triggers.iter().filter(|(t, _)| *t == track).count()
+        };
+        // `. . . .`, four 4-unit cycles. (every 2 (fast 2)) doubles cycles
+        // 1 and 3: 4 + 8 + 4 + 8.
+        let triggers = jaki_instance_triggers_with(
+            None,
+            r#"(list (dict :route 0 :mods (list (list "every" 2 (list "fast" 2)))))"#,
+            "(list (list :dot :dot :dot :dot))",
+            96_000,
+        );
+        assert_eq!(on(&triggers, 0), 24, "{triggers:?}");
+        // `. .` ×2: (every-fig 2 (fast 2)) doubles figure 1 only, 2 + 4
+        // hits per 4-unit cycle. (every-fig 2 left) keeps figure 0 whole and
+        // figure 1's left-hand hit: 3 per cycle.
+        let triggers = jaki_instance_triggers_with(
+            None,
+            r#"(list (dict :route 0 :mods (list (list "every-fig" 2 (list "fast" 2))))
+                     (dict :route 1 :mods (list (list "every-fig" 2 "left"))))"#,
+            "(list (list 2 :dot :dot))",
+            96_000,
+        );
+        assert_eq!(on(&triggers, 0), 24, "{triggers:?}");
+        assert_eq!(on(&triggers, 1), 12, "{triggers:?}");
+    }
+
+    #[test]
+    fn a_jaki_quant_row_lands_every_hit_on_its_grid() {
+        // `. .` ×2 on sixteenths (this harness plays unit k at (k + 1) *
+        // 6000). (quant :8) snaps units 0 1 2 3 onto eighths 0 2 2 0: two
+        // hits per 4-unit cycle, both on the eighth grid, since hits snapped
+        // onto one point sound once. (every-fig 2 (quant :4)) snaps only
+        // figure 1 (units 2 3) onto the bar line: units 0 and 1 remain.
+        let triggers = jaki_instance_triggers_with(
+            None,
+            r#"(list (dict :route 0 :mods (list (list "quant" ":8")))
+                     (dict :route 1 :mods (list (list "every-fig" 2 (list "quant" ":4")))))"#,
+            "(list (list 2 :dot :dot))",
+            96_000,
+        );
+        let times = |track: usize| -> Vec<u64> {
+            triggers.iter().filter(|(t, _)| *t == track).map(|(_, time)| *time - 6_000).collect()
+        };
+        assert_eq!(times(0), vec![0, 12_000, 24_000, 36_000, 48_000, 60_000, 72_000, 84_000]);
+        assert_eq!(times(1), vec![0, 6_000, 24_000, 30_000, 48_000, 54_000, 72_000, 78_000]);
+    }
+
+    #[test]
+    fn a_jaki_every_fig_note_transposes_only_the_picked_figures() {
+        // `. .` ×2 = one 4-unit cycle; (note 5) then (every-fig 2 (note (12
+        // 7))): figure 0 keeps 5, figure 1 plays 12 on cycle 0, 7 on cycle 1.
+        let triggers = jaki_instance_observed(
+            None,
+            r#"(list (dict :route 0 :mods (list (list "note" 5)
+                                                (list "every-fig" 2 (list "note" (list 12 7))))))"#,
+            "(list (list 2 :dot :dot))",
+            48_000,
+            |_| {},
+        );
+        let notes: Vec<f32> = triggers.iter().map(|trigger| trigger.transpose).collect();
+        assert_eq!(notes, vec![5.0, 5.0, 12.0, 12.0, 5.0, 5.0, 7.0, 7.0], "{triggers:?}");
+    }
+
+    #[test]
+    fn a_jaki_on_row_scopes_retiming_drops_and_transpose() {
+        // Figures `. .` `. .` = one 4-unit cycle, four cycles. Row 0 doubles
+        // figure 2 only: 2 + 4 per cycle. Row 1 drops figure 2 every other
+        // time it plays: 4 2 4 2. Row 2 raises figure 1's left hit by 7
+        // over the route's note 5.
+        let triggers = jaki_instance_observed(
+            None,
+            r#"(list (dict :route 0 :mods (list (list "on" (list "fig" 2) (list "fast" 2))))
+                     (dict :route 1 :mods (list (list "on" (list "nth" 2 (list "fig" 2)) "rest")))
+                     (dict :route 2 :mods (list (list "note" 5)
+                                                (list "on" (list "and" (list "fig" 1) "left")
+                                                      (list "note+" 7)))))"#,
+            "(list (list :dot :dot) (list :dot :dot))",
+            96_000,
+            |_| {},
+        );
+        let on = |track: usize| triggers.iter().filter(|t| t.track == track).count();
+        assert_eq!(on(0), 24, "{triggers:?}");
+        assert_eq!(on(1), 12, "{triggers:?}");
+        let notes: Vec<f32> =
+            triggers.iter().filter(|t| t.track == 2).map(|t| t.transpose).collect();
+        assert_eq!(notes, [12.0, 5.0, 5.0, 5.0].repeat(4), "{triggers:?}");
+    }
+
+    /// Perf probe: a five-row jaki instance (two `. -` figures, modifier-heavy
+    /// rows) ticked for 16 bars, one sixteenth per lookahead call like the
+    /// live driver. Prints per-call percentiles; ~1.5 ms of each call is the
+    /// harness clock, not the generator (compare `JAKI_TICK='(+ 1 2)'`).
+    /// `JAKI_TICK` replaces the tick source, `JAKI_DUMP=<path>` writes every
+    /// scheduled event for before/after output diffs.
+    /// cargo nextest run --release -p sequencer --run-ignored only -E 'test(jaki_tick_cost_probe)' --no-capture
+    #[test]
+    #[ignore]
+    fn jaki_tick_cost_probe() {
+        run_with_scheduler_stack(|| {
+            let state = Arc::new(SequencerState::new(
+                8,
+                (0..8).map(|_| default_empty_effect_chain()).collect(),
+            ));
+            let mut values = Runtime::new();
+            let mut literal = |source: &str| {
+                let value = values.eval_str(source).expect("literal").expect("a value");
+                crate::process::ProcessLiteral::from_value(&value).expect("portable")
+            };
+            let kind = lisp_host::KindDefinition {
+                id: "alez/jaki:jaki".to_string(),
+                name: "jaki".to_string(),
+                package: Some("alez/jaki".to_string()),
+                module: Some("alez.jaki.kind".to_string()),
+                sequencer: None,
+                generator: Some(crate::sequencer::PublishedSequencer {
+                    id: 0,
+                    name: "jaki".to_string(),
+                    resolution: crate::sequencer::Timebase::Sixteenth as u8,
+                    tick_source: std::env::var("JAKI_TICK").unwrap_or_else(|_| {
+                        "(alez.jaki.doc/tick self.figures self.rows self.row-count self.mode)".to_string()
+                    }),
+                    requires: vec!["alez.jaki.doc".to_string()],
+                    graph: None,
+                    owner_rack: None,
+                }),
+                document: vec![
+                    ("figures".to_string(), literal("(list (list :dot :dot :dot :dot))")),
+                    ("rows".to_string(), literal("(list)")),
+                    ("row-count".to_string(), literal("8")),
+                    ("mode".to_string(), literal(":loop")),
+                ],
+                state_fields: Vec::new(),
+                has_view: true,
+                keymap: None,
+            };
+            lisp_host::register_kind(kind.clone());
+            let rows = r#"(list
+                (dict :route 0 :mods (list (list "minvel" 0.21) (list "dotdecay" 0.13)
+                  (list "dashdecay" 0.25) (list "every" 4 "rev") "left" (list "slow" 1)))
+                (dict :route 1 :mods (list (list "minvel" 0.06) (list "dotdecay" 0.02)
+                  (list "dashdecay" 0.58) (list "shift" 2) (list "every" 2 "ghost")))
+                (dict :route 3 :mods (list (list "dotdecay" 0.0) (list "shift" 2) "right"
+                  (list "every" 4 "swap") (list "slow" (list 1 1 1 2)) "stac"))
+                (dict :route 2 :mods (list (list "minvel" 0.22) (list "dotdecay" 0.17) "left"
+                  (list "every" 4 "rev") (list "fast" 1)))
+                (dict :route 4 :mods (list (list "shift" 0) "left" (list "every" 2 "rev")
+                  (list "dotdecay" 0.0) (list "minvel" 0.0) (list "dashdecay" 0.0)
+                  (list "slow" 2))))"#;
+            state
+                .write_current_scene_slot(lisp_host::instance_document_slot(5, "rows"), literal(rows))
+                .expect("rows");
+            state
+                .write_current_scene_slot(
+                    lisp_host::instance_document_slot(5, "figures"),
+                    literal("(list (list :dot :dash) (list :dot :dash))"),
+                )
+                .expect("figures");
+            let published =
+                lisp_host::instance_published_sequencer(&kind, 5, None).expect("generator");
+            let mut scratch = lisp_host::ScratchControlRuntime::new(
+                Arc::clone(&state),
+                vec![Vec::new(); 8],
+                vec![EffectDescriptor::builtin_sampler(); 8],
+                0,
+                0,
+            );
+            scratch
+                .register_published_sequencer(
+                    published.id,
+                    published.name.clone(),
+                    crate::sequencer::Timebase::from_index(published.resolution as u32),
+                    published.tick_source.clone(),
+                    &published.requires,
+                )
+                .expect("register");
+            state.transport.playing.store(true, Ordering::Relaxed);
+            let mut scheduler = SchedulerLookaheadState::new(48_000);
+            scheduler
+                .generator_runtime
+                .sync_definitions(&scratch.sequencer_defs(), 0.0);
+            let mut scratch_runtime = Some(scratch);
+            let snapshot = state.publish_scheduler_snapshot();
+            let live_midi_fx_tracks: [LiveMidiFxTrackState; MAX_TRACKS] =
+                std::array::from_fn(|_| LiveMidiFxTrackState::default());
+            // 24000 samples per quarter: one bar = 96000, 16 ticks per bar.
+            let bars = 16u64;
+            let chunk = 6_000u64; // one sixteenth per call, like the live driver
+            let mut events = 0usize;
+            let mut worst = Duration::ZERO;
+            let mut chunks: Vec<Duration> = Vec::new();
+            let mut dump = String::new();
+            let started = Instant::now();
+            let mut now = 0u64;
+            let mut until = 0u64;
+            while now < bars * 96_000 {
+                let queue = ScheduledEventQueue::<256>::new();
+                let t = Instant::now();
+                let result = schedule_playing_lookahead(
+                    &mut scheduler,
+                    &state,
+                    &snapshot,
+                    &queue,
+                    &mut scratch_runtime,
+                    &live_midi_fx_tracks,
+                    snapshot.transport.pattern_epoch,
+                    now,
+                    now + chunk,
+                    48_000,
+                    6_000,
+                    24_000.0,
+                    until,
+                    false,
+                    false,
+                );
+                until = result.scheduled_until_sample;
+                chunks.push(t.elapsed());
+                worst = worst.max(t.elapsed());
+                while let Some(event) = queue.pop_owned() {
+                    events += 1;
+                    dump.push_str(&format!("{event:?}\n"));
+                }
+                now += chunk;
+            }
+            let elapsed = started.elapsed();
+            let ticks = bars * 16;
+            let errors: Vec<String> = state
+                .drain_generator_tick_errors()
+                .into_iter()
+                .map(|notice| notice.error)
+                .collect();
+            assert!(errors.is_empty(), "{errors:?}");
+            if let Ok(path) = std::env::var("JAKI_DUMP") {
+                std::fs::write(path, &dump).expect("dump");
+            }
+            chunks.sort();
+            let pct = |q: f64| chunks[((chunks.len() - 1) as f64 * q) as usize];
+            eprintln!(
+                "chunks p10 {:?} p50 {:?} p90 {:?} p99 {:?}",
+                pct(0.1),
+                pct(0.5),
+                pct(0.9),
+                pct(0.99)
+            );
+            eprintln!(
+                "jaki probe: {ticks} ticks in {elapsed:?} = {:?}/tick, worst chunk {worst:?}, {events} events",
+                elapsed / ticks as u32
+            );
+        });
     }
 
     #[test]
@@ -9393,6 +9990,49 @@
     }
 
     #[test]
+    fn cross_track_neural_fires_take_the_p_locks_of_their_landing_step() {
+        let state = SequencerState::new(2, (0..2).map(|_| default_empty_effect_chain()).collect());
+        let slot = &state.pattern.instrument_slots[1];
+        slot.apply_descriptor(&EffectDescriptor::builtin_sampler(), 12);
+        slot.set_plock(4, 12, 2.0);
+        let snapshot = state.publish_scheduler_snapshot();
+        let landing = super::StepLanding {
+            step: 4,
+            print_overrides: None,
+        };
+
+        // Seeded by track 0, firing into track 1: track 1's step 4 stamps
+        // the hit, and the seed moves there for MIDI-FX/key-lock/rack reads.
+        let mut output = neural_output(0, 1, 3, 0.0, 1.0);
+        output.event.source = EventSource::Network {
+            seed: Some((0, 9)),
+            neuron: 3,
+            instrument_fingerprint: 0,
+        };
+        super::land_network_event(&snapshot, &landing, &mut output.event);
+        assert_eq!(output.event.sampler_params.playback_speed, 2.0);
+        assert_eq!(
+            output.event.source,
+            EventSource::Network {
+                seed: Some((1, 4)),
+                neuron: 3,
+                instrument_fingerprint: 0,
+            }
+        );
+
+        // A fire back into its seed's own track keeps the seed step's stamp.
+        let mut echo = neural_output(0, 1, 3, 0.0, 1.0);
+        echo.event.source = EventSource::Network {
+            seed: Some((1, 9)),
+            neuron: 3,
+            instrument_fingerprint: 0,
+        };
+        let before = echo.event.clone();
+        super::land_network_event(&snapshot, &landing, &mut echo.event);
+        assert_eq!(echo.event, before);
+    }
+
+    #[test]
     fn resolve_instrument_plocks_returns_only_plocked_params_on_inactive_steps() {
         let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
         let track = 0;
@@ -14899,6 +15539,7 @@ fn scene_transpose_follows_live_scene_values_without_a_scratch_runtime() {
                 2.0,
                 spq,
                 crate::groove::GrooveFloor::at(0),
+                None,
                 false,
             ));
             let mut times: Vec<(usize, u64)> = observed_triggers(&queue)
@@ -15245,6 +15886,7 @@ fn scene_transpose_follows_live_scene_values_without_a_scratch_runtime() {
                 2.0,
                 spq,
                 crate::groove::GrooveFloor::at(0),
+                None,
                 false,
             ));
             let mut got: Vec<(usize, u64, f32)> = trig_velocities(&queue)

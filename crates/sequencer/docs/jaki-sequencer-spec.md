@@ -148,6 +148,17 @@ Adopted from the Swift vocabulary; each is a list form:
 - `(ghost)` — skip a dash's first hit, keep the second as a pickup.
 - `(split <target>)` / `(merge <target>)` — dash↔dot-pair rewrites.
 - `(swap)` — exchange hand assignment (L↔R) for this cycle.
+- `(half)` — Liebezeit halftime, the inverse of `(* 2)`, dashes first: each
+  `-` claims the `. .` right before it and contracts to one dash, then the
+  dots left in each run pair up left to right into single dots, all played at
+  twice their length, so the figure keeps its length and its accent count
+  (every dash still ends in a dash). `. . . -` plays `.` `-`(×2);
+  `. . . . . -` plays `.`(×2) `.` `-`(×2); symbols that cannot contract pass
+  through (`. - .`). Hands derive per symbol as usual: a `. . -` contraction
+  keeps the hand after the figure, a `. .` one flips it, and claiming dots
+  for dashes first keeps those flips to a minimum. `(* 2)` after `(half)` expands the
+  halftime symbols back: `. . -` `(half)` `(* 2)` plays `. . -`. Contrast
+  `(/ n)` / `slow`, which keeps the symbols and stretches the figure n-fold.
 - `(basevel v)`, `(dotdecay v)`, `(dashdecay v)`, `(minvel v)`,
   `(maxvel v)` — velocity-model overrides; `v` is any expression, including
   `(cyc …)`.
@@ -257,6 +268,169 @@ hit), `:figure` (index, for splitting concatenations across tracks).
   (`filterByAccent`, line 1104).
 - Other axes — gates unchanged (default); an optional `:legato true` key
   opts into hand-style extension.
+
+## 7.1 Scoped words: `(on SEL word…)`
+
+A filter *keeps* the matching events and drops the rest. Most musical
+intent is different: "on the left hand, lower the velocity; leave everything
+else alone". `on` is that: it applies route words **only to the events or
+figures a selector matches**, and every other event passes through
+untouched.
+
+```lisp
+(on left (vel+ -0.1))                    ; left hand quieter, right hand as is
+(on (fig 2) (every 2 (fast 2)))          ; figure 2 double time, every other cycle
+(on (and (fig 3) tail) (vel* 0.6))       ; figure 3's ghost hit quieter
+(on (and (fig 2) dot) (note+ 7) stac)    ; dots in figure 2 up a fifth, short
+(on (nth 2 (fig 2)) (fast 2))            ; every other TIME figure 2 plays
+```
+
+`for-hand`, `every-fig` and `(every n <post word>)` are special cases of
+this one form (`(for-hand :left stac)` is `(on left stac)`, `(every 4 stac)`
+is `(on (every 4) stac)`); they keep working unchanged.
+
+### 7.1.1 Selectors
+
+A selector is a predicate over an event's tags. The tags come from the
+figure grammar, so nothing has to be annotated by hand.
+
+| Selector | Matches | Level |
+|---|---|---|
+| `left` `right` | the hit's hand (§6) | event |
+| `dot` `dash` | the hit's symbol | event |
+| `head` `tail` | first / second hit of a dash (`tail` is the ghost hit) | event |
+| `accent` | Liebezeit accents (§5) | event |
+| `any` | everything | figure |
+| `(fig n)` | authored figure `n`, 1-based, every repetition of it | figure |
+| `(rep n)` | the `n`th repetition (1-based) of a figure's `(rep k)` | figure |
+| `(every n)` | whole cycles, the `(every n …)` convention: `(c + 1) mod n = 0` | figure |
+| `(nth n S)` | every `n`th **occurrence** of the figures `S` picks, counted across cycles; `(nth n)` counts every figure | figure |
+| `(and s…)` `(or s…)` `(not s)` | combinations | the lowest of its parts |
+| `(s1 s2 …)` / `(cyc s1 s2 …)` | one selector per cycle, like word alternation | the lowest of its parts |
+
+`(fig n)` counts the figures as authored: `(fig (. -) (rep 4)) (fig (. . -))`
+has two, the second is `(fig 2)`. The repetitions are distinguished by
+`(rep n)`: `(and (fig 1) (rep 4))` is the last `. -`. Numeric arguments are
+per-cycle argument data (`(fig (1 2))` alternates figures per cycle).
+
+`(nth n S)` counts occurrences, not cycles. `S` is a static figure selector
+(`fig` / `rep` / `and` / `or` / `not`); with `K` figures matching `S` per
+cycle, figure occurrence `k` of cycle `c` is occurrence `c·K + k`, picked when
+`(c·K + k + 1) mod n = 0`. This is closed-form, so it memoizes and relocates
+exactly like everything else; Tidal, whose patterns are stateless functions of
+cycle time, has no equivalent (`every` counts cycles only).
+
+### 7.1.2 Words inside `on`
+
+Words split by what they touch, and that decides which selectors may scope
+them:
+
+- **Event words** work on one event at a time and take any selector:
+  `(vel* s)`, `(vel+ d)` (velocity multiply / add, clamped to 0..1),
+  `(note+ n)` (transpose added on top of the route's `(note …)`), `(vel s)`
+  (= `vel*` inside `on`), `(note n)` (sets the note of the matched events),
+  and every post-op word: `stac`, `(gate s)`, `(shift n)`, `(quant tb)`,
+  `left`/`right`/`accent` (filter within the matched events), `rest`/`none`
+  (drop the matched events).
+- **Structural words** rebuild a figure and need a **figure-level** selector:
+  `fast` `slow` `rev` `rot` `trunc` `swap` `ghost` `split` `merge` and the
+  velocity-model words (`basevel`, `dotdecay`, …). `(on left (fast 2))` has no
+  meaning — half a figure cannot be retimed — so the word is ignored, and the
+  row editor never offers it.
+- `(every n w)` inside `on` narrows the selector: `(on S (every n w))` is
+  `(on (and S (every n)) w)`. Likewise nested `(on S2 w)` is
+  `(on (and S S2) w)`.
+
+`(vel* s)`, `(vel+ d)` and `(note+ n)` are also plain route words: at the top
+level they apply to the whole route, and `(every n (vel+ -0.2))` gates them.
+
+### 7.1.3 Evaluation
+
+- Event-level `on` is a post op `(:on sel post)`: the matched events form a
+  sub-result, the post op runs on it, and the untouched events are merged
+  back in offset order. It sits in authored word order with the other post
+  ops.
+- Figure-level `on` with a structural word attaches `(:on sel xf fig-ctx)` to
+  every figure's transform list (and `(:when :on sel fig-ctx …)` to its
+  time-mod for `fast`/`slow`), where `fig-ctx` is the figure's expanded index,
+  authored index and repetition. The figure evaluates the word only while the
+  selector holds.
+- Events carry `:afig` / `:arep` (authored figure and repetition, 0-based)
+  next to `:fig` (expanded index), plus `:nadd` / `:nset` note adjustments
+  that `emit` adds to the route's `(note …)`.
+- Selectors contribute to the evaluation period (§8.2): `(every n)` and
+  `(nth n …)` by `n`, `(fig n)` / `(rep n)` by their argument's period.
+
+## 7.2 Value sequences: `(seq :clock v…)`
+
+A list of values steps through its members; the **clock** says what moves
+it on. Today's lists move once per cycle, which is right for slow harmonic
+movement and far too slow for a melody.
+
+```lisp
+(note (seq :hit 0 3 7 10))        ; next value on every hit: a melody
+(note (seq :fig 0 5))             ; next value on every figure played
+(note (seq :cycle 0 5 9 14))      ; next value every cycle
+(note (seq :span 0 3 7 10))       ; spread over the cycle: a hit takes the
+                                  ; value at its position (Tidal's "0 3 7 10")
+(note (0 5 9 14))                 ; sugar for (seq :cycle 0 5 9 14)
+```
+
+`(cyc v…)` stays a synonym of `(seq :cycle v…)`.
+
+**Where the clocks step.** `:hit`, `:fig` and `:span` step in **per-hit
+values** — the route's `(note …)` / `(vel …)`, and `vel*`, `vel+`, `note+`,
+`(gate …)`, and `on`'s `(note …)` / `(vel …)`. Anywhere else (retiming,
+figure transforms, selector arguments, route destinations) a `seq` reads
+per cycle whatever its clock, since those values shape the whole cycle
+before any hit plays.
+
+**Counting.**
+- `:hit` counts the hits the value applies to, **across cycles**: four notes
+  over a seven-hit cycle drift against the rhythm and repeat every 28 hits.
+  Inside `(on SEL …)` it counts only the matched hits, so
+  `(on left (note+ (seq :hit 0 7 12)))` is a left-hand melody.
+- `:fig` counts figure occurrences among those same hits: it moves on when a
+  hit belongs to a different figure (or cycle) than the previous one.
+- `:span` is stateless: a hit at offset `o` of an `L`-unit cycle takes member
+  `floor(o / L · n)`.
+- `:cycle` is the cycle index, as before.
+
+Counters advance as hits are emitted, in time order, and restart when the
+transport jumps (the same rule as hand/velocity threading, §6.3).
+
+**Nesting.** A member may itself be a list. A nested `seq` whose clock is
+`:hit` or `:fig` steps once per **visit** of its parent — `(seq :hit 0 (seq
+:hit 7 12))` plays 0 7 0 12 0 7 … — while a nested `:cycle` list (or plain
+`(7 12)`) moves per cycle, as in Tidal: `(seq :hit 0 (7 12))` plays 0 7 0 7 …
+on cycle 0 and 0 12 0 12 … on cycle 1. A nested `:span` reads the hit's
+position.
+
+**Evaluation.** A per-hit word whose argument needs a hit clock is not
+applied during evaluation (which is memoized per cycle); it rides on the
+event as a deferred op `(kind raw key)` — `key` unique per route word — and
+`emit` resolves it against that key's counters, after the words applied
+during evaluation.
+
+## 7.3 Lit items (kind panel)
+
+While the transport plays, the jaki kind panel rings each row item that is
+being applied to the hit sounding on that row: an `(on SEL …)` whose selector
+(narrowed by any `every` inside it) matches the hit, and an `(every n …)` /
+`(every-fig n …)` whose gate is open for the hit's cycle / figure.
+
+- Route words are stepped with their index (`:widx`, the row item index).
+  Those items add a post op `(:tag sel idx)`; it pushes `idx` onto `:lits`
+  of every event `sel` matches (`(every n)` → `(:every n)`, `every-fig` →
+  `(:fig-every n)`). A structural word an `on` ignores adds no tag.
+- A route with tags emits, per hit, `(gen-mark mask route at)` and
+  `(gen-mark 0 route (+ at dur))`: the bitmask of its items at the hit's
+  onset, cleared at its end. `gen-mark` stamps the boundary's audio sample
+  plus `at` beats; a mark earlier than the newest drops the newer ones, so the
+  next hit's onset replaces a pending clear.
+- The host publishes the latest sounded mark as
+  `SEQ.generator-mark-<id>-<route>`; the row's sexp-slot binds it as `:lit`
+  (a render binding: a hit repaints the slot, never re-runs the view).
 
 ## 8. Runtime Model
 
@@ -488,6 +662,9 @@ The def-sequencer skeleton is now machine-written. The package module
   with different cycle structures don't fight over the shared cells),
   and emission options `(vel s)` (`:vel-scale`) and `(note n)`. Unknown
   words are ignored.
+- `(on SEL word…)` scopes words to the events or figures a selector matches
+  (§7.1); `(vel* s)`, `(vel+ d)` and `(note+ n)` are per-event velocity and
+  transpose adjustments usable at the top level or inside `on`.
 - Route-word `stac` is a **post op** (gate cap at 1/4 unit), not the
   figure-level xf flag, so it composes with the gate-extending filters in
   authored word order: `left stac` filters to the left hand and then caps

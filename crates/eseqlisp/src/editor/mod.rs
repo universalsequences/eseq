@@ -6377,8 +6377,16 @@ impl Editor {
         {
             // A widget that refuses Escape may still bind it through its
             // :on-focus-key (the patcher's dismiss-bubble); a handled binding
-            // consumes Escape and keeps focus.
+            // consumes Escape and keeps focus. A sexp-slot's Escape closes
+            // its field or popup and keeps focus; only the next one leaves.
+            let keeps_focus = self
+                .focused_widget_node()
+                .is_some_and(|node| crate::widget_render::sexp_slot::escape_keeps_focus(&node));
             if !self.handle_focused_widget_key(key) && self.dispatch_focus_key(key) {
+                self.mark_needs_redraw();
+                return;
+            }
+            if keeps_focus {
                 self.mark_needs_redraw();
                 return;
             }

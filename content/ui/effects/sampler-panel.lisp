@@ -137,7 +137,7 @@
           :label "Edit sampler slice")))
 
 (def sampler-panel-drop-types (inst)
-  (list "sample" "instrument" "sound"))
+  (list "sample" "instrument" "instrument-preset" "sound"))
 
 (def sampler-panel-drop-meta (inst)
   (if (pc/instrument-rack-target? inst)

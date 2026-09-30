@@ -246,6 +246,14 @@
 (def effective-clip-area-height ()
   (if mixer-show-clip-grid mixer-clip-area-height 0))
 
+;; Read by the host's file watcher each frame (eseq-aj2t). Changes made
+;; while it is off are not replayed: switching it back on rescans
+;; instruments and effects; package and init.lisp edits load on their next
+;; save or at the next launch.
+(defcustom reload-lisp-on-change true
+  :type :bool
+  :doc "Reload instruments, effects, packages and init.lisp automatically when their files change on disk. Turn off to freeze your setup, for example during a live set.")
+
 ;; Rounded-corner scale for the sequencer and mixer chrome: 1 is the stock
 ;; look, 0 squares every corner. `radius` is the multiplier every
 ;; `:corner-radius` / `:border-radius` literal in those views goes through.

@@ -67,8 +67,8 @@ impl VoiceExpression {
         })
     }
 
-    pub(super) fn values(&mut self, state: &PressureState, reset: bool) -> [f32; 3] {
-        let Some((channel, key)) = state.source_channel(self.source) else { return [0.0; 3] };
+    pub(super) fn values(&mut self, state: &PressureState, reset: bool) -> [f32; 4] {
+        let Some((channel, key)) = state.source_channel(self.source) else { return [0.0; 4] };
         let generation = channel.generations[key];
         if self.generation == 0 { self.generation = generation; }
         if reset {
@@ -76,7 +76,7 @@ impl VoiceExpression {
         } else if self.generation == generation && channel.holds[key].any() {
             self.key_pressure = channel.keys[key];
         }
-        [self.key_pressure.unwrap_or(channel.value), channel.pitch_bend, channel.mod_wheel]
+        [self.key_pressure.unwrap_or(channel.value), channel.pitch_bend, channel.mod_wheel, channel.slide]
     }
 }
 
@@ -145,6 +145,7 @@ struct Channel {
     value: f32,
     pitch_bend: f32,
     mod_wheel: f32,
+    slide: f32,
     keys: [Option<f32>; 128],
     holds: [TrackHolds; 128],
     generations: [u64; 128],
@@ -152,7 +153,7 @@ struct Channel {
 
 impl Default for Channel {
     fn default() -> Self {
-        Self { value: 0.0, pitch_bend: 0.0, mod_wheel: 0.0, keys: [None; 128], holds: [TrackHolds::default(); 128], generations: [0; 128] }
+        Self { value: 0.0, pitch_bend: 0.0, mod_wheel: 0.0, slide: 0.0, keys: [None; 128], holds: [TrackHolds::default(); 128], generations: [0; 128] }
     }
 }
 
@@ -265,12 +266,16 @@ impl PressureState {
         }
     }
 
-    pub(super) fn expression(&self, source: Option<LiveNoteSource>) -> [f32; 3] {
-        let Some(LiveNoteSource::Midi { port, channel, note }) = source else { return [0.0; 3] };
-        if channel >= 16 || note >= 128 { return [0.0; 3]; }
-        let Some(index) = port.checked_mul(16).and_then(|index| index.checked_add(channel as usize)) else { return [0.0; 3] };
-        let Some(state) = self.channels.get(index) else { return [0.0; 3] };
-        [self.value(source), state.pitch_bend, state.mod_wheel]
+    pub(super) fn set_slide(&mut self, port: usize, channel: u8, value: f32) {
+        if !value.is_finite() { return; }
+        if let Some(state) = self.channel_mut(port, channel) {
+            state.slide = value.clamp(0.0, 1.0);
+        }
+    }
+
+    pub(super) fn expression(&self, source: Option<LiveNoteSource>) -> [f32; 4] {
+        let Some((state, _)) = self.source_channel(source) else { return [0.0; 4] };
+        [self.value(source), state.pitch_bend, state.mod_wheel, state.slide]
     }
 
     pub(super) fn reset(&mut self) {
@@ -282,6 +287,7 @@ impl PressureState {
         state.value = 0.0;
         state.pitch_bend = 0.0;
         state.mod_wheel = 0.0;
+        state.slide = 0.0;
         state.keys.fill(None);
         // Reset All Controllers leaves held notes sounding. Their ownership
         // remains so subsequent key pressure can address the same lifetime.
@@ -317,19 +323,19 @@ mod tests {
         state.press(0, source);
         let mut tail = VoiceExpression::new(source);
         state.set(0, 2, Some(60), 0.8);
-        assert_eq!(tail.values(&state, false), [0.8, 0.0, 0.0]);
+        assert_eq!(tail.values(&state, false), [0.8, 0.0, 0.0, 0.0]);
         state.release(0, source);
         state.set_pitch_bend(0, 2, 0.5);
         state.set_mod_wheel(0, 2, 0.3);
-        assert_eq!(tail.values(&state, false), [0.8, 0.5, 0.3]);
+        assert_eq!(tail.values(&state, false), [0.8, 0.5, 0.3, 0.0]);
         state.press(0, source);
         let mut next = VoiceExpression::new(source);
         state.set(0, 2, Some(60), 0.2);
-        assert_eq!(next.values(&state, false), [0.2, 0.5, 0.3]);
-        assert_eq!(tail.values(&state, false), [0.8, 0.5, 0.3]);
+        assert_eq!(next.values(&state, false), [0.2, 0.5, 0.3, 0.0]);
+        assert_eq!(tail.values(&state, false), [0.8, 0.5, 0.3, 0.0]);
         state.reset_channel(0, 2);
-        assert_eq!(tail.values(&state, true), [0.0; 3]);
-        assert_eq!(next.values(&state, true), [0.0; 3]);
+        assert_eq!(tail.values(&state, true), [0.0; 4]);
+        assert_eq!(next.values(&state, true), [0.0; 4]);
     }
 
     #[test]
@@ -340,18 +346,20 @@ mod tests {
         let other = Some(LiveNoteSource::Midi { port: 1, channel: 2, note: 60 });
         state.set_pitch_bend(0, 2, -0.5);
         state.set_mod_wheel(0, 2, 0.75);
+        state.set_slide(0, 2, 0.6);
         state.press(0, a);
         state.press(0, b);
         state.set(0, 2, Some(60), 0.8);
-        assert_eq!(state.expression(a), [0.8, -0.5, 0.75]);
-        assert_eq!(state.expression(b), [0.0, -0.5, 0.75]);
-        assert_eq!(state.expression(other), [0.0; 3]);
+        assert_eq!(state.expression(a), [0.8, -0.5, 0.75, 0.6]);
+        assert_eq!(state.expression(b), [0.0, -0.5, 0.75, 0.6]);
+        assert_eq!(state.expression(other), [0.0; 4]);
         state.set_pitch_bend(0, 2, f32::NAN);
         state.set_mod_wheel(0, 2, f32::INFINITY);
-        assert_eq!(state.expression(b), [0.0, -0.5, 0.75]);
+        state.set_slide(0, 2, f32::NAN);
+        assert_eq!(state.expression(b), [0.0, -0.5, 0.75, 0.6]);
         state.reset_channel(0, 2);
         state.set(0, 2, Some(60), 0.4);
-        assert_eq!(state.expression(a), [0.4, 0.0, 0.0]);
+        assert_eq!(state.expression(a), [0.4, 0.0, 0.0, 0.0]);
     }
 
     #[test]

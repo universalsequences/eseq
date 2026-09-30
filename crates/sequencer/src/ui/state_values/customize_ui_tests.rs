@@ -345,3 +345,69 @@ fn clip_launch_cells_scale_with_the_track_strip_width() {
     };
     assert!(6.0 * 2.0 * scale <= 11.0, "scale {scale}");
 }
+
+#[test]
+fn reload_lisp_on_change_knob_is_listed_on_by_default_and_setopt_pauses_the_watcher() {
+    let mut editor = full_grid_editor_for_scroll_tests();
+    assert!(crate::lisp_hot_reload::auto_reload_enabled(&editor));
+
+    eval(&mut editor, "(eseq.customize/open-customize)");
+    let labels = texts(&customize_layout(&mut editor));
+    assert!(
+        labels.iter().any(|text| text == "reload-lisp-on-change"),
+        "knob row missing: {labels:?}"
+    );
+
+    eval(&mut editor, "(setopt eseq.seq-core-state/reload-lisp-on-change false)");
+    assert!(!crate::lisp_hot_reload::auto_reload_enabled(&editor));
+    eval(&mut editor, "(setopt eseq.seq-core-state/reload-lisp-on-change true)");
+    assert!(crate::lisp_hot_reload::auto_reload_enabled(&editor));
+}
+
+/// eseq-39c8: the watcher re-evaluates init.lisp on every save, in the
+/// installed app as in development. A typical init (Customize block, key
+/// bindings, MIDI mappings, a keyed hook, an override) must leave identical
+/// state when evaluated a second time: registrations replace, never pile up.
+#[test]
+fn typical_user_init_is_idempotent_when_the_watcher_reloads_it() {
+    let mut editor = full_grid_editor_for_scroll_tests();
+    let init = std::env::temp_dir().join(format!("idempotent-init-{}.lisp", std::process::id()));
+    let source = r#"
+(def init-hook-calls 0)
+(import eseq.midi :refer (midi-map cc rack-macro))
+(midi-map (cc 14) (rack-macro 0))
+(midi-map (cc 15) (rack-macro 1))
+(add-hook "midi-message-hook" "init-counter" (lambda (msg) (set! init-hook-calls (+ init-hook-calls 1))))
+(bind-key "C-c t" "eseq.seq-panels/seq-toggle-fx-panel")
+(override eseq.seq-layout/transport-height :around (original) (+ (original) 1))
+;; customize -- managed, edit via M-x customize
+(setopt eseq.seq-core-state/mixer-show-clip-grid false)
+;; end customize
+"#;
+    let snapshot = |editor: &mut eseqlisp::Editor| {
+        (
+            eval(editor, "(len (eseq.midi/midi-mappings))"),
+            eval(editor, "(len (override-declarations))"),
+            eval(editor, "(eseq.seq-layout/transport-height)"),
+            eval(editor, "eseq.seq-core-state/mixer-show-clip-grid"),
+        )
+    };
+    let before = eval(&mut editor, "(len (eseq.midi/midi-mappings))");
+    let mut after = Vec::new();
+    for _ in 0..2 {
+        let overlays = editor.snapshot_file_backed_sources();
+        let report = editor.runtime_mut().eval_source_transactional(Some(init.clone()), source, overlays);
+        assert!(report.success, "init eval failed: {:?}", report.diagnostics);
+        after.push(snapshot(&mut editor));
+    }
+    assert_eq!(after[0], after[1], "second evaluation changed state");
+    let (Value::Number(before), Value::Number(now)) = (before, after[1].0.clone()) else {
+        panic!("mapping counts are numbers");
+    };
+    assert_eq!(now - before, 2.0, "the init adds two MIDI mappings, not four");
+
+    // One listener, not two: a message runs the hook once.
+    eval(&mut editor, "(set! init-hook-calls 0)");
+    eval(&mut editor, "(run-hook \"midi-message-hook\" (dict :kind :cc :channel 0 :cc 99 :value 0.5))");
+    assert_eq!(eval(&mut editor, "init-hook-calls"), Value::Number(1.0));
+}

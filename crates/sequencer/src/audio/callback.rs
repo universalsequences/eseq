@@ -244,6 +244,12 @@ pub(super) fn render_audio_block(
                     super::pressure::PressureTarget::Reset { port, channel });
                 continue;
             }
+            crate::sequencer::LiveInputEvent::Slide { port, channel, value } => {
+                data.pressure.set_slide(port, channel, value);
+                super::pressure::dispatch_held_pressure(data,
+                    super::pressure::PressureTarget::Source { port, channel, note: None });
+                continue;
+            }
         };
         processed_keyboard_trigger = true;
         if kt.track >= num_tracks {

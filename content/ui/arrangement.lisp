@@ -2012,7 +2012,7 @@
     :corner-radius 16
     :padding 0.5
     :align :center
-    :drop-types (list "sample" "instrument" "sound")
+    :drop-types (list "sample" "instrument" "instrument-preset" "sound")
     :drop-meta (dict :kind "new-sample-track")
     :on-drop (lambda (event) (eseq.sequencer/drop-new-track event))
     (label "Drop sounds here to add a track"

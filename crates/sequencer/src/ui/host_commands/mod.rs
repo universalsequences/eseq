@@ -1,4 +1,5 @@
 mod agent;
+pub(crate) mod content_reload;
 pub(crate) mod audio_settings;
 mod customize;
 mod dispatch;
@@ -56,8 +57,9 @@ use super::natives;
 use super::state_values::{
     build_accumulator_names, build_effects_value, build_instrument_panel_value,
     build_midi_effects_value, build_step_has_plocks, build_steps_value, build_track_ids,
-    build_track_names, push_solo_mutes, set_current_track_reactive, sync_all_track_sequencer_state,
-    sync_fx_param_binding_fields, sync_groups_bindings, sync_step_param_lists,
+    build_track_names, load_instrument_preset_into_track, push_solo_mutes,
+    set_current_track_reactive, sync_all_track_sequencer_state, sync_fx_param_binding_fields,
+    sync_groups_bindings, sync_sidebar_browser, sync_step_param_lists,
     sync_track_mixer_state, sync_track_name_state, sync_track_params, sync_track_peak_fields,
 };
 use super::{map_number, map_string, map_u32, map_usize};
@@ -309,7 +311,9 @@ pub(crate) fn handle_add_track_instrument_command(payload: &Value, ctx: AddTrack
     let name = sequencer::lisp_host::pin_instrument_for_new_track(&name);
 
     match ctx.app.add_saved_instrument_track_sync(&name) {
-        Ok(idx) => finish_added_instrument_track(idx, ctx),
+        Ok(idx) => {
+            finish_added_instrument_track(idx, ctx);
+        }
         Err(e) => {
             ctx.editor.handle_host_event(HostEvent::Status(format!(
                 "Error adding instrument track: {e}"
@@ -318,7 +322,9 @@ pub(crate) fn handle_add_track_instrument_command(payload: &Value, ctx: AddTrack
     }
 }
 
-pub(crate) fn finish_added_instrument_track(idx: usize, ctx: AddTrackInstrumentCtx<'_>) {
+/// Returns whether the new track was committed (a rejected group attach drops
+/// it again), so callers only follow up on a track that still exists.
+pub(crate) fn finish_added_instrument_track(idx: usize, ctx: AddTrackInstrumentCtx<'_>) -> bool {
     let AddTrackInstrumentCtx {
         app,
         editor,
@@ -345,7 +351,7 @@ pub(crate) fn finish_added_instrument_track(idx: usize, ctx: AddTrackInstrumentC
         // success here is what used to strand a loose, padless track.
         *track_groups.lock().unwrap() = app.groups.clone();
         editor.handle_host_event(HostEvent::Status(status));
-        return;
+        return false;
     }
     if let Err(error) = app.commit_created_track(idx, "Add instrument track") {
         app.groups = groups_before;
@@ -353,7 +359,7 @@ pub(crate) fn finish_added_instrument_track(idx: usize, ctx: AddTrackInstrumentC
         editor.handle_host_event(HostEvent::Status(format!(
             "Error adding instrument track: {error}"
         )));
-        return;
+        return false;
     }
     *track_groups.lock().unwrap() = app.groups.clone();
 
@@ -415,6 +421,37 @@ pub(crate) fn finish_added_instrument_track(idx: usize, ctx: AddTrackInstrumentC
         "Added instrument track {}: {new_name}",
         idx + 1
     )));
+    true
+}
+
+/// Loads a preset dragged from the browser onto the track its instrument load
+/// just produced (new track or swap). Runs after the add/swap has committed and
+/// synced, so the preset is its own undo step on a track that exists.
+pub(crate) fn apply_dropped_instrument_preset(
+    app: &mut app::App,
+    editor: &mut Editor,
+    track: usize,
+    preset: &str,
+    current_track: &Arc<AtomicUsize>,
+    selected_steps: &Arc<Mutex<HashSet<usize>>>,
+    ui_epoch: &Arc<AtomicUsize>,
+) {
+    if let Err(error) = load_instrument_preset_into_track(app, track, preset) {
+        editor.handle_host_event(HostEvent::Status(format!("Error loading preset: {error}")));
+        return;
+    }
+    let selected = current_track.load(Ordering::Relaxed);
+    let rt = editor.runtime_mut();
+    rt.set_reactive(
+        "SEQ",
+        "instrument-panel",
+        build_instrument_panel_value(app, selected, selected_steps),
+    );
+    sync_sidebar_browser(rt, app, selected);
+    rt.run_reactive_cycle();
+    editor.refresh_runtime_side_effects();
+    ui_epoch.fetch_add(1, Ordering::Relaxed);
+    editor.handle_host_event(HostEvent::Status(format!("Loaded preset '{preset}'")));
 }
 
 pub(crate) struct SwapTrackInstrumentCtx<'a> {

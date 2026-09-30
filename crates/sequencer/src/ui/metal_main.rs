@@ -119,15 +119,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
     let app_paths = sequencer::app_paths::init()?;
     // Checkout-only startup work: the chdir into the crate directory and the
-    // live shader/Lisp watches. Bundle resources are immutable, so watching
-    // them would add startup traversal and steady-state filesystem polling
-    // without ever producing a valid reload.
+    // live shader watch. Bundle resources are immutable, so watching them
+    // would add startup traversal and steady-state filesystem polling without
+    // ever producing a valid reload. The Lisp watcher still runs in an
+    // installed app, scoped to the user-writable tiers (user instruments and
+    // effects, packages, init.lisp) so a coding agent's new or edited
+    // instrument shows up without a restart (eseq-63j4.4); see
+    // `lisp_hot_reload::user_writable`.
     eseqlisp::ui::set_editable_shader_overrides_enabled(!app_paths.is_release());
-    let lisp_hot_reload_enabled = !app_paths.is_release();
+    let lisp_hot_reload_enabled = true;
     if !app_paths.is_release() {
         sequencer::paths::enter_sequencer_dir()?;
     }
     app_paths.ensure_user_tier()?;
+    // Installed builds write the coding-agent authoring guide into the user
+    // folder (eseq-63j4); development keeps `.local` free of agent files.
+    if app_paths.is_release() {
+        let root = app_paths.user_data_root();
+        let cli = sequencer::authoring_kit::eseq_cli_path();
+        if let Err(error) = sequencer::authoring_kit::seed(app_paths, &root, &cli) {
+            eprintln!("metal_seq: failed to write the authoring guide: {error}");
+        }
+    }
     match sequencer::package_samples::reconcile_app_package_samples(app_paths) {
         Ok(report) => {
             for error in report.errors {

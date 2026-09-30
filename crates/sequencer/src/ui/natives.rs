@@ -3559,12 +3559,16 @@ pub(crate) fn init_runtime(
                 ("sidebar-selected-sample", Value::String(String::new())),
                 ("sidebar-track-index", Value::Number(0.0)),
                 ("sidebar-presets", Value::List(vec![])),
+                ("sidebar-user-presets", Value::List(vec![])),
                 ("sidebar-rack-slot-presets", Value::List(vec![])),
                 ("sidebar-preset-tree", Value::List(vec![])),
                 (
                     "project-instrument-engines",
                     build_string_list(&project_instrument_engine_names(app)),
                 ),
+                // Bumped when the instrument/effect library changes on disk
+                // (lisp_hot_reload::bump_content_library_epoch).
+                ("content-library-epoch", Value::Number(0.0)),
                 ("sound-presets", build_sound_presets_value()),
                 ("kit-presets", build_kit_presets_value()),
                 ("graph-sequencers", Value::List(vec![])),
@@ -7232,7 +7236,11 @@ pub(crate) fn init_runtime(
             Some(Value::String(s)) => s.as_str(),
             _ => "",
         };
-        Ok(build_preset_tree_from_list(args.first(), query))
+        let instrument = match args.get(2) {
+            Some(Value::String(s)) => s.as_str(),
+            _ => "",
+        };
+        Ok(build_preset_tree_from_list(args.first(), query, instrument, args.get(3)))
     });
     runtime.register_native("seq-saved-instruments", move |_args, _ctx| {
         Ok(Value::List(
@@ -8376,8 +8384,8 @@ fn document_metal_seq_natives(runtime: &mut Runtime) {
         ),
         (
             "seq-preset-tree",
-            "(seq-preset-tree presets query)",
-            "Return a preset browser tree for a preset list and query.",
+            "(seq-preset-tree presets query [instrument] [user-presets])",
+            "Return a preset browser tree for a preset list and query; with user-presets, split into Factory and Library sections.",
         ),
         (
             "seq-saved-instruments",

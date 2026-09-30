@@ -73,6 +73,7 @@ impl DGenManifest {
             "pressure" => Some(gp::OUTPUT_PRESSURE),
             "pitchbend" => Some(gp::OUTPUT_PITCH_BEND),
             "modwheel" => Some(gp::OUTPUT_MOD_WHEEL),
+            "slide" => Some(gp::OUTPUT_SLIDE),
             "noteon" => Some(gp::OUTPUT_NOTE_ON),
             "legato" => Some(gp::OUTPUT_LEGATO),
             "clockinc" => Some(gp::PARAM_CLOCK_INC as usize),

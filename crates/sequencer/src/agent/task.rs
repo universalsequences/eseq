@@ -5,8 +5,8 @@ use std::time::Duration;
 use serde_json::Value;
 
 use super::actions::{AgentAppAction, AgentSessionContext};
-use super::audition::{audition_feedback, audition_loaded_effect, audition_loaded_instrument};
-use super::dsp_validate::{validate_effect_dsp_source, validate_instrument_dsp_source};
+use super::audition::{audition_feedback, audition_loaded_instrument};
+use super::dsp_validate::validate_instrument_dsp_source;
 use super::network::{AgentNetworkClient, AgentTurnResult};
 use super::parse::{instrument_artifacts, last_dgenlisp_block, InstrumentArtifacts};
 use super::protocol::{ToolCall, ToolCallOutcome};
@@ -17,7 +17,8 @@ use super::store::{
     bump, push_message, push_message_with_reasoning, AgentKind, AgentStatus, ConvId,
     ConversationState, ConversationStore, InstrumentDraft, Role, RunningTask,
 };
-use super::ui_validate::{validate_effect_ui_source, validate_instrument_ui_source};
+use super::ui_validate::validate_instrument_ui_source;
+use super::verify::{verify_sources, ArtifactKind, VerifyMode, VerifyStage};
 
 const MAX_RETRIES_PER_TURN: u8 = 3;
 const MAX_REQUEST_ATTEMPTS: u8 = 3;
@@ -682,45 +683,30 @@ fn validate_effect_artifact_sources(
     dsp_source: &str,
     ui_source: &str,
 ) -> Result<(), String> {
-    if let Err(error) = validate_effect_dsp_source(dsp_source) {
-        log_failed_effect_sources(id, "dsp validation", &error, dsp_source, ui_source);
-        return Err(format!("dsp.lisp validation error:\n{error}"));
-    }
-
-    let compile_result = match crate::lisp_host::compile_and_load(dsp_source, store.sample_rate()) {
-        Ok(result) => result,
-        Err(error) => {
-            log_failed_effect_sources(id, "dsp compile", &error, dsp_source, ui_source);
-            return Err(format!("compile error:\n{error}"));
+    let report = verify_sources(
+        ArtifactKind::Effect,
+        VerifyMode::Agent,
+        dsp_source,
+        Some(ui_source),
+        store.sample_rate(),
+        None,
+    )
+    .map_err(|failure| {
+        if failure.stage != VerifyStage::Audition || failure.message.starts_with("audition failed") {
+            log_failed_effect_sources(id, failure.stage.label(), &failure.message, dsp_source, ui_source);
         }
-    };
-
-    if let Err(error) = validate_effect_ui_source(ui_source, &compile_result.manifest) {
-        log_failed_effect_sources(id, "ui validation", &error, dsp_source, ui_source);
-        return Err(format!("ui.lisp validation error:\n{error}"));
-    }
-
-    let audition = match audition_loaded_effect(&compile_result, store.sample_rate()) {
-        Ok(audition) => audition,
-        Err(error) => {
-            log_failed_effect_sources(id, "audition", &error, dsp_source, ui_source);
-            return Err(format!("audition failed:\n{error}"));
-        }
-    };
-    let feedback = audition_feedback(&audition);
-    if audition.silent || audition.clipped || audition.differs_from_input == Some(false) {
-        return Err(feedback);
-    }
+        failure.to_string()
+    })?;
     let inner = store.inner();
     let mut inner = inner.lock().unwrap();
     let state = inner
         .get_mut(&id)
         .ok_or_else(|| format!("unknown agent conversation {id}"))?;
-    state.last_audition = Some(audition);
+    state.last_audition = Some(report.audition);
     push_message(
         state,
         Role::System,
-        format!("Validated effect artifact '{name}'. {feedback}"),
+        format!("Validated effect artifact '{name}'. {}", report.feedback),
     );
     Ok(())
 }
@@ -844,46 +830,30 @@ fn validate_instrument_artifact_sources(
     dsp_source: &str,
     ui_source: &str,
 ) -> Result<(), String> {
-    if let Err(error) = validate_instrument_dsp_source(&dsp_source) {
-        log_failed_instrument_sources(id, "dsp validation", &error, &dsp_source, &ui_source);
-        return Err(format!("dsp.lisp validation error:\n{error}"));
-    }
-
-    let compile_result =
-        match crate::lisp_host::compile_and_load_instrument(&dsp_source, store.sample_rate()) {
-            Ok(result) => result,
-            Err(error) => {
-                log_failed_instrument_sources(id, "dsp compile", &error, &dsp_source, &ui_source);
-                return Err(format!("compile error:\n{error}"));
-            }
-        };
-
-    if let Err(error) = validate_instrument_ui_source(&ui_source, &compile_result.manifest) {
-        log_failed_instrument_sources(id, "ui validation", &error, &dsp_source, &ui_source);
-        return Err(format!("ui.lisp validation error:\n{error}"));
-    }
-
-    let audition = match audition_loaded_instrument(&compile_result, store.sample_rate()) {
-        Ok(audition) => audition,
-        Err(error) => {
-            log_failed_instrument_sources(id, "audition", &error, &dsp_source, &ui_source);
-            return Err(format!("audition failed:\n{error}"));
+    let report = verify_sources(
+        ArtifactKind::Instrument,
+        VerifyMode::Agent,
+        dsp_source,
+        Some(ui_source),
+        store.sample_rate(),
+        None,
+    )
+    .map_err(|failure| {
+        if failure.stage != VerifyStage::Audition || failure.message.starts_with("audition failed") {
+            log_failed_instrument_sources(id, failure.stage.label(), &failure.message, dsp_source, ui_source);
         }
-    };
-    let feedback = audition_feedback(&audition);
-    if audition.silent || audition.clipped {
-        return Err(feedback);
-    }
+        failure.to_string()
+    })?;
     let inner = store.inner();
     let mut inner = inner.lock().unwrap();
     let state = inner
         .get_mut(&id)
         .ok_or_else(|| format!("unknown agent conversation {id}"))?;
-    state.last_audition = Some(audition);
+    state.last_audition = Some(report.audition);
     push_message(
         state,
         Role::System,
-        format!("Validated instrument artifact '{name}'. {feedback}"),
+        format!("Validated instrument artifact '{name}'. {}", report.feedback),
     );
     Ok(())
 }
@@ -1143,11 +1113,19 @@ fn set_idle(store: &ConversationStore, id: ConvId) {
     }
 }
 
-fn system_prompt_for(kind: AgentKind) -> &'static str {
+pub(crate) fn system_prompt_for(kind: AgentKind) -> &'static str {
     match kind {
         AgentKind::General => include_str!("prompts/general.md"),
-        AgentKind::Instrument => include_str!("prompts/instrument.md"),
-        AgentKind::Effect => include_str!("prompts/effect.md"),
+        // The authoring rules are shared with the kit external agents read
+        // (content/authoring/, shipped in the app bundle).
+        AgentKind::Instrument => concat!(
+            include_str!("prompts/instrument.md"),
+            include_str!("../../../../content/authoring/instrument-reference.md")
+        ),
+        AgentKind::Effect => concat!(
+            include_str!("prompts/effect.md"),
+            include_str!("../../../../content/authoring/effect-reference.md")
+        ),
     }
 }
 

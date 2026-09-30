@@ -30,6 +30,9 @@ pub(crate) struct InstrumentTreeNode {
     label: String,
     name: Option<String>,
     folder: Option<String>,
+    /// Marked `"deprecated": true` in its `instrument.json`: pruned from
+    /// the tree unless favorited (instrument-versioning spec §Deprecation).
+    deprecated: bool,
     children: Vec<InstrumentTreeNode>,
 }
 
@@ -677,6 +680,7 @@ fn group_instrument_tree_nodes(
             label: group.label,
             name: None,
             folder: None,
+            deprecated: false,
             children,
         });
     }
@@ -710,7 +714,7 @@ fn build_instrument_tree_nodes(
     };
 
     let mut dirs: Vec<(String, std::path::PathBuf)> = Vec::new();
-    let mut files: Vec<(String, String)> = Vec::new();
+    let mut files: Vec<(String, String, bool)> = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
         let name = path
@@ -734,7 +738,8 @@ fn build_instrument_tree_nodes(
             }
             if let Ok(rel) = path.strip_prefix(root) {
                 let instrument_name = rel.with_extension("").to_string_lossy().replace('\\', "/");
-                files.push((label, instrument_name));
+                let deprecated = sequencer::lisp_host::instrument_source_is_deprecated(&path);
+                files.push((label, instrument_name, deprecated));
             }
         }
     }
@@ -750,6 +755,9 @@ fn build_instrument_tree_nodes(
                     label,
                     name: Some(instrument_name),
                     folder: None,
+                    deprecated: sequencer::lisp_host::instrument_metadata_is_deprecated(
+                        &path.join("instrument.json"),
+                    ),
                     children: Vec::new(),
                 });
             }
@@ -767,15 +775,17 @@ fn build_instrument_tree_nodes(
                 label,
                 name: None,
                 folder,
+                deprecated: false,
                 children,
             });
         }
     }
-    for (label, name) in files {
+    for (label, name, deprecated) in files {
         items.push(InstrumentTreeNode {
             label,
             name: Some(name),
             folder: None,
+            deprecated,
             children: Vec::new(),
         });
     }
@@ -786,15 +796,43 @@ fn build_instrument_tree_nodes(
     }
 }
 
+/// Drop deprecated instruments (instrument-versioning spec §Deprecation),
+/// except those `keep` names (favorites), and the folders and categories
+/// left empty by that. Runs after category grouping, so a deprecated name a
+/// `.categories.json` still lists validates and then leaves its group.
+fn prune_deprecated_instrument_nodes(
+    items: Vec<InstrumentTreeNode>,
+    keep: &dyn Fn(&str) -> bool,
+) -> Vec<InstrumentTreeNode> {
+    items
+        .into_iter()
+        .filter_map(|mut item| match &item.name {
+            Some(name) => (!item.deprecated || keep(name)).then_some(item),
+            None => {
+                let had_children = !item.children.is_empty();
+                item.children = prune_deprecated_instrument_nodes(std::mem::take(&mut item.children), keep);
+                (!had_children || !item.children.is_empty()).then_some(item)
+            }
+        })
+        .collect()
+}
+
 fn instrument_tree_nodes_to_value(items: &[InstrumentTreeNode]) -> Value {
     Value::List(
         items
             .iter()
             .map(|item| {
                 let mut map = std::collections::HashMap::new();
+                // Only a favorited deprecated instrument survives pruning;
+                // the suffix says why it is missing from the rest of the tree.
+                let label = if item.deprecated {
+                    format!("{} (deprecated)", item.label)
+                } else {
+                    item.label.clone()
+                };
                 map.insert(
                     "label".to_string(),
-                    Rc::new(RefCell::new(Value::String(item.label.clone()))),
+                    Rc::new(RefCell::new(Value::String(label))),
                 );
                 if let Some(name) = &item.name {
                     map.insert(
@@ -962,6 +1000,7 @@ fn project_engine_nodes(engine_names: &[String]) -> Vec<InstrumentTreeNode> {
             label: instrument_display_name(name),
             name: Some(name.clone()),
             folder: None,
+            deprecated: false,
             children: Vec::new(),
         })
         .collect()
@@ -1084,6 +1123,27 @@ fn mark_favorite_instrument_value(
     }
 }
 
+/// One tier's saved-instrument nodes: categorized unless `movable` (the user
+/// tier), package names qualified, deprecated rows pruned unless favorited.
+fn instrument_tier_nodes(
+    root: &std::path::Path,
+    movable: bool,
+    tier: &sequencer::app_paths::ContentTier,
+    qualify: Option<&sequencer::app_paths::ContentTier>,
+    favorites: &std::collections::BTreeSet<String>,
+) -> Result<Vec<InstrumentTreeNode>, String> {
+    let mut nodes = build_instrument_tree_nodes(root, root, !movable)?;
+    if !movable {
+        clear_instrument_folder_ids(&mut nodes);
+    }
+    if let Some(tier) = qualify {
+        qualify_instrument_tree_names(&mut nodes, tier);
+    }
+    Ok(prune_deprecated_instrument_nodes(nodes, &|name| {
+        favorites.contains(&super::instrument_favorites::canonical_instrument_id(Some(tier), name))
+    }))
+}
+
 /// The Instruments tab tree. `favorites` puts a heart on those rows;
 /// `favorites_only` narrows every section to them and drops the builtins,
 /// which cannot be favorited.
@@ -1109,13 +1169,7 @@ pub(crate) fn build_instrument_tree_value_with_favorites(
                       movable: bool,
                       tier: &sequencer::app_paths::ContentTier,
                       qualify: Option<&sequencer::app_paths::ContentTier>| {
-        let mut nodes = build_instrument_tree_nodes(&root, &root, !movable)?;
-        if !movable {
-            clear_instrument_folder_ids(&mut nodes);
-        }
-        if let Some(tier) = qualify {
-            qualify_instrument_tree_names(&mut nodes, tier);
-        }
+        let nodes = instrument_tier_nodes(&root, movable, tier, qualify, favorites)?;
         let mut values = list_items(instrument_tree_nodes_to_value(&filter_instrument_tree_nodes(
             &narrow(nodes, Some(tier)),
             &query_lower,
@@ -1456,9 +1510,59 @@ fn civil_from_days(days_since_unix_epoch: i64) -> (i32, u32, u32) {
     (year as i32, m as u32, d as u32)
 }
 
-pub(crate) fn build_preset_tree_from_list(items_value: Option<&Value>, query: &str) -> Value {
+/// Preset rows for the browser. With a non-empty `instrument`, each row also
+/// carries `:instrument` and `:preset`, the drag payload drop targets use to
+/// load (or add a track with) that instrument at that preset. With a
+/// `user_items` list, rows are split under a Factory and a Library (the
+/// user's own presets) header; an empty section is omitted.
+pub(crate) fn build_preset_tree_from_list(
+    items_value: Option<&Value>,
+    query: &str,
+    instrument: &str,
+    user_items: Option<&Value>,
+) -> Value {
     let query = query.trim().to_lowercase();
-    let mut items: Vec<String> = match items_value {
+    let mut items = preset_names(items_value);
+    if !query.is_empty() {
+        items.retain(|item| item.to_lowercase().contains(&query));
+    }
+    let leaves = |names: &[String]| -> Vec<Value> {
+        let Value::List(rows) = build_icon_tree_items(names, "piano") else {
+            return Vec::new();
+        };
+        rows.into_iter()
+            .map(|row| {
+                let mut row = row.borrow().clone();
+                if !instrument.is_empty() {
+                    if let Value::Map(map) = &mut row {
+                        let preset = map.get("label").map(|label| label.borrow().clone());
+                        if let Some(preset) = preset {
+                            map.insert("preset".to_string(), Rc::new(RefCell::new(preset)));
+                        }
+                        map.insert(
+                            "instrument".to_string(),
+                            Rc::new(RefCell::new(Value::String(instrument.to_string()))),
+                        );
+                    }
+                }
+                row
+            })
+            .collect()
+    };
+    let Some(Value::List(_)) = user_items else {
+        return list_value(leaves(&items));
+    };
+    let user = preset_names(user_items);
+    let (library, factory): (Vec<String>, Vec<String>) =
+        items.into_iter().partition(|item| user.contains(item));
+    let mut rows = Vec::new();
+    append_tree_section(&mut rows, "Factory", leaves(&factory));
+    append_tree_section(&mut rows, "Library", leaves(&library));
+    list_value(rows)
+}
+
+fn preset_names(value: Option<&Value>) -> Vec<String> {
+    match value {
         Some(Value::List(items)) => items
             .iter()
             .filter_map(|item| match &*item.borrow() {
@@ -1467,11 +1571,7 @@ pub(crate) fn build_preset_tree_from_list(items_value: Option<&Value>, query: &s
             })
             .collect(),
         _ => Vec::new(),
-    };
-    if !query.is_empty() {
-        items.retain(|item| item.to_lowercase().contains(&query));
     }
-    build_icon_tree_items(&items, "piano")
 }
 
 fn effect_leaf(label: String, kind: &'static str) -> Value {
@@ -1601,6 +1701,22 @@ pub(crate) fn visible_preset_items_for_track(app: &app::App, track: usize) -> Ve
         .unwrap_or_default();
     items.sort();
     items
+}
+
+/// The subset of [`visible_preset_items_for_track`] the user saved themselves,
+/// which the Presets tab lists under Library instead of Factory.
+pub(crate) fn visible_user_preset_items_for_track(app: &app::App, track: usize) -> Vec<String> {
+    if app.graph.track_instrument_types.get(track)
+        == Some(&sequencer::sequencer::InstrumentType::Rack)
+    {
+        return sequencer::project::list_rack_presets_by_tier()
+            .map(|(_, user)| user)
+            .unwrap_or_default();
+    }
+    let Some(name) = current_custom_instrument_name(app, track) else {
+        return Vec::new();
+    };
+    sequencer::lisp_host::load_user_instrument_preset_names(&name).unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -1736,8 +1852,15 @@ mod tests {
     #[test]
     fn factory_instrument_categories_preserve_ids_and_flat_synths() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../content/instruments");
-        let original = build_instrument_tree_nodes(&root, &root, false).unwrap();
-        let grouped = build_instrument_tree_nodes(&root, &root, true).unwrap();
+        // Deprecated instruments need no category: they never reach the tree.
+        let visible = |categorized| {
+            prune_deprecated_instrument_nodes(
+                build_instrument_tree_nodes(&root, &root, categorized).unwrap(),
+                &|_| false,
+            )
+        };
+        let original = visible(false);
+        let grouped = visible(true);
         fn names(items: &[InstrumentTreeNode]) -> Vec<String> {
             let mut result = Vec::new();
             for item in items {
@@ -1767,7 +1890,7 @@ mod tests {
     fn category_test_items() -> Vec<InstrumentTreeNode> {
         ["First", "Second", "Unlisted"].into_iter().map(|label| InstrumentTreeNode {
             label: label.into(), name: Some(format!("Drums/{label}/")),
-            folder: None, children: Vec::new(),
+            folder: None, deprecated: false, children: Vec::new(),
         }).collect()
     }
 
@@ -1797,7 +1920,7 @@ mod tests {
         // instrument belongs to the category; a same-label directory stays put.
         let mut items = category_test_items();
         items.push(InstrumentTreeNode {
-            label: "First".into(), name: None, folder: Some("Drums/First".into()),
+            label: "First".into(), name: None, folder: Some("Drums/First".into()), deprecated: false,
             children: Vec::new(),
         });
         let categories = serde_json::from_str(r#"{"version":1,"groups":[
@@ -1832,6 +1955,67 @@ mod tests {
     }
 
     #[test]
+    fn deprecated_instruments_leave_the_tree_categories_and_search_unless_favorited() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let drums = root.join("Drums");
+        for name in ["Zz Old Kick", "Zz New Kick"] {
+            std::fs::create_dir_all(drums.join(name)).unwrap();
+            std::fs::write(drums.join(name).join("dsp.lisp"), "(out 0)").unwrap();
+        }
+        std::fs::write(
+            drums.join("Zz Old Kick/instrument.json"),
+            r#"{"version":1,"run_mode":"instrument","deprecated":true,"replaced_by":"Drums/Zz New Kick"}"#,
+        )
+        .unwrap();
+        std::fs::write(drums.join("Zz Old Hat.lisp"), "(out 0)").unwrap();
+        std::fs::write(
+            drums.join("Zz Old Hat.instrument.json"),
+            r#"{"version":1,"run_mode":"instrument","deprecated":true}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            drums.join(".categories.json"),
+            r#"{"version":1,"groups":[
+                {"label":"Kicks","instruments":["Zz Old Kick","Zz New Kick"]},
+                {"label":"Legacy","instruments":["Zz Old Hat"]}
+            ]}"#,
+        )
+        .unwrap();
+        let factory = sequencer::app_paths::ContentTier::Factory;
+        fn labels(items: &[InstrumentTreeNode], out: &mut Vec<String>) {
+            for item in items {
+                out.push(item.label.clone());
+                labels(&item.children, out);
+            }
+        }
+
+        let none = std::collections::BTreeSet::new();
+        let nodes = instrument_tier_nodes(root, false, &factory, None, &none).unwrap();
+        let mut seen = Vec::new();
+        labels(&nodes, &mut seen);
+        assert_eq!(seen, ["Drums", "Kicks", "Zz New Kick"], "deprecated rows and emptied categories are gone");
+        assert!(filter_instrument_tree_nodes(&nodes, "old").is_empty(), "search cannot find them");
+
+        let favorites: std::collections::BTreeSet<String> =
+            ["factory:Drums/Zz Old Kick".to_string()].into();
+        let nodes = instrument_tier_nodes(root, false, &factory, None, &favorites).unwrap();
+        let kept = retain_favorite_instrument_nodes(&nodes, &favorites, Some(&factory));
+        let mut seen = Vec::new();
+        labels(&kept, &mut seen);
+        assert_eq!(seen, ["Drums", "Kicks", "Zz Old Kick"], "a favorite never silently disappears");
+        let Value::List(items) = instrument_tree_nodes_to_value(&kept) else { panic!("tree list") };
+        let drums_row = items[0].borrow();
+        let Value::Map(drums_row) = &*drums_row else { panic!("folder map") };
+        let Value::List(groups) = &*drums_row["children"].borrow() else { panic!("children") };
+        let Value::Map(kicks) = &*groups[0].borrow() else { panic!("category map") };
+        let Value::List(kicks) = &*kicks["children"].borrow() else { panic!("children") };
+        let Value::Map(old) = &*kicks[0].borrow() else { panic!("leaf map") };
+        assert_eq!(*old["label"].borrow(), Value::String("Zz Old Kick (deprecated)".into()));
+        assert_eq!(*old["name"].borrow(), Value::String("Drums/Zz Old Kick/".into()));
+    }
+
+    #[test]
     fn instrument_tree_places_unique_project_engines_between_builtins_and_library() {
         let tree = build_instrument_tree_value(
             "",
@@ -1861,18 +2045,18 @@ mod tests {
             InstrumentTreeNode {
                 label: "Kicks".to_string(),
                 name: None,
-                folder: Some("Kicks".to_string()),
+                folder: Some("Kicks".to_string()), deprecated: false,
                 children: vec![
                     InstrumentTreeNode {
                         label: "Kick 1".to_string(),
                         name: Some("Kicks/Kick 1/".to_string()),
-                        folder: None,
+                        folder: None, deprecated: false,
                         children: Vec::new(),
                     },
                     InstrumentTreeNode {
                         label: "Kick 2".to_string(),
                         name: Some("Kicks/Kick 2/".to_string()),
-                        folder: None,
+                        folder: None, deprecated: false,
                         children: Vec::new(),
                     },
                 ],
@@ -1880,11 +2064,11 @@ mod tests {
             InstrumentTreeNode {
                 label: "Snares".to_string(),
                 name: None,
-                folder: Some("Snares".to_string()),
+                folder: Some("Snares".to_string()), deprecated: false,
                 children: vec![InstrumentTreeNode {
                     label: "Snare".to_string(),
                     name: Some("Snares/Snare/".to_string()),
-                    folder: None,
+                    folder: None, deprecated: false,
                     children: Vec::new(),
                 }],
             },
@@ -1954,11 +2138,11 @@ mod tests {
         let mut nodes = vec![InstrumentTreeNode {
             label: "Drums".to_string(),
             name: None,
-            folder: Some("Drums".to_string()),
+            folder: Some("Drums".to_string()), deprecated: false,
             children: vec![InstrumentTreeNode {
                 label: "Kick".to_string(),
                 name: Some("Drums/Kick/".to_string()),
-                folder: None,
+                folder: None, deprecated: false,
                 children: Vec::new(),
             }],
         }];
@@ -1992,13 +2176,13 @@ mod tests {
             InstrumentTreeNode {
                 label: "Folder".to_string(),
                 name: None,
-                folder: Some("folder".to_string()),
+                folder: Some("folder".to_string()), deprecated: false,
                 children: Vec::new(),
             },
             InstrumentTreeNode {
                 label: "My Instrument".to_string(),
                 name: Some("folder/my-instrument/".to_string()),
-                folder: None,
+                folder: None, deprecated: false,
                 children: Vec::new(),
             },
         ]);
@@ -2030,7 +2214,7 @@ mod tests {
             Value::String("Brutal Fifths".to_string()),
             Value::String("Galactic Pad".to_string()),
         ]);
-        let tree = build_preset_tree_from_list(Some(&presets), "brutal");
+        let tree = build_preset_tree_from_list(Some(&presets), "brutal", "", None);
         let Value::List(items) = tree else {
             panic!("preset tree should be a list");
         };
@@ -2044,6 +2228,21 @@ mod tests {
             item.get("icon").map(|value| value.borrow().clone()),
             Some(Value::Keyword("piano".to_string()))
         );
+    }
+
+    #[test]
+    fn preset_tree_splits_factory_and_library_sections() {
+        let presets = list_value(["Bright", "Dark", "Mine"].map(|name| Value::String(name.to_string())));
+        let user = list_value([Value::String("Mine".to_string())]);
+        let tree = build_preset_tree_from_list(Some(&presets), "", "synth", Some(&user));
+        assert_eq!(
+            top_level_tree_labels(&tree),
+            vec!["Factory", "Bright", "Dark", "Library", "Mine"]
+        );
+
+        // Searching away every Library preset drops its header.
+        let tree = build_preset_tree_from_list(Some(&presets), "dark", "synth", Some(&user));
+        assert_eq!(top_level_tree_labels(&tree), vec!["Factory", "Dark"]);
     }
 
     #[test]

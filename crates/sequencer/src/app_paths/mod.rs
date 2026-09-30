@@ -677,6 +677,20 @@ impl AppPaths {
     pub fn instruments_dir(&self) -> PathBuf {
         self.factory_root().join("instruments")
     }
+    /// Authoring references for coding agents (instrument/effect rules),
+    /// shipped with the factory content. See `crate::authoring_kit`.
+    pub fn authoring_dir(&self) -> PathBuf {
+        self.factory_root().join("authoring")
+    }
+    /// The DGenLisp language reference (`DGenLispReadme.md`) and operator
+    /// catalog (`dgenlisp-operators.json`). The bundle copies both into the
+    /// authoring folder (`dist/macos/build.sh`).
+    pub fn dgenlisp_reference_dir(&self) -> PathBuf {
+        match self {
+            AppPaths::Dev { sequencer_dir, .. } => sequencer_dir.join("tools"),
+            AppPaths::Release { .. } => self.authoring_dir(),
+        }
+    }
     pub fn user_effects_dir(&self) -> PathBuf {
         self.user_data_root().join("effects")
     }

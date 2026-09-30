@@ -2692,6 +2692,50 @@
         assert!(render_peak() > 0.01, "redo must restore playable routing");
     }
 
+    /// eseq-63j4.4: a coding agent edits a user instrument's dsp.lisp while it
+    /// plays on a track; "Reload Instrument From Disk" recompiles it in place.
+    #[test]
+    fn reload_custom_instrument_from_disk_recompiles_the_running_engine() {
+        let graph = TestLiveGraph::new("reload-instrument-from-disk");
+        let mut app = test_app_with_track_count(&graph, 0);
+        app.graph_controller().add_empty_track().unwrap();
+        assert!(
+            app.reload_custom_instrument_from_disk(0).is_err(),
+            "an empty track has no instrument to reload"
+        );
+
+        let root = crate::app_paths::app_paths().user_instruments_dir();
+        std::fs::create_dir_all(&root).unwrap();
+        let dir = tempfile::Builder::new().prefix("eseq-reload-probe-").tempdir_in(&root).unwrap();
+        let dsp = dir.path().join("dsp.lisp");
+        std::fs::write(&dsp, "(param tone @min 0 @max 1)\n(out (* 0.1 tone) 1)").unwrap();
+        let name = format!("user:{}/", dir.path().file_name().unwrap().to_str().unwrap());
+        let source = lisp_host::load_instrument_source(&name).unwrap();
+        let compiled = lisp_host::compile_and_load_instrument(&source, 44_100).unwrap();
+        app.swap_track_to_compiled_saved_instrument_sync(
+            0, &name, &source, CustomInstrumentRunMode::Instrument, compiled,
+        ).unwrap();
+        let param_names = |app: &App| -> Vec<String> {
+            app.graph.instrument_descriptors[0].params.iter().map(|param| param.name.clone()).collect()
+        };
+        assert!(!param_names(&app).contains(&"body".to_string()));
+
+        let edited = "(param tone @min 0 @max 1)\n(param body @min 0 @max 1)\n(out (* tone body) 1)";
+        std::fs::write(&dsp, edited).unwrap();
+        assert_eq!(app.reload_custom_instrument_from_disk(0).unwrap(), name);
+        let names = param_names(&app);
+        assert!(names.contains(&"tone".to_string()) && names.contains(&"body".to_string()), "{names:?}");
+        let engine_id = app.graph.track_engine_ids[0].unwrap();
+        assert_eq!(app.editor.engine_registry.get(engine_id).unwrap().source, edited);
+
+        std::fs::write(&dsp, "(this does not compile").unwrap();
+        assert!(app.reload_custom_instrument_from_disk(0).is_err());
+        assert_eq!(
+            app.editor.engine_registry.get(engine_id).unwrap().source, edited,
+            "a broken edit keeps the running engine"
+        );
+    }
+
     #[test]
     fn empty_track_device_load_undo_redo_preserves_identity_pattern_and_effects() {
         let graph = TestLiveGraph::new("empty-track-device-history");

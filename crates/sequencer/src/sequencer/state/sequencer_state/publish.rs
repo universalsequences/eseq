@@ -1,5 +1,8 @@
 use super::super::*;
 
+/// Marks kept per generator: a few bars of sixteenths of lookahead.
+const GENERATOR_MARK_CAP: usize = 256;
+
 impl SequencerState {
     pub fn latest_scheduler_snapshot(&self) -> Arc<SequencerSnapshot> {
         self.scheduler_snapshot.lock().unwrap().clone()
@@ -49,6 +52,44 @@ impl SequencerState {
                 (snapshot.id, nodes)
             })
             .collect()
+    }
+
+    /// A generator tick's `(gen-mark v [key])`: `v` stamped at the audio
+    /// sample it plays at. Ticks run ahead of the audio (lookahead), so
+    /// readers take the latest mark at or before the audio clock. A mark
+    /// earlier than the newest (a relocation, or a hit landing before a
+    /// previous hit's end-of-gate mark) drops that stale future first.
+    pub fn push_generator_mark(&self, id: u64, key: &str, sample: u64, value: f64) {
+        let mut marks = self.generator_marks.lock().unwrap();
+        let queue = marks.entry((id, key.to_string())).or_default();
+        while queue.back().is_some_and(|(at, _)| *at > sample) {
+            queue.pop_back();
+        }
+        queue.push_back((sample, value));
+        while queue.len() > GENERATOR_MARK_CAP {
+            queue.pop_front();
+        }
+    }
+
+    /// The latest mark of generator `id` under `key` at or before audio
+    /// sample `sample`.
+    pub fn generator_mark_at(&self, id: u64, key: &str, sample: u64) -> Option<f64> {
+        let marks = self.generator_marks.lock().unwrap();
+        marks
+            .get(&(id, key.to_string()))?
+            .iter()
+            .rev()
+            .find(|(at, _)| *at <= sample)
+            .map(|(_, value)| *value)
+    }
+
+    /// Every (generator id, key) that has stamped marks.
+    pub fn generator_mark_keys(&self) -> Vec<(u64, String)> {
+        self.generator_marks.lock().unwrap().keys().cloned().collect()
+    }
+
+    pub fn clear_generator_marks(&self) {
+        self.generator_marks.lock().unwrap().clear();
     }
 
     pub fn has_graph_visualizations(&self) -> bool {

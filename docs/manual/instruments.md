@@ -172,12 +172,14 @@ The pattern sounds as before: none of its notes reach C3. Now set the bar transp
 
 An instrument is a DGenLisp program, `dsp.lisp`, with a panel description, `ui.lisp`. The factory instruments are built the same way, and any of them can be opened, studied and forked.
 
+The quickest way to a new instrument is to describe it to a coding agent, which writes and tests both files for you; see [Making instruments with an agent](agent-authoring). The rest of this section covers building one by hand.
+
 - **Create > Create Instrument…** (Command-I) opens the patch editor on a new draft. Choose **Instrument** or **Free Patch** at the top: an Instrument allocates a voice per note, and a Free Patch runs a single voice continuously. Name it under **Save as** and click **Finalize** to save it to your Library.
 - **Edit** in an instrument's **•••** menu opens that instrument in the patch editor. **Save** overwrites the instrument's definition, which every project using it shares. **Fork** turns the editor into a draft copy to name and finalize, leaving the original untouched.
 - Command-Option-I opens the selected instrument's panel description, `ui.lisp`.
 
 The patch editor shows the instrument as a graph of nodes. When you are editing an existing instrument, **View code** switches to its source, where **Eval** (`C-c C-c`) compiles the buffer and swaps it into the running track, and **Open as patch** returns to the graph.
 
-A patch-editor tutorial is beyond the scope of this manual. Two experimental aids exist. **Patch Learn** searches an instrument's parameters for settings that match a target sample. It has no button yet; with the instrument's patch editor active, run `M-x` `open-learn-patch`. It needs the DGenLisp trainer and says so if the trainer is missing. **Agent Mode** (`C-x a`) is a conversation buffer that drafts instruments and effects; it needs an API key in an environment variable such as `ANTHROPIC_API_KEY`. Both may change.
+A patch-editor tutorial is beyond the scope of this manual. Two experimental aids exist. **Patch Learn** searches an instrument's parameters for settings that match a target sample. It has no button yet; with the instrument's patch editor active, run `M-x` `open-learn-patch`. It needs the DGenLisp trainer and says so if the trainer is missing. **Agent Mode** (`C-x a`) is a conversation buffer that drafts instruments and effects; it needs an API key in an environment variable such as `ANTHROPIC_API_KEY`. An agent in your terminal needs no key; see [Making instruments with an agent](agent-authoring). Both may change.
 
 Instruments you build can be shared as packages; see [Packages](packages). To change how instrument panels behave or which keys do what, see [Keys and customization](customization).

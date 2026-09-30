@@ -162,6 +162,11 @@ ditto "$DGEN_TOOL" "$MACOS/DGenLisp-macos-arm64"
 ditto "$DGEN_TOOLCHAIN" "$RESOURCES/dgen-toolchain"
 ditto "$CONTENT_DIR" "$RESOURCES"
 ditto "$REPO_ROOT/docs/manual" "$RESOURCES/manual"
+# The DGenLisp language reference and operator catalog belong to the coding-
+# agent authoring kit (crates/sequencer/src/authoring_kit); release AppPaths
+# resolves them inside Resources/authoring.
+ditto "$REPO_ROOT/crates/sequencer/tools/DGenLispReadme.md" "$RESOURCES/authoring/DGenLispReadme.md"
+ditto "$REPO_ROOT/crates/sequencer/tools/dgenlisp-operators.json" "$RESOURCES/authoring/dgenlisp-operators.json"
 ditto "$ICON" "$RESOURCES/AppIcon.icns"
 ditto "$FONT_DIR" "$RESOURCES/fonts"
 

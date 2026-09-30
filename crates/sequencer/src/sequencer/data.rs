@@ -1911,6 +1911,7 @@ pub enum LiveInputEvent {
     },
     PitchBend { port: usize, channel: u8, value: f32 },
     ModWheel { port: usize, channel: u8, value: f32 },
+    Slide { port: usize, channel: u8, value: f32 },
     ResetControllers {
         port: usize,
         channel: u8,

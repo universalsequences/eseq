@@ -428,6 +428,7 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
             graph_replay,
             generation,
             clock,
+            state,
             graph_runtimes,
             queue,
             base_snapshot,
@@ -863,6 +864,9 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                 trigger.absolute_beats,
                 samples_per_quarter,
                 groove_floor,
+                Some(&|track, beats| {
+                    StepLanding::resolve(&*clock, state, snapshot, track, beats, samples_per_quarter)
+                }),
                 debug_accum,
             ) {
                 chunk_enqueued = false;
@@ -1301,6 +1305,9 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                     trigger.absolute_beats,
                     samples_per_quarter,
                     groove_floor,
+                    Some(&|track, beats| {
+                        StepLanding::resolve(&*clock, state, snapshot, track, beats, samples_per_quarter)
+                    }),
                     debug_accum,
                 )
             {
@@ -1925,6 +1932,9 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                 chunk_end_beats,
                 samples_per_quarter,
                 groove_floor,
+                Some(&|track, beats| {
+                    StepLanding::resolve(&*clock, state, snapshot, track, beats, samples_per_quarter)
+                }),
                 debug_accum,
             );
         }
@@ -1949,6 +1959,18 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                 output.sample_time,
                 samples_per_quarter,
             );
+            // A fire into another track lands on that track's step grid at
+            // its straight beat and takes that step's device p-locks.
+            if let Some(landing) = StepLanding::resolve(
+                &*clock,
+                state,
+                snapshot,
+                output.event.track,
+                event_beats,
+                samples_per_quarter,
+            ) {
+                land_network_event(snapshot, &landing, &mut output.event);
+            }
             // `None`: an early groove hit that already sounded before a
             // mid-play resync.
             let Some(sample_time) = grooved_or_swung_network_sample_time(
@@ -2011,183 +2033,38 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
         // (like the neural layer). Each boundary invokes the generator's
         // :tick on the scheduler-side VM; seq-emit output is resolved to a
         // NetworkTrigger here.
-        if !generator_runtime.is_empty() {
-            let mut generator_emissions = Vec::new();
-            let mut generator_control_emissions = Vec::new();
-            if let Some(scratch) = scratch_runtime.as_mut() {
-                // Channel snapshot for chan-get: ticks in this chunk observe
-                // process-channel writes from earlier chunks (processes run
-                // after generators within a chunk).
-                scratch.set_generator_channel_values(
-                    process_runtime.payload_epoch(),
-                    process_runtime.channel_values(),
-                );
-                // Naming a generator means locking the definition registry
-                // and cloning every name; failures are rare, so collect ids
-                // here and resolve names once, after the block.
-                let mut tick_failures: Vec<(u64, String)> = Vec::new();
-                generator_runtime.process_block_with_controls(
-                    chunk_start_beats,
-                    chunk_end_beats,
-                    scheduled_until_sample,
-                    samples_per_quarter,
-                    |input| {
-                        let generator_index = input.generator_index;
-                        let generator_id = input.id;
-                        let random_state = input.random_state;
-                        let fallback_state = input.state.clone();
-                        let empty = crate::generator::GeneratorTickResult {
-                            emitted: Vec::new(),
-                            controls: Vec::new(),
-                            random_state,
-                            state: fallback_state,
-                        };
-                        if parked_generators.contains(&generator_id) {
-                            return empty;
-                        }
-                        match scratch.invoke_sequencer_tick(generator_index, input) {
-                            Ok(mut result) => {
-                                if let Some(group_id) = generator_owner_racks.get(&generator_id) {
-                                    map_rack_member_emissions(
-                                        &mut result.emitted,
-                                        crate::graph::rack_members(
-                                            &snapshot.rack_memberships,
-                                            *group_id,
-                                        )
-                                        .unwrap_or(&[]),
-                                    );
-                                }
-                                result
-                            }
-                            Err(error) => {
-                                // Report the first failure and park: a broken
-                                // tick must be one loud notice, not silence
-                                // re-erroring every boundary. The park clears
-                                // when definitions re-sync.
-                                tick_failures.push((generator_id, error));
-                                parked_generators.insert(generator_id);
-                                empty
-                            }
-                        }
-                    },
-                    &mut generator_emissions,
-                    &mut generator_control_emissions,
-                );
-                if !tick_failures.is_empty() {
-                    let generator_names: std::collections::HashMap<u64, String> = scratch
-                        .sequencer_defs()
-                        .iter()
-                        .map(|definition| (definition.id, definition.name.clone()))
-                        .collect();
-                    for (generator_id, error) in tick_failures {
-                        let name = generator_names
-                            .get(&generator_id)
-                            .cloned()
-                            .unwrap_or_else(|| format!("generator {generator_id}"));
-                        eprintln!("sequencer tick failed for {name} ({generator_id}): {error}");
-                        state.report_generator_tick_error(generator_id, name, error);
-                    }
-                }
-                // Mixer-control holds ride to the app thread through the
-                // mailbox; the frame drain applies due ones
-                // (docs/jaki-mixer-control-routes-spec.md).
-                for emission in generator_control_emissions.drain(..) {
-                    state.scheduled_mixer_controls().push(
-                        emission.engage_sample,
-                        emission.release_sample,
-                        emission.generator_index,
-                        emission.control.op,
-                        emission.control.target,
-                    );
-                }
-            } else if debug_routing_enabled() {
-                eprintln!(
-                    "[routing] skip generator-block reason=no-scratch-runtime chunk=({:.6}..{:.6})",
-                    chunk_start_beats, chunk_end_beats
-                );
-            }
-            // Velocity-merge coincident hits only when they are the same note.
-            // Different notes at the same sample/track are polyphony.
-            for mut emission in merge_generator_emission_accents(generator_emissions) {
-                // Generator hits aimed at a rack member play through its
-                // groove like every other trig source; their sample time is
-                // their straight beat.
-                if let Some(track) = emission.event.track {
-                    if snapshot.track_groove(track).is_some() {
-                        let straight_beats = sample_time_to_beats(
-                            chunk_start_beats,
-                            scheduled_until_sample,
-                            emission.sample_time,
-                            samples_per_quarter,
-                        );
-                        // `None`: an early hit that already sounded before
-                        // a mid-play resync.
-                        let Some(sample_time) = grooved_emission_sample_time(
-                            snapshot,
-                            Some(track),
-                            emission.sample_time,
-                            straight_beats,
-                            samples_per_quarter,
-                            groove_floor,
-                        ) else {
-                            continue;
-                        };
-                        emission.sample_time = sample_time;
-                        emission.event.resolved.velocity = grooved_velocity(
-                            snapshot,
-                            Some(track),
-                            emission.event.resolved.velocity,
-                            straight_beats,
-                        );
-                    }
-                }
-                let event_beats = sample_time_to_beats(
-                    chunk_start_beats,
-                    scheduled_until_sample,
-                    emission.sample_time,
-                    samples_per_quarter,
-                ) as f32;
-                if debug_routing_enabled() {
-                    eprintln!(
-                        "[routing] generator-emission generator={} track={:?} sample={} beats={:.6} chain={:?} transpose={} vel={}",
-                        emission.generator_index,
-                        emission.event.track,
-                        emission.sample_time,
-                        event_beats,
-                        emission
-                            .event
-                            .track
-                            .and_then(|track| snapshot.tracks.get(track))
-                            .map(|track| track.params.midi_fx_chain.as_slice())
-                            .unwrap_or(&[]),
-                        emission.event.resolved.transpose,
-                        emission.event.resolved.velocity
-                    );
-                }
-                if !enqueue_emitted_network_event_with_midi_fx(
-                    queue,
-                    snapshot,
-                    &mut track_output_events,
-                    scratch_runtime.as_mut(),
-                    Some(&mut *midi_fx_quantizer_state),
-                    pattern_epoch,
-                    emission.sample_time,
-                    samples_per_quarter as f32,
-                    event_beats,
-                    process_runtime.global_transpose(),
-                    EmittedNetworkEventSource::Generator {
-                        index: emission.generator_index,
-                    },
-                    emission.event,
-                    debug_accum,
-                ) {
-                    chunk_enqueued = false;
-                    break;
-                }
-            }
-            if !chunk_enqueued {
-                break;
-            }
+        // Generators a graph node gates run in a second pass after the
+        // graph stage, so a fire reaches the generator's tick on the same
+        // boundary (docs/jaki-trig-modes-spec.md §4.1).
+        let gated_generators: std::collections::HashSet<u64> = graph_runtimes
+            .iter()
+            .filter(|graph| !graph.is_empty())
+            .flat_map(|graph| graph.gate_targets())
+            .collect();
+        if !generator_runtime.is_empty()
+            && !run_generator_stage(
+                generator_runtime,
+                scratch_runtime,
+                process_runtime,
+                parked_generators,
+                generator_owner_racks,
+                clock,
+                state,
+                snapshot,
+                queue,
+                &mut track_output_events,
+                midi_fx_quantizer_state,
+                pattern_epoch,
+                chunk_start_beats,
+                chunk_end_beats,
+                scheduled_until_sample,
+                samples_per_quarter,
+                groove_floor,
+                debug_accum,
+                |id| !gated_generators.contains(&id),
+            )
+        {
+            break;
         }
 
         // Scheduler-owned processes: self-clocked like generators, but with
@@ -2253,6 +2130,9 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                             invocation_beat,
                             samples_per_quarter,
                             groove_floor,
+                            Some(&|track, beats| {
+                                StepLanding::resolve(&*clock, state, snapshot, track, beats, samples_per_quarter)
+                            }),
                             debug_accum,
                         ) {
                             chunk_enqueued = false;
@@ -2277,6 +2157,9 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                         chunk_end_beats,
                         samples_per_quarter,
                         groove_floor,
+                        Some(&|track, beats| {
+                            StepLanding::resolve(&*clock, state, snapshot, track, beats, samples_per_quarter)
+                        }),
                         debug_accum,
                     )
                 {
@@ -2382,10 +2265,54 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                         .unwrap_or(0)
                 );
             }
+            // A node routed to a generator gates (or restarts) it instead of
+            // sounding a note: its fire becomes a gate trigger for the generator's
+            // second pass below, and is neither enqueued nor retained for
+            // replay (docs/jaki-trig-modes-spec.md §4, §6). Split before the
+            // accent merge, which would fold two gate targets' coincident
+            // same-note fires (both track `None`) into one.
+            graph_emissions.retain(|emission| {
+                let Some(target) =
+                    graph_runtimes[graph_index].node_gate_target(emission.node_index)
+                else {
+                    return true;
+                };
+                generator_runtime.push_gate_trigger(
+                    target.id,
+                    crate::generator::GateTrigger {
+                        kind: if target.restart {
+                            crate::generator::GateTriggerKind::Restart
+                        } else {
+                            crate::generator::GateTriggerKind::Play
+                        },
+                        beat: emission.grid_beats,
+                        duration_beats: emission.event.resolved.duration as f64,
+                        note: emission.event.resolved.transpose as f32,
+                        velocity: emission.event.resolved.velocity as f32,
+                    },
+                );
+                false
+            });
             // Velocity-merge coincident hits only when they are the same note.
             // Different notes at the same sample/track are polyphony.
             for mut emission in merge_graph_emission_accents(graph_emissions) {
                 let straight_emission = emission.clone();
+                let graph_source = EmittedNetworkEventSource::Graph {
+                    graph_index,
+                    node_index: emission.node_index,
+                };
+                // The step the fire lands on, at its straight beat, supplies
+                // its device p-locks.
+                let landing = graph_source.resolve_track(emission.event.track).and_then(|track| {
+                    StepLanding::resolve(
+                        &*clock,
+                        state,
+                        snapshot,
+                        track,
+                        emission.grid_beats,
+                        samples_per_quarter,
+                    )
+                });
                 // A fire aimed at a rack member plays through the rack's
                 // groove, keyed on its straight (quantized) beat (rack
                 // groove spec §Sites 2). No groove: unchanged.
@@ -2443,11 +2370,9 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                     samples_per_quarter as f32,
                     event_beats,
                     process_runtime.global_transpose(),
-                    EmittedNetworkEventSource::Graph {
-                        graph_index,
-                        node_index: emission.node_index,
-                    },
+                    graph_source,
                     emission.event,
+                    landing,
                     debug_accum,
                 ) {
                     chunk_enqueued = false;
@@ -2470,6 +2395,31 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
             debug_graph_drive_chunks += 1;
         }
         if !chunk_enqueued {
+            break;
+        }
+        if !gated_generators.is_empty()
+            && !run_generator_stage(
+                generator_runtime,
+                scratch_runtime,
+                process_runtime,
+                parked_generators,
+                generator_owner_racks,
+                clock,
+                state,
+                snapshot,
+                queue,
+                &mut track_output_events,
+                midi_fx_quantizer_state,
+                pattern_epoch,
+                chunk_start_beats,
+                chunk_end_beats,
+                scheduled_until_sample,
+                samples_per_quarter,
+                groove_floor,
+                debug_accum,
+                |id| gated_generators.contains(&id),
+            )
+        {
             break;
         }
 
@@ -2637,11 +2587,237 @@ fn feed_track_output_reads(
 /// it was still in the cleared queue) and its re-grooved sample must be at
 /// or after `rendered` too (an early move that lands before it is dropped). Replayed emissions stay
 /// retained under the current generation, for a later resync.
+/// One pass of the Lisp-generator stage over a chunk: tick the generators
+/// `include` accepts, resolve their `seq-emit` output to network triggers and
+/// enqueue them. False when the queue filled (the chunk stops there).
+#[allow(clippy::too_many_arguments)]
+fn run_generator_stage<const QUEUE_CAP: usize>(
+    generator_runtime: &mut crate::generator::GeneratorRuntime,
+    scratch_runtime: &mut Option<lisp_host::ScratchControlRuntime>,
+    process_runtime: &mut crate::process::ProcessRuntime,
+    parked_generators: &mut std::collections::HashSet<u64>,
+    generator_owner_racks: &std::collections::HashMap<u64, u64>,
+    clock: &SnapshotSequencerClock,
+    state: &SequencerState,
+    snapshot: &SequencerSnapshot,
+    queue: &ScheduledEventQueue<QUEUE_CAP>,
+    track_output_events: &mut Vec<TrackOutputEvent>,
+    midi_fx_quantizer_state: &mut MidiFxQuantizerState,
+    pattern_epoch: u64,
+    chunk_start_beats: f64,
+    chunk_end_beats: f64,
+    scheduled_until_sample: u64,
+    samples_per_quarter: f64,
+    groove_floor: crate::groove::GrooveFloor,
+    debug_accum: bool,
+    include: impl Fn(u64) -> bool,
+) -> bool {
+    let mut chunk_enqueued = true;
+    let mut generator_emissions = Vec::new();
+    let mut generator_control_emissions = Vec::new();
+    if let Some(scratch) = scratch_runtime.as_mut() {
+        // Channel snapshot for chan-get: ticks in this chunk observe
+        // process-channel writes from earlier chunks (processes run
+        // after generators within a chunk).
+        scratch.set_generator_channel_values(
+            process_runtime.payload_epoch(),
+            process_runtime.channel_values(),
+        );
+        // Naming a generator means locking the definition registry
+        // and cloning every name; failures are rare, so collect ids
+        // here and resolve names once, after the block.
+        let mut tick_failures: Vec<(u64, String)> = Vec::new();
+        generator_runtime.process_block_selected(
+            chunk_start_beats,
+            chunk_end_beats,
+            scheduled_until_sample,
+            samples_per_quarter,
+            include,
+            |input| {
+                let generator_index = input.generator_index;
+                let generator_id = input.id;
+                let random_state = input.random_state;
+                let fallback_state = input.state.clone();
+                let empty = crate::generator::GeneratorTickResult {
+                    emitted: Vec::new(),
+                    controls: Vec::new(),
+                    random_state,
+                    state: fallback_state,
+                };
+                if parked_generators.contains(&generator_id) {
+                    return empty;
+                }
+                match scratch.invoke_sequencer_tick(generator_index, input) {
+                    Ok(mut result) => {
+                        if let Some(group_id) = generator_owner_racks.get(&generator_id) {
+                            map_rack_member_emissions(
+                                &mut result.emitted,
+                                crate::graph::rack_members(
+                                    &snapshot.rack_memberships,
+                                    *group_id,
+                                )
+                                .unwrap_or(&[]),
+                            );
+                        }
+                        result
+                    }
+                    Err(error) => {
+                        // Report the first failure and park: a broken
+                        // tick must be one loud notice, not silence
+                        // re-erroring every boundary. The park clears
+                        // when definitions re-sync.
+                        tick_failures.push((generator_id, error));
+                        parked_generators.insert(generator_id);
+                        empty
+                    }
+                }
+            },
+            &mut generator_emissions,
+            &mut generator_control_emissions,
+        );
+        if !tick_failures.is_empty() {
+            let generator_names: std::collections::HashMap<u64, String> = scratch
+                .sequencer_defs()
+                .iter()
+                .map(|definition| (definition.id, definition.name.clone()))
+                .collect();
+            for (generator_id, error) in tick_failures {
+                let name = generator_names
+                    .get(&generator_id)
+                    .cloned()
+                    .unwrap_or_else(|| format!("generator {generator_id}"));
+                eprintln!("sequencer tick failed for {name} ({generator_id}): {error}");
+                state.report_generator_tick_error(generator_id, name, error);
+            }
+        }
+        // Mixer-control holds ride to the app thread through the
+        // mailbox; the frame drain applies due ones
+        // (docs/jaki-mixer-control-routes-spec.md).
+        for emission in generator_control_emissions.drain(..) {
+            state.scheduled_mixer_controls().push(
+                emission.engage_sample,
+                emission.release_sample,
+                emission.generator_index,
+                emission.control.op,
+                emission.control.target,
+            );
+        }
+    } else if debug_routing_enabled() {
+        eprintln!(
+            "[routing] skip generator-block reason=no-scratch-runtime chunk=({:.6}..{:.6})",
+            chunk_start_beats, chunk_end_beats
+        );
+    }
+    // Velocity-merge coincident hits only when they are the same note.
+    // Different notes at the same sample/track are polyphony.
+    for mut emission in merge_generator_emission_accents(generator_emissions) {
+        let generator_source = EmittedNetworkEventSource::Generator {
+            index: emission.generator_index,
+        };
+        // The step the hit lands on, at its straight beat (before
+        // the groove moves it), supplies its device p-locks.
+        let landing = generator_source.resolve_track(emission.event.track).and_then(|track| {
+            StepLanding::resolve(
+                &*clock,
+                state,
+                snapshot,
+                track,
+                sample_time_to_beats(
+                    chunk_start_beats,
+                    scheduled_until_sample,
+                    emission.sample_time,
+                    samples_per_quarter,
+                ),
+                samples_per_quarter,
+            )
+        });
+        // Generator hits aimed at a rack member play through its
+        // groove like every other trig source; their sample time is
+        // their straight beat.
+        if let Some(track) = emission.event.track {
+            if snapshot.track_groove(track).is_some() {
+                let straight_beats = sample_time_to_beats(
+                    chunk_start_beats,
+                    scheduled_until_sample,
+                    emission.sample_time,
+                    samples_per_quarter,
+                );
+                // `None`: an early hit that already sounded before
+                // a mid-play resync.
+                let Some(sample_time) = grooved_emission_sample_time(
+                    snapshot,
+                    Some(track),
+                    emission.sample_time,
+                    straight_beats,
+                    samples_per_quarter,
+                    groove_floor,
+                ) else {
+                    continue;
+                };
+                emission.sample_time = sample_time;
+                emission.event.resolved.velocity = grooved_velocity(
+                    snapshot,
+                    Some(track),
+                    emission.event.resolved.velocity,
+                    straight_beats,
+                );
+            }
+        }
+        let event_beats = sample_time_to_beats(
+            chunk_start_beats,
+            scheduled_until_sample,
+            emission.sample_time,
+            samples_per_quarter,
+        ) as f32;
+        if debug_routing_enabled() {
+            eprintln!(
+                "[routing] generator-emission generator={} track={:?} sample={} beats={:.6} chain={:?} transpose={} vel={}",
+                emission.generator_index,
+                emission.event.track,
+                emission.sample_time,
+                event_beats,
+                emission
+                    .event
+                    .track
+                    .and_then(|track| snapshot.tracks.get(track))
+                    .map(|track| track.params.midi_fx_chain.as_slice())
+                    .unwrap_or(&[]),
+                emission.event.resolved.transpose,
+                emission.event.resolved.velocity
+            );
+        }
+        if !enqueue_emitted_network_event_with_midi_fx(
+            queue,
+            snapshot,
+            track_output_events,
+            scratch_runtime.as_mut(),
+            Some(&mut *midi_fx_quantizer_state),
+            pattern_epoch,
+            emission.sample_time,
+            samples_per_quarter as f32,
+            event_beats,
+            process_runtime.global_transpose(),
+            generator_source,
+            emission.event,
+            landing,
+            debug_accum,
+        ) {
+            chunk_enqueued = false;
+            break;
+        }
+    }
+    if !chunk_enqueued {
+        return false;
+    }
+    true
+}
+
 #[allow(clippy::too_many_arguments)]
 fn replay_retained_graph_emissions<const QUEUE_CAP: usize>(
     retained: &mut Vec<RetainedGraphEmission>,
     generation: u64,
     clock: &SnapshotSequencerClock,
+    state: &SequencerState,
     graph_runtimes: &[crate::graph::GraphRuntime],
     queue: &ScheduledEventQueue<QUEUE_CAP>,
     snapshot: &SequencerSnapshot,
@@ -2717,6 +2893,20 @@ fn replay_retained_graph_emissions<const QUEUE_CAP: usize>(
             sample_time,
             samples_per_quarter,
         ) as f32;
+        let source = EmittedNetworkEventSource::Graph {
+            graph_index,
+            node_index: emission.node_index,
+        };
+        let landing = source.resolve_track(emission.event.track).and_then(|track| {
+            StepLanding::resolve(
+                clock,
+                state,
+                snapshot,
+                track,
+                emission.grid_beats,
+                samples_per_quarter,
+            )
+        });
         if !enqueue_emitted_network_event_with_midi_fx(
             queue,
             snapshot,
@@ -2728,11 +2918,9 @@ fn replay_retained_graph_emissions<const QUEUE_CAP: usize>(
             samples_per_quarter as f32,
             event_beats,
             global_transpose,
-            EmittedNetworkEventSource::Graph {
-                graph_index,
-                node_index: emission.node_index,
-            },
+            source,
             emission.event,
+            landing,
             debug_accum,
         ) {
             break;

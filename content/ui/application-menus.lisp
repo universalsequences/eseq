@@ -174,7 +174,30 @@
                (not (= SEQ.sidebar-instrument-name ""))))
         :on-select (lambda ()
           (host-command "enter-edit-instrument"
-            (dict :name SEQ.sidebar-instrument-name))))))))
+            (dict :name SEQ.sidebar-instrument-name))))
+      nil
+      ;; Pick up instrument/effect files written outside the app, e.g. by a
+      ;; coding agent (eseq-63j4.4). New folders and ui.lisp edits are picked
+      ;; up by the file watcher; DSP running on a track needs these.
+      (dict :id "edit-menu-reload-instrument" :label "Reload Instrument From Disk"
+        :enabled-when (lambda ()
+          (and (commands-enabled?) (< eseq.seq-core-state/selected-bus 0) (> SEQ.num-tracks 0)
+               (= (nth SEQ.track-instrument-types SEQ.current-track) "custom")))
+        :on-select (lambda ()
+          (host-command "reload-instrument-from-disk" (dict :track SEQ.current-track))))
+      (dict :id "edit-menu-reload-effect" :label "Reload Selected Effect From Disk"
+        :enabled-when (lambda ()
+          (and (commands-enabled?)
+               (let ((fx (selected-editable-effect)))
+                 (and (not (= fx nil)) (not (get fx :bus-fx))))))
+        :on-select (lambda ()
+          (let ((fx (selected-editable-effect)))
+            (if fx
+              (host-command "reload-effect-from-disk" (dict :slot (get fx :slot-idx)))
+              nil))))
+      (dict :id "edit-menu-rescan-library" :label "Rescan Instruments & Effects"
+        :enabled-when commands-enabled?
+        :on-select (lambda () (host-command "reload-content-library" (dict))))))))
   (menus/register-menu (dict :id "Create" :label "Create" :enabled-when commands-enabled?
     :items (map (lambda (item)
       (if (and item (= (get item :id) "create-menu-effect"))
@@ -211,4 +234,7 @@
   :items (list
     (application-menu-entry "help-search" "Search Commands…" "" (lambda () (host-command "menu-search-commands" (dict))))
     (application-menu-entry "help-shortcuts" "Keyboard Shortcuts" "" (lambda () (host-command "menu-keyboard-shortcuts" (dict))))
-    (application-menu-entry "help-manual" "Documentation" "" (lambda () (host-command "open-help" (dict)))))))
+    (application-menu-entry "help-manual" "Documentation" "" (lambda () (host-command "open-help" (dict))))
+    nil
+    ;; Where a coding agent writes new instruments and effects (eseq-63j4).
+    (application-menu-entry "help-authoring" "Open Authoring Folder in Terminal" "" (lambda () (host-command "menu-open-authoring-folder" (dict)))))))

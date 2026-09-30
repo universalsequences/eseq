@@ -13,10 +13,23 @@ pub(super) struct RackPresetCatalog {
 
 impl RackPresetCatalog {
     pub(super) fn names(&mut self, directories: &[PathBuf]) -> Vec<String> {
+        let mut names: Vec<String> = self.names_by_directory(directories).into_iter().flatten().collect();
+        names.sort();
+        names.dedup();
+        names
+    }
+
+    /// Sorted, deduplicated names found in each directory, in `directories`
+    /// order (a name may appear under more than one directory).
+    pub(super) fn names_by_directory(&mut self, directories: &[PathBuf]) -> Vec<Vec<String>> {
         let mut seen = HashSet::new();
-        let mut names = Vec::new();
+        let mut per_directory = Vec::new();
         for directory in directories {
-            let Ok(entries) = std::fs::read_dir(directory) else { continue };
+            let mut names = Vec::new();
+            let Ok(entries) = std::fs::read_dir(directory) else {
+                per_directory.push(names);
+                continue;
+            };
             for entry in entries.filter_map(Result::ok) {
                 let path = entry.path();
                 if path.extension().and_then(|ext| ext.to_str()) != Some("rackpreset") {
@@ -43,11 +56,12 @@ impl RackPresetCatalog {
                 }
                 seen.insert(path);
             }
+            names.sort();
+            names.dedup();
+            per_directory.push(names);
         }
         self.entries.retain(|path, _| seen.contains(path));
-        names.sort();
-        names.dedup();
-        names
+        per_directory
     }
 }
 

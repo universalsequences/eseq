@@ -128,6 +128,30 @@ New tracks created from the browser use `current`.
 
 Never edit a file under `versions/` after it ships.
 
+## Deprecation
+
+Any instrument's `instrument.json` (a folder instrument's, a single-file
+`<name>.instrument.json`, or a versioned lineage's top-folder manifest) may
+carry:
+
+```json
+{ "deprecated": true, "replaced_by": "Drums/VILLAIN Kick" }
+```
+
+Both are optional; files without them parse unchanged, and rewriting the run
+mode preserves them.
+
+- **Hidden**: a deprecated instrument is left out of the browser's instrument
+  tree (every tier), its search, `.categories.json` groups (a listed deprecated
+  name still validates, then leaves its group; a group left empty disappears),
+  and `list_saved_instruments` (`seq-saved-instruments`, the agent protocol).
+- **Loadable**: resolution, `qualify_instrument_id` (including `@<release>`
+  pinning), presets, custom UI and compile are unchanged, so projects, sounds
+  and kits that reference it load as before.
+- **Favorites**: a favorited deprecated instrument stays in the tree, labelled
+  `<name> (deprecated)`, so a favorite never disappears silently.
+- `replaced_by` is informational for now; nothing reads it.
+
 ## First application: Digi Drift → Digi Syn
 
 - Move `Synths/Digi Drift/{dsp.lisp,ui.lisp,dsp.layout.json}` to

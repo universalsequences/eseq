@@ -1703,6 +1703,49 @@ pub(super) fn process_step_event_value(
     eseqlisp::vm::Value::Map(map)
 }
 
+/// A cross-track network fire lands on its destination's step grid: instead of
+/// the base stamp [`normalize_network_event_destination`] would give it, it
+/// takes the landing step's params (see [`StepLanding`]). The seed becomes
+/// that step, so later normalization keeps these params and MIDI-FX, key
+/// locks and rack p-locks all resolve against the same step. A fire back
+/// into its seed's own track keeps the seed step's params.
+pub(super) fn land_network_event(
+    snapshot: &SequencerSnapshot,
+    landing: &StepLanding,
+    event: &mut StepEvent,
+) {
+    let EventSource::Network { seed, neuron, .. } = event.source.clone() else {
+        return;
+    };
+    if seed.is_some_and(|(track, _)| track == event.track) {
+        return;
+    }
+    // Same rule as normalization: a seedless event's params are its own
+    // explicit writes; a foreign seed's params belong to the other track.
+    let (explicit_effect_params, explicit_instrument_params, explicit_tensor_params) =
+        if seed.is_none() {
+            (
+                std::mem::take(&mut event.effect_params),
+                std::mem::replace(&mut event.instrument_params, ScheduledInstrumentParams::new()),
+                std::mem::replace(
+                    &mut event.instrument_tensor_params,
+                    ScheduledInstrumentTensorParams::new(),
+                ),
+            )
+        } else {
+            Default::default()
+        };
+    landing.stamp(snapshot, event);
+    upsert_effect_params(&mut event.effect_params, explicit_effect_params);
+    upsert_instrument_params(&mut event.instrument_params, explicit_instrument_params);
+    upsert_instrument_tensor_params(&mut event.instrument_tensor_params, explicit_tensor_params);
+    event.source = EventSource::Network {
+        seed: Some((event.track, landing.step)),
+        neuron,
+        instrument_fingerprint: 0,
+    };
+}
+
 pub(super) fn normalize_network_event_destination(
     snapshot: &SequencerSnapshot,
     neuron_idx: usize,

@@ -184,7 +184,10 @@ fn close_other_dropdowns(active_widget_id: u64) {
 }
 
 /// Close the dropdown for a given widget_id (called when overlay is dismissed externally).
+/// The `Dropdown` overlay kind also carries `sexp-slot` popups, so this
+/// closes those too.
 pub fn close_dropdown(widget_id: u64) {
+    super::sexp_slot::close_popups(widget_id);
     let state_key = state_key_for_widget_id(widget_id);
     STATES.with(|s| {
         if let Some(state) = s.borrow_mut().get_mut(&state_key) {
@@ -197,7 +200,7 @@ pub fn close_dropdown(widget_id: u64) {
 }
 
 pub fn is_dropdown_open(widget_id: u64) -> bool {
-    get_state(widget_id).open
+    get_state(widget_id).open || super::sexp_slot::overlay_open(widget_id)
 }
 
 /// An open `:filterable` dropdown is typing into its filter, so the editor
@@ -211,6 +214,9 @@ pub fn filter_captures_text(node: &LayoutNode) -> bool {
 /// Update hovered item based on mouse position in tile-local overlay space.
 /// Returns true if the hover state changed.
 pub fn hover_overlay(widget_id: u64, local_row: f32) -> bool {
+    if super::sexp_slot::overlay_open(widget_id) {
+        return super::sexp_slot::hover_overlay(widget_id, local_row);
+    }
     let state_key = state_key_for_widget_id(widget_id);
     STATES.with(|s| {
         let mut states = s.borrow_mut();

@@ -576,7 +576,7 @@ impl EmittedNetworkEventSource {
         }
     }
 
-    fn resolve_track(self, emitted_track: Option<usize>) -> Option<usize> {
+    pub(super) fn resolve_track(self, emitted_track: Option<usize>) -> Option<usize> {
         match self {
             Self::Generator { .. } | Self::Process { .. } => emitted_track.or(Some(0)),
             Self::Graph { .. } => emitted_track,
@@ -597,6 +597,7 @@ pub(super) fn enqueue_emitted_network_event_with_midi_fx(
     global_transpose: f32,
     source: EmittedNetworkEventSource,
     emitted: lisp_host::EmittedAccumulatorEvent,
+    landing: Option<StepLanding>,
     debug_accum: bool,
 ) -> bool {
     let Some(track_idx) = source.resolve_track(emitted.track) else {
@@ -649,22 +650,35 @@ pub(super) fn enqueue_emitted_network_event_with_midi_fx(
         emitted.resolved.duration,
         emitted.chord_step_transpose,
     );
+    // A hit that lands on the destination's step grid stamps that step's
+    // device params and pins MIDI-FX, key-lock and rack p-lock reads to it
+    // through the seed; otherwise it plays the track's base values.
+    let seed = landing.as_ref().map(|landing| (track_idx, landing.step));
     let mut event = StepEvent {
         track: track_idx,
         samples_per_step: samples_per_quarter,
         resolved: emitted.resolved,
         chord,
-        effect_params: resolve_effect_defaults(snapshot, track_idx),
-        instrument_params: resolve_instrument_defaults(snapshot, track_idx),
-        instrument_tensor_params: resolve_instrument_tensor_defaults(snapshot, track_idx),
-        sampler_params: resolve_sampler_defaults(snapshot, track_idx),
+        effect_params: Vec::new(),
+        instrument_params: ScheduledInstrumentParams::new(),
+        instrument_tensor_params: ScheduledInstrumentTensorParams::new(),
+        sampler_params: ScheduledSamplerParams::default(),
         rack_macro_values: [None; crate::sequencer::RACK_MACRO_COUNT],
         source: EventSource::Network {
-            seed: None,
+            seed,
             neuron: source.event_source_index(),
             instrument_fingerprint: 0,
         },
     };
+    match landing {
+        Some(landing) => landing.stamp(snapshot, &mut event),
+        None => {
+            event.effect_params = resolve_effect_defaults(snapshot, track_idx);
+            event.instrument_params = resolve_instrument_defaults(snapshot, track_idx);
+            event.instrument_tensor_params = resolve_instrument_tensor_defaults(snapshot, track_idx);
+            event.sampler_params = resolve_sampler_defaults(snapshot, track_idx);
+        }
+    }
     upsert_effect_params(&mut event.effect_params, emitted.effect_params);
     upsert_instrument_params(
         &mut event.instrument_params,
@@ -706,6 +720,7 @@ pub(super) fn enqueue_due_process_emissions(
     up_to_beat: f64,
     samples_per_quarter: f64,
     groove_floor: crate::groove::GrooveFloor,
+    landing: Option<&dyn Fn(usize, f64) -> Option<StepLanding>>,
     debug_accum: bool,
 ) -> bool {
     for item in process_runtime.take_due_events(up_to_beat) {
@@ -745,6 +760,14 @@ pub(super) fn enqueue_due_process_emissions(
                         event.resolved.velocity
                     );
                 }
+                let source = EmittedNetworkEventSource::Process {
+                    runtime_id: item.process_runtime_id,
+                };
+                let landing = landing.and_then(|landing| {
+                    source
+                        .resolve_track(event.track)
+                        .and_then(|track| landing(track, item.beat))
+                });
                 if !enqueue_emitted_network_event_with_midi_fx(
                     queue,
                     snapshot,
@@ -756,10 +779,9 @@ pub(super) fn enqueue_due_process_emissions(
                     samples_per_quarter as f32,
                     item.beat as f32,
                     process_runtime.global_transpose(),
-                    EmittedNetworkEventSource::Process {
-                        runtime_id: item.process_runtime_id,
-                    },
+                    source,
                     event,
+                    landing,
                     debug_accum,
                 ) {
                     return false;

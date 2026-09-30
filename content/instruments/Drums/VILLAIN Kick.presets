@@ -1,0 +1,370 @@
+{
+  "version": 1,
+  "engine_name": "Drums/VILLAIN Kick",
+  "source_file": "instruments/Drums/VILLAIN Kick/dsp.lisp",
+  "presets": [
+    {
+      "id": "villain-kickpca-51",
+      "name": "Kick 51 (0)",
+      "base_note_offset": 0,
+      "params": {
+        "kick_a": 0,
+        "kick_b": 0,
+        "blend": 0,
+        "drive": 1.0
+      }
+    },
+    {
+      "id": "villain-kickpca-52",
+      "name": "Kick 52 (1)",
+      "base_note_offset": 0,
+      "params": {
+        "kick_a": 1,
+        "kick_b": 1,
+        "blend": 0,
+        "drive": 1.0
+      }
+    },
+    {
+      "id": "villain-kickpca-54",
+      "name": "Kick 54 (2)",
+      "base_note_offset": 0,
+      "params": {
+        "kick_a": 2,
+        "kick_b": 2,
+        "blend": 0,
+        "drive": 1.0
+      }
+    },
+    {
+      "id": "villain-kickpca-55",
+      "name": "Kick 55 (3)",
+      "base_note_offset": 0,
+      "params": {
+        "kick_a": 3,
+        "kick_b": 3,
+        "blend": 0,
+        "drive": 1.0
+      }
+    },
+    {
+      "id": "villain-kickpca-56",
+      "name": "Kick 56 (4)",
+      "base_note_offset": 0,
+      "params": {
+        "kick_a": 4,
+        "kick_b": 4,
+        "blend": 0,
+        "drive": 1.0
+      }
+    },
+    {
+      "id": "villain-kickpca-57",
+      "name": "Kick 57 (5)",
+      "base_note_offset": 0,
+      "params": {
+        "kick_a": 5,
+        "kick_b": 5,
+        "blend": 0,
+        "drive": 1.0
+      }
+    },
+    {
+      "id": "villain-kickpca-58",
+      "name": "Kick 58 (6)",
+      "base_note_offset": 0,
+      "params": {
+        "kick_a": 6,
+        "kick_b": 6,
+        "blend": 0,
+        "drive": 1.0
+      }
+    },
+    {
+      "id": "villain-kickpca-59",
+      "name": "Kick 59 (7)",
+      "base_note_offset": 0,
+      "params": {
+        "kick_a": 7,
+        "kick_b": 7,
+        "blend": 0,
+        "drive": 1.0
+      }
+    },
+    {
+      "id": "villain-kickpca-60",
+      "name": "Kick 60 (8)",
+      "base_note_offset": 0,
+      "params": {
+        "kick_a": 8,
+        "kick_b": 8,
+        "blend": 0,
+        "drive": 1.0
+      }
+    },
+    {
+      "id": "villain-kickpca-61",
+      "name": "Kick 61 (9)",
+      "base_note_offset": 0,
+      "params": {
+        "kick_a": 9,
+        "kick_b": 9,
+        "blend": 0,
+        "drive": 1.0
+      }
+    },
+    {
+      "id": "villain-kickpca-62",
+      "name": "Kick 62 (10)",
+      "base_note_offset": 0,
+      "params": {
+        "kick_a": 10,
+        "kick_b": 10,
+        "blend": 0,
+        "drive": 1.0
+      }
+    },
+    {
+      "id": "villain-kickpca-63",
+      "name": "Kick 63 (11)",
+      "base_note_offset": 0,
+      "params": {
+        "kick_a": 11,
+        "kick_b": 11,
+        "blend": 0,
+        "drive": 1.0
+      }
+    },
+    {
+      "id": "villain-kickpca-64",
+      "name": "Kick 64 (12)",
+      "base_note_offset": 0,
+      "params": {
+        "kick_a": 12,
+        "kick_b": 12,
+        "blend": 0,
+        "drive": 1.0
+      }
+    },
+    {
+      "id": "villain-kickpca-65",
+      "name": "Kick 65 (13)",
+      "base_note_offset": 0,
+      "params": {
+        "kick_a": 13,
+        "kick_b": 13,
+        "blend": 0,
+        "drive": 1.0
+      }
+    },
+    {
+      "id": "villain-kickpca-66",
+      "name": "Kick 66 (14)",
+      "base_note_offset": 0,
+      "params": {
+        "kick_a": 14,
+        "kick_b": 14,
+        "blend": 0,
+        "drive": 1.0
+      }
+    },
+    {
+      "id": "villain-kickpca-67",
+      "name": "Kick 67 (15)",
+      "base_note_offset": 0,
+      "params": {
+        "kick_a": 15,
+        "kick_b": 15,
+        "blend": 0,
+        "drive": 1.0
+      }
+    },
+    {
+      "id": "villain-kickpca-68",
+      "name": "Kick 68 (16)",
+      "base_note_offset": 0,
+      "params": {
+        "kick_a": 16,
+        "kick_b": 16,
+        "blend": 0,
+        "drive": 1.0
+      }
+    },
+    {
+      "id": "villain-kickpca-69",
+      "name": "Kick 69 (17)",
+      "base_note_offset": 0,
+      "params": {
+        "kick_a": 17,
+        "kick_b": 17,
+        "blend": 0,
+        "drive": 1.0
+      }
+    },
+    {
+      "id": "villain-kickpca-70",
+      "name": "Kick 70 (18)",
+      "base_note_offset": 0,
+      "params": {
+        "kick_a": 18,
+        "kick_b": 18,
+        "blend": 0,
+        "drive": 1.0
+      }
+    },
+    {
+      "id": "villain-kickpca-71",
+      "name": "Kick 71 (19)",
+      "base_note_offset": 0,
+      "params": {
+        "kick_a": 19,
+        "kick_b": 19,
+        "blend": 0,
+        "drive": 1.0
+      }
+    },
+    {
+      "id": "villain-kickpca-72",
+      "name": "Kick 72 (20)",
+      "base_note_offset": 0,
+      "params": {
+        "kick_a": 20,
+        "kick_b": 20,
+        "blend": 0,
+        "drive": 1.0
+      }
+    },
+    {
+      "id": "villain-kickpca-73",
+      "name": "Kick 73 (21)",
+      "base_note_offset": 0,
+      "params": {
+        "kick_a": 21,
+        "kick_b": 21,
+        "blend": 0,
+        "drive": 1.0
+      }
+    },
+    {
+      "id": "villain-kickpca-74",
+      "name": "Kick 74 (22)",
+      "base_note_offset": 0,
+      "params": {
+        "kick_a": 22,
+        "kick_b": 22,
+        "blend": 0,
+        "drive": 1.0
+      }
+    },
+    {
+      "id": "villain-kickpca-75",
+      "name": "Kick 75 (23)",
+      "base_note_offset": 0,
+      "params": {
+        "kick_a": 23,
+        "kick_b": 23,
+        "blend": 0,
+        "drive": 1.0
+      }
+    },
+    {
+      "id": "villain-kickpca-76",
+      "name": "Kick 76 (24)",
+      "base_note_offset": 0,
+      "params": {
+        "kick_a": 24,
+        "kick_b": 24,
+        "blend": 0,
+        "drive": 1.0
+      }
+    },
+    {
+      "id": "villain-kickpca-77",
+      "name": "Kick 77 (25)",
+      "base_note_offset": 0,
+      "params": {
+        "kick_a": 25,
+        "kick_b": 25,
+        "blend": 0,
+        "drive": 1.0
+      }
+    },
+    {
+      "id": "villain-kickpca-78",
+      "name": "Kick 78 (26)",
+      "base_note_offset": 0,
+      "params": {
+        "kick_a": 26,
+        "kick_b": 26,
+        "blend": 0,
+        "drive": 1.0
+      }
+    },
+    {
+      "id": "villain-kickpca-79",
+      "name": "Kick 79 (27)",
+      "base_note_offset": 0,
+      "params": {
+        "kick_a": 27,
+        "kick_b": 27,
+        "blend": 0,
+        "drive": 1.0
+      }
+    },
+    {
+      "id": "villain-kickpca-81",
+      "name": "Kick 81 (28)",
+      "base_note_offset": 0,
+      "params": {
+        "kick_a": 28,
+        "kick_b": 28,
+        "blend": 0,
+        "drive": 1.0
+      }
+    },
+    {
+      "id": "villain-kickpca-85",
+      "name": "Kick 85 (29)",
+      "base_note_offset": 0,
+      "params": {
+        "kick_a": 29,
+        "kick_b": 29,
+        "blend": 0,
+        "drive": 1.0
+      }
+    },
+    {
+      "id": "villain-kickpca-86",
+      "name": "Kick 86 (30)",
+      "base_note_offset": 0,
+      "params": {
+        "kick_a": 30,
+        "kick_b": 30,
+        "blend": 0,
+        "drive": 1.0
+      }
+    },
+    {
+      "id": "villain-kickpca-98",
+      "name": "Kick 98 (31)",
+      "base_note_offset": 0,
+      "params": {
+        "kick_a": 31,
+        "kick_b": 31,
+        "blend": 0,
+        "drive": 1.0
+      }
+    },
+    {
+      "id": "villain-kickpca-99",
+      "name": "Kick 99 (32)",
+      "base_note_offset": 0,
+      "params": {
+        "kick_a": 32,
+        "kick_b": 32,
+        "blend": 0,
+        "drive": 1.0
+      }
+    }
+  ]
+}

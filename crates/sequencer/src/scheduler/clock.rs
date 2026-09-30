@@ -719,6 +719,34 @@ impl SnapshotSequencerClock {
         }
     }
 
+    /// The step `track` is on at absolute transport `beats`, through the same
+    /// anchored projection and boundary geometry that fires its steps, so an
+    /// emitted hit (generator, process, graph, cross-track neural fire)
+    /// resolves the p-locks of the step it actually lands on. `tolerance`
+    /// absorbs sample rounding: a hit a hair before a boundary lands on the
+    /// step that boundary starts. `None` past the track's last step (Sync
+    /// padding) or on a track with no cycle. Sequence-roll windows are not
+    /// applied: the live position is the step grid a hit lands on.
+    pub(super) fn track_step_at_beats(
+        &self,
+        snapshot: &SequencerSnapshot,
+        track: usize,
+        beats: f64,
+        tolerance: f64,
+    ) -> Option<usize> {
+        if track >= snapshot.transport.num_tracks {
+            return None;
+        }
+        let tc = self.track_clocks.get(track)?;
+        let num_steps = snapshot.tracks.get(track)?.params.num_steps;
+        if num_steps == 0 || tc.cycle_beats <= 0.0 {
+            return None;
+        }
+        let position = Self::anchored_local_beats(tc, beats + tolerance.max(0.0), num_steps)
+            .rem_euclid(tc.cycle_beats);
+        Self::derive_local_step(tc, position, num_steps)
+    }
+
     /// Capture one sequence-roll anchor per track from the current live clock
     /// position (docs/rolling-core-spec.md 5.1). Each track uses its own
     /// precomputed cycle, including timebase overrides and Sync padding.

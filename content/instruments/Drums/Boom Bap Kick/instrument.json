@@ -1,1 +1,6 @@
-{"version":1,"run_mode":"instrument"}
+{
+  "version": 1,
+  "run_mode": "instrument",
+  "deprecated": true,
+  "replaced_by": "Drums/VILLAIN Kick"
+}

@@ -1,0 +1,359 @@
+{
+  "version": 1,
+  "engine_name": "Drums/VILLAIN Snare",
+  "source_file": "instruments/Drums/VILLAIN Snare/dsp.lisp",
+  "presets": [
+    {
+      "id": "villain-snare-pca-sp-01",
+      "name": "SP Snare 01",
+      "base_note_offset": 0,
+      "params": {
+        "snare_a": 0,
+        "snare_b": 0,
+        "blend": 0,
+        "release": 160.0
+      }
+    },
+    {
+      "id": "villain-snare-pca-sp-02",
+      "name": "SP Snare 02",
+      "base_note_offset": 0,
+      "params": {
+        "snare_a": 1,
+        "snare_b": 1,
+        "blend": 0,
+        "release": 200.0
+      }
+    },
+    {
+      "id": "villain-snare-pca-sp-03",
+      "name": "SP Snare 03",
+      "base_note_offset": 0,
+      "params": {
+        "snare_a": 2,
+        "snare_b": 2,
+        "blend": 0,
+        "release": 600.0
+      }
+    },
+    {
+      "id": "villain-snare-pca-sp-04",
+      "name": "SP Snare 04",
+      "base_note_offset": 0,
+      "params": {
+        "snare_a": 3,
+        "snare_b": 3,
+        "blend": 0,
+        "release": 160.0
+      }
+    },
+    {
+      "id": "villain-snare-pca-sp-05",
+      "name": "SP Snare 05",
+      "base_note_offset": 0,
+      "params": {
+        "snare_a": 4,
+        "snare_b": 4,
+        "blend": 0,
+        "release": 160.0
+      }
+    },
+    {
+      "id": "villain-snare-pca-sp-06",
+      "name": "SP Snare 06",
+      "base_note_offset": 0,
+      "params": {
+        "snare_a": 5,
+        "snare_b": 5,
+        "blend": 0,
+        "release": 160.0
+      }
+    },
+    {
+      "id": "villain-snare-pca-sp-07",
+      "name": "SP Snare 07",
+      "base_note_offset": 0,
+      "params": {
+        "snare_a": 6,
+        "snare_b": 6,
+        "blend": 0,
+        "release": 130.0
+      }
+    },
+    {
+      "id": "villain-snare-pca-sp-08",
+      "name": "SP Snare 08",
+      "base_note_offset": 0,
+      "params": {
+        "snare_a": 7,
+        "snare_b": 7,
+        "blend": 0,
+        "release": 160.0
+      }
+    },
+    {
+      "id": "villain-snare-pca-sp-09",
+      "name": "SP Snare 09",
+      "base_note_offset": 0,
+      "params": {
+        "snare_a": 8,
+        "snare_b": 8,
+        "blend": 0,
+        "release": 160.0
+      }
+    },
+    {
+      "id": "villain-snare-pca-sp-10",
+      "name": "SP Snare 10",
+      "base_note_offset": 0,
+      "params": {
+        "snare_a": 9,
+        "snare_b": 9,
+        "blend": 0,
+        "release": 160.0
+      }
+    },
+    {
+      "id": "villain-snare-pca-sp-11",
+      "name": "SP Snare 11",
+      "base_note_offset": 0,
+      "params": {
+        "snare_a": 10,
+        "snare_b": 10,
+        "blend": 0,
+        "release": 160.0
+      }
+    },
+    {
+      "id": "villain-snare-pca-sp-12",
+      "name": "SP Snare 12",
+      "base_note_offset": 0,
+      "params": {
+        "snare_a": 11,
+        "snare_b": 11,
+        "blend": 0,
+        "release": 160.0
+      }
+    },
+    {
+      "id": "villain-snare-pca-sp-13",
+      "name": "SP Snare 13",
+      "base_note_offset": 0,
+      "params": {
+        "snare_a": 12,
+        "snare_b": 12,
+        "blend": 0,
+        "release": 1000.0
+      }
+    },
+    {
+      "id": "villain-snare-pca-sp-14",
+      "name": "SP Snare 14",
+      "base_note_offset": 0,
+      "params": {
+        "snare_a": 13,
+        "snare_b": 13,
+        "blend": 0,
+        "release": 160.0
+      }
+    },
+    {
+      "id": "villain-snare-pca-sp-15",
+      "name": "SP Snare 15",
+      "base_note_offset": 0,
+      "params": {
+        "snare_a": 14,
+        "snare_b": 14,
+        "blend": 0,
+        "release": 160.0
+      }
+    },
+    {
+      "id": "villain-snare-pca-sp-16",
+      "name": "SP Snare 16",
+      "base_note_offset": 0,
+      "params": {
+        "snare_a": 15,
+        "snare_b": 15,
+        "blend": 0,
+        "release": 160.0
+      }
+    },
+    {
+      "id": "villain-snare-pca-sp-17",
+      "name": "SP Snare 17",
+      "base_note_offset": 0,
+      "params": {
+        "snare_a": 16,
+        "snare_b": 16,
+        "blend": 0,
+        "release": 160.0
+      }
+    },
+    {
+      "id": "villain-snare-pca-sp-18",
+      "name": "SP Snare 18",
+      "base_note_offset": 0,
+      "params": {
+        "snare_a": 17,
+        "snare_b": 17,
+        "blend": 0,
+        "release": 200.0
+      }
+    },
+    {
+      "id": "villain-snare-pca-sp-19",
+      "name": "SP Snare 19",
+      "base_note_offset": 0,
+      "params": {
+        "snare_a": 18,
+        "snare_b": 18,
+        "blend": 0,
+        "release": 200.0
+      }
+    },
+    {
+      "id": "villain-snare-pca-sp-20",
+      "name": "SP Snare 20",
+      "base_note_offset": 0,
+      "params": {
+        "snare_a": 19,
+        "snare_b": 19,
+        "blend": 0,
+        "release": 160.0
+      }
+    },
+    {
+      "id": "villain-snare-pca-xcf",
+      "name": "Snr XCF",
+      "base_note_offset": 0,
+      "params": {
+        "snare_a": 20,
+        "snare_b": 20,
+        "blend": 0,
+        "release": 200.0
+      }
+    },
+    {
+      "id": "villain-snare-pca-xdxdfghs",
+      "name": "Snr XDXDFGHS",
+      "base_note_offset": 0,
+      "params": {
+        "snare_a": 21,
+        "snare_b": 21,
+        "blend": 0,
+        "release": 160.0
+      }
+    },
+    {
+      "id": "villain-snare-pca-yetpre",
+      "name": "Snr YETPRE",
+      "base_note_offset": 0,
+      "params": {
+        "snare_a": 22,
+        "snare_b": 22,
+        "blend": 0,
+        "release": 160.0
+      }
+    },
+    {
+      "id": "villain-snare-pca-yng",
+      "name": "Snr YNG",
+      "base_note_offset": 0,
+      "params": {
+        "snare_a": 23,
+        "snare_b": 23,
+        "blend": 0,
+        "release": 160.0
+      }
+    },
+    {
+      "id": "villain-snare-pca-yute",
+      "name": "Snr YUTE",
+      "base_note_offset": 0,
+      "params": {
+        "snare_a": 24,
+        "snare_b": 24,
+        "blend": 0,
+        "release": 160.0
+      }
+    },
+    {
+      "id": "villain-snare-pca-yyuuu",
+      "name": "Snr YYUUU",
+      "base_note_offset": 0,
+      "params": {
+        "snare_a": 25,
+        "snare_b": 25,
+        "blend": 0,
+        "release": 160.0
+      }
+    },
+    {
+      "id": "villain-snare-pca-zdszs",
+      "name": "Snr ZDSZS",
+      "base_note_offset": 0,
+      "params": {
+        "snare_a": 26,
+        "snare_b": 26,
+        "blend": 0,
+        "release": 160.0
+      }
+    },
+    {
+      "id": "villain-snare-pca-zetwy",
+      "name": "Snr ZETWY",
+      "base_note_offset": 0,
+      "params": {
+        "snare_a": 27,
+        "snare_b": 27,
+        "blend": 0,
+        "release": 160.0
+      }
+    },
+    {
+      "id": "villain-snare-pca-zfg",
+      "name": "Snr ZFG",
+      "base_note_offset": 0,
+      "params": {
+        "snare_a": 28,
+        "snare_b": 28,
+        "blend": 0,
+        "release": 200.0
+      }
+    },
+    {
+      "id": "villain-snare-pca-zsfg",
+      "name": "Snr ZSFG",
+      "base_note_offset": 0,
+      "params": {
+        "snare_a": 29,
+        "snare_b": 29,
+        "blend": 0,
+        "release": 160.0
+      }
+    },
+    {
+      "id": "villain-snare-pca-zv",
+      "name": "Snr ZV",
+      "base_note_offset": 0,
+      "params": {
+        "snare_a": 30,
+        "snare_b": 30,
+        "blend": 0,
+        "release": 160.0
+      }
+    },
+    {
+      "id": "villain-snare-pca-zxdvfb",
+      "name": "Snr ZXDVFB",
+      "base_note_offset": 0,
+      "params": {
+        "snare_a": 31,
+        "snare_b": 31,
+        "blend": 0,
+        "release": 160.0
+      }
+    }
+  ]
+}

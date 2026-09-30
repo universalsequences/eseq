@@ -191,7 +191,10 @@ pub(super) struct CompiledSequencerTick {
 /// but for self-clocked generators: musical position only (no source step), an RNG
 /// cell for `gen-rand`, and the buffer that `seq-emit` pushes into.
 pub(crate) struct GeneratorTickContext {
+    pub(super) id: u64,
     pub(super) tick_index: u64,
+    pub(super) boundary_sample: u64,
+    pub(super) samples_per_quarter: f64,
     pub(super) beat: f64,
     pub(super) resolution_beats: f64,
     pub(super) random_state: u64,
@@ -200,6 +203,9 @@ pub(crate) struct GeneratorTickContext {
     /// Mixer-control holds pushed by `seq-emit-control`
     /// (docs/jaki-mixer-control-routes-spec.md).
     pub(super) controls: Vec<crate::mixer_control::EmittedMixerControl>,
+    /// The gate other sequencers hold on this generator at this boundary
+    /// (`gen-gate`, docs/jaki-trig-modes-spec.md §4).
+    pub(super) gate: crate::generator::GeneratorGateView,
 }
 
 #[derive(Default)]
@@ -1249,13 +1255,17 @@ impl ScratchControlRuntime {
                 .lock()
                 .map_err(|_| "failed to lock generator tick context".to_string())?;
             *ctx = Some(GeneratorTickContext {
+                id: input.id,
                 tick_index: input.tick_index,
+                boundary_sample: input.boundary_sample,
+                samples_per_quarter: input.samples_per_quarter,
                 beat: input.beat,
                 resolution_beats: input.resolution_beats,
                 random_state: input.random_state,
                 state: input.state,
                 emitted: Vec::new(),
                 controls: Vec::new(),
+                gate: input.gate,
             });
         }
         let invocation = self

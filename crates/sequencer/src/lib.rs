@@ -60,6 +60,7 @@ use heap_audit as test_alloc;
 pub mod agent;
 pub mod analysis;
 pub mod app_paths;
+pub mod authoring_kit;
 pub mod audio;
 pub use audio::{audiograph, engine};
 pub mod audio_tap;

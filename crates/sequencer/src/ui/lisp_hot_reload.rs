@@ -37,17 +37,68 @@ fn discovery_roots() -> DiscoveryRoots {
     let paths = sequencer::app_paths::app_paths();
     DiscoveryRoots {
         custom: paths.instrument_dirs().into_iter().chain(paths.effect_dirs())
-            .chain([paths.midi_fx_dir()]).collect(),
-        packages: [paths.packages_dir(), paths.factory_packages_dir()].into_iter().collect(),
+            .chain([paths.midi_fx_dir()]).filter(|path| user_writable(path)).collect(),
+        packages: [paths.packages_dir(), paths.factory_packages_dir()].into_iter()
+            .filter(|path| user_writable(path)).collect(),
     }
 }
+
+/// Whether the watcher may observe `path`. A checkout watches everything.
+/// An installed app watches only what the user (or their coding agent) can
+/// write: the Application Support tiers, installed packages and init.lisp.
+/// The bundle's Resources are immutable, so watching them would only add
+/// startup traversal (eseq-4tr.5).
+fn user_writable(path: &Path) -> bool {
+    let paths = sequencer::app_paths::app_paths();
+    paths_watchable(paths.is_release(), &paths.factory_root(), path)
+}
+
+fn paths_watchable(release: bool, factory_root: &Path, path: &Path) -> bool {
+    !release || !watch_path(path).starts_with(watch_path(factory_root))
+}
+
+/// Next value of `SEQ.content-library-epoch`. The browser's Instruments and
+/// Audio FX trees read it so a changed library re-lists without restart.
+static CONTENT_LIBRARY_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Re-list the instrument/effect library in the browser: bumps
+/// `SEQ.content-library-epoch` and runs the reactive cycle.
+pub(crate) fn bump_content_library_epoch(editor: &mut Editor) {
+    let epoch = CONTENT_LIBRARY_EPOCH.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+    let runtime = editor.runtime_mut();
+    runtime.set_reactive("SEQ", "content-library-epoch", eseqlisp::vm::Value::Number(epoch as f64));
+    runtime.run_reactive_cycle();
+    editor.refresh_runtime_side_effects();
+    editor.mark_needs_redraw();
+}
+
+/// Re-list the browser's instrument/effect tiers and re-evaluate every
+/// custom instrument/effect panel from its ui.lisp on disk.
+pub(crate) fn rescan_content_library(editor: &mut Editor) -> bool {
+    sequencer::lisp_host::invalidate_instrument_release_index();
+    let ok = reload_custom_instrument_ui(editor);
+    bump_content_library_epoch(editor);
+    editor.refresh_visible_layouts_for_buffer_named("*fx*");
+    ok
+}
+
+/// The Customize knob `reload-lisp-on-change` (eseq-aj2t). Absent or
+/// non-boolean means on, so a failed UI load never silently freezes reload.
+pub(crate) fn auto_reload_enabled(editor: &Editor) -> bool {
+    !matches!(
+        editor.runtime().state_value(AUTO_RELOAD_KNOB),
+        Some(eseqlisp::vm::Value::Bool(false))
+    )
+}
+
+pub(crate) const AUTO_RELOAD_KNOB: &str = "eseq.seq-core-state/reload-lisp-on-change";
 
 pub(crate) fn watched_lisp_paths(editor: &Editor) -> Vec<PathBuf> {
     let mut paths = editor
         .runtime()
         .lisp_source_paths()
         .into_iter()
-        .filter(|path| !is_generated_custom_ui_source_path(path))
+        .filter(|path| !is_generated_custom_ui_source_path(path) && user_writable(path))
         .collect::<Vec<_>>();
     // A valid init is already in the module graph. Add it explicitly as well
     // so a boot-time-erroring init remains watched and can recover live.
@@ -61,6 +112,13 @@ pub(crate) fn watched_lisp_paths(editor: &Editor) -> Vec<PathBuf> {
 }
 
 pub(crate) fn process_lisp_hot_reload_paths(editor: &mut Editor, changes: ReloadBatch) -> bool {
+    let library_changed = changes.library;
+    if library_changed {
+        bump_content_library_epoch(editor);
+    }
+    if changes.paths.is_empty() {
+        return library_changed;
+    }
     let paths: Vec<_> = changes.paths.into_iter().collect();
     eprintln!(
         "metal_seq: Lisp hot reload observed changes: {}",
@@ -138,7 +196,7 @@ pub(crate) fn process_lisp_hot_reload_paths(editor: &mut Editor, changes: Reload
 
     if !normal_lisp_changed && !custom_ui_changed {
         eprintln!("metal_seq: Lisp hot reload has no eligible paths");
-        return false;
+        return library_changed;
     }
     success
 }
@@ -447,6 +505,7 @@ mod tests {
         let path = watch_path(&ui);
         assert!(process_lisp_hot_reload_paths(&mut editor, ReloadBatch {
             paths: [path.clone()].into_iter().collect(), custom_ui: [path].into_iter().collect(),
+            ..Default::default()
         }));
         assert!(matches!(editor.runtime_mut().eval_str(&expression).unwrap(), Some(Value::Bool(false))));
         assert_eq!(editor.active_buffer().text(), "(defsynth-ui (label 1))", "keep the user's open text");
@@ -454,6 +513,40 @@ mod tests {
         assert!(reload_custom_instrument_ui(&mut editor));
         assert!(matches!(editor.runtime_mut().eval_str(&expression).unwrap(), Some(Value::Map(_))),
             "explicit evaluation still supports an unsaved custom UI overlay");
+    }
+
+    #[test]
+    fn library_only_batch_bumps_content_library_epoch() {
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        editor.runtime_mut().register_reactive(
+            "SEQ", vec![("content-library-epoch", Value::Number(0.0))], true);
+        let read = |editor: &mut Editor| editor.runtime_mut().eval_str("SEQ.content-library-epoch").unwrap();
+        assert!(matches!(read(&mut editor), Some(Value::Number(n)) if n == 0.0));
+        assert!(!process_lisp_hot_reload_paths(&mut editor, ReloadBatch::default()));
+        assert!(matches!(read(&mut editor), Some(Value::Number(n)) if n == 0.0));
+        assert!(
+            process_lisp_hot_reload_paths(&mut editor, ReloadBatch { library: true, ..Default::default() }),
+            "a library change must redraw"
+        );
+        let first = match read(&mut editor) { Some(Value::Number(n)) => n, other => panic!("{other:?}") };
+        assert!(first > 0.0);
+        assert!(process_lisp_hot_reload_paths(&mut editor, ReloadBatch { library: true, ..Default::default() }));
+        assert!(matches!(read(&mut editor), Some(Value::Number(n)) if n > first));
+    }
+
+    #[test]
+    fn installed_app_watches_only_user_writable_tiers() {
+        let temp = tempfile::tempdir().unwrap();
+        let resources = temp.path().join("ESeq.app/Contents/Resources");
+        let support = temp.path().join("Application Support/eseq");
+        std::fs::create_dir_all(&resources).unwrap();
+        std::fs::create_dir_all(&support).unwrap();
+        let factory = resources.join("instruments");
+        let user = support.join("instruments");
+        assert!(!paths_watchable(true, &resources, &factory), "bundle content is immutable");
+        assert!(!paths_watchable(true, &resources, &resources.join("ui/browser.lisp")));
+        assert!(paths_watchable(true, &resources, &user));
+        assert!(paths_watchable(false, &resources, &factory), "a checkout watches everything");
     }
 
     #[test]

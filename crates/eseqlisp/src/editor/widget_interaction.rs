@@ -988,13 +988,23 @@ impl Editor {
         let Some((local_col, local_row)) =
             hit::to_local(precise_col, precise_row, content_col, content_row)
         else {
-            if matches!(mouse.kind, MouseEventKind::Moved)
-                && widget_render::set_pointer_hover_widget(None)
-            {
-                self.mark_needs_redraw();
+            if matches!(mouse.kind, MouseEventKind::Moved) {
+                for output in widget_render::sexp_slot::pointer_moved_to(None) {
+                    let _ = self.apply_widget_output(Some(output));
+                }
+                if widget_render::set_pointer_hover_widget(None) {
+                    self.mark_needs_redraw();
+                }
             }
             return false;
         };
+        if matches!(mouse.kind, MouseEventKind::Moved) {
+            // A sexp-slot's :on-hover hears the pointer leave it.
+            let hovered = self.widget_node_at_local(local_col, local_row).map(|node| node.widget_id);
+            for output in widget_render::sexp_slot::pointer_moved_to(hovered) {
+                let _ = self.apply_widget_output(Some(output));
+            }
+        }
         if matches!(mouse.kind, MouseEventKind::Moved)
             && widget_render::set_pointer_hover_widget(
                 self.hover_node_at_local(local_col, local_row)

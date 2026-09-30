@@ -14,3 +14,4 @@ pub mod store;
 pub mod task;
 pub mod tools;
 pub mod ui_validate;
+pub mod verify;

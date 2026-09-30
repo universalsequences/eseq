@@ -39,6 +39,37 @@ pub(in crate::lisp_host) struct InstrumentMetadataFile {
     current: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     releases: Option<std::collections::BTreeMap<u32, InstrumentReleaseEntry>>,
+    /// Deprecation (instrument-versioning spec §Deprecation): hidden from
+    /// listings and the browser, still fully loadable.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    deprecated: bool,
+    /// Informational successor logical path, e.g. `Drums/VILLAIN Kick`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    replaced_by: Option<String>,
+}
+
+/// The deprecation-only view of `instrument.json` listings read.
+#[derive(Deserialize)]
+struct InstrumentDeprecationManifest {
+    #[serde(default)]
+    deprecated: bool,
+}
+
+/// Whether the `instrument.json` at `metadata_path` marks its instrument
+/// deprecated. A missing or unreadable file is not deprecated: hiding an
+/// instrument because its metadata is broken would lose it silently.
+pub fn instrument_metadata_is_deprecated(metadata_path: &Path) -> bool {
+    std::fs::read_to_string(metadata_path)
+        .ok()
+        .and_then(|source| serde_json::from_str::<InstrumentDeprecationManifest>(&source).ok())
+        .is_some_and(|manifest| manifest.deprecated)
+}
+
+/// Whether the instrument whose source lives at `source` (a folder's
+/// `dsp.lisp` or a single-file `.lisp`) is deprecated.
+pub fn instrument_source_is_deprecated(source: &Path) -> bool {
+    instrument_metadata_path_for_source_path(source)
+        .is_ok_and(|path| instrument_metadata_is_deprecated(&path))
 }
 
 /// The release-only view of `instrument.json` the release index scans.
@@ -997,7 +1028,7 @@ pub fn save_instrument_run_mode(name: &str, run_mode: CustomInstrumentRunMode) -
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
         Err(error) if error.kind() == io::ErrorKind::NotFound => InstrumentMetadataFile {
             version: 1, run_mode: run_mode.as_str().to_string(), voice_controls: None,
-            current: None, releases: None,
+            current: None, releases: None, deprecated: false, replaced_by: None,
         },
         Err(error) => return Err(error),
     };
@@ -2061,6 +2092,11 @@ fn list_saved_instruments_in(dirs: Vec<PathBuf>) -> Vec<String> {
                     continue;
                 }
                 if path.join("dsp.lisp").exists() {
+                    // Deprecated instruments stay loadable by id but are
+                    // no longer offered (spec §Deprecation).
+                    if instrument_metadata_is_deprecated(&path.join("instrument.json")) {
+                        continue;
+                    }
                     if let Ok(rel) = path.strip_prefix(root) {
                         out.push(format!("{}/", rel.to_string_lossy().replace('\\', "/")));
                     }
@@ -2072,6 +2108,9 @@ fn list_saved_instruments_in(dirs: Vec<PathBuf>) -> Vec<String> {
                     .and_then(|stem| stem.to_str())
                     .unwrap_or("");
                 if matches!(file_stem, "dsp" | "ui" | "presets") {
+                    continue;
+                }
+                if instrument_source_is_deprecated(&path) {
                     continue;
                 }
                 if let Ok(rel) = path.strip_prefix(root) {
@@ -3437,6 +3476,59 @@ mod tier_id_tests {
         let json: serde_json::Value = serde_json::to_value(&metadata).unwrap();
         assert_eq!(json["current"], 2);
         assert_eq!(json["releases"]["1"]["name"], "Synths/Drift");
+    }
+
+    #[test]
+    fn deprecated_metadata_round_trips() {
+        let source = r#"{"version":1,"run_mode":"instrument","deprecated":true,"replaced_by":"Drums/VILLAIN Kick"}"#;
+        let metadata: InstrumentMetadataFile = serde_json::from_str(source).unwrap();
+        let json: serde_json::Value = serde_json::to_value(&metadata).unwrap();
+        assert_eq!(json["deprecated"], true);
+        assert_eq!(json["replaced_by"], "Drums/VILLAIN Kick");
+        // Files without the fields parse unchanged and don't gain them.
+        let plain: InstrumentMetadataFile =
+            serde_json::from_str(r#"{"version":1,"run_mode":"instrument"}"#).unwrap();
+        let json: serde_json::Value = serde_json::to_value(&plain).unwrap();
+        assert!(json.get("deprecated").is_none());
+        assert!(json.get("replaced_by").is_none());
+    }
+
+    #[test]
+    fn deprecated_instruments_are_unlisted_but_still_resolve() {
+        let (paths, root) = test_paths("deprecated");
+        let factory = paths.instruments_dir();
+        write_folder_instrument(&factory, "Drums/Old Kick", "old");
+        std::fs::write(
+            factory.join("Drums/Old Kick/instrument.json"),
+            r#"{"version":1,"run_mode":"instrument","deprecated":true,"replaced_by":"Drums/New Kick"}"#,
+        )
+        .unwrap();
+        write_folder_instrument(&factory, "Drums/New Kick", "new");
+        std::fs::write(factory.join("Drums/Old Hat.lisp"), "old hat").unwrap();
+        std::fs::write(
+            factory.join("Drums/Old Hat.instrument.json"),
+            r#"{"version":1,"run_mode":"instrument","deprecated":true}"#,
+        )
+        .unwrap();
+        // A versioned lineage deprecated at its top folder.
+        write_versioned_syn(&paths, r#""deprecated":true,"current":2,"#);
+
+        let listed = list_saved_instruments_in(vec![factory.clone()]);
+        assert_eq!(listed, ["Drums/New Kick/"]);
+
+        assert_eq!(resolved_marker(&paths, "Drums/Old Kick/"), "old");
+        assert_eq!(resolved_marker(&paths, "factory:Drums/Old Kick"), "old");
+        assert_eq!(resolved_marker(&paths, "Drums/Old Hat"), "old hat");
+        assert_eq!(
+            qualify_instrument_id_with_paths(&paths, "Drums/Old Kick/").unwrap(),
+            "factory:Drums/Old Kick"
+        );
+        assert_eq!(resolved_marker(&paths, "factory:Synths/Syn@1"), "release 1");
+        assert_eq!(resolved_marker(&paths, "Synths/Drift/"), "release 1");
+        assert!(qualify_instrument_id_with_paths(&paths, "Synths/Syn/").is_ok());
+        assert!(instrument_source_is_deprecated(&factory.join("Drums/Old Hat.lisp")));
+        assert!(!instrument_source_is_deprecated(&factory.join("Drums/New Kick/dsp.lisp")));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     /// The shipped factory content (spec §First application): Digi Drift is

@@ -9,6 +9,7 @@
 //! (form every (num :min 1 :max 16) (word rev swap))
 //! (forms (word left right) (form trunc (num :min 1 :max 32 :default 3)) …)
 //! (fixed (num :min 0 :max 1))                   ; never a list
+//! (form seq (word :hit :cycle) (rest (num)))   ; last arg repeats: (seq :hit 0 3 7)
 //! ```
 //!
 //! Every slot except `(fixed …)` also accepts a list of itself, nested freely:
@@ -41,6 +42,25 @@ pub enum Schema {
     Form { head: String, args: Vec<Schema> },
     Forms(Vec<Schema>),
     Fixed(Box<Schema>),
+    /// A form's last arg only: one or more values of the inner schema, so
+    /// the form takes any number of trailing args (`+` inside its parens).
+    Rest(Box<Schema>),
+}
+
+/// A number slot's rails, for widgets that format and scrub it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct NumSpec {
+    pub min: f64,
+    pub max: f64,
+    pub step: f64,
+    pub decimals: u32,
+}
+
+impl NumSpec {
+    /// Clamp and snap exactly as `Schema::check` does.
+    pub fn snap(&self, value: f64) -> f64 {
+        snap(value, self.min, self.max, self.step)
+    }
 }
 
 fn items(value: &Value) -> Option<Vec<Value>> {
@@ -143,6 +163,10 @@ impl Schema {
                 [inner] => Ok(Schema::Fixed(Box::new(Schema::parse(inner)?))),
                 _ => Err("fixed wraps exactly one schema".to_string()),
             },
+            "rest" => match rest {
+                [inner] => Ok(Schema::Rest(Box::new(Schema::parse(inner)?))),
+                _ => Err("rest wraps exactly one schema".to_string()),
+            },
             other => Err(format!("unknown schema kind '{other}'")),
         }
     }
@@ -162,7 +186,7 @@ impl Schema {
                     .collect(),
             ),
             Schema::Forms(_) => list(Vec::new()),
-            Schema::Fixed(inner) => inner.default_value(),
+            Schema::Fixed(inner) | Schema::Rest(inner) => inner.default_value(),
         }
     }
 
@@ -194,7 +218,11 @@ impl Schema {
                     .map(list)
             }
             Schema::Form { head, args } => check_form(head, args, value),
+            Schema::Rest(inner) => inner.check_slot(value, lists_ok),
             _ => {
+                if let Some(form) = self.or_form_for(value) {
+                    return form.check_slot(value, lists_ok);
+                }
                 if let Some(elements) = items(value) {
                     if !lists_ok {
                         return Err("this value cannot cycle; give one value".to_string());
@@ -211,6 +239,18 @@ impl Schema {
                 self.check_atom(value)
             }
         }
+    }
+
+    /// For an `or`: the form alternative a list headed by its head word is.
+    /// Such a list is that form, not a cycle — `(every 2 (fast 2))` under
+    /// `(or (word …) (form fast …))`.
+    fn or_form_for(&self, value: &Value) -> Option<&Schema> {
+        let Schema::Or(alternatives) = self else { return None };
+        let head = items(value)?.first().and_then(word_text)?;
+        alternatives.iter().find(|alternative| {
+            matches!(alternative, Schema::Form { head: name, args }
+                if *name == head && !args.is_empty())
+        })
     }
 
     fn check_atom(&self, value: &Value) -> Result<Value, String> {
@@ -242,6 +282,7 @@ impl Schema {
                 Err(reasons.join("; or "))
             }
             Schema::Form { head, args } => check_form(head, args, value),
+            Schema::Rest(inner) => inner.check_atom(value),
             Schema::Forms(_) | Schema::Fixed(_) => self.check_slot(value, false),
         }
     }
@@ -272,7 +313,7 @@ impl Schema {
                     out.push(head.clone());
                 }
             }
-            Schema::Fixed(inner) => inner.collect_choices(out),
+            Schema::Fixed(inner) | Schema::Rest(inner) => inner.collect_choices(out),
         }
     }
 
@@ -283,7 +324,7 @@ impl Schema {
             Schema::Or(alternatives) | Schema::Forms(alternatives) => {
                 alternatives.iter().flat_map(Schema::forms).collect()
             }
-            Schema::Fixed(inner) => inner.forms(),
+            Schema::Fixed(inner) | Schema::Rest(inner) => inner.forms(),
             _ => Vec::new(),
         }
     }
@@ -302,13 +343,59 @@ impl Schema {
             .collect()
     }
 
+    /// The number rails of a slot that holds a number (directly, fixed, or
+    /// as the first number alternative of an `or`).
+    pub fn num_spec(&self) -> Option<NumSpec> {
+        match self {
+            Schema::Num { min, max, step, decimals, .. } => Some(NumSpec {
+                min: *min,
+                max: *max,
+                step: *step,
+                decimals: *decimals,
+            }),
+            Schema::Fixed(inner) | Schema::Rest(inner) => inner.num_spec(),
+            Schema::Or(alternatives) => alternatives.iter().find_map(Schema::num_spec),
+            _ => None,
+        }
+    }
+
+    /// Whether `head` names one of this schema's forms.
+    pub fn is_form_head(&self, head: &str) -> bool {
+        self.forms().iter().any(|(name, _)| *name == head)
+    }
+
+    /// A fresh `(head args…)` with every arg at its default, or `None` when
+    /// `head` is not one of this schema's forms. A zero-arg form is its bare
+    /// head.
+    pub fn form_default(&self, head: &str) -> Option<Value> {
+        let (name, args) = self.forms().into_iter().find(|(name, _)| *name == head)?;
+        Some(if args.is_empty() {
+            Value::String(name.to_string())
+        } else {
+            Schema::Form { head: name.to_string(), args: args.to_vec() }.default_value()
+        })
+    }
+
     /// The schema a form's arg `index` uses, if `head` is one of this
-    /// schema's forms.
+    /// schema's forms. Every index at or past a `(rest …)` arg is its inner
+    /// schema.
     pub fn form_arg(&self, head: &str, index: usize) -> Option<&Schema> {
-        self.forms()
-            .into_iter()
-            .find(|(name, _)| *name == head)
-            .and_then(|(_, args)| args.get(index))
+        let (_, args) = self.forms().into_iter().find(|(name, _)| *name == head)?;
+        let arg = match args.last() {
+            Some(last @ Schema::Rest(_)) if index + 1 >= args.len() => last,
+            _ => args.get(index)?,
+        };
+        Some(match arg {
+            Schema::Rest(inner) => inner,
+            other => other,
+        })
+    }
+
+    /// For a form whose last arg is `(rest …)`: the arg index where the
+    /// repeating args start.
+    pub fn form_rest_start(&self, head: &str) -> Option<usize> {
+        let (_, args) = self.forms().into_iter().find(|(name, _)| *name == head)?;
+        matches!(args.last(), Some(Schema::Rest(_))).then(|| args.len() - 1)
     }
 
     /// The schema of one element of a list held in this slot: the slot's own
@@ -375,11 +462,21 @@ fn check_form(head: &str, args: &[Schema], value: &Value) -> Result<Value, Strin
         return Err(format!("expected ({head} …)"));
     }
     let given = &parts[1..];
-    if given.len() > args.len() {
+    let rest = match args.last() {
+        Some(Schema::Rest(inner)) => Some(&**inner),
+        _ => None,
+    };
+    if rest.is_none() && given.len() > args.len() {
         return Err(format!("{head} takes {} argument(s)", args.len()));
     }
     let mut out = vec![Value::String(head.to_string())];
-    for (index, schema) in args.iter().enumerate() {
+    let count = if rest.is_some() { given.len().max(args.len()) } else { args.len() };
+    for index in 0..count {
+        let schema = match (rest, args.get(index)) {
+            (Some(inner), None) => inner,
+            (_, Some(schema)) => schema,
+            (None, None) => break,
+        };
         let arg = match given.get(index) {
             Some(arg) => schema
                 .check_slot(arg, true)
@@ -543,6 +640,24 @@ mod tests {
     }
 
     #[test]
+    fn a_rest_arg_takes_any_number_of_trailing_values() {
+        let seq = schema("(form seq (word :hit :cycle) (rest (num :min 0 :max 12 :step 1)))");
+        assert_eq!(checked(&seq, "(seq :hit 0 3 40)"), Ok("(\"seq\" \":hit\" 0 3 12)".into()));
+        // Missing: one default value; a value may still be a cycle list.
+        assert_eq!(checked(&seq, "(seq :cycle)"), Ok("(\"seq\" \":cycle\" 0)".into()));
+        assert_eq!(checked(&seq, "(seq :hit (1 2) 5)"), Ok("(\"seq\" \":hit\" (1 2) 5)".into()));
+        assert!(checked(&seq, "(seq :bar 1)").is_err());
+        assert!(checked(&seq, "(seq :hit x)").is_err());
+        assert_eq!(seq.form_rest_start("seq"), Some(1));
+        assert!(seq.form_arg("seq", 7).and_then(Schema::num_spec).is_some());
+        // Under an `or`, a plain number still works and a seq form reads as one.
+        let note = schema("(or (num :min 0 :max 12) (form seq (word :hit) (rest (num :min 0 :max 12))))");
+        assert_eq!(checked(&note, "5"), Ok("5".into()));
+        assert_eq!(checked(&note, "(3 5)"), Ok("(3 5)".into()));
+        assert_eq!(checked(&note, "(seq :hit 3 5)"), Ok("(\"seq\" \":hit\" 3 5)".into()));
+    }
+
+    #[test]
     fn numbers_clamp_and_snap_and_cycle_as_lists() {
         let fast = schema("(num :min 1 :max 16 :step 1)");
         assert_eq!(checked(&fast, "40"), Ok("16".into()));
@@ -593,6 +708,22 @@ mod tests {
     }
 
     #[test]
+    fn an_or_holds_forms_alone_and_inside_cycles() {
+        let every = schema(
+            "(form every (num :min 1 :max 16) \
+               (or (word rev swap) (form fast (num :min 1 :max 8 :default 2))))",
+        );
+        // A list headed by a form head is that form, clamped by its rails…
+        assert_eq!(checked(&every, "(every 2 (fast 20))"), Ok("(\"every\" 2 (\"fast\" 8))".into()));
+        // …and still one member of a per-cycle list.
+        assert_eq!(
+            checked(&every, "(every 2 (rev (fast 3)))"),
+            Ok("(\"every\" 2 (\"rev\" (\"fast\" 3)))".into())
+        );
+        assert_eq!(every.completions("(every 2 f"), vec!["fast"]);
+    }
+
+    #[test]
     fn heads_swap_only_to_the_same_arg_shape() {
         let row = row();
         assert_eq!(row.compatible_heads("trunc"), vec!["trunc", "rot"]);
@@ -613,6 +744,18 @@ mod tests {
         assert_eq!(row.completions("(every 2 s"), vec!["swap", "stac"]);
         assert_eq!(row.completions("(every 2 (rev s"), vec!["swap", "stac"]);
         assert_eq!(row.completions("(quant :16"), vec![":16", ":16t"]);
+    }
+
+    #[test]
+    fn form_heads_and_their_defaults() {
+        let row = row();
+        assert!(row.is_form_head("every"));
+        assert!(!row.is_form_head("left"));
+        assert_eq!(
+            row.form_default("every").map(|value| format_lisp_source(&value)),
+            Some("(\"every\" 4 \"rev\")".into())
+        );
+        assert_eq!(row.form_default("left"), None);
     }
 
     #[test]

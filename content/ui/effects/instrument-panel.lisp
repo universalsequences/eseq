@@ -254,7 +254,13 @@
             (host-command "add-rack-instrument-slot"
               (dict :track track :name name))
             (status "Drop an instrument, not a folder"))
-          (status "Drop a sample or instrument"))))))
+          (if (= drag-type "instrument-preset")
+            (let ((instrument (eseq.browser/preset-payload-instrument payload)))
+              (if instrument
+                (host-command "add-rack-instrument-slot"
+                  (dict :track track :name instrument :preset (get payload :preset)))
+                (status "Drop an instrument preset")))
+            (status "Drop a sample or instrument")))))))
 
 (def rack-panel-drop-on-container (event)
   (if (= (get event :drag-type) "sound")
@@ -275,6 +281,17 @@
                     :slot (get target :slot)
                     :name name))
             (status "Drop an instrument, not a folder")))
+        ;; A preset of the layer's own instrument only switches its preset;
+        ;; the host decides, like it does for a track swap.
+        (if (= drag-type "instrument-preset")
+          (let ((instrument (eseq.browser/preset-payload-instrument payload)))
+            (if instrument
+              (host-command "replace-rack-slot-instrument"
+                (dict :track (get target :track)
+                      :slot (get target :slot)
+                      :name instrument
+                      :preset (get payload :preset)))
+              (status "Drop an instrument preset")))
         (if (= drag-type "sample")
           (let ((path (get payload :path)))
             (if path
@@ -284,7 +301,7 @@
                       :path path
                       :preserve-browser-context true))
               (status "Drop a sample file, not a folder")))
-          (status "Drop a sample or instrument"))))))
+          (status "Drop a sample or instrument")))))))
 
 (def rack-slot-select (slot)
   (host-command "select-rack-slot"
@@ -528,7 +545,7 @@
        :selected 0
        :h-align :center
        :v-align :center
-       :drop-types (list "sample" "instrument" "sound")
+       :drop-types (list "sample" "instrument" "instrument-preset" "sound")
        :drop-meta (dict :track (get inst :track))
        :drop-hover-border-color :mixer-strip-selected-border
        :on-drop (lambda (event) (rack-panel-drop-on-container event))
@@ -640,7 +657,7 @@
                       :font-size 11 :color :dim :bg :transparent)))))
             (box :width 0 :height 0)))))
     :key (str "rack-panel-" (get inst :track)) :debug-name "rack-panel"
-    :drop-types (list "sample" "instrument" "sound")
+    :drop-types (list "sample" "instrument" "instrument-preset" "sound")
     :drop-meta (dict :track (get inst :track))
     :drop-hover-border-color :mixer-strip-selected-border
     :on-drop (lambda (event) (rack-panel-drop-on-container event))
@@ -734,8 +751,8 @@
           ;; Rack-slot instruments reuse this panel renderer, but the rack owns
           ;; their drop semantics.
           :drop-types (if (= (get inst :rack-slot) nil)
-            (list "sample" "instrument" "sound")
-            (list "sample" "instrument" "sound"))
+            (list "sample" "instrument" "instrument-preset" "sound")
+            (list "sample" "instrument" "instrument-preset" "sound"))
           :drop-meta (if (= (get inst :rack-slot) nil)
             (dict :kind "instrument-panel" :track (get inst :track))
             (dict :kind "rack-selected-instrument"

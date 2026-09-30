@@ -1874,6 +1874,8 @@ pub(crate) struct VisualizationLiveness {
     track_beat: Option<bool>,
     /// Last published `graph-node-notes-<id>` list per graph.
     pub(crate) graph_node_notes: HashMap<u64, Vec<f64>>,
+    /// Last published `generator-mark-<id>[-<key>]` per generator and key.
+    pub(crate) generator_marks: HashMap<(u64, String), f64>,
 }
 
 /// Hidden displays do not pull or convert scheduler histories. Forget their
@@ -1959,6 +1961,44 @@ pub(crate) fn sync_graph_node_notes_fields(
         let value = Value::List(flat.iter().map(|n| value_cell(Value::Number(*n))).collect());
         dirty |= rt.set_reactive("SEQ", &field, value).effects_dirty;
         previous.insert(graph_id, flat);
+    }
+    dirty
+}
+
+/// Publish `SEQ.generator-mark-<id>` (and `…-<id>-<key>` for keyed marks)
+/// for every generator mark a view reads: the latest `(gen-mark v)` its ticks
+/// stamped at or before the audio clock, or 0 while stopped. Polled every
+/// tick against the audio clock, so a mark changes when its hit sounds, not
+/// when the lookahead ran it.
+pub(crate) fn sync_generator_mark_fields(
+    rt: &mut Runtime,
+    state: &Arc<SequencerState>,
+    previous: &mut HashMap<(u64, String), f64>,
+) -> bool {
+    let mut dirty = false;
+    let playing = state.is_playing();
+    let sample = state.audio_rendered_sample();
+    for (id, key) in state.generator_mark_keys() {
+        let field = if key.is_empty() {
+            format!("generator-mark-{id}")
+        } else {
+            format!("generator-mark-{id}-{key}")
+        };
+        let slot = (id, key);
+        if !rt.has_live_reactive_consumers("SEQ", &field) {
+            previous.remove(&slot);
+            continue;
+        }
+        let mark = if playing {
+            state.generator_mark_at(slot.0, &slot.1, sample).unwrap_or(0.0)
+        } else {
+            0.0
+        };
+        if previous.get(&slot) == Some(&mark) {
+            continue;
+        }
+        dirty |= rt.set_reactive("SEQ", &field, Value::Number(mark)).effects_dirty;
+        previous.insert(slot, mark);
     }
     dirty
 }

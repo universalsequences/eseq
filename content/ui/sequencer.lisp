@@ -499,8 +499,9 @@
 (def drop-on-track (event)
   (if (= (get event :drag-type) "sound")
     (eseq.browser/drop-sound-on-track event)
-    (if (= (get event :drag-type) "instrument")
-      (eseq.browser/drop-instrument-on-track event)
+    (if (or (= (get event :drag-type) "instrument")
+            (= (get event :drag-type) "instrument-preset"))
+      (eseq.browser/drop-sound-on-track event)
       (drop-sample-on-track event))))
 
 (def drop-new-track (event)
@@ -513,9 +514,11 @@
           (status "Drop a Sound item, not a folder"))
         (if (= (get event :drag-type) "instrument")
           (eseq.browser/drop-instrument-new-track payload)
-          (if path
-            (host-command "add-track-sample" (dict :path path :preserve-browser-context true))
-            (status "Drop a sample file, not a folder")))))))
+          (if (= (get event :drag-type) "instrument-preset")
+            (eseq.browser/drop-preset-new-track payload nil)
+            (if path
+              (host-command "add-track-sample" (dict :path path :preserve-browser-context true))
+              (status "Drop a sample file, not a folder"))))))))
 
 (defwidget seqv-track-container
   :width 1.5 :height 1.5
@@ -3450,7 +3453,7 @@
 ;; a pad replaces that pad's sound on its member track, so the two must agree.
 (def sound-drop-types (i)
   (if (eseq.track-collapse/replaceable-instrument? i)
-    (list "sample" "instrument" "sound")
+    (list "sample" "instrument" "instrument-preset" "sound")
     (if (eseq.track-collapse/sound-replaceable? i) (list "sample" "sound") (list "sample"))))
 
 ;; One track's grid row. Rack members render through this exact path — a rack
@@ -3695,11 +3698,20 @@
               (host-command "add-track-instrument"
                 (dict :name name :group-id group-id :pad-note note)))
             (status "Drop an instrument, not a folder")))
-        (if path
-          (host-command "add-track-sample"
-            (dict :path path :group-id group-id :pad-note note
-              :preserve-browser-context true))
-          (status "Drop a sample file, not a folder"))))))
+        (if (= (get event :drag-type) "instrument-preset")
+          (let ((instrument (eseq.browser/preset-payload-instrument payload)))
+            (if instrument
+              (do
+                (set! sbrowser-loading-instrument-name instrument)
+                (host-command "add-track-instrument"
+                  (dict :name instrument :preset (get payload :preset)
+                    :group-id group-id :pad-note note)))
+              (status "Drop an instrument preset")))
+          (if path
+            (host-command "add-track-sample"
+              (dict :path path :group-id group-id :pad-note note
+                :preserve-browser-context true))
+            (status "Drop a sample file, not a folder")))))))
 
 ;; An OCCUPIED cell replaces the pad's sound on its existing member track — the
 ;; same replacement a drop on the member's grid row does — so pad identity,
@@ -3714,7 +3726,7 @@
     (cons "rack-pad"
       (if (and (>= track 0) (< track SEQ.num-tracks))
         (sound-drop-types track)
-        (list "sample" "instrument")))))
+        (list "sample" "instrument" "instrument-preset")))))
 
 ;; A pad dragged from the grid carries its rack and note; the drop target
 ;; only needs to know which note it lands on. The drag stays within one rack:
@@ -4347,7 +4359,7 @@
       :border-color :transparent
       :drop-hover-border-color :mixer-strip-selected-border
       :corner-radius (eseq.seq-core-state/radius 10)
-      :drop-types (list "sample" "instrument" "sound")
+      :drop-types (list "sample" "instrument" "instrument-preset" "sound")
       :drop-meta (dict :kind "new-sample-track")
       :on-drop (lambda (event) (drop-new-track event))
       :on-double-click (lambda (event) (host-command "add-track-empty" (dict)))

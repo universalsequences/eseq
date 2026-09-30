@@ -892,10 +892,18 @@ pub(super) fn handle(
             // A new rack layer gets the instrument's current release.
             let name = extract_string_from_payload(&payload, "name")
                 .map(|name| sequencer::lisp_host::pin_instrument_for_new_track(&name));
+            let preset = extract_string_from_payload(&payload, "preset")
+                .filter(|preset| !preset.is_empty());
             match (track, name) {
                 (Some(track), Some(name)) => {
                     match app.add_saved_instrument_slot_to_rack_sync(track, &name) {
                         Ok(slot_idx) => {
+                            let preset_error = preset.as_deref().and_then(|preset| {
+                                load_instrument_preset_into_rack_slot(
+                                    &mut app, track, slot_idx, &name, preset,
+                                )
+                                .err()
+                            });
                             sync_after_instrument_track_apply(
                                 &mut app,
                                 &mut editor,
@@ -912,11 +920,14 @@ pub(super) fn handle(
                                 &ui_epoch,
                                 lg_raw,
                             );
-                            editor.handle_host_event(HostEvent::Status(format!(
-                                "Added rack instrument layer {}: {}",
-                                slot_idx + 1,
-                                name
-                            )));
+                            editor.handle_host_event(HostEvent::Status(match preset_error {
+                                Some(error) => format!("Error loading preset: {error}"),
+                                None => format!(
+                                    "Added rack instrument layer {}: {}",
+                                    slot_idx + 1,
+                                    name
+                                ),
+                            }));
                         }
                         Err(error) => {
                             editor.handle_host_event(HostEvent::Status(format!(
@@ -939,12 +950,29 @@ pub(super) fn handle(
             let slot = extract_usize_from_payload(&payload, "slot");
             let name = extract_string_from_payload(&payload, "name")
                 .map(|name| sequencer::lisp_host::pin_instrument_for_new_track(&name));
+            let preset = extract_string_from_payload(&payload, "preset")
+                .filter(|preset| !preset.is_empty());
             match (track, slot, name) {
                 (Some(track), Some(slot), Some(name)) => {
-                    match app.replace_rack_slot_with_saved_instrument_sync(
-                        track, slot, &name,
-                    ) {
-                        Ok(()) => {
+                    // A preset of the instrument the layer already runs only
+                    // switches the preset; anything else replaces the layer
+                    // first and then loads the preset onto it.
+                    let replaced = if preset.is_some()
+                        && rack_slot_runs_instrument(&app, track, slot, &name)
+                    {
+                        Ok(false)
+                    } else {
+                        app.replace_rack_slot_with_saved_instrument_sync(track, slot, &name)
+                            .map(|()| true)
+                    };
+                    match replaced {
+                        Ok(replaced) => {
+                            let preset_error = preset.as_deref().and_then(|preset| {
+                                load_instrument_preset_into_rack_slot(
+                                    &mut app, track, slot, &name, preset,
+                                )
+                                .err()
+                            });
                             sync_after_instrument_track_apply(
                                 &mut app,
                                 &mut editor,
@@ -961,11 +989,16 @@ pub(super) fn handle(
                                 &ui_epoch,
                                 lg_raw,
                             );
-                            editor.handle_host_event(HostEvent::Status(format!(
-                                "Replaced rack layer {} with {}",
-                                slot + 1,
-                                name
-                            )));
+                            editor.handle_host_event(HostEvent::Status(
+                                match (preset_error, preset.as_deref(), replaced) {
+                                    (Some(error), _, _) => format!("Error loading preset: {error}"),
+                                    (None, Some(preset), false) => format!(
+                                        "Loaded preset '{preset}' on rack layer {}",
+                                        slot + 1
+                                    ),
+                                    _ => format!("Replaced rack layer {} with {}", slot + 1, name),
+                                },
+                            ));
                         }
                         Err(error) => editor.handle_host_event(HostEvent::Status(
                             format!("Error replacing rack instrument layer: {error}"),

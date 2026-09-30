@@ -152,7 +152,7 @@ DGenLisp effects are also where you write your own:
 - **Fork…** makes an editable draft copy of the selected Custom effect, loads it on the current track and opens it in the patch editor. It is saved under a new name when you save it; the original is left untouched.
 - **edit** in a loaded effect's header, or **Edit > Edit Selected Effect…**, opens that effect's source.
 
-The patch editor is covered with instrument building in [Instruments](instruments). Effects shared as packages are covered in [Packages](packages).
+A coding agent can also write an effect for you; see [Making instruments with an agent](agent-authoring). The patch editor is covered with instrument building in [Instruments](instruments). Effects shared as packages are covered in [Packages](packages).
 
 ## Modulation
 

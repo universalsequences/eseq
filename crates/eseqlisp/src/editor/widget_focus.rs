@@ -1358,6 +1358,7 @@ fn node_captures_text_input(node: &LayoutNode) -> bool {
     matches!(node.widget_type.as_str(), "text-input" | "textbox")
         || crate::widget_render::patcher::patcher_has_text_edit(node)
         || crate::widget_render::dropdown::filter_captures_text(node)
+        || crate::widget_render::sexp_slot::captures_text(node)
 }
 
 /// The patch file a patcher node is showing, from the props the widget itself

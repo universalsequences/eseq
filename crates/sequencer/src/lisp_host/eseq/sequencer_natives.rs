@@ -1117,6 +1117,30 @@ pub(in crate::lisp_host) fn register_sequencer_natives_with_accumulators(
         },
     );
 
+    let generator_tick_for_gate = Arc::clone(&generator_tick);
+    runtime.register_native_with_docs(
+        "gen-gate",
+        "(gen-gate)",
+        "The gate other sequencers hold on this generator at this boundary (docs/jaki-trig-modes-spec.md): (dict :epoch n :open bool :note st :vel v :restart n). :epoch/:restart count boundaries that delivered a play/restart trigger; never triggered is epoch 0, closed, note 0, vel 1.",
+        move |_args, _ctx| {
+            let guard = generator_tick_for_gate
+                .lock()
+                .map_err(|_| "failed to lock generator tick context".to_string())?;
+            let Some(ctx) = guard.as_ref() else {
+                return Err("gen-gate called outside a generator tick".to_string());
+            };
+            let gate = ctx.gate;
+            let cell = |value| std::rc::Rc::new(std::cell::RefCell::new(value));
+            Ok(EValue::Map(HashMap::from([
+                ("epoch".to_string(), cell(EValue::Number(gate.epoch as f64))),
+                ("open".to_string(), cell(EValue::Bool(gate.open))),
+                ("note".to_string(), cell(EValue::Number(gate.note as f64))),
+                ("vel".to_string(), cell(EValue::Number(gate.velocity as f64))),
+                ("restart".to_string(), cell(EValue::Number(gate.restart_epoch as f64))),
+            ])))
+        },
+    );
+
     let generator_tick_for_chan_get = Arc::clone(&generator_tick);
     let generator_channels_for_chan_get = Arc::clone(&generator_channels);
     runtime.register_native_with_docs(
@@ -1145,6 +1169,42 @@ pub(in crate::lisp_host) fn register_sequencer_natives_with_accumulators(
                 .get(&name)
                 .cloned()
                 .unwrap_or_else(|| args.get(1).cloned().unwrap_or(EValue::Nil)))
+        },
+    );
+
+    // UI telemetry: the tick stamps a number at the audio sample it plays at
+    // (the boundary, plus `at` beats); the UI publishes the latest one sounded
+    // as SEQ.generator-mark-<id>, or SEQ.generator-mark-<id>-<key> for a keyed
+    // mark (the jaki kind's playhead and lit row items).
+    let generator_tick_for_mark = Arc::clone(&generator_tick);
+    let state_for_mark = Arc::clone(&state);
+    runtime.register_native_with_docs(
+        "gen-mark",
+        "(gen-mark value [key] [at-beats])",
+        "Stamp a number at this boundary's audio time (plus at-beats); the UI reads the latest sounded one as SEQ.generator-mark-<id>[-<key>].",
+        move |args, _ctx| {
+            let Some(EValue::Number(value)) = args.first() else {
+                return Err("gen-mark expects a number".to_string());
+            };
+            let key = match args.get(1) {
+                None | Some(EValue::Nil) => String::new(),
+                Some(EValue::String(key)) => key.clone(),
+                Some(EValue::Number(n)) => format!("{n}"),
+                Some(other) => return Err(format!("gen-mark key must be a string, got {other:?}")),
+            };
+            let at = match args.get(2) {
+                Some(EValue::Number(at)) => at.max(0.0),
+                _ => 0.0,
+            };
+            let guard = generator_tick_for_mark
+                .lock()
+                .map_err(|_| "failed to lock generator tick context".to_string())?;
+            let Some(ctx) = guard.as_ref() else {
+                return Err("gen-mark called outside a generator tick".to_string());
+            };
+            let sample = ctx.boundary_sample + (at * ctx.samples_per_quarter).round() as u64;
+            state_for_mark.push_generator_mark(ctx.id, &key, sample, *value);
+            Ok(EValue::Nil)
         },
     );
 

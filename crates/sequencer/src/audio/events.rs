@@ -428,7 +428,9 @@ pub(super) fn dispatch_scheduled_network_step(
         data,
         frame_offset,
         track_idx,
-        0,
+        // An Instrument Rack resolves its own p-locks at the step the hit
+        // landed on (the network seed), like a step trigger there.
+        key_lock_plock_step.unwrap_or(0),
         key_lock_plock_step,
         samples_per_step as f64,
         resolved,

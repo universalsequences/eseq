@@ -43,6 +43,17 @@ Both are kind-agnostic: nothing below names jaki except §5.
   rows keep their data, like the neural node count.
 - The panel also shows the equivalent `(jak …)` source, read only, so the GUI
   teaches the language.
+- A **hits** strip under the figures shows two cycles of the figure
+  pattern as its symbols (one cell per `.`, a double cell per `-`, figures
+  and cycles set apart). While the transport plays, the symbol under the
+  playhead lights up: the tick calls `(gen-mark (+ (gen-tick) 1))`, which
+  stamps the value at the boundary's audio sample; the host publishes the
+  latest sounded mark as `SEQ.generator-mark-<id>` (0 when stopped) and the
+  strip, its own `subtree`, locates that tick in the pattern
+  (`alez.jaki.core/locate`, `alez.jaki.core/preview`). The window follows the
+  playhead two cycles at a time.
+- Row modifier slots never wrap (`:wrap false`): a row is one line tall, and
+  a wrapped second line would draw over the next row.
 
 ## 3. `def-kind :document`
 
@@ -142,8 +153,10 @@ op strings → route-word symbols via a `match` table) and calls
 language's own. Rows routed Off and rows past `row-count` are left out; no
 live row means silence.
 
-Modifier catalog: every route word — `left right accent rev stac ghost swap`,
-the one-number words `trunc rot shift fast slow gate vel note`, the velocity
+Modifier catalog: every route word — `left right accent rev stac ghost swap half`,
+the one-number words `trunc rot shift fast slow gate vel note vel* vel+ note+`,
+scoped words `(on SEL w)` (selectors and their rules: jaki-sequencer-spec
+§7.1; `crates/sequencer/docs/`), the velocity
 model `basevel dotdecay dashdecay minvel maxvel`, `every n <word>`,
 hand-scoped `L <word>` / `R <word>`, and `split` / `merge` with a
 `first | last | all` target. Figure transforms used as route words apply to

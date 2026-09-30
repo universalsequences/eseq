@@ -122,6 +122,67 @@
         (off (gvr-route-off-index self)))
     (if (number? route) (if (< route off) (round route) off) off)))
 
+;; ── jaki routes (docs/jaki-trig-modes-spec.md §5-§6) ──
+;; Past the tracks, the route menu lists the jaki instances with this
+;; instance's owner (the project, or its rack), twice:
+;;   → jaki 1   the node gates it instead of playing a note: its fires open the
+;;              pattern for their duration, their note adds and their velocity
+;;              scales; the jaki's own mode decides whether each fire restarts
+;;              it or picks up where it stopped. Stored as (:gen id).
+;;   ↺ jaki 1   each fire only restarts its pattern, whatever its mode (a
+;;              looping jaki jumps to the top of its phrase). (:restart id).
+;; The menu is its own list: track-typed process inlets keep offering tracks
+;; only (gvr-route-options).
+(def gvr-jaki-kind "alez/jaki:jaki")
+(def gvr-jakis (self)
+  (let ((rack (gvr-owner-rack self)))
+    (filter (lambda (instance) (and (= (get instance :kind) gvr-jaki-kind)
+                                    (= (get instance :owner-rack) rack)))
+            (or SEQ.instances (list)))))
+(def gvr-route-track-count (self) (- (len (gvr-route-options self)) 1))
+(def gvr-route-menu (self)
+  (let ((jakis (gvr-jakis self)))
+    (append (gvr-track-inlet-track-options self)
+            (map (lambda (jaki) (str "→ " (get jaki :label))) jakis)
+            (map (lambda (jaki) (str "↺ " (get jaki :label))) jakis)
+            (list "Off"))))
+(def gvr-generator-route-tag (route)
+  (if (or (number? route) (= route nil)) nil (nth route 0)))
+(def gvr-jaki-position (self id)
+  (let ((jakis (gvr-jakis self)))
+    (let ((hits (filter (lambda (k) (= (get (nth jakis k) :id) id)) (range 0 (len jakis)))))
+      (if (> (len hits) 0) (nth hits 0) -1))))
+;; Node n's route as a menu index (a tracked read); a jaki that is gone, or
+;; is not this owner's, reads as Off.
+(def gvr-route-menu-index (self n)
+  (let ((route (graph-node-value self n :route))
+        (tracks (gvr-route-track-count self))
+        (count (len (gvr-jakis self))))
+    (let ((off (+ tracks (* 2 count)))
+          (tag (gvr-generator-route-tag route)))
+      (if (number? route)
+        (if (< route tracks) (round route) off)
+        (if (or (= tag :gen) (= tag :restart))
+          (let ((k (gvr-jaki-position self (nth route 1))))
+            (if (< k 0) off (+ tracks k (if (= tag :restart) count 0))))
+          off)))))
+(def gvr-route-menu->internal (self label)
+  (let ((menu (gvr-route-menu self))
+        (tracks (gvr-route-track-count self))
+        (jakis (gvr-jakis self)))
+    (let ((hits (filter (lambda (i) (= (nth menu i) label)) (range 0 (len menu))))
+          (count (len jakis)))
+      (if (= (len hits) 0)
+        :off
+        (let ((k (- (nth hits 0) tracks)))
+          (if (< k 0)
+            (nth hits 0)
+            (if (< k count)
+              (list :gen (get (nth jakis k) :id))
+              (if (< k (* 2 count))
+                (list :restart (get (nth jakis (- k count)) :id))
+                :off))))))))
+
 (def gvr-route-color-valid? (track-colors route-index off-index)
   (and (>= route-index 0) (< route-index (len track-colors)) (< route-index off-index)))
 
@@ -380,8 +441,8 @@
       (gvr-route-bar self n track-colors)
       (label (str n) :width gvr-node-width :height gvr-row-height :font-size 9 :h-align :center :color :dim :bg :transparent)
       (gvr-pick (str "graph-variable-reset-route-" n)
-        (gvr-route-option-index self n) (gvr-route-options self)
-        (lambda (v) (graph-node self n :route (gvr-route->internal self v))))
+        (gvr-route-menu-index self n) (gvr-route-menu self)
+        (lambda (v) (graph-node self n :route (gvr-route-menu->internal self v))))
       (gvr-pick-sized (str "graph-variable-reset-group-" n)
         (bind-graph self n :group) gvr-group-options gvr-group-width
         (lambda (v) (graph-node self n :group (gvr-index-of gvr-group-options v))))

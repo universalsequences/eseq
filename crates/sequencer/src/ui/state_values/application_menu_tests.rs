@@ -57,6 +57,58 @@ fn edit_instrument_menu_tracks_selection_and_opens_existing_editor() {
     }
 }
 
+/// eseq-63j4.4: Edit > Reload Instrument From Disk / Rescan Instruments &
+/// Effects pick up files a coding agent wrote while the app runs.
+#[test]
+fn reload_from_disk_menu_items_queue_their_host_commands() {
+    let mut editor = full_grid_editor_for_scroll_tests();
+    editor
+        .runtime_mut()
+        .eval_str(
+            r#"
+        (set-window-buffer "*transport*")
+        (eseq.transport/open-application-menu "Edit" (dict :col 2 :row 1))
+    "#,
+        )
+        .unwrap();
+    let invoke = |editor: &mut eseqlisp::Editor, id: &str| {
+        editor.drain_host_commands();
+        let callback = editor.runtime_mut().eval_str(&format!(
+            "(get (nth (filter (lambda (item) (and item (= (get item :id) \"{id}\"))) (eseq.transport/application-menu-items \"Edit\")) 0) :on-select)"
+        )).unwrap().unwrap();
+        editor.runtime_mut().invoke(callback, vec![]).unwrap();
+        editor.drain_host_commands()
+    };
+    for (kind, enabled) in [("custom", true), ("sampler", false)] {
+        editor.runtime_mut().set_reactive("SEQ", "current-track", Value::Number(0.0));
+        editor.runtime_mut().set_reactive("SEQ", "num-tracks", Value::Number(1.0));
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "track-instrument-types",
+            build_string_list(&[kind.to_string()]),
+        );
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let layout = editor.widget_layout().unwrap();
+        let item = find_layout_node_by_stable_key_suffix(&layout, "/edit-menu-reload-instrument")
+            .expect("reload instrument action");
+        assert!(
+            matches!(item.props.get("disabled"), Some(Value::Bool(value)) if *value == !enabled),
+            "{kind}: {:?}",
+            item.props.get("disabled")
+        );
+        find_layout_node_by_stable_key_suffix(&layout, "/edit-menu-reload-effect")
+            .expect("reload effect action");
+        find_layout_node_by_stable_key_suffix(&layout, "/edit-menu-rescan-library")
+            .expect("rescan library action");
+    }
+    assert!(invoke(&mut editor, "edit-menu-reload-instrument").iter().any(|event| matches!(event,
+        HostCommand::Custom { name, payload: Value::Map(map) }
+        if name == "reload-instrument-from-disk" && map_usize(map, "track") == Some(0))));
+    assert!(invoke(&mut editor, "edit-menu-rescan-library").iter().any(|event| matches!(event,
+        HostCommand::Custom { name, .. } if name == "reload-content-library")));
+}
+
 #[test]
 fn application_menus_share_actions_and_fallback_layout() {
     let mut editor = full_grid_editor_for_scroll_tests();

@@ -139,6 +139,15 @@ fn widget_type_captures_text_input(widget_type: &str) -> bool {
 fn widget_captures_text_input(node: &eseqlisp::layout::LayoutNode) -> bool {
     widget_type_captures_text_input(node.widget_type.as_str())
         || eseqlisp::widget_render::patcher::patcher_has_text_edit(node)
+        || eseqlisp::widget_render::sexp_slot::editing_text(node)
+}
+
+/// A focused sexp-slot owns bare typing even between edits (a letter or digit
+/// opens its field), but it is only a text input, with Space and the history
+/// and clipboard chords, while that field is open.
+fn focused_widget_owns_typing(editor: &Editor) -> bool {
+    focused_widget_captures_text_input(editor)
+        || focused_widget_matches(editor, eseqlisp::widget_render::sexp_slot::captures_text)
 }
 
 fn focused_number_picker_is_editing(editor: &Editor) -> bool {
@@ -172,7 +181,7 @@ fn editor_accepts_live_keyboard_input(editor: &Editor) -> bool {
     mode_policy
         && editor.minibuffer_prompt().is_none()
         && editor.prompt_text().is_none()
-        && !focused_widget_captures_text_input(editor)
+        && !focused_widget_owns_typing(editor)
         && !focused_number_picker_is_editing(editor)
 }
 
@@ -1082,7 +1091,7 @@ pub(crate) fn handle_metal_soft_step_param_key(
         return false;
     }
 
-    if focused_widget_captures_text_input(editor) {
+    if focused_widget_owns_typing(editor) {
         return false;
     }
     // A focused number picker anywhere else (the lane strip's lo/hi, an

@@ -1,0 +1,115 @@
+<!-- eseq:generated. eseq rewrites this file each time it starts so the paths stay current. Delete this line to keep your own edits. -->
+# Authoring eseq instruments and effects
+
+You are working in the eseq user folder. When the user asks for a new
+instrument ("make me a poly synth with a wavefolder") or an audio effect ("a
+tape delay with wow and flutter"), you write two small source files into a new
+folder here. eseq compiles them to native code and shows them in its browser.
+When the user asks to change one, edit its files in place.
+
+## Where things are
+
+| What | Path |
+| --- | --- |
+| Your instruments (write here) | `{{USER_INSTRUMENTS}}` |
+| Your effects (write here) | `{{USER_EFFECTS}}` |
+| Instrument rules (read first) | `{{AUTHORING}}/instrument-reference.md` |
+| Effect rules (read first) | `{{AUTHORING}}/effect-reference.md` |
+| DGenLisp language reference | `{{DGENLISP_REFERENCE}}/DGenLispReadme.md` |
+| DGenLisp operator catalog (large JSON; search it) | `{{DGENLISP_REFERENCE}}/dgenlisp-operators.json` |
+| Factory instruments (read-only examples) | `{{FACTORY_INSTRUMENTS}}` |
+| Factory effects (read-only examples) | `{{FACTORY_EFFECTS}}` |
+| The `eseq` command-line tool | `{{ESEQ}}` |
+
+The factory folders are read-only examples. Never edit them. Don't touch the
+user's projects, samples, recordings or other folders here unless they ask.
+
+## What an instrument or effect is
+
+One folder containing:
+
+- `dsp.lisp`: the signal processing, written in DGenLisp. An instrument turns
+  gate/pitch/velocity inputs into audio; one voice is compiled per note. An
+  effect processes stereo audio in to stereo audio out.
+- `ui.lisp`: the panel. It holds exactly one `(defsynth-ui ...)` form for an
+  instrument, or `(defeffect-ui ...)` for an effect, built from the
+  `eseq.effects.custom-ui-lego` helpers and naming params from `dsp.lisp`.
+
+The folder name is what the user sees in the browser, so use a short
+human-readable name such as `Fold Poly` or `Tape Echo`. Sub-folders become folders in the browser
+(`{{USER_INSTRUMENTS}}/Drums/Tight Hat/`, `{{USER_INSTRUMENTS}}/Bass/Acid Mono/`);
+use one when the user already has a matching folder. Before creating a folder,
+check the name isn't already taken.
+
+## Workflow
+
+1. Read the rules file for what you are making (`instrument-reference.md` or
+   `effect-reference.md`). They are short, strict and specific to eseq. Look up
+   operators in the DGenLisp reference as you need them.
+2. Study one or two factory examples close to the request. Read their
+   `dsp.lisp` for DSP technique. Good small starting points:
+   - synths: `{{FACTORY_INSTRUMENTS}}/Synths/Revsynt/dsp.lisp`,
+     `{{FACTORY_INSTRUMENTS}}/Synths/Vox/dsp.lisp`
+   - drums: `{{FACTORY_INSTRUMENTS}}/Drums/Boom Bap Kick/dsp.lisp` (for a
+     simple drum, the one-shot recipe in the instrument rules is a better
+     start)
+   - physical models: `{{FACTORY_INSTRUMENTS}}/Physical Models/PM Flute/dsp.lisp`
+   - effects with standard panels: `{{FACTORY_EFFECTS}}/stereo-tremolo/`,
+     `{{FACTORY_EFFECTS}}/lexilush/`
+
+   Factory instrument panels use bespoke surface modules. For your own panels,
+   use the lego helpers shown in the rules files instead. Some older factory
+   sources break the rules files' conventions; when they disagree, follow the
+   rules files. Their "Recipes" section covers one-shot drum envelopes,
+   feedback delays (`delay` takes samples), LFOs and history cells.
+3. Write `dsp.lisp` and `ui.lisp` into the new folder. For the panel, choose
+   the standard or dense lego layout by how many controls you will show, not
+   by how many params the DSP declares; start simple and only go dense when a
+   standard layout would not fit.
+4. Check your work, and repeat until it passes:
+
+   ```sh
+   "{{ESEQ}}" instrument check "{{USER_INSTRUMENTS}}/<Name>"
+   "{{ESEQ}}" effect check "{{USER_EFFECTS}}/<Name>"
+   ```
+
+   The check compiles the DSP, validates the panel, renders a test note or
+   test signal (it fails on silence or clipping), and draws the panel with
+   eseq's own renderer. `FAIL` lines give the stage and the exact error; fix
+   that and run it again. `warn` lines are conventions worth following but not
+   blockers. If the panel render fails with "eseq's own UI failed to load; not
+   caused by these files", the problem is in the installation, not your
+   folder: don't try to fix it, tell the user, and use `--no-render` to check
+   everything else. On success it prints the path of a PNG of the panel (rewritten on each run). **Open that
+   image and look at it**: check for overlapping or clipped controls, empty
+   space, and red `missing: <param>` labels, then adjust the layout.
+5. Tell the user it's ready and how to find it. eseq picks up new folders
+   while it runs: the instrument appears in the browser's **Instruments** tab
+   under **Library** (effects: **Audio FX** tab, **Custom**). Summarize the
+   controls and suggest settings to try.
+
+Making sound is the job: a patch that passes the check but sounds thin or
+harsh isn't done. Pick sensible defaults (moderate levels, a musical filter
+setting, short attack) so the first note the user plays sounds good.
+
+## Changing an existing instrument
+
+Edit its `dsp.lisp`/`ui.lisp` and run the check again. A `ui.lisp` change
+shows up in eseq by itself. A `dsp.lisp` change to something already on a
+track needs one gesture from the user, so tell them: select the track and
+choose **Edit > Reload Instrument From Disk** (for an effect, click its header
+and choose **Edit > Reload Selected Effect From Disk**). Knob values are kept
+for params whose names didn't change. Keep existing param
+names where you can: projects store knob values and step locks by param name,
+and a renamed param loses them.
+
+## Sharing
+
+The user can share their work as a package: **File > Export Package…** in
+eseq, or
+
+```sh
+"{{ESEQ}}" package export <author>/<name> 0.1.0 <out-dir> instrument:<Folder> effect:<Folder>
+```
+
+`<Folder>` is the path under the instruments or effects folder above.

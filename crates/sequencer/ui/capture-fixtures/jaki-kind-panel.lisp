@@ -9,11 +9,15 @@
 (def capture-after-sync ()
   (let ((j (instance-ref 1)))
     (do
-      (set! j.figures (list (list :dot :dot :dash) (list :dot :dash)))
+      (set! j.figures (list (list :dot :dot :dash) (list 4 :dot :dash)))
+      ;; Slot items (docs/sexp-slot-spec.md): words, forms, a number list
+      ;; and a word cycle, one per cycle; row 3 is a record saved before the
+      ;; slot (it still reads).
       (set! j.rows
-        (list (dict :route 0 :mods (list (dict :op "left" :args (list))))
-              (dict :route 1 :mods (list (dict :op "right" :args (list))
-                                         (dict :op "accent" :args (list))))
-              (dict :route 2 :mods (list (dict :op "trunc" :args (list 3))
-                                         (dict :op "right" :args (list))
-                                         (dict :op "every" :args (list 4 "rev")))))))))
+        (list (dict :route 0 :mods (list "left" (list "fast" (list 1 2))))
+              (dict :route 1 :mods (list "right" "accent"
+                                         (list "left" "left" "right")))
+              (dict :route 2 :mods (list (list "trunc" (list 3 1)) "right"
+                                         (list "every" 2 (list "rev" "swap"))
+                                         (list "every-fig" 2 "rev")))
+              (dict :route 0 :mods (list (dict :op "every" :args (list 4 "rev")))))))))

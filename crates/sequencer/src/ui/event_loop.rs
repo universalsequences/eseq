@@ -316,6 +316,8 @@ pub(crate) fn run_event_loop(
         None
     };
     let mut lisp_hot_reload_source_revision = editor.runtime().lisp_source_revision();
+    // Set while the Customize knob has automatic reload switched off.
+    let mut lisp_auto_reload_paused = false;
 
     // Driver discovery and device settings run outside the UI/audio threads.
     // The waker ends a blocked idle poll the moment a note is queued.
@@ -687,7 +689,14 @@ pub(crate) fn run_event_loop(
                 lisp_hot_reload_source_revision = source_revision;
             }
             let changed_paths = watcher.poll_ready_paths();
-            if !changed_paths.is_empty()
+            if !auto_reload_enabled(&editor) {
+                // Drain and drop: a paused watcher must not replay a backlog.
+                lisp_auto_reload_paused = true;
+            } else if std::mem::take(&mut lisp_auto_reload_paused) {
+                // Back on: catch up on instrument/effect edits made meanwhile.
+                rescan_content_library(&mut editor);
+                shared.ui_epoch.fetch_add(1, Ordering::Relaxed);
+            } else if (!changed_paths.is_empty() || changed_paths.library)
                 && process_lisp_hot_reload_paths(&mut editor, changed_paths)
             {
                 shared.ui_epoch.fetch_add(1, Ordering::Relaxed);
@@ -1330,6 +1339,8 @@ pub(crate) fn run_event_loop(
                             Some(LiveInputEvent::PitchBend { port, channel, value }),
                         MidiMessage::ControlChange { channel, controller: 1, value } =>
                             Some(LiveInputEvent::ModWheel { port, channel, value: value as f32 / 127.0 }),
+                        MidiMessage::ControlChange { channel, controller: 74, value } =>
+                            Some(LiveInputEvent::Slide { port, channel, value: value as f32 / 127.0 }),
                         MidiMessage::ControlChange { channel, controller: 121, .. } =>
                             Some(LiveInputEvent::ResetControllers { port, channel }),
                         _ => None,
@@ -1915,7 +1926,7 @@ pub(crate) fn run_event_loop(
                     result,
                 ) {
                     Ok(SavedInstrumentLoadApply::Added { track, group_id, pad_note }) => {
-                        finish_added_instrument_track(
+                        let committed = finish_added_instrument_track(
                             track,
                             AddTrackInstrumentCtx {
                                 app: &mut app,
@@ -1935,6 +1946,17 @@ pub(crate) fn run_event_loop(
                                 lg_raw: shared.lg_raw,
                             },
                         );
+                        if let (true, Some(preset)) = (committed, pending.preset.as_deref()) {
+                            apply_dropped_instrument_preset(
+                                &mut app,
+                                &mut editor,
+                                track,
+                                preset,
+                                &shared.current_track,
+                                &shared.selected_steps,
+                                &shared.ui_epoch,
+                            );
+                        }
                         editor.mark_needs_redraw();
                     }
                     Ok(SavedInstrumentLoadApply::Swapped {
@@ -1958,6 +1980,17 @@ pub(crate) fn run_event_loop(
                                 ui_epoch: &shared.ui_epoch,
                             },
                         );
+                        if let Some(preset) = pending.preset.as_deref() {
+                            apply_dropped_instrument_preset(
+                                &mut app,
+                                &mut editor,
+                                track,
+                                preset,
+                                &shared.current_track,
+                                &shared.selected_steps,
+                                &shared.ui_epoch,
+                            );
+                        }
                         editor.mark_needs_redraw();
                     }
                     Err(error) => {

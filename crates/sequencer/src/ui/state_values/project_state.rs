@@ -418,10 +418,13 @@ pub(crate) fn sync_sidebar_browser(rt: &mut Runtime, app: &app::App, track: usiz
         }).unwrap_or_default()
     };
     let slot_contexts = slots.into_iter().map(|(slot_idx, kind, name, loaded_preset)| {
-        let mut presets = if kind == sequencer::sequencer::InstrumentType::Custom {
-            sequencer::lisp_host::load_instrument_preset_names(&name).unwrap_or_default()
+        let (mut presets, user_presets) = if kind == sequencer::sequencer::InstrumentType::Custom {
+            (
+                sequencer::lisp_host::load_instrument_preset_names(&name).unwrap_or_default(),
+                sequencer::lisp_host::load_user_instrument_preset_names(&name).unwrap_or_default(),
+            )
         } else {
-            Vec::new()
+            (Vec::new(), Vec::new())
         };
         presets.sort();
         map_value([
@@ -430,6 +433,7 @@ pub(crate) fn sync_sidebar_browser(rt: &mut Runtime, app: &app::App, track: usiz
             ("instrument", Value::String(name.clone())),
             ("display-name", Value::String(instrument_display_name(&name))),
             ("presets", build_string_list(&presets)),
+            ("user-presets", build_string_list(&user_presets)),
             ("loaded-preset", Value::String(loaded_preset)),
         ])
     }).collect::<Vec<_>>();
@@ -465,6 +469,7 @@ pub(crate) fn sync_sidebar_browser(rt: &mut Runtime, app: &app::App, track: usiz
             Value::String(selected_sample),
         );
         rt.set_reactive("SEQ", "sidebar-presets", Value::List(vec![]));
+        rt.set_reactive("SEQ", "sidebar-user-presets", Value::List(vec![]));
         rt.set_reactive("SEQ", "sidebar-preset-tree", Value::List(vec![]));
         return;
     }
@@ -486,6 +491,7 @@ pub(crate) fn sync_sidebar_browser(rt: &mut Runtime, app: &app::App, track: usiz
         .and_then(|meta| meta.loaded_preset.clone())
         .unwrap_or_default();
     let preset_items = visible_preset_items_for_track(app, track);
+    let user_preset_items = visible_user_preset_items_for_track(app, track);
 
     rt.set_reactive(
         "SEQ",
@@ -516,6 +522,11 @@ pub(crate) fn sync_sidebar_browser(rt: &mut Runtime, app: &app::App, track: usiz
         Value::String(String::new()),
     );
     rt.set_reactive("SEQ", "sidebar-presets", build_string_list(&preset_items));
+    rt.set_reactive(
+        "SEQ",
+        "sidebar-user-presets",
+        build_string_list(&user_preset_items),
+    );
     rt.set_reactive(
         "SEQ",
         "sidebar-preset-tree",
@@ -587,6 +598,28 @@ pub(crate) fn load_instrument_preset_into_track(
     )
     .map(|_| ())
     .map_err(|error| format!("{error:?}"))
+}
+
+/// True when `track` already runs saved instrument `instrument_name`, so a
+/// dropped preset of that instrument only switches the preset.
+pub(crate) fn track_runs_instrument(app: &app::App, track: usize, instrument_name: &str) -> bool {
+    app.graph.track_instrument_types.get(track)
+        == Some(&sequencer::sequencer::InstrumentType::Custom)
+        && current_custom_instrument_name(app, track).as_deref() == Some(instrument_name)
+}
+
+/// True when a rack slot already runs saved instrument `instrument_name`, so a
+/// preset of that instrument can load in place instead of replacing the layer.
+pub(crate) fn rack_slot_runs_instrument(
+    app: &app::App,
+    track: usize,
+    slot_idx: usize,
+    instrument_name: &str,
+) -> bool {
+    app.rack_slot_effect_snapshot(track, slot_idx).is_ok_and(|slot| {
+        slot.instrument_type == sequencer::sequencer::InstrumentType::Custom
+            && rack_slot_raw_name(app, slot_idx, &slot) == instrument_name
+    })
 }
 
 pub(crate) fn load_instrument_preset_into_rack_slot(

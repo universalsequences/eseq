@@ -19,6 +19,60 @@ pub(super) fn scheduled_instrument_tensor_params_from_vec(
         .collect::<ScheduledInstrumentTensorParams>()
 }
 
+/// The step an emitted hit (generator, process, graph, cross-track neural
+/// fire) lands on in its destination track's step grid. The hit stamps that
+/// step's device params — base values, the step's p-locks, the live
+/// device-print latch — exactly like an ON trigger there, so p-locks recorded
+/// on an untriggered pattern ride the hits another sequencer plays. Stamping
+/// at the onset is what per-hit instruments (params latched at note-on) need:
+/// the off-step automation event reaches the voice after it has latched.
+#[derive(Clone)]
+pub(super) struct StepLanding {
+    pub(super) step: usize,
+    pub(super) print_overrides: Option<crate::sequencer::DeviceParamPrintValues>,
+}
+
+impl StepLanding {
+    /// Where a hit at straight (pre-groove) transport `beats` lands on
+    /// `track`, with the track's live print latch.
+    pub(super) fn resolve(
+        clock: &SnapshotSequencerClock,
+        state: &SequencerState,
+        snapshot: &SequencerSnapshot,
+        track: usize,
+        beats: f64,
+        samples_per_quarter: f64,
+    ) -> Option<Self> {
+        // One sample of slack: emitters round their beats to samples.
+        let tolerance = if samples_per_quarter > 0.0 {
+            1.0 / samples_per_quarter
+        } else {
+            0.0
+        };
+        let step = clock.track_step_at_beats(snapshot, track, beats, tolerance)?;
+        Some(Self {
+            step,
+            print_overrides: state.device_print_override.values_for_track(track),
+        })
+    }
+
+    /// Replace `event`'s device params with this landing step's full stamp.
+    /// Callers upsert any params the emitter set explicitly afterwards.
+    pub(super) fn stamp(&self, snapshot: &SequencerSnapshot, event: &mut StepEvent) {
+        let track = event.track;
+        let print_overrides = self.print_overrides.as_ref();
+        event.effect_params = resolve_effect_params(snapshot, track, self.step, print_overrides);
+        event
+            .effect_params
+            .extend(resolve_track_send_params(snapshot, track, self.step));
+        event.instrument_params =
+            resolve_instrument_params(snapshot, track, self.step, print_overrides);
+        event.instrument_tensor_params =
+            resolve_instrument_tensor_params(snapshot, track, self.step);
+        event.sampler_params = resolve_sampler_params(snapshot, track, self.step);
+    }
+}
+
 pub(super) fn resolve_track_send_params(
     snapshot: &SequencerSnapshot,
     track_idx: usize,

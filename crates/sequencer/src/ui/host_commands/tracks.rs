@@ -673,6 +673,36 @@ pub(super) fn handle(
             }
         }
         "add-track-instrument" | "swap-track-instrument" => {
+            // A preset dragged from the browser rides along with its
+            // instrument and is applied once the instrument is on the track.
+            let preset = extract_string_from_payload(&payload, "preset")
+                .filter(|preset| !preset.is_empty());
+            // Dropping a preset on a track already running its instrument
+            // only switches the preset: no recompile, no instrument reset.
+            if name == "swap-track-instrument" {
+                if let (Some(preset), Some(track), Some(instrument_name)) = (
+                    preset.as_deref(),
+                    extract_usize_from_payload(&payload, "track"),
+                    extract_string_from_payload(&payload, "name")
+                        .map(|name| sequencer::lisp_host::pin_instrument_for_new_track(&name)),
+                ) {
+                    if track_runs_instrument(&app, track, &instrument_name) {
+                        let _ = editor
+                            .runtime_mut()
+                            .eval_str("(set! sbrowser-loading-instrument-name \"\")");
+                        apply_dropped_instrument_preset(
+                            &mut app,
+                            &mut editor,
+                            track,
+                            preset,
+                            &current_track,
+                            &selected_steps,
+                            &ui_epoch,
+                        );
+                        return;
+                    }
+                }
+            }
             if let Some(pending) = ctx.sessions.pending_saved_instrument_load.as_ref() {
                 let escaped = escape_lisp_string(&pending.name);
                 let _ = editor.runtime_mut().eval_str(&format!(
@@ -780,7 +810,7 @@ pub(super) fn handle(
                     .eval_str("(set! sbrowser-loading-instrument-name \"\")");
                 match cached_result {
                     Ok(SavedInstrumentLoadApply::Added { track, group_id, pad_note }) => {
-                        finish_added_instrument_track(
+                        let committed = finish_added_instrument_track(
                             track,
                             AddTrackInstrumentCtx {
                                 app: &mut app,
@@ -799,7 +829,18 @@ pub(super) fn handle(
                                 ui_epoch: &ui_epoch,
                                 lg_raw,
                             },
-                        )
+                        );
+                        if let (true, Some(preset)) = (committed, preset.as_deref()) {
+                            apply_dropped_instrument_preset(
+                                &mut app,
+                                &mut editor,
+                                track,
+                                preset,
+                                &current_track,
+                                &selected_steps,
+                                &ui_epoch,
+                            );
+                        }
                     }
                     Ok(SavedInstrumentLoadApply::Swapped {
                         track,
@@ -821,7 +862,18 @@ pub(super) fn handle(
                                 fx_epoch: &fx_epoch,
                                 ui_epoch: &ui_epoch,
                             },
-                        )
+                        );
+                        if let Some(preset) = preset.as_deref() {
+                            apply_dropped_instrument_preset(
+                                &mut app,
+                                &mut editor,
+                                track,
+                                preset,
+                                &current_track,
+                                &selected_steps,
+                                &ui_epoch,
+                            );
+                        }
                     }
                     Err(error) => {
                         let action = match target {
@@ -860,6 +912,7 @@ pub(super) fn handle(
                 source,
                 run_mode,
                 target,
+                preset,
                 receiver: rx,
             });
             let action = match target {

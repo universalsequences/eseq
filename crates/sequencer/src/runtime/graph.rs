@@ -481,15 +481,37 @@ impl GraphSwingSpec {
 pub enum ProjectGraphRouteOverride {
     None,
     Track(usize),
+    /// A generator (a jaki instance, by id): fires gate it instead of sounding
+    /// a note (docs/jaki-trig-modes-spec.md §6).
+    Generator(u64),
+    /// A generator whose pattern each fire restarts, in any mode (spec §5).
+    GeneratorRestart(u64),
 }
 
 impl ProjectGraphRouteOverride {
     fn to_route(&self) -> Option<usize> {
         match self {
-            Self::None => None,
+            Self::None | Self::Generator(_) | Self::GeneratorRestart(_) => None,
             Self::Track(track) => Some(*track),
         }
     }
+
+    fn to_gate_target(&self) -> Option<GateTarget> {
+        match self {
+            Self::Generator(id) => Some(GateTarget { id: *id, restart: false }),
+            Self::GeneratorRestart(id) => Some(GateTarget { id: *id, restart: true }),
+            Self::None | Self::Track(_) => None,
+        }
+    }
+}
+
+/// The generator a node's fires reach instead of a track
+/// (docs/jaki-trig-modes-spec.md §6): each fire gates it, or with `restart`
+/// only restarts its pattern (§5).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GateTarget {
+    pub id: u64,
+    pub restart: bool,
 }
 
 /// Deserialize a `Vec<u8>` that may have been serialized as a bare integer by an
@@ -826,6 +848,9 @@ pub struct GraphNode {
     /// Round-robin cycle of quantize grids, advanced one slot per fire. Always non-empty.
     pub quantize_cycle: Vec<Option<Timebase>>,
     pub route: Option<usize>,
+    /// The generator this node's fires gate (or restart) instead of sounding
+    /// a note (docs/jaki-trig-modes-spec.md §6); `route` is `None` when set.
+    pub gate_target: Option<GateTarget>,
     pub seed_track_mask: u128,
     pub reduce: Reduce,
     /// Which incoming payload survives when several arrive in one boundary (Layer A).
@@ -862,6 +887,7 @@ impl Default for GraphNode {
             quantize: None,
             quantize_cycle: vec![None],
             route: None,
+            gate_target: None,
             seed_track_mask: 0,
             reduce: Reduce::Sum,
             event_select: EventSelect::Newest,
@@ -1572,6 +1598,16 @@ impl GraphRuntime {
     /// The track a node emits to after resolution (`None` = off).
     pub fn node_route(&self, node_index: usize) -> Option<usize> {
         self.nodes.get(node_index).and_then(|node| node.route)
+    }
+
+    /// The generator node `node_index` gates, if it routes to one.
+    pub fn node_gate_target(&self, node_index: usize) -> Option<GateTarget> {
+        self.nodes.get(node_index).and_then(|node| node.gate_target)
+    }
+
+    /// Every generator some node of this graph gates or restarts.
+    pub fn gate_targets(&self) -> impl Iterator<Item = u64> + '_ {
+        self.nodes.iter().filter_map(|node| node.gate_target.map(|target| target.id))
     }
 
     pub fn matches_reference(&self, graph_id: u64, graph_name: &str) -> bool {
@@ -3683,6 +3719,7 @@ impl GraphManifest {
         let mut node_params = vec![proto_params; num_nodes];
         for idx in 0..num_nodes {
             let mut route = self.node.route;
+            let mut gate_target = None;
             let mut seed_from = self.node.seed_from.clone();
             let mut resolution_cycle = vec![self.node.resolution];
             let mut delay_steps = self.node.delay_steps;
@@ -3717,6 +3754,7 @@ impl GraphManifest {
                     }
                     if let Some(value) = &intrinsic.route {
                         route = value.to_route();
+                        gate_target = value.to_gate_target();
                     }
                     if let Some(value) = &intrinsic.seed_from {
                         seed_from = SeedFrom::from(value);
@@ -3759,6 +3797,7 @@ impl GraphManifest {
                 quantize: quantize_cycle[0],
                 quantize_cycle,
                 route,
+                gate_target,
                 seed_track_mask,
                 reduce: self.node.reduce,
                 event_select: self.node.event_select,

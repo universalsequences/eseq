@@ -403,9 +403,11 @@
               (status "Drop a Sound item, not a folder"))
             (if (= (get event :drag-type) "instrument")
               (eseq.browser/drop-instrument-new-track payload)
+              (if (= (get event :drag-type) "instrument-preset")
+                (eseq.browser/drop-preset-new-track payload nil)
               (if path
                 (host-command "add-track-sample" (dict :path path :preserve-browser-context true))
-                (status "Drop a sample file, not a folder")))))))))
+                (status "Drop a sample file, not a folder"))))))))))
 
 ;; Drag a track badge onto a group container -> add it to that group.
 (def drop-track-into-group (event gidx)
@@ -445,8 +447,8 @@
   (let ((drag-type (get event :drag-type)))
     (if (= drag-type "sound")
       (eseq.browser/drop-sound-on-track event)
-      (if (= drag-type "instrument")
-        (eseq.browser/drop-instrument-on-track event)
+      (if (or (= drag-type "instrument") (= drag-type "instrument-preset"))
+        (eseq.browser/drop-sound-on-track event)
         (if (= drag-type "sample")
           (drop-sample-on-track event)
           (if (= drag-type "effect-instance")
@@ -460,7 +462,8 @@
 
 (def track-drop-types (i)
   (if (eseq.track-collapse/replaceable-instrument? i)
-    (list "sample" "instrument" "sound" "audio-effect" "midi-effect" "effect-instance")
+    (list "sample" "instrument" "instrument-preset" "sound" "audio-effect" "midi-effect"
+      "effect-instance")
     (if (eseq.track-collapse/sound-replaceable? i)
       (list "sample" "sound" "audio-effect" "midi-effect" "effect-instance")
       (list "sample" "audio-effect" "midi-effect" "effect-instance"))))
@@ -1886,7 +1889,7 @@
       :background-color :mixer-strip-bg
       :drop-hover-border-color :mixer-strip-selected-border
       :drop-types (if (>= bus-idx 0)
-        (list "sample" "instrument" "audio-effect")
+        (list "sample" "instrument" "instrument-preset" "audio-effect")
         (list))
       :drop-meta (dict :kind "bus" :bus bus-idx)
       :on-drop (lambda (event) (drop-on-group-header event gidx))
@@ -1955,6 +1958,8 @@
         (group-id (get group :id)))
       (do
         (select-group gidx)
+        (if (= (get event :drag-type) "instrument-preset")
+          (eseq.browser/drop-preset-new-track payload group-id)
         (if (= (get event :drag-type) "instrument")
           ;; The builtin add-track host commands take no :group-id (a rack even
           ;; creates its own group), so a builtin dropped on a group header is
@@ -1969,7 +1974,7 @@
           (if path
             (host-command "add-track-sample"
               (dict :path path :group-id group-id :preserve-browser-context true))
-            (status "Drop a sample file, not a folder")))))))
+            (status "Drop a sample file, not a folder"))))))))
 
 (def drop-on-group-header (event gidx)
   (if (= (get event :drag-type) "audio-effect")
@@ -2044,7 +2049,7 @@
     :corner-radius (eseq.seq-core-state/radius 16)
     :padding 0.5
     :align :center
-    :drop-types (list "sample" "instrument" "sound" "track-badge")
+    :drop-types (list "sample" "instrument" "instrument-preset" "sound" "track-badge")
     :drop-meta (dict :kind "new-sample-track")
     :on-drop (lambda (event) (drop-sample-new-track event))
     (label "Drop sounds here"

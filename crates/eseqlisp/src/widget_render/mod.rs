@@ -41,6 +41,7 @@ pub mod roar_filter;
 pub mod roar_shaper;
 pub mod scope;
 pub mod scroll;
+pub mod sexp_slot;
 pub mod sdf_widget;
 pub mod sound_glyph;
 pub mod spectrogram;
@@ -1351,6 +1352,7 @@ static WIDGET_DEFINITIONS: &[&dyn WidgetDefinition] = &[
     &image::IMAGE_WIDGET,
     &dropdown::DROPDOWN_WIDGET,
     &number_picker::NUMBER_PICKER_WIDGET,
+    &sexp_slot::SEXP_SLOT_WIDGET,
     &response_curve_editor::RESPONSE_CURVE_EDITOR_WIDGET,
     &scope::SCOPE_WIDGET,
     &scope::XY_SCOPE_WIDGET,

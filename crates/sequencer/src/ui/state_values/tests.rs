@@ -2627,9 +2627,11 @@ mod solo_binding_tests;
                 ("sidebar-track-index", Value::Number(0.0)),
                 ("sidebar-selected-sample", Value::String(String::new())),
                 ("sidebar-presets", test_list(vec![])),
+                ("sidebar-user-presets", test_list(vec![])),
                 ("sidebar-loaded-preset", Value::String(String::new())),
                 ("sidebar-instrument-name", Value::String(String::new())),
                 ("project-instrument-engines", test_list(vec![])),
+                ("content-library-epoch", Value::Number(0.0)),
                 (
                     "sound-presets",
                     test_list(vec![map_value([
@@ -3406,6 +3408,83 @@ mod solo_binding_tests;
                 .any(|item| tree_contains_kind(&item.borrow(), expected_kind)),
             _ => false,
         }
+    }
+
+    fn browser_widget_tree(editor: &eseqlisp::Editor) -> Value {
+        editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*samples*")
+            .and_then(|buffer| buffer.widget_tree.clone())
+            .expect("browser widget tree")
+    }
+
+    fn bump_test_content_library_epoch(editor: &mut eseqlisp::Editor, epoch: f64) {
+        let runtime = editor.runtime_mut();
+        runtime.set_reactive("SEQ", "content-library-epoch", Value::Number(epoch));
+        runtime.run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+    }
+
+    /// eseq-63j4.4: a folder a coding agent writes into the user instruments
+    /// dir lists in the Instruments tab once the host bumps
+    /// `SEQ.content-library-epoch` (the file watcher does), with no restart
+    /// and no other browser interaction.
+    #[test]
+    fn metal_seq_browser_instrument_tab_relists_library_on_content_epoch() {
+        let mut editor = browser_editor_on_instrument_tab();
+        let root = sequencer::app_paths::app_paths().user_instruments_dir();
+        std::fs::create_dir_all(&root).unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("eseq-library-epoch-probe-")
+            .tempdir_in(&root)
+            .unwrap();
+        let name = dir.path().file_name().unwrap().to_str().unwrap().to_string();
+        assert!(
+            !value_contains_string(&browser_widget_tree(&editor), &name),
+            "probe folder is not written yet"
+        );
+        std::fs::write(dir.path().join("dsp.lisp"), "(out 0)").unwrap();
+        std::fs::write(dir.path().join("ui.lisp"), "(defsynth-ui (label 1))").unwrap();
+
+        bump_test_content_library_epoch(&mut editor, 1.0);
+        assert!(
+            value_contains_string(&browser_widget_tree(&editor), &name),
+            "the Library section should list the new folder after the epoch bump"
+        );
+
+        drop(dir);
+        bump_test_content_library_epoch(&mut editor, 2.0);
+        assert!(
+            !value_contains_string(&browser_widget_tree(&editor), &name),
+            "a removed folder should leave the Library section"
+        );
+    }
+
+    #[test]
+    fn metal_seq_browser_audio_fx_tab_relists_effects_on_content_epoch() {
+        let mut editor = browser_editor_on_instrument_tab();
+        let calls = std::rc::Rc::new(std::cell::Cell::new(0usize));
+        let counter = calls.clone();
+        editor
+            .runtime_mut()
+            .register_native("seq-audio-effect-tree", move |_args, _ctx| {
+                counter.set(counter.get() + 1);
+                Ok(test_list(vec![]))
+            });
+        editor
+            .runtime_mut()
+            .eval_str("(set! sbrowser-tab \"audio-fx\")")
+            .expect("select audio fx tab");
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let before = calls.get();
+        assert!(before > 0, "the audio fx tab should list effects");
+        bump_test_content_library_epoch(&mut editor, 1.0);
+        assert!(
+            calls.get() > before,
+            "a content-library epoch bump should re-list the audio effects"
+        );
     }
 
     #[test]
@@ -5774,6 +5853,135 @@ mod solo_binding_tests;
                 .expect("read loading name"),
             Some(Value::String("emulations/digitone".to_string()))
         );
+    }
+
+    fn single_custom_command(editor: &mut eseqlisp::Editor) -> (String, Value) {
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1, "expected one host command: {commands:?}");
+        match commands.into_iter().next().unwrap() {
+            eseqlisp::host::HostCommand::Custom { name, payload } => (name, payload),
+            other => panic!("expected a custom host command, got {other:?}"),
+        }
+    }
+
+    /// A dragged preset row adds a track running its instrument at that preset
+    /// wherever an instrument would add a track (new-track zones, groups).
+    #[test]
+    fn metal_seq_browser_preset_drop_on_new_track_zone_adds_instrument_with_preset() {
+        let mut editor = browser_editor_on_instrument_tab();
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(eseq.browser/drop-preset-new-track
+                    (dict :label "Warm" :preset "Warm" :instrument "synths/digi")
+                    7)"#,
+            )
+            .expect("drop preset on the new-track zone");
+        let (name, payload) = single_custom_command(&mut editor);
+        assert_eq!(name, "add-track-instrument");
+        assert_eq!(extract_string_from_payload(&payload, "name").as_deref(), Some("synths/digi"));
+        assert_eq!(extract_string_from_payload(&payload, "preset").as_deref(), Some("Warm"));
+        assert_eq!(extract_usize_from_payload(&payload, "group-id"), Some(7));
+        assert_eq!(
+            editor.runtime_mut().eval_str("sbrowser-loading-instrument-name").unwrap(),
+            Some(Value::String("synths/digi".to_string()))
+        );
+
+        // Loose tracks carry no group.
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(eseq.browser/drop-preset-new-track
+                    (dict :label "Warm" :preset "Warm" :instrument "synths/digi") nil)"#,
+            )
+            .expect("drop preset on a loose new-track zone");
+        let (_, payload) = single_custom_command(&mut editor);
+        assert_eq!(extract_usize_from_payload(&payload, "group-id"), None);
+
+        // Rack presets carry no instrument and are refused, not mis-added.
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(eseq.browser/drop-preset-new-track
+                    (dict :label "Kit" :preset "Kit" :instrument "") nil)"#,
+            )
+            .expect("drop instrument-less preset");
+        assert!(editor.drain_host_commands().is_empty());
+        assert_eq!(
+            editor.runtime_mut().take_status_message().as_deref(),
+            Some("Drop an instrument preset")
+        );
+    }
+
+    /// Onto an existing track the preset rides a swap; the host loads it in
+    /// place when the track already runs that instrument.
+    #[test]
+    fn metal_seq_browser_preset_drop_on_track_swaps_with_preset() {
+        let mut editor = browser_editor_on_instrument_tab();
+        let rt = editor.runtime_mut();
+        rt.set_reactive("SEQ", "num-tracks", Value::Number(2.0));
+        rt.set_reactive(
+            "SEQ",
+            "track-instrument-types",
+            test_list(vec![
+                Value::String("custom".to_string()),
+                Value::String("modulator".to_string()),
+            ]),
+        );
+        rt.run_reactive_cycle();
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(eseq.browser/drop-sound-on-track
+                    (dict :drag-type "instrument-preset"
+                          :payload (dict :label "Warm" :preset "Warm" :instrument "synths/digi")
+                          :target (dict :track 0 :from-pad true)))"#,
+            )
+            .expect("drop preset on a track");
+        let (name, payload) = single_custom_command(&mut editor);
+        assert_eq!(name, "swap-track-instrument");
+        assert_eq!(extract_usize_from_payload(&payload, "track"), Some(0));
+        assert_eq!(extract_string_from_payload(&payload, "name").as_deref(), Some("synths/digi"));
+        assert_eq!(extract_string_from_payload(&payload, "preset").as_deref(), Some("Warm"));
+        assert!(extract_bool_from_payload(&payload, "preserve-track-selection"));
+
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(eseq.browser/drop-sound-on-track
+                    (dict :drag-type "instrument-preset"
+                          :payload (dict :label "Warm" :preset "Warm" :instrument "synths/digi")
+                          :target (dict :track 1)))"#,
+            )
+            .expect("drop preset on a modulator track");
+        assert!(editor.drain_host_commands().is_empty());
+        assert_eq!(
+            editor.runtime_mut().take_status_message().as_deref(),
+            Some("This track cannot load an instrument")
+        );
+    }
+
+    /// Every drop zone that takes an instrument also takes a preset.
+    #[test]
+    fn metal_seq_instrument_drop_zones_also_accept_presets() {
+        for path in [
+            "ui/mixer.lisp",
+            "ui/sequencer.lisp",
+            "ui/arrangement.lisp",
+            "ui/effects/instrument-panel.lisp",
+            "ui/effects/sampler-panel.lisp",
+        ] {
+            let src = read_factory_source(path).expect("read drop-zone lisp");
+            for (idx, line) in src.lines().enumerate() {
+                if line.contains("(list \"sample\" \"instrument\"") {
+                    assert!(
+                        line.contains("\"instrument-preset\""),
+                        "{path}:{} accepts instruments but not presets: {line}",
+                        idx + 1
+                    );
+                }
+            }
+        }
     }
 
     /// A builtin dropped on an existing track that cannot host it adds a track
@@ -12562,6 +12770,16 @@ mod solo_binding_tests;
             Ok(Some(Value::Bool(true))),
             "right-click on a p-locked param must open the menu"
         );
+        // Only the host that opened the menu draws it: *mixer* renders the
+        // same menu state, and a second copy there steals the clicks.
+        assert_eq!(
+            editor.runtime_mut().eval_str(
+                r#"(list (eseq.effects.param-controls/param-plock-menu-open-in? "fx")
+                         (eseq.effects.param-controls/param-plock-menu-open-in? "mixer"))"#
+            ),
+            Ok(Some(test_bool_list(&[true, false]))),
+            "a param knob's menu opens in *fx* only"
+        );
         assert_eq!(
             editor
                 .runtime_mut()
@@ -12793,16 +13011,6 @@ mod solo_binding_tests;
             ),
             Ok(Some(Value::Number(0.0))),
             "mapping must not repurpose the device control's value domain"
-        );
-        // Only the host that opened the menu draws it: *mixer* renders the
-        // same menu state, and a second copy there steals the clicks.
-        assert_eq!(
-            editor.runtime_mut().eval_str(
-                r#"(list (eseq.effects.param-controls/param-plock-menu-open-in? "fx")
-                         (eseq.effects.param-controls/param-plock-menu-open-in? "mixer"))"#
-            ),
-            Ok(Some(test_bool_list(&[true, false]))),
-            "a param knob's menu opens in *fx* only"
         );
         assert_eq!(
             editor.runtime_mut().eval_str(
@@ -15329,6 +15537,61 @@ mod solo_binding_tests;
             other => panic!("expected replace-rack-slot-instrument command, got {other:?}"),
         }
 
+        // browser.lisp (which owns the preset payload reader) is not loaded
+        // in this fx harness; its own tests cover the reader.
+        editor.runtime_mut().register_native(
+            "eseq.browser/preset-payload-instrument",
+            |args, _ctx| Ok(match args.first() {
+                Some(Value::Map(payload)) => payload
+                    .get("instrument")
+                    .map(|value| value.borrow().clone())
+                    .unwrap_or(Value::Nil),
+                _ => Value::Nil,
+            }),
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(eseq.effects.instrument-panel/rack-selected-instrument-drop
+                    (dict :drag-type "instrument-preset"
+                          :payload (dict :label "Warm" :preset "Warm" :instrument "synths/wavetable")
+                          :target (dict :track 0 :slot 1)))"#,
+            )
+            .expect("drop preset on expanded rack layer");
+        let commands = editor.drain_host_commands();
+        assert!(
+            matches!(commands.as_slice(),
+                [eseqlisp::host::HostCommand::Custom { name, payload }]
+                    if name == "replace-rack-slot-instrument"
+                        && extract_usize_from_payload(payload, "slot") == Some(1)
+                        && extract_string_from_payload(payload, "name").as_deref()
+                            == Some("synths/wavetable")
+                        && extract_string_from_payload(payload, "preset").as_deref()
+                            == Some("Warm")),
+            "preset drop on a rack layer should replace it at that preset: {commands:?}"
+        );
+
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(eseq.effects.instrument-panel/rack-panel-drop-on-rack
+                    (dict :drag-type "instrument-preset"
+                          :payload (dict :label "Warm" :preset "Warm" :instrument "synths/wavetable")
+                          :target (dict :track 0)))"#,
+            )
+            .expect("drop preset on rack panel");
+        let commands = editor.drain_host_commands();
+        assert!(
+            matches!(commands.as_slice(),
+                [eseqlisp::host::HostCommand::Custom { name, payload }]
+                    if name == "add-rack-instrument-slot"
+                        && extract_string_from_payload(payload, "name").as_deref()
+                            == Some("synths/wavetable")
+                        && extract_string_from_payload(payload, "preset").as_deref()
+                            == Some("Warm")),
+            "preset drop on a rack should add a layer at that preset: {commands:?}"
+        );
+
         editor
             .runtime_mut()
             .eval_str(
@@ -16949,6 +17212,7 @@ mod solo_binding_tests;
                 ("sidebar-track-index", Value::Number(0.0)),
                 ("sidebar-selected-sample", Value::String(String::new())),
                 ("sidebar-presets", test_list(vec![])),
+                ("sidebar-user-presets", test_list(vec![])),
                 ("sidebar-loaded-preset", Value::String(String::new())),
                 ("sidebar-instrument-name", Value::String(String::new())),
                 (
@@ -34363,7 +34627,7 @@ mod solo_binding_tests;
         assert_finite_nonzero_rect(panel, "custom instrument drop target");
         assert_eq!(
             panel.props.get("drop-types"),
-            Some(&test_string_list(&["sample", "instrument", "sound"]))
+            Some(&test_string_list(&["sample", "instrument", "instrument-preset", "sound"]))
         );
         assert_eq!(
             actions.props.get("options"),
@@ -52703,6 +52967,7 @@ mod solo_binding_tests;
             Some(&test_list(vec![
                 Value::String("sample".to_string()),
                 Value::String("instrument".to_string()),
+                Value::String("instrument-preset".to_string()),
                 Value::String("audio-effect".to_string()),
             ])),
             "group bus strips should accept new tracks and audio-effect drops"

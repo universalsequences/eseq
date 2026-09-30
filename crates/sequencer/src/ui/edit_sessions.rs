@@ -222,6 +222,8 @@ pub(super) struct PendingSavedInstrumentLoad {
     pub(super) source: String,
     pub(super) run_mode: CustomInstrumentRunMode,
     pub(super) target: SavedInstrumentLoadTarget,
+    /// Preset dropped along with the instrument, applied after the load.
+    pub(super) preset: Option<String>,
     pub(super) receiver: std::sync::mpsc::Receiver<Result<sequencer::lisp_host::CompileResult, String>>,
 }
 

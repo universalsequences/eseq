@@ -674,9 +674,10 @@ pub(in crate::lisp_host) fn render_loaded_effect_for_test_with_host_services(
     if options.frames == 0 {
         return Err("frames must be greater than zero".to_string());
     }
-    if manifest.n_inputs < 2 || manifest.n_outputs < 2 {
+    // Mono effects are fine: the channel buffers below are padded to stereo.
+    if manifest.n_inputs < 1 || manifest.n_outputs < 1 {
         return Err(format!(
-            "effect probe requires at least two inputs and outputs, got {} input(s) and {} output(s)",
+            "effect probe requires at least one input and one output, got {} input(s) and {} output(s)",
             manifest.n_inputs, manifest.n_outputs
         ));
     }

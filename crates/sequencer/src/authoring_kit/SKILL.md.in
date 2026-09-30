@@ -1,0 +1,23 @@
+---
+name: eseq-authoring
+description: Create or modify a custom instrument (synth, drum voice, physical model) or audio effect for the ESeq sequencer, written in DGenLisp with a ui.lisp panel. Use whenever the user asks for a new ESeq instrument, synth, drum sound or effect, or wants to change one they made.
+---
+<!-- eseq:generated. Written by `eseq authoring skill` for ESeq {{VERSION}}. -->
+
+# ESeq instrument and effect authoring
+
+The full guide is `{{USER_ROOT}}/AGENTS.md`. Read it before writing anything and
+follow its workflow. It lists where to write files, the rules files for
+instruments and effects, factory examples, and the check command:
+
+```sh
+"{{ESEQ}}" instrument check "{{USER_INSTRUMENTS}}/<Name>"
+"{{ESEQ}}" effect check "{{USER_EFFECTS}}/<Name>"
+```
+
+Write new instruments under `{{USER_INSTRUMENTS}}` and effects under
+`{{USER_EFFECTS}}`, one folder each holding `dsp.lisp` and `ui.lisp`. Run the
+check until it prints `PASS`, then open the panel PNG it prints and look at it.
+
+If `{{USER_ROOT}}/AGENTS.md` is missing, start ESeq once; it writes the guide
+when it launches.

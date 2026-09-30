@@ -11,6 +11,7 @@ pub(super) const COMMANDS: &[&str] = &[
     "menu-search-commands",
     "menu-import-samples",
     "menu-keyboard-shortcuts",
+    "menu-open-authoring-folder",
     "menu-open-recent",
     "menu-pattern-transpose",
     "menu-pattern-clear-request",
@@ -45,6 +46,13 @@ pub(super) fn handle(
                     .runtime_mut()
                     .eval_str("(eseq.manual/open-node \"customization\")")
                     .map_err(|e| format!("{e:?}"))?;
+            }
+            "menu-open-authoring-folder" => {
+                let paths = sequencer::app_paths::app_paths();
+                let root = paths.user_data_root();
+                sequencer::authoring_kit::seed(paths, &root, &sequencer::authoring_kit::eseq_cli_path())
+                    .map_err(|e| format!("Could not write the authoring guide: {e}"))?;
+                open_terminal_at(&root)?;
             }
             "menu-pattern-clear-request" => {
                 let track = ctx.shared.current_track.load(Ordering::Relaxed);
@@ -270,4 +278,16 @@ pub(super) fn handle(
     editor.runtime_mut().run_reactive_cycle();
     editor.refresh_runtime_side_effects();
     editor.mark_needs_redraw();
+}
+
+/// A new Terminal window in `dir`, where the user starts their coding agent.
+fn open_terminal_at(dir: &std::path::Path) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    let status = std::process::Command::new("open").arg("-a").arg("Terminal").arg(dir).status();
+    #[cfg(not(target_os = "macos"))]
+    let status = std::process::Command::new("xdg-open").arg(dir).status();
+    match status {
+        Ok(status) if status.success() => Ok(()),
+        Ok(_) | Err(_) => Err(format!("Could not open a terminal; the folder is {}", dir.display())),
+    }
 }

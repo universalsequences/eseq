@@ -705,6 +705,9 @@ pub struct SequencerState {
     pub(super) rack_macro_runtime_values: Arc<RackMacroRuntimeValues>,
     pub(super) neural_visualization: Mutex<NeuralVisualizationSnapshot>,
     pub(super) graph_visualizations: Mutex<Vec<GraphVisualizationSnapshot>>,
+    /// `gen-mark` values per (generator id, key): (audio sample, value),
+    /// oldest first, capped (see `push_generator_mark`).
+    pub(super) generator_marks: Mutex<HashMap<(u64, String), std::collections::VecDeque<(u64, f64)>>>,
     pub(super) graph_control_commands: Mutex<Vec<crate::graph::GraphControlCommand>>,
     /// Control-thread hold ownership and ordered roll commands, drained at
     /// the top of every scheduler worker iteration.

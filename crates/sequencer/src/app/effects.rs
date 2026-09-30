@@ -862,6 +862,30 @@ impl App {
         self.replace_custom_instrument_track_sync(track, name, source)
     }
 
+    /// Recompile the custom instrument running on `track` from its dsp.lisp
+    /// on disk, in place (eseq-63j4.4: files edited outside the app, e.g. by
+    /// a coding agent). Every track sharing that engine picks it up and keeps
+    /// the values of parameters whose names survived. Returns the
+    /// instrument id; a compile error leaves the running engine untouched.
+    pub fn reload_custom_instrument_from_disk(&mut self, track: usize) -> Result<String, String> {
+        if self.graph.track_instrument_types.get(track) != Some(&InstrumentType::Custom) {
+            return Err("the selected track does not play a custom instrument".to_string());
+        }
+        let name = self
+            .graph
+            .track_engine_ids
+            .get(track)
+            .copied()
+            .flatten()
+            .and_then(|engine_id| self.editor.engine_registry.get(engine_id))
+            .map(|engine| engine.name.clone())
+            .ok_or_else(|| "the track's instrument could not be resolved".to_string())?;
+        let source = lisp_host::load_instrument_source(&name)
+            .map_err(|error| format!("cannot read dsp.lisp of '{name}': {error}"))?;
+        self.replace_custom_instrument_track_sync(track, &name, &source)?;
+        Ok(name)
+    }
+
     pub fn replace_custom_instrument_track_sync(
         &mut self,
         track: usize,

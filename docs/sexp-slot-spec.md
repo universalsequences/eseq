@@ -80,6 +80,14 @@ typed input, and feeds completions and `+` menus.
   unless it is `(fixed …)`. That is what makes `(fast (1 2 3))` and
   `(every 2 (rev swap))` fall out with no per-head work.
 - `:clock` on the outer schema (`per-cycle`, `per-fire`, …) is only a label.
+- `(rest <schema>)` is only a form's last arg: the form then takes one or
+  more trailing values of `<schema>`. `(form seq (word :hit :cycle) (rest
+  (num …)))` accepts `(seq :hit 0 3 7)`; `+` inside its `)` adds a copy of
+  the last value, Backspace removes trailing values down to one.
+- A form is recognized by the schema that applies **where it sits**, not the
+  root's: a `(seq …)` in a `(note …)` arg or a `(fig 2)` in an `(on …)`
+  selector is a form of that position's schema (head drawn as a head, no
+  `+` unless its last arg is `rest`).
 
 ## 5. Interaction
 
@@ -171,6 +179,15 @@ number scrubs it; clicking a word or head opens its choice popup
   highlight) is the widget's own, keyed by widget id; instance key scoping
   already makes those ids unique per instance.
 - Every committed edit is one `on-change` call, so one undo step.
+- `:on-hover (lambda (item) …)` (optional) hears the top-level item under the
+  pointer, as its stored value, whenever it changes, and `nil` when the
+  pointer leaves the item or the slot (the editor reports the leave through
+  `widget_render::sexp_slot::pointer_moved_to`).
+- `:wrap false` keeps the value on one line; the slot grows past its box
+  instead of wrapping between pieces.
+- `:tint-args '(("on" 0))` draws argument 0 of every `(on …)` form (its atoms
+  and bands) in `:tint-color` (default the syntax string color), so a form's
+  "where" reads apart from its "what".
 
 ## 8. Build plan
 

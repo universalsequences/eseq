@@ -1500,7 +1500,20 @@ fn graph_timebase_value(timebase: crate::sequencer::Timebase) -> EValue {
     EValue::String(timebase.label().to_string())
 }
 
-fn graph_route_value(route: Option<usize>) -> EValue {
+/// A node's route as Lisp reads it back: a track index, `(:gen id)` for a
+/// generator it gates, `(:restart id)` for one it restarts
+/// (docs/jaki-trig-modes-spec.md §5-§6), or nil.
+fn graph_route_value(
+    route: Option<usize>,
+    gate_target: Option<crate::graph::GateTarget>,
+) -> EValue {
+    if let Some(target) = gate_target {
+        let tag = if target.restart { "restart" } else { "gen" };
+        return lisp_list(vec![
+            EValue::Keyword(tag.to_string()),
+            EValue::Number(target.id as f64),
+        ]);
+    }
     route
         .map(|track| EValue::Number(track as f64))
         .unwrap_or(EValue::Nil)
@@ -1570,7 +1583,7 @@ fn resolved_graph_node_value(
                 .collect::<Vec<_>>()
                 .join(" "),
         )),
-        "route" => Ok(graph_route_value(node.route)),
+        "route" => Ok(graph_route_value(node.route, node.gate_target)),
         "seed-from" => Ok(graph_seed_from_value(node.seed_track_mask)),
         "seed-route" | "seed-from-route" => Ok(EValue::Number(
             if resolved_graph_seed_from_route(state, manifest, instance) {
@@ -1831,8 +1844,34 @@ fn parse_graph_route_override(
         Some("none") | Some("nil") | Some("off") => {
             Ok(crate::graph::ProjectGraphRouteOverride::None)
         }
+        _ if matches!(value, EValue::List(_)) => parse_graph_generator_route(value),
         _ => parse_nonnegative_usize(value, "route")
             .map(crate::graph::ProjectGraphRouteOverride::Track),
+    }
+}
+
+/// `(:gen id)`: gate generator `id`; `(:restart id)`: restart its pattern
+/// (docs/jaki-trig-modes-spec.md §5-§6).
+fn parse_graph_generator_route(
+    value: &EValue,
+) -> Result<crate::graph::ProjectGraphRouteOverride, String> {
+    const EXPECTED: &str = "route expects a track index, :off, (:gen id) or (:restart id)";
+    let EValue::List(items) = value else {
+        return Err(EXPECTED.to_string());
+    };
+    let items: Vec<EValue> = items.iter().map(|item| item.borrow().clone()).collect();
+    let [tag, EValue::Number(id)] = items.as_slice() else {
+        return Err(EXPECTED.to_string());
+    };
+    if *id < 0.0 || id.fract() != 0.0 {
+        return Err(EXPECTED.to_string());
+    }
+    match graph_keyword(tag).as_deref() {
+        Some("gen") => Ok(crate::graph::ProjectGraphRouteOverride::Generator(*id as u64)),
+        Some("restart") => {
+            Ok(crate::graph::ProjectGraphRouteOverride::GeneratorRestart(*id as u64))
+        }
+        _ => Err(EXPECTED.to_string()),
     }
 }
 
