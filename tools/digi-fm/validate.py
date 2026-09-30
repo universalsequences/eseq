@@ -146,8 +146,8 @@ def main():
         assert errors['sine'] < .001 and errors['keys'] < .05, errors
         results['high_rate_reference_relative_spectral_error_below_10khz'] = errors
         # Compare the refactored Drift to its unmodified tracked implementation.
-        before = subprocess.check_output(['git','show','HEAD:content/instruments/Synths/Digi Drift/dsp.lisp'],cwd=ROOT,text=True)
-        after = (ROOT/'content/instruments/Synths/Digi Drift/dsp.lisp').read_text()
+        before = subprocess.check_output(['git','show','HEAD:content/instruments/Synths/Digi Syn/versions/1/dsp.lisp'],cwd=ROOT,text=True)
+        after = (ROOT/'content/instruments/Synths/Digi Syn/versions/1/dsp.lisp').read_text()
         old = compile_source(directory, 'drift_before', before)
         new = compile_source(directory, 'drift_after', after)
         for filter_type in [0,1]:

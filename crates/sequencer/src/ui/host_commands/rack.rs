@@ -889,7 +889,9 @@ pub(super) fn handle(
         "add-rack-instrument-slot" => {
             let track = extract_usize_from_payload(&payload, "track")
                 .or_else(|| current_track_for_app(&mut app, &current_track));
-            let name = extract_string_from_payload(&payload, "name");
+            // A new rack layer gets the instrument's current release.
+            let name = extract_string_from_payload(&payload, "name")
+                .map(|name| sequencer::lisp_host::pin_instrument_for_new_track(&name));
             match (track, name) {
                 (Some(track), Some(name)) => {
                     match app.add_saved_instrument_slot_to_rack_sync(track, &name) {
@@ -935,7 +937,8 @@ pub(super) fn handle(
             let track = extract_usize_from_payload(&payload, "track")
                 .or_else(|| current_track_for_app(&mut app, &current_track));
             let slot = extract_usize_from_payload(&payload, "slot");
-            let name = extract_string_from_payload(&payload, "name");
+            let name = extract_string_from_payload(&payload, "name")
+                .map(|name| sequencer::lisp_host::pin_instrument_for_new_track(&name));
             match (track, slot, name) {
                 (Some(track), Some(slot), Some(name)) => {
                     match app.replace_rack_slot_with_saved_instrument_sync(

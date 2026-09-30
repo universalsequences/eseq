@@ -1,6 +1,7 @@
 //! Digi Drift's phase-aligned, pre-filter source preview.
 //!
-//! Dual-maintained with `content/instruments/Synths/Digi Drift/dsp.lisp`:
+//! Dual-maintained with `content/instruments/Synths/Digi Syn/versions/1/dsp.lisp`
+//! (Digi Drift, release 1 of Digi Syn):
 //! morph-osc, basic-osc, osc-frequencies and source-mixer. This is a cycle
 //! diagram, not an oscilloscope: free-running phase, analog drift and internal
 //! voice envelopes / matrix are not simulated. Host modulation uses the same

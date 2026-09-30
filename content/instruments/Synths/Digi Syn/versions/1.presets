@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "engine_name": "Synths/Digi Drift/",
-  "source_file": "instruments/Synths/Digi Drift/dsp.lisp",
+  "engine_name": "Synths/Digi Syn/versions/1/",
+  "source_file": "instruments/Synths/Digi Syn/versions/1/dsp.lisp",
   "presets": [
     {
       "id": "Woolly Res Bass",

@@ -1578,7 +1578,8 @@ pub(crate) fn build_midi_effect_tree(query: &str) -> Value {
 }
 
 pub(crate) fn instrument_display_name(name: &str) -> String {
-    let trimmed = name.trim_end_matches('/');
+    // A pinned release id (`factory:Synths/Digi Syn@2`) displays without its pin.
+    let (trimmed, _) = sequencer::app_paths::ContentTier::split_release(name);
     Path::new(trimmed)
         .file_name()
         .and_then(|value| value.to_str())

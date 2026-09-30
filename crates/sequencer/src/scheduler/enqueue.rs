@@ -84,7 +84,7 @@ pub(super) fn enqueue_resolved_trigger(
                         pattern_epoch,
                         sample_time: note_sample_time,
                         kind: ScheduledEventKind::ResolvedTrigger {
-                            voice_policy: crate::scheduled_event::ScheduledVoicePolicy::from_track(&snapshot.tracks[track_idx]),
+                            voice_policy: crate::scheduled_event::ScheduledVoicePolicy::from_track_with_params(&snapshot.tracks[track_idx], &instrument_params),
                             track: track_idx,
                             step: step_idx,
                             samples_per_step,
@@ -130,7 +130,7 @@ pub(super) fn enqueue_resolved_trigger(
             pattern_epoch,
             sample_time,
             kind: ScheduledEventKind::ResolvedTrigger {
-                voice_policy: crate::scheduled_event::ScheduledVoicePolicy::from_track(&snapshot.tracks[track_idx]),
+                voice_policy: crate::scheduled_event::ScheduledVoicePolicy::from_track_with_params(&snapshot.tracks[track_idx], &instrument_params),
                 track: track_idx,
                 step: step_idx,
                 samples_per_step,

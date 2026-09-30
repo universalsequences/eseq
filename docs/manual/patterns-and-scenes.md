@@ -137,7 +137,7 @@ To open the palette:
 - click the badge beginning with **>** in the instrument panel header, which names the pattern or take the panel is editing (for example **> Pattern 2 (scene)**);
 - or press `C-c p`: with a clip selected in the arrangement it opens on that clip's pattern or take, otherwise on the current track.
 
-The header names the track, its instrument and the target the palette acts on, for example **Sound Pool - Track 3 (Digi Drift) - Pattern 4**. The target is a pattern, a take or a scene cell. The palette has three actions:
+The header names the track, its instrument and the target the palette acts on, for example **Sound Pool - Track 3 (Digi Syn) - Pattern 4**. The target is a pattern, a take or a scene cell. The palette has three actions:
 
 - Click a card to **apply** that patch to the target. This links rather than copies: the target now uses the same patch, so later edits to it are heard wherever it is used. The target keeps its own mix. The patch carries its instrument and effect p-locks, so after Apply the target's steps play the source's locks.
 - Click **+** in the header to **fork** the target's sound: it gets new copies of its patch and mix, and stops sharing.

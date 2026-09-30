@@ -42,7 +42,7 @@ The factory instruments come in three folders, the first two divided into sub-fo
 
 - **Drums** (16). Kicks: 808 Kick, 909 Kick, Boom Bap Kick, Break Kick, Modal Kick, Virus B BassDrum 23. Snares: Digi Snare, Membrane Snare, Modal Snare. Claps: 808 Clap, Digi Clap. Hats & Cymbals: 909 Open Hat, Digi Cymbal, Digi Hat. Toms: 808 Tom, Orbit Tom 66.
 - **Physical Models** (15). Winds: PM Clarinet, PM Flute, PM Saxophone. Strings: PM Cello, PM Electric Bass. Keys: PM Piano. Cymbals: PM Crash, PM Hi-Hat, PM Ride. Gamelan: PM Bonang, PM Kempyang, PM Kethuk, PM Saron, PM Slenthem, PM Slenthem Slendro. The six Gamelan models are Javanese gamelan instruments.
-- **Synths** (9): Digi Drift, Digi FM, Digi Wave, Grit, Heat, Melt, Poseidon, Revsynt and Vox.
+- **Synths** (9): Digi FM, Digi Syn, Digi Wave, Grit, Heat, Melt, Poseidon, Revsynt and Vox.
 
 Every compiled instrument, factory or not, is the same kind of object: DGenLisp source plus a panel description. A factory instrument has no privileges that one of yours lacks.
 
@@ -75,9 +75,9 @@ Selecting a track shows its instrument at the left of the device panel. The head
 - the **•••** menu: **Copy current values to all scenes**, **Group Rack** (which wraps the track in an Instrument Rack) and **Edit** (which opens the instrument in the patch editor);
 - the save icon, which saves a preset.
 
-The **synth** tab shows the instrument's own controls. Each instrument lays these out itself, so there is no single layout to learn, but most synths have oscillators or another source, a filter, an amplitude envelope and some modulation of their own. Digi Drift, for instance, has two oscillators and noise, two routable envelopes, a filter, an LFO and a pitch section.
+The **synth** tab shows the instrument's own controls. Each instrument lays these out itself, so there is no single layout to learn, but most synths have oscillators or another source, a filter, an amplitude envelope and some modulation of their own. Digi Syn, for instance, has two oscillators and noise, two routable envelopes, a filter, an LFO and a pitch section.
 
-![Digi Drift's synth tab. Its oscillator, envelope, filter, LFO and pitch sections are the instrument's own; the synth, mods and keys tabs in the header are common to every instrument.](images/digi-drift.png)
+![Digi Syn's synth tab. Its oscillator, envelope, filter, LFO and pitch sections are the instrument's own; the synth, mods and keys tabs in the header are common to every instrument.](images/digi-drift.png)
 
 A knob in the panel writes to one of three places, depending on what is selected:
 
@@ -91,7 +91,7 @@ A **preset** is a saved state of one instrument: every base value, the base note
 
 To load one, select the track and open the **Presets** tab of the browser. Click a preset to load it. The list shows the factory presets and your own; when a rack slot is selected, it shows the presets of that slot's instrument.
 
-![The Presets tab follows the selected track's instrument; this list belongs to Digi Drift.](images/presets.png)
+![The Presets tab follows the selected track's instrument; this list belongs to Digi Syn.](images/presets.png)
 
 Loading a preset replaces the base values, the base note and the key locks of the current pattern's patch, and so of any pattern sharing that patch. Other patterns on the track keep their own settings; use **Copy current values to all scenes** in the **•••** menu to spread the preset to them. Step parameter locks stay, and still win on their steps.
 
@@ -159,7 +159,7 @@ Keys that carry locks are marked on the keyboard. Each distinct set of locked va
 
 ### Example: a bass that changes with register
 
-This builds a bass that changes character by register. It assumes a Digi Drift track playing a two-page pattern whose notes stay between C2 and B2.
+This builds a bass that changes character by register. It assumes a Digi Syn track playing a two-page pattern whose notes stay between C2 and B2.
 
 1. With no steps and no keys selected, set **Cutoff Hz** low for a dark sound.
 2. Click **keys** and select C3 to B3.

@@ -345,6 +345,31 @@ fn instrument_ui_dispatch_aliases(
     aliases.into_iter().collect()
 }
 
+/// Dispatch names for a versioned factory release: its pinned id and every
+/// alias that resolves to it, minus unqualified names another instrument's UI
+/// also answers to (the counts include both).
+fn release_instrument_ui_dispatch_aliases(
+    id: &str,
+    aliases: &[String],
+    leaf_name_counts: &BTreeMap<String, usize>,
+    logical_path_counts: &BTreeMap<String, usize>,
+) -> Vec<String> {
+    let mut out = vec![id.to_string()];
+    for alias in aliases {
+        let trimmed = alias.trim_end_matches('/');
+        let unique = alias.contains(':')
+            || if trimmed.contains('/') {
+                logical_path_counts.get(trimmed).copied() == Some(1)
+            } else {
+                leaf_name_counts.get(trimmed).copied() == Some(1)
+            };
+        if unique && !out.contains(alias) {
+            out.push(alias.clone());
+        }
+    }
+    out
+}
+
 fn warn_custom_ui_source(path: &str, source: &str) {
     eseqlisp::module_alias_migration::warn_on_old_module_aliases(Path::new(path), source);
 }
@@ -354,7 +379,13 @@ pub(crate) fn build_custom_instrument_ui_source_with_overlay(
 ) -> String {
     use eseqlisp::parser::{ASTParser, Expression, Parser};
 
-    fn collect(dir: &Path, root: &Path, tier: &str, out: &mut Vec<(String, String, String)>) {
+    fn collect(
+        dir: &Path,
+        root: &Path,
+        tier: &str,
+        releases: &[sequencer::lisp_host::InstrumentReleaseIds],
+        out: &mut Vec<(String, String, String)>,
+    ) {
         let Ok(entries) = std::fs::read_dir(dir) else {
             return;
         };
@@ -371,21 +402,34 @@ pub(crate) fn build_custom_instrument_ui_source_with_overlay(
                         if let (Ok(rel), Ok(src)) =
                             (path.strip_prefix(root), std::fs::read_to_string(&ui_path))
                         {
-                            let inst_name =
-                                format!("{tier}{}/", rel.to_string_lossy().replace('\\', "/"));
+                            // A factory release folder (the top of a versioned
+                            // instrument or one of its `versions/<n>`) is
+                            // named by its pinned id, never by its path.
+                            let inst_name = match releases.iter().find(|release| release.folder == path) {
+                                Some(release) => release.id.clone(),
+                                None => format!("{tier}{}/", rel.to_string_lossy().replace('\\', "/")),
+                            };
                             out.push((inst_name, ui_path.display().to_string(), src));
                         }
                     }
                 }
-                collect(&path, root, tier, out);
+                collect(&path, root, tier, releases, out);
             }
         }
     }
 
     let mut ui_sources = Vec::new();
     let paths = sequencer::app_paths::app_paths();
+    // Versioned releases dispatch on exactly the ids that load them
+    // (docs/instrument-versioning-spec.md): the pin, plus whichever legacy
+    // names and top-folder forms resolve to that release.
+    let releases = sequencer::lisp_host::instrument_release_ids();
+    let release_aliases: BTreeMap<String, Vec<String>> = releases
+        .iter()
+        .map(|release| (release.id.clone(), release.aliases.clone()))
+        .collect();
     for root in paths.instrument_roots() {
-        collect(&root.path, &root.path, &root.tier.id_prefix(), &mut ui_sources);
+        collect(&root.path, &root.path, &root.tier.id_prefix(), &releases, &mut ui_sources);
     }
 
     let mut functions = r#"
@@ -415,6 +459,19 @@ pub(crate) fn build_custom_instrument_ui_source_with_overlay(
     let mut leaf_name_counts = BTreeMap::new();
     let mut logical_path_counts = BTreeMap::new();
     for (name, _, _) in &ui_sources {
+        if let Some(aliases) = release_aliases.get(name) {
+            // Count the unqualified names a release answers to, so another
+            // tier's same-named instrument does not also claim them.
+            for alias in aliases.iter().filter(|alias| !alias.contains(':')) {
+                let alias = alias.trim_end_matches('/');
+                if alias.contains('/') {
+                    *logical_path_counts.entry(alias.to_string()).or_insert(0) += 1;
+                } else {
+                    *leaf_name_counts.entry(alias.to_string()).or_insert(0) += 1;
+                }
+            }
+            continue;
+        }
         if let Some(leaf) = instrument_leaf_name(name) {
             *leaf_name_counts.entry(leaf).or_insert(0) += 1;
         }
@@ -467,13 +524,18 @@ pub(crate) fn build_custom_instrument_ui_source_with_overlay(
             "\n(def {fn_name} (inst) (do (set! synth-ui-current-inst inst) (set! synth-ui-current-name {}) (set! custom-ui-current-kind \"instrument\") (set! custom-ui-selected-section (eseq.effects.custom-ui-sections/custom-ui-selected-section-for-current-scope)) {body}))\n",
             lisp_string_literal(normalized_instrument_name)
         ));
-        let aliases =
-            instrument_ui_dispatch_aliases(&instrument_name, &leaf_name_counts, &logical_path_counts);
+        let release_alias_list = release_aliases.get(&instrument_name);
+        let aliases = match release_alias_list {
+            Some(release_aliases) => {
+                release_instrument_ui_dispatch_aliases(&instrument_name, release_aliases, &leaf_name_counts, &logical_path_counts)
+            }
+            None => instrument_ui_dispatch_aliases(&instrument_name, &leaf_name_counts, &logical_path_counts),
+        };
         let mut name_clauses = aliases
             .iter()
             .map(|alias| format!("(= (get inst :name) {})", lisp_string_literal(alias)))
             .collect::<Vec<_>>();
-        if let Some(leaf) = instrument_leaf_name(&instrument_name) {
+        if let Some(leaf) = instrument_leaf_name(&instrument_name).filter(|_| release_alias_list.is_none()) {
             if !instrument_name.contains(':') && leaf != normalized_instrument_name
                 && leaf_name_counts.get(&leaf).copied() == Some(1)
             {
@@ -769,7 +831,7 @@ mod tests {
     use super::{
         build_custom_audio_fx_ui_source_with_overlay,
         build_custom_instrument_ui_source_with_overlay, build_custom_midi_fx_ui_source_with_overlay,
-        instrument_ui_dispatch_aliases,
+        instrument_ui_dispatch_aliases, release_instrument_ui_dispatch_aliases,
         reload_custom_ui_source, GENERATED_INSTRUMENT_UI_PATH,
     };
     use eseqlisp::vm::Value;
@@ -954,6 +1016,34 @@ mod tests {
     }
 
     #[test]
+    fn release_ui_dispatch_answers_to_its_pin_and_uncontested_legacy_names() {
+        let aliases = [
+            "factory:Synths/Drift",
+            "Synths/Drift",
+            "Synths/Drift/",
+            "Drift",
+        ]
+        .map(String::from);
+        let mut leaves = BTreeMap::new();
+        leaves.insert("Drift".to_string(), 1);
+        let mut paths = BTreeMap::new();
+        paths.insert("Synths/Drift".to_string(), 1);
+        let dispatch =
+            release_instrument_ui_dispatch_aliases("factory:Synths/Syn@1", &aliases, &leaves, &paths);
+        assert_eq!(dispatch[0], "factory:Synths/Syn@1");
+        for alias in &aliases {
+            assert!(dispatch.contains(alias), "{alias}");
+        }
+        // A user instrument sharing the legacy path or leaf contests the
+        // unqualified names; the qualified ones stay.
+        leaves.insert("Drift".to_string(), 2);
+        paths.insert("Synths/Drift".to_string(), 2);
+        let dispatch =
+            release_instrument_ui_dispatch_aliases("factory:Synths/Syn@1", &aliases, &leaves, &paths);
+        assert_eq!(dispatch, ["factory:Synths/Syn@1", "factory:Synths/Drift"]);
+    }
+
+    #[test]
     fn instrument_ui_dispatch_preserves_content_tier_for_root_level_names() {
         let mut counts = BTreeMap::new();
         counts.insert("Heat".to_string(), 1);
@@ -1071,7 +1161,9 @@ fn active_custom_ui_buffer_overlay(editor: &Editor) -> Option<(String, String, S
                 .ok()
                 .map(|rel| (root.tier.id_prefix(), rel.to_path_buf()))
         })?;
-    let instrument_name = format!("{prefix}{}/", rel.to_string_lossy().replace('\\', "/"));
+    // A release folder's UI is dispatched under its pinned id.
+    let instrument_name = sequencer::lisp_host::instrument_release_id_for_folder(folder)
+        .unwrap_or_else(|| format!("{prefix}{}/", rel.to_string_lossy().replace('\\', "/")));
     Some((instrument_name, path.display().to_string(), buffer.text()))
 }
 

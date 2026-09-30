@@ -256,8 +256,11 @@ pub(super) fn render_audio_block(
             continue;
         }
         let is_custom = instrument_type == InstrumentType::Custom;
-        let track_polyphonic = data.state.pattern.track_params[kt.track].is_polyphonic();
-        let track_max_polyphony = data.state.pattern.track_params[kt.track].get_max_polyphony();
+        let instrument_voice_config = data.scheduler_snapshot.tracks.get(kt.track)
+            .and_then(|track| track.instrument_slot.instrument_voice_config(&ScheduledInstrumentParams::new()));
+        let track_polyphonic = instrument_voice_config.map_or_else(|| data.state.pattern.track_params[kt.track].is_polyphonic(), |config| config.polyphonic);
+        let track_max_polyphony = instrument_voice_config.map_or_else(|| data.state.pattern.track_params[kt.track].get_max_polyphony(), |config| config.max_polyphony);
+        let mono_trigger = instrument_voice_config.map_or_else(|| data.state.pattern.track_params[kt.track].get_mono_trigger(), |config| config.mono_trigger);
         data.voice_pools[kt.track].polyphonic = track_polyphonic;
         let base_note_offset = f32::from_bits(
             data.state.pattern.instrument_base_note_offsets[kt.track].load(Ordering::Relaxed),
@@ -375,6 +378,23 @@ pub(super) fn render_audio_block(
                 let Some(engine_id) = track_engine_id(&data.state, kt.track) else {
                     continue;
                 };
+                let default_params =
+                    resolve_snapshot_instrument_defaults(&data.scheduler_snapshot, kt.track);
+                let default_tensor_params =
+                    resolve_live_instrument_tensor_defaults(&data.state, kt.track);
+                let key_locked_params = key_locked_live_instrument_params(
+                    &data.state,
+                    kt.track,
+                    resolved_transpose,
+                    base_note_offset,
+                    None,
+                    &default_params,
+                );
+                let allocation_config = data.scheduler_snapshot.tracks.get(kt.track)
+                    .and_then(|track| track.instrument_slot.instrument_voice_config(&key_locked_params));
+                let track_polyphonic = allocation_config.map_or(track_polyphonic, |config| config.polyphonic);
+                let track_max_polyphony = allocation_config.map_or(track_max_polyphony, |config| config.max_polyphony);
+                let mono_trigger = allocation_config.map_or(mono_trigger, |config| config.mono_trigger);
                 let free_patch = track_custom_run_mode(&data.state, kt.track)
                     == CustomInstrumentRunMode::FreePatch;
                 let allocation = if free_patch {
@@ -398,23 +418,11 @@ pub(super) fn render_audio_block(
                 };
                 let legato = !free_patch && allocation.continues_mono_note(
                     kt.track, track_polyphonic, track_max_polyphony,
-                    data.state.pattern.track_params[kt.track].get_mono_trigger(),
+                    mono_trigger,
                 );
                 let voice_idx = allocation.voice_idx;
                 data.custom_engine_pools[engine_id].note_voice_allocated(engine_id, voice_idx);
                 let voice_lid = allocation.logical_id;
-                let default_params =
-                    resolve_snapshot_instrument_defaults(&data.scheduler_snapshot, kt.track);
-                let default_tensor_params =
-                    resolve_live_instrument_tensor_defaults(&data.state, kt.track);
-                let key_locked_params = key_locked_live_instrument_params(
-                    &data.state,
-                    kt.track,
-                    resolved_transpose,
-                    base_note_offset,
-                    None,
-                    &default_params,
-                );
                 let fingerprint = instrument_param_bundle_fingerprint(
                     engine_id,
                     base_note_offset,

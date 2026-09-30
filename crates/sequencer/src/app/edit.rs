@@ -5121,6 +5121,7 @@ fn encode_effect_slot_values(bytes: &mut WitnessBytes, snapshot: &EffectSlotSnap
         tensor_params,
         param_node_indices: _,
         param_node_spans: _,
+        instrument_voice_controls: _,
         transport_phase_param_idx: _,
         ir,
         table,

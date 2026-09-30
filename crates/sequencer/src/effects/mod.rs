@@ -2,6 +2,7 @@
 
 #[allow(dead_code)]
 pub mod compressor;
+pub mod instrument_voice;
 pub mod conv_reverb;
 pub mod dgen_builtin;
 #[allow(dead_code)]
@@ -1349,6 +1350,7 @@ mod tests {
             )]),
             param_node_indices: vec![15],
             param_node_spans: vec![1],
+            instrument_voice_controls: None,
             transport_phase_param_idx: crate::effects::NO_TRANSPORT_PHASE_PARAM,
             tensor_params: Vec::new(),
             ir: None,
@@ -2521,6 +2523,7 @@ mod tests {
             key_lock_param_ids: BTreeMap::new(),
             param_node_indices: vec![4, 3, 1, 0, 132122],
             param_node_spans: vec![1; 5],
+            instrument_voice_controls: None,
             transport_phase_param_idx: crate::effects::NO_TRANSPORT_PHASE_PARAM,
             tensor_params: Vec::new(),
             ir: None,
@@ -10599,6 +10602,8 @@ fn tensor_snapshot_retained_bytes(tensor: &TensorParamSnapshot) -> usize {
 
 #[derive(Clone, Debug)]
 pub struct EffectSlotSnapshot {
+    /// Descriptor-derived allocation contract; rebound on project load.
+    pub instrument_voice_controls: Option<instrument_voice::InstrumentVoiceControls>,
     pub node_id: u32,
     pub modulator_node_id: u32,
     pub num_params: u32,
@@ -10626,6 +10631,7 @@ pub(crate) struct EffectSlotBindingLayout {
     modulator_node_id: u32,
     params: Vec<(u32, u32)>,
     transport_phase: u32,
+    instrument_voice_controls: Option<instrument_voice::InstrumentVoiceControls>,
     tensors: Vec<(String, Vec<usize>, usize, usize)>,
     modulation_groups: BTreeMap<usize, Vec<usize>>,
 }
@@ -10637,6 +10643,7 @@ impl EffectSlotBindingLayout {
             modulator_node_id,
             params: desc.params.iter().map(|p| (p.node_param_idx, p.node_param_span.max(1))).collect(),
             transport_phase: desc.transport_phase_param_idx().unwrap_or(NO_TRANSPORT_PHASE_PARAM),
+            instrument_voice_controls: instrument_voice::InstrumentVoiceControls::from_descriptor(desc),
             tensors: desc.tensor_params.iter().map(|t|
                 (t.name.clone(), t.shape.clone(), t.default.len(), t.cell_offset)).collect(),
             modulation_groups: EffectSlotSnapshot::modulation_active_groups(desc),
@@ -10803,6 +10810,7 @@ impl EffectSlotSnapshot {
             tensor_params,
             param_node_indices,
             param_node_spans,
+            instrument_voice_controls: None,
             transport_phase_param_idx: slot.transport_phase_param_idx.load(Ordering::Relaxed),
             ir: crate::effects::conv_reverb::ir_ref_for(node_id as i32),
             // Persisted form: bare table ref plus `#ft-engine=` when the node
@@ -10907,6 +10915,7 @@ impl EffectSlotSnapshot {
             tensor_params,
             param_node_indices,
             param_node_spans,
+            instrument_voice_controls: instrument_voice::InstrumentVoiceControls::from_descriptor(desc),
             transport_phase_param_idx: desc
                 .transport_phase_param_idx()
                 .unwrap_or(NO_TRANSPORT_PHASE_PARAM),
@@ -10929,6 +10938,7 @@ impl EffectSlotSnapshot {
             tensor_params: Vec::new(),
             param_node_indices: Vec::new(),
             param_node_spans: Vec::new(),
+            instrument_voice_controls: None,
             transport_phase_param_idx: NO_TRANSPORT_PHASE_PARAM,
             ir: None,
             table: None,
@@ -11241,6 +11251,7 @@ impl EffectSlotSnapshot {
             || self.num_params as usize != n || self.defaults.len() != n
             || !self.param_node_indices.iter().copied().eq(desc.params.iter().map(|p| p.node_param_idx))
             || !self.param_node_spans.iter().copied().eq(desc.params.iter().map(|p| p.node_param_span.max(1)))
+            || self.instrument_voice_controls != instrument_voice::InstrumentVoiceControls::from_descriptor(desc)
             || self.transport_phase_param_idx != desc.transport_phase_param_idx().unwrap_or(NO_TRANSPORT_PHASE_PARAM)
             || self.plocks.len() != MAX_STEPS || self.plock_param_ids.len() != MAX_STEPS
             || self.tensor_params.len() != desc.tensor_params.len()
@@ -11336,6 +11347,7 @@ impl EffectSlotSnapshot {
             .iter()
             .map(|p| p.node_param_span.max(1))
             .collect();
+        self.instrument_voice_controls = instrument_voice::InstrumentVoiceControls::from_descriptor(desc);
         self.transport_phase_param_idx = desc
             .transport_phase_param_idx()
             .unwrap_or(NO_TRANSPORT_PHASE_PARAM);

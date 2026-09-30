@@ -28,8 +28,8 @@ def signal_check(y, memory):
 
 
 def check(compiler, toolchain):
-    source = ROOT / "content/instruments/Synths/Digi Drift/dsp.lisp"
-    bank = json.loads((source.parent.parent / "Digi Drift.presets").read_text())
+    source = ROOT / "content/instruments/Synths/Digi Syn/versions/1/dsp.lisp"
+    bank = json.loads(source.parent.with_suffix(".presets").read_text())
     rows, gain_checks, presets = [], [], []
     base = dict(osc1_wave=0, osc2_on=0, noise_gain_db=-60,
                 drift=0, spread=0, voice_pan=0, keytrack=0,

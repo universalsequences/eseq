@@ -113,7 +113,7 @@ This project has four tracks and one bus:
 
 - Track 1, Kick: 909 Kick.
 - Track 2, Hat: Digi Hat.
-- Track 3, Bass: Digi Drift.
+- Track 3, Bass: Digi Syn.
 - Track 4, Keys: PM Piano.
 - Bus A carries a reverb. The hat and the keys send to it.
 
@@ -122,7 +122,7 @@ In scene 1 each track plays its first pattern: a four-on-the-floor kick, offbeat
 Press **+**. Scene 2 is created and becomes current. It points at four new patterns, copies of the four in scene 1. Now make three changes in scene 2:
 
 - add sixteenth notes to the hat pattern;
-- with no steps selected, raise the Digi Drift filter cutoff;
+- with no steps selected, raise the Digi Syn filter cutoff;
 - shorten the reverb decay on Bus A.
 
 Finally, click the first Keys pattern's cell in the Keys mixer strip. Scene 2 now plays the same keys pattern as scene 1. The copy made by **+** stays in the pool, unused.

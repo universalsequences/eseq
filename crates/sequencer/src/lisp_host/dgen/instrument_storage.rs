@@ -30,6 +30,81 @@ pub struct InstrumentPreset {
 pub(in crate::lisp_host) struct InstrumentMetadataFile {
     version: u32,
     run_mode: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    voice_controls: Option<InstrumentVoiceControlNames>,
+    /// Release manifest (instrument-versioning spec §Manifest). Carried here
+    /// so rewriting the run mode keeps it; resolution reads it through
+    /// `InstrumentReleaseManifest`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    current: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    releases: Option<std::collections::BTreeMap<u32, InstrumentReleaseEntry>>,
+}
+
+/// The release-only view of `instrument.json` the release index scans.
+#[derive(Deserialize)]
+struct InstrumentReleaseManifest {
+    #[serde(default)]
+    current: Option<u32>,
+    #[serde(default)]
+    releases: std::collections::BTreeMap<u32, InstrumentReleaseEntry>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct InstrumentReleaseEntry {
+    /// Release folder, relative to the instrument's top folder (`.` or
+    /// `versions/<n>`).
+    path: String,
+    /// The logical path the release shipped under.
+    name: String,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InstrumentVoiceControlNames {
+    mode: String,
+    count: String,
+    legato: String,
+}
+
+/// Host allocation metadata is independent of the compiler's envelope-only
+/// `@role` vocabulary. Apply it after acquiring the DSP artifact, so editing
+/// instrument.json cannot leave an old policy in the dylib cache.
+pub(in crate::lisp_host) fn apply_instrument_voice_metadata(
+    manifest: &mut DGenManifest,
+    asset_base: Option<&Path>,
+) -> Result<(), String> {
+    let Some(base) = asset_base else { return Ok(()); };
+    let path = base.join("instrument.json");
+    let source = match std::fs::read_to_string(&path) {
+        Ok(source) => source,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(format!("cannot read '{}': {error}", path.display())),
+    };
+    let metadata: InstrumentMetadataFile = serde_json::from_str(&source)
+        .map_err(|error| format!("invalid instrument metadata '{}': {error}", path.display()))?;
+    let Some(controls) = metadata.voice_controls else { return Ok(()); };
+    let mut bindings: Vec<(usize, &str)> = Vec::new();
+    for (role, name, min, max) in [
+        ("voice-mode", &controls.mode, 0.0, 3.0),
+        ("voice-count", &controls.count, 1.0, 32.0),
+        ("legato", &controls.legato, 0.0, 1.0),
+    ] {
+        let matches: Vec<_> = manifest.params.iter().enumerate()
+            .filter(|(_, p)| p.name == *name || p.display_name == *name).collect();
+        let [(index, param)] = matches.as_slice() else {
+            return Err(format!("voice_controls.{role} requires one visible scalar parameter '{name}'"));
+        };
+        if param.hidden || param.cell_span != 1 || param.min != min || param.max != max || param.role.is_some() {
+            return Err(format!("voice_controls.{role} parameter '{name}' must be visible, scalar, unassigned, with range {min}..{max}"));
+        }
+        if bindings.iter().any(|(bound, _)| bound == index) {
+            return Err("voice_controls must bind three distinct parameters".into());
+        }
+        bindings.push((*index, role));
+    }
+    for (index, role) in bindings { manifest.params[index].role = Some(role.to_string()); }
+    Ok(())
 }
 
 #[derive(Serialize, Deserialize)]
@@ -129,6 +204,449 @@ fn parse_instrument_id(name: &str) -> io::Result<Option<(InstrumentTier, &str)>>
     Ok(qualified)
 }
 
+// ── Versioned factory instruments (docs/instrument-versioning-spec.md) ──
+
+/// One factory instrument whose `instrument.json` carries `releases`.
+struct VersionedInstrument {
+    /// Logical path of the top folder, e.g. `Synths/Digi Syn`.
+    lineage: String,
+    /// `current`, or the highest release when the manifest omits it.
+    current: u32,
+    /// Release number → (release folder, the name it shipped under).
+    releases: std::collections::BTreeMap<u32, (PathBuf, String)>,
+}
+
+/// The release an instrument id resolves to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InstrumentRelease {
+    /// Logical path of the instrument's top folder (its lineage). A pinned id
+    /// for this release is `factory:<lineage>@<release>`.
+    pub lineage: String,
+    pub release: u32,
+    /// The logical path this release shipped under (`releases[n].name`).
+    pub name: String,
+    /// The lineage's `current` release.
+    pub current: u32,
+    /// The release folder: holds `dsp.lisp`, `ui.lisp`, `dsp.layout.json`,
+    /// and optionally its own `instrument.json`; its bank is
+    /// `<folder>.presets` beside it.
+    pub folder: PathBuf,
+    /// The `@<release>` the id was written with, if any.
+    pub pinned: Option<u32>,
+}
+
+type InstrumentReleaseIndex = Vec<VersionedInstrument>;
+
+/// Release manifests of the factory-tier roots, scanned once per root set.
+/// Keyed by the roots so temp-root tests never see each other's index.
+fn instrument_release_index_cache(
+) -> &'static std::sync::Mutex<std::collections::HashMap<Vec<PathBuf>, std::sync::Arc<InstrumentReleaseIndex>>>
+{
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<Vec<PathBuf>, std::sync::Arc<InstrumentReleaseIndex>>>,
+    > = std::sync::OnceLock::new();
+    CACHE.get_or_init(Default::default)
+}
+
+/// Drop the cached release index (and the resolved-path memo that may hold
+/// release folders). Call after writing a factory `instrument.json`
+/// in-process.
+pub fn invalidate_instrument_release_index() {
+    instrument_release_index_cache().lock().unwrap().clear();
+    resolved_walk_cache().lock().unwrap().clear();
+}
+
+/// Factory-tier instrument roots, primary first then the dev fixture root.
+/// Only the factory tier ships manifests in rev 1 of the spec.
+fn factory_release_roots(paths: &crate::app_paths::AppPaths) -> Vec<PathBuf> {
+    let mut roots = vec![factory_instruments_root(paths)];
+    roots.extend(paths.dev_instrument_fixtures_dir());
+    roots
+}
+
+fn instrument_release_index(
+    paths: &crate::app_paths::AppPaths,
+) -> std::sync::Arc<InstrumentReleaseIndex> {
+    let roots = factory_release_roots(paths);
+    if let Some(index) = instrument_release_index_cache().lock().unwrap().get(&roots) {
+        return index.clone();
+    }
+    let mut index = Vec::new();
+    for root in &roots {
+        scan_release_manifests(root, root, &mut index);
+    }
+    let index = std::sync::Arc::new(index);
+    instrument_release_index_cache()
+        .lock()
+        .unwrap()
+        .insert(roots, index.clone());
+    index
+}
+
+/// Walk `dir` for manifests with `releases`. A versioned instrument's folder
+/// and any instrument folder (`dsp.lisp`) are leaves, so `versions/` is never
+/// entered.
+fn scan_release_manifests(root: &Path, dir: &Path, out: &mut InstrumentReleaseIndex) {
+    let manifest = dir.join("instrument.json");
+    if dir != root && manifest.is_file() {
+        match read_release_manifest(root, dir, &manifest) {
+            Ok(Some(instrument)) => {
+                out.push(instrument);
+                return;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                eprintln!("ignoring instrument release manifest '{}': {error}", manifest.display());
+                return;
+            }
+        }
+    }
+    if dir != root && dir.join("dsp.lisp").is_file() {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut children: Vec<PathBuf> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.is_dir()
+                && !path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with('.'))
+        })
+        .collect();
+    children.sort();
+    for child in children {
+        scan_release_manifests(root, &child, out);
+    }
+}
+
+fn read_release_manifest(
+    root: &Path,
+    dir: &Path,
+    manifest: &Path,
+) -> Result<Option<VersionedInstrument>, String> {
+    let source = std::fs::read_to_string(manifest).map_err(|error| error.to_string())?;
+    let parsed: InstrumentReleaseManifest =
+        serde_json::from_str(&source).map_err(|error| error.to_string())?;
+    if parsed.releases.is_empty() {
+        return Ok(None);
+    }
+    let lineage = dir
+        .strip_prefix(root)
+        .map_err(|error| error.to_string())?
+        .to_string_lossy()
+        .replace('\\', "/");
+    let mut releases = std::collections::BTreeMap::new();
+    for (release, entry) in parsed.releases {
+        let relative = Path::new(&entry.path);
+        if relative.as_os_str().is_empty()
+            || relative.components().any(|component| {
+                !matches!(
+                    component,
+                    std::path::Component::Normal(_) | std::path::Component::CurDir
+                )
+            })
+        {
+            return Err(format!("release {release} has invalid path '{}'", entry.path));
+        }
+        // `.` normalizes away so the folder's own name (and so its
+        // `<folder>.presets` sibling) is the top folder's.
+        let folder = relative
+            .components()
+            .filter(|component| matches!(component, std::path::Component::Normal(_)))
+            .fold(dir.to_path_buf(), |folder, component| folder.join(component));
+        let name = entry.name.trim_end_matches('/').to_string();
+        releases.insert(release, (folder, name));
+    }
+    let highest = *releases.keys().next_back().expect("non-empty releases");
+    let current = parsed.current.unwrap_or(highest);
+    if !releases.contains_key(&current) {
+        return Err(format!("current release {current} is not listed in releases"));
+    }
+    Ok(Some(VersionedInstrument { lineage, current, releases }))
+}
+
+/// Resolve an instrument id against the factory release manifests. `Ok(None)`
+/// means the id names no versioned instrument and resolves as it always has.
+///
+/// - Pinned (`<logical>@n`): the instrument whose top folder (or, failing
+///   that, some release name) is `<logical>`; unknown `n` is an error.
+/// - Unpinned: the lowest release whose `name` is `<logical>` — unpinned ids
+///   predate pinning, so that is the release they were saved against; if
+///   only the top folder matches, `current`.
+///
+/// Only `factory:` ids and bare names consult the index. A pin on a `user:`
+/// or `pkg:` id is an error: those tiers ship no manifests.
+pub fn instrument_release(name: &str) -> io::Result<Option<InstrumentRelease>> {
+    instrument_release_with_paths(crate::app_paths::app_paths(), name)
+}
+
+pub(in crate::lisp_host) fn instrument_release_with_paths(
+    paths: &crate::app_paths::AppPaths,
+    name: &str,
+) -> io::Result<Option<InstrumentRelease>> {
+    let qualified = parse_instrument_id(name)?;
+    let (tier, path) = match &qualified {
+        Some((tier, path)) => (Some(tier), *path),
+        None => (None, name.trim_end_matches('/')),
+    };
+    let (logical, pinned) = InstrumentTier::split_release(path);
+    if !matches!(tier, None | Some(InstrumentTier::Factory)) {
+        return match pinned {
+            Some(_) => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("instrument '{name}' pins a release, but only factory instruments are versioned"),
+            )),
+            None => Ok(None),
+        };
+    }
+    let index = instrument_release_index(paths);
+    let by_lineage = || index.iter().find(|instrument| instrument.lineage == logical);
+    let by_name = || {
+        index
+            .iter()
+            .find(|instrument| instrument.releases.values().any(|(_, release_name)| release_name == logical))
+    };
+    let found = match pinned {
+        Some(release) => {
+            let Some(instrument) = by_lineage().or_else(by_name) else {
+                // A bare name ending in `@<digits>` may just be a legacy
+                // name; only a qualified pin is a hard error.
+                if qualified.is_none() {
+                    return Ok(None);
+                }
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("instrument '{name}' pins release {release}, but '{logical}' has no release manifest"),
+                ));
+            };
+            if !instrument.releases.contains_key(&release) {
+                let available = instrument
+                    .releases
+                    .iter()
+                    .map(|(n, (_, release_name))| format!("{n} ({release_name})"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!(
+                        "instrument '{name}' pins release {release}, which '{}' does not have; available releases: {available}",
+                        instrument.lineage
+                    ),
+                ));
+            }
+            (instrument, release)
+        }
+        None => {
+            if let Some(instrument) = by_name() {
+                let release = instrument
+                    .releases
+                    .iter()
+                    .find(|(_, (_, release_name))| release_name == logical)
+                    .map(|(release, _)| *release)
+                    .expect("by_name matched a release");
+                (instrument, release)
+            } else if let Some(instrument) = by_lineage() {
+                (instrument, instrument.current)
+            } else {
+                return Ok(None);
+            }
+        }
+    };
+    let (instrument, release) = found;
+    let (folder, release_name) = &instrument.releases[&release];
+    Ok(Some(InstrumentRelease {
+        lineage: instrument.lineage.clone(),
+        release,
+        name: release_name.clone(),
+        current: instrument.current,
+        folder: folder.clone(),
+        pinned,
+    }))
+}
+
+/// The pinned id of a release: `factory:<lineage>@<release>`, what saves write.
+fn pinned_release_id(release: &InstrumentRelease) -> String {
+    InstrumentTier::Factory.qualify(&format!("{}@{}", release.lineage, release.release))
+}
+
+/// The release whose folder is exactly `folder` (the top folder or a
+/// `versions/<n>` folder), pinned to itself.
+fn instrument_release_for_folder_with_paths(
+    paths: &crate::app_paths::AppPaths,
+    folder: &Path,
+) -> Option<InstrumentRelease> {
+    instrument_release_index(paths).iter().find_map(|instrument| {
+        instrument
+            .releases
+            .iter()
+            .find(|(_, (release_folder, _))| release_folder == folder)
+            .map(|(release, (release_folder, name))| InstrumentRelease {
+                lineage: instrument.lineage.clone(),
+                release: *release,
+                name: name.clone(),
+                current: instrument.current,
+                folder: release_folder.clone(),
+                pinned: Some(*release),
+            })
+    })
+}
+
+/// The pinned id for an instrument folder that is a factory release folder
+/// (`…/Digi Syn` or `…/Digi Syn/versions/1`); `None` for any other folder.
+/// Anything that turns a source path back into an id must use this before
+/// stripping roots: a `versions/<n>` path is not an id.
+pub fn instrument_release_id_for_folder(folder: &Path) -> Option<String> {
+    instrument_release_for_folder_with_paths(crate::app_paths::app_paths(), folder)
+        .map(|release| pinned_release_id(&release))
+}
+
+/// The logical path, under the user tier (and a package's `presets/factory`),
+/// that holds a release's user presets: its `name`. That keeps an overlay
+/// saved before the lineage was versioned
+/// (`<user>/instruments/Synths/Digi Drift.presets`) on the release that
+/// shipped as Digi Drift, and gives the current release the lineage path
+/// whenever its name is the lineage. A later release that reuses an earlier
+/// release's name gets `<name>@<n>`, so no two releases (two parameter
+/// layouts) ever share a user bank.
+fn release_user_preset_logical(
+    paths: &crate::app_paths::AppPaths,
+    release: &InstrumentRelease,
+) -> String {
+    let first_with_name =
+        instrument_release_with_paths(paths, &InstrumentTier::Factory.qualify(&release.name))
+            .ok()
+            .flatten();
+    if first_with_name
+        .is_some_and(|first| first.lineage == release.lineage && first.release == release.release)
+    {
+        release.name.clone()
+    } else {
+        format!("{}@{}", release.name, release.release)
+    }
+}
+
+/// The id a *new* track or rack slot gets when the user picks `name` (a
+/// browser row, a dropped instrument): the spec's "new tracks use `current`".
+/// A versioned instrument is pinned — to `current` when `name` is the
+/// lineage's own top folder, otherwise to the release `name` resolves to (an
+/// explicit pin, or a legacy name). Everything else comes back unchanged.
+/// Legacy ids in files do not go through this; they resolve (and qualify) to
+/// the release they were saved against.
+pub fn pin_instrument_for_new_track(name: &str) -> String {
+    pin_instrument_for_new_track_with_paths(crate::app_paths::app_paths(), name)
+}
+
+fn pin_instrument_for_new_track_with_paths(paths: &crate::app_paths::AppPaths, name: &str) -> String {
+    let Ok(Some(mut release)) = instrument_release_with_paths(paths, name) else {
+        return name.to_string();
+    };
+    let path = match parse_instrument_id(name) {
+        Ok(Some((_, path))) => path,
+        _ => name.trim_end_matches('/'),
+    };
+    if release.pinned.is_none() && InstrumentTier::split_release(path).0 == release.lineage {
+        release.release = release.current;
+    }
+    pinned_release_id(&release)
+}
+
+/// `factory:<lineage>` for any id of a versioned instrument (any release, any
+/// legacy name); `None` otherwise. Favorites and "which browser row is this
+/// track" key on this so they survive new releases and renames.
+pub fn instrument_lineage_id(name: &str) -> Option<String> {
+    instrument_lineage_id_with_paths(crate::app_paths::app_paths(), name)
+}
+
+fn instrument_lineage_id_with_paths(paths: &crate::app_paths::AppPaths, name: &str) -> Option<String> {
+    instrument_release_with_paths(paths, name)
+        .ok()
+        .flatten()
+        .map(|release| InstrumentTier::Factory.qualify(&release.lineage))
+}
+
+/// One factory release folder with the ids that load it, for dispatching
+/// its `ui.lisp` by an engine's name.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InstrumentReleaseIds {
+    pub folder: PathBuf,
+    /// The pinned id, `factory:<lineage>@<release>`.
+    pub id: String,
+    /// Every other spelling that resolves to this release: the pin through an
+    /// old name, and the unpinned lineage/name forms (bare, `factory:`, with
+    /// and without the trailing `/`, and their leaf) that land here.
+    pub aliases: Vec<String>,
+}
+
+pub fn instrument_release_ids() -> Vec<InstrumentReleaseIds> {
+    instrument_release_ids_with_paths(crate::app_paths::app_paths())
+}
+
+fn instrument_release_ids_with_paths(paths: &crate::app_paths::AppPaths) -> Vec<InstrumentReleaseIds> {
+    let index = instrument_release_index(paths);
+    let mut out = Vec::new();
+    for instrument in index.iter() {
+        let mut logicals: Vec<&str> = vec![instrument.lineage.as_str()];
+        for (_, name) in instrument.releases.values() {
+            if !logicals.contains(&name.as_str()) {
+                logicals.push(name);
+            }
+        }
+        for (release, (folder, release_name)) in &instrument.releases {
+            let source = folder.join("dsp.lisp");
+            let id = InstrumentTier::Factory.qualify(&format!("{}@{release}", instrument.lineage));
+            let mut candidates = Vec::new();
+            for logical in &logicals {
+                // A pin is only ever written on the lineage or, by hand, on
+                // the name the release shipped under.
+                if *logical == release_name.as_str() {
+                    candidates.push(InstrumentTier::Factory.qualify(&format!("{logical}@{release}")));
+                }
+                candidates.push(InstrumentTier::Factory.qualify(logical));
+                candidates.push(format!("{}/", InstrumentTier::Factory.qualify(logical)));
+                candidates.push(logical.to_string());
+                candidates.push(format!("{logical}/"));
+                if let Some(leaf) = Path::new(logical).file_name().and_then(|leaf| leaf.to_str()) {
+                    if leaf != *logical {
+                        candidates.push(leaf.to_string());
+                        candidates.push(format!("{leaf}/"));
+                    }
+                }
+            }
+            let mut aliases: Vec<String> = Vec::new();
+            for candidate in candidates {
+                if candidate == id || aliases.contains(&candidate) {
+                    continue;
+                }
+                let resolves_here = resolve_instrument_storage_path_with_paths(paths, &candidate, "lisp")
+                    .is_ok_and(|resolved| resolved == source);
+                if resolves_here {
+                    aliases.push(candidate);
+                }
+            }
+            out.push(InstrumentReleaseIds { folder: folder.clone(), id, aliases });
+        }
+    }
+    out
+}
+
+/// A storage file of a release: its `dsp.lisp`, or the `<folder>.<ext>`
+/// sibling (`versions/1.presets`, `Digi Syn.presets`).
+fn release_storage_path(folder: &Path, extension: &str) -> PathBuf {
+    if extension == "lisp" {
+        return folder.join("dsp.lisp");
+    }
+    let file_name = folder
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    folder.with_file_name(format!("{file_name}.{extension}"))
+}
+
 fn resolve_instrument_storage_path_with_paths(
     paths: &crate::app_paths::AppPaths,
     name: &str,
@@ -219,6 +737,20 @@ fn resolve_instrument_storage_path_with_paths(
             return Ok(cached);
         }
         resolved_walk_cache().lock().unwrap().remove(&cache_key);
+    }
+
+    // A versioned factory instrument resolves to its release folder; every
+    // sibling lookup (ui.lisp, layout, instrument.json, bank) then follows
+    // that folder.
+    if let Some(release) = instrument_release_with_paths(paths, name)? {
+        let resolved = release_storage_path(&release.folder, extension);
+        if resolved.exists() {
+            resolved_walk_cache()
+                .lock()
+                .unwrap()
+                .insert(cache_key, resolved.clone());
+        }
+        return Ok(resolved);
     }
 
     // A qualified id names an exact logical path. `factory:` ids search the
@@ -337,6 +869,15 @@ fn qualify_instrument_id_with_paths(
             format!("instrument '{name}' does not exist"),
         ));
     }
+    // Saves always pin (spec §Ids): a versioned instrument qualifies to
+    // `factory:<lineage>@<release>` for the release its id resolves to, so the
+    // file keeps naming that exact release after later ones ship or rename
+    // the lineage. A release folder's own path (`…/versions/1`) is never an
+    // id. Project load runs this too, so a legacy unpinned id is pinned to
+    // the release it already resolved to and the next save writes the pin.
+    if let Some(release) = instrument_release_with_paths(paths, name)? {
+        return Ok(InstrumentTier::Factory.qualify(&format!("{}@{}", release.lineage, release.release)));
+    }
     for InstrumentRoot { tier, path: root, .. } in instrument_roots(paths) {
         if let Ok(relative) = source.strip_prefix(&root) {
             let logical = if relative.file_name().and_then(|part| part.to_str()) == Some("dsp.lisp") {
@@ -451,10 +992,16 @@ pub fn save_instrument_run_mode(name: &str, run_mode: CustomInstrumentRunMode) -
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let metadata = InstrumentMetadataFile {
-        version: 1,
-        run_mode: run_mode.as_str().to_string(),
+    let mut metadata = match std::fs::read_to_string(&path) {
+        Ok(source) => serde_json::from_str::<InstrumentMetadataFile>(&source)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => InstrumentMetadataFile {
+            version: 1, run_mode: run_mode.as_str().to_string(), voice_controls: None,
+            current: None, releases: None,
+        },
+        Err(error) => return Err(error),
     };
+    metadata.run_mode = run_mode.as_str().to_string();
     let json = serde_json::to_string_pretty(&metadata).map_err(|error| {
         io::Error::new(
             io::ErrorKind::InvalidData,
@@ -482,6 +1029,16 @@ fn strip_source_root(parent: &Path, roots: &[PathBuf], relative_dir: &str) -> Op
 pub(in crate::lisp_host) fn instrument_name_from_source_path(path: &Path) -> Option<String> {
     if path.file_name().and_then(|name| name.to_str()) == Some("dsp.lisp") {
         if let Some(parent) = path.parent() {
+            // A frozen release folder (`…/versions/<n>`) is not an id; name it
+            // by its pin. The top folder keeps its plain logical name, which
+            // resolves to the same release.
+            if parent.parent().and_then(|versions| versions.file_name()).and_then(|name| name.to_str())
+                == Some("versions")
+            {
+                if let Some(id) = instrument_release_id_for_folder(parent) {
+                    return Some(id);
+                }
+            }
             // A package instrument's name is always qualified: its bare
             // relative path would resolve factory-first and land elsewhere.
             for root in instrument_roots(crate::app_paths::app_paths()) {
@@ -616,8 +1173,15 @@ fn package_preset_overlays_with_paths(
     paths: &crate::app_paths::AppPaths,
     name: &str,
 ) -> io::Result<Vec<PathBuf>> {
-    let Some(relative) = package_preset_overlay_relative(name)? else {
-        return Ok(Vec::new());
+    // A versioned instrument's pack banks are keyed like its user bank: by
+    // the release's name, so a pack written for Digi Drift stays on release 1.
+    let relative = match instrument_release_with_paths(paths, name)? {
+        Some(release) => Path::new("factory")
+            .join(format!("{}.presets", release_user_preset_logical(paths, &release))),
+        None => match package_preset_overlay_relative(name)? {
+            Some(relative) => relative,
+            None => return Ok(Vec::new()),
+        },
     };
     Ok(paths
         .package_catalog()
@@ -874,6 +1438,14 @@ fn user_preset_overlay_for_factory_source_with_paths(
     paths: &crate::app_paths::AppPaths,
     source_dsp: &Path,
 ) -> Option<PathBuf> {
+    if let Some(release) = source_dsp
+        .parent()
+        .filter(|_| source_dsp.file_name().and_then(|name| name.to_str()) == Some("dsp.lisp"))
+        .and_then(|folder| instrument_release_for_folder_with_paths(paths, folder))
+    {
+        return Some(user_tier_preset_path(paths, &release_user_preset_logical(paths, &release)))
+            .filter(|path| path.is_file());
+    }
     let rel = instrument_roots(paths)
         .into_iter()
         .filter(|root| root.tier == InstrumentTier::Factory)
@@ -920,6 +1492,40 @@ pub fn load_instrument_preset_names(name: &str) -> io::Result<Vec<String>> {
         .collect())
 }
 
+/// Names of the presets the user saved themselves (the browser's Library
+/// section): entries of the writable bank that no read-only bank (factory or
+/// package) also ships. A user save over a shipped name stays with the shipped
+/// preset. Every preset of a user instrument is in its writable bank, so all of
+/// them are Library.
+pub fn load_user_instrument_preset_names(name: &str) -> io::Result<Vec<String>> {
+    load_user_instrument_preset_names_with_paths(crate::app_paths::app_paths(), name)
+}
+
+fn load_user_instrument_preset_names_with_paths(
+    paths: &crate::app_paths::AppPaths,
+    name: &str,
+) -> io::Result<Vec<String>> {
+    let writable = instrument_preset_save_path_with_paths(paths, name)?;
+    let Some(user) = read_preset_bank(&writable)? else {
+        return Ok(Vec::new());
+    };
+    let bank_paths = instrument_preset_bank_paths_with_paths(paths, name)?;
+    let mut shipped = std::collections::HashSet::new();
+    for path in std::iter::once(&bank_paths.base).chain(&bank_paths.package_overlays) {
+        if *path == writable {
+            continue;
+        }
+        for preset in read_preset_bank(path)?.unwrap_or_default() {
+            shipped.insert(preset.name);
+        }
+    }
+    Ok(user
+        .into_iter()
+        .map(|preset| preset.name)
+        .filter(|name| !shipped.contains(name))
+        .collect())
+}
+
 fn preset_path_for_writable_instrument_source(source: &Path) -> PathBuf {
     if source.file_name().and_then(|file| file.to_str()) == Some("dsp.lisp") {
         source.parent().unwrap_or(source).with_extension("presets")
@@ -932,6 +1538,11 @@ fn instrument_preset_save_path_with_paths(
     paths: &crate::app_paths::AppPaths,
     name: &str,
 ) -> io::Result<PathBuf> {
+    // A versioned release saves user presets under its release name (see
+    // `release_user_preset_logical`), never under the pinned id's path.
+    if let Some(release) = instrument_release_with_paths(paths, name)? {
+        return Ok(user_tier_preset_path(paths, &release_user_preset_logical(paths, &release)));
+    }
     match parse_instrument_id(name)? {
         Some((InstrumentTier::Factory, logical_name)) => {
             return Ok(user_tier_preset_path(paths, logical_name));
@@ -1011,6 +1622,18 @@ fn promote_instrument_preset_to_factory_with_paths(
     name: &str,
     preset: &InstrumentPreset,
 ) -> io::Result<PathBuf> {
+    // A retired release is frozen, bank included (spec §Shipping).
+    if let Some(release) = instrument_release_with_paths(paths, name)? {
+        if release.release != release.current {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!(
+                    "'{name}' is release {} of '{}', which is retired; only the current release ({}) takes factory presets",
+                    release.release, release.lineage, release.current
+                ),
+            ));
+        }
+    }
     let source = resolve_instrument_storage_path_with_paths(paths, name, "lisp")?;
     let factory_root = factory_instruments_root(paths);
     let relative = source
@@ -1408,6 +2031,10 @@ pub fn load_instrument_ui_source(name: &str) -> io::Result<String> {
 }
 
 pub fn list_saved_instruments() -> Vec<String> {
+    list_saved_instruments_in(crate::app_paths::app_paths().instrument_dirs())
+}
+
+fn list_saved_instruments_in(dirs: Vec<PathBuf>) -> Vec<String> {
     fn is_hidden(path: &Path) -> bool {
         path.file_name()
             .and_then(|name| name.to_str())
@@ -1425,6 +2052,14 @@ pub fn list_saved_instruments() -> Vec<String> {
                 continue;
             }
             if path.is_dir() {
+                // Frozen releases of a versioned instrument
+                // (`<instrument>/versions/<n>`) are reached through the
+                // instrument's pinned id, never listed as instruments.
+                if dir.join("dsp.lisp").exists()
+                    && path.file_name().and_then(|name| name.to_str()) == Some("versions")
+                {
+                    continue;
+                }
                 if path.join("dsp.lisp").exists() {
                     if let Ok(rel) = path.strip_prefix(root) {
                         out.push(format!("{}/", rel.to_string_lossy().replace('\\', "/")));
@@ -1448,7 +2083,7 @@ pub fn list_saved_instruments() -> Vec<String> {
     }
 
     let mut names = Vec::new();
-    for dir in crate::app_paths::app_paths().instrument_dirs() {
+    for dir in dirs {
         collect(&dir, &dir, &mut names);
     }
     names.sort_by_key(|name| name.to_lowercase());
@@ -1865,6 +2500,35 @@ mod tier_id_tests {
         assert_eq!(
             package_preset_overlay_relative("user:kits/kick").unwrap(),
             Some(PathBuf::from("user/kits/kick.presets"))
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn user_preset_names_are_the_writable_bank_minus_shipped_names() {
+        let (paths, root) = test_paths("user-preset-names");
+        std::fs::create_dir_all(paths.instruments_dir()).unwrap();
+        write_folder_instrument(&paths.instruments_dir(), "split", "factory");
+        write_preset_bank(
+            &paths.instruments_dir().join("split.presets"),
+            "factory:split",
+            &["Bright", "Dark"],
+        );
+        let overlay = paths.user_instruments_dir().join("split.presets");
+        std::fs::create_dir_all(overlay.parent().unwrap()).unwrap();
+        // "Dark" is a user edit of a shipped preset: it stays Factory.
+        write_preset_bank(&overlay, "factory:split", &["Dark", "Mine"]);
+        assert_eq!(
+            load_user_instrument_preset_names_with_paths(&paths, "factory:split").unwrap(),
+            vec!["Mine"]
+        );
+
+        // A user instrument's whole bank is the user's.
+        write_folder_instrument(&paths.user_instruments_dir(), "Own", "user");
+        write_preset_bank(&paths.user_instruments_dir().join("Own.presets"), "user:Own", &["A", "B"]);
+        assert_eq!(
+            load_user_instrument_preset_names_with_paths(&paths, "user:Own").unwrap(),
+            vec!["A", "B"]
         );
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -2402,6 +3066,461 @@ mod tier_id_tests {
 
         std::fs::remove_dir_all(root).unwrap();
     }
+
+    /// `Synths/Syn` at release 2 (top of the folder) with the frozen
+    /// `Synths/Drift` as release 1 under `versions/1`.
+    fn write_versioned_syn(paths: &crate::app_paths::AppPaths, current: &str) {
+        let factory = paths.instruments_dir();
+        write_folder_instrument(&factory, "Synths/Syn", "release 2");
+        write_folder_instrument(&factory, "Synths/Syn/versions/1", "release 1");
+        std::fs::write(
+            factory.join("Synths/Syn/instrument.json"),
+            format!(
+                r#"{{"version":1,"run_mode":"instrument",{current}"releases":{{
+                    "1":{{"path":"versions/1","name":"Synths/Drift"}},
+                    "2":{{"path":".","name":"Synths/Syn"}}}}}}"#
+            ),
+        )
+        .unwrap();
+    }
+
+    fn resolved_marker(paths: &crate::app_paths::AppPaths, name: &str) -> String {
+        std::fs::read_to_string(resolve_instrument_storage_path_with_paths(paths, name, "lisp").unwrap())
+            .unwrap()
+    }
+
+    #[test]
+    fn pinned_release_ids_resolve_to_the_release_folder() {
+        let (paths, root) = test_paths("release-pinned");
+        write_versioned_syn(&paths, r#""current":2,"#);
+        assert_eq!(resolved_marker(&paths, "factory:Synths/Syn@1"), "release 1");
+        assert_eq!(resolved_marker(&paths, "factory:Synths/Syn@2"), "release 2");
+        // A pin on an old release name finds the same lineage.
+        assert_eq!(resolved_marker(&paths, "factory:Synths/Drift@1"), "release 1");
+        // Siblings follow the release folder.
+        let factory = paths.instruments_dir();
+        assert_eq!(
+            resolve_instrument_storage_path_with_paths(&paths, "factory:Synths/Syn@1", "presets").unwrap(),
+            factory.join("Synths/Syn/versions/1.presets")
+        );
+        assert_eq!(
+            resolve_instrument_storage_path_with_paths(&paths, "factory:Synths/Syn@2", "presets").unwrap(),
+            factory.join("Synths/Syn.presets")
+        );
+        assert_eq!(
+            instrument_metadata_path_for_source_path(
+                &resolve_instrument_storage_path_with_paths(&paths, "factory:Synths/Syn@1", "lisp").unwrap()
+            )
+            .unwrap(),
+            factory.join("Synths/Syn/versions/1/instrument.json")
+        );
+        let release = instrument_release_with_paths(&paths, "factory:Synths/Syn@1").unwrap().unwrap();
+        assert_eq!(
+            (release.lineage.as_str(), release.release, release.name.as_str(), release.current, release.pinned),
+            ("Synths/Syn", 1, "Synths/Drift", 2, Some(1))
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn pinning_an_unknown_release_names_the_releases_that_exist() {
+        let (paths, root) = test_paths("release-unknown");
+        write_versioned_syn(&paths, r#""current":2,"#);
+        let error = resolve_instrument_storage_path_with_paths(&paths, "factory:Synths/Syn@7", "lisp")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("factory:Synths/Syn@7"), "{error}");
+        assert!(error.contains("1 (Synths/Drift)") && error.contains("2 (Synths/Syn)"), "{error}");
+        write_folder_instrument(&paths.instruments_dir(), "Synths/Plain", "plain");
+        assert!(resolve_instrument_storage_path_with_paths(&paths, "factory:Synths/Plain@1", "lisp").is_err());
+        assert!(resolve_instrument_storage_path_with_paths(&paths, "user:Synths/Syn@1", "lisp").is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn unpinned_ids_take_the_lowest_release_with_that_name() {
+        let (paths, root) = test_paths("release-unpinned");
+        write_versioned_syn(&paths, r#""current":2,"#);
+        // The old folder is gone; its name still finds release 1.
+        assert!(!paths.instruments_dir().join("Synths/Drift").exists());
+        assert_eq!(resolved_marker(&paths, "factory:Synths/Drift"), "release 1");
+        assert_eq!(resolved_marker(&paths, "Synths/Drift"), "release 1");
+        assert_eq!(resolved_marker(&paths, "factory:Synths/Syn"), "release 2");
+        assert_eq!(resolved_marker(&paths, "Synths/Syn/"), "release 2");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_top_folder_no_release_is_named_after_resolves_to_current() {
+        let (paths, root) = test_paths("release-current");
+        let factory = paths.instruments_dir();
+        write_folder_instrument(&factory, "Synths/Lineage", "release 2");
+        write_folder_instrument(&factory, "Synths/Lineage/versions/1", "release 1");
+        std::fs::write(
+            factory.join("Synths/Lineage/instrument.json"),
+            r#"{"version":1,"run_mode":"instrument","current":1,"releases":{
+                "1":{"path":"versions/1","name":"Synths/Old"},
+                "2":{"path":".","name":"Synths/New"}}}"#,
+        )
+        .unwrap();
+        assert_eq!(resolved_marker(&paths, "factory:Synths/Lineage"), "release 1");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn unversioned_instruments_resolve_as_before() {
+        let (paths, root) = test_paths("release-unversioned");
+        write_versioned_syn(&paths, "");
+        let factory = paths.instruments_dir();
+        write_folder_instrument(&factory, "Synths/Plain", "plain");
+        // An instrument.json without releases (Digi Syn today) is unversioned.
+        std::fs::write(
+            factory.join("Synths/Plain/instrument.json"),
+            r#"{"version":1,"run_mode":"instrument","voice_controls":{"mode":"m","count":"c","legato":"l"}}"#,
+        )
+        .unwrap();
+        assert!(instrument_release_with_paths(&paths, "factory:Synths/Plain").unwrap().is_none());
+        assert_eq!(resolved_marker(&paths, "factory:Synths/Plain"), "plain");
+        assert_eq!(resolved_marker(&paths, "Plain"), "plain");
+        assert_eq!(
+            resolve_instrument_storage_path_with_paths(&paths, "factory:Synths/Plain", "presets").unwrap(),
+            factory.join("Synths/Plain.presets")
+        );
+        assert_eq!(qualify_instrument_id_with_paths(&paths, "Plain").unwrap(), "factory:Synths/Plain");
+        // `current` defaults to the highest release.
+        assert_eq!(
+            instrument_release_with_paths(&paths, "factory:Synths/Syn").unwrap().unwrap().current,
+            2
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn qualify_pins_every_spelling_of_a_release_to_its_lineage() {
+        let (paths, root) = test_paths("release-qualify");
+        write_versioned_syn(&paths, r#""current":2,"#);
+        for (input, expected) in [
+            ("factory:Synths/Syn@1", "factory:Synths/Syn@1"),
+            ("factory:Synths/Drift@1", "factory:Synths/Syn@1"),
+            ("factory:Synths/Drift", "factory:Synths/Syn@1"),
+            ("Synths/Drift", "factory:Synths/Syn@1"),
+            ("Synths/Drift/", "factory:Synths/Syn@1"),
+            ("factory:Synths/Syn", "factory:Synths/Syn@2"),
+            ("Synths/Syn/", "factory:Synths/Syn@2"),
+            ("Synths/Syn@2", "factory:Synths/Syn@2"),
+        ] {
+            let qualified = qualify_instrument_id_with_paths(&paths, input).unwrap();
+            assert_eq!(qualified, expected, "{input}");
+            // Load-time pinning never changes which release plays.
+            assert_eq!(resolved_marker(&paths, &qualified), resolved_marker(&paths, input), "{input}");
+            // And it is a fixed point, so load -> save writes the same id.
+            assert_eq!(qualify_instrument_id_with_paths(&paths, &qualified).unwrap(), qualified);
+        }
+        assert!(qualify_instrument_id_with_paths(&paths, "factory:Synths/Syn@9").is_err());
+        // Unversioned instruments qualify exactly as before: no pin.
+        write_folder_instrument(&paths.instruments_dir(), "Synths/Plain", "plain");
+        assert_eq!(qualify_instrument_id_with_paths(&paths, "Synths/Plain/").unwrap(), "factory:Synths/Plain");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Ship release 3 of `Synths/Syn` the way the spec says: move the top
+    /// files into `versions/2`, put new ones at the top, bump `current`.
+    fn ship_syn_release_3(paths: &crate::app_paths::AppPaths) {
+        let factory = paths.instruments_dir();
+        write_folder_instrument(&factory, "Synths/Syn/versions/2", "release 2");
+        std::fs::write(factory.join("Synths/Syn/dsp.lisp"), "release 3").unwrap();
+        std::fs::write(
+            factory.join("Synths/Syn/instrument.json"),
+            r#"{"version":1,"run_mode":"instrument","current":3,"releases":{
+                "1":{"path":"versions/1","name":"Synths/Drift"},
+                "2":{"path":"versions/2","name":"Synths/Syn"},
+                "3":{"path":".","name":"Synths/Syn"}}}"#,
+        )
+        .unwrap();
+        invalidate_instrument_release_index();
+    }
+
+    #[test]
+    fn saved_pins_survive_the_next_release_and_legacy_ids_load_onto_their_release() {
+        let (paths, root) = test_paths("release-round-trip");
+        write_versioned_syn(&paths, r#""current":2,"#);
+        // A project written before pinning names Drift and Syn unpinned.
+        // Load qualifies (pins), the engine keeps that id, save qualifies it
+        // again: the file now pins the release it was already playing.
+        let loaded: Vec<String> = ["factory:Synths/Drift", "Synths/Syn"]
+            .iter()
+            .map(|id| qualify_instrument_id_with_paths(&paths, id).unwrap())
+            .collect();
+        assert_eq!(loaded, ["factory:Synths/Syn@1", "factory:Synths/Syn@2"]);
+        let saved: Vec<String> = loaded
+            .iter()
+            .map(|engine_name| qualify_instrument_id_with_paths(&paths, engine_name).unwrap())
+            .collect();
+        assert_eq!(saved, loaded);
+
+        ship_syn_release_3(&paths);
+        // The saved pins still load the releases they were saved with...
+        assert_eq!(resolved_marker(&paths, &saved[0]), "release 1");
+        assert_eq!(resolved_marker(&paths, &saved[1]), "release 2");
+        assert_eq!(qualify_instrument_id_with_paths(&paths, &saved[1]).unwrap(), saved[1]);
+        // ...while a new track from the browser row gets the new current.
+        assert_eq!(pin_instrument_for_new_track_with_paths(&paths, "Synths/Syn/"), "factory:Synths/Syn@3");
+        assert_eq!(resolved_marker(&paths, "factory:Synths/Syn@3"), "release 3");
+        // An unpinned legacy `Synths/Syn` predates release 3 and stays on the
+        // lowest release of that name.
+        assert_eq!(qualify_instrument_id_with_paths(&paths, "Synths/Syn").unwrap(), "factory:Synths/Syn@2");
+        invalidate_instrument_release_index();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn new_tracks_pin_current_and_other_names_pass_through() {
+        let (paths, root) = test_paths("release-new-track");
+        write_versioned_syn(&paths, r#""current":2,"#);
+        write_folder_instrument(&paths.instruments_dir(), "Synths/Plain", "plain");
+        for (input, expected) in [
+            ("Synths/Syn/", "factory:Synths/Syn@2"),
+            ("factory:Synths/Syn", "factory:Synths/Syn@2"),
+            // An explicit pin or a legacy name keeps its release.
+            ("factory:Synths/Syn@1", "factory:Synths/Syn@1"),
+            ("Synths/Drift", "factory:Synths/Syn@1"),
+            // Unversioned or unknown names are left for the loader.
+            ("Synths/Plain/", "Synths/Plain/"),
+            ("user:Mine/Lead/", "user:Mine/Lead/"),
+            ("nowhere", "nowhere"),
+        ] {
+            assert_eq!(pin_instrument_for_new_track_with_paths(&paths, input), expected, "{input}");
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn every_release_spelling_maps_to_the_lineage_id() {
+        let (paths, root) = test_paths("release-lineage");
+        write_versioned_syn(&paths, r#""current":2,"#);
+        write_folder_instrument(&paths.instruments_dir(), "Synths/Plain", "plain");
+        for input in ["factory:Synths/Drift", "Synths/Drift/", "factory:Synths/Syn@1", "Synths/Syn/", "factory:Synths/Syn@2"] {
+            assert_eq!(
+                instrument_lineage_id_with_paths(&paths, input).as_deref(),
+                Some("factory:Synths/Syn"),
+                "{input}"
+            );
+        }
+        assert_eq!(instrument_lineage_id_with_paths(&paths, "Synths/Plain/"), None);
+        assert_eq!(instrument_lineage_id_with_paths(&paths, "user:Synths/Syn"), None);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn release_ids_list_each_release_folder_with_the_names_that_load_it() {
+        let (paths, root) = test_paths("release-ui-ids");
+        write_versioned_syn(&paths, r#""current":2,"#);
+        let factory = paths.instruments_dir();
+        let ids = instrument_release_ids_with_paths(&paths);
+        assert_eq!(ids.len(), 2);
+        let first = ids.iter().find(|ids| ids.id == "factory:Synths/Syn@1").unwrap();
+        assert_eq!(first.folder, factory.join("Synths/Syn/versions/1"));
+        for alias in ["factory:Synths/Drift@1", "factory:Synths/Drift", "Synths/Drift", "Synths/Drift/"] {
+            assert!(first.aliases.iter().any(|a| a == alias), "{alias} in {:?}", first.aliases);
+        }
+        // No alias of release 1 names the top folder, and no `versions` path
+        // or bare `1` leaf ever becomes an alias.
+        assert!(!first.aliases.iter().any(|a| {
+            let a = a.trim_end_matches('/');
+            a.ends_with("Synths/Syn") || a == "Syn"
+        }));
+        assert!(!first.aliases.iter().any(|a| a.contains("versions") || a == "1"));
+        let second = ids.iter().find(|ids| ids.id == "factory:Synths/Syn@2").unwrap();
+        assert_eq!(second.folder, factory.join("Synths/Syn"));
+        for alias in ["factory:Synths/Syn", "factory:Synths/Syn/", "Synths/Syn", "Synths/Syn/", "Syn"] {
+            assert!(second.aliases.iter().any(|a| a == alias), "{alias} in {:?}", second.aliases);
+        }
+        assert!(!second.aliases.iter().any(|a| a.contains("Drift")));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn release_presets_use_their_release_bank_and_the_user_bank_of_their_name() {
+        let (paths, root) = test_paths("release-presets");
+        write_versioned_syn(&paths, r#""current":2,"#);
+        let factory = paths.instruments_dir();
+        let user = paths.user_instruments_dir();
+        std::fs::create_dir_all(user.join("Synths")).unwrap();
+        write_preset_bank(&factory.join("Synths/Syn/versions/1.presets"), "Synths/Drift/", &["Drift Factory"]);
+        write_preset_bank(&factory.join("Synths/Syn.presets"), "Synths/Syn/", &["Syn Factory"]);
+        // Overlays saved before the manifest existed, one per old instrument.
+        write_preset_bank(&user.join("Synths/Drift.presets"), "factory:Synths/Drift", &["Drift Mine"]);
+        write_preset_bank(&user.join("Synths/Syn.presets"), "factory:Synths/Syn", &["Syn Mine"]);
+
+        for id in ["factory:Synths/Syn@1", "factory:Synths/Drift", "Synths/Drift/"] {
+            let presets = cached_instrument_presets_with_paths(&paths, id).unwrap();
+            assert_eq!(names(&presets), ["Drift Factory", "Drift Mine"], "{id}");
+            assert_eq!(
+                instrument_preset_save_path_with_paths(&paths, id).unwrap(),
+                user.join("Synths/Drift.presets"),
+                "{id}"
+            );
+        }
+        for id in ["factory:Synths/Syn@2", "factory:Synths/Syn", "Synths/Syn/"] {
+            let presets = cached_instrument_presets_with_paths(&paths, id).unwrap();
+            assert_eq!(names(&presets), ["Syn Factory", "Syn Mine"], "{id}");
+        }
+        assert_eq!(
+            load_user_instrument_preset_names_with_paths(&paths, "factory:Synths/Syn@1").unwrap(),
+            ["Drift Mine"]
+        );
+
+        // A new user preset on the pinned release lands in that release's
+        // bank only.
+        let mut mine = load_user_instrument_presets_with_paths(&paths, "factory:Synths/Syn@1").unwrap();
+        mine.push(preset("Drift Two"));
+        save_instrument_presets_with_paths(&paths, "factory:Synths/Syn@1", &mine).unwrap();
+        assert_eq!(
+            names(&cached_instrument_presets_with_paths(&paths, "factory:Synths/Syn@1").unwrap()),
+            ["Drift Factory", "Drift Mine", "Drift Two"]
+        );
+        assert_eq!(
+            names(&cached_instrument_presets_with_paths(&paths, "factory:Synths/Syn@2").unwrap()),
+            ["Syn Factory", "Syn Mine"]
+        );
+        assert!(!user.join("Synths/Syn@1.presets").exists());
+
+        // A fork of the release-1 folder carries release 1's user bank.
+        assert_eq!(
+            user_preset_overlay_for_factory_source_with_paths(
+                &paths,
+                &factory.join("Synths/Syn/versions/1/dsp.lisp")
+            ),
+            Some(user.join("Synths/Drift.presets"))
+        );
+
+        // Retired releases are frozen: promotion only reaches `current`.
+        assert!(promote_instrument_preset_to_factory_with_paths(&paths, "factory:Synths/Syn@1", &preset("P"))
+            .is_err());
+        assert!(promote_instrument_preset_to_factory_with_paths(&paths, "factory:Synths/Syn@2", &preset("P"))
+            .is_ok());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_release_that_reuses_a_name_gets_its_own_user_bank() {
+        let (paths, root) = test_paths("release-shared-name");
+        write_versioned_syn(&paths, r#""current":2,"#);
+        ship_syn_release_3(&paths);
+        let user = paths.user_instruments_dir();
+        assert_eq!(
+            instrument_preset_save_path_with_paths(&paths, "factory:Synths/Syn@2").unwrap(),
+            user.join("Synths/Syn.presets")
+        );
+        assert_eq!(
+            instrument_preset_save_path_with_paths(&paths, "factory:Synths/Syn@3").unwrap(),
+            user.join("Synths/Syn@3.presets")
+        );
+        invalidate_instrument_release_index();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn saved_instrument_listing_skips_frozen_releases() {
+        let (paths, root) = test_paths("release-listing");
+        write_versioned_syn(&paths, r#""current":2,"#);
+        write_folder_instrument(&paths.instruments_dir(), "Synths/Plain", "plain");
+        let listed = list_saved_instruments_in(vec![paths.instruments_dir()]);
+        assert_eq!(listed, ["Synths/Plain/", "Synths/Syn/"]);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn metadata_with_releases_round_trips() {
+        let source = r#"{"version":1,"run_mode":"instrument","current":2,"releases":{"1":{"path":"versions/1","name":"Synths/Drift"}}}"#;
+        let metadata: InstrumentMetadataFile = serde_json::from_str(source).unwrap();
+        let json: serde_json::Value = serde_json::to_value(&metadata).unwrap();
+        assert_eq!(json["current"], 2);
+        assert_eq!(json["releases"]["1"]["name"], "Synths/Drift");
+    }
+
+    /// The shipped factory content (spec §First application): Digi Drift is
+    /// Digi Syn release 1, frozen under `versions/1`.
+    #[test]
+    fn factory_digi_drift_is_digi_syn_release_1() {
+        let paths = crate::app_paths::app_paths();
+        let syn = paths.instruments_dir().join("Synths/Digi Syn");
+        let source = |id: &str| resolve_instrument_storage_path_with_paths(paths, id, "lisp").unwrap();
+        for id in ["factory:Synths/Digi Drift", "Synths/Digi Drift/", "factory:Synths/Digi Syn@1"] {
+            assert_eq!(source(id), syn.join("versions/1/dsp.lisp"), "{id}");
+            assert_eq!(qualify_instrument_id_with_paths(paths, id).unwrap(), "factory:Synths/Digi Syn@1", "{id}");
+            assert_eq!(
+                resolve_instrument_storage_path_with_paths(paths, id, "presets").unwrap(),
+                syn.join("versions/1.presets"),
+                "{id}"
+            );
+        }
+        for id in ["factory:Synths/Digi Syn", "Synths/Digi Syn/", "factory:Synths/Digi Syn@2"] {
+            assert_eq!(source(id), syn.join("dsp.lisp"), "{id}");
+            assert_eq!(qualify_instrument_id_with_paths(paths, id).unwrap(), "factory:Synths/Digi Syn@2", "{id}");
+        }
+        // Release 1 inherits nothing from the top instrument.json: no
+        // metadata of its own, so it runs exactly as Digi Drift always did.
+        assert!(!syn.join("versions/1/instrument.json").exists());
+        let bank: InstrumentPresetBank =
+            serde_json::from_str(&std::fs::read_to_string(syn.join("versions/1.presets")).unwrap()).unwrap();
+        assert!(bank.presets.iter().any(|preset| preset.name == "Woolly Res Bass"));
+
+        let listed = list_saved_instruments_in(vec![paths.instruments_dir()]);
+        assert!(listed.iter().any(|name| name == "Synths/Digi Syn/"), "{listed:?}");
+        assert!(!listed.iter().any(|name| name.contains("Digi Drift") || name.contains("versions")), "{listed:?}");
+    }
 }
 
 // ── Instrument compilation ──
+
+#[cfg(test)]
+mod voice_metadata_tests {
+    use super::*;
+    use crate::scheduled_event::{ScheduledInstrumentParam, ScheduledInstrumentParamTarget, ScheduledInstrumentParams};
+
+    #[test]
+    fn voice_metadata_validates_atomically_and_effective_values_drive_allocation() {
+        let root = std::env::temp_dir().join(format!("eseq-voice-metadata-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("instrument.json");
+        let mut manifest = parse_manifest(&serde_json::json!({
+            "processAbi": DGEN_PROCESS_ABI_V1,
+            "params": [
+                {"name":"mode","cellId":7,"min":0,"max":3,"default":0},
+                {"name":"count","cellId":11,"min":1,"max":32,"default":32},
+                {"name":"legato","cellId":19,"min":0,"max":1,"default":1}
+            ]
+        }).to_string()).unwrap();
+        let original = manifest.clone();
+        std::fs::write(&path, r#"{"version":1,"run_mode":"instrument","voice_controls":{"mode":"mode","count":"missing","legato":"legato"}}"#).unwrap();
+        assert!(apply_instrument_voice_metadata(&mut manifest, Some(&root)).is_err());
+        assert!(manifest.params.iter().all(|p| p.role.is_none()), "failed binding must not partly mutate roles");
+        std::fs::write(&path, r#"{"version":1,"run_mode":"instrument","voice_controls":{"mode":"mode","count":"count","legato":"legato"}}"#).unwrap();
+        apply_instrument_voice_metadata(&mut manifest, Some(&root)).unwrap();
+        let descriptor = instrument_descriptor_from_manifest("test", &manifest);
+        let slot = crate::effects::EffectSlotSnapshot::new_default(&descriptor, 1);
+        let baseline = slot.instrument_voice_config(&ScheduledInstrumentParams::new()).unwrap();
+        assert_eq!(baseline.max_polyphony, 32);
+        let mut values = ScheduledInstrumentParams::new();
+        for (target, idx, value) in [
+            (ScheduledInstrumentParamTarget::Synth, 7, 3.0),
+            (ScheduledInstrumentParamTarget::Synth, 11, 16.0),
+            (ScheduledInstrumentParamTarget::Modulator, 7, 1.0),
+        ] {
+            values.push(ScheduledInstrumentParam { target, idx: idx + HEADER_SLOTS as u64, value, span: 1 });
+        }
+        assert_eq!(slot.instrument_voice_config(&values).unwrap().max_polyphony, 4);
+        values.push(ScheduledInstrumentParam { target: ScheduledInstrumentParamTarget::Synth, idx: 7 + HEADER_SLOTS as u64, value: 1.0, span: 1 });
+        let mono = slot.instrument_voice_config(&values).unwrap();
+        assert!(!mono.polyphonic);
+        assert_eq!(mono.max_polyphony, 1);
+        assert_eq!(mono.mono_trigger, crate::sequencer::MonoTrigger::Legato);
+        // Metadata is re-read for a cached artifact rather than embedded in it.
+        std::fs::write(&path, r#"{"version":1,"run_mode":"instrument"}"#).unwrap();
+        let mut cached = original;
+        apply_instrument_voice_metadata(&mut cached, Some(&root)).unwrap();
+        assert!(cached.params.iter().all(|p| p.role.is_none()));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}

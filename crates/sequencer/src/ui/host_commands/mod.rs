@@ -306,6 +306,7 @@ pub(crate) fn handle_add_track_instrument_command(payload: &Value, ctx: AddTrack
     let Some(name) = payload_name(payload) else {
         return;
     };
+    let name = sequencer::lisp_host::pin_instrument_for_new_track(&name);
 
     match ctx.app.add_saved_instrument_track_sync(&name) {
         Ok(idx) => finish_added_instrument_track(idx, ctx),

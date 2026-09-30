@@ -869,6 +869,36 @@ impl ContentTier {
         }
         Ok(None)
     }
+
+    /// `parse_id` that also splits an `@<release>` pin off the logical path
+    /// (instrument-versioning spec §Ids): `factory:Synths/Digi Syn@2` is
+    /// `(Factory, "Synths/Digi Syn", Some(2))`. `parse_id` itself leaves the
+    /// suffix on the path, so callers that key by id keep two releases apart.
+    pub fn parse_versioned_id(id: &str) -> Result<Option<(ContentTier, &str, Option<u32>)>, String> {
+        Ok(Self::parse_id(id)?.map(|(tier, path)| {
+            let (logical, release) = Self::split_release(path);
+            (tier, logical, release)
+        }))
+    }
+
+    /// Split a trailing `@<digits>` release pin off a logical path. Anything
+    /// else after an `@` stays part of the path.
+    pub fn split_release(logical: &str) -> (&str, Option<u32>) {
+        let logical = logical.trim_end_matches('/');
+        match logical.rsplit_once('@') {
+            Some((base, digits))
+                if !base.is_empty()
+                    && !digits.is_empty()
+                    && digits.bytes().all(|byte| byte.is_ascii_digit()) =>
+            {
+                match digits.parse() {
+                    Ok(release) => (base.trim_end_matches('/'), Some(release)),
+                    Err(_) => (logical, None),
+                }
+            }
+            _ => (logical, None),
+        }
+    }
 }
 
 /// A directory that holds one kind of content, tagged with its tier.
@@ -1718,6 +1748,28 @@ mod tests {
         assert!(ContentTier::parse_id("pkg:alec.drums").is_err(), "no path");
         assert!(ContentTier::parse_id("pkg:noauthor/kick").is_err(), "unscoped package");
         assert!(ContentTier::parse_id("weird:thing").is_err());
+    }
+
+    #[test]
+    fn content_tier_ids_split_a_release_pin() {
+        assert_eq!(
+            ContentTier::parse_versioned_id("factory:Synths/Digi Syn@2").unwrap(),
+            Some((ContentTier::Factory, "Synths/Digi Syn", Some(2)))
+        );
+        assert_eq!(
+            ContentTier::parse_versioned_id("factory:Synths/Digi Syn").unwrap(),
+            Some((ContentTier::Factory, "Synths/Digi Syn", None))
+        );
+        // `parse_id` keeps the pin on the path so ids stay distinct keys.
+        assert_eq!(
+            ContentTier::parse_id("factory:Synths/Digi Syn@2").unwrap(),
+            Some((ContentTier::Factory, "Synths/Digi Syn@2"))
+        );
+        assert_eq!(ContentTier::split_release("kits/808@12"), ("kits/808", Some(12)));
+        assert_eq!(ContentTier::split_release("mail@home"), ("mail@home", None));
+        assert_eq!(ContentTier::split_release("@3"), ("@3", None));
+        assert_eq!(ContentTier::split_release("x@"), ("x@", None));
+        assert_eq!(ContentTier::parse_versioned_id("bare@2").unwrap(), None);
     }
 
     #[test]

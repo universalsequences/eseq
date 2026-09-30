@@ -205,14 +205,24 @@ pub struct ScheduledVoicePolicy {
 
 impl ScheduledVoicePolicy {
     pub fn from_track(track: &crate::sequencer::SequencerTrackSnapshot) -> Self {
-        Self {
+        Self::from_track_with_params(track, &ScheduledInstrumentParams::new())
+    }
+
+    pub fn from_track_with_params(track: &crate::sequencer::SequencerTrackSnapshot, params: &ScheduledInstrumentParams) -> Self {
+        let mut policy = Self {
             gate: track.params.gate,
             polyphonic: track.params.polyphonic,
             max_polyphony: track.params.max_polyphony,
             mono_trigger: track.params.mono_trigger,
             voice_priority: track.params.voice_priority,
             base_note_offset: track.instrument_base_note_offset,
+        };
+        if let Some(config) = track.instrument_slot.instrument_voice_config(params) {
+            policy.polyphonic = config.polyphonic;
+            policy.max_polyphony = config.max_polyphony;
+            policy.mono_trigger = config.mono_trigger;
         }
+        policy
     }
 }
 

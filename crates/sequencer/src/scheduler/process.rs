@@ -2254,7 +2254,7 @@ pub(super) fn enqueue_network_trigger(
                         pattern_epoch,
                         sample_time: note_sample_time,
                         kind: ScheduledEventKind::NetworkTrigger {
-                            voice_policy: crate::scheduled_event::ScheduledVoicePolicy::from_track(&snapshot.tracks[track_idx]),
+                            voice_policy: crate::scheduled_event::ScheduledVoicePolicy::from_track_with_params(&snapshot.tracks[track_idx], &instrument_params),
                             track: track_idx,
                             source_neuron,
                             seed,
@@ -2301,7 +2301,7 @@ pub(super) fn enqueue_network_trigger(
             pattern_epoch,
             sample_time,
             kind: ScheduledEventKind::NetworkTrigger {
-                voice_policy: crate::scheduled_event::ScheduledVoicePolicy::from_track(&snapshot.tracks[track_idx]),
+                voice_policy: crate::scheduled_event::ScheduledVoicePolicy::from_track_with_params(&snapshot.tracks[track_idx], &instrument_params),
                 track: track_idx,
                 source_neuron,
                 seed,

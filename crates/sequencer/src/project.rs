@@ -2777,6 +2777,7 @@ impl ProjectEffectSlot {
             tensor_params: self.tensor_params,
             param_node_indices: self.param_node_indices,
             param_node_spans: self.param_node_spans,
+            instrument_voice_controls: None,
             transport_phase_param_idx: crate::effects::NO_TRANSPORT_PHASE_PARAM,
             ir: self.ir,
             table: self.table,

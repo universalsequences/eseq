@@ -10,7 +10,7 @@ By the end you will have:
 - made a second scene with a variation of the part, and switched between the two;
 - saved the project.
 
-The walkthrough uses **Digi Drift**, a two-oscillator subtractive synth in the factory library. It enters notes only with the step grid and the step inspector. The other ways of making notes are covered in later chapters, and the last section of this one says where to find them.
+The walkthrough uses **Digi Syn**, a two-oscillator subtractive synth in the factory library. It enters notes only with the step grid and the step inspector. The other ways of making notes are covered in later chapters, and the last section of this one says where to find them.
 
 ## Start a project
 
@@ -32,14 +32,14 @@ The walkthrough uses the session view. If the middle of the screen shows a timel
 A track makes no sound until it has a sound source. Load one from the browser:
 
 1. Click **Instruments** in the browser.
-2. Click the search field (**Search instruments...**) and type `digi drift`. The factory instrument appears under **Synths**.
-3. Double-click **Digi Drift**.
+2. Click the search field (**Search instruments...**) and type `digi syn`. The factory instrument appears under **Synths**.
+3. Double-click **Digi Syn**.
 
-![Searching for Digi Drift narrows the browser to the matching factory instrument under Synths.](images/first-sound-browser.png)
+![Searching for Digi Syn narrows the browser to the matching factory instrument under Synths.](images/first-sound-browser.png)
 
-The track takes the instrument's name, and Digi Drift's controls appear in the device panel. Its sections are the two oscillators and noise on the left, the envelopes in the middle, and the filter, LFO and pitch controls on the right.
+The track takes the instrument's name, and Digi Syn's controls appear in the device panel. Its sections are the two oscillators and noise on the left, the envelopes in the middle, and the filter, LFO and pitch controls on the right.
 
-![Digi Drift in the device panel. The FILTER section holds the Cutoff Hz control used later in this chapter.](images/digi-drift.png)
+![Digi Syn in the device panel. The FILTER section holds the Cutoff Hz control used later in this chapter.](images/digi-drift.png)
 
 Double-clicking an instrument replaces the sound on the selected track. The track keeps its pattern. To add a new track with the instrument instead, drag it onto **Drop sounds here** at the end of the mixer. You can also drag an instrument onto an existing track to replace that track's sound.
 
@@ -49,7 +49,7 @@ The round buttons in the track's row are the pattern's 16 steps, numbered from 1
 
 Click steps **1**, **5**, **9** and **13**. Each click on an unlit step adds a note at C4 (Transpose 0).
 
-![The Digi Drift track with notes on steps 1, 5, 9 and 13.](images/step-pattern.png)
+![The Digi Syn track with notes on steps 1, 5, 9 and 13.](images/step-pattern.png)
 
 Clicks on a lit step behave differently from clicks on an unlit one:
 
@@ -66,7 +66,7 @@ Press Space, or click **Play** in the transport. Press Space again, or click **S
 
 ![Transport playback controls. The square stops playback and the triangle starts it.](images/record-controls.png)
 
-The playhead moves along the steps and Digi Drift sounds on steps 1, 5, 9 and 13: four quarter notes per bar. When it reaches the end of the pattern, playback returns to step 1. The meter on the track's mixer strip moves with each note. If the playhead moves but you hear nothing, see [Troubleshooting](troubleshooting).
+The playhead moves along the steps and Digi Syn sounds on steps 1, 5, 9 and 13: four quarter notes per bar. When it reaches the end of the pattern, playback returns to step 1. The meter on the track's mixer strip moves with each note. If the playhead moves but you hear nothing, see [Troubleshooting](troubleshooting).
 
 Leave the pattern playing until the Save section. An edit is heard the next time the playhead reaches the step.
 
@@ -82,11 +82,11 @@ The inspector's other values work the same way on the selected steps: **Velocity
 
 ## Give one step its own filter setting
 
-Keep step 1 selected. In Digi Drift's **FILTER** section, turn **Cutoff Hz** down. Step 1 becomes darker. Steps 5, 9 and 13 keep their tone.
+Keep step 1 selected. In Digi Syn's **FILTER** section, turn **Cutoff Hz** down. Step 1 becomes darker. Steps 5, 9 and 13 keep their tone.
 
 With steps selected, a device control writes a **parameter lock** on them; with none selected it sets the pattern's base value ([Concepts](concepts)). A small marker on the control shows that the parameter has locks in the pattern.
 
-![Digi Drift with a cutoff lock on the selected step. The marker on Cutoff Hz shows that the parameter is locked.](images/locked-cutoff.png)
+![Digi Syn with a cutoff lock on the selected step. The marker on Cutoff Hz shows that the parameter is locked.](images/locked-cutoff.png)
 
 Press Esc to clear the selection (Command-clicking a selected step also deselects it). The inspector shows **0 selected**. Turn Cutoff Hz up. Steps 5, 9 and 13 get brighter, and step 1 keeps the dark value locked on it.
 

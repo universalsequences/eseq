@@ -47929,6 +47929,9 @@ mod solo_binding_tests;
                 .find_map(|child| find_stable_key_suffix(child, suffix))
         }
 
+        // Digi Drift is Digi Syn release 1 (`Digi Syn/versions/1/`); only the
+        // top-level Digi Syn UI uses the `syn` key prefix.
+        let prefix = if overlay_path.ends_with("Digi Syn/ui.lisp") { "syn" } else { "drift" };
         let src = read_ui_source("effects.lisp").expect("read fx lisp");
         let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
             "test-instrument".to_string(),
@@ -47936,7 +47939,7 @@ mod solo_binding_tests;
             drift_ui,
         )));
         let mut drift_inst = test_instrument_map();
-        let dsp = read_factory_source("instruments/Synths/Digi Drift/dsp.lisp").unwrap();
+        let dsp = read_factory_source(&overlay_path.replace("ui.lisp", "dsp.lisp")).unwrap();
         let mut bindings = Vec::new();
         let params = dsp.lines().map(str::trim).filter(|line| line.starts_with("(param "))
             .enumerate().map(|(index, line)| {
@@ -48050,7 +48053,7 @@ mod solo_binding_tests;
             let current = editor.widget_layout().unwrap();
             let panel = find_layout_node_by_debug_name(&current, "instrument-panel").unwrap();
             assert_visible(panel, panel);
-            let env = find_layout_node_by_debug_name(&current, "drift-envelope").unwrap();
+            let env = find_layout_node_by_debug_name(&current, &format!("{prefix}-envelope")).unwrap();
             for stage in ["attack", "decay", "sustain", "release"] {
                 let Value::ReactiveRef { field, .. } = &env.props[stage] else { panic!("bound {stage}"); };
                 assert_eq!(field, &format!("drift-test-env{}_{stage}", section + 1));
@@ -48078,7 +48081,7 @@ mod solo_binding_tests;
                 assert_eq!(*update["value"].borrow(), Value::Number(value));
             }
             for param in ["osc1_on", "osc2_on", "osc1_route", "osc2_route", "noise_route"] {
-                let switch = find_layout_node_by_debug_name(&current, &format!("drift-switch-{param}")).unwrap();
+                let switch = find_layout_node_by_debug_name(&current, &format!("{prefix}-switch-{param}")).unwrap();
                 editor.drain_host_commands();
                 editor.runtime_mut().invoke(switch.props["on-click"].clone(),
                     vec![Value::Number(0.0), Value::Number(0.0), Value::Nil]).unwrap();
@@ -48092,7 +48095,7 @@ mod solo_binding_tests;
                 assert_eq!(*payload["param-idx"].borrow(), Value::Number(index as f64));
                 assert_eq!(*payload["value"].borrow(), Value::Number(0.0));
             }
-            let curve = find_layout_node_by_debug_name(&current, "drift-filter-response").unwrap();
+            let curve = find_layout_node_by_debug_name(&current, &format!("{prefix}-filter-response")).unwrap();
             let Value::List(bands) = &curve.props["bands"] else { panic!("filter bands"); };
             assert_eq!(bands.len(), 2);
             for name in ["mm1_src", "mm1_dest",
@@ -48100,6 +48103,28 @@ mod solo_binding_tests;
                 "cyc_tilt", "cyc_hold", "pitch_mod1_src", "pitch_mod2_src", "vel_to_vol"] {
                 let control = find_stable_key_suffix(&current, name).unwrap_or_else(|| panic!("missing {name}"));
                 assert_finite_nonzero_rect(control, name);
+            }
+        }
+
+        if prefix == "syn" {
+            for (mode, rate) in ["rate_hz", "time_ms", "ratio", "beats"].iter().enumerate() {
+                for prefix in ["lfo", "cyc"] {
+                    editor.runtime_mut().set_reactive("SEQ", &format!("drift-test-{prefix}_mode"), Value::Number(mode as f64));
+                }
+                editor.runtime_mut().run_reactive_cycle();
+                editor.refresh_runtime_side_effects();
+                let current = editor.widget_layout().unwrap();
+                let panel = find_layout_node_by_debug_name(&current, "instrument-panel").unwrap();
+                assert_visible(panel, panel);
+                for prefix in ["lfo", "cyc"] {
+                    let name = format!("{prefix}_{rate}");
+                    assert_finite_nonzero_rect(find_stable_key_suffix(&current, &name).unwrap(), &name);
+                }
+            }
+            for name in ["legato_on", "osc_retrig", "noise_on", "note_pitch_bend_on"] {
+                let switch = find_layout_node_by_debug_name(&layout, &format!("syn-switch-{name}")).unwrap();
+                assert_finite_nonzero_rect(switch, name);
+                assert!(switch.rect.row + switch.rect.height <= instrument_panel.rect.row + instrument_panel.rect.height);
             }
         }
 
@@ -48608,11 +48633,11 @@ mod solo_binding_tests;
 
     #[test]
     fn metal_seq_fx_lisp_lays_out_digi_drift_columns() {
-        let drift_ui = read_factory_source("instruments/Synths/Digi Drift/ui.lisp")
+        let drift_ui = read_factory_source("instruments/Synths/Digi Syn/versions/1/ui.lisp")
             .expect("read Digi Drift ui");
         assert_drift_columns_lay_out(
             drift_ui,
-            "instruments/Synths/Digi Drift/ui.lisp",
+            "instruments/Synths/Digi Syn/versions/1/ui.lisp",
             &[
                 "lfo_rate_hz",
                 "mm2_amt",
@@ -48622,6 +48647,16 @@ mod solo_binding_tests;
                 "hp_freq",
                 "drift",
             ],
+        );
+    }
+
+    #[test]
+    fn metal_seq_fx_lisp_lays_out_digi_syn_voice_and_modulation_controls() {
+        assert_drift_columns_lay_out(
+            read_factory_source("instruments/Synths/Digi Syn/ui.lisp").unwrap(),
+            "instruments/Synths/Digi Syn/ui.lisp",
+            &["voice_mode", "voice_count", "mono_thickness", "stereo_spread", "unison_strength",
+                "transpose", "pitch_bend_range", "osc1_shape_src", "osc1_shape_amt", "lfo_mod_src", "lfo_mod_amt", "mm3_amt"],
         );
     }
 

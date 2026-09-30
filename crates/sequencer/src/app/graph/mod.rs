@@ -124,6 +124,8 @@ fn preserve_rack_slot_configuration(
 }
 
 fn instrument_display_name(name: &str) -> String {
+    // A pinned release id (`factory:Synths/Digi Syn@2`) displays without its pin.
+    let (name, _) = crate::app_paths::ContentTier::split_release(name);
     std::path::Path::new(name)
         .file_name()
         .and_then(|s| s.to_str())

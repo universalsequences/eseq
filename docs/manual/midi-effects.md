@@ -159,7 +159,7 @@ The chain's structure, which effects in which order, is kept the same in every p
 
 ## A worked example
 
-This example builds a two-chord arpeggio and then shapes it. It uses a track with a sustained instrument, such as PM Piano or Digi Drift, running at 1/16 steps.
+This example builds a two-chord arpeggio and then shapes it. It uses a track with a sustained instrument, such as PM Piano or Digi Syn, running at 1/16 steps.
 
 1. On step 1, enter a C–E–G chord in the C4 octave with a duration of 8 steps. On step 9, enter an F–A–C chord, also 8 steps long. Chords are entered in the [Piano roll](piano-roll); Duration is a step value, see [Step sequencer](sequencer-tour). With no MIDI effects the track plays two held chords per bar.
 2. Add **arp** from the browser's MIDI FX tab. Leave **rate** at 1/16 and **direction** at up, and set **octaves** to 3. Each chord becomes a run of sixteenths cycling through nine notes: its three notes, then the same three one octave up and two octaves up. The pattern itself still shows two chords.

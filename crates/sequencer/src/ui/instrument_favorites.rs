@@ -1,6 +1,6 @@
 //! Favorited saved instruments for the browser's Instruments tab.
 //!
-//! Keyed by the canonical tier-qualified id (`factory:Synths/Digi Drift`,
+//! Keyed by the canonical tier-qualified id (`factory:Synths/Digi Syn`,
 //! `user:MF DOOM Kicks/Boom-Bap Kick 51`, `pkg:…`), never by a row's raw
 //! `:name`: Factory and Library rows carry bare names with a trailing `/`
 //! for folder instruments, while Engines rows carry the qualified id the
@@ -24,8 +24,26 @@ use serde::{Deserialize, Serialize};
 /// The key favorites are stored under. `section_tier` is the tier of the
 /// tree section a bare name came from (Factory or Library); with none, a bare
 /// name resolves the way loading it would (factory wins over user).
+///
+/// A versioned factory instrument (docs/instrument-versioning-spec.md) keys
+/// on its lineage, `factory:<top folder>`, whatever release or old name the
+/// id spells: a heart survives new releases and renames, and a favorite saved
+/// as `factory:Synths/Digi Drift` lands on the Digi Syn row once its manifest
+/// lists Digi Drift as a release.
 pub(crate) fn canonical_instrument_id(section_tier: Option<&ContentTier>, name: &str) -> String {
     let trimmed = name.trim_end_matches('/');
+    let versioned = match (ContentTier::parse_id(name), section_tier) {
+        (Ok(Some((ContentTier::Factory, _))), _) | (Ok(None), None) => {
+            sequencer::lisp_host::instrument_lineage_id(name)
+        }
+        (Ok(None), Some(ContentTier::Factory)) => {
+            sequencer::lisp_host::instrument_lineage_id(&ContentTier::Factory.qualify(trimmed))
+        }
+        _ => None,
+    };
+    if let Some(lineage) = versioned {
+        return lineage;
+    }
     match ContentTier::parse_id(name) {
         Ok(Some((tier, path))) => tier.qualify(path),
         Ok(None) => match section_tier {

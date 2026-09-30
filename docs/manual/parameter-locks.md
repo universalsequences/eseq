@@ -40,7 +40,7 @@ Note: a lock written on an empty step stays there. Switching a lit step off is d
 
 ## A worked example
 
-Start with a Digi Drift track, 16 steps, with notes on steps 1, 5, 9 and 13, and Cutoff Hz set to 1200 in the device panel. All four notes play with the same brightness.
+Start with a Digi Syn track, 16 steps, with notes on steps 1, 5, 9 and 13, and Cutoff Hz set to 1200 in the device panel. All four notes play with the same brightness.
 
 1. Click step 1 and turn Cutoff Hz down to 650. Step 1 now plays darker; steps 5, 9 and 13 still play at 1200.
 2. Press Escape. Turn Cutoff Hz to 2000. Steps 5, 9 and 13 get brighter. Step 1 stays at 650, because its lock replaces whatever the base value is.
@@ -49,7 +49,7 @@ Start with a Digi Drift track, 16 steps, with notes on steps 1, 5, 9 and 13, and
 
 The base value moved in step 2 and step 1 did not follow. That is the property that makes locks useful, and also the one to remember when a knob seems to have no effect on a step.
 
-![Digi Drift with a cutoff lock on the selected step. The value readout is drawn in the lock colour, and the marker at the control's corner shows the parameter has locks in this pattern.](images/locked-cutoff.png)
+![Digi Syn with a cutoff lock on the selected step. The value readout is drawn in the lock colour, and the marker at the control's corner shows the parameter has locks in this pattern.](images/locked-cutoff.png)
 
 ## Reading locks on the panel
 

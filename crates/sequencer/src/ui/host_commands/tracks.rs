@@ -735,6 +735,12 @@ pub(super) fn handle(
             let _ = editor.runtime_mut().eval_str(&format!(
                 "(set! sbrowser-loading-instrument-name \"{escaped}\")"
             ));
+            // The browser row names a versioned instrument by its top folder;
+            // the track gets the lineage's `current` release, pinned
+            // (docs/instrument-versioning-spec.md §Ids). The loading marker
+            // above keeps the row's own name so its spinner still matches.
+            let instrument_name =
+                sequencer::lisp_host::pin_instrument_for_new_track(&instrument_name);
             let source =
                 match sequencer::lisp_host::load_instrument_source(&instrument_name) {
                     Ok(source) => source,

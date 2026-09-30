@@ -7,12 +7,12 @@ fn digidrift_preview_layout_live_bindings_and_idle_probe() {
     let ui = std::fs::read_to_string(
         sequencer::app_paths::app_paths()
             .factory_root()
-            .join("instruments/Synths/Digi Drift/ui.lisp"),
+            .join("instruments/Synths/Digi Syn/versions/1/ui.lisp"),
     )
     .expect("Digi Drift UI");
     let source = build_custom_instrument_ui_source_with_overlay(Some((
         "test-instrument".into(),
-        "instruments/Synths/Digi Drift/ui.lisp".into(),
+        "instruments/Synths/Digi Syn/versions/1/ui.lisp".into(),
         ui,
     )));
     let params = [
@@ -30,7 +30,7 @@ fn digidrift_preview_layout_live_bindings_and_idle_probe() {
         ("lp_freq", 2500.0, 20.0, 18000.0),
     ];
     let root = sequencer::app_paths::app_paths().factory_root()
-        .join("instruments/Synths/Digi Drift");
+        .join("instruments/Synths/Digi Syn/versions/1");
     let dsp = std::fs::read_to_string(root.join("dsp.lisp")).unwrap();
     let compiled = sequencer::lisp_host::compile_and_load_instrument_with_asset_base(
         &dsp, 48000, Some(&root)).expect("Digi Drift parameter manifest");

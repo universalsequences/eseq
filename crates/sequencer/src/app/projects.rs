@@ -752,6 +752,7 @@ fn project_custom_instrument_slot_into_synced_snapshot(
             .iter()
             .map(|p| p.node_param_span.max(1))
             .collect(),
+        instrument_voice_controls: crate::effects::instrument_voice::InstrumentVoiceControls::from_descriptor(desc),
         transport_phase_param_idx: desc
             .transport_phase_param_idx()
             .unwrap_or(crate::effects::NO_TRANSPORT_PHASE_PARAM),
@@ -5518,6 +5519,7 @@ impl App {
                                     .iter()
                                     .map(|p| p.node_param_span.max(1))
                                     .collect(),
+                                instrument_voice_controls: None,
                                 transport_phase_param_idx: sampler_desc
                                     .transport_phase_param_idx()
                                     .unwrap_or(crate::effects::NO_TRANSPORT_PHASE_PARAM),
@@ -6464,6 +6466,7 @@ mod tests {
             key_lock_param_ids: std::collections::BTreeMap::new(),
             param_node_indices,
             param_node_spans: vec![1; num_params],
+            instrument_voice_controls: None,
             transport_phase_param_idx: crate::effects::NO_TRANSPORT_PHASE_PARAM,
             tensor_params: Vec::new(),
             ir: None,

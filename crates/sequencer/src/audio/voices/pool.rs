@@ -3,7 +3,7 @@
 //! Custom DGen engines need route assignment and release-tail bookkeeping;
 //! that higher-level lifecycle lives in the sibling `runtime` module.
 
-pub const MAX_VOICES: usize = 12;
+pub const MAX_VOICES: usize = 32;
 
 /// Voices a new melodic rack slot starts with. The pool can hold
 /// `MAX_VOICES`, but a slot at the cap costs twice this in CPU for chords

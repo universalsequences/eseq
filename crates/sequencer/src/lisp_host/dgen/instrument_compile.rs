@@ -434,6 +434,7 @@ pub fn compile_and_load_instrument_with_origin(
     result.manifest.asset_base = asset_base.map(|base| {
         eseqlisp::widget_render::patcher::register_asset_source_root(base)
     });
+    super::instrument_storage::apply_instrument_voice_metadata(&mut result.manifest, asset_base)?;
     Ok(result)
 }
 
@@ -447,6 +448,7 @@ pub fn compile_and_load_instrument_uncached_with_asset_base(
     manifest.asset_base = asset_base.map(|base| {
         eseqlisp::widget_render::patcher::register_asset_source_root(base)
     });
+    super::instrument_storage::apply_instrument_voice_metadata(&mut manifest, asset_base)?;
     let lib = load_dylib_prewarmed(&manifest)?;
     Ok(CompileResult {
         manifest,
