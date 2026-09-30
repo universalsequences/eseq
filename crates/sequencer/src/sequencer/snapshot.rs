@@ -116,7 +116,7 @@ pub struct SequencerSnapshot {
     /// The groove table of EVERY scene, by scene position: a rack plays the
     /// groove of the clip each scene points at (its own, else the rack's).
     /// Like `scene_slot_table`, a chunk scheduled from a prebuilt snapshot
-    /// reads its scene's entry here (`with_live_track_grooves`), so a clip
+    /// reads its scene's entry here (`with_live_rack_config`), so a clip
     /// launch switches grooves on the same boundary sample as its patterns.
     /// Empty when no clip has its own groove: every scene plays
     /// `track_grooves`.

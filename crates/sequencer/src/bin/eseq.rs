@@ -15,6 +15,7 @@ const USAGE: &str = "usage: eseq paths
        eseq authoring skill
        eseq instrument check DIR_OR_NAME [--no-render]
        eseq effect check DIR_OR_NAME [--no-render]
+       eseq sequencer check MODULE [--no-render] [--eval FORM]
        eseq package index [PACKAGE_DIR]
        eseq package install AUTHOR/NAME GIT_URL
        eseq package import PATH_OR_ARCHIVE
@@ -74,6 +75,21 @@ fn run(args: Vec<String>) -> Result<(), String> {
                 _ => return Err(USAGE.to_string()),
             };
             check_artifact(kind, target, render)
+        }
+        [sequencer, check, module, flags @ ..]
+            if sequencer == "sequencer" && check == "check" =>
+        {
+            let mut render = true;
+            let mut eval = None;
+            let mut rest = flags.iter();
+            while let Some(flag) = rest.next() {
+                match flag.as_str() {
+                    "--no-render" => render = false,
+                    "--eval" => eval = Some(rest.next().ok_or(USAGE)?.clone()),
+                    _ => return Err(USAGE.to_string()),
+                }
+            }
+            check_sequencer(module, render, eval.as_deref())
         }
         [package, index] if package == "package" && index == "index" => {
             index_package(std::env::current_dir().map_err(|error| error.to_string())?)
@@ -177,6 +193,7 @@ fn print_paths() -> Result<(), String> {
     println!("{:<20}{}", "factory-instruments", paths.instruments_dir().display());
     println!("{:<20}{}", "factory-effects", paths.effects_dir().display());
     println!("{:<20}{}", "packages", paths.packages_dir().display());
+    println!("{:<20}{}", "local-packages", paths.local_modules_dir().display());
     println!("{:<20}{}", "authoring", paths.authoring_dir().display());
     println!("{:<20}{}", "dgenlisp", paths.dgenlisp_tool().display());
     Ok(())
@@ -386,6 +403,310 @@ fn render_panel(kind: ArtifactKind, sources: &CheckSources) -> Result<(), String
     Ok(())
 }
 
+/// `eseq sequencer check MODULE`: find the module on the load path, check
+/// its header and `def-kind`s, then load it in the app's own runtime
+/// (`metal_seq capture`), create an instance of each kind and draw its tab.
+/// The tick is not run; the report says so.
+fn check_sequencer(module: &str, render: bool, eval: Option<&str>) -> Result<(), String> {
+    if !eseqlisp::modules::is_valid_module_name(module) || module.contains('"') {
+        return Err(format!("`{module}` is not a module name (dotted, like `my.pulse`)"));
+    }
+    let paths = sequencer::app_paths::app_paths();
+    let (roots, _) = paths.module_load_roots();
+    let path = resolve_module_file(&roots, module).ok_or_else(|| {
+        let searched: Vec<String> = roots.iter().map(|root| root.path.display().to_string()).collect();
+        format!(
+            "FAIL {module} (module)\nno file for `{module}`; a Local module `a.b` is \
+             `a/b.lisp` under {}. Searched:\n  {}",
+            paths.local_modules_dir().display(),
+            searched.join("\n  ")
+        )
+    })?;
+    let source = std::fs::read_to_string(&path)
+        .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+    match declared_module(&source) {
+        Some(name) if name == module => {}
+        Some(name) => {
+            return Err(format!(
+                "FAIL {module} (module)\n{} declares (module {name}); it must declare (module {module})",
+                path.display()
+            ))
+        }
+        None => {
+            return Err(format!(
+                "FAIL {module} (module)\n{} must begin with (module {module})",
+                path.display()
+            ))
+        }
+    }
+    println!("ok    module    {}", path.display());
+    let checked = check_brackets_with_imports(&roots, paths, module, &path, &source)?;
+    println!("ok    parse     {checked} file(s), brackets balanced");
+    let kinds = def_kind_names(&source);
+    if kinds.is_empty() {
+        return Err(format!(
+            "FAIL {module} (def-kind)\nno (def-kind NAME …) in {}; the check needs the module \
+             that declares the kind (usually the one with the panel)",
+            path.display()
+        ));
+    }
+    println!("ok    def-kind  {}", kinds.join(", "));
+    if render {
+        let package = sequencer::lisp_host::package_name_for_module(module);
+        for kind in &kinds {
+            let id = sequencer::lisp_host::kind_id(package.as_deref(), Some(module), kind);
+            render_instance(module, &path, kind, &id, eval)?;
+        }
+    }
+    println!("--    tick      not run by the check: press Play in eseq and listen");
+    println!("PASS {module}");
+    Ok(())
+}
+
+/// The file a module loads from: the first load root (Local, installed
+/// packages, factory) holding one of its candidate paths. A package root
+/// only resolves modules in its own namespace, prefix stripped.
+fn resolve_module_file(roots: &[eseqlisp::ModuleLoadRoot], module: &str) -> Option<PathBuf> {
+    roots.iter().find_map(|root| {
+        let relative = match &root.module_prefix {
+            Some(prefix) => module.strip_prefix(prefix.as_str())?.strip_prefix('.')?,
+            None => module,
+        };
+        eseqlisp::modules::module_relative_file_candidates(relative)
+            .into_iter()
+            .map(|candidate| root.path.join(candidate))
+            .find(|candidate| candidate.is_file())
+    })
+}
+
+/// Source with `;` comments dropped and string contents blanked, so neither
+/// can look like a form (eseqlisp strings have no escapes).
+fn code_only(source: &str) -> String {
+    source
+        .lines()
+        .map(|line| {
+            let mut out = String::with_capacity(line.len());
+            let mut in_string = false;
+            for ch in line.chars() {
+                match ch {
+                    '"' => {
+                        in_string = !in_string;
+                        out.push('"');
+                    }
+                    ';' if !in_string => break,
+                    _ if in_string => out.push(' '),
+                    _ => out.push(ch),
+                }
+            }
+            out
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Bracket-check the module and every Local or installed module it imports,
+/// transitively (factory modules are eseq's own and skipped). Returns how
+/// many files were checked.
+fn check_brackets_with_imports(
+    roots: &[eseqlisp::ModuleLoadRoot],
+    paths: &sequencer::app_paths::AppPaths,
+    module: &str,
+    path: &Path,
+    source: &str,
+) -> Result<usize, String> {
+    let user_roots = [paths.local_modules_dir(), paths.packages_dir()];
+    let mut pending = vec![(module.to_string(), path.to_path_buf(), source.to_string())];
+    let mut seen = vec![module.to_string()];
+    let mut checked = 0;
+    while let Some((name, file, text)) = pending.pop() {
+        if let Some(problem) = bracket_problem(&text) {
+            return Err(format!("FAIL {module} (parse)\n{}:{problem}", file.display()));
+        }
+        checked += 1;
+        for import in imported_modules(&text) {
+            if seen.contains(&import) {
+                continue;
+            }
+            seen.push(import.clone());
+            let Some(import_file) = resolve_module_file(roots, &import) else { continue };
+            if !user_roots.iter().any(|root| import_file.starts_with(root)) {
+                continue;
+            }
+            let import_text = std::fs::read_to_string(&import_file)
+                .map_err(|error| format!("cannot read {}: {error}", import_file.display()))?;
+            pending.push((import, import_file, import_text));
+        }
+        let _ = name;
+    }
+    Ok(checked)
+}
+
+/// `LINE: reason` for the first unbalanced bracket, or None.
+fn bracket_problem(source: &str) -> Option<String> {
+    let mut open: Vec<(char, usize)> = Vec::new();
+    for (index, line) in code_only(source).lines().enumerate() {
+        let line_no = index + 1;
+        for ch in line.chars() {
+            match ch {
+                '(' | '[' => open.push((ch, line_no)),
+                ')' | ']' => {
+                    let want = if ch == ')' { '(' } else { '[' };
+                    match open.pop() {
+                        Some((got, _)) if got == want => {}
+                        Some((got, at)) => {
+                            return Some(format!(
+                                "{line_no}: `{ch}` closes the `{got}` opened on line {at}"
+                            ))
+                        }
+                        None => return Some(format!("{line_no}: `{ch}` has nothing to close")),
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    open.pop().map(|(ch, at)| format!("{at}: this `{ch}` is never closed"))
+}
+
+/// Module names in `(import NAME …)` forms.
+fn imported_modules(source: &str) -> Vec<String> {
+    let code = code_only(source);
+    let mut names = Vec::new();
+    let mut rest = code.as_str();
+    while let Some(at) = rest.find("(import") {
+        rest = &rest[at + "(import".len()..];
+        if !rest.starts_with(char::is_whitespace) {
+            continue;
+        }
+        let name: String = rest
+            .trim_start()
+            .chars()
+            .take_while(|ch| !ch.is_whitespace() && *ch != ')' && *ch != '(')
+            .collect();
+        if eseqlisp::modules::is_valid_module_name(&name) && !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    names
+}
+
+/// The name in a leading `(module NAME)` form, if the file starts with one.
+fn declared_module(source: &str) -> Option<String> {
+    let code = code_only(source);
+    let rest = code.trim_start().strip_prefix('(')?.trim_start().strip_prefix("module")?;
+    if !rest.starts_with(char::is_whitespace) {
+        return None;
+    }
+    let name: String = rest
+        .trim_start()
+        .chars()
+        .take_while(|ch| !ch.is_whitespace() && *ch != ')')
+        .collect();
+    (!name.is_empty()).then_some(name)
+}
+
+/// Every `(def-kind NAME` in the source, in order.
+fn def_kind_names(source: &str) -> Vec<String> {
+    let code = code_only(source);
+    let mut names = Vec::new();
+    let mut rest = code.as_str();
+    while let Some(at) = rest.find("(def-kind") {
+        rest = &rest[at + "(def-kind".len()..];
+        if !rest.starts_with(char::is_whitespace) {
+            continue;
+        }
+        let name: String = rest
+            .trim_start()
+            .chars()
+            .take_while(|ch| !ch.is_whitespace() && *ch != ')' && *ch != '(')
+            .collect();
+        if !name.is_empty() && !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    names
+}
+
+/// Load the module in the app's own runtime, create instance 1 of the kind
+/// and draw its tab. `eval` runs after the project syncs, with the instance
+/// reachable as `(instance-ref 1)`: fill its document with an example, or pin
+/// a preview playhead.
+fn render_instance(
+    module: &str,
+    path: &Path,
+    kind: &str,
+    kind_id: &str,
+    eval: Option<&str>,
+) -> Result<(), String> {
+    let metal_seq = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join("metal_seq")))
+        .filter(|path| path.exists());
+    let Some(metal_seq) = metal_seq else {
+        println!("--    panel     not rendered: metal_seq not found next to eseq");
+        return Ok(());
+    };
+    let work_dir = std::env::temp_dir().join("eseq-check");
+    std::fs::create_dir_all(&work_dir)
+        .map_err(|error| format!("cannot create {}: {error}", work_dir.display()))?;
+    let stem: String = format!("{module}-{kind}")
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' })
+        .collect();
+    let script_path = work_dir.join(format!("{stem}.lisp"));
+    let png_path = work_dir.join(format!("{stem}.png"));
+    let mut script = String::from(
+        "(capture-project\n  (track :sampler :name \"Kick\")\n  (track :sampler :name \"Snare\")\n  \
+         (track :sampler :name \"Hat\")\n  (track :sampler :name \"Perc\"))\n",
+    );
+    script.push_str(&format!("(import {module})\n"));
+    script.push_str(&format!("(host-command \"instance-create\" (dict :kind \"{kind_id}\"))\n"));
+    if let Some(form) = eval {
+        script.push_str(&format!("(def capture-after-sync () {form})\n"));
+    }
+    std::fs::write(&script_path, script)
+        .map_err(|error| format!("cannot write {}: {error}", script_path.display()))?;
+    let buffer = format!("*{kind} · {kind} 1*");
+    let output = std::process::Command::new(&metal_seq)
+        .arg("capture")
+        .arg("--script")
+        .arg(&script_path)
+        .args(["--buffer", &buffer, "--hide-status"])
+        .args(["--width", "1800", "--height", "900"])
+        .arg("--out")
+        .arg(&png_path)
+        .output()
+        .map_err(|error| format!("cannot run {}: {error}", metal_seq.display()))?;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let file = path.display().to_string();
+    let own: Vec<&str> = stderr
+        .lines()
+        .filter(|line| !line.contains("is not exported by"))
+        .filter(|line| {
+            line.contains(&file)
+                || line.contains("[lisp-error]")
+                || line.contains(module)
+                || line.contains("capture-after-sync failed")
+        })
+        .collect();
+    if !own.is_empty() || !output.status.success() {
+        let mut detail = if own.is_empty() {
+            stderr.lines().rev().take(5).collect::<Vec<_>>().join("\n")
+        } else {
+            own.join("\n")
+        };
+        if stderr.contains("does not exist") {
+            detail.push_str(&format!(
+                "\nthe `{kind}` tab did not open: the module failed to load, `def-kind {kind}` \
+                 has no :view, or creating the instance failed"
+            ));
+        }
+        return Err(format!("FAIL {module} (panel render, kind {kind})\n{detail}"));
+    }
+    println!("ok    panel     {kind}: {}", png_path.display());
+    Ok(())
+}
+
 fn index_package(path: PathBuf) -> Result<(), String> {
     let lines = sequencer::sample_manifest::index_package(&path)?;
     let count = lines
@@ -402,4 +723,35 @@ fn index_package(path: PathBuf) -> Result<(), String> {
         path.join("samples.jsonl").display()
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{bracket_problem, declared_module, def_kind_names, imported_modules};
+
+    #[test]
+    fn sequencer_check_reads_the_module_header_and_kind_names() {
+        let source = ";; (def-kind commented-out)\n(module my.pulse)\n(import my.pulse-core)\n\
+                      (def x \"(def-kind in-a-string\")\n(def-kind pulse\n  :view p)\n\
+                      (def-kind other :view q) ; (def-kind trailing)\n(def-kinds nope)\n";
+        assert_eq!(declared_module(source).as_deref(), Some("my.pulse"));
+        assert_eq!(def_kind_names(source), vec!["pulse".to_string(), "other".to_string()]);
+        assert_eq!(declared_module("(def x 1)\n(module late)"), None);
+        assert_eq!(declared_module("(modules x)"), None);
+        assert_eq!(imported_modules(source), vec!["my.pulse-core".to_string()]);
+    }
+
+    #[test]
+    fn sequencer_check_points_at_the_unbalanced_bracket() {
+        assert_eq!(bracket_problem("(a (b \")\") ; )\n c)"), None);
+        assert_eq!(
+            bracket_problem("(def a 1)\n(def b (+ 1\n  2)\n(def c 3)").as_deref(),
+            Some("2: this `(` is never closed")
+        );
+        assert_eq!(bracket_problem("(a))").as_deref(), Some("1: `)` has nothing to close"));
+        assert_eq!(
+            bracket_problem("(each xs |i|\n  [a)").as_deref(),
+            Some("2: `)` closes the `[` opened on line 2")
+        );
+    }
 }

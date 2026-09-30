@@ -7893,6 +7893,98 @@ mod tests {
         }
     }
 
+
+    /// A rack-owned generator (a jaki instance on a rack: its routes are
+    /// member indices) routed to a pad track created while the transport
+    /// plays must reach it on the next boundary, not after a stop and
+    /// restart. Play preflights song-row snapshots that froze the rack's
+    /// member list, so the new member resolved to nothing.
+    #[test]
+    fn rack_generator_hits_reach_a_member_added_while_playing() {
+        use crate::scheduler::scheduled_event::{ScheduledEventKind, ScheduledEventQueue};
+        use crate::scheduler::{SchedulerDriver, SchedulerInput};
+
+        const BLOCK: usize = 256;
+        const LOOKAHEAD: u64 = 2_048;
+        const SAMPLE_RATE: u32 = 44_100;
+
+        for authored_scene_row in [false, true] {
+            let graph = TestLiveGraph::new("rack-generator-added-member-test", 64, 44_100, 2);
+            let mut app = test_app_for_live_graph(&graph, 0);
+            let (group_id, _) = app
+                .create_drum_rack_recorded(None)
+                .expect("drum rack should be created");
+            let kick = app.graph_controller().add_blank_sampler_track().expect("kick track");
+            app.assign_rack_pad_track_recorded(group_id, 0, kick).expect("kick pad");
+            // Route 1 = the rack's second member, which does not exist yet.
+            app.state.publish_sequencer(crate::sequencer::PublishedSequencer {
+                id: 7,
+                name: "to-member-1".to_string(),
+                resolution: crate::sequencer::Timebase::Sixteenth as u8,
+                tick_source: "(seq-emit :track 1 :at :now :vel 0.5)".to_string(),
+                requires: Vec::new(),
+                graph: None,
+                owner_rack: Some(group_id),
+            });
+            if authored_scene_row {
+                app.arr_replace_rows(
+                    vec![crate::app::song_edit::SongRowSpec {
+                        start_beat: 0.0,
+                        scene: 0,
+                        overrides: Vec::new(),
+                    }],
+                    64.0,
+                    false,
+                )
+                .expect("arrangement row");
+            }
+            app.song_transport_play(false).expect("song playback starts");
+
+            let bpm = app.state.latest_scheduler_snapshot().transport.bpm.max(1) as f64;
+            let spq = SAMPLE_RATE as f64 * 60.0 / bpm;
+            let queue = Arc::new(ScheduledEventQueue::<4096>::new());
+            let mut driver =
+                SchedulerDriver::new(Arc::clone(&app.state), SAMPLE_RATE, BLOCK, queue.clone());
+            let mut hits: Vec<(usize, u64)> = Vec::new();
+            let mut rendered = 0_u64;
+            let run_until = |driver: &mut SchedulerDriver,
+                             rendered: &mut u64,
+                             until: u64,
+                             hits: &mut Vec<(usize, u64)>| {
+                while *rendered < until {
+                    driver.advance(*rendered, *rendered + LOOKAHEAD, SchedulerInput::Offline);
+                    while let Some(event) = queue.pop_owned() {
+                        if let ScheduledEventKind::NetworkTrigger { track, .. } = event.kind {
+                            hits.push((track, event.sample_time));
+                        }
+                    }
+                    *rendered += BLOCK as u64;
+                }
+            };
+            let beats = |b: f64| ((b * spq) as u64 / BLOCK as u64) * BLOCK as u64;
+            let (add_at, end) = (beats(2.0), beats(6.0));
+            run_until(&mut driver, &mut rendered, add_at, &mut hits);
+            assert!(hits.is_empty(), "no member 1 yet: {hits:?}");
+            let snare = app.graph_controller().add_blank_sampler_track().expect("snare track");
+            app.assign_rack_pad_track_recorded(group_id, 2, snare).expect("snare pad");
+            run_until(&mut driver, &mut rendered, end, &mut hits);
+
+            let label = if authored_scene_row { "scene row" } else { "auto-latched scene" };
+            let errors = driver.take_runtime_errors();
+            assert!(errors.is_empty(), "{label}: {errors:?}");
+            assert!(
+                hits.iter().all(|&(track, _)| track == snare),
+                "{label}: member 1 is the snare track {snare}: {hits:?}"
+            );
+            assert!(
+                hits.iter().any(|&(_, sample)| sample >= add_at + LOOKAHEAD),
+                "{label}: hits reach the new member without a restart: {hits:?}"
+            );
+            app.song_transport_stop().expect("stop");
+            graph.process_block();
+        }
+    }
+
     /// A two-slot 16th groove with a row per `pad_notes` note (each row
     /// distinct) and a `[0, shared]` shared row.
     fn two_slot_test_groove(

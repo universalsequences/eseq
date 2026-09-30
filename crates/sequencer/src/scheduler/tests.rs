@@ -17820,12 +17820,12 @@ fn prebuilt_chunks_take_their_scenes_live_groove_table() {
     prebuilt.transport.current_pattern = 1;
     let mut cache = None;
     let patched =
-        super::lookahead::with_live_track_grooves(&mut cache, Arc::new(prebuilt), &base);
+        super::lookahead::with_live_rack_config(&mut cache, Arc::new(prebuilt), &base);
     assert!(Arc::ptr_eq(&patched.track_grooves, &chorus), "the chorus scene's table");
     let mut verse_chunk = crate::sequencer::SequencerSnapshot::empty();
     verse_chunk.transport.current_pattern = 0;
     let patched =
-        super::lookahead::with_live_track_grooves(&mut cache, Arc::new(verse_chunk), &base);
+        super::lookahead::with_live_rack_config(&mut cache, Arc::new(verse_chunk), &base);
     assert!(Arc::ptr_eq(&patched.track_grooves, &verse));
 }
 
