@@ -18,6 +18,8 @@ use super::grid_clock::{process_grid_boundaries, GridBoundaryClock};
 use crate::scheduled_event::StepEvent;
 use crate::sequencer::{StepParam, NUM_PARAMS};
 
+pub use super::param_ref::{bus_send_from_label, step_param_from_target_name, ParamRef};
+
 pub const DEFAULT_PROCESS_PORT: &str = "__default";
 
 /// Short label for a `ParamTarget::BusSend` bus id: the two default buses

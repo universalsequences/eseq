@@ -13,6 +13,7 @@ mod live_audio_analyzer;
 mod natives;
 #[cfg(target_os = "macos")]
 mod native_menu;
+mod param_words;
 mod piano_roll;
 mod patch_learn;
 mod profile;

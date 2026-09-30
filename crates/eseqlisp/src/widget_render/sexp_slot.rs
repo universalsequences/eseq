@@ -34,6 +34,13 @@
 //! pairs — draws argument `index` (0-based) of every `(head …)` form in
 //! `:tint-color`, e.g. `'(("on" 0))` marks `on`'s selector apart from its
 //! word.
+//!
+//! `:dyn-context` (any value) is handed untouched to the host sources of the
+//! schema's `(dyn SOURCE)` atoms (`crate::sexp_slot::dyn_words`): they are
+//! asked only when a popup or field opens on such an atom, or to revalidate
+//! when the context or the source's epoch changes, and the answer is cached
+//! per widget. A name its source does not offer for the context is drawn in
+//! `:error-color` (a `nil` context is not validated); the text is kept.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -51,7 +58,8 @@ use crate::layout::{
     Constraints, DEFAULT_FONT_SIZE, LayoutNode, MeasureCtx, Rect, Size, TextMeasurer, f64_to_f32,
     get_map, get_prop_num,
 };
-use crate::sexp_slot::edit::{Datum, MAX_COMPLETIONS, Outcome, Path, Slot, SlotState, Stop};
+use crate::sexp_slot::dyn_words::{DynCache, DynLookup};
+use crate::sexp_slot::edit::{Completions, Datum, MAX_COMPLETIONS, Outcome, Path, Slot, SlotState, Stop};
 use crate::sexp_slot::schema::Schema;
 use crate::theme;
 use crate::vm::Value;
@@ -104,6 +112,28 @@ thread_local! {
     /// Slots with an `:on-hover` whose pointer is over a top-level item: the
     /// callback (to report the leave without the node) and the item index.
     static HOVERED: RefCell<HashMap<u64, (Value, usize)>> = RefCell::new(HashMap::new());
+    /// Each slot's `dyn` source answers, per (source, context, epoch).
+    static DYN_CACHES: RefCell<HashMap<StateKey, std::rc::Rc<RefCell<DynCache>>>> = RefCell::new(HashMap::new());
+    /// Measuring sees only props, not the widget: its `dyn-num` rails (for
+    /// number widths) come from one cache per printed `:dyn-context`.
+    static MEASURE_DYN_CACHES: RefCell<HashMap<String, std::rc::Rc<RefCell<DynCache>>>> = RefCell::new(HashMap::new());
+}
+
+/// The slot's `:dyn-context` and its answer cache.
+fn dyn_lookup(node: &LayoutNode) -> DynLookup {
+    let key = state_key(node);
+    let cache = DYN_CACHES.with(|caches| caches.borrow_mut().entry(key).or_default().clone());
+    DynLookup::new(node.props.get("dyn-context").cloned().unwrap_or(Value::Nil), cache)
+}
+
+/// A lookup for measuring (props only): shared per `:dyn-context`, so it
+/// asks a source at most once per (context, epoch). Sources are only asked
+/// for `dyn-num` positions with a non-`nil` context.
+fn measure_dyn_lookup(props: &HashMap<String, Value>) -> DynLookup {
+    let context = props.get("dyn-context").cloned().unwrap_or(Value::Nil);
+    let key = crate::vm::format_lisp_source(&context);
+    let cache = MEASURE_DYN_CACHES.with(|caches| caches.borrow_mut().entry(key).or_default().clone());
+    DynLookup::new(context, cache)
 }
 
 /// The pointer now hovers `widget_id` (or nothing): every other slot that
@@ -673,7 +703,8 @@ fn open_field_for_key(props: &HashMap<String, Value>) -> Option<(Stop, String)> 
 /// Lay the node out at its render width.
 fn node_layout(node: &LayoutNode, schema: &Schema, value: &Datum, state: &SlotState, cell_w: f32) -> SlotLayout {
     let font_size = get_f32_prop(&node.props, "font-size", DEFAULT_FONT_SIZE);
-    let slot = Slot::new(schema, value);
+    let lookup = dyn_lookup(node);
+    let slot = Slot::new(schema, value).with_dyn(&lookup);
     let field = state.field.as_ref().map(|field| (&field.target, field.text.as_str()));
     let text_width = |text: &str| render_text_width(text, font_size, cell_w);
     // A hair of slack so the render measurer never wraps what measuring fit.
@@ -783,7 +814,7 @@ impl WidgetDefinition for SexpSlotWidget {
             "schema", "value", "on-change", "width", "max-width", "height", "font-size",
             "focusable", "atom-bg", "text-color", "head-color", "paren-color", "band-color",
             "focus-color", "error-color", "on-hover", "tint-args", "tint-color", "wrap",
-            "lit", "lit-color", "lit-values",
+            "lit", "lit-color", "lit-values", "dyn-context",
         ]
     }
 
@@ -831,8 +862,9 @@ impl WidgetDefinition for SexpSlotWidget {
             .min(if constraints.max_width > 0.0 { constraints.max_width } else { f32::INFINITY })
         };
         let field = open_field_for_key(&props);
+        let lookup = measure_dyn_lookup(&props);
         let layout = layout_slot(
-            &Slot::new(&schema, &value),
+            &Slot::new(&schema, &value).with_dyn(&lookup),
             field.as_ref().map(|(target, text)| (target, text.as_str())),
             &text_width,
             wrap,
@@ -872,7 +904,8 @@ impl WidgetDefinition for SexpSlotWidget {
         remember_cell_w(cell_w);
         let Ok(schema) = parse_schema(&node.props) else { return MouseEventOutcome::Consume };
         let value = value_datum(&node.props, &schema);
-        let slot = Slot::new(&schema, &value);
+        let lookup = dyn_lookup(node);
+        let slot = Slot::new(&schema, &value).with_dyn(&lookup);
         let mut state = get_state(node);
         state.cursor = slot.normalize(&state.cursor);
 
@@ -910,8 +943,12 @@ impl WidgetDefinition for SexpSlotWidget {
                 };
                 state.place(&slot, stop.clone());
                 let outcome = match (&placed.piece, &stop) {
-                    (Piece::Word { .. }, Stop::Item(path)) => {
-                        state.open_word_popup(&slot, path);
+                    (Piece::Word { text, .. }, Stop::Item(path)) => {
+                        // A dyn name with nothing to pick (only a hint) opens
+                        // as text, so the hint shows and the name stays editable.
+                        if !state.open_word_popup(&slot, path) && slot.dyn_field(&stop, text) {
+                            state.open_field(stop.clone(), text.clone());
+                        }
                         Outcome::Changed
                     }
                     (Piece::Head { .. }, Stop::Item(path)) => {
@@ -975,7 +1012,8 @@ impl WidgetDefinition for SexpSlotWidget {
     fn key_event(&self, node: &LayoutNode, key: WidgetKeyEvent) -> Option<WidgetEvent> {
         let schema = parse_schema(&node.props).ok()?;
         let value = value_datum(&node.props, &schema);
-        let slot = Slot::new(&schema, &value);
+        let lookup = dyn_lookup(node);
+        let slot = Slot::new(&schema, &value).with_dyn(&lookup);
         let mut state = get_state(node);
         let outcome = state.handle_key(&slot, key.code, key.modifiers);
         if !state.has_open_editor() {
@@ -1041,7 +1079,8 @@ impl WidgetDefinition for SexpSlotWidget {
             }
         };
         let value = value_datum(&node.props, &schema);
-        let slot = Slot::new(&schema, &value);
+        let lookup = dyn_lookup(node);
+        let slot = Slot::new(&schema, &value).with_dyn(&lookup);
         let focused = viewport.focused_widget_id == Some(node.widget_id);
         let mut state = get_state(node);
         let normalized = slot.normalize(&state.cursor);
@@ -1071,6 +1110,7 @@ impl WidgetDefinition for SexpSlotWidget {
         let tint_atom = Color { a: 0.28, ..tint };
         let is_tinted = |path: &Path| !rules.is_empty() && tinted(&value, path, &rules);
         let played = lit_value_paths(&node.props);
+        let error_color = resolve_named_color(&node.props, "error-color", theme::RED());
 
         // Lit items: a ring around each item the sounding hit applied.
         let lit = get_f32_prop(&node.props, "lit", 0.0).max(0.0) as u64;
@@ -1117,15 +1157,25 @@ impl WidgetDefinition for SexpSlotWidget {
                 Piece::Num { text: t, path } | Piece::Word { text: t, path } => {
                     // the member the sounding hit played fills with the lit color
                     let playing = played.contains(path);
+                    // A dyn name its source does not offer here: error band.
+                    let invalid = matches!(placed.piece, Piece::Word { .. }) && slot.dyn_problem(path).is_some();
                     let bg = if playing {
                         resolve_named_color(&node.props, "lit-color", focus)
+                    } else if invalid {
+                        Color { a: 0.22, ..error_color }
                     } else if is_tinted(path) {
                         tint_atom
                     } else {
                         atom_bg
                     };
                     prims.push(rounded_rect(rect, bg, 8.0, viewport, true));
-                    let fg = if playing { theme::BG() } else { text_color };
+                    let fg = if playing {
+                        theme::BG()
+                    } else if invalid {
+                        error_color
+                    } else {
+                        text_color
+                    };
                     prims.push(text(text_row, rect.col + ATOM_PAD, t.clone(), font_size, fg));
                 }
                 Piece::Head { text: t, .. } => {
@@ -1179,10 +1229,19 @@ fn draw_overlay(
     viewport: WidgetViewport,
     line_h: f32,
 ) {
-    let (anchor, options, highlight, error) = if let Some(popup) = &state.popup {
-        (layout.anchor(Some(&Stop::Item(popup.path.clone())), line_h), popup.options.clone(), popup.highlight, None)
+    let (anchor, rows, highlight, error) = if let Some(popup) = &state.popup {
+        let target = Stop::Item(popup.path.clone());
+        // A dyn word's popup: its details and hints come from the same rows.
+        let rows = match slot.value.get(&popup.path) {
+            Some(Datum::Word(word)) if !popup.head && slot.dyn_field(&target, word) => {
+                let rows = slot.completion_rows(&target, "");
+                Completions { words: popup.options.clone(), ..rows }
+            }
+            _ => Completions { words: popup.options.clone(), ..Completions::default() },
+        };
+        (layout.anchor(Some(&target), line_h), rows, popup.highlight, None)
     } else if let Some(field) = &state.field {
-        (layout.anchor(None, line_h), state.field_completions(slot), field.highlight, field.error.clone())
+        (layout.anchor(None, line_h), state.field_completion_rows(slot), field.highlight, field.error.clone())
     } else {
         super::remove_overlay(node.widget_id);
         return;
@@ -1191,12 +1250,14 @@ fn draw_overlay(
         super::remove_overlay(node.widget_id);
         return;
     };
-    if options.is_empty() && error.is_none() {
+    let options = &rows.words;
+    if options.is_empty() && error.is_none() && rows.hints.is_empty() {
         super::remove_overlay(node.widget_id);
         return;
     }
     let menu_font = menu_style::MENU_FONT_SIZE;
-    let lead = usize::from(error.is_some());
+    // Lead rows (not selectable): the error, then a source's hints.
+    let lead = usize::from(error.is_some()) + rows.hints.len();
     // Below the anchor if it fits, else whichever side has more room, the
     // window shrunk to fit (it scrolls with the highlight).
     let screen_row = node.rect.row + anchor.row - viewport.scroll_top;
@@ -1213,10 +1274,14 @@ fn draw_overlay(
     let visible = options.len().min(window).min(fit.saturating_sub(lead).max(1));
     let first = highlight.saturating_sub(visible.saturating_sub(1)).min(options.len().saturating_sub(visible));
     let text_w = |t: &str| render_text_width(t, menu_font, viewport.cell_w);
+    let detail_gap = 1.2;
+    let detail = |index: usize| rows.details.get(index).filter(|detail| !detail.is_empty());
     let content_width = options
         .iter()
-        .map(|option| text_w(option))
+        .enumerate()
+        .map(|(index, option)| text_w(option) + detail(index).map_or(0.0, |d| detail_gap + text_w(d)))
         .chain(error.iter().map(|reason| text_w(reason)))
+        .chain(rows.hints.iter().map(|hint| text_w(hint)))
         .fold(0.0_f32, f32::max);
     let width = (content_width + menu_style::TEXT_PADDING_H * 2.0).max(anchor.width).max(6.0);
     let height = (lead + visible) as f32 * MENU_ROW_HEIGHT + PANEL_PADDING_V * 2.0;
@@ -1238,6 +1303,10 @@ fn draw_overlay(
         let color = resolve_named_color(&node.props, "error-color", theme::RED());
         super::push_overlay_primitive(text(text_row(rect), rect.col + menu_style::TEXT_PADDING_H, reason, menu_font, color));
     }
+    for (index, hint) in rows.hints.iter().enumerate() {
+        let rect = row_rect(lead - rows.hints.len() + index);
+        super::push_overlay_primitive(text(text_row(rect), rect.col + menu_style::TEXT_PADDING_H, hint.clone(), menu_font, theme::DIM()));
+    }
     for (offset, option) in options.iter().skip(first).take(visible).enumerate() {
         let rect = row_rect(lead + offset);
         if first + offset == highlight {
@@ -1245,6 +1314,10 @@ fn draw_overlay(
         }
         let fg = if slot.schema.is_form_head(option) { theme::SYN_KEYWORD() } else { theme::FG() };
         super::push_overlay_primitive(text(text_row(rect), rect.col + menu_style::TEXT_PADDING_H, option.clone(), menu_font, fg));
+        if let Some(detail) = detail(first + offset) {
+            let col = rect.col + rect.width - menu_style::TEXT_PADDING_H - text_w(detail);
+            super::push_overlay_primitive(text(text_row(rect), col, detail.clone(), menu_font, theme::DIM()));
+        }
     }
 }
 
@@ -1458,6 +1531,136 @@ mod tests {
         assert!(SEXP_SLOT_WIDGET.key_event(&node, key(KeyCode::Up)).is_none());
         // Space outside a field falls through (transport).
         assert!(SEXP_SLOT_WIDGET.key_event(&node, key(KeyCode::Char(' '))).is_none());
+    }
+
+    #[test]
+    fn dyn_context_reaches_the_source_and_its_words_commit() {
+        use crate::sexp_slot::dyn_words::{DynGroup, DynItem, DynWords, register_dyn_word_source};
+        let seen: std::rc::Rc<RefCell<Vec<Value>>> = Default::default();
+        let log = seen.clone();
+        register_dyn_word_source(
+            "widget-param",
+            Box::new(move |context| {
+                log.borrow_mut().push(context.clone());
+                DynWords {
+                    epoch: 0,
+                    groups: vec![DynGroup {
+                        group: "Instrument".into(),
+                        items: vec![DynItem::new("instrument:cutoff", "Cutoff")],
+                    }],
+                    aliases: Vec::new(),
+                }
+            }),
+        );
+        let mut node = LayoutNode {
+            widget_id: 13,
+            stable_widget_id: None,
+            subtree_root_id: None,
+            parent_subtree_root_id: None,
+            stable_key: None,
+            widget_type: "sexp-slot".to_string(),
+            rect: Rect { row: 0.0, col: 0.0, width: 40.0, height: 1.3 },
+            props: HashMap::new(),
+            children: Vec::new(),
+            focusable: true,
+            animation: Default::default(),
+        };
+        let mut runtime = crate::Runtime::new();
+        let schema = runtime
+            .eval_str("(list \"forms\" (list \"form\" \"plock\" (list \"fixed\" (list \"dyn\" \"widget-param\")) (list \"num\")))")
+            .unwrap()
+            .unwrap();
+        node.props.insert("schema".into(), schema);
+        node.props.insert("value".into(), read_value("((plock \"\" 0))").unwrap());
+        node.props.insert("on-change".into(), Value::Keyword("cb".into()));
+        node.props.insert("dyn-context".into(), Value::Number(3.0));
+        let key = |code| WidgetKeyEvent { code, modifiers: KeyModifiers::NONE };
+        use crossterm::event::KeyCode;
+        // Onto the form, down to its name, type a fuzzy query, Enter.
+        SEXP_SLOT_WIDGET.key_event(&node, key(KeyCode::Down));
+        for ch in "cut".chars() {
+            SEXP_SLOT_WIDGET.key_event(&node, key(KeyCode::Char(ch)));
+        }
+        let event = SEXP_SLOT_WIDGET.key_event(&node, key(KeyCode::Enter)).expect("commit");
+        let output = SEXP_SLOT_WIDGET.handle_event(&node, event).expect("on-change");
+        assert_eq!(output.args, vec![read_value("((\"plock\" \"instrument:cutoff\" 0))").unwrap()]);
+        // Asked once, with the context untouched, across every keystroke.
+        assert_eq!(*seen.borrow(), vec![Value::Number(3.0)]);
+    }
+
+    #[test]
+    fn dyn_num_scrubs_and_formats_in_the_named_words_rails() {
+        use crate::sexp_slot::dyn_words::{DynGroup, DynItem, DynWords, register_dyn_word_source};
+        use crate::sexp_slot::schema::NumSpec;
+        register_dyn_word_source(
+            "widget-rails",
+            Box::new(|_| DynWords {
+                groups: vec![DynGroup {
+                    group: "Instrument".into(),
+                    items: vec![DynItem::new("instrument:cutoff", "Cutoff").with_num(NumSpec {
+                        min: 20.0,
+                        max: 20000.0,
+                        step: 1.0,
+                        decimals: 0,
+                    })],
+                }],
+                ..DynWords::default()
+            }),
+        );
+        let make_node = |widget_id: u64| LayoutNode {
+            widget_id,
+            stable_widget_id: None,
+            subtree_root_id: None,
+            parent_subtree_root_id: None,
+            stable_key: None,
+            widget_type: "sexp-slot".to_string(),
+            rect: Rect { row: 0.0, col: 0.0, width: 60.0, height: 1.3 },
+            props: HashMap::new(),
+            children: Vec::new(),
+            focusable: true,
+            animation: Default::default(),
+        };
+        let mut node = make_node(17);
+        node.props.insert("schema".into(), read_value(
+            "(forms (form plock (fixed (dyn widget-rails))
+                       (dyn-num widget-rails (num :min -100000 :max 100000 :step 0.01 :decimals 2))))",
+        ).unwrap());
+        node.props.insert("value".into(), read_value("((plock \"instrument:cutoff\" 440))").unwrap());
+        node.props.insert("on-change".into(), Value::Keyword("cb".into()));
+        node.props.insert("dyn-context".into(), Value::Number(0.0));
+        let schema = parse_schema(&node.props).unwrap();
+        let value = value_datum(&node.props, &schema);
+        let layout = node_layout(&node, &schema, &value, &SlotState::default(), 8.0);
+        let num = layout.placed.iter().find(|p| matches!(p.piece, Piece::Num { .. })).unwrap();
+        assert_eq!(num.piece, Piece::Num { path: vec![0, 2], text: "440".into() });
+        // Unrouted: the fallback's decimals.
+        let mut unrouted = make_node(18);
+        unrouted.props = node.props.clone();
+        unrouted.props.insert("dyn-context".into(), Value::Nil);
+        let layout = node_layout(&unrouted, &schema, &value, &SlotState::default(), 8.0);
+        assert!(layout.placed.iter().any(|p| p.piece == Piece::Num { path: vec![0, 2], text: "440.00".into() }));
+
+        let (col, row) = (num.col + num.width * 0.5, 0.6);
+        let gesture = SEXP_SLOT_WIDGET.begin_gesture(&node, col, row, KeyModifiers::NONE).expect("a number");
+        let drag = |to_row: f32| {
+            match SEXP_SLOT_WIDGET.mouse_event(
+                &node, MouseEventKind::Drag(MouseButton::Left), col, to_row, None, Some(&gesture),
+                KeyModifiers::NONE, 8.0, 16.0,
+            ) {
+                MouseEventOutcome::Dispatch(event) => {
+                    let args = SEXP_SLOT_WIDGET.handle_event(&node, event).expect("on-change").args;
+                    Datum::from_value(&args[0]).get(&[0, 2]).cloned()
+                }
+                _ => None,
+            }
+        };
+        // One row up: a 24th of cutoff's range, snapped to its whole-Hz step.
+        let Some(Datum::Num(up)) = drag(row - 1.0) else { panic!("scrub") };
+        assert_eq!(up.fract(), 0.0);
+        assert!((up - (440.0 + 19980.0 / 24.0)).abs() <= 1.0, "{up}");
+        // Far up / down: clamped to the cutoff's rails, not the fallback's.
+        assert_eq!(drag(row - 100.0), Some(Datum::Num(20000.0)));
+        assert_eq!(drag(row + 100.0), Some(Datum::Num(20.0)));
     }
 
     #[test]

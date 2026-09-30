@@ -1932,6 +1932,7 @@ pub(in crate::lisp_host) fn build_process_emit_event(args: &[EValue]) -> Result<
         chord_step_transpose: 0.0,
         effect_params: Vec::new(),
         instrument_params: Vec::new(),
+        named_params: Vec::new(),
     })
 }
 

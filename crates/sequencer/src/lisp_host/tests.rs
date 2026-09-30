@@ -9670,6 +9670,110 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     }
 
     #[test]
+    fn seq_emit_params_parse_labels_and_reject_malformed_lists() {
+        // docs/jaki-plock-spec.md §3: labels parse at emit time; malformed
+        // :params follow the seq-emit error contract (status + false, nothing
+        // emitted), read back here through each outer emission's velocity.
+        let state = Arc::new(SequencerState::new(4, (0..4).map(|_| default_empty_effect_chain()).collect()));
+        let mut runtime = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(4),
+            fallback_instrument_descriptors(4),
+            0,
+            0,
+        );
+        runtime
+            .eval(
+                r#"(__register-sequencer "plocks"
+                     :resolution :16
+                     :tick (lambda ()
+                       (do
+                         (seq-emit :track 0 :at :now :vel 1
+                           :params (list "instrument:cutoff" 5535
+                                         "fx2:filterbank:freq" 0.8
+                                         "effect-param:Reverb:mix" 0.25
+                                         "step-param:pan" -0.5
+                                         "rack-macro:macro_2" 0.9
+                                         "send:A" 0.5))
+                         (seq-emit :track 1 :at :now
+                           :vel (if (seq-emit :track 3 :at :now :params (list "bogus:thing" 1)) 0.9 0.1))
+                         (seq-emit :track 1 :at :now
+                           :vel (if (seq-emit :track 3 :at :now :params (list "instrument:cutoff")) 0.9 0.1))
+                         (seq-emit :track 1 :at :now
+                           :vel (if (seq-emit :track 3 :at :now :params (list "instrument:cutoff" "hi")) 0.9 0.1))
+                         (seq-emit :track 1 :at :now
+                           :vel (if (seq-emit :track 3 :at :now :params (list "process:lfo:rate" 1)) 0.9 0.1))
+                         (seq-emit :track 1 :at :now
+                           :vel (if (seq-emit :track 3 :at :now :params 5) 0.9 0.1))
+                         (seq-emit :track 2 :at :now :params nil))))"#,
+            )
+            .expect("register sequencer");
+        let defs = runtime.sequencer_defs();
+        let result = runtime
+            .invoke_sequencer_tick(
+                0,
+                crate::generator::GeneratorTickInput {
+                    gate: Default::default(),
+                    id: defs[0].id,
+                    generator_index: 0,
+                    tick_index: 0,
+                    boundary_sample: 0,
+                    beat: 0.0,
+                    resolution_beats: defs[0].resolution_beats,
+                    samples_per_quarter: 48_000.0,
+                    random_state: 1,
+                    state: Default::default(),
+                },
+            )
+            .expect("tick");
+
+        use crate::process::ParamRef;
+        let tracks: Vec<Option<usize>> = result.emitted.iter().map(|e| e.track).collect();
+        // No rejected inner call (track 3) emitted anything.
+        assert_eq!(
+            tracks,
+            vec![Some(0), Some(1), Some(1), Some(1), Some(1), Some(1), Some(2)]
+        );
+        assert_eq!(
+            result.emitted[0].named_params,
+            vec![
+                (ParamRef::Instrument { param: "cutoff".into() }, 5535.0),
+                (
+                    ParamRef::Effect {
+                        slot: Some(1),
+                        effect: "filterbank".into(),
+                        param: "freq".into(),
+                    },
+                    0.8,
+                ),
+                (
+                    ParamRef::Effect {
+                        slot: None,
+                        effect: "Reverb".into(),
+                        param: "mix".into(),
+                    },
+                    0.25,
+                ),
+                (ParamRef::Step { param: crate::sequencer::StepParam::Pan }, -0.5),
+                (ParamRef::RackMacro { macro_idx: 1 }, 0.9),
+                (ParamRef::Send { bus: crate::sequencer::DEFAULT_BUS_A_ID }, 0.5),
+            ]
+        );
+        // Named params never pre-fill the resolved lists at emit.
+        assert!(result.emitted[0].effect_params.is_empty());
+        assert!(result.emitted[0].instrument_params.is_empty());
+        let rejected: Vec<f32> = result.emitted[1..6]
+            .iter()
+            .map(|e| e.resolved.velocity)
+            .collect();
+        assert_close(
+            &rejected.iter().map(|v| *v as f64).collect::<Vec<_>>(),
+            &[0.1, 0.1, 0.1, 0.1, 0.1],
+        );
+        assert!(result.emitted[6].named_params.is_empty());
+    }
+
+    #[test]
     fn chan_get_reads_channel_snapshot_inside_generator_tick() {
         let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
         let mut runtime = ScratchControlRuntime::new(
@@ -10248,6 +10352,49 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         assert_eq!(
             value,
             Value::String("((fig (. -) (rep 4)) (fig (. . -)) -> 0 (every-fig 2 rev))".into())
+        );
+    }
+
+    #[test]
+    fn jaki_doc_patterns_body_is_one_voice_line_per_sounding_pattern() {
+        let mut rt = jaki_runtime();
+        let body = |rt: &mut ScratchControlRuntime, patterns: &str| {
+            rt.eval(&format!(
+                r#"(import alez.jaki.doc)
+                   (source (alez.jaki.doc/patterns-body
+                             (alez.jaki.doc/pattern-list
+                               (list (list :dot :dot :dash))
+                               (list (dict :route 0 :mods (list "left")))
+                               8
+                               {patterns})))"#
+            ))
+            .expect("eval")
+            .expect("value")
+        };
+        // one pattern keeps the single-voice body
+        assert_eq!(
+            body(&mut rt, "(list)"),
+            Value::String("((fig (. . -)) -> 0 left)".into())
+        );
+        // a silent pattern (no figure, or no routed row) is left out
+        assert_eq!(
+            body(
+                &mut rt,
+                "(list alez.jaki.doc/new-pattern
+                       (dict :figures (list (list :dot)) :rows (list) :row-count 4))"
+            ),
+            Value::String("((fig (. . -)) -> 0 left)".into())
+        );
+        // several sound as voice lines, in pattern order
+        assert_eq!(
+            body(
+                &mut rt,
+                r#"(list (dict :figures (list (list :dot :dash))
+                               :rows (list (dict :route -1 :mods (list))
+                                           (dict :route 2 :mods (list "left")))
+                               :row-count 4))"#
+            ),
+            Value::String("(((fig (. . -)) -> 0 left) ((fig (. -)) -> 2 left))".into())
         );
     }
 
@@ -12759,6 +12906,93 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         assert!(schema.check(&read_value("((on (fast 2) left))").unwrap()).is_err());
     }
 
+    /// `(plock NAME V)` rows (docs/jaki-plock-spec.md §5.3, §6): NAME is a
+    /// `(dyn "param")` atom, V a per-hit value (seqs too), and a name valid
+    /// on one destination track turns invalid when the row's :dyn-context
+    /// moves to a track without it — and valid again when it moves back.
+    #[test]
+    fn jaki_row_schema_plock_names_follow_the_dyn_context() {
+        use eseqlisp::sexp_slot::dyn_words::{
+            register_dyn_word_source, DynCache, DynGroup, DynItem, DynLookup, DynWords,
+        };
+        use eseqlisp::sexp_slot::edit::{Datum, Slot};
+        use eseqlisp::sexp_slot::{read_value, schema::Schema};
+        use eseqlisp::vm::Value as EValue;
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let mut rt = jaki_runtime();
+        let value = rt
+            .eval("(import alez.jaki.doc)\nalez.jaki.doc/row-schema")
+            .expect("row schema")
+            .expect("a value");
+        let schema = Schema::parse(&value).expect("row schema parses");
+        schema
+            .check(&read_value(
+                r#"(("plock" "instrument:cutoff" (seq :hit 100 5535 34)) ("plock" "fx2:filterbank:freq" (0.2 0.8)) (on left ("plock" "rack-macro:macro_1" 0.9)))"#,
+            ).unwrap())
+            .expect("plock rows are valid, bare and under on");
+
+        // Track 1 has a cutoff, track 2 does not.
+        register_dyn_word_source(
+            "param",
+            Box::new(|context| DynWords {
+                epoch: 0,
+                groups: match context {
+                    EValue::Number(n) if *n == 1.0 => vec![DynGroup {
+                        group: "Synth".into(),
+                        items: vec![DynItem::new("instrument:cutoff", "Cutoff").with_num(
+                            eseqlisp::sexp_slot::schema::NumSpec {
+                                min: 20.0,
+                                max: 20000.0,
+                                step: 1.0,
+                                decimals: 0,
+                            },
+                        )],
+                    }],
+                    _ => Vec::new(),
+                },
+                aliases: Vec::new(),
+            }),
+        );
+        let row = Datum::from_value(
+            &read_value(r#"(("plock" "instrument:cutoff" 5535))"#).unwrap(),
+        );
+        let cache = Rc::new(RefCell::new(DynCache::default()));
+        let on = |track: EValue| DynLookup::new(track, cache.clone());
+        let name = [0, 1];
+        let one = on(EValue::Number(1.0));
+        assert_eq!(Slot::new(&schema, &row).with_dyn(&one).dyn_problem(&name), None);
+        let two = on(EValue::Number(2.0));
+        assert!(Slot::new(&schema, &row).with_dyn(&two).dyn_problem(&name).is_some());
+        let unrouted = on(EValue::Nil);
+        assert_eq!(Slot::new(&schema, &row).with_dyn(&unrouted).dyn_problem(&name), None);
+        let back = on(EValue::Number(1.0));
+        assert_eq!(Slot::new(&schema, &row).with_dyn(&back).dyn_problem(&name), None);
+        // Value rails follow the name (eseq-jplk.6): bare, in seqs and cycle
+        // lists, under `on`; unknown names and unrouted rows fall back.
+        let rails = Datum::from_value(
+            &read_value(
+                r#"(("plock" "instrument:cutoff" 5535) ("plock" "instrument:cutoff" (seq :hit 1 (2 3))) (on left ("plock" "instrument:cutoff" 7)) ("plock" "bogus" 7))"#,
+            )
+            .unwrap(),
+        );
+        let slot = Slot::new(&schema, &rails).with_dyn(&one);
+        for path in [&[0, 2][..], &[1, 2, 2], &[1, 2, 3, 1], &[2, 2, 2]] {
+            let spec = slot.num_spec_at(path).unwrap_or_else(|| panic!("rails at {path:?}"));
+            assert_eq!((spec.min, spec.max, spec.decimals), (20.0, 20000.0, 0), "{path:?}");
+        }
+        assert_eq!(slot.number_text(&[0, 2], 5535.0), "5535");
+        let fallback = slot.num_spec_at(&[3, 2]).expect("fallback rails");
+        assert_eq!((fallback.min, fallback.max), (-100000.0, 100000.0));
+        let unrouted_slot = Slot::new(&schema, &rails).with_dyn(&unrouted);
+        assert_eq!(unrouted_slot.num_spec_at(&[0, 2]).map(|s| s.max), Some(100000.0));
+        // Stored values off the rails still check (nothing is rewritten).
+        schema
+            .check(&read_value(r#"(("plock" "instrument:cutoff" 99999.5))"#).unwrap())
+            .expect("stored values are kept");
+    }
+
     #[test]
     fn jaki_fast_expands_symbols_in_place_and_keeps_the_figure_length() {
         let mut rt = jaki_runtime();
@@ -12900,6 +13134,167 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         assert!((durs[3] - durs[2] * 0.5).abs() < 1e-6, "{durs:?}");
         let vels: Vec<f64> = t[3].iter().map(|h| h.2).collect();
         assert!(vels[1] < vels[0] * 0.8, "{vels:?}");
+    }
+
+    // ── jaki (plock NAME V) (docs/jaki-plock-spec.md §4) ──
+
+    /// Per track, each hit's (note, dur, vel) and its `seq-emit :params`.
+    fn jaki_surface_plocks(
+        body: &str,
+        beats: f64,
+    ) -> Vec<Vec<((f64, f64, f64), Vec<(crate::process::ParamRef, f32)>)>> {
+        let mut rt = jaki_runtime();
+        rt.eval(&format!("(import alez.jaki.surface :refer (jak))\n(jak \"s\" :16 {body})"))
+            .expect("jak");
+        let mut generators = crate::generator::GeneratorRuntime::default();
+        generators.sync_definitions(&rt.sequencer_defs(), 0.0);
+        let mut out = Vec::new();
+        generators.process_block(0.0, beats, 0, 48_000.0,
+            |input| rt.invoke_sequencer_tick(input.generator_index, input).expect("tick"), &mut out);
+        let mut tracks = vec![Vec::new(); 4];
+        for e in &out {
+            let r = &e.event.resolved;
+            tracks[e.event.track.unwrap_or(0)].push((
+                (r.transpose as f64, r.duration as f64, r.velocity as f64),
+                e.event.named_params.clone(),
+            ));
+        }
+        tracks
+    }
+
+    /// Each hit's value for `label` (None: the hit carries no lock for it).
+    fn plock_values(
+        hits: &[((f64, f64, f64), Vec<(crate::process::ParamRef, f32)>)],
+        label: &str,
+    ) -> Vec<Option<f32>> {
+        let target = crate::process::ParamRef::parse(label).expect("label parses");
+        hits.iter()
+            .map(|(_, params)| {
+                params.iter().rev().find(|(r, _)| *r == target).map(|(_, v)| *v)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn jaki_plock_walks_per_hit_values_across_cycles() {
+        let t = jaki_surface_plocks(
+            r#". . . .
+               -> 0 (plock "instrument:cutoff" (seq :hit 100 5535 34))
+               -> 1 (plock "fx2:filterbank:freq" (0.2 0.8))
+               -> 2 (plock "rack-macro:macro_1" 0.9)"#,
+            2.0,
+        );
+        assert_eq!(t[0].len(), 8);
+        let s = |v: &[f32]| v.iter().map(|x| Some(*x)).collect::<Vec<_>>();
+        // :hit keeps counting across the cycle boundary.
+        assert_eq!(
+            plock_values(&t[0], "instrument:cutoff"),
+            s(&[100., 5535., 34., 100., 5535., 34., 100., 5535.])
+        );
+        // an implicit-cyc list moves once per cycle
+        assert_eq!(
+            plock_values(&t[1], "fx2:filterbank:freq"),
+            s(&[0.2, 0.2, 0.2, 0.2, 0.8, 0.8, 0.8, 0.8])
+        );
+        assert_eq!(plock_values(&t[2], "rack-macro:macro_1"), s(&[0.9; 8]));
+        for hits in &t[..3] {
+            assert!(hits.iter().all(|(_, params)| params.len() == 1), "{hits:?}");
+        }
+    }
+
+    #[test]
+    fn jaki_plock_labels_keep_independent_counters_and_last_same_label_wins() {
+        let t = jaki_surface_plocks(
+            r#". . . .
+               -> 0 (plock "instrument:a" (seq :hit 1 2))
+                    (plock "instrument:b" (seq :hit 10 20 30))
+               -> 1 (plock "instrument:a" 1) (plock "instrument:a" (seq :hit 5 6))"#,
+            2.0,
+        );
+        let s = |v: &[f32]| v.iter().map(|x| Some(*x)).collect::<Vec<_>>();
+        assert_eq!(plock_values(&t[0], "instrument:a"), s(&[1., 2., 1., 2., 1., 2., 1., 2.]));
+        assert_eq!(
+            plock_values(&t[0], "instrument:b"),
+            s(&[10., 20., 30., 10., 20., 30., 10., 20.])
+        );
+        // a later lock of the same label replaces the earlier one: one entry
+        assert_eq!(plock_values(&t[1], "instrument:a"), s(&[5., 6., 5., 6., 5., 6., 5., 6.]));
+        assert!(t[1].iter().all(|(_, params)| params.len() == 1), "{:?}", t[1]);
+    }
+
+    #[test]
+    fn jaki_plock_inside_on_locks_only_the_selected_hits() {
+        // `. . . .` plays L R L R; only left hits lock and step the seq.
+        let t = jaki_surface_plocks(
+            r#". . . . -> 0 (on left (plock "instrument:cutoff" (seq :hit 1 2 3)))"#,
+            2.0,
+        );
+        assert_eq!(
+            plock_values(&t[0], "instrument:cutoff"),
+            [Some(1.), None, Some(2.), None, Some(3.), None, Some(1.), None]
+        );
+    }
+
+    #[test]
+    fn jaki_plock_bad_label_drops_only_the_lock_and_no_plock_output_is_unchanged() {
+        let plain = ". . - . -> 0 (note (seq :hit 0 3 7)) (vel* (0.5 1)) (on left (note+ 12))";
+        let base = jaki_surface_plocks(plain, 2.0);
+        assert!(!base[0].is_empty());
+        // no plock: no params on any hit
+        assert!(base[0].iter().all(|(_, params)| params.is_empty()), "{:?}", base[0]);
+        let notes = |hits: &[((f64, f64, f64), Vec<(crate::process::ParamRef, f32)>)]| {
+            hits.iter().map(|h| h.0).collect::<Vec<_>>()
+        };
+        // unparseable labels (a typo, a process inlet, a non-string) are
+        // dropped at route build; the notes play exactly as without them
+        let bad = jaki_surface_plocks(
+            &format!(
+                r#"{plain} (plock "nonsense" 5) (plock "process:lfo:rate" 2)
+                   (plock cutoff 3) (on left (plock "fx:x" (seq :hit 1 2)))"#
+            ),
+            2.0,
+        );
+        assert_eq!(notes(&bad[0]), notes(&base[0]));
+        assert!(bad[0].iter().all(|(_, params)| params.is_empty()), "{:?}", bad[0]);
+        // beside a valid lock, only the bad one drops
+        let mixed = jaki_surface_plocks(
+            &format!(r#"{plain} (plock "nonsense" 5) (plock "instrument:cutoff" 7)"#),
+            2.0,
+        );
+        assert_eq!(notes(&mixed[0]), notes(&base[0]));
+        assert!(mixed[0].iter().all(|(_, params)| params.len() == 1), "{:?}", mixed[0]);
+        assert!(plock_values(&mixed[0], "instrument:cutoff").iter().all(|v| *v == Some(7.)));
+    }
+
+    #[test]
+    fn jaki_doc_plock_route_data_keeps_the_label_a_string() {
+        let mut rt = jaki_runtime();
+        let value = rt
+            .eval(
+                r#"(import alez.jaki.doc)
+                   (source (alez.jaki.doc/body
+                             (list (list :dot :dot))
+                             (list (dict :route 0 :mods
+                                     (list (list "plock" "instrument:cutoff" 5)
+                                           (list "on" "left"
+                                                 (list "plock" "fx1:filter:mode"
+                                                       (list "seq" ":hit" 1 2))))))
+                             1))"#,
+            )
+            .expect("eval")
+            .expect("value");
+        let Value::String(body) = value else { panic!("{value:?}") };
+        assert_eq!(
+            body,
+            r#"((fig (. .)) -> 0 (plock "instrument:cutoff" 5) (on left (plock "fx1:filter:mode" (seq :hit 1 2))))"#
+        );
+        let t = jaki_surface_plocks(&body, 2.0);
+        // `. .` is L R; four cycles in two beats
+        assert_eq!(plock_values(&t[0], "instrument:cutoff"), [Some(5.); 8]);
+        assert_eq!(
+            plock_values(&t[0], "fx1:filter:mode"),
+            [Some(1.), None, Some(2.), None, Some(1.), None, Some(2.), None]
+        );
     }
 
     #[test]

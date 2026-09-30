@@ -66,6 +66,7 @@ pub(in crate::lisp_host) fn eval_emit_current_event(
         chord_step_transpose,
         effect_params: eval.effect_params.clone(),
         instrument_params: eval.instrument_params.clone(),
+        named_params: Vec::new(),
     });
     Ok(EValue::Bool(true))
 }
@@ -155,6 +156,7 @@ pub(in crate::lisp_host) fn eval_arp_emit_current_event(
         chord_step_transpose: eval.chord_step_transpose,
         effect_params: eval.effect_params.clone(),
         instrument_params: eval.instrument_params.clone(),
+        named_params: Vec::new(),
     });
     Ok(EValue::Bool(true))
 }
@@ -207,6 +209,7 @@ pub(in crate::lisp_host) fn eval_arp_emit_directed_current_event(
         chord_step_transpose: eval.chord_step_transpose,
         effect_params: eval.effect_params.clone(),
         instrument_params: eval.instrument_params.clone(),
+        named_params: Vec::new(),
     });
     Ok(EValue::Bool(true))
 }

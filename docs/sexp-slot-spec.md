@@ -35,6 +35,8 @@ manages the internals: it passes a schema and a value and receives one
 |---|---|---|---|
 | number | `3`, `-1.5` | number-picker (min/max/step/decimals from schema) | number |
 | word | `rev`, `:16t` | dropdown of the schema's word set | string (a `:`-prefixed word is emitted as a keyword) |
+| dyn name | `cut` (fuzzy) | dropdown of a host source's words (§4, §7) | string |
+| dyn number | `440` | number-picker whose rails come from a sibling dyn name (§4.1) | number |
 
 Timebases are not a separate kind: `:16 :16t :8n …` are simply words in a
 schema's word set. Ratios are out for now (keep it simple).
@@ -74,7 +76,15 @@ typed input, and feeds completions and `+` menus.
   (form every (num :min 1 :max 16) (word rev swap stac ghost))
   …)
 (fixed …)                                  ; opt out of list-ness for one slot
+(dyn param)                                ; a string atom named by a host source
+(form plock (fixed (dyn param)) (num :min -100000 :max 100000))
+(dyn-num param (num :min -100000 :max 100000 :step 0.01 :decimals 2))
+                                           ; rails from the sibling dyn name
 ```
+
+Schemas built in Lisp may spell every head and word as a string, so
+`(list "form" "plock" (list "fixed" (list "dyn" "param")) value-schema)` is
+the same schema.
 
 - Every atom slot also accepts a **list of itself** (and lists of lists)
   unless it is `(fixed …)`. That is what makes `(fast (1 2 3))` and
@@ -84,10 +94,58 @@ typed input, and feeds completions and `+` menus.
   more trailing values of `<schema>`. `(form seq (word :hit :cycle) (rest
   (num …)))` accepts `(seq :hit 0 3 7)`; `+` inside its `)` adds a copy of
   the last value, Backspace removes trailing values down to one.
+- `(dyn SOURCE)` is a **string atom whose words live in the host**: its
+  completions and validity come from the source registered under `SOURCE`
+  (§7), asked with the slot's `:dyn-context`. It checks any string (a
+  symbol or keyword is stored as its string), because validity depends on the
+  context and a name must survive a reroute; a fresh one is `""`. Like `word`
+  it takes lists of itself unless `(fixed …)`.
+  - Completion is a case-insensitive **fuzzy subsequence** match: every
+    space-separated term must be a subsequence of the item's word or of its
+    detail (`cut` finds `instrument:cutoff`, `filt fr` finds
+    `fx2:filterbank:freq`). A field that edits exactly one dyn name uses its
+    whole text as the query (spaces allowed) and a pick replaces it all;
+    inside a larger typed form, the partial word is the query. Static words
+    (from an `or`) come first by prefix, then the source's words in source
+    (group) order, each row with its detail (or group) dim on the right.
+  - A name the source does not offer for the context is drawn with the
+    slot's `error-color` (tinted band, red text) and kept as is; routing back
+    makes it live again. A `nil` context is never validated. Enter on a name
+    that matches nothing stores it as typed.
+- `(dyn-num SOURCE (num …))` is a number whose rails come from a `(dyn
+  SOURCE)` name next to it (§4.1); the `(num …)` is its fallback.
 - A form is recognized by the schema that applies **where it sits**, not the
   root's: a `(seq …)` in a `(note …)` arg or a `(fig 2)` in an `(on …)`
   selector is a form of that position's schema (head drawn as a head, no
   `+` unless its last arg is `rest`).
+
+### 4.1 `dyn-num`: rails from a sibling name
+
+*Built (eseq-jplk.6).* `(plock "instrument:cutoff" 440)` should scrub in the
+cutoff's 20–20000 Hz, not a fixed wide rail, and its rails change with the
+name and the row's route. So:
+
+- **Resolution.** The name is the word in a `(dyn SOURCE)` arg of the
+  **nearest enclosing form** that has one. The number may sit at any depth
+  under that form: `(plock NAME (seq :hit 1 (2 3)))` resolves every number
+  inside the seq and its cycle list from NAME. The rails are
+  `DynItem::num` of NAME (a listed word or an alias) in the source's answer
+  for the slot's `:dyn-context`, read through the same per-widget cache as
+  completion and validation, so rails cost no extra source query.
+- **Fallback.** The `(num …)` rails apply when there is no name, the source
+  does not list it (or lists it with `num: None`), the context is `nil`
+  (never asked), or no lookup is at hand (measuring a bare slot, `check`).
+- **Scrub, type, format.** Dragging uses the resolved min/max/step (a 24th
+  of the range per row, snapped to the step, clamped). A typed number, or a
+  typed item, list or form, snaps and clamps every `dyn-num` inside what was
+  typed (`Slot::snap_dyn_nums`). Numbers are drawn with the rails' decimals.
+- **Stored values are never rewritten.** A value outside the current rails
+  (typed on another route, or before the name changed) is shown as stored,
+  at full precision if the rails' decimals would round it, and survives
+  edits elsewhere in the slot: `Schema::check` only type-checks a `dyn-num`
+  (it has neither the name's rails nor the context), and snapping happens
+  only on what the user edits. Picking a new name does not touch its
+  value. Clamping for playback is the host engine's job.
 
 ## 5. Interaction
 
@@ -185,9 +243,54 @@ number scrubs it; clicking a word or head opens its choice popup
   `widget_render::sexp_slot::pointer_moved_to`).
 - `:wrap false` keeps the value on one line; the slot grows past its box
   instead of wrapping between pieces.
+- `:dyn-context` (any value) is passed untouched to the sources of the
+  schema's `(dyn …)` atoms, e.g. a jaki row's destination track.
 - `:tint-args '(("on" 0))` draws argument 0 of every `(on …)` form (its atoms
   and bands) in `:tint-color` (default the syntax string color), so a form's
   "where" reads apart from its "what".
+
+**Dyn word sources (Rust host API, `eseqlisp::sexp_slot::dyn_words`).**
+
+```rust
+register_dyn_word_source(name: &str, source: Box<dyn Fn(&Value) -> DynWords>);
+unregister_dyn_word_source(name: &str);
+bump_dyn_word_epoch(name: &str);          // host data changed: caches go stale
+set_dyn_word_epoch(name: &str, epoch: u64);
+dyn_word_epoch(name: &str) -> Option<u64>;
+
+struct DynWords { epoch: u64, groups: Vec<DynGroup>, aliases: Vec<DynItem> }
+struct DynGroup { group: String, items: Vec<DynItem> }
+struct DynItem  { word: String, detail: String, num: Option<NumSpec> }
+// DynItem::new(word, detail).with_num(NumSpec { min, max, step, decimals })
+// DynWords::num_spec(word) -> Option<NumSpec>   (items, then aliases)
+```
+
+- The registry is per thread (the UI thread), like the widget's own state.
+  Re-registering a name replaces its source and bumps its epoch.
+- **Lazy.** A source is asked only when a popup or field opens on a dyn atom,
+  or when a render must validate a dyn name after the `:dyn-context` or the
+  source's epoch changed. Each widget caches one answer per source, keyed by
+  (source, context, epoch); a slot with no dyn atoms, or a `nil` context with
+  no popup open, never asks.
+- **Epoch.** The cache is fresh while `dyn_word_epoch(name)` is unchanged.
+  The host bumps or sets it when its data changes; a `DynWords.epoch` newer
+  than the registry's is adopted, so a source may simply report its own
+  counter.
+- **Hint rows.** An item whose `word` is empty is a hint: its `detail` is a
+  dim, non-selectable row above the completions (after any error line), it
+  is never inserted and never makes a name valid. A source with nothing to
+  offer for a context (`nil`: "route this row to see its parameters")
+  returns just a hint; Enter or a click on the name then opens it as text so
+  the hint shows.
+- **Aliases.** `DynWords.aliases` are further valid spellings that are never
+  offered (e.g. slot-free forms of listed names), so they validate without
+  doubling the popup. They are `DynItem`s so an alias carries the same
+  `num` rails as the word it spells (its `detail` is unused).
+- **Rails.** `DynItem.num` is the rails a `(dyn-num SOURCE …)` beside that
+  word takes (§4.1); `None` leaves the fallback. `query_dyn_words(name, context)` asks a source outside
+  a widget (the sequencer's `(dyn-word-valid? source context word)` native).
+- Hovering an invalid name has no tooltip of its own yet; hosts that want a
+  reason ("not on Bass") can show it from `:on-hover`.
 
 ## 8. Build plan
 

@@ -142,7 +142,17 @@ Document (all literals):
 figures   ; list of figures, each a list of :dot / :dash, e.g. ((:dot :dot :dash))
 rows      ; list of (dict :route n-or--1 :mods ((dict :op "trunc" :args (3)) …))
 row-count ; how many rows show and play
+patterns  ; further patterns: ((dict :figures … :rows … :row-count n) …)
 ```
+
+The instance's patterns are the first pattern (figures/rows/row-count, what
+documents saved before `patterns` hold) followed by `patterns`. Each is its
+own figure strip and rows. One sounding pattern builds the single-voice body;
+several build one jaki voice line each, in pattern order, so each cycles on
+its own (`((fig (. . -)) -> 0 left) ((fig (. -)) -> 2 left)`) and route marks
+number through the patterns in order. A pattern with no figure or no routed
+row is left out. The panel's `+ pattern` appends a new one (no figures, 4 Off
+rows); removing pattern 1 moves pattern 2 into the document's own fields.
 
 Row `i` beyond `(len rows)` is the default row (route off, no mods). A fresh
 instance has one figure `(. . . .)` and row 0 on track/pad 1.

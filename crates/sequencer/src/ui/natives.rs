@@ -2867,6 +2867,8 @@ pub(crate) fn init_runtime(
     let mut runtime = Runtime::new();
     let menu_state = application_menu::register_natives(&mut runtime);
     register_factory_path_native(&mut runtime);
+    // `(dyn "param")` completions for jaki `plock` names (jaki-plock-spec §5.2).
+    super::param_words::register_param_word_source(&mut runtime, Arc::clone(&state));
     sequencer::lisp_host::register_neural_authoring_natives_with_selection(
         &mut runtime,
         Arc::clone(&state),

@@ -73,6 +73,19 @@ impl MidiFxDescriptorSource {
             })
             .unwrap_or_default()
     }
+
+    /// The one registered midi-fx named `name` (case-insensitive), without
+    /// cloning the rest of the registry.
+    pub fn descriptor(&self, name: &str) -> Option<EffectDescriptor> {
+        let registry = self.0.lock().ok()?;
+        let entry = registry
+            .iter()
+            .find(|entry| entry.name.eq_ignore_ascii_case(name))?;
+        let mut desc = EffectDescriptor::empty_custom_slot();
+        desc.name = entry.name.clone();
+        desc.params = entry.params.clone();
+        Some(desc)
+    }
 }
 pub(super) type SharedPendingMidiFxParams = Arc<Mutex<Vec<crate::effects::ParamDescriptor>>>;
 pub(super) type SharedMidiFxState = Arc<Mutex<HashMap<String, EValue>>>;
@@ -111,6 +124,11 @@ pub struct EmittedAccumulatorEvent {
     pub chord_step_transpose: f32,
     pub effect_params: Vec<ScheduledEffectParam>,
     pub instrument_params: Vec<ScheduledInstrumentParam>,
+    /// `seq-emit :params`: per-hit values named by macro-editor label,
+    /// resolved against the destination track only when the hit lands
+    /// (docs/jaki-plock-spec.md §3). Applied in order; a later entry for the
+    /// same parameter wins.
+    pub named_params: Vec<(crate::process::ParamRef, f32)>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

@@ -2732,6 +2732,7 @@ impl GraphRuntime {
             chord_step_transpose: 0.0,
             effect_params: Vec::new(),
             instrument_params: Vec::new(),
+            named_params: Vec::new(),
         };
         event.resolved.transpose = payload.note;
         event.resolved.velocity = payload.velocity;

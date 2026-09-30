@@ -6,6 +6,7 @@
 //! (typed text -> data, never evaluated) and the schema model (the guard
 //! rails: validate, clamp, default, complete).
 
+pub mod dyn_words;
 pub mod edit;
 mod reader;
 pub mod schema;

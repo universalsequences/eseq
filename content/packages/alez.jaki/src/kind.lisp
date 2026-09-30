@@ -8,6 +8,10 @@
 ;;     -> 0 left              <- row 0:  [1 Kick ▾]  left  +
 ;;     -> 2 (trunc 3) right)  <- row 2:  [3 Hat ▾]  (trunc 3)  right  +
 ;;
+;; An instance holds any number of patterns, each its own figure strip and
+;; rows — one jaki voice each, cycling on its own beside the others (kick and
+;; snare on `. . -`, the hat on `. -`). `+ pattern` adds one.
+;;
 ;; A row's modifiers are one sexp-slot (docs/sexp-slot-spec.md): type
 ;; `(every 2 (rev swap))` on its `+`, scrub numbers, pick words; any argument
 ;; may be a list, one per cycle.
@@ -44,48 +48,80 @@
           -1 (range 0 (len xs))))
 
 ;; ── document edits (each is one undoable scene-slot write) ─────────────────
+;; Pattern 0 is the document's own figures/rows/row-count; pattern k > 0 is
+;; entry k - 1 of self.patterns (alez.jaki.doc, the document).
 
-(def jk-add-figure (self label)
+(def jk-patterns (self)
+  (alez.jaki.doc/pattern-list self.figures self.rows self.row-count self.patterns))
+
+(def jk-put (self k field value)
+  (if (= k 0)
+    (if (= field :figures)
+      (set! self.figures value)
+      (if (= field :rows) (set! self.rows value) (set! self.row-count value)))
+    (set! self.patterns
+      (jk-update-nth self.patterns (- k 1) (lambda (p) (merge p field value))))))
+
+(def jk-field (self k field) (get (nth (jk-patterns self) k) field))
+
+(def jk-add-figure (self k label)
   (let ((i (jk-index-of alez.jaki.doc/figure-option-labels label)))
     (if (>= i 0)
-      (set! self.figures
-        (append self.figures (list (nth (nth alez.jaki.doc/figure-options i) 1))))
+      (jk-put self k :figures
+        (append (jk-field self k :figures)
+                (list (nth (nth alez.jaki.doc/figure-options i) 1))))
       nil)))
 
-(def jk-replace-figure (self index label)
+(def jk-replace-figure (self k index label)
   (let ((i (jk-index-of alez.jaki.doc/figure-option-labels label)))
     (if (>= i 0)
-      (set! self.figures
-        (jk-update-nth self.figures index
+      (jk-put self k :figures
+        (jk-update-nth (jk-field self k :figures) index
           (lambda (f) (alez.jaki.doc/with-times
                         (nth (nth alez.jaki.doc/figure-options i) 1)
                         (alez.jaki.doc/figure-times f)))))
       nil)))
 
 ;; How many times the figure plays back to back (×1 … ×16).
-(def jk-set-figure-times (self index n)
-  (set! self.figures
-    (jk-update-nth self.figures index
+(def jk-set-figure-times (self k index n)
+  (jk-put self k :figures
+    (jk-update-nth (jk-field self k :figures) index
       (lambda (f) (alez.jaki.doc/with-times f (max 1 (min 16 n)))))))
 
-(def jk-remove-figure (self index)
-  (set! self.figures (jk-remove-nth self.figures index)))
+(def jk-remove-figure (self k index)
+  (jk-put self k :figures (jk-remove-nth (jk-field self k :figures) index)))
 
 ;; Rows are stored only as far as the last one ever edited; the rest read the
 ;; default (off, no modifiers).
-(def jk-edit-row (self index update)
-  (let ((rows self.rows))
+(def jk-edit-row (self k index update)
+  (let ((rows (jk-field self k :rows)))
     (let ((padded (if (< index (len rows))
                     rows
-                    (append rows (map (lambda (k) alez.jaki.doc/default-row)
+                    (append rows (map (lambda (j) alez.jaki.doc/default-row)
                                       (range (len rows) (+ index 1)))))))
-      (set! self.rows (jk-update-nth padded index update)))))
+      (jk-put self k :rows (jk-update-nth padded index update)))))
 
-(def jk-set-route (self index route)
-  (jk-edit-row self index (lambda (row) (merge row :route route))))
+(def jk-set-route (self k index route)
+  (jk-edit-row self k index (lambda (row) (merge row :route route))))
 
-(def jk-set-mods (self index mods)
-  (jk-edit-row self index (lambda (row) (merge row :mods mods))))
+(def jk-set-mods (self k index mods)
+  (jk-edit-row self k index (lambda (row) (merge row :mods mods))))
+
+(def jk-add-pattern (self)
+  (set! self.patterns (append self.patterns (list alez.jaki.doc/new-pattern))))
+
+;; Removing the first pattern moves the second into its place.
+(def jk-remove-pattern (self k)
+  (if (> k 0)
+    (set! self.patterns (jk-remove-nth self.patterns (- k 1)))
+    (if (empty? self.patterns)
+      nil
+      (let ((next (first self.patterns)))
+        (do
+          (set! self.figures (get next :figures))
+          (set! self.rows (get next :rows))
+          (set! self.row-count (get next :row-count))
+          (set! self.patterns (rest self.patterns)))))))
 
 ;; How the pattern is clocked (docs/jaki-trig-modes-spec.md): loop on the
 ;; transport, or wait for a sequencer (a neuron routed here) to gate it.
@@ -96,8 +132,8 @@
 (def jk-mode-index (self)
   (max 0 (jk-index-of alez.jaki.doc/modes (alez.jaki.doc/mode-of self.mode))))
 
-(def jk-set-row-count (self n)
-  (set! self.row-count (max 1 (min jk-max-rows (round n)))))
+(def jk-set-row-count (self k n)
+  (jk-put self k :row-count (max 1 (min jk-max-rows (round n)))))
 
 ;; ── routes ─────────────────────────────────────────────────────────────────
 
@@ -131,7 +167,62 @@
         (if (and c (>= (len c) 3)) (rgba (nth c 0) (nth c 1) (nth c 2) 1) :mixer-strip-border))
       :mixer-strip-border)))
 
+;; The track a row plays (a rack's pad → its member track), or nil when the
+;; row is Off: the sexp-slot's :dyn-context, so `(plock NAME V)` completes
+;; and checks NAME against that track's parameters (jaki-plock-spec §5.3).
+(def jk-row-track (self row)
+  (let ((route (get row :route)) (tracks (jk-route-tracks self)))
+    (if (and (number? route) (>= route 0) (< route (len tracks)))
+      (nth tracks route)
+      nil)))
+
+;; ── plock names after a reroute (jaki-plock-spec §6) ──────────────────────
+;; The slot draws a name its track does not have in the error color and keeps
+;; it; hovering the item says why. One hovered row at a time, so one global:
+;; (list instance-id pattern row text), or nil.
+(defstate jk-hover-reason nil)
+
+;; the NAME of a (plock NAME V) item, bare or under (on SEL …); nil otherwise
+(def jk-plock-name (item)
+  ;; a slot item is a word string, a number, or a list
+  (if (and item (not (string? item)) (not (number? item)) (not (empty? item)))
+    (if (and (= (first item) "plock") (> (len item) 1) (string? (nth item 1)))
+      (nth item 1)
+      (if (and (= (first item) "on") (> (len item) 2))
+        (jk-plock-name (nth item 2))
+        nil))
+    nil))
+
+(def jk-plock-reason (item track)
+  (let ((name (jk-plock-name item)))
+    (if (and (string? name) (number? track)
+             (= (dyn-word-valid? "param" track name) false))
+      (str "not on " (nth SEQ.track-names track))
+      nil)))
+
+(def jk-hover-row (self k index item track)
+  (let ((text (jk-plock-reason item track)))
+    (if text
+      (set! jk-hover-reason (list self.id k index text))
+      (if (and jk-hover-reason
+               (= (nth jk-hover-reason 0) self.id)
+               (= (nth jk-hover-reason 1) k)
+               (= (nth jk-hover-reason 2) index))
+        (set! jk-hover-reason nil)
+        nil))))
+
+(def jk-row-reason (self k index)
+  (if (and jk-hover-reason
+           (= (nth jk-hover-reason 0) self.id)
+           (= (nth jk-hover-reason 1) k)
+           (= (nth jk-hover-reason 2) index))
+    (nth jk-hover-reason 3)
+    nil))
+
 ;; ── widgets ────────────────────────────────────────────────────────────────
+
+;; a widget key in pattern k (pattern 0 keeps the plain key)
+(def jk-key (k name) (if (= k 0) name (str name "-p" k)))
 
 (def jk-add-menu (key text labels placeholder width on-pick)
   (menu-button
@@ -160,38 +251,37 @@
 
 ;; One figure box: a dropdown to swap the figure for another, its repeat
 ;; count, and ×.
-(def jk-figure-box (self index figure)
-  (box :key (str "jaki-figure-" index)
+(def jk-figure-box (self k index figure)
+  (box :key (jk-key k (str "jaki-figure-" index))
     :width 13.6 :height jk-row-height :padding 0.1
     :background-color :bg  :corner-radius 16
     (h-stack :gap 0.1 :align :center
       (dropdown
-        :key (str "jaki-figure-pick-" index)
+        :key (jk-key k (str "jaki-figure-pick-" index))
         :value-index (max 0 (jk-index-of alez.jaki.doc/figure-option-labels
                                (alez.jaki.doc/figure-label figure)))
         :options alez.jaki.doc/figure-option-labels
         :filterable true
         :badge-color :transparent :bg-color :bg :border-color :transparent
         :width 7.8 :height 1.0 :font-size 13
-        :on-change (lambda (label) (jk-replace-figure self index label)))
+        :on-change (lambda (label) (jk-replace-figure self k index label)))
       (number-picker
-        :key (str "jaki-figure-times-" index)
+        :key (jk-key k (str "jaki-figure-times-" index))
         :value (alez.jaki.doc/figure-times figure) :min 1 :max 16 :step 1 :decimals 0
         :value-labels jk-times-labels
         :border-color :transparent :background-color :bg
         :width 3.8 :height 1.0 :font-size 11
-        :on-change (lambda (v) (jk-set-figure-times self index v)))
-      (jk-x-button (str "jaki-figure-remove-" index)
-        (lambda () (jk-remove-figure self index))))))
+        :on-change (lambda (v) (jk-set-figure-times self k index v)))
+      (jk-x-button (jk-key k (str "jaki-figure-remove-" index))
+        (lambda () (jk-remove-figure self k index))))))
 
-(def jk-figure-strip (self)
-  (let ((figures self.figures))
-    (h-stack :gap 0.4 :align :center
-      (label "figures" :width 5 :height jk-row-height :font-size 9 :color :dim :bg :transparent)
-      (each (range 0 (len figures)) |i| (jk-figure-box self i (nth figures i)))
-      (jk-add-menu "jaki-figure-add" "+  figure" alez.jaki.doc/figure-option-labels
-        "Filter figures…" 7
-        (lambda (label) (jk-add-figure self label))))))
+(def jk-figure-strip (self k figures)
+  (h-stack :gap 0.4 :align :center
+    (label "figures" :width 5 :height jk-row-height :font-size 9 :color :dim :bg :transparent)
+    (each (range 0 (len figures)) |i| (jk-figure-box self k i (nth figures i)))
+    (jk-add-menu (jk-key k "jaki-figure-add") "+  figure" alez.jaki.doc/figure-option-labels
+      "Filter figures…" 7
+      (lambda (label) (jk-add-figure self k label)))))
 
 ;; ── hit strip with playhead ───────────────────────────────────────────────
 ;; Two cycles of the figure strip's pattern as its symbols — one cell per
@@ -250,7 +340,7 @@
         :width width :height 1.0 :font-size 11 :h-align :center
         :color (if playing? :bg :dim) :bg :transparent))))
 
-(def jk-preview-strip (self figures)
+(def jk-preview-strip (self k figures)
   (let ((body (alez.jaki.doc/figures-body figures)))
     (let ((ph (jk-playhead self (alez.jaki.core/from-list body))))
       (let ((base (if (= ph nil) 0 (- (nth ph 0) (mod (nth ph 0) jk-preview-cycles)))))
@@ -263,25 +353,37 @@
                   (let ((c (nth cells i)))
                     (h-stack :gap 0 :align :center
                       (box :width (get c :gap) :height 1.0 :padding 0 :background-color :transparent)
-                      (jk-symbol-cell (str "jaki-hit-" i) c w (jk-cell-playing? c ph)))))))))))))
+                      (jk-symbol-cell (jk-key k (str "jaki-hit-" i)) c w (jk-cell-playing? c ph)))))))))))))
 
-(def jk-preview (self figures)
+(def jk-preview (self k figures)
   (h-stack :gap 0.4 :align :center
     (label "hits" :width 5 :height jk-row-height :font-size 9 :color :dim :bg :transparent)
     (if (empty? figures)
       (box :width 1 :height 1.0 :background-color :transparent)
-      (subtree :key (str "jaki-hits-" self.id)
-        (jk-preview-strip self figures)))))
+      (subtree :key (jk-key k (str "jaki-hits-" self.id))
+        (jk-preview-strip self k figures)))))
 
 ;; Row i's route in the generator: its place among the live rows before it
-;; (alez.jaki.doc/body leaves Off rows out).
-(def jk-route-slot (rows i)
+;; (alez.jaki.doc/body leaves Off rows out), after every live row of the
+;; sounding patterns before it (alez.jaki.doc/patterns-body).
+(def jk-live-rows-before (rows i)
   (reduce (lambda (n j) (if (alez.jaki.doc/row-live? (alez.jaki.doc/row-at rows j)) (+ n 1) n))
           0 (range 0 i)))
 
-(def jk-row (self index row route-slot)
-  (let ((live (alez.jaki.doc/row-live? row)))
-    (box :key (str "jaki-row-" index)
+(def jk-route-base (pats k)
+  (reduce (lambda (n j)
+            (let ((pat (nth pats j)))
+              (if (alez.jaki.doc/pattern-sounds? pat)
+                (+ n (jk-live-rows-before (get pat :rows) (get pat :row-count)))
+                n)))
+          0 (range 0 k)))
+
+;; `sounding`: the row is routed and its pattern plays, so its route has marks
+(def jk-row (self k index row route-slot sounding)
+  (let ((live (alez.jaki.doc/row-live? row))
+        (track (jk-row-track self row))
+        (reason (jk-row-reason self k index)))
+    (box :key (jk-key k (str "jaki-row-" index))
       :height jk-row-height :padding 0 :background-color :transparent
       (h-stack :gap 0.4 :align :center
         (box :width 0.3 :height jk-row-height :corner-radius 2
@@ -289,17 +391,17 @@
         (label (str index) :width 1.4 :height jk-row-height :font-size 9
           :h-align :center :color (if live :foreground :dim) :bg :transparent)
         (dropdown
-          :key (str "jaki-route-" index)
+          :key (jk-key k (str "jaki-route-" index))
           :value-index (jk-route-index self row)
           :options (jk-route-options self)
           :badge-color :transparent :bg-color :mixer-strip-bg
           :border-color :mixer-strip-selected-bg
           :width 8 :height jk-row-height :font-size 9
           :on-change (lambda (label)
-                       (jk-set-route self index
-                         (- (max 0 (jk-index-of (jk-route-options self) label)) 1))))
+            (jk-set-route self k index
+              (- (max 0 (jk-index-of (jk-route-options self) label)) 1))))
         (sexp-slot
-          :key (str "jaki-mods-" index)
+          :key (jk-key k (str "jaki-mods-" index))
           :schema alez.jaki.doc/row-schema
           :value (alez.jaki.doc/row-mods row)
           :height jk-row-height :font-size 9
@@ -309,43 +411,79 @@
           :head-color :process-lane-accent
           ;; an (on SEL w) item's selector reads apart from its word
           :tint-args '(("on" 0))
+          :font-size 11
           ;; the items applied to the sounding hit — (on …) and (every …) —
           ;; ring up: the tick stamps a bitmask per route at each hit's audio
           ;; time (jaki-sequencer-spec §7.3); a render binding, no Lisp rerun
-          :lit (if live (bind-seq (str "generator-mark-" self.id "-" route-slot)) 0)
+          :lit (if sounding (bind-seq (str "generator-mark-" self.id "-" route-slot)) 0)
           ;; and the member of each (seq …) / cycle list the hit played (§7.4)
-          :lit-values (if live
-                        (map (lambda (k) (bind-seq (str "generator-mark-" self.id "-" route-slot "." k)))
-                             (range 0 (len (get row :mods))))
-                        (list))
+          :lit-values (if sounding
+            (map (lambda (k) (bind-seq (str "generator-mark-" self.id "-" route-slot "." k)))
+              (range 0 (len (get row :mods))))
+            (list))
           :lit-color :process-lane-accent
-          :on-change (lambda (mods) (jk-set-mods self index mods)))))))
+          ;; `(dyn "param")` names complete and validate against this track
+          :dyn-context track
+          :on-hover (lambda (item) (jk-hover-row self k index item track))
+          :on-change (lambda (mods) (jk-set-mods self k index mods)))
+        (if reason
+          (label reason :width 12 :height jk-row-height :font-size 9
+            :color :error :bg :transparent)
+          (box :width 0 :height 0 :background-color :transparent))))))
 
-(def jk-code (self figures rows row-count)
-  (let ((b (alez.jaki.doc/body figures rows row-count)))
-    (if b
-      (source (append (list 'jak self.label :16) b))
-      "route a row to hear it")))
+;; The pattern as the jak form it plays; several patterns are one voice line
+;; each, a line apiece.
+(def jk-code-lines (self pats)
+  (let ((b (alez.jaki.doc/patterns-body pats)))
+    (if (= b nil)
+      (list "route a row to hear it")
+      (if (> (len (filter alez.jaki.doc/pattern-sounds? pats)) 1)
+        (let ((n (len b)))
+          (cons (str "(jak " (source self.label) " :16")
+                (map (lambda (i) (str "  " (source (nth b i)) (if (= i (- n 1)) ")" "")))
+                     (range 0 n))))
+        (list (source (append (list 'jak self.label :16) b)))))))
+
+(def jk-pattern-header (self k pat count)
+  (h-stack :gap 0.6 :align :center
+    (label (str "pattern " (+ k 1)) :width 5.5 :height jk-row-height :font-size 10
+      :color :foreground :bg :transparent)
+    (label "rows" :width 3 :height jk-row-height :font-size 9 :h-align :right
+      :color :dim :bg :transparent)
+    (number-picker
+      :key (jk-key k "jaki-row-count")
+      :border-color :dim :background-color :mixer-strip-bg
+      :value (get pat :row-count) :min 1 :max jk-max-rows :step 1 :decimals 0
+      :width 4 :height jk-row-height :font-size 9
+      :on-change (lambda (v) (jk-set-row-count self k v)))
+    (if (> count 1)
+      (jk-x-button (jk-key k "jaki-pattern-remove") (lambda () (jk-remove-pattern self k)))
+      (box :width 1.2 :height 1.0 :background-color :transparent))))
+
+(def jk-pattern (self pats k)
+  (let ((pat (nth pats k)))
+    (let ((figures (get pat :figures))
+          (rows (get pat :rows))
+          (sounds (alez.jaki.doc/pattern-sounds? pat))
+          (base (jk-route-base pats k)))
+      (v-stack :gap 0.6
+        (jk-pattern-header self k pat (len pats))
+        (jk-figure-strip self k figures)
+        (jk-preview self k figures)
+        (v-stack :gap 0.25
+          (each (range 0 (get pat :row-count)) |i|
+            (let ((row (alez.jaki.doc/row-at rows i)))
+              (jk-row self k i row (+ base (jk-live-rows-before rows i))
+                      (and sounds (alez.jaki.doc/row-live? row))))))))))
 
 (def jk-panel (self)
-  (let ((figures self.figures)
-        (rows self.rows)
-        (row-count self.row-count))
+  (let ((pats (jk-patterns self)))
     (box :padding 0.85
       (box
          :padding 1
-;        :background-color :mixer-strip-bg :border-color :mixer-strip-border :corner-radius 16
         (v-stack :gap 0.6
           (h-stack :gap 0.6 :align :center
             (label "jaki" :width 4 :height jk-row-height :font-size 11 :color :foreground :bg :transparent)
-            (label "rows" :width 3.5 :height jk-row-height :font-size 9 :h-align :right
-              :color :dim :bg :transparent)
-            (number-picker
-              :key "jaki-row-count"
-              :border-color :dim :background-color :mixer-strip-bg
-              :value row-count :min 1 :max jk-max-rows :step 1 :decimals 0
-              :width 4 :height jk-row-height :font-size 9
-              :on-change (lambda (v) (jk-set-row-count self v)))
             (label "mode" :width 3.5 :height jk-row-height :font-size 9 :h-align :right
               :color :dim :bg :transparent)
             (dropdown
@@ -356,14 +494,19 @@
               :border-color :mixer-strip-selected-bg
               :width 7 :height jk-row-height :font-size 9
               :on-change (lambda (label) (jk-set-mode self label))))
-          (jk-figure-strip self)
-          (jk-preview self figures)
-          (v-stack :gap 0.25
-            (each (range 0 row-count) |i|
-              (jk-row self i (alez.jaki.doc/row-at rows i) (jk-route-slot rows i))))
+          (v-stack :gap 1.2
+            (each (range 0 (len pats)) |k|
+              (box :key (str "jaki-pattern-" k) :padding 0 :background-color :transparent
+                (jk-pattern self pats k))))
+          (button "+  pattern" :key "jaki-pattern-add"
+            :width 7 :height jk-row-height :padding 0 :font-size 12 :corner-radius 16
+            :background-color (rgba 0.28 0.20 0.11 1) :border-color :none
+            :color :process-lane-accent
+            :on-click (lambda (event) (jk-add-pattern self)))
           (box :width :fill :padding 0.4 :background-color :bg :corner-radius 6
-            (label (jk-code self figures rows row-count)
-              :width 92 :height 1.0 :font-size 8 :color :dim :bg :transparent)))))))
+            (v-stack :gap 0.1
+              (each (jk-code-lines self pats) |line|
+                (label line :width 92 :height 1.0 :font-size 8 :color :dim :bg :transparent)))))))))
 
 ;; The kind (docs/instance-kinds-spec.md, docs/jaki-kind-spec.md). Each
 ;; instance publishes the :generator under its own id; its tick reads the
@@ -371,9 +514,11 @@
 (def-kind jaki
   :generator (:resolution :16
               :requires (alez.jaki.doc)
-              :tick (alez.jaki.doc/tick self.figures self.rows self.row-count self.mode))
+              :tick (alez.jaki.doc/tick-patterns self.figures self.rows self.row-count
+                                                 self.mode self.patterns))
   :document ((figures (list (list :dot :dot :dot :dot)))
              (rows (list (dict :route 0 :mods (list))))
              (row-count 8)
-             (mode :loop))
+             (mode :loop)
+             (patterns (list)))
   :view jk-panel)

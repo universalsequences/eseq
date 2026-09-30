@@ -14,6 +14,7 @@
 
 use crossterm::event::{KeyCode, KeyModifiers};
 
+use super::dyn_words::{DynLookup, fuzzy_matches};
 use super::read_value;
 use super::schema::{NumSpec, Schema};
 use crate::vm::Value;
@@ -61,6 +62,9 @@ impl Datum {
     pub fn text(&self) -> String {
         match self {
             Datum::Num(number) => format_number(*number, None),
+            // A word that would not read back as itself (a fresh empty `dyn`
+            // name, a host word with spaces) is written as a string.
+            Datum::Word(word) if needs_quotes(word) => format!("{word:?}"),
             Datum::Word(word) => word.clone(),
             Datum::List(items) => {
                 let inner: Vec<String> = items.iter().map(Datum::text).collect();
@@ -91,6 +95,10 @@ impl Datum {
     }
 }
 
+fn needs_quotes(word: &str) -> bool {
+    word.is_empty() || word.chars().any(|ch| ch.is_whitespace() || matches!(ch, '(' | ')' | '"' | '\'' | '`' | ',' | '|'))
+}
+
 /// `decimals` from the schema when known; otherwise the shortest spelling
 /// (`3`, `0.85`).
 pub fn format_number(number: f64, decimals: Option<u32>) -> String {
@@ -112,16 +120,34 @@ pub enum Stop {
     Plus(Path),
 }
 
-/// The slot being edited: its rails and its current value.
+/// The slot being edited: its rails and its current value, plus (for
+/// `(dyn …)` atoms) the widget's context and answer cache.
 #[derive(Clone, Copy)]
 pub struct Slot<'a> {
     pub schema: &'a Schema,
     pub value: &'a Datum,
+    pub dyn_lookup: Option<&'a DynLookup>,
+}
+
+/// What a field or popup offers: insertable words (static ones first, then
+/// `dyn` words in source order), a dim detail per word, and a source's
+/// non-selectable hint rows.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Completions {
+    pub words: Vec<String>,
+    pub details: Vec<String>,
+    pub hints: Vec<String>,
 }
 
 impl<'a> Slot<'a> {
     pub fn new(schema: &'a Schema, value: &'a Datum) -> Self {
-        Self { schema, value }
+        Self { schema, value, dyn_lookup: None }
+    }
+
+    /// Resolve `(dyn …)` atoms through `lookup` (without one they complete
+    /// nothing and are never marked invalid).
+    pub fn with_dyn(self, lookup: &'a DynLookup) -> Self {
+        Self { dyn_lookup: Some(lookup), ..self }
     }
 
     pub fn is_row(&self) -> bool {
@@ -271,13 +297,104 @@ impl<'a> Slot<'a> {
         Some(schema)
     }
 
+    /// The rails of the number at `path`. A `(dyn-num SOURCE …)` takes them
+    /// from its source's answer for the word its enclosing form names
+    /// (`dyn_name_for`), through the widget's cache; its fallback when there
+    /// is no lookup, the context is `nil`, or the word carries no rails.
     pub fn num_spec_at(&self, path: &[usize]) -> Option<NumSpec> {
-        self.schema_at(path).and_then(Schema::num_spec)
+        self.num_rails_at(path).map(|(spec, _)| spec)
     }
 
-    /// How a number at `path` reads: the schema's decimals when known.
+    /// `num_spec_at`, and whether the number is a `dyn-num` (its stored
+    /// value is shown as is, never rounded to the rails' decimals).
+    fn num_rails_at(&self, path: &[usize]) -> Option<(NumSpec, bool)> {
+        let (fallback, source) = self.schema_at(path)?.num_rails()?;
+        let Some(source) = source else { return Some((fallback, false)) };
+        let resolved = self
+            .dyn_lookup
+            .filter(|lookup| lookup.validates())
+            .and_then(|lookup| {
+                let word = self.dyn_name_for(path, source)?;
+                lookup.words(source)?.num_spec(word)
+            });
+        Some((resolved.unwrap_or(fallback), true))
+    }
+
+    /// The `(dyn SOURCE)` word that names the rails of a `dyn-num` at
+    /// `path`: the word in a `dyn` arg of the nearest enclosing form that has
+    /// one, so `(plock NAME (seq :hit 1 (2 3)))` finds NAME from any depth.
+    pub fn dyn_name_for(&self, path: &[usize], source: &str) -> Option<&'a str> {
+        for depth in (0..path.len()).rev() {
+            let ancestor = &path[..depth];
+            let Some(head) = self.form_head_at(ancestor) else { continue };
+            let schema = self.schema_at(ancestor)?;
+            let items = self.value.get(ancestor)?.items()?;
+            for (index, item) in items.iter().enumerate().skip(1) {
+                let is_source = schema
+                    .form_arg(head, index - 1)
+                    .is_some_and(|arg| arg.dyn_sources().contains(&source));
+                if let (true, Datum::Word(word)) = (is_source, item) {
+                    return Some(word);
+                }
+            }
+        }
+        None
+    }
+
+    /// How a number at `path` reads: the schema's decimals when known. A
+    /// `dyn-num` whose stored value those decimals would round (a value
+    /// from other rails, typed before a reroute) reads as stored.
     pub fn number_text(&self, path: &[usize], number: f64) -> String {
-        format_number(number, self.num_spec_at(path).map(|spec| spec.decimals))
+        match self.num_rails_at(path) {
+            Some((spec, true)) => {
+                let text = format_number(number, Some(spec.decimals));
+                if text.parse::<f64>().is_ok_and(|shown| (shown - number).abs() <= 1e-9 * number.abs().max(1.0)) {
+                    text
+                } else {
+                    format_number(number, None)
+                }
+            }
+            rails => format_number(number, rails.map(|(spec, _)| spec.decimals)),
+        }
+    }
+
+    /// Snap every `dyn-num` number inside the item at `path` of `root` (a
+    /// value this slot's schema describes) to its resolved rails: what the
+    /// user just typed or inserted there. The rest of the value is left as
+    /// stored (`Schema::check` only clamps `dyn-num`s to their fallback).
+    pub fn snap_dyn_nums(&self, root: Datum, path: &[usize]) -> Datum {
+        fn walk(slot: &Slot<'_>, path: &mut Vec<usize>, out: &mut Vec<(Vec<usize>, f64)>) {
+            match slot.value.get(path) {
+                Some(Datum::Num(number)) => {
+                    if let Some((spec, true)) = slot.num_rails_at(path) {
+                        let snapped = spec.snap(*number);
+                        if snapped != *number {
+                            out.push((path.clone(), snapped));
+                        }
+                    }
+                }
+                Some(Datum::List(items)) => {
+                    for index in 0..items.len() {
+                        path.push(index);
+                        walk(slot, path, out);
+                        path.pop();
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut snapped = Vec::new();
+        {
+            let slot = Slot { value: &root, ..*self };
+            walk(&slot, &mut path.to_vec(), &mut snapped);
+        }
+        let mut root = root;
+        for (at, number) in snapped {
+            if let Some(slot) = root.get_mut(&at) {
+                *slot = Datum::Num(number);
+            }
+        }
+        root
     }
 
     /// The text the schema's completer needs before a field at `target`: the
@@ -315,7 +432,82 @@ impl<'a> Slot<'a> {
     /// Words the schema allows at a field whose text before the caret is
     /// `typed`.
     pub fn completions(&self, target: &Stop, typed: &str) -> Vec<String> {
-        self.schema.completions(&format!("{}{typed}", self.context_prefix(target)))
+        self.completion_rows(target, typed).words
+    }
+
+    /// Whether a field at `target` edits exactly one `dyn` name: its whole
+    /// text is the (fuzzy, spaces allowed) query and a pick replaces it all.
+    pub fn dyn_field(&self, target: &Stop, typed: &str) -> bool {
+        let Stop::Item(path) = target else { return false };
+        !typed.trim_start().starts_with('(')
+            && !matches!(self.value.get(path), Some(Datum::List(_)))
+            && self.schema_at(path).is_some_and(|schema| !schema.dyn_sources().is_empty())
+    }
+
+    /// Completions with details and hints: static words by prefix, `dyn`
+    /// words by fuzzy subsequence over word and detail (sources asked through
+    /// the widget's cache, only now).
+    pub fn completion_rows(&self, target: &Stop, typed: &str) -> Completions {
+        let (statics, sources, query) = match target {
+            Stop::Item(path) if self.dyn_field(target, typed) => {
+                let schema = self.schema_at(path).expect("dyn_field has a schema");
+                let sources = schema.dyn_sources().into_iter().map(str::to_string).collect();
+                (schema.choices(), sources, typed.trim().to_string())
+            }
+            _ => self
+                .schema
+                .completion_context(&format!("{}{typed}", self.context_prefix(target))),
+        };
+        let mut rows = Completions::default();
+        for word in statics.into_iter().filter(|word| word.starts_with(query.as_str())) {
+            rows.words.push(word);
+            rows.details.push(String::new());
+        }
+        let Some(lookup) = self.dyn_lookup else { return rows };
+        for source in &sources {
+            let Some(words) = lookup.words(source) else { continue };
+            rows.hints.extend(words.hints().map(str::to_string));
+            for (group, item) in words.items() {
+                if item.word.is_empty()
+                    || rows.words.contains(&item.word)
+                    || !fuzzy_matches(&query, &item.word, &item.detail)
+                {
+                    continue;
+                }
+                rows.words.push(item.word.clone());
+                rows.details.push(if item.detail.is_empty() { group.to_string() } else { item.detail.clone() });
+            }
+        }
+        rows
+    }
+
+    /// Why the word at `path` is not offered by its `dyn` source(s) for the
+    /// current context, or `None` when it is (or cannot be judged: no
+    /// lookup, a `nil` context, an unregistered source).
+    pub fn dyn_problem(&self, path: &[usize]) -> Option<String> {
+        let lookup = self.dyn_lookup.filter(|lookup| lookup.validates())?;
+        let Some(Datum::Word(word)) = self.value.get(path) else { return None };
+        let schema = self.schema_at(path)?;
+        let sources = schema.dyn_sources();
+        if sources.is_empty() || schema.choices().contains(word) {
+            return None;
+        }
+        for source in sources {
+            if lookup.words(source)?.contains(word) {
+                return None;
+            }
+        }
+        Some(if word.is_empty() { "no name yet".to_string() } else { format!("'{word}' is not offered here") })
+    }
+
+    /// A word picked or typed at `target`: a `dyn` name stays a word even if
+    /// it spells a form head.
+    fn expand_word_at(&self, target: &Stop, word: &str) -> Datum {
+        if self.dyn_field(target, word) {
+            Datum::Word(word.to_string())
+        } else {
+            self.expand_word(word)
+        }
     }
 
     /// Choices for the word at `path` (its popup).
@@ -451,6 +643,12 @@ impl Field {
         self.text.char_indices().nth(caret).map_or(self.text.len(), |(index, _)| index)
     }
 
+    /// Replace the whole text with `word` (a `dyn` field's pick).
+    fn replace_all(&mut self, word: &str) {
+        self.text = word.to_string();
+        self.caret = word.chars().count();
+    }
+
     /// Replace the partial word before the caret with `word`.
     fn accept(&mut self, word: &str) {
         let partial_chars = self.partial().chars().count();
@@ -500,8 +698,13 @@ pub const MAX_COMPLETIONS: usize = 8;
 impl SlotState {
     /// Completions for the open field.
     pub fn field_completions(&self, slot: &Slot<'_>) -> Vec<String> {
-        let Some(field) = &self.field else { return Vec::new() };
-        slot.completions(&field.target, &field.before_caret())
+        self.field_completion_rows(slot).words
+    }
+
+    /// The open field's completions with their details and hints.
+    pub fn field_completion_rows(&self, slot: &Slot<'_>) -> Completions {
+        let Some(field) = &self.field else { return Completions::default() };
+        slot.completion_rows(&field.target, &field.before_caret())
     }
 
     /// Put the cursor on `stop` (after normalizing it) and close popups.
@@ -557,7 +760,7 @@ impl SlotState {
             head_path.push(0);
             slot.replace(&head_path, Datum::Word(option.clone()))
         } else {
-            slot.replace(&popup.path, slot.expand_word(option))
+            slot.replace(&popup.path, slot.expand_word_at(&Stop::Item(popup.path.clone()), option))
         };
         self.cursor = Stop::Item(popup.path);
         match commit(slot, &root) {
@@ -614,17 +817,29 @@ impl SlotState {
     fn commit_field(&mut self, slot: &Slot<'_>) -> Outcome {
         let completions = self.field_completions(slot);
         let Some(field) = self.field.as_mut() else { return Outcome::Changed };
-        let partial = field.partial();
+        let whole = slot.dyn_field(&field.target, &field.text);
+        let partial = if whole { field.text.trim().to_string() } else { field.partial() };
         if !partial.is_empty()
             && let Some(word) = completions.get(field.highlight)
             && !completions.contains(&partial)
         {
             let word = word.clone();
-            field.accept(&word);
+            if whole {
+                field.replace_all(&word);
+            } else {
+                field.accept(&word);
+            }
         }
-        let datum = match read_value(&field.text) {
+        // A dyn name that is not a completion is kept as typed (even with
+        // spaces): whether the source offers it is shown, not enforced.
+        let read = if whole && read_value(&field.text).is_err() && !field.text.trim().is_empty() {
+            Ok(Value::String(field.text.trim().to_string()))
+        } else {
+            read_value(&field.text)
+        };
+        let datum = match read {
             Ok(value) => match Datum::from_value(&value) {
-                Datum::Word(word) => slot.expand_word(&word),
+                Datum::Word(word) => slot.expand_word_at(&field.target, &word),
                 datum => datum,
             },
             Err(reason) => {
@@ -635,6 +850,11 @@ impl SlotState {
         let (root, cursor) = match field.target.clone() {
             Stop::Item(path) => (slot.replace(&path, datum), Stop::Item(path)),
             Stop::Plus(container) => slot.append(&container, datum),
+        };
+        // Typed numbers take their resolved `dyn-num` rails (clamped, snapped).
+        let root = match &cursor {
+            Stop::Item(path) => slot.snap_dyn_nums(root, path),
+            Stop::Plus(_) => root,
         };
         match commit(slot, &root) {
             Ok(value) => {
@@ -786,7 +1006,13 @@ impl SlotState {
                 Outcome::Changed
             }
             KeyCode::Tab => {
-                if let Some(word) = completions.get(field.highlight) {
+                if let Some(word) = completions.get(field.highlight)
+                    && slot.dyn_field(&field.target, &field.text)
+                {
+                    let word = word.clone();
+                    field.replace_all(&word);
+                    field.highlight = 0;
+                } else if let Some(word) = completions.get(field.highlight) {
                     let word = word.clone();
                     field.accept(&word);
                     // A bare head with args in an empty item position is the
@@ -904,6 +1130,340 @@ mod tests {
 
         fn text(&self) -> String {
             self.value.text()
+        }
+    }
+
+    mod dyn_atoms {
+        use super::*;
+        use crate::sexp_slot::dyn_words::{
+            DynCache, DynGroup, DynItem, DynLookup, DynWords, bump_dyn_word_epoch,
+            register_dyn_word_source,
+        };
+        use std::cell::{Cell, RefCell};
+        use std::rc::Rc;
+
+        fn entry(word: &str, detail: &str) -> DynItem {
+            DynItem::new(word, detail)
+        }
+
+        /// A stub `param` source under `name`: track 1 has an instrument and a
+        /// filterbank, track 2 only a cutoff, `nil` a hint. Returns its call count.
+        fn stub(name: &str) -> Rc<Cell<usize>> {
+            let calls = Rc::new(Cell::new(0));
+            let counter = calls.clone();
+            register_dyn_word_source(
+                name,
+                Box::new(move |context| {
+                    counter.set(counter.get() + 1);
+                    let groups = match context {
+                        Value::Number(n) if *n == 1.0 => vec![
+                            DynGroup {
+                                group: "Instrument".into(),
+                                items: vec![entry("instrument:cutoff", "Cutoff 20..20k"), entry("instrument:res", "Resonance")],
+                            },
+                            DynGroup {
+                                group: "FX 2 Filterbank".into(),
+                                items: vec![entry("fx2:filterbank:freq", "Freq"), entry("fx2:filterbank:mix", "")],
+                            },
+                        ],
+                        Value::Number(_) => vec![DynGroup {
+                            group: "Instrument".into(),
+                            items: vec![entry("instrument:cutoff", "Cutoff")],
+                        }],
+                        _ => vec![DynGroup {
+                            group: String::new(),
+                            items: vec![entry("", "route this row to see its parameters")],
+                        }],
+                    };
+                    DynWords { epoch: 0, groups, aliases: Vec::new() }
+                }),
+            );
+            calls
+        }
+
+        fn plock_schema(source: &str) -> Schema {
+            schema(&format!("(form plock (fixed (dyn {source})) (num :min -100 :max 100))"))
+        }
+
+        fn lookup(context: Value) -> DynLookup {
+            DynLookup::new(context, Rc::new(RefCell::new(DynCache::default())))
+        }
+
+        #[test]
+        fn completions_are_fuzzy_over_word_and_detail_and_grouped() {
+            stub("p-fuzzy");
+            let schema = plock_schema("p-fuzzy");
+            let value = value("(plock instrument:cutoff 0)");
+            let lookup = lookup(Value::Number(1.0));
+            let slot = Slot::new(&schema, &value).with_dyn(&lookup);
+            let name = item(&[1]);
+            assert_eq!(slot.completions(&name, "cut"), vec!["instrument:cutoff"]);
+            assert_eq!(slot.completions(&name, "filt fr")[0], "fx2:filterbank:freq");
+            assert!(!slot.completions(&name, "filt fr").contains(&"instrument:cutoff".to_string()));
+            // Detail matches too; source (group) order is kept.
+            assert_eq!(slot.completions(&name, "reso"), vec!["instrument:res"]);
+            let all = slot.completion_rows(&name, "");
+            assert_eq!(all.words, vec!["instrument:cutoff", "instrument:res", "fx2:filterbank:freq", "fx2:filterbank:mix"]);
+            // An empty detail shows the group instead.
+            assert_eq!(all.details[3], "FX 2 Filterbank");
+            assert!(all.hints.is_empty());
+            // Typed after the head in a whole-form field, the partial word is the query.
+            assert_eq!(slot.completions(&item(&[]), "(plock fbfr"), vec!["fx2:filterbank:freq"]);
+        }
+
+        #[test]
+        fn a_nil_context_offers_only_the_hint_and_is_never_invalid() {
+            let calls = stub("p-nil");
+            let schema = plock_schema("p-nil");
+            let value = value("(plock bogus 0)");
+            let lookup = lookup(Value::Nil);
+            let slot = Slot::new(&schema, &value).with_dyn(&lookup);
+            assert_eq!(slot.dyn_problem(&[1]), None);
+            assert_eq!(calls.get(), 0, "validation never asks for a nil context");
+            let rows = slot.completion_rows(&item(&[1]), "");
+            assert!(rows.words.is_empty());
+            assert_eq!(rows.hints, vec!["route this row to see its parameters"]);
+            // Enter on the name: no choices, so the field opens with the hint.
+            let mut state = SlotState { cursor: item(&[1]), ..SlotState::default() };
+            state.activate(&slot);
+            assert!(state.field.is_some());
+            assert_eq!(state.field_completion_rows(&slot).hints.len(), 1);
+        }
+
+        #[test]
+        fn answers_are_cached_per_context_and_epoch() {
+            let calls = stub("p-cache");
+            let schema = plock_schema("p-cache");
+            let value = value("(plock instrument:cutoff 0)");
+            let cache = Rc::new(RefCell::new(DynCache::default()));
+            let track = |n: f64| DynLookup::new(Value::Number(n), cache.clone());
+            let one = track(1.0);
+            let slot = Slot::new(&schema, &value).with_dyn(&one);
+            for typed in ["", "c", "cu", "cut"] {
+                slot.completions(&item(&[1]), typed);
+            }
+            slot.dyn_problem(&[1]);
+            assert_eq!(calls.get(), 1, "one context, one epoch: one query");
+            // The context changed: asked again, once.
+            let two = track(2.0);
+            let slot = Slot::new(&schema, &value).with_dyn(&two);
+            slot.completions(&item(&[1]), "");
+            slot.dyn_problem(&[1]);
+            assert_eq!(calls.get(), 2);
+            // The host's data changed: asked again.
+            bump_dyn_word_epoch("p-cache");
+            slot.completions(&item(&[1]), "");
+            assert_eq!(calls.get(), 3);
+            slot.completions(&item(&[1]), "x");
+            assert_eq!(calls.get(), 3);
+        }
+
+        #[test]
+        fn names_the_context_does_not_offer_are_invalid_but_kept() {
+            stub("p-valid");
+            let schema = plock_schema("p-valid");
+            let value = value("(plock fx2:filterbank:freq 0)");
+            let on_one = lookup(Value::Number(1.0));
+            let on_two = lookup(Value::Number(2.0));
+            assert_eq!(Slot::new(&schema, &value).with_dyn(&on_one).dyn_problem(&[1]), None);
+            // Rerouted to a track without the filterbank: flagged, not rewritten.
+            let slot = Slot::new(&schema, &value).with_dyn(&on_two);
+            assert_eq!(slot.dyn_problem(&[1]), Some("'fx2:filterbank:freq' is not offered here".into()));
+            assert_eq!(slot.value.get(&[1]), Some(&Datum::Word("fx2:filterbank:freq".into())));
+            // Without a lookup, or for a non-dyn atom, nothing is judged.
+            assert_eq!(Slot::new(&schema, &value).dyn_problem(&[1]), None);
+            assert_eq!(slot.dyn_problem(&[2]), None);
+        }
+
+        #[test]
+        fn picking_a_fuzzy_match_stores_the_word_and_unknown_names_are_kept() {
+            stub("p-pick");
+            let schema = plock_schema("p-pick");
+            let lookup = lookup(Value::Number(1.0));
+            let mut value = value("(plock \"\" 0)");
+            let mut state = SlotState { cursor: item(&[1]), ..SlotState::default() };
+            let typed = |state: &mut SlotState, value: &Datum, text: &str, finish: KeyCode| {
+                let slot = Slot::new(&schema, value).with_dyn(&lookup);
+                state.handle_key(&slot, KeyCode::Char(text.chars().next().unwrap()), KeyModifiers::NONE);
+                for ch in text.chars().skip(1) {
+                    state.handle_key(&slot, KeyCode::Char(ch), KeyModifiers::NONE);
+                }
+                state.handle_key(&slot, finish, KeyModifiers::NONE)
+            };
+            // Tab takes the highlighted match for the whole field; Enter commits it.
+            assert_eq!(typed(&mut state, &value, "filt fr", KeyCode::Tab), Outcome::Changed);
+            assert_eq!(state.field.as_ref().unwrap().text, "fx2:filterbank:freq");
+            let slot = Slot::new(&schema, &value).with_dyn(&lookup);
+            let Outcome::Commit(stored) = state.handle_key(&slot, KeyCode::Enter, KeyModifiers::NONE) else {
+                panic!("commit");
+            };
+            assert_eq!(format_lisp_source(&stored), "(\"plock\" \"fx2:filterbank:freq\" 0)");
+            value = Datum::from_value(&stored);
+            // Enter on a half-typed name takes the match too.
+            let Outcome::Commit(stored) = typed(&mut state, &value, "cut", KeyCode::Enter) else { panic!("commit") };
+            assert_eq!(format_lisp_source(&stored), "(\"plock\" \"instrument:cutoff\" 0)");
+            value = Datum::from_value(&stored);
+            // A name nothing matches is kept as typed (shown invalid, not refused).
+            let Outcome::Commit(stored) = typed(&mut state, &value, "zzz", KeyCode::Enter) else { panic!("commit") };
+            assert_eq!(format_lisp_source(&stored), "(\"plock\" \"zzz\" 0)");
+            // An empty name survives a whole-form round trip as text.
+            let empty = Datum::from_value(&read_value("(plock \"\" 0)").unwrap());
+            assert_eq!(empty.text(), "(plock \"\" 0)");
+        }
+
+        // ── dyn-num: number rails from the sibling dyn word ─────────────────
+
+        /// A stub whose words carry rails: cutoff 20..20000 step 1, mode an
+        /// enum 0..3, `inst-alias:cutoff` an alias of the cutoff, `plain` none.
+        fn rails_stub(name: &str) {
+            register_dyn_word_source(
+                name,
+                Box::new(|context| {
+                    if matches!(context, Value::Nil) {
+                        return DynWords {
+                            groups: vec![DynGroup { group: String::new(), items: vec![entry("", "route")] }],
+                            ..DynWords::default()
+                        };
+                    }
+                    let cutoff = NumSpec { min: 20.0, max: 20000.0, step: 1.0, decimals: 0 };
+                    DynWords {
+                        epoch: 0,
+                        groups: vec![DynGroup {
+                            group: "Instrument".into(),
+                            items: vec![
+                                entry("instrument:cutoff", "Cutoff").with_num(cutoff),
+                                entry("instrument:mode", "Mode")
+                                    .with_num(NumSpec { min: 0.0, max: 3.0, step: 1.0, decimals: 0 }),
+                                entry("instrument:plain", "Plain"),
+                            ],
+                        }],
+                        aliases: vec![entry("inst-alias:cutoff", "").with_num(cutoff)],
+                    }
+                }),
+            );
+        }
+
+        /// `plock` whose value is a dyn-num, alone, in a seq, or a cycle list.
+        fn rails_schema(source: &str) -> Schema {
+            schema(&format!(
+                "(forms (word rev)
+                        (form plock (fixed (dyn {source}))
+                          (or (dyn-num {source} (num :min -1000 :max 1000 :step 0.5 :decimals 1))
+                              (form seq (word :hit :cycle)
+                                (rest (dyn-num {source} (num :min -1000 :max 1000 :step 0.5 :decimals 1))))))
+                        (form on (word left right)
+                          (form plock (fixed (dyn {source}))
+                            (dyn-num {source} (num :min -1000 :max 1000 :step 0.5 :decimals 1)))))"
+            ))
+        }
+
+        const FALLBACK: NumSpec = NumSpec { min: -1000.0, max: 1000.0, step: 0.5, decimals: 1 };
+
+        #[test]
+        fn dyn_num_rails_come_from_the_sibling_word_at_any_depth() {
+            rails_stub("r-sib");
+            let schema = rails_schema("r-sib");
+            let value = value(
+                "((plock instrument:cutoff 440) (plock instrument:mode (seq :hit 1 (2 3)))
+                  (on left (plock inst-alias:cutoff 50)) rev)",
+            );
+            let lookup = lookup(Value::Number(1.0));
+            let slot = Slot::new(&schema, &value).with_dyn(&lookup);
+            let cutoff = NumSpec { min: 20.0, max: 20000.0, step: 1.0, decimals: 0 };
+            let mode = NumSpec { min: 0.0, max: 3.0, step: 1.0, decimals: 0 };
+            assert_eq!(slot.dyn_name_for(&[0, 2], "r-sib"), Some("instrument:cutoff"));
+            assert_eq!(slot.num_spec_at(&[0, 2]), Some(cutoff));
+            // Inside a seq, and inside a cycle list inside the seq.
+            assert_eq!(slot.num_spec_at(&[1, 2, 2]), Some(mode));
+            assert_eq!(slot.num_spec_at(&[1, 2, 3, 1]), Some(mode));
+            // Nested in another form (on), through an alias.
+            assert_eq!(slot.num_spec_at(&[2, 2, 2]), Some(cutoff));
+            // Formatting follows the resolved decimals.
+            assert_eq!(slot.number_text(&[0, 2], 440.0), "440");
+            // Without a lookup: the fallback.
+            assert_eq!(Slot::new(&schema, &value).num_spec_at(&[0, 2]), Some(FALLBACK));
+            assert_eq!(Slot::new(&schema, &value).number_text(&[0, 2], 440.0), "440.0");
+        }
+
+        #[test]
+        fn dyn_num_falls_back_on_unknown_words_and_nil_contexts() {
+            rails_stub("r-fall");
+            let schema = rails_schema("r-fall");
+            let value = value("((plock bogus 5) (plock instrument:plain 5) (plock instrument:cutoff 5))");
+            let on_track = lookup(Value::Number(1.0));
+            let slot = Slot::new(&schema, &value).with_dyn(&on_track);
+            assert_eq!(slot.num_spec_at(&[0, 2]), Some(FALLBACK), "unknown word");
+            assert_eq!(slot.num_spec_at(&[1, 2]), Some(FALLBACK), "word without rails");
+            let unrouted = lookup(Value::Nil);
+            let slot = Slot::new(&schema, &value).with_dyn(&unrouted);
+            assert_eq!(slot.num_spec_at(&[2, 2]), Some(FALLBACK), "nil context");
+            // Static numbers are untouched by all this.
+            let every = schema_static();
+            let static_value = super::value("(every 3 rev)");
+            assert_eq!(
+                Slot::new(&every, &static_value).with_dyn(&on_track).num_spec_at(&[1]).map(|s| s.max),
+                Some(16.0)
+            );
+        }
+
+        fn schema_static() -> Schema {
+            schema("(form every (num :min 1 :max 16 :step 1 :decimals 0) (word rev))")
+        }
+
+        #[test]
+        fn typed_dyn_nums_clamp_and_snap_to_their_rails_but_stored_values_stay() {
+            rails_stub("r-type");
+            let schema = rails_schema("r-type");
+            let on_track = lookup(Value::Number(1.0));
+            // A stored value outside the rails is shown and kept as is.
+            let mut value = value("((plock instrument:mode 7.25) (plock instrument:cutoff 30000))");
+            let slot = Slot::new(&schema, &value).with_dyn(&on_track);
+            assert_eq!(slot.number_text(&[0, 2], 7.25), "7.25");
+            assert_eq!(slot.number_text(&[1, 2], 30000.0), "30000");
+            // Typing into the cutoff clamps to its max; the mode value is not touched.
+            let mut state = SlotState { cursor: item(&[1, 2]), ..SlotState::default() };
+            for ch in "99999".chars() {
+                state.handle_key(&slot, KeyCode::Char(ch), KeyModifiers::NONE);
+            }
+            let Outcome::Commit(stored) = state.handle_key(&slot, KeyCode::Enter, KeyModifiers::NONE) else {
+                panic!("commit");
+            };
+            assert_eq!(
+                format_lisp_source(&stored),
+                "((\"plock\" \"instrument:mode\" 7.25) (\"plock\" \"instrument:cutoff\" 20000))"
+            );
+            value = Datum::from_value(&stored);
+            // A whole typed item snaps every number inside it to the named rails.
+            let slot = Slot::new(&schema, &value).with_dyn(&on_track);
+            let mut state = SlotState { cursor: Stop::Plus(vec![]), ..SlotState::default() };
+            state.open_field(Stop::Plus(vec![]), "(plock instrument:mode (seq :hit 1.4 (2.6 9)))".into());
+            let Outcome::Commit(stored) = state.handle_key(&slot, KeyCode::Enter, KeyModifiers::NONE) else {
+                panic!("commit");
+            };
+            let stored = Datum::from_value(&stored);
+            assert_eq!(stored.get(&[2]).map(Datum::text), Some("(plock instrument:mode (seq :hit 1 (3 3)))".into()));
+            // Without the source (nil context), the typed value takes the fallback rails.
+            let unrouted = lookup(Value::Nil);
+            let slot = Slot::new(&schema, &value).with_dyn(&unrouted);
+            let mut state = SlotState { cursor: item(&[1, 2]), ..SlotState::default() };
+            state.open_field(item(&[1, 2]), "1234.3".into());
+            let Outcome::Commit(stored) = state.handle_key(&slot, KeyCode::Enter, KeyModifiers::NONE) else {
+                panic!("commit");
+            };
+            assert_eq!(Datum::from_value(&stored).get(&[1, 2]), Some(&Datum::Num(1000.0)));
+        }
+
+        #[test]
+        fn schema_check_only_type_checks_dyn_nums() {
+            let schema = rails_schema("r-check");
+            let checked = |text: &str| schema.check(&read_value(text).unwrap()).map(|v| format_lisp_source(&v));
+            // No snapping (0.37 is off the fallback's 0.5 step) and no clamping
+            // (5000 is past its max): the rails depend on the word and context.
+            assert_eq!(checked("((plock a 0.37))"), Ok("((\"plock\" \"a\" 0.37))".into()));
+            assert_eq!(checked("((plock a 5000))"), Ok("((\"plock\" \"a\" 5000))".into()));
+            assert!(checked("((plock a x))").is_err());
+            assert!(Schema::parse(&read_value("(dyn-num p (word a))").unwrap()).is_err());
+            assert!(Schema::parse(&read_value("(dyn-num p)").unwrap()).is_err());
         }
     }
 

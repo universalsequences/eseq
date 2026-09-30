@@ -329,7 +329,7 @@ them:
   `(vel* s)`, `(vel+ d)` (velocity multiply / add, clamped to 0..1),
   `(note+ n)` (transpose added on top of the route's `(note …)`), `(vel s)`
   (= `vel*` inside `on`), `(note n)` (sets the note of the matched events),
-  and every post-op word: `stac`, `(gate s)`, `(shift n)`, `(quant tb)`,
+  `(plock NAME v)` (a per-hit parameter lock, below), and every post-op word: `stac`, `(gate s)`, `(shift n)`, `(quant tb)`,
   `left`/`right`/`accent` (filter within the matched events), `rest`/`none`
   (drop the matched events).
 - **Structural words** rebuild a figure and need a **figure-level** selector:
@@ -343,6 +343,27 @@ them:
 
 `(vel* s)`, `(vel+ d)` and `(note+ n)` are also plain route words: at the top
 level they apply to the whole route, and `(every n (vel+ -0.2))` gates them.
+
+`(plock NAME v)` locks one parameter for each hit it applies to
+(docs/jaki-plock-spec.md §4). `NAME` is a macro-editor label **string** —
+`"instrument:cutoff"`, `"fx2:filterbank:freq"`, `"rack-macro:macro_1"`,
+`"step-param:pan"` — resolved by name on the track the hit lands on (a name
+the destination lacks is skipped there); `v` is a per-hit value in that
+parameter's own units. It works as a route word, inside `on` and under
+`every`:
+
+```lisp
+-> 0 (plock "instrument:cutoff" (seq :hit 100 5535 34 535))
+-> 1 (plock "fx2:filterbank:freq" (0.2 0.8))        ; one value per cycle
+-> 2 (on left (plock "rack-macro:macro_1" 0.9))     ; left hits only
+```
+
+A later `plock` of the same `NAME` on the same hit wins. Labels are checked
+once, when the route is built (host native `param-label?`): one that does
+not parse (a typo, a `process:` inlet, a non-string) makes that word a
+no-op, so the note still plays. `plock` never changes cycle length, so the
+length-only evaluator ignores it. Evaluated events carry the locks as a flat
+`:params` list (`label value …`) that `emit` hands to `seq-emit :params`.
 
 ### 7.1.3 Evaluation
 
@@ -380,7 +401,9 @@ movement and far too slow for a melody.
 
 **Where the clocks step.** `:hit`, `:fig` and `:span` step in **per-hit
 values** — the route's `(note …)` / `(vel …)`, and `vel*`, `vel+`, `note+`,
-`(gate …)`, and `on`'s `(note …)` / `(vel …)`. Anywhere else (retiming,
+`(gate …)`, `(plock NAME …)`, and `on`'s `(note …)` / `(vel …)`. A clocked
+`plock` value lowers to `(:defer :plock raw key label)`, its label folded into
+the counter key, so two `plock`s on one row step their own sequences. Anywhere else (retiming,
 figure transforms, selector arguments, route destinations) a `seq` reads
 per cycle whatever its clock, since those values shape the whole cycle
 before any hit plays.
@@ -664,7 +687,8 @@ The def-sequencer skeleton is now machine-written. The package module
   words are ignored.
 - `(on SEL word…)` scopes words to the events or figures a selector matches
   (§7.1); `(vel* s)`, `(vel+ d)` and `(note+ n)` are per-event velocity and
-  transpose adjustments usable at the top level or inside `on`.
+  transpose adjustments usable at the top level or inside `on`, and
+  `(plock NAME v)` a per-hit parameter lock (§7.1.2).
 - Route-word `stac` is a **post op** (gate cap at 1/4 unit), not the
   figure-level xf flag, so it composes with the gate-extending filters in
   authored word order: `left stac` filters to the left hand and then caps

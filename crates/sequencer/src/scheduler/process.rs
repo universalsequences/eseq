@@ -115,45 +115,7 @@ pub(super) fn is_node_payload_pseudo_param(name: &str) -> bool {
 }
 
 pub(super) fn process_step_param_from_name(name: &str) -> Option<StepParam> {
-    let normalized = name
-        .trim_start_matches(':')
-        .replace('_', "-")
-        .to_ascii_lowercase();
-    [
-        StepParam::Duration,
-        StepParam::Velocity,
-        StepParam::Speed,
-        StepParam::AuxA,
-        StepParam::AuxB,
-        StepParam::Transpose,
-        StepParam::Pan,
-        StepParam::Chop,
-        StepParam::Retrig,
-        StepParam::RetrigRate,
-    ]
-    .into_iter()
-    .find(|param| {
-        param.short_label().eq_ignore_ascii_case(&normalized)
-            || param
-                .label()
-                .replace(' ', "-")
-                .eq_ignore_ascii_case(&normalized)
-            || match param {
-                StepParam::Duration => normalized == "duration",
-                StepParam::Velocity => normalized == "velocity",
-                StepParam::Speed => normalized == "speed",
-                StepParam::AuxA => normalized == "aux-a",
-                StepParam::AuxB => normalized == "aux-b",
-                StepParam::Transpose => normalized == "transpose",
-                StepParam::Pan => normalized == "pan",
-                StepParam::Chop => normalized == "chop",
-                StepParam::Retrig => normalized == "retrig",
-                StepParam::RetrigRate => {
-                    normalized == "retrig-rate" || normalized == "retrig_rate"
-                }
-                StepParam::Sync | StepParam::Delay => false,
-            }
-    })
+    crate::process::step_param_from_target_name(name)
 }
 
 pub(super) fn resolved_step_param(resolved: &ResolvedStep, param: StepParam) -> f32 {

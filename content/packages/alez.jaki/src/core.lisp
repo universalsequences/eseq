@@ -402,7 +402,11 @@
 ;; every such word has its own counters.
 (def key-defers (op key)
   (match (first op)
-    :defer (list :defer (nth op 1) (nth op 2) key)
+    :defer (if (= (nth op 1) :plock)
+               ;; the label rides along (apply-defer needs it) and is folded
+               ;; into the key, so two plocks keep their own seq counters
+               (list :defer :plock (nth op 2) (str key "#" (nth op 4)) (nth op 4))
+               (list :defer (nth op 1) (nth op 2) key))
     :every (list :every (nth op 1) (key-defers (nth op 2) key))
     :fig-every (list :fig-every (nth op 1) (key-defers (nth op 2) key))
     :on (list :on (nth op 1) (key-defers (nth op 2) key))
@@ -1025,6 +1029,8 @@
       :vadd (apply-event-op res :vadd (resolve-arg (nth op 1) cycle))
       :nadd (apply-event-op res :nadd (resolve-arg (nth op 1) cycle))
       :nset (apply-event-op res :nset (resolve-arg (nth op 1) cycle))
+      :plock (let ((l (nth op 1)) (v (resolve-arg (nth op 2) cycle)))
+               (map-events res (lambda (e) (merge e :params (plock-set (get e :params) l v)))))
       ;; row item idx applied to the matched events: emit reports them so the
       ;; kind panel lights the item (spec §7.3)
       :tag (let ((idx (nth op 2)))
@@ -1172,6 +1178,7 @@
     :vadd (raw-period (nth op 1))
     :nadd (raw-period (nth op 1))
     :nset (raw-period (nth op 1))
+    :plock (raw-period (nth op 2))
     :defer 1
     :tag (sel-period* (nth op 1))
     :alt (reduce (lambda (a x) (lcm0 a (post-period* x)))
@@ -1608,6 +1615,7 @@
       :nadd (merge acc :nadd (+ (get acc :nadd) v))
       :nset (merge acc :nset v)
       :gmul (merge acc :gmul (* (get acc :gmul) (max 0 v)))
+      :plock (merge acc :params (plock-set (get acc :params) (nth d 3) v))
       _ acc)))
 
 ;; opts stay raw and resolve per event: (every-fig n (note m)) differs per
@@ -1618,7 +1626,7 @@
         (reset (set! lit-picks (list))))
     (let ((a (reduce (lambda (acc d) (apply-defer acc d p rkey e c clen))
                      (dict :vel (get e :vel) :nadd (or-default (get e :nadd) 0)
-                           :nset (get e :nset) :gmul 1)
+                           :nset (get e :nset) :gmul 1 :params (get e :params))
                      (or-default (get e :defer) (list))))
           (opt-note (ev-value p (str rkey "opt:note") (get opts :note) e c clen 0))
           (opt-vel (ev-value p (str rkey "opt:vel") (get opts :vel-scale) e c clen 1)))
@@ -1643,7 +1651,9 @@
                 :note (+ (+ (let ((ns (get a :nset))) (if (= ns nil) opt-note ns))
                             (get a :nadd))
                          (state-get "jaki-gnote" 0))
-                :dur dur))))))
+                :dur dur
+                ;; (plock …) values, a flat label/value list (nil: none)
+                :params (get a :params)))))))
 
 ;; item indices → bitmask (duplicates count once)
 (def pow2 (i) (if (<= i 0) 1 (* 2 (pow2 (- i 1)))))
@@ -1698,6 +1708,8 @@
 ;;   `none`/`rest` the silent cycle — also useful as (every n rest));
 ;;   members must all be post-lowerable or all figure transforms
 ;;   (vel s) (note n)
+;;   (plock NAME v) — per-hit parameter lock, NAME a macro-editor label
+;;   string ("instrument:cutoff"); v any per-hit value, e.g. (seq :hit …)
 ;;   any figure transform: (basevel v) (dotdecay v) (dashdecay v) (minvel v)
 ;;   (maxvel v) (split t) (merge t) (L w) (R w)
 ;;   (gate s) / (dur s) — multiply every gate by s (per-cycle arg: number,
@@ -1719,6 +1731,35 @@
 (def quant-units (tb)
   (let ((u (state-get "jaki-unit" 0.25)))
     (rat (round-int (* (/ (beats tb) u) 96)) 96)))
+
+;; (plock NAME V) (docs/jaki-plock-spec.md §4): a per-hit parameter lock.
+;; NAME is a macro-editor label string ("instrument:cutoff",
+;; "fx2:filterbank:freq", "rack-macro:macro_1"), checked ONCE here with the
+;; host's `param-label?` — a label seq-emit would reject (which fails the
+;; whole call, silencing the note) lowers to the no-op (:id), so a typo
+;; drops only the lock. V is any per-hit value, like note's: a clocked
+;; value defers to emit as (:defer :plock raw key label).
+(def plock-op (args wp)
+  (let ((label (nth args 0)) (raw (nth args 1)))
+    (if (and (string? label) (and (not (= raw nil)) (param-label? label)))
+        (let ((v (lit-raw raw (sub-path wp 2))))
+          (if (or (needs-ev? v) (at-wrapped? v))
+              (list :defer :plock v nil label)
+              (list :plock label v)))
+        (list :id))))
+
+;; a hit's locks: flat (label value …), the list seq-emit :params takes; a
+;; later lock of the same label replaces the earlier one; non-numbers drop
+(def plock-index (l label i)
+  (if (>= i (len l)) -1 (if (= (nth l i) label) i (plock-index l label (+ i 2)))))
+
+(def plock-set (l label v)
+  (if (not (number? v))
+      l
+      (if (= l nil)
+          (list label v)
+          (let ((i (plock-index l label 0)))
+            (if (>= i 0) (set-nth l (+ i 1) v) (append l (list label v)))))))
 
 ;; route words that lower to post ops, so `(every n w)` can wrap them
 ;; cycle-gated while staying in authored word order; nil for xf-able words.
@@ -1749,6 +1790,7 @@
           'vel*   (defer-or :vmul :vmul v)
           'vel+   (defer-or :vadd :vadd v)
           'note+  (defer-or :nadd :nadd v)
+          'plock  (plock-op args wp)
           'every  (let ((inner (route-post-op-at (nth args 1) (sub-path wp 2))))
                     (if (= inner nil)
                         nil
@@ -1838,6 +1880,7 @@
       'vel*   (add-route-post acc (route-post-op-at w (get acc :wpath)) w)
       'vel+   (add-route-post acc (route-post-op-at w (get acc :wpath)) w)
       'note+  (add-route-post acc (route-post-op-at w (get acc :wpath)) w)
+      'plock  (add-route-post acc (route-post-op-at w (get acc :wpath)) w)
       'on     (route-on acc (nth args 0) (rest args))
       'inv    (merge acc :inv true)
       ;; Any other figure transform (basevel dotdecay dashdecay minvel

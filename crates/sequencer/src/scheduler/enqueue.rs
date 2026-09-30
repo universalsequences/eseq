@@ -684,6 +684,21 @@ pub(super) fn enqueue_emitted_network_event_with_midi_fx(
         &mut event.instrument_params,
         scheduled_instrument_params_from_vec(emitted.instrument_params),
     );
+    // `seq-emit :params`, by name against the destination, after the
+    // landing stamp so it is the most specific source for this hit.
+    let mut midi_fx_params = Vec::new();
+    if !emitted.named_params.is_empty() {
+        let midi_fx = runtime
+            .as_ref()
+            .map(|runtime| runtime.midi_fx_descriptor_source());
+        apply_named_params(
+            snapshot,
+            midi_fx.as_ref(),
+            &emitted.named_params,
+            &mut event,
+            &mut midi_fx_params,
+        );
+    }
 
     enqueue_step_event_with_midi_fx(
         queue,
@@ -698,7 +713,7 @@ pub(super) fn enqueue_emitted_network_event_with_midi_fx(
         global_transpose,
         arp_phase_beats,
         event,
-        Vec::new(),
+        midi_fx_params,
         debug_accum,
     )
 }

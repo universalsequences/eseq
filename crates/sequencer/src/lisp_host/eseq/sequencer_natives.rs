@@ -30,12 +30,12 @@ pub const DEF_SEQUENCER_KEYWORDS: &[&str] = &[
     ":seed-on-reset", ":max-poly", ":max-poly-selection", ":duration", ":dur", ":swing",
 ];
 pub const SEQ_EMIT_SIGNATURE: &str =
-    "(seq-emit :track t :at offset :vel v :note n :dur beats :speed ratio :pan amount :chop count :chord (...) :quantize grid)";
+    "(seq-emit :track t :at offset :vel v :note n :dur beats :speed ratio :pan amount :chop count :chord (...) :quantize grid :params (label value ...))";
 pub const SEQ_EMIT_DOCS: &str =
-    "Emit an event from a generator :tick at a musical offset; the engine resolves timing to samples. Long and abbreviated parameter names are both accepted.";
+    "Emit an event from a generator :tick at a musical offset; the engine resolves timing to samples. Long and abbreviated parameter names are both accepted. :params is a flat list of macro-editor labels and values (\"instrument:cutoff\" 5535 \"fx2:filterbank:freq\" 0.8), in each parameter's own units; they apply to this hit only, resolved by name on the destination track when it lands (unknown names are skipped).";
 pub const SEQ_EMIT_KEYWORDS: &[&str] = &[
     ":track", ":at", ":vel", ":velocity", ":note", ":transpose", ":trn", ":dur",
-    ":duration", ":speed", ":spd", ":pan", ":chop", ":chp", ":chord", ":quantize", ":q",
+    ":duration", ":speed", ":spd", ":pan", ":chop", ":chp", ":chord", ":quantize", ":q", ":params",
 ];
 pub const SEQ_EMIT_CONTROL_SIGNATURE: &str =
     "(seq-emit-control :op \"mute\"|\"solo\" :track idx | :group \"name\" :at offset-beats :dur beats)";
@@ -985,6 +985,21 @@ pub(in crate::lisp_host) fn register_sequencer_natives_with_accumulators(
         },
     );
 
+    // Jaki validates `(plock NAME V)` labels once when a route is prepared,
+    // so a mistyped label drops only that lock instead of failing seq-emit
+    // (which rejects the whole call, silencing the note).
+    runtime.register_native_with_docs(
+        "param-label?",
+        "(param-label? label)",
+        "True when label is a per-hit parameter label seq-emit :params accepts (e.g. \"instrument:cutoff\", \"fx2:filterbank:freq\", \"rack-macro:macro_1\"); false otherwise, including non-strings. Existence on a track is checked only when the hit lands.",
+        |args, _ctx| {
+            Ok(EValue::Bool(matches!(
+                args.first(),
+                Some(EValue::String(s)) if crate::process::ParamRef::parse(s).is_ok()
+            )))
+        },
+    );
+
     let generator_tick_for_tick = Arc::clone(&generator_tick);
     runtime.register_native_with_docs(
         "gen-tick",
@@ -1884,6 +1899,7 @@ pub(in crate::lisp_host) fn register_sequencer_natives_with_accumulators(
                 chord_step_transpose: eval.chord_step_transpose,
                 effect_params: eval.effect_params.clone(),
                 instrument_params: eval.instrument_params.clone(),
+                named_params: Vec::new(),
             });
             Ok(EValue::Bool(true))
         },
@@ -1918,6 +1934,7 @@ pub(in crate::lisp_host) fn register_sequencer_natives_with_accumulators(
                 chord_step_transpose,
                 effect_params: eval.effect_params.clone(),
                 instrument_params: eval.instrument_params.clone(),
+                named_params: Vec::new(),
             });
             Ok(EValue::Bool(true))
         },
@@ -3361,6 +3378,7 @@ pub(in crate::lisp_host) fn build_seq_emit_event(
     let mut offset_beats: f32 = 0.0;
     let mut target_track: Option<usize> = None;
     let mut quantize: Option<Timebase> = None;
+    let mut named_params: Vec<(crate::process::ParamRef, f32)> = Vec::new();
     let mut idx = 0;
     while idx < args.len() {
         let key = match &args[idx] {
@@ -3426,6 +3444,7 @@ pub(in crate::lisp_host) fn build_seq_emit_event(
                     _ => Some(parse_timebase_arg(args, idx)?),
                 };
             }
+            "params" => named_params = parse_seq_emit_named_params(value)?,
             _ => return Err(format!("seq-emit unknown key :{key}")),
         }
         idx += 1;
@@ -3455,7 +3474,40 @@ pub(in crate::lisp_host) fn build_seq_emit_event(
         chord_step_transpose: 0.0,
         effect_params: Vec::new(),
         instrument_params: Vec::new(),
+        named_params,
     })
+}
+
+/// `seq-emit :params`: a flat `label value …` list. Each label is parsed
+/// once here (an unparseable one is a tick error); whether it exists on the
+/// destination is decided at landing, where unknown names drop silently
+/// (docs/jaki-plock-spec.md §3). `nil` is an empty list.
+fn parse_seq_emit_named_params(
+    value: &EValue,
+) -> Result<Vec<(crate::process::ParamRef, f32)>, String> {
+    let items = match value {
+        EValue::Nil => return Ok(Vec::new()),
+        EValue::List(items) => items,
+        _ => return Err("seq-emit :params expects a list of label/value pairs".to_string()),
+    };
+    if items.len() % 2 != 0 {
+        return Err("seq-emit :params expects label/value pairs (odd-length list)".to_string());
+    }
+    let mut params = Vec::with_capacity(items.len() / 2);
+    for pair in items.chunks(2) {
+        let label = match &*pair[0].borrow() {
+            EValue::String(label) | EValue::Symbol(label) | EValue::Keyword(label) => label.clone(),
+            _ => return Err("seq-emit :params label must be a string".to_string()),
+        };
+        let param_ref = crate::process::ParamRef::parse(&label)
+            .map_err(|error| format!("seq-emit :params {error}"))?;
+        let number = match &*pair[1].borrow() {
+            EValue::Number(n) if n.is_finite() => *n as f32,
+            _ => return Err(format!("seq-emit :params value for \"{label}\" must be a number")),
+        };
+        params.push((param_ref, number));
+    }
+    Ok(params)
 }
 
 pub(in crate::lisp_host) fn parse_timebase_arg(args: &[EValue], idx: usize) -> Result<Timebase, String> {

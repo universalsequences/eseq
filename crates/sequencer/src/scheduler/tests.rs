@@ -638,6 +638,7 @@
                 chord_step_transpose: 0.0,
                 effect_params: Vec::new(),
                 instrument_params: Vec::new(),
+                named_params: Vec::new(),
             },
         }
     }
@@ -665,6 +666,7 @@
                 chord_step_transpose: 0.0,
                 effect_params: Vec::new(),
                 instrument_params: Vec::new(),
+                named_params: Vec::new(),
             },
         }
     }
@@ -1708,6 +1710,7 @@
                 chord_step_transpose: 0.0,
                 effect_params: Vec::new(),
                 instrument_params: Vec::new(),
+                named_params: Vec::new(),
             },
             None,
             false,
@@ -1800,6 +1803,7 @@
                 chord_step_transpose: 0.0,
                 effect_params: Vec::new(),
                 instrument_params: Vec::new(),
+                named_params: Vec::new(),
             },
             None,
             false,
@@ -2466,6 +2470,7 @@
                 chord_step_transpose: 0.0,
                 effect_params: Vec::new(),
                 instrument_params: Vec::new(),
+                named_params: Vec::new(),
             },
             None,
             false,
@@ -2534,6 +2539,7 @@
                 chord_step_transpose: 0.0,
                 effect_params: Vec::new(),
                 instrument_params: Vec::new(),
+                named_params: Vec::new(),
             },
             None,
             false,
@@ -2727,6 +2733,54 @@
             .collect()
     }
 
+    /// docs/jaki-kind-spec.md §5: each further pattern in the document's
+    /// `patterns` plays as its own voice beside the first — the two together
+    /// sound exactly what each plays alone.
+    #[test]
+    fn jaki_instance_patterns_play_as_independent_voices() {
+        const FIRST_ROWS: &str = "(list (dict :route 0 :mods (list)))";
+        const FIRST_FIGURES: &str = "(list (list :dot :dot :dot :dot))";
+        const SECOND_ROWS: &str = r#"(list (dict :route -1 :mods (list))
+                                           (dict :route 2 :mods (list "right")))"#;
+        const SECOND_FIGURES: &str = "(list (list :dot :dash))";
+        let triggers = |observed: Vec<ObservedTrigger>| -> Vec<(usize, u64)> {
+            observed
+                .into_iter()
+                .map(|trigger| (trigger.track, trigger.sample_time))
+                .collect()
+        };
+        let both = triggers(jaki_instance_observed(
+            None,
+            FIRST_ROWS,
+            FIRST_FIGURES,
+            96_000,
+            |state| {
+                let mut values = Runtime::new();
+                let patterns = values
+                    .eval_str(&format!(
+                        "(list (dict :figures {SECOND_FIGURES} :rows {SECOND_ROWS} :row-count 4))"
+                    ))
+                    .expect("literal")
+                    .expect("a value");
+                state
+                    .write_current_scene_slot(
+                        lisp_host::instance_document_slot(5, "patterns"),
+                        crate::process::ProcessLiteral::from_value(&patterns).expect("portable"),
+                    )
+                    .expect("patterns");
+            },
+        ));
+        let first = jaki_instance_triggers_with(None, FIRST_ROWS, FIRST_FIGURES, 96_000);
+        let second = jaki_instance_triggers_with(None, SECOND_ROWS, SECOND_FIGURES, 96_000);
+        assert!(!first.is_empty() && !second.is_empty());
+        assert!(second.iter().all(|(track, _)| *track == 2));
+        let mut expected: Vec<(usize, u64)> = first.into_iter().chain(second).collect();
+        expected.sort_by_key(|(track, time)| (*time, *track));
+        let mut both = both;
+        both.sort_by_key(|(track, time)| (*time, *track));
+        assert_eq!(both, expected);
+    }
+
     fn jaki_instance_observed(
         owner_rack: Option<(u64, Vec<usize>)>,
         rows: &'static str,
@@ -2787,7 +2841,8 @@
                     id: 0,
                     name: "jaki".to_string(),
                     resolution: crate::sequencer::Timebase::Sixteenth as u8,
-                    tick_source: "(alez.jaki.doc/tick self.figures self.rows self.row-count self.mode)"
+                    tick_source: "(alez.jaki.doc/tick-patterns self.figures self.rows \
+                                  self.row-count self.mode self.patterns)"
                         .to_string(),
                     requires: vec!["alez.jaki.doc".to_string()],
                     graph: None,
@@ -2798,6 +2853,7 @@
                     ("rows".to_string(), literal("(list)")),
                     ("row-count".to_string(), literal("8")),
                     ("mode".to_string(), literal(":loop")),
+                    ("patterns".to_string(), literal("(list)")),
                 ],
                 state_fields: Vec::new(),
                 has_view: true,
@@ -3849,6 +3905,209 @@
             assert_eq!(due[1].engage_sample, 27_000);
             assert_eq!(due[1].release_sample, 39_000);
         });
+    }
+
+    /// docs/jaki-plock-spec.md §3 fixture: track 0 is a sampler (speed
+    /// p-locked to 0.5 on every step) through a Filter in fx slot 1 (mode
+    /// p-locked to 1). A `:4` generator emits, each beat, one hit carrying
+    /// `params` and a plain hit a sixteenth later. Returns every trigger as
+    /// (sample, speed, filter mode, pan, rack macro 1).
+    fn named_param_generator_hits(params: &str) -> Vec<(u64, f32, f32, f32, Option<f32>)> {
+        named_param_generator_hits_on(params, None)
+    }
+
+    /// [`named_param_generator_hits`] with the generator optionally owned by
+    /// a rack whose only member is track 1: the sampler + Filter setup then
+    /// lives on track 1, and track 0 (what `:track 0` would mean unmapped)
+    /// has neither.
+    fn named_param_generator_hits_on(
+        params: &str,
+        rack_member: Option<usize>,
+    ) -> Vec<(u64, f32, f32, f32, Option<f32>)> {
+        let params = params.to_string();
+        run_with_scheduler_stack(move || {
+            let state = Arc::new(SequencerState::new(
+                2,
+                (0..2).map(|_| default_empty_effect_chain()).collect(),
+            ));
+            let dest = rack_member.unwrap_or(0);
+            state.pattern.track_params[dest].set_num_steps(16);
+            let sampler_desc = EffectDescriptor::builtin_sampler();
+            let filter_desc = EffectDescriptor::builtin_filter();
+            let speed_idx = sampler_desc
+                .params
+                .iter()
+                .position(|param| param.name == "speed")
+                .expect("sampler speed param");
+            let mode_idx = filter_desc
+                .params
+                .iter()
+                .position(|param| param.name == "mode")
+                .expect("filter mode param");
+            state.pattern.instrument_slots[dest].apply_descriptor(&sampler_desc, 12);
+            state.pattern.effect_chains[dest][0].apply_descriptor(&filter_desc, 42);
+            for step in 0..16 {
+                state.pattern.instrument_slots[dest].set_plock(step, speed_idx, 0.5);
+                state.pattern.effect_chains[dest][0].set_plock(step, mode_idx, 1.0);
+            }
+            let mut effect_descriptors = vec![EffectDescriptor::default_full_chain(); 2];
+            effect_descriptors[dest][0] = filter_desc;
+            let instrument_descriptors = vec![sampler_desc; 2];
+            state.set_scratch_runtime_descriptors(
+                effect_descriptors.clone(),
+                instrument_descriptors.clone(),
+            );
+            if let Some(member) = rack_member {
+                state.set_rack_memberships(vec![crate::graph::RackMembership {
+                    group_id: 77,
+                    members: vec![member],
+                }]);
+            }
+            let mut scratch = lisp_host::ScratchControlRuntime::new(
+                Arc::clone(&state),
+                effect_descriptors,
+                instrument_descriptors,
+                0,
+                0,
+            );
+            scratch
+                .eval(&format!(
+                    r#"(__register-sequencer "plocker"
+                         :resolution :4
+                         :tick (lambda ()
+                           (do
+                             (seq-emit :track 0 :at :now :params (list {params}))
+                             (seq-emit :track 0 :at 0.25))))"#
+                ))
+                .expect("register plock generator");
+
+            state.transport.playing.store(true, Ordering::Relaxed);
+            let mut scheduler = SchedulerLookaheadState::new(48_000);
+            let defs = scratch.sequencer_defs();
+            scheduler.generator_runtime.sync_definitions(&defs, 0.0);
+            if rack_member.is_some() {
+                scheduler.generator_owner_racks.insert(defs[0].id, 77);
+            }
+            let mut scratch_runtime = Some(scratch);
+            let snapshot = state.publish_scheduler_snapshot();
+            let queue = ScheduledEventQueue::<64>::new();
+            let live_midi_fx_tracks: [LiveMidiFxTrackState; MAX_TRACKS] =
+                std::array::from_fn(|_| LiveMidiFxTrackState::default());
+            schedule_playing_lookahead(
+                &mut scheduler,
+                &state,
+                &snapshot,
+                &queue,
+                &mut scratch_runtime,
+                &live_midi_fx_tracks,
+                snapshot.transport.pattern_epoch,
+                0,
+                48_000,
+                48_000,
+                6_000,
+                24_000.0,
+                0,
+                false,
+                false,
+            );
+            let errors: Vec<_> = state
+                .drain_generator_tick_errors()
+                .into_iter()
+                .map(|notice| notice.error)
+                .collect();
+            assert!(errors.is_empty(), "{errors:?}");
+
+            let mut hits = Vec::new();
+            while let Some(event) = queue.pop_owned() {
+                if let ScheduledEventKind::NetworkTrigger {
+                    track,
+                    resolved,
+                    effect_params,
+                    sampler_params,
+                    rack_macro_values,
+                    ..
+                } = event.kind
+                {
+                    assert_eq!(track, dest);
+                    let mode = effect_params
+                        .iter()
+                        .find(|param| {
+                            param.logical_id == 42
+                                && param.idx == crate::effects::filter::FILTER_PARAM_MODE as u64
+                        })
+                        .map(|param| param.value)
+                        .expect("filter mode is stamped on every hit");
+                    hits.push((
+                        event.sample_time,
+                        sampler_params.playback_speed,
+                        mode,
+                        resolved.pan,
+                        rack_macro_values[0],
+                    ));
+                }
+            }
+            hits.sort_by(|a, b| a.0.cmp(&b.0));
+            hits
+        })
+    }
+
+    #[test]
+    fn generator_named_params_beat_the_step_plock_for_that_hit_only() {
+        let hits = named_param_generator_hits(
+            r#""instrument:speed" 2 "fx1:filter:mode" 7 "step-param:pan" -0.5"#,
+        );
+        assert!(hits.len() >= 2, "{hits:?}");
+        for (sample, speed, mode, pan, _) in &hits {
+            if sample % 24_000 == 0 {
+                // The hit carrying :params: named values win over the step's
+                // stored p-locks; mode 7 clamps to the Filter's 0..3.
+                assert!((speed - 2.0).abs() < 1e-6, "{hits:?}");
+                assert!((mode - 3.0).abs() < 1e-6, "{hits:?}");
+                assert!((pan + 0.5).abs() < 1e-6, "{hits:?}");
+            } else {
+                // The next hit plays the step's own p-locks: nothing leaks.
+                assert_eq!(sample % 24_000, 6_000, "{hits:?}");
+                assert!((speed - 0.5).abs() < 1e-6, "{hits:?}");
+                assert!((mode - 1.0).abs() < 1e-6, "{hits:?}");
+                assert_eq!(*pan, 0.0, "{hits:?}");
+            }
+        }
+        assert!(hits.iter().any(|hit| hit.0 % 24_000 == 0), "{hits:?}");
+        assert!(hits.iter().any(|hit| hit.0 % 24_000 != 0), "{hits:?}");
+    }
+
+    #[test]
+    fn generator_named_params_unknown_on_destination_drop_only_that_param() {
+        // No `nosuch` instrument param, slot 2 is not a Filter, and a plain
+        // sampler track has no rack macros: each drops silently, the note
+        // still plays, and the slot-free spelling finds the Filter in slot 1.
+        let hits = named_param_generator_hits(
+            r#""instrument:nosuch" 1 "fx2:filter:mode" 2 "rack-macro:macro_1" 0.5
+               "effect-param:Filter:mode" 2 "send:A" 0.3"#,
+        );
+        let named: Vec<_> = hits.iter().filter(|hit| hit.0 % 24_000 == 0).collect();
+        assert!(!named.is_empty(), "{hits:?}");
+        for (_, speed, mode, _, macro_1) in named {
+            assert!((speed - 0.5).abs() < 1e-6, "{hits:?}");
+            assert!((mode - 2.0).abs() < 1e-6, "{hits:?}");
+            assert_eq!(*macro_1, None, "{hits:?}");
+        }
+    }
+
+    #[test]
+    fn rack_owned_generator_named_params_resolve_against_the_member_track() {
+        // `:track 0` is rack member 0 = track 1, the only track with the
+        // Filter; named params resolve there, after the member mapping.
+        let hits = named_param_generator_hits_on(
+            r#""instrument:speed" 2 "fx1:filter:mode" 3"#,
+            Some(1),
+        );
+        let named: Vec<_> = hits.iter().filter(|hit| hit.0 % 24_000 == 0).collect();
+        assert!(!named.is_empty(), "{hits:?}");
+        for (_, speed, mode, _, _) in named {
+            assert!((speed - 2.0).abs() < 1e-6, "{hits:?}");
+            assert!((mode - 3.0).abs() < 1e-6, "{hits:?}");
+        }
     }
 
     /// takes spec 10 × defscene: a scene-latched manual launch suspends the

@@ -10,6 +10,9 @@
 //! (forms (word left right) (form trunc (num :min 1 :max 32 :default 3)) …)
 //! (fixed (num :min 0 :max 1))                   ; never a list
 //! (form seq (word :hit :cycle) (rest (num)))   ; last arg repeats: (seq :hit 0 3 7)
+//! (form plock (fixed (dyn param)) (num))         ; a host-resolved string atom
+//! (form plock (fixed (dyn param)) (dyn-num param (num :min -1e5 :max 1e5)))
+//!                                   ; rails from the named word, else fallback
 //! ```
 //!
 //! Every slot except `(fixed …)` also accepts a list of itself, nested freely:
@@ -45,6 +48,18 @@ pub enum Schema {
     /// A form's last arg only: one or more values of the inner schema, so
     /// the form takes any number of trailing args (`+` inside its parens).
     Rest(Box<Schema>),
+    /// A string atom whose words come from the host source of this name
+    /// (`sexp_slot::dyn_words`). Any string checks: whether the source
+    /// offers it is shown, never enforced, so a name survives a reroute.
+    Dyn(String),
+    /// A number whose rails come from the `(dyn SOURCE)` word of the nearest
+    /// enclosing form that has one (`(plock "instrument:cutoff" (seq :hit 1
+    /// 2))`: every number of the value takes the cutoff's range), resolved by
+    /// the widget through `DynItem::num`. `fallback` is used when the word is
+    /// unknown, the context is `nil`, or no lookup is at hand. `Schema::check`
+    /// only type-checks it: rails (resolved or fallback) clamp and snap where
+    /// the user edits, so a stored value outside them is kept.
+    DynNum { source: String, fallback: NumSpec, default: f64 },
 }
 
 /// A number slot's rails, for widgets that format and scrub it.
@@ -167,6 +182,27 @@ impl Schema {
                 [inner] => Ok(Schema::Rest(Box::new(Schema::parse(inner)?))),
                 _ => Err("rest wraps exactly one schema".to_string()),
             },
+            "dyn-num" => match rest {
+                [source, fallback] => {
+                    let source =
+                        word_text(source).ok_or_else(|| "dyn-num takes a source name".to_string())?;
+                    match Schema::parse(fallback)? {
+                        Schema::Num { min, max, step, decimals, default } => Ok(Schema::DynNum {
+                            source,
+                            fallback: NumSpec { min, max, step, decimals },
+                            default,
+                        }),
+                        _ => Err("dyn-num's fallback must be a (num …)".to_string()),
+                    }
+                }
+                _ => Err("dyn-num takes a source name and a fallback (num …)".to_string()),
+            },
+            "dyn" => match rest {
+                [source] => Ok(Schema::Dyn(
+                    word_text(source).ok_or_else(|| "dyn takes a source name".to_string())?,
+                )),
+                _ => Err("dyn takes exactly one source name".to_string()),
+            },
             other => Err(format!("unknown schema kind '{other}'")),
         }
     }
@@ -174,8 +210,9 @@ impl Schema {
     /// The value a fresh slot of this schema holds.
     pub fn default_value(&self) -> Value {
         match self {
-            Schema::Num { default, .. } => Value::Number(*default),
+            Schema::Num { default, .. } | Schema::DynNum { default, .. } => Value::Number(*default),
             Schema::Word(words) => Value::String(words[0].clone()),
+            Schema::Dyn(_) => Value::String(String::new()),
             Schema::Or(alternatives) => alternatives
                 .first()
                 .map(Schema::default_value)
@@ -261,6 +298,13 @@ impl Schema {
                 })?;
                 Ok(Value::Number(snap(number, *min, *max, *step)))
             }
+            // Its rails depend on a sibling word and the host's context,
+            // which a bare check has neither of: the widget clamps and snaps
+            // what the user edits (`Slot::snap_dyn_nums`), and whatever is
+            // stored stays as is.
+            Schema::DynNum { .. } => number(value)
+                .map(Value::Number)
+                .ok_or_else(|| format!("expected a number, got {}", format_lisp_source(value))),
             Schema::Word(words) => {
                 let word = word_text(value).ok_or_else(|| {
                     format!("expected one of {}", words.join(" "))
@@ -271,6 +315,9 @@ impl Schema {
                     Err(format!("'{word}' is not one of {}", words.join(" ")))
                 }
             }
+            Schema::Dyn(_) => word_text(value)
+                .map(Value::String)
+                .ok_or_else(|| format!("expected a name, got {}", format_lisp_source(value))),
             Schema::Or(alternatives) => {
                 let mut reasons = Vec::new();
                 for alternative in alternatives {
@@ -297,7 +344,7 @@ impl Schema {
 
     fn collect_choices(&self, out: &mut Vec<String>) {
         match self {
-            Schema::Num { .. } => {}
+            Schema::Num { .. } | Schema::Dyn(_) | Schema::DynNum { .. } => {}
             Schema::Word(words) => {
                 for word in words {
                     if !out.contains(word) {
@@ -346,6 +393,21 @@ impl Schema {
     /// The number rails of a slot that holds a number (directly, fixed, or
     /// as the first number alternative of an `or`).
     pub fn num_spec(&self) -> Option<NumSpec> {
+        self.num_rails().map(|(spec, _)| spec)
+    }
+
+    /// `num_spec` plus, for a `(dyn-num SOURCE …)`, its source: the spec is
+    /// then the fallback the source's word may replace.
+    pub fn num_rails(&self) -> Option<(NumSpec, Option<&str>)> {
+        match self {
+            Schema::DynNum { source, fallback, .. } => Some((*fallback, Some(source.as_str()))),
+            Schema::Fixed(inner) | Schema::Rest(inner) => inner.num_rails(),
+            Schema::Or(alternatives) => alternatives.iter().find_map(Schema::num_rails),
+            other => other.num_spec_static().map(|spec| (spec, None)),
+        }
+    }
+
+    fn num_spec_static(&self) -> Option<NumSpec> {
         match self {
             Schema::Num { min, max, step, decimals, .. } => Some(NumSpec {
                 min: *min,
@@ -353,8 +415,6 @@ impl Schema {
                 step: *step,
                 decimals: *decimals,
             }),
-            Schema::Fixed(inner) | Schema::Rest(inner) => inner.num_spec(),
-            Schema::Or(alternatives) => alternatives.iter().find_map(Schema::num_spec),
             _ => None,
         }
     }
@@ -411,9 +471,40 @@ impl Schema {
     /// before the cursor. Returns the words the schema allows at the cursor
     /// that start with the partial word being typed, in schema order.
     pub fn completions(&self, text: &str) -> Vec<String> {
+        let (words, _, partial) = self.completion_context(text);
+        words.into_iter().filter(|word| word.starts_with(partial.as_str())).collect()
+    }
+
+    /// The `(dyn …)` sources this slot draws words from (itself, or inside
+    /// or/forms/fixed/rest), in schema order.
+    pub fn dyn_sources(&self) -> Vec<&str> {
+        match self {
+            Schema::Dyn(source) => vec![source.as_str()],
+            Schema::Or(alternatives) | Schema::Forms(alternatives) => {
+                alternatives.iter().flat_map(Schema::dyn_sources).fold(Vec::new(), |mut out, source| {
+                    if !out.contains(&source) {
+                        out.push(source);
+                    }
+                    out
+                })
+            }
+            Schema::Fixed(inner) | Schema::Rest(inner) => inner.dyn_sources(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// What the cursor at the end of `text` expects: the static words (heads
+    /// first after a `(`), the `dyn` sources whose words also go there, and
+    /// the partial word being typed.
+    pub fn completion_context(&self, text: &str) -> (Vec<String>, Vec<String>, String) {
         let (context, partial) = cursor_context(self, text);
         let Some(context) = context else {
-            return Vec::new();
+            return (Vec::new(), Vec::new(), partial);
+        };
+        let sources = match context {
+            Position::Value(schema) | Position::Head(schema) => {
+                schema.dyn_sources().into_iter().map(str::to_string).collect()
+            }
         };
         let words = match context {
             Position::Value(schema) => schema.choices(),
@@ -429,7 +520,7 @@ impl Schema {
                     out
                 }),
         };
-        words.into_iter().filter(|word| word.starts_with(partial.as_str())).collect()
+        (words, sources, partial)
     }
 }
 
@@ -756,6 +847,45 @@ mod tests {
             Some("(\"every\" 4 \"rev\")".into())
         );
         assert_eq!(row.form_default("left"), None);
+    }
+
+    #[test]
+    fn dyn_atoms_parse_in_forms_and_accept_any_name() {
+        let plock = schema("(form plock (fixed (dyn param)) (num :min -10 :max 10))");
+        assert_eq!(
+            plock,
+            Schema::Form {
+                head: "plock".into(),
+                args: vec![
+                    Schema::Fixed(Box::new(Schema::Dyn("param".into()))),
+                    Schema::Num { min: -10.0, max: 10.0, step: 0.0, decimals: 2, default: -10.0 },
+                ],
+            }
+        );
+        // Schemas built in Lisp arrive as lists of strings.
+        let mut runtime = crate::Runtime::new();
+        let from_lisp = runtime
+            .eval_str("(list \"form\" \"plock\" (list \"fixed\" (list \"dyn\" \"param\")) (list \"num\" :min -10 :max 10))")
+            .unwrap()
+            .unwrap();
+        assert_eq!(Schema::parse(&from_lisp), Ok(plock.clone()));
+        // Validity against the source is shown, never enforced.
+        assert_eq!(
+            checked(&plock, "(plock instrument:cutoff 3)"),
+            Ok("(\"plock\" \"instrument:cutoff\" 3)".into())
+        );
+        assert_eq!(checked(&plock, "(plock \"not a param\" 3)"), Ok("(\"plock\" \"not a param\" 3)".into()));
+        assert!(checked(&plock, "(plock 4 3)").unwrap_err().contains("expected a name"));
+        assert!(checked(&plock, "(plock (a b) 3)").unwrap_err().contains("cannot cycle"));
+        assert_eq!(format_lisp_source(&plock.default_value()), "(\"plock\" \"\" -10)");
+        // Statically it offers no words; the cursor context names the source.
+        assert!(plock.completions("(plock ").is_empty());
+        let (words, sources, partial) = plock.completion_context("(plock cu");
+        assert!(words.is_empty());
+        assert_eq!(sources, vec!["param"]);
+        assert_eq!(partial, "cu");
+        assert!(Schema::parse(&read_value("(dyn)").unwrap()).is_err());
+        assert!(Schema::parse(&read_value("(dyn a b)").unwrap()).is_err());
     }
 
     #[test]

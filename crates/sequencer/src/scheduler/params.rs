@@ -186,6 +186,148 @@ pub(super) fn upsert_effect_params(
     params.sort_by_key(|param| (param.logical_id, param.idx));
 }
 
+/// A named value clamped to its descriptor's range (params store and
+/// schedule raw, knob-unit values, not normalized ones).
+fn named_param_value(desc: &crate::effects::ParamDescriptor, value: f32) -> f32 {
+    let (lo, hi) = if desc.min <= desc.max {
+        (desc.min, desc.max)
+    } else {
+        (desc.max, desc.min)
+    };
+    value.clamp(lo, hi)
+}
+
+/// Fold `seq-emit :params` (docs/jaki-plock-spec.md §3) into `event` after
+/// its landing stamp, resolving each label BY NAME against `event.track`, so
+/// a per-hit value beats the step's base, its stored p-lock and the print
+/// latch. Values are in the param's own units, clamped to its range. A name
+/// the destination does not have drops just that param; the note plays.
+///
+/// Applied: instrument, effect (slotted or first-by-name), MIDI FX (via
+/// `midi_fx_params`, needs `midi_fx`), step params, and rack macros (on a
+/// slot-based Instrument Rack track). Skipped: `send:*` (spec §7) and
+/// `rack<N>:…` slot params, which no per-event seam carries yet (process
+/// writes skip them too).
+pub(super) fn apply_named_params(
+    snapshot: &SequencerSnapshot,
+    midi_fx: Option<&lisp_host::MidiFxDescriptorSource>,
+    named: &[(crate::process::ParamRef, f32)],
+    event: &mut StepEvent,
+    midi_fx_params: &mut Vec<ProcessMidiFxParamOverride>,
+) {
+    use crate::process::ParamRef;
+    let Some(track) = snapshot.tracks.get(event.track) else {
+        return;
+    };
+    for (param_ref, value) in named {
+        let value = *value;
+        if !value.is_finite() {
+            continue;
+        }
+        match param_ref {
+            ParamRef::Instrument { param } => {
+                let desc = &track.instrument_descriptor;
+                let Some(param_idx) = process_param_index_by_tag_or_name(desc, param) else {
+                    continue;
+                };
+                let value = named_param_value(&desc.params[param_idx], value);
+                if let Some(scheduled) =
+                    process_scheduled_instrument_param(&track.instrument_slot, param_idx, value)
+                {
+                    upsert_instrument_params(&mut event.instrument_params, [scheduled]);
+                }
+            }
+            ParamRef::Effect {
+                slot,
+                effect,
+                param,
+            } => {
+                let slot_idx = match slot {
+                    Some(slot) => track
+                        .effect_descriptors
+                        .get(*slot)
+                        .is_some_and(|desc| desc.name.eq_ignore_ascii_case(effect))
+                        .then_some(*slot),
+                    None => track
+                        .effect_descriptors
+                        .iter()
+                        .position(|desc| desc.name.eq_ignore_ascii_case(effect)),
+                };
+                let Some(slot_idx) = slot_idx else {
+                    continue;
+                };
+                let desc = &track.effect_descriptors[slot_idx];
+                let (Some(param_idx), Some(slot_snapshot)) = (
+                    process_param_index_by_tag_or_name(desc, param),
+                    track.effect_slots.get(slot_idx),
+                ) else {
+                    continue;
+                };
+                let value = named_param_value(&desc.params[param_idx], value);
+                if let Some(scheduled) = process_scheduled_effect_param(slot_snapshot, param_idx, value)
+                {
+                    upsert_effect_params(&mut event.effect_params, [scheduled]);
+                }
+            }
+            ParamRef::MidiFx { slot, fx, param } => {
+                let chain = &track.params.midi_fx_chain;
+                let slot_idx = match slot {
+                    Some(slot) => chain
+                        .get(*slot)
+                        .is_some_and(|name| name.eq_ignore_ascii_case(fx))
+                        .then_some(*slot),
+                    None => chain.iter().position(|name| name.eq_ignore_ascii_case(fx)),
+                };
+                let (Some(slot_idx), Some(source)) = (slot_idx, midi_fx) else {
+                    continue;
+                };
+                let Some(desc) = source.descriptor(&chain[slot_idx]) else {
+                    continue;
+                };
+                let Some(param_idx) = process_param_index_by_tag_or_name(&desc, param) else {
+                    continue;
+                };
+                let param_desc = &desc.params[param_idx];
+                let value = named_param_value(param_desc, value);
+                match midi_fx_params.iter_mut().find(|existing| {
+                    existing.slot == slot_idx && existing.param_idx == param_idx
+                }) {
+                    Some(existing) => existing.value = value,
+                    None => midi_fx_params.push(ProcessMidiFxParamOverride {
+                        slot: slot_idx,
+                        fx: chain[slot_idx].clone(),
+                        param: param_desc.name.clone(),
+                        param_idx,
+                        value,
+                    }),
+                }
+            }
+            ParamRef::Step { param } => {
+                if matches!(param, StepParam::Sync | StepParam::Delay) {
+                    continue;
+                }
+                set_resolved_step_param(&mut event.resolved, *param, value);
+            }
+            ParamRef::RackMacro { macro_idx } => {
+                let has_macro = track
+                    .rack_track
+                    .as_ref()
+                    .is_some_and(|rack| rack.macros.get(*macro_idx).is_some());
+                if has_macro {
+                    if let Some(slot) = event.rack_macro_values.get_mut(*macro_idx) {
+                        *slot = Some(value.clamp(0.0, 1.0));
+                    }
+                }
+            }
+            // TODO(eseq-jplk): rack slot params have no per-event seam (the
+            // process-write path skips them as well); bus sends are a v1
+            // non-goal (spec §7).
+            ParamRef::RackSlot { .. }
+            | ParamRef::RackSlotInstrument { .. }
+            | ParamRef::Send { .. } => {}
+        }
+    }
+}
 
 pub(super) fn slot_param_identity(node_id: u32, modulator_node_id: u32, raw_idx: u32) -> Option<ParamNodeId> {
     if raw_idx == u32::MAX {

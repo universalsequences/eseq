@@ -179,6 +179,9 @@ pub(super) fn merge_generator_emission_accents(
         {
             existing.event.resolved.velocity =
                 (existing.event.resolved.velocity + emission.event.resolved.velocity).min(1.0);
+            // Per-hit `:params` survive the merge; applied in order, so
+            // the later emission wins a shared name.
+            existing.event.named_params.extend(emission.event.named_params);
             continue;
         }
         merged.push(emission);

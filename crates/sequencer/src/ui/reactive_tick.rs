@@ -194,6 +194,11 @@ pub(crate) fn sync_reactive_tick(
     ui_loop_stats: &mut UiLoopStats,
 ) {
     host_commands::export::poll(editor);
+    // A published snapshot that changed a track's parameter set (instrument
+    // swap, FX / MIDI FX chain, rack macros) re-judges open `plock` names.
+    if super::param_words::refresh_param_word_source() {
+        editor.mark_needs_redraw();
+    }
     poll_pending_compile_status(
         &mut app,
         &mut editor,

@@ -6,6 +6,12 @@
 ;;                                                   leading count repeats it
 ;;   rows      ((dict :route 0 :mods (("trunc" 3) "right")) …)
 ;;   row-count 8                                      rows that show and play
+;;   patterns  ((dict :figures … :rows … :row-count 4) …)
+;;                                                   patterns after the first
+;;
+;; The first pattern is figures/rows/row-count (documents saved before
+;; patterns hold only it); each further pattern is its own figure strip and
+;; rows, played as one more jaki voice — its own cycle, beside the others.
 ;;
 ;; A row's :mods is the value of its sexp-slot (docs/sexp-slot-spec.md): a
 ;; list of items, each a word "left", a form ("trunc" 3) / ("every" 2 "rev"),
@@ -19,6 +25,10 @@
 ;;
 ;;   (fig (. . -)) (fig (. -)) -> 0 (trunc 3) right -> 1 accent
 ;;
+;; With more than one pattern sounding, each is a voice line:
+;;
+;;   ((fig (. . -)) -> 0 left) ((fig (. -)) -> 2 left)
+;;
 ;; so every evaluator rule, hand model and memo is the language's own. This
 ;; module is what the scheduler imports for the tick (`:requires`); it holds
 ;; no widget code. The view lives in alez.jaki.kind.
@@ -31,7 +41,8 @@
         row-schema figure-label figure-times figure-events with-times
         figure-options figure-option-labels zero-mods
         num-mods mod-arg-spec every-words split-targets
-        figures-body modes mode-labels mode-of)
+        figures-body modes mode-labels mode-of
+        pattern-list pattern-sounds? patterns-body new-pattern tick-patterns)
 
 ;; ── figures ─────────────────────────────────────────────────────────────────
 
@@ -107,6 +118,10 @@
     "maxvel"    (list 0 1 0.01 2 1.0)
     "every" (list 1 16 1 0 4)
     "every-fig" (list 1 16 1 0 2)
+    ;; a plock value is in its parameter's own units: the editor takes its
+    ;; rails from the named param (leaf-schema's dyn-num); this wide rail is
+    ;; the fallback for an unknown name or an unrouted row
+    "plock" (list -100000 100000 0.01 2 0)
     _ nil))
 
 ;; ── the row's sexp-slot schema (docs/sexp-slot-spec.md §4) ─────────────────
@@ -131,24 +146,35 @@
 ;; §7.2). The clock word leads; `+` inside adds a value. A plain list of
 ;; numbers still means one per cycle.
 (def seq-clocks (list ":hit" ":fig" ":cycle" ":span"))
-(def per-hit-mods (list "vel" "note" "vel*" "vel+" "note+" "gate"))
+(def per-hit-mods (list "vel" "note" "vel*" "vel+" "note+" "gate" "plock"))
 ;; A seq's values may be seqs themselves — (seq :hit 2 (seq :cycle 5 9) 3).
 ;; A schema is plain data and cannot refer to itself, so the nesting is
 ;; spelled out seq-depth levels deep (a plain number list nests freely).
 (def seq-depth 3)
+(def leaf-schema (op)
+  ;; a plock number scrubs in its sibling param's range (sexp-slot-spec §4.1)
+  (if (= op "plock")
+    (list "dyn-num" "param" (num-schema op))
+    (num-schema op)))
 (def seq-value-schema (op depth)
   (if (<= depth 0)
-    (num-schema op)
-    (list "or" (num-schema op)
+    (leaf-schema op)
+    (list "or" (leaf-schema op)
           (list "form" "seq" (cons "word" seq-clocks)
                 (list "rest" (seq-value-schema op (- depth 1)))))))
 
 (def value-schema (op)
   (if (reduce (lambda (a x) (or a (= x op))) false per-hit-mods)
     (seq-value-schema op seq-depth)
-    (num-schema op)))
+    (leaf-schema op)))
 
 (def num-forms (map (lambda (op) (list "form" op (value-schema op))) num-mods))
+
+
+;; (plock NAME V) — a per-hit parameter lock (docs/jaki-plock-spec.md §5.3).
+;; NAME is a string completed by the host's `param` source for the row's
+;; destination track (the slot's :dyn-context); V takes seqs like note's.
+(def plock-form (list "form" "plock" (list "fixed" (list "dyn" "param")) (value-schema "plock")))
 
 (def gated-word (append (list "or" (cons "word" every-words)) num-forms (list quant-form)))
 
@@ -178,13 +204,14 @@
                 (cons "word" (append zero-mods (list "rest"))))
           (filter (lambda (f) (not (= (nth f 1) "vel+"))) num-forms)
           (list quant-form
+                plock-form
                 (list "form" "every" (num-schema "every") gated-word))))
 
 (def row-schema
   (append
     (list "forms" (cons "word" zero-mods))
     num-forms
-    (list quant-form)
+    (list quant-form plock-form)
     (list (list "form" "on" sel-schema on-body)
           (list "form" "every" (num-schema "every") gated-word)
           (list "form" "every-fig" (num-schema "every-fig") gated-word)
@@ -211,10 +238,16 @@
 ;; as its keyword), numbers stay numbers, lists recurse. So "left" is
 ;; `left`, ("fast" (1 2)) is `(fast (1 2))`, ("every" 2 ("rev" "swap")) is
 ;; `(every 2 (rev swap))` and ("left" "left" "right") is a word cycle.
+;; ("plock" "instrument:cutoff" v) keeps its NAME a string: it is a param
+;; label, not a word (docs/jaki-plock-spec.md §4).
 (def route-datum (x)
   (if (string? x)
     (read-string x)
-    (if (number? x) x (map route-datum x))))
+    (if (number? x)
+      x
+      (if (= (first x) "plock")
+        (cons 'plock (cons (nth x 1) (map route-datum (rest (rest x)))))
+        (map route-datum x)))))
 
 (def mod-form (m) (route-datum (mod-item m)))
 
@@ -253,6 +286,29 @@
         (figures-body figures)
         (reduce (lambda (acc row) (append acc (row-segment row))) (list) live)))))
 
+;; ── patterns ────────────────────────────────────────────────────────────────
+
+(def new-pattern (dict :figures (list) :rows (list) :row-count 4))
+
+;; Every pattern, the first from the document's own fields.
+(def pattern-list (figures rows row-count patterns)
+  (cons (dict :figures figures :rows rows :row-count row-count)
+        (if (= patterns nil) (list) patterns)))
+
+(def pattern-body (pat)
+  (body (get pat :figures) (get pat :rows) (get pat :row-count)))
+
+(def pattern-sounds? (pat) (not (= (pattern-body pat) nil)))
+
+;; The patterns that can sound, as one jaki body: one pattern keeps the
+;; single-voice shape, several are voice lines, in pattern order — so the
+;; routes (and their marks) number through the patterns in order.
+(def patterns-body (pats)
+  (let ((bodies (filter (lambda (b) (not (= b nil))) (map pattern-body pats))))
+    (if (empty? bodies)
+      nil
+      (if (= (len bodies) 1) (first bodies) bodies))))
+
 ;; `body` per document, so a steady document costs one deep `=` per tick
 ;; instead of a rebuild (read-string per word). A few entries: every jaki
 ;; instance's tick runs on this VM.
@@ -265,11 +321,11 @@
       (list (nth (first m) 1))
       (body-memo-find (rest m) key))))
 
-(def memo-body (figures rows row-count)
-  (let ((key (list figures rows row-count)))
+(def memo-body (figures rows row-count patterns)
+  (let ((key (list figures rows row-count patterns)))
     (let ((hit (body-memo-find body-memo key)))
       (if (empty? hit)
-        (let ((b (body figures rows row-count)))
+        (let ((b (patterns-body (pattern-list figures rows row-count patterns))))
           (do (set! body-memo (cons (list key b)
                                     (if (< (len body-memo) 8)
                                       body-memo
@@ -290,11 +346,15 @@
 ;; the host's "stopped".
 ;; `mode` is :loop, :retrig, :continue or :gate (docs/jaki-trig-modes-spec.md);
 ;; the mark follows the clock's position, and is 0 while the gate is shut.
-(def tick (figures rows row-count mode)
+(def tick-patterns (figures rows row-count mode patterns)
   (do
     (alez.jaki.core/init :16)
     (let ((playing (alez.jaki.core/step-clock (mode-of mode))))
       (do
         (gen-mark (if playing (+ (alez.jaki.core/play-pos) 1) 0))
-        (let ((b (memo-body figures rows row-count)))
+        (let ((b (memo-body figures rows row-count patterns)))
           (if (and b playing) (alez.jaki.core/play-routes b) 0))))))
+
+;; one pattern: the tick before patterns
+(def tick (figures rows row-count mode)
+  (tick-patterns figures rows row-count mode (list)))
