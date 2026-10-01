@@ -2241,6 +2241,59 @@ fn custom_engine_pool_shrinks_only_after_release_tail_expires() {
 }
 
 #[test]
+fn idle_voices_below_a_releasing_high_voice_stop_running() {
+    // The enabled count is a high-water mark: one voice releasing in slot 2
+    // keeps the count at 3, but idle slots 0 and 1 must not run with it.
+    let engine_id = 0;
+    let mut pool = CustomEnginePool::new();
+    for lid in 1..=4 {
+        pool.add_voice(lid);
+    }
+    for note in 0..3 {
+        let allocation = pool.allocate_voice(0, 0, note as f32, true, 6);
+        pool.note_voice_allocated(engine_id, allocation.voice_idx);
+    }
+    let lids: Vec<u64> = pool.voices[..3].iter().map(|voice| voice.logical_id).collect();
+    pool.release_free_patch_voice_by_logical_id(lids[0]);
+    pool.release_free_patch_voice_by_logical_id(lids[1]);
+    pool.release_voice_by_logical_id(lids[2], 1_000);
+
+    pool.shrink_released_voices(engine_id, 1_500, 1_000, 0);
+    assert_eq!(crate::lisp_host::get_dgen_engine_enabled_voices(engine_id), 3);
+    assert!(!crate::lisp_host::dgen_engine_voice_runs(engine_id, 0));
+    assert!(!crate::lisp_host::dgen_engine_voice_runs(engine_id, 1));
+    assert!(crate::lisp_host::dgen_engine_voice_runs(engine_id, 2));
+
+    // Reallocating an idle slot lets it run again before the next shrink.
+    let allocation = pool.allocate_voice(0, 0, 9.0, true, 6);
+    pool.note_voice_allocated(engine_id, allocation.voice_idx);
+    assert!(crate::lisp_host::dgen_engine_voice_runs(engine_id, allocation.voice_idx));
+
+    // The release tail still runs its full length before the slot stops.
+    pool.shrink_released_voices(engine_id, 1_999, 1_000, 0);
+    assert!(crate::lisp_host::dgen_engine_voice_runs(engine_id, 2));
+    crate::lisp_host::reset_dgen_engine_enabled_voices(engine_id);
+}
+
+#[test]
+fn voice_mask_never_silences_a_host_raised_voice_the_pool_has_not_synced() {
+    // The host raises an idle engine's count (FreePatch idle voice) before
+    // the audio thread's pool has seen it; the shrink must not mask it off.
+    let engine_id = 0;
+    let mut pool = CustomEnginePool::new();
+    for lid in 1..=4 {
+        pool.add_voice(lid);
+    }
+    pool.enabled_voice_count = 0;
+    crate::lisp_host::set_dgen_engine_enabled_voices(engine_id, 1);
+
+    pool.shrink_released_voices(engine_id, 0, 1_000, 0);
+
+    assert!(crate::lisp_host::dgen_engine_voice_runs(engine_id, 0));
+    crate::lisp_host::reset_dgen_engine_enabled_voices(engine_id);
+}
+
+#[test]
 fn idle_instrument_engine_disables_all_voices() {
     let engine_id = 0;
     let mut pool = CustomEnginePool::new();

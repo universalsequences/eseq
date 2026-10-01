@@ -15,6 +15,10 @@ counts, process-call stats) that the audio thread reads through
 use super::super::*;
 use crate::sequencer::MAX_INSTRUMENT_ENGINES;
 use crate::audio::MAX_VOICES;
+use std::sync::atomic::AtomicU32;
+
+// Voice masks hold one bit per engine voice.
+const _: () = assert!(MAX_VOICES <= u32::BITS as usize);
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct InstrumentPreset {
@@ -1761,6 +1765,14 @@ pub(in crate::lisp_host) static DGEN_ENGINE_ENABLED_VOICES: [AtomicUsize; MAX_IN
     const INIT: AtomicUsize = AtomicUsize::new(1);
     [INIT; MAX_INSTRUMENT_ENGINES]
 };
+/// Voices below the enabled count that are actually retained (active or in
+/// their release tail). The enabled count is a high-water mark, so one voice
+/// releasing in a high slot would otherwise run every idle voice beneath it.
+/// Setting a count resets this to all voices; only the engine pool narrows it.
+pub(in crate::lisp_host) static DGEN_ENGINE_VOICE_MASKS: [AtomicU32; MAX_INSTRUMENT_ENGINES] = {
+    const INIT: AtomicU32 = AtomicU32::new(u32::MAX);
+    [INIT; MAX_INSTRUMENT_ENGINES]
+};
 pub(in crate::lisp_host) static DGEN_ENGINE_PROCESS_CALLS: [AtomicU64; MAX_INSTRUMENT_ENGINES] = {
     const INIT: AtomicU64 = AtomicU64::new(0);
     [INIT; MAX_INSTRUMENT_ENGINES]
@@ -1790,6 +1802,54 @@ pub fn set_dgen_instrument_output_count(slot_id: usize, count: usize) {
 pub fn set_dgen_engine_enabled_voices(engine_id: usize, count: usize) {
     if engine_id < MAX_INSTRUMENT_ENGINES {
         DGEN_ENGINE_ENABLED_VOICES[engine_id].store(count.min(MAX_VOICES), Ordering::Release);
+        DGEN_ENGINE_VOICE_MASKS[engine_id].store(u32::MAX, Ordering::Release);
+    }
+}
+
+/// Grow the enabled count without reopening idle voices below it (the
+/// engine pool's allocation path). Audio thread only.
+pub fn raise_dgen_engine_enabled_voices(engine_id: usize, count: usize) {
+    if engine_id < MAX_INSTRUMENT_ENGINES {
+        DGEN_ENGINE_ENABLED_VOICES[engine_id].store(count.min(MAX_VOICES), Ordering::Release);
+    }
+}
+
+/// Mask with voices `0..count` set.
+pub fn dgen_voice_bits_below(count: usize) -> u32 {
+    u32::MAX.checked_shl(count as u32).map_or(u32::MAX, |above| !above)
+}
+
+/// Whether an engine voice runs this block: under the enabled count and
+/// retained by the engine pool.
+pub fn dgen_engine_voice_runs(engine_id: usize, voice_idx: usize) -> bool {
+    engine_id >= MAX_INSTRUMENT_ENGINES
+        || (voice_idx < get_dgen_engine_enabled_voices(engine_id)
+            && get_dgen_engine_voice_mask(engine_id) & (1 << voice_idx) != 0)
+}
+
+/// Let `voice_idx` run again after the pool allocated it. Audio thread only.
+pub fn enable_dgen_engine_voice(engine_id: usize, voice_idx: usize) {
+    if engine_id < MAX_INSTRUMENT_ENGINES && voice_idx < MAX_VOICES {
+        DGEN_ENGINE_VOICE_MASKS[engine_id].fetch_or(1 << voice_idx, Ordering::AcqRel);
+    }
+}
+
+/// Narrow an engine's running voices to `mask` (bit = voice index) within its
+/// enabled count. Audio thread only: the engine pool's retained voices.
+/// Stores only on change, since every voice kernel reads this cell.
+pub fn set_dgen_engine_voice_mask(engine_id: usize, mask: u32) {
+    if engine_id < MAX_INSTRUMENT_ENGINES
+        && DGEN_ENGINE_VOICE_MASKS[engine_id].load(Ordering::Relaxed) != mask
+    {
+        DGEN_ENGINE_VOICE_MASKS[engine_id].store(mask, Ordering::Release);
+    }
+}
+
+pub fn get_dgen_engine_voice_mask(engine_id: usize) -> u32 {
+    if engine_id < MAX_INSTRUMENT_ENGINES {
+        DGEN_ENGINE_VOICE_MASKS[engine_id].load(Ordering::Acquire)
+    } else {
+        u32::MAX
     }
 }
 
@@ -1856,21 +1916,16 @@ unsafe extern "C" fn dgenlisp_instrument_wrapper_process(
     }
     let engine_id = slot_id / MAX_VOICES;
     let voice_idx = slot_id % MAX_VOICES;
-    if engine_id < MAX_INSTRUMENT_ENGINES {
-        let enabled = DGEN_ENGINE_ENABLED_VOICES[engine_id]
+    if !dgen_engine_voice_runs(engine_id, voice_idx) {
+        let output_count = DGEN_INSTRUMENT_OUTPUT_COUNTS[slot_id % INSTRUMENT_REGISTRY_SIZE]
             .load(Ordering::Acquire)
-            .min(MAX_VOICES);
-        if voice_idx >= enabled {
-            let output_count = DGEN_INSTRUMENT_OUTPUT_COUNTS[slot_id % INSTRUMENT_REGISTRY_SIZE]
-                .load(Ordering::Acquire)
-                .max(1);
-            if !out.is_null() {
-                // An idle voice is silent: zero once, then let downstream
-                // routes skip it (silence propagation).
-                crate::effects::silence::emit(out, output_count, nframes);
-            }
-            return;
+            .max(1);
+        if !out.is_null() {
+            // An idle voice is silent: zero once, then let downstream
+            // routes skip it (silence propagation).
+            crate::effects::silence::emit(out, output_count, nframes);
         }
+        return;
     }
     let fn_ptr = DGEN_INSTRUMENT_FNS[slot_id % INSTRUMENT_REGISTRY_SIZE].load(Ordering::Acquire);
     if fn_ptr != 0 {

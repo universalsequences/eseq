@@ -3,7 +3,11 @@
 //! Custom DGen engines need route assignment and release-tail bookkeeping;
 //! that higher-level lifecycle lives in the sibling `runtime` module.
 
-pub const MAX_VOICES: usize = 32;
+/// One voice limit for every instrument: DGen dylibs are compiled for
+/// `DGEN_INSTRUMENT_VOICES`, and every engine builds this many voice nodes
+/// (synth + gatepitch + modulator + routes) that run each block whether or
+/// not they can ever be allocated, so a larger graph pool is pure CPU cost.
+pub const MAX_VOICES: usize = crate::lisp_host::DGEN_INSTRUMENT_VOICES;
 
 /// Voices a new melodic rack slot starts with. The pool can hold
 /// `MAX_VOICES`, but a slot at the cap costs twice this in CPU for chords

@@ -1768,8 +1768,7 @@ unsafe extern "C" fn voice_modulator_process(
     }
 
     if let Some((engine_id, voice_idx)) = custom_identity {
-        let enabled = crate::lisp_host::get_dgen_engine_enabled_voices(engine_id);
-        if voice_idx >= enabled {
+        if !crate::lisp_host::dgen_engine_voice_runs(engine_id, voice_idx) {
             record_disabled_custom_skip(engine_id, nf);
             clear_outputs(&lanes, out, nf);
             publish_slot_display_values(s, out, nf);

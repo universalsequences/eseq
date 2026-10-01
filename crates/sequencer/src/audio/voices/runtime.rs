@@ -353,8 +353,9 @@ impl CustomEnginePool {
         let needed = (voice_idx + 1).min(MAX_VOICES).max(1);
         if needed > self.enabled_voice_count {
             self.enabled_voice_count = needed;
-            crate::lisp_host::set_dgen_engine_enabled_voices(engine_id, needed);
+            crate::lisp_host::raise_dgen_engine_enabled_voices(engine_id, needed);
         }
+        crate::lisp_host::enable_dgen_engine_voice(engine_id, voice_idx);
     }
 
     pub(in crate::audio) fn sync_enabled_voice_count(&mut self, engine_id: usize) {
@@ -369,6 +370,7 @@ impl CustomEnginePool {
         minimum_enabled_voices: usize,
     ) {
         let mut highest_retained_idx: Option<usize> = None;
+        let mut retained_mask = 0u32;
         for i in 0..self.num_voices {
             let voice = &mut self.voices[i];
             if let Some(release_started_sample) = voice.release_started_sample {
@@ -377,6 +379,7 @@ impl CustomEnginePool {
                 }
             }
             if voice.active || voice.release_started_sample.is_some() {
+                retained_mask |= 1 << i;
                 highest_retained_idx =
                     Some(highest_retained_idx.map_or(i, |highest| highest.max(i)));
             }
@@ -397,6 +400,18 @@ impl CustomEnginePool {
             self.enabled_voice_count = minimum;
             crate::lisp_host::set_dgen_engine_enabled_voices(engine_id, minimum);
         }
+        // Idle voices under the high-water mark stop running; a voice still
+        // inside its release tail keeps running exactly as long as before.
+        // Voices at or above this pool's count stay set: a host-side count
+        // raise (FreePatch idle voice) the pool has not synced yet must not
+        // be masked off, and the count gates them anyway.
+        use crate::lisp_host::dgen_voice_bits_below as below;
+        let minimum = minimum_enabled_voices.min(self.num_voices);
+        let unmanaged = !below(self.enabled_voice_count);
+        crate::lisp_host::set_dgen_engine_voice_mask(
+            engine_id,
+            retained_mask | below(minimum) | unmanaged,
+        );
     }
 
     pub(in crate::audio) fn invalidate_sound_cache(&mut self) {
