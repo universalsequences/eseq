@@ -4267,6 +4267,352 @@
         });
     }
 
+    /// docs/jaki-row-processes-spec.md §13: `(harmony :track 1)` holds a jaki
+    /// route to the chord track 1 is on, read straight from the generator
+    /// tick (gen-track-harmony), same boundary, no channel.
+    #[test]
+    fn jaki_harmony_word_holds_a_route_to_another_tracks_step_chord() {
+        run_with_scheduler_stack(|| {
+            let state = Arc::new(SequencerState::new(
+                2,
+                vec![default_empty_effect_chain(), default_empty_effect_chain()],
+            ));
+            state.pattern.track_params[1].set_num_steps(8);
+            for step in 0..8 {
+                state.pattern.patterns[1].set_step_active(step, true);
+                let chord: &[f32] = if step < 4 { &[0.0, 4.0, 7.0] } else { &[2.0, 5.0, 9.0] };
+                for note in chord {
+                    assert!(state.pattern.chord_data[1].add_note(step, *note));
+                }
+            }
+            let mut scratch = lisp_host::ScratchControlRuntime::new(
+                Arc::clone(&state),
+                vec![Vec::new(), Vec::new()],
+                vec![EffectDescriptor::builtin_sampler(), EffectDescriptor::builtin_sampler()],
+                0,
+                0,
+            );
+            scratch
+                .eval(
+                    r#"(import alez.jaki.surface :refer (jak))
+                       (jak "follow" :16 . . . .
+                         -> 0 (note (seq :hit 1 3 6 11)) (harmony :track 1 :amount 1))"#,
+                )
+                .expect("define jaki");
+            state.transport.playing.store(true, Ordering::Relaxed);
+            let snapshot = state.publish_scheduler_snapshot();
+            let queue = ScheduledEventQueue::<64>::new();
+            let mut scheduler = SchedulerLookaheadState::new(48_000);
+            scheduler.generator_runtime.sync_definitions(&scratch.sequencer_defs(), 0.0);
+            let live_midi_fx_tracks: [LiveMidiFxTrackState; MAX_TRACKS] =
+                std::array::from_fn(|_| LiveMidiFxTrackState::default());
+            let mut scratch_runtime = Some(scratch);
+            // two beats = 8 sixteenths: steps 0-3 on C E G, 4-7 on D F A
+            schedule_playing_lookahead(
+                &mut scheduler, &state, &snapshot, &queue, &mut scratch_runtime,
+                &live_midi_fx_tracks, snapshot.transport.pattern_epoch,
+                0, 48_000, 48_000, 6_000, 24_000.0, 0, false, false,
+            );
+            let mut hits = Vec::new();
+            while let Some(event) = queue.pop_owned() {
+                if let ScheduledEventKind::NetworkTrigger { track: 0, resolved, .. } = event.kind {
+                    hits.push((event.sample_time, resolved.transpose));
+                }
+            }
+            hits.sort_by(|a, b| a.0.cmp(&b.0));
+            let got: Vec<f32> = hits.iter().map(|h| h.1).take(8).collect();
+            // 1 3 6 11 on C E G → 0 4 7 12; once the source moves to D F A
+            // every note lands on one of its pitch classes
+            assert_eq!(&got[..4], &[0.0, 4.0, 7.0, 12.0], "{got:?}");
+            assert!(got[4..].iter().all(|t| [2.0, 5.0, 9.0, 14.0].iter().any(|c| (t - c).rem_euclid(12.0) == 0.0)), "{got:?}");
+        });
+    }
+
+    /// jaki's `(harmony :track n :amount a)` against lane-harmony's own
+    /// C-major fixture: same source chords, same follower notes, same answers
+    /// at every strictness.
+    fn jaki_harmony_in_c_major(amount: f32) -> Vec<f32> {
+        run_with_scheduler_stack(move || {
+            let state = Arc::new(SequencerState::new(
+                2,
+                vec![default_empty_effect_chain(), default_empty_effect_chain()],
+            ));
+            state.pattern.track_params[1].set_num_steps(8);
+            for (step, chord) in [(0, [0.0, 4.0, 7.0]), (4, [5.0, 9.0, 12.0]), (6, [7.0, 11.0, 14.0])] {
+                state.pattern.patterns[1].set_step_active(step, true);
+                for note in chord {
+                    assert!(state.pattern.chord_data[1].add_note(step, note));
+                }
+            }
+            let mut scratch = lisp_host::ScratchControlRuntime::new(
+                Arc::clone(&state),
+                vec![Vec::new(), Vec::new()],
+                vec![EffectDescriptor::builtin_sampler(), EffectDescriptor::builtin_sampler()],
+                0,
+                0,
+            );
+            scratch
+                .eval(&format!(
+                    r#"(import alez.jaki.surface :refer (jak))
+                       (jak "follow" :16 . . . . . . . .
+                         -> 0 (note (seq :hit 0 1 2 3 5 6 8 11)) (harmony :track 1 :amount {amount}))"#
+                ))
+                .expect("define jaki");
+            state.transport.playing.store(true, Ordering::Relaxed);
+            let snapshot = state.publish_scheduler_snapshot();
+            let queue = ScheduledEventQueue::<64>::new();
+            let mut scheduler = SchedulerLookaheadState::new(48_000);
+            scheduler.generator_runtime.sync_definitions(&scratch.sequencer_defs(), 0.0);
+            let live_midi_fx_tracks: [LiveMidiFxTrackState; MAX_TRACKS] =
+                std::array::from_fn(|_| LiveMidiFxTrackState::default());
+            let mut scratch_runtime = Some(scratch);
+            schedule_playing_lookahead(
+                &mut scheduler, &state, &snapshot, &queue, &mut scratch_runtime,
+                &live_midi_fx_tracks, snapshot.transport.pattern_epoch,
+                0, 102_000, 48_000, 6_000, 24_000.0, 0, false, false,
+            );
+            let mut hits = Vec::new();
+            while let Some(event) = queue.pop_owned() {
+                if let ScheduledEventKind::NetworkTrigger { track: 0, resolved, .. } = event.kind {
+                    hits.push((event.sample_time, resolved.transpose));
+                }
+            }
+            hits.sort_by(|a, b| a.0.cmp(&b.0));
+            hits.into_iter().take(8).map(|h| h.1).collect()
+        })
+    }
+
+    #[test]
+    fn jaki_harmony_amount_matches_lane_harmony_tiers() {
+        let lane = |amount: f32| run_with_scheduler_stack(move || track_roster_harmony_in_c_major(amount));
+        for amount in [1.0, 0.5, 0.3, 0.0] {
+            assert_eq!(jaki_harmony_in_c_major(amount), lane(amount), "amount {amount}");
+        }
+    }
+
+    #[test]
+    #[ignore = "diagnostic: what harmony :amount does against a jaki-played source"]
+    fn jaki_harmony_amount_against_jaki_source_probe() {
+        for amount in ["1", "0.5", "0.3"] {
+            let observed = jaki_instance_observed(
+                Some((77, vec![0, 1])),
+                Box::leak(format!(r#"(list (dict :route 0
+                       :mods (list (list "minvel" 0) (list "dotdecay" 0.53) (list "dashdecay" 0))
+                       :procs (list (list "left" (list "acc" ":by" 4 ":min" 0 ":max" 16) (list "note+" "$1"))
+                                    (list "any" (list "scale" ":minor" ":root" "C"))))
+                 (dict :route 1 :mods (list "right" (list "note" (list 1 3 5)))
+                       :procs (list (list "any" (list "harmony" ":track" "0" ":amount" {amount})))))"#).into_boxed_str()),
+                "(list (list :dot :dot :dash) (list :dot :dash))",
+                384_000,
+                |_| {},
+            );
+            let pcs = |track: usize| {
+                let mut v: Vec<(u64, i32)> = observed.iter().filter(|t| t.track == track)
+                    .map(|t| (t.sample_time, (t.transpose.round() as i32))).collect();
+                v.sort();
+                v.into_iter().map(|x| x.1).collect::<Vec<_>>()
+            };
+            eprintln!("PROBE amount {amount}\n  source   {:?}\n  follower {:?}", pcs(0), pcs(1));
+        }
+    }
+
+    /// The jakiridering setup: a rack-owned jaki instance, row 0 plays the
+    /// source with rules, row 1's rule holds it to track 0's harmony.
+    #[test]
+    fn jaki_instance_rule_harmony_follows_the_other_row_in_a_rack() {
+        let observed = jaki_instance_observed(
+            Some((77, vec![0, 1])),
+            r#"(list (dict :route 0
+                           :mods (list (list "minvel" 0) (list "dotdecay" 0.53) (list "dashdecay" 0))
+                           :procs (list (list "left" (list "acc" ":by" 4 ":min" 0 ":max" 16)
+                                              (list "note+" "$1"))
+                                        (list "any" (list "scale" ":minor" ":root" "C"))))
+                     (dict :route 1
+                           :mods (list "right" (list "note" (list 1 3 5)))
+                           :procs (list (list "any" (list "harmony" ":track" "0" ":amount" 0.95)))))"#,
+            "(list (list :dot :dot :dash) (list :dot :dash))",
+            192_000,
+            |_| {},
+        );
+        let mut source: Vec<(u64, f32)> = observed.iter().filter(|t| t.track == 0)
+            .map(|t| (t.sample_time, t.transpose)).collect();
+        let mut follower: Vec<(u64, f32)> = observed.iter().filter(|t| t.track == 1)
+            .map(|t| (t.sample_time, t.transpose)).collect();
+        source.sort_by_key(|h| h.0);
+        follower.sort_by_key(|h| h.0);
+        assert!(!source.is_empty() && !follower.is_empty(), "{source:?} {follower:?}");
+        // after the first beat, every follower note shares a pitch class
+        // with a source note that has already sounded
+        let pc = |t: f32| (t.round() as i32).rem_euclid(12);
+        let late: Vec<&(u64, f32)> = follower.iter().filter(|h| h.0 > 48_000).collect();
+        assert!(!late.is_empty());
+        for (time, note) in late {
+            let sounded: Vec<i32> = source.iter().filter(|s| s.0 <= *time).map(|s| pc(s.1)).collect();
+            assert!(sounded.contains(&pc(*note)), "follower {note} at {time} not in {sounded:?}\nsource {source:?}\nfollower {follower:?}");
+        }
+    }
+
+    /// A harmony source played only by a jaki route (no steps, no graphs):
+    /// its sounded notes must reach the reads, or `harmony` is a no-op.
+    #[test]
+    fn jaki_harmony_follows_a_track_another_jaki_route_plays() {
+        run_with_scheduler_stack(|| {
+            let state = Arc::new(SequencerState::new(
+                2,
+                vec![default_empty_effect_chain(), default_empty_effect_chain()],
+            ));
+            let mut scratch = lisp_host::ScratchControlRuntime::new(
+                Arc::clone(&state),
+                vec![Vec::new(), Vec::new()],
+                vec![EffectDescriptor::builtin_sampler(), EffectDescriptor::builtin_sampler()],
+                0,
+                0,
+            );
+            // tracks only jaki plays: no clip in the scene, so the step clock
+            // emits no triggers for them (the step loop never feeds reads)
+            state.set_scene_silenced(0, true);
+            state.set_scene_silenced(1, true);
+            // track 0 holds an E (4) on every hit; track 1 plays 1 3 6 11
+            // held to track 0's harmony at full strictness
+            scratch
+                .eval(
+                    r#"(import alez.jaki.surface :refer (jak))
+                       (jak "src" :16 . . . . -> 0 (note 4))
+                       (jak "follow" :16 . . . .
+                         -> 1 (note (seq :hit 1 3 6 11)) (harmony :track 0 :amount 1))"#,
+                )
+                .expect("define jaki");
+            state.transport.playing.store(true, Ordering::Relaxed);
+            let mut scheduler = SchedulerLookaheadState::new(48_000);
+            scheduler.generator_runtime.sync_definitions(&scratch.sequencer_defs(), 0.0);
+            let live_midi_fx_tracks: [LiveMidiFxTrackState; MAX_TRACKS] =
+                std::array::from_fn(|_| LiveMidiFxTrackState::default());
+            let mut scratch_runtime = Some(scratch);
+            let mut follower = Vec::new();
+            // several lookahead calls, as the worker makes them
+            for call in 0..4u64 {
+                let snapshot = state.publish_scheduler_snapshot();
+                let queue = ScheduledEventQueue::<64>::new();
+                schedule_playing_lookahead(
+                    &mut scheduler, &state, &snapshot, &queue, &mut scratch_runtime,
+                    &live_midi_fx_tracks, snapshot.transport.pattern_epoch,
+                    call * 24_000, (call + 1) * 24_000, 48_000, 6_000, 24_000.0,
+                    call * 24_000, false, false,
+                );
+                while let Some(event) = queue.pop_owned() {
+                    if let ScheduledEventKind::NetworkTrigger { track: 1, resolved, .. } = event.kind {
+                        follower.push((event.sample_time, resolved.transpose));
+                    }
+                }
+            }
+            follower.sort_by(|a, b| a.0.cmp(&b.0));
+            let late: Vec<f32> = follower.iter().skip(4).map(|h| h.1).collect();
+            assert!(!late.is_empty(), "follower emitted nothing");
+            // a one-note E chord: every note lands on pitch class 4
+            assert!(
+                late.iter().all(|t| (t - 4.0).rem_euclid(12.0) == 0.0),
+                "follower ignored the jaki-played source: {follower:?}"
+            );
+        });
+    }
+
+    /// docs/jaki-row-processes-spec.md §11: alez.jaki.harmony publishes track
+    /// 1's chord as a pitch-class mask; a jaki route on track 0 snaps to it
+    /// once the channel write has crossed to the generator.
+    #[test]
+    fn jaki_harmony_channel_snaps_a_jaki_route_to_another_tracks_chord() {
+        run_with_scheduler_stack(|| {
+            let state = Arc::new(SequencerState::new(
+                2,
+                vec![default_empty_effect_chain(), default_empty_effect_chain()],
+            ));
+            state.pattern.track_params[1].set_num_steps(8);
+            for step in 0..8 {
+                state.pattern.patterns[1].set_step_active(step, true);
+                for note in [0.0, 4.0, 7.0] {
+                    assert!(state.pattern.chord_data[1].add_note(step, note));
+                }
+            }
+            let mut scratch = lisp_host::ScratchControlRuntime::new(
+                Arc::clone(&state),
+                vec![Vec::new(), Vec::new()],
+                vec![EffectDescriptor::builtin_sampler(), EffectDescriptor::builtin_sampler()],
+                0,
+                0,
+            );
+            scratch
+                .eval(
+                    r#"(import alez.jaki.harmony :refer (harmony))
+                       (import alez.jaki.surface :refer (jak))
+                       (harmony "chord" :track 1)
+                       (jak "follow" :16 . . . . -> 0 (note (seq :hit 1 3 6 11)) (snap "chord"))"#,
+                )
+                .expect("publish harmony and define jaki");
+
+            let transposes = |scheduler: &mut SchedulerLookaheadState,
+                              scratch_runtime: &mut Option<lisp_host::ScratchControlRuntime>,
+                              rendered: u64| {
+                let snapshot = state.publish_scheduler_snapshot();
+                let queue = ScheduledEventQueue::<64>::new();
+                let live_midi_fx_tracks: [LiveMidiFxTrackState; MAX_TRACKS] =
+                    std::array::from_fn(|_| LiveMidiFxTrackState::default());
+                schedule_playing_lookahead(
+                    scheduler,
+                    &state,
+                    &snapshot,
+                    &queue,
+                    scratch_runtime,
+                    &live_midi_fx_tracks,
+                    snapshot.transport.pattern_epoch,
+                    rendered,
+                    rendered + 24_000,
+                    48_000,
+                    6_000,
+                    24_000.0,
+                    rendered,
+                    false,
+                    false,
+                );
+                let mut out = Vec::new();
+                while let Some(event) = queue.pop_owned() {
+                    if let ScheduledEventKind::NetworkTrigger { track, resolved, .. } = event.kind {
+                        if track == 0 {
+                            out.push(resolved.transpose);
+                        }
+                    }
+                }
+                out
+            };
+
+            state.transport.playing.store(true, Ordering::Relaxed);
+            let mut scheduler = SchedulerLookaheadState::new(48_000);
+            scheduler
+                .generator_runtime
+                .sync_definitions(&scratch.sequencer_defs(), 0.0);
+            scheduler
+                .process_runtime
+                .sync_authoring(scratch.process_authoring_snapshot(), 0.0);
+            let mut scratch_runtime = Some(scratch);
+
+            let mut chunks = Vec::new();
+            for chunk in 0..4 {
+                chunks.push(transposes(&mut scheduler, &mut scratch_runtime, chunk * 24_000));
+            }
+            assert_eq!(
+                state.process_channel_value("chord"),
+                Some(crate::process::ProcessLiteral::Number(145.0)),
+                "C E G as a pitch-class mask"
+            );
+            let last = chunks.last().unwrap();
+            assert!(!last.is_empty(), "jaki emitted nothing: {chunks:?}");
+            // 1 → 0, 3 → 4, 6 → 7, 11 → 12
+            assert!(
+                last.iter().all(|t| [0.0, 4.0, 7.0, 12.0].contains(t)),
+                "snapped once the mask crossed: {chunks:?}"
+            );
+        });
+    }
+
     /// docs/jaki-live-channel-widgets-spec.md 7 and 8.1: control-thread
     /// channel writes reach `chan-get` on the next chunk, while a process write
     /// is mirrored back through the same channel handle for inline UI polling.

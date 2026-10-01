@@ -2086,6 +2086,15 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
             .filter(|graph| !graph.is_empty())
             .flat_map(|graph| graph.gate_targets())
             .collect();
+        // Generator ticks read every track's harmony (jaki's `harmony`):
+        // hand the process reads all output enqueued so far this chunk.
+        if !generator_runtime.is_empty() {
+            feed_track_output_reads(
+                process_runtime,
+                &track_output_events,
+                &mut track_output_read_cursor,
+            );
+        }
         if !generator_runtime.is_empty()
             && !run_generator_stage(
                 generator_runtime,
@@ -2111,6 +2120,10 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
         {
             break;
         }
+        // …and what the generators just emitted: a track only a generator
+        // plays (a jaki route, no steps) is otherwise never fed, so its
+        // `:output` reads (and the next chunk's harmony) stay empty.
+        feed_track_output_reads(process_runtime, &track_output_events, &mut track_output_read_cursor);
 
         // Scheduler-owned processes: self-clocked like generators, but with
         // named inlets/outlets/channels and a pending store for future emits.
@@ -2467,6 +2480,7 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
         {
             break;
         }
+        feed_track_output_reads(process_runtime, &track_output_events, &mut track_output_read_cursor);
 
         if let Some(runtime) = scratch_runtime.as_mut() {
             for pending in midi_fx_quantizer_state.drain_due(chunk_end_beats) {
@@ -2667,6 +2681,12 @@ fn run_generator_stage<const QUEUE_CAP: usize>(
         scratch.set_generator_channel_values(
             process_runtime.payload_epoch(),
             process_runtime.channel_values(),
+        );
+        // Harmony for `gen-track-harmony` (jaki's `harmony` action): this
+        // chunk's step boundaries are already recorded, so each tick reads
+        // the step its source is on at the tick's own beat.
+        scratch.set_generator_track_harmony(
+            process_runtime.track_harmony_timeline(chunk_start_beats, chunk_end_beats),
         );
         // Naming a generator means locking the definition registry
         // and cloning every name; failures are rare, so collect ids

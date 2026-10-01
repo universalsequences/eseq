@@ -140,6 +140,7 @@ fn widget_captures_text_input(node: &eseqlisp::layout::LayoutNode) -> bool {
     widget_type_captures_text_input(node.widget_type.as_str())
         || eseqlisp::widget_render::patcher::patcher_has_text_edit(node)
         || eseqlisp::widget_render::sexp_slot::editing_text(node)
+        || eseqlisp::widget_render::dropdown::filter_captures_text(node)
 }
 
 /// A focused sexp-slot owns bare typing even between edits (a letter or digit
@@ -2421,7 +2422,7 @@ mod live_keyboard_tests {
         normalize_command_shortcuts, normalize_command_shortcuts_for, note_from_key,
         number_picker_edit_state, quantized_record_position, sample_browser_search_shortcut_for,
         sequencer_history_shortcut, sequencer_tab_shortcut_index_for,
-        should_route_to_live_keyboard,
+        should_route_to_live_keyboard, should_toggle_play_on_space,
         ExpandedStepProjectionRegistry, ExpandedStepViewport,
         HeldKeyboardNote, LiveNoteTarget, RecordingKeyOutcome, RollRecordBuffer,
         SequencerHistoryShortcut, SoftStepParamEdit, StepClipboardShortcut,
@@ -3496,6 +3497,68 @@ mod live_keyboard_tests {
             &held,
             false,
         ));
+    }
+
+    /// An open `:filterable` dropdown is typing into its filter, so Space
+    /// belongs to the filter text rather than the transport.
+    #[test]
+    fn space_types_into_an_open_filterable_dropdown_instead_of_toggling_play() {
+        fn find_dropdown(
+            node: &eseqlisp::layout::LayoutNode,
+        ) -> Option<&eseqlisp::layout::LayoutNode> {
+            if node.widget_type == "dropdown" {
+                return Some(node);
+            }
+            node.children.iter().find_map(find_dropdown)
+        }
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(effect
+                     (v-stack
+                       (dropdown :value "." :options '("." ". -" "..")
+                         :filterable true :width 20)))"#,
+            )
+            .expect("install filterable dropdown");
+        editor.set_layout_viewport(30, 20);
+        let space = KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE);
+        assert!(should_toggle_play_on_space(&editor, &space), "no focus: Space plays");
+
+        let dropdown = editor
+            .runtime()
+            .current_layout
+            .as_ref()
+            .and_then(|layout| find_dropdown(layout))
+            .expect("dropdown")
+            .clone();
+        let col = dropdown.rect.col + dropdown.rect.width * 0.5;
+        let row = dropdown.rect.row + dropdown.rect.height * 0.5;
+        for kind in [
+            MouseEventKind::Down(MouseButton::Left),
+            MouseEventKind::Up(MouseButton::Left),
+        ] {
+            editor.handle_mouse_precise(
+                MouseEvent {
+                    kind,
+                    column: col.floor() as u16,
+                    row: row.floor() as u16,
+                    modifiers: KeyModifiers::NONE,
+                },
+                0,
+                0,
+                30,
+                20,
+                col,
+                row,
+            );
+        }
+        assert!(eseqlisp::widget_render::dropdown::is_dropdown_open(dropdown.widget_id));
+        assert!(
+            !should_toggle_play_on_space(&editor, &space),
+            "an open filter owns Space"
+        );
     }
 
     #[test]

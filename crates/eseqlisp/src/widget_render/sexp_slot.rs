@@ -43,6 +43,7 @@
 //! `:error-color` (a `nil` context is not validated); the text is kept.
 
 use std::cell::RefCell;
+use std::rc::Rc;
 use std::collections::HashMap;
 
 use crossterm::event::{KeyModifiers, MouseButton, MouseEventKind};
@@ -373,8 +374,103 @@ fn slot_key(props: &HashMap<String, Value>) -> Option<String> {
     }
 }
 
-fn parse_schema(props: &HashMap<String, Value>) -> Result<Schema, String> {
-    Schema::parse(props.get("schema").ok_or("sexp-slot needs :schema")?)
+/// The slot's parsed schema. A schema is plain data a host passes on every
+/// render (the jaki rule body's is ~130 KB of nested lists), and measure,
+/// paint, mouse and key handling each need it, so parsing it from scratch
+/// every call made a panel of slots cost (slots × schema size) several times
+/// per frame. Parsed schemas are cached by a hash of the value's content:
+/// walking it allocates nothing and is far cheaper than parsing, and a
+/// content key stays right whether the host shares or copies the value.
+fn parse_schema(props: &HashMap<String, Value>) -> Result<Rc<Schema>, String> {
+    let value = props.get("schema").ok_or("sexp-slot needs :schema")?;
+    // Fast path: a list clone shares its element cells, so the same Lisp
+    // schema value passed again has the same element pointers. The entry
+    // keeps a clone of the value, so those cells (and their addresses) stay
+    // alive and cannot be reused by another value.
+    let identity = schema_identity(value);
+    if let Some(id) = identity {
+        if let Some(schema) = SCHEMA_IDENTITY.with(|cache| cache.borrow().get(&id).map(|(_, s)| Rc::clone(s))) {
+            return Ok(schema);
+        }
+    }
+    let schema = parse_schema_by_content(value)?;
+    if let Some(id) = identity {
+        SCHEMA_IDENTITY.with(|cache| {
+            let mut cache = cache.borrow_mut();
+            if cache.len() >= 64 {
+                cache.clear();
+            }
+            cache.insert(id, (value.clone(), Rc::clone(&schema)));
+        });
+    }
+    Ok(schema)
+}
+
+/// (length, first cell, last cell) of a list value, or None.
+fn schema_identity(value: &Value) -> Option<(usize, usize, usize)> {
+    match value {
+        Value::List(items) if !items.is_empty() => Some((
+            items.len(),
+            Rc::as_ptr(&items[0]) as usize,
+            Rc::as_ptr(&items[items.len() - 1]) as usize,
+        )),
+        _ => None,
+    }
+}
+
+fn parse_schema_by_content(value: &Value) -> Result<Rc<Schema>, String> {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    hash_schema_value(value, &mut hasher);
+    let key = std::hash::Hasher::finish(&hasher);
+    SCHEMA_CACHE.with(|cache| {
+        if let Some(schema) = cache.borrow().get(&key) {
+            return Ok(Rc::clone(schema));
+        }
+        let schema = Rc::new(Schema::parse(value)?);
+        let mut cache = cache.borrow_mut();
+        // a handful of distinct schemas per session; bound it anyway
+        if cache.len() >= 64 {
+            cache.clear();
+        }
+        cache.insert(key, Rc::clone(&schema));
+        Ok(schema)
+    })
+}
+
+thread_local! {
+    static SCHEMA_CACHE: std::cell::RefCell<HashMap<u64, Rc<Schema>>> =
+        std::cell::RefCell::new(HashMap::new());
+    static SCHEMA_IDENTITY: std::cell::RefCell<HashMap<(usize, usize, usize), (Value, Rc<Schema>)>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
+/// Hash the parts of a value a schema can contain (lists, maps, atoms).
+fn hash_schema_value(value: &Value, hasher: &mut impl std::hash::Hasher) {
+    use std::hash::Hash;
+    match value {
+        Value::List(items) => {
+            0u8.hash(hasher);
+            items.len().hash(hasher);
+            for item in items {
+                hash_schema_value(&item.borrow(), hasher);
+            }
+        }
+        Value::Map(map) => {
+            1u8.hash(hasher);
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            for key in keys {
+                key.hash(hasher);
+                hash_schema_value(&map[key].borrow(), hasher);
+            }
+        }
+        Value::String(s) => { 2u8.hash(hasher); s.hash(hasher); }
+        Value::Symbol(s) => { 3u8.hash(hasher); s.hash(hasher); }
+        Value::Keyword(s) => { 4u8.hash(hasher); s.hash(hasher); }
+        Value::Number(n) => { 5u8.hash(hasher); n.to_bits().hash(hasher); }
+        Value::Bool(b) => { 6u8.hash(hasher); b.hash(hasher); }
+        _ => 7u8.hash(hasher),
+    }
 }
 
 fn value_datum(props: &HashMap<String, Value>, schema: &Schema) -> Datum {
@@ -1044,7 +1140,7 @@ impl WidgetDefinition for SexpSlotWidget {
         let text = match parse_schema(props) {
             Ok(schema) => {
                 let value = value_datum(props, &schema);
-                match (&schema, &value) {
+                match (&*schema, &value) {
                     (Schema::Forms(_), Datum::List(items)) => {
                         items.iter().map(Datum::text).collect::<Vec<_>>().join(" ") + " +"
                     }

@@ -450,7 +450,7 @@ impl SequencerState {
             .unwrap_or(false)
     }
 
-    pub(super) fn set_scene_silenced(&self, track: usize, silenced: bool) {
+    pub(crate) fn set_scene_silenced(&self, track: usize, silenced: bool) {
         if let Some(flag) = self.pattern.scene_silenced.get(track) {
             flag.store(silenced, Ordering::Release);
         }

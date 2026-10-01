@@ -202,6 +202,29 @@ to grow last in the row.
   when it is saved. Save a matching pair of files (core and view) together,
   or a reload can see one new file and one old.
 
+## Making it a package
+
+When the user wants to share a sequencer (identity `author/name`, for
+example `alec/euclid`):
+
+1. Build the package folder OUTSIDE the packages folder (the importer refuses
+   a folder already inside it), for example `~/Desktop/alec.euclid/`.
+2. Copy each module to `src/`, renaming it into the namespace
+   `author.name.`: `euclid/core.lisp` becomes `src/core.lisp` declaring
+   `(module alec.euclid.core)`. Rewrite every qualified reference to match,
+   including `:requires`, `(import …)`, calls like `euclid.core/tick`, and
+   module-qualified macro names inside `:shader` bodies.
+3. Write `manifest.json` with `name`, `version`, `entry` (the view module) and
+   `kinds` (see "Files and names").
+4. Install it with `eseq package import ~/Desktop/alec.euclid`, then check
+   the installed module: `eseq sequencer check alec.euclid.rings`.
+5. Tell the user: the package now appears under **Installed** in the
+   Packages tab, and **File > Import Package…** installs the same folder
+   (or a zip of it) on another machine. The kind id changes with the
+   namespace (`alec/euclid:euclid` instead of `euclid.rings:euclid`), so
+   instances in existing projects still use the Local copy; keep it until
+   those projects are moved over.
+
 ## Checking
 
 ```sh
@@ -230,5 +253,6 @@ To see the playing state in the PNG, give the view a preview hook, such as
 above 0, and set it with `--eval '(set! my.pulse/pulse-preview-mark 37)'`.
 
 The check does not run the tick. When the panel is right, ask the user to
-press Play and listen, and to report any error in the status line (a tick
-error names the module and the failing form).
+press Play and listen, and to report any error in the status line. A tick
+error reads `Sequencer '<label>' tick failed (generator parked until its
+source changes): <error>`; the sequencer stays silent until a file changes.

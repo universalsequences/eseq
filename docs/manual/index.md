@@ -78,5 +78,6 @@ The chapters follow the order in which you meet eseq. Concepts and the first ses
 - [Mixer](mixer) — levels, sends, buses and groups
 - [Saving and export](saving-and-export) — projects and stereo WAV export
 - [Packages](packages) — installing, sharing and writing packages, including the factory sequencers
+- [Making sequencers with an agent](sequencer-authoring) — have a coding agent write a sequencer package, from first request to shared package
 - [Keys and customization](customization) — focus, shortcuts, buffers, Customize and init.lisp
 - [Troubleshooting](troubleshooting) — silent tracks and unexpected behavior

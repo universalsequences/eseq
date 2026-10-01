@@ -1223,6 +1223,59 @@ pub(in crate::lisp_host) fn register_sequencer_natives_with_accumulators(
         },
     );
 
+    let generator_tick_for_harmony = Arc::clone(&generator_tick);
+    let generator_channels_for_harmony = Arc::clone(&generator_channels);
+    runtime.register_native_with_docs(
+        "gen-track-harmony",
+        "(gen-track-harmony track)",
+        "Track TRACK's harmony at this tick's beat, for a generator :tick: (list chord key) — chord pitches in semitones from the track root, key its pitch classes — the step it is on (else what it sounds), or nil before it has played. Refreshed once per lookahead chunk.",
+        move |args, _ctx| {
+            let Some(EValue::Number(track)) = args.first() else {
+                return Err("gen-track-harmony expects a track number".to_string());
+            };
+            let beat = {
+                let guard = generator_tick_for_harmony
+                    .lock()
+                    .map_err(|_| "failed to lock generator tick context".to_string())?;
+                let Some(ctx) = guard.as_ref() else {
+                    return Err("gen-track-harmony called outside a generator tick".to_string());
+                };
+                ctx.beat
+            };
+            let harmony = Arc::clone(
+                &generator_channels_for_harmony
+                    .lock()
+                    .map_err(|_| "failed to lock generator channel snapshot".to_string())?
+                    .harmony,
+            );
+            let Some(timeline) = usize::try_from(track.round() as i64)
+                .ok()
+                .and_then(|track| harmony.get(track))
+            else {
+                return Ok(EValue::Nil);
+            };
+            let Some((_, current)) = timeline.iter().rev().find(|(at, _)| *at <= beat + 1e-9).or(timeline.first())
+            else {
+                return Ok(EValue::Nil);
+            };
+            let numbers = |values: Vec<f64>| {
+                EValue::List(
+                    values
+                        .into_iter()
+                        .map(|v| std::rc::Rc::new(std::cell::RefCell::new(EValue::Number(v))))
+                        .collect(),
+                )
+            };
+            let cell = |value| std::rc::Rc::new(std::cell::RefCell::new(value));
+            Ok(EValue::List(vec![
+                cell(numbers(current.chord.iter().map(|p| f64::from(*p)).collect())),
+                cell(numbers(
+                    (0..12).filter(|pc| current.key_mask & (1 << pc) != 0).map(f64::from).collect(),
+                )),
+            ]))
+        },
+    );
+
     let generator_channels_for_chan_epoch = Arc::clone(&generator_channels);
     runtime.register_native_with_docs(
         "chan-epoch",

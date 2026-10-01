@@ -102,3 +102,5 @@ eseq also has a built-in conversation buffer for drafting instruments and effect
 ## Sharing what you make
 
 Instruments and effects you make can be shared as a package: **File > Export Package…** bundles chosen instruments and effects into a file someone else can install. See [Packages](packages).
+
+The same agent can also write sequencers, which are Lisp packages rather than DGenLisp; see [Making sequencers with an agent](sequencer-authoring).

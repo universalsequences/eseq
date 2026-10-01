@@ -1,6 +1,9 @@
 # Jaki row processes: per-row process chains, written in Lisp
 
-Status: spec rev 1, 2026-09-29. Epic: `bd list --label jaki-procs`.
+Status: spec rev 3, 2026-09-30. .1-.6 BUILT; §12 records build deviations,
+§13 harmony, §15 the rev 3 surface (keyword args, nested sources, plain
+action words, scale/harmony). Examples in §1-§6 use the rev 1 spelling,
+which still parses. Epic: `bd list --label jaki-procs`.
 
 ## 1. Goal
 
@@ -172,16 +175,18 @@ in `next`:
 
 Any other word inside `next` (`fast`, `slow`, `trunc`, `(rot n)` on a
 figure with padding, `(* n)`) is rejected when the route is prepared.
-Because this is a live-coding surface, "rejected" means ignored, with a
-status message; the rest of the pattern keeps playing.
+Because this is a live-coding surface, "rejected" means ignored; the rest of
+the pattern keeps playing. (The scheduler VM has no status-message native, so
+the ignore is silent, like any other unknown jaki word; the kind's editor only
+offers allowed words.)
 
 ### 6.1 Halftime
 
-- **Fit halftime (in scope).** `(next half)` is `half-events` followed by a
-  `:fit` time-mod to the untransformed unit count. The figure plays its
-  halftime shape squeezed into its original span, and cycle length is
-  untouched. This reuses `half-walk` and the `:fit` kind that `eval-fig`
-  already handles.
+- **Fit halftime (in scope).** `(next half)` appends the `half` figure
+  transform. No `:fit` is needed: `half-walk` already keeps the unit count
+  (`. .` becomes one double-length dot, `. . -` one double-length dash), so
+  the figure plays its halftime shape in its original span and cycle length
+  is untouched.
 - **True halftime (out of scope, bead .7).** Making the next figure *longer*
   makes cycle length depend on coin outcomes. `locate` finds the cycle from
   the tick in closed form, assuming lengths repeat with period P. Supporting
@@ -202,9 +207,13 @@ Row processes use a **pure hash** instead:
 u = hash(seed, chain k, stage s, cycle, figure index, hit index) ∈ [0,1)
 ```
 
-This is implemented in Lisp, for example as `fract(sin(dot(key, primes)) ·
-43758.5453)` with a guard against the low-bit patterns of the sine hash (the
-unit tests check the distribution, §10). Consequences:
+This is implemented in Lisp as integer mixing modulo the prime 67108859
+(< 2^26): each key is folded in linearly, then scrambled quadratically
+(`a·(a+12345)`), with two extra scramble rounds at the end. Every product
+stays under 2^53, so it is exact in f64. The sine hash was rejected: its
+quality depends on `sin` precision at large arguments, and the cycle index
+grows without bound. `alez.jaki.core/hash-u` is exported; the unit tests check
+determinism, bucket uniformity and serial independence (§10). Consequences:
 
 - The memo stays valid, and seeking to a cycle reproduces its coins exactly.
 - The same position always makes the same choice. Replaying bar 12 replays
@@ -220,13 +229,13 @@ scalar cells keyed by the route pattern's cell prefix, next to `jaki-vel`:
 
 | Cell | Meaning |
 |---|---|
-| `jp<k>:acc` | accumulator |
-| `jp<k>:n` | count |
+| `jp<k>:n` | steps taken; `(count N)` reads `n mod N`, and `n > 0` means "has a held value" |
 | `jp<k>:hold` | held value (§5.1) |
 | `jp<k>:pend` | pending next-figure flag (§6) |
+| `jp<k>:acc<s>` | stage `s`'s accumulator, stored as the offset from `lo` (so a fresh chain starts at `lo`) |
 
-The chain state travels **inside `st`** as a `:procs` list of per-chain
-dicts. Everything that already threads `st` therefore threads it for free:
+The chain state travels **inside `st`** as a `:procs` list with one flat
+number list per chain, `(n hold pend acc0 acc1 …)`. Everything that already threads `st` therefore threads it for free:
 `fold-events`, `eval-figs`, `roll-state`, `ensure-state`. `load-state` /
 `store-state` read and write the four cells per chain.
 
@@ -296,16 +305,160 @@ scratch-VM harness (`crates/sequencer/src/lisp_host/tests.rs`, alongside the
 
 ## 11. Out of scope / later
 
-- **Harmony (bead .6).** "Set harmony from track 4 / slot 3" needs a harmony
-  read in generator context, and none exists: process `read` natives are
-  walled off. The Lisp-only route is a track process that publishes the
-  chord as a 12-bit pitch-class mask into a channel, plus a jaki stage
-  `(harmony "chan")` / action `(snap note)` that reads it with `chan-get`.
-  This needs a check that channel values carry integers that large exactly
-  (they are f64, so 4095 is safe), and a decision on where the publishing
-  process lives.
+- **Harmony (bead .6): BUILT, see §13.**
 - **Row-to-row reads.** One chain reading another row's hits or held value
   can live in state cells, but it couples route evaluation order; deferred.
 - **Chains reading each other's x.** A shared per-row bus; deferred until
   someone wants it.
 - **True halftime** (§6.1, bead .7).
+
+## 12. Build notes (rev 2)
+
+Where the build (eseq-1sr5.1-.3) differs from or refines rev 1:
+
+- **Order within a hit.** The velocity model reads the held
+  `dashdecay`/`dotdecay`/`basevel` values from *before* the hit, because a
+  step needs the hit's accent to test its trigger. The chains then step, and
+  the hit itself takes the new held `vel`/`note`/`gate` values and this
+  step's `then` words. The worked example is unaffected: the dash's head
+  steps and its second hit reads the new value.
+- **Held `(* vel)`** scales the emitted velocity only. It does not feed back
+  into the velocity model's `:cur`, just like the `vel*` route word.
+- **Alignment padding** hits (`(align n :pad)`) do not run processes. Chain
+  state passes through them unchanged.
+- **Seeds.** A route with processes and no `(seed n)` word gets seed = route
+  index in `prepare`, and the seed is appended to the pattern id. Without
+  that, two routes with identical words would share memo entries and state
+  cells, and so the same coins.
+- **Extra stage.** A bare number is a constant source (`(proc left 7 (+ note))`).
+- **Defaults** for omitted stage args: `(coin)` p 0.5, `(acc)` step 0.1 over
+  [0,1), `(count)` 2, `(pow)` 1, `(clamp)` [0,1], `(cmp OP)` t 0.5, `(quant)` 1.
+- **A chain with no valid action, or whose trigger is not a selector, is
+  dropped.** The route's other words still apply.
+
+## 13. Harmony
+
+Two routes, both built:
+
+- **`(harmony :track n :amount a)`** (rev 3, the main one): holds each hit's
+  final note to track n's harmony with lane-harmony's strictness tiers
+  (`harmonic-snap`: 1 chord tones only, ~0.5 in key, 0 free). A route word,
+  an `on` word, or a chain action (every hit the chain steps on). The read is
+  the Rust native `gen-track-harmony` (the one exception to the pure-Lisp
+  rule, agreed 2026-09-30): each lookahead chunk the scheduler publishes
+  every track's harmony timeline (`ProcessRuntime::track_harmony_timeline`:
+  the step pattern in force at chunk start, then each boundary in the chunk;
+  a track with no steps falls back to what it sounded), and the native picks
+  the entry at the tick's own beat. Same boundary, no channel. The kind's
+  track dropdown is the `track` dyn word source (ui/param_words.rs): the
+  0-based track number, its name beside it.
+- **Channel bridge** (`alez.jaki.harmony/harmony` + `(snap "chan")`): a
+  conductor publishes a track's chord as a 12-bit pitch-class mask into a
+  channel. Timer (`:every`) processes cannot do this: they run with an empty
+  read snapshot. One chunk of latency. Useful when several sequencers share
+  one harmony source by name.
+
+`(scale :MODE :root NOTE)` snaps to a fixed scale in pure Lisp (modes major
+minor dorian phrygian lydian mixolydian locrian harmonic-minor melodic-minor
+pentatonic minor-pentatonic blues whole-tone chromatic; roots C..B, flats or
+sharps, relative to transpose 0). Order at emit: harmony, then scale, then
+snap. Ties go downward.
+
+Tests: `jaki_scale_holds_notes_to_a_musical_scale`,
+`jaki_snap_moves_notes_to_the_channel_pitch_classes` (lisp_host);
+`jaki_harmony_word_holds_a_route_to_another_tracks_step_chord`,
+`jaki_harmony_channel_snaps_a_jaki_route_to_another_tracks_chord` (scheduler).
+
+## 14. True halftime (bead .7): design proposal, NOT built
+
+`(next slow2)`, a next figure that plays its shape at half speed over *twice*
+its span, makes a cycle's length depend on coin outcomes. Three invariants
+stand in the way: `fig-len`/`cycle-length` never run processes, `locate`
+finds a tick's cycle in closed form from a periodic length table, and
+`ensure-state` rolls at most 8 cycles, then treats anything further as a jump.
+
+**Option A: elastic clock, restart on seek.** Replace `locate` for such routes
+with running cells `jaki-cstart` / `jaki-clen`. A tick past `cstart + clen`
+evaluates the next cycle, with processes, and takes its real length. A jump
+re-anchors cycle 0 at the jump tick, as `:retrig` does. Cost: seeking to bar
+12 no longer plays bar 12's material, and routes of one body drift apart
+because each has its own clock.
+
+**Option B: elastic clock, replay on seek.** Like A, but a jump replays
+cycles from the last known anchor up to the target. Exact, but O(cycles) per
+seek, and needs a cap (fall back to A beyond, say, 64 cycles). The replay
+runs on the scheduler thread inside one tick.
+
+**Option C: fixed frame, overflow truncates (recommended).** The cycle keeps
+its closed-form length. A slowed figure takes twice its span and pushes the
+figures after it later; whatever crosses the cycle end is dropped (hands and
+velocity still thread through it, as with `rest`). It needs no clock change,
+no memo change and no seek change. Musically it is "halftime eats the rest of
+the bar", which is how a drummer plays a halftime fill inside a fixed
+phrase. It is also cheap: eval-fig reads the pending flag, doubles `scale`,
+and a final `keep` drops events at or past `:len`.
+
+Recommendation: C now, spelled `(next slow)`. A and B only if someone needs
+phrases whose length itself grows. Decision needed before building.
+
+## 15. Rev 3 surface (2026-09-30, after first use)
+
+Rev 1's editor was hard to use: positional args nobody could read, and
+`(+ note)` read like Lisp addition. Rev 3:
+
+- **Keyword args, pre-filled** by the editor: `(acc :by 1 :min 0 :max 8)`.
+  An arg list starting with a known keyword is read by keyword, else
+  positionally.
+- **Nested sources are cables**: any number arg may be a source
+  (`coin rand acc count cyc chan`), evaluated on the same step with its own
+  state cell and hash node. `(acc :by (coin :p 0.5) :min 0 :max 16)`. No
+  fan-out (one source feeding two args); names could add it later.
+- **Plain action words**, the target-first spelling jaki already uses,
+  where a missing number means x: `note+ vel* gate* dashdecay* dotdecay*
+  basevel*`.
+- `scale` is musical; the linear map is `remap`.
+- Chain state: `(n hold pend v0 v1 …)`, one cell per source node in parse
+  order (node ids reset per chain); `count` still reads the chain's step n.
+- The editor's number slots nest two levels deep (sexp-slot schemas are
+  data and cannot recurse); typed source nests any depth.
+
+Rev 3.1 (same day): the editor cannot offer one name as both a bare word and
+a form, so the held actions are `(note+ x)` / `(vel* x)`. `x` in an action's
+slot means the chain's value, held; a number means an event word gated on
+`x >= 0.5`, written straight in the chain (`(coin :p 0.5) (note+ -12)`,
+`(coin) rest`), so `then` is only needed to group several words. Bare
+`note+` still parses. `(next (fast n))` / `(next (* n))` is allowed: fast
+packs n times the hits into the figure's own span (length unchanged; a
+`:slow`/`:fit` figure ignores it). `(next (slow n))` is the open .7 decision.
+
+Rev 3.2 (same day): renamed **rules**. The surface word is `(rule …)`;
+`proc` still parses, and the kind document keeps the field name `:procs` so
+saved documents load. A rule is an `on` with a decision in between: `on`
+picks hits and always applies, a rule picks hits, computes, and acts on the
+result. In the kind, a row's `rules N` toggle (before its words) opens a box
+under the row: one line per rule, `TRIGGER -> STAGES… ACTIONS…`, then a
+`+ rule` button and the seed (a rarely touched reroll) at the right. The
+per-row preview strip is gone (`preview-procs` stays in core for tests and a
+future preview). Folding stages into `on` itself is a
+possible later step, held until there is usage to judge it by.
+
+Rev 3.3 (same day): `$1` names the stages' value (`x` still parses), with
+`$` context matching the neural expr cards where it applies (`$n`, `$vel`,
+plus `$cycle $fig $rep`). `(if COND w… (else w…))`: every word after COND is
+the then-branch, so the editor's `+` adds another; `else` is its own form
+(not Lisp's positional third arg). Bare figure words (`half rev swap ghost
+(fast n)`, and velocity-model words `(minvel v)` etc.) mean the next figure,
+in a rule or a branch; next-figure word sets are bits in the rule's pending
+mask. A rule with no stages always acts. Later: several sources as
+`$1 $2 …` (multi-inlet) and several outlets.
+
+Rev 3.4 (same day): `(for N w…)` runs figure words over the next N figures
+(N per-cycle data, read when it fires). Pending next-figure sets are now a
+countdown cell per set (after the source cells; `:nbase`), not a bitmask:
+firing sets max(remaining, N), each figure that starts counts one down;
+`(next …)` and bare figure words are a set of length 1. A rule's own `fast`
+no longer feeds its counters: `fast-steps` flags the hits the figure was
+written with (its authored `(* n)` included) and only those step rules, so
+`(count :n 16) (if (> $1 12) (fast 8))` cannot loop on its own extra hits
+(it did: every fast figure counted through 13-15 and re-armed itself).
+`(fast (4 8))` args stay raw and resolve per cycle.

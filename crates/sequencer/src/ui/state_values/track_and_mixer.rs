@@ -11,6 +11,15 @@ pub(crate) fn build_record_armed_value(armed: &[bool]) -> Value {
 
 /// Build a Lisp Value::List of track name strings.
 pub(crate) fn build_track_names(names: &[String]) -> Value {
+    // every SEQ.track-names publish also refreshes the sexp-slot `track`
+    // word source (jaki's `(harmony :track n)` dropdown) — so only TRACK
+    // names may come through here; other name lists use build_name_list
+    crate::param_words::set_track_word_names(names);
+    build_name_list(names)
+}
+
+/// A Lisp list of name strings (bus names and the like), no side effects.
+pub(crate) fn build_name_list(names: &[String]) -> Value {
     let items: Vec<Rc<RefCell<Value>>> = names
         .iter()
         .map(|name| Rc::new(RefCell::new(Value::String(name.clone()))))
@@ -906,7 +915,7 @@ pub(crate) fn sync_bus_mixer_control_state(rt: &mut Runtime, app: &app::App) {
         .collect();
     rt.set_reactive("SEQ", "bus-output-routes", build_bus_output_routes(app));
     rt.set_reactive("SEQ", "bus-ids", Value::List(ids));
-    rt.set_reactive("SEQ", "bus-names", build_track_names(&names));
+    rt.set_reactive("SEQ", "bus-names", build_name_list(&names));
     rt.set_reactive("SEQ", "bus-volumes", Value::List(volumes));
     rt.set_reactive("SEQ", "bus-mutes", Value::List(mutes));
     rt.set_reactive("SEQ", "bus-solos", Value::List(solos));

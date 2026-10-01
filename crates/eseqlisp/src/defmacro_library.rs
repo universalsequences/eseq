@@ -1256,9 +1256,11 @@ mod tests {
         // which the legacy substituting expander could never have reproduced.
         // Record them as named exceptions rather than dropping the audit, so
         // every other checked-in macro stays covered.
-        const DELIBERATELY_PROCEDURAL: [(&str, &str); 2] = [
+        const DELIBERATELY_PROCEDURAL: [(&str, &str); 3] = [
             ("content/packages/alez.jaki/src/surface.lisp", "jak"),
             ("content/packages/alez.sig/src/surface.lisp", "sig"),
+            // like `sig`: gensym'd process/binding names for the shipped body
+            ("content/packages/alez.jaki/src/harmony.lisp", "harmony"),
         ];
 
         let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");

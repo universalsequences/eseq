@@ -4,7 +4,9 @@
 ;;
 ;;   figures   ((:dot :dot :dash) (4 :dot :dash))    one list per figure; a
 ;;                                                   leading count repeats it
-;;   rows      ((dict :route 0 :mods (("trunc" 3) "right")) …)
+;;   rows      ((dict :route 0 :mods (("trunc" 3) "right")
+;;                    :procs (("left" ("coin" 0.5) ("next" "rest")))
+;;                    :seed 3) …)
 ;;   row-count 8                                      rows that show and play
 ;;   patterns  ((dict :figures … :rows … :row-count 4) …)
 ;;                                                   patterns after the first
@@ -19,6 +21,12 @@
 ;; a list, one per cycle: ("fast" (1 2)), ("every" 2 ("rev" "swap")). Rows
 ;; saved before the slot hold (dict :op "trunc" :args (3)) records; they
 ;; still read (`mod-item`).
+;;
+;; A row's :procs are its row process chains (docs/jaki-row-processes-spec.md
+;; §9), each a list in the same encoding: the trigger (one selector item; a
+;; multi-term trigger is ("and" …)) then stage and action items. They become
+;; one (rule …) route word each, after the mods; :seed (optional) becomes
+;; (seed n).
 ;;
 ;; `body` turns it into ordinary jaki body data, the same shape a `(jak …)`
 ;; form hands `alez.jaki.core/run`:
@@ -42,7 +50,9 @@
         figure-options figure-option-labels zero-mods
         num-mods mod-arg-spec every-words split-targets
         figures-body modes mode-labels mode-of
-        pattern-list pattern-sounds? patterns-body new-pattern tick-patterns)
+        pattern-list pattern-sounds? patterns-body new-pattern tick-patterns
+        row-procs proc-word new-chain chain-trigger-items chain-with-trigger
+        proc-trigger-schema proc-body-schema)
 
 ;; ── figures ─────────────────────────────────────────────────────────────────
 
@@ -112,9 +122,9 @@
     "rep"   (list 1 16 1 0 1)
     "nth"   (list 1 16 1 0 2)
     "basevel"   (list 0 1 0.01 2 0.8)
-    "dotdecay"  (list 0 1 0.01 2 0.85)
-    "dashdecay" (list 0 1 0.01 2 0.9)
-    "minvel"    (list 0 1 0.01 2 0.3)
+    "dotdecay"  (list 0 1 0.01 2 0.5)
+    "dashdecay" (list 0 1 0.01 2 0.5)
+    "minvel"    (list 0 1 0.01 2 0)
     "maxvel"    (list 0 1 0.01 2 1.0)
     "every" (list 1 16 1 0 4)
     "every-fig" (list 1 16 1 0 2)
@@ -123,6 +133,27 @@
     ;; the fallback for an unknown name or an unrouted row
     "plock" (list -100000 100000 0.01 2 0)
     _ nil))
+
+;; ── schema atoms shared by the row slot and the process chain slots ───────
+
+(def pnum (lo hi step dec def)
+  (list "num" :min lo :max hi :step step :decimals dec :default def))
+(def pword (words) (list "fixed" (cons "word" words)))
+(def pkw (k) (pword (list k)))
+
+(def scale-modes
+  (list ":major" ":minor" ":dorian" ":phrygian" ":lydian" ":mixolydian" ":locrian"
+        ":harmonic-minor" ":melodic-minor" ":pentatonic" ":minor-pentatonic"
+        ":blues" ":whole-tone" ":chromatic"))
+(def note-roots (list "C" "Db" "D" "Eb" "E" "F" "Gb" "G" "Ab" "A" "Bb" "B"))
+
+;; (scale :minor :root C) and (harmony :track 1 :amount 1): row words and
+;; chain actions alike (docs/jaki-row-processes-spec.md §13). The track comes
+;; from the host's `track` word source (0-based, the name beside it).
+(def scale-form (list "form" "scale" (pword scale-modes) (pkw ":root") (pword note-roots)))
+(def harmony-form
+  (list "form" "harmony" (pkw ":track") (list "fixed" (list "dyn" "track"))
+                         (pkw ":amount") (pnum 0 1 0.05 2 1)))
 
 ;; ── the row's sexp-slot schema (docs/sexp-slot-spec.md §4) ─────────────────
 
@@ -211,7 +242,7 @@
   (append
     (list "forms" (cons "word" zero-mods))
     num-forms
-    (list quant-form plock-form)
+    (list quant-form plock-form scale-form harmony-form)
     (list (list "form" "on" sel-schema on-body)
           (list "form" "every" (num-schema "every") gated-word)
           (list "form" "every-fig" (num-schema "every-fig") gated-word)
@@ -219,6 +250,124 @@
           (list "form" "R" (cons "word" every-words))
           (list "form" "split" (list "fixed" (cons "word" split-targets)))
           (list "form" "merge" (list "fixed" (cons "word" split-targets))))))
+
+;; ── row process chain schemas (docs/jaki-row-processes-spec.md §3-6, §13) ─
+;; A chain line is two slots: the trigger's selector terms (ANDed), then the
+;; stages and actions. Stage args are keyword-labelled and pre-filled; a
+;; number arg also takes a nested source, (acc :by (coin :p 0.5) …).
+
+(def proc-trigger-schema
+  (cons "forms" (cons (cons "word" (cons "any" sel-words)) (rest (rest sel-schema)))))
+
+;; a number, or (depth > 0) a nested source whose args nest one level less
+(def pval (lo hi step dec def depth)
+  (if (<= depth 0)
+    (pnum lo hi step dec def)
+    (cons "or" (cons (pnum lo hi step dec def) (source-forms (- depth 1))))))
+
+(def source-forms (depth)
+  (list (list "form" "acc" (pkw ":by") (pval -16 16 0.05 2 1 depth)
+                           (pkw ":min") (pval -48 48 1 0 0 depth)
+                           (pkw ":max") (pval -48 48 1 0 8 depth))
+        (list "form" "coin" (pkw ":p") (pval 0 1 0.05 2 0.5 depth))
+        (list "form" "rand" (pkw ":min") (pval -48 48 1 0 0 depth)
+                            (pkw ":max") (pval -48 48 1 0 12 depth))
+        (list "form" "count" (pkw ":n") (pval 1 64 1 0 4 depth))
+        (list "form" "cyc" (list "rest" (pnum -48 48 1 0 0)))))
+
+(def proc-then-schema
+  (list "or" (pword (list "rest" "stac"))
+        (list "form" "vel*" (num-schema "vel*"))
+        (list "form" "vel+" (num-schema "vel+"))
+        (list "form" "note+" (num-schema "note+"))
+        (list "form" "note" (num-schema "note"))
+        (list "form" "gate" (num-schema "gate"))))
+
+;; only words that keep the figure's length (spec §6)
+(def proc-next-schema
+  (list "or" (pword (list "rest" "rev" "swap" "ghost" "stac" "half"))
+        (list "form" "fast" (pnum 2 8 1 0 2))
+        (list "form" "note+" (num-schema "note+"))
+        (list "form" "vel*" (num-schema "vel*"))
+        (list "form" "vel+" (num-schema "vel+"))
+        (list "form" "gate" (num-schema "gate"))))
+
+;; ── (if COND THEN [ELSE]) ──
+;; a value in a condition: a number or a $ context word; the left side of a
+;; comparison may also be arithmetic on those, (= (mod $n 4) 3). Kept this
+;; shallow on purpose: every slot carries its whole schema, and spelling
+;; arithmetic into both sides and into and/or/not made this part alone 77 KB
+;; (typed conditions may nest anything; only the editor's check is shallow).
+(def ctx-words (list "$1" "$n" "$vel" "$cycle" "$fig" "$rep"))
+(def cond-atom (list "or" (pnum -48 48 1 0 0) (cons "word" ctx-words)))
+(def cond-left
+  (append cond-atom
+          (map (lambda (op) (list "form" op cond-atom cond-atom)) (list "mod" "+" "-" "*"))))
+(def cond-ops (list "=" "!=" "<" ">" "<=" ">="))
+(def cond-compare (map (lambda (op) (list "form" op cond-left cond-atom)) cond-ops))
+(def cond-plain (cons "or" (map (lambda (op) (list "form" op cond-atom cond-atom)) cond-ops)))
+(def cond-schema
+  (append (cons "or" cond-compare)
+          (list (list "form" "and" cond-plain cond-plain)
+                (list "form" "or" cond-plain cond-plain)
+                (list "form" "not" cond-plain))))
+
+;; what an if does: event words on this hit, figure words on the next
+;; figure; `+` adds another, (else w…) runs when the condition fails
+(def value-or-x (op) (list "or" (num-schema op) (list "word" "$1")))
+(def branch-one
+  (list "or" (pword (list "rest" "stac" "half" "rev" "swap" "ghost"))
+        (list "form" "note+" (value-or-x "note+"))
+        (list "form" "vel*" (value-or-x "vel*"))
+        (list "form" "vel+" (num-schema "vel+"))
+        (list "form" "note" (num-schema "note"))
+        (list "form" "gate" (num-schema "gate"))
+        (list "form" "fast" (pnum 2 8 1 0 2))
+        (list "form" "minvel" (num-schema "minvel"))
+        (list "form" "maxvel" (num-schema "maxvel"))
+        (list "form" "basevel" (num-schema "basevel"))
+        (list "form" "dotdecay" (num-schema "dotdecay"))
+        (list "form" "dashdecay" (num-schema "dashdecay"))
+        scale-form))
+;; (for N w…): figure words for the next N figures
+(def for-form (list "form" "for" (pnum 1 16 1 0 2) (list "rest" branch-one)))
+(def branch-schema
+  (append branch-one (list for-form (list "form" "else" (list "rest" (append branch-one (list for-form)))))))
+(def if-form (list "form" "if" cond-schema (list "rest" branch-schema)))
+
+(def proc-body-schema
+  (append
+    (list "forms"
+          ;; transforms on $1, held targets $1 drives, and figure words (on
+          ;; the next figure)
+          (list "word" "sin" "abs" "gate*" "dashdecay*" "dotdecay*" "basevel*"
+                "half" "rev" "swap" "ghost"))
+    ;; one level of nesting in the editor, (acc :by (coin :p 0.5)): every
+    ;; level multiplies the schema, and each slot carries all of it (typed
+    ;; code nests deeper; only the editor's check stops at one)
+    (source-forms 1)
+    (list (list "form" "remap" (pkw ":in-lo") (pval -48 48 0.1 2 -1 1) (pkw ":in-hi") (pval -48 48 0.1 2 1 1)
+                               (pkw ":out-lo") (pval -48 48 0.1 2 0 1) (pkw ":out-hi") (pval -48 48 0.1 2 1 1))
+          (list "form" "clamp" (pkw ":min") (pval -48 48 1 0 0 1) (pkw ":max") (pval -48 48 1 0 12 1))
+          (list "form" "cmp" (pkw ":op") (pword (list ">=" ">" "<" "<=" "=")) (pkw ":to") (pval -48 48 0.5 1 1 1))
+          (list "form" "quant" (pkw ":step") (pval 0 12 1 0 1 1))
+          (list "form" "pow" (pkw ":e") (pval 0 8 0.5 1 2 1))
+          scale-form
+          harmony-form
+          ;; (note+ $1) / (vel* $1) hold the stages' value on every hit;
+          ;; with a number the word acts on the hit when $1 >= 0.5:
+          ;; (coin :p 0.5) (note+ -12)
+          (list "word" "rest" "stac")
+          (list "form" "note+" (value-or-x "note+"))
+          (list "form" "vel*" (value-or-x "vel*"))
+          (list "form" "fast" (pnum 2 8 1 0 2))
+          for-form
+          if-form
+          (list "form" "vel+" (num-schema "vel+"))
+          (list "form" "note" (num-schema "note"))
+          (list "form" "gate" (num-schema "gate"))
+          (list "form" "then" (list "rest" proc-then-schema))
+          (list "form" "next" (list "rest" proc-next-schema)))))
 
 ;; ── modifier items -> route words ──────────────────────────────────────────
 
@@ -242,7 +391,8 @@
 ;; label, not a word (docs/jaki-plock-spec.md §4).
 (def route-datum (x)
   (if (string? x)
-    (read-string x)
+    ;; "" is a dyn word nobody picked yet: `(harmony :track "")` reads 0
+    (if (= x "") 0 (read-string x))
     (if (number? x)
       x
       (if (= (first x) "plock")
@@ -250,6 +400,35 @@
         (map route-datum x)))))
 
 (def mod-form (m) (route-datum (mod-item m)))
+
+;; ── row processes (docs/jaki-row-processes-spec.md §9) ─────────────────────
+
+(def row-procs (row) (let ((ps (get row :procs))) (if (= ps nil) (list) ps)))
+
+;; ("chan" "name" 0) keeps its channel name a string, like plock's label
+(def proc-datum (x)
+  (if (and (not (string? x)) (not (number? x)) (not (empty? x)) (= (first x) "chan"))
+    (cons 'chan (cons (nth x 1) (map route-datum (rest (rest x)))))
+    (route-datum x)))
+
+(def proc-word (chain) (cons 'rule (map proc-datum chain)))
+
+;; a fresh rule: every hit, nothing yet (a rule without an action is
+;; skipped until it has one)
+(def new-chain (list "any"))
+
+;; The trigger as the trigger slot's items: ("and" a b) shows as a b, so
+;; `dash head` reads as two terms. An edit back: one item is the trigger, two
+;; or more are ANDed, none is `any`.
+(def chain-trigger-items (chain)
+  (let ((t (first chain)))
+    (if (and (not (string? t)) (not (number? t)) (not (empty? t)) (= (first t) "and"))
+      (rest t)
+      (list t))))
+
+(def chain-with-trigger (chain items)
+  (cons (if (empty? items) "any" (if (= (len items) 1) (first items) (cons "and" items)))
+        (rest chain)))
 
 ;; ── rows ────────────────────────────────────────────────────────────────────
 
@@ -263,7 +442,11 @@
     (and (number? route) (>= route 0))))
 
 (def row-segment (row)
-  (cons '-> (cons (get row :route) (map mod-form (get row :mods)))))
+  (cons '-> (cons (get row :route)
+                  (append (map mod-form (get row :mods))
+                          (map proc-word (row-procs row))
+                          (let ((seed (get row :seed)))
+                            (if (and (number? seed) (>= seed 0)) (list (list 'seed seed)) (list)))))))
 
 ;; ── document -> body ────────────────────────────────────────────────────────
 

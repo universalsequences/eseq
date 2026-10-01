@@ -3248,7 +3248,7 @@ pub(crate) fn init_runtime(
                 ),
                 (
                     "bus-names",
-                    build_track_names(
+                    build_name_list(
                         &app.buses
                             .iter()
                             .map(|bus| bus.name.clone())

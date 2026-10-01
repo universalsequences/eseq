@@ -213,6 +213,24 @@ The part before the first `->` is the **figure**. A `.` is a single stroke and t
 
 Each `->` starts a **route**: a track number, counted from 0 for the first track, followed by route words. With no route, the figure plays on track 0. In the example, track 0 plays the whole figure, track 1 plays only the left-hand strokes, and track 2 plays it shifted one unit later, wrapping round the cycle, with shortened notes. Other route words include `right`, `accent`, `rev`, `ghost`, `(rot n)`, `(fast n)`, `(slow n)`, `(vel s)` and `(note n)`. `(plock "instrument:cutoff" 5535)` sets a parameter for each note the route plays, by the name the macro editor shows for it, such as `"fx2:filterbank:freq"` or `"rack-macro:macro_1"`. The value can change per note: `(plock "instrument:cutoff" (seq :hit 100 5535 34))` steps through its values one note at a time, and `(on left (plock …))` sets it on left-hand strokes only. A name the track does not have is skipped, and the note still plays. A route that contains `(mute T)` or `(solo T)` plays no notes; it opens and closes a mute or solo on track T in time with the figure, so `-> (mute 3)` gates track 3 with the rhythm.
 
+A route can also carry **rules**: small chains that run on its strokes and decide what to change. Where `(on left …)` always applies its words, a rule first works something out — a coin flip, a running count — and acts on that. `(rule TRIGGER STAGE… ACTION…)` names which strokes step the rule (any selector `on` takes, such as `left`, `dash` or `(and dash head)`), then stages that compute one number, then actions that use it:
+
+```lisp
+(jak "yo" :16
+  (fig (. . -)) (fig (. -))
+  -> 0 (rule any (acc :by 1 :min 0 :max 8) (note+ $1))
+  -> 1 (rule left (coin :p 0.5) (note+ -12))
+  -> 2 (rule any (acc :by (coin :p 0.5) :min 0 :max 12) (note+ $1)))
+```
+
+A rule reads left to right: the stages work out one number, `$1`, and the action uses it. Track 0 counts up one semitone per stroke and wraps after 7: `$1` in an action's slot means "use the number". Track 1 flips a coin on every left-hand stroke and drops it an octave on heads: a plain number in the slot means "do this when `x` is 0.5 or more". On track 2 the count only moves on heads: any number in a stage can be another stage, here a coin feeding `:by`.
+
+Stages: `(acc :by :min :max)`, `(coin :p)`, `(rand :min :max)`, `(count :n)`, `(cyc v…)`, `(chan "name" d)`, `sin`, `abs`, `(pow :e)`, `(remap :in-lo :in-hi :out-lo :out-hi)`, `(clamp :min :max)`, `(cmp :op >= :to)` and `(quant :step)`. Actions: `(note+ $1)`, `(vel* x)`, `gate*`, `dashdecay*`, `dotdecay*` and `basevel*` apply `$1` to every stroke until the chain steps again. `(note+ n)`, `(vel* n)`, `(vel+ n)`, `(note n)`, `(gate n)`, `rest` and `stac` change the stroke that stepped, and `(next …)` the next figure (for example `(next rest)` or `(next (fast 4))`), both only when `$1` is 0.5 or more. Coins are not random each time: the same position in the pattern always gives the same result, so a replayed bar sounds the same. The row's **seed** picks a different set.
+
+For anything more specific, use `(if CONDITION …)`: `left -> (count :n 4) (if (= $1 3) (note+ 12))` lifts every fourth left-hand stroke an octave. `$1` is the number the stages worked out, `$n` how many times the rule has run, and `$fig` / `$rep` which figure and repeat this is. Everything after the condition happens when it is true; put the rest in `(else …)`. Figure words like `half`, `(fast 4)` or `(minvel 0.4)` change the next figure; `(for 3 (fast 8))` keeps them on for the next 3. A rule counts the pattern as written: the extra hits its own `fast` adds do not move its counts.
+
+Two words keep notes in key, on a whole route or inside a chain: `(scale :minor :root C)` moves each note to the nearest note of the scale, and `(harmony :track 1 :amount 1)` to the chord track 1 is playing (`:amount` 1 allows chord tones only, about 0.5 anything in key, 0 leaves notes alone). In the jaki instance panel, each row's **rules** button opens a box with one line per rule and a **+ rule** button; every word, number and nested stage is picked from menus or typed. The row's **seed**, at the right of that box, rerolls its coins.
+
 The route words are listed in the package's `core.lisp`, in the section headed "tier-2 route surface" (search for "Route words"), and the `jak` form is described at the top of `surface.lisp`. Use View Source.
 
 ### alez/sig: signal channels
@@ -256,7 +274,7 @@ A module is a Lisp file that begins with `(module name)`, declares what it offer
 - `override` replaces or wraps a factory definition, such as a mixer strip. It is listed under **Overrides** in Customize, where it can be switched off without removing the module.
 - A module can add a tab beside **Seq**, as the tracker and the graph sequencer do.
 
-The factory packages are the working reference for all of these. Open them with View Source, or use Copy to Local and change them.
+The factory packages are the working reference for all of these. Open them with View Source, or use Copy to Local and change them. [Making sequencers with an agent](sequencer-authoring) walks through writing a sequencer with a coding agent, from the first request to a package someone else can install.
 
 A Local module is enough for your own projects. To share one, build a package folder by hand: a `manifest.json` and the module files under `src/`, renamed into the package's namespace. The importer checks these rules:
 

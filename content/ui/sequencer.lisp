@@ -4148,8 +4148,8 @@
 ;; lit when active. They sit in a `wrap` that fills the header's right half,
 ;; so the column count follows the panel width and a long bank wraps onto
 ;; more rows rather than stretching the row past the window.
-(def rack-clip-cell-width 1.8)
-(def rack-clip-cell-height 0.9)
+(def rack-clip-cell-width 3.6)
+(def rack-clip-cell-height 1.8)
 (def rack-clip-rename-width 4.6)
 
 (def begin-clip-rename (clip)
@@ -4227,7 +4227,7 @@
           :on-submit (lambda () (finish-clip-rename gid id true))
           :on-cancel (lambda () (finish-clip-rename gid id false))
           :on-blur (lambda () (finish-clip-rename gid id true)))
-        (label id :color :dimmer :active (bind-seq (str "rack-clip-active-" gid "-" id)) :active-color :white :font-size 6 :bg :transparent :v-align :center :h-align :center)
+        (label id :color :dimmer :active (bind-seq (str "rack-clip-active-" gid "-" id)) :active-color :white :font-size 10 :bg :transparent :v-align :center :h-align :center)
         )
       
       )))
@@ -4279,7 +4279,7 @@
           (box :width 2.2 :height 0.0 :bg :transparent)
           (box :background-color '(rgba 0.1 0.1 0.1 0.2) :corner-radius 10 :padding 0.2
             (wrap :key (str "rack-clip-grid-" gid)
-              :width 50 :gap 0.12 :row-gap 0.12 :align :center
+              :width 48 :gap 0.12 :row-gap 0.12 :align :center
               (each clips |clip i|
                 (rack-clip-cell gid clip c))
               (rack-clip-number-picker gid clips c)))

@@ -50,6 +50,47 @@ use sequencer::sequencer::{SequencerState, SequencerTrackSnapshot, StepParam};
 /// The source name the jaki row schema spells as `(dyn "param")`.
 pub(crate) const PARAM_WORD_SOURCE: &str = "param";
 
+/// The `track` source (docs/jaki-row-processes-spec.md §13): every track as
+/// its 0-based index, the number jaki routes and `(harmony :track n)` use,
+/// with the track's name as the detail. Context-free.
+pub(crate) const TRACK_WORD_SOURCE: &str = "track";
+
+thread_local! {
+    static TRACK_NAMES: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Called wherever SEQ.track-names is published: a change bumps the `track`
+/// source so open slots re-ask.
+pub(crate) fn set_track_word_names(names: &[String]) {
+    let changed = TRACK_NAMES.with(|stored| {
+        let mut stored = stored.borrow_mut();
+        if stored.as_slice() == names {
+            return false;
+        }
+        *stored = names.to_vec();
+        true
+    });
+    if changed {
+        bump_dyn_word_epoch(TRACK_WORD_SOURCE);
+    }
+}
+
+fn track_words() -> DynWords {
+    TRACK_NAMES.with(|names| DynWords {
+        epoch: 0,
+        groups: vec![DynGroup {
+            group: String::new(),
+            items: names
+                .borrow()
+                .iter()
+                .enumerate()
+                .map(|(index, name)| DynItem::new(index.to_string(), format!("{} {name}", index + 1)))
+                .collect(),
+        }],
+        aliases: Vec::new(),
+    })
+}
+
 /// Shown (dim, unselectable) when a row has no destination track.
 pub(crate) const UNROUTED_HINT: &str = "route this row to see its parameters";
 
@@ -96,6 +137,7 @@ pub(crate) fn register_param_word_source(runtime: &mut Runtime, state: Arc<Seque
         });
     });
     register_dyn_word_source(PARAM_WORD_SOURCE, Box::new(|context| param_words(context).as_ref().clone()));
+    register_dyn_word_source(TRACK_WORD_SOURCE, Box::new(|_context| track_words()));
     runtime.register_native_with_docs(
         "dyn-word-valid?",
         "(dyn-word-valid? source context word)",
@@ -494,6 +536,23 @@ mod tests {
     use sequencer::effects::EffectDescriptor;
     use sequencer::sequencer::default_empty_effect_chain;
     use sequencer::process::ParamRef;
+
+    #[test]
+    fn track_word_source_lists_tracks_only_never_bus_names() {
+        register_dyn_word_source(TRACK_WORD_SOURCE, Box::new(|_context| track_words()));
+        crate::state_values::build_track_names(&["Spectral".to_string(), "Digi FM".to_string()]);
+        // the mixer publishes bus names through its own list builder
+        crate::state_values::build_name_list(&["Mix".to_string(), "Bus A".to_string()]);
+        let words = query_dyn_words(TRACK_WORD_SOURCE, &Value::Nil).expect("track source");
+        let items: Vec<(String, String)> = words
+            .items()
+            .map(|(_, item)| (item.word.clone(), item.detail.clone()))
+            .collect();
+        assert_eq!(
+            items,
+            [("0".to_string(), "1 Spectral".to_string()), ("1".to_string(), "2 Digi FM".to_string())]
+        );
+    }
 
     fn state_with_sampler_and_filter() -> Arc<SequencerState> {
         let state = Arc::new(SequencerState::new(

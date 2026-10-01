@@ -29,7 +29,8 @@
         eval-at eval-cycle cycle-length locate cycle-index
         default-state mk-state
         init emit emit* reset
-        run run-in step-clock play-routes play-pos)
+        run run-in step-clock play-routes play-pos
+        prepare hash-u preview-procs)
 
 ;; ── exact rationals: normalized (num den) 2-lists, den > 0 ──────────────────
 
@@ -584,6 +585,19 @@
                   (repeat* dot m)))))
         (list) evs)))
 
+;; Per HIT of (expand-fast evs nf): true for the hits evs was written with,
+;; false for the ones the expansion adds. A dot's first copy is the dot; a
+;; dash's (2nf-2) dots + dash keep the head on the first dot and the tail on
+;; the closing dash's second hit. Rules step only on true hits, so a rule's
+;; own (fast n) does not run its counters (the pattern as written).
+(def fast-steps (evs nf)
+  (reduce (lambda (acc e)
+            (append acc
+              (if (dash-sym? e)
+                  (append (cons true (repeat* false (- (* 2 nf) 3))) (list false true))
+                  (cons true (repeat* false (- nf 1))))))
+          (list) evs))
+
 ;; halftime (Liebezeit), the inverse of (* 2), dashes first: each `-` claims
 ;; the `. .` right before it and becomes one dash, then the dots left over in
 ;; each run pair up left to right into single dots — all at twice the length,
@@ -636,9 +650,11 @@
 
 ;; ── velocity model (Swift JakiVelocityState port) ───────────────────────────
 
+;; dot/dash decay 0.5 and min-vel 0 (2026-09-30, the Swift port had 0.85 /
+;; 0.9 / 0.3): unaccented hits fall away audibly, so accents read
 (def default-params
-  (dict :base 0.8 :dot-decay 0.85 :dash-decay 0.9
-        :accent-boost 1.15 :min-vel 0.3 :max-vel 1.0))
+  (dict :base 0.8 :dot-decay 0.5 :dash-decay 0.5
+        :accent-boost 1.15 :min-vel 0 :max-vel 1.0))
 (def default-state (dict :cur 0.8 :pwd false :streak 0))
 (def mk-state (cur pwd streak) (dict :cur cur :pwd pwd :streak streak))
 
@@ -715,6 +731,591 @@
       (append (if (dash-sym? (first evs)) (list hand hand) (list hand))
               (derive-hands (rest evs) (other-hand hand)))))
 
+;; ── row processes: (proc TRIGGER STAGE… ACTION…) ────────────────────────────
+;; (docs/jaki-row-processes-spec.md). A route word that collects a chain into
+;; the route pattern's :procs. Chains run inside the figure fold: on every hit
+;; the TRIGGER selector holds for, the chain STEPS — the stages fold one number
+;; x from 0, then the actions use it. Stage args take keywords, and any number
+;; arg may be a nested source that is evaluated on the same step:
+;;
+;;   (proc any (acc :by (coin :p 0.5) :min 0 :max 16) (note+))
+;;
+;; Chain state rides `st` as :procs, one flat number list per chain,
+;; (n hold pend v0 v1 …): n steps so far, the held x, the pending
+;; next-figure flag, and one cell per source node (an acc's offset from its
+;; min), node ids numbered in parse order.
+
+(def has-procs? (p) (not (empty? (or-default (get p :procs) (list)))))
+
+;; ── parsing (route time) ──
+
+;; every keyword a stage or action takes: an arg list that starts with one of
+;; these is read by keyword, else positionally (the rev 1 spelling)
+(def proc-keys '(:p :min :max :by :n :e :in-lo :in-hi :out-lo :out-hi :op :to
+                 :step :root :track :amount))
+
+(def kw-list? (a) (and (not (empty? a)) (member? (first a) proc-keys)))
+
+(def kw-arg (a key pos d)
+  (if (kw-list? a)
+      (let ((i (index-of* a key 0))) (if (>= i 0) (or-default (nth a (+ i 1)) d) d))
+      (or-default (nth a pos) d)))
+
+(def compound? (x) (and (not (number? x)) (not (string? x)) (not (= (nth x 0) nil))))
+
+(def source-head? (h) (member? h '(coin rand acc count cyc chan)))
+
+;; node ids, numbered per chain while it parses (reset by norm-proc)
+(def proc-ids 0)
+(def mk-node (k args) (let ((id proc-ids)) (do (set! proc-ids (+ id 1)) (dict :k k :id id :a args))))
+
+;; a number arg: (:node n) for a nested source, else (:lit raw) — per-cycle
+;; data resolve-arg reads
+(def norm-arg (raw)
+  (if (and (compound? raw) (source-head? (raw-head raw)))
+      (let ((n (norm-stage raw))) (if (= n nil) (list :lit 0) (list :node n)))
+      (list :lit raw)))
+
+(def remap-node (a)
+  (mk-node :remap (list (norm-arg (kw-arg a :in-lo 0 -1)) (norm-arg (kw-arg a :in-hi 1 1))
+                        (norm-arg (kw-arg a :out-lo 2 0)) (norm-arg (kw-arg a :out-hi 3 1)))))
+
+;; a stage → node dict (:k kind :id :a arg specs [:op]); nil when unknown
+(def norm-stage (it)
+  (if (number? it)
+      (mk-node :const (list (list :lit it)))
+      (let ((h (raw-head it)) (a (raw-args it)))
+        (match h
+          'coin  (mk-node :coin (list (norm-arg (kw-arg a :p 0 0.5))))
+          'rand  (mk-node :rand (list (norm-arg (kw-arg a :min 0 0)) (norm-arg (kw-arg a :max 1 1))))
+          'acc   (mk-node :acc (list (norm-arg (kw-arg a :by 0 0.1)) (norm-arg (kw-arg a :min 1 0))
+                                     (norm-arg (kw-arg a :max 2 1))))
+          'count (mk-node :count (list (norm-arg (kw-arg a :n 0 2))))
+          'cyc   (mk-node :cyc (list (list :lit (cons 'cyc a))))
+          'chan  (mk-node :chan (list (list :lit (nth a 0)) (list :lit (or-default (nth a 1) 0))))
+          'sin   (mk-node :sin (list))
+          'abs   (mk-node :abs (list))
+          'pow   (mk-node :pow (list (norm-arg (kw-arg a :e 0 2))))
+          'remap (remap-node a)
+          ;; rev 1's linear map, (scale a b c d); keyword `scale` is musical
+          'scale (if (number? (nth a 0)) (remap-node a) nil)
+          'clamp (mk-node :clamp (list (norm-arg (kw-arg a :min 0 0)) (norm-arg (kw-arg a :max 1 1))))
+          'cmp   (merge (mk-node :cmp (list (norm-arg (kw-arg a :to 1 0.5)))) :op (kw-arg a :op 0 '>=))
+          'quant (mk-node :quant (list (norm-arg (kw-arg a :step 0 1))))
+          _ nil))))
+
+;; ── musical scales and roots (tonic pitch class relative to transpose 0) ──
+
+(def scale-steps (mode)
+  (match mode
+    :major '(0 2 4 5 7 9 11)  :minor '(0 2 3 5 7 8 10)
+    :dorian '(0 2 3 5 7 9 10)  :phrygian '(0 1 3 5 7 8 10)
+    :lydian '(0 2 4 6 7 9 11)  :mixolydian '(0 2 4 5 7 9 10)
+    :locrian '(0 1 3 5 6 8 10)
+    :harmonic-minor '(0 2 3 5 7 8 11)  :melodic-minor '(0 2 3 5 7 9 11)
+    :pentatonic '(0 2 4 7 9)  :minor-pentatonic '(0 3 5 7 10)
+    :blues '(0 3 5 6 7 10)  :whole-tone '(0 2 4 6 8 10)
+    _ '(0 1 2 3 4 5 6 7 8 9 10 11)))
+
+(def note-pc (r)
+  (if (number? r)
+      (imod (round-int r) 12)
+      (match r
+        'C 0 'C# 1 'Db 1 'D 2 'D# 3 'Eb 3 'E 4 'F 5 'F# 6 'Gb 6 'G 7 'G# 8 'Ab 8
+        'A 9 'A# 10 'Bb 10 'B 11 _ 0)))
+
+(def scale-mask (mode root)
+  (let ((r (note-pc root)))
+    (reduce (lambda (m s) (+ m (pow2 (imod (+ s r) 12)))) 0 (scale-steps mode))))
+
+;; (scale :minor :root C) → (:smask m); (harmony :track 2 :amount 1) →
+;; (:harm track amount); (snap "chan") → (:snap name). Tags the hit; emit
+;; moves its final note (snap-hit).
+(def scale-op (a)
+  (let ((mode (if (and (not (empty? a)) (not (= (nth a 0) :root))) (nth a 0) :major))
+        (i (index-of* a :root 0)))
+    (list :smask (scale-mask mode (if (>= i 0) (nth a (+ i 1)) 0)))))
+
+(def note-op (w)
+  (let ((h (raw-head w)) (a (raw-args w)))
+    (match h
+      'scale   (if (number? (nth a 0)) nil (scale-op a))
+      'harmony (list :harm (kw-arg a :track 0 0) (kw-arg a :amount 1 1))
+      'snap    (list :snap (nth a 0))
+      _ nil)))
+
+;; one event word of (then W…) / (next W…) → an event op, or nil
+(def ev-op (w)
+  (let ((h (raw-head w)) (a (raw-args w)))
+    (match h
+      'rest  (list :drop)
+      'stac  (list :stac)
+      'vel*  (list :vmul (nth a 0))
+      'vel+  (list :vadd (nth a 0))
+      'note+ (list :nadd (nth a 0))
+      'note  (list :nset (nth a 0))
+      'gate  (list :gmul (nth a 0))
+      _ (note-op w))))
+
+;; (next W…) words → (dict :xf :ops :drop :fast). Only words that keep the
+;; figure's length (spec §6): fig-len and the super-cycle tables never run
+;; processes. `half` is length-preserving by construction (half-walk keeps
+;; the units), and so is (fast n) / (* n): n× the hits in the figure's own
+;; span. Anything else is ignored.
+(def next-xf-words '(rev swap ghost stac half))
+
+(def norm-next (ws)
+  (reduce
+    (lambda (acc w)
+      (let ((h (raw-head w)))
+        (if (member? h next-xf-words)
+            (merge acc :xf (append (get acc :xf) (list (list (head-kw h)))))
+            (if (= h 'rest)
+                (merge acc :drop true)
+                (if (and (member? h vel-model-words) (not (empty? (raw-args w))))
+                    (merge acc :xf (append (get acc :xf) (list (norm-xf w))))
+                (if (or (= h 'fast) (= h '*))
+                    (merge acc :fast (append (get acc :fast) (list (nth (raw-args w) 0))))
+                (let ((op (ev-op w)))
+                  (if (and (not (= op nil)) (member? (first op) '(:vmul :vadd :nadd :gmul)))
+                      (merge acc :ops (append (get acc :ops) (list op)))
+                      acc))))))))
+    (dict :xf (list) :ops (list) :drop false :fast (list)) ws))
+
+;; held actions: the target with `x` (or nothing) for its number —
+;; (note+ x) adds the chain's value to the note, (vel* x) scales velocity by
+;; it. (+ note) and (* dashdecay) are the rev 1 spellings.
+(def held-word (it)
+  (if (or (number? it) (string? it))
+      nil
+      (let ((h (raw-head it)) (a (raw-args it)))
+        (if (or (empty? a) (and (= (len a) 1) (chain-value? (nth a 0))))
+            (match h 'note+ :note 'vel* :vel 'gate* :gate 'dashdecay* :dash-decay
+                     'dotdecay* :dot-decay 'basevel* :base _ nil)
+            (if (and (= h '+) (= (nth a 0) 'note))
+                :note
+                (if (= h '*)
+                    (match (nth a 0) 'dashdecay :dash-decay 'dotdecay :dot-decay
+                                     'basevel :base 'vel :vel 'gate :gate _ nil)
+                    nil))))))
+
+;; `$1` (or the rev 3 spelling `x`): the value the stages produced
+(def chain-value? (v) (or (= v '$1) (= v 'x)))
+
+;; figure words: they reshape a whole figure, so straight in a chain (or in
+;; an if branch) they mean the NEXT figure — `(coin :p 0.2) half`. The
+;; velocity-model words set that figure's params: `(minvel 0.4)`.
+(def vel-model-words '(basevel dotdecay dashdecay minvel maxvel))
+
+(def fig-word? (it)
+  (and (compound-or-word? it)
+       (or (member? (raw-head it) '(half rev swap ghost fast))
+           (and (member? (raw-head it) vel-model-words) (not (empty? (raw-args it)))))))
+
+;; ── (if COND THEN [ELSE]) ──
+;; COND is a small expression over numbers and $ context: $1 the stages'
+;; value, $n the rule's steps so far (0-based, like the neural expr cards),
+;; $vel the hit's velocity, $cycle, $fig / $rep (1-based, like the (fig n) /
+;; (rep n) selectors). Comparisons, and/or/not, + - * / mod min max abs; true
+;; is any non-zero number. Every word after COND runs when it holds, and
+;; the words of an (else w…) when it does not: event words act on this hit,
+;; figure words (half (fast 4) (minvel 0.4) …, or (next …)) on the next
+;; figure. (do w…) groups words, as anywhere.
+(def truthy? (v) (and (number? v) (not (= v 0))))
+
+(def ctx-var (v env)
+  (match v
+    '$1 (get env :x)  'x (get env :x)  '$n (get env :n)  '$vel (get env :vel)
+    '$cycle (get env :cycle)  '$fig (get env :fig)  '$rep (get env :rep)
+    _ 0))
+
+(def cond-val (e env)
+  (if (number? e)
+      e
+      (if (= (nth e 0) nil)
+          (ctx-var e env)
+          (let ((h (raw-head e)) (a (map (lambda (z) (cond-val z env)) (raw-args e))))
+            (let ((a0 (or-default (nth a 0) 0)) (a1 (or-default (nth a 1) 0)))
+              (match h
+                '=  (b->n (= a0 a1))   '!= (b->n (not (= a0 a1)))
+                '<  (b->n (< a0 a1))   '>  (b->n (> a0 a1))
+                '<= (b->n (<= a0 a1))  '>= (b->n (>= a0 a1))
+                'and (b->n (reduce (lambda (acc v) (and acc (truthy? v))) true a))
+                'or  (b->n (reduce (lambda (acc v) (or acc (truthy? v))) false a))
+                'not (b->n (not (truthy? a0)))
+                '+ (reduce (lambda (acc v) (+ acc v)) 0 a)
+                '- (if (= (len a) 1) (* -1 a0) (- a0 a1))
+                '* (reduce (lambda (acc v) (* acc v)) 1 a)
+                '/ (if (= a1 0) 0 (/ a0 a1))
+                'mod (if (= a1 0) 0 (fwrap a0 a1))
+                'min (min a0 a1)  'max (max a0 a1)  'abs (abs a0)
+                _ 0))))))
+
+;; next-figure word sets, collected per rule while it parses. Each set has
+;; a countdown cell in the rule's state: firing it sets the count to its
+;; length (:for, raw per-cycle data; 1 unless written (for N w…)), and each
+;; figure it applies to counts one down.
+(def proc-nexts (list))
+(def add-next-set (words dur)
+  (if (empty? words)
+      -1
+      (do (set! proc-nexts (append proc-nexts (list (merge (norm-next words) :for dur))))
+          (- (len proc-nexts) 1))))
+
+(def for-form? (w) (= (raw-head w) 'for))
+
+;; the next-figure sets action words fire: (next …) and bare figure words
+;; together as one set lasting one figure, each (for N w…) its own
+(def collect-sets (ws)
+  (keep (lambda (i) (>= i 0))
+        (cons (add-next-set (reduce (lambda (acc v)
+                                      (if (= (raw-head v) 'next)
+                                          (append acc (rest v))
+                                          (if (fig-word? v) (append acc (list v)) acc)))
+                                    (list) ws)
+                            1)
+              (map (lambda (f) (add-next-set (drop* 2 f) (nth f 1))) (keep for-form? ws)))))
+
+(def flat-words (ws)
+  (reduce (lambda (acc w) (if (= (raw-head w) 'do) (append acc (flat-words (rest w))) (append acc (list w))))
+          (list) ws))
+
+(def norm-branch (words)
+  (let ((ws (flat-words words)))
+    (let ((sets (collect-sets ws))
+          (ops (some* (map (lambda (v)
+                             (if (or (fig-word? v) (= (raw-head v) 'next) (for-form? v)) nil (ev-op v)))
+                           ws))))
+      (dict :ops ops :sets sets))))
+
+(def else-form? (w) (= (raw-head w) 'else))
+
+(def norm-if (a)
+  (let ((ws (drop* 2 a)))
+    (dict :cond (nth a 1)
+          :then (norm-branch (keep (lambda (w) (not (else-form? w))) ws))
+          :else (norm-branch (reduce (lambda (acc w) (append acc (rest w)))
+                                     (list) (keep else-form? ws))))))
+
+;; an event word straight in the chain, (note+ -12) or `rest`, acts on the
+;; stepping hit when x ≥ 0.5 — `then` without the wrapper. A bare target
+;; word with no number (note+) is the held action instead.
+(def gated-word (it)
+  (if (and (compound-or-word? it) (= (held-word it) nil) (= (note-op it) nil)
+           (not (fig-word? it)) (not (member? (raw-head it) '(if for))))
+      (ev-op it)
+      nil))
+
+(def proc-action? (it)
+  (and (compound-or-word? it)
+       (or (not (= (held-word it) nil))
+           (member? (raw-head it) '(then next if for))
+           (fig-word? it)
+           (not (= (note-op it) nil))
+           (not (= (gated-word it) nil)))))
+
+(def compound-or-word? (it) (and (not (number? it)) (not (string? it))))
+
+(def some* (l) (keep (lambda (x) (not (= x nil))) l))
+
+;; (proc TRIGGER STAGE… ACTION…) args → chain record, or nil without a valid
+;; trigger or any action
+(def norm-proc (args figs)
+  (let ((sel (norm-sel (nth args 0) figs)) (items (rest args))
+        (reset (do (set! proc-ids 0) (set! proc-nexts (list)))))
+    (let ((stages (some* (map norm-stage (keep (lambda (it) (not (proc-action? it))) items))))
+          (acts (keep proc-action? items)))
+      (let ((held (some* (map held-word acts)))
+            (hitops (some* (map note-op acts)))
+            (thens (reduce (lambda (acc a)
+                             (if (= (raw-head a) 'then)
+                                 (append acc (some* (map ev-op (rest a))))
+                                 (let ((g (gated-word a))) (if (= g nil) acc (append acc (list g))))))
+                           (list) acts))
+            ;; (next …), bare figure words and (for …): sets gated on $1
+            (gsets (collect-sets acts)))
+        (let ((ifs (map norm-if (keep (lambda (a) (= (raw-head a) 'if)) acts))))
+          (if (or (= sel nil)
+                  (and (empty? held) (empty? hitops) (empty? thens) (empty? gsets) (empty? ifs)))
+              nil
+              (dict :sel sel :stages stages :width (+ 3 proc-ids (len proc-nexts))
+                    ;; the sets' countdown cells follow the source cells
+                    :nbase (+ 3 proc-ids)
+                    :muls (keep (lambda (t) (not (= t :note))) held)
+                    :nadd (member? :note held)
+                    :hitops hitops :then thens :ifs ifs
+                    :nexts proc-nexts :gsets gsets)))))))
+
+(def add-proc (p args)
+  (let ((c (norm-proc args (get p :figs))))
+    (if (= c nil)
+        p
+        (merge p :procs (append (or-default (get p :procs) (list)) (list c))
+                 :id (str (get p :id) "|proc:" (source args))))))
+
+;; eval-time config: nil for a route without processes
+(def proc-config (p cycle)
+  (if (has-procs? p)
+      (let ((chains (get p :procs)))
+        (dict :chains chains
+              :seed (round-int (resolve-arg (or-default (get p :seed) 0) cycle))
+              :pmul (member? true (map (lambda (c)
+                                         (or (member? :dash-decay (get c :muls))
+                                             (or (member? :dot-decay (get c :muls))
+                                                 (member? :base (get c :muls)))))
+                                       chains))))
+      nil))
+
+;; ── chain state ──
+
+(def chain-width (c) (get c :width))
+(def fresh-chain (c) (repeat* 0 (chain-width c)))
+
+;; st's chain states, fresh when st carries none (or another route's)
+(def proc-states (st pc)
+  (let ((cs (get st :procs)) (chains (get pc :chains)))
+    (if (and (not (= cs nil)) (= (len cs) (len chains)))
+        cs
+        (map fresh-chain chains))))
+
+(def keep-procs (st2 st)
+  (if (= (get st :procs) nil) st2 (merge st2 :procs (get st :procs))))
+
+;; a figure has started: every running next-figure set counts one down
+(def tick-sets (c s)
+  (reduce (lambda (s j)
+            (let ((slot (+ (get c :nbase) j)))
+              (if (> (nth s slot) 0) (set-nth s slot (- (nth s slot) 1)) s)))
+          s (range 0 (len (or-default (get c :nexts) (list))))))
+
+;; ── hashed randomness (spec §7) ──
+;; A pure function of (seed chain node cycle figure hit), so the per-cycle
+;; memo, roll-state and seeks reproduce every coin. Integer mixing mod a
+;; prime below 2^26: every product stays under 2^53, exact in f64. The
+;; quadratic scramble (repeated at the end) breaks the linear structure a
+;; plain LCG leaves between neighbouring keys.
+(def hash-m 67108859)
+
+(def hash-mix (h x)
+  (let ((a (imod (* (+ h (imod (round-int x) hash-m) 1) 40503) hash-m)))
+    (imod (+ (* a (+ a 12345)) 6789) hash-m)))
+
+(def hash-u (keys)
+  (/ (hash-mix (hash-mix (reduce hash-mix 7 keys) 0) 0) hash-m))
+
+;; ── evaluating a step ──
+;; env: (dict :hk hash key (seed chain cycle fig hit) :n steps so far
+;; :cycle). Values thread the chain state list cs: → (list value cs).
+
+(def fwrap (v w) (- v (* w (floor (/ v w)))))
+
+(def cmp-op? (op x t)
+  (match op '> (> x t) '< (< x t) '>= (>= x t) '<= (<= x t) '= (= x t) _ false))
+
+(def arg-val (spec cs env)
+  (if (= (first spec) :node)
+      (node-val (nth spec 1) 0 cs env)
+      (list (resolve-arg (nth spec 1) (get env :cycle)) cs)))
+
+(def args-vals (specs cs env acc)
+  (if (empty? specs)
+      (list acc cs)
+      (let ((r (arg-val (first specs) cs env)))
+        (args-vals (rest specs) (nth r 1) env (append acc (list (first r)))))))
+
+;; one node on input x → (list x2 cs2)
+(def node-val (g x cs env)
+  (let ((r (args-vals (get g :a) cs env (list))))
+    (let ((v (nth r 0)) (cs1 (nth r 1)) (id (get g :id)))
+      (let ((a (lambda (i) (nth v i)))
+            (u (lambda () (hash-u (cons id (get env :hk))))))
+        (match (get g :k)
+          :const (list (a 0) cs1)
+          :coin (list (if (< (u) (a 0)) 1 0) cs1)
+          :rand (list (+ (a 0) (* (- (a 1) (a 0)) (u))) cs1)
+          ;; the offset from min is stored, so a fresh chain starts at min
+          :acc (let ((w (- (a 2) (a 1))) (slot (+ 3 id)))
+                 (let ((a1 (if (<= w 0) 0 (fwrap (+ (nth cs1 slot) (a 0)) w))))
+                   (list (+ (a 1) a1) (set-nth cs1 slot a1))))
+          :count (list (imod (get env :n) (max 1 (round-int (a 0)))) cs1)
+          :cyc (list (a 0) cs1)
+          :chan (list (chan-get (a 0) (a 1)) cs1)
+          :sin (list (sin (* 6.283185307179586 x)) cs1)
+          :abs (list (abs x) cs1)
+          :pow (list (pow x (a 0)) cs1)
+          :remap (list (if (= (a 0) (a 1))
+                           (a 2)
+                           (+ (a 2) (/ (* (- x (a 0)) (- (a 3) (a 2))) (- (a 1) (a 0)))))
+                       cs1)
+          :clamp (list (max (a 0) (min (a 1) x)) cs1)
+          :cmp (list (if (cmp-op? (get g :op) x (a 0)) 1 0) cs1)
+          :quant (list (if (<= (a 0) 0) x (* (a 0) (round-int (/ x (a 0))))) cs1)
+          _ (list x cs1))))))
+
+(def stage-walk (stages x cs env)
+  (if (empty? stages)
+      (list x cs)
+      (let ((r (node-val (first stages) x cs env)))
+        (stage-walk (rest stages) (first r) (nth r 1) env))))
+
+;; fire next-figure sets: each runs for its length from the next figure (a
+;; set still running keeps the longer of the two)
+(def fire-sets (c cs sets cycle)
+  (reduce (lambda (cs j)
+            (let ((slot (+ (get c :nbase) j))
+                  (d (max 1 (round-int (resolve-arg (get (nth (get c :nexts) j) :for) cycle)))))
+              (set-nth cs slot (max (nth cs slot) d))))
+          cs sets))
+
+;; an op whose value is $1 takes the stages' value
+(def subst-x (op x)
+  (if (and (> (len op) 1) (chain-value? (nth op 1))) (set-nth op 1 x) op))
+
+;; the rule's ifs on this step → (dict :ops this-hit ops :sets next sets)
+(def run-ifs (ifs env)
+  (reduce (lambda (acc f)
+            (let ((b (get f (if (truthy? (cond-val (get f :cond) env)) :then :else))))
+              (dict :ops (append (get acc :ops)
+                                 (map (lambda (op) (subst-x op (get env :x))) (get b :ops)))
+                    :sets (append (get acc :sets) (get b :sets)))))
+          (dict :ops (list) :sets (list)) ifs))
+
+;; one chain on one hit → (list state ops): ops are the chain's note ops on
+;; every hit it steps on, its gated words when x ≥ 0.5 (spec §5.2), and its
+;; if branches. A rule with no stages has nothing to decide, so x is 1: it
+;; always acts ((fig 1) -> (next half) halftimes every figure after figure 1).
+(def step-chain (c k s0 hctx cycle seed)
+  (if (not (sel-ok? (get c :sel) hctx cycle))
+      (list s0 (list))
+      (let ((n (nth s0 0)))
+        (let ((r (stage-walk (get c :stages) (if (empty? (get c :stages)) 1 0) s0
+                             (dict :n n :cycle cycle
+                                   :hk (list seed k cycle (get hctx :fig) (get hctx :hidx))))))
+          (let ((x (if (number? (first r)) (first r) 0)) (cs (nth r 1)))
+            (let ((on? (>= x 0.5))
+                  (fi (run-ifs (get c :ifs)
+                               (dict :x x :n n :vel (get hctx :vel) :cycle cycle
+                                     :fig (+ 1 (or-default (get hctx :afig) 0))
+                                     :rep (+ 1 (or-default (get hctx :arep) 0))))))
+              (list (fire-sets c (set-nth (set-nth cs 0 (+ n 1)) 1 x)
+                               (append (if on? (get c :gsets) (list)) (get fi :sets)) cycle)
+                    (append (get c :hitops) (if on? (get c :then) (list)) (get fi :ops)))))))))
+
+(def step-chains (chains cs hctx cycle seed)
+  (reduce (lambda (acc k)
+            (let ((r (step-chain (nth chains k) k (nth cs k) hctx cycle seed)))
+              (dict :cs (append (get acc :cs) (list (first r)))
+                    :then (append (get acc :then) (nth r 1)))))
+          (dict :cs (list) :then (list))
+          (range 0 (len chains))))
+
+;; ── actions ──
+
+;; product of the held values of the chains that hold `target`; 1 (identity)
+;; for a chain that has not stepped yet (spec §5.1)
+(def held-mul (chains cs target)
+  (reduce (lambda (m k)
+            (let ((s (nth cs k)))
+              (if (and (> (nth s 0) 0) (member? target (get (nth chains k) :muls)))
+                  (* m (nth s 1))
+                  m)))
+          1 (range 0 (len chains))))
+
+(def held-note (chains cs)
+  (reduce (lambda (a k)
+            (let ((s (nth cs k)))
+              (if (and (> (nth s 0) 0) (get (nth chains k) :nadd)) (+ a (round-int (nth s 1))) a)))
+          0 (range 0 (len chains))))
+
+;; the velocity-model params as the figure resolved them, times the held values
+(def held-params (params chains cs)
+  (merge params
+    :base (clamp01 (* (get params :base) (held-mul chains cs :base)))
+    :dot-decay (clamp01 (* (get params :dot-decay) (held-mul chains cs :dot-decay)))
+    :dash-decay (clamp01 (* (get params :dash-decay) (held-mul chains cs :dash-decay)))))
+
+(def gate-rat (s) (rat (round-int (* (max 0 s) 96)) 96))
+
+(def held-event (ev chains cs)
+  (let ((nd (held-note chains cs)))
+    (let ((e1 (if (= nd 0) ev (merge ev :nadd (+ (or-default (get ev :nadd) 0) nd)))))
+      (let ((e2 (if (member? true (map (lambda (c) (member? :vel (get c :muls))) chains))
+                    (merge e1 :vel (clamp01 (* (get e1 :vel) (held-mul chains cs :vel))))
+                    e1)))
+        (if (member? true (map (lambda (c) (member? :gate (get c :muls))) chains))
+            (merge e2 :gate (r* (get e2 :gate) (gate-rat (held-mul chains cs :gate))))
+            e2)))))
+
+(def ev-op-apply (e op cycle)
+  (let ((v (lambda () (resolve-arg (nth op 1) cycle))))
+    (match (first op)
+      :drop (merge e :drop true)
+      :stac (merge e :gate (r-min (get e :gate) (rat 1 4)))
+      :vmul (merge e :vel (clamp01 (* (get e :vel) (v))))
+      :vadd (merge e :vel (clamp01 (+ (get e :vel) (v))))
+      :nadd (merge e :nadd (+ (or-default (get e :nadd) 0) (v)))
+      :nset (merge e :nset (v))
+      :gmul (merge e :gate (r* (get e :gate) (gate-rat (v))))
+      :snap (merge e :snap (nth op 1))
+      :smask (merge e :smask (nth op 1))
+      :harm (merge e :harm (rest op))
+      _ e)))
+
+(def ev-ops-apply (e ops cycle) (reduce (lambda (x op) (ev-op-apply x op cycle)) e ops))
+
+;; one hit with row processes: the velocity model sees the held param values
+;; from BEFORE this hit (a step needs the hit's accent), then the chains step
+;; and the hit takes the held event values and this step's ops.
+(def proc-hit (dash? second? ctx st off hand hidx pc)
+  (let ((chains (get pc :chains)) (cs (get st :procs)) (cycle (get ctx :cycle)))
+    (let ((r (mk-hit dash? second?
+                     (if (get pc :pmul)
+                         (merge ctx :params (held-params (get ctx :params) chains cs))
+                         ctx)
+                     st off hand)))
+      (let ((ev (get r :ev)))
+        (let ((sr (if (let ((sp (get ctx :steps))) (or (= sp nil) (nth sp hidx)))
+                      (step-chains chains cs
+                               (merge ev :afig (get ctx :afig) :arep (get ctx :arep) :hidx hidx)
+                               cycle (get pc :seed))
+                      ;; a hit a rule's fast added: rules do not step on it
+                      (dict :cs cs :then (list)))))
+          (dict :ev (ev-ops-apply (held-event ev chains (get sr :cs)) (get sr :then) cycle)
+                :st (merge (get r :st) :procs (get sr :cs))))))))
+
+(def fold-hit (dash? second? ctx st off hand hidx)
+  (let ((pc (get ctx :pc)))
+    (if (= pc nil)
+        (mk-hit dash? second? ctx st off hand)
+        (proc-hit dash? second? ctx st off hand hidx pc))))
+
+;; ── next-figure actions (spec §6) ──
+
+;; the merged (next …) words of every pending chain, or nil
+(def merge-next (a nx)
+  (let ((a (or-default a (dict :xf (list) :ops (list) :drop false :fast (list)))))
+    (dict :xf (append (get a :xf) (get nx :xf))
+          :ops (append (get a :ops) (get nx :ops))
+          :drop (or (get a :drop) (get nx :drop))
+          :fast (append (get a :fast) (get nx :fast)))))
+
+;; the merged next-figure words of every set still running, or nil
+(def pending-next (chains cs)
+  (reduce (lambda (acc k)
+            (let ((c (nth chains k)) (s (nth cs k)))
+              (let ((nexts (or-default (get c :nexts) (list))))
+                (reduce (lambda (a j) (if (> (nth s (+ (get c :nbase) j)) 0) (merge-next a (nth nexts j)) a))
+                        acc (range 0 (len nexts))))))
+          nil (range 0 (len chains))))
+
+;; `rest` drops the figure's hits after they threaded hands and velocity
+(def apply-next (body nx cycle)
+  (merge body :evs
+    (map (lambda (e)
+           (let ((e2 (ev-ops-apply e (get nx :ops) cycle)))
+             (if (get nx :drop) (merge e2 :drop true) e2)))
+         (get body :evs))))
+
 ;; ── figure fold: symbolic events → timed events ─────────────────────────────
 
 (def hit-ev (off sym hit hand vel accent ctx)
@@ -746,10 +1347,10 @@
         ;; is this symbol's context only, the rest fold with `ctx`
         (let ((scale (r* (get ctx :scale) (r-int mul)))
               (hctx (if (= mul 1) ctx (merge ctx :gate (r* (get ctx :gate) (r-int mul))))))
-          (let ((r1 (mk-hit dash? false hctx st off (nth hands hit-idx))))
+          (let ((r1 (fold-hit dash? false hctx st off (nth hands hit-idx) hit-idx)))
             (if dash?
-                (let ((r2 (mk-hit true true hctx (get r1 :st) (r+ off scale)
-                                  (nth hands (+ hit-idx 1)))))
+                (let ((r2 (fold-hit true true hctx (get r1 :st) (r+ off scale)
+                                    (nth hands (+ hit-idx 1)) (+ hit-idx 1))))
                   (fold-events (rest evs) hands ctx (get r2 :st)
                                (r+ off (r* scale (r-int 2))) (+ hit-idx 2)
                                (append acc (list (get r1 :ev) (get r2 :ev)))))
@@ -815,17 +1416,48 @@
                   (dict :evs (append (get body :evs) (get pr :evs))
                         :dur (dur dprime)
                         :hand (get pr :hand)
-                        :st (get pr :st)))
+                        ;; padding runs no row processes: chain state passes
+                        ;; through unchanged
+                        :st (keep-procs (get pr :st) (get body :st))))
                 (merge body :dur (dur dprime))))))))
 
-;; evaluate one figure → (dict :evs :dur :hand :st)
-(def eval-fig (fig cycle off hand st figidx)
+;; evaluate one figure → (dict :evs :dur :hand :st). `pc` is the route's row
+;; process config (nil: none): pending (next …) words apply to this figure
+;; first (spec §6), and hits a chain drops are removed last.
+(def eval-fig (fig cycle off hand st figidx pc)
+  (if (= pc nil)
+      (eval-fig* fig cycle off hand st figidx nil)
+      (let ((cs (proc-states st pc)))
+        (let ((nx (pending-next (get pc :chains) cs)))
+          (let ((body (eval-fig* (if (= nx nil)
+                                     fig
+                                     (merge fig :xf (append (get fig :xf) (get nx :xf))
+                                                :nfast (reduce (lambda (p r) (* p (max 1 (round-int (resolve-arg r cycle)))))
+                                                               1 (get nx :fast))))
+                                 cycle off hand (merge st :procs (map (lambda (k) (tick-sets (nth (get pc :chains) k) (nth cs k)))
+                                                          (range 0 (len cs)))) figidx pc)))
+            (let ((body2 (if (= nx nil) body (apply-next body nx cycle))))
+              (merge body2 :evs (keep (lambda (e) (not (get e :drop))) (get body2 :evs)))))))))
+
+(def eval-fig* (fig cycle off hand st figidx pc)
   (let ((xfs (get fig :xf))
         (evs1 (apply-xf-events (get fig :events) (get fig :xf) cycle))
         (tm (tm-at (get fig :tm) cycle)))
-    (let ((kind (if (= tm nil) nil (nth tm 0)))
-          (m (if (= tm nil) 1 (max 1 (round-int (resolve-arg (nth tm 1) cycle))))))
-      (let ((evs2 (if (= kind :fast) (expand-fast evs1 m) evs1)))
+    (let ((kind0 (if (= tm nil) nil (nth tm 0)))
+          (m0 (if (= tm nil) 1 (max 1 (round-int (resolve-arg (nth tm 1) cycle)))))
+          (nf (or-default (get fig :nfast) 1)))
+     ;; a pending (next (fast n)) multiplies a plain or fast figure's rate;
+     ;; length is unchanged either way (fig-len never sees it)
+     (let ((kind (if (and (> nf 1) (or (= kind0 nil) (= kind0 :fast))) :fast kind0))
+           (m (if (and (> nf 1) (or (= kind0 nil) (= kind0 :fast))) (* m0 nf) m0)))
+      ;; a rule's fast expands the figure as written (its own time-mod
+      ;; first), and only the hits it was written with step rules (steps)
+      (let ((evs2 (if (= kind :fast)
+                      (if (> nf 1) (expand-fast (expand-fast evs1 m0) nf) (expand-fast evs1 m))
+                      evs1))
+            (steps (if (and (> nf 1) (= kind :fast))
+                       (fast-steps (expand-fast evs1 (if (= kind0 :fast) m0 1)) nf)
+                       nil)))
         (let ((raw (units evs2))
               (params (apply-overrides default-params (vel-overrides xfs cycle))))
           (let ((eff (match kind
@@ -844,7 +1476,10 @@
                 (let ((folded (fold-events evs2
                                 (if swap? (map other-hand hands0) hands0)
                                 (dict :scale scale :gate gate :ghost ghost?
-                                      :params params :fig figidx)
+                                      :params params :fig figidx
+                                      :pc pc :cycle cycle
+                                      :afig (get fig :afig) :arep (get fig :arep)
+                                      :steps steps)
                                 st off 0 (list))))
                   ;; ending hand from the transformed event count; swap
                   ;; exchanges assignment within the cycle only and does not
@@ -855,20 +1490,21 @@
                                               hand
                                               (other-hand hand))
                                     :st (get folded :st))))
-                    (apply-align body (get fig :align) cycle off params figidx)))))))))))
+                    (apply-align body (get fig :align) cycle off params figidx))))))))))))
 
 ;; ── whole-pattern evaluation ────────────────────────────────────────────────
 
-(def eval-figs (figs cycle off hand st idx acc)
+(def eval-figs (figs cycle off hand st idx acc pc)
   (if (empty? figs)
       (dict :evs acc :off off :hand hand :st st)
-      (let ((r (eval-fig (first figs) cycle off hand st idx))
+      (let ((r (eval-fig (first figs) cycle off hand st idx pc))
             (a (get (first figs) :afig))
             (k (get (first figs) :arep)))
         (eval-figs (rest figs) cycle (r+ off (get r :dur))
                    (get r :hand) (get r :st) (+ idx 1)
                    (append acc (map (lambda (e) (merge e :afig a :arep k))
-                                    (get r :evs)))))))
+                                    (get r :evs)))
+                   pc))))
 
 ;; quoted true/false arrive as symbols in filter specs
 (def as-bool (v) (if (= v 'true) true (if (= v 'false) false v)))
@@ -1046,11 +1682,14 @@
       ;; drop every event, keeping the cycle's length/timing: the silent
       ;; alternation member ((left right none)) and (every n none) thinning
       :none (merge res :events (list))
+      ;; a note op (snap / scale / harmony), resolved at emit
+      :snap (map-events res (lambda (e) (merge e :snap (nth op 1))))
+      :noteop (map-events res (lambda (e) (ev-op-apply e (nth op 1) cycle)))
       _ res)))
 
 ;; evaluate a pattern for one cycle with explicit threading state
 (def eval-at (p cycle hand st)
-  (let ((r (eval-figs (get p :figs) cycle (r-int 0) hand st 0 (list))))
+  (let ((r (eval-figs (get p :figs) cycle (r-int 0) hand st 0 (list) (proc-config p cycle))))
     (reduce (lambda (acc op) (apply-post-one acc op cycle))
             (dict :events (sort-evs (get r :evs)) :len (get r :off)
                   :end-hand (get r :hand) :end-st (get r :st))
@@ -1200,11 +1839,12 @@
     :alt (reduce (lambda (a x) (lcm0 a (sel-period* x))) (max 1 (len (rest s))) (rest s))
     _ 1))
 
+;; row processes hash the cycle and carry non-periodic state: exact keys
 (def eval-period (p)
   (let ((pd (reduce (lambda (a op) (lcm0 a (post-period* op)))
                     (reduce (lambda (a f) (lcm0 a (fig-period* f))) 1 (get p :figs))
                     (get p :post))))
-    (if (> pd 256) 0 pd)))
+    (if (or (> pd 256) (has-procs? p)) 0 pd)))
 
 ;; `prepare` stamps :period on each route's pattern; patterns built by hand
 ;; (emit, emit*) carry none and keep the exact cycle key.
@@ -1223,7 +1863,7 @@
   ;; their structural keys across channel writes.
   (let ((key (list (get p :id) (memo-cycle p cycle) hand
                    (get st :cur) (get st :pwd) (get st :streak)
-                   (chan-epoch))))
+                   (chan-epoch) (get st :procs))))
     (let ((hit (memo-find memo-store key)))
       (if (= hit nil)
           (let ((r (eval-at p cycle hand st)))
@@ -1399,9 +2039,10 @@
 (def cell (p name) (str name ":" (get p :id)))
 
 (def load-state (p)
-  (mk-state (state-get (cell p "jaki-vel") 0.8)
-            (n->b (state-get (cell p "jaki-pwd") 0))
-            (state-get (cell p "jaki-streak") 0)))
+  (let ((st (mk-state (state-get (cell p "jaki-vel") 0.8)
+                      (n->b (state-get (cell p "jaki-pwd") 0))
+                      (state-get (cell p "jaki-streak") 0))))
+    (if (has-procs? p) (merge st :procs (load-procs p)) st)))
 
 (def store-state (p c hand st)
   (do (state-set! (cell p "jaki-cycle") c)
@@ -1409,7 +2050,29 @@
       (state-set! (cell p "jaki-vel") (get st :cur))
       (state-set! (cell p "jaki-pwd") (b->n (get st :pwd)))
       (state-set! (cell p "jaki-streak") (get st :streak))
+      (if (has-procs? p) (store-procs p st) nil)
       nil))
+
+;; Row process chain state (spec §8): chain k's numbers live in scalar cells
+;; jp<k>:n, jp<k>:hold, jp<k>:pend, jp<k>:acc<s> — state-set! stores numbers
+;; only. `default-state` carries no :procs, so a jump stores fresh chains.
+(def proc-cell (p k i)
+  (cell p (str "jp" k ":" (if (= i 0) "n" (if (= i 1) "hold" (if (= i 2) "pend" (str "acc" (- i 3))))))))
+
+(def load-procs (p)
+  (let ((chains (get p :procs)))
+    (map (lambda (k)
+           (map (lambda (i) (state-get (proc-cell p k i) 0))
+                (range 0 (chain-width (nth chains k)))))
+         (range 0 (len chains)))))
+
+(def store-procs (p st)
+  (let ((cs (proc-states st (dict :chains (get p :procs)))))
+    (map (lambda (k)
+           (let ((s (nth cs k)))
+             (map (lambda (i) (state-set! (proc-cell p k i) (nth s i)))
+                  (range 0 (len s)))))
+         (range 0 (len cs)))))
 
 (def roll-state (p from to)
   (if (>= from to)
@@ -1648,12 +2311,44 @@
                 ;; computes: its velocity scales, its note adds after an
                 ;; absolute (note …) set (docs/jaki-trig-modes-spec.md §3)
                 :vel (* (* (get a :vel) opt-vel) (state-get "jaki-gvel" 1))
-                :note (+ (+ (let ((ns (get a :nset))) (if (= ns nil) opt-note ns))
-                            (get a :nadd))
-                         (state-get "jaki-gnote" 0))
+                :note (snap-hit e (+ (+ (let ((ns (get a :nset))) (if (= ns nil) opt-note ns))
+                                        (get a :nadd))
+                                     (state-get "jaki-gnote" 0)))
                 :dur dur
                 ;; (plock …) values, a flat label/value list (nil: none)
                 :params (get a :params)))))))
+
+;; ── note ops at emit (docs/jaki-row-processes-spec.md §13) ──
+;; A hit tagged by (harmony :track n :amount a), (scale :minor :root C) or
+;; (snap "chan") — route words, `on` words, or chain actions — has its final
+;; transpose moved here, in that order: harmony holds it to another track's
+;; chord and key at strictness a (lane-harmony's tiers, via harmonic-snap on
+;; gen-track-harmony), then a scale or a channel's pitch-class mask moves it
+;; to the nearest allowed pitch class (octave kept, ties downward). No read,
+;; an empty mask: the note stays.
+(def pc-bit? (mask pc) (= 1 (imod (idiv mask (pow2 pc)) 2)))
+
+(def snap-walk (r m d)
+  (if (> d 6)
+      r
+      (if (pc-bit? m (imod (- r d) 12))
+          (- r d)
+          (if (pc-bit? m (imod (+ r d) 12)) (+ r d) (snap-walk r m (+ d 1))))))
+
+(def snap-note (n mask)
+  (let ((m (if (number? mask) (imod (round-int mask) 4096) 0)))
+    (if (= m 0) n (snap-walk (round-int n) m 0))))
+
+(def harm-note (note h)
+  (let ((r (gen-track-harmony (round-int (resolve-arg (nth h 0) 0)))))
+    (if (= r nil)
+        note
+        (+ note (harmonic-snap (nth r 0) (nth r 1) note (resolve-arg (nth h 1) 0) 0)))))
+
+(def snap-hit (e note)
+  (let ((n1 (let ((h (get e :harm))) (if (= h nil) note (harm-note note h)))))
+    (let ((n2 (let ((m (get e :smask))) (if (= m nil) n1 (snap-note n1 m)))))
+      (let ((ch (get e :snap))) (if (string? ch) (snap-note n2 (chan-get ch 0)) n2)))))
 
 ;; item indices → bitmask (duplicates count once)
 (def pow2 (i) (if (<= i 0) 1 (* 2 (pow2 (- i 1)))))
@@ -1714,6 +2409,13 @@
 ;;   (maxvel v) (split t) (merge t) (L w) (R w)
 ;;   (gate s) / (dur s) — multiply every gate by s (per-cycle arg: number,
 ;;   (cyc …), (chan …)); applies in authored word order like stac
+;;   (scale :minor :root C) — hold every note to a scale
+;;   (harmony :track n :amount a) — hold every note to track n's chord/key
+;;   (snap "chan") — snap every hit's note to the pitch classes the channel
+;;   holds (alez.jaki.harmony publishes a track's chord there)
+;;   (rule TRIGGER STAGE… ACTION…) — a rule run on the hits TRIGGER selects
+;;   (docs/jaki-row-processes-spec.md; `proc` is the old name); (seed n)
+;;   rerolls its coins
 ;; A route containing a (mute T) or (solo T) form — T a track number or
 ;; (group "name") — is a CONTROL route: events become timed mute/solo holds
 ;; instead of notes, and the route word `inv` complements the windows
@@ -1791,6 +2493,9 @@
           'vel+   (defer-or :vadd :vadd v)
           'note+  (defer-or :nadd :nadd v)
           'plock  (plock-op args wp)
+          'snap   (list :snap (nth args 0))
+          'scale  (let ((op (note-op w))) (if (= op nil) nil (list :noteop op)))
+          'harmony (list :noteop (note-op w))
           'every  (let ((inner (route-post-op-at (nth args 1) (sub-path wp 2))))
                     (if (= inner nil)
                         nil
@@ -1881,8 +2586,17 @@
       'vel+   (add-route-post acc (route-post-op-at w (get acc :wpath)) w)
       'note+  (add-route-post acc (route-post-op-at w (get acc :wpath)) w)
       'plock  (add-route-post acc (route-post-op-at w (get acc :wpath)) w)
+      'snap   (add-route-post acc (route-post-op-at w (get acc :wpath)) w)
+      'harmony (add-route-post acc (route-post-op-at w (get acc :wpath)) w)
+      'scale  (let ((post (route-post-op-at w (get acc :wpath))))
+                (if (= post nil) acc (add-route-post acc post w)))
       'on     (route-on acc (nth args 0) (rest args))
       'inv    (merge acc :inv true)
+      'rule   (merge acc :p (add-proc (get acc :p) args))
+      'proc   (merge acc :p (add-proc (get acc :p) args))
+      'seed   (let ((p (get acc :p)))
+                (merge acc :p (merge p :seed (nth args 0)
+                                       :id (str (get p :id) "|seed:" (source (nth args 0))))))
       ;; Any other figure transform (basevel dotdecay dashdecay minvel
       ;; maxvel split merge L R …) applies to every figure of the route.
       _ (if (= (norm-xf w) nil) acc (merge acc :p (xform (get acc :p) w))))))
@@ -1950,6 +2664,15 @@
 ;; event tagged with its :cycle.
 (def preview (body start cycles)
   (preview-walk (from-list body) start (+ start cycles) :left default-state (list)))
+
+;; the same window with a row's (proc …) words and seed applied (the kind's
+;; row process editor, docs/jaki-row-processes-spec.md §9): the chains only,
+;; no other route words, so it needs no route preparation. Hits the chains
+;; drop are absent. State starts fresh at `start`, so a long-running
+;; accumulator can differ from what is playing: a preview, not a meter.
+(def preview-procs (body words seed start cycles)
+  (let ((p (reduce (lambda (p w) (add-proc p (rest w))) (from-list body) words)))
+    (preview-walk (merge p :seed seed) start (+ start cycles) :left default-state (list))))
 
 (def preview-walk (p c end hand st acc)
   (if (>= c end)
@@ -2127,10 +2850,18 @@
                     (reduce (lambda (acc l) (append acc (prepare-voice l))) (list) body)
                     (prepare-voice body))))
     (map (lambda (i)
-           (let ((r (nth routes i)))
+           (let ((r (seed-route (nth routes i) i)))
              (merge r :opts (merge (or-default (get r :opts) (dict))
                                    :rkey (str "r" i ":") :rindex (str i)))))
          (range 0 (len routes)))))
+
+;; a route with row processes and no (seed n) word seeds its hash with its
+;; index; the seed joins the id so equal routes keep their own coins and cells
+(def seed-route (r i)
+  (let ((p (get r :p)))
+    (if (or (not (has-procs? p)) (not (= (get p :seed) nil)))
+        r
+        (merge r :p (merge p :seed i :id (str (get p :id) "|seed:" i))))))
 
 ;; Everything up to here is a function of the body alone; only locate/emit
 ;; depend on the tick. Re-preparing every tick (parse, route words, id

@@ -50,6 +50,8 @@ fn render(template: &str, paths: &AppPaths, eseq_cli: &Path) -> String {
         .replace("{{FACTORY_INSTRUMENTS}}", &path(paths.instruments_dir()))
         .replace("{{FACTORY_EFFECTS}}", &path(paths.effects_dir()))
         .replace("{{AUTHORING}}", &path(paths.authoring_dir()))
+        .replace("{{LOCAL_PACKAGES}}", &path(paths.local_modules_dir()))
+        .replace("{{FACTORY_PACKAGES}}", &path(paths.factory_packages_dir()))
         .replace("{{DGENLISP_REFERENCE}}", &path(paths.dgenlisp_reference_dir()))
         .replace("{{ESEQ}}", &eseq_cli.display().to_string())
         .replace("{{VERSION}}", env!("CARGO_PKG_VERSION"))
@@ -119,6 +121,8 @@ mod tests {
             assert!(!text.contains("{{"), "unfilled placeholder in:\n{text}");
             assert!(text.contains("\"/Applications/ESeq.app/Contents/MacOS/eseq\" instrument check"));
             assert!(text.contains(&paths.user_instruments_dir().display().to_string()));
+            assert!(text.contains("\"/Applications/ESeq.app/Contents/MacOS/eseq\" sequencer check"));
+            assert!(text.contains(&paths.local_modules_dir().display().to_string()));
         }
     }
 
@@ -190,7 +194,7 @@ mod tests {
     #[test]
     fn referenced_kit_files_exist() {
         let paths = crate::app_paths::app_paths();
-        for file in ["instrument-reference.md", "effect-reference.md"] {
+        for file in ["instrument-reference.md", "effect-reference.md", "sequencer-reference.md"] {
             assert!(paths.authoring_dir().join(file).is_file(), "missing {file}");
         }
         for file in ["DGenLispReadme.md", "dgenlisp-operators.json"] {
@@ -207,6 +211,9 @@ mod tests {
         }
         for example in ["stereo-tremolo", "dimension-d-chorus", "lexilush"] {
             assert!(paths.effects_dir().join(example).join("ui.lisp").is_file(), "{example}");
+        }
+        for example in ["alez.jaki/src/kind.lisp", "alez.jaki/src/doc.lisp"] {
+            assert!(paths.factory_packages_dir().join(example).is_file(), "{example}");
         }
     }
 

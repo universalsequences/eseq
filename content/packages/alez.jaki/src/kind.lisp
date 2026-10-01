@@ -16,6 +16,11 @@
 ;; `(every 2 (rev swap))` on its `+`, scrub numbers, pick words; any argument
 ;; may be a list, one per cycle.
 ;;
+;; A row's `rules` toggle, before its words, opens a box of its rules under it
+;; (docs/jaki-row-processes-spec.md §9, §15), one line each: TRIGGER ->
+;; STAGES… ACTIONS…, both sexp-slots; `+ rule` adds one, and the row's seed
+;; (rarely touched: it rerolls the coins) sits at the right of that line.
+;;
 ;; Each instance ("New jaki" on the package row, or "New jaki in rack" on a
 ;; rack) is the host's: it publishes the :generator under its own id, gets its
 ;; own `*jaki · <label>*` buffer and tab, and renders (jk-panel self) there.
@@ -106,6 +111,32 @@
 
 (def jk-set-mods (self k index mods)
   (jk-edit-row self k index (lambda (row) (merge row :mods mods))))
+
+;; ── row rules (docs/jaki-row-processes-spec.md §9; stored as :procs) ───────
+
+(def jk-set-procs (self k index procs)
+  (jk-edit-row self k index (lambda (row) (merge row :procs procs))))
+
+(def jk-set-chain (self k index c chain)
+  (jk-set-procs self k index
+    (jk-update-nth (alez.jaki.doc/row-procs (alez.jaki.doc/row-at (jk-field self k :rows) index))
+                   c (lambda (old) chain))))
+
+;; A row without :seed plays its route index as the seed (alez.jaki.core
+;; seed-route); the picker shows that, and any edit pins the number.
+(def jk-set-seed (self k index v)
+  (jk-edit-row self k index (lambda (row) (merge row :seed (max 0 (round v))))))
+
+;; which row's rules box is open: "k:index", or "" (a view cell)
+(def jk-rules-key (k index) (str k ":" index))
+(def jk-rules-open? (self k index) (= self.rules-open (jk-rules-key k index)))
+(def jk-toggle-rules (self k index)
+  (set! self.rules-open (if (jk-rules-open? self k index) "" (jk-rules-key k index))))
+
+(def jk-add-rule (self k index)
+  (jk-set-procs self k index
+    (append (alez.jaki.doc/row-procs (alez.jaki.doc/row-at (jk-field self k :rows) index))
+            (list alez.jaki.doc/new-chain))))
 
 (def jk-add-pattern (self)
   (set! self.patterns (append self.patterns (list alez.jaki.doc/new-pattern))))
@@ -400,6 +431,7 @@
           :on-change (lambda (label)
             (jk-set-route self k index
               (- (max 0 (jk-index-of (jk-route-options self) label)) 1))))
+        (jk-rules-toggle self k index row)
         (sexp-slot
           :key (jk-key k (str "jaki-mods-" index))
           :schema alez.jaki.doc/row-schema
@@ -430,6 +462,78 @@
           (label reason :width 12 :height jk-row-height :font-size 9
             :color :error :bg :transparent)
           (box :width 0 :height 0 :background-color :transparent))))))
+
+;; ── row rules: a box of lines under the row ───────────────────────────────
+
+;; where the row's words start (color bar, index, route dropdown, gaps), so
+;; the rules box lines up under them
+(def jk-rule-indent 10.9)
+
+(def jk-rules-toggle (self k index row)
+  (let ((n (len (alez.jaki.doc/row-procs row))) (open (jk-rules-open? self k index)))
+    (button (if (> n 0) (str "rules " n) "rules")
+      :key (jk-key k (str "jaki-rules-toggle-" index))
+      :width 4.8 :height jk-row-height :padding 0.1 :font-size 9 :corner-radius 16
+      :background-color (if open :process-lane-accent :transparent)
+      :border-color (if (> n 0) :process-lane-accent :mixer-strip-border)
+      :color (if open :bg (if (> n 0) :process-lane-accent :dim))
+      :on-click (lambda (event) (jk-toggle-rules self k index)))))
+
+(def jk-add-rule-button (self k index)
+  (button "+  rule" :key (jk-key k (str "jaki-rule-add-" index))
+    :width 6 :height jk-row-height :padding 0 :font-size 11 :corner-radius 16
+    :background-color (rgba 0.28 0.20 0.11 1) :border-color :none
+    :color :process-lane-accent
+    :on-click (lambda (event) (jk-add-rule self k index))))
+
+(def jk-code (text)
+  (label text :height jk-row-height :font-size 11 :v-align :center :color :dim :bg :transparent))
+
+(def jk-rule-line (self k index procs c)
+  (let ((chain (nth procs c)))
+    (h-stack :gap 0.3 :align :center
+      (sexp-slot
+        :key (jk-key k (str "jaki-rule-trigger-" index "-" c))
+        :schema alez.jaki.doc/proc-trigger-schema
+        :value (alez.jaki.doc/chain-trigger-items chain)
+        :height jk-row-height :font-size 11 :wrap false
+        :head-color :process-lane-accent
+        :on-change (lambda (items)
+          (jk-set-chain self k index c (alez.jaki.doc/chain-with-trigger chain items))))
+      (jk-code "->")
+      (sexp-slot
+        :key (jk-key k (str "jaki-rule-body-" index "-" c))
+        :schema alez.jaki.doc/proc-body-schema
+        :value (rest chain)
+        :height jk-row-height :font-size 11 :wrap false
+        :head-color :process-lane-accent
+        :on-change (lambda (items)
+          (jk-set-chain self k index c (cons (first chain) items))))
+      (jk-x-button (jk-key k (str "jaki-rule-remove-" index "-" c))
+        (lambda () (jk-set-procs self k index (jk-remove-nth procs c)))))))
+
+(def jk-rules (self k index row route-slot)
+  (let ((procs (alez.jaki.doc/row-procs row))
+        (seed (let ((s (get row :seed))) (if (and (number? s) (>= s 0)) s route-slot))))
+    (h-stack :gap 0 :align :top
+      (box :width jk-rule-indent :height 1.0 :padding 0 :background-color :transparent)
+      (box :key (jk-key k (str "jaki-rules-" index))
+        :padding 0.5 :border-color :mixer-strip-border
+        :background-color :mixer-strip-bg :corner-radius 12
+      (v-stack :gap 0.15
+        (each (range 0 (len procs)) |c| (jk-rule-line self k index procs c))
+        (h-stack :gap 0.3 :align :center
+          (jk-add-rule-button self k index)
+          ;; seed is a rarely touched reroll: out of the way, at the right
+          (box :width 40 :height 1.0 :padding 0 :background-color :transparent)
+          (label "seed" :width 2.4 :height jk-row-height :font-size 9 :h-align :right
+            :v-align :center :color :dim :bg :transparent)
+          (number-picker
+            :key (jk-key k (str "jaki-rule-seed-" index))
+            :value seed :min 0 :max 999 :step 1 :decimals 0
+            :border-color :transparent :background-color :transparent
+            :width 3 :height jk-row-height :font-size 9
+            :on-change (lambda (v) (jk-set-seed self k index v)))))))))
 
 ;; The pattern as the jak form it plays; several patterns are one voice line
 ;; each, a line apiece.
@@ -463,18 +567,24 @@
 (def jk-pattern (self pats k)
   (let ((pat (nth pats k)))
     (let ((figures (get pat :figures))
-          (rows (get pat :rows))
-          (sounds (alez.jaki.doc/pattern-sounds? pat))
-          (base (jk-route-base pats k)))
-      (v-stack :gap 0.6
-        (jk-pattern-header self k pat (len pats))
-        (jk-figure-strip self k figures)
-        (jk-preview self k figures)
-        (v-stack :gap 0.25
-          (each (range 0 (get pat :row-count)) |i|
-            (let ((row (alez.jaki.doc/row-at rows i)))
-              (jk-row self k i row (+ base (jk-live-rows-before rows i))
-                      (and sounds (alez.jaki.doc/row-live? row))))))))))
+        (rows (get pat :rows))
+        (sounds (alez.jaki.doc/pattern-sounds? pat))
+        (base (jk-route-base pats k)))
+      (box :padding 1 :corner-radius 16 :background-color :mixer-strip-bg 
+        (v-stack :gap 0.6
+          (jk-pattern-header self k pat (len pats))
+          (jk-figure-strip self k figures)
+          (jk-preview self k figures)
+          (v-stack :gap 0.25
+            (each (range 0 (get pat :row-count)) |i|
+              (let ((row (alez.jaki.doc/row-at rows i))
+                  (slot (+ base (jk-live-rows-before rows i))))
+                (v-stack :gap 0.25
+                  (jk-row self k i row slot (and sounds (alez.jaki.doc/row-live? row)))
+                  (if (jk-rules-open? self k i)
+                    (jk-rules self k i row slot)
+                    nil)))))))))
+  )
 
 (def jk-panel (self)
   (let ((pats (jk-patterns self)))
@@ -483,8 +593,7 @@
          :padding 1
         (v-stack :gap 0.6
           (h-stack :gap 0.6 :align :center
-            (label "jaki" :width 4 :height jk-row-height :font-size 11 :color :foreground :bg :transparent)
-            (label "mode" :width 3.5 :height jk-row-height :font-size 9 :h-align :right
+            (label "mode" :v-align :center :width 3.5 :height jk-row-height :font-size 9 :h-align :right
               :color :dim :bg :transparent)
             (dropdown
               :key "jaki-mode"
@@ -516,9 +625,11 @@
               :requires (alez.jaki.doc)
               :tick (alez.jaki.doc/tick-patterns self.figures self.rows self.row-count
                                                  self.mode self.patterns))
-  :document ((figures (list (list :dot :dot :dot :dot)))
+  :document ((figures (list (list :dot :dot :dash)))
              (rows (list (dict :route 0 :mods (list))))
              (row-count 8)
              (mode :loop)
              (patterns (list)))
+  ;; view only: the row whose rules box is open ("k:index")
+  :state ((rules-open ""))
   :view jk-panel)

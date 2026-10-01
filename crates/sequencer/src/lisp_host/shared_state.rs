@@ -159,6 +159,8 @@ pub(super) type SharedProcessEvalContext = Arc<Mutex<Option<ProcessEvalContext>>
 pub(super) struct GeneratorChannelSnapshot {
     pub(super) payload_epoch: u32,
     pub(super) values: Arc<HashMap<String, EValue>>,
+    /// Every track's harmony over the chunk, for `gen-track-harmony`.
+    pub(super) harmony: Arc<crate::process::TrackHarmonyTimeline>,
 }
 
 pub(super) type SharedGeneratorChannels = Arc<Mutex<GeneratorChannelSnapshot>>;
@@ -628,10 +630,16 @@ impl ScratchControlRuntime {
         values: HashMap<String, EValue>,
     ) {
         if let Ok(mut guard) = self.generator_channels.lock() {
-            *guard = GeneratorChannelSnapshot {
-                payload_epoch,
-                values: Arc::new(values),
-            };
+            guard.payload_epoch = payload_epoch;
+            guard.values = Arc::new(values);
+        }
+    }
+
+    /// Publish every track's harmony over the coming chunk for
+    /// `gen-track-harmony` reads (`ProcessRuntime::track_harmony_timeline`).
+    pub fn set_generator_track_harmony(&self, harmony: crate::process::TrackHarmonyTimeline) {
+        if let Ok(mut guard) = self.generator_channels.lock() {
+            guard.harmony = Arc::new(harmony);
         }
     }
 

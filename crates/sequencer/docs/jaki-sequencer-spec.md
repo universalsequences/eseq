@@ -196,6 +196,12 @@ generator's persistent state (no per-step reset; the old spec's restart
 semantics existed only because a midi-fx dies with its step). A
 `(jaki/reset)` helper and a reset-on-pattern-edit are the escape hatches.
 
+Defaults (2026-09-30): `base` 0.8, `dot-decay` 0.5, `dash-decay` 0.5,
+`accent-boost` 1.15, `min-vel` 0, `max-vel` 1. The Swift port's 0.85 / 0.9 /
+0.3 kept unaccented hits too close to the accents; halving per hit with no
+floor makes the accent structure audible. `(dotdecay v)` / `(dashdecay v)` /
+`(minvel v)` restore anything else per route.
+
 An event following a dash is **accented** (velocity boosted by
 `accent-boost`); `(accent)`-filtered views key off this flag (§7).
 
@@ -454,6 +460,52 @@ being applied to the hit sounding on that row: an `(on SEL …)` whose selector
 - The host publishes the latest sounded mark as
   `SEQ.generator-mark-<id>-<route>`; the row's sexp-slot binds it as `:lit`
   (a render binding: a hit repaints the slot, never re-runs the view).
+
+## 7.5 Rules: `(rule TRIGGER STAGE… ACTION…)`
+
+Full design: docs/jaki-row-processes-spec.md (epic eseq-1sr5; `proc` is the
+old name and still parses). In short, a route word that runs a small chain inside the evaluator's figure and
+hit fold, in Lisp:
+
+- **TRIGGER** is any `on` selector (§7.1.1). The chain *steps* on every hit it
+  holds for.
+- **STAGEs** fold one number `x` from 0, with keyword args: sources
+  `(acc :by :min :max)`, `(coin :p)`, `(rand :min :max)`, `(count :n)`,
+  `(cyc v…)`, `(chan "name" d)`, a bare number; transforms `sin`, `abs`,
+  `(pow :e)`, `(remap :in-lo :in-hi :out-lo :out-hi)`, `(clamp :min :max)`,
+  `(cmp :op >= :to)`, `(quant :step)`. Any number arg may be a nested source:
+  `(acc :by (coin :p 0.5) :min 0 :max 16)`.
+- **ACTIONs**: held `(note+ $1) (vel* $1) gate* dashdecay* dotdecay* basevel*`
+  (`$1` is the stages' value, `x` the older spelling; sample and hold); event words with a number,
+  `(note+ -12)`, `rest`, …, act on the stepping hit when `x >= 0.5`
+  (`(then W…)` groups several); `(next W…)` on the next figure, including
+  `(fast n)`; note ops
+  `(scale :minor :root C)`, `(harmony :track n :amount a)`, `(snap "chan")`
+  on every hit the chain steps on.
+- `(if COND w… (else w…))`: COND over numbers and `$` context (`$1` the
+  stages' value, `$n` the rule's steps so far, `$vel`, `$cycle`, `$fig`,
+  `$rep`; `= != < > <= >=`, `and or not`, `+ - * / mod min max abs`). Every
+  word after COND runs when it holds; event words act on this hit, figure
+  words (`half rev swap ghost (fast n)` and `(minvel v)`-style velocity
+  words) on the next figure. Bare figure words straight in a rule also mean
+  the next figure. A rule with no stages always acts.
+- Randomness is a pure hash of (seed, chain, node, cycle, figure, hit).
+  `(seed n)` sets the route's seed; the default is the route index.
+- Rev 1 spellings still parse: positional args `(acc 0.07 0 1)`, `(+ note)`,
+  `(* dashdecay)`, `(scale -1 1 0 1)` as remap.
+
+`(scale …)`, `(harmony …)` and `(snap …)` are also plain route words (and
+`on` words): they move every hit's final note at emit (§13 of the row
+processes spec).
+
+```lisp
+(jak "yo" :16
+  (fig (. . -)) (fig (. -))
+  -> 0 (rule any (acc :by 1 :min 0 :max 8) (note+ $1)) (scale :minor :root C)
+  -> 1 (rule left (coin :p 0.5) (next rest))
+  -> 2 (rule (and dash head) (acc :by 0.07) sin
+             (remap :in-lo -1 :in-hi 1 :out-lo 0 :out-hi 1) dashdecay*))
+```
 
 ## 8. Runtime Model
 

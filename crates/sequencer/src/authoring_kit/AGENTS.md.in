@@ -1,11 +1,14 @@
 <!-- eseq:generated. eseq rewrites this file each time it starts so the paths stay current. Delete this line to keep your own edits. -->
-# Authoring eseq instruments and effects
+# Authoring eseq instruments, effects and sequencers
 
 You are working in the eseq user folder. When the user asks for a new
 instrument ("make me a poly synth with a wavefolder") or an audio effect ("a
 tape delay with wow and flutter"), you write two small source files into a new
 folder here. eseq compiles them to native code and shows them in its browser.
-When the user asks to change one, edit its files in place.
+When the user asks for a new sequencer ("a Euclidean ring sequencer", "a
+Turing-machine style random looper"), you write a Lisp package module instead;
+see "Sequencers" below. When the user asks to change something, edit its files
+in place.
 
 ## Where things are
 
@@ -19,6 +22,9 @@ When the user asks to change one, edit its files in place.
 | DGenLisp operator catalog (large JSON; search it) | `{{DGENLISP_REFERENCE}}/dgenlisp-operators.json` |
 | Factory instruments (read-only examples) | `{{FACTORY_INSTRUMENTS}}` |
 | Factory effects (read-only examples) | `{{FACTORY_EFFECTS}}` |
+| Your sequencer modules (write here) | `{{LOCAL_PACKAGES}}` |
+| Sequencer rules (read first) | `{{AUTHORING}}/sequencer-reference.md` |
+| Factory sequencer packages (read-only examples) | `{{FACTORY_PACKAGES}}` |
 | The `eseq` command-line tool | `{{ESEQ}}` |
 
 The factory folders are read-only examples. Never edit them. Don't touch the
@@ -102,6 +108,43 @@ and choose **Edit > Reload Selected Effect From Disk**). Knob values are kept
 for params whose names didn't change. Keep existing param
 names where you can: projects store knob values and step locks by param name,
 and a renamed param loses them.
+
+## Sequencers
+
+A sequencer is not DGenLisp. It is a module in eseq's own Lisp that defines
+an instance kind with `def-kind`: a document of saved settings, a tick that
+emits notes, and a panel that becomes its own tab beside **Seq**.
+
+1. Read `{{AUTHORING}}/sequencer-reference.md`. It is the rulebook: file
+   layout, `def-kind`, the tick natives, panels, shader widgets and the
+   eseqlisp gotchas that break code silently (`0` is falsy, fixed arity, the
+   16-value shader limit).
+2. Study the factory examples: `{{FACTORY_PACKAGES}}/alez.jaki/src/kind.lisp`
+   (a generator kind with a document, a sexp-slot panel and a playhead) and
+   `{{FACTORY_PACKAGES}}/alez.jaki/src/doc.lisp` (its tick side).
+3. Write two modules in a new folder under `{{LOCAL_PACKAGES}}`: a core module
+   with the pure tick, and a view module that imports it, draws the panel and
+   declares the `def-kind`. `<folder>/core.lisp` is the module
+   `<folder>.core`. Check the folder name isn't taken. Save both files before
+   checking: eseq reloads Local files as they change, and a half-written pair
+   can fail to load in the running app.
+4. Check your work, and repeat until it passes:
+
+   ```sh
+   "{{ESEQ}}" sequencer check <folder>.<view-module>
+   ```
+
+   It finds the module, checks brackets (with file and line) across it and the
+   modules it imports, confirms the `def-kind`, then loads it in eseq's own
+   runtime, creates an instance and draws its tab. Open the PNG it prints and
+   look at it. `--eval FORM` runs after the instance exists, for example to
+   fill it with example settings (see the rules file).
+5. The check does not run the tick. Tell the user how to try it: in the
+   **Packages** tab, under **Local**, right-click the view module and choose
+   **New <kind>**; its tab opens beside **Seq**. Press Play. Ask them to report
+   any error in the status line, and to say how it sounds. A Drum Rack can own
+   one too (right-click the rack header: **New <kind> in rack**), once the
+   module has been loaded in the session.
 
 ## Sharing
 

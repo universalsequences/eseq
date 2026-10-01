@@ -204,6 +204,28 @@ fn output_reads_at(output: &VecDeque<OutputNote>, beat: f64) -> (Vec<f32>, u16) 
     (chord, key_mask)
 }
 
+/// One track's harmony as a generator tick reads it (`gen-track-harmony`,
+/// docs/jaki-row-processes-spec.md §13): chord pitches in semitones from the
+/// track root, and the key as a pitch-class mask.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TrackHarmony {
+    pub chord: Vec<f32>,
+    pub key_mask: u16,
+}
+
+impl TrackHarmony {
+    fn from_pattern(pattern: &ProcessStepPattern) -> Self {
+        Self {
+            chord: pattern.pitches().collect(),
+            key_mask: pattern.key_mask,
+        }
+    }
+}
+
+/// Per track, ascending `(beat, harmony)` changes: what a `gen-track-harmony`
+/// read at a beat takes is the last entry at or before it.
+pub type TrackHarmonyTimeline = Vec<Vec<(f64, TrackHarmony)>>;
+
 #[derive(Clone, Debug, Default)]
 pub struct ProcessReadSnapshot {
     pub tracks: Arc<Vec<ProcessTrackReadSnapshot>>,
@@ -2246,6 +2268,46 @@ impl ProcessRuntime {
                     });
             }
         }
+    }
+
+    /// Every track's harmony from `from_beat` through `to_beat`, for
+    /// generator ticks in one lookahead chunk: the harmony in force at
+    /// `from_beat`, then each step boundary after it. Like a `:chord :pattern`
+    /// read, a stepped track reports its authored step (an empty step holds
+    /// the last trig's); a track that has not stepped reports what it sounded
+    /// (`:output`) at `from_beat`, and nothing before it has sounded.
+    pub fn track_harmony_timeline(&self, from_beat: f64, to_beat: f64) -> TrackHarmonyTimeline {
+        const EPS: f64 = 1e-9;
+        self.resolved_track_history
+            .iter()
+            .map(|history| {
+                let mut timeline = Vec::new();
+                let at_start = history
+                    .steps
+                    .iter()
+                    .rev()
+                    .filter(|entry| entry.beat <= from_beat + EPS)
+                    .find_map(|entry| entry.pattern)
+                    .map(|pattern| TrackHarmony::from_pattern(&pattern))
+                    .or_else(|| {
+                        let (chord, key_mask) = output_reads_at(&history.output, from_beat);
+                        (!chord.is_empty()).then_some(TrackHarmony { chord, key_mask })
+                    });
+                if let Some(harmony) = at_start {
+                    timeline.push((from_beat, harmony));
+                }
+                for entry in history
+                    .steps
+                    .iter()
+                    .filter(|entry| entry.beat > from_beat + EPS && entry.beat <= to_beat + EPS)
+                {
+                    if let Some(pattern) = entry.pattern {
+                        timeline.push((entry.beat, TrackHarmony::from_pattern(&pattern)));
+                    }
+                }
+                timeline
+            })
+            .collect()
     }
 
     pub fn read_snapshot(&mut self, before_beat: f64) -> ProcessReadSnapshot {

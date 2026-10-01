@@ -10084,7 +10084,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                  (map (lambda (e) (get e :vel)) (get r :events)))"#,
         );
         // dash base, dash-decay, post-dash accent, then dot decay from the accent
-        assert_close(&vels, &[0.8, 0.72, 0.92, 0.782]);
+        assert_close(&vels, &[0.8, 0.4, 0.92, 0.46]);
     }
 
     #[test]
@@ -10098,20 +10098,11 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                      (append (map (lambda (e) (get e :vel)) (get r0 :events))
                              (map (lambda (e) (get e :vel)) (get r1 :events))))))"#,
         );
-        // dot streak decays straight through the cycle boundary, clamped at
-        // min-vel 0.3 (spec §5: no per-step reset)
+        // dot streak halves straight through the cycle boundary, down toward
+        // min-vel 0 (spec §5: no per-step reset)
         assert_close(
             &vels,
-            &[
-                0.8,
-                0.68,
-                0.578,
-                0.49130000000000007,
-                0.417605,
-                0.35496425,
-                0.30171961249999996,
-                0.3,
-            ],
+            &[0.8, 0.4, 0.2, 0.1, 0.05, 0.025, 0.0125, 0.00625],
         );
     }
 
@@ -10220,7 +10211,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             &nums,
             &[
                 0.0, 1.0, 0.0, 1.0, // hands L R L R
-                0.8, 0.68, 0.578, 0.49130000000000007, // pad continues decay
+                0.8, 0.4, 0.2, 0.1, // pad continues decay
                 4.0, // padded length
                 0.0, // ending hand back to :left
             ],
@@ -10248,7 +10239,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         );
         // ghost drops the dash's first hit; the pickup keeps dash-decay as its
         // velocity and the following dot still accents
-        assert_close(&nums, &[1.0, 0.9, 2.0, 0.92]);
+        assert_close(&nums, &[1.0, 0.5, 2.0, 0.92]);
     }
 
     #[test]
@@ -10261,7 +10252,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                  (map (lambda (e) (get e :vel)) (get r :events)))"#,
         );
         // rotate right by one unit: the last (quietest) hit wraps to offset 0
-        assert_close(&vels, &[0.49130000000000007, 0.8, 0.68, 0.578]);
+        assert_close(&vels, &[0.1, 0.8, 0.4, 0.2]);
     }
 
     #[test]
@@ -10523,16 +10514,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         let vels: Vec<f64> = out.iter().map(|e| e.event.resolved.velocity as f64).collect();
         assert_close(
             &vels,
-            &[
-                0.8,
-                0.68,
-                0.578,
-                0.49130000000000007,
-                0.417605,
-                0.35496425,
-                0.30171961249999996,
-                0.3,
-            ],
+            &[0.8, 0.4, 0.2, 0.1, 0.05, 0.025, 0.0125, 0.00625],
         );
         assert_eq!(out[0].sample_time, 12_000);
         assert!(out.iter().all(|e| e.event.track == Some(0)));
@@ -10622,7 +10604,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             .iter()
             .map(|e| e.event.resolved.velocity as f64)
             .collect();
-        assert_close(&base_vels, &[0.8, 0.68, 0.8, 0.72, 0.92]);
+        assert_close(&base_vels, &[0.8, 0.4, 0.8, 0.4, 0.92]);
     }
 
     #[test]
@@ -11515,7 +11497,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             .iter()
             .map(|e| e.event.resolved.velocity as f64)
             .collect();
-        assert_close(&base_vels, &[0.8, 0.68, 0.8, 0.72, 0.92]);
+        assert_close(&base_vels, &[0.8, 0.4, 0.8, 0.4, 0.92]);
     }
 
     #[test]
@@ -12480,16 +12462,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         let vels: Vec<f64> = out.iter().map(|e| e.event.resolved.velocity as f64).collect();
         assert_close(
             &vels,
-            &[
-                0.8,
-                0.68,
-                0.578,
-                0.49130000000000007,
-                0.417605,
-                0.35496425,
-                0.30171961249999996,
-                0.3,
-            ],
+            &[0.8, 0.4, 0.2, 0.1, 0.05, 0.025, 0.0125, 0.00625],
         );
     }
 
@@ -12558,7 +12531,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
 
         // :vel-scale applies at emission, on top of the threaded velocities
         let vels: Vec<f64> = out.iter().map(|e| e.event.resolved.velocity as f64).collect();
-        assert_close(&vels, &[0.4, 0.34, 0.289, 0.24565000000000003]);
+        assert_close(&vels, &[0.4, 0.2, 0.1, 0.05]);
     }
 
     #[test]
@@ -13395,6 +13368,543 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         assert_eq!(cycles, [[3.0; 5], [4.0; 5]].concat());
     }
 
+    // ── jaki row processes (docs/jaki-row-processes-spec.md) ──
+
+    #[test]
+    fn jaki_proc_hash_is_deterministic_and_roughly_uniform() {
+        let mut rt = jaki_runtime();
+        let draw = "(map (lambda (i) (jaki/hash-u (list 3 0 0 i 1 2))) (range 0 10000))";
+        let a = jaki_eval_nums(&mut rt, draw);
+        let b = jaki_eval_nums(&mut rt, draw);
+        assert_eq!(a, b, "same keys, same draws");
+        assert!(a.iter().all(|u| (0.0..1.0).contains(u)), "draws in [0,1)");
+        let mut buckets = [0usize; 10];
+        for u in &a {
+            buckets[(u * 10.0) as usize] += 1;
+        }
+        assert!(buckets.iter().all(|&n| (900..=1100).contains(&n)), "{buckets:?}");
+        // neighbouring cycles are not correlated: a fair coin repeats its
+        // previous side about half the time
+        let coins: Vec<bool> = a.iter().map(|u| *u < 0.5).collect();
+        let repeats = coins.windows(2).filter(|w| w[0] == w[1]).count() as f64;
+        let ratio = repeats / (coins.len() - 1) as f64;
+        assert!((0.46..0.54).contains(&ratio), "repeat ratio {ratio}");
+        // every key position moves the draw
+        let keyed = jaki_eval_nums(
+            &mut rt,
+            "(map (lambda (k) (jaki/hash-u k))
+                  (list (list 3 0 0 5 1 2) (list 4 0 0 5 1 2) (list 3 1 0 5 1 2)
+                        (list 3 0 1 5 1 2) (list 3 0 0 6 1 2) (list 3 0 0 5 2 2)
+                        (list 3 0 0 5 1 3)))",
+        );
+        for i in 1..keyed.len() {
+            assert_ne!(keyed[0], keyed[i], "key position {i} ignored: {keyed:?}");
+        }
+    }
+
+    #[test]
+    fn jaki_proc_coin_next_rest_silences_following_figures() {
+        let body = "(fig (. .)) (fig (. .)) (fig (. .)) (fig (. .))";
+        // every figure's left hit flips heads: each figure rests the next,
+        // across the cycle boundary too, so only the very first figure plays
+        let t = jaki_surface_hits(&format!("{body} -> 0 (proc left (coin 1) (next rest))"), 4.0);
+        assert_eq!(t[0].len(), 2, "{:?}", t[0]);
+        let t = jaki_surface_hits(&format!("{body} -> 0 (proc left (coin 0) (next rest))"), 4.0);
+        assert_eq!(t[0].len(), 16);
+        // a rested figure still threads velocity: the unprocessed route's hits
+        // at the same positions keep the same velocities
+        let plain = jaki_surface_hits(&format!("{body} -> 0"), 1.0);
+        let t = jaki_surface_hits(&format!("{body} -> 0 (proc left (coin 1) (next rest))"), 1.0);
+        assert_eq!(t[0], plain[0][..2]);
+
+        // p = 0.5 is a fixed, replayable mix
+        let half = format!("{body} -> 0 (proc left (coin 0.5) (next rest)) (seed 7)");
+        let a = jaki_surface_hits(&half, 8.0);
+        let b = jaki_surface_hits(&half, 8.0);
+        assert_eq!(a[0], b[0]);
+        assert!(a[0].len() > 8 && a[0].len() < 32, "{} hits", a[0].len());
+        // another seed rerolls
+        let c = jaki_surface_hits(&half.replace("(seed 7)", "(seed 8)"), 8.0);
+        assert_ne!(a[0], c[0]);
+    }
+
+    #[test]
+    fn jaki_proc_then_actions_apply_to_the_stepping_hit() {
+        // `. . . .` plays L R L R
+        let t = jaki_surface_hits(
+            ". . . .
+             -> 0 (proc left (coin 1) (then rest))
+             -> 1 (proc right (coin 1) (then (note+ 7) (vel* 0.5)))
+             -> 2 (proc left (coin 0) (then rest))",
+            1.0,
+        );
+        let plain = jaki_surface_hits(". . . . -> 0", 1.0);
+        // dropped hits still thread the velocity model
+        assert_eq!(t[0], vec![plain[0][1], plain[0][3]]);
+        assert_eq!(notes(&t[1]), [0., 7., 0., 7.]);
+        assert!((t[1][1].2 - plain[0][1].2 * 0.5).abs() < 1e-6, "{:?}", t[1]);
+        assert!((t[1][0].2 - plain[0][0].2).abs() < 1e-6);
+        assert_eq!(t[2], plain[0]);
+    }
+
+    #[test]
+    fn jaki_proc_held_dashdecay_steps_per_dash_head() {
+        // (acc 0.25) steps once per dash head; the dash's second hit decays
+        // from its first by dashdecay × held, held 0.25, 0.5, 0.75, 0 (wrap)
+        let t = jaki_surface_hits(
+            "- - - - -> 0 (minvel 0.3) (proc (and dash head) (acc 0.25) (* dashdecay))",
+            2.0,
+        );
+        let vels: Vec<f64> = t[0].iter().map(|h| h.2).collect();
+        assert_eq!(vels.len(), 8);
+        for (i, held) in [0.25, 0.5, 0.75, 0.0].iter().enumerate() {
+            let first = vels[2 * i];
+            let expect = (first * (0.5 * held)).clamp(0.3, 1.0);
+            assert!((vels[2 * i + 1] - expect).abs() < 1e-5, "dash {i}: {vels:?}");
+        }
+        // without the process the decay is the plain 0.5
+        let plain = jaki_surface_hits("- - - - -> 0", 2.0);
+        assert!((plain[0][1].2 - plain[0][0].2 * 0.5).abs() < 1e-5);
+    }
+
+    #[test]
+    fn jaki_proc_chain_state_round_trips_through_generator_cells() {
+        // (count 5) steps once per hit and keeps counting across cycles
+        let t = jaki_surface_hits(". . . . -> 0 (proc any (count 5) (+ note))", 3.0);
+        assert_eq!(notes(&t[0]), [0., 1., 2., 3., 4., 0., 1., 2., 3., 4., 0., 1.]);
+        // held values persist on non-stepping hits: right hits reuse the last
+        // left hit's transpose
+        let t = jaki_surface_hits(". . . . -> 0 (proc left (acc 2 0 12) (+ note))", 2.0);
+        assert_eq!(notes(&t[0]), [2., 2., 4., 4., 6., 6., 8., 8.]);
+        // …and before a chain's first step the held value is the identity
+        let t = jaki_surface_hits(". . . . -> 0 (proc right (acc 2 0 12) (+ note))", 1.0);
+        assert_eq!(notes(&t[0]), [0., 2., 2., 4.]);
+        // a pending next-figure flag set by a cycle's last figure applies to
+        // the next cycle's first figure
+        let t = jaki_surface_hits("(fig (. .)) (fig (. .)) -> 0 (proc (fig 2) (coin 1) (next (note+ 12)))", 3.0);
+        assert_eq!(notes(&t[0]), [0., 0., 0., 0., 12., 12., 0., 0., 12., 12., 0., 0.]);
+        // stages: sin / scale / cmp / quant / clamp fold one x per step
+        let t = jaki_surface_hits(
+            ". . . . -> 0 (proc any (count 4) (scale 0 4 0 1) sin (scale -1 1 0 10) (quant 5) (clamp 0 7) (+ note))",
+            1.0,
+        );
+        // sin(2π·{0, .25, .5, .75}) → {0, 1, 0, -1} → {5, 10, 5, 0} → clamp 7
+        assert_eq!(notes(&t[0]), [5., 7., 5., 0.]);
+        let t = jaki_surface_hits(". . . . -> 0 (proc any (count 4) (cmp >= 2) (+ note))", 1.0);
+        assert_eq!(notes(&t[0]), [0., 0., 1., 1.]);
+    }
+
+    #[test]
+    fn jaki_doc_row_procs_become_proc_words_that_play() {
+        let mut rt = jaki_runtime();
+        let value = rt
+            .eval(
+                r#"(import alez.jaki.doc)
+                   (source (alez.jaki.doc/body
+                             (list (list :dot :dot :dot :dot))
+                             (list (dict :route 0 :mods (list)
+                                     :procs (list (list "left" (list "coin" 1) (list "then" (list "note+" 7)))
+                                                  (list (list "and" "dash" "head") (list "acc" 0.25 0 1)
+                                                        (list "*" "dashdecay"))
+                                                  (list "any" (list "chan" "jaki-proc-doc" 3) (list "+" "note")))
+                                     :seed 5))
+                             1))"#,
+            )
+            .expect("eval")
+            .expect("value");
+        let Value::String(body) = value else { panic!("{value:?}") };
+        assert_eq!(
+            body,
+            r#"((fig (. . . .)) -> 0 (rule left (coin 1) (then (note+ 7))) (rule (and dash head) (acc 0.25 0 1) (* dashdecay)) (rule any (chan "jaki-proc-doc" 3) (+ note)) (seed 5))"#
+        );
+        // `. . . .` is L R L R: left hits +7 by `then`, every hit +3 held
+        let t = jaki_surface_hits(&body, 1.0);
+        assert_eq!(notes(&t[0]), [10., 3., 10., 3.]);
+
+        // the trigger slot shows an (and …) trigger as its terms, and back
+        let got = rt
+            .eval(
+                r#"(source (list
+                     (alez.jaki.doc/chain-trigger-items (list (list "and" "dash" "head") "sin"))
+                     (alez.jaki.doc/chain-with-trigger (list "left" "sin") (list "dash" "head"))
+                     (alez.jaki.doc/chain-with-trigger (list "left" "sin") (list "dot"))
+                     (alez.jaki.doc/chain-with-trigger (list "left" "sin") (list))))"#,
+            )
+            .expect("eval")
+            .expect("value");
+        assert_eq!(
+            got,
+            Value::String(
+                r#"(("dash" "head") (("and" "dash" "head") "sin") ("dot" "sin") ("any" "sin"))"#
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn jaki_proc_schemas_accept_chains_and_reject_length_changing_next_words() {
+        use eseqlisp::sexp_slot::{read_value, schema::Schema};
+        let mut rt = jaki_runtime();
+        let mut schema_of = |name: &str| {
+            let value = rt
+                .eval(&format!("(import alez.jaki.doc)\nalez.jaki.doc/{name}"))
+                .expect("schema")
+                .expect("a value");
+            Schema::parse(&value).unwrap_or_else(|e| panic!("{name} parses: {e:?}"))
+        };
+        let trigger = schema_of("proc-trigger-schema");
+        let body = schema_of("proc-body-schema");
+        trigger
+            .check(&read_value("(dash head (fig 2) (not accent) any (and left (every 2)))").unwrap())
+            .expect("selector terms");
+        assert!(trigger.check(&read_value("((coin 0.5))").unwrap()).is_err());
+        body.check(
+            &read_value(
+                "((coin :p 0.5) (next rest half (note+ 7)) (acc :by 0.07 :min 0 :max 1) sin \
+                  (remap :in-lo -1 :in-hi 1 :out-lo 0 :out-hi 1) dashdecay* (then rest (vel* 0.5)) \
+                  (cmp :op >= :to 0.5) (note+ $1) (vel* $1) (count :n 4) (rand :min 0 :max 1) (cyc 1 2 3) \
+                  (clamp :min 0 :max 1) (quant :step 1) abs (pow :e 2) \
+                  (scale :minor :root Eb) (harmony :track \"2\" :amount 0.5) \
+                  (note+ -12) rest (vel* 0.5))",
+            )
+            .unwrap(),
+        )
+        .expect("stages and actions");
+        body.check(
+            &read_value(
+                "((count :n 4) (if (= (mod $n 4) 3) (note+ 12)) (if (and (>= $1 1) (!= $fig 2)) \
+                  (note+ $1) half (minvel 0.4) (for 3 (fast 8) (minvel 0.2)) (else (vel* 0.5) rest)) \
+                  half (fast 4) (note+ $1) (for 2 rest))",
+            )
+            .unwrap(),
+        )
+        .expect("if, $ context, figure words");
+        // a source's number arg takes a nested source, one level deep in
+        // the editor (each level multiplies the schema every slot carries)
+        body.check(&read_value("((acc :by (coin :p 0.5) :min 0 :max 16))").unwrap())
+            .expect("nested sources");
+        assert!(body.check(&read_value("((next fast))").unwrap()).is_err());
+        assert!(body.check(&read_value("((acc :by sin))").unwrap()).is_err());
+        let fresh = body.form_default("acc").expect("acc is a form");
+        assert_eq!(
+            eseqlisp::vm::format_lisp_source(&fresh),
+            r#"("acc" ":by" 1 ":min" 0 ":max" 8)"#
+        );
+        // the row's own slot takes scale / harmony too
+        let row = schema_of("row-schema");
+        row.check(&read_value("((scale :dorian :root D) (harmony :track \"1\" :amount 1))").unwrap())
+            .expect("row scale/harmony");
+    }
+
+    #[test]
+    fn jaki_preview_procs_shows_the_chains_effect() {
+        let mut rt = jaki_runtime();
+        // left hits dropped by `then rest`, right hits transposed by a
+        // count: two cycles of `. . . .`
+        let got = jaki_eval_nums(
+            &mut rt,
+            "(map (lambda (e) (+ (* 100 (get e :cycle)) (or (get e :nadd) 0)))
+                  (jaki/preview-procs '((fig (. . . .)))
+                                      '((proc left (coin 1) (then rest))
+                                        (proc right (count 3) (+ note)))
+                                      0 0 2))",
+        );
+        assert_eq!(got, [0., 1., 102., 100.]);
+    }
+
+    #[test]
+    fn jaki_snap_moves_notes_to_the_channel_pitch_classes() {
+        let mut rt = jaki_runtime();
+        rt.eval(
+            r#"(import alez.jaki.surface :refer (jak))
+               (jak "s" :16 . . . .
+                 -> 0 (note (seq :hit 0 1 2 3)) (snap "chord")
+                 -> 1 (note (seq :hit 5 6 11 13)) (proc left 1 (then (snap "chord")))
+                 -> 2 (note 5) (snap "unset"))"#,
+        )
+        .expect("jak");
+        // C major triad: pitch classes 0 4 7 → 1 + 16 + 128
+        rt.set_generator_channel_values(
+            1,
+            HashMap::from([("chord".to_string(), Value::Number(145.0))]),
+        );
+        let mut generators = crate::generator::GeneratorRuntime::default();
+        generators.sync_definitions(&rt.sequencer_defs(), 0.0);
+        let mut out = Vec::new();
+        generators.process_block(0.0, 1.0, 0, 48_000.0,
+            |input| rt.invoke_sequencer_tick(input.generator_index, input).expect("tick"), &mut out);
+        let track = |t: usize| {
+            out.iter()
+                .filter(|e| e.event.track == Some(t))
+                .map(|e| e.event.resolved.transpose as f64)
+                .collect::<Vec<_>>()
+        };
+        // nearest chord tone, ties downward (2 → 0), octave kept
+        assert_eq!(track(0), [0., 0., 0., 4.]);
+        // only the left hits step the chain that snaps; 11 wraps up to 12
+        assert_eq!(track(1), [4., 6., 12., 13.]);
+        // an unset channel leaves the note alone
+        assert_eq!(track(2), [5., 5., 5., 5.]);
+    }
+
+    #[test]
+    fn jaki_proc_keyword_args_nested_sources_and_plain_actions() {
+        let n = |body: &str, beats: f64| notes(&jaki_surface_hits(body, beats)[0]);
+        // accumulate 1 every hit, add it to the note; wraps at :max
+        assert_eq!(
+            n(". . . . -> 0 (proc any (acc :by 1 :min 0 :max 8) (note+))", 3.0),
+            [1., 2., 3., 4., 5., 6., 7., 0., 1., 2., 3., 4.]
+        );
+        // a nested source feeds an arg: heads every time, tails never
+        assert_eq!(
+            n(". . . . -> 0 (proc any (acc :by (coin :p 1) :min 0 :max 8) (note+))", 1.0),
+            [1., 2., 3., 4.]
+        );
+        assert_eq!(
+            n(". . . . -> 0 (proc any (acc :by (coin :p 0) :min 0 :max 8) (note+))", 1.0),
+            [0., 0., 0., 0.]
+        );
+        // a nested acc keeps its own state: :by walks 1 2 3 0 1 2 3 0
+        assert_eq!(
+            n(". . . . -> 0 (proc any (acc :by (acc :by 1 :min 0 :max 4) :min 0 :max 100) (note+))", 2.0),
+            [1., 3., 6., 6., 7., 9., 12., 12.]
+        );
+        assert_eq!(
+            n(". . . . -> 0 (proc any (count :n 4) (cmp :op >= :to 2) (note+))", 1.0),
+            [0., 0., 1., 1.]
+        );
+        assert_eq!(
+            n(". . . . -> 0 (proc any (count :n 4) (remap :in-lo 0 :in-hi 4 :out-lo 0 :out-hi 8) (note+))", 1.0),
+            [0., 2., 4., 6.]
+        );
+        // (vel*) holds velocity × x
+        let t = jaki_surface_hits(". . . . -> 0 (proc any 0.5 (vel*))", 1.0);
+        let plain = jaki_surface_hits(". . . . -> 0", 1.0);
+        for (a, b) in t[0].iter().zip(&plain[0]) {
+            assert!((a.2 - b.2 * 0.5).abs() < 1e-6, "{:?} vs {:?}", t[0], plain[0]);
+        }
+    }
+
+    #[test]
+    fn jaki_rule_if_with_dollar_context() {
+        let n = |body: &str, beats: f64| notes(&jaki_surface_hits(body, beats)[0]);
+        // `. . . .` is L R L R: every 4th left hit up an octave
+        assert_eq!(
+            n(". . . . -> 0 (rule left (count :n 4) (if (= $1 3) (note+ 12)))", 4.0),
+            [0., 0., 0., 0., 0., 0., 12., 0., 0., 0., 0., 0., 0., 0., 12., 0.]
+        );
+        // the same with $n and no stage
+        assert_eq!(
+            n(". . . . -> 0 (rule left (if (= (mod $n 4) 3) (note+ 12)))", 4.0),
+            [0., 0., 0., 0., 0., 0., 12., 0., 0., 0., 0., 0., 0., 0., 12., 0.]
+        );
+        // else branch, and $1 as a value
+        assert_eq!(
+            n(". . . . -> 0 (rule any (count :n 4) (if (< $1 2) (note+ $1) (else (note+ -12))))", 1.0),
+            [0., 1., -12., -12.]
+        );
+        // every word after the condition runs; and/or/not
+        let t = jaki_surface_hits(
+            ". . . . -> 0 (rule any (count :n 4) (if (and (>= $1 1) (not (= $1 3))) (note+ 5) (vel* 0.5)))",
+            1.0,
+        );
+        let plain = jaki_surface_hits(". . . . -> 0", 1.0);
+        assert_eq!(notes(&t[0]), [0., 5., 5., 0.]);
+        assert!((t[0][1].2 - plain[0][1].2 * 0.5).abs() < 1e-6);
+        // $fig picks by figure, and a figure word in a branch hits the NEXT figure
+        let t = jaki_surface_hits(
+            "(fig (. .)) (fig (. .)) (fig (. .)) -> 0 (rule any (if (= $fig 1) (fast 2)))",
+            1.5,
+        );
+        // figure 2 doubles (4 hits), figures 1 and 3 stay 2 hits
+        assert_eq!(t[0].len(), 8, "{:?}", t[0]);
+        // several figure words in one if: figure 2 fast and floored at minvel
+        let t = jaki_surface_hits(
+            "(fig (. .)) (fig (. . . .)) -> 0 (rule (fig 1) (if (= 1 1) (fast 2) (minvel 0.6)))",
+            1.5,
+        );
+        assert_eq!(t[0].len(), 2 + 8, "{:?}", t[0]);
+        assert!(t[0][2..].iter().all(|h| h.2 >= 0.6 - 1e-6), "{:?}", t[0]);
+    }
+
+    #[test]
+    fn jaki_rule_fast_does_not_feed_its_own_counter() {
+        // `. . -` twice = 8 hits a cycle; count 16 → hits 13-15 fall in cycle
+        // 1's second figure, so cycle 2's first figure plays fast, then the
+        // count carries on over the pattern as written: one fast figure every
+        // two cycles, never stuck
+        let body = "(fig (. . -)) (fig (. . -)) -> 0 (rule any (count :n 16) (if (> $1 12) (fast 4)))";
+        let t = jaki_surface_hits(body, 16.0);
+        // 16 figures of 4 hits, 3 of them (cycles 2 4 6) fast 4 → 16 hits
+        assert_eq!(t[0].len(), 16 * 4 + 3 * 12, "{} hits", t[0].len());
+    }
+
+    #[test]
+    fn jaki_rule_for_runs_figure_words_over_several_figures() {
+        let four = "(fig (. .)) (fig (. .)) (fig (. .)) (fig (. .))";
+        // figure 1 fires (for 2 (fast 2)): figures 2 and 3 double, 4 does not
+        let t = jaki_surface_hits(&format!("{four} -> 0 (rule (fig 1) (for 2 (fast 2)))"), 4.0);
+        assert_eq!(t[0].len(), 2 * (2 + 4 + 4 + 2), "{:?}", t[0].len());
+        // (for 3 rest) after figure 1: only figure 1 plays
+        let t = jaki_surface_hits(&format!("{four} -> 0 (rule (fig 1) (for 3 rest))"), 4.0);
+        assert_eq!(t[0].len(), 2 * 2);
+        // inside an if, with the count of the pattern as written
+        let t = jaki_surface_hits(
+            &format!("{four} -> 0 (rule any (count :n 8) (if (= $1 1) (for 2 (fast 2))))"),
+            4.0,
+        );
+        assert_eq!(t[0].len(), 2 * (2 + 4 + 4 + 2), "{:?}", t[0].len());
+    }
+
+    #[test]
+    #[ignore = "timing probe: sexp-slot schema parse cost for the jaki slots"]
+    fn jaki_schema_parse_cost_probe() {
+        use eseqlisp::sexp_slot::schema::Schema;
+        let mut rt = jaki_runtime();
+        for name in ["row-schema", "proc-trigger-schema", "proc-body-schema"] {
+            let value = rt
+                .eval(&format!("(import alez.jaki.doc)\nalez.jaki.doc/{name}"))
+                .unwrap()
+                .unwrap();
+            let size = eseqlisp::vm::format_lisp_source(&value).len();
+            let start = std::time::Instant::now();
+            for _ in 0..200 {
+                std::hint::black_box(Schema::parse(&value).unwrap());
+            }
+            let per = start.elapsed().as_secs_f64() * 1e6 / 200.0;
+            eprintln!("PROBE {name}: {size} chars of source, {per:.1} us per parse");
+        }
+    }
+
+    #[test]
+    fn jaki_rule_bare_figure_words_mean_the_next_figure() {
+        let t = jaki_surface_hits("(fig (. .)) (fig (. .)) -> 0 (rule (fig 1) (fast 2))", 1.0);
+        assert_eq!(t[0].len(), 6, "figure 2 doubled: {:?}", t[0]);
+        let t = jaki_surface_hits("(fig (. .)) (fig (. .)) -> 0 (rule (fig 1) (coin :p 0) half)", 1.0);
+        assert_eq!(t[0].len(), 4);
+    }
+
+    #[test]
+    fn jaki_rule_without_stages_always_acts() {
+        // `. . -` ×2: figure 1 always triggers, so every figure after the
+        // first plays halftime (`. . -` → one double-length dash: 2 hits)
+        let t = jaki_surface_hits("(fig (. . -) (rep 2)) -> 0 (rule (fig 1) (next half))", 2.0);
+        let plain = jaki_surface_hits("(fig (. . -) (rep 2)) -> 0", 2.0);
+        assert!(t[0].len() < plain[0].len(), "{} vs {}", t[0].len(), plain[0].len());
+        let t = jaki_surface_hits(". . . . -> 0 (rule left (note+ 7))", 1.0);
+        assert_eq!(notes(&t[0]), [7., 0., 7., 0.]);
+    }
+
+    #[test]
+    fn jaki_proc_event_words_with_a_number_act_on_heads() {
+        let t = jaki_surface_hits(
+            ". . . .
+             -> 0 (proc any (coin :p 1) (note+ -12))
+             -> 1 (proc left (coin :p 1) rest)
+             -> 2 (proc any (coin :p 0) (note+ -12))
+             -> 3 (proc any (count :n 2) (note+ x))",
+            1.0,
+        );
+        assert_eq!(notes(&t[0]), [-12.; 4]);
+        assert_eq!(t[1].len(), 2, "left hits dropped");
+        assert_eq!(notes(&t[2]), [0.; 4]);
+        // a bare note+ is still the held x
+        assert_eq!(notes(&t[3]), [0., 1., 0., 1.]);
+    }
+
+    #[test]
+    fn jaki_scale_holds_notes_to_a_musical_scale() {
+        let t = jaki_surface_hits(
+            ". . . .
+             -> 0 (note (seq :hit 0 1 2 3)) (scale :minor :root C)
+             -> 1 (note (seq :hit 0 1 2 3)) (scale :major :root D)
+             -> 2 (note 1) (proc left (scale :minor :root C))",
+            1.0,
+        );
+        // C minor: 0 2 3 5 7 8 10; ties go down
+        assert_eq!(notes(&t[0]), [0., 0., 2., 3.]);
+        // D major: 2 4 6 7 9 11 1 — 0 goes down to the B below
+        assert_eq!(notes(&t[1]), [-1., 1., 2., 2.]);
+        // only the hits the chain steps on
+        assert_eq!(notes(&t[2]), [0., 1., 0., 1.]);
+    }
+
+    #[test]
+    fn jaki_proc_manual_example_plays() {
+        // docs/manual/packages.md, alez/jaki
+        let t = jaki_surface_hits(
+            "(fig (. . -)) (fig (. -))
+             -> 0 (rule any (acc :by 1 :min 0 :max 8) (note+ x))
+             -> 1 (rule left (coin :p 0.5) (note+ -12))
+             -> 2 (rule any (acc :by (coin :p 0.5) :min 0 :max 12) (note+ x))",
+            8.0,
+        );
+        let full = jaki_surface_hits("(fig (. . -)) (fig (. -)) -> 0", 8.0);
+        let counted: Vec<f64> = (0..full[0].len()).map(|i| ((i + 1) % 8) as f64).collect();
+        assert_eq!(notes(&t[0]), counted);
+        // some left strokes an octave down, the rest untouched
+        let n1 = notes(&t[1]);
+        assert!(n1.contains(&-12.0) && n1.contains(&0.0), "{n1:?}");
+        // the coin-fed count moves on some hits and holds on others
+        let n2 = notes(&t[2]);
+        let moves = n2.windows(2).filter(|w| w[0] != w[1]).count();
+        assert!(moves > 3 && moves < n2.len() - 3, "{n2:?}");
+    }
+
+    #[test]
+    fn jaki_proc_next_words_keep_the_figure_length() {
+        let mut rt = jaki_runtime();
+        for word in [
+            "rest", "rev", "swap", "ghost", "stac", "half", "(note+ 3)", "(vel* 0.5)", "(vel+ 0.1)",
+            "(gate 0.5)", "(fast 4)", "(* 2)",
+        ] {
+            // the first figure's first hit sets pend, so figure 2 plays `word`
+            let got = jaki_eval_nums(
+                &mut rt,
+                &format!(
+                    "(let ((p (get (first (jaki/prepare
+                                 '((fig (. .)) (fig (. . . . -)) (fig (.))
+                                   -> 0 (proc (fig 1) (coin 1) (next {word})))))
+                                  :p)))
+                       (let ((r (jaki/eval-at p 0 :left jaki/default-state)))
+                         (append (list (jaki/cycle-length p 0)
+                                       (/ (nth (get r :len) 0) (nth (get r :len) 1)))
+                                 (map (lambda (e) (/ (nth (get e :off) 0) (nth (get e :off) 1)))
+                                      (get r :events)))))"
+                ),
+            );
+            assert_eq!(got[0], 9.0, "{word}: {got:?}");
+            assert_eq!(got[1], 9.0, "{word}: {got:?}");
+            assert!(got[2..].iter().all(|off| *off < 9.0), "{word}: {got:?}");
+            // figure 3's lone dot always sits at unit 8
+            assert_eq!(*got.last().unwrap(), 8.0, "{word}: {got:?}");
+        }
+        // (next (fast 4)) packs four times the hits into figure 2's span
+        let mut hits = |w: &str| {
+            jaki_eval_nums(
+                &mut rt,
+                &format!(
+                    "(let ((p (get (first (jaki/prepare
+                                '((fig (. .)) (fig (. -)) -> 0 (proc (fig 1) (coin 1) (next {w}))))) :p)))
+                       (map (lambda (e) (/ (nth (get e :off) 0) (nth (get e :off) 1)))
+                            (get (jaki/eval-at p 0 :left jaki/default-state) :events)))"
+                ),
+            )
+        };
+        let fast = hits("(fast 4)");
+        // figure 1 at 0 1, then `. -` × 4 = 4 dots + 6 dots + a dash in 3 units
+        assert_eq!(fast.len(), 2 + 4 + 6 + 2, "{fast:?}");
+        assert!(fast[2..].iter().all(|o| (2.0..5.0).contains(o)), "{fast:?}");
+        // a length-changing word inside next is ignored
+        let got = jaki_eval_nums(
+            &mut rt,
+            "(let ((p (get (first (jaki/prepare
+                        '((fig (. .)) (fig (. .)) -> 0 (proc any (coin 1) (next (slow 2) (trunc 1)))))) :p)))
+               (list (len (get (jaki/eval-at p 0 :left jaki/default-state) :events))))",
+        );
+        assert_eq!(got, [4.0]);
+    }
+
     #[test]
     fn gen_mark_stamps_values_at_the_boundary_audio_sample() {
         let state = Arc::new(SequencerState::new(
@@ -13451,7 +13961,8 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                (jak "on" :16
                  . . . .
                  -> 0 (note 5) (on left (note+ 7) (vel* 0.5))
-                 -> 1 (on (every 2) (note 12)))"#,
+                 -> 1 (on (every 2) (note 12))
+                 -> 2 (note 5))"#,
         )
         .expect("jaki surface macro");
 
@@ -13473,7 +13984,9 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             track(0).iter().map(|e| e.event.resolved.transpose as f64).collect();
         assert_close(&notes[..4], &[12.0, 5.0, 12.0, 5.0]);
         let vels: Vec<f64> = track(0).iter().map(|e| e.event.resolved.velocity as f64).collect();
-        assert!(vels[0] < vels[1] * 0.8, "left hits are halved: {vels:?}");
+        let plain: Vec<f64> = track(2).iter().map(|e| e.event.resolved.velocity as f64).collect();
+        assert!((vels[0] - plain[0] * 0.5).abs() < 1e-6, "left hits are halved: {vels:?}");
+        assert!((vels[1] - plain[1]).abs() < 1e-6, "right hits untouched: {vels:?}");
         // (every 2) picks cycle 1 only: 0 0 0 0 then 12 12 12 12.
         let notes: Vec<f64> =
             track(1).iter().map(|e| e.event.resolved.transpose as f64).collect();

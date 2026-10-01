@@ -39,6 +39,10 @@ pub(crate) struct CaptureArgs {
     scroll_x: f32,
     scroll_y: f32,
     all_panels: bool,
+    /// Timed edit replay: each frame calls the script's `(capture-edit i)`
+    /// (a document write, as a widget's on-change makes) then builds and
+    /// renders the frame; reports per-frame timings.
+    edit_frames: usize,
 }
 
 impl CaptureArgs {
@@ -68,6 +72,7 @@ impl CaptureArgs {
         let mut scroll_x = 0.0;
         let mut scroll_y = 0.0;
         let mut all_panels = false;
+        let mut edit_frames = 0;
 
         while let Some(arg) = args.next() {
             match arg.as_str() {
@@ -93,6 +98,7 @@ impl CaptureArgs {
                     if arg == "--scroll-x" { scroll_x = value; } else { scroll_y = value; }
                 }
                 "--all-panels" => all_panels = true,
+                "--edit-frames" => edit_frames = parse_usize_arg(&mut args, "--edit-frames")?,
                 "-h" | "--help" => return Err(Self::usage()),
                 other => {
                     return Err(format!(
@@ -125,11 +131,12 @@ impl CaptureArgs {
             scroll_x,
             scroll_y,
             all_panels,
+            edit_frames,
         }))
     }
 
     fn usage() -> String {
-        "usage: metal_seq capture --script PATH [--project SAVED_PROJECT_JSON] [--buffer '*fx*'] [--track N] [--width PX] [--height PX] [--key KEY] [--padding PX] [--list-keys] [--hide-status] [--out PATH] [--scroll-frames N --scroll-x CELLS --scroll-y CELLS] [--all-panels]"
+        "usage: metal_seq capture --script PATH [--project SAVED_PROJECT_JSON] [--buffer '*fx*'] [--track N] [--width PX] [--height PX] [--key KEY] [--padding PX] [--list-keys] [--hide-status] [--out PATH] [--scroll-frames N --scroll-x CELLS --scroll-y CELLS] [--all-panels] [--edit-frames N]"
             .to_string()
     }
 }
@@ -1444,6 +1451,48 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
     let mut frame = build_render_frame(&mut editor, columns, rows);
     if apply_capture_click_widgets(&mut editor, columns, rows)? {
         frame = build_render_frame(&mut editor, columns, rows);
+    }
+
+    if args.edit_frames > 0 {
+        let target = backend.create_tiled_capture_target(args.width, args.height)
+            .map_err(|_| "failed to create tiled capture target")?;
+        let mut samples = Vec::new();
+        // pass 0 warms (first exposure, glyph uploads); pass 1 is measured
+        for pass in 0..2 {
+            for index in 0..args.edit_frames {
+                let started = Instant::now();
+                editor.runtime_mut()
+                    .eval_str(&format!("(capture-edit {})", pass * args.edit_frames + index))
+                    .map_err(|error| format!("capture-edit failed: {error:?}"))?;
+                let edit_ms = started.elapsed().as_secs_f64() * 1000.0;
+                editor.sync_reactive_bindings_for_visible_layouts();
+                let tiled = eseqlisp::frame::build_tiled_render_frame_borderless(
+                    &mut editor, columns, rows);
+                let frame_build_ms = started.elapsed().as_secs_f64() * 1000.0;
+                let timing = backend.render_tiled_capture(&tiled, &target)
+                    .map_err(|_| "failed to render tiled edit replay")?;
+                if pass == 1 {
+                    samples.push(serde_json::json!({
+                        "edit_ms": edit_ms,
+                        "frame_build_ms": frame_build_ms,
+                        "cpu_ms": frame_build_ms + timing.cpu_ms,
+                    }));
+                }
+            }
+        }
+        if let Some(parent) = args.out.parent() { std::fs::create_dir_all(parent)?; }
+        target.save_png(&args.out)?;
+        let mean = |key: &str| samples.iter().map(|s| s[key].as_f64().unwrap_or(0.0)).sum::<f64>()
+            / samples.len().max(1) as f64;
+        let report = serde_json::json!({
+            "scope": "edit replay: capture-edit + reactive sync + frame build + render (no presentation)",
+            "script": args.script, "project": args.project, "buffer": args.buffer,
+            "mean_edit_ms": mean("edit_ms"), "mean_frame_build_ms": mean("frame_build_ms"),
+            "mean_cpu_ms": mean("cpu_ms"), "samples": samples,
+        });
+        std::fs::write(args.out.with_extension("json"), serde_json::to_vec_pretty(&report)?)?;
+        println!("{}", args.out.display());
+        return Ok(());
     }
 
     if args.scroll_frames > 0 || args.all_panels {
