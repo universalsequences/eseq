@@ -185,10 +185,17 @@ class Instrument:
         self.params = {p["name"]: p for p in self.manifest["params"]}
         self.inputs = {i["name"]: i["channel"] for i in self.manifest["inputs"]}
         self.n_in = len(self.manifest["inputs"])
-        self.n_out = len(self.manifest["outputs"])
-        # An `@amp` voice-retirement flag is host control, never audio.
+        # An `@amp` voice-retirement flag is host control and a `(probe …)`
+        # tap is display signal: neither is ever audio. Probe channels may be
+        # missing from outputs[], and generated code writes each output to its
+        # declared channel, so size the buffers by the highest channel.
         self.amp_channel = (self.manifest.get("ampOutput") or {}).get("channel")
-        self.audio_channels = [ch for ch in range(self.n_out) if ch != self.amp_channel]
+        self.probe_channels = [p["channel"] for p in self.manifest.get("probes") or []]
+        self.n_out = max([1] + [o.get("channel", i) + 1
+                                for i, o in enumerate(self.manifest["outputs"])]
+                         + [ch + 1 for ch in self.probe_channels])
+        non_audio = set(self.probe_channels) | {self.amp_channel}
+        self.audio_channels = [ch for ch in range(self.n_out) if ch not in non_audio]
         self.lib = ctypes.CDLL(os.path.join(self.build_dir, "patch.dylib"))
         self.process_fn = self.lib.dgen_process_v1
         self.process_fn.argtypes = (

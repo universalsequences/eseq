@@ -325,15 +325,6 @@ fn manifest_mod_output_channels(manifest: &DGenManifest) -> Vec<usize> {
     channels
 }
 
-fn manifest_audio_output_channels(manifest: &DGenManifest) -> Vec<usize> {
-    let output_count = manifest.n_outputs.max(1);
-    let mod_channels = manifest_mod_output_channels(manifest);
-    (0..output_count)
-        .filter(|channel| !mod_channels.contains(channel))
-        .filter(|&channel| manifest.amp_output_channel != Some(channel))
-        .collect()
-}
-
 fn stereo_route_source_channel(audio_channels: &[usize], route_idx: usize) -> Option<usize> {
     match route_idx {
         0 => audio_channels.first().copied(),

@@ -5813,6 +5813,64 @@ fn real_patcher_lisp_right_click_opens_context_menu() {
     );
 }
 
+/// The REAL ui/patcher.lisp menu offers Insert Probe / Insert Scope on a
+/// cable and the other view on a probe node, and every probe command it
+/// names is a patcher command.
+#[test]
+fn real_patcher_lisp_menu_offers_probe_entries() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    let source_path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../content/ui/patcher.lisp");
+    let source = std::fs::read_to_string(&source_path).expect("read real patcher.lisp");
+    editor
+        .runtime_mut()
+        .eval_source_at_path(source_path, &source)
+        .expect("load real patcher.lisp");
+    for command in [
+        "insert-probe",
+        "insert-scope",
+        "show-as-scope",
+        "show-as-number",
+    ] {
+        assert!(
+            source.contains(&format!("\"{command}\"")),
+            "patcher.lisp menu names {command}"
+        );
+        assert!(crate::widget_render::patcher::PATCHER_COMMANDS.contains(&command));
+    }
+    let mut entry_count = |event: &str| {
+        editor
+            .runtime
+            .eval_str(&format!("(eseq.patcher/open-context-menu {event})"))
+            .expect("open menu");
+        match editor
+            .runtime
+            .eval_str("(len (eseq.patcher/menu-entries))")
+            .expect("menu entries evaluate")
+        {
+            Some(Value::Number(count)) => count as usize,
+            other => panic!("menu entries: {other:?}"),
+        }
+    };
+    // Ask Agent, Paste, Insert Probe, Insert Scope, Toggle Cable Style, Delete.
+    assert_eq!(
+        entry_count(r#"(dict :col 1 :row 1 :node nil :cable "a:0->b:0" :ghosts false)"#),
+        6
+    );
+    let plain = entry_count(
+        r#"(dict :col 1 :row 1 :node (dict :id "ph" :macro? false :probe-view nil) :cable nil :ghosts false)"#,
+    );
+    let number = entry_count(
+        r#"(dict :col 1 :row 1 :node (dict :id "p1" :macro? false :probe-view "number") :cable nil :ghosts false)"#,
+    );
+    let scope = entry_count(
+        r#"(dict :col 1 :row 1 :node (dict :id "p1" :macro? false :probe-view "scope") :cable nil :ghosts false)"#,
+    );
+    assert_eq!(number, plain + 1, "a number probe offers Show as Scope");
+    assert_eq!(scope, plain + 1, "a scope probe offers Show as Number");
+}
+
 #[test]
 fn cmd_k_opens_visible_patcher_agentic_bubble_without_widget_focus() {
     let path = temp_file_path("patcher-visible-cmd-k");

@@ -43,7 +43,10 @@ pub fn contains(name: &str) -> bool {
     find(name).is_some()
 }
 
+/// Per-node teardown for every DGen effect node, built-in or user source:
+/// each chain path that deletes or replaces an effect node calls this.
 pub fn clear_instance(node_id: i32) {
+    crate::lisp_host::clear_effect_probes(node_id);
     super::conv_reverb::clear_instance(node_id);
     super::filter_table::clear_instance(node_id);
     // ES Compressor keeps no per-instance state.

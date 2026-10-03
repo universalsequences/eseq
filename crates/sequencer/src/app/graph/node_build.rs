@@ -838,6 +838,7 @@ impl GraphController<'_> {
             lisp_host::set_dgen_instrument_output_count(slot_id, manifest.n_outputs.max(1));
             lisp_host::set_dgen_instrument_amp_channel(slot_id, manifest.amp_output_channel);
         }
+        lisp_host::publish_dgen_instrument_probes(engine_id, manifest, lib.process_fn as usize);
         transaction.commit();
 
         let bpm = self.app.state.transport.bpm.load(Ordering::Relaxed) as f32;
@@ -849,7 +850,7 @@ impl GraphController<'_> {
                 bpm,
             );
         }
-        let audio_output_channels = manifest_audio_output_channels(manifest);
+        let audio_output_channels = manifest.audio_output_channels();
         let mod_output_channels = manifest_mod_output_channels(manifest);
         self.app.graph.engine_node_ids[engine_id] = Some(EngineNodeIds {
             synth_ids,

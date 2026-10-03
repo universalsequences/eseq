@@ -33,10 +33,21 @@ fn default_grid_color(trace: Color) -> Color {
 /// Widest sampling step that still keeps roughly one trace point per design
 /// pixel of plot width; finer only adds vertices.
 fn trace_points_for_width(width_cells: f32, viewport: WidgetViewport) -> usize {
+    points_for_plot_width(width_cells, viewport, 0.8, 32, MAX_TRACE_POINTS)
+}
+
+/// Points to plot across `width_cells` of plot: `per_px` per design pixel,
+/// clamped to `min..=max`. Shared by every trace drawer (this widget, the
+/// patcher's probe scope) so they resolve the same at a given width.
+pub(crate) fn points_for_plot_width(
+    width_cells: f32,
+    viewport: WidgetViewport,
+    per_px: f32,
+    min: usize,
+    max: usize,
+) -> usize {
     let width_px = width_cells * viewport.cell_w.max(1.0) / super::ui_px_scale().max(0.1);
-    (width_px * 0.8)
-        .round()
-        .clamp(32.0, MAX_TRACE_POINTS as f32) as usize
+    (width_px * per_px).round().clamp(min as f32, max as f32) as usize
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]

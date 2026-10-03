@@ -70,6 +70,7 @@ pub(super) struct PlannedNode {
     pub(super) text: String,
     pub(super) position: (f32, f32),
     pub(super) width: Option<f32>,
+    pub(super) height: Option<f32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -270,6 +271,7 @@ pub(super) fn plan_encapsulation(
                 BODY_INSET_CELLS.1,
             ),
             width: None,
+            height: None,
         });
     }
     for (index, _) in outlets.iter().enumerate() {
@@ -281,6 +283,7 @@ pub(super) fn plan_encapsulation(
                 BODY_INSET_CELLS.1 + INTERFACE_ROW_GAP_CELLS * 2.0 + body_height,
             ),
             width: None,
+            height: None,
         });
     }
 
@@ -296,6 +299,7 @@ pub(super) fn plan_encapsulation(
                 text: hoisted,
                 position: (rebased.0, rebased.1 - INTERFACE_ROW_GAP_CELLS * 0.5),
                 width: None,
+                height: None,
             });
             body_cables.push(PlannedCable {
                 from: BodyKey::HoistedConstant(node.id.clone()),
@@ -309,6 +313,7 @@ pub(super) fn plan_encapsulation(
             text: text.text,
             position: rebased,
             width: node.width,
+            height: node.height,
         });
     }
 
@@ -554,6 +559,11 @@ fn encapsulated_node_text(
             }
         }
     }
+    // Builtin attributes ride in the label (`@mode`, a probe's `@id`/`@view`);
+    // the node moves into the macro, so they move with it.
+    if node.kind == NodeKind::Builtin {
+        text.push_str(&super::lisp::label_attributes_suffix(&node.label));
+    }
 
     EncapsulatedNodeText {
         text,
@@ -662,6 +672,7 @@ pub(super) fn apply_encapsulation_plan(
         {
             edit.text = planned.text.clone();
             edit.width = planned.width;
+            edit.height = planned.height;
         }
         body_ids.insert(planned.key.clone(), created_id);
     }

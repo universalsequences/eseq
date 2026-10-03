@@ -65,6 +65,15 @@ pub use dgen::effect_compile::*;
 pub use dgen::effect_chain_graph::*;
 pub use dgen::instrument_compile::*;
 pub use dgen::instrument_storage::*;
+pub use dgen::probe_capture::{
+    bind_effect_probe_node, clear_dgen_instrument_probes, clear_effect_probes, dgen_display_voice,
+    note_dgen_display_voice, probe_infos, probe_scope_window, probe_set, probe_snapshot,
+    probes_watched, publish_dgen_instrument_probes, reclaim_retired_probe_sets,
+    register_effect_probes, release_effect_probe_token, unwatch_probes, watch_probes,
+    EffectProbeToken, ProbeInstance, ProbeReading, ProbeSetHandle, ProbeWatchGuard,
+    MAX_EFFECT_PROBE_INSTANCES, PROBE_SCOPE_POINTS_PER_BLOCK, PROBE_SCOPE_RING_PAIRS,
+};
+pub use eseqlisp::live_audio::ProbeView;
 
 /// Resolve the optional top-level `(effect-latency …)` declaration of an
 /// effect source at `sample_rate`, without compiling it. Builtin modules use

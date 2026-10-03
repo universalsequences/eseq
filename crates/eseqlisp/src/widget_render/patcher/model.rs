@@ -217,6 +217,9 @@ pub struct PatchNode {
     pub outputs: Vec<String>,
     pub position: (f32, f32),
     pub width: Option<f32>,
+    /// Height override, in cells. Only resizable-height nodes (a probe in its
+    /// `scope` view) read it; persisted in the layout sidecar like `width`.
+    pub height: Option<f32>,
     pub param: Option<ParamNodeInfo>,
     pub inline_inputs: Vec<Option<InlineInput>>,
     pub diagnostic: Option<String>,

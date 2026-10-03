@@ -156,7 +156,14 @@ pub const MAX_MIDI_FX_SLOTS: usize = 4;
 pub const MAX_BUS_FX_CHAINS: usize = 64;
 
 // ── Node state layout (ABI v1: single memory span) ──
-// state[0] = host-local slot identity (diagnostics only)
+// state[0] = host-local slot identity (diagnostics only, read by nothing);
+//            for an effect with probes, a negative probe code instead
+//            (`probe_capture::encode_effect_probe_token`). Every header index
+//            is taken: growing HEADER_SLOTS would shift every saved dgen
+//            param's node-state index (`LEGACY_DGEN_HEADER_SLOTS` in
+//            app/projects.rs), and a trailer past the redzone is clobbered by
+//            audiograph's legacy 5-slot-header param mirror (graph_engine.c
+//            `apply_params`) whenever memory cell 0 is written.
 // state[1] = total_memory_slots (f32)
 // state[2] = canary
 // state[3] = declared input count (f32)
@@ -261,6 +268,9 @@ pub(in crate::lisp_host) unsafe extern "C" fn dgenlisp_wrapper_process(
             &context,
             dgen_host_services_v1(),
         );
+        // A negative `state[0]` is a probe code (see `probe_capture`); an
+        // effect without probes skips capture on this plain state read.
+        super::probe_capture::record_dgen_effect_probes(*s, process_fn as usize, out, nframes);
     } else {
         // Passthrough: copy input to output
         let nf = nframes as usize;

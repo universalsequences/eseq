@@ -203,6 +203,14 @@
       ]
     },
     {
+      "name": "@id",
+      "summary": "Stable probe identity for the host and the patcher. Defaults to probe-<ordinal>; repeated ids get an occurrence index.",
+      "type": "string",
+      "used_by": [
+        "probe"
+      ]
+    },
+    {
       "name": "@knee",
       "summary": "Compressor knee in dB.",
       "type": "signal|float",
@@ -368,6 +376,7 @@
         "in",
         "ir",
         "out",
+        "probe",
         "tensor",
         "tensor-param"
       ]
@@ -497,6 +506,14 @@
       "type": "string",
       "used_by": [
         "param"
+      ]
+    },
+    {
+      "name": "@view",
+      "summary": "Probe display hint passed through to the manifest. Defaults to number.",
+      "type": "enum",
+      "used_by": [
+        "probe"
       ]
     },
     {
@@ -2523,6 +2540,44 @@
         "(event-hold value trigger)"
       ],
       "summary": "Sample on positive trigger frames and schedule pure consumers on that event clock. Latch final coefficients back to audio rate. C forward rendering only."
+    },
+    {
+      "aliases": [],
+      "arity": {
+        "maximum": null,
+        "minimum": null
+      },
+      "attribute_docs": [],
+      "attributes": [],
+      "category": "uncategorized",
+      "documentation": {
+        "port_docs": "not-yet-curated",
+        "source": "source-discovered"
+      },
+      "implementation": {
+        "function": "evalEventLatch",
+        "source_file": "LispEvaluator.swift"
+      },
+      "input_count": {
+        "maximum": null,
+        "minimum": null
+      },
+      "inputs": [],
+      "name": "event-latch",
+      "output_count": {
+        "maximum": 1,
+        "minimum": 1
+      },
+      "outputs": [
+        {
+          "index": 0,
+          "kind": "value",
+          "name": "out",
+          "summary": "Operator result."
+        }
+      ],
+      "signatures": [],
+      "summary": "Operator implemented in DGenLisp evaluator."
     },
     {
       "aliases": [],
@@ -5646,6 +5701,79 @@
         "(pow base exponent)"
       ],
       "summary": "Exponentiation."
+    },
+    {
+      "aliases": [],
+      "arity": {
+        "maximum": 1,
+        "minimum": 1
+      },
+      "attribute_docs": [
+        {
+          "name": "@id",
+          "summary": "Stable probe identity for the host and the patcher. Defaults to probe-<ordinal>; repeated ids get an occurrence index.",
+          "type": "string"
+        },
+        {
+          "name": "@name",
+          "summary": "Host-visible parameter, input, output, or tensor name.",
+          "type": "string"
+        },
+        {
+          "name": "@view",
+          "summary": "Probe display hint passed through to the manifest. Defaults to number.",
+          "type": "enum",
+          "values": [
+            "number",
+            "scope",
+            "meter"
+          ]
+        }
+      ],
+      "attributes": [
+        "@id",
+        "@name",
+        "@view"
+      ],
+      "category": "io",
+      "documentation": {
+        "port_docs": "curated-from-signature",
+        "source": "curated"
+      },
+      "implementation": {
+        "function": "evalProbe",
+        "source_file": "LispEvaluator.swift"
+      },
+      "input_count": {
+        "maximum": 1,
+        "minimum": 1
+      },
+      "inputs": [
+        {
+          "kind": "signal|float",
+          "name": "signal",
+          "required": true,
+          "summary": "Scalar signal to observe; returned unchanged."
+        }
+      ],
+      "name": "probe",
+      "output_count": {
+        "maximum": 1,
+        "minimum": 1
+      },
+      "outputs": [
+        {
+          "index": 0,
+          "kind": "signal",
+          "name": "out",
+          "summary": "Operator result."
+        }
+      ],
+      "signatures": [
+        "(probe signal)",
+        "(probe signal @id string @view number|scope|meter @name string)"
+      ],
+      "summary": "Identity passthrough that exposes a scalar signal to the host as a live probe (patcher number~/scope~ views). Every probe is a graph root, so a dangling probe still compiles. Scalar signals only."
     },
     {
       "aliases": [],

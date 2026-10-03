@@ -3205,7 +3205,7 @@ impl App {
             &manifest.params,
             manifest.asset_base.as_deref(),
             manifest.n_inputs,
-            manifest.n_outputs,
+            manifest.audio_output_count(),
             manifest.effect_latency_samples,
         );
         desc.tensor_params = crate::effects::tensor_param_descriptors_from_manifest(
@@ -3249,7 +3249,7 @@ impl App {
             &manifest.params,
             manifest.asset_base.as_deref(),
             manifest.n_inputs,
-            manifest.n_outputs,
+            manifest.audio_output_count(),
             manifest.effect_latency_samples,
         );
         desc.tensor_params = crate::effects::tensor_param_descriptors_from_manifest(
@@ -4774,7 +4774,7 @@ impl App {
             &manifest.params,
             manifest.asset_base.as_deref(),
             manifest.n_inputs,
-            manifest.n_outputs,
+            manifest.audio_output_count(),
             manifest.effect_latency_samples,
         );
         descriptor.tensor_params = crate::effects::tensor_param_descriptors_from_manifest(
@@ -5512,6 +5512,7 @@ mod tests {
             modulators: Vec::new(),
             mod_outputs: Vec::new(),
             amp_output_channel: None,
+            probes: Vec::new(),
             mod_destinations: Vec::new(),
             n_inputs: 4,
             n_outputs: 1,

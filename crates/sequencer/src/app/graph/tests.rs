@@ -622,7 +622,95 @@
         let mut manifest = test_instrument_manifest();
         manifest.n_outputs = 3;
         manifest.amp_output_channel = Some(2);
-        assert_eq!(manifest_audio_output_channels(&manifest), vec![0, 1]);
+        assert_eq!(manifest.audio_output_channels(), vec![0, 1]);
+    }
+
+    #[test]
+    fn amp_and_probe_output_channels_are_never_routed_as_audio() {
+        // eseq-d1xr.2: probe taps are display signal, like the `@amp` flag.
+        // Probe 3 is absent from `outputs[]`; the buffers still cover it.
+        let manifest = crate::lisp_host::parse_manifest(
+            r#"{"processAbi": "dgen-host-abi-v1",
+                "outputs": [{"channel": 0, "name": "audio"},
+                            {"channel": 1, "name": "amp"},
+                            {"channel": 2, "name": "probe"}],
+                "ampOutput": {"channel": 1, "name": "amp"},
+                "probes": [
+                  {"id": "cut", "occurrence": 0, "channel": 2, "view": "scope", "name": null},
+                  {"id": "cut", "occurrence": 1, "channel": 3, "view": "number", "name": null}
+                ]}"#,
+        )
+        .expect("manifest parses");
+        assert_eq!(manifest.n_outputs, 4);
+        assert_eq!(manifest.non_audio_output_channels(), vec![1, 2, 3]);
+        assert_eq!(manifest.audio_output_channels(), vec![0]);
+    }
+
+    /// eseq-d1xr.4: a project load drops every track effect node through
+    /// `clear_all_tracks`. Effect probe tokens (256 at most) and instrument
+    /// probe sets live in process-global registries, so that bulk path must
+    /// release them like the per-node teardown does, or repeated loads leak
+    /// every token.
+    #[test]
+    fn clear_all_tracks_releases_effect_and_instrument_probes() {
+        let manifest = crate::lisp_host::parse_manifest(
+            r#"{"processAbi": "dgen-host-abi-v1",
+                "outputs": [{"channel": 0}, {"channel": 1}],
+                "probes": [{"id": "cut", "occurrence": 0, "channel": 2, "view": "number"}]}"#,
+        )
+        .expect("manifest parses");
+        let graph = TestLiveGraph::new("clear-all-tracks-probes");
+        let mut app = test_app_with_track_count(&graph, 0);
+        app.graph_controller()
+            .add_blank_sampler_track()
+            .expect("add track");
+
+        let effect_node = graph.add_gain(1.0, "probe_effect_stand_in");
+        let token = crate::lisp_host::register_effect_probes(&manifest, 0x1234).expect("token");
+        crate::lisp_host::bind_effect_probe_node(token, effect_node);
+        app.state.pattern.effect_chains[0][crate::effects::BUILTIN_SLOT_COUNT]
+            .node_id
+            .store(effect_node as u32, Ordering::Relaxed);
+        let effect = crate::lisp_host::ProbeInstance::Effect { node_id: effect_node };
+        assert_eq!(crate::lisp_host::probe_infos(effect).len(), 1);
+
+        let engine_id = 3;
+        crate::lisp_host::publish_dgen_instrument_probes(engine_id, &manifest, 0x1234);
+        if app.graph.engine_node_ids.len() <= engine_id {
+            app.graph.engine_node_ids.resize_with(engine_id + 1, || None);
+        }
+        app.graph.engine_node_ids[engine_id] = Some(crate::app::EngineNodeIds {
+            synth_ids: Vec::new(),
+            synth_inputs: 0,
+            synth_outputs: 0,
+            audio_output_channels: Vec::new(),
+            mod_output_channels: Vec::new(),
+            gatepitch_ids: Vec::new(),
+            modulator_ids: Vec::new(),
+            route_gain_ids: Vec::new(),
+            ext_route_gain_ids: Vec::new(),
+        });
+        let instrument = crate::lisp_host::ProbeInstance::Instrument { engine_id };
+        assert_eq!(crate::lisp_host::probe_infos(instrument).len(), 1);
+
+        app.graph_controller().clear_all_tracks();
+
+        assert!(
+            crate::lisp_host::probe_infos(effect).is_empty(),
+            "the effect's probe token is released"
+        );
+        assert!(
+            crate::lisp_host::probe_infos(instrument).is_empty(),
+            "the engine's probe set is cleared"
+        );
+        // Every token is free again: a full table can be registered.
+        let tokens = (0..crate::lisp_host::MAX_EFFECT_PROBE_INSTANCES)
+            .map(|_| crate::lisp_host::register_effect_probes(&manifest, 0x1234))
+            .collect::<Option<Vec<_>>>()
+            .expect("all tokens available after the reset");
+        for token in tokens {
+            crate::lisp_host::release_effect_probe_token(token);
+        }
     }
 
     fn test_instrument_manifest() -> DGenManifest {
@@ -647,6 +735,7 @@
             modulators: Vec::new(),
             mod_outputs: Vec::new(),
             amp_output_channel: None,
+            probes: Vec::new(),
             mod_destinations: Vec::new(),
             n_inputs: 4,
             n_outputs: 1,

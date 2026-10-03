@@ -778,7 +778,7 @@ pub(crate) fn run_event_loop(
         }
         editor.update_tile_rects(cols as u16, rows as u16);
         editor.sync_reactive_bindings_for_visible_layouts();
-        if live_audio_analyzer.sync_visible(&editor, &app) {
+        if live_audio_analyzer.sync_visible(&editor, &app, &sessions) {
             editor.mark_needs_redraw();
         }
         if log_voice_counts && meters.last_voice_count_log_at.elapsed() >= VOICE_COUNT_LOG_INTERVAL

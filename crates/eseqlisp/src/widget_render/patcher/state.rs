@@ -525,6 +525,7 @@ pub(super) struct PatcherNodeEdit {
     pub(super) text: String,
     pub(super) position: (f32, f32),
     pub(super) width: Option<f32>,
+    pub(super) height: Option<f32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -544,6 +545,10 @@ pub(super) enum NodeResizeCorner {
 impl NodeResizeCorner {
     pub(super) fn resizes_left_edge(self) -> bool {
         matches!(self, Self::TopLeft | Self::BottomLeft)
+    }
+
+    pub(super) fn resizes_top_edge(self) -> bool {
+        matches!(self, Self::TopLeft | Self::TopRight)
     }
 }
 
@@ -594,7 +599,11 @@ pub(super) enum PatcherDragState {
         node_id: String,
         corner: NodeResizeCorner,
         start_col: f32,
+        start_row: f32,
         start_width: f32,
+        /// Model height at grab time; only a probe scope's height follows
+        /// the drag, every other node resizes horizontally only.
+        start_height: f32,
         start_position: (f32, f32),
     },
     Marquee {
@@ -869,6 +878,7 @@ pub(super) struct PatcherClipboardNode {
     pub(super) text: String,
     pub(super) position: (f32, f32),
     pub(super) width: Option<f32>,
+    pub(super) height: Option<f32>,
 }
 
 /// A wire internal to the copied selection, endpoints as indices into
@@ -1239,6 +1249,7 @@ pub(super) fn allocate_created_node_avoiding(
             text: String::new(),
             position,
             width: None,
+            height: None,
         },
     );
     debug_log_edit_event(
@@ -1585,6 +1596,7 @@ pub(super) fn ensure_source_node_edit(
             text,
             position: node.position,
             width: node.width,
+            height: node.height,
         });
 }
 
@@ -1605,12 +1617,15 @@ pub(super) fn set_node_edit_position(
     }
 }
 
-pub(super) fn set_node_edit_width(
+/// Move a node and set its size overrides (a resize). Only a probe scope
+/// reads `height`.
+pub(super) fn set_node_edit_size(
     state: &mut PatcherInteractionState,
     view_key: &str,
     node: &PatchNode,
     position: (f32, f32),
     width: Option<f32>,
+    height: Option<f32>,
     text: String,
 ) {
     ensure_source_node_edit(state, view_key, node, text);
@@ -1621,6 +1636,7 @@ pub(super) fn set_node_edit_width(
     {
         edit.position = position;
         edit.width = width.filter(|width| width.is_finite());
+        edit.height = height.filter(|height| height.is_finite());
     }
 }
 
@@ -1729,6 +1745,7 @@ pub(super) fn patch_scope_with_interaction_state(
         if let Some(edit) = interaction_state.edit_state.nodes.get(&edit_key) {
             node.position = edit.position;
             node.width = edit.width;
+            node.height = edit.height;
             apply_node_text_override(node, &edit.text, macro_signatures);
         }
         if let Some(edit) = interaction_state
@@ -1785,6 +1802,7 @@ pub(super) fn patch_scope_with_interaction_state(
         ));
         if let Some(node) = patch.nodes.last_mut() {
             node.width = edit.width;
+            node.height = edit.height;
             if let Some(text_edit) = interaction_state
                 .text_edit
                 .as_ref()
@@ -2171,6 +2189,7 @@ fn inline_mod_accessor_node(id: &str, position: (f32, f32)) -> PatchNode {
         outputs: vec!["out".to_string()],
         position,
         width: None,
+        height: None,
         param: None,
         inline_inputs: vec![None],
         synthesized: true,
@@ -2684,6 +2703,7 @@ pub(super) fn node_from_editor_text(
             outputs: Vec::new(),
             position,
             width: None,
+            height: None,
             param: None,
             inline_inputs: Vec::new(),
             synthesized: false,
@@ -2692,6 +2712,12 @@ pub(super) fn node_from_editor_text(
         };
     }
 
+    // `number~` / `scope~` are patcher spellings of a probe; a commit
+    // canonicalizes them (with an id), this keeps any text that skipped the
+    // commit — an agent edit, a fixture — a working probe rather than an
+    // unknown operator.
+    let expanded_alias = super::probe::expand_probe_alias(trimmed);
+    let trimmed = expanded_alias.as_deref().unwrap_or(trimmed);
     let parsed = parse_editor_node_text(trimmed);
     let (op, inline_args, parse_diagnostic) = match parsed {
         Ok((op, inline_args)) => (op, inline_args, None),
@@ -2748,6 +2774,7 @@ pub(super) fn node_from_editor_text(
             }),
         position,
         width: None,
+        height: None,
         param,
         inline_inputs: Vec::new(),
         synthesized: false,

@@ -415,6 +415,8 @@ impl CustomEnginePool {
             crate::lisp_host::raise_dgen_engine_enabled_voices(engine_id, needed);
         }
         crate::lisp_host::enable_dgen_engine_voice(engine_id, voice_idx);
+        // The most recently allocated voice is the one patcher probes show.
+        crate::lisp_host::note_dgen_display_voice(engine_id, voice_idx);
     }
 
     pub(in crate::audio) fn sync_enabled_voice_count(&mut self, engine_id: usize) {

@@ -176,6 +176,23 @@ impl ShadedMesh {
         }
     }
 
+    /// Fill the area between two paths sampled at the same x positions
+    /// (`tops[i]` above `bottoms[i]`, cell units) with a flat `color`: one
+    /// quad per consecutive pair. No fringe; stroke the edges for a crisp
+    /// outline. Paths of different lengths fill their common prefix.
+    pub fn push_band(&mut self, tops: &[[f32; 2]], bottoms: &[[f32; 2]], color: Color) {
+        let count = tops.len().min(bottoms.len());
+        for index in 1..count {
+            self.quad(
+                tops[index - 1],
+                tops[index],
+                bottoms[index],
+                bottoms[index - 1],
+                [color; 4],
+            );
+        }
+    }
+
     /// Stroke `points` (cell units) as an anti-aliased ribbon whose opaque core
     /// is `half_width` design pixels to each side of the path.
     ///

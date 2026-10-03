@@ -411,7 +411,7 @@ pub(super) fn release_matching_key_lock_auditions(
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum EffectEditTarget {
     Track { track: usize, slot: usize },
     Bus { bus: usize, slot: usize },

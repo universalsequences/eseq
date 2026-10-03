@@ -183,3 +183,27 @@ The patch editor shows the instrument as a graph of nodes. When you are editing 
 A patch-editor tutorial is beyond the scope of this manual. Two experimental aids exist. **Patch Learn** searches an instrument's parameters for settings that match a target sample. It has no button yet; with the instrument's patch editor active, run `M-x` `open-learn-patch`. It needs the DGenLisp trainer and says so if the trainer is missing. **Agent Mode** (`C-x a`) is a conversation buffer that drafts instruments and effects; it needs an API key in an environment variable such as `ANTHROPIC_API_KEY`. An agent in your terminal needs no key; see [Making instruments with an agent](agent-authoring). Both may change.
 
 Instruments you build can be shared as packages; see [Packages](packages). To change how instrument panels behave or which keys do what, see [Keys and customization](customization).
+
+## Probes
+
+A probe shows a signal inside a patch while it runs. It passes the signal through unchanged, so adding one never changes the sound. Probes work the same way in instruments and in DGenLisp effects.
+
+- Type `number~` or `scope~` (or `probe`) in a new object box. `number~` shows a value; `scope~` shows a waveform. Connect the signal to watch to its inlet.
+- Right-click a cable and choose **Insert Probe** or **Insert Scope** to splice one into the cable.
+- Right-click a probe and choose **Show as Scope** or **Show as Number** to switch its view.
+
+A probe's outlet carries its input, so it can sit in the middle of a chain or be left with nothing connected. In source, a probe is a `probe` form that returns its input, so it can wrap any expression:
+
+```lisp
+(biquad in (probe (clip f 50 5000) @id "cut" @view scope) 0.9 1 1)
+```
+
+`@id` names the probe; it is optional, and probes without one are numbered `probe-1`, `probe-2` and so on. The patch editor writes short ids of its own, such as `p1`. `@view` is `number` (the default) or `scope`.
+
+A number probe shows the last value of the latest audio block; hover over it to see that block's minimum and maximum. A scope probe draws the recent waveform. A probe shows `—` when nothing is running, because the patch has no live instance or has not played yet. A dimmed value is held: the voice has gone idle or the effect is bypassed.
+
+- In a polyphonic instrument, probes follow the most recently triggered voice.
+- Probes take single signals only, not tensors.
+- Probes inside a macro show their values only when that macro is open.
+
+Probes cost almost nothing. Values are captured only while a patch editor that shows probes is on screen.

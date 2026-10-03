@@ -129,10 +129,18 @@ impl GraphController<'_> {
                         );
                     }
                 }
+                // Per-node teardown (probe tokens, conv/filter tables): those
+                // registries outlive the graph reset, so a project load must
+                // release what each effect node held.
+                crate::effects::dgen_builtin::clear_instance(node_id as i32);
             }
         }
 
-        for engine in self.app.graph.engine_node_ids.iter_mut().flatten() {
+        for (engine_id, engine) in self.app.graph.engine_node_ids.iter_mut().enumerate() {
+            let Some(engine) = engine else {
+                continue;
+            };
+            crate::lisp_host::clear_dgen_instrument_probes(engine_id);
             for routes in &engine.route_gain_ids {
                 for route_pair in routes {
                     for &route_id in route_pair {

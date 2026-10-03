@@ -22,6 +22,12 @@ use sequencer::app;
 
 use crate::constants::LIVE_AUDIO_ANALYZER_POLL_INTERVAL;
 
+mod probes;
+
+use probes::{
+    collect_visible_patcher_paths, patcher_probe_sources, resolve_probe_instance, ProbePublisher,
+};
+
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct TapKey {
     source: LiveAudioSourceSelector,
@@ -106,6 +112,8 @@ pub(crate) struct LiveAudioAnalyzerManager {
     processors: HashMap<String, SpectrogramProcessor>,
     meter_nodes: HashMap<String, MeterNode>,
     compressor_nodes: HashMap<String, CompressorMeterNode>,
+    /// Probe values of the visible patchers' live instances.
+    probes: ProbePublisher,
     last_poll_at: Instant,
 }
 
@@ -119,11 +127,22 @@ impl LiveAudioAnalyzerManager {
             processors: HashMap::new(),
             meter_nodes: HashMap::new(),
             compressor_nodes: HashMap::new(),
+            probes: ProbePublisher::new(),
             last_poll_at: Instant::now() - LIVE_AUDIO_ANALYZER_POLL_INTERVAL,
         }
     }
 
-    pub(crate) fn sync_visible(&mut self, editor: &eseqlisp::Editor, app: &app::App) -> bool {
+    /// `sessions` names what each open patch-editor session edits
+    /// (`patcher_probe_sources`); a visible patcher on one of those paths
+    /// gets its live instance's probe values published. Probe work (the
+    /// patcher walk, session sources, instance resolution) runs only on
+    /// polls, and sources are built only when a patcher is visible.
+    pub(crate) fn sync_visible(
+        &mut self,
+        editor: &eseqlisp::Editor,
+        app: &app::App,
+        sessions: &crate::loop_ctx::EditSessionState,
+    ) -> bool {
         if app.has_pending_project_load() {
             return self.suspend_for_project_load();
         }
@@ -133,8 +152,13 @@ impl LiveAudioAnalyzerManager {
         let mut meter_requests: HashMap<String, BandMeterRequest> = HashMap::new();
         let mut compressor_requests: HashMap<String, CompressorMeterRequest> = HashMap::new();
         let mut device_meter_sources = Vec::new();
+        let mut patcher_paths = HashSet::new();
+        let poll_due = self.last_poll_at.elapsed() >= LIVE_AUDIO_ANALYZER_POLL_INTERVAL;
         for layout in editor.visible_widget_layouts() {
             collect_device_meter_sources(layout.as_ref(), &mut device_meter_sources);
+            if poll_due {
+                collect_visible_patcher_paths(layout.as_ref(), &mut patcher_paths);
+            }
             for request in collect_spectrogram_requests(layout.as_ref()) {
                 grouped
                     .entry(TapKey::from_request(&request))
@@ -178,10 +202,28 @@ impl LiveAudioAnalyzerManager {
                     .or_insert(request);
             }
         }
-        let poll_due = self.last_poll_at.elapsed() >= LIVE_AUDIO_ANALYZER_POLL_INTERVAL;
+        let probes_changed = poll_due && {
+            let patcher_sources = if patcher_paths.is_empty() {
+                Vec::new()
+            } else {
+                patcher_probe_sources(sessions)
+            };
+            let probe_bindings = patcher_paths
+                .into_iter()
+                .map(|path| {
+                    let instance = patcher_sources
+                        .iter()
+                        .find(|source| source.path == path)
+                        .and_then(|source| resolve_probe_instance(app, &source.target));
+                    (path, instance)
+                })
+                .collect::<Vec<_>>();
+            self.probes.sync(&probe_bindings, Instant::now())
+        };
         let meters_changed = self.sync_band_meters(app, meter_requests, poll_due)
             | self.sync_compressor_meters(app, compressor_requests, poll_due)
-            | self.sync_device_meters(app, device_meter_sources.into_iter().collect(), poll_due);
+            | self.sync_device_meters(app, device_meter_sources.into_iter().collect(), poll_due)
+            | probes_changed;
 
         let mut active_keys = HashSet::new();
         let mut active_scope_keys = HashSet::new();
@@ -709,6 +751,7 @@ impl LiveAudioAnalyzerManager {
             || !self.meter_nodes.is_empty()
             || !self.compressor_nodes.is_empty()
             || !self.device_meters.is_empty();
+        let had_probes = self.probes.clear();
         self.clear_device_meters();
         self.clear_taps();
         self.processors.clear();
@@ -717,7 +760,7 @@ impl LiveAudioAnalyzerManager {
         eseqlisp::live_audio::retain_scope_frames(&HashSet::<String>::new());
         eseqlisp::live_audio::retain_band_meter_frames(&HashSet::<String>::new());
         eseqlisp::live_audio::retain_compressor_meter_frames(&HashSet::<String>::new());
-        had_live_data
+        had_live_data || had_probes
     }
 
     fn create_tap(

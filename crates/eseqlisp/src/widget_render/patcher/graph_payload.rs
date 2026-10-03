@@ -451,6 +451,7 @@ fn patch_node(entry: &NodeEntry) -> PatchNode {
         // deserialization; unmatched ids fall back to auto-placement as always.
         position: (0.0, 0.0),
         width: None,
+        height: None,
         param: entry.param.as_ref().map(|param| ParamNodeInfo {
             name: param.name.clone(),
             modulatable: param.modulatable,

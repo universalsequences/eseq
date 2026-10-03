@@ -438,6 +438,7 @@ mod engine_registry_tests {
             modulators: Vec::new(),
             mod_outputs: Vec::new(),
             amp_output_channel: None,
+            probes: Vec::new(),
             mod_destinations: Vec::new(),
             n_inputs: 0,
             n_outputs: 1,

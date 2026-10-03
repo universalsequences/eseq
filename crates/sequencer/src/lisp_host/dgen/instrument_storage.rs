@@ -2007,6 +2007,7 @@ unsafe extern "C" fn dgenlisp_instrument_wrapper_process(
             dgen_host_services_v1(),
         );
         record_dgen_voice_amp(slot_id % INSTRUMENT_REGISTRY_SIZE, out, nframes);
+        super::probe_capture::record_dgen_voice_probes(engine_id, voice_idx, fn_ptr, out, nframes);
     } else {
         let nf = nframes as usize;
         let output_count = DGEN_INSTRUMENT_OUTPUT_COUNTS[slot_id % INSTRUMENT_REGISTRY_SIZE]

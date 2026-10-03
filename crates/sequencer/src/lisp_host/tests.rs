@@ -5622,6 +5622,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             modulators: Vec::new(),
             mod_outputs: Vec::new(),
             amp_output_channel: None,
+            probes: Vec::new(),
             mod_destinations: Vec::new(),
             n_inputs: 0,
             n_outputs: 2,
@@ -5673,6 +5674,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             modulators: Vec::new(),
             mod_outputs: Vec::new(),
             amp_output_channel: None,
+            probes: Vec::new(),
             mod_destinations: Vec::new(),
             n_inputs: 0,
             n_outputs: 2,
@@ -6146,6 +6148,41 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         )
         .expect("manifest parses");
         assert_eq!(manifest.n_outputs, 3);
+    }
+
+    #[test]
+    fn parse_manifest_reads_probes_and_sizes_outputs_past_them() {
+        // Probe channels are compiler-assigned after every user channel and
+        // may be missing from `outputs[]`; buffers must still reach them.
+        let manifest = parse_manifest(
+            r#"{"processAbi": "dgen-host-abi-v1",
+                "outputs": [{"channel": 0, "name": "audio"}],
+                "probes": [
+                  {"id": "cut", "occurrence": 0, "channel": 1, "view": "scope", "name": null},
+                  {"id": "env", "occurrence": 0, "channel": 2}
+                ]}"#,
+        )
+        .expect("manifest parses");
+        assert_eq!(manifest.n_outputs, 3);
+        assert_eq!(
+            manifest.probes,
+            vec![
+                crate::lisp_host::DGenProbe { id: "cut".into(), occurrence: 0, channel: 1, view: crate::lisp_host::ProbeView::Scope },
+                crate::lisp_host::DGenProbe { id: "env".into(), occurrence: 0, channel: 2, view: crate::lisp_host::ProbeView::Number },
+            ]
+        );
+        // A mono effect with a probe tap stays mono to its chain neighbours.
+        assert_eq!(manifest.audio_output_channels(), vec![0]);
+        assert_eq!(manifest.audio_output_count(), 1);
+
+        let without = parse_manifest(
+            r#"{"processAbi": "dgen-host-abi-v1",
+                "outputs": [{"channel": 0}, {"channel": 1}]}"#,
+        )
+        .expect("manifest parses");
+        assert!(without.probes.is_empty());
+        assert_eq!(without.audio_output_channels(), vec![0, 1]);
+        assert_eq!(without.audio_output_count(), 2);
     }
 
     #[test]

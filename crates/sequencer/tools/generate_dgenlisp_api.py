@@ -99,6 +99,15 @@ CURATED_OPERATORS = {
     },
     "in": {"category": "io", "summary": "Audio input channel.", "signatures": ["(in channel @name string)", "(in channel @name mod1 @modulator 1)"], "arity": {"minimum": 1, "maximum": None}},
     "out": {"category": "io", "summary": "Audio output channel.", "signatures": ["(out expr channel @name string)"], "arity": {"minimum": 2, "maximum": None}},
+    "probe": {
+        "category": "io",
+        "summary": "Identity passthrough that exposes a scalar signal to the host as a live probe (patcher number~/scope~ views). Every probe is a graph root, so a dangling probe still compiles. Scalar signals only.",
+        "signatures": [
+            "(probe signal)",
+            "(probe signal @id string @view number|scope|meter @name string)",
+        ],
+        "arity": {"minimum": 1, "maximum": 1},
+    },
     "tensor": {
         "category": "tensor_creation",
         "summary": "Buffer-shaped data. @shape plus one source of contents: @data (inline), @file (JSON asset), or neither (zero-filled).",
@@ -227,6 +236,7 @@ ATTRIBUTE_SPECS = {
     "@generated": {"type": "string", "summary": "Tags generated helper parameters."},
     "@generated-for": {"type": "symbol", "summary": "Associates a generated helper parameter with a user parameter."},
     "@group": {"type": "symbol", "summary": "UI fallback group name for a host-visible param."},
+    "@id": {"type": "string", "summary": "Stable probe identity for the host and the patcher. Defaults to probe-<ordinal>; repeated ids get an occurrence index."},
     "@hidden": {"type": "bool", "summary": "Hide a generated or internal parameter from normal host presentation."},
     "@hop": {"type": "int", "summary": "Hop size for STFT and hop-rate operators.", "aliases": ["@hopSize"]},
     "@hopSize": {"type": "int", "summary": "Camel-case alias for @hop.", "aliases": ["@hop"]},
@@ -264,6 +274,7 @@ ATTRIBUTE_SPECS = {
     "@threshold": {"type": "signal|float", "summary": "Compressor threshold in dB."},
     "@type": {"type": "enum", "values": ["hann"], "summary": "Window type."},
     "@unit": {"type": "string", "summary": "Host-visible unit label."},
+    "@view": {"type": "enum", "values": ["number", "scope", "meter"], "summary": "Probe display hint passed through to the manifest. Defaults to number."},
 }
 
 
@@ -299,6 +310,7 @@ CURATED_OPERATOR_ATTRIBUTES = {
         "@generated-for",
         "@modulator-slot",
     ],
+    "probe": ["@id", "@view", "@name"],
     "partition-ir": ["@N", "@n", "@hop", "@hopSize"],
     "partitioned-convolve": ["@N", "@n", "@hop", "@hopSize", "@gain"],
     "partitioned-spectral-mac": ["@N", "@n"],
@@ -367,6 +379,9 @@ CURATED_OPERATOR_INPUTS = {
     "delay": [
         {"name": "signal", "kind": "signal|float|tensor", "summary": "Input signal. A tensor gets one independent delay line per lane.", "required": True},
         {"name": "time_in_samples", "kind": "signal|float|tensor", "summary": "Delay time in samples (clamped to [0, max-delay - 1], interpolated). A scalar broadcasts to every lane; a tensor gives per-lane delay times and requires a tensor input signal.", "required": True},
+    ],
+    "probe": [
+        {"name": "signal", "kind": "signal|float", "summary": "Scalar signal to observe; returned unchanged.", "required": True},
     ],
     "phasor": [
         {"name": "freq", "kind": "signal|float", "summary": "Frequency in Hz.", "required": True},
@@ -880,7 +895,7 @@ def result_kind_for_operator(name: str, category: str) -> str:
     if name == "delay":
         # Tensor in -> tensor out; scalar in -> signal out.
         return "same-as-inputs"
-    if name in {"param", "in", "phasor", "stateful-phasor", "sample", "click", "ramp2trig", "accum", "latch", "mix", "biquad", "compressor", "peek", "poke", "seq", "to-signal", "overlap-add", "scale", "triangle", "wrap", "clip", "selector", "partitioned-convolve", "__modulated-param"}:
+    if name in {"param", "in", "probe", "phasor", "stateful-phasor", "sample", "click", "ramp2trig", "accum", "latch", "mix", "biquad", "compressor", "peek", "poke", "seq", "to-signal", "overlap-add", "scale", "triangle", "wrap", "clip", "selector", "partitioned-convolve", "__modulated-param"}:
         return "signal"
     if name in {"tensor", "zeros", "ones", "full", "randn", "tensor-param", "audio-tensor", "ir", "matmul", "conv1d", "conv2d", "reshape", "transpose", "shrink", "pad", "expand", "repeat", "windows", "hann", "window", "softmax"}:
         return "tensor"
