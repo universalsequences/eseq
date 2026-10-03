@@ -43,7 +43,7 @@ def passive_input(inst, params, gates):
                 a[offset:].ctypes.data_as(ctypes.POINTER(ctypes.c_float)) for a in arrays])
         inst.process_fn(pointers(inputs), pointers(outputs), count,
                         state.ctypes.data_as(ctypes.c_void_p), ctypes.byref(inst.context), None)
-    return np.array(outputs).T, state
+    return np.array(outputs)[inst.audio_channels].T, state
 
 
 def main():

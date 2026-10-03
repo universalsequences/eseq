@@ -118,4 +118,9 @@
 (def q (clip (mod body_q) 0.5 6))
 (def band (/ (svf bell (clip (mod body_hz) 200 5000) q 1) q))
 (def colored (mix bell band (clip (mod body) 0 0.9)))
-(out (* colored (clip velocity 0 1) (clip (mod gain) 0 1)) 1 @name audio)
+(def voice_out (* colored (clip velocity 0 1) (clip (mod gain) 0 1)))
+(out voice_out 1 @name audio)
+;; Held notes always count (a slow breath attack starts silent); after
+;; release the bore's ring is tracked by the output level.
+(use-defmacro voice-amp)
+(out (voice-amp (max (gt gate 0.5) envelope) voice_out voice_out) 2 @name amp @amp true)

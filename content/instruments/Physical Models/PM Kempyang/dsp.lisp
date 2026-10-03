@@ -206,5 +206,13 @@
   (def driven (mix signal (/ (tanh (* signal (+ 1 (* drive_v 8)))) (+ 1 (* drive_v 2))) drive_v))
   (def filtered (svf driven cutoff 0.707 0))
   (* filtered gain_v))
-(out (gamelan-output left drive_v cutoff output_gain) 1 @name left)
-(out (gamelan-output right drive_v cutoff output_gain) 2 @name right)
+(def voice_left (gamelan-output left drive_v cutoff output_gain))
+(def voice_right (gamelan-output right drive_v cutoff output_gain))
+(out voice_left 1 @name left)
+(out voice_right 2 @name right)
+;; Struck, often without a note-off: the output level tracks the free ring;
+;; the damper's release window only covers a key-up that chokes it.
+(use-defmacro voice-amp)
+(use-defmacro release-window)
+(out (voice-amp (release-window gate (* 1000 (clip (mod release_s) 0.02 12))) voice_left voice_right)
+  3 @name amp @amp true)

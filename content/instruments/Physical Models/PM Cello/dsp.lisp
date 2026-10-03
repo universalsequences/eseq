@@ -260,5 +260,13 @@
 (def (center second third) (cello-strings frequency contact motion pluck))
 (def (left right) (cello-stereo center second third))
 (def (left_body right_body) (cello-resonance left right))
-(out (cello-level left_body velocity) 1 @name left)
-(out (cello-level right_body velocity) 2 @name right)
+(def voice_left (cello-level left_body velocity))
+(def voice_right (cello-level right_body velocity))
+(out voice_left 1 @name left)
+(out voice_right 2 @name right)
+;; The bow envelope lives inside cello-bow: hold the voice while the key is
+;; down and for the bow release, then the string's ring is tracked by the
+;; output level (plucks and body resonance included).
+(use-defmacro voice-amp)
+(use-defmacro release-window)
+(out (voice-amp (release-window gate release) voice_left voice_right) 3 @name amp @amp true)

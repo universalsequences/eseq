@@ -143,6 +143,10 @@
         "x": 4649.0703,
         "y": 4.0
       },
+      "*#39": {
+        "x": 15.009998,
+        "y": 84.479996
+      },
       "*#4": {
         "x": 2740.4304,
         "y": 144.62
@@ -417,6 +421,10 @@
         "x": 62.259995,
         "y": 89.439995
       },
+      "1000": {
+        "x": 15.009998,
+        "y": 78.28
+      },
       "12": {
         "x": 2300.39,
         "y": 89.439995
@@ -538,6 +546,10 @@
         "x": 4.0,
         "y": 30.800003
       },
+      "amp": {
+        "x": 1266.28,
+        "y": 281.64005
+      },
       "amplitude": {
         "x": 2701.8198,
         "y": 172.52
@@ -625,6 +637,10 @@
       "clip#23": {
         "x": 4702.579,
         "y": 77.659996
+      },
+      "clip#24": {
+        "x": 24.819998,
+        "y": 78.28
       },
       "clip#3": {
         "x": 4564.1094,
@@ -794,14 +810,6 @@
       "gamelan-hold#7": {
         "x": 2256.08,
         "y": 96.88
-      },
-      "gamelan-output#0": {
-        "x": 2736.3303,
-        "y": 268.62006
-      },
-      "gamelan-output#1": {
-        "x": 2756.5403,
-        "y": 268.62006
       },
       "gamelan-row#0": {
         "x": 2314.68,
@@ -1015,6 +1023,10 @@
         "x": 4647.8994,
         "y": 71.46
       },
+      "mod#18": {
+        "x": 17.81,
+        "y": 72.08
+      },
       "mod#2": {
         "x": 2155.54,
         "y": 71.46
@@ -1127,6 +1139,10 @@
       "register": {
         "x": 4.0,
         "y": 28.120003
+      },
+      "release-window#0": {
+        "x": 1266.28,
+        "y": 90.67999
       },
       "release_loss": {
         "x": 2191.11,
@@ -1258,6 +1274,18 @@
       "velocity_row": {
         "x": 4550.139,
         "y": 127.26
+      },
+      "voice-amp#0": {
+        "x": 1266.28,
+        "y": 278.54004
+      },
+      "voice_left": {
+        "x": 2736.3306,
+        "y": 274.82004
+      },
+      "voice_right": {
+        "x": 2756.5405,
+        "y": 274.82004
       },
       "weight": {
         "x": 2701.8198,
@@ -1396,6 +1424,10 @@
       "*#38:0->cutoff:1": {
         "segmented": true,
         "y": 39.845
+      },
+      "*#39:0->release-window#0:1": {
+        "segmented": true,
+        "y": 90.229996
       },
       "*#3:0->high_indices:1": {
         "segmented": true,
@@ -1657,6 +1689,10 @@
         "segmented": true,
         "y": 166.18001
       },
+      "1000:0->*#39:0": {
+        "segmented": true,
+        "y": 83.409996
+      },
       "100:0->hand_loss:0": {
         "segmented": true,
         "y": 96.53
@@ -1881,6 +1917,10 @@
         "segmented": true,
         "y": 81.86
       },
+      "clip#24:0->*#39:1": {
+        "segmented": true,
+        "y": 81.549995
+      },
       "clip#2:0->+#0:0": {
         "segmented": true,
         "y": 119.68
@@ -1973,13 +2013,13 @@
         "segmented": true,
         "y": 83.1
       },
-      "cutoff:0->gamelan-output#0:2": {
+      "cutoff:0->voice_left:2": {
         "segmented": true,
-        "y": 177.96002
+        "y": 183.54001
       },
-      "cutoff:0->gamelan-output#1:2": {
+      "cutoff:0->voice_right:2": {
         "segmented": true,
-        "y": 177.96002
+        "y": 183.54001
       },
       "decay:0->mod#8:0": {
         "segmented": true,
@@ -2001,13 +2041,13 @@
         "segmented": true,
         "y": 48.810005
       },
-      "drive_v:0->gamelan-output#0:1": {
+      "drive_v:0->voice_left:1": {
         "segmented": true,
-        "y": 183.23001
+        "y": 188.5
       },
-      "drive_v:0->gamelan-output#1:1": {
+      "drive_v:0->voice_right:1": {
         "segmented": true,
-        "y": 183.23001
+        "y": 188.5
       },
       "dynamics:0->clip#1:0": {
         "segmented": true,
@@ -2097,14 +2137,6 @@
         "segmented": true,
         "y": 143.55
       },
-      "gamelan-output#0:0->left~1:0": {
-        "segmented": true,
-        "y": 271.27005
-      },
-      "gamelan-output#1:0->right~1:0": {
-        "segmented": true,
-        "y": 270.55005
-      },
       "gamelan-row#0:0->row:0": {
         "segmented": true,
         "y": 120.3
@@ -2164,6 +2196,10 @@
       "gate:0->held:0": {
         "segmented": true,
         "y": 38.52
+      },
+      "gate:0->release-window#0:0": {
+        "segmented": true,
+        "y": 48.129997
       },
       "gt#0:0->onset:0": {
         "segmented": true,
@@ -2241,9 +2277,9 @@
         "segmented": true,
         "y": 73.39
       },
-      "left:0->gamelan-output#0:0": {
+      "left:0->voice_left:0": {
         "segmented": true,
-        "y": 267.55005
+        "y": 273.75003
       },
       "lift:0->mod#11:0": {
         "segmented": true,
@@ -2349,6 +2385,10 @@
         "segmented": true,
         "y": 73.49
       },
+      "mod#18:0->clip#24:0": {
+        "segmented": true,
+        "y": 77.83
+      },
       "mod#1:0->clip#7:0": {
         "segmented": true,
         "y": 75.35
@@ -2445,13 +2485,13 @@
         "segmented": true,
         "y": 87.13
       },
-      "output_gain:0->gamelan-output#0:3": {
+      "output_gain:0->voice_left:3": {
         "segmented": true,
-        "y": 177.96002
+        "y": 183.54001
       },
-      "output_gain:0->gamelan-output#1:3": {
+      "output_gain:0->voice_right:3": {
         "segmented": true,
-        "y": 177.96002
+        "y": 183.54001
       },
       "peek#0:0->*#12:1": {
         "segmented": true,
@@ -2557,6 +2597,10 @@
         "segmented": true,
         "y": 30.050003
       },
+      "release-window#0:0->voice-amp#0:0": {
+        "segmented": true,
+        "y": 182.30002
+      },
       "release_loss:0->+#12:1": {
         "segmented": true,
         "y": 102.94
@@ -2565,9 +2609,13 @@
         "segmented": true,
         "y": 41.390003
       },
-      "right:0->gamelan-output#1:0": {
+      "release_s:0->mod#18:0": {
         "segmented": true,
-        "y": 266.83005
+        "y": 42.010006
+      },
+      "right:0->voice_right:0": {
+        "segmented": true,
+        "y": 273.03003
       },
       "rise:0->modes:3": {
         "segmented": true,
@@ -2832,6 +2880,26 @@
       "velocity_row:0->velocity_mix:0": {
         "segmented": true,
         "y": 132.48999
+      },
+      "voice-amp#0:0->amp:0": {
+        "segmented": true,
+        "y": 280.88004
+      },
+      "voice_left:0->left~1:0": {
+        "segmented": true,
+        "y": 278.19003
+      },
+      "voice_left:0->voice-amp#0:1": {
+        "segmented": true,
+        "y": 278.19003
+      },
+      "voice_right:0->right~1:0": {
+        "segmented": true,
+        "y": 276.95004
+      },
+      "voice_right:0->voice-amp#0:2": {
+        "segmented": true,
+        "y": 276.95004
       },
       "weight:0->modes:5": {
         "segmented": true,
@@ -9247,10 +9315,10 @@
         ]
       },
       {
-        "id": "gamelan-output#0",
+        "id": "voice_left",
         "op": "gamelan-output",
         "kind": "macro-instance",
-        "label": "gamelan-output",
+        "label": "gamelan-output voice_left",
         "args": [
           {
             "kind": "symbol-ref",
@@ -9271,29 +9339,13 @@
         ],
         "outputs": [
           "out"
-        ],
-        "synthesized": true
-      },
-      {
-        "id": "left~1",
-        "op": "out",
-        "kind": "out",
-        "label": "left",
-        "args": [
-          {
-            "kind": "connected"
-          },
-          {
-            "kind": "literal",
-            "value": "1"
-          }
         ]
       },
       {
-        "id": "gamelan-output#1",
+        "id": "voice_right",
         "op": "gamelan-output",
         "kind": "macro-instance",
-        "label": "gamelan-output",
+        "label": "gamelan-output voice_right",
         "args": [
           {
             "kind": "symbol-ref",
@@ -9314,8 +9366,23 @@
         ],
         "outputs": [
           "out"
-        ],
-        "synthesized": true
+        ]
+      },
+      {
+        "id": "left~1",
+        "op": "out",
+        "kind": "out",
+        "label": "left",
+        "args": [
+          {
+            "kind": "symbol-ref",
+            "name": "voice_left"
+          },
+          {
+            "kind": "literal",
+            "value": "1"
+          }
+        ]
       },
       {
         "id": "right~1",
@@ -9324,11 +9391,135 @@
         "label": "right",
         "args": [
           {
-            "kind": "connected"
+            "kind": "symbol-ref",
+            "name": "voice_right"
           },
           {
             "kind": "literal",
             "value": "2"
+          }
+        ]
+      },
+      {
+        "id": "mod#18",
+        "op": "mod",
+        "kind": "builtin",
+        "label": "mod",
+        "args": [
+          {
+            "kind": "symbol-ref",
+            "name": "release_s"
+          }
+        ],
+        "outputs": [
+          "out"
+        ],
+        "synthesized": true
+      },
+      {
+        "id": "clip#24",
+        "op": "clip",
+        "kind": "builtin",
+        "label": "clip",
+        "args": [
+          {
+            "kind": "connected"
+          },
+          {
+            "kind": "literal",
+            "value": "0.02"
+          },
+          {
+            "kind": "literal",
+            "value": "12"
+          }
+        ],
+        "outputs": [
+          "out"
+        ],
+        "synthesized": true
+      },
+      {
+        "id": "1000",
+        "op": "1000",
+        "kind": "constant",
+        "label": "1000",
+        "outputs": [
+          "out"
+        ]
+      },
+      {
+        "id": "*#39",
+        "op": "*",
+        "kind": "builtin",
+        "label": "*",
+        "args": [
+          {
+            "kind": "connected"
+          },
+          {
+            "kind": "connected"
+          }
+        ],
+        "outputs": [
+          "out"
+        ],
+        "synthesized": true
+      },
+      {
+        "id": "release-window#0",
+        "op": "release-window",
+        "kind": "macro-instance",
+        "label": "release-window",
+        "args": [
+          {
+            "kind": "symbol-ref",
+            "name": "gate"
+          },
+          {
+            "kind": "connected"
+          }
+        ],
+        "outputs": [
+          "out"
+        ],
+        "synthesized": true
+      },
+      {
+        "id": "voice-amp#0",
+        "op": "voice-amp",
+        "kind": "macro-instance",
+        "label": "voice-amp",
+        "args": [
+          {
+            "kind": "connected"
+          },
+          {
+            "kind": "symbol-ref",
+            "name": "voice_left"
+          },
+          {
+            "kind": "symbol-ref",
+            "name": "voice_right"
+          }
+        ],
+        "outputs": [
+          "out"
+        ],
+        "synthesized": true
+      },
+      {
+        "id": "amp",
+        "op": "out",
+        "kind": "out",
+        "label": "out 3 @name amp @amp true",
+        "args": [
+          {
+            "kind": "connected"
+          },
+          {
+            "kind": "literal",
+            "value": "3"
           }
         ]
       }
@@ -12401,7 +12592,7 @@
       {
         "fromNode": "left",
         "fromOutput": 0,
-        "toNode": "gamelan-output#0",
+        "toNode": "voice_left",
         "toInput": 0,
         "kind": "forward",
         "presentation": "cable"
@@ -12409,7 +12600,7 @@
       {
         "fromNode": "drive_v",
         "fromOutput": 0,
-        "toNode": "gamelan-output#0",
+        "toNode": "voice_left",
         "toInput": 1,
         "kind": "forward",
         "presentation": "cable"
@@ -12417,7 +12608,7 @@
       {
         "fromNode": "cutoff",
         "fromOutput": 0,
-        "toNode": "gamelan-output#0",
+        "toNode": "voice_left",
         "toInput": 2,
         "kind": "forward",
         "presentation": "cable"
@@ -12425,13 +12616,45 @@
       {
         "fromNode": "output_gain",
         "fromOutput": 0,
-        "toNode": "gamelan-output#0",
+        "toNode": "voice_left",
         "toInput": 3,
         "kind": "forward",
         "presentation": "cable"
       },
       {
-        "fromNode": "gamelan-output#0",
+        "fromNode": "right",
+        "fromOutput": 0,
+        "toNode": "voice_right",
+        "toInput": 0,
+        "kind": "forward",
+        "presentation": "cable"
+      },
+      {
+        "fromNode": "drive_v",
+        "fromOutput": 0,
+        "toNode": "voice_right",
+        "toInput": 1,
+        "kind": "forward",
+        "presentation": "cable"
+      },
+      {
+        "fromNode": "cutoff",
+        "fromOutput": 0,
+        "toNode": "voice_right",
+        "toInput": 2,
+        "kind": "forward",
+        "presentation": "cable"
+      },
+      {
+        "fromNode": "output_gain",
+        "fromOutput": 0,
+        "toNode": "voice_right",
+        "toInput": 3,
+        "kind": "forward",
+        "presentation": "cable"
+      },
+      {
+        "fromNode": "voice_left",
         "fromOutput": 0,
         "toNode": "left~1",
         "toInput": 0,
@@ -12439,41 +12662,89 @@
         "presentation": "cable"
       },
       {
-        "fromNode": "right",
+        "fromNode": "voice_right",
         "fromOutput": 0,
-        "toNode": "gamelan-output#1",
+        "toNode": "right~1",
         "toInput": 0,
         "kind": "forward",
         "presentation": "cable"
       },
       {
-        "fromNode": "drive_v",
+        "fromNode": "gate",
         "fromOutput": 0,
-        "toNode": "gamelan-output#1",
+        "toNode": "release-window#0",
+        "toInput": 0,
+        "kind": "forward",
+        "presentation": "cable"
+      },
+      {
+        "fromNode": "release_s",
+        "fromOutput": 0,
+        "toNode": "mod#18",
+        "toInput": 0,
+        "kind": "forward",
+        "presentation": "cable"
+      },
+      {
+        "fromNode": "mod#18",
+        "fromOutput": 0,
+        "toNode": "clip#24",
+        "toInput": 0,
+        "kind": "forward",
+        "presentation": "cable"
+      },
+      {
+        "fromNode": "1000",
+        "fromOutput": 0,
+        "toNode": "*#39",
+        "toInput": 0,
+        "kind": "forward",
+        "presentation": "cable"
+      },
+      {
+        "fromNode": "clip#24",
+        "fromOutput": 0,
+        "toNode": "*#39",
         "toInput": 1,
         "kind": "forward",
         "presentation": "cable"
       },
       {
-        "fromNode": "cutoff",
+        "fromNode": "*#39",
         "fromOutput": 0,
-        "toNode": "gamelan-output#1",
+        "toNode": "release-window#0",
+        "toInput": 1,
+        "kind": "forward",
+        "presentation": "cable"
+      },
+      {
+        "fromNode": "release-window#0",
+        "fromOutput": 0,
+        "toNode": "voice-amp#0",
+        "toInput": 0,
+        "kind": "forward",
+        "presentation": "cable"
+      },
+      {
+        "fromNode": "voice_left",
+        "fromOutput": 0,
+        "toNode": "voice-amp#0",
+        "toInput": 1,
+        "kind": "forward",
+        "presentation": "cable"
+      },
+      {
+        "fromNode": "voice_right",
+        "fromOutput": 0,
+        "toNode": "voice-amp#0",
         "toInput": 2,
         "kind": "forward",
         "presentation": "cable"
       },
       {
-        "fromNode": "output_gain",
+        "fromNode": "voice-amp#0",
         "fromOutput": 0,
-        "toNode": "gamelan-output#1",
-        "toInput": 3,
-        "kind": "forward",
-        "presentation": "cable"
-      },
-      {
-        "fromNode": "gamelan-output#1",
-        "fromOutput": 0,
-        "toNode": "right~1",
+        "toNode": "amp",
         "toInput": 0,
         "kind": "forward",
         "presentation": "cable"
@@ -16136,6 +16407,798 @@
             }
           ]
         }
+      },
+      {
+        "name": "release-window",
+        "params": [
+          "gate",
+          "release_ms"
+        ],
+        "outputs": [
+          "out"
+        ],
+        "origin": {
+          "kind": "library",
+          "sourcePath": "/Users/alecresende/code/learning/anthropic/eseq/crates/eseqlisp/../../content/defmacros/release-window/macro.lisp",
+          "layoutPath": "/Users/alecresende/code/learning/anthropic/eseq/crates/eseqlisp/../../content/defmacros/release-window/macro.layout.json"
+        },
+        "graph": {
+          "nodes": [
+            {
+              "id": "gate",
+              "op": "in",
+              "kind": "in",
+              "label": "in 1 @name gate",
+              "args": [
+                {
+                  "kind": "literal",
+                  "value": "1"
+                },
+                {
+                  "kind": "literal",
+                  "value": "@name"
+                },
+                {
+                  "kind": "literal",
+                  "value": "gate"
+                }
+              ],
+              "outputs": [
+                "gate"
+              ]
+            },
+            {
+              "id": "release_ms",
+              "op": "in",
+              "kind": "in",
+              "label": "in 2 @name release_ms",
+              "args": [
+                {
+                  "kind": "literal",
+                  "value": "2"
+                },
+                {
+                  "kind": "literal",
+                  "value": "@name"
+                },
+                {
+                  "kind": "literal",
+                  "value": "release_ms"
+                }
+              ],
+              "outputs": [
+                "release_ms"
+              ]
+            },
+            {
+              "id": "release_window_left",
+              "op": "make-history",
+              "kind": "history",
+              "label": "history",
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "release_window_held",
+              "op": "gt",
+              "kind": "builtin",
+              "label": "gt release_window_held",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "gate"
+                },
+                {
+                  "kind": "literal",
+                  "value": "0.5"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "0",
+              "op": "0",
+              "kind": "constant",
+              "label": "0",
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "max#0",
+              "op": "max",
+              "kind": "builtin",
+              "label": "max",
+              "args": [
+                {
+                  "kind": "connected"
+                },
+                {
+                  "kind": "symbol-ref",
+                  "name": "release_ms"
+                }
+              ],
+              "outputs": [
+                "out"
+              ],
+              "synthesized": true
+            },
+            {
+              "id": "*#0",
+              "op": "*",
+              "kind": "builtin",
+              "label": "*",
+              "args": [
+                {
+                  "kind": "connected"
+                },
+                {
+                  "kind": "literal",
+                  "value": "0.001"
+                },
+                {
+                  "kind": "literal",
+                  "value": "samplerate"
+                }
+              ],
+              "outputs": [
+                "out"
+              ],
+              "synthesized": true
+            },
+            {
+              "id": "-#0",
+              "op": "-",
+              "kind": "builtin",
+              "label": "-",
+              "args": [
+                {
+                  "kind": "connected"
+                },
+                {
+                  "kind": "literal",
+                  "value": "1"
+                }
+              ],
+              "outputs": [
+                "out"
+              ],
+              "synthesized": true
+            },
+            {
+              "id": "0~1",
+              "op": "0",
+              "kind": "constant",
+              "label": "0",
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "max#1",
+              "op": "max",
+              "kind": "builtin",
+              "label": "max",
+              "args": [
+                {
+                  "kind": "connected"
+                },
+                {
+                  "kind": "connected"
+                }
+              ],
+              "outputs": [
+                "out"
+              ],
+              "synthesized": true
+            },
+            {
+              "id": "release_window_value",
+              "op": "gswitch",
+              "kind": "builtin",
+              "label": "gswitch release_window_value",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "release_window_held"
+                },
+                {
+                  "kind": "connected"
+                },
+                {
+                  "kind": "connected"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "gt#0",
+              "op": "gt",
+              "kind": "builtin",
+              "label": "gt",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "release_window_value"
+                },
+                {
+                  "kind": "literal",
+                  "value": "0"
+                }
+              ],
+              "outputs": [
+                "out"
+              ],
+              "synthesized": true
+            },
+            {
+              "id": "return",
+              "op": "max",
+              "kind": "builtin",
+              "label": "max",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "release_window_held"
+                },
+                {
+                  "kind": "connected"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "out",
+              "op": "out",
+              "kind": "out",
+              "label": "out 1",
+              "args": [
+                {
+                  "kind": "literal",
+                  "value": "1"
+                }
+              ]
+            }
+          ],
+          "connections": [
+            {
+              "fromNode": "gate",
+              "fromOutput": 0,
+              "toNode": "release_window_held",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "release_window_held",
+              "fromOutput": 0,
+              "toNode": "release_window_value",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "0",
+              "fromOutput": 0,
+              "toNode": "max#0",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "release_ms",
+              "fromOutput": 0,
+              "toNode": "max#0",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "max#0",
+              "fromOutput": 0,
+              "toNode": "*#0",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "*#0",
+              "fromOutput": 0,
+              "toNode": "release_window_value",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "release_window_left",
+              "fromOutput": 0,
+              "toNode": "-#0",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "0~1",
+              "fromOutput": 0,
+              "toNode": "max#1",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "-#0",
+              "fromOutput": 0,
+              "toNode": "max#1",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "max#1",
+              "fromOutput": 0,
+              "toNode": "release_window_value",
+              "toInput": 2,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "release_window_value",
+              "fromOutput": 0,
+              "toNode": "release_window_left",
+              "toInput": 0,
+              "kind": "feedback",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "release_window_held",
+              "fromOutput": 0,
+              "toNode": "return",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "release_window_value",
+              "fromOutput": 0,
+              "toNode": "gt#0",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "gt#0",
+              "fromOutput": 0,
+              "toNode": "return",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "return",
+              "fromOutput": 0,
+              "toNode": "out",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            }
+          ]
+        }
+      },
+      {
+        "name": "voice-amp",
+        "params": [
+          "env",
+          "left",
+          "right"
+        ],
+        "outputs": [
+          "out"
+        ],
+        "origin": {
+          "kind": "library",
+          "sourcePath": "/Users/alecresende/code/learning/anthropic/eseq/crates/eseqlisp/../../content/defmacros/voice-amp/macro.lisp",
+          "layoutPath": "/Users/alecresende/code/learning/anthropic/eseq/crates/eseqlisp/../../content/defmacros/voice-amp/macro.layout.json"
+        },
+        "graph": {
+          "nodes": [
+            {
+              "id": "env",
+              "op": "in",
+              "kind": "in",
+              "label": "in 1 @name env",
+              "args": [
+                {
+                  "kind": "literal",
+                  "value": "1"
+                },
+                {
+                  "kind": "literal",
+                  "value": "@name"
+                },
+                {
+                  "kind": "literal",
+                  "value": "env"
+                }
+              ],
+              "outputs": [
+                "env"
+              ]
+            },
+            {
+              "id": "left",
+              "op": "in",
+              "kind": "in",
+              "label": "in 2 @name left",
+              "args": [
+                {
+                  "kind": "literal",
+                  "value": "2"
+                },
+                {
+                  "kind": "literal",
+                  "value": "@name"
+                },
+                {
+                  "kind": "literal",
+                  "value": "left"
+                }
+              ],
+              "outputs": [
+                "left"
+              ]
+            },
+            {
+              "id": "right",
+              "op": "in",
+              "kind": "in",
+              "label": "in 3 @name right",
+              "args": [
+                {
+                  "kind": "literal",
+                  "value": "3"
+                },
+                {
+                  "kind": "literal",
+                  "value": "@name"
+                },
+                {
+                  "kind": "literal",
+                  "value": "right"
+                }
+              ],
+              "outputs": [
+                "right"
+              ]
+            },
+            {
+              "id": "voice_amp_peak",
+              "op": "make-history",
+              "kind": "history",
+              "label": "history",
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "abs#0",
+              "op": "abs",
+              "kind": "builtin",
+              "label": "abs",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "left"
+                }
+              ],
+              "outputs": [
+                "out"
+              ],
+              "synthesized": true
+            },
+            {
+              "id": "abs#1",
+              "op": "abs",
+              "kind": "builtin",
+              "label": "abs",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "right"
+                }
+              ],
+              "outputs": [
+                "out"
+              ],
+              "synthesized": true
+            },
+            {
+              "id": "max#0",
+              "op": "max",
+              "kind": "builtin",
+              "label": "max",
+              "args": [
+                {
+                  "kind": "connected"
+                },
+                {
+                  "kind": "connected"
+                }
+              ],
+              "outputs": [
+                "out"
+              ],
+              "synthesized": true
+            },
+            {
+              "id": "/#0",
+              "op": "/",
+              "kind": "builtin",
+              "label": "/",
+              "args": [
+                {
+                  "kind": "literal",
+                  "value": "-20"
+                },
+                {
+                  "kind": "literal",
+                  "value": "samplerate"
+                }
+              ],
+              "outputs": [
+                "out"
+              ],
+              "synthesized": true
+            },
+            {
+              "id": "exp#0",
+              "op": "exp",
+              "kind": "builtin",
+              "label": "exp",
+              "args": [
+                {
+                  "kind": "connected"
+                }
+              ],
+              "outputs": [
+                "out"
+              ],
+              "synthesized": true
+            },
+            {
+              "id": "*#0",
+              "op": "*",
+              "kind": "builtin",
+              "label": "*",
+              "args": [
+                {
+                  "kind": "connected"
+                },
+                {
+                  "kind": "connected"
+                }
+              ],
+              "outputs": [
+                "out"
+              ],
+              "synthesized": true
+            },
+            {
+              "id": "voice_amp_level",
+              "op": "max",
+              "kind": "builtin",
+              "label": "max voice_amp_level",
+              "args": [
+                {
+                  "kind": "connected"
+                },
+                {
+                  "kind": "connected"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "gt#0",
+              "op": "gt",
+              "kind": "builtin",
+              "label": "gt",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "env"
+                },
+                {
+                  "kind": "literal",
+                  "value": "0.0001"
+                }
+              ],
+              "outputs": [
+                "out"
+              ],
+              "synthesized": true
+            },
+            {
+              "id": "gt#1",
+              "op": "gt",
+              "kind": "builtin",
+              "label": "gt",
+              "args": [
+                {
+                  "kind": "symbol-ref",
+                  "name": "voice_amp_level"
+                },
+                {
+                  "kind": "literal",
+                  "value": "0.00001"
+                }
+              ],
+              "outputs": [
+                "out"
+              ],
+              "synthesized": true
+            },
+            {
+              "id": "return",
+              "op": "max",
+              "kind": "builtin",
+              "label": "max",
+              "args": [
+                {
+                  "kind": "connected"
+                },
+                {
+                  "kind": "connected"
+                }
+              ],
+              "outputs": [
+                "out"
+              ]
+            },
+            {
+              "id": "out",
+              "op": "out",
+              "kind": "out",
+              "label": "out 1",
+              "args": [
+                {
+                  "kind": "literal",
+                  "value": "1"
+                }
+              ]
+            }
+          ],
+          "connections": [
+            {
+              "fromNode": "left",
+              "fromOutput": 0,
+              "toNode": "abs#0",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "abs#0",
+              "fromOutput": 0,
+              "toNode": "max#0",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "right",
+              "fromOutput": 0,
+              "toNode": "abs#1",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "abs#1",
+              "fromOutput": 0,
+              "toNode": "max#0",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "max#0",
+              "fromOutput": 0,
+              "toNode": "voice_amp_level",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "voice_amp_peak",
+              "fromOutput": 0,
+              "toNode": "*#0",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "/#0",
+              "fromOutput": 0,
+              "toNode": "exp#0",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "exp#0",
+              "fromOutput": 0,
+              "toNode": "*#0",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "*#0",
+              "fromOutput": 0,
+              "toNode": "voice_amp_level",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "voice_amp_level",
+              "fromOutput": 0,
+              "toNode": "voice_amp_peak",
+              "toInput": 0,
+              "kind": "feedback",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "env",
+              "fromOutput": 0,
+              "toNode": "gt#0",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "gt#0",
+              "fromOutput": 0,
+              "toNode": "return",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "voice_amp_level",
+              "fromOutput": 0,
+              "toNode": "gt#1",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "gt#1",
+              "fromOutput": 0,
+              "toNode": "return",
+              "toInput": 1,
+              "kind": "forward",
+              "presentation": "cable"
+            },
+            {
+              "fromNode": "return",
+              "fromOutput": 0,
+              "toNode": "out",
+              "toInput": 0,
+              "kind": "forward",
+              "presentation": "cable"
+            }
+          ]
+        }
       }
     ],
     "hostModulators": [
@@ -16159,6 +17222,10 @@
         "channel": 9,
         "slot": 4
       }
+    ],
+    "imports": [
+      "voice-amp",
+      "release-window"
     ]
   }
 }

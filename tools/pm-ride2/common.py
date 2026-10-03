@@ -81,4 +81,4 @@ def play(inst, events, seconds, params=None, mem=None, release=None):
         inst.process_fn(inptrs, outptrs, frames, mem.ctypes.data_as(ctypes.c_void_p), ctypes.byref(inst.context), None)
         for c in range(inst.n_out):
             y[b:b + frames, c] = outs[c][:frames]
-    return y, mem
+    return y[:, inst.audio_channels], mem

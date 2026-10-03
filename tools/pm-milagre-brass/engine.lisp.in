@@ -146,4 +146,9 @@ ${body_chain}
 (def wet (mb-hall dry hall_s 0.35))
 (def mixed (+ dry (* (clip (mod hall) 0 1) wet)))
 ;; Transparent at playing levels (under 0.5 dB at the reference phrase's loudest peak), bounded at extremes.
-(out (* 2 (tanh (* mixed (clip (mod gain) 0 1)))) 1 @name audio)
+(def voice_out (* 2 (tanh (* mixed (clip (mod gain) 0 1)))))
+(out voice_out 1 @name audio)
+;; Held notes always count (a slow breath attack starts silent); after
+;; release the bore and hall tails are tracked by the output level.
+(use-defmacro voice-amp)
+(out (voice-amp (max (gt gate 0.5) env) voice_out voice_out) 2 @name amp @amp true)

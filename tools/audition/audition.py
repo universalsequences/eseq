@@ -65,6 +65,22 @@ def note_to_hz(spec):
     return 440.0 * 2.0 ** (semis / 12.0)
 
 
+def expand_defmacro_imports(source, seen=None):
+    """Inline `(use-defmacro NAME)` from content/defmacros, as the host does.
+    The standalone compiler has no package resolver of its own."""
+    seen = set() if seen is None else seen
+    def expand(match):
+        name = match.group(1)
+        if name in seen:
+            return ""
+        seen.add(name)
+        path = os.path.join(REPO_ROOT, "content", "defmacros", name, "macro.lisp")
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"use-defmacro {name}: no {path}")
+        return expand_defmacro_imports(open(path).read(), seen)
+    return re.sub(r"\(use-defmacro\s+([^\s()]+)\s*\)", expand, source)
+
+
 def extract_preamble():
     """Pull INSTRUMENT_PREAMBLE (a raw string) out of lisp_host.rs."""
     src = open(LISP_HOST).read()
@@ -120,7 +136,7 @@ class Instrument:
         with open(os.path.join(REPO_ROOT, "content", "dgen-toolchain.lock"), "rb") as f:
             h.update(f.read())
         h.update(extract_preamble().encode())
-        h.update(open(self.dsp_path, "rb").read())
+        h.update(expand_defmacro_imports(open(self.dsp_path).read()).encode())
         # Tensor default-files are BAKED into the dylib at compile time, so
         # asset contents must be part of the cache key.
         for name in sorted(os.listdir(self.asset_dir)):
@@ -142,7 +158,7 @@ class Instrument:
         with open(combined, "w") as f:
             f.write(extract_preamble())
             f.write("\n")
-            f.write(open(self.dsp_path).read())
+            f.write(expand_defmacro_imports(open(self.dsp_path).read()))
         cmd = [self.compiler, combined,
                "-o", self.build_dir, "--name", "patch",
                "--sample-rate", str(self.sample_rate),
@@ -170,6 +186,9 @@ class Instrument:
         self.inputs = {i["name"]: i["channel"] for i in self.manifest["inputs"]}
         self.n_in = len(self.manifest["inputs"])
         self.n_out = len(self.manifest["outputs"])
+        # An `@amp` voice-retirement flag is host control, never audio.
+        self.amp_channel = (self.manifest.get("ampOutput") or {}).get("channel")
+        self.audio_channels = [ch for ch in range(self.n_out) if ch != self.amp_channel]
         self.lib = ctypes.CDLL(os.path.join(self.build_dir, "patch.dylib"))
         self.process_fn = self.lib.dgen_process_v1
         self.process_fn.argtypes = (
@@ -272,7 +291,9 @@ class Instrument:
                             ctypes.byref(self.context), None)
             for ch in range(self.n_out):
                 y[b:b + frames, ch] = outs[ch][:frames]
-        return (y[:, 0], mem) if self.n_out == 1 else (y, mem)
+        self.amp_flag = None if self.amp_channel is None else y[:, self.amp_channel]
+        y = y[:, self.audio_channels]
+        return (y[:, 0], mem) if y.shape[1] == 1 else (y, mem)
 
 
 # -- analysis helpers --------------------------------------------------------

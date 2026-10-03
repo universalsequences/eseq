@@ -149,4 +149,9 @@
 (def flute-body-bank-2 (flute-body-bank flute-jet-waveguide-2 (mod freq) n2 bright (mod stretch) resbodymix))
 
 ;; Unity at the original gain default; the output control now reaches silence.
-(out (* flute-body-bank-2 2 (clip (mod gain) 0 1)) 1 @name audio)
+(def voice_out (* flute-body-bank-2 2 (clip (mod gain) 0 1)))
+(out voice_out 1 @name audio)
+;; Held notes always count (a slow breath attack starts silent); after
+;; release the jet and body ring are tracked by the output level.
+(use-defmacro voice-amp)
+(out (voice-amp (max (gt gate 0.5) env) voice_out voice_out) 2 @name amp @amp true)

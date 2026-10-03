@@ -33,7 +33,7 @@ def stream(inst, seconds=1., block=128, params=None, hits=None, events=None, gat
         inst.process_fn(pointers(inputs), pointers(outputs), n,
                         state.ctypes.data_as(C.c_void_p), C.byref(inst.context), None)
         offset += n
-    return outputs.T, state
+    return outputs[inst.audio_channels].T, state
 
 
 def timer(output):

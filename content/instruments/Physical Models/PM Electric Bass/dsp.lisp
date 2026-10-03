@@ -195,3 +195,9 @@
 (def signal (+ (* 0.65 tone (clip (mod output.gain) 0 1)) hiss rumble))
 (out signal 1 @name left)
 (out signal 2 @name right)
+;; Plucked, no amp envelope: hold the note-off decay window, then the
+;; string's own ring and the vinyl floor's fade are tracked by the output.
+(use-defmacro voice-amp)
+(use-defmacro release-window)
+(out (voice-amp (release-window gate (* 1000 (clip (mod string.release_s) 0.025 2))) signal signal)
+  3 @name amp @amp true)
