@@ -549,7 +549,7 @@ pub fn sdf_widget_registry_generation() -> u64 {
 pub fn sdf_widget_measure(
     widget_type: &str,
     node: &Value,
-    _children: &[Value],
+    _children: &[&Value],
     _constraints: Constraints,
     _ctx: &MeasureCtx<'_>,
 ) -> Option<Size> {

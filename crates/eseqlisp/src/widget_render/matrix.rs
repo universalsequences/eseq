@@ -867,7 +867,7 @@ impl WidgetDefinition for MatrixWidget {
     fn measure(
         &self,
         node: &Value,
-        _children: &[Value],
+        _children: &[&Value],
         constraints: Constraints,
         _ctx: &MeasureCtx<'_>,
         _measure_child: &mut dyn FnMut(&Value, Constraints) -> Option<Size>,
@@ -895,7 +895,7 @@ impl WidgetDefinition for MatrixWidget {
         &self,
         _node: &Value,
         area: Rect,
-        _children: &[Value],
+        _children: &[&Value],
         _aspect: f32,
         _measure_ctx: &MeasureCtx<'_>,
         layout_ctx: LayoutCtx,

@@ -277,7 +277,7 @@ impl WidgetDefinition for ScrollWidget {
     fn measure(
         &self,
         node: &Value,
-        children: &[Value],
+        children: &[&Value],
         constraints: Constraints,
         _ctx: &MeasureCtx<'_>,
         measure_child: &mut dyn FnMut(&Value, Constraints) -> Option<Size>,
@@ -320,7 +320,7 @@ impl WidgetDefinition for ScrollWidget {
         &self,
         _node: &Value,
         area: Rect,
-        children: &[Value],
+        children: &[&Value],
         _aspect: f32,
         _measure_ctx: &MeasureCtx<'_>,
         _layout_ctx: LayoutCtx,

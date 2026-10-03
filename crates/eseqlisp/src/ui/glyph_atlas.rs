@@ -949,8 +949,27 @@ pub struct SizedFontCache {
     face: FontFace,
     line_metrics: HashMap<u16, FontLineMetrics>,
     cap_heights: HashMap<u16, f32>,
+    advances: HashMap<u16, AdvanceTable>,
     scale: f32,
     pub post_script_name: String,
+}
+
+/// Advance widths for one size. Layout measures every label on every pass,
+/// and asking the face costs a font lookup per character (two CoreText calls
+/// on macOS), so ASCII advances live in a flat table and the rest in a map.
+struct AdvanceTable {
+    /// `NaN` marks an advance not fetched yet.
+    ascii: [f32; 128],
+    other: HashMap<char, f32>,
+}
+
+impl AdvanceTable {
+    fn new() -> Self {
+        Self {
+            ascii: [f32::NAN; 128],
+            other: HashMap::new(),
+        }
+    }
 }
 
 impl SizedFontCache {
@@ -973,6 +992,7 @@ impl SizedFontCache {
             face: loaded.face,
             line_metrics: HashMap::new(),
             cap_heights: HashMap::new(),
+            advances: HashMap::new(),
             scale: scale as f32,
             post_script_name: loaded.post_script_name,
         })
@@ -1029,12 +1049,17 @@ impl SizedFontCache {
 
     pub fn char_advance(&mut self, ch: char, size_tenths: u16) -> f32 {
         let px = size_tenths as f32 / 10.0 * self.scale;
-        self.face.advance(ch, px)
+        let face = &self.face;
+        let table = self.advances.entry(size_tenths).or_insert_with(AdvanceTable::new);
+        cached_advance(table, face, ch, px)
     }
 
     pub fn measure_text(&mut self, text: &str, size_tenths: u16) -> f32 {
+        let px = size_tenths as f32 / 10.0 * self.scale;
+        let face = &self.face;
+        let table = self.advances.entry(size_tenths).or_insert_with(AdvanceTable::new);
         text.chars()
-            .map(|ch| self.char_advance(ch, size_tenths))
+            .map(|ch| cached_advance(table, face, ch, px))
             .sum()
     }
 
@@ -1052,6 +1077,16 @@ impl SizedFontCache {
         let px = size_tenths as f32 / 10.0 * self.scale;
         self.face.rasterize(ch, px)
     }
+}
+
+fn cached_advance(table: &mut AdvanceTable, face: &FontFace, ch: char, px: f32) -> f32 {
+    if let Some(slot) = table.ascii.get_mut(ch as usize) {
+        if slot.is_nan() {
+            *slot = face.advance(ch, px);
+        }
+        return *slot;
+    }
+    *table.other.entry(ch).or_insert_with(|| face.advance(ch, px))
 }
 
 #[derive(Clone, Copy, Debug)]

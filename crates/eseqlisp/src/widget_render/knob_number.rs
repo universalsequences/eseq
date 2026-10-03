@@ -10,8 +10,8 @@ use super::{
 };
 use crate::backend::Color;
 use crate::layout::{
-    Constraints, DEFAULT_FONT_SIZE, LayoutNode, MeasureCtx, Rect, Size, f64_to_f32, get_map,
-    get_prop_num,
+    Constraints, DEFAULT_FONT_SIZE, LayoutNode, MeasureCtx, Rect, Size, f64_to_f32,
+    get_prop_num, get_prop_str,
 };
 use crate::theme;
 use crate::vm::Value;
@@ -1970,7 +1970,7 @@ impl WidgetDefinition for KnobNumberWidget {
     fn measure(
         &self,
         node: &Value,
-        _children: &[Value],
+        _children: &[&Value],
         _constraints: Constraints,
         ctx: &MeasureCtx<'_>,
         _measure_child: &mut dyn FnMut(&Value, Constraints) -> Option<Size>,
@@ -1982,21 +1982,14 @@ impl WidgetDefinition for KnobNumberWidget {
             let label_size = get_prop_num(node, "label-font-size")
                 .map(f64_to_f32)
                 .unwrap_or(font_size * 0.88);
-            let props = get_map(node).unwrap_or_default();
-            let label = props.get("label").and_then(|value| match value {
-                Value::String(label) => Some(label.as_str()),
-                _ => None,
-            });
-            let unit = props.get("unit").and_then(|value| match value {
-                Value::String(unit) => Some(unit.as_str()),
-                _ => None,
-            });
+            let label = get_prop_str(node, "label");
+            let unit = get_prop_str(node, "unit");
             let mut value_chars = String::from(NUMERIC_READOUT_CHARS);
             if let Some(unit) = unit {
-                value_chars.push_str(unit);
+                value_chars.push_str(&unit);
             }
             cache_font_metrics(font_size, &value_chars, measurer, ctx);
-            cache_font_metrics(label_size, label.unwrap_or(""), measurer, ctx);
+            cache_font_metrics(label_size, label.as_deref().unwrap_or(""), measurer, ctx);
         }
         Some(Size {
             width: get_prop_num(node, "width").map(f64_to_f32).unwrap_or(5.2),

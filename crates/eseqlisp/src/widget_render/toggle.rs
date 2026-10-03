@@ -107,7 +107,7 @@ impl WidgetDefinition for ToggleWidget {
     fn measure(
         &self,
         _node: &Value,
-        _children: &[Value],
+        _children: &[&Value],
         _constraints: Constraints,
         _ctx: &MeasureCtx<'_>,
         _measure_child: &mut dyn FnMut(&Value, Constraints) -> Option<Size>,

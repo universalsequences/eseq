@@ -16,12 +16,13 @@ struct WrappedChild<'a> {
 }
 
 fn measured_children<'a>(
-    children: &'a [Value],
+    children: &[&'a Value],
     inner: Constraints,
     measure_child: &mut dyn FnMut(&Value, Constraints) -> Option<Size>,
 ) -> Vec<WrappedChild<'a>> {
     children
         .iter()
+        .copied()
         .filter_map(|child| {
             measure_child(child, inner).map(|mut size| {
                 if inner.max_width.is_finite() {
@@ -95,7 +96,7 @@ impl WidgetDefinition for WrapWidget {
     fn measure(
         &self,
         node: &Value,
-        children: &[Value],
+        children: &[&Value],
         constraints: Constraints,
         _ctx: &MeasureCtx<'_>,
         measure_child: &mut dyn FnMut(&Value, Constraints) -> Option<Size>,
@@ -138,7 +139,7 @@ impl WidgetDefinition for WrapWidget {
         &self,
         node: &Value,
         area: Rect,
-        children: &[Value],
+        children: &[&Value],
         aspect: f32,
         _measure_ctx: &MeasureCtx<'_>,
         _layout_ctx: LayoutCtx,
@@ -252,7 +253,7 @@ mod tests {
         let size = WRAP_WIDGET
             .measure(
                 &node,
-                &children,
+                &children.iter().collect::<Vec<_>>(),
                 Constraints {
                     min_width: 0.0,
                     max_width: 10.0,
@@ -292,7 +293,7 @@ mod tests {
                 width: 10.0,
                 height: 10.0,
             },
-            &children,
+            &children.iter().collect::<Vec<_>>(),
             1.0,
             &MeasureCtx {
                 text_measurer: None,

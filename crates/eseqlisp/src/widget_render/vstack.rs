@@ -39,7 +39,7 @@ impl WidgetDefinition for VStackWidget {
     fn measure(
         &self,
         node: &Value,
-        children: &[Value],
+        children: &[&Value],
         constraints: Constraints,
         _ctx: &MeasureCtx<'_>,
         measure_child: &mut dyn FnMut(&Value, Constraints) -> Option<Size>,
@@ -57,6 +57,7 @@ impl WidgetDefinition for VStackWidget {
         }
         let mut child_sizes = children
             .iter()
+            .copied()
             .filter_map(|child| {
                 let mut size = measure_child(child, inner)?;
                 if let Some(min_height) = get_prop_num(child, "min-height").map(f64_to_f32) {
@@ -92,7 +93,7 @@ impl WidgetDefinition for VStackWidget {
         &self,
         node: &Value,
         area: Rect,
-        children: &[Value],
+        children: &[&Value],
         aspect: f32,
         _measure_ctx: &MeasureCtx<'_>,
         _layout_ctx: LayoutCtx,
@@ -120,6 +121,7 @@ impl WidgetDefinition for VStackWidget {
         // reserve room it would otherwise only get from leftover space.
         let mut measured: Vec<(&Value, Size, f32)> = children
             .iter()
+            .copied()
             .filter_map(|child| {
                 let mut size = measure_child(child, inner_constraints)?;
                 if let Some(min_height) = get_prop_num(child, "min-height").map(f64_to_f32) {

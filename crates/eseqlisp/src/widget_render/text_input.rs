@@ -735,7 +735,7 @@ impl WidgetDefinition for TextInputWidget {
     fn measure(
         &self,
         node: &Value,
-        _children: &[Value],
+        _children: &[&Value],
         constraints: Constraints,
         ctx: &MeasureCtx<'_>,
         _measure_child: &mut dyn FnMut(&Value, Constraints) -> Option<Size>,
@@ -769,7 +769,7 @@ impl WidgetDefinition for TextInputWidget {
         &self,
         _node: &Value,
         area: Rect,
-        children: &[Value],
+        children: &[&Value],
         _aspect: f32,
         _measure_ctx: &MeasureCtx<'_>,
         _layout_ctx: LayoutCtx,
@@ -1131,7 +1131,7 @@ impl WidgetDefinition for TextboxWidget {
     fn measure(
         &self,
         node: &Value,
-        _children: &[Value],
+        _children: &[&Value],
         constraints: Constraints,
         ctx: &MeasureCtx<'_>,
         _measure_child: &mut dyn FnMut(&Value, Constraints) -> Option<Size>,

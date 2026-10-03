@@ -864,3 +864,53 @@ Cursor, mode, full-viewport, and incremental step writes synchronize those
 fields alongside the existing slot projection. The post-fix zero rerun and
 relayout counts identify this incomplete projection boundary as the owner; the
 input interpolation and hit-test path was not changed speculatively.
+
+## Full-layout pass probe (eseq-eual)
+
+`tests::full_layout_pass_end_to_end_perf` times the layout engine alone: a cold
+`LayoutEngine` full layout of every visible tile's widget tree, with no reuse,
+reconciliation, Lisp, or rendering in the timed region. It loads the checked-in
+`drift-switch` fixture into the production seven-pane layout, installs the real
+CoreText text measurer through the offscreen Metal capture backend, and clicks
+drift track 3 so the `*fx*` tile holds a full instrument panel (about 1,800
+layout nodes across the tiles). 3 warmups, 15 samples, per-tile medians.
+
+```sh
+cargo nextest run -p sequencer --release --run-ignored only --no-capture \
+  -E 'test(=tests::full_layout_pass_end_to_end_perf)'
+```
+
+`ESEQ_LAYOUT_PROBE_SAMPLES=3000` lengthens the loop for `sample`/Instruments.
+`ESEQ_LAYOUT_PROBE_DUMP=/path` writes every tile's laid-out tree (rects and
+props) so a layout-engine change can be diffed for identical geometry against
+a build without it; normalize `__source-*` props and `<closure:N>` ids first.
+
+### Before / after (2026-10-02, Apple M1 Max, release)
+
+Same widget trees on both sides (identical per-tile node counts):
+
+| Tile | Nodes | Before | After |
+| --- | ---: | ---: | ---: |
+| `*sequencer*` | 832 | 14.27 ms | 3.43 ms |
+| `*mixer*` | 422 | 3.07 ms | 1.01 ms |
+| `*transport*` | 104 | 0.95 ms | 0.32 ms |
+| `*step*` | 58 | 0.65 ms | 0.28 ms |
+| `*samples*` | 34 | 0.34 ms | 0.09 ms |
+
+All seven tiles: 25.1 ms before. Per node, `*fx*` went from about 10.6 to
+3.2 us. The geometry dump matched for every tile whose input tree matched.
+
+What changed: `WidgetDefinition::measure`/`layout_children` take children as
+`&[&Value]` borrowed from the frozen tree instead of cloning every child's
+prop map on each visit; a per-pass measure memo keyed on tree-node address
+(nodes a widget synthesizes are never cached, see `ChildMembership`);
+`widget_definition` is a name index instead of a scan of every definition;
+`resolve_align`/`resolve_justify` and the knob measure read single props
+instead of cloning the prop map; `SizedFontCache` caches glyph advances per
+size instead of two CoreText calls per character.
+
+Not SIMD-shaped: the remaining time is about 22% SipHash on `Value::Map` prop
+lookups (eseq-t06z), allocation for each node's `props` map, and repeated
+measurement. The memo hits only about 11% of measure calls because containers
+measure a child with different constraints in their measure pass (unbounded
+height) than in their layout pass (the assigned rect).

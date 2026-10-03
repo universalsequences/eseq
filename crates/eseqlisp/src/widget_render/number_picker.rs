@@ -882,7 +882,7 @@ impl WidgetDefinition for NumberPickerWidget {
     fn measure(
         &self,
         node: &Value,
-        _children: &[Value],
+        _children: &[&Value],
         _constraints: Constraints,
         ctx: &MeasureCtx<'_>,
         _measure_child: &mut dyn FnMut(&Value, Constraints) -> Option<Size>,

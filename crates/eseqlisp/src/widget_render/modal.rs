@@ -259,7 +259,7 @@ impl WidgetDefinition for ModalWidget {
     fn measure(
         &self,
         _node: &Value,
-        _children: &[Value],
+        _children: &[&Value],
         _constraints: Constraints,
         _ctx: &MeasureCtx<'_>,
         _measure_child: &mut dyn FnMut(&Value, Constraints) -> Option<Size>,
@@ -277,7 +277,7 @@ impl WidgetDefinition for ModalWidget {
         &self,
         node: &Value,
         area: Rect,
-        children: &[Value],
+        children: &[&Value],
         aspect: f32,
         _measure_ctx: &MeasureCtx<'_>,
         _layout_ctx: LayoutCtx,

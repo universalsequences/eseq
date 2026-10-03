@@ -2672,6 +2672,18 @@
     }
 
     #[test]
+    #[ignore = "eseq-eual: release-mode perf probe: cold full layout of every visible tile under the production multi-pane layout (drift-switch fixture, drift track selected) with the real text measurer"]
+    fn full_layout_pass_end_to_end_perf() {
+        std::thread::Builder::new()
+            .name("full-layout-pass-probe".to_string())
+            .stack_size(sequencer::REQUIRED_THREAD_STACK_SIZE)
+            .spawn(|| project_92_ui_performance_probe_impl(Project92UiProbe::FullLayoutPass))
+            .expect("spawn full layout pass probe")
+            .join()
+            .expect("full layout pass probe should pass");
+    }
+
+    #[test]
     #[ignore = "eseq-pgru: release-mode perf probe: same-instrument track switching (two factory:core/drift tracks, and the two factory:drums/synthid-808 tracks as a same-project comparison) on the checked-in drift-switch fixture, under the production multi-pane layout"]
     fn drift_same_instrument_track_switch_end_to_end_perf() {
         std::thread::Builder::new()
@@ -2939,6 +2951,10 @@
         /// fixture, clicks, panel-identity and param-isolation assertions,
         /// 0 warmups + 1 sample, no timing ceilings (debug-safe).
         DriftTrackSwitchSmoke,
+        /// Cold full layout of every visible tile under the production
+        /// multi-pane layout with the real CoreText text measurer, on the
+        /// checked-in drift-switch fixture. Times only `LayoutEngine` passes.
+        FullLayoutPass,
     }
 
     fn project_92_ui_performance_probe_impl(probe: Project92UiProbe) {
@@ -2980,6 +2996,7 @@
                 | Project92UiProbe::TritonAdsrDrag
                 | Project92UiProbe::DriftTrackSwitch
                 | Project92UiProbe::DriftTrackSwitchSmoke
+                | Project92UiProbe::FullLayoutPass
         );
         // The production layout packs seven tiles; 180x70 leaves the smaller
         // step-panel tile too short to keep all 64 step cells on screen, so
@@ -2988,14 +3005,16 @@
         let (vp_cols, vp_rows): (u16, u16) = if full_layout { (220, 110) } else { (180, 70) };
         let drift_switch = matches!(
             probe,
-            Project92UiProbe::DriftTrackSwitch | Project92UiProbe::DriftTrackSwitchSmoke
+            Project92UiProbe::DriftTrackSwitch
+                | Project92UiProbe::DriftTrackSwitchSmoke
+                | Project92UiProbe::FullLayoutPass
         );
         let project_name = match probe {
             Project92UiProbe::LiveKeyboardLatency | Project92UiProbe::PlaybackUi | Project92UiProbe::RackClipSwitch => "live-input-probe",
             Project92UiProbe::PianoholdSelection => "pianohold",
-            Project92UiProbe::DriftTrackSwitch | Project92UiProbe::DriftTrackSwitchSmoke => {
-                "drift-switch"
-            }
+            Project92UiProbe::DriftTrackSwitch
+            | Project92UiProbe::DriftTrackSwitchSmoke
+            | Project92UiProbe::FullLayoutPass => "drift-switch",
             _ => "92",
         };
         let project_fixture = if matches!(probe, Project92UiProbe::LiveKeyboardLatency | Project92UiProbe::PlaybackUi | Project92UiProbe::RackClipSwitch) {
@@ -3252,6 +3271,19 @@
             app.state.scene_count() >= required_scenes,
             "project {project_name} should have at least {required_scenes} scene(s)"
         );
+
+        // The layout-pass probe measures with the real CoreText text
+        // measurer, which only a Metal backend provides.
+        #[cfg(target_os = "macos")]
+        let _layout_probe_backend = (probe == Project92UiProbe::FullLayoutPass).then(|| {
+            let backend =
+                super::editor_setup::create_offscreen_capture_backend(&mut editor, 2500, 1700, 2.0)
+                    .expect("offscreen capture backend");
+            assert!(editor.runtime().has_text_measurer(), "probe needs the real text measurer");
+            editor.set_layout_viewport(vp_cols, vp_rows);
+            editor.update_tile_rects(vp_cols, vp_rows);
+            backend
+        });
 
         if probe == Project92UiProbe::ArrangedStepInteractions {
             // Commit an arrangement at realistic scale through the same edit
@@ -10670,6 +10702,7 @@
                 | Project92UiProbe::GroupTrackSelectionSmoke
                 | Project92UiProbe::DriftTrackSwitch
                 | Project92UiProbe::DriftTrackSwitchSmoke
+                | Project92UiProbe::FullLayoutPass
         ) {
             // Smoke mode is the always-run functional variant: same fixture,
             // clicks, and assertions, minimal iterations, no ceilings.
@@ -11813,6 +11846,73 @@
                     "clicking a track header must keep focus on the sequencer tile"
                 );
                 assert_eq!(current_track.load(Ordering::Relaxed), plain_a);
+            }
+
+            // Layout-pass probe (eseq-eual): the pre-warm click selected a
+            // drift track, so the fx tile holds a full instrument panel. Time
+            // a cold full layout of every visible tile. ESEQ_LAYOUT_PROBE_SAMPLES
+            // lengthens the loop for a profiler; ESEQ_LAYOUT_PROBE_DUMP writes
+            // every tile's laid-out tree (rects + props) so a layout change
+            // can be diffed for geometry against a build without it.
+            if probe == Project92UiProbe::FullLayoutPass {
+                const WARMUPS: usize = 3;
+                let samples_n: usize = std::env::var("ESEQ_LAYOUT_PROBE_SAMPLES")
+                    .ok()
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or(15);
+                if let Ok(path) = std::env::var("ESEQ_LAYOUT_PROBE_DUMP") {
+                    fn dump(node: &eseqlisp::layout::LayoutNode, depth: usize, out: &mut String) {
+                        use std::fmt::Write;
+                        let mut props = node
+                            .props
+                            .iter()
+                            .map(|(k, v)| format!("{k}={}", eseqlisp::vm::format_lisp_value(v)))
+                            .collect::<Vec<_>>();
+                        props.sort();
+                        let r = node.rect;
+                        let _ = writeln!(
+                            out,
+                            "{:indent$}{} [{:.4},{:.4} {:.4}x{:.4}] {}",
+                            "",
+                            node.widget_type,
+                            r.row,
+                            r.col,
+                            r.width,
+                            r.height,
+                            props.join(" "),
+                            indent = depth * 2
+                        );
+                        for child in &node.children {
+                            dump(child, depth + 1, out);
+                        }
+                    }
+                    let mut out = String::new();
+                    for layout in editor.visible_widget_layouts() {
+                        out.push_str("=== tile\n");
+                        dump(&layout, 0, &mut out);
+                    }
+                    std::fs::write(&path, out).expect("write layout dump");
+                }
+                let _ = editor.profile_visible_full_layouts(WARMUPS);
+                let samples = editor.profile_visible_full_layouts(samples_n);
+                assert!(samples.len() >= 5, "production layout should show several tiles");
+                let (cell_w, cell_h) = editor.runtime().layout_cell_dims();
+                eprintln!(
+                    "full-layout probe: {vp_cols}x{vp_rows} cells, cell {cell_w}x{cell_h}px, \
+                     track {plain_a} selected"
+                );
+                let mut total_median = 0.0;
+                for (name, nodes, mut durations) in samples {
+                    durations.sort();
+                    let median = duration_ms(durations[durations.len() / 2]);
+                    let min = duration_ms(durations[0]);
+                    total_median += median;
+                    eprintln!(
+                        "  {name:<24} nodes={nodes:>6} median={median:>8.3}ms min={min:>8.3}ms"
+                    );
+                }
+                eprintln!("  TOTAL median={total_median:.3}ms");
+                return;
             }
 
             // One transition scenario: an untimed setup click establishes the

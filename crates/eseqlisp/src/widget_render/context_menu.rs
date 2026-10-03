@@ -156,7 +156,7 @@ pub(crate) fn scroll_at(node: &LayoutNode, row: f32, col: f32, amount: isize) ->
 }
 
 fn layout_rows(
-    node: &Value, panel: Rect, children: &[Value], sizes: Vec<Size>,
+    node: &Value, panel: Rect, children: &[&Value], sizes: Vec<Size>,
     build_child: &mut dyn FnMut(&Value, Rect, LayoutCtx) -> LayoutNode,
 ) -> Vec<LayoutNode> {
     let available = (panel.height - PANEL_PADDING_ROWS * 2.0).max(ITEM_ROW_HEIGHT);
@@ -399,7 +399,7 @@ impl WidgetDefinition for ContextMenuWidget {
     fn measure(
         &self,
         _node: &Value,
-        _children: &[Value],
+        _children: &[&Value],
         _constraints: Constraints,
         _ctx: &MeasureCtx<'_>,
         _measure_child: &mut dyn FnMut(&Value, Constraints) -> Option<Size>,
@@ -416,7 +416,7 @@ impl WidgetDefinition for ContextMenuWidget {
         &self,
         node: &Value,
         area: Rect,
-        children: &[Value],
+        children: &[&Value],
         aspect: f32,
         _measure_ctx: &MeasureCtx<'_>,
         _layout_ctx: LayoutCtx,
@@ -489,7 +489,7 @@ impl WidgetDefinition for MenuItemWidget {
     fn is_container(&self) -> bool { true }
 
     fn layout_children(
-        &self, node: &Value, area: Rect, children: &[Value], aspect: f32,
+        &self, node: &Value, area: Rect, children: &[&Value], aspect: f32,
         _measure_ctx: &MeasureCtx<'_>, _layout_ctx: LayoutCtx,
         measure_child: &mut dyn FnMut(&Value, Constraints) -> Option<Size>,
         build_child: &mut dyn FnMut(&Value, Rect, LayoutCtx) -> LayoutNode,
@@ -520,7 +520,7 @@ impl WidgetDefinition for MenuItemWidget {
     fn measure(
         &self,
         node: &Value,
-        children: &[Value],
+        children: &[&Value],
         _constraints: Constraints,
         ctx: &MeasureCtx<'_>,
         _measure_child: &mut dyn FnMut(&Value, Constraints) -> Option<Size>,
@@ -694,7 +694,7 @@ impl WidgetDefinition for MenuSeparatorWidget {
     fn measure(
         &self,
         _node: &Value,
-        _children: &[Value],
+        _children: &[&Value],
         _constraints: Constraints,
         _ctx: &MeasureCtx<'_>,
         _measure_child: &mut dyn FnMut(&Value, Constraints) -> Option<Size>,

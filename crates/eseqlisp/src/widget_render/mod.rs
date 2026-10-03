@@ -80,7 +80,7 @@ use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEventKind};
 
 use crate::backend::{Cell, CellStyle, Color};
 use crate::layout::{
-    Constraints, LayoutCtx, LayoutNode, MeasureCtx, Rect, Size, TextMeasurer, get_map,
+    Constraints, LayoutCtx, LayoutNode, MeasureCtx, Rect, Size, TextMeasurer,
     get_widget_type,
 };
 use crate::theme;
@@ -534,12 +534,8 @@ pub enum Justify {
 }
 
 pub fn resolve_align(node: &Value, key: &str, default: Align) -> Align {
-    let map = match get_map(node) {
-        Some(m) => m,
-        None => return default,
-    };
-    match map.get(key) {
-        Some(Value::Keyword(s)) | Some(Value::String(s)) => match s.as_str() {
+    crate::layout::with_prop(node, key, |value| match value {
+        Value::Keyword(s) | Value::String(s) => match s.as_str() {
             "start" => Align::Start,
             "center" => Align::Center,
             "end" => Align::End,
@@ -548,7 +544,8 @@ pub fn resolve_align(node: &Value, key: &str, default: Align) -> Align {
             _ => default,
         },
         _ => default,
-    }
+    })
+    .unwrap_or(default)
 }
 
 /// Computes (start_offset, effective_gap) for main-axis justify distribution.
@@ -578,12 +575,8 @@ pub fn distribute_justify(justify: Justify, remaining: f32, count: usize, gap: f
 }
 
 pub fn resolve_justify(node: &Value, key: &str, default: Justify) -> Justify {
-    let map = match get_map(node) {
-        Some(m) => m,
-        None => return default,
-    };
-    match map.get(key) {
-        Some(Value::Keyword(s)) | Some(Value::String(s)) => match s.as_str() {
+    crate::layout::with_prop(node, key, |value| match value {
+        Value::Keyword(s) | Value::String(s) => match s.as_str() {
             "start" => Justify::Start,
             "center" => Justify::Center,
             "end" => Justify::End,
@@ -593,7 +586,8 @@ pub fn resolve_justify(node: &Value, key: &str, default: Justify) -> Justify {
             _ => default,
         },
         _ => default,
-    }
+    })
+    .unwrap_or(default)
 }
 
 // ── Semantic events (backend-agnostic) ───────────────────────────────────────
@@ -1133,7 +1127,7 @@ pub trait WidgetDefinition: Sync {
     fn measure(
         &self,
         node: &Value,
-        children: &[Value],
+        children: &[&Value],
         constraints: Constraints,
         ctx: &MeasureCtx<'_>,
         measure_child: &mut dyn FnMut(&Value, Constraints) -> Option<Size>,
@@ -1147,7 +1141,7 @@ pub trait WidgetDefinition: Sync {
         &self,
         node: &Value,
         area: Rect,
-        children: &[Value],
+        children: &[&Value],
         aspect: f32,
         measure_ctx: &MeasureCtx<'_>,
         layout_ctx: LayoutCtx,
@@ -1371,11 +1365,25 @@ static WIDGET_DEFINITIONS: &[&dyn WidgetDefinition] = &[
     &automation_lane::AUTOMATION_LANE_WIDGET,
 ];
 
+/// Layout resolves a definition for every node it measures or builds, so
+/// the lookup is indexed by name once instead of scanning every
+/// definition's name list. The first definition to claim a name wins,
+/// matching the declaration order of `WIDGET_DEFINITIONS`.
 pub fn widget_definition(widget_type: &str) -> Option<&'static dyn WidgetDefinition> {
-    WIDGET_DEFINITIONS
-        .iter()
+    static INDEX: std::sync::OnceLock<HashMap<&'static str, &'static dyn WidgetDefinition>> =
+        std::sync::OnceLock::new();
+    INDEX
+        .get_or_init(|| {
+            let mut index = HashMap::new();
+            for definition in WIDGET_DEFINITIONS.iter().copied() {
+                for name in definition.names() {
+                    index.entry(*name).or_insert(definition);
+                }
+            }
+            index
+        })
+        .get(widget_type)
         .copied()
-        .find(|definition| definition.names().contains(&widget_type))
 }
 
 pub fn is_layout_widget_type(widget_type: &str) -> bool {

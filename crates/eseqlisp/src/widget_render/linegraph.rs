@@ -419,7 +419,7 @@ impl WidgetDefinition for LineGraphWidget {
     fn measure(
         &self,
         node: &Value,
-        _children: &[Value],
+        _children: &[&Value],
         constraints: Constraints,
         _ctx: &MeasureCtx<'_>,
         _measure_child: &mut dyn FnMut(&Value, Constraints) -> Option<Size>,

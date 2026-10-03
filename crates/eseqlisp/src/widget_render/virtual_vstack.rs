@@ -116,7 +116,7 @@ fn update_cached_heights(
 }
 
 fn item_heights(
-    children: &[Value],
+    children: &[&Value],
     keys: &[String],
     state: Option<&VirtualVStackState>,
     estimated: f32,
@@ -206,7 +206,7 @@ impl WidgetDefinition for VirtualVStackWidget {
     fn measure(
         &self,
         node: &Value,
-        children: &[Value],
+        children: &[&Value],
         constraints: Constraints,
         _ctx: &MeasureCtx<'_>,
         _measure_child: &mut dyn FnMut(&Value, Constraints) -> Option<Size>,
@@ -240,7 +240,7 @@ impl WidgetDefinition for VirtualVStackWidget {
         &self,
         node: &Value,
         area: Rect,
-        children: &[Value],
+        children: &[&Value],
         aspect: f32,
         _measure_ctx: &MeasureCtx<'_>,
         layout_ctx: LayoutCtx,

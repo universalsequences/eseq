@@ -29,7 +29,7 @@ impl WidgetDefinition for HStackWidget {
     fn measure(
         &self,
         node: &Value,
-        children: &[Value],
+        children: &[&Value],
         constraints: Constraints,
         _ctx: &MeasureCtx<'_>,
         measure_child: &mut dyn FnMut(&Value, Constraints) -> Option<Size>,
@@ -43,6 +43,7 @@ impl WidgetDefinition for HStackWidget {
         }
         let mut child_sizes: Vec<(&Value, Size)> = children
             .iter()
+            .copied()
             .filter_map(|child| measure_child(child, inner).map(|size| (child, size)))
             .collect();
         let width = child_sizes.iter().map(|(_, size)| size.width).sum::<f32>()
@@ -97,7 +98,7 @@ impl WidgetDefinition for HStackWidget {
         &self,
         node: &Value,
         area: Rect,
-        children: &[Value],
+        children: &[&Value],
         aspect: f32,
         measure_ctx: &MeasureCtx<'_>,
         _layout_ctx: LayoutCtx,
@@ -129,6 +130,7 @@ impl WidgetDefinition for HStackWidget {
         // children and gaps are reserved.
         let measured: Vec<(&Value, Size, f32)> = children
             .iter()
+            .copied()
             .filter_map(|child| {
                 let flex = get_prop_num(child, "flex").map(f64_to_f32).unwrap_or(0.0);
                 let size = if prop_is_keyword(node, "width", "fill") && flex > 0.0 {
@@ -302,7 +304,7 @@ mod tests {
                 width: 10.0,
                 height: 1.0,
             },
-            &children,
+            &children.iter().collect::<Vec<_>>(),
             2.0,
             &ctx,
             LayoutCtx::default(),
@@ -405,7 +407,7 @@ mod tests {
             aspect: 1.0,
         };
         let size = HSTACK_WIDGET
-            .measure(&fill_stack(), &children, constraints, &ctx, &mut measure)
+            .measure(&fill_stack(), &children.iter().collect::<Vec<_>>(), constraints, &ctx, &mut measure)
             .unwrap();
         // 30 cells of content at 15 cells wide wraps into two rows, not the
         // single row the child reports when measured at the full 20 cells.
@@ -420,7 +422,7 @@ mod tests {
                 width: 20.0,
                 height: size.height,
             },
-            &children,
+            &children.iter().collect::<Vec<_>>(),
             1.0,
             &ctx,
             LayoutCtx::default(),

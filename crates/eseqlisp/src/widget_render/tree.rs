@@ -949,7 +949,7 @@ impl WidgetDefinition for TreeWidget {
     fn measure(
         &self,
         node: &Value,
-        _children: &[Value],
+        _children: &[&Value],
         constraints: Constraints,
         _ctx: &MeasureCtx<'_>,
         _measure_child: &mut dyn FnMut(&Value, Constraints) -> Option<Size>,
@@ -1861,7 +1861,7 @@ impl WidgetDefinition for TreeRowBgWidget {
     fn measure(
         &self,
         _node: &Value,
-        _children: &[Value],
+        _children: &[&Value],
         _constraints: Constraints,
         _ctx: &MeasureCtx<'_>,
         _measure_child: &mut dyn FnMut(&Value, Constraints) -> Option<Size>,

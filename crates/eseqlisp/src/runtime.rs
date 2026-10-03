@@ -4116,6 +4116,38 @@ impl Runtime {
         relayout_subtree_path_result(existing, tree, child_path, dirty_widget_ids, &engine)
     }
 
+    /// Lay `tree` out from scratch with this runtime's text measurer and cell
+    /// metrics, touching no runtime state. Perf probes use it to time the
+    /// cold full-layout pass in isolation from reuse and reconciliation.
+    pub fn full_layout_for_tree(
+        &self,
+        tree: &Value,
+        viewport: (f32, f32),
+        frame_viewport: Option<crate::layout::Rect>,
+        content_scroll: (f32, f32),
+    ) -> Option<LayoutNode> {
+        let (cols, rows) = viewport;
+        let mut engine = if let Some(measurer) = self.text_measurer.as_deref() {
+            LayoutEngine::with_text_measurer_exact(
+                cols,
+                rows,
+                self.layout_aspect,
+                measurer,
+                self.layout_cell_w,
+                self.layout_cell_h,
+            )
+        } else {
+            LayoutEngine::new_exact(cols, rows, self.layout_aspect)
+        };
+        engine.frame_viewport = frame_viewport;
+        engine.content_scroll = content_scroll;
+        engine.layout(tree)
+    }
+
+    pub fn has_text_measurer(&self) -> bool {
+        self.text_measurer.is_some()
+    }
+
     /// Reconcile a cached layout against a changed widget tree, reusing every
     /// unchanged descendant and rebuilding changed subtrees in place when the
     /// change occupies exactly the space its predecessor did (see

@@ -4661,6 +4661,73 @@ impl Editor {
         }
     }
 
+    /// Time a cold full layout of every visible tile's widget tree, `iterations`
+    /// times each, without touching any cached layout. Returns
+    /// `(buffer name, layout node count, per-iteration durations)` per tile.
+    /// Perf probes use it to measure the layout engine in isolation.
+    pub fn profile_visible_full_layouts(
+        &self,
+        iterations: usize,
+    ) -> Vec<(String, usize, Vec<Duration>)> {
+        fn count_nodes(node: &LayoutNode) -> usize {
+            1 + node.children.iter().map(count_nodes).sum::<usize>()
+        }
+        let (cell_w, cell_h) = self.runtime.layout_cell_dims();
+        let mut samples = Vec::new();
+        for tile_id in self.tile_root.leaf_ids() {
+            let Some(leaf) = self.tile_root.find_leaf(tile_id) else {
+                continue;
+            };
+            let active = tile_id == self.active_tile;
+            let tree = if active {
+                self.runtime.current_widget_tree()
+            } else {
+                self.buffers[leaf.buffer_idx].widget_tree.clone()
+            };
+            let Some(tree) = tree else {
+                continue;
+            };
+            let rect = self
+                .cached_tile_rects
+                .iter()
+                .find(|(tid, _)| *tid == tile_id)
+                .map(|(_, r)| r);
+            let viewport = match (active, rect) {
+                (false, Some(r)) => metal_tile_content_viewport(
+                    &tile_body_rect(*r, !leaf.tabs.is_empty()),
+                    self.tile_effective_show_status(tile_id)
+                        .unwrap_or(leaf.show_status),
+                    leaf.show_border,
+                    leaf.border_width_px,
+                    cell_w,
+                    cell_h,
+                ),
+                _ => (
+                    self.runtime.layout_cols_exact(),
+                    self.runtime.layout_rows_exact(),
+                ),
+            };
+            let frame_viewport = self.tile_layout_frame_viewport(tile_id);
+            let content_scroll = self.tile_layout_content_scroll(tile_id);
+            let mut node_count = 0;
+            let mut durations = Vec::with_capacity(iterations);
+            for _ in 0..iterations {
+                let started = Instant::now();
+                let layout = self.runtime.full_layout_for_tree(
+                    &tree,
+                    viewport,
+                    frame_viewport,
+                    content_scroll,
+                );
+                durations.push(started.elapsed());
+                node_count = layout.as_ref().map(count_nodes).unwrap_or(0);
+                drop(layout);
+            }
+            samples.push((self.buffers[leaf.buffer_idx].name.clone(), node_count, durations));
+        }
+        samples
+    }
+
     pub fn has_visible_inline_runtime_bindings(&self) -> bool {
         self.tile_root.leaf_ids().iter().any(|tile_id| {
             self.tile_root.find_leaf(*tile_id).is_some_and(|leaf|
