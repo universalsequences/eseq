@@ -183,8 +183,55 @@ mod latency_tests {
 
 pub(super) fn payload_from_patch(patch: &Patch) -> GraphPayload {
     let mut payload = scope_payload_from_patch(patch);
-    payload.macros = patch.macros.iter().map(macro_entry).collect();
+    let persisted = persisted_macro_names(patch);
+    payload.macros = patch
+        .macros
+        .iter()
+        .filter(|macro_patch| persisted.contains(macro_patch.name.as_str()))
+        .map(macro_entry)
+        .collect();
     payload
+}
+
+/// Macros worth persisting in the payload: every local macro, plus the library
+/// macros reachable from the root scope, a local macro body, or a declared
+/// import — transitively, since a library body may call another package.
+///
+/// The live model carries the whole defmacro library so the editor can offer
+/// any package, but a library body in the payload is only a fallback for when
+/// that package is gone at load time (`resolve_library_macros` re-projects or
+/// re-adds every package whenever the library is available). Persisting the
+/// unreachable ones bloated each sidecar by the entire library.
+fn persisted_macro_names(patch: &Patch) -> std::collections::HashSet<&str> {
+    use std::collections::{HashMap, HashSet};
+    let by_name = patch
+        .macros
+        .iter()
+        .map(|macro_patch| (macro_patch.name.as_str(), macro_patch))
+        .collect::<HashMap<_, _>>();
+    let mut pending = patch
+        .nodes
+        .iter()
+        .map(|node| node.op.as_str())
+        .chain(patch.imports.iter().map(String::as_str))
+        .chain(
+            patch
+                .macros
+                .iter()
+                .filter(|macro_patch| matches!(macro_patch.origin, MacroOrigin::Local))
+                .map(|macro_patch| macro_patch.name.as_str()),
+        )
+        .collect::<Vec<_>>();
+    let mut persisted = HashSet::new();
+    while let Some(name) = pending.pop() {
+        let Some(macro_patch) = by_name.get(name) else {
+            continue;
+        };
+        if persisted.insert(name) {
+            pending.extend(macro_patch.patch.nodes.iter().map(|node| node.op.as_str()));
+        }
+    }
+    persisted
 }
 
 fn scope_payload_from_patch(patch: &Patch) -> GraphPayload {

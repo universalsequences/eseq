@@ -25252,3 +25252,88 @@ fn two_cables_into_one_history_emit_a_single_summed_write() {
         generated.source
     );
 }
+
+// ── Payload persists only reachable library macros (eseq-y8ku) ──
+
+fn payload_macro_names(patch: &Patch) -> Vec<String> {
+    let json = serde_json::to_value(graph_payload::payload_from_patch(patch)).unwrap();
+    let mut names = json["macros"]
+        .as_array()
+        .map(|macros| {
+            macros
+                .iter()
+                .map(|entry| entry["name"].as_str().unwrap().to_string())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    names.sort();
+    names
+}
+
+#[test]
+fn payload_keeps_imported_library_macro_and_deps_but_drops_unused_ones() {
+    let library = temp_defmacro_library(
+        "payload-trim",
+        &[
+            ("inner", "(defmacro inner (x) (* x 2))"),
+            ("outer", "(use-defmacro inner)\n(defmacro outer (x) (inner (+ x 1)))"),
+            ("unused", "(defmacro unused (x) (* x 3))"),
+        ],
+    );
+    let source = "(use-defmacro outer)\n(defmacro local-gain (x) (* x 0.5))\n(def input (in 1))\n(def shaped (outer input))\n(out shaped 1)";
+    let patch =
+        parse_patch_source_with_library(source, PatcherIntent::Instrument, &library).unwrap();
+    assert!(
+        patch.macros.iter().any(|macro_patch| macro_patch.name == "unused"),
+        "the live model still offers every library package"
+    );
+    assert_eq!(
+        payload_macro_names(&patch),
+        vec!["inner".to_string(), "local-gain".to_string(), "outer".to_string()],
+        "payload keeps local macros plus reachable library macros only"
+    );
+
+    let original = generate::generate_patch_source(&patch, PatcherIntent::Instrument).unwrap();
+    assert!(original.source.contains("(use-defmacro outer)"), "{}", original.source);
+    let json = serde_json::to_string(&graph_payload::payload_from_patch(&patch)).unwrap();
+    let payload = serde_json::from_str(&json).unwrap();
+
+    // Library present at load: every package is re-attached, source unchanged.
+    let mut with_library = graph_payload::patch_from_payload(&payload);
+    lisp::resolve_library_macros(&mut with_library, &library, PatcherIntent::Instrument);
+    lisp::resolve_node_operators(&mut with_library);
+    assert!(with_library.macros.iter().any(|m| m.name == "unused"));
+    assert_eq!(
+        generate::generate_patch_source(&with_library, PatcherIntent::Instrument)
+            .unwrap()
+            .source,
+        original.source
+    );
+
+    // Library missing at load: the trimmed payload's stored bodies suffice.
+    let mut without_library = graph_payload::patch_from_payload(&payload);
+    lisp::resolve_node_operators(&mut without_library);
+    assert!(
+        without_library.nodes.iter().all(|node| node.diagnostic.is_none()),
+        "imported macro call must still resolve from the payload alone"
+    );
+    assert_eq!(
+        generate::generate_patch_source(&without_library, PatcherIntent::Instrument)
+            .unwrap()
+            .source,
+        original.source
+    );
+}
+
+#[test]
+fn payload_without_library_calls_persists_no_library_macros() {
+    let library =
+        temp_defmacro_library("payload-no-imports", &[("unused", "(defmacro unused (x) (* x 3))")]);
+    let patch = parse_patch_source_with_library(
+        "(def input (in 1))\n(out input 1)",
+        PatcherIntent::Instrument,
+        &library,
+    )
+    .unwrap();
+    assert!(payload_macro_names(&patch).is_empty());
+}
