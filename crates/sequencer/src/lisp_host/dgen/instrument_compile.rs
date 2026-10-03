@@ -511,6 +511,12 @@ pub fn render_loaded_instrument_for_test(
         manifest.host_signal_output_for_input(input).map(|output| (input.channel, output))
     }).collect();
     let mut rendered = Vec::with_capacity(options.frames);
+    let audio_channels: Vec<usize> = (0..n_outputs)
+        .filter(|&channel| manifest.amp_output_channel != Some(channel))
+        .filter(|&channel| !manifest.mod_outputs.iter().any(|m| m.channel == channel))
+        .collect();
+    let mut audio_peaks = Vec::with_capacity(options.frames);
+    let mut amp_flags = Vec::with_capacity(options.frames);
     let mut frames_done = 0usize;
 
     while frames_done < options.frames {
@@ -580,8 +586,25 @@ pub fn render_loaded_instrument_for_test(
             );
         }
         rendered.extend_from_slice(&output_buffers[0]);
+        for frame in 0..block {
+            audio_peaks.push(
+                audio_channels
+                    .iter()
+                    .map(|&channel| output_buffers[channel][frame].abs())
+                    .fold(0.0f32, f32::max),
+            );
+        }
+        if let Some(channel) = manifest.amp_output_channel.filter(|&c| c < n_outputs) {
+            amp_flags.extend_from_slice(&output_buffers[channel]);
+        }
         frames_done += block;
     }
+    let last_audible_frame = audio_peaks.iter().rposition(|&peak| peak > 1.0e-5);
+    let amp_off_frame = (!amp_flags.is_empty())
+        .then(|| amp_flags.iter().rposition(|&amp| amp != 0.0).map_or(0, |last| last + 1));
+    let peak_after_amp_off = amp_off_frame.map(|frame| {
+        audio_peaks.get(frame..).unwrap_or(&[]).iter().copied().fold(0.0f32, f32::max)
+    });
 
     let mut peak = 0.0f32;
     let mut sum_sq = 0.0f64;
@@ -635,6 +658,9 @@ pub fn render_loaded_instrument_for_test(
         non_finite_state_slots,
         first_non_finite_state_slot,
         first_samples: rendered.into_iter().take(32).collect(),
+        last_audible_frame,
+        amp_off_frame,
+        peak_after_amp_off,
     })
 }
 

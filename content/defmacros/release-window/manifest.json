@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "name": "release-window",
+  "params": [
+    "gate",
+    "release_ms"
+  ],
+  "outputs": [
+    "open"
+  ],
+  "summary": "1 while the gate is held and for release_ms after it falls, else 0. Envelope stand-in for voice-amp when the amp envelope is not reachable at the top level.",
+  "tags": [
+    "envelope",
+    "utility",
+    "voice"
+  ]
+}

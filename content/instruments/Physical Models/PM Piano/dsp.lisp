@@ -437,5 +437,13 @@
   (def clean (svf signal cutoff 0.707 0))
   (def shaped (mix clean (/ (tanh (* clean (+ 1 (* drive_v 12)))) (+ 1 (* drive_v 3))) drive_v))
   (* shaped output_gain pan_gain))
-(out (piano-output (+ brightened string_side) (sqrt (- 1 pan_value))) 1)
-(out (piano-output (- brightened string_side) (sqrt (+ 1 pan_value))) 2)
+(def voice_left (piano-output (+ brightened string_side) (sqrt (- 1 pan_value))))
+(def voice_right (piano-output (- brightened string_side) (sqrt (+ 1 pan_value))))
+(out voice_left 1)
+(out voice_right 2)
+;; No amp envelope: hold the damper's release, then the strings' own decay
+;; (pedal down, free upper strings) is tracked by the output level.
+(use-defmacro voice-amp)
+(use-defmacro release-window)
+(out (voice-amp (release-window gate (* 1000 (clip (mod release_s) 0.02 20))) voice_left voice_right)
+  3 @name amp @amp true)

@@ -43,6 +43,10 @@ pub struct DGenManifest {
     pub inputs: Vec<DGenInput>,
     pub modulators: Vec<DGenModulator>,
     pub mod_outputs: Vec<DGenModOutput>,
+    /// Output declared `@amp true`: nonzero while a voice is audible. Never
+    /// mixed as audio; lets the engine pool retire a released voice as soon
+    /// as its envelope finishes instead of holding the full release tail.
+    pub amp_output_channel: Option<usize>,
     pub mod_destinations: Vec<DGenModDestination>,
     pub n_inputs: usize,
     pub n_outputs: usize,
@@ -370,6 +374,8 @@ pub fn parse_manifest_with_base(json: &str, base_dir: &Path) -> Result<DGenManif
         })
         .unwrap_or_default();
 
+    let amp_output_channel = v["ampOutput"]["channel"].as_u64().map(|channel| channel as usize);
+
     let mod_destinations = v["modDestinations"]
         .as_array()
         .map(|arr| {
@@ -461,6 +467,7 @@ pub fn parse_manifest_with_base(json: &str, base_dir: &Path) -> Result<DGenManif
         inputs,
         modulators,
         mod_outputs,
+        amp_output_channel,
         mod_destinations,
         n_inputs,
         n_outputs,

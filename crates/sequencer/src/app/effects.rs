@@ -5511,6 +5511,7 @@ mod tests {
                 .collect(),
             modulators: Vec::new(),
             mod_outputs: Vec::new(),
+            amp_output_channel: None,
             mod_destinations: Vec::new(),
             n_inputs: 4,
             n_outputs: 1,

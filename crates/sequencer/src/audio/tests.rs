@@ -2278,6 +2278,66 @@ fn idle_voices_below_a_releasing_high_voice_stop_running() {
 }
 
 #[test]
+fn amp_output_retires_a_released_voice_before_the_release_tail() {
+    // eseq-jx37: an instrument with an `@amp` output stops running a voice
+    // as soon as a block rendered after its release reports the amp off.
+    let engine_id = 1;
+    let voice_slot = |voice: usize| engine_id * crate::audio::MAX_VOICES + voice;
+    for voice in 0..crate::audio::MAX_VOICES {
+        crate::lisp_host::set_dgen_instrument_output_count(voice_slot(voice), 3);
+        crate::lisp_host::set_dgen_instrument_amp_channel(voice_slot(voice), Some(2));
+    }
+    let mut pool = CustomEnginePool::new();
+    for lid in 1..=4 {
+        pool.add_voice(lid);
+    }
+    let allocation = pool.allocate_voice(0, 0, 0.0, true, 6);
+    pool.note_voice_allocated(engine_id, allocation.voice_idx);
+    let voice = allocation.voice_idx;
+
+    // A finished previous note left the voice reading "off"; the new note's
+    // release must not be retired on that stale reading.
+    crate::lisp_host::record_dgen_voice_amp_for_test(engine_id, voice, 0.0);
+    pool.release_voice_by_logical_id(allocation.logical_id, 1_000);
+    pool.shrink_released_voices(engine_id, 1_000, 1_000_000, 0);
+    assert!(crate::lisp_host::dgen_engine_voice_runs(engine_id, voice));
+
+    // Still sounding after the release: keep running.
+    crate::lisp_host::record_dgen_voice_amp_for_test(engine_id, voice, 1.0);
+    pool.shrink_released_voices(engine_id, 2_000, 1_000_000, 0);
+    assert!(crate::lisp_host::dgen_engine_voice_runs(engine_id, voice));
+
+    // The envelope finished: retire long before the tail would have.
+    crate::lisp_host::record_dgen_voice_amp_for_test(engine_id, voice, 0.0);
+    pool.shrink_released_voices(engine_id, 3_000, 1_000_000, 0);
+    assert_eq!(pool.voices[voice].release_started_sample, None);
+    assert!(!crate::lisp_host::dgen_engine_voice_runs(engine_id, voice));
+
+    for voice in 0..crate::audio::MAX_VOICES {
+        crate::lisp_host::set_dgen_instrument_amp_channel(voice_slot(voice), None);
+    }
+    crate::lisp_host::reset_dgen_engine_enabled_voices(engine_id);
+}
+
+#[test]
+fn engine_without_amp_output_holds_the_full_release_tail() {
+    let engine_id = 2;
+    let mut pool = CustomEnginePool::new();
+    for lid in 1..=4 {
+        pool.add_voice(lid);
+    }
+    let allocation = pool.allocate_voice(0, 0, 0.0, true, 6);
+    pool.note_voice_allocated(engine_id, allocation.voice_idx);
+    pool.release_voice_by_logical_id(allocation.logical_id, 1_000);
+
+    pool.shrink_released_voices(engine_id, 1_999, 1_000, 0);
+    assert!(crate::lisp_host::dgen_engine_voice_runs(engine_id, allocation.voice_idx));
+    pool.shrink_released_voices(engine_id, 2_000, 1_000, 0);
+    assert!(!crate::lisp_host::dgen_engine_voice_runs(engine_id, allocation.voice_idx));
+    crate::lisp_host::reset_dgen_engine_enabled_voices(engine_id);
+}
+
+#[test]
 fn voice_mask_never_silences_a_host_raised_voice_the_pool_has_not_synced() {
     // The host raises an idle engine's count (FreePatch idle voice) before
     // the audio thread's pool has seen it; the shrink must not mask it off.

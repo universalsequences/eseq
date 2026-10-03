@@ -616,6 +616,15 @@
         );
     }
 
+    #[test]
+    fn amp_output_channel_is_never_routed_as_audio() {
+        // eseq-jx37: the `@amp` flag is voice bookkeeping, not signal.
+        let mut manifest = test_instrument_manifest();
+        manifest.n_outputs = 3;
+        manifest.amp_output_channel = Some(2);
+        assert_eq!(manifest_audio_output_channels(&manifest), vec![0, 1]);
+    }
+
     fn test_instrument_manifest() -> DGenManifest {
         DGenManifest {
             effect_latency_samples: None,
@@ -637,6 +646,7 @@
                 .collect(),
             modulators: Vec::new(),
             mod_outputs: Vec::new(),
+            amp_output_channel: None,
             mod_destinations: Vec::new(),
             n_inputs: 4,
             n_outputs: 1,

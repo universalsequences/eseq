@@ -294,6 +294,9 @@ fn main() {
                 "mean_abs": report.mean_abs,
                 "nonzero_frames": report.nonzero_frames,
                 "first_nonzero_frame": report.first_nonzero_frame,
+                "last_audible_frame": report.last_audible_frame,
+                "amp_off_frame": report.amp_off_frame,
+                "peak_after_amp_off": report.peak_after_amp_off,
                 "non_finite_samples": report.non_finite_samples,
                 "first_non_finite_frame": report.first_non_finite_frame,
                 "non_finite_state_slots": report.non_finite_state_slots,
@@ -313,6 +316,9 @@ fn main() {
         println!("mean_abs: {:.8}", report.mean_abs);
         println!("nonzero_frames: {}", report.nonzero_frames);
         println!("first_nonzero_frame: {:?}", report.first_nonzero_frame);
+        println!("last_audible_frame: {:?}", report.last_audible_frame);
+        println!("amp_off_frame: {:?}", report.amp_off_frame);
+        println!("peak_after_amp_off: {:?}", report.peak_after_amp_off);
         println!("non_finite_samples: {}", report.non_finite_samples);
         println!(
             "first_non_finite_frame: {:?}",

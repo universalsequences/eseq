@@ -1563,6 +1563,7 @@ mod rack_glyph_tests {
             inputs: Vec::new(),
             modulators: Vec::new(),
             mod_outputs: Vec::new(),
+            amp_output_channel: None,
             mod_destinations: Vec::new(),
             n_inputs: 0,
             n_outputs: 1,

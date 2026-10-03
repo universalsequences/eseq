@@ -127,3 +127,5 @@
 
 (out out_l 1 @name audio)
 (out out_r 2 @name audio-2)
+(use-defmacro voice-amp)
+(out (voice-amp env out_l out_r) 3 @name amp @amp true)

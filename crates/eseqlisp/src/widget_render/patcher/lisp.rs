@@ -628,6 +628,22 @@ fn in_label(items: &[Expression]) -> String {
 }
 
 fn out_label(items: &[Expression]) -> String {
+    // `@amp` (the voice-retirement flag) rides in the label like `@modulator`:
+    // the generator rebuilds the out from the label, so dropping it here
+    // would strip it from the source on the next patch save.
+    if attribute_patch_literal_value(items, "@amp").is_some_and(|value| is_true_literal(&value)) {
+        let mut label = String::from("out");
+        if let Some(channel) = positional_args(items, 1).get(1) {
+            label.push(' ');
+            label.push_str(&format_patch_literal(channel));
+        }
+        if let Some(name) = attribute_value(items, "@name") {
+            label.push_str(" @name ");
+            label.push_str(&name);
+        }
+        label.push_str(" @amp true");
+        return label;
+    }
     let Some(modulator) = attribute_patch_literal_value(items, "@modulator") else {
         return attribute_value(items, "@name").unwrap_or_else(|| "out".to_string());
     };
@@ -639,6 +655,10 @@ fn out_label(items: &[Expression]) -> String {
     label.push_str(" @modulator ");
     label.push_str(&modulator);
     label
+}
+
+pub(super) fn is_true_literal(value: &str) -> bool {
+    matches!(value, "true" | "1")
 }
 
 fn attribute_patch_literal_value(items: &[Expression], attr: &str) -> Option<String> {

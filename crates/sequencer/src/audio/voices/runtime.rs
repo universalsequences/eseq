@@ -18,6 +18,9 @@ pub(in crate::audio) struct CustomVoiceSlot {
     pub(in crate::audio) age: u64,
     pub(in crate::audio) active: bool,
     pub(in crate::audio) release_started_sample: Option<u64>,
+    /// Whether this release has armed the engine's `@amp` reading, so a
+    /// stale "off" from before the note cannot retire the voice early.
+    pub(in crate::audio) amp_armed: bool,
     pub(in crate::audio) note: f32,
     pub(in crate::audio) assigned_track: Option<usize>,
     pub(in crate::audio) assigned_route: Option<usize>,
@@ -64,6 +67,7 @@ impl CustomEnginePool {
                 age: 0,
                 active: false,
                 release_started_sample: None,
+                amp_armed: false,
                 note: 0.0,
                 assigned_track: None,
                 assigned_route: None,
@@ -83,6 +87,7 @@ impl CustomEnginePool {
                 age: 0,
                 active: false,
                 release_started_sample: None,
+                amp_armed: false,
                 note: 0.0,
                 assigned_track: None,
                 assigned_route: None,
@@ -103,6 +108,7 @@ impl CustomEnginePool {
                 age: 0,
                 active: false,
                 release_started_sample: None,
+                amp_armed: false,
                 note: 0.0,
                 assigned_track: None,
                 assigned_route: None,
@@ -334,6 +340,7 @@ impl CustomEnginePool {
             if self.voices[i].logical_id == logical_id {
                 self.voices[i].active = false;
                 self.voices[i].release_started_sample = Some(release_sample);
+                self.voices[i].amp_armed = false;
                 return;
             }
         }
@@ -374,7 +381,20 @@ impl CustomEnginePool {
         for i in 0..self.num_voices {
             let voice = &mut self.voices[i];
             if let Some(release_started_sample) = voice.release_started_sample {
-                if current_sample.saturating_sub(release_started_sample) >= release_tail_samples {
+                let tail_elapsed =
+                    current_sample.saturating_sub(release_started_sample) >= release_tail_samples;
+                // An `@amp` instrument reports when its envelope is done. Arm
+                // first: only a block rendered after this release may end it.
+                let amp_finished = match crate::lisp_host::dgen_voice_amp_finished(engine_id, i) {
+                    Some(_) if !voice.amp_armed => {
+                        crate::lisp_host::arm_dgen_voice_amp(engine_id, i);
+                        voice.amp_armed = true;
+                        false
+                    }
+                    Some(finished) => finished && !voice.active,
+                    None => false,
+                };
+                if tail_elapsed || amp_finished {
                     voice.release_started_sample = None;
                 }
             }

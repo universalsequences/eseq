@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "name": "voice-amp",
+  "params": [
+    "env",
+    "left",
+    "right"
+  ],
+  "outputs": [
+    "amp"
+  ],
+  "summary": "Voice audibility flag for an `(out … @amp true)` output: 1 while the amp envelope is above -80 dB or the output's decaying peak is above -100 dBFS, else 0. Lets the host retire a released voice as soon as it is silent.",
+  "tags": [
+    "envelope",
+    "utility",
+    "voice"
+  ]
+}

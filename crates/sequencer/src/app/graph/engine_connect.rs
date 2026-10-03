@@ -414,6 +414,7 @@ impl GraphController<'_> {
             let slot_id = engine_id * MAX_VOICES + v;
             lisp_host::set_dgen_instrument_fn(slot_id, lib.process_fn);
             lisp_host::set_dgen_instrument_output_count(slot_id, manifest.n_outputs.max(1));
+            lisp_host::set_dgen_instrument_amp_channel(slot_id, manifest.amp_output_channel);
             let init_msg = lisp_host::build_init_message_for_voice(slot_id, manifest, v);
             let init_msg_size = init_msg.len() * std::mem::size_of::<f32>();
             let state_size = lisp_host::dgen_total_state_slots(manifest.total_memory_slots)

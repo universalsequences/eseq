@@ -486,5 +486,12 @@
     (mod osc1_gain_db) (mod osc2_gain_db) (mod noise_gain_db)
     (mod lp_freq) (mod lp_res) (mod hp_freq) (mod volume_db))))
 (def normalization (gswitch (eq (round voice_mode) 1) (+ 1 (* mono_thickness 3)) copies))
-(out (/ (+ (* fade0 weight0 left0) (* fade1 weight1 left1) (* fade2 weight2 left2) (* fade3 weight3 left3)) normalization) 1 @name left)
-(out (/ (+ (* fade0 weight0 right0) (* fade1 weight1 right1) (* fade2 weight2 right2) (* fade3 weight3 right3)) normalization) 2 @name right)
+(def voice_left (/ (+ (* fade0 weight0 left0) (* fade1 weight1 left1) (* fade2 weight2 left2) (* fade3 weight3 left3)) normalization))
+(def voice_right (/ (+ (* fade0 weight0 right0) (* fade1 weight1 right1) (* fade2 weight2 right2) (* fade3 weight3 right3)) normalization))
+(out voice_left 1 @name left)
+(out voice_right 2 @name right)
+; The amp envelope lives inside each unison copy; hold its release, then
+; let the output level say when the voice is silent.
+(use-defmacro voice-amp)
+(use-defmacro release-window)
+(out (voice-amp (release-window gate env1_release) voice_left voice_right) 3 @name amp @amp true)

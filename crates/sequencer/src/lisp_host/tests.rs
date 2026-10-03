@@ -5621,6 +5621,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             inputs: Vec::new(),
             modulators: Vec::new(),
             mod_outputs: Vec::new(),
+            amp_output_channel: None,
             mod_destinations: Vec::new(),
             n_inputs: 0,
             n_outputs: 2,
@@ -5671,6 +5672,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             inputs: Vec::new(),
             modulators: Vec::new(),
             mod_outputs: Vec::new(),
+            amp_output_channel: None,
             mod_destinations: Vec::new(),
             n_inputs: 0,
             n_outputs: 2,
@@ -6103,6 +6105,34 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             };
             assert_eq!(descriptor.params[index].name, canonical);
         }
+    }
+
+    #[test]
+    fn parse_manifest_reads_amp_output() {
+        let json = r#"
+        {
+          "processAbi": "dgen-host-abi-v1",
+          "totalMemorySlots": 128,
+          "inputs": [],
+          "outputs": [
+            { "channel": 0, "name": "left" },
+            { "channel": 1, "name": "right" },
+            { "channel": 2, "name": "amp" }
+          ],
+          "ampOutput": { "channel": 2, "name": "amp" },
+          "tensors": [],
+          "tensorInitData": []
+        }
+        "#;
+        let manifest = parse_manifest(json).expect("manifest parses");
+        assert_eq!(manifest.n_outputs, 3);
+        assert_eq!(manifest.amp_output_channel, Some(2));
+
+        let without = parse_manifest(
+            r#"{"processAbi": "dgen-host-abi-v1", "outputs": [{"channel": 0}]}"#,
+        )
+        .expect("manifest parses");
+        assert_eq!(without.amp_output_channel, None);
     }
 
     #[test]

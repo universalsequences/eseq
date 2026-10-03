@@ -1057,8 +1057,9 @@ impl<'a> ScopeEmitter<'a> {
             let modulator_attr = modulator
                 .map(|slot| format!(" @modulator {slot}"))
                 .unwrap_or_default();
+            let amp_attr = if out_amp_attr(out) { " @amp true" } else { "" };
             lines.push(format!(
-                "(out {value} {channel}{modulator_attr} @name {name})"
+                "(out {value} {channel}{modulator_attr} @name {name}{amp_attr})"
             ));
         }
         Ok(lines)
@@ -1318,6 +1319,11 @@ fn out_modulator_attr(node: &PatchNode) -> Option<usize> {
     label_attribute(&node.label, "@modulator")
         .and_then(|value| value.parse::<f64>().ok())
         .map(|value| value as usize)
+}
+
+fn out_amp_attr(node: &PatchNode) -> bool {
+    label_attribute(&node.label, "@amp")
+        .is_some_and(|value| super::lisp::is_true_literal(&value))
 }
 
 fn label_items(label: &str) -> Option<Vec<Expression>> {

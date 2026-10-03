@@ -1,6 +1,6 @@
 //! Factory patches must keep the editable graph and executable source in sync.
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use eseqlisp::layout::{LayoutNode, Rect};
 use eseqlisp::parser::{ASTParser, Expression, Parser};
@@ -37,6 +37,28 @@ fn piano_macro_operators(source: &str) -> HashMap<String, HashMap<String, usize>
     result
 }
 
+/// The `dsp.lisp` a patch-editor save would write for this patch-authored
+/// source, regenerated from its sidecar graph.
+fn patch_saved_source(path: &Path) -> String {
+    let node = LayoutNode {
+        widget_id: 1,
+        stable_widget_id: None,
+        subtree_root_id: None,
+        parent_subtree_root_id: None,
+        stable_key: None,
+        widget_type: "patcher".into(),
+        rect: Rect { row: 0.0, col: 0.0, width: 160.0, height: 100.0 },
+        props: HashMap::from([
+            ("path".into(), Value::String(path.display().to_string())),
+            ("intent".into(), Value::Keyword("instrument".into())),
+        ]),
+        children: Vec::new(),
+        focusable: true,
+        animation: Default::default(),
+    };
+    emitted_source_buffer_snapshot(&node).unwrap().source
+}
+
 fn check_factory_sidecars(names: &[&str]) {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     eseqlisp::defmacro_library::set_default_library_root(root.join("content/defmacros"));
@@ -47,23 +69,7 @@ fn check_factory_sidecars(names: &[&str]) {
         let path = factory.join(name).join("dsp.lisp");
         let source = std::fs::read_to_string(&path).unwrap();
         assert!(source_opens_in_patch_editor(&path, &source, PatcherIntent::Instrument));
-        let node = LayoutNode {
-            widget_id: 1,
-            stable_widget_id: None,
-            subtree_root_id: None,
-            parent_subtree_root_id: None,
-            stable_key: None,
-            widget_type: "patcher".into(),
-            rect: Rect { row: 0.0, col: 0.0, width: 160.0, height: 100.0 },
-            props: HashMap::from([
-                ("path".into(), Value::String(path.display().to_string())),
-                ("intent".into(), Value::Keyword("instrument".into())),
-            ]),
-            children: Vec::new(),
-            focusable: true,
-            animation: Default::default(),
-        };
-        let emitted = emitted_source_buffer_snapshot(&node).unwrap().source;
+        let emitted = patch_saved_source(&path);
         // Projecting both executable forms normalizes generated node names and
         // ordering. A stale sidecar would silently undo controls on patch save.
         let canonical = emit_patch_writeback_source(&source, PatcherIntent::Instrument).unwrap();
@@ -139,4 +145,20 @@ fn factory_gamelan_sidecars_preserve_executable_controls() {
 #[test]
 fn factory_cymbal_sidecars_preserve_executable_controls() {
     check_factory_sidecars(&["PM Crash", "PM Ride/versions/1", "PM Hi-Hat"]);
+}
+
+#[test]
+fn factory_amp_outputs_survive_patch_save() {
+    // eseq-jx37: a patch save regenerates dsp.lisp from the sidecar graph; a
+    // stale graph would silently drop the `@amp` voice-retirement output.
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    eseqlisp::defmacro_library::set_default_library_root(root.join("content/defmacros"));
+    for name in ["Synths/Digi Wave", "Synths/Poseidon", "Synths/Revsynt", "Physical Models/PM Piano"] {
+        let path = root.join("content/instruments").join(name).join("dsp.lisp");
+        let source = std::fs::read_to_string(&path).unwrap();
+        assert!(source.contains("@amp true"), "{name} declares an @amp output");
+        assert!(source_opens_in_patch_editor(&path, &source, PatcherIntent::Instrument), "{name}");
+        let saved = patch_saved_source(&path);
+        assert!(saved.contains("@amp true"), "{name} keeps its @amp output through a patch save:\n{}", saved.lines().filter(|l| l.contains("(out ")).collect::<Vec<_>>().join("\n"));
+    }
 }

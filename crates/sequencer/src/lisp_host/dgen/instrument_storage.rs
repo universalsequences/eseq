@@ -15,7 +15,7 @@ counts, process-call stats) that the audio thread reads through
 use super::super::*;
 use crate::sequencer::MAX_INSTRUMENT_ENGINES;
 use crate::audio::MAX_VOICES;
-use std::sync::atomic::AtomicU32;
+use std::sync::atomic::{AtomicU32, AtomicU8};
 
 // Voice masks hold one bit per engine voice.
 const _: () = assert!(MAX_VOICES <= u32::BITS as usize);
@@ -1756,6 +1756,21 @@ pub(in crate::lisp_host) static DGEN_INSTRUMENT_OUTPUT_COUNTS: [AtomicUsize; INS
     const INIT: AtomicUsize = AtomicUsize::new(1);
     [INIT; INSTRUMENT_REGISTRY_SIZE]
 };
+/// Output channel an instrument declared `@amp true`, or `NO_AMP_CHANNEL`.
+pub(in crate::lisp_host) static DGEN_INSTRUMENT_AMP_CHANNELS: [AtomicUsize; INSTRUMENT_REGISTRY_SIZE] = {
+    const INIT: AtomicUsize = AtomicUsize::new(NO_AMP_CHANNEL);
+    [INIT; INSTRUMENT_REGISTRY_SIZE]
+};
+const NO_AMP_CHANNEL: usize = usize::MAX;
+/// Per-voice `@amp` reading. `AMP_PENDING` until a render after the engine
+/// pool armed it, then the last sample of the amp channel: on or off.
+pub(in crate::lisp_host) static DGEN_VOICE_AMP_STATES: [AtomicU8; INSTRUMENT_REGISTRY_SIZE] = {
+    const INIT: AtomicU8 = AtomicU8::new(AMP_PENDING);
+    [INIT; INSTRUMENT_REGISTRY_SIZE]
+};
+const AMP_OFF: u8 = 0;
+const AMP_ON: u8 = 1;
+const AMP_PENDING: u8 = 2;
 pub(in crate::lisp_host) static DGEN_ENGINE_ENABLED_VOICES: [AtomicUsize; MAX_INSTRUMENT_ENGINES] = {
     const INIT: AtomicUsize = AtomicUsize::new(1);
     [INIT; MAX_INSTRUMENT_ENGINES]
@@ -1792,6 +1807,35 @@ pub fn set_dgen_instrument_fn(slot_id: usize, f: DGenProcessFn) {
 pub fn set_dgen_instrument_output_count(slot_id: usize, count: usize) {
     DGEN_INSTRUMENT_OUTPUT_COUNTS[slot_id % INSTRUMENT_REGISTRY_SIZE]
         .store(count.max(1), Ordering::Release);
+}
+
+pub fn set_dgen_instrument_amp_channel(slot_id: usize, channel: Option<usize>) {
+    let slot_id = slot_id % INSTRUMENT_REGISTRY_SIZE;
+    DGEN_INSTRUMENT_AMP_CHANNELS[slot_id]
+        .store(channel.unwrap_or(NO_AMP_CHANNEL), Ordering::Release);
+    DGEN_VOICE_AMP_STATES[slot_id].store(AMP_PENDING, Ordering::Release);
+}
+
+/// Forget any amp reading taken before now, so only a render that follows
+/// this call can report the voice finished. Audio thread only.
+pub fn arm_dgen_voice_amp(engine_id: usize, voice_idx: usize) {
+    if engine_id < MAX_INSTRUMENT_ENGINES && voice_idx < MAX_VOICES {
+        DGEN_VOICE_AMP_STATES[engine_id * MAX_VOICES + voice_idx]
+            .store(AMP_PENDING, Ordering::Release);
+    }
+}
+
+/// `Some(finished)` for an engine whose instrument declares an `@amp`
+/// output; `None` means the host cannot tell and must hold the release tail.
+pub fn dgen_voice_amp_finished(engine_id: usize, voice_idx: usize) -> Option<bool> {
+    if engine_id >= MAX_INSTRUMENT_ENGINES || voice_idx >= MAX_VOICES {
+        return None;
+    }
+    let slot_id = engine_id * MAX_VOICES + voice_idx;
+    if DGEN_INSTRUMENT_AMP_CHANNELS[slot_id].load(Ordering::Acquire) == NO_AMP_CHANNEL {
+        return None;
+    }
+    Some(DGEN_VOICE_AMP_STATES[slot_id].load(Ordering::Acquire) == AMP_OFF)
 }
 
 pub fn set_dgen_engine_enabled_voices(engine_id: usize, count: usize) {
@@ -1947,6 +1991,7 @@ unsafe extern "C" fn dgenlisp_instrument_wrapper_process(
             &context,
             dgen_host_services_v1(),
         );
+        record_dgen_voice_amp(slot_id % INSTRUMENT_REGISTRY_SIZE, out, nframes);
     } else {
         let nf = nframes as usize;
         let output_count = DGEN_INSTRUMENT_OUTPUT_COUNTS[slot_id % INSTRUMENT_REGISTRY_SIZE]
@@ -1963,6 +2008,36 @@ unsafe extern "C" fn dgenlisp_instrument_wrapper_process(
             }
         }
     }
+}
+
+/// Latch the voice's `@amp` output at the end of the block it just rendered.
+#[inline]
+unsafe fn record_dgen_voice_amp(slot_id: usize, out: *const *mut f32, nframes: c_int) {
+    let channel = DGEN_INSTRUMENT_AMP_CHANNELS[slot_id].load(Ordering::Relaxed);
+    if channel == NO_AMP_CHANNEL || nframes <= 0 {
+        return;
+    }
+    let output_count = DGEN_INSTRUMENT_OUTPUT_COUNTS[slot_id].load(Ordering::Relaxed);
+    if channel >= output_count {
+        return;
+    }
+    let amp = *out.add(channel);
+    if amp.is_null() {
+        return;
+    }
+    let state = if *amp.add(nframes as usize - 1) != 0.0 { AMP_ON } else { AMP_OFF };
+    DGEN_VOICE_AMP_STATES[slot_id].store(state, Ordering::Release);
+}
+
+/// Render stand-in: what the wrapper latches after a voice block whose amp
+/// channel ends on `last_amp`.
+#[cfg(test)]
+pub fn record_dgen_voice_amp_for_test(engine_id: usize, voice_idx: usize, last_amp: f32) {
+    let slot_id = engine_id * MAX_VOICES + voice_idx;
+    let output_count = DGEN_INSTRUMENT_OUTPUT_COUNTS[slot_id].load(Ordering::Relaxed);
+    let mut buffers = vec![[0.0f32, last_amp]; output_count];
+    let pointers: Vec<*mut f32> = buffers.iter_mut().map(|buffer| buffer.as_mut_ptr()).collect();
+    unsafe { record_dgen_voice_amp(slot_id, pointers.as_ptr(), 2) };
 }
 
 pub fn dgenlisp_instrument_vtable() -> NodeVTable {

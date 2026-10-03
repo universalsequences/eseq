@@ -330,6 +330,7 @@ fn manifest_audio_output_channels(manifest: &DGenManifest) -> Vec<usize> {
     let mod_channels = manifest_mod_output_channels(manifest);
     (0..output_count)
         .filter(|channel| !mod_channels.contains(channel))
+        .filter(|&channel| manifest.amp_output_channel != Some(channel))
         .collect()
 }
 

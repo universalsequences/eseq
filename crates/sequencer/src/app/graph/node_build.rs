@@ -836,6 +836,7 @@ impl GraphController<'_> {
             let slot_id = engine_id * MAX_VOICES + v;
             lisp_host::set_dgen_instrument_fn(slot_id, lib.process_fn);
             lisp_host::set_dgen_instrument_output_count(slot_id, manifest.n_outputs.max(1));
+            lisp_host::set_dgen_instrument_amp_channel(slot_id, manifest.amp_output_channel);
         }
         transaction.commit();
 

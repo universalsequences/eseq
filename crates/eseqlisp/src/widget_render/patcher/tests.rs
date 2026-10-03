@@ -12040,6 +12040,27 @@ fn display_label_shows_out_modulator_metadata() {
 }
 
 #[test]
+fn generated_source_keeps_out_amp_flag() {
+    // eseq-jx37: the host retires released voices from the `@amp` output, so
+    // a patch save must not drop it (or rename the out).
+    let patch = parse(
+        r#"
+            (def signal (in 1 @name pitch))
+            (out signal 1 @name left)
+            (out (gt signal 0) 3 @name amp @amp true)
+            "#,
+    );
+    let generated = generate::generate_patch_source(&patch, PatcherIntent::Instrument).unwrap();
+    assert!(
+        generated.source.contains("3 @name amp @amp true)"),
+        "{}",
+        generated.source
+    );
+    assert!(generated.source.contains("1 @name left)"), "{}", generated.source);
+    assert_eq!(generated.source.matches("@amp").count(), 1, "{}", generated.source);
+}
+
+#[test]
 fn writeback_out_text_edit_preserves_and_updates_modulator_metadata() {
     let source = r#"
         (def signal (in 1 @name pitch))

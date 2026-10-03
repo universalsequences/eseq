@@ -397,3 +397,5 @@
 
 (out left 1 @name left)
 (out right 2 @name right)
+(use-defmacro voice-amp)
+(out (voice-amp aeg left right) 3 @name amp @amp true)

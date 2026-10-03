@@ -473,5 +473,17 @@
 ; Equal-power pan and explicit master gain. Normalize the sum by copy count;
 ; continuous controls are smoothed, with no hidden limiter on the result.
 (def gain (heat-control (/ (heat-db (+ (mod volume_db) (* expression pressure_amp_db))) copies)))
-(out (* gain (+ (* fade0 left0) (* fade1 left1) (* fade2 left2) (* fade3 left3))) 1)
-(out (* gain (+ (* fade0 right0) (* fade1 right1) (* fade2 right2) (* fade3 right3))) 2)
+(def voice_left (* gain (+ (* fade0 left0) (* fade1 left1) (* fade2 left2) (* fade3 left3))))
+(def voice_right (* gain (+ (* fade0 right0) (* fade1 right1) (* fade2 right2) (* fade3 right3))))
+(out voice_left 1)
+(out voice_right 2)
+; Amp contours live inside each copy and Free mode ignores note-off, so hold
+; a full attack+decay+release past the last (most delayed) copy's note-off;
+; a free-running loop contour never reports the voice finished.
+(use-defmacro voice-amp)
+(use-defmacro release-window)
+(def amp_release_window_ms (+ (max amp1_env_attack_ms amp2_env_attack_ms)
+  (max amp1_env_decay_ms amp2_env_decay_ms) (max amp1_env_release_ms amp2_env_release_ms)
+  (* 3 unison_delay_ms)))
+(out (voice-amp (max (release-window gate amp_release_window_ms) contour_never_idle)
+  voice_left voice_right) 3 @name amp @amp true)

@@ -54,6 +54,15 @@ pub struct InstrumentRenderReport {
     pub non_finite_state_slots: usize,
     pub first_non_finite_state_slot: Option<usize>,
     pub first_samples: Vec<f32>,
+    /// Last frame where any audio output (not `@amp`/modulation) exceeds
+    /// -100 dBFS.
+    pub last_audible_frame: Option<usize>,
+    /// For an `@amp` instrument: the frame after the last nonzero amp flag
+    /// sample, i.e. where the host may retire the voice.
+    pub amp_off_frame: Option<usize>,
+    /// Loudest audio sample at or after `amp_off_frame`: what retiring the
+    /// voice there would cut. Should sit at the -100 dB floor.
+    pub peak_after_amp_off: Option<f32>,
 }
 
 #[derive(Clone, Debug)]
