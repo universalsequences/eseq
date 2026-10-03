@@ -6136,6 +6136,19 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     }
 
     #[test]
+    fn parse_manifest_sizes_outputs_by_highest_channel() {
+        // Mono audio on channel 1 with an `@amp` flag on channel 3: the
+        // generated code writes output index 2, so three buffers are needed.
+        let manifest = parse_manifest(
+            r#"{"processAbi": "dgen-host-abi-v1",
+                "outputs": [{"channel": 0, "name": "audio"}, {"channel": 2, "name": "amp"}],
+                "ampOutput": {"channel": 2, "name": "amp"}}"#,
+        )
+        .expect("manifest parses");
+        assert_eq!(manifest.n_outputs, 3);
+    }
+
+    #[test]
     fn parse_manifest_reads_modulation_outputs() {
         let json = r#"
         {

@@ -408,7 +408,21 @@ pub fn parse_manifest_with_base(json: &str, base_dir: &Path) -> Result<DGenManif
         .unwrap_or_default();
 
     let n_inputs = inputs.iter().map(|inp| inp.channel + 1).max().unwrap_or(1);
-    let n_outputs = v["outputs"].as_array().map(|a| a.len()).unwrap_or(0).max(1);
+    // Generated code writes each output to its declared channel index, so a
+    // source that skips a channel (mono audio on 1, `@amp` on 3) needs buffers
+    // up to the highest channel, not one per `out` form.
+    let n_outputs = v["outputs"]
+        .as_array()
+        .map(|outputs| {
+            outputs
+                .iter()
+                .enumerate()
+                .map(|(idx, output)| output["channel"].as_u64().map_or(idx, |c| c as usize) + 1)
+                .max()
+                .unwrap_or(0)
+        })
+        .unwrap_or(0)
+        .max(1);
 
     let tensor_init_data = v["tensorInitData"]
         .as_array()
