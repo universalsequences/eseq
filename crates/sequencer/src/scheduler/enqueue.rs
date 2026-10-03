@@ -24,6 +24,7 @@ pub(super) fn enqueue_resolved_trigger(
     instrument_tensor_params: ScheduledInstrumentTensorParams,
     mut sampler_params: ScheduledSamplerParams,
     rack_macro_values: [Option<f32>; crate::sequencer::RACK_MACRO_COUNT],
+    rack_slot_params: ScheduledRackSlotParams,
 ) -> bool {
     let (resolved, chord) = apply_fit_to_scale_to_trigger(snapshot, track_idx, resolved, chord);
     // What the track sounds, relative to its root: harmony followers read it
@@ -96,6 +97,7 @@ pub(super) fn enqueue_resolved_trigger(
                             sampler_params,
                             instrument_fingerprint,
                             rack_macro_values,
+                            rack_slot_params: rack_slot_params.clone(),
                         },
                     })
                     .is_err()
@@ -142,6 +144,7 @@ pub(super) fn enqueue_resolved_trigger(
                 sampler_params,
                 instrument_fingerprint,
                 rack_macro_values,
+                rack_slot_params,
             },
         })
         .is_ok();
@@ -191,6 +194,7 @@ pub(super) fn step_event_from_resolved(
         instrument_tensor_params,
         sampler_params: resolve_sampler_params(snapshot, track_idx, step_idx),
         rack_macro_values: [None; crate::sequencer::RACK_MACRO_COUNT],
+        rack_slot_params: Default::default(),
         source: EventSource::Step {
             track: track_idx,
             step: step_idx,
@@ -230,6 +234,7 @@ pub(super) fn enqueue_step_event(
             event.instrument_tensor_params,
             event.sampler_params,
             event.rack_macro_values,
+            event.rack_slot_params,
         ),
         EventSource::Network { seed, neuron, .. } => {
             normalize_network_event_destination(snapshot, neuron, seed, &mut event);
@@ -260,6 +265,7 @@ pub(super) fn enqueue_step_event(
                 event.sampler_params,
                 instrument_fingerprint,
                 event.rack_macro_values,
+                event.rack_slot_params,
             )
         }
     }
@@ -664,6 +670,7 @@ pub(super) fn enqueue_emitted_network_event_with_midi_fx(
         instrument_tensor_params: ScheduledInstrumentTensorParams::new(),
         sampler_params: ScheduledSamplerParams::default(),
         rack_macro_values: [None; crate::sequencer::RACK_MACRO_COUNT],
+        rack_slot_params: Default::default(),
         source: EventSource::Network {
             seed,
             neuron: source.event_source_index(),
@@ -742,28 +749,62 @@ pub(super) fn enqueue_due_process_emissions(
         let straight_sample_time = chunk_start_sample.saturating_add(
             ((item.beat - chunk_start_beats).max(0.0) * samples_per_quarter).round() as u64,
         );
+        let source = EmittedNetworkEventSource::Process {
+            runtime_id: item.process_runtime_id,
+        };
         // Process emissions aimed at a rack member play through its groove
         // (rack groove spec §Sites 4), keyed on the emission's straight beat,
-        // so step processes land in the same pocket as the step trigs.
+        // so step processes land in the same pocket as the step trigs. A
+        // track-less emission sounds on the source's default track, so it
+        // takes that track's groove too.
         let target_track = match &item.event {
-            crate::process::ProcessScheduledEvent::Emission(event) => event.track,
+            crate::process::ProcessScheduledEvent::Emission(event) => {
+                source.resolve_track(event.track)
+            }
             crate::process::ProcessScheduledEvent::Step(spawned) => Some(spawned.event.track),
         };
-        let Some(sample_time) = grooved_emission_sample_time(
-            snapshot,
-            target_track,
-            straight_sample_time,
-            item.beat,
-            samples_per_quarter,
-            groove_floor,
-        ) else {
-            // An early hit that already sounded before a mid-play resync.
-            continue;
+        // A grooved event whose straight beat precedes the chunk (a step
+        // recovered late after a mid-play resync spawns its ratchets/emits at
+        // its own pre-chunk beat) keeps its true straight sample when the
+        // groove still lands it at or after the audio frontier; pinning it to
+        // the chunk start would play it late by the recovery lag. Anything
+        // else keeps the chunk-start clamp.
+        let recovered_sample_time = (item.beat < chunk_start_beats)
+            .then(|| target_track.and_then(|track| snapshot.track_groove(track)))
+            .flatten()
+            .and_then(|groove| {
+                let signed_straight = (chunk_start_sample as i64).saturating_add(
+                    ((item.beat - chunk_start_beats) * samples_per_quarter).round() as i64,
+                );
+                let straight = u64::try_from(signed_straight).ok()?;
+                crate::groove::grooved_sample_time(
+                    groove,
+                    item.beat,
+                    straight,
+                    samples_per_quarter,
+                    groove_floor,
+                )
+                .filter(|moved| *moved >= groove_floor.not_before)
+            });
+        let sample_time = match recovered_sample_time {
+            Some(sample_time) => sample_time,
+            None => match grooved_emission_sample_time(
+                snapshot,
+                target_track,
+                straight_sample_time,
+                item.beat,
+                samples_per_quarter,
+                groove_floor,
+            ) {
+                Some(sample_time) => sample_time,
+                // An early hit that already sounded before a mid-play resync.
+                None => continue,
+            },
         };
         match item.event {
             crate::process::ProcessScheduledEvent::Emission(mut event) => {
                 event.resolved.velocity =
-                    grooved_velocity(snapshot, event.track, event.resolved.velocity, item.beat);
+                    grooved_velocity(snapshot, target_track, event.resolved.velocity, item.beat);
                 if debug_routing_enabled() {
                     eprintln!(
                         "[routing] process-emission process={} track={:?} sample={} beat={:.6} transpose={} vel={}",
@@ -775,9 +816,6 @@ pub(super) fn enqueue_due_process_emissions(
                         event.resolved.velocity
                     );
                 }
-                let source = EmittedNetworkEventSource::Process {
-                    runtime_id: item.process_runtime_id,
-                };
                 let landing = landing.and_then(|landing| {
                     source
                         .resolve_track(event.track)

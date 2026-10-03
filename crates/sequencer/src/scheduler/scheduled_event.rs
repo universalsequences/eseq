@@ -107,6 +107,42 @@ pub struct ScheduledInstrumentTensorParam {
 pub type ScheduledInstrumentTensorParams =
     ArrayVec<ScheduledInstrumentTensorParam, MAX_SLOT_TENSOR_PARAMS>;
 
+/// What a per-hit rack-slot value addresses inside one slot.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ScheduledRackSlotTarget {
+    /// The slot's own mixer/voice param (`rack<N>:gain`, …).
+    Slot(crate::sequencer::RackSlotParam),
+    /// An index into the slot instrument's params (`rack<N>:instrument:…`).
+    Instrument { param_idx: usize },
+}
+
+/// One `seq-emit :params` value for a rack slot, resolved by name at landing
+/// (`scheduler::params::apply_named_params`). It beats the slot's stored
+/// p-lock and any macro mapping for the hit it rides on.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ScheduledRackSlotParam {
+    pub slot: usize,
+    pub target: ScheduledRackSlotTarget,
+    pub value: f32,
+}
+
+/// Per-hit rack-slot values; extra entries past the cap are dropped.
+pub const MAX_SCHEDULED_RACK_SLOT_PARAMS: usize = 32;
+pub type ScheduledRackSlotParams = ArrayVec<ScheduledRackSlotParam, MAX_SCHEDULED_RACK_SLOT_PARAMS>;
+
+/// Insert or replace the value for `param`'s (slot, target).
+pub fn upsert_rack_slot_param(params: &mut ScheduledRackSlotParams, param: ScheduledRackSlotParam) {
+    match params
+        .iter_mut()
+        .find(|existing| existing.slot == param.slot && existing.target == param.target)
+    {
+        Some(existing) => existing.value = param.value,
+        None => {
+            let _ = params.try_push(param);
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ScheduledSamplerParams {
     pub attack_ms: f32,
@@ -187,6 +223,7 @@ pub struct StepEvent {
     pub instrument_tensor_params: ScheduledInstrumentTensorParams,
     pub sampler_params: ScheduledSamplerParams,
     pub rack_macro_values: [Option<f32>; crate::sequencer::RACK_MACRO_COUNT],
+    pub rack_slot_params: ScheduledRackSlotParams,
     pub source: EventSource,
 }
 
@@ -217,10 +254,9 @@ impl ScheduledVoicePolicy {
             voice_priority: track.params.voice_priority,
             base_note_offset: track.instrument_base_note_offset,
         };
-        if let Some(config) = track.instrument_slot.instrument_voice_config(params) {
-            policy.polyphonic = config.polyphonic;
-            policy.max_polyphony = config.max_polyphony;
-            policy.mono_trigger = config.mono_trigger;
+        if track.instrument_slot.instrument_forces_mono(params) {
+            policy.polyphonic = false;
+            policy.max_polyphony = 1;
         }
         policy
     }
@@ -250,6 +286,7 @@ pub enum ScheduledEventKind {
         sampler_params: ScheduledSamplerParams,
         instrument_fingerprint: u64,
         rack_macro_values: [Option<f32>; crate::sequencer::RACK_MACRO_COUNT],
+        rack_slot_params: ScheduledRackSlotParams,
     },
     NetworkTrigger {
         voice_policy: ScheduledVoicePolicy,
@@ -265,6 +302,7 @@ pub enum ScheduledEventKind {
         sampler_params: ScheduledSamplerParams,
         instrument_fingerprint: u64,
         rack_macro_values: [Option<f32>; crate::sequencer::RACK_MACRO_COUNT],
+        rack_slot_params: ScheduledRackSlotParams,
     },
     InstrumentParams {
         track: usize,
@@ -619,6 +657,7 @@ mod tests {
                     sampler_params: default_sampler_params(),
                     instrument_fingerprint: 11,
                     rack_macro_values: [None; crate::sequencer::RACK_MACRO_COUNT],
+                    rack_slot_params: Default::default(),
                 },
             })
             .unwrap();
@@ -658,6 +697,7 @@ mod tests {
                     sampler_params: default_sampler_params(),
                     instrument_fingerprint: 0,
                     rack_macro_values: [None; crate::sequencer::RACK_MACRO_COUNT],
+                    rack_slot_params: Default::default(),
                 },
             })
             .unwrap();
@@ -706,6 +746,7 @@ mod tests {
                     sampler_params: default_sampler_params(),
                     instrument_fingerprint: 11,
                     rack_macro_values: [None; crate::sequencer::RACK_MACRO_COUNT],
+                    rack_slot_params: Default::default(),
                 },
             })
         );
@@ -746,6 +787,7 @@ mod tests {
                     sampler_params: default_sampler_params(),
                     instrument_fingerprint: 0,
                     rack_macro_values: [None; crate::sequencer::RACK_MACRO_COUNT],
+                    rack_slot_params: Default::default(),
                 },
             })
         );
@@ -791,6 +833,7 @@ mod tests {
                     sampler_params: default_sampler_params(),
                     instrument_fingerprint: 0,
                     rack_macro_values: [None; crate::sequencer::RACK_MACRO_COUNT],
+                    rack_slot_params: Default::default(),
                 },
             })
             .unwrap();
@@ -830,6 +873,7 @@ mod tests {
                 sampler_params: default_sampler_params(),
                 instrument_fingerprint: 0,
                 rack_macro_values: [None; crate::sequencer::RACK_MACRO_COUNT],
+                rack_slot_params: Default::default(),
             },
         });
         assert!(overflow.is_err());

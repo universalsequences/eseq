@@ -1113,6 +1113,7 @@ mod tests {
     fn test_event(track: usize) -> StepEvent {
         StepEvent {
             rack_macro_values: [None; crate::sequencer::RACK_MACRO_COUNT],
+            rack_slot_params: Default::default(),
             track,
             samples_per_step: 12_000.0,
             resolved: ResolvedStep {

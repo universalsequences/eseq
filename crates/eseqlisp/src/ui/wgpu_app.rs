@@ -41,7 +41,7 @@ use crate::backend::{
     AUTOCOMPLETE_PANEL_CORNER_RADIUS_PX, AUTOCOMPLETE_ROW_CORNER_RADIUS_PX,
     AUTOCOMPLETE_TEXT_CELL_SCALE, Backend, BackendError, BackendEvent, Color, RenderFrame,
     TOAST_BORDER_WIDTH_PX, TOAST_CORNER_RADIUS_PX, TiledRenderFrame, completion_panel_columns,
-    toast_loading_shapes, toast_placement, TOAST_CLOSE_GLYPH,
+    toast_colors, toast_loading_shapes, toast_placement, toast_shadow_shapes, TOAST_CLOSE_GLYPH,
 };
 use crate::layout::TextMeasurer;
 use crate::live_audio;
@@ -2539,19 +2539,23 @@ impl WgpuAppBackend {
                 (vp_h / cell_h).floor().max(1.0) as usize,
             )
         {
-            let bg = theme::TOAST_BG();
-            let accent = match toast.kind {
-                crate::host::ToastKind::Success => theme::TOAST_SUCCESS(),
-                crate::host::ToastKind::Error => theme::TOAST_ERROR(),
-                crate::host::ToastKind::Loading => theme::ACCENT(),
-            };
-            let border = match toast.kind {
-                crate::host::ToastKind::Success | crate::host::ToastKind::Loading => {
-                    theme::TOAST_BORDER()
-                }
-                crate::host::ToastKind::Error => accent,
-            };
+            let (bg, border, accent) = toast_colors(toast.kind);
             let mut rounded = Vec::new();
+            for shape in toast_shadow_shapes(&place, cell_w, cell_h, ui_px_scale) {
+                gpu_scene::push_rounded_instance_cells(
+                    &mut rounded,
+                    shape.x / cell_w,
+                    shape.y / cell_h,
+                    shape.w / cell_w,
+                    shape.h / cell_h,
+                    shape.color,
+                    shape.radius_px,
+                    cell_w,
+                    cell_h,
+                    vp_w,
+                    vp_h,
+                );
+            }
             gpu_scene::push_rounded_instance_cells(
                 &mut rounded,
                 place.panel_col,

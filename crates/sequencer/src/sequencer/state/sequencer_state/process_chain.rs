@@ -1752,6 +1752,25 @@ impl SequencerState {
         }
         self.publish_scheduler_snapshot();
     }
+    pub fn engine_instrument_descriptors(&self) -> Arc<Vec<EffectDescriptor>> {
+        Arc::clone(&self.engine_instrument_descriptors.lock().unwrap().1)
+    }
+    /// Replace the engine-id → instrument descriptor table when the engine
+    /// registry's `epoch` moved since the last sync, and republish then.
+    pub fn sync_engine_instrument_descriptors(
+        &self,
+        epoch: u64,
+        descriptors: impl FnOnce() -> Vec<EffectDescriptor>,
+    ) {
+        {
+            let mut current = self.engine_instrument_descriptors.lock().unwrap();
+            if current.0 == epoch {
+                return;
+            }
+            *current = (epoch, Arc::new(descriptors()));
+        }
+        self.publish_scheduler_snapshot();
+    }
     pub fn process_trace_enabled(&self) -> bool {
         self.process_trace_enabled.load(Ordering::Relaxed)
     }

@@ -1,0 +1,26 @@
+{
+ "rates": {
+  "44100": {
+   "cases": 201,
+   "non_finite": [],
+   "max_peak_gain1": 6.836,
+   "block_128_512_identical": true,
+   "worst_tail_change_db": -63.0
+  },
+  "48000": {
+   "cases": 201,
+   "non_finite": [],
+   "max_peak_gain1": 6.74,
+   "block_128_512_identical": true,
+   "worst_tail_change_db": -63.0
+  },
+  "96000": {
+   "cases": 201,
+   "non_finite": [],
+   "max_peak_gain1": 6.84,
+   "block_128_512_identical": true,
+   "worst_tail_change_db": -63.1
+  }
+ },
+ "cpu_percent_one_voice_48k_128": 16.14
+}

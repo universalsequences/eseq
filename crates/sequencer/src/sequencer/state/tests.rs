@@ -291,6 +291,7 @@
             accum_limit: (1 + id) as f32,
             accum_mode: id as u32,
             fts_scale: id + 1,
+            tuning: crate::scale::TrackTuning::DEFAULT,
             mono_trigger: crate::sequencer::MonoTrigger::Retrig,
             voice_priority: crate::sequencer::VoicePriority::Last,
             mute_group: (id % 9) as u8,

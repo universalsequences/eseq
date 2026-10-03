@@ -584,6 +584,21 @@ static DisconnectResult apply_disconnect_result(LiveGraph *lg, int src_node,
                                                 int src_port, int dst_node,
                                                 int dst_port);
 
+// A node that no longer exists is not a failure: the UI side notices the
+// stalled block count and re-attaches or detaches on its own schedule.
+static bool apply_set_node_meter(LiveGraph *lg, int node_id, int slot,
+                                 int clear_slot) {
+  if (!lg || node_id < 0 || node_id >= lg->node_count)
+    return true;
+  RTNode *node = &lg->nodes[node_id];
+  if (slot >= 0 && slot < AP_NODE_METER_CAPACITY) {
+    node->meter_slot = slot + 1;
+  } else if (node->meter_slot == clear_slot + 1) {
+    node->meter_slot = 0;
+  }
+  return true;
+}
+
 bool apply_graph_edits(GraphEditQueue *r, LiveGraph *lg) {
   GraphEditCmd cmd;
   GraphEditCmd next_cmd;
@@ -706,6 +721,11 @@ bool apply_graph_edits(GraphEditQueue *r, LiveGraph *lg) {
       if (cmd.u.write_node_state.source_data) {
         free(cmd.u.write_node_state.source_data);
       }
+      break;
+    case GE_SET_NODE_METER:
+      ok = apply_set_node_meter(lg, cmd.u.set_node_meter.node_id,
+                                cmd.u.set_node_meter.slot,
+                                cmd.u.set_node_meter.clear_slot);
       break;
     default: {
       ok = false; // unknown op

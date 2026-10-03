@@ -1627,6 +1627,7 @@ fn test_block_trigger(seq: u64, track: usize) -> BlockEvent {
             kind: ScheduledEventKind::ResolvedTrigger {
                     voice_policy: crate::scheduled_event::ScheduledVoicePolicy::default(),
                 rack_macro_values: [None; crate::sequencer::RACK_MACRO_COUNT],
+                rack_slot_params: Default::default(),
                 track,
                 step: 0,
                 samples_per_step: 1024.0,
@@ -1671,6 +1672,7 @@ fn test_block_network_trigger(seq: u64, track: usize) -> BlockEvent {
             kind: ScheduledEventKind::NetworkTrigger {
                     voice_policy: crate::scheduled_event::ScheduledVoicePolicy::default(),
                 rack_macro_values: [None; crate::sequencer::RACK_MACRO_COUNT],
+                rack_slot_params: Default::default(),
                 track,
                 source_neuron: 0,
                 seed: None,
@@ -2700,6 +2702,8 @@ fn live_keyboard_transpose_quantizes_after_ramp_and_before_scene_transpose() {
     state.pattern.track_params[0].set_fts_scale(1);
     state.write_current_scene_slot(crate::sequencer::SCENE_TRANSPOSE_SLOT,
         crate::process::ProcessLiteral::Number(1.0)).unwrap();
+    // The scale (and its tuning) is read from the published snapshot.
+    state.publish_scheduler_snapshot();
 
     let resolved = resolve_live_keyboard_transpose(
         &state,
@@ -2713,6 +2717,35 @@ fn live_keyboard_transpose_quantizes_after_ramp_and_before_scene_transpose() {
     );
 
     assert_eq!(resolved, 5.0);
+}
+
+#[test]
+fn live_keyboard_transpose_plays_the_tracks_microtonal_tuning() {
+    let state = SequencerState::new(1, Vec::new());
+    let just_major = crate::scale::SCALES
+        .iter()
+        .position(|scale| scale.name == "Just Major")
+        .unwrap();
+    state.pattern.track_params[0].set_fts_scale(just_major);
+    let mut tuning = crate::scale::TrackTuning::DEFAULT;
+    tuning.root = 2;
+    tuning.offsets[4] = 10.0;
+    state.pattern.track_params[0].set_tuning(tuning);
+    state.publish_scheduler_snapshot();
+
+    let live = |raw: f32| {
+        resolve_live_keyboard_transpose(
+            &state,
+            &state.latest_scheduler_snapshot(),
+            AccumulatorRuntimeState::default(),
+            0,
+            raw,
+        )
+    };
+    // D root: F# is the just major third (386.31 cents above D)...
+    assert!((live(6.0) - (2.0 + 3.863137)).abs() < 1e-4, "{}", live(6.0));
+    // ...and A, the fifth, carries its +10 cent offset.
+    assert!((live(9.0) - (2.0 + 7.119550)).abs() < 1e-4, "{}", live(9.0));
 }
 
 #[test]

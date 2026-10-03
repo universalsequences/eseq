@@ -101,7 +101,15 @@ pub enum LegacyGrooveRef {
 
 /// A kit v5 `groove` value: the rack's selection among the kit's `grooves`
 /// list, and its amounts.
+///
+/// Strict about its keys: every field defaults, so without
+/// `deny_unknown_fields` a v6 copy that fails to parse (an unknown pad role,
+/// a hand edit) would fall through [`KitGrooveField`]'s untagged match into
+/// an empty v5 selection and silently turn the rack's groove off. A v6 object
+/// always has a `groove` key, so it can never match here; it fails the kit
+/// parse instead, and the load reports it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LegacyKitGrooveSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active: Option<LegacyGrooveRef>,

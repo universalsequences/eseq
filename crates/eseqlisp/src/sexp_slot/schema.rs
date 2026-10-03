@@ -670,7 +670,10 @@ fn cursor_context<'a>(root: &'a Schema, text: &str) -> (Option<Position<'a>>, St
             }
             atom => {
                 if let Some(frame) = stack.last_mut() {
-                    if at_open && !frame.schema.forms().is_empty() {
+                    // only a real head opens a form: in a value list that also
+                    // allows forms ((I IV V7) beside (seq …)) the first word is
+                    // just the first element
+                    if at_open && frame.schema.is_form_head(atom) {
                         frame.head = Some(atom.to_string());
                     } else {
                         frame.count += 1;

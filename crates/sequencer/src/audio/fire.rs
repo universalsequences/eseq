@@ -91,6 +91,7 @@ pub(super) fn fire_resolved(
     sampler_params: ScheduledSamplerParams,
     voice_policy: crate::scheduled_event::ScheduledVoicePolicy,
     rack_macro_values: [Option<f32>; crate::sequencer::RACK_MACRO_COUNT],
+    rack_slot_params: &ScheduledRackSlotParams,
 ) {
     if !track_accepts_scheduled_trigger(&data.state, track_idx) {
         return;
@@ -134,6 +135,7 @@ pub(super) fn fire_resolved(
                 chord,
                 rack,
                 rack_macro_values,
+                rack_slot_params,
             );
         }
         return;

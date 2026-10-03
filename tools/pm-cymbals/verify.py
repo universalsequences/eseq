@@ -6,7 +6,7 @@ import platform
 
 import numpy as np
 
-from common import FACTORY, HERE, NAMES, digest, instrument
+from common import FACTORY, FOLDERS, HERE, NAMES, digest, instrument
 from engine import PARAMS
 from runtime import stream, timer
 
@@ -76,10 +76,10 @@ def main():
     result = {'platform': platform.platform(), 'sample_rate': 48000,
               'frames_per_block': 128, 'instruments': []}
     for slug in args.families or NAMES:
-        path = factory/NAMES[slug]/'dsp.lisp'
+        path = factory/FOLDERS[slug]/'dsp.lisp'
         inst = instrument(path)
         cases = signal_checks(inst, slug)
-        presets = json.loads((factory/(NAMES[slug]+'.presets')).read_text())['presets']
+        presets = json.loads((factory/(FOLDERS[slug]+'.presets')).read_text())['presets']
         for name, value in presets[0]['params'].items():
             assert inst.params[name]['default'] == value, ('Default preset mismatch', name)
         for preset in presets:

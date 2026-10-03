@@ -44,6 +44,7 @@
 (module alez.jaki.doc)
 
 (import alez.jaki.core)
+(import alez.jaki.chords)
 
 (export tick body row-at row-live? default-row mod-form mod-item row-mods
         row-schema figure-label figure-times figure-events with-times
@@ -51,6 +52,7 @@
         num-mods mod-arg-spec every-words split-targets
         figures-body modes mode-labels mode-of
         pattern-list pattern-sounds? patterns-body new-pattern tick-patterns
+        chords-route chord-qualities chords-row-schema
         row-procs proc-word new-chain chain-trigger-items chain-with-trigger
         proc-trigger-schema proc-body-schema)
 
@@ -118,6 +120,8 @@
     "vel*"  (list 0 2 0.05 2 0.8)
     "vel+"  (list -1 1 0.05 2 -0.1)
     "note+" (list -48 48 1 0 7)
+    ;; (voice n): chord tones above (below) the voice-led note
+    "voice" (list -8 8 1 0 0)
     "fig"   (list 1 16 1 0 1)
     "rep"   (list 1 16 1 0 1)
     "nth"   (list 1 16 1 0 2)
@@ -177,7 +181,7 @@
 ;; §7.2). The clock word leads; `+` inside adds a value. A plain list of
 ;; numbers still means one per cycle.
 (def seq-clocks (list ":hit" ":fig" ":cycle" ":span"))
-(def per-hit-mods (list "vel" "note" "vel*" "vel+" "note+" "gate" "plock"))
+(def per-hit-mods (list "vel" "note" "vel*" "vel+" "note+" "gate" "plock" "voice"))
 ;; A seq's values may be seqs themselves — (seq :hit 2 (seq :cycle 5 9) 3).
 ;; A schema is plain data and cannot refer to itself, so the nesting is
 ;; spelled out seq-depth levels deep (a plain number list nests freely).
@@ -187,12 +191,22 @@
   (if (= op "plock")
     (list "dyn-num" "param" (num-schema op))
     (num-schema op)))
+
+;; a note may be a degree of the declared chord: (note (deg 3)), also as a
+;; member of a seq. A sibling of the number in the value's `or` (a nested
+;; `or` does not match forms).
+(def deg-form (list "form" "deg" (list "num" :min -13 :max 15 :step 1 :decimals 0 :default 3)))
+(def deg-ops (list "note" "note+"))
+(def leaf-alts (op)
+  (if (reduce (lambda (a x) (or a (= x op))) false deg-ops)
+    (list (leaf-schema op) deg-form)
+    (list (leaf-schema op))))
 (def seq-value-schema (op depth)
   (if (<= depth 0)
-    (leaf-schema op)
-    (list "or" (leaf-schema op)
-          (list "form" "seq" (cons "word" seq-clocks)
-                (list "rest" (seq-value-schema op (- depth 1)))))))
+    (let ((alts (leaf-alts op))) (if (= (len alts) 1) (first alts) (cons "or" alts)))
+    (append (cons "or" (leaf-alts op))
+            (list (list "form" "seq" (cons "word" seq-clocks)
+                        (list "rest" (seq-value-schema op (- depth 1))))))))
 
 (def value-schema (op)
   (if (reduce (lambda (a x) (or a (= x op))) false per-hit-mods)
@@ -238,11 +252,44 @@
                 plock-form
                 (list "form" "every" (num-schema "every") gated-word))))
 
+;; quality words for (chord Q), :declared first: on a track row it plays
+;; the chord a Chords row declared
+(def chord-qualities
+  (cons ":declared" (map (lambda (q) (str q)) alez.jaki.chords/quality-names)))
+(def chord-form (list "form" "chord" (cons "word" chord-qualities)))
+
+;; ── the Chords lane's own words ────────────────────────────────────────────
+;; A Chords row only declares, so its slot offers only what shapes the
+;; progression: (chord X) with chord words (Am7, iv7, V7/iv) as values — per
+;; cycle lists and (seq :fig …) like any value — the (key …) numerals count
+;; from, (on SEL (chord …)) / (every n (chord …)) overrides, and note+ to
+;; transpose. No filters or articulation: they mean nothing here.
+;; numerals first: a lane with a (key …) mostly picks them; typing a letter
+;; narrows the list to symbols either way
+(def chord-atom
+  (cons "word" (append alez.jaki.chords/numeral-words alez.jaki.chords/chord-words)))
+(def chord-val
+  (list "or" chord-atom
+        (list "form" "seq" (cons "word" seq-clocks) (list "rest" chord-atom))))
+(def chord-override
+  (list "or" (list "form" "chord" chord-atom) (list "form" "note+" (num-schema "note+"))))
+(def chords-row-schema
+  (list "forms"
+        (list "form" "chord" chord-val)
+        (list "form" "key" (pword alez.jaki.chords/menu-roots) (pword alez.jaki.chords/key-modes))
+        (list "form" "on" sel-schema chord-override)
+        (list "form" "every" (num-schema "every") chord-override)
+        (list "form" "note+" (value-schema "note+"))))
+
 (def row-schema
   (append
     (list "forms" (cons "word" zero-mods))
     num-forms
     (list quant-form plock-form scale-form harmony-form)
+    ;; declared harmony (docs/harmony-declaration-spec.md): (chord Q) plays
+    ;; or (on a Chords row) declares quality Q; :declared plays the declared
+    ;; chord; voice takes the nearest free chord tone
+    (list chord-form (list "form" "voice" (value-schema "voice")))
     (list (list "form" "on" sel-schema on-body)
           (list "form" "every" (num-schema "every") gated-word)
           (list "form" "every-fig" (num-schema "every-fig") gated-word)
@@ -437,12 +484,15 @@
 (def row-at (rows i)
   (if (< i (len rows)) (nth rows i) default-row))
 
+;; route -2 is the Chords destination: the row declares the chord
+(def chords-route -2)
+
 (def row-live? (row)
   (let ((route (get row :route)))
-    (and (number? route) (>= route 0))))
+    (and (number? route) (or (>= route 0) (= route chords-route)))))
 
 (def row-segment (row)
-  (cons '-> (cons (get row :route)
+  (cons '-> (cons (if (= (get row :route) chords-route) 'chords (get row :route))
                   (append (map mod-form (get row :mods))
                           (map proc-word (row-procs row))
                           (let ((seed (get row :seed)))

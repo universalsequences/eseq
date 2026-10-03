@@ -386,6 +386,33 @@ impl RackGrooveSettings {
         &mut self.pads[index]
     }
 
+    /// A pad moved from note `from` to note `to` (`swap`: the pad on `to`
+    /// moved to `from` in exchange). Pad shares follow the PAD, the drum the
+    /// user set them for, not the note it happens to sit on; an entry left on
+    /// an unoccupied `to` is stale and goes.
+    pub fn remap_pad_note(&mut self, from: i32, to: i32, swap: bool) {
+        if from == to {
+            return;
+        }
+        if !swap {
+            self.pads.retain(|pad| pad.pad_note != to);
+        }
+        for pad in &mut self.pads {
+            if pad.pad_note == from {
+                pad.pad_note = to;
+            } else if swap && pad.pad_note == to {
+                pad.pad_note = from;
+            }
+        }
+        self.sanitize();
+    }
+
+    /// Drops the share of every pad note `keep` rejects (a removed pad), so
+    /// a pad that later takes that note starts at the full groove.
+    pub fn retain_pad_notes(&mut self, mut keep: impl FnMut(i32) -> bool) {
+        self.pads.retain(|pad| keep(pad.pad_note));
+    }
+
     /// Clamps the amounts into their documented ranges (a non-finite value
     /// takes the default), so a hand-edited file cannot drive the scheduler
     /// out of its early-hit bound.
@@ -567,6 +594,24 @@ fn step_swing_beats(pattern: &TrackPatternData, step: usize, cycle_start_beats: 
     swing_shift_beats(swing_pct, resolution, cycle_start_beats)
 }
 
+/// The feel one step was heard with, in beats: the groove's pocket at the
+/// step's straight boundary on a grooved member (the scheduler never plays
+/// swing there, `scheduler::clock::step_trigger_sample_time`), otherwise the
+/// pattern's own swing. Shared by extraction ([`heard_hits_through`]) and the
+/// quantize move rule (`step_heard_lateness`) so the two snap a hit to the
+/// same step.
+fn step_feel_beats(
+    pattern: &TrackPatternData,
+    groove: Option<&TrackGrooveSnapshot>,
+    step: usize,
+    start: f64,
+) -> f64 {
+    match groove {
+        Some(groove) => groove.offset_beats_with_random(start, false),
+        None => step_swing_beats(pattern, step, start),
+    }
+}
+
 /// Where every hit of `pattern` was heard, in the pattern's cycle beats (one
 /// pass over the pattern, step 0 at beat 0):
 ///
@@ -607,10 +652,7 @@ pub fn heard_hits_through(
         };
         let start = geometry.beats_at_steps(step as f64);
         let step_beats = step_timebase(pattern, step).step_beats(num_steps);
-        let swing = match groove {
-            Some(groove) => groove.offset_beats_with_random(start, false),
-            None => step_swing_beats(pattern, step, start),
-        };
+        let swing = step_feel_beats(pattern, groove, step, start);
         let velocity = params[StepParam::Velocity.index()];
         let chord_delays = pattern.chord_snapshot.delays.get(step).filter(|_| {
             pattern
@@ -1017,17 +1059,20 @@ fn step_can_move(pattern: &TrackPatternData, step: usize) -> bool {
 }
 
 /// How late each of one step's hits was HEARD, in units of the step: its
-/// chord-note delay or step Delay plus the pattern's swing for that step. The
-/// move rule compares this against half a step, the same line extraction's
-/// nearest snap draws.
+/// chord-note delay or step Delay plus the feel heard on that step (the
+/// groove's pocket on a member playing through `groove`, otherwise the
+/// pattern's swing; see `step_feel_beats`). The move rule compares this
+/// against half a step, the same line extraction's nearest snap draws.
 fn step_heard_lateness(
     pattern: &TrackPatternData,
+    groove: Option<&TrackGrooveSnapshot>,
     geometry: &crate::sequencer::PatternStepGeometry,
     step: usize,
 ) -> Vec<f64> {
     let num_steps = geometry.num_steps();
     let step_beats = step_timebase(pattern, step).step_beats(num_steps).max(EPS);
-    let swing = step_swing_beats(pattern, step, geometry.beats_at_steps(step as f64)) / step_beats;
+    let start = geometry.beats_at_steps(step as f64);
+    let swing = step_feel_beats(pattern, groove, step, start) / step_beats;
     let delays = match pattern.chord_snapshot.steps.get(step) {
         Some(notes) if !notes.is_empty() => (0..notes.len())
             .map(|voice| {
@@ -1061,7 +1106,9 @@ fn step_heard_lateness(
 ///
 /// - every hit is moved to its NEAREST step, the same reading extraction's
 ///   nearest-slot snap makes: a step whose hits were all heard at least half
-///   a step late (delay plus swing) moves whole onto the next step, when that step is empty and neither
+///   a step late (delay plus the feel heard: the pocket of `groove`, the
+///   groove the member played through while it was extracted, else the
+///   pattern's swing) moves whole onto the next step, when that step is empty and neither
 ///   step carries content a move cannot take along (device p-locks,
 ///   timebase/sync, an instrument rack, process lanes, a different bar
 ///   transpose). A step that cannot move stays on its own step;
@@ -1069,7 +1116,10 @@ fn step_heard_lateness(
 /// - track swing is set to 50 and per-step swing p-locks are cleared.
 ///
 /// Returns whether anything changed.
-pub fn quantize_groove_source(pattern: &mut TrackPatternData) -> bool {
+pub fn quantize_groove_source(
+    pattern: &mut TrackPatternData,
+    groove: Option<&TrackGrooveSnapshot>,
+) -> bool {
     let source = pattern.clone();
     let geometry = source.step_geometry();
     let num_steps = geometry.num_steps().min(MAX_STEPS);
@@ -1085,7 +1135,7 @@ pub fn quantize_groove_source(pattern: &mut TrackPatternData) -> bool {
                 continue;
             }
             let target = (step + 1) % num_steps;
-            let all_late = step_heard_lateness(&source, &geometry, step)
+            let all_late = step_heard_lateness(&source, groove, &geometry, step)
                 .iter()
                 .all(|lateness| *lateness >= 0.5 - EPS);
             if !all_late

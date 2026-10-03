@@ -1709,8 +1709,10 @@
         (set! package-menu-open true))
       nil)))
 
-(def package-action (id key label)
-  (dict :id id :key key :label label))
+;; `icon` is a `button-icon` name or nil; `group` sections the menu, and
+;; `package-menu-rows` puts a divider wherever it changes.
+(def package-action (id key label icon group)
+  (dict :id id :key key :label label :icon icon :group group))
 
 (def rack-groups ()
   (filter (lambda (group) (get group :rack)) (or SEQ.groups (list))))
@@ -1724,24 +1726,27 @@
     (append
       (append
         (if live
-          (list (package-action :open "open" "Open")
-                (package-action :rename "rename" "Rename")
-                (package-action :duplicate "duplicate" "Duplicate"))
-          (list (package-action :rename "rename" "Rename")))
+          (list (package-action :open "open" "Open" :document :edit)
+                (package-action :rename "rename" "Rename" :pencil :edit)
+                (package-action :duplicate "duplicate" "Duplicate" nil :edit))
+          (list (package-action :rename "rename" "Rename" :pencil :edit)))
         (append
           (map (lambda (group)
                  (dict :id :move-to-rack
                        :key (str "move-" (get group :id))
                        :group-id (get group :id)
-                       :label (str "Move to " (get group :name))))
+                       :label (str "Move to " (get group :name))
+                       :icon nil
+                       :group :move))
             (filter (lambda (group) (not (= (get group :id) owner-rack))) (rack-groups)))
           (if (= owner-rack nil)
             (list)
-            (list (package-action :give-back "give-back" "Give back to project")))))
-      (list (package-action :delete-instance "delete" "Delete")))))
+            (list (package-action :give-back "give-back" "Give back to project" nil :move)))))
+      (list (package-action :delete-instance "delete" "Delete" nil :delete)))))
 
-;; Module row: `New <kind>` per kind first (attaching first if needed),
-;; then Attach/Remove, Always Load and the source actions.
+;; Module row: `New <kind>` per kind first (attaching first if needed) --
+;; the reason a kind module is in the tree -- then Attach/Remove + Always
+;; Load, then the source actions, each section divided from the next.
 (def module-menu-actions (item)
   (append
     (append
@@ -1749,23 +1754,26 @@
              (dict :id :new-instance
                    :key (str "new-" (get kind :id))
                    :kind-id (get kind :id)
-                   :label (str "New " (get kind :name))))
+                   :label (str "New " (get kind :name))
+                   :icon :plus
+                   :group :create))
         (package-item-kinds item))
       (if (package-item-attachable? item)
         (list
           (if (get item :attached?)
-            (package-action :detach "detach" "Remove from Project")
-            (package-action :attach "attach" "Attach to Project"))
+            (package-action :detach "detach" "Remove from Project" :unlink :load)
+            (package-action :attach "attach" "Attach to Project" :link :load))
           (if (get item :always?)
-            (package-action :stop-always "stop-always" "Stop Always Loading")
-            (package-action :always "always" "Always Load")))
+            (package-action :stop-always "stop-always" "Stop Always Loading" :bookmark :load)
+            (package-action :always "always" "Always Load" :bookmark :load)))
         (list)))
     (if (and (not (= (get item :path) nil)) (not (= (get item :kind) "package")))
       (append
-        (list (package-action :view "view"
-                (if (get item :read-only?) "View Source" "Edit Source")))
+        (list (if (get item :read-only?)
+                (package-action :view "view" "View Source" :document :source)
+                (package-action :view "view" "Edit Source" :pencil :source)))
         (if (and (get item :read-only?) (package-item-attachable? item))
-          (list (package-action :copy "copy" "Copy to Local"))
+          (list (package-action :copy "copy" "Copy to Local" :download :source))
           (list)))
       (list))))
 
@@ -1869,15 +1877,30 @@
         (select-instance-menu-action item action)
         (select-module-menu-action item action)))))
 
+;; The menu's rows: the actions with a divider before each one whose
+;; :group differs from the action above it.
+(def package-menu-rows (actions)
+  (reduce
+    (lambda (rows action)
+      (if (and (> (len rows) 0)
+               (not (= (get (nth rows (- (len rows) 1)) :group) (get action :group))))
+        (append rows (list (dict :separator? true :key (get action :key)) action))
+        (append rows (list action))))
+    (list)
+    actions))
+
 (def package-context-menu ()
   (context-menu :is-open package-menu-open
     :anchor-col package-menu-col
     :anchor-row package-menu-row
     :on-close (lambda () (set! package-menu-open false))
-    (each (package-menu-actions) |action|
-      (menu-item (get action :label)
-        :key (str "package-menu-" (get action :key))
-        :on-select (lambda (event) (select-package-menu-action action))))))
+    (each (package-menu-rows (package-menu-actions)) |action|
+      (if (get action :separator?)
+        (menu-separator :key (str "package-menu-sep-" (get action :key)))
+        (menu-item (get action :label)
+          :key (str "package-menu-" (get action :key))
+          :icon (get action :icon)
+          :on-select (lambda (event) (select-package-menu-action action)))))))
 
 (def begin-new-package ()
   (do

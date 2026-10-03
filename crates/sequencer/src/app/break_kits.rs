@@ -560,6 +560,9 @@ impl App {
                     super::instances::all_override_entries(scenes),
                 )
             });
+            // Pass 1 allocates every fresh id, so pass 2 can point generator
+            // gate routes (`(:gen id)`) at the new id whatever the record order.
+            let mut placed = Vec::with_capacity(records.len());
             for record in records {
                 let id = app.allocate_instance_id();
                 let name = crate::lisp_host::instance_sequencer_name(
@@ -580,23 +583,29 @@ impl App {
                     owner: ProjectInstanceOwner::Rack(group_id),
                     label,
                 });
-                if let (true, Some(mut graph)) = (install_overrides, record.overrides) {
+                documents.extend(record.document.iter().map(|(field, value)| {
+                    (crate::lisp_host::instance_document_slot(id, field), value.clone())
+                }));
+                map.insert(record.id, KitSequencerRekey { id, name: name.clone() });
+                placed.push((id, name, record.overrides));
+            }
+            let fresh_ids: HashMap<u64, u64> =
+                map.iter().map(|(old, rekey)| (*old, rekey.id)).collect();
+            for (id, name, overrides) in placed {
+                if let (true, Some(mut graph)) = (install_overrides, overrides) {
                     super::rack_sequencers::remap_graph_member_routes(
                         &mut graph,
                         &pad_to_position,
                     );
+                    super::rack_sequencers::remap_graph_generator_routes(&mut graph, &fresh_ids);
                     graph.sequencer_id = id;
-                    graph.sequencer_name = name.clone();
+                    graph.sequencer_name = name;
                     graph.owner_rack = Some(group_id);
                     // Fresh node process slot ids: one kit loaded twice must
                     // not share process state between its copies (§9).
                     reminter.remint(id, &mut graph);
                     installs.push(graph);
                 }
-                documents.extend(record.document.iter().map(|(field, value)| {
-                    (crate::lisp_host::instance_document_slot(id, field), value.clone())
-                }));
-                map.insert(record.id, KitSequencerRekey { id, name });
             }
             app.install_kit_instance_overrides(group_id, installs);
             if !documents.is_empty() {
@@ -739,6 +748,8 @@ impl App {
                 super::instances::all_override_entries(scenes),
             )
         });
+        let fresh_ids: HashMap<u64, u64> =
+            id_map.iter().map(|(old, rekey)| (*old, rekey.id)).collect();
         for (index, clip) in clips.into_iter().enumerate() {
             let pattern =
                 expand_kit_clip_pattern(clip.pattern, &pad_to_position, &members, num_tracks);
@@ -774,6 +785,7 @@ impl App {
                 .filter_map(|mut graph| {
                     let rekey = id_map.get(&graph.sequencer_id)?;
                     super::rack_sequencers::remap_graph_member_routes(&mut graph, &pad_to_position);
+                    super::rack_sequencers::remap_graph_generator_routes(&mut graph, &fresh_ids);
                     graph.owner_rack = Some(group_id);
                     graph.sequencer_id = rekey.id;
                     graph.sequencer_name.clone_from(&rekey.name);
@@ -1263,6 +1275,75 @@ mod tests {
         assert!(!app.instances.contains(fresh), "the rack's previous instance is gone");
         assert_eq!(published_owner(&app, fresh), None);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// A kit neural's `(:gen id)` / `(:restart id)` gate routes follow the
+    /// kit's jaki to its fresh id. Kept raw, the old id would gate whatever
+    /// live instance owns it (here the exporting rack's own jaki).
+    fn assert_kit_generator_routes_rekey(with_clips: bool) {
+        let mut app = headless_app();
+        let mut runtime = neural_runtime(&app);
+        let (rack, neural) = rack_with_neural(&mut app, &mut runtime, "Gate", 0.25);
+        // The gate target stands in for a jaki: routes take any instance id.
+        let jaki = app
+            .create_instance_recorded(NEURAL, ProjectInstanceOwner::Rack(rack), None)
+            .expect("gate target");
+        runtime.set_global_value("src", Value::Instance(neural));
+        runtime
+            .eval_str(&format!(
+                "(graph-node src 0 :route (list :gen {jaki}))
+                 (graph-node src 1 :route (list :restart {jaki}))
+                 (graph-node src 2 :route (list :gen 9999))"
+            ))
+            .expect("generator routes");
+        if with_clips {
+            app.convert_rack_to_clips_recorded(rack).expect("convert to clips");
+        }
+        let path = save_kit(
+            &mut app,
+            rack,
+            if with_clips { "Gate-Clips" } else { "Gate-Scene" },
+            if with_clips { &[0] } else { &[] },
+        );
+
+        let (loaded, failures) = app.load_kit_as_rack(&path).expect("kit loads");
+        assert!(failures.is_empty(), "{failures:?}");
+        let owned = app.rack_instances(loaded);
+        assert_eq!(owned.len(), 2, "{owned:?}");
+        let (fresh_neural, fresh_jaki) = (owned[0].id, owned[1].id);
+        assert!(![neural, jaki].contains(&fresh_jaki));
+        let overrides = if with_clips {
+            app.state.with_scenes(|scenes| {
+                scenes.rack_bank(loaded).expect("bank").clips[0].graph_overrides.clone()
+            })
+        } else {
+            app.state.current_graph_overrides()
+        };
+        let graph = overrides
+            .into_iter()
+            .find(|graph| graph.sequencer_id == fresh_neural)
+            .expect("the loaded neural's overrides");
+        let route = |node: usize| {
+            graph
+                .node_intrinsics
+                .iter()
+                .find(|intrinsic| intrinsic.instance == node)
+                .and_then(|intrinsic| intrinsic.route.clone())
+        };
+        assert_eq!(route(0), Some(ProjectGraphRouteOverride::Generator(fresh_jaki)));
+        assert_eq!(route(1), Some(ProjectGraphRouteOverride::GeneratorRestart(fresh_jaki)));
+        assert_eq!(route(2), Some(ProjectGraphRouteOverride::None), "unknown id drops to off");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn break_kit_generator_routes_rekey_to_the_fresh_jaki() {
+        assert_kit_generator_routes_rekey(false);
+    }
+
+    #[test]
+    fn break_kit_clip_generator_routes_rekey_to_the_fresh_jaki() {
+        assert_kit_generator_routes_rekey(true);
     }
 
     /// A kit pad that fails to load leaves no rack pad, so later kit pads sit

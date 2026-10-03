@@ -1,0 +1,29 @@
+{
+ "rates": {
+  "44100": {
+   "renders": 61,
+   "max_peak": 2.0,
+   "failures": []
+  },
+  "48000": {
+   "renders": 61,
+   "max_peak": 2.0,
+   "failures": []
+  },
+  "96000": {
+   "renders": 61,
+   "max_peak": 2.0,
+   "failures": []
+  }
+ },
+ "blocks": {
+  "identical": true,
+  "max_diff": 0.0
+ },
+ "cpu": {
+  "seconds_audio": 9.6,
+  "seconds_wall": 0.1559,
+  "percent_core": 1.62,
+  "note": "includes the Python host loop; an upper bound"
+ }
+}

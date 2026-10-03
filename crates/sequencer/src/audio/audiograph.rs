@@ -264,6 +264,22 @@ extern "C" {
         state_size: *mut usize,
     ) -> bool;
 
+    // Node output meters: any node's first two outputs, peak-accumulated on
+    // the audio thread into a fixed lock-free slot table (NodeMeterSlot).
+    /// Claim a slot and start metering `node_id`; -1 when the table is full.
+    pub fn graph_node_meter_attach(lg: *mut LiveGraph, node_id: c_int) -> c_int;
+    /// Re-send the attach edit for a claimed slot (node id reused). Idempotent.
+    pub fn graph_node_meter_reattach(lg: *mut LiveGraph, slot: c_int) -> bool;
+    pub fn graph_node_meter_detach(lg: *mut LiveGraph, slot: c_int) -> bool;
+    /// Peaks since the previous take (then reset) and the metered-block count.
+    pub fn graph_node_meter_take(
+        lg: *mut LiveGraph,
+        slot: c_int,
+        peak_l: *mut f32,
+        peak_r: *mut f32,
+        blocks: *mut u32,
+    ) -> bool;
+
     // Wrapper for the static-inline params_push
     #[link_name = "params_push_wrapper"]
     fn params_push_wrapper_raw(lg: *mut LiveGraph, m: ParamMsg) -> bool;

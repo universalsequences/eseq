@@ -6,7 +6,7 @@ from pathlib import Path
 
 import numpy as np
 
-from common import FACTORY, HERE, NAMES, digest, instrument
+from common import FACTORY, FOLDERS, HERE, NAMES, digest, instrument
 from runtime import stream
 
 
@@ -18,8 +18,8 @@ def main():
     factory = FACTORY if args.installed else HERE/'output/staging/content/instruments/Physical Models'
     result = []
     for slug, name in NAMES.items():
-        source = factory/name/'dsp.lisp'
-        saved = args.export_directory/name/'dsp.lisp'
+        source = factory/FOLDERS[slug]/'dsp.lisp'
+        saved = args.export_directory/FOLDERS[slug]/'dsp.lisp'
         original, roundtrip = instrument(source), instrument(saved)
         for opening in [0, 1] if slug == 'hihat' else [0]:
             params = {'contact.openness': opening} if slug == 'hihat' else {}

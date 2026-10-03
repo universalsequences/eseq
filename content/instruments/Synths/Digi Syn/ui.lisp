@@ -2,7 +2,10 @@
 ;; UI-only layout; all parameters keep the host's scoped modulation/p-lock routes.
 (def syn-accent () :control-on-bg)
 (def syn-ink () :control-on-fg)
-(def syn-section () (if (= eseq.vanilla/custom-ui-selected-section 1) 1 0))
+;; Display sections: 0 ENV 1, 1 ENV 2, 2 VOICES.
+(def syn-section ()
+  (let ((section eseq.vanilla/custom-ui-selected-section))
+    (if (or (= section 1) (= section 2)) section 0)))
 (def syn-knob (name title width height size decimals taper)
   (eseq.effects.custom-ui-lego/ui-lego-knob-styled-s (syn-section) name title
     width height size (syn-accent) decimals taper :widget-knob-track 10.5 9.5 :right))
@@ -92,20 +95,25 @@
               (eseq.effects.custom-ui-runtime/custom-ui-param-change-callback p))))))))
 ;; Single-line readouts for the filter header/footer: no compressed label rows.
 (def syn-inline-num (name title width decimals)
+  (syn-inline-num-ink name title width decimals false))
+;; ink false keeps the dark-panel colors; the orange display passes (syn-ink).
+(def syn-inline-num-ink (name title width decimals ink)
   (let ((p (eseq.effects.custom-ui-runtime/custom-ui-current-param name)))
     (eseq.effects.custom-ui-runtime/custom-ui-param-mod-wrapper p
       (str "syn-inline-mod-" (eseq.effects.custom-ui-runtime/custom-ui-scope-name) "-" name)
       (subtree :key (str "syn-inline-" (eseq.effects.custom-ui-runtime/custom-ui-scope-name)
           (eseq.effects.custom-ui-runtime/custom-ui-param-control-key-mode p) "-" name)
         (h-stack :width width :height 0.8 :gap 0.25 :align :center
-          (label title :width (min 5.8 (* width 0.5)) :height 0.8 :font-size 8.6 :color :dim :bg :transparent :v-align :center)
+          (label title :width (min 5.8 (* width 0.5)) :height 0.8 :font-size 8.6 :color (if ink ink :dim) :bg :transparent :v-align :center)
           (number-picker :width (- width (+ 0.25 (min 5.8 (* width 0.5)))) :height 0.75 :noui true :decimals decimals :font-size 8
             :value (eseq.effects.custom-ui-runtime/custom-ui-param-binding p)
             :min (eseq.effects.custom-ui-runtime/custom-ui-param-control-min p)
             :process-value (eseq.effects.custom-ui-runtime/custom-ui-param-process-value p) :process-clamped (eseq.effects.custom-ui-runtime/custom-ui-param-process-clamped p)
             :max (eseq.effects.custom-ui-runtime/custom-ui-param-control-max p)
-            :text-color (eseq.effects.custom-ui-runtime/custom-ui-param-plock-text-color p)
+            :text-color (if ink ink (eseq.effects.custom-ui-runtime/custom-ui-param-plock-text-color p))
             :text-align :left
+            ;; Display ink marks locks with an underline; the accent would vanish on orange.
+            :plock-style (if ink :underline :fill)
             :plock-active (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p) 1 0)
             :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
             :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
@@ -118,10 +126,26 @@
   (eseq.effects.custom-ui-runtime/custom-ui-param-mod-offset
     (eseq.effects.custom-ui-runtime/custom-ui-current-param name)))
 
-(def syn-shape-mod ()
-  (v-stack :width 14 :height 2.3 :gap 0.2
-    (syn-option "osc1_shape_src" (syn-src-options) 13.5 :fg :instrument-control-bg)
-    (syn-inline-num "osc1_shape_amt" "Shape mod" 13.5 2)))
+(def syn-source-preview ()
+  (drift-waveform :width 14.0 :height 2.3 :release 2
+    :background-color :instrument-control-bg :wave-color (syn-accent)
+    :osc1-wave (syn-preview-binding "osc1_wave")
+    :osc1-shape (syn-preview-binding "osc1_shape")
+    :osc1-shape-mod (syn-preview-mod "osc1_shape")
+    :osc1-octave (syn-preview-binding "osc1_octave")
+    :osc1-on (syn-preview-binding "osc1_on")
+    :osc1-gain-db (syn-preview-binding "osc1_gain_db")
+    :osc1-gain-db-mod (syn-preview-mod "osc1_gain_db")
+    :osc2-wave (syn-preview-binding "osc2_wave")
+    :osc2-octave (syn-preview-binding "osc2_octave")
+    :osc2-detune (syn-preview-binding "osc2_detune")
+    :osc2-detune-mod (syn-preview-mod "osc2_detune")
+    :osc2-on (syn-preview-binding "osc2_on")
+    :osc2-gain-db (syn-preview-binding "osc2_gain_db")
+    :osc2-gain-db-mod (syn-preview-mod "osc2_gain_db")
+    :noise-on (syn-preview-binding "noise_on")
+    :noise-gain-db (syn-preview-binding "noise_gain_db")
+    :noise-gain-db-mod (syn-preview-mod "noise_gain_db")))
 
 (def syn-filter-curve ()
   (let ((cut-p (eseq.effects.custom-ui-runtime/custom-ui-current-param "lp_freq"))
@@ -189,15 +213,31 @@
         (syn-knob (str prefix "_octave") "Octave" 6.2 2.3 3.1 0 "linear")
         (syn-knob second second-title 6.2 2.3 3.1 decimals "linear")
         (syn-knob (str prefix "_gain_db") "Gain dB" 6.2 2.3 3.1 1 "linear")))))
+;; Osc1 carries its shape-mod source over the matching amount knob.
+(def syn-osc1-row ()
+  (syn-panel 25 3.5
+    (v-stack :gap 0.15
+      (h-stack :gap 0.35
+        (syn-switch "osc1_on" "Osc1" 4.5)
+        (syn-option "osc1_wave" (syn-wave1-options) 7 :fg :instrument-control-bg)
+        (syn-option "osc1_shape_src" (syn-src-options) 5.5 :fg :instrument-control-bg)
+        (syn-switch "osc1_route" "To Filter" 6.3))
+      (h-stack :gap 0.35
+        (syn-knob "osc1_octave" "Octave" 5.6 2.3 3.1 0 "linear")
+        (syn-knob "osc1_shape" "Shape" 5.6 2.3 3.1 2 "linear")
+        (syn-knob "osc1_shape_amt" "Shape mod" 5.6 2.3 3.1 2 "linear")
+        (syn-knob "osc1_gain_db" "Gain dB" 5.6 2.3 3.1 1 "linear")))))
 (def syn-sources ()
   (v-stack :gap 0.1
-    (syn-osc-row "osc1" "Osc1" (syn-wave1-options) "osc1_shape" "Shape" 2)
+    (syn-osc1-row)
     (syn-osc-row "osc2" "Osc2" (syn-wave2-options) "osc2_detune" "Detune" 1)
     (syn-panel 25 2.6
       (h-stack :gap 0.35 :align :center
-        (syn-shape-mod)
+        (syn-source-preview)
         (syn-knob "noise_gain_db" "Noise dB" 5.2 2.3 2.8 0 "linear")
-        (syn-switch "noise_route" "To Filt" 4.1)))))
+        (v-stack :gap 0.3
+          (syn-switch "noise_on" "Noise" 4.1)
+          (syn-switch "noise_route" "To Filt" 4.1))))))
 (def syn-env-plot (section prefix)
   (let ((scope (eseq.effects.custom-ui-runtime/custom-ui-current-scope)))
     (adsr-editor :width 33.2 :height 2.4 :debug-name "syn-envelope"
@@ -214,7 +254,7 @@
             (str prefix "_attack") (str prefix "_decay")
             (str prefix "_sustain") (str prefix "_release") env))))))
 (def syn-screen-tab (section title)
-  (button title :width 5.2 :height 0.75 :font-size 8 :padding 0
+  (button title :width 5.2 :height 0.75 :debug-name (str "syn-tab-" section) :font-size 8 :padding 0
     :color (if (= (syn-section) section) (syn-ink) (syn-accent))
     :background-color (if (= (syn-section) section) (syn-accent) :instrument-control-bg)
     :on-click (eseq.effects.custom-ui-sections/ui-section-select-callback section)))
@@ -223,7 +263,107 @@
     (syn-option (str prefix "_src") (syn-src-options) 7.0 :fg :instrument-control-bg)
     (label "→" :width 1.5 :height 0.8 :color (syn-ink) :bg :transparent)
     (syn-option (str prefix "_dest") (syn-dest-options) 13 :fg :instrument-control-bg)
-    (syn-inline-num (str prefix "_amt") "Amt" 9.5 2)))
+    (syn-inline-num-ink (str prefix "_amt") "Amt" 9.5 2 (syn-ink))))
+(def syn-env-detail (section prefix)
+  (v-stack :gap 0.12
+    (syn-env-plot section prefix)
+    (h-stack :gap 0.8
+      (syn-num (str prefix "_attack") "Attack ms" 7.6 0 (syn-ink))
+      (syn-num (str prefix "_decay") "Decay ms" 7.6 0 (syn-ink))
+      (syn-num (str prefix "_sustain") "Sustain" 7.6 2 (syn-ink))
+      (syn-num (str prefix "_release") "Release ms" 7.6 0 (syn-ink)))
+    (box :width 33.2 :height 0.03 :background-color (syn-ink))
+    (h-stack :gap 0.2 :align :end
+      (h-stack :width 9.8 :height 1.1 :gap 0.3 :align :center
+        (label "Cycle" :width 3.3 :height 0.8 :font-size 8.6 :color (syn-ink) :bg :transparent :v-align :center)
+        (syn-option "env2_mode" (syn-env2-mode-options) 6.2 :fg :instrument-control-bg))
+      (syn-option "cyc_mode" (syn-lfo-mode-options) 5.0 :fg :instrument-control-bg)
+      (syn-num (syn-rate-param "cyc") "Rate" 6.0 2 (syn-ink))
+      (syn-num "cyc_tilt" "Tilt" 5.0 2 (syn-ink))
+      (syn-num "cyc_hold" "Hold" 5.0 2 (syn-ink)))
+    (box :width 33.2 :height 0.03 :background-color (syn-ink))
+    (syn-matrix-row "mm1")
+    (syn-matrix-row "mm2")
+    (syn-matrix-row "mm3")))
+
+;; VOICES screen: single-line LED readouts, Heat-style.
+(def syn-screen-value (name title decimals step)
+  (let ((p (eseq.effects.custom-ui-runtime/custom-ui-current-param name))
+        (ink (if (eseq.effects.custom-ui-runtime/custom-ui-param-mod-highlighted? p) :white (syn-ink))))
+    (eseq.effects.custom-ui-runtime/custom-ui-param-mod-wrapper p
+      (str "syn-screen-mod-" (eseq.effects.custom-ui-runtime/custom-ui-scope-name) "-" name)
+      (subtree :key (str "syn-screen-" (eseq.effects.custom-ui-runtime/custom-ui-scope-name)
+          (eseq.effects.custom-ui-runtime/custom-ui-param-control-key-mode p) "-" name)
+        (h-stack :width 10.6 :height 0.8 :gap 0.1 :align :center
+          (label title :width 6.0 :height 0.8 :v-align :center :font-size 8.6 :color ink :bg :transparent)
+          (number-picker :width 4.4 :height 0.8 :noui true :font-size 8.6 :text-align :right
+            :decimals decimals :step step
+            :value (eseq.effects.custom-ui-runtime/custom-ui-param-binding p)
+            :min (eseq.effects.custom-ui-runtime/custom-ui-param-control-min p)
+            :process-value (eseq.effects.custom-ui-runtime/custom-ui-param-process-value p) :process-clamped (eseq.effects.custom-ui-runtime/custom-ui-param-process-clamped p)
+            :max (eseq.effects.custom-ui-runtime/custom-ui-param-control-max p)
+            :text-color ink :edit-color ink :cursor-color ink
+            :plock-style :underline
+            :plock-active (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p) 1 0)
+            :on-change (eseq.effects.custom-ui-runtime/custom-ui-param-change-callback-s 2 p)))))))
+(def syn-screen-choice (name title options)
+  (let ((p (eseq.effects.custom-ui-runtime/custom-ui-current-param name))
+        (scope (eseq.effects.custom-ui-runtime/custom-ui-current-scope)))
+    (eseq.effects.custom-ui-runtime/custom-ui-param-mod-wrapper p
+      (str "syn-choice-mod-" (eseq.effects.custom-ui-runtime/custom-ui-scope-name) "-" name)
+      (subtree :key (str "syn-choice-" (eseq.effects.custom-ui-runtime/custom-ui-scope-name) "-" name)
+        (h-stack :width 10.6 :height 0.8 :gap 0.1 :align :center
+          (label title :width 6.0 :height 0.8 :v-align :center :font-size 8.6 :color (syn-ink) :bg :transparent)
+          (dropdown :width 4.4 :height 0.8 :font-size 8.6
+            :value-index (eseq.effects.custom-ui-runtime/custom-ui-param-binding p)
+            :value-index-offset (get p :min) :options options
+            :text-color (syn-ink) :chevron-color (syn-ink) :badge-color :transparent
+            :bg-color (syn-accent) :border-color :transparent :border-width 0
+            :plock-active (if (eseq.effects.custom-ui-runtime/custom-ui-param-plock-active? p) 1 0)
+            :plock-color-r (eseq.effects.param-controls/param-plock-color-r)
+            :plock-color-g (eseq.effects.param-controls/param-plock-color-g)
+            :plock-color-b (eseq.effects.param-controls/param-plock-color-b)
+            :on-change (lambda (v)
+              (eseq.effects.custom-ui-runtime/custom-ui-set-param-in-scope scope p
+                (+ (get p :min) (eseq.effects.param-controls/custom-ui-option-index options v))))))))))
+(def syn-screen-group (title body)
+  (v-stack :gap 0.1
+    (label title :v-align :center :height 0.55 :font-size 8.6 :color (syn-ink) :bg :transparent)
+    (box :width 10.6 :height 0.03 :background-color (syn-ink))
+    body))
+;; Mode is the voice allocator's main switch: one wide segment per mode.
+(def syn-mode-button (mode title)
+  (let ((p (eseq.effects.custom-ui-runtime/custom-ui-current-param "voice_mode"))
+        (scope (eseq.effects.custom-ui-runtime/custom-ui-current-scope)))
+    (let ((on (= (round (reactive-value (eseq.effects.custom-ui-runtime/custom-ui-param-binding p))) mode)))
+      (button title :debug-name (str "syn-voice-mode-" mode) :width 8.1 :height 1.1 :font-size 9 :padding 0 :corner-radius 0
+        :color (if on (syn-accent) (syn-ink))
+        :background-color (if on (syn-ink) (syn-accent))
+        :border-color (syn-ink)
+        :on-click (lambda (x y r)
+          (eseq.effects.custom-ui-runtime/custom-ui-set-param-in-scope scope p mode))))))
+(def syn-voices-detail ()
+  (v-stack :gap 0.45
+    (h-stack :gap 0.27
+      (syn-mode-button 0 "POLY") (syn-mode-button 1 "MONO")
+      (syn-mode-button 2 "STEREO") (syn-mode-button 3 "UNISON"))
+    (h-stack :gap 0.75 :align :start
+      (syn-screen-group "Voice"
+        (v-stack :gap 0.18
+          (syn-screen-choice "osc_retrig" "Retrigger" '("Off" "On"))
+          (syn-screen-choice "note_pitch_bend_on" "Pitch bend" '("Off" "On"))))
+      (syn-screen-group "Width"
+        (v-stack :gap 0.18
+          (syn-screen-value "mono_thickness" "Thickness" 2 0.01)
+          (syn-screen-value "stereo_spread" "Stereo" 2 0.01)
+          (syn-screen-value "unison_strength" "Unison" 2 0.01)
+          (syn-screen-value "spread" "Drift pan" 2 0.01)))
+      (syn-screen-group "Tune / Pan"
+        (v-stack :gap 0.18
+          (syn-screen-value "transpose" "Transpose" 0 1)
+          (syn-screen-value "pitch_bend_range" "Bend range" 0 1)
+          (syn-screen-value "voice_pan" "Pan" 2 0.01))))))
+
 (def syn-display ()
   (let ((section (syn-section))
         (prefix (if (= (syn-section) 1) "env2" "env1")))
@@ -231,28 +371,13 @@
       :debug-name "syn-detail-display" :background-color (syn-accent)
       (v-stack :gap 0.12
         (h-stack :gap 0.15
-          (box :width 22.5 :height 0.75 :background-color :instrument-control-bg
-            (label "DIGI SYN / ENVELOPE" :height 0.75 :font-size 8 :color (syn-accent) :bg :transparent :v-align :center))
-          (syn-screen-tab 0 "ENV 1") (syn-screen-tab 1 "ENV 2"))
-        (syn-env-plot section prefix)
-        (h-stack :gap 0.8
-          (syn-num (str prefix "_attack") "Attack ms" 7.6 0 (syn-ink))
-          (syn-num (str prefix "_decay") "Decay ms" 7.6 0 (syn-ink))
-          (syn-num (str prefix "_sustain") "Sustain" 7.6 2 (syn-ink))
-          (syn-num (str prefix "_release") "Release ms" 7.6 0 (syn-ink)))
-        (box :width 33.2 :height 0.03 :background-color (syn-ink))
-        (h-stack :gap 0.2 :align :end
-          (h-stack :width 9.8 :height 1.1 :gap 0.3 :align :center
-            (label "Cycle" :width 3.3 :height 0.8 :font-size 8.6 :color (syn-ink) :bg :transparent :v-align :center)
-            (syn-option "env2_mode" (syn-env2-mode-options) 6.2 :fg :instrument-control-bg))
-          (syn-option "cyc_mode" (syn-lfo-mode-options) 5.0 :fg :instrument-control-bg)
-          (syn-num (syn-rate-param "cyc") "Rate" 6.0 2 (syn-ink))
-          (syn-num "cyc_tilt" "Tilt" 5.0 2 (syn-ink))
-          (syn-num "cyc_hold" "Hold" 5.0 2 (syn-ink)))
-        (box :width 33.2 :height 0.03 :background-color (syn-ink))
-        (syn-matrix-row "mm1")
-        (syn-matrix-row "mm2")
-        (syn-matrix-row "mm3")))))
+          (box :width 17.15 :height 0.75 :background-color :instrument-control-bg
+            (label (if (= section 2) "DIGI SYN / VOICES" "DIGI SYN / ENVELOPE")
+              :height 0.75 :font-size 8 :color (syn-accent) :bg :transparent :v-align :center))
+          (syn-screen-tab 0 "ENV 1") (syn-screen-tab 1 "ENV 2") (syn-screen-tab 2 "VOICES"))
+        (if (= section 2)
+          (syn-voices-detail)
+          (syn-env-detail section prefix))))))
 (def syn-filter-panel ()
   (syn-panel 29.8 5.4
     (v-stack :gap 0.1
@@ -306,28 +431,6 @@
   (let ((mode (round (reactive-value (eseq.effects.custom-ui-controls/ui-param-bound-value (str prefix "_mode") 0)))))
     (str prefix (nth '("_rate_hz" "_time_ms" "_ratio" "_beats") mode))))
 
-(def syn-voice-panel ()
-  (syn-panel 26 9.8
-    (v-stack :gap 0.12
-      (syn-label "VOICES" 25.5)
-      (h-stack :gap 0.4 :align :center
-        (syn-option "voice_mode" '("Poly" "Mono" "Stereo" "Unison") 12.5 :fg :instrument-control-bg)
-        (syn-inline-num "voice_count" "Voices" 12.5 0))
-      (syn-inline-num "mono_thickness" "Thickness" 25 2)
-      (syn-inline-num "stereo_spread" "Stereo" 25 2)
-      (syn-inline-num "unison_strength" "Unison" 25 2)
-      (h-stack :gap 0.4
-        (syn-switch "legato_on" "Legato" 12.5)
-        (syn-switch "osc_retrig" "Retrigger" 12.5))
-      (h-stack :gap 0.4
-        (syn-switch "noise_on" "Noise" 12.5)
-        (syn-switch "note_pitch_bend_on" "Pitch bend" 12.5))
-      (syn-inline-num "transpose" "Transpose" 25 0)
-      (syn-inline-num "pitch_bend_range" "Bend range" 25 0)
-      (h-stack :gap 0.4
-        (syn-inline-num "voice_pan" "Pan" 12.5 2)
-        (syn-inline-num "spread" "Drift pan" 12.5 2)))))
-
 (defsynth-ui
   (h-stack :gap 0.15 :align :start
     (syn-sources)
@@ -336,5 +439,4 @@
       (syn-filter-panel)
       (syn-lfo-panel)
       (syn-filter-mod))
-    (syn-pitch-panel)
-    (syn-voice-panel)))
+    (syn-pitch-panel)))

@@ -1,22 +1,18 @@
-# Cymbal reference material
+# PM Ride (release 2) reference material
 
-PM Crash, PM Ride and PM Hi-Hat were calibrated using the recordings in
-**Acoustic Cymbals Vol.1 by Donit**, supplied locally in `samples-to-analyze`.
-The author/recordist credit comes from the pack's bundled `zzz_readme_ap2.txt`.
-That file calls the collection “Analog Percussion Sample Pack Vol.2”; the
-folder has the different title above. We preserve both rather than infer a
-release identity or license that the supplied material does not state.
+Identified from rides in **Acoustic Cymbals Vol.1 by Donit**, supplied locally in
+`samples-to-analyze` (see `versions/1/ATTRIBUTION.md` for the pack's credit and terms).
+Only fitted modal coefficients are stored; no recordings, recorded phase, or sampled
+amplitude envelopes ship with the instrument.
 
-Donit's bundled note permits using the sounds in beats, songs, films and other
-works, prohibits selling the samples themselves, and requests attribution when
-sharing the sample pack or samples. It does not name a standard license.
+| Character | Name | Reference | SHA256 |
+| ---: | --- | --- | --- |
+| 0 | Dark | `Cymbal - Ride_18.wav` | `e5bc23097fdd1f87…` |
+| 1 | Warm | `Cymbal - Ride_22.wav` | `3cbed6ce9677d09d…` |
+| 2 | Classic | `Cymbal - Ride_11.wav` | `a1fe5432a65c180a…` |
+| 3 | Dry | `Cymbal - Ride_12.wav` | `abba0cb0a1d06bb7…` |
+| 4 | Bright | `Cymbal - Ride_10.wav` | `57275f942df16081…` |
+| 5 | Crisp | `Cymbal - Ride.wav` | `dd6e73fbd34641b8…` |
 
-- [Donit's linked video](https://youtu.be/UaVYYyqF4IY)
-- [Donit's linked channel](https://www.youtube.com/channel/UCzkRDhQ3PH7E3wJQcWCBzjw)
-
-The factory instruments contain generated physical coefficients and synthesis
-code. No recordings, recorded phase, or sampled amplitude envelopes are
-embedded. Source WAV files and rendered comparisons are excluded from git.
-Exact reference filenames, hashes and measurements are in the three
-`tools/pm-cymbals/*-analysis.json` files. The unchanged supplied text is retained
-in `tools/pm-cymbals/source-readme.txt` for provenance.
+Analysis, generator and comparison: `tools/pm-ride2/`. Release 1 (the reduced-plate
+model) is frozen in `versions/1/`.

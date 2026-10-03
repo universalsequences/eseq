@@ -1,0 +1,1313 @@
+{
+ "compiler_sha256": "09b3f28c08e0bff871f8abdbdff8c9886e1dcba7cf321d7c14e9a1ab0d13ce4e",
+ "render_rate": 48000,
+ "method": "one strike per Character at C4, velocity 1, Width 0; rendered at 48 kHz, resampled to 44.1 kHz, divided by the level gain, scored against the high-passed recording",
+ "summary_mean_abs_level_error_db": {
+  "0-5ms": 0.71,
+  "5-15ms": 0.67,
+  "15-30ms": 0.38,
+  "30-60ms": 0.27,
+  "60-150ms": 0.36,
+  "150-300ms": 0.56,
+  "300-600ms": 0.79,
+  "600-1000ms": 1.26
+ },
+ "cymbals": [
+  {
+   "character": 0,
+   "slug": "dark",
+   "name": "Dark",
+   "reference": "samples-to-analyze/Acoustic Cymbals Vol.1 by Donit/Cymbal - Ride_18.wav",
+   "windows": [
+    {
+     "ms": [
+      0,
+      5
+     ],
+     "level_error_db": 0.53,
+     "band_error_db": [
+      -0.69,
+      -2.44,
+      4.04,
+      0.92,
+      0.21,
+      1.16,
+      -0.02
+     ],
+     "median_audible_band_error_db": 0.92
+    },
+    {
+     "ms": [
+      5,
+      15
+     ],
+     "level_error_db": 1.0,
+     "band_error_db": [
+      0.28,
+      -0.6,
+      2.41,
+      0.67,
+      0.11,
+      -0.06,
+      -0.16
+     ],
+     "median_audible_band_error_db": 0.28
+    },
+    {
+     "ms": [
+      15,
+      30
+     ],
+     "level_error_db": -0.62,
+     "band_error_db": [
+      9.99,
+      5.82,
+      -0.94,
+      0.22,
+      -1.01,
+      -0.24,
+      -0.48
+     ],
+     "median_audible_band_error_db": 0.94
+    },
+    {
+     "ms": [
+      30,
+      60
+     ],
+     "level_error_db": 0.44,
+     "band_error_db": [
+      1.37,
+      -2.04,
+      0.75,
+      1.15,
+      0.49,
+      -0.74,
+      -0.31
+     ],
+     "median_audible_band_error_db": 0.75
+    },
+    {
+     "ms": [
+      60,
+      150
+     ],
+     "level_error_db": -0.56,
+     "band_error_db": [
+      -1.77,
+      -2.27,
+      -0.69,
+      -0.08,
+      -0.26,
+      -0.71,
+      -0.31
+     ],
+     "median_audible_band_error_db": 0.69
+    },
+    {
+     "ms": [
+      150,
+      300
+     ],
+     "level_error_db": -1.81,
+     "band_error_db": [
+      -0.75,
+      -2.78,
+      -2.61,
+      -0.99,
+      -0.15,
+      -0.59,
+      -0.69
+     ],
+     "median_audible_band_error_db": 0.75
+    },
+    {
+     "ms": [
+      300,
+      600
+     ],
+     "level_error_db": -1.72,
+     "band_error_db": [
+      -3.9,
+      -3.88,
+      -1.87,
+      -2.09,
+      -0.55,
+      1.32,
+      0.46
+     ],
+     "median_audible_band_error_db": 1.98
+    },
+    {
+     "ms": [
+      600,
+      1000
+     ],
+     "level_error_db": -3.11,
+     "band_error_db": [
+      -7.34,
+      -4.97,
+      -2.94,
+      -3.64,
+      -2.6,
+      -0.05,
+      3.29
+     ],
+     "median_audible_band_error_db": 3.29
+    }
+   ],
+   "texture": {
+    "50ms 1400-5600": {
+     "recording": {
+      "flatness_db": -10.85,
+      "lines_per_khz": 15.7
+     },
+     "model": {
+      "flatness_db": -8.85,
+      "lines_per_khz": 10.0
+     }
+    },
+    "50ms 5600-11200": {
+     "recording": {
+      "flatness_db": -13.65,
+      "lines_per_khz": 17.0
+     },
+     "model": {
+      "flatness_db": -11.05,
+      "lines_per_khz": 8.0
+     }
+    },
+    "50ms 11200-18000": {
+     "recording": {
+      "flatness_db": -14.73,
+      "lines_per_khz": 15.3
+     },
+     "model": {
+      "flatness_db": -7.75,
+      "lines_per_khz": 5.1
+     }
+    },
+    "300ms 1400-5600": {
+     "recording": {
+      "flatness_db": -11.68,
+      "lines_per_khz": 15.2
+     },
+     "model": {
+      "flatness_db": -7.52,
+      "lines_per_khz": 8.1
+     }
+    },
+    "300ms 5600-11200": {
+     "recording": {
+      "flatness_db": -12.02,
+      "lines_per_khz": 16.4
+     },
+     "model": {
+      "flatness_db": -8.76,
+      "lines_per_khz": 5.0
+     }
+    },
+    "300ms 11200-18000": {
+     "recording": {
+      "flatness_db": -14.02,
+      "lines_per_khz": 12.4
+     },
+     "model": {
+      "flatness_db": -6.99,
+      "lines_per_khz": 3.2
+     }
+    }
+   },
+   "concentration": {
+    "recording": {
+     "top_10_bin_power_fraction": 0.2611,
+     "bins_for_90_percent_power": 880
+    },
+    "model": {
+     "top_10_bin_power_fraction": 0.2759,
+     "bins_for_90_percent_power": 1021
+    }
+   }
+  },
+  {
+   "character": 1,
+   "slug": "warm",
+   "name": "Warm",
+   "reference": "samples-to-analyze/Acoustic Cymbals Vol.1 by Donit/Cymbal - Ride_22.wav",
+   "windows": [
+    {
+     "ms": [
+      0,
+      5
+     ],
+     "level_error_db": 1.72,
+     "band_error_db": [
+      10.71,
+      5.02,
+      0.98,
+      -2.29,
+      2.9,
+      0.76,
+      -0.24
+     ],
+     "median_audible_band_error_db": 2.29
+    },
+    {
+     "ms": [
+      5,
+      15
+     ],
+     "level_error_db": 0.53,
+     "band_error_db": [
+      10.37,
+      -7.42,
+      1.88,
+      -0.27,
+      1.0,
+      -0.04,
+      -0.33
+     ],
+     "median_audible_band_error_db": 0.33
+    },
+    {
+     "ms": [
+      15,
+      30
+     ],
+     "level_error_db": 0.59,
+     "band_error_db": [
+      -2.85,
+      -3.42,
+      0.33,
+      -0.11,
+      2.02,
+      -1.03,
+      -1.38
+     ],
+     "median_audible_band_error_db": 1.03
+    },
+    {
+     "ms": [
+      30,
+      60
+     ],
+     "level_error_db": -0.14,
+     "band_error_db": [
+      -3.44,
+      -2.53,
+      0.86,
+      -0.23,
+      -0.45,
+      0.21,
+      0.26
+     ],
+     "median_audible_band_error_db": 0.26
+    },
+    {
+     "ms": [
+      60,
+      150
+     ],
+     "level_error_db": -0.26,
+     "band_error_db": [
+      -2.0,
+      -4.01,
+      0.11,
+      -0.4,
+      -0.23,
+      -0.58,
+      -0.01
+     ],
+     "median_audible_band_error_db": 0.23
+    },
+    {
+     "ms": [
+      150,
+      300
+     ],
+     "level_error_db": -0.22,
+     "band_error_db": [
+      0.43,
+      -0.27,
+      -0.4,
+      -0.1,
+      -0.19,
+      0.13,
+      1.37
+     ],
+     "median_audible_band_error_db": 0.19
+    },
+    {
+     "ms": [
+      300,
+      600
+     ],
+     "level_error_db": -0.11,
+     "band_error_db": [
+      -0.16,
+      -0.16,
+      -0.15,
+      -0.41,
+      -0.05,
+      -0.04,
+      2.32
+     ],
+     "median_audible_band_error_db": 0.1
+    },
+    {
+     "ms": [
+      600,
+      1000
+     ],
+     "level_error_db": 0.03,
+     "band_error_db": [
+      -0.27,
+      -0.04,
+      0.42,
+      -1.07,
+      -0.75,
+      -2.12,
+      1.75
+     ],
+     "median_audible_band_error_db": 0.75
+    }
+   ],
+   "texture": {
+    "50ms 1400-5600": {
+     "recording": {
+      "flatness_db": -15.04,
+      "lines_per_khz": 8.1
+     },
+     "model": {
+      "flatness_db": -16.79,
+      "lines_per_khz": 7.6
+     }
+    },
+    "50ms 5600-11200": {
+     "recording": {
+      "flatness_db": -11.64,
+      "lines_per_khz": 8.6
+     },
+     "model": {
+      "flatness_db": -11.24,
+      "lines_per_khz": 8.8
+     }
+    },
+    "50ms 11200-18000": {
+     "recording": {
+      "flatness_db": -15.89,
+      "lines_per_khz": 5.4
+     },
+     "model": {
+      "flatness_db": -11.35,
+      "lines_per_khz": 2.4
+     }
+    },
+    "300ms 1400-5600": {
+     "recording": {
+      "flatness_db": -20.53,
+      "lines_per_khz": 12.1
+     },
+     "model": {
+      "flatness_db": -13.83,
+      "lines_per_khz": 6.7
+     }
+    },
+    "300ms 5600-11200": {
+     "recording": {
+      "flatness_db": -22.02,
+      "lines_per_khz": 11.2
+     },
+     "model": {
+      "flatness_db": -12.75,
+      "lines_per_khz": 7.1
+     }
+    },
+    "300ms 11200-18000": {
+     "recording": {
+      "flatness_db": -15.83,
+      "lines_per_khz": 4.6
+     },
+     "model": {
+      "flatness_db": -10.75,
+      "lines_per_khz": 1.9
+     }
+    }
+   },
+   "concentration": {
+    "recording": {
+     "top_10_bin_power_fraction": 0.2394,
+     "bins_for_90_percent_power": 1089
+    },
+    "model": {
+     "top_10_bin_power_fraction": 0.2489,
+     "bins_for_90_percent_power": 914
+    }
+   }
+  },
+  {
+   "character": 2,
+   "slug": "classic",
+   "name": "Classic",
+   "reference": "samples-to-analyze/Acoustic Cymbals Vol.1 by Donit/Cymbal - Ride_11.wav",
+   "windows": [
+    {
+     "ms": [
+      0,
+      5
+     ],
+     "level_error_db": 0.18,
+     "band_error_db": [
+      -5.47,
+      -0.65,
+      2.12,
+      -4.1,
+      -0.7,
+      2.8,
+      -0.29
+     ],
+     "median_audible_band_error_db": 2.12
+    },
+    {
+     "ms": [
+      5,
+      15
+     ],
+     "level_error_db": -0.5,
+     "band_error_db": [
+      -0.9,
+      7.72,
+      -0.47,
+      -0.44,
+      0.06,
+      -0.12,
+      -1.69
+     ],
+     "median_audible_band_error_db": 0.47
+    },
+    {
+     "ms": [
+      15,
+      30
+     ],
+     "level_error_db": 0.33,
+     "band_error_db": [
+      9.66,
+      3.57,
+      0.7,
+      0.83,
+      0.84,
+      -0.2,
+      0.14
+     ],
+     "median_audible_band_error_db": 0.83
+    },
+    {
+     "ms": [
+      30,
+      60
+     ],
+     "level_error_db": -0.21,
+     "band_error_db": [
+      1.0,
+      -2.37,
+      -1.9,
+      -0.81,
+      -0.03,
+      -0.06,
+      -0.32
+     ],
+     "median_audible_band_error_db": 0.81
+    },
+    {
+     "ms": [
+      60,
+      150
+     ],
+     "level_error_db": -0.26,
+     "band_error_db": [
+      -0.84,
+      -0.83,
+      -0.94,
+      0.38,
+      -0.1,
+      -0.58,
+      0.11
+     ],
+     "median_audible_band_error_db": 0.58
+    },
+    {
+     "ms": [
+      150,
+      300
+     ],
+     "level_error_db": -0.18,
+     "band_error_db": [
+      0.57,
+      0.1,
+      -2.6,
+      0.11,
+      -0.08,
+      -0.35,
+      0.39
+     ],
+     "median_audible_band_error_db": 0.35
+    },
+    {
+     "ms": [
+      300,
+      600
+     ],
+     "level_error_db": -0.9,
+     "band_error_db": [
+      0.21,
+      -3.47,
+      -2.07,
+      -0.68,
+      -0.66,
+      -0.48,
+      0.78
+     ],
+     "median_audible_band_error_db": 0.68
+    },
+    {
+     "ms": [
+      600,
+      1000
+     ],
+     "level_error_db": -1.42,
+     "band_error_db": [
+      -1.04,
+      -3.99,
+      -2.4,
+      -1.54,
+      -0.87,
+      -0.32,
+      1.45
+     ],
+     "median_audible_band_error_db": 1.29
+    }
+   ],
+   "texture": {
+    "50ms 1400-5600": {
+     "recording": {
+      "flatness_db": -12.21,
+      "lines_per_khz": 16.9
+     },
+     "model": {
+      "flatness_db": -12.8,
+      "lines_per_khz": 16.7
+     }
+    },
+    "50ms 5600-11200": {
+     "recording": {
+      "flatness_db": -11.56,
+      "lines_per_khz": 17.0
+     },
+     "model": {
+      "flatness_db": -11.0,
+      "lines_per_khz": 12.0
+     }
+    },
+    "50ms 11200-18000": {
+     "recording": {
+      "flatness_db": -19.49,
+      "lines_per_khz": 7.2
+     },
+     "model": {
+      "flatness_db": -13.8,
+      "lines_per_khz": 4.0
+     }
+    },
+    "300ms 1400-5600": {
+     "recording": {
+      "flatness_db": -13.42,
+      "lines_per_khz": 17.4
+     },
+     "model": {
+      "flatness_db": -12.46,
+      "lines_per_khz": 16.9
+     }
+    },
+    "300ms 5600-11200": {
+     "recording": {
+      "flatness_db": -15.88,
+      "lines_per_khz": 18.9
+     },
+     "model": {
+      "flatness_db": -11.99,
+      "lines_per_khz": 11.2
+     }
+    },
+    "300ms 11200-18000": {
+     "recording": {
+      "flatness_db": -23.99,
+      "lines_per_khz": 4.6
+     },
+     "model": {
+      "flatness_db": -13.73,
+      "lines_per_khz": 2.6
+     }
+    }
+   },
+   "concentration": {
+    "recording": {
+     "top_10_bin_power_fraction": 0.1715,
+     "bins_for_90_percent_power": 3743
+    },
+    "model": {
+     "top_10_bin_power_fraction": 0.1781,
+     "bins_for_90_percent_power": 3582
+    }
+   }
+  },
+  {
+   "character": 3,
+   "slug": "dry",
+   "name": "Dry",
+   "reference": "samples-to-analyze/Acoustic Cymbals Vol.1 by Donit/Cymbal - Ride_12.wav",
+   "windows": [
+    {
+     "ms": [
+      0,
+      5
+     ],
+     "level_error_db": 0.1,
+     "band_error_db": [
+      2.45,
+      -0.02,
+      1.23,
+      4.34,
+      0.23,
+      0.47,
+      0.54
+     ],
+     "median_audible_band_error_db": 0.54
+    },
+    {
+     "ms": [
+      5,
+      15
+     ],
+     "level_error_db": -0.69,
+     "band_error_db": [
+      -1.25,
+      4.03,
+      -0.05,
+      2.51,
+      -0.46,
+      -0.63,
+      -1.83
+     ],
+     "median_audible_band_error_db": 1.25
+    },
+    {
+     "ms": [
+      15,
+      30
+     ],
+     "level_error_db": 0.01,
+     "band_error_db": [
+      3.69,
+      1.15,
+      -3.73,
+      -0.23,
+      0.46,
+      0.01,
+      -0.34
+     ],
+     "median_audible_band_error_db": 0.46
+    },
+    {
+     "ms": [
+      30,
+      60
+     ],
+     "level_error_db": -0.42,
+     "band_error_db": [
+      -4.58,
+      0.68,
+      -2.67,
+      0.16,
+      -0.31,
+      -0.49,
+      -0.6
+     ],
+     "median_audible_band_error_db": 0.6
+    },
+    {
+     "ms": [
+      60,
+      150
+     ],
+     "level_error_db": -0.58,
+     "band_error_db": [
+      -1.11,
+      -0.95,
+      0.21,
+      -0.95,
+      -0.05,
+      -0.88,
+      -0.12
+     ],
+     "median_audible_band_error_db": 0.88
+    },
+    {
+     "ms": [
+      150,
+      300
+     ],
+     "level_error_db": -0.65,
+     "band_error_db": [
+      -2.7,
+      -1.77,
+      -1.58,
+      -0.69,
+      -0.61,
+      -0.67,
+      0.46
+     ],
+     "median_audible_band_error_db": 0.69
+    },
+    {
+     "ms": [
+      300,
+      600
+     ],
+     "level_error_db": -0.73,
+     "band_error_db": [
+      -4.28,
+      -4.06,
+      -2.32,
+      -2.09,
+      -0.26,
+      -0.2,
+      1.77
+     ],
+     "median_audible_band_error_db": 2.09
+    },
+    {
+     "ms": [
+      600,
+      1000
+     ],
+     "level_error_db": -1.5,
+     "band_error_db": [
+      -3.62,
+      -4.65,
+      -2.6,
+      -1.73,
+      -2.01,
+      0.23,
+      4.74
+     ],
+     "median_audible_band_error_db": 2.6
+    }
+   ],
+   "texture": {
+    "50ms 1400-5600": {
+     "recording": {
+      "flatness_db": -14.12,
+      "lines_per_khz": 15.7
+     },
+     "model": {
+      "flatness_db": -10.77,
+      "lines_per_khz": 8.6
+     }
+    },
+    "50ms 5600-11200": {
+     "recording": {
+      "flatness_db": -12.08,
+      "lines_per_khz": 15.0
+     },
+     "model": {
+      "flatness_db": -8.01,
+      "lines_per_khz": 7.5
+     }
+    },
+    "50ms 11200-18000": {
+     "recording": {
+      "flatness_db": -11.6,
+      "lines_per_khz": 12.8
+     },
+     "model": {
+      "flatness_db": -6.81,
+      "lines_per_khz": 4.1
+     }
+    },
+    "300ms 1400-5600": {
+     "recording": {
+      "flatness_db": -15.76,
+      "lines_per_khz": 17.9
+     },
+     "model": {
+      "flatness_db": -10.71,
+      "lines_per_khz": 6.9
+     }
+    },
+    "300ms 5600-11200": {
+     "recording": {
+      "flatness_db": -13.73,
+      "lines_per_khz": 17.7
+     },
+     "model": {
+      "flatness_db": -6.25,
+      "lines_per_khz": 6.2
+     }
+    },
+    "300ms 11200-18000": {
+     "recording": {
+      "flatness_db": -17.37,
+      "lines_per_khz": 12.6
+     },
+     "model": {
+      "flatness_db": -6.45,
+      "lines_per_khz": 1.3
+     }
+    }
+   },
+   "concentration": {
+    "recording": {
+     "top_10_bin_power_fraction": 0.1126,
+     "bins_for_90_percent_power": 3937
+    },
+    "model": {
+     "top_10_bin_power_fraction": 0.1186,
+     "bins_for_90_percent_power": 4437
+    }
+   }
+  },
+  {
+   "character": 4,
+   "slug": "bright",
+   "name": "Bright",
+   "reference": "samples-to-analyze/Acoustic Cymbals Vol.1 by Donit/Cymbal - Ride_10.wav",
+   "windows": [
+    {
+     "ms": [
+      0,
+      5
+     ],
+     "level_error_db": 1.24,
+     "band_error_db": [
+      9.83,
+      11.29,
+      7.33,
+      -0.54,
+      0.72,
+      1.0,
+      2.1
+     ],
+     "median_audible_band_error_db": 2.1
+    },
+    {
+     "ms": [
+      5,
+      15
+     ],
+     "level_error_db": 1.17,
+     "band_error_db": [
+      7.22,
+      7.27,
+      2.93,
+      2.85,
+      0.64,
+      1.45,
+      0.16
+     ],
+     "median_audible_band_error_db": 2.85
+    },
+    {
+     "ms": [
+      15,
+      30
+     ],
+     "level_error_db": 0.38,
+     "band_error_db": [
+      -2.49,
+      0.02,
+      -1.04,
+      -3.12,
+      0.45,
+      0.59,
+      0.72
+     ],
+     "median_audible_band_error_db": 0.72
+    },
+    {
+     "ms": [
+      30,
+      60
+     ],
+     "level_error_db": -0.1,
+     "band_error_db": [
+      -7.96,
+      -0.76,
+      -0.42,
+      -1.58,
+      -0.42,
+      0.29,
+      0.27
+     ],
+     "median_audible_band_error_db": 0.42
+    },
+    {
+     "ms": [
+      60,
+      150
+     ],
+     "level_error_db": -0.16,
+     "band_error_db": [
+      -11.58,
+      -0.39,
+      -1.1,
+      -1.48,
+      0.08,
+      -0.12,
+      -0.34
+     ],
+     "median_audible_band_error_db": 0.36
+    },
+    {
+     "ms": [
+      150,
+      300
+     ],
+     "level_error_db": -0.33,
+     "band_error_db": [
+      -8.47,
+      0.22,
+      -2.42,
+      -0.29,
+      -0.06,
+      -0.4,
+      -0.61
+     ],
+     "median_audible_band_error_db": 0.34
+    },
+    {
+     "ms": [
+      300,
+      600
+     ],
+     "level_error_db": -1.02,
+     "band_error_db": [
+      -10.65,
+      -2.07,
+      -3.26,
+      -1.64,
+      -0.32,
+      -0.49,
+      -0.65
+     ],
+     "median_audible_band_error_db": 1.14
+    },
+    {
+     "ms": [
+      600,
+      1000
+     ],
+     "level_error_db": -0.81,
+     "band_error_db": [
+      -15.79,
+      -1.09,
+      -4.07,
+      -3.53,
+      -0.46,
+      -0.24,
+      0.78
+     ],
+     "median_audible_band_error_db": 0.93
+    }
+   ],
+   "texture": {
+    "50ms 1400-5600": {
+     "recording": {
+      "flatness_db": -16.31,
+      "lines_per_khz": 13.3
+     },
+     "model": {
+      "flatness_db": -15.83,
+      "lines_per_khz": 9.3
+     }
+    },
+    "50ms 5600-11200": {
+     "recording": {
+      "flatness_db": -14.65,
+      "lines_per_khz": 19.5
+     },
+     "model": {
+      "flatness_db": -11.17,
+      "lines_per_khz": 13.4
+     }
+    },
+    "50ms 11200-18000": {
+     "recording": {
+      "flatness_db": -18.32,
+      "lines_per_khz": 17.9
+     },
+     "model": {
+      "flatness_db": -12.5,
+      "lines_per_khz": 10.0
+     }
+    },
+    "300ms 1400-5600": {
+     "recording": {
+      "flatness_db": -17.29,
+      "lines_per_khz": 15.5
+     },
+     "model": {
+      "flatness_db": -14.85,
+      "lines_per_khz": 11.0
+     }
+    },
+    "300ms 5600-11200": {
+     "recording": {
+      "flatness_db": -18.26,
+      "lines_per_khz": 20.9
+     },
+     "model": {
+      "flatness_db": -11.71,
+      "lines_per_khz": 13.4
+     }
+    },
+    "300ms 11200-18000": {
+     "recording": {
+      "flatness_db": -24.85,
+      "lines_per_khz": 18.1
+     },
+     "model": {
+      "flatness_db": -16.46,
+      "lines_per_khz": 9.4
+     }
+    }
+   },
+   "concentration": {
+    "recording": {
+     "top_10_bin_power_fraction": 0.1743,
+     "bins_for_90_percent_power": 1546
+    },
+    "model": {
+     "top_10_bin_power_fraction": 0.1579,
+     "bins_for_90_percent_power": 1993
+    }
+   }
+  },
+  {
+   "character": 5,
+   "slug": "crisp",
+   "name": "Crisp",
+   "reference": "samples-to-analyze/Acoustic Cymbals Vol.1 by Donit/Cymbal - Ride.wav",
+   "windows": [
+    {
+     "ms": [
+      0,
+      5
+     ],
+     "level_error_db": 0.48,
+     "band_error_db": [
+      9.31,
+      7.29,
+      5.65,
+      0.1,
+      0.39,
+      1.59,
+      -0.58
+     ],
+     "median_audible_band_error_db": 1.59
+    },
+    {
+     "ms": [
+      5,
+      15
+     ],
+     "level_error_db": 0.11,
+     "band_error_db": [
+      3.5,
+      3.66,
+      -0.99,
+      -0.04,
+      1.83,
+      0.12,
+      -0.69
+     ],
+     "median_audible_band_error_db": 0.99
+    },
+    {
+     "ms": [
+      15,
+      30
+     ],
+     "level_error_db": 0.35,
+     "band_error_db": [
+      -6.0,
+      4.8,
+      -0.67,
+      0.92,
+      0.29,
+      0.42,
+      -0.04
+     ],
+     "median_audible_band_error_db": 0.67
+    },
+    {
+     "ms": [
+      30,
+      60
+     ],
+     "level_error_db": -0.28,
+     "band_error_db": [
+      -7.64,
+      0.56,
+      -0.88,
+      0.2,
+      -1.71,
+      -0.18,
+      -0.07
+     ],
+     "median_audible_band_error_db": 0.56
+    },
+    {
+     "ms": [
+      60,
+      150
+     ],
+     "level_error_db": -0.34,
+     "band_error_db": [
+      -8.84,
+      -0.95,
+      -1.4,
+      0.04,
+      -0.29,
+      -0.32,
+      -0.1
+     ],
+     "median_audible_band_error_db": 0.3
+    },
+    {
+     "ms": [
+      150,
+      300
+     ],
+     "level_error_db": -0.17,
+     "band_error_db": [
+      -8.7,
+      -0.12,
+      -1.42,
+      -0.61,
+      -0.23,
+      -0.16,
+      0.28
+     ],
+     "median_audible_band_error_db": 0.25
+    },
+    {
+     "ms": [
+      300,
+      600
+     ],
+     "level_error_db": -0.28,
+     "band_error_db": [
+      -9.21,
+      -1.59,
+      -2.04,
+      0.1,
+      0.05,
+      -0.26,
+      0.18
+     ],
+     "median_audible_band_error_db": 0.22
+    },
+    {
+     "ms": [
+      600,
+      1000
+     ],
+     "level_error_db": -0.71,
+     "band_error_db": [
+      -11.74,
+      -2.75,
+      -2.02,
+      -0.53,
+      -0.4,
+      -0.42,
+      1.27
+     ],
+     "median_audible_band_error_db": 1.27
+    }
+   ],
+   "texture": {
+    "50ms 1400-5600": {
+     "recording": {
+      "flatness_db": -15.43,
+      "lines_per_khz": 13.1
+     },
+     "model": {
+      "flatness_db": -16.23,
+      "lines_per_khz": 11.4
+     }
+    },
+    "50ms 5600-11200": {
+     "recording": {
+      "flatness_db": -14.46,
+      "lines_per_khz": 18.8
+     },
+     "model": {
+      "flatness_db": -11.77,
+      "lines_per_khz": 13.0
+     }
+    },
+    "50ms 11200-18000": {
+     "recording": {
+      "flatness_db": -24.25,
+      "lines_per_khz": 7.1
+     },
+     "model": {
+      "flatness_db": -15.81,
+      "lines_per_khz": 3.5
+     }
+    },
+    "300ms 1400-5600": {
+     "recording": {
+      "flatness_db": -21.22,
+      "lines_per_khz": 16.4
+     },
+     "model": {
+      "flatness_db": -18.78,
+      "lines_per_khz": 11.7
+     }
+    },
+    "300ms 5600-11200": {
+     "recording": {
+      "flatness_db": -20.54,
+      "lines_per_khz": 19.5
+     },
+     "model": {
+      "flatness_db": -12.76,
+      "lines_per_khz": 13.0
+     }
+    },
+    "300ms 11200-18000": {
+     "recording": {
+      "flatness_db": -30.37,
+      "lines_per_khz": 8.1
+     },
+     "model": {
+      "flatness_db": -15.89,
+      "lines_per_khz": 3.5
+     }
+    }
+   },
+   "concentration": {
+    "recording": {
+     "top_10_bin_power_fraction": 0.148,
+     "bins_for_90_percent_power": 2424
+    },
+    "model": {
+     "top_10_bin_power_fraction": 0.1551,
+     "bins_for_90_percent_power": 2556
+    }
+   }
+  }
+ ]
+}

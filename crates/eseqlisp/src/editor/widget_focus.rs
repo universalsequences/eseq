@@ -289,6 +289,9 @@ impl Editor {
             .or_else(|| find_open_modal_node(&layout).cloned())
         else {
             crate::widget_render::remove_overlay(modal_widget_id);
+            // No `:on-close` runs for a dead entry; a matrix stock menu that
+            // detached (its matrix moved) would otherwise stay latched.
+            crate::widget_render::matrix::reset_builtin_menu();
             self.mark_needs_redraw();
             return;
         };

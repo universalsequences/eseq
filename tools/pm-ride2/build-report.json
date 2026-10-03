@@ -1,0 +1,56 @@
+{
+ "modes": 480,
+ "ring_modes": 448,
+ "attack_modes": 32,
+ "wash_bands": 21,
+ "cymbals": [
+  {
+   "slug": "dark",
+   "name": "Dark",
+   "file": "samples-to-analyze/Acoustic Cymbals Vol.1 by Donit/Cymbal - Ride_18.wav",
+   "level_gain_db": -6.34,
+   "identified_ring_poles": 5846,
+   "kept_ring_energy_fraction": 0.9026
+  },
+  {
+   "slug": "warm",
+   "name": "Warm",
+   "file": "samples-to-analyze/Acoustic Cymbals Vol.1 by Donit/Cymbal - Ride_22.wav",
+   "level_gain_db": -5.74,
+   "identified_ring_poles": 5958,
+   "kept_ring_energy_fraction": 0.86727
+  },
+  {
+   "slug": "classic",
+   "name": "Classic",
+   "file": "samples-to-analyze/Acoustic Cymbals Vol.1 by Donit/Cymbal - Ride_11.wav",
+   "level_gain_db": -0.88,
+   "identified_ring_poles": 5607,
+   "kept_ring_energy_fraction": 0.82543
+  },
+  {
+   "slug": "dry",
+   "name": "Dry",
+   "file": "samples-to-analyze/Acoustic Cymbals Vol.1 by Donit/Cymbal - Ride_12.wav",
+   "level_gain_db": -0.3,
+   "identified_ring_poles": 5632,
+   "kept_ring_energy_fraction": 0.66813
+  },
+  {
+   "slug": "bright",
+   "name": "Bright",
+   "file": "samples-to-analyze/Acoustic Cymbals Vol.1 by Donit/Cymbal - Ride_10.wav",
+   "level_gain_db": -10.76,
+   "identified_ring_poles": 5306,
+   "kept_ring_energy_fraction": 0.80617
+  },
+  {
+   "slug": "crisp",
+   "name": "Crisp",
+   "file": "samples-to-analyze/Acoustic Cymbals Vol.1 by Donit/Cymbal - Ride.wav",
+   "level_gain_db": -7.14,
+   "identified_ring_poles": 5341,
+   "kept_ring_energy_fraction": 0.8208
+  }
+ ]
+}

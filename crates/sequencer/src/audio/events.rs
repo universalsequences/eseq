@@ -383,6 +383,7 @@ pub(super) fn dispatch_scheduled_step(
     voice_policy: crate::scheduled_event::ScheduledVoicePolicy,
     instrument_fingerprint: u64,
     rack_macro_values: [Option<f32>; crate::sequencer::RACK_MACRO_COUNT],
+    rack_slot_params: &ScheduledRackSlotParams,
 ) {
     unsafe {
         dispatch_effect_chain_for_track(data.lg.0, effect_params);
@@ -402,6 +403,7 @@ pub(super) fn dispatch_scheduled_step(
         sampler_params,
         voice_policy,
         rack_macro_values,
+        rack_slot_params,
     );
 }
 
@@ -420,6 +422,7 @@ pub(super) fn dispatch_scheduled_network_step(
     voice_policy: crate::scheduled_event::ScheduledVoicePolicy,
     instrument_fingerprint: u64,
     rack_macro_values: [Option<f32>; crate::sequencer::RACK_MACRO_COUNT],
+    rack_slot_params: &ScheduledRackSlotParams,
 ) {
     unsafe {
         dispatch_effect_chain_for_track(data.lg.0, effect_params);
@@ -441,6 +444,7 @@ pub(super) fn dispatch_scheduled_network_step(
         sampler_params,
         voice_policy,
         rack_macro_values,
+        rack_slot_params,
     );
 }
 
@@ -465,6 +469,7 @@ pub(super) fn dispatch_scheduled_event(
             voice_policy,
             instrument_fingerprint,
             rack_macro_values,
+            rack_slot_params,
         } => {
             dispatch_scheduled_step(
                 data,
@@ -481,6 +486,7 @@ pub(super) fn dispatch_scheduled_event(
                 *voice_policy,
                 *instrument_fingerprint,
                 *rack_macro_values,
+                rack_slot_params,
             );
         }
         ScheduledEventKind::InstrumentParams {
@@ -515,6 +521,7 @@ pub(super) fn dispatch_scheduled_event(
             voice_policy,
             instrument_fingerprint,
             rack_macro_values,
+            rack_slot_params,
             seed,
             ..
         } => {
@@ -533,6 +540,7 @@ pub(super) fn dispatch_scheduled_event(
                 *voice_policy,
                 *instrument_fingerprint,
                 *rack_macro_values,
+                rack_slot_params,
             );
         }
     }

@@ -2,6 +2,7 @@
   "version": 1,
   "groups": [
     {"label": "Winds", "instruments": ["PM Clarinet", "PM Flute", "PM Saxophone"]},
+    {"label": "Brass", "instruments": ["PM Milagre Brass"]},
     {"label": "Strings", "instruments": ["PM Cello", "PM Electric Bass"]},
     {"label": "Keys", "instruments": ["PM Piano"]},
     {"label": "Cymbals", "instruments": ["PM Crash", "PM Hi-Hat", "PM Ride"]},

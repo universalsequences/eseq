@@ -1873,6 +1873,17 @@ impl App {
         // The clip capture may convert a legacy rack first, which rewrites the
         // group; read the rack only after it.
         let content = self.capture_kit_content(group_id, scene_selection)?;
+        // The clip whose groove the kit carries: the first exported scene's,
+        // else the one the rack plays now. On a clip rack every groove edit
+        // lands in that clip's own groove, so `rack.groove` alone is often a
+        // stale default. Read after the capture, which may have converted a
+        // legacy rack.
+        let groove_clip = self.state.with_scenes(|scenes| {
+            scene_selection
+                .iter()
+                .find_map(|scene| scenes.scene_rack_clip(*scene, group_id))
+                .or_else(|| scenes.current_rack_clip(group_id))
+        });
         let group = self
             .groups
             .iter()
@@ -1883,9 +1894,16 @@ impl App {
         };
         // The rack's pocket travels with it (kit version 6): a copy of its
         // active pool groove plus the amounts. Pad rows are keyed by pad
-        // note, which is already kit space.
-        let groove = crate::groove::KitGroove::from_rack(&rack.groove, &self.grooves)
+        // note, which is already kit space. A kit carries ONE groove, so
+        // clips playing a different one of their own lose it (warned below).
+        let carried_settings = rack.groove_for_clip(groove_clip);
+        let groove = crate::groove::KitGroove::from_rack(carried_settings, &self.grooves)
             .map(crate::project::KitGrooveField::Copy);
+        let dropped_clip_grooves = rack
+            .clip_grooves
+            .iter()
+            .filter(|entry| &entry.settings != carried_settings)
+            .count();
         let color = group.color;
         let bus_id = group.bus_id;
         // Resolve every pad against the member list up front: capturing a pad
@@ -1899,6 +1917,14 @@ impl App {
         let super::break_kits::CapturedKitContent { sequencers, instances, clips, mut warnings } =
             content;
         warnings.extend(roster.warnings.iter().cloned());
+        if dropped_clip_grooves > 0 {
+            warnings.push(format!(
+                "{dropped_clip_grooves} clip{} {} a groove of {} own; only one groove travels with the kit",
+                if dropped_clip_grooves == 1 { "" } else { "s" },
+                if dropped_clip_grooves == 1 { "has" } else { "have" },
+                if dropped_clip_grooves == 1 { "its" } else { "their" },
+            ));
+        }
         // The rack's internal cables (§7.5), read before the pad captures
         // below, which snapshot the project.
         let (mod_connections, dropped_cables) =
@@ -2325,6 +2351,9 @@ impl App {
 
         let kit_carries_grooves = kit.carries_grooves();
         let kit_carried_groove = kit.carried_groove();
+        // A kit with clips replaces the rack's clip bank below; one without
+        // keeps it (and the clips' own grooves with it).
+        let kit_installs_clips = !kit.clips.is_empty();
         let history_checkpoint = self.history.clone();
         let history_len = self.history.undo_len();
         let result = (|| {
@@ -2436,10 +2465,16 @@ impl App {
                 // about grooves and leaves the rack's selection alone. The
                 // pool itself is never trimmed here. Pad rows key on pad
                 // note, so pads without a row play the shared row.
-                let groove = group
+                //
+                // Clip grooves are keyed by the scene bank's clip ids. A kit
+                // without clips keeps that bank, so its clips keep their own
+                // grooves, unless the kit carries a groove: that one plays on
+                // every clip ("Apply to All Clips" semantics). A kit with
+                // clips replaces the bank, so the old entries go.
+                let (groove, old_clip_grooves) = group
                     .rack
                     .take()
-                    .map(|rack| rack.groove)
+                    .map(|rack| (rack.groove, rack.clip_grooves))
                     .unwrap_or_default();
                 let mut rack = crate::project::ProjectRackConfig {
                     sequencers: Vec::new(),
@@ -2448,14 +2483,18 @@ impl App {
                     clips: Vec::new(),
                     next_clip_id: 0,
                     groove,
-                    // A kit installs no clips, so no clip plays its own groove.
-                    clip_grooves: Vec::new(),
+                    clip_grooves: if kit_installs_clips {
+                        Vec::new()
+                    } else {
+                        old_clip_grooves
+                    },
                 };
                 if let Some(kit_groove) = &kit_groove {
                     rack.groove = super::rack_grooves::kit_groove_settings(
                         &mut app.grooves,
                         kit_groove.as_ref(),
                     );
+                    rack.clip_grooves.clear();
                 }
                 app.groups[group_index].rack = Some(rack);
                 Ok(())
@@ -4425,6 +4464,14 @@ impl App {
         // is the single authority, and save rebuilds the serialized form.
         for group in &mut self.groups {
             if let Some(rack) = group.rack.as_mut() {
+                // A clip's own groove only means something while that clip
+                // exists. Drop orphans (a clip deleted by an older build, or
+                // a rack with no clips at all): a rack whose bank is not
+                // rebuilt here restarts clip ids at 1, and a reissued id
+                // must not inherit a deleted clip's groove.
+                let live_clips: Vec<crate::project::RackClipId> =
+                    rack.clips.iter().map(|clip| clip.id).collect();
+                rack.clip_grooves.retain(|entry| live_clips.contains(&entry.clip));
                 rack.clips = Vec::new();
                 rack.next_clip_id = 0;
             }

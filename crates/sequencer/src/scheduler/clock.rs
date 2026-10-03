@@ -753,21 +753,13 @@ impl SnapshotSequencerClock {
         Self::derive_local_step(tc, position, num_steps)
     }
 
-    /// Capture one sequence-roll anchor per track from the current live clock
-    /// position (docs/rolling-core-spec.md 5.1). Each track uses its own
-    /// precomputed cycle, including timebase overrides and Sync padding.
-    pub(super) fn capture_roll_windows(
-        &mut self,
-        snapshot: &SequencerSnapshot,
-        grid_beats: f64,
-    ) -> [Option<f64>; MAX_TRACKS] {
-        let at_beats = self.total_beats;
-        self.capture_roll_windows_at(snapshot, grid_beats, at_beats)
-    }
-
-    /// `capture_roll_windows` anchored at an explicit absolute transport beat
-    /// instead of the frontier: a process roll (`roll!`) anchors on the step
-    /// that fired it, which the lookahead frontier may already be past.
+    /// Capture one sequence-roll anchor per track at an absolute transport
+    /// beat (docs/rolling-core-spec.md 5.1). Each track uses its own
+    /// precomputed cycle, including timebase overrides and Sync padding. The
+    /// beat is never the bare frontier: a manual sequence roll anchors on the
+    /// audible position (the frontier less its lead over the render head),
+    /// and a process roll (`roll!`) on the step that fired it, which the
+    /// lookahead frontier may already be past.
     pub(super) fn capture_roll_windows_at(
         &mut self,
         snapshot: &SequencerSnapshot,

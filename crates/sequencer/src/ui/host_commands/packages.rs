@@ -2416,10 +2416,14 @@ fn package_nodes_to_value(items: &[PackageTreeNode]) -> Value {
         items
             .iter()
             .map(|item| {
+                // A module that defines instance kinds (a sequencer you can
+                // make "New <kind>" of) wears the instance glyph, so it stands
+                // apart from plain library files.
                 let icon = match item.kind {
                     "root" | "folder" => "folder",
                     "package" | "orphan" => "project",
                     "instance" => "midi-fx",
+                    "module" if !item.kinds.is_empty() => "midi-fx",
                     _ => "document",
                 };
                 let mut fields: Vec<(&str, Value)> = vec![

@@ -479,6 +479,14 @@ pub(super) fn build_selected_rack_slot_instrument_value(
         "rack-slot".to_string(),
         value_cell(Value::Number(slot_idx as f64)),
     );
+    // The slot panner sums this slot's voices and feeds the slot's own fx.
+    panel_map.insert(
+        "meter".to_string(),
+        device_meter_source(
+            "rack-slot",
+            &[("index", track as f64), ("rack-slot", slot_idx as f64)],
+        ),
+    );
     insert_string_prop(&mut panel_map, "name", raw_name.clone());
     insert_string_prop(
         &mut panel_map,
@@ -940,6 +948,17 @@ pub(super) fn build_rack_slot_effect_value(
         value_cell(Value::Number(rack_slot as f64)),
     );
     effect.insert("rack-fx".to_string(), value_cell(Value::Bool(true)));
+    effect.insert(
+        "meter".to_string(),
+        device_meter_source(
+            "rack-effect",
+            &[
+                ("index", track as f64),
+                ("rack-slot", rack_slot as f64),
+                ("slot", effect_slot as f64),
+            ],
+        ),
+    );
     effect.insert(
         "builtin".to_string(),
         value_cell(Value::Bool(

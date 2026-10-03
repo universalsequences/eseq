@@ -1,0 +1,2244 @@
+{
+ "summary": {
+  "median_level_error_db": [
+   4.15,
+   0.33,
+   -2.59
+  ],
+  "median_abs_level_error_db": [
+   6.97,
+   2.24,
+   2.73
+  ],
+  "median_weighted_band_abs_db": [
+   7.51,
+   3.15,
+   4.13
+  ]
+ },
+ "rows": [
+  {
+   "group": "C#2",
+   "onset_s": 0.10427083333333333,
+   "windows": [
+    {
+     "ms": [
+      0,
+      30
+     ],
+     "level_error_db": 3.25,
+     "band_error_db": [
+      6.8,
+      2.7,
+      -0.2,
+      1.9,
+      -0.7,
+      -5.5,
+      2.8
+     ],
+     "weighted_band_abs_db": 2.84
+    },
+    {
+     "ms": [
+      30,
+      100
+     ],
+     "level_error_db": 2.88,
+     "band_error_db": [
+      11.2,
+      -3.1,
+      -2.5,
+      3.2,
+      2.5,
+      2.1,
+      null
+     ],
+     "weighted_band_abs_db": 3.91
+    },
+    {
+     "ms": [
+      100,
+      250
+     ],
+     "level_error_db": 4.25,
+     "band_error_db": [
+      8.0,
+      -0.6,
+      -2.4,
+      2.4,
+      1.3,
+      null,
+      0.4
+     ],
+     "weighted_band_abs_db": 3.46
+    }
+   ]
+  },
+  {
+   "group": "C#2",
+   "onset_s": 10.410666666666666,
+   "windows": [
+    {
+     "ms": [
+      0,
+      30
+     ],
+     "level_error_db": 6.97,
+     "band_error_db": [
+      19.4,
+      6.8,
+      -8.7,
+      -5.3,
+      -8.4,
+      -40.6,
+      -47.3
+     ],
+     "weighted_band_abs_db": 10.43
+    },
+    {
+     "ms": [
+      30,
+      100
+     ],
+     "level_error_db": 11.03,
+     "band_error_db": [
+      null,
+      null,
+      -9.1,
+      -3.4,
+      -3.5,
+      -47.2,
+      -66.5
+     ],
+     "weighted_band_abs_db": 9.45
+    },
+    {
+     "ms": [
+      100,
+      250
+     ],
+     "level_error_db": 18.03,
+     "band_error_db": [
+      null,
+      null,
+      -4.8,
+      -2.9,
+      -6.0,
+      -49.4,
+      -63.9
+     ],
+     "weighted_band_abs_db": 5.47
+    }
+   ]
+  },
+  {
+   "group": "D#2",
+   "onset_s": 9.774375,
+   "windows": [
+    {
+     "ms": [
+      0,
+      30
+     ],
+     "level_error_db": 1.73,
+     "band_error_db": [
+      null,
+      null,
+      -5.0,
+      -1.3,
+      -5.3,
+      -32.7,
+      -48.7
+     ],
+     "weighted_band_abs_db": 6.72
+    },
+    {
+     "ms": [
+      30,
+      100
+     ],
+     "level_error_db": -0.02,
+     "band_error_db": [
+      0.5,
+      -0.8,
+      -0.3,
+      1.0,
+      3.2,
+      -36.5,
+      -71.4
+     ],
+     "weighted_band_abs_db": 1.14
+    },
+    {
+     "ms": [
+      100,
+      250
+     ],
+     "level_error_db": 5.02,
+     "band_error_db": [
+      null,
+      null,
+      -4.4,
+      1.8,
+      -4.9,
+      -49.0,
+      -71.0
+     ],
+     "weighted_band_abs_db": 6.31
+    }
+   ]
+  },
+  {
+   "group": "D#2",
+   "onset_s": 14.944458333333333,
+   "windows": [
+    {
+     "ms": [
+      0,
+      30
+     ],
+     "level_error_db": 10.73,
+     "band_error_db": [
+      8.1,
+      15.9,
+      0.3,
+      10.8,
+      16.7,
+      18.7,
+      23.3
+     ],
+     "weighted_band_abs_db": 6.33
+    },
+    {
+     "ms": [
+      30,
+      100
+     ],
+     "level_error_db": 14.55,
+     "band_error_db": [
+      null,
+      null,
+      6.9,
+      15.0,
+      21.1,
+      25.0,
+      24.0
+     ],
+     "weighted_band_abs_db": 8.35
+    },
+    {
+     "ms": [
+      100,
+      250
+     ],
+     "level_error_db": 11.75,
+     "band_error_db": [
+      null,
+      null,
+      4.2,
+      14.8,
+      null,
+      null,
+      16.6
+     ],
+     "weighted_band_abs_db": 4.93
+    }
+   ]
+  },
+  {
+   "group": "D#2",
+   "onset_s": 4.5986666666666665,
+   "windows": [
+    {
+     "ms": [
+      0,
+      30
+     ],
+     "level_error_db": 7.16,
+     "band_error_db": [
+      8.2,
+      4.2,
+      null,
+      5.6,
+      -7.1,
+      -25.1,
+      null
+     ],
+     "weighted_band_abs_db": 6.0
+    },
+    {
+     "ms": [
+      30,
+      100
+     ],
+     "level_error_db": -2.64,
+     "band_error_db": [
+      -0.6,
+      -3.3,
+      -5.5,
+      -7.2,
+      -13.0,
+      -60.3,
+      -72.2
+     ],
+     "weighted_band_abs_db": 3.72
+    },
+    {
+     "ms": [
+      100,
+      250
+     ],
+     "level_error_db": -3.39,
+     "band_error_db": [
+      -4.0,
+      -2.6,
+      -4.4,
+      -2.3,
+      null,
+      null,
+      null
+     ],
+     "weighted_band_abs_db": 3.46
+    }
+   ]
+  },
+  {
+   "group": "G#2",
+   "onset_s": 1.8679791666666667,
+   "windows": [
+    {
+     "ms": [
+      0,
+      30
+     ],
+     "level_error_db": 10.62,
+     "band_error_db": [
+      7.0,
+      18.0,
+      -4.6,
+      -4.1,
+      -10.7,
+      -11.2,
+      -33.1
+     ],
+     "weighted_band_abs_db": 8.39
+    },
+    {
+     "ms": [
+      30,
+      100
+     ],
+     "level_error_db": 0.01,
+     "band_error_db": [
+      -0.5,
+      13.4,
+      -5.7,
+      null,
+      null,
+      null,
+      null
+     ],
+     "weighted_band_abs_db": 0.54
+    },
+    {
+     "ms": [
+      100,
+      250
+     ],
+     "level_error_db": -5.32,
+     "band_error_db": [
+      -4.9,
+      -12.1,
+      -21.6,
+      -25.1,
+      -32.8,
+      null,
+      null
+     ],
+     "weighted_band_abs_db": 6.24
+    }
+   ]
+  },
+  {
+   "group": "G#2",
+   "onset_s": 0.5933541666666666,
+   "windows": [
+    {
+     "ms": [
+      0,
+      30
+     ],
+     "level_error_db": 16.93,
+     "band_error_db": [
+      28.5,
+      16.1,
+      null,
+      -2.3,
+      -8.0,
+      -5.0,
+      -32.2
+     ],
+     "weighted_band_abs_db": 15.48
+    },
+    {
+     "ms": [
+      30,
+      100
+     ],
+     "level_error_db": 0.67,
+     "band_error_db": [
+      -0.3,
+      5.6,
+      null,
+      null,
+      null,
+      null,
+      null
+     ],
+     "weighted_band_abs_db": 0.75
+    },
+    {
+     "ms": [
+      100,
+      250
+     ],
+     "level_error_db": -3.11,
+     "band_error_db": [
+      -3.2,
+      5.8,
+      null,
+      null,
+      null,
+      null,
+      null
+     ],
+     "weighted_band_abs_db": 3.2
+    }
+   ]
+  },
+  {
+   "group": "G#2",
+   "onset_s": 9.137729166666666,
+   "windows": [
+    {
+     "ms": [
+      0,
+      30
+     ],
+     "level_error_db": 10.73,
+     "band_error_db": [
+      9.3,
+      11.4,
+      1.3,
+      -5.8,
+      -4.9,
+      -8.8,
+      -29.5
+     ],
+     "weighted_band_abs_db": 10.39
+    },
+    {
+     "ms": [
+      30,
+      100
+     ],
+     "level_error_db": 0.26,
+     "band_error_db": [
+      -0.8,
+      2.9,
+      0.6,
+      -7.4,
+      null,
+      null,
+      null
+     ],
+     "weighted_band_abs_db": 1.19
+    },
+    {
+     "ms": [
+      100,
+      250
+     ],
+     "level_error_db": -3.02,
+     "band_error_db": [
+      -3.2,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+     ],
+     "weighted_band_abs_db": 3.17
+    }
+   ]
+  },
+  {
+   "group": "G#2",
+   "onset_s": 5.7215,
+   "windows": [
+    {
+     "ms": [
+      0,
+      30
+     ],
+     "level_error_db": 11.79,
+     "band_error_db": [
+      10.8,
+      12.3,
+      null,
+      1.6,
+      -13.7,
+      -14.5,
+      -27.6
+     ],
+     "weighted_band_abs_db": 11.89
+    },
+    {
+     "ms": [
+      30,
+      100
+     ],
+     "level_error_db": 0.47,
+     "band_error_db": [
+      -0.7,
+      5.9,
+      null,
+      null,
+      null,
+      null,
+      null
+     ],
+     "weighted_band_abs_db": 1.11
+    },
+    {
+     "ms": [
+      100,
+      250
+     ],
+     "level_error_db": -2.59,
+     "band_error_db": [
+      -2.7,
+      10.4,
+      null,
+      null,
+      null,
+      null,
+      null
+     ],
+     "weighted_band_abs_db": 2.69
+    }
+   ]
+  },
+  {
+   "group": "G#2",
+   "onset_s": 10.892729166666667,
+   "windows": [
+    {
+     "ms": [
+      0,
+      30
+     ],
+     "level_error_db": 9.92,
+     "band_error_db": [
+      10.6,
+      9.9,
+      8.9,
+      -5.2,
+      -8.6,
+      -7.2,
+      null
+     ],
+     "weighted_band_abs_db": 9.95
+    },
+    {
+     "ms": [
+      30,
+      100
+     ],
+     "level_error_db": 0.18,
+     "band_error_db": [
+      -0.9,
+      4.0,
+      null,
+      null,
+      null,
+      null,
+      null
+     ],
+     "weighted_band_abs_db": 1.3
+    },
+    {
+     "ms": [
+      100,
+      250
+     ],
+     "level_error_db": -2.6,
+     "band_error_db": [
+      -2.7,
+      8.2,
+      null,
+      null,
+      null,
+      null,
+      null
+     ],
+     "weighted_band_abs_db": 2.71
+    }
+   ]
+  },
+  {
+   "group": "G#2",
+   "onset_s": 7.8542708333333335,
+   "windows": [
+    {
+     "ms": [
+      0,
+      30
+     ],
+     "level_error_db": 16.09,
+     "band_error_db": [
+      16.2,
+      16.2,
+      null,
+      -1.0,
+      -7.3,
+      -10.5,
+      -23.4
+     ],
+     "weighted_band_abs_db": 15.89
+    },
+    {
+     "ms": [
+      30,
+      100
+     ],
+     "level_error_db": 2.18,
+     "band_error_db": [
+      0.3,
+      null,
+      null,
+      -10.0,
+      null,
+      null,
+      null
+     ],
+     "weighted_band_abs_db": 0.35
+    },
+    {
+     "ms": [
+      100,
+      250
+     ],
+     "level_error_db": -1.63,
+     "band_error_db": [
+      -1.8,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+     ],
+     "weighted_band_abs_db": 1.75
+    }
+   ]
+  },
+  {
+   "group": "G#2",
+   "onset_s": 7.021020833333333,
+   "windows": [
+    {
+     "ms": [
+      0,
+      30
+     ],
+     "level_error_db": 13.14,
+     "band_error_db": [
+      13.8,
+      13.3,
+      1.8,
+      -3.9,
+      -10.5,
+      -7.5,
+      -24.3
+     ],
+     "weighted_band_abs_db": 12.8
+    },
+    {
+     "ms": [
+      30,
+      100
+     ],
+     "level_error_db": 1.5,
+     "band_error_db": [
+      0.3,
+      6.4,
+      -0.4,
+      -8.5,
+      null,
+      null,
+      null
+     ],
+     "weighted_band_abs_db": 0.93
+    },
+    {
+     "ms": [
+      100,
+      250
+     ],
+     "level_error_db": -1.47,
+     "band_error_db": [
+      -1.5,
+      5.2,
+      -8.5,
+      null,
+      null,
+      null,
+      null
+     ],
+     "weighted_band_abs_db": 1.63
+    }
+   ]
+  },
+  {
+   "group": "G#2",
+   "onset_s": 14.294145833333333,
+   "windows": [
+    {
+     "ms": [
+      0,
+      30
+     ],
+     "level_error_db": 13.77,
+     "band_error_db": [
+      16.7,
+      13.1,
+      null,
+      -4.8,
+      -5.4,
+      -7.0,
+      -22.1
+     ],
+     "weighted_band_abs_db": 13.48
+    },
+    {
+     "ms": [
+      30,
+      100
+     ],
+     "level_error_db": 2.22,
+     "band_error_db": [
+      0.2,
+      null,
+      null,
+      -10.0,
+      null,
+      null,
+      null
+     ],
+     "weighted_band_abs_db": 0.19
+    },
+    {
+     "ms": [
+      100,
+      250
+     ],
+     "level_error_db": -1.22,
+     "band_error_db": [
+      -1.3,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+     ],
+     "weighted_band_abs_db": 1.34
+    }
+   ]
+  },
+  {
+   "group": "F3",
+   "onset_s": 3.7787916666666668,
+   "windows": [
+    {
+     "ms": [
+      0,
+      30
+     ],
+     "level_error_db": -12.22,
+     "band_error_db": [
+      -6.9,
+      -16.9,
+      -3.3,
+      -8.1,
+      -10.5,
+      -4.4,
+      -6.3
+     ],
+     "weighted_band_abs_db": 15.44
+    },
+    {
+     "ms": [
+      30,
+      100
+     ],
+     "level_error_db": 6.46,
+     "band_error_db": [
+      null,
+      null,
+      2.4,
+      -5.8,
+      -6.2,
+      1.6,
+      -0.6
+     ],
+     "weighted_band_abs_db": 3.38
+    },
+    {
+     "ms": [
+      100,
+      250
+     ],
+     "level_error_db": 8.87,
+     "band_error_db": [
+      null,
+      null,
+      5.5,
+      10.9,
+      null,
+      null,
+      null
+     ],
+     "weighted_band_abs_db": 5.52
+    }
+   ]
+  },
+  {
+   "group": "F3",
+   "onset_s": 8.96125,
+   "windows": [
+    {
+     "ms": [
+      0,
+      30
+     ],
+     "level_error_db": -3.36,
+     "band_error_db": [
+      null,
+      null,
+      -7.6,
+      -10.8,
+      -12.9,
+      -8.5,
+      -10.0
+     ],
+     "weighted_band_abs_db": 8.64
+    },
+    {
+     "ms": [
+      30,
+      100
+     ],
+     "level_error_db": 3.67,
+     "band_error_db": [
+      null,
+      null,
+      -6.8,
+      -10.9,
+      -3.9,
+      -3.3,
+      null
+     ],
+     "weighted_band_abs_db": 6.98
+    },
+    {
+     "ms": [
+      100,
+      250
+     ],
+     "level_error_db": -19.55,
+     "band_error_db": [
+      -45.2,
+      -15.0,
+      -11.2,
+      -22.9,
+      -26.5,
+      null,
+      null
+     ],
+     "weighted_band_abs_db": 35.29
+    }
+   ]
+  },
+  {
+   "group": "F3",
+   "onset_s": 12.143145833333334,
+   "windows": [
+    {
+     "ms": [
+      0,
+      30
+     ],
+     "level_error_db": -9.4,
+     "band_error_db": [
+      -26.6,
+      null,
+      -1.6,
+      -6.0,
+      0.8,
+      -6.5,
+      null
+     ],
+     "weighted_band_abs_db": 22.51
+    },
+    {
+     "ms": [
+      30,
+      100
+     ],
+     "level_error_db": -10.09,
+     "band_error_db": [
+      -30.1,
+      null,
+      -1.7,
+      -6.1,
+      2.3,
+      null,
+      null
+     ],
+     "weighted_band_abs_db": 26.35
+    },
+    {
+     "ms": [
+      100,
+      250
+     ],
+     "level_error_db": -8.04,
+     "band_error_db": [
+      null,
+      null,
+      -7.4,
+      -18.4,
+      -25.1,
+      -39.4,
+      -37.1
+     ],
+     "weighted_band_abs_db": 24.41
+    }
+   ]
+  },
+  {
+   "group": "F3",
+   "onset_s": 3.155708333333333,
+   "windows": [
+    {
+     "ms": [
+      0,
+      30
+     ],
+     "level_error_db": -7.24,
+     "band_error_db": [
+      -19.8,
+      -13.1,
+      -1.8,
+      -3.5,
+      -0.3,
+      -1.7,
+      6.4
+     ],
+     "weighted_band_abs_db": 12.78
+    },
+    {
+     "ms": [
+      30,
+      100
+     ],
+     "level_error_db": -5.4,
+     "band_error_db": [
+      -18.9,
+      -4.8,
+      -4.2,
+      -2.3,
+      4.1,
+      null,
+      null
+     ],
+     "weighted_band_abs_db": 7.45
+    },
+    {
+     "ms": [
+      100,
+      250
+     ],
+     "level_error_db": -5.21,
+     "band_error_db": [
+      null,
+      -5.7,
+      -4.7,
+      2.4,
+      null,
+      null,
+      null
+     ],
+     "weighted_band_abs_db": 5.29
+    }
+   ]
+  },
+  {
+   "group": "F3",
+   "onset_s": 13.8393125,
+   "windows": [
+    {
+     "ms": [
+      0,
+      30
+     ],
+     "level_error_db": -5.53,
+     "band_error_db": [
+      -12.9,
+      -7.6,
+      -3.3,
+      -8.1,
+      -3.5,
+      -1.1,
+      6.7
+     ],
+     "weighted_band_abs_db": 6.4
+    },
+    {
+     "ms": [
+      30,
+      100
+     ],
+     "level_error_db": -4.02,
+     "band_error_db": [
+      -16.5,
+      -2.5,
+      -6.3,
+      -3.8,
+      -0.9,
+      null,
+      null
+     ],
+     "weighted_band_abs_db": 5.23
+    },
+    {
+     "ms": [
+      100,
+      250
+     ],
+     "level_error_db": -6.12,
+     "band_error_db": [
+      -17.9,
+      -5.1,
+      -8.1,
+      3.7,
+      null,
+      null,
+      null
+     ],
+     "weighted_band_abs_db": 6.65
+    }
+   ]
+  },
+  {
+   "group": "F3",
+   "onset_s": 14.599520833333333,
+   "windows": [
+    {
+     "ms": [
+      0,
+      30
+     ],
+     "level_error_db": -4.65,
+     "band_error_db": [
+      null,
+      -6.9,
+      -3.1,
+      -7.6,
+      -12.9,
+      -8.9,
+      -11.7
+     ],
+     "weighted_band_abs_db": 5.78
+    },
+    {
+     "ms": [
+      30,
+      100
+     ],
+     "level_error_db": 2.1,
+     "band_error_db": [
+      null,
+      null,
+      -3.9,
+      -4.9,
+      -10.5,
+      -5.6,
+      null
+     ],
+     "weighted_band_abs_db": 3.98
+    },
+    {
+     "ms": [
+      100,
+      250
+     ],
+     "level_error_db": -16.73,
+     "band_error_db": [
+      null,
+      -18.7,
+      -9.8,
+      -13.0,
+      -26.1,
+      null,
+      null
+     ],
+     "weighted_band_abs_db": 18.0
+    }
+   ]
+  },
+  {
+   "group": "F3",
+   "onset_s": 6.876895833333333,
+   "windows": [
+    {
+     "ms": [
+      0,
+      30
+     ],
+     "level_error_db": -6.03,
+     "band_error_db": [
+      7.5,
+      -8.0,
+      -4.3,
+      -9.7,
+      -15.4,
+      -7.8,
+      null
+     ],
+     "weighted_band_abs_db": 7.1
+    },
+    {
+     "ms": [
+      30,
+      100
+     ],
+     "level_error_db": -2.36,
+     "band_error_db": [
+      null,
+      -1.7,
+      -4.8,
+      -7.3,
+      -5.1,
+      null,
+      null
+     ],
+     "weighted_band_abs_db": 2.69
+    },
+    {
+     "ms": [
+      100,
+      250
+     ],
+     "level_error_db": -21.71,
+     "band_error_db": [
+      -42.5,
+      -14.4,
+      -7.6,
+      -18.7,
+      null,
+      null,
+      null
+     ],
+     "weighted_band_abs_db": 38.23
+    }
+   ]
+  },
+  {
+   "group": "F3",
+   "onset_s": 0.9325208333333334,
+   "windows": [
+    {
+     "ms": [
+      0,
+      30
+     ],
+     "level_error_db": -3.28,
+     "band_error_db": [
+      null,
+      -13.0,
+      3.0,
+      -2.4,
+      -3.7,
+      -7.8,
+      4.3
+     ],
+     "weighted_band_abs_db": 10.87
+    },
+    {
+     "ms": [
+      30,
+      100
+     ],
+     "level_error_db": -4.26,
+     "band_error_db": [
+      null,
+      -10.9,
+      2.0,
+      null,
+      null,
+      null,
+      null
+     ],
+     "weighted_band_abs_db": 9.4
+    },
+    {
+     "ms": [
+      100,
+      250
+     ],
+     "level_error_db": 0.47,
+     "band_error_db": [
+      null,
+      -0.2,
+      4.0,
+      null,
+      null,
+      null,
+      null
+     ],
+     "weighted_band_abs_db": 0.54
+    }
+   ]
+  },
+  {
+   "group": "F3",
+   "onset_s": 6.0810208333333335,
+   "windows": [
+    {
+     "ms": [
+      0,
+      30
+     ],
+     "level_error_db": -3.87,
+     "band_error_db": [
+      null,
+      -13.8,
+      -0.6,
+      -3.3,
+      -10.3,
+      -3.4,
+      7.2
+     ],
+     "weighted_band_abs_db": 8.69
+    },
+    {
+     "ms": [
+      30,
+      100
+     ],
+     "level_error_db": -2.91,
+     "band_error_db": [
+      null,
+      -4.8,
+      -0.9,
+      -2.7,
+      -6.1,
+      null,
+      null
+     ],
+     "weighted_band_abs_db": 3.54
+    },
+    {
+     "ms": [
+      100,
+      250
+     ],
+     "level_error_db": -4.49,
+     "band_error_db": [
+      null,
+      -5.4,
+      -3.7,
+      null,
+      null,
+      null,
+      null
+     ],
+     "weighted_band_abs_db": 4.66
+    }
+   ]
+  },
+  {
+   "group": "F3",
+   "onset_s": 4.926645833333334,
+   "windows": [
+    {
+     "ms": [
+      0,
+      30
+     ],
+     "level_error_db": -1.76,
+     "band_error_db": [
+      0.3,
+      -5.1,
+      -0.7,
+      -6.4,
+      -7.5,
+      -1.7,
+      12.1
+     ],
+     "weighted_band_abs_db": 2.52
+    },
+    {
+     "ms": [
+      30,
+      100
+     ],
+     "level_error_db": -3.24,
+     "band_error_db": [
+      -10.7,
+      -2.9,
+      -2.2,
+      -4.3,
+      -5.6,
+      null,
+      null
+     ],
+     "weighted_band_abs_db": 3.91
+    },
+    {
+     "ms": [
+      100,
+      250
+     ],
+     "level_error_db": -6.59,
+     "band_error_db": [
+      -20.1,
+      -7.8,
+      -2.6,
+      -1.9,
+      -12.1,
+      null,
+      null
+     ],
+     "weighted_band_abs_db": 8.53
+    }
+   ]
+  },
+  {
+   "group": "F3",
+   "onset_s": 8.3338125,
+   "windows": [
+    {
+     "ms": [
+      0,
+      30
+     ],
+     "level_error_db": -5.27,
+     "band_error_db": [
+      -5.5,
+      -9.2,
+      -1.9,
+      -10.3,
+      -8.5,
+      -2.9,
+      8.4
+     ],
+     "weighted_band_abs_db": 6.71
+    },
+    {
+     "ms": [
+      30,
+      100
+     ],
+     "level_error_db": -4.07,
+     "band_error_db": [
+      -13.0,
+      -2.5,
+      -4.0,
+      -8.1,
+      -4.3,
+      null,
+      null
+     ],
+     "weighted_band_abs_db": 5.43
+    },
+    {
+     "ms": [
+      100,
+      250
+     ],
+     "level_error_db": -6.13,
+     "band_error_db": [
+      null,
+      -9.5,
+      -4.1,
+      -0.1,
+      null,
+      null,
+      null
+     ],
+     "weighted_band_abs_db": 7.02
+    }
+   ]
+  },
+  {
+   "group": "F3",
+   "onset_s": 11.224645833333334,
+   "windows": [
+    {
+     "ms": [
+      0,
+      30
+     ],
+     "level_error_db": -3.48,
+     "band_error_db": [
+      null,
+      -18.0,
+      -0.9,
+      -8.2,
+      -11.6,
+      -4.7,
+      null
+     ],
+     "weighted_band_abs_db": 11.06
+    },
+    {
+     "ms": [
+      30,
+      100
+     ],
+     "level_error_db": -3.61,
+     "band_error_db": [
+      null,
+      -17.6,
+      -0.2,
+      -7.7,
+      -10.7,
+      null,
+      null
+     ],
+     "weighted_band_abs_db": 10.67
+    },
+    {
+     "ms": [
+      100,
+      250
+     ],
+     "level_error_db": -2.96,
+     "band_error_db": [
+      null,
+      -4.2,
+      -2.1,
+      null,
+      null,
+      null,
+      null
+     ],
+     "weighted_band_abs_db": 3.16
+    }
+   ]
+  },
+  {
+   "group": "G3",
+   "onset_s": 9.539416666666666,
+   "windows": [
+    {
+     "ms": [
+      0,
+      30
+     ],
+     "level_error_db": 2.96,
+     "band_error_db": [
+      -11.0,
+      16.5,
+      null,
+      1.1,
+      -9.8,
+      -15.0,
+      -26.7
+     ],
+     "weighted_band_abs_db": 11.22
+    },
+    {
+     "ms": [
+      30,
+      100
+     ],
+     "level_error_db": 1.49,
+     "band_error_db": [
+      null,
+      1.2,
+      null,
+      null,
+      -15.4,
+      -25.1,
+      -37.0
+     ],
+     "weighted_band_abs_db": 1.5
+    },
+    {
+     "ms": [
+      100,
+      250
+     ],
+     "level_error_db": -2.24,
+     "band_error_db": [
+      null,
+      -2.2,
+      null,
+      -19.0,
+      -31.4,
+      -44.5,
+      -66.6
+     ],
+     "weighted_band_abs_db": 3.64
+    }
+   ]
+  },
+  {
+   "group": "G3",
+   "onset_s": 5.041604166666667,
+   "windows": [
+    {
+     "ms": [
+      0,
+      30
+     ],
+     "level_error_db": 19.7,
+     "band_error_db": [
+      null,
+      null,
+      0.4,
+      null,
+      null,
+      5.5,
+      -13.7
+     ],
+     "weighted_band_abs_db": 0.44
+    },
+    {
+     "ms": [
+      30,
+      100
+     ],
+     "level_error_db": 0.33,
+     "band_error_db": [
+      -7.2,
+      1.5,
+      null,
+      null,
+      null,
+      null,
+      null
+     ],
+     "weighted_band_abs_db": 3.15
+    },
+    {
+     "ms": [
+      100,
+      250
+     ],
+     "level_error_db": 11.92,
+     "band_error_db": [
+      -5.3,
+      null,
+      null,
+      null,
+      -26.9,
+      -37.9,
+      -62.4
+     ],
+     "weighted_band_abs_db": 18.81
+    }
+   ]
+  },
+  {
+   "group": "G3",
+   "onset_s": 3.478125,
+   "windows": [
+    {
+     "ms": [
+      0,
+      30
+     ],
+     "level_error_db": 5.99,
+     "band_error_db": [
+      3.2,
+      6.8,
+      -2.5,
+      3.4,
+      -12.2,
+      -17.2,
+      null
+     ],
+     "weighted_band_abs_db": 5.93
+    },
+    {
+     "ms": [
+      30,
+      100
+     ],
+     "level_error_db": 1.01,
+     "band_error_db": [
+      -1.2,
+      1.1,
+      -0.2,
+      null,
+      null,
+      null,
+      null
+     ],
+     "weighted_band_abs_db": 1.11
+    },
+    {
+     "ms": [
+      100,
+      250
+     ],
+     "level_error_db": 1.02,
+     "band_error_db": [
+      null,
+      0.9,
+      null,
+      null,
+      null,
+      null,
+      null
+     ],
+     "weighted_band_abs_db": 0.86
+    }
+   ]
+  },
+  {
+   "group": "G3",
+   "onset_s": 2.4778125,
+   "windows": [
+    {
+     "ms": [
+      0,
+      30
+     ],
+     "level_error_db": 5.33,
+     "band_error_db": [
+      2.3,
+      6.1,
+      -3.9,
+      2.0,
+      -13.9,
+      -17.3,
+      null
+     ],
+     "weighted_band_abs_db": 5.35
+    },
+    {
+     "ms": [
+      30,
+      100
+     ],
+     "level_error_db": 1.18,
+     "band_error_db": [
+      -0.1,
+      1.3,
+      -1.8,
+      null,
+      null,
+      null,
+      null
+     ],
+     "weighted_band_abs_db": 1.22
+    },
+    {
+     "ms": [
+      100,
+      250
+     ],
+     "level_error_db": -0.33,
+     "band_error_db": [
+      -14.2,
+      0.8,
+      1.9,
+      null,
+      null,
+      null,
+      null
+     ],
+     "weighted_band_abs_db": 4.13
+    }
+   ]
+  },
+  {
+   "group": "G3",
+   "onset_s": 14.735229166666667,
+   "windows": [
+    {
+     "ms": [
+      0,
+      30
+     ],
+     "level_error_db": 11.12,
+     "band_error_db": [
+      3.5,
+      14.2,
+      -0.7,
+      0.8,
+      -11.7,
+      -16.7,
+      -20.6
+     ],
+     "weighted_band_abs_db": 7.98
+    },
+    {
+     "ms": [
+      30,
+      100
+     ],
+     "level_error_db": 2.69,
+     "band_error_db": [
+      null,
+      2.7,
+      -2.4,
+      null,
+      null,
+      null,
+      null
+     ],
+     "weighted_band_abs_db": 2.65
+    },
+    {
+     "ms": [
+      100,
+      250
+     ],
+     "level_error_db": 0.02,
+     "band_error_db": [
+      null,
+      0.1,
+      -1.5,
+      -18.1,
+      -33.6,
+      -46.8,
+      -69.8
+     ],
+     "weighted_band_abs_db": 0.89
+    }
+   ]
+  },
+  {
+   "group": "G3",
+   "onset_s": 11.867125,
+   "windows": [
+    {
+     "ms": [
+      0,
+      30
+     ],
+     "level_error_db": 5.78,
+     "band_error_db": [
+      5.1,
+      7.4,
+      -5.8,
+      0.2,
+      -3.5,
+      null,
+      null
+     ],
+     "weighted_band_abs_db": 6.7
+    },
+    {
+     "ms": [
+      30,
+      100
+     ],
+     "level_error_db": 2.11,
+     "band_error_db": [
+      3.7,
+      2.3,
+      -2.3,
+      null,
+      null,
+      null,
+      null
+     ],
+     "weighted_band_abs_db": 2.35
+    },
+    {
+     "ms": [
+      100,
+      250
+     ],
+     "level_error_db": 0.22,
+     "band_error_db": [
+      -8.1,
+      0.6,
+      2.0,
+      null,
+      null,
+      null,
+      null
+     ],
+     "weighted_band_abs_db": 1.74
+    }
+   ]
+  },
+  {
+   "group": "G3",
+   "onset_s": 7.67875,
+   "windows": [
+    {
+     "ms": [
+      0,
+      30
+     ],
+     "level_error_db": 5.25,
+     "band_error_db": [
+      2.8,
+      7.2,
+      -5.5,
+      1.9,
+      -6.3,
+      null,
+      null
+     ],
+     "weighted_band_abs_db": 5.93
+    },
+    {
+     "ms": [
+      30,
+      100
+     ],
+     "level_error_db": 1.96,
+     "band_error_db": [
+      8.9,
+      2.0,
+      -2.5,
+      null,
+      null,
+      null,
+      null
+     ],
+     "weighted_band_abs_db": 2.14
+    },
+    {
+     "ms": [
+      100,
+      250
+     ],
+     "level_error_db": -0.88,
+     "band_error_db": [
+      -11.6,
+      0.1,
+      1.3,
+      -12.3,
+      null,
+      null,
+      null
+     ],
+     "weighted_band_abs_db": 3.01
+    }
+   ]
+  },
+  {
+   "group": "G3",
+   "onset_s": 8.660875,
+   "windows": [
+    {
+     "ms": [
+      0,
+      30
+     ],
+     "level_error_db": 7.25,
+     "band_error_db": [
+      9.1,
+      7.4,
+      -2.0,
+      6.4,
+      -11.1,
+      null,
+      null
+     ],
+     "weighted_band_abs_db": 7.17
+    },
+    {
+     "ms": [
+      30,
+      100
+     ],
+     "level_error_db": 2.88,
+     "band_error_db": [
+      4.9,
+      2.7,
+      null,
+      null,
+      null,
+      null,
+      null
+     ],
+     "weighted_band_abs_db": 2.83
+    },
+    {
+     "ms": [
+      100,
+      250
+     ],
+     "level_error_db": 1.09,
+     "band_error_db": [
+      null,
+      0.8,
+      null,
+      null,
+      null,
+      null,
+      null
+     ],
+     "weighted_band_abs_db": 0.85
+    }
+   ]
+  },
+  {
+   "group": "G3",
+   "onset_s": 14.127583333333334,
+   "windows": [
+    {
+     "ms": [
+      0,
+      30
+     ],
+     "level_error_db": 4.15,
+     "band_error_db": [
+      8.6,
+      5.6,
+      -9.2,
+      2.6,
+      -5.6,
+      null,
+      null
+     ],
+     "weighted_band_abs_db": 6.92
+    },
+    {
+     "ms": [
+      30,
+      100
+     ],
+     "level_error_db": -1.31,
+     "band_error_db": [
+      5.7,
+      -1.3,
+      -16.8,
+      null,
+      null,
+      null,
+      null
+     ],
+     "weighted_band_abs_db": 3.16
+    },
+    {
+     "ms": [
+      100,
+      250
+     ],
+     "level_error_db": -3.83,
+     "band_error_db": [
+      -16.3,
+      -1.2,
+      -6.5,
+      -2.5,
+      null,
+      null,
+      null
+     ],
+     "weighted_band_abs_db": 8.01
+    }
+   ]
+  },
+  {
+   "group": "G3",
+   "onset_s": 12.8040625,
+   "windows": [
+    {
+     "ms": [
+      0,
+      30
+     ],
+     "level_error_db": 5.12,
+     "band_error_db": [
+      9.6,
+      7.3,
+      -11.1,
+      4.1,
+      -5.2,
+      null,
+      null
+     ],
+     "weighted_band_abs_db": 9.12
+    },
+    {
+     "ms": [
+      30,
+      100
+     ],
+     "level_error_db": -3.2,
+     "band_error_db": [
+      11.7,
+      -4.4,
+      -6.8,
+      null,
+      null,
+      null,
+      null
+     ],
+     "weighted_band_abs_db": 4.76
+    },
+    {
+     "ms": [
+      100,
+      250
+     ],
+     "level_error_db": -1.06,
+     "band_error_db": [
+      9.1,
+      -1.0,
+      -6.9,
+      null,
+      null,
+      null,
+      null
+     ],
+     "weighted_band_abs_db": 1.57
+    }
+   ]
+  },
+  {
+   "group": "C4",
+   "onset_s": 7.224458333333334,
+   "windows": [
+    {
+     "ms": [
+      0,
+      30
+     ],
+     "level_error_db": -3.31,
+     "band_error_db": [
+      null,
+      -8.2,
+      -6.3,
+      -5.5,
+      -7.3,
+      -10.8,
+      -24.4
+     ],
+     "weighted_band_abs_db": 7.51
+    },
+    {
+     "ms": [
+      30,
+      100
+     ],
+     "level_error_db": -1.7,
+     "band_error_db": [
+      null,
+      0.9,
+      -9.7,
+      -4.8,
+      -7.6,
+      null,
+      null
+     ],
+     "weighted_band_abs_db": 7.03
+    },
+    {
+     "ms": [
+      100,
+      250
+     ],
+     "level_error_db": -3.71,
+     "band_error_db": [
+      null,
+      -2.4,
+      -6.9,
+      -2.2,
+      null,
+      null,
+      null
+     ],
+     "weighted_band_abs_db": 4.87
+    }
+   ]
+  },
+  {
+   "group": "C4",
+   "onset_s": 2.055875,
+   "windows": [
+    {
+     "ms": [
+      0,
+      30
+     ],
+     "level_error_db": -4.87,
+     "band_error_db": [
+      -4.6,
+      -7.8,
+      -2.4,
+      -3.8,
+      -7.2,
+      -12.6,
+      -31.8
+     ],
+     "weighted_band_abs_db": 5.52
+    },
+    {
+     "ms": [
+      30,
+      100
+     ],
+     "level_error_db": -1.91,
+     "band_error_db": [
+      null,
+      -1.9,
+      -5.4,
+      -4.2,
+      -8.1,
+      null,
+      null
+     ],
+     "weighted_band_abs_db": 3.75
+    },
+    {
+     "ms": [
+      100,
+      250
+     ],
+     "level_error_db": -5.06,
+     "band_error_db": [
+      null,
+      -5.2,
+      -6.3,
+      -2.8,
+      -0.6,
+      null,
+      null
+     ],
+     "weighted_band_abs_db": 5.58
+    }
+   ]
+  },
+  {
+   "group": "C4",
+   "onset_s": 12.635604166666667,
+   "windows": [
+    {
+     "ms": [
+      0,
+      30
+     ],
+     "level_error_db": -1.59,
+     "band_error_db": [
+      1.6,
+      -7.7,
+      0.1,
+      -2.0,
+      -5.1,
+      -12.1,
+      -18.3
+     ],
+     "weighted_band_abs_db": 4.13
+    },
+    {
+     "ms": [
+      30,
+      100
+     ],
+     "level_error_db": -0.46,
+     "band_error_db": [
+      1.7,
+      -2.0,
+      -0.6,
+      -0.4,
+      -5.6,
+      -7.6,
+      -14.3
+     ],
+     "weighted_band_abs_db": 1.51
+    },
+    {
+     "ms": [
+      100,
+      250
+     ],
+     "level_error_db": -11.39,
+     "band_error_db": [
+      8.4,
+      -13.6,
+      -10.0,
+      0.8,
+      null,
+      null,
+      null
+     ],
+     "weighted_band_abs_db": 12.64
+    }
+   ]
+  },
+  {
+   "group": "C4",
+   "onset_s": 11.560895833333333,
+   "windows": [
+    {
+     "ms": [
+      0,
+      30
+     ],
+     "level_error_db": 3.32,
+     "band_error_db": [
+      8.9,
+      -4.9,
+      3.1,
+      -1.7,
+      -5.8,
+      -11.4,
+      -27.1
+     ],
+     "weighted_band_abs_db": 5.19
+    },
+    {
+     "ms": [
+      30,
+      100
+     ],
+     "level_error_db": 3.02,
+     "band_error_db": [
+      7.0,
+      -1.3,
+      1.6,
+      -0.8,
+      -6.2,
+      -8.6,
+      null
+     ],
+     "weighted_band_abs_db": 2.93
+    },
+    {
+     "ms": [
+      100,
+      250
+     ],
+     "level_error_db": 0.49,
+     "band_error_db": [
+      null,
+      -3.2,
+      -0.6,
+      1.7,
+      3.2,
+      null,
+      null
+     ],
+     "weighted_band_abs_db": 1.95
+    }
+   ]
+  }
+ ]
+}

@@ -20,6 +20,10 @@ pub struct Chunk {
     /// (widget `:key`, `bind-key`, `define-mode`, …) know the module
     /// current at the executing call site.
     pub source_module: Option<String>,
+    /// Macro-expansion origins referenced by this chunk's
+    /// `OpCode::ExpansionOriginBegin(idx)`. Kept out of the op stream so
+    /// `OpCode` stays `Copy` and the VM fetches ops without cloning.
+    pub origins: Vec<std::rc::Rc<ExpansionOrigin>>,
 }
 
 #[derive(Debug)]
@@ -69,7 +73,7 @@ impl ExpansionOrigin {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub enum OpCode {
     Push,
     PushConst(usize), // const idx
@@ -134,7 +138,8 @@ pub enum OpCode {
     JumpIfFalse(usize),
     PushBool(bool),
     PushNil,
-    ExpansionOriginBegin(ExpansionOrigin),
+    /// Index into the executing chunk's `Chunk::origins`.
+    ExpansionOriginBegin(usize),
     ExpansionOriginEnd,
 }
 
@@ -244,6 +249,7 @@ fn is_widget_name(name: &str) -> bool {
             | "meter"
             | "modulator-curve"
             | "drift-waveform"
+            | "family-map"
             | "lfo-curve"
             | "text-input"
             | "select"
@@ -1232,6 +1238,7 @@ impl<'a> Compiler<'a> {
             source_symbol: None,
             source_file: self.source_file.clone(),
             source_module: None,
+            origins: Vec::new(),
         });
 
         if kind != ReactiveChunkKind::Derived {
@@ -2266,7 +2273,8 @@ impl<'a> Compiler<'a> {
         // Generated function/effect chunks can execute long after the top-level expansion has
         // returned. Give each such chunk its own balanced provenance scope.
         if let Some(origin) = self.active_expansion_origin.clone() {
-            chunk.ops.push(OpCode::ExpansionOriginBegin(origin));
+            chunk.origins.push(std::rc::Rc::new(origin));
+            chunk.ops.push(OpCode::ExpansionOriginBegin(chunk.origins.len() - 1));
         }
         // Stamp every chunk with the module current at its creation
         // (None = implicit eseq.vanilla). The entry chunk of a unit whose
@@ -2446,6 +2454,7 @@ impl<'a> Compiler<'a> {
             source_symbol: Some(name.to_string()),
             source_file: self.source_file.clone(),
             source_module: self.declared_module(),
+            origins: Vec::new(),
         });
         self.compiling_macro_body += 1;
         let compile_result = self.compile_expression(body);
@@ -2506,6 +2515,7 @@ impl<'a> Compiler<'a> {
             source_symbol: name.clone(),
             source_file: self.source_file.clone(),
             source_module: None,
+            origins: Vec::new(),
         });
         self.compile_expression(&wrapped_body)?;
 
@@ -2696,7 +2706,10 @@ impl<'a> Compiler<'a> {
                 expanded,
             ]);
             let previous_origin = self.active_expansion_origin.replace(origin.clone());
-            self.emit(OpCode::ExpansionOriginBegin(origin.clone()));
+            let origins = &mut self.chunk_mut().unwrap().origins;
+            origins.push(std::rc::Rc::new(origin.clone()));
+            let origin_idx = origins.len() - 1;
+            self.emit(OpCode::ExpansionOriginBegin(origin_idx));
             self.compiling_source_origin_payload = true;
             let result = self.compile_expression(&rewrapped);
             self.compiling_source_origin_payload = false;
@@ -3596,6 +3609,7 @@ impl<'a> Compiler<'a> {
             source_symbol: None,
             source_file: self.source_file.clone(),
             source_module: entry_module,
+            origins: Vec::new(),
         });
         let expressions = std::mem::take(&mut self.expressions);
         for expression in &expressions {

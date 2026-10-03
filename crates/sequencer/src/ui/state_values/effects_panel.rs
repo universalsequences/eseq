@@ -198,6 +198,13 @@ pub(crate) fn build_effects_value(
                 "target-node-id".to_string(),
                 Rc::new(RefCell::new(Value::Number(node_id as f64))),
             );
+            slot_map.insert(
+                "meter".to_string(),
+                device_meter_source(
+                    "track-effect",
+                    &[("index", track as f64), ("slot", slot_idx as f64)],
+                ),
+            );
             if desc.name == sequencer::effects::conv_reverb::NAME {
                 let name = sequencer::effects::conv_reverb::ir_name_for(node_id)
                     .unwrap_or_else(|| "No IR".to_string());
@@ -999,6 +1006,13 @@ pub(crate) fn build_bus_effects_value_for_selection(
                         .get(slot_idx)
                         .map(|slot| slot.node_id as i32)
                         .unwrap_or(0);
+                    slot_map.insert(
+                        "meter".to_string(),
+                        device_meter_source(
+                            "bus-effect",
+                            &[("id", bus.id.0 as f64), ("slot", slot_idx as f64)],
+                        ),
+                    );
                     if desc.name == sequencer::effects::conv_reverb::NAME {
                         let name = sequencer::effects::conv_reverb::ir_name_for(node_id)
                             .unwrap_or_else(|| "No IR".to_string());

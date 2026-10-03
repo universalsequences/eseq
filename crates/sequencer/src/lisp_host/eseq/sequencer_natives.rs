@@ -263,6 +263,10 @@ pub(in crate::lisp_host) fn register_scene_slot_natives_with_snapshot(
 /// instance instead of by declaration. `__instance-doc-read` /
 /// `__instance-doc-write` back `self.field` / `(set! self.field v)` in the
 /// VM; `__instance-document` hands a generator tick the whole document.
+/// Host native `(__instance-doc-write-many id field value ...)`: one
+/// atomic, one-undo-step write of several document fields.
+pub(crate) const INSTANCE_DOC_WRITE_MANY_NATIVE: &str = "__instance-doc-write-many";
+
 fn register_instance_document_natives(
     runtime: &mut Runtime,
     state: Arc<crate::sequencer::SequencerState>,
@@ -312,6 +316,7 @@ fn register_instance_document_natives(
     });
 
     let snapshot_backed = scheduler_slots.is_some();
+    let write_state = Arc::clone(&state);
     runtime.register_native("__instance-doc-write", move |args, ctx| {
         let [id, EValue::String(field), value] = args.as_slice() else {
             return Err("instance document write expects an id, a field and a value".to_string());
@@ -325,7 +330,7 @@ fn register_instance_document_natives(
         let literal = crate::process::ProcessLiteral::from_value(value)
             .map_err(|error| format!("document field '{field}': {error}"))?;
         let (scene_id, previous, epoch) =
-            state.write_current_scene_slot_identified(name.clone(), literal.clone())?;
+            write_state.write_current_scene_slot_identified(name.clone(), literal.clone())?;
         if let Some(diagnostic) =
             crate::sequencer::SceneSlotStore::soft_size_diagnostic(&name, &literal)
         {
@@ -352,6 +357,77 @@ fn register_instance_document_natives(
             EValue::String(epoch.to_string()),
         );
         Ok(value.clone())
+    });
+
+    // `(__instance-doc-write-many id field value field value ...)`: several
+    // fields of one document as one edit. Every slot lands under one lock
+    // with one scheduler publish, and one history command carries every
+    // write so a single undo restores the whole document (a jaki pattern
+    // removal rewrites figures/rows/row-count/patterns together).
+    runtime.register_native(INSTANCE_DOC_WRITE_MANY_NATIVE, move |args, ctx| {
+        let Some((id, pairs)) = args.split_first() else {
+            return Err(
+                "instance document write-many expects an id and field/value pairs".to_string(),
+            );
+        };
+        if pairs.is_empty() || pairs.len() % 2 != 0 {
+            return Err(
+                "instance document write-many expects an id and field/value pairs".to_string(),
+            );
+        }
+        let id = instance_id_arg(id)?;
+        let mut writes = Vec::with_capacity(pairs.len() / 2);
+        for pair in pairs.chunks(2) {
+            let field = match &pair[0] {
+                EValue::String(field) | EValue::Keyword(field) => {
+                    field.trim_start_matches(':').to_string()
+                }
+                other => return Err(format!("expected a document field name, got {other:?}")),
+            };
+            if snapshot_backed {
+                return Err(format!(
+                    "document field '{field}' cannot be written from a scheduler callback"
+                ));
+            }
+            let literal = crate::process::ProcessLiteral::from_value(&pair[1])
+                .map_err(|error| format!("document field '{field}': {error}"))?;
+            writes.push((super::kinds::instance_document_slot(id, &field), literal));
+        }
+        let (scene_id, results) = state.write_current_scene_slots_identified(writes.clone())?;
+        let mut history_slots = Vec::with_capacity(writes.len());
+        for ((name, literal), (previous, epoch)) in writes.into_iter().zip(results) {
+            if let Some(diagnostic) =
+                crate::sequencer::SceneSlotStore::soft_size_diagnostic(&name, &literal)
+            {
+                ctx.set_status(diagnostic);
+            }
+            if record_history {
+                let mut slot = HashMap::new();
+                slot.insert("slot".to_string(), lisp_string(name.clone()));
+                slot.insert("old-present".to_string(), lisp_bool(previous.is_some()));
+                slot.insert(
+                    "old".to_string(),
+                    lisp_value(previous.map_or(EValue::Nil, |value| value.to_value())),
+                );
+                slot.insert("new".to_string(), lisp_value(literal.to_value()));
+                history_slots.push(EValue::Map(slot));
+            }
+            ctx.invalidate_reactive_source(
+                SCENE_SLOT_REACTIVE_NAMESPACE,
+                name,
+                EValue::String(epoch.to_string()),
+            );
+        }
+        if record_history {
+            let mut payload = HashMap::new();
+            payload.insert("scene-id".to_string(), lisp_string(scene_id.0.to_string()));
+            payload.insert("slots".to_string(), lisp_value(lisp_list(history_slots)));
+            ctx.enqueue_command(HostCommand::Custom {
+                name: "scene-slot-history-write".to_string(),
+                payload: EValue::Map(payload),
+            });
+        }
+        Ok(EValue::Nil)
     });
 
     let document_resolver = Arc::clone(&resolver);
@@ -1254,8 +1330,7 @@ pub(in crate::lisp_host) fn register_sequencer_natives_with_accumulators(
             else {
                 return Ok(EValue::Nil);
             };
-            let Some((_, current)) = timeline.iter().rev().find(|(at, _)| *at <= beat + 1e-9).or(timeline.first())
-            else {
+            let Some(current) = harmony_at(timeline, beat) else {
                 return Ok(EValue::Nil);
             };
             let numbers = |values: Vec<f64>| {
@@ -3766,5 +3841,37 @@ pub(in crate::lisp_host) fn midi_fx_param_descriptor_for_slot(
             .cloned()
             .ok_or_else(|| format!("unknown MIDI FX param '{name}'")),
         _ => Err("MIDI FX param must be name or index".to_string()),
+    }
+}
+
+/// The harmony in force on `beat` in one track's ascending `(beat, harmony)`
+/// timeline: the last change at or before it, or `None` before the track's
+/// first change (a later chord in the same chunk never applies early).
+fn harmony_at(
+    timeline: &[(f64, crate::process::TrackHarmony)],
+    beat: f64,
+) -> Option<&crate::process::TrackHarmony> {
+    timeline
+        .iter()
+        .rev()
+        .find(|(at, _)| *at <= beat + 1e-9)
+        .map(|(_, harmony)| harmony)
+}
+
+#[cfg(test)]
+mod harmony_at_tests {
+    use super::harmony_at;
+    use crate::process::TrackHarmony;
+
+    #[test]
+    fn harmony_at_is_none_before_the_first_change() {
+        let chord = TrackHarmony {
+            chord: vec![0.0, 4.0, 7.0],
+            key_mask: 0b1010_1011_0101,
+        };
+        let timeline = vec![(0.5, chord.clone())];
+        assert_eq!(harmony_at(&timeline, 0.0), None);
+        assert_eq!(harmony_at(&timeline, 0.5), Some(&chord));
+        assert_eq!(harmony_at(&timeline, 0.75), Some(&chord));
     }
 }

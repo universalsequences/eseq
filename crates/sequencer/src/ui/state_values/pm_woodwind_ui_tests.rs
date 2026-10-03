@@ -213,6 +213,9 @@ fn saxophone_surface_controls_and_pages() { check_woodwind_surface("PM Saxophone
 fn clarinet_surface_controls_and_pages() { check_woodwind_surface("PM Clarinet", 5); }
 
 #[test]
+fn milagre_brass_surface_controls_and_pages() { check_woodwind_surface("PM Milagre Brass", 6); }
+
+#[test]
 fn cello_surface_controls_and_pages() { check_woodwind_surface("PM Cello", 8); }
 
 #[test]
@@ -228,7 +231,15 @@ fn saron_surface_controls_and_pages() { check_woodwind_surface("PM Saron", 5); }
 fn crash_surface_controls_and_pages() { check_woodwind_surface("PM Crash", 4); }
 
 #[test]
-fn ride_surface_controls_and_pages() { check_woodwind_surface("PM Ride", 4); }
+fn ride_surface_controls_and_pages() { check_woodwind_surface("PM Ride", 5); }
+
+#[test]
+fn ride_release_1_surface_controls_and_pages() {
+    // The reduced-plate PM Ride is frozen as release 1 of the lineage.
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../content/instruments/Physical Models/PM Ride/versions/1");
+    check_resonant_surface_at(&root, "dsp.lisp", "PM Ride", 4);
+}
 
 #[test]
 fn hihat_surface_controls_and_pages() { check_woodwind_surface("PM Hi-Hat", 4); }
@@ -252,6 +263,13 @@ fn pm_tabla_surface_controls_and_pages() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../tools/pm-tabla");
     check_resonant_surface_at(&root, "model.lisp", "PM Tabla", 5);
+}
+
+#[test]
+fn pm_ride_kit_surface_controls_and_pages() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tools/pm-ride");
+    check_resonant_surface_at(&root, "model.lisp", "PM Ride Kit", 5);
 }
 
 #[test]

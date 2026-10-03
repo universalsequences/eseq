@@ -6,7 +6,7 @@ import json
 import numpy as np
 import soundfile as sf
 
-from common import FACTORY, HERE, NAMES, ROOT, digest, instrument, read_reference
+from common import FACTORY, FOLDERS, HERE, NAMES, ROOT, digest, instrument, read_reference
 
 
 def concentration(y, sr=48000):
@@ -36,7 +36,7 @@ def main():
             by_name = {r['source'].rsplit('/', 1)[-1]: r for r in records}
             voices = [('closed', by_name['Hihat - Close_8.wav'], {'contact.openness': 0}),
                       ('open', by_name['Hihat - Open_3.wav'], {'contact.openness': 1})]
-        path = factory/name/'dsp.lisp'
+        path = factory/FOLDERS[slug]/'dsp.lisp'
         inst = instrument(path)
         for articulation, row, params in voices:
             reference, _, _ = read_reference(ROOT/row['source'])

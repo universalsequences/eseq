@@ -1654,6 +1654,16 @@ impl ProjectRackConfig {
             .unwrap_or(&self.groove)
     }
 
+    /// Whether the rack plays pool groove `id` anywhere: as its own default
+    /// or as one of its clips' own grooves.
+    pub fn plays_groove(&self, id: GrooveId) -> bool {
+        self.groove.active == Some(id)
+            || self
+                .clip_grooves
+                .iter()
+                .any(|own| own.settings.active == Some(id))
+    }
+
     /// Clip `clip`'s own groove, if it has one.
     pub fn clip_groove(&self, clip: RackClipId) -> Option<&RackGrooveSettings> {
         self.clip_grooves
@@ -1747,7 +1757,9 @@ impl ProjectRackConfig {
         self.choke_groups.resize(self.pads.len(), None);
     }
 
-    /// Drops the pad at `pad_index` along with its choke entry.
+    /// Drops the pad at `pad_index` along with its choke entry and its groove
+    /// shares (the rack's and every clip's), so a pad that later takes the
+    /// note starts at the full groove instead of inheriting a stale one.
     pub fn remove_pad(&mut self, pad_index: usize) -> Option<ProjectRackPad> {
         if pad_index >= self.pads.len() {
             return None;
@@ -1755,7 +1767,12 @@ impl ProjectRackConfig {
         if pad_index < self.choke_groups.len() {
             self.choke_groups.remove(pad_index);
         }
-        Some(self.pads.remove(pad_index))
+        let pad = self.pads.remove(pad_index);
+        let removed_note = pad.pad_note;
+        for settings in self.all_groove_settings_mut() {
+            settings.retain_pad_notes(|note| note != removed_note);
+        }
+        Some(pad)
     }
 
     /// A member left `group.members` at `member_position`: drop its pad (if it
@@ -2253,6 +2270,10 @@ pub struct ProjectTrackParams {
     pub accum_mode: u32,
     #[serde(default)]
     pub fts_scale: usize,
+    /// Microtonal edits on `fts_scale`; omitted while untouched so projects
+    /// that never open the scale editor serialize as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tuning: Option<ProjectTrackTuning>,
     #[serde(default)]
     pub mono_trigger: crate::sequencer::MonoTrigger,
     #[serde(default)]
@@ -2619,6 +2640,7 @@ impl From<TrackParamsSnapshot> for ProjectTrackParams {
             accum_limit: value.accum_limit,
             accum_mode: value.accum_mode,
             fts_scale: value.fts_scale,
+            tuning: ProjectTrackTuning::from_tuning(&value.tuning),
             mono_trigger: value.mono_trigger,
             voice_priority: value.voice_priority,
             mute_group: value.mute_group.min(8),
@@ -2656,11 +2678,132 @@ impl From<ProjectTrackParams> for TrackParamsSnapshot {
             accum_limit: value.accum_limit,
             accum_mode: value.accum_mode,
             fts_scale: value.fts_scale,
+            tuning: value
+                .tuning
+                .map(ProjectTrackTuning::into_tuning)
+                .unwrap_or_default(),
             mono_trigger: value.mono_trigger,
             voice_priority: value.voice_priority,
             mute_group: value.mute_group.min(8),
             global_transpose: value.global_transpose,
         }
+    }
+}
+
+/// Persisted [`crate::scale::TrackTuning`]: offsets and disabled degrees are
+/// sparse, so a lightly edited scale stays a short line of JSON.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ProjectTrackTuning {
+    #[serde(default)]
+    pub root: u8,
+    #[serde(default = "default_tuning_morph")]
+    pub morph: f32,
+    #[serde(default)]
+    pub mode: ProjectTuningMode,
+    /// `[degree, cents]` pairs for every non-zero offset.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub offsets: Vec<(usize, f32)>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub disabled: Vec<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom: Option<ProjectCustomScale>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectTuningMode {
+    #[default]
+    Snap,
+    Map,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ProjectCustomScale {
+    pub name: String,
+    pub cents: Vec<f32>,
+    pub period: f32,
+}
+
+fn default_tuning_morph() -> f32 {
+    1.0
+}
+
+impl ProjectTrackTuning {
+    pub fn from_tuning(tuning: &crate::scale::TrackTuning) -> Option<Self> {
+        use crate::scale::TuningMode;
+        if tuning.is_default() {
+            return None;
+        }
+        Some(Self {
+            root: tuning.root,
+            morph: tuning.morph,
+            mode: match tuning.mode {
+                TuningMode::Snap => ProjectTuningMode::Snap,
+                TuningMode::Map => ProjectTuningMode::Map,
+            },
+            offsets: tuning
+                .offsets
+                .iter()
+                .enumerate()
+                .filter(|(_, cents)| **cents != 0.0)
+                .map(|(degree, cents)| (degree, *cents))
+                .collect(),
+            disabled: (0..crate::scale::MAX_SCALE_DEGREES)
+                .filter(|degree| !tuning.degree_enabled(*degree))
+                .collect(),
+            custom: tuning.custom.as_ref().map(|custom| ProjectCustomScale {
+                name: custom.name.clone(),
+                cents: custom.cents.clone(),
+                period: custom.period,
+            }),
+        })
+    }
+
+    /// Out-of-range degrees and non-finite numbers are dropped, and a custom
+    /// scale that could not have been imported is ignored, so a hand-edited
+    /// file cannot hand the quantizer a broken table.
+    pub fn into_tuning(self) -> crate::scale::TrackTuning {
+        use crate::scale::{CustomScale, MAX_SCALE_DEGREES, TrackTuning, TuningMode};
+        let mut tuning = TrackTuning {
+            root: self.root % 12,
+            morph: if self.morph.is_finite() {
+                self.morph.clamp(0.0, 1.0)
+            } else {
+                1.0
+            },
+            mode: match self.mode {
+                ProjectTuningMode::Snap => TuningMode::Snap,
+                ProjectTuningMode::Map => TuningMode::Map,
+            },
+            ..TrackTuning::DEFAULT
+        };
+        for (degree, cents) in self.offsets {
+            if degree < MAX_SCALE_DEGREES && cents.is_finite() {
+                tuning.offsets[degree] = cents;
+            }
+        }
+        for degree in self.disabled {
+            if degree < MAX_SCALE_DEGREES {
+                tuning.disabled |= 1 << degree;
+            }
+        }
+        tuning.custom = self
+            .custom
+            .filter(|custom| {
+                !custom.cents.is_empty()
+                    && custom.cents.len() <= MAX_SCALE_DEGREES
+                    && custom.cents.iter().all(|cents| cents.is_finite())
+                    && custom.period.is_finite()
+                    && custom.period > 0.0
+            })
+            .map(|custom| {
+                std::sync::Arc::new(CustomScale {
+                    name: custom.name,
+                    cents: custom.cents,
+                    period: custom.period,
+                })
+            });
+        tuning
     }
 }
 
@@ -4536,6 +4679,7 @@ mod tests {
                         accum_limit: 24.0,
                         accum_mode: 2,
                         fts_scale: 0,
+                        tuning: None,
                         mono_trigger: crate::sequencer::MonoTrigger::Retrig,
                         voice_priority: crate::sequencer::VoicePriority::Last,
                         mute_group: 3,
@@ -4565,6 +4709,7 @@ mod tests {
                         accum_limit: 48.0,
                         accum_mode: 0,
                         fts_scale: 0,
+                        tuning: None,
                         mono_trigger: crate::sequencer::MonoTrigger::Retrig,
                         voice_priority: crate::sequencer::VoicePriority::Last,
                         mute_group: 0,
@@ -5899,6 +6044,42 @@ mod tests {
         let members = rack.pads.len();
         assert_eq!(rack.map_unmapped_members(members + 4), 0);
         assert_eq!(rack.pads.len(), members);
+    }
+
+    #[test]
+    fn track_tuning_round_trips_sparsely_and_is_omitted_when_untouched() {
+        use crate::scale::{CustomScale, TrackTuning, TuningMode};
+        assert_eq!(ProjectTrackTuning::from_tuning(&TrackTuning::DEFAULT), None);
+
+        let mut tuning = TrackTuning::DEFAULT;
+        tuning.root = 7;
+        tuning.morph = 0.4;
+        tuning.mode = TuningMode::Map;
+        tuning.offsets[2] = -13.7;
+        tuning.disabled = 1 << 5;
+        tuning.custom = Some(std::sync::Arc::new(CustomScale {
+            name: "tri".to_string(),
+            cents: vec![0.0, 400.0, 800.0],
+            period: 1200.0,
+        }));
+        let stored = ProjectTrackTuning::from_tuning(&tuning).expect("edited tuning persists");
+        assert_eq!(stored.offsets, vec![(2, -13.7)]);
+        assert_eq!(stored.disabled, vec![5]);
+        let json = serde_json::to_string(&stored).unwrap();
+        let loaded: ProjectTrackTuning = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.into_tuning(), tuning);
+
+        // A hand-edited file cannot smuggle in a broken table.
+        let hostile: ProjectTrackTuning = serde_json::from_str(
+            r#"{"root":30,"morph":7,"offsets":[[99,5.0]],"disabled":[70],
+                "custom":{"name":"x","cents":[],"period":0}}"#,
+        )
+        .unwrap();
+        let sanitized = hostile.into_tuning();
+        assert_eq!(sanitized.root, 6);
+        assert_eq!(sanitized.morph, 1.0);
+        assert!(!sanitized.has_degree_edits());
+        assert!(sanitized.custom.is_none());
     }
 
     #[test]
@@ -7492,6 +7673,39 @@ mod tests {
         }
         let kit: ProjectKitPreset = serde_json::from_value(base).expect("groove-less v5 kit");
         assert!(kit.carries_grooves() && kit.carried_groove().is_none());
+    }
+
+    /// A v6 groove copy this build cannot read (an unknown pad role, a null
+    /// slot offset) must fail the kit parse, not fall through the untagged
+    /// field into an empty v5 selection that silently turns the groove off.
+    #[test]
+    fn unreadable_v6_kit_groove_copy_is_an_error_not_a_v5_selection() {
+        let kit = serde_json::json!({
+            "version": project_file_version(),
+            "kit_version": 6,
+            "metadata": {"name": "New Kit", "tags": [], "author": ""},
+            "pads": [],
+            "groove": {
+                "groove": serde_json::to_value(test_groove(4, "Madlib")).unwrap(),
+                "timing_amount": 1.0,
+            },
+        });
+        let parsed: ProjectKitPreset = serde_json::from_value(kit.clone()).expect("v6 kit loads");
+        assert!(matches!(parsed.groove, Some(KitGrooveField::Copy(_))));
+
+        let mut broken = kit;
+        broken["groove"]["groove"]["shared_row"]["slots"][0]["offset"] = serde_json::Value::Null;
+        assert_eq!(
+            broken["groove"]["groove"]["shared_row"]["slots"][0]["offset"],
+            serde_json::Value::Null,
+            "the fixture reached a slot offset"
+        );
+        let result = serde_json::from_value::<ProjectKitPreset>(broken);
+        assert!(
+            result.is_err(),
+            "a broken v6 copy must not parse as a v5 selection: {:?}",
+            result.map(|kit| kit.groove)
+        );
     }
 
     #[test]

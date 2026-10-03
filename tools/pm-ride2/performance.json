@@ -1,0 +1,43 @@
+{
+ "platform": "macOS-26.5.1-arm64-arm-64bit-Mach-O",
+ "sample_rate": 48000,
+ "unit": "microseconds per block (one voice)",
+ "blocks": {
+  "128": {
+   "PM Ride 2": {
+    "median_us": 217.0053333333333,
+    "percent_of_one_core": 8.138
+   },
+   "PM Ride Kit": {
+    "median_us": 261.21066666666667,
+    "percent_of_one_core": 9.795
+   },
+   "PM Tabla": {
+    "median_us": 22.19,
+    "percent_of_one_core": 0.832
+   },
+   "PM Ride 1": {
+    "median_us": 40.53533333333334,
+    "percent_of_one_core": 1.52
+   }
+  },
+  "512": {
+   "PM Ride 2": {
+    "median_us": 873.5013333333333,
+    "percent_of_one_core": 8.189
+   },
+   "PM Ride Kit": {
+    "median_us": 1064.6986666666664,
+    "percent_of_one_core": 9.982
+   },
+   "PM Tabla": {
+    "median_us": 90.14666666666668,
+    "percent_of_one_core": 0.845
+   },
+   "PM Ride 1": {
+    "median_us": 163.74666666666667,
+    "percent_of_one_core": 1.535
+   }
+  }
+ }
+}

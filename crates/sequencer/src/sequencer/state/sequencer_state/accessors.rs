@@ -342,6 +342,7 @@ impl SequencerState {
             process_effective_sends: Mutex::new(HashMap::new()),
             scratch_effect_descriptors: Mutex::new(Vec::new()),
             scratch_instrument_descriptors: Mutex::new(Vec::new()),
+            engine_instrument_descriptors: Mutex::new((0, Arc::new(Vec::new()))),
             process_trace_enabled: AtomicBool::new(
                 std::env::var("ESEQ_PROCESS_TRACE").is_ok_and(|value| value == "1"),
             ),

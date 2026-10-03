@@ -11,9 +11,10 @@
 //!
 //! Only what the engine applies at landing is listed (see
 //! `scheduler::params::apply_named_params`): instrument, effect and MIDI FX
-//! params, the step params `step_param_from_target_name` accepts, and rack
-//! macros on tracks with a rack. Rack-slot params and sends are skipped there,
-//! so they are not offered.
+//! params, the step params `step_param_from_target_name` accepts, and on
+//! tracks with a rack its macros plus each slot's own params and instrument
+//! params (`rack<N>:gain`, `rack<N>:instrument:cutoff`). Sends are skipped
+//! there, so they are not offered.
 //!
 //! **Rails.** Every item (and alias) carries `DynItem::num`, the range a
 //! `plock` value of that name scrubs, snaps and clamps to in the editor
@@ -28,7 +29,7 @@
 //! every UI tick) re-fingerprints the cached tracks whenever a new snapshot
 //! was published and bumps the source's epoch only when a track's parameter
 //! set actually changed (instrument swap, FX / MIDI FX chain edit, rack
-//! macros, track removal) — so open slots revalidate exactly then.
+//! macros or slot instruments, track removal) — so open slots revalidate exactly then.
 
 use std::cell::RefCell;
 use std::collections::hash_map::DefaultHasher;
@@ -45,7 +46,9 @@ use eseqlisp::vm::Value;
 use eseqlisp::Runtime;
 use sequencer::effects::{EffectDescriptor, ParamDescriptor, ParamKind, ParamScaling};
 use sequencer::process::{step_param_from_target_name, ParamTarget};
-use sequencer::sequencer::{SequencerState, SequencerTrackSnapshot, StepParam};
+use sequencer::sequencer::{
+    RackSlotParam, SequencerSnapshot, SequencerState, SequencerTrackSnapshot, StepParam,
+};
 
 /// The source name the jaki row schema spells as `(dyn "param")`.
 pub(crate) const PARAM_WORD_SOURCE: &str = "param";
@@ -183,11 +186,11 @@ fn param_words(context: &Value) -> Rc<DynWords> {
         let Some(track_snapshot) = snapshot.tracks.get(track) else {
             return Rc::new(hint_words());
         };
-        let words = Rc::new(build_track_param_words(track_snapshot));
+        let words = Rc::new(build_track_param_words(&snapshot, track_snapshot));
         source.tracks.insert(
             track,
             CachedTrack {
-                fingerprint: track_fingerprint(track_snapshot),
+                fingerprint: track_fingerprint(&snapshot, track_snapshot),
                 words: words.clone(),
             },
         );
@@ -219,7 +222,7 @@ pub(crate) fn refresh_param_word_source() -> bool {
             snapshot
                 .tracks
                 .get(*track)
-                .is_some_and(|track| track_fingerprint(track) == cached.fingerprint)
+                .is_some_and(|track| track_fingerprint(&snapshot, track) == cached.fingerprint)
         });
         source.tracks.len() != before
     });
@@ -241,8 +244,9 @@ fn hint_words() -> DynWords {
 }
 
 /// Everything that decides a track's words: descriptor names, param names
-/// and ranges, the MIDI FX chain names, and the rack macros.
-fn track_fingerprint(track: &SequencerTrackSnapshot) -> u64 {
+/// and ranges, the MIDI FX chain names, the rack macros and the rack slots'
+/// instrument descriptors.
+fn track_fingerprint(snapshot: &SequencerSnapshot, track: &SequencerTrackSnapshot) -> u64 {
     fn hash_desc(desc: &EffectDescriptor, hasher: &mut DefaultHasher) {
         desc.name.hash(hasher);
         desc.params.len().hash(hasher);
@@ -266,6 +270,13 @@ fn track_fingerprint(track: &SequencerTrackSnapshot) -> u64 {
             rack.macros.len().hash(&mut hasher);
             for rack_macro in &rack.macros {
                 rack_macro.name.hash(&mut hasher);
+            }
+            rack.slots.len().hash(&mut hasher);
+            for slot in &rack.slots {
+                match snapshot.rack_slot_instrument_descriptor(slot) {
+                    Some(desc) => hash_desc(desc, &mut hasher),
+                    None => usize::MAX.hash(&mut hasher),
+                }
             }
         }
         None => usize::MAX.hash(&mut hasher),
@@ -387,8 +398,45 @@ const MACRO_NUM_SPEC: NumSpec = NumSpec {
     decimals: 2,
 };
 
+/// The editor rails of a rack slot's own param, matching
+/// `RackSlotParam::clamp`.
+fn rack_slot_param_num_spec(param: RackSlotParam) -> NumSpec {
+    let (min, max, step, decimals) = match param {
+        RackSlotParam::BaseNote => (-48.0, 48.0, 1.0, 0),
+        RackSlotParam::Gain => (0.0, 2.0, 0.01, 2),
+        RackSlotParam::Pan => (-1.0, 1.0, 0.01, 2),
+        RackSlotParam::MaxPolyphony => (1.0, sequencer::audio::MAX_VOICES as f64, 1.0, 0),
+        RackSlotParam::Mute | RackSlotParam::Solo => (0.0, 1.0, 1.0, 0),
+    };
+    NumSpec { min, max, step, decimals }
+}
+
+fn rack_slot_param_detail(param: RackSlotParam) -> String {
+    let spec = rack_slot_param_num_spec(param);
+    let label = match param {
+        RackSlotParam::BaseNote => "Base note",
+        RackSlotParam::Gain => "Gain",
+        RackSlotParam::Pan => "Pan",
+        RackSlotParam::MaxPolyphony => "Polyphony",
+        RackSlotParam::Mute => "Mute",
+        RackSlotParam::Solo => "Solo",
+    };
+    let range = format!(
+        "{}–{}",
+        short_number(spec.min as f32),
+        short_number(spec.max as f32)
+    );
+    match param {
+        RackSlotParam::Mute | RackSlotParam::Solo => format!("{label} · {range} off/on"),
+        _ => format!("{label} · {range}"),
+    }
+}
+
 /// The groups + aliases for one track, from its scheduler snapshot.
-pub(crate) fn build_track_param_words(track: &SequencerTrackSnapshot) -> DynWords {
+pub(crate) fn build_track_param_words(
+    snapshot: &SequencerSnapshot,
+    track: &SequencerTrackSnapshot,
+) -> DynWords {
     let mut groups = Vec::new();
     let mut aliases = Vec::new();
 
@@ -495,6 +543,47 @@ pub(crate) fn build_track_param_words(track: &SequencerTrackSnapshot) -> DynWord
         if !items.is_empty() {
             groups.push(DynGroup {
                 group: "Macros".to_string(),
+                items,
+            });
+        }
+
+        // Each slot: its instrument's params, then its own mixer params.
+        for (slot, rack_slot) in rack.slots.iter().enumerate() {
+            let desc = snapshot.rack_slot_instrument_descriptor(rack_slot);
+            let mut items: Vec<DynItem> = desc
+                .map(|desc| {
+                    desc.params
+                        .iter()
+                        .take(rack_slot.instrument_slot.defaults.len())
+                        .map(|param| {
+                            item(
+                                ParamTarget::RackSlotInstrumentParam {
+                                    slot,
+                                    param: param.name.clone(),
+                                    param_id: None,
+                                },
+                                param_detail(param),
+                                param_num_spec(param),
+                            )
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            items.extend(RackSlotParam::ALL.into_iter().map(|param| {
+                item(
+                    ParamTarget::RackSlotParam {
+                        slot,
+                        param: param.name().to_string(),
+                    },
+                    rack_slot_param_detail(param),
+                    rack_slot_param_num_spec(param),
+                )
+            }));
+            groups.push(DynGroup {
+                group: match desc.filter(|desc| !desc.name.is_empty()) {
+                    Some(desc) => format!("Slot {} · {}", slot + 1, desc.name),
+                    None => format!("Slot {}", slot + 1),
+                },
                 items,
             });
         }
@@ -627,7 +716,8 @@ mod tests {
     #[test]
     fn param_words_carry_number_rails_for_items_and_aliases() {
         let state = state_with_sampler_and_filter();
-        let words = build_track_param_words(&state.latest_scheduler_snapshot().tracks[0]);
+        let snapshot = state.latest_scheduler_snapshot();
+        let words = build_track_param_words(&snapshot, &snapshot.tracks[0]);
         let filter_name = EffectDescriptor::builtin_filter().name;
         let spec = |word: &str| words.num_spec(word).unwrap_or_else(|| panic!("no rails for {word}"));
         let rails = |spec: NumSpec| (spec.min, spec.max, spec.step, spec.decimals);
@@ -671,11 +761,76 @@ mod tests {
             ),
         );
         state.publish_scheduler_snapshot();
-        let words = build_track_param_words(&state.latest_scheduler_snapshot().tracks[1]);
+        let snapshot = state.latest_scheduler_snapshot();
+        let words = build_track_param_words(&snapshot, &snapshot.tracks[1]);
         let macros = group(&words, "Macros");
         assert_eq!(macros.items[0].word, "rack-macro:macro_1");
         assert_eq!(macros.items[0].num, Some(MACRO_NUM_SPEC));
         assert!(macros.items[0].detail.starts_with("Macro 1"));
+    }
+
+    #[test]
+    fn param_words_list_each_rack_slots_instrument_and_mixer_params() {
+        use sequencer::effects::EffectSlotSnapshot;
+        use sequencer::sequencer::{
+            CustomInstrumentRunMode, InstrumentType, RackSlotParamPlocks, RackSlotSnapshot,
+            RackTrackSnapshot, TrackSoundState,
+        };
+        let state = state_with_sampler_and_filter();
+        let filter = EffectDescriptor::builtin_filter();
+        let slot = |instrument_type, desc: &EffectDescriptor| RackSlotSnapshot {
+            instrument_type,
+            instrument_run_mode: CustomInstrumentRunMode::Instrument,
+            instrument_base_note_offset: 0.0,
+            choke_group: None,
+            gain: 1.0,
+            pan: 0.0,
+            mute: false,
+            solo: false,
+            enabled: true,
+            max_polyphony: 2,
+            param_plocks: RackSlotParamPlocks::new(),
+            instrument_slot: EffectSlotSnapshot::new_default(desc, 9),
+            effect_slots: RackSlotSnapshot::empty_effect_slots(),
+            effect_descriptors: EffectDescriptor::default_full_chain(),
+            custom_effect_names: RackSlotSnapshot::empty_effect_names(),
+            track_sound_state: TrackSoundState::default(),
+            sample_id: None,
+        };
+        let mut synth = slot(InstrumentType::Custom, &filter);
+        synth.track_sound_state.engine_id = Some(0);
+        state.set_rack_track_for_all_pattern_snapshots(
+            1,
+            RackTrackSnapshot::new(
+                vec![synth, slot(InstrumentType::Sampler, &EffectDescriptor::builtin_sampler())],
+                sequencer::sequencer::default_rack_macros(),
+            ),
+        );
+        state.sync_engine_instrument_descriptors(1, || vec![filter.clone()]);
+        let snapshot = state.latest_scheduler_snapshot();
+        let words = build_track_param_words(&snapshot, &snapshot.tracks[1]);
+
+        let first = group(&words, &format!("Slot 1 · {}", filter.name));
+        let mode = format!("rack1:instrument:{}", filter.params[0].name);
+        let mode_item = first.items.iter().find(|item| item.word == mode).expect("slot 1 param");
+        assert_eq!(mode_item.num, Some(param_num_spec(&filter.params[0])));
+        assert!(first.items.iter().any(|item| item.word == "rack1:gain"));
+        let second = group(
+            &words,
+            &format!("Slot 2 · {}", EffectDescriptor::builtin_sampler().name),
+        );
+        assert!(second.items.iter().any(|item| item.word == "rack2:instrument:speed"));
+        // Every offered word parses to the rack-slot reference it names.
+        for item in first.items.iter().chain(&second.items) {
+            assert!(
+                matches!(
+                    ParamRef::parse(&item.word),
+                    Ok(ParamRef::RackSlot { .. } | ParamRef::RackSlotInstrument { .. })
+                ),
+                "{}",
+                item.word
+            );
+        }
     }
 
     #[test]

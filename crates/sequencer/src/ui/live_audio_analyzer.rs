@@ -10,6 +10,7 @@ use eseqlisp::widget_render::compressor_display::{
 };
 use eseqlisp::widget_render::live_audio::{LiveAudioSourceSelector, TapPoint};
 use eseqlisp::widget_render::multiband_meter::{collect_band_meter_requests, BandMeterRequest};
+use eseqlisp::widget_render::device_meter::collect_device_meter_sources;
 use eseqlisp::widget_render::gate_led::collect_gate_led_requests;
 use eseqlisp::widget_render::roar_shaper::collect_roar_meter_requests;
 use eseqlisp::widget_render::scope::{collect_scope_requests, ScopeRequest};
@@ -74,8 +75,33 @@ struct CompressorMeterNode {
     last_ring_write: f32,
 }
 
+/// One device (instrument or effect output) metered for a visible
+/// `device-meter` widget through the graph's node-meter slots. `node_id` is
+/// the device's output node at the last resolve; a rebuilt device moves to a
+/// new node and the meter follows it.
+struct DeviceMeterNode {
+    node_id: i32,
+    slot: i32,
+    /// Linear peak after ballistics, per channel.
+    level: [f32; 2],
+    /// Last published display levels.
+    published: Option<[f32; 2]>,
+    last_blocks: u32,
+    stalled_polls: u32,
+}
+
+/// Release time constant for device meters: the audio thread hands over the
+/// raw peak since the last poll and the poller decays between polls, close to
+/// the 0.92-per-block fall of the panner/peak-meter nodes the mixer uses.
+const DEVICE_METER_RELEASE_SECONDS: f32 = 0.08;
+/// Polls without a metered block before the attach edit is re-sent: the node
+/// id may have been freed and reused by a node that starts unmetered.
+const DEVICE_METER_REATTACH_POLLS: u32 = 15;
+
 pub(crate) struct LiveAudioAnalyzerManager {
     lg: LiveGraphPtr,
+    device_meters: HashMap<LiveAudioSourceSelector, DeviceMeterNode>,
+    last_device_meter_poll_at: Instant,
     taps: HashMap<TapKey, TapNode>,
     processors: HashMap<String, SpectrogramProcessor>,
     meter_nodes: HashMap<String, MeterNode>,
@@ -87,6 +113,8 @@ impl LiveAudioAnalyzerManager {
     pub(crate) fn new(lg: LiveGraphPtr) -> Self {
         Self {
             lg,
+            device_meters: HashMap::new(),
+            last_device_meter_poll_at: Instant::now(),
             taps: HashMap::new(),
             processors: HashMap::new(),
             meter_nodes: HashMap::new(),
@@ -104,7 +132,9 @@ impl LiveAudioAnalyzerManager {
         let mut scope_grouped: HashMap<TapKey, Vec<ScopeRequest>> = HashMap::new();
         let mut meter_requests: HashMap<String, BandMeterRequest> = HashMap::new();
         let mut compressor_requests: HashMap<String, CompressorMeterRequest> = HashMap::new();
+        let mut device_meter_sources = Vec::new();
         for layout in editor.visible_widget_layouts() {
+            collect_device_meter_sources(layout.as_ref(), &mut device_meter_sources);
             for request in collect_spectrogram_requests(layout.as_ref()) {
                 grouped
                     .entry(TapKey::from_request(&request))
@@ -150,7 +180,8 @@ impl LiveAudioAnalyzerManager {
         }
         let poll_due = self.last_poll_at.elapsed() >= LIVE_AUDIO_ANALYZER_POLL_INTERVAL;
         let meters_changed = self.sync_band_meters(app, meter_requests, poll_due)
-            | self.sync_compressor_meters(app, compressor_requests, poll_due);
+            | self.sync_compressor_meters(app, compressor_requests, poll_due)
+            | self.sync_device_meters(app, device_meter_sources.into_iter().collect(), poll_due);
 
         let mut active_keys = HashSet::new();
         let mut active_scope_keys = HashSet::new();
@@ -471,6 +502,100 @@ impl LiveAudioAnalyzerManager {
         changed
     }
 
+    /// Meters the devices behind visible `device-meter` widgets through the
+    /// graph's node-meter slots and publishes their display levels. Each
+    /// source is re-resolved to its current output node every pass, so a
+    /// device rebuilt under a panel that did not rerun (a rack slot whose
+    /// instrument finished compiling) is followed rather than left on its
+    /// muted predecessor. Hidden meters release their slot, which stops the
+    /// audio-thread scan.
+    fn sync_device_meters(
+        &mut self,
+        app: &app::App,
+        requested: HashSet<LiveAudioSourceSelector>,
+        poll_due: bool,
+    ) -> bool {
+        let lg = self.lg.0;
+        let resolved: HashMap<LiveAudioSourceSelector, i32> = requested
+            .iter()
+            .filter_map(|source| Some((source.clone(), resolve_device_output_node(app, source)?)))
+            .collect();
+        self.device_meters.retain(|source, meter| {
+            let keep = resolved.get(source) == Some(&meter.node_id);
+            if !keep {
+                unsafe { audiograph::graph_node_meter_detach(lg, meter.slot) };
+            }
+            keep
+        });
+        eseqlisp::live_audio::retain_device_meter_levels(
+            &self.device_meters.keys().chain(resolved.keys()).map(|source| source.key_fragment()).collect(),
+        );
+        for (source, node_id) in resolved {
+            if self.device_meters.contains_key(&source) {
+                continue;
+            }
+            let slot = unsafe { audiograph::graph_node_meter_attach(lg, node_id) };
+            if slot >= 0 {
+                self.device_meters.insert(
+                    source,
+                    DeviceMeterNode {
+                        node_id,
+                        slot,
+                        level: [0.0; 2],
+                        published: None,
+                        last_blocks: 0,
+                        stalled_polls: 0,
+                    },
+                );
+            }
+        }
+        if !poll_due || self.device_meters.is_empty() {
+            return false;
+        }
+        let elapsed = self.last_device_meter_poll_at.elapsed().as_secs_f32();
+        self.last_device_meter_poll_at = Instant::now();
+        let decay = (-elapsed / DEVICE_METER_RELEASE_SECONDS).exp();
+        let mut changed = false;
+        for (source, meter) in &mut self.device_meters {
+            let (mut peak_l, mut peak_r, mut blocks) = (0.0f32, 0.0f32, 0u32);
+            if !unsafe {
+                audiograph::graph_node_meter_take(lg, meter.slot, &mut peak_l, &mut peak_r, &mut blocks)
+            } {
+                continue;
+            }
+            if blocks == meter.last_blocks {
+                meter.stalled_polls += 1;
+                if meter.stalled_polls % DEVICE_METER_REATTACH_POLLS == 0 {
+                    unsafe { audiograph::graph_node_meter_reattach(lg, meter.slot) };
+                }
+            } else {
+                meter.stalled_polls = 0;
+                meter.last_blocks = blocks;
+            }
+            meter.level = [
+                peak_l.max(meter.level[0] * decay),
+                peak_r.max(meter.level[1] * decay),
+            ];
+            let display = [
+                crate::state_values::meter_display_level(meter.level[0]) as f32,
+                crate::state_values::meter_display_level(meter.level[1]) as f32,
+            ];
+            if meter.published != Some(display) {
+                meter.published = Some(display);
+                eseqlisp::live_audio::publish_device_meter_level(&source.key_fragment(), display);
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    fn clear_device_meters(&mut self) {
+        for (_, meter) in std::mem::take(&mut self.device_meters) {
+            unsafe { audiograph::graph_node_meter_detach(self.lg.0, meter.slot) };
+        }
+        eseqlisp::live_audio::retain_device_meter_levels(&HashSet::new());
+    }
+
     /// Watches the Compressor effect nodes behind visible
     /// `compressor-display` widgets and republishes their meter rings.
     fn sync_compressor_meters(
@@ -582,7 +707,9 @@ impl LiveAudioAnalyzerManager {
         let had_live_data = !self.taps.is_empty()
             || !self.processors.is_empty()
             || !self.meter_nodes.is_empty()
-            || !self.compressor_nodes.is_empty();
+            || !self.compressor_nodes.is_empty()
+            || !self.device_meters.is_empty();
+        self.clear_device_meters();
         self.clear_taps();
         self.processors.clear();
         self.clear_meter_nodes();
@@ -677,6 +804,7 @@ impl Drop for LiveAudioAnalyzerManager {
     fn drop(&mut self) {
         self.clear_taps();
         self.clear_meter_nodes();
+        self.clear_device_meters();
     }
 }
 
@@ -695,6 +823,20 @@ impl Drop for GraphEditBatchGuard {
     fn drop(&mut self) {
         unsafe { audiograph::end_graph_edit_batch(self.lg.0) };
     }
+}
+
+/// A device meter's node: the device's own output. Tracks meter the panner
+/// that feeds their insert chain (the instrument's output), rack slots their
+/// slot panner, effects their effect node. Masters and buses are not devices.
+fn resolve_device_output_node(app: &app::App, source: &LiveAudioSourceSelector) -> Option<i32> {
+    match source {
+        LiveAudioSourceSelector::Master | LiveAudioSourceSelector::Bus { .. } => None,
+        _ => resolve_source_node(
+            app,
+            &TapKey { source: source.clone(), tap_point: TapPoint::PreFx },
+        ),
+    }
+    .filter(|node_id| *node_id > 0)
 }
 
 /// Resolves an effect-slot source straight to its node id (for widgets that
@@ -792,6 +934,13 @@ fn resolve_source_node(app: &app::App, tap_key: &TapKey) -> Option<i32> {
             .and_then(|rack_slot| rack_slot.effect_slots.get(*slot))
             .map(|slot| slot.node_id as i32)
             .filter(|node_id| *node_id > 0),
+        LiveAudioSourceSelector::RackSlot { index, rack_slot } => app
+            .graph
+            .track_node_ids
+            .get(*index)
+            .and_then(|track| track.rack_slots.get(*rack_slot))
+            .map(|slot| slot.slot_pan_id)
+            .filter(|node_id| *node_id > 0),
         LiveAudioSourceSelector::Bus {
             id: Some(bus_id), ..
         } => app
@@ -871,6 +1020,100 @@ mod tests {
 
         let mix = app::BusNodeIds { pdc_id: 0, ..bus };
         assert_eq!(node_for_bus(&mix, TapPoint::PostFx), mix.volume_id);
+    }
+
+    unsafe extern "C" fn constant_source(
+        _inp: *const *mut f32,
+        out: *const *mut f32,
+        nframes: std::os::raw::c_int,
+        _state: *mut c_void,
+        _buffers: *mut c_void,
+    ) {
+        std::slice::from_raw_parts_mut(*out, nframes as usize).fill(0.5);
+    }
+
+    /// User report 2026-10-01: rack slot meters stayed at zero. The panel's
+    /// dicts outlive a slot rebuild (non-structural patches do not rerun the
+    /// layout), so a meter pinned to a node id kept metering the muted
+    /// outgoing slot panner. Meters name the device; the poller follows it.
+    #[test]
+    fn device_meter_follows_a_rebuilt_rack_slot_to_its_new_panner() {
+        unsafe { audiograph::initialize_engine(64, 44_100) };
+        let lg = LiveGraphPtr(unsafe {
+            audiograph::create_live_graph(32, 64, c"device-meter-rack".as_ptr(), 2)
+        });
+        assert!(!lg.0.is_null());
+        let (keyboard_tx, _keyboard_rx) = std::sync::mpsc::channel();
+        let mut app = app::App::new(
+            Arc::new(sequencer::sequencer::SequencerState::new(0, Vec::new())),
+            lg,
+            44_100,
+            app::AudioBuses {
+                bus_l_id: 0,
+                bus_r_id: 0,
+                default_bus_nodes: Vec::new(),
+                bus_effect_runtime: Arc::new(std::sync::Mutex::new(Arc::new(Vec::new()))),
+                reverb_bus_id: 0,
+                reverb_node_id: 0,
+            },
+            Arc::new(sequencer::recorder::MasterRecorder::new(44_100, 2)),
+            keyboard_tx,
+        );
+        app.graph_controller().add_blank_sampler_track().expect("add track");
+        app.graph_controller().group_track_to_instrument_rack(0).expect("group into rack");
+
+        let feed_slot = |app: &app::App| {
+            let slot = &app.graph.track_node_ids[0].rack_slots[0];
+            let vtable = audiograph::NodeVTable {
+                process: Some(constant_source),
+                ..audiograph::NodeVTable::default()
+            };
+            for sum in [slot.slot_sum_l_id, slot.slot_sum_r_id] {
+                let node = unsafe {
+                    audiograph::add_node(lg.0, vtable, 0, c"src".as_ptr(), 0, 1, std::ptr::null(), 0)
+                };
+                assert!(unsafe { audiograph::graph_connect(lg.0, node, 0, sum, 0) });
+            }
+            slot.slot_pan_id
+        };
+        let render = || {
+            let mut out = vec![0.0f32; 64 * 2];
+            for _ in 0..6 {
+                unsafe { audiograph::process_next_block(lg.0, out.as_mut_ptr(), 64) };
+            }
+        };
+        let source = LiveAudioSourceSelector::RackSlot { index: 0, rack_slot: 0 };
+        let key = source.key_fragment();
+        let mut manager = LiveAudioAnalyzerManager::new(lg);
+        let mut meter = |app: &app::App| {
+            manager.sync_device_meters(app, HashSet::from([source.clone()]), true);
+            render();
+            manager.sync_device_meters(app, HashSet::from([source.clone()]), true);
+            let node = manager.device_meters.get(&source).expect("metered").node_id;
+            let level = eseqlisp::live_audio::device_meter_level(&key).expect("published")[0];
+            (node, level)
+        };
+
+        let first_pan = feed_slot(&app);
+        let (node, level) = meter(&app);
+        assert_eq!(node, first_pan);
+        assert!(level > 0.5, "slot audio should light the meter, got {level}");
+
+        app.graph_controller()
+            .replace_rack_slot_with_sampler(
+                0,
+                0,
+                std::path::Path::new("../../content/impulses/lexicon-300-rich-plate.wav"),
+            )
+            .expect("rebuild the slot");
+        let second_pan = feed_slot(&app);
+        assert_ne!(second_pan, first_pan, "the rebuilt slot gets a new panner");
+        let (node, level) = meter(&app);
+        assert_eq!(node, second_pan, "the meter follows the slot, not the old node");
+        assert!(level > 0.5, "the rebuilt slot's audio should light the meter, got {level}");
+        drop(manager);
+        drop(app);
+        unsafe { audiograph::destroy_live_graph(lg.0) };
     }
 
     #[test]

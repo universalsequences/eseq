@@ -6443,6 +6443,69 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         assert_eq!(&*payload["new"].borrow(), &Value::Number(0.75));
     }
 
+    /// A multi-field document edit (jaki removing pattern 0) lands every
+    /// slot and queues exactly one history command listing every write, so
+    /// App records it as one undo step.
+    #[test]
+    fn instance_document_write_many_queues_one_history_payload() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let scene = state.current_scene_id().expect("current scene identity");
+        let figures = super::instance_document_slot(7, "figures");
+        let patterns = super::instance_document_slot(7, "patterns");
+        state
+            .write_current_scene_slot(figures.clone(), crate::process::ProcessLiteral::Number(1.0))
+            .expect("seed figures");
+        let mut runtime = Runtime::new();
+        super::register_scene_slot_authoring_natives(&mut runtime, Arc::clone(&state));
+        runtime
+            .eval_str(r#"(__instance-doc-write-many 7 "figures" 2 :patterns (list))"#)
+            .expect("write many");
+        assert_eq!(
+            state.current_scene_slots().get(&figures),
+            Some(&crate::process::ProcessLiteral::Number(2.0))
+        );
+        assert_eq!(
+            state.current_scene_slots().get(&patterns),
+            Some(&crate::process::ProcessLiteral::List(Vec::new()))
+        );
+        let mut editor = eseqlisp::Editor::new(runtime, eseqlisp::EditorConfig::default());
+        let payloads: Vec<_> = editor
+            .drain_host_commands()
+            .into_iter()
+            .filter_map(|command| match command {
+                eseqlisp::HostCommand::Custom { name, payload }
+                    if name == "scene-slot-history-write" => Some(payload),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(payloads.len(), 1, "one edit, one history command");
+        let Value::Map(payload) = &payloads[0] else {
+            panic!("history payload must be a map");
+        };
+        assert_eq!(
+            &*payload["scene-id"].borrow(),
+            &Value::String(scene.0.to_string())
+        );
+        let Value::List(slots) = &*payload["slots"].borrow() else {
+            panic!("slots must be a list");
+        };
+        assert_eq!(slots.len(), 2);
+        let slot = |index: usize, key: &str| {
+            let slot = slots[index].borrow();
+            let Value::Map(map) = &*slot else {
+                panic!("slot write must be a map");
+            };
+            let value = map[key].borrow().clone();
+            value
+        };
+        assert_eq!(slot(0, "slot"), Value::String(figures));
+        assert_eq!(slot(0, "old-present"), Value::Bool(true));
+        assert_eq!(slot(0, "old"), Value::Number(1.0));
+        assert_eq!(slot(0, "new"), Value::Number(2.0));
+        assert_eq!(slot(1, "slot"), Value::String(patterns));
+        assert_eq!(slot(1, "old-present"), Value::Bool(false));
+    }
+
     #[test]
     fn scenes_introspection_lists_declared_slots_and_pattern_overrides() {
         let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
@@ -10019,6 +10082,44 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         runtime
     }
 
+    /// Two jakis sharing a label get distinct route menu entries, and
+    /// picking the second one's entry routes to the second jaki: the
+    /// dropdown hands back only the label text.
+    #[test]
+    fn neural_route_menu_disambiguates_jakis_with_the_same_label() {
+        let mut runtime = jaki_runtime();
+        let menu = runtime
+            .eval(
+                r#"(import alez.neural.variable-reset)
+                   (module test.gvr-route-menu)
+                   (override alez.neural.variable-reset/gvr-route-options (self)
+                     (list "1 kick" "Off"))
+                   (override alez.neural.variable-reset/gvr-jakis (self)
+                     (list (dict :id 7 :label "drums") (dict :id 9 :label "drums")
+                           (dict :id 11 :label "bass")))
+                   (alez.neural.variable-reset/gvr-route-menu nil)"#,
+            )
+            .expect("route menu")
+            .expect("value");
+        assert_eq!(
+            eseqlisp::vm::format_lisp_value(&menu),
+            r#"("1 kick" "→ drums #7" "→ drums #9" "→ bass" "↺ drums #7" "↺ drums #9" "↺ bass" "Off")"#
+        );
+        let pick = |runtime: &mut ScratchControlRuntime, label: &str| {
+            let value = runtime
+                .eval(&format!(
+                    "(alez.neural.variable-reset/gvr-route-menu->internal nil \"{label}\")"
+                ))
+                .expect("route pick")
+                .expect("value");
+            eseqlisp::vm::format_lisp_value(&value)
+        };
+        assert_eq!(pick(&mut runtime, "→ drums #9"), "(:gen 9)");
+        assert_eq!(pick(&mut runtime, "↺ drums #9"), "(:restart 9)");
+        assert_eq!(pick(&mut runtime, "→ drums #7"), "(:gen 7)");
+        assert_eq!(pick(&mut runtime, "↺ bass"), "(:restart 11)");
+    }
+
     fn jaki_nums(value: &Value) -> Vec<f64> {
         let Value::List(items) = value else {
             panic!("expected a list of numbers, got {value:?}");
@@ -10274,22 +10375,49 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
     }
 
     #[test]
+    fn jaki_sort_evs_orders_by_offset_and_keeps_ties_in_input_order() {
+        let mut rt = jaki_runtime();
+        // offsets (num den): 3 runs, ties across and within runs; :i is the
+        // input position, so a stable sort keeps equal offsets in :i order
+        let ids = jaki_eval_nums(
+            &mut rt,
+            r#"(let ((offs (list (list 1 2) (list 1 1) (list 3 1) (list 0 1) (list 1 2)
+                                 (list 1 1) (list 0 1) (list 5 2) (list 1 1) (list 1 4))))
+                 (map (lambda (e) (get e :i))
+                      (jaki/sort-evs (map (lambda (i) (dict :off (nth offs i) :i i))
+                                          (range 0 (len offs))))))"#,
+        );
+        assert_eq!(ids, vec![3.0, 6.0, 9.0, 0.0, 4.0, 1.0, 5.0, 8.0, 7.0, 2.0]);
+        let sorted = jaki_eval_nums(
+            &mut rt,
+            r#"(let ((l (map (lambda (i) (dict :off (list i 1) :i i)) (range 0 40))))
+                 (list (if (= (jaki/sort-evs l) l) 1 0) (len (jaki/sort-evs (list)))))"#,
+        );
+        assert_eq!(sorted, vec![1.0, 0.0]);
+    }
+
+    #[test]
     fn jaki_per_cycle_memo_reuses_results_and_stays_bounded() {
         let mut rt = jaki_runtime();
         let nums = jaki_eval_nums(
             &mut rt,
-            r#"(let ((p (jaki/pat . . - .)))
+            r#"(let ((p (jaki/pat . . - .))
+                     (q (jaki/with-period (jaki/pat . -))))
                  (do
+                   (jaki/eval-cycle q 0 :left jaki/default-state)
                    (map (lambda (k) (jaki/eval-cycle p k :left jaki/default-state))
                         (range 0 80))
                    (let ((a (jaki/eval-cycle p 3 :left jaki/default-state))
                          (b (jaki/eval-cycle p 3 :left jaki/default-state)))
-                     (list (len jaki/memo-store)
+                     (list (len jaki/exact-memo)
+                           (len jaki/memo-store)
                            (if (= a b) 1 0)
                            (len (get a :events))))))"#,
         );
-        // the assoc memo caps at 64 entries and repeated lookups agree
-        assert_eq!(nums, vec![64.0, 1.0, 5.0]);
+        // an unstamped pattern keys on the exact cycle: its entries cap at 32
+        // in their own store, so 80 of them never evict the periodic entry
+        // (eseq-8cim), and repeated lookups agree
+        assert_eq!(nums, vec![32.0, 1.0, 1.0, 5.0]);
     }
 
     #[test]
@@ -10308,6 +10436,38 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
             nums,
             vec![10.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 2.0]
         );
+    }
+
+    #[test]
+    fn jaki_trunc_cuts_the_end_of_the_whole_cycle() {
+        let mut rt = jaki_runtime();
+        // (. -) (. . -) is 7 units. trunc cuts symbols off the end of the
+        // concatenated cycle, back through the figures: trunc 1 → (. -)
+        // (. .), trunc 3 → (. -), a cut past the start leaves nothing.
+        // Per hit: 0 = dot, 1 = dash.
+        let cut = |rt: &mut ScratchControlRuntime, n: u32| {
+            jaki_eval_nums(
+                rt,
+                &format!(
+                    "(let ((p (jaki/trunc (jaki/pat (fig (. -)) (fig (. . -))) {n})))
+                       (cons (jaki/cycle-length p 0)
+                             (map (lambda (e) (if (= (get e :sym) :dash) 1 0))
+                                  (get (jaki/eval-at p 0 :left jaki/default-state) :events))))"
+                ),
+            )
+        };
+        assert_eq!(cut(&mut rt, 1), [5.0, 0.0, 1.0, 1.0, 0.0, 0.0]);
+        assert_eq!(cut(&mut rt, 3), [3.0, 0.0, 1.0, 1.0]);
+        assert_eq!(cut(&mut rt, 9), [0.0]);
+        // (every 2 (trunc 3)) cuts the whole cycle on odd cycles only; the
+        // row word goes through the same path.
+        let got = jaki_eval_nums(
+            &mut rt,
+            "(let ((p (get (first (jaki/prepare
+                        '((fig (. -)) (fig (. . -)) -> 0 (every 2 (trunc 3))))) :p)))
+               (list (jaki/cycle-length p 0) (jaki/cycle-length p 1)))",
+        );
+        assert_eq!(got, [7.0, 3.0]);
     }
 
     #[test]
@@ -10440,7 +10600,7 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
                          :vel (get (nth (get r :events) 1) :vel)
                          :note (len jaki/len-memo)
                          :speed (len jaki/lens-memo)
-                         :pan (/ (len jaki/memo-store) 10))))))"#,
+                         :pan (/ (len jaki/exact-memo) 10))))))"#,
         )
         .expect("register payload-channel sequencer");
         let definition = rt.sequencer_defs().remove(0);
@@ -13827,6 +13987,278 @@ here is reached through `use super::…`, i.e. the façade's re-exports.
         assert_eq!(notes(&t[1]), [-1., 1., 2., 2.]);
         // only the hits the chain steps on
         assert_eq!(notes(&t[2]), [0., 1., 0., 1.]);
+    }
+
+    // ── harmony declaration (docs/harmony-declaration-spec.md) ──
+
+    #[test]
+    #[ignore = "probe: reader + string ops for chord symbols"]
+    fn jaki_chord_symbol_reader_probe() {
+        let mut rt = jaki_runtime();
+        for code in [
+            "(source '(C#m7 Am7 bVII V7/iv vii° iiø7 F#maj7 Bb7 E))",
+            "(str 'C#m7)",
+            "(len (str 'C#m7))",
+            "(length (str 'C#m7))",
+            "(substring (str 'C#m7) 0 2)",
+            "(substring \"vii°\" 3 4)",
+            "(len \"vii°\")",
+            "(source (read-string \"C#m7\"))",
+            "(= (substring \"Am7\" 0 1) \"A\")",
+        ] {
+            eprintln!("PROBE {code} => {:?}", rt.eval(code));
+        }
+    }
+
+    #[test]
+    fn jaki_chords_module_loads() {
+        let mut rt = jaki_runtime();
+        rt.eval("(import alez.jaki.chords)").expect("chords module");
+        rt.eval("(import alez.jaki.core)").expect("core module");
+        let v = rt.eval("(alez.jaki.chords/chord-name 5 :min7)").expect("eval").expect("value");
+        assert_eq!(v, Value::String("Fm7".to_string()));
+    }
+
+    #[test]
+    fn jaki_chords_row_declares_and_deg_reads_it_same_beat() {
+        // cycle 0 declares Cm7, cycle 1 F7; row 0 plays the 3rd
+        let t = jaki_surface_hits(
+            ". . . .
+             -> chords (note (0 5)) (chord (:min7 :dom7))
+             -> 0 (note (deg 3))
+             -> 1 (note (deg 7))",
+            2.0,
+        );
+        assert_eq!(notes(&t[0]), [3., 3., 3., 3., 9., 9., 9., 9.]);
+        assert_eq!(notes(&t[1]), [10., 10., 10., 10., 15., 15., 15., 15.]);
+        // a chords row plays no track of its own
+        assert_eq!(t[0].len() + t[1].len(), 16);
+    }
+
+    #[test]
+    fn jaki_chord_bundles_play_a_quality_or_the_declared_chord() {
+        let t = jaki_surface_hits(
+            ". .
+             -> chords (note (0 5)) (chord (:min7 :dom7))
+             -> 1 (chord :maj7)
+             -> 2 (chord)
+             -> 3 (note 12) (chord :min :inv 1)",
+            1.0,
+        );
+        // four notes per hit, two hits per cycle, two cycles
+        assert_eq!(notes(&t[1])[..4], [0., 4., 7., 11.]);
+        assert_eq!(notes(&t[2])[..4], [0., 3., 7., 10.]);
+        assert_eq!(notes(&t[2])[8..12], [5., 9., 12., 15.]);
+        // first inversion: the root up an octave
+        assert_eq!(notes(&t[3])[..3], [24., 15., 19.]);
+    }
+
+    #[test]
+    fn jaki_voices_spread_over_the_declared_chord() {
+        let t = jaki_surface_hits(
+            ". . . .
+             -> chords (note (0 7)) (chord :maj7)
+             -> 1 (voice)
+             -> 2 (voice)
+             -> 3 (voice)",
+            2.0,
+        );
+        for i in 0..8 {
+            let pcs: Vec<i64> = (1..4).map(|r| (t[r][i].0.round() as i64).rem_euclid(12)).collect();
+            let root = if i < 4 { 0 } else { 7 };
+            let chord: Vec<i64> = [0, 4, 7, 11].iter().map(|x| (x + root) % 12).collect();
+            assert!(pcs.iter().all(|pc| chord.contains(pc)), "hit {i}: {pcs:?} not in {chord:?}");
+            assert!(pcs[0] != pcs[1] && pcs[1] != pcs[2] && pcs[0] != pcs[2], "hit {i} doubled: {pcs:?}");
+        }
+        // voice leading: on the change to G, each voice moves at most a
+        // few semitones
+        for r in 1..4 {
+            assert!((t[r][4].0 - t[r][3].0).abs() <= 5.0, "row {r} jumped: {:?}", t[r]);
+        }
+    }
+
+    #[test]
+    fn jaki_doc_chords_route_and_schema() {
+        use eseqlisp::sexp_slot::{read_value, schema::Schema};
+        let mut rt = jaki_runtime();
+        let value = rt
+            .eval(
+                r#"(import alez.jaki.doc)
+                   (source (alez.jaki.doc/body
+                             (list (list :dot :dot :dot :dot))
+                             (list (dict :route -2 :mods (list (list "note" (list 0 5))
+                                                               (list "chord" (list ":min7" ":dom7"))))
+                                   (dict :route 0 :mods (list (list "note" (list "deg" 3))))
+                                   (dict :route 1 :mods (list "voice"))
+                                   (dict :route 2 :mods (list (list "chord" ":declared"))))
+                             4))"#,
+            )
+            .expect("eval")
+            .expect("value");
+        let Value::String(body) = value else { panic!("{value:?}") };
+        assert_eq!(
+            body,
+            "((fig (. . . .)) -> chords (note (0 5)) (chord (:min7 :dom7)) -> 0 (note (deg 3)) -> 1 voice -> 2 (chord :declared))"
+        );
+        let t = jaki_surface_hits(&body, 2.0);
+        assert_eq!(notes(&t[0]), [3., 3., 3., 3., 9., 9., 9., 9.]);
+        assert_eq!(notes(&t[2])[..4], [0., 3., 7., 10.]);
+
+        let schema = rt.eval("alez.jaki.doc/row-schema").unwrap().unwrap();
+        let schema = Schema::parse(&schema).expect("row schema parses");
+        schema
+            .check(&read_value("((note (deg 3)) (chord :min7) (chord (:min7 :dom7)) (voice) (voice (seq :hit 0 1 2)) (chord :declared) (note+ (deg 5)))").unwrap())
+            .expect("chord words on a row");
+        assert!(schema.check(&read_value("((chord :nope))").unwrap()).is_err());
+
+        // the Chords lane: chord words, key, seq, on / every, note+; no filters
+        let lane = rt.eval("alez.jaki.doc/chords-row-schema").unwrap().unwrap();
+        let lane = Schema::parse(&lane).expect("chords lane schema parses");
+        lane.check(&read_value(
+            "((key A :minor) (chord (i iv V7 bVI)) (chord (Am7 (seq :fig E F))) (chord C#m7) \
+              (on accent (chord E7)) (every 4 (chord V7/V)) (note+ 5) (chord vii°))",
+        ).unwrap())
+        .expect("progression words");
+        assert!(lane.check(&read_value("(left)").unwrap()).is_err());
+        assert!(lane.check(&read_value("((chord Q7))").unwrap()).is_err());
+        let size = eseqlisp::vm::format_lisp_source(&rt.eval("alez.jaki.doc/chords-row-schema").unwrap().unwrap()).len();
+        assert!(size < 40_000, "chords lane schema is {size} chars");
+    }
+
+    #[test]
+    fn jaki_chords_lane_reads_chord_symbols_and_numerals() {
+        // root of whatever chord is declared, via (deg 1), and its 3rd
+        let roots = |lane: &str, beats: f64| {
+            notes(&jaki_surface_hits(&format!("{lane} -> 0 (note (deg 1))"), beats)[0])
+        };
+        // symbols, one per cycle
+        assert_eq!(roots(". . -> chords (chord (Am7 Dm7 C#m7 Bb7))", 2.0), [9., 9., 2., 2., 1., 1., 10., 10.]);
+        // numerals against the key; borrowed chords carry their accidental
+        assert_eq!(
+            roots(". . -> chords (key A :minor) (chord (i iv V7 bVI))", 2.0),
+            [9., 9., 2., 2., 4., 4., 5., 5.]
+        );
+        // a seq inside the per-cycle list: cycle 2 alternates per figure
+        assert_eq!(
+            roots("(fig (. .)) (fig (. .)) -> chords (chord (Am7 (seq :fig E F)))", 2.0),
+            [9., 9., 9., 9., 4., 4., 5., 5.]
+        );
+        // on overrides per hit
+        assert_eq!(roots("(fig (. .)) (fig (. .)) -> chords (chord C) (on (fig 2) (chord G7))", 1.0), [0., 0., 7., 7.]);
+        // note+ transposes the whole progression
+        assert_eq!(roots(". . -> chords (chord C) (note+ 5)", 0.5), [5., 5.]);
+        // qualities: secondary dominant, diminished, sharps
+        let third = |lane: &str| notes(&jaki_surface_hits(&format!("{lane} -> 0 (note (deg 3))"), 0.25)[0]);
+        assert_eq!(third(". -> chords (key C :major) (chord V7/V)"), [6.]);   // D7: F#
+        assert_eq!(third(". -> chords (chord C#m7)"), [4.]);                  // E
+        let fifth = notes(&jaki_surface_hits(". -> chords (key C :major) (chord vii°) -> 0 (note (deg 5))", 0.25)[0]);
+        assert_eq!(fifth, [17.]);                                              // B dim: F
+        // a chord word on a track row plays that chord
+        let t = jaki_surface_hits(". -> 1 (chord Am7)", 0.25);
+        assert_eq!(notes(&t[1]), [9., 12., 16., 19.]);
+    }
+
+    #[test]
+    fn jaki_voice_offsets_step_chord_tones() {
+        // one track, left and right rows never share a tick: plain voices
+        // land on the same tone; (voice 1) sits one chord tone higher
+        let hits = |right: &str| {
+            jaki_surface_hits(
+                &format!(". . . . -> chords (chord (C F)) -> 0 (voice) left -> 1 {right} right"),
+                2.0,
+            )
+        };
+        let same = hits("(voice)");
+        assert_eq!(notes(&same[0]), notes(&same[1]), "plain voices collapse onto one tone");
+        let t = hits("(voice 1)");
+        let tones = |root: i64| -> Vec<i64> { [0, 4, 7].iter().map(|x| (x + root).rem_euclid(12)).collect() };
+        for (i, (a, b)) in notes(&t[0]).iter().zip(notes(&t[1]).iter()).enumerate() {
+            let root = if i < 2 { 0 } else { 5 };
+            assert!(tones(root).contains(&(b.round() as i64).rem_euclid(12)), "{:?}", notes(&t[1]));
+            assert!((3.0..=5.0).contains(&(b - a)), "hit {i}: {a} -> {b}");
+        }
+        // a seq offset climbs the chord per hit and returns: no drift
+        let arp = notes(&jaki_surface_hits(". . . . -> chords (chord C) -> 0 (voice (seq :hit 0 1 2))", 2.0)[0]);
+        assert_eq!(arp, [0., 4., 7., 0., 4., 7., 0., 4.]);
+    }
+
+    #[test]
+    #[ignore = "probe: the learningchords pattern over 30 s"]
+    fn jaki_learningchords_probe() {
+        let t = jaki_surface_hits(
+            "(fig (. . -)) -> chords (key C :major) (chord (I IV V7 (V II)))
+             -> 0 (voice 0) left -> 0 (voice 1) right",
+            60.0,
+        );
+        for (c, chunk) in notes(&t[0]).chunks(4).enumerate().take(24) {
+            let chord = ["I", "IV", "V7", "V/II"][c % 4];
+            eprintln!("PROBE cycle {c:2} {chord:5} {chunk:?}");
+        }
+    }
+
+    #[test]
+    fn jaki_voices_keep_their_register_over_many_loops() {
+        // the learningchords pattern: I IV V7 (V II) with two voices on one
+        // track; plain nearest-tone leading sank a fifth per loop
+        let t = jaki_surface_hits(
+            "(fig (. . -)) -> chords (key C :major) (chord (I IV V7 (V II)))
+             -> 0 (voice 0) left -> 0 (voice 1) right",
+            60.0,
+        );
+        let n = notes(&t[0]);
+        let lo = n.iter().cloned().fold(f64::INFINITY, f64::min);
+        let hi = n.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        assert!(lo >= -5.0 && hi <= 9.0, "voices left their register: {lo}..{hi} {n:?}");
+        // and the loop repeats: the second pass of 8 cycles equals a later one
+        let cycles: Vec<&[f64]> = n.chunks(4).collect();
+        assert_eq!(cycles[8..16], cycles[24..32], "the voicing settles into a loop");
+    }
+
+    #[test]
+    fn jaki_nested_cycle_lists_step_per_visit() {
+        // (I IV V7 (VI IV)): the inner list alternates each time it is
+        // reached, so VI and IV take turns on every 4th cycle
+        let roots = notes(&jaki_surface_hits(
+            ". -> chords (key C :major) (chord (I IV V7 (VI IV))) -> 0 (note (deg 1))",
+            2.0,
+        )[0]);
+        assert_eq!(roots, [0., 5., 7., 9., 0., 5., 7., 5.]);
+        // the same for any per-cycle value
+        let t = jaki_surface_hits(". -> 0 (note (0 1 (10 20)))", 1.5);
+        assert_eq!(notes(&t[0]), [0., 1., 10., 0., 1., 20.]);
+    }
+
+    #[test]
+    fn jaki_chords_lane_lights_the_playing_chord() {
+        let state = Arc::new(SequencerState::new(4, (0..4).map(|_| default_empty_effect_chain()).collect()));
+        let mut rt = ScratchControlRuntime::new(
+            Arc::clone(&state), fallback_effect_descriptors(4), fallback_instrument_descriptors(4), 0, 0,
+        );
+        // item 0 (key …), item 1 (chord (I IV V7)); one cycle per hit
+        rt.eval(
+            r#"(import alez.jaki.surface :refer (jak))
+               (jak "lit" :16 . -> chords (key C :major) (chord (I IV V7)) -> 0 voice)"#,
+        )
+        .expect("jak");
+        let id = rt.sequencer_defs()[0].id;
+        let mut generators = crate::generator::GeneratorRuntime::default();
+        generators.sync_definitions(&rt.sequencer_defs(), 0.0);
+        let mut out = Vec::new();
+        generators.process_block(0.0, 1.0, 0, 48_000.0,
+            |input| rt.invoke_sequencer_tick(input.generator_index, input).expect("tick"), &mut out);
+        let code = |rel: &[u64]| rel.iter().rev().fold(0u64, |acc, d| acc * 64 + d + 1) as f64;
+        let pick = |k: u64| state.generator_mark_at(id, "0.1", (k + 1) * 12_000);
+        // the chord list is arg 1 of item 1; member k plays on cycle k
+        assert_eq!(pick(0), Some(code(&[1, 0])));
+        assert_eq!(pick(1), Some(code(&[1, 1])));
+        assert_eq!(pick(2), Some(code(&[1, 2])));
+    }
+
+    #[test]
+    fn jaki_chords_play_option_sounds_the_declared_chord() {
+        let t = jaki_surface_hits(". . -> (chords :play 3) (note 2) (chord :min)", 0.5);
+        assert_eq!(notes(&t[3]), [2., 5., 9., 2., 5., 9.]);
+        assert!(t[0].is_empty());
     }
 
     #[test]

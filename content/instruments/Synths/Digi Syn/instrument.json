@@ -2,9 +2,7 @@
   "version": 1,
   "run_mode": "instrument",
   "voice_controls": {
-    "mode": "voice_mode",
-    "count": "voice_count",
-    "legato": "legato_on"
+    "mode": "voice_mode"
   },
   "current": 2,
   "releases": {

@@ -1,0 +1,36 @@
+{
+ "source_sha256": "017a12b65ca6c0b91e64ce8b7bc1cdd5daf707ac72575bb012007d5254df488c",
+ "rates": {
+  "44100": {
+   "width_power_change_db": 1.72,
+   "renders": 84,
+   "max_peak": 0.4749862551689148,
+   "block_partition_max_abs": 0.0,
+   "extreme_renders": 120,
+   "roll_peak": 0.6657407879829407,
+   "octave_repeat_max_abs": 0.0,
+   "choke_db_300ms_after_release": -185.3
+  },
+  "48000": {
+   "width_power_change_db": 1.72,
+   "renders": 84,
+   "max_peak": 0.44388771057128906,
+   "block_partition_max_abs": 0.0,
+   "extreme_renders": 120,
+   "roll_peak": 0.59840989112854,
+   "octave_repeat_max_abs": 0.0,
+   "choke_db_300ms_after_release": -185.3
+  },
+  "96000": {
+   "width_power_change_db": 1.72,
+   "renders": 84,
+   "max_peak": 0.4261836111545563,
+   "block_partition_max_abs": 0.0,
+   "extreme_renders": 120,
+   "roll_peak": 0.5848966240882874,
+   "octave_repeat_max_abs": 0.0,
+   "choke_db_300ms_after_release": -185.4
+  }
+ },
+ "compiler_sha256": "09b3f28c08e0bff871f8abdbdff8c9886e1dcba7cf321d7c14e9a1ab0d13ce4e"
+}

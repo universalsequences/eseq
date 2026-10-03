@@ -1134,6 +1134,7 @@ mod solo_binding_tests;
             "ui/effects/panel-frame.lisp",
             "ui/effects/drag-drop.lisp",
             "ui/effects/track-panels.lisp",
+            "ui/effects/scale-editor.lisp",
             "ui/effects/panel-widgets.lisp",
             "ui/effects/param-controls.lisp",
             "ui/effects/param-grid.lisp",
@@ -3753,38 +3754,6 @@ mod solo_binding_tests;
             }
             other => panic!("expected enter-new-effect-editor host command, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn metal_seq_browser_packages_tab_renders_tiered_package_tree() {
-        let mut editor = browser_editor_on_instrument_tab();
-        let items = editor.runtime_mut().eval_str(r#"
-            (list (dict :kind "header" :label "Local" :tier "local")
-                  (dict :kind "module" :label "my.euclid" :module "my.euclid"
-                        :path "/packages/local/my/euclid.lisp" :tier "local"
-                        :attached? true :always? false :read-only? false))
-        "#).unwrap().unwrap();
-        editor.runtime_mut().register_native("seq-package-tree", move |_args, _ctx| Ok(items.clone()));
-        editor.runtime_mut().eval_str("(set! sbrowser-tab \"packages\")")
-            .expect("select packages tab");
-        editor.runtime_mut().eval_str("(eseq.browser/refresh-buffer)").unwrap();
-        editor.refresh_runtime_side_effects();
-        editor.set_active_buffer(browser_id(&editor));
-        editor.set_layout_viewport(90, 70);
-        let layout = editor.widget_layout().expect("packages browser layout");
-        let panel = find_layout_node_by_stable_key_suffix(&layout, "/packages-tab-panel")
-            .expect("packages panel");
-        for key in ["/packages-tab-tree", "/package-new-button", "/package-refresh-button"] {
-            let node = find_layout_node_by_stable_key_suffix(&layout, key).expect(key);
-            assert_finite_nonzero_rect(node, key);
-            assert_layout_inside(node, panel, key);
-        }
-        let tree = find_layout_node_by_stable_key_suffix(&layout, "/packages-tab-tree").unwrap();
-        for handler in ["on-select", "on-activate", "on-right-click"] {
-            assert!(tree.props.contains_key(handler), "package tree needs {handler}");
-        }
-        let rendered = render_layout_cells(&layout, 90, 70);
-        assert!(rendered.contains("my.euclid"), "module row should render visibly: {rendered}");
     }
 
     #[test]
@@ -14471,6 +14440,34 @@ mod solo_binding_tests;
             .unwrap_or_else(|| panic!("rack/track FX divider; layout={layout_summaries:#?}"));
         let track_drop = find_layout_node_by_debug_name(&layout, "fx-track-drop-placeholder-panel")
             .unwrap_or_else(|| panic!("track FX drop panel; layout={layout_summaries:#?}"));
+        // Ableton-style output meters sit after each device: the selected
+        // slot's instrument (slot panner), its OTT, then the whole rack
+        // (track panner) after the rack/track divider.
+        let mut device_meters = Vec::new();
+        collect_layout_nodes_by_debug_name(&layout, "device-output-meter", &mut device_meters);
+        // Meters name devices, not graph nodes, so a rebuilt slot is followed.
+        let meter_source = |meter: &eseqlisp::layout::LayoutNode| {
+            eseqlisp::widget_render::live_audio::optional_source_from_props(&meter.props)
+                .expect("device meter source")
+        };
+        use eseqlisp::widget_render::live_audio::LiveAudioSourceSelector as Source;
+        assert_eq!(device_meters.len(), 3, "meters: {device_meters:#?}");
+        for meter in &device_meters {
+            assert_eq!(meter.widget_type, "device-meter");
+            assert!(meter.rect.width > 0.0 && meter.rect.height > 0.0, "{meter:#?}");
+        }
+        let [slot_meter, ott_out_meter, rack_meter] = [0, 1, 2].map(|idx| device_meters[idx]);
+        assert_eq!(meter_source(slot_meter), Source::RackSlot { index: 0, rack_slot: 0 });
+        assert_eq!(
+            meter_source(ott_out_meter),
+            Source::RackEffect { index: 0, rack_slot: 0, slot: 0 }
+        );
+        assert_eq!(meter_source(rack_meter), Source::Track { index: 0 });
+        let right = |node: &eseqlisp::layout::LayoutNode| node.rect.col + node.rect.width;
+        assert!(right(selected_sampler_panel) <= slot_meter.rect.col);
+        assert!(right(ott_panel) <= ott_out_meter.rect.col);
+        assert!(right(chain_divider) <= rack_meter.rect.col);
+        assert!(right(rack_meter) <= track_drop.rect.col);
         let layer_label = find_layout_node_by_text(&layout, "Layer Alpha")
             .unwrap_or_else(|| panic!("rack layer label; layout={layout_summaries:#?}"));
         let sampler_small_param_row =
@@ -22804,6 +22801,100 @@ mod solo_binding_tests;
             value_contains_string(&spec, "*track*"),
             "main sequencer layout spec should keep the track parameters panel: {spec:?}"
         );
+    }
+
+    #[test]
+    fn metal_seq_track_panel_scale_button_swaps_to_the_scale_editor() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let params = sequencer::sequencer::TrackParams::new();
+        let just_major = sequencer::scale::SCALES
+            .iter()
+            .position(|scale| scale.name == "Just Major")
+            .unwrap();
+        params.set_fts_scale(just_major);
+        let mut tuning = sequencer::scale::TrackTuning::DEFAULT;
+        tuning.offsets[4] = 20.0;
+        params.set_tuning(tuning);
+        for (key, value) in crate::tuning_reactive_fields(&params) {
+            editor.runtime_mut().set_reactive("SEQ", key, value);
+        }
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "tp-fts", Value::String(crate::fts_scale_label(&params)));
+        editor.refresh_runtime_side_effects();
+        let track_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*track*")
+            .expect("track buffer should exist")
+            .id;
+        editor.set_active_buffer(track_id);
+        editor.set_layout_viewport(80, 60);
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+
+        let layout = editor.widget_layout().expect("track panel layout");
+        let strip = find_layout_node_by_debug_name(&layout, "track-parameters-strip")
+            .expect("track settings strip");
+        let open = find_layout_node_by_debug_name(strip, "track-scale-editor-open")
+            .expect("scale editor button beside the scale dropdown");
+        assert_finite_nonzero_rect(open, "scale editor button");
+        assert!(find_dropdown_by_value(strip, "Just Major*").is_some());
+        assert_eq!(
+            editor.runtime_mut().eval_str("(eseq.seq-layout/track-tile-height)").unwrap(),
+            Some(Value::Number(7.0))
+        );
+
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.effects.scale-editor/open-scale-editor)")
+            .expect("open the scale editor");
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        assert_eq!(
+            editor.runtime_mut().eval_str("(eseq.seq-layout/track-tile-height)").unwrap(),
+            Some(Value::Number(13.0))
+        );
+        let layout = editor.widget_layout().expect("scale editor layout");
+        assert!(find_layout_node_by_debug_name(&layout, "track-parameters-strip").is_none());
+        let panel = find_layout_node_by_debug_name(&layout, "scale-editor-panel")
+            .expect("scale editor panel");
+        let degrees = find_layout_node_by_debug_name(panel, "scale-editor-degrees")
+            .expect("scale editor widget");
+        assert_finite_nonzero_rect(degrees, "scale editor widget");
+        assert_eq!(degrees.widget_type, "scale-editor");
+        let Some(Value::List(offsets)) = degrees.props.get("offsets") else {
+            panic!("offsets bound");
+        };
+        assert_eq!(offsets.len(), 7);
+        assert_eq!(*offsets[4].borrow(), Value::Number(20.0));
+        for key in [
+            "scale-editor-close",
+            "scale-editor-mode",
+            "scale-editor-just",
+            "scale-editor-reset",
+            "scale-editor-rand-amount",
+            "scale-editor-stretch-amount",
+            "scale-editor-morph",
+        ] {
+            let node = find_layout_node_by_debug_name(panel, key).unwrap_or_else(|| panic!("{key}"));
+            assert_finite_nonzero_rect(node, key);
+            assert!(
+                node.rect.col + node.rect.width <= panel.rect.col + 26.5,
+                "{key} overflows the 28-wide *track* tile: {:?} in {:?}",
+                node.rect,
+                panel.rect
+            );
+        }
+
+        editor
+            .runtime_mut()
+            .eval_str("(eseq.effects.scale-editor/close-scale-editor)")
+            .expect("close the scale editor");
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let layout = editor.widget_layout().expect("track panel layout after close");
+        assert!(find_layout_node_by_debug_name(&layout, "track-parameters-strip").is_some());
     }
 
     #[test]
@@ -48385,10 +48476,46 @@ mod solo_binding_tests;
                     assert_finite_nonzero_rect(find_stable_key_suffix(&current, &name).unwrap(), &name);
                 }
             }
-            for name in ["legato_on", "osc_retrig", "noise_on", "note_pitch_bend_on"] {
-                let switch = find_layout_node_by_debug_name(&layout, &format!("syn-switch-{name}")).unwrap();
-                assert_finite_nonzero_rect(switch, name);
-                assert!(switch.rect.row + switch.rect.height <= instrument_panel.rect.row + instrument_panel.rect.height);
+            let switch = find_layout_node_by_debug_name(&layout, "syn-switch-noise_on").unwrap();
+            assert_finite_nonzero_rect(switch, "noise_on");
+            assert!(switch.rect.row + switch.rect.height <= instrument_panel.rect.row + instrument_panel.rect.height);
+            assert!(find_layout_node_by_widget_type(&layout, "drift-waveform").is_some());
+
+            // Voice controls live on the display's VOICES screen (section 2).
+            editor.runtime_mut().eval_str(r#"
+                (do
+                  (custom-instrument-synth-ui (nth SEQ.instrument-panel 0))
+                  ((eseq.effects.custom-ui-sections/ui-section-select-callback 2) false))
+            "#).unwrap();
+            editor.refresh_runtime_side_effects();
+            let voices = editor.widget_layout().unwrap();
+            let panel = find_layout_node_by_debug_name(&voices, "instrument-panel").unwrap();
+            assert_visible(panel, panel);
+            assert!(find_layout_node_by_debug_name(&voices, "syn-envelope").is_none());
+            for name in ["osc_retrig", "note_pitch_bend_on", "mono_thickness",
+                "stereo_spread", "unison_strength", "spread", "transpose", "pitch_bend_range", "voice_pan"] {
+                let control = find_stable_key_suffix(&voices, name).unwrap_or_else(|| panic!("missing {name}"));
+                assert_finite_nonzero_rect(control, name);
+            }
+            // The track's Voices and Trigger are the only note limit and legato.
+            for name in ["voice_count", "legato_on"] {
+                assert!(find_stable_key_suffix(&voices, name).is_none(), "{name} duplicates a track setting");
+            }
+            let index = dsp.lines().map(str::trim).filter(|line| line.starts_with("(param "))
+                .position(|line| line.split_whitespace().nth(1) == Some("voice_mode")).unwrap();
+            for mode in 0..4 {
+                let button = find_layout_node_by_debug_name(&voices, &format!("syn-voice-mode-{mode}")).unwrap();
+                assert_finite_nonzero_rect(button, "voice mode");
+                editor.drain_host_commands();
+                editor.runtime_mut().invoke(button.props["on-click"].clone(),
+                    vec![Value::Number(0.0), Value::Number(0.0), Value::Nil]).unwrap();
+                let commands = editor.drain_host_commands();
+                let [eseqlisp::host::HostCommand::Custom { name, payload: Value::Map(payload) }] = commands.as_slice() else {
+                    panic!("voice mode edit: {commands:?}");
+                };
+                assert_eq!(name, "set-instrument-param");
+                assert_eq!(*payload["param-idx"].borrow(), Value::Number(index as f64));
+                assert_eq!(*payload["value"].borrow(), Value::Number(mode as f64));
             }
         }
 
@@ -48919,8 +49046,7 @@ mod solo_binding_tests;
         assert_drift_columns_lay_out(
             read_factory_source("instruments/Synths/Digi Syn/ui.lisp").unwrap(),
             "instruments/Synths/Digi Syn/ui.lisp",
-            &["voice_mode", "voice_count", "mono_thickness", "stereo_spread", "unison_strength",
-                "transpose", "pitch_bend_range", "osc1_shape_src", "osc1_shape_amt", "lfo_mod_src", "lfo_mod_amt", "mm3_amt"],
+            &["osc1_shape", "osc1_shape_src", "osc1_shape_amt", "noise_gain_db", "lfo_mod_src", "lfo_mod_amt", "mm3_amt"],
         );
     }
 
@@ -59422,6 +59548,9 @@ mod fm_formant_ui_tests;
 
 #[path = "pm_woodwind_ui_tests.rs"]
 mod pm_woodwind_ui_tests;
+
+#[path = "villain_ui_tests.rs"]
+mod villain_ui_tests;
 
 #[path = "melt_ui_tests.rs"]
 mod melt_ui_tests;

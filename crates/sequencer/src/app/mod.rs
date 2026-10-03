@@ -70,7 +70,7 @@ mod synth;
 pub use browser::BrowserNode;
 pub use params::SoloAudibility;
 #[allow(unused_imports)]
-pub use command::{apply_command, AppCommand};
+pub use command::{apply_command, AppCommand, TuningEdit};
 pub use edit::try_apply_command;
 
 const BAR_HEIGHT: usize = 8;
@@ -380,6 +380,11 @@ impl EngineRegistry {
 
     pub fn get_instrument_descriptor(&self, engine_id: usize) -> Option<&EffectDescriptor> {
         self.instrument_descriptors.get(engine_id)
+    }
+
+    /// Every engine's instrument descriptor, indexed by engine id.
+    pub fn instrument_descriptors(&self) -> &[EffectDescriptor] {
+        &self.instrument_descriptors
     }
 
     pub fn replace_at(&mut self, engine_id: usize, entry: EngineDescriptor) {

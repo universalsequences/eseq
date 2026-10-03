@@ -121,6 +121,18 @@ fn apply(name: &str, payload: &Value, app: &mut app::App) -> Result<RackGrooveEd
     let clip = extract_i32_from_payload(payload, "clip-id")
         .filter(|clip| *clip >= 0)
         .map(|clip| clip as u64);
+    // A clip deleted between drawing and clicking: editing it would mint a
+    // `clip_grooves` entry for a clip that no longer exists.
+    if let Some(clip) = clip {
+        let exists = app.state.with_scenes(|scenes| {
+            scenes
+                .rack_bank(group)
+                .is_some_and(|bank| bank.clip(clip).is_some())
+        });
+        if !exists {
+            return Err("That rack clip no longer exists".to_string());
+        }
+    }
     let target = |app: &app::App| {
         rack_of(app, group).map(|rack| rack.groove_for_clip(clip).clone())
     };
@@ -461,6 +473,10 @@ pub(super) fn handle(
         Ok(RackGrooveEdit::Amount(true)) => {
             // Scalar fields only: the knob being dragged is not rebuilt.
             *ctx.shared.track_groups.lock().unwrap() = app.groups.clone();
+            // Already published: keep the next tick's groups reconcile from
+            // rerunning the full `sync_groups_bindings` for an amount, which
+            // no structural field carries.
+            ctx.frame.prev_groups = app.groups.clone();
             let rt = editor.runtime_mut();
             sync_rack_groove_amount_fields(rt, &app.groups);
             rt.run_reactive_cycle();

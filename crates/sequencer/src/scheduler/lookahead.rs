@@ -1559,6 +1559,7 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                                         trigger.step,
                                     ),
                                     rack_macro_values: process_overlay.rack_macro_values,
+                                    rack_slot_params: Default::default(),
                                     source: EventSource::Step {
                                         track: trigger.track,
                                         step: trigger.step,
@@ -1617,6 +1618,7 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
                                         trigger.step,
                                     ),
                                     rack_macro_values: process_overlay.rack_macro_values,
+                                    rack_slot_params: Default::default(),
                                     source: EventSource::Step {
                                         track: trigger.track,
                                         step: trigger.step,
@@ -2565,6 +2567,15 @@ pub(super) fn schedule_playing_lookahead<const QUEUE_CAP: usize>(
 
         scheduled_until_sample = scheduled_until_sample.saturating_add(chunk_frames as u64);
     }
+    // The last in-loop feed precedes the chunk's quantizer drain and roll
+    // hits, and a queue-full `break` skips it entirely; `track_output_events`
+    // is a per-call local, so anything not fed here would never reach the
+    // `:output` reads or the harmony timeline.
+    feed_track_output_reads(
+        &mut scheduler.process_runtime,
+        &track_output_events,
+        &mut track_output_read_cursor,
+    );
 
     scheduler.debug_graph_drive_chunks = debug_graph_drive_chunks;
     scheduler.debug_accum_invocations = debug_accum_invocations;
@@ -2712,7 +2723,11 @@ fn run_generator_stage<const QUEUE_CAP: usize>(
                 if parked_generators.contains(&generator_id) {
                     return empty;
                 }
-                match scratch.invoke_sequencer_tick(generator_index, input) {
+                let tick_beat = input.beat;
+                let timer = super::load_meter::TickTimer::start();
+                let tick = scratch.invoke_sequencer_tick(generator_index, input);
+                timer.finish(generator_id, tick_beat);
+                match tick {
                     Ok(mut result) => {
                         if let Some(group_id) = generator_owner_racks.get(&generator_id) {
                             map_rack_member_emissions(
@@ -2798,8 +2813,9 @@ fn run_generator_stage<const QUEUE_CAP: usize>(
         });
         // Generator hits aimed at a rack member play through its
         // groove like every other trig source; their sample time is
-        // their straight beat.
-        if let Some(track) = emission.event.track {
+        // their straight beat. A track-less hit sounds on the generator's
+        // default track, so it takes that track's groove.
+        if let Some(track) = generator_source.resolve_track(emission.event.track) {
             if snapshot.track_groove(track).is_some() {
                 let straight_beats = sample_time_to_beats(
                     chunk_start_beats,

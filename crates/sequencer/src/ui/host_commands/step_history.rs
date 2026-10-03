@@ -16,6 +16,7 @@ pub(super) const COMMANDS: &[&str] = &[
     "slice2-history-action",
     "resize-drum-rack-patterns",
     "slice3-history-action",
+    "track-tuning-action",
     "track-params-batch-action",
     "bus-mixer-history-action",
     "toggle-step",
@@ -975,7 +976,11 @@ pub(super) fn handle(
                 ))),
             }
         }
-        "slice3-history-action" => match apply_slice3_history_host_command(&mut app, &payload) {
+        "slice3-history-action" | "track-tuning-action" => match if name == "track-tuning-action" {
+            apply_track_tuning_host_command(&mut app, &payload)
+        } else {
+            apply_slice3_history_host_command(&mut app, &payload)
+        } {
             Ok((app::edit::EditOutcome::Applied(result), track)) => {
                 *auto_follow_override_until.lock().unwrap() =
                     Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);

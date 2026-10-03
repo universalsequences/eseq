@@ -204,10 +204,10 @@ fn named_param_value(desc: &crate::effects::ParamDescriptor, value: f32) -> f32 
 /// the destination does not have drops just that param; the note plays.
 ///
 /// Applied: instrument, effect (slotted or first-by-name), MIDI FX (via
-/// `midi_fx_params`, needs `midi_fx`), step params, and rack macros (on a
-/// slot-based Instrument Rack track). Skipped: `send:*` (spec §7) and
-/// `rack<N>:…` slot params, which no per-event seam carries yet (process
-/// writes skip them too).
+/// `midi_fx_params`, needs `midi_fx`), step params, and on a slot-based
+/// Instrument Rack track its macros and `rack<N>:…` slot params (the slot's
+/// own mixer params and its instrument's params, via
+/// `event.rack_slot_params`). Skipped: `send:*` (spec §7).
 pub(super) fn apply_named_params(
     snapshot: &SequencerSnapshot,
     midi_fx: Option<&lisp_host::MidiFxDescriptorSource>,
@@ -319,12 +319,50 @@ pub(super) fn apply_named_params(
                     }
                 }
             }
-            // TODO(eseq-jplk): rack slot params have no per-event seam (the
-            // process-write path skips them as well); bus sends are a v1
-            // non-goal (spec §7).
-            ParamRef::RackSlot { .. }
-            | ParamRef::RackSlotInstrument { .. }
-            | ParamRef::Send { .. } => {}
+            ParamRef::RackSlot { slot, param } => {
+                let has_slot = track
+                    .rack_track
+                    .as_ref()
+                    .is_some_and(|rack| rack.slots.get(*slot).is_some());
+                let Some(param) = crate::sequencer::RackSlotParam::from_label(param).filter(|_| has_slot) else {
+                    continue;
+                };
+                scheduled_event::upsert_rack_slot_param(
+                    &mut event.rack_slot_params,
+                    ScheduledRackSlotParam {
+                        slot: *slot,
+                        target: ScheduledRackSlotTarget::Slot(param),
+                        value: param.clamp(value),
+                    },
+                );
+            }
+            ParamRef::RackSlotInstrument { slot, param } => {
+                let Some(rack_slot) = track
+                    .rack_track
+                    .as_ref()
+                    .and_then(|rack| rack.slots.get(*slot))
+                else {
+                    continue;
+                };
+                let Some(desc) = snapshot.rack_slot_instrument_descriptor(rack_slot) else {
+                    continue;
+                };
+                let Some(param_idx) = process_param_index_by_tag_or_name(desc, param)
+                    .filter(|idx| *idx < rack_slot.instrument_slot.defaults.len())
+                else {
+                    continue;
+                };
+                scheduled_event::upsert_rack_slot_param(
+                    &mut event.rack_slot_params,
+                    ScheduledRackSlotParam {
+                        slot: *slot,
+                        target: ScheduledRackSlotTarget::Instrument { param_idx },
+                        value: named_param_value(&desc.params[param_idx], value),
+                    },
+                );
+            }
+            // Bus sends are a v1 non-goal (spec §7).
+            ParamRef::Send { .. } => {}
         }
     }
 }
@@ -1161,5 +1199,164 @@ pub(super) fn resolve_sampler_params(
             crate::instruments::sampler::PARAM_WARP_SEG_ENVELOPE as u32,
             crate::instruments::sampler::WARP_SEG_ENVELOPE_DEFAULT,
         ),
+    }
+}
+
+#[cfg(test)]
+mod rack_slot_named_param_tests {
+    use super::*;
+    use crate::effects::EffectSlotSnapshot;
+    use crate::process::ParamRef;
+    use crate::sequencer::{
+        default_empty_effect_chain, default_rack_macros, CustomInstrumentRunMode, InstrumentType,
+        RackSlotParam, RackSlotParamPlocks, RackSlotSnapshot, RackTrackSnapshot, SequencerState,
+        TrackSoundState,
+    };
+
+    fn slot(instrument_type: InstrumentType, desc: &EffectDescriptor) -> RackSlotSnapshot {
+        RackSlotSnapshot {
+            instrument_type,
+            instrument_run_mode: CustomInstrumentRunMode::Instrument,
+            instrument_base_note_offset: 0.0,
+            choke_group: None,
+            gain: 1.0,
+            pan: 0.0,
+            mute: false,
+            solo: false,
+            enabled: true,
+            max_polyphony: 2,
+            param_plocks: RackSlotParamPlocks::new(),
+            instrument_slot: EffectSlotSnapshot::new_default(desc, 9),
+            effect_slots: RackSlotSnapshot::empty_effect_slots(),
+            effect_descriptors: EffectDescriptor::default_full_chain(),
+            custom_effect_names: RackSlotSnapshot::empty_effect_names(),
+            track_sound_state: TrackSoundState::default(),
+            sample_id: None,
+        }
+    }
+
+    fn event() -> StepEvent {
+        StepEvent {
+            track: 0,
+            samples_per_step: 6_000.0,
+            resolved: ResolvedStep {
+                duration: 1.0,
+                velocity: 1.0,
+                speed: 1.0,
+                aux_a: 0.0,
+                aux_b: 0.0,
+                transpose: 0.0,
+                pan: 0.0,
+                chop: 1.0,
+                retrig: StepParam::Retrig.default_value(),
+                retrig_rate: StepParam::RetrigRate.default_value(),
+            },
+            chord: ScheduledChordData {
+                live_origins: [None; MAX_VOICES],
+                count: 0,
+                notes: [0.0; MAX_VOICES],
+                durations: [0.0; MAX_VOICES],
+                delays: [0.0; MAX_VOICES],
+                step_transpose: 0.0,
+            },
+            effect_params: Vec::new(),
+            instrument_params: ScheduledInstrumentParams::new(),
+            instrument_tensor_params: ScheduledInstrumentTensorParams::new(),
+            sampler_params: ScheduledSamplerParams::default(),
+            rack_macro_values: [None; crate::sequencer::RACK_MACRO_COUNT],
+            rack_slot_params: Default::default(),
+            source: EventSource::Step {
+                track: 0,
+                step: 0,
+                instrument_fingerprint: 0,
+            },
+        }
+    }
+
+    #[test]
+    fn rack_slot_params_resolve_by_name_against_each_slots_instrument() {
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        let filter = EffectDescriptor::builtin_filter();
+        let sampler = EffectDescriptor::builtin_sampler();
+        let mut custom = slot(InstrumentType::Custom, &filter);
+        custom.track_sound_state.engine_id = Some(0);
+        state.set_rack_track_for_all_pattern_snapshots(
+            0,
+            RackTrackSnapshot::new(
+                vec![custom, slot(InstrumentType::Sampler, &sampler)],
+                default_rack_macros(),
+            ),
+        );
+        state.sync_engine_instrument_descriptors(1, || vec![filter.clone()]);
+        let snapshot = state.publish_scheduler_snapshot();
+
+        let named: Vec<(ParamRef, f32)> = [
+            // Filter mode is 0..3: 7 clamps.
+            ("rack1:instrument:mode", 7.0),
+            ("rack2:instrument:speed", 2.0),
+            ("rack2:gain", 5.0),
+            ("rack1:pan", -0.25),
+            // Each of these drops alone: no such param, no slot 3.
+            ("rack1:instrument:nosuch", 1.0),
+            ("rack1:nosuch", 1.0),
+            ("rack3:gain", 1.0),
+        ]
+        .into_iter()
+        .map(|(label, value)| (ParamRef::parse(label).expect(label), value))
+        .collect();
+        let mut event = event();
+        apply_named_params(&snapshot, None, &named, &mut event, &mut Vec::new());
+
+        let index = |desc: &EffectDescriptor, name: &str| {
+            desc.params.iter().position(|param| param.name == name).unwrap()
+        };
+        assert_eq!(
+            event.rack_slot_params.as_slice(),
+            &[
+                ScheduledRackSlotParam {
+                    slot: 0,
+                    target: ScheduledRackSlotTarget::Instrument {
+                        param_idx: index(&filter, "mode"),
+                    },
+                    value: 3.0,
+                },
+                ScheduledRackSlotParam {
+                    slot: 1,
+                    target: ScheduledRackSlotTarget::Instrument {
+                        param_idx: index(&sampler, "speed"),
+                    },
+                    value: 2.0,
+                },
+                ScheduledRackSlotParam {
+                    slot: 1,
+                    target: ScheduledRackSlotTarget::Slot(RackSlotParam::Gain),
+                    value: 2.0,
+                },
+                ScheduledRackSlotParam {
+                    slot: 0,
+                    target: ScheduledRackSlotTarget::Slot(RackSlotParam::Pan),
+                    value: -0.25,
+                },
+            ]
+        );
+        // A track-level instrument param is untouched by slot names.
+        assert!(event.instrument_params.is_empty());
+    }
+
+    #[test]
+    fn rack_slot_instrument_params_need_the_engine_descriptor() {
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        let filter = EffectDescriptor::builtin_filter();
+        let mut custom = slot(InstrumentType::Custom, &filter);
+        custom.track_sound_state.engine_id = Some(0);
+        state.set_rack_track_for_all_pattern_snapshots(
+            0,
+            RackTrackSnapshot::new(vec![custom], default_rack_macros()),
+        );
+        let snapshot = state.publish_scheduler_snapshot();
+        let named = vec![(ParamRef::parse("rack1:instrument:mode").unwrap(), 1.0)];
+        let mut event = event();
+        apply_named_params(&snapshot, None, &named, &mut event, &mut Vec::new());
+        assert!(event.rack_slot_params.is_empty(), "unknown engine: dropped");
     }
 }

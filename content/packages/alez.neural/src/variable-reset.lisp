@@ -140,11 +140,19 @@
                                     (= (get instance :owner-rack) rack)))
             (or SEQ.instances (list)))))
 (def gvr-route-track-count (self) (- (len (gvr-route-options self)) 1))
+;; A jaki's menu label: its label, plus " #id" when another of this owner's
+;; jakis shares it. The dropdown hands back only the chosen text, so two
+;; "→ drums" entries would both resolve to the first one.
+(def gvr-jaki-menu-label (jakis jaki)
+  (let ((label (get jaki :label)))
+    (if (> (len (filter (lambda (other) (= (get other :label) label)) jakis)) 1)
+      (str label " #" (get jaki :id))
+      label)))
 (def gvr-route-menu (self)
   (let ((jakis (gvr-jakis self)))
     (append (gvr-track-inlet-track-options self)
-            (map (lambda (jaki) (str "→ " (get jaki :label))) jakis)
-            (map (lambda (jaki) (str "↺ " (get jaki :label))) jakis)
+            (map (lambda (jaki) (str "→ " (gvr-jaki-menu-label jakis jaki))) jakis)
+            (map (lambda (jaki) (str "↺ " (gvr-jaki-menu-label jakis jaki))) jakis)
             (list "Off"))))
 (def gvr-generator-route-tag (route)
   (if (or (number? route) (= route nil)) nil (nth route 0)))

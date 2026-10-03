@@ -1,0 +1,10 @@
+{
+ "buzz_default": 0.6306,
+ "relief_default": 0.2754,
+ "hardness_default": 0.1229,
+ "alpha_default": 1.9205,
+ "contact_loss_default": 0.0325,
+ "wood_default": 10408.2341,
+ "upper_decay_default": 1.7141,
+ "fit_rms_db": 6.169
+}

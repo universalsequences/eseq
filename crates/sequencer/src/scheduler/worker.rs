@@ -458,10 +458,20 @@ impl SchedulerDriver {
             self.lookahead_state
                 .roll
                 .cancel_process_roll_for_commands(&roll_commands, state);
-            self.lookahead_state.roll.apply_commands_with_clock(
+            // The clock frontier leads the render head by the scheduled
+            // lookahead (plus any early-groove discovery lead); a captured
+            // sequence-roll window anchors on what is audible now.
+            let frontier_lag_beats = if playing {
+                self.scheduled_until_sample.saturating_sub(rendered) as f64
+                    / (sample_rate as f64 * 60.0 / snapshot.transport.bpm.max(1) as f64)
+            } else {
+                0.0
+            };
+            self.lookahead_state.roll.apply_commands_with_clock_lagged(
                 &roll_commands,
                 &mut self.lookahead_state.clock,
                 &snapshot,
+                frontier_lag_beats,
             );
             let grid = self.lookahead_state.roll.active_grid_beats(state);
             self.lookahead_state.roll.publish_windows(state, grid);
@@ -790,6 +800,21 @@ impl SchedulerDriver {
     }
 }
 
+/// The scheduler has a soft deadline (the lookahead, ~43 ms at 512-frame
+/// blocks) but ran at default QoS, so ordinary machine load parked it for
+/// tens to hundreds of ms and events reached the callback late. Mark it
+/// user-interactive like the audio workers' helper threads; it is not a
+/// time-constraint thread because Lisp ticks allocate and may overrun.
+/// `ESEQ_SCHED_QOS=0` keeps the default for A/B measurement.
+fn raise_scheduler_thread_qos() {
+    #[cfg(target_os = "macos")]
+    if std::env::var("ESEQ_SCHED_QOS").as_deref() != Ok("0") {
+        unsafe {
+            libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_USER_INTERACTIVE, 0);
+        }
+    }
+}
+
 pub fn spawn_scheduler_thread(
     state: Arc<SequencerState>,
     sample_rate: u32,
@@ -804,8 +829,11 @@ pub fn spawn_scheduler_thread(
         .spawn(move || {
             let lookahead_samples = (scheduler_block_size.max(1) * 4) as u64;
             let mut driver = SchedulerDriver::new(state, sample_rate, scheduler_block_size, queue);
+            raise_scheduler_thread_qos();
+            let mut meter = super::load_meter::LoadMeter::new(sample_rate);
             loop {
                 let rendered = rendered_samples.load(Ordering::Acquire);
+                meter.begin_pass(rendered, driver.scheduled_until_sample, driver.last_playing);
                 let advanced = driver.advance(
                     rendered,
                     rendered.saturating_add(lookahead_samples),
@@ -814,6 +842,7 @@ pub fn spawn_scheduler_thread(
                         clock: &std::time::Instant::now,
                     },
                 );
+                meter.end_pass(advanced.poll_after);
                 thread::sleep(advanced.poll_after);
             }
         });

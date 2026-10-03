@@ -97,7 +97,7 @@ pub mod package_samples;
 pub mod sample_db;
 pub mod sample_import;
 pub mod sample_manifest;
-mod scale;
+pub mod scale;
 mod scheduler;
 pub use scheduler::scheduled_event;
 #[allow(dead_code)]

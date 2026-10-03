@@ -379,6 +379,67 @@ impl SequencerState {
         Ok((scene_id, previous, epoch))
     }
 
+    /// Persist several overrides into the current pattern under one lock and
+    /// publish the scheduler snapshot once, so a multi-field document edit is
+    /// never seen half-applied. Either every write lands or none does.
+    /// Returns the pattern identity and, per write in order, the previous
+    /// override and the new epoch.
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn write_current_scene_slots_identified(
+        &self,
+        writes: Vec<(String, crate::process::ProcessLiteral)>,
+    ) -> Result<(SceneId, Vec<(Option<crate::process::ProcessLiteral>, u64)>), String> {
+        let result = {
+            let mut scenes = self
+                .pattern
+                .scenes
+                .lock()
+                .map_err(|_| "failed to lock pattern bank".to_string())?;
+            let current = self.current_pattern_index();
+            let scene_id = scenes
+                .scenes
+                .get(current)
+                .ok_or_else(|| "current pattern out of range".to_string())?
+                .id;
+            let mut applied: Vec<(String, Option<crate::process::ProcessLiteral>, u64)> =
+                Vec::with_capacity(writes.len());
+            let mut failure = None;
+            for (name, value) in writes {
+                let Some(store) = scenes.scene_slot_store_mut(current, &name) else {
+                    failure = Some("current pattern out of range".to_string());
+                    break;
+                };
+                let previous = store.get(&name).cloned();
+                match store.write_literal(name.clone(), value) {
+                    Ok(epoch) => applied.push((name, previous, epoch)),
+                    Err(error) => {
+                        failure = Some(error);
+                        break;
+                    }
+                }
+            }
+            if let Some(error) = failure {
+                // Roll back in reverse so a repeated name restores its first
+                // previous value.
+                for (name, previous, _) in applied.into_iter().rev() {
+                    if let Some(store) = scenes.scene_slot_store_mut(current, &name) {
+                        let _ = store.set_override(name, previous);
+                    }
+                }
+                return Err(error);
+            }
+            (
+                scene_id,
+                applied
+                    .into_iter()
+                    .map(|(_, previous, epoch)| (previous, epoch))
+                    .collect(),
+            )
+        };
+        self.publish_scheduler_snapshot();
+        Ok(result)
+    }
+
     pub fn write_current_scene_slot(
         &self,
         name: impl Into<String>,

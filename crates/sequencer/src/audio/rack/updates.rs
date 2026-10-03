@@ -2,13 +2,17 @@
 //!
 //! Only eight optional macro values are retained. Mappings and pattern data
 //! remain borrowed, and each destination is resolved when it is dispatched.
+//! A trigger may also carry per-hit slot values (`seq-emit :params`), which
+//! beat stored p-locks and macro mappings for that hit.
 use super::*;
+use crate::scheduled_event::MAX_SCHEDULED_RACK_SLOT_PARAMS;
 use crate::sequencer::{RackMacroTarget, RACK_MACRO_COUNT};
 
 pub(super) struct RackParams<'a> {
     pub(super) rack: &'a RackTrackSnapshot,
     pub(super) step: Option<usize>,
     values: [Option<f32>; RACK_MACRO_COUNT],
+    hits: &'a [ScheduledRackSlotParam],
 }
 
 impl<'a> RackParams<'a> {
@@ -25,7 +29,7 @@ impl<'a> RackParams<'a> {
                 .unwrap_or_else(|| rack.runtime_macro_value_at(rack_macro.id, step)
                     .unwrap_or_else(|| rack_macro.value_at(step))));
         }
-        Self { rack, step: Some(step), values }
+        Self { rack, step: Some(step), values, hits: &[] }
     }
 
     pub(super) fn live(rack: &'a RackTrackSnapshot, print_values: [Option<f32>; RACK_MACRO_COUNT]) -> Self {
@@ -36,7 +40,7 @@ impl<'a> RackParams<'a> {
                 .or_else(|| rack.runtime_macro_default(rack_macro.id))
                 .unwrap_or(rack_macro.value).clamp(0.0, 1.0));
         }
-        Self { rack, step: None, values }
+        Self { rack, step: None, values, hits: &[] }
     }
 
     pub(super) fn for_update(
@@ -56,7 +60,17 @@ impl<'a> RackParams<'a> {
                     .unwrap_or_else(|| rack_macro.value_at(step)))
             });
         }
-        Self { rack, step, values }
+        Self { rack, step, values, hits: &[] }
+    }
+
+    /// Layer one trigger's per-hit slot values over everything else.
+    pub(super) fn with_hit_params(mut self, hits: &'a [ScheduledRackSlotParam]) -> Self {
+        self.hits = hits;
+        self
+    }
+
+    fn slot_hits(&self, slot_idx: usize) -> impl Iterator<Item = &ScheduledRackSlotParam> {
+        self.hits.iter().filter(move |hit| hit.slot == slot_idx)
     }
 
     fn mappings(&self) -> impl Iterator<Item = (&RackMacroTarget, f32)> {
@@ -88,6 +102,10 @@ impl<'a> RackParams<'a> {
                     Some((*param_index, value)),
                 _ => None,
             }))
+            .with_hits(self.slot_hits(slot_idx).filter_map(|hit| match hit.target {
+                ScheduledRackSlotTarget::Instrument { param_idx } => Some((param_idx, hit.value)),
+                ScheduledRackSlotTarget::Slot(_) => None,
+            }))
     }
 
     pub(super) fn effect(&self, slot_idx: usize, effect_idx: usize) -> DeviceParams<'_> {
@@ -111,7 +129,8 @@ impl<'a> RackParams<'a> {
         // Host sampler controls have no DSP-node identity. Their authored
         // locks are read directly, as in the ordinary sampler resolver.
         let host_value = |param, fallback| {
-            self.step.and_then(|step| stored_lock(slot, step, param))
+            device.hit_value(param)
+                .or_else(|| self.step.and_then(|step| stored_lock(slot, step, param)))
                 .unwrap_or_else(|| resolved_device_value_or(slot, None, param,
                     device.macro_value(param), fallback))
         };
@@ -137,6 +156,20 @@ impl<'a> RackParams<'a> {
                 RackSlotParam::Solo => result.solo = value >= 0.5,
             }
         }
+        for hit in self.slot_hits(slot_idx) {
+            let ScheduledRackSlotTarget::Slot(param) = hit.target else { continue; };
+            let value = param.clamp(hit.value);
+            match param {
+                RackSlotParam::BaseNote => result.base_note_offset = value,
+                RackSlotParam::Gain => result.gain = value,
+                RackSlotParam::Pan => result.pan = value,
+                RackSlotParam::MaxPolyphony => {
+                    result.max_polyphony = value.round().clamp(1.0, MAX_VOICES as f32) as usize
+                }
+                RackSlotParam::Mute => result.mute = value >= 0.5,
+                RackSlotParam::Solo => result.solo = value >= 0.5,
+            }
+        }
         result
     }
 }
@@ -147,6 +180,7 @@ pub(super) struct DeviceParams<'a> {
     pub(super) slot: &'a EffectSlotSnapshot,
     step: Option<usize>,
     values: [Option<f32>; MAX_SLOT_PARAMS],
+    hits: ArrayVec<(usize, f32), MAX_SCHEDULED_RACK_SLOT_PARAMS>,
 }
 
 impl<'a> DeviceParams<'a> {
@@ -155,7 +189,21 @@ impl<'a> DeviceParams<'a> {
         for (param, value) in mappings {
             if let Some(destination) = values.get_mut(param) { *destination = Some(value); }
         }
-        Self { slot, step, values }
+        Self { slot, step, values, hits: ArrayVec::new() }
+    }
+
+    fn with_hits(mut self, hits: impl Iterator<Item = (usize, f32)>) -> Self {
+        for hit in hits {
+            if hit.0 < self.slot.defaults.len() && self.hits.try_push(hit).is_err() {
+                break;
+            }
+        }
+        self
+    }
+
+    /// The per-hit value for `param`, if this trigger carries one.
+    pub(super) fn hit_value(&self, param: usize) -> Option<f32> {
+        self.hits.iter().find(|(idx, _)| *idx == param).map(|(_, value)| *value)
     }
 
     pub(super) fn macro_value(&self, param: usize) -> Option<f32> {
@@ -163,6 +211,9 @@ impl<'a> DeviceParams<'a> {
     }
 
     pub(super) fn value(&self, param: usize, fallback: f32) -> f32 {
+        if let Some(value) = self.hit_value(param) {
+            return value;
+        }
         resolved_device_value_or(self.slot, self.step, param, self.macro_value(param), fallback)
     }
 }

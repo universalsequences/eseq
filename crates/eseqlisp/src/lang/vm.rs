@@ -2590,7 +2590,7 @@ pub struct VM {
     /// Some callback-oriented natives historically turn callback errors into
     /// Lisp `nil`. Sandbox violations must never be swallowed that way.
     expansion_violation: Option<VMError>,
-    active_execution_origins: Vec<ExpansionOrigin>,
+    active_execution_origins: Vec<Rc<ExpansionOrigin>>,
     /// Kind schemas and per-instance field cells (instance-kinds spec §4).
     instances: instances::InstanceStore,
     /// Host-bound view buffers (instance-kinds spec §7).
@@ -2652,6 +2652,33 @@ fn clone_globals_for_snapshot(
                 .map(|value| Rc::new(RefCell::new(clone_value_for_snapshot(&value.borrow()))))
         })
         .collect()
+}
+
+/// Upper bound on emptied frames one `execute_with_frames_impl` call keeps
+/// for reuse; deep recursion beyond it just allocates as before.
+const FRAME_POOL_LIMIT: usize = 64;
+
+/// Call a pure core native on argument cells where they sit on the VM
+/// stack. Small arities borrow into fixed arrays so the hot call path does
+/// not allocate two scratch `Vec`s per call.
+fn call_borrowed_native(f: BorrowedNativeFn, cells: &[Rc<RefCell<Value>>]) -> Value {
+    const INLINE_ARGS: usize = 8;
+    if cells.len() <= INLINE_ARGS {
+        let mut refs: [Option<std::cell::Ref<'_, Value>>; INLINE_ARGS] = Default::default();
+        for (slot, cell) in refs.iter_mut().zip(cells) {
+            *slot = Some(cell.borrow());
+        }
+        let nil = Value::Nil;
+        let mut args: [&Value; INLINE_ARGS] = [&nil; INLINE_ARGS];
+        for (arg, cell) in args.iter_mut().zip(refs.iter().flatten()) {
+            *arg = &**cell;
+        }
+        f(&args[..cells.len()])
+    } else {
+        let refs: Vec<std::cell::Ref<'_, Value>> = cells.iter().map(|cell| cell.borrow()).collect();
+        let args: Vec<&Value> = refs.iter().map(|cell| &**cell).collect();
+        f(&args)
+    }
 }
 
 fn clone_value_for_snapshot(value: &Value) -> Value {
@@ -3826,7 +3853,7 @@ fn core_first(args: &[&Value]) -> Value {
 
 fn core_rest(args: &[&Value]) -> Value {
     if let Some(Value::List(l)) = args.first().copied() {
-        Value::List(l[1..].to_vec())
+        Value::List(l.get(1..).map(<[_]>::to_vec).unwrap_or_default())
     } else {
         Value::List(vec![])
     }
@@ -7941,6 +7968,9 @@ impl VM {
         mut frames: Vec<Frame>,
     ) -> Result<Option<Value>, VMError> {
         let mut stack: Vec<Rc<RefCell<Value>>> = vec![];
+        // Retired call frames, emptied, so closure calls can reuse their
+        // `locals`/`upvalues` allocations.
+        let mut frame_pool: Vec<Frame> = Vec::new();
 
         while frames.last().unwrap().pc < self.chunks[self.current_chunk].ops.len() {
             if let Some(remaining) = self.step_budget.as_mut() {
@@ -7949,7 +7979,7 @@ impl VM {
                 }
                 *remaining -= 1;
             }
-            let op = self.chunks[self.current_chunk].ops[frames.last().unwrap().pc].clone();
+            let op = self.chunks[self.current_chunk].ops[frames.last().unwrap().pc];
             if self.active_expander.is_some()
                 && let Some(operation) = Self::expansion_forbidden_opcode(&op)
             {
@@ -7980,8 +8010,12 @@ impl VM {
                     stack.push(Rc::new(RefCell::new(Value::Nil)));
                     frames.last_mut().unwrap().pc += 1;
                 }
-                OpCode::ExpansionOriginBegin(origin) => {
-                    self.active_execution_origins.push(origin);
+                OpCode::ExpansionOriginBegin(origin_idx) => {
+                    let Some(origin) = self.chunks[self.current_chunk].origins.get(origin_idx)
+                    else {
+                        return Err(VMError::UnknownConstant);
+                    };
+                    self.active_execution_origins.push(Rc::clone(origin));
                     frames.last_mut().unwrap().pc += 1;
                 }
                 OpCode::ExpansionOriginEnd => {
@@ -8009,24 +8043,25 @@ impl VM {
                     frames.last_mut().unwrap().pc += 1;
                 }
                 OpCode::Sub(arity) => {
-                    if stack.len() < arity {
+                    if stack.len() < arity || arity == 0 {
                         return Err(VMError::StackUnderflow);
                     }
-                    let mut nums: Vec<f64> = vec![];
-                    for _ in 0..arity {
-                        if let Some(val) = stack.pop() {
-                            match &*val.borrow() {
-                                Value::Number(val) => nums.push(*val),
-                                other => {
-                                    self.last_reactive_error_detail =
-                                        Some(format!("Sub operand={other:?}"));
-                                    return Err(VMError::IncorrectType);
-                                }
+                    // Fold the operands in place (left to right, same
+                    // float order as before) instead of collecting a Vec.
+                    let base = stack.len() - arity;
+                    let mut diff = 0.0;
+                    for (i, cell) in stack[base..].iter().enumerate() {
+                        match &*cell.borrow() {
+                            Value::Number(val) if i == 0 => diff = *val,
+                            Value::Number(val) => diff -= val,
+                            other => {
+                                self.last_reactive_error_detail =
+                                    Some(format!("Sub operand={other:?}"));
+                                return Err(VMError::IncorrectType);
                             }
                         }
                     }
-                    nums.reverse();
-                    let diff = nums[1..].iter().fold(nums[0], |acc, x| acc - x);
+                    stack.truncate(base);
                     stack.push(Rc::new(RefCell::new(Value::Number(diff))));
                     frames.last_mut().unwrap().pc += 1;
                 }
@@ -8054,25 +8089,23 @@ impl VM {
                     if stack.len() < arity || arity == 0 {
                         return Err(VMError::StackUnderflow);
                     }
-                    let mut nums: Vec<f64> = vec![];
-                    for _ in 0..arity {
-                        if let Some(val) = stack.pop() {
-                            match &*val.borrow() {
-                                Value::Number(val) => nums.push(*val),
-                                other => {
-                                    self.last_reactive_error_detail =
-                                        Some(format!("Div operand={other:?}"));
-                                    return Err(VMError::IncorrectType);
-                                }
+                    let base = stack.len() - arity;
+                    let mut quotient = 0.0;
+                    for (i, cell) in stack[base..].iter().enumerate() {
+                        match &*cell.borrow() {
+                            Value::Number(val) if i == 0 => quotient = *val,
+                            Value::Number(val) => quotient /= val,
+                            other => {
+                                self.last_reactive_error_detail =
+                                    Some(format!("Div operand={other:?}"));
+                                return Err(VMError::IncorrectType);
                             }
                         }
                     }
-                    nums.reverse();
-                    let quotient = if nums.len() == 1 {
-                        1.0 / nums[0]
-                    } else {
-                        nums[1..].iter().fold(nums[0], |acc, x| acc / x)
-                    };
+                    if arity == 1 {
+                        quotient = 1.0 / quotient;
+                    }
+                    stack.truncate(base);
                     stack.push(Rc::new(RefCell::new(Value::Number(quotient))));
                     frames.last_mut().unwrap().pc += 1;
                 }
@@ -8317,8 +8350,9 @@ impl VM {
                         }
                         let stored = stack.pop();
                         self.globals[idx] = stored.clone();
-                        if let (Some(name), Some(value)) =
-                            (self.global_names.get(idx), stored.as_ref())
+                        if !self.global_store_hooks.is_empty()
+                            && let (Some(name), Some(value)) =
+                                (self.global_names.get(idx), stored.as_ref())
                         {
                             // Hooks see the bare name: consumers (process/
                             // channel naming) treat it as a user-visible
@@ -8716,11 +8750,20 @@ impl VM {
                         match &*borrowed {
                             Value::Closure(chunk_idx, upvalues) => {
                                 let chunk_idx = *chunk_idx;
-                                let upvalues = upvalues.clone();
+                                // Reuse a retired frame's buffers instead of
+                                // allocating fresh locals/upvalues per call.
+                                let mut frame = frame_pool.pop().unwrap_or_else(|| Frame {
+                                    locals: Vec::new(),
+                                    upvalues: Vec::new(),
+                                    pc: 0,
+                                    chunk_idx,
+                                });
+                                frame.upvalues.extend_from_slice(upvalues);
                                 drop(borrowed);
                                 self.current_chunk = chunk_idx;
-                                let mut frame = self.new_frame();
-                                frame.upvalues = upvalues;
+                                frame.locals.resize(self.chunk().symbols.len(), None);
+                                frame.pc = 0;
+                                frame.chunk_idx = chunk_idx;
                                 if arity > frame.locals.len() {
                                     return Err(VMError::ArityMismatch);
                                 }
@@ -8753,12 +8796,7 @@ impl VM {
                                     return Err(VMError::StackUnderflow);
                                 }
                                 let base = stack.len() - arity;
-                                let result = {
-                                    let cells: Vec<std::cell::Ref<'_, Value>> =
-                                        stack[base..].iter().map(|cell| cell.borrow()).collect();
-                                    let args: Vec<&Value> = cells.iter().map(|cell| &**cell).collect();
-                                    f(&args)
-                                };
+                                let result = call_borrowed_native(f, &stack[base..]);
                                 stack.truncate(base);
                                 stack.push(Rc::new(RefCell::new(result)));
                                 frames.last_mut().unwrap().pc += 1;
@@ -8915,7 +8953,13 @@ impl VM {
                         if PROFILE {
                             self.profile_exit_chunk();
                         }
-                        frames.pop();
+                        if let Some(mut retired) = frames.pop()
+                            && frame_pool.len() < FRAME_POOL_LIMIT
+                        {
+                            retired.locals.clear();
+                            retired.upvalues.clear();
+                            frame_pool.push(retired);
+                        }
                         if let Some(caller_frame) = frames.last() {
                             self.current_chunk = caller_frame.chunk_idx;
                             stack.push(return_value);
@@ -10801,6 +10845,31 @@ counter
         assert_eq!(items.len(), 2);
         assert_eq!(*items[0].borrow(), Value::Number(1.0));
         assert_eq!(*items[1].borrow(), Value::Number(2.0));
+    }
+
+    #[test]
+    fn rest_of_empty_list_is_empty() {
+        let mut vm = VM::new(Vec::new());
+        super::register_core_natives(&mut vm);
+        let list_len = |vm: &mut VM, src: &str| -> Vec<Value> {
+            match vm.eval_str(src).expect("eval rest").expect("rest value") {
+                Value::List(items) => items.iter().map(|v| v.borrow().clone()).collect(),
+                other => panic!("expected list from {src}, got {other:?}"),
+            }
+        };
+
+        assert!(list_len(&mut vm, "(rest (list))").is_empty());
+        assert!(list_len(&mut vm, "(rest (list 1))").is_empty());
+        assert_eq!(
+            list_len(&mut vm, "(rest (list 1 2))"),
+            vec![Value::Number(2.0)]
+        );
+        // Indirect call through the register_native wrapper, not the
+        // borrowed direct-call path.
+        assert!(list_len(&mut vm, "((lambda (f) (f (list))) rest)").is_empty());
+        let mapped = list_len(&mut vm, "(map rest (list (list)))");
+        assert_eq!(mapped.len(), 1);
+        assert!(matches!(&mapped[0], Value::List(items) if items.is_empty()));
     }
 
     #[test]

@@ -58,13 +58,41 @@ impl Default for RackGrooveExtractRequest {
     }
 }
 
-/// One pad's source lane: its note, member track and the pool pattern read.
+/// One pad's source lane: its note, member (position and track) and the
+/// pool pattern read.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct GrooveSourceLane {
     pad_note: i32,
     role: Option<crate::project::PadRole>,
+    member: usize,
     track: usize,
     pattern: PatternId,
+}
+
+/// Whether pattern `pattern` of `track` is played by anything other than
+/// member cell `member` of clip `clip`: another clip of the rack's bank, a
+/// project scene cell or the track's override. Quantizing such a pattern in
+/// place would straighten that other user too, without the groove that keeps
+/// the source clip sounding the same.
+fn clip_pattern_is_shared(
+    scenes: &ProjectScenes,
+    group_id: u64,
+    clip: RackClipId,
+    member: usize,
+    track: usize,
+    pattern: PatternId,
+) -> bool {
+    let in_other_clip = scenes.rack_bank(group_id).is_some_and(|bank| {
+        bank.clips.iter().any(|other| {
+            other.id != clip && other.cells.get(member).copied().flatten() == Some(pattern)
+        })
+    });
+    let in_scene = scenes
+        .scenes
+        .iter()
+        .any(|scene| scene.cells.get(track).copied().flatten() == Some(pattern));
+    let in_override = scenes.track_overrides.get(track).copied().flatten() == Some(pattern);
+    in_other_clip || in_scene || in_override
 }
 
 /// Resolves each pad of a rack to the pattern the groove reads. Pads whose
@@ -100,6 +128,7 @@ fn groove_source_lanes(
             lanes.push(GrooveSourceLane {
                 pad_note: pad.pad_note,
                 role: pad.effective_role(),
+                member: pad.member,
                 track,
                 pattern,
             });
@@ -179,13 +208,7 @@ impl App {
                 group
                     .rack
                     .as_ref()
-                    .is_some_and(|rack| {
-                        rack.groove.active == Some(groove_id)
-                            || rack
-                                .clip_grooves
-                                .iter()
-                                .any(|own| own.settings.active == Some(groove_id))
-                    })
+                    .is_some_and(|rack| rack.plays_groove(groove_id))
             })
             .map(|group| group.id)
             .collect()
@@ -249,13 +272,22 @@ impl App {
             &self.grooves,
         );
         let groove_id = next_pool_groove_id(&self.grooves);
-        let sources = lanes
+        // Each lane's groove as heard; the quantize move rule reads the same
+        // feel so both halves snap a hit to the same step.
+        let lane_grooves: Vec<Option<crate::groove::TrackGrooveSnapshot>> = lanes
             .iter()
             .map(|lane| {
-                let groove = playing
+                playing
                     .iter()
                     .find(|(track, _)| *track == lane.track)
-                    .and_then(|(_, groove)| groove.as_ref());
+                    .and_then(|(_, groove)| groove.clone())
+            })
+            .collect();
+        let sources = lanes
+            .iter()
+            .zip(&lane_grooves)
+            .map(|(lane, groove)| {
+                let groove = groove.as_ref();
                 let data = scenes
                     .track_pools
                     .get(lane.track)
@@ -280,7 +312,27 @@ impl App {
             if quantize {
                 let mut scenes = app.capture_synchronized_scene_structure_state()?;
                 let mut changed = false;
-                for lane in &lanes {
+                for (lane, groove) in lanes.iter().zip(&lane_grooves) {
+                    // The source clip's lane, when it is that clip's own
+                    // cell and something else plays the same pattern: the
+                    // quantized copy is forked into the clip (sharing the
+                    // sound), so only the clip that gets the groove changes.
+                    let fork_into = source_clip.filter(|clip| {
+                        let is_clip_cell = scenes
+                            .rack_bank(group_id)
+                            .and_then(|bank| bank.clip(*clip))
+                            .and_then(|clip| clip.cells.get(lane.member).copied().flatten())
+                            == Some(lane.pattern);
+                        is_clip_cell
+                            && clip_pattern_is_shared(
+                                &scenes,
+                                group_id,
+                                *clip,
+                                lane.member,
+                                lane.track,
+                                lane.pattern,
+                            )
+                    });
                     let pool = scenes
                         .track_pools
                         .get_mut(lane.track)
@@ -288,14 +340,26 @@ impl App {
                     let mut data = pool
                         .get(lane.pattern)
                         .ok_or_else(|| format!("Track {} lost its pattern", lane.track + 1))?;
-                    if quantize_groove_source(&mut data) {
-                        if !pool.store(lane.pattern, data) {
-                            return Err(format!(
-                                "Could not quantize the pattern on track {}",
-                                lane.track + 1
-                            ));
-                        }
-                        changed = true;
+                    if !quantize_groove_source(&mut data, groove.as_ref()) {
+                        continue;
+                    }
+                    changed = true;
+                    if let Some(clip) = fork_into {
+                        let refs = pool
+                            .refs(lane.pattern)
+                            .ok_or_else(|| format!("Track {} lost its pattern", lane.track + 1))?;
+                        let forked = pool.insert_with_refs(data, refs);
+                        let cell = scenes
+                            .rack_bank_mut(group_id)
+                            .and_then(|bank| bank.clip_mut(clip))
+                            .and_then(|clip| clip.cells.get_mut(lane.member))
+                            .ok_or_else(|| format!("Drum rack has no clip {clip}"))?;
+                        *cell = Some(forked);
+                    } else if !pool.store(lane.pattern, data) {
+                        return Err(format!(
+                            "Could not quantize the pattern on track {}",
+                            lane.track + 1
+                        ));
                     }
                 }
                 if changed {

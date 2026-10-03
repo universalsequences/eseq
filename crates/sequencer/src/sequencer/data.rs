@@ -1172,6 +1172,9 @@ pub struct TrackParams {
     pub accum_limit: AtomicU32,
     pub accum_mode: AtomicU32,
     pub fts_scale: AtomicU32,
+    /// Microtonal edits on top of `fts_scale`. UI-thread only: the audio
+    /// thread reads the copy in the published snapshot.
+    pub tuning: Mutex<crate::scale::TrackTuning>,
     pub mono_trigger: AtomicU32,
     pub voice_priority: AtomicU32,
     pub mute_group: AtomicU32,
@@ -1205,6 +1208,7 @@ impl TrackParams {
             accum_limit: AtomicU32::new(48.0_f32.to_bits()),
             accum_mode: AtomicU32::new(0),
             fts_scale: AtomicU32::new(0),
+            tuning: Mutex::new(crate::scale::TrackTuning::DEFAULT),
             mono_trigger: AtomicU32::new(MonoTrigger::Retrig as u32),
             voice_priority: AtomicU32::new(VoicePriority::Last as u32),
             mute_group: AtomicU32::new(0),
@@ -1432,6 +1436,12 @@ impl TrackParams {
     pub fn set_fts_scale(&self, idx: usize) {
         self.fts_scale.store(idx as u32, Ordering::Relaxed);
     }
+    pub fn tuning(&self) -> crate::scale::TrackTuning {
+        self.tuning.lock().unwrap().clone()
+    }
+    pub fn set_tuning(&self, tuning: crate::scale::TrackTuning) {
+        *self.tuning.lock().unwrap() = tuning;
+    }
     pub fn get_mute_group(&self) -> u8 {
         self.mute_group.load(Ordering::Relaxed).min(8) as u8
     }
@@ -1486,6 +1496,7 @@ pub struct TrackParamsSnapshot {
     pub accum_limit: f32,
     pub accum_mode: u32,
     pub fts_scale: usize,
+    pub tuning: crate::scale::TrackTuning,
     pub mono_trigger: MonoTrigger,
     pub voice_priority: VoicePriority,
     pub mute_group: u8,
@@ -1517,6 +1528,7 @@ impl Default for TrackParamsSnapshot {
             accum_limit: 48.0,
             accum_mode: 0,
             fts_scale: 0,
+            tuning: crate::scale::TrackTuning::DEFAULT,
             mono_trigger: MonoTrigger::Retrig,
             voice_priority: VoicePriority::Last,
             mute_group: 0,

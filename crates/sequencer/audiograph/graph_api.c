@@ -125,6 +125,13 @@ LiveGraph *create_live_graph(int initial_capacity, int block_size,
   lg->watch.sizes = calloc(lg->node_capacity, sizeof(size_t));
   pthread_rwlock_init(&lg->watch.lock, NULL);
 
+  lg->node_meters = calloc(AP_NODE_METER_CAPACITY, sizeof(NodeMeterSlot));
+  if (lg->node_meters) {
+    for (int i = 0; i < AP_NODE_METER_CAPACITY; i++) {
+      atomic_init(&lg->node_meters[i].node_id, -1);
+    }
+  }
+
   // Initialize scheduling cache (optimization to avoid O(n) per block)
   lg->sched.source_capacity = 256;  // Start with reasonable capacity
   lg->sched.source_nodes = calloc(lg->sched.source_capacity, sizeof(int32_t));
@@ -268,6 +275,9 @@ void destroy_live_graph(LiveGraph *lg) {
   if (lg->watch.sizes)
     free(lg->watch.sizes);
   pthread_rwlock_destroy(&lg->watch.lock);
+
+  free(lg->node_meters);
+  lg->node_meters = NULL;
 
   // Free retire list
   if (lg->retire.list)
@@ -783,6 +793,84 @@ bool get_node_state_into(LiveGraph *lg, int node_id, void *out,
 
   pthread_rwlock_unlock(&lg->watch.lock);
   return copied;
+}
+
+// ===================== Node Output Meters =====================
+
+static bool submit_set_node_meter(LiveGraph *lg, int node_id, int slot,
+                                  int clear_slot) {
+  GraphEditCmd cmd = {.op = GE_SET_NODE_METER,
+                      .batch_serial = current_batch_serial(lg),
+                      .u.set_node_meter = {.node_id = node_id,
+                                           .slot = slot,
+                                           .clear_slot = clear_slot}};
+  return submit_graph_edit(lg, &cmd);
+}
+
+static bool node_meter_slot_valid(LiveGraph *lg, int slot) {
+  return lg && lg->node_meters && slot >= 0 && slot < AP_NODE_METER_CAPACITY;
+}
+
+int graph_node_meter_attach(LiveGraph *lg, int node_id) {
+  if (!lg || !lg->node_meters || node_id < 0)
+    return -1;
+  for (int slot = 0; slot < AP_NODE_METER_CAPACITY; slot++) {
+    NodeMeterSlot *meter = &lg->node_meters[slot];
+    int32_t expected = -1;
+    if (!atomic_compare_exchange_strong(&meter->node_id, &expected, node_id))
+      continue;
+    atomic_store_explicit(&meter->peak_l_bits, 0, memory_order_relaxed);
+    atomic_store_explicit(&meter->peak_r_bits, 0, memory_order_relaxed);
+    atomic_store_explicit(&meter->blocks, 0, memory_order_relaxed);
+    if (!submit_set_node_meter(lg, node_id, slot, -1)) {
+      atomic_store(&meter->node_id, -1);
+      return -1;
+    }
+    return slot;
+  }
+  return -1;
+}
+
+bool graph_node_meter_reattach(LiveGraph *lg, int slot) {
+  if (!node_meter_slot_valid(lg, slot))
+    return false;
+  int node_id = atomic_load(&lg->node_meters[slot].node_id);
+  return node_id >= 0 && submit_set_node_meter(lg, node_id, slot, -1);
+}
+
+bool graph_node_meter_detach(LiveGraph *lg, int slot) {
+  if (!node_meter_slot_valid(lg, slot))
+    return false;
+  NodeMeterSlot *meter = &lg->node_meters[slot];
+  int node_id = atomic_load(&meter->node_id);
+  if (node_id < 0)
+    return false;
+  // Edits apply in order, so this clear lands before any later attach that
+  // reclaims the slot. Until then the audio thread's owner check drops writes.
+  submit_set_node_meter(lg, node_id, -1, slot);
+  atomic_store(&meter->node_id, -1);
+  return true;
+}
+
+bool graph_node_meter_take(LiveGraph *lg, int slot, float *peak_l,
+                           float *peak_r, uint32_t *blocks) {
+  if (!node_meter_slot_valid(lg, slot))
+    return false;
+  NodeMeterSlot *meter = &lg->node_meters[slot];
+  uint32_t l = atomic_exchange_explicit(&meter->peak_l_bits, 0,
+                                        memory_order_relaxed);
+  uint32_t r = atomic_exchange_explicit(&meter->peak_r_bits, 0,
+                                        memory_order_relaxed);
+  float lf, rf;
+  memcpy(&lf, &l, sizeof lf);
+  memcpy(&rf, &r, sizeof rf);
+  if (peak_l)
+    *peak_l = lf;
+  if (peak_r)
+    *peak_r = rf;
+  if (blocks)
+    *blocks = atomic_load_explicit(&meter->blocks, memory_order_relaxed);
+  return true;
 }
 
 // Debug: dump graph topology to stderr

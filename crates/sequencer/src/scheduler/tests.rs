@@ -700,6 +700,7 @@
                 instrument_tensor_params: ScheduledInstrumentTensorParams::new(),
                 sampler_params: ScheduledSamplerParams::default(),
                 rack_macro_values: [None; crate::sequencer::RACK_MACRO_COUNT],
+                rack_slot_params: Default::default(),
                 source: EventSource::Network {
                     seed: Some((0, 0)),
                     neuron,
@@ -918,6 +919,7 @@
             instrument_tensor_params: ScheduledInstrumentTensorParams::new(),
             sampler_params: ScheduledSamplerParams::default(),
             rack_macro_values: [None; crate::sequencer::RACK_MACRO_COUNT],
+            rack_slot_params: Default::default(),
             source: EventSource::Step {
                 track: 0,
                 step: 0,
@@ -1433,6 +1435,7 @@
             ScheduledInstrumentTensorParams::new(),
             ScheduledSamplerParams::default(),
             [None; crate::sequencer::RACK_MACRO_COUNT],
+            Default::default(),
         ));
 
         let first = queue.pop_owned().expect("first note event");
@@ -1478,6 +1481,7 @@
             ScheduledInstrumentTensorParams::new(),
             ScheduledSamplerParams::default(),
             [None; crate::sequencer::RACK_MACRO_COUNT],
+            Default::default(),
         ));
 
         let event = queue.pop_owned().expect("global-transposed event");
@@ -1524,6 +1528,7 @@
             ScheduledInstrumentTensorParams::new(),
             ScheduledSamplerParams::default(),
             [None; crate::sequencer::RACK_MACRO_COUNT],
+            Default::default(),
         ));
 
         let event = queue.pop_owned().expect("opted-out event");
@@ -1559,6 +1564,7 @@
             instrument_tensor_params: ScheduledInstrumentTensorParams::new(),
             sampler_params: ScheduledSamplerParams::default(),
             rack_macro_values: [None; crate::sequencer::RACK_MACRO_COUNT],
+            rack_slot_params: Default::default(),
             source: EventSource::Network {
                 seed: Some((0, 0)),
                 neuron: 0,
@@ -1616,6 +1622,7 @@
             instrument_tensor_params: ScheduledInstrumentTensorParams::new(),
             sampler_params: ScheduledSamplerParams::default(),
             rack_macro_values: [None; crate::sequencer::RACK_MACRO_COUNT],
+            rack_slot_params: Default::default(),
             source: EventSource::Network {
                 seed: None,
                 neuron: 0,
@@ -1902,6 +1909,7 @@
             instrument_tensor_params: ScheduledInstrumentTensorParams::new(),
             sampler_params: resolve_sampler_params(&snapshot, 0, 0),
             rack_macro_values: [None; crate::sequencer::RACK_MACRO_COUNT],
+            rack_slot_params: Default::default(),
             source: EventSource::Step {
                 track: 0,
                 step: 0,
@@ -2821,6 +2829,38 @@
             + Send
             + 'static,
     ) -> Vec<ObservedTrigger> {
+        jaki_instance_observed_with_state(
+            owner_rack,
+            rows,
+            figures,
+            mode,
+            horizon,
+            chunk_frames,
+            setup,
+            scheduler_setup,
+        )
+        .0
+    }
+
+    /// [`jaki_instance_observed_full`] that also returns the keys of the
+    /// instance generator's persistent state map after the run.
+    #[allow(clippy::too_many_arguments)]
+    fn jaki_instance_observed_with_state(
+        owner_rack: Option<(u64, Vec<usize>)>,
+        rows: &'static str,
+        figures: &'static str,
+        mode: &'static str,
+        horizon: u64,
+        chunk_frames: usize,
+        setup: impl FnOnce(&Arc<SequencerState>, u64) + Send + 'static,
+        scheduler_setup: impl FnOnce(
+                &SequencerState,
+                &crate::sequencer::SequencerSnapshot,
+                &mut SchedulerLookaheadState,
+            )
+            + Send
+            + 'static,
+    ) -> (Vec<ObservedTrigger>, Vec<String>) {
         run_with_scheduler_stack(move || {
             let state = Arc::new(SequencerState::new(
                 4,
@@ -2942,7 +2982,8 @@
                 .map(|notice| notice.error)
                 .collect();
             assert!(errors.is_empty(), "the instance tick must not fail: {errors:?}");
-            observed_triggers(&queue)
+            let state_keys = scheduler.generator_runtime.instance_state_keys(published.id);
+            (observed_triggers(&queue), state_keys)
         })
     }
 
@@ -2965,12 +3006,36 @@
         delay_steps: u32,
         restart: bool,
     ) -> Vec<ObservedTrigger> {
-        jaki_instance_observed_full(
-            None,
+        jaki_driven_by_neuron_with_state(
             r#"(list (dict :route 1 :mods (list "left")) (dict :route 2 :mods (list "right")))"#,
+            mode,
+            dur_steps,
+            delay_steps,
+            restart,
+            96_000,
+        )
+        .0
+        .into_iter()
+        .filter(|trigger| trigger.kind == ScheduledTriggerKind::Network)
+        .collect()
+    }
+
+    /// [`jaki_driven_by_neuron`] with the instance's rows and the horizon,
+    /// returning every observed trigger plus the instance's state keys.
+    fn jaki_driven_by_neuron_with_state(
+        rows: &'static str,
+        mode: &'static str,
+        dur_steps: u32,
+        delay_steps: u32,
+        restart: bool,
+        horizon: u64,
+    ) -> (Vec<ObservedTrigger>, Vec<String>) {
+        jaki_instance_observed_with_state(
+            None,
+            rows,
             "(list (list :dot :dot :dot :dot))",
             mode,
-            96_000,
+            horizon,
             512,
             move |state, jaki_id| {
                 state.toggle_step_and_clear_plocks(0, 0);
@@ -3077,9 +3142,45 @@
                 assert_eq!(scheduler.graph_runtimes.len(), 1);
             },
         )
-        .into_iter()
-        .filter(|trigger| trigger.kind == ScheduledTriggerKind::Network)
-        .collect()
+    }
+
+    /// Every `:retrig` fire rewinds the instance (a backward cycle jump that
+    /// bumps its seq epoch). A `(seq :hit …)` value's counters restart per
+    /// window, and they restart in place: the generator's state map must not
+    /// grow by a fresh key set per fire.
+    #[test]
+    fn retrig_jaki_rewinds_keep_the_seq_counter_state_bounded() {
+        const ROWS: &str = r#"(list (dict :route 1 :mods (list (list "vel" (list "seq" ":hit" 0.25 0.5 0.75 1))))
+                                   (dict :route 2 :mods (list "right")))"#;
+        // Windows of 5 units over a 4-unit cycle: each one reaches cycle 1,
+        // so the next fire's rewind to cycle 0 is a backward jump.
+        let run = |horizon: u64| {
+            let (hits, keys) = jaki_driven_by_neuron_with_state(ROWS, ":retrig", 5, 8, false, horizon);
+            let hits: Vec<ObservedTrigger> = hits
+                .into_iter()
+                .filter(|trigger| trigger.kind == ScheduledTriggerKind::Network && trigger.track == 1)
+                .collect();
+            let seq_keys = keys.iter().filter(|key| key.starts_with("seq:")).count();
+            (hits, seq_keys)
+        };
+        let (short_hits, short_keys) = run(144_000);
+        let (long_hits, long_keys) = run(480_000);
+        assert!(short_keys > 0, "the seq value keeps counters");
+        let first = long_hits.first().expect("left-hand hits").sample_time;
+        // Each window's first left-hand hit restarts the seq at its first value.
+        let window_starts: Vec<u32> = long_hits
+            .iter()
+            .filter(|hit| (hit.sample_time - first) % 48_000 == 0)
+            .map(|hit| hit.velocity.to_bits())
+            .collect();
+        assert!(window_starts.len() >= 6, "many rewinds: {long_hits:#?}");
+        assert_eq!(
+            window_starts,
+            vec![window_starts[0]; window_starts.len()],
+            "every window restarts the seq: {long_hits:#?}"
+        );
+        assert!(long_hits.len() > short_hits.len());
+        assert_eq!(long_keys, short_keys, "rewinds must not grow the state map");
     }
 
     #[test]
@@ -4326,6 +4427,73 @@
             assert_eq!(&got[..4], &[0.0, 4.0, 7.0, 12.0], "{got:?}");
             assert!(got[4..].iter().all(|t| [2.0, 5.0, 9.0, 14.0].iter().any(|c| (t - c).rem_euclid(12.0) == 0.0)), "{got:?}");
         });
+    }
+
+    /// Two cycles of a 4-hit jaki route harmonized against track 1 holding
+    /// C E G on every step; `harmony` is the authored `(harmony …)` word.
+    fn jaki_harmony_two_cycles(harmony: &'static str) -> Vec<f32> {
+        run_with_scheduler_stack(move || {
+            let state = Arc::new(SequencerState::new(
+                2,
+                vec![default_empty_effect_chain(), default_empty_effect_chain()],
+            ));
+            state.pattern.track_params[1].set_num_steps(8);
+            for step in 0..8 {
+                state.pattern.patterns[1].set_step_active(step, true);
+                for note in [0.0, 4.0, 7.0] {
+                    assert!(state.pattern.chord_data[1].add_note(step, note));
+                }
+            }
+            let mut scratch = lisp_host::ScratchControlRuntime::new(
+                Arc::clone(&state),
+                vec![Vec::new(), Vec::new()],
+                vec![EffectDescriptor::builtin_sampler(), EffectDescriptor::builtin_sampler()],
+                0,
+                0,
+            );
+            scratch
+                .eval(&format!(
+                    r#"(import alez.jaki.surface :refer (jak))
+                       (jak "follow" :16 . . . .
+                         -> 0 (note (seq :hit 1 3 6 11)) {harmony})"#
+                ))
+                .expect("define jaki");
+            state.transport.playing.store(true, Ordering::Relaxed);
+            let snapshot = state.publish_scheduler_snapshot();
+            let queue = ScheduledEventQueue::<64>::new();
+            let mut scheduler = SchedulerLookaheadState::new(48_000);
+            scheduler.generator_runtime.sync_definitions(&scratch.sequencer_defs(), 0.0);
+            let live_midi_fx_tracks: [LiveMidiFxTrackState; MAX_TRACKS] =
+                std::array::from_fn(|_| LiveMidiFxTrackState::default());
+            let mut scratch_runtime = Some(scratch);
+            schedule_playing_lookahead(
+                &mut scheduler, &state, &snapshot, &queue, &mut scratch_runtime,
+                &live_midi_fx_tracks, snapshot.transport.pattern_epoch,
+                0, 48_000, 48_000, 6_000, 24_000.0, 0, false, false,
+            );
+            let mut hits = Vec::new();
+            while let Some(event) = queue.pop_owned() {
+                if let ScheduledEventKind::NetworkTrigger { track: 0, resolved, .. } = event.kind {
+                    hits.push((event.sample_time, resolved.transpose));
+                }
+            }
+            hits.sort_by(|a, b| a.0.cmp(&b.0));
+            hits.into_iter().take(8).map(|h| h.1).collect()
+        })
+    }
+
+    /// `(harmony …)` args cycle like every other slot: `:amount (0 1)` is
+    /// amount 0 on cycle 0 and amount 1 on cycle 1, not cycle 0's forever.
+    #[test]
+    fn jaki_harmony_amount_list_cycles_per_cycle() {
+        let loose = jaki_harmony_two_cycles("(harmony :track 1 :amount 0)");
+        let strict = jaki_harmony_two_cycles("(harmony :track 1 :amount 1)");
+        assert_eq!(loose.len(), 8, "{loose:?}");
+        assert_eq!(strict.len(), 8, "{strict:?}");
+        assert_ne!(loose[4..], strict[4..], "the tiers must differ for this to test anything");
+        let cycling = jaki_harmony_two_cycles("(harmony :track 1 :amount (0 1))");
+        assert_eq!(&cycling[..4], &loose[..4], "cycle 0 plays amount 0: {cycling:?}");
+        assert_eq!(&cycling[4..], &strict[4..], "cycle 1 plays amount 1: {cycling:?}");
     }
 
     /// jaki's `(harmony :track n :amount a)` against lane-harmony's own
@@ -10340,6 +10508,7 @@
             instrument_tensor_params: ScheduledInstrumentTensorParams::new(),
             sampler_params: ScheduledSamplerParams::default(),
             rack_macro_values: [None; crate::sequencer::RACK_MACRO_COUNT],
+            rack_slot_params: Default::default(),
             source: EventSource::Network {
                 seed: Some((0, 0)),
                 neuron: 0,
@@ -10380,6 +10549,43 @@
             other => panic!("expected network trigger, got {other:?}"),
         }
         assert!(queue.pop_owned().is_none());
+    }
+
+    #[test]
+    fn fit_to_scale_applies_the_tracks_tuning_to_notes_and_chord_voices() {
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        let edo24 = crate::scale::SCALES
+            .iter()
+            .position(|scale| scale.name == "24-EDO")
+            .unwrap();
+        // Picking 24-EDO through the command path switches the track to Map.
+        state.pattern.track_params[0].set_fts_scale(edo24);
+        state.pattern.track_params[0]
+            .set_tuning(crate::scale::TrackTuning::DEFAULT.for_scale(edo24));
+        let snapshot = state.publish_scheduler_snapshot();
+        let mut resolved = test_resolved_step();
+        resolved.transpose = 3.0;
+        let chord = ScheduledChordData {
+            live_origins: [None; crate::audio::MAX_VOICES],
+            count: 2,
+            notes: std::array::from_fn(|idx| if idx == 1 { 1.0 } else { 0.0 }),
+            durations: [0.0; crate::audio::MAX_VOICES],
+            delays: [0.0; crate::audio::MAX_VOICES],
+            step_transpose: 0.0,
+        };
+        let (resolved, chord) =
+            super::process::apply_fit_to_scale_to_trigger(&snapshot, 0, resolved, chord);
+        // Map: each semitone of input is one quarter tone.
+        assert_eq!(resolved.transpose, 1.5);
+        let voice = |idx: usize| {
+            crate::scheduled_event::resolved_chord_transpose(
+                chord.notes[idx],
+                chord.step_transpose,
+                resolved.transpose,
+            )
+        };
+        assert_eq!(voice(0), 1.5);
+        assert_eq!(voice(1), 2.0);
     }
 
     #[test]
@@ -10429,6 +10635,7 @@
             instrument_tensor_params: ScheduledInstrumentTensorParams::new(),
             sampler_params: ScheduledSamplerParams::default(),
             rack_macro_values: [None; crate::sequencer::RACK_MACRO_COUNT],
+            rack_slot_params: Default::default(),
             source: EventSource::Network {
                 seed: Some((0, 0)),
                 neuron: 0,
@@ -10510,6 +10717,7 @@
             instrument_tensor_params: ScheduledInstrumentTensorParams::new(),
             sampler_params: ScheduledSamplerParams::default(),
             rack_macro_values: [None; crate::sequencer::RACK_MACRO_COUNT],
+            rack_slot_params: Default::default(),
             source: EventSource::Network {
                 seed: Some((0, 0)),
                 neuron: 0,
@@ -10582,6 +10790,7 @@
             instrument_tensor_params: ScheduledInstrumentTensorParams::new(),
             sampler_params: ScheduledSamplerParams::default(),
             rack_macro_values: [None; crate::sequencer::RACK_MACRO_COUNT],
+            rack_slot_params: Default::default(),
             source: EventSource::Step { track: 0, step: 0, instrument_fingerprint: 0 },
         };
         let events = run_midi_fx_chain_for_track(&mut runtime, &snapshot, 0, vec![event], None, 0, false);
@@ -10643,6 +10852,7 @@
             instrument_tensor_params: ScheduledInstrumentTensorParams::new(),
             sampler_params: ScheduledSamplerParams::default(),
             rack_macro_values: [None; crate::sequencer::RACK_MACRO_COUNT],
+            rack_slot_params: Default::default(),
             source: EventSource::Network {
                 seed: Some((0, 0)),
                 neuron: 0,
@@ -10743,6 +10953,7 @@
             instrument_tensor_params: ScheduledInstrumentTensorParams::new(),
             sampler_params: ScheduledSamplerParams::default(),
             rack_macro_values: [None; crate::sequencer::RACK_MACRO_COUNT],
+            rack_slot_params: Default::default(),
             source: EventSource::Step {
                 track: 0,
                 step: 0,
@@ -11170,6 +11381,7 @@
             instrument_tensor_params: ScheduledInstrumentTensorParams::new(),
             sampler_params,
             rack_macro_values: [None; crate::sequencer::RACK_MACRO_COUNT],
+            rack_slot_params: Default::default(),
             source: EventSource::Step {
                 track: 0,
                 step: 0,
@@ -11392,6 +11604,7 @@
             instrument_tensor_params: ScheduledInstrumentTensorParams::new(),
             sampler_params: ScheduledSamplerParams::default(),
             rack_macro_values: [None; crate::sequencer::RACK_MACRO_COUNT],
+            rack_slot_params: Default::default(),
             source: EventSource::Network {
                 seed: None,
                 neuron: 0,
@@ -11510,6 +11723,7 @@
             instrument_tensor_params: ScheduledInstrumentTensorParams::new(),
             sampler_params: ScheduledSamplerParams::default(),
             rack_macro_values: [None; crate::sequencer::RACK_MACRO_COUNT],
+            rack_slot_params: Default::default(),
             source: EventSource::Network {
                 seed: None,
                 neuron: 0,
@@ -11622,6 +11836,7 @@
             instrument_tensor_params: ScheduledInstrumentTensorParams::new(),
             sampler_params: ScheduledSamplerParams::default(),
             rack_macro_values: [None; crate::sequencer::RACK_MACRO_COUNT],
+            rack_slot_params: Default::default(),
             source: EventSource::Network {
                 seed: None,
                 neuron: 0,
@@ -11749,6 +11964,7 @@
             instrument_tensor_params: ScheduledInstrumentTensorParams::new(),
             sampler_params: ScheduledSamplerParams::default(),
             rack_macro_values: [None; crate::sequencer::RACK_MACRO_COUNT],
+            rack_slot_params: Default::default(),
             source: EventSource::Network {
                 seed: Some((0, 0)),
                 neuron: 0,
@@ -15213,6 +15429,80 @@
     }
 
     #[test]
+    fn roll_press_catches_every_unrendered_line_when_frontier_leads_by_more_than_one_grid() {
+        run_with_scheduler_stack(|| {
+            // The frontier can lead the render head by more than one grid
+            // line (lookahead target + early-groove discovery lead at fine
+            // roll rates). Every line in (rendered, frontier) is still
+            // audible, so catch-up emits all of them, not only the latest.
+            let (state, mut scheduler) = roll_test_state(&[]);
+            state
+                .transport
+                .roll_rate
+                .store(Timebase::SixtyFourth as u32, Ordering::Release);
+            // 1/64 → 0.0625 beat → 1_500 samples.
+            let queue = ScheduledEventQueue::<64>::new();
+            let frontier = drive_roll_chunks_unaligned(&state, &mut scheduler, &queue, 0, 0);
+            assert_eq!(frontier, 5_000, "frontier must lead several 1/64 lines");
+            assert!(drain_roll_triggers(&queue).is_empty());
+
+            scheduler.roll.apply_commands(&[RollCommand::NoteOn {
+                track: 0,
+                transpose: 3.0,
+            }]);
+            drive_roll_chunks_unaligned(&state, &mut scheduler, &queue, 500, frontier);
+            let triggers = drain_roll_triggers(&queue);
+            assert_eq!(
+                triggers.iter().map(|(sample, ..)| *sample).collect::<Vec<_>>(),
+                vec![1_500, 3_000, 4_500],
+                "every unrendered line behind the frontier is caught, in order",
+            );
+        });
+    }
+
+    #[test]
+    fn roll_hits_in_a_single_chunk_call_reach_the_output_reads() {
+        run_with_scheduler_stack(|| {
+            // The app's worker extends the horizon about one block per call,
+            // so each call runs one chunk. Roll hits enqueue after that
+            // chunk's last in-loop feed; they must still reach `:output`.
+            let (state, mut scheduler) = roll_test_state(&[(0, 3.0)]);
+            let queue = ScheduledEventQueue::<64>::new();
+            let snapshot = state.publish_scheduler_snapshot();
+            let live_midi_fx_tracks: [LiveMidiFxTrackState; MAX_TRACKS] =
+                std::array::from_fn(|_| LiveMidiFxTrackState::default());
+            let mut scratch_runtime = None;
+            let frontier = schedule_playing_lookahead(
+                &mut scheduler,
+                &state,
+                &snapshot,
+                &queue,
+                &mut scratch_runtime,
+                &live_midi_fx_tracks,
+                snapshot.transport.pattern_epoch,
+                0,
+                512,
+                48_000,
+                512,
+                ROLL_TEST_SPQ,
+                0,
+                false,
+                false,
+            )
+            .scheduled_until_sample;
+            assert_eq!(frontier, 512, "exactly one chunk ran");
+            assert_eq!(drain_roll_triggers(&queue).len(), 1, "the beat-0 roll hit");
+            let timeline = scheduler.process_runtime.track_harmony_timeline(0.01, 0.02);
+            assert!(
+                timeline[0]
+                    .first()
+                    .is_some_and(|(_, harmony)| !harmony.chord.is_empty()),
+                "track 0's roll hit is visible to :output reads: {timeline:?}",
+            );
+        });
+    }
+
+    #[test]
     fn roll_hits_on_a_swung_track_match_sequenced_swing_offsets() {
         run_with_scheduler_stack(|| {
             let (state, mut scheduler) = roll_test_state(&[(0, 3.0)]);
@@ -15409,6 +15699,35 @@
             &snapshot,
         );
         assert_eq!(roll.window_start[0], Some(0.75));
+    }
+
+    #[test]
+    fn sequence_roll_capture_anchors_on_the_audible_position_not_the_frontier() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        state.pattern.track_params[0].set_num_steps(16);
+        state.toggle_play();
+        let snapshot = state.publish_scheduler_snapshot();
+        let capture = |frontier: f64, lag: f64| {
+            let mut clock = SnapshotSequencerClock::new(48_000);
+            clock.seek_beats(frontier);
+            clock.was_playing = true;
+            let mut roll = RollState::new();
+            roll.apply_commands_with_clock_lagged(
+                &[
+                    RollCommand::SetRate { rate: Timebase::Sixteenth },
+                    RollCommand::SequenceRoll { on: true },
+                ],
+                &mut clock,
+                &snapshot,
+                lag,
+            );
+            roll.window_start[0]
+        };
+        // The render head plays step 4 (beat 1.05) while the frontier (target
+        // plus an early-groove lead) is already in step 6 (beat 1.55).
+        let heard = capture(1.05, 0.0);
+        assert_eq!(capture(1.55, 0.5), heard, "the window opens where the head is");
+        assert_ne!(capture(1.55, 0.0), heard, "the bare frontier is steps late");
     }
 
     #[test]
@@ -16349,6 +16668,7 @@ fn scene_transpose_follows_live_scene_values_without_a_scratch_runtime() {
                 instrument_tensor_params: ScheduledInstrumentTensorParams::new(),
                 sampler_params: ScheduledSamplerParams::default(),
                 rack_macro_values: [None; crate::sequencer::RACK_MACRO_COUNT],
+                rack_slot_params: Default::default(),
                 source: EventSource::Network {
                     seed: Some((0, 0)),
                     neuron: 0,
@@ -16412,6 +16732,7 @@ fn scene_transpose_follows_live_scene_values_without_a_scratch_runtime() {
                     instrument_tensor_params: ScheduledInstrumentTensorParams::new(),
                     sampler_params: ScheduledSamplerParams::default(),
                     rack_macro_values: [None; crate::sequencer::RACK_MACRO_COUNT],
+                    rack_slot_params: Default::default(),
                     source: EventSource::Step { track, step: 0, instrument_fingerprint: 0 },
                 },
                 midi_fx_params: Vec::new(),
@@ -16725,6 +17046,148 @@ fn scene_transpose_follows_live_scene_values_without_a_scratch_runtime() {
             assert!((v[1].1 - 0.375).abs() < 1e-6, "{}", v[1].1);
         }
 
+        /// A process `(emit …)` without `:track` sounds on track 0, so it
+        /// plays through track 0's groove (timing and accent), exactly like
+        /// an explicit `:track 0`.
+        #[test]
+        fn process_emission_without_track_takes_track0_groove() {
+            let mut g = accented(&[0.0, 0.3, 0.0, 0.1], &[1.5, 0.5, 1.0, 1.2], 0.0);
+            g.velocity_amount = 1.0;
+            let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+            state.set_track_grooves(vec![Some(g)]);
+            let snapshot = state.latest_scheduler_snapshot();
+            let emission = |track: Option<usize>| crate::lisp_host::EmittedAccumulatorEvent {
+                origin_note: None,
+                offset_beats: 0.0,
+                track,
+                resolved: ResolvedStep { velocity: 0.6, ..test_resolved_step() },
+                chord: Vec::new(),
+                chord_durations: Vec::new(),
+                chord_step_transpose: 0.0,
+                effect_params: Vec::new(),
+                instrument_params: Vec::new(),
+                named_params: Vec::new(),
+            };
+            let mut got = Vec::new();
+            for track in [None, Some(0)] {
+                let mut process_runtime = crate::process::ProcessRuntime::default();
+                process_runtime.schedule_emission_at(1, 0.25, emission(track));
+                let queue = ScheduledEventQueue::<16>::new();
+                let mut track_output_events = Vec::new();
+                let mut scratch_runtime = None;
+                let mut quantizer = MidiFxQuantizerState::default();
+                assert!(enqueue_due_process_emissions(
+                    &queue,
+                    &snapshot,
+                    &mut track_output_events,
+                    &mut scratch_runtime,
+                    &mut quantizer,
+                    &mut process_runtime,
+                    0,
+                    0.0,
+                    0,
+                    2.0,
+                    24_000.0,
+                    crate::groove::GrooveFloor::at(0),
+                    None,
+                    false,
+                ));
+                got.push(trig_velocities(&queue));
+            }
+            assert_eq!(got[0], got[1], "track-less emits match an explicit :track 0");
+            assert_eq!(got[0].len(), 1);
+            let (track, sample, velocity) = got[0][0];
+            assert_eq!((track, sample), (0, 6_000 + 1_800));
+            assert!((f32::from_bits(velocity) - 0.3).abs() < 1e-6);
+        }
+
+        /// A late-recovered step (mid-play resync) spawns its process
+        /// ratchets/emits at its own straight beat, before the chunk start.
+        /// A grooved target keeps that true straight sample when the groove
+        /// still lands it at or after the audio frontier, instead of being
+        /// pinned to the chunk start and playing late by the recovery lag.
+        #[test]
+        fn pre_chunk_process_events_on_a_grooved_member_keep_their_straight_sample() {
+            let state = Arc::new(SequencerState::new(2, vec![
+                default_empty_effect_chain(),
+                default_empty_effect_chain(),
+            ]));
+            state.set_track_grooves(vec![None, Some(groove(1.0, 0.25, &[0.0, 0.3, 0.0, 0.1]))]);
+            let snapshot = state.latest_scheduler_snapshot();
+            let spq = 24_000.0;
+            let mut process_runtime = crate::process::ProcessRuntime::default();
+            let step_event = |track: usize| crate::process::ProcessScheduledStepEvent {
+                event: StepEvent {
+                    track,
+                    samples_per_step: 6_000.0,
+                    resolved: test_resolved_step(),
+                    chord: ScheduledChordData {
+                        live_origins: [None; crate::audio::MAX_VOICES],
+                        count: 0,
+                        notes: [0.0; crate::audio::MAX_VOICES],
+                        durations: [0.0; crate::audio::MAX_VOICES],
+                        delays: [0.0; crate::audio::MAX_VOICES],
+                        step_transpose: 0.0,
+                    },
+                    effect_params: Vec::new(),
+                    instrument_params: ScheduledInstrumentParams::new(),
+                    instrument_tensor_params: ScheduledInstrumentTensorParams::new(),
+                    sampler_params: ScheduledSamplerParams::default(),
+                    rack_macro_values: [None; crate::sequencer::RACK_MACRO_COUNT],
+                    rack_slot_params: Default::default(),
+                    source: EventSource::Step { track, step: 0, instrument_fingerprint: 0 },
+                },
+                midi_fx_params: Vec::new(),
+            };
+            // Chunk (and audio frontier) at beat 0.3 = sample 7_200. Slot 1
+            // (straight 6_000, 0.3 late) grooves to 7_800: still ahead. Its
+            // ratchet's second hit at beat 0.3125 keeps its spacing. Track 0
+            // is ungrooved and keeps the chunk-start clamp.
+            for (beat, track) in [(0.25, 1usize), (0.3125, 1), (0.25, 0)] {
+                process_runtime.schedule_step_event_at(1, beat, step_event(track));
+            }
+            let queue = ScheduledEventQueue::<16>::new();
+            let mut track_output_events = Vec::new();
+            let mut scratch_runtime = None;
+            let mut quantizer = MidiFxQuantizerState::default();
+            assert!(enqueue_due_process_emissions(
+                &queue,
+                &snapshot,
+                &mut track_output_events,
+                &mut scratch_runtime,
+                &mut quantizer,
+                &mut process_runtime,
+                0,
+                0.3,
+                7_200,
+                2.0,
+                spq,
+                crate::groove::GrooveFloor::at(7_200),
+                None,
+                false,
+            ));
+            let mut times: Vec<(usize, u64)> = observed_triggers(&queue)
+                .into_iter()
+                .map(|e| (e.track, e.sample_time))
+                .collect();
+            times.sort();
+            // The in-chunk second hit takes the ordinary grooved path from
+            // its own straight sample (7_500).
+            let in_chunk = crate::groove::grooved_sample_time(
+                snapshot.track_groove(1).expect("track 1 groove"),
+                0.3125,
+                7_500,
+                spq,
+                crate::groove::GrooveFloor::at(7_200),
+            )
+            .expect("a late move");
+            assert_eq!(
+                times,
+                vec![(0, 7_200), (1, 6_000 + 1_800), (1, in_chunk)],
+                "grooved pre-chunk hits keep their straight sample; ungrooved clamp"
+            );
+        }
+
         /// Velocity at the emission sites: process-scheduled steps and
         /// emissions aimed at a grooved member take the accent at their
         /// straight beat, and the helper every emission site shares leaves an
@@ -16759,6 +17222,7 @@ fn scene_transpose_follows_live_scene_values_without_a_scratch_runtime() {
                     instrument_tensor_params: ScheduledInstrumentTensorParams::new(),
                     sampler_params: ScheduledSamplerParams::default(),
                     rack_macro_values: [None; crate::sequencer::RACK_MACRO_COUNT],
+                    rack_slot_params: Default::default(),
                     source: EventSource::Step { track, step: 0, instrument_fingerprint: 0 },
                 },
                 midi_fx_params: Vec::new(),

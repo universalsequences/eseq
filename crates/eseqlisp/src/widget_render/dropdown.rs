@@ -398,6 +398,16 @@ fn row_value(props: &HashMap<String, Value>, row: MenuRow) -> Option<String> {
     }
 }
 
+/// The row a filter edit hovers, so Enter picks it: the first matching
+/// option. A filter that matches nothing hovers nothing, so Enter never runs
+/// the (never-filtered) footer action by accident; Down/Up still reach it.
+fn first_filtered_hover(rows: &[MenuRow], filter: &str) -> Option<usize> {
+    if filter.trim().is_empty() {
+        return step_row(rows, None, true);
+    }
+    rows.iter().position(|row| matches!(row, MenuRow::Option(_)))
+}
+
 /// The nearest pickable row from `from`, stepping `forward` (or back).
 fn step_row(rows: &[MenuRow], from: Option<usize>, forward: bool) -> Option<usize> {
     let pickable = |i: usize| !matches!(rows[i], MenuRow::Header(_));
@@ -948,7 +958,7 @@ impl WidgetDefinition for DropdownWidget {
             KeyCode::Char(ch) if typing => {
                 state.filter.push(ch);
                 let rows = menu_rows(&node.props, &state.filter);
-                state.hovered_idx = step_row(&rows, None, true);
+                state.hovered_idx = first_filtered_hover(&rows, &state.filter);
                 state.scroll_offset = 0.0;
                 set_state(node.widget_id, state);
                 Some(WidgetEvent::Custom(Value::Nil))
@@ -956,7 +966,7 @@ impl WidgetDefinition for DropdownWidget {
             KeyCode::Backspace if typing => {
                 state.filter.pop();
                 let rows = menu_rows(&node.props, &state.filter);
-                state.hovered_idx = step_row(&rows, None, true);
+                state.hovered_idx = first_filtered_hover(&rows, &state.filter);
                 state.scroll_offset = 0.0;
                 set_state(node.widget_id, state);
                 Some(WidgetEvent::Custom(Value::Nil))
@@ -2074,6 +2084,63 @@ mod tests {
         assert_eq!(step_row(&rows, None, true), Some(1), "the first pickable row");
         assert_eq!(row_value(&props, MenuRow::Footer).as_deref(), Some("Extract…"));
         assert_eq!(row_value(&props, MenuRow::Header(1)), None);
+    }
+
+    #[test]
+    fn filter_with_no_match_hovers_nothing_so_enter_skips_the_footer() {
+        let widget_id = 91_341;
+        let mut props = HashMap::new();
+        props.insert("options".to_string(), string_list(&["Swing", "Shuffle"]));
+        props.insert("filterable".to_string(), Value::Bool(true));
+        props.insert("footer".to_string(), Value::String("Extract…".to_string()));
+        props.insert("value".to_string(), Value::String("Swing".to_string()));
+        let node = LayoutNode {
+            widget_id,
+            stable_widget_id: None,
+            subtree_root_id: None,
+            parent_subtree_root_id: None,
+            stable_key: None,
+            widget_type: "dropdown".to_string(),
+            rect: Rect {
+                row: 0.25,
+                col: 8.0,
+                width: 6.0,
+                height: 1.0,
+            },
+            props,
+            children: Vec::new(),
+            focusable: true,
+            animation: Default::default(),
+        };
+        let key = |code| WidgetKeyEvent {
+            code,
+            modifiers: KeyModifiers::NONE,
+        };
+        super::super::clear_overlay();
+        set_state(widget_id, DropdownState::default());
+
+        DROPDOWN_WIDGET.key_event(&node, key(KeyCode::Enter));
+        assert!(get_state(widget_id).open);
+        // A matching filter still hovers its first match.
+        DROPDOWN_WIDGET.key_event(&node, key(KeyCode::Char('h')));
+        assert_eq!(get_state(widget_id).hovered_idx, Some(0), "Shuffle");
+        DROPDOWN_WIDGET.key_event(&node, key(KeyCode::Backspace));
+
+        DROPDOWN_WIDGET.key_event(&node, key(KeyCode::Char('z')));
+        DROPDOWN_WIDGET.key_event(&node, key(KeyCode::Char('q')));
+        assert_eq!(get_state(widget_id).hovered_idx, None);
+        // Down still reaches the footer deliberately.
+        DROPDOWN_WIDGET.key_event(&node, key(KeyCode::Down));
+        assert_eq!(get_state(widget_id).hovered_idx, Some(0));
+        DROPDOWN_WIDGET.key_event(&node, key(KeyCode::Backspace));
+        assert_eq!(get_state(widget_id).hovered_idx, None);
+
+        assert!(matches!(
+            DROPDOWN_WIDGET.key_event(&node, key(KeyCode::Enter)),
+            Some(WidgetEvent::Custom(Value::Nil))
+        ));
+        assert!(!get_state(widget_id).open);
+        super::super::clear_overlay();
     }
 
     #[test]

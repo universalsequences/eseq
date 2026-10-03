@@ -58,6 +58,11 @@ typedef struct RTNode {
   bool io_cache_valid;     // False if topology changed, needs rebuild
   uint32_t io_generation;  // Bumped per IO rebuild; see ap_current_node_io_generation
 
+  // Output meter: 0 = unmetered, otherwise (slot index + 1) into
+  // LiveGraph.node_meters. Zeroed with the node, so a reused node id starts
+  // unmetered. Written only by the audio thread (GE_SET_NODE_METER).
+  int32_t meter_slot;
+
   // scheduling
   int32_t *succ; // successor node indices
   int succCount; // number of nodes that depend on this node's output
@@ -68,6 +73,21 @@ typedef struct {
   int size;
   int channel_count;
 } BufferDesc;
+
+// Per-node output meter. A fixed table that is never reallocated, so the UI
+// reads it lock-free while the graph grows. The audio thread max-accumulates
+// the absolute peak of the node's first two outputs (float bits; non-negative
+// floats order the same as their bit patterns) and counts metered blocks; the
+// reader exchanges the peaks back to zero, so each read sees everything since
+// the previous one and applies its own ballistics.
+#define AP_NODE_METER_CAPACITY 256
+
+typedef struct NodeMeterSlot {
+  _Atomic int32_t node_id; // owning node, -1 = free (claimed by the UI side)
+  _Atomic uint32_t peak_l_bits;
+  _Atomic uint32_t peak_r_bits;
+  _Atomic uint32_t blocks; // metered blocks run; stalls when the node is gone
+} NodeMeterSlot;
 
 // ===================== Live Editing System =====================
 
@@ -158,6 +178,8 @@ typedef struct LiveGraph {
     size_t *sizes;           // state sizes indexed by node_id
     pthread_rwlock_t lock;
   } watch;
+
+  NodeMeterSlot *node_meters; // [AP_NODE_METER_CAPACITY], see NodeMeterSlot
 
 } LiveGraph;
 
@@ -357,6 +379,21 @@ bool get_node_state_into(LiveGraph *lg, int node_id, void *out,
                          size_t out_capacity, size_t *state_size);
 
 void update_orphaned_status(LiveGraph *lg);
+
+// ===================== Node Output Meter API =====================
+
+// Claim a meter slot for node_id and ask the audio thread to meter it.
+// Returns the slot index, or -1 when the table is full.
+int graph_node_meter_attach(LiveGraph *lg, int node_id);
+// Re-send the attach edit for an already claimed slot (node id reused or the
+// edit was dropped). Idempotent.
+bool graph_node_meter_reattach(LiveGraph *lg, int slot);
+// Stop metering and release the slot.
+bool graph_node_meter_detach(LiveGraph *lg, int slot);
+// Take the peaks accumulated since the previous take (reset to zero) and the
+// running metered-block count.
+bool graph_node_meter_take(LiveGraph *lg, int slot, float *peak_l,
+                           float *peak_r, uint32_t *blocks);
 
 // ===================== Buffer API =====================
 

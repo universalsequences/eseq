@@ -7,6 +7,7 @@
 (import eseq.drum-rack-v2)
 ;; The header pill + chip *step* shares with the *processes* dock.
 (import eseq.panel-header :as header)
+(import eseq.effects.scale-editor :as se)
 
 (export selected-plock-row
         plock-row-selected?
@@ -572,6 +573,11 @@
         :font-size 6.5 :color :dim :bg :transparent :v-align :center))))
 
 (def track-parameters-panel ()
+  (if se/scale-editor-open
+    (se/scale-editor-panel)
+    (track-settings-strip)))
+
+(def track-settings-strip ()
   (box :debug-name "track-parameters-strip" :padding 0.0
     (v-stack :gap 0.25
       (h-stack :gap 1.05 :align :center
@@ -676,12 +682,14 @@
             :width 5.4 :height 1.0 :font-size 9))
         )
       (v-stack :align :center :gap 0.5
-  	(v-stack :align :center :gap 0.15
-          (label "scale" :font-size 8 :color :dim :bg :transparent :v-align :center)
-          (dropdown :value SEQ.tp-fts
-            :options SEQ.fts-options
-            :on-change (lambda (v) (do (eseq.seq-core-state/cool-off-follow) (seq-set-fts v)))
-            :width 7.0 :height 1.0 :font-size 9))        )
+  	(v-stack :align :left :gap 0.15
+          (label "   scale" :font-size 8 :color :dim :bg :transparent :v-align :center)
+          (h-stack :gap 0.3 :align :center
+            (dropdown :value SEQ.tp-fts
+              :options SEQ.fts-options
+              :on-change (lambda (v) (do (eseq.seq-core-state/cool-off-follow) (seq-set-fts v)))
+              :width 8.6 :height 1.0 :font-size 9)
+            (se/scale-settings-button)))        )
       )
     )
   )

@@ -151,7 +151,7 @@ pub struct ToastFrame {
 }
 
 pub const TOAST_CORNER_RADIUS_PX: f32 = 10.0;
-pub const TOAST_BORDER_WIDTH_PX: f32 = 1.0;
+pub const TOAST_BORDER_WIDTH_PX: f32 = 2.0;
 /// Horizontal padding, in toast cells, on each side of the icon + message.
 const TOAST_PAD_COLS: usize = 2;
 /// Panel height in toast cells; the single text row sits centred inside it.
@@ -304,6 +304,47 @@ pub struct ToastShape {
 fn mix(a: Color, b: Color, t: f32) -> Color {
     let t = t.clamp(0.0, 1.0);
     Color::rgb(a.r + (b.r - a.r) * t, a.g + (b.g - a.g) * t, a.b + (b.b - a.b) * t)
+}
+
+/// How far the toast panel fill leans toward its kind's accent colour. Every
+/// theme's `toast-bg` is close to the window background, so an untinted
+/// panel disappears against it.
+const TOAST_BG_ACCENT_TINT: f32 = 0.14;
+
+/// Panel fill, border and icon colour for a toast of `kind`. The border is
+/// always the kind's accent (theme accent while loading, success green,
+/// error red) so the toast stands out against any background.
+pub fn toast_colors(kind: crate::host::ToastKind) -> (Color, Color, Color) {
+    use super::theme;
+    let accent = match kind {
+        crate::host::ToastKind::Success => theme::TOAST_SUCCESS(),
+        crate::host::ToastKind::Error => theme::TOAST_ERROR(),
+        crate::host::ToastKind::Loading => theme::ACCENT(),
+    };
+    let base = theme::TOAST_BG();
+    let bg = Color { a: base.a, ..mix(base, accent, TOAST_BG_ACCENT_TINT) };
+    (bg, accent, accent)
+}
+
+/// Soft drop shadow behind the toast panel: translucent black rounded rects,
+/// each wider and fainter than the last, nudged down. Draw before the panel.
+pub fn toast_shadow_shapes(place: &ToastPlacement, cell_w: f32, cell_h: f32, px_scale: f32) -> Vec<ToastShape> {
+    let (x, y) = (place.panel_col * cell_w, place.panel_row * cell_h);
+    let (w, h) = (place.panel_cols * cell_w, place.panel_rows * cell_h);
+    [(2.0, 0.30), (6.0, 0.16), (12.0, 0.08)]
+        .into_iter()
+        .map(|(spread, alpha): (f32, f32)| {
+            let s = spread * px_scale;
+            ToastShape {
+                x: x - s,
+                y: y - s + 3.0 * px_scale,
+                w: w + 2.0 * s,
+                h: h + 2.0 * s,
+                color: Color::rgba(0.0, 0.0, 0.0, alpha),
+                radius_px: TOAST_CORNER_RADIUS_PX * px_scale + s,
+            }
+        })
+        .collect()
 }
 
 /// One dot of the loading spinner, centre and diameter in pixels.

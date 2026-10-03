@@ -1,0 +1,53 @@
+{
+ "reference": {
+  "buzz_crest_db": 15.7,
+  "buzz_kurtosis": 5.0,
+  "buzz_cycle_depth_db": 6.7,
+  "partial_roughness_db": [
+   1.62,
+   2.08,
+   2.46,
+   1.82,
+   0.6,
+   3.54,
+   3.62,
+   3.23,
+   3.93,
+   6.43
+  ]
+ },
+ "model": {
+  "buzz_crest_db": 19.8,
+  "buzz_kurtosis": 13.5,
+  "buzz_cycle_depth_db": 3.0,
+  "partial_roughness_db": [
+   1.54,
+   3.09,
+   5.43,
+   4.59,
+   3.41,
+   2.69,
+   1.61,
+   2.19,
+   4.74,
+   0.94
+  ]
+ },
+ "model_no_buzz": {
+  "buzz_crest_db": 14.6,
+  "buzz_kurtosis": 6.3,
+  "buzz_cycle_depth_db": 4.4,
+  "partial_roughness_db": [
+   0.92,
+   2.15,
+   4.03,
+   0.59,
+   0.32,
+   3.2,
+   0.22,
+   3.82,
+   4.11,
+   1.18
+  ]
+ }
+}

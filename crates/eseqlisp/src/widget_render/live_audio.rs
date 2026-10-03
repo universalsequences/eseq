@@ -17,6 +17,11 @@ pub enum LiveAudioSourceSelector {
         rack_slot: usize,
         slot: usize,
     },
+    /// A rack slot's own output (its slot panner), ahead of the slot's fx.
+    RackSlot {
+        index: usize,
+        rack_slot: usize,
+    },
     Bus {
         id: Option<u64>,
         index: Option<usize>,
@@ -47,6 +52,9 @@ impl LiveAudioSourceSelector {
                 rack_slot,
                 slot,
             } => format!("rack-effect:{index}:{rack_slot}:{slot}"),
+            LiveAudioSourceSelector::RackSlot { index, rack_slot } => {
+                format!("rack-slot:{index}:{rack_slot}")
+            }
             LiveAudioSourceSelector::Bus { id: Some(id), .. } => format!("bus-id:{id}"),
             LiveAudioSourceSelector::Bus {
                 id: None,
@@ -98,6 +106,15 @@ pub fn source_from_props(props: &HashMap<String, Value>) -> LiveAudioSourceSelec
     }
 }
 
+/// The `:source` selector when one is given; `None` (rather than Master) when
+/// the prop is missing or malformed.
+pub fn optional_source_from_props(props: &HashMap<String, Value>) -> Option<LiveAudioSourceSelector> {
+    match props.get("source")? {
+        Value::Map(map) => source_from_map(map),
+        _ => None,
+    }
+}
+
 pub fn tap_point_from_props(props: &HashMap<String, Value>) -> TapPoint {
     match prop_keyword(props, "tap-point").as_deref() {
         Some("pre-fx") | Some("pre") => TapPoint::PreFx,
@@ -146,6 +163,10 @@ fn source_from_map(
                 slot,
             })
         }
+        "rack-slot" => Some(LiveAudioSourceSelector::RackSlot {
+            index: usize_from_map(map, "index")?,
+            rack_slot: usize_from_map(map, "rack-slot")?,
+        }),
         "bus" => {
             let id = u64_from_map(map, "id");
             let index = usize_from_map(map, "index");

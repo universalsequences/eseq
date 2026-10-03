@@ -2348,6 +2348,16 @@ impl Runtime {
         self.invalidate_symbol_cache();
     }
 
+    /// Read a module for editor navigation without importing/evaluating it.
+    pub fn module_source_for_navigation(
+        &self,
+        module: &str,
+        importer: Option<&std::path::Path>,
+        overlays: Vec<SourceOverlay>,
+    ) -> Result<crate::hot_reload::LoadedSource, String> {
+        self.vm.source_manager.module_source_for_navigation(module, importer, overlays)
+    }
+
     pub fn exclude_module_alias_scan_root(&mut self, root: std::path::PathBuf) {
         self.vm.source_manager.exclude_module_alias_scan_root(root);
     }

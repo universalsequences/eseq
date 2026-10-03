@@ -4,6 +4,7 @@ pub mod button;
 pub mod cable;
 pub mod compressor_display;
 pub mod context_menu;
+pub mod device_meter;
 pub mod dropdown;
 pub mod eq8_editor;
 pub mod event_view;
@@ -19,6 +20,7 @@ pub mod label;
 pub mod lfo_curve;
 pub mod lane_preview;
 pub mod groove_lane;
+pub mod scale_editor;
 pub mod live_audio;
 pub mod linegraph;
 pub mod matrix;
@@ -57,6 +59,7 @@ pub mod virtual_vstack;
 pub mod vslider;
 pub mod vstack;
 pub mod drift_waveform;
+pub mod family_map;
 pub mod waveform;
 pub mod wavetable_viewer;
 pub(crate) mod wgsl;
@@ -1305,6 +1308,7 @@ static WIDGET_DEFINITIONS: &[&dyn WidgetDefinition] = &[
     &label::LABEL_WIDGET,
     &lane_preview::LANE_PREVIEW_WIDGET,
     &groove_lane::GROOVE_LANE_WIDGET,
+    &scale_editor::SCALE_EDITOR_WIDGET,
     &hslider::HSLIDER_WIDGET,
     &vslider::VSLIDER_WIDGET,
     &button::BUTTON_WIDGET,
@@ -1331,6 +1335,7 @@ static WIDGET_DEFINITIONS: &[&dyn WidgetDefinition] = &[
     &timeline::TIMELINE_CURSOR_MARKER_WIDGET,
     &transport_clock::TRANSPORT_CLOCK_WIDGET,
     &drift_waveform::DRIFT_WAVEFORM_WIDGET,
+    &family_map::FAMILY_MAP_WIDGET,
     &waveform::WAVEFORM_WIDGET,
     &wavetable_viewer::WAVETABLE_VIEWER_WIDGET,
     &sound_glyph::SOUND_GLYPH_WIDGET,
@@ -1342,6 +1347,7 @@ static WIDGET_DEFINITIONS: &[&dyn WidgetDefinition] = &[
     &roar_shaper::ROAR_SHAPER_WIDGET,
     &roar_filter::ROAR_FILTER_WIDGET,
     &gate_led::GATE_LED_WIDGET,
+    &device_meter::DEVICE_METER_WIDGET,
     &vstack::VSTACK_WIDGET,
     &wrap::WRAP_WIDGET,
     &hstack::HSTACK_WIDGET,

@@ -1068,6 +1068,20 @@ mod tests {
         Schema::parse(&read_value(text).expect("schema text")).expect("schema")
     }
 
+    #[test]
+    fn every_word_of_a_value_list_opens_its_choices() {
+        // (chord (I IV V7 (V II))): each member of the per-cycle list, and of
+        // the nested list, is a word with the same choices
+        let schema = schema(
+            "(forms (form chord (or (word I IV V7 V II Am7) (form seq (word :fig) (rest (word I IV V7 V II Am7))))))",
+        );
+        let value = value("((chord (I IV V7 (V II))))");
+        let slot = Slot::new(&schema, &value);
+        for path in [[0, 1, 0].as_slice(), &[0, 1, 1], &[0, 1, 2], &[0, 1, 3, 0], &[0, 1, 3, 1]] {
+            assert!(!slot.word_choices(path).is_empty(), "no choices at {path:?}");
+        }
+    }
+
     fn row_schema() -> Schema {
         schema(
             "(forms (word left right accent rev stac ghost swap)

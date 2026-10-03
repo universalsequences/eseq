@@ -262,11 +262,11 @@ pub(super) fn render_audio_block(
             continue;
         }
         let is_custom = instrument_type == InstrumentType::Custom;
-        let instrument_voice_config = data.scheduler_snapshot.tracks.get(kt.track)
-            .and_then(|track| track.instrument_slot.instrument_voice_config(&ScheduledInstrumentParams::new()));
-        let track_polyphonic = instrument_voice_config.map_or_else(|| data.state.pattern.track_params[kt.track].is_polyphonic(), |config| config.polyphonic);
-        let track_max_polyphony = instrument_voice_config.map_or_else(|| data.state.pattern.track_params[kt.track].get_max_polyphony(), |config| config.max_polyphony);
-        let mono_trigger = instrument_voice_config.map_or_else(|| data.state.pattern.track_params[kt.track].get_mono_trigger(), |config| config.mono_trigger);
+        let forces_mono = data.scheduler_snapshot.tracks.get(kt.track)
+            .is_some_and(|track| track.instrument_slot.instrument_forces_mono(&ScheduledInstrumentParams::new()));
+        let track_polyphonic = !forces_mono && data.state.pattern.track_params[kt.track].is_polyphonic();
+        let track_max_polyphony = if forces_mono { 1 } else { data.state.pattern.track_params[kt.track].get_max_polyphony() };
+        let mono_trigger = data.state.pattern.track_params[kt.track].get_mono_trigger();
         data.voice_pools[kt.track].polyphonic = track_polyphonic;
         let base_note_offset = f32::from_bits(
             data.state.pattern.instrument_base_note_offsets[kt.track].load(Ordering::Relaxed),
@@ -396,11 +396,10 @@ pub(super) fn render_audio_block(
                     None,
                     &default_params,
                 );
-                let allocation_config = data.scheduler_snapshot.tracks.get(kt.track)
-                    .and_then(|track| track.instrument_slot.instrument_voice_config(&key_locked_params));
-                let track_polyphonic = allocation_config.map_or(track_polyphonic, |config| config.polyphonic);
-                let track_max_polyphony = allocation_config.map_or(track_max_polyphony, |config| config.max_polyphony);
-                let mono_trigger = allocation_config.map_or(mono_trigger, |config| config.mono_trigger);
+                let locked_mono = data.scheduler_snapshot.tracks.get(kt.track)
+                    .is_some_and(|track| track.instrument_slot.instrument_forces_mono(&key_locked_params));
+                let track_polyphonic = track_polyphonic && !locked_mono;
+                let track_max_polyphony = if locked_mono { 1 } else { track_max_polyphony };
                 let free_patch = track_custom_run_mode(&data.state, kt.track)
                     == CustomInstrumentRunMode::FreePatch;
                 let allocation = if free_patch {

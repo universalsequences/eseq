@@ -194,6 +194,12 @@ pub(crate) fn sync_reactive_tick(
     ui_loop_stats: &mut UiLoopStats,
 ) {
     host_commands::export::poll(editor);
+    // Rack-slot instrument params resolve by name in the scheduler
+    // (`seq-emit :params`), which needs the registry's descriptors.
+    let registry = &app.editor.engine_registry;
+    ctx.shared.state.sync_engine_instrument_descriptors(registry.epoch(), || {
+        registry.instrument_descriptors().to_vec()
+    });
     // A published snapshot that changed a track's parameter set (instrument
     // swap, FX / MIDI FX chain, rack macros) re-judges open `plock` names.
     if super::param_words::refresh_param_word_source() {

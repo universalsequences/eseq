@@ -750,7 +750,28 @@ fn annotate_process_bound_params(
     }
 }
 
+/// The selected track's instrument panel entries, each stamped with the
+/// instrument's output meter selector (`meter`): the track itself, which the
+/// FX panel's `device-meter` resolves to the panner feeding the insert chain.
+/// Rack-slot entries keep their own `rack-slot` selector.
 pub(crate) fn build_instrument_panel_value(
+    app: &app::App,
+    track: usize,
+    selected: &Arc<Mutex<HashSet<usize>>>,
+) -> Value {
+    let value = build_instrument_panel_entries(app, track, selected);
+    if let Value::List(entries) = &value {
+        for entry in entries {
+            if let Value::Map(map) = &mut *entry.borrow_mut() {
+                map.entry("meter".to_string())
+                    .or_insert_with(|| device_meter_source("track", &[("index", track as f64)]));
+            }
+        }
+    }
+    value
+}
+
+fn build_instrument_panel_entries(
     app: &app::App,
     track: usize,
     selected: &Arc<Mutex<HashSet<usize>>>,

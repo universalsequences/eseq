@@ -568,6 +568,179 @@ pub(super) fn apply_track_params_batch_host_command(
 /// Mixer-strip ops stay on the targeted per-track invalidation (Mute/Solo
 /// already fan the effective-mute/color fields out to every track);
 /// everything else falls back to the full whole-track + ui-epoch resync.
+/// One scale-editor edit (`seq-tuning`) against the track's current tuning,
+/// recorded as a single `SetTrackTuning` (degree drags and morph coalesce).
+/// Payload: `{op, track, value?, degree?}`.
+pub(super) fn apply_track_tuning_host_command(
+    app: &mut app::App,
+    payload: &Value,
+) -> Result<(app::edit::EditOutcome, Option<usize>), String> {
+    use sequencer::scale::{self, TuningMode, MAX_SCALE_DEGREES};
+    let Value::Map(map) = payload else {
+        return Err("Scale edit payload was invalid".to_string());
+    };
+    let op = map_string(map, "op").ok_or_else(|| "Scale edit operation was missing".to_string())?;
+    let track = map_usize(map, "track").ok_or_else(|| "Scale edit track was invalid".to_string())?;
+    let params = app
+        .state
+        .pattern
+        .track_params
+        .get(track)
+        .ok_or_else(|| format!("Scale edit track {track} does not exist"))?;
+    let value = map_number(map, "value").filter(|value| value.is_finite()).unwrap_or(0.0) as f32;
+    let scale_idx = params.get_fts_scale();
+    let current = params.tuning();
+    let degree_count = scale::base_scale(scale_idx, &current)
+        .map(|(base, _)| base.len().min(MAX_SCALE_DEGREES))
+        .unwrap_or(0);
+    let degree = || {
+        map_usize(map, "degree")
+            .filter(|degree| *degree < degree_count)
+            .ok_or_else(|| "Scale edit degree was invalid".to_string())
+    };
+    let label = map_string(map, "label");
+    if op == "import-scl" {
+        return import_scala_scale(app, track, scale_idx, &current);
+    }
+    let mut tuning = current.clone();
+    let edit = match op.as_str() {
+        "root" => {
+            let root = match &label {
+                Some(label) => TUNING_ROOT_NAMES
+                    .iter()
+                    .position(|name| name.eq_ignore_ascii_case(label))
+                    .ok_or_else(|| format!("unknown scale root '{label}'"))?
+                    as i32,
+                None => value.round() as i32,
+            };
+            tuning.root = root.rem_euclid(12) as u8;
+            app::TuningEdit::Root
+        }
+        "morph" => {
+            tuning.morph = value.clamp(0.0, 1.0);
+            app::TuningEdit::Morph
+        }
+        "mode" => {
+            tuning.mode = match &label {
+                Some(label) => TuningMode::from_label(label)
+                    .ok_or_else(|| format!("unknown scale mapping '{label}'"))?,
+                None if value != 0.0 => TuningMode::Map,
+                None => TuningMode::Snap,
+            };
+            app::TuningEdit::Mode
+        }
+        "offset" => {
+            let degree = degree()?;
+            tuning.offsets[degree] = value.clamp(-1200.0, 1200.0);
+            app::TuningEdit::Offset(degree)
+        }
+        "clear" => {
+            let degree = degree()?;
+            tuning.offsets[degree] = 0.0;
+            app::TuningEdit::ClearDegree(degree)
+        }
+        "toggle" => {
+            let degree = degree()?;
+            tuning.disabled ^= 1 << degree;
+            app::TuningEdit::ToggleDegree(degree)
+        }
+        "reset" => {
+            tuning = tuning.without_degree_edits();
+            app::TuningEdit::Reset
+        }
+        "just" => {
+            tuning = scale::justify(scale_idx, &current);
+            app::TuningEdit::Justify
+        }
+        "rand" => {
+            let seed = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_nanos() as u64)
+                .unwrap_or(0x9E37_79B9);
+            tuning = scale::randomize(scale_idx, &current, value.abs().min(600.0), seed);
+            app::TuningEdit::Randomize
+        }
+        "stretch" => {
+            tuning = scale::stretch(scale_idx, &current, value.clamp(-600.0, 600.0));
+            app::TuningEdit::Stretch
+        }
+        _ => return Err(format!("unknown scale edit operation {op}")),
+    };
+    if tuning == current {
+        return Ok((app::edit::EditOutcome::NoOp, Some(track)));
+    }
+    app::try_apply_command(
+        app,
+        app::AppCommand::SetTrackTuning { track, tuning: Box::new(tuning), scale_idx: None, edit },
+    )
+    .map(|outcome| (outcome, Some(track)))
+    .map_err(|error| format!("could not apply scale edit: {error:?}"))
+}
+
+/// Scale editor `.scl…`: pick a Scala file and make it the track's scale.
+/// Turns the scale on when it was Off; both land as one undo step.
+fn import_scala_scale(
+    app: &mut app::App,
+    track: usize,
+    scale_idx: usize,
+    current: &sequencer::scale::TrackTuning,
+) -> Result<(app::edit::EditOutcome, Option<usize>), String> {
+    let Some(path) = choose_scala_path()? else {
+        return Ok((app::edit::EditOutcome::NoOp, Some(track)));
+    };
+    let text = std::fs::read_to_string(&path)
+        .map_err(|error| format!("could not read {}: {error}", path.display()))?;
+    let stem = path
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "Scala".to_string());
+    let custom = sequencer::scale::parse_scl(&text, &stem)
+        .map_err(|error| format!("{}: {error}", path.display()))?;
+    let scale_idx = if scale_idx == sequencer::scale::SCALE_OFF { 1 } else { scale_idx };
+    let tuning = scala_tuning(current, custom);
+    app::try_apply_command(
+        app,
+        app::AppCommand::SetTrackTuning {
+            track,
+            tuning: Box::new(tuning),
+            scale_idx: Some(scale_idx),
+            edit: app::TuningEdit::ImportScala,
+        },
+    )
+    .map(|outcome| (outcome, Some(track)))
+    .map_err(|error| format!("could not import Scala scale: {error:?}"))
+}
+
+/// The tuning an imported scale starts from: root and morph kept, degree
+/// edits dropped, and Map for scales that are not 12-or-fewer-note.
+fn scala_tuning(
+    current: &sequencer::scale::TrackTuning,
+    custom: sequencer::scale::CustomScale,
+) -> sequencer::scale::TrackTuning {
+    use sequencer::scale::{TrackTuning, TuningMode};
+    TrackTuning {
+        root: current.root,
+        morph: current.morph,
+        mode: if custom.cents.len() <= 12 && (custom.period - 1200.0).abs() < 0.5 {
+            TuningMode::Snap
+        } else {
+            TuningMode::Map
+        },
+        custom: Some(std::sync::Arc::new(custom)),
+        ..TrackTuning::DEFAULT
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn choose_scala_path() -> Result<Option<std::path::PathBuf>, String> {
+    crate::application_menu::choose_scala_path()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn choose_scala_path() -> Result<Option<std::path::PathBuf>, String> {
+    Err("Scala import needs the macOS file picker".to_string())
+}
+
 pub(super) fn slice3_track_mixer_invalidation(payload: &Value) -> Option<TrackMixerInvalidation> {
     let Value::Map(map) = payload else {
         return None;

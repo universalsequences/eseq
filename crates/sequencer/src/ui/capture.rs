@@ -210,6 +210,10 @@ struct CaptureTrackSpec {
     /// Open the Filter Table response editor on this track's Filter Table
     /// slot after effects install (eseq-dtx.8 visual review).
     filter_table_editor: bool,
+    /// `:scale "Just Major"`: the track's fit-to-scale scale by name.
+    scale: Option<usize>,
+    /// `:scale-offsets ((2 -14) (4 20))`: `(degree cents)` detunes.
+    scale_offsets: Vec<(usize, f32)>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -475,6 +479,8 @@ fn parse_capture_track(expression: &Expression) -> Result<CaptureTrackSpec, Stri
     let mut audio_fx = Vec::new();
     let mut rack_slot_audio_fx = Vec::new();
     let mut filter_table_editor = false;
+    let mut scale = None;
+    let mut scale_offsets = Vec::new();
     while cursor < items.len() {
         let option = expression_name(items.get(cursor))
             .ok_or_else(|| format!("expected a track option at item {}", cursor + 1))?;
@@ -528,6 +534,26 @@ fn parse_capture_track(expression: &Expression) -> Result<CaptureTrackSpec, Stri
                 filter_table_editor = expression_bool(value)
                     .ok_or_else(|| ":filter-table-editor expects true or false".to_string())?;
             }
+            "scale" => {
+                let name = expression_string(Some(value))
+                    .ok_or_else(|| ":scale expects a scale name".to_string())?;
+                scale = Some(
+                    sequencer::scale::SCALES
+                        .iter()
+                        .position(|scale| scale.name.eq_ignore_ascii_case(name))
+                        .ok_or_else(|| format!("unknown scale {name:?}"))?,
+                );
+            }
+            "scale-offsets" => {
+                scale_offsets = parse_capture_steps(value)
+                    .map_err(|_| ":scale-offsets expects (degree cents) pairs".to_string())?;
+                if let Some((degree, _)) = scale_offsets
+                    .iter()
+                    .find(|(degree, _)| *degree >= sequencer::scale::MAX_SCALE_DEGREES)
+                {
+                    return Err(format!(":scale-offsets degree {degree} is out of range"));
+                }
+            }
             other => return Err(format!("unsupported track option :{other}")),
         }
         cursor += 2;
@@ -557,6 +583,8 @@ fn parse_capture_track(expression: &Expression) -> Result<CaptureTrackSpec, Stri
         audio_fx,
         rack_slot_audio_fx,
         filter_table_editor,
+        scale,
+        scale_offsets,
     })
 }
 
@@ -694,6 +722,15 @@ fn apply_capture_project(app: &mut app::App, project: &CaptureProjectSpec) -> Re
         app.state.pattern.track_params[track].set_solo(spec.solo);
         if let Some(num_steps) = spec.num_steps {
             app.state.pattern.track_params[track].set_num_steps(num_steps);
+        }
+        if let Some(scale_idx) = spec.scale {
+            let params = &app.state.pattern.track_params[track];
+            let mut tuning = params.tuning().for_scale(scale_idx);
+            for &(degree, cents) in &spec.scale_offsets {
+                tuning.offsets[degree] = cents;
+            }
+            params.set_fts_scale(scale_idx);
+            params.set_tuning(tuning);
         }
         for &(step, transpose) in &spec.steps {
             app.state.pattern.patterns[track].set_step_active(step, true);
@@ -1634,6 +1671,8 @@ mod tests {
                 audio_fx: vec!["filter".to_string()],
                 rack_slot_audio_fx: vec![],
                 filter_table_editor: false,
+                scale: None,
+                scale_offsets: vec![],
             }
         );
         assert_eq!(

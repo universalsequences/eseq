@@ -130,7 +130,12 @@ fn digidrift_preview_layout_live_bindings_and_idle_probe() {
     assert!(r.col >= panel.rect.col && r.row >= panel.rect.row);
     assert!(r.col + r.width <= panel.rect.col + panel.rect.width);
     assert!(r.row + r.height <= panel.rect.row + panel.rect.height);
-    for prop in DRIFT_WAVEFORM_WIDGET.bindable_props() {
+    // `release` is a per-UI constant and `noise-on` exists only in release 2.
+    for prop in DRIFT_WAVEFORM_WIDGET
+        .bindable_props()
+        .iter()
+        .filter(|prop| !matches!(**prop, "release" | "noise-on"))
+    {
         assert!(
             matches!(node.props.get(*prop), Some(Value::ReactiveRef { .. })),
             "{prop}"

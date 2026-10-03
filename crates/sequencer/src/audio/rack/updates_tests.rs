@@ -90,6 +90,40 @@ fn borrowed_rack_values_match_macro_lock_and_live_precedence() {
     }
 }
 
+fn per_hit_params() -> ScheduledRackSlotParams {
+    [
+        ScheduledRackSlotParam {
+            slot: 0, target: ScheduledRackSlotTarget::Instrument { param_idx: 0 }, value: 7.0,
+        },
+        ScheduledRackSlotParam {
+            slot: 0, target: ScheduledRackSlotTarget::Slot(RackSlotParam::Gain), value: 1.5,
+        },
+        ScheduledRackSlotParam {
+            slot: 1, target: ScheduledRackSlotTarget::Slot(RackSlotParam::Pan), value: -0.5,
+        },
+    ].into_iter().collect()
+}
+
+#[test]
+fn per_hit_slot_values_beat_stored_locks_and_macros_for_that_hit_only() {
+    let rack = mapped_rack();
+    let hits = per_hit_params();
+    let plain = RackParams::at_step(&rack, 4, [None; 8], [None; 8]);
+    let hit = RackParams::at_step(&rack, 4, [None; 8], [None; 8]).with_hit_params(&hits);
+
+    // Slot 0's instrument param 0 carries a stored lock (42) and macro
+    // mappings; slot 0's gain is locked to 0.37.
+    assert_eq!(plain.instrument(0).value(0, 0.0), 42.0);
+    assert_eq!(hit.instrument(0).value(0, 0.0), 7.0);
+    assert_eq!(hit.slot_params(0).gain, 1.5);
+    assert_eq!(hit.slot_params(1).pan, -0.5);
+    // Everything the hit does not name resolves as before.
+    assert_eq!(hit.instrument(1).value(0, 0.0), plain.instrument(1).value(0, 0.0));
+    assert_eq!(hit.slot_params(0).pan, plain.slot_params(0).pan);
+    assert_eq!(hit.slot_params(1).gain, plain.slot_params(1).gain);
+    assert_eq!(hit.effect(0, 0).value(0, 0.0), plain.effect(0, 0).value(0, 0.0));
+}
+
 #[test]
 fn rack_resolution_does_not_allocate_or_free_even_at_maximum_parameter_count() {
     let mut rack = mapped_rack();
@@ -102,9 +136,11 @@ fn rack_resolution_does_not_allocate_or_free_even_at_maximum_parameter_count() {
     let (_, reference) = crate::test_alloc::measure(|| drop(std::hint::black_box(rack.clone())));
     assert!(reference.allocations > 100 && reference.deallocations > 100,
         "negative control must detect the former deep copy: {reference:?}");
+    let hits = per_hit_params();
     let (_, counts) = crate::test_alloc::measure(|| {
         for view in [
             RackParams::at_step(&rack, 4, [None; 8], [None; 8]),
+            RackParams::at_step(&rack, 4, [None; 8], [None; 8]).with_hit_params(&hits),
             RackParams::live(&rack, [None; 8]),
             RackParams::for_update(&rack, Some(4), [None; 8]),
             RackParams::for_update(&rack, None, [Some(0.7); 8]),

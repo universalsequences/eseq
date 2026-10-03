@@ -1535,6 +1535,50 @@ static void rebuild_invalid_io_caches(LiveGraph *lg, int nframes) {
   }
 }
 
+static inline float block_abs_peak(const float *buf, int nframes) {
+  float peak = 0.0f;
+  for (int i = 0; i < nframes; i++) {
+    float v = fabsf(buf[i]);
+    peak = v > peak ? v : peak;
+  }
+  // NaN/inf would poison the bit-pattern max ordering.
+  return isfinite(peak) ? peak : 0.0f;
+}
+
+static inline void meter_accumulate(_Atomic uint32_t *bits, float peak) {
+  uint32_t candidate;
+  memcpy(&candidate, &peak, sizeof candidate);
+  uint32_t current = atomic_load_explicit(bits, memory_order_relaxed);
+  // Single writer per slot; the reader only exchanges to zero, so a lost
+  // race just carries one block's peak into the next read.
+  if (candidate > current)
+    atomic_store_explicit(bits, candidate, memory_order_relaxed);
+}
+
+// Node output meter (see NodeMeterSlot). The owner check drops writes from a
+// node whose slot was released and reclaimed before the clear edit applied.
+// Unconnected outputs alias the shared scratch buffer, which other workers
+// write concurrently, so they read as silence.
+static void record_node_output_meter(LiveGraph *lg, RTNode *node, int nid,
+                                     float **outPtrs, int nframes) {
+  int slot = node->meter_slot - 1;
+  if (slot < 0 || slot >= AP_NODE_METER_CAPACITY || !outPtrs)
+    return;
+  NodeMeterSlot *meter = &lg->node_meters[slot];
+  if (atomic_load_explicit(&meter->node_id, memory_order_relaxed) != nid)
+    return;
+  const float *left = outPtrs[0];
+  const float *right = node->nOutputs > 1 ? outPtrs[1] : left;
+  float peak_l = left && left != lg->scratch_null
+                     ? block_abs_peak(left, nframes) : 0.0f;
+  float peak_r = right == left ? peak_l
+                 : right && right != lg->scratch_null
+                     ? block_abs_peak(right, nframes) : 0.0f;
+  meter_accumulate(&meter->peak_l_bits, peak_l);
+  meter_accumulate(&meter->peak_r_bits, peak_r);
+  atomic_fetch_add_explicit(&meter->blocks, 1, memory_order_relaxed);
+}
+
 void bind_and_run_live(LiveGraph *lg, int nid, int nframes) {
   RTNode *node = &lg->nodes[nid];
 
@@ -1582,6 +1626,8 @@ void bind_and_run_live(LiveGraph *lg, int nid, int nframes) {
 #else
     (void)profile_start;
 #endif
+    if (node->meter_slot > 0 && node->nOutputs > 0 && lg->node_meters)
+      record_node_output_meter(lg, node, nid, outPtrs, nframes);
   }
 
   // Clear thread-local context

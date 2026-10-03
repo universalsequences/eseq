@@ -1,0 +1,2535 @@
+{
+ "compiler_sha256": "09b3f28c08e0bff871f8abdbdff8c9886e1dcba7cf321d7c14e9a1ab0d13ce4e",
+ "render_rate": 48000,
+ "sample_rate": 32500,
+ "method": "one voice re-plays the whole sample as retriggers at the recorded onsets; each stroke window scored against the high-passed left channel",
+ "summary": {
+  "0-5ms": {
+   "installed_mean_abs_level_error_db": 0.94,
+   "all_mean_abs_level_error_db": 1.48,
+   "all_mean_band_error_db": [
+    -2.3,
+    -0.34,
+    -2.43,
+    1.63,
+    0.87,
+    1.47,
+    4.92
+   ]
+  },
+  "5-15ms": {
+   "installed_mean_abs_level_error_db": 1.31,
+   "all_mean_abs_level_error_db": 1.34,
+   "all_mean_band_error_db": [
+    -1.28,
+    -0.39,
+    1.27,
+    0.62,
+    0.19,
+    1.49,
+    0.53
+   ]
+  },
+  "15-30ms": {
+   "installed_mean_abs_level_error_db": 0.78,
+   "all_mean_abs_level_error_db": 1.06,
+   "all_mean_band_error_db": [
+    -0.41,
+    -0.71,
+    -0.52,
+    0.0,
+    0.13,
+    0.04,
+    0.22
+   ]
+  },
+  "30-60ms": {
+   "installed_mean_abs_level_error_db": 0.41,
+   "all_mean_abs_level_error_db": 0.96,
+   "all_mean_band_error_db": [
+    -1.1,
+    -0.6,
+    -0.34,
+    0.23,
+    -0.11,
+    -0.72,
+    -0.17
+   ]
+  },
+  "60-150ms": {
+   "installed_mean_abs_level_error_db": 0.19,
+   "all_mean_abs_level_error_db": 0.65,
+   "all_mean_band_error_db": [
+    -1.94,
+    -1.68,
+    -0.58,
+    -0.15,
+    -0.23,
+    -0.4,
+    -0.37
+   ]
+  },
+  "150-300ms": {
+   "installed_mean_abs_level_error_db": 0.48,
+   "all_mean_abs_level_error_db": 1.08,
+   "all_mean_band_error_db": [
+    -3.13,
+    -2.47,
+    -0.08,
+    -0.26,
+    -0.48,
+    -0.37,
+    1.39
+   ]
+  }
+ },
+ "hits": [
+  {
+   "index": 0,
+   "onset_s": 0.39215,
+   "key": 63,
+   "velocity": 1.0,
+   "substituted": true,
+   "next_stroke_ms": 671.8,
+   "windows": [
+    {
+     "ms": [
+      0,
+      5
+     ],
+     "level_error_db": 2.12,
+     "band_error_db": [
+      -2.34,
+      2.79,
+      -2.73,
+      0.14,
+      3.06,
+      1.55,
+      3.29
+     ],
+     "median_audible_band_error_db": 2.73
+    },
+    {
+     "ms": [
+      5,
+      15
+     ],
+     "level_error_db": -0.21,
+     "band_error_db": [
+      -3.79,
+      -2.59,
+      5.5,
+      1.91,
+      -1.8,
+      1.69,
+      0.13
+     ],
+     "median_audible_band_error_db": 1.91
+    },
+    {
+     "ms": [
+      15,
+      30
+     ],
+     "level_error_db": -1.1,
+     "band_error_db": [
+      -2.63,
+      0.43,
+      -1.42,
+      1.65,
+      -2.77,
+      1.59,
+      -0.01
+     ],
+     "median_audible_band_error_db": 1.59
+    },
+    {
+     "ms": [
+      30,
+      60
+     ],
+     "level_error_db": -1.78,
+     "band_error_db": [
+      -7.24,
+      2.32,
+      -1.22,
+      1.76,
+      -2.38,
+      0.73,
+      -0.46
+     ],
+     "median_audible_band_error_db": 1.76
+    },
+    {
+     "ms": [
+      60,
+      150
+     ],
+     "level_error_db": -1.82,
+     "band_error_db": [
+      -4.56,
+      -2.44,
+      1.17,
+      -2.15,
+      -1.81,
+      1.88,
+      -5.6
+     ],
+     "median_audible_band_error_db": 2.15
+    },
+    {
+     "ms": [
+      150,
+      300
+     ],
+     "level_error_db": -2.36,
+     "band_error_db": [
+      -7.45,
+      -2.63,
+      1.61,
+      -2.25,
+      -1.59,
+      2.68,
+      -6.31
+     ],
+     "median_audible_band_error_db": 2.63
+    }
+   ]
+  },
+  {
+   "index": 1,
+   "onset_s": 1.06397,
+   "key": 69,
+   "velocity": 0.818,
+   "substituted": true,
+   "next_stroke_ms": 354.1,
+   "windows": [
+    {
+     "ms": [
+      0,
+      5
+     ],
+     "level_error_db": 2.8,
+     "band_error_db": [
+      -2.07,
+      -0.15,
+      3.96,
+      5.07,
+      0.89,
+      3.66,
+      8.0
+     ],
+     "median_audible_band_error_db": 3.81
+    },
+    {
+     "ms": [
+      5,
+      15
+     ],
+     "level_error_db": 1.95,
+     "band_error_db": [
+      -5.61,
+      3.18,
+      1.92,
+      -0.68,
+      1.34,
+      2.41,
+      5.3
+     ],
+     "median_audible_band_error_db": 2.17
+    },
+    {
+     "ms": [
+      15,
+      30
+     ],
+     "level_error_db": 0.21,
+     "band_error_db": [
+      2.82,
+      -4.21,
+      3.36,
+      2.07,
+      1.99,
+      -1.95,
+      1.43
+     ],
+     "median_audible_band_error_db": 2.03
+    },
+    {
+     "ms": [
+      30,
+      60
+     ],
+     "level_error_db": 0.69,
+     "band_error_db": [
+      -0.2,
+      -3.26,
+      1.5,
+      -0.28,
+      3.55,
+      -3.25,
+      -1.21
+     ],
+     "median_audible_band_error_db": 1.5
+    },
+    {
+     "ms": [
+      60,
+      150
+     ],
+     "level_error_db": -1.15,
+     "band_error_db": [
+      -2.35,
+      -2.63,
+      2.46,
+      -3.15,
+      0.6,
+      -3.68,
+      -2.53
+     ],
+     "median_audible_band_error_db": 2.53
+    },
+    {
+     "ms": [
+      150,
+      300
+     ],
+     "level_error_db": -1.68,
+     "band_error_db": [
+      -2.19,
+      -5.09,
+      2.22,
+      0.36,
+      0.13,
+      -7.64,
+      -5.2
+     ],
+     "median_audible_band_error_db": 2.22
+    }
+   ]
+  },
+  {
+   "index": 2,
+   "onset_s": 1.41803,
+   "key": 61,
+   "velocity": 0.695,
+   "substituted": true,
+   "next_stroke_ms": 616.6,
+   "windows": [
+    {
+     "ms": [
+      0,
+      5
+     ],
+     "level_error_db": -0.59,
+     "band_error_db": [
+      -6.99,
+      -3.9,
+      -2.17,
+      -0.45,
+      -1.78,
+      -0.1,
+      2.92
+     ],
+     "median_audible_band_error_db": 2.17
+    },
+    {
+     "ms": [
+      5,
+      15
+     ],
+     "level_error_db": -1.69,
+     "band_error_db": [
+      -2.62,
+      -2.7,
+      -6.88,
+      -1.64,
+      -4.35,
+      0.54,
+      -0.48
+     ],
+     "median_audible_band_error_db": 2.62
+    },
+    {
+     "ms": [
+      15,
+      30
+     ],
+     "level_error_db": -2.08,
+     "band_error_db": [
+      -0.31,
+      -2.33,
+      -5.47,
+      -4.4,
+      -2.15,
+      -2.49,
+      -5.17
+     ],
+     "median_audible_band_error_db": 2.49
+    },
+    {
+     "ms": [
+      30,
+      60
+     ],
+     "level_error_db": -3.27,
+     "band_error_db": [
+      -2.13,
+      -1.33,
+      -4.32,
+      3.44,
+      -4.34,
+      -3.67,
+      -5.56
+     ],
+     "median_audible_band_error_db": 3.67
+    },
+    {
+     "ms": [
+      60,
+      150
+     ],
+     "level_error_db": -3.52,
+     "band_error_db": [
+      -2.28,
+      -2.37,
+      -3.83,
+      -0.47,
+      -5.03,
+      -4.21,
+      -1.74
+     ],
+     "median_audible_band_error_db": 2.37
+    },
+    {
+     "ms": [
+      150,
+      300
+     ],
+     "level_error_db": -4.45,
+     "band_error_db": [
+      -3.96,
+      -5.01,
+      -3.89,
+      -1.18,
+      -5.69,
+      -4.57,
+      2.1
+     ],
+     "median_audible_band_error_db": 3.96
+    }
+   ]
+  },
+  {
+   "index": 3,
+   "onset_s": 2.03462,
+   "key": 63,
+   "velocity": 1.0,
+   "substituted": true,
+   "next_stroke_ms": 341.9,
+   "windows": [
+    {
+     "ms": [
+      0,
+      5
+     ],
+     "level_error_db": -0.14,
+     "band_error_db": [
+      -3.05,
+      -1.28,
+      -3.97,
+      1.43,
+      -1.48,
+      1.1,
+      -0.25
+     ],
+     "median_audible_band_error_db": 1.43
+    },
+    {
+     "ms": [
+      5,
+      15
+     ],
+     "level_error_db": -1.82,
+     "band_error_db": [
+      -4.24,
+      -5.14,
+      -0.42,
+      -0.68,
+      -2.78,
+      -0.09,
+      -1.59
+     ],
+     "median_audible_band_error_db": 1.59
+    },
+    {
+     "ms": [
+      15,
+      30
+     ],
+     "level_error_db": -2.69,
+     "band_error_db": [
+      -4.05,
+      -1.7,
+      -3.36,
+      -1.11,
+      -2.21,
+      -3.45,
+      -1.05
+     ],
+     "median_audible_band_error_db": 2.21
+    },
+    {
+     "ms": [
+      30,
+      60
+     ],
+     "level_error_db": -1.97,
+     "band_error_db": [
+      -5.28,
+      2.2,
+      -1.74,
+      -0.26,
+      -1.56,
+      -2.66,
+      0.54
+     ],
+     "median_audible_band_error_db": 1.74
+    },
+    {
+     "ms": [
+      60,
+      150
+     ],
+     "level_error_db": -1.04,
+     "band_error_db": [
+      -3.2,
+      -3.51,
+      -1.84,
+      -1.32,
+      -0.39,
+      0.04,
+      -2.41
+     ],
+     "median_audible_band_error_db": 1.84
+    },
+    {
+     "ms": [
+      150,
+      300
+     ],
+     "level_error_db": -2.82,
+     "band_error_db": [
+      -7.93,
+      -3.84,
+      -1.6,
+      -2.24,
+      -1.56,
+      -0.28,
+      -2.3
+     ],
+     "median_audible_band_error_db": 2.24
+    }
+   ]
+  },
+  {
+   "index": 4,
+   "onset_s": 2.37655,
+   "key": 67,
+   "velocity": 1.0,
+   "substituted": true,
+   "next_stroke_ms": 662.5,
+   "windows": [
+    {
+     "ms": [
+      0,
+      5
+     ],
+     "level_error_db": 3.62,
+     "band_error_db": [
+      -4.8,
+      1.78,
+      0.41,
+      5.51,
+      3.81,
+      3.21,
+      11.19
+     ],
+     "median_audible_band_error_db": 3.81
+    },
+    {
+     "ms": [
+      5,
+      15
+     ],
+     "level_error_db": 1.12,
+     "band_error_db": [
+      2.93,
+      3.0,
+      -3.12,
+      -0.93,
+      2.13,
+      1.11,
+      2.73
+     ],
+     "median_audible_band_error_db": 2.73
+    },
+    {
+     "ms": [
+      15,
+      30
+     ],
+     "level_error_db": 0.15,
+     "band_error_db": [
+      3.36,
+      -3.93,
+      -0.51,
+      -3.65,
+      -1.15,
+      0.91,
+      2.61
+     ],
+     "median_audible_band_error_db": 2.61
+    },
+    {
+     "ms": [
+      30,
+      60
+     ],
+     "level_error_db": -1.36,
+     "band_error_db": [
+      5.06,
+      -4.47,
+      -0.99,
+      -4.9,
+      -1.44,
+      -1.14,
+      0.78
+     ],
+     "median_audible_band_error_db": 1.44
+    },
+    {
+     "ms": [
+      60,
+      150
+     ],
+     "level_error_db": 0.08,
+     "band_error_db": [
+      2.24,
+      -2.16,
+      1.67,
+      -0.18,
+      0.09,
+      -0.19,
+      0.69
+     ],
+     "median_audible_band_error_db": 0.69
+    },
+    {
+     "ms": [
+      150,
+      300
+     ],
+     "level_error_db": 0.15,
+     "band_error_db": [
+      -2.42,
+      -1.02,
+      3.73,
+      -2.05,
+      -0.74,
+      1.43,
+      1.83
+     ],
+     "median_audible_band_error_db": 1.83
+    }
+   ]
+  },
+  {
+   "index": 5,
+   "onset_s": 3.03902,
+   "key": 61,
+   "velocity": 1.0,
+   "substituted": false,
+   "next_stroke_ms": 455.9,
+   "windows": [
+    {
+     "ms": [
+      0,
+      5
+     ],
+     "level_error_db": 4.03,
+     "band_error_db": [
+      -3.51,
+      -1.35,
+      0.25,
+      1.78,
+      4.67,
+      4.42,
+      4.78
+     ],
+     "median_audible_band_error_db": 3.51
+    },
+    {
+     "ms": [
+      5,
+      15
+     ],
+     "level_error_db": 2.69,
+     "band_error_db": [
+      1.28,
+      -0.46,
+      0.0,
+      0.15,
+      0.74,
+      3.96,
+      -1.0
+     ],
+     "median_audible_band_error_db": 0.74
+    },
+    {
+     "ms": [
+      15,
+      30
+     ],
+     "level_error_db": 2.65,
+     "band_error_db": [
+      2.1,
+      -2.0,
+      -5.37,
+      1.01,
+      2.33,
+      3.35,
+      0.63
+     ],
+     "median_audible_band_error_db": 2.1
+    },
+    {
+     "ms": [
+      30,
+      60
+     ],
+     "level_error_db": 0.09,
+     "band_error_db": [
+      -0.04,
+      -1.55,
+      -0.62,
+      0.31,
+      0.23,
+      0.12,
+      -0.24
+     ],
+     "median_audible_band_error_db": 0.24
+    },
+    {
+     "ms": [
+      60,
+      150
+     ],
+     "level_error_db": -0.28,
+     "band_error_db": [
+      -0.19,
+      -0.66,
+      -0.4,
+      -0.07,
+      0.21,
+      -0.62,
+      -0.05
+     ],
+     "median_audible_band_error_db": 0.21
+    },
+    {
+     "ms": [
+      150,
+      300
+     ],
+     "level_error_db": -0.15,
+     "band_error_db": [
+      -1.61,
+      -1.7,
+      0.74,
+      -0.37,
+      -0.53,
+      0.31,
+      5.6
+     ],
+     "median_audible_band_error_db": 0.74
+    }
+   ]
+  },
+  {
+   "index": 6,
+   "onset_s": 3.49492,
+   "key": 63,
+   "velocity": 1.0,
+   "substituted": true,
+   "next_stroke_ms": 154.7,
+   "windows": [
+    {
+     "ms": [
+      0,
+      5
+     ],
+     "level_error_db": -1.57,
+     "band_error_db": [
+      -3.13,
+      -2.02,
+      -3.25,
+      3.8,
+      -2.85,
+      -1.12,
+      3.28
+     ],
+     "median_audible_band_error_db": 3.13
+    },
+    {
+     "ms": [
+      5,
+      15
+     ],
+     "level_error_db": -1.91,
+     "band_error_db": [
+      -4.19,
+      -3.68,
+      5.43,
+      1.01,
+      -2.31,
+      -1.46,
+      1.11
+     ],
+     "median_audible_band_error_db": 2.31
+    },
+    {
+     "ms": [
+      15,
+      30
+     ],
+     "level_error_db": -2.5,
+     "band_error_db": [
+      -3.12,
+      -0.54,
+      -1.95,
+      -1.19,
+      -2.42,
+      -3.29,
+      3.68
+     ],
+     "median_audible_band_error_db": 2.42
+    },
+    {
+     "ms": [
+      30,
+      60
+     ],
+     "level_error_db": -0.67,
+     "band_error_db": [
+      -3.68,
+      1.0,
+      0.46,
+      -0.33,
+      -0.35,
+      -0.82,
+      3.12
+     ],
+     "median_audible_band_error_db": 0.82
+    },
+    {
+     "ms": [
+      60,
+      150
+     ],
+     "level_error_db": 0.19,
+     "band_error_db": [
+      -2.62,
+      -1.97,
+      -1.8,
+      0.03,
+      1.1,
+      1.27,
+      2.44
+     ],
+     "median_audible_band_error_db": 1.8
+    },
+    {
+     "ms": [
+      150,
+      300
+     ],
+     "level_error_db": 0.42,
+     "band_error_db": [
+      -4.75,
+      -1.13,
+      -0.49,
+      2.98,
+      1.27,
+      0.6,
+      2.3
+     ],
+     "median_audible_band_error_db": 1.27
+    }
+   ]
+  },
+  {
+   "index": 7,
+   "onset_s": 3.64963,
+   "key": 63,
+   "velocity": 1.0,
+   "substituted": false,
+   "next_stroke_ms": 327.5,
+   "windows": [
+    {
+     "ms": [
+      0,
+      5
+     ],
+     "level_error_db": 0.07,
+     "band_error_db": [
+      -5.32,
+      -0.46,
+      -1.54,
+      1.19,
+      -1.24,
+      0.83,
+      4.21
+     ],
+     "median_audible_band_error_db": 1.24
+    },
+    {
+     "ms": [
+      5,
+      15
+     ],
+     "level_error_db": 0.77,
+     "band_error_db": [
+      -4.57,
+      -2.1,
+      7.12,
+      4.6,
+      2.25,
+      1.04,
+      0.25
+     ],
+     "median_audible_band_error_db": 2.25
+    },
+    {
+     "ms": [
+      15,
+      30
+     ],
+     "level_error_db": -0.33,
+     "band_error_db": [
+      -2.88,
+      0.31,
+      -3.73,
+      1.29,
+      0.83,
+      -1.43,
+      0.44
+     ],
+     "median_audible_band_error_db": 1.29
+    },
+    {
+     "ms": [
+      30,
+      60
+     ],
+     "level_error_db": 1.16,
+     "band_error_db": [
+      -6.92,
+      -1.21,
+      1.75,
+      4.23,
+      2.55,
+      0.57,
+      -0.99
+     ],
+     "median_audible_band_error_db": 1.75
+    },
+    {
+     "ms": [
+      60,
+      150
+     ],
+     "level_error_db": 0.63,
+     "band_error_db": [
+      -4.69,
+      -1.67,
+      -1.32,
+      3.4,
+      2.54,
+      1.62,
+      -0.75
+     ],
+     "median_audible_band_error_db": 1.67
+    },
+    {
+     "ms": [
+      150,
+      300
+     ],
+     "level_error_db": 0.22,
+     "band_error_db": [
+      -6.27,
+      -1.38,
+      -1.84,
+      3.41,
+      2.65,
+      1.69,
+      1.17
+     ],
+     "median_audible_band_error_db": 1.84
+    }
+   ]
+  },
+  {
+   "index": 8,
+   "onset_s": 3.97711,
+   "key": 68,
+   "velocity": 1.0,
+   "substituted": false,
+   "next_stroke_ms": 639.5,
+   "windows": [
+    {
+     "ms": [
+      0,
+      5
+     ],
+     "level_error_db": 1.31,
+     "band_error_db": [
+      0.67,
+      0.49,
+      -3.24,
+      -2.69,
+      0.76,
+      1.19,
+      11.63
+     ],
+     "median_audible_band_error_db": 1.94
+    },
+    {
+     "ms": [
+      5,
+      15
+     ],
+     "level_error_db": 2.36,
+     "band_error_db": [
+      1.25,
+      2.22,
+      -2.16,
+      -0.11,
+      1.29,
+      2.35,
+      8.55
+     ],
+     "median_audible_band_error_db": 2.16
+    },
+    {
+     "ms": [
+      15,
+      30
+     ],
+     "level_error_db": 1.12,
+     "band_error_db": [
+      0.51,
+      -4.65,
+      -0.78,
+      1.37,
+      0.52,
+      1.43,
+      3.65
+     ],
+     "median_audible_band_error_db": 1.37
+    },
+    {
+     "ms": [
+      30,
+      60
+     ],
+     "level_error_db": 0.09,
+     "band_error_db": [
+      2.4,
+      -0.91,
+      -0.85,
+      -0.62,
+      0.24,
+      0.1,
+      0.5
+     ],
+     "median_audible_band_error_db": 0.62
+    },
+    {
+     "ms": [
+      60,
+      150
+     ],
+     "level_error_db": -0.1,
+     "band_error_db": [
+      -5.4,
+      -1.56,
+      -2.5,
+      -0.45,
+      0.1,
+      0.17,
+      0.35
+     ],
+     "median_audible_band_error_db": 0.45
+    },
+    {
+     "ms": [
+      150,
+      300
+     ],
+     "level_error_db": 0.09,
+     "band_error_db": [
+      -6.23,
+      -1.3,
+      -1.47,
+      0.21,
+      0.41,
+      0.1,
+      3.29
+     ],
+     "median_audible_band_error_db": 1.3
+    }
+   ]
+  },
+  {
+   "index": 9,
+   "onset_s": 4.61658,
+   "key": 71,
+   "velocity": 1.0,
+   "substituted": false,
+   "next_stroke_ms": 622.6,
+   "windows": [
+    {
+     "ms": [
+      0,
+      5
+     ],
+     "level_error_db": 0.68,
+     "band_error_db": [
+      -1.4,
+      -1.59,
+      -7.08,
+      0.73,
+      0.92,
+      0.44,
+      2.68
+     ],
+     "median_audible_band_error_db": 1.4
+    },
+    {
+     "ms": [
+      5,
+      15
+     ],
+     "level_error_db": 0.23,
+     "band_error_db": [
+      -0.12,
+      -0.0,
+      -2.09,
+      3.22,
+      0.14,
+      -0.2,
+      -3.75
+     ],
+     "median_audible_band_error_db": 0.2
+    },
+    {
+     "ms": [
+      15,
+      30
+     ],
+     "level_error_db": 0.79,
+     "band_error_db": [
+      2.73,
+      2.46,
+      -1.82,
+      1.16,
+      0.67,
+      1.06,
+      -0.46
+     ],
+     "median_audible_band_error_db": 1.16
+    },
+    {
+     "ms": [
+      30,
+      60
+     ],
+     "level_error_db": 0.07,
+     "band_error_db": [
+      -0.09,
+      -1.49,
+      1.63,
+      -0.23,
+      0.06,
+      -0.12,
+      0.35
+     ],
+     "median_audible_band_error_db": 0.23
+    },
+    {
+     "ms": [
+      60,
+      150
+     ],
+     "level_error_db": -0.06,
+     "band_error_db": [
+      -0.57,
+      -1.35,
+      -1.15,
+      0.36,
+      0.01,
+      -0.88,
+      -0.29
+     ],
+     "median_audible_band_error_db": 0.57
+    },
+    {
+     "ms": [
+      150,
+      300
+     ],
+     "level_error_db": -0.69,
+     "band_error_db": [
+      0.78,
+      -2.36,
+      -0.39,
+      -0.77,
+      -0.74,
+      -0.2,
+      3.06
+     ],
+     "median_audible_band_error_db": 0.75
+    }
+   ]
+  },
+  {
+   "index": 10,
+   "onset_s": 5.23917,
+   "key": 70,
+   "velocity": 1.0,
+   "substituted": false,
+   "next_stroke_ms": 346.6,
+   "windows": [
+    {
+     "ms": [
+      0,
+      5
+     ],
+     "level_error_db": 0.2,
+     "band_error_db": [
+      -0.46,
+      -2.68,
+      -5.06,
+      -2.08,
+      0.01,
+      1.43,
+      1.2
+     ],
+     "median_audible_band_error_db": 1.43
+    },
+    {
+     "ms": [
+      5,
+      15
+     ],
+     "level_error_db": 0.44,
+     "band_error_db": [
+      -0.54,
+      -2.71,
+      2.31,
+      0.44,
+      0.48,
+      0.63,
+      -3.89
+     ],
+     "median_audible_band_error_db": 0.63
+    },
+    {
+     "ms": [
+      15,
+      30
+     ],
+     "level_error_db": 0.05,
+     "band_error_db": [
+      2.85,
+      0.67,
+      1.57,
+      -0.54,
+      -0.25,
+      1.85,
+      -3.36
+     ],
+     "median_audible_band_error_db": 1.57
+    },
+    {
+     "ms": [
+      30,
+      60
+     ],
+     "level_error_db": 0.09,
+     "band_error_db": [
+      -0.75,
+      -2.11,
+      0.17,
+      0.51,
+      0.08,
+      -0.31,
+      -2.86
+     ],
+     "median_audible_band_error_db": 0.51
+    },
+    {
+     "ms": [
+      60,
+      150
+     ],
+     "level_error_db": 0.06,
+     "band_error_db": [
+      -0.34,
+      -1.9,
+      -1.41,
+      0.29,
+      0.04,
+      -0.4,
+      0.28
+     ],
+     "median_audible_band_error_db": 0.37
+    },
+    {
+     "ms": [
+      150,
+      300
+     ],
+     "level_error_db": -0.26,
+     "band_error_db": [
+      -1.14,
+      -4.32,
+      -1.86,
+      0.19,
+      -0.47,
+      0.33,
+      2.47
+     ],
+     "median_audible_band_error_db": 0.81
+    }
+   ]
+  },
+  {
+   "index": 11,
+   "onset_s": 5.58572,
+   "key": 61,
+   "velocity": 0.987,
+   "substituted": true,
+   "next_stroke_ms": 641.8,
+   "windows": [
+    {
+     "ms": [
+      0,
+      5
+     ],
+     "level_error_db": 0.97,
+     "band_error_db": [
+      -7.65,
+      -4.38,
+      -3.73,
+      1.34,
+      -0.01,
+      1.73,
+      3.85
+     ],
+     "median_audible_band_error_db": 3.73
+    },
+    {
+     "ms": [
+      5,
+      15
+     ],
+     "level_error_db": 0.46,
+     "band_error_db": [
+      -3.07,
+      -0.38,
+      1.03,
+      1.99,
+      0.7,
+      2.07,
+      -5.25
+     ],
+     "median_audible_band_error_db": 1.99
+    },
+    {
+     "ms": [
+      15,
+      30
+     ],
+     "level_error_db": 0.42,
+     "band_error_db": [
+      -0.46,
+      3.58,
+      2.17,
+      -5.34,
+      1.34,
+      0.74,
+      -6.51
+     ],
+     "median_audible_band_error_db": 2.17
+    },
+    {
+     "ms": [
+      30,
+      60
+     ],
+     "level_error_db": -1.68,
+     "band_error_db": [
+      -1.87,
+      -3.76,
+      -0.35,
+      -1.92,
+      -2.74,
+      -0.97,
+      -4.79
+     ],
+     "median_audible_band_error_db": 1.92
+    },
+    {
+     "ms": [
+      60,
+      150
+     ],
+     "level_error_db": -1.17,
+     "band_error_db": [
+      -1.63,
+      -3.07,
+      0.15,
+      -2.66,
+      -0.72,
+      -0.97,
+      -2.73
+     ],
+     "median_audible_band_error_db": 1.63
+    },
+    {
+     "ms": [
+      150,
+      300
+     ],
+     "level_error_db": -1.5,
+     "band_error_db": [
+      -3.69,
+      -4.15,
+      -0.58,
+      -2.15,
+      -1.28,
+      -0.78,
+      3.5
+     ],
+     "median_audible_band_error_db": 2.15
+    }
+   ]
+  },
+  {
+   "index": 12,
+   "onset_s": 6.22754,
+   "key": 66,
+   "velocity": 1.0,
+   "substituted": false,
+   "next_stroke_ms": 355.5,
+   "windows": [
+    {
+     "ms": [
+      0,
+      5
+     ],
+     "level_error_db": 0.53,
+     "band_error_db": [
+      4.42,
+      0.23,
+      -3.12,
+      0.28,
+      -0.73,
+      0.46,
+      9.7
+     ],
+     "median_audible_band_error_db": 0.59
+    },
+    {
+     "ms": [
+      5,
+      15
+     ],
+     "level_error_db": 2.51,
+     "band_error_db": [
+      6.83,
+      0.76,
+      1.7,
+      -0.17,
+      1.68,
+      3.27,
+      4.75
+     ],
+     "median_audible_band_error_db": 1.7
+    },
+    {
+     "ms": [
+      15,
+      30
+     ],
+     "level_error_db": -0.02,
+     "band_error_db": [
+      3.35,
+      -5.95,
+      1.45,
+      1.13,
+      0.03,
+      -0.09,
+      2.69
+     ],
+     "median_audible_band_error_db": 1.45
+    },
+    {
+     "ms": [
+      30,
+      60
+     ],
+     "level_error_db": 0.15,
+     "band_error_db": [
+      -0.03,
+      -1.93,
+      -0.12,
+      0.46,
+      0.17,
+      0.15,
+      -0.11
+     ],
+     "median_audible_band_error_db": 0.15
+    },
+    {
+     "ms": [
+      60,
+      150
+     ],
+     "level_error_db": 0.16,
+     "band_error_db": [
+      -4.57,
+      -1.76,
+      -0.32,
+      0.29,
+      0.32,
+      0.13,
+      0.66
+     ],
+     "median_audible_band_error_db": 0.32
+    },
+    {
+     "ms": [
+      150,
+      300
+     ],
+     "level_error_db": -0.73,
+     "band_error_db": [
+      -6.87,
+      -3.01,
+      0.66,
+      -1.35,
+      -0.48,
+      -0.78,
+      3.01
+     ],
+     "median_audible_band_error_db": 1.35
+    }
+   ]
+  },
+  {
+   "index": 13,
+   "onset_s": 6.58305,
+   "key": 62,
+   "velocity": 1.0,
+   "substituted": false,
+   "next_stroke_ms": 632.2,
+   "windows": [
+    {
+     "ms": [
+      0,
+      5
+     ],
+     "level_error_db": 0.56,
+     "band_error_db": [
+      0.42,
+      0.05,
+      -4.01,
+      3.68,
+      1.13,
+      0.19,
+      2.47
+     ],
+     "median_audible_band_error_db": 1.13
+    },
+    {
+     "ms": [
+      5,
+      15
+     ],
+     "level_error_db": 0.71,
+     "band_error_db": [
+      -0.66,
+      -0.97,
+      8.07,
+      -5.21,
+      0.98,
+      1.64,
+      -1.51
+     ],
+     "median_audible_band_error_db": 1.51
+    },
+    {
+     "ms": [
+      15,
+      30
+     ],
+     "level_error_db": 0.51,
+     "band_error_db": [
+      1.65,
+      -0.7,
+      1.37,
+      -3.15,
+      1.81,
+      -0.24,
+      0.43
+     ],
+     "median_audible_band_error_db": 1.37
+    },
+    {
+     "ms": [
+      30,
+      60
+     ],
+     "level_error_db": -0.12,
+     "band_error_db": [
+      -0.28,
+      -0.46,
+      1.62,
+      0.4,
+      -0.61,
+      -0.13,
+      0.21
+     ],
+     "median_audible_band_error_db": 0.4
+    },
+    {
+     "ms": [
+      60,
+      150
+     ],
+     "level_error_db": 0.06,
+     "band_error_db": [
+      0.41,
+      -0.39,
+      0.14,
+      -1.09,
+      -0.03,
+      0.32,
+      0.68
+     ],
+     "median_audible_band_error_db": 0.39
+    },
+    {
+     "ms": [
+      150,
+      300
+     ],
+     "level_error_db": -0.81,
+     "band_error_db": [
+      0.16,
+      -2.19,
+      -0.73,
+      -1.6,
+      -1.19,
+      -0.19,
+      6.09
+     ],
+     "median_audible_band_error_db": 1.19
+    }
+   ]
+  },
+  {
+   "index": 14,
+   "onset_s": 7.2152,
+   "key": 64,
+   "velocity": 1.0,
+   "substituted": false,
+   "next_stroke_ms": 356.9,
+   "windows": [
+    {
+     "ms": [
+      0,
+      5
+     ],
+     "level_error_db": -0.37,
+     "band_error_db": [
+      -0.37,
+      0.21,
+      -4.29,
+      1.78,
+      0.05,
+      -0.75,
+      3.08
+     ],
+     "median_audible_band_error_db": 0.75
+    },
+    {
+     "ms": [
+      5,
+      15
+     ],
+     "level_error_db": -0.4,
+     "band_error_db": [
+      -0.29,
+      -2.54,
+      1.23,
+      2.83,
+      0.99,
+      -0.78,
+      0.01
+     ],
+     "median_audible_band_error_db": 0.99
+    },
+    {
+     "ms": [
+      15,
+      30
+     ],
+     "level_error_db": -0.17,
+     "band_error_db": [
+      0.76,
+      2.86,
+      0.29,
+      2.28,
+      0.18,
+      -0.59,
+      -2.23
+     ],
+     "median_audible_band_error_db": 0.76
+    },
+    {
+     "ms": [
+      30,
+      60
+     ],
+     "level_error_db": 0.15,
+     "band_error_db": [
+      0.03,
+      -0.29,
+      -0.76,
+      -1.84,
+      0.31,
+      0.15,
+      0.05
+     ],
+     "median_audible_band_error_db": 0.29
+    },
+    {
+     "ms": [
+      60,
+      150
+     ],
+     "level_error_db": -0.52,
+     "band_error_db": [
+      0.03,
+      -1.03,
+      -0.48,
+      -0.34,
+      -0.57,
+      -0.88,
+      -2.25
+     ],
+     "median_audible_band_error_db": 0.57
+    },
+    {
+     "ms": [
+      150,
+      300
+     ],
+     "level_error_db": -0.67,
+     "band_error_db": [
+      -0.6,
+      -1.93,
+      -0.37,
+      -1.5,
+      -0.4,
+      -0.34,
+      0.9
+     ],
+     "median_audible_band_error_db": 0.6
+    }
+   ]
+  },
+  {
+   "index": 15,
+   "onset_s": 7.57209,
+   "key": 69,
+   "velocity": 1.0,
+   "substituted": false,
+   "next_stroke_ms": 631.0,
+   "windows": [
+    {
+     "ms": [
+      0,
+      5
+     ],
+     "level_error_db": 1.62,
+     "band_error_db": [
+      3.41,
+      0.1,
+      2.82,
+      0.47,
+      0.18,
+      1.92,
+      5.07
+     ],
+     "median_audible_band_error_db": 1.2
+    },
+    {
+     "ms": [
+      5,
+      15
+     ],
+     "level_error_db": 1.28,
+     "band_error_db": [
+      -1.28,
+      3.52,
+      0.13,
+      1.1,
+      0.7,
+      1.69,
+      0.59
+     ],
+     "median_audible_band_error_db": 1.1
+    },
+    {
+     "ms": [
+      15,
+      30
+     ],
+     "level_error_db": -0.34,
+     "band_error_db": [
+      -1.91,
+      -1.1,
+      2.68,
+      0.15,
+      -0.36,
+      -0.48,
+      -1.31
+     ],
+     "median_audible_band_error_db": 1.1
+    },
+    {
+     "ms": [
+      30,
+      60
+     ],
+     "level_error_db": 0.55,
+     "band_error_db": [
+      0.2,
+      -3.16,
+      -1.58,
+      -0.72,
+      0.72,
+      0.53,
+      -0.81
+     ],
+     "median_audible_band_error_db": 0.72
+    },
+    {
+     "ms": [
+      60,
+      150
+     ],
+     "level_error_db": -0.15,
+     "band_error_db": [
+      -1.3,
+      -1.3,
+      -0.44,
+      -0.45,
+      -0.2,
+      0.13,
+      -1.37
+     ],
+     "median_audible_band_error_db": 0.45
+    },
+    {
+     "ms": [
+      150,
+      300
+     ],
+     "level_error_db": -0.58,
+     "band_error_db": [
+      -1.3,
+      -3.27,
+      -0.72,
+      -0.3,
+      -0.58,
+      -0.79,
+      -0.49
+     ],
+     "median_audible_band_error_db": 0.75
+    }
+   ]
+  },
+  {
+   "index": 16,
+   "onset_s": 8.20308,
+   "key": 61,
+   "velocity": 1.0,
+   "substituted": true,
+   "next_stroke_ms": 346.1,
+   "windows": [
+    {
+     "ms": [
+      0,
+      5
+     ],
+     "level_error_db": 2.26,
+     "band_error_db": [
+      -5.62,
+      -2.42,
+      -2.42,
+      2.21,
+      1.24,
+      2.67,
+      5.27
+     ],
+     "median_audible_band_error_db": 2.42
+    },
+    {
+     "ms": [
+      5,
+      15
+     ],
+     "level_error_db": 1.09,
+     "band_error_db": [
+      -0.87,
+      1.01,
+      -2.93,
+      3.85,
+      0.0,
+      1.97,
+      -3.56
+     ],
+     "median_audible_band_error_db": 1.97
+    },
+    {
+     "ms": [
+      15,
+      30
+     ],
+     "level_error_db": 0.92,
+     "band_error_db": [
+      0.33,
+      -2.09,
+      -0.23,
+      5.79,
+      0.96,
+      0.96,
+      -2.36
+     ],
+     "median_audible_band_error_db": 0.96
+    },
+    {
+     "ms": [
+      30,
+      60
+     ],
+     "level_error_db": -1.4,
+     "band_error_db": [
+      -1.36,
+      -1.44,
+      -2.28,
+      1.03,
+      -1.21,
+      -1.6,
+      -1.57
+     ],
+     "median_audible_band_error_db": 1.44
+    },
+    {
+     "ms": [
+      60,
+      150
+     ],
+     "level_error_db": -2.16,
+     "band_error_db": [
+      -1.08,
+      -0.92,
+      -1.01,
+      0.82,
+      -1.21,
+      -3.46,
+      -0.5
+     ],
+     "median_audible_band_error_db": 1.01
+    },
+    {
+     "ms": [
+      150,
+      300
+     ],
+     "level_error_db": -2.33,
+     "band_error_db": [
+      -1.57,
+      -3.26,
+      0.05,
+      1.21,
+      -1.56,
+      -3.4,
+      4.7
+     ],
+     "median_audible_band_error_db": 1.57
+    }
+   ]
+  },
+  {
+   "index": 17,
+   "onset_s": 8.54917,
+   "key": 63,
+   "velocity": 1.0,
+   "substituted": true,
+   "next_stroke_ms": 134.8,
+   "windows": [
+    {
+     "ms": [
+      0,
+      5
+     ],
+     "level_error_db": 6.22,
+     "band_error_db": [
+      -3.45,
+      5.11,
+      -1.87,
+      -0.56,
+      7.56,
+      6.21,
+      9.43
+     ],
+     "median_audible_band_error_db": 5.11
+    },
+    {
+     "ms": [
+      5,
+      15
+     ],
+     "level_error_db": 2.02,
+     "band_error_db": [
+      -3.46,
+      0.29,
+      -1.63,
+      1.13,
+      4.33,
+      2.14,
+      6.22
+     ],
+     "median_audible_band_error_db": 2.14
+    },
+    {
+     "ms": [
+      15,
+      30
+     ],
+     "level_error_db": 1.23,
+     "band_error_db": [
+      -0.91,
+      2.98,
+      -4.88,
+      2.24,
+      3.84,
+      -0.37,
+      7.03
+     ],
+     "median_audible_band_error_db": 2.98
+    },
+    {
+     "ms": [
+      30,
+      60
+     ],
+     "level_error_db": 0.68,
+     "band_error_db": [
+      0.62,
+      7.93,
+      0.35,
+      -0.35,
+      2.78,
+      -1.64,
+      7.71
+     ],
+     "median_audible_band_error_db": 1.64
+    },
+    {
+     "ms": [
+      60,
+      150
+     ],
+     "level_error_db": -0.16,
+     "band_error_db": [
+      -3.5,
+      -0.2,
+      -1.16,
+      2.08,
+      -1.28,
+      1.38,
+      4.07
+     ],
+     "median_audible_band_error_db": 1.38
+    },
+    {
+     "ms": [
+      150,
+      300
+     ],
+     "level_error_db": -0.91,
+     "band_error_db": [
+      -4.02,
+      -0.57,
+      -0.53,
+      1.31,
+      -0.81,
+      -0.32,
+      0.68
+     ],
+     "median_audible_band_error_db": 0.68
+    }
+   ]
+  },
+  {
+   "index": 18,
+   "onset_s": 8.68394,
+   "key": 63,
+   "velocity": 1.0,
+   "substituted": true,
+   "next_stroke_ms": 145.3,
+   "windows": [
+    {
+     "ms": [
+      0,
+      5
+     ],
+     "level_error_db": 1.02,
+     "band_error_db": [
+      -5.55,
+      0.38,
+      -2.98,
+      4.83,
+      -1.11,
+      2.81,
+      5.01
+     ],
+     "median_audible_band_error_db": 2.98
+    },
+    {
+     "ms": [
+      5,
+      15
+     ],
+     "level_error_db": -1.41,
+     "band_error_db": [
+      -5.72,
+      -1.32,
+      7.31,
+      1.16,
+      -4.12,
+      1.77,
+      2.57
+     ],
+     "median_audible_band_error_db": 2.57
+    },
+    {
+     "ms": [
+      15,
+      30
+     ],
+     "level_error_db": -2.62,
+     "band_error_db": [
+      -4.65,
+      0.97,
+      -2.66,
+      3.2,
+      -4.12,
+      -1.21,
+      2.57
+     ],
+     "median_audible_band_error_db": 2.66
+    },
+    {
+     "ms": [
+      30,
+      60
+     ],
+     "level_error_db": -2.66,
+     "band_error_db": [
+      -6.04,
+      -0.15,
+      0.5,
+      1.21,
+      -2.89,
+      -1.72,
+      3.03
+     ],
+     "median_audible_band_error_db": 1.72
+    },
+    {
+     "ms": [
+      60,
+      150
+     ],
+     "level_error_db": -0.66,
+     "band_error_db": [
+      -4.64,
+      -1.34,
+      -0.98,
+      1.81,
+      0.25,
+      -1.0,
+      1.93
+     ],
+     "median_audible_band_error_db": 1.34
+    },
+    {
+     "ms": [
+      150,
+      300
+     ],
+     "level_error_db": 0.75,
+     "band_error_db": [
+      -2.28,
+      -0.29,
+      2.17,
+      0.15,
+      1.75,
+      1.26,
+      -1.02
+     ],
+     "median_audible_band_error_db": 1.26
+    }
+   ]
+  },
+  {
+   "index": 19,
+   "onset_s": 8.82926,
+   "key": 65,
+   "velocity": 1.0,
+   "substituted": false,
+   "next_stroke_ms": 326.9,
+   "windows": [
+    {
+     "ms": [
+      0,
+      5
+     ],
+     "level_error_db": 0.17,
+     "band_error_db": [
+      -2.06,
+      -0.16,
+      -7.29,
+      2.75,
+      2.1,
+      -1.14,
+      1.58
+     ],
+     "median_audible_band_error_db": 2.06
+    },
+    {
+     "ms": [
+      5,
+      15
+     ],
+     "level_error_db": -0.19,
+     "band_error_db": [
+      -2.31,
+      0.94,
+      4.91,
+      0.11,
+      -1.27,
+      1.9,
+      -2.31
+     ],
+     "median_audible_band_error_db": 1.9
+    },
+    {
+     "ms": [
+      15,
+      30
+     ],
+     "level_error_db": 1.27,
+     "band_error_db": [
+      -3.79,
+      -0.29,
+      4.34,
+      -1.35,
+      2.33,
+      1.38,
+      0.27
+     ],
+     "median_audible_band_error_db": 1.38
+    },
+    {
+     "ms": [
+      30,
+      60
+     ],
+     "level_error_db": 1.99,
+     "band_error_db": [
+      -2.79,
+      -0.68,
+      1.0,
+      1.08,
+      3.69,
+      0.46,
+      -0.12
+     ],
+     "median_audible_band_error_db": 1.0
+    },
+    {
+     "ms": [
+      60,
+      150
+     ],
+     "level_error_db": 0.22,
+     "band_error_db": [
+      -1.88,
+      -0.21,
+      2.13,
+      0.11,
+      1.08,
+      1.11,
+      -0.3
+     ],
+     "median_audible_band_error_db": 1.08
+    },
+    {
+     "ms": [
+      150,
+      300
+     ],
+     "level_error_db": 0.97,
+     "band_error_db": [
+      -1.35,
+      -1.66,
+      1.5,
+      -0.1,
+      2.11,
+      2.77,
+      0.84
+     ],
+     "median_audible_band_error_db": 1.5
+    }
+   ]
+  },
+  {
+   "index": 20,
+   "onset_s": 9.15618,
+   "key": 60,
+   "velocity": 1.0,
+   "substituted": false,
+   "next_stroke_ms": 659.8,
+   "windows": [
+    {
+     "ms": [
+      0,
+      5
+     ],
+     "level_error_db": 0.83,
+     "band_error_db": [
+      0.82,
+      1.64,
+      -0.77,
+      0.2,
+      0.92,
+      0.88,
+      -0.31
+     ],
+     "median_audible_band_error_db": 0.82
+    },
+    {
+     "ms": [
+      5,
+      15
+     ],
+     "level_error_db": 2.48,
+     "band_error_db": [
+      1.1,
+      3.29,
+      1.71,
+      -0.04,
+      1.92,
+      2.98,
+      -1.9
+     ],
+     "median_audible_band_error_db": 1.9
+    },
+    {
+     "ms": [
+      15,
+      30
+     ],
+     "level_error_db": 0.66,
+     "band_error_db": [
+      -6.25,
+      7.84,
+      2.4,
+      -1.56,
+      1.06,
+      0.93,
+      0.12
+     ],
+     "median_audible_band_error_db": 1.56
+    },
+    {
+     "ms": [
+      30,
+      60
+     ],
+     "level_error_db": 0.26,
+     "band_error_db": [
+      0.67,
+      4.3,
+      -1.01,
+      2.17,
+      0.61,
+      -0.27,
+      -1.46
+     ],
+     "median_audible_band_error_db": 1.01
+    },
+    {
+     "ms": [
+      60,
+      150
+     ],
+     "level_error_db": -0.02,
+     "band_error_db": [
+      0.77,
+      -1.68,
+      -1.0,
+      0.06,
+      -0.22,
+      -0.47,
+      0.6
+     ],
+     "median_audible_band_error_db": 0.6
+    },
+    {
+     "ms": [
+      150,
+      300
+     ],
+     "level_error_db": -0.16,
+     "band_error_db": [
+      -1.14,
+      -1.67,
+      0.12,
+      0.59,
+      -0.82,
+      0.31,
+      3.04
+     ],
+     "median_audible_band_error_db": 0.82
+    }
+   ]
+  },
+  {
+   "index": 21,
+   "onset_s": 9.81597,
+   "key": 67,
+   "velocity": 1.0,
+   "substituted": false,
+   "next_stroke_ms": 277.3,
+   "windows": [
+    {
+     "ms": [
+      0,
+      5
+     ],
+     "level_error_db": 0.87,
+     "band_error_db": [
+      -2.58,
+      0.16,
+      -1.44,
+      4.47,
+      0.93,
+      0.69,
+      10.2
+     ],
+     "median_audible_band_error_db": 1.19
+    },
+    {
+     "ms": [
+      5,
+      15
+     ],
+     "level_error_db": 1.72,
+     "band_error_db": [
+      1.76,
+      -2.18,
+      -1.19,
+      -0.47,
+      1.23,
+      2.24,
+      4.7
+     ],
+     "median_audible_band_error_db": 1.76
+    },
+    {
+     "ms": [
+      15,
+      30
+     ],
+     "level_error_db": 1.41,
+     "band_error_db": [
+      1.46,
+      -8.22,
+      1.04,
+      -0.99,
+      0.46,
+      2.27,
+      1.75
+     ],
+     "median_audible_band_error_db": 1.46
+    },
+    {
+     "ms": [
+      30,
+      60
+     ],
+     "level_error_db": -0.19,
+     "band_error_db": [
+      5.6,
+      -2.85,
+      -0.57,
+      -0.06,
+      0.15,
+      -0.28,
+      0.19
+     ],
+     "median_audible_band_error_db": 0.28
+    },
+    {
+     "ms": [
+      60,
+      150
+     ],
+     "level_error_db": -0.04,
+     "band_error_db": [
+      -1.31,
+      -2.8,
+      -0.91,
+      -0.26,
+      0.15,
+      -0.03,
+      0.62
+     ],
+     "median_audible_band_error_db": 0.62
+    }
+   ]
+  }
+ ]
+}

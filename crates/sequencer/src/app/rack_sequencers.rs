@@ -18,7 +18,8 @@
 
 use super::*;
 use crate::graph::{ProjectGraphOverrides, ProjectGraphRouteOverride, ProjectGraphSeedFrom, RackMembership};
-use crate::project::ProjectRackSequencer;
+use crate::project::{ProjectInstanceOwner, ProjectRackSequencer};
+use std::collections::HashSet;
 
 impl App {
     /// Every drum rack's member tracks in member order, for the scheduler's
@@ -50,6 +51,17 @@ impl App {
             .iter()
             .filter(|instance| instance.owner.rack() == Some(group_id))
             .cloned()
+            .collect()
+    }
+
+    /// The ids of the instances `owner` owns: the jakis a node of that
+    /// owner may gate (`drop_cross_owner_generator_routes`).
+    pub(super) fn owned_instance_ids(&self, owner: ProjectInstanceOwner) -> HashSet<u64> {
+        self.instances
+            .list
+            .iter()
+            .filter(|instance| instance.owner == owner)
+            .map(|instance| instance.id)
             .collect()
     }
 
@@ -98,6 +110,7 @@ impl App {
                 .ok_or_else(|| format!("Rack {group_id} does not own sequencer {sequencer_id}"))?;
             let entry = rack.sequencers.remove(position);
             let project_id = crate::lisp_host::graph_instance_id(&entry.sequencer_name, None);
+            let project_owned = app.owned_instance_ids(ProjectInstanceOwner::Project);
             app.state.edit_all_scene_graph_overrides(|graphs| {
                 let mut changed = false;
                 for graph in graphs.iter_mut() {
@@ -105,6 +118,7 @@ impl App {
                         continue;
                     }
                     expand_member_routes_to_tracks(graph, &members);
+                    drop_cross_owner_generator_routes(graph, &|id| project_owned.contains(&id));
                     graph.owner_rack = None;
                     graph.sequencer_id = project_id;
                     changed = true;
@@ -162,6 +176,7 @@ impl App {
                 Some(existing) => *existing = entry,
                 None => rack.sequencers.push(entry),
             }
+            let rack_owned = app.owned_instance_ids(ProjectInstanceOwner::Rack(group_id));
             app.state.edit_all_scene_graph_overrides(|graphs| {
                 let mut changed = false;
                 for graph in graphs.iter_mut() {
@@ -169,6 +184,7 @@ impl App {
                         continue;
                     }
                     contract_track_routes_to_members(graph, &members);
+                    drop_cross_owner_generator_routes(graph, &|id| rack_owned.contains(&id));
                     graph.owner_rack = Some(group_id);
                     graph.sequencer_id = rack_id;
                     changed = true;
@@ -264,6 +280,54 @@ pub(crate) fn remap_graph_member_routes(graph: &mut ProjectGraphOverrides, map: 
             ));
         }
     }
+}
+
+/// Rewrite an override's generator gate routes (`(:gen id)` / `(:restart id)`)
+/// through `ids`, old instance id -> new. A route to an id `ids` does not
+/// know drops to "off": instance ids are small and counter-issued, so a kit's
+/// stale id would otherwise gate an unrelated live jaki.
+pub(crate) fn remap_graph_generator_routes(
+    graph: &mut ProjectGraphOverrides,
+    ids: &std::collections::HashMap<u64, u64>,
+) {
+    for intrinsic in &mut graph.node_intrinsics {
+        let remapped = match &intrinsic.route {
+            Some(ProjectGraphRouteOverride::Generator(old)) => Some(
+                ids.get(old)
+                    .map(|id| ProjectGraphRouteOverride::Generator(*id))
+                    .unwrap_or(ProjectGraphRouteOverride::None),
+            ),
+            Some(ProjectGraphRouteOverride::GeneratorRestart(old)) => Some(
+                ids.get(old)
+                    .map(|id| ProjectGraphRouteOverride::GeneratorRestart(*id))
+                    .unwrap_or(ProjectGraphRouteOverride::None),
+            ),
+            _ => continue,
+        };
+        intrinsic.route = remapped;
+    }
+}
+
+/// Drop every generator gate route whose target id is not in `allowed`
+/// (docs/jaki-trig-modes-spec.md: a node only routes to a jaki of its own
+/// owner). Returns whether anything changed.
+pub(crate) fn drop_cross_owner_generator_routes(
+    graph: &mut ProjectGraphOverrides,
+    allowed: &dyn Fn(u64) -> bool,
+) -> bool {
+    let mut changed = false;
+    for intrinsic in &mut graph.node_intrinsics {
+        if let Some(
+            ProjectGraphRouteOverride::Generator(id) | ProjectGraphRouteOverride::GeneratorRestart(id),
+        ) = &intrinsic.route
+        {
+            if !allowed(*id) {
+                intrinsic.route = Some(ProjectGraphRouteOverride::None);
+                changed = true;
+            }
+        }
+    }
+    changed
 }
 
 pub(super) fn expand_member_routes_to_tracks(graph: &mut ProjectGraphOverrides, members: &[usize]) {

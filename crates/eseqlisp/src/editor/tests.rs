@@ -17178,8 +17178,8 @@ fn meta_period_opens_qualified_definition_in_module_file() {
             .unwrap()
             .as_nanos()
     ));
-    // Caller lives in a subdirectory; the module file is a sibling of that
-    // directory, so a parent-dir-only scan would miss it.
+    // Caller lives below the configured module root. Navigation must use
+    // that root, not search relative to the caller's directory.
     let ui_dir = dir.join("ui");
     let effects_dir = ui_dir.join("effects");
     std::fs::create_dir_all(&effects_dir).unwrap();
@@ -17196,13 +17196,128 @@ fn meta_period_opens_qualified_definition_in_module_file() {
     )
     .unwrap();
 
+    editor.runtime.set_module_load_path(vec![ui_dir]);
     editor.open_file_buffer(&caller_path).unwrap();
     editor.active_buffer_mut().cursor = (0, 30);
 
     editor.handle_key(KeyEvent::new(KeyCode::Char('.'), KeyModifiers::ALT));
 
-    assert_eq!(editor.active_buffer().path.as_ref(), Some(&module_path));
+    assert_eq!(editor.active_buffer().path.as_ref(), Some(&std::fs::canonicalize(&module_path).unwrap()));
     assert_eq!(editor.active_buffer().cursor, (1, 5));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn module_navigation_follows_imports_overrides_and_unsaved_definitions() {
+    use crate::hot_reload::ModuleLoadRoot;
+    let dir = std::env::temp_dir().join(format!("eseqlisp-module-navigation-{}", std::process::id()));
+    let local = dir.join("local");
+    let factory = dir.join("factory");
+    std::fs::create_dir_all(&local).unwrap();
+    std::fs::create_dir_all(&factory).unwrap();
+    let doc = local.join("doc.lisp");
+    let core = local.join("core.lisp");
+    std::fs::write(&doc, "; header\n(module test.algo.doc)\n(import test.algo.core)\n(def tick 1)\n").unwrap();
+    std::fs::write(&core, "(module test.algo.core)\n(def run 2)\n").unwrap();
+    std::fs::write(factory.join("doc.lisp"), "(module test.algo.doc)\n(def tick 99)\n").unwrap();
+    let mut runtime = Runtime::new();
+    runtime.set_scoped_module_load_path(vec![
+        ModuleLoadRoot { path: local, module_prefix: Some("test.algo".into()) },
+        ModuleLoadRoot { path: factory.clone(), module_prefix: Some("test.algo".into()) },
+    ]);
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    // Even an open lower-priority module must not steal the jump.
+    editor.open_file_buffer(&factory.join("doc.lisp")).unwrap();
+    let caller = editor.open_scratch_buffer("*caller*", "(import test.algo.doc)\n(test.algo.doc/tick)");
+    editor.set_active_buffer(caller);
+    editor.active_buffer_mut().cursor = (0, 12);
+    editor.goto_definition();
+    assert_eq!(editor.active_buffer().path.as_ref(), Some(&std::fs::canonicalize(&doc).unwrap()));
+    assert_eq!(editor.active_buffer().cursor, (1, 8));
+    let doc_id = editor.active_buffer().id;
+    editor.active_buffer_mut().cursor = (2, 14);
+    editor.goto_definition();
+    assert_eq!(editor.active_buffer().path.as_ref(), Some(&std::fs::canonicalize(&core).unwrap()));
+    editor.pop_definition_mark();
+    assert_eq!(editor.active_buffer().id, doc_id);
+    assert_eq!(editor.active_buffer().cursor, (2, 14));
+    // The open buffer is authoritative, including a moved, unsaved definition.
+    editor.active_buffer_mut().lines.insert(3, "; unsaved edit".into());
+    editor.active_buffer_mut().dirty = true;
+    editor.pop_definition_mark();
+    assert_eq!(editor.active_buffer().id, caller);
+    assert_eq!(editor.active_buffer().cursor, (0, 12));
+    editor.active_buffer_mut().cursor = (1, 10);
+    editor.goto_definition();
+    assert_eq!(editor.active_buffer().id, doc_id);
+    assert_eq!(editor.active_buffer().cursor, (4, 5));
+    assert!(editor.active_buffer().dirty);
+    assert!(!std::fs::read_to_string(&doc).unwrap().contains("unsaved edit"));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn module_navigation_legacy_resolution_does_not_evaluate_source() {
+    let dir = std::env::temp_dir().join(format!("eseqlisp-module-navigation-legacy-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("doc.lisp");
+    std::fs::write(&path, "(module eseq.doc)\n(navigation-side-effect)\n(def tick 1)\n").unwrap();
+    let calls = std::rc::Rc::new(std::cell::Cell::new(0));
+    let observed = calls.clone();
+    let mut runtime = Runtime::new();
+    runtime.set_load_root(dir.clone());
+    runtime.register_native("navigation-side-effect", move |_, _| {
+        observed.set(observed.get() + 1);
+        Ok(Value::Nil)
+    });
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    let caller = editor.open_scratch_buffer("*caller*", "(import eseq.doc)");
+    editor.set_active_buffer(caller);
+    editor.active_buffer_mut().cursor = (0, 10);
+    editor.goto_definition();
+    assert_eq!(editor.active_buffer().path.as_ref(), Some(&std::fs::canonicalize(&path).unwrap()));
+    assert_eq!(calls.get(), 0, "navigation must not import the module");
+    editor.runtime.eval_str("(import eseq.doc)").unwrap();
+    assert_eq!(calls.get(), 1, "navigation must not mark the module as already imported");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn module_navigation_rejects_fake_imports_and_unrelated_definitions() {
+    let dir = std::env::temp_dir().join(format!("eseqlisp-module-navigation-errors-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("doc.lisp"), "(module test.algo.doc)\n(def other 1)\n").unwrap();
+    let mut runtime = Runtime::new();
+    runtime.set_scoped_module_load_path(vec![crate::hot_reload::ModuleLoadRoot {
+        path: dir.clone(), module_prefix: Some("test.algo".into()),
+    }]);
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.open_scratch_buffer("*unrelated*", "(def tick 42)");
+    for text in [
+        "; (import test.algo.doc)",
+        "\"(import test.algo.doc)\"",
+        "'(import test.algo.doc)",
+        "(def example '(import test.algo.doc))",
+        "(import test.algo.missing)",
+        "(test.algo.doc/tick)",
+    ] {
+        let id = editor.open_scratch_buffer("*navigation-case*", text);
+        editor.set_active_buffer(id);
+        editor.active_buffer_mut().cursor = (0, text.find("test.algo").unwrap() + 2);
+        let cursor = editor.active_buffer().cursor;
+        editor.goto_definition();
+        assert_eq!(editor.active_buffer().id, id, "{text}");
+        assert_eq!(editor.active_buffer().cursor, cursor);
+        assert!(editor.jump_stack.is_empty());
+    }
+    // Multiline imports, comments between tokens, and repeated imports work.
+    let id = editor.open_scratch_buffer("*imports*", "(import test.algo.doc)\n(import ; comment\n  test.algo.doc :as d)\n(def unfinished");
+    editor.set_active_buffer(id);
+    editor.active_buffer_mut().cursor = (2, 5);
+    editor.goto_definition();
+    assert_eq!(editor.active_buffer().cursor, (0, 8));
+    assert_ne!(editor.active_buffer().id, id);
+    std::fs::remove_dir_all(dir).unwrap();
 }
 
 // ── Hidden-cursor infinite drag (eseq-c3xk.1) ────────────────────────────────
@@ -17722,4 +17837,46 @@ fn select_window_for_focuses_the_tile_after_a_queued_layout() {
         .unwrap();
     editor.refresh_runtime_side_effects();
     assert_eq!(editor.active_buffer().name, "*right-pane*");
+}
+
+#[test]
+fn context_menu_opened_from_inactive_tile_hover_moves_the_highlight() {
+    // Right-clicking a panel whose tile is not active opens its menu; hovering
+    // another row must move the single highlight there, not leave the first
+    // row painted as keyboard focus alongside the hovered one.
+    let _overlay_guard = OverlayClearGuard;
+    let mut editor = context_menu_two_tile_editor();
+    assert!(editor.switch_active_tile_to_buffer_named("*sequencer*"));
+    let _ = crate::ui::frame::build_tiled_render_frame_borderless(&mut editor, 60, 20);
+    right_click_at(&mut editor, 6.0, 1.5);
+    assert!(eval_bool(&mut editor, "menu-open"));
+    // Register the panel's menu overlay as the live render does for every
+    // visible tile, then hand activity back to the sequencer.
+    assert!(editor.switch_active_tile_to_buffer_named("*panel*"));
+    register_active_layout_overlays(&mut editor);
+    let entry = crate::widget_render::topmost_overlay().expect("context menu overlay entry");
+    assert!(editor.switch_active_tile_to_buffer_named("*sequencer*"));
+    crate::widget_render::push_overlay(entry);
+
+    // The panel tile stays inactive, so its menu lives in its cached layout.
+    let panel_layout = |editor: &Editor| {
+        let idx = editor.buffers.iter().position(|b| b.name == "*panel*").unwrap();
+        editor.tile_root.find_leaf_by_buffer_idx(idx).unwrap().cached_layout.clone().expect("panel layout")
+    };
+    let layout = panel_layout(&editor);
+    let delete = find_menu_item(&layout, "Delete").expect("Delete item").clone();
+    let col = delete.rect.col + delete.rect.width * 0.5;
+    let row = delete.rect.row + delete.rect.height * 0.5;
+    editor.handle_tiled_mouse_precise(
+        mouse_event(MouseEventKind::Moved, col.floor() as u16, row.floor() as u16),
+        col, row, 0,
+    );
+    let layout = panel_layout(&editor);
+    let rename = find_menu_item(&layout, "Rename").expect("Rename item").widget_id;
+    let delete = find_menu_item(&layout, "Delete").expect("Delete item").widget_id;
+    let focused: Vec<_> = editor.tile_root.leaf_ids().into_iter()
+        .filter_map(|id| editor.tile_root.find_leaf(id).and_then(|leaf| leaf.focused_widget_id))
+        .collect();
+    assert!(!focused.contains(&rename), "Rename must not stay focused: {focused:?} (rename {rename}, delete {delete})");
+    assert!(focused.contains(&delete), "hovered Delete must be focused: {focused:?}");
 }

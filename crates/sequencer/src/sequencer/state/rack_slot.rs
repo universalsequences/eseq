@@ -43,6 +43,20 @@ impl RackSlotParam {
         }
     }
 
+    /// A per-hit / macro spelling: case- and `_`/`-`-insensitive, an
+    /// optional leading `:`, plus the `transpose` and `polyphony` aliases.
+    pub fn from_label(label: &str) -> Option<Self> {
+        let normalized = label
+            .trim_start_matches(':')
+            .replace('_', "-")
+            .to_ascii_lowercase();
+        match normalized.as_str() {
+            "transpose" => Some(Self::BaseNote),
+            "polyphony" => Some(Self::MaxPolyphony),
+            other => Self::from_name(other),
+        }
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             Self::BaseNote => "base-note",

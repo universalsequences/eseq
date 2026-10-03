@@ -249,6 +249,41 @@ pub(crate) fn sanitize_pasted_step_snapshot(
 ///   - Reverb                    (no publish needed — push only, no snapshot)
 ///   - Transport                 (always publish)
 ///   - Pure UI                   (no publish)
+/// What a [`AppCommand::SetTrackTuning`] changed, for history.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TuningEdit {
+    Root,
+    Morph,
+    Mode,
+    /// Drag on one degree's detune bar.
+    Offset(usize),
+    ClearDegree(usize),
+    ToggleDegree(usize),
+    Reset,
+    Justify,
+    Randomize,
+    Stretch,
+    ImportScala,
+}
+
+impl TuningEdit {
+    pub fn label(self) -> &'static str {
+        match self {
+            TuningEdit::Root => "Set scale root",
+            TuningEdit::Morph => "Set tuning morph",
+            TuningEdit::Mode => "Set scale mapping",
+            TuningEdit::Offset(_) => "Detune scale degree",
+            TuningEdit::ClearDegree(_) => "Reset scale degree",
+            TuningEdit::ToggleDegree(_) => "Toggle scale degree",
+            TuningEdit::Reset => "Reset scale tuning",
+            TuningEdit::Justify => "Just-tune scale",
+            TuningEdit::Randomize => "Randomize scale tuning",
+            TuningEdit::Stretch => "Stretch scale",
+            TuningEdit::ImportScala => "Import Scala scale",
+        }
+    }
+}
+
 #[allow(dead_code)]
 #[derive(Clone)]
 pub enum AppCommand {
@@ -560,6 +595,17 @@ pub enum AppCommand {
     SetTrackFtsScale {
         track: usize,
         scale_idx: usize,
+    },
+
+    /// Replace a track's microtonal tuning (scale editor). `edit` only picks
+    /// the undo label and which drags coalesce.
+    SetTrackTuning {
+        track: usize,
+        tuning: Box<crate::scale::TrackTuning>,
+        /// Also set `fts_scale` (a Scala import turns an Off scale on), in
+        /// the same undo step.
+        scale_idx: Option<usize>,
+        edit: TuningEdit,
     },
 
     SetTrackAccumIdx {
@@ -1061,6 +1107,16 @@ pub fn history_policy(cmd: &AppCommand) -> super::history::HistoryPolicy {
         | AppCommand::SetTrackAccumMode { .. }
         | AppCommand::SetTrackMuteGroup { .. }
         | AppCommand::SetTrackGlobalTranspose { .. } => HistoryPolicy::Record,
+
+        AppCommand::SetTrackTuning { track, edit, .. } => match edit {
+            TuningEdit::Offset(degree) => HistoryPolicy::Coalesce(
+                super::history::MergeKey::new(format!("track:{track}:tuning-offset:{degree}")),
+            ),
+            TuningEdit::Morph => HistoryPolicy::Coalesce(super::history::MergeKey::new(
+                format!("track:{track}:tuning-morph"),
+            )),
+            _ => HistoryPolicy::Record,
+        },
 
         AppCommand::ToggleBusMute { .. } | AppCommand::ToggleBusSolo { .. } => {
             HistoryPolicy::Record
@@ -3481,7 +3537,21 @@ pub(crate) fn execute_command(app: &mut App, cmd: AppCommand) {
         }
 
         AppCommand::SetTrackFtsScale { track, scale_idx } => {
-            app.state.pattern.track_params[track].set_fts_scale(scale_idx);
+            let params = &app.state.pattern.track_params[track];
+            // A newly picked scale starts clean: the degree edits (and any
+            // imported scale) belonged to the old one.
+            if params.get_fts_scale() != scale_idx || params.tuning().custom.is_some() {
+                params.set_tuning(params.tuning().for_scale(scale_idx));
+            }
+            params.set_fts_scale(scale_idx);
+        }
+
+        AppCommand::SetTrackTuning { track, tuning, scale_idx, .. } => {
+            let params = &app.state.pattern.track_params[track];
+            if let Some(scale_idx) = scale_idx {
+                params.set_fts_scale(scale_idx);
+            }
+            params.set_tuning(*tuning);
         }
 
         AppCommand::SetTrackAccumIdx {

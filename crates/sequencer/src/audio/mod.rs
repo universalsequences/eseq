@@ -106,7 +106,7 @@ use crate::scheduled_event::{
     resolved_chord_transpose, ScheduledEffectParam, ScheduledEvent, ScheduledEventKind,
     ScheduledEventQueue, ScheduledInstrumentParam, ScheduledInstrumentParamTarget,
     ScheduledInstrumentParams, ScheduledInstrumentTensorParam, ScheduledInstrumentTensorParams,
-    ScheduledSamplerParams,
+    ScheduledRackSlotParam, ScheduledRackSlotParams, ScheduledRackSlotTarget, ScheduledSamplerParams,
 };
 use crate::sequencer::{
     rack_slot_pool_index, CustomInstrumentRunMode, InstrumentType,
@@ -130,6 +130,8 @@ mod tests;
 mod live_input_tests;
 #[cfg(test)]
 mod live_params_tests;
+#[cfg(test)]
+mod node_meter_tests;
 
 #[cfg(test)]
 pub(crate) fn resolve_snapshot_instrument_defaults_for_test(

@@ -249,6 +249,22 @@ impl RollState {
         clock: &mut SnapshotSequencerClock,
         snapshot: &SequencerSnapshot,
     ) {
+        self.apply_commands_with_clock_lagged(commands, clock, snapshot, 0.0);
+    }
+
+    /// [`Self::apply_commands_with_clock`] with window capture anchored
+    /// `lag_beats` behind the clock frontier: the worker passes the
+    /// frontier's lead over the audio render head, so a sequence-roll window
+    /// opens on the step the user HEARS, not on the step the lookahead
+    /// (target plus any early-groove discovery lead) has already reached.
+    pub(super) fn apply_commands_with_clock_lagged(
+        &mut self,
+        commands: &[RollCommand],
+        clock: &mut SnapshotSequencerClock,
+        snapshot: &SequencerSnapshot,
+        lag_beats: f64,
+    ) {
+        let at_beats = (clock.total_beats - lag_beats.max(0.0)).max(0.0);
         for command in commands {
             match *command {
                 RollCommand::SetRate { rate } => {
@@ -265,16 +281,18 @@ impl RollState {
                                 | Timebase::SixtyFourthTriplet
                         );
                     if self.sequence_rolling() && (changed || stutter_repress) {
-                        self.window_start = clock.capture_roll_windows(
+                        self.window_start = clock.capture_roll_windows_at(
                             snapshot,
                             rate.step_beats(MAX_STEPS),
+                            at_beats,
                         );
                     }
                 }
                 RollCommand::SequenceRoll { on: true } => {
-                    self.window_start = clock.capture_roll_windows(
+                    self.window_start = clock.capture_roll_windows_at(
                         snapshot,
                         self.sequence_rate.step_beats(MAX_STEPS),
+                        at_beats,
                     );
                 }
                 RollCommand::SequenceRoll { on: false } => self.window_start.fill(None),
@@ -344,23 +362,29 @@ pub(super) fn schedule_roll_hits<const QUEUE_CAP: usize>(
         return true;
     }
 
-    // Boundary catch-up: for keys pressed since the last pass, the most
-    // recent grid line at or before the scheduling frontier is emitted
-    // retroactively — but ONLY while the audio render head has not reached it
-    // yet. That line is still the next AUDIBLE boundary, so the retroactive
-    // emission is sample-exact and never late. A line the head has already
-    // rendered is simply missed: the press waits for the next boundary (F1) —
-    // emitting it would fire immediately and land audibly behind the grid,
-    // which reads as a one-off swung hit.
+    // Boundary catch-up: for keys pressed since the last pass, every grid
+    // line between the audio render head and the scheduling frontier is
+    // emitted retroactively. The frontier can lead the head by more than one
+    // grid line (the lookahead target plus any early-groove discovery lead,
+    // at fine roll rates), and every one of those lines is still AUDIBLE, so
+    // each retroactive emission is sample-exact and never late. A line the
+    // head has already rendered is simply missed: the press waits for the
+    // next boundary (F1) — emitting it would fire immediately and land
+    // audibly behind the grid, which reads as a one-off swung hit.
     let groove_floor = clock.groove_floor(rendered);
     let pressed = std::mem::take(&mut roll.newly_pressed);
     if !pressed.is_empty() {
-        let line_beats = ((chunk_start_beats + EPS) / grid_beats).floor() * grid_beats;
         let rendered_beats = chunk_start_beats
             - chunk_start_sample.saturating_sub(rendered) as f64 / samples_per_quarter;
-        // A line at (or an epsilon before) chunk_start is emitted by the
-        // regular scan below — no catch-up needed, no double fire.
-        if line_beats < chunk_start_beats - EPS && line_beats >= rendered_beats - EPS {
+        let mut line_index = ((rendered_beats - EPS) / grid_beats).ceil().max(0.0) as i64;
+        loop {
+            let line_beats = line_index as f64 * grid_beats;
+            // A line at (or an epsilon before) chunk_start is emitted by the
+            // regular scan below — no catch-up needed, no double fire.
+            if line_beats >= chunk_start_beats - EPS {
+                break;
+            }
+            line_index += 1;
             let sample_time = chunk_start_sample.saturating_sub(
                 ((chunk_start_beats - line_beats) * samples_per_quarter).round() as u64,
             );
@@ -538,6 +562,7 @@ fn emit_roll_hit<const QUEUE_CAP: usize>(
         instrument_tensor_params: resolve_instrument_tensor_defaults(snapshot, track),
         sampler_params: resolve_sampler_defaults(snapshot, track),
         rack_macro_values: [None; crate::sequencer::RACK_MACRO_COUNT],
+        rack_slot_params: Default::default(),
         // Step 0 stands in as the source step: roll hits are live events,
         // not pattern reads. The fingerprint is recomputed by
         // `enqueue_resolved_trigger`.

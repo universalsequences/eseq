@@ -1,0 +1,166 @@
+{
+ "modes": 688,
+ "ring_modes": 640,
+ "attack_modes": 48,
+ "dropped_ring_modes": 1495,
+ "wash_bands": 20,
+ "kept_ring_energy_fraction": 0.94612,
+ "strokes": [
+  {
+   "slug": "ride",
+   "key": 60,
+   "reference_onset_s": 9.15618,
+   "ring_energy_db": -33.26,
+   "contact": {
+    "click_rms": 0.0434277318292646,
+    "click_decay_s": 0.0007616953846153845,
+    "centre_hz": 7246.900687743932,
+    "peak_ms": 1.323
+   }
+  },
+  {
+   "slug": "ride-push",
+   "key": 61,
+   "reference_onset_s": 3.03902,
+   "ring_energy_db": -35.4,
+   "contact": {
+    "click_rms": 0.04192399766304818,
+    "click_decay_s": 0.006,
+    "centre_hz": 6891.68311631586,
+    "peak_ms": 1.631
+   }
+  },
+  {
+   "slug": "ride-soft",
+   "key": 62,
+   "reference_onset_s": 6.58305,
+   "ring_energy_db": -38.86,
+   "contact": {
+    "click_rms": 0.04036151691092043,
+    "click_decay_s": 0.006,
+    "centre_hz": 8217.072756525156,
+    "peak_ms": 2.031
+   }
+  },
+  {
+   "slug": "ghost",
+   "key": 63,
+   "reference_onset_s": 3.64963,
+   "ring_energy_db": -44.05,
+   "contact": {
+    "click_rms": 0.033563781670064394,
+    "click_decay_s": 0.006,
+    "centre_hz": 7112.2920995778295,
+    "peak_ms": 1.415
+   }
+  },
+  {
+   "slug": "tip",
+   "key": 64,
+   "reference_onset_s": 7.2152,
+   "ring_energy_db": -40.32,
+   "contact": {
+    "click_rms": 0.035223069523352905,
+    "click_decay_s": 0.006,
+    "centre_hz": 8173.015086803931,
+    "peak_ms": 3.754
+   }
+  },
+  {
+   "slug": "dark",
+   "key": 65,
+   "reference_onset_s": 8.82926,
+   "ring_energy_db": -39.08,
+   "contact": {
+    "click_rms": 0.030133159803634468,
+    "click_decay_s": 0.006,
+    "centre_hz": 6841.843809324032,
+    "peak_ms": 1.2
+   }
+  },
+  {
+   "slug": "shoulder",
+   "key": 66,
+   "reference_onset_s": 6.22754,
+   "ring_energy_db": -34.15,
+   "contact": {
+    "click_rms": 0.06282713465517581,
+    "click_decay_s": 0.006,
+    "centre_hz": 6183.13733499408,
+    "peak_ms": 2.677
+   }
+  },
+  {
+   "slug": "shoulder-accent",
+   "key": 67,
+   "reference_onset_s": 9.81597,
+   "ring_energy_db": -32.88,
+   "contact": {
+    "click_rms": 0.06863123071497462,
+    "click_decay_s": 0.006,
+    "centre_hz": 6956.3728869541,
+    "peak_ms": 3.938
+   }
+  },
+  {
+   "slug": "shoulder-soft",
+   "key": 68,
+   "reference_onset_s": 3.97711,
+   "ring_energy_db": -38.11,
+   "contact": {
+    "click_rms": 0.046846834047792746,
+    "click_decay_s": 0.006,
+    "centre_hz": 7928.232088606001,
+    "peak_ms": 1.754
+   }
+  },
+  {
+   "slug": "ping",
+   "key": 69,
+   "reference_onset_s": 7.57209,
+   "ring_energy_db": -33.51,
+   "contact": {
+    "click_rms": 0.04817720978358631,
+    "click_decay_s": 0.006,
+    "centre_hz": 6929.123198449998,
+    "peak_ms": 1.323
+   }
+  },
+  {
+   "slug": "bell",
+   "key": 70,
+   "reference_onset_s": 5.23917,
+   "ring_energy_db": -29.23,
+   "contact": {
+    "click_rms": 0.03976286172830591,
+    "click_decay_s": 0.006,
+    "centre_hz": 6100.459826820456,
+    "peak_ms": 3.538
+   }
+  },
+  {
+   "slug": "bell-open",
+   "key": 71,
+   "reference_onset_s": 4.61658,
+   "ring_energy_db": -29.8,
+   "contact": {
+    "click_rms": 0.04211124626040766,
+    "click_decay_s": 0.006,
+    "centre_hz": 5966.522536304023,
+    "peak_ms": 3.446
+   }
+  }
+ ],
+ "substitutes": {
+  "0": 7,
+  "1": 15,
+  "2": 5,
+  "3": 7,
+  "4": 21,
+  "6": 7,
+  "11": 5,
+  "16": 5,
+  "17": 7,
+  "18": 7
+ }
+}

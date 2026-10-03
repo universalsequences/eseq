@@ -17,6 +17,9 @@
 ;; The *processes* dock that takes the right column (*step*/*track*) while a
 ;; node editor is open (ui/processes-buffer.lisp); late-bound back the same way.
 (import eseq.processes-buffer :as procs)
+;; The scale editor grows the *track* tile while it is open; it re-lays out
+;; late-bound too.
+(import eseq.effects.scale-editor :as scale-editor)
 
 (export buffer-radius
         transport-height
@@ -72,7 +75,11 @@
       (processes-dock-layout-spec)
       (list :rows :gap 1
         0.48 (list :buf "*step*" :hide-status true :border-radius (eseq.seq-core-state/radius buffer-radius) :border-width border-width :background-color :buffer-bg :min-width 28 :max-width 28)
-        0.52 (list :buf "*track*" :hide-status true :border-radius (eseq.seq-core-state/radius buffer-radius) :border-width border-width :background-color :buffer-bg :max-height 7 :min-height 7 :min-width 28 :max-width 28)))))
+        0.52 (list :buf "*track*" :hide-status true :border-radius (eseq.seq-core-state/radius buffer-radius) :border-width border-width :background-color :buffer-bg :max-height (track-tile-height) :min-height (track-tile-height) :min-width 28 :max-width 28)))))
+
+;; *track* is a fixed 7 rows; the scale editor needs 13 while it is open.
+(def track-tile-height ()
+  (if scale-editor/scale-editor-open 13 7))
 
 (def main-panel-layout-spec ()
   (if (eseq.seq-step-tabs/seq-arrangement-view?)

@@ -6,14 +6,13 @@
 //! - `SEQ.rack-grooves` is STRUCTURAL: one entry per drum rack with the
 //!   project pool's grooves, the picker (labels + parallel keys + header
 //!   indices) and the active groove. It changes on extract / pick / rename /
-//!   delete. The rack panel no longer draws a heatmap (eseq-groove.12): a
-//!   groove's map is the Grooves tab's preview, on `SEQ.groove-pool`.
+//!   delete.
 //! - `SEQ.rack-groove-{timing,velocity,random}-<group id>` are the amounts,
 //!   scalar fields the Timing / Velocity / Random knobs bind to.
 //!
 //! Rev 2 (eseq-groove.9): grooves live in the project pool and racks point
-//! into it. `SEQ.groove-pool` lists the pool with each groove's instances
-//! (the racks playing it); `SEQ.groove-library` lists the factory + user
+//! into it. `SEQ.groove-pool` lists the pool (`{id key name grid}`);
+//! `SEQ.groove-library` lists the factory + user
 //! `.groove` files (`{key name tier}`), whose picker entries copy-on-apply.
 
 use super::*;
@@ -30,6 +29,9 @@ pub(crate) const GROOVE_PICKER_OFF: &str = "No groove";
 pub(crate) const GROOVE_PICKER_PROJECT_HEADER: &str = "This project";
 pub(crate) const GROOVE_PICKER_FACTORY_HEADER: &str = "Factory";
 pub(crate) const GROOVE_PICKER_LIBRARY_HEADER: &str = "Library";
+/// The picker's `:footer` action label; must match `extract-label` in
+/// content/ui/rack-groove-buffer.lisp, whose handler checks it first.
+const GROOVE_PICKER_EXTRACT: &str = "Extract from this rack’s clip…";
 
 fn reserved_picker_label(label: &str) -> bool {
     [
@@ -37,6 +39,7 @@ fn reserved_picker_label(label: &str) -> bool {
         GROOVE_PICKER_PROJECT_HEADER,
         GROOVE_PICKER_FACTORY_HEADER,
         GROOVE_PICKER_LIBRARY_HEADER,
+        GROOVE_PICKER_EXTRACT,
     ]
     .contains(&label)
 }
@@ -130,74 +133,15 @@ pub(crate) fn picker(pool: &[ProjectGroove], library: &[GrooveLibraryEntry]) -> 
     }
 }
 
-/// How many times the groove's period repeats across the heatmap: a groove
-/// shorter than a bar (the two-slot MPC swings) is tiled out to one bar, so
-/// the map always reads as a bar of the pocket.
+/// How many times the groove's period repeats across the buffer's lanes: a
+/// groove shorter than a bar (the two-slot MPC swings) is tiled out to one
+/// bar, so the lanes always read as a bar of the pocket.
 fn heat_repeats(groove: &ProjectGroove) -> usize {
     if groove.period_beats >= GROOVE_PERIOD_ONE_BAR - 1e-9 || groove.period_beats <= 0.0 {
         1
     } else {
         ((GROOVE_PERIOD_ONE_BAR / groove.period_beats).round() as usize).max(1)
     }
-}
-
-/// A groove's own heatmap, independent of any rack (the Grooves tab's
-/// preview): the "All" (shared) row, then one row per recorded pad row in
-/// pad-note order, labelled by its role where the row recorded one, else by
-/// its pad note. Same cell shape as the rack panel's map.
-pub(crate) fn groove_preview_heatmap(groove: &ProjectGroove) -> Value {
-    let repeats = heat_repeats(groove);
-    let row_value = |label: String,
-                     pad_note: Option<i32>,
-                     role: Option<&str>,
-                     row: &sequencer::groove::GrooveRow| {
-        let cells = (0..repeats).flat_map(|_| row.slots.iter());
-        map_value([
-            ("label", Value::String(label.into())),
-            (
-                "pad-note",
-                pad_note.map_or(Value::Nil, |note| Value::Number(note as f64)),
-            ),
-            (
-                "role",
-                role.map_or(Value::Nil, |role| Value::String(role.to_string().into())),
-            ),
-            ("own", Value::Bool(true)),
-            (
-                "cells",
-                list_value(cells.clone().map(|slot| Value::Number(slot.offset as f64))),
-            ),
-            (
-                "measured",
-                list_value(cells.map(|slot| Value::Bool(slot.source.is_measured()))),
-            ),
-        ])
-    };
-    let mut pad_rows: Vec<&sequencer::groove::GroovePadRow> = groove.pad_rows.iter().collect();
-    pad_rows.sort_by_key(|row| row.pad_note);
-    let mut rows = vec![row_value("All".to_string(), None, None, &groove.shared_row)];
-    for pad_row in pad_rows {
-        let label = pad_row
-            .role
-            .map(|role| role.label().to_string())
-            .unwrap_or_else(|| drum_rack_pad_label(pad_row.pad_note));
-        rows.push(row_value(
-            label,
-            Some(pad_row.pad_note),
-            pad_row.role.map(|role| role.key()),
-            &pad_row.row,
-        ));
-    }
-    map_value([
-        (
-            "slots",
-            Value::Number((groove.slot_count() * repeats) as f64),
-        ),
-        ("period-beats", Value::Number(groove.period_beats)),
-        ("resolution-beats", Value::Number(groove.resolution_beats)),
-        ("grid", Value::String(groove_grid_label(groove).into())),
-        ("rows", list_value(rows.into_iter())),
-    ])
 }
 
 fn resolution_label(resolution_beats: f64) -> &'static str {
@@ -322,7 +266,7 @@ fn picker_details(
                     other
                         .rack
                         .as_ref()
-                        .is_some_and(|rack| rack.groove.active == Some(id))
+                        .is_some_and(|rack| rack.plays_groove(id))
                 })
                 .map(|other| other.name.as_str())
                 .collect();
@@ -489,28 +433,11 @@ pub(crate) fn build_rack_grooves_value(
     }))
 }
 
-/// `SEQ.groove-pool`: every pool groove with its instances (the racks
-/// playing it, with their amounts).
-pub(crate) fn build_groove_pool_value(
-    groups: &[ProjectTrackGroup],
-    pool: &[ProjectGroove],
-) -> Value {
+/// `SEQ.groove-pool`: every pool groove's identity and grid, all the rack
+/// groove buffer reads (extract naming, rename). Nothing per-rack rides on
+/// it, so an amount drag never changes it.
+pub(crate) fn build_groove_pool_value(pool: &[ProjectGroove]) -> Value {
     list_value(pool.iter().map(|groove| {
-        let instances = groups.iter().filter_map(|group| {
-            let rack = group.rack.as_ref()?;
-            (rack.groove.active == Some(groove.id)).then(|| {
-                map_value([
-                    ("group-id", Value::Number(group.id as f64)),
-                    ("name", Value::String(group.name.clone().into())),
-                    ("timing", Value::Number(rack.groove.timing_amount as f64)),
-                    (
-                        "velocity",
-                        Value::Number(rack.groove.velocity_amount as f64),
-                    ),
-                    ("random", Value::Number(rack.groove.random_amount as f64)),
-                ])
-            })
-        });
         map_value([
             ("id", Value::Number(groove.id as f64)),
             (
@@ -519,11 +446,6 @@ pub(crate) fn build_groove_pool_value(
             ),
             ("name", Value::String(groove.name.clone().into())),
             ("grid", Value::String(groove_grid_label(groove).into())),
-            ("heatmap", groove_preview_heatmap(groove)),
-            (
-                "instances",
-                list_value(instances.collect::<Vec<_>>().into_iter()),
-            ),
         ])
     }))
 }
@@ -588,11 +510,84 @@ pub(crate) fn sync_rack_groove_state(
         "rack-grooves",
         build_rack_grooves_value(groups, pool, &library),
     );
-    rt.set_reactive("SEQ", "groove-pool", build_groove_pool_value(groups, pool));
+    rt.set_reactive("SEQ", "groove-pool", build_groove_pool_value(pool));
     rt.set_reactive(
         "SEQ",
         "groove-library",
         build_groove_library_value(&library),
     );
     sync_rack_groove_amount_fields(rt, groups);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sequencer::groove::RackGrooveSettings;
+    use sequencer::project::RackClipGroove;
+
+    fn rack_group(id: u64, name: &str, rack: ProjectRackConfig) -> ProjectTrackGroup {
+        ProjectTrackGroup {
+            id,
+            name: name.to_string(),
+            color: [0.0; 3],
+            collapsed: false,
+            members: Vec::new(),
+            bus_id: id,
+            rack: Some(rack),
+            rack_members: Vec::new(),
+        }
+    }
+
+    /// A rack that plays a pool groove only through one clip's own groove
+    /// still counts as playing it: the picker says so, as the delete
+    /// confirm (`App::racks_using_groove`) does.
+    #[test]
+    fn rack_groove_picker_details_count_clip_grooves() {
+        let groove = ProjectGroove {
+            id: 7,
+            name: "Take".to_string(),
+            period_beats: GROOVE_PERIOD_ONE_BAR,
+            resolution_beats: 0.25,
+            pad_rows: Vec::new(),
+            shared_row: sequencer::groove::GrooveRow { slots: Vec::new() },
+        };
+        let kit_b = ProjectRackConfig {
+            clip_grooves: vec![RackClipGroove {
+                clip: 3,
+                settings: RackGrooveSettings {
+                    active: Some(groove.id),
+                    ..RackGrooveSettings::default()
+                },
+            }],
+            ..ProjectRackConfig::default()
+        };
+        assert_eq!(kit_b.groove.active, None, "the rack's own groove is off");
+        let groups = vec![
+            rack_group(1, "Kit A", ProjectRackConfig::default()),
+            rack_group(2, "Kit B", kit_b),
+        ];
+        let value = build_rack_grooves_value(&groups, std::slice::from_ref(&groove), &[]);
+        let Value::List(entries) = value else {
+            panic!("rack-grooves is a list");
+        };
+        let entry = entries[0].borrow().clone();
+        let field = |key: &str| -> Vec<Value> {
+            let Value::Map(map) = &entry else {
+                panic!("an entry is a map");
+            };
+            let Value::List(items) = map.get(key).expect(key).borrow().clone() else {
+                panic!("{key} is a list");
+            };
+            items.iter().map(|cell| cell.borrow().clone()).collect()
+        };
+        let key = GrooveChoice::Pool(groove.id).picker_key();
+        let index = field("picker-keys")
+            .iter()
+            .position(|k| *k == Value::String(key.clone().into()))
+            .expect("the pool groove is in the picker");
+        assert_eq!(
+            field("picker-details")[index],
+            Value::String("on Kit B".into())
+        );
+    }
 }

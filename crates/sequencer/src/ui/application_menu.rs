@@ -543,6 +543,28 @@ pub(crate) fn choose_package_path() -> Result<Option<PathBuf>, String> {
         .find_map(|url| url.path().map(|path| PathBuf::from(path.to_string()))))
 }
 
+/// Scale editor `.scl…`: one Scala scale file. `None` when the user cancels.
+#[cfg(target_os = "macos")]
+pub(crate) fn choose_scala_path() -> Result<Option<PathBuf>, String> {
+    use objc2_app_kit::{NSModalResponseOK, NSOpenPanel};
+    use objc2_foundation::{MainThreadMarker, NSString};
+    let mtm = MainThreadMarker::new().ok_or("File picker requires the UI thread")?;
+    let panel = NSOpenPanel::openPanel(mtm);
+    panel.setCanChooseFiles(true);
+    panel.setCanChooseDirectories(false);
+    panel.setAllowsMultipleSelection(false);
+    panel.setTitle(Some(&NSString::from_str("Import Scala Scale")));
+    panel.setMessage(Some(&NSString::from_str("Choose a Scala .scl scale file.")));
+    panel.setPrompt(Some(&NSString::from_str("Import")));
+    if panel.runModal() != NSModalResponseOK {
+        return Ok(None);
+    }
+    Ok(panel
+        .URLs()
+        .iter()
+        .find_map(|url| url.path().map(|path| PathBuf::from(path.to_string()))))
+}
+
 /// File > Export Package…: where to write the `.eseqpack` archive. `None`
 /// when the user cancels.
 #[cfg(target_os = "macos")]

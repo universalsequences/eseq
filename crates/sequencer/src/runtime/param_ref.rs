@@ -166,14 +166,19 @@ fn nonempty<'a>(text: &'a str, what: &str, label: &str) -> Result<&'a str, Strin
 }
 
 /// `NAME:PARAM` with both halves non-empty; PARAM keeps any further colons.
+/// A package id NAME (`pkg:author.name/path`) keeps its own `pkg:` prefix:
+/// the separator is the first `:` after it (package paths hold no colon).
 fn split_name_param<'a>(
     rest: &'a str,
     what: &str,
     label: &str,
 ) -> Result<(&'a str, &'a str), String> {
-    let (name, param) = rest
-        .split_once(':')
+    let skip = if rest.starts_with("pkg:") { 4 } else { 0 };
+    let sep = rest[skip..]
+        .find(':')
+        .map(|i| i + skip)
         .ok_or_else(|| format!("expected {what}:param in parameter name {label:?}"))?;
+    let (name, param) = (&rest[..sep], &rest[sep + 1..]);
     Ok((
         nonempty(name, what, label)?,
         nonempty(param, "param", label)?,
@@ -364,6 +369,17 @@ mod tests {
                 fx: "arp".to_string(),
                 param: "rate".to_string(),
             },
+            ParamTarget::EffectParam {
+                slot: 0,
+                effect: "pkg:alec.fx/comp".to_string(),
+                param: "mix".to_string(),
+                param_id: None,
+            },
+            ParamTarget::MidiFxParam {
+                slot: 1,
+                fx: "pkg:alec.midi/arp".to_string(),
+                param: "rate".to_string(),
+            },
             ParamTarget::RackSlotParam {
                 slot: 2,
                 param: "gain".to_string(),
@@ -432,6 +448,22 @@ mod tests {
             Ok(ParamRef::MidiFx {
                 slot: None,
                 fx: "Arp".to_string(),
+                param: "rate".to_string(),
+            })
+        );
+        assert_eq!(
+            ParamRef::parse("effect-param:pkg:a.b/c:mix"),
+            Ok(ParamRef::Effect {
+                slot: None,
+                effect: "pkg:a.b/c".to_string(),
+                param: "mix".to_string(),
+            })
+        );
+        assert_eq!(
+            ParamRef::parse("midi-fx-param:pkg:a.b/arp:rate"),
+            Ok(ParamRef::MidiFx {
+                slot: None,
+                fx: "pkg:a.b/arp".to_string(),
                 param: "rate".to_string(),
             })
         );

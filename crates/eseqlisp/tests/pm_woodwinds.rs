@@ -138,5 +138,5 @@ fn factory_gamelan_sidecars_preserve_executable_controls() {
 
 #[test]
 fn factory_cymbal_sidecars_preserve_executable_controls() {
-    check_factory_sidecars(&["PM Crash", "PM Ride", "PM Hi-Hat"]);
+    check_factory_sidecars(&["PM Crash", "PM Ride/versions/1", "PM Hi-Hat"]);
 }

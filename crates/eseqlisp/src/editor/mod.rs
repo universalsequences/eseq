@@ -2732,16 +2732,30 @@ impl Editor {
             return;
         }
 
-        let hovered = self.tile_root.find_leaf(tile_id).and_then(|leaf| {
+        let hit = self.tile_root.find_leaf(tile_id).and_then(|leaf| {
             let layout = leaf.cached_layout.as_deref()?;
             let modal = widget_focus::find_node_by_id(layout, entry.widget_id)
                 .or_else(|| widget_focus::find_open_modal_node(layout).cloned())?;
             let layout_col = local_col + leaf.widget_scroll_left;
             let layout_row = local_row + leaf.widget_scroll_top;
-            crate::ui::layout::hit_test_layout(&modal, layout_row, layout_col)
-                .map(|node| node.widget_id)
+            let hit = crate::ui::layout::hit_test_layout(&modal, layout_row, layout_col)?;
+            Some((modal.widget_type == "context-menu", hit.clone()))
         });
-        if crate::widget_render::set_pointer_hover_widget(hovered) {
+        if crate::widget_render::set_pointer_hover_widget(hit.as_ref().map(|(_, node)| node.widget_id)) {
+            self.mark_needs_redraw();
+        }
+        // A context menu shares one highlight between hover and keyboard focus
+        // (the active-tile path moves focus on hover too). The modal focus trap
+        // focused the first row in the owner tile; without this, that row stays
+        // lit beside the hovered one while the owner tile is inactive.
+        if let Some((true, node)) = hit
+            && node.widget_type == "menu-item"
+            && !crate::widget_render::context_menu::item_disabled(&node.props)
+            && let Some(leaf) = self.tile_root.find_leaf_mut(tile_id)
+            && leaf.focused_widget_id != Some(node.widget_id)
+        {
+            leaf.focused_widget_id = Some(node.widget_id);
+            leaf.focused_widget_node = Some(node);
             self.mark_needs_redraw();
         }
         self.widget_cursor = WidgetCursor::Default;
@@ -4025,9 +4039,12 @@ impl Editor {
             return;
         };
 
-        let Some(location) = self.find_definition(&symbol) else {
-            self.show_transient_message(format!("Definition not found: {symbol}"));
-            return;
+        let location = match self.find_definition(&symbol) {
+            Ok(location) => location,
+            Err(error) => {
+                self.show_transient_message(error);
+                return;
+            }
         };
 
         let current = Mark {
@@ -4109,93 +4126,41 @@ impl Editor {
         Some(chars[start..end].iter().collect())
     }
 
-    fn find_definition(&self, symbol: &str) -> Option<DefinitionLocation> {
-        // `module/name`: resolve the module to its file first, then look the
-        // bare name up there. A definition is spelled `(def name …)` inside a
-        // `(module module)` file, so the qualified spelling never matches a
-        // def head verbatim.
+    fn find_definition(&self, symbol: &str) -> Result<DefinitionLocation, String> {
+        let text = self.active_buffer().text();
+        if find_named_form(&text, "import", symbol, Some(self.active_buffer().cursor)).is_some() {
+            return self.find_module_definition(symbol, None);
+        }
         if let Some((module, name)) = crate::modules::split_qualified(symbol) {
-            if let Some(location) = self.find_qualified_definition(module, name) {
-                return Some(location);
-            }
-            return self.find_unqualified_definition(name);
+            return self.find_module_definition(module, Some(name));
         }
         self.find_unqualified_definition(symbol)
+            .ok_or_else(|| format!("Definition not found: {symbol}"))
     }
 
-    fn find_qualified_definition(&self, module: &str, name: &str) -> Option<DefinitionLocation> {
-        for buffer in &self.buffers {
-            let text = buffer.text();
-            if !text_declares_module(&text, module) {
-                continue;
-            }
-            if let Some(cursor) = find_definition_in_text(&text, name) {
-                return Some(DefinitionLocation {
-                    path: buffer.path.clone(),
-                    buffer_id: Some(buffer.id),
-                    cursor,
-                });
-            }
-        }
-
-        let open_paths: HashSet<PathBuf> = self
-            .buffers
-            .iter()
-            .filter_map(|buffer| buffer.path.clone())
-            .collect();
-        let mut tried = HashSet::new();
-        let mut roots = Vec::new();
-        if let Some(path) = self.active_buffer().path.as_ref() {
-            let mut ancestor = path.parent();
-            while let Some(dir) = ancestor {
-                roots.push(dir.to_path_buf());
-                ancestor = dir.parent();
-            }
-        } else if let Ok(cwd) = std::env::current_dir() {
-            roots.push(cwd);
-        }
-        let candidates = crate::modules::module_relative_file_candidates(module);
-        for root in roots {
-            for candidate in &candidates {
-                let path = root.join(candidate);
-                if open_paths.contains(&path) || !tried.insert(path.clone()) {
-                    continue;
-                }
-                let Ok(text) = std::fs::read_to_string(&path) else {
-                    continue;
-                };
-                if !text_declares_module(&text, module) {
-                    continue;
-                }
-                if let Some(cursor) = find_definition_in_text(&text, name) {
-                    return Some(DefinitionLocation {
-                        path: Some(path),
-                        buffer_id: None,
-                        cursor,
-                    });
-                }
-            }
-        }
-
-        for path in self.definition_search_paths() {
-            if open_paths.contains(&path) || !tried.insert(path.clone()) {
-                continue;
-            }
-            let Ok(text) = std::fs::read_to_string(&path) else {
-                continue;
-            };
-            if !text_declares_module(&text, module) {
-                continue;
-            }
-            if let Some(cursor) = find_definition_in_text(&text, name) {
-                return Some(DefinitionLocation {
-                    path: Some(path),
-                    buffer_id: None,
-                    cursor,
-                });
-            }
-        }
-        None
+    fn find_module_definition(
+        &self,
+        module: &str,
+        name: Option<&str>,
+    ) -> Result<DefinitionLocation, String> {
+        let source = self.runtime.module_source_for_navigation(
+            module,
+            self.active_buffer().path.as_deref(),
+            self.snapshot_file_backed_sources(),
+        ).map_err(|error| format!("Cannot resolve module {module}: {error}"))?;
+        let declaration = find_named_form(&source.text, "module", module, None)
+            .ok_or_else(|| format!("{} does not declare module {module}", source.path.display()))?;
+        let cursor = match name {
+            Some(name) => find_definition_in_text(&source.text, name)
+                .ok_or_else(|| format!("Definition not found: {module}/{name}"))?,
+            None => declaration,
+        };
+        let buffer_id = self.buffers.iter().find(|buffer| {
+            buffer.path.as_ref().is_some_and(|path| {
+                path == &source.path || std::fs::canonicalize(path).ok().as_ref() == Some(&source.path)
+            })
+        }).map(|buffer| buffer.id);
+        Ok(DefinitionLocation { path: Some(source.path), buffer_id, cursor })
     }
 
     fn find_unqualified_definition(&self, symbol: &str) -> Option<DefinitionLocation> {
@@ -9168,6 +9133,9 @@ impl Editor {
         // Process widget tree rendering (stored per-buffer)
         if let Some(tree) = self.runtime.take_pending_widget_tree() {
             crate::widget_render::clear_overlay();
+            // The new tree dismisses any open matrix stock menu without its
+            // `:on-close`; drop it so it cannot reattach later.
+            crate::widget_render::matrix::reset_builtin_menu();
             match tree {
                 Value::Nil | Value::Bool(false) => {
                     let buffer = self.active_buffer_mut();
@@ -10433,22 +10401,33 @@ fn collect_lisp_files(root: &std::path::Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// True when `text` carries a top-level `(module <module>)` declaration.
-fn text_declares_module(text: &str, module: &str) -> bool {
-    let mut search = 0usize;
-    while let Some(found) = text[search..].find("(module") {
-        let after = search + found + "(module".len();
-        search = after;
-        if !text[after..].starts_with(|c: char| c.is_whitespace()) {
-            continue;
-        }
-        let name_start = skip_ws_and_comments(text, after);
-        let name_end = advance_symbol(text, name_start);
-        if &text[name_start..name_end] == module {
-            return true;
+/// Find a real top-level named form, never text inside a comment/string/quote.
+/// Read one form at a time so an unfinished later form does not hide the header.
+fn find_named_form(
+    text: &str,
+    head: &str,
+    name: &str,
+    at: Option<(usize, usize)>,
+) -> Option<(usize, usize)> {
+    use crate::parser::{ExprKind, Parser, SpannedASTParser};
+    let tokens = Parser::new(text.to_string()).parse_spanned().ok()?;
+    let mut parser = SpannedASTParser::new(tokens);
+    while parser.peek().is_some() {
+        let expr = parser.parse_expression().ok()?;
+        let ExprKind::List(items) = expr.kind else { continue };
+        if let [first, second, ..] = items.as_slice() {
+            if matches!(&first.kind, ExprKind::Symbol(value) if value == head)
+                && matches!(&second.kind, ExprKind::Symbol(value) if value == name)
+            {
+                let start = offset_to_position(text, second.origin.primary_span.start_byte);
+                let end = offset_to_position(text, second.origin.primary_span.end_byte);
+                if at.is_none_or(|cursor| cursor >= start && cursor <= end) {
+                    return Some(start);
+                }
+            }
         }
     }
-    false
+    None
 }
 
 fn find_definition_in_text(text: &str, symbol: &str) -> Option<(usize, usize)> {

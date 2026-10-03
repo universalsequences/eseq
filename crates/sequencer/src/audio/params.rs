@@ -50,11 +50,16 @@ pub(super) fn resolve_live_keyboard_transpose(
         Some(def) if def.name == "TransposeRamp" => raw_transpose + accumulator_state.value,
         _ => raw_transpose,
     };
-    let fts = tp.get_fts_scale();
-    let quantized = if fts > 0 {
-        crate::scale::quantize_transpose(with_accumulator, fts)
-    } else {
-        with_accumulator
+    // The scale and its tuning come from the published snapshot (the tuning
+    // sits behind a UI-side mutex the audio thread must not take); the atomic
+    // covers a track the snapshot has not caught up with yet.
+    let quantized = match snapshot.tracks.get(track_idx) {
+        Some(track) => crate::scale::quantize(
+            with_accumulator,
+            track.params.fts_scale,
+            &track.params.tuning,
+        ),
+        None => crate::scale::quantize_transpose(with_accumulator, tp.get_fts_scale()),
     };
     // Match scheduled playback: scene transpose comes after fit-to-scale.
     // Use the callback's published snapshot, never lock the scene store on

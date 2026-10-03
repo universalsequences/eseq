@@ -196,16 +196,20 @@
       ;; Rack-level fx still matter: the bus chain stays right here, edited the
       ;; same way an ordinary bus selection edits it.
       (each (filter |fx| (> (len (get fx :params)) 0) (selected-bus-effects)) |fx slot-idx|
-        (subtree :key (str "bus-fx-panel-" (get fx :bus-idx) "-" (get fx :slot-idx) "-" (get fx :name))
-          (ep/fx-panel (get fx :name) (get fx :params) fx)))
+        (h-stack :gap 1 :height st/fx-fixed-panel-height :align :stretch
+          (subtree :key (str "bus-fx-panel-" (get fx :bus-idx) "-" (get fx :slot-idx) "-" (get fx :name))
+            (ep/fx-panel (get fx :name) (get fx :params) fx))
+          (pf/device-output-meter (get fx :meter))))
       (drop-placeholder-panel))))
 
 (def bus-selection-panel ()
   (v-stack :padding 0.05 :gap 1
     (h-stack :gap 1
       (each (filter |fx| (> (len (get fx :params)) 0) (selected-bus-effects)) |fx slot-idx|
-        (subtree :key (str "bus-fx-panel-" (get fx :bus-idx) "-" (get fx :slot-idx) "-" (get fx :name))
-          (ep/fx-panel (get fx :name) (get fx :params) fx)))
+        (h-stack :gap 1 :height st/fx-fixed-panel-height :align :stretch
+          (subtree :key (str "bus-fx-panel-" (get fx :bus-idx) "-" (get fx :slot-idx) "-" (get fx :name))
+            (ep/fx-panel (get fx :name) (get fx :params) fx))
+          (pf/device-output-meter (get fx :meter))))
       (drop-placeholder-panel))))
 
 ;; Keep this as a macro rather than a normal function. Custom instrument/effect
@@ -213,24 +217,28 @@
 ;; strip must remain inline at the effect-buffer callsite.
 (defmacro track-selection-panel ()
   `(v-stack :padding 0.05 :gap 1
-    (h-stack :gap 1
+    (h-stack :gap 0.5
       (each SEQ.instrument-panel |inst inst-idx|
-        (if (= (get inst :type) "rack")
-          (h-stack :gap 0.2 :height st/fx-fixed-panel-height :align :stretch
-            (ip/instrument-panel inst)
-            (if (st/rack-panel-selected-chain-open inst)
-              (h-stack :debug-name "rack-selected-chain-fx"
-                :gap 1 :height st/fx-fixed-panel-height :align :stretch
-                (ip/rack-selected-fx-panel inst)
-                (ip/rack-slot-fx-drop-panel inst)
-                (ip/rack-slot-track-fx-divider))
-              (box :width 0 :height 0)))
-          (ip/instrument-panel inst)))
+        (h-stack :gap 0.5 :height st/fx-fixed-panel-height :align :stretch
+          (if (= (get inst :type) "rack")
+            (h-stack :gap 0.2 :height st/fx-fixed-panel-height :align :stretch
+              (ip/instrument-panel inst)
+              (if (st/rack-panel-selected-chain-open inst)
+                (h-stack :debug-name "rack-selected-chain-fx"
+                  :gap 1 :height st/fx-fixed-panel-height :align :stretch
+                  (ip/rack-selected-fx-panel inst)
+                  (ip/rack-slot-fx-drop-panel inst)
+                  (ip/rack-slot-track-fx-divider))
+                (box :width 0 :height 0)))
+            (ip/instrument-panel inst))
+          (pf/device-output-meter (get inst :meter))))
       (each (filter |fx| (> (len (get fx :params)) 0) SEQ.midi-effects) |fx slot-idx|
         (ep/midi-fx-panel (get fx :name) (get fx :params) fx))
       (each (filter |fx| (> (len (get fx :params)) 0) SEQ.effects) |fx slot-idx|
-        (subtree :key (str "audio-fx-panel-" (get fx :slot-idx) "-" (get fx :name))
-          (ep/fx-panel (get fx :name) (get fx :params) fx)))
+        (h-stack :gap 0.5 :height st/fx-fixed-panel-height :align :stretch
+          (subtree :key (str "audio-fx-panel-" (get fx :slot-idx) "-" (get fx :name))
+            (ep/fx-panel (get fx :name) (get fx :params) fx))
+          (pf/device-output-meter (get fx :meter))))
       (track-drop-placeholder-panel))))
 
 (effect-buffer "*track*"

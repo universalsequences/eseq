@@ -1,0 +1,42 @@
+{
+ "source_sha256": "0a33b814595c540f4a0ec12e63f8ebae321ac344380723fca5d41c26c2f4111b",
+ "rates": {
+  "44100": {
+   "width_power_change_db": 0.37,
+   "renders": 54,
+   "max_peak": 0.6642000675201416,
+   "block_partition_max_abs": 0.0,
+   "extreme_renders": 114,
+   "roll_peak": 1.3584389686584473,
+   "tracking_vs_tune_max_relative": 0.0003849246131721884,
+   "untracked_keys_max_abs": 0.0,
+   "character_switch_mid_ring_max_abs": 0.0,
+   "choke_db_300ms_after_release": -182.2
+  },
+  "48000": {
+   "width_power_change_db": 0.37,
+   "renders": 54,
+   "max_peak": 0.6238129138946533,
+   "block_partition_max_abs": 0.0,
+   "extreme_renders": 114,
+   "roll_peak": 1.4383634328842163,
+   "tracking_vs_tune_max_relative": 0.00039465053123421967,
+   "untracked_keys_max_abs": 0.0,
+   "character_switch_mid_ring_max_abs": 0.0,
+   "choke_db_300ms_after_release": -182.2
+  },
+  "96000": {
+   "width_power_change_db": 0.37,
+   "renders": 54,
+   "max_peak": 0.5700521469116211,
+   "block_partition_max_abs": 0.0,
+   "extreme_renders": 114,
+   "roll_peak": 1.129978060722351,
+   "tracking_vs_tune_max_relative": 0.0003767280140891671,
+   "untracked_keys_max_abs": 0.0,
+   "character_switch_mid_ring_max_abs": 0.0,
+   "choke_db_300ms_after_release": -182.4
+  }
+ },
+ "compiler_sha256": "09b3f28c08e0bff871f8abdbdff8c9886e1dcba7cf321d7c14e9a1ab0d13ce4e"
+}

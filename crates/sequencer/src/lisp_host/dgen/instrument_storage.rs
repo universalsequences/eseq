@@ -98,8 +98,12 @@ struct InstrumentReleaseEntry {
 #[serde(deny_unknown_fields)]
 struct InstrumentVoiceControlNames {
     mode: String,
-    count: String,
-    legato: String,
+    /// Retired: the track's Voices and Trigger are the only note limit and
+    /// legato control. Still accepted so older instrument.json files load.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    count: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    legato: Option<String>,
 }
 
 /// Host allocation metadata is independent of the compiler's envelope-only
@@ -119,26 +123,17 @@ pub(in crate::lisp_host) fn apply_instrument_voice_metadata(
     let metadata: InstrumentMetadataFile = serde_json::from_str(&source)
         .map_err(|error| format!("invalid instrument metadata '{}': {error}", path.display()))?;
     let Some(controls) = metadata.voice_controls else { return Ok(()); };
-    let mut bindings: Vec<(usize, &str)> = Vec::new();
-    for (role, name, min, max) in [
-        ("voice-mode", &controls.mode, 0.0, 3.0),
-        ("voice-count", &controls.count, 1.0, 32.0),
-        ("legato", &controls.legato, 0.0, 1.0),
-    ] {
-        let matches: Vec<_> = manifest.params.iter().enumerate()
-            .filter(|(_, p)| p.name == *name || p.display_name == *name).collect();
-        let [(index, param)] = matches.as_slice() else {
-            return Err(format!("voice_controls.{role} requires one visible scalar parameter '{name}'"));
-        };
-        if param.hidden || param.cell_span != 1 || param.min != min || param.max != max || param.role.is_some() {
-            return Err(format!("voice_controls.{role} parameter '{name}' must be visible, scalar, unassigned, with range {min}..{max}"));
-        }
-        if bindings.iter().any(|(bound, _)| bound == index) {
-            return Err("voice_controls must bind three distinct parameters".into());
-        }
-        bindings.push((*index, role));
+    let (role, name, min, max) = ("voice-mode", &controls.mode, 0.0, 3.0);
+    let matches: Vec<_> = manifest.params.iter().enumerate()
+        .filter(|(_, p)| p.name == *name || p.display_name == *name).collect();
+    let [(index, param)] = matches.as_slice() else {
+        return Err(format!("voice_controls.{role} requires one visible scalar parameter '{name}'"));
+    };
+    if param.hidden || param.cell_span != 1 || param.min != min || param.max != max || param.role.is_some() {
+        return Err(format!("voice_controls.{role} parameter '{name}' must be visible, scalar, unassigned, with range {min}..{max}"));
     }
-    for (index, role) in bindings { manifest.params[index].role = Some(role.to_string()); }
+    let index = *index;
+    manifest.params[index].role = Some(role.to_string());
     Ok(())
 }
 
@@ -3640,29 +3635,26 @@ mod voice_metadata_tests {
             ]
         }).to_string()).unwrap();
         let original = manifest.clone();
-        std::fs::write(&path, r#"{"version":1,"run_mode":"instrument","voice_controls":{"mode":"mode","count":"missing","legato":"legato"}}"#).unwrap();
+        std::fs::write(&path, r#"{"version":1,"run_mode":"instrument","voice_controls":{"mode":"missing"}}"#).unwrap();
         assert!(apply_instrument_voice_metadata(&mut manifest, Some(&root)).is_err());
         assert!(manifest.params.iter().all(|p| p.role.is_none()), "failed binding must not partly mutate roles");
         std::fs::write(&path, r#"{"version":1,"run_mode":"instrument","voice_controls":{"mode":"mode","count":"count","legato":"legato"}}"#).unwrap();
         apply_instrument_voice_metadata(&mut manifest, Some(&root)).unwrap();
+        // Only the mode binds; retired count/legato names are accepted and ignored.
+        assert_eq!(manifest.params.iter().filter(|p| p.role.is_some()).count(), 1);
         let descriptor = instrument_descriptor_from_manifest("test", &manifest);
         let slot = crate::effects::EffectSlotSnapshot::new_default(&descriptor, 1);
-        let baseline = slot.instrument_voice_config(&ScheduledInstrumentParams::new()).unwrap();
-        assert_eq!(baseline.max_polyphony, 32);
+        assert!(!slot.instrument_forces_mono(&ScheduledInstrumentParams::new()));
         let mut values = ScheduledInstrumentParams::new();
         for (target, idx, value) in [
             (ScheduledInstrumentParamTarget::Synth, 7, 3.0),
-            (ScheduledInstrumentParamTarget::Synth, 11, 16.0),
             (ScheduledInstrumentParamTarget::Modulator, 7, 1.0),
         ] {
             values.push(ScheduledInstrumentParam { target, idx: idx + HEADER_SLOTS as u64, value, span: 1 });
         }
-        assert_eq!(slot.instrument_voice_config(&values).unwrap().max_polyphony, 4);
+        assert!(!slot.instrument_forces_mono(&values), "unison leaves allocation to the track");
         values.push(ScheduledInstrumentParam { target: ScheduledInstrumentParamTarget::Synth, idx: 7 + HEADER_SLOTS as u64, value: 1.0, span: 1 });
-        let mono = slot.instrument_voice_config(&values).unwrap();
-        assert!(!mono.polyphonic);
-        assert_eq!(mono.max_polyphony, 1);
-        assert_eq!(mono.mono_trigger, crate::sequencer::MonoTrigger::Legato);
+        assert!(slot.instrument_forces_mono(&values));
         // Metadata is re-read for a cached artifact rather than embedded in it.
         std::fs::write(&path, r#"{"version":1,"run_mode":"instrument"}"#).unwrap();
         let mut cached = original;

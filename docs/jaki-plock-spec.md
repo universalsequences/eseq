@@ -167,9 +167,15 @@ read from the latest scheduler snapshot (the descriptors the engine resolves
 against), cached per track on the UI thread, and the epoch is bumped by a
 per-tick check that re-fingerprints cached tracks after each snapshot
 publish. Groups: instrument, `FX N · name`, `MIDI FX N · name`, `Macros`,
-`Step`; detail = display name + the range values are clamped to. Slot-free
-spellings are `DynWords.aliases` (valid, never listed). Rack-slot and send
-labels are not offered (the engine skips them). The kind row shows *"not on
+`Step`, and on a rack track one `Slot N · instrument` group per slot (its
+instrument's params as `rackN:instrument:…`, then `rackN:gain` / `pan` /
+`base-note` / `max-polyphony` / `mute` / `solo`); detail = display name + the
+range values are clamped to. Slot-free spellings are `DynWords.aliases`
+(valid, never listed). Send labels are not offered (the engine skips them).
+Rack-slot values ride the trigger as `StepEvent::rack_slot_params`, resolved
+by name at landing against the slot's instrument descriptor (the UI engine
+registry mirrored into `SequencerSnapshot::engine_instrument_descriptors`),
+and beat the slot's stored p-lock and macro mappings for that hit only. The kind row shows *"not on
 <track>"* beside the row while an invalid `plock` item is hovered.
 
 ### 5.3 Jaki kind wiring

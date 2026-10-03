@@ -13,6 +13,7 @@ pub mod audition;
 mod clock;
 mod enqueue;
 mod geometry;
+mod load_meter;
 mod lookahead;
 mod midi_fx;
 mod node_process;
@@ -28,6 +29,8 @@ use {
     runtime::*, worker::{reconcile_playing_topology_change, topology_edit_frontier_drained},
 };
 
+#[allow(unused_imports)]
+pub(crate) use load_meter::{scheduler_load, SchedulerLoad};
 pub use worker::spawn_scheduler_thread;
 pub(crate) use worker::{SchedulerDriver, SchedulerInput};
 
@@ -54,7 +57,8 @@ use self::scheduled_event::{
     ScheduledEffectParam, ScheduledEvent, ScheduledEventKind, ScheduledEventQueue,
     ScheduledInstrumentParam,
     ScheduledInstrumentParamTarget, ScheduledInstrumentParams, ScheduledInstrumentTensorParam,
-    ScheduledInstrumentTensorParams, ScheduledSamplerParams, StepEvent, ScheduledEventSink,
+    ScheduledInstrumentTensorParams, ScheduledRackSlotParam, ScheduledRackSlotParams,
+    ScheduledRackSlotTarget, ScheduledSamplerParams, StepEvent, ScheduledEventSink,
 };
 use crate::sequencer::{
     sync_beats, InstrumentType, KeyboardTrigger, MidiFxPosition, SequencerSnapshot, SequencerState,

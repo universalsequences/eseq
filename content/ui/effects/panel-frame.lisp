@@ -6,6 +6,7 @@
 (import eseq.effects.param-controls :as pc)
 (import eseq.effects.process-panel :as pp)
 (import eseq.effects.track-panels :as tp)
+(import eseq.effects.state :as st)
 
 (export fx-panel-body
         fx-panel-header-leading-spacer
@@ -20,7 +21,8 @@
         fx-effect-drop-types
         fx-panel-header
         fx-clear-delete-selection
-        fx-clear-selected-effect)
+        fx-clear-selected-effect
+        device-output-meter)
 
 ;; Migration aliases (module spec §10). This is the cycle hub of effects/:
 ;; the still-unconverted instrument-panel, sampler-panel, modulator-panel and
@@ -242,3 +244,15 @@
   (do
     (pp/clear-selection)
     (fx-clear-delete-selection)))
+
+;; Ableton-style stereo meter on a device's output, drawn between devices:
+;; instrument [meter] effect [meter] ... `source` is the device dict's :meter
+;; selector (track, rack-slot, track-effect, rack-effect or bus-effect). It
+;; names the device, not a graph node; the host resolves it to the device's
+;; current output node, meters only visible meters and repaints them without
+;; a reactive pass.
+(def device-output-meter (source)
+  (device-meter :source source
+    :debug-name "device-output-meter"
+    :width 0.7 :height st/fx-fixed-panel-height
+    :inset 0.3 :bar-gap 0.1))

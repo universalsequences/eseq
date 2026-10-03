@@ -804,6 +804,11 @@ pub struct SequencerState {
         Mutex<HashMap<(usize, u64), crate::process::ProcessEffectiveSend>>,
     pub(super) scratch_effect_descriptors: Mutex<Vec<Vec<EffectDescriptor>>>,
     pub(super) scratch_instrument_descriptors: Mutex<Vec<EffectDescriptor>>,
+    /// Instrument descriptors by engine id (the UI's engine registry), so the
+    /// scheduler can name a rack slot's instrument params
+    /// (`SequencerSnapshot::rack_slot_instrument_descriptor`), with the
+    /// registry epoch they were taken at.
+    pub(super) engine_instrument_descriptors: Mutex<(u64, Arc<Vec<EffectDescriptor>>)>,
     pub(super) process_trace_enabled: AtomicBool,
     pub(super) pending_accumulator_reset_all: AtomicBool,
     pub(super) pending_accumulator_reset_tracks: [AtomicBool; MAX_TRACKS],
@@ -945,6 +950,7 @@ pub(super) fn capture_track_params_snapshot(track_params: &TrackParams) -> Track
         accum_limit: track_params.get_accum_limit(),
         accum_mode: track_params.get_accum_mode(),
         fts_scale: track_params.get_fts_scale(),
+        tuning: track_params.tuning(),
         mono_trigger: track_params.get_mono_trigger(),
         voice_priority: track_params.get_voice_priority(),
         mute_group: track_params.get_mute_group(),
@@ -975,6 +981,7 @@ pub(super) fn restore_track_params_snapshot(track_params: &TrackParams, snapshot
     track_params.set_accum_limit(snapshot.accum_limit);
     track_params.set_accum_mode(snapshot.accum_mode);
     track_params.set_fts_scale(snapshot.fts_scale);
+    track_params.set_tuning(snapshot.tuning.clone());
     track_params.set_mono_trigger(snapshot.mono_trigger);
     track_params.set_voice_priority(snapshot.voice_priority);
     track_params.set_mute_group(snapshot.mute_group);

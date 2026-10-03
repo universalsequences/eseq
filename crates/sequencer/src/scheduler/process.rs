@@ -2146,19 +2146,20 @@ pub(super) fn apply_fit_to_scale_to_trigger(
         return (resolved, chord);
     };
     let scale_idx = track.params.fts_scale;
-    if scale_idx == 0 {
+    if scale_idx == crate::scale::SCALE_OFF {
         return (resolved, chord);
     }
+    let tuning = &track.params.tuning;
 
     let pre_fts_transpose = resolved.transpose;
-    resolved.transpose = crate::scale::quantize_transpose(pre_fts_transpose, scale_idx);
+    resolved.transpose = crate::scale::quantize(pre_fts_transpose, scale_idx, tuning);
     for note_idx in 0..chord.count.min(MAX_VOICES) {
         let raw = resolved_chord_transpose(
             chord.notes[note_idx],
             chord.step_transpose,
             pre_fts_transpose,
         );
-        let quantized = crate::scale::quantize_transpose(raw, scale_idx);
+        let quantized = crate::scale::quantize(raw, scale_idx, tuning);
         chord.notes[note_idx] = quantized - (resolved.transpose - chord.step_transpose);
     }
 
@@ -2204,6 +2205,7 @@ pub(super) fn enqueue_network_trigger(
     mut sampler_params: ScheduledSamplerParams,
     instrument_fingerprint: u64,
     rack_macro_values: [Option<f32>; crate::sequencer::RACK_MACRO_COUNT],
+    rack_slot_params: ScheduledRackSlotParams,
 ) -> bool {
     let (resolved, chord) = apply_fit_to_scale_to_trigger(snapshot, track_idx, resolved, chord);
     // What the track sounds, relative to its root: harmony followers read it
@@ -2272,6 +2274,7 @@ pub(super) fn enqueue_network_trigger(
                             sampler_params,
                             instrument_fingerprint,
                             rack_macro_values,
+                            rack_slot_params: rack_slot_params.clone(),
                         },
                     })
                     .is_err()
@@ -2319,6 +2322,7 @@ pub(super) fn enqueue_network_trigger(
                 sampler_params,
                 instrument_fingerprint,
                 rack_macro_values,
+                rack_slot_params,
             },
         })
         .is_ok();

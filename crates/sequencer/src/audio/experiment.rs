@@ -231,6 +231,7 @@ fn load(app: &mut App, config: &Config, offline: bool) -> Result<()> {
     }
     app.sample_analysis.require_complete()?;
     app.publish_all_sampler_analysis_runtime();
+    register_instance_kinds(app)?;
     app.apply_pattern_launch(&PatternLaunchTarget::Scene { scene: config.pattern - 1 })
         .map_err(|error| format!("Cannot launch scene: {error:?}"))?;
     app.refresh_latency_compensation();
@@ -244,6 +245,35 @@ fn load(app: &mut App, config: &Config, offline: bool) -> Result<()> {
         live(&runtime.voice_counts), runtime.voice_counts.len());
     eprintln!("[audio-experiment] loaded {} tracks, scene {}, {} BPM",
         app.tracks.len(), config.pattern, app.state.latest_scheduler_snapshot().transport.bpm);
+    Ok(())
+}
+
+/// The UI VM registers package kinds when it evaluates their modules; without
+/// it no instance (jaki, neural, ...) publishes and its sequencer never runs.
+/// Evaluate each instance kind's declaring module in a bare authoring VM so
+/// the scheduler ticks exactly what the app would.
+fn register_instance_kinds(app: &mut App) -> Result<()> {
+    let paths = crate::app_paths::app_paths();
+    let (catalog, _) = paths.package_catalog_with_errors();
+    let mut modules = std::collections::BTreeSet::new();
+    for instance in &app.instances.list {
+        let module = catalog.packages().values().find_map(|package| {
+            package.manifest.kinds.iter()
+                .find(|kind| package.manifest.kind_id(&kind.name) == instance.kind)
+                .map(|kind| kind.module.clone())
+        }).ok_or_else(|| format!("No installed package declares kind {}", instance.kind))?;
+        modules.insert(module);
+    }
+    if modules.is_empty() { return Ok(()); }
+    let mut runtime = eseqlisp::Runtime::new();
+    crate::lisp_host::register_graph_authoring_natives(&mut runtime, Arc::clone(&app.state));
+    runtime.set_scoped_module_load_path(paths.module_load_roots().0);
+    for module in &modules {
+        runtime.eval_str(&format!("(import {module})"))
+            .map_err(|error| format!("Cannot evaluate kind module {module}: {error:?}"))?;
+    }
+    let published = app.publish_instance_sequencers();
+    eprintln!("[audio-experiment] kinds from {modules:?}; {published} instance sequencers published");
     Ok(())
 }
 
@@ -488,6 +518,8 @@ pub fn run(mut config: Config) -> Result<serde_json::Value> {
         "late_events": blocks.iter().map(|block| block.late).max(),
         "measured_dropped_events": blocks.last().unwrap().dropped.saturating_sub(blocks.first().unwrap().dropped),
         "measured_late_events": blocks.last().unwrap().late.saturating_sub(blocks.first().unwrap().late),
+        // Live only: the scheduler thread's last one-second window.
+        "scheduler_load": format!("{:?}", crate::scheduler::scheduler_load()),
         "audio_sha256": audio_hash, "instrument_voice_stats": instrument_stats, "blocks": blocks,
         "recorded_audio": recorded_audio,
     }))

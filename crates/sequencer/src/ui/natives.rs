@@ -3428,13 +3428,7 @@ pub(crate) fn init_runtime(
                 ),
                 (
                     "tp-fts",
-                    Value::String(
-                        FTS_SCALE_NAMES
-                            .get(state.pattern.track_params[0].get_fts_scale())
-                            .copied()
-                            .unwrap_or("Off")
-                            .to_string(),
-                    ),
+                    Value::String(fts_scale_label(&state.pattern.track_params[0])),
                 ),
                 (
                     "tp-mute-group",
@@ -3627,7 +3621,9 @@ pub(crate) fn init_runtime(
                     "editor-instrument-run-mode",
                     Value::String("instrument".to_string()),
                 ),
+                ("tuning-root-options", build_tuning_root_options()),
             ];
+            fields.extend(tuning_reactive_fields(&state.pattern.track_params[0]));
             for idx in 0..track_count {
                 fields.push((
                     Box::leak(track_selected_field(idx).into_boxed_str()),
@@ -6818,22 +6814,60 @@ pub(crate) fn init_runtime(
             Some(Value::String(s)) => s.as_str(),
             _ => return Err("seq-set-fts: expected string label".into()),
         };
-        let normalized = label.to_ascii_lowercase();
-        let scale_idx = FTS_SCALE_NAMES
-            .iter()
-            .position(|scale| scale.to_ascii_lowercase() == normalized)
+        let scale_idx = fts_scale_index(label)
             .ok_or_else(|| format!("seq-set-fts: unknown scale '{label}'"))?;
+        let scale_name = sequencer::scale::SCALES[scale_idx].name;
         let track = ct.load(Ordering::Relaxed);
         if let Some(tracks) = bulk_edit_tracks(&sel_tracks, track) {
             ctx.enqueue_command(track_params_batch_command("fts", &tracks, scale_idx as f64));
-            return Ok(Value::String(FTS_SCALE_NAMES[scale_idx].to_string()));
+            return Ok(Value::String(scale_name.to_string()));
         }
         ctx.enqueue_command(slice3_numeric_history_command(
             "fts", Some(track), scale_idx as f64,
         ));
         *auto_follow_override.lock().unwrap() = Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
         ui_ep.fetch_add(1, Ordering::Relaxed);
-        Ok(Value::String(FTS_SCALE_NAMES[scale_idx].to_string()))
+        Ok(Value::String(scale_name.to_string()))
+    });
+
+    // seq-tuning — one scale-editor edit on the current track's tuning:
+    // (seq-tuning op value) or (seq-tuning op value degree). Ops: root, morph,
+    // mode, offset, clear, toggle, reset, just, rand, stretch.
+    let ct = current_track.clone();
+    let ui_ep = ui_epoch.clone();
+    runtime.register_native("seq-tuning", move |args, ctx| {
+        let op = match args.first() {
+            Some(Value::String(op)) | Some(Value::Keyword(op)) => op.trim_start_matches(':').to_string(),
+            _ => return Err("seq-tuning: expected an op".into()),
+        };
+        let number = |idx: usize| match args.get(idx) {
+            Some(Value::Number(value)) => Some(*value),
+            Some(Value::Bool(value)) => Some(if *value { 1.0 } else { 0.0 }),
+            _ => None,
+        };
+        let mut payload = HashMap::new();
+        payload.insert("op".to_string(), Rc::new(RefCell::new(Value::Keyword(op))));
+        payload.insert(
+            "track".to_string(),
+            Rc::new(RefCell::new(Value::Number(ct.load(Ordering::Relaxed) as f64))),
+        );
+        payload.insert(
+            "value".to_string(),
+            Rc::new(RefCell::new(Value::Number(number(1).unwrap_or(0.0)))),
+        );
+        // Dropdowns hand over their label (root "D#", mode "Map").
+        if let Some(Value::String(label)) = args.get(1) {
+            payload.insert("label".to_string(), Rc::new(RefCell::new(Value::String(label.clone()))));
+        }
+        if let Some(degree) = number(2) {
+            payload.insert("degree".to_string(), Rc::new(RefCell::new(Value::Number(degree))));
+        }
+        ctx.enqueue_command(HostCommand::Custom {
+            name: "track-tuning-action".to_string(),
+            payload: Value::Map(payload),
+        });
+        ui_ep.fetch_add(1, Ordering::Relaxed);
+        Ok(Value::Nil)
     });
 
     // seq-plock-timebase — set a timebase p-lock on selected steps
@@ -8298,6 +8332,11 @@ fn document_metal_seq_natives(runtime: &mut Runtime) {
             "seq-set-fts",
             "(seq-set-fts label)",
             "Set the current track's force-to-scale mode by label.",
+        ),
+        (
+            "seq-tuning",
+            "(seq-tuning op value [degree])",
+            "Edit the current track's scale tuning: root, morph, mode, offset, clear, toggle, reset, just, rand, stretch.",
         ),
         (
             "seq-plock-timebase",

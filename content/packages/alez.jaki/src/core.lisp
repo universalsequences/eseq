@@ -24,6 +24,9 @@
 
 (module alez.jaki.core)
 
+;; declared harmony: `-> chords` rows, (deg n), (chord Q), (voice)
+(import alez.jaki.chords)
+
 (export pat from-list xform rev rot trunc every every-fig stac ghost swap
         shift filter for-hand fast slow on preview
         eval-at eval-cycle cycle-length locate cycle-index
@@ -87,15 +90,54 @@
 (def member? (x l) (reduce (lambda (acc i) (or acc (= i x))) false l))
 (def sum* (l) (reduce (lambda (a b) (+ a b)) 0 l))
 
-;; stable insertion sort by rational :off
-(def insert-ev (ev l)
-  (if (empty? l)
-      (list ev)
-      (if (r< (get ev :off) (get (first l) :off))
-          (cons ev l)
-          (cons (first l) (insert-ev ev (rest l))))))
-(def sort-walk (l acc) (if (empty? l) acc (sort-walk (rest l) (insert-ev (first l) acc))))
-(def sort-evs (l) (sort-walk l (list)))
+;; stable sort by rational :off — a natural merge sort. Lists are vectors:
+;; `rest` and `cons` copy, so the old recursive insertion sort cost ~n³
+;; element copies and n² interpreted compares, worst on the usual input (an
+;; already sorted cycle) — 25+ ms per sort of a 128-hit (fast 8) cycle on
+;; the scheduler thread (eseq-8cim). Here a sorted list costs one O(n) scan,
+;; and k ascending runs cost O(n log k) compares. Ties keep input order.
+(def ev< (a b) (r< (get a :off) (get b :off)))
+
+;; (lo hi) bounds of the maximal non-decreasing runs, in order
+(def srt-runs (l i n lo acc)
+  (if (>= i n)
+      (reverse (cons (list lo n) acc))
+      (if (ev< (nth l i) (nth l (- i 1)))
+          (srt-runs l (+ i 1) n i (cons (list lo i) acc))
+          (srt-runs l (+ i 1) n lo acc))))
+
+(def srt-slice (l b) (map (lambda (i) (nth l i)) (range (nth b 0) (nth b 1))))
+
+;; stable merge of sorted a and b: on equal :off, a's events go first
+(def srt-merge (a i na b j nb acc)
+  (if (>= i na)
+      (append (reverse acc) (map (lambda (k) (nth b k)) (range j nb)))
+      (if (>= j nb)
+          (append (reverse acc) (map (lambda (k) (nth a k)) (range i na)))
+          (if (ev< (nth b j) (nth a i))
+              (srt-merge a i na b (+ j 1) nb (cons (nth b j) acc))
+              (srt-merge a (+ i 1) na b j nb (cons (nth a i) acc))))))
+
+(def srt-pairs (runs i n acc)
+  (if (>= i n)
+      (reverse acc)
+      (if (= (+ i 1) n)
+          (reverse (cons (nth runs i) acc))
+          (let ((a (nth runs i)) (b (nth runs (+ i 1))))
+            (srt-pairs runs (+ i 2) n
+                       (cons (srt-merge a 0 (len a) b 0 (len b) (list)) acc))))))
+
+(def srt-all (runs)
+  (if (<= (len runs) 1) (first runs) (srt-all (srt-pairs runs 0 (len runs) (list)))))
+
+(def sort-evs (l)
+  (let ((n (len l)))
+    (if (<= n 1)
+        l
+        (let ((bounds (srt-runs l 1 n 0 (list))))
+          (if (= (len bounds) 1)
+              l
+              (srt-all (map (lambda (b) (srt-slice l b)) bounds)))))))
 
 ;; ── pattern parsing: quoted body data → figure records ──────────────────────
 
@@ -392,7 +434,50 @@
 
 (def rev (p) (xform p 'rev))
 (def rot (p n) (xform p (list 'rot n)))
-(def trunc (p n) (xform p (list 'trunc n)))
+;; (trunc n) cuts n symbols off the end of the WHOLE cycle — the figures
+;; concatenated, after each figure's own transforms — working back through
+;; the figures: (. -) (. . -) trunc 1 → (. -) (. .), trunc 3 → (. -).
+;; Entries are (:all n) or (:every k n) (from (every k (trunc n))); their
+;; cuts add up. A (trunc n) inside a fig form, or (every-fig k (trunc n)),
+;; still cuts that figure alone.
+(def add-gtrunc (p entry)
+  (merge p :gtrunc (append (or-default (get p :gtrunc) (list)) (list entry))
+           :id (str (get p :id) "|gt:" (source entry))
+           :len-id (str (get p :len-id) "|gt:" (source entry))))
+
+(def trunc (p n) (add-gtrunc p (list :all n)))
+
+(def gtrunc-total (p cycle)
+  (reduce (lambda (a e)
+            (+ a (if (or (= (first e) :all)
+                         (every-active? (round-int (resolve-arg (nth e 1) cycle)) cycle))
+                     (max 0 (round-int (resolve-arg (last* e) cycle)))
+                     0)))
+          0 (or-default (get p :gtrunc) (list))))
+
+(def cut-walk (lens-rev rem)
+  (if (empty? lens-rev)
+      (list)
+      (let ((c (min rem (first lens-rev))))
+        (cons c (cut-walk (rest lens-rev) (- rem c))))))
+
+;; the cycle's figures, each stamped with :cut — how many of its trailing
+;; (transformed) symbols the global trunc removes this cycle
+(def cut-figs (p cycle)
+  (let ((figs (get p :figs)) (total (gtrunc-total p cycle)))
+    (if (<= total 0)
+        figs
+        (let ((cuts (reverse (cut-walk
+                               (reverse (map (lambda (f)
+                                               (len (apply-xf-events (get f :events)
+                                                                     (get f :xf) cycle)))
+                                             figs))
+                               total))))
+          (map (lambda (i) (merge (nth figs i) :cut (nth cuts i))) (range 0 (len figs)))))))
+
+(def cut-tail (evs fig)
+  (let ((k (or-default (get fig :cut) 0)))
+    (if (> k 0) (take* (max 0 (- (len evs) k)) evs) evs)))
 (def every (p n t) (xform p (list 'every n t)))
 (def stac (p) (xform p 'stac))
 (def ghost (p) (xform p 'ghost))
@@ -469,7 +554,7 @@
                 ;; (seq :clock v…) outside a per-hit value reads per cycle
                 ;; (spec §7.2)
                 (let ((vals (if (= h 'seq) (drop* 2 raw) (rest raw))))
-                  (resolve-arg-at (nth vals (imod cycle (max 1 (len vals)))) cycle fig))
+                  (resolve-cycle-member vals cycle fig))
                 (if (= h 'chan)
                     (chan-get (nth raw 1) (nth raw 2))
                     (if (= h 'every-gate)
@@ -483,9 +568,22 @@
                               (if (fig-index-active? (nth raw 1) fig cycle) (nth raw 2) (nth raw 3))
                               cycle fig)
                             (if (implicit-cyc? raw)
-                                (resolve-arg-at (nth raw (imod cycle (max 1 (len raw)))) cycle fig)
-                                ;; symbols and other forms evaluate as source
-                                (eval (source raw))))))))))))
+                                (resolve-cycle-member raw cycle fig)
+                                (if (= h 'deg)
+                                    ;; outside emit (no declared chord at
+                                    ;; hand): the degree over C major
+                                    (alez.jaki.chords/deg-interval
+                                      :maj (resolve-arg-at (nth raw 1) cycle fig))
+                                    ;; symbols and other forms evaluate as source
+                                    (eval (source raw)))))))))))))
+
+;; A per-cycle list picks member (cycle mod n), and a nested list steps once
+;; per VISIT, Tidal style: in (I IV V7 (VI IV)) the inner list is visited on
+;; cycles 3, 7, 11 … and plays VI, IV, VI … (it sees the visit count, not the
+;; cycle, which would land on the same parity every time).
+(def resolve-cycle-member (vals cycle fig)
+  (let ((n (max 1 (len vals))))
+    (resolve-arg-at (nth vals (imod cycle n)) (idiv cycle n) fig)))
 
 (def round-int (x) (floor (+ x 0.5)))
 (def every-active? (n cycle) (and (> n 0) (= 0 (imod (+ cycle 1) n))))
@@ -1441,7 +1539,7 @@
 
 (def eval-fig* (fig cycle off hand st figidx pc)
   (let ((xfs (get fig :xf))
-        (evs1 (apply-xf-events (get fig :events) (get fig :xf) cycle))
+        (evs1 (cut-tail (apply-xf-events (get fig :events) (get fig :xf) cycle) fig))
         (tm (tm-at (get fig :tm) cycle)))
     (let ((kind0 (if (= tm nil) nil (nth tm 0)))
           (m0 (if (= tm nil) 1 (max 1 (round-int (resolve-arg (nth tm 1) cycle)))))
@@ -1685,11 +1783,12 @@
       ;; a note op (snap / scale / harmony), resolved at emit
       :snap (map-events res (lambda (e) (merge e :snap (nth op 1))))
       :noteop (map-events res (lambda (e) (ev-op-apply e (nth op 1) cycle)))
+      :chordv (map-events res (lambda (e) (merge e :chordv (nth op 1))))
       _ res)))
 
 ;; evaluate a pattern for one cycle with explicit threading state
 (def eval-at (p cycle hand st)
-  (let ((r (eval-figs (get p :figs) cycle (r-int 0) hand st 0 (list) (proc-config p cycle))))
+  (let ((r (eval-figs (cut-figs p cycle) cycle (r-int 0) hand st 0 (list) (proc-config p cycle))))
     (reduce (lambda (acc op) (apply-post-one acc op cycle))
             (dict :events (sort-evs (get r :evs)) :len (get r :off)
                   :end-hand (get r :hand) :end-st (get r :st))
@@ -1697,7 +1796,8 @@
 
 ;; ── per-cycle memo (assoc list in scheduler-VM globals, spec §8.2) ──────────
 
-(def memo-store (list))
+(def memo-store (list))     ; periodic keys (cycle mod :period)
+(def exact-memo (list))     ; exact cycle keys, kept apart: see eval-cycle-entry
 (def len-memo (list))
 (def prepared-memo (list))   ; `prepared` below: body → route records
 
@@ -1721,8 +1821,9 @@
 
 (def lcm0 (a b) (if (or (= a 0) (= b 0)) 0 (lcm* a b)))
 
+;; n members, each nested list stepping per visit: n × the members' period
 (def members-period (vals)
-  (reduce (lambda (a x) (lcm0 a (raw-period x))) (max 1 (len vals)) vals))
+  (* (max 1 (len vals)) (reduce (lambda (a x) (lcm0 a (raw-period x))) 1 vals)))
 
 ;; period of (resolve-arg raw c) as a function of c
 (def raw-period (raw)
@@ -1840,9 +1941,16 @@
     _ 1))
 
 ;; row processes hash the cycle and carry non-periodic state: exact keys
+(def gtrunc-period* (e)
+  (if (= (first e) :all)
+      (raw-period (nth e 1))
+      (lcm0 (every-period (nth e 1)) (raw-period (nth e 2)))))
+
 (def eval-period (p)
   (let ((pd (reduce (lambda (a op) (lcm0 a (post-period* op)))
-                    (reduce (lambda (a f) (lcm0 a (fig-period* f))) 1 (get p :figs))
+                    (reduce (lambda (a e) (lcm0 a (gtrunc-period* e)))
+                            (reduce (lambda (a f) (lcm0 a (fig-period* f))) 1 (get p :figs))
+                            (or-default (get p :gtrunc) (list)))
                     (get p :post))))
     (if (or (> pd 256) (has-procs? p)) 0 pd)))
 
@@ -1850,9 +1958,10 @@
 ;; (emit, emit*) carry none and keep the exact cycle key.
 (def with-period (p) (merge p :period (eval-period p)))
 
+(def periodic? (p) (let ((pd (get p :period))) (and (number? pd) (> pd 0))))
+
 (def memo-cycle (p cycle)
-  (let ((pd (get p :period)))
-    (if (and (number? pd) (> pd 0)) (imod cycle pd) cycle)))
+  (if (periodic? p) (imod cycle (get p :period)) cycle))
 
 (def eval-cycle (p cycle hand st) (first (eval-cycle-entry p cycle hand st)))
 
@@ -1861,14 +1970,21 @@
   ;; Payload channels can alter evaluated event data but never cycle length.
   ;; Include their epoch here only: len-memo and lens-memo intentionally keep
   ;; their structural keys across channel writes.
+  ;; Exact-cycle keys (row processes, unstamped patterns) never recur, yet
+  ;; such a route inserts one every cycle: sharing the 64-entry store let
+  ;; one instance's row processes evict another's periodic steady-state
+  ;; entries, so every ~20 cycles each route re-evaluated at once on the
+  ;; same bar-start tick (eseq-8cim). They get their own small store.
   (let ((key (list (get p :id) (memo-cycle p cycle) hand
                    (get st :cur) (get st :pwd) (get st :streak)
                    (chan-epoch) (get st :procs))))
-    (let ((hit (memo-find memo-store key)))
+    (let ((hit (memo-find (if (periodic? p) memo-store exact-memo) key)))
       (if (= hit nil)
           (let ((r (eval-at p cycle hand st)))
             (let ((entry (list r (unit-buckets r))))
-              (do (set! memo-store (cons (list key entry) (take* 63 memo-store)))
+              (do (if (periodic? p)
+                      (set! memo-store (cons (list key entry) (take* 63 memo-store)))
+                      (set! exact-memo (cons (list key entry) (take* 31 exact-memo))))
                   entry)))
           hit))))
 
@@ -1903,7 +2019,7 @@
 ;; :fast expansion multiplies units by exactly m, so eff reduces to the
 ;; pre-expansion unit count.
 (def fig-len (fig cycle off)
-  (let ((evs1 (apply-xf-events (get fig :events) (get fig :xf) cycle))
+  (let ((evs1 (cut-tail (apply-xf-events (get fig :events) (get fig :xf) cycle) fig))
         (tm (tm-at (get fig :tm) cycle)))
     (let ((kind (if (= tm nil) nil (nth tm 0)))
           (m (if (= tm nil) 1 (max 1 (round-int (resolve-arg (nth tm 1) cycle))))))
@@ -1930,7 +2046,7 @@
   (let ((key (list (get p :len-id) k)))
     (let ((hit (memo-find len-memo key)))
       (if (= hit nil)
-          (let ((l (r->f (cycle-len-figs (get p :figs) k (r-int 0)))))
+          (let ((l (r->f (cycle-len-figs (cut-figs p k) k (r-int 0)))))
             (do (set! len-memo (cons (list key l) (take* 31 len-memo)))
                 l))
           hit))))
@@ -1944,11 +2060,9 @@
       1
       (if (or (= (nth raw 0) 'cyc) (= (nth raw 0) 'seq))
           (let ((vals (if (= (nth raw 0) 'seq) (drop* 2 raw) (rest raw))))
-            (reduce (lambda (a x) (lcm* a (arg-period x)))
-                    (max 1 (len vals)) vals))
+            (* (max 1 (len vals)) (reduce (lambda (a x) (lcm* a (arg-period x))) 1 vals)))
           (if (implicit-cyc? raw)
-              (reduce (lambda (a x) (lcm* a (arg-period x)))
-                      (max 1 (len raw)) raw)
+              (* (max 1 (len raw)) (reduce (lambda (a x) (lcm* a (arg-period x))) 1 raw))
               1)))))
 
 (def xf-period (f)
@@ -1982,8 +2096,15 @@
         (lcm* (reduce (lambda (a x) (lcm* a (xf-period x))) 1 (get f :xf))
               (arg-period (if (= (get f :align) nil) nil (nth (get f :align) 0))))))
 
+(def gtrunc-period (e)
+  (if (= (first e) :all)
+      (arg-period (nth e 1))
+      (lcm* (max 1 (every-period (nth e 1))) (arg-period (nth e 2)))))
+
 (def pat-period (p)
-  (min 64 (max 1 (reduce (lambda (a f) (lcm* a (fig-period f))) 1 (get p :figs)))))
+  (min 64 (max 1 (reduce (lambda (a e) (lcm* a (gtrunc-period e)))
+                         (reduce (lambda (a f) (lcm* a (fig-period f))) 1 (get p :figs))
+                         (or-default (get p :gtrunc) (list))))))
 
 (def prefix-sum (lens k) (sum* (take* k lens)))
 
@@ -2144,6 +2265,7 @@
 
 (def reset ()
   (do (set! memo-store (list))
+      (set! exact-memo (list))
       (set! len-memo (list))
       (set! lens-memo (list))
       (set! prepared-memo (list))
@@ -2188,7 +2310,8 @@
 (def needs-ev? (raw)
   (if (or (= raw nil) (number? raw) (string? raw) (= (nth raw 0) nil))
       false
-      (if (and (= (nth raw 0) 'seq) (ev-clock? (nth raw 1)))
+      ;; (deg n) reads the chord declared at the hit: resolved at emit
+      (if (or (and (= (nth raw 0) 'seq) (ev-clock? (nth raw 1))) (= (nth raw 0) 'deg))
           true
           (reduce (lambda (a x) (or a (needs-ev? x))) false raw))))
 
@@ -2206,6 +2329,13 @@
       (resolve-ev (nth vals k)
                   (merge ctx :hit (idiv (round-int n) l) :figs (idiv (round-int n) l))
                   (sub-path here (+ off k))))))
+
+;; per cycle: member (cycle mod n), its nested lists stepping per visit
+;; (resolve-cycle-member)
+(def pick-cycle (vals c ctx here off)
+  (let ((n (max 1 (len vals))))
+    (let ((k (imod c n)))
+      (resolve-ev (nth vals k) (merge ctx :cycle (idiv c n)) (sub-path here (+ off k))))))
 
 (def pick-member (vals i ctx here off)
   (let ((k (imod i (max 1 (len vals)))))
@@ -2226,9 +2356,9 @@
                     :hit (seq-visit vals (get ctx :hit) ctx here 2)
                     :fig (seq-visit vals (get ctx :figs) ctx here 2)
                     :span (pick-member vals (floor (* (get ctx :pos) (max 1 (len vals)))) ctx here 2)
-                    _ (pick-member vals c ctx here 2)))
+                    _ (pick-cycle vals c ctx here 2)))
                 (if (= h 'cyc)
-                    (pick-member (rest raw) c ctx here 1)
+                    (pick-cycle (rest raw) c ctx here 1)
                     (if (= h 'every-gate)
                         (resolve-ev (if (every-active? (round-int (resolve-arg (nth raw 1) c)) c)
                                         (nth raw 2) (nth raw 3))
@@ -2238,26 +2368,41 @@
                                             (nth raw 2) (nth raw 3))
                                         ctx nil)
                             (if (implicit-cyc? raw)
-                                (pick-member raw c ctx here 0)
-                                (resolve-arg-at raw c (get ctx :fig))))))))))))
+                                (pick-cycle raw c ctx here 0)
+                                (if (= h 'deg)
+                                    (deg-value (resolve-ev (nth raw 1) ctx (sub-path here 1)))
+                                    (resolve-arg-at raw c (get ctx :fig)))))))))))))
+
+;; (deg n) at emit: degree n of the chord the `-> chords` row declared (root
+;; plus the degree's interval); before any declaration, over C major
+(def deg-value (n)
+  (let ((f (alez.jaki.chords/field-get "chords")))
+    (if (= f nil)
+        (alez.jaki.chords/deg-interval :maj n)
+        (+ (get f :root) (alez.jaki.chords/deg-interval (get f :q) n)))))
 
 (def seq-epoch (p) (state-get (cell p "jaki-seq-epoch") 0))
 
 ;; advance value `key`'s counters for hit e and return its resolution context:
 ;; :hit counts this value's hits, :figs its figure occurrences (it moves on
 ;; when the hit's cycle or figure differs from the previous hit's)
+;; The epoch a value's counters belong to lives beside them (":e"), not in
+;; the key: a jump restarts them in place on first use, so rewinds (every
+;; :retrig fire) never grow the generator's state with stale key sets.
 (def ev-ctx (p key e c clen)
-  (let ((k (str "seq:" (seq-epoch p) ":" (get p :id) ":" key)))
-    (let ((n (state-get (str k ":h") 0))
-          (last (state-get (str k ":l") -1))
-          (m (state-get (str k ":f") 0))
+  (let ((k (str "seq:" (get p :id) ":" key)) (ep (seq-epoch p)))
+    (let ((fresh (not (= (state-get (str k ":e") -1) ep))))
+    (let ((n (if fresh 0 (state-get (str k ":h") 0)))
+          (last (if fresh -1 (state-get (str k ":l") -1)))
+          (m (if fresh 0 (state-get (str k ":f") 0)))
           (cur (+ (* c 4096) (get e :fig))))
       (let ((m2 (if (= cur last) m (+ m 1))))
-        (do (state-set! (str k ":h") (+ n 1))
+        (do (state-set! (str k ":e") ep)
+            (state-set! (str k ":h") (+ n 1))
             (state-set! (str k ":l") cur)
             (state-set! (str k ":f") m2)
             (dict :cycle c :fig (get e :fig) :hit n :figs (- m2 1)
-                  :pos (if (> clen 0) (/ (r->f (get e :off)) clen) 0)))))))
+                  :pos (if (> clen 0) (/ (r->f (get e :off)) clen) 0))))))))
 
 ;; value raw for hit e: stepped by its clock when it has one, else the
 ;; per-cycle resolution; d when raw is nil
@@ -2292,7 +2437,11 @@
                            :nset (get e :nset) :gmul 1 :params (get e :params))
                      (or-default (get e :defer) (list))))
           (opt-note (ev-value p (str rkey "opt:note") (get opts :note) e c clen 0))
-          (opt-vel (ev-value p (str rkey "opt:vel") (get opts :vel-scale) e c clen 1)))
+          (opt-vel (ev-value p (str rkey "opt:vel") (get opts :vel-scale) e c clen 1))
+          ;; the hit's chord (a per-hit (on … (chord X)) first), resolved
+          ;; before the lit marks so the member playing lights up
+          (chord-q (let ((raw (or-default (get e :chordv) (get opts :chord))))
+                     (if (= raw nil) nil (ev-value p (str rkey "opt:chord") raw e c clen :maj)))))
       (let ((at (* (r->f (r- (get e :off) (r-int u))) unit))
             (dur (* (* (r->f (get e :gate)) unit) (get a :gmul))))
       (do
@@ -2305,18 +2454,77 @@
         (map (lambda (path)
                (gen-mark (path-code (rest path)) (str (get opts :rindex) "." (first path)) at))
              lit-picks)
-      (seq-emit :track track
-                :at at
-;; a gating fire's payload rides on top of everything the row
-                ;; computes: its velocity scales, its note adds after an
-                ;; absolute (note …) set (docs/jaki-trig-modes-spec.md §3)
-                :vel (* (* (get a :vel) opt-vel) (state-get "jaki-gvel" 1))
-                :note (snap-hit e (+ (+ (let ((ns (get a :nset))) (if (= ns nil) opt-note ns))
-                                        (get a :nadd))
-                                     (state-get "jaki-gnote" 0)))
-                :dur dur
-                ;; (plock …) values, a flat label/value list (nil: none)
-                :params (get a :params)))))))
+      (let ((base (let ((ns (get a :nset))) (if (= ns nil) opt-note ns))))
+        ;; a gating fire's payload rides on top of everything the row
+        ;; computes: its velocity scales, its note adds after an absolute
+        ;; (note …) set (docs/jaki-trig-modes-spec.md §3). A (voice) row
+        ;; first moves its note to the nearest free declared chord tone.
+        (emit-notes chord-q c opts track at dur
+                    (* (* (get a :vel) opt-vel) (state-get "jaki-gvel" 1))
+                    (snap-hit e (+ (+ (if (get opts :voice)
+                                          (alez.jaki.chords/voice-pick
+                                            rkey base (alez.jaki.chords/field-get "chords") (gen-tick)
+                                            (ev-value p (str rkey "opt:voice") (get opts :voice-offset) e c clen 0))
+                                          base)
+                                      (get a :nadd))
+                                   (state-get "jaki-gnote" 0))
+                              c)
+                    ;; (plock …) values, a flat label/value list (nil: none)
+                    (get a :params))))))))
+
+;; A (chord X) value: chord words (Am7, iv7, V7/iv) become codes
+;; (alez.jaki.chords/chord-code) so seq / per-cycle lists carry them;
+;; nothing, :inv or :declared means the declared chord; a list of plain
+;; qualities (:min7 :dom7) is one per cycle.
+(def chord-value (q)
+  (if (or (= q nil) (= q :inv) (= q :declared))
+      :field
+      (let ((v (alez.jaki.chords/encode-raw q)))
+        ;; a lit-wrapped value (at PATH raw) keeps its wrapper
+        (if (at-wrapped? v)
+            (list 'at (nth v 1) (cyc-list (nth v 2)))
+            (cyc-list v)))))
+
+;; a list headed by a keyword (:min7 :dom7) is not an implicit cyc: mark it
+(def cyc-list (v)
+  (if (and (not (number? v)) (not (= (nth v 0) nil))
+           (not (member? (nth v 0) '(seq cyc at))) (not (number? (nth v 0))))
+      (cons 'cyc v)
+      v))
+
+;; One hit's sound (docs/harmony-declaration-spec.md): a `-> chords` row
+;; declares (and with :play sounds) the chord rooted on the hit's note; a
+;; (chord Q) row plays chord Q on it, a bare (chord) the declared chord
+;; transposed by it; any other row plays the one note.
+(def emit-notes (q c opts track at dur vel note params)
+  (let ((inv (resolve-arg (or-default (get opts :chord-inv) 0) c)))
+    (do
+      ;; a chord word's code → its root (on the key, for numerals) plus the
+      ;; hit's note, so note / note+ transpose the progression
+      (let ((code (alez.jaki.chords/decode-code q (or-default (get opts :key-root) 0))))
+        (let ((root (if (= code nil) note (+ (first code) note)))
+              (qual (if (= code nil) q (nth code 1))))
+          (if (string? (get opts :declare))
+              (let ((qd (if (or (= qual nil) (= qual :field)) :maj qual)))
+                (do (alez.jaki.chords/field-set! (get opts :declare) root qd)
+                    (gen-mark (alez.jaki.chords/field-code root qd) "chord" at)
+                    (if (= (get opts :play) nil)
+                        nil
+                        (emit-bundle (round-int (resolve-arg (get opts :play) c)) at vel dur params
+                                     (alez.jaki.chords/chord-notes root qd inv)))))
+              (if (= qual nil)
+                  (seq-emit :track track :at at :vel vel :note note :dur dur :params params)
+                  (emit-bundle track at vel dur params
+                    (if (= qual :field)
+                        (let ((f (alez.jaki.chords/field-get "chords")))
+                          (if (= f nil)
+                              (list note)
+                              (alez.jaki.chords/chord-notes (+ (get f :root) note) (get f :q) inv)))
+                        (alez.jaki.chords/chord-notes root qual inv))))))))))
+
+(def emit-bundle (track at vel dur params notes)
+  (map (lambda (n) (seq-emit :track track :at at :vel vel :note n :dur dur :params params))
+       notes))
 
 ;; ── note ops at emit (docs/jaki-row-processes-spec.md §13) ──
 ;; A hit tagged by (harmony :track n :amount a), (scale :minor :root C) or
@@ -2339,14 +2547,16 @@
   (let ((m (if (number? mask) (imod (round-int mask) 4096) 0)))
     (if (= m 0) n (snap-walk (round-int n) m 0))))
 
-(def harm-note (note h)
-  (let ((r (gen-track-harmony (round-int (resolve-arg (nth h 0) 0)))))
+(def harm-note (note h c)
+  (let ((r (gen-track-harmony (round-int (resolve-arg (nth h 0) c)))))
     (if (= r nil)
         note
-        (+ note (harmonic-snap (nth r 0) (nth r 1) note (resolve-arg (nth h 1) 0) 0)))))
+        (+ note (harmonic-snap (nth r 0) (nth r 1) note (resolve-arg (nth h 1) c) 0)))))
 
-(def snap-hit (e note)
-  (let ((n1 (let ((h (get e :harm))) (if (= h nil) note (harm-note note h)))))
+;; `c` is the hit's cycle: (harmony :track … :amount …) args cycle like
+;; every other slot
+(def snap-hit (e note c)
+  (let ((n1 (let ((h (get e :harm))) (if (= h nil) note (harm-note note h c)))))
     (let ((n2 (let ((m (get e :smask))) (if (= m nil) n1 (snap-note n1 m)))))
       (let ((ch (get e :snap))) (if (string? ch) (snap-note n2 (chan-get ch 0)) n2)))))
 
@@ -2494,6 +2704,8 @@
           'note+  (defer-or :nadd :nadd v)
           'plock  (plock-op args wp)
           'snap   (list :snap (nth args 0))
+          ;; (on accent (chord E7)) / (every 4 (chord F)): a per-hit chord
+          'chord  (list :chordv (chord-value (lit-raw (nth args 0) (sub-path wp 1))))
           'scale  (let ((op (note-op w))) (if (= op nil) nil (list :noteop op)))
           'harmony (list :noteop (note-op w))
           'every  (let ((inner (route-post-op-at (nth args 1) (sub-path wp 2))))
@@ -2539,6 +2751,10 @@
     (match h
       'fast (merge acc :p (when-retime p kind n :fast (nth (raw-args w) 0)))
       'slow (merge acc :p (when-retime p kind n :slow (nth (raw-args w) 0)))
+      ;; (every k (trunc n)) cuts the whole cycle; every-fig cuts its figures
+      'trunc (merge acc :p (if (= kind :every)
+                               (add-gtrunc p (list :every n (nth (raw-args w) 0)))
+                               (every-fig p n w)))
       'note (merge acc :opts (gate-opt (get acc :opts) :note kind n m 0))
       'vel  (merge acc :opts (gate-opt (get acc :opts) :vel-scale kind n m 1))
       _ (let ((post (route-post-op-at w wp)))
@@ -2582,6 +2798,22 @@
                                   :vel-scale (lit-raw (nth args 0) (sub-path (get acc :wpath) 1))))
       'note   (merge acc :opts (merge (get acc :opts)
                                   :note (lit-raw (nth args 0) (sub-path (get acc :wpath) 1))))
+      ;; (chord Q [:inv n]): on a track row, each hit plays chord Q on its
+      ;; note; bare (chord) plays the declared chord. On a `-> chords` row,
+      ;; Q is the quality the hit declares. Q is per-hit value data like
+      ;; note's: a keyword, (:min7 :dom7) per cycle, (seq :fig …).
+      'chord  (let ((i (index-of* args :inv 0)))
+                (merge acc :opts (merge (get acc :opts)
+                                   :chord (chord-value (lit-raw (nth args 0) (sub-path (get acc :wpath) 1)))
+                                   :chord-inv (if (>= i 0) (nth args (+ i 1)) 0))))
+      ;; (key A :minor): the tonic the lane's Roman numerals count from
+      'key    (merge acc :opts (merge (get acc :opts)
+                                 :key-root (or-default (alez.jaki.chords/parse-root (nth args 0)) 0)
+                                 :key-mode (or-default (nth args 1) :major)))
+      ;; (voice): move to the nearest free tone of the declared chord
+      ;; (voice n): n chord tones from it (a per-hit value: (seq :hit 0 1 2))
+      'voice  (merge acc :opts (merge (get acc :opts)
+                                 :voice true :voice-offset (or-default (nth args 0) 0)))
       'vel*   (add-route-post acc (route-post-op-at w (get acc :wpath)) w)
       'vel+   (add-route-post acc (route-post-op-at w (get acc :wpath)) w)
       'note+  (add-route-post acc (route-post-op-at w (get acc :wpath)) w)
@@ -2699,10 +2931,23 @@
         (merge acc :lights true
                    :p (add-post (get acc :p) (list :tag sel idx) (str "tag:" idx ":" (source sel)))))))
 
+;; `-> chords` / `-> (chords "name" [:play track])`: the row declares the
+;; chord instead of playing a track (alez.jaki.chords). :play also sounds the
+;; declared chord on that track.
+(def chords-dest? (d)
+  (and (not (number? d)) (not (string? d)) (= (raw-head d) 'chords)))
+
 (def prepare-route (p seg)
-  (let ((r (route-steps (dict :p p :opts (dict)) (rest seg))))
-    (dict :kind :note :p (with-period (get r :p)) :track (first seg)
-          :opts (merge (get r :opts) :lights (= (get r :lights) true)))))
+  (let ((r (route-steps (dict :p p :opts (dict)) (rest seg))) (dest (first seg)))
+    (let ((opts (merge (get r :opts) :lights (= (get r :lights) true))))
+      (if (chords-dest? dest)
+          (let ((a (raw-args dest)))
+            (let ((i (index-of* a :play 0)))
+              (dict :kind :note :p (with-period (get r :p))
+                    :track (if (>= i 0) (nth a (+ i 1)) 0)
+                    :opts (merge opts :declare (if (string? (nth a 0)) (nth a 0) "chords")
+                                      :play (if (>= i 0) (nth a (+ i 1)) nil)))))
+          (dict :kind :note :p (with-period (get r :p)) :track dest :opts opts)))))
 
 ;; ── control routes: -> (mute T) / (solo T) — sequenced mixer holds ─────────
 ;; (docs/jaki-mixer-control-routes-spec.md). Events become gate windows
@@ -2883,9 +3128,14 @@
       (play-control-route route)
       (emit* (get route :p) (get route :track) (get route :opts))))
 
-;; this tick's routes at the clock's position (`step-clock` ran first)
+;; this tick's routes at the clock's position (`step-clock` ran first).
+;; `-> chords` rows play first, so the others read this tick's chord.
+(def declares? (r) (string? (get (get r :opts) :declare)))
+
 (def play-routes (body)
-  (sum* (map play-route (prepared body))))
+  (let ((routes (prepared body)))
+    (sum* (map play-route (append (keep declares? routes)
+                                  (keep (lambda (r) (not (declares? r))) routes))))))
 
 ;; one tick in `mode` (docs/jaki-trig-modes-spec.md §2); 0 when gated shut
 (def run-in (mode body)

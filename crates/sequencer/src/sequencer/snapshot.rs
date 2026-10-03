@@ -137,6 +137,9 @@ pub struct SequencerSnapshot {
     /// allocation path.
     pub scene_slot_table: Arc<Vec<Arc<SceneSlotStore>>>,
     pub process_trace: bool,
+    /// Instrument descriptors by engine id, for naming rack-slot instrument
+    /// params at landing (see [`Self::rack_slot_instrument_descriptor`]).
+    pub engine_instrument_descriptors: Arc<Vec<EffectDescriptor>>,
 }
 
 impl SequencerSnapshot {
@@ -186,6 +189,23 @@ impl SequencerSnapshot {
             .fold(0.0, f64::max)
     }
 
+    /// The instrument descriptor a rack slot plays: the builtin sampler's, or
+    /// its engine's from the registry table. `None` for an empty slot or an
+    /// engine the table does not know yet.
+    pub fn rack_slot_instrument_descriptor<'a>(
+        &'a self,
+        slot: &crate::sequencer::RackSlotSnapshot,
+    ) -> Option<&'a EffectDescriptor> {
+        static SAMPLER: std::sync::OnceLock<EffectDescriptor> = std::sync::OnceLock::new();
+        match slot.instrument_type {
+            InstrumentType::Sampler => Some(SAMPLER.get_or_init(EffectDescriptor::builtin_sampler)),
+            InstrumentType::Custom | InstrumentType::Modulator => self
+                .engine_instrument_descriptors
+                .get(slot.track_sound_state.engine_id?),
+            InstrumentType::Empty | InstrumentType::Rack => None,
+        }
+    }
+
     pub fn empty() -> Self {
         Self {
             transport: SequencerTransportSnapshot {
@@ -206,6 +226,7 @@ impl SequencerSnapshot {
             scene_slots: SceneSlotStore::default(),
             scene_slot_table: Arc::new(Vec::new()),
             process_trace: false,
+            engine_instrument_descriptors: Arc::new(Vec::new()),
         }
     }
 
@@ -263,6 +284,7 @@ impl SequencerSnapshot {
             scene_slots,
             scene_slot_table,
             process_trace: state.process_trace_enabled(),
+            engine_instrument_descriptors: state.engine_instrument_descriptors(),
         }
     }
 
@@ -379,6 +401,7 @@ impl SequencerSnapshot {
             // their slots from there rather than from this stale copy.
             scene_slot_table: Arc::new(state.scene_slot_table()),
             process_trace: state.process_trace_enabled(),
+            engine_instrument_descriptors: state.engine_instrument_descriptors(),
         }
     }
 }
@@ -417,6 +440,7 @@ fn capture_live_track(
         accum_limit: tp.get_accum_limit(),
         accum_mode: tp.get_accum_mode(),
         fts_scale: tp.get_fts_scale(),
+        tuning: tp.tuning(),
         mono_trigger: tp.get_mono_trigger(),
         voice_priority: tp.get_voice_priority(),
         mute_group: tp.get_mute_group(),
@@ -447,7 +471,13 @@ fn capture_live_track(
         .collect();
     let instrument_descriptor =
         instrument_descriptor.unwrap_or_else(EffectDescriptor::builtin_sampler);
-    let instrument_slot = EffectSlotSnapshot::capture(&state.pattern.instrument_slots[track]);
+    let mut instrument_slot = EffectSlotSnapshot::capture(&state.pattern.instrument_slots[track]);
+    // `EffectSlotState` carries no voice-control roles; derive them from the
+    // descriptor so an instrument's Mono voice mode reaches allocation.
+    instrument_slot.instrument_voice_controls =
+        crate::effects::instrument_voice::InstrumentVoiceControls::from_descriptor(
+            &instrument_descriptor,
+        );
     let bar_transposes = state.pattern.bar_transposes[track].snapshot();
     let steps = (0..MAX_STEPS)
         .map(|step| SequencerStepSnapshot::capture(state, track, step))
@@ -577,13 +607,18 @@ fn track_snapshot_from_pattern_data(
     project_process_chain: &crate::process::TrackProcessChain,
 ) -> SequencerTrackSnapshot {
     let engine_id = data.track_sound_state.engine_id;
+    let mut instrument_slot = data.instrument_slot.clone();
+    instrument_slot.instrument_voice_controls =
+        crate::effects::instrument_voice::InstrumentVoiceControls::from_descriptor(
+            &instrument_descriptor,
+        );
     let track_chain =
         data.refreshed_process_chain(Some(&instrument_descriptor), &effect_descriptors);
     let process_chain = compose_track_process_chain(
         project_process_chain,
         Some(&track_chain),
         &instrument_descriptor,
-        &data.instrument_slot,
+        &instrument_slot,
         &effect_descriptors,
         &data.effect_slots,
         Some(&data.project_process_lane_overrides),
@@ -641,8 +676,8 @@ fn track_snapshot_from_pattern_data(
         effect_descriptors,
         effect_slots: data.effect_slots.clone(),
         midi_fx_slots: data.midi_fx_slots.clone(),
+        instrument_slot,
         instrument_descriptor,
-        instrument_slot: data.instrument_slot.clone(),
         track_send_runtime_targets: Vec::new(),
         track_send_live_baselines: Vec::new(),
         bar_transposes: data.bar_transpose_snapshot,
@@ -687,4 +722,103 @@ fn track_pattern_bit(bits: [u64; super::data::TRACK_PATTERN_WORDS], step: usize)
     let bit = step % 64;
     bits.get(word)
         .is_some_and(|word_bits| (word_bits & (1u64 << bit)) != 0)
+}
+
+#[cfg(test)]
+mod instrument_voice_capture_tests {
+    use super::*;
+    use crate::effects::{EffectSlotSnapshot, ParamUiMetadata};
+    use crate::scheduled_event::ScheduledVoicePolicy;
+    use crate::sequencer::MonoTrigger;
+
+    fn voice_descriptor() -> EffectDescriptor {
+        let mut desc = EffectDescriptor::builtin_sampler();
+        for (idx, role) in ["voice-mode"].into_iter().enumerate() {
+            desc.params[idx].ui_metadata = Some(ParamUiMetadata {
+                group: None,
+                env: None,
+                role: Some(role.to_string()),
+                tags: Vec::new(),
+                asset_options: None,
+                display_name: None,
+            });
+        }
+        desc
+    }
+
+    fn assert_mono_legato(track: &SequencerTrackSnapshot) {
+        assert!(track.params.polyphonic, "track params stay poly; Mono mode overrides them");
+        let policy = ScheduledVoicePolicy::from_track(track);
+        assert!(!policy.polyphonic);
+        assert_eq!(policy.max_polyphony, 1);
+        // Legato is the track's Trigger setting, never the instrument's.
+        assert_eq!(policy.mono_trigger, MonoTrigger::Legato);
+    }
+
+    #[test]
+    fn unison_leaves_the_note_limit_and_trigger_to_the_track() {
+        let state = SequencerState::new(1, vec![vec![]]);
+        state.pattern.track_params[0].set_max_polyphony(6);
+        let desc = voice_descriptor();
+        let mut slot = EffectSlotSnapshot::new_default(&desc, 1);
+        slot.defaults[0] = 3.0; // Unison
+        slot.restore(&state.pattern.instrument_slots[0]);
+        let live = capture_live_track(
+            &state,
+            0,
+            &crate::process::TrackProcessChain::default(),
+            None,
+            None,
+            None,
+            None,
+            Some(desc),
+        );
+        let policy = ScheduledVoicePolicy::from_track(&live);
+        assert_eq!(policy.polyphonic, live.params.polyphonic);
+        assert_eq!(policy.max_polyphony, 6);
+        assert_eq!(policy.mono_trigger, live.params.mono_trigger);
+    }
+
+    #[test]
+    fn live_and_pattern_captures_carry_instrument_voice_controls() {
+        let state = SequencerState::new(1, vec![vec![]]);
+        state.pattern.track_params[0].set_max_polyphony(6);
+        state.pattern.track_params[0].set_mono_trigger(MonoTrigger::Legato);
+        let desc = voice_descriptor();
+        let mut slot = EffectSlotSnapshot::new_default(&desc, 1);
+        slot.defaults[0] = 1.0; // Mono
+        slot.restore(&state.pattern.instrument_slots[0]);
+
+        let live = capture_live_track(
+            &state,
+            0,
+            &crate::process::TrackProcessChain::default(),
+            None,
+            None,
+            None,
+            None,
+            Some(desc.clone()),
+        );
+        assert_mono_legato(&live);
+
+        let mut data = super::super::state::PatternSnapshot::capture(
+            &state,
+            1,
+            &[0],
+            &[48_000],
+            &["t".to_string()],
+            &[InstrumentType::Custom],
+        )
+        .track_pattern_data(0)
+        .unwrap();
+        data.instrument_slot.instrument_voice_controls = None;
+        let switched = track_snapshot_from_pattern_data(
+            &data,
+            false,
+            EffectDescriptor::default_full_chain(),
+            desc,
+            &crate::process::TrackProcessChain::default(),
+        );
+        assert_mono_legato(&switched);
+    }
 }

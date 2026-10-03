@@ -868,13 +868,7 @@ fn sync_track_param_fields(
     rt.set_reactive(
         "SEQ",
         "tp-fts",
-        Value::String(
-            FTS_SCALE_NAMES
-                .get(tp.get_fts_scale())
-                .copied()
-                .unwrap_or("Off")
-                .to_string(),
-        ),
+        Value::String(fts_scale_label(tp)),
     );
     rt.set_reactive(
         "SEQ",
@@ -898,6 +892,10 @@ fn sync_track_param_fields(
     );
     rt.set_reactive("SEQ", "accumulator-options", build_accumulator_options(app));
     rt.set_reactive("SEQ", "fts-options", build_fts_options());
+    for (key, value) in tuning_reactive_fields(tp) {
+        rt.set_reactive("SEQ", key, value);
+    }
+    rt.set_reactive("SEQ", "tuning-root-options", build_tuning_root_options());
     rt.set_reactive("SEQ", "mute-group-options", build_mute_group_options());
     rt.set_reactive("SEQ", "accum-mode-options", build_accum_mode_options());
 }

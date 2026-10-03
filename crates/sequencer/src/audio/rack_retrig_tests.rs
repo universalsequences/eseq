@@ -83,7 +83,7 @@ fn rack_retrig_schedules_every_layer_and_chord_voice_with_resolved_gates() {
     let fire = |data: &mut AudioCallbackData, resolved, chord| {
         let (_, heap) = crate::test_alloc::measure(|| {
             fire_rack_resolved(data, 17, 0, 0, None, 6000.0, resolved, chord,
-                &rack, [None; crate::sequencer::RACK_MACRO_COUNT]);
+                &rack, [None; crate::sequencer::RACK_MACRO_COUNT], &ScheduledRackSlotParams::new());
         });
         assert_eq!(heap, crate::test_alloc::Counts::default());
     };
@@ -175,6 +175,6 @@ fn rack_retrig_schedules_every_layer_and_chord_voice_with_resolved_gates() {
         slot.max_polyphony = 1;
     }
     fire_rack_resolved(&mut data, 17, 0, 0, None, 6000.0, resolved, chord,
-        &mono_rack, [None; crate::sequencer::RACK_MACRO_COUNT]);
+        &mono_rack, [None; crate::sequencer::RACK_MACRO_COUNT], &ScheduledRackSlotParams::new());
     assert_eq!(data.countdown_events.iter().filter(|event| matches!(event.kind, CountdownEventKind::Retrig(_))).count(), 2);
 }

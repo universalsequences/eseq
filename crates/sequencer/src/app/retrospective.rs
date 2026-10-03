@@ -330,9 +330,17 @@ impl App {
         let slop = (end - start) / steps as f64 / 4.0;
         let mut lanes = BTreeMap::<usize, BTreeMap<usize, Vec<ImportedNote>>>::new();
         // Notes before the crop start go last, and only onto a track whose
-        // step one is still empty, so a pickup or flam never doubles the
-        // downbeat.
-        for early in [false, true] { for note in &draft.notes {
+        // step one has no hit at or after the crop start, so a pickup or
+        // flam never doubles the downbeat. That is decided once before the
+        // early pass, so every note of an early downbeat chord lands together.
+        let mut downbeat_taken = std::collections::BTreeSet::<usize>::new();
+        for early in [false, true] {
+            if early {
+                downbeat_taken = lanes.iter()
+                    .filter(|(_, steps)| steps.contains_key(&0))
+                    .map(|(&track, _)| track).collect();
+            }
+            for note in &draft.notes {
             // A trig is selected by its onset, inside the crop window shifted
             // back by the slop. A note crossing the right crop edge is
             // shortened; cropping never invents a note-on at the left.
@@ -340,7 +348,7 @@ impl App {
                 || note.start < start - slop || note.start >= end - slop { continue; }
             let track = self.track_registry.index_of(note.track)
                 .ok_or("A captured track was deleted. Reopen MIDI capture")?;
-            if early && lanes.get(&track).is_some_and(|steps| steps.contains_key(&0)) { continue; }
+            if early && downbeat_taken.contains(&track) { continue; }
             let position = ((note.start - start) * scale).max(0.0);
             let step = position.floor() as usize;
             let delay = (position - step as f64) as f32;
@@ -747,6 +755,27 @@ mod tests {
         assert!(app.state.pattern.patterns[0].is_active(0));
         assert_eq!(app.state.pattern.chord_data[0].count(0), 1);
         assert_eq!(app.state.pattern.step_data[0].get(0, StepParam::Velocity), 1.0);
+    }
+
+    /// A downbeat chord played just before the crop start lands on step one
+    /// whole: the flam guard must not drop the chord's later notes.
+    #[test]
+    fn retrospective_import_keeps_every_note_of_an_early_downbeat_chord() {
+        let sixteenth = 15.0 / 120.0;
+        let note = |start: f64, transpose: f32| CapturedNote {
+            track: TrackId(1), transpose, velocity: 1.0, start, end: start + 0.05,
+        };
+        let early = 1.0 - 0.2 * sixteenth;
+        let notes = vec![
+            note(early, 0.0), note(early, 4.0), note(early, 7.0), note(1.0 + 8.0 * sixteenth, 0.0),
+        ];
+        let mut app = app();
+        app.retrospective.draft = Some(CaptureDraft {
+            duration: 4.0, truncated: false, scene: app.state.current_scene_id().unwrap(), notes,
+        });
+        app.import_retrospective(1.0, 3.0, 1).unwrap();
+        assert!(app.state.pattern.patterns[0].is_active(0));
+        assert_eq!(app.state.pattern.chord_data[0].count(0), 3);
     }
 
     /// Kit pads in a rack with clips read their pattern from the active clip,

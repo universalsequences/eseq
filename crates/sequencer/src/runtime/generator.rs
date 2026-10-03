@@ -263,6 +263,16 @@ impl GeneratorRuntime {
         self.instances.len()
     }
 
+    /// The keys of generator `id`'s persistent `state-get`/`state-set!` map.
+    #[cfg(test)]
+    pub fn instance_state_keys(&self, id: u64) -> Vec<String> {
+        self.instances
+            .iter()
+            .find(|inst| inst.id == id)
+            .map(|inst| inst.state.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+
     /// Reconcile the runtime to a new set of definitions, **by id**. An instance
     /// whose id and resolution are unchanged keeps its clock / tick counter / RNG
     /// (so hot-reloading the `:tick` body or unrelated params does not interrupt a

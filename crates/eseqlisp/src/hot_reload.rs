@@ -357,6 +357,38 @@ impl SourceManager {
         Some(Err(errors))
     }
 
+    /// Resolve editor navigation with the import loader's precedence, but without
+    /// evaluating code or changing the live dependency graph. Only resolution
+    /// configuration is copied; editor overlays replace potentially stale ones.
+    pub fn module_source_for_navigation(
+        &self,
+        module: &str,
+        importer: Option<&Path>,
+        overlays: Vec<SourceOverlay>,
+    ) -> Result<LoadedSource, String> {
+        let mut sources = Self {
+            cwd: self.cwd.clone(),
+            module_load_roots: self.module_load_roots.clone(),
+            ..Self::new()
+        };
+        sources.set_overlays(overlays);
+        if let Some(path) = importer {
+            sources.enter_file(sources.canonicalize_path(path), 0);
+        }
+        let candidates = crate::modules::module_relative_file_candidates(module);
+        if let Some(result) = sources.load_module_source(module, &candidates) {
+            return result.map_err(|errors| errors.join("\n"));
+        }
+        let mut errors = Vec::new();
+        for candidate in crate::modules::module_file_candidates(module) {
+            match sources.load_source(&candidate) {
+                Ok(source) => return Ok(source),
+                Err(error) => errors.push(error),
+            }
+        }
+        Err(errors.join("\n"))
+    }
+
     /// Excludes a known factory-content root from legacy-alias preflight.
     /// Authored roots must not be registered here: future user roots should
     /// inherit detection automatically through normal path evaluation.

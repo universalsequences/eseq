@@ -504,7 +504,7 @@ fn quantize_zeroes_delays_and_swing_and_moves_late_hits_to_their_nearest_step() 
     chord_step(&mut data, 8, &[0.2, 0.3], 0.9); // captured double
     data.step_data[8][StepParam::Transpose.index()] = 5.0;
 
-    assert!(quantize_groove_source(&mut data));
+    assert!(quantize_groove_source(&mut data, None));
     assert_eq!(data.track_params.swing, 50.0);
     assert!(data.swing_plock_snapshot.iter().all(Option::is_none));
     assert!(data
@@ -540,7 +540,7 @@ fn quantize_zeroes_delays_and_swing_and_moves_late_hits_to_their_nearest_step() 
     );
 
     assert!(
-        !quantize_groove_source(&mut data),
+        !quantize_groove_source(&mut data, None),
         "quantizing twice is a no-op"
     );
 }
@@ -553,7 +553,7 @@ fn quantize_does_not_move_onto_an_occupied_step_or_with_device_locks() {
     chord_step(&mut data, 10, &[0.2, 0.9], 1.0); // not ALL notes late
     chord_step(&mut data, 12, &[0.7], 1.0);
     data.timebase_plock_snapshot[12] = Some(Timebase::Eighth as u32);
-    assert!(quantize_groove_source(&mut data));
+    assert!(quantize_groove_source(&mut data, None));
     let active = (0..16)
         .filter(|step| step_active(&data, *step))
         .collect::<Vec<_>>();
@@ -570,7 +570,7 @@ fn quantize_does_not_move_onto_an_occupied_step_or_with_device_locks() {
 fn quantize_moves_a_last_step_pickup_onto_the_downbeat() {
     let mut data = pattern(16);
     chord_step(&mut data, 15, &[0.95], 1.0);
-    assert!(quantize_groove_source(&mut data));
+    assert!(quantize_groove_source(&mut data, None));
     assert!(step_active(&data, 0));
     assert!(!step_active(&data, 15));
 }
@@ -616,7 +616,7 @@ fn quantized_source_through_its_groove_sounds_as_before() {
 
     for ((note, data), (_, heard_before)) in sources.iter().zip(&before) {
         let mut quantized = (*data).clone();
-        quantize_groove_source(&mut quantized);
+        quantize_groove_source(&mut quantized, None);
         let straight = heard_hits(&quantized);
         assert_eq!(
             straight.len(),
@@ -2067,4 +2067,59 @@ fn track_groove_snapshots_stretch_the_grid_by_the_rack_scale() {
         .unwrap()
         .get("scale")
         .is_none());
+}
+
+/// A grooved member never plays its pattern's swing (the scheduler replaces
+/// it with the groove's pocket), so Quantize must not move a hit by a swing
+/// nobody heard: the move rule and extraction's snap agree on every step.
+#[test]
+fn quantize_source_through_groove_ignores_unheard_swing() {
+    let mut data = pattern(16);
+    data.track_params.swing = 75.0;
+    data.track_params.swing_resolution = SwingResolution::Eighth;
+    for step in (0..16).step_by(2) {
+        activate(&mut data, step, 0.8);
+    }
+    let straight = track_groove(4.0, SIXTEENTH, &[0.0; 16]);
+
+    // Sanity: without the groove the leftover swing reads a whole step late.
+    let mut unheard = data.clone();
+    assert!(quantize_groove_source(&mut unheard, None));
+    assert!(step_active(&unheard, 3), "plain swing moves step 2 onto 3");
+
+    let heard_steps = heard_hits_through(&data, Some(&straight))
+        .iter()
+        .map(|hit| (hit.beat / SIXTEENTH).round() as usize % 16)
+        .collect::<Vec<_>>();
+    assert!(quantize_groove_source(&mut data, Some(&straight)));
+    let active = (0..16)
+        .filter(|step| step_active(&data, *step))
+        .collect::<Vec<_>>();
+    assert_eq!(active, (0..16).step_by(2).collect::<Vec<_>>());
+    assert_eq!(active, heard_steps, "quantize and extraction agree");
+}
+
+/// A hit whose Delay plus the groove's pocket was heard more than half a step
+/// late is extracted into the next slot, so Quantize moves it there too.
+#[test]
+fn quantize_source_through_groove_counts_groove_offset() {
+    let mut data = pattern(16);
+    delayed_step(&mut data, 4, 0.2, 1.0);
+    let mut offsets = [0.0_f32; 16];
+    offsets[4] = 0.4;
+    let groove = track_groove(4.0, SIXTEENTH, &offsets);
+
+    let heard = heard_hits_through(&data, Some(&groove));
+    assert_eq!(heard.len(), 1);
+    assert_eq!((heard[0].beat / SIXTEENTH).round() as usize, 5);
+
+    let mut plain = data.clone();
+    quantize_groove_source(&mut plain, None);
+    assert!(step_active(&plain, 4), "Delay 0.2 alone stays on its step");
+
+    assert!(quantize_groove_source(&mut data, Some(&groove)));
+    let active = (0..16)
+        .filter(|step| step_active(&data, *step))
+        .collect::<Vec<_>>();
+    assert_eq!(active, vec![5], "moved onto the slot extraction snapped it to");
 }

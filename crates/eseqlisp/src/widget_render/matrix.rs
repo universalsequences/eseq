@@ -419,8 +419,12 @@ fn default_cell_value(props: &HashMap<String, Value>, row: usize, col: usize) ->
 /// `context-menu` child with "Clear", without call sites opting in. The menu is
 /// the ordinary `context-menu` widget: the matrix only owns whether it is open.
 struct OpenMenu {
-    /// Identifies the owning matrix across relayouts: widget ids are assigned
-    /// after `layout_children` runs, but the laid-out rect is known there.
+    /// The owning matrix's stable widget id (`:key` / `__stable-widget-id`),
+    /// when it has one. Runtime widget ids are assigned after
+    /// `layout_children` runs, so this is the identity checked there.
+    owner: Option<u64>,
+    /// Laid-out rect at right-click time: the identity fallback for a matrix
+    /// without a stable id, and kept current while a keyed owner moves.
     rect: Rect,
     anchor_col: f32,
     anchor_row: f32,
@@ -443,6 +447,29 @@ pub(crate) fn has_builtin_menu(node: &LayoutNode) -> bool {
         && (has_callback(node, "on-cell-change") || has_callback(node, "on-change"))
 }
 
+/// `has_builtin_menu` for an unlaid widget value, as `layout_children` sees it.
+fn value_has_builtin_menu(value: &Value) -> bool {
+    let Value::Map(map) = value else {
+        return false;
+    };
+    let has = |key: &str| {
+        map.get(key)
+            .is_some_and(|cell| !matches!(&*cell.borrow(), Value::Nil | Value::Bool(false)))
+    };
+    !map.contains_key("on-right-click") && (has("on-cell-change") || has("on-change"))
+}
+
+/// Drop a stock menu whose dismissal skipped `:on-close` (a dead overlay
+/// entry, or a widget tree replaced underneath it) so it cannot reattach to
+/// a later matrix laid out at the same identity or rect.
+pub(crate) fn reset_builtin_menu() {
+    let closed = OPEN_MENU.with(|menu| menu.borrow_mut().take());
+    PENDING_OUTPUTS.with(|cell| cell.borrow_mut().clear());
+    if closed.is_some() {
+        bump_widget_state_generation();
+    }
+}
+
 pub fn take_pending_outputs() -> Vec<EventOutput> {
     PENDING_OUTPUTS.with(|cell| std::mem::take(&mut *cell.borrow_mut()))
 }
@@ -450,6 +477,7 @@ pub fn take_pending_outputs() -> Vec<EventOutput> {
 fn open_menu(node: &LayoutNode, local_col: f32, local_row: f32) {
     OPEN_MENU.with(|menu| {
         *menu.borrow_mut() = Some(OpenMenu {
+            owner: node.stable_widget_id,
             rect: node.rect,
             anchor_col: local_col,
             anchor_row: local_row,
@@ -876,13 +904,27 @@ impl WidgetDefinition for MatrixWidget {
     ) -> Vec<LayoutNode> {
         // The stock menu is an overlay panel: it anchors at the pointer, so
         // the rect it is handed does not affect the matrix's own layout.
-        OPEN_MENU.with(|menu| {
-            menu.borrow()
-                .as_ref()
-                .filter(|menu| same_rect(menu.rect, area))
-                .map(|menu| vec![build_child(&builtin_menu_value(menu), area, layout_ctx)])
-                .unwrap_or_default()
-        })
+        if !value_has_builtin_menu(_node) {
+            return Vec::new();
+        }
+        let stable_id = crate::ui::layout::get_stable_widget_id(_node);
+        let menu_value = OPEN_MENU.with(|menu| {
+            let mut menu = menu.borrow_mut();
+            let menu = menu.as_mut()?;
+            let owned = match (menu.owner, stable_id) {
+                (Some(owner), Some(id)) => owner == id,
+                (None, None) => same_rect(menu.rect, area),
+                _ => false,
+            };
+            if !owned {
+                return None;
+            }
+            menu.rect = area;
+            Some(builtin_menu_value(menu))
+        });
+        menu_value
+            .map(|value| vec![build_child(&value, area, layout_ctx)])
+            .unwrap_or_default()
     }
 
     fn mouse_event(
@@ -1965,5 +2007,89 @@ mod tests {
         assert_eq!(instance.uniform_a[0], 2.0);
         assert_eq!(instance.color_b, [0.0, 0.0, 0.0, 0.0]);
         assert_eq!(instance.color_a, [1.0, 0.0, 0.0, 0x80 as f32 / 255.0]);
+    }
+
+    fn menu_matrix(key: Option<&str>, extra: Vec<Value>) -> Value {
+        let mut args = vec![
+            Value::Keyword("rows".to_string()),
+            Value::Number(2.0),
+            Value::Keyword("cols".to_string()),
+            Value::Number(2.0),
+            Value::Keyword("width".to_string()),
+            Value::Number(8.0),
+            Value::Keyword("height".to_string()),
+            Value::Number(4.0),
+            Value::Keyword("on-change".to_string()),
+            native("test-matrix-change", || {}),
+        ];
+        if let Some(key) = key {
+            args.push(Value::Keyword("key".to_string()));
+            args.push(Value::String(key.to_string()));
+        }
+        args.extend(extra);
+        crate::widgets::build_widget("matrix", args)
+    }
+
+    fn lay_out(tree: &Value) -> LayoutNode {
+        crate::layout::LayoutEngine::new(20, 10, 1.0)
+            .layout(tree)
+            .expect("matrix layout")
+    }
+
+    fn has_menu(node: &LayoutNode) -> bool {
+        node.children.iter().any(|child| child.widget_type == "context-menu")
+    }
+
+    fn right_click(node: &LayoutNode) {
+        let outcome = MATRIX_WIDGET.mouse_event(
+            node,
+            MouseEventKind::Down(MouseButton::Right),
+            1.0,
+            1.0,
+            None,
+            None,
+            KeyModifiers::empty(),
+            1.0,
+            1.0,
+        );
+        assert!(matches!(outcome, MouseEventOutcome::Consume));
+    }
+
+    #[test]
+    fn stock_menu_does_not_attach_to_another_matrix_at_the_same_rect() {
+        reset_builtin_menu();
+        let owner = lay_out(&menu_matrix(Some("matrix-a"), Vec::new()));
+        right_click(&owner);
+        assert!(has_menu(&lay_out(&menu_matrix(Some("matrix-a"), Vec::new()))));
+
+        let other = lay_out(&menu_matrix(Some("matrix-b"), Vec::new()));
+        assert!(same_rect(other.rect, owner.rect));
+        assert!(!has_menu(&other), "a different keyed matrix must not inherit the menu");
+
+        let unkeyed = lay_out(&menu_matrix(None, Vec::new()));
+        assert!(!has_menu(&unkeyed), "an unkeyed matrix must not inherit a keyed menu");
+
+        let own_menu = lay_out(&menu_matrix(
+            Some("matrix-a"),
+            vec![
+                Value::Keyword("on-right-click".to_string()),
+                native("test-matrix-right-click", || {}),
+            ],
+        ));
+        assert!(!has_menu(&own_menu), "a matrix with its own :on-right-click has no stock menu");
+        reset_builtin_menu();
+    }
+
+    #[test]
+    fn reset_builtin_menu_drops_a_menu_dismissed_without_on_close() {
+        reset_builtin_menu();
+        let owner = lay_out(&menu_matrix(Some("matrix-a"), Vec::new()));
+        right_click(&owner);
+        assert!(has_menu(&lay_out(&menu_matrix(Some("matrix-a"), Vec::new()))));
+
+        // A dead overlay entry or a replaced widget tree skips `:on-close`.
+        reset_builtin_menu();
+        assert!(!has_menu(&lay_out(&menu_matrix(Some("matrix-a"), Vec::new()))));
+        assert!(take_pending_outputs().is_empty());
     }
 }

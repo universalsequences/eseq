@@ -152,7 +152,39 @@ The **scene transpose** is the field beside the tempo in the transport whose val
 (seq-set-track-param :global-transpose false)
 ```
 
-The **scale** menu in the track settings snaps each note to the nearest degree of a scale on C: Major, Minor, Dorian, Mixolydian, Lydian, Phrygian, Locrian, Pent. Major, Pent. Minor, Blues, Whole Tone or Diminished. **Off** leaves notes as they are. The scene transpose is added after the snap, so a scene transpose that is not a multiple of 12 can move notes off the scale.
+The **scale** menu in the track settings snaps each note to the nearest degree of a scale. **Off** leaves notes as they are. The scene transpose is added after the snap, so a scene transpose that is not a multiple of 12 can move notes off the scale.
+
+The menu has the usual 12-note scales (Major, Minor, the modes, pentatonics, Blues, Whole Tone, Diminished, harmonic and melodic minor, Hungarian minor, Phrygian dominant, Hirajoshi, In) and microtonal ones:
+
+- **Just intonation and historical tunings:** Just Major, Just Minor, Just Chromatic, Pythagorean, Meantone 1/4, Werckmeister III, Harmonic 8-15.
+- **Maqam and gamelan:** Maqam Rast, Maqam Bayati, Maqam Saba (quarter tones), Pelog, Slendro.
+- **Equal divisions:** 7-, 19-, 22-, 24- and 31-EDO, Bohlen-Pierce (13 steps per 3:1 instead of per octave), and Wendy Carlos's Alpha, Beta and Gamma.
+
+### The scale editor
+
+The button beside the scale menu opens the **scale editor** in place of the track settings, and the track settings tile grows to fit it. **‹** goes back.
+
+- The top strip shows each degree's pitch as a step over faint semitone lines.
+- Below it, each degree has a detune bar. Drag up to sharpen or down to flatten, up to 100 cents either way (hold Shift to move in 5-cent steps). The short gray tick shows where the nearest ordinary semitone is. Double-click a bar, or Option-click it, to reset that degree.
+- Click a degree's dot to take it out of the scale; notes then snap to the degrees that are left.
+- The labels give each degree's nearest note and how far off it is, for example E-14 is 14 cents flat of E.
+
+Above the editor:
+
+- **Root** moves the whole scale onto another note.
+- **Snap / Map** sets how notes reach the scale. **Snap** moves each note to the nearest degree. **Map** plays the scale in order: each semitone up is the next degree. Use Map for scales with more or fewer than 12 notes, so every degree is reachable from the step grid and a keyboard; the equal-division scales start in Map.
+Below the editor:
+
+- **Just intonation** moves each degree onto the nearest simple ratio.
+- **Load .scl** loads a [Scala](https://www.huygens-fokker.org/scala/) scale file. Its name replaces the scale name in the menu.
+- **Reset** clears every detune and brings back every degree.
+- **Randomize** detunes every degree by a random amount up to the number of cents (ct) beside it.
+- **Stretch** widens the scale by the number of cents beside it, a little like a stretched piano tuning.
+- **Morph** blends from 0% (every degree rounded to the nearest ordinary semitone) to 100% (the tuning as drawn). Sweep it to bring a tuning in gradually.
+
+Every edit can be undone; one drag on a bar is one undo step. Picking another scale from the menu clears the degree edits but keeps the root and morph. A scale name with a `*` has edits.
+
+Microtonal pitches reach the track's instrument directly. The piano roll still draws ordinary semitone rows.
 
 ### Example: one step through the stages
 

@@ -134,7 +134,7 @@ impl VM {
             upvalues: Vec::new(),
             source_symbol: Some(format!("view-buffer {target}")),
             source_file: None,
-            source_module: None,
+            source_module: None,            origins: Vec::new(),
         });
         // No owner buffer and no source file: a bound view belongs to the
         // host, so neither a buffer's layout reset nor a module reload

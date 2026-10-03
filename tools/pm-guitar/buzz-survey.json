@@ -1,0 +1,296 @@
+[
+ {
+  "pitch": "C#2",
+  "take": 0,
+  "onset_s": 0.10427083333333333,
+  "periodicity": 0.718,
+  "hf_rel_db": -30.1
+ },
+ {
+  "pitch": "C#2",
+  "take": 1,
+  "onset_s": 10.410666666666666,
+  "periodicity": 0.783,
+  "hf_rel_db": -31.1
+ },
+ {
+  "pitch": "D#2",
+  "take": 0,
+  "onset_s": 4.5986666666666665,
+  "periodicity": 0.638,
+  "hf_rel_db": -27.9
+ },
+ {
+  "pitch": "D#2",
+  "take": 1,
+  "onset_s": 9.774375,
+  "periodicity": 0.628,
+  "hf_rel_db": -24.8
+ },
+ {
+  "pitch": "D#2",
+  "take": 2,
+  "onset_s": 14.944458333333333,
+  "periodicity": 0.774,
+  "hf_rel_db": -27.0
+ },
+ {
+  "pitch": "G#2",
+  "take": 0,
+  "onset_s": 0.5933541666666666,
+  "periodicity": 0.593,
+  "hf_rel_db": -49.3
+ },
+ {
+  "pitch": "G#2",
+  "take": 1,
+  "onset_s": 1.8679791666666667,
+  "periodicity": 0.526,
+  "hf_rel_db": -49.0
+ },
+ {
+  "pitch": "G#2",
+  "take": 2,
+  "onset_s": 5.7215,
+  "periodicity": 0.652,
+  "hf_rel_db": -50.5
+ },
+ {
+  "pitch": "G#2",
+  "take": 3,
+  "onset_s": 7.021020833333333,
+  "periodicity": 0.674,
+  "hf_rel_db": -51.5
+ },
+ {
+  "pitch": "G#2",
+  "take": 4,
+  "onset_s": 7.8542708333333335,
+  "periodicity": 0.744,
+  "hf_rel_db": -51.8
+ },
+ {
+  "pitch": "G#2",
+  "take": 5,
+  "onset_s": 9.137729166666666,
+  "periodicity": 0.804,
+  "hf_rel_db": -49.9
+ },
+ {
+  "pitch": "G#2",
+  "take": 6,
+  "onset_s": 10.892729166666667,
+  "periodicity": 0.564,
+  "hf_rel_db": -49.0
+ },
+ {
+  "pitch": "G#2",
+  "take": 7,
+  "onset_s": 14.294145833333333,
+  "periodicity": 0.731,
+  "hf_rel_db": -50.7
+ },
+ {
+  "pitch": "F3",
+  "take": 0,
+  "onset_s": 0.9325208333333334,
+  "periodicity": 0.257,
+  "hf_rel_db": -50.5
+ },
+ {
+  "pitch": "F3",
+  "take": 1,
+  "onset_s": 3.155708333333333,
+  "periodicity": 0.613,
+  "hf_rel_db": -45.3
+ },
+ {
+  "pitch": "F3",
+  "take": 2,
+  "onset_s": 3.7787916666666668,
+  "periodicity": 0.462,
+  "hf_rel_db": -43.4
+ },
+ {
+  "pitch": "F3",
+  "take": 3,
+  "onset_s": 4.926645833333334,
+  "periodicity": 0.589,
+  "hf_rel_db": -33.7
+ },
+ {
+  "pitch": "F3",
+  "take": 4,
+  "onset_s": 6.0810208333333335,
+  "periodicity": 0.425,
+  "hf_rel_db": -49.2
+ },
+ {
+  "pitch": "F3",
+  "take": 5,
+  "onset_s": 6.876895833333333,
+  "periodicity": 0.273,
+  "hf_rel_db": -39.6
+ },
+ {
+  "pitch": "F3",
+  "take": 6,
+  "onset_s": 8.3338125,
+  "periodicity": 0.536,
+  "hf_rel_db": -46.3
+ },
+ {
+  "pitch": "F3",
+  "take": 7,
+  "onset_s": 8.96125,
+  "periodicity": 0.417,
+  "hf_rel_db": -41.3
+ },
+ {
+  "pitch": "F3",
+  "take": 8,
+  "onset_s": 11.224645833333334,
+  "periodicity": 0.391,
+  "hf_rel_db": -49.1
+ },
+ {
+  "pitch": "F3",
+  "take": 9,
+  "onset_s": 12.143145833333334,
+  "periodicity": 0.39,
+  "hf_rel_db": -43.5
+ },
+ {
+  "pitch": "F3",
+  "take": 10,
+  "onset_s": 13.8393125,
+  "periodicity": 0.314,
+  "hf_rel_db": -41.1
+ },
+ {
+  "pitch": "F3",
+  "take": 11,
+  "onset_s": 14.599520833333333,
+  "periodicity": 0.051,
+  "hf_rel_db": -48.5
+ },
+ {
+  "pitch": "G3",
+  "take": 0,
+  "onset_s": 2.4778125,
+  "periodicity": 0.489,
+  "hf_rel_db": -49.5
+ },
+ {
+  "pitch": "G3",
+  "take": 1,
+  "onset_s": 3.478125,
+  "periodicity": 0.552,
+  "hf_rel_db": -50.4
+ },
+ {
+  "pitch": "G3",
+  "take": 2,
+  "onset_s": 5.041604166666667,
+  "periodicity": 0.269,
+  "hf_rel_db": -32.0
+ },
+ {
+  "pitch": "G3",
+  "take": 3,
+  "onset_s": 7.67875,
+  "periodicity": 0.143,
+  "hf_rel_db": -47.6
+ },
+ {
+  "pitch": "G3",
+  "take": 4,
+  "onset_s": 8.660875,
+  "periodicity": 0.629,
+  "hf_rel_db": -45.6
+ },
+ {
+  "pitch": "G3",
+  "take": 5,
+  "onset_s": 9.539416666666666,
+  "periodicity": 0.734,
+  "hf_rel_db": -43.5
+ },
+ {
+  "pitch": "G3",
+  "take": 6,
+  "onset_s": 11.867125,
+  "periodicity": 0.417,
+  "hf_rel_db": -45.4
+ },
+ {
+  "pitch": "G3",
+  "take": 7,
+  "onset_s": 12.8040625,
+  "periodicity": 0.539,
+  "hf_rel_db": -45.3
+ },
+ {
+  "pitch": "G3",
+  "take": 8,
+  "onset_s": 14.127583333333334,
+  "periodicity": 0.493,
+  "hf_rel_db": -46.3
+ },
+ {
+  "pitch": "G3",
+  "take": 9,
+  "onset_s": 14.735229166666667,
+  "periodicity": 0.332,
+  "hf_rel_db": -49.7
+ },
+ {
+  "pitch": "A#3",
+  "take": 0,
+  "onset_s": 4.449416666666667,
+  "periodicity": 0.386,
+  "hf_rel_db": -24.6
+ },
+ {
+  "pitch": "C4",
+  "take": 0,
+  "onset_s": 2.055875,
+  "periodicity": 0.825,
+  "hf_rel_db": -39.8
+ },
+ {
+  "pitch": "C4",
+  "take": 1,
+  "onset_s": 7.224458333333334,
+  "periodicity": 0.641,
+  "hf_rel_db": -47.7
+ },
+ {
+  "pitch": "C4",
+  "take": 2,
+  "onset_s": 11.560895833333333,
+  "periodicity": 0.828,
+  "hf_rel_db": -36.1
+ },
+ {
+  "pitch": "C4",
+  "take": 3,
+  "onset_s": 12.635604166666667,
+  "periodicity": 0.62,
+  "hf_rel_db": -31.5
+ },
+ {
+  "pitch": "D#4",
+  "take": 0,
+  "onset_s": 12.3373125,
+  "periodicity": 0.868,
+  "hf_rel_db": -14.9
+ },
+ {
+  "pitch": "F4",
+  "take": 0,
+  "onset_s": 1.7298125,
+  "periodicity": 0.551,
+  "hf_rel_db": -37.1
+ }
+]

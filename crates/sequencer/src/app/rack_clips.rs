@@ -235,6 +235,12 @@ impl App {
                 .state
                 .with_scenes_mut(|scenes| scenes.delete_rack_clip(group_id, clip))
             {
+                // The clip's own groove goes with it (undo brings both back):
+                // an orphaned entry would keep the groove "in use" and, after
+                // a reload reissues the id, hand it to an unrelated clip.
+                if let Ok(rack) = app.rack_config_mut(group_id) {
+                    rack.clip_grooves.retain(|entry| entry.clip != clip);
+                }
                 Ok(())
             } else {
                 Err("That rack clip no longer exists".to_string())

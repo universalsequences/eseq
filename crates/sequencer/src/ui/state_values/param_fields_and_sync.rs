@@ -1681,10 +1681,110 @@ pub(crate) fn build_accum_mode_options() -> Value {
     Value::List(items)
 }
 
+/// The scale dropdown's shown value: the scale (or imported scale) name,
+/// with `*` once degrees are detuned or switched off in the scale editor.
+pub(crate) fn fts_scale_label(tp: &sequencer::sequencer::TrackParams) -> String {
+    let scale_idx = tp.get_fts_scale();
+    let tuning = tp.tuning();
+    let name = sequencer::scale::scale_name(scale_idx, &tuning);
+    if scale_idx != sequencer::scale::SCALE_OFF && tuning.has_degree_edits() {
+        format!("{name}*")
+    } else {
+        name.to_string()
+    }
+}
+
+pub(crate) const TUNING_ROOT_NAMES: [&str; 12] =
+    ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+
+/// The scale editor's `SEQ.tp-tuning-*` fields for one track. Degree lists
+/// are empty while the scale is Off.
+pub(crate) fn tuning_reactive_fields(
+    tp: &sequencer::sequencer::TrackParams,
+) -> Vec<(&'static str, Value)> {
+    use sequencer::scale;
+    let list = |items: Vec<Value>| {
+        Value::List(items.into_iter().map(|item| Rc::new(RefCell::new(item))).collect())
+    };
+    let scale_idx = tp.get_fts_scale();
+    let tuning = tp.tuning();
+    let (base, period) = scale::base_scale(scale_idx, &tuning).unwrap_or((&[], 1200.0));
+    let base = &base[..base.len().min(scale::MAX_SCALE_DEGREES)];
+    let root_cents = f32::from(tuning.root) * 100.0;
+    let pitches: Vec<f32> = (0..base.len())
+        .map(|degree| scale::degree_pitch(base, degree, &tuning))
+        .collect();
+    vec![
+        ("tp-tuning-on", Value::Bool(!base.is_empty())),
+        ("tp-tuning-scale", Value::String(scale::scale_name(scale_idx, &tuning).to_string())),
+        ("tp-tuning-custom", Value::Bool(tuning.custom.is_some())),
+        ("tp-tuning-edited", Value::Bool(tuning.has_degree_edits())),
+        ("tp-tuning-root", Value::String(TUNING_ROOT_NAMES[usize::from(tuning.root % 12)].to_string())),
+        ("tp-tuning-morph", Value::Number((f64::from(tuning.morph) * 100.0).round())),
+        ("tp-tuning-mode", Value::String(tuning.mode.label().to_string())),
+        ("tp-tuning-period", Value::Number(f64::from(period))),
+        ("tp-tuning-degree-count", Value::Number(base.len() as f64)),
+        (
+            "tp-tuning-base",
+            list(base.iter().map(|cents| Value::Number(f64::from(*cents))).collect()),
+        ),
+        (
+            "tp-tuning-offsets",
+            list(
+                tuning.offsets[..base.len()]
+                    .iter()
+                    .map(|cents| Value::Number(f64::from(*cents)))
+                    .collect(),
+            ),
+        ),
+        (
+            "tp-tuning-enabled",
+            list((0..base.len()).map(|degree| Value::Bool(tuning.degree_enabled(degree))).collect()),
+        ),
+        (
+            "tp-tuning-pitches",
+            list(pitches.iter().map(|cents| Value::Number(f64::from(*cents))).collect()),
+        ),
+        (
+            "tp-tuning-labels",
+            list(
+                pitches
+                    .iter()
+                    .map(|cents| Value::String(scale::pitch_label(root_cents + cents)))
+                    .collect(),
+            ),
+        ),
+        (
+            "tp-tuning-ratios",
+            list(
+                pitches
+                    .iter()
+                    .map(|cents| {
+                        Value::String(
+                            scale::nearest_just_ratio(*cents, 3.0)
+                                .filter(|_| (period - 1200.0).abs() < 0.5)
+                                .map(|(num, den, _)| format!("{num}/{den}"))
+                                .unwrap_or_default(),
+                        )
+                    })
+                    .collect(),
+            ),
+        ),
+    ]
+}
+
+pub(crate) fn build_tuning_root_options() -> Value {
+    Value::List(
+        TUNING_ROOT_NAMES
+            .iter()
+            .map(|name| Rc::new(RefCell::new(Value::String((*name).to_string()))))
+            .collect(),
+    )
+}
+
 pub(crate) fn build_fts_options() -> Value {
-    let items = FTS_SCALE_NAMES
-        .iter()
-        .map(|scale| Rc::new(RefCell::new(Value::String((*scale).to_string()))))
+    let items = fts_scale_names()
+        .map(|scale| Rc::new(RefCell::new(Value::String(scale.to_string()))))
         .collect();
     Value::List(items)
 }

@@ -6355,4 +6355,63 @@
         assert!(take_test_graph_build_rollback_node_ids().is_empty());
         assert!(take_test_graph_build_rollback_connections().is_empty());
         graph.process_block();
+    
+    }
+
+    /// FX panel device meters (eseq-fno6): a rack slot's panner, its slot
+    /// effect and the rack's track panner each report the audio through them.
+    #[test]
+    fn rack_slot_device_meters_see_slot_audio() {
+        let graph = TestLiveGraph::new("rack-slot-device-meters");
+        let mut app = test_app_with_track_count(&graph, 0);
+        app.graph_controller().add_blank_sampler_track().expect("add track");
+        app.graph_controller()
+            .group_track_to_instrument_rack(0)
+            .expect("group into instrument rack");
+        let effect_slot = app
+            .add_builtin_rack_slot_effect_sync(0, 0, "Filter")
+            .expect("rack slot should accept Filter");
+        let effect_node = app.state.pattern.rack_tracks.lock().unwrap()[0]
+            .as_ref()
+            .expect("rack state")
+            .slots[0]
+            .effect_slots[effect_slot]
+            .node_id as i32;
+        let track_nodes = app.graph.track_node_ids[0].clone();
+        let slot_nodes = track_nodes.rack_slots[0].clone();
+        let source_l = graph.add_constant_source("rack_meter_source_l");
+        let source_r = graph.add_constant_source("rack_meter_source_r");
+        unsafe {
+            crate::audiograph::graph_connect(graph.ptr.0, source_l, 0, slot_nodes.slot_sum_l_id, 0);
+            crate::audiograph::graph_connect(graph.ptr.0, source_r, 0, slot_nodes.slot_sum_r_id, 0);
+        }
+        let nodes = [
+            ("slot panner", slot_nodes.slot_pan_id),
+            ("slot effect", effect_node),
+            ("track panner", track_nodes.pan_id),
+        ];
+        let slots: Vec<i32> = nodes
+            .iter()
+            .map(|(name, node)| {
+                let slot = unsafe { crate::audiograph::graph_node_meter_attach(graph.ptr.0, *node) };
+                assert!(slot >= 0, "{name} meter slot");
+                slot
+            })
+            .collect();
+        for _ in 0..8 {
+            graph.process_block();
+        }
+        let slot_pan_peak = graph
+            .read_panner_state(slot_nodes.slot_pan_id)
+            .expect("watched slot panner")[crate::effects::stereo_panner::STATE_PEAK_L];
+        for ((name, node), slot) in nodes.iter().zip(&slots) {
+            let (mut l, mut r, mut blocks) = (0.0f32, 0.0f32, 0u32);
+            unsafe {
+                crate::audiograph::graph_node_meter_take(graph.ptr.0, *slot, &mut l, &mut r, &mut blocks)
+            };
+            assert!(
+                blocks > 0 && l > 0.01,
+                "{name} (node {node}) metered blocks={blocks} l={l} r={r}; slot panner state peak={slot_pan_peak}"
+            );
+        }
     }

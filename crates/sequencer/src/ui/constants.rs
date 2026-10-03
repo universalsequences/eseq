@@ -19,18 +19,12 @@ pub(crate) const BUILTIN_ACCUMULATOR_NAMES: &[&str] = &[
     "SendToTrack",
 ];
 pub(crate) const ACCUM_MODE_LABELS: &[&str] = &["rtz", "clip", "rvtz", "rvbp"];
-pub(crate) const FTS_SCALE_NAMES: &[&str] = &[
-    "Off",
-    "Major",
-    "Minor",
-    "Dorian",
-    "Mixolydian",
-    "Lydian",
-    "Phrygian",
-    "Locrian",
-    "Pent. Major",
-    "Pent. Minor",
-    "Blues",
-    "Whole Tone",
-    "Diminished",
-];
+/// Scale dropdown labels, in persisted `fts_scale` index order.
+pub(crate) fn fts_scale_names() -> impl Iterator<Item = &'static str> {
+    sequencer::scale::SCALES.iter().map(|scale| scale.name)
+}
+
+/// The `fts_scale` index a dropdown label names (case-insensitive).
+pub(crate) fn fts_scale_index(label: &str) -> Option<usize> {
+    fts_scale_names().position(|name| name.eq_ignore_ascii_case(label))
+}

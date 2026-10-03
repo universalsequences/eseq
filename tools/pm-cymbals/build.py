@@ -8,7 +8,7 @@ import json
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 
-from common import FACTORY, HERE, NAMES, ROOT, digest
+from common import FACTORY, FOLDERS, HERE, NAMES, ROOT, digest
 from engine import PARAMS, basis_source, source
 
 FIELDS = {'material': 8, 'band_gains': 18, 'mode_frequencies': 8,
@@ -140,8 +140,9 @@ def presets(slug):
                     ('bell', 'Bell Focus', {'body.wash': .4, 'body.bell': 1.5, 'stick.hardness': .8}),
                     ('muted', 'Hand Muted', {'contact.touch': .2, 'body.decay': .7}),
                     ('wash', 'Wide Wash', {'body.wash': 1.3, 'body.bell': .5, 'body.decay': 1.6, 'output.width': .65})]
-    return {'version': 1, 'engine_name': 'Physical Models/'+NAMES[slug],
-            'source_file': f'instruments/Physical Models/{NAMES[slug]}/dsp.lisp',
+    engine = 'Physical Models/'+FOLDERS[slug] + ('/' if FOLDERS[slug] != NAMES[slug] else '')
+    return {'version': 1, 'engine_name': engine,
+            'source_file': f'instruments/Physical Models/{FOLDERS[slug]}/dsp.lisp',
             'presets': [{'id': key, 'name': name, 'base_note_offset': 0, 'params': defaults | values}
                         for key, name, values in variants]}
 
@@ -153,9 +154,9 @@ def outputs(slug):
     assert len(calibration['references']) == len(analysis['references']), 'Incomplete calibration'
     expected_basis = hashlib.sha256(basis_source(hat=slug == 'hihat').encode()).hexdigest()
     assert calibration.get('basis_source_sha256') == expected_basis, 'Calibration must be refined against this exact engine before generation'
-    folder = FACTORY/NAMES[slug]
+    folder = FACTORY/FOLDERS[slug]
     result = {folder/'dsp.lisp': dsp(slug, calibration), folder/'ui.lisp': ui(slug),
-              FACTORY/(NAMES[slug]+'.presets'): json.dumps(presets(slug), indent=2)+'\n',
+              FACTORY/(FOLDERS[slug]+'.presets'): json.dumps(presets(slug), indent=2)+'\n',
               folder/'ATTRIBUTION.md': (HERE/'ATTRIBUTION.md').read_text()}
     for page in range(4):
         fixture = f'(capture-project (track :instrument "factory:Physical Models/{NAMES[slug]}"))\n'

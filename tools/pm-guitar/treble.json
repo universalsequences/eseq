@@ -1,0 +1,173 @@
+{
+ "recorded": {
+  "C#2": {
+   "f0": 69.1349755565528,
+   "takes": 2,
+   "alpha_median": 0.5219879230409564,
+   "fc_median": 981.3196123775496,
+   "beta_median": 0.09981411544583264
+  },
+  "D#2": {
+   "f0": 77.62433263632856,
+   "takes": 3,
+   "alpha_median": 6.553602846906669e-20,
+   "fc_median": 925.8608420015022,
+   "beta_median": 0.10975235789593074
+  },
+  "G#2": {
+   "f0": 103.29033574443172,
+   "takes": 8,
+   "alpha_median": 1.9121000275985627,
+   "fc_median": 11999.99999963284,
+   "beta_median": 0.08848723853747872
+  },
+  "F3": {
+   "f0": 173.21625500034418,
+   "takes": 12,
+   "alpha_median": 1.3725909115737303,
+   "fc_median": 9816.837029527029,
+   "beta_median": 0.11485627072315008
+  },
+  "G3": {
+   "f0": 194.98144738163188,
+   "takes": 10,
+   "alpha_median": 2.6352753203185406,
+   "fc_median": 4584.030063701801,
+   "beta_median": 0.25924626185611255
+  },
+  "A#3": {
+   "f0": 230.52227009475644,
+   "takes": 1,
+   "alpha_median": 2.7394813429948397,
+   "fc_median": 11999.99999999997,
+   "beta_median": 0.12182584502126985
+  },
+  "C4": {
+   "f0": 261.07294240731505,
+   "takes": 4,
+   "alpha_median": 2.3657938849559095,
+   "fc_median": 7596.747054395555,
+   "beta_median": 0.24379529353989454
+  },
+  "D#4": {
+   "f0": 311.5152021421551,
+   "takes": 1,
+   "alpha_median": 0.5479403230599963,
+   "fc_median": 4151.87005468426,
+   "beta_median": 0.15645386373204284
+  },
+  "F4": {
+   "f0": 349.2282314330039,
+   "takes": 1,
+   "alpha_median": 2.9999999999999996,
+   "fc_median": 6075.366645692844,
+   "beta_median": 0.13783597432152792
+  }
+ },
+ "model": {
+  "40": {
+   "early_centroid_hz": 375.4546119451499,
+   "early_centroid_k": 4.556107085966643,
+   "early_above_1k_db": -9.06815418322664,
+   "late_centroid_hz": 179.56047728646084,
+   "late_centroid_k": 2.178949830143283,
+   "late_above_1k_db": -24.105482232313253
+  },
+  "44": {
+   "early_centroid_hz": 117.67702499214626,
+   "early_centroid_k": 1.133404227574322,
+   "early_above_1k_db": -38.88113395279322,
+   "late_centroid_hz": 108.24273979009277,
+   "late_centroid_k": 1.0425380730903608,
+   "late_above_1k_db": -48.958100938681866
+  },
+  "48": {
+   "early_centroid_hz": 131.41124306080303,
+   "early_centroid_k": 1.004574938307853,
+   "early_above_1k_db": -37.68691704758324,
+   "late_centroid_hz": 134.67136910859557,
+   "late_centroid_k": 1.0294970138247987,
+   "late_above_1k_db": -45.735084081943256
+  },
+  "52": {
+   "early_centroid_hz": 197.53535025146056,
+   "early_centroid_k": 1.1985366278322103,
+   "early_above_1k_db": -32.484382428976886,
+   "late_centroid_hz": 199.04008308258585,
+   "late_centroid_k": 1.2076665248906837,
+   "late_above_1k_db": -46.63216817986882
+  },
+  "56": {
+   "early_centroid_hz": 215.0251591778945,
+   "early_centroid_k": 1.0355055477623278,
+   "early_above_1k_db": -35.514538743691105,
+   "late_centroid_hz": 253.27819586388182,
+   "late_centroid_k": 1.219722277834945,
+   "late_above_1k_db": -46.8187694387655
+  },
+  "60": {
+   "early_centroid_hz": 304.84380481019707,
+   "early_centroid_k": 1.1651911939872628,
+   "early_above_1k_db": -18.207934710413205,
+   "late_centroid_hz": 287.9429377164798,
+   "late_centroid_k": 1.1005917460155066,
+   "late_above_1k_db": -26.26478984493624
+  },
+  "64": {
+   "early_centroid_hz": 355.74621497408543,
+   "early_centroid_k": 1.0792368766307951,
+   "early_above_1k_db": -20.840866378839845,
+   "late_centroid_hz": 337.07439842983575,
+   "late_centroid_k": 1.0225916837375773,
+   "late_above_1k_db": -32.738779454240685
+  },
+  "68": {
+   "early_centroid_hz": 459.99213724464374,
+   "early_centroid_k": 1.1076015752412633,
+   "early_above_1k_db": -17.951575882730676,
+   "late_centroid_hz": 427.6295775001011,
+   "late_centroid_k": 1.029676716858671,
+   "late_above_1k_db": -27.76749729789488
+  },
+  "72": {
+   "early_centroid_hz": 763.2428896859456,
+   "early_centroid_k": 1.4586550225109045,
+   "early_above_1k_db": -2.873011409557672,
+   "late_centroid_hz": 568.1892063877839,
+   "late_centroid_k": 1.0858824246303191,
+   "late_above_1k_db": -10.489696697400072
+  },
+  "76": {
+   "early_centroid_hz": 1183.7422651026552,
+   "early_centroid_k": 1.795575400596062,
+   "early_above_1k_db": -0.6664027721346227,
+   "late_centroid_hz": 1176.2789416939147,
+   "late_centroid_k": 1.7842545579477131,
+   "late_above_1k_db": -0.8089387881965542
+  },
+  "80": {
+   "early_centroid_hz": 1459.9185358160985,
+   "early_centroid_k": 1.7576475107593357,
+   "early_above_1k_db": -0.8476604526967723,
+   "late_centroid_hz": 1450.505690023882,
+   "late_centroid_k": 1.746315053111894,
+   "late_above_1k_db": -1.0317577071228805
+  },
+  "84": {
+   "early_centroid_hz": 2026.74073168666,
+   "early_centroid_k": 1.9366806999136397,
+   "early_above_1k_db": -0.058625113863218184,
+   "late_centroid_hz": 2038.1711286282016,
+   "late_centroid_k": 1.947603176973946,
+   "late_above_1k_db": -0.03002735952369889
+  },
+  "88": {
+   "early_centroid_hz": 2577.226064260578,
+   "early_centroid_k": 1.9546500362390917,
+   "early_above_1k_db": -0.04261337361949305,
+   "late_centroid_hz": 2597.9476066433604,
+   "late_centroid_k": 1.9703659115870529,
+   "late_above_1k_db": -0.021884734523578957
+  }
+ }
+}

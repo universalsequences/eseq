@@ -3255,6 +3255,20 @@ impl ProcessRuntime {
         });
     }
 
+    #[cfg(test)]
+    pub fn schedule_emission_at(
+        &mut self,
+        process_runtime_id: u64,
+        beat: f64,
+        event: crate::lisp_host::EmittedAccumulatorEvent,
+    ) {
+        self.pending_events.push(PendingProcessEvent {
+            process_runtime_id,
+            beat,
+            event: ProcessScheduledEvent::Emission(event),
+        });
+    }
+
     pub fn take_due_events(&mut self, up_to_beat: f64) -> Vec<ProcessScheduledItem> {
         let mut due = Vec::new();
         let mut i = 0;

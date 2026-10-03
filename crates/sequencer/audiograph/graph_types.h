@@ -168,7 +168,8 @@ typedef enum {
   GE_CREATE_BUFFER,
   GE_HOTSWAP_BUFFER,
 
-  GE_WRITE_NODE_STATE // bulk-write a float block into a node's state memory
+  GE_WRITE_NODE_STATE, // bulk-write a float block into a node's state memory
+  GE_SET_NODE_METER    // point a node's output meter at a slot (-1 = none)
 
 } GraphEditOp;
 
@@ -253,6 +254,11 @@ typedef struct {
     GECreateBuffer create_buffer;
     GEHotSwapBuffer hotswap_buffer;
     GEWriteNodeState write_node_state;
+    struct {
+      int node_id;
+      int slot; // -1 clears the node's meter only if it still owns `clear_slot`
+      int clear_slot;
+    } set_node_meter;
   } u;
 } GraphEditCmd;
 

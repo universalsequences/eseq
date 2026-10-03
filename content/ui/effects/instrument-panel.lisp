@@ -555,7 +555,9 @@
 (def rack-selected-instrument-panel (inst)
   (let ((selected (get inst :selected-instrument)))
     (if selected
-      (instrument-panel selected)
+      (h-stack :gap 1 :height st/fx-fixed-panel-height :align :stretch
+        (instrument-panel selected)
+        (pf/device-output-meter (get selected :meter)))
       (rack-empty-selected-panel inst))))
 
 (def rack-selected-fx-panel (inst)
@@ -568,8 +570,10 @@
           (h-stack :debug-name "rack-slot-fx-panel"
                    :height st/fx-fixed-panel-height :gap 1 :align :stretch
             (each (get slot :effects) |fx fx-idx|
-              (subtree :key (str "rack-slot-fx-" (get fx :slot-idx) "-" (get fx :name))
-                (ep/fx-panel (get fx :name) (get fx :params) fx)))))))))
+              (h-stack :gap 1 :height st/fx-fixed-panel-height :align :stretch
+                (subtree :key (str "rack-slot-fx-" (get fx :slot-idx) "-" (get fx :name))
+                  (ep/fx-panel (get fx :name) (get fx :params) fx))
+                (pf/device-output-meter (get fx :meter))))))))))
 
 (def rack-slot-fx-drop-panel (inst)
   (let ((slot-idx (get inst :selected-slot)))

@@ -1,0 +1,154 @@
+{
+  "version": 1,
+  "engine_name": "Drums/PM Ride Kit",
+  "source_file": "instruments/Drums/PM Ride Kit/dsp.lisp",
+  "presets": [
+    {
+      "id": "reference",
+      "name": "Recorded",
+      "base_note_offset": 0,
+      "params": {
+        "stick.hardness": 0.5,
+        "stick.dynamics": 0.5,
+        "stick.click": 1.0,
+        "stick.click_tone": 0.0,
+        "cymbal.decay": 1.0,
+        "cymbal.muffle": 0.0,
+        "cymbal.wash": 1.0,
+        "cymbal.choke": 0.0,
+        "cymbal.tune": 0.0,
+        "output.width": 0.0,
+        "output.drive": 0.0,
+        "output.tone_hz": 20000.0,
+        "output.gain": 1.0,
+        "voice_mode": 1.0
+      }
+    },
+    {
+      "id": "wide",
+      "name": "Wide Ride",
+      "base_note_offset": 0,
+      "params": {
+        "stick.hardness": 0.5,
+        "stick.dynamics": 0.5,
+        "stick.click": 1.0,
+        "stick.click_tone": 0.0,
+        "cymbal.decay": 1.0,
+        "cymbal.muffle": 0.0,
+        "cymbal.wash": 1.0,
+        "cymbal.choke": 0.0,
+        "cymbal.tune": 0.0,
+        "output.width": 0.7,
+        "output.drive": 0.0,
+        "output.tone_hz": 20000.0,
+        "output.gain": 1.0,
+        "voice_mode": 1.0
+      }
+    },
+    {
+      "id": "dry",
+      "name": "Taped",
+      "base_note_offset": 0,
+      "params": {
+        "stick.hardness": 0.5,
+        "stick.dynamics": 0.5,
+        "stick.click": 1.0,
+        "stick.click_tone": 0.0,
+        "cymbal.decay": 0.6,
+        "cymbal.muffle": 0.35,
+        "cymbal.wash": 1.0,
+        "cymbal.choke": 0.0,
+        "cymbal.tune": 0.0,
+        "output.width": 0.3,
+        "output.drive": 0.0,
+        "output.tone_hz": 20000.0,
+        "output.gain": 1.0,
+        "voice_mode": 1.0
+      }
+    },
+    {
+      "id": "dark",
+      "name": "Dark Stick",
+      "base_note_offset": 0,
+      "params": {
+        "stick.hardness": 0.2,
+        "stick.dynamics": 0.5,
+        "stick.click": 0.5,
+        "stick.click_tone": 0.0,
+        "cymbal.decay": 1.0,
+        "cymbal.muffle": 0.0,
+        "cymbal.wash": 1.0,
+        "cymbal.choke": 0.0,
+        "cymbal.tune": 0.0,
+        "output.width": 0.3,
+        "output.drive": 0.0,
+        "output.tone_hz": 9000.0,
+        "output.gain": 1.0,
+        "voice_mode": 1.0
+      }
+    },
+    {
+      "id": "bright",
+      "name": "Bright Stick",
+      "base_note_offset": 0,
+      "params": {
+        "stick.hardness": 0.85,
+        "stick.dynamics": 0.5,
+        "stick.click": 1.8,
+        "stick.click_tone": 0.3,
+        "cymbal.decay": 1.0,
+        "cymbal.muffle": 0.0,
+        "cymbal.wash": 1.0,
+        "cymbal.choke": 0.0,
+        "cymbal.tune": 0.0,
+        "output.width": 0.3,
+        "output.drive": 0.0,
+        "output.tone_hz": 20000.0,
+        "output.gain": 1.0,
+        "voice_mode": 1.0
+      }
+    },
+    {
+      "id": "choke",
+      "name": "Grab",
+      "base_note_offset": 0,
+      "params": {
+        "stick.hardness": 0.5,
+        "stick.dynamics": 0.5,
+        "stick.click": 1.0,
+        "stick.click_tone": 0.0,
+        "cymbal.decay": 1.0,
+        "cymbal.muffle": 0.0,
+        "cymbal.wash": 1.0,
+        "cymbal.choke": 0.6,
+        "cymbal.tune": 0.0,
+        "output.width": 0.3,
+        "output.drive": 0.0,
+        "output.tone_hz": 20000.0,
+        "output.gain": 1.0,
+        "voice_mode": 1.0
+      }
+    },
+    {
+      "id": "dusty",
+      "name": "Dusty Record",
+      "base_note_offset": 0,
+      "params": {
+        "stick.hardness": 0.5,
+        "stick.dynamics": 0.5,
+        "stick.click": 1.0,
+        "stick.click_tone": 0.0,
+        "cymbal.decay": 0.9,
+        "cymbal.muffle": 0.0,
+        "cymbal.wash": 1.0,
+        "cymbal.choke": 0.0,
+        "cymbal.tune": 0.0,
+        "output.width": 0.0,
+        "output.drive": 0.35,
+        "output.tone_hz": 7000.0,
+        "output.gain": 1.0,
+        "voice_mode": 1.0
+      }
+    }
+  ]
+}

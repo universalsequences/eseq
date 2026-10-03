@@ -26,6 +26,7 @@ pub(super) struct MidiFxEvent {
     pub(super) instrument_tensor_params: ScheduledInstrumentTensorParams,
     pub(super) sampler_params: ScheduledSamplerParams,
     pub(super) rack_macro_values: [Option<f32>; crate::sequencer::RACK_MACRO_COUNT],
+    pub(super) rack_slot_params: ScheduledRackSlotParams,
     pub(super) source: EventSource,
 }
 
@@ -154,6 +155,7 @@ pub(super) fn midi_fx_event_from_step(
         instrument_tensor_params,
         sampler_params: resolve_sampler_params(snapshot, track_idx, step_idx),
         rack_macro_values: [None; crate::sequencer::RACK_MACRO_COUNT],
+        rack_slot_params: Default::default(),
         source: EventSource::Step {
             track: track_idx,
             step: step_idx,
@@ -213,6 +215,7 @@ pub(super) fn midi_fx_event_from_step_event(
         instrument_tensor_params: event.instrument_tensor_params,
         sampler_params: event.sampler_params,
         rack_macro_values: event.rack_macro_values,
+        rack_slot_params: event.rack_slot_params.clone(),
         source: event.source,
     }
 }
@@ -449,6 +452,7 @@ pub(super) fn midi_fx_window_events_from_step(
             instrument_tensor_params: instrument_tensor_params.clone(),
             sampler_params: resolve_sampler_params(snapshot, track_idx, step_idx),
             rack_macro_values: [None; crate::sequencer::RACK_MACRO_COUNT],
+            rack_slot_params: Default::default(),
             source: EventSource::Step {
                 track: track_idx,
                 step: step_idx,
@@ -788,6 +792,7 @@ pub(super) fn run_midi_fx_chain_for_track_inner(
                             instrument_tensor_params: event.instrument_tensor_params.clone(),
                             sampler_params: event.sampler_params,
                             rack_macro_values: event.rack_macro_values,
+                            rack_slot_params: event.rack_slot_params.clone(),
                             source: event.source.clone(),
                         };
                         if target_track == source_track {
@@ -936,6 +941,7 @@ pub(super) fn enqueue_midi_fx_events(
                 event.sampler_params,
                 instrument_fingerprint,
                 event.rack_macro_values,
+                event.rack_slot_params,
             ),
             EventSource::Step { .. } => enqueue_resolved_trigger(
                 queue,
@@ -956,6 +962,7 @@ pub(super) fn enqueue_midi_fx_events(
                 event.instrument_tensor_params,
                 event.sampler_params,
                 event.rack_macro_values,
+                event.rack_slot_params,
             ),
         };
         if !enqueued {
@@ -1187,6 +1194,7 @@ pub(super) fn schedule_live_midi_fx(
                 ),
                 sampler_params: resolve_sampler_params(snapshot, track_idx, step),
                 rack_macro_values: [None; crate::sequencer::RACK_MACRO_COUNT],
+                rack_slot_params: Default::default(),
                 source: EventSource::Step {
                     track: track_idx,
                     step,
@@ -1323,6 +1331,7 @@ pub(super) fn schedule_live_midi_fx(
                 ),
                 sampler_params: resolve_sampler_params(snapshot, track_idx, step),
                 rack_macro_values: [None; crate::sequencer::RACK_MACRO_COUNT],
+                rack_slot_params: Default::default(),
                 source: EventSource::Step {
                     track: track_idx,
                     step,

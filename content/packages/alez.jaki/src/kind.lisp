@@ -32,6 +32,7 @@
 (module alez.jaki.kind)
 
 (import alez.jaki.doc)
+(import alez.jaki.chords)
 
 (export jk-panel)
 
@@ -52,7 +53,7 @@
   (reduce (lambda (acc i) (if (and (< acc 0) (= (nth xs i) item)) i acc))
           -1 (range 0 (len xs))))
 
-;; ── document edits (each is one undoable scene-slot write) ─────────────────
+;; ── document edits (each is one undoable scene-slot edit) ──────────────────
 ;; Pattern 0 is the document's own figures/rows/row-count; pattern k > 0 is
 ;; entry k - 1 of self.patterns (alez.jaki.doc, the document).
 
@@ -106,8 +107,18 @@
                                       (range (len rows) (+ index 1)))))))
       (jk-put self k :rows (jk-update-nth padded index update)))))
 
+;; A row switched to Chords with nothing on it gets a progression to hear
+;; and edit: I IV V7 I in C, one chord per cycle.
+(def jk-chords-starter
+  (list (list "key" "C" ":major")
+        (list "chord" (list "I" "IV" "V7" "I"))))
+
 (def jk-set-route (self k index route)
-  (jk-edit-row self k index (lambda (row) (merge row :route route))))
+  (jk-edit-row self k index
+    (lambda (row)
+      (if (and (= route alez.jaki.doc/chords-route) (empty? (alez.jaki.doc/row-mods row)))
+        (merge row :route route :mods jk-chords-starter)
+        (merge row :route route)))))
 
 (def jk-set-mods (self k index mods)
   (jk-edit-row self k index (lambda (row) (merge row :mods mods))))
@@ -148,11 +159,12 @@
     (if (empty? self.patterns)
       nil
       (let ((next (first self.patterns)))
-        (do
-          (set! self.figures (get next :figures))
-          (set! self.rows (get next :rows))
-          (set! self.row-count (get next :row-count))
-          (set! self.patterns (rest self.patterns)))))))
+        ;; One host write so the four fields land, publish and undo together.
+        (__instance-doc-write-many self
+          "figures" (get next :figures)
+          "rows" (get next :rows)
+          "row-count" (get next :row-count)
+          "patterns" (rest self.patterns))))))
 
 ;; How the pattern is clocked (docs/jaki-trig-modes-spec.md): loop on the
 ;; transport, or wait for a sequencer (a neuron routed here) to gate it.
@@ -179,24 +191,42 @@
       (range 0 (len SEQ.track-names)))))
 
 ;; Option 0 is Off; option k+1 is route k (a track, or pad k on a rack).
+;; Option 0 is Off, then the routes; the last is Chords: the row declares
+;; the chord the other rows read (docs/harmony-declaration-spec.md).
+(def jk-chords-label "Chords")
+
 (def jk-route-options (self)
   (let ((names SEQ.track-names))
-    (cons "Off"
-      (map (lambda (track) (str (+ track 1) " " (nth names track)))
-           (jk-route-tracks self)))))
+    (append
+      (cons "Off"
+        (map (lambda (track) (str (+ track 1) " " (nth names track)))
+             (jk-route-tracks self)))
+      (list jk-chords-label))))
+
+(def jk-chords-row? (row) (= (get row :route) alez.jaki.doc/chords-route))
 
 (def jk-route-index (self row)
   (let ((route (get row :route)))
-    (if (and (number? route) (>= route 0) (< route (len (jk-route-tracks self))))
-      (+ route 1)
-      0)))
+    (if (jk-chords-row? row)
+      (+ 1 (len (jk-route-tracks self)))
+      (if (and (number? route) (>= route 0) (< route (len (jk-route-tracks self))))
+        (+ route 1)
+        0))))
+
+;; a dropdown label back to a route: Off -1, a track its index, Chords -2
+(def jk-route-of-label (self label)
+  (if (= label jk-chords-label)
+    alez.jaki.doc/chords-route
+    (- (max 0 (jk-index-of (jk-route-options self) label)) 1)))
 
 (def jk-route-color (self row)
   (let ((route (get row :route)) (tracks (jk-route-tracks self)))
-    (if (and (number? route) (>= route 0) (< route (len tracks)))
-      (let ((c (nth SEQ.track-colors (nth tracks route))))
-        (if (and c (>= (len c) 3)) (rgba (nth c 0) (nth c 1) (nth c 2) 1) :mixer-strip-border))
-      :mixer-strip-border)))
+    (if (jk-chords-row? row)
+      :process-lane-accent
+      (if (and (number? route) (>= route 0) (< route (len tracks)))
+        (let ((c (nth SEQ.track-colors (nth tracks route))))
+          (if (and c (>= (len c) 3)) (rgba (nth c 0) (nth c 1) (nth c 2) 1) :mixer-strip-border))
+        :mixer-strip-border))))
 
 ;; The track a row plays (a rack's pad → its member track), or nil when the
 ;; row is Off: the sexp-slot's :dyn-context, so `(plock NAME V)` completes
@@ -206,6 +236,17 @@
     (if (and (number? route) (>= route 0) (< route (len tracks)))
       (nth tracks route)
       nil)))
+
+;; The chord a Chords row declared last, as it sounds: the tick stamps it as
+;; a mark (alez.jaki.chords/field-code); its own subtree, so a chord change
+;; repaints only this label. "—" before anything is declared (or stopped).
+(def jk-chord-now (self k index)
+  (subtree :key (jk-key k (str "jaki-chord-now-" index "-" self.id))
+    (let ((name (alez.jaki.chords/decode-name
+                  (reactive-value (bind-seq (str "generator-mark-" self.id "-chord"))))))
+      (label (if (= name "") "—" name)
+        :width 6 :height jk-row-height :font-size 12 :h-align :center
+        :color :process-lane-accent :bg :transparent))))
 
 ;; ── plock names after a reroute (jaki-plock-spec §6) ──────────────────────
 ;; The slot draws a name its track does not have in the error color and keeps
@@ -429,12 +470,13 @@
           :border-color :mixer-strip-selected-bg
           :width 8 :height jk-row-height :font-size 9
           :on-change (lambda (label)
-            (jk-set-route self k index
-              (- (max 0 (jk-index-of (jk-route-options self) label)) 1))))
+            (jk-set-route self k index (jk-route-of-label self label))))
+        (if (jk-chords-row? row) (jk-chord-now self k index) nil)
         (jk-rules-toggle self k index row)
         (sexp-slot
           :key (jk-key k (str "jaki-mods-" index))
-          :schema alez.jaki.doc/row-schema
+          ;; a Chords row offers only progression words
+          :schema (if (jk-chords-row? row) alez.jaki.doc/chords-row-schema alez.jaki.doc/row-schema)
           :value (alez.jaki.doc/row-mods row)
           :height jk-row-height :font-size 9
           ;; one line always: the row is one line tall, a wrapped second
@@ -570,12 +612,12 @@
         (rows (get pat :rows))
         (sounds (alez.jaki.doc/pattern-sounds? pat))
         (base (jk-route-base pats k)))
-      (box :padding 1 :corner-radius 16 :background-color :mixer-strip-bg 
+      (box :padding 1  
         (v-stack :gap 0.6
           (jk-pattern-header self k pat (len pats))
           (jk-figure-strip self k figures)
           (jk-preview self k figures)
-          (v-stack :gap 0.25
+          (v-stack :gap 0.25 
             (each (range 0 (get pat :row-count)) |i|
               (let ((row (alez.jaki.doc/row-at rows i))
                   (slot (+ base (jk-live-rows-before rows i))))

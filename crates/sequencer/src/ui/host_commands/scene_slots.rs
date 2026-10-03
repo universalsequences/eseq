@@ -54,6 +54,39 @@ pub(crate) fn apply_scene_slot_history_host_command(
             .map_err(|_| "invalid pattern identity".to_string())?,
         _ => return Err("missing pattern identity".to_string()),
     };
+    if let Some(slots) = field("slots") {
+        let Value::List(slots) = slots else {
+            return Err("invalid slot list".to_string());
+        };
+        let mut writes = Vec::with_capacity(slots.len());
+        for slot in slots {
+            writes.push(scene_slot_history_write(&slot.borrow())?);
+        }
+        return app
+            .record_applied_scene_slot_writes(scene, writes)
+            .map_err(|error| format!("{error:?}"));
+    }
+    let (name, before, after) = scene_slot_history_write(payload)?;
+    app.record_applied_scene_slot_write(scene, name, before, after)
+        .map_err(|error| format!("{error:?}"))
+}
+
+/// One `{slot old-present old new}` write of a scene-slot history payload.
+#[allow(clippy::type_complexity)]
+fn scene_slot_history_write(
+    payload: &Value,
+) -> Result<
+    (
+        String,
+        Option<sequencer::process::ProcessLiteral>,
+        sequencer::process::ProcessLiteral,
+    ),
+    String,
+> {
+    let Value::Map(map) = payload else {
+        return Err("invalid slot write".to_string());
+    };
+    let field = |name: &str| map.get(name).map(|cell| cell.borrow().clone());
     let name = match field("slot") {
         Some(Value::String(value)) => value,
         _ => return Err("missing slot name".to_string()),
@@ -72,8 +105,7 @@ pub(crate) fn apply_scene_slot_history_host_command(
     let after = sequencer::process::ProcessLiteral::from_value(
         &field("new").ok_or_else(|| "missing new value".to_string())?,
     )?;
-    app.record_applied_scene_slot_write(scene, name, before, after)
-        .map_err(|error| format!("{error:?}"))
+    Ok((name, before, after))
 }
 
 fn apply_scene_transpose_host_command(

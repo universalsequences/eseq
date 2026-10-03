@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "run_mode": "instrument",
+  "voice_controls": {
+    "mode": "voice_mode"
+  },
+  "current": 2,
+  "releases": {
+    "1": {
+      "path": "versions/1",
+      "name": "Physical Models/PM Ride"
+    },
+    "2": {
+      "path": ".",
+      "name": "Physical Models/PM Ride"
+    }
+  }
+}

@@ -89,6 +89,7 @@ pub struct SeqParams {
     pub accum_limit: f32,
     pub accum_mode: u32,
     pub fts_scale: usize,
+    pub tuning: crate::scale::TrackTuning,
     pub global_transpose: bool,
 }
 
@@ -404,6 +405,7 @@ impl TrackPatternData {
                 accum_limit: track_params.accum_limit,
                 accum_mode: track_params.accum_mode,
                 fts_scale: track_params.fts_scale,
+                tuning: track_params.tuning.clone(),
                 global_transpose: track_params.global_transpose,
             },
             chord_snapshot,
@@ -490,6 +492,7 @@ impl TrackPatternData {
                 accum_limit: seq.params.accum_limit,
                 accum_mode: seq.params.accum_mode,
                 fts_scale: seq.params.fts_scale,
+                tuning: seq.params.tuning.clone(),
                 mute_group: patch.params.mute_group,
                 global_transpose: seq.params.global_transpose,
             },

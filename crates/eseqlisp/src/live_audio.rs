@@ -171,6 +171,30 @@ pub fn clear_compressor_meter_frames() {
     compressor_meter_frames().clear();
 }
 
+/// Output level of one device (instrument or effect) for the FX panel's
+/// `device-meter` widgets: L/R in meter display units (0 = floor, 1 = 0 dBFS),
+/// keyed by the device's source selector (`LiveAudioSourceSelector`
+/// `key_fragment`) and published by the host's device-meter poller.
+static DEVICE_METER_LEVELS: OnceLock<PaintResourceStore<[f32; 2]>> = OnceLock::new();
+
+fn device_meter_levels() -> &'static PaintResourceStore<[f32; 2]> {
+    DEVICE_METER_LEVELS.get_or_init(PaintResourceStore::default)
+}
+
+pub fn publish_device_meter_level(key: &str, levels: [f32; 2]) {
+    device_meter_levels().publish(format!("device-meter:{key}"), levels);
+}
+
+pub fn device_meter_level(key: &str) -> Option<[f32; 2]> {
+    device_meter_levels().get(&format!("device-meter:{key}"))
+}
+
+pub fn retain_device_meter_levels(active_keys: &HashSet<String>) {
+    device_meter_levels().retain(|key| {
+        key.strip_prefix("device-meter:").is_some_and(|key| active_keys.contains(key))
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

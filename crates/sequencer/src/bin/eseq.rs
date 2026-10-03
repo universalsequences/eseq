@@ -480,28 +480,30 @@ fn resolve_module_file(roots: &[eseqlisp::ModuleLoadRoot], module: &str) -> Opti
 }
 
 /// Source with `;` comments dropped and string contents blanked, so neither
-/// can look like a form (eseqlisp strings have no escapes).
+/// can look like a form (eseqlisp strings have no escapes). String state
+/// carries across lines (strings may span them); newlines are always kept so
+/// reported line numbers stay correct.
 fn code_only(source: &str) -> String {
-    source
-        .lines()
-        .map(|line| {
-            let mut out = String::with_capacity(line.len());
-            let mut in_string = false;
-            for ch in line.chars() {
-                match ch {
-                    '"' => {
-                        in_string = !in_string;
-                        out.push('"');
-                    }
-                    ';' if !in_string => break,
-                    _ if in_string => out.push(' '),
-                    _ => out.push(ch),
-                }
+    let mut out = String::with_capacity(source.len());
+    let mut in_string = false;
+    let mut in_comment = false;
+    for ch in source.chars() {
+        match ch {
+            '\n' => {
+                in_comment = false;
+                out.push('\n');
             }
-            out
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+            _ if in_comment => {}
+            '"' => {
+                in_string = !in_string;
+                out.push('"');
+            }
+            ';' if !in_string => in_comment = true,
+            _ if in_string => out.push(' '),
+            _ => out.push(ch),
+        }
+    }
+    out
 }
 
 /// Bracket-check the module and every Local or installed module it imports,
@@ -752,6 +754,19 @@ mod tests {
         assert_eq!(
             bracket_problem("(each xs |i|\n  [a)").as_deref(),
             Some("2: `)` closes the `[` opened on line 2")
+        );
+    }
+
+    #[test]
+    fn sequencer_check_tracks_strings_across_lines() {
+        assert_eq!(bracket_problem("(def doc \"first\nhas (paren; and ) \")\n(def b 1)"), None);
+        assert_eq!(
+            def_kind_names("(module m)\n(def d \"x\n(def-kind fake\")\n(def-kind real :view v)"),
+            vec!["real".to_string()]
+        );
+        assert_eq!(
+            bracket_problem("(def doc \"a\nb\")\n(def c (+ 1\n 2)").as_deref(),
+            Some("3: this `(` is never closed")
         );
     }
 }

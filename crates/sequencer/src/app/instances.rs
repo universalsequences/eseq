@@ -227,6 +227,10 @@ impl App {
         self.instances = instances;
         self.instances.revision = revision + 1;
         self.instances.generation = generation + 1;
+        // A project open or new project reissues instance ids from the
+        // loaded `next_id`, so the outgoing project's row-light marks would
+        // otherwise answer for the incoming project's same-numbered instance.
+        self.state.clear_generator_marks();
         self.publish_instance_sequencers();
     }
 
@@ -694,7 +698,40 @@ impl App {
             .filter(|_| !rack_to_rack)
             .map(|group_id| self.rack_member_tracks(group_id))
             .transpose()?;
-        self.apply_recorded_instance_mutation("Move instance", Some(vec![id]), move |app| {
+        // A node gates only a jaki of its own owner (jaki-trig-modes spec
+        // §5): the panel lists no other, so a generator route that crosses
+        // owners after the move would gate on with the panel showing Off.
+        // The moved instance keeps routes to its new owner's instances; any
+        // other owner's override routed to the moved one drops to off.
+        let new_owner_ids: std::collections::HashSet<u64> = self
+            .instances
+            .list
+            .iter()
+            .filter(|instance| instance.owner == owner)
+            .map(|instance| instance.id)
+            .collect();
+        let routes_to_moved = |graph: &ProjectGraphOverrides| {
+            graph.sequencer_id != id
+                && graph.owner_rack != owner.rack()
+                && graph.node_intrinsics.iter().any(|intrinsic| {
+                    matches!(
+                        intrinsic.route,
+                        Some(
+                            crate::graph::ProjectGraphRouteOverride::Generator(target)
+                                | crate::graph::ProjectGraphRouteOverride::GeneratorRestart(target)
+                        ) if target == id
+                    )
+                })
+        };
+        let mut recorded = vec![id];
+        self.state.with_scenes(|scenes| {
+            for graph in all_override_entries(scenes).filter(|graph| routes_to_moved(graph)) {
+                if !recorded.contains(&graph.sequencer_id) {
+                    recorded.push(graph.sequencer_id);
+                }
+            }
+        });
+        self.apply_recorded_instance_mutation("Move instance", Some(recorded), move |app| {
             let current_scene = app.state.current_scene_index();
             let remap = |mut graph: ProjectGraphOverrides| {
                 if let Some(members) = &from_members {
@@ -703,10 +740,21 @@ impl App {
                 if let Some(members) = &to_members {
                     super::rack_sequencers::contract_track_routes_to_members(&mut graph, members);
                 }
+                super::rack_sequencers::drop_cross_owner_generator_routes(&mut graph, &|target| {
+                    new_owner_ids.contains(&target)
+                });
                 graph.owner_rack = owner.rack();
                 graph
             };
             app.state.with_scenes_mut(|scenes| {
+                for_each_override_list(scenes, |_, graphs| {
+                    for graph in graphs.iter_mut().filter(|graph| routes_to_moved(graph)) {
+                        super::rack_sequencers::drop_cross_owner_generator_routes(
+                            graph,
+                            &|target| target != id,
+                        );
+                    }
+                });
                 let banked = |scenes: &ProjectScenes, group_id: u64| {
                     scenes.rack_bank(group_id).is_some_and(|bank| !bank.clips.is_empty())
                 };
@@ -1419,6 +1467,16 @@ mod tests {
     }
 
     #[test]
+    fn replace_instances_clears_generator_marks() {
+        let (mut app, _runtime) = fixture();
+        app.state.push_generator_mark(1, "0.2", 100, 7.0);
+        assert_eq!(app.state.generator_mark_at(1, "0.2", 1_000), Some(7.0));
+        app.replace_instances(ProjectInstances::default());
+        assert!(app.state.generator_mark_keys().is_empty());
+        assert_eq!(app.state.generator_mark_at(1, "0.2", 1_000), None);
+    }
+
+    #[test]
     fn def_kind_rejects_host_field_state_without_registering_the_kind() {
         let (_app, mut runtime) = fixture();
         let version = crate::lisp_host::kind_registry_version();
@@ -1823,6 +1881,51 @@ mod tests {
         assert_eq!(published_owner(&app, a), None);
         applied(redo(&mut app));
         assert_eq!(routes(&app, a), (Some(1), Some(Track(1)), Some(Off)));
+    }
+
+    /// A node gates only its own owner's jakis: moving either end of a
+    /// generator route across owners turns it off (the panel would show Off
+    /// while the engine kept gating), undoably; a move that brings the two
+    /// under one owner keeps it.
+    #[test]
+    fn move_across_owners_turns_generator_routes_off() {
+        use crate::graph::ProjectGraphRouteOverride::{
+            Generator, GeneratorRestart, None as Off,
+        };
+        let (mut app, mut runtime) = fixture_with_tracks(4);
+        with_rack(&mut app);
+        let a = app.create_instance_recorded(KIND, ProjectInstanceOwner::Project, None).unwrap();
+        // The gate target stands in for a jaki: routes take any instance id.
+        let j = app.create_instance_recorded(KIND, ProjectInstanceOwner::Project, None).unwrap();
+        runtime.set_global_value("a", Value::Instance(a));
+        let gate = |runtime: &mut Runtime| {
+            runtime.eval_str(&format!("(graph-node a 0 :route (list :gen {j}))")).unwrap();
+            runtime.eval_str(&format!("(graph-node a 1 :route (list :restart {j}))")).unwrap();
+        };
+        gate(&mut runtime);
+        assert_eq!(routes(&app, a), (None, Some(Generator(j)), Some(GeneratorRestart(j))));
+
+        // The jaki leaves: the neural's routes to it go off, in one undo.
+        app.move_instance_owner_recorded(j, ProjectInstanceOwner::Rack(1)).expect("jaki moves");
+        assert_eq!(routes(&app, a), (None, Some(Off), Some(Off)));
+        applied(undo(&mut app));
+        assert_eq!(app.instances.get(j).unwrap().owner, ProjectInstanceOwner::Project);
+        assert_eq!(
+            routes(&app, a),
+            (None, Some(Generator(j)), Some(GeneratorRestart(j))),
+            "undo restores the other instance's routes too"
+        );
+
+        // The neural leaves: its own routes to the project jaki go off.
+        app.move_instance_owner_recorded(a, ProjectInstanceOwner::Rack(1)).expect("neural moves");
+        assert_eq!(routes(&app, a), (Some(1), Some(Off), Some(Off)));
+        applied(undo(&mut app));
+
+        // Joining the jaki's owner keeps routes that now share it.
+        app.move_instance_owner_recorded(j, ProjectInstanceOwner::Rack(1)).expect("jaki moves");
+        gate(&mut runtime);
+        app.move_instance_owner_recorded(a, ProjectInstanceOwner::Rack(1)).expect("neural joins");
+        assert_eq!(routes(&app, a), (Some(1), Some(Generator(j)), Some(GeneratorRestart(j))));
     }
 
     fn doc(app: &App, id: u64) -> Option<crate::process::ProcessLiteral> {

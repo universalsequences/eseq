@@ -256,6 +256,9 @@ fn extract_pick_and_play_a_rack_groove_through_the_ui() {
         last_voice_count_log_at: Instant::now(),
     };
     let mut track_names = app.tracks.clone();
+    // After each `drive`: whether the frame's groups snapshot matches
+    // `app.groups`, i.e. the next tick's reconcile has nothing to redo.
+    let prev_groups_synced = std::cell::Cell::new(false);
 
     // Evaluates UI Lisp (or runs a widget's own callback) and routes every
     // host command it emits through the production dispatcher. Returns the
@@ -291,6 +294,7 @@ fn extract_pick_and_play_a_rack_groove_through_the_ui() {
             dispatch_custom_host_command(&name, payload, app, editor, &mut ctx);
             names.push(name);
         }
+        prev_groups_synced.set(frame.prev_groups == app.groups);
         names
     };
     let rack_state = |editor: &Editor| {
@@ -393,9 +397,11 @@ fn extract_pick_and_play_a_rack_groove_through_the_ui() {
     );
     let pool_field = list(&field(&editor, "groove-pool"));
     assert_eq!(pool_field.len(), 1);
-    let instances = list(&get(&pool_field[0], "instances"));
-    assert_eq!(instances.len(), 1, "the source rack plays it");
-    assert_eq!(number(&get(&instances[0], "group-id")) as u64, group_id);
+    assert_eq!(number(&get(&pool_field[0], "id")) as u64, app.grooves[0].id);
+    // Only the identity the buffer reads: nothing per-rack (amounts) rides
+    // on the pool, so an amount drag never changes it.
+    assert_eq!(get(&pool_field[0], "instances"), Value::Nil);
+    assert_eq!(get(&pool_field[0], "heatmap"), Value::Nil);
     assert_eq!(string(&get(&entry, "active-grid")), "1 bar · 1/16");
     // The lanes: the All row and each pad's own row (the one it plays).
     let lanes = get(&entry, "lanes");
@@ -641,6 +647,10 @@ fn extract_pick_and_play_a_rack_groove_through_the_ui() {
             &mut editor,
         );
         assert_eq!(sent, vec!["set-rack-groove-amount".to_string()]);
+        assert!(
+            prev_groups_synced.get(),
+            "an amount drag step already published its groups"
+        );
     }
     assert_eq!(
         number(&field(&editor, &format!("rack-groove-timing-{group_id}"))),

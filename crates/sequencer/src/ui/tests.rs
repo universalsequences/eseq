@@ -412,6 +412,75 @@
         assert_eq!(state.pattern.track_params[0].get_volume().to_bits(), before.to_bits());
     }
 
+    #[test]
+    fn track_tuning_host_ops_edit_the_current_scale_and_undo() {
+        let (state, mut app) = history_test_app();
+        let major = 1;
+        state.pattern.track_params[0].set_fts_scale(major);
+        let tune = |app: &mut sequencer::app::App, op: &str, value: Value, degree: Option<f64>| {
+            let mut entries = vec![
+                ("op", Value::Keyword(op.to_string())),
+                ("track", Value::Number(0.0)),
+            ];
+            match value {
+                Value::String(label) => {
+                    entries.push(("value", Value::Number(0.0)));
+                    entries.push(("label", Value::String(label)));
+                }
+                value => entries.push(("value", value)),
+            }
+            if let Some(degree) = degree {
+                entries.push(("degree", Value::Number(degree)));
+            }
+            let outcome = crate::apply_track_tuning_host_command(app, &history_value_map(entries));
+            sequencer::app::edit::finish_active_gesture(app);
+            outcome
+        };
+        assert!(tune(&mut app, "offset", Value::Number(-14.0), Some(2.0)).is_ok());
+        assert!(tune(&mut app, "toggle", Value::Number(0.0), Some(6.0)).is_ok());
+        assert!(tune(&mut app, "root", Value::String("D".to_string()), None).is_ok());
+        assert!(tune(&mut app, "mode", Value::String("Map".to_string()), None).is_ok());
+        assert!(tune(&mut app, "morph", Value::Number(0.5), None).is_ok());
+        let tuning = state.pattern.track_params[0].tuning();
+        assert_eq!(tuning.offsets[2], -14.0);
+        assert!(!tuning.degree_enabled(6));
+        assert_eq!(tuning.root, 2);
+        assert_eq!(tuning.mode, sequencer::scale::TuningMode::Map);
+        assert_eq!(tuning.morph, 0.5);
+        assert_eq!(crate::fts_scale_label(&state.pattern.track_params[0]), "Major*");
+
+        // Degree 7 does not exist in Major; unknown ops and roots are errors.
+        assert!(tune(&mut app, "offset", Value::Number(5.0), Some(7.0)).is_err());
+        assert!(tune(&mut app, "root", Value::String("H".to_string()), None).is_err());
+        assert!(tune(&mut app, "warp", Value::Number(0.0), None).is_err());
+        // Re-asserting the current value records nothing.
+        let (outcome, _) = tune(&mut app, "morph", Value::Number(0.5), None).unwrap();
+        assert!(matches!(outcome, sequencer::app::edit::EditOutcome::NoOp));
+
+        assert!(tune(&mut app, "just", Value::Number(0.0), None).is_ok());
+        let just = state.pattern.track_params[0].tuning();
+        assert!((just.offsets[2] + 13.686).abs() < 0.01, "{}", just.offsets[2]);
+        assert!(tune(&mut app, "reset", Value::Number(0.0), None).is_ok());
+        assert!(!state.pattern.track_params[0].tuning().has_degree_edits());
+
+        for _ in 0..7 {
+            assert!(matches!(
+                sequencer::app::edit::undo(&mut app),
+                sequencer::app::history::HistoryReplay::Applied(_)
+            ));
+        }
+        assert!(state.pattern.track_params[0].tuning().is_default());
+
+        let fields: std::collections::HashMap<_, _> =
+            crate::tuning_reactive_fields(&state.pattern.track_params[0]).into_iter().collect();
+        assert_eq!(fields["tp-tuning-degree-count"], Value::Number(7.0));
+        assert_eq!(fields["tp-tuning-root"], Value::String("C".to_string()));
+        let Value::List(labels) = &fields["tp-tuning-labels"] else {
+            panic!("labels list");
+        };
+        assert_eq!(*labels[2].borrow(), Value::String("E".to_string()));
+    }
+
     /// Three-track app for the multi-track (bulk edit / rack-wide select-all)
     /// host handlers.
     fn multi_track_history_test_app() -> (

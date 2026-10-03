@@ -688,8 +688,8 @@ pub(super) fn rack_live_keys_play_mono(rack: &RackTrackSnapshot) -> bool {
         && rack.slots.iter().all(|slot| {
             slot.instrument_type == InstrumentType::Custom
                 && slot.instrument_run_mode != CustomInstrumentRunMode::FreePatch
-                && slot.instrument_slot.instrument_voice_config(&ScheduledInstrumentParams::new())
-                    .map_or(slot.max_polyphony <= 1, |config| !config.polyphonic || config.max_polyphony <= 1)
+                && (slot.max_polyphony <= 1
+                    || slot.instrument_slot.instrument_forces_mono(&ScheduledInstrumentParams::new()))
         })
 }
 
@@ -714,8 +714,8 @@ pub(super) fn fire_live_keyboard_rack_note(
     let voice_priority = if !rack.slots.is_empty() && rack.slots.iter().enumerate().all(|(idx, slot)| {
         slot.instrument_type == InstrumentType::Custom
             && slot.instrument_run_mode != CustomInstrumentRunMode::FreePatch
-            && slot.instrument_slot.instrument_voice_config(&update.instrument_params(idx))
-                .map_or(update.slot_params(idx).max_polyphony <= 1, |config| !config.polyphonic || config.max_polyphony <= 1)
+            && (update.slot_params(idx).max_polyphony <= 1
+                || slot.instrument_slot.instrument_forces_mono(&update.instrument_params(idx)))
     }) {
         crate::sequencer::VoicePriority::Last
     } else {
@@ -877,9 +877,12 @@ pub(super) fn fire_live_keyboard_rack_note(
                     None,
                     &instrument_params,
                 );
-                let instrument_voice_config = slot.instrument_slot.instrument_voice_config(&key_locked_instrument_params);
-                let max_polyphony = instrument_voice_config.map_or(slot_params.max_polyphony, |config| config.max_polyphony);
-                let mono_trigger = instrument_voice_config.map_or_else(|| data.state.pattern.track_params[parent_track_idx].get_mono_trigger(), |config| config.mono_trigger);
+                let max_polyphony = if slot.instrument_slot.instrument_forces_mono(&key_locked_instrument_params) {
+                    1
+                } else {
+                    slot_params.max_polyphony
+                };
+                let mono_trigger = data.state.pattern.track_params[parent_track_idx].get_mono_trigger();
                 let Some(engine_id) = slot.track_sound_state.engine_id else {
                     continue;
                 };
@@ -961,7 +964,7 @@ pub(super) fn fire_live_keyboard_rack_note(
                             &key_locked_instrument_params,
                         );
                     }
-                    if !legato && (allocation.stole_active_voice || slot_params.max_polyphony <= 1 || free_patch) {
+                    if !legato && (allocation.stole_active_voice || max_polyphony <= 1 || free_patch) {
                         let off_seq = next_event_sequence_from(&mut data.event_seq);
                         send_custom_note_off(data.lg.0, voice_lid, 0, off_seq);
                     }
@@ -1161,9 +1164,12 @@ pub(super) fn fire_rack_slot_note(
             return Some(RetrigTarget::RackSampler(hit));
         }
         InstrumentType::Custom => {
-            let config = slot.instrument_slot.instrument_voice_config(instrument_params);
-            let max_polyphony = config.map_or(slot_params.max_polyphony, |config| config.max_polyphony);
-            let mono_trigger = config.map_or_else(|| data.state.pattern.track_params[parent_track_idx].get_mono_trigger(), |config| config.mono_trigger);
+            let max_polyphony = if slot.instrument_slot.instrument_forces_mono(instrument_params) {
+                1
+            } else {
+                slot_params.max_polyphony
+            };
+            let mono_trigger = data.state.pattern.track_params[parent_track_idx].get_mono_trigger();
             let engine_id = slot.track_sound_state.engine_id?;
             if engine_id >= data.custom_engine_pools.len() {
                 return None;
@@ -1210,12 +1216,12 @@ pub(super) fn fire_rack_slot_note(
             if data.trace_audio {
                 eprintln!(
                     "audio-trace: scheduled rack note-on track={parent_track_idx} slot={slot_idx} engine={engine_id} voice={voice_idx} lid={lid} max_poly={} stolen={} legato={legato}",
-                    slot_params.max_polyphony, allocation.stole_active_voice,
+                    max_polyphony, allocation.stole_active_voice,
                 );
             }
             cancel_gate_off_for_lid(&mut data.countdown_events, &mut data.block_events, lid);
             unsafe {
-                if !legato && (allocation.stole_active_voice || slot_params.max_polyphony <= 1 || free_patch) {
+                if !legato && (allocation.stole_active_voice || max_polyphony <= 1 || free_patch) {
                     let off_seq = next_event_sequence_from(&mut data.event_seq);
                     send_custom_note_off(data.lg.0, lid, frame_offset, off_seq);
                 }
@@ -1666,9 +1672,11 @@ pub(super) fn fire_rack_resolved(
     chord: crate::scheduled_event::ScheduledChordData,
     rack: &RackTrackSnapshot,
     rack_macro_values: [Option<f32>; crate::sequencer::RACK_MACRO_COUNT],
+    rack_slot_params: &ScheduledRackSlotParams,
 ) {
     let print_values = data.state.rack_macro_values_for_track(track_idx);
-    let update = RackParams::at_step(rack, step, rack_macro_values, print_values);
+    let update = RackParams::at_step(rack, step, rack_macro_values, print_values)
+        .with_hit_params(rack_slot_params);
     let (track_pan, track_send, gate_mode) = {
         let tp = &data.state.pattern.track_params[track_idx];
         (

@@ -2151,6 +2151,54 @@ impl App {
         Ok(EditOutcome::Applied(history_move))
     }
 
+    /// Record several scene-slot writes of one pattern that the UI VM has
+    /// already applied as one edit (`__instance-doc-write-many`). They become
+    /// one history entry, never coalesced with neighbouring gestures, so one
+    /// undo restores every slot together. Writes are in application order;
+    /// a slot written twice keeps its first `before`.
+    pub fn record_applied_scene_slot_writes(
+        &mut self,
+        scene: crate::sequencer::SceneId,
+        writes: Vec<(
+            String,
+            Option<crate::process::ProcessLiteral>,
+            crate::process::ProcessLiteral,
+        )>,
+    ) -> Result<EditOutcome, EditError> {
+        finish_active_gesture(self);
+        let mut patches: Vec<SceneSlotPatch> = Vec::with_capacity(writes.len());
+        for (name, before, after) in writes {
+            match patches.iter_mut().find(|patch| patch.name == name) {
+                Some(patch) => patch.after = Some(after),
+                None => patches.push(SceneSlotPatch {
+                    scene,
+                    name,
+                    before,
+                    after: Some(after),
+                }),
+            }
+        }
+        patches.retain(|patch| patch.before != patch.after);
+        let mut patches: Vec<EditPatch> = patches.into_iter().map(EditPatch::SceneSlot).collect();
+        let (patch, retained_bytes) = match patches.len() {
+            0 => return Ok(EditOutcome::NoOp),
+            1 => {
+                let patch = patches.pop().expect("one patch");
+                let retained_bytes = edit_patch_retained_bytes(&patch);
+                (patch, retained_bytes)
+            }
+            _ => {
+                let retained_bytes = std::mem::size_of::<Vec<EditPatch>>()
+                    + patches.iter().map(edit_patch_retained_bytes).sum::<usize>();
+                (EditPatch::Composite(patches), retained_bytes)
+            }
+        };
+        let history_move = self
+            .history
+            .commit("Edit scene slots", None, patch, retained_bytes);
+        Ok(EditOutcome::Applied(history_move))
+    }
+
     /// Record a graph node process-chain edit the UI VM has already applied
     /// (eseq-waa9.23). A click records one entry; `merge` (a picker drag)
     /// stages repeated edits of one inlet as one gesture entry, committed on
@@ -3513,10 +3561,17 @@ impl App {
             // An occupied destination SWAPS: dragging a pad onto another pad
             // exchanges their notes, the way every hardware drum rack reorders
             // pads. Both pads keep their member track and choke group.
-            if let Some(other) = rack.pad_index_for_note(new_note) {
+            let swapped = rack.pad_index_for_note(new_note);
+            if let Some(other) = swapped {
                 rack.pads[other].pad_note = pad_note;
             }
             rack.pads[pad_index].pad_note = new_note;
+            // ...and their groove shares (Amt, include dot), in the rack's
+            // groove and every clip's: they were set for the drum, not the
+            // note.
+            for settings in rack.all_groove_settings_mut() {
+                settings.remap_pad_note(pad_note, new_note, swapped.is_some());
+            }
             Ok(())
         })
     }
@@ -5044,6 +5099,7 @@ fn encode_track_params(snapshot: &TrackParamsSnapshot) -> Vec<u8> {
         accum_limit,
         accum_mode,
         fts_scale,
+        tuning,
         mono_trigger,
         voice_priority,
         mute_group,
@@ -5091,6 +5147,23 @@ fn encode_track_params(snapshot: &TrackParamsSnapshot) -> Vec<u8> {
     bytes.f32(*accum_limit);
     bytes.u32(*accum_mode);
     bytes.usize(*fts_scale);
+    bytes.u32(u32::from(tuning.root));
+    bytes.f32(tuning.morph);
+    bytes.u32(tuning.mode as u32);
+    for offset in &tuning.offsets {
+        bytes.f32(*offset);
+    }
+    bytes.u64(tuning.disabled);
+    bytes.bool(tuning.custom.is_some());
+    if let Some(custom) = &tuning.custom {
+        bytes.usize(custom.name.len());
+        bytes.0.extend_from_slice(custom.name.as_bytes());
+        bytes.usize(custom.cents.len());
+        for cents in &custom.cents {
+            bytes.f32(*cents);
+        }
+        bytes.f32(custom.period);
+    }
     bytes.u32(*mono_trigger as u32);
     bytes.u32(*voice_priority as u32);
     bytes.u32(*mute_group as u32);
@@ -5580,6 +5653,7 @@ fn validate_device_command_target(app: &App, cmd: &AppCommand) -> Result<(), Edi
         | AppCommand::SetTrackMonoTrigger { .. }
         | AppCommand::SetTrackVoicePriority { .. }
         | AppCommand::SetTrackFtsScale { .. }
+        | AppCommand::SetTrackTuning { .. }
         | AppCommand::SetTrackAccumIdx { .. }
         | AppCommand::SetTrackAccumLimit { .. }
         | AppCommand::AdjustTrackAccumLimit { .. }
@@ -5673,6 +5747,7 @@ fn capture_barrier_witness(app: &App, cmd: &AppCommand) -> Result<BarrierWitness
         | AppCommand::SetTrackMonoTrigger { track, .. }
         | AppCommand::SetTrackVoicePriority { track, .. }
         | AppCommand::SetTrackFtsScale { track, .. }
+        | AppCommand::SetTrackTuning { track, .. }
         | AppCommand::SetTrackAccumIdx { track, .. }
         | AppCommand::SetTrackAccumLimit { track, .. }
         | AppCommand::AdjustTrackAccumLimit { track, .. }
@@ -7696,6 +7771,7 @@ fn track_params_command_track(cmd: &AppCommand) -> Option<usize> {
         | AppCommand::SetTrackMonoTrigger { track, .. }
         | AppCommand::SetTrackVoicePriority { track, .. }
         | AppCommand::SetTrackFtsScale { track, .. }
+        | AppCommand::SetTrackTuning { track, .. }
         | AppCommand::SetTrackAccumIdx { track, .. }
         | AppCommand::SetTrackAccumLimit { track, .. }
         | AppCommand::AdjustTrackAccumLimit { track, .. }
@@ -7740,6 +7816,7 @@ fn track_params_label(cmd: &AppCommand) -> &'static str {
         AppCommand::SetTrackMonoTrigger { .. } => "Set track mono trigger",
         AppCommand::SetTrackVoicePriority { .. } => "Set track voice priority",
         AppCommand::SetTrackFtsScale { .. } => "Set track FTS scale",
+        AppCommand::SetTrackTuning { edit, .. } => edit.label(),
         AppCommand::SetTrackAccumIdx { .. } => "Set track accumulator",
         AppCommand::SetTrackAccumLimit { .. } | AppCommand::AdjustTrackAccumLimit { .. } => {
             "Set accumulator limit"
@@ -11088,6 +11165,49 @@ mod tests {
         assert_eq!(app.state.current_scene_slots().get("amount"), Some(&second));
     }
 
+    /// Removing jaki pattern 0 rewrites four document slots; they must be
+    /// one history entry so one undo restores the whole document.
+    #[test]
+    fn scene_slot_batch_write_is_one_undo_step() {
+        use crate::process::ProcessLiteral;
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        let mut app = test_app(state);
+        let n = ProcessLiteral::Number;
+        app.state.write_current_scene_slot("figures", n(1.0)).expect("seed figures");
+        app.state.write_current_scene_slot("rows", n(10.0)).expect("seed rows");
+        app.state.write_current_scene_slot("patterns", n(2.0)).expect("seed patterns");
+        let undo_before = app.history.undo_len();
+        let writes = vec![
+            ("figures".to_string(), n(2.0)),
+            ("rows".to_string(), n(10.0)), // unchanged: dropped from the entry
+            ("patterns".to_string(), ProcessLiteral::List(Vec::new())),
+        ];
+        let (scene, previous) = app
+            .state
+            .write_current_scene_slots_identified(writes.clone())
+            .expect("batch write");
+        let records = writes
+            .into_iter()
+            .zip(previous)
+            .map(|((name, after), (before, _))| (name, before, after))
+            .collect();
+        assert!(matches!(
+            app.record_applied_scene_slot_writes(scene, records),
+            Ok(EditOutcome::Applied(_))
+        ));
+        assert_eq!(app.history.undo_len(), undo_before + 1, "one edit, one entry");
+
+        assert!(matches!(undo(&mut app), HistoryReplay::Applied(_)));
+        let slots = app.state.current_scene_slots();
+        assert_eq!(slots.get("figures"), Some(&n(1.0)));
+        assert_eq!(slots.get("rows"), Some(&n(10.0)));
+        assert_eq!(slots.get("patterns"), Some(&n(2.0)));
+        assert!(matches!(redo(&mut app), HistoryReplay::Applied(_)));
+        let slots = app.state.current_scene_slots();
+        assert_eq!(slots.get("figures"), Some(&n(2.0)));
+        assert_eq!(slots.get("patterns"), Some(&ProcessLiteral::List(Vec::new())));
+    }
+
     /// Regression: a newly added track has a pattern only in the scene it
     /// was born in (takes spec 11.1). Switching to another scene must show
     /// an EMPTY step grid (not the previous scene's notes), and the first
@@ -14334,6 +14454,64 @@ mod tests {
     }
 
     #[test]
+    fn picking_a_scale_drops_tuning_edits_and_undo_restores_them() {
+        use crate::scale::TrackTuning;
+        let mut app = test_app(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut edited = TrackTuning::DEFAULT;
+        edited.root = 4;
+        edited.offsets[2] = -14.0;
+        edited.disabled = 0b10;
+        for command in [
+            AppCommand::SetTrackFtsScale { track: 0, scale_idx: 1 },
+            AppCommand::SetTrackTuning {
+                track: 0,
+                tuning: Box::new(edited.clone()),
+                scale_idx: None,
+                edit: crate::app::TuningEdit::Offset(2),
+            },
+            AppCommand::SetTrackFtsScale { track: 0, scale_idx: 2 },
+        ] {
+            assert!(matches!(try_apply_command(&mut app, command), Ok(EditOutcome::Applied(_))));
+        }
+        let picked = app.state.pattern.track_params[0].tuning();
+        assert_eq!(picked.root, 4, "root survives a scale change");
+        assert!(!picked.has_degree_edits());
+        assert_eq!(app.state.latest_scheduler_snapshot().tracks[0].params.tuning, picked);
+
+        assert!(matches!(undo(&mut app), HistoryReplay::Applied(_)));
+        assert_eq!(app.state.pattern.track_params[0].get_fts_scale(), 1);
+        assert_eq!(app.state.pattern.track_params[0].tuning(), edited);
+        assert_eq!(app.state.latest_scheduler_snapshot().tracks[0].params.tuning, edited);
+    }
+
+    #[test]
+    fn tuning_drags_on_one_degree_coalesce_into_one_undo_step() {
+        use crate::scale::TrackTuning;
+        let mut app = test_app(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        assert!(try_apply_command(&mut app, AppCommand::SetTrackFtsScale { track: 0, scale_idx: 1 }).is_ok());
+        finish_active_gesture(&mut app);
+        let before = app.history.undo_len();
+        for cents in [5.0, 10.0, 15.0] {
+            let mut tuning = TrackTuning::DEFAULT;
+            tuning.offsets[3] = cents;
+            assert!(try_apply_command(
+                &mut app,
+                AppCommand::SetTrackTuning {
+                    track: 0,
+                    tuning: Box::new(tuning),
+                    scale_idx: None,
+                    edit: crate::app::TuningEdit::Offset(3),
+                },
+            )
+            .is_ok());
+        }
+        finish_active_gesture(&mut app);
+        assert_eq!(app.history.undo_len(), before + 1);
+        assert!(matches!(undo(&mut app), HistoryReplay::Applied(_)));
+        assert!(!app.state.pattern.track_params[0].tuning().has_degree_edits());
+    }
+
+    #[test]
     fn slice3_track_command_families_obey_the_round_trip_law() {
         let mut app = test_app(SequencerState::new(
             1,
@@ -14377,6 +14555,16 @@ mod tests {
             AppCommand::SetTrackFtsScale {
                 track: 0,
                 scale_idx: 3,
+            },
+            AppCommand::SetTrackTuning {
+                track: 0,
+                tuning: Box::new(crate::scale::TrackTuning {
+                    root: 3,
+                    morph: 0.5,
+                    ..crate::scale::randomize(3, &crate::scale::TrackTuning::DEFAULT, 30.0, 11)
+                }),
+                scale_idx: None,
+                edit: crate::app::TuningEdit::Randomize,
             },
             AppCommand::SetTrackAccumIdx {
                 track: 0,

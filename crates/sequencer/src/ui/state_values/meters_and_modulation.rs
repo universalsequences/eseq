@@ -82,6 +82,20 @@ pub(crate) fn read_track_peak_levels(
         .collect()
 }
 
+/// A device's `:meter` selector for the FX panel's `device-meter`: the
+/// device's identity (kind + indices, the `LiveAudioSourceSelector` dict
+/// shape), never its graph node, which a rebuild can replace while the panel
+/// keeps its dicts. The live-audio poller resolves it to the current output
+/// node every pass.
+pub(crate) fn device_meter_source(kind: &str, fields: &[(&str, f64)]) -> Rc<RefCell<Value>> {
+    let mut map = HashMap::new();
+    map.insert("kind".to_string(), value_cell(Value::String(kind.to_string())));
+    for (key, value) in fields {
+        map.insert(key.to_string(), value_cell(Value::Number(*value)));
+    }
+    value_cell(Value::Map(map))
+}
+
 pub(crate) fn rack_slot_peak_field(track: usize, slot_idx: usize) -> String {
     format!("rack-slot-peak-{track}-{slot_idx}")
 }

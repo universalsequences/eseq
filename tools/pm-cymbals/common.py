@@ -15,6 +15,10 @@ HERE = Path(__file__).resolve().parent
 SAMPLES = ROOT/'samples-to-analyze/Acoustic Cymbals Vol.1 by Donit'
 FACTORY = ROOT/'content/instruments/Physical Models'
 NAMES = {'crash': 'PM Crash', 'ride': 'PM Ride', 'hihat': 'PM Hi-Hat'}
+# Factory folder of each model's release. PM Ride's reduced-plate model is
+# frozen as release 1 of the PM Ride lineage; release 2 (tools/pm-ride2) is a
+# measured-plate model. Never rewrite a shipped release.
+FOLDERS = {'crash': 'PM Crash', 'ride': 'PM Ride/versions/1', 'hihat': 'PM Hi-Hat'}
 sys.path.insert(0, str(ROOT/'tools/audition'))
 from audition import Instrument
 

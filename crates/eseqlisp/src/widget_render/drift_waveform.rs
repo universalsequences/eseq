@@ -1,8 +1,9 @@
 //! Digi Drift's phase-aligned, pre-filter source preview.
 //!
-//! Dual-maintained with `content/instruments/Synths/Digi Syn/versions/1/dsp.lisp`
-//! (Digi Drift, release 1 of Digi Syn):
-//! morph-osc, basic-osc, osc-frequencies and source-mixer. This is a cycle
+//! Dual-maintained with both Digi Syn releases' dsp.lisp: morph-osc, basic-osc,
+//! osc-frequencies and source-mixer. `release` 1 is Digi Drift
+//! (`versions/1/dsp.lisp`); `release` 2 is Digi Syn (`dsp.lisp`), which adds
+//! sine phase-shaping, a -120 dB gain floor and the `noise_on` switch. This is a cycle
 //! diagram, not an oscilloscope: free-running phase, analog drift and internal
 //! voice envelopes / matrix are not simulated. Host modulation uses the same
 //! live offsets as the knobs. One base-pitch cycle includes both octave ratios
@@ -28,18 +29,20 @@ const SAMPLES: usize = 513;
 // Bounded value cache, not an owner-id registry: deleted/rebuilt widgets cannot
 // strand entries. Identical patches share samples; no ui_epoch/time dependency.
 const CACHE_CAPACITY: usize = 128;
-const PARAMS: [(&str, f32, f32, f32); 11] = [
+const PARAMS: [(&str, f32, f32, f32); 13] = [
     ("osc1-wave", 4.0, 0.0, 6.0),
     ("osc1-shape", 0.5, 0.0, 1.0),
     ("osc1-octave", 0.0, -3.0, 3.0),
     ("osc1-on", 1.0, 0.0, 1.0),
-    ("osc1-gain-db", -6.0, -36.0, 12.0),
+    ("osc1-gain-db", -6.0, -120.0, 12.0),
     ("osc2-wave", 3.0, 0.0, 4.0),
     ("osc2-octave", -1.0, -3.0, 3.0),
     ("osc2-detune", 0.0, -24.0, 24.0),
     ("osc2-on", 1.0, 0.0, 1.0),
-    ("osc2-gain-db", -6.0, -36.0, 12.0),
-    ("noise-gain-db", -60.0, -60.0, 12.0),
+    ("osc2-gain-db", -6.0, -120.0, 12.0),
+    ("noise-gain-db", -60.0, -120.0, 12.0),
+    ("noise-on", 1.0, 0.0, 1.0),
+    ("release", 1.0, 1.0, 2.0),
 ];
 
 fn number(value: &Value) -> Option<f32> {
@@ -52,7 +55,7 @@ fn number(value: &Value) -> Option<f32> {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct Inputs([f32; 11]);
+struct Inputs([f32; 13]);
 impl Inputs {
     fn from_props(props: &HashMap<String, Value>) -> Self {
         Self(std::array::from_fn(|i| {
@@ -94,11 +97,12 @@ fn pulse(phase: f32, width: f32, dt: f32) -> f32 {
 fn driven_saw(saw: f32, drive: f32) -> f32 {
     (saw * drive).tanh() / drive.tanh()
 }
-fn morph(phase: f32, wave: f32, shape: f32, dt: f32) -> f32 {
+fn morph(phase: f32, wave: f32, shape: f32, sine_pm: f32, dt: f32) -> f32 {
     let saw = 2.0 * phase - 1.0 - polyblep(phase, dt);
     let tri = asym_triangle(phase, 0.05 + shape * 0.9);
+    let tau = std::f32::consts::TAU;
     match wave.round() as u32 {
-        0 => (phase * std::f32::consts::TAU).sin(),
+        0 => ((phase + shape * sine_pm * (phase * tau).sin()) * tau).sin(),
         1 => tri,
         2 => (1.0 - shape) * saw + shape * tri,
         3 => driven_saw(saw, 1.0 + shape * 5.0),
@@ -135,14 +139,25 @@ fn evaluate(inputs: Inputs) -> Vec<f32> {
         on2,
         db2,
         noise_db,
+        noise_on,
+        release,
     ] = inputs.0;
+    // Release 1 clamps gains at -36 / -60 dB; release 2 at -120 dB.
+    let (gain_floor, noise_floor, sine_pm) = if release.round() >= 2.0 {
+        (-120.0, -120.0, 0.15)
+    } else {
+        (-36.0, -60.0, 0.0)
+    };
+    let db1 = db1.max(gain_floor);
+    let db2 = db2.max(gain_floor);
+    let noise_db = noise_db.max(noise_floor);
     let ratio1 = octave1.round().exp2();
     let ratio2 = (octave2.round() + detune / 12.0).exp2();
     let dt1 = ratio1 / (SAMPLES - 1) as f32;
     let dt2 = ratio2 / (SAMPLES - 1) as f32;
     let gain1 = if on1 >= 0.5 { db_amp(db1) } else { 0.0 };
     let gain2 = if on2 >= 0.5 { db_amp(db2) } else { 0.0 };
-    let noise_gain = if noise_db > -59.5 {
+    let noise_gain = if noise_on >= 0.5 && noise_db > noise_floor + 0.5 {
         db_amp(noise_db)
     } else {
         0.0
@@ -155,7 +170,7 @@ fn evaluate(inputs: Inputs) -> Vec<f32> {
             random ^= random << 5;
             let noise = random as f64 / u32::MAX as f64 * 2.0 - 1.0;
             let phase = i as f32 / (SAMPLES - 1) as f32;
-            gain1 * morph((phase * ratio1).fract(), wave1, shape, dt1)
+            gain1 * morph((phase * ratio1).fract(), wave1, shape, sine_pm, dt1)
                 + gain2 * basic((phase * ratio2).fract(), wave2, dt2)
                 + noise_gain * noise as f32
         })
@@ -213,6 +228,8 @@ impl WidgetDefinition for DriftWaveformWidget {
             "osc2-on",
             "osc2-gain-db",
             "noise-gain-db",
+            "noise-on",
+            "release",
             "osc1-shape-mod",
             "osc1-gain-db-mod",
             "osc2-detune-mod",
@@ -308,9 +325,9 @@ mod tests {
         assert_eq!(basic(0.0, 3.0, dt), 0.0); // corrected saw discontinuity
         assert_eq!(pulse(0.0, 0.5, dt), 0.0);
         assert_eq!(pulse(0.5, 0.5, dt), 0.0);
-        assert_eq!(morph(0.2, 5.0, 0.0, dt), -1.0);
-        assert_eq!(morph(0.2, 5.0, 1.0, dt), 1.0);
-        assert!((morph(0.25, 3.0, 0.4, dt) - driven_saw(-0.5, 3.0)).abs() < 1e-6);
+        assert_eq!(morph(0.2, 5.0, 0.0, 0.0, dt), -1.0);
+        assert_eq!(morph(0.2, 5.0, 1.0, 0.0, dt), 1.0);
+        assert!((morph(0.25, 3.0, 0.4, 0.0, dt) - driven_saw(-0.5, 3.0)).abs() < 1e-6);
         let mut inputs = Inputs::from_props(&HashMap::new());
         inputs.0[3] = 0.0;
         inputs.0[8] = 0.0;
@@ -321,6 +338,22 @@ mod tests {
         let noise = evaluate(inputs);
         assert_eq!(noise, evaluate(inputs));
         assert!(noise.iter().any(|y| y.abs() > 0.5));
+    }
+
+    #[test]
+    fn release_two_matches_digi_syn_mixer_and_sine() {
+        let dt = 1.0 / 512.0;
+        assert_eq!(morph(0.1, 0.0, 1.0, 0.0, dt), (0.1 * std::f32::consts::TAU).sin());
+        assert_ne!(morph(0.1, 0.0, 1.0, 0.15, dt), morph(0.1, 0.0, 1.0, 0.0, dt));
+        let mut inputs = Inputs::from_props(&HashMap::new());
+        inputs.0[3] = 0.0;
+        inputs.0[8] = 0.0;
+        inputs.0[10] = -60.0;
+        assert!(evaluate(inputs).iter().all(|y| *y == 0.0), "release 1 mutes -60 dB noise");
+        inputs.0[12] = 2.0;
+        assert!(evaluate(inputs).iter().any(|y| *y != 0.0), "release 2 keeps -60 dB noise");
+        inputs.0[11] = 0.0;
+        assert!(evaluate(inputs).iter().all(|y| *y == 0.0), "noise_on gates noise");
     }
 
     #[test]
@@ -349,6 +382,7 @@ mod tests {
             ("osc2-octave", 0.0),
             ("osc1-on", 0.0),
             ("osc2-on", 0.0),
+            ("release", 2.0),
         ] {
             let changed = HashMap::from([(name.into(), Value::Number(value))]);
             assert_ne!(
