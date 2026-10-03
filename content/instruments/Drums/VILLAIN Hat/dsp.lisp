@@ -1050,3 +1050,8 @@
 (def mixed (+ (* hit_a gain_a) (* hit_b gain_b)))
 (out mixed 1 @name left)
 (out mixed 2 @name right)
+;; A drum may never see note-off (gate-off tracks), so the amp flag must not
+;; depend on the gate: the voice is done once its output has fallen below
+;; -100 dBFS, which follows any decay, release or ring.
+(use-defmacro voice-amp)
+(out (voice-amp 0 mixed mixed) 3 @name amp @amp true)

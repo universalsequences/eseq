@@ -399,3 +399,8 @@
 (def mono_out (tabla-output (+ heads skin_noise) drive_v cutoff output_gain))
 (out mono_out 1 @name left)
 (out mono_out 2 @name right)
+;; A drum may never see note-off (gate-off tracks), so the amp flag must not
+;; depend on the gate: the voice is done once its output has fallen below
+;; -100 dBFS, which follows any decay, release or ring.
+(use-defmacro voice-amp)
+(out (voice-amp 0 mono_out mono_out) 3 @name amp @amp true)

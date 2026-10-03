@@ -2019,3 +2019,8 @@
 (def right_out (* (svf (ride-drive (+ plate_right wash_right click_noise) drive_v) cutoff 0.707 0) output_gain))
 (out left_out 1 @name left)
 (out right_out 2 @name right)
+;; A drum may never see note-off (gate-off tracks), so the amp flag must not
+;; depend on the gate: the voice is done once its output has fallen below
+;; -100 dBFS, which follows any decay, release or ring.
+(use-defmacro voice-amp)
+(out (voice-amp 0 left_out right_out) 3 @name amp @amp true)

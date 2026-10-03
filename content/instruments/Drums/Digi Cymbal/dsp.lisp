@@ -118,4 +118,11 @@
 (def efm_cy (* 0.28 (svf (* efm_car cy_env) (clip (mod hpf) 500 15000) 0.7 2)))
 
 (def voice (selector eng trx_cy efm_cy))
-(out (* (md-out voice) vel (clip (mod level) 0 1)) 1 @name audio)
+(def voice_out (* (md-out voice) vel (clip (mod level) 0 1)))
+(out voice_out 1 @name audio)
+;; A drum may never see note-off (gate-off tracks), so the amp flag must not
+;; depend on the gate: the voice is done once its output has fallen below
+;; -100 dBFS, which follows any decay, release or ring. Mono voice: the
+;; flag takes the next channel, 2 (output channels must not leave a gap).
+(use-defmacro voice-amp)
+(out (voice-amp 0 voice_out voice_out) 2 @name amp @amp true)
