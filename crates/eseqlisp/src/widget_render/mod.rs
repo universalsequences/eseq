@@ -3269,12 +3269,12 @@ pub fn map_mouse_event(
     // handling so :on-right-click has the same contract on every widget.
     if mouse_kind == MouseEventKind::Down(MouseButton::Right)
         && node.props.contains_key("on-right-click") {
-        // A tree adds the hit row as `:item` so the handler can open a menu
-        // for the row under the pointer.
-        let info = if node.widget_type == "tree" {
-            tree::tree_context_menu_info(node, modifiers, local_col, local_row)
-        } else {
-            pointer_event_info("right-click", modifiers, node, local_col, local_row)
+        // A tree adds the hit row as `:item`, a patcher the node or cable
+        // under the pointer as `:node` / `:cable`.
+        let info = match node.widget_type.as_str() {
+            "tree" => tree::tree_context_menu_info(node, modifiers, local_col, local_row),
+            "patcher" => patcher::patcher_context_menu_info(node, modifiers, local_col, local_row),
+            _ => pointer_event_info("right-click", modifiers, node, local_col, local_row),
         };
         return MouseEventOutcome::Dispatch(WidgetEvent::ContextMenu(info));
     }

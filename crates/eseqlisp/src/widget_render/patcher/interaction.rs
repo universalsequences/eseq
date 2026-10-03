@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyModifiers, MouseEventKind};
 
-use crate::layout::LayoutNode;
+use crate::layout::{LayoutNode, Rect};
 use crate::ui::platform::has_primary_shortcut_modifier;
 use crate::widget_render::trigger_alignment_haptic;
 
@@ -1173,37 +1173,24 @@ pub(super) fn handle_patcher_double_click(
         local_col,
         local_row,
     ) {
-        let node_rects = patch_node_rects(&patch, node.rect, &pan_state);
-        let Some(patch_node) = patch
-            .nodes
-            .iter()
-            .find(|patch_node| patch_node.id == node_id)
-        else {
-            return false;
-        };
-        let Some(rect) = node_rects.get(&node_id) else {
-            return false;
-        };
-        // Editable text, not the drawn label: a slot that is cabled past the
-        // last written one has to be spelled out or retyping drops its cable.
-        let text = editable_node_text(patch_node, &inbound_slots_for_node(&patch, &node_id));
-        let Some(cursor_pos) = patcher_text_cursor_at_col_with_zoom(
-            *rect,
-            &text,
+        let rect = patch_node_rects(&patch, node.rect, &pan_state)
+            .get(&node_id)
+            .copied();
+        let caret = rect.map(|rect| NodeTextCaret::AtCol {
+            rect,
             local_col,
-            node_font_size(patch_node),
-            patcher_zoom(&pan_state),
-        ) else {
-            return false;
-        };
-        ensure_source_node_edit(&mut state, &view_key, patch_node, text.clone());
-        begin_patcher_text_edit(
+            zoom: patcher_zoom(&pan_state),
+        });
+        if !begin_patcher_node_text_edit(
+            node,
             &mut state,
-            node_id,
-            text,
-            cursor_pos,
-            autocomplete_asset_paths_for_node(node),
-        );
+            &view_key,
+            &patch,
+            &node_id,
+            caret.unwrap_or(NodeTextCaret::SelectOp),
+        ) {
+            return false;
+        }
         set_patcher_interaction_state(key, state);
         return true;
     }
@@ -1231,9 +1218,79 @@ pub(super) fn handle_patcher_double_click(
     true
 }
 
+/// Where the caret goes when a node's text edit opens.
+#[derive(Clone, Copy)]
+pub(super) enum NodeTextCaret {
+    /// Under the pointer (double-click). The hit test only has glyph advances
+    /// for text the measure pass has already seen; when it has none for this
+    /// text the caret goes to the end rather than refusing the edit.
+    AtCol { rect: Rect, local_col: f32, zoom: f32 },
+    /// The op token selected, so typing replaces the name (context-menu
+    /// Rename / Edit).
+    SelectOp,
+}
+
+/// Open the text edit on `node_id` in `patch` — the one path double-click and
+/// the `edit-node` command share. Returns false when the node is not in
+/// `patch`.
+pub(super) fn begin_patcher_node_text_edit(
+    node: &LayoutNode,
+    state: &mut PatcherInteractionState,
+    view_key: &str,
+    patch: &Patch,
+    node_id: &str,
+    caret: NodeTextCaret,
+) -> bool {
+    let Some(patch_node) = patch
+        .nodes
+        .iter()
+        .find(|patch_node| patch_node.id == node_id)
+    else {
+        return false;
+    };
+    // Editable text, not the drawn label: a slot that is cabled past the
+    // last written one has to be spelled out or retyping drops its cable.
+    let text = editable_node_text(patch_node, &inbound_slots_for_node(patch, node_id));
+    let text_len = text.chars().count();
+    let op_len = text
+        .chars()
+        .position(char::is_whitespace)
+        .unwrap_or(text_len);
+    let (cursor_pos, selection_anchor) = match caret {
+        NodeTextCaret::AtCol {
+            rect,
+            local_col,
+            zoom,
+        } => (
+            patcher_text_cursor_at_col_with_zoom(
+                rect,
+                &text,
+                local_col,
+                node_font_size(patch_node),
+                zoom,
+            )
+            .unwrap_or(text_len),
+            None,
+        ),
+        NodeTextCaret::SelectOp => (op_len, (op_len > 0).then_some(0)),
+    };
+    ensure_source_node_edit(state, view_key, patch_node, text.clone());
+    begin_patcher_text_edit(
+        state,
+        node_id.to_string(),
+        text,
+        cursor_pos,
+        autocomplete_asset_paths_for_node(node),
+    );
+    if let Some(edit) = state.text_edit.as_mut() {
+        edit.state.selection_anchor = selection_anchor;
+    }
+    true
+}
+
 /// Argument indices `node_id` has cables landing on, which is what
 /// `editable_node_text` needs to know a trailing slot is in use.
-fn inbound_slots_for_node(patch: &Patch, node_id: &str) -> HashSet<usize> {
+pub(super) fn inbound_slots_for_node(patch: &Patch, node_id: &str) -> HashSet<usize> {
     patch
         .connections
         .iter()

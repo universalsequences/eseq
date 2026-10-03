@@ -25023,6 +25023,118 @@ fn double_clicking_a_two_cable_operator_opens_editable_text_with_both_slots() {
     let _ = fs::remove_file(path);
 }
 
+/// What the measure pass did before it measured editable text too: drawn
+/// labels only, so `- ?` (the editable text of a two-cable `-`) is unknown.
+fn prime_patcher_label_metrics_only(patch: &Patch) {
+    let measurer = MonospaceTextMeasurer;
+    let measure_ctx = MeasureCtx {
+        text_measurer: Some(&measurer),
+        cell_w: 10.0,
+        cell_h: 20.0,
+        inherited_font_size: NODE_FONT_SIZE,
+    };
+    for node in &patch.nodes {
+        cache_text_widths(node_display_label(node), node_font_size(node), &measure_ctx);
+    }
+}
+
+/// A node with a cable past its last written slot edits as text the label
+/// never drew. Double-click used to need that exact text's glyph advances to
+/// place the caret and silently refused the edit without them.
+#[test]
+fn double_clicking_a_cabled_node_edits_without_measured_editable_text() {
+    let source = "(def a (in 1 @name a))\n(def b (in 2 @name b))\n(def d (- a b))\n(out d 1)";
+    let path = temp_patcher_source_path("patcher-edit-unmeasured");
+    fs::write(&path, source).unwrap();
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+    set_patcher_interaction_state(key, PatcherInteractionState::default());
+    let (_, root_patch) = load_patch_from_props(&node.props).unwrap();
+    prime_patcher_label_metrics_only(&root_patch);
+
+    let rects = patch_node_rects(&root_patch, node.rect, &PatcherPanState::default());
+    let subtract_rect = rects.get("d").unwrap();
+    assert!(handle_patcher_double_click(
+        &node,
+        subtract_rect.col + subtract_rect.width - 1.0,
+        subtract_rect.row + subtract_rect.height * 0.5,
+    ));
+
+    let state = get_patcher_interaction_state(key);
+    let edit = state.text_edit.as_ref().expect("double-click opens the edit");
+    assert_eq!(edit.text, "- ?");
+    assert!(edit.state.cursor_pos <= 3);
+    reset_patcher_widget_state(key);
+    let _ = fs::remove_file(path);
+}
+
+#[test]
+fn edit_node_command_opens_selected_node_text_with_op_selected() {
+    let source = "(def a (in 1 @name a))\n(def b (in 2 @name b))\n(def d (- a b))\n(out d 1)";
+    let path = temp_patcher_source_path("patcher-edit-node-command");
+    fs::write(&path, source).unwrap();
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+    let mut state = PatcherInteractionState::default();
+    state.selected_nodes.insert("d".to_string());
+    set_patcher_interaction_state(key, state);
+
+    assert!(super::run_patcher_command(&node, "edit-node").is_some());
+
+    let state = get_patcher_interaction_state(key);
+    let edit = state.text_edit.as_ref().expect("edit-node opens the edit");
+    assert_eq!(edit.node_id, "d");
+    assert_eq!(edit.text, "- ?");
+    assert_eq!(edit.state.cursor_pos, 1);
+    assert_eq!(edit.state.selection_anchor, Some(0), "the op is selected");
+    reset_patcher_widget_state(key);
+    let _ = fs::remove_file(path);
+}
+
+/// The generic dispatcher claims every right-click before the widget's own
+/// handler runs, so it has to build the patcher's payload itself or the menu
+/// never learns which node was clicked.
+#[test]
+fn right_click_through_generic_dispatch_reports_the_node_under_the_pointer() {
+    let source = "(def a (in 1 @name a))\n(def b (in 2 @name b))\n(def d (- a b))\n(out d 1)";
+    let path = temp_patcher_source_path("patcher-right-click-node");
+    fs::write(&path, source).unwrap();
+    let mut node = patcher_test_node(&path);
+    node.props.insert("on-right-click".to_string(), Value::Bool(true));
+    let key = patcher_state_key(&node);
+    set_patcher_interaction_state(key, PatcherInteractionState::default());
+    let (_, root_patch) = load_patch_from_props(&node.props).unwrap();
+    prime_patcher_text_metrics(&root_patch);
+    let rects = patch_node_rects(&root_patch, node.rect, &PatcherPanState::default());
+    let subtract_rect = rects.get("d").unwrap();
+
+    let outcome = crate::widget_render::map_mouse_event(
+        &node,
+        MouseEventKind::Down(MouseButton::Right),
+        subtract_rect.col + 1.0,
+        subtract_rect.row + subtract_rect.height * 0.5,
+        None,
+        None,
+        KeyModifiers::empty(),
+        10.0,
+        20.0,
+    );
+    let MouseEventOutcome::Dispatch(WidgetEvent::ContextMenu(Value::Map(info))) = outcome else {
+        panic!("right-click dispatches a context menu");
+    };
+    let hit = info.get("node").expect(":node key").borrow().clone();
+    let Value::Map(hit) = hit else {
+        panic!("right-click on a node reports it, got {hit:?}");
+    };
+    assert_eq!(
+        hit.get("id").map(|value| value.borrow().clone()),
+        Some(Value::String("d".to_string()))
+    );
+    assert!(get_patcher_interaction_state(key).selected_nodes.contains("d"));
+    reset_patcher_widget_state(key);
+    let _ = fs::remove_file(path);
+}
+
 #[test]
 fn copying_a_two_cable_operator_pastes_it_with_both_cables() {
     let source = "(def a (in 1 @name a))\n(def b (in 2 @name b))\n(def d (- a b))\n(out d 1)";

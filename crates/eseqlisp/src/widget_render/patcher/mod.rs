@@ -1287,7 +1287,8 @@ use emit::debug_log_patch_lisp;
 use encapsulate::encapsulate_patcher_selection;
 use interaction::{
     PatcherChangeKind, connect_last_touched_nodes, copy_selected_patcher_nodes,
-    create_patcher_node_below_anchor, handle_patcher_double_click, handle_patcher_pointer_down,
+    NodeTextCaret, begin_patcher_node_text_edit, create_patcher_node_below_anchor,
+    handle_patcher_double_click, inbound_slots_for_node, handle_patcher_pointer_down,
     handle_patcher_pointer_drag, handle_patcher_pointer_moved, handle_patcher_pointer_up,
     open_selected_macro_node, pan_patcher_by_delta, pan_patcher_by_wheel, paste_patcher_clipboard,
     promote_created_macro_definition, reset_patcher_pan, zoom_patcher_by_magnify,
@@ -1379,14 +1380,9 @@ impl WidgetDefinition for PatcherWidget {
         cell_h: f32,
     ) -> MouseEventOutcome {
         match mouse_kind {
-            MouseEventKind::Down(MouseButton::Right)
-                if node.props.contains_key("on-right-click") =>
-            {
-                MouseEventOutcome::Dispatch(WidgetEvent::Custom(patcher_context_menu_info(
-                    node, modifiers, local_col, local_row,
-                )))
-            }
-            // macOS convention: ctrl+click is a right-click synonym, only when
+            // Plain right-click never reaches here: `map_mouse_event` claims
+            // it for every widget and builds this widget's payload with
+            // `patcher_context_menu_info`. macOS convention: ctrl+click is a right-click synonym, only when
             // the widget opts in via :on-right-click (as box/tree do).
             MouseEventKind::Down(MouseButton::Left)
                 if modifiers.contains(KeyModifiers::CONTROL)
@@ -2296,6 +2292,7 @@ pub const PATCHER_COMMANDS: &[&str] = &[
     "open-bubble",
     "connect-bubble",
     "open-macro",
+    "edit-node",
     "delete-selection",
     "accept-suggestions",
 ];
@@ -2617,6 +2614,27 @@ pub fn run_patcher_command(node: &LayoutNode, name: &str) -> Option<WidgetEvent>
             }
             set_patcher_interaction_state(key, state);
             reset_patcher_pan(key);
+            Some(WidgetEvent::Custom(Value::Nil))
+        }
+        // Open the single selected node's text with its name selected — the
+        // context menu's Rename / Edit. Committing a new name on a macro
+        // instance renames the defmacro.
+        "edit-node" if state.selected_nodes.len() == 1 && state.drag.is_none() => {
+            let node_id = state.selected_nodes.iter().next().cloned()?;
+            let (_, root_patch) = load_patch_from_props(&node.props).ok()?;
+            let patch = active_patcher_patch(&root_patch, &state);
+            let patch = patch_with_interaction_state(patch, &state, &view_key);
+            if !begin_patcher_node_text_edit(
+                node,
+                &mut state,
+                &view_key,
+                &patch,
+                &node_id,
+                NodeTextCaret::SelectOp,
+            ) {
+                return None;
+            }
+            set_patcher_interaction_state(key, state);
             Some(WidgetEvent::Custom(Value::Nil))
         }
         "delete-selection" if state.selected_cable.is_some() => {
@@ -4240,6 +4258,14 @@ fn cache_patcher_text_widths(node: &Value, ctx: &MeasureCtx<'_>) {
     for patch_node in &patch.nodes {
         let font_size = display::node_font_size(patch_node);
         cache_text_widths(node_display_label(patch_node), font_size, ctx);
+        // Double-click places its caret in the editable text, which spells
+        // out cabled slots the label leaves off (`biquad ?`), so it needs
+        // its own advances.
+        let editable = display::editable_node_text(
+            patch_node,
+            &inbound_slots_for_node(&patch, &patch_node.id),
+        );
+        cache_text_widths(editable, font_size, ctx);
     }
     if let Some(tooltip) = interaction_state
         .hovered_input_port

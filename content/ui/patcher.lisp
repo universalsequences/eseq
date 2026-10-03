@@ -18,7 +18,7 @@
 ;;   (eseq.patcher/unbind-key "Tab")
 ;; Commands: create-below connect-last-two undo redo copy paste encapsulate
 ;; toggle-cable-style retry-bubble dismiss-bubble open-bubble connect-bubble
-;; open-macro delete-selection accept-suggestions
+;; open-macro edit-node delete-selection accept-suggestions
 (module eseq.patcher)
 
 (export handle-focus-key
@@ -76,7 +76,11 @@
         (cable (if (= menu-event nil) nil (get menu-event :cable))))
     (append
       (if (and (not (= node nil)) (get node :macro?))
-        (list (menu-entry "Open Macro" "open-macro"))
+        (list (menu-entry "Open Macro" "open-macro")
+              (menu-entry "Rename" "edit-node"))
+        (list))
+      (if (and (not (= node nil)) (not (get node :macro?)))
+        (list (menu-entry "Edit" "edit-node"))
         (list))
       (if (not (= node nil))
         (list (menu-entry "Connect with Agent…" "connect-bubble")
