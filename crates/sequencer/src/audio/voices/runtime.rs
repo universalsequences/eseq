@@ -18,9 +18,17 @@ pub(in crate::audio) struct CustomVoiceSlot {
     pub(in crate::audio) age: u64,
     pub(in crate::audio) active: bool,
     pub(in crate::audio) release_started_sample: Option<u64>,
-    /// Whether this release has armed the engine's `@amp` reading, so a
-    /// stale "off" from before the note cannot retire the voice early.
+    /// Whether this release (or one-shot note) has armed the engine's
+    /// `@amp` reading, so a stale "off" from before it cannot retire the
+    /// voice early.
     pub(in crate::audio) amp_armed: bool,
+    /// Triggered on a route that sends no note-off (an ungated track), so
+    /// `active` never clears on its own: `@amp` retires it instead.
+    pub(in crate::audio) one_shot: bool,
+    /// Whether this one-shot note has read its armed `@amp` on. Only a note
+    /// that sounded and then fell silent is retired, never one still in a
+    /// delay stage or an attack starting from zero.
+    pub(in crate::audio) amp_heard: bool,
     pub(in crate::audio) note: f32,
     pub(in crate::audio) assigned_track: Option<usize>,
     pub(in crate::audio) assigned_route: Option<usize>,
@@ -68,6 +76,8 @@ impl CustomEnginePool {
                 active: false,
                 release_started_sample: None,
                 amp_armed: false,
+                one_shot: false,
+                amp_heard: false,
                 note: 0.0,
                 assigned_track: None,
                 assigned_route: None,
@@ -88,6 +98,8 @@ impl CustomEnginePool {
                 active: false,
                 release_started_sample: None,
                 amp_armed: false,
+                one_shot: false,
+                amp_heard: false,
                 note: 0.0,
                 assigned_track: None,
                 assigned_route: None,
@@ -109,6 +121,8 @@ impl CustomEnginePool {
                 active: false,
                 release_started_sample: None,
                 amp_armed: false,
+                one_shot: false,
+                amp_heard: false,
                 note: 0.0,
                 assigned_track: None,
                 assigned_route: None,
@@ -138,8 +152,9 @@ impl CustomEnginePool {
         self.age_counter += 1;
         let max_polyphony = max_polyphony.clamp(1, MAX_VOICES);
         // Priority is a keyboard policy: a sequenced note has no held key to
-        // lose against, and a gate-off track never clears `active`, so a
-        // rejected step would otherwise stay silent for the rest of playback.
+        // lose against, and a gate-off track never clears `active` (only an
+        // `@amp` engine retires it once silent), so a rejected step would
+        // otherwise stay silent for the rest of playback.
         let priority = if origin.is_some() { priority } else { crate::sequencer::VoicePriority::Last };
         if !polyphonic {
             if let Some(idx) =
@@ -153,6 +168,7 @@ impl CustomEnginePool {
                 slot.age = self.age_counter;
                 slot.active = true;
                 slot.release_started_sample = None;
+                slot.one_shot = false;
                 slot.note = note;
                 slot.expression = crate::audio::pressure::VoiceExpression::with_origin(origin);
                 slot.assigned_track = Some(track);
@@ -292,6 +308,7 @@ impl CustomEnginePool {
         slot.age = self.age_counter;
         slot.active = true;
         slot.release_started_sample = None;
+        slot.one_shot = false;
         slot.note = note;
         slot.expression = crate::audio::pressure::VoiceExpression::with_origin(origin);
         slot.assigned_track = Some(track);
@@ -322,6 +339,7 @@ impl CustomEnginePool {
         slot.age = self.age_counter;
         slot.active = true;
         slot.release_started_sample = None;
+        slot.one_shot = false;
         slot.note = note;
         slot.expression = crate::audio::pressure::VoiceExpression::default();
         slot.assigned_track = Some(track);
@@ -344,6 +362,40 @@ impl CustomEnginePool {
                 return;
             }
         }
+    }
+
+    /// The voice just triggered with no note-off to follow (an ungated
+    /// track, or a live key on one): once its `@amp` output has read on and
+    /// then off in blocks rendered after this trigger, the shrink retires it
+    /// to idle. Never for a FreePatch voice, which must keep running.
+    pub(in crate::audio) fn mark_one_shot(&mut self, voice_idx: usize) {
+        let voice = &mut self.voices[voice_idx];
+        voice.one_shot = voice.active;
+        voice.amp_armed = false;
+        voice.amp_heard = false;
+    }
+
+    /// A retrig repeat re-excites `logical_id` in place. The hit's gate may
+    /// have released it, or its `@amp` retired it, since: hold it again,
+    /// let it run, and track it as the hit did (`one_shot` when ungated).
+    pub(in crate::audio) fn retrigger_voice_in_place(
+        &mut self,
+        engine_id: usize,
+        logical_id: u64,
+        one_shot: bool,
+    ) {
+        let Some(voice_idx) = (0..self.num_voices).find(|&i| self.voices[i].logical_id == logical_id)
+        else {
+            return;
+        };
+        let voice = &mut self.voices[voice_idx];
+        voice.active = true;
+        voice.release_started_sample = None;
+        voice.one_shot = false;
+        if one_shot {
+            self.mark_one_shot(voice_idx);
+        }
+        self.note_voice_allocated(engine_id, voice_idx);
     }
 
     pub(in crate::audio) fn release_free_patch_voice_by_logical_id(&mut self, logical_id: u64) {
@@ -380,23 +432,39 @@ impl CustomEnginePool {
         let mut retained_mask = 0u32;
         for i in 0..self.num_voices {
             let voice = &mut self.voices[i];
-            if let Some(release_started_sample) = voice.release_started_sample {
-                let tail_elapsed =
-                    current_sample.saturating_sub(release_started_sample) >= release_tail_samples;
-                // An `@amp` instrument reports when its envelope is done. Arm
-                // first: only a block rendered after this release may end it.
-                let amp_finished = match crate::lisp_host::dgen_voice_amp_finished(engine_id, i) {
+            let one_shot = voice.active && voice.one_shot;
+            // An `@amp` instrument reports when its envelope is done. Arm
+            // first: only a block rendered after this release or one-shot
+            // trigger may end it. A held, gated note is never consulted.
+            let amp_finished = if voice.release_started_sample.is_some() || one_shot {
+                use crate::lisp_host::DGenVoiceAmp;
+                match crate::lisp_host::dgen_voice_amp(engine_id, i) {
                     Some(_) if !voice.amp_armed => {
                         crate::lisp_host::arm_dgen_voice_amp(engine_id, i);
                         voice.amp_armed = true;
                         false
                     }
-                    Some(finished) => finished && !voice.active,
-                    None => false,
-                };
+                    Some(DGenVoiceAmp::On) => {
+                        voice.amp_heard = true;
+                        false
+                    }
+                    Some(DGenVoiceAmp::Off) => !one_shot || voice.amp_heard,
+                    Some(DGenVoiceAmp::Pending) | None => false,
+                }
+            } else {
+                false
+            };
+            if let Some(release_started_sample) = voice.release_started_sample {
+                let tail_elapsed =
+                    current_sample.saturating_sub(release_started_sample) >= release_tail_samples;
                 if tail_elapsed || amp_finished {
                     voice.release_started_sample = None;
                 }
+            } else if one_shot && amp_finished {
+                // Idle again, exactly like a retired release: the next
+                // allocation prefers it over stealing a sounding voice.
+                voice.active = false;
+                voice.one_shot = false;
             }
             if voice.active || voice.release_started_sample.is_some() {
                 retained_mask |= 1 << i;

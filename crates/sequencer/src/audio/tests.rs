@@ -2337,6 +2337,192 @@ fn engine_without_amp_output_holds_the_full_release_tail() {
     crate::lisp_host::reset_dgen_engine_enabled_voices(engine_id);
 }
 
+/// Give every voice of `engine_id` a three-output instrument whose channel
+/// 2 is its `@amp` output (or none).
+fn declare_engine_amp_output(engine_id: usize, amp: bool) {
+    for voice in 0..crate::audio::MAX_VOICES {
+        let slot_id = engine_id * crate::audio::MAX_VOICES + voice;
+        crate::lisp_host::set_dgen_instrument_output_count(slot_id, 3);
+        crate::lisp_host::set_dgen_instrument_amp_channel(slot_id, amp.then_some(2));
+    }
+}
+
+/// One ungated (one-shot) voice on route 0, allocated and running.
+fn one_shot_test_pool(engine_id: usize) -> (CustomEnginePool, usize, u64) {
+    let mut pool = CustomEnginePool::new();
+    for lid in 1..=4 {
+        pool.add_voice(lid);
+    }
+    let allocation = pool.allocate_voice(0, 0, 0.0, true, 6);
+    pool.note_voice_allocated(engine_id, allocation.voice_idx);
+    pool.mark_one_shot(allocation.voice_idx);
+    (pool, allocation.voice_idx, allocation.logical_id)
+}
+
+#[test]
+fn amp_output_retires_a_one_shot_voice_once_it_sounded_and_fell_silent() {
+    // eseq-oxij: an ungated track sends no note-off, so only `@amp` can end
+    // its voice. A stale "off" from before the trigger and the trigger block's
+    // own pre-attack "off" must not; on then off must.
+    let engine_id = 3;
+    declare_engine_amp_output(engine_id, true);
+    let (mut pool, voice, _) = one_shot_test_pool(engine_id);
+
+    crate::lisp_host::record_dgen_voice_amp_for_test(engine_id, voice, 0.0);
+    pool.shrink_released_voices(engine_id, 1_000, 1_000_000, 0);
+    assert!(pool.voices[voice].active, "stale reading from the previous note");
+
+    crate::lisp_host::record_dgen_voice_amp_for_test(engine_id, voice, 0.0);
+    pool.shrink_released_voices(engine_id, 2_000, 1_000_000, 0);
+    assert!(pool.voices[voice].active, "not heard yet: attack from zero or a delay stage");
+    assert!(crate::lisp_host::dgen_engine_voice_runs(engine_id, voice));
+
+    crate::lisp_host::record_dgen_voice_amp_for_test(engine_id, voice, 1.0);
+    pool.shrink_released_voices(engine_id, 3_000, 1_000_000, 0);
+    assert!(pool.voices[voice].active);
+
+    crate::lisp_host::record_dgen_voice_amp_for_test(engine_id, voice, 0.0);
+    pool.shrink_released_voices(engine_id, 4_000, 1_000_000, 0);
+    assert!(!pool.voices[voice].active);
+    assert_eq!(pool.voices[voice].release_started_sample, None);
+    assert!(!crate::lisp_host::dgen_engine_voice_runs(engine_id, voice));
+
+    // The retired voice is idle, not an active voice to steal.
+    let next = pool.allocate_voice(0, 0, 7.0, true, 6);
+    assert_eq!(next.voice_idx, voice);
+    assert!(!next.stole_active_voice);
+
+    declare_engine_amp_output(engine_id, false);
+    crate::lisp_host::reset_dgen_engine_enabled_voices(engine_id);
+}
+
+#[test]
+fn amp_output_keeps_a_one_shot_voice_that_is_still_sounding() {
+    let engine_id = 4;
+    declare_engine_amp_output(engine_id, true);
+    let (mut pool, voice, _) = one_shot_test_pool(engine_id);
+
+    pool.shrink_released_voices(engine_id, 1_000, 1_000_000, 0);
+    for block in 2..10u64 {
+        crate::lisp_host::record_dgen_voice_amp_for_test(engine_id, voice, 1.0);
+        pool.shrink_released_voices(engine_id, block * 1_000, 1_000_000, 0);
+        assert!(pool.voices[voice].active);
+        assert!(crate::lisp_host::dgen_engine_voice_runs(engine_id, voice));
+    }
+
+    declare_engine_amp_output(engine_id, false);
+    crate::lisp_host::reset_dgen_engine_enabled_voices(engine_id);
+}
+
+#[test]
+fn one_shot_retrigger_is_not_retired_by_the_previous_notes_amp_reading() {
+    let engine_id = 5;
+    declare_engine_amp_output(engine_id, true);
+    let (mut pool, voice, _) = one_shot_test_pool(engine_id);
+    pool.shrink_released_voices(engine_id, 1_000, 1_000_000, 0);
+    crate::lisp_host::record_dgen_voice_amp_for_test(engine_id, voice, 1.0);
+    pool.shrink_released_voices(engine_id, 2_000, 1_000_000, 0);
+
+    // The first note's last block ended silent; the same voice retriggers
+    // before the shrink that would have read that.
+    crate::lisp_host::record_dgen_voice_amp_for_test(engine_id, voice, 0.0);
+    let retrigger = pool.allocate_voice(0, 0, 0.0, true, 6);
+    assert_eq!(retrigger.voice_idx, voice);
+    pool.mark_one_shot(voice);
+    pool.shrink_released_voices(engine_id, 3_000, 1_000_000, 0);
+    assert!(pool.voices[voice].active);
+
+    // Its own trigger block ending pre-attack is not "finished" either.
+    crate::lisp_host::record_dgen_voice_amp_for_test(engine_id, voice, 0.0);
+    pool.shrink_released_voices(engine_id, 4_000, 1_000_000, 0);
+    assert!(pool.voices[voice].active);
+    assert!(crate::lisp_host::dgen_engine_voice_runs(engine_id, voice));
+
+    declare_engine_amp_output(engine_id, false);
+    crate::lisp_host::reset_dgen_engine_enabled_voices(engine_id);
+}
+
+#[test]
+fn amp_output_never_retires_a_held_gated_voice() {
+    // A gated note is held until its note-off: a silent sustain or slow
+    // attack reading "off" must not cut it.
+    let engine_id = 6;
+    declare_engine_amp_output(engine_id, true);
+    let mut pool = CustomEnginePool::new();
+    for lid in 1..=4 {
+        pool.add_voice(lid);
+    }
+    let allocation = pool.allocate_voice(0, 0, 0.0, true, 6);
+    pool.note_voice_allocated(engine_id, allocation.voice_idx);
+    let voice = allocation.voice_idx;
+    for (block, amp) in [(1u64, 0.0), (2, 1.0), (3, 0.0), (4, 0.0)] {
+        crate::lisp_host::record_dgen_voice_amp_for_test(engine_id, voice, amp);
+        pool.shrink_released_voices(engine_id, block * 1_000, 1_000_000, 0);
+        assert!(pool.voices[voice].active);
+        assert!(crate::lisp_host::dgen_engine_voice_runs(engine_id, voice));
+    }
+
+    declare_engine_amp_output(engine_id, false);
+    crate::lisp_host::reset_dgen_engine_enabled_voices(engine_id);
+}
+
+#[test]
+fn amp_output_never_retires_a_free_patch_voice() {
+    let engine_id = 7;
+    declare_engine_amp_output(engine_id, true);
+    let mut pool = CustomEnginePool::new();
+    pool.add_voice(1);
+    let allocation = pool.allocate_free_patch_voice(0, 0, 0.0).expect("free patch voice");
+    pool.note_voice_allocated(engine_id, allocation.voice_idx);
+    for (block, amp) in [(1u64, 0.0), (2, 1.0), (3, 0.0), (4, 0.0)] {
+        crate::lisp_host::record_dgen_voice_amp_for_test(engine_id, 0, amp);
+        pool.shrink_released_voices(engine_id, block * 1_000, 1_000_000, 1);
+        assert!(pool.voices[0].active);
+        assert!(crate::lisp_host::dgen_engine_voice_runs(engine_id, 0));
+    }
+
+    declare_engine_amp_output(engine_id, false);
+    crate::lisp_host::reset_dgen_engine_enabled_voices(engine_id);
+}
+
+#[test]
+fn engine_without_amp_output_holds_a_one_shot_voice() {
+    let engine_id = 8;
+    let (mut pool, voice, _) = one_shot_test_pool(engine_id);
+    for block in 1..5u64 {
+        crate::lisp_host::record_dgen_voice_amp_for_test(engine_id, voice, (block % 2) as f32);
+        pool.shrink_released_voices(engine_id, block * 1_000, 1_000_000, 0);
+        assert!(pool.voices[voice].active);
+        assert!(crate::lisp_host::dgen_engine_voice_runs(engine_id, voice));
+    }
+    crate::lisp_host::reset_dgen_engine_enabled_voices(engine_id);
+}
+
+#[test]
+fn retrig_repeat_reopens_a_retired_one_shot_voice() {
+    // A retrig repeat re-excites the hit's voice in place; if `@amp` retired
+    // it between repeats it must run again and be re-armed, not left idle.
+    let engine_id = 9;
+    declare_engine_amp_output(engine_id, true);
+    let (mut pool, voice, logical_id) = one_shot_test_pool(engine_id);
+    pool.shrink_released_voices(engine_id, 1_000, 1_000_000, 0);
+    crate::lisp_host::record_dgen_voice_amp_for_test(engine_id, voice, 1.0);
+    pool.shrink_released_voices(engine_id, 2_000, 1_000_000, 0);
+    crate::lisp_host::record_dgen_voice_amp_for_test(engine_id, voice, 0.0);
+    pool.shrink_released_voices(engine_id, 3_000, 1_000_000, 0);
+    assert!(!crate::lisp_host::dgen_engine_voice_runs(engine_id, voice));
+
+    pool.retrigger_voice_in_place(engine_id, logical_id, true);
+    assert!(pool.voices[voice].active);
+    assert!(crate::lisp_host::dgen_engine_voice_runs(engine_id, voice));
+    pool.shrink_released_voices(engine_id, 4_000, 1_000_000, 0);
+    assert!(pool.voices[voice].active, "the stale off must not retire the repeat");
+    assert!(crate::lisp_host::dgen_engine_voice_runs(engine_id, voice));
+
+    declare_engine_amp_output(engine_id, false);
+    crate::lisp_host::reset_dgen_engine_enabled_voices(engine_id);
+}
+
 #[test]
 fn voice_mask_never_silences_a_host_raised_voice_the_pool_has_not_synced() {
     // The host raises an idle engine's count (FreePatch idle voice) before

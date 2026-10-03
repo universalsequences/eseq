@@ -493,6 +493,10 @@ pub(super) fn render_audio_block(
                 unsafe {
                     send_custom_note_on(data.lg.0, voice_lid, 0, on_seq, pitch_hz, kt.velocity, legato);
                 }
+                if !free_patch && !live_key_release_cuts_voice(&data.state, kt.track) {
+                    // Key-up will not cut it: ring out like a sequenced one-shot.
+                    data.custom_engine_pools[engine_id].mark_one_shot(voice_idx);
+                }
                 store_active_keyboard_note(
                     &mut data.active_keyboard_notes,
                     kt.track,

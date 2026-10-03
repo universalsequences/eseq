@@ -981,6 +981,10 @@ pub(super) fn fire_live_keyboard_rack_note(
                 }
                 data.custom_engine_pools[engine_id].voices[voice_idx].fingerprint =
                     instrument_fingerprint;
+                if !free_patch && gate_mode <= 0.5 {
+                    // Key-up will not cut it: ring out like a sequenced one-shot.
+                    data.custom_engine_pools[engine_id].mark_one_shot(voice_idx);
+                }
                 push_active_keyboard_voice(
                     &mut active_voices,
                     &mut active_voice_count,
@@ -1268,6 +1272,9 @@ pub(super) fn fire_rack_slot_note(
                 );
             } else {
                 data.legato_holds.clear_lid(lid);
+                if !free_patch {
+                    data.custom_engine_pools[engine_id].mark_one_shot(voice_idx);
+                }
             }
             let mut voices = [RetrigCustomVoice::default(); MAX_VOICES];
             voices[0] = RetrigCustomVoice { logical_id: lid, pitch_hz, velocity };

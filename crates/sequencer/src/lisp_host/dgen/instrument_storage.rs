@@ -1825,9 +1825,20 @@ pub fn arm_dgen_voice_amp(engine_id: usize, voice_idx: usize) {
     }
 }
 
-/// `Some(finished)` for an engine whose instrument declares an `@amp`
-/// output; `None` means the host cannot tell and must hold the release tail.
-pub fn dgen_voice_amp_finished(engine_id: usize, voice_idx: usize) -> Option<bool> {
+/// A voice's `@amp` reading since it was last armed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DGenVoiceAmp {
+    /// No block has rendered since the arm.
+    Pending,
+    /// The last rendered block ended with the amp on.
+    On,
+    /// The last rendered block ended with the amp off.
+    Off,
+}
+
+/// `Some(reading)` for an engine whose instrument declares an `@amp`
+/// output; `None` means the host cannot tell and must hold the voice.
+pub fn dgen_voice_amp(engine_id: usize, voice_idx: usize) -> Option<DGenVoiceAmp> {
     if engine_id >= MAX_INSTRUMENT_ENGINES || voice_idx >= MAX_VOICES {
         return None;
     }
@@ -1835,7 +1846,11 @@ pub fn dgen_voice_amp_finished(engine_id: usize, voice_idx: usize) -> Option<boo
     if DGEN_INSTRUMENT_AMP_CHANNELS[slot_id].load(Ordering::Acquire) == NO_AMP_CHANNEL {
         return None;
     }
-    Some(DGEN_VOICE_AMP_STATES[slot_id].load(Ordering::Acquire) == AMP_OFF)
+    Some(match DGEN_VOICE_AMP_STATES[slot_id].load(Ordering::Acquire) {
+        AMP_OFF => DGenVoiceAmp::Off,
+        AMP_ON => DGenVoiceAmp::On,
+        _ => DGenVoiceAmp::Pending,
+    })
 }
 
 pub fn set_dgen_engine_enabled_voices(engine_id: usize, count: usize) {
