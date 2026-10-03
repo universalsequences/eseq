@@ -8,6 +8,9 @@ extern _Atomic uint64_t g_param_push_fail_count;
 extern _Atomic uint64_t g_block_event_push_count;
 extern _Atomic uint64_t g_block_event_push_fail_count;
 
+// Floats past block_size every edge (and per-node discard) buffer carries.
+#define EDGE_BUFFER_PAD_FLOATS 64
+
 // ===================== Runtime Graph Types =====================
 
 // Live graph edge buffer
@@ -56,6 +59,15 @@ typedef struct RTNode {
   float *cached_inInline[MAX_IO];
   float *cached_outInline[MAX_IO];
   bool io_cache_valid;     // False if topology changed, needs rebuild
+  // Private discard buffers for this node's unconnected outputs: one
+  // (block_size + EDGE_BUFFER_PAD_FLOATS) run per unconnected port, in port
+  // order, null_out_capacity runs. Reserved in the edit phase
+  // (node_reserve_unconnected_outputs), never shrunk, never allocated by the
+  // IO-cache rebuild. Unconnected ports never share a buffer with another
+  // port or another node, so a host can read back an unrouted channel (DGen
+  // probes / @amp) after process. NULL = none.
+  float *null_out;
+  int null_out_capacity;
   uint32_t io_generation;  // Bumped per IO rebuild; see ap_current_node_io_generation
 
   // Output meter: 0 = unmetered, otherwise (slot index + 1) into
@@ -317,6 +329,14 @@ bool prepare_graph_for_render(LiveGraph *lg);
 LiveGraph *create_live_graph(int initial_capacity, int block_size,
                              const char *label, int num_channels);
 void destroy_live_graph(LiveGraph *lg);
+// Per-node discard buffers for unconnected outputs (see RTNode.null_out).
+bool node_reserve_null_outputs(LiveGraph *lg, RTNode *node, int ports);
+bool node_reserve_unconnected_outputs(LiveGraph *lg, RTNode *node);
+void node_free_null_outputs(RTNode *node);
+bool node_output_is_null(const LiveGraph *lg, const RTNode *node,
+                         const float *buf);
+const float *ap_debug_node_null_outputs(LiveGraph *lg, int node_id,
+                                        int *capacity);
 int apply_add_node(LiveGraph *lg, NodeVTable vtable, size_t state_size,
                    uint64_t logical_id, const char *name, int nInputs,
                    int nOutputs, const void *initial_state);

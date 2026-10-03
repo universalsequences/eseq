@@ -1462,6 +1462,71 @@ void engine_stop_workers(void) {
 
 // ===================== Live Graph Operations =====================
 
+static inline size_t node_null_output_stride(const LiveGraph *lg) {
+  return (size_t)lg->block_size + EDGE_BUFFER_PAD_FLOATS;
+}
+
+// Ensure `node` owns at least `ports` private discard buffers. Edit-phase
+// only (see node_reserve_unconnected_outputs); the IO-cache rebuild never
+// calls it, because that rebuild can run lazily on a render worker
+// (bind_and_run_live). Grow-only. Freeing the old run is safe: edits apply
+// between blocks, and every caller has invalidated the node's IO cache, so
+// the next rebuild repoints cached_outPtrs before any process.
+bool node_reserve_null_outputs(LiveGraph *lg, RTNode *node, int ports) {
+  if (ports <= node->null_out_capacity)
+    return true;
+  size_t floats = node_null_output_stride(lg) * (size_t)ports;
+  float *buf = alloc_aligned(64, floats * sizeof(float));
+  if (!buf)
+    return false;
+  memset(buf, 0, floats * sizeof(float));
+  free(node->null_out);
+  node->null_out = buf;
+  node->null_out_capacity = ports;
+  return true;
+}
+
+void node_free_null_outputs(RTNode *node) {
+  free(node->null_out);
+  node->null_out = NULL;
+  node->null_out_capacity = 0;
+}
+
+// True when `buf` is a discard buffer (shared or this node's private one),
+// i.e. the port is unconnected and nothing downstream hears it.
+bool node_output_is_null(const LiveGraph *lg, const RTNode *node,
+                         const float *buf) {
+  if (buf == lg->scratch_null)
+    return true;
+  if (!node->null_out)
+    return false;
+  const float *end =
+      node->null_out + node_null_output_stride(lg) * (size_t)node->null_out_capacity;
+  return buf >= node->null_out && buf < end;
+}
+
+// The one definition of "unconnected" shared by the edit-phase reservation
+// and the rebuild that assigns those buffers.
+static inline bool output_port_is_connected(const LiveGraph *lg,
+                                            const RTNode *node, int port) {
+  int eid = node->outEdgeId ? node->outEdgeId[port] : -1;
+  return eid >= 0 && eid < lg->edge_capacity && lg->edges[eid].buf;
+}
+
+// Reserve one discard buffer per currently-unconnected output of `node`.
+// Called wherever an edit invalidates a node's IO cache: update_orphaned_status
+// (every add/connect/disconnect/delete/replace/watch edit funnels through it,
+// queued or direct) and apply_hot_swap (no topology change, so its rebuild is
+// the lazy one on a worker). Sized to the unconnected ports, not nOutputs:
+// most ports are routed and already own an edge buffer.
+bool node_reserve_unconnected_outputs(LiveGraph *lg, RTNode *node) {
+  int count = 0;
+  for (int i = 0; i < node->nOutputs; i++)
+    if (!output_port_is_connected(lg, node, i))
+      count++;
+  return node_reserve_null_outputs(lg, node, count);
+}
+
 // Rebuild IO cache for a single node (called lazily when cache is invalid)
 static void rebuild_node_io_cache(LiveGraph *lg, RTNode *node, int nframes) {
   (void)nframes;  // Currently unused but might be needed later
@@ -1501,12 +1566,22 @@ static void rebuild_node_io_cache(LiveGraph *lg, RTNode *node, int nframes) {
     }
   }
 
-  // Resolve output pointers
+  // Resolve output pointers. Each unconnected port writes its own private
+  // discard buffer (reserved in the edit phase, never allocated here): a
+  // shared one would let a node's later unconnected port overwrite an earlier
+  // one within the same process call, and other workers write it
+  // concurrently, so a host reading an unrouted channel back after process
+  // (DGen probes / @amp) would see someone else's data. Unconnected ports
+  // take runs in port order; any past the reservation (only if its
+  // allocation failed) fall back to the shared scratch.
   if (node->cached_outPtrs) {
+    size_t stride = node_null_output_stride(lg);
+    int next_null = 0;
     for (int i = 0; i < node->nOutputs; i++) {
-      int eid = node->outEdgeId ? node->outEdgeId[i] : -1;
-      if (eid >= 0 && eid < lg->edge_capacity && lg->edges[eid].buf) {
-        node->cached_outPtrs[i] = lg->edges[eid].buf;
+      if (output_port_is_connected(lg, node, i)) {
+        node->cached_outPtrs[i] = lg->edges[node->outEdgeId[i]].buf;
+      } else if (next_null < node->null_out_capacity) {
+        node->cached_outPtrs[i] = node->null_out + stride * (size_t)next_null++;
       } else {
         node->cached_outPtrs[i] = lg->scratch_null;
       }
@@ -1557,8 +1632,8 @@ static inline void meter_accumulate(_Atomic uint32_t *bits, float peak) {
 
 // Node output meter (see NodeMeterSlot). The owner check drops writes from a
 // node whose slot was released and reclaimed before the clear edit applied.
-// Unconnected outputs alias the shared scratch buffer, which other workers
-// write concurrently, so they read as silence.
+// Unconnected outputs write a discard buffer nothing downstream hears, so
+// they read as silence.
 static void record_node_output_meter(LiveGraph *lg, RTNode *node, int nid,
                                      float **outPtrs, int nframes) {
   int slot = node->meter_slot - 1;
@@ -1569,10 +1644,10 @@ static void record_node_output_meter(LiveGraph *lg, RTNode *node, int nid,
     return;
   const float *left = outPtrs[0];
   const float *right = node->nOutputs > 1 ? outPtrs[1] : left;
-  float peak_l = left && left != lg->scratch_null
+  float peak_l = left && !node_output_is_null(lg, node, left)
                      ? block_abs_peak(left, nframes) : 0.0f;
   float peak_r = right == left ? peak_l
-                 : right && right != lg->scratch_null
+                 : right && !node_output_is_null(lg, node, right)
                      ? block_abs_peak(right, nframes) : 0.0f;
   meter_accumulate(&meter->peak_l_bits, peak_l);
   meter_accumulate(&meter->peak_r_bits, peak_r);
