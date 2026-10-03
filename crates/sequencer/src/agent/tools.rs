@@ -572,8 +572,9 @@ mod tests {
     fn list_instrument_examples_returns_known_example() {
         let tools = AgentToolRegistry::load_default().expect("load tools");
         let result = tools.list_examples(ExampleKind::Instrument, 200);
-        assert!(result.content.contains("prophet-5"));
-        assert!(result.content.contains("flute"));
+        // Factory instruments are listed by folder name.
+        assert!(result.content.contains("PM Flute (instrument)"), "{}", result.content);
+        assert!(result.content.contains("Modal Snare (instrument)"), "{}", result.content);
     }
 
     #[test]

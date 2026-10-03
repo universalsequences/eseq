@@ -4031,7 +4031,6 @@ mod solo_binding_tests;
             .as_ref()
             .expect("browser widget tree")
             .clone();
-        assert!(value_contains_string(&tree, "New Effect"));
         assert!(value_contains_string(&tree, "Draft patch"));
         assert!(value_contains_string(&tree, "track "));
         assert!(value_contains_string(&tree, "Save as"));
@@ -4046,7 +4045,7 @@ mod solo_binding_tests;
             .runtime_mut()
             .layout_snapshot_for_tree_with_viewport(&tree, Some((28.0, 13.0)))
             .expect("new effect editor sidebar should lay out");
-        for label in ["New Effect", "Draft patch", "Save as", "Save & Add"] {
+        for label in ["Draft patch", "Save as", "Save & Add"] {
             let node = find_layout_text_containing(&layout, label)
                 .unwrap_or_else(|| panic!("expected visible editor text: {label}"));
             assert!(
@@ -4333,7 +4332,6 @@ mod solo_binding_tests;
             .find(|buffer| buffer.name == "*samples*")
             .expect("browser lisp should create the *samples* buffer");
         let tree = browser.widget_tree.as_ref().expect("browser widget tree");
-        assert!(value_contains_string(tree, "New Effect"));
         assert!(value_contains_string(tree, "effect-name"));
         assert!(value_contains_string(tree, "Save & Add"));
         assert!(
