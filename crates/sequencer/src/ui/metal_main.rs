@@ -13,6 +13,7 @@ mod live_audio_analyzer;
 mod natives;
 #[cfg(target_os = "macos")]
 mod native_menu;
+mod noui;
 mod param_words;
 mod piano_roll;
 mod patch_learn;
@@ -117,6 +118,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return sequencer::bounce::command::run(std::env::args().skip(2));
     }
     let capture_args = capture::CaptureArgs::parse_env()
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
+    // Read before `enter_sequencer_dir` replaces the shell's cwd.
+    let noui_args = noui::NoUiArgs::parse_env()
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
     let app_paths = sequencer::app_paths::init()?;
     // Checkout-only startup work: the chdir into the crate directory and the
@@ -275,7 +279,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // (bead eseq-jo7.21).
     app.editor.ui_process_authoring = Some(process_authoring);
 
-    let (editor, backend) = create_editor_and_backend(runtime, &app)?;
+    let ui_root = if noui_args.is_some() { UiRoot::Bare } else { UiRoot::Distro };
+    let (mut editor, backend) = create_editor_and_backend(runtime, &app, ui_root)?;
+    if let Some(args) = &noui_args {
+        noui::enter_session(&mut editor, args)?;
+    }
 
     // Cheaply clonable mirrors of the handles init_runtime captured, bundled
     // for the extracted host-command dispatcher.

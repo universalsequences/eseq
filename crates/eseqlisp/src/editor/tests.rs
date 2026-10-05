@@ -596,6 +596,38 @@ fn hot_reload_root_load_uses_dirty_child_overlay() {
     );
 }
 
+
+#[test]
+fn failed_interactive_import_does_not_poison_later_transactional_reloads() {
+    let dir = hot_reload_temp_dir("eseqlisp-stale-import-error");
+    let root = dir.join("root.lisp");
+    let source = "(def stale-import-probe 1)";
+    std::fs::write(&root, source).unwrap();
+
+    let mut runtime = Runtime::new();
+    // An interactive eval of a missing module returns its message as the
+    // value and leaves the load error queued.
+    runtime.eval_str("(import no.such.module)").unwrap();
+
+    for attempt in 0..2 {
+        let report = runtime.eval_source_transactional(Some(root.clone()), source, Vec::new());
+        assert!(
+            report.success,
+            "reload {attempt} inherited a stale import error: {:?}",
+            report.diagnostics
+        );
+    }
+
+    // A path-based eval still fails on its own missing import.
+    let report = runtime.eval_source_transactional(
+        Some(root.clone()),
+        "(import no.such.module)",
+        Vec::new(),
+    );
+    assert!(!report.success);
+    let report = runtime.eval_source_transactional(Some(root.clone()), source, Vec::new());
+    assert!(report.success, "rollback re-queued the error: {:?}", report.diagnostics);
+}
 #[test]
 fn hot_reload_replaces_module_graph_children_on_successful_root_eval() {
     let dir = hot_reload_temp_dir("eseqlisp-hot-graph-edges");

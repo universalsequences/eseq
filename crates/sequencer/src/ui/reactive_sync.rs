@@ -2731,6 +2731,11 @@ pub(super) fn apply_ui_invalidations(
 }
 
 pub(super) fn reset_sampler_waveform_view(editor: &mut Editor) {
+    const RESET_VIEW: &str = "eseq.effects.sampler-panel/sampler-reset-view";
+    // The bare `noui` root never loads the sampler panel (eseq-750i).
+    if !editor.runtime_mut().has_global(RESET_VIEW) {
+        return;
+    }
     if let Err(error) = editor
         .runtime_mut()
         .eval_str("(eseq.effects.sampler-panel/sampler-reset-view)")

@@ -1213,7 +1213,10 @@ pub(crate) fn run_event_loop(
                     live_key_consumed = intercepted;
                     // Only pass Press events to the editor (Release is only for note-off)
                     if !intercepted && key.kind == crossterm::event::KeyEventKind::Press {
-                        let should_reload_custom_ui = should_reload_custom_ui_after_key(&key);
+                        // Rebuilding every panel's dispatch is heavy; only an
+                        // evaluated panel source (ui.lisp) needs it.
+                        let should_reload_custom_ui = should_reload_custom_ui_after_key(&key)
+                            && active_buffer_is_custom_ui_source(&editor);
                         let previous_track = shared.current_track.load(Ordering::Relaxed);
                         editor.handle_key(key);
                         if should_reload_custom_ui {

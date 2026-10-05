@@ -1141,6 +1141,15 @@ mod tests {
     }
 }
 
+/// Whether the active buffer is an instrument / MIDI FX / audio effect panel
+/// source (`ui.lisp` beside a `dsp.lisp` under a library root) — the only
+/// buffers whose evaluation needs the custom UI dispatch rebuilt.
+pub(crate) fn active_buffer_is_custom_ui_source(editor: &Editor) -> bool {
+    active_custom_ui_buffer_overlay(editor).is_some()
+        || active_custom_midi_fx_ui_buffer_overlay(editor).is_some()
+        || active_custom_audio_fx_ui_buffer_overlay(editor).is_some()
+}
+
 fn active_custom_ui_buffer_overlay(editor: &Editor) -> Option<(String, String, String)> {
     let buffer = editor.active_buffer();
     let path = buffer.path.as_ref()?;

@@ -2327,6 +2327,15 @@ impl Runtime {
         self.vm.take_source_load_errors()
     }
 
+    /// Path-based evals judge a source by the load errors its own `import` /
+    /// `load` forms raise. Anything already queued came from an earlier
+    /// `eval_str` (an interactive `(import …)` that failed and returned its
+    /// message as the value); left in place it failed every later reload, and
+    /// the rollback snapshot re-queued it, so it never cleared (eseq-750i).
+    fn discard_stale_source_load_errors(&mut self) {
+        let _ = self.vm.take_source_load_errors();
+    }
+
     pub fn set_module_load_path(&mut self, roots: Vec<std::path::PathBuf>) {
         self.set_scoped_module_load_path(
             roots
@@ -2398,6 +2407,7 @@ impl Runtime {
         path: PathBuf,
         source: &str,
     ) -> Result<Option<Value>, crate::vm::VMError> {
+        self.discard_stale_source_load_errors();
         let source_buffer_id = self.source_buffer_id_for_path(Some(&path));
         self.vm.set_current_effect_context(source_buffer_id);
         self.vm.begin_inline_widget_capture();
@@ -2430,6 +2440,7 @@ impl Runtime {
         source: &str,
         overlays: Vec<SourceOverlay>,
     ) -> ReloadReport {
+        self.discard_stale_source_load_errors();
         let snapshot = self.snapshot_state();
         let source_buffer_id = self.source_buffer_id_for_path(path.as_deref());
         self.vm.set_current_effect_context(source_buffer_id);
@@ -2618,6 +2629,7 @@ impl Runtime {
         paths: Vec<PathBuf>,
         overlays: Vec<SourceOverlay>,
     ) -> ReloadReport {
+        self.discard_stale_source_load_errors();
         let snapshot = self.snapshot_state();
         self.vm.set_current_effect_context(None);
         self.vm.begin_import_pass();

@@ -3,18 +3,29 @@ use eseqlisp::backend::Backend;
 use eseqlisp::{Editor, EditorConfig, Runtime};
 use sequencer::app;
 
-use super::constants::ui_entrypoint_path;
+use super::constants::{noui_entrypoint_path, ui_entrypoint_path};
 use super::custom_ui::reload_custom_instrument_ui;
 use super::state_values::push_project_scratch_to_named_buffer;
 
 pub(crate) const METAL_SEQ_TEXT_FONT_SIZE_PT: f64 = 13.0;
 const STARTUP_GRID_LAYOUT_EXPR: &str = "(eseq.seq-layout/apply-fx-layout)";
 
+/// Which Lisp root assembles the session: the vanilla DAW (`ui/main.lisp`
+/// plus the startup grid layout) or the bare editor root of `metal_seq noui`
+/// (`ui/noui.lisp`, single window, no DAW buffers).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UiRoot {
+    Distro,
+    Bare,
+}
+
 pub(crate) fn create_editor_and_backend(
     runtime: Runtime,
     app: &app::App,
+    root: UiRoot,
 ) -> Result<(Editor, AppBackend), Box<dyn std::error::Error>> {
-    let mut editor = create_editor(runtime, app)?;
+    let mut editor =
+        create_editor_with_root(runtime, app, sequencer::paths::user_init_path(), root)?;
     let mut backend =
         AppBackend::new_with_size_and_font_size(1250, 850, METAL_SEQ_TEXT_FONT_SIZE_PT)
             .map_err(|_| "render backend creation failed")?;
@@ -35,9 +46,18 @@ pub(crate) fn create_editor(
 }
 
 pub(crate) fn create_editor_with_user_init_path(
+    runtime: Runtime,
+    app: &app::App,
+    user_init_path: Option<std::path::PathBuf>,
+) -> Result<Editor, Box<dyn std::error::Error>> {
+    create_editor_with_root(runtime, app, user_init_path, UiRoot::Distro)
+}
+
+fn create_editor_with_root(
     mut runtime: Runtime,
     app: &app::App,
     user_init_path: Option<std::path::PathBuf>,
+    root: UiRoot,
 ) -> Result<Editor, Box<dyn std::error::Error>> {
     let app_paths = sequencer::app_paths::app_paths();
     // `@/` paths are rooted at immutable factory content, independent of the
@@ -68,7 +88,10 @@ pub(crate) fn create_editor_with_user_init_path(
     }
 
     reload_custom_instrument_ui(&mut editor);
-    let ui_entrypoint = ui_entrypoint_path();
+    let ui_entrypoint = match root {
+        UiRoot::Distro => ui_entrypoint_path(),
+        UiRoot::Bare => noui_entrypoint_path(),
+    };
     // Execute the distro root directly rather than opening it as an authored
     // file. Transactional file evaluation deliberately rejects compatibility-
     // alias escape hatches used by a few event-time UI cycles; those modules
@@ -87,8 +110,10 @@ pub(crate) fn create_editor_with_user_init_path(
     reload_custom_instrument_ui(&mut editor);
     push_project_scratch_to_named_buffer(&mut editor, &app);
     load_user_init(&mut editor, user_init_path.as_deref());
-    apply_startup_grid_layout(&mut editor)?;
-    log_lisp_ui_load_diagnostics(&mut editor);
+    if root == UiRoot::Distro {
+        apply_startup_grid_layout(&mut editor)?;
+        log_lisp_ui_load_diagnostics(&mut editor);
+    }
     Ok(editor)
 }
 
