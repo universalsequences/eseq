@@ -87,6 +87,10 @@
 (import eseq.seq-script-picker)
 (import eseq.seq-macro-mapping-hooks)
 (import eseq.step-grid-interactions)
+;; Cmd/Ctrl+A selects the visible surface's items; `.` toggles recording.
+;; Bound here, not in the library, so importing it binds nothing.
+(bind-key "C-a" "eseq.step-grid-interactions/seq-global-select-all")
+(bind-key "." "eseq.step-grid-interactions/seq-global-toggle-record")
 (import eseq.seqv-track-params)
 (import eseq.seq-grid-mode)
 

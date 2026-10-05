@@ -21,3 +21,55 @@
 (import eseq.effects.physical-model-surface)
 (import eseq.effects.identified-drum)
 (import eseq.effects.panel-bodies)
+
+;; Rack slot clicks select the slot as the factory rack panel does.
+(import eseq.effects.instrument-panel)
+
+(export device-panel device-panel-body panel-height panel-buffer rack-slot-select)
+
+;; The buffer name the host publishes device panels for: it builds
+;; instrument / effect panel data (what `device-panel` returns) only while a
+;; buffer named "*fx*" is visible, so a view showing panels names its tile
+;; "*fx*". (`effect-buffer` takes a literal name: write "*fx*" there and use
+;; `panel-buffer` in layouts.)
+(def panel-buffer "*fx*")
+
+;; Height of a panel body, the factory's fixed device-panel height less its
+;; header and padding: what `device-panel-body` lays out at.
+(def panel-height eseq.effects.state/fx-panel-body-content-height)
+
+;; The panel data of `d`, an eseq.kinds device (`(nth t.devices i)`): the
+;; instrument panel for the instrument (slot -1; its `:type` is "rack" for a
+;; rack, with `:slots`, `:selected-slot` and `:selected-instrument`), else the
+;; effect in that slot (`:params` holds its parameters). Nil while d's track
+;; is not the selected one: the host publishes panels for the selected track
+;; only, and only while `panel-buffer` is visible.
+(def device-panel (d)
+  (if (and d d.track d.track.selected)
+    (if (< d.slot 0)
+      (if (> (len SEQ.instrument-panel) 0) (first SEQ.instrument-panel) nil)
+      (find-by-key SEQ.effects :slot-idx d.slot))
+    nil))
+
+;; The factory body of d's panel (no header), `panel-height` tall: the synth
+;; UI of an instrument or of a rack's selected slot, an effect's controls
+;; (MIDI or audio, as the factory effect panel picks). Nil when
+;; `device-panel` is.
+(def device-panel-body (d)
+  (let ((panel (device-panel d)))
+    (if (= panel nil)
+      nil
+      (box :height panel-height
+        (if (>= d.slot 0)
+          (if (get panel :midi-fx)
+            (eseq.effects.panel-bodies/midi-fx-panel-body panel)
+            (eseq.effects.panel-bodies/audio-fx-panel-body panel (get panel :params)))
+          (if (= (get panel :type) "rack")
+            (if (get panel :selected-instrument)
+              (eseq.effects.panel-bodies/instrument-synth-panel-body (get panel :selected-instrument))
+              (box :width 30 :h-align :center :v-align :center
+                (label "Empty slot" :color :dim :bg :transparent)))
+            (eseq.effects.panel-bodies/instrument-synth-panel-body panel)))))))
+
+;; Select a rack slot (an entry of a rack panel's `:slots`).
+(def rack-slot-select (slot) (eseq.effects.instrument-panel/rack-slot-select slot))

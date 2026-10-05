@@ -43,6 +43,9 @@ pub(crate) struct CaptureArgs {
     /// (a document write, as a widget's on-change makes) then builds and
     /// renders the frame; reports per-frame timings.
     edit_frames: usize,
+    /// `--noui`: load the bare `-noui` root (`ui/noui.lisp`) instead of the
+    /// DAW, so a `metal_seq noui` view file renders as it does there.
+    noui: bool,
 }
 
 impl CaptureArgs {
@@ -73,6 +76,7 @@ impl CaptureArgs {
         let mut scroll_y = 0.0;
         let mut all_panels = false;
         let mut edit_frames = 0;
+        let mut noui = false;
 
         while let Some(arg) = args.next() {
             match arg.as_str() {
@@ -99,6 +103,7 @@ impl CaptureArgs {
                 }
                 "--all-panels" => all_panels = true,
                 "--edit-frames" => edit_frames = parse_usize_arg(&mut args, "--edit-frames")?,
+                "--noui" => noui = true,
                 "-h" | "--help" => return Err(Self::usage()),
                 other => {
                     return Err(format!(
@@ -132,11 +137,12 @@ impl CaptureArgs {
             scroll_y,
             all_panels,
             edit_frames,
+            noui,
         }))
     }
 
     fn usage() -> String {
-        "usage: metal_seq capture --script PATH [--project SAVED_PROJECT_JSON] [--buffer '*fx*'] [--track N] [--width PX] [--height PX] [--key KEY] [--padding PX] [--list-keys] [--hide-status] [--out PATH] [--scroll-frames N --scroll-x CELLS --scroll-y CELLS] [--all-panels] [--edit-frames N]"
+        "usage: metal_seq capture --script PATH [--project SAVED_PROJECT_JSON] [--buffer '*fx*'] [--track N] [--width PX] [--height PX] [--key KEY] [--padding PX] [--list-keys] [--hide-status] [--out PATH] [--scroll-frames N --scroll-x CELLS --scroll-y CELLS] [--all-panels] [--edit-frames N] [--noui]"
             .to_string()
     }
 }
@@ -1303,23 +1309,52 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
         Arc::clone(&piano_roll_selection),
         piano_roll_move_state,
         new_shared_piano_roll_focus(),
-        recording,
+        Arc::clone(&recording),
         master_recording,
         master_recorder,
         Arc::clone(&record_armed),
         Arc::clone(&armed_rack),
         Arc::clone(&ui_epoch),
-        fx_epoch,
+        Arc::clone(&fx_epoch),
         ui_invalidations,
         Arc::clone(&expanded_step_projection),
         selected_neural_neurons,
-        active_delete_target,
-        active_delete_target_version,
+        Arc::clone(&active_delete_target),
+        Arc::clone(&active_delete_target_version),
         auto_follow_override_until,
         graph,
     );
+    // Host kinds (eseq.kinds) read these; the live loop syncs them every
+    // tick, capture at each step below.
+    let kinds_handles = super::host_kinds::KindsHandles {
+        state: Arc::clone(&state),
+        current_track: Arc::clone(&current_track),
+        selected_steps: Arc::clone(&selected_steps),
+        active_delete_target,
+        active_delete_target_version,
+        record_armed: Arc::clone(&record_armed),
+        recording,
+        ui_epoch: Arc::clone(&ui_epoch),
+        fx_epoch,
+        fx_value_epoch: Arc::new(AtomicUsize::new(0)),
+    };
+    let mut host_kinds = super::host_kinds::HostKinds::default();
+    let mut sync_host_kinds = |editor: &mut Editor, app: &app::App| {
+        if host_kinds.sync_with(app, editor.runtime_mut(), &kinds_handles, &[]) {
+            editor.refresh_runtime_side_effects();
+        }
+    };
 
-    let mut editor = create_editor(runtime, &app)?;
+    let mut editor = if args.noui {
+        create_editor_with_root(
+            runtime,
+            &app,
+            sequencer::paths::user_init_path(),
+            UiRoot::Bare,
+        )?
+    } else {
+        create_editor(runtime, &app)?
+    };
     editor
         .runtime_mut()
         .eval_str("(def capture-after-sync () nil)")
@@ -1362,6 +1397,7 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
         runtime.run_reactive_cycle();
     }
     editor.refresh_runtime_side_effects();
+    sync_host_kinds(&mut editor, &app);
     if args.project.is_some() {
         // Match live project-open ordering: scripts can read the loaded
         // topology and must restore their own buffers before the capture hook.
@@ -1439,6 +1475,7 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
     sync_track_color_state(editor.runtime_mut(), &app, &state);
     editor.runtime_mut().run_reactive_cycle();
     editor.refresh_runtime_side_effects();
+    sync_host_kinds(&mut editor, &app);
 
     let buffer_id = editor
         .buffers

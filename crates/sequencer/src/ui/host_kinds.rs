@@ -81,6 +81,7 @@ pub(crate) mod f {
     pub(crate) const TRACK_VOLUME: FieldKey = (TRACK, "volume");
     pub(crate) const TRACK_PEAK: FieldKey = (TRACK, "peak");
     pub(crate) const TRACK_MUTED: FieldKey = (TRACK, "muted");
+    pub(crate) const TRACK_AUDIBLE: FieldKey = (TRACK, "audible");
     pub(crate) const TRACK_ARMED: FieldKey = (TRACK, "armed");
     pub(crate) const TRACK_SELECTED: FieldKey = (TRACK, "selected");
     pub(crate) const TRACK_PRESET: FieldKey = (TRACK, "preset");
@@ -135,6 +136,7 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     (f::TRACK_VOLUME, ":number", Live),
     (f::TRACK_PEAK, ":number", Live),
     (f::TRACK_MUTED, ":bool", Live),
+    (f::TRACK_AUDIBLE, ":bool", Live),
     (f::TRACK_ARMED, ":bool", Live),
     (f::TRACK_SELECTED, ":bool", Live),
     (f::TRACK_PRESET, ":string", Model),
@@ -340,6 +342,9 @@ pub(crate) struct KindsShared {
     /// The last meter level of each track position (`t.peak`; the tick
     /// copies the meter cache, pruned to the track count).
     peaks: Vec<f64>,
+    /// Who another track's (or a bus's) solo silences, as of the last
+    /// sync (`t.audible`; the tick copies it from the `App`).
+    solo: Option<app::SoloAudibility>,
     /// Fields a schema mismatch keeps the host from pushing.
     skip: HashSet<FieldKey>,
 }
@@ -350,20 +355,27 @@ impl KindsShared {
     }
 }
 
-/// The shared sequencer state live fields read; built once, when the
-/// reader is installed.
-struct LiveSources {
-    state: Arc<SequencerState>,
-    current_track: Arc<AtomicUsize>,
-    selected_steps: Arc<Mutex<HashSet<usize>>>,
-    active_delete_target: Arc<Mutex<Option<ActiveDeleteTarget>>>,
-    active_delete_target_version: Arc<AtomicUsize>,
-    record_armed: Arc<Mutex<Vec<bool>>>,
-    recording: Arc<AtomicBool>,
+/// What host kinds read outside the `App`: the shared live state and the UI
+/// epochs. The event loop's [`SharedHandles`] holds all of it
+/// ([`KindsHandles::of`]); headless capture, which has no `SharedHandles`,
+/// builds one from its own handles. The reader hook keeps the first one it
+/// is installed with.
+#[derive(Clone)]
+pub(crate) struct KindsHandles {
+    pub(crate) state: Arc<SequencerState>,
+    pub(crate) current_track: Arc<AtomicUsize>,
+    pub(crate) selected_steps: Arc<Mutex<HashSet<usize>>>,
+    pub(crate) active_delete_target: Arc<Mutex<Option<ActiveDeleteTarget>>>,
+    pub(crate) active_delete_target_version: Arc<AtomicUsize>,
+    pub(crate) record_armed: Arc<Mutex<Vec<bool>>>,
+    pub(crate) recording: Arc<AtomicBool>,
+    pub(crate) ui_epoch: Arc<AtomicUsize>,
+    pub(crate) fx_epoch: Arc<AtomicUsize>,
+    pub(crate) fx_value_epoch: Arc<AtomicUsize>,
 }
 
-impl LiveSources {
-    fn from_shared(shared: &SharedHandles) -> Self {
+impl KindsHandles {
+    pub(crate) fn of(shared: &SharedHandles) -> Self {
         Self {
             state: shared.state.clone(),
             current_track: shared.current_track.clone(),
@@ -372,6 +384,9 @@ impl LiveSources {
             active_delete_target_version: shared.active_delete_target_version.clone(),
             record_armed: shared.record_armed.clone(),
             recording: shared.recording.clone(),
+            ui_epoch: shared.ui_epoch.clone(),
+            fx_epoch: shared.fx_epoch.clone(),
+            fx_value_epoch: shared.fx_value_epoch.clone(),
         }
     }
 
@@ -531,7 +546,7 @@ fn drop_steps_past<S: KindStore>(store: &mut S, track: InstanceId, num_steps: us
 /// else, and for a field a schema mismatch skips. Counts the computation.
 fn live_value<S: KindStore>(
     store: &mut S,
-    sources: &LiveSources,
+    sources: &KindsHandles,
     shared: &RefCell<KindsShared>,
     id: InstanceId,
     field: &str,
@@ -553,6 +568,15 @@ fn live_value<S: KindStore>(
             match key {
                 f::TRACK_VOLUME => number(params.get_volume()),
                 f::TRACK_MUTED => Value::Bool(params.is_muted()),
+                // Effective mute, like the legacy `track-muted-effective`.
+                f::TRACK_AUDIBLE => Value::Bool(
+                    !params.is_muted()
+                        && !shared
+                            .borrow()
+                            .solo
+                            .as_ref()
+                            .is_some_and(|solo| solo.track_is_muted(params)),
+                ),
                 f::TRACK_ARMED => Value::Bool(
                     sources
                         .record_armed
@@ -615,7 +639,7 @@ fn live_value<S: KindStore>(
 /// Install the reader hook that answers by-value reads of unobserved live
 /// fields (and registers steps on a cold `t.steps`). Anything but a live
 /// field name returns `None` before any lookup.
-fn install_reader(rt: &mut Runtime, sources: Rc<LiveSources>, shared: Rc<RefCell<KindsShared>>) {
+fn install_reader(rt: &mut Runtime, sources: Rc<KindsHandles>, shared: Rc<RefCell<KindsShared>>) {
     let reader: HostFieldReader = Rc::new(move |vm: &mut VM, id: InstanceId, field: &str| {
         if !LIVE_KEYS.iter().any(|(_, live)| *live == field) {
             return None;
@@ -653,7 +677,7 @@ struct ModelRevision {
 }
 
 impl ModelRevision {
-    fn capture(app: &app::App, shared: &SharedHandles) -> Self {
+    fn capture(app: &app::App, shared: &KindsHandles) -> Self {
         Self {
             ui_epoch: shared.ui_epoch.load(Ordering::Relaxed),
             fx_epoch: shared.fx_epoch.load(Ordering::Relaxed),
@@ -688,7 +712,7 @@ struct StepSelection {
 
 impl StepSelection {
     /// Catch up with the shared selection; returns whether it changed.
-    fn refresh(&mut self, sources: &LiveSources) -> bool {
+    fn refresh(&mut self, sources: &KindsHandles) -> bool {
         let mut changed = !self.primed;
         self.primed = true;
         let current = sources.current_track.load(Ordering::Relaxed);
@@ -757,7 +781,7 @@ struct StepDiff {
 pub(crate) struct HostKinds {
     pub(crate) shared: Rc<RefCell<KindsShared>>,
     /// Built when the reader is installed.
-    sources: Option<Rc<LiveSources>>,
+    sources: Option<Rc<KindsHandles>>,
     /// The schema generation [`check_schema`] last ran against, and the
     /// mismatches it warned about.
     schema_generation: Option<u64>,
@@ -792,7 +816,7 @@ pub(crate) struct HostKinds {
 /// Pushes during one sync: compares with the cell first.
 struct Pusher<'a> {
     rt: &'a mut Runtime,
-    sources: &'a LiveSources,
+    sources: &'a KindsHandles,
     shared: &'a RefCell<KindsShared>,
     changed: bool,
 }
@@ -926,22 +950,45 @@ impl HostKinds {
         shared: &SharedHandles,
         track_peaks: &[f64],
     ) -> bool {
+        match &self.sources {
+            Some(sources) => self.sync_sources(app, rt, sources.clone(), track_peaks),
+            None => self.sync_with(app, rt, &KindsHandles::of(shared), track_peaks),
+        }
+    }
+
+    /// [`Self::sync`] over explicit handles (headless capture).
+    pub(crate) fn sync_with(
+        &mut self,
+        app: &app::App,
+        rt: &mut Runtime,
+        handles: &KindsHandles,
+        track_peaks: &[f64],
+    ) -> bool {
+        let sources = match &self.sources {
+            Some(sources) => sources.clone(),
+            None => Rc::new(handles.clone()),
+        };
+        self.sync_sources(app, rt, sources, track_peaks)
+    }
+
+    fn sync_sources(
+        &mut self,
+        app: &app::App,
+        rt: &mut Runtime,
+        sources: Rc<KindsHandles>,
+        track_peaks: &[f64],
+    ) -> bool {
         if rt.instance_kind_schema(TRACK).is_none() {
             return false; // eseq.kinds is not loaded
         }
         if self.refresh_schema(rt) {
             self.model = None;
         }
-        let sources = match &self.sources {
-            Some(sources) => sources.clone(),
-            None => {
-                let sources = Rc::new(LiveSources::from_shared(shared));
-                install_reader(rt, sources.clone(), self.shared.clone());
-                self.sources = Some(sources.clone());
-                self.model = None;
-                sources
-            }
-        };
+        if self.sources.is_none() {
+            install_reader(rt, sources.clone(), self.shared.clone());
+            self.sources = Some(sources.clone());
+            self.model = None;
+        }
         {
             let mut kinds_shared = self.shared.borrow_mut();
             let count = app.tracks.len().min(track_peaks.len());
@@ -949,6 +996,7 @@ impl HostKinds {
                 kinds_shared.peaks.clear();
                 kinds_shared.peaks.extend_from_slice(&track_peaks[..count]);
             }
+            kinds_shared.solo = Some(app.solo_audibility());
         }
         let shared_kinds = self.shared.clone();
         let mut pusher = Pusher {
@@ -957,7 +1005,7 @@ impl HostKinds {
             shared: &shared_kinds,
             changed: false,
         };
-        let revision = ModelRevision::capture(app, shared);
+        let revision = ModelRevision::capture(app, &sources);
         let model_due = self.model.as_ref() != Some(&revision)
             || app.track_registry.ids() != self.model_track_ids.as_slice()
             || self.cached_instances_stale(pusher.rt);

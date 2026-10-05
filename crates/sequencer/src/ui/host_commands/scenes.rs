@@ -10,6 +10,51 @@ fn adjacent_scene_index(state: &SequencerState, delta: i32) -> Option<usize> {
     (target < state.scene_count()).then_some(target)
 }
 
+/// `{:idx scene :quantize "off"}`, an immediate `switch-pattern` payload.
+fn switch_now_payload(scene: usize) -> Value {
+    Value::Map(
+        [
+            ("idx".to_string(), Value::Number(scene as f64)),
+            ("quantize".to_string(), Value::String("off".to_string())),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key, Rc::new(RefCell::new(value))))
+        .collect(),
+    )
+}
+
+/// `clone-pattern` / `delete-pattern` act on the current scene; an `:idx` in
+/// the payload names another one, which is made current first (an immediate
+/// launch, as `switch-pattern` with `:quantize "off"`). Returns the scene
+/// that was current before, or `Err(())` when the payload's scene is out of
+/// range or could not be launched (a status says why).
+fn make_payload_scene_current(
+    payload: &Value,
+    app: &mut app::App,
+    editor: &mut Editor,
+    ctx: &mut LoopCtx<'_>,
+) -> Result<usize, ()> {
+    let previous = app.state.current_scene_index();
+    let Some(idx) = extract_usize_from_payload(payload, "idx") else {
+        return Ok(previous);
+    };
+    if idx >= app.state.scene_count() {
+        editor.handle_host_event(HostEvent::Status(format!(
+            "Scene {} does not exist",
+            idx + 1
+        )));
+        return Err(());
+    }
+    if idx != previous {
+        handle("switch-pattern", switch_now_payload(idx), app, editor, ctx);
+    }
+    if app.state.current_scene_index() == idx {
+        Ok(previous)
+    } else {
+        Err(())
+    }
+}
+
 pub(super) const COMMANDS: &[&str] = &[
     "set-scene-launch-quantize",
     "fork-track-pattern",
@@ -1112,6 +1157,10 @@ pub(super) fn handle(
             }
         }
         "clone-pattern" => {
+            // `:idx`: clone that scene (into its bank) instead of the current one.
+            if make_payload_scene_current(&payload, app, editor, ctx).is_err() {
+                return;
+            }
             let requested_bank = ["bank-id", "bank_id"]
                 .iter()
                 .find_map(|key| extract_usize_from_payload(&payload, key))
@@ -1194,6 +1243,11 @@ pub(super) fn handle(
             )));
         }
         "delete-pattern" => {
+            // `:idx`: delete that scene, then return to the one that was
+            // playing (its index shifts down when it came after).
+            let Ok(previous) = make_payload_scene_current(&payload, app, editor, ctx) else {
+                return;
+            };
             let num_tracks = app.tracks.len();
             let deleted_pattern = app.state.current_scene_index();
             let deleted = app.apply_recorded_scene_structure_mutation(
@@ -1280,6 +1334,14 @@ pub(super) fn handle(
                 rt.run_reactive_cycle();
                 editor.refresh_runtime_side_effects();
                 ui_epoch.fetch_add(1, Ordering::Relaxed);
+                if previous != deleted_pattern {
+                    let back = if previous > deleted_pattern {
+                        previous - 1
+                    } else {
+                        previous
+                    };
+                    handle("switch-pattern", switch_now_payload(back), app, editor, ctx);
+                }
             }
         }
         _ => {}

@@ -3981,6 +3981,12 @@ impl Runtime {
         self.shared.borrow().lisp_bindings.clone()
     }
 
+    /// The handler a global `bind-key` gave `key` (as stored: module
+    /// qualified), if any.
+    pub fn global_key_binding(&self, key: &str) -> Option<String> {
+        self.shared.borrow().lisp_bindings.get(key).cloned()
+    }
+
     pub(crate) fn take_pending_eval_buffer(&mut self) -> Option<BufferId> {
         let mut shared = self.shared.borrow_mut();
         shared.pending_eval_buffer.take()

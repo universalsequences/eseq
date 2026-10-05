@@ -881,3 +881,67 @@ fn observed_bits_batch_children_by_kind_and_the_schema_generation() {
     eval(&mut vm, TRACK);
     assert!(vm.instance_kind_schema_generation() > generation);
 }
+
+/// Every `__stable-key` in a widget tree, depth first.
+fn stable_keys(tree: &Value, out: &mut Vec<String>) {
+    match tree {
+        Value::Map(map) => {
+            if let Some(key) = map.get(super::super::STABLE_KEY_PROP)
+                && let Value::String(key) = &*key.borrow()
+            {
+                out.push(key.clone());
+            }
+            for value in map.values() {
+                stable_keys(&value.borrow(), out);
+            }
+        }
+        Value::List(items) => {
+            for item in items {
+                stable_keys(&item.borrow(), out);
+            }
+        }
+        _ => {}
+    }
+}
+
+#[test]
+fn subtree_keys_take_instances_and_lists_of_parts() {
+    let (mut vm, _) = vm();
+    let t0 = vm.register_keyed_instance("track", &[0]).expect("t0");
+    let t1 = vm.register_keyed_instance("track", &[1]).expect("t1");
+    let key = |vm: &mut VM, code: &str| super::super::subtree_key_string(&eval(vm, code));
+    assert_eq!(key(&mut vm, "(track 0)"), Some(format!("#<{t0}>")));
+    assert_eq!(
+        key(&mut vm, "(list :preset (track 1) 2)"),
+        Some(format!(":preset/#<{t1}>/2"))
+    );
+    assert_eq!(
+        key(&mut vm, "(list :preset (dict))"),
+        None,
+        "every part must key"
+    );
+    eval(
+        &mut vm,
+        r#"
+        (effect-buffer "*keys*"
+          (v-stack
+            (subtree :key (track 0) (label "a"))
+            (subtree :key (list :preset (track 1)) (label "b"))))
+        "#,
+    );
+    let mut keys = Vec::new();
+    for update in vm.pending_widget_trees.drain(..) {
+        if let PendingUiUpdate::FullTree(tree) = update {
+            stable_keys(&tree.tree, &mut keys);
+        }
+    }
+    assert!(
+        keys.iter().any(|k| k.ends_with(&format!("#<{t0}>"))),
+        "{keys:?}"
+    );
+    assert!(
+        keys.iter()
+            .any(|k| k.ends_with(&format!(":preset/#<{t1}>"))),
+        "{keys:?}"
+    );
+}

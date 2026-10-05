@@ -36,6 +36,8 @@
 (module eseq.step-grid-interactions)
 
 (import eseq.seq-core-state :as core)
+;; `selection` for the kind-based gestures (down / drag / up / double-click).
+(import eseq.kinds :refer (selection))
 ;; Rack membership for the rack-wide select-all (drum rack v2 groups).
 (import eseq.drum-rack-v2)
 
@@ -82,7 +84,16 @@
         retrig-slider-value
         step-param-value
         step-slider-param-value
-        param-decimals)
+        param-decimals
+        down
+        drag
+        up
+        double-click
+        bind-step-keys)
+
+;; Importing this module binds no keys. The DAW root (ui/main.lisp) binds
+;; C-a and `.` to seq-global-select-all / seq-global-toggle-record; a view
+;; built on eseq.kinds calls (bind-step-keys).
 
 
 (def page-button-width 2.8)
@@ -484,11 +495,14 @@
         ;; Selecting this surface relinquishes the prior destructive target,
         ;; even when it is empty or its selection is already complete.
         (seq-clear-delete-target)
-        (if (= context :arrangement)
+        ;; The arrangement, piano roll and DAW *sequencer* modules are the
+        ;; DAW root's: a `-noui` session (whose own view may be named
+        ;; *sequencer*) has none of them and gets the plain step select-all.
+        (if (and (= context :arrangement) (module-loaded? "eseq.arrangement"))
           (do (drop-step-selection) (eseq.arrangement/select-all-clips))
-          (if (= context :piano-roll)
+          (if (and (= context :piano-roll) (module-loaded? "eseq.piano-roll"))
             (do (drop-step-selection) (eseq.piano-roll/piano-roll-select-all))
-            (if (= (current-buffer-name) "*sequencer*")
+            (if (and (= (current-buffer-name) "*sequencer*") (module-loaded? "eseq.sequencer"))
               (eseq.sequencer/select-all-current-track-steps)
               (select-all-steps))))
         true))
@@ -497,19 +511,70 @@
 ;; Kept as the historical name: user lisp may rebind or call it.
 (def seq-global-select-all-steps () (seq-global-select-all))
 
-(bind-key "C-a" "seq-global-select-all")
-
 (def seq-global-toggle-record ()
   (if (or (buffer-read-only?) (= (view-mode) "ui"))
     (seq-toggle-record)
     false))
 
-(bind-key "." "seq-global-toggle-record")
-
 (def delete-selected-steps ()
   (do
     (eseq.seq-core-state/cool-off-follow)
     (seq-delete-selected-steps)))
+
+;; ── Kind-based gestures ──
+;; The main grid's step gestures over an eseq.kinds step instance `s`:
+;; click empty = on (drag paints), click on = select, drag = move, hold+drag =
+;; sweep-select, shift/cmd-drag = range/add, double-click = off. Each selects
+;; s's track first; a gesture stays on the track it started on.
+;;
+;;   (box :on-mouse-down (lambda (e) (sgi/down s e)) :on-drag (lambda (e) (sgi/drag s e))
+;;        :on-mouse-up (lambda (e) (sgi/up s e)) :on-double-click (lambda (e) (sgi/double-click s e)) ...)
+
+;; The track the current gesture started on (nil between gestures).
+(def gesture-track nil)
+
+(def down (s e)
+  (let ((t s.track)
+        ;; read before selecting: a selection applies on an already-selected track only
+        (use-selection s.track.selected))
+    (do (set! selection.track t)
+        (set! gesture-track t)
+        (step-pointer-down-for-track t.index s.index e use-selection))))
+
+(def drag (s e)
+  (when (= gesture-track s.track)
+    (set! selection.track s.track)
+    (step-select-drag-over-for-track s.track.index s.index e)))
+
+(def up (s e)
+  (do (when (= gesture-track s.track)
+        (set! selection.track s.track)
+        (step-pointer-up s.index e))
+      (set! gesture-track nil)))
+
+(def double-click (s e)
+  (do (set! selection.track s.track)
+      (step-double-click-for-track s.track.index s.index e)))
+
+;; ── Step keys for a kinds view ──
+;; ESC clears the step selection, C-a / s-a select every step (rack-wide
+;; over a selected drum rack), BS deletes the selected steps. Each acts in a
+;; widget (`ui`) view only and hands the key back (false) elsewhere, so code
+;; buffers keep their own ESC, C-a and BS.
+(def step-key-clear-selection ()
+  (if (= (view-mode) "ui") (do (seq-clear-selection) true) false))
+
+(def step-key-select-all ()
+  (if (= (view-mode) "ui") (do (select-all-steps) true) false))
+
+(def step-key-delete ()
+  (if (and (= (view-mode) "ui") (seq-has-selection?)) (do (delete-selected-steps) true) false))
+
+(def bind-step-keys ()
+  (do (bind-key "ESC" "eseq.step-grid-interactions/step-key-clear-selection")
+      (bind-key "C-a" "eseq.step-grid-interactions/step-key-select-all")
+      (bind-key "s-a" "eseq.step-grid-interactions/step-key-select-all")
+      (bind-key "BS" "eseq.step-grid-interactions/step-key-delete")))
 
 (def duration-slider-position (duration)
   (let ((d (max 0 (min duration 32))))

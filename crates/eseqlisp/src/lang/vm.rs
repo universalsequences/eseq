@@ -2309,6 +2309,9 @@ fn explicit_subtree_root_hash(
     hasher.finish() & MAX_SAFE_F64_INT
 }
 
+/// A `subtree :key` as its stable string: a scalar, a kind instance
+/// (`#<id>`, so `(subtree :key t ...)` follows the instance), or a list of
+/// those (parts joined with `/`, so `(subtree :key (list :preset t) ...)`).
 fn subtree_key_string(value: &Value) -> Option<String> {
     match value {
         Value::String(s) => Some(s.clone()),
@@ -2316,6 +2319,12 @@ fn subtree_key_string(value: &Value) -> Option<String> {
         Value::Bool(b) => Some(b.to_string()),
         Value::Keyword(s) => Some(format!(":{s}")),
         Value::Symbol(s) => Some(s.clone()),
+        Value::Instance(id) => Some(format!("#<{id}>")),
+        Value::List(items) => items
+            .iter()
+            .map(|item| subtree_key_string(&item.borrow()))
+            .collect::<Option<Vec<_>>>()
+            .map(|parts| parts.join("/")),
         _ => None,
     }
 }
@@ -3368,6 +3377,17 @@ pub fn register_core_natives(vm: &mut VM) {
             .or_default()
             .append(names);
         Value::Nil
+    });
+
+    // (module-loaded? "eseq.sequencer"): whether that module has been
+    // loaded, so a library can call an optional module's functions only
+    // under a root that loads it (the DAW vs a `-noui` session).
+    vm.register_native_with_vm("module-loaded?", |args, vm| match args.first() {
+        Some(Value::String(name)) => Value::Bool(vm.declared_modules.contains_key(name)),
+        _ => {
+            log_native_misuse("module-loaded?", "expects a module name string");
+            Value::Bool(false)
+        }
     });
 
     vm.register_native_with_vm("__import-module", |args, vm| {

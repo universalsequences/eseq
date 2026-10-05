@@ -234,6 +234,10 @@ fn value_is_open(node: &Value) -> bool {
     let Value::Map(map) = node else {
         return false;
     };
+    // `:anchor nil` (no point yet) keeps the menu hidden.
+    if matches!(anchor_point(node), Some(None)) {
+        return false;
+    }
     match map.get("is-open").map(|value| value.borrow().clone()) {
         Some(Value::Bool(open)) => open,
         Some(Value::Number(n)) => n > 0.5,
@@ -255,6 +259,24 @@ fn prop_f32(node: &Value, key: &str) -> Option<f32> {
         }
         _ => None,
     }
+}
+
+/// The `:anchor` prop: `None` when absent, `Some(None)` when nil (or not a
+/// point), else the point's `(col, row)`. A point is a map with `:col` and
+/// `:row`, as a pointer event's `e.at` is.
+fn anchor_point(node: &Value) -> Option<Option<(f32, f32)>> {
+    let Value::Map(map) = node else {
+        return None;
+    };
+    let anchor = map.get("anchor")?.borrow().clone();
+    let Value::Map(point) = anchor else {
+        return Some(None);
+    };
+    let coord = |key: &str| match point.get(key).map(|value| value.borrow().clone()) {
+        Some(Value::Number(n)) => Some(n as f32),
+        _ => None,
+    };
+    Some(coord("col").zip(coord("row")))
 }
 
 /// True when a `menu-item` layout node is disabled.
@@ -385,7 +407,7 @@ impl WidgetDefinition for ContextMenuWidget {
     }
 
     fn size_affecting_props(&self) -> &'static [&'static str] {
-        &["is-open", "anchor-col", "anchor-row", "width"]
+        &["is-open", "anchor", "anchor-col", "anchor-row", "width"]
     }
 
     fn bindable_props(&self) -> &'static [&'static str] {
@@ -460,8 +482,12 @@ impl WidgetDefinition for ContextMenuWidget {
             .min(max_content_width);
         let content_height: f32 = sizes.iter().map(|size| size.height).sum();
 
-        let anchor_col = prop_f32(node, "anchor-col").unwrap_or(frame.col);
-        let anchor_row = prop_f32(node, "anchor-row").unwrap_or(frame.row);
+        let (anchor_col, anchor_row) = anchor_point(node).flatten().unwrap_or_else(|| {
+            (
+                prop_f32(node, "anchor-col").unwrap_or(frame.col),
+                prop_f32(node, "anchor-row").unwrap_or(frame.row),
+            )
+        });
         let panel = anchored_panel_rect(
             anchor_col,
             anchor_row,
@@ -869,6 +895,43 @@ mod tests {
             item.rect.width,
             width_at(tile_font)
         );
+    }
+
+    #[test]
+    fn anchor_takes_a_point_and_nil_keeps_the_menu_hidden() {
+        let point = |col: f64, row: f64| {
+            Value::Map(HashMap::from([
+                ("col".to_string(), Rc::new(RefCell::new(Value::Number(col)))),
+                ("row".to_string(), Rc::new(RefCell::new(Value::Number(row)))),
+            ]))
+        };
+        let menu = |anchor: Option<Value>| {
+            let mut props = vec![("is-open", Value::Bool(true))];
+            if let Some(anchor) = anchor {
+                props.push(("anchor", anchor));
+            }
+            let tree = widget_node(
+                "context-menu",
+                &props,
+                vec![widget_node(
+                    "menu-item",
+                    &[("text", Value::String("Clone scene".to_string()))],
+                    vec![],
+                )],
+            );
+            let layout = crate::layout::LayoutEngine::new(120, 40, 1.0)
+                .layout(&tree)
+                .expect("layout");
+            find_widget(&layout, "menu-item").map(|item| item.rect)
+        };
+        let at = menu(Some(point(30.0, 12.0))).expect("open at the point");
+        let cols = menu(None).expect("open at the frame corner");
+        assert!(at.col > cols.col && at.row > cols.row, "{at:?} vs {cols:?}");
+        assert!(
+            (at.col - 30.0).abs() < 2.0 && (at.row - 12.0).abs() < 2.0,
+            "{at:?}"
+        );
+        assert!(menu(Some(Value::Nil)).is_none(), "nil anchor: hidden");
     }
 
     #[test]

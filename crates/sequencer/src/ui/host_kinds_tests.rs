@@ -634,6 +634,7 @@ fn unobserved_live_fields_are_never_computed() {
         f::STEP_SELECTED,
         f::TRACK_PEAK,
         f::TRACK_VOLUME,
+        f::TRACK_AUDIBLE,
     ] {
         assert_eq!(h.computed(key), 0, "{key:?} computed while unobserved");
     }
@@ -674,7 +675,7 @@ fn reconcile_keeps_results_aligned_when_a_registration_fails() {
     let mut h = Harness::new();
     h.sync();
     let t0 = h.track_id(0);
-    let sources = LiveSources::from_shared(&h.shared);
+    let sources = KindsHandles::of(&h.shared);
     let shared = RefCell::new(KindsShared::default());
     let mut pusher = Pusher {
         rt: h.editor.runtime_mut(),
@@ -945,4 +946,455 @@ fn a_defwidget_with_instance_state_reads_host_kinds_and_only_repaints() {
         rendered,
         "instance state repaints; the view never re-renders"
     );
+}
+
+/// The mini-DAW example (kind-bindings spec §13 stage 6): the `-noui` view
+/// built on eseq.kinds, `#'` and defwidget instance state.
+const MINI_DAW: &str = include_str!("../../../../docs/examples/mini-daw.lisp");
+
+/// Every map in a widget tree that carries `prop` (a depth-first walk).
+fn widgets_with_prop(tree: &Value, prop: &str, out: &mut Vec<HashMap<String, Value>>) {
+    match tree {
+        Value::Map(map) => {
+            if map.contains_key(prop) {
+                out.push(
+                    map.iter()
+                        .map(|(key, value)| (key.clone(), value.borrow().clone()))
+                        .collect(),
+                );
+            }
+            for value in map.values() {
+                widgets_with_prop(&value.borrow(), prop, out);
+            }
+        }
+        Value::List(items) => {
+            for item in items {
+                widgets_with_prop(&item.borrow(), prop, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// `source` without comments: a `;` outside a string starts one, up to the
+/// end of its line (string escapes included).
+fn strip_lisp_comments(source: &str) -> String {
+    let mut out = String::with_capacity(source.len());
+    let (mut in_string, mut escaped, mut in_comment) = (false, false, false);
+    for ch in source.chars() {
+        if in_comment {
+            if ch == '\n' {
+                in_comment = false;
+                out.push(ch);
+            }
+            continue;
+        }
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+        } else if ch == '"' {
+            in_string = true;
+        } else if ch == ';' {
+            in_comment = true;
+            continue;
+        }
+        out.push(ch);
+    }
+    out
+}
+
+/// Whether `code` has a symbol starting with `prefix` (`SEQ.` matches
+/// `SEQ.steps`, not `MY-SEQ.x`).
+fn has_symbol_starting_with(code: &str, prefix: &str) -> bool {
+    code.match_indices(prefix).any(|(at, _)| {
+        code[..at]
+            .chars()
+            .next_back()
+            .is_none_or(|before| !(before.is_alphanumeric() || "-_/.*+!?<>=#'".contains(before)))
+    })
+}
+
+#[test]
+fn mini_daw_example_has_no_string_key_bindings() {
+    let code = strip_lisp_comments(MINI_DAW);
+    assert!(
+        !code.contains("No project on this line;"),
+        "strings survive stripping"
+    );
+    let flat = code.split_whitespace().collect::<Vec<_>>().join(" ");
+    for forbidden in [
+        "bind-seq",
+        "(bind ",
+        "reactive-get",
+        "with-color",
+        "tr-r",
+        "tr-g",
+        "tr-b",
+        "b01",
+        ":bindable",
+        "defstate",
+        ":key (str ",
+    ] {
+        assert!(
+            !flat.contains(forbidden),
+            "mini-daw.lisp uses {forbidden:?}"
+        );
+    }
+    for field in ["SEQ.", "SEQV."] {
+        assert!(
+            !has_symbol_starting_with(&code, field),
+            "mini-daw.lisp reads {field}"
+        );
+    }
+    assert!(has_symbol_starting_with("(len SEQ.steps)", "SEQ."));
+    assert!(!has_symbol_starting_with("(len MY-SEQ.steps)", "SEQ."));
+    // Keys: none bound twice, none of the step keys sgi/bind-step-keys binds.
+    let bound: Vec<&str> = flat
+        .split("(bind-key \"")
+        .skip(1)
+        .filter_map(|rest| rest.split('"').next())
+        .collect();
+    let unique: HashSet<&str> = bound.iter().copied().collect();
+    assert_eq!(unique.len(), bound.len(), "a key bound twice: {bound:?}");
+    for step_key in ["ESC", "C-a", "s-a", "BS"] {
+        assert!(
+            !unique.contains(step_key),
+            "{step_key} is sgi/bind-step-keys'"
+        );
+    }
+    assert!(flat.contains("(sgi/bind-step-keys)"));
+    assert!(flat.contains("(import eseq.kinds :refer ("));
+}
+
+impl Harness {
+    /// A buffer's widget tree and its revision.
+    fn buffer_tree(&self, name: &str) -> (Value, u64) {
+        let buffer = self
+            .editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == name)
+            .unwrap_or_else(|| panic!("{name} exists"));
+        (
+            buffer
+                .widget_tree
+                .clone()
+                .unwrap_or_else(|| panic!("{name} rendered")),
+            buffer.widget_tree_revision,
+        )
+    }
+
+    /// Load the mini-DAW example and render it.
+    fn load_mini_daw(&mut self) {
+        self.sync();
+        self.editor
+            .runtime_mut()
+            .eval_str(MINI_DAW)
+            .unwrap_or_else(|error| panic!("mini-daw.lisp: {error:?}"));
+        self.sync();
+        self.show_all();
+        self.sync();
+        self.show_all();
+    }
+}
+
+#[test]
+fn mini_daw_example_renders_through_kinds_and_only_repaints_on_playback() {
+    let mut h = Harness::new();
+    h.load_mini_daw();
+    // Turn a step on through the kinds' :set path.
+    h.eval("(let ((t0 (first (tracks)))) (let ((s0 (first t0.steps))) (do (set! s0.active true) nil)))");
+    h.drain();
+    h.sync();
+    h.show_all();
+    h.sync();
+    h.show_all();
+
+    let step_def =
+        eseqlisp::widget_render::sdf_widget::sdf_widget_def("daw-step").expect("daw-step");
+    assert_eq!(
+        step_def.state_uniforms,
+        [
+            "seed",
+            "step.active",
+            "step.selected",
+            "step.playing",
+            "transport.playing",
+            "track.color|r",
+            "track.color|g",
+            "track.color|b",
+        ]
+    );
+    let active = eseqlisp::widget_render::sdf_widget::shader_state_prop_name("step.active");
+    let playing = eseqlisp::widget_render::sdf_widget::shader_state_prop_name("step.playing");
+    let (sequencer, revision) = h.buffer_tree("*sequencer*");
+    let mut cells = Vec::new();
+    widgets_with_prop(&sequencer, &active, &mut cells);
+    let shown = match h.eval("(reduce |n t| (+ n (len t.steps)) 0 (tracks))") {
+        Value::Number(n) => n as usize,
+        other => panic!("step count {other:?}"),
+    };
+    assert!(shown >= 32, "two 16-step tracks, got {shown}");
+    assert_eq!(cells.len(), shown, "one step cell per step instance");
+    for cell in &cells {
+        assert!(
+            matches!(cell.get(&active), Some(Value::ReactiveRef { .. })),
+            "step.active is bound to the step instance"
+        );
+    }
+    let first = eseqlisp::widget_render::get_f32_prop(&cells[0], &active, -1.0);
+    assert_eq!(first, 1.0, "the step turned on through set! shows");
+    // The mixer binds through the track instance: the mute button reads
+    // muted and audible, the fader audible.
+    let shader_prop = eseqlisp::widget_render::sdf_widget::shader_state_prop_name;
+    let mut mutes = Vec::new();
+    widgets_with_prop(&sequencer, &shader_prop("track.muted"), &mut mutes);
+    assert_eq!(mutes.len(), 2, "a mute button per track");
+    let mut audible = Vec::new();
+    widgets_with_prop(&sequencer, &shader_prop("track.audible"), &mut audible);
+    assert_eq!(audible.len(), 4, "a mute button and a fader per track");
+    // The top tile shows the bank and scene pills.
+    let (fx, _) = h.buffer_tree("*fx*");
+    let mut pills = Vec::new();
+    widgets_with_prop(&fx, "queued", &mut pills);
+    assert!(pills.len() >= 2, "a bank pill and a scene pill");
+
+    // The playhead lands on step 3 while the transport plays: the cell's
+    // binding follows, and the view never re-renders.
+    h.shared.state.transport.track_playheads[0].store(3, Ordering::Relaxed);
+    h.shared
+        .state
+        .transport
+        .playing
+        .store(true, Ordering::Relaxed);
+    assert!(h.sync());
+    h.show_all();
+    let cell3 = &cells[3];
+    assert_eq!(
+        eseqlisp::widget_render::get_f32_prop(cell3, &playing, -1.0),
+        1.0
+    );
+    h.editor.refresh_runtime_side_effects();
+    assert_eq!(
+        h.buffer_tree("*sequencer*").1,
+        revision,
+        "playback only repaints"
+    );
+
+    // Control: view state read by value (the scene menu opening)
+    // re-renders its buffer, which the revision shows.
+    let fx_revision = h.buffer_tree("*fx*").1;
+    h.eval("(do (set! scene-menu.open true) nil)");
+    h.show_all();
+    h.editor.refresh_runtime_side_effects();
+    assert_ne!(
+        h.buffer_tree("*fx*").1,
+        fx_revision,
+        "a by-value read re-renders"
+    );
+}
+
+/// Whether any map in `tree` has a string `prop` containing `needle`.
+fn tree_has_string_prop(tree: &Value, prop: &str, needle: &str) -> bool {
+    let mut found = Vec::new();
+    widgets_with_prop(tree, prop, &mut found);
+    found
+        .iter()
+        .any(|map| matches!(map.get(prop), Some(Value::String(s)) if s.contains(needle)))
+}
+
+#[test]
+fn mini_daw_opens_the_selected_tracks_instrument_panel_in_the_top_tile() {
+    let mut h = Harness::new();
+    // A third track with an instrument (a new project's tracks have none),
+    // selected.
+    h.app.graph_controller().add_blank_sampler_track();
+    h.shared.current_track.store(2, Ordering::Relaxed);
+    h.load_mini_daw();
+    // The host publishes the selected track's panel while *fx* is visible,
+    // as the tick does there.
+    let panel = build_instrument_panel_value(&h.app, 2, &h.shared.selected_steps);
+    let rt = h.editor.runtime_mut();
+    rt.set_reactive_value_patch("SEQ", "instrument-panel", panel);
+    rt.run_reactive_cycle();
+    h.show_all();
+    assert_eq!(h.eval("(eseq.effects/device-panel nil)"), Value::Nil);
+    h.eval("(let ((t2 (nth (tracks) 2))) (do (set! view.open-device (first t2.devices)) nil))");
+    h.show_all();
+    h.editor.refresh_runtime_side_effects();
+    assert_ne!(
+        h.eval("(eseq.effects/device-panel view.open-device)"),
+        Value::Nil
+    );
+    assert_ne!(
+        h.eval("(eseq.effects/device-panel-body view.open-device)"),
+        Value::Nil
+    );
+    let (fx, _) = h.buffer_tree("*fx*");
+    assert!(
+        tree_has_string_prop(&fx, "background", "daw-panel-frame"),
+        "the framed panel shows"
+    );
+    assert!(
+        tree_has_string_prop(&fx, "debug-name", "synth-wrapper"),
+        "the factory synth body shows: {fx:?}"
+    );
+    let mut pills = Vec::new();
+    widgets_with_prop(&fx, "queued", &mut pills);
+    assert!(pills.is_empty(), "the panel replaces the scenes");
+    // A device on a track that is not selected has no panel.
+    h.shared.current_track.store(0, Ordering::Relaxed);
+    h.sync();
+    assert_eq!(
+        h.eval("(eseq.effects/device-panel view.open-device)"),
+        Value::Nil
+    );
+}
+
+#[test]
+fn track_audible_follows_mute_and_another_tracks_solo() {
+    let mut h = Harness::new();
+    h.sync();
+    h.eval("(def t0 (track 0)) (def t1 (track 1)) (def a0 #'t0.audible) (def a1 #'t1.audible)");
+    h.sync();
+    assert_eq!(h.slot("a0"), 1.0);
+    assert_eq!(h.slot("a1"), 1.0);
+    // Track 1 soloed: track 0 is silenced, track 1 stays heard.
+    h.shared.state.pattern.track_params[1].set_solo(true);
+    h.sync();
+    assert_eq!(h.slot("a0"), 0.0, "silenced by track 1's solo");
+    assert_eq!(h.slot("a1"), 1.0);
+    assert_eq!(h.eval("t0.muted"), Value::Bool(false), "not muted itself");
+    h.shared.state.pattern.track_params[1].set_solo(false);
+    h.shared.state.pattern.track_params[1].set_mute(true);
+    h.sync();
+    assert_eq!(h.slot("a0"), 1.0);
+    assert_eq!(h.slot("a1"), 0.0, "muted");
+}
+
+#[test]
+fn clone_scene_copies_the_clicked_scene_into_its_bank_without_a_view_switch() {
+    let mut h = Harness::new();
+    h.sync();
+    // Scene 2 (index 1) in a second bank, with step 5 of track 0 on; the
+    // first scene playing.
+    h.command("clone-pattern", Value::Nil);
+    h.eval("(let ((t0 (first (tracks)))) (let ((s5 (nth t0.steps 5))) (do (set! s5.active true) nil)))");
+    h.drain();
+    h.command("create-scene-bank", Value::Nil);
+    let bank_b = h.app.state.scene_banks()[1].id.0;
+    h.eval(&format!(
+        "(host-command \"move-scene-to-scene-bank\" (dict :scene 1 :bank-id {bank_b}))"
+    ));
+    h.eval("(host-command \"switch-pattern\" (dict :idx 0 :quantize \"off\"))");
+    h.drain();
+    assert_eq!(h.app.state.current_scene_index(), 0);
+    assert!(!h.shared.state.pattern.patterns[0].is_active(5));
+    h.sync();
+
+    h.eval("(eseq.kinds/clone-scene! (nth (scenes) 1))");
+    let commands = h.editor.drain_host_commands();
+    let names: Vec<&str> = commands
+        .iter()
+        .filter_map(|command| match command {
+            HostCommand::Custom { name, .. } => Some(name.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(names, ["clone-pattern"], "one command; no switch first");
+    for command in commands {
+        if let HostCommand::Custom { name, payload } = command {
+            h.command(&name, payload);
+        }
+    }
+    let banks = h.app.state.scene_banks();
+    assert_eq!(h.app.state.scene_count(), 3);
+    assert_eq!(
+        (banks[0].len, banks[1].len),
+        (1, 2),
+        "cloned into scene 2's bank"
+    );
+    assert_eq!(h.app.state.current_scene_index(), 2, "the clone plays");
+    assert!(
+        h.shared.state.pattern.patterns[0].is_active(5),
+        "a copy of scene 2"
+    );
+
+    // delete-scene! of another scene keeps the playing one.
+    h.eval("(host-command \"switch-pattern\" (dict :idx 0 :quantize \"off\"))");
+    h.drain();
+    h.sync();
+    h.eval("(eseq.kinds/delete-scene! (nth (scenes) 1))");
+    h.drain();
+    assert_eq!(h.app.state.scene_count(), 2);
+    assert_eq!(h.app.state.current_scene_index(), 0, "scene 1 still plays");
+    assert!(!h.shared.state.pattern.patterns[0].is_active(5));
+}
+
+#[test]
+fn importing_step_grid_interactions_binds_no_keys() {
+    let bindings = |h: &Harness, key: &str| h.rt().global_key_binding(key);
+    let mut h = Harness::new();
+    h.eval("(import eseq.step-grid-interactions :as sgi)");
+    for key in ["C-a", ".", "s-a", "BS"] {
+        assert_eq!(bindings(&h, key), None, "{key} bound by the import");
+    }
+    assert_eq!(
+        h.eval("(module-loaded? \"eseq.sequencer\")"),
+        Value::Bool(false)
+    );
+    h.eval("(eseq.step-grid-interactions/bind-step-keys)");
+    for key in ["ESC", "C-a", "s-a", "BS"] {
+        assert!(
+            bindings(&h, key)
+                .is_some_and(|handler| handler.starts_with("eseq.step-grid-interactions/")),
+            "{key}: {:?}",
+            bindings(&h, key)
+        );
+    }
+    // The DAW root binds the global ones itself.
+    let h = Harness::with_root(UiRoot::Distro);
+    assert_eq!(
+        bindings(&h, "C-a").as_deref(),
+        Some("eseq.step-grid-interactions/seq-global-select-all")
+    );
+    assert_eq!(
+        bindings(&h, ".").as_deref(),
+        Some("eseq.step-grid-interactions/seq-global-toggle-record")
+    );
+}
+
+#[test]
+fn step_gestures_on_a_step_instance_select_its_track_and_toggle_the_step() {
+    let mut h = Harness::new();
+    h.sync();
+    h.eval("(import eseq.step-grid-interactions)");
+    // Press and release an empty step of track 1 while track 0 is selected.
+    h.eval(
+        "(let ((t1 (nth (tracks) 1)))
+           (let ((s3 (nth t1.steps 3)))
+             (do (eseq.step-grid-interactions/down s3 (dict))
+                 (eseq.step-grid-interactions/up s3 (dict))
+                 nil)))",
+    );
+    h.drain();
+    h.sync();
+    assert_eq!(h.shared.current_track.load(Ordering::Relaxed), 1, "track 1 selected");
+    assert!(h.shared.state.pattern.patterns[1].is_active(3), "the step turned on");
+    assert!(!h.shared.state.pattern.patterns[0].is_active(3));
+    // A drag reaching another track's step does nothing there.
+    h.eval(
+        "(let ((t0 (first (tracks))) (t1 (nth (tracks) 1)))
+           (do (eseq.step-grid-interactions/down (nth t1.steps 5) (dict))
+               (eseq.step-grid-interactions/drag (nth t0.steps 6) (dict))
+               (eseq.step-grid-interactions/up (nth t0.steps 6) (dict))
+               nil))",
+    );
+    h.drain();
+    assert!(!h.shared.state.pattern.patterns[0].is_active(6));
 }

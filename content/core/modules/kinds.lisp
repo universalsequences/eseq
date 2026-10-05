@@ -18,7 +18,7 @@
 (module eseq.kinds)
 
 (export track scene bank transport selection project
-        tracks scenes banks launch!)
+        tracks scenes banks launch! clone-scene! delete-scene! step-preset!)
 
 ;; ── :set functions (thin wrappers over the existing natives) ──
 
@@ -61,6 +61,7 @@
          (volume    :number :range (0 1) :set set-track-volume)
          (peak      :number :range (0 1) :doc "Output meter level")
          (muted     :bool   :set set-track-muted)
+         (audible   :bool   :doc "Heard: neither muted nor silenced by another track's solo")
          (armed     :bool   :set set-track-armed :doc "Record-armed")
          (selected  :bool   :doc "The current track (set selection.track)")
          (preset    :string :doc "Loaded preset name; empty when none")
@@ -114,3 +115,14 @@
 (def launch! (s)
   (host-command "switch-pattern"
     (dict :idx s.index :quantize transport.launch-quantize)))
+
+;; Copy scene s to a new scene at the end of its bank, which then plays.
+(def clone-scene! (s) (host-command "clone-pattern" (dict :idx s.index)))
+
+;; Delete scene s (never the last one); the playing scene keeps playing
+;; unless it is s.
+(def delete-scene! (s) (host-command "delete-pattern" (dict :idx s.index)))
+
+;; Load track t's next (dir 1) or previous (dir -1) preset, wrapping.
+(def step-preset! (t dir)
+  (host-command "step-instrument-preset" (dict :track t.index :delta dir)))

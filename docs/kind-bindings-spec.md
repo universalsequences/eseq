@@ -363,7 +363,7 @@ Built (stage 4):
 
   | Kind | Key | `:host` fields (`:set` in brackets) |
   |---|---|---|
-  | `track` | `(index)` | `index :int`, `name :string`, `color :rgb`, `volume :number` [`seq-set-track-volume`], `peak :number`, `muted :bool` [`seq-set-track-mute`], `armed :bool` [`seq-set-record-arm`], `selected :bool`, `preset :string`, `num-steps :int`, `steps (list-of step)`, `devices (list-of device)` |
+  | `track` | `(index)` | `index :int`, `name :string`, `color :rgb`, `volume :number` [`seq-set-track-volume`], `peak :number`, `muted :bool` [`seq-set-track-mute`], `audible :bool`, `armed :bool` [`seq-set-record-arm`], `selected :bool`, `preset :string`, `num-steps :int`, `steps (list-of step)`, `devices (list-of device)` |
   | `step` | `(track index)` | `index :int`, `track track`, `active :bool` [`seq-set-track-step`], `playing :bool`, `selected :bool` |
   | `device` | `(track slot)`, slot part = slot + 1 | `track track`, `slot :int` (-1 = instrument), `name :string`, `enabled :bool` |
   | `scene` | `(index)` | `index :int`, `number :int` (1-based in its bank), `name :string`, `active :bool`, `queued :bool`, `bank bank` |
@@ -411,7 +411,10 @@ Built (stage 4):
   `scene_bank_label`, shared with `SEQ.scene-banks`), the queued scene from
   `queued_transport_scene` (shared with `SEQ.queued-scene`),
   `launch-quantize` from `SEQ.scene-launch-quantize`. `muted` is the track's own mute (what the
-  setter toggles), not the solo-effective mute.
+  setter toggles), not the solo-effective mute; `audible` is the effective
+  one (not muted and not silenced by a solo, the legacy
+  `track-muted-effective` negated; the tick copies the `App`'s solo state
+  for it).
 - **Publishing.** `HostKinds::sync` runs at the end of every
   `sync_reactive_tick` (state in `FrameDiffState::host_kinds`): re-check the
   schema when its generation moved, reconcile the registry and push model
@@ -807,7 +810,7 @@ Built (stage 4):
   field name that is not a live field, and reads `LiveSources` built once
   when it is installed.
 - **Two feeds.** *Live* fields (the `Feed::Live` entries of `PUBLISHED`:
-  track `volume muted armed selected peak num-steps steps`, step `active
+  track `volume muted audible armed selected peak num-steps steps`, step `active
   playing selected`, transport `playing recording`, `selection.track`) read
   shared state the UI thread reaches without the `App`: the tick computes
   them only while observed (`Pusher::push_live`: one batched observed query
@@ -938,6 +941,35 @@ its instance and field.
    plus `eseq.effects` index resolution. Acceptance: it renders and plays like
    the string-key version, with no `bind-seq`, `str`-built keys or color
    triples.
+   Built (stage 6): `docs/examples/mini-daw.lisp`, the reference example
+   (the user's exp4 view ported; `host_kinds_tests::mini_daw_*` load it
+   under the `-noui` root, scan it for legacy forms, string-built keys and
+   re-bound step keys, check a playhead write repaints its step cell
+   without re-rendering, and open an instrument panel in its top tile). The
+   view holds layout and shaders only; the plumbing moved into libraries:
+   - `eseq.step-grid-interactions`: `down` / `drag` / `up` / `double-click`
+     (the main grid's step gestures over a step instance; each selects the
+     step's track) and `(bind-step-keys)` (ESC / C-a / s-a / BS in widget
+     views, rack-aware). Importing it binds no keys: the DAW root
+     (`ui/main.lisp`) binds C-a and `.` itself, and the DAW-only calls are
+     guarded with `(module-loaded? …)` (a new native) for `-noui`.
+   - `eseq.kinds`: `clone-scene!`, `delete-scene!` (the host's
+     `clone-pattern` / `delete-pattern` take an explicit scene `:idx`; the
+     host makes it current itself, and a delete returns to the scene that
+     was playing) and `step-preset!`; `track.audible` (a live field: false
+     while muted or silenced by another track's or a bus's solo).
+   - `eseq.effects`: `device-panel` (a device instance's panel data),
+     `device-panel-body` (the factory body: instrument synth, a rack's
+     selected slot, audio or MIDI effect, at `panel-height`),
+     `rack-slot-select` and `panel-buffer` (the host publishes panels only
+     while "*fx*" is visible).
+   - eseqlisp: `subtree :key` takes an instance (`#<id>`) or a list of
+     parts (`(list :preset t)`); `context-menu :anchor` takes a point
+     (`e.at`; nil keeps the menu hidden); `label` / `number-label` `:active`
+     accept a Lisp bool.
+   - `metal_seq capture --noui` (bare root) with a host-kinds sync
+     (`HostKinds::sync_with` over `KindsHandles`), so kinds views render
+     headlessly.
 7. **Factory kind inventory.** Stage 4 publishes the seven kinds the
    mini-DAW needs. The factory UI reaches further: ~1,600 legacy accesses
    (`bind-seq`, `bind-seq-nth`, `(bind "SEQV" …)`, `(bind "GRAPH" …)`,
@@ -964,15 +996,18 @@ Stages 1–3 touch only eseqlisp and can land before any host work.
 
 ## Appendix A. Target example (abridged)
 
+The real, complete view is `docs/examples/mini-daw.lisp`; this is its shape.
+
 ```lisp
-(import eseq.effects)
-(import eseq.kinds :refer (tracks transport banks scenes selection))
-(import eseq.step-grid :as grid)
+(import eseq.kinds :refer (tracks transport banks scenes selection
+                           launch! clone-scene! delete-scene! step-preset!))
+(import eseq.effects :as fx)
+(import eseq.step-grid-interactions :as sgi)
 
 (def-kind view
   :key ()
   :state ((bank -1)                         ; -1 = follow the playing scene
-          (open-slot device :default nil)))
+          (open-device device :default nil)))
 
 (def-kind scene-menu
   :key ()
@@ -986,67 +1021,80 @@ Stages 1–3 touch only eseqlisp and can land before any host work.
   :shader
   (sdf/layer
     (sdf/fill bar (vgrad (gray 0.07)))
-    (sdf/fill (clip-x bar track.volume) (* (if track.muted 0.35 1) (vgrad track.color)))
+    (sdf/fill (clip-x bar track.volume) (* (if track.audible 1 0.35) (vgrad track.color)))
     (outline bar)
     (sdf/fill (clip-x meter track.peak) (vgrad (rgb 0.45 0.9 0.4)))))
 
-(defmacro pill-box (text lit &rest props)
-  `(box :background "pill" :lit ,lit :width (sc 10) :height (sc 4)
+(defmacro on-track (t &rest body)           ; a handler that selects t first
+  `(lambda (e) (do (set! selection.track ,t) ,@body)))
+
+(defmacro big-pill (text lit &rest props)
+  `(box :background "pill" :active ,lit :width (sc 10) :height (sc 4)
         :h-align :center :v-align :center ,@props
      (label ,text :bg :transparent :color :white :active ,lit :active-color :black)))
 
 (def step-view (s t)
   (box :width (sc 8) :height (sc 4)
-    :on-mouse-down   (lambda (e) (grid/down s e))
-    :on-drag         (lambda (e) (grid/drag s e))
-    :on-mouse-up     (lambda (e) (grid/up s e))
-    :on-double-click (lambda (e) (grid/double-click s e))
+    :on-mouse-down   (lambda (e) (sgi/down s e))
+    :on-drag         (lambda (e) (sgi/drag s e))
+    :on-mouse-up     (lambda (e) (sgi/up s e))
+    :on-double-click (lambda (e) (sgi/double-click s e))
     (step-cell :step s :track t :seed (~slider 68.457 :min 0 :max 100))))
 
+(sgi/bind-step-keys)                        ; Esc, Cmd-A, BS on the steps
+
 (def track-view (t)
-  (box :on-mouse-down (lambda (e) (set! selection.track t))
-    (h-stack :v-align :top :gap (sc 3)
-      (label (substring t.name 0 3)
-        :font-size (sc 32) :color :dim
-        :active #'t.selected :active-color :white)
-      (grid :columns 8 :cell-width (sc 8) :cell-height (sc 4)
-        (each t.steps |s| (step-view s t)))
-      (v-stack :gap (sc 0.5)
-        (h-stack :gap (sc 1)
-          (box :background "mute-button" :track t :on-click (lambda (e) (toggle! t.muted)))
-          (box :background "arm-button" :armed #'t.armed
-            :on-click (lambda (e) (toggle! t.armed)))
-          (box :background "fader" :track t
-            :on-drag (lambda (e) (set! t.volume e.u))))
-        (slot-row t)))))
+  (subtree :key t
+    (box :on-mouse-down (on-track t)
+      (h-stack :v-align :top
+        (label (substring t.name 0 3)
+          :font-size (sc 32) :color :dim
+          :active #'t.selected :active-color :white)
+        (grid :cols 8 :col-width (sc 8) :row-height (sc 4)
+          (each t.steps |s| (step-view s t)))
+        (v-stack :gap (sc 0.5)
+          (h-stack :gap (sc 1)
+            (box :background "mute-button" :track t :on-click (on-track t (toggle! t.muted)))
+            (box :background "arm-button" :armed #'t.armed
+              :on-click (on-track t (toggle! t.armed)))
+            (box :background "fader" :track t
+              :on-drag (on-track t (set! t.volume e.u))))
+          (subtree :key (list :preset t) (preset-row t))
+          (subtree :key (list :devices t) (slot-row t)))))))
 
 (def scenes-view ()
   (let ((shown (if (< view.bank 0) transport.scene.bank (nth (banks) view.bank))))
     (v-stack :gap (sc 1)
       (h-stack :gap (sc 1)
         (each (banks) |b|
-          (pill-box b.label (= b shown)
-            :pulsing (and b.playing (not (= b shown)))
+          (big-pill b.label (= b shown)
+            :queued (and b.playing (not (= b shown)))
             :on-click (lambda (e) (set! view.bank b.index)))))
       (h-stack :gap (sc 1)
         (each shown.scenes |s|
-          (pill-box (str s.number) #'s.active
-            :pulsing #'s.queued
+          (big-pill (str s.number) #'s.active
+            :queued #'s.queued
             :on-click (lambda (e) (launch! s))
             :on-right-click (lambda (e)
               (do (set! scene-menu.scene s)
                   (set! scene-menu.at e.at)
                   (set! scene-menu.open true))))))
-      (context-menu :is-open #'scene-menu.open :anchor scene-menu.at
+      (context-menu :is-open scene-menu.open :anchor scene-menu.at
         :on-close (lambda () (set! scene-menu.open false))
-        (menu-item "Clone scene"  :on-select (lambda (e) (clone! scene-menu.scene)))
+        (menu-item "Clone scene"  :on-select (lambda (e) (clone-scene! scene-menu.scene)))
         (menu-item "Delete scene" :disabled (<= (len (scenes)) 1)
-                                  :on-select (lambda (e) (delete! scene-menu.scene)))))))
+                                  :on-select (lambda (e) (delete-scene! scene-menu.scene)))))))
 
 (effect-buffer "*sequencer*"
   (v-stack :padding (sc 1) :gap (sc 1)
     (each (tracks) |t| (track-view t))))
+
+(effect-buffer "*fx*"                       ; fx/panel-buffer
+  (let ((d view.open-device))
+    (if (fx/device-panel d)
+      (subtree :key (list :device d) (framed (fx/device-panel-body d)))
+      (subtree :key :scenes (scenes-view)))))
 ```
 
 Note the scene pills (`#'s.active`, repaint on launch) and bank pills
-(`(= b shown)`, re-render) share `pill-box`; only the argument form differs.
+(`(= b shown)`, re-render) share `big-pill`; only the argument form differs.

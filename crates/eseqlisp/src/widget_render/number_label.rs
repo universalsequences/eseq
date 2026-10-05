@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
 use super::{
-    CellBuffer, GpuPrimitive, GpuProportionalTextPrimitive, GpuRectPrimitive,
-    WidgetDefinition, get_f32_prop, resolve_named_color, styled_cell,
+    CellBuffer, GpuPrimitive, GpuProportionalTextPrimitive, GpuRectPrimitive, WidgetDefinition,
+    get_bool_prop, get_f32_prop, resolve_named_color, styled_cell,
 };
 use crate::backend::Color;
 use crate::layout::{
@@ -50,7 +50,7 @@ fn resolve_v_align(props: &HashMap<String, Value>) -> f32 {
 }
 
 fn resolve_color(props: &HashMap<String, Value>) -> Color {
-    if get_f32_prop(props, "active", 0.0) != 0.0
+    if get_bool_prop(props, "active", false)
         && let Some(value) = props.get("active-color")
     {
         return crate::theme::parse_color_value(value).unwrap_or(theme::WIDGET_LABEL_FG());

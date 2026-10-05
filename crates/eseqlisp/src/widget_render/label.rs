@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use super::{
     CellBuffer, EventOutput, GpuPrimitive, GpuProportionalTextPrimitive, GpuRectPrimitive,
-    MouseEventOutcome, WidgetDefinition, WidgetEvent, get_f32_prop, resolve_named_color,
+    MouseEventOutcome, WidgetDefinition, WidgetEvent, get_bool_prop, resolve_named_color,
     styled_cell,
 };
 use crossterm::event::{KeyModifiers, MouseButton, MouseEventKind};
@@ -24,7 +24,7 @@ fn resolve_color(props: &HashMap<String, Value>, hovered: bool) -> Color {
             return crate::theme::parse_color_value(value).unwrap_or(theme::WIDGET_LABEL_FG());
         }
     }
-    if get_f32_prop(props, "active", 0.0) != 0.0
+    if get_bool_prop(props, "active", false)
         && let Some(value) = props.get("active-color")
     {
         return crate::theme::parse_color_value(value).unwrap_or(theme::WIDGET_LABEL_FG());
@@ -266,6 +266,12 @@ mod tests {
         props.insert("active".to_string(), Value::Number(1.0));
 
         assert_eq!(resolve_color(&props, false), theme::YELLOW());
+
+        // A Lisp bool (a kind field read by value, `(= b shown)`) works too.
+        props.insert("active".to_string(), Value::Bool(true));
+        assert_eq!(resolve_color(&props, false), theme::YELLOW());
+        props.insert("active".to_string(), Value::Bool(false));
+        assert_eq!(resolve_color(&props, false), theme::DIM());
     }
     #[test]
     fn wrapped_gpu_lines_match_measured_proportional_width_and_height() {
