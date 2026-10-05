@@ -1460,6 +1460,45 @@ impl<'a> Compiler<'a> {
         Ok(())
     }
 
+    /// `#'h.f1…fn`, read as `(function h.f1…fn)` (kind-bindings spec §7.1):
+    /// evaluate `h.f1…f(n-1)` by value like any dotted path (each step
+    /// records its dependency), then `(__field-ref instance "fn")` builds the
+    /// binding. A reactive namespace head (`#'SEQ.playing`) compiles to the
+    /// legacy ref `(bind "SEQ" "playing")`.
+    fn compile_field_binding(&mut self, list: &[Expression]) -> Result<(), CompilerError> {
+        const USAGE: &str = "#' takes a field path like t.volume";
+        let path = match list {
+            [_, Expression::Symbol(path)] if !super::modules::is_qualified(path) => path,
+            _ => return Err(CompilerError::Message(USAGE.to_string())),
+        };
+        let Some((prefix, last)) = path.rsplit_once('.') else {
+            return Err(CompilerError::Message(USAGE.to_string()));
+        };
+        if path.split('.').any(str::is_empty) {
+            return Err(CompilerError::Message(USAGE.to_string()));
+        }
+        let native = if self.reactive_namespaces.contains(prefix) {
+            let idx = self.use_string_constant(prefix);
+            self.emit(OpCode::PushStr(idx));
+            "bind"
+        } else if let Some((head, _)) = prefix.split_once('.')
+            && self.reactive_namespaces.contains(head)
+        {
+            let field = path[head.len() + 1..].split('.').next().unwrap_or_default();
+            return Err(CompilerError::Message(format!(
+                "#'{path}: a reactive namespace binding takes one field, like #'{head}.{field}"
+            )));
+        } else {
+            self.compile_expression(&Expression::Symbol(prefix.to_string()))?;
+            crate::vm::FIELD_REF_NATIVE
+        };
+        let idx = self.use_string_constant(last);
+        self.emit(OpCode::PushStr(idx));
+        self.emit_symbol_load(native);
+        self.emit(OpCode::Call(2));
+        Ok(())
+    }
+
     fn compile_set_statement(
         &mut self,
         target: &Expression,
@@ -3376,6 +3415,9 @@ impl<'a> Compiler<'a> {
             }
             if s == "set!" && list.len() == 3 {
                 return self.compile_set_statement(&list[1], &list[2]);
+            }
+            if s == super::parser::FUNCTION_FORM {
+                return self.compile_field_binding(list);
             }
             if s == "defstate" && list.len() == 3 {
                 let Expression::Symbol(name) = &list[1] else {

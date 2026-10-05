@@ -84,7 +84,7 @@ pub fn is_builtin_widget_name(name: &str) -> bool {
 pub fn register_widget_natives(vm: &mut VM) {
     for widget in BUILTIN_WIDGET_NAMES {
         let widget_type = widget.to_string();
-        vm.register_native_with_vm(widget, move |args, vm| {
+        vm.register_ref_aware_native_with_vm(widget, move |args, vm| {
             let mut widget = build_widget(&widget_type, args);
             vm.qualify_widget_stable_key(&mut widget);
             if let Some(symbol) = vm.current_source_symbol() {
@@ -113,7 +113,7 @@ pub fn register_widget_natives(vm: &mut VM) {
 }
 
 fn register_inline_widget_target_binding_native(vm: &mut VM) {
-    vm.register_native_with_vm("__bind-inline-widget-target", |args, vm| {
+    vm.register_ref_aware_native_with_vm("__bind-inline-widget-target", |args, vm| {
         if !vm.inline_widget_registration_enabled() {
             return Value::Bool(true);
         }
@@ -153,7 +153,7 @@ fn register_inline_value_widget_natives(vm: &mut VM) {
         ("~toggle", "toggle", None),
     ] {
         let widget_type = widget_type.to_string();
-        vm.register_native_with_vm(form_name, move |args, vm| {
+        vm.register_ref_aware_native_with_vm(form_name, move |args, vm| {
             let value = args.first().cloned().unwrap_or(Value::Nil);
             if !vm.inline_widget_registration_enabled() {
                 return value;
@@ -267,7 +267,7 @@ fn keyword_string_arg(args: &[Value], key: &str) -> Option<String> {
 }
 
 fn register_inline_scope_native(vm: &mut VM) {
-    vm.register_native_with_vm("~scope", |args, vm| {
+    vm.register_ref_aware_native_with_vm("~scope", |args, vm| {
         if !vm.inline_widget_registration_enabled() {
             return Value::Nil;
         }
@@ -329,7 +329,7 @@ fn register_inline_scope_native(vm: &mut VM) {
 }
 
 fn register_inline_lane_native(vm: &mut VM) {
-    vm.register_native_with_vm("~lane", |args, vm| {
+    vm.register_ref_aware_native_with_vm("~lane", |args, vm| {
         let value = args.first().cloned().unwrap_or(Value::Nil);
         if !vm.inline_widget_registration_enabled() {
             return value;

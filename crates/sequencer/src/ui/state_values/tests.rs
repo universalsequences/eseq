@@ -968,7 +968,8 @@ mod solo_binding_tests;
                     | Some(Token::Keyword(_))
                     | Some(Token::Backtick)
                     | Some(Token::Comma)
-                    | Some(Token::CommaAt) => Err(ParserError::InvalidQuote),
+                    | Some(Token::CommaAt)
+                    | Some(Token::HashQuote) => Err(ParserError::InvalidQuote),
                     None => Err(ParserError::UnexpectedEOF),
                 }
             }
@@ -989,7 +990,10 @@ mod solo_binding_tests;
                 }
                 parse_expression_at(tokens, pos)
             }
-            Some(Token::Backtick) | Some(Token::Comma) | Some(Token::CommaAt) => {
+            Some(Token::Backtick)
+            | Some(Token::Comma)
+            | Some(Token::CommaAt)
+            | Some(Token::HashQuote) => {
                 *pos += 1;
                 parse_expression_at(tokens, pos)
             }

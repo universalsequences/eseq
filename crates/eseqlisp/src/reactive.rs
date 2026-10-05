@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::layout::LayoutNode;
-use crate::vm::ReactiveBindingKey;
+use crate::vm::{BindingKind, ReactiveBindingKey};
 use crate::vm::Value;
 
 #[derive(Clone, Default)]
@@ -19,6 +19,50 @@ fn numeric_value(value: &Value) -> Option<f64> {
         Value::Bool(true) => Some(1.0),
         Value::Bool(false) => Some(0.0),
         _ => None,
+    }
+}
+
+/// An `:rgb` binding's r, g and b slots are keyed as elements 0..3 of the
+/// field (kind-bindings spec §3.3); r is the slot the ref itself holds.
+const RGB_COMPONENTS: [usize; 3] = [0, 1, 2];
+
+fn rgb_component_key(namespace: &str, field: &str, component: usize) -> ReactiveBindingKey {
+    ReactiveBindingKey::indexed(namespace, field, component)
+}
+
+/// The floats a slot-backed field value stores: `[n, 0, 0]` for a number
+/// or bool (1/0), `[r, g, b]` for `(rgb r g b)` (items 1..4 of the list).
+pub(crate) fn binding_components(kind: BindingKind, value: &Value) -> Option<[f64; 3]> {
+    match kind {
+        BindingKind::Float | BindingKind::InstanceFloat(_) => {
+            numeric_value(value).map(|number| [number, 0.0, 0.0])
+        }
+        BindingKind::InstanceRgb(_) => {
+            let Value::List(items) = value else {
+                return None;
+            };
+            let component = |index: usize| numeric_value(&items.get(index + 1)?.borrow());
+            let [r, g, b] = RGB_COMPONENTS.map(component);
+            Some([r?, g?, b?])
+        }
+    }
+}
+
+/// A binding ref over a fresh slot outside the store holding `value`'s
+/// first component (a stale instance's `#'`: nothing will write it).
+pub(crate) fn detached_binding_ref(
+    namespace: String,
+    field: &str,
+    kind: BindingKind,
+    value: &Value,
+) -> Value {
+    let first = binding_components(kind, value).map_or(0.0, |[first, ..]| first);
+    Value::ReactiveRef {
+        namespace,
+        field: field.to_string(),
+        index: None,
+        kind,
+        slot: Arc::new(AtomicU64::new(first.to_bits())),
     }
 }
 
@@ -99,6 +143,78 @@ impl ReactiveBindingStore {
             field,
             index: Some(index),
             kind: crate::vm::BindingKind::Float,
+        }
+    }
+
+    /// The slot a binding of `kind` hands out: the field's own slot for a
+    /// float, the r component's for `:rgb` (see [`Self::rgb_slots`]).
+    pub(crate) fn binding_slot(
+        &self,
+        namespace: &str,
+        field: &str,
+        kind: BindingKind,
+    ) -> Arc<AtomicU64> {
+        match kind {
+            BindingKind::Float | BindingKind::InstanceFloat(_) => self.slot(namespace, field),
+            BindingKind::InstanceRgb(_) => {
+                self.slot_for_key(rgb_component_key(namespace, field, RGB_COMPONENTS[0]))
+            }
+        }
+    }
+
+    /// The r, g and b slots of an `:rgb` binding (kind-bindings spec §3.3).
+    pub fn rgb_slots(&self, namespace: &str, field: &str) -> [Arc<AtomicU64>; 3] {
+        RGB_COMPONENTS
+            .map(|component| self.slot_for_key(rgb_component_key(namespace, field, component)))
+    }
+
+    /// Write a bound field's value into its slot(s), creating them if
+    /// needed: returns the ref's slot ([`Self::binding_slot`]) and whether
+    /// any slot changed. A value of another shape (a stale nil) leaves them
+    /// alone.
+    pub(crate) fn write_binding(
+        &self,
+        namespace: &str,
+        field: &str,
+        kind: BindingKind,
+        value: &Value,
+    ) -> (Arc<AtomicU64>, bool) {
+        let components = binding_components(kind, value);
+        let rgb = matches!(kind, BindingKind::InstanceRgb(_));
+        let mut slots = self
+            .slots
+            .lock()
+            .expect("reactive float store lock poisoned");
+        let mut first = None;
+        let mut changed = false;
+        for component in RGB_COMPONENTS.into_iter().take(if rgb { 3 } else { 1 }) {
+            let key = if rgb {
+                rgb_component_key(namespace, field, component)
+            } else {
+                ReactiveBindingKey::field(namespace, field)
+            };
+            let slot = slots
+                .entry(key)
+                .or_insert_with(|| Arc::new(AtomicU64::new(0.0f64.to_bits())));
+            if let Some(components) = components {
+                let bits = components[component].to_bits();
+                changed |= slot.swap(bits, Ordering::Relaxed) != bits;
+            }
+            first.get_or_insert_with(|| Arc::clone(slot));
+        }
+        (first.expect("at least one slot"), changed)
+    }
+
+    /// Forget a field's slots (an instance was dropped). Refs that still
+    /// hold them keep their last value.
+    pub(crate) fn remove_field_slots(&self, namespace: &str, field: &str) {
+        let mut slots = self
+            .slots
+            .lock()
+            .expect("reactive float store lock poisoned");
+        slots.remove(&ReactiveBindingKey::field(namespace, field));
+        for component in RGB_COMPONENTS {
+            slots.remove(&rgb_component_key(namespace, field, component));
         }
     }
 
@@ -714,11 +830,7 @@ impl ReactiveRegistry {
                 self.dirty.push(dirty);
             }
         }
-        let mut widgets: Vec<u64> = self
-            .field_to_widgets
-            .get(namespace, field, None)
-            .map(|widgets| widgets.iter().copied().collect())
-            .unwrap_or_default();
+        let mut widgets: Vec<u64> = self.bound_widget_ids(namespace, field).collect();
         for index in changed_indices {
             if let Some(index_widgets) = self
                 .field_to_widgets
@@ -841,11 +953,7 @@ impl ReactiveRegistry {
             }
         }
 
-        let mut widgets: Vec<u64> = self
-            .field_to_widgets
-            .get(namespace, field, None)
-            .map(|widgets| widgets.iter().copied().collect())
-            .unwrap_or_default();
+        let mut widgets: Vec<u64> = self.bound_widget_ids(namespace, field).collect();
         if let Some(index_widgets) = self
             .field_to_widgets
             .get(namespace, field, Some(index))
@@ -860,6 +968,16 @@ impl ReactiveRegistry {
             effect_dirty: enqueue_effect_dirty,
             widget_ids: widgets,
         }
+    }
+
+    /// Widgets bound to a field's scalar binding (also `#'x.field` on an
+    /// instance, repainted after its slot was written outside [`Self::set`]).
+    pub fn bound_widget_ids(&self, namespace: &str, field: &str) -> impl Iterator<Item = u64> + '_ {
+        self.field_to_widgets
+            .get(namespace, field, None)
+            .into_iter()
+            .flatten()
+            .copied()
     }
 
     pub fn batch_begin(&mut self) {

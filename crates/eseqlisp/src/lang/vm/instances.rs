@@ -32,6 +32,17 @@
 //! A dropped instance keeps a tombstone naming its kind: reads answer the
 //! kind's defaults, writes are silent no-ops (spec §4 "stale self").
 //!
+//! Slot-backed fields (`:number :int :bool :rgb`, kind-bindings spec §3.3)
+//! can be bound with `#'x.field` ([`FIELD_REF_NATIVE`], §7.1): the binding
+//! is a `Value::ReactiveRef` over a float slot (three for `:rgb`) in the
+//! VM's binding store, under the field's `%instance/<id>` namespace (also
+//! its DAG source), with a `BindingKind::Instance*` kind naming the
+//! instance. Slots are created on the first binding, seeded from the field,
+//! and from then on every change of the field writes them and queues a
+//! repaint of the widgets bound to them
+//! ([`VM::take_pending_binding_repaints`]).
+//! Dropping an instance writes its defaults and frees its slots.
+//!
 //! A kind's `:document` fields (docs/jaki-kind-spec.md §3) read and write
 //! with the same syntax but are stored by the host, per pattern: a read calls
 //! the host native [`INSTANCE_DOC_READ_NATIVE`] and a write
@@ -42,7 +53,9 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use super::{ReactiveNode, ReactiveSource, VM, VMError, Value, clone_value_for_snapshot};
+use super::{
+    BindingKind, ReactiveNode, ReactiveSource, VM, VMError, Value, clone_value_for_snapshot,
+};
 
 /// Host-assigned instance id, stable within a project.
 pub type InstanceId = u64;
@@ -54,6 +67,10 @@ pub type InstanceLabelHook = Rc<dyn Fn(InstanceId, &Value)>;
 
 /// Reserved DAG namespace prefix for instance field sources.
 pub const INSTANCE_NAMESPACE_PREFIX: &str = "%instance/";
+
+/// The native `#'x.field` compiles to: `(__field-ref x "field")` returns a
+/// binding to the field (kind-bindings spec §7.1).
+pub const FIELD_REF_NATIVE: &str = "__field-ref";
 
 /// Host native `(__instance-doc-read id field default)` backing document
 /// field reads. It tracks its own reactive dependency.
@@ -211,6 +228,22 @@ impl FieldType {
             }
             _ => Err(format!("invalid field type; {FIELD_TYPES_HINT}")),
         }
+    }
+
+    /// The binding a field of this type on instance `id` supports: a float
+    /// slot for the numeric types, three for `:rgb`, none for value-only
+    /// types (kind-bindings spec §3.3).
+    pub fn binding_kind(&self, id: InstanceId) -> Option<BindingKind> {
+        match self {
+            Self::Number | Self::Int | Self::Bool => Some(BindingKind::InstanceFloat(id)),
+            Self::Rgb => Some(BindingKind::InstanceRgb(id)),
+            _ => None,
+        }
+    }
+
+    /// Whether `#'` can bind a field of this type.
+    pub fn is_bindable(&self) -> bool {
+        self.binding_kind(0).is_some()
     }
 
     /// Whether `value` has this type. Without `kind_of` (no store to ask) a
@@ -757,6 +790,31 @@ impl InstanceStore {
         })
     }
 
+    /// The fields of `kind` `#'` can bind, for error messages: slot-backed
+    /// `:state` fields, and `:document` fields while they are local cells.
+    fn bindable_fields(&self, kind: &str, host_documents: bool) -> String {
+        let Some(schema) = self.kinds.get(kind) else {
+            return "(none)".to_string();
+        };
+        let documents = if host_documents {
+            &[][..]
+        } else {
+            &schema.document[..]
+        };
+        let names: Vec<&str> = schema
+            .fields
+            .iter()
+            .chain(documents)
+            .filter(|field| field.ty.is_bindable())
+            .map(|field| field.name.as_str())
+            .collect();
+        if names.is_empty() {
+            "(none)".to_string()
+        } else {
+            names.join(", ")
+        }
+    }
+
     /// Cells for `fields` from an instance's cells under `previous`: a value
     /// survives by name while the new type still admits it; anything else
     /// starts at its default.
@@ -828,6 +886,7 @@ impl VM {
                     let value = self.instances.value(id, &schema.kind, FieldSlot::State(index));
                     self.publish_instance_field(id, &field.name, value);
                 }
+                self.sync_bound_slots(Some(id));
             }
         }
         Ok(())
@@ -954,6 +1013,18 @@ impl VM {
         };
         self.instances.dropped.insert(id, record.kind);
         self.republish_instance_sources(id);
+        // Held bindings read the stale defaults; the store forgets the slots
+        // (a revived id binds fresh ones).
+        self.sync_bound_slots(Some(id));
+        let namespace = instance_namespace(id);
+        let reactive_float_slots = &self.reactive_float_slots;
+        self.bound_instance_fields.retain(|(bound_id, field), _| {
+            let keep = *bound_id != id;
+            if !keep {
+                reactive_float_slots.remove_field_slots(&namespace, field);
+            }
+            keep
+        });
         true
     }
 
@@ -1194,12 +1265,148 @@ impl VM {
     }
 
     /// Advance one field's source (if anything ever read it) and dirty only
-    /// its readers. Unread fields allocate nothing.
+    /// its readers, and write its binding slot if it has one. Unread,
+    /// unbound fields allocate nothing.
     fn publish_instance_field(&mut self, id: InstanceId, field: &str, value: Value) {
+        self.write_bound_slot(id, field, &value);
         let namespace = instance_namespace(id);
         if let Some(source_id) = self.dag.find_namespace_field_source_node(&namespace, field) {
             self.mark_source_dependents_dirty(source_id, value);
         }
+    }
+
+    /// Write a bound field's slot(s); queue a repaint of its widgets when
+    /// that changed them.
+    fn write_bound_slot(&mut self, id: InstanceId, field: &str, value: &Value) {
+        if self.bound_instance_fields.is_empty() {
+            return;
+        }
+        let key = (id, field.to_string());
+        let Some(&kind) = self.bound_instance_fields.get(&key) else {
+            return;
+        };
+        let namespace = instance_namespace(id);
+        let (_, changed) = self
+            .reactive_float_slots
+            .write_binding(&namespace, field, kind, value);
+        if changed {
+            self.pending_binding_repaints.insert(key);
+        }
+    }
+
+    /// Rewrite the bound slots of instance `id` (every instance for `None`)
+    /// from the store, after a kind re-registration, a drop or a rollback
+    /// changed what its fields answer. A field whose new type is no longer
+    /// slot-backed loses its slot.
+    pub(super) fn sync_bound_slots(&mut self, id: Option<InstanceId>) {
+        let keys: Vec<(InstanceId, String)> = self
+            .bound_instance_fields
+            .keys()
+            .filter(|(bound_id, _)| id.is_none_or(|id| id == *bound_id))
+            .cloned()
+            .collect();
+        for key in keys {
+            let (id, field) = &key;
+            let resolved = self.instances.resolve_declared(*id, field).ok().and_then(
+                |(kind, slot, declared)| {
+                    let binding = declared?.ty.binding_kind(*id)?;
+                    Some((self.instances.value(*id, kind, slot), binding))
+                },
+            );
+            match resolved {
+                Some((value, binding)) => {
+                    self.bound_instance_fields.insert(key.clone(), binding);
+                    self.write_bound_slot(*id, field, &value);
+                }
+                None => {
+                    self.reactive_float_slots
+                        .remove_field_slots(&instance_namespace(*id), field);
+                    self.bound_instance_fields.remove(&key);
+                }
+            }
+        }
+    }
+
+    /// Whether a bound slot changed since the last
+    /// [`Self::take_pending_binding_repaints`].
+    pub fn has_pending_binding_repaints(&self) -> bool {
+        !self.pending_binding_repaints.is_empty()
+    }
+
+    /// `(namespace, field)` of every bound slot that changed since the last
+    /// call: the host repaints the widgets bound to them (no re-render).
+    pub fn take_pending_binding_repaints(&mut self) -> Vec<(String, String)> {
+        self.pending_binding_repaints
+            .drain()
+            .map(|(id, field)| (instance_namespace(id), field))
+            .collect()
+    }
+
+    /// `#'x.field` (kind-bindings spec §7.1): a binding to a slot-backed
+    /// field of instance `id`. An unknown field or a type `#'` cannot bind
+    /// is an error naming the kind, the field and the bindable fields.
+    pub(super) fn instance_field_ref(
+        &mut self,
+        id: InstanceId,
+        field: &str,
+    ) -> Result<Value, VMError> {
+        let host_documents = self.instance_doc_native(INSTANCE_DOC_READ_NATIVE).is_some();
+        let (kind, slot, declared) = match self.instances.resolve_declared(id, field) {
+            Ok(resolved) => resolved,
+            Err(InstanceError::UnknownField { kind, field, .. }) => {
+                let bindable = self.instances.bindable_fields(&kind, host_documents);
+                return Err(VMError::Instance(format!(
+                    "kind '{kind}' has no field '{field}'; bindable fields: {bindable}"
+                )));
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let unbindable = |what: String| {
+            VMError::Instance(format!(
+                "#': field '{field}' of kind '{kind}' {what}; bindable fields: {}",
+                self.instances.bindable_fields(kind, host_documents)
+            ))
+        };
+        let Some(declared) = declared else {
+            return Err(unbindable("is a built-in field".to_string()));
+        };
+        let Some(binding) = declared.ty.binding_kind(id) else {
+            return Err(unbindable(format!(
+                "is {}, which is not bindable",
+                declared.ty
+            )));
+        };
+        if matches!(slot, FieldSlot::Document(_)) && host_documents {
+            return Err(unbindable("is a host-stored :document field".to_string()));
+        }
+        let namespace = instance_namespace(id);
+        if !self.instances.live.contains_key(&id) {
+            // A stale instance: a detached slot holding the default.
+            let value = self.instances.value(id, kind, slot);
+            return Ok(crate::reactive::detached_binding_ref(
+                namespace, field, binding, &value,
+            ));
+        }
+        let key = (id, field.to_string());
+        let slot = if self.bound_instance_fields.contains_key(&key) {
+            // Already bound: every change of the field keeps the slot current.
+            self.reactive_float_slots
+                .binding_slot(&namespace, field, binding)
+        } else {
+            let value = self.instances.value(id, kind, slot);
+            self.bound_instance_fields.insert(key, binding);
+            let (slot, _) = self
+                .reactive_float_slots
+                .write_binding(&namespace, field, binding, &value);
+            slot
+        };
+        Ok(Value::ReactiveRef {
+            namespace,
+            field: field.to_string(),
+            index: None,
+            kind: binding,
+            slot,
+        })
     }
 
     /// Re-publish every retained source of an instance from the store (after
@@ -1219,6 +1426,10 @@ impl VM {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "field_binding_tests.rs"]
+mod field_binding_tests;
 
 #[cfg(test)]
 mod tests {

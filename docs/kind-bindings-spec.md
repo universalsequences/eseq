@@ -1,6 +1,6 @@
 # Kind bindings
 
-Status: spec rev 3, 2026-10-04. Stage 1 built (§3.1, §3.3 notes). Bead: epic `eseq-0l17` (`bd list --label kind-bindings`).
+Status: spec rev 3, 2026-10-04. Stages 1–2 built (§3.1, §3.3, §7.1, §8 notes). Bead: epic `eseq-0l17` (`bd list --label kind-bindings`).
 Rev 3 resolves the open questions (§12 Decisions). Rev 2 dropped the separate `defrecord` form of rev 1: host state and view state
 are declared with `def-kind`, which gains keyed and singleton kinds, a `:host`
 field group and typed fields.
@@ -331,6 +331,44 @@ this.)
   Paths through a variable are checked when the ref is built, since the
   instance's kind is only known then.
 
+Built (stage 2), decisions the above left open:
+
+- The reader form is `(function path)` (`parser::FUNCTION_FORM`); `function`
+  was free (no native, no content use), so it is a special form now, and
+  `__field-ref` is the native it compiles to. Only `#` immediately followed
+  by `'` is the prefix; `#` elsewhere is still a symbol character.
+- Every path is checked when the ref is built, singletons included (no
+  compile-time schema check yet): the singleton's field types are only known
+  once its `def-kind` has evaluated.
+- `#'NS.field` on a reactive namespace (`#'SEQ.playing`) compiles to the
+  legacy ref `(bind "SEQ" "playing")`, as a migration aid; the compiler
+  knows the reactive namespaces statically. `#'SEQ.a.b` is a compile error.
+- Errors: `kind 'm:k' has no field 'x'; bindable fields: a, b` and
+  `#': field 'name' of kind 'm:k' is :string, which is not bindable;
+  bindable fields: …` (also for built-in fields). A non-instance head (a
+  dict, nil, a string) is an error too.
+- An instance ref's kind names its instance: `BindingKind::InstanceFloat(id)`
+  (`:number :int :bool`) or `BindingKind::InstanceRgb(id)`; legacy refs are
+  `BindingKind::Float`. The `ReactiveRef` shape is otherwise unchanged, and
+  the namespace is the field's `%instance/<id>` DAG source.
+- `:rgb`: the ref's `slot` is the r component, and the three component slots
+  are keyed as elements 0..3 of the field (`ReactiveBindingStore::rgb_slots`).
+  Read as a value it is `(rgb r g b)`. Widget consumers come in stage 5; a
+  built-in float prop given one reads r.
+- Slots are created by the first `#'` on a field, seeded from its value, and
+  then written by every change of the field (Lisp `set!`, host
+  `set_instance_field`, kind re-registration, rollback); a write that changes
+  a slot queues a repaint of the widgets bound to it
+  (`VM::take_pending_binding_repaints`; the runtime flushes it lazily when
+  the dirty widget ids are read), never a re-render. The bookkeeping (bound
+  fields, pending repaints) lives on the VM beside the slots, outside eval
+  snapshots. Dropping an instance writes the defaults into its slots (held
+  refs read the stale default) and removes them from the store. A stale
+  instance's `#'` gets a detached slot.
+- `:document` fields bind only while they are local cells; with the host's
+  document natives (`__instance-doc-read`) they are an error until the host
+  publishes their slots (stage 4).
+
 ### 7.2 Built-in widget props
 
 Unchanged. The ~40 built-in widgets (`label :active`, `toggle :value`,
@@ -386,6 +424,36 @@ Read points:
 Ref-aware registration is an explicit flag on `register_native*`, so a native
 author opts in and the default is safe. Natives reached through
 `register_borrowing_native`'s by-name fast path take the same flag.
+
+Built (stage 2):
+
+- A ref reads itself through `VM::read_binding_ref`, which `reactive-value`
+  also uses: an instance ref reads like `t.x` (typed, so a `:bool` binding is
+  `true`/`false` and `:rgb` is `(rgb r g b)`) and records that field's
+  dependency; a legacy ref reads its float slot and records the
+  `(namespace, field)` dependency, as `reactive-value` always did.
+- Read points: `JumpIfFalse` (so `if`/`and`/`or`/`when`), `Eq`, `Lt`/`Gt`/
+  `Lte`/`Gte`, `Add`/`Sub`/`Mul`/`Div`/`Min`/`Max` (only on the non-number
+  path), the target of `GetField` (a ref held in a local, then `.field`),
+  the index of `LoadReactiveNth`, `filter`'s predicate result, and the
+  native call boundary: the opcode call (owned and borrowing fast path) and
+  `VM::invoke` (`map`, callbacks). Closures, `HostHandle`s and override
+  dispatch pass refs through; the boundary is the native's.
+- Ref-aware: `VM::register_ref_aware_native_with_vm` or
+  `VM::mark_natives_ref_aware` (`Runtime::mark_natives_ref_aware` for natives
+  registered through the runtime's wrappers); re-registering a native clears
+  the flag. Marked: every built-in widget constructor, `defwidget`-generated
+  and material slider constructors, `~slider`/`~knob`/`~toggle`/`~scope`/
+  `~lane` and the inline target binder, `dict`, `ui/style`, `list`, `merge`,
+  `cons`, `append`, `set-nth`, `bind`, `bind-seq`, `bind-nth`,
+  `bind-seq-nth`, `bind-view-buffer`, `reactive-value`, `__field-ref`.
+  Accessors (`get`, `nth`, `first`) are not: the boundary only looks at
+  top-level arguments, so a ref inside a collection survives any native.
+- `str` is not ref-aware (the list above had it print `<bind:…>`): used as a
+  value a binding reads itself, so `(str "Vol " #'t.vol)` formats the
+  value, as `fmt` does. The raw ref prints as `<bind:namespace.field>` only
+  where the printer sees it without the call boundary (REPL echo,
+  `source`).
 
 ## 9. Host side
 

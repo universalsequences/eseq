@@ -461,7 +461,7 @@ fn top_level_item_byte_spans(text: &str) -> Option<Vec<(usize, usize)>> {
 
 fn token_expression_end(tokens: &[crate::parser::SpannedToken], start: usize) -> Option<usize> {
     match tokens.get(start)?.token {
-        Token::Quote | Token::Backtick | Token::Comma | Token::CommaAt => {
+        Token::Quote | Token::Backtick | Token::Comma | Token::CommaAt | Token::HashQuote => {
             token_expression_end(tokens, start + 1)
         }
         Token::LeftParen => {

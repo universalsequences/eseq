@@ -18,9 +18,9 @@ use std::time::{Duration, Instant};
 mod instances;
 mod view_buffers;
 pub use instances::{
-    DEF_SINGLETON_KIND_NATIVE, FieldType, INSTANCE_HOST_FIELDS, INSTANCE_NAMESPACE_PREFIX,
-    InstanceError, InstanceHostField, InstanceId, InstanceKindSchema, InstanceLabelHook,
-    KindField, SCRATCH_KIND_PACKAGE, kind_id, kind_name_of,
+    DEF_SINGLETON_KIND_NATIVE, FIELD_REF_NATIVE, FieldType, INSTANCE_HOST_FIELDS,
+    INSTANCE_NAMESPACE_PREFIX, InstanceError, InstanceHostField, InstanceId, InstanceKindSchema,
+    InstanceLabelHook, KindField, SCRATCH_KIND_PACKAGE, kind_id, kind_name_of,
 };
 pub(crate) use instances::{FIELD_TYPES_HINT, nil_default_message, state_entry_shape_message};
 pub use view_buffers::BoundView;
@@ -81,6 +81,13 @@ pub struct NativeFunction {
     /// cells in place: the owned `callable` path deep-clones every argument
     /// first, so `(get event :off)` would copy the whole map to read a key.
     borrowed: Option<BorrowedNativeFn>,
+    /// Receives binding refs (`Value::ReactiveRef`) as they are. Every other
+    /// native gets each top-level ref argument replaced by the value it
+    /// reads (kind-bindings spec §8): the default is the safe one, and a
+    /// native that stores or forwards bindings (widget constructors, `list`,
+    /// `dict`, …) opts in with [`VM::register_ref_aware_native_with_vm`] or
+    /// [`VM::mark_natives_ref_aware`].
+    ref_aware: bool,
 }
 
 /// A pure native over borrowed arguments; see [`NativeFunction::borrowed`].
@@ -90,7 +97,13 @@ impl NativeFunction {
     /// An anonymous native callable, for host code that hands a callback to
     /// a widget prop without registering a global.
     pub fn new(name: impl Into<String>, f: impl Fn(Vec<Value>, &mut VM) -> Value + 'static) -> Self {
-        Self { name: name.into(), callable: Rc::new(f), expansion_safe: false, borrowed: None }
+        Self {
+            name: name.into(),
+            callable: Rc::new(f),
+            expansion_safe: false,
+            borrowed: None,
+            ref_aware: false,
+        }
     }
 }
 pub type GlobalStoreHook = Rc<dyn Fn(&str, &Value)>;
@@ -237,7 +250,27 @@ impl ReactiveBindingKey {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BindingKind {
+    /// A float slot of a host reactive namespace (`bind`, `bind-seq`,
+    /// `bind-nth`). Read as a value it is the slot's number.
     Float,
+    /// A `:number`, `:int` or `:bool` field of an instance (`#'x.field`,
+    /// kind-bindings spec §7.1): one float slot. Read as a value it is the
+    /// field's value.
+    InstanceFloat(InstanceId),
+    /// An `:rgb` field of an instance (kind-bindings spec §3.3): three float
+    /// slots, r g b. The ref's `slot` is r; all three come from
+    /// `ReactiveBindingStore::rgb_slots`. Read as a value it is `(rgb r g b)`.
+    InstanceRgb(InstanceId),
+}
+
+impl BindingKind {
+    /// The instance whose field this binds, for an instance field binding.
+    pub fn instance(self) -> Option<InstanceId> {
+        match self {
+            Self::Float => None,
+            Self::InstanceFloat(id) | Self::InstanceRgb(id) => Some(id),
+        }
+    }
 }
 
 pub enum Value {
@@ -2517,6 +2550,13 @@ pub struct VM {
     /// cost one extra scan, never return a wrong slot.
     reactive_namespace_indices: RefCell<HashMap<String, usize>>,
     pub(crate) reactive_float_slots: crate::reactive::ReactiveBindingStore,
+    /// Instance fields with binding slots (`#'x.field`, kind-bindings spec
+    /// §7.1) and their binding kind. Like the slots this is not eval state:
+    /// a rollback keeps it and re-syncs the slots.
+    bound_instance_fields: HashMap<(InstanceId, String), BindingKind>,
+    /// Bound instance fields whose slots changed since the host last asked
+    /// ([`Self::take_pending_binding_repaints`]).
+    pending_binding_repaints: HashSet<(InstanceId, String)>,
     pending_reactive_sets: Vec<(String, String, Value)>,
     pub derived_bindings: HashMap<String, NodeId>,
     pub state_bindings: HashMap<String, NodeId>,
@@ -2760,11 +2800,7 @@ pub fn register_core_natives(vm: &mut VM) {
         else {
             return Value::Nil;
         };
-        vm.record_reactive_read(namespace, field);
-        if let Some(ctx_id) = vm.tracking_stack.last().copied() {
-            let source_id = vm.get_or_create_source_node(namespace, field);
-            vm.dag.add_edge(source_id, ctx_id);
-        }
+        vm.track_source_read(namespace, field);
         vm.current_reactive_value(namespace, field)
     });
 
@@ -2793,27 +2829,41 @@ pub fn register_core_natives(vm: &mut VM) {
         reactive_float_ref(&vm.reactive_float_slots, "SEQ", field)
     });
 
-    vm.register_native_with_vm("reactive-value", |args, vm| {
+    // (reactive-value ref) → what the ref reads now, recording a dependency
+    // (the explicit form of what any value position does, spec §8).
+    vm.register_ref_aware_native_with_vm("reactive-value", |args, vm| {
         let Some(value) = args.first() else {
             return Value::Nil;
         };
-        match value {
-            Value::ReactiveRef {
-                kind: BindingKind::Float,
-                namespace,
-                field,
-                slot,
-                ..
-            } => {
-                vm.record_reactive_read(namespace, field);
-                if let Some(ctx_id) = vm.tracking_stack.last().copied() {
-                    let source_id = vm.get_or_create_source_node(namespace, field);
-                    vm.dag.add_edge(source_id, ctx_id);
-                }
-                Value::Number(crate::reactive::read_float_slot(slot))
-            }
-            other => other.clone(),
+        if !matches!(value, Value::ReactiveRef { .. }) {
+            return value.clone();
         }
+        vm.read_binding_ref(value).unwrap_or_else(|error| {
+            vm.fail_native_call(error);
+            Value::Nil
+        })
+    });
+
+    // `#'h.f` compiles to `(__field-ref h "f")` (kind-bindings spec §7.1):
+    // a binding to field f of instance h. (`#'SEQ.playing` on a reactive
+    // namespace compiles to `(bind "SEQ" "playing")` instead.)
+    vm.register_ref_aware_native_with_vm(FIELD_REF_NATIVE, |args, vm| {
+        let result = match (args.first(), args.get(1)) {
+            (Some(Value::Instance(id)), Some(Value::String(field))) => {
+                vm.instance_field_ref(*id, field)
+            }
+            (Some(other), Some(Value::String(field))) => Err(VMError::Instance(format!(
+                "#' binds a field of an instance; got {} for .{field}",
+                format_lisp_value(other)
+            ))),
+            _ => Err(VMError::Instance(
+                "#' takes a field path like t.volume".to_string(),
+            )),
+        };
+        result.unwrap_or_else(|error| {
+            vm.fail_native_call(error);
+            Value::Nil
+        })
     });
 
     vm.register_native_with_vm("bind-nth", |args, vm| {
@@ -3083,6 +3133,14 @@ pub fn register_core_natives(vm: &mut VM) {
                     Some(Value::Nil)
                 })
                 .unwrap_or(Value::Nil);
+            let keep = if matches!(keep, Value::ReactiveRef { .. }) {
+                vm.read_binding_ref(&keep).unwrap_or_else(|error| {
+                    log_native_callback_error(vm, "filter", idx, &error);
+                    Value::Nil
+                })
+            } else {
+                keep
+            };
             if !is_falsey(&keep) {
                 out.push(Rc::new(RefCell::new(item_value)));
             }
@@ -3825,6 +3883,26 @@ pub fn register_core_natives(vm: &mut VM) {
         "append", "list", "empty?", "set-nth", "map", "filter", "reduce",
         "zip", "nth", "reverse", "chunks", "range", "not", "str", "substring",
         "str-contains?", "gensym", "source", "fmt", "number?", "string?",
+    ]);
+
+    // Natives that store or forward binding refs take them as they are
+    // (kind-bindings spec §8). Every other native (`str` included) receives
+    // a top-level ref argument as the value it reads. Accessors (`get`,
+    // `nth`, `first`, …) need no flag: a ref inside a collection is never
+    // touched by the call boundary.
+    vm.mark_natives_ref_aware(&[
+        "dict",
+        "ui/style",
+        "list",
+        "merge",
+        "cons",
+        "append",
+        "set-nth",
+        "bind",
+        "bind-seq",
+        "bind-nth",
+        "bind-seq-nth",
+        "bind-view-buffer",
     ]);
 }
 
@@ -4696,6 +4774,8 @@ impl VM {
             reactive_namespaces: HashSet::new(),
             writable_reactive_namespaces: HashSet::new(),
             reactive_float_slots: crate::reactive::ReactiveBindingStore::default(),
+            bound_instance_fields: HashMap::new(),
+            pending_binding_repaints: HashSet::new(),
             pending_reactive_sets: Vec::new(),
             derived_bindings: HashMap::new(),
             state_bindings: HashMap::new(),
@@ -4767,14 +4847,7 @@ impl VM {
             let refs: Vec<&Value> = args.iter().collect();
             f(&refs)
         });
-        let Some(idx) = self.resolve_global_read_index(name) else {
-            return;
-        };
-        if let Some(cell) = self.globals.get(idx).and_then(Option::as_ref) {
-            if let Value::NativeFunction(native) = &mut *cell.borrow_mut() {
-                native.borrowed = Some(f);
-            }
-        }
+        self.update_natives(&[name], "borrowing", |native| native.borrowed = Some(f));
     }
 
     pub fn register_native_with_vm(
@@ -4793,12 +4866,7 @@ impl VM {
         if idx >= self.globals.len() {
             self.globals.resize(idx + 1, None);
         }
-        let native = Value::NativeFunction(NativeFunction {
-            name: name.to_string(),
-            callable: Rc::new(f),
-            expansion_safe: false,
-            borrowed: None,
-        });
+        let native = Value::NativeFunction(NativeFunction::new(name, f));
         // Re-registration mutates the existing cell in place instead of
         // replacing the slot Option: a converted module's healed alias slot
         // (spec §10 stage 3) shares the cell, and replacing the Option would
@@ -4809,6 +4877,41 @@ impl VM {
         match &self.globals[idx] {
             Some(cell) => *cell.borrow_mut() = native,
             None => self.globals[idx] = Some(Rc::new(RefCell::new(native))),
+        }
+    }
+
+    /// [`Self::register_native_with_vm`] for a native that takes binding refs
+    /// as they are (kind-bindings spec §8): a widget constructor binding a
+    /// prop, a collection constructor storing the ref. Any other native
+    /// receives each top-level ref argument as the value it reads.
+    pub fn register_ref_aware_native_with_vm(
+        &mut self,
+        name: &str,
+        f: impl Fn(Vec<Value>, &mut VM) -> Value + 'static,
+    ) {
+        self.register_native_with_vm(name, f);
+        self.mark_natives_ref_aware(&[name]);
+    }
+
+    /// Flag already registered natives ref-aware (see
+    /// [`Self::register_ref_aware_native_with_vm`]). Re-registering a native
+    /// clears the flag.
+    pub fn mark_natives_ref_aware(&mut self, names: &[&str]) {
+        self.update_natives(names, "ref-aware", |native| native.ref_aware = true);
+    }
+
+    /// Apply `update` to each registered native in `names`; `what` names
+    /// the flag for the assertion that every name is a registered native.
+    fn update_natives(&mut self, names: &[&str], what: &str, update: impl Fn(&mut NativeFunction)) {
+        for name in names {
+            let cell = self
+                .resolve_global_read_index(name)
+                .and_then(|idx| self.globals.get(idx))
+                .and_then(Option::as_ref);
+            match cell.map(|cell| cell.borrow_mut()).as_deref_mut() {
+                Some(Value::NativeFunction(native)) => update(native),
+                _ => debug_assert!(false, "{what} native `{name}` was not registered"),
+            }
         }
     }
 
@@ -4827,18 +4930,9 @@ impl VM {
     }
 
     fn mark_natives_expansion_safe(&mut self, names: &[&str]) {
-        for name in names {
-            let Some(idx) = self.resolve_global_read_index(name) else {
-                debug_assert!(false, "expansion-safe native `{name}` was not registered");
-                continue;
-            };
-            let Some(cell) = self.globals.get(idx).and_then(Option::as_ref) else {
-                continue;
-            };
-            if let Value::NativeFunction(native) = &mut *cell.borrow_mut() {
-                native.expansion_safe = true;
-            }
-        }
+        self.update_natives(names, "expansion-safe", |native| {
+            native.expansion_safe = true
+        });
     }
 
     fn expansion_error(&mut self, operation: &str) -> VMError {
@@ -5680,6 +5774,7 @@ impl VM {
         self.imported_at_epoch = snapshot.imported_at_epoch;
         self.import_pass_epoch = snapshot.import_pass_epoch;
         self.instances.restore_from(snapshot.instances);
+        self.sync_bound_slots(None);
         self.view_buffers = snapshot.view_buffers;
     }
 
@@ -6667,6 +6762,128 @@ impl VM {
         }
     }
 
+    /// Record a read of the reactive source `(namespace, field)`: the
+    /// effect/subtree read set and, while something is being tracked, a DAG
+    /// edge from the source to it.
+    fn track_source_read(&mut self, namespace: &str, field: &str) {
+        self.record_reactive_read(namespace, field);
+        if let Some(ctx_id) = self.tracking_stack.last().copied() {
+            let source_id = self.get_or_create_source_node(namespace, field);
+            self.dag.add_edge(source_id, ctx_id);
+        }
+    }
+
+    /// A binding ref used as a value reads itself (kind-bindings spec §8):
+    /// the value it binds plus a dependency of the running effect on its
+    /// source, exactly what the matching by-value read records. An instance
+    /// field ref (`#'t.x`) reads like `t.x` (typed: `true`, `(rgb r g b)`);
+    /// a legacy ref (`bind`, `bind-seq`) reads its float slot, as
+    /// `reactive-value` always has. Anything else is returned as is.
+    pub(crate) fn read_binding_ref(&mut self, value: &Value) -> Result<Value, VMError> {
+        let Value::ReactiveRef {
+            namespace,
+            field,
+            kind,
+            slot,
+            ..
+        } = value
+        else {
+            return Ok(value.clone());
+        };
+        if let Some(id) = kind.instance() {
+            return self.read_instance_field_tracked(id, field);
+        }
+        self.track_source_read(namespace, field);
+        Ok(Value::Number(crate::reactive::read_float_slot(slot)))
+    }
+
+    /// The native call boundary of §8: replace each top-level ref argument
+    /// with the value it reads, unless the native is ref-aware. Only a
+    /// discriminant check per argument when there are no refs.
+    fn read_native_ref_args(&mut self, ref_aware: bool, args: &mut [Value]) -> Result<(), VMError> {
+        if ref_aware {
+            return Ok(());
+        }
+        for arg in args.iter_mut() {
+            if matches!(arg, Value::ReactiveRef { .. }) {
+                *arg = self.read_binding_ref(arg)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// [`Self::read_native_ref_args`] over stack cells (the borrowing
+    /// native fast path). A ref cell is replaced, never written: it may be
+    /// shared with a local.
+    fn read_native_ref_cells(
+        &mut self,
+        ref_aware: bool,
+        cells: &mut [Rc<RefCell<Value>>],
+    ) -> Result<(), VMError> {
+        if ref_aware {
+            return Ok(());
+        }
+        for cell in cells.iter_mut() {
+            if matches!(&*cell.borrow(), Value::ReactiveRef { .. }) {
+                *cell = self.binding_ref_operand(Rc::clone(cell))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// What an operand cell reads as when it holds a ref (§8); `None` when
+    /// it holds anything else, to be read in place.
+    fn read_ref_operand(&mut self, cell: &Rc<RefCell<Value>>) -> Result<Option<Value>, VMError> {
+        let value = match &*cell.borrow() {
+            value @ Value::ReactiveRef { .. } => value.clone(),
+            _ => return Ok(None),
+        };
+        self.read_binding_ref(&value).map(Some)
+    }
+
+    /// An opcode operand: a ref cell becomes a cell holding what it reads.
+    fn binding_ref_operand(
+        &mut self,
+        cell: Rc<RefCell<Value>>,
+    ) -> Result<Rc<RefCell<Value>>, VMError> {
+        Ok(match self.read_ref_operand(&cell)? {
+            Some(value) => Rc::new(RefCell::new(value)),
+            None => cell,
+        })
+    }
+
+    /// A numeric opcode operand; a ref reads itself first (slow path only).
+    #[inline]
+    fn number_operand(&mut self, cell: &Rc<RefCell<Value>>, op: &str) -> Result<f64, VMError> {
+        if let Value::Number(number) = &*cell.borrow() {
+            return Ok(*number);
+        }
+        if let Some(Value::Number(number)) = self.read_ref_operand(cell)? {
+            return Ok(number);
+        }
+        self.last_reactive_error_detail = Some(format!("{op} operand={:?}", cell.borrow()));
+        Err(VMError::IncorrectType)
+    }
+
+    /// Pop `arity` numeric operands and fold them into `init` (the
+    /// order-free `Add`/`Mul`/`Min`/`Max`).
+    fn fold_popped_numbers(
+        &mut self,
+        stack: &mut Vec<Rc<RefCell<Value>>>,
+        arity: usize,
+        op: &str,
+        init: f64,
+        fold: impl Fn(f64, f64) -> f64,
+    ) -> Result<f64, VMError> {
+        let mut acc = init;
+        for _ in 0..arity {
+            if let Some(cell) = stack.pop() {
+                acc = fold(acc, self.number_operand(&cell, op)?);
+            }
+        }
+        Ok(acc)
+    }
+
     /// Add an edge from a host-owned reactive source to the effect currently
     /// rendering. A plain, non-rendering native call has no tracking context
     /// and therefore resolves immediately without retaining a dependency.
@@ -7169,6 +7386,8 @@ impl VM {
             }
             Value::NativeFunction(native) => {
                 self.check_native_expansion_safety(&native)?;
+                let mut args = args;
+                self.read_native_ref_args(native.ref_aware, &mut args)?;
                 let result = (native.callable)(args, self);
                 if let Some(error) = self.pending_native_error.take() {
                     return Err(error);
@@ -8060,19 +8279,8 @@ impl VM {
                     if stack.len() < arity {
                         return Err(VMError::StackUnderflow);
                     }
-                    let mut sum: f64 = 0.0;
-                    for _ in 0..arity {
-                        if let Some(val) = stack.pop() {
-                            match &*val.borrow() {
-                                Value::Number(val) => sum += val,
-                                other => {
-                                    self.last_reactive_error_detail =
-                                        Some(format!("Add operand={other:?}"));
-                                    return Err(VMError::IncorrectType);
-                                }
-                            }
-                        }
-                    }
+                    let sum =
+                        self.fold_popped_numbers(&mut stack, arity, "Add", 0.0, |a, b| a + b)?;
                     stack.push(Rc::new(RefCell::new(Value::Number(sum))));
                     frames.last_mut().unwrap().pc += 1;
                 }
@@ -8085,14 +8293,11 @@ impl VM {
                     let base = stack.len() - arity;
                     let mut diff = 0.0;
                     for (i, cell) in stack[base..].iter().enumerate() {
-                        match &*cell.borrow() {
-                            Value::Number(val) if i == 0 => diff = *val,
-                            Value::Number(val) => diff -= val,
-                            other => {
-                                self.last_reactive_error_detail =
-                                    Some(format!("Sub operand={other:?}"));
-                                return Err(VMError::IncorrectType);
-                            }
+                        let val = self.number_operand(cell, "Sub")?;
+                        if i == 0 {
+                            diff = val;
+                        } else {
+                            diff -= val;
                         }
                     }
                     stack.truncate(base);
@@ -8103,19 +8308,8 @@ impl VM {
                     if stack.len() < arity {
                         return Err(VMError::StackUnderflow);
                     }
-                    let mut product: f64 = 1.0;
-                    for _ in 0..arity {
-                        if let Some(val) = stack.pop() {
-                            match &*val.borrow() {
-                                Value::Number(val) => product *= val,
-                                other => {
-                                    self.last_reactive_error_detail =
-                                        Some(format!("Mul operand={other:?}"));
-                                    return Err(VMError::IncorrectType);
-                                }
-                            }
-                        }
-                    }
+                    let product =
+                        self.fold_popped_numbers(&mut stack, arity, "Mul", 1.0, |a, b| a * b)?;
                     stack.push(Rc::new(RefCell::new(Value::Number(product))));
                     frames.last_mut().unwrap().pc += 1;
                 }
@@ -8126,14 +8320,11 @@ impl VM {
                     let base = stack.len() - arity;
                     let mut quotient = 0.0;
                     for (i, cell) in stack[base..].iter().enumerate() {
-                        match &*cell.borrow() {
-                            Value::Number(val) if i == 0 => quotient = *val,
-                            Value::Number(val) => quotient /= val,
-                            other => {
-                                self.last_reactive_error_detail =
-                                    Some(format!("Div operand={other:?}"));
-                                return Err(VMError::IncorrectType);
-                            }
+                        let val = self.number_operand(cell, "Div")?;
+                        if i == 0 {
+                            quotient = val;
+                        } else {
+                            quotient /= val;
                         }
                     }
                     if arity == 1 {
@@ -8147,19 +8338,13 @@ impl VM {
                     if stack.len() < arity || arity == 0 {
                         return Err(VMError::StackUnderflow);
                     }
-                    let mut current = f64::INFINITY;
-                    for _ in 0..arity {
-                        if let Some(val) = stack.pop() {
-                            match &*val.borrow() {
-                                Value::Number(val) => current = current.min(*val),
-                                other => {
-                                    self.last_reactive_error_detail =
-                                        Some(format!("Min operand={other:?}"));
-                                    return Err(VMError::IncorrectType);
-                                }
-                            }
-                        }
-                    }
+                    let current = self.fold_popped_numbers(
+                        &mut stack,
+                        arity,
+                        "Min",
+                        f64::INFINITY,
+                        f64::min,
+                    )?;
                     stack.push(Rc::new(RefCell::new(Value::Number(current))));
                     frames.last_mut().unwrap().pc += 1;
                 }
@@ -8167,19 +8352,13 @@ impl VM {
                     if stack.len() < arity || arity == 0 {
                         return Err(VMError::StackUnderflow);
                     }
-                    let mut current = f64::NEG_INFINITY;
-                    for _ in 0..arity {
-                        if let Some(val) = stack.pop() {
-                            match &*val.borrow() {
-                                Value::Number(val) => current = current.max(*val),
-                                other => {
-                                    self.last_reactive_error_detail =
-                                        Some(format!("Max operand={other:?}"));
-                                    return Err(VMError::IncorrectType);
-                                }
-                            }
-                        }
-                    }
+                    let current = self.fold_popped_numbers(
+                        &mut stack,
+                        arity,
+                        "Max",
+                        f64::NEG_INFINITY,
+                        f64::max,
+                    )?;
                     stack.push(Rc::new(RefCell::new(Value::Number(current))));
                     frames.last_mut().unwrap().pc += 1;
                 }
@@ -8203,7 +8382,12 @@ impl VM {
                     }
                     let mut result = false;
                     if let (Some(a), Some(b)) = (stack.pop(), stack.pop()) {
-                        result = *a.borrow() == *b.borrow();
+                        result = match (self.read_ref_operand(&a)?, self.read_ref_operand(&b)?) {
+                            (None, None) => *a.borrow() == *b.borrow(),
+                            (Some(a), None) => a == *b.borrow(),
+                            (None, Some(b)) => *a.borrow() == b,
+                            (Some(a), Some(b)) => a == b,
+                        };
                     }
                     stack.push(Rc::new(RefCell::new(Value::Bool(result))));
                     frames.last_mut().unwrap().pc += 1;
@@ -8213,6 +8397,7 @@ impl VM {
                         return Err(VMError::StackUnderflow);
                     }
                     if let (Some(a), Some(b)) = (stack.pop(), stack.pop()) {
+                        let (a, b) = (self.binding_ref_operand(a)?, self.binding_ref_operand(b)?);
                         match (&*a.borrow(), &*b.borrow()) {
                             (Value::Number(a), Value::Number(b)) => {
                                 let result = match op {
@@ -8273,10 +8458,14 @@ impl VM {
                     if stack.is_empty() {
                         return Err(VMError::StackUnderflow);
                     }
-                    if let Some(result) = stack.pop()
-                        && let Some(frame) = frames.last_mut()
-                    {
-                        let is_false = is_falsey(&result.borrow());
+                    if let Some(result) = stack.pop() {
+                        let is_false = match self.read_ref_operand(&result)? {
+                            Some(value) => is_falsey(&value),
+                            None => is_falsey(&result.borrow()),
+                        };
+                        let Some(frame) = frames.last_mut() else {
+                            continue;
+                        };
                         if is_false {
                             frame.pc += pc;
                         } else {
@@ -8672,6 +8861,7 @@ impl VM {
                     let Some(index_value) = stack.pop() else {
                         return Err(VMError::StackUnderflow);
                     };
+                    let index_value = self.binding_ref_operand(index_value)?;
                     self.record_reactive_read(&namespace, &field);
                     let Some(global_idx) = self.reactive_namespace_global_index(&namespace)
                     else {
@@ -8820,16 +9010,19 @@ impl VM {
                             Value::NativeFunction(NativeFunction {
                                 borrowed: Some(f),
                                 expansion_safe,
+                                ref_aware,
                                 ..
                             }) if *expansion_safe || self.active_expander.is_none() => {
                                 // A pure core native: run it on the argument
                                 // cells where they sit (no clones), then pop them.
                                 let f = *f;
+                                let ref_aware = *ref_aware;
                                 drop(borrowed);
                                 if stack.len() < arity {
                                     return Err(VMError::StackUnderflow);
                                 }
                                 let base = stack.len() - arity;
+                                self.read_native_ref_cells(ref_aware, &mut stack[base..])?;
                                 let result = call_borrowed_native(f, &stack[base..]);
                                 stack.truncate(base);
                                 stack.push(Rc::new(RefCell::new(result)));
@@ -8846,6 +9039,7 @@ impl VM {
                                     .map(|v| v.borrow().clone())
                                     .collect();
                                 args.reverse();
+                                self.read_native_ref_args(native.ref_aware, &mut args)?;
                                 let result = (native.callable)(args, self);
                                 if let Some(error) = self.pending_native_error.take() {
                                     return Err(error);
@@ -8929,6 +9123,8 @@ impl VM {
                     let key = self.chunks[self.current_chunk].strings[idx].clone();
                     match stack.pop() {
                         Some(val) => {
+                            // A ref target (`#'k.menu` held in a local) reads itself.
+                            let val = self.binding_ref_operand(val)?;
                             let instance = match &*val.borrow() {
                                 Value::Instance(id) => Some(*id),
                                 _ => None,

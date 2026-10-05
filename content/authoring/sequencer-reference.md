@@ -76,6 +76,12 @@ In the view, `self.field` reads and `(set! self.field value)` writes (one
 undoable edit per write). `self.id` is the instance id, `self.owner` is
 `:project` or the owning rack's group id.
 
+`#'self.field` is a binding to a `:state` field of type `:number`, `:int`,
+`:bool` or `:rgb`: pass it to a bindable widget prop (`(label "x" :active
+#'self.open)`) and a write repaints that widget without re-running the view.
+Used as a value (`if`, `=`, arithmetic, `str`, most natives) a binding reads
+the field, like `self.field`: `(str "Vol " #'self.vol)` is `"Vol 0.8"`.
+
 ## The tick
 
 Natives available inside a tick:

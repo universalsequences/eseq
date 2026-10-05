@@ -1722,7 +1722,7 @@ impl Runtime {
 
                 let widget_type = name.clone();
                 let state_uniforms = compiled.state_symbols;
-                vm.register_native_with_vm(&name, move |args, vm| {
+                vm.register_ref_aware_native_with_vm(&name, move |args, vm| {
                     let mut widget = crate::widgets::build_widget(&widget_type, args);
                     vm.qualify_widget_stable_key(&mut widget);
                     if let Value::Map(map) = &mut widget {
@@ -1753,7 +1753,7 @@ impl Runtime {
             let wtype = widget_name.to_string();
             runtime
                 .vm
-                .register_native_with_vm(widget_name, move |args, vm| {
+                .register_ref_aware_native_with_vm(widget_name, move |args, vm| {
                     let mut widget = crate::widgets::build_widget(&wtype, args);
                     vm.qualify_widget_stable_key(&mut widget);
                     if let Value::Map(map) = &mut widget {
@@ -1910,6 +1910,13 @@ impl Runtime {
             },
         );
         self.invalidate_symbol_cache();
+    }
+
+    /// Flag registered natives (e.g. from [`Self::register_vm_native_with_docs`])
+    /// as taking binding refs as they are (kind-bindings spec §8); see
+    /// [`crate::vm::VM::mark_natives_ref_aware`].
+    pub fn mark_natives_ref_aware(&mut self, names: &[&str]) {
+        self.vm.mark_natives_ref_aware(names);
     }
 
     pub fn add_global_store_hook(&mut self, hook: crate::vm::GlobalStoreHook) {
@@ -3110,11 +3117,7 @@ impl Runtime {
                 widget_ids.len(),
             );
         }
-        for widget_id in widget_ids {
-            if !self.dirty_widget_ids.contains(&widget_id) {
-                self.dirty_widget_ids.push(widget_id);
-            }
-        }
+        self.mark_widgets_dirty(widget_ids);
         // Reactive bindings dirtied specific widgets, but they do not mutate
         // widget-local state such as hover, scroll, focus, or animation state.
         // Keep the global widget primitive cache generation stable so high-rate
@@ -3202,11 +3205,7 @@ impl Runtime {
         }
         let widget_ids = outcome.widget_ids;
         let widgets_dirty = !widget_ids.is_empty();
-        for widget_id in widget_ids {
-            if !self.dirty_widget_ids.contains(&widget_id) {
-                self.dirty_widget_ids.push(widget_id);
-            }
-        }
+        self.mark_widgets_dirty(widget_ids);
         ReactiveSetResult {
             changed: outcome.changed || !outcome.registered,
             effects_dirty: outcome.effect_dirty,
@@ -3553,10 +3552,29 @@ impl Runtime {
     fn flush_vm_reactive_sets(&mut self) {
         for (namespace, field, value) in self.vm.take_pending_reactive_sets() {
             let outcome = self.reactive_registry.set(&namespace, &field, value, false);
-            for widget_id in outcome.widget_ids {
-                if !self.dirty_widget_ids.contains(&widget_id) {
-                    self.dirty_widget_ids.push(widget_id);
-                }
+            self.mark_widgets_dirty(outcome.widget_ids);
+        }
+        self.flush_binding_repaints();
+    }
+
+    /// Instance field bindings (`#'x.field`): the VM already wrote the slots,
+    /// so only the bound widgets repaint. Flushed lazily, wherever the dirty
+    /// widget ids are read, so every VM entry point (Lisp `set!`, host
+    /// `set_instance_field`, `drop_instance`) is covered without its own flush.
+    fn flush_binding_repaints(&mut self) {
+        for (namespace, field) in self.vm.take_pending_binding_repaints() {
+            let widget_ids: Vec<u64> = self
+                .reactive_registry
+                .bound_widget_ids(&namespace, &field)
+                .collect();
+            self.mark_widgets_dirty(widget_ids);
+        }
+    }
+
+    fn mark_widgets_dirty(&mut self, ids: impl IntoIterator<Item = u64>) {
+        for widget_id in ids {
+            if !self.dirty_widget_ids.contains(&widget_id) {
+                self.dirty_widget_ids.push(widget_id);
             }
         }
     }
@@ -3703,6 +3721,7 @@ impl Runtime {
     }
 
     pub fn take_dirty_widget_ids(&mut self) -> Vec<u64> {
+        self.flush_binding_repaints();
         std::mem::take(&mut self.dirty_widget_ids)
     }
 
@@ -3715,15 +3734,13 @@ impl Runtime {
             self.dirty_widget_ids
                 .retain(|widget_id| !layout_contains_widget_id(previous_layout, *widget_id));
         }
-        for widget_id in replacement {
-            if !self.dirty_widget_ids.contains(&widget_id) {
-                self.dirty_widget_ids.push(widget_id);
-            }
-        }
+        self.mark_widgets_dirty(replacement);
     }
 
+    /// Also true while binding repaints wait for their lazy flush (which
+    /// [`Self::take_dirty_widget_ids`] does), even if no widget is bound.
     pub fn has_dirty_widget_ids(&self) -> bool {
-        !self.dirty_widget_ids.is_empty()
+        !self.dirty_widget_ids.is_empty() || self.vm.has_pending_binding_repaints()
     }
 
     pub fn replace_widget_bindings_from_layouts<'a>(
