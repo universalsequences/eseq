@@ -19,9 +19,9 @@ mod instances;
 mod view_buffers;
 pub use instances::{
     CREATED_BUILTIN_FIELDS, DEF_KEYED_KIND_NATIVE, FIELD_REF_NATIVE, FieldType, HostField,
-    INSTANCE_NAMESPACE_PREFIX, InstanceBuiltinField, InstanceError, InstanceId, InstanceKey,
-    InstanceKindSchema, InstanceLabelHook, KIND_KEYS_NAMESPACE_PREFIX, KindField, KindKey,
-    SCRATCH_KIND_PACKAGE, kind_id, kind_name_of,
+    HostFieldReader, INSTANCE_NAMESPACE_PREFIX, InstanceBuiltinField, InstanceError, InstanceId,
+    InstanceKey, InstanceKindSchema, InstanceLabelHook, KIND_KEYS_NAMESPACE_PREFIX, KindField,
+    KindKey, SCRATCH_KIND_PACKAGE, kind_id, kind_name_of,
 };
 pub(crate) use instances::{
     FIELD_TYPES_HINT, host_entry_shape_message, host_option_message, nil_default_message,
@@ -1218,7 +1218,7 @@ fn is_falsey(value: &Value) -> bool {
 
 /// The tagged list `(tag arg ...)`, as constructor natives like `rgb` and
 /// the SDF `vec3`/`rgba` build it.
-pub(crate) fn tagged_list(tag: &str, args: Vec<Value>) -> Value {
+pub fn tagged_list(tag: &str, args: Vec<Value>) -> Value {
     list_from_values(std::iter::once(Value::Symbol(tag.to_string())).chain(args))
 }
 
@@ -2684,6 +2684,17 @@ pub struct VM {
     /// Bound instance fields whose slots changed since the host last asked
     /// ([`Self::take_pending_binding_repaints`]).
     pending_binding_repaints: HashSet<(InstanceId, String)>,
+    /// The host's answer to a read of an unobserved `:host` field
+    /// ([`HostFieldReader`]). Host wiring, not eval state.
+    host_field_reader: Option<HostFieldReader>,
+    /// Kind names only one module may define (kind-bindings spec §3.4):
+    /// name → owning module. Host wiring, not eval state.
+    reserved_kind_names: HashMap<String, String>,
+    /// [`VM::instance_kind_schema_generation`]. Kept across rollbacks (a
+    /// rollback bumps it) so a value never names two schema sets.
+    kind_schema_generation: u64,
+    /// [`VM::instance_observer_epoch`].
+    instance_observer_epoch: u64,
     pending_reactive_sets: Vec<(String, String, Value)>,
     pub derived_bindings: HashMap<String, NodeId>,
     pub state_bindings: HashMap<String, NodeId>,
@@ -4905,6 +4916,10 @@ impl VM {
             reactive_float_slots: crate::reactive::ReactiveBindingStore::default(),
             bound_instance_fields: HashMap::new(),
             pending_binding_repaints: HashSet::new(),
+            host_field_reader: None,
+            reserved_kind_names: HashMap::new(),
+            kind_schema_generation: 0,
+            instance_observer_epoch: 0,
             pending_reactive_sets: Vec::new(),
             derived_bindings: HashMap::new(),
             state_bindings: HashMap::new(),
@@ -5909,6 +5924,7 @@ impl VM {
         self.imported_at_epoch = snapshot.imported_at_epoch;
         self.import_pass_epoch = snapshot.import_pass_epoch;
         self.instances.restore_from(snapshot.instances);
+        self.kind_schema_generation += 1;
         self.sync_bound_slots(None);
         self.view_buffers = snapshot.view_buffers;
     }

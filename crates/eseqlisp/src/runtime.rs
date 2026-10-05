@@ -2880,8 +2880,8 @@ impl Runtime {
         self.vm.live_instances()
     }
 
-    pub fn instance_kind(&self, id: crate::vm::InstanceId) -> Option<String> {
-        self.vm.instance_kind(id).map(str::to_string)
+    pub fn instance_kind(&self, id: crate::vm::InstanceId) -> Option<&str> {
+        self.vm.instance_kind(id)
     }
 
     pub fn instance_field(
@@ -2946,6 +2946,79 @@ impl Runtime {
         moves: &[(crate::vm::InstanceId, crate::vm::InstanceKey)],
     ) -> Result<(), crate::vm::InstanceError> {
         self.vm.rekey_instances(moves)
+    }
+
+    /// Whether anything observes `field` of instance `id`: a DAG reader or
+    /// a held `#'` binding (kind-bindings spec §9, D3). See
+    /// [`crate::vm::VM::host_field_observed`].
+    pub fn host_field_observed(&self, id: crate::vm::InstanceId, field: &str) -> bool {
+        self.vm.host_field_observed(id, field)
+    }
+
+    /// [`Self::host_field_observed`] for several fields at once: bit `i` is
+    /// `fields[i]` ([`crate::vm::VM::host_fields_observed`]).
+    pub fn host_fields_observed(&self, id: crate::vm::InstanceId, fields: &[&str]) -> u32 {
+        self.vm.host_fields_observed(id, fields)
+    }
+
+    /// Bumped whenever a kind schema is (re)registered or rolled back.
+    pub fn instance_kind_schema_generation(&self) -> u64 {
+        self.vm.instance_kind_schema_generation()
+    }
+
+    /// Bumped whenever an instance field may have gained an observer
+    /// ([`crate::vm::VM::instance_observer_epoch`]).
+    pub fn instance_observer_epoch(&self) -> u64 {
+        self.vm.instance_observer_epoch()
+    }
+
+    /// Whether any live child of `parent` of kind `kind` has one of
+    /// `fields` observed.
+    pub fn keyed_children_observed(
+        &self,
+        parent: crate::vm::InstanceId,
+        kind: &str,
+        fields: &[&str],
+    ) -> bool {
+        self.vm.keyed_children_observed(parent, kind, fields)
+    }
+
+    /// Install the host's answer to reads of unobserved `:host` fields
+    /// ([`crate::vm::HostFieldReader`]).
+    pub fn set_host_field_reader(&mut self, reader: Option<crate::vm::HostFieldReader>) {
+        self.vm.set_host_field_reader(reader);
+    }
+
+    /// Reserve kind names for the module that declares them
+    /// ([`crate::vm::VM::reserve_kind_names`]).
+    pub fn reserve_kind_names(&mut self, module: &str, names: &[&str]) {
+        self.vm.reserve_kind_names(module, names);
+    }
+
+    /// The one instance of a singleton kind (its kind id).
+    pub fn singleton_instance(&self, kind: &str) -> Option<crate::vm::InstanceId> {
+        self.vm.singleton_instance(kind)
+    }
+
+    /// The current key of a live keyed instance.
+    pub fn instance_key(&self, id: crate::vm::InstanceId) -> Option<&[u64]> {
+        self.vm.instance_key(id)
+    }
+
+    /// The live instance ids of a keyed kind's children under `parent`
+    /// (steps of a track), sorted.
+    pub fn keyed_children(&self, parent: crate::vm::InstanceId) -> Vec<crate::vm::InstanceId> {
+        self.vm.keyed_children(parent)
+    }
+
+    /// The live children of `parent` of kind `kind` with their keys,
+    /// unordered and without allocating.
+    pub fn keyed_children_of_kind<'s>(
+        &'s self,
+        parent: crate::vm::InstanceId,
+        kind: &'s str,
+    ) -> impl Iterator<Item = (crate::vm::InstanceId, &'s [u64])> + 's {
+        self.vm.keyed_children_of_kind(parent, kind)
     }
 
     /// [`crate::vm::format_lisp_value`], printing instances of kinds with a

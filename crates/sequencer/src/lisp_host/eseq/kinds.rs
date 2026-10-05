@@ -604,7 +604,7 @@ pub fn sync_instance_records(
 /// whether a hook ran; an instance with no record here, or a kind without
 /// `:on-create`, is a quiet no-op.
 pub fn run_instance_on_create(runtime: &mut Runtime, id: u64) -> Result<bool, String> {
-    let Some(kind) = runtime.instance_kind(id) else {
+    let Some(kind) = runtime.instance_kind(id).map(str::to_string) else {
         return Ok(false);
     };
     let Some(hook) = runtime

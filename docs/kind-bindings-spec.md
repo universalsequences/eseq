@@ -1,6 +1,6 @@
 # Kind bindings
 
-Status: spec rev 3, 2026-10-04. Stages 1–3 built (§3.1, §3.2, §3.3, §4, §7.1, §8 notes). Bead: epic `eseq-0l17` (`bd list --label kind-bindings`).
+Status: spec rev 3, 2026-10-04. Stages 1–4 built (§3.1, §3.2, §3.3, §3.4, §4, §7.1, §8, §9 notes). Bead: epic `eseq-0l17` (`bd list --label kind-bindings`).
 Rev 3 resolves the open questions (§12 Decisions). Rev 2 dropped the separate `defrecord` form of rev 1: host state and view state
 are declared with `def-kind`, which gains keyed and singleton kinds, a `:host`
 field group and typed fields.
@@ -305,7 +305,7 @@ Built (stage 1), decisions the above left open:
 
 ### 3.4 Where host kinds are declared
 
-`content/core/kinds.lisp`, the module `eseq.kinds`. It is the one page that
+`content/core/modules/kinds.lisp`, the module `eseq.kinds`. It is the one page that
 answers "what can I build a view from". A view imports what it uses:
 
 ```lisp
@@ -318,6 +318,109 @@ for them (§12 D1). The host kind names (`track`, `step`, `transport`, `scene`,
 itself against it: a field it publishes that a kind lacks, or a declared
 `:host` field it never publishes, is a hard error in debug builds and a
 warning in release.
+
+Built (stage 4):
+
+- **Load.** `content/core/modules/kinds.lisp` declares `(module
+  eseq.kinds)`. The module resolver tries `core/modules/<name>.lisp`
+  (`modules::CORE_MODULES_DIR`) last for `eseq.` names
+  (`module_relative_file_candidates`, and `@/core/modules/<name>.lisp` in
+  the rootless `module_file_candidates` fallback), so `ui/` modules shadow
+  core ones, package modules never reach `core/`, and the startup scripts
+  beside the modules (`core/init.lisp`, `themes.lisp`, `sdf-stdlib.lisp`)
+  never resolve as modules (`(import eseq.init)` finds nothing). Both roots (`ui/main.lisp` and the
+  `-noui` root `ui/noui.lisp`) `(import eseq.kinds)` without `:refer`, so the
+  kinds exist for the host to publish while no name lands in `eseq.vanilla`;
+  a view refers what it uses. An `import`'s `:refer` covers the source it
+  heads (a REPL eval needs its own). A `def-kind` with `:key ()` or
+  `:key (index)` counts as a definition of its name for `(export …)`
+  validation and hot reload (`extract_defined_symbols_from_source`, which
+  reads `:key` with the compiler's `def_kind_slots`).
+- **Exports:** `track`, `scene`, `bank` (constructors), `transport`,
+  `selection`, `project` (singletons), `tracks`, `scenes`, `banks`
+  (collections) and `launch!`. `step` and `device` are reached through
+  their track.
+- **Reserved names.** `VM::reserve_kind_names(module, names)` /
+  `Runtime::reserve_kind_names`: defining a kind with a reserved name in any
+  other module is an error (`kind name 'track' is reserved for the host
+  kinds of eseq.kinds; …`). The host reserves every kind in `PUBLISHED`
+  (`host_kind_names`: `track step device scene bank transport selection
+  project`) before evaluating the root.
+- **Schema check.** `host_kinds::PUBLISHED`
+  (`crates/sequencer/src/ui/host_kinds.rs`) lists every field the host
+  publishes as a `FieldKey` (kind id, field; the `host_kinds::f`
+  constants every push site uses), its type and its feed; `check_schema`
+  compares it with the loaded kinds in both directions (a published field
+  missing or of another type, a declared `:host` field never published, a
+  kind not declared). `create_editor_with_root` runs it after the root
+  loads: `panic!` in debug, an `eprintln!` warning in release. After
+  startup `HostKinds::sync` re-runs it whenever
+  `Runtime::instance_kind_schema_generation` moves (any `def-kind`, or a
+  rollback, e.g. a hot reload of `eseq.kinds`): a mismatch warns once per
+  distinct set and its fields are skipped (no push, the reader answers
+  `None`) until fixed; it never panics.
+- **Fields as built:**
+
+  | Kind | Key | `:host` fields (`:set` in brackets) |
+  |---|---|---|
+  | `track` | `(index)` | `index :int`, `name :string`, `color :rgb`, `volume :number` [`seq-set-track-volume`], `peak :number`, `muted :bool` [`seq-set-track-mute`], `armed :bool` [`seq-set-record-arm`], `selected :bool`, `preset :string`, `num-steps :int`, `steps (list-of step)`, `devices (list-of device)` |
+  | `step` | `(track index)` | `index :int`, `track track`, `active :bool` [`seq-set-track-step`], `playing :bool`, `selected :bool` |
+  | `device` | `(track slot)`, slot part = slot + 1 | `track track`, `slot :int` (-1 = instrument), `name :string`, `enabled :bool` |
+  | `scene` | `(index)` | `index :int`, `number :int` (1-based in its bank), `name :string`, `active :bool`, `queued :bool`, `bank bank` |
+  | `bank` | `(index)` | `index :int`, `label :string`, `scenes (list-of scene)`, `playing :bool` |
+  | `transport` | `()` | `playing :bool` [`seq-set-playing`], `recording :bool` [`seq-set-recording`], `scene scene`, `queued scene` (nil when none), `launch-quantize :string` |
+  | `selection` | `()` | `track track` [`seq-set-track`] |
+  | `project` | `()` | `tracks (list-of track)`, `scenes (list-of scene)`, `banks (list-of bank)` |
+
+  The `:set` functions are Lisp wrappers in `eseq.kinds` over those
+  natives, all absolute: `seq-set-track-mute` (slice-3 op `set-mute`),
+  `seq-set-track-step` (`toggle-step` with `:active`) and `seq-set-playing`
+  (`song-transport-set-playing`) toggle only when the model differs when
+  the command lands; `seq-set-record-arm` and `seq-set-recording` compare
+  with the shared flag at once. So two `set!`s or `toggle!`s in one frame
+  never undo each other through a cell that has not caught up. `(launch!
+  s)` is an action (`switch-pattern` with `transport.launch-quantize`), not
+  a `:set`. `(tracks)`, `(scenes)`, `(banks)` read the `project`
+  singleton, so adding a track re-renders whoever iterated them. Model
+  identity: tracks by `app.track_registry` `TrackId` paired with the
+  registry's `generation()` (ids restart with every project, so a new
+  generation drops every track instance: a project load replaces them; a
+  rebuilt track shell keeps its instance); scenes and banks by their ids.
+  Identity never falls back to position: a frame whose scene or bank ids
+  are not distinct, or whose registry is out of step with the track list,
+  skips that part of the sync. A reorder re-keys in one `rekey_instances`,
+  a delete drops (with the steps and devices under it). `reconcile`
+  returns one `Option` per model entry, so a failed registration leaves a
+  hole instead of shifting later indices.
+- **Sources.** Track name/color/preset/devices come from the same `App`
+  data as `SEQ.track-names`, `track_display_color`
+  (`track-color-*-effective` without the mute dimming),
+  `track_loaded_presets` (shared with `SEQ.track-loaded-presets`) and
+  `track_device_chain` (shared with `SEQ.track-device-chains`);
+  volume/mute/steps/num-steps from `SequencerState` track params and
+  patterns; `armed` from the shared record-arm vector;
+  `selected`/`selection.track` from the current track; `step.selected`
+  from the step selection on the current track or, while a rack-wide
+  `ActiveDeleteTarget::TrackSteps` is armed, on each of its tracks, clipped
+  to the track's length (like the legacy step-selection publish);
+  `step.playing` from `track_active_playhead_step` while the transport
+  plays; `peak` from the reactive tick's track meter cache
+  (`MeterCache::cached_track_peak_levels`, polled at the meter cadence,
+  also while only a host-kinds `peak` is observed: `HostKinds::wants_peaks`);
+  scenes and banks from `with_project_scenes` (labels from
+  `scene_bank_label`, shared with `SEQ.scene-banks`), the queued scene from
+  `queued_transport_scene` (shared with `SEQ.queued-scene`),
+  `launch-quantize` from `SEQ.scene-launch-quantize`. `muted` is the track's own mute (what the
+  setter toggles), not the solo-effective mute.
+- **Publishing.** `HostKinds::sync` runs at the end of every
+  `sync_reactive_tick` (state in `FrameDiffState::host_kinds`): re-check the
+  schema when its generation moved, reconcile the registry and push model
+  fields when the model revision moved (§9), compare the queued scene and
+  launch quantization, push observed live fields, and run one reactive
+  cycle when anything changed.
+  Every push compares with the cell first (`Runtime::instance_field`), so
+  only changed values reach readers and slots. Legacy `SEQ` fields and their
+  buffer-name gates are untouched.
 
 ## 4. Keyed instances
 
@@ -562,6 +665,63 @@ computing unobserved fields and pushes only values that changed. Buffer names
 stop mattering. A coarse gate comes back only if profiling demands it, and
 then only as an internal optimization authors never see.
 
+Built (stage 4):
+
+- **Observed bit:** `VM::host_field_observed(id, field)` /
+  `Runtime::host_field_observed`: the field's `%instance/<id>` DAG source
+  has dependents, or its bound slot's `Arc` strong count exceeds the store's
+  own (`ReactiveBindingStore::binding_slots_held`). A hidden buffer's
+  deferred effect still counts as a reader. The batched
+  `host_fields_observed(id, &[fields]) -> u32` (bit `i` = `fields[i]`)
+  formats the namespace once and locks the slot store once; the tick asks
+  it once per instance. `instance_observer_epoch` moves whenever a field
+  may have gained an observer (a tracked read, a handed-out `#'`), so a host
+  can cache "nothing observes these" until it moves.
+- **Cold reads.** The host skips unobserved fields, so a by-value read of
+  one (a REPL `t.volume`, an event handler's `toggle!`, the first read that
+  makes a field observed) would see a stale cell. `VM::set_host_field_reader`
+  installs a `HostFieldReader` (`Fn(&mut VM, InstanceId, &str) ->
+  Option<Value>`), called by `GetField` and by `#'` (seeding the slot) on a
+  live instance's `:host` field nothing observes; a `Some` equal to the
+  cell is not written, any other is type-checked and stored like a push.
+  The reader may register keyed instances (lazy steps) but must not read
+  fields through Lisp. The host's reader returns `None` at once for any
+  field name that is not a live field, and reads `LiveSources` built once
+  when it is installed.
+- **Two feeds.** *Live* fields (the `Feed::Live` entries of `PUBLISHED`:
+  track `volume muted armed selected peak num-steps steps`, step `active
+  playing selected`, transport `playing recording`, `selection.track`) read
+  shared state the UI thread reaches without the `App`: the tick computes
+  them only while observed (`Pusher::push_live`: one batched observed query
+  per instance, then compute and push the observed ones), the reader
+  answers cold reads, and `KindsShared::computed` (keyed by `FieldKey`)
+  counts every computation (an unobserved field never counts). Steps are
+  dropped only when a track's length shrinks; their fields are diffed in
+  place per track (the active mask every tick, the selected mask only when
+  the current track, step selection or rack-wide target changed, the
+  playing step) and only for tracks with step instances whose `steps` or
+  some step field is observed (the latter cached per
+  `instance_observer_epoch`); only observed changed fields are pushed.
+  Playheads and meters cost no per-step work while nothing observes them.
+  *Model* fields (names, colors, presets, device chains, indices, scenes,
+  banks, transport scene, collections) need the `App`, which the reader
+  cannot reach. The tick re-derives them for every registered instance
+  only when a `ModelRevision` moves: UI, FX and FX-value epochs, the
+  pattern epoch, song-row mirror and sound-binding epochs, the history
+  revision (renames and every recorded edit), the scene revision and
+  current scene, the track count, the registry generation and order, and
+  the theme's track tint (mirroring `capture_param_sync_revision`; the
+  legacy publishers are epoch-gated the same way). It also runs after the
+  reader is installed, after a schema change, and when an instance it
+  produced is gone (a hot reload). The transport's queued scene and launch
+  quantization are compared every tick (a quantized launch moves no
+  counter). `KindsShared::model_syncs` counts model runs.
+- **Lazy steps (D2).** Step instances are keyed (track instance id, step
+  index) and registered by the reader on a cold `t.steps` read, or by the
+  tick while `steps` is observed (then the list follows `num-steps`). Every
+  sync drops a track's step instances at or past its length; dropping a
+  track drops its steps. A track nobody read `steps` of has none.
+
 ## 10. Diagnostics
 
 - Every schema error names the kind, the field and the known fields.
@@ -648,7 +808,7 @@ its instance and field.
    `(parent index)`, `FieldSlot::Host`, keyed registration and key lookup,
    constructors, `:set` dispatch, read-only errors, the created-kind opt-outs.
    Tested with a fake host.
-4. **Host kinds.** `eseq.kinds` (`content/core/kinds.lisp`),
+4. **Host kinds.** `eseq.kinds` (`content/core/modules/kinds.lisp`),
    `set_instance_field`, keyed registration from the project model, lazy
    step instances (D2), the observed bit (D3), the startup schema check, and
    `track`/`step`/`transport`/`scene`/`bank`/`device`/`selection` published

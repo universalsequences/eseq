@@ -266,6 +266,8 @@ pub(crate) struct FrameDiffState {
     pub(crate) sound_palette: SoundPaletteFrameState,
     pub(crate) watched_sampler_voice_track: Option<usize>,
     pub(crate) watched_sampler_voice_ids: Vec<i32>,
+    /// The host kinds of `eseq.kinds` (kind-bindings spec §13 stage 4).
+    pub(crate) host_kinds: super::host_kinds::HostKinds,
 }
 
 /// In-flight pointer-gesture state that host commands need to observe or

@@ -142,6 +142,10 @@ pub fn is_valid_module_name(name: &str) -> bool {
         })
 }
 
+/// The factory directory holding core modules (`eseq.kinds`), relative to
+/// a load-path root.
+pub const CORE_MODULES_DIR: &str = "core/modules";
+
 /// Candidate load paths for a module name (spec §7): `eseq.track-collapse`
 /// → `track-collapse.lisp` under a load-path root, dots in the remainder
 /// mapping to directory separators. `@/` is the source manager cwd — in
@@ -155,6 +159,7 @@ pub fn is_valid_module_name(name: &str) -> bool {
 /// `effects/index.lisp` (kind-bindings spec §11), with the precedence
 /// documented on `module_relative_file_candidates`.
 pub fn module_file_candidates(name: &str) -> Vec<String> {
+    let factory = name.starts_with("eseq.");
     let stripped = name.strip_prefix("eseq.").unwrap_or(name);
     let flat = format!("{stripped}.lisp");
     let path = stripped.replace('.', "/");
@@ -168,6 +173,10 @@ pub fn module_file_candidates(name: &str) -> Vec<String> {
     for prefix in prefixes {
         candidates.push(format!("{prefix}{index}"));
         candidates.push(format!("{prefix}{nested}"));
+    }
+    // Factory core modules last (see `module_relative_file_candidates`).
+    if factory {
+        candidates.push(format!("@/{CORE_MODULES_DIR}/{nested}"));
     }
     candidates
 }
@@ -186,6 +195,7 @@ pub fn module_file_candidates(name: &str) -> Vec<String> {
 /// pre-existing resolution changes, since the index candidates only ever
 /// match files named `index.lisp`.
 pub fn module_relative_file_candidates(name: &str) -> Vec<std::path::PathBuf> {
+    let factory = name.starts_with("eseq.");
     let stripped = name.strip_prefix("eseq.").unwrap_or(name);
     let flat = std::path::PathBuf::from(format!("{stripped}.lisp"));
     let path = stripped.replace('.', "/");
@@ -198,6 +208,14 @@ pub fn module_relative_file_candidates(name: &str) -> Vec<std::path::PathBuf> {
         }
         candidates.push(prefix.join(&index));
         candidates.push(prefix.join(&nested));
+    }
+    // Factory core modules (`content/core/modules/kinds.lisp` is
+    // `eseq.kinds`, kind-bindings spec §3.4) come last, so a `ui/` module of
+    // the same name shadows them. Only `core/modules/` is searched: the
+    // startup scripts beside it (`core/init.lisp`, `themes.lisp`, …) are
+    // never modules.
+    if factory {
+        candidates.push(std::path::Path::new(CORE_MODULES_DIR).join(&nested));
     }
     candidates
 }
@@ -237,8 +255,14 @@ mod tests {
         // sibling file at each prefix; the old order is otherwise kept.
         assert_eq!(
             module_relative_file_candidates("eseq.effects"),
-            ["effects/index.lisp", "effects.lisp", "ui/effects/index.lisp", "ui/effects.lisp"]
-                .map(std::path::PathBuf::from)
+            [
+                "effects/index.lisp",
+                "effects.lisp",
+                "ui/effects/index.lisp",
+                "ui/effects.lisp",
+                "core/modules/effects.lisp",
+            ]
+            .map(std::path::PathBuf::from)
         );
         assert_eq!(
             module_file_candidates("eseq.effects"),
@@ -249,6 +273,7 @@ mod tests {
                 "@/effects.lisp",
                 "effects/index.lisp",
                 "effects.lisp",
+                "@/core/modules/effects.lisp",
             ]
         );
         // Dotted: the flat `a.b.lisp` spelling keeps its place ahead of the
@@ -262,9 +287,40 @@ mod tests {
                 "ui/effects.state.lisp",
                 "ui/effects/state/index.lisp",
                 "ui/effects/state.lisp",
+                "core/modules/effects/state.lisp",
             ]
             .map(std::path::PathBuf::from)
         );
+        // Only factory (`eseq.`) names reach core/; package modules never do.
+        assert!(
+            !module_relative_file_candidates("alez.tools")
+                .iter()
+                .any(|candidate| candidate.starts_with("core"))
+        );
+    }
+
+    #[test]
+    fn startup_scripts_in_core_are_never_module_candidates() {
+        // content/core holds init.lisp, themes.lisp and sdf-stdlib.lisp
+        // beside the core modules; only core/modules/ is searched.
+        for name in ["eseq.init", "eseq.themes", "eseq.sdf-stdlib"] {
+            let relative = module_relative_file_candidates(name);
+            assert!(
+                relative
+                    .iter()
+                    .all(|candidate| !candidate.starts_with("core")
+                        || candidate.starts_with(CORE_MODULES_DIR)),
+                "{name}: {relative:?}"
+            );
+            let rootless = module_file_candidates(name);
+            assert!(
+                rootless
+                    .iter()
+                    .all(|candidate| !candidate.contains("core/")
+                        || candidate.contains("core/modules/")),
+                "{name}: {rootless:?}"
+            );
+        }
     }
 
     #[test]

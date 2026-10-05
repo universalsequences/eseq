@@ -44,6 +44,7 @@ pub(super) const COMMANDS: &[&str] = &[
     // Transport authority (docs/song-mode-spec.md 12/13): routed through the
     // state machine in app/song_transport.rs.
     "song-transport-toggle-play",
+    "song-transport-set-playing",
     "song-transport-play",
     "song-capture-arm",
     "song-capture-cancel",
@@ -628,6 +629,12 @@ fn run_transport(
             let record = transport_record_signal(app, ctx);
             app.song_transport_toggle_play(record)
         }
+        // Absolute Play/Stop (`seq-set-playing`): a no-op when the transport
+        // already is where the caller wants it.
+        "song-transport-set-playing" => {
+            let record = transport_record_signal(app, ctx);
+            app.song_transport_set_playing(matches!(payload, Value::Bool(true)), record)
+        }
         "song-transport-play" => {
             let record = transport_record_signal(app, ctx);
             app.song_transport_play(record).map(|mode| match mode {
@@ -870,6 +877,7 @@ pub(crate) fn apply_sound_palette_view_command(
 
 const TRANSPORT_COMMANDS: &[&str] = &[
     "song-transport-toggle-play",
+    "song-transport-set-playing",
     "song-transport-play",
     "song-capture-arm",
     "song-capture-cancel",

@@ -705,6 +705,17 @@ fn collect_defined_symbols(expr: &Expression, out: &mut HashSet<String>) {
                 out.insert(name.clone());
             }
         }
+        // A singleton or index-keyed kind binds its name (kind-bindings
+        // spec §3.1); a created or parent-keyed one binds nothing.
+        [Expression::Symbol(form), Expression::Symbol(name), ..] if form == "def-kind" => {
+            if let Ok((
+                _,
+                Some(crate::vm::KindKey::Singleton | crate::vm::KindKey::Indexed { .. }),
+            )) = crate::compiler::def_kind_slots(name, items)
+            {
+                out.insert(name.clone());
+            }
+        }
         _ => {}
     }
 }
@@ -745,6 +756,26 @@ mod tests {
         .expect("extract symbols");
         assert!(symbols.contains("eseq.factory/view"));
         assert!(symbols.contains("eseq.factory/other"));
+    }
+
+    #[test]
+    fn keyed_def_kinds_that_bind_their_name_are_defined_symbols() {
+        let symbols = extract_defined_symbols_from_source(
+            "(module m)
+             (def-kind transport :key () :state ((open false)))
+             (def-kind track :key (index) :host ((name :string)))
+             (def-kind step :key (track index) :host ((active :bool)))
+             (def-kind neural :state ((rate 1)))",
+        )
+        .expect("extract symbols");
+        assert!(
+            symbols.contains("transport") && symbols.contains("track"),
+            "{symbols:?}"
+        );
+        assert!(
+            !symbols.contains("step") && !symbols.contains("neural"),
+            "{symbols:?}"
+        );
     }
 
     #[test]

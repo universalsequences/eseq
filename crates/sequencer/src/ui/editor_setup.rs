@@ -53,7 +53,7 @@ pub(crate) fn create_editor_with_user_init_path(
     create_editor_with_root(runtime, app, user_init_path, UiRoot::Distro)
 }
 
-fn create_editor_with_root(
+pub(crate) fn create_editor_with_root(
     mut runtime: Runtime,
     app: &app::App,
     user_init_path: Option<std::path::PathBuf>,
@@ -88,6 +88,7 @@ fn create_editor_with_root(
     }
 
     reload_custom_instrument_ui(&mut editor);
+    super::host_kinds::reserve_kind_names(editor.runtime_mut());
     let ui_entrypoint = match root {
         UiRoot::Distro => ui_entrypoint_path(),
         UiRoot::Bare => noui_entrypoint_path(),
@@ -106,6 +107,8 @@ fn create_editor_with_root(
         .runtime_mut()
         .eval_str(&grid_source)
         .map_err(|error| format!("failed to execute {}: {error:?}", ui_entrypoint.display()))?;
+    // Both roots import eseq.kinds; the host must publish exactly its fields.
+    super::host_kinds::check_schema_at_startup(editor.runtime());
     editor.refresh_runtime_side_effects();
     reload_custom_instrument_ui(&mut editor);
     push_project_scratch_to_named_buffer(&mut editor, &app);

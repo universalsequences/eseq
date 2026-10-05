@@ -83,6 +83,20 @@ pub(super) fn apply_toggle_step_host_command(
         .ok_or_else(|| "step toggle track was invalid".to_string())?;
     let step =
         map_usize(map, "step").ok_or_else(|| "step toggle index was invalid".to_string())?;
+    // An absolute set (`seq-set-track-step`) toggles only when the step
+    // differs, judged when the command lands rather than when it was queued.
+    let wanted = map.get("active").and_then(|cell| match &*cell.borrow() {
+        Value::Bool(active) => Some(*active),
+        _ => None,
+    });
+    let unchanged = wanted.is_some_and(|active| {
+        track < app.state.active_track_count()
+            && step < MAX_STEPS
+            && app.state.pattern.patterns[track].is_active(step) == active
+    });
+    if unchanged {
+        return Ok((app::edit::EditOutcome::NoOp, track, step));
+    }
     app::try_apply_command(app, app::AppCommand::ToggleStep { track, step })
         .map(|outcome| (outcome, track, step))
         .map_err(|error| format!("could not toggle step: {error:?}"))
@@ -385,7 +399,20 @@ pub(super) fn apply_slice3_history_host_command(
     let op = map_string(map, "op")
         .ok_or_else(|| "Slice 3 edit operation was missing".to_string())?;
     let track = map_usize(map, "track");
-    let command = slice3_command(map, &op, track)?;
+    let command = if op == "set-mute" {
+        // An absolute mute (`seq-set-track-mute`): toggle only when the
+        // track differs, judged when the command lands.
+        let track = track
+            .filter(|track| *track < app.state.active_track_count())
+            .ok_or_else(|| "Slice 3 edit track was invalid".to_string())?;
+        let muted = map_number(map, "value").is_some_and(|value| value != 0.0);
+        if app.state.pattern.track_params[track].is_muted() == muted {
+            return Ok((app::edit::EditOutcome::NoOp, Some(track)));
+        }
+        app::AppCommand::ToggleTrackMute { track }
+    } else {
+        slice3_command(map, &op, track)?
+    };
     app::try_apply_command(app, command)
         .map(|outcome| (outcome, track))
         .map_err(|error| format!("could not apply Slice 3 edit: {error:?}"))
@@ -748,7 +775,7 @@ pub(super) fn slice3_track_mixer_invalidation(payload: &Value) -> Option<TrackMi
     match map_string(map, "op")?.as_str() {
         "volume" => Some(TrackMixerInvalidation::Volume),
         "pan" => Some(TrackMixerInvalidation::Pan),
-        "toggle-mute" => Some(TrackMixerInvalidation::Mute),
+        "toggle-mute" | "set-mute" => Some(TrackMixerInvalidation::Mute),
         "toggle-solo" => Some(TrackMixerInvalidation::Solo),
         _ => None,
     }

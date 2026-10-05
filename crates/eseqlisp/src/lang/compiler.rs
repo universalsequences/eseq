@@ -274,7 +274,7 @@ fn is_widget_name(name: &str) -> bool {
 /// (kind-bindings spec §3.1): `None` without `:key` (a created kind). This
 /// is the one place the key's shape (at most two names) is checked. A
 /// malformed slot list or key is an error.
-fn def_kind_slots<'e>(
+pub(crate) fn def_kind_slots<'e>(
     name: &str,
     list: &'e [Expression],
 ) -> Result<(Vec<(String, &'e Expression)>, Option<KindKey>), CompilerError> {

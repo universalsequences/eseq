@@ -403,16 +403,29 @@ pub(crate) fn current_custom_instrument_name(app: &app::App, track: usize) -> Op
     }
 }
 
+/// The loaded preset name of the first `count` tracks ("" when none).
+/// Shared by `SEQ.track-loaded-presets` and the `track` host kind.
+pub(crate) fn track_loaded_presets(app: &app::App, count: usize) -> Vec<String> {
+    let sound = app.state.pattern.track_sound_state.lock().unwrap();
+    (0..count)
+        .map(|t| {
+            sound
+                .get(t)
+                .and_then(|meta| meta.loaded_preset.clone())
+                .unwrap_or_default()
+        })
+        .collect()
+}
+
 pub(crate) fn sync_sidebar_browser(rt: &mut Runtime, app: &app::App, track: usize) {
     // Every track's loaded preset name ("" when none), for views that show
     // all tracks at once rather than the current track's sidebar.
-    let loaded_presets: Vec<String> = {
-        let sound = app.state.pattern.track_sound_state.lock().unwrap();
-        (0..app.tracks.len())
-            .map(|t| sound.get(t).and_then(|meta| meta.loaded_preset.clone()).unwrap_or_default())
-            .collect()
-    };
-    rt.set_reactive("SEQ", "track-loaded-presets", build_string_list(&loaded_presets));
+    let loaded_presets = track_loaded_presets(app, app.tracks.len());
+    rt.set_reactive(
+        "SEQ",
+        "track-loaded-presets",
+        build_string_list(&loaded_presets),
+    );
     // Publish each slot independently of the edit cursor: only the explicit
     // delete-target selection opts the browser into slot presets.
     let slots = {

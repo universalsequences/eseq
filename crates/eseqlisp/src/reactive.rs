@@ -162,6 +162,40 @@ impl ReactiveBindingStore {
         }
     }
 
+    /// Which bindings' slots are held outside the store (by a `#'` ref a
+    /// widget or a Lisp value keeps): the store's own handle is the only
+    /// other one (kind-bindings spec §9, the observed bit).
+    /// Takes `(bit, field, kind)` triples and returns the mask of the bits
+    /// whose binding is held; the store is locked once.
+    pub(crate) fn binding_slots_held<'f>(
+        &self,
+        namespace: &str,
+        fields: impl IntoIterator<Item = (usize, &'f str, BindingKind)>,
+    ) -> u32 {
+        let slots = self
+            .slots
+            .lock()
+            .expect("reactive float store lock poisoned");
+        let mut mask = 0u32;
+        for (bit, field, kind) in fields {
+            let key = match kind {
+                BindingKind::Float | BindingKind::InstanceFloat(_) => {
+                    ReactiveBindingKey::field(namespace, field)
+                }
+                BindingKind::InstanceRgb(_) => {
+                    rgb_component_key(namespace, field, RGB_COMPONENTS[0])
+                }
+            };
+            if slots
+                .get(&key)
+                .is_some_and(|slot| Arc::strong_count(slot) > 1)
+            {
+                mask |= 1 << bit;
+            }
+        }
+        mask
+    }
+
     /// The r, g and b slots of an `:rgb` binding (kind-bindings spec §3.3).
     pub fn rgb_slots(&self, namespace: &str, field: &str) -> [Arc<AtomicU64>; 3] {
         RGB_COMPONENTS

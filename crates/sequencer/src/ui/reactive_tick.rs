@@ -431,6 +431,13 @@ pub(crate) fn sync_reactive_tick(
                 read_track_peak_levels(app.graph.lg, &app.graph.track_node_ids);
             ctx.meters.cached_rack_slot_peak_levels = read_rack_slot_peak_levels(app.graph.lg, &app);
             ctx.meters.cached_bus_peak_levels = read_bus_peak_levels(app.graph.lg, &app.graph.bus_node_ids);
+        } else if ctx.frame.host_kinds.wants_peaks()
+            && (meter_polled || ctx.meters.cached_track_peak_levels.len() != app.tracks.len())
+        {
+            // A host-kinds `t.peak` is observed with no legacy meter on
+            // screen: keep the track meters polled at the same cadence.
+            ctx.meters.cached_track_peak_levels =
+                read_track_peak_levels(app.graph.lg, &app.graph.track_node_ids);
         }
         if fx_visible && (meter_polled || !was_visible.fx) {
             (ctx.meters.cached_modulator_phases, ctx.meters.cached_modulator_levels) =
@@ -2177,6 +2184,16 @@ pub(crate) fn sync_reactive_tick(
                 );
             }
         }
+    }
+    // Host kinds (eseq.kinds): registry, model fields, observed live fields.
+    if ctx.frame.host_kinds.sync(
+        app,
+        editor.runtime_mut(),
+        ctx.shared,
+        &ctx.meters.cached_track_peak_levels,
+    ) {
+        editor.refresh_runtime_side_effects();
+        editor.mark_needs_redraw();
     }
     ui_loop_stats.note_sync(reactive_sync_started.elapsed());
 

@@ -709,6 +709,19 @@ impl App {
         }
     }
 
+    /// Play or stop through the state machine (the `seq-set-playing`
+    /// route): toggles only when the transport is not already `playing`.
+    pub fn song_transport_set_playing(
+        &mut self,
+        playing: bool,
+        record: bool,
+    ) -> Result<Option<String>, String> {
+        if self.transport_engaged() == playing {
+            return Ok(None);
+        }
+        self.song_transport_toggle_play(record)
+    }
+
     /// Cancel arrangement capture (spec 13): discard the take, preserve the
     /// committed song, stop the transport. Only valid during capture.
     pub fn song_capture_cancel(&mut self) -> Result<String, String> {

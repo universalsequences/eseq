@@ -450,6 +450,7 @@ pub(crate) fn run_event_loop(
         sound_palette: SoundPaletteFrameState::default(),
         watched_sampler_voice_track: None,
         watched_sampler_voice_ids: Vec::new(),
+        host_kinds: Default::default(),
     };
     let (initial_modulator_phases, initial_modulator_levels) =
         read_modulator_display_values(app.graph.lg, &app);
@@ -595,17 +596,7 @@ pub(crate) fn run_event_loop(
             )));
         }
         app.graph_controller().reap_due_rack_teardowns();
-        let queued_transport_scene = shared
-            .state
-            .quantized_launches()
-            .pending_target(sequencer::quantized_launch::QuantizedLaunchOwner::Transport)
-            .and_then(|target| match target {
-                sequencer::quantized_launch::PatternLaunchTarget::Scene { scene }
-                | sequencer::quantized_launch::PatternLaunchTarget::SceneTracks { scene, .. } => {
-                    Some(scene)
-                }
-                sequencer::quantized_launch::PatternLaunchTarget::TrackPattern { .. } => None,
-            });
+        let queued_transport_scene = queued_transport_scene(&shared.state);
         if queued_transport_scene != frame.prev_queued_transport_scene {
             let rt = editor.runtime_mut();
             rt.set_reactive(

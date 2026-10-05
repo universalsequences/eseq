@@ -942,6 +942,19 @@ pub(crate) fn register_transport_toggle_play_native(
         });
         Ok(Value::Bool(!state.is_playing()))
     });
+    // `seq-set-playing` — absolute Play/Stop: the state machine toggles only
+    // when the transport differs once the command lands, so repeated calls
+    // in one frame never double-toggle (the `transport.playing` :set).
+    runtime.register_native("seq-set-playing", move |args, ctx| {
+        let Some(Value::Bool(playing)) = args.first() else {
+            return Err("seq-set-playing: expected a bool".into());
+        };
+        ctx.enqueue_command(HostCommand::Custom {
+            name: "song-transport-set-playing".to_string(),
+            payload: Value::Bool(*playing),
+        });
+        Ok(Value::Bool(*playing))
+    });
 }
 
 pub(crate) fn register_song_natives(runtime: &mut Runtime) {
@@ -4399,6 +4412,33 @@ pub(crate) fn init_runtime(
         Ok(Value::Bool(next_active))
     });
 
+    // seq-set-track-step — (seq-set-track-step track step active): an
+    // absolute step set. The toggle happens only when the step differs once
+    // the command lands (the `step.active` :set).
+    let st = state.clone();
+    runtime.register_native("seq-set-track-step", move |args, ctx| {
+        let (Some(Value::Number(track)), Some(Value::Number(step)), Some(Value::Bool(active))) =
+            (args.first(), args.get(1), args.get(2))
+        else {
+            return Err("seq-set-track-step: expected (track step active)".into());
+        };
+        let (track, step, active) = (*track as usize, *step as usize, *active);
+        if track >= st.active_track_count() {
+            return Err(format!("seq-set-track-step: track {track} out of range").into());
+        }
+        if step >= MAX_STEPS {
+            return Err(format!("seq-set-track-step: step {step} out of range").into());
+        }
+        ctx.enqueue_command(HostCommand::Custom {
+            name: "toggle-step".to_string(),
+            payload: map_value([
+                ("track", Value::Number(track as f64)),
+                ("step", Value::Number(step as f64)),
+                ("active", Value::Bool(active)),
+            ]),
+        });
+        Ok(Value::Bool(active))
+    });
 
     let st = state.clone();
     runtime.register_native("seq-track-step-active?", move |args, _ctx| {
@@ -5356,6 +5396,32 @@ pub(crate) fn init_runtime(
             );
         }
         Ok(Value::Bool(muted))
+    });
+
+    // seq-set-track-mute — (seq-set-track-mute track-idx muted): an absolute
+    // mute; the toggle happens only when the track differs once the command
+    // lands (the `track.muted` :set).
+    let st = state.clone();
+    let ui_inv = ui_invalidations.clone();
+    runtime.register_native("seq-set-track-mute", move |args, ctx| {
+        let (Some(Value::Number(track)), Some(Value::Bool(muted))) = (args.first(), args.get(1))
+        else {
+            return Err("seq-set-track-mute: expected (track muted)".into());
+        };
+        let track = *track as usize;
+        if track >= st.active_track_count() {
+            return Err(format!("seq-set-track-mute: track {track} out of range").into());
+        }
+        ctx.enqueue_command(slice3_numeric_history_command(
+            "set-mute",
+            Some(track),
+            if *muted { 1.0 } else { 0.0 },
+        ));
+        ui_inv.push(UiInvalidation::TrackMixer {
+            track,
+            change: TrackMixerInvalidation::Mute,
+        });
+        Ok(Value::Bool(*muted))
     });
 
     // seq-toggle-track-collapsed — (seq-toggle-track-collapsed track-idx)
@@ -6999,6 +7065,24 @@ pub(crate) fn init_runtime(
         Ok(Value::Bool(!was))
     });
 
+    // seq-set-recording — (seq-set-recording on): `seq-toggle-record` when
+    // the record flag differs, else nothing (the `transport.recording` :set).
+    let rec = recording.clone();
+    let ui_ep = ui_epoch.clone();
+    runtime.register_native("seq-set-recording", move |args, ctx| {
+        let Some(Value::Bool(on)) = args.first() else {
+            return Err("seq-set-recording: expected a bool".into());
+        };
+        if rec.swap(*on, Ordering::Relaxed) != *on {
+            ui_ep.fetch_add(1, Ordering::Relaxed);
+            ctx.enqueue_command(HostCommand::Custom {
+                name: "song-toggle-record".to_string(),
+                payload: Value::Bool(*on),
+            });
+        }
+        Ok(Value::Bool(*on))
+    });
+
     let master_rec = master_recording.clone();
     let master = master_recorder.clone();
     let ui_ep = ui_epoch.clone();
@@ -7043,6 +7127,35 @@ pub(crate) fn init_runtime(
             Some(armed) => {
                 ui_ep.fetch_add(1, Ordering::Relaxed);
                 Ok(Value::Bool(armed))
+            }
+            None => Ok(Value::Bool(false)),
+        }
+    });
+
+    // seq-set-record-arm — (seq-set-record-arm track armed): toggle the
+    // track's record arm only when it differs (the `track.armed` :set).
+    let ra = record_armed.clone();
+    let ar = armed_rack.clone();
+    let groups_state = track_groups.clone();
+    let ui_ep = ui_epoch.clone();
+    runtime.register_native("seq-set-record-arm", move |args, _ctx| {
+        let (Some(Value::Number(track)), Some(Value::Bool(armed))) = (args.first(), args.get(1))
+        else {
+            return Err("seq-set-record-arm: expected (track armed)".into());
+        };
+        let track = *track as usize;
+        let mut record_armed = ra.lock().unwrap();
+        match record_armed.get(track) {
+            Some(current) if *current == *armed => Ok(Value::Bool(*armed)),
+            Some(_) => {
+                let armed = toggle_track_record_arm(
+                    &mut record_armed,
+                    &mut ar.lock().unwrap(),
+                    &groups_state.lock().unwrap(),
+                    track,
+                );
+                ui_ep.fetch_add(1, Ordering::Relaxed);
+                Ok(Value::Bool(armed.unwrap_or(false)))
             }
             None => Ok(Value::Bool(false)),
         }
@@ -8019,6 +8132,11 @@ fn document_metal_seq_natives(runtime: &mut Runtime) {
             "Toggle a step on a specific track without changing the current track.",
         ),
         (
+            "seq-set-track-step",
+            "(seq-set-track-step track step active)",
+            "Turn a step on a specific track on or off; nothing happens when it already is.",
+        ),
+        (
             "seq-set-step-param",
             "(seq-set-step-param step :param value)",
             "Set a per-step parameter on the current track.",
@@ -8149,6 +8267,11 @@ fn document_metal_seq_natives(runtime: &mut Runtime) {
             "Toggle a track's mute state.",
         ),
         (
+            "seq-set-track-mute",
+            "(seq-set-track-mute track muted)",
+            "Mute or unmute a track; nothing happens when it already is.",
+        ),
+        (
             "seq-toggle-track-solo",
             "(seq-toggle-track-solo track)",
             "Toggle a track's solo state and update solo mute routing.",
@@ -8247,6 +8370,11 @@ fn document_metal_seq_natives(runtime: &mut Runtime) {
             "seq-toggle-play",
             "(seq-toggle-play)",
             "Toggle sequencer playback.",
+        ),
+        (
+            "seq-set-playing",
+            "(seq-set-playing playing)",
+            "Start or stop playback; nothing happens when the transport already is.",
         ),
         (
             "seq-set-bpm",
@@ -8359,6 +8487,11 @@ fn document_metal_seq_natives(runtime: &mut Runtime) {
             "Toggle recording when at least one track is armed.",
         ),
         (
+            "seq-set-recording",
+            "(seq-set-recording on)",
+            "Turn recording on or off; nothing happens when it already is.",
+        ),
+        (
             "seq-toggle-master-recording",
             "(seq-toggle-master-recording)",
             "Toggle final master-output WAV recording.",
@@ -8372,6 +8505,11 @@ fn document_metal_seq_natives(runtime: &mut Runtime) {
             "seq-toggle-record-arm",
             "(seq-toggle-record-arm track)",
             "Toggle record-arm state for a track.",
+        ),
+        (
+            "seq-set-record-arm",
+            "(seq-set-record-arm track armed)",
+            "Arm or disarm a track for recording; nothing happens when it already is.",
         ),
         (
             "seq-armed-tracks",

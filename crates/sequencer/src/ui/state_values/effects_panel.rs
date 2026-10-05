@@ -747,59 +747,92 @@ pub(crate) fn device_leaf_name(name: &str) -> String {
     }
 }
 
+/// One device of a track's chain ([`track_device_chain`]).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct DeviceChainEntry {
+    pub(crate) name: String,
+    /// "instrument" or "effect".
+    pub(crate) kind: &'static str,
+    pub(crate) enabled: bool,
+    /// Effect slot index; -1 for the instrument.
+    pub(crate) slot: i64,
+}
+
+/// A track's devices in signal order: its instrument (when it has one),
+/// then each occupied effect slot. Shared by `SEQ.track-device-chains` and
+/// the `device` host kind (kind-bindings spec §13 stage 4).
+pub(crate) fn track_device_chain(
+    app: &app::App,
+    state: &Arc<SequencerState>,
+    track: usize,
+) -> Vec<DeviceChainEntry> {
+    let mut entries = Vec::new();
+    let instrument_type = app.graph.track_instrument_types.get(track).copied();
+    let instrument_name = match instrument_type {
+        Some(sequencer::sequencer::InstrumentType::Custom) => app
+            .graph
+            .track_engine_ids
+            .get(track)
+            .and_then(|engine_id| *engine_id)
+            .and_then(|engine_id| app.editor.engine_registry.get(engine_id))
+            .map(|engine| engine.name.clone())
+            .or_else(|| app.tracks.get(track).cloned()),
+        Some(sequencer::sequencer::InstrumentType::Sampler) => Some("sampler".to_string()),
+        // A rack has no engine name of its own; the track's name is the
+        // only label that says which rack this is.
+        Some(sequencer::sequencer::InstrumentType::Rack) => app
+            .tracks
+            .get(track)
+            .filter(|name| !name.trim().is_empty())
+            .cloned()
+            .or_else(|| Some("rack".to_string())),
+        Some(sequencer::sequencer::InstrumentType::Modulator) => Some("modulator".to_string()),
+        Some(sequencer::sequencer::InstrumentType::Empty) | None => None,
+    };
+    if let Some(name) = instrument_name {
+        entries.push(DeviceChainEntry {
+            name: device_leaf_name(&name),
+            kind: "instrument",
+            enabled: true,
+            slot: -1,
+        });
+    }
+    let descs = app.graph.effect_descriptors.get(track);
+    let chain = state.pattern.effect_chains.get(track);
+    if let Some(descs) = descs {
+        // Chains are fixed-size slot arrays; an unused slot has an
+        // empty descriptor. Only occupied slots are devices.
+        for (slot_idx, desc) in descs.iter().enumerate().filter(|(_, d)| !d.name.is_empty()) {
+            let enabled = match (
+                enabled_param_index(desc),
+                chain.and_then(|c| c.get(slot_idx)),
+            ) {
+                (Some(idx), Some(slot)) => {
+                    slot_param_stored_value(slot, &desc.params[idx], idx, None) >= 0.5
+                }
+                _ => true,
+            };
+            entries.push(DeviceChainEntry {
+                name: desc.name.clone(),
+                kind: "effect",
+                enabled,
+                slot: slot_idx as i64,
+            });
+        }
+    }
+    entries
+}
+
 pub(crate) fn build_track_device_chains_value(
     app: &app::App,
     state: &Arc<SequencerState>,
 ) -> Value {
-    let track_count = app.tracks.len();
-    list_value((0..track_count).map(|track| {
-        let mut entries = Vec::new();
-        let instrument_type = app.graph.track_instrument_types.get(track).copied();
-        let instrument_name = match instrument_type {
-            Some(sequencer::sequencer::InstrumentType::Custom) => app
-                .graph
-                .track_engine_ids
-                .get(track)
-                .and_then(|engine_id| *engine_id)
-                .and_then(|engine_id| app.editor.engine_registry.get(engine_id))
-                .map(|engine| engine.name.clone())
-                .or_else(|| app.tracks.get(track).cloned()),
-            Some(sequencer::sequencer::InstrumentType::Sampler) => Some("sampler".to_string()),
-            // A rack has no engine name of its own; the track's name is the
-            // only label that says which rack this is.
-            Some(sequencer::sequencer::InstrumentType::Rack) => app
-                .tracks
-                .get(track)
-                .filter(|name| !name.trim().is_empty())
-                .cloned()
-                .or_else(|| Some("rack".to_string())),
-            Some(sequencer::sequencer::InstrumentType::Modulator) => Some("modulator".to_string()),
-            Some(sequencer::sequencer::InstrumentType::Empty) | None => None,
-        };
-        if let Some(name) = instrument_name {
-            entries.push(device_entry(
-                device_leaf_name(&name),
-                "instrument",
-                true,
-                -1,
-            ));
-        }
-        let descs = app.graph.effect_descriptors.get(track);
-        let chain = state.pattern.effect_chains.get(track);
-        if let Some(descs) = descs {
-            // Chains are fixed-size slot arrays; an unused slot has an
-            // empty descriptor. Only occupied slots are devices.
-            for (slot_idx, desc) in descs.iter().enumerate().filter(|(_, d)| !d.name.is_empty()) {
-                let enabled = match (enabled_param_index(desc), chain.and_then(|c| c.get(slot_idx))) {
-                    (Some(idx), Some(slot)) => {
-                        slot_param_stored_value(slot, &desc.params[idx], idx, None) >= 0.5
-                    }
-                    _ => true,
-                };
-                entries.push(device_entry(desc.name.clone(), "effect", enabled, slot_idx as i64));
-            }
-        }
-        list_value(entries)
+    list_value((0..app.tracks.len()).map(|track| {
+        list_value(
+            track_device_chain(app, state, track)
+                .into_iter()
+                .map(|entry| device_entry(entry.name, entry.kind, entry.enabled, entry.slot)),
+        )
     }))
 }
 

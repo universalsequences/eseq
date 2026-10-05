@@ -752,3 +752,132 @@ fn a_set_lambda_and_widget_named_fields_compile_like_any_def_kind() {
         Ok(Value::String(String::new()))
     );
 }
+
+#[test]
+fn a_host_field_is_observed_while_a_reader_depends_on_it_or_a_binding_is_held() {
+    let (mut vm, _) = vm();
+    let id = vm.register_keyed_instance("track", &[0]).expect("register");
+    assert!(!vm.host_field_observed(id, "name"));
+    eval(&mut vm, "(def t0 (track 0))");
+    // An untracked read observes nothing.
+    eval(&mut vm, "t0.name");
+    assert!(!vm.host_field_observed(id, "name"));
+    eval(&mut vm, r#"(effect-buffer "*name*" (label t0.name))"#);
+    rendered_targets(&mut vm);
+    assert!(vm.host_field_observed(id, "name"));
+    assert!(!vm.host_field_observed(id, "volume"));
+    // A held binding observes its field; letting go of it stops observing.
+    eval(&mut vm, "(def held #'t0.volume)");
+    assert!(vm.host_field_observed(id, "volume"));
+    eval(&mut vm, "(set! held nil)");
+    assert!(!vm.host_field_observed(id, "volume"));
+    eval(&mut vm, "(def rgb #'t0.color)");
+    assert!(vm.host_field_observed(id, "color"));
+}
+
+#[test]
+fn a_read_of_an_unobserved_host_field_asks_the_hosts_reader() {
+    let (mut vm, _) = vm();
+    let id = vm.register_keyed_instance("track", &[0]).expect("register");
+    let asked: Rc<RefCell<Vec<String>>> = Rc::default();
+    let log = asked.clone();
+    vm.set_host_field_reader(Some(Rc::new(move |vm: &mut VM, read: u64, field: &str| {
+        assert!(vm.instance_is_live(read));
+        log.borrow_mut().push(field.to_string());
+        (field == "volume").then_some(Value::Number(0.75))
+    })));
+    eval(&mut vm, "(def t0 (track 0))");
+    // A cold read gets the host's value, and the cell keeps it.
+    assert_eq!(eval(&mut vm, "t0.volume"), Value::Number(0.75));
+    assert_eq!(vm.instance_field(id, "volume"), Ok(Value::Number(0.75)));
+    // `None` keeps the cell; :state fields never ask.
+    push(&mut vm, id, "name", Value::String("Kick".into()));
+    assert_eq!(eval(&mut vm, "t0.name"), Value::String("Kick".into()));
+    eval(&mut vm, "t0.open");
+    assert_eq!(*asked.borrow(), vec!["volume", "name"]);
+    // A binding seeds its slot from the reader.
+    let held = eval(&mut vm, "(def held #'t0.volume) held");
+    let Value::ReactiveRef { slot, .. } = &held else {
+        panic!("expected a ref, got {held:?}");
+    };
+    assert_eq!(read_float_slot(slot), 0.75);
+    asked.borrow_mut().clear();
+    // Observed fields are the host's to keep current: reads use the cell.
+    assert_eq!(eval(&mut vm, "t0.volume"), Value::Number(0.75));
+    assert!(asked.borrow().is_empty());
+    // A value of the wrong type is an error, like any host push.
+    vm.set_host_field_reader(Some(Rc::new(|_: &mut VM, _: u64, _: &str| {
+        Some(Value::String("loud".into()))
+    })));
+    assert!(error(&mut vm, "t0.peak").contains(":number"));
+}
+
+#[test]
+fn reserved_kind_names_belong_to_their_module() {
+    let mut vm = VM::new(Vec::new());
+    super::super::register_core_natives(&mut vm);
+    vm.reserve_kind_names("eseq.kinds", &["track"]);
+    assert!(
+        error(
+            &mut vm,
+            "(def-kind track :key (index) :host ((name :string)))"
+        )
+        .contains("kind name 'track' is reserved for the host kinds of eseq.kinds")
+    );
+    eval(&mut vm, "(def-kind tracker :key () :state ((open false)))");
+    eval(
+        &mut vm,
+        "(module eseq.kinds) (def-kind track :key (index) :host ((name :string)))",
+    );
+    assert!(vm.instance_kind_schema("eseq.kinds:track").is_some());
+}
+
+#[test]
+fn observed_bits_batch_children_by_kind_and_the_schema_generation() {
+    let (mut vm, _) = vm();
+    let id = vm.register_keyed_instance("track", &[0]).expect("register");
+    eval(&mut vm, "(def t0 (track 0))");
+    eval(&mut vm, r#"(effect-buffer "*name*" (label t0.name))"#);
+    rendered_targets(&mut vm);
+    eval(&mut vm, "(def held #'t0.volume) (def rgb #'t0.color)");
+    let fields = ["name", "volume", "peak", "color", "steps"];
+    assert_eq!(vm.host_fields_observed(id, &fields), 0b01011);
+    for (bit, field) in fields.iter().enumerate() {
+        assert_eq!(
+            vm.host_field_observed(id, field),
+            0b01011 & (1 << bit) != 0,
+            "{field}"
+        );
+    }
+    // Children of one kind, with their keys.
+    eval(
+        &mut vm,
+        "(def-kind step :key (track index) :host ((active :bool)))
+         (def-kind clip :key (track index) :host ((name :string)))",
+    );
+    let step = vm.register_keyed_instance("step", &[id, 3]).expect("step");
+    vm.register_keyed_instance("clip", &[id, 0]).expect("clip");
+    let step_kind = vm.instance_kind(step).expect("kind id").to_string();
+    let steps: Vec<(u64, Vec<u64>)> = vm
+        .keyed_children_of_kind(id, &step_kind)
+        .map(|(child, key)| (child, key.to_vec()))
+        .collect();
+    assert_eq!(steps, vec![(step, vec![id, 3])]);
+    // Observers of children: a new binding moves the observer epoch.
+    assert!(!vm.keyed_children_observed(id, &step_kind, &["active"]));
+    let epoch = vm.instance_observer_epoch();
+    push(
+        &mut vm,
+        id,
+        "steps",
+        Value::List(vec![Rc::new(RefCell::new(Value::Instance(step)))]),
+    );
+    eval(&mut vm, "(def s3 (first t0.steps))");
+    eval(&mut vm, "(def held-step #'s3.active)");
+    assert!(vm.instance_observer_epoch() > epoch);
+    assert!(vm.keyed_children_observed(id, &step_kind, &["active"]));
+    // Every (re)registration moves the schema generation.
+    let generation = vm.instance_kind_schema_generation();
+    eval(&mut vm, TRACK);
+    assert!(vm.instance_kind_schema_generation() > generation);
+}

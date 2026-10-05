@@ -28,7 +28,10 @@ pub(crate) fn build_name_list(names: &[String]) -> Value {
 }
 
 /// Resolve display color without touching the authored/persisted track palette.
-fn track_display_color(app: &app::App, track: usize) -> sequencer::track_color::TrackColor {
+pub(crate) fn track_display_color(
+    app: &app::App,
+    track: usize,
+) -> sequencer::track_color::TrackColor {
     let color = app
         .track_colors
         .get(track)

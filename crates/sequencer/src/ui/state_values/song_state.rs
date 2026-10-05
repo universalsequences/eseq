@@ -795,6 +795,31 @@ pub(crate) fn scene_bank_auto_label(mut index: usize) -> String {
     String::from_utf8(reversed).expect("scene bank labels contain only ASCII letters")
 }
 
+/// A scene bank's display label: its auto label (`A`, `B`, …), with its
+/// name after a dash when it has one. Shared by `SEQ.scene-banks` and the
+/// `bank` host kind.
+pub(crate) fn scene_bank_label(index: usize, name: Option<&str>) -> String {
+    let auto_label = scene_bank_auto_label(index);
+    match name {
+        Some(name) => format!("{auto_label} — {name}"),
+        None => auto_label,
+    }
+}
+
+/// The scene the transport's pending quantized launch waits for, if any.
+/// Shared by `SEQ.queued-scene` and the host kinds' `queued` fields.
+pub(crate) fn queued_transport_scene(state: &SequencerState) -> Option<usize> {
+    use sequencer::quantized_launch::{PatternLaunchTarget, QuantizedLaunchOwner};
+    state
+        .quantized_launches()
+        .pending_target(QuantizedLaunchOwner::Transport)
+        .and_then(|target| match target {
+            PatternLaunchTarget::Scene { scene }
+            | PatternLaunchTarget::SceneTracks { scene, .. } => Some(scene),
+            PatternLaunchTarget::TrackPattern { .. } => None,
+        })
+}
+
 pub(super) fn build_scene_banks_value(banks: &[SceneBank]) -> Value {
     let mut offset = 0usize;
     Value::List(
@@ -802,11 +827,7 @@ pub(super) fn build_scene_banks_value(banks: &[SceneBank]) -> Value {
             .iter()
             .enumerate()
             .map(|(index, bank)| {
-                let auto_label = scene_bank_auto_label(index);
-                let label = match bank.name.as_deref() {
-                    Some(name) => format!("{auto_label} — {name}"),
-                    None => auto_label,
-                };
+                let label = scene_bank_label(index, bank.name.as_deref());
                 let mut map = HashMap::new();
                 number_field(&mut map, "id", bank.id.0 as f64);
                 map.insert(

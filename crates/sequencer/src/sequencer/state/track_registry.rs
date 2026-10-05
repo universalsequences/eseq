@@ -14,6 +14,15 @@ pub struct TrackRegistry {
     order: Vec<TrackId>,
     index_by_id: HashMap<TrackId, usize>,
     next_id: u64,
+    /// See [`Self::generation`].
+    generation: u64,
+}
+
+/// Source of [`TrackRegistry::generation`] values.
+static NEXT_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn next_generation() -> u64 {
+    NEXT_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 impl Default for TrackRegistry {
@@ -22,6 +31,7 @@ impl Default for TrackRegistry {
             order: Vec::new(),
             index_by_id: HashMap::new(),
             next_id: TrackId::MIN.0,
+            generation: next_generation(),
         }
     }
 }
@@ -53,7 +63,17 @@ impl TrackRegistry {
             order,
             index_by_id,
             next_id,
+            generation: next_generation(),
         })
+    }
+
+    /// A process-unique value for each registry built from scratch (a
+    /// project load or a clear), kept by edits and clones. Ids restart with
+    /// every project, so a holder of `TrackId`s across frames (the host
+    /// kinds) pairs them with this to tell a new project's track 1 from the
+    /// old one's.
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 
     pub fn len(&self) -> usize {

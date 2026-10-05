@@ -6,6 +6,7 @@ mod constants;
 mod custom_ui;
 mod editor_setup;
 mod host_commands;
+mod host_kinds;
 mod input;
 mod instrument_favorites;
 mod lisp_hot_reload;

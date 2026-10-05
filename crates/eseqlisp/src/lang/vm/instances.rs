@@ -78,6 +78,14 @@ pub type InstanceId = u64;
 /// accepted label back with `VM::set_instance_builtin_field`.
 pub type InstanceLabelHook = Rc<dyn Fn(InstanceId, &Value)>;
 
+/// Answers a by-value read of a `:host` field nothing observes (kind-bindings
+/// spec §9, D3): the host skips computing unobserved fields, so their cells
+/// may be stale; a read of one asks the host for the current value instead.
+/// `None` keeps the cell's value. A `Some` is type-checked and written to the
+/// cell like a host push. The hook may register keyed instances (a lazy
+/// `t.steps`, D2) but must not read fields through Lisp.
+pub type HostFieldReader = Rc<dyn Fn(&mut VM, InstanceId, &str) -> Option<Value>>;
+
 /// Reserved DAG namespace prefix for instance field sources.
 pub const INSTANCE_NAMESPACE_PREFIX: &str = "%instance/";
 
@@ -976,6 +984,13 @@ struct Resolved<'s> {
     record: Option<&'s InstanceRecord>,
 }
 
+impl Resolved<'_> {
+    /// A `:host` field of a live instance (what the host pushes).
+    fn is_live_host(&self) -> bool {
+        matches!(self.slot, FieldSlot::Host(_)) && self.record.is_some()
+    }
+}
+
 /// The live instances of one keyed kind by key (kind-bindings spec §4).
 #[derive(Clone, Default)]
 struct KeyRegistry {
@@ -1439,6 +1454,15 @@ impl VM {
     /// while the VM holds it.
     pub fn register_instance_kind(&mut self, schema: InstanceKindSchema) -> Result<(), InstanceError> {
         schema.validate()?;
+        let name = kind_name_of(&schema.kind);
+        if let Some(owner) = self.reserved_kind_names.get(name)
+            && schema.kind.rsplit_once(':').map(|(module, _)| module) != Some(owner.as_str())
+        {
+            return Err(InstanceError::InvalidSchema(format!(
+                "kind name '{name}' is reserved for the host kinds of {owner}; \
+                 use (import {owner} :refer ({name})) or pick another name"
+            )));
+        }
         if let Some(previous) = self.instances.kinds.get(schema.kind.as_str())
             && !previous.key.same_shape(&schema.key)
         {
@@ -1453,6 +1477,7 @@ impl VM {
             .kind_rc(&schema.kind)
             .unwrap_or_else(|| Rc::from(schema.kind.as_str()));
         let previous = self.instances.kinds.insert(kind.clone(), schema);
+        self.kind_schema_generation += 1;
         // A (re)registered kind may carry a new `:view`: every bound view
         // buffer of its instances re-renders through it.
         self.mark_instance_views_of_kind_dirty(&kind);
@@ -1768,6 +1793,48 @@ impl VM {
     pub fn keyed_instance(&self, kind: &str, key: &[u64]) -> Option<InstanceId> {
         let (kind, _) = self.instances.resolve_keyed_kind(kind).ok()?;
         self.instances.keyed_id(kind, key)
+    }
+
+    /// The one instance of singleton kind `kind` (its kind id), once its
+    /// `def-kind` has run.
+    pub fn singleton_instance(&self, kind: &str) -> Option<InstanceId> {
+        self.instances
+            .singletons
+            .get(kind)
+            .copied()
+            .filter(|id| self.instances.live.contains_key(id))
+    }
+
+    /// The live children of `parent` of kind `kind` (a kind id, as
+    /// [`Self::keyed_instance`] takes) with their keys, in no particular
+    /// order and without allocating (for a host's drop loops).
+    pub fn keyed_children_of_kind<'s>(
+        &'s self,
+        parent: InstanceId,
+        kind: &'s str,
+    ) -> impl Iterator<Item = (InstanceId, &'s [u64])> + 's {
+        self.instances
+            .children
+            .get(&parent)
+            .into_iter()
+            .flatten()
+            .filter_map(move |id| {
+                let record = self.instances.live.get(id)?;
+                (&*record.kind == kind).then_some((*id, record.key.as_deref()?))
+            })
+    }
+
+    /// The live children of `parent` (instances of `:key (parent index)`
+    /// kinds under it), sorted.
+    pub fn keyed_children(&self, parent: InstanceId) -> Vec<InstanceId> {
+        let mut ids: Vec<InstanceId> = self
+            .instances
+            .children
+            .get(&parent)
+            .map(|children| children.iter().copied().collect())
+            .unwrap_or_default();
+        ids.sort_unstable();
+        ids
     }
 
     /// The current key of a live keyed instance.
@@ -2106,9 +2173,126 @@ impl VM {
                 self,
             ));
         }
-        let value = self.instances.value_of(id, &resolved);
+        let value = if resolved.is_live_host() {
+            self.refresh_cold_host_field(id, field)?;
+            self.instances.field_value(id, field)?
+        } else {
+            self.instances.value_of(id, &resolved)
+        };
         self.track_instance_source_read(&instance_namespace(id), field, &value);
         Ok(value)
+    }
+
+    /// Before a read of a live instance's `:host` field nothing observes:
+    /// the host skips computing unobserved fields (kind-bindings spec D3),
+    /// so ask its [`HostFieldReader`] for the current value and store it.
+    /// Returns whether the cell may have changed.
+    fn refresh_cold_host_field(&mut self, id: InstanceId, field: &str) -> Result<bool, VMError> {
+        let Some(reader) = self.host_field_reader.clone() else {
+            return Ok(false);
+        };
+        if self.host_field_observed(id, field) {
+            return Ok(false);
+        }
+        let Some(value) = reader(self, id, field) else {
+            return Ok(false);
+        };
+        if self
+            .instances
+            .field_value(id, field)
+            .is_ok_and(|cell| cell == value)
+        {
+            return Ok(false);
+        }
+        self.set_instance_field(id, field, value)?;
+        Ok(true)
+    }
+
+    /// Whether anything observes `field` of instance `id` (kind-bindings
+    /// spec §9, D3): its DAG source has readers, or a `#'` binding to it is
+    /// held outside the slot store (by a widget or a Lisp value). The host
+    /// computes and pushes only observed `:host` fields.
+    pub fn host_field_observed(&self, id: InstanceId, field: &str) -> bool {
+        self.host_fields_observed(id, &[field]) != 0
+    }
+
+    /// [`Self::host_field_observed`] for several fields of one instance at
+    /// once: bit `i` of the result is set when `fields[i]` is observed. The
+    /// namespace is formatted once and the slot store locked once. At most
+    /// 32 fields.
+    pub fn host_fields_observed(&self, id: InstanceId, fields: &[&str]) -> u32 {
+        debug_assert!(
+            fields.len() <= 32,
+            "host_fields_observed takes at most 32 fields"
+        );
+        let namespace = instance_namespace(id);
+        let sources = self.dag.namespace_field_sources.get(&namespace);
+        let mut mask = 0u32;
+        for (bit, field) in fields.iter().enumerate().take(32) {
+            let read = sources
+                .and_then(|sources| sources.get(*field))
+                .is_some_and(|node| {
+                    matches!(
+                        self.dag.nodes.get(node),
+                        Some(ReactiveNode::Source { dependents, .. }) if !dependents.is_empty()
+                    )
+                });
+            if read {
+                mask |= 1 << bit;
+            }
+        }
+        if let Some(bound) = self.bound_instance_fields.get(&id) {
+            let unread = fields
+                .iter()
+                .enumerate()
+                .take(32)
+                .filter_map(|(bit, field)| {
+                    (mask & (1 << bit) == 0)
+                        .then(|| bound.get(*field).map(|kind| (bit, *field, *kind)))
+                        .flatten()
+                });
+            mask |= self
+                .reactive_float_slots
+                .binding_slots_held(&namespace, unread);
+        }
+        mask
+    }
+
+    /// Whether any live child of `parent` of kind `kind` has one of
+    /// `fields` observed ([`Self::host_fields_observed`]).
+    pub fn keyed_children_observed(&self, parent: InstanceId, kind: &str, fields: &[&str]) -> bool {
+        self.keyed_children_of_kind(parent, kind)
+            .any(|(child, _)| self.host_fields_observed(child, fields) != 0)
+    }
+
+    /// Bumped whenever an instance field may have gained an observer (a
+    /// tracked read adds a reader edge, or a `#'` binding is handed out).
+    /// Losing one does not bump it, so a host caching "nothing observes
+    /// these" until it moves never misses a new observer.
+    pub fn instance_observer_epoch(&self) -> u64 {
+        self.instance_observer_epoch
+    }
+
+    /// Bumped whenever a kind schema is (re)registered or rolled back, so a
+    /// host can re-check the kinds it publishes after a hot reload.
+    pub fn instance_kind_schema_generation(&self) -> u64 {
+        self.kind_schema_generation
+    }
+
+    /// Install (or remove) the host's answer to reads of unobserved `:host`
+    /// fields ([`HostFieldReader`]).
+    pub fn set_host_field_reader(&mut self, reader: Option<HostFieldReader>) {
+        self.host_field_reader = reader;
+    }
+
+    /// Reserve kind names for `module` (kind-bindings spec §3.4: the host
+    /// kinds of `eseq.kinds`): defining a kind with one of these names in
+    /// any other module is an error. Existing kinds are not checked.
+    pub fn reserve_kind_names(&mut self, module: &str, names: &[&str]) {
+        for name in names {
+            self.reserved_kind_names
+                .insert((*name).to_string(), module.to_string());
+        }
     }
 
     /// Record a read of the store-backed source `(namespace, field)`, whose
@@ -2119,6 +2303,7 @@ impl VM {
         if let Some(ctx_id) = self.tracking_stack.last().copied() {
             let source_id = self.get_or_create_instance_source_node(namespace, field, value);
             self.dag.add_edge(source_id, ctx_id);
+            self.instance_observer_epoch += 1;
         }
     }
 
@@ -2397,13 +2582,20 @@ impl VM {
             return Err(unbindable("is a host-stored :document field".to_string()));
         }
         let namespace = instance_namespace(id);
-        let value = self.instances.value_of(id, &resolved);
-        if resolved.record.is_none() {
+        let live_host = resolved.is_live_host();
+        let mut value = self.instances.value_of(id, &resolved);
+        let stale = resolved.record.is_none();
+        if live_host && self.refresh_cold_host_field(id, field)? {
+            value = self.instances.field_value(id, field)?;
+        }
+        if stale {
             // A stale instance: a detached slot holding the default.
             return Ok(crate::reactive::detached_binding_ref(
                 namespace, field, binding, &value,
             ));
         }
+        // A new held ref may observe a field nothing observed before.
+        self.instance_observer_epoch += 1;
         let bound = self.bound_instance_fields.entry(id).or_default();
         let slot = if bound.contains_key(field) {
             // Already bound: every change of the field keeps the slot current.
