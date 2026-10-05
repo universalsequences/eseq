@@ -1716,10 +1716,10 @@ fn commit_active_patcher_text_edit(
     let promoted_macro = root_patch.as_ref().is_some_and(|root_patch| {
         promote_created_macro_definition(root_patch, state, view_key, &committed_node_id)
     });
-    // Retyping the header of a created macro's instance renames the macro
-    // (that is how an encapsulated `sub1` gets a real name) rather than
-    // leaving a call to an operator that does not exist.
-    let renamed_macro = encapsulate::rename_created_macro_from_instance_text(
+    // Retyping a local macro instance's name renames the macro and every
+    // call to it (that is how an encapsulated `sub1` gets a real name)
+    // rather than leaving a call to an operator that does not exist.
+    let renamed_macro = encapsulate::rename_macro_from_instance_text(
         node,
         state,
         view_key,

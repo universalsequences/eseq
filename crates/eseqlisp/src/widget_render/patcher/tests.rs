@@ -22573,6 +22573,108 @@ fn retyping_an_encapsulated_instance_renames_the_macro() {
     assert!(!source.contains("sub1"), "{source}");
 }
 
+/// Once the patch is saved an encapsulated macro is an ordinary defmacro in
+/// the file. Retyping one instance's name still renames it: the defmacro and
+/// every call take the new name, instead of the edited node becoming a call
+/// to an operator that does not exist.
+#[test]
+fn retyping_a_saved_macro_instance_renames_the_defmacro_and_every_call() {
+    let path = temp_patcher_source_path("source-macro-rename");
+    fs::write(
+        &path,
+        "(defmacro sub1 (x) (* x 2))\n\
+         (def g (in 1 @name gate))\n\
+         (def first (sub1 g))\n\
+         (def second (sub1 first))\n\
+         (out 1 second)\n",
+    )
+    .expect("write source");
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+    let mut state = PatcherInteractionState::default();
+    state.selected_nodes.insert("first".to_string());
+    set_patcher_interaction_state(key, state);
+    assert!(super::run_patcher_command(&node, "edit-node").is_some());
+
+    let mut state = get_patcher_interaction_state(key);
+    let edit = state.text_edit.as_mut().expect("edit-node opens the edit");
+    let original = edit.original_text.clone();
+    assert!(original.starts_with("sub1"), "{original}");
+    edit.text = original.replacen("sub1", "wobble", 1);
+    assert!(commit_active_patcher_text_edit(&node, &mut state, "root"));
+    assert_eq!(
+        state.edit_state.renamed_macros.get("sub1").map(String::as_str),
+        Some("wobble")
+    );
+
+    let (_, root_patch) = load_patch_from_props(&node.props).expect("load patch");
+    let visible = sidecar::root_patch_with_interaction(&root_patch, &state);
+    for id in ["first", "second"] {
+        let instance = visible.nodes.iter().find(|n| n.id == id).unwrap();
+        assert_eq!(instance.op, "wobble", "{id}");
+        assert_eq!(instance.kind, NodeKind::MacroInstance, "{id}");
+        assert!(instance.diagnostic.is_none(), "{id}: {:?}", instance.diagnostic);
+    }
+    let source = generate::generate_patch_source(&visible, PatcherIntent::Instrument)
+        .expect("generate")
+        .source;
+    assert!(source.contains("(defmacro wobble"), "{source}");
+    assert!(!source.contains("sub1"), "{source}");
+    let reparsed = parse_patch_source(&source, PatcherIntent::Instrument).expect("reparse");
+    assert!(reparsed.diagnostics.is_empty(), "{:?}", reparsed.diagnostics);
+
+    // The macro opens under its new name, body intact.
+    state.active_macro = Some("wobble".to_string());
+    let body = active_patcher_patch(&root_patch, &state);
+    assert!(!body.nodes.is_empty());
+
+    // Renaming back drops the rename instead of chaining it.
+    state.active_macro = None;
+    state.selected_nodes = ["second".to_string()].into_iter().collect();
+    set_patcher_interaction_state(key, state);
+    assert!(super::run_patcher_command(&node, "edit-node").is_some());
+    let mut state = get_patcher_interaction_state(key);
+    let edit = state.text_edit.as_mut().unwrap();
+    edit.text = edit.original_text.replacen("wobble", "sub1", 1);
+    assert!(commit_active_patcher_text_edit(&node, &mut state, "root"));
+    assert!(state.edit_state.renamed_macros.is_empty());
+    reset_patcher_widget_state(key);
+    let _ = fs::remove_file(path);
+}
+
+/// Retyping a macro instance as an operator that already exists swaps that
+/// one node; it is not a rename.
+#[test]
+fn retyping_a_saved_macro_instance_as_a_known_operator_does_not_rename() {
+    let path = temp_patcher_source_path("source-macro-swap");
+    fs::write(
+        &path,
+        "(defmacro sub1 (x) (* x 2))\n\
+         (def g (in 1 @name gate))\n\
+         (def first (sub1 g))\n\
+         (def second (sub1 first))\n\
+         (out 1 second)\n",
+    )
+    .expect("write source");
+    let node = patcher_test_node(&path);
+    let key = patcher_state_key(&node);
+    let mut state = PatcherInteractionState::default();
+    state.selected_nodes.insert("first".to_string());
+    set_patcher_interaction_state(key, state);
+    assert!(super::run_patcher_command(&node, "edit-node").is_some());
+    let mut state = get_patcher_interaction_state(key);
+    let edit = state.text_edit.as_mut().unwrap();
+    edit.text = edit.original_text.replacen("sub1", "tanh", 1);
+    commit_active_patcher_text_edit(&node, &mut state, "root");
+    assert!(state.edit_state.renamed_macros.is_empty());
+    let (_, root_patch) = load_patch_from_props(&node.props).expect("load patch");
+    let visible = sidecar::root_patch_with_interaction(&root_patch, &state);
+    let second = visible.nodes.iter().find(|n| n.id == "second").unwrap();
+    assert_eq!(second.op, "sub1");
+    reset_patcher_widget_state(key);
+    let _ = fs::remove_file(path);
+}
+
 #[test]
 fn encapsulation_with_two_outlets_returns_a_tuple() {
     let path = temp_patcher_source_path("encapsulate-tuple");

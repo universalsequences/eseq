@@ -212,6 +212,7 @@ The patch editor has its own table, changed with `eseq.patcher/bind-key` and `es
 - `undo` (`P-z`), `redo` (`P-S-z`), `copy` (`P-c`), `paste` (`P-v`)
 - `encapsulate` (`P-e`) and `toggle-cable-style` (`P-y`)
 - `open-macro` (`RET`) and `delete-selection` (Backspace or Delete)
+- `edit-node` (unbound), which opens the selected node's text with its name selected; the right-click menu offers it as Rename on a macro and Edit on other nodes
 - `open-bubble` (`P-k`), `connect-bubble` (`P-S-k`), `retry-bubble` (`P-r`) and `dismiss-bubble` (`ESC`), for the agent prompt
 - `accept-suggestions` (`Tab`), for suggested cables
 

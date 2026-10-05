@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use super::display::node_display_label;
 use super::model::{
-    ArgValue, ConnectionKind, InputPortRef, NodeKind, OutputPortRef, Patch, PatchConnection,
+    ArgValue, ConnectionKind, InputPortRef, MacroOrigin, NodeKind, OutputPortRef, Patch, PatchConnection,
     PatchNode, hidden_inline_node_ids,
 };
 use super::state::{
@@ -810,47 +810,59 @@ pub(super) fn encapsulate_patcher_selection_result(
     Ok(instance_id)
 }
 
-/// Retyping a created macro instance's header renames the macro rather than
-/// turning the node into a call to an operator that does not exist. This is
-/// how an encapsulated `sub1` gets a real name: double-click it, type, commit.
+/// Retyping a local macro instance's name renames the macro rather than
+/// turning the node into a call to an operator that does not exist: the
+/// defmacro and every call to it take the new name. This is how an
+/// encapsulated `sub1` gets a real name — double-click it, type, commit — and
+/// it works the same after the patch is saved and the macro lives in the file.
 ///
-/// `previous_text` is the header as it stood before the edit — the macro name
-/// we are renaming *from*.
-pub(super) fn rename_created_macro_from_instance_text(
+/// Only a new name nothing else answers to counts as a rename; retyping the
+/// node as an existing operator or macro swaps that one node, as for any
+/// other node.
+///
+/// `previous_text` is the node text as it stood before the edit — its first
+/// token is the macro name we are renaming *from*.
+pub(super) fn rename_macro_from_instance_text(
     node: &crate::layout::LayoutNode,
     state: &mut PatcherInteractionState,
     view_key: &str,
     node_id: &str,
     previous_text: &str,
 ) -> bool {
-    let old = previous_text.trim();
-    let Some(macro_edit) = state.edit_state.created_macros.get(old) else {
+    let Some(old) = previous_text.split_whitespace().next().map(str::to_string) else {
         return false;
     };
-    if macro_edit.instance_node_id != node_id {
-        return false;
-    }
-    let Some(edit) = state
+    let Some(new) = state
         .edit_state
         .nodes
         .get(&node_edit_key(view_key, node_id))
+        .and_then(|edit| edit.text.split_whitespace().next())
+        .map(str::to_string)
     else {
         return false;
     };
-    let new = edit.text.trim().to_string();
     if new == old || !super::interaction::is_valid_created_macro_name(&new) {
         return false;
     }
-    let patch = super::load_patch_from_props(&node.props)
+    let visible = super::load_patch_from_props(&node.props)
         .ok()
-        .map(|(_, root_patch)| root_patch);
-    let taken_names = super::autocomplete_macros_for_patch(&node.props, patch.as_ref())
+        .map(|(_, root_patch)| super::state::patch_with_created_macros(root_patch, state));
+    let is_local_source_macro = visible.as_ref().is_some_and(|patch| {
+        patch.macros.iter().any(|macro_patch| {
+            macro_patch.name == old && macro_patch.origin == MacroOrigin::Local
+        })
+    });
+    let taken_names = super::autocomplete_macros_for_patch(&node.props, visible.as_ref())
         .into_iter()
         .map(|macro_patch| macro_patch.name)
         .chain(state.edit_state.created_macros.keys().cloned())
         .chain(super::project::dgenlisp_operator_names().iter().cloned())
         .collect::<HashSet<_>>();
-    super::state::rename_created_macro(state, old, &new, &taken_names)
+    if state.edit_state.created_macros.contains_key(&old) {
+        return super::state::rename_created_macro(state, &old, &new, &taken_names);
+    }
+    is_local_source_macro
+        && super::state::rename_source_macro(state, &old, &new, &taken_names)
 }
 
 /// First free `sub1`, `sub2`, … Names must not collide with an existing macro
