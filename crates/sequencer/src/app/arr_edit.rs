@@ -32,6 +32,22 @@ pub const EMPTY_CLIP_ERROR: &str =
     "A clip must have a source: silence is an empty stretch of lane, not an empty clip — \
      use delete to silence a span";
 
+/// What a script's drag has set so far (`App::arr_script_drag`): per clip
+/// id its start and end, and the song end. Ordered by clip id, the order
+/// every frame applies them in.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ArrangementDragTargets {
+    pub clips: std::collections::BTreeMap<u64, ClipDragTarget>,
+    pub end: Option<f64>,
+}
+
+/// One clip's targets in an [`ArrangementDragTargets`].
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ClipDragTarget {
+    pub start: Option<f64>,
+    pub end: Option<f64>,
+}
+
 /// Reject a beat that cannot address anything on the timeline.
 fn finite_beat(name: &str, beat: f64) -> Result<f64, String> {
     if !beat.is_finite() || beat < 0.0 {
@@ -99,12 +115,17 @@ impl App {
     /// wrap, so any span past that is silence). `None` for pattern/empty
     /// clips and for takes with no step mapping.
     fn take_clip_playable_end(&self, track: usize, clip: &ArrClip) -> Option<f64> {
+        self.state
+            .with_project_scenes(|scenes| Self::take_playable_end_in(scenes, track, clip))
+    }
+
+    /// `take_clip_playable_end` against borrowed `scenes`.
+    fn take_playable_end_in(scenes: &ProjectScenes, track: usize, clip: &ArrClip) -> Option<f64> {
         let take_id = clip.take_id?;
-        let (steps_per_beat, total_len) = self.state.with_project_scenes(|scenes| {
+        let (steps_per_beat, total_len) =
             crate::sequencer::SongCompileContext::song_track_take_step_mapping(
                 scenes, track, take_id,
-            )
-        })?;
+            )?;
         (steps_per_beat > 0.0)
             .then(|| clip.start_beat + (total_len - clip.offset_steps).max(0.0) / steps_per_beat)
     }
@@ -141,6 +162,33 @@ impl App {
         merge_key: crate::app::history::MergeKey,
         edit: impl FnOnce(&mut ProjectArrangement, &ProjectScenes) -> Result<(), String>,
     ) -> Result<(), String> {
+        self.edit_arrangement_staged(label, merge_key, false, edit)
+    }
+
+    /// `edit_arrangement` with an optional coalescing merge key: the
+    /// one-shot and continuous variants of the `_impl` primitives.
+    fn edit_arrangement_keyed(
+        &mut self,
+        label: &'static str,
+        merge_key: Option<crate::app::history::MergeKey>,
+        edit: impl FnOnce(&mut ProjectArrangement, &ProjectScenes) -> Result<(), String>,
+    ) -> Result<(), String> {
+        match merge_key {
+            Some(merge_key) => self.edit_arrangement_coalesced(label, merge_key, edit),
+            None => self.edit_arrangement(label, edit),
+        }
+    }
+
+    /// `edit_arrangement_coalesced`'s body. `from_gesture_start` runs `edit`
+    /// against the arrangement as the gesture found it rather than the
+    /// current one (`arr_script_drag` rebuilds every frame from there).
+    fn edit_arrangement_staged(
+        &mut self,
+        label: &'static str,
+        merge_key: crate::app::history::MergeKey,
+        from_gesture_start: bool,
+        edit: impl FnOnce(&mut ProjectArrangement, &ProjectScenes) -> Result<(), String>,
+    ) -> Result<(), String> {
         self.require_song_edit_unlocked()?;
         if self
             .history
@@ -151,20 +199,23 @@ impl App {
             finish_active_gesture(self);
         }
         let current = self.require_arrangement()?;
-        let mut after = current.clone();
-        self.state
-            .with_project_scenes(|scenes| edit(&mut after, scenes))?;
-        if after == current {
-            return Ok(());
-        }
         let gesture_before = self
             .history
             .active_gesture_patch(&merge_key)
             .and_then(|patch| match patch {
                 EditPatch::Arrangement(patch) => patch.before.clone(),
                 _ => None,
-            })
-            .unwrap_or(current);
+            });
+        let mut after = match &gesture_before {
+            Some(before) if from_gesture_start => before.clone(),
+            _ => current.clone(),
+        };
+        self.state
+            .with_project_scenes(|scenes| edit(&mut after, scenes))?;
+        if after == current {
+            return Ok(());
+        }
+        let gesture_before = gesture_before.unwrap_or(current);
         self.state.set_committed_arrangement(Some(after.clone()))?;
         if gesture_before == after {
             self.history.discard_active_gesture_entry(&merge_key);
@@ -304,19 +355,29 @@ impl App {
     pub fn arr_clip_move(&mut self, clip_id: ClipId, new_start_beat: f64) -> Result<(), String> {
         let new_start_beat = finite_beat("Clip start beat", new_start_beat)?;
         self.edit_arrangement("Move clip", move |arrangement, scenes| {
-            let (track, clip) = Self::locate_clip(arrangement, clip_id)?;
-            if clip.start_beat == new_start_beat {
-                return Ok(());
-            }
-            let new_end_beat = new_start_beat + (clip.end_beat - clip.start_beat);
-            let mut moved = Self::take_clip(arrangement, track, clip_id);
-            moved.start_beat = new_start_beat;
-            moved.end_beat = new_end_beat;
-            occlude_span(arrangement, scenes, track, new_start_beat, new_end_beat)?;
-            insert_clip_sorted(arrangement, track, moved);
-            arrangement.end_beat = arrangement.end_beat.max(new_end_beat);
-            Ok(())
+            Self::move_clip_in(arrangement, scenes, clip_id, new_start_beat)
         })
+    }
+
+    /// `arr_clip_move`'s edit on `arrangement`.
+    fn move_clip_in(
+        arrangement: &mut ProjectArrangement,
+        scenes: &ProjectScenes,
+        clip_id: ClipId,
+        new_start_beat: f64,
+    ) -> Result<(), String> {
+        let (track, clip) = Self::locate_clip(arrangement, clip_id)?;
+        if clip.start_beat == new_start_beat {
+            return Ok(());
+        }
+        let new_end_beat = new_start_beat + (clip.end_beat - clip.start_beat);
+        let mut moved = Self::take_clip(arrangement, track, clip_id);
+        moved.start_beat = new_start_beat;
+        moved.end_beat = new_end_beat;
+        occlude_span(arrangement, scenes, track, new_start_beat, new_end_beat)?;
+        insert_clip_sorted(arrangement, track, moved);
+        arrangement.end_beat = arrangement.end_beat.max(new_end_beat);
+        Ok(())
     }
 
     /// Resize a clip to `[new_start_beat, new_end_beat)`.
@@ -363,77 +424,119 @@ impl App {
                 "A clip must have a positive span (got [{new_start_beat}, {new_end_beat}))"
             ));
         }
-        let clamped_end = {
+        if merge_key.is_none() {
+            // Dragging a take clip's right edge past its playable end GROWS
+            // the take (takes never wrap; the drag asks for more length, so
+            // the linear axis extends with silence). One-shot commits only —
+            // the coalesced panel pickers stay clamped and route length
+            // changes through the Length field instead. Only the RIGHT edge
+            // is a length ask: a left-edge drag that lowers the playable end
+            // (offset already floored at 0) is phase, and must never mint
+            // silence.
             let arrangement = self.require_arrangement()?;
             let (track, clip) = Self::locate_clip(&arrangement, clip_id)?;
             // Re-stamp first: the playable length depends on the offset the
             // trimmed clip will actually carry. Borrow the scenes — cloning
             // the whole pattern store here doubled the cost of every resize.
-            let restamped = self
-                .state
-                .with_project_scenes(|scenes| restamped_clip(scenes, track, &clip, new_start_beat));
-            match restamped {
-                Some(restamped) => match self.take_clip_playable_end(track, &restamped) {
-                    Some(limit) => {
-                        // Dragging a take clip's right edge past its playable
-                        // end GROWS the take (takes never wrap; the drag asks
-                        // for more length, so the linear axis extends with
-                        // silence). One-shot commits only — the coalesced
-                        // panel pickers stay clamped and route length changes
-                        // through the Length field instead. Only the RIGHT
-                        // edge is a length ask: a left-edge drag that lowers
-                        // the playable end (offset already floored at 0) is
-                        // phase, and must never mint silence.
-                        if merge_key.is_none()
-                            && (new_start_beat - clip.start_beat).abs() < 1e-9
-                            && new_end_beat > limit + 1e-9
-                            && limit > new_start_beat
-                        {
-                            return self.arr_take_clip_resize_growing(
-                                clip_id,
-                                track,
-                                restamped,
-                                new_start_beat,
-                                new_end_beat,
-                            );
-                        }
-                        new_end_beat.min(limit).max(new_start_beat)
-                    }
-                    None => new_end_beat,
-                },
-                // The re-anchored clip would have nothing left to play.
-                None => new_start_beat,
+            let grows = self.state.with_project_scenes(|scenes| {
+                let restamped = restamped_clip(scenes, track, &clip, new_start_beat)?;
+                let limit = Self::take_playable_end_in(scenes, track, &restamped)?;
+                ((new_start_beat - clip.start_beat).abs() < 1e-9
+                    && new_end_beat > limit + 1e-9
+                    && limit > new_start_beat)
+                    .then_some(restamped)
+            });
+            if let Some(restamped) = grows {
+                return self.arr_take_clip_resize_growing(
+                    clip_id,
+                    track,
+                    restamped,
+                    new_start_beat,
+                    new_end_beat,
+                );
             }
+        }
+        self.edit_arrangement_keyed("Resize clip", merge_key, move |arrangement, scenes| {
+            Self::resize_clip_in(arrangement, scenes, clip_id, new_start_beat, new_end_beat)
+        })
+    }
+
+    /// `arr_clip_resize`'s edit on `arrangement`, a take's right edge
+    /// clamped to its playable end (no growing).
+    fn resize_clip_in(
+        arrangement: &mut ProjectArrangement,
+        scenes: &ProjectScenes,
+        clip_id: ClipId,
+        new_start_beat: f64,
+        new_end_beat: f64,
+    ) -> Result<(), String> {
+        let (track, clip) = Self::locate_clip(arrangement, clip_id)?;
+        let restamped = restamped_clip(scenes, track, &clip, new_start_beat);
+        let clamped_end = match &restamped {
+            Some(restamped) => match Self::take_playable_end_in(scenes, track, restamped) {
+                Some(limit) => new_end_beat.min(limit).max(new_start_beat),
+                None => new_end_beat,
+            },
+            // The re-anchored clip would have nothing left to play.
+            None => new_start_beat,
         };
-        if clamped_end <= new_start_beat {
+        let Some(mut resized) = restamped.filter(|_| clamped_end > new_start_beat) else {
             return Err(
                 "Resizing this take clip to a positive span is impossible: its source has no \
                  audio left at that start beat"
                     .to_string(),
             );
-        }
-        let resize = move |arrangement: &mut ProjectArrangement,
-                           scenes: &ProjectScenes|
-              -> Result<(), String> {
-            let (track, clip) = Self::locate_clip(arrangement, clip_id)?;
-            if clip.start_beat == new_start_beat && clip.end_beat == clamped_end {
-                return Ok(());
-            }
-            Self::take_clip(arrangement, track, clip_id);
-            let mut resized = restamped_clip(scenes, track, &clip, new_start_beat)
-                .ok_or_else(|| EMPTY_CLIP_ERROR.to_string())?;
-            resized.end_beat = clamped_end;
-            occlude_span(arrangement, scenes, track, new_start_beat, clamped_end)?;
-            insert_clip_sorted(arrangement, track, resized);
-            arrangement.end_beat = arrangement.end_beat.max(clamped_end);
-            Ok(())
         };
-        match merge_key {
-            Some(merge_key) => {
-                self.edit_arrangement_coalesced("Resize clip", merge_key, resize)
-            }
-            None => self.edit_arrangement("Resize clip", resize),
+        if clip.start_beat == new_start_beat && clip.end_beat == clamped_end {
+            return Ok(());
         }
+        Self::take_clip(arrangement, track, clip_id);
+        resized.end_beat = clamped_end;
+        occlude_span(arrangement, scenes, track, new_start_beat, clamped_end)?;
+        insert_clip_sorted(arrangement, track, resized);
+        arrangement.end_beat = arrangement.end_beat.max(clamped_end);
+        Ok(())
+    }
+
+    /// A script drag's frame (kind-bindings spec §14.2d): `targets` holds
+    /// every clip start / end and the song end the drag has set so far, and
+    /// each frame rebuilds the arrangement from where the gesture started
+    /// (`merge_key`'s open entry, else the committed one), applying them in
+    /// a fixed order: clips by id (a start moves, an end resizes from the
+    /// clip's start then), then the song end. One undo entry for the whole
+    /// drag however many clips it touches, and a clip dragged across
+    /// another only occludes it where it ends up. Take ends clamp (a
+    /// one-shot `arr_clip_resize` grows the take instead).
+    pub fn arr_script_drag(
+        &mut self,
+        merge_key: crate::app::history::MergeKey,
+        targets: &ArrangementDragTargets,
+    ) -> Result<(), String> {
+        for target in targets.clips.values() {
+            for beat in [target.start, target.end].into_iter().flatten() {
+                finite_beat("Clip beat", beat)?;
+            }
+        }
+        if let Some(end) = targets.end {
+            finite_beat("Arrangement end beat", end)?;
+        }
+        let rebuild = |arrangement: &mut ProjectArrangement, scenes: &ProjectScenes| {
+            for (&clip_id, target) in &targets.clips {
+                let clip_id = ClipId(clip_id);
+                if let Some(start) = target.start {
+                    Self::move_clip_in(arrangement, scenes, clip_id, start)?;
+                }
+                if let Some(end) = target.end {
+                    let (_, clip) = Self::locate_clip(arrangement, clip_id)?;
+                    Self::resize_clip_in(arrangement, scenes, clip_id, clip.start_beat, end)?;
+                }
+            }
+            match targets.end {
+                Some(end) => Self::set_end_in(arrangement, end),
+                None => Ok(()),
+            }
+        };
+        self.edit_arrangement_staged("Edit arrangement", merge_key, true, rebuild)
     }
 
     /// Grow a take so a right-edge resize past its playable end means what
@@ -663,12 +766,7 @@ impl App {
             edited.end_beat = gesture_end_beat.unwrap_or(edited.end_beat).min(end_limit);
             Ok(())
         };
-        match merge_key {
-            Some(merge_key) => {
-                self.edit_arrangement_coalesced("Set clip start offset", merge_key, set_offset)
-            }
-            None => self.edit_arrangement("Set clip start offset", set_offset),
-        }
+        self.edit_arrangement_keyed("Set clip start offset", merge_key, set_offset)
     }
 
     /// Split a clip at `beat` into two clips playing the same uninterrupted
@@ -881,37 +979,42 @@ impl App {
     pub fn arr_set_end(&mut self, end_beat: f64) -> Result<(), String> {
         let end_beat = finite_beat("Arrangement end beat", end_beat)?;
         self.edit_arrangement("Set song end", move |arrangement, _scenes| {
-            if end_beat <= 0.0 {
-                return Err(format!(
-                    "Arrangement end beat {end_beat} must be greater than zero"
-                ));
-            }
-            let last_clip_end = arrangement
-                .track_lanes
-                .iter()
-                .flatten()
-                .map(|clip| clip.end_beat)
-                .fold(0.0f64, f64::max);
-            if end_beat < last_clip_end {
-                return Err(format!(
-                    "Cannot shorten the arrangement to beat {end_beat}: a clip runs to beat \
-                     {last_clip_end}; trim or delete it first"
-                ));
-            }
-            let last_scene_start = arrangement
-                .scene_lane
-                .last()
-                .map(|event| event.start_beat)
-                .unwrap_or(0.0);
-            if end_beat <= last_scene_start {
-                return Err(format!(
-                    "Cannot shorten the arrangement to beat {end_beat}: a scene change starts at \
-                     beat {last_scene_start}; remove it first"
-                ));
-            }
-            arrangement.end_beat = end_beat;
-            Ok(())
+            Self::set_end_in(arrangement, end_beat)
         })
+    }
+
+    /// `arr_set_end`'s edit on `arrangement`.
+    fn set_end_in(arrangement: &mut ProjectArrangement, end_beat: f64) -> Result<(), String> {
+        if end_beat <= 0.0 {
+            return Err(format!(
+                "Arrangement end beat {end_beat} must be greater than zero"
+            ));
+        }
+        let last_clip_end = arrangement
+            .track_lanes
+            .iter()
+            .flatten()
+            .map(|clip| clip.end_beat)
+            .fold(0.0f64, f64::max);
+        if end_beat < last_clip_end {
+            return Err(format!(
+                "Cannot shorten the arrangement to beat {end_beat}: a clip runs to beat \
+                 {last_clip_end}; trim or delete it first"
+            ));
+        }
+        let last_scene_start = arrangement
+            .scene_lane
+            .last()
+            .map(|event| event.start_beat)
+            .unwrap_or(0.0);
+        if end_beat <= last_scene_start {
+            return Err(format!(
+                "Cannot shorten the arrangement to beat {end_beat}: a scene change starts at \
+                 beat {last_scene_start}; remove it first"
+            ));
+        }
+        arrangement.end_beat = end_beat;
+        Ok(())
     }
 
     /// Enable or disable arrangement looping.

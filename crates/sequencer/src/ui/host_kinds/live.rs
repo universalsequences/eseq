@@ -59,6 +59,9 @@ pub(crate) struct KindsShared {
     /// Each route instance's connection (track positions), as of the last
     /// model sync (`route.selected`).
     pub(super) routes: HashMap<InstanceId, sequencer::sequencer::ModConnection>,
+    /// The arrangement capture's record head, copied by the tick (the
+    /// `song.position` fallback while capturing over an empty song).
+    pub(super) capture_head: Option<f64>,
 }
 
 impl KindsShared {
@@ -284,6 +287,10 @@ pub(super) fn live_value<S: KindStore>(
                     let target = sources.active_delete_target.lock().unwrap();
                     Value::Bool(mixer_track_delete_target_selected(target.as_ref(), track))
                 }
+                f::TRACK_LATCHED => Value::Bool(song_lane_latched(
+                    sources.state.song_manual_latch_mask(),
+                    track,
+                )),
                 key => {
                     let input = mod_input(&f::TRACK_MOD_IN, key)?;
                     let shared = shared.borrow();
@@ -377,6 +384,25 @@ pub(super) fn live_value<S: KindStore>(
                 }
             }
         }
+        CELL => {
+            let &[parent, pattern] = store.key_of(id)? else {
+                return None;
+            };
+            let track = *store.key_of(parent)?.first()? as usize;
+            if !sources.track_exists(track) {
+                return None;
+            }
+            match key {
+                f::CELL_QUEUED => {
+                    Value::Bool(queued_track_clip(&sources.state, track) == Some(pattern))
+                }
+                f::CELL_SELECTED => {
+                    let target = sources.active_delete_target.lock().unwrap();
+                    Value::Bool(track_pattern_cell_selected(target.as_ref(), track, pattern))
+                }
+                _ => return None,
+            }
+        }
         ROUTE => {
             let connection = *shared.borrow().routes.get(&id)?;
             let target = sources.active_delete_target.lock().unwrap();
@@ -427,6 +453,12 @@ pub(super) fn live_value<S: KindStore>(
                     .sequence_rolling
                     .load(Ordering::Relaxed),
             ),
+            f::SONG_POSITION => {
+                let position = song_position(&sources.state, shared.borrow().capture_head);
+                number(displayed_song_position_beats(position))
+            }
+            f::SONG_MANUAL_LATCH => Value::Bool(song_manual_latch(&sources.state)),
+            f::SONG_SCENE_LATCHED => Value::Bool(sources.state.song_scene_latch()),
             f::SELECTION_AUTO_FOLLOW => {
                 Value::Bool(auto_follow_enabled(&sources.auto_follow_override_until))
             }

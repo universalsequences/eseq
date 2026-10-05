@@ -1270,13 +1270,18 @@ pub(super) fn collect_pattern_cell_glyph_frames(
     pending
 }
 
+/// A sound's palette color index and its themed color, `None` for no (or an
+/// unknown) color: the palette rows and clip dots (`SEQ.song-clip-sounds`,
+/// `clip.dot-color`).
+pub(crate) fn sound_palette_rgb(color: Option<u8>) -> Option<(usize, [f32; 3])> {
+    let idx = usize::from(color?);
+    let rgb = SOUND_PALETTE_RGB.get(idx)?;
+    Some((idx, super::track_and_mixer::themed_variant_rgb(*rgb)))
+}
+
 fn color_fields(map: &mut HashMap<String, Rc<RefCell<Value>>>, color: Option<u8>) {
-    match color
-        .map(usize::from)
-        .filter(|idx| *idx < SOUND_PALETTE_RGB.len())
-    {
-        Some(idx) => {
-            let [r, g, b] = super::track_and_mixer::themed_variant_rgb(SOUND_PALETTE_RGB[idx]);
+    match sound_palette_rgb(color) {
+        Some((idx, [r, g, b])) => {
             map.insert(
                 "color".to_string(),
                 Rc::new(RefCell::new(Value::Number(idx as f64))),

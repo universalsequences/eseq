@@ -598,31 +598,29 @@ impl App {
     /// every dot on the lane at once).
     pub fn song_clip_sounds(&self) -> Vec<Vec<(u64, bool, Option<u8>)>> {
         // Two sequential lock scopes, never nested (arrangement and scenes
-        // have no established lock order): first the minimal clip tuples,
-        // then the sound resolution.
-        let lanes: Vec<Vec<(u64, Option<u64>, Option<u64>)>> =
-            self.state.with_committed_arrangement(|arrangement| {
-                arrangement
-                    .map(|arrangement| {
-                        arrangement
-                            .track_lanes
-                            .iter()
-                            .map(|clips| {
-                                clips
-                                    .iter()
-                                    .map(|clip| (clip.id.0, clip.take_id, clip.pattern_id))
-                                    .collect()
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default()
-            });
+        // have no established lock order): first the lanes, then the sound
+        // resolution.
+        let lanes = self.state.with_committed_arrangement(|arrangement| {
+            arrangement.map(|arrangement| arrangement.track_lanes.clone())
+        });
+        match lanes {
+            Some(lanes) => self.song_clip_sounds_in(&lanes),
+            None => Vec::new(),
+        }
+    }
+
+    /// [`Self::song_clip_sounds`] for `lanes` already read from the
+    /// committed arrangement (one scenes lock, no arrangement lock).
+    pub fn song_clip_sounds_in(
+        &self,
+        lanes: &[Vec<crate::sequencer::ArrClip>],
+    ) -> Vec<Vec<(u64, bool, Option<u8>)>> {
         if lanes.is_empty() {
             return Vec::new();
         }
         self.state.with_project_scenes(|scenes| {
             lanes
-                .into_iter()
+                .iter()
                 .enumerate()
                 .map(|(track, clips)| {
                     let pool = scenes.track_pools.get(track);
@@ -640,14 +638,14 @@ impl App {
                         }
                     };
                     clips
-                        .into_iter()
-                        .map(|(clip_id, take_id, pattern_id)| {
-                            let patch = clip_patch(take_id, pattern_id);
+                        .iter()
+                        .map(|clip| {
+                            let patch = clip_patch(clip.take_id, clip.pattern_id);
                             let color = patch.and_then(|patch| {
                                 pool.and_then(|pool| pool.sounds.patch_meta.get(&patch))
                                     .and_then(|meta| meta.color)
                             });
-                            (clip_id, patch.is_some(), color)
+                            (clip.id.0, patch.is_some(), color)
                         })
                         .collect()
                 })

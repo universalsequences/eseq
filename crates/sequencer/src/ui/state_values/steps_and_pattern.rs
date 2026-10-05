@@ -430,6 +430,22 @@ pub(crate) fn sync_track_pattern_cell_state_fields(
     }
 }
 
+/// Whether the delete target selects `track`'s pool pattern `pattern_id`
+/// (`track-pattern-cell-selected-*`, `cell.selected`).
+pub(crate) fn track_pattern_cell_selected(
+    active_delete_target: Option<&ActiveDeleteTarget>,
+    track: usize,
+    pattern_id: u64,
+) -> bool {
+    matches!(
+        active_delete_target,
+        Some(ActiveDeleteTarget::TrackPattern {
+            track: selected_track,
+            pattern_id: selected_pattern_id,
+        }) if *selected_track == track && selected_pattern_id.0 == pattern_id
+    )
+}
+
 pub(crate) fn sync_track_pattern_cell_selected_fields(
     rt: &mut Runtime,
     state: &Arc<SequencerState>,
@@ -442,12 +458,10 @@ pub(crate) fn sync_track_pattern_cell_selected_fields(
             rt.set_reactive(
                 "SEQ",
                 &track_pattern_cell_selected_field(track, pattern_id),
-                Value::Bool(matches!(
+                Value::Bool(track_pattern_cell_selected(
                     active_delete_target,
-                    Some(ActiveDeleteTarget::TrackPattern {
-                        track: selected_track,
-                        pattern_id: selected_pattern_id,
-                    }) if *selected_track == track && selected_pattern_id.0 == pattern_id
+                    track,
+                    pattern_id,
                 )),
             );
         }

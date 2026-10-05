@@ -984,7 +984,22 @@ pub(super) fn handle(
         }
         return;
     }
-    match run(name, &payload, app) {
+    let result = run(name, &payload, app).map(Some);
+    song_edit_landed(app, editor, ctx, name, result);
+}
+
+/// After a song edit landed (`run`'s primitives, the arrangement kinds'
+/// setters): a success clears the latched rejection and resyncs the piano
+/// roll's clip-shaped surfaces, showing `status` when there is one; a
+/// failure is latched for `SEQ.song-edit-error` / `song.edit-error`.
+pub(super) fn song_edit_landed(
+    app: &mut app::App,
+    editor: &mut Editor,
+    ctx: &LoopCtx<'_>,
+    name: &str,
+    result: Result<Option<String>, String>,
+) {
+    match result {
         Ok(status) => {
             // A successful edit clears the latched rejection so the
             // arrangement banner disappears.
@@ -999,7 +1014,9 @@ pub(super) fn handle(
                 track: ctx.shared.current_track.load(Ordering::Relaxed),
                 change: PianoRollInvalidation::Items,
             });
-            editor.handle_host_event(HostEvent::Status(status));
+            if let Some(status) = status {
+                editor.handle_host_event(HostEvent::Status(status));
+            }
         }
         Err(error) => {
             // Latch the rejection for SEQ.song-edit-error: the step tile

@@ -565,9 +565,20 @@ pub(crate) fn build_pattern_preview_value(pattern: &LanePatternEvents) -> Value 
         ("take-id", pattern.take_id.map(|id| Value::Number(id as f64)).unwrap_or(Value::Nil)),
         ("num-steps", Value::Number(pattern.num_steps as f64)),
         ("length-beats", Value::Number(pattern.length_beats)),
-        ("events", list_value(pattern.events.iter().map(|(time, pitch, velocity, duration)|
-            list_value([*time, *pitch, *velocity, *duration].into_iter().map(Value::Number))))),
+        ("events", pattern_events_value(&pattern.events)),
     ])
+}
+
+/// A pattern's or take's flattened events as `((time transpose velocity
+/// duration) …)` (`SEQ.song-lane-events`, `clip.events`).
+pub(crate) fn pattern_events_value(events: &[(f64, f64, f64, f64)]) -> Value {
+    list_value(events.iter().map(|(time, pitch, velocity, duration)| {
+        list_value(
+            [*time, *pitch, *velocity, *duration]
+                .into_iter()
+                .map(Value::Number),
+        )
+    }))
 }
 
 pub(crate) fn build_song_lane_events_value(events: &[Vec<LanePatternEvents>]) -> Value {
@@ -599,10 +610,7 @@ pub(crate) fn build_song_bindings_snapshot(
     // the same clock the launches and take notes are stamped on, so it is
     // the honest fallback; capture ON TOP of song playback keeps the
     // scheduler position, which `pending_capture_head_beat` clamps to anyway.
-    let position = app
-        .state
-        .song_position_beats()
-        .or_else(|| app.pending_capture_head_beat());
+    let position = song_position(&app.state, app.pending_capture_head_beat());
     let song_playing = app.song_transport_mode == SongTransportMode::SongPlayback;
     let (current_row, current_row_id) = match (song, position) {
         (Some(song), Some(beats)) if song_playing => match display_row_at_beat(song, beats) {
@@ -620,11 +628,7 @@ pub(crate) fn build_song_bindings_snapshot(
     };
     SongBindingsSnapshot {
         exists: song.is_some(),
-        recording_kind: match app.recording_kind {
-            Some(sequencer::app::song_transport::RecordingKind::Capture) => "take",
-            Some(sequencer::app::song_transport::RecordingKind::Overdub) => "dub",
-            None => "",
-        },
+        recording_kind: song_recording_kind_label(app.recording_kind),
         mode,
         current_row,
         current_row_id,
@@ -633,18 +637,18 @@ pub(crate) fn build_song_bindings_snapshot(
         // Quantized to a milli-beat for display: still render-rate smooth,
         // but sub-display-precision jitter does not force a reactive cycle
         // every frame.
-        position_beats: (position.unwrap_or(0.0) * 1000.0).round() / 1000.0,
+        position_beats: displayed_song_position_beats(position),
         end_beat: song.map(|song| song.end_beat).unwrap_or(0.0),
         loop_enabled: song.map(|song| song.loop_enabled).unwrap_or(false),
         capture_failed: app.song_capture_failed,
         capture_error: app.song_capture_error.clone(),
         edit_error: app.song_edit_error.clone(),
-        manual_latch: app.state.song_manual_latch_mask() != 0 || app.state.song_scene_latch(),
+        manual_latch: song_manual_latch(&app.state),
         take_lane_states: song_take_lane_states(app),
         latched_tracks: {
             let mask = app.state.song_manual_latch_mask();
             (0..app.tracks.len())
-                .map(|track| track < 64 && mask >> track & 1 == 1)
+                .map(|track| song_lane_latched(mask, track))
                 .collect()
         },
         scene_latched: app.state.song_scene_latch(),
@@ -661,6 +665,47 @@ pub(crate) fn build_song_bindings_snapshot(
             )
         }),
     }
+}
+
+/// The song position (`SEQ.song-position-beats`, `song.position`): the song
+/// playback position, else `capture_head` (capturing over an EMPTY song runs
+/// the plain session transport, so the playback position is inactive and the
+/// capture's record head is the honest clock; see
+/// `App::pending_capture_head_beat`).
+pub(crate) fn song_position(state: &SequencerState, capture_head: Option<f64>) -> Option<f64> {
+    state.song_position_beats().or(capture_head)
+}
+
+/// [`song_position`] as shown: 0 while inactive, quantized to a milli-beat
+/// (still render-rate smooth, but sub-display jitter forces no reactive
+/// cycle every frame).
+pub(crate) fn displayed_song_position_beats(position: Option<f64>) -> f64 {
+    (position.unwrap_or(0.0) * 1000.0).round() / 1000.0
+}
+
+/// "" while not recording, else "take" (arrangement capture) or "dub"
+/// (docs/unified-transport-spec.md 8): `SEQ.song-recording-kind`,
+/// `song.recording-kind`.
+pub(crate) fn song_recording_kind_label(
+    kind: Option<sequencer::app::song_transport::RecordingKind>,
+) -> &'static str {
+    match kind {
+        Some(sequencer::app::song_transport::RecordingKind::Capture) => "take",
+        Some(sequencer::app::song_transport::RecordingKind::Overdub) => "dub",
+        None => "",
+    }
+}
+
+/// Some lane, or the scene, is manually latched away from the song (takes
+/// spec 10): `SEQ.song-manual-latch`, `song.manual-latch`.
+pub(crate) fn song_manual_latch(state: &SequencerState) -> bool {
+    state.song_manual_latch_mask() != 0 || state.song_scene_latch()
+}
+
+/// Whether `track`'s bit is set in the manual-latch `mask`
+/// (`SEQ.song-track-latched`, `track.latched`).
+pub(crate) fn song_lane_latched(mask: u64, track: usize) -> bool {
+    track < 64 && mask >> track & 1 == 1
 }
 
 /// Per-track take-lane state for the Seq grid (takes spec 10/11.2 UX):
@@ -694,8 +739,11 @@ pub(crate) fn song_take_lane_states(app: &app::App) -> Vec<u8> {
                 .get(*track)
                 .is_some_and(|takes| takes.is_claimed(id));
             if claimed {
-                let latched = *track < 64 && latch >> track & 1 == 1;
-                *state = if latched { 2 } else { 1 };
+                *state = if song_lane_latched(latch, *track) {
+                    2
+                } else {
+                    1
+                };
             }
         }
     });
@@ -818,6 +866,24 @@ pub(crate) fn queued_transport_scene(state: &SequencerState) -> Option<usize> {
             | PatternLaunchTarget::SceneTracks { scene, .. } => Some(scene),
             PatternLaunchTarget::TrackPattern { .. } => None,
         })
+}
+
+/// The pattern a track's pending quantized clip launch waits for, if any:
+/// the just-assigned scene cell (the click assigns the cell up front and
+/// defers the audible launch), or the pattern a song-authority override
+/// launch names. Shared by `SEQ.queued-track-clips` and `cell.queued`.
+pub(crate) fn queued_track_clip(state: &SequencerState, track: usize) -> Option<u64> {
+    use sequencer::quantized_launch::{PatternLaunchTarget, QuantizedLaunchOwner};
+    match state
+        .quantized_launches()
+        .pending_target(QuantizedLaunchOwner::TrackClip(track as u32))?
+    {
+        PatternLaunchTarget::SceneTracks { scene, .. } => {
+            state.scene_track_pattern_id(scene, track).map(|id| id.0)
+        }
+        PatternLaunchTarget::TrackPattern { pattern, .. } => Some(pattern),
+        PatternLaunchTarget::Scene { .. } => None,
+    }
 }
 
 pub(super) fn build_scene_banks_value(banks: &[SceneBank]) -> Value {

@@ -320,6 +320,7 @@ impl Harness {
     }
 }
 
+mod arrangement;
 mod mixer;
 mod params;
 mod scenes;

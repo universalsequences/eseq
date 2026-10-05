@@ -21,18 +21,47 @@ impl SequencerState {
             .lock()
             .unwrap()
             .track_pattern_cells(track);
-        // No grid clip is "playing" while the lane is silenced (an
-        // explicit-empty song row / deleted timeline clip) or while the
-        // mirrored song row is playing a take on it (takes spec 11.2) —
-        // the scene-cell fallback in `active_effective` would otherwise
-        // show the scene's clip as audible when it isn't.
+        self.silence_track_pattern_cells(track, &mut cells);
+        cells
+    }
+
+    /// Every track's [`Self::track_pattern_cells`] with its scene-bank
+    /// membership (`ProjectScenes::track_pattern_bank_indices`), under one
+    /// scenes lock.
+    pub fn tracks_pattern_cells(
+        &self,
+        tracks: usize,
+    ) -> Vec<(
+        Vec<TrackPatternCellView>,
+        std::collections::HashMap<PatternId, Vec<usize>>,
+    )> {
+        let mut all: Vec<_> = {
+            let scenes = self.pattern.scenes.lock().unwrap();
+            (0..tracks)
+                .map(|track| {
+                    let cells = scenes.track_pattern_cells(track);
+                    (cells, scenes.track_pattern_bank_indices(track))
+                })
+                .collect()
+        };
+        for (track, (cells, _)) in all.iter_mut().enumerate() {
+            self.silence_track_pattern_cells(track, cells);
+        }
+        all
+    }
+
+    /// No grid clip is "playing" while the lane is silenced (an
+    /// explicit-empty song row / deleted timeline clip) or while the
+    /// mirrored song row is playing a take on it (takes spec 11.2) — the
+    /// scene-cell fallback in `active_effective` would otherwise show the
+    /// scene's clip as audible when it isn't.
+    fn silence_track_pattern_cells(&self, track: usize, cells: &mut [TrackPatternCellView]) {
         let take_lane = track < 64 && self.song_take_lane_mask() >> track & 1 == 1;
         if take_lane || self.is_scene_silenced(track) {
-            for cell in &mut cells {
+            for cell in cells {
                 cell.active_effective = false;
             }
         }
-        cells
     }
 
     /// Repaint the live grid from the current scene's cells, dropping

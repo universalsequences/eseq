@@ -3,8 +3,8 @@
 ;;
 ;; Each kind here is a projection of the sequencer's own state. The host
 ;; registers the instances (tracks, scenes, banks, buses, groups, devices,
-;; sends; steps on first read of `t.steps`, params on first read of
-;; `d.params`), pushes their `:host` fields,
+;; sends, clips, cells, scene spans; steps on first read of `t.steps`, params
+;; on first read of `d.params`), pushes their `:host` fields,
 ;; and checks at startup that it publishes exactly the fields declared below
 ;; (crates/sequencer/src/ui/host_kinds/). A view imports what it uses:
 ;;
@@ -20,6 +20,7 @@
 (module eseq.kinds)
 
 (export track scene bank bus group transport selection project master engine
+        song region
         tracks scenes banks buses groups routes
         launch! clone-scene! delete-scene! step-preset!
         device-param lock-param! unlock-param!
@@ -28,7 +29,8 @@
         set-bar-transpose! mod-in-level
         mute-group-options accum-mode-options tuning-root-options tuning-mode-options
         voice-priority-options mono-trigger-options swing-resolution-options
-        roll-rate-options)
+        roll-rate-options
+        launch-cell! select-region! select-region-in! clear-region! take-none take-governed take-latched)
 
 ;; Short fixed option lists (the host checks they match its own). The lists
 ;; the host owns (scales, step sync resolutions, accumulators, track outputs)
@@ -117,6 +119,34 @@
   (lambda (d v)
     (host-command "set-tuning"
       (dict :track-id d.tuning.track.tid :op op :degree d.index :value v))))
+;; The arrangement (song, clips, the track's pattern cells). Clips are
+;; addressed by their stable clip id, tracks by their stable track id, cells
+;; by (track id, pattern id), so an edit or a reorder before the command lands
+;; cannot retarget them. Script drags (spec §14.2d): while the pointer is
+;; down, every clip start / end and song end set! (of any number of clips)
+;; joins ONE undo entry, and each frame rebuilds the arrangement from where
+;; the drag started with every target set so far, so a clip dragged across
+;; another only occludes it where it ends up. With the pointer up each set!
+;; is its own entry (an end past a take's end grows the take, as on the
+;; timeline). Values (spec §14.2c): beats are finite numbers >= 0 (an end
+;; after its start), flags are bools; a rejected arrangement edit shows in
+;; song.edit-error.
+(def song-setter (field)
+  (lambda (sg v) (host-command "set-song" (dict :field field :value v))))
+(def set-song-bound-clip (sg c)
+  (host-command "set-song" (dict :field "bound-clip" :clip-id (if c c.cid nil))))
+(def set-track-latched (t v)
+  (host-command "set-song" (dict :field "latched" :track-id t.tid :value v)))
+(def clip-setter (field)
+  (lambda (c v) (host-command "set-clip" (dict :clip-id c.cid :field field :value v))))
+;; Plays cell (a pattern of the clip's own track) instead; nil is an error.
+(def set-clip-cell (c cl)
+  (host-command "set-clip"
+    (dict :clip-id c.cid :field "cell"
+          :track-id (if cl cl.track.tid nil) :pattern-id (if cl cl.pid nil))))
+(def set-cell-selected (c v)
+  (host-command "set-cell"
+    (dict :track-id c.track.tid :pattern-id c.pid :field "selected" :value v)))
 ;; A device param's own value (never a p-lock), in display units. Addressed
 ;; by stable ids (track id, device id) so a reorder before the command lands
 ;; cannot retarget it.
@@ -255,7 +285,83 @@
          (mod-in-4  :number :range (0 1))
          (bar-transposes (list-of :number)
                     :doc "Per 16-step bar of the pattern, semitones; (set-bar-transpose! t bar v)")
-         (delete-target :bool :set set-track-delete-target :doc "Among the mixer's delete target (one track or several)")))
+         (delete-target :bool :set set-track-delete-target :doc "Among the mixer's delete target (one track or several)")
+         ;; The arrangement.
+         (clips     (list-of clip) :doc "The clips on the track's arrangement lane, in time order")
+         (cells     (list-of cell) :doc "The track's patterns (the mixer's clip grid), by pattern id")
+         (governed  :int    :doc "take-none, take-governed (a take plays on the lane: steps dimmed and locked) or take-latched (a take lane the performer latched away)")
+         (latched   :bool   :set set-track-latched
+                    :doc "Latched away from the song by a manual launch; set false to hand the lane back to the song")))
+
+;; A clip on a track's arrangement lane: (nth t.clips 0). Keyed by its stable
+;; clip id: moving or resizing it keeps the instance.
+(def-kind clip
+  :key (track cid)
+  :host ((track  track  :doc "The track whose lane holds the clip")
+         (cid    :int    :doc "The host's stable clip id")
+         (start  :number :set (clip-setter "start") :doc "First beat; setting it moves the clip (its length stays)")
+         (end    :number :set (clip-setter "end") :doc "End beat (exclusive); setting it resizes the clip")
+         (cell   cell    :set set-clip-cell :doc "The pattern the clip plays, a cell of its track; nil for a take clip")
+         (take   :int    :doc "The take the clip plays, from 0; -1 for a pattern clip")
+         (offset :number :doc "Where the clip starts in its source, in steps")
+         (num-steps :int :doc "The source's length in steps: one pattern cycle, or the whole take")
+         (length :number :doc "The source's length in beats: one pattern cycle, or the whole take")
+         (events (list-of (list-of :number))
+                 :doc "The source's notes, each (time transpose velocity duration), time and duration in steps")
+         (dot    :bool   :doc "The clip resolves a sound (it shows the sound identity dot)")
+         (dot-color :rgb :doc "The sound's palette color, themed; the timeline's gray when it has none")))
+
+;; One of a track's patterns, a cell of the mixer's clip grid: (nth t.cells 0).
+;; Keyed by its stable pattern id.
+(def-kind cell
+  :key (track pid)
+  :host ((track    track :doc "The track whose pool holds the pattern")
+         (pid      :int  :doc "The pattern's stable id in its track's pool")
+         (active   :bool :doc "The track plays this pattern")
+         (assigned :bool :doc "The current scene's cell on the track")
+         (override :bool :doc "The track plays a launched pattern instead of its scene's (true on every cell of the track)")
+         (queued   :bool :doc "Waiting for a quantized launch")
+         (selected :bool :set set-cell-selected :doc "Selected as the mixer's delete target")
+         (banks    (list-of bank) :doc "The scene banks whose scenes use the pattern; empty when none does yet")))
+
+;; A scene change on the song's scene lane, as the span it governs:
+;; (nth song.spans 0). Scene changes have no ids, so spans are positional: an
+;; edit re-pushes the values.
+(def-kind scene-span
+  :key (index)
+  :host ((index :int    :doc "Position on the scene lane, from 0")
+         (scene scene   :doc "The scene that plays over the span")
+         (start :number :doc "First beat")
+         (end   :number :doc "End beat (exclusive): the next scene change, or the song's end")))
+
+;; The arrangement and song playback.
+(def-kind song
+  :key ()
+  :host ((exists :bool :doc "The project has a committed song")
+         (mode   :string :doc "stopped, song-playback or arrangement-capture")
+         (recording-kind :string :doc "Empty while not recording, else take (arrangement capture) or dub (overdub)")
+         (position :number :doc "The playback position in beats (the record head while capturing over an empty song); 0 while inactive")
+         (cursor :number :set (song-setter "cursor") :doc "The arrangement's edit cursor (the paste target), in beats")
+         (end    :number :set (song-setter "end") :doc "End beat; setting it before a clip's end or the last scene change is an error")
+         (loop   :bool   :set (song-setter "loop") :doc "Playback loops")
+         (manual-latch :bool :set (song-setter "manual-latch")
+                       :doc "Some lane (or the scene) is latched away from the song; set false for Back to Song")
+         (scene-latched :bool :doc "The scene is the performer's (scene latch)")
+         (edit-error :string :doc "Why the last arrangement edit was rejected; empty after a successful one")
+         (capture-failed :bool :doc "The last arrangement capture failed")
+         (capture-error :string :doc "Why it failed; empty otherwise")
+         (region region :doc "The selected region, or nil; (select-region! t1 t2 start end), (select-region-in! t1 t2 start end scene-lane), (clear-region!)")
+         (bound-clip clip :set set-song-bound-clip
+                     :doc "The selected clip (its track's sound binds to it), or nil")
+         (spans (list-of scene-span) :doc "The scene lane, in time order")))
+
+;; The arrangement's selected region (song.region while one is selected).
+(def-kind region
+  :key ()
+  :host ((tracks (list-of track) :doc "The tracks it spans, in order")
+         (start  :number :doc "First beat")
+         (end    :number :doc "End beat (exclusive)")
+         (scene-lane :bool :doc "Swept in the scene lane: copy, paste and delete carry the scene changes in it too")))
 
 ;; A track's scale (the scale editor): (track 0).tuning. One per track.
 (def-kind tuning
@@ -418,6 +524,29 @@
 ;; Delete scene s (never the last one); the playing scene keeps playing
 ;; unless it is s.
 (def delete-scene! (s) (host-command "delete-pattern" (dict :idx s.index)))
+
+;; track.governed values.
+(def take-none 0)
+(def take-governed 1)
+(def take-latched 2)
+
+;; Launch cell c on its track with the transport's launch quantization: the
+;; current scene's cell becomes c's pattern. The track (by id) and the
+;; current scene resolve when the command lands.
+(def launch-cell! (c)
+  (host-command "set-scene-cell"
+    (dict :track-id c.track.tid :pattern-id c.pid :quantize transport.launch-quantize)))
+
+;; Select the region from track t1 to track t2 (either order) between beats
+;; start and end (song.region); a degenerate one clears it.
+;; select-region-in! takes scene-lane too (a bool; functions have no optional
+;; parameters): true sweeps the scene lane, so copy, paste and delete carry
+;; its scene changes.
+(def select-region-in! (t1 t2 start end scene-lane)
+  (host-command "set-song-region"
+    (dict :track-ids (list t1.tid t2.tid) :start start :end end :scene-lane scene-lane)))
+(def select-region! (t1 t2 start end) (select-region-in! t1 t2 start end false))
+(def clear-region! () (host-command "set-song-region" nil))
 
 ;; step.lock-kind values.
 (def lock-none 0)

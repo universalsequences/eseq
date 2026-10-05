@@ -348,6 +348,7 @@ pub(crate) fn run_event_loop(
         scroll_inertia: Default::default(),
         pointer_down: false,
         script_param_gesture: None,
+        script_arrangement_drag: None,
     };
 
     // Inline editor session state (instrument/effect creation/editing)
@@ -624,31 +625,7 @@ pub(crate) fn run_event_loop(
         // restore), so resolve the pending SceneTracks target's cell. Drives
         // the mixer grid's blinking queued-cell background.
         let queued_track_clips: Vec<i64> = (0..app.tracks.len())
-            .map(|track| {
-                shared
-                    .state
-                    .quantized_launches()
-                    .pending_target(
-                        sequencer::quantized_launch::QuantizedLaunchOwner::TrackClip(track as u32),
-                    )
-                    .and_then(|target| match target {
-                        sequencer::quantized_launch::PatternLaunchTarget::SceneTracks {
-                            scene,
-                            ..
-                        } => shared
-                            .state
-                            .scene_track_pattern_id(scene, track)
-                            .map(|id| id.0 as i64),
-                        // Song-authority override launches name the pattern
-                        // directly.
-                        sequencer::quantized_launch::PatternLaunchTarget::TrackPattern {
-                            pattern,
-                            ..
-                        } => Some(pattern as i64),
-                        sequencer::quantized_launch::PatternLaunchTarget::Scene { .. } => None,
-                    })
-                    .unwrap_or(-1)
-            })
+            .map(|track| queued_track_clip(&shared.state, track).map_or(-1, |id| id as i64))
             .collect();
         if queued_track_clips != frame.prev_queued_track_clips {
             let rt = editor.runtime_mut();

@@ -57,7 +57,6 @@ impl TrackSettings {
     /// Push the fields of track instance `id`, labelled as the track panel
     /// shows them; `accumulators` names the accumulators by index.
     fn push(&self, pusher: &mut Pusher<'_>, id: InstanceId, accumulators: &[String]) {
-        let text = |text: &str| Value::String(text.to_string());
         pusher.push(id, f::TRACK_POLY, Value::Bool(self.poly));
         let voices = number(self.max_polyphony as f64);
         pusher.push(id, f::TRACK_MAX_POLYPHONY, voices);

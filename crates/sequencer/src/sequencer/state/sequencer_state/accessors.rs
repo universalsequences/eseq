@@ -1221,6 +1221,11 @@ impl SequencerState {
         self.pattern.song.lock().unwrap().clone()
     }
 
+    /// Borrow the committed song in place (`committed_song` deep-clones it).
+    pub fn with_committed_song<R>(&self, f: impl FnOnce(Option<&ProjectSong>) -> R) -> R {
+        f(self.pattern.song.lock().unwrap().as_ref())
+    }
+
     /// Replace the committed song directly, clearing any stored arrangement.
     ///
     /// The stored authoring model is lanes and rows are compiled output

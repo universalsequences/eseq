@@ -2272,7 +2272,26 @@ pub(crate) fn set_track_delete_target(
     true
 }
 
-fn bump_delete_target_version(active_delete_target_version: &Arc<AtomicUsize>) {
+/// `cell.selected`'s setter (`set-cell`) on `target`: `on` makes `track`'s
+/// pool pattern `pattern_id` the target; off clears the target when it is
+/// that cell. Returns whether the target changed.
+pub(crate) fn set_track_pattern_delete_target(
+    target: &mut Option<ActiveDeleteTarget>,
+    track: usize,
+    pattern_id: u64,
+    on: bool,
+) -> bool {
+    if on == track_pattern_cell_selected(target.as_ref(), track, pattern_id) {
+        return false;
+    }
+    *target = on.then_some(ActiveDeleteTarget::TrackPattern {
+        track,
+        pattern_id: PatternId(pattern_id),
+    });
+    true
+}
+
+pub(crate) fn bump_delete_target_version(active_delete_target_version: &Arc<AtomicUsize>) {
     active_delete_target_version.fetch_add(1, Ordering::Relaxed);
 }
 

@@ -78,28 +78,57 @@ pub(super) fn bar_transpose_applied(ctx: &LoopCtx<'_>, track: usize) {
 }
 
 /// A setter's value under the value rule (see the module docs), named
-/// `what` in errors.
-struct SetValue<'a> {
+/// `what` in errors. Shared with the arrangement setters.
+pub(super) struct SetValue<'a> {
     what: &'a str,
     value: Value,
 }
 
+/// `value` as a stable model id: a non-negative integer.
+pub(super) fn value_id(value: &Value) -> Option<u64> {
+    match *value {
+        Value::Number(id) if id >= 0.0 && id.fract() == 0.0 => Some(id as u64),
+        _ => None,
+    }
+}
+
 impl<'a> SetValue<'a> {
-    fn of(map: &Payload, key: &str, what: &'a str) -> Self {
+    pub(super) fn of(map: &Payload, key: &str, what: &'a str) -> Self {
         let value = map
             .get(key)
             .map_or(Value::Nil, |cell| cell.borrow().clone());
         Self { what, value }
     }
 
-    fn fail<T>(&self, wants: &str) -> Result<T, String> {
+    pub(super) fn fail<T>(&self, wants: &str) -> Result<T, String> {
         Err(format!("{} takes {wants}, not {:?}", self.what, self.value))
     }
 
-    fn flag(&self) -> Result<bool, String> {
+    /// A stable model id ([`value_id`]); `wants` names it in the error.
+    pub(super) fn id(&self, wants: &str) -> Result<u64, String> {
+        value_id(&self.value).map_or_else(|| self.fail(wants), Ok)
+    }
+
+    /// [`Self::id`], or `None` for nil.
+    pub(super) fn id_or_nil(&self, wants: &str) -> Result<Option<u64>, String> {
+        match self.value {
+            Value::Nil => Ok(None),
+            _ => self.id(wants).map(Some),
+        }
+    }
+
+    pub(super) fn flag(&self) -> Result<bool, String> {
         match self.value {
             Value::Bool(on) => Ok(on),
             _ => self.fail("true or false"),
+        }
+    }
+
+    /// [`Self::flag`], or `default` for nil.
+    pub(super) fn flag_or(&self, default: bool) -> Result<bool, String> {
+        match self.value {
+            Value::Nil => Ok(default),
+            _ => self.flag(),
         }
     }
 
@@ -117,6 +146,14 @@ impl<'a> SetValue<'a> {
             .iter()
             .position(|option| option.eq_ignore_ascii_case(label))
             .map_or_else(|| self.fail(&format!("one of {options:?}")), Ok)
+    }
+
+    /// A finite number of at least `min` (a beat: `from(0.0)`).
+    pub(super) fn from(&self, min: f64) -> Result<f64, String> {
+        match self.value {
+            Value::Number(value) if value.is_finite() && value >= min => Ok(value),
+            _ => self.fail(&format!("a finite number of at least {min}")),
+        }
     }
 
     /// A finite number in `min..=max`.
@@ -270,14 +307,8 @@ fn track_setting_request(
         }
         "output" => {
             // A bus id (the main mix's for main), or nil for sends only.
-            let bus = SetValue::of(map, "bus-id", "output");
-            let bus = match bus.value {
-                Value::Nil => None,
-                Value::Number(id) if id >= 0.0 && id.fract() == 0.0 => {
-                    Some(sequencer::sequencer::BusId(id as u64))
-                }
-                _ => return bus.fail("a bus or nil"),
-            };
+            let bus = SetValue::of(map, "bus-id", "output").id_or_nil("a bus or nil")?;
+            let bus = bus.map(sequencer::sequencer::BusId);
             let output = track_output_for_bus(app, bus)
                 .ok_or_else(|| format!("output: no bus {:?}", bus.map(|bus| bus.0)))?;
             Ok((output != tp.output()).then_some(TrackSettingEdit {
@@ -356,7 +387,7 @@ fn tuning_request(
 }
 
 /// The track a command's `:track-id` names now.
-fn command_track(app: &app::App, map: &Payload) -> Result<usize, String> {
+pub(super) fn command_track(app: &app::App, map: &Payload) -> Result<usize, String> {
     map_usize(map, "track-id")
         .and_then(|id| live_track_index(app, sequencer::sequencer::TrackId(id as u64)))
         .ok_or_else(|| "the track is gone".to_string())

@@ -293,6 +293,13 @@ pub(crate) struct GestureState {
     /// opened while the pointer was down; later script edits join it,
     /// while any other active gesture is a user's and is left alone.
     pub(crate) script_param_gesture: Option<sequencer::app::history::GestureId>,
+    /// The arrangement targets a script drag has set in that gesture
+    /// (`App::arr_script_drag`): every frame rebuilds from the gesture's
+    /// start with all of them.
+    pub(crate) script_arrangement_drag: Option<(
+        sequencer::app::history::GestureId,
+        sequencer::app::arr_edit::ArrangementDragTargets,
+    )>,
 }
 
 /// Shared handles threaded between the event loop, lisp natives, and the

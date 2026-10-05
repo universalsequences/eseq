@@ -181,9 +181,7 @@ impl HostKinds {
         let names = &ROUTE_LIVE.names;
         let ids = || ids.iter().flatten().copied().collect();
         self.route_observed.refresh(pusher.rt, names, ids);
-        for &(id, mask, _) in &self.route_observed.entries {
-            pusher.push_live_masked(id, &ROUTE_LIVE, mask);
-        }
+        self.route_observed.push_masked(pusher, &ROUTE_LIVE);
     }
 
     /// The group registry (by group id), the group fields and

@@ -1,4 +1,5 @@
 mod agent;
+mod arrangement;
 pub(crate) mod content_reload;
 pub(crate) mod audio_settings;
 mod customize;
@@ -104,6 +105,12 @@ impl ScriptEdit {
         } else {
             apply(app)
         }
+    }
+
+    /// Whether a `continuous` edit (a value a drag moves) joins the
+    /// script's drag: the pointer is down and no user gesture is active.
+    pub(super) fn drags(&self, ctx: &crate::LoopCtx<'_>, continuous: bool) -> bool {
+        !self.beside && continuous && ctx.gesture.pointer_down
     }
 
     /// End the edit: `continuous` edits (a value a drag moves) stay open

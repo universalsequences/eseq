@@ -41,6 +41,8 @@
 //! stable ids (`RouteKey`), replaced on a project load like tracks. Each
 //! track has one `tuning`, keyed (track instance id, 0), whose `degree`s
 //! are keyed (tuning instance id, index), registered at the model sync.
+//! Arrangement clips are keyed (track instance id, clip id) and pattern
+//! cells (track instance id, pattern id); scene spans are positional.
 //!
 //! [`check_schema`] compares [`PUBLISHED`] with the loaded `eseq.kinds`; the
 //! tick re-runs it whenever a kind schema changes (a hot reload) and skips
@@ -49,14 +51,16 @@
 //! Layout: this module holds the published schema and the tick
 //! ([`HostKinds::sync`]); `live` the shared handles, live-field values and
 //! the reader hook; `registry` the instance registry helpers and pushes;
-//! `tracks`, `steps`, `params`, `scenes`, `mixer` (buses, groups, routes)
-//! and `settings` (track settings) the per-kind syncs.
+//! `tracks`, `steps`, `params`, `scenes`, `mixer` (buses, groups, routes),
+//! `settings` (track settings) and `arrangement` (song, clips, cells) the
+//! per-kind syncs.
 
 use crate::*;
 use eseqlisp::vm::{HostFieldReader, InstanceId, VM};
 use std::sync::atomic::AtomicBool;
 use std::sync::LazyLock;
 
+mod arrangement;
 mod live;
 mod mixer;
 mod params;
@@ -66,6 +70,7 @@ mod settings;
 mod steps;
 mod tracks;
 
+use arrangement::SongState;
 pub(crate) use live::KindsHandles;
 use live::*;
 pub(crate) use mixer::KindsMeters;
@@ -95,6 +100,11 @@ pub(crate) const PARAM: &str = "eseq.kinds:param";
 pub(crate) const ROUTE: &str = "eseq.kinds:route";
 pub(crate) const TUNING: &str = "eseq.kinds:tuning";
 pub(crate) const DEGREE: &str = "eseq.kinds:degree";
+pub(crate) const SONG: &str = "eseq.kinds:song";
+pub(crate) const REGION: &str = "eseq.kinds:region";
+pub(crate) const SCENE_SPAN: &str = "eseq.kinds:scene-span";
+pub(crate) const CLIP: &str = "eseq.kinds:clip";
+pub(crate) const CELL: &str = "eseq.kinds:cell";
 
 /// How the host keeps a field current (see the module docs).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -163,6 +173,58 @@ pub(crate) mod f {
     ];
     pub(crate) const TRACK_BAR_TRANSPOSES: FieldKey = (TRACK, "bar-transposes");
     pub(crate) const TRACK_DELETE_TARGET: FieldKey = (TRACK, "delete-target");
+    pub(crate) const TRACK_CLIPS: FieldKey = (TRACK, "clips");
+    pub(crate) const TRACK_CELLS: FieldKey = (TRACK, "cells");
+    pub(crate) const TRACK_GOVERNED: FieldKey = (TRACK, "governed");
+    pub(crate) const TRACK_LATCHED: FieldKey = (TRACK, "latched");
+
+    pub(crate) const CLIP_TRACK: FieldKey = (CLIP, "track");
+    pub(crate) const CLIP_CID: FieldKey = (CLIP, "cid");
+    pub(crate) const CLIP_START: FieldKey = (CLIP, "start");
+    pub(crate) const CLIP_END: FieldKey = (CLIP, "end");
+    pub(crate) const CLIP_CELL: FieldKey = (CLIP, "cell");
+    pub(crate) const CLIP_TAKE: FieldKey = (CLIP, "take");
+    pub(crate) const CLIP_OFFSET: FieldKey = (CLIP, "offset");
+    pub(crate) const CLIP_NUM_STEPS: FieldKey = (CLIP, "num-steps");
+    pub(crate) const CLIP_LENGTH: FieldKey = (CLIP, "length");
+    pub(crate) const CLIP_EVENTS: FieldKey = (CLIP, "events");
+    pub(crate) const CLIP_DOT: FieldKey = (CLIP, "dot");
+    pub(crate) const CLIP_DOT_COLOR: FieldKey = (CLIP, "dot-color");
+
+    pub(crate) const CELL_TRACK: FieldKey = (CELL, "track");
+    pub(crate) const CELL_PID: FieldKey = (CELL, "pid");
+    pub(crate) const CELL_ACTIVE: FieldKey = (CELL, "active");
+    pub(crate) const CELL_ASSIGNED: FieldKey = (CELL, "assigned");
+    pub(crate) const CELL_OVERRIDE: FieldKey = (CELL, "override");
+    pub(crate) const CELL_QUEUED: FieldKey = (CELL, "queued");
+    pub(crate) const CELL_SELECTED: FieldKey = (CELL, "selected");
+    pub(crate) const CELL_BANKS: FieldKey = (CELL, "banks");
+
+    pub(crate) const SCENE_SPAN_INDEX: FieldKey = (SCENE_SPAN, "index");
+    pub(crate) const SCENE_SPAN_SCENE: FieldKey = (SCENE_SPAN, "scene");
+    pub(crate) const SCENE_SPAN_START: FieldKey = (SCENE_SPAN, "start");
+    pub(crate) const SCENE_SPAN_END: FieldKey = (SCENE_SPAN, "end");
+
+    pub(crate) const SONG_EXISTS: FieldKey = (SONG, "exists");
+    pub(crate) const SONG_MODE: FieldKey = (SONG, "mode");
+    pub(crate) const SONG_RECORDING_KIND: FieldKey = (SONG, "recording-kind");
+    pub(crate) const SONG_POSITION: FieldKey = (SONG, "position");
+    pub(crate) const SONG_CURSOR: FieldKey = (SONG, "cursor");
+    pub(crate) const SONG_END: FieldKey = (SONG, "end");
+    pub(crate) const SONG_LOOP: FieldKey = (SONG, "loop");
+    pub(crate) const SONG_MANUAL_LATCH: FieldKey = (SONG, "manual-latch");
+    pub(crate) const SONG_SCENE_LATCHED: FieldKey = (SONG, "scene-latched");
+    pub(crate) const SONG_EDIT_ERROR: FieldKey = (SONG, "edit-error");
+    pub(crate) const SONG_CAPTURE_FAILED: FieldKey = (SONG, "capture-failed");
+    pub(crate) const SONG_CAPTURE_ERROR: FieldKey = (SONG, "capture-error");
+    pub(crate) const SONG_REGION: FieldKey = (SONG, "region");
+    pub(crate) const SONG_BOUND_CLIP: FieldKey = (SONG, "bound-clip");
+    pub(crate) const SONG_SPANS: FieldKey = (SONG, "spans");
+
+    pub(crate) const REGION_TRACKS: FieldKey = (REGION, "tracks");
+    pub(crate) const REGION_START: FieldKey = (REGION, "start");
+    pub(crate) const REGION_END: FieldKey = (REGION, "end");
+    pub(crate) const REGION_SCENE_LANE: FieldKey = (REGION, "scene-lane");
 
     pub(crate) const STEP_INDEX: FieldKey = (STEP, "index");
     pub(crate) const STEP_TRACK: FieldKey = (STEP, "track");
@@ -374,6 +436,59 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     (f::TRACK_MOD_IN[3], ":number", Live),
     (f::TRACK_BAR_TRANSPOSES, "(list-of :number)", Live),
     (f::TRACK_DELETE_TARGET, ":bool", Live),
+    // The arrangement (`arrangement`): clips and cells at the song and cell
+    // model syncs, `governed` per tick behind its inputs, `latched` from the
+    // shared latch mask.
+    (f::TRACK_CLIPS, "(list-of clip)", Model),
+    (f::TRACK_CELLS, "(list-of cell)", Model),
+    (f::TRACK_GOVERNED, ":int", Model),
+    (f::TRACK_LATCHED, ":bool", Live),
+    (f::CLIP_TRACK, "track", Model),
+    (f::CLIP_CID, ":int", Model),
+    (f::CLIP_START, ":number", Model),
+    (f::CLIP_END, ":number", Model),
+    (f::CLIP_CELL, "cell", Model),
+    (f::CLIP_TAKE, ":int", Model),
+    (f::CLIP_OFFSET, ":number", Model),
+    // The source's content: when the committed song, the pattern epoch or
+    // the pool content moved.
+    (f::CLIP_NUM_STEPS, ":int", Model),
+    (f::CLIP_LENGTH, ":number", Model),
+    (f::CLIP_EVENTS, "(list-of (list-of :number))", Model),
+    (f::CLIP_DOT, ":bool", Model),
+    (f::CLIP_DOT_COLOR, ":rgb", Model),
+    (f::CELL_TRACK, "track", Model),
+    (f::CELL_PID, ":int", Model),
+    (f::CELL_ACTIVE, ":bool", Model),
+    (f::CELL_ASSIGNED, ":bool", Model),
+    (f::CELL_OVERRIDE, ":bool", Model),
+    (f::CELL_QUEUED, ":bool", Live),
+    (f::CELL_SELECTED, ":bool", Live),
+    (f::CELL_BANKS, "(list-of bank)", Model),
+    (f::SCENE_SPAN_INDEX, ":int", Model),
+    (f::SCENE_SPAN_SCENE, "scene", Model),
+    (f::SCENE_SPAN_START, ":number", Model),
+    (f::SCENE_SPAN_END, ":number", Model),
+    (f::SONG_EXISTS, ":bool", Model),
+    // `App` state no counter tracks: compared every tick (`SongPushed`).
+    (f::SONG_MODE, ":string", Model),
+    (f::SONG_RECORDING_KIND, ":string", Model),
+    (f::SONG_POSITION, ":number", Live),
+    (f::SONG_CURSOR, ":number", Model),
+    (f::SONG_END, ":number", Model),
+    (f::SONG_LOOP, ":bool", Model),
+    (f::SONG_MANUAL_LATCH, ":bool", Live),
+    (f::SONG_SCENE_LATCHED, ":bool", Live),
+    (f::SONG_EDIT_ERROR, ":string", Model),
+    (f::SONG_CAPTURE_FAILED, ":bool", Model),
+    (f::SONG_CAPTURE_ERROR, ":string", Model),
+    (f::SONG_REGION, "region", Model),
+    (f::SONG_BOUND_CLIP, "clip", Model),
+    (f::SONG_SPANS, "(list-of scene-span)", Model),
+    (f::REGION_TRACKS, "(list-of track)", Model),
+    (f::REGION_START, ":number", Model),
+    (f::REGION_END, ":number", Model),
+    (f::REGION_SCENE_LANE, ":bool", Model),
     (f::STEP_INDEX, ":int", Model),
     (f::STEP_TRACK, "track", Model),
     (f::STEP_ACTIVE, ":bool", Live),
@@ -582,6 +697,8 @@ pub(super) static MASTER_LIVE: LazyLock<LiveFields> = LazyLock::new(|| LiveField
 pub(super) static ENGINE_LIVE: LazyLock<LiveFields> = LazyLock::new(|| LiveFields::of(ENGINE));
 pub(super) static PARAM_LIVE: LazyLock<LiveFields> = LazyLock::new(|| LiveFields::of(PARAM));
 pub(super) static ROUTE_LIVE: LazyLock<LiveFields> = LazyLock::new(|| LiveFields::of(ROUTE));
+pub(super) static CELL_LIVE: LazyLock<LiveFields> = LazyLock::new(|| LiveFields::of(CELL));
+pub(super) static SONG_LIVE: LazyLock<LiveFields> = LazyLock::new(|| LiveFields::of(SONG));
 
 /// The step fields diffed by value per tick (beside `active`, `selected`
 /// and `playing`): `held`, then the step parameters, whose field names are
@@ -708,6 +825,10 @@ pub(crate) fn reserve_kind_names(rt: &mut Runtime) {
 
 fn number(n: impl Into<f64>) -> Value {
     Value::Number(n.into())
+}
+
+fn text(text: &str) -> Value {
+    Value::String(text.to_string())
 }
 
 fn instance_or_nil(id: Option<InstanceId>) -> Value {
@@ -866,6 +987,8 @@ pub(crate) struct HostKinds {
     /// (current track, its length, the step cursor) when `selection`'s
     /// step fields were last pushed; `None` forces a push.
     selection_cursor: Option<(usize, usize, usize)>,
+    /// The song, its clips and scene spans, and the tracks' cells.
+    song: SongState,
 }
 
 impl HostKinds {
@@ -936,6 +1059,15 @@ impl HostKinds {
         if self.refresh_schema(rt) {
             self.model = None;
             self.reset_project_options();
+            self.song.invalidate();
+        }
+        if self
+            .song
+            .representatives()
+            .any(|id| !rt.instance_is_live(*id))
+        {
+            // A hot reload dropped arrangement instances.
+            self.song.invalidate();
         }
         if self.sources.is_none() {
             install_reader(rt, sources.clone(), self.shared.clone());
@@ -943,6 +1075,7 @@ impl HostKinds {
             self.model = None;
         }
         self.shared.borrow_mut().copy_meters(app, meters);
+        self.shared.borrow_mut().capture_head = app.pending_capture_head_beat();
         let shared_kinds = self.shared.clone();
         let mut pusher = Pusher {
             rt,
@@ -988,6 +1121,10 @@ impl HostKinds {
                 self.model = None;
             }
         }
+        self.sync_cell_model(&mut pusher, app);
+        self.sync_song_model(&mut pusher, app);
+        self.sync_song_pushed(&mut pusher, app);
+        self.sync_governed(&mut pusher, app);
         self.sync_transport_queue(&mut pusher, app);
         self.sync_bus_mixer(&mut pusher, app);
         self.sync_compiling(&mut pusher, app);
@@ -998,7 +1135,13 @@ impl HostKinds {
         self.sync_device_live(&mut pusher, app);
         self.sync_bus_live(&mut pusher);
         self.sync_route_live(&mut pusher);
-        for (kind, fields) in [(TRANSPORT, &*TRANSPORT_LIVE), (ENGINE, &*ENGINE_LIVE)] {
+        self.sync_cell_live(&mut pusher);
+        let singletons = [
+            (TRANSPORT, &*TRANSPORT_LIVE),
+            (ENGINE, &*ENGINE_LIVE),
+            (SONG, &*SONG_LIVE),
+        ];
+        for (kind, fields) in singletons {
             if let Some(id) = pusher.singleton(kind) {
                 pusher.push_live(id, fields);
             }

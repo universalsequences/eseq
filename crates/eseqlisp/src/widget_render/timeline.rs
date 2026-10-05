@@ -4272,6 +4272,15 @@ fn get_items(props: &HashMap<String, Value>) -> Vec<TimelineItem> {
         .collect()
 }
 
+/// The sound-identity dot of a patch without a palette color (takes spec
+/// §17.11's name-only gray fallback).
+pub const SOUND_DOT_GRAY: crate::backend::Color = crate::backend::Color {
+    r: 0.62,
+    g: 0.62,
+    b: 0.66,
+    a: 1.0,
+};
+
 /// Lenient `:sound-dot` parse: an `(r g b)` list becomes the dot color, a
 /// bare `true` the name-only gray fallback (takes spec §17.11); anything
 /// else is no dot, never a render error.
@@ -4286,12 +4295,7 @@ fn parse_sound_dot(value: &Value) -> Option<crate::backend::Color> {
                 a: 1.0,
             })
         }
-        Value::Bool(true) => Some(crate::backend::Color {
-            r: 0.62,
-            g: 0.62,
-            b: 0.66,
-            a: 1.0,
-        }),
+        Value::Bool(true) => Some(SOUND_DOT_GRAY),
         _ => None,
     }
 }

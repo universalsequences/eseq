@@ -368,6 +368,13 @@ impl ObservedList {
         }
         ids.len()
     }
+
+    /// Push each entry's observed `fields`.
+    pub(super) fn push_masked(&self, pusher: &mut Pusher<'_>, fields: &LiveFields) {
+        for &(id, mask, _) in &self.entries {
+            pusher.push_live_masked(id, fields, mask);
+        }
+    }
 }
 
 impl HostKinds {

@@ -72,6 +72,29 @@ pub(super) const COMMANDS: &[&str] = &[
     "delete-pattern",
 ];
 
+/// `set-scene-cell` addressed by stable ids (`launch-cell!`): `:track-id`
+/// resolved to the track's position when the command lands, and no
+/// `:scene` meaning the current scene. Legacy payloads (`:scene :track`)
+/// pass through unchanged.
+fn scene_cell_by_ids(app: &app::App, payload: Value) -> Result<Value, String> {
+    let Value::Map(map) = &payload else {
+        return Ok(payload);
+    };
+    let Some(id) = map.get("track-id") else {
+        return Ok(payload);
+    };
+    let id = super::track_settings::value_id(&id.borrow()).ok_or("track-id takes a track id")?;
+    let track =
+        live_track_index(app, sequencer::sequencer::TrackId(id)).ok_or("the track is gone")?;
+    let number = |n: usize| Rc::new(RefCell::new(Value::Number(n as f64)));
+    let mut map = map.clone();
+    map.insert("track".to_string(), number(track));
+    if !map.contains_key("scene") {
+        map.insert("scene".to_string(), number(app.state.current_scene_index()));
+    }
+    Ok(Value::Map(map))
+}
+
 #[allow(clippy::too_many_lines)]
 pub(super) fn handle(
     name: &str,
@@ -92,6 +115,16 @@ pub(super) fn handle(
     let active_delete_target_version = ctx.shared.active_delete_target_version.clone();
     let track_collapsed = ctx.shared.track_collapsed.clone();
     let accumulator_names = ctx.shared.accumulator_names.clone();
+    let payload = match name {
+        "set-scene-cell" => match scene_cell_by_ids(app, payload) {
+            Ok(payload) => payload,
+            Err(error) => {
+                editor.handle_host_event(HostEvent::Error(format!("{name}: {error}")));
+                return;
+            }
+        },
+        _ => payload,
+    };
     match name {
         "set-scene-launch-quantize" => {
             let Value::String(label) = payload else {

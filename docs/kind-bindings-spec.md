@@ -1,6 +1,6 @@
 # Kind bindings
 
-Status: spec rev 3, 2026-10-04. Stages 1–6 built, stage 7 in part (§14; 7, 7b and 7i built) (§3.1, §3.2, §3.3, §3.4, §4, §7.1, §7.3, §8, §9 notes). Bead: epic `eseq-0l17` (`bd list --label kind-bindings`).
+Status: spec rev 3, 2026-10-04. Stages 1–6 built, stage 7 in part (§14; 7, 7b, 7d and 7i built) (§3.1, §3.2, §3.3, §3.4, §4, §7.1, §7.3, §8, §9 notes). Bead: epic `eseq-0l17` (`bd list --label kind-bindings`).
 Rev 3 resolves the open questions (§12 Decisions). Rev 2 dropped the separate `defrecord` form of rev 1: host state and view state
 are declared with `def-kind`, which gains keyed and singleton kinds, a `:host`
 field group and typed fields.
@@ -345,7 +345,7 @@ Built (stage 4):
   other module is an error (`kind name 'track' is reserved for the host
   kinds of eseq.kinds; …`). The host reserves every kind in `PUBLISHED`
   (`host_kind_names`: `track step device scene bank transport selection
-  project`, and since stage 7 `send bus group master engine`, since 7b `param`, since 7i `route`) before
+  project`, and since stage 7 `send bus group master engine`, since 7b `param`, since 7i `route`, since 7d `song region scene-span clip cell`) before
   evaluating the root.
 - **Schema check.** `host_kinds::PUBLISHED`
   (`crates/sequencer/src/ui/host_kinds/mod.rs`) lists every field the host
@@ -990,6 +990,9 @@ its instance and field.
    eseq-0l17.28–.35 (§14.3), which the port beads depend on.
    Built (stage 7b, eseq-0l17.28): `param` under `device`, the step
    p-lock render and send lock flags (§14.2, "Built (7b)").
+   Built (stage 7d, eseq-0l17.30): the arrangement: `song` and `region`
+   singletons, `scene-span`, `clip`, `cell`, `track.governed` / `latched`
+   (§14.2d).
    Built (stage 7i, eseq-0l17.35): track settings, routing (`route`, bus
    outputs, mod port levels), option constants, selection, transport and
    engine extras (§14.2c).
@@ -1411,6 +1414,140 @@ Built (7i):
   `SEQ.midi-effects` → `track.midi-devices`, `SEQ.rack-slot-delete-target-*`
   → `device.delete-target`, and a rack track's slot voices.
 
+### 14.2d Built in stage 7d (eseq-0l17.30)
+
+| Kind | Key | New `:host` fields (`:set` in brackets) |
+|---|---|---|
+| `song` | `()` | `exists :bool`, `mode :string` (`stopped`, `song-playback`, `arrangement-capture`), `recording-kind :string` (empty, `take`, `dub`), `position :number` (L, beats), `cursor :number` [c], `end :number` [c], `loop :bool` [c], `manual-latch :bool` (L) [c, false only], `scene-latched :bool` (L), `edit-error :string`, `capture-failed :bool`, `capture-error :string`, `region region` (nil: none), `bound-clip clip` [c], `spans (list-of scene-span)` |
+| `region` | `()` | `tracks (list-of track)`, `start`, `end :number`, `scene-lane :bool` |
+| `scene-span` | `(index)` | `index :int`, `scene scene`, `start`, `end :number` |
+| `clip` | `(track cid)` | `track track`, `cid :int`, `start :number` [k], `end :number` [k], `cell cell` [k] (nil for a take), `take :int` (-1 for a pattern), `offset :number` (steps), `num-steps :int`, `length :number` (beats), `events (list-of (list-of :number))`, `dot :bool`, `dot-color :rgb` (the timeline's gray without a palette color) |
+| `cell` | `(track pid)` | `track track`, `pid :int`, `active`, `assigned`, `override :bool`, `queued :bool` (L), `selected :bool` (L) [e], `banks (list-of bank)` |
+| `track` | `(index)` | `clips (list-of clip)`, `cells (list-of cell)`, `governed :int` (`take-none`, `take-governed`, `take-latched`), `latched :bool` (L) [c, false only] |
+
+[c] = the `set-song` host command (`:field`, `:value`; `:track-id` for
+`latched`, `:clip-id` for `bound-clip`); [k] = `set-clip` (`:clip-id`,
+`:field`, `:value`; `:track-id`, `:pattern-id` for `cell`); [e] =
+`set-cell` (`:track-id`, `:pattern-id`, `:field`, `:value`); all in
+`host_commands/arrangement.rs`. Actions: `(launch-cell! c)` (the legacy
+`set-scene-cell`, extended to take `:track-id` and no `:scene`, both
+resolved when it lands: the track by id, the current scene; legacy
+`:scene :track` payloads still work; with `transport.launch-quantize`),
+`(select-region! t1 t2 start end)`, `(select-region-in! t1 t2 start end
+scene-lane)` (functions have no optional parameters; `scene-lane` a bool,
+sent as `:scene-lane`) and `(clear-region!)` (`set-song-region`, tracks by
+`tid`).
+Constants: `take-none` (0), `take-governed` (1), `take-latched` (2).
+
+Built (7d):
+
+- **Cells are pool patterns.** The legacy `track-pattern-cell-*` family
+  is keyed (track, pattern id), the mixer clip grid's patterns, not (track,
+  scene): a `cell` is one pattern of a track's pool (take chunks and the
+  track-sound carrier excluded, as in `track_pattern_cells`), keyed (track
+  instance id, `PatternId`). Scene membership is `cell.banks` (the banks
+  whose scenes use it; empty for an orphan, which the grid shows in every
+  bank) and `cell.assigned` (the current scene's cell). `override` is the
+  track's launched-override flag (true on every cell of the track, as the
+  legacy field). A clip's `cell` is the cell it plays.
+- **Identity.** Clips are keyed (track instance id, `ClipId`), the
+  arrangement's stable, never-reused clip id: a move, resize or source
+  change keeps the instance; a delete drops it. Clips and cells are
+  registered per track (`reconcile_children`) and dropped with their track,
+  so a track reorder (a delete, its undo) keeps them and a project load
+  replaces them with the tracks. Scene changes carry no ids, so
+  `scene-span`s are positional (`(index)`, like steps, D2): an edit
+  re-pushes their values, a shorter lane drops the tail. `region` is a
+  singleton; `song.region` is it while a region is selected, else nil.
+- **Feeds.** Each behind its own key; none reads the history revision, so
+  a knob drag re-derives none of them (`SongState::structure_syncs` counts
+  the structure syncs). *Structure* (the clips and their fields, the
+  spans, `song.exists`/`end`/`loop`, read through the borrowing
+  `SequencerState::with_committed_song`): the committed-song revision
+  (`committed_song_revision`), the track and scene instances (a reorder
+  remaps the lanes in place without moving the song revision) and the cell
+  set. *Source content* (a clip's `num-steps`, `length`, `events`: the
+  source's preview, one pattern cycle or the whole take, from
+  `collect_lane_pattern_events`, shared with `SEQ.song-lane-events`): the
+  pattern epoch and pool content revision; values are cached per (track
+  instance, source), only the lanes holding a missing source are
+  previewed, and after a structure-only change only clips whose (track,
+  source) is new are pushed. *Dots* (`App::song_clip_sounds_in` over the
+  lanes in hand, shared with `SEQ.song-clip-sounds`, through
+  `sound_palette_rgb`, shared with the palette rows; the timeline's
+  `SOUND_DOT_GRAY` without a palette color): the song revision, the scenes
+  revision (patches and their palette colors live there), the sound
+  binding epoch and the structure. *Cells* (`tracks_pattern_cells`: every
+  track's `track_pattern_cells` and `track_pattern_bank_indices` under one
+  scenes lock, as the legacy publishers): the scenes revision, current
+  scene, pattern epoch, song-row mirror epoch, track generation, take-lane
+  and silenced masks and the track and bank instances. Scene spans go
+  through `registry::reconcile` over their positions, so a hot reload's
+  dropped instances are re-registered; a schema change or a dropped
+  arrangement instance invalidates every key. `mode`, `recording-kind`,
+  `cursor`, `edit-error` and the capture state are `App` state no counter
+  tracks: compared every tick with what was last pushed, allocating only on
+  a change, all re-pushed when the song or region singleton is a new
+  instance; `region` likewise (with the structure generation: its tracks
+  are positions), and when it is cleared the `region` singleton reads as
+  no tracks over 0..0 outside a lane; `bound-clip` by one keyed lookup.
+  `track.governed` (`song_take_lane_states`, shared with
+  `SEQ.song-track-governed`) is re-derived only when song authority, the
+  mirrored row, the latch mask, the running song or the structure moved.
+  Live: `song.position` (`song_position` /
+  `displayed_song_position_beats`, shared with `SEQ.song-position-beats`;
+  the tick copies the capture's record head for the empty-song fallback),
+  `manual-latch` (`song_manual_latch`), `scene-latched`, `track.latched`
+  (`song_lane_latched`), `cell.queued` (`queued_track_clip`, shared with
+  `SEQ.queued-track-clips`) and `cell.selected`
+  (`track_pattern_cell_selected`, shared with the legacy field); observed
+  cells are kept in an `ObservedList`.
+- **Setters.** Clips by `cid`, tracks by `tid`, cells by (`tid`, `pid`),
+  resolved when the command lands; a gone clip, track or pattern is an
+  error. They act only where the model differs and go through the timeline
+  commands' primitives (`App::arr_*`, one arrangement history entry; undo
+  restores), landing like them (`song_edit_landed`, shared with the legacy
+  song commands: a rejection, the setter's own pre-edit ones for
+  `set-clip` and `song.loop`/`song.end` included, is latched in
+  `song.edit-error` and reported; a success clears it and resyncs the
+  piano roll). `clip.start` moves the clip (length kept), `clip.end`
+  resizes it, `clip.cell` sets its source to a pattern of its own track's
+  pool (another track's cell, nil, or a pattern no longer in the pool is
+  an error), `song.loop`, `song.end` (before a clip's end or the last
+  scene change the model refuses). `cell.selected` (`set-cell`) makes the
+  cell the mixer's delete target (false clears it when it is).
+- **Script drags.** While the pointer is down (and no user gesture is
+  active, `ScriptEdit::drags`), every `clip.start`, `clip.end` and
+  `song.end` `set!`, across any number of clips, shares ONE coalescing key
+  (`kinds-arrangement`) and so forms one undo entry. Each frame is applied
+  relative to the gesture's `before` arrangement: the targets the drag has
+  set so far (clip id to start / end, the song end;
+  `GestureState::script_arrangement_drag`, tied to the gesture's id)
+  accumulate across frames, and every frame rebuilds from the before
+  snapshot with all of them in a fixed order (clips by id: a start moves,
+  an end resizes from the clip's start then; the song end last;
+  `App::arr_script_drag`). A clip dragged across another therefore only
+  occludes it where it ends up, as a timeline drag; a rejected frame
+  changes nothing and keeps the earlier targets; take ends clamp. With the
+  pointer up each `set!` is a plain one-shot edit and its own entry
+  (`arr_clip_move`, `arr_clip_resize` — which grows a take past its
+  playable end, as the timeline's resize — and `arr_set_end`). The
+  primitives share `edit_arrangement_keyed` (one-shot or coalesced) and the
+  in-place edits `move_clip_in`, `resize_clip_in`, `set_end_in`.
+- **Selection state.** `cursor`, `bound-clip` (`select_song_clip_span`
+  with the clip's span, as a title-bar click; nil deselects),
+  `manual-latch` / `track.latched` (false is Back to Song, for all lanes or
+  one; true is an error: only a launch latches), `cell.selected` and the
+  region actions are selection or transport state, without history, as
+  the legacy commands; their rejections are reported, not latched. Values:
+  beats are finite numbers of at least 0 (a clip's end after its start),
+  flags bools, ids non-negative integers (`SetValue::id` / `id_or_nil`,
+  shared with `track.output`); `set!` rejects a wrong type, the host
+  anything else (`set-clip: …`, `set-song: …`).
+- **Deferred to eseq-0l17.39:** `song.pending` (the provisional capture
+  surface: pending take lanes, scene and track launches) as positional
+  sub-kinds.
+
 ### 14.3 Follow-up beads
 
 Each port bead depends on the beads whose rows it uses (`bd dep`).
@@ -1421,7 +1558,8 @@ Each port bead depends on the beads whose rows it uses (`bd dep`).
 | 7b-2 | eseq-0l17.36 | devices (and params) for MIDI fx, bus effects, rack slots; `bus.devices`, `track.midi-devices`, `device.delete-target` (from 7i) | .13 .14 .18 .19 .21 |
 | 7b-3 | eseq-0l17.37 | panel extras: modulation display, process mapping, tensors, base note, key locks, rack and project macros, variant chip list, neural-selection display | .14 .18 |
 | 7c | eseq-0l17.29 | `lane`, process slots and scopes, process library singleton | .11 .14 .20 |
-| 7d | eseq-0l17.30 | `song` singleton, `clip`, pattern `cell`, `track.governed` / `latched` | .11 .12 .13 .15 .17 .20 |
+| 7d | eseq-0l17.30 (built) | `song` and `region` singletons, `scene-span`, `clip`, pattern `cell`, `track.governed` / `latched` | .11 .12 .13 .15 .17 .20 |
+| 7d-2 | eseq-0l17.39 | `song.pending` (the provisional capture surface) as positional sub-kinds | .15 |
 | 7e | eseq-0l17.31 | `note`, `piano-roll` singleton, tracker rows and grid playheads | .16 .20 |
 | 7f | eseq-0l17.32 | `browser`, `sound`, `editor`, `learn`, `retro`, `export`, settings and agent singletons, `track.instrument-id` | .12 .17 .18 |
 | 7g | eseq-0l17.33 | `graph-node`, neural networks, visualizations, generator marks, track events | .20 |
@@ -1555,28 +1693,28 @@ builds the field name.
 | `SEQ.track-process-lanes` | 2 | seqv-track-params, packages/alez.tracker/src/ui | sv/topology_and_visualization.rs | model | track.lanes | .29 | .11 .20 |
 | `SEQ.track-process-scopes` | 3 | sequencer | ui_replay_probe.rs | live | process scope (live) | .29 | .11 |
 | `SEQ.track-process-slots` | 4 | sequencer, seqv-track-params, scripts/sequencers/band-coupling-matrix-demo | input.rs | model | track.processes | .29 | .11 .20 |
-| `SEQ.queued-track-clips` | 1 | mixer | event_loop.rs | model | cell.queued | .30 | .13 |
-| `SEQ.scene-spans` | 9 | arrangement | sv/song_state.rs | model | clip spans | .30 | .15 |
-| `SEQ.song-bound-clip` | 2 | arrangement, sound-palette | sv/song_state.rs | model | song.bound-clip | .30 | .15 .17 |
-| `SEQ.song-clip-sounds` | 2 | arrangement | sv/sound_palette.rs | model | clip.sound | .30 | .15 |
-| `SEQ.song-cursor-beats` | 1 | transport | sv/song_state.rs | model | song.cursor | .30 | .12 |
-| `SEQ.song-edit-error` | 2 | arrangement | sv/song_state.rs | model | song.edit-error | .30 | .15 |
-| `SEQ.song-end-beat` | 2 | arrangement | sv/song_state.rs | model | song.end | .30 | .15 |
-| `SEQ.song-lane-events` | 4 | arrangement | sv/song_state.rs | model | clip kind | .30 | .15 |
-| `SEQ.song-lanes` | 7 | arrangement, sound-palette | sv/song_state.rs | model | clip lanes | .30 | .15 .17 |
-| `SEQ.song-manual-latch` | 2 | transport | sv/song_state.rs | model | song.manual-latch | .30 | .12 |
-| `SEQ.song-mode` | 2 | transport, arrangement | sv/song_state.rs | model | song.mode | .30 | .12 .15 |
-| `SEQ.song-pending` | 8 | arrangement | sv/song_state.rs | model | song.pending | .30 | .15 |
-| `SEQ.song-position-beats` | 5 | arrangement, transport | sv/song_state.rs | live | song.position (live) | .30 | .12 .15 |
-| `SEQ.song-region` | 31 | arrangement | sv/song_state.rs | model | song.region | .30 | .15 |
-| `SEQ.song-scene-latched` | 1 | arrangement | sv/song_state.rs | model | song.scene-latched | .30 | .15 |
-| `SEQ.song-track-governed` | 3 | sequencer | sv/song_state.rs | model | track.governed | .30 | .11 |
-| `SEQ.song-track-latched` | 1 | arrangement | sv/song_state.rs | model | track.latched | .30 | .15 |
-| `SEQ.track-pattern-cell-active-*` | 2 | mixer, arrangement | sv/steps_and_pattern.rs | model | cell.active | .30 | .13 .15 |
-| `SEQ.track-pattern-cell-assigned-*` | 1 | mixer | sv/steps_and_pattern.rs | model | cell.assigned | .30 | .13 |
-| `SEQ.track-pattern-cell-override-*` | 1 | mixer | sv/steps_and_pattern.rs | model | cell.override | .30 | .13 |
-| `SEQ.track-pattern-cell-selected-*` | 1 | mixer | sv/steps_and_pattern.rs | model | cell.selected | .30 | .13 |
-| `SEQ.track-pattern-cells` | 4 | mixer, arrangement | sv/track_and_mixer.rs | model | cell kind (track scene) | .30 | .13 .15 |
+| `SEQ.queued-track-clips` | 1 | mixer | event_loop.rs | model | cell.queued (live) | built (.30) | .13 |
+| `SEQ.scene-spans` | 9 | arrangement | sv/song_state.rs | model | song.spans → scene-span | built (.30) | .15 |
+| `SEQ.song-bound-clip` | 2 | arrangement, sound-palette | sv/song_state.rs | model | song.bound-clip | built (.30) | .15 .17 |
+| `SEQ.song-clip-sounds` | 2 | arrangement | sv/sound_palette.rs | model | clip.dot / dot-color | built (.30) | .15 |
+| `SEQ.song-cursor-beats` | 1 | transport | sv/song_state.rs | model | song.cursor | built (.30) | .12 |
+| `SEQ.song-edit-error` | 2 | arrangement | sv/song_state.rs | model | song.edit-error | built (.30) | .15 |
+| `SEQ.song-end-beat` | 2 | arrangement | sv/song_state.rs | model | song.end | built (.30) | .15 |
+| `SEQ.song-lane-events` | 4 | arrangement | sv/song_state.rs | model | clip.events / num-steps / length | built (.30) | .15 |
+| `SEQ.song-lanes` | 7 | arrangement, sound-palette | sv/song_state.rs | model | `t.clips` → clip | built (.30) | .15 .17 |
+| `SEQ.song-manual-latch` | 2 | transport | sv/song_state.rs | model | song.manual-latch | built (.30) | .12 |
+| `SEQ.song-mode` | 2 | transport, arrangement | sv/song_state.rs | model | song.mode | built (.30) | .12 .15 |
+| `SEQ.song-pending` | 8 | arrangement | sv/song_state.rs | model | song.pending | .39 | .15 |
+| `SEQ.song-position-beats` | 5 | arrangement, transport | sv/song_state.rs | live | song.position (live) | built (.30) | .12 .15 |
+| `SEQ.song-region` | 31 | arrangement | sv/song_state.rs | model | song.region | built (.30) | .15 |
+| `SEQ.song-scene-latched` | 1 | arrangement | sv/song_state.rs | model | song.scene-latched | built (.30) | .15 |
+| `SEQ.song-track-governed` | 3 | sequencer | sv/song_state.rs | model | track.governed | built (.30) | .11 |
+| `SEQ.song-track-latched` | 1 | arrangement | sv/song_state.rs | model | track.latched | built (.30) | .15 |
+| `SEQ.track-pattern-cell-active-*` | 2 | mixer, arrangement | sv/steps_and_pattern.rs | model | cell.active | built (.30) | .13 .15 |
+| `SEQ.track-pattern-cell-assigned-*` | 1 | mixer | sv/steps_and_pattern.rs | model | cell.assigned | built (.30) | .13 |
+| `SEQ.track-pattern-cell-override-*` | 1 | mixer | sv/steps_and_pattern.rs | model | cell.override | built (.30) | .13 |
+| `SEQ.track-pattern-cell-selected-*` | 1 | mixer | sv/steps_and_pattern.rs | model | cell.selected | built (.30) | .13 |
+| `SEQ.track-pattern-cells` | 4 | mixer, arrangement | sv/track_and_mixer.rs | model | cell kind (track pid): `t.cells` | built (.30) | .13 .15 |
 | `SEQ.focus-clip-end` | 3 | piano-roll | piano_roll.rs | model | piano-roll.clip-end | .31 | .16 |
 | `SEQ.focus-clip-kind` | 5 | piano-roll | piano_roll.rs | model | piano-roll.clip-kind | .31 | .16 |
 | `SEQ.focus-clip-offset` | 4 | piano-roll | piano_roll.rs | model | piano-roll.clip-offset | .31 | .16 |
