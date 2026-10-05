@@ -577,6 +577,37 @@ impl ParamDescriptor {
             }
         }
     }
+
+    /// The label an enum value selects (rounded and clamped into the label
+    /// list); `None` for other kinds or an empty list.
+    pub fn option_label(&self, value: f32) -> Option<&str> {
+        match &self.kind {
+            ParamKind::Enum { labels } => option_label_at(labels, value),
+            _ => None,
+        }
+    }
+
+    /// Whether `other` describes the same parameter: name, range, default
+    /// and kind (units and labels included).
+    pub fn same_shape(&self, other: &ParamDescriptor) -> bool {
+        self.name == other.name
+            && self.min.to_bits() == other.min.to_bits()
+            && self.max.to_bits() == other.max.to_bits()
+            && self.default.to_bits() == other.default.to_bits()
+            && param_kinds_are_compatible(&self.kind, &other.kind)
+    }
+}
+
+/// The option `value` selects from `labels`: rounded, clamped into the list;
+/// `None` when the list is empty.
+pub fn option_label_at(labels: &[String], value: f32) -> Option<&str> {
+    let last = labels.len().checked_sub(1)?;
+    let index = if value.is_nan() {
+        0
+    } else {
+        (value.round().max(0.0) as usize).min(last)
+    };
+    Some(labels[index].as_str())
 }
 
 fn param_kinds_are_compatible(old: &ParamKind, new: &ParamKind) -> bool {
@@ -9028,6 +9059,23 @@ impl SlotPLockData {
                 mask[step / 64] |= 1u64 << (step % 64);
             }
         }
+    }
+
+    /// Whether any of the first `num_steps` steps locks `param_idx`. O(1)
+    /// for a plock-free slot; otherwise skips plock-free steps and stops at
+    /// the first lock.
+    pub fn param_has_any_plock(&self, param_idx: usize, num_steps: usize) -> bool {
+        if param_idx >= self.max_params || !self.has_any_plock() {
+            return false;
+        }
+        let Some(cells) = self.cells() else {
+            return false;
+        };
+        (0..num_steps.min(MAX_STEPS)).any(|step| {
+            self.step_count(step) > 0
+                && !f32::from_bits(cells.data[self.index(step, param_idx)].load(Ordering::Relaxed))
+                    .is_nan()
+        })
     }
 
     pub fn step_has_any_plock(&self, step: usize, num_params: usize) -> bool {

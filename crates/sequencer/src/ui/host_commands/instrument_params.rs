@@ -112,13 +112,18 @@ pub(super) fn handle(
                                 &[(PrintTarget::Instrument { param_idx }, stored)],
                             );
                         } else {
-                            if !wrote_neural_plock {
-                                app::apply_command(
-                                    &mut app,
-                                    app::AppCommand::SetInstrumentParam {
-                                        track,
-                                        param_idx,
-                                        value: stored,
+                            if wrote_neural_plock {
+                                super::rebuild_panel_if_needed(ctx.shared, &desc);
+                            } else {
+                                super::apply_device_param_base(
+                                    app,
+                                    ctx.shared,
+                                    (track, DeviceSlot::Instrument, param_idx),
+                                    &desc,
+                                    stored,
+                                    |app, command| {
+                                        app::apply_command(app, command);
+                                        true
                                     },
                                 );
                             }
@@ -139,10 +144,6 @@ pub(super) fn handle(
                                     sync_sampler_times: true,
                                 },
                             );
-                            if param_change_needs_fx_rebuild(&desc) {
-                                fx_epoch.fetch_add(1, Ordering::Relaxed);
-                                ui_epoch.fetch_add(1, Ordering::Relaxed);
-                            }
                         }
                     }
                 }

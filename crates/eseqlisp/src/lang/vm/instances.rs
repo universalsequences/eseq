@@ -2361,7 +2361,18 @@ impl VM {
         field: &str,
         value: Value,
     ) -> Result<(), VMError> {
-        let Some(slot) = self.checked_write_slot(id, field, &value)? else {
+        let checked = match self.checked_write_slot(id, field, &value) {
+            // A numeric `:host` field's `:set` takes true/false too (an on/off
+            // param's `(set! p.base true)`): the setter converts it.
+            Err(InstanceError::TypeMismatch { .. })
+                if matches!(value, Value::Bool(_)) && self.numeric_host_setter(id, field) =>
+            {
+                let resolved = self.instances.resolve(id, field)?;
+                resolved.record.map(|_| resolved.slot)
+            }
+            checked => checked?,
+        };
+        let Some(slot) = checked else {
             return Ok(());
         };
         let FieldSlot::Host(index) = slot else {
@@ -2383,6 +2394,24 @@ impl VM {
         };
         self.invoke(setter, vec![Value::Instance(id), value])?;
         Ok(())
+    }
+
+    /// Whether `field` of `id` is a `:number`/`:int` `:host` field with a
+    /// `:set` function.
+    fn numeric_host_setter(&self, id: InstanceId, field: &str) -> bool {
+        let Ok(resolved) = self.instances.resolve(id, field) else {
+            return false;
+        };
+        let FieldSlot::Host(index) = resolved.slot else {
+            return false;
+        };
+        let numeric = resolved
+            .declared
+            .is_some_and(|declared| matches!(declared.ty, FieldType::Number | FieldType::Int));
+        let setter = (self.instances.kinds.get(resolved.kind))
+            .and_then(|schema| schema.host.get(index))
+            .is_some_and(|declared| declared.set.is_some());
+        numeric && setter
     }
 
     /// Resolve a write of `value` to `field` and type-check it: the cell to

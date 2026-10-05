@@ -281,6 +281,13 @@ pub(crate) struct GestureState {
     /// App-side scroll momentum (Wayland has none); host commands toggle it,
     /// the event loop drives it.
     pub(crate) scroll_inertia: crate::scroll_inertia::ScrollInertia,
+    /// A mouse button is held (mirrors the event loop's pointer state), so
+    /// a script edit may belong to a drag whose release ends its gesture.
+    pub(crate) pointer_down: bool,
+    /// The history gesture a script param edit (`param.base`'s `:set`)
+    /// opened while the pointer was down; later script edits join it,
+    /// while any other active gesture is a user's and is left alone.
+    pub(crate) script_param_gesture: Option<sequencer::app::history::GestureId>,
 }
 
 /// Shared handles threaded between the event loop, lisp natives, and the

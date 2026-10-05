@@ -153,6 +153,17 @@ impl TrackSendPLockData {
         }
     }
 
+    /// Whether any of the first `num_steps` steps locks the send to
+    /// `destination`.
+    pub fn has_lock_for(&self, destination: BusId, num_steps: usize) -> bool {
+        self.steps
+            .lock()
+            .unwrap()
+            .iter()
+            .take(num_steps)
+            .any(|row| row.iter().any(|send| send.destination == destination))
+    }
+
     pub fn snapshot(&self) -> Vec<Vec<TrackSendSnapshot>> {
         self.steps.lock().unwrap().clone()
     }

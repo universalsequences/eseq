@@ -1,6 +1,6 @@
 # Kind bindings
 
-Status: spec rev 3, 2026-10-04. Stages 1–6 built, stage 7 in part (§14) (§3.1, §3.2, §3.3, §3.4, §4, §7.1, §7.3, §8, §9 notes). Bead: epic `eseq-0l17` (`bd list --label kind-bindings`).
+Status: spec rev 3, 2026-10-04. Stages 1–6 built, stage 7 in part (§14; 7 and 7b built) (§3.1, §3.2, §3.3, §3.4, §4, §7.1, §7.3, §8, §9 notes). Bead: epic `eseq-0l17` (`bd list --label kind-bindings`).
 Rev 3 resolves the open questions (§12 Decisions). Rev 2 dropped the separate `defrecord` form of rev 1: host state and view state
 are declared with `def-kind`, which gains keyed and singleton kinds, a `:host`
 field group and typed fields.
@@ -345,7 +345,7 @@ Built (stage 4):
   other module is an error (`kind name 'track' is reserved for the host
   kinds of eseq.kinds; …`). The host reserves every kind in `PUBLISHED`
   (`host_kind_names`: `track step device scene bank transport selection
-  project`, and since stage 7 `send bus group master engine`) before
+  project`, and since stage 7 `send bus group master engine`, since 7b `param`) before
   evaluating the root.
 - **Schema check.** `host_kinds::PUBLISHED`
   (`crates/sequencer/src/ui/host_kinds/mod.rs`) lists every field the host
@@ -366,7 +366,7 @@ Built (stage 4):
   |---|---|---|
   | `track` | `(index)` | `index :int`, `name :string`, `color :rgb`, `volume :number` [`seq-set-track-volume`], `peak :number`, `muted :bool` [`seq-set-track-mute`], `audible :bool`, `armed :bool` [`seq-set-record-arm`], `selected :bool`, `preset :string`, `num-steps :int`, `steps (list-of step)`, `devices (list-of device)` |
   | `step` | `(track index)` | `index :int`, `track track`, `active :bool` [`seq-set-track-step`], `playing :bool`, `selected :bool` |
-  | `device` | `(track slot)`, slot part = slot + 1 | `track track`, `slot :int` (-1 = instrument), `name :string`, `enabled :bool` |
+  | `device` | `(track slot)`, slot part = slot + 1 (since 7b `(track did)`, §14.2b) | `track track`, `slot :int` (-1 = instrument), `name :string`, `enabled :bool` |
   | `scene` | `(index)` | `index :int`, `number :int` (1-based in its bank), `name :string`, `active :bool`, `queued :bool`, `bank bank` |
   | `bank` | `(index)` | `index :int`, `label :string`, `scenes (list-of scene)`, `playing :bool` |
   | `transport` | `()` | `playing :bool` [`seq-set-playing`], `recording :bool` [`seq-set-recording`], `scene scene`, `queued scene` (nil when none), `launch-quantize :string` |
@@ -988,6 +988,8 @@ its instance and field.
    `lane`, `clip`, `note`, `graph-node`, browser and editor singletons, rack
    pads/clips, track settings and routing) are follow-up beads
    eseq-0l17.28–.35 (§14.3), which the port beads depend on.
+   Built (stage 7b, eseq-0l17.28): `param` under `device`, the step
+   p-lock render and send lock flags (§14.2, "Built (7b)").
 8. **Factory port**, one area at a time, each removing that area's legacy
    field names: sequencer grid and step editing; transport, scenes and
    banks; mixer; effect and instrument panels (incl. custom-ui runtime,
@@ -1125,13 +1127,153 @@ Model.
   track-peak slice; `wants_bus_peaks` / `wants_master_peaks` keep the meter
   cache polled while only a kind field observes them.
 
+### 14.2b Built in stage 7b (eseq-0l17.28)
+
+| Kind | Key | New `:host` fields (`:set` in brackets) |
+|---|---|---|
+| `param` | `(device index)` | `device device`, `index :int`, `name :string`, `min`, `max`, `default :number`, `type :string` (`continuous`, `enum`, `boolean`), `options (list-of :string)`, `unit :string`, `value :number` (L, shown), `base :number` (L) [host command `set-device-param`], `locked :bool` (L), `has-locks :bool` (L), `text :string` (L), `printing :bool` (L) |
+| `device` | `(track did)` (was `(track slot)`) | `did :int`, `type :string`, `params (list-of param)` (lazy; then Model), `playhead :number` (L) |
+| `track` | `(index)` | `tid :int` (the stable `TrackId`) |
+| `step` | `(track index)` | `plocked :bool`, `lock-kind :int` (`lock-none`, `lock-seq`, `lock-variant`), `variant-color :rgb` (all L) |
+| `send` | `(track bus-id)` | `has-locks :bool` (L) |
+
+Built (7b):
+
+- **Names.** As for sends (§14.1): `param.base` is the device's own
+  value, what its `:set` changes (never a p-lock); `param.value` is the
+  value shown: on the current track the p-lock in force at the selected
+  (else, while playing, the playing) step, with the off-step hold of
+  `held_plock_value`, else the base under any engaged macro override;
+  `locked` says a p-lock supplies `value`; `has-locks` says some step of
+  the pattern (the first `num-steps`, like `send.has-locks`) locks the
+  param (the knob's automation dot, legacy `track-plock-any` /
+  `plk-…-any`); `printing` says a live print latch holds the param while
+  playing and recording (legacy `track-plock-printing` / `plk-…-print`).
+  `text` is the option an enum value selects (rounded, clamped:
+  `ParamDescriptor::option_label`, which the effect panels use too),
+  `on`/`off` for a boolean, empty for a continuous param. `type` replaces
+  a `boolean` flag (`kind` is a built-in instance field). The legacy
+  `plk-…-def` projection is `param.base`; `plk-…-on` is `param.locked`
+  (also true while playing a locked step, like `send.locked`).
+  `step.lock-kind` is an `:int` (bindable) named by the exported
+  constants `lock-none` (0), `lock-seq` (1, sequencer-only locks) and
+  `lock-variant` (2, a p-lock variant).
+- **One unit convention.** Every param's `value`, `base`, `min`, `max`
+  and `default`, and every setter, speak display units, for instrument
+  and effect params alike: a percent param reads and takes 0–100
+  (`stored_to_user` / `user_input_to_stored` through
+  `DeviceSlot::to_user` / `from_user_clamped`). Effect params' legacy
+  `track-N-fx-*` fields stay in stored units; they agree with `param` for
+  every non-percent param.
+- **Identity.** Devices are keyed (track instance id, `did`): 0 for the
+  instrument, else the effect's stable instance id
+  (`DeviceIdentityRegistry`, bound by recorded chain edits and project
+  loads; an effect slot with none bound yet uses 2^52 + slot until one
+  is). A reorder keeps a device's instance and its params (only `slot`
+  moves). Params are keyed (device instance id, descriptor index) and
+  registered lazily, on the first read of `d.params` (the reader hook,
+  or the tick once `params` is observed), each registration pushing
+  `index`, `device` and the descriptor fields; `d.params` is then a model
+  field. A descriptor change in a device (an effect replaced in its slot,
+  which adopts the replaced instance id; an instrument swap or a preset
+  load that changes the descriptor) drops its params and, when they were
+  registered, registers fresh ones and re-pushes `d.params`: old handles
+  go stale. Deleting the device (or its track, or a project load) drops
+  its params. `device.type` says what the device is (the instrument type,
+  `sampler`, `synth`, …, or the effect, `Filter`, …).
+- **Feeds.** The model sync keeps, per device, a `DeviceSource`
+  (`host_kinds/params.rs`: track position, `DeviceSlot`, the descriptor's
+  params, the sampler voices) in `KindsShared`, replaced only when the
+  descriptor or position changed, with the effect slot counts per track;
+  the tick copies the macro engine's override layer when it changes. So
+  every param field the reader may be asked for is computable without the
+  `App`: descriptor fields are pushed once, at registration; the rest are
+  Live, from the instrument or effect slot (`defaults`, `plocks`), the
+  print latch (`StepPrintState::holds`) and the transport. The tick keeps
+  the observed devices and params in lists rebuilt only when the observer
+  epoch moves or their instances change (`ObservedList`), and per tick
+  re-queries and computes only those: work in proportion to the observed
+  params, not the registered ones. A param's displayed value and p-lock
+  state are computed once for `value`, `locked` and `text`; `text` is
+  pushed without allocating unless its label changed; `has-locks`
+  (`SlotPLockData::param_has_any_plock`, an early-exit scan bounded by
+  `num-steps`) only when the track's p-lock key moved. `device.playhead`
+  is re-resolved from the `App` per tick read (a sample load or voice
+  rebuild moves no model counter); a cold read uses the sampler voices of
+  the last model sync.
+- **P-lock change tracking.** `UiInvalidationQueue` keeps a p-lock
+  revision per track, moved only by invalidations that may move a
+  p-lock (`UiInvalidation::plock_scope`: `Full`, `ProjectState`,
+  `Pattern`, track topology, step edits, `TrackFx`/`Instrument` p-lock
+  and topology, `MidiFx`, `TrackBusSend`, process lanes, the
+  `Plocks`/`BusSends`/`NumSteps` track params); a base-value edit moves
+  none. A track's `PlockKey` is that revision with the pattern, fx and
+  UI epochs (a scene switch, an undo, a structural edit). The step p-lock
+  render (legacy `seq-track-step-plocked-*`, `-plock-kind-*`,
+  `-variant-{r,g,b}-*`, `step-has-plocks`) is a whole-track scan
+  (`plock_variant_step_render_values` and
+  `track_step_plock_mask_for_slots`), cached per track in `KindsShared`
+  under its `PlockKey`: cold reads and the step diff share it (a cold
+  read of every step scans once), and the step diff recomputes only for
+  tracks whose steps observe one of the three fields, when the key
+  moved.
+- **Shared derivations.** `device_param_display` (`state_values/shared.rs`)
+  serves `param.value`/`locked` and the legacy instrument / track-effect
+  value fields; `DeviceSlot` (`state_values/shared.rs`: descriptor, slot
+  state, units, macro key, print target, invalidations, history commands,
+  `did`/`resolve`) serves the params, the device chain sync and the
+  setters; `app::instrument_param_macro_key` / `effect_param_macro_key`
+  serve `App::effective_*_param_value` and the kinds' override lookup;
+  `SamplerPlayhead` serves `read_sampler_playhead_seconds` and
+  `device.playhead`; `track_step_plock_mask_for_slots` serves
+  `track_step_plock_mask`.
+- **Setters.** `param.base`'s `:set` is the host command
+  `set-device-param` (`:track-id`, the track's `tid`; `:device`, its
+  `did`; `:param-idx`; `:value`); `(lock-param! p steps v)` and
+  `(unlock-param! p steps)` (steps: step instances of the param's track,
+  sent with their tracks' `tid`s) are `set-device-param-locks` /
+  `clear-device-param-locks`. All resolve the device by those stable ids
+  when the command lands (like send's bus id), so a reorder in between
+  cannot retarget them; a device or param that is gone, a non-finite
+  value or a step of another track is an error (nothing changes). Values
+  are display units, clamped, rounded for enum and boolean params, and
+  `true`/`false` work (a numeric `:host` field's `:set` takes a boolean,
+  which the setter converts). They act only where the model differs, go
+  through the knob edits' history commands (`SetInstrumentParam` /
+  `SetEffectParam`; `Set…PlockMulti` / `Clear…PlockMulti`, one undo
+  entry for all steps, built by the same `clear_plocks_command` and
+  `step_list` as `clear-param-plocks`), and queue the invalidations that
+  refresh the legacy fields. A base set goes through
+  `apply_device_param_base`, which `set-instrument-param` and
+  `set-effect-param` share: an enum, boolean or sampler `sens` change
+  rebuilds the legacy panel (fx and UI epochs). The base setter never
+  latches a print (unlike the legacy knob while recording).
+  `(device-param d name)` finds a param by name (the custom-ui `(bind
+  "x")` helpers become `#'(device-param d "x").value`).
+- **Gestures.** A script base set while no pointer is held is an undo
+  entry of its own, ended at once; while the pointer is down it stays
+  open and later script base sets join it (a drag view's `set!` per
+  frame is one entry, ended by the release) — the pointer state, not a
+  flag, decides (`GestureState::pointer_down`). An edit landing while
+  another gesture is active (a user's knob drag) is applied beside it
+  (`app::edit::apply_command_beside_gesture`, over
+  `UndoManager::suspend_gesture` / `resume_gesture`): its own entry, the
+  drag neither split nor joined.
+- **Not covered** (follow-ups): MIDI fx, bus effect and rack slot devices
+  (eseq-0l17.36); modulation display, process mapping, tensors, base
+  note, key locks, rack and project macros, the variant chip list, the
+  neural-selection display override and the rest of the panel data
+  (eseq-0l17.37).
+
 ### 14.3 Follow-up beads
 
 Each port bead depends on the beads whose rows it uses (`bd dep`).
 
 | Tag | Bead | Kinds | Ports blocked |
 |---|---|---|---|
-| 7b | eseq-0l17.28 | `param` under `device` (values, p-lock display, modulation display, base note, tensors, rack macros), devices for bus effects / MIDI fx / rack slots, step p-lock render (`plocked`, `lock-kind`, `variant-color`), send p-lock flags | .11 .13 .14 .18 .19 .21 |
+| 7b | eseq-0l17.28 (built) | `param` under `device` (values, p-lock display, print latch), `device.playhead`, step p-lock render (`plocked`, `lock-kind`, `variant-color`), send p-lock flags | .11 .13 .14 .18 .19 .21 |
+| 7b-2 | eseq-0l17.36 | devices (and params) for MIDI fx, bus effects, rack slots | .13 .14 .19 .21 |
+| 7b-3 | eseq-0l17.37 | panel extras: modulation display, process mapping, tensors, base note, key locks, rack and project macros, variant chip list, neural-selection display | .14 .18 |
 | 7c | eseq-0l17.29 | `lane`, process slots and scopes, process library singleton | .11 .14 .20 |
 | 7d | eseq-0l17.30 | `song` singleton, `clip`, pattern `cell`, `track.governed` / `latched` | .11 .12 .13 .15 .17 .20 |
 | 7e | eseq-0l17.31 | `note`, `piano-roll` singleton, tracker rows and grid playheads | .16 .20 |
@@ -1239,24 +1381,24 @@ builds the field name.
 | `SEQ.transposes` | 2 | seq-core-state, seqv-track-params | reactive_sync.rs | model | step.transpose | built (.10) | .11 |
 | `SEQ.velocities` | 2 | seq-core-state, seqv-track-params | app/retrospective.rs | model | step.velocity | built (.10) | .11 |
 | `SEQV.<sel-track-vis-field>` | 1 | seq-core-state | Lisp (reactive-set) | Lisp-owned | track.selected | built (.10) | .11 |
-| `<ns-var name>` | 2 | effects/drum-surface | custom_ui.rs | - | param (custom-ui (bind "x")) | .28 | .14 |
-| `SEQ.<get>` | 23 | effects/param-controls, effects/instrument-panel, effects/sampler-panel +9 | sv/param_fields_and_sync.rs, instrument_panel.rs, effects_panel.rs | model | param.value / param.name (panel :value-field, :label-field, :name-field, :short-field) | .28 | .14 .16 .18 .19 .20 .21 |
-| `SEQ.<slot-field>` | 12 | sequencer | sv/expanded_step.rs | model | step.active/selected/playing/plocked/lock-kind/variant-color through the view's own slot→step map (expanded-step projection removed) | .28 | .11 |
-| `SEQ.<var field>` | 8 | effects/param-controls, effects/custom-ui-runtime, mixer +1 | sv/param_fields_and_sync.rs | model | param.value / send.display (field strings from panel data) | .28 | .13 .14 |
-| `SEQ.effects` | 3 | application-menus, effects/index, effects/buffers | lisp_host/dgen/instrument_storage.rs | model | track.devices → device.params | .28 | .14 .18 |
-| `SEQ.instrument-panel` | 10 | effects/param-controls, browser, effects/index +3 | reactive_tick.rs | model | device panel data (device.params) | .28 | .14 .17 .18 |
-| `SEQ.macros` | 5 | macros, effects/param-controls | project.rs | model | rack macros (group.macros) | .28 | .14 .18 |
-| `SEQ.sampler-playhead` | 1 | effects/sampler-panel | reactive_tick.rs | live | device.playhead (live) | .28 | .14 |
-| `SEQ.seq-track-step-plock-kind-*` | 1 | sequencer | sv/steps_and_pattern.rs | model | step.lock-kind | .28 | .11 |
-| `SEQ.seq-track-step-plocked-*` | 1 | sequencer | sv/steps_and_pattern.rs | model | step.plocked | .28 | .11 |
-| `SEQ.seq-track-step-variant-b-*` | 1 | sequencer | - | model | step.variant-color | .28 | .11 |
-| `SEQ.seq-track-step-variant-g-*` | 1 | sequencer | - | model | step.variant-color | .28 | .11 |
-| `SEQ.seq-track-step-variant-r-*` | 1 | sequencer | - | model | step.variant-color | .28 | .11 |
-| `SEQ.step-has-plocks` | 2 | step-grid | reactive_tick.rs | model | step.plocked | .28 | .11 |
-| `SEQ.track-plock-any` | 1 | effects/param-controls | event_loop.rs | model | param.has-locks | .28 | .14 |
-| `SEQ.track-plock-printing` | 1 | effects/param-controls | step_print.rs | model | param.printing | .28 | .14 |
-| `SEQ.track-plock-variants` | 3 | effects/track-panels, effects/param-controls | reactive_sync.rs | model | step.variant-color + variant list | .28 | .14 |
-| `SEQ.track-plocks` | 9 | effects/track-panels, effects/param-controls | reactive_sync.rs | model | param.locked / param rows | .28 | .14 |
+| `<ns-var name>` | 2 | effects/drum-surface | custom_ui.rs | - | param.value via (device-param d "x") | built (.28) | .14 |
+| `SEQ.<get>` | 23 | effects/param-controls, effects/instrument-panel, effects/sampler-panel +9 | sv/param_fields_and_sync.rs, instrument_panel.rs, effects_panel.rs | model | param.value / param.name (panel :value-field, :label-field, :name-field, :short-field); MIDI fx / bus / rack slot params .36, rack macro names .37 | built (.28) | .14 .16 .18 .19 .20 .21 |
+| `SEQ.<slot-field>` | 12 | sequencer | sv/expanded_step.rs | model | step.active/selected/playing/plocked/lock-kind/variant-color through the view's own slot→step map (expanded-step projection removed) | built (.28) | .11 |
+| `SEQ.<var field>` | 8 | effects/param-controls, effects/custom-ui-runtime, mixer +1 | sv/param_fields_and_sync.rs | model | param.value / send.display (field strings from panel data); mod / process fields .37 | built (.28) | .13 .14 |
+| `SEQ.effects` | 3 | application-menus, effects/index, effects/buffers | lisp_host/dgen/instrument_storage.rs | model | track.devices → device.params (other panel data .37) | built (.28) | .14 .18 |
+| `SEQ.instrument-panel` | 10 | effects/param-controls, browser, effects/index +3 | reactive_tick.rs | model | device panel data (device.params; rack slots .36, key locks / macros / modulation .37) | built (.28) | .14 .17 .18 |
+| `SEQ.macros` | 5 | macros, effects/param-controls | project.rs | model | rack macros (group.macros) and project macros | .37 | .14 .18 |
+| `SEQ.sampler-playhead` | 1 | effects/sampler-panel | reactive_tick.rs | live | device.playhead (live) | built (.28) | .14 |
+| `SEQ.seq-track-step-plock-kind-*` | 1 | sequencer | sv/steps_and_pattern.rs | model | step.lock-kind | built (.28) | .11 |
+| `SEQ.seq-track-step-plocked-*` | 1 | sequencer | sv/steps_and_pattern.rs | model | step.plocked | built (.28) | .11 |
+| `SEQ.seq-track-step-variant-b-*` | 1 | sequencer | - | model | step.variant-color | built (.28) | .11 |
+| `SEQ.seq-track-step-variant-g-*` | 1 | sequencer | - | model | step.variant-color | built (.28) | .11 |
+| `SEQ.seq-track-step-variant-r-*` | 1 | sequencer | - | model | step.variant-color | built (.28) | .11 |
+| `SEQ.step-has-plocks` | 2 | step-grid | reactive_tick.rs | model | step.plocked | built (.28) | .11 |
+| `SEQ.track-plock-any` | 1 | effects/param-controls | event_loop.rs | model | param.has-locks, send.has-locks | built (.28) | .14 |
+| `SEQ.track-plock-printing` | 1 | effects/param-controls | step_print.rs | model | param.printing | built (.28) | .14 |
+| `SEQ.track-plock-variants` | 3 | effects/track-panels, effects/param-controls | reactive_sync.rs | model | step.variant-color (built .28) + variant chip list | .37 | .14 |
+| `SEQ.track-plocks` | 9 | effects/track-panels, effects/param-controls | reactive_sync.rs | model | param.locked / param.base (the -on / -def projections; step panel rows from device.params) | built (.28) | .14 |
 | `SEQ.process-lanes` | 3 | seqv-track-params, seq-grid-mode, sequencer | input.rs | model | lane kind | .29 | .11 |
 | `SEQ.process-library` | 3 | sequencer, packages/alez.neural/src/variable-reset | input.rs | model | processes singleton | .29 | .11 .20 |
 | `SEQ.process-run-errors` | 1 | sequencer | reactive_tick.rs | model | processes.errors | .29 | .11 |

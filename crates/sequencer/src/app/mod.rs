@@ -68,7 +68,9 @@ pub mod song_transport;
 mod synth;
 
 pub use browser::BrowserNode;
+pub use effect_params::effect_param_macro_key;
 pub use params::SoloAudibility;
+pub use synth::instrument_param_macro_key;
 #[allow(unused_imports)]
 pub use command::{apply_command, AppCommand, TuningEdit};
 pub use edit::try_apply_command;
@@ -1209,11 +1211,21 @@ impl DeviceIdentityRegistry {
         id
     }
 
-    pub(crate) fn audio_effect_location(
+    pub fn audio_effect_location(
         &self,
         id: crate::sequencer::EffectInstanceId,
     ) -> Option<(crate::sequencer::TrackId, usize)> {
         self.audio_effect_locations.get(&id).copied()
+    }
+
+    /// The stable identity bound to `track`'s effect chain slot `slot`, if
+    /// one is (a read-only [`Self::audio_effect`]: never allocates).
+    pub fn audio_effect_id(
+        &self,
+        track: crate::sequencer::TrackId,
+        slot: usize,
+    ) -> Option<crate::sequencer::EffectInstanceId> {
+        self.audio_effects.get(&(track, slot)).copied()
     }
 
     pub(crate) fn audio_effect_chain(

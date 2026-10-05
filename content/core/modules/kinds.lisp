@@ -3,7 +3,8 @@
 ;;
 ;; Each kind here is a projection of the sequencer's own state. The host
 ;; registers the instances (tracks, scenes, banks, buses, groups, devices,
-;; sends; steps on first read of `t.steps`), pushes their `:host` fields,
+;; sends; steps on first read of `t.steps`, params on first read of
+;; `d.params`), pushes their `:host` fields,
 ;; and checks at startup that it publishes exactly the fields declared below
 ;; (crates/sequencer/src/ui/host_kinds/). A view imports what it uses:
 ;;
@@ -19,7 +20,9 @@
 
 (export track scene bank bus group transport selection project master engine
         tracks scenes banks buses groups
-        launch! clone-scene! delete-scene! step-preset!)
+        launch! clone-scene! delete-scene! step-preset!
+        device-param lock-param! unlock-param!
+        lock-none lock-seq lock-variant)
 
 ;; ── :set functions (thin wrappers over the existing natives) ──
 
@@ -52,6 +55,12 @@
 (def set-transport-roll-mode (tr v) (host-command "set-roll-mode" v))
 (def set-transport-record-quantize (tr v) (host-command "set-record-quantize" v))
 (def set-master-recording (m v) (seq-set-master-recording v))
+;; A device param's own value (never a p-lock), in display units. Addressed
+;; by stable ids (track id, device id) so a reorder before the command lands
+;; cannot retarget it.
+(def set-param-base (p v)
+  (host-command "set-device-param"
+    (dict :track-id p.device.track.tid :device p.device.did :param-idx p.index :value v)))
 
 ;; ── Kinds ──
 
@@ -63,7 +72,7 @@
          (track    track   :doc "The track the step belongs to")
          (active   :bool   :set set-step-active :doc "The step triggers")
          (playing  :bool   :doc "The playhead is on this step while the transport runs")
-         (selected :bool   :doc "Selected for editing (the selected track's steps only)")
+         (selected :bool   :doc "Selected for editing (the current track's steps only)")
          (held     :bool   :doc "Inside an active step's duration (that step included)")
          ;; Step parameters, in the host's units (seq-set-track-step-param).
          (velocity    :number :set (step-param-setter :velocity))
@@ -74,7 +83,11 @@
          (retrig-rate :number :set (step-param-setter :retrig-rate))
          (pan         :number :set (step-param-setter :pan))
          (sync        :number :set (step-param-setter :sync))
-         (aux-a       :number :set (step-param-setter :aux-a))))
+         (aux-a       :number :set (step-param-setter :aux-a))
+         ;; P-lock display (any family: device params, sends, step params, …).
+         (plocked       :bool :doc "Some p-lock lands on this step")
+         (lock-kind     :int  :doc "lock-none, lock-seq (sequencer-only locks) or lock-variant (a p-lock variant)")
+         (variant-color :rgb  :doc "The step's p-lock variant color (gray for sequencer-only locks)")))
 
 ;; One track's send to one bus (not the main mix): (nth t.sends 0).
 (def-kind send
@@ -84,20 +97,51 @@
          (amount  :number :range (0 1) :set set-send-amount
                   :doc "The track's send level (the base; setting it never p-locks)")
          (display :number :range (0 1)
-                  :doc "The level shown: on the selected track the p-lock at the selected (or playing) step, else amount")
-         (locked  :bool   :doc "display comes from a p-lock")))
+                  :doc "The level shown: on the current track the p-lock at the selected (or playing) step, else amount")
+         (locked  :bool   :doc "display comes from a p-lock")
+         (has-locks :bool :doc "Some step of the track's pattern locks this send")))
+
+;; One parameter of a device: (nth d.params 3), or (device-param d "cutoff").
+;; Params belong to their device: a reorder keeps them; another effect or
+;; instrument in the device (a different descriptor) replaces them, and the
+;; old ones go stale. Every value, the range and the setters speak display
+;; units, the same for instrument and effect params: a % param reads 0-100.
+(def-kind param
+  :key (device index)
+  :host ((device  device  :doc "The device the param belongs to")
+         (index   :int    :doc "Parameter index in the device's descriptor, from 0")
+         (name    :string)
+         (min     :number :doc "Range, in display units")
+         (max     :number)
+         (default :number :doc "The descriptor's default")
+         (type    :string :doc "continuous, enum or boolean (value 0 or 1)")
+         (options (list-of :string) :doc "Labels of an enum param, by value; empty otherwise")
+         (unit    :string :doc "Display unit of a continuous param (Hz, ms, %); may be empty")
+         (value   :number :doc "The value shown: on the current track the p-lock at the selected (or playing) step, else the base under any engaged macro")
+         (base    :number :set set-param-base
+                  :doc "The device's own value (setting it never p-locks; see lock-param!). Set values are clamped; enum and boolean ones rounded (true/false work)")
+         (locked  :bool   :doc "value comes from a p-lock")
+         (has-locks :bool :doc "Some step of the track's pattern locks this param")
+         (text    :string :doc "The option label value selects (on/off for a boolean); empty for continuous params")
+         (printing :bool  :doc "Held under a live print latch while playing and recording")))
 
 ;; One device of a track's chain: the instrument (slot -1), then effects.
+;; Keyed by its stable id: a reorder keeps the instance, only slot moves.
 (def-kind device
-  :key (track slot)
+  :key (track did)
   :host ((track   track   :doc "The track whose chain holds the device")
          (slot    :int    :doc "-1 for the instrument, else the effect slot")
+         (did     :int    :doc "The host's stable device id on its track: 0 for the instrument, else the effect's instance id")
+         (type    :string :doc "What the device is: the instrument type (synth, sampler, …) or the effect (Filter, Reverb, …)")
          (name    :string :doc "Device name")
-         (enabled :bool   :doc "False while bypassed")))
+         (enabled :bool   :doc "False while bypassed")
+         (params  (list-of param) :doc "The device's parameters, in descriptor order")
+         (playhead :number :doc "A sampler's playing position in seconds, 0 when idle or not a sampler")))
 
 (def-kind track
   :key (index)
   :host ((index     :int    :doc "Position in the track list, from 0")
+         (tid       :int    :doc "The host's stable track id")
          (name      :string)
          (color     :rgb    :doc "Display color")
          (volume    :number :range (0 1) :set set-track-volume)
@@ -220,6 +264,32 @@
 ;; Delete scene s (never the last one); the playing scene keeps playing
 ;; unless it is s.
 (def delete-scene! (s) (host-command "delete-pattern" (dict :idx s.index)))
+
+;; step.lock-kind values.
+(def lock-none 0)
+(def lock-seq 1)
+(def lock-variant 2)
+
+;; Device d's param named name, or nil.
+(def device-param (d name)
+  (first (filter (lambda (p) (= p.name name)) d.params)))
+
+;; P-lock param p to v (display units) on steps, a list of step instances of
+;; p's track (any other track's step is an error); one undo entry. Steps
+;; already locked to v are left alone.
+(def lock-param! (p steps v)
+  (host-command "set-device-param-locks"
+    (dict :track-id p.device.track.tid :device p.device.did :param-idx p.index
+          :steps (map (lambda (s) s.index) steps)
+          :step-tracks (map (lambda (s) s.track.tid) steps) :value v)))
+
+;; Clear param p's p-locks on steps (a list of step instances of p's track);
+;; one undo entry.
+(def unlock-param! (p steps)
+  (host-command "clear-device-param-locks"
+    (dict :track-id p.device.track.tid :device p.device.did :param-idx p.index
+          :steps (map (lambda (s) s.index) steps)
+          :step-tracks (map (lambda (s) s.track.tid) steps))))
 
 ;; Load track t's next (dir 1) or previous (dir -1) preset, wrapping.
 (def step-preset! (t dir)

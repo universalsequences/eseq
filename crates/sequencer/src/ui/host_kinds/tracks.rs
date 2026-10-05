@@ -25,13 +25,31 @@ impl HostKinds {
                 .collect()
         };
         self.send_ids.clear();
+        let previous_devices = std::mem::take(&mut self.device_ids);
+        {
+            let rt = &*pusher.rt;
+            let mut shared = pusher.shared.borrow_mut();
+            shared.devices.retain(|id, _| rt.instance_is_live(*id));
+            shared.param_devices.retain(|id| rt.instance_is_live(*id));
+            shared.effect_slots.clear();
+            let slots = app.graph.effect_descriptors.iter().map(Vec::len);
+            shared.effect_slots.extend(slots);
+            if tracks != self.track_ids {
+                // Renders are cached by track position.
+                shared.plock_renders.clear();
+            }
+        }
+        let mut params_replaced = false;
         for (track, id) in tracks.iter().enumerate() {
             let Some(id) = *id else { continue };
             pusher.push(id, f::TRACK_INDEX, number(track as f64));
+            let tid = registry.ids()[track].0;
+            pusher.push(id, f::TRACK_TID, number(tid as f64));
             pusher.push(id, f::TRACK_NAME, Value::String(app.tracks[track].clone()));
             pusher.push(id, f::TRACK_COLOR, rgb(track_display_color(app, track)));
             pusher.push(id, f::TRACK_PRESET, Value::String(presets[track].clone()));
-            let devices = sync_devices(pusher, app, track, id);
+            let devices = sync_devices(pusher, app, track, id, &mut params_replaced);
+            self.device_ids.extend_from_slice(&devices);
             pusher.push(id, f::TRACK_DEVICES, instance_list(devices));
             let instrument = app
                 .graph
@@ -47,6 +65,13 @@ impl HostKinds {
             let sends = sync_sends(pusher, app, id, &self.buses);
             self.send_ids.extend_from_slice(&sends);
             pusher.push(id, f::TRACK_SENDS, instance_list(sends));
+        }
+        if self.device_ids != previous_devices {
+            self.device_observed.reset();
+            params_replaced = true;
+        }
+        if params_replaced {
+            self.param_observed.reset();
         }
         let holders = self.sync_group_model(pusher, app, &tracks);
         if let Some(holders) = &holders {
@@ -133,25 +158,44 @@ fn sync_sends(
 }
 
 /// Register, update and drop the device instances of one track; returns
-/// them in chain order. Keyed (track id, slot + 1).
+/// them in chain order. Keyed (track id, [`DeviceSlot::did`]): a reorder
+/// keeps an effect's instance (and its params), only `slot` moves.
+/// `params_replaced` is set when a device's params were replaced.
 fn sync_devices(
     pusher: &mut Pusher<'_>,
     app: &app::App,
     track: usize,
     track_id: InstanceId,
+    params_replaced: &mut bool,
 ) -> Vec<InstanceId> {
     let chain = track_device_chain(app, &app.state, track);
-    let wanted: Vec<u64> = chain.iter().map(|entry| (entry.slot + 1) as u64).collect();
+    let slots: Vec<DeviceSlot> = chain
+        .iter()
+        .map(|entry| DeviceSlot::from_chain_slot(entry.slot))
+        .collect();
+    let wanted: Vec<u64> = slots.iter().map(|slot| slot.did(app, track)).collect();
     let devices = reconcile_children(pusher, track_id, DEVICE, &wanted);
+    let instrument_type = || {
+        let kind = app.graph.track_instrument_types.get(track);
+        kind.map_or("empty", |kind| instrument_type_label(*kind))
+    };
     chain
         .into_iter()
-        .zip(devices)
-        .filter_map(|(entry, id)| {
+        .zip(slots)
+        .zip(wanted.iter().zip(devices))
+        .filter_map(|((entry, device), (did, id))| {
             let id = id?;
+            let device_type = match device {
+                DeviceSlot::Instrument => instrument_type().to_string(),
+                DeviceSlot::Effect(_) => entry.name.clone(),
+            };
             pusher.push(id, f::DEVICE_TRACK, Value::Instance(track_id));
-            pusher.push(id, f::DEVICE_SLOT, number(entry.slot as f64));
+            pusher.push(id, f::DEVICE_SLOT, number(device.chain_slot() as f64));
+            pusher.push(id, f::DEVICE_DID, number(*did as f64));
+            pusher.push(id, f::DEVICE_TYPE, Value::String(device_type));
             pusher.push(id, f::DEVICE_NAME, Value::String(entry.name));
             pusher.push(id, f::DEVICE_ENABLED, Value::Bool(entry.enabled));
+            *params_replaced |= HostKinds::sync_device_source(pusher, app, id, track, device);
             Some(id)
         })
         .collect()

@@ -1062,6 +1062,14 @@ struct PendingGesture<P> {
     retained_bytes: usize,
 }
 
+/// An active gesture set aside by [`UndoManager::suspend_gesture`], with its
+/// staged entry, until [`UndoManager::resume_gesture`] puts it back.
+pub struct SuspendedGesture<P> {
+    gesture: ActiveGesture,
+    updated_at: Option<Instant>,
+    pending: Option<PendingGesture<P>>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HistoryBudget {
     pub max_entries: usize,
@@ -1247,6 +1255,26 @@ impl<P> UndoManager<P> {
         if self.active_gesture.is_some() {
             self.active_gesture_updated_at = Some(Instant::now());
         }
+    }
+
+    /// Set the active gesture (and its staged entry) aside, so another edit
+    /// can commit an entry of its own without finishing or joining it.
+    pub fn suspend_gesture(&mut self) -> Option<SuspendedGesture<P>> {
+        let gesture = self.active_gesture.take()?;
+        Some(SuspendedGesture {
+            gesture,
+            updated_at: self.active_gesture_updated_at.take(),
+            pending: self.pending_gesture.take(),
+        })
+    }
+
+    /// Make a suspended gesture active again. Any gesture begun meanwhile
+    /// is finished first.
+    pub fn resume_gesture(&mut self, suspended: SuspendedGesture<P>) {
+        self.finish_active_gesture();
+        self.active_gesture = Some(suspended.gesture);
+        self.active_gesture_updated_at = suspended.updated_at;
+        self.pending_gesture = suspended.pending;
     }
 
     pub fn finish_gesture(&mut self, id: GestureId) -> Option<ActiveGesture> {

@@ -121,6 +121,12 @@ impl StepPrintState {
         !self.values.is_empty()
     }
 
+    /// Whether the latch holds `target` on `track` (the host kinds'
+    /// `param.printing`, like a `track-plock-printing` row).
+    pub(crate) fn holds(&self, track: usize, target: PrintTarget) -> bool {
+        self.armed() && self.track == track && self.values.iter().any(|(t, _)| *t == target)
+    }
+
     /// Arm-on-touch: latch a param value for printing. A touch on a
     /// different track than the current latch restarts the latch there.
     pub(crate) fn latch(&mut self, track: usize, target: impl Into<PrintTarget>, value: f32) {

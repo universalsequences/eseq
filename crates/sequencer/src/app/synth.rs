@@ -626,21 +626,11 @@ impl App {
     }
 
     pub fn effective_instrument_param_value(&self, track: usize, param_idx: usize) -> Option<f32> {
-        let slot = self.state.pattern.instrument_slots.get(track)?;
-        if param_idx >= slot.num_params.load(Ordering::Relaxed) as usize {
-            return None;
-        }
-        let raw_idx = slot.resolve_node_idx(param_idx) as u32;
-        let param_id = crate::neural::ParamNodeId::from_slot_param(
-            slot.node_id.load(Ordering::Relaxed),
-            slot.modulator_node_id.load(Ordering::Relaxed),
-            raw_idx,
-        );
-        let key = crate::macro_engine::MacroParamKey::for_instrument(track, param_idx, param_id);
-        Some(
-            self.macro_engine
-                .effective_value(&key, slot.defaults.get(param_idx)),
-        )
+        let key = instrument_param_macro_key(&self.state, track, param_idx)?;
+        let base = self.state.pattern.instrument_slots[track]
+            .defaults
+            .get(param_idx);
+        Some(self.macro_engine.effective_value(&key, base))
     }
 
     /// Sends the current base value unless an engaged macro owns this param.
@@ -1787,4 +1777,28 @@ impl App {
             self.set_instrument_param_or_plock(track, param_idx, new_val);
         }
     }
+}
+
+/// The macro engine's key for `track`'s instrument param `param_idx`; `None`
+/// when the track or the param (past the slot's live params) does not exist.
+/// Shared by [`App::effective_instrument_param_value`] and the host kinds,
+/// which look the key up in a copy of the override layer.
+pub fn instrument_param_macro_key(
+    state: &crate::sequencer::SequencerState,
+    track: usize,
+    param_idx: usize,
+) -> Option<crate::macro_engine::MacroParamKey> {
+    let slot = state.pattern.instrument_slots.get(track)?;
+    if param_idx >= slot.num_params.load(Ordering::Relaxed) as usize {
+        return None;
+    }
+    let raw_idx = slot.resolve_node_idx(param_idx) as u32;
+    let param_id = crate::neural::ParamNodeId::from_slot_param(
+        slot.node_id.load(Ordering::Relaxed),
+        slot.modulator_node_id.load(Ordering::Relaxed),
+        raw_idx,
+    );
+    Some(crate::macro_engine::MacroParamKey::for_instrument(
+        track, param_idx, param_id,
+    ))
 }

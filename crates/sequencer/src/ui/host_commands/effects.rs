@@ -40,7 +40,197 @@ pub(super) const COMMANDS: &[&str] = &[
     "paste-effect",
     "delete-effect",
     "delete-midi-fx",
+    "set-device-param",
+    "set-device-param-locks",
+    "clear-device-param-locks",
 ];
+
+/// Bump the epochs that rebuild the legacy panels when a change of `pdesc`
+/// redefines panel data rather than a bound readout (an enum or boolean, the
+/// sampler's `sens`: [`param_change_needs_fx_rebuild`]).
+pub(super) fn rebuild_panel_if_needed(
+    shared: &SharedHandles,
+    pdesc: &sequencer::effects::ParamDescriptor,
+) {
+    if param_change_needs_fx_rebuild(pdesc) {
+        shared.fx_epoch.fetch_add(1, Ordering::Relaxed);
+        shared.ui_epoch.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Set param `param_idx` of `device` on `track` to `value` (stored units)
+/// through history (`SetInstrumentParam` / `SetEffectParam`, which coalesce
+/// until the gesture ends) with `apply`, which answers whether the model
+/// changed; on a change queue the param's invalidation and rebuild the
+/// legacy panel when the param needs it. Shared by the knob commands
+/// (`set-instrument-param`, `set-effect-param`) and `set-device-param`.
+pub(super) fn apply_device_param_base(
+    app: &mut app::App,
+    shared: &SharedHandles,
+    (track, device, param_idx): (usize, DeviceSlot, usize),
+    pdesc: &sequencer::effects::ParamDescriptor,
+    value: f32,
+    apply: impl FnOnce(&mut app::App, app::AppCommand) -> bool,
+) -> bool {
+    if !apply(app, device.set_command(track, param_idx, value)) {
+        return false;
+    }
+    shared
+        .ui_invalidations
+        .push(device.invalidation(track, param_idx, false));
+    rebuild_panel_if_needed(shared, pdesc);
+    true
+}
+
+/// Apply a script's history command: beside an active gesture that is not
+/// the script's own ([`app::edit::apply_command_beside_gesture`]), else
+/// plainly. Returns whether the model changed.
+fn apply_script_command(app: &mut app::App, command: app::AppCommand, beside: bool) -> bool {
+    let outcome = if beside {
+        app::edit::apply_command_beside_gesture(app, command)
+    } else {
+        app::try_apply_command(app, command)
+    };
+    outcome.is_ok_and(|outcome| outcome != app::edit::EditOutcome::NoOp)
+}
+
+/// The host kinds' param edits (`param.base`'s `:set`, `lock-param!`,
+/// `unlock-param!` in `eseq.kinds`), addressed by stable ids resolved when
+/// the command lands (`:track-id`, the track's `TrackId`; `:device`, 0 for
+/// the instrument, else the effect's instance id: [`DeviceSlot::did`]), so a
+/// reorder before it lands cannot retarget it. Values are display units
+/// (percent params ×100), clamped, and rounded for enum and boolean params
+/// (`true`/`false` read as 1/0). Errors: a non-finite value, a device or
+/// param that is gone, steps (`:steps`, with `:step-tracks` their tracks'
+/// ids) of another track. Absolute: each acts only where the model differs
+/// (steps already holding the lock, or holding none to clear, are left
+/// alone), through the knob edits' history commands, and queues the
+/// invalidations that refresh the legacy fields.
+///
+/// Gestures: a base edit while the pointer is down stays open and later
+/// script base edits join it (a drag view's `set!` per frame is one undo
+/// entry, which the release ends); any other script edit ends its entry at
+/// once. An edit landing while another gesture is active (a user's knob
+/// drag) gets an entry of its own beside it, neither splitting nor joining
+/// the drag.
+fn device_param_edit(
+    name: &str,
+    payload: &Value,
+    app: &mut app::App,
+    editor: &mut Editor,
+    ctx: &mut LoopCtx<'_>,
+) {
+    let Value::Map(map) = payload else {
+        return;
+    };
+    let mut fail = |message: &str| {
+        editor.handle_host_event(HostEvent::Error(format!("{name}: {message}")));
+    };
+    let (Some(track_id), Some(did), Some(param_idx)) = (
+        map_usize(map, "track-id"),
+        map_usize(map, "device"),
+        map_usize(map, "param-idx"),
+    ) else {
+        return fail("needs :track-id, :device and :param-idx");
+    };
+    let track_id = sequencer::sequencer::TrackId(track_id as u64);
+    let Some((track, device)) = DeviceSlot::resolve(app, track_id, did as u64) else {
+        return fail("the device is gone");
+    };
+    let Some(pdesc) = device
+        .descriptor(app, track)
+        .and_then(|desc| desc.params.get(param_idx))
+        .cloned()
+    else {
+        return fail("the device has no such param");
+    };
+    let state = app.state.clone();
+    let Some(slot_state) = device.slot_state(&state, track) else {
+        return fail("the device is gone");
+    };
+    let value = match map_number_or_bool(map, "value") {
+        Some(value) if !value.is_finite() => return fail("the value is not finite"),
+        value => value.map(|value| DeviceSlot::from_user_clamped(&pdesc, value as f32)),
+    };
+    let base = name == "set-device-param";
+    let steps = if base {
+        Vec::new()
+    } else {
+        let steps = map_usize_list(map, "steps").unwrap_or_default();
+        let tracks = map_usize_list(map, "step-tracks").unwrap_or_default();
+        if tracks.len() != steps.len() || tracks.iter().any(|tid| *tid as u64 != track_id.0) {
+            return fail("steps must be steps of the param's track");
+        }
+        steps
+    };
+    let lock_at = |step: usize| slot_state.plocks.get(step, param_idx);
+    let active = app.history.active_gesture().map(|active| active.id);
+    let beside = active.is_some() && active != ctx.gesture.script_param_gesture;
+    let changed = if base {
+        let Some(value) = value else {
+            return fail("needs a :value");
+        };
+        if slot_param_stored_value(slot_state, &pdesc, param_idx, None) == value {
+            return;
+        }
+        apply_device_param_base(
+            app,
+            ctx.shared,
+            (track, device, param_idx),
+            &pdesc,
+            value,
+            |app, command| apply_script_command(app, command, beside),
+        )
+    } else {
+        let (steps, command) = if name == "set-device-param-locks" {
+            let Some(value) = value else {
+                return fail("needs a :value");
+            };
+            let steps = super::step_list(steps.into_iter().filter(|s| lock_at(*s) != Some(value)));
+            let command = device.lock_command(track, steps.clone(), param_idx, value);
+            (steps, Some(command))
+        } else {
+            let steps = super::step_list(steps.into_iter().filter(|s| lock_at(*s).is_some()));
+            let (target, slot_idx) = device.plock_target();
+            let command = super::clear_plocks_command(
+                app,
+                target,
+                track,
+                steps.clone(),
+                param_idx,
+                slot_idx,
+                None,
+            );
+            (steps, command)
+        };
+        let Some(command) = command.filter(|_| !steps.is_empty()) else {
+            return;
+        };
+        let changed = apply_script_command(app, command, beside);
+        if changed {
+            let invalidations = &ctx.shared.ui_invalidations;
+            invalidations.push(device.invalidation(track, param_idx, true));
+            invalidations.push(UiInvalidation::StepInvalidationBatch {
+                track,
+                steps,
+                change: StepInvalidation::PlockPresence,
+            });
+        }
+        changed
+    };
+    if beside {
+        return;
+    }
+    if base && ctx.gesture.pointer_down {
+        // A drag view: its later `set!`s join this entry until release.
+        ctx.gesture.script_param_gesture = app.history.active_gesture().map(|active| active.id);
+    } else {
+        if changed {
+            app::edit::finish_active_gesture(app);
+        }
+        ctx.gesture.script_param_gesture = None;
+    }
+}
 
 #[allow(clippy::too_many_lines)]
 pub(super) fn handle(
@@ -59,6 +249,9 @@ pub(super) fn handle(
     let ui_invalidations = ctx.shared.ui_invalidations.clone();
     let bus_state = ctx.shared.bus_state.clone();
     match name {
+        "set-device-param" | "set-device-param-locks" | "clear-device-param-locks" => {
+            device_param_edit(name, &payload, app, editor, ctx);
+        }
         "set-convolution-reverb-ir" => {
             let path_str = extract_path_from_payload(&payload);
             // bus >= 0 means a bus effect; absent/-1 means a track effect.
@@ -783,8 +976,22 @@ pub(super) fn handle(
                             neural_selection.is_empty(),
                         );
                     if !print_gesture {
-                        if !wrote_neural_plock {
-                            app::apply_command(
+                        match (&desc, wrote_neural_plock) {
+                            (Some(desc), false) => {
+                                apply_device_param_base(
+                                    app,
+                                    ctx.shared,
+                                    (track, DeviceSlot::Effect(slot_idx), param_idx),
+                                    desc,
+                                    clamped,
+                                    |app, command| {
+                                        app::apply_command(app, command);
+                                        true
+                                    },
+                                );
+                            }
+                            (Some(desc), true) => rebuild_panel_if_needed(ctx.shared, desc),
+                            (None, false) => app::apply_command(
                                 &mut app,
                                 app::AppCommand::SetEffectParam {
                                     track,
@@ -792,7 +999,8 @@ pub(super) fn handle(
                                     param_idx,
                                     value: clamped,
                                 },
-                            );
+                            ),
+                            (None, true) => {}
                         }
                         sync_effect_param_authoring_display(
                             &mut editor,
@@ -809,10 +1017,6 @@ pub(super) fn handle(
                                 sync_plock_list: wrote_neural_plock,
                             },
                         );
-                        if desc.as_ref().is_some_and(param_change_needs_fx_rebuild) {
-                            fx_epoch.fetch_add(1, Ordering::Relaxed);
-                            ui_epoch.fetch_add(1, Ordering::Relaxed);
-                        }
                     }
                 }
             }

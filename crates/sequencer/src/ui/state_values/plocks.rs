@@ -1547,9 +1547,21 @@ pub(super) fn track_step_plock_mask_with_render(
     descriptors: &[Vec<sequencer::effects::EffectDescriptor>],
     render_values: Option<&[PlockVariantStepRender]>,
 ) -> [u64; MAX_STEPS / 64] {
+    let num_slots = descriptors.get(track).map(|d| d.len()).unwrap_or(0);
+    track_step_plock_mask_for_slots(state, track, num_slots, render_values)
+}
+
+/// [`track_step_plock_mask_with_render`] given the track's effect slot count
+/// (the length of its `app.graph.effect_descriptors` row), so the host kinds
+/// can compute `step.plocked` without the `App`.
+pub(crate) fn track_step_plock_mask_for_slots(
+    state: &Arc<SequencerState>,
+    track: usize,
+    num_slots: usize,
+    render_values: Option<&[PlockVariantStepRender]>,
+) -> [u64; MAX_STEPS / 64] {
     let mut mask = [0u64; MAX_STEPS / 64];
     let chain = &state.pattern.effect_chains[track];
-    let num_slots = descriptors.get(track).map(|d| d.len()).unwrap_or(0);
     for slot_idx in 0..num_slots {
         if let Some(slot) = chain.get(slot_idx) {
             let np = slot.num_params.load(Ordering::Relaxed) as usize;

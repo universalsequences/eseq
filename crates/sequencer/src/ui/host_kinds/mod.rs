@@ -34,8 +34,10 @@
 //! (spec D2): keyed (track instance id, step index), registered on the first
 //! read of `t.steps` (the reader hook, or the tick while `steps` is
 //! observed) and dropped when their track goes or its length shrinks below
-//! them. Devices are keyed (track instance id, slot + 1): the instrument is
-//! slot -1.
+//! them. Devices are keyed (track instance id, `did`): 0 for the
+//! instrument, else the effect's stable instance id, so a reorder keeps
+//! them (`DeviceSlot::did`). Params are keyed (device instance id, index)
+//! and lazy like steps (`params`).
 //!
 //! [`check_schema`] compares [`PUBLISHED`] with the loaded `eseq.kinds`; the
 //! tick re-runs it whenever a kind schema changes (a hot reload) and skips
@@ -44,7 +46,7 @@
 //! Layout: this module holds the published schema and the tick
 //! ([`HostKinds::sync`]); `live` the shared handles, live-field values and
 //! the reader hook; `registry` the instance registry helpers and pushes;
-//! `tracks`, `steps`, `scenes` and `mixer` the per-kind syncs.
+//! `tracks`, `steps`, `params`, `scenes` and `mixer` the per-kind syncs.
 
 use crate::*;
 use eseqlisp::vm::{HostFieldReader, InstanceId, VM};
@@ -53,6 +55,7 @@ use std::sync::LazyLock;
 
 mod live;
 mod mixer;
+mod params;
 mod registry;
 mod scenes;
 mod steps;
@@ -61,6 +64,7 @@ mod tracks;
 pub(crate) use live::KindsHandles;
 use live::*;
 pub(crate) use mixer::KindsMeters;
+use params::*;
 use registry::*;
 use steps::*;
 
@@ -80,6 +84,7 @@ pub(crate) const BUS: &str = "eseq.kinds:bus";
 pub(crate) const GROUP: &str = "eseq.kinds:group";
 pub(crate) const MASTER: &str = "eseq.kinds:master";
 pub(crate) const ENGINE: &str = "eseq.kinds:engine";
+pub(crate) const PARAM: &str = "eseq.kinds:param";
 
 /// How the host keeps a field current (see the module docs).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -101,6 +106,7 @@ pub(crate) mod f {
     use super::*;
 
     pub(crate) const TRACK_INDEX: FieldKey = (TRACK, "index");
+    pub(crate) const TRACK_TID: FieldKey = (TRACK, "tid");
     pub(crate) const TRACK_NAME: FieldKey = (TRACK, "name");
     pub(crate) const TRACK_COLOR: FieldKey = (TRACK, "color");
     pub(crate) const TRACK_VOLUME: FieldKey = (TRACK, "volume");
@@ -138,12 +144,16 @@ pub(crate) mod f {
     pub(crate) const STEP_PAN: FieldKey = (STEP, "pan");
     pub(crate) const STEP_SYNC: FieldKey = (STEP, "sync");
     pub(crate) const STEP_AUX_A: FieldKey = (STEP, "aux-a");
+    pub(crate) const STEP_PLOCKED: FieldKey = (STEP, "plocked");
+    pub(crate) const STEP_LOCK_KIND: FieldKey = (STEP, "lock-kind");
+    pub(crate) const STEP_VARIANT_COLOR: FieldKey = (STEP, "variant-color");
 
     pub(crate) const SEND_TRACK: FieldKey = (SEND, "track");
     pub(crate) const SEND_BUS: FieldKey = (SEND, "bus");
     pub(crate) const SEND_AMOUNT: FieldKey = (SEND, "amount");
     pub(crate) const SEND_DISPLAY: FieldKey = (SEND, "display");
     pub(crate) const SEND_LOCKED: FieldKey = (SEND, "locked");
+    pub(crate) const SEND_HAS_LOCKS: FieldKey = (SEND, "has-locks");
 
     pub(crate) const BUS_INDEX: FieldKey = (BUS, "index");
     pub(crate) const BUS_BID: FieldKey = (BUS, "bid");
@@ -164,8 +174,28 @@ pub(crate) mod f {
 
     pub(crate) const DEVICE_TRACK: FieldKey = (DEVICE, "track");
     pub(crate) const DEVICE_SLOT: FieldKey = (DEVICE, "slot");
+    pub(crate) const DEVICE_DID: FieldKey = (DEVICE, "did");
+    pub(crate) const DEVICE_TYPE: FieldKey = (DEVICE, "type");
     pub(crate) const DEVICE_NAME: FieldKey = (DEVICE, "name");
     pub(crate) const DEVICE_ENABLED: FieldKey = (DEVICE, "enabled");
+    pub(crate) const DEVICE_PARAMS: FieldKey = (DEVICE, "params");
+    pub(crate) const DEVICE_PLAYHEAD: FieldKey = (DEVICE, "playhead");
+
+    pub(crate) const PARAM_DEVICE: FieldKey = (PARAM, "device");
+    pub(crate) const PARAM_INDEX: FieldKey = (PARAM, "index");
+    pub(crate) const PARAM_NAME: FieldKey = (PARAM, "name");
+    pub(crate) const PARAM_MIN: FieldKey = (PARAM, "min");
+    pub(crate) const PARAM_MAX: FieldKey = (PARAM, "max");
+    pub(crate) const PARAM_DEFAULT: FieldKey = (PARAM, "default");
+    pub(crate) const PARAM_OPTIONS: FieldKey = (PARAM, "options");
+    pub(crate) const PARAM_TYPE: FieldKey = (PARAM, "type");
+    pub(crate) const PARAM_UNIT: FieldKey = (PARAM, "unit");
+    pub(crate) const PARAM_VALUE: FieldKey = (PARAM, "value");
+    pub(crate) const PARAM_BASE: FieldKey = (PARAM, "base");
+    pub(crate) const PARAM_LOCKED: FieldKey = (PARAM, "locked");
+    pub(crate) const PARAM_HAS_LOCKS: FieldKey = (PARAM, "has-locks");
+    pub(crate) const PARAM_TEXT: FieldKey = (PARAM, "text");
+    pub(crate) const PARAM_PRINTING: FieldKey = (PARAM, "printing");
 
     pub(crate) const SCENE_INDEX: FieldKey = (SCENE, "index");
     pub(crate) const SCENE_NUMBER: FieldKey = (SCENE, "number");
@@ -213,6 +243,7 @@ pub(crate) mod f {
 /// names derive from it.
 pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     (f::TRACK_INDEX, ":int", Model),
+    (f::TRACK_TID, ":int", Model),
     (f::TRACK_NAME, ":string", Model),
     (f::TRACK_COLOR, ":rgb", Model),
     (f::TRACK_VOLUME, ":number", Live),
@@ -249,15 +280,40 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     (f::STEP_PAN, ":number", Live),
     (f::STEP_SYNC, ":number", Live),
     (f::STEP_AUX_A, ":number", Live),
+    (f::STEP_PLOCKED, ":bool", Live),
+    (f::STEP_LOCK_KIND, ":int", Live),
+    (f::STEP_VARIANT_COLOR, ":rgb", Live),
     (f::SEND_TRACK, "track", Model),
     (f::SEND_BUS, "bus", Model),
     (f::SEND_AMOUNT, ":number", Live),
     (f::SEND_DISPLAY, ":number", Live),
     (f::SEND_LOCKED, ":bool", Live),
+    (f::SEND_HAS_LOCKS, ":bool", Live),
     (f::DEVICE_TRACK, "track", Model),
     (f::DEVICE_SLOT, ":int", Model),
+    (f::DEVICE_DID, ":int", Model),
+    (f::DEVICE_TYPE, ":string", Model),
     (f::DEVICE_NAME, ":string", Model),
     (f::DEVICE_ENABLED, ":bool", Model),
+    // Registered and pushed on the first read (the reader hook) or once
+    // observed (the tick), then at the model sync.
+    (f::DEVICE_PARAMS, "(list-of param)", Model),
+    (f::DEVICE_PLAYHEAD, ":number", Live),
+    (f::PARAM_DEVICE, "device", Model),
+    (f::PARAM_INDEX, ":int", Model),
+    (f::PARAM_NAME, ":string", Model),
+    (f::PARAM_MIN, ":number", Model),
+    (f::PARAM_MAX, ":number", Model),
+    (f::PARAM_DEFAULT, ":number", Model),
+    (f::PARAM_OPTIONS, "(list-of :string)", Model),
+    (f::PARAM_TYPE, ":string", Model),
+    (f::PARAM_UNIT, ":string", Model),
+    (f::PARAM_VALUE, ":number", Live),
+    (f::PARAM_BASE, ":number", Live),
+    (f::PARAM_LOCKED, ":bool", Live),
+    (f::PARAM_HAS_LOCKS, ":bool", Live),
+    (f::PARAM_TEXT, ":string", Live),
+    (f::PARAM_PRINTING, ":bool", Live),
     (f::SCENE_INDEX, ":int", Model),
     (f::SCENE_NUMBER, ":int", Model),
     (f::SCENE_NAME, ":string", Model),
@@ -362,6 +418,7 @@ pub(super) static SEND_LIVE: LazyLock<LiveFields> = LazyLock::new(|| LiveFields:
 pub(super) static BUS_LIVE: LazyLock<LiveFields> = LazyLock::new(|| LiveFields::of(BUS));
 pub(super) static MASTER_LIVE: LazyLock<LiveFields> = LazyLock::new(|| LiveFields::of(MASTER));
 pub(super) static ENGINE_LIVE: LazyLock<LiveFields> = LazyLock::new(|| LiveFields::of(ENGINE));
+pub(super) static PARAM_LIVE: LazyLock<LiveFields> = LazyLock::new(|| LiveFields::of(PARAM));
 
 /// The step fields diffed by value per tick (beside `active`, `selected`
 /// and `playing`): `held`, then the step parameters, whose field names are
@@ -591,6 +648,13 @@ pub(crate) struct HostKinds {
     group_ids: Vec<Option<InstanceId>>,
     /// Every send instance, for the live loop.
     send_ids: Vec<InstanceId>,
+    /// Every device instance, for the live loop (its params are its
+    /// children).
+    device_ids: Vec<InstanceId>,
+    /// The observed devices and params, kept per observer epoch and reset
+    /// when their instances change.
+    device_observed: ObservedList,
+    param_observed: ObservedList,
     /// The union of the send (bus) instances' observed live fields, as of
     /// `Runtime::instance_observer_epoch` ([`observed_union`]).
     send_observers: Option<(u64, u32)>,
@@ -730,6 +794,7 @@ impl HostKinds {
         let selection_changed = self.selection.refresh(&sources);
         self.sync_track_live(&mut pusher, selection_changed);
         self.sync_send_live(&mut pusher);
+        self.sync_device_live(&mut pusher, app);
         self.sync_bus_live(&mut pusher);
         for (kind, fields) in [(TRANSPORT, &*TRANSPORT_LIVE), (ENGINE, &*ENGINE_LIVE)] {
             if let Some(id) = pusher.singleton(kind) {

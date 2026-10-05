@@ -427,10 +427,10 @@ pub(crate) fn build_effects_value(
                             }
                         }
                         ParamKind::Enum { labels } => {
-                            let selected = labels
-                                .get(current_val.round() as usize)
-                                .cloned()
-                                .unwrap_or_default();
+                            let selected = pdesc
+                                .option_label(current_val)
+                                .unwrap_or_default()
+                                .to_string();
                             let option_values = labels
                                 .iter()
                                 .cloned()
@@ -464,10 +464,10 @@ pub(crate) fn build_effects_value(
                                     .iter()
                                     .map(|d| d.label().to_string())
                                     .collect();
-                                let selected_idx = (current_val.round() as usize)
-                                    .min(labels.len().saturating_sub(1));
                                 let selected =
-                                    labels.get(selected_idx).cloned().unwrap_or_default();
+                                    sequencer::effects::option_label_at(&labels, current_val)
+                                        .unwrap_or_default()
+                                        .to_string();
                                 let option_values = labels
                                     .into_iter()
                                     .map(|label| Rc::new(RefCell::new(Value::String(label))))
@@ -611,10 +611,10 @@ pub(crate) fn build_effects_value(
                             );
                         }
                         ParamKind::Enum { labels } => {
-                            let selected = labels
-                                .get(current_val.round() as usize)
-                                .cloned()
-                                .unwrap_or_default();
+                            let selected = pdesc
+                                .option_label(current_val)
+                                .unwrap_or_default()
+                                .to_string();
                             let option_values = labels
                                 .iter()
                                 .cloned()
@@ -1239,10 +1239,10 @@ pub(crate) fn build_bus_effects_value_for_selection(
                                     }
                                 }
                                 ParamKind::Enum { labels } => {
-                                    let selected = labels
-                                        .get(current_val.round() as usize)
-                                        .cloned()
-                                        .unwrap_or_default();
+                                    let selected = pdesc
+                                        .option_label(current_val)
+                                        .unwrap_or_default()
+                                        .to_string();
                                     let option_values = labels
                                         .iter()
                                         .cloned()
@@ -1276,10 +1276,10 @@ pub(crate) fn build_bus_effects_value_for_selection(
                                             .iter()
                                             .map(|d| d.label().to_string())
                                             .collect();
-                                        let selected_idx = (current_val.round() as usize)
-                                            .min(labels.len().saturating_sub(1));
                                         let selected =
-                                            labels.get(selected_idx).cloned().unwrap_or_default();
+                                            sequencer::effects::option_label_at(&labels, current_val)
+                                                .unwrap_or_default()
+                                                .to_string();
                                         let option_values = labels
                                             .into_iter()
                                             .map(|label| {
@@ -1411,10 +1411,10 @@ pub(crate) fn build_bus_effects_value_for_selection(
                                     );
                                 }
                                 ParamKind::Enum { labels } => {
-                                    let selected = labels
-                                        .get(current_val.round() as usize)
-                                        .cloned()
-                                        .unwrap_or_default();
+                                    let selected = pdesc
+                                        .option_label(current_val)
+                                        .unwrap_or_default()
+                                        .to_string();
                                     let option_values = labels
                                         .iter()
                                         .filter(|label| {
@@ -1631,10 +1631,10 @@ pub(crate) fn build_midi_effects_value(
                             }
                         }
                         ParamKind::Enum { labels } => {
-                            let selected = labels
-                                .get(current_val.round() as usize)
-                                .cloned()
-                                .unwrap_or_default();
+                            let selected = pdesc
+                                .option_label(current_val)
+                                .unwrap_or_default()
+                                .to_string();
                             let option_values = labels
                                 .iter()
                                 .cloned()

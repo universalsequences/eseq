@@ -1316,7 +1316,7 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
         Arc::clone(&armed_rack),
         Arc::clone(&ui_epoch),
         Arc::clone(&fx_epoch),
-        ui_invalidations,
+        Arc::clone(&ui_invalidations),
         Arc::clone(&expanded_step_projection),
         selected_neural_neurons,
         Arc::clone(&active_delete_target),
@@ -1340,6 +1340,8 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
         ui_epoch: Arc::clone(&ui_epoch),
         fx_epoch,
         fx_value_epoch: Arc::new(AtomicUsize::new(0)),
+        ui_invalidations,
+        step_print: Arc::new(Mutex::new(StepPrintState::default())),
     };
     let mut host_kinds = super::host_kinds::HostKinds::default();
     let mut sync_host_kinds = |editor: &mut Editor, app: &app::App| {

@@ -275,7 +275,8 @@ fn s(text: &str) -> Value {
 
 /// Every kind the stage-7 tests read.
 const REFER_ALL: &str = "(import eseq.kinds :refer (track tracks buses groups transport \
-                         selection master engine))";
+                         selection master engine device-param lock-param! unlock-param! \
+                         lock-none lock-seq lock-variant))";
 
 fn num(value: Value) -> f64 {
     match value {
@@ -318,6 +319,7 @@ impl Harness {
 }
 
 mod mixer;
+mod params;
 mod scenes;
 mod schema;
 mod steps;

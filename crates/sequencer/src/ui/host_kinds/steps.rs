@@ -12,6 +12,10 @@ struct StepBits {
     /// Per [`STEP_VALUES`] field: its bit and its parameter (`None` for
     /// `held`).
     values: [(u32, Option<StepParam>); STEP_VALUES.len()],
+    /// `plocked`, `lock-kind` and `variant-color`.
+    plocked: u32,
+    lock_kind: u32,
+    variant_color: u32,
 }
 
 static STEP_BITS: LazyLock<StepBits> = LazyLock::new(|| StepBits {
@@ -19,6 +23,9 @@ static STEP_BITS: LazyLock<StepBits> = LazyLock::new(|| StepBits {
     playing: STEP_LIVE.bit(f::STEP_PLAYING),
     selected: STEP_LIVE.bit(f::STEP_SELECTED),
     values: STEP_VALUES.map(|key| (STEP_LIVE.bit(key), step_param_named(key.1))),
+    plocked: STEP_LIVE.bit(f::STEP_PLOCKED),
+    lock_kind: STEP_LIVE.bit(f::STEP_LOCK_KIND),
+    variant_color: STEP_LIVE.bit(f::STEP_VARIANT_COLOR),
 });
 
 /// The step selection as of the last sync, so `step.selected` is
@@ -100,6 +107,11 @@ pub(super) struct StepDiff {
     values: [Vec<f64>; STEP_VALUES.len()],
     /// The track's `held` flags this tick (a reused buffer).
     held: Vec<bool>,
+    /// The p-lock render last pushed per step, and the track's
+    /// [`PlockKey`] then; empty while nothing observes it. Diffed only when
+    /// the key moves.
+    plocks: Vec<StepPlockRender>,
+    plock_key: Option<PlockKey>,
     /// The union of the step instances' observed fields (bit `i` is
     /// `STEP_LIVE.keys[i]`), as of `Runtime::instance_observer_epoch`.
     observers: Option<(u64, u32)>,
@@ -124,7 +136,7 @@ pub(super) fn sync_steps(
 ) {
     let num_steps = pusher.sources.num_steps(track);
     if diff.num_steps.is_none_or(|last| num_steps < last)
-        && drop_steps_past(&mut *pusher.rt, track_id, num_steps)
+        && drop_children_past(&mut *pusher.rt, track_id, STEP, num_steps)
     {
         pusher.changed = true;
     }
@@ -210,6 +222,32 @@ pub(super) fn sync_steps(
             }
         }
     }
+    // The p-lock render: a whole-track scan (cached per track), so only
+    // when the track's p-locks may have moved (or it starts being observed).
+    let plock_bits = bits.plocked | bits.lock_kind | bits.variant_color;
+    let plock_key = pusher.sources.plock_key(track);
+    if union & plock_bits == 0 {
+        diff.plocks.clear();
+        diff.plock_key = None;
+    } else if !primed || diff.plock_key != Some(plock_key) || diff.plocks.len() != num_steps {
+        let fresh = !primed || diff.plocks.len() != num_steps;
+        diff.plock_key = Some(plock_key);
+        let render = track_plock_render(pusher.sources, pusher.shared, track);
+        diff.plocks.resize(num_steps, StepPlockRender::default());
+        for (step, previous) in diff.plocks.iter_mut().enumerate() {
+            let now = render.get(step).copied().unwrap_or_default();
+            if fresh || previous.plocked != now.plocked {
+                changes[step] |= bits.plocked;
+            }
+            if fresh || previous.kind != now.kind {
+                changes[step] |= bits.lock_kind;
+            }
+            if fresh || previous.color != now.color {
+                changes[step] |= bits.variant_color;
+            }
+            *previous = now;
+        }
+    }
     diff.primed = true;
     for (step, change) in changes.iter().enumerate() {
         if *change == 0 {
@@ -220,8 +258,18 @@ pub(super) fn sync_steps(
         };
         let wanted = pusher.rt.host_fields_observed(id, &STEP_LIVE.names) & change;
         for (bit, key) in STEP_LIVE.keys.iter().enumerate() {
-            if wanted & (1 << bit) != 0 {
-                pusher.push_live_field(id, *key);
+            let bit = 1 << bit;
+            if wanted & bit == 0 {
+                continue;
+            }
+            // The render is a whole-track scan: push the one just made.
+            match diff.plocks.get(step) {
+                Some(render) if bit & plock_bits != 0 => {
+                    if let Some(value) = render.field(*key) {
+                        pusher.push_computed(id, *key, value);
+                    }
+                }
+                _ => pusher.push_live_field(id, *key),
             }
         }
     }

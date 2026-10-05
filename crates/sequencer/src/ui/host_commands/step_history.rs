@@ -1879,15 +1879,7 @@ pub(super) fn handle(
                 return;
             };
             let steps: Vec<usize> = if map_string(map, "scope").as_deref() == Some("selected") {
-                let mut steps: Vec<usize> = selected_steps
-                    .lock()
-                    .unwrap()
-                    .iter()
-                    .copied()
-                    .filter(|step| *step < MAX_STEPS)
-                    .collect();
-                steps.sort_unstable();
-                steps
+                step_list(selected_steps.lock().unwrap().iter().copied())
             } else {
                 (0..MAX_STEPS).collect()
             };
@@ -1899,57 +1891,8 @@ pub(super) fn handle(
             if track >= state.active_track_count() {
                 return;
             }
-            let command = match target.as_str() {
-                "rack-slot-param" => slot_idx.and_then(|slot_idx| {
-                    sequencer::sequencer::RackSlotParam::ALL.iter().copied()
-                        .find(|param| param.index() == param_idx)
-                        .map(|param| app::AppCommand::ClearRackSlotParamPlockMulti {
-                            track, slot_idx, steps, param,
-                        })
-                }),
-                "rack-macro" => Some(app::AppCommand::ClearRackMacroPlockMulti {
-                    track,
-                    steps,
-                    macro_idx: param_idx,
-                }),
-                "bus-send" => app.buses.get(param_idx).map(|bus| {
-                    app::AppCommand::ClearTrackBusSendPlockMulti {
-                        track,
-                        steps,
-                        destination: bus.id,
-                    }
-                }),
-                "instrument" => Some(app::AppCommand::ClearInstrumentPlockMulti {
-                    track,
-                    steps,
-                    param_idx,
-                }),
-                "effect" => slot_idx.map(|slot_idx| app::AppCommand::ClearEffectPlockMulti {
-                    track,
-                    steps,
-                    slot_idx,
-                    param_idx,
-                }),
-                "midi-fx" => slot_idx.map(|slot_idx| app::AppCommand::ClearMidiFxPlockMulti {
-                    track,
-                    steps,
-                    slot_idx,
-                    param_idx,
-                }),
-                "rack-effect" => match (rack_slot, slot_idx) {
-                    (Some(rack_slot_idx), Some(effect_slot_idx)) => {
-                        Some(app::AppCommand::ClearRackSlotEffectPlockMulti {
-                            track,
-                            steps,
-                            rack_slot_idx,
-                            effect_slot_idx,
-                            param_idx,
-                        })
-                    }
-                    _ => None,
-                },
-                _ => None,
-            };
+            let command =
+                clear_plocks_command(&app, &target, track, steps, param_idx, slot_idx, rack_slot);
             let Some(command) = command else {
                 return;
             };
@@ -2108,6 +2051,87 @@ pub(super) fn handle(
             }
         }
         _ => {}
+    }
+}
+
+/// Steps sorted, deduplicated, within `MAX_STEPS`.
+pub(super) fn step_list(steps: impl IntoIterator<Item = usize>) -> Vec<usize> {
+    let mut steps: Vec<usize> = steps.into_iter().filter(|step| *step < MAX_STEPS).collect();
+    steps.sort_unstable();
+    steps.dedup();
+    steps
+}
+
+/// The `Clear*PlockMulti` command clearing `param_idx`'s p-locks on `steps`
+/// of `track` for a `clear-param-plocks` target (`instrument`, `effect`,
+/// `midi-fx`, `rack-effect`, `rack-slot-param`, `rack-macro`, `bus-send`);
+/// `None` for an unknown target or a missing slot.
+pub(super) fn clear_plocks_command(
+    app: &app::App,
+    target: &str,
+    track: usize,
+    steps: Vec<usize>,
+    param_idx: usize,
+    slot_idx: Option<usize>,
+    rack_slot: Option<usize>,
+) -> Option<app::AppCommand> {
+    match target {
+        "rack-slot-param" => slot_idx.and_then(|slot_idx| {
+            sequencer::sequencer::RackSlotParam::ALL
+                .iter()
+                .copied()
+                .find(|param| param.index() == param_idx)
+                .map(|param| app::AppCommand::ClearRackSlotParamPlockMulti {
+                    track,
+                    slot_idx,
+                    steps,
+                    param,
+                })
+        }),
+        "rack-macro" => Some(app::AppCommand::ClearRackMacroPlockMulti {
+            track,
+            steps,
+            macro_idx: param_idx,
+        }),
+        "bus-send" => {
+            app.buses
+                .get(param_idx)
+                .map(|bus| app::AppCommand::ClearTrackBusSendPlockMulti {
+                    track,
+                    steps,
+                    destination: bus.id,
+                })
+        }
+        "instrument" => Some(app::AppCommand::ClearInstrumentPlockMulti {
+            track,
+            steps,
+            param_idx,
+        }),
+        "effect" => slot_idx.map(|slot_idx| app::AppCommand::ClearEffectPlockMulti {
+            track,
+            steps,
+            slot_idx,
+            param_idx,
+        }),
+        "midi-fx" => slot_idx.map(|slot_idx| app::AppCommand::ClearMidiFxPlockMulti {
+            track,
+            steps,
+            slot_idx,
+            param_idx,
+        }),
+        "rack-effect" => match (rack_slot, slot_idx) {
+            (Some(rack_slot_idx), Some(effect_slot_idx)) => {
+                Some(app::AppCommand::ClearRackSlotEffectPlockMulti {
+                    track,
+                    steps,
+                    rack_slot_idx,
+                    effect_slot_idx,
+                    param_idx,
+                })
+            }
+            _ => None,
+        },
+        _ => None,
     }
 }
 

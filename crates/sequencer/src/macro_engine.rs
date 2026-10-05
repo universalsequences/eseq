@@ -1095,6 +1095,11 @@ impl MacroEngine {
         self.override_value(key).unwrap_or(base)
     }
 
+    /// The live override layer, borrowed (see [`Self::override_snapshot`]).
+    pub fn overrides(&self) -> &HashMap<MacroParamKey, f32> {
+        &self.overrides
+    }
+
     pub fn is_engaged(&self, id: MacroId) -> bool {
         self.macro_definition(id)
             .is_some_and(|macro_definition| macro_definition.last_write_order.is_some())

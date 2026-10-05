@@ -392,6 +392,17 @@ fn set_on_a_host_field_calls_its_setter_and_leaves_the_cell_to_the_host() {
         "field 'volume' of kind 'scratch:track' is :number; got \"x\""
     );
     assert_eq!(eval(&mut vm, "log.calls"), Value::Number(1.0));
+    // A numeric field's setter takes true/false too (an on/off value).
+    eval(
+        &mut vm,
+        "(def-kind amp :key (index) :host ((value :number :set seq-set-mute)))",
+    );
+    let knob = vm.register_keyed_instance("amp", &[0]).expect("register");
+    eval(&mut vm, "(let ((k (amp 0))) (set! k.value true))");
+    assert_eq!(
+        calls.borrow().last(),
+        Some(&vec![Value::Instance(knob), Value::Bool(true)])
+    );
     // Without :set the field is read-only, as are the built-ins.
     assert_eq!(error(&mut vm, "(set! t.peak 1)"), "track.peak is read-only");
     assert!(error(&mut vm, "(set! t.key (list 2))").contains("read-only"));

@@ -32,6 +32,8 @@ mod scene_slots;
 mod scripts;
 mod song;
 mod step_history;
+use effects::{apply_device_param_base, rebuild_panel_if_needed};
+use step_history::{clear_plocks_command, step_list};
 mod tracks;
 
 pub(crate) use dispatch::dispatch_custom_host_command;

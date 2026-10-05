@@ -11,8 +11,9 @@ pub(super) trait KindStore {
     fn key_of(&self, id: InstanceId) -> Option<&[u64]>;
     fn kind_of(&self, id: InstanceId) -> Option<&str>;
     fn register(&mut self, kind: &str, key: &[u64]) -> Option<InstanceId>;
-    /// The step instances of `track` at or past `num_steps`.
-    fn steps_past(&self, track: InstanceId, num_steps: usize) -> Vec<InstanceId>;
+    /// The `kind` children of `parent` whose index (second key part) is at
+    /// or past `count`: steps past a track's length, params past a device's.
+    fn children_past(&self, parent: InstanceId, kind: &str, count: usize) -> Vec<InstanceId>;
     fn drop_id(&mut self, id: InstanceId);
     fn push(&mut self, id: InstanceId, key: FieldKey, value: Value);
 }
@@ -30,9 +31,9 @@ impl KindStore for VM {
     fn register(&mut self, kind: &str, key: &[u64]) -> Option<InstanceId> {
         self.register_keyed_instance(kind, key).ok()
     }
-    fn steps_past(&self, track: InstanceId, num_steps: usize) -> Vec<InstanceId> {
-        self.keyed_children_of_kind(track, STEP)
-            .filter(|(_, key)| matches!(key, [_, step] if *step as usize >= num_steps))
+    fn children_past(&self, parent: InstanceId, kind: &str, count: usize) -> Vec<InstanceId> {
+        self.keyed_children_of_kind(parent, kind)
+            .filter(|(_, key)| matches!(key, [_, index] if *index as usize >= count))
             .map(|(id, _)| id)
             .collect()
     }
@@ -57,9 +58,9 @@ impl KindStore for Runtime {
     fn register(&mut self, kind: &str, key: &[u64]) -> Option<InstanceId> {
         self.register_keyed_instance(kind, key).ok()
     }
-    fn steps_past(&self, track: InstanceId, num_steps: usize) -> Vec<InstanceId> {
-        self.keyed_children_of_kind(track, STEP)
-            .filter(|(_, key)| matches!(key, [_, step] if *step as usize >= num_steps))
+    fn children_past(&self, parent: InstanceId, kind: &str, count: usize) -> Vec<InstanceId> {
+        self.keyed_children_of_kind(parent, kind)
+            .filter(|(_, key)| matches!(key, [_, index] if *index as usize >= count))
             .map(|(id, _)| id)
             .collect()
     }
@@ -87,28 +88,47 @@ pub(super) fn track_steps<S: KindStore>(
     track: InstanceId,
     num_steps: usize,
 ) -> Value {
-    drop_steps_past(store, track, num_steps);
-    let steps = (0..num_steps as u64).filter_map(|step| {
-        if let Some(id) = store.keyed(STEP, &[track, step]) {
-            return Some(id);
-        }
-        let id = store.register(STEP, &[track, step])?;
+    let steps = indexed_children(store, track, STEP, num_steps, |store, id, step| {
         store.push(id, f::STEP_INDEX, number(step as f64));
         store.push(id, f::STEP_TRACK, Value::Instance(track));
-        Some(id)
     });
-    let steps: Vec<InstanceId> = steps.collect();
     instance_list(steps)
 }
 
-/// Drop the step instances of `track` at or past `num_steps`. Returns
-/// whether any was dropped.
-pub(super) fn drop_steps_past<S: KindStore>(
+/// The `kind` children of `parent` keyed (parent, index) for indexes
+/// `0..count`, in order: drops those at or past `count`, registers the
+/// missing ones and runs `init` on each new one (its fixed fields).
+pub(super) fn indexed_children<S: KindStore>(
     store: &mut S,
-    track: InstanceId,
-    num_steps: usize,
+    parent: InstanceId,
+    kind: &str,
+    count: usize,
+    mut init: impl FnMut(&mut S, InstanceId, usize),
+) -> Vec<InstanceId> {
+    drop_children_past(store, parent, kind, count);
+    (0..count)
+        .filter_map(|index| {
+            let key = [parent, index as u64];
+            if let Some(id) = store.keyed(kind, &key) {
+                return Some(id);
+            }
+            let id = store.register(kind, &key)?;
+            init(store, id, index);
+            Some(id)
+        })
+        .collect()
+}
+
+/// Drop the `kind` children of `parent` whose index is at or past `count`
+/// (steps past a track's length, params past a device's). Returns whether
+/// any was dropped.
+pub(super) fn drop_children_past<S: KindStore>(
+    store: &mut S,
+    parent: InstanceId,
+    kind: &str,
+    count: usize,
 ) -> bool {
-    let doomed = store.steps_past(track, num_steps);
+    let doomed = store.children_past(parent, kind, count);
     for id in &doomed {
         store.drop_id(*id);
     }
@@ -140,6 +160,32 @@ impl Pusher<'_> {
         }
         report_push(self.rt.set_instance_field(id, key.1, value), key);
         self.changed = true;
+    }
+
+    /// Push a live field value computed outside [`live_value`], counting it
+    /// like one.
+    pub(super) fn push_computed(&mut self, id: InstanceId, key: FieldKey, value: Value) {
+        if self.shared.borrow().skip.contains(&key) {
+            return;
+        }
+        self.shared.borrow_mut().count(key);
+        self.push(id, key, value);
+    }
+
+    /// Push a text field computed outside [`live_value`], counting it like
+    /// one; allocates only when the text differs from the cell.
+    pub(super) fn push_text(&mut self, id: InstanceId, key: FieldKey, text: &str) {
+        if self.shared.borrow().skip.contains(&key) {
+            return;
+        }
+        self.shared.borrow_mut().count(key);
+        let same = self
+            .rt
+            .instance_field(id, key.1)
+            .is_ok_and(|current| matches!(current, Value::String(current) if current == text));
+        if !same {
+            self.push(id, key, Value::String(text.to_string()));
+        }
     }
 
     /// Compute and push one live field.
@@ -194,17 +240,22 @@ pub(super) fn observed_union(
     ids: impl Iterator<Item = InstanceId>,
     fields: &LiveFields,
 ) -> u32 {
-    let epoch = rt.instance_observer_epoch();
-    if let Some((seen, union)) = *cache {
-        if seen == epoch {
-            return union;
-        }
+    if let Some(union) = cached_union(rt, *cache) {
+        return union;
     }
+    let epoch = rt.instance_observer_epoch();
     let union = ids.fold(0, |union, id| {
         union | rt.host_fields_observed(id, &fields.names)
     });
     *cache = Some((epoch, union));
     union
+}
+
+/// The union a cache (see [`observed_union`]) holds, while it is of the
+/// current observer epoch.
+pub(super) fn cached_union(rt: &Runtime, cache: Option<(u64, u32)>) -> Option<u32> {
+    let (seen, union) = cache?;
+    (seen == rt.instance_observer_epoch()).then_some(union)
 }
 
 /// Bring the registry of index-keyed `kind` in line with `model` (stable

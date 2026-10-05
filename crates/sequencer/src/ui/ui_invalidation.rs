@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use sequencer::sequencer::StepParam;
@@ -311,9 +312,91 @@ pub(crate) enum BrowserInvalidation {
     EffectTrees,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct UiInvalidationQueue {
     pending: Mutex<BTreeSet<UiInvalidation>>,
+    /// P-lock revisions for readers that do not drain the queue (the host
+    /// kinds' step p-lock render and `has-locks`): `plocks_all` moves on an
+    /// invalidation that may move every track's p-locks, `plocks_track[t]`
+    /// on one that may move track `t`'s ([`UiInvalidation::plock_scope`]).
+    plocks_all: AtomicU64,
+    plocks_track: [AtomicU64; sequencer::sequencer::MAX_TRACKS],
+}
+
+/// Which tracks' p-locks an invalidation may have moved.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PlockScope {
+    AllTracks,
+    Track(usize),
+}
+
+impl UiInvalidation {
+    /// The tracks whose p-locks (any family: device params, sends, step
+    /// params, process lanes) or pattern shape this invalidation may have
+    /// moved; `None` for one that cannot move a p-lock (mixer, selection,
+    /// meters, a device's base value, …).
+    pub(crate) fn plock_scope(&self) -> Option<PlockScope> {
+        use PlockScope::{AllTracks, Track};
+        Some(match self {
+            Self::Full(_) | Self::ProjectState | Self::Pattern(PatternInvalidation::AllTracks) => {
+                AllTracks
+            }
+            Self::TrackTopology(TrackTopologyInvalidation::InstrumentType { track }) => {
+                Track(*track)
+            }
+            Self::TrackTopology(TrackTopologyInvalidation::TracksAddedRemovedOrReordered) => {
+                AllTracks
+            }
+            Self::Pattern(
+                PatternInvalidation::WholeTrack { track }
+                | PatternInvalidation::TrackLength { track },
+            ) => Track(*track),
+            Self::Step { track, change, .. }
+            | Self::StepInvalidationBatch { track, change, .. }
+                if *change != StepInvalidation::Selected =>
+            {
+                Track(*track)
+            }
+            Self::StepBatch { track, .. }
+            | Self::TrackBusSend { track, .. }
+            | Self::ProcessLaneValues { track }
+            | Self::ProcessChain { track }
+            | Self::MidiFx { track, .. }
+            | Self::TrackFx {
+                track,
+                change:
+                    TrackFxInvalidation::Plock { .. }
+                    | TrackFxInvalidation::Topology
+                    | TrackFxInvalidation::PanelTree,
+            }
+            | Self::Instrument {
+                track,
+                change: InstrumentInvalidation::Plock { .. } | InstrumentInvalidation::PanelTopology,
+            }
+            | Self::TrackParam {
+                track,
+                change:
+                    TrackParamInvalidation::Plocks
+                    | TrackParamInvalidation::BusSends
+                    | TrackParamInvalidation::NumSteps,
+            }
+            | Self::Sidebar {
+                track,
+                change: SidebarInvalidation::Plocks,
+            } => Track(*track),
+            _ => return None,
+        })
+    }
+}
+
+impl Default for UiInvalidationQueue {
+    fn default() -> Self {
+        Self {
+            pending: Mutex::default(),
+            plocks_all: AtomicU64::new(0),
+            plocks_track: std::array::from_fn(|_| AtomicU64::new(0)),
+        }
+    }
 }
 
 impl UiInvalidationQueue {
@@ -321,7 +404,32 @@ impl UiInvalidationQueue {
         Self::default()
     }
 
+    /// Track `track`'s p-lock revision: moves whenever an invalidation that
+    /// may move its p-locks is pushed ([`UiInvalidation::plock_scope`]).
+    pub(crate) fn plock_generation(&self, track: usize) -> u64 {
+        let all = self.plocks_all.load(Ordering::Relaxed);
+        let own = self
+            .plocks_track
+            .get(track)
+            .map_or(0, |generation| generation.load(Ordering::Relaxed));
+        all.wrapping_add(own)
+    }
+
     pub(crate) fn push(&self, invalidation: UiInvalidation) {
+        match invalidation.plock_scope() {
+            Some(PlockScope::AllTracks) => {
+                self.plocks_all.fetch_add(1, Ordering::Relaxed);
+            }
+            Some(PlockScope::Track(track)) => match self.plocks_track.get(track) {
+                Some(generation) => {
+                    generation.fetch_add(1, Ordering::Relaxed);
+                }
+                None => {
+                    self.plocks_all.fetch_add(1, Ordering::Relaxed);
+                }
+            },
+            None => {}
+        }
         let mut pending = self.pending.lock().unwrap();
         if matches!(invalidation, UiInvalidation::Full(_)) {
             pending.clear();

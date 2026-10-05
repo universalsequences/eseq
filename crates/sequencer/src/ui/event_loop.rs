@@ -346,6 +346,8 @@ pub(crate) fn run_event_loop(
         piano_roll_history_gesture: None,
         preview_plock_variant: None,
         scroll_inertia: Default::default(),
+        pointer_down: false,
+        script_param_gesture: None,
     };
 
     // Inline editor session state (instrument/effect creation/editing)
@@ -893,6 +895,7 @@ pub(crate) fn run_event_loop(
                             }
                             pending_drag = None;
                             pointer_is_down = false;
+                            gesture.pointer_down = false;
                             shared.ui_epoch.fetch_add(1, Ordering::Relaxed);
                             ui_loop_stats.note_event(event_started.elapsed(), editor.needs_redraw());
                             return Ok(HostLoopControl::WaitUntil(Instant::now()));
@@ -1225,6 +1228,7 @@ pub(crate) fn run_event_loop(
                 BackendEvent::Terminal(Event::Mouse(mouse)) => {
                     if matches!(mouse.kind, crossterm::event::MouseEventKind::Down(_)) {
                         pointer_is_down = true;
+                        gesture.pointer_down = true;
                         gesture.scroll_inertia.cancel();
                     }
                     let (precise_col, precise_row) = backend
@@ -1255,6 +1259,7 @@ pub(crate) fn run_event_loop(
                             }
                             pointer_released_this_loop = true;
                             pointer_is_down = false;
+                            gesture.pointer_down = false;
                         }
                         editor.handle_tiled_mouse_precise(mouse, precise_col, precise_row, 0);
                         backend.set_widget_cursor(editor.widget_cursor());

@@ -10591,17 +10591,46 @@ fn commit_rack_groove_drag(app: &mut App, drag: RackGrooveDrag) {
     );
 }
 
-pub fn finish_active_gesture(app: &mut App) -> bool {
+/// Commit the active gesture's staged entry (publishing the scheduler when
+/// it needs it); the gesture's drag bookkeeping is the caller's.
+fn finish_gesture_entry(app: &mut App) -> Option<super::history::ActiveGesture> {
     let publish_scheduler = app
         .history
         .active_gesture()
         .and_then(|gesture| app.history.active_gesture_patch(&gesture.merge_key))
         .is_some_and(pending_gesture_publishes_scheduler);
     let finished_gesture = app.history.finish_active_gesture();
-    let finished = finished_gesture.is_some();
-    if finished && publish_scheduler {
+    if finished_gesture.is_some() && publish_scheduler {
         app.state.publish_scheduler_snapshot();
     }
+    finished_gesture
+}
+
+/// Apply `cmd` as an undo entry of its own while leaving the active gesture
+/// (a user's knob drag) open, unsplit and unjoined: the gesture and its
+/// drag bookkeeping are set aside, `cmd` applies and its own entry (staged
+/// or committed) is finished, then the gesture resumes. For script edits
+/// that land mid-drag.
+pub fn apply_command_beside_gesture(
+    app: &mut App,
+    cmd: AppCommand,
+) -> Result<EditOutcome, EditError> {
+    let suspended = app.history.suspend_gesture();
+    let process_lane_drag = app.process_lane_drag.take();
+    let rack_groove_drag = app.rack_groove_drag.take();
+    let outcome = try_apply_command(app, cmd);
+    finish_gesture_entry(app);
+    app.process_lane_drag = process_lane_drag;
+    app.rack_groove_drag = rack_groove_drag;
+    if let Some(suspended) = suspended {
+        app.history.resume_gesture(suspended);
+    }
+    outcome
+}
+
+pub fn finish_active_gesture(app: &mut App) -> bool {
+    let finished_gesture = finish_gesture_entry(app);
+    let finished = finished_gesture.is_some();
     if let (Some(gesture), Some(drag)) = (finished_gesture.as_ref(), app.process_lane_drag.take()) {
         if gesture.merge_key == drag.merge_key {
             app.commit_applied_scene_structure_mutation(drag.before, "Edit process lane");

@@ -25,10 +25,29 @@ pub(crate) struct KindsShared {
     solo: Option<app::SoloAudibility>,
     /// Fields a schema mismatch keeps the host from pushing.
     pub(super) skip: HashSet<FieldKey>,
+    /// What each device instance's params read, as of the last model sync
+    /// (descriptors and where the values live; see [`DeviceSource`]).
+    pub(super) devices: HashMap<InstanceId, Rc<DeviceSource>>,
+    /// The devices whose params are registered (`d.params` read or
+    /// observed once); their `params` is then a model field.
+    pub(super) param_devices: HashSet<InstanceId>,
+    /// The step p-lock render per track position, with the [`PlockKey`] it
+    /// was computed under ([`track_plock_render`]).
+    pub(super) plock_renders: Vec<Option<(PlockKey, Rc<[StepPlockRender]>)>>,
+    /// Whole-track p-lock render scans, and param instances the tick asked
+    /// for their observed fields, for tests.
+    pub(crate) plock_scans: u64,
+    pub(crate) param_queries: u64,
+    /// The macro engine's override layer, copied by the tick when it
+    /// changes (`param.value` shows an engaged macro's value).
+    pub(super) macro_overrides: HashMap<sequencer::macro_engine::MacroParamKey, f32>,
+    /// Effect chain slots per track position (the length of its
+    /// `app.graph.effect_descriptors` row), for `step.plocked`.
+    pub(super) effect_slots: Vec<usize>,
 }
 
 impl KindsShared {
-    fn count(&mut self, key: FieldKey) {
+    pub(super) fn count(&mut self, key: FieldKey) {
         *self.computed.entry(key).or_default() += 1;
     }
 
@@ -40,6 +59,10 @@ impl KindsShared {
         self.master_peaks = meters.master;
         self.cpu_load = meters.cpu_load;
         self.solo = Some(app.solo_audibility());
+        let overrides = app.macro_engine.overrides();
+        if &self.macro_overrides != overrides {
+            self.macro_overrides.clone_from(overrides);
+        }
     }
 }
 
@@ -73,6 +96,10 @@ pub(crate) struct KindsHandles {
     pub(crate) ui_epoch: Arc<AtomicUsize>,
     pub(crate) fx_epoch: Arc<AtomicUsize>,
     pub(crate) fx_value_epoch: Arc<AtomicUsize>,
+    /// Its per-track p-lock revisions say a p-lock may have moved (the step
+    /// p-lock render, `has-locks`: [`KindsHandles::plock_key`]).
+    pub(crate) ui_invalidations: Arc<UiInvalidationQueue>,
+    pub(crate) step_print: Arc<Mutex<StepPrintState>>,
 }
 
 impl KindsHandles {
@@ -91,6 +118,8 @@ impl KindsHandles {
             ui_epoch: shared.ui_epoch.clone(),
             fx_epoch: shared.fx_epoch.clone(),
             fx_value_epoch: shared.fx_value_epoch.clone(),
+            ui_invalidations: shared.ui_invalidations.clone(),
+            step_print: shared.step_print.clone(),
         }
     }
 
@@ -112,7 +141,7 @@ impl KindsHandles {
     /// The step whose p-locks `track`'s controls show: on the current track
     /// the selected step, else the playing one; none on other tracks (like
     /// the legacy `track-N-bus-M-send`).
-    fn plock_display_step(&self, track: usize) -> Option<usize> {
+    pub(super) fn plock_display_step(&self, track: usize) -> Option<usize> {
         (self.current_track.load(Ordering::Relaxed) == track)
             .then(|| {
                 displayed_plock_step(
@@ -237,6 +266,11 @@ pub(super) fn live_value<S: KindStore>(
                 f::STEP_HELD => {
                     Value::Bool(track_step_duration_covered(&sources.state, track, step))
                 }
+                f::STEP_PLOCKED | f::STEP_LOCK_KIND | f::STEP_VARIANT_COLOR => {
+                    track_plock_render(sources, shared, track)
+                        .get(step)?
+                        .field(key)?
+                }
                 _ => number(sources.step_param(track, step, step_param_named(key.1)?)),
             }
         }
@@ -260,8 +294,26 @@ pub(super) fn live_value<S: KindStore>(
                 f::SEND_LOCKED => Value::Bool(
                     track_send_lock(state, track, bus, sources.plock_display_step(track)).is_some(),
                 ),
+                f::SEND_HAS_LOCKS => Value::Bool(
+                    state.pattern.track_send_plocks[track]
+                        .has_lock_for(bus, sources.num_steps(track)),
+                ),
                 _ => return None,
             }
+        }
+        DEVICE => {
+            let device = shared.borrow().devices.get(&id)?.clone();
+            match key {
+                f::DEVICE_PLAYHEAD => number(device.sampler.as_ref().map_or(0.0, |s| s.seconds())),
+                _ => return None,
+            }
+        }
+        PARAM => {
+            let &[device_id, index] = store.key_of(id)? else {
+                return None;
+            };
+            let device = shared.borrow().devices.get(&device_id)?.clone();
+            param_live_value(sources, shared, &device, index as usize, key)?
         }
         BUS => {
             let bus = *store.key_of(id)?.first()? as usize;
@@ -323,7 +375,8 @@ pub(super) fn live_value<S: KindStore>(
 }
 
 /// Install the reader hook that answers by-value reads of unobserved live
-/// fields (and registers steps on a cold `t.steps`). Anything but a live
+/// fields (and registers steps on a cold `t.steps`, params on the first
+/// `d.params`). Anything but a live
 /// field name returns `None` before any lookup.
 pub(super) fn install_reader(
     rt: &mut Runtime,
@@ -331,6 +384,10 @@ pub(super) fn install_reader(
     shared: Rc<RefCell<KindsShared>>,
 ) {
     let reader: HostFieldReader = Rc::new(move |vm: &mut VM, id: InstanceId, field: &str| {
+        if field == f::DEVICE_PARAMS.1 && vm.instance_kind(id) == Some(DEVICE) {
+            // A model field, but registered on the first read.
+            return cold_device_params(vm, &shared, id);
+        }
         if !LIVE_KEYS.iter().any(|(_, live)| *live == field) {
             return None;
         }
