@@ -883,7 +883,7 @@ mod tests {
         sdf_widget::register_sdf_widget(sdf_widget::SdfWidgetDef {
             name: "retained-shadow".into(), shader_source: String::new(),
             sdf_expr: crate::parser::Expression::Number(0.0), state_uniforms: vec![],
-            bindable_props: vec![], region_count: 0, width: 1.0, height: 1.0,
+            state: Default::default(), region_count: 0, width: 1.0, height: 1.0,
             paint_margin: 2.0, animates: false,
         });
         let shadow = node(80901, "retained-shadow", rect(41.0, 0.0, 2.0, 2.0), vec![]);
@@ -905,7 +905,7 @@ mod tests {
         sdf_widget::register_sdf_widget(sdf_widget::SdfWidgetDef {
             name: "retained-expanded-background".into(), shader_source: String::new(),
             sdf_expr: crate::parser::Expression::Number(0.0), state_uniforms: vec![],
-            bindable_props: vec![], region_count: 0, width: 1.0, height: 1.0,
+            state: Default::default(), region_count: 0, width: 1.0, height: 1.0,
             paint_margin: 0.0, animates: false,
         });
         let mut root = node(81001, "box", rect(0.0, 0.0, 20.0, 2.0), vec![
@@ -1047,7 +1047,7 @@ mod tests {
         sdf_widget::register_sdf_widget(sdf_widget::SdfWidgetDef {
             name: "retained-animated-paint".into(), shader_source: String::new(),
             sdf_expr: crate::parser::Expression::Number(0.0), state_uniforms: vec![],
-            bindable_props: vec![], region_count: 0, width: 1.0, height: 1.0,
+            state: Default::default(), region_count: 0, width: 1.0, height: 1.0,
             paint_margin: 0.0, animates: true,
         });
         let mut root = node(87001, "box", rect(0.0, 0.0, 10.0, 10.0), vec![]);
@@ -1068,7 +1068,7 @@ mod tests {
         sdf_widget::register_sdf_widget(sdf_widget::SdfWidgetDef {
             name: "retained-mutable-style".into(), shader_source: String::new(),
             sdf_expr: crate::parser::Expression::Number(0.0), state_uniforms: vec![],
-            bindable_props: vec![], region_count: 0, width: 1.0, height: 1.0,
+            state: Default::default(), region_count: 0, width: 1.0, height: 1.0,
             paint_margin: 0.0, animates: false,
         });
         let brightness = Rc::new(RefCell::new(Value::Number(1.0)));

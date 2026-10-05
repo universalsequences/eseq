@@ -1239,24 +1239,16 @@ impl InstanceStore {
         })
     }
 
-    /// The fields of `kind` `#'` can bind, for error messages: slot-backed
-    /// `:state` fields, and `:document` fields while they are local cells.
-    fn bindable_fields(&self, kind: &str, host_documents: bool) -> String {
-        let Some(schema) = self.kinds.get(kind) else {
-            return "(none)".to_string();
-        };
-        let documents = if host_documents {
-            &[][..]
-        } else {
-            &schema.document[..]
-        };
+    /// The fields of `schema` `#'` (or a shader) can bind, for error
+    /// messages: slot-backed `:host` and `:state` fields, and `:document`
+    /// fields while they are local cells.
+    fn bindable_fields(schema: &InstanceKindSchema, host_documents: bool) -> String {
         let names: Vec<&str> = schema
-            .host
-            .iter()
-            .map(|declared| &declared.field)
-            .chain(schema.fields.iter())
-            .chain(documents)
-            .filter(|field| field.ty.is_bindable())
+            .declared_fields()
+            .filter(|field| {
+                field.ty.is_bindable()
+                    && !(host_documents && schema.document_index_of(&field.name).is_some())
+            })
             .map(|field| field.name.as_str())
             .collect();
         if names.is_empty() {
@@ -1264,6 +1256,62 @@ impl InstanceStore {
         } else {
             names.join(", ")
         }
+    }
+
+    /// The binding `field` of `schema` supports on instance `id`
+    /// (kind-bindings spec §7.1, §7.3): a declared, slot-backed field
+    /// (`:number :int :bool :rgb`), not a `:document` field the host
+    /// stores. `Err` is the reason, naming the kind, the field and the
+    /// bindable fields; the caller prefixes who asked (`#'`, a widget).
+    pub(super) fn field_binding(
+        schema: &InstanceKindSchema,
+        id: InstanceId,
+        field: &str,
+        host_documents: bool,
+    ) -> Result<BindingKind, String> {
+        let kind = &schema.kind;
+        let unbindable = |what: &str| {
+            format!(
+                "field '{field}' of kind '{kind}' {what}; bindable fields: {}",
+                Self::bindable_fields(schema, host_documents)
+            )
+        };
+        if schema.builtin_fields().contains(&field) {
+            return Err(unbindable("is a built-in field"));
+        }
+        let Some(declared) = schema
+            .declared_fields()
+            .find(|declared| declared.name == field)
+        else {
+            return Err(format!(
+                "kind '{kind}' has no field '{field}'; bindable fields: {}",
+                Self::bindable_fields(schema, host_documents)
+            ));
+        };
+        let Some(binding) = declared.ty.binding_kind(id) else {
+            return Err(unbindable(&format!(
+                "is {}, which is not bindable",
+                declared.ty
+            )));
+        };
+        if host_documents
+            && schema.host_index_of(field).is_none()
+            && schema.index_of(field).is_none()
+        {
+            return Err(unbindable("is a host-stored :document field"));
+        }
+        Ok(binding)
+    }
+
+    /// The kinds of any key shape whose name part is `name` (`track` for
+    /// `eseq.kinds:track`).
+    pub(super) fn kinds_named<'s, 'n>(
+        &'s self,
+        name: &'n str,
+    ) -> impl Iterator<Item = (&'s Rc<str>, &'s InstanceKindSchema)> + use<'s, 'n> {
+        self.kinds
+            .iter()
+            .filter(move |(_, schema)| kind_name_of(&schema.kind) == name)
     }
 
     /// Cells for `fields` from an instance's cells under `previous`: a value
@@ -1302,20 +1350,15 @@ impl InstanceStore {
             };
         }
         let mut matches = self
-            .kinds
-            .iter()
-            .filter(|(_, schema)| schema.is_keyed() && kind_name_of(&schema.kind) == kind);
+            .kinds_named(kind)
+            .filter(|(_, schema)| schema.is_keyed());
         match (matches.next(), matches.next()) {
             (Some(found), None) => Ok(found),
             (Some((first, _)), Some((second, _))) => Err(InstanceError::InvalidKey(format!(
                 "keyed kind name '{kind}' is ambiguous ('{first}', '{second}'); use its kind id"
             ))),
-            (None, _) => match self
-                .kinds
-                .values()
-                .find(|schema| kind_name_of(&schema.kind) == kind)
-            {
-                Some(schema) => Err(not_keyed(schema)),
+            (None, _) => match self.kinds_named(kind).next() {
+                Some((_, schema)) => Err(not_keyed(schema)),
                 None => Err(InstanceError::UnknownKind(kind.to_string())),
             },
         }
@@ -2551,69 +2594,134 @@ impl VM {
         id: InstanceId,
         field: &str,
     ) -> Result<Value, VMError> {
-        let host_documents = self.instance_doc_native(INSTANCE_DOC_READ_NATIVE).is_some();
-        let resolved = match self.instances.resolve(id, field) {
-            Ok(resolved) => resolved,
-            Err(InstanceError::UnknownField { kind, field, .. }) => {
-                let bindable = self.instances.bindable_fields(&kind, host_documents);
-                return Err(VMError::Instance(format!(
-                    "kind '{kind}' has no field '{field}'; bindable fields: {bindable}"
-                )));
-            }
-            Err(error) => return Err(error.into()),
-        };
-        let kind = resolved.kind;
-        let unbindable = |what: String| {
-            VMError::Instance(format!(
-                "#': field '{field}' of kind '{kind}' {what}; bindable fields: {}",
-                self.instances.bindable_fields(kind, host_documents)
-            ))
-        };
-        let Some(declared) = resolved.declared else {
-            return Err(unbindable("is a built-in field".to_string()));
-        };
-        let Some(binding) = declared.ty.binding_kind(id) else {
-            return Err(unbindable(format!(
-                "is {}, which is not bindable",
-                declared.ty
-            )));
-        };
-        if matches!(resolved.slot, FieldSlot::Document(_)) && host_documents {
-            return Err(unbindable("is a host-stored :document field".to_string()));
-        }
         let namespace = instance_namespace(id);
-        let live_host = resolved.is_live_host();
-        let mut value = self.instances.value_of(id, &resolved);
-        let stale = resolved.record.is_none();
-        if live_host && self.refresh_cold_host_field(id, field)? {
-            value = self.instances.field_value(id, field)?;
-        }
+        Ok(match self.prepare_field_binding(id, field, "#'")? {
+            PreparedBinding::Stale { binding, value } => {
+                crate::reactive::detached_binding_ref(namespace, field, binding, &value)
+            }
+            PreparedBinding::Bound { binding, seed } => {
+                let slot = match seed {
+                    Some(value) => {
+                        self.reactive_float_slots
+                            .write_binding(&namespace, field, binding, &value)
+                            .0
+                    }
+                    None => self
+                        .reactive_float_slots
+                        .binding_slot(&namespace, field, binding),
+                };
+                Value::ReactiveRef {
+                    namespace,
+                    field: field.to_string(),
+                    index: None,
+                    kind: binding,
+                    slot,
+                }
+            }
+        })
+    }
+
+    /// [`Self::instance_field_ref`] with one ref per slot: one for a float
+    /// field, the r, g and b slots of an `:rgb` field (a shader reads each
+    /// as a uniform, kind-bindings spec §7.3). A stale instance gets
+    /// detached slots, so nothing enters the store under its namespace.
+    /// `who` prefixes an error (the widget).
+    pub(super) fn instance_field_refs(
+        &mut self,
+        id: InstanceId,
+        field: &str,
+        who: &str,
+    ) -> Result<Vec<Value>, VMError> {
+        let namespace = instance_namespace(id);
+        let (binding, slots) = match self.prepare_field_binding(id, field, who)? {
+            PreparedBinding::Stale { binding, value } => {
+                return Ok(crate::reactive::detached_binding_refs(
+                    &namespace, field, binding, &value,
+                ));
+            }
+            PreparedBinding::Bound { binding, seed } => (
+                binding,
+                self.reactive_float_slots
+                    .binding_slots(&namespace, field, binding, seed.as_ref()),
+            ),
+        };
+        Ok(slots
+            .into_iter()
+            .map(|slot| Value::ReactiveRef {
+                namespace: namespace.clone(),
+                field: field.to_string(),
+                index: None,
+                kind: binding,
+                slot,
+            })
+            .collect())
+    }
+
+    /// What `#'` checks and refreshes before handing out a field's slots:
+    /// the field must be bindable; a cold `:host` field of a live instance
+    /// is read from the host first. A field already bound keeps its slots
+    /// current on every change, so it is not read again (no seed).
+    fn prepare_field_binding(
+        &mut self,
+        id: InstanceId,
+        field: &str,
+        who: &str,
+    ) -> Result<PreparedBinding, VMError> {
+        let host_documents = self.instance_doc_native(INSTANCE_DOC_READ_NATIVE).is_some();
+        let (binding, stale, live_host) = {
+            let resolved = match self.instances.resolve(id, field) {
+                Ok(resolved) => resolved,
+                // Reported below with the bindable fields.
+                Err(InstanceError::UnknownField { .. }) => {
+                    let kind = self.instances.kind_of(id).unwrap_or_default();
+                    let reason = self
+                        .instances
+                        .kinds
+                        .get(kind)
+                        .map(|schema| {
+                            InstanceStore::field_binding(schema, id, field, host_documents)
+                        })
+                        .and_then(Result::err)
+                        .unwrap_or_else(|| format!("kind '{kind}' has no field '{field}'"));
+                    return Err(VMError::Instance(format!("{who}: {reason}")));
+                }
+                Err(error) => return Err(error.into()),
+            };
+            let schema = self
+                .instances
+                .kinds
+                .get(resolved.kind)
+                .ok_or_else(|| InstanceError::UnknownKind(resolved.kind.to_string()))?;
+            let binding = InstanceStore::field_binding(schema, id, field, host_documents)
+                .map_err(|reason| VMError::Instance(format!("{who}: {reason}")))?;
+            (binding, resolved.record.is_none(), resolved.is_live_host())
+        };
         if stale {
-            // A stale instance: a detached slot holding the default.
-            return Ok(crate::reactive::detached_binding_ref(
-                namespace, field, binding, &value,
-            ));
+            // A stale instance: detached slots holding the default.
+            let value = self.instances.field_value(id, field)?;
+            return Ok(PreparedBinding::Stale { binding, value });
+        }
+        if live_host {
+            // Returns at once when a reader observes it or a held ref keeps
+            // it current.
+            self.refresh_cold_host_field(id, field)?;
         }
         // A new held ref may observe a field nothing observed before.
         self.instance_observer_epoch += 1;
         let bound = self.bound_instance_fields.entry(id).or_default();
-        let slot = if bound.contains_key(field) {
-            // Already bound: every change of the field keeps the slot current.
-            self.reactive_float_slots
-                .binding_slot(&namespace, field, binding)
-        } else {
-            bound.insert(field.to_string(), binding);
-            let (slot, _) = self
-                .reactive_float_slots
-                .write_binding(&namespace, field, binding, &value);
-            slot
-        };
-        Ok(Value::ReactiveRef {
-            namespace,
-            field: field.to_string(),
-            index: None,
-            kind: binding,
-            slot,
+        if bound.contains_key(field) {
+            // Already bound: every change of the field (a cold refresh
+            // included) keeps its slots current; no value to read.
+            return Ok(PreparedBinding::Bound {
+                binding,
+                seed: None,
+            });
+        }
+        bound.insert(field.to_string(), binding);
+        let value = self.instances.field_value(id, field)?;
+        Ok(PreparedBinding::Bound {
+            binding,
+            seed: Some(value),
         })
     }
 
@@ -2639,6 +2747,22 @@ impl VM {
         }
     }
 }
+
+/// A field binding [`VM::prepare_field_binding`] checked.
+enum PreparedBinding {
+    /// A dropped instance's field: detached slots holding `value`.
+    Stale { binding: BindingKind, value: Value },
+    /// A live instance's field, bound in the store; `seed` is its value
+    /// when the slots need writing (first bind).
+    Bound {
+        binding: BindingKind,
+        seed: Option<Value>,
+    },
+}
+
+#[path = "widget_state.rs"]
+mod widget_state;
+pub use widget_state::SdfStatePlan;
 
 #[cfg(test)]
 #[path = "field_binding_tests.rs"]

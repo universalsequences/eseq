@@ -66,6 +66,32 @@ pub(crate) fn detached_binding_ref(
     }
 }
 
+/// [`detached_binding_ref`] for every component slot (r, g and b for
+/// `:rgb`), none of them in the store.
+pub(crate) fn detached_binding_refs(
+    namespace: &str,
+    field: &str,
+    kind: BindingKind,
+    value: &Value,
+) -> Vec<Value> {
+    let components = binding_components(kind, value).unwrap_or_default();
+    let count = if matches!(kind, BindingKind::InstanceRgb(_)) {
+        3
+    } else {
+        1
+    };
+    components[..count]
+        .iter()
+        .map(|component| Value::ReactiveRef {
+            namespace: namespace.to_string(),
+            field: field.to_string(),
+            index: None,
+            kind,
+            slot: Arc::new(AtomicU64::new(component.to_bits())),
+        })
+        .collect()
+}
+
 pub fn read_float_slot(slot: &AtomicU64) -> f64 {
     f64::from_bits(slot.load(Ordering::Relaxed))
 }
@@ -97,6 +123,15 @@ impl ReactiveBindingStore {
             .entry(key)
             .or_insert_with(|| Arc::new(AtomicU64::new(0.0f64.to_bits())))
             .clone()
+    }
+
+    /// How many slots the store holds.
+    #[cfg(test)]
+    pub(crate) fn slot_count(&self) -> usize {
+        self.slots
+            .lock()
+            .expect("reactive float store lock poisoned")
+            .len()
     }
 
     /// Whether anything ever bound (or wrote) this field's float slot. Lets a
@@ -213,13 +248,47 @@ impl ReactiveBindingStore {
         kind: BindingKind,
         value: &Value,
     ) -> (Arc<AtomicU64>, bool) {
-        let components = binding_components(kind, value);
+        let mut first = None;
+        let changed = self.visit_binding_slots(namespace, field, kind, Some(value), |slot| {
+            first.get_or_insert_with(|| Arc::clone(slot));
+        });
+        (first.expect("at least one slot"), changed)
+    }
+
+    /// Every slot of a binding, created if needed and seeded from `value`
+    /// when given: one for a float, r, g and b for `:rgb`. The store is
+    /// locked once.
+    pub(crate) fn binding_slots(
+        &self,
+        namespace: &str,
+        field: &str,
+        kind: BindingKind,
+        value: Option<&Value>,
+    ) -> Vec<Arc<AtomicU64>> {
+        let mut slots = Vec::with_capacity(3);
+        self.visit_binding_slots(namespace, field, kind, value, |slot| {
+            slots.push(Arc::clone(slot));
+        });
+        slots
+    }
+
+    /// Visit a binding's slots in component order under one lock, creating
+    /// them if needed and writing `value`'s components when given (a value
+    /// of another shape writes nothing). Returns whether any slot changed.
+    fn visit_binding_slots(
+        &self,
+        namespace: &str,
+        field: &str,
+        kind: BindingKind,
+        value: Option<&Value>,
+        mut visit: impl FnMut(&Arc<AtomicU64>),
+    ) -> bool {
+        let components = value.and_then(|value| binding_components(kind, value));
         let rgb = matches!(kind, BindingKind::InstanceRgb(_));
         let mut slots = self
             .slots
             .lock()
             .expect("reactive float store lock poisoned");
-        let mut first = None;
         let mut changed = false;
         for component in RGB_COMPONENTS.into_iter().take(if rgb { 3 } else { 1 }) {
             let key = if rgb {
@@ -234,9 +303,9 @@ impl ReactiveBindingStore {
                 let bits = components[component].to_bits();
                 changed |= slot.swap(bits, Ordering::Relaxed) != bits;
             }
-            first.get_or_insert_with(|| Arc::clone(slot));
+            visit(slot);
         }
-        (first.expect("at least one slot"), changed)
+        changed
     }
 
     /// Forget a field's slots (an instance was dropped). Refs that still

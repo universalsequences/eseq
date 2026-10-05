@@ -10893,7 +10893,7 @@ fragment float4 live_spectrogram_frag(
                 name: "retained-style-test".into(),
                 shader_source: "fragment float4 widget_frag(WidgetVaryings in [[stage_in]]) { return float4(0.8, 0.3, 0.1, 1.0); }".into(),
                 sdf_expr: crate::parser::Expression::Number(0.0), state_uniforms: vec![],
-                bindable_props: vec![], region_count: 1, width: 8.0, height: 3.0,
+                state: Default::default(), region_count: 1, width: 8.0, height: 3.0,
                 paint_margin: 0.0, animates: false,
             });
             let value = |v| std::rc::Rc::new(std::cell::RefCell::new(v));
@@ -11319,7 +11319,7 @@ fragment float4 live_spectrogram_frag(
                 name: "retained-clock-test".into(),
                 shader_source: "fragment float4 widget_frag(WidgetVaryings in [[stage_in]]) { return float4(fract(in.itime * 0.1), 0.3, 0.1, 1.0); }".into(),
                 sdf_expr: crate::parser::Expression::Number(0.0), state_uniforms: vec![],
-                bindable_props: vec![], region_count: 1, width: 8.0, height: 3.0,
+                state: Default::default(), region_count: 1, width: 8.0, height: 3.0,
                 paint_margin: 0.0, animates: true,
             });
             let mut tiled = changing_controls_frame(&backend, 640, 480);

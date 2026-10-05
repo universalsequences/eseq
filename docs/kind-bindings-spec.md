@@ -1,6 +1,6 @@
 # Kind bindings
 
-Status: spec rev 3, 2026-10-04. Stages 1–4 built (§3.1, §3.2, §3.3, §3.4, §4, §7.1, §8, §9 notes). Bead: epic `eseq-0l17` (`bd list --label kind-bindings`).
+Status: spec rev 3, 2026-10-04. Stages 1–5 built (§3.1, §3.2, §3.3, §3.4, §4, §7.1, §7.3, §8, §9 notes). Bead: epic `eseq-0l17` (`bd list --label kind-bindings`).
 Rev 3 resolves the open questions (§12 Decisions). Rev 2 dropped the separate `defrecord` form of rev 1: host state and view state
 are declared with `def-kind`, which gains keyed and singleton kinds, a `:host`
 field group and typed fields.
@@ -521,10 +521,12 @@ Built (stage 2), decisions the above left open:
 - `#'NS.field` on a reactive namespace (`#'SEQ.playing`) compiles to the
   legacy ref `(bind "SEQ" "playing")`, as a migration aid; the compiler
   knows the reactive namespaces statically. `#'SEQ.a.b` is a compile error.
-- Errors: `kind 'm:k' has no field 'x'; bindable fields: a, b` and
+- Errors: `#': kind 'm:k' has no field 'x'; bindable fields: a, b` and
   `#': field 'name' of kind 'm:k' is :string, which is not bindable;
   bindable fields: …` (also for built-in fields). A non-instance head (a
-  dict, nil, a string) is an error too.
+  dict, nil, a string) is an error too. The check is
+  `InstanceStore::field_binding`, shared with `defwidget` (§7.3), whose
+  errors carry the widget's name in place of `#'`.
 - An instance ref's kind names its instance: `BindingKind::InstanceFloat(id)`
   (`:number :int :bool`) or `BindingKind::InstanceRgb(id)`; legacy refs are
   `BindingKind::Float`. The `ReactiveRef` shape is otherwise unchanged, and
@@ -573,7 +575,8 @@ is an ordinary `ReactiveRef` to them.
 - Budget: 16 floats total (`MAX_SDF_STATE_UNIFORMS`, `sdf_widget.rs:28`).
   Exceeding it is a compile error listing the allocation.
 - An unknown field or a non-numeric type in the shader is a compile error:
-  `step-cell: kind 'step' has no field 'activ'; fields: active playing selected`.
+  `step-cell: kind 'step' has no field 'activ'; bindable fields: active, playing,
+  selected`.
 - At render, an instance prop fills its uniforms from the fields' slots; a
   scalar prop takes a number or any ref (`#'x`, legacy `bind-seq`).
 - `:bindable` is deleted: every SDF state accepts refs. It is still parsed and
@@ -582,6 +585,121 @@ is an ordinary `ReactiveRef` to them.
   background widget like any prop.
 - Singleton fields (`transport.playing`) are readable from any shader without
   being passed in.
+
+Built (stage 5):
+
+- **Which names are instance state.** A `:state` name is instance state when
+  the shader reads it dotted (`step.active`); a name read bare stays scalar
+  even when a kind has that name, so legacy widgets with `:state (scene)`
+  (`ui/transport.lisp`) or `(track)` (`effects/identified-drum.lisp`) keep
+  working. Reading one name both ways is an error (`step-cell: :state 'step'
+  is read both as a number (step) and as an instance (step.active)`).
+  Dotted symbols are found after macro expansion, skipping qualified names
+  (`m/f`) and heads a `let` binds (one walker, `sdf_codegen::
+  walk_free_symbols`, serves this and `collect_state_symbols`); a nested
+  path (`transport.scene.active`) is an error.
+- **Resolution** happens when `defwidget` runs (`VM::plan_sdf_widget_state`,
+  `lang/vm/widget_state.rs`): the kind with that exact id (`:state
+  (alpha:dup)`, read `alpha:dup.on`), else the one kind of any key shape
+  whose name part matches (`InstanceStore::kinds_named`, shared with keyed
+  kind lookup). None is an error (`… reads a field of :state 'knob', but no
+  kind is named 'knob' (define the kind before the widget)`); several list
+  the candidates (`… names several kinds (alpha:dup, beta:dup); use its
+  kind id`). Host kinds load with the root, before any view. A dotted head
+  that is not a `:state` name resolves the same way and must be a singleton
+  (`transport.playing`); a keyed kind there is an error (`… which is not a
+  singleton; add track to :state and pass the instance`), and a head naming
+  no kind is left to the shader compiler, as before.
+- **Field errors** are `#'`'s (§7.1, the same check) with the widget's name
+  in front: `step-cell: kind 'eseq.kinds:step' has no field 'activ';
+  bindable fields: index, active, playing, selected`, `step-cell: field
+  'name' of kind 'eseq.kinds:track' is :string, which is not bindable;
+  bindable fields: …` (also built-ins, and `:document` fields while the
+  host stores them).
+- **Errors.** The plan's, the budget's and a name collision are evaluation
+  errors (`VMError::Instance`). A shader codegen error (`<widget>: shader
+  error: …`) stays non-fatal: a `[defwidget] warning:` on stderr and the
+  form's string value, as before. Making it fatal broke a content load:
+  `rec-arm-dot` in `ui/legacy/mixer.lisp` calls `eseq.materials/color`,
+  which is unknown when that file loads without `ui/materials.lisp`
+  (`legacy_mixer_definitions_are_top_level_and_source_loads`); it was
+  silently unregistered before. No other content `defwidget` hits one.
+- **Uniform layout.** `SdfWidgetDef::state_uniforms` stays one float name per
+  slot, in slot order: scalar states first (as `collect_state_symbols`
+  finds them, captured `defstate`s included), then fields in first-read
+  order, each once: `step.active`, and for `:rgb` three names
+  `track.color|r`, `|g`, `|b` (`|` never appears in a symbol;
+  `sdf_codegen::rgb_uniform_name`, read back by `rgb_uniform_base`).
+  Shader identifiers map `.` to `__` (`sdf_state_step__active`); the codegen
+  declares each `:rgb` field as a `float3 sdf_state_track__color` over its
+  components, typed `float3` for inference. Two states that map to one
+  identifier are an error naming both (`clash: state 'lane__color' and
+  'lane.color' name the same shader uniform; rename one`; also
+  `lane.color|r` against a `lane.color-r`). `SdfWidgetDef::state`
+  (`SdfWidgetState`) holds the `:state` names, the plan (`SdfStatePlan`:
+  scalars, and `SdfInstanceField`s — source `Prop(state)` or
+  `Singleton(kind id)`, kind, field, uniform, rgb, and the field's
+  `shader-state-*` prop names), the kind schema generation it was planned
+  at, and the `shader-state-*` prop name of every uniform (filled at
+  registration, so per-frame packing and hit testing format nothing).
+- **`:rgb` in the shader.** `track.color` is a vec3: arithmetic works on it
+  (`(* 0.5 track.color)`), `(rgba track.color a)` adds an alpha (MSL/WGSL
+  `float4(float3, a)`), and in a color position (`sdf/fill`, `sdf/paint`,
+  `sdf/stroke`, `sdf/stroke-px`, material and shadow `:color`) a `float3`
+  is widened to an opaque color. Both `if` branches must agree, so mix it
+  with a theme keyword through `rgba`.
+- **Budget.** More than 16 floats (scalars plus fields) is an error listing
+  the allocation: `too-many: shader state needs 17 floats, over the budget
+  of 16: s0 1, …, lane.color 3`. No silent truncation is left: `defwidget`,
+  `:material` sliders (error prefix `material`, printed, the slider drawn
+  without its material, as for any material error) and `sdf->metal`
+  (prefix `sdf->metal`, returned as its `"error: …"` string) all plan
+  through `plan_sdf_widget_state` and check the budget, so singleton reads
+  (`transport.playing`) work in materials and `sdf->metal` too. A
+  material's state names are the slider's props; its cache key includes
+  the plan, so a kind reload that changes the fields it reads recompiles
+  it. `content_shader_corpus_emits_valid_wgsl` plans every content
+  `defwidget` this way with the host kinds (`core/modules/kinds.lisp`)
+  loaded, plus an instance-state fixture (`step.active`, `track.color`,
+  `transport.playing`).
+- **Render.** The constructor (`defwidget`'s, a `:material` slider's, and
+  `box` for its `:background`) calls `VM::bind_sdf_widget_instance_fields`
+  with the registered definition: per field, the instance (the prop named
+  like the state, or the singleton; each source looked up and kind-checked
+  once) gets `#'`'s bindings (`instance_field_refs`: one ref per slot, r, g
+  and b for `:rgb`, with one store lock; slots created and seeded, cold
+  `:host` fields read, observer epoch bumped; a field already bound skips
+  the read) stored under the field's precomputed `shader-state-*` props.
+  A stale instance gets detached slots, so nothing enters the store under
+  a dead namespace. The widget holding the refs makes the fields observed
+  (§9), so the host computes `step.playing` only while such a widget
+  exists; the binding table maps the refs to the widget, so a field write
+  repaints it and never re-runs the view. A missing or nil instance prop,
+  or a dropped instance, leaves its uniforms at 0; an instance of another
+  kind is an error (`step-cell: :step takes an instance of kind
+  'eseq.kinds:step'; got <track#…>`). Scalar props are unchanged: a
+  number, or any ref.
+- **Kind hot reload.** The definition records
+  `instance_kind_schema_generation()`; when it has moved, construction
+  re-plans the widget against the current kinds. The same fields go on as
+  before; any change to them (`lane.color` turned from `:rgb` to `:number`,
+  a kind no longer a singleton) is an error, `step-cell: kind
+  'scratch:lane' changed since defwidget; re-evaluate it`, never silent
+  zeros. Re-evaluating the `defwidget` recompiles against the new kind.
+- **`:bindable`** is parsed and ignored. `prop_accepts_binding` accepts a
+  ref on a scalar state of an SDF widget, directly or as a `box
+  :background`: a declared `:state` name that is not an instance head,
+  read by the shader or not (`ui/mixer.lisp` binds `assigned` and
+  `override`, which only the host reads), or a captured `defstate` the
+  shader reads. An instance state takes an instance and a uniform name is
+  never a prop, so `(step-cell :cell #'x)` gets the widget diagnostic
+  `step-cell: :cell does not accept reactive bindings`.
+- **`box :background`.** The `box` constructor binds the background widget's
+  instance fields the same way, so `(box :background "step-cell" :step s
+  :track t)` works; scalar states pass through as props, as before.
+- Not typed: uniforms stay a `Vec<String>` with the `|r` convention rather
+  than an enum through the codegen API (every `compile_sdf_*` entry point
+  and the per-frame packing take names).
 
 ## 8. Refs used as values
 

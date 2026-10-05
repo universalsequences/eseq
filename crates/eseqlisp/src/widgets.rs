@@ -87,6 +87,12 @@ pub fn register_widget_natives(vm: &mut VM) {
         vm.register_ref_aware_native_with_vm(widget, move |args, vm| {
             let mut widget = build_widget(&widget_type, args);
             vm.qualify_widget_stable_key(&mut widget);
+            if widget_type == "box"
+                && let Err(error) = fill_box_background_instance_fields(vm, &mut widget)
+            {
+                vm.fail_native_call(error);
+                return Value::Nil;
+            }
             if let Some(symbol) = vm.current_source_symbol() {
                 if let Value::Map(map) = &mut widget {
                     map.insert(
@@ -110,6 +116,27 @@ pub fn register_widget_natives(vm: &mut VM) {
     register_inline_value_widget_natives(vm);
     register_inline_scope_native(vm);
     register_inline_lane_native(vm);
+}
+
+/// `(box :background "step-cell" :step s)`: the background widget's
+/// instance props pass through the box like any prop, so its instance field
+/// uniforms are bound here as the `defwidget` constructor binds them
+/// (kind-bindings spec §7.3).
+fn fill_box_background_instance_fields(
+    vm: &mut VM,
+    widget: &mut Value,
+) -> Result<(), crate::vm::VMError> {
+    let Value::Map(map) = widget else {
+        return Ok(());
+    };
+    let Some(Value::String(background)) = map.get("background").map(|value| value.borrow().clone())
+    else {
+        return Ok(());
+    };
+    let Some(definition) = crate::widget_render::sdf_widget::sdf_widget_def(&background) else {
+        return Ok(());
+    };
+    vm.bind_sdf_widget_instance_fields(&definition, map)
 }
 
 fn register_inline_widget_target_binding_native(vm: &mut VM) {
@@ -500,12 +527,32 @@ fn prop_accepts_binding(
             && let Some(background) = props.get("background")
             && let Value::String(background_type) = &*background.borrow()
         {
-            return crate::widget_render::sdf_widget::sdf_widget_def(background_type).is_some_and(
-                |definition| definition.bindable_props.iter().any(|name| name == prop),
-            );
+            return crate::widget_render::sdf_widget::sdf_widget_def(background_type)
+                .is_some_and(|definition| sdf_state_accepts_binding(&definition, prop));
         }
         return false;
     }
     crate::widget_render::sdf_widget::sdf_widget_def(widget_type)
-        .is_some_and(|definition| definition.bindable_props.iter().any(|name| name == prop))
+        .is_some_and(|definition| sdf_state_accepts_binding(&definition, prop))
+}
+
+/// Every scalar state of an SDF widget accepts a binding ref (kind-bindings
+/// spec §7.3; `:bindable` is ignored): a declared `:state` name, read by the
+/// shader or not (the view may bind one only the host reads), or a captured
+/// `defstate` the shader reads. An instance state takes an instance, and a
+/// uniform name (`step.active`) is never a prop.
+fn sdf_state_accepts_binding(
+    definition: &crate::widget_render::sdf_widget::SdfWidgetDef,
+    prop: &str,
+) -> bool {
+    use crate::widget_render::sdf_widget::SdfFieldSource;
+    let state = &definition.state;
+    let instance_head = state
+        .plan
+        .fields
+        .iter()
+        .any(|field| matches!(&field.source, SdfFieldSource::Prop(head) if head == prop));
+    !instance_head
+        && (state.names.iter().any(|name| name == prop)
+            || state.plan.scalars.iter().any(|name| name == prop))
 }

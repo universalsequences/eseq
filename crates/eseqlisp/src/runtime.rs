@@ -498,24 +498,105 @@ fn compile_sdf_for_platform_backend(
     }
 }
 
-fn compile_sdf_value(
-    value: &Value,
+/// Fill an SDF widget's `shader-state-*` props at construction
+/// (`defwidget` constructors and `:material` sliders): bindings for the
+/// instance fields its shader reads (kind-bindings spec §7.3), then each
+/// scalar state from the prop of that name or the captured `defstate`.
+fn fill_sdf_state_props(
     vm: &mut VM,
-    state_bindings: &std::collections::HashSet<String>,
-) -> Result<SdfCompileResult, String> {
+    widget: &str,
+    map: &mut HashMap<String, Rc<RefCell<Value>>>,
+) -> Result<(), crate::vm::VMError> {
+    let Some(def) = crate::widget_render::sdf_widget::sdf_widget_def(widget) else {
+        return Ok(());
+    };
+    vm.bind_sdf_widget_instance_fields(&def, map)?;
+    // Scalars come first in slot order, so their prop names lead.
+    for (state_name, prop_name) in def.state.plan.scalars.iter().zip(&def.state.prop_names) {
+        let explicit_value = map.get(state_name).map(|cell| cell.borrow().clone());
+        if let Some(value) = explicit_value.or_else(|| vm.read_tracked_state_value(state_name)) {
+            map.insert(prop_name.clone(), Rc::new(RefCell::new(value)));
+        }
+    }
+    Ok(())
+}
+
+/// Compile a macro-expanded shader over its state uniforms for the
+/// platform's backend, with the environment's shader options.
+fn compile_expanded_sdf(
+    expanded: &crate::parser::Expression,
+    state_symbols: &[String],
+) -> Result<crate::lang::sdf_codegen::SdfShaderOutput, String> {
+    let options = crate::lang::sdf_codegen::SdfShaderOptions::from_env()?;
+    compile_sdf_for_platform_backend(expanded, state_symbols, options).map_err(|e| e.to_string())
+}
+
+/// Plan a shader's state (kind-bindings spec §7.3) and hold it to the
+/// uniform budget; errors are prefixed with `who`.
+fn plan_sdf_state(
+    who: &str,
+    vm: &VM,
+    state_names: &[String],
+    expanded: &crate::parser::Expression,
+) -> Result<crate::vm::SdfStatePlan, String> {
+    let plan = vm.plan_sdf_widget_state(who, state_names, expanded)?;
+    match plan.budget_error(who) {
+        Some(error) => Err(error),
+        None => Ok(plan),
+    }
+}
+
+/// `sdf->metal`: compile a quoted SDF expression. Singleton fields
+/// (`transport.playing`) and captured `defstate`s read as uniforms, as in
+/// a `defwidget` with no `:state`.
+fn compile_sdf_value(value: &Value, vm: &mut VM) -> Result<SdfCompileResult, String> {
     let expr = crate::lang::sdf_codegen::value_to_expression(value).map_err(|e| e.to_string())?;
     let expanded = expand_sdf_expression(&expr, vm)?;
-    let mut state_symbols =
-        crate::lang::sdf_codegen::collect_state_symbols(&expanded, state_bindings);
-    state_symbols.truncate(crate::widget_render::sdf_widget::MAX_SDF_STATE_UNIFORMS);
-    let options = crate::lang::sdf_codegen::SdfShaderOptions::from_env()?;
-    let output = compile_sdf_for_platform_backend(&expanded, &state_symbols, options)
-        .map_err(|e| e.to_string())?;
+    let state_symbols = plan_sdf_state("sdf->metal", vm, &[], &expanded)?.uniforms();
+    let output = compile_expanded_sdf(&expanded, &state_symbols)?;
     Ok(SdfCompileResult {
         output,
         expanded_expr: expanded,
         state_symbols,
     })
+}
+
+/// Why a `defwidget` did not compile.
+enum DefwidgetError {
+    /// The shader itself (`<widget>: shader error: …`): a warning, and the
+    /// form's string value, as before kind-bindings stage 5; some content
+    /// `defwidget`s hit one (`rec-arm-dot` in `ui/legacy/mixer.lisp` when its
+    /// material macros are not loaded).
+    Shader(String),
+    /// Its state (kind-bindings spec §7.3): an evaluation error.
+    State(String),
+}
+
+/// Compile a `defwidget` shader against its `:state` names (kind-bindings
+/// spec §7.3): scalar states and the instance fields the shader reads become
+/// uniforms ([`VM::plan_sdf_widget_state`]). Over the uniform budget is an
+/// error listing the allocation; so is a bad instance field.
+fn compile_defwidget_shader(
+    widget: &str,
+    value: &Value,
+    vm: &mut VM,
+    state_names: &[String],
+) -> Result<(SdfCompileResult, crate::vm::SdfStatePlan), DefwidgetError> {
+    let shader_error = |e: String| DefwidgetError::Shader(format!("{widget}: shader error: {e}"));
+    let expr = crate::lang::sdf_codegen::value_to_expression(value)
+        .map_err(|e| shader_error(e.to_string()))?;
+    let expanded = expand_sdf_expression(&expr, vm).map_err(shader_error)?;
+    let plan = plan_sdf_state(widget, vm, state_names, &expanded).map_err(DefwidgetError::State)?;
+    let state_symbols = plan.uniforms();
+    let output = compile_expanded_sdf(&expanded, &state_symbols).map_err(shader_error)?;
+    Ok((
+        SdfCompileResult {
+            output,
+            expanded_expr: expanded,
+            state_symbols,
+        },
+        plan,
+    ))
 }
 
 use std::collections::hash_map::DefaultHasher;
@@ -710,7 +791,6 @@ fn compile_widget_material(
     widget_type: &str,
     material_val: &Value,
     vm: &mut VM,
-    state_binding_keys: &[String],
     prop_binding_keys: &[String],
 ) -> Result<String, String> {
     let material_expr =
@@ -718,20 +798,26 @@ fn compile_widget_material(
 
     let shader_expr = build_material_shader_expr(widget_type, &material_expr)?;
 
-    // For vslider, add origin_t so it gets a uniform slot.
-    let mut bindings: std::collections::HashSet<String> =
-        state_binding_keys.iter().cloned().collect();
-    bindings.extend(prop_binding_keys.iter().cloned());
+    // The material's state names: the widget's props (plus origin_t for a
+    // vslider, so it gets a uniform slot); captured defstates read too.
+    let mut state_names: Vec<String> = prop_binding_keys.to_vec();
     if widget_type == "vslider" {
-        bindings.insert("origin_t".to_string());
+        state_names.push("origin_t".to_string());
     }
+    state_names.sort();
+    state_names.dedup();
     let expanded = expand_sdf_expression(&shader_expr, vm)?;
+    let plan = plan_sdf_state("material", vm, &state_names, &expanded)?;
+    let state_symbols = plan.uniforms();
     let mut hasher = DefaultHasher::new();
     widget_type.hash(&mut hasher);
     expr_to_source(&expanded).hash(&mut hasher);
-    let mut binding_keys = bindings.iter().cloned().collect::<Vec<_>>();
-    binding_keys.sort();
-    binding_keys.hash(&mut hasher);
+    state_names.hash(&mut hasher);
+    // The plan: a kind reload that changes the fields read recompiles.
+    state_symbols.hash(&mut hasher);
+    for field in &plan.fields {
+        (&field.kind, &field.field, field.rgb).hash(&mut hasher);
+    }
     let options = crate::lang::sdf_codegen::SdfShaderOptions::from_env()?;
     options.hash(&mut hasher);
     let cache_key = hasher.finish();
@@ -740,8 +826,6 @@ fn compile_widget_material(
         return Ok(name);
     }
 
-    let mut state_symbols = crate::lang::sdf_codegen::collect_state_symbols(&expanded, &bindings);
-    state_symbols.truncate(crate::widget_render::sdf_widget::MAX_SDF_STATE_UNIFORMS);
     let output = compile_sdf_for_platform_backend(&expanded, &state_symbols, options)
         .map_err(|e| e.to_string())?;
 
@@ -754,6 +838,12 @@ fn compile_widget_material(
         output.shader_source,
         expanded,
         state_symbols,
+        crate::widget_render::sdf_widget::SdfWidgetState {
+            names: state_names,
+            plan,
+            kind_generation: std::cell::Cell::new(vm.instance_kind_schema_generation()),
+            prop_names: Vec::new(),
+        },
         paint_margin,
     );
 
@@ -1601,15 +1691,17 @@ impl Runtime {
             let _ = runtime.eval_str(sdf_src);
         }
         // Register sdf->metal: takes a quoted SDF expression, returns Metal shader string
-        runtime.vm.register_native_with_vm("sdf->metal", move |args, vm| {
-            let Some(val) = args.first() else {
-                return Value::String("error: sdf->metal requires 1 argument".into());
-            };
-            match compile_sdf_value(val, vm, &std::collections::HashSet::new()) {
-                Ok(result) => Value::String(result.output.shader_source),
-                Err(e) => Value::String(format!("error: {}", e)),
-            }
-        });
+        runtime
+            .vm
+            .register_native_with_vm("sdf->metal", move |args, vm| {
+                let Some(val) = args.first() else {
+                    return Value::String("error: sdf->metal requires 1 argument".into());
+                };
+                match compile_sdf_value(val, vm) {
+                    Ok(result) => Value::String(result.output.shader_source),
+                    Err(e) => Value::String(format!("error: {}", e)),
+                }
+            });
         // Register defwidget: defines a new SDF widget type
         runtime
             .vm
@@ -1630,7 +1722,6 @@ impl Runtime {
                 let mut paint_margin: f32 = 0.0;
                 let mut shader_val = None;
                 let mut widget_state_names: Vec<String> = Vec::new();
-                let mut bindable_props: Vec<String> = Vec::new();
                 let mut animates = false;
 
                 let mut i = 1;
@@ -1668,18 +1759,9 @@ impl Runtime {
                                     }
                                 }
                             }
-                            "bindable" => {
-                                if let Value::List(items) = &args[i + 1] {
-                                    for item in items {
-                                        match &*item.borrow() {
-                                            Value::Symbol(s)
-                                            | Value::Keyword(s)
-                                            | Value::String(s) => bindable_props.push(s.clone()),
-                                            _ => {}
-                                        }
-                                    }
-                                }
-                            }
+                            // Every state accepts refs (kind-bindings spec
+                            // §7.3); `:bindable` is parsed and ignored.
+                            "bindable" => {}
                             _ => {}
                         }
                         i += 2;
@@ -1692,16 +1774,18 @@ impl Runtime {
                     return Value::String("defwidget: :shader is required".into());
                 };
 
-                // Combine VM state bindings with widget-declared state names
-                let mut state_bindings: std::collections::HashSet<String> =
-                    vm.state_bindings.keys().cloned().collect();
-                for name in &widget_state_names {
-                    state_bindings.insert(name.clone());
-                }
-                let compiled = match compile_sdf_value(&shader_val, vm, &state_bindings) {
-                    Ok(o) => o,
-                    Err(e) => return Value::String(format!("defwidget shader error: {}", e)),
-                };
+                let (compiled, plan) =
+                    match compile_defwidget_shader(&name, &shader_val, vm, &widget_state_names) {
+                        Ok(compiled) => compiled,
+                        Err(DefwidgetError::Shader(error)) => {
+                            eprintln!("[defwidget] warning: {error}");
+                            return Value::String(format!("defwidget shader error: {error}"));
+                        }
+                        Err(DefwidgetError::State(error)) => {
+                            vm.fail_native_call(crate::vm::VMError::Instance(error));
+                            return Value::Nil;
+                        }
+                    };
                 let paint_margin = paint_margin.max(estimate_shadow_paint_margin(
                     &compiled.expanded_expr,
                     width,
@@ -1711,8 +1795,13 @@ impl Runtime {
                     name: name.clone(),
                     shader_source: compiled.output.shader_source,
                     sdf_expr: compiled.expanded_expr,
-                    state_uniforms: compiled.state_symbols.clone(),
-                    bindable_props,
+                    state_uniforms: compiled.state_symbols,
+                    state: crate::widget_render::sdf_widget::SdfWidgetState {
+                        names: widget_state_names,
+                        plan,
+                        kind_generation: std::cell::Cell::new(vm.instance_kind_schema_generation()),
+                        prop_names: Vec::new(),
+                    },
                     region_count: compiled.output.region_count,
                     width,
                     height,
@@ -1721,25 +1810,14 @@ impl Runtime {
                 });
 
                 let widget_type = name.clone();
-                let state_uniforms = compiled.state_symbols;
                 vm.register_ref_aware_native_with_vm(&name, move |args, vm| {
                     let mut widget = crate::widgets::build_widget(&widget_type, args);
                     vm.qualify_widget_stable_key(&mut widget);
-                    if let Value::Map(map) = &mut widget {
-                        for state_name in &state_uniforms {
-                            let explicit_value =
-                                map.get(state_name).map(|cell| cell.borrow().clone());
-                            if let Some(value) =
-                                explicit_value.or_else(|| vm.read_tracked_state_value(state_name))
-                            {
-                                map.insert(
-                                    crate::widget_render::sdf_widget::shader_state_prop_name(
-                                        state_name,
-                                    ),
-                                    Rc::new(RefCell::new(value)),
-                                );
-                            }
-                        }
+                    if let Value::Map(map) = &mut widget
+                        && let Err(error) = fill_sdf_state_props(vm, &widget_type, map)
+                    {
+                        vm.fail_native_call(error);
+                        return Value::Nil;
                     }
                     widget
                 });
@@ -1760,31 +1838,14 @@ impl Runtime {
                         if let Some(material_cell) = map.get("material") {
                             let material_val = material_cell.borrow().clone();
                             if !matches!(material_val, Value::Nil) {
-                                let keys: Vec<String> =
-                                    vm.state_bindings.keys().cloned().collect();
                                 let prop_keys = map.keys().cloned().collect::<Vec<_>>();
-                                match compile_widget_material(
-                                    &wtype,
-                                    &material_val,
-                                    vm,
-                                    &keys,
-                                    &prop_keys,
-                                ) {
+                                match compile_widget_material(&wtype, &material_val, vm, &prop_keys) {
                                     Ok(shader_name) => {
-                                        if let Some(def) = crate::widget_render::sdf_widget::sdf_widget_def(&shader_name) {
-                                            for state_name in &def.state_uniforms {
-                                                let explicit_value = map
-                                                    .get(state_name)
-                                                    .map(|cell| cell.borrow().clone());
-                                                if let Some(value) = explicit_value
-                                                    .or_else(|| vm.read_tracked_state_value(state_name))
-                                                {
-                                                    map.insert(
-                                                        crate::widget_render::sdf_widget::shader_state_prop_name(state_name),
-                                                        Rc::new(RefCell::new(value)),
-                                                    );
-                                                }
-                                            }
+                                        if let Err(error) =
+                                            fill_sdf_state_props(vm, &shader_name, map)
+                                        {
+                                            vm.fail_native_call(error);
+                                            return Value::Nil;
                                         }
                                         if wtype == "vslider" {
                                             let origin_t = compute_origin_t(map);
@@ -2255,6 +2316,16 @@ impl Runtime {
         expr: &crate::parser::Expression,
     ) -> Result<crate::parser::Expression, String> {
         self.vm.expand_macros_expression(expr)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn plan_sdf_widget_state(
+        &self,
+        widget: &str,
+        state_names: &[String],
+        shader: &crate::parser::Expression,
+    ) -> Result<crate::vm::SdfStatePlan, String> {
+        self.vm.plan_sdf_widget_state(widget, state_names, shader)
     }
 
     /// Modules declared via `(module NAME)` → declaring file, if any
@@ -5170,7 +5241,7 @@ mod theme_shader_recompile_tests {
             shader_source: baked.shader_source.clone(),
             sdf_expr: expr,
             state_uniforms: Vec::new(),
-            bindable_props: Vec::new(),
+            state: Default::default(),
             region_count: baked.region_count,
             width: 1.0,
             height: 1.0,

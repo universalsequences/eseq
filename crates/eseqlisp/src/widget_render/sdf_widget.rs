@@ -16,13 +16,103 @@ pub struct SdfWidgetDef {
     pub name: String,
     pub shader_source: String,
     pub sdf_expr: Expression, // macro-expanded SDF expression for CPU hit testing
+    /// One float uniform per entry, in slot order: scalar states (`seed`),
+    /// then instance fields (`step.active`; an `:rgb` field is three,
+    /// `track.color|r` `|g` `|b`, see [`crate::lang::sdf_codegen::rgb_uniform_name`]).
     pub state_uniforms: Vec<String>,
-    pub bindable_props: Vec<String>,
+    /// The `:state` names and the plan over them (kind-bindings spec §7.3).
+    pub state: SdfWidgetState,
     pub region_count: usize,
     pub width: f32,
     pub height: f32,
     pub paint_margin: f32,
     pub animates: bool,
+}
+
+/// Where an instance field uniform finds its instance.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SdfFieldSource {
+    /// The widget prop named like the `:state` name (`:step s`).
+    Prop(String),
+    /// The one instance of a singleton kind (its kind id): `transport.playing`
+    /// reads in any shader without being passed in.
+    Singleton(String),
+}
+
+/// One field of a kind a `defwidget` shader reads (`step.active`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SdfInstanceField {
+    pub source: SdfFieldSource,
+    /// The field's kind id (`eseq.kinds:step`).
+    pub kind: String,
+    pub field: String,
+    /// The uniform the shader reads: `step.active`, or the `float3` base of
+    /// an `:rgb` field's three uniforms.
+    pub uniform: String,
+    pub rgb: bool,
+    /// The `shader-state-*` prop of each float uniform, in slot order: one,
+    /// or r, g and b for `:rgb`.
+    pub prop_names: Vec<String>,
+}
+
+impl SdfInstanceField {
+    pub fn new(
+        source: SdfFieldSource,
+        kind: String,
+        field: String,
+        uniform: String,
+        rgb: bool,
+    ) -> Self {
+        let mut field = Self {
+            source,
+            kind,
+            field,
+            uniform,
+            rgb,
+            prop_names: Vec::new(),
+        };
+        field.prop_names = field
+            .uniform_names()
+            .iter()
+            .map(|name| shader_state_prop_name(name))
+            .collect();
+        field
+    }
+
+    /// Floats the field takes: 3 for `:rgb`, else 1.
+    pub fn float_count(&self) -> usize {
+        if self.rgb { 3 } else { 1 }
+    }
+
+    /// Its float uniform names: `step.active`, or `track.color|r` `|g` `|b`.
+    pub fn uniform_names(&self) -> Vec<String> {
+        if self.rgb {
+            crate::lang::sdf_codegen::RGB_UNIFORM_COMPONENTS
+                .map(|component| {
+                    crate::lang::sdf_codegen::rgb_uniform_name(&self.uniform, component)
+                })
+                .to_vec()
+        } else {
+            vec![self.uniform.clone()]
+        }
+    }
+}
+
+/// A `defwidget`'s state (kind-bindings spec §7.3).
+#[derive(Clone, Debug, Default)]
+pub struct SdfWidgetState {
+    /// The declared `:state` names (a material's prop names).
+    pub names: Vec<String>,
+    /// Its scalar states (the only props that accept a binding ref) and the
+    /// instance fields the shader reads, whose `shader-state-*` props the
+    /// constructor fills with bindings to the fields' slots.
+    pub plan: crate::vm::SdfStatePlan,
+    /// [`crate::vm::VM::instance_kind_schema_generation`] when planned:
+    /// construction re-checks the plan after a kind hot reload.
+    pub kind_generation: std::cell::Cell<u64>,
+    /// `shader-state-<uniform>` for each of `state_uniforms`, filled at
+    /// registration so per-frame packing formats nothing.
+    pub prop_names: Vec<String>,
 }
 
 pub const MAX_SDF_STATE_UNIFORMS: usize = 16;
@@ -338,11 +428,10 @@ fn visual_scale_anim_uniforms(
     })
 }
 
-/// Resolve a state prop value by name — tries direct name, then prefixed.
-fn resolve_state_prop(props: &HashMap<String, Value>, name: &str) -> Option<f64> {
-    let val = props
-        .get(name)
-        .or_else(|| props.get(&shader_state_prop_name(name)));
+/// Resolve a state prop value by name — tries direct name, then its
+/// `shader-state-*` prop (`prop_name`, precomputed at registration).
+fn resolve_state_prop(props: &HashMap<String, Value>, name: &str, prop_name: &str) -> Option<f64> {
+    let val = props.get(name).or_else(|| props.get(prop_name));
     match val {
         Some(Value::Number(n)) => Some(*n),
         Some(Value::Bool(true)) => Some(1.0),
@@ -354,7 +443,7 @@ fn resolve_state_prop(props: &HashMap<String, Value>, name: &str) -> Option<f64>
 
 fn hit_test_uniform_vars(
     props: &HashMap<String, Value>,
-    state_uniforms: &[String],
+    def: &SdfWidgetDef,
 ) -> HashMap<String, f64> {
     let mut vars = HashMap::new();
     let itime = current_sdf_time_seconds();
@@ -366,8 +455,8 @@ fn hit_test_uniform_vars(
             current_sdf_time_fallback_seconds() as f64
         },
     );
-    for state_name in state_uniforms {
-        if let Some(value) = resolve_state_prop(props, state_name) {
+    for (state_name, prop_name) in def.state_uniforms.iter().zip(&def.state.prop_names) {
+        if let Some(value) = resolve_state_prop(props, state_name, prop_name) {
             vars.insert(state_name.clone(), value);
         }
     }
@@ -398,7 +487,7 @@ fn sdf_widget_hit_region(
         node.rect.height,
         pixel_aspect,
     );
-    let mut vars = hit_test_uniform_vars(&node.props, &def.state_uniforms);
+    let mut vars = hit_test_uniform_vars(&node.props, &def);
     let aspect = pixel_aspect as f64;
     vars.insert("aspect".to_string(), aspect);
     vars.insert("width".to_string(), aspect.max(1.0));
@@ -500,7 +589,12 @@ pub fn sdf_handle_event(
     })
 }
 
-pub fn register_sdf_widget(def: SdfWidgetDef) {
+pub fn register_sdf_widget(mut def: SdfWidgetDef) {
+    def.state.prop_names = def
+        .state_uniforms
+        .iter()
+        .map(|name| shader_state_prop_name(name))
+        .collect();
     let name = def.name.clone();
     SDF_WIDGETS.with(|w| w.borrow_mut().insert(name, Rc::new(def)));
     SDF_WIDGET_REGISTRY_GENERATION.fetch_add(1, Ordering::Relaxed);
@@ -515,22 +609,21 @@ pub fn register_inline_shader(
     shader_source: String,
     sdf_expr: Expression,
     state_uniforms: Vec<String>,
+    state: SdfWidgetState,
     paint_margin: f32,
 ) {
-    let def = SdfWidgetDef {
-        name: name.clone(),
+    register_sdf_widget(SdfWidgetDef {
+        name,
         shader_source,
         sdf_expr,
         state_uniforms,
-        bindable_props: Vec::new(),
+        state,
         region_count: 0,
         width: 1.0,
         height: 1.0,
         paint_margin,
         animates: false,
-    };
-    SDF_WIDGETS.with(|w| w.borrow_mut().insert(name, Rc::new(def)));
-    SDF_WIDGET_REGISTRY_GENERATION.fetch_add(1, Ordering::Relaxed);
+    });
 }
 
 pub fn sdf_widget_def(name: &str) -> Option<Rc<SdfWidgetDef>> {
@@ -588,13 +681,14 @@ pub fn build_material_overlay(
     let mut uniform_b = [0.0; 4];
     let mut uniform_c = [0.0; 4];
     let mut uniform_d = [0.0; 4];
-    for (idx, name) in def
-        .state_uniforms
+    for (idx, prop_name) in def
+        .state
+        .prop_names
         .iter()
         .take(MAX_SDF_STATE_UNIFORMS)
         .enumerate()
     {
-        let val = super::get_f32_prop(&node.props, &shader_state_prop_name(name), 0.0);
+        let val = super::get_f32_prop(&node.props, prop_name, 0.0);
         if idx < 4 {
             uniform_a[idx] = val;
         } else if idx < 8 {
@@ -693,8 +787,8 @@ fn numeric_literal(expr: &Expression) -> Option<f32> {
     }
 }
 
-fn prop_uniform_value(props: &HashMap<String, Value>, name: &str) -> f32 {
-    resolve_state_prop(props, name)
+fn prop_uniform_value(props: &HashMap<String, Value>, name: &str, prop_name: &str) -> f32 {
+    resolve_state_prop(props, name, prop_name)
         .or_else(|| resolve_color_component_prop(props, name))
         .unwrap_or(0.0) as f32
 }
@@ -861,13 +955,14 @@ pub fn sdf_widget_primitives(
     let mut uniform_b = [0.0; 4];
     let mut uniform_c = [0.0; 4];
     let mut uniform_d = [0.0; 4];
-    for (idx, name) in def
+    for (idx, (name, prop_name)) in def
         .state_uniforms
         .iter()
+        .zip(&def.state.prop_names)
         .take(MAX_SDF_STATE_UNIFORMS)
         .enumerate()
     {
-        let value = prop_uniform_value(&node.props, name);
+        let value = prop_uniform_value(&node.props, name, prop_name);
         if idx < 4 {
             uniform_a[idx] = value;
         } else if idx < 8 {
@@ -939,13 +1034,14 @@ pub fn sdf_widget_background_primitives(
     let mut uniform_b = [0.0; 4];
     let mut uniform_c = [0.0; 4];
     let mut uniform_d = [0.0; 4];
-    for (idx, name) in def
+    for (idx, (name, prop_name)) in def
         .state_uniforms
         .iter()
+        .zip(&def.state.prop_names)
         .take(MAX_SDF_STATE_UNIFORMS)
         .enumerate()
     {
-        let value = prop_uniform_value(props, name);
+        let value = prop_uniform_value(props, name, prop_name);
         if idx < 4 {
             uniform_a[idx] = value;
         } else if idx < 8 {
@@ -1182,7 +1278,7 @@ mod tests {
                 ]),
             ]),
             state_uniforms: Vec::new(),
-            bindable_props: Vec::new(),
+            state: Default::default(),
             region_count: 1,
             width: 2.8,
             height: 1.4,
@@ -1241,7 +1337,7 @@ mod tests {
             shader_source: String::new(),
             sdf_expr: Expression::Symbol("shape".to_string()),
             state_uniforms: Vec::new(),
-            bindable_props: Vec::new(),
+            state: Default::default(),
             region_count: 0,
             width: 1.0,
             height: 1.0,

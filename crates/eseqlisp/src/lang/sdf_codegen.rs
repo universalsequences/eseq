@@ -86,6 +86,8 @@ struct ShaderEmitter {
     scopes: Vec<HashMap<String, String>>,
     type_scopes: Vec<HashMap<String, &'static str>>,
     uniform_symbols: HashMap<String, String>,
+    /// Uniforms that are not plain floats (an `:rgb` field is a `float3`).
+    uniform_types: HashMap<String, &'static str>,
     theme: theme::Theme,
     current_region_id: Option<usize>,
     next_region_id: usize,
@@ -159,6 +161,9 @@ impl ShaderEmitter {
             statements: Vec::new(),
             scopes: Vec::new(),
             type_scopes: Vec::new(),
+            uniform_types: uniform_vec3_bases(uniform_symbols.keys())
+                .map(|base| (base, "float3"))
+                .collect(),
             uniform_symbols,
             theme,
             current_region_id: None,
@@ -263,7 +268,21 @@ impl ShaderEmitter {
                 return Some(*type_name);
             }
         }
-        None
+        if self.scopes.iter().any(|scope| scope.contains_key(name)) {
+            return None;
+        }
+        self.uniform_types.get(name).copied()
+    }
+
+    /// Emit a color expression, widening a `float3` (an `:rgb` field such
+    /// as `track.color`, or a `vec3`) to an opaque `float4`.
+    fn emit_color_expr(&mut self, expr: &Expression) -> Result<String, CodegenError> {
+        let color = self.emit_expr(expr)?;
+        Ok(if self.expr_type(expr) == Some("float3") {
+            format!("{}({}, 1.0)", self.constructor("float4"), color)
+        } else {
+            color
+        })
     }
 
     fn expr_is_bool(&self, expr: &Expression) -> bool {
@@ -495,7 +514,7 @@ impl ShaderEmitter {
                 .insert("normal".to_string(), "float3");
         }
         let shadow = self.emit_shadow_contribution(sdf_expr, &material, &d)?;
-        let color = self.emit_expr(material.color_expr)?;
+        let color = self.emit_color_expr(material.color_expr)?;
         self.type_scopes.pop();
         self.scopes.pop();
         let clr = self.fresh_var();
@@ -957,7 +976,7 @@ impl ShaderEmitter {
             ("d".to_string(), d.to_string()),
         ]));
         let shadow_dist_expr = self.emit_expr(sdf_expr)?;
-        let shadow_color_expr = self.emit_expr(shadow.color_expr)?;
+        let shadow_color_expr = self.emit_color_expr(shadow.color_expr)?;
         let blur_expr = self.emit_expr(shadow.blur_expr)?;
         let spread_expr = match shadow.spread_expr {
             Some(expr) => self.emit_expr(expr)?,
@@ -1060,7 +1079,7 @@ impl ShaderEmitter {
             .push(self.declaration("float", &mask, &mask_expr));
 
         // Evaluate color
-        let color = self.emit_expr(&args[2])?;
+        let color = self.emit_color_expr(&args[2])?;
         let clr = self.fresh_var();
         self.statements
             .push(self.declaration("float4", &clr, &color));
@@ -1325,12 +1344,61 @@ pub struct SdfShaderOutput {
     pub region_count: usize,
 }
 
+/// A shader identifier for a state uniform name: `-` becomes `_`, and the
+/// `.` of an instance field (`step.active`, kind-bindings spec §7.3) `__`.
 fn metal_safe_symbol(name: &str) -> String {
-    name.replace('-', "_")
+    let mut out = String::with_capacity(name.len());
+    for ch in name.chars() {
+        match ch {
+            '.' => out.push_str("__"),
+            ch if ch.is_ascii_alphanumeric() || ch == '_' => out.push(ch),
+            _ => out.push('_'),
+        }
+    }
+    out
+}
+
+/// The three float uniforms an `:rgb` field takes, named `<base>|r`,
+/// `<base>|g`, `<base>|b` (`|` never appears in a Lisp symbol). The shader
+/// reads them together as the `float3` uniform `<base>` (`track.color`).
+pub const RGB_UNIFORM_COMPONENTS: [&str; 3] = ["r", "g", "b"];
+const RGB_UNIFORM_SEPARATOR: char = '|';
+
+pub fn rgb_uniform_name(base: &str, component: &str) -> String {
+    format!("{base}{RGB_UNIFORM_SEPARATOR}{component}")
+}
+
+/// The `float3` base of an `:rgb` field's first (`r`) uniform name:
+/// `track.color` for `track.color|r`, `None` for any other name.
+pub fn rgb_uniform_base(name: &str) -> Option<&str> {
+    name.strip_suffix(RGB_UNIFORM_COMPONENTS[0])?
+        .strip_suffix(RGB_UNIFORM_SEPARATOR)
+}
+
+/// The `float3` bases of the `:rgb` uniforms among `names`.
+fn uniform_vec3_bases<'a>(names: impl Iterator<Item = &'a String>) -> impl Iterator<Item = String> {
+    names.filter_map(|name| rgb_uniform_base(name).map(str::to_string))
+}
+
+/// Two state uniform names that compile to one shader identifier
+/// (`sdf_state_<name>`): a scalar `a__b` and a field `a.b`, or
+/// `lane.color|r` and `lane.color-r`. Checked over the float names and the
+/// `float3` bases of `:rgb` fields.
+pub fn uniform_identifier_collision(state_symbols: &[String]) -> Option<(String, String)> {
+    let mut seen: HashMap<String, &str> = HashMap::new();
+    let bases: Vec<String> = uniform_vec3_bases(state_symbols.iter()).collect();
+    for name in state_symbols.iter().chain(&bases) {
+        if let Some(previous) = seen.insert(metal_safe_symbol(name), name)
+            && previous != name
+        {
+            return Some((previous.to_string(), name.clone()));
+        }
+    }
+    None
 }
 
 fn uniform_layout(state_symbols: &[String]) -> HashMap<String, String> {
-    state_symbols
+    let mut layout: HashMap<String, String> = state_symbols
         .iter()
         .map(|name| {
             (
@@ -1338,10 +1406,25 @@ fn uniform_layout(state_symbols: &[String]) -> HashMap<String, String> {
                 format!("sdf_state_{}", metal_safe_symbol(name)),
             )
         })
-        .collect()
+        .collect();
+    for base in uniform_vec3_bases(state_symbols.iter()) {
+        let identifier = format!("sdf_state_{}", metal_safe_symbol(&base));
+        layout.insert(base, identifier);
+    }
+    layout
 }
 
-fn emit_metal_uniform_declarations(shader: &mut String, state_symbols: &[String]) {
+/// One `<type> sdf_state_<name> = <input>.uniform_<r>.<c>;` line per state
+/// float, then one `float3` per `:rgb` uniform over its three components.
+fn emit_uniform_declarations(
+    shader: &mut String,
+    state_symbols: &[String],
+    language: ShaderLanguage,
+) {
+    let input = match language {
+        ShaderLanguage::Metal => "in",
+        ShaderLanguage::Wgsl => "input",
+    };
     for (idx, name) in state_symbols.iter().enumerate() {
         let register = match idx / 4 {
             0 => "uniform_a",
@@ -1349,39 +1432,48 @@ fn emit_metal_uniform_declarations(shader: &mut String, state_symbols: &[String]
             2 => "uniform_c",
             _ => "uniform_d",
         };
-        let component = match idx % 4 {
-            0 => "x",
-            1 => "y",
-            2 => "z",
-            _ => "w",
-        };
-        writeln!(
-            shader,
-            "    float sdf_state_{} = in.{}.{};",
-            metal_safe_symbol(name),
-            register,
-            component
-        )
+        let component = ["x", "y", "z", "w"][idx % 4];
+        let name = metal_safe_symbol(name);
+        match language {
+            ShaderLanguage::Metal => writeln!(
+                shader,
+                "    float sdf_state_{name} = {input}.{register}.{component};"
+            ),
+            ShaderLanguage::Wgsl => writeln!(
+                shader,
+                "    let sdf_state_{name}: f32 = {input}.{register}.{component};"
+            ),
+        }
+        .unwrap();
+    }
+    for base in uniform_vec3_bases(state_symbols.iter()) {
+        let [r, g, b] = RGB_UNIFORM_COMPONENTS
+            .map(|component| metal_safe_symbol(&rgb_uniform_name(&base, component)));
+        let base = metal_safe_symbol(&base);
+        match language {
+            ShaderLanguage::Metal => writeln!(
+                shader,
+                "    float3 sdf_state_{base} = float3(sdf_state_{r}, sdf_state_{g}, sdf_state_{b});"
+            ),
+            ShaderLanguage::Wgsl => writeln!(
+                shader,
+                "    let sdf_state_{base}: vec3<f32> = vec3<f32>(sdf_state_{r}, sdf_state_{g}, sdf_state_{b});"
+            ),
+        }
         .unwrap();
     }
 }
 
-fn collect_state_symbols_impl(
+/// Visit every symbol `expr` reads with the `let` scopes around it
+/// (`scopes`, innermost last): `visit(name, scopes)` decides what a
+/// binding shadows. A `let` binding's value is walked in the outer scope.
+pub fn walk_free_symbols(
     expr: &Expression,
-    state_bindings: &HashSet<String>,
-    scope_stack: &mut Vec<HashSet<String>>,
-    out: &mut Vec<String>,
+    scopes: &mut Vec<HashSet<String>>,
+    visit: &mut impl FnMut(&str, &[HashSet<String>]),
 ) {
     match expr {
-        Expression::Symbol(name) => {
-            let shadowed = scope_stack.iter().rev().any(|scope| scope.contains(name));
-            if state_bindings.contains(name)
-                && !shadowed
-                && !out.iter().any(|existing| existing == name)
-            {
-                out.push(name.clone());
-            }
-        }
+        Expression::Symbol(name) => visit(name, scopes),
         Expression::List(items) if !items.is_empty() => {
             if let Some(Expression::Symbol(head)) = items.first()
                 && head == "let"
@@ -1396,30 +1488,31 @@ fn collect_state_symbols_impl(
                     if parts.len() != 2 {
                         continue;
                     }
-                    collect_state_symbols_impl(&parts[1], state_bindings, scope_stack, out);
+                    walk_free_symbols(&parts[1], scopes, visit);
                     if let Expression::Symbol(name) = &parts[0] {
                         scope.insert(name.clone());
                     }
                 }
-                scope_stack.push(scope);
+                scopes.push(scope);
                 for body in &items[2..] {
-                    collect_state_symbols_impl(body, state_bindings, scope_stack, out);
+                    walk_free_symbols(body, scopes, visit);
                 }
-                scope_stack.pop();
+                scopes.pop();
                 return;
             }
 
             for arg in items.iter().skip(1) {
-                collect_state_symbols_impl(arg, state_bindings, scope_stack, out);
+                walk_free_symbols(arg, scopes, visit);
             }
         }
         _ => {}
     }
 }
 
-pub fn collect_state_symbols(expr: &Expression, state_bindings: &HashSet<String>) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut scope_stack = vec![HashSet::from([
+/// The names every shader binds itself (coordinates, time, hit state),
+/// which never name a state uniform.
+pub fn builtin_shader_symbols() -> HashSet<String> {
+    HashSet::from([
         "x".to_string(),
         "y".to_string(),
         "d".to_string(),
@@ -1430,8 +1523,23 @@ pub fn collect_state_symbols(expr: &Expression, state_bindings: &HashSet<String>
         "hit/active".to_string(),
         "hit/region".to_string(),
         "input-color".to_string(),
-    ])];
-    collect_state_symbols_impl(expr, state_bindings, &mut scope_stack, &mut out);
+    ])
+}
+
+pub fn collect_state_symbols(expr: &Expression, state_bindings: &HashSet<String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    walk_free_symbols(
+        expr,
+        &mut vec![builtin_shader_symbols()],
+        &mut |name, scopes| {
+            if state_bindings.contains(name)
+                && !scopes.iter().any(|scope| scope.contains(name))
+                && !out.iter().any(|existing| existing == name)
+            {
+                out.push(name.to_string());
+            }
+        },
+    );
     out
 }
 
@@ -1541,7 +1649,7 @@ fn compile_sdf_to_metal_with_state_theme_and_options(
         writeln!(shader, "    int hit_region = int(in.color_b.x);").unwrap();
         writeln!(shader, "    int hit_pressed = int(in.color_b.y);").unwrap();
     }
-    emit_metal_uniform_declarations(&mut shader, state_symbols);
+    emit_uniform_declarations(&mut shader, state_symbols, ShaderLanguage::Metal);
 
     for stmt in &emitter.statements {
         writeln!(shader, "    {}", stmt).unwrap();
@@ -1689,23 +1797,7 @@ fn compile_sdf_to_wgsl_with_state_theme_and_options(
         )
         .unwrap();
     }
-    for (idx, name) in state_symbols.iter().enumerate() {
-        let register = match idx / 4 {
-            0 => "uniform_a",
-            1 => "uniform_b",
-            2 => "uniform_c",
-            _ => "uniform_d",
-        };
-        let component = ["x", "y", "z", "w"][idx % 4];
-        writeln!(
-            shader,
-            "    let sdf_state_{}: f32 = input.{}.{};",
-            metal_safe_symbol(name),
-            register,
-            component
-        )
-        .unwrap();
-    }
+    emit_uniform_declarations(&mut shader, state_symbols, ShaderLanguage::Wgsl);
 
     for stmt in &emitter.statements {
         writeln!(shader, "    {}", stmt).unwrap();
@@ -2012,6 +2104,47 @@ mod tests {
         assert_eq!(output.region_count, 0);
     }
 
+    /// Plan and compile one corpus `defwidget` as `defwidget` does
+    /// ([`crate::vm::VM::plan_sdf_widget_state`], kinds loaded): its state
+    /// within the uniform budget, both emitters agreeing on region count,
+    /// WGSL that naga accepts. `false` when `expression` is not a
+    /// `defwidget`.
+    fn compile_corpus_defwidget(
+        runtime: &mut crate::runtime::Runtime,
+        label: &str,
+        expression: &Expression,
+    ) -> bool {
+        let Some((shader, state_names)) = shader_from_defwidget(expression) else {
+            return false;
+        };
+        let expanded = runtime
+            .expand_macros_expression(shader)
+            .unwrap_or_else(|error| panic!("failed to expand shader from {label}: {error}"));
+        let plan = runtime
+            .plan_sdf_widget_state(label, &state_names, &expanded)
+            .unwrap_or_else(|error| panic!("state plan failed for {label}: {error}"));
+        // defwidget rejects a shader over the uniform budget.
+        if let Some(error) = plan.budget_error(label) {
+            panic!("{error}");
+        }
+        let state_symbols = plan.uniforms();
+        let metal = compile_sdf_to_metal_with_state_and_theme(
+            &expanded,
+            &state_symbols,
+            theme::default_theme(),
+        )
+        .unwrap_or_else(|error| panic!("MSL codegen failed for {label}: {error}"));
+        let wgsl = compile_sdf_to_wgsl_with_state_and_theme(
+            &expanded,
+            &state_symbols,
+            theme::default_theme(),
+        )
+        .unwrap_or_else(|error| panic!("WGSL codegen failed for {label}: {error}"));
+        assert_eq!(metal.region_count, wgsl.region_count, "{label}");
+        assert_valid_wgsl(&wgsl.shader_source);
+        true
+    }
+
     /// Every authored widget shader must survive the whole pipeline: parse,
     /// macro expansion, and both emitters, agreeing on region count and
     /// producing WGSL that naga accepts.
@@ -2035,6 +2168,11 @@ mod tests {
         });
 
         let mut runtime = Runtime::new();
+        // The host kinds, so shaders that read them plan as they do in the
+        // app (host kinds load before any view).
+        runtime
+            .eval_str(&std::fs::read_to_string(content.join("core/modules/kinds.lisp")).unwrap())
+            .expect("host kinds");
         let mut shader_count = 0;
         for path in files {
             let source = std::fs::read_to_string(&path).unwrap();
@@ -2070,38 +2208,28 @@ mod tests {
                     continue;
                 }
 
-                let Some((shader, state_symbols)) = shader_from_defwidget(&expression) else {
-                    continue;
-                };
-                let expanded = runtime
-                    .expand_macros_expression(shader)
-                    .unwrap_or_else(|error| {
-                        panic!("failed to expand shader from {}: {error}", path.display())
-                    });
-                let state_bindings = state_symbols.into_iter().collect::<HashSet<_>>();
-                let mut state_symbols = collect_state_symbols(&expanded, &state_bindings);
-                state_symbols.truncate(crate::widget_render::sdf_widget::MAX_SDF_STATE_UNIFORMS);
-                let metal = compile_sdf_to_metal_with_state_and_theme(
-                    &expanded,
-                    &state_symbols,
-                    theme::default_theme(),
-                )
-                .unwrap_or_else(|error| {
-                    panic!("MSL codegen failed for {}: {error}", path.display())
-                });
-                let wgsl = compile_sdf_to_wgsl_with_state_and_theme(
-                    &expanded,
-                    &state_symbols,
-                    theme::default_theme(),
-                )
-                .unwrap_or_else(|error| {
-                    panic!("WGSL codegen failed for {}: {error}", path.display())
-                });
-                assert_eq!(metal.region_count, wgsl.region_count, "{}", path.display());
-                assert_valid_wgsl(&wgsl.shader_source);
-                shader_count += 1;
+                if compile_corpus_defwidget(&mut runtime, &path.display().to_string(), &expression)
+                {
+                    shader_count += 1;
+                }
             }
         }
+        // A widget with instance state (kind-bindings spec §7.3) over the
+        // host kinds: a keyed step and track, and the transport singleton.
+        let instance_state = parse_one_expr(
+            "(defwidget corpus-step-cell
+               :state (step track seed)
+               :shader
+               (sdf/layer
+                 (sdf/fill (sdf/circle (+ 0.3 (* 0.2 step.active) seed))
+                   (rgba track.color (if transport.playing 1 0.5)))
+                 (sdf/stroke (sdf/circle 0.45) 0.05 track.color)))",
+        );
+        assert!(compile_corpus_defwidget(
+            &mut runtime,
+            "corpus-step-cell",
+            &instance_state
+        ));
         assert!(
             shader_count >= 60,
             "expected the full content shader corpus"
@@ -2622,6 +2750,78 @@ mod tests {
             collect_state_symbols(&expr, &states),
             vec![String::from("amount")]
         );
+    }
+
+    #[test]
+    fn uniform_identifier_collisions_name_both_states() {
+        let names = |names: &[&str]| {
+            names
+                .iter()
+                .map(|name| name.to_string())
+                .collect::<Vec<_>>()
+        };
+        let mut rgb = names(&["lane.color-r"]);
+        rgb.extend(RGB_UNIFORM_COMPONENTS.map(|c| rgb_uniform_name("lane.color", c)));
+        assert_eq!(
+            uniform_identifier_collision(&rgb),
+            Some(("lane.color-r".to_string(), "lane.color|r".to_string()))
+        );
+        assert_eq!(
+            uniform_identifier_collision(&names(&["a__b", "a.b"])),
+            Some(("a__b".to_string(), "a.b".to_string()))
+        );
+        assert_eq!(
+            uniform_identifier_collision(&names(&["a", "a.b", "b"])),
+            None
+        );
+        assert_eq!(rgb_uniform_base("lane.color|r"), Some("lane.color"));
+        assert_eq!(rgb_uniform_base("lane.color|g"), None);
+        assert_eq!(rgb_uniform_base("color-r"), None);
+    }
+
+    #[test]
+    fn rgb_state_uniforms_read_as_a_vec3_color() {
+        // kind-bindings spec §7.3: an `:rgb` field is three floats the
+        // shader reads as one float3, widened to an opaque color where a
+        // color is expected, or given an alpha with `rgba`.
+        let expr = expand_sdf(
+            "(sdf/layer
+               (sdf/fill (sdf/circle 0.5) track.color)
+               (sdf/paint (sdf/circle (* 0.5 step.active)) (rgba (* 0.5 track.color) 0.25)))",
+        );
+        let mut states = vec!["step.active".to_string()];
+        states.extend(RGB_UNIFORM_COMPONENTS.map(|c| rgb_uniform_name("track.color", c)));
+        let metal =
+            compile_sdf_to_metal_with_state_and_theme(&expr, &states, theme::default_theme())
+                .unwrap()
+                .shader_source;
+        assert!(
+            metal.contains("float sdf_state_step__active = in.uniform_a.x;"),
+            "{metal}"
+        );
+        assert!(
+            metal.contains("float sdf_state_track__color_b = in.uniform_a.w;"),
+            "{metal}"
+        );
+        assert!(
+            metal.contains(
+                "float3 sdf_state_track__color = float3(sdf_state_track__color_r, \
+                 sdf_state_track__color_g, sdf_state_track__color_b);"
+            ),
+            "{metal}"
+        );
+        assert!(
+            metal.contains("float4(sdf_state_track__color, 1.0)"),
+            "{metal}"
+        );
+        let wgsl = compile_sdf_to_wgsl_with_state_and_theme(&expr, &states, theme::default_theme())
+            .unwrap()
+            .shader_source;
+        assert!(
+            wgsl.contains("vec4<f32>(sdf_state_track__color, 1.0)"),
+            "{wgsl}"
+        );
+        assert_valid_wgsl(&wgsl);
     }
 
     #[test]

@@ -21,7 +21,7 @@ pub use instances::{
     CREATED_BUILTIN_FIELDS, DEF_KEYED_KIND_NATIVE, FIELD_REF_NATIVE, FieldType, HostField,
     HostFieldReader, INSTANCE_NAMESPACE_PREFIX, InstanceBuiltinField, InstanceError, InstanceId,
     InstanceKey, InstanceKindSchema, InstanceLabelHook, KIND_KEYS_NAMESPACE_PREFIX, KindField,
-    KindKey, SCRATCH_KIND_PACKAGE, kind_id, kind_name_of,
+    KindKey, SCRATCH_KIND_PACKAGE, SdfStatePlan, kind_id, kind_name_of,
 };
 pub(crate) use instances::{
     FIELD_TYPES_HINT, host_entry_shape_message, host_option_message, nil_default_message,

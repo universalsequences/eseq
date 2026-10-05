@@ -70,7 +70,7 @@ impl ShaderEmitter {
         self.statements.push(self.declaration("float", &pixel, "max(fwidth(y), 0.000001)"));
         let distance = self.emit_expr(&args[0])?;
         let width = self.emit_expr(&args[1])?;
-        let color = self.emit_expr(&args[2])?;
+        let color = self.emit_color_expr(&args[2])?;
         let d = self.fresh_var();
         let half = self.fresh_var();
         let coverage = self.fresh_var();

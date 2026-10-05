@@ -228,7 +228,7 @@ fn unknown_and_value_only_fields_are_errors_naming_the_bindable_fields() {
     let mut vm = vm();
     assert_eq!(
         error(&mut vm, "#'k.nope"),
-        "kind 'scratch:k' has no field 'nope'; bindable fields: flag, level, tint"
+        "#': kind 'scratch:k' has no field 'nope'; bindable fields: flag, level, tint"
     );
     assert_eq!(
         error(&mut vm, "#'k.name"),

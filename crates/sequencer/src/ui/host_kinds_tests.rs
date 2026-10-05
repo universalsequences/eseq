@@ -843,3 +843,106 @@ fn startup_scripts_beside_the_core_modules_do_not_resolve_as_modules() {
     // The core module itself does.
     h.eval("(import eseq.kinds)");
 }
+
+#[test]
+fn a_defwidget_with_instance_state_reads_host_kinds_and_only_repaints() {
+    // kind-bindings spec §7.3: `:state (step track)` names host kinds; the
+    // shader's fields become uniforms bound to the fields' slots, and a
+    // singleton (`transport`) is read without being passed in.
+    let mut h = Harness::new();
+    h.sync();
+    let renders = Rc::new(std::cell::Cell::new(0u32));
+    let counter = renders.clone();
+    h.editor
+        .runtime_mut()
+        .register_native("count-render", move |_args, _ctx| {
+            counter.set(counter.get() + 1);
+            Ok(Value::Nil)
+        });
+    h.eval(
+        r#"(defwidget kinds-step-cell
+             :width 4 :height 2
+             :state (step track)
+             :shader
+             (sdf/fill (sdf/circle (+ 0.2 (* 0.3 step.playing)))
+               (rgba track.color (if transport.playing 1 0.5))))
+           (def t0 (track 0))
+           (def s3 (nth t0.steps 3))
+           (effect-buffer "*cells*"
+             (do (count-render)
+                 (kinds-step-cell :step s3 :track t0)))
+           (def cell (kinds-step-cell :step s3 :track t0))"#,
+    );
+    h.show_all();
+    let rendered = renders.get();
+    assert!(rendered >= 1);
+    let def =
+        eseqlisp::widget_render::sdf_widget::sdf_widget_def("kinds-step-cell").expect("registered");
+    assert_eq!(
+        def.state_uniforms,
+        [
+            "step.playing",
+            "track.color|r",
+            "track.color|g",
+            "track.color|b",
+            "transport.playing"
+        ]
+    );
+    let t0 = h.track_id(0);
+    let s3 = h.steps_of(t0)[3];
+    // Held by the widget, the live fields are observed, so the host computes them.
+    assert!(h.rt().host_field_observed(s3, "playing"));
+    assert!(h.rt().host_field_observed(t0, "color"));
+
+    let uniforms = |h: &mut Harness| -> Vec<f32> {
+        let Value::Map(map) = h.eval("cell") else {
+            panic!("widget map");
+        };
+        let props: HashMap<String, Value> = map
+            .iter()
+            .map(|(key, value)| (key.clone(), value.borrow().clone()))
+            .collect();
+        def.state_uniforms
+            .iter()
+            .map(|name| {
+                eseqlisp::widget_render::get_f32_prop(
+                    &props,
+                    &eseqlisp::widget_render::sdf_widget::shader_state_prop_name(name),
+                    -1.0,
+                )
+            })
+            .collect()
+    };
+    let Value::List(color) = h.eval("t0.color") else {
+        panic!("rgb");
+    };
+    let color: Vec<f32> = color[1..]
+        .iter()
+        .map(|component| match &*component.borrow() {
+            Value::Number(n) => *n as f32,
+            other => panic!("component {other:?}"),
+        })
+        .collect();
+    let before = uniforms(&mut h);
+    assert_eq!(before[0], 0.0);
+    assert_eq!(&before[1..4], &color[..]);
+    assert_eq!(before[4], 0.0);
+
+    // The playhead lands on step 3 while the transport plays.
+    h.shared.state.transport.track_playheads[0].store(3, Ordering::Relaxed);
+    h.shared
+        .state
+        .transport
+        .playing
+        .store(true, Ordering::Relaxed);
+    assert!(h.sync());
+    let after = uniforms(&mut h);
+    assert_eq!(after[0], 1.0);
+    assert_eq!(after[4], 1.0);
+    h.editor.runtime_mut().run_reactive_cycle();
+    assert_eq!(
+        renders.get(),
+        rendered,
+        "instance state repaints; the view never re-renders"
+    );
+}
