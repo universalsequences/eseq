@@ -328,7 +328,7 @@ pub(super) struct ObservedList {
     epoch: Option<u64>,
     /// (instance, observed mask, the [`PlockKey`] its `has-locks` was last
     /// computed under).
-    entries: Vec<(InstanceId, u32, Option<PlockKey>)>,
+    pub(super) entries: Vec<(InstanceId, u32, Option<PlockKey>)>,
 }
 
 impl ObservedList {
@@ -342,7 +342,7 @@ impl ObservedList {
     /// (losing an observer moves no epoch), dropping the unobserved. A tick
     /// between epoch moves costs work in proportion to the observed.
     /// Returns how many instances it queried.
-    fn refresh(
+    pub(super) fn refresh(
         &mut self,
         rt: &Runtime,
         names: &[&str],

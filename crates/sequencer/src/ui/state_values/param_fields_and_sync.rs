@@ -1485,10 +1485,32 @@ pub(crate) fn fx_step_param_value_field(param: StepParam) -> Option<&'static str
 }
 
 pub(crate) fn fx_step_cursor_from_runtime(rt: &Runtime) -> usize {
-    match rt.global_value("cursor-step") {
+    fx_step_cursor_value(rt.global_value(FX_STEP_CURSOR_GLOBAL))
+}
+
+/// The Lisp global holding the step panel's cursor (`eseq.vanilla/cursor-step`).
+pub(crate) const FX_STEP_CURSOR_GLOBAL: &str = "cursor-step";
+
+/// The step cursor a [`FX_STEP_CURSOR_GLOBAL`] value names (0 when unset).
+pub(crate) fn fx_step_cursor_value(value: Option<Value>) -> usize {
+    match value {
         Some(Value::Number(step)) if step >= 0.0 => step as usize,
         _ => 0,
     }
+}
+
+/// The step panel's cursor step and the step it edits (the first selected
+/// step, else the cursor), clipped to a track of `num_steps` steps
+/// (`SEQ.fx-step-cursor-number` − 1 and `SEQ.fx-step-parameter-step`;
+/// `selection.cursor-step` and `selection.edit-step`).
+pub(crate) fn fx_step_cursor(
+    num_steps: usize,
+    cursor_step: usize,
+    selected_step: Option<usize>,
+) -> (usize, usize) {
+    let last = num_steps.max(1).min(MAX_STEPS) - 1;
+    let cursor_step = cursor_step.min(last);
+    (cursor_step, selected_step.unwrap_or(cursor_step).min(last))
 }
 
 /// Refresh the fixed-size step-parameter strip without rerunning its Lisp
@@ -1509,10 +1531,7 @@ pub(crate) fn sync_fx_step_cursor_binding_fields(
         .get_num_steps()
         .max(1)
         .min(MAX_STEPS);
-    let cursor_step = cursor_step.min(num_steps.saturating_sub(1));
-    let parameter_step = selected_step
-        .unwrap_or(cursor_step)
-        .min(num_steps.saturating_sub(1));
+    let (cursor_step, parameter_step) = fx_step_cursor(num_steps, cursor_step, selected_step);
     let mut dirty = rt
         .set_reactive(
             "SEQ",
@@ -1676,9 +1695,12 @@ pub(crate) fn build_accum_mode_options() -> Value {
 /// The scale dropdown's shown value: the scale (or imported scale) name,
 /// with `*` once degrees are detuned or switched off in the scale editor.
 pub(crate) fn fts_scale_label(tp: &sequencer::sequencer::TrackParams) -> String {
-    let scale_idx = tp.get_fts_scale();
-    let tuning = tp.tuning();
-    let name = sequencer::scale::scale_name(scale_idx, &tuning);
+    fts_label(tp.get_fts_scale(), &tp.tuning())
+}
+
+/// [`fts_scale_label`] of scale `scale_idx` under `tuning`.
+pub(crate) fn fts_label(scale_idx: usize, tuning: &sequencer::scale::TrackTuning) -> String {
+    let name = sequencer::scale::scale_name(scale_idx, tuning);
     if scale_idx != sequencer::scale::SCALE_OFF && tuning.has_degree_edits() {
         format!("{name}*")
     } else {
@@ -1689,80 +1711,120 @@ pub(crate) fn fts_scale_label(tp: &sequencer::sequencer::TrackParams) -> String 
 pub(crate) const TUNING_ROOT_NAMES: [&str; 12] =
     ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
 
+/// The scale editor's key mappings, by `TuningMode` (`tuning.mode`,
+/// `tuning-mode-options`).
+pub(crate) const TUNING_MODE_LABELS: [&str; 2] = ["Snap", "Map"];
+
+/// One degree of a scale as the scale editor shows it (`SEQ.tp-tuning-*`
+/// lists, the host kinds' `degree`).
+pub(crate) struct TuningDegree {
+    /// The scale's own pitch, cents above the root.
+    pub(crate) base: f32,
+    pub(crate) offset: f32,
+    pub(crate) enabled: bool,
+    /// The sounding pitch (offset and morph applied), cents above the root.
+    pub(crate) pitch: f32,
+    pub(crate) label: String,
+    /// The nearest simple just ratio, empty when none or the period is not
+    /// an octave.
+    pub(crate) ratio: String,
+}
+
+/// The period (cents) and degrees of scale `scale_idx` under `tuning`; no
+/// degrees while the scale is Off.
+pub(crate) fn tuning_degrees(
+    scale_idx: usize,
+    tuning: &sequencer::scale::TrackTuning,
+) -> (f32, Vec<TuningDegree>) {
+    use sequencer::scale;
+    let (base, period) = scale::base_scale(scale_idx, tuning).unwrap_or((&[], 1200.0));
+    let base = &base[..base.len().min(scale::MAX_SCALE_DEGREES)];
+    let root_cents = f32::from(tuning.root) * 100.0;
+    let degrees = (0..base.len())
+        .map(|degree| {
+            let pitch = scale::degree_pitch(base, degree, tuning);
+            let ratio = scale::nearest_just_ratio(pitch, 3.0)
+                .filter(|_| (period - 1200.0).abs() < 0.5)
+                .map(|(num, den, _)| format!("{num}/{den}"))
+                .unwrap_or_default();
+            TuningDegree {
+                base: base[degree],
+                offset: tuning.offsets[degree],
+                enabled: tuning.degree_enabled(degree),
+                pitch,
+                label: scale::pitch_label(root_cents + pitch),
+                ratio,
+            }
+        })
+        .collect();
+    (period, degrees)
+}
+
 /// The scale editor's `SEQ.tp-tuning-*` fields for one track. Degree lists
 /// are empty while the scale is Off.
 pub(crate) fn tuning_reactive_fields(
     tp: &sequencer::sequencer::TrackParams,
 ) -> Vec<(&'static str, Value)> {
-    use sequencer::scale;
-    let list = |items: Vec<Value>| {
-        Value::List(items.into_iter().map(|item| Rc::new(RefCell::new(item))).collect())
-    };
     let scale_idx = tp.get_fts_scale();
     let tuning = tp.tuning();
-    let (base, period) = scale::base_scale(scale_idx, &tuning).unwrap_or((&[], 1200.0));
-    let base = &base[..base.len().min(scale::MAX_SCALE_DEGREES)];
-    let root_cents = f32::from(tuning.root) * 100.0;
-    let pitches: Vec<f32> = (0..base.len())
-        .map(|degree| scale::degree_pitch(base, degree, &tuning))
-        .collect();
+    let (period, degrees) = tuning_degrees(scale_idx, &tuning);
+    let list = |item: fn(&TuningDegree) -> Value| list_value(degrees.iter().map(item));
+    let cents = |cents: f32| Value::Number(f64::from(cents));
     vec![
-        ("tp-tuning-on", Value::Bool(!base.is_empty())),
-        ("tp-tuning-scale", Value::String(scale::scale_name(scale_idx, &tuning).to_string())),
+        ("tp-tuning-on", Value::Bool(!degrees.is_empty())),
+        (
+            "tp-tuning-scale",
+            Value::String(sequencer::scale::scale_name(scale_idx, &tuning).to_string()),
+        ),
         ("tp-tuning-custom", Value::Bool(tuning.custom.is_some())),
         ("tp-tuning-edited", Value::Bool(tuning.has_degree_edits())),
-        ("tp-tuning-root", Value::String(TUNING_ROOT_NAMES[usize::from(tuning.root % 12)].to_string())),
-        ("tp-tuning-morph", Value::Number((f64::from(tuning.morph) * 100.0).round())),
-        ("tp-tuning-mode", Value::String(tuning.mode.label().to_string())),
-        ("tp-tuning-period", Value::Number(f64::from(period))),
-        ("tp-tuning-degree-count", Value::Number(base.len() as f64)),
+        (
+            "tp-tuning-root",
+            Value::String(tuning_root_label(&tuning).to_string()),
+        ),
+        (
+            "tp-tuning-morph",
+            Value::Number((f64::from(tuning.morph) * 100.0).round()),
+        ),
+        (
+            "tp-tuning-mode",
+            Value::String(tuning.mode.label().to_string()),
+        ),
+        ("tp-tuning-period", cents(period)),
+        (
+            "tp-tuning-degree-count",
+            Value::Number(degrees.len() as f64),
+        ),
         (
             "tp-tuning-base",
-            list(base.iter().map(|cents| Value::Number(f64::from(*cents))).collect()),
+            list(|degree| Value::Number(f64::from(degree.base))),
         ),
         (
             "tp-tuning-offsets",
-            list(
-                tuning.offsets[..base.len()]
-                    .iter()
-                    .map(|cents| Value::Number(f64::from(*cents)))
-                    .collect(),
-            ),
+            list(|degree| Value::Number(f64::from(degree.offset))),
         ),
         (
             "tp-tuning-enabled",
-            list((0..base.len()).map(|degree| Value::Bool(tuning.degree_enabled(degree))).collect()),
+            list(|degree| Value::Bool(degree.enabled)),
         ),
         (
             "tp-tuning-pitches",
-            list(pitches.iter().map(|cents| Value::Number(f64::from(*cents))).collect()),
+            list(|degree| Value::Number(f64::from(degree.pitch))),
         ),
         (
             "tp-tuning-labels",
-            list(
-                pitches
-                    .iter()
-                    .map(|cents| Value::String(scale::pitch_label(root_cents + cents)))
-                    .collect(),
-            ),
+            list(|degree| Value::String(degree.label.clone())),
         ),
         (
             "tp-tuning-ratios",
-            list(
-                pitches
-                    .iter()
-                    .map(|cents| {
-                        Value::String(
-                            scale::nearest_just_ratio(*cents, 3.0)
-                                .filter(|_| (period - 1200.0).abs() < 0.5)
-                                .map(|(num, den, _)| format!("{num}/{den}"))
-                                .unwrap_or_default(),
-                        )
-                    })
-                    .collect(),
-            ),
+            list(|degree| Value::String(degree.ratio.clone())),
         ),
     ]
+}
+
+/// The root's name (`SEQ.tp-tuning-root`, `tuning.root`).
+pub(crate) fn tuning_root_label(tuning: &sequencer::scale::TrackTuning) -> &'static str {
+    TUNING_ROOT_NAMES[usize::from(tuning.root % 12)]
 }
 
 pub(crate) fn build_tuning_root_options() -> Value {
@@ -1813,11 +1875,41 @@ pub(crate) fn accum_mode_label(mode: u32) -> &'static str {
 
 pub(crate) fn selected_accumulator_name(app: &app::App, track: usize) -> String {
     let tp = &app.state.pattern.track_params[track];
-    if let Some(name) = tp.script_accumulator_name() {
-        return name;
-    }
-    build_accumulator_names(app)
-        .get(tp.get_accumulator_idx())
-        .cloned()
+    selected_accumulator_name_in(tp, &build_accumulator_names(app))
+}
+
+/// The accumulator `tp` runs, by name, among `names` ([`build_accumulator_names`]).
+pub(crate) fn selected_accumulator_name_in(
+    tp: &sequencer::sequencer::TrackParams,
+    names: &[String],
+) -> String {
+    accumulator_name(
+        tp.get_accumulator_idx(),
+        tp.script_accumulator_name(),
+        names,
+    )
+}
+
+/// The name of accumulator `idx` among `names`, or `script` (the script
+/// accumulator's name) when the track runs one.
+pub(crate) fn accumulator_name(idx: usize, script: Option<String>, names: &[String]) -> String {
+    script
+        .or_else(|| names.get(idx).cloned())
         .unwrap_or_else(|| "Off".to_string())
+}
+
+/// The voice-priority labels, by `VoicePriority` index (`SEQ.tp-voice-priority`,
+/// `track.voice-priority`, `voice-priority-options`).
+pub(crate) const VOICE_PRIORITY_LABELS: [&str; 3] = ["Last", "High", "Low"];
+
+/// The mono-trigger labels, by `MonoTrigger` index (`SEQ.tp-mono-trigger`,
+/// `track.mono-trigger`, `mono-trigger-options`).
+pub(crate) const MONO_TRIGGER_LABELS: [&str; 2] = ["retrig", "legato"];
+
+pub(crate) fn voice_priority_label(priority: sequencer::sequencer::VoicePriority) -> &'static str {
+    VOICE_PRIORITY_LABELS[priority as usize]
+}
+
+pub(crate) fn mono_trigger_label(trigger: sequencer::sequencer::MonoTrigger) -> &'static str {
+    MONO_TRIGGER_LABELS[trigger as usize]
 }

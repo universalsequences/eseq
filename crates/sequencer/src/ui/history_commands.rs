@@ -408,6 +408,52 @@ fn absolute_as_toggle(
     (current != on).then_some(toggle)
 }
 
+/// A Slice 3 op's payload with a numeric `value` (`{op, track?, value}`),
+/// as `slice3-history-action` takes it. Shared by the track-param natives
+/// and the host kinds' track settings.
+pub(crate) fn slice3_numeric_payload(
+    op: &str,
+    track: Option<usize>,
+    value: f64,
+) -> std::collections::HashMap<String, Rc<RefCell<Value>>> {
+    let cell = |value| Rc::new(RefCell::new(value));
+    let mut payload = std::collections::HashMap::new();
+    payload.insert("op".to_string(), cell(Value::Keyword(op.to_string())));
+    if let Some(track) = track {
+        payload.insert("track".to_string(), cell(Value::Number(track as f64)));
+    }
+    payload.insert("value".to_string(), cell(Value::Number(value)));
+    payload
+}
+
+/// The index of the accumulator `label` names among `names`
+/// ([`build_accumulator_names`]), case-insensitively.
+pub(crate) fn accumulator_index(names: &[String], label: &str) -> Option<usize> {
+    names
+        .iter()
+        .position(|name| name.eq_ignore_ascii_case(label))
+}
+
+/// The Slice 3 `accumulator` op choosing accumulator `idx` of `names`
+/// ([`build_accumulator_names`]) on `track`: a built-in one resets the limit
+/// to its default, a script one is named. Shared by `seq-set-accumulator`
+/// and the host kinds' `track.accumulator`.
+pub(crate) fn accumulator_edit_payload(
+    track: usize,
+    idx: usize,
+    names: &[String],
+) -> std::collections::HashMap<String, Rc<RefCell<Value>>> {
+    let cell = |value| Rc::new(RefCell::new(value));
+    let mut payload = slice3_numeric_payload("accumulator", Some(track), idx as f64);
+    if idx < BUILTIN_ACCUMULATOR_NAMES.len() {
+        let limit = builtin_accumulator_default_limit(idx) as f64;
+        payload.insert("default-limit".to_string(), cell(Value::Number(limit)));
+    } else if let Some(name) = names.get(idx) {
+        payload.insert("script-name".to_string(), cell(Value::String(name.clone())));
+    }
+    payload
+}
+
 pub(super) fn apply_slice3_history_host_command(
     app: &mut app::App,
     payload: &Value,
@@ -446,7 +492,7 @@ pub(super) fn apply_slice3_history_host_command(
 
 /// Builds the app command for one Slice 3 op against one track (or none for
 /// the global ops). Shared by the single-track path and the multi-track batch.
-fn slice3_command(
+pub(super) fn slice3_command(
     map: &std::collections::HashMap<String, Rc<RefCell<Value>>>,
     op: &str,
     track: Option<usize>,
@@ -628,12 +674,40 @@ pub(super) fn apply_track_tuning_host_command(
     app: &mut app::App,
     payload: &Value,
 ) -> Result<(app::edit::EditOutcome, Option<usize>), String> {
-    use sequencer::scale::{self, TuningMode, MAX_SCALE_DEGREES};
     let Value::Map(map) = payload else {
         return Err("Scale edit payload was invalid".to_string());
     };
+    let track =
+        map_usize(map, "track").ok_or_else(|| "Scale edit track was invalid".to_string())?;
+    if map_string(map, "op").as_deref() == Some("import-scl") {
+        let params = app
+            .state
+            .pattern
+            .track_params
+            .get(track)
+            .ok_or_else(|| format!("Scale edit track {track} does not exist"))?;
+        let (scale_idx, current) = (params.get_fts_scale(), params.tuning());
+        return import_scala_scale(app, track, scale_idx, &current);
+    }
+    let Some(command) = track_tuning_command(app, track, map)? else {
+        return Ok((app::edit::EditOutcome::NoOp, Some(track)));
+    };
+    app::try_apply_command(app, command)
+        .map(|outcome| (outcome, Some(track)))
+        .map_err(|error| format!("could not apply scale edit: {error:?}"))
+}
+
+/// The `SetTrackTuning` one scale-editor edit (`{op, value?, label?,
+/// degree?}`, any op but `import-scl`) makes against `track`'s current
+/// tuning; `None` when it changes nothing. Shared by the scale editor and
+/// the host kinds' `set-tuning`.
+pub(super) fn track_tuning_command(
+    app: &app::App,
+    track: usize,
+    map: &std::collections::HashMap<String, Rc<RefCell<Value>>>,
+) -> Result<Option<app::AppCommand>, String> {
+    use sequencer::scale::{self, TuningMode, MAX_SCALE_DEGREES};
     let op = map_string(map, "op").ok_or_else(|| "Scale edit operation was missing".to_string())?;
-    let track = map_usize(map, "track").ok_or_else(|| "Scale edit track was invalid".to_string())?;
     let params = app
         .state
         .pattern
@@ -652,9 +726,6 @@ pub(super) fn apply_track_tuning_host_command(
             .ok_or_else(|| "Scale edit degree was invalid".to_string())
     };
     let label = map_string(map, "label");
-    if op == "import-scl" {
-        return import_scala_scale(app, track, scale_idx, &current);
-    }
     let mut tuning = current.clone();
     let edit = match op.as_str() {
         "root" => {
@@ -720,14 +791,14 @@ pub(super) fn apply_track_tuning_host_command(
         _ => return Err(format!("unknown scale edit operation {op}")),
     };
     if tuning == current {
-        return Ok((app::edit::EditOutcome::NoOp, Some(track)));
+        return Ok(None);
     }
-    app::try_apply_command(
-        app,
-        app::AppCommand::SetTrackTuning { track, tuning: Box::new(tuning), scale_idx: None, edit },
-    )
-    .map(|outcome| (outcome, Some(track)))
-    .map_err(|error| format!("could not apply scale edit: {error:?}"))
+    Ok(Some(app::AppCommand::SetTrackTuning {
+        track,
+        tuning: Box::new(tuning),
+        scale_idx: None,
+        edit,
+    }))
 }
 
 /// Scale editor `.scl…`: pick a Scala file and make it the track's scale.

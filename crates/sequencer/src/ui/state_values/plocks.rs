@@ -1275,8 +1275,17 @@ pub(crate) fn build_track_plock_variants_value_with_preview(
     Value::List(items)
 }
 
-pub(super) fn build_track_output_label(app: &app::App, tp: &sequencer::sequencer::TrackParams) -> Value {
-    let label = match tp.output() {
+pub(super) fn build_track_output_label(
+    app: &app::App,
+    tp: &sequencer::sequencer::TrackParams,
+) -> Value {
+    Value::String(track_output_label(app, tp))
+}
+
+/// Where a track's audio goes, as the output dropdown names it
+/// (`SEQ.tp-output`, `SEQ.track-outputs`, `track.output`).
+pub(crate) fn track_output_label(app: &app::App, tp: &sequencer::sequencer::TrackParams) -> String {
+    match tp.output() {
         sequencer::sequencer::TrackOutput::Mix => "main".to_string(),
         sequencer::sequencer::TrackOutput::None => "sends only".to_string(),
         sequencer::sequencer::TrackOutput::Bus(id) => app
@@ -1285,22 +1294,62 @@ pub(super) fn build_track_output_label(app: &app::App, tp: &sequencer::sequencer
             .find(|bus| bus.id == id)
             .map(|bus| bus.name.clone())
             .unwrap_or_else(|| "main".to_string()),
-    };
-    Value::String(label)
+    }
+}
+
+/// The output dropdown's choices: main, sends only, then every bus but the
+/// main mix (`SEQ.track-output-options`, `track.output-options`).
+pub(crate) fn track_output_options(app: &app::App) -> Vec<String> {
+    let buses = app
+        .buses
+        .iter()
+        .filter(|bus| bus.id != sequencer::sequencer::BusId::MIX)
+        .map(|bus| bus.name.clone());
+    ["main".to_string(), "sends only".to_string()]
+        .into_iter()
+        .chain(buses)
+        .collect()
+}
+
+/// The output a dropdown label names ([`track_output_options`]), resolved
+/// against the current buses; `None` for an unknown label.
+pub(crate) fn track_output_named(
+    app: &app::App,
+    label: &str,
+) -> Option<sequencer::sequencer::TrackOutput> {
+    match label {
+        "main" => Some(sequencer::sequencer::TrackOutput::Mix),
+        "sends only" => Some(sequencer::sequencer::TrackOutput::None),
+        _ => app
+            .buses
+            .iter()
+            .filter(|bus| bus.id != sequencer::sequencer::BusId::MIX)
+            .find(|bus| bus.name == label)
+            .map(|bus| sequencer::sequencer::TrackOutput::Bus(bus.id)),
+    }
+}
+
+/// The output that sends a track to bus `bus` (the main mix bus is
+/// `Mix`), or to its sends only for `None`; `None` for a bus that does not
+/// exist. The host kinds' `track.output` setter resolves its bus with it.
+pub(crate) fn track_output_for_bus(
+    app: &app::App,
+    bus: Option<sequencer::sequencer::BusId>,
+) -> Option<sequencer::sequencer::TrackOutput> {
+    use sequencer::sequencer::{BusId, TrackOutput};
+    match bus {
+        None => Some(TrackOutput::None),
+        Some(BusId::MIX) => Some(TrackOutput::Mix),
+        Some(bus) => app
+            .buses
+            .iter()
+            .any(|known| known.id == bus)
+            .then_some(TrackOutput::Bus(bus)),
+    }
 }
 
 pub(crate) fn build_track_output_options(app: &app::App) -> Value {
-    let mut labels = vec![
-        Rc::new(RefCell::new(Value::String("main".to_string()))),
-        Rc::new(RefCell::new(Value::String("sends only".to_string()))),
-    ];
-    labels.extend(
-        app.buses
-            .iter()
-            .filter(|bus| bus.id != sequencer::sequencer::BusId::MIX)
-            .map(|bus| Rc::new(RefCell::new(Value::String(bus.name.clone())))),
-    );
-    Value::List(labels)
+    list_value(track_output_options(app).into_iter().map(Value::String))
 }
 
 pub(super) fn build_track_bus_sends(app: &app::App, _tp: &sequencer::sequencer::TrackParams) -> Value {

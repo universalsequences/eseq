@@ -1,3 +1,4 @@
+use super::track_settings::{bar_transpose_applied, slice3_edit_applied};
 use crate::*;
 
 pub(super) const COMMANDS: &[&str] = &[
@@ -982,25 +983,7 @@ pub(super) fn handle(
             apply_slice3_history_host_command(&mut app, &payload)
         } {
             Ok((app::edit::EditOutcome::Applied(result), track)) => {
-                *auto_follow_override_until.lock().unwrap() =
-                    Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
-                match (track, slice3_track_mixer_invalidation(&payload)) {
-                    (Some(track), Some(change)) => {
-                        ui_invalidations.push(UiInvalidation::TrackMixer { track, change });
-                    }
-                    (track, None) => {
-                        if let Some(track) = track {
-                            ui_invalidations.push(UiInvalidation::Pattern(
-                                PatternInvalidation::WholeTrack { track },
-                            ));
-                        }
-                        ui_epoch.fetch_add(1, Ordering::Relaxed);
-                    }
-                    (None, Some(_)) => {
-                        ui_epoch.fetch_add(1, Ordering::Relaxed);
-                    }
-                }
-                editor.show_transient_message(result.label);
+                slice3_edit_applied(editor, ctx, &payload, track, Some(result.label));
             }
             Ok((app::edit::EditOutcome::NoOp, _)) => {}
             Ok((app::edit::EditOutcome::AppliedUnrecorded, _)) => {
@@ -1094,14 +1077,7 @@ pub(super) fn handle(
             let track = track as usize;
             let bar = bar as usize;
             match app::edit::apply_bar_transpose_edit(&mut app, track, bar, value as f32) {
-                Ok(app::edit::EditOutcome::Applied(_)) => {
-                    for viewport in ctx.shared.expanded_step_projection.viewports_for_track(track) {
-                        ui_invalidations.push(UiInvalidation::ExpandedStepViewport {
-                            track,
-                            track_id: viewport.track_id,
-                        });
-                    }
-                }
+                Ok(app::edit::EditOutcome::Applied(_)) => bar_transpose_applied(ctx, track),
                 Ok(_) => {}
                 Err(error) => editor.handle_host_event(HostEvent::Error(format!(
                     "Bar transpose edit failed: {error:?}"

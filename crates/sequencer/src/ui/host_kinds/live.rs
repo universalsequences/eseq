@@ -38,12 +38,27 @@ pub(crate) struct KindsShared {
     /// for their observed fields, for tests.
     pub(crate) plock_scans: u64,
     pub(crate) param_queries: u64,
+    /// Tracks whose settings, and tunings whose scale, were pushed (they
+    /// changed), for tests.
+    pub(crate) settings_pushes: u64,
+    pub(crate) tuning_pushes: u64,
     /// The macro engine's override layer, copied by the tick when it
     /// changes (`param.value` shows an engaged macro's value).
     pub(super) macro_overrides: HashMap<sequencer::macro_engine::MacroParamKey, f32>,
     /// Effect chain slots per track position (the length of its
     /// `app.graph.effect_descriptors` row), for `step.plocked`.
     pub(super) effect_slots: Vec<usize>,
+    /// The mod port levels (`t.mod-in-1`, `t.mod-out-level`, `b.mod-in-1`,
+    /// …), copied by the tick from its meter cache when they change.
+    mod_ports: ModPortLevels,
+    /// Whether the audio-overload warning shows (`engine.overloaded`).
+    overloaded: bool,
+    /// The bus ids by bus position, as of the last model sync (the mod
+    /// port levels are by bus id).
+    pub(super) bus_ids: Vec<u64>,
+    /// Each route instance's connection (track positions), as of the last
+    /// model sync (`route.selected`).
+    pub(super) routes: HashMap<InstanceId, sequencer::sequencer::ModConnection>,
 }
 
 impl KindsShared {
@@ -59,6 +74,10 @@ impl KindsShared {
         self.master_peaks = meters.master;
         self.cpu_load = meters.cpu_load;
         self.solo = Some(app.solo_audibility());
+        if &self.mod_ports != meters.mod_ports {
+            self.mod_ports.clone_from(meters.mod_ports);
+        }
+        self.overloaded = meters.overloaded;
         let overrides = app.macro_engine.overrides();
         if &self.macro_overrides != overrides {
             self.macro_overrides.clone_from(overrides);
@@ -100,6 +119,9 @@ pub(crate) struct KindsHandles {
     /// p-lock render, `has-locks`: [`KindsHandles::plock_key`]).
     pub(crate) ui_invalidations: Arc<UiInvalidationQueue>,
     pub(crate) step_print: Arc<Mutex<StepPrintState>>,
+    /// While a deadline in it lies ahead, the view does not follow the
+    /// playhead (`selection.auto-follow`).
+    pub(crate) auto_follow_override_until: Arc<Mutex<Option<Instant>>>,
 }
 
 impl KindsHandles {
@@ -120,6 +142,7 @@ impl KindsHandles {
             fx_value_epoch: shared.fx_value_epoch.clone(),
             ui_invalidations: shared.ui_invalidations.clone(),
             step_print: shared.step_print.clone(),
+            auto_follow_override_until: shared.auto_follow_override_until.clone(),
         }
     }
 
@@ -241,7 +264,32 @@ pub(super) fn live_value<S: KindStore>(
                     number(sources.playing_step(track).map_or(-1.0, |step| step as f64))
                 }
                 f::TRACK_TIMEBASE => Value::String(params.get_timebase().label().to_string()),
-                _ => return None,
+                f::TRACK_MOD_OUT_LEVEL => {
+                    let shared = shared.borrow();
+                    number(
+                        shared
+                            .mod_ports
+                            .track_outputs
+                            .get(track)
+                            .copied()
+                            .unwrap_or(0.0),
+                    )
+                }
+                f::TRACK_BAR_TRANSPOSES => {
+                    let bars =
+                        track_bar_transposes(&sources.state, track, sources.num_steps(track));
+                    list_value(bars.iter().map(|semitones| number(*semitones)))
+                }
+                f::TRACK_DELETE_TARGET => {
+                    let target = sources.active_delete_target.lock().unwrap();
+                    Value::Bool(mixer_track_delete_target_selected(target.as_ref(), track))
+                }
+                key => {
+                    let input = mod_input(&f::TRACK_MOD_IN, key)?;
+                    let shared = shared.borrow();
+                    let inputs = shared.mod_ports.track_inputs.get(track);
+                    number(inputs.map_or(0.0, |inputs| inputs[input]))
+                }
             }
         }
         STEP => {
@@ -317,10 +365,22 @@ pub(super) fn live_value<S: KindStore>(
         }
         BUS => {
             let bus = *store.key_of(id)?.first()? as usize;
+            let shared = shared.borrow();
             match key {
-                f::BUS_PEAK => number(shared.borrow().bus_peaks.get(bus).copied()?),
-                _ => return None,
+                f::BUS_PEAK => number(shared.bus_peaks.get(bus).copied()?),
+                key => {
+                    let input = mod_input(&f::BUS_MOD_IN, key)?;
+                    let bus_id = *shared.bus_ids.get(bus)?;
+                    let ports = &shared.mod_ports.bus_inputs;
+                    let inputs = ports.iter().find(|(id, _)| *id == bus_id);
+                    number(inputs.map_or(0.0, |(_, inputs)| inputs[input]))
+                }
             }
+        }
+        ROUTE => {
+            let connection = *shared.borrow().routes.get(&id)?;
+            let target = sources.active_delete_target.lock().unwrap();
+            Value::Bool(target.as_ref() == Some(&mod_route_delete_target(&connection)))
         }
         _ => match key {
             f::TRANSPORT_PLAYING => {
@@ -355,6 +415,34 @@ pub(super) fn live_value<S: KindStore>(
             f::MASTER_RECORDING => Value::Bool(sources.master_recording.load(Ordering::Relaxed)),
             f::ENGINE_CPU_LOAD => number(shared.borrow().cpu_load),
             f::ENGINE_LATENCY_MS => number(sources.state.pdc_latency_seconds() as f64 * 1000.0),
+            f::ENGINE_OVERLOADED => Value::Bool(shared.borrow().overloaded),
+            f::TRANSPORT_ROLL_RATE => {
+                let raw = sources.state.transport.roll_rate.load(Ordering::Relaxed);
+                Value::String(roll_rate_label(raw).to_string())
+            }
+            f::TRANSPORT_SEQUENCE_ROLLING => Value::Bool(
+                sources
+                    .state
+                    .transport
+                    .sequence_rolling
+                    .load(Ordering::Relaxed),
+            ),
+            f::SELECTION_AUTO_FOLLOW => {
+                Value::Bool(auto_follow_enabled(&sources.auto_follow_override_until))
+            }
+            f::SELECTION_STEPS => {
+                let steps = selection_steps(store, sources);
+                instance_list(steps.map_or_else(Vec::new, |(_, steps)| steps))
+            }
+            f::SELECTION_CURSOR_STEP | f::SELECTION_EDIT_STEP => {
+                let (cursor, edit) = selection_cursor(store, sources);
+                let step = if key == f::SELECTION_CURSOR_STEP {
+                    cursor
+                } else {
+                    edit
+                };
+                instance_or_nil(step)
+            }
             f::SELECTION_TRACK => {
                 let track = sources.current_track.load(Ordering::Relaxed) as u64;
                 instance_or_nil(store.keyed(TRACK, &[track]))
@@ -372,6 +460,87 @@ pub(super) fn live_value<S: KindStore>(
     };
     shared.borrow_mut().count(key);
     Some(value)
+}
+
+/// Which of the four mod inputs `key` is among `keys`.
+fn mod_input(keys: &[FieldKey; 4], key: FieldKey) -> Option<usize> {
+    keys.iter().position(|input| *input == key)
+}
+
+/// The bar transposes of `track`'s pattern, one per 16-step bar of its
+/// `num_steps` (at least one).
+fn track_bar_transposes(state: &SequencerState, track: usize, num_steps: usize) -> Vec<f64> {
+    (0..bar_count(num_steps))
+        .map(|bar| state.bar_transpose(track, bar) as f64)
+        .collect()
+}
+
+/// The current track's instance and its length, while it exists.
+fn current_track<S: KindStore>(store: &S, sources: &KindsHandles) -> Option<(InstanceId, usize)> {
+    let track = sources.current_track.load(Ordering::Relaxed);
+    if !sources.track_exists(track) {
+        return None;
+    }
+    let id = store.keyed(TRACK, &[track as u64])?;
+    Some((id, sources.num_steps(track)))
+}
+
+/// Step `step` of a track (instance `track`, `num_steps` long), registering
+/// the track's steps when it has none yet (spec D2).
+fn step_of<S: KindStore>(
+    store: &mut S,
+    track: InstanceId,
+    num_steps: usize,
+    step: usize,
+) -> Option<InstanceId> {
+    if step >= num_steps {
+        return None;
+    }
+    if let Some(id) = store.keyed(STEP, &[track, step as u64]) {
+        return Some(id);
+    }
+    track_steps(store, track, num_steps);
+    store.keyed(STEP, &[track, step as u64])
+}
+
+/// The current track and its selected steps (`selection.steps`), in order.
+fn selection_steps<S: KindStore>(
+    store: &mut S,
+    sources: &KindsHandles,
+) -> Option<(InstanceId, Vec<InstanceId>)> {
+    let (track, num_steps) = current_track(store, sources)?;
+    let mut selected: Vec<usize> = sources
+        .selected_steps
+        .lock()
+        .unwrap()
+        .iter()
+        .copied()
+        .collect();
+    selected.sort_unstable();
+    let steps = selected
+        .into_iter()
+        .filter_map(|step| step_of(store, track, num_steps, step))
+        .collect();
+    Some((track, steps))
+}
+
+/// `selection.cursor-step` and `selection.edit-step`: the step under the
+/// step cursor (the Lisp global the step panel moves) and the step the
+/// panel edits, on the current track ([`fx_step_cursor`]).
+fn selection_cursor<S: KindStore>(
+    store: &mut S,
+    sources: &KindsHandles,
+) -> (Option<InstanceId>, Option<InstanceId>) {
+    let Some((track, num_steps)) = current_track(store, sources) else {
+        return (None, None);
+    };
+    let cursor = fx_step_cursor_value(store.global(FX_STEP_CURSOR_GLOBAL));
+    let selected = selected_plock_step(&sources.selected_steps);
+    let (cursor, edit) = fx_step_cursor(num_steps, cursor, selected);
+    (
+        step_of(store, track, num_steps, cursor),
+        step_of(store, track, num_steps, edit),
+    )
 }
 
 /// Install the reader hook that answers by-value reads of unobserved live

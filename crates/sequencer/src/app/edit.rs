@@ -10615,10 +10615,16 @@ pub fn apply_command_beside_gesture(
     app: &mut App,
     cmd: AppCommand,
 ) -> Result<EditOutcome, EditError> {
+    apply_beside_gesture(app, |app| try_apply_command(app, cmd))
+}
+
+/// [`apply_command_beside_gesture`] for an edit `apply` makes (one that is
+/// not a single `AppCommand`, such as a bar transpose).
+pub fn apply_beside_gesture<T>(app: &mut App, apply: impl FnOnce(&mut App) -> T) -> T {
     let suspended = app.history.suspend_gesture();
     let process_lane_drag = app.process_lane_drag.take();
     let rack_groove_drag = app.rack_groove_drag.take();
-    let outcome = try_apply_command(app, cmd);
+    let outcome = apply(app);
     finish_gesture_entry(app);
     app.process_lane_drag = process_lane_drag;
     app.rack_groove_drag = rack_groove_drag;

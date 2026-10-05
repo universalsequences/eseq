@@ -1,6 +1,6 @@
 # Kind bindings
 
-Status: spec rev 3, 2026-10-04. Stages 1–6 built, stage 7 in part (§14; 7 and 7b built) (§3.1, §3.2, §3.3, §3.4, §4, §7.1, §7.3, §8, §9 notes). Bead: epic `eseq-0l17` (`bd list --label kind-bindings`).
+Status: spec rev 3, 2026-10-04. Stages 1–6 built, stage 7 in part (§14; 7, 7b and 7i built) (§3.1, §3.2, §3.3, §3.4, §4, §7.1, §7.3, §8, §9 notes). Bead: epic `eseq-0l17` (`bd list --label kind-bindings`).
 Rev 3 resolves the open questions (§12 Decisions). Rev 2 dropped the separate `defrecord` form of rev 1: host state and view state
 are declared with `def-kind`, which gains keyed and singleton kinds, a `:host`
 field group and typed fields.
@@ -345,7 +345,7 @@ Built (stage 4):
   other module is an error (`kind name 'track' is reserved for the host
   kinds of eseq.kinds; …`). The host reserves every kind in `PUBLISHED`
   (`host_kind_names`: `track step device scene bank transport selection
-  project`, and since stage 7 `send bus group master engine`, since 7b `param`) before
+  project`, and since stage 7 `send bus group master engine`, since 7b `param`, since 7i `route`) before
   evaluating the root.
 - **Schema check.** `host_kinds::PUBLISHED`
   (`crates/sequencer/src/ui/host_kinds/mod.rs`) lists every field the host
@@ -990,6 +990,9 @@ its instance and field.
    eseq-0l17.28–.35 (§14.3), which the port beads depend on.
    Built (stage 7b, eseq-0l17.28): `param` under `device`, the step
    p-lock render and send lock flags (§14.2, "Built (7b)").
+   Built (stage 7i, eseq-0l17.35): track settings, routing (`route`, bus
+   outputs, mod port levels), option constants, selection, transport and
+   engine extras (§14.2c).
 8. **Factory port**, one area at a time, each removing that area's legacy
    field names: sequencer grid and step editing; transport, scenes and
    banks; mixer; effect and instrument panels (incl. custom-ui runtime,
@@ -1058,9 +1061,12 @@ selection extras 54). View-local singleton kinds: 17. Removed: 10. Kept
   fields. `num-tracks`, `num-patterns`, `track-ids`, `bus-ids`,
   `delete-target-version` and the `*-view-generation` counters are removed:
   collections and instance identity replace them.
-- **Option lists are constants.** `fts-options`, `mute-group-options`,
-  `accum-mode-options`, `tuning-root-options`, `sync-labels` become
-  `eseq.kinds` definitions (7i).
+- **Option lists.** Lists the host owns or derives (the scales, the step
+  sync resolutions, the accumulators, the track outputs) are `project`
+  fields the host publishes (`project.fts-options`, `sync-options`,
+  `accumulator-options`, `output-options`); short fixed enums
+  (`mute-group-options`, `accum-mode-options`, `tuning-root-options`, …)
+  are `eseq.kinds` constants the schema tests hold to the host's (7i).
 - **`THEME` stays** (theme namespace, not host model state).
 
 ### 14.2 Built in stage 7
@@ -1265,6 +1271,146 @@ Built (7b):
   neural-selection display override and the rest of the panel data
   (eseq-0l17.37).
 
+### 14.2c Built in stage 7i (eseq-0l17.35)
+
+| Kind | Key | New `:host` fields (`:set` in brackets) |
+|---|---|---|
+| `track` | `(index)` | settings (Model): `poly :bool` [s], `max-polyphony :int` [s], `gate :bool` [s], `supports-mono-trigger :bool`, `voice-priority :string` [s], `mono-trigger :string` [s], `mute-group :int` (0 = none) [s], `swing :number` [s], `swing-resolution :string` [s], `fts :string` [s], `tuning tuning`, `accumulator :string` [s], `accum-mode :string` [s], `accum-limit :number` [s], `output bus` (nil: sends only) [s], `mod-output :bool`; live: `mod-out-level`, `mod-in-1` … `mod-in-4 :number` (L), `bar-transposes (list-of :number)` (L; `set-bar-transpose!`), `delete-target :bool` (L) [`seq-set-track-delete-target`] |
+| `tuning` | `(track index)`, one per track (index 0) | `track track`, `on :bool`, `scale :string`, `custom :bool`, `edited :bool`, `root :string` [t], `morph :number` (0–1) [t], `mode :string` [t], `period :number`, `degrees (list-of degree)` |
+| `degree` | `(tuning index)` | `tuning tuning`, `index :int`, `base :number`, `offset :number` (−1200–1200 cents) [t], `enabled :bool` [t], `pitch :number`, `label :string`, `ratio :string` |
+| `bus` | `(index)` | `output bus` [host command `set-bus-output`], `output-options (list-of bus)`, `mod-in-1` … `mod-in-4 :number` (L) |
+| `route` | `(index)` | `index :int`, `source track`, `dest track`, `dest-bus bus`, `input :int` (1–4), `selected :bool` (L) [`seq-set-delete-target`] |
+| `transport` | `()` | `roll-rate :string` (L) [`seq-set-roll-rate`], `sequence-rolling :bool` (L) |
+| `engine` | `()` | `overloaded :bool` (L), `compiling :bool` (compared every tick) |
+| `selection` | `()` | `steps (list-of step)` (L), `cursor-step step` (L) [host command `set-cursor-step`], `edit-step step` (L), `rack-slot :int` (−1: no rack), `auto-follow :bool` (L) |
+| `project` | `()` | `routes (list-of route)`; `(routes)`; `fts-options`, `sync-options`, `accumulator-options (list-of :string)`, `output-options (list-of bus)` |
+
+[s] = the `set-track-setting` host command; [t] = `set-tuning`. Constants in
+`eseq.kinds`: `mute-group-options` (labels by `mute-group` value),
+`accum-mode-options`, `tuning-root-options`, `tuning-mode-options`,
+`voice-priority-options`, `mono-trigger-options`,
+`swing-resolution-options`, `roll-rate-options`. Actions:
+`reset-tuning!`, `justify-tuning!`, `(randomize-tuning! tn cents)`,
+`(stretch-tuning! tn cents)`, `(set-bar-transpose! t bar v)`;
+`(mod-in-level x i)` is a binding to input `i` (1–4) of a track or bus.
+
+Built (7i):
+
+- **The value rule** (every 7i setter; the earlier stages' clamping
+  setters are unchanged). A string field takes one of its labels,
+  case-insensitively, and its current value always works (`(set! t.fts
+  t.fts)` with an edited `Major*` scale or an imported scale's name); a
+  number field takes a finite number in its range; an `:int` field an
+  integer in its range; a bool field a bool; an instance field an instance
+  of its kind (or nil where documented). Anything else is an error that
+  changes nothing: `set!` itself rejects a value of the wrong type (the
+  field's declared type), and the host rejects what is out of range or
+  unknown (no silent clamping) with a `set-track-setting: …` /
+  `set-tuning: …` error. A native setter's error (an unknown roll rate
+  label, a `mod-in-level` input outside 1–4) reaches the status line, as
+  any failing native's does (natives never raise). The roll rate's label
+  is resolved by the host (`seq-set-roll-rate` takes a label or an index).
+- **Settings are the track's own.** `poly` and `max-polyphony` are the
+  track's flag and voice count; a drum rack's voices are its slots' (the
+  legacy `tp-poly` / `tp-max-polyphony` show the selected slot's on a
+  rack: rack slot devices, eseq-0l17.36). `swing` and `swing-resolution`
+  are the base values (like `timebase`), never a step's p-lock.
+  `mute-group` is an `:int` (bindable); its label is
+  `(nth mute-group-options g)`. Picking the scale a track already plays
+  by its unedited name (`"Major"` while it shows `Major*`) changes nothing,
+  as in the dropdown.
+- **Outputs are buses.** `track.output` is the bus instance the track
+  feeds: the main mix bus for main, nil for sends only (no separate
+  flag). Its setter sends the bus's `bid` (`:bus-id`; nil for sends
+  only), resolved by `BusId` when it lands (`track_output_for_bus`), so
+  two buses with one name are never confused. `project.output-options`
+  is every bus a track may feed, in bus order (the main mix first).
+- **Scales are a sub-kind.** `t.tuning` is the track's `tuning` instance
+  (keyed (track instance id, 0), registered with the track); its
+  `degrees` are `degree` instances keyed (tuning instance id, index),
+  registered and dropped with the degree count (none while the scale is
+  off). `root`, `morph`, `mode` and a degree's `offset` and `enabled` are
+  settable fields (`set!`, `toggle!`, `#'`), each one undo entry; `morph`
+  and `offset` are continuous (a drag's `set!`s join one entry). `morph`
+  is 0–1 (the legacy `tp-tuning-morph` shows percent). Whole-scale edits
+  are the actions above. Each field is its own cell, so a morph drag
+  notifies only the readers of `morph` (and of the degree pitches, labels
+  and ratios it moves), never a view reading `root`.
+- **Feeds.** Settings are model fields: the model sync reads each track's
+  raw `TrackSettings` (`host_kinds/settings.rs`: the model values, the
+  accumulator's index and script name) and labels them only when pushing
+  (`voice_priority_label`, `mono_trigger_label` over
+  `VOICE_PRIORITY_LABELS` / `MONO_TRIGGER_LABELS`, `accumulator_name`),
+  when they changed or the accumulator list did. A track's scale is read
+  once per sync (one tuning lock) and compared with the last pushed (scale
+  index, `TrackTuning`); only a change pushes the `tuning` and `degree`
+  fields (`tuning_degrees`, which the legacy `tuning_reactive_fields`
+  shares) and the track's `fts` (`fts_label`). The track's output is
+  pushed per sync (an instance, no allocation). The project's option lists
+  are pushed when they change (the fixed `fts-options` and `sync-options`
+  once, again after a schema change). Port levels are copied from the
+  meter cache (`KindsMeters::mod_ports`, which the tick keeps polled while
+  one is observed with the mixer hidden: `HostKinds::wants_mod_levels`);
+  `bar-transposes` is compared in place with the last push per observing
+  track and rebuilt only when a bar moved; `engine.compiling`
+  (`App::compile_pending`) and `selection.rack-slot`
+  (`rack_slot_selection`, re-derived at the model sync and when the current
+  track changes) need the `App`. `selection.steps`, `cursor-step` and
+  `edit-step` are computed only when observed and the step selection, the
+  current track, its length or the step cursor (the Lisp global
+  `cursor-step`, `fx_step_cursor_value`) moved; `edit-step` is the first
+  selected step, else the cursor (`fx_step_cursor`, shared with the
+  legacy `fx-step-*` fields). Routes keep the observed ones in an
+  `ObservedList`; the route sync reads the current scene's connections
+  alone (`SequencerState::current_mod_connections`, no graph-override
+  composition). Bus output options bound their cycle walk by the bus count
+  (no allocation).
+- **Identity.** Routes are keyed by their endpoints' stable ids
+  (`RouteKey`: source `TrackId`, destination `TrackId` or `BusId`, input),
+  each key allocated a route id while the route exists (ids are never
+  reused; a key is forgotten with its route), so removing or adding another
+  route or track re-keys rather than re-registers; a project load replaces
+  them. A route naming a track the registry lacks (the scene's connection
+  list is not remapped by a track delete today) or repeating another's
+  endpoints gets no instance. Mod inputs are numbered 1–4 everywhere in
+  the kinds (`mod-in-1` … `mod-in-4`, `route.input`, `mod-in-level`), as
+  the mixer labels them (Ext1–4).
+- **Setters.** `set-track-setting` (`:track-id`, `:setting`, `:value`, or
+  `:bus-id` for `output`) and `set-tuning` (`:track-id`, `:op`, `:value`,
+  `:degree`) resolve the track by `TrackId` when they land
+  (`live_track_index`, which `DeviceSlot::resolve` shares), act only where
+  the track differs, and go through the legacy edits' history commands
+  (`slice3_command` over `slice3_numeric_payload`, `track_tuning_command`,
+  `SetTrackOutput`, `accumulator_edit_payload`) with their invalidations
+  (`slice3_edit_applied`, `track_output_applied`); an edit applied without
+  history refreshes the same way. They live in
+  `host_commands/track_settings.rs`, with `set-track-bar-transpose`
+  (`set-bar-transpose!`; the bar and semitones in range, else an error) and
+  `set-cursor-step`. `bus.output` goes through `set-bus-output` (by bus
+  ids; absolute in `set_bus_output_recorded`). Script edits follow the 7b
+  gesture rules, one helper (`host_commands::ScriptEdit`, over
+  `app::edit::apply_beside_gesture`): swing, accum limit, voices, a scale
+  morph or degree offset and bar transposes join one entry while the
+  pointer is down; anything else is its own entry.
+- **Selection setters.** `selection.cursor-step`'s setter is the host
+  command `set-cursor-step` (`:track-id`, `:step`, in range): it makes the
+  step's track current (`CurrentTrackSwitch`, which `seq-set-track`
+  shares), sets the step cursor, refreshes the step panel's `fx-step-*`
+  fields from that track's step (`sync_fx_step_cursor_binding_fields`) and
+  runs the grid's cursor hook (`sequencer-cursor-step-changed`, the
+  highlight a click moves), as a click on the step does; no history.
+  `t.delete-target` reads true while the mixer's delete target holds the
+  track (alone or among several); `(set! t.delete-target true)` makes the
+  track the target unless it already holds it, `false` takes it out (a
+  one-track target clears, a multi-track one shrinks):
+  `seq-set-track-delete-target`, so what a setter writes the field reads.
+  Route selection is the immediate `seq-set-delete-target` (clearing only
+  the route's own target).
+- **Deferred to eseq-0l17.36** (they need device instances for MIDI fx,
+  bus effects and rack slots): `SEQ.bus-effects` → `bus.devices`,
+  `SEQ.midi-effects` → `track.midi-devices`, `SEQ.rack-slot-delete-target-*`
+  → `device.delete-target`, and a rack track's slot voices.
+
 ### 14.3 Follow-up beads
 
 Each port bead depends on the beads whose rows it uses (`bd dep`).
@@ -1272,7 +1418,7 @@ Each port bead depends on the beads whose rows it uses (`bd dep`).
 | Tag | Bead | Kinds | Ports blocked |
 |---|---|---|---|
 | 7b | eseq-0l17.28 (built) | `param` under `device` (values, p-lock display, print latch), `device.playhead`, step p-lock render (`plocked`, `lock-kind`, `variant-color`), send p-lock flags | .11 .13 .14 .18 .19 .21 |
-| 7b-2 | eseq-0l17.36 | devices (and params) for MIDI fx, bus effects, rack slots | .13 .14 .19 .21 |
+| 7b-2 | eseq-0l17.36 | devices (and params) for MIDI fx, bus effects, rack slots; `bus.devices`, `track.midi-devices`, `device.delete-target` (from 7i) | .13 .14 .18 .19 .21 |
 | 7b-3 | eseq-0l17.37 | panel extras: modulation display, process mapping, tensors, base note, key locks, rack and project macros, variant chip list, neural-selection display | .14 .18 |
 | 7c | eseq-0l17.29 | `lane`, process slots and scopes, process library singleton | .11 .14 .20 |
 | 7d | eseq-0l17.30 | `song` singleton, `clip`, pattern `cell`, `track.governed` / `latched` | .11 .12 .13 .15 .17 .20 |
@@ -1280,7 +1426,7 @@ Each port bead depends on the beads whose rows it uses (`bd dep`).
 | 7f | eseq-0l17.32 | `browser`, `sound`, `editor`, `learn`, `retro`, `export`, settings and agent singletons, `track.instrument-id` | .12 .17 .18 |
 | 7g | eseq-0l17.33 | `graph-node`, neural networks, visualizations, generator marks, track events | .20 |
 | 7h | eseq-0l17.34 | rack pads, rack clips, grooves, armed rack | .11 .13 .19 |
-| 7i | eseq-0l17.35 | track settings (`tp-*`), routing (outputs, mod routes and levels), option constants, selection extras (delete targets, step cursor, auto-follow), transport/engine extras | .11 .12 .13 .14 .18 |
+| 7i | eseq-0l17.35 (built) | track settings (`tp-*`), scales (`tuning`, `degree`), routing (outputs, mod routes and levels), the project's option lists and option constants, selection extras (delete targets, step cursor, auto-follow), transport/engine extras | .11 .12 .13 .14 .18 |
 
 ### 14.4 Families
 
@@ -1565,60 +1711,60 @@ builds the field name.
 | `SEQ.rack-grooves` | 1 | drum-rack-v2 | sv/rack_groove_fields.rs | model | groove kind | .34 | .19 |
 | `SEQ.rack-pad-trigger-*` | 3 | sequencer | sv/drum_rack.rs | live | pad.triggered (live) | .34 | .11 |
 | `SEQ.track-steps` | 2 | rack-groove-buffer | sv/param_fields_and_sync.rs | model | rack member steps | .34 | .19 |
-| `SEQ.<slot-bar-transpose-field>` | 1 | sequencer | sv/expanded_step.rs | model | track.bar-transposes | .35 | .11 |
-| `SEQ.<slot-bar-transpose-set-field>` | 1 | sequencer | sv/expanded_step.rs | model | track.bar-transposes | .35 | .11 |
-| `SEQ.accum-mode-options` | 1 | effects/track-panels | sv/project_state.rs | model | constant | .35 | .14 |
-| `SEQ.accumulator-options` | 1 | effects/track-panels | sv/project_state.rs | model | track.accumulator-options | .35 | .14 |
-| `SEQ.auto-follow` | 2 | seq-core-state, sequencer | reactive_tick.rs | model | selection.auto-follow | .35 | .11 |
-| `SEQ.bus-effects` | 3 | application-menus, effects/buffers, effects/panel-widgets | event_loop.rs | model | bus.devices | .35 | .14 .18 |
-| `SEQ.bus-mod-in-level-*` | 1 | mixer | sv/meters_and_modulation.rs | live | bus.mod-in-level (live) | .35 | .13 |
-| `SEQ.bus-output-routes` | 1 | mixer | sv/track_and_mixer.rs | model | bus.output | .35 | .13 |
-| `SEQ.compiling` | 1 | effects/buffers | sv/host_commands.rs | model | engine.compiling | .35 | .14 |
-| `SEQ.cpu-overloaded` | 2 | transport | reactive_tick.rs | live | engine.overloaded | .35 | .12 |
-| `SEQ.fts-options` | 2 | effects/track-panels, effects/scale-editor | sv/project_state.rs | model | constant | .35 | .14 |
-| `SEQ.fx-step-cursor-number` | 1 | effects/track-panels | sv/param_fields_and_sync.rs | model | selection.cursor-step | .35 | .14 |
-| `SEQ.fx-step-parameter-step` | 1 | seq-core-state | sv/topology_and_visualization.rs | model | selection.cursor-step | .35 | .11 |
-| `SEQ.fx-step-selection-count` | 2 | effects/track-panels, seq-core-state | sv/param_fields_and_sync.rs | model | (len selected steps) | .35 | .11 .14 |
-| `SEQ.fx-step-value-*` | 1 | effects/track-panels | step_print.rs | model | step.‹param› of selection.cursor-step | .35 | .14 |
-| `SEQ.midi-effects` | 1 | effects/buffers | event_loop.rs | model | track.midi-devices | .35 | .14 |
-| `SEQ.mixer-track-delete-target-*` | 1 | mixer | sv/steps_and_pattern.rs | model | track.delete-target | .35 | .13 |
-| `SEQ.mod-in-level-*` | 1 | mixer | sv/meters_and_modulation.rs | live | track.mod-in-level (live) | .35 | .13 |
-| `SEQ.mod-out-level-*` | 1 | mixer | sv/meters_and_modulation.rs | live | track.mod-out-level (live) | .35 | .13 |
-| `SEQ.mod-routes` | 6 | mixer | reactive_sync.rs | model | route kind | .35 | .13 |
-| `SEQ.mute-group-options` | 1 | effects/track-panels | sv/project_state.rs | model | constant | .35 | .14 |
-| `SEQ.rack-slot-delete-target-*` | 1 | effects/instrument-panel | sv/steps_and_pattern.rs | model | device.delete-target | .35 | .14 |
-| `SEQ.roll-rate` | 1 | transport | reactive_tick.rs | live | transport.roll-rate | .35 | .12 |
-| `SEQ.selected-mod-routes` | 2 | mixer | sv/steps_and_pattern.rs | model | route.selected | .35 | .13 |
-| `SEQ.sequence-rolling` | 1 | transport | reactive_tick.rs | live | transport.sequence-rolling | .35 | .12 |
-| `SEQ.sync-labels` | 8 | sequencer, step-grid, seqv-track-params +1 | natives.rs | model | eseq.kinds constant | .35 | .11 |
-| `SEQ.tp-accum-limit` | 1 | effects/track-panels | sv/project_state.rs | model | track.accum-limit | .35 | .14 |
-| `SEQ.tp-accum-mode` | 1 | effects/track-panels | sv/project_state.rs | model | track.accum-mode | .35 | .14 |
-| `SEQ.tp-accumulator` | 1 | effects/track-panels | sv/project_state.rs | model | track.accumulator | .35 | .14 |
-| `SEQ.tp-fts` | 2 | effects/track-panels, effects/scale-editor | sv/project_state.rs | model | track.fts | .35 | .14 |
-| `SEQ.tp-gate` | 4 | effects/sampler-panel | sv/project_state.rs | model | track.gate | .35 | .14 |
-| `SEQ.tp-max-polyphony` | 2 | mixer, effects/track-panels | host_commands/rack.rs | model | track.max-polyphony | .35 | .13 .14 |
-| `SEQ.tp-mono-trigger` | 1 | effects/track-panels | sv/project_state.rs | model | track.mono-trigger | .35 | .14 |
-| `SEQ.tp-mute-group` | 1 | effects/track-panels | sv/project_state.rs | model | track.mute-group | .35 | .14 |
-| `SEQ.tp-poly` | 12 | effects/track-panels, mixer, effects/instrument-panel | sv/project_state.rs | model | track.poly | .35 | .13 .14 |
-| `SEQ.tp-rack-slot-idx` | 5 | effects/track-panels, mixer | sv/project_state.rs | model | selection.rack-slot | .35 | .13 .14 |
-| `SEQ.tp-supports-mono-trigger` | 2 | effects/track-panels | sv/project_state.rs | model | track.supports-mono-trigger | .35 | .14 |
-| `SEQ.tp-swing` | 2 | effects/track-panels | sv/project_state.rs | model | track.swing | .35 | .14 |
-| `SEQ.tp-swing-resolution` | 1 | effects/track-panels | sv/project_state.rs | model | track.swing-resolution | .35 | .14 |
-| `SEQ.tp-tuning-base` | 1 | effects/scale-editor | sv/param_fields_and_sync.rs | model | track.tuning | .35 | .14 |
-| `SEQ.tp-tuning-enabled` | 1 | effects/scale-editor | sv/param_fields_and_sync.rs | model | track.tuning | .35 | .14 |
-| `SEQ.tp-tuning-labels` | 1 | effects/scale-editor | sv/param_fields_and_sync.rs | model | track.tuning | .35 | .14 |
-| `SEQ.tp-tuning-mode` | 4 | effects/scale-editor | sv/param_fields_and_sync.rs | model | track.tuning | .35 | .14 |
-| `SEQ.tp-tuning-morph` | 1 | effects/scale-editor | sv/param_fields_and_sync.rs | model | track.tuning | .35 | .14 |
-| `SEQ.tp-tuning-offsets` | 1 | effects/scale-editor | sv/param_fields_and_sync.rs | model | track.tuning | .35 | .14 |
-| `SEQ.tp-tuning-on` | 1 | effects/scale-editor | sv/param_fields_and_sync.rs | model | track.tuning | .35 | .14 |
-| `SEQ.tp-tuning-period` | 1 | effects/scale-editor | sv/param_fields_and_sync.rs | model | track.tuning | .35 | .14 |
-| `SEQ.tp-tuning-pitches` | 1 | effects/scale-editor | sv/param_fields_and_sync.rs | model | track.tuning | .35 | .14 |
-| `SEQ.tp-tuning-root` | 1 | effects/scale-editor | sv/param_fields_and_sync.rs | model | track.tuning | .35 | .14 |
-| `SEQ.tp-voice-priority` | 1 | effects/track-panels | sv/project_state.rs | model | track.voice-priority | .35 | .14 |
-| `SEQ.track-mod-output-available` | 2 | mixer | sv/track_and_mixer.rs | model | track.mod-output | .35 | .13 |
-| `SEQ.track-output-options` | 1 | mixer | host_commands/routing.rs | model | track.output-options | .35 | .13 |
-| `SEQ.track-outputs` | 1 | mixer | sv/track_and_mixer.rs | model | track.output | .35 | .13 |
-| `SEQ.tuning-root-options` | 1 | effects/scale-editor | sv/project_state.rs | model | constant | .35 | .14 |
+| `SEQ.<slot-bar-transpose-field>` | 1 | sequencer | sv/expanded_step.rs | model | track.bar-transposes | built (.35) | .11 |
+| `SEQ.<slot-bar-transpose-set-field>` | 1 | sequencer | sv/expanded_step.rs | model | track.bar-transposes (≠ 0; `set-bar-transpose!`) | built (.35) | .11 |
+| `SEQ.accum-mode-options` | 1 | effects/track-panels | sv/project_state.rs | model | constant | built (.35) | .14 |
+| `SEQ.accumulator-options` | 1 | effects/track-panels | sv/project_state.rs | model | project.accumulator-options | built (.35) | .14 |
+| `SEQ.auto-follow` | 2 | seq-core-state, sequencer | reactive_tick.rs | model | selection.auto-follow | built (.35) | .11 |
+| `SEQ.bus-effects` | 3 | application-menus, effects/buffers, effects/panel-widgets | event_loop.rs | model | bus.devices | .36 | .14 .18 |
+| `SEQ.bus-mod-in-level-*` | 1 | mixer | sv/meters_and_modulation.rs | live | bus.mod-in-1 … -4 (live; `(mod-in-level b i)`) | built (.35) | .13 |
+| `SEQ.bus-output-routes` | 1 | mixer | sv/track_and_mixer.rs | model | bus.output, bus.output-options | built (.35) | .13 |
+| `SEQ.compiling` | 1 | effects/buffers | sv/host_commands.rs | model | engine.compiling | built (.35) | .14 |
+| `SEQ.cpu-overloaded` | 2 | transport | reactive_tick.rs | live | engine.overloaded | built (.35) | .12 |
+| `SEQ.fts-options` | 2 | effects/track-panels, effects/scale-editor | sv/project_state.rs | model | project.fts-options | built (.35) | .14 |
+| `SEQ.fx-step-cursor-number` | 1 | effects/track-panels | sv/param_fields_and_sync.rs | model | selection.cursor-step (index + 1) | built (.35) | .14 |
+| `SEQ.fx-step-parameter-step` | 1 | seq-core-state | sv/topology_and_visualization.rs | model | selection.edit-step | built (.35) | .11 |
+| `SEQ.fx-step-selection-count` | 2 | effects/track-panels, seq-core-state | sv/param_fields_and_sync.rs | model | (len selection.steps) | built (.35) | .11 .14 |
+| `SEQ.fx-step-value-*` | 1 | effects/track-panels | step_print.rs | model | step.‹param› of selection.edit-step | built (.35) | .14 |
+| `SEQ.midi-effects` | 1 | effects/buffers | event_loop.rs | model | track.midi-devices | .36 | .14 |
+| `SEQ.mixer-track-delete-target-*` | 1 | mixer | sv/steps_and_pattern.rs | model | track.delete-target | built (.35) | .13 |
+| `SEQ.mod-in-level-*` | 1 | mixer | sv/meters_and_modulation.rs | live | track.mod-in-1 … -4 (live; `(mod-in-level t i)`) | built (.35) | .13 |
+| `SEQ.mod-out-level-*` | 1 | mixer | sv/meters_and_modulation.rs | live | track.mod-out-level (live) | built (.35) | .13 |
+| `SEQ.mod-routes` | 6 | mixer | reactive_sync.rs | model | route kind, `(routes)` | built (.35) | .13 |
+| `SEQ.mute-group-options` | 1 | effects/track-panels | sv/project_state.rs | model | constant | built (.35) | .14 |
+| `SEQ.rack-slot-delete-target-*` | 1 | effects/instrument-panel | sv/steps_and_pattern.rs | model | device.delete-target | .36 | .14 |
+| `SEQ.roll-rate` | 1 | transport | reactive_tick.rs | live | transport.roll-rate | built (.35) | .12 |
+| `SEQ.selected-mod-routes` | 2 | mixer | sv/steps_and_pattern.rs | model | route.selected | built (.35) | .13 |
+| `SEQ.sequence-rolling` | 1 | transport | reactive_tick.rs | live | transport.sequence-rolling | built (.35) | .12 |
+| `SEQ.sync-labels` | 8 | sequencer, step-grid, seqv-track-params +1 | natives.rs | model | project.sync-options | built (.35) | .11 |
+| `SEQ.tp-accum-limit` | 1 | effects/track-panels | sv/project_state.rs | model | track.accum-limit | built (.35) | .14 |
+| `SEQ.tp-accum-mode` | 1 | effects/track-panels | sv/project_state.rs | model | track.accum-mode | built (.35) | .14 |
+| `SEQ.tp-accumulator` | 1 | effects/track-panels | sv/project_state.rs | model | track.accumulator | built (.35) | .14 |
+| `SEQ.tp-fts` | 2 | effects/track-panels, effects/scale-editor | sv/project_state.rs | model | track.fts | built (.35) | .14 |
+| `SEQ.tp-gate` | 4 | effects/sampler-panel | sv/project_state.rs | model | track.gate | built (.35) | .14 |
+| `SEQ.tp-max-polyphony` | 2 | mixer, effects/track-panels | host_commands/rack.rs | model | track.max-polyphony (the track's own; a rack slot's: .36) | built (.35) | .13 .14 |
+| `SEQ.tp-mono-trigger` | 1 | effects/track-panels | sv/project_state.rs | model | track.mono-trigger | built (.35) | .14 |
+| `SEQ.tp-mute-group` | 1 | effects/track-panels | sv/project_state.rs | model | track.mute-group (`:int`; label `(nth mute-group-options g)`) | built (.35) | .14 |
+| `SEQ.tp-poly` | 12 | effects/track-panels, mixer, effects/instrument-panel | sv/project_state.rs | model | track.poly (the track's own; a rack slot's: .36) | built (.35) | .13 .14 |
+| `SEQ.tp-rack-slot-idx` | 5 | effects/track-panels, mixer | sv/project_state.rs | model | selection.rack-slot (-1: no rack) | built (.35) | .13 .14 |
+| `SEQ.tp-supports-mono-trigger` | 2 | effects/track-panels | sv/project_state.rs | model | track.supports-mono-trigger | built (.35) | .14 |
+| `SEQ.tp-swing` | 2 | effects/track-panels | sv/project_state.rs | model | track.swing | built (.35) | .14 |
+| `SEQ.tp-swing-resolution` | 1 | effects/track-panels | sv/project_state.rs | model | track.swing-resolution | built (.35) | .14 |
+| `SEQ.tp-tuning-base` | 1 | effects/scale-editor | sv/param_fields_and_sync.rs | model | degree.base of track.tuning.degrees | built (.35) | .14 |
+| `SEQ.tp-tuning-enabled` | 1 | effects/scale-editor | sv/param_fields_and_sync.rs | model | degree.enabled [s] of track.tuning.degrees | built (.35) | .14 |
+| `SEQ.tp-tuning-labels` | 1 | effects/scale-editor | sv/param_fields_and_sync.rs | model | degree.label of track.tuning.degrees | built (.35) | .14 |
+| `SEQ.tp-tuning-mode` | 4 | effects/scale-editor | sv/param_fields_and_sync.rs | model | tuning.mode (`set!`) | built (.35) | .14 |
+| `SEQ.tp-tuning-morph` | 1 | effects/scale-editor | sv/param_fields_and_sync.rs | model | tuning.morph (`set!`; 0-1; the legacy field is percent) | built (.35) | .14 |
+| `SEQ.tp-tuning-offsets` | 1 | effects/scale-editor | sv/param_fields_and_sync.rs | model | degree.offset (`set!`) | built (.35) | .14 |
+| `SEQ.tp-tuning-on` | 1 | effects/scale-editor | sv/param_fields_and_sync.rs | model | tuning.on | built (.35) | .14 |
+| `SEQ.tp-tuning-period` | 1 | effects/scale-editor | sv/param_fields_and_sync.rs | model | tuning.period | built (.35) | .14 |
+| `SEQ.tp-tuning-pitches` | 1 | effects/scale-editor | sv/param_fields_and_sync.rs | model | degree.pitch of track.tuning.degrees | built (.35) | .14 |
+| `SEQ.tp-tuning-root` | 1 | effects/scale-editor | sv/param_fields_and_sync.rs | model | tuning.root (`set!`) | built (.35) | .14 |
+| `SEQ.tp-voice-priority` | 1 | effects/track-panels | sv/project_state.rs | model | track.voice-priority | built (.35) | .14 |
+| `SEQ.track-mod-output-available` | 2 | mixer | sv/track_and_mixer.rs | model | track.mod-output | built (.35) | .13 |
+| `SEQ.track-output-options` | 1 | mixer | host_commands/routing.rs | model | project.output-options (bus instances; nil is sends only) | built (.35) | .13 |
+| `SEQ.track-outputs` | 1 | mixer | sv/track_and_mixer.rs | model | track.output (a bus; nil is sends only) | built (.35) | .13 |
+| `SEQ.tuning-root-options` | 1 | effects/scale-editor | sv/project_state.rs | model | constant | built (.35) | .14 |
 | `SEQV.<adsr-stage-active-field>` | 1 | effects/custom-ui-sections | Lisp (reactive-set) | Lisp-owned | custom-ui view state | view-local | .14 |
 | `SEQV.<channel>` | 20 | arrangement | Lisp (reactive-set) | Lisp-owned | arrangement view singleton (arr-*) | view-local | .15 |
 | `SEQV.<cursor-highlight-field>` | 1 | sequencer | Lisp (reactive-set) | Lisp-owned | sequencer view singleton (cursor) | view-local | .11 |
@@ -1652,7 +1798,7 @@ builds the field name.
 | `THEME.scene_clip_bg` | 1 | arrangement | - | model | THEME stays (theme namespace, not host state) | keep | .15 |
 | `GRAPH` via `bind-graph` / `bind-graph-config` (103 calls) | 103 | scripts/sequencers/graph-*, packages/alez.neural | lisp_host/eseq/graph_authoring.rs | model | graph-node.‹field› | .33 | .20 |
 | `reactive-set "GRAPH"` (52 writes) | 52 | scripts/sequencers/graph-* | Lisp | Lisp-owned | graph-node :set | .33 | .20 |
-| `reactive-set "SEQ" "fx-step-*"` (8 writes) | 8 | seq-core-state | Lisp | Lisp-owned | selection.cursor-step / step.‹param› | .35 | .11 |
+| `reactive-set "SEQ" "fx-step-*"` (8 writes) | 8 | seq-core-state | Lisp | Lisp-owned | selection.cursor-step (`:set`) / step.‹param› | built (.35) | .11 |
 
 ## Appendix A. Target example (abridged)
 

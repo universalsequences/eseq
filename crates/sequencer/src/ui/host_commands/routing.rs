@@ -40,6 +40,44 @@ fn set_track_send_base(
     app::apply_command(app, app::AppCommand::SetTrackSends { track, sends });
 }
 
+/// After a track's output changed (`set-track-output`, the host kinds'
+/// `track.output`): refresh the mixer, and the track panel when it is the
+/// current track.
+pub(super) fn track_output_applied(
+    app: &app::App,
+    editor: &mut Editor,
+    ctx: &LoopCtx<'_>,
+    track: usize,
+) {
+    let shared = ctx.shared;
+    let rt = editor.runtime_mut();
+    sync_track_mixer_state(rt, app, &shared.state);
+    if track == shared.current_track.load(Ordering::Relaxed) {
+        let selected_neural_snapshot = shared.selected_neural_neurons.lock().unwrap().clone();
+        let selected_steps = &shared.selected_steps;
+        let neural = Some(&selected_neural_snapshot);
+        sync_track_params_with_neural_selection(
+            rt,
+            app,
+            &shared.state,
+            track,
+            selected_steps,
+            neural,
+        );
+        sync_fx_param_binding_fields_with_neural_selection(
+            rt,
+            app,
+            &shared.state,
+            track,
+            selected_steps,
+            neural,
+        );
+    }
+    rt.run_reactive_cycle();
+    editor.refresh_runtime_side_effects();
+    shared.ui_epoch.fetch_add(1, Ordering::Relaxed);
+}
+
 #[allow(clippy::too_many_lines)]
 pub(super) fn handle(
     name: &str,
@@ -51,7 +89,6 @@ pub(super) fn handle(
     let state = ctx.shared.state.clone();
     let current_track = ctx.shared.current_track.clone();
     let selected_steps = ctx.shared.selected_steps.clone();
-    let selected_neural_neurons = ctx.shared.selected_neural_neurons.clone();
     let ui_epoch = ctx.shared.ui_epoch.clone();
     let fx_epoch = ctx.shared.fx_epoch.clone();
     let ui_invalidations = ctx.shared.ui_invalidations.clone();
@@ -84,51 +121,19 @@ pub(super) fn handle(
                         Value::Number(n) => Some(*n as usize),
                         _ => None,
                     });
-                if let Some(label) = label {
-                    let track = payload_track
-                        .unwrap_or_else(|| current_track.load(Ordering::Relaxed));
-                    let output = if label == "main" {
-                        Some(TrackOutput::Mix)
-                    } else if label == "sends only" {
-                        Some(TrackOutput::None)
-                    } else {
-                        app.buses
-                            .iter()
-                            .filter(|bus| bus.id != sequencer::sequencer::BusId::MIX)
-                            .find(|bus| bus.name == label)
-                            .map(|bus| TrackOutput::Bus(bus.id))
-                    };
-                    if let Some(output) = output {
-                        app::apply_command(
-                            &mut app,
-                            app::AppCommand::SetTrackOutput { track, output },
-                        );
-                        let rt = editor.runtime_mut();
-                        sync_track_mixer_state(rt, &app, &state);
-                        if track == current_track.load(Ordering::Relaxed) {
-                            let selected_neural_snapshot =
-                                selected_neural_neurons.lock().unwrap().clone();
-                            sync_track_params_with_neural_selection(
-                                rt,
-                                &app,
-                                &state,
-                                track,
-                                &selected_steps,
-                                Some(&selected_neural_snapshot),
-                            );
-                            sync_fx_param_binding_fields_with_neural_selection(
-                                rt,
-                                &app,
-                                &state,
-                                track,
-                                &selected_steps,
-                                Some(&selected_neural_snapshot),
-                            );
-                        }
-                        rt.run_reactive_cycle();
-                        editor.refresh_runtime_side_effects();
-                        ui_epoch.fetch_add(1, Ordering::Relaxed);
+                // By label (the output dropdown) or by `:bus-id`.
+                let output = match (label, map_usize(map, "bus-id")) {
+                    (Some(label), _) => track_output_named(app, &label),
+                    (None, Some(bus)) => {
+                        track_output_for_bus(app, Some(sequencer::sequencer::BusId(bus as u64)))
                     }
+                    (None, None) => None,
+                };
+                if let Some(output) = output {
+                    let track =
+                        payload_track.unwrap_or_else(|| current_track.load(Ordering::Relaxed));
+                    app::apply_command(&mut app, app::AppCommand::SetTrackOutput { track, output });
+                    track_output_applied(app, editor, ctx, track);
                 }
             }
         }

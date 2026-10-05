@@ -865,15 +865,18 @@ pub(super) fn neural_neuron_value(idx: usize, neuron: &sequencer::neural::Projec
 }
 
 pub(crate) fn build_sync_labels() -> Value {
-    let items: Vec<Rc<RefCell<Value>>> = SYNC_RESOLUTIONS
-        .iter()
-        .map(|(_, label)| {
-            let mut compact = label.replace(' ', "");
-            compact.truncate(4);
-            Rc::new(RefCell::new(Value::String(compact)))
-        })
-        .collect();
-    Value::List(items)
+    list_value(sync_labels().map(Value::String))
+}
+
+/// `step.sync` labels by value (`SEQ.sync-labels`,
+/// `project.sync-options`): the sync resolutions, compacted to four
+/// characters.
+pub(crate) fn sync_labels() -> impl Iterator<Item = String> {
+    SYNC_RESOLUTIONS.iter().map(|(_, label)| {
+        let mut compact = label.replace(' ', "");
+        compact.truncate(4);
+        compact
+    })
 }
 
 /// Per-rack clip bank for the collapsed rack row and the mixer strip

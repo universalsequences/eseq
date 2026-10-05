@@ -3683,6 +3683,11 @@ impl App {
         });
     }
 
+    /// Whether an effect or instrument compile is running.
+    pub fn compile_pending(&self) -> bool {
+        self.editor.pending_compile.is_some()
+    }
+
     /// Poll for async compile completion. Returns a status message if something finished.
     pub fn poll_pending_compile(&mut self) -> Option<String> {
         self.reclaim_applied_effect_leases();

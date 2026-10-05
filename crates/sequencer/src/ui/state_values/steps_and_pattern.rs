@@ -348,6 +348,18 @@ pub(super) fn mod_destination_id_value(destination: sequencer::sequencer::ModDes
     }
 }
 
+/// The delete target that selects a mod route (`SEQ.selected-mod-routes`,
+/// `route.selected`).
+pub(crate) fn mod_route_delete_target(
+    connection: &sequencer::sequencer::ModConnection,
+) -> ActiveDeleteTarget {
+    ActiveDeleteTarget::ModRoute {
+        source: connection.source_track,
+        destination: connection.destination,
+        input: connection.dest_input,
+    }
+}
+
 pub(crate) fn selected_mod_routes_value(
     active_delete_target: Option<&ActiveDeleteTarget>,
 ) -> Value {
@@ -442,7 +454,7 @@ pub(crate) fn sync_track_pattern_cell_selected_fields(
     }
 }
 
-fn mixer_track_delete_target_selected(
+pub(crate) fn mixer_track_delete_target_selected(
     active_delete_target: Option<&ActiveDeleteTarget>,
     track: usize,
 ) -> bool {

@@ -383,10 +383,7 @@ impl DeviceSlot {
         track_id: sequencer::sequencer::TrackId,
         did: u64,
     ) -> Option<(usize, Self)> {
-        let track = app.track_registry.index_of(track_id)?;
-        if track >= app.state.active_track_count() {
-            return None;
-        }
+        let track = live_track_index(app, track_id)?;
         let device = match did {
             0 => Self::Instrument,
             did if did >= UNBOUND_EFFECT_DID => Self::Effect((did - UNBOUND_EFFECT_DID) as usize),
@@ -557,4 +554,18 @@ pub(crate) fn slot_param_stored_value(
 
 pub(super) fn reactive_set_needs_ui(result: eseqlisp::runtime::ReactiveSetResult) -> bool {
     result.effects_dirty || result.widgets_dirty
+}
+
+/// The roll rate's label (`SEQ.roll-rate`, `transport.roll-rate`) from the
+/// transport's `roll_rate` atomic.
+pub(crate) fn roll_rate_label(raw: u32) -> &'static str {
+    sequencer::sequencer::Timebase::from_index(raw).label()
+}
+
+/// The position of the track `id` names now; `None` once it is gone (or
+/// past the active tracks). Commands addressed by `TrackId` resolve their
+/// track with it when they land.
+pub(crate) fn live_track_index(app: &app::App, id: sequencer::sequencer::TrackId) -> Option<usize> {
+    let track = app.track_registry.index_of(id)?;
+    (track < app.state.active_track_count()).then_some(track)
 }

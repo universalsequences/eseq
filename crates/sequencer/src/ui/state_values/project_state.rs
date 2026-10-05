@@ -770,6 +770,39 @@ pub(crate) fn extract_usize_list_from_payload(payload: &Value, key: &str) -> Vec
     out
 }
 
+/// A drum rack track's selected slot and that slot's voice count; `None`
+/// for any other track (`SEQ.tp-rack-slot-idx`, `selection.rack-slot`).
+pub(crate) fn rack_slot_selection(app: &app::App, track: usize) -> Option<(usize, usize)> {
+    if app.graph.track_instrument_types.get(track)
+        != Some(&sequencer::sequencer::InstrumentType::Rack)
+    {
+        return None;
+    }
+    let rack = app
+        .state
+        .pattern
+        .rack_tracks
+        .lock()
+        .unwrap()
+        .get(track)
+        .cloned()
+        .flatten()?;
+    let selected_slot = app.selected_rack_slot_index_for_rack(track, &rack)?;
+    let max_polyphony = rack.slots.get(selected_slot)?.max_polyphony;
+    Some((selected_slot, max_polyphony))
+}
+
+/// Whether the track's instrument honours voice priority and mono trigger
+/// (`SEQ.tp-supports-mono-trigger`, `track.supports-mono-trigger`): rack
+/// slots read the parent track's.
+pub(crate) fn track_supports_mono_trigger(app: &app::App, track: usize) -> bool {
+    matches!(
+        app.graph.track_instrument_types.get(track),
+        Some(sequencer::sequencer::InstrumentType::Custom)
+            | Some(sequencer::sequencer::InstrumentType::Rack)
+    )
+}
+
 /// Publish the poly/voices fields the *track* panel, mixer strip and
 /// instrument header read. Split out so a rack-slot voice edit can republish
 /// them: for a rack those fields show the selected slot, and a stale value
@@ -789,23 +822,7 @@ pub(crate) fn sync_track_polyphony_fields(
     // the *selected slot's* values here (and which slot they'd be writing to)
     // so this panel's poly/voices controls can be routed to the right place
     // instead of silently editing a value playback ignores.
-    let rack_slot_poly = (app.graph.track_instrument_types.get(track)
-        == Some(&sequencer::sequencer::InstrumentType::Rack))
-    .then(|| {
-        let rack = app
-            .state
-            .pattern
-            .rack_tracks
-            .lock()
-            .unwrap()
-            .get(track)
-            .cloned()
-            .flatten()?;
-        let selected_slot = app.selected_rack_slot_index_for_rack(track, &rack)?;
-        let max_polyphony = rack.slots.get(selected_slot)?.max_polyphony;
-        Some((selected_slot, max_polyphony))
-    })
-    .flatten();
+    let rack_slot_poly = rack_slot_selection(app, track);
     dirty |= changed(rt.set_reactive("SEQ", "tp-is-rack", Value::Bool(rack_slot_poly.is_some())));
     dirty |= changed(rt.set_reactive(
         "SEQ",
@@ -825,24 +842,21 @@ pub(crate) fn sync_track_polyphony_fields(
     // fire_live_keyboard_rack_note) reads the parent track's mono trigger and
     // voice priority, with "mono" decided per slot by its max_polyphony. So a
     // rack slot at 1 voice gets legato from this same track-level control.
-    dirty |= changed(rt.set_reactive("SEQ", "tp-supports-mono-trigger", Value::Bool(matches!(
-        app.graph.track_instrument_types.get(track),
-        Some(sequencer::sequencer::InstrumentType::Custom)
-            | Some(sequencer::sequencer::InstrumentType::Rack)
-    ))));
-    dirty |= changed(rt.set_reactive("SEQ", "tp-voice-priority", Value::String(
-        match tp.get_voice_priority() {
-            sequencer::sequencer::VoicePriority::Last => "Last",
-            sequencer::sequencer::VoicePriority::High => "High",
-            sequencer::sequencer::VoicePriority::Low => "Low",
-        }.to_string(),
-    )));
-    dirty |= changed(rt.set_reactive("SEQ", "tp-mono-trigger", Value::String(
-        match tp.get_mono_trigger() {
-            sequencer::sequencer::MonoTrigger::Retrig => "retrig",
-            sequencer::sequencer::MonoTrigger::Legato => "legato",
-        }.to_string(),
-    )));
+    dirty |= changed(rt.set_reactive(
+        "SEQ",
+        "tp-supports-mono-trigger",
+        Value::Bool(track_supports_mono_trigger(app, track)),
+    ));
+    dirty |= changed(rt.set_reactive(
+        "SEQ",
+        "tp-voice-priority",
+        Value::String(voice_priority_label(tp.get_voice_priority()).to_string()),
+    ));
+    dirty |= changed(rt.set_reactive(
+        "SEQ",
+        "tp-mono-trigger",
+        Value::String(mono_trigger_label(tp.get_mono_trigger()).to_string()),
+    ));
     dirty |= changed(rt.set_reactive(
         "SEQ",
         "tp-max-polyphony",

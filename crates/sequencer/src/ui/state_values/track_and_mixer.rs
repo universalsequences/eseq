@@ -908,6 +908,12 @@ pub(crate) fn sync_track_mixer_state(
     );
 }
 
+/// The bus `bus` feeds (the main mix unless routed elsewhere;
+/// `SEQ.bus-output-routes` `:value`, `bus.output`).
+pub(crate) fn bus_output_destination(bus: &app::BusChannelState) -> sequencer::sequencer::BusId {
+    sequencer::sequencer::BusId(bus.output.destination().unwrap_or(0))
+}
+
 pub(crate) fn build_bus_output_routes(app: &app::App) -> Value {
     let label = |id: sequencer::sequencer::BusId| {
         if id == sequencer::sequencer::BusId::MIX { return "main".to_string(); }
@@ -919,7 +925,7 @@ pub(crate) fn build_bus_output_routes(app: &app::App) -> Value {
     list_value(app.buses.iter().map(|bus| {
         let options = app.bus_output_options(bus.id);
         map_value([
-            ("value", Value::String(label(sequencer::sequencer::BusId(bus.output.destination().unwrap_or(0))))),
+            ("value", Value::String(label(bus_output_destination(bus)))),
             ("options", list_value(options.iter().map(|id| Value::String(label(*id))))),
             ("ids", list_value(options.iter().map(|id| Value::Number(id.0 as f64)))),
         ])
@@ -986,4 +992,3 @@ pub(crate) fn sync_track_mixer_empty_state(rt: &mut Runtime) {
     rt.set_reactive("SEQ", "bus-mutes", Value::List(vec![]));
     rt.set_reactive("SEQ", "bus-solos", Value::List(vec![]));
 }
-

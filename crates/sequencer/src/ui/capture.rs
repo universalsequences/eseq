@@ -1321,7 +1321,7 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
         selected_neural_neurons,
         Arc::clone(&active_delete_target),
         Arc::clone(&active_delete_target_version),
-        auto_follow_override_until,
+        Arc::clone(&auto_follow_override_until),
         graph,
     );
     // Host kinds (eseq.kinds) read these; the live loop syncs them every
@@ -1342,6 +1342,7 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
         fx_value_epoch: Arc::new(AtomicUsize::new(0)),
         ui_invalidations,
         step_print: Arc::new(Mutex::new(StepPrintState::default())),
+        auto_follow_override_until,
     };
     let mut host_kinds = super::host_kinds::HostKinds::default();
     let mut sync_host_kinds = |editor: &mut Editor, app: &app::App| {

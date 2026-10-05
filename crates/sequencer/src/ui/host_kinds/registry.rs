@@ -16,6 +16,8 @@ pub(super) trait KindStore {
     fn children_past(&self, parent: InstanceId, kind: &str, count: usize) -> Vec<InstanceId>;
     fn drop_id(&mut self, id: InstanceId);
     fn push(&mut self, id: InstanceId, key: FieldKey, value: Value);
+    /// A Lisp global's value (the step cursor), read without evaluating.
+    fn global(&self, name: &str) -> Option<Value>;
 }
 
 impl KindStore for VM {
@@ -43,6 +45,9 @@ impl KindStore for VM {
     fn push(&mut self, id: InstanceId, key: FieldKey, value: Value) {
         report_push(self.set_instance_field(id, key.1, value), key);
     }
+    fn global(&self, name: &str) -> Option<Value> {
+        self.global_value(name)
+    }
 }
 
 impl KindStore for Runtime {
@@ -69,6 +74,9 @@ impl KindStore for Runtime {
     }
     fn push(&mut self, id: InstanceId, key: FieldKey, value: Value) {
         report_push(self.set_instance_field(id, key.1, value), key);
+    }
+    fn global(&self, name: &str) -> Option<Value> {
+        self.global_value(name)
     }
 }
 
@@ -188,6 +196,24 @@ impl Pusher<'_> {
         }
     }
 
+    /// Push a live field value computed outside [`live_value`] when
+    /// `changed` says it moved, counting the computation; `value` builds it.
+    pub(super) fn push_computed_if(
+        &mut self,
+        id: InstanceId,
+        key: FieldKey,
+        changed: bool,
+        value: impl FnOnce() -> Value,
+    ) {
+        if self.shared.borrow().skip.contains(&key) {
+            return;
+        }
+        self.shared.borrow_mut().count(key);
+        if changed {
+            self.push(id, key, value());
+        }
+    }
+
     /// Compute and push one live field.
     pub(super) fn push_live_field(&mut self, id: InstanceId, key: FieldKey) {
         if let Some(value) = live_value(&mut *self.rt, self.sources, self.shared, id, key.1) {
@@ -199,13 +225,30 @@ impl Pusher<'_> {
     /// fields: one batched observed query, then the observed fields only.
     /// Returns the observed mask (bit `i` is `fields.keys[i]`).
     pub(super) fn push_live(&mut self, id: InstanceId, fields: &LiveFields) -> u32 {
+        self.push_live_except(id, fields, 0)
+    }
+
+    /// [`Self::push_live`], leaving the fields in `except` (bits as in the
+    /// returned mask) to the caller.
+    pub(super) fn push_live_except(
+        &mut self,
+        id: InstanceId,
+        fields: &LiveFields,
+        except: u32,
+    ) -> u32 {
         let mask = self.rt.host_fields_observed(id, &fields.names);
+        self.push_live_masked(id, fields, mask & !except);
+        mask
+    }
+
+    /// Compute and push the live fields of `id` in `mask` (bit `i` is
+    /// `fields.keys[i]`).
+    pub(super) fn push_live_masked(&mut self, id: InstanceId, fields: &LiveFields, mask: u32) {
         for (bit, key) in fields.keys.iter().enumerate() {
             if mask & (1 << bit) != 0 {
                 self.push_live_field(id, *key);
             }
         }
-        mask
     }
 
     /// [`Self::push_live`] for each of `ids` while `cache` (see

@@ -12,17 +12,35 @@
 ;;
 ;; Read a field by value (`t.name`, re-renders the reader) or bind it
 ;; (`#'t.volume`, repaints only). Writable fields carry `:set`: `(set! t.volume
-;; 0.5)`, `(toggle! t.muted)`, `(toggle! s.active)`, `(set! selection.track t)`.
+;; 0.5)`, `(toggle! t.muted)`, `(toggle! s.active)`, `(set! selection.track t)`,
+;; `(set! t.swing 56)`, `(set! t.output nil)`, `(set! tn.morph 0.5)` (tn = t.tuning).
 ;; The host computes a field only while something observes it (a reader or a
 ;; held `#'`); reading an unobserved one asks the host for its value.
 
 (module eseq.kinds)
 
 (export track scene bank bus group transport selection project master engine
-        tracks scenes banks buses groups
+        tracks scenes banks buses groups routes
         launch! clone-scene! delete-scene! step-preset!
         device-param lock-param! unlock-param!
-        lock-none lock-seq lock-variant)
+        lock-none lock-seq lock-variant
+        reset-tuning! justify-tuning! randomize-tuning! stretch-tuning!
+        set-bar-transpose! mod-in-level
+        mute-group-options accum-mode-options tuning-root-options tuning-mode-options
+        voice-priority-options mono-trigger-options swing-resolution-options
+        roll-rate-options)
+
+;; Short fixed option lists (the host checks they match its own). The lists
+;; the host owns (scales, step sync resolutions, accumulators, track outputs)
+;; are `project` fields: project.fts-options, project.sync-options, ….
+(def mute-group-options '("Off" "1" "2" "3" "4" "5" "6" "7" "8"))
+(def accum-mode-options '("rtz" "clip" "rvtz" "rvbp"))
+(def tuning-root-options '("C" "C#" "D" "D#" "E" "F" "F#" "G" "G#" "A" "A#" "B"))
+(def tuning-mode-options '("Snap" "Map"))
+(def voice-priority-options '("Last" "High" "Low"))
+(def mono-trigger-options '("retrig" "legato"))
+(def swing-resolution-options '("1/16" "1/8" "1/4" "1/2"))
+(def roll-rate-options '("4" "4T" "8" "8T" "16" "16T" "32" "32T"))
 
 ;; ── :set functions (thin wrappers over the existing natives) ──
 
@@ -55,6 +73,50 @@
 (def set-transport-roll-mode (tr v) (host-command "set-roll-mode" v))
 (def set-transport-record-quantize (tr v) (host-command "set-record-quantize" v))
 (def set-master-recording (m v) (seq-set-master-recording v))
+;; Track settings (the track panel): absolute, addressed by the track's stable
+;; id so a reorder before the command lands cannot retarget it. One undo entry
+;; per set! (a drag view's set!s while the pointer is held join one entry).
+;; Values (spec §14.2c): a string field takes one of its labels
+;; (case-insensitive; its current value always works), a number field a
+;; number in range, a bool field a bool; anything else is an error.
+(def track-setting (setting)
+  (lambda (t v)
+    (host-command "set-track-setting" (dict :track-id t.tid :setting setting :value v))))
+;; The output: a bus instance (the main mix bus for main), nil for sends only.
+(def set-track-output (t b)
+  (host-command "set-track-setting"
+    (dict :track-id t.tid :setting "output" :bus-id (if b b.bid nil))))
+;; true makes t the mixer's delete target (unless it already is one of
+;; them); false takes t out of it (from a multi-track target, the others
+;; stay).
+(def set-track-delete-target (t v) (seq-set-track-delete-target t.index v))
+;; A bus's output, addressed by bus ids.
+(def set-bus-output (b dest)
+  (if dest
+    (host-command "set-bus-output" (dict :bus-id b.bid :destination-id dest.bid))
+    nil))
+(def route-target (r)
+  (dict :source r.source.index :dest-kind (if r.dest "track" "bus")
+        :dest (if r.dest r.dest.index r.dest-bus.bid) :input (- r.input 1)))
+(def set-route-selected (r v)
+  (if v
+    (seq-set-delete-target :mod-route (route-target r))
+    (if (seq-delete-target? :mod-route (route-target r)) (seq-clear-delete-target) nil)))
+;; The step cursor: makes s's track the current one and moves the grid's
+;; cursor to s, as a click on the step does.
+(def set-cursor-step (sel s)
+  (if s
+    (host-command "set-cursor-step" (dict :track-id s.track.tid :step s.index))
+    nil))
+(def set-transport-roll-rate (tr v) (seq-set-roll-rate v))
+;; The scale editor (`tuning` and its `degree`s), by the track's stable id.
+(def tuning-edit (tn op v)
+  (host-command "set-tuning" (dict :track-id tn.track.tid :op op :value v)))
+(def tuning-setter (op) (lambda (tn v) (tuning-edit tn op v)))
+(def degree-setter (op)
+  (lambda (d v)
+    (host-command "set-tuning"
+      (dict :track-id d.tuning.track.tid :op op :degree d.index :value v))))
 ;; A device param's own value (never a p-lock), in display units. Addressed
 ;; by stable ids (track id, device id) so a reorder before the command lands
 ;; cannot retarget it.
@@ -162,7 +224,65 @@
          (instrument-type :string :doc "Instrument kind: synth, sampler, rack, …")
          (rack      :bool   :doc "A drum rack track")
          (group     group   :doc "The group holding the track, or nil")
-         (sends     (list-of send))))
+         (sends     (list-of send))
+         ;; Track settings (the track panel). Setters take what the field reads.
+         (poly      :bool   :set (track-setting "poly")
+                    :doc "Polyphonic (the track's own flag; a drum rack's voices are per slot)")
+         (max-polyphony :int :range (1 16) :set (track-setting "max-polyphony") :doc "Voices")
+         (gate      :bool   :set (track-setting "gate") :doc "Notes last their step duration")
+         (supports-mono-trigger :bool :doc "The instrument honours voice-priority and mono-trigger")
+         (voice-priority :string :set (track-setting "voice-priority") :doc "One of voice-priority-options")
+         (mono-trigger :string :set (track-setting "mono-trigger") :doc "One of mono-trigger-options")
+         (mute-group :int   :range (0 8) :set (track-setting "mute-group")
+                    :doc "0 for none, else the group; (nth mute-group-options g) is its label")
+         (swing     :number :range (50 75) :set (track-setting "swing")
+                    :doc "The track's own swing percent (a step's swing p-lock never shows here)")
+         (swing-resolution :string :set (track-setting "swing-resolution")
+                    :doc "The track's own swing resolution, one of swing-resolution-options")
+         (fts       :string :set (track-setting "fts")
+                    :doc "Scale name: one of project.fts-options, an imported scale's name, * once degrees are edited")
+         (tuning    tuning  :doc "The scale editor's state (set! its root, morph, mode and degrees)")
+         (accumulator :string :set (track-setting "accumulator") :doc "One of project.accumulator-options")
+         (accum-mode :string :set (track-setting "accum-mode") :doc "One of accum-mode-options")
+         (accum-limit :number :range (0 127) :set (track-setting "accum-limit"))
+         (output    bus     :set set-track-output
+                    :doc "The bus the track's audio goes to (the main mix bus for main); nil for sends only. One of project.output-options")
+         (mod-output :bool  :doc "Has a mod output (a modulator, or an instrument exposing one)")
+         (mod-out-level :number :range (0 1) :doc "Mod output port level")
+         (mod-in-1  :number :range (0 1) :doc "Mod input port levels, inputs 1-4 (Ext1-4); (mod-in-level t i) binds input i")
+         (mod-in-2  :number :range (0 1))
+         (mod-in-3  :number :range (0 1))
+         (mod-in-4  :number :range (0 1))
+         (bar-transposes (list-of :number)
+                    :doc "Per 16-step bar of the pattern, semitones; (set-bar-transpose! t bar v)")
+         (delete-target :bool :set set-track-delete-target :doc "Among the mixer's delete target (one track or several)")))
+
+;; A track's scale (the scale editor): (track 0).tuning. One per track.
+(def-kind tuning
+  :key (track index)
+  :host ((track   track   :doc "The track whose scale this is")
+         (on      :bool   :doc "A scale is on (fts is not Off)")
+         (scale   :string :doc "The scale's name (an imported scale's name)")
+         (custom  :bool   :doc "An imported (.scl) scale")
+         (edited  :bool   :doc "Some degree is detuned or switched off")
+         (root    :string :set (tuning-setter "root") :doc "The pitch class degree 0 sits on, one of tuning-root-options")
+         (morph   :number :range (0 1) :set (tuning-setter "morph")
+                  :doc "0 rounds every degree to its nearest semitone, 1 plays it exact")
+         (mode    :string :set (tuning-setter "mode") :doc "How keys map to degrees, one of tuning-mode-options")
+         (period  :number :doc "Cents per period (1200 for an octave)")
+         (degrees (list-of degree) :doc "The scale's degrees, in order; empty while off")))
+
+;; One degree of a scale: (nth tn.degrees 2).
+(def-kind degree
+  :key (tuning index)
+  :host ((tuning  tuning  :doc "The scale the degree belongs to")
+         (index   :int    :doc "Position in the scale, from 0")
+         (base    :number :doc "The scale's own pitch of the degree, cents above the root")
+         (offset  :number :range (-1200 1200) :set (degree-setter "offset") :doc "Cents added to base")
+         (enabled :bool   :set (degree-setter "enabled") :doc "In the scale (false skips the degree)")
+         (pitch   :number :doc "The sounding pitch, cents above the root (offset and morph applied)")
+         (label   :string :doc "The sounding pitch's note name and cents")
+         (ratio   :string :doc "The nearest simple just ratio (empty when none, or the period is not an octave)")))
 
 ;; A mixer bus, the main mix included.
 (def-kind bus
@@ -173,7 +293,24 @@
          (volume :number :range (0 1) :set set-bus-volume)
          (muted  :bool   :set set-bus-muted)
          (soloed :bool   :set set-bus-soloed)
-         (peak   :number :range (0 1) :doc "Output meter level")))
+         (peak   :number :range (0 1) :doc "Output meter level")
+         (output bus     :set set-bus-output :doc "The bus this one feeds (the main mix by default); nil for the main mix")
+         (output-options (list-of bus) :doc "The buses output may be set to (empty when fixed)")
+         (mod-in-1 :number :range (0 1) :doc "Mod input port levels, inputs 1-4 (Ext1-4); (mod-in-level b i) binds input i")
+         (mod-in-2 :number :range (0 1))
+         (mod-in-3 :number :range (0 1))
+         (mod-in-4 :number :range (0 1))))
+
+;; A modulation route: a track's mod output into a track's or a bus's mod
+;; input. Keyed by its endpoints (track and bus ids), so a reorder keeps it.
+(def-kind route
+  :key (index)
+  :host ((index    :int   :doc "Position in the route list, from 0")
+         (source   track  :doc "The modulating track")
+         (dest     track  :doc "The modulated track, or nil for a bus")
+         (dest-bus bus    :doc "The modulated bus, or nil for a track")
+         (input    :int   :doc "The destination's mod input, 1-4 (Ext1-4), as in mod-in-1")
+         (selected :bool  :set set-route-selected :doc "Selected as the mixer's delete target")))
 
 ;; A track group (or drum rack) and the bus it routes to.
 (def-kind group
@@ -216,7 +353,9 @@
          (metronome       :bool   :set set-transport-metronome)
          (roll-mode       :bool   :set set-transport-roll-mode)
          (record-quantize :string :set set-transport-record-quantize
-                          :doc "Live-record quantization: off, 1/16, …, 1 bar")))
+                          :doc "Live-record quantization: off, 1/16, …, 1 bar")
+         (roll-rate       :string :set set-transport-roll-rate :doc "One of roll-rate-options")
+         (sequence-rolling :bool  :doc "A sequence roll is held")))
 
 ;; The master output.
 (def-kind master
@@ -229,21 +368,35 @@
 (def-kind engine
   :key ()
   :host ((cpu-load   :number :doc "Audio callback load, percent")
-         (latency-ms :number :doc "Plugin-delay-compensation latency")))
+         (latency-ms :number :doc "Plugin-delay-compensation latency")
+         (overloaded :bool   :doc "An audio deadline was missed in the last two seconds")
+         (compiling  :bool   :doc "An effect compile is running")))
 
 (def-kind selection
   :key ()
   :host ((track  track :set select-track :doc "The current track")
-         (tracks (list-of track) :doc "The multi-track selection")))
+         (tracks (list-of track) :doc "The multi-track selection")
+         (steps  (list-of step) :doc "The current track's selected steps, in order")
+         (cursor-step step :set set-cursor-step
+                      :doc "The step under the step cursor (current track); setting it selects the step's track")
+         (edit-step step :doc "The step the step panel edits: the first selected step, else cursor-step")
+         (rack-slot :int :doc "The current drum rack's selected slot, -1 when the current track is no rack")
+         (auto-follow :bool :doc "The view follows the playhead (paused for a while after an edit)")))
 
-;; The collections, for (tracks), (scenes), (banks), (buses) and (groups).
+;; The collections, for (tracks), (scenes), (banks), (buses), (groups) and
+;; (routes), and the option lists the host owns.
 (def-kind project
   :key ()
   :host ((tracks (list-of track))
          (scenes (list-of scene))
          (banks  (list-of bank))
          (buses  (list-of bus))
-         (groups (list-of group))))
+         (groups (list-of group))
+         (routes (list-of route))
+         (fts-options (list-of :string) :doc "The built-in scales, for track.fts")
+         (sync-options (list-of :string) :doc "step.sync labels, by value")
+         (accumulator-options (list-of :string) :doc "Built-in and script accumulators, for track.accumulator")
+         (output-options (list-of bus) :doc "The buses a track's output may be set to (nil is sends only)")))
 
 ;; ── Collections and actions ──
 
@@ -252,6 +405,7 @@
 (def banks () project.banks)
 (def buses () project.buses)
 (def groups () project.groups)
+(def routes () project.routes)
 
 ;; Launch a scene with the transport's launch quantization.
 (def launch! (s)
@@ -294,3 +448,27 @@
 ;; Load track t's next (dir 1) or previous (dir -1) preset, wrapping.
 (def step-preset! (t dir)
   (host-command "step-instrument-preset" (dict :track t.index :delta dir)))
+
+;; Scale editor actions on tn, a track's tuning; one undo entry each.
+;; Drop every degree's offset and switch every degree back on.
+(def reset-tuning! (tn) (tuning-edit tn "reset" nil))
+;; Snap every degree to its nearest simple just ratio.
+(def justify-tuning! (tn) (tuning-edit tn "just" nil))
+;; Detune every degree at random, by up to cents (0-600).
+(def randomize-tuning! (tn cents) (tuning-edit tn "rand" cents))
+;; Stretch the scale by cents per period (-600-600).
+(def stretch-tuning! (tn cents) (tuning-edit tn "stretch" cents))
+
+;; Transpose bar (16-step page) bar of track t's pattern by v semitones
+;; (-60-60; out of range is an error).
+(def set-bar-transpose! (t bar v)
+  (host-command "set-track-bar-transpose" (dict :track-id t.tid :bar bar :value v)))
+
+;; A binding to mod input i (1-4, as in mod-in-1) of x, a track or a bus;
+;; any other i is an error (reported; the value is false).
+(def mod-in-level (x i)
+  (if (= i 1) #'x.mod-in-1
+    (if (= i 2) #'x.mod-in-2
+      (if (= i 3) #'x.mod-in-3
+        (if (= i 4) #'x.mod-in-4
+          (seq-error (str "mod-in-level: no input " i " (inputs are 1-4)")))))))

@@ -825,6 +825,12 @@ impl ProjectScenes {
         ))
     }
 
+    /// A scene's mod connections alone ([`Self::scene_metadata`] without
+    /// the neural networks and composed graph overrides).
+    pub fn scene_mod_connections(&self, scene_idx: usize) -> Option<Vec<ModConnection>> {
+        Some(self.scenes.get(scene_idx)?.mod_connections.clone())
+    }
+
     pub fn scene_snapshot(&self, scene_idx: usize) -> Option<PatternSnapshot> {
         let scene = self.scenes.get(scene_idx)?;
         let mut snapshot = PatternSnapshot::new_default(self.track_pools.len(), &[]);

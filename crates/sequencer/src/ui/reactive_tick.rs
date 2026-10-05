@@ -453,7 +453,16 @@ pub(crate) fn sync_reactive_tick(
             (ctx.meters.cached_modulator_phases, ctx.meters.cached_modulator_levels) =
                 read_modulator_display_values(app.graph.lg, &app);
         }
-        if mixer_visible && (meter_polled || !was_visible.mixer) {
+        // The mixer shows the mod port levels; with it hidden, an observed
+        // host-kinds level keeps them polled at the meter cadence.
+        let mod_levels_due = if mixer_visible {
+            meter_polled || !was_visible.mixer
+        } else {
+            ctx.frame.host_kinds.wants_mod_levels()
+                && (meter_polled
+                    || ctx.meters.cached_mod_port_levels.track_outputs.len() != app.tracks.len())
+        };
+        if mod_levels_due {
             ctx.meters.cached_mod_port_levels = read_mod_port_levels(app.graph.lg, &app);
         }
         if meter_polled {
@@ -885,7 +894,7 @@ pub(crate) fn sync_reactive_tick(
             .load(Ordering::Relaxed);
         if roll_rate_raw != ctx.frame.prev_roll_rate {
             if transport_visible {
-                let label = sequencer::sequencer::Timebase::from_index(roll_rate_raw).label();
+                let label = roll_rate_label(roll_rate_raw);
                 needs_reactive_cycle |= editor
                     .runtime_mut()
                     .set_reactive("SEQ", "roll-rate", Value::String(label.to_string()))
@@ -2204,6 +2213,8 @@ pub(crate) fn sync_reactive_tick(
             ctx.meters.cached_peak_r_level,
         ),
         cpu_load: f32::from_bits(ctx.meters.cached_cpu_load_bits) as f64,
+        mod_ports: &ctx.meters.cached_mod_port_levels,
+        overloaded: ctx.frame.cpu_overload.displayed(),
     };
     if ctx
         .frame

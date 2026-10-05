@@ -32,6 +32,7 @@ mod scene_slots;
 mod scripts;
 mod song;
 mod step_history;
+mod track_settings;
 use effects::{apply_device_param_base, rebuild_panel_if_needed};
 use step_history::{clear_plocks_command, step_list};
 mod tracks;
@@ -65,6 +66,69 @@ use super::state_values::{
     sync_track_mixer_state, sync_track_name_state, sync_track_params, sync_track_peak_fields,
 };
 use super::{map_number, map_string, map_u32, map_usize};
+
+/// A host kind setter's history edit (a script's `set!`), under the
+/// gesture rules (kind-bindings spec §14.2b "Gestures"): an edit landing
+/// while another gesture is active (a user's drag) gets an undo entry of its
+/// own beside it, neither splitting nor joining the drag; otherwise a
+/// continuous edit while the pointer is down stays open and the script's
+/// later edits join it (a drag view's `set!` per frame is one entry, ended
+/// by the release), and any other edit ends its entry at once.
+pub(super) struct ScriptEdit {
+    beside: bool,
+}
+
+impl ScriptEdit {
+    pub(super) fn begin(app: &app::App, ctx: &crate::LoopCtx<'_>) -> Self {
+        let active = app.history.active_gesture().map(|active| active.id);
+        Self {
+            beside: active.is_some() && active != ctx.gesture.script_param_gesture,
+        }
+    }
+
+    /// Apply `command`; returns whether the model changed.
+    pub(super) fn apply(&self, app: &mut app::App, command: app::AppCommand) -> bool {
+        self.apply_with(app, |app| app::try_apply_command(app, command))
+            .is_ok_and(|outcome| outcome != app::edit::EditOutcome::NoOp)
+    }
+
+    /// Apply an edit `apply` makes (beside the active gesture when there is
+    /// one that is not the script's).
+    pub(super) fn apply_with<T>(
+        &self,
+        app: &mut app::App,
+        apply: impl FnOnce(&mut app::App) -> T,
+    ) -> T {
+        if self.beside {
+            app::edit::apply_beside_gesture(app, apply)
+        } else {
+            apply(app)
+        }
+    }
+
+    /// End the edit: `continuous` edits (a value a drag moves) stay open
+    /// while the pointer is down.
+    pub(super) fn end(
+        self,
+        app: &mut app::App,
+        ctx: &mut crate::LoopCtx<'_>,
+        continuous: bool,
+        changed: bool,
+    ) {
+        if self.beside {
+            return;
+        }
+        if continuous && ctx.gesture.pointer_down {
+            // A drag view: its later `set!`s join this entry until release.
+            ctx.gesture.script_param_gesture = app.history.active_gesture().map(|active| active.id);
+        } else {
+            if changed {
+                app::edit::finish_active_gesture(app);
+            }
+            ctx.gesture.script_param_gesture = None;
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MacroHostCommandOutcome {

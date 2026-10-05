@@ -148,24 +148,9 @@ fn step_param_command(
 }
 
 fn slice3_numeric_history_command(op: &str, track: Option<usize>, value: f64) -> HostCommand {
-    let mut payload = HashMap::new();
-    payload.insert(
-        "op".to_string(),
-        Rc::new(RefCell::new(Value::Keyword(op.to_string()))),
-    );
-    if let Some(track) = track {
-        payload.insert(
-            "track".to_string(),
-            Rc::new(RefCell::new(Value::Number(track as f64))),
-        );
-    }
-    payload.insert(
-        "value".to_string(),
-        Rc::new(RefCell::new(Value::Number(value))),
-    );
     HostCommand::Custom {
         name: "slice3-history-action".to_string(),
-        payload: Value::Map(payload),
+        payload: Value::Map(slice3_numeric_payload(op, track, value)),
     }
 }
 
@@ -2188,6 +2173,105 @@ fn active_delete_target_kind(target: Option<&ActiveDeleteTarget>) -> Value {
 /// which the reactive tick republishes off the version counter alone — a
 /// `ui_epoch` bump here would buy nothing but a whole-project resync per
 /// clip-launch click (~7ms at 20-clip pool scale).
+/// What making a track the current one touches (`seq-set-track`, the host
+/// kinds' `selection.cursor-step`).
+#[derive(Clone)]
+pub(crate) struct CurrentTrackSwitch {
+    pub(crate) current_track: Arc<AtomicUsize>,
+    pub(crate) selected_tracks: Arc<Mutex<HashSet<usize>>>,
+    pub(crate) selected_steps: Arc<Mutex<HashSet<usize>>>,
+    pub(crate) piano_roll_selection: Arc<Mutex<HashSet<u64>>>,
+    pub(crate) active_delete_target: Arc<Mutex<Option<ActiveDeleteTarget>>>,
+    pub(crate) active_delete_target_version: Arc<AtomicUsize>,
+    pub(crate) ui_invalidations: Arc<UiInvalidationQueue>,
+    pub(crate) fx_epoch: Arc<AtomicUsize>,
+}
+
+impl CurrentTrackSwitch {
+    pub(crate) fn of(shared: &SharedHandles) -> Self {
+        Self {
+            current_track: shared.current_track.clone(),
+            selected_tracks: shared.selected_tracks.clone(),
+            selected_steps: shared.selected_steps.clone(),
+            piano_roll_selection: shared.piano_roll_selection.clone(),
+            active_delete_target: shared.active_delete_target.clone(),
+            active_delete_target_version: shared.active_delete_target_version.clone(),
+            ui_invalidations: shared.ui_invalidations.clone(),
+            fx_epoch: shared.fx_epoch.clone(),
+        }
+    }
+
+    /// Make `track` (in range) the current track and the only selected one;
+    /// a change clears the step and piano-roll selections and a step
+    /// delete target. Returns whether the current track changed.
+    pub(crate) fn select(&self, track: usize) -> bool {
+        {
+            let mut set = self.selected_tracks.lock().unwrap();
+            set.clear();
+            set.insert(track);
+        }
+        let previous = self.current_track.swap(track, Ordering::Relaxed);
+        if previous == track {
+            return false;
+        }
+        self.selected_steps.lock().unwrap().clear();
+        self.piano_roll_selection.lock().unwrap().clear();
+        let mut guard = self.active_delete_target.lock().unwrap();
+        if matches!(
+            guard.as_ref(),
+            Some(ActiveDeleteTarget::TrackPattern { .. })
+                | Some(ActiveDeleteTarget::TrackSteps { .. })
+        ) {
+            guard.take();
+            bump_delete_target_version(&self.active_delete_target_version);
+        }
+        drop(guard);
+        self.ui_invalidations.push(UiInvalidation::CurrentTrack {
+            previous,
+            current: track,
+        });
+        let next_fx_epoch = self.fx_epoch.fetch_add(1, Ordering::Relaxed) + 1;
+        if trace_ui_enabled() {
+            eprintln!(
+                "[ui-trace][native] seq-set-track previous={} next={} fx_epoch={}",
+                previous, track, next_fx_epoch
+            );
+        }
+        true
+    }
+}
+
+/// `t.delete-target`'s setter (`seq-set-track-delete-target`) on `target`:
+/// `on` makes `track` the target unless the target already holds it; off
+/// takes it out (clearing a one-track target, shrinking a multi-track one).
+/// Returns whether the target changed.
+pub(crate) fn set_track_delete_target(
+    target: &mut Option<ActiveDeleteTarget>,
+    track: usize,
+    on: bool,
+) -> bool {
+    let held = mixer_track_delete_target_selected(target.as_ref(), track);
+    if on == held {
+        return false;
+    }
+    *target = if on {
+        Some(ActiveDeleteTarget::MixerTrack { track })
+    } else {
+        match target.take() {
+            Some(ActiveDeleteTarget::MixerTracks { mut tracks }) => {
+                tracks.retain(|member| *member != track);
+                match tracks[..] {
+                    [] => None,
+                    [track] => Some(ActiveDeleteTarget::MixerTrack { track }),
+                    _ => Some(ActiveDeleteTarget::MixerTracks { tracks }),
+                }
+            }
+            _ => None,
+        }
+    };
+    true
+}
+
 fn bump_delete_target_version(active_delete_target_version: &Arc<AtomicUsize>) {
     active_delete_target_version.fetch_add(1, Ordering::Relaxed);
 }
@@ -3453,35 +3537,11 @@ pub(crate) fn init_runtime(
                     "tp-send",
                     Value::Number(state.pattern.track_params[0].get_send() as f64),
                 ),
-                ("tp-output", {
-                    let tp = &state.pattern.track_params[0];
-                    let label = match tp.output() {
-                        sequencer::sequencer::TrackOutput::Mix => "main".to_string(),
-                        sequencer::sequencer::TrackOutput::None => "sends only".to_string(),
-                        sequencer::sequencer::TrackOutput::Bus(id) => app
-                            .buses
-                            .iter()
-                            .find(|bus| bus.id == id)
-                            .map(|bus| bus.name.clone())
-                            .unwrap_or_else(|| "main".to_string()),
-                    };
-                    Value::String(label)
-                }),
                 (
-                    "track-output-options",
-                    Value::List(
-                        std::iter::once("main".to_string())
-                            .chain(std::iter::once("sends only".to_string()))
-                            .chain(
-                                app.buses
-                                    .iter()
-                                    .filter(|bus| bus.id != sequencer::sequencer::BusId::MIX)
-                                    .map(|bus| bus.name.clone()),
-                            )
-                            .map(|label| Rc::new(RefCell::new(Value::String(label))))
-                            .collect(),
-                    ),
+                    "tp-output",
+                    Value::String(track_output_label(app, &state.pattern.track_params[0])),
                 ),
+                ("track-output-options", build_track_output_options(app)),
                 ("tp-bus-sends", {
                     use std::collections::HashMap;
                     let tp = &state.pattern.track_params[0];
@@ -3917,6 +3977,29 @@ pub(crate) fn init_runtime(
     runtime.register_native("seq-clear-delete-target", move |_args, _ctx| {
         clear_active_delete_target(&delete_target, &delete_target_version);
         Ok(Value::Bool(true))
+    });
+
+    let delete_target = active_delete_target.clone();
+    let delete_target_version = active_delete_target_version.clone();
+    let st = state.clone();
+    runtime.register_native("seq-set-track-delete-target", move |args, _ctx| {
+        let (Some(Value::Number(track)), Some(Value::Bool(on))) = (args.first(), args.get(1))
+        else {
+            return Err("seq-set-track-delete-target: expected (track bool)".into());
+        };
+        let track = *track as usize;
+        if track >= st.active_track_count() {
+            return Err(format!("seq-set-track-delete-target: no track {track}").into());
+        }
+        if set_track_delete_target(&mut delete_target.lock().unwrap(), track, *on) {
+            bump_delete_target_version(&delete_target_version);
+        }
+        Ok(Value::Bool(*on))
+    });
+
+    runtime.register_native("seq-error", move |args, _ctx| match args.first() {
+        Some(Value::String(message)) => Err(message.clone().into()),
+        _ => Err("seq-error: expected a message".into()),
     });
 
     let delete_target = active_delete_target.clone();
@@ -5263,15 +5346,17 @@ pub(crate) fn init_runtime(
 
     // seq-set-track — switch current track (single-select: resets the multi-select set)
     let st = state.clone();
-    let ct = current_track.clone();
-    let sel_tracks = selected_tracks.clone();
-    let sel = selected_steps.clone();
-    let piano_sel = piano_roll_selection.clone();
     let ui_ep = ui_epoch.clone();
-    let fx_ep = fx_epoch.clone();
-    let ui_inv = ui_invalidations.clone();
-    let delete_target = active_delete_target.clone();
-    let delete_target_version = active_delete_target_version.clone();
+    let switch = CurrentTrackSwitch {
+        current_track: current_track.clone(),
+        selected_tracks: selected_tracks.clone(),
+        selected_steps: selected_steps.clone(),
+        piano_roll_selection: piano_roll_selection.clone(),
+        active_delete_target: active_delete_target.clone(),
+        active_delete_target_version: active_delete_target_version.clone(),
+        ui_invalidations: ui_invalidations.clone(),
+        fx_epoch: fx_epoch.clone(),
+    };
     runtime.register_native("seq-set-track", move |args, _ctx| {
         let Some(Value::Number(track)) = args.first() else {
             return Err("seq-set-track: expected track number".into());
@@ -5280,37 +5365,7 @@ pub(crate) fn init_runtime(
         if track >= st.active_track_count() {
             return Err(format!("seq-set-track: track {track} out of range").into());
         }
-        {
-            let mut set = sel_tracks.lock().unwrap();
-            set.clear();
-            set.insert(track);
-        }
-        let previous = ct.load(Ordering::Relaxed);
-        ct.store(track, Ordering::Relaxed);
-        if previous != track {
-            sel.lock().unwrap().clear();
-            piano_sel.lock().unwrap().clear();
-            let mut guard = delete_target.lock().unwrap();
-            if matches!(
-                guard.as_ref(),
-                Some(ActiveDeleteTarget::TrackPattern { .. })
-                    | Some(ActiveDeleteTarget::TrackSteps { .. })
-            ) {
-                guard.take();
-                bump_delete_target_version(&delete_target_version);
-            }
-            ui_inv.push(UiInvalidation::CurrentTrack {
-                previous,
-                current: track,
-            });
-            let next_fx_epoch = fx_ep.fetch_add(1, Ordering::Relaxed) + 1;
-            if trace_ui_enabled() {
-                eprintln!(
-                    "[ui-trace][native] seq-set-track previous={} next={} fx_epoch={}",
-                    previous, track, next_fx_epoch
-                );
-            }
-        } else if trace_ui_enabled() {
+        if !switch.select(track) && trace_ui_enabled() {
             eprintln!(
                 "[ui-trace][native] seq-set-track unchanged track={} ui_epoch={}",
                 track,
@@ -6558,31 +6613,12 @@ pub(crate) fn init_runtime(
             _ => return Err("seq-set-accumulator: expected string label".into()),
         };
         let names = accumulator_names_for_native.lock().unwrap();
-        let idx = names
-            .iter()
-            .position(|name| name.eq_ignore_ascii_case(label))
+        let idx = accumulator_index(&names, label)
             .ok_or_else(|| format!("seq-set-accumulator: unknown accumulator '{label}'"))?;
         let track = ct.load(Ordering::Relaxed);
-        let mut payload = HashMap::new();
-        payload.insert("op".to_string(), Rc::new(RefCell::new(Value::Keyword("accumulator".to_string()))));
-        payload.insert("track".to_string(), Rc::new(RefCell::new(Value::Number(track as f64))));
-        payload.insert("value".to_string(), Rc::new(RefCell::new(Value::Number(idx as f64))));
-        if idx < BUILTIN_ACCUMULATOR_NAMES.len() {
-            payload.insert(
-                "default-limit".to_string(),
-                Rc::new(RefCell::new(Value::Number(
-                    builtin_accumulator_default_limit(idx) as f64,
-                ))),
-            );
-        } else {
-            payload.insert(
-                "script-name".to_string(),
-                Rc::new(RefCell::new(Value::String(names[idx].clone()))),
-            );
-        }
         ctx.enqueue_command(HostCommand::Custom {
             name: "slice3-history-action".to_string(),
-            payload: Value::Map(payload),
+            payload: Value::Map(accumulator_edit_payload(track, idx, &names)),
         });
         *auto_follow_override.lock().unwrap() = Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
         ui_ep.fetch_add(1, Ordering::Relaxed);
@@ -6716,34 +6752,14 @@ pub(crate) fn init_runtime(
         }
 
         let mut names = accumulator_names_for_native.lock().unwrap();
-        if !names.iter().any(|name| name.eq_ignore_ascii_case(&label)) {
+        if accumulator_index(&names, &label).is_none() {
             names.push(label.clone());
         }
-        let idx = names
-            .iter()
-            .position(|name| name.eq_ignore_ascii_case(&label))
+        let idx = accumulator_index(&names, &label)
             .ok_or_else(|| format!("seq-use-accumulator: unknown accumulator '{label}'"))?;
-
-        let mut payload = HashMap::new();
-        payload.insert("op".to_string(), Rc::new(RefCell::new(Value::Keyword("accumulator".to_string()))));
-        payload.insert("track".to_string(), Rc::new(RefCell::new(Value::Number(track as f64))));
-        payload.insert("value".to_string(), Rc::new(RefCell::new(Value::Number(idx as f64))));
-        if idx < BUILTIN_ACCUMULATOR_NAMES.len() {
-            payload.insert(
-                "default-limit".to_string(),
-                Rc::new(RefCell::new(Value::Number(
-                    builtin_accumulator_default_limit(idx) as f64,
-                ))),
-            );
-        } else {
-            payload.insert(
-                "script-name".to_string(),
-                Rc::new(RefCell::new(Value::String(names[idx].clone()))),
-            );
-        }
         ctx.enqueue_command(HostCommand::Custom {
             name: "slice3-history-action".to_string(),
-            payload: Value::Map(payload),
+            payload: Value::Map(accumulator_edit_payload(track, idx, &names)),
         });
         *auto_follow_override.lock().unwrap() = Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
         ui_ep.fetch_add(1, Ordering::Relaxed);
@@ -8392,6 +8408,16 @@ fn document_metal_seq_natives(runtime: &mut Runtime) {
             "seq-clear-delete-target",
             "(seq-clear-delete-target)",
             "Clear the active destructive keyboard target.",
+        ),
+        (
+            "seq-set-track-delete-target",
+            "(seq-set-track-delete-target track on)",
+            "Put track into (true) or take it out of (false) the mixer's delete target.",
+        ),
+        (
+            "seq-error",
+            "(seq-error message)",
+            "Report message as an error (the status line, like any failing native); returns false.",
         ),
         (
             "seq-delete-target?",

@@ -37,7 +37,10 @@
 //! them. Devices are keyed (track instance id, `did`): 0 for the
 //! instrument, else the effect's stable instance id, so a reorder keeps
 //! them (`DeviceSlot::did`). Params are keyed (device instance id, index)
-//! and lazy like steps (`params`).
+//! and lazy like steps (`params`). Mod routes are keyed by their endpoints'
+//! stable ids (`RouteKey`), replaced on a project load like tracks. Each
+//! track has one `tuning`, keyed (track instance id, 0), whose `degree`s
+//! are keyed (tuning instance id, index), registered at the model sync.
 //!
 //! [`check_schema`] compares [`PUBLISHED`] with the loaded `eseq.kinds`; the
 //! tick re-runs it whenever a kind schema changes (a hot reload) and skips
@@ -46,7 +49,8 @@
 //! Layout: this module holds the published schema and the tick
 //! ([`HostKinds::sync`]); `live` the shared handles, live-field values and
 //! the reader hook; `registry` the instance registry helpers and pushes;
-//! `tracks`, `steps`, `params`, `scenes` and `mixer` the per-kind syncs.
+//! `tracks`, `steps`, `params`, `scenes`, `mixer` (buses, groups, routes)
+//! and `settings` (track settings) the per-kind syncs.
 
 use crate::*;
 use eseqlisp::vm::{HostFieldReader, InstanceId, VM};
@@ -58,14 +62,17 @@ mod mixer;
 mod params;
 mod registry;
 mod scenes;
+mod settings;
 mod steps;
 mod tracks;
 
 pub(crate) use live::KindsHandles;
 use live::*;
 pub(crate) use mixer::KindsMeters;
+use mixer::RouteKey;
 use params::*;
 use registry::*;
+use settings::*;
 use steps::*;
 
 /// The module declaring the host kinds.
@@ -85,6 +92,9 @@ pub(crate) const GROUP: &str = "eseq.kinds:group";
 pub(crate) const MASTER: &str = "eseq.kinds:master";
 pub(crate) const ENGINE: &str = "eseq.kinds:engine";
 pub(crate) const PARAM: &str = "eseq.kinds:param";
+pub(crate) const ROUTE: &str = "eseq.kinds:route";
+pub(crate) const TUNING: &str = "eseq.kinds:tuning";
+pub(crate) const DEGREE: &str = "eseq.kinds:degree";
 
 /// How the host keeps a field current (see the module docs).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -128,6 +138,31 @@ pub(crate) mod f {
     pub(crate) const TRACK_RACK: FieldKey = (TRACK, "rack");
     pub(crate) const TRACK_GROUP: FieldKey = (TRACK, "group");
     pub(crate) const TRACK_SENDS: FieldKey = (TRACK, "sends");
+    pub(crate) const TRACK_POLY: FieldKey = (TRACK, "poly");
+    pub(crate) const TRACK_MAX_POLYPHONY: FieldKey = (TRACK, "max-polyphony");
+    pub(crate) const TRACK_GATE: FieldKey = (TRACK, "gate");
+    pub(crate) const TRACK_SUPPORTS_MONO_TRIGGER: FieldKey = (TRACK, "supports-mono-trigger");
+    pub(crate) const TRACK_VOICE_PRIORITY: FieldKey = (TRACK, "voice-priority");
+    pub(crate) const TRACK_MONO_TRIGGER: FieldKey = (TRACK, "mono-trigger");
+    pub(crate) const TRACK_MUTE_GROUP: FieldKey = (TRACK, "mute-group");
+    pub(crate) const TRACK_SWING: FieldKey = (TRACK, "swing");
+    pub(crate) const TRACK_SWING_RESOLUTION: FieldKey = (TRACK, "swing-resolution");
+    pub(crate) const TRACK_FTS: FieldKey = (TRACK, "fts");
+    pub(crate) const TRACK_TUNING: FieldKey = (TRACK, "tuning");
+    pub(crate) const TRACK_ACCUMULATOR: FieldKey = (TRACK, "accumulator");
+    pub(crate) const TRACK_ACCUM_MODE: FieldKey = (TRACK, "accum-mode");
+    pub(crate) const TRACK_ACCUM_LIMIT: FieldKey = (TRACK, "accum-limit");
+    pub(crate) const TRACK_OUTPUT: FieldKey = (TRACK, "output");
+    pub(crate) const TRACK_MOD_OUTPUT: FieldKey = (TRACK, "mod-output");
+    pub(crate) const TRACK_MOD_OUT_LEVEL: FieldKey = (TRACK, "mod-out-level");
+    pub(crate) const TRACK_MOD_IN: [FieldKey; 4] = [
+        (TRACK, "mod-in-1"),
+        (TRACK, "mod-in-2"),
+        (TRACK, "mod-in-3"),
+        (TRACK, "mod-in-4"),
+    ];
+    pub(crate) const TRACK_BAR_TRANSPOSES: FieldKey = (TRACK, "bar-transposes");
+    pub(crate) const TRACK_DELETE_TARGET: FieldKey = (TRACK, "delete-target");
 
     pub(crate) const STEP_INDEX: FieldKey = (STEP, "index");
     pub(crate) const STEP_TRACK: FieldKey = (STEP, "track");
@@ -162,6 +197,41 @@ pub(crate) mod f {
     pub(crate) const BUS_MUTED: FieldKey = (BUS, "muted");
     pub(crate) const BUS_SOLOED: FieldKey = (BUS, "soloed");
     pub(crate) const BUS_PEAK: FieldKey = (BUS, "peak");
+    pub(crate) const BUS_OUTPUT: FieldKey = (BUS, "output");
+    pub(crate) const BUS_OUTPUT_OPTIONS: FieldKey = (BUS, "output-options");
+    pub(crate) const BUS_MOD_IN: [FieldKey; 4] = [
+        (BUS, "mod-in-1"),
+        (BUS, "mod-in-2"),
+        (BUS, "mod-in-3"),
+        (BUS, "mod-in-4"),
+    ];
+
+    pub(crate) const TUNING_TRACK: FieldKey = (TUNING, "track");
+    pub(crate) const TUNING_ON: FieldKey = (TUNING, "on");
+    pub(crate) const TUNING_SCALE: FieldKey = (TUNING, "scale");
+    pub(crate) const TUNING_CUSTOM: FieldKey = (TUNING, "custom");
+    pub(crate) const TUNING_EDITED: FieldKey = (TUNING, "edited");
+    pub(crate) const TUNING_ROOT: FieldKey = (TUNING, "root");
+    pub(crate) const TUNING_MORPH: FieldKey = (TUNING, "morph");
+    pub(crate) const TUNING_MODE: FieldKey = (TUNING, "mode");
+    pub(crate) const TUNING_PERIOD: FieldKey = (TUNING, "period");
+    pub(crate) const TUNING_DEGREES: FieldKey = (TUNING, "degrees");
+
+    pub(crate) const DEGREE_TUNING: FieldKey = (DEGREE, "tuning");
+    pub(crate) const DEGREE_INDEX: FieldKey = (DEGREE, "index");
+    pub(crate) const DEGREE_BASE: FieldKey = (DEGREE, "base");
+    pub(crate) const DEGREE_OFFSET: FieldKey = (DEGREE, "offset");
+    pub(crate) const DEGREE_ENABLED: FieldKey = (DEGREE, "enabled");
+    pub(crate) const DEGREE_PITCH: FieldKey = (DEGREE, "pitch");
+    pub(crate) const DEGREE_LABEL: FieldKey = (DEGREE, "label");
+    pub(crate) const DEGREE_RATIO: FieldKey = (DEGREE, "ratio");
+
+    pub(crate) const ROUTE_INDEX: FieldKey = (ROUTE, "index");
+    pub(crate) const ROUTE_SOURCE: FieldKey = (ROUTE, "source");
+    pub(crate) const ROUTE_DEST: FieldKey = (ROUTE, "dest");
+    pub(crate) const ROUTE_DEST_BUS: FieldKey = (ROUTE, "dest-bus");
+    pub(crate) const ROUTE_INPUT: FieldKey = (ROUTE, "input");
+    pub(crate) const ROUTE_SELECTED: FieldKey = (ROUTE, "selected");
 
     pub(crate) const GROUP_INDEX: FieldKey = (GROUP, "index");
     pub(crate) const GROUP_GID: FieldKey = (GROUP, "gid");
@@ -219,6 +289,8 @@ pub(crate) mod f {
     pub(crate) const TRANSPORT_METRONOME: FieldKey = (TRANSPORT, "metronome");
     pub(crate) const TRANSPORT_ROLL_MODE: FieldKey = (TRANSPORT, "roll-mode");
     pub(crate) const TRANSPORT_RECORD_QUANTIZE: FieldKey = (TRANSPORT, "record-quantize");
+    pub(crate) const TRANSPORT_ROLL_RATE: FieldKey = (TRANSPORT, "roll-rate");
+    pub(crate) const TRANSPORT_SEQUENCE_ROLLING: FieldKey = (TRANSPORT, "sequence-rolling");
 
     pub(crate) const MASTER_PEAK_L: FieldKey = (MASTER, "peak-l");
     pub(crate) const MASTER_PEAK_R: FieldKey = (MASTER, "peak-r");
@@ -226,15 +298,27 @@ pub(crate) mod f {
 
     pub(crate) const ENGINE_CPU_LOAD: FieldKey = (ENGINE, "cpu-load");
     pub(crate) const ENGINE_LATENCY_MS: FieldKey = (ENGINE, "latency-ms");
+    pub(crate) const ENGINE_OVERLOADED: FieldKey = (ENGINE, "overloaded");
+    pub(crate) const ENGINE_COMPILING: FieldKey = (ENGINE, "compiling");
 
     pub(crate) const SELECTION_TRACK: FieldKey = (SELECTION, "track");
     pub(crate) const SELECTION_TRACKS: FieldKey = (SELECTION, "tracks");
+    pub(crate) const SELECTION_STEPS: FieldKey = (SELECTION, "steps");
+    pub(crate) const SELECTION_CURSOR_STEP: FieldKey = (SELECTION, "cursor-step");
+    pub(crate) const SELECTION_EDIT_STEP: FieldKey = (SELECTION, "edit-step");
+    pub(crate) const SELECTION_RACK_SLOT: FieldKey = (SELECTION, "rack-slot");
+    pub(crate) const SELECTION_AUTO_FOLLOW: FieldKey = (SELECTION, "auto-follow");
 
     pub(crate) const PROJECT_TRACKS: FieldKey = (PROJECT, "tracks");
     pub(crate) const PROJECT_SCENES: FieldKey = (PROJECT, "scenes");
     pub(crate) const PROJECT_BANKS: FieldKey = (PROJECT, "banks");
     pub(crate) const PROJECT_BUSES: FieldKey = (PROJECT, "buses");
     pub(crate) const PROJECT_GROUPS: FieldKey = (PROJECT, "groups");
+    pub(crate) const PROJECT_ROUTES: FieldKey = (PROJECT, "routes");
+    pub(crate) const PROJECT_FTS_OPTIONS: FieldKey = (PROJECT, "fts-options");
+    pub(crate) const PROJECT_SYNC_OPTIONS: FieldKey = (PROJECT, "sync-options");
+    pub(crate) const PROJECT_ACCUMULATOR_OPTIONS: FieldKey = (PROJECT, "accumulator-options");
+    pub(crate) const PROJECT_OUTPUT_OPTIONS: FieldKey = (PROJECT, "output-options");
 }
 
 /// Every kind and `:host` field the host publishes, with its type as
@@ -265,6 +349,31 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     (f::TRACK_RACK, ":bool", Model),
     (f::TRACK_GROUP, "group", Model),
     (f::TRACK_SENDS, "(list-of send)", Model),
+    // Track settings: read from the `App` at the model sync, pushed when
+    // they changed (`settings`).
+    (f::TRACK_POLY, ":bool", Model),
+    (f::TRACK_MAX_POLYPHONY, ":int", Model),
+    (f::TRACK_GATE, ":bool", Model),
+    (f::TRACK_SUPPORTS_MONO_TRIGGER, ":bool", Model),
+    (f::TRACK_VOICE_PRIORITY, ":string", Model),
+    (f::TRACK_MONO_TRIGGER, ":string", Model),
+    (f::TRACK_MUTE_GROUP, ":int", Model),
+    (f::TRACK_SWING, ":number", Model),
+    (f::TRACK_SWING_RESOLUTION, ":string", Model),
+    (f::TRACK_FTS, ":string", Model),
+    (f::TRACK_TUNING, "tuning", Model),
+    (f::TRACK_ACCUMULATOR, ":string", Model),
+    (f::TRACK_ACCUM_MODE, ":string", Model),
+    (f::TRACK_ACCUM_LIMIT, ":number", Model),
+    (f::TRACK_OUTPUT, "bus", Model),
+    (f::TRACK_MOD_OUTPUT, ":bool", Model),
+    (f::TRACK_MOD_OUT_LEVEL, ":number", Live),
+    (f::TRACK_MOD_IN[0], ":number", Live),
+    (f::TRACK_MOD_IN[1], ":number", Live),
+    (f::TRACK_MOD_IN[2], ":number", Live),
+    (f::TRACK_MOD_IN[3], ":number", Live),
+    (f::TRACK_BAR_TRANSPOSES, "(list-of :number)", Live),
+    (f::TRACK_DELETE_TARGET, ":bool", Live),
     (f::STEP_INDEX, ":int", Model),
     (f::STEP_TRACK, "track", Model),
     (f::STEP_ACTIVE, ":bool", Live),
@@ -332,6 +441,36 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     (f::BUS_MUTED, ":bool", Model),
     (f::BUS_SOLOED, ":bool", Model),
     (f::BUS_PEAK, ":number", Live),
+    (f::BUS_OUTPUT, "bus", Model),
+    (f::BUS_OUTPUT_OPTIONS, "(list-of bus)", Model),
+    (f::BUS_MOD_IN[0], ":number", Live),
+    (f::BUS_MOD_IN[1], ":number", Live),
+    (f::BUS_MOD_IN[2], ":number", Live),
+    (f::BUS_MOD_IN[3], ":number", Live),
+    (f::TUNING_TRACK, "track", Model),
+    (f::TUNING_ON, ":bool", Model),
+    (f::TUNING_SCALE, ":string", Model),
+    (f::TUNING_CUSTOM, ":bool", Model),
+    (f::TUNING_EDITED, ":bool", Model),
+    (f::TUNING_ROOT, ":string", Model),
+    (f::TUNING_MORPH, ":number", Model),
+    (f::TUNING_MODE, ":string", Model),
+    (f::TUNING_PERIOD, ":number", Model),
+    (f::TUNING_DEGREES, "(list-of degree)", Model),
+    (f::DEGREE_TUNING, "tuning", Model),
+    (f::DEGREE_INDEX, ":int", Model),
+    (f::DEGREE_BASE, ":number", Model),
+    (f::DEGREE_OFFSET, ":number", Model),
+    (f::DEGREE_ENABLED, ":bool", Model),
+    (f::DEGREE_PITCH, ":number", Model),
+    (f::DEGREE_LABEL, ":string", Model),
+    (f::DEGREE_RATIO, ":string", Model),
+    (f::ROUTE_INDEX, ":int", Model),
+    (f::ROUTE_SOURCE, "track", Model),
+    (f::ROUTE_DEST, "track", Model),
+    (f::ROUTE_DEST_BUS, "bus", Model),
+    (f::ROUTE_INPUT, ":int", Model),
+    (f::ROUTE_SELECTED, ":bool", Live),
     (f::GROUP_INDEX, ":int", Model),
     (f::GROUP_GID, ":int", Model),
     (f::GROUP_NAME, ":string", Model),
@@ -350,18 +489,34 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     (f::TRANSPORT_METRONOME, ":bool", Live),
     (f::TRANSPORT_ROLL_MODE, ":bool", Live),
     (f::TRANSPORT_RECORD_QUANTIZE, ":string", Live),
+    (f::TRANSPORT_ROLL_RATE, ":string", Live),
+    (f::TRANSPORT_SEQUENCE_ROLLING, ":bool", Live),
     (f::MASTER_PEAK_L, ":number", Live),
     (f::MASTER_PEAK_R, ":number", Live),
     (f::MASTER_RECORDING, ":bool", Live),
     (f::ENGINE_CPU_LOAD, ":number", Live),
     (f::ENGINE_LATENCY_MS, ":number", Live),
+    (f::ENGINE_OVERLOADED, ":bool", Live),
+    // Compared every tick (the `App`'s pending compile moves no counter).
+    (f::ENGINE_COMPILING, ":bool", Model),
     (f::SELECTION_TRACK, "track", Live),
     (f::SELECTION_TRACKS, "(list-of track)", Live),
+    (f::SELECTION_STEPS, "(list-of step)", Live),
+    (f::SELECTION_CURSOR_STEP, "step", Live),
+    (f::SELECTION_EDIT_STEP, "step", Live),
+    (f::SELECTION_RACK_SLOT, ":int", Model),
+    (f::SELECTION_AUTO_FOLLOW, ":bool", Live),
     (f::PROJECT_TRACKS, "(list-of track)", Model),
     (f::PROJECT_SCENES, "(list-of scene)", Model),
     (f::PROJECT_BANKS, "(list-of bank)", Model),
     (f::PROJECT_BUSES, "(list-of bus)", Model),
     (f::PROJECT_GROUPS, "(list-of group)", Model),
+    (f::PROJECT_ROUTES, "(list-of route)", Model),
+    // The fixed lists once; the others when they change (`settings`).
+    (f::PROJECT_FTS_OPTIONS, "(list-of :string)", Model),
+    (f::PROJECT_SYNC_OPTIONS, "(list-of :string)", Model),
+    (f::PROJECT_ACCUMULATOR_OPTIONS, "(list-of :string)", Model),
+    (f::PROJECT_OUTPUT_OPTIONS, "(list-of bus)", Model),
 ];
 
 /// The published kinds, in [`PUBLISHED`] order.
@@ -397,6 +552,8 @@ impl LiveFields {
             .filter(|((published, _), _, feed)| *published == kind && *feed == Live)
             .map(|(key, _, _)| *key)
             .collect();
+        // Observed masks are `u32`s.
+        assert!(keys.len() <= 32, "{kind} has more than 32 live fields");
         let names = keys.iter().map(|(_, name)| *name).collect();
         Self { keys, names }
     }
@@ -405,6 +562,11 @@ impl LiveFields {
     pub(super) fn bit(&self, key: FieldKey) -> u32 {
         let index = self.keys.iter().position(|live| *live == key);
         index.map_or(0, |index| 1 << index)
+    }
+
+    /// The observed-mask bits of `keys`.
+    pub(super) fn bits(&self, keys: &[FieldKey]) -> u32 {
+        keys.iter().fold(0, |bits, key| bits | self.bit(*key))
     }
 }
 
@@ -419,6 +581,7 @@ pub(super) static BUS_LIVE: LazyLock<LiveFields> = LazyLock::new(|| LiveFields::
 pub(super) static MASTER_LIVE: LazyLock<LiveFields> = LazyLock::new(|| LiveFields::of(MASTER));
 pub(super) static ENGINE_LIVE: LazyLock<LiveFields> = LazyLock::new(|| LiveFields::of(ENGINE));
 pub(super) static PARAM_LIVE: LazyLock<LiveFields> = LazyLock::new(|| LiveFields::of(PARAM));
+pub(super) static ROUTE_LIVE: LazyLock<LiveFields> = LazyLock::new(|| LiveFields::of(ROUTE));
 
 /// The step fields diffed by value per tick (beside `active`, `selected`
 /// and `playing`): `held`, then the step parameters, whose field names are
@@ -676,6 +839,33 @@ pub(crate) struct HostKinds {
     peaks_observed: bool,
     bus_peaks_observed: bool,
     master_peaks_observed: bool,
+    /// Whether a track's or a bus's mod port level was observed at the
+    /// last sync.
+    track_mod_levels_observed: bool,
+    bus_mod_levels_observed: bool,
+    /// Each track's settings as last pushed ([`TrackSettings`]), each
+    /// tuning instance's scale and tuning as last pushed, and the project's
+    /// option lists.
+    settings: HashMap<InstanceId, TrackSettings>,
+    tunings: HashMap<InstanceId, (usize, sequencer::scale::TrackTuning)>,
+    project_options: ProjectOptions,
+    /// `t.bar-transposes` last pushed, per observing track.
+    bar_transposes: HashMap<InstanceId, Vec<f64>>,
+    /// Route id → instance; the ids are allocated per [`RouteKey`] while
+    /// the route exists (never reused), and forgotten on a project load
+    /// (track ids restart).
+    routes: HashMap<u64, InstanceId>,
+    route_keys: HashMap<RouteKey, u64>,
+    next_route_id: u64,
+    route_ids: Vec<Option<InstanceId>>,
+    route_observed: ObservedList,
+    /// `engine.compiling` last pushed.
+    compiling: Option<bool>,
+    /// The current track `selection.rack-slot` was last computed for.
+    rack_slot_track: Option<usize>,
+    /// (current track, its length, the step cursor) when `selection`'s
+    /// step fields were last pushed; `None` forces a push.
+    selection_cursor: Option<(usize, usize, usize)>,
 }
 
 impl HostKinds {
@@ -694,6 +884,11 @@ impl HostKinds {
     /// Like [`Self::wants_peaks`], for the master meter.
     pub(crate) fn wants_master_peaks(&self) -> bool {
         self.master_peaks_observed
+    }
+
+    /// Like [`Self::wants_peaks`], for the mod port levels.
+    pub(crate) fn wants_mod_levels(&self) -> bool {
+        self.track_mod_levels_observed || self.bus_mod_levels_observed
     }
 
     /// One sync: schema check (on change), registry and model fields (on a
@@ -740,6 +935,7 @@ impl HostKinds {
         }
         if self.refresh_schema(rt) {
             self.model = None;
+            self.reset_project_options();
         }
         if self.sources.is_none() {
             install_reader(rt, sources.clone(), self.shared.clone());
@@ -770,6 +966,9 @@ impl HostKinds {
             self.bus_observers = None;
             self.bus_mixer.clear();
             self.selection_tracks = None;
+            self.selection_cursor = None;
+            self.rack_slot_track = None;
+            self.compiling = None;
             self.replace_on_project_load(&mut pusher, app);
             let buses_done = self.sync_bus_model(&mut pusher, app);
             let tracks_done = self.sync_track_model(&mut pusher, app);
@@ -791,11 +990,14 @@ impl HostKinds {
         }
         self.sync_transport_queue(&mut pusher, app);
         self.sync_bus_mixer(&mut pusher, app);
+        self.sync_compiling(&mut pusher, app);
+        self.sync_rack_slot(&mut pusher, app);
         let selection_changed = self.selection.refresh(&sources);
         self.sync_track_live(&mut pusher, selection_changed);
         self.sync_send_live(&mut pusher);
         self.sync_device_live(&mut pusher, app);
         self.sync_bus_live(&mut pusher);
+        self.sync_route_live(&mut pusher);
         for (kind, fields) in [(TRANSPORT, &*TRANSPORT_LIVE), (ENGINE, &*ENGINE_LIVE)] {
             if let Some(id) = pusher.singleton(kind) {
                 pusher.push_live(id, fields);
@@ -805,7 +1007,7 @@ impl HostKinds {
         self.master_peaks_observed = pusher
             .singleton(MASTER)
             .is_some_and(|id| pusher.push_live(id, &MASTER_LIVE) & master_peaks != 0);
-        self.sync_selection(&mut pusher);
+        self.sync_selection(&mut pusher, selection_changed);
         let changed = pusher.changed;
         if changed {
             rt.run_reactive_cycle();
@@ -847,6 +1049,7 @@ impl HostKinds {
             .chain(&self.bank_ids)
             .chain(&self.bus_ids)
             .chain(&self.group_ids)
+            .chain(&self.route_ids)
             .flatten()
             .any(|id| !rt.instance_is_live(*id))
     }
@@ -865,23 +1068,49 @@ impl HostKinds {
             .tracks
             .drain()
             .chain(self.buses.drain())
-            .chain(self.groups.drain());
+            .chain(self.groups.drain())
+            .chain(self.routes.drain());
         for (_, id) in doomed {
             pusher.rt.drop_instance(id);
             pusher.changed = true;
         }
+        self.route_keys.clear();
         self.track_generation = Some(generation);
     }
 
-    /// `selection.track`, and `selection.tracks` when observed and the
-    /// sorted selection changed since the last push.
-    fn sync_selection(&mut self, pusher: &mut Pusher<'_>) {
+    /// `selection.track` and `auto-follow` when observed; `selection.tracks`
+    /// when observed and the sorted selection changed since the last push;
+    /// the step fields (`steps`, `cursor-step`, `edit-step`) when observed
+    /// and the step selection (`selection_changed`), the current track, its
+    /// length or the step cursor moved.
+    fn sync_selection(&mut self, pusher: &mut Pusher<'_>, selection_changed: bool) {
         let Some(id) = pusher.singleton(SELECTION) else {
             return;
         };
         let mask = pusher.rt.host_fields_observed(id, &SELECTION_LIVE.names);
-        if mask & SELECTION_LIVE.bit(f::SELECTION_TRACK) != 0 {
-            pusher.push_live_field(id, f::SELECTION_TRACK);
+        let always = SELECTION_LIVE.bits(&[f::SELECTION_TRACK, f::SELECTION_AUTO_FOLLOW]);
+        pusher.push_live_masked(id, &SELECTION_LIVE, mask & always);
+        let step_bits = SELECTION_LIVE.bits(&[
+            f::SELECTION_STEPS,
+            f::SELECTION_CURSOR_STEP,
+            f::SELECTION_EDIT_STEP,
+        ]);
+        if mask & step_bits == 0 {
+            self.selection_cursor = None;
+        } else {
+            let sources = pusher.sources;
+            let current = sources.current_track.load(Ordering::Relaxed);
+            let num_steps = if sources.track_exists(current) {
+                sources.num_steps(current)
+            } else {
+                0
+            };
+            let cursor = fx_step_cursor_value(pusher.rt.global_value(FX_STEP_CURSOR_GLOBAL));
+            let key = Some((current, num_steps, cursor));
+            if selection_changed || self.selection_cursor != key {
+                self.selection_cursor = key;
+                pusher.push_live_masked(id, &SELECTION_LIVE, mask & step_bits);
+            }
         }
         if mask & SELECTION_LIVE.bit(f::SELECTION_TRACKS) == 0 {
             self.selection_tracks = None;
@@ -892,6 +1121,38 @@ impl HostKinds {
             pusher.push_live_field(id, f::SELECTION_TRACKS);
             self.selection_tracks = Some(tracks);
         }
+    }
+}
+
+impl HostKinds {
+    /// `engine.compiling`, compared every tick: a compile starts and lands
+    /// without moving a model counter.
+    fn sync_compiling(&mut self, pusher: &mut Pusher<'_>, app: &app::App) {
+        let compiling = app.compile_pending();
+        if self.compiling == Some(compiling) {
+            return;
+        }
+        if let Some(engine) = pusher.singleton(ENGINE) {
+            pusher.push(engine, f::ENGINE_COMPILING, Value::Bool(compiling));
+            self.compiling = Some(compiling);
+        }
+    }
+
+    /// `selection.rack-slot`: the current drum rack's selected slot (-1
+    /// when the current track is no rack), from
+    /// the `App`; re-derived at the model sync (selecting a slot moves the
+    /// UI epoch) and when the current track changes.
+    fn sync_rack_slot(&mut self, pusher: &mut Pusher<'_>, app: &app::App) {
+        let current = pusher.sources.current_track.load(Ordering::Relaxed);
+        if self.rack_slot_track == Some(current) {
+            return;
+        }
+        let Some(selection) = pusher.singleton(SELECTION) else {
+            return;
+        };
+        let slot = rack_slot_selection(app, current).map_or(-1.0, |(slot, _)| slot as f64);
+        pusher.push(selection, f::SELECTION_RACK_SLOT, number(slot));
+        self.rack_slot_track = Some(current);
     }
 }
 

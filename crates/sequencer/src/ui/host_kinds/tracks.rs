@@ -39,6 +39,14 @@ impl HostKinds {
                 shared.plock_renders.clear();
             }
         }
+        let accumulators = build_accumulator_names(app);
+        let accumulators_changed = self.sync_accumulator_options(pusher, &accumulators);
+        {
+            let rt = &*pusher.rt;
+            self.settings.retain(|id, _| rt.instance_is_live(*id));
+            self.tunings.retain(|id, _| rt.instance_is_live(*id));
+            self.bar_transposes.retain(|id, _| rt.instance_is_live(*id));
+        }
         let mut params_replaced = false;
         for (track, id) in tracks.iter().enumerate() {
             let Some(id) = *id else { continue };
@@ -65,6 +73,7 @@ impl HostKinds {
             let sends = sync_sends(pusher, app, id, &self.buses);
             self.send_ids.extend_from_slice(&sends);
             pusher.push(id, f::TRACK_SENDS, instance_list(sends));
+            self.sync_track_settings(pusher, app, track, id, &accumulators, accumulators_changed);
         }
         if self.device_ids != previous_devices {
             self.device_observed.reset();
@@ -88,6 +97,7 @@ impl HostKinds {
                 instance_list(tracks.iter().flatten().copied()),
             );
         }
+        self.sync_route_model(pusher, app, &tracks);
         self.track_ids = tracks;
         holders.is_some()
     }
@@ -96,14 +106,25 @@ impl HostKinds {
     pub(super) fn sync_track_live(&mut self, pusher: &mut Pusher<'_>, selection_changed: bool) {
         let peak_bit = TRACK_LIVE.bit(f::TRACK_PEAK);
         let steps_bit = TRACK_LIVE.bit(f::TRACK_STEPS);
+        let bars_bit = TRACK_LIVE.bit(f::TRACK_BAR_TRANSPOSES);
+        let mod_bits = TRACK_LIVE.bits(&f::TRACK_MOD_IN) | TRACK_LIVE.bit(f::TRACK_MOD_OUT_LEVEL);
         let mut peaks_observed = false;
-        for (track, id) in self.track_ids.iter().enumerate() {
-            let Some(id) = *id else { continue };
+        let mut mod_levels_observed = false;
+        for index in 0..self.track_ids.len() {
+            let (track, Some(id)) = (index, self.track_ids[index]) else {
+                continue;
+            };
             if !pusher.sources.track_exists(track) {
                 continue;
             }
-            let observed = pusher.push_live(id, &TRACK_LIVE);
+            let observed = pusher.push_live_except(id, &TRACK_LIVE, bars_bit);
             peaks_observed |= observed & peak_bit != 0;
+            mod_levels_observed |= observed & mod_bits != 0;
+            if observed & bars_bit != 0 {
+                self.sync_bar_transposes(pusher, track, id);
+            } else {
+                self.bar_transposes.remove(&id);
+            }
             let diff = self.steps.entry(id).or_default();
             sync_steps(
                 pusher,
@@ -117,6 +138,7 @@ impl HostKinds {
             );
         }
         self.peaks_observed = peaks_observed;
+        self.track_mod_levels_observed = mod_levels_observed;
     }
 
     /// The observed live fields of every send; nothing while no send

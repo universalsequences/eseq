@@ -3,7 +3,7 @@
 use super::*;
 
 /// The meter readings host kinds publish, from the tick's meter cache.
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy)]
 pub(crate) struct KindsMeters<'a> {
     /// Track meter levels by track position.
     pub(crate) tracks: &'a [f64],
@@ -13,25 +13,60 @@ pub(crate) struct KindsMeters<'a> {
     pub(crate) master: (f64, f64),
     /// Audio callback load, percent.
     pub(crate) cpu_load: f64,
+    /// The mod port levels (`t.mod-in-1`, …).
+    pub(crate) mod_ports: &'a ModPortLevels,
+    /// Whether the audio-overload warning shows.
+    pub(crate) overloaded: bool,
+}
+
+/// No mod port levels, for [`KindsMeters::default`].
+static NO_MOD_PORTS: ModPortLevels = ModPortLevels {
+    track_inputs: Vec::new(),
+    track_outputs: Vec::new(),
+    bus_inputs: Vec::new(),
+};
+
+impl Default for KindsMeters<'_> {
+    fn default() -> Self {
+        Self {
+            tracks: &[],
+            buses: &[],
+            master: (0.0, 0.0),
+            cpu_load: 0.0,
+            mod_ports: &NO_MOD_PORTS,
+            overloaded: false,
+        }
+    }
 }
 
 impl HostKinds {
-    /// The bus registry (by `BusId`), `index`, `bid`, `name` and
-    /// `project.buses`. Returns false when the bus ids were not distinct
-    /// this frame (nothing changed then).
+    /// The bus registry (by `BusId`), `index`, `bid`, `name`, `output`,
+    /// `output-options`, `project.buses` and `project.output-options`.
+    /// Returns false when the bus ids were not distinct this frame (nothing
+    /// changed then).
     pub(super) fn sync_bus_model(&mut self, pusher: &mut Pusher<'_>, app: &app::App) -> bool {
         let model: Vec<u64> = app.buses.iter().map(|bus| bus.id.0).collect();
         if !distinct(&model) {
             return false;
         }
         let buses = reconcile(pusher, BUS, &mut self.buses, &model);
+        let instance = |bus: sequencer::sequencer::BusId| self.buses.get(&bus.0).copied();
         for (index, id) in buses.iter().enumerate() {
             let Some(id) = *id else { continue };
             let bus = &app.buses[index];
             pusher.push(id, f::BUS_INDEX, number(index as f64));
             pusher.push(id, f::BUS_BID, number(bus.id.0 as f64));
             pusher.push(id, f::BUS_NAME, Value::String(bus.name.clone()));
+            // The main mix feeds nothing.
+            let output = (bus.id != sequencer::sequencer::BusId::MIX)
+                .then(|| instance(bus_output_destination(bus)))
+                .flatten();
+            pusher.push(id, f::BUS_OUTPUT, instance_or_nil(output));
+            let options = app.bus_output_options(bus.id).into_iter();
+            let options = instance_list(options.filter_map(instance));
+            pusher.push(id, f::BUS_OUTPUT_OPTIONS, options);
         }
+        pusher.shared.borrow_mut().bus_ids = model;
         if let Some(project) = pusher.singleton(PROJECT) {
             pusher.push(
                 project,
@@ -39,6 +74,7 @@ impl HostKinds {
                 instance_list(buses.iter().flatten().copied()),
             );
         }
+        self.sync_output_options(pusher, &buses);
         self.bus_ids = buses;
         true
     }
@@ -62,12 +98,92 @@ impl HostKinds {
         }
     }
 
-    /// The observed live fields of every bus (`peak`); nothing while none
-    /// is observed.
+    /// The observed live fields of every bus (`peak`, the mod inputs);
+    /// nothing while none is observed.
     pub(super) fn sync_bus_live(&mut self, pusher: &mut Pusher<'_>) {
         let ids = self.bus_ids.iter().flatten().copied();
         let observed = pusher.push_live_all(ids, &BUS_LIVE, &mut self.bus_observers);
         self.bus_peaks_observed = observed & BUS_LIVE.bit(f::BUS_PEAK) != 0;
+        self.bus_mod_levels_observed = observed & BUS_LIVE.bits(&f::BUS_MOD_IN) != 0;
+    }
+
+    /// The mod routes (`route`, keyed by their endpoints' stable ids:
+    /// [`RouteKey`]), their fields and `project.routes`. Runs after the
+    /// tracks (`tracks`, their instances by position) and buses. A route
+    /// naming a track the registry lacks, or repeating another's endpoints,
+    /// gets no instance.
+    pub(super) fn sync_route_model(
+        &mut self,
+        pusher: &mut Pusher<'_>,
+        app: &app::App,
+        tracks: &[Option<InstanceId>],
+    ) {
+        let track_ids = app.track_registry.ids();
+        let mut model = Vec::new();
+        let mut keys = Vec::new();
+        let mut connections = Vec::new();
+        for connection in app.state.current_mod_connections() {
+            let Some(key) = RouteKey::of(&connection, track_ids) else {
+                continue;
+            };
+            let id = *self.route_keys.entry(key).or_insert_with(|| {
+                self.next_route_id += 1;
+                self.next_route_id
+            });
+            if !model.contains(&id) {
+                model.push(id);
+                keys.push(key);
+                connections.push(connection);
+            }
+        }
+        // A route gone from the model loses its instance below; its key goes
+        // too (ids are never reused).
+        self.route_keys.retain(|key, _| keys.contains(key));
+        let routes = reconcile(pusher, ROUTE, &mut self.routes, &model);
+        let mut sources = HashMap::new();
+        for (index, (connection, id)) in connections.iter().zip(&routes).enumerate() {
+            let Some(id) = *id else { continue };
+            sources.insert(id, *connection);
+            let track = |track: usize| tracks.get(track).copied().flatten();
+            let (dest, dest_bus) = match connection.destination {
+                sequencer::sequencer::ModDestination::Track(dest) => (track(dest), None),
+                sequencer::sequencer::ModDestination::Bus(bus) => {
+                    (None, self.buses.get(&bus.0).copied())
+                }
+            };
+            pusher.push(id, f::ROUTE_INDEX, number(index as f64));
+            let source = track(connection.source_track);
+            pusher.push(id, f::ROUTE_SOURCE, instance_or_nil(source));
+            pusher.push(id, f::ROUTE_DEST, instance_or_nil(dest));
+            pusher.push(id, f::ROUTE_DEST_BUS, instance_or_nil(dest_bus));
+            // 1-4, as the `mod-in-N` fields name the inputs.
+            pusher.push(
+                id,
+                f::ROUTE_INPUT,
+                number(connection.dest_input as f64 + 1.0),
+            );
+        }
+        if let Some(project) = pusher.singleton(PROJECT) {
+            let list = instance_list(routes.iter().flatten().copied());
+            pusher.push(project, f::PROJECT_ROUTES, list);
+        }
+        pusher.shared.borrow_mut().routes = sources;
+        if routes != self.route_ids {
+            self.route_observed.reset();
+        }
+        self.route_ids = routes;
+    }
+
+    /// The observed route fields (`selected`), from a list kept per
+    /// observer epoch ([`ObservedList`]).
+    pub(super) fn sync_route_live(&mut self, pusher: &mut Pusher<'_>) {
+        let ids = &self.route_ids;
+        let names = &ROUTE_LIVE.names;
+        let ids = || ids.iter().flatten().copied().collect();
+        self.route_observed.refresh(pusher.rt, names, ids);
+        for &(id, mask, _) in &self.route_observed.entries {
+            pusher.push_live_masked(id, &ROUTE_LIVE, mask);
+        }
     }
 
     /// The group registry (by group id), the group fields and
@@ -116,5 +232,41 @@ impl HostKinds {
         }
         self.group_ids = groups;
         Some(holders)
+    }
+}
+
+/// A mod route's identity: its endpoints by stable id (the source's
+/// `TrackId`, the destination's `TrackId` or `BusId`) and the input.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub(super) struct RouteKey {
+    source: u64,
+    dest: RouteDest,
+    input: usize,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum RouteDest {
+    Track(u64),
+    Bus(u64),
+}
+
+impl RouteKey {
+    /// The key of `connection` (track positions) under the registry's
+    /// order `track_ids`; `None` when a track is out of range.
+    fn of(
+        connection: &sequencer::sequencer::ModConnection,
+        track_ids: &[sequencer::sequencer::TrackId],
+    ) -> Option<Self> {
+        let dest = match connection.destination {
+            sequencer::sequencer::ModDestination::Track(track) => {
+                RouteDest::Track(track_ids.get(track)?.0)
+            }
+            sequencer::sequencer::ModDestination::Bus(bus) => RouteDest::Bus(bus.0),
+        };
+        Some(Self {
+            source: track_ids.get(connection.source_track)?.0,
+            dest,
+            input: connection.dest_input,
+        })
     }
 }

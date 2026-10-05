@@ -82,18 +82,6 @@ pub(super) fn apply_device_param_base(
     true
 }
 
-/// Apply a script's history command: beside an active gesture that is not
-/// the script's own ([`app::edit::apply_command_beside_gesture`]), else
-/// plainly. Returns whether the model changed.
-fn apply_script_command(app: &mut app::App, command: app::AppCommand, beside: bool) -> bool {
-    let outcome = if beside {
-        app::edit::apply_command_beside_gesture(app, command)
-    } else {
-        app::try_apply_command(app, command)
-    };
-    outcome.is_ok_and(|outcome| outcome != app::edit::EditOutcome::NoOp)
-}
-
 /// The host kinds' param edits (`param.base`'s `:set`, `lock-param!`,
 /// `unlock-param!` in `eseq.kinds`), addressed by stable ids resolved when
 /// the command lands (`:track-id`, the track's `TrackId`; `:device`, 0 for
@@ -164,8 +152,7 @@ fn device_param_edit(
         steps
     };
     let lock_at = |step: usize| slot_state.plocks.get(step, param_idx);
-    let active = app.history.active_gesture().map(|active| active.id);
-    let beside = active.is_some() && active != ctx.gesture.script_param_gesture;
+    let script = super::ScriptEdit::begin(app, ctx);
     let changed = if base {
         let Some(value) = value else {
             return fail("needs a :value");
@@ -179,7 +166,7 @@ fn device_param_edit(
             (track, device, param_idx),
             &pdesc,
             value,
-            |app, command| apply_script_command(app, command, beside),
+            |app, command| script.apply(app, command),
         )
     } else {
         let (steps, command) = if name == "set-device-param-locks" {
@@ -206,7 +193,7 @@ fn device_param_edit(
         let Some(command) = command.filter(|_| !steps.is_empty()) else {
             return;
         };
-        let changed = apply_script_command(app, command, beside);
+        let changed = script.apply(app, command);
         if changed {
             let invalidations = &ctx.shared.ui_invalidations;
             invalidations.push(device.invalidation(track, param_idx, true));
@@ -218,18 +205,7 @@ fn device_param_edit(
         }
         changed
     };
-    if beside {
-        return;
-    }
-    if base && ctx.gesture.pointer_down {
-        // A drag view: its later `set!`s join this entry until release.
-        ctx.gesture.script_param_gesture = app.history.active_gesture().map(|active| active.id);
-    } else {
-        if changed {
-            app::edit::finish_active_gesture(app);
-        }
-        ctx.gesture.script_param_gesture = None;
-    }
+    script.end(app, ctx, base, changed);
 }
 
 #[allow(clippy::too_many_lines)]

@@ -22,6 +22,11 @@ impl CpuOverloadIndicator {
         self.displayed = active;
         Some(active)
     }
+
+    /// Whether the warning shows (as of the last [`Self::update`]).
+    pub(crate) fn displayed(&self) -> bool {
+        self.displayed
+    }
 }
 
 #[derive(Debug, Clone, Default)]

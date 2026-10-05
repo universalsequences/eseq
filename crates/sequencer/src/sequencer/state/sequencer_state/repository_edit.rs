@@ -545,8 +545,16 @@ impl SequencerState {
         Ok(())
     }
 
+    /// The current scene's mod connections (cloning nothing else of the
+    /// scene).
     pub fn current_mod_connections(&self) -> Vec<ModConnection> {
-        self.current_scene_metadata().0
+        let current_pattern = self.current_pattern_index();
+        self.pattern
+            .scenes
+            .lock()
+            .unwrap()
+            .scene_mod_connections(current_pattern)
+            .unwrap_or_default()
     }
 
     pub fn edit_current_mod_connections<F, R>(&self, edit: F) -> Result<R, String>
