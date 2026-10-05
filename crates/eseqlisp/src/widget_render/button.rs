@@ -209,15 +209,6 @@ fn icon_value(props: &HashMap<String, Value>) -> Option<f32> {
     }
 }
 
-fn click_info(phase: &str, modifiers: KeyModifiers) -> Value {
-    let mut info = super::pointer_modifier_info(modifiers);
-    info.insert(
-        "phase".to_string(),
-        std::rc::Rc::new(std::cell::RefCell::new(Value::String(phase.to_string()))),
-    );
-    Value::Map(info)
-}
-
 fn normalized_corner_radius(rect: Rect, viewport: super::WidgetViewport, radius_px: f32) -> f32 {
     if radius_px <= 0.0 {
         return 0.001;
@@ -932,16 +923,25 @@ impl WidgetDefinition for ButtonWidget {
         if node.widget_type == "badge" {
             return None;
         }
-        let (callback_name, phase, modifiers) = match event {
-            WidgetEvent::Activate(modifiers) => ("on-click", "click", modifiers),
-            WidgetEvent::PointerDown(_) => ("on-press", "press", KeyModifiers::empty()),
-            WidgetEvent::PointerUp(_) => ("on-release", "release", KeyModifiers::empty()),
+        // Activate also comes from Enter/Space and carries no position, so
+        // on-click reports the widget's top-left; press/release carry a
+        // position but no modifier state.
+        let (callback_name, phase, modifiers, col, row) = match event {
+            WidgetEvent::Activate(modifiers) => {
+                ("on-click", "click", modifiers, node.rect.col, node.rect.row)
+            }
+            WidgetEvent::PointerDown(pe) => {
+                ("on-press", "press", KeyModifiers::empty(), pe.local_col, pe.local_row)
+            }
+            WidgetEvent::PointerUp(pe) => {
+                ("on-release", "release", KeyModifiers::empty(), pe.local_col, pe.local_row)
+            }
             _ => return None,
         };
         let callback = node.props.get(callback_name)?.clone();
         Some(EventOutput {
             callback,
-            args: vec![click_info(phase, modifiers)],
+            args: vec![super::pointer_event_info(phase, modifiers, node, col, row)],
         })
     }
 

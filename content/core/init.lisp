@@ -1,6 +1,13 @@
 ;; init.lisp — loaded at editor startup
 ;; Define commands and key bindings here.
 
+;; ── Stdlib macros ─────────────────────────────────────────────────────────
+;; Unqualified, so every module sees them through the flat macro table.
+;; (when c a b) runs a and b only when c is truthy; otherwise nil.
+(defmacro when (c &rest body) `(if ,c (do ,@body) nil))
+;; (toggle! place) flips a boolean place: a variable or a dotted field.
+(defmacro toggle! (place) `(set! ,place (not ,place)))
+
 ;; Evaluate the s-expression at the cursor and show the result in the minibuffer.
 ;; (eval ...) is a native that schedules the string to run after this handler returns.
 (def eval-sexp ()

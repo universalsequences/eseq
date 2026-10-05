@@ -9848,6 +9848,59 @@ mod tests {
     }
 
     #[test]
+    fn import_of_a_directory_module_loads_its_index() {
+        // kind-bindings spec §11: `(import eseq.effects)` loads
+        // ui/effects/index.lisp. The sibling ui/effects.lisp is a headerless
+        // load manifest (as in the factory tree) and must not be imported;
+        // if it were, it would raise the marker error below.
+        for via_load_root in [true, false] {
+            let mut vm = module_test_vm();
+            let root = std::env::temp_dir().join(format!(
+                "eseqlisp-modules-dir-index-{via_load_root}-{}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&root);
+            let dir = root.join("ui/index-probe");
+            std::fs::create_dir_all(&dir).expect("create ui/index-probe");
+            std::fs::write(
+                root.join("ui/index-probe.lisp"),
+                "(error \"sibling manifest was imported\")",
+            )
+            .expect("write sibling manifest");
+            std::fs::write(
+                dir.join("index.lisp"),
+                "(module eseq.index-probe)\n(import eseq.index-probe.leaf)\n(export v)\n(def v () 5)",
+            )
+            .expect("write index");
+            std::fs::write(
+                dir.join("leaf.lisp"),
+                "(module eseq.index-probe.leaf)\n(export w)\n(def w () 7)",
+            )
+            .expect("write leaf");
+            if via_load_root {
+                vm.source_manager.set_module_load_roots(vec![root.clone()]);
+            } else {
+                vm.source_manager.set_cwd(root.clone());
+            }
+            let result = vm
+                .eval_module_source(
+                    root.join("consumer.lisp"),
+                    "(import eseq.index-probe)\n(+ (eseq.index-probe/v) (eseq.index-probe.leaf/w))",
+                    1,
+                )
+                .expect("import directory module");
+            assert_eq!(result, Some(Value::Number(12.0)), "via_load_root={via_load_root}");
+            assert!(
+                vm.source_load_errors.is_empty(),
+                "via_load_root={via_load_root}: {:?}",
+                vm.source_load_errors
+            );
+            assert!(vm.declared_modules.contains_key("eseq.index-probe"));
+            let _ = std::fs::remove_dir_all(root);
+        }
+    }
+
+    #[test]
     fn import_refer_binds_bare_symbols() {
         let mut vm = module_test_vm();
         let helper = std::env::temp_dir().join(format!(

@@ -837,6 +837,7 @@ impl WidgetDefinition for TimelineWidget {
         node: &LayoutNode,
         local_col: f32,
         local_row: f32,
+        _modifiers: KeyModifiers,
     ) -> Option<WidgetEvent> {
         if get_num(&node.props, "placement-active", 0.0) > 0.0 {
             return None;
@@ -4633,7 +4634,11 @@ mod tests {
         }).expect("Escape cancels placement");
         let WidgetEvent::Custom(cancel) = cancel else { panic!("cancel action"); };
         assert_eq!(get_map(&cancel).unwrap().get("type"), Some(&keyword(":cancel-placement")));
-        assert!(TIMELINE_WIDGET.double_click_event(&node, 10.0, 1.0).is_none());
+        assert!(
+            TIMELINE_WIDGET
+                .double_click_event(&node, 10.0, 1.0, KeyModifiers::empty())
+                .is_none()
+        );
         let event = TIMELINE_WIDGET.mouse_event(&node, MouseEventKind::Up(MouseButton::Left),
             10.0, 1.0, None, None, KeyModifiers::NONE, 10.0, 20.0);
         let MouseEventOutcome::Dispatch(WidgetEvent::Custom(action)) = event else {

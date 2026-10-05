@@ -377,6 +377,7 @@ impl WidgetDefinition for AutomationLaneWidget {
         node: &LayoutNode,
         local_col: f32,
         _local_row: f32,
+        _modifiers: KeyModifiers,
     ) -> Option<WidgetEvent> {
         // Double-click cannot see the cell width; the design-pixel tolerance
         // is small enough that one cell is a fair stand-in.
@@ -678,7 +679,7 @@ mod tests {
         );
         assert!(matches!(outcome, MouseEventOutcome::Ignore));
         let event = AUTOMATION_LANE_WIDGET
-            .double_click_event(&node, 10.1, 5.0)
+            .double_click_event(&node, 10.1, 5.0, KeyModifiers::empty())
             .expect("double-click on a point");
         let output = AUTOMATION_LANE_WIDGET.handle_event(&node, event).unwrap();
         assert_eq!(output.args[0], Value::Keyword("clear".to_string()));

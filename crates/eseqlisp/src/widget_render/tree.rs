@@ -1311,6 +1311,7 @@ impl WidgetDefinition for TreeWidget {
         node: &LayoutNode,
         _local_col: f32,
         local_row: f32,
+        _modifiers: KeyModifiers,
     ) -> Option<WidgetEvent> {
         let items = get_items_from_props(&node.props);
         let expand_all = get_expand_all_prop(&node.props);

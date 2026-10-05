@@ -7318,6 +7318,7 @@ impl Editor {
                         content_row,
                         precise_col,
                         precise_row,
+                        mouse.modifiers,
                     ) {
                         self.remember_widget_click(
                             content_col,

@@ -122,12 +122,14 @@ An error inside a callback is logged and the element becomes `nil`. Set
 (let ((a 1) (b (+ a 1))) body…)    ; sequential: b sees a
 (-> x (f 1) g)  (->> x f)          ; threading
 (set! name value)
+(when c e1 e2)                     ; (if c (do e1 e2) nil)
+(toggle! place)                    ; (set! place (not place)); place may be a.b
 ```
 
-There is no `cond`, `when`, `unless`, `case`, `loop`, `while`, or `let*`.
-Nest `if`, and `let` is already sequential. There is no `try`/`catch`; a
-native error aborts the current evaluation and shows in `*lisp-reload*` or
-the status line.
+`when` and `toggle!` are macros from `content/core/init.lisp`. There is no
+`cond`, `unless`, `case`, `loop`, `while`, or `let*`. Nest `if`, and `let`
+is already sequential. There is no `try`/`catch`; a native error aborts
+the current evaluation and shows in `*lisp-reload*` or the status line.
 
 A list pattern in `let` or an argument list destructures a map by keyword,
 not a list by position:
@@ -271,14 +273,35 @@ file. Do not name a `def` or a parameter after a widget: a local called
 
 | widget | handler | receives |
 |---|---|---|
-| `box` `:on-click :on-drag :on-mouse-down …` | one event map | `phase x y col row shift ctrl alt super` |
-| `button :on-click` | one map | click info |
+| `box` `label` `:on-click :on-drag :on-mouse-down :on-mouse-up :on-right-click :on-double-click` | one pointer event map | see below |
+| `button :on-click :on-press :on-release` | one pointer event map | see below |
 | `slider knob number-picker tabs :on-change` | one number | |
 | `toggle :on-change` | one bool | |
 | `dropdown :on-change` | the option string | use `:value-index` for enums |
 | `text-input :on-change :on-submit` | string, none | |
 | `xy-pad :on-change` | `x y` | |
 | shader widgets `:on-drag` | `sx sy region` | normalized -1..1 |
+
+### Pointer events
+
+Pointer handlers receive a plain map; read it with dotted access (`e.u`).
+
+| Field | Meaning |
+|---|---|
+| `e.phase` | `"down"` `"drag"` `"up"` `"click"` `"right-click"` `"double-click"` (button: `"click"` `"press"` `"release"`) |
+| `e.u`, `e.v` | 0–1 position within the widget; `u` grows rightward, `v` downward |
+| `e.sx`, `e.sy` | the same position in -1..1 (`u = (sx + 1) / 2`) |
+| `e.x`, `e.y` | offset from the widget's top-left, in cells |
+| `e.at` | `(dict :col :row)`, the grid point a `context-menu` anchors to |
+| `e.col`, `e.row` | the same point as separate numbers |
+| `e.shift`, `e.cmd`, `e.alt`, `e.ctrl` | modifier booleans (`e.super` and `e.meta` alias `e.cmd`) |
+
+`u`/`v` are not clamped: a drag that leaves the widget reports values outside
+0–1. A `button` `:on-click` (which Enter/Space also fire) and a `box` or
+`label` `:on-click` fired from the keyboard carry no pointer position and
+report the widget's top-left (`u = v = 0`). `button` `:on-press` and
+`:on-release` report the modifiers as false. A right-click that bubbles to
+an ancestor's `:on-right-click` measures `u`/`v` against that ancestor.
 
 ### Children come from `each`
 
@@ -379,7 +402,10 @@ exported; `pc/param-set-control-value` reaches an export through its alias.
 A file with no `module` form belongs to `eseq.vanilla` and exports
 everything. Module `a.b.c` is the file `a/b/c.lisp` on the load path:
 `content/ui/` for factory code, then `~/.eseq.d/packages/<pkg>/src/`, then
-your user directory.
+your user directory. A module can also be a directory: `a.b` loads
+`a/b/index.lisp`, which is tried before a sibling `a/b.lisp` in the same
+root. `(import eseq.effects)` loads every module factory device UIs call by
+qualified name.
 
 `(load "@/ui/themes.lisp")` re-evaluates a file as a side effect. Use
 `import` for code you call and `load` for files whose evaluation is the point.

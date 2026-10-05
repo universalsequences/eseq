@@ -150,19 +150,24 @@ pub fn is_valid_module_name(name: &str) -> bool {
 /// are what resolve `eseq.effects.state` → `@/ui/effects/state.lisp`
 /// against the real layout. The rootless spellings resolve relative to the
 /// importing file (and cover harnesses whose cwd is the ui root itself).
+///
+/// A module name can also name a directory: `eseq.effects` →
+/// `effects/index.lisp` (kind-bindings spec §11), with the precedence
+/// documented on `module_relative_file_candidates`.
 pub fn module_file_candidates(name: &str) -> Vec<String> {
     let stripped = name.strip_prefix("eseq.").unwrap_or(name);
     let flat = format!("{stripped}.lisp");
-    let nested = format!("{}.lisp", stripped.replace('.', "/"));
-    let mut candidates = vec![
-        format!("@/ui/{flat}"),
-        format!("@/{flat}"),
-        flat.clone(),
-    ];
+    let path = stripped.replace('.', "/");
+    let nested = format!("{path}.lisp");
+    let index = format!("{path}/index.lisp");
+    let prefixes = ["@/ui/", "@/", ""];
+    let mut candidates = Vec::new();
     if nested != flat {
-        candidates.push(format!("@/ui/{nested}"));
-        candidates.push(format!("@/{nested}"));
-        candidates.push(nested);
+        candidates.extend(prefixes.iter().map(|prefix| format!("{prefix}{flat}")));
+    }
+    for prefix in prefixes {
+        candidates.push(format!("{prefix}{index}"));
+        candidates.push(format!("{prefix}{nested}"));
     }
     candidates
 }
@@ -171,17 +176,28 @@ pub fn module_file_candidates(name: &str) -> Vec<String> {
 /// user `modules/` and package `src/` roots; `ui/` spellings map the factory
 /// content root. Either shape also supports embedders that choose the more
 /// specific root.
+///
+/// Precedence: a directory's `index.lisp` is tried immediately before its
+/// sibling file (`effects/index.lisp` before `effects.lisp`), at each
+/// prefix. The sibling file of a directory module is in practice a
+/// headerless `load` manifest (ui/effects.lisp loads ui/effects/*), which
+/// must never be evaluated as an import. Roots still shadow in order: an
+/// earlier root's file beats a later root's index and vice versa. No
+/// pre-existing resolution changes, since the index candidates only ever
+/// match files named `index.lisp`.
 pub fn module_relative_file_candidates(name: &str) -> Vec<std::path::PathBuf> {
     let stripped = name.strip_prefix("eseq.").unwrap_or(name);
     let flat = std::path::PathBuf::from(format!("{stripped}.lisp"));
-    let nested = std::path::PathBuf::from(format!("{}.lisp", stripped.replace('.', "/")));
-    let mut candidates = vec![flat.clone()];
-    if nested != flat {
-        candidates.push(nested.clone());
-    }
-    candidates.push(std::path::Path::new("ui").join(&flat));
-    if nested != flat {
-        candidates.push(std::path::Path::new("ui").join(nested));
+    let path = stripped.replace('.', "/");
+    let nested = std::path::PathBuf::from(format!("{path}.lisp"));
+    let index = std::path::PathBuf::from(&path).join("index.lisp");
+    let mut candidates = Vec::new();
+    for prefix in [std::path::Path::new(""), std::path::Path::new("ui")] {
+        if nested != flat {
+            candidates.push(prefix.join(&flat));
+        }
+        candidates.push(prefix.join(&index));
+        candidates.push(prefix.join(&nested));
     }
     candidates
 }
@@ -214,6 +230,42 @@ pub fn strip_implicit(name: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn module_index_precedes_sibling_file() {
+        // Single segment: the directory index comes right before its
+        // sibling file at each prefix; the old order is otherwise kept.
+        assert_eq!(
+            module_relative_file_candidates("eseq.effects"),
+            ["effects/index.lisp", "effects.lisp", "ui/effects/index.lisp", "ui/effects.lisp"]
+                .map(std::path::PathBuf::from)
+        );
+        assert_eq!(
+            module_file_candidates("eseq.effects"),
+            [
+                "@/ui/effects/index.lisp",
+                "@/ui/effects.lisp",
+                "@/effects/index.lisp",
+                "@/effects.lisp",
+                "effects/index.lisp",
+                "effects.lisp",
+            ]
+        );
+        // Dotted: the flat `a.b.lisp` spelling keeps its place ahead of the
+        // nested directory forms.
+        assert_eq!(
+            module_relative_file_candidates("eseq.effects.state"),
+            [
+                "effects.state.lisp",
+                "effects/state/index.lisp",
+                "effects/state.lisp",
+                "ui/effects.state.lisp",
+                "ui/effects/state/index.lisp",
+                "ui/effects/state.lisp",
+            ]
+            .map(std::path::PathBuf::from)
+        );
+    }
 
     #[test]
     fn qualification_predicate() {

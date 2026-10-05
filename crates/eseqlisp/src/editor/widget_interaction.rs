@@ -1317,6 +1317,7 @@ impl Editor {
         content_row: u16,
         precise_col: f32,
         precise_row: f32,
+        modifiers: KeyModifiers,
     ) -> bool {
         let Some((local_col, local_row)) =
             hit::to_local(precise_col, precise_row, content_col, content_row)
@@ -1343,7 +1344,7 @@ impl Editor {
                 .offset_y
             });
         crate::widget_render::scroll::set_current_event_scroll_offset(event_scroll_offset);
-        if let Some(widget_event) = map_double_click_event(&node, scrolled_col, scrolled_row) {
+        if let Some(widget_event) = map_double_click_event(&node, scrolled_col, scrolled_row, modifiers) {
             crate::widget_render::scroll::set_current_event_scroll_offset(None);
             let output = handle_event(&node, widget_event);
             let _ = self.apply_widget_output(output);
@@ -1361,7 +1362,7 @@ impl Editor {
             return false;
         };
         let Some(widget_event) =
-            map_double_click_event(&double_click_node, scrolled_col, scrolled_row)
+            map_double_click_event(&double_click_node, scrolled_col, scrolled_row, modifiers)
         else {
             crate::widget_render::scroll::set_current_event_scroll_offset(None);
             return false;

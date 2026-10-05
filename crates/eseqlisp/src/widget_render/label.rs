@@ -560,11 +560,12 @@ impl WidgetDefinition for LabelWidget {
         node: &crate::layout::LayoutNode,
         local_col: f32,
         local_row: f32,
+        modifiers: KeyModifiers,
     ) -> Option<WidgetEvent> {
         node.props.contains_key("on-double-click").then(|| {
             WidgetEvent::Custom(super::pointer_event_info(
                 "double-click",
-                KeyModifiers::empty(),
+                modifiers,
                 node,
                 local_col,
                 local_row,

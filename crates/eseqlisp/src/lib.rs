@@ -768,6 +768,98 @@ mod tests {
         );
     }
 
+    /// `(import eseq.effects)` resolves to content/ui/effects/index.lisp
+    /// (kind-bindings spec §11) and loads every module factory device UIs
+    /// call by qualified name, without the app's ui/effects.lisp manifest.
+    #[test]
+    fn import_eseq_effects_loads_factory_ui_modules() {
+        let content = super::factory_core_dir().join("..");
+        let mut runtime = Runtime::new();
+        runtime.set_module_load_path(vec![content]);
+        // The host publishes SEQ; module bodies read it at load time.
+        runtime.register_reactive("SEQ", vec![], true);
+        let result = runtime.eval_str("(import eseq.effects)").unwrap();
+        assert!(!matches!(result, Some(Value::String(_))), "{result:?}");
+        assert_eq!(runtime.take_source_load_errors(), Vec::<String>::new());
+        for module in [
+            "eseq.effects",
+            "eseq.effects.state",
+            "eseq.effects.param-controls",
+            "eseq.effects.custom-ui-runtime",
+            "eseq.effects.custom-ui-sections",
+            "eseq.effects.custom-ui-controls",
+            "eseq.effects.custom-ui-lego",
+            "eseq.effects.custom-effect-ui",
+            "eseq.effects.mnm-surface",
+            "eseq.effects.drum-surface",
+            "eseq.effects.physical-model-surface",
+            "eseq.effects.identified-drum",
+            "eseq.effects.panel-bodies",
+        ] {
+            assert!(runtime.declared_modules().contains_key(module), "{module} not loaded");
+        }
+        // The entry points PM / drum / MnM factory UIs call.
+        for name in [
+            "eseq.effects.physical-model-surface/panel",
+            "eseq.effects.drum-surface/bind",
+            "eseq.effects.mnm-surface/mnm-panel",
+        ] {
+            let value = runtime.eval_str(name).unwrap();
+            assert!(
+                matches!(value, Some(Value::Function(..) | Value::Closure(..))),
+                "{name} = {value:?}"
+            );
+        }
+    }
+
+    /// `when` and `toggle!` come from content/core/init.lisp (kind-bindings
+    /// spec §6) and must be visible from inside a `(module ...)` too.
+    #[test]
+    fn core_init_when_and_toggle_macros() {
+        let init = include_str!("../../../content/core/init.lisp");
+        let mut runtime = Runtime::with_init_source(init);
+        let eval = |runtime: &mut Runtime, src: &str| runtime.eval_str(src).unwrap();
+
+        // when: every body form runs, the last one is the value.
+        assert_eq!(
+            eval(
+                &mut runtime,
+                "(module core-init-macro-test)
+                 (def n 0)
+                 (when (> 2 1) (set! n (+ n 1)) (set! n (+ n 10)) n)"
+            ),
+            Some(Value::Number(11.0))
+        );
+        assert_eq!(
+            eval(
+                &mut runtime,
+                "(def hits 0) (when true (set! hits (+ hits 1)) (set! hits (+ hits 10))) hits"
+            ),
+            Some(Value::Number(11.0))
+        );
+        // when: a false condition skips the body and yields nil.
+        assert_eq!(
+            eval(&mut runtime, "(when false (set! hits 99)) hits"),
+            Some(Value::Number(11.0))
+        );
+        assert_eq!(eval(&mut runtime, "(when false 1)"), Some(Value::Nil));
+
+        // toggle!: a plain variable.
+        assert_eq!(
+            eval(&mut runtime, "(def flag false) (toggle! flag) flag"),
+            Some(Value::Bool(true))
+        );
+        assert_eq!(
+            eval(&mut runtime, "(toggle! flag) flag"),
+            Some(Value::Bool(false))
+        );
+        // toggle!: a dotted map field.
+        assert_eq!(
+            eval(&mut runtime, "(def m (dict :on false)) (toggle! m.on) m.on"),
+            Some(Value::Bool(true))
+        );
+    }
+
     #[test]
     fn test_recursion() {
         assert_eq!(

@@ -1478,6 +1478,7 @@ impl WidgetDefinition for PatcherWidget {
         node: &LayoutNode,
         local_col: f32,
         local_row: f32,
+        _modifiers: KeyModifiers,
     ) -> Option<WidgetEvent> {
         if handle_patcher_double_click(node, local_col, local_row) {
             Some(WidgetEvent::Custom(Value::Nil))
