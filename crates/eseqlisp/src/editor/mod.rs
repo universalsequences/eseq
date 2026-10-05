@@ -6466,8 +6466,8 @@ impl Editor {
         // A modified global chord prefix that is not itself a direct binding
         // opens the chord before a catch-all on-key handler can swallow it,
         // so "C-x …" commands keep working from every mode. Unmodified
-        // prefixes ("ESC" with "ESC ." chords) still reach the mode first:
-        // Escape is a cancellation key modes rely on.
+        // prefixes still reach the mode first (Escape, a cancellation key
+        // modes rely on, is deliberately never a prefix).
         if !vim_insert_literal
             && key.modifiers != KeyModifiers::NONE
             && !self.lisp_bindings.contains_key(&ks)

@@ -2837,6 +2837,36 @@ fn vim_insert_mode_accepts_text_and_escape_returns_to_normal() {
 }
 
 #[test]
+fn vim_escape_is_never_a_chord_prefix() {
+    let mut editor = Editor::new(
+        Runtime::new(),
+        EditorConfig {
+            vim_mode: true,
+            ..EditorConfig::default()
+        },
+    );
+    editor.open_scratch_buffer("*test*", "");
+    let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+
+    editor.handle_key(key(KeyCode::Char('i')));
+    editor.handle_key(key(KeyCode::Char('a')));
+    editor.handle_key(key(KeyCode::Esc));
+    // A second, redundant Escape in normal mode must not arm an "ESC …"
+    // chord that eats the following command key.
+    editor.handle_key(key(KeyCode::Esc));
+    editor.handle_key(key(KeyCode::Char('i')));
+    assert_eq!(editor.vim_input_mode, VimInputMode::Insert);
+    assert!(editor.pending_key.is_none());
+    editor.handle_key(key(KeyCode::Char('b')));
+    editor.handle_key(key(KeyCode::Esc));
+    editor.handle_key(key(KeyCode::Char('a')));
+    editor.handle_key(key(KeyCode::Char('c')));
+    let mut typed: Vec<char> = editor.active_buffer().text().chars().collect();
+    typed.sort();
+    assert_eq!(typed, vec!['a', 'b', 'c'], "every key after Escape reached Vim");
+}
+
+#[test]
 fn vim_normal_mode_supports_basic_motions() {
     let runtime = Runtime::new();
     let mut editor = Editor::new(
