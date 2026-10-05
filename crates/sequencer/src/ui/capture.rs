@@ -1344,6 +1344,7 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
         step_print: Arc::new(Mutex::new(StepPrintState::default())),
         auto_follow_override_until,
         armed_rack,
+        bus_state: Arc::clone(&bus_state),
     };
     let mut host_kinds = super::host_kinds::HostKinds::default();
     let mut sync_host_kinds = |editor: &mut Editor, app: &app::App| {

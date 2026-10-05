@@ -61,6 +61,13 @@ fn paths_watchable(release: bool, factory_root: &Path, path: &Path) -> bool {
 /// Audio FX trees read it so a changed library re-lists without restart.
 static CONTENT_LIBRARY_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// The content library's epoch (`SEQ.content-library-epoch`): moves on every
+/// library change the watcher sees, so a cache of library contents (the host
+/// kinds' MIDI effect descriptors) reloads only then.
+pub(crate) fn content_library_epoch() -> u64 {
+    CONTENT_LIBRARY_EPOCH.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Re-list the instrument/effect library in the browser: bumps
 /// `SEQ.content-library-epoch` and runs the reactive cycle.
 pub(crate) fn bump_content_library_epoch(editor: &mut Editor) {

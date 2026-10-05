@@ -260,6 +260,115 @@ fn parent_keyed_instances_hang_off_their_parent_and_reach_lisp_through_its_list_
 }
 
 #[test]
+fn a_kind_keyed_under_several_parent_kinds_takes_an_instance_of_any() {
+    let mut vm = VM::new(Vec::new());
+    super::super::register_core_natives(&mut vm);
+    eval(
+        &mut vm,
+        "(def-kind device :key ((track bus) did)
+           :host ((track track) (bus bus) (name :string)))
+         (def-kind track :key (index) :host ((devices (list-of device))))
+         (def-kind bus :key (index) :host ((devices (list-of device))))
+         (def-kind scene :key (index) :host ((name :string)))",
+    );
+    let t = vm.register_keyed_instance("track", &[0]).expect("track");
+    let b = vm.register_keyed_instance("bus", &[0]).expect("bus");
+    let td = vm
+        .register_keyed_instance("device", &[t, 7])
+        .expect("under a track");
+    let bd = vm
+        .register_keyed_instance("device", &[b, 7])
+        .expect("under a bus");
+    assert_ne!(td, bd, "one did under two parents is two devices");
+    push(&mut vm, bd, "name", Value::String("Reverb".into()));
+    let devices = super::super::list_from_values([Value::Instance(bd)]);
+    push(&mut vm, b, "devices", devices);
+    assert_eq!(
+        eval(&mut vm, "(let ((b (bus 0)) (d (first b.devices))) d.name)"),
+        Value::String("Reverb".into())
+    );
+    assert_eq!(
+        eval(&mut vm, "(let ((b (bus 0))) (str (first b.devices)))"),
+        Value::String(format!("<device#{bd} [{b} 7]>"))
+    );
+    // Any other kind is no parent.
+    let s = vm.register_keyed_instance("scene", &[0]).expect("scene");
+    let refused = vm
+        .register_keyed_instance("device", &[s, 1])
+        .expect_err("a scene is no parent");
+    assert!(
+        refused
+            .to_string()
+            .contains("not a live 'scratch:track' or 'scratch:bus' instance"),
+        "{refused}"
+    );
+    assert_eq!(
+        vm.create_instance(1, "scratch:device")
+            .expect_err("keyed")
+            .to_string(),
+        "device instances come from the project; reach them through their track or bus"
+    );
+    // A device may move between parents of either kind; each parent drops
+    // only its own.
+    vm.rekey_instance(td, &[b, 8]).expect("to the bus");
+    assert!(vm.drop_instance(t));
+    assert!(vm.instance_is_live(td));
+    assert!(vm.drop_instance(b));
+    assert!(!vm.instance_is_live(td) && !vm.instance_is_live(bd));
+    // The parent list is part of the key's shape.
+    eval(
+        &mut vm,
+        "(def-kind device :key ((track bus) id) :host ((track track) (bus bus) (name :string)))",
+    );
+    let message = error(
+        &mut vm,
+        "(def-kind device :key (track did) :host ((name :string)))",
+    );
+    assert!(
+        message.contains("is already defined keyed (:key ((track bus) id))"),
+        "{message}"
+    );
+    // ... as a set: the same parents in another order are the same shape.
+    eval(
+        &mut vm,
+        "(def-kind device :key ((bus track) id) :host ((track track) (bus bus) (name :string)))",
+    );
+    let message = error(
+        &mut vm,
+        "(def-kind device :key ((bus scene) id) :host ((name :string)))",
+    );
+    assert!(message.contains("is already defined keyed"), "{message}");
+    for code in [
+        "(def-kind a :key (() index) :host ((x :number)))",
+        "(def-kind a :key ((track 1) index) :host ((x :number)))",
+    ] {
+        let errors = compile_errors(&mut vm, code);
+        assert!(errors.contains(":key expects"), "{code}: {errors}");
+    }
+    // A parent named twice is an error, at compile time and in the VM's own
+    // :key parser.
+    let errors = compile_errors(
+        &mut vm,
+        "(def-kind a :key ((track bus track) index) :host ((x :number)))",
+    );
+    assert!(errors.contains("names parent track twice"), "{errors}");
+    let symbol = |name: &str| Rc::new(RefCell::new(Value::Symbol(name.into())));
+    let parents = Value::List(vec![symbol("bus"), symbol("bus")]);
+    let key = Value::List(vec![Rc::new(RefCell::new(parents)), symbol("index")]);
+    let refused = vm
+        .def_keyed_kind_from_args(vec![
+            Value::Symbol("b".into()),
+            Value::Keyword("key".into()),
+            key,
+        ])
+        .expect_err("a duplicate parent");
+    assert!(
+        format!("{refused:?}").contains("names parent bus twice"),
+        "{refused:?}"
+    );
+}
+
+#[test]
 fn a_parent_that_is_not_keyed_is_an_error_at_registration() {
     let mut vm = VM::new(Vec::new());
     super::super::register_core_natives(&mut vm);
@@ -461,7 +570,7 @@ fn malformed_keyed_kinds_and_host_on_created_kinds_are_errors() {
         ),
         (
             "(def-kind a :key (x y z) :host ((x :number)))",
-            ":key expects () (a singleton), (index) or (parent index)",
+            ":key expects () (a singleton), (index), (parent index) or ((parent …) index)",
         ),
         ("(def-kind a :key (1) :host ((x :number)))", ":key expects"),
         (

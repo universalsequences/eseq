@@ -36,7 +36,9 @@
 //! observed) and dropped when their track goes or its length shrinks below
 //! them. Devices are keyed (track instance id, `did`): 0 for the
 //! instrument, else the effect's stable instance id, so a reorder keeps
-//! them (`DeviceSlot::did`). Params are keyed (device instance id, index)
+//! them (`DeviceSlot::did`); a track's MIDI effects, drum rack slots and
+//! their effects are devices of the track too, a bus's effects devices of
+//! the bus (`devices`). Params are keyed (device instance id, index)
 //! and lazy like steps (`params`). Mod routes are keyed by their endpoints'
 //! stable ids (`RouteKey`), replaced on a project load like tracks. Each
 //! track has one `tuning`, keyed (track instance id, 0), whose `degree`s
@@ -56,8 +58,9 @@
 //! ([`HostKinds::sync`]); `live` the shared handles, live-field values and
 //! the reader hook; `registry` the instance registry helpers and pushes;
 //! `tracks`, `steps`, `params`, `scenes`, `mixer` (buses, groups, routes),
-//! `settings` (track settings), `arrangement` (song, clips, cells) and
-//! `racks` (drum rack pads, rack clips, grooves) the per-kind syncs.
+//! `settings` (track settings), `arrangement` (song, clips, cells),
+//! `racks` (drum rack pads, rack clips, grooves) and `devices` (devices
+//! beyond the track chain) the per-kind syncs.
 
 use crate::*;
 use eseqlisp::vm::{HostFieldReader, InstanceId, VM};
@@ -65,6 +68,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::LazyLock;
 
 mod arrangement;
+mod devices;
 mod live;
 mod mixer;
 mod params;
@@ -76,6 +80,7 @@ mod steps;
 mod tracks;
 
 use arrangement::SongState;
+use devices::*;
 pub(crate) use live::KindsHandles;
 use live::*;
 pub(crate) use mixer::KindsMeters;
@@ -190,6 +195,7 @@ pub(crate) mod f {
     pub(crate) const TRACK_GOVERNED: FieldKey = (TRACK, "governed");
     pub(crate) const TRACK_LATCHED: FieldKey = (TRACK, "latched");
     pub(crate) const TRACK_PAD: FieldKey = (TRACK, "pad");
+    pub(crate) const TRACK_MIDI_DEVICES: FieldKey = (TRACK, "midi-devices");
 
     pub(crate) const PAD_GROUP: FieldKey = (PAD, "group");
     pub(crate) const PAD_TRACK: FieldKey = (PAD, "track");
@@ -327,6 +333,7 @@ pub(crate) mod f {
     pub(crate) const BUS_PEAK: FieldKey = (BUS, "peak");
     pub(crate) const BUS_OUTPUT: FieldKey = (BUS, "output");
     pub(crate) const BUS_OUTPUT_OPTIONS: FieldKey = (BUS, "output-options");
+    pub(crate) const BUS_DEVICES: FieldKey = (BUS, "devices");
     pub(crate) const BUS_MOD_IN: [FieldKey; 4] = [
         (BUS, "mod-in-1"),
         (BUS, "mod-in-2"),
@@ -379,6 +386,8 @@ pub(crate) mod f {
     pub(crate) const GROUP_GROOVE: FieldKey = (GROUP, "groove");
 
     pub(crate) const DEVICE_TRACK: FieldKey = (DEVICE, "track");
+    pub(crate) const DEVICE_BUS: FieldKey = (DEVICE, "bus");
+    pub(crate) const DEVICE_ROLE: FieldKey = (DEVICE, "role");
     pub(crate) const DEVICE_SLOT: FieldKey = (DEVICE, "slot");
     pub(crate) const DEVICE_DID: FieldKey = (DEVICE, "did");
     pub(crate) const DEVICE_TYPE: FieldKey = (DEVICE, "type");
@@ -386,6 +395,10 @@ pub(crate) mod f {
     pub(crate) const DEVICE_ENABLED: FieldKey = (DEVICE, "enabled");
     pub(crate) const DEVICE_PARAMS: FieldKey = (DEVICE, "params");
     pub(crate) const DEVICE_PLAYHEAD: FieldKey = (DEVICE, "playhead");
+    pub(crate) const DEVICE_DEVICES: FieldKey = (DEVICE, "devices");
+    pub(crate) const DEVICE_CONTAINER: FieldKey = (DEVICE, "container");
+    pub(crate) const DEVICE_VOICES: FieldKey = (DEVICE, "voices");
+    pub(crate) const DEVICE_DELETE_TARGET: FieldKey = (DEVICE, "delete-target");
 
     pub(crate) const PARAM_DEVICE: FieldKey = (PARAM, "device");
     pub(crate) const PARAM_INDEX: FieldKey = (PARAM, "index");
@@ -478,6 +491,9 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     (f::TRACK_NUM_STEPS, ":int", Live),
     (f::TRACK_STEPS, "(list-of step)", Live),
     (f::TRACK_DEVICES, "(list-of device)", Model),
+    // The device sync (`devices`): MIDI effects, bus effects, drum rack
+    // slots and their effects.
+    (f::TRACK_MIDI_DEVICES, "(list-of device)", Model),
     (f::TRACK_PAN, ":number", Live),
     (f::TRACK_SOLOED, ":bool", Live),
     (f::TRACK_COLLAPSED, ":bool", Live),
@@ -642,11 +658,17 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     (f::SEND_LOCKED, ":bool", Live),
     (f::SEND_HAS_LOCKS, ":bool", Live),
     (f::DEVICE_TRACK, "track", Model),
+    (f::DEVICE_BUS, "bus", Model),
     (f::DEVICE_SLOT, ":int", Model),
     (f::DEVICE_DID, ":int", Model),
+    (f::DEVICE_ROLE, ":string", Model),
     (f::DEVICE_TYPE, ":string", Model),
     (f::DEVICE_NAME, ":string", Model),
     (f::DEVICE_ENABLED, ":bool", Model),
+    (f::DEVICE_DEVICES, "(list-of device)", Model),
+    (f::DEVICE_CONTAINER, "device", Model),
+    (f::DEVICE_VOICES, ":int", Model),
+    (f::DEVICE_DELETE_TARGET, ":bool", Live),
     // Registered and pushed on the first read (the reader hook) or once
     // observed (the tick), then at the model sync.
     (f::DEVICE_PARAMS, "(list-of param)", Model),
@@ -686,6 +708,7 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     (f::BUS_PEAK, ":number", Live),
     (f::BUS_OUTPUT, "bus", Model),
     (f::BUS_OUTPUT_OPTIONS, "(list-of bus)", Model),
+    (f::BUS_DEVICES, "(list-of device)", Model),
     (f::BUS_MOD_IN[0], ":number", Live),
     (f::BUS_MOD_IN[1], ":number", Live),
     (f::BUS_MOD_IN[2], ":number", Live),
@@ -1006,6 +1029,10 @@ struct ModelRevision {
     tracks: usize,
     active_tracks: usize,
     track_generation: u64,
+    /// The device registry's generation: a bind can give a chain device an
+    /// identity (its `did`) and move no other counter, and the track chain
+    /// sync must then re-key the device.
+    device_registry: u64,
     /// The display tint and palette track colors go through (a theme change
     /// bumps no epoch).
     track_tint: (
@@ -1029,6 +1056,7 @@ impl ModelRevision {
             tracks: app.tracks.len(),
             active_tracks: app.state.active_track_count(),
             track_generation: app.track_registry.generation(),
+            device_registry: app.device_registry.generation(),
             track_tint: eseqlisp::theme::track_display_key(),
         }
     }
@@ -1136,6 +1164,9 @@ pub(crate) struct HostKinds {
     song: SongState,
     /// The drum racks' pads, clips and grooves, the groove pool and library.
     racks: RackState,
+    /// Devices beyond the track chain: MIDI effects, bus effects, drum rack
+    /// slots and their effects.
+    pub(crate) devices: DeviceState,
 }
 
 impl HostKinds {
@@ -1208,6 +1239,7 @@ impl HostKinds {
             self.reset_project_options();
             self.song.invalidate();
             self.racks.invalidate();
+            self.devices.invalidate();
         }
         if self
             .song
@@ -1277,6 +1309,7 @@ impl HostKinds {
                 self.model = None;
             }
         }
+        self.sync_device_model(&mut pusher, app);
         self.sync_cell_model(&mut pusher, app);
         self.sync_rack_clips(&mut pusher, app);
         self.sync_rack_model(&mut pusher, app);

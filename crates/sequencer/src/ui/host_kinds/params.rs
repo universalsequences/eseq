@@ -13,14 +13,25 @@
 //! p-lock state and the print latch are live fields read from the shared
 //! sequencer state while observed; the descriptor fields are pushed once,
 //! at registration. Every value is in display units (percent params ×100).
+//!
+//! Every device family reads its values where they live
+//! ([`DeviceSlot::with_values`]): a track chain device or MIDI effect from
+//! its live slot (the p-lock in force at the displayed step, with the
+//! off-step hold, and an engaged project macro: [`device_param_display`]),
+//! a drum rack slot or rack slot effect from the rack's snapshot (the
+//! displayed step's p-lock, else a rack macro mapped onto it:
+//! `rack_slot_instrument_param_display`, `rack_effect_param_display`,
+//! shared with the rack panel), a bus effect from the shared bus copy (its
+//! base, like the legacy `bus-N-fx-*` fields: bus effects show no p-lock).
 
 use super::*;
 use sequencer::effects::{ParamDescriptor, ParamKind};
 
 /// What one device's params read without the `App` (see the module docs).
 pub(crate) struct DeviceSource {
-    /// The track position as of the model sync.
-    pub(super) track: usize,
+    /// The owner's position as of the model sync: the track's, or the
+    /// bus's for a bus effect.
+    pub(super) owner: usize,
     pub(super) device: DeviceSlot,
     pub(super) params: Rc<[ParamDescriptor]>,
     /// A sampler instrument's voices, for a cold `device.playhead` read (the
@@ -147,6 +158,98 @@ static PARAM_BITS: LazyLock<ParamBits> = LazyLock::new(|| ParamBits {
     printing: PARAM_LIVE.bit(f::PARAM_PRINTING),
 });
 
+/// What one param shows, as far as a mask asks: the displayed value
+/// (stored units) and whether a p-lock supplies it, the base, whether some
+/// step locks it.
+#[derive(Default)]
+struct ParamReading {
+    shown: Option<(f32, bool)>,
+    base: Option<f32>,
+    has_locks: Option<bool>,
+}
+
+/// Read param `index` of `device` where its family keeps it
+/// ([`DeviceSlot::with_values`], see the module docs), computing only what
+/// `mask` asks for. `None` when the device is gone.
+fn read_param(
+    sources: &KindsHandles,
+    shared: &RefCell<KindsShared>,
+    device: &DeviceSource,
+    pdesc: &ParamDescriptor,
+    index: usize,
+    mask: u32,
+) -> Option<ParamReading> {
+    let bits = &*PARAM_BITS;
+    let shown = mask & (bits.value | bits.locked | bits.text) != 0;
+    let base = mask & bits.base != 0;
+    let has_locks = mask & bits.has_locks != 0;
+    let (state, owner) = (&sources.state, device.owner);
+    let is_bus = matches!(device.device, DeviceSlot::BusEffect(_));
+    if !is_bus && !sources.track_exists(owner) {
+        return None;
+    }
+    // Only a bus effect reads the shared bus copy.
+    let buses = is_bus.then(|| sources.bus_state.lock().unwrap());
+    let buses = buses.as_deref().map_or(&[][..], Vec::as_slice);
+    let step = || sources.plock_display_step(owner);
+    let num_steps = || match is_bus {
+        true => MAX_STEPS,
+        false => sources.num_steps(owner),
+    };
+    device.device.with_values(state, buses, owner, |values| {
+        let display = match values {
+            DeviceValues::Live(slot) => shown.then(|| {
+                let effective = device.device.macro_key(state, owner, index).map(|key| {
+                    let overrides = &shared.borrow().macro_overrides;
+                    (overrides.get(&key).copied()).unwrap_or_else(|| slot.defaults.get(index))
+                });
+                device_param_display(state, owner, slot, pdesc, index, step(), effective)
+            }),
+            DeviceValues::Rack { rack, values } => shown.then(|| match device.device {
+                DeviceSlot::RackEffect { rack_slot, slot } => rack_effect_param_display(
+                    rack,
+                    rack_slot,
+                    slot,
+                    values,
+                    pdesc.default,
+                    index,
+                    step(),
+                ),
+                DeviceSlot::RackSlot(slot) => rack_slot_instrument_param_display(
+                    rack,
+                    slot,
+                    &rack.slots[slot],
+                    pdesc.default,
+                    index,
+                    step(),
+                ),
+                _ => (
+                    values.defaults.get(index).copied().unwrap_or(pdesc.default),
+                    false,
+                ),
+            }),
+            // A bus effect shows its own value (no p-lock), as its legacy
+            // field does.
+            DeviceValues::Snapshot(_) => Some((values.base(pdesc, index), false)),
+        };
+        ParamReading {
+            shown: display,
+            base: base.then(|| values.base(pdesc, index)),
+            has_locks: has_locks.then(|| values.has_lock(index, num_steps())),
+        }
+    })
+}
+
+/// The track a device's param follows for its print latch and its
+/// `has-locks` key: its own track, or the current track for a bus effect
+/// (whose knob latches under the current track).
+fn param_track(sources: &KindsHandles, device: &DeviceSource) -> usize {
+    match device.device {
+        DeviceSlot::BusEffect(_) => sources.current_track.load(Ordering::Relaxed),
+        _ => device.owner,
+    }
+}
+
 /// The live fields of param `index` of `device` in `mask` (bit `i` is
 /// `PARAM_LIVE.keys[i]`), each passed to `emit`. The displayed value and
 /// its p-lock state are computed once for `value`, `locked` and `text`.
@@ -161,24 +264,12 @@ pub(super) fn param_live_fields<'a>(
     let Some(pdesc) = device.params.get(index) else {
         return;
     };
-    let track = device.track;
-    if !sources.track_exists(track) {
-        return;
-    }
-    let state = &sources.state;
-    let Some(slot) = device.device.slot_state(state, track) else {
+    let Some(reading) = read_param(sources, shared, device, pdesc, index, mask) else {
         return;
     };
     let bits = &*PARAM_BITS;
     let user = |stored| DeviceSlot::to_user(pdesc, stored);
-    if mask & (bits.value | bits.locked | bits.text) != 0 {
-        let effective = device.device.macro_key(state, track, index).map(|key| {
-            let overrides = &shared.borrow().macro_overrides;
-            (overrides.get(&key).copied()).unwrap_or_else(|| slot.defaults.get(index))
-        });
-        let step = sources.plock_display_step(track);
-        let (stored, locked) =
-            device_param_display(state, track, slot, pdesc, index, step, effective);
+    if let Some((stored, locked)) = reading.shown {
         if mask & bits.value != 0 {
             emit(f::PARAM_VALUE, ParamField::Number(user(stored)));
         }
@@ -189,19 +280,19 @@ pub(super) fn param_live_fields<'a>(
             emit(f::PARAM_TEXT, ParamField::Text(param_text(pdesc, stored)));
         }
     }
-    if mask & bits.base != 0 {
-        let stored = slot_param_stored_value(slot, pdesc, index, None);
+    if let Some(stored) = reading.base.filter(|_| mask & bits.base != 0) {
         emit(f::PARAM_BASE, ParamField::Number(user(stored)));
     }
-    if mask & bits.has_locks != 0 {
-        let num_steps = sources.num_steps(track);
-        let any = slot.plocks.param_has_any_plock(index, num_steps);
+    if let Some(any) = reading.has_locks {
         emit(f::PARAM_HAS_LOCKS, ParamField::Bool(any));
     }
     if mask & bits.printing != 0 {
+        let state = &sources.state;
+        let track = param_track(sources, device);
+        let target = device.device.print_target(device.owner, index);
         let printing = state.transport.playing.load(Ordering::Relaxed)
             && sources.recording.load(Ordering::Relaxed)
-            && (sources.step_print.lock().unwrap()).holds(track, device.device.print_target(index));
+            && (sources.step_print.lock().unwrap()).holds(track, target);
         emit(f::PARAM_PRINTING, ParamField::Bool(printing));
     }
 }
@@ -228,11 +319,23 @@ pub(super) fn param_live_value(
     value
 }
 
-/// The fields a device's observed mask covers: its live `playhead`, and
-/// `params`, a model field the tick registers once something observes it.
-const DEVICE_OBSERVED: [&str; 2] = ["playhead", "params"];
+/// The fields a device's observed mask covers: its live `playhead` and
+/// `delete-target`, and `params`, a model field the tick registers once
+/// something observes it.
+const DEVICE_OBSERVED: [&str; 3] = ["playhead", "params", "delete-target"];
 const DEVICE_PLAYHEAD_BIT: u32 = 1;
 const DEVICE_PARAMS_BIT: u32 = 2;
+const DEVICE_DELETE_TARGET_BIT: u32 = 4;
+
+/// `device.delete-target`: the delete target names the device
+/// ([`DeviceSlot::delete_target`]).
+pub(super) fn device_delete_target(sources: &KindsHandles, device: &DeviceSource) -> bool {
+    let current = sources.current_track.load(Ordering::Relaxed);
+    let Some(target) = device.device.delete_target(device.owner, current) else {
+        return false;
+    };
+    sources.active_delete_target.lock().unwrap().as_ref() == Some(&target)
+}
 
 /// One step's p-lock render (`plocked`, `lock-kind`, `variant-color`).
 #[derive(Clone, Copy, Default, PartialEq)]
@@ -378,25 +481,24 @@ impl ObservedList {
 }
 
 impl HostKinds {
-    /// Keep `device_id`'s [`DeviceSource`] current at the model sync: the
-    /// existing one while its descriptor and position are unchanged; else a
-    /// new one. On a descriptor change (another effect or instrument in the
-    /// device) its params are dropped and, when they were registered,
-    /// registered fresh with `d.params` re-pushed. Returns whether param
-    /// instances were replaced.
+    /// Keep `device_id`'s [`DeviceSource`] current at a model sync (the
+    /// track model's for the track chain, the device sync's for the other
+    /// families): the existing one while its descriptor (`params`) and
+    /// position are unchanged; else a new one. On a descriptor change
+    /// (another effect or instrument in the device) its params are dropped
+    /// and, when they were registered, registered fresh with `d.params`
+    /// re-pushed. Returns whether param instances were replaced.
     pub(super) fn sync_device_source(
         pusher: &mut Pusher<'_>,
         app: &app::App,
         device_id: InstanceId,
-        track: usize,
+        owner: usize,
         device: DeviceSlot,
+        params: &[ParamDescriptor],
     ) -> bool {
-        let params = device
-            .descriptor(app, track)
-            .map_or(&[][..], |desc| desc.params.as_slice());
         let sampler = match device {
-            DeviceSlot::Instrument => SamplerPlayhead::of(app, track),
-            DeviceSlot::Effect(_) => None,
+            DeviceSlot::Instrument => SamplerPlayhead::of(app, owner),
+            _ => None,
         };
         let existing = pusher.shared.borrow().devices.get(&device_id).cloned();
         let same_params = existing
@@ -407,7 +509,7 @@ impl HostKinds {
                 (Some(a), Some(b)) => a.same_voices(b),
                 (a, b) => a.is_none() && b.is_none(),
             };
-            if same_params && source.track == track && source.device == device && same_sampler {
+            if same_params && source.owner == owner && source.device == device && same_sampler {
                 return false;
             }
         }
@@ -416,7 +518,7 @@ impl HostKinds {
             _ => Rc::from(params.to_vec()),
         };
         let source = DeviceSource {
-            track,
+            owner,
             device,
             params,
             sampler,
@@ -452,8 +554,10 @@ impl HostKinds {
     /// observer epoch ([`ObservedList`]): a tick costs work in proportion
     /// to what is observed, not to what is registered.
     pub(super) fn sync_device_live(&mut self, pusher: &mut Pusher<'_>, app: &app::App) {
-        let device_ids = &self.device_ids;
-        (self.device_observed).refresh(pusher.rt, &DEVICE_OBSERVED, || device_ids.clone());
+        let (chain, devices) = (&self.device_ids, &self.devices);
+        (self.device_observed).refresh(pusher.rt, &DEVICE_OBSERVED, || {
+            chain.iter().copied().chain(devices.ids()).collect()
+        });
         for index in 0..self.device_observed.entries.len() {
             let (id, mask, _) = self.device_observed.entries[index];
             let Some(source) = pusher.shared.borrow().devices.get(&id).cloned() else {
@@ -463,10 +567,14 @@ impl HostKinds {
                 // Re-resolved from the `App` per read: a sample load or a
                 // voice rebuild moves no model counter.
                 let seconds = match source.device {
-                    DeviceSlot::Instrument => read_sampler_playhead_seconds(app, source.track),
-                    DeviceSlot::Effect(_) => 0.0,
+                    DeviceSlot::Instrument => read_sampler_playhead_seconds(app, source.owner),
+                    _ => 0.0,
                 };
                 pusher.push_computed(id, f::DEVICE_PLAYHEAD, number(seconds));
+            }
+            if mask & DEVICE_DELETE_TARGET_BIT != 0 {
+                let held = device_delete_target(pusher.sources, &source);
+                pusher.push_computed(id, f::DEVICE_DELETE_TARGET, Value::Bool(held));
             }
             let registered = pusher.shared.borrow().param_devices.contains(&id);
             if mask & DEVICE_PARAMS_BIT != 0 && !registered {
@@ -477,18 +585,17 @@ impl HostKinds {
                 }
             }
         }
-        let registered: Vec<InstanceId> = {
-            let shared = pusher.shared.borrow();
-            let devices = self.device_ids.iter().copied();
-            devices
-                .filter(|id| shared.param_devices.contains(id))
-                .collect()
-        };
-        let rt = &*pusher.rt;
+        // Rebuilt from the registered devices' params only when the observer
+        // epoch moved: a tick between costs work in proportion to the
+        // observed params.
+        let (rt, shared) = (&*pusher.rt, pusher.shared);
+        let (chain, devices) = (&self.device_ids, &self.devices);
         let queried = self.param_observed.refresh(rt, &PARAM_LIVE.names, || {
+            let shared = shared.borrow();
+            let registered = (chain.iter().copied().chain(devices.ids()))
+                .filter(|id| shared.param_devices.contains(id));
             let params = registered
-                .iter()
-                .flat_map(|device| rt.keyed_children_of_kind(*device, PARAM).map(|(id, _)| id));
+                .flat_map(|device| rt.keyed_children_of_kind(device, PARAM).map(|(id, _)| id));
             params.collect()
         });
         pusher.shared.borrow_mut().param_queries += queried as u64;
@@ -505,7 +612,7 @@ impl HostKinds {
             // `has-locks` scans the slot's p-locks: only after they may
             // have moved.
             if mask & has_locks != 0 {
-                let key = sources.plock_key(device.track);
+                let key = sources.plock_key(param_track(sources, &device));
                 if seen == Some(key) {
                     mask &= !has_locks;
                 }

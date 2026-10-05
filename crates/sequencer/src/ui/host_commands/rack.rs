@@ -69,6 +69,89 @@ pub(crate) fn initialize_loaded_rack_view(app: &app::App, editor: &mut Editor, t
     }
 }
 
+/// After a rack slot param edit landed (the rack knob commands, the host
+/// kinds' rack slot params): mark the rack control snapshot dirty and
+/// refresh what shows the param. A base edit (`plock` `None`) of a param
+/// that redefines the panel (an enum, a boolean) rebuilds the instrument
+/// panel; a lock of one resyncs the rack's authoring display and bumps the
+/// epochs; anything else repaints the param's direct fields, a lock's
+/// first write (`RowSetChanged`) also the step p-lock rows.
+pub(super) fn rack_param_applied(
+    editor: &mut Editor,
+    app: &app::App,
+    ctx: &mut LoopCtx<'_>,
+    track: usize,
+    target: RackDirectDisplayTarget,
+    rebuild: bool,
+    plock: Option<RackPlockRowsSync>,
+) {
+    ctx.gesture.rack_control_snapshot_dirty = true;
+    let shared = ctx.shared;
+    match (rebuild, plock) {
+        (true, None) => refresh_instrument_panel_reactive(
+            editor,
+            app,
+            track,
+            &shared.selected_steps,
+            &shared.ui_epoch,
+        ),
+        (true, Some(_)) => {
+            sync_rack_slot_instrument_authoring_display(
+                editor,
+                app,
+                &shared.state,
+                track,
+                &shared.selected_steps,
+            );
+            shared.ui_epoch.fetch_add(1, Ordering::Relaxed);
+            shared.fx_epoch.fetch_add(1, Ordering::Relaxed);
+        }
+        (false, rows) => refresh_rack_direct_param_reactive(
+            editor,
+            app,
+            &shared.state,
+            track,
+            target,
+            &shared.selected_steps,
+            rows.unwrap_or(RackPlockRowsSync::Unchanged),
+            &shared.expanded_step_projection,
+            &shared.ui_epoch,
+        ),
+    }
+}
+
+/// After a rack slot's voices changed (`set-rack-slot-max-polyphony`, the
+/// host kinds' `device.voices`): the *track* panel, mixer strip and
+/// instrument header show the selected slot's voices through the `tp-*`
+/// fields when the rack is the current track, and the rack's own "V" field.
+pub(super) fn rack_slot_voices_applied(
+    editor: &mut Editor,
+    app: &app::App,
+    ctx: &LoopCtx<'_>,
+    track: usize,
+    slot_idx: usize,
+) {
+    let shared = ctx.shared;
+    if track == shared.current_track.load(Ordering::Relaxed) {
+        let dirty = sync_track_polyphony_fields(editor.runtime_mut(), app, &shared.state, track);
+        flush_reactive_display_edit(editor, dirty);
+    }
+    refresh_rack_direct_param_reactive(
+        editor,
+        app,
+        &shared.state,
+        track,
+        RackDirectDisplayTarget::SlotParam {
+            slot_idx,
+            param: RackSlotParam::MaxPolyphony,
+        },
+        &shared.selected_steps,
+        RackPlockRowsSync::Unchanged,
+        &shared.expanded_step_projection,
+        &shared.ui_epoch,
+    );
+}
+
 #[allow(clippy::too_many_lines)]
 pub(super) fn handle(
     name: &str,
@@ -611,38 +694,19 @@ pub(super) fn handle(
                         },
                     );
                     if outcome.is_ok() {
-                        ctx.gesture.rack_control_snapshot_dirty = true;
-                        if rack_slot_effect_param_needs_panel_rebuild(
+                        let rebuild = rack_slot_effect_param_needs_panel_rebuild(
                             &state,
                             track,
                             rack_slot,
                             effect_slot,
                             param,
-                        ) {
-                            refresh_instrument_panel_reactive(
-                                &mut editor,
-                                &app,
-                                track,
-                                &selected_steps,
-                                &ui_epoch,
-                            );
-                        } else {
-                            refresh_rack_direct_param_reactive(
-                                &mut editor,
-                                &app,
-                                &state,
-                                track,
-                                RackDirectDisplayTarget::EffectParam {
-                                    rack_slot,
-                                    effect_slot,
-                                    param_idx: param,
-                                },
-                                &selected_steps,
-                                RackPlockRowsSync::Unchanged,
-                                &ctx.shared.expanded_step_projection,
-                                &ui_epoch,
-                            );
-                        }
+                        );
+                        let target = RackDirectDisplayTarget::EffectParam {
+                            rack_slot,
+                            effect_slot,
+                            param_idx: param,
+                        };
+                        rack_param_applied(editor, app, ctx, track, target, rebuild, None);
                     } else if let Err(error) = outcome {
                         editor.handle_host_event(HostEvent::Status(format!(
                             "Error setting rack-slot effect parameter: {error:?}"
@@ -696,43 +760,23 @@ pub(super) fn handle(
                             "Rack-slot effect parameter locks were not changed"
                         )));
                     } else {
-                        ctx.gesture.rack_control_snapshot_dirty = true;
                         // Structural params (bool/enum) rebuild the panel;
                         // a continuous lock drag repaints through its bound
                         // value field and never bumps `fx_epoch` (eseq-lf72).
-                        if rack_slot_effect_param_needs_panel_rebuild(
+                        let rebuild = rack_slot_effect_param_needs_panel_rebuild(
                             &state,
                             track,
                             rack_slot,
                             effect_slot,
                             param,
-                        ) {
-                            sync_rack_slot_instrument_authoring_display(
-                                &mut editor,
-                                &app,
-                                &state,
-                                track,
-                                &selected_steps,
-                            );
-                            ui_epoch.fetch_add(1, Ordering::Relaxed);
-                            fx_epoch.fetch_add(1, Ordering::Relaxed);
-                        } else {
-                            refresh_rack_direct_param_reactive(
-                                &mut editor,
-                                &app,
-                                &state,
-                                track,
-                                RackDirectDisplayTarget::EffectParam {
-                                    rack_slot,
-                                    effect_slot,
-                                    param_idx: param,
-                                },
-                                &selected_steps,
-                                RackPlockRowsSync::for_plock_write(plock_row_existed),
-                                &ctx.shared.expanded_step_projection,
-                                &ui_epoch,
-                            );
-                        }
+                        );
+                        let target = RackDirectDisplayTarget::EffectParam {
+                            rack_slot,
+                            effect_slot,
+                            param_idx: param,
+                        };
+                        let rows = RackPlockRowsSync::for_plock_write(plock_row_existed);
+                        rack_param_applied(editor, app, ctx, track, target, rebuild, Some(rows));
                     }
                 }
                 _ => editor.handle_host_event(HostEvent::Status(
@@ -1289,32 +1333,7 @@ pub(super) fn handle(
                             value,
                         },
                     );
-                    // The *track* panel, mixer strip and instrument header show
-                    // the selected slot's voices through the tp-* fields; the
-                    // slot refresh below only covers the rack's own "V" field.
-                    if track == ctx.shared.current_track.load(Ordering::Relaxed) {
-                        let dirty = sync_track_polyphony_fields(
-                            editor.runtime_mut(),
-                            &app,
-                            &state,
-                            track,
-                        );
-                        flush_reactive_display_edit(&mut editor, dirty);
-                    }
-                    refresh_rack_direct_param_reactive(
-                        &mut editor,
-                        &app,
-                        &state,
-                        track,
-                        RackDirectDisplayTarget::SlotParam {
-                            slot_idx,
-                            param: RackSlotParam::MaxPolyphony,
-                        },
-                        &selected_steps,
-                        RackPlockRowsSync::Unchanged,
-                        &ctx.shared.expanded_step_projection,
-                        &ui_epoch,
-                    );
+                    rack_slot_voices_applied(editor, app, ctx, track, slot_idx);
                 }
             }
         }
@@ -1779,31 +1798,12 @@ pub(super) fn handle(
                                     value: stored,
                                 },
                             );
-                            ctx.gesture.rack_control_snapshot_dirty = true;
-                            if param_change_needs_fx_rebuild(&desc) {
-                                refresh_instrument_panel_reactive(
-                                    &mut editor,
-                                    &app,
-                                    track,
-                                    &selected_steps,
-                                    &ui_epoch,
-                                );
-                            } else {
-                                refresh_rack_direct_param_reactive(
-                                    &mut editor,
-                                    &app,
-                                    &state,
-                                    track,
-                                    RackDirectDisplayTarget::InstrumentParam {
-                                        slot_idx,
-                                        param_idx,
-                                    },
-                                    &selected_steps,
-                                    RackPlockRowsSync::Unchanged,
-                                    &ctx.shared.expanded_step_projection,
-                                    &ui_epoch,
-                                );
-                            }
+                            let target = RackDirectDisplayTarget::InstrumentParam {
+                                slot_idx,
+                                param_idx,
+                            };
+                            let rebuild = param_change_needs_fx_rebuild(&desc);
+                            rack_param_applied(editor, app, ctx, track, target, rebuild, None);
                         }
                     }
                 }
@@ -1851,39 +1851,27 @@ pub(super) fn handle(
                                     value: stored,
                                 },
                             );
-                            ctx.gesture.rack_control_snapshot_dirty = true;
                             // Same policy as `set-instrument-plock`: only a
                             // structural param (bool/enum) rebuilds the *fx*
                             // tree. A continuous p-lock drag is covered by
                             // the bound value field; bumping `fx_epoch` per
                             // event rebuilt every rack slot panel per mouse
                             // move (eseq-lf72).
-                            if param_change_needs_fx_rebuild(&desc) {
-                                sync_rack_slot_instrument_authoring_display(
-                                    &mut editor,
-                                    &app,
-                                    &state,
-                                    track,
-                                    &selected_steps,
-                                );
-                                ui_epoch.fetch_add(1, Ordering::Relaxed);
-                                fx_epoch.fetch_add(1, Ordering::Relaxed);
-                            } else {
-                                refresh_rack_direct_param_reactive(
-                                    &mut editor,
-                                    &app,
-                                    &state,
-                                    track,
-                                    RackDirectDisplayTarget::InstrumentParam {
-                                        slot_idx,
-                                        param_idx,
-                                    },
-                                    &selected_steps,
-                                    RackPlockRowsSync::for_plock_write(plock_row_existed),
-                                    &ctx.shared.expanded_step_projection,
-                                    &ui_epoch,
-                                );
-                            }
+                            let target = RackDirectDisplayTarget::InstrumentParam {
+                                slot_idx,
+                                param_idx,
+                            };
+                            let rebuild = param_change_needs_fx_rebuild(&desc);
+                            let rows = RackPlockRowsSync::for_plock_write(plock_row_existed);
+                            rack_param_applied(
+                                editor,
+                                app,
+                                ctx,
+                                track,
+                                target,
+                                rebuild,
+                                Some(rows),
+                            );
                         }
                     }
                 }

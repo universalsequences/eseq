@@ -119,7 +119,7 @@ pub(super) fn handle(
                                     app,
                                     ctx.shared,
                                     (track, DeviceSlot::Instrument, param_idx),
-                                    &desc,
+                                    Some(&desc),
                                     stored,
                                     |app, command| {
                                         app::apply_command(app, command);

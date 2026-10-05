@@ -10,7 +10,7 @@ pub(super) fn rack_slot_type_name(slot: &sequencer::sequencer::RackSlotSnapshot)
     }
 }
 
-pub(super) fn rack_slot_raw_name(
+pub(crate) fn rack_slot_raw_name(
     app: &app::App,
     slot_idx: usize,
     slot: &sequencer::sequencer::RackSlotSnapshot,

@@ -6911,6 +6911,94 @@ mod tests {
         );
     }
 
+    /// A persisted identity two device families share (here a track effect
+    /// and a MIDI effect) loads: the first holder keeps it, the other gets a
+    /// fresh one, and the registry then binds both.
+    #[test]
+    fn device_normalization_reallocates_an_id_two_families_share() {
+        let mut project = minimal_project_with_effect_slots(Vec::new(), Vec::new());
+        let source = crate::project::ProjectEffectSource::Builtin {
+            name: "Filter".to_string(),
+        };
+        project.device_instances = crate::project::ProjectDeviceInstances {
+            track_effects: vec![crate::project::ProjectTrackEffectChain {
+                track_id: 1,
+                instances: vec![crate::project::ProjectEffectInstance {
+                    id: 10,
+                    source: source.clone(),
+                }],
+            }],
+            midi_effects: vec![crate::project::ProjectMidiEffectChain {
+                track_id: 1,
+                instances: vec![
+                    crate::project::ProjectMidiEffectInstance {
+                        id: 10,
+                        name: "arp".into(),
+                    },
+                    crate::project::ProjectMidiEffectInstance {
+                        id: 12,
+                        name: "arp".into(),
+                    },
+                ],
+            }],
+            bus_effects: Vec::new(),
+            rack_effects: vec![crate::project::ProjectRackEffectChain {
+                track_id: 1,
+                slot_index: 0,
+                rack_slot_id: 12,
+                instances: vec![crate::project::ProjectEffectInstance { id: 3, source }],
+            }],
+        };
+
+        project.normalize_device_instances().unwrap();
+
+        let instances = &project.device_instances;
+        assert_eq!(
+            instances.track_effects[0].instances[0].id, 10,
+            "the first holder keeps it"
+        );
+        let midi: Vec<u64> = instances.midi_effects[0]
+            .instances
+            .iter()
+            .map(|i| i.id)
+            .collect();
+        assert_eq!(midi, vec![13, 12], "fresh past every persisted id");
+        assert_eq!(instances.rack_effects[0].rack_slot_id, 14);
+        assert_eq!(instances.rack_effects[0].instances[0].id, 3);
+        // Every family binds, and a cross-family collision is refused.
+        let mut registry = crate::app::DeviceIdentityRegistry::default();
+        let track = crate::sequencer::TrackId(1);
+        registry
+            .bind_audio_effect_chain(
+                track,
+                crate::effects::BUILTIN_SLOT_COUNT,
+                &[crate::sequencer::EffectInstanceId(10)],
+            )
+            .unwrap();
+        let midi_ids: Vec<_> = midi
+            .iter()
+            .map(|id| crate::sequencer::MidiFxInstanceId(*id))
+            .collect();
+        registry.bind_midi_effect_chain(track, &midi_ids).unwrap();
+        registry
+            .bind_rack_slot(track, 0, crate::sequencer::RackSlotId(14))
+            .unwrap();
+        let refused = registry
+            .bind_midi_effect_chain(track, &[crate::sequencer::MidiFxInstanceId(10)])
+            .expect_err("a track effect holds 10");
+        assert!(
+            refused.contains("already bound to a track effect"),
+            "{refused}"
+        );
+        let refused = registry
+            .bind_rack_slot(track, 1, crate::sequencer::RackSlotId(13))
+            .expect_err("a MIDI effect holds 13");
+        assert!(
+            refused.contains("already bound to a MIDI effect"),
+            "{refused}"
+        );
+    }
+
     #[test]
     fn device_normalization_keeps_modern_dense_custom_slots() {
         let shimmer_values = vec![

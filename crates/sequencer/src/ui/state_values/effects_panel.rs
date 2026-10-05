@@ -727,7 +727,7 @@ fn device_entry(name: String, kind: &str, enabled: bool, slot: i64) -> Value {
     ])
 }
 
-fn enabled_param_index(desc: &sequencer::effects::EffectDescriptor) -> Option<usize> {
+pub(super) fn enabled_param_index(desc: &sequencer::effects::EffectDescriptor) -> Option<usize> {
     desc.params.iter().position(|param| param.name == "enabled")
 }
 
@@ -803,15 +803,10 @@ pub(crate) fn track_device_chain(
         // Chains are fixed-size slot arrays; an unused slot has an
         // empty descriptor. Only occupied slots are devices.
         for (slot_idx, desc) in descs.iter().enumerate().filter(|(_, d)| !d.name.is_empty()) {
-            let enabled = match (
-                enabled_param_index(desc),
-                chain.and_then(|c| c.get(slot_idx)),
-            ) {
-                (Some(idx), Some(slot)) => {
-                    slot_param_stored_value(slot, &desc.params[idx], idx, None) >= 0.5
-                }
-                _ => true,
-            };
+            let enabled = effect_enabled(
+                desc,
+                chain.and_then(|c| c.get(slot_idx)).map(DeviceValues::Live),
+            );
             entries.push(DeviceChainEntry {
                 name: desc.name.clone(),
                 kind: "effect",
@@ -838,19 +833,65 @@ pub(crate) fn build_track_device_chains_value(
 
 pub(crate) fn build_bus_device_chains_value(app: &app::App) -> Value {
     list_value(app.buses.iter().map(|bus| {
-        list_value(bus.effect_descriptors.iter().enumerate().filter(|(_, d)| !d.name.is_empty()).map(|(slot_idx, desc)| {
-            let enabled = match (enabled_param_index(desc), bus.effect_slots.get(slot_idx)) {
-                (Some(idx), Some(slot)) => slot
-                    .defaults
-                    .get(idx)
-                    .copied()
-                    .unwrap_or(desc.params[idx].default)
-                    >= 0.5,
-                _ => true,
-            };
-            device_entry(desc.name.clone(), "effect", enabled, slot_idx as i64)
-        }))
+        list_value(
+            bus_device_chain(bus)
+                .into_iter()
+                .map(|entry| device_entry(entry.name, entry.kind, entry.enabled, entry.slot)),
+        )
     }))
+}
+
+/// The occupied effect slots of a snapshot chain (a bus's, a rack slot's),
+/// in order.
+fn snapshot_effect_chain(
+    descriptors: &[sequencer::effects::EffectDescriptor],
+    slots: &[sequencer::effects::EffectSlotSnapshot],
+) -> Vec<DeviceChainEntry> {
+    descriptors
+        .iter()
+        .enumerate()
+        .filter(|(_, desc)| !desc.name.is_empty())
+        .map(|(slot_idx, desc)| DeviceChainEntry {
+            name: desc.name.clone(),
+            kind: "effect",
+            enabled: effect_enabled(desc, slots.get(slot_idx).map(DeviceValues::Snapshot)),
+            slot: slot_idx as i64,
+        })
+        .collect()
+}
+
+/// A bus's effects in chain order (its occupied slots). Shared by
+/// `SEQ.bus-device-chains` and the host kinds' `bus.devices`.
+pub(crate) fn bus_device_chain(bus: &app::BusChannelState) -> Vec<DeviceChainEntry> {
+    snapshot_effect_chain(&bus.effect_descriptors, &bus.effect_slots)
+}
+
+/// A drum rack slot's effects in chain order (its occupied slots), for the
+/// host kinds' rack slot devices.
+pub(crate) fn rack_slot_effect_chain(
+    slot: &sequencer::sequencer::RackSlotSnapshot,
+) -> Vec<DeviceChainEntry> {
+    snapshot_effect_chain(&slot.effect_descriptors, &slot.effect_slots)
+}
+
+/// A track's MIDI effects in chain order, each with its descriptor
+/// (`descriptors`: `load_midi_fx_descriptors`); a slot whose effect has no
+/// descriptor is left out. Shared by `SEQ.midi-effects` and the host kinds'
+/// `track.midi-devices`.
+pub(crate) fn midi_fx_device_chain<'a>(
+    chain: &[String],
+    descriptors: &'a [sequencer::effects::EffectDescriptor],
+) -> Vec<(usize, &'a sequencer::effects::EffectDescriptor)> {
+    chain
+        .iter()
+        .enumerate()
+        .filter_map(|(slot_idx, name)| {
+            let desc = descriptors
+                .iter()
+                .find(|desc| desc.name.eq_ignore_ascii_case(name))?;
+            Some((slot_idx, desc))
+        })
+        .collect()
 }
 
 pub(crate) fn build_bus_effects_value(app: &app::App) -> Value {
@@ -1532,16 +1573,10 @@ pub(crate) fn build_midi_effects_value(
     track: usize,
     selected: &Arc<Mutex<HashSet<usize>>>,
 ) -> Value {
-    use sequencer::effects::{EffectDescriptor, ParamKind};
+    use sequencer::effects::ParamKind;
     use std::collections::HashMap;
 
     let descriptors = sequencer::lisp_host::load_midi_fx_descriptors();
-    let descriptor_for = |name: &str| -> Option<EffectDescriptor> {
-        descriptors
-            .iter()
-            .find(|desc| desc.name.eq_ignore_ascii_case(name))
-            .cloned()
-    };
     let Some(track_params) = state.pattern.track_params.get(track) else {
         return Value::List(vec![]);
     };
@@ -1549,11 +1584,9 @@ pub(crate) fn build_midi_effects_value(
     let sel = selected.lock().unwrap();
     let plock_step = sel.iter().copied().min();
 
-    let slots: Vec<Rc<RefCell<Value>>> = chain
-        .iter()
-        .enumerate()
-        .filter_map(|(slot_idx, name)| {
-            let desc = descriptor_for(name)?;
+    let slots: Vec<Rc<RefCell<Value>>> = midi_fx_device_chain(&chain, &descriptors)
+        .into_iter()
+        .filter_map(|(slot_idx, desc)| {
             let slot = state
                 .pattern
                 .midi_fx_slots

@@ -167,7 +167,28 @@ pub(crate) fn rack_slot_param_value(
     param_idx: usize,
     selected_step: Option<usize>,
 ) -> f32 {
-    if let Some(step) = selected_step {
+    let default = desc
+        .params
+        .get(param_idx)
+        .map(|param| param.default)
+        .unwrap_or_default();
+    rack_slot_instrument_param_display(rack, slot_idx, slot, default, param_idx, selected_step).0
+}
+
+/// What param `param_idx` of rack slot `slot_idx`'s instrument shows at
+/// `step` (stored units), and whether a p-lock supplies it: the step's
+/// p-lock, else a rack macro mapped onto the param, else the slot's own
+/// value (`default` past its values). Shared by the legacy rack panel
+/// fields and the host kinds' rack slot params.
+pub(crate) fn rack_slot_instrument_param_display(
+    rack: &sequencer::sequencer::RackTrackSnapshot,
+    slot_idx: usize,
+    slot: &sequencer::sequencer::RackSlotSnapshot,
+    default: f32,
+    param_idx: usize,
+    step: Option<usize>,
+) -> (f32, bool) {
+    if let Some(step) = step {
         if let Some(value) = slot
             .instrument_slot
             .plocks
@@ -176,10 +197,10 @@ pub(crate) fn rack_slot_param_value(
             .copied()
             .flatten()
         {
-            return value;
+            return (value, true);
         }
     }
-    if let Some(value) = rack_macro_mapped_value(rack, selected_step, |target| {
+    if let Some(value) = rack_macro_mapped_value(rack, step, |target| {
         matches!(
             target,
             sequencer::sequencer::RackMacroTarget::SlotInstrumentParam {
@@ -189,18 +210,10 @@ pub(crate) fn rack_slot_param_value(
             } if *slot == slot_idx && *param_index == param_idx
         )
     }) {
-        return value;
+        return (value, false);
     }
-    slot.instrument_slot
-        .defaults
-        .get(param_idx)
-        .copied()
-        .unwrap_or_else(|| {
-            desc.params
-                .get(param_idx)
-                .map(|param| param.default)
-                .unwrap_or_default()
-        })
+    let base = slot.instrument_slot.defaults.get(param_idx).copied();
+    (base.unwrap_or(default), false)
 }
 
 pub(super) fn rack_macro_mapped_value(
@@ -658,8 +671,32 @@ pub(super) fn rack_effect_param_value(
     param_idx: usize,
     selected_step: Option<usize>,
 ) -> f32 {
-    let fallback = descriptor.params[param_idx].default;
-    if let Some(step) = selected_step {
+    let default = descriptor.params[param_idx].default;
+    rack_effect_param_display(
+        rack,
+        rack_slot,
+        effect_slot,
+        snapshot,
+        default,
+        param_idx,
+        selected_step,
+    )
+    .0
+}
+
+/// What param `param_idx` of effect `effect_slot` of rack slot `rack_slot`
+/// shows at `step` (stored units), and whether a p-lock supplies it, as
+/// [`rack_slot_instrument_param_display`] for a rack slot's effect.
+pub(crate) fn rack_effect_param_display(
+    rack: &sequencer::sequencer::RackTrackSnapshot,
+    rack_slot: usize,
+    effect_slot: usize,
+    snapshot: &sequencer::effects::EffectSlotSnapshot,
+    default: f32,
+    param_idx: usize,
+    step: Option<usize>,
+) -> (f32, bool) {
+    if let Some(step) = step {
         if let Some(value) = snapshot
             .plocks
             .get(step)
@@ -667,10 +704,10 @@ pub(super) fn rack_effect_param_value(
             .copied()
             .flatten()
         {
-            return value;
+            return (value, true);
         }
     }
-    rack_macro_mapped_value(rack, selected_step, |target| {
+    let mapped = rack_macro_mapped_value(rack, step, |target| {
         matches!(
             target,
             sequencer::sequencer::RackMacroTarget::SlotEffectParam {
@@ -682,14 +719,9 @@ pub(super) fn rack_effect_param_value(
                 && *target_effect_slot == effect_slot
                 && *param_index == param_idx
         )
-    })
-    .unwrap_or_else(|| {
-        snapshot
-            .defaults
-            .get(param_idx)
-            .copied()
-            .unwrap_or(fallback)
-    })
+    });
+    let base = || snapshot.defaults.get(param_idx).copied().unwrap_or(default);
+    (mapped.unwrap_or_else(base), false)
 }
 
 pub(super) fn build_rack_slot_effect_value(

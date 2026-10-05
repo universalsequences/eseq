@@ -26,7 +26,7 @@ impl Harness {
         (h, slot)
     }
 
-    fn add_effect(&mut self, track: usize, name: &str) -> usize {
+    pub(super) fn add_effect(&mut self, track: usize, name: &str) -> usize {
         let slot = self
             .app
             .apply_recorded_track_effect_chain_mutation(track, "Add effect", |app| {
@@ -51,11 +51,11 @@ impl Harness {
         }
     }
 
-    fn filter_slot(&self, slot: usize) -> &sequencer::effects::EffectSlotState {
+    pub(super) fn filter_slot(&self, slot: usize) -> &sequencer::effects::EffectSlotState {
         &self.shared.state.pattern.effect_chains[0][slot]
     }
 
-    fn drain_and_sync(&mut self) {
+    pub(super) fn drain_and_sync(&mut self) {
         self.drain();
         self.sync();
     }
@@ -77,7 +77,7 @@ impl Harness {
         });
     }
 
-    fn error(&self) -> String {
+    pub(super) fn error(&self) -> String {
         self.editor.minibuffer.clone().unwrap_or_default()
     }
 

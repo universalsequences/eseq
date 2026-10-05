@@ -141,6 +141,8 @@ pub(crate) struct KindsHandles {
     /// The drum rack the live keyboard plays as pads, by group id
     /// (`group.armed`).
     pub(crate) armed_rack: Arc<Mutex<Option<u64>>>,
+    /// The `App`'s buses as the natives see them (bus effect params).
+    pub(crate) bus_state: Arc<Mutex<Vec<app::BusChannelState>>>,
 }
 
 impl KindsHandles {
@@ -163,6 +165,7 @@ impl KindsHandles {
             step_print: shared.step_print.clone(),
             auto_follow_override_until: shared.auto_follow_override_until.clone(),
             armed_rack: shared.armed_rack.clone(),
+            bus_state: shared.bus_state.clone(),
         }
     }
 
@@ -377,6 +380,7 @@ pub(super) fn live_value<S: KindStore>(
             let device = shared.borrow().devices.get(&id)?.clone();
             match key {
                 f::DEVICE_PLAYHEAD => number(device.sampler.as_ref().map_or(0.0, |s| s.seconds())),
+                f::DEVICE_DELETE_TARGET => Value::Bool(device_delete_target(sources, &device)),
                 _ => return None,
             }
         }

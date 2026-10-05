@@ -40,6 +40,26 @@ fn set_track_send_base(
     app::apply_command(app, app::AppCommand::SetTrackSends { track, sends });
 }
 
+/// After a bus effect's param value landed (`set-bus-effect-param`, the
+/// host kinds' `param.base` of a bus effect): publish the bus runtime and
+/// the shared bus copy the natives and the host kinds read, refresh the
+/// legacy value field, and rebuild the panels when the param redefines them
+/// (an enum, a boolean).
+pub(super) fn bus_effect_param_applied(
+    app: &mut app::App,
+    editor: &mut Editor,
+    shared: &SharedHandles,
+    (bus, slot, param): (usize, usize, usize),
+    pdesc: Option<&sequencer::effects::ParamDescriptor>,
+) {
+    app.publish_bus_effect_runtime();
+    *shared.bus_state.lock().unwrap() = app.buses.clone();
+    sync_bus_effect_param_value_field(editor.runtime_mut(), app, bus, slot, param);
+    if let Some(pdesc) = pdesc {
+        super::rebuild_panel_if_needed(shared, pdesc);
+    }
+}
+
 /// After a track's output changed (`set-track-output`, the host kinds'
 /// `track.output`): refresh the mixer, and the track panel when it is the
 /// current track.
@@ -484,22 +504,13 @@ pub(super) fn handle(
                                 bus_idx, slot_idx, param_idx, stored,
                             ),
                         ) {
-                            Ok(()) => {
-                                app.publish_bus_effect_runtime();
-                                *bus_state.lock().unwrap() = app.buses.clone();
-                                sync_bus_effect_param_value_field(
-                                    editor.runtime_mut(),
-                                    &app,
-                                    bus_idx,
-                                    slot_idx,
-                                    param_idx,
-                                );
-                                if desc.as_ref().is_some_and(param_change_needs_fx_rebuild)
-                                {
-                                    fx_epoch.fetch_add(1, Ordering::Relaxed);
-                                    ui_epoch.fetch_add(1, Ordering::Relaxed);
-                                }
-                            }
+                            Ok(()) => bus_effect_param_applied(
+                                app,
+                                editor,
+                                ctx.shared,
+                                (bus_idx, slot_idx, param_idx),
+                                desc.as_ref(),
+                            ),
                             Err(error) => editor.handle_host_event(HostEvent::Status(
                                 format!("Error setting bus effect param: {error}"),
                             )),

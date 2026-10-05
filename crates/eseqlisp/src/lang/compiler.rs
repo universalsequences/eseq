@@ -317,7 +317,7 @@ pub(crate) fn def_kind_slots<'e>(
     let mut key = None;
     let key_shape = || {
         CompilerError::Message(format!(
-            "def-kind {name}: :key expects () (a singleton), (index) or (parent index)"
+            "def-kind {name}: :key expects () (a singleton), (index), (parent index) or ((parent …) index)"
         ))
     };
     for (offset, pair) in list[2..].chunks(2).enumerate() {
@@ -343,10 +343,31 @@ pub(crate) fn def_kind_slots<'e>(
                     [index] => KindKey::Indexed {
                         index: key_name(index)?,
                     },
-                    [parent, index] => KindKey::Under {
-                        parent: key_name(parent)?,
-                        index: key_name(index)?,
-                    },
+                    [parent, index] => {
+                        let parents = match strip_source_origin_wrappers(parent.clone()) {
+                            // `((p1 p2 …) index)`: under any of several kinds.
+                            Expression::List(parents) | Expression::QuoteList(parents)
+                                if !parents.is_empty() =>
+                            {
+                                parents
+                                    .iter()
+                                    .map(|parent| {
+                                        key_name(&strip_source_origin_wrappers(parent.clone()))
+                                    })
+                                    .collect::<Result<Vec<_>, _>>()?
+                            }
+                            parent => vec![key_name(&parent)?],
+                        };
+                        if let Some(duplicate) = first_duplicate(&parents) {
+                            return Err(CompilerError::Message(format!(
+                                "def-kind {name}: :key names parent {duplicate} twice"
+                            )));
+                        }
+                        KindKey::Under {
+                            parents,
+                            index: key_name(index)?,
+                        }
+                    }
                     _ => return Err(key_shape()),
                 },
                 Expression::Symbol(nil) if nil == "nil" => KindKey::Singleton,
@@ -356,6 +377,15 @@ pub(crate) fn def_kind_slots<'e>(
         slots.push((slot, value));
     }
     Ok((slots, key))
+}
+
+/// The first name `names` holds twice, if any (a `:key`'s parent list).
+pub(crate) fn first_duplicate(names: &[String]) -> Option<&str> {
+    names
+        .iter()
+        .enumerate()
+        .find(|(at, name)| names[..*at].contains(name))
+        .map(|(_, name)| name.as_str())
 }
 
 /// The entries of a def-kind field group (`:host`, `:state`), free of
@@ -2268,22 +2298,32 @@ impl<'a> Compiler<'a> {
         self.emit(OpCode::PushSymbol(name_idx));
         let key_idx = self.use_string_constant("key");
         self.emit(OpCode::PushKeyword(key_idx));
-        let parts: Vec<&str> = match key {
-            KindKey::Created | KindKey::Singleton => Vec::new(),
-            KindKey::Indexed { index } => vec![index],
-            KindKey::Under { parent, index } => vec![parent, index],
+        // The key names as data: `(index)`, `(parent index)`, or
+        // `((p1 p2 …) index)` for several parent kinds.
+        let (parents, index): (&[String], Option<&String>) = match key {
+            KindKey::Created | KindKey::Singleton => (&[], None),
+            KindKey::Indexed { index } => (&[], Some(index)),
+            KindKey::Under { parents, index } => (parents, Some(index)),
         };
-        for part in &parts {
-            let part_idx = self.use_string_constant(part);
-            self.emit(OpCode::PushSymbol(part_idx));
+        for parent in parents {
+            let parent_idx = self.use_string_constant(parent);
+            self.emit(OpCode::PushSymbol(parent_idx));
         }
-        if parts.is_empty() {
+        if parents.len() > 1 {
+            self.emit(OpCode::MakeList(parents.len()));
+        }
+        if let Some(index) = index {
+            let index_idx = self.use_string_constant(index);
+            self.emit(OpCode::PushSymbol(index_idx));
+        }
+        let parts = usize::from(!parents.is_empty()) + usize::from(index.is_some());
+        if parts == 0 {
             self.emit(OpCode::PushNil);
         } else {
-            self.emit(OpCode::MakeList(parts.len()));
+            self.emit(OpCode::MakeList(parts));
         }
         let mut arity = 3;
-        let what = if parts.is_empty() {
+        let what = if parts == 0 {
             "a singleton (:key ())"
         } else {
             "a keyed kind"

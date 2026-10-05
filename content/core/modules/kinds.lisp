@@ -2,7 +2,8 @@
 ;; (docs/kind-bindings-spec.md §3.4, §4, §9, §14).
 ;;
 ;; Each kind here is a projection of the sequencer's own state. The host
-;; registers the instances (tracks, scenes, banks, buses, groups, devices,
+;; registers the instances (tracks, scenes, banks, buses, groups, devices
+;; (a track's chain, MIDI effects and drum rack slots, a bus's effects),
 ;; sends, clips, cells, scene spans, drum rack pads, rack clips and grooves;
 ;; steps on first read of `t.steps`, params on first read of `d.params`),
 ;; pushes their `:host` fields,
@@ -157,12 +158,22 @@
 (def set-cell-selected (c v)
   (host-command "set-cell"
     (dict :track-id c.track.tid :pattern-id c.pid :field "selected" :value v)))
-;; A device param's own value (never a p-lock), in display units. Addressed
-;; by stable ids (track id, device id) so a reorder before the command lands
-;; cannot retarget it.
+;; A device by stable ids: its track's id (a chain device, a MIDI effect, a
+;; drum rack slot or one of its effects) or its bus's (a bus effect), and its
+;; did, so a reorder before the command lands cannot retarget it.
+(def device-target (d)
+  (if d.bus
+    (dict :bus-id d.bus.bid :device d.did)
+    (dict :track-id d.track.tid :device d.did)))
+;; A device param's own value (never a p-lock), in display units.
 (def set-param-base (p v)
   (host-command "set-device-param"
-    (dict :track-id p.device.track.tid :device p.device.did :param-idx p.index :value v)))
+    (merge (device-target p.device) :param-idx p.index :value v)))
+;; A device's own fields (set-device): a rack slot's voices, the delete
+;; target.
+(def device-setter (field)
+  (lambda (d v)
+    (host-command "set-device" (merge (device-target d) :field field :value v))))
 
 ;; Drum racks (spec §14.2e). Pads are addressed by their rack's group id and
 ;; their member track's stable id, rack clips by (group id, clip id), grooves
@@ -256,18 +267,29 @@
          (text    :string :doc "The option label value selects (on/off for a boolean); empty for continuous params")
          (printing :bool  :doc "Held under a live print latch while playing and recording")))
 
-;; One device of a track's chain: the instrument (slot -1), then effects.
-;; Keyed by its stable id: a reorder keeps the instance, only slot moves.
+;; One device: of a track's chain (t.devices: the instrument, slot -1, then
+;; its effects), a track's MIDI effects (t.midi-devices), a drum rack's slots
+;; (the rack instrument's devices) and each slot's effects (the slot's
+;; devices), or a bus's effects (b.devices). Keyed under its track or bus by
+;; its stable id: a reorder keeps the instance, only slot moves.
 (def-kind device
-  :key (track did)
-  :host ((track   track   :doc "The track whose chain holds the device")
-         (slot    :int    :doc "-1 for the instrument, else the effect slot")
-         (did     :int    :doc "The host's stable device id on its track: 0 for the instrument, else the effect's instance id")
-         (type    :string :doc "What the device is: the instrument type (synth, sampler, …) or the effect (Filter, Reverb, …)")
+  :key ((track bus) did)
+  :host ((track   track   :doc "The track that holds the device; nil for a bus effect")
+         (bus     bus     :doc "The bus whose effect it is; nil for a track's device")
+         (slot    :int    :doc "Position in its own chain: -1 for the instrument, else the effect, MIDI effect, rack slot or bus effect slot")
+         (did     :int    :doc "The host's stable device id under its track or bus: 0 for the instrument, else the device's instance id")
+         (role    :string :doc "instrument, effect, midi-fx, rack-slot, rack-effect or bus-effect")
+         (type    :string :doc "What the device is: the instrument type (synth, sampler, rack, …) or the effect (Filter, Reverb, …)")
          (name    :string :doc "Device name")
-         (enabled :bool   :doc "False while bypassed")
+         (enabled :bool   :doc "False while bypassed (a rack slot: switched off)")
          (params  (list-of param) :doc "The device's parameters, in descriptor order")
-         (playhead :number :doc "A sampler's playing position in seconds, 0 when idle or not a sampler")))
+         (playhead :number :doc "A sampler's playing position in seconds, 0 when idle or not a sampler")
+         (devices (list-of device) :doc "The devices it holds: a drum rack's slots, a rack slot's effects; empty otherwise")
+         (container device :doc "The device whose devices holds this one (a rack slot's rack, a rack slot effect's slot), or nil")
+         (voices  :int :set (device-setter "voices")
+                  :doc "A drum rack slot's voices, 1 (mono) to 16 (the setter checks; no declared range: 0 reads for any other device, which takes no set!)")
+         (delete-target :bool :set (device-setter "delete-target")
+                  :doc "The delete target (Backspace deletes it). Track effects are targets only on the current track; an instrument never")))
 
 (def-kind track
   :key (index)
@@ -284,7 +306,8 @@
          (preset    :string :doc "Loaded preset name; empty when none")
          (num-steps :int    :doc "Pattern length in steps")
          (steps     (list-of step))
-         (devices   (list-of device))
+         (devices   (list-of device) :doc "The chain: the instrument, then its effects")
+         (midi-devices (list-of device) :doc "The MIDI effects, in chain order")
          (pan       :number :range (-1 1) :set set-track-pan)
          (soloed    :bool   :set set-track-soloed)
          (collapsed :bool   :set set-track-collapsed :doc "Lane collapsed in the sequencer")
@@ -442,6 +465,7 @@
          (peak   :number :range (0 1) :doc "Output meter level")
          (output bus     :set set-bus-output :doc "The bus this one feeds (the main mix by default); nil for the main mix")
          (output-options (list-of bus) :doc "The buses output may be set to (empty when fixed)")
+         (devices (list-of device) :doc "The bus's effects, in chain order")
          (mod-in-1 :number :range (0 1) :doc "Mod input port levels, inputs 1-4 (Ext1-4); (mod-in-level b i) binds input i")
          (mod-in-2 :number :range (0 1))
          (mod-in-3 :number :range (0 1))
@@ -689,20 +713,21 @@
 
 ;; P-lock param p to v (display units) on steps, a list of step instances of
 ;; p's track (any other track's step is an error); one undo entry. Steps
-;; already locked to v are left alone.
+;; already locked to v are left alone. A bus effect's params take no p-locks.
 (def lock-param! (p steps v)
   (host-command "set-device-param-locks"
-    (dict :track-id p.device.track.tid :device p.device.did :param-idx p.index
-          :steps (map (lambda (s) s.index) steps)
-          :step-tracks (map (lambda (s) s.track.tid) steps) :value v)))
+    (merge (device-target p.device)
+           :param-idx p.index :steps (map (lambda (s) s.index) steps)
+           :step-tracks (map (lambda (s) s.track.tid) steps) :value v)))
 
 ;; Clear param p's p-locks on steps (a list of step instances of p's track);
-;; one undo entry.
+;; one undo entry. (A drum rack slot instrument's locks cannot be cleared
+;; yet: an error.)
 (def unlock-param! (p steps)
   (host-command "clear-device-param-locks"
-    (dict :track-id p.device.track.tid :device p.device.did :param-idx p.index
-          :steps (map (lambda (s) s.index) steps)
-          :step-tracks (map (lambda (s) s.track.tid) steps))))
+    (merge (device-target p.device)
+           :param-idx p.index :steps (map (lambda (s) s.index) steps)
+           :step-tracks (map (lambda (s) s.track.tid) steps))))
 
 ;; Load track t's next (dir 1) or previous (dir -1) preset, wrapping.
 (def step-preset! (t dir)

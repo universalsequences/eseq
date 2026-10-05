@@ -322,6 +322,7 @@ impl Harness {
 }
 
 mod arrangement;
+mod devices;
 mod mixer;
 mod params;
 mod racks;

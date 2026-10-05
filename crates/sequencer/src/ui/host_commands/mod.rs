@@ -3,6 +3,7 @@ mod arrangement;
 pub(crate) mod content_reload;
 pub(crate) mod audio_settings;
 mod customize;
+mod devices;
 mod dispatch;
 mod drum_rack_v2;
 pub(crate) use drum_rack_v2::{apply_rack_pad_map_command, evaluate_rack_sequencer_source};

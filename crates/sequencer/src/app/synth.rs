@@ -705,6 +705,20 @@ impl App {
         }
     }
 
+    /// The descriptor a rack slot's instrument plays, borrowed: the builtin
+    /// sampler's (one shared copy: it is derived from constants, so one is
+    /// as good as another, and building it costs ~100 param descriptors) or
+    /// its engine's (`None` for an empty slot or an engine the registry does
+    /// not know yet). The borrowing twin of
+    /// [`Self::rack_slot_instrument_descriptor`].
+    pub fn rack_slot_descriptor(&self, slot: &RackSlotSnapshot) -> Option<&EffectDescriptor> {
+        static SAMPLER: std::sync::OnceLock<EffectDescriptor> = std::sync::OnceLock::new();
+        match slot.instrument_type {
+            InstrumentType::Sampler => Some(SAMPLER.get_or_init(EffectDescriptor::builtin_sampler)),
+            _ => self.rack_slot_cached_instrument_descriptor(slot),
+        }
+    }
+
     fn rack_slot_snapshot(&self, track: usize, slot_idx: usize) -> Option<RackSlotSnapshot> {
         self.state
             .pattern

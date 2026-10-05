@@ -1,6 +1,6 @@
 # Kind bindings
 
-Status: spec rev 3, 2026-10-04. Stages 1–6 built, stage 7 in part (§14; 7, 7b, 7d, 7h and 7i built) (§3.1, §3.2, §3.3, §3.4, §4, §7.1, §7.3, §8, §9 notes). Bead: epic `eseq-0l17` (`bd list --label kind-bindings`).
+Status: spec rev 3, 2026-10-04. Stages 1–6 built, stage 7 in part (§14; 7, 7b, 7b-2, 7d, 7h and 7i built) (§3.1, §3.2, §3.3, §3.4, §4, §7.1, §7.3, §8, §9 notes). Bead: epic `eseq-0l17` (`bd list --label kind-bindings`).
 Rev 3 resolves the open questions (§12 Decisions). Rev 2 dropped the separate `defrecord` form of rev 1: host state and view state
 are declared with `def-kind`, which gains keyed and singleton kinds, a `:host`
 field group and typed fields.
@@ -140,6 +140,12 @@ The rules an author learns:
   instance, or nil when no track 3 exists.
 - `(track index)`: keyed under a parent kind. Reached only through the parent
   (`t.steps`, `(nth t.steps 5)`); no constructor (one path per thing).
+- `((p1 p2 …) index)`: keyed under any one of several parent kinds (built
+  in 7b-2 for `device`, under a track or a bus). The first key part is a
+  live instance of one of them; each parent drops exactly its own children.
+  The parent list is a set: naming a parent twice is an error (at compile
+  time and in the VM's own `:key` parser), and a re-definition that lists
+  the same parents in another order keeps the key's shape.
 - `()`: singleton. `def-kind` binds the kind's name, in the defining module,
   to its one instance, so `transport.playing` and
   `(set! scene-menu.open true)` work directly.
@@ -185,6 +191,12 @@ Built (stage 3, keyed kinds):
   (parent id → child ids), maintained by register, re-key (a step moved to
   another track belongs to the new one) and drop; dropping a parent drops
   exactly its current children.
+- Several parents (7b-2): `:key ((track bus) did)` is `KindKey::Under {
+  parents, index }` with every name; each resolves as below, and a key's
+  first part must be a live instance of any of them (the error names them
+  all, `not a live 'm:track' or 'm:bus' instance`). The parent list is part
+  of the key's shape (a hot reload may not change it); messages read
+  `reach them through their track or bus`.
 - The parent named in `:key` is resolved when the kind's first instance
   registers, not at `def-kind`, so `eseq.kinds` can declare `step` before
   `track`: the parent's own module first (`m:track` for `m:step`), else the
@@ -366,7 +378,7 @@ Built (stage 4):
   |---|---|---|
   | `track` | `(index)` | `index :int`, `name :string`, `color :rgb`, `volume :number` [`seq-set-track-volume`], `peak :number`, `muted :bool` [`seq-set-track-mute`], `audible :bool`, `armed :bool` [`seq-set-record-arm`], `selected :bool`, `preset :string`, `num-steps :int`, `steps (list-of step)`, `devices (list-of device)` |
   | `step` | `(track index)` | `index :int`, `track track`, `active :bool` [`seq-set-track-step`], `playing :bool`, `selected :bool` |
-  | `device` | `(track slot)`, slot part = slot + 1 (since 7b `(track did)`, §14.2b) | `track track`, `slot :int` (-1 = instrument), `name :string`, `enabled :bool` |
+  | `device` | `(track slot)`, slot part = slot + 1 (since 7b `(track did)`, §14.2b; since 7b-2 `((track bus) did)`, §14.2f) | `track track`, `slot :int` (-1 = instrument), `name :string`, `enabled :bool` |
   | `scene` | `(index)` | `index :int`, `number :int` (1-based in its bank), `name :string`, `active :bool`, `queued :bool`, `bank bank` |
   | `bank` | `(index)` | `index :int`, `label :string`, `scenes (list-of scene)`, `playing :bool` |
   | `transport` | `()` | `playing :bool` [`seq-set-playing`], `recording :bool` [`seq-set-recording`], `scene scene`, `queued scene` (nil when none), `launch-quantize :string` |
@@ -999,6 +1011,9 @@ its instance and field.
    Built (stage 7h, eseq-0l17.34): drum racks: `pad`, `rack-clip`,
    `groove`, `pad-groove`, `pool-groove`, `library-groove`, the group's
    rack fields and `track.pad` (§14.2e).
+   Built (stage 7b-2, eseq-0l17.36): devices beyond the track chain (MIDI
+   effects, bus effects, drum rack slots and their effects) with their
+   params, `device.voices` and `device.delete-target` (§14.2f).
 8. **Factory port**, one area at a time, each removing that area's legacy
    field names: sequencer grid and step editing; transport, scenes and
    banks; mixer; effect and instrument panels (incl. custom-ui runtime,
@@ -1272,7 +1287,7 @@ Built (7b):
   `UndoManager::suspend_gesture` / `resume_gesture`): its own entry, the
   drag neither split nor joined.
 - **Not covered** (follow-ups): MIDI fx, bus effect and rack slot devices
-  (eseq-0l17.36); modulation display, process mapping, tensors, base
+  (eseq-0l17.36, built: §14.2f); modulation display, process mapping, tensors, base
   note, key locks, rack and project macros, the variant chip list, the
   neural-selection display override and the rest of the panel data
   (eseq-0l17.37).
@@ -1415,7 +1430,8 @@ Built (7i):
 - **Deferred to eseq-0l17.36** (they need device instances for MIDI fx,
   bus effects and rack slots): `SEQ.bus-effects` → `bus.devices`,
   `SEQ.midi-effects` → `track.midi-devices`, `SEQ.rack-slot-delete-target-*`
-  → `device.delete-target`, and a rack track's slot voices.
+  → `device.delete-target`, and a rack track's slot voices
+  (`device.voices`). Built in 7b-2 (§14.2f).
 
 ### 14.2d Built in stage 7d (eseq-0l17.30)
 
@@ -1671,11 +1687,142 @@ Built (7h):
   amount commands name the amount with `rack_grooves::Amount`); every other
   setter is its own entry.
 - **Not covered.** Rack slot voices and polyphony stay with the rack slot
-  devices (eseq-0l17.36, §14.2c), as do a rack's macros (eseq-0l17.37).
+  devices (eseq-0l17.36, §14.2c; built: `device.voices`, §14.2f); a rack's
+  macros are eseq-0l17.37.
   The groove picker's labels, headers and details (`:picker-labels`,
   `:picker-headers`, `:picker-details`) are a view's to build from
   `project.groove-pool` (`pg.racks` says where else one plays) and
   `project.groove-library`. Kit presets stay with the browser (eseq-0l17.32).
+
+### 14.2f Built in stage 7b-2 (eseq-0l17.36)
+
+| Kind | Key | New `:host` fields (`:set` in brackets) |
+|---|---|---|
+| `device` | `((track bus) did)` (was `(track did)`) | `bus bus` (nil for a track's device; `track` is nil for a bus effect), `role :string` (`instrument`, `effect`, `midi-fx`, `rack-slot`, `rack-effect`, `bus-effect`), `devices (list-of device)` (a drum rack's slots on its instrument device, a rack slot's effects on the slot), `container device` (the device whose `devices` holds it, or nil), `voices :int` (a rack slot's, 1–16; 0 otherwise; no declared range, the setter checks) [d], `delete-target :bool` (L) [d] |
+| `track` | `(index)` | `midi-devices (list-of device)` |
+| `bus` | `(index)` | `devices (list-of device)` |
+
+[d] = the `set-device` host command (`:track-id` or `:bus-id`, `:device`,
+`:field`, `:value`; `host_commands/devices.rs`). `param.base`, `lock-param!`
+and `unlock-param!` take a bus effect's param too: every device command
+names the device by `(device-target d)`, its track's `tid` or its bus's
+`bid` with its `did`.
+
+Built (7b-2):
+
+- **One device kind, several parents.** Every device is a `device`, with
+  the same `param`s, setters and panel helpers: a track's chain
+  (`t.devices`: the instrument, then its effects), its MIDI effects
+  (`t.midi-devices`), a drum rack's slots (the rack instrument device's
+  `devices`; each slot device stands for the slot's instrument, its voices
+  and its effects, its `devices`), and a bus's effects (`b.devices`). A
+  device is keyed under its track, or under its bus for a bus effect (a
+  parent-keyed kind may name several parent kinds, §3.1; a bus has no track
+  to hang its effects off, and a separate bus device kind would need a
+  separate param kind). `role` says which family it is (`kind` is a
+  built-in); `slot` is its place in its own chain.
+- **Identity.** The `did` is the device registry's identity of the device
+  (a MIDI effect's, a rack slot's, a rack slot effect's, a bus effect's
+  instance id, from the allocator the track effects use; 0 for the
+  instrument). Ids are unique across families, which a track's devices of
+  every family rely on (one key space under the track): every `bind_*`
+  refuses an id another family holds, and a project load reallocates a
+  persisted id two records share (`Project::normalize_device_instances`:
+  the first holder keeps it; nothing else in a project names these ids).
+  A reorder keeps the instance and its params. A device whose id is not
+  bound yet uses a placeholder of its family (above 2^52, by position:
+  `DeviceSlot::unbound_did`). When the registry allocates an identity for
+  such a device it records the placeholder it came from (family and
+  position at the bind: `DevicePlaceholder`), and `reconcile_devices`
+  re-keys the placeholder instance to exactly that identity, never
+  guessing by position (so a bind that also reorders, say unbound
+  `(transpose arp)` moved to `(arp transpose)`, keeps every handle on its
+  own effect), the track chain's effects included. An identity with no
+  record (a new device, a persisted one) or two identities claiming one
+  placeholder replace the instance instead; other families' devices under
+  the same parent are left alone. A descriptor change in a device replaces
+  its params (old handles go stale); a deleted device, track or bus, or a
+  project load drops it. The track model's revision includes the
+  registry's `generation`, so a bind that moves no other counter re-keys a
+  chain device too.
+- **Feeds.** The chain stays with the track model sync; the other families
+  have a pass each (`host_kinds/devices.rs`), each behind its own key,
+  compared in place and updated only when it moved: MIDI effects on the FX,
+  UI and pattern epochs, the content library epoch, the registry's
+  `generation` and the tracks; bus effects on the FX and UI epochs, the
+  `generation` and the buses; rack slots and their effects on the
+  `generation`, the tracks and the chain devices, and the rack revision
+  (`RevisionedMutex`: any rack edit), where a rack whose layout
+  fingerprint (slots, instruments, names, switches, voices, descriptors,
+  effects and their switches) did not change is skipped, so a rack knob
+  drag does no device work (`DeviceState::racks_synced`). None reads the
+  history revision (`DeviceState::syncs`: a value edit or drag runs none);
+  a hot reload is caught by one representative instance. MIDI effect
+  descriptors come from a cache in `DeviceState`, reloaded only when the
+  content library epoch moves (`midi_fx_loads`); rack devices are synced
+  under the rack lock, in one pass per rack (models and placeholders built
+  together, reconciled once). Shared derivations: the chains
+  (`bus_device_chain`, shared with `SEQ.bus-device-chains`;
+  `midi_fx_device_chain`, shared with `SEQ.midi-effects`;
+  `rack_slot_effect_chain`), `effect_enabled` (over `DeviceValues`, shared
+  with `track_device_chain` and the bus and rack chains),
+  `rack_slot_raw_name`, `App::rack_slot_descriptor` (shared with the rack
+  modulation meters), `with_rack_slot`.
+- **Param values per family** (`DeviceSlot::with_values`, `read_param`):
+  a MIDI effect as a chain device (`device_param_display`: the lock in
+  force at the displayed step, held off-step; no project macro); a rack
+  slot's instrument or effect from the rack's snapshot
+  (`rack_slot_instrument_param_display`, `rack_effect_param_display`:
+  the displayed step's lock, else a rack macro mapped onto it, else the
+  base; shared with the rack panel's value fields); a bus effect from the
+  shared bus copy (`KindsHandles::bus_state`): its base, like the legacy
+  `bus-N-fx-*` field (`locked` false; `has-locks` scans the bus slot's
+  locks; `printing` follows the current track's latch, as the bus knob
+  does). All in display units. Observed params are computed per tick
+  only (the device and param `ObservedList`s cover every family).
+- **Setters.** `set-device-param` and the lock commands resolve the
+  device by owner id and `did` when they land (`DeviceSlot::resolve` /
+  `resolve_bus`); a placeholder `did` names the device at its family and
+  position while one is there, even once an edit has bound it (two `set!`s
+  of one unbound device in one eval both land, and a drag keeps landing
+  until the next sync re-keys the device). A MIDI effect's descriptor comes
+  from the device sync's cache and its presence from the chain's names: no
+  setter reads a file (the history commands' own clamp,
+  `AppCommand::SetMidiFxParam` / `SetMidiFxPlockMulti`, shared with the
+  legacy knobs, still loads the descriptor per command: not yet cached).
+  They act only where the model differs and go through the knob edits'
+  history commands (`SetMidiFxParam`, `SetRackSlotInstrumentParam`,
+  `SetRackSlotEffectParam`, their `…PlockMulti`, `ClearMidiFxPlockMulti`,
+  `ClearRackSlotEffectPlockMulti`; a bus effect through
+  `apply_recorded_bus_effect_value_mutation`), with the gesture rules of
+  7b (a bus effect drag is one entry too). They refresh what the legacy
+  commands refresh, through helpers shared with them:
+  `apply_device_param_base` (now also `set-midi-fx-param`'s; its panel
+  rebuild is skipped for a rack slot, whose `rack_param_applied` owns it),
+  `rack_param_applied` (the four rack knob commands'; a script lock
+  refreshes the shown step's rows as the knobs do,
+  `RackPlockRowsSync::for_plock_write`) and `bus_effect_param_applied`
+  (`set-bus-effect-param`'s). Bus effects take
+  no p-locks (`lock-param!` / `unlock-param!` on one are errors), and a
+  rack slot instrument's locks have no clear command (eseq-0l17.41).
+- **Voices.** `device.voices` is a rack slot's max polyphony (a model
+  field of the device sync; the legacy `tp-poly` / `tp-max-polyphony` show
+  the selected slot's: `(> rs.voices 1)`); any other device reads 0, so the
+  field declares no `:range` (0 would violate one) and its setter checks:
+  an integer in 1–16 (`SetRackSlotMaxPolyphony` through history, refreshed
+  with the legacy command's `rack_slot_voices_applied`; a drag joins one
+  entry); another device's is an error.
+- **Delete targets.** `device.delete-target` (live) reads true while the
+  active delete target names the device (`DeviceSlot::delete_target`: a
+  rack slot or rack slot effect, a bus effect, and a chain effect or MIDI
+  effect of the current track: the fx panel's targets name the current
+  track's chains). `(set! d.delete-target true)` makes the device the
+  target; false clears it only while it names the device; an instrument,
+  or another track's chain effect, is an error.
+- **Not covered:** rack slot strip controls (gain, pan, mute, solo, choke,
+  enabled as settable fields, with their p-lock display) (eseq-0l17.42),
+  base note and the rest of the panel extras (eseq-0l17.37), rack slot
+  sampler playheads (`device.playhead` is a track instrument's).
 
 ### 14.3 Follow-up beads
 
@@ -1684,7 +1831,9 @@ Each port bead depends on the beads whose rows it uses (`bd dep`).
 | Tag | Bead | Kinds | Ports blocked |
 |---|---|---|---|
 | 7b | eseq-0l17.28 (built) | `param` under `device` (values, p-lock display, print latch), `device.playhead`, step p-lock render (`plocked`, `lock-kind`, `variant-color`), send p-lock flags | .11 .13 .14 .18 .19 .21 |
-| 7b-2 | eseq-0l17.36 | devices (and params) for MIDI fx, bus effects, rack slots; `bus.devices`, `track.midi-devices`, `device.delete-target` (from 7i) | .13 .14 .18 .19 .21 |
+| 7b-2 | eseq-0l17.36 (built) | devices (and params) for MIDI fx, bus effects, rack slots; `bus.devices`, `track.midi-devices`, `device.delete-target` (from 7i), `device.voices` | .13 .14 .18 .19 .21 |
+| 7b-2a | eseq-0l17.41 | the clear command for a rack slot instrument's p-locks (`unlock-param!` on a rack slot param) | — |
+| 7b-2b | eseq-0l17.42 | rack slot strip controls (gain, pan, mute, solo, choke, enabled) on the rack slot device, with their p-lock display | .14 .19 |
 | 7b-3 | eseq-0l17.37 | panel extras: modulation display, process mapping, tensors, base note, key locks, rack and project macros, variant chip list, neural-selection display | .14 .18 |
 | 7c | eseq-0l17.29 | `lane`, process slots and scopes, process library singleton | .11 .14 .20 |
 | 7d | eseq-0l17.30 (built) | `song` and `region` singletons, `scene-span`, `clip`, pattern `cell`, `track.governed` / `latched` | .11 .12 .13 .15 .17 .20 |
@@ -1795,11 +1944,11 @@ builds the field name.
 | `SEQ.velocities` | 2 | seq-core-state, seqv-track-params | app/retrospective.rs | model | step.velocity | built (.10) | .11 |
 | `SEQV.<sel-track-vis-field>` | 1 | seq-core-state | Lisp (reactive-set) | Lisp-owned | track.selected | built (.10) | .11 |
 | `<ns-var name>` | 2 | effects/drum-surface | custom_ui.rs | - | param.value via (device-param d "x") | built (.28) | .14 |
-| `SEQ.<get>` | 23 | effects/param-controls, effects/instrument-panel, effects/sampler-panel +9 | sv/param_fields_and_sync.rs, instrument_panel.rs, effects_panel.rs | model | param.value / param.name (panel :value-field, :label-field, :name-field, :short-field); MIDI fx / bus / rack slot params .36, rack macro names .37 | built (.28) | .14 .16 .18 .19 .20 .21 |
+| `SEQ.<get>` | 23 | effects/param-controls, effects/instrument-panel, effects/sampler-panel +9 | sv/param_fields_and_sync.rs, instrument_panel.rs, effects_panel.rs | model | param.value / param.name (panel :value-field, :label-field, :name-field, :short-field); MIDI fx / bus / rack slot params (built .36), rack macro names .37 | built (.28, .36) | .14 .16 .18 .19 .20 .21 |
 | `SEQ.<slot-field>` | 12 | sequencer | sv/expanded_step.rs | model | step.active/selected/playing/plocked/lock-kind/variant-color through the view's own slot→step map (expanded-step projection removed) | built (.28) | .11 |
 | `SEQ.<var field>` | 8 | effects/param-controls, effects/custom-ui-runtime, mixer +1 | sv/param_fields_and_sync.rs | model | param.value / send.display (field strings from panel data); mod / process fields .37 | built (.28) | .13 .14 |
 | `SEQ.effects` | 3 | application-menus, effects/index, effects/buffers | lisp_host/dgen/instrument_storage.rs | model | track.devices → device.params (other panel data .37) | built (.28) | .14 .18 |
-| `SEQ.instrument-panel` | 10 | effects/param-controls, browser, effects/index +3 | reactive_tick.rs | model | device panel data (device.params; rack slots .36, key locks / macros / modulation .37) | built (.28) | .14 .17 .18 |
+| `SEQ.instrument-panel` | 10 | effects/param-controls, browser, effects/index +3 | reactive_tick.rs | model | device panel data (device.params; rack slots: the rack device's devices (built .36), key locks / macros / modulation .37) | built (.28, .36) | .14 .17 .18 |
 | `SEQ.macros` | 5 | macros, effects/param-controls | project.rs | model | rack macros (group.macros) and project macros | .37 | .14 .18 |
 | `SEQ.sampler-playhead` | 1 | effects/sampler-panel | reactive_tick.rs | live | device.playhead (live) | built (.28) | .14 |
 | `SEQ.seq-track-step-plock-kind-*` | 1 | sequencer | sv/steps_and_pattern.rs | model | step.lock-kind | built (.28) | .11 |
@@ -1983,7 +2132,7 @@ builds the field name.
 | `SEQ.accum-mode-options` | 1 | effects/track-panels | sv/project_state.rs | model | constant | built (.35) | .14 |
 | `SEQ.accumulator-options` | 1 | effects/track-panels | sv/project_state.rs | model | project.accumulator-options | built (.35) | .14 |
 | `SEQ.auto-follow` | 2 | seq-core-state, sequencer | reactive_tick.rs | model | selection.auto-follow | built (.35) | .11 |
-| `SEQ.bus-effects` | 3 | application-menus, effects/buffers, effects/panel-widgets | event_loop.rs | model | bus.devices | .36 | .14 .18 |
+| `SEQ.bus-effects` | 3 | application-menus, effects/buffers, effects/panel-widgets | event_loop.rs | model | bus.devices | built (.36) | .14 .18 |
 | `SEQ.bus-mod-in-level-*` | 1 | mixer | sv/meters_and_modulation.rs | live | bus.mod-in-1 … -4 (live; `(mod-in-level b i)`) | built (.35) | .13 |
 | `SEQ.bus-output-routes` | 1 | mixer | sv/track_and_mixer.rs | model | bus.output, bus.output-options | built (.35) | .13 |
 | `SEQ.compiling` | 1 | effects/buffers | sv/host_commands.rs | model | engine.compiling | built (.35) | .14 |
@@ -1993,13 +2142,13 @@ builds the field name.
 | `SEQ.fx-step-parameter-step` | 1 | seq-core-state | sv/topology_and_visualization.rs | model | selection.edit-step | built (.35) | .11 |
 | `SEQ.fx-step-selection-count` | 2 | effects/track-panels, seq-core-state | sv/param_fields_and_sync.rs | model | (len selection.steps) | built (.35) | .11 .14 |
 | `SEQ.fx-step-value-*` | 1 | effects/track-panels | step_print.rs | model | step.‹param› of selection.edit-step | built (.35) | .14 |
-| `SEQ.midi-effects` | 1 | effects/buffers | event_loop.rs | model | track.midi-devices | .36 | .14 |
+| `SEQ.midi-effects` | 1 | effects/buffers | event_loop.rs | model | track.midi-devices | built (.36) | .14 |
 | `SEQ.mixer-track-delete-target-*` | 1 | mixer | sv/steps_and_pattern.rs | model | track.delete-target | built (.35) | .13 |
 | `SEQ.mod-in-level-*` | 1 | mixer | sv/meters_and_modulation.rs | live | track.mod-in-1 … -4 (live; `(mod-in-level t i)`) | built (.35) | .13 |
 | `SEQ.mod-out-level-*` | 1 | mixer | sv/meters_and_modulation.rs | live | track.mod-out-level (live) | built (.35) | .13 |
 | `SEQ.mod-routes` | 6 | mixer | reactive_sync.rs | model | route kind, `(routes)` | built (.35) | .13 |
 | `SEQ.mute-group-options` | 1 | effects/track-panels | sv/project_state.rs | model | constant | built (.35) | .14 |
-| `SEQ.rack-slot-delete-target-*` | 1 | effects/instrument-panel | sv/steps_and_pattern.rs | model | device.delete-target | .36 | .14 |
+| `SEQ.rack-slot-delete-target-*` | 1 | effects/instrument-panel | sv/steps_and_pattern.rs | model | device.delete-target | built (.36) | .14 |
 | `SEQ.roll-rate` | 1 | transport | reactive_tick.rs | live | transport.roll-rate | built (.35) | .12 |
 | `SEQ.selected-mod-routes` | 2 | mixer | sv/steps_and_pattern.rs | model | route.selected | built (.35) | .13 |
 | `SEQ.sequence-rolling` | 1 | transport | reactive_tick.rs | live | transport.sequence-rolling | built (.35) | .12 |
@@ -2009,10 +2158,10 @@ builds the field name.
 | `SEQ.tp-accumulator` | 1 | effects/track-panels | sv/project_state.rs | model | track.accumulator | built (.35) | .14 |
 | `SEQ.tp-fts` | 2 | effects/track-panels, effects/scale-editor | sv/project_state.rs | model | track.fts | built (.35) | .14 |
 | `SEQ.tp-gate` | 4 | effects/sampler-panel | sv/project_state.rs | model | track.gate | built (.35) | .14 |
-| `SEQ.tp-max-polyphony` | 2 | mixer, effects/track-panels | host_commands/rack.rs | model | track.max-polyphony (the track's own; a rack slot's: .36) | built (.35) | .13 .14 |
+| `SEQ.tp-max-polyphony` | 2 | mixer, effects/track-panels | host_commands/rack.rs | model | track.max-polyphony (the track's own; a rack slot's: device.voices) | built (.35, .36) | .13 .14 |
 | `SEQ.tp-mono-trigger` | 1 | effects/track-panels | sv/project_state.rs | model | track.mono-trigger | built (.35) | .14 |
 | `SEQ.tp-mute-group` | 1 | effects/track-panels | sv/project_state.rs | model | track.mute-group (`:int`; label `(nth mute-group-options g)`) | built (.35) | .14 |
-| `SEQ.tp-poly` | 12 | effects/track-panels, mixer, effects/instrument-panel | sv/project_state.rs | model | track.poly (the track's own; a rack slot's: .36) | built (.35) | .13 .14 |
+| `SEQ.tp-poly` | 12 | effects/track-panels, mixer, effects/instrument-panel | sv/project_state.rs | model | track.poly (the track's own; a rack slot's: (> device.voices 1)) | built (.35, .36) | .13 .14 |
 | `SEQ.tp-rack-slot-idx` | 5 | effects/track-panels, mixer | sv/project_state.rs | model | selection.rack-slot (-1: no rack) | built (.35) | .13 .14 |
 | `SEQ.tp-supports-mono-trigger` | 2 | effects/track-panels | sv/project_state.rs | model | track.supports-mono-trigger | built (.35) | .14 |
 | `SEQ.tp-swing` | 2 | effects/track-panels | sv/project_state.rs | model | track.swing | built (.35) | .14 |

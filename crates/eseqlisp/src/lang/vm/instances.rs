@@ -179,7 +179,9 @@ pub enum KindKey {
     Indexed { index: String },
     /// `:key (parent index)`: an instance per (parent instance id, index),
     /// reached through the parent, an instance of the keyed kind `parent`.
-    Under { parent: String, index: String },
+    /// `:key ((p1 p2 …) index)` names several parent kinds: the parent is
+    /// an instance of any one of them (a device under a track or a bus).
+    Under { parents: Vec<String>, index: String },
 }
 
 impl KindKey {
@@ -194,11 +196,15 @@ impl KindKey {
     }
 
     /// Whether a re-registration keeps the key's shape: the same variant
-    /// and, under a parent, the same parent kind name. Index names may
-    /// change.
+    /// and, under a parent, the same parent kind names (in any order).
+    /// Index names may change.
     fn same_shape(&self, other: &Self) -> bool {
         match (self, other) {
-            (Self::Under { parent: a, .. }, Self::Under { parent: b, .. }) => a == b,
+            // The parent list is a set: `((track bus) did)` and
+            // `((bus track) did)` are one shape.
+            (Self::Under { parents: a, .. }, Self::Under { parents: b, .. }) => {
+                a.len() == b.len() && a.iter().all(|parent| b.contains(parent))
+            }
             _ => std::mem::discriminant(self) == std::mem::discriminant(other),
         }
     }
@@ -209,8 +215,17 @@ impl KindKey {
             Self::Created => "without :key".to_string(),
             Self::Singleton => "as a singleton (:key ())".to_string(),
             Self::Indexed { index } => format!("keyed (:key ({index}))"),
-            Self::Under { parent, index } => format!("keyed (:key ({parent} {index}))"),
+            Self::Under { parents, index } => match parents.as_slice() {
+                [parent] => format!("keyed (:key ({parent} {index}))"),
+                parents => format!("keyed (:key (({}) {index}))", parents.join(" ")),
+            },
         }
+    }
+
+    /// The parent kind names of a `:key (parent index)` key, as messages
+    /// show them: `track`, `track or bus`.
+    fn parents_text(parents: &[String]) -> String {
+        parents.join(" or ")
     }
 }
 
@@ -682,9 +697,15 @@ impl InstanceKindSchema {
     }
 
     /// `:key (parent index)`, under the keyed kind `parent`.
-    pub fn under(mut self, parent: impl Into<String>, index: impl Into<String>) -> Self {
+    pub fn under(self, parent: impl Into<String>, index: impl Into<String>) -> Self {
+        self.under_any(vec![parent.into()], index)
+    }
+
+    /// `:key ((p1 p2 …) index)`, under an instance of any of the keyed
+    /// kinds `parents`.
+    pub fn under_any(mut self, parents: Vec<String>, index: impl Into<String>) -> Self {
         self.key = KindKey::Under {
-            parent: parent.into(),
+            parents,
             index: index.into(),
         };
         self
@@ -705,10 +726,11 @@ impl InstanceKindSchema {
         matches!(self.key, KindKey::Indexed { .. } | KindKey::Under { .. })
     }
 
-    /// The parent kind name of a `:key (parent index)` kind.
-    pub fn parent_kind_name(&self) -> Option<&str> {
+    /// The parent kind name of a `:key (parent index)` kind (`track`;
+    /// `track or bus` for several).
+    pub fn parent_kind_name(&self) -> Option<String> {
         match &self.key {
-            KindKey::Under { parent, .. } => Some(parent),
+            KindKey::Under { parents, .. } => Some(KindKey::parents_text(parents)),
             _ => None,
         }
     }
@@ -1017,11 +1039,11 @@ pub(crate) struct InstanceStore {
     singletons: HashMap<String, InstanceId>,
     /// Keyed kind id -> its live instances by key.
     keyed: HashMap<Rc<str>, KeyRegistry>,
-    /// `:key (parent index)` kind id -> its parent kind id, resolved when
-    /// the first instance registers and then fixed, so a kind defined later
-    /// (one that would make the parent name ambiguous) never re-parents
-    /// live children.
-    parent_kinds: HashMap<Rc<str>, Rc<str>>,
+    /// `:key (parent index)` kind id -> its parent kind ids (one per name
+    /// its key gives), resolved when the first instance registers and then
+    /// fixed, so a kind defined later (one that would make a parent name
+    /// ambiguous) never re-parents live children.
+    parent_kinds: HashMap<Rc<str>, Rc<[Rc<str>]>>,
     /// Parent instance -> its live children (instances of `:key (parent
     /// index)` kinds whose key names it), dropped with it.
     children: HashMap<InstanceId, HashSet<InstanceId>>,
@@ -1364,38 +1386,45 @@ impl InstanceStore {
         }
     }
 
-    /// The parent kind id of the `:key (parent index)` kind `kind`: the
-    /// parent named in its own module first (`m:track` for `m:step`), else
-    /// the one keyed kind with that name. Resolved when the first instance
-    /// registers (so kinds can be declared in any order) and then fixed.
-    fn parent_kind(&mut self, kind: &str) -> Result<Rc<str>, InstanceError> {
-        if let Some(parent) = self.parent_kinds.get(kind) {
-            return Ok(parent.clone());
+    /// The parent kind ids of the `:key (parent index)` kind `kind`, one
+    /// per parent name: the parent named in its own module first (`m:track`
+    /// for `m:step`), else the one keyed kind with that name. Resolved when
+    /// the first instance registers (so kinds can be declared in any order)
+    /// and then fixed.
+    fn parent_kind(&mut self, kind: &str) -> Result<Rc<[Rc<str>]>, InstanceError> {
+        if let Some(parents) = self.parent_kinds.get(kind) {
+            return Ok(parents.clone());
         }
         let Some((kind, schema)) = self.kinds.get_key_value(kind) else {
             return Err(InstanceError::UnknownKind(kind.to_string()));
         };
-        let KindKey::Under { parent, .. } = &schema.key else {
+        let KindKey::Under { parents, .. } = &schema.key else {
             return Err(InstanceError::InvalidKey(format!(
                 "kind '{kind}' is not keyed under a parent"
             )));
         };
-        let local = kind.rsplit_once(':').and_then(|(module, _)| {
-            self.kinds
-                .get_key_value(format!("{module}:{parent}").as_str())
-        });
-        let found = match local {
-            Some(found) => Ok(found),
-            None => self.resolve_keyed_kind(parent),
-        };
-        let resolved = match found {
-            Ok((parent_kind, parent_schema)) if parent_schema.is_keyed() => parent_kind.clone(),
-            _ => {
-                return Err(InstanceError::InvalidKey(format!(
-                    "kind '{kind}' is keyed under '{parent}', which is not a keyed kind"
-                )));
+        let mut resolved = Vec::with_capacity(parents.len());
+        for parent in parents {
+            let local = kind.rsplit_once(':').and_then(|(module, _)| {
+                self.kinds
+                    .get_key_value(format!("{module}:{parent}").as_str())
+            });
+            let found = match local {
+                Some(found) => Ok(found),
+                None => self.resolve_keyed_kind(parent),
+            };
+            match found {
+                Ok((parent_kind, parent_schema)) if parent_schema.is_keyed() => {
+                    resolved.push(parent_kind.clone());
+                }
+                _ => {
+                    return Err(InstanceError::InvalidKey(format!(
+                        "kind '{kind}' is keyed under '{parent}', which is not a keyed kind"
+                    )));
+                }
             }
-        };
+        }
+        let resolved: Rc<[Rc<str>]> = resolved.into();
         let kind = kind.clone();
         self.parent_kinds.insert(kind, resolved.clone());
         Ok(resolved)
@@ -1419,15 +1448,17 @@ impl InstanceStore {
         let Some(parent) = key_parent(key) else {
             return Ok(None);
         };
-        let parent_kind = self.parent_kind(kind)?;
+        let parent_kinds = self.parent_kind(kind)?;
         let live_parent = self
             .live
             .get(&parent)
-            .is_some_and(|record| record.kind == parent_kind);
+            .is_some_and(|record| parent_kinds.contains(&record.kind));
         if !live_parent {
+            let names: Vec<&str> = parent_kinds.iter().map(|kind| &**kind).collect();
             return Err(InstanceError::InvalidKey(format!(
-                "kind '{kind}': key ({}) names parent {parent}, which is not a live '{parent_kind}' instance",
-                key_text(key)
+                "kind '{kind}': key ({}) names parent {parent}, which is not a live '{}' instance",
+                key_text(key),
+                names.join("' or '")
             )));
         }
         Ok(Some(parent))
@@ -1597,7 +1628,7 @@ impl VM {
             if schema.is_keyed() {
                 return Err(InstanceError::KeyedKind {
                     kind: kind.to_string(),
-                    parent: schema.parent_kind_name().map(str::to_string),
+                    parent: schema.parent_kind_name(),
                 });
             }
         }
@@ -1684,19 +1715,29 @@ impl VM {
             match pair {
                 [Value::Keyword(slot), Value::Nil] if slot == "key" => schema = schema.singleton(),
                 [Value::Keyword(slot), Value::List(names)] if slot == "key" => {
-                    let names = names
-                        .iter()
-                        .map(|item| match &*item.borrow() {
-                            Value::Symbol(name) => Ok(name.clone()),
-                            _ => Err(malformed_key()),
-                        })
-                        .collect::<Result<Vec<_>, _>>()?;
-                    schema = match <[String; 2]>::try_from(names) {
-                        Ok([parent, index]) => schema.under(parent, index),
-                        Err(names) => match <[String; 1]>::try_from(names) {
-                            Ok([index]) => schema.indexed(index),
-                            Err(_) => return Err(malformed_key()),
-                        },
+                    let symbol = |item: &Rc<std::cell::RefCell<Value>>| match &*item.borrow() {
+                        Value::Symbol(name) => Ok(name.clone()),
+                        _ => Err(malformed_key()),
+                    };
+                    schema = match names.as_slice() {
+                        [index] => schema.indexed(symbol(index)?),
+                        // `((p1 p2 …) index)`: several parent kinds.
+                        [parents, index] => {
+                            let parents = match &*parents.borrow() {
+                                Value::List(parents) if !parents.is_empty() => {
+                                    parents.iter().map(symbol).collect::<Result<Vec<_>, _>>()?
+                                }
+                                Value::Symbol(parent) => vec![parent.clone()],
+                                _ => return Err(malformed_key()),
+                            };
+                            if let Some(duplicate) = crate::compiler::first_duplicate(&parents) {
+                                return Err(VMError::Instance(format!(
+                                    "def-kind {name}: :key names parent {duplicate} twice"
+                                )));
+                            }
+                            schema.under_any(parents, symbol(index)?)
+                        }
+                        _ => return Err(malformed_key()),
                     };
                 }
                 [Value::Keyword(slot), Value::Nil] if slot == "state" || slot == "host" => {}

@@ -952,6 +952,32 @@ impl ProjectFile {
             }
         }
 
+        // One identity per device across every family: the registry binds
+        // each in one family, and the host kinds key a track's devices of
+        // every family by it. A persisted id several records share (a
+        // hand-edited or damaged file) keeps its first holder, in the order
+        // below; each later holder gets a fresh id. Nothing else in the
+        // project names these ids (a rack chain's own `rack_slot_id` is
+        // rewritten with it), so the record stays consistent.
+        let mut seen = std::collections::HashSet::new();
+        let instances = &mut self.device_instances;
+        let effects = (instances.track_effects.iter_mut()).flat_map(|chain| &mut chain.instances);
+        let midi = (instances.midi_effects.iter_mut()).flat_map(|chain| &mut chain.instances);
+        let buses = (instances.bus_effects.iter_mut()).flat_map(|chain| &mut chain.instances);
+        let racks = instances.rack_effects.iter_mut().flat_map(|chain| {
+            std::iter::once(&mut chain.rack_slot_id)
+                .chain(chain.instances.iter_mut().map(|instance| &mut instance.id))
+        });
+        let ids = (effects.map(|instance| &mut instance.id))
+            .chain(midi.map(|instance| &mut instance.id))
+            .chain(buses.map(|instance| &mut instance.id))
+            .chain(racks);
+        for id in ids {
+            if *id != 0 && !seen.insert(*id) {
+                *id = allocate();
+            }
+        }
+
         self.custom_effects = self.tracks.iter().map(|track| {
             self.device_instances.track_effects.iter()
                 .find(|chain| chain.track_id == track.id.0)

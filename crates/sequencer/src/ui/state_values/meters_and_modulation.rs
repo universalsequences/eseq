@@ -1306,19 +1306,9 @@ fn read_rack_slot_mod_values(
     let rack = racks.get(track)?.as_ref()?;
     let slot_idx = app.selected_rack_slot_index_for_rack(track, rack)?;
     let slot = rack.slots.get(slot_idx)?;
-    // Custom engines hand out a borrow; the built-in sampler's descriptor is
-    // constructed on demand, so cache one and borrow that instead of rebuilding
-    // ~100 param descriptors on every meter tick. It is derived from constants,
-    // so one copy is as good as another.
-    static SAMPLER_DESCRIPTOR: std::sync::OnceLock<sequencer::effects::EffectDescriptor> =
-        std::sync::OnceLock::new();
-    let desc = match slot.instrument_type {
-        sequencer::sequencer::InstrumentType::Sampler => Some(
-            SAMPLER_DESCRIPTOR
-                .get_or_init(sequencer::effects::EffectDescriptor::builtin_sampler),
-        ),
-        _ => app.rack_slot_cached_instrument_descriptor(slot),
-    }?;
+    // Borrowed: a custom engine's from the registry, the built-in sampler's
+    // from one shared copy (never rebuilt on a meter tick).
+    let desc = app.rack_slot_descriptor(slot)?;
     if desc.instrument_modulation_targets.is_empty() {
         return None;
     }

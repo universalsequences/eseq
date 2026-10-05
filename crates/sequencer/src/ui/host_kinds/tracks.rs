@@ -179,9 +179,11 @@ fn sync_sends(
         .collect()
 }
 
-/// Register, update and drop the device instances of one track; returns
-/// them in chain order. Keyed (track id, [`DeviceSlot::did`]): a reorder
-/// keeps an effect's instance (and its params), only `slot` moves.
+/// Register, update and drop the chain device instances (the instrument
+/// and the effects) of one track ([`sync_family`]); returns them in chain
+/// order. Keyed (track id, [`DeviceSlot::did`]): a reorder keeps an
+/// effect's instance (and its params), only `slot` moves; the track's other
+/// devices (MIDI effects, rack slots) are the device sync's.
 /// `params_replaced` is set when a device's params were replaced.
 fn sync_devices(
     pusher: &mut Pusher<'_>,
@@ -190,35 +192,37 @@ fn sync_devices(
     track_id: InstanceId,
     params_replaced: &mut bool,
 ) -> Vec<InstanceId> {
-    let chain = track_device_chain(app, &app.state, track);
-    let slots: Vec<DeviceSlot> = chain
-        .iter()
-        .map(|entry| DeviceSlot::from_chain_slot(entry.slot))
-        .collect();
-    let wanted: Vec<u64> = slots.iter().map(|slot| slot.did(app, track)).collect();
-    let devices = reconcile_children(pusher, track_id, DEVICE, &wanted);
     let instrument_type = || {
         let kind = app.graph.track_instrument_types.get(track);
         kind.map_or("empty", |kind| instrument_type_label(*kind))
     };
-    chain
+    let models = track_device_chain(app, &app.state, track)
         .into_iter()
-        .zip(slots)
-        .zip(wanted.iter().zip(devices))
-        .filter_map(|((entry, device), (did, id))| {
-            let id = id?;
-            let device_type = match device {
-                DeviceSlot::Instrument => instrument_type().to_string(),
-                DeviceSlot::Effect(_) => entry.name.clone(),
+        .map(|entry| {
+            let device = DeviceSlot::from_chain_slot(entry.slot);
+            // A chain device's descriptor is the `App`'s own (borrowed).
+            let params = match device.descriptor(app, track, &[]) {
+                Some(std::borrow::Cow::Borrowed(desc)) => desc.params.as_slice(),
+                _ => &[],
             };
-            pusher.push(id, f::DEVICE_TRACK, Value::Instance(track_id));
-            pusher.push(id, f::DEVICE_SLOT, number(device.chain_slot() as f64));
-            pusher.push(id, f::DEVICE_DID, number(*did as f64));
-            pusher.push(id, f::DEVICE_TYPE, Value::String(device_type));
-            pusher.push(id, f::DEVICE_NAME, Value::String(entry.name));
-            pusher.push(id, f::DEVICE_ENABLED, Value::Bool(entry.enabled));
-            *params_replaced |= HostKinds::sync_device_source(pusher, app, id, track, device);
-            Some(id)
+            DeviceModel {
+                device,
+                did: device.did(app, track),
+                kind: match device {
+                    DeviceSlot::Instrument => instrument_type().to_string(),
+                    _ => entry.name.clone(),
+                },
+                name: entry.name,
+                enabled: entry.enabled,
+                params,
+                container: None,
+                voices: 0,
+            }
         })
-        .collect()
+        .collect();
+    let family = |device| matches!(device, DeviceSlot::Instrument | DeviceSlot::Effect(_));
+    let parent = Parent::Track(track_id);
+    let (devices, replaced) = sync_family(pusher, app, parent, track, models, family);
+    *params_replaced |= replaced;
+    devices
 }
