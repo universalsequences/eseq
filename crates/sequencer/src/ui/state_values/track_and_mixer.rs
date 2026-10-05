@@ -43,7 +43,7 @@ pub(crate) fn track_display_color(
 }
 
 /// Track groups share the track display tint, not a separate authored palette.
-pub(super) fn themed_track_rgb(color: [f32; 3]) -> [f32; 3] {
+pub(crate) fn themed_track_rgb(color: [f32; 3]) -> [f32; 3] {
     let (tint, palette) = eseqlisp::theme::track_display_key();
     tinted_rgb(palette_snapped_rgb(color, &palette), tint)
 }
@@ -182,17 +182,25 @@ pub(crate) fn build_track_instrument_types(app: &app::App) -> Value {
         .track_instrument_types
         .iter()
         .map(|instrument_type| {
-            let label = match instrument_type {
-                sequencer::sequencer::InstrumentType::Empty => "empty",
-                sequencer::sequencer::InstrumentType::Sampler => "sampler",
-                sequencer::sequencer::InstrumentType::Custom => "custom",
-                sequencer::sequencer::InstrumentType::Modulator => "modulator",
-                sequencer::sequencer::InstrumentType::Rack => "rack",
-            };
+            let label = instrument_type_label(*instrument_type);
             Rc::new(RefCell::new(Value::String(label.to_string())))
         })
         .collect();
     Value::List(items)
+}
+
+/// `SEQ.track-instrument-types` and `track.instrument-type` spell an
+/// instrument type this way.
+pub(crate) fn instrument_type_label(
+    instrument_type: sequencer::sequencer::InstrumentType,
+) -> &'static str {
+    match instrument_type {
+        sequencer::sequencer::InstrumentType::Empty => "empty",
+        sequencer::sequencer::InstrumentType::Sampler => "sampler",
+        sequencer::sequencer::InstrumentType::Custom => "custom",
+        sequencer::sequencer::InstrumentType::Modulator => "modulator",
+        sequencer::sequencer::InstrumentType::Rack => "rack",
+    }
 }
 
 /// Per track, the id of the instrument it plays, in the Instruments tab's
@@ -402,14 +410,43 @@ pub(crate) fn track_bus_send_amount(
     if bus.id == sequencer::sequencer::BusId::MIX {
         return None;
     }
-    let tp = state.pattern.track_params.get(track)?;
-    Some(
-        tp.sends()
-            .iter()
-            .find(|send| send.destination == bus.id)
-            .map(|send| send.amount)
-            .unwrap_or(0.0),
-    )
+    state.pattern.track_params.get(track)?;
+    Some(track_send_base(state, track, bus.id))
+}
+
+/// The track's own send level to `bus` (0 without a send). `track` is in
+/// range.
+pub(crate) fn track_send_base(
+    state: &SequencerState,
+    track: usize,
+    bus: sequencer::sequencer::BusId,
+) -> f32 {
+    state.pattern.track_params[track]
+        .send_amount(bus)
+        .unwrap_or(0.0)
+}
+
+/// The p-lock of `track`'s send to `bus` at `display_step`, if any.
+pub(crate) fn track_send_lock(
+    state: &SequencerState,
+    track: usize,
+    bus: sequencer::sequencer::BusId,
+    display_step: Option<usize>,
+) -> Option<f32> {
+    display_step.and_then(|step| state.pattern.track_send_plocks[track].get(step, bus))
+}
+
+/// The send level shown at `display_step` (see
+/// [`sync_selected_track_bus_send_binding_fields`]): its p-lock, else the
+/// base.
+pub(crate) fn displayed_track_send_amount(
+    state: &SequencerState,
+    track: usize,
+    bus: sequencer::sequencer::BusId,
+    display_step: Option<usize>,
+) -> f32 {
+    track_send_lock(state, track, bus, display_step)
+        .unwrap_or_else(|| track_send_base(state, track, bus))
 }
 
 pub(crate) fn sync_track_bus_send_binding_field(
@@ -508,21 +545,16 @@ pub(crate) fn sync_selected_track_bus_send_binding_fields(
     selected_steps: &Arc<Mutex<HashSet<usize>>>,
 ) -> bool {
     let display_step = displayed_plock_step(state, track, selected_plock_step(selected_steps));
-    let locks = display_step.map(|_| state.pattern.track_send_plocks[track].snapshot());
     let mut dirty = false;
     for (bus_idx, bus) in app.buses.iter().enumerate() {
         if bus.id == sequencer::sequencer::BusId::MIX {
             continue;
         }
-        let Some(baseline) = track_bus_send_amount(app, state, track, bus_idx) else {
+        if track >= state.pattern.track_params.len() {
             continue;
-        };
+        }
         dirty |= sync_track_bus_send_plock_fields(rt, app, state, track, bus_idx, display_step);
-        let amount = display_step
-            .and_then(|step| locks.as_ref()?.get(step))
-            .and_then(|row| row.iter().find(|send| send.destination == bus.id))
-            .map(|send| send.amount)
-            .unwrap_or(baseline);
+        let amount = displayed_track_send_amount(state, track, bus.id, display_step);
         dirty |= rt.set_reactive(
             "SEQ",
             &track_bus_send_field(track, bus_idx),

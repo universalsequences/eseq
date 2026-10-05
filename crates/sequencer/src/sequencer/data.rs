@@ -1311,6 +1311,15 @@ impl TrackParams {
     pub fn sends(&self) -> Vec<TrackSendSnapshot> {
         self.sends.lock().unwrap().clone()
     }
+    /// The send level to `destination`, without cloning the send list.
+    pub fn send_amount(&self, destination: BusId) -> Option<f32> {
+        self.sends
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|send| send.destination == destination)
+            .map(|send| send.amount)
+    }
     pub fn set_sends(&self, sends: Vec<TrackSendSnapshot>) {
         let sends = sends
             .into_iter()

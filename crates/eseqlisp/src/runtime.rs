@@ -3043,17 +3043,6 @@ impl Runtime {
         self.vm.instance_observer_epoch()
     }
 
-    /// Whether any live child of `parent` of kind `kind` has one of
-    /// `fields` observed.
-    pub fn keyed_children_observed(
-        &self,
-        parent: crate::vm::InstanceId,
-        kind: &str,
-        fields: &[&str],
-    ) -> bool {
-        self.vm.keyed_children_observed(parent, kind, fields)
-    }
-
     /// Install the host's answer to reads of unobserved `:host` fields
     /// ([`crate::vm::HostFieldReader`]).
     pub fn set_host_field_reader(&mut self, reader: Option<crate::vm::HostFieldReader>) {

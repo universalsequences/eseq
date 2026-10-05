@@ -1310,7 +1310,7 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
         piano_roll_move_state,
         new_shared_piano_roll_focus(),
         Arc::clone(&recording),
-        master_recording,
+        Arc::clone(&master_recording),
         master_recorder,
         Arc::clone(&record_armed),
         Arc::clone(&armed_rack),
@@ -1334,13 +1334,21 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
         active_delete_target_version,
         record_armed: Arc::clone(&record_armed),
         recording,
+        master_recording,
+        selected_tracks: Arc::clone(&selected_tracks),
+        track_collapsed: Arc::clone(&track_collapsed),
         ui_epoch: Arc::clone(&ui_epoch),
         fx_epoch,
         fx_value_epoch: Arc::new(AtomicUsize::new(0)),
     };
     let mut host_kinds = super::host_kinds::HostKinds::default();
     let mut sync_host_kinds = |editor: &mut Editor, app: &app::App| {
-        if host_kinds.sync_with(app, editor.runtime_mut(), &kinds_handles, &[]) {
+        if host_kinds.sync_with(
+            app,
+            editor.runtime_mut(),
+            &kinds_handles,
+            &Default::default(),
+        ) {
             editor.refresh_runtime_side_effects();
         }
     };

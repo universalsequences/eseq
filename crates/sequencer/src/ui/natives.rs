@@ -109,6 +109,44 @@ fn value_string_field(value: &Value, field: &str) -> Option<String> {
     })
 }
 
+/// The step parameter a `seq-set-step-param` keyword names (also the
+/// `eseq.kinds` step field names).
+pub(crate) fn step_param_named(name: &str) -> Option<StepParam> {
+    Some(match name {
+        "velocity" | "vel" => StepParam::Velocity,
+        "duration" | "dur" => StepParam::Duration,
+        "aux-a" | "aux_a" | "auxa" | "axa" => StepParam::AuxA,
+        "transpose" => StepParam::Transpose,
+        "pan" => StepParam::Pan,
+        "sync" | "syn" => StepParam::Sync,
+        "delay" | "dly" => StepParam::Delay,
+        "speed" => StepParam::Speed,
+        "retrig" | "rtrg" => StepParam::Retrig,
+        "retrig-rate" | "retrig_rate" | "rate" => StepParam::RetrigRate,
+        _ => return None,
+    })
+}
+
+/// A one-step parameter command (`set-step-param-history`,
+/// `print-step-param`): `param` to `value` at `step` of `track`.
+fn step_param_command(
+    name: &str,
+    track: usize,
+    param: &str,
+    value: f32,
+    step: usize,
+) -> HostCommand {
+    HostCommand::Custom {
+        name: name.to_string(),
+        payload: map_value([
+            ("track", Value::Number(track as f64)),
+            ("param", Value::Keyword(param.to_string())),
+            ("value", Value::Number(value as f64)),
+            ("steps", list_value([Value::Number(step as f64)])),
+        ]),
+    }
+}
+
 fn slice3_numeric_history_command(op: &str, track: Option<usize>, value: f64) -> HostCommand {
     let mut payload = HashMap::new();
     payload.insert(
@@ -1880,6 +1918,74 @@ fn toggle_master_recording_capture(
         master_recorder,
         &sequencer::app_paths::app_paths().recordings_dir(),
     )
+}
+
+/// `seq-toggle-master-recording`: toggle the capture, bump the UI epoch,
+/// report the status and announce a saved take.
+fn toggle_master_recording_native(
+    master_recording: &AtomicBool,
+    master_recorder: &sequencer::recorder::MasterRecorder,
+    ui_epoch: &AtomicUsize,
+    ctx: &mut eseqlisp::NativeContext,
+) -> eseqlisp::NativeResult {
+    let result = toggle_master_recording_capture(master_recording, master_recorder);
+    ui_epoch.fetch_add(1, Ordering::Relaxed);
+    let (active, status, saved) = result?;
+    ctx.set_status(status);
+    if let Some(path) = saved {
+        ctx.enqueue_command(HostCommand::Custom {
+            name: "master-recording-saved".to_string(),
+            payload: Value::String(path.to_string_lossy().into_owned()),
+        });
+    }
+    Ok(Value::Bool(active))
+}
+
+/// Set (`Some`) or flip (`None`) a track lane's collapsed flag, invalidating
+/// the mixer when it moves; returns the new flag. `track` is in range.
+fn update_track_collapsed(
+    state: &SequencerState,
+    collapsed: &Mutex<Vec<bool>>,
+    ui_invalidations: &UiInvalidationQueue,
+    track: usize,
+    value: Option<bool>,
+) -> bool {
+    let (now, changed) = {
+        let mut tracks = collapsed.lock().unwrap();
+        if tracks.len() < state.active_track_count() {
+            tracks.resize(state.active_track_count(), false);
+        }
+        let now = value.unwrap_or(!tracks[track]);
+        (now, std::mem::replace(&mut tracks[track], now) != now)
+    };
+    if changed {
+        ui_invalidations.push(UiInvalidation::TrackMixer {
+            track,
+            change: TrackMixerInvalidation::Collapsed,
+        });
+    }
+    now
+}
+
+/// Set (`Some`) or flip (`None`) a group's collapsed flag, invalidating the
+/// bus topology when it moves; returns the new flag, `None` when no group
+/// has `group_id`.
+fn update_group_collapsed(
+    groups: &Mutex<Vec<sequencer::project::ProjectTrackGroup>>,
+    ui_invalidations: &UiInvalidationQueue,
+    group_id: u64,
+    value: Option<bool>,
+) -> Option<bool> {
+    let (now, changed) = {
+        let mut groups = groups.lock().unwrap();
+        let group = groups.iter_mut().find(|g| g.id == group_id)?;
+        let now = value.unwrap_or(!group.collapsed);
+        (now, std::mem::replace(&mut group.collapsed, now) != now)
+    };
+    if changed {
+        ui_invalidations.push(UiInvalidation::BusTopology);
+    }
+    Some(now)
 }
 
 fn toggle_master_recording_capture_in(
@@ -4469,18 +4575,8 @@ pub(crate) fn init_runtime(
         if step >= MAX_STEPS {
             return Err(format!("seq-set-step-param: step {step} out of range").into());
         }
-        let param = match param_name.as_str() {
-            "velocity" | "vel" => StepParam::Velocity,
-            "duration" | "dur" => StepParam::Duration,
-            "aux-a" | "aux_a" | "auxa" | "axa" => StepParam::AuxA,
-            "transpose" => StepParam::Transpose,
-            "pan" => StepParam::Pan,
-            "sync" | "syn" => StepParam::Sync,
-            "delay" | "dly" => StepParam::Delay,
-            "speed" => StepParam::Speed,
-            "retrig" | "rtrg" => StepParam::Retrig,
-            "retrig-rate" | "retrig_rate" | "rate" => StepParam::RetrigRate,
-            other => return Err(format!("seq-set-step-param: unknown param :{other}").into()),
+        let Some(param) = step_param_named(param_name) else {
+            return Err(format!("seq-set-step-param: unknown param :{param_name}").into());
         };
         let track = ct.load(Ordering::Relaxed);
         let val = (*val as f32).clamp(param.min(), param.max());
@@ -4491,18 +4587,42 @@ pub(crate) fn init_runtime(
                 fx_ep.fetch_add(1, Ordering::Relaxed);
             }
         }
-        let mut payload = HashMap::new();
-        payload.insert("track".to_string(), Rc::new(RefCell::new(Value::Number(track as f64))));
-        payload.insert("param".to_string(), Rc::new(RefCell::new(Value::Keyword(param_name.clone()))));
-        payload.insert("value".to_string(), Rc::new(RefCell::new(Value::Number(val as f64))));
-        payload.insert(
-            "steps".to_string(),
-            Rc::new(RefCell::new(Value::List(vec![Rc::new(RefCell::new(Value::Number(step as f64)))]))),
-        );
-        ctx.enqueue_command(HostCommand::Custom {
-            name: "set-step-param-history".to_string(),
-            payload: Value::Map(payload),
-        });
+        ctx.enqueue_command(step_param_command("set-step-param-history", track, param_name, val, step));
+        Ok(Value::Number(val as f64))
+    });
+
+    // seq-set-track-step-param — (seq-set-track-step-param track step :param
+    // value): one step's parameter on any track, clamped, as one undo entry;
+    // leaves the step selection alone (the `step.velocity` … :set).
+    let st = state.clone();
+    runtime.register_native("seq-set-track-step-param", move |args, ctx| {
+        let (
+            Some(Value::Number(track)),
+            Some(Value::Number(step)),
+            Some(Value::Keyword(param_name)),
+            Some(Value::Number(val)),
+        ) = (args.first(), args.get(1), args.get(2), args.get(3))
+        else {
+            return Err("seq-set-track-step-param: expected (track step :param value)".into());
+        };
+        let (track, step) = (*track as usize, *step as usize);
+        if track >= st.active_track_count() || step >= MAX_STEPS {
+            return Err(format!(
+                "seq-set-track-step-param: track {track} step {step} out of range"
+            )
+            .into());
+        }
+        let Some(param) = step_param_named(param_name) else {
+            return Err(format!("seq-set-track-step-param: unknown param :{param_name}").into());
+        };
+        let val = (*val as f32).clamp(param.min(), param.max());
+        ctx.enqueue_command(step_param_command(
+            "set-step-param-history",
+            track,
+            param_name,
+            val,
+            step,
+        ));
         Ok(Value::Number(val as f64))
     });
 
@@ -4528,18 +4648,7 @@ pub(crate) fn init_runtime(
         };
         let track = ct.load(Ordering::Relaxed);
         let val = (*val as f32).clamp(param.min(), param.max());
-        let mut payload = HashMap::new();
-        payload.insert("track".to_string(), Rc::new(RefCell::new(Value::Number(track as f64))));
-        payload.insert("param".to_string(), Rc::new(RefCell::new(Value::Keyword(param_name.clone()))));
-        payload.insert("value".to_string(), Rc::new(RefCell::new(Value::Number(val as f64))));
-        payload.insert(
-            "steps".to_string(),
-            Rc::new(RefCell::new(Value::List(vec![Rc::new(RefCell::new(Value::Number(step as f64)))]))),
-        );
-        ctx.enqueue_command(HostCommand::Custom {
-            name: "print-step-param".to_string(),
-            payload: Value::Map(payload),
-        });
+        ctx.enqueue_command(step_param_command("print-step-param", track, param_name, val, step));
         Ok(Value::Number(val as f64))
     });
 
@@ -5271,21 +5380,28 @@ pub(crate) fn init_runtime(
             return Err("seq-toggle-group-collapsed: expected group id".into());
         };
         let group_id = *group_id as u64;
-        let collapsed = {
-            let mut groups = groups_state.lock().unwrap();
-            match groups.iter_mut().find(|g| g.id == group_id) {
-                Some(group) => {
-                    group.collapsed = !group.collapsed;
-                    group.collapsed
-                }
-                None => {
-                    return Err(
-                        format!("seq-toggle-group-collapsed: group {group_id} not found").into(),
-                    );
-                }
-            }
+        let Some(collapsed) = update_group_collapsed(&groups_state, &ui_inv, group_id, None) else {
+            return Err(format!("seq-toggle-group-collapsed: group {group_id} not found").into());
         };
-        ui_inv.push(UiInvalidation::BusTopology);
+        Ok(Value::Bool(collapsed))
+    });
+
+    // seq-set-group-collapsed — (seq-set-group-collapsed group-id collapsed):
+    // absolute (the `group.collapsed` :set).
+    let groups_state = track_groups.clone();
+    let ui_inv = ui_invalidations.clone();
+    runtime.register_native("seq-set-group-collapsed", move |args, _ctx| {
+        let (Some(Value::Number(group_id)), Some(Value::Bool(collapsed))) =
+            (args.first(), args.get(1))
+        else {
+            return Err("seq-set-group-collapsed: expected (group-id collapsed)".into());
+        };
+        let group_id = *group_id as u64;
+        let Some(collapsed) =
+            update_group_collapsed(&groups_state, &ui_inv, group_id, Some(*collapsed))
+        else {
+            return Err(format!("seq-set-group-collapsed: group {group_id} not found").into());
+        };
         Ok(Value::Bool(collapsed))
     });
 
@@ -5398,30 +5514,63 @@ pub(crate) fn init_runtime(
         Ok(Value::Bool(muted))
     });
 
-    // seq-set-track-mute — (seq-set-track-mute track-idx muted): an absolute
-    // mute; the toggle happens only when the track differs once the command
-    // lands (the `track.muted` :set).
+    // seq-set-track-mute / seq-set-track-solo — (… track-idx on): absolute;
+    // the toggle happens only when the track differs once the command lands
+    // (the `track.muted` / `track.soloed` :set).
+    for (name, op, change) in [
+        (
+            "seq-set-track-mute",
+            "set-mute",
+            TrackMixerInvalidation::Mute,
+        ),
+        (
+            "seq-set-track-solo",
+            "set-solo",
+            TrackMixerInvalidation::Solo,
+        ),
+    ] {
+        let st = state.clone();
+        let ui_inv = ui_invalidations.clone();
+        runtime.register_native(name, move |args, ctx| {
+            let (Some(Value::Number(track)), Some(Value::Bool(on))) = (args.first(), args.get(1))
+            else {
+                return Err(format!("{name}: expected (track on)").into());
+            };
+            let track = *track as usize;
+            if track >= st.active_track_count() {
+                return Err(format!("{name}: track {track} out of range").into());
+            }
+            ctx.enqueue_command(slice3_numeric_history_command(
+                op,
+                Some(track),
+                if *on { 1.0 } else { 0.0 },
+            ));
+            ui_inv.push(UiInvalidation::TrackMixer {
+                track,
+                change: change.clone(),
+            });
+            Ok(Value::Bool(*on))
+        });
+    }
+
+    // seq-set-track-collapsed — (seq-set-track-collapsed track-idx collapsed):
+    // absolute (the `track.collapsed` :set).
     let st = state.clone();
+    let collapsed_tracks = track_collapsed.clone();
     let ui_inv = ui_invalidations.clone();
-    runtime.register_native("seq-set-track-mute", move |args, ctx| {
-        let (Some(Value::Number(track)), Some(Value::Bool(muted))) = (args.first(), args.get(1))
+    runtime.register_native("seq-set-track-collapsed", move |args, _ctx| {
+        let (Some(Value::Number(track)), Some(Value::Bool(collapsed))) =
+            (args.first(), args.get(1))
         else {
-            return Err("seq-set-track-mute: expected (track muted)".into());
+            return Err("seq-set-track-collapsed: expected (track collapsed)".into());
         };
         let track = *track as usize;
         if track >= st.active_track_count() {
-            return Err(format!("seq-set-track-mute: track {track} out of range").into());
+            return Err(format!("seq-set-track-collapsed: track {track} out of range").into());
         }
-        ctx.enqueue_command(slice3_numeric_history_command(
-            "set-mute",
-            Some(track),
-            if *muted { 1.0 } else { 0.0 },
-        ));
-        ui_inv.push(UiInvalidation::TrackMixer {
-            track,
-            change: TrackMixerInvalidation::Mute,
-        });
-        Ok(Value::Bool(*muted))
+        let collapsed =
+            update_track_collapsed(&st, &collapsed_tracks, &ui_inv, track, Some(*collapsed));
+        Ok(Value::Bool(collapsed))
     });
 
     // seq-toggle-track-collapsed — (seq-toggle-track-collapsed track-idx)
@@ -5436,18 +5585,7 @@ pub(crate) fn init_runtime(
         if track >= st.active_track_count() {
             return Err(format!("seq-toggle-track-collapsed: track {track} out of range").into());
         }
-        let collapsed = {
-            let mut tracks = collapsed_tracks.lock().unwrap();
-            if tracks.len() < st.active_track_count() {
-                tracks.resize(st.active_track_count(), false);
-            }
-            tracks[track] = !tracks[track];
-            tracks[track]
-        };
-        ui_inv.push(UiInvalidation::TrackMixer {
-            track,
-            change: TrackMixerInvalidation::Collapsed,
-        });
+        let collapsed = update_track_collapsed(&st, &collapsed_tracks, &ui_inv, track, None);
         Ok(Value::Bool(collapsed))
     });
 
@@ -5561,6 +5699,33 @@ pub(crate) fn init_runtime(
         ));
         Ok(Value::Bool(solo))
     });
+
+    // seq-set-bus-mute / seq-set-bus-solo — (… bus on): absolute; the
+    // toggle happens only when the bus differs once the command lands (the
+    // `bus.muted` / `bus.soloed` :set).
+    for (name, op) in [
+        ("seq-set-bus-mute", "set-mute"),
+        ("seq-set-bus-solo", "set-solo"),
+    ] {
+        let bus_state = buses.clone();
+        runtime.register_native(name, move |args, ctx| {
+            let (Some(Value::Number(bus_idx)), Some(Value::Bool(on))) = (args.first(), args.get(1))
+            else {
+                return Err(format!("{name}: expected (bus on)").into());
+            };
+            let bus_idx = *bus_idx as usize;
+            let Some(bus_id) = bus_state.lock().unwrap().get(bus_idx).map(|bus| bus.id) else {
+                return Err(format!("{name}: bus {bus_idx} out of range").into());
+            };
+            ctx.enqueue_command(bus_mixer_history_command(
+                op,
+                bus_idx,
+                bus_id,
+                Some(if *on { 1.0 } else { 0.0 }),
+            ));
+            Ok(Value::Bool(*on))
+        });
+    }
 
     // seq-set-effect-param — (seq-set-effect-param slot-idx param-idx value)
     let st = state.clone();
@@ -7087,21 +7252,23 @@ pub(crate) fn init_runtime(
     let master = master_recorder.clone();
     let ui_ep = ui_epoch.clone();
     runtime.register_native("seq-toggle-master-recording", move |_args, ctx| {
-        let result = toggle_master_recording_capture(&master_rec, &master);
-        ui_ep.fetch_add(1, Ordering::Relaxed);
-        match result {
-            Ok((active, status, saved)) => {
-                ctx.set_status(status);
-                if let Some(path) = saved {
-                    ctx.enqueue_command(HostCommand::Custom {
-                        name: "master-recording-saved".to_string(),
-                        payload: Value::String(path.to_string_lossy().into_owned()),
-                    });
-                }
-                Ok(Value::Bool(active))
-            }
-            Err(error) => Err(error.into()),
+        toggle_master_recording_native(&master_rec, &master, &ui_ep, ctx)
+    });
+
+    // seq-set-master-recording — (seq-set-master-recording on):
+    // `seq-toggle-master-recording` when the capture differs, else nothing
+    // (the `master.recording` :set).
+    let master_rec = master_recording.clone();
+    let master = master_recorder.clone();
+    let ui_ep = ui_epoch.clone();
+    runtime.register_native("seq-set-master-recording", move |args, ctx| {
+        let Some(Value::Bool(on)) = args.first() else {
+            return Err("seq-set-master-recording: expected a bool".into());
+        };
+        if master_rec.load(Ordering::Acquire) == *on {
+            return Ok(Value::Bool(*on));
         }
+        toggle_master_recording_native(&master_rec, &master, &ui_ep, ctx)
     });
 
     // seq-toggle-record-arm — toggle record arm for a given track index
@@ -8290,6 +8457,41 @@ fn document_metal_seq_natives(runtime: &mut Runtime) {
             "seq-toggle-bus-solo",
             "(seq-toggle-bus-solo bus)",
             "Toggle a bus solo state.",
+        ),
+        (
+            "seq-set-track-solo",
+            "(seq-set-track-solo track soloed)",
+            "Solo or unsolo a track; nothing happens when it already is.",
+        ),
+        (
+            "seq-set-track-collapsed",
+            "(seq-set-track-collapsed track collapsed)",
+            "Collapse or expand a track's lane in the sequencer.",
+        ),
+        (
+            "seq-set-bus-mute",
+            "(seq-set-bus-mute bus muted)",
+            "Mute or unmute a bus; nothing happens when it already is.",
+        ),
+        (
+            "seq-set-bus-solo",
+            "(seq-set-bus-solo bus soloed)",
+            "Solo or unsolo a bus; nothing happens when it already is.",
+        ),
+        (
+            "seq-set-group-collapsed",
+            "(seq-set-group-collapsed group-id collapsed)",
+            "Collapse or expand a track group.",
+        ),
+        (
+            "seq-set-master-recording",
+            "(seq-set-master-recording on)",
+            "Start or stop recording the master output; nothing happens when it already is.",
+        ),
+        (
+            "seq-set-track-step-param",
+            "(seq-set-track-step-param track step :param value)",
+            "Set one step's parameter (:velocity, :duration, :transpose, …) on any track.",
         ),
         (
             "seq-set-effect-param",

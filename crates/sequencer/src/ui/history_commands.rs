@@ -389,6 +389,25 @@ pub(super) fn apply_slice2_history_host_command(
         .map_err(|error| format!("could not apply Slice 2 edit: {error:?}"))
 }
 
+/// An absolute mute or solo op (`set-mute` / `set-solo`, from the
+/// `seq-set-…-mute` / `-solo` natives) as the matching toggle, judged when the
+/// command lands: `None` when the target already is so (`muted`, `soloed`).
+fn absolute_as_toggle(
+    map: &std::collections::HashMap<String, Rc<RefCell<Value>>>,
+    op: &str,
+    (muted, soloed): (bool, bool),
+    toggle_mute: app::AppCommand,
+    toggle_solo: app::AppCommand,
+) -> Option<app::AppCommand> {
+    let on = map_number(map, "value").is_some_and(|value| value != 0.0);
+    let (current, toggle) = if op == "set-mute" {
+        (muted, toggle_mute)
+    } else {
+        (soloed, toggle_solo)
+    };
+    (current != on).then_some(toggle)
+}
+
 pub(super) fn apply_slice3_history_host_command(
     app: &mut app::App,
     payload: &Value,
@@ -399,17 +418,24 @@ pub(super) fn apply_slice3_history_host_command(
     let op = map_string(map, "op")
         .ok_or_else(|| "Slice 3 edit operation was missing".to_string())?;
     let track = map_usize(map, "track");
-    let command = if op == "set-mute" {
-        // An absolute mute (`seq-set-track-mute`): toggle only when the
-        // track differs, judged when the command lands.
+    let command = if op == "set-mute" || op == "set-solo" {
+        // An absolute mute or solo (`seq-set-track-mute`,
+        // `seq-set-track-solo`): toggle only when the track differs, judged
+        // when the command lands.
         let track = track
             .filter(|track| *track < app.state.active_track_count())
             .ok_or_else(|| "Slice 3 edit track was invalid".to_string())?;
-        let muted = map_number(map, "value").is_some_and(|value| value != 0.0);
-        if app.state.pattern.track_params[track].is_muted() == muted {
+        let params = &app.state.pattern.track_params[track];
+        let Some(command) = absolute_as_toggle(
+            map,
+            &op,
+            (params.is_muted(), params.is_solo()),
+            app::AppCommand::ToggleTrackMute { track },
+            app::AppCommand::ToggleTrackSolo { track },
+        ) else {
             return Ok((app::edit::EditOutcome::NoOp, Some(track)));
-        }
-        app::AppCommand::ToggleTrackMute { track }
+        };
+        command
     } else {
         slice3_command(map, &op, track)?
     };
@@ -776,7 +802,7 @@ pub(super) fn slice3_track_mixer_invalidation(payload: &Value) -> Option<TrackMi
         "volume" => Some(TrackMixerInvalidation::Volume),
         "pan" => Some(TrackMixerInvalidation::Pan),
         "toggle-mute" | "set-mute" => Some(TrackMixerInvalidation::Mute),
-        "toggle-solo" => Some(TrackMixerInvalidation::Solo),
+        "toggle-solo" | "set-solo" => Some(TrackMixerInvalidation::Solo),
         _ => None,
     }
 }
@@ -789,8 +815,8 @@ pub(super) fn bus_mixer_targeted_invalidation(payload: &Value) -> Option<BusMixe
     };
     match map_string(map, "op")?.as_str() {
         "volume" => Some(BusMixerInvalidation::Volume),
-        "toggle-mute" => Some(BusMixerInvalidation::Mute),
-        "toggle-solo" => Some(BusMixerInvalidation::Solo),
+        "toggle-mute" | "set-mute" => Some(BusMixerInvalidation::Mute),
+        "toggle-solo" | "set-solo" => Some(BusMixerInvalidation::Solo),
         _ => None,
     }
 }
@@ -830,6 +856,21 @@ pub(super) fn apply_bus_mixer_history_host_command(
         },
         "toggle-mute" => app::AppCommand::ToggleBusMute { bus },
         "toggle-solo" => app::AppCommand::ToggleBusSolo { bus },
+        // Absolute (`seq-set-bus-mute`/`-solo`): toggle only when the bus
+        // differs when the command lands.
+        "set-mute" | "set-solo" => {
+            let channel = &app.buses[bus_idx];
+            let Some(command) = absolute_as_toggle(
+                map,
+                &op,
+                (channel.mute, channel.solo),
+                app::AppCommand::ToggleBusMute { bus },
+                app::AppCommand::ToggleBusSolo { bus },
+            ) else {
+                return Ok((app::edit::EditOutcome::NoOp, bus_idx));
+            };
+            command
+        }
         _ => return Err(format!("Unsupported bus mixer edit operation: {op}")),
     };
     app::try_apply_command(app, command)

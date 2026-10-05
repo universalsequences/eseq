@@ -418,7 +418,9 @@ pub(crate) fn sync_reactive_tick(
         let current_track_playhead_changed = playhead != ctx.frame.prev_playhead;
         let meter_polled = ctx.meters.last_meter_poll_at.elapsed() >= METER_POLL_INTERVAL;
         let was_visible = ctx.frame.prev_meter_visibility;
-        if master_meter_visible && (meter_polled || !was_visible.master) {
+        if (master_meter_visible && (meter_polled || !was_visible.master))
+            || (ctx.frame.host_kinds.wants_master_peaks() && meter_polled)
+        {
             ctx.meters.cached_peak_l_level = meter_display_level(f32::from_bits(
                 ctx.shared.state.transport.peak_l.load(Ordering::Relaxed),
             ));
@@ -438,6 +440,14 @@ pub(crate) fn sync_reactive_tick(
             // screen: keep the track meters polled at the same cadence.
             ctx.meters.cached_track_peak_levels =
                 read_track_peak_levels(app.graph.lg, &app.graph.track_node_ids);
+        }
+        if !track_and_bus_meter_visible
+            && ctx.frame.host_kinds.wants_bus_peaks()
+            && (meter_polled || ctx.meters.cached_bus_peak_levels.len() != app.buses.len())
+        {
+            // Likewise for an observed `b.peak`.
+            ctx.meters.cached_bus_peak_levels =
+                read_bus_peak_levels(app.graph.lg, &app.graph.bus_node_ids);
         }
         if fx_visible && (meter_polled || !was_visible.fx) {
             (ctx.meters.cached_modulator_phases, ctx.meters.cached_modulator_levels) =
@@ -2186,12 +2196,20 @@ pub(crate) fn sync_reactive_tick(
         }
     }
     // Host kinds (eseq.kinds): registry, model fields, observed live fields.
-    if ctx.frame.host_kinds.sync(
-        app,
-        editor.runtime_mut(),
-        ctx.shared,
-        &ctx.meters.cached_track_peak_levels,
-    ) {
+    let meters = super::host_kinds::KindsMeters {
+        tracks: &ctx.meters.cached_track_peak_levels,
+        buses: &ctx.meters.cached_bus_peak_levels,
+        master: (
+            ctx.meters.cached_peak_l_level,
+            ctx.meters.cached_peak_r_level,
+        ),
+        cpu_load: f32::from_bits(ctx.meters.cached_cpu_load_bits) as f64,
+    };
+    if ctx
+        .frame
+        .host_kinds
+        .sync(app, editor.runtime_mut(), ctx.shared, &meters)
+    {
         editor.refresh_runtime_side_effects();
         editor.mark_needs_redraw();
     }

@@ -8,6 +8,7 @@ pub(super) const COMMANDS: &[&str] = &[
     "delete-mod-route",
     "refresh-mixer-ui",
     "set-track-bus-send",
+    "set-track-send-base",
     "set-bus-effect-param",
     "set-bus-effect-plock",
     "set-bus-effect-param-option",
@@ -19,6 +20,25 @@ pub(super) const COMMANDS: &[&str] = &[
     "move-bus-effect-slot",
     "delete-bus-effect",
 ];
+
+/// Set `track`'s own send level to `bus` (adding the send when missing).
+fn set_track_send_base(
+    app: &mut app::App,
+    track: usize,
+    bus: sequencer::sequencer::BusId,
+    amount: f32,
+) {
+    let mut sends = app.state.pattern.track_params[track].sends();
+    if let Some(send) = sends.iter_mut().find(|send| send.destination == bus) {
+        send.amount = amount;
+    } else {
+        sends.push(TrackSendSnapshot {
+            destination: bus,
+            amount,
+        });
+    }
+    app::apply_command(app, app::AppCommand::SetTrackSends { track, sends });
+}
 
 #[allow(clippy::too_many_lines)]
 pub(super) fn handle(
@@ -283,27 +303,17 @@ pub(super) fn handle(
                     if track >= state.active_track_count() {
                         return;
                     }
-                    let selected: Vec<usize> = selected_steps.lock().unwrap()
-                        .iter()
-                        .copied()
-                        .collect();
+                    // The step selection belongs to the current track: a
+                    // send of another track sets its own level.
+                    let current = current_track.load(Ordering::Relaxed);
+                    let selected: Vec<usize> = if track == current {
+                        selected_steps.lock().unwrap().iter().copied().collect()
+                    } else {
+                        Vec::new()
+                    };
                     let has_selection = !selected.is_empty();
                     if !has_selection {
-                        let mut sends = app.state.pattern.track_params[track].sends();
-                        if let Some(send) =
-                            sends.iter_mut().find(|send| send.destination == bus_id)
-                        {
-                            send.amount = amount;
-                        } else {
-                            sends.push(TrackSendSnapshot {
-                                destination: bus_id,
-                                amount,
-                            });
-                        }
-                        app::apply_command(
-                            &mut app,
-                            app::AppCommand::SetTrackSends { track, sends },
-                        );
+                        set_track_send_base(app, track, bus_id, amount);
                     } else {
                         // A zero baseline still needs a persistent graph edge so the
                         // realtime scheduler can address this destination at a lock.
@@ -336,7 +346,6 @@ pub(super) fn handle(
                         fx_epoch.fetch_add(1, Ordering::Relaxed);
                     }
                     let rt = editor.runtime_mut();
-                    let current = current_track.load(Ordering::Relaxed);
                     if has_selection {
                         // The persisted baseline intentionally did not change. Publish
                         // the edited lock value instead of immediately snapping both
@@ -365,6 +374,48 @@ pub(super) fn handle(
                     editor.refresh_runtime_side_effects();
                 }
             }
+        }
+        // `send.amount` :set: the track's own send level, never a p-lock;
+        // the bus is named by id, so a reorder before this lands cannot
+        // retarget it.
+        "set-track-send-base" => {
+            let Value::Map(ref map) = payload else {
+                return;
+            };
+            let number = |key: &str| {
+                map.get(key).and_then(|cell| match &*cell.borrow() {
+                    Value::Number(n) => Some(*n),
+                    _ => None,
+                })
+            };
+            let (Some(track), Some(bus_id), Some(amount)) =
+                (number("track"), number("bus-id"), number("amount"))
+            else {
+                return;
+            };
+            let (track, bus_id) = (track as usize, sequencer::sequencer::BusId(bus_id as u64));
+            let Some(bus_idx) = app.buses.iter().position(|bus| bus.id == bus_id) else {
+                return;
+            };
+            if bus_id == sequencer::sequencer::BusId::MIX || track >= state.active_track_count() {
+                return;
+            }
+            set_track_send_base(app, track, bus_id, amount.clamp(0.0, 1.0) as f32);
+            let rt = editor.runtime_mut();
+            if track == current_track.load(Ordering::Relaxed) {
+                // The current track's controls show the displayed level.
+                sync_selected_track_bus_send_binding_fields(
+                    rt,
+                    app,
+                    &state,
+                    track,
+                    &selected_steps,
+                );
+            } else {
+                sync_track_bus_send_binding_field(rt, app, &state, track, bus_idx);
+            }
+            rt.run_reactive_cycle();
+            editor.refresh_runtime_side_effects();
         }
         "set-bus-effect-param" => {
             if let Value::Map(ref map) = payload {

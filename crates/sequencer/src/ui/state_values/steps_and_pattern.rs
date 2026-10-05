@@ -218,20 +218,9 @@ pub(crate) fn build_track_duration_spans_value(state: &Arc<SequencerState>, trac
     let num_steps = state.pattern.track_params[track]
         .get_num_steps()
         .min(MAX_STEPS);
+    let held = track_held_steps(state, track, num_steps);
     let spans: Vec<Rc<RefCell<Value>>> = (0..MAX_STEPS)
-        .map(|target_step| {
-            let covered = target_step < num_steps
-                && (0..=target_step).any(|source_step| {
-                    if !state.pattern.patterns[track].is_active(source_step) {
-                        return false;
-                    }
-                    let duration = state.pattern.step_data[track]
-                        .get(source_step, StepParam::Duration)
-                        .max(0.0);
-                    duration > (target_step - source_step) as f32
-                });
-            Rc::new(RefCell::new(Value::Bool(covered)))
-        })
+        .map(|step| Rc::new(RefCell::new(Value::Bool(held.get(step) == Some(&true)))))
         .collect();
     Value::List(spans)
 }
@@ -244,16 +233,42 @@ pub(crate) fn track_step_duration_covered(
     let num_steps = state.pattern.track_params[track]
         .get_num_steps()
         .min(MAX_STEPS);
-    target_step < num_steps
-        && (0..=target_step).any(|source_step| {
-            if !state.pattern.patterns[track].is_active(source_step) {
-                return false;
-            }
-            let duration = state.pattern.step_data[track]
-                .get(source_step, StepParam::Duration)
-                .max(0.0);
-            duration > (target_step - source_step) as f32
-        })
+    target_step < num_steps && track_held_steps(state, track, target_step + 1)[target_step]
+}
+
+/// Per step of the first `num_steps`, whether it lies inside an active
+/// step's duration, that step included (`seq-track-step-duration-*`,
+/// `step.held`): one scan.
+pub(crate) fn track_held_steps(
+    state: &SequencerState,
+    track: usize,
+    num_steps: usize,
+) -> Vec<bool> {
+    let mut held = Vec::new();
+    fill_track_held_steps(state, track, num_steps, &mut held);
+    held
+}
+
+/// [`track_held_steps`] into a reused buffer.
+pub(crate) fn fill_track_held_steps(
+    state: &SequencerState,
+    track: usize,
+    num_steps: usize,
+    held: &mut Vec<bool>,
+) {
+    let pattern = &state.pattern.patterns[track];
+    let data = &state.pattern.step_data[track];
+    // How far the active steps so far reach: a step is held while
+    // `source + duration > step` for some active `source <= step`.
+    let mut reach = f64::NEG_INFINITY;
+    held.clear();
+    held.extend((0..num_steps).map(|step| {
+        if pattern.is_active(step) {
+            let duration = data.get(step, StepParam::Duration).max(0.0) as f64;
+            reach = reach.max(step as f64 + duration);
+        }
+        reach > step as f64
+    }));
 }
 
 pub(crate) fn track_step_active_field(track: usize, step: usize) -> String {
@@ -511,9 +526,16 @@ pub(crate) fn sync_track_selection_binding_fields(
 
 /// Builds the `SEQ.selected-tracks` reactive list (sorted track indices).
 pub(crate) fn build_selected_tracks_value(selected: &HashSet<usize>) -> Value {
+    let tracks = sorted_selected_tracks(selected);
+    list_value(tracks.into_iter().map(|t| Value::Number(t as f64)))
+}
+
+/// The multi-track selection in track order (`SEQ.selected-tracks`,
+/// `selection.tracks`).
+pub(crate) fn sorted_selected_tracks(selected: &HashSet<usize>) -> Vec<usize> {
     let mut tracks: Vec<usize> = selected.iter().copied().collect();
     tracks.sort_unstable();
-    list_value(tracks.into_iter().map(|t| Value::Number(t as f64)))
+    tracks
 }
 
 /// Lights `track-selected-{i}` for every track in the multi-select set (union

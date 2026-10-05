@@ -1,11 +1,11 @@
 ;; eseq.kinds — the host kinds: what a view can be built from
-;; (docs/kind-bindings-spec.md §3.4, §4, §9).
+;; (docs/kind-bindings-spec.md §3.4, §4, §9, §14).
 ;;
 ;; Each kind here is a projection of the sequencer's own state. The host
-;; registers the instances (tracks, scenes, banks, devices; steps on first
-;; read of `t.steps`), pushes their `:host` fields, and checks at startup that
-;; it publishes exactly the fields declared below (crates/sequencer/src/ui/
-;; host_kinds.rs). A view imports what it uses:
+;; registers the instances (tracks, scenes, banks, buses, groups, devices,
+;; sends; steps on first read of `t.steps`), pushes their `:host` fields,
+;; and checks at startup that it publishes exactly the fields declared below
+;; (crates/sequencer/src/ui/host_kinds/). A view imports what it uses:
 ;;
 ;;   (import eseq.kinds :refer (track tracks transport scenes banks selection launch!))
 ;;
@@ -17,8 +17,9 @@
 
 (module eseq.kinds)
 
-(export track scene bank transport selection project
-        tracks scenes banks launch! clone-scene! delete-scene! step-preset!)
+(export track scene bank bus group transport selection project master engine
+        tracks scenes banks buses groups
+        launch! clone-scene! delete-scene! step-preset!)
 
 ;; ── :set functions (thin wrappers over the existing natives) ──
 
@@ -32,6 +33,25 @@
 (def set-transport-playing (tr v) (seq-set-playing v))
 (def set-transport-recording (tr v) (seq-set-recording v))
 (def select-track (sel t) (if t (seq-set-track t.index) nil))
+(def set-track-pan (t v) (seq-set-track-pan t.index (max -1 (min 1 v))))
+(def set-track-soloed (t v) (seq-set-track-solo t.index v))
+(def set-track-collapsed (t v) (seq-set-track-collapsed t.index v))
+(def step-param-setter (param)
+  (lambda (s v) (seq-set-track-step-param s.track.index s.index param v)))
+;; The track's own send level (never a p-lock), addressed by bus id so a bus
+;; reorder before the command lands cannot retarget it.
+(def set-send-amount (s v)
+  (host-command "set-track-send-base"
+    (dict :track s.track.index :bus-id s.bus.bid :amount (max 0 (min 1 v)))))
+(def set-bus-volume (b v) (seq-set-bus-volume b.index (max 0 (min 1 v))))
+(def set-bus-muted (b v) (seq-set-bus-mute b.index v))
+(def set-bus-soloed (b v) (seq-set-bus-solo b.index v))
+(def set-group-collapsed (g v) (seq-set-group-collapsed g.gid v))
+(def set-transport-bpm (tr v) (seq-set-bpm v))
+(def set-transport-metronome (tr v) (host-command "set-metronome" v))
+(def set-transport-roll-mode (tr v) (host-command "set-roll-mode" v))
+(def set-transport-record-quantize (tr v) (host-command "set-record-quantize" v))
+(def set-master-recording (m v) (seq-set-master-recording v))
 
 ;; ── Kinds ──
 
@@ -43,7 +63,29 @@
          (track    track   :doc "The track the step belongs to")
          (active   :bool   :set set-step-active :doc "The step triggers")
          (playing  :bool   :doc "The playhead is on this step while the transport runs")
-         (selected :bool   :doc "Selected for editing (the selected track's steps only)")))
+         (selected :bool   :doc "Selected for editing (the selected track's steps only)")
+         (held     :bool   :doc "Inside an active step's duration (that step included)")
+         ;; Step parameters, in the host's units (seq-set-track-step-param).
+         (velocity    :number :set (step-param-setter :velocity))
+         (duration    :number :set (step-param-setter :duration) :doc "Length in steps")
+         (transpose   :number :set (step-param-setter :transpose))
+         (delay       :number :set (step-param-setter :delay))
+         (retrig      :number :set (step-param-setter :retrig))
+         (retrig-rate :number :set (step-param-setter :retrig-rate))
+         (pan         :number :set (step-param-setter :pan))
+         (sync        :number :set (step-param-setter :sync))
+         (aux-a       :number :set (step-param-setter :aux-a))))
+
+;; One track's send to one bus (not the main mix): (nth t.sends 0).
+(def-kind send
+  :key (track bus)
+  :host ((track   track :doc "The sending track")
+         (bus     bus   :doc "The receiving bus")
+         (amount  :number :range (0 1) :set set-send-amount
+                  :doc "The track's send level (the base; setting it never p-locks)")
+         (display :number :range (0 1)
+                  :doc "The level shown: on the selected track the p-lock at the selected (or playing) step, else amount")
+         (locked  :bool   :doc "display comes from a p-lock")))
 
 ;; One device of a track's chain: the instrument (slot -1), then effects.
 (def-kind device
@@ -67,7 +109,39 @@
          (preset    :string :doc "Loaded preset name; empty when none")
          (num-steps :int    :doc "Pattern length in steps")
          (steps     (list-of step))
-         (devices   (list-of device))))
+         (devices   (list-of device))
+         (pan       :number :range (-1 1) :set set-track-pan)
+         (soloed    :bool   :set set-track-soloed)
+         (collapsed :bool   :set set-track-collapsed :doc "Lane collapsed in the sequencer")
+         (playhead  :int    :doc "The playing step, -1 while stopped")
+         (timebase  :string :doc "Step timebase: 1/16, 1/8T, …")
+         (instrument-type :string :doc "Instrument kind: synth, sampler, rack, …")
+         (rack      :bool   :doc "A drum rack track")
+         (group     group   :doc "The group holding the track, or nil")
+         (sends     (list-of send))))
+
+;; A mixer bus, the main mix included.
+(def-kind bus
+  :key (index)
+  :host ((index  :int    :doc "Position in the bus list, from 0")
+         (bid    :int    :doc "The host's stable bus id")
+         (name   :string)
+         (volume :number :range (0 1) :set set-bus-volume)
+         (muted  :bool   :set set-bus-muted)
+         (soloed :bool   :set set-bus-soloed)
+         (peak   :number :range (0 1) :doc "Output meter level")))
+
+;; A track group (or drum rack) and the bus it routes to.
+(def-kind group
+  :key (index)
+  :host ((index     :int    :doc "Position in the group list, from 0")
+         (gid       :int    :doc "The host's stable group id (legacy SEQ.groups :id)")
+         (name      :string)
+         (color     :rgb)
+         (collapsed :bool   :set set-group-collapsed)
+         (rack      :bool   :doc "A drum rack")
+         (tracks    (list-of track) :doc "Member tracks, in order")
+         (bus       bus     :doc "The group's bus, or nil")))
 
 ;; A scene; `bank` holds it. Launch with (launch! s).
 (def-kind scene
@@ -92,24 +166,48 @@
          (recording       :bool :set set-transport-recording)
          (scene           scene :doc "The playing scene")
          (queued          scene :doc "The scene a quantized launch waits for, or nil")
-         (launch-quantize :string :doc "Scene launch quantization: off, 1 bar, …")))
+         (launch-quantize :string :doc "Scene launch quantization: off, 1 bar, …")
+         (bpm             :int    :range (20 300) :set set-transport-bpm)
+         (position        :int    :doc "Transport step counter")
+         (metronome       :bool   :set set-transport-metronome)
+         (roll-mode       :bool   :set set-transport-roll-mode)
+         (record-quantize :string :set set-transport-record-quantize
+                          :doc "Live-record quantization: off, 1/16, …, 1 bar")))
+
+;; The master output.
+(def-kind master
+  :key ()
+  :host ((peak-l    :number :range (0 1))
+         (peak-r    :number :range (0 1))
+         (recording :bool   :set set-master-recording :doc "Recording the master output to a file")))
+
+;; The audio engine.
+(def-kind engine
+  :key ()
+  :host ((cpu-load   :number :doc "Audio callback load, percent")
+         (latency-ms :number :doc "Plugin-delay-compensation latency")))
 
 (def-kind selection
   :key ()
-  :host ((track track :set select-track :doc "The current track")))
+  :host ((track  track :set select-track :doc "The current track")
+         (tracks (list-of track) :doc "The multi-track selection")))
 
-;; The collections, for (tracks), (scenes) and (banks).
+;; The collections, for (tracks), (scenes), (banks), (buses) and (groups).
 (def-kind project
   :key ()
   :host ((tracks (list-of track))
          (scenes (list-of scene))
-         (banks  (list-of bank))))
+         (banks  (list-of bank))
+         (buses  (list-of bus))
+         (groups (list-of group))))
 
 ;; ── Collections and actions ──
 
 (def tracks () project.tracks)
 (def scenes () project.scenes)
 (def banks () project.banks)
+(def buses () project.buses)
+(def groups () project.groups)
 
 ;; Launch a scene with the transport's launch quantization.
 (def launch! (s)

@@ -1,0 +1,834 @@
+//! The host kinds of `eseq.kinds` (`content/core/modules/kinds.lisp`),
+//! published from the sequencer (docs/kind-bindings-spec.md §3.4, §4, §9;
+//! stage 4).
+//!
+//! The host registers keyed instances from the project model (tracks,
+//! scenes, banks, devices), re-keys them on reorder, and pushes their
+//! `:host` fields with `Runtime::set_instance_field`. Every push compares
+//! with the cell first, so only changed values reach readers and slots.
+//!
+//! Two feeds keep fields current ([`Feed`]):
+//!
+//! - **Live** fields read shared sequencer state the UI thread can reach
+//!   without the `App` (atomics and shared handles: volume, mute, arm,
+//!   selection, step state, playheads, meters, transport). They carry the
+//!   observed bit (spec D3): the tick computes one only while
+//!   `Runtime::host_fields_observed` says a reader or a held `#'` binding
+//!   wants it, and a by-value read of an unobserved one asks the reader hook
+//!   ([`install_reader`]) for its current value. Playheads and meters cost no
+//!   per-step work while nothing observes them.
+//! - **Model** fields come from the `App` (names, colors, presets, device
+//!   chains, scenes and banks). The hook cannot reach the `App`, so the tick
+//!   keeps every registered instance's model fields current, but only when
+//!   the model may have moved: a [`ModelRevision`] built from the existing
+//!   change counters (UI/FX epochs, pattern epoch, history revision, scene
+//!   revision, track registry, theme tint), like the legacy publishers'
+//!   epoch gates. The transport's queued scene and launch quantization are
+//!   compared every tick.
+//!
+//! Track instances are keyed by the track registry's stable `TrackId`s
+//! (paired with the registry's generation, so a project load replaces
+//! them); scenes, banks, buses and groups by their ids (buses and groups are
+//! replaced on a project load too, once, when the generation moves). Sends are keyed (track instance id, bus
+//! id), one per bus but the main mix. Steps are positional and lazy
+//! (spec D2): keyed (track instance id, step index), registered on the first
+//! read of `t.steps` (the reader hook, or the tick while `steps` is
+//! observed) and dropped when their track goes or its length shrinks below
+//! them. Devices are keyed (track instance id, slot + 1): the instrument is
+//! slot -1.
+//!
+//! [`check_schema`] compares [`PUBLISHED`] with the loaded `eseq.kinds`; the
+//! tick re-runs it whenever a kind schema changes (a hot reload) and skips
+//! mismatched fields until they are fixed.
+//!
+//! Layout: this module holds the published schema and the tick
+//! ([`HostKinds::sync`]); `live` the shared handles, live-field values and
+//! the reader hook; `registry` the instance registry helpers and pushes;
+//! `tracks`, `steps`, `scenes` and `mixer` the per-kind syncs.
+
+use crate::*;
+use eseqlisp::vm::{HostFieldReader, InstanceId, VM};
+use std::sync::atomic::AtomicBool;
+use std::sync::LazyLock;
+
+mod live;
+mod mixer;
+mod registry;
+mod scenes;
+mod steps;
+mod tracks;
+
+pub(crate) use live::KindsHandles;
+use live::*;
+pub(crate) use mixer::KindsMeters;
+use registry::*;
+use steps::*;
+
+/// The module declaring the host kinds.
+pub(crate) const KINDS_MODULE: &str = "eseq.kinds";
+
+pub(crate) const TRACK: &str = "eseq.kinds:track";
+pub(crate) const STEP: &str = "eseq.kinds:step";
+pub(crate) const DEVICE: &str = "eseq.kinds:device";
+pub(crate) const SCENE: &str = "eseq.kinds:scene";
+pub(crate) const BANK: &str = "eseq.kinds:bank";
+pub(crate) const TRANSPORT: &str = "eseq.kinds:transport";
+pub(crate) const SELECTION: &str = "eseq.kinds:selection";
+pub(crate) const PROJECT: &str = "eseq.kinds:project";
+pub(crate) const SEND: &str = "eseq.kinds:send";
+pub(crate) const BUS: &str = "eseq.kinds:bus";
+pub(crate) const GROUP: &str = "eseq.kinds:group";
+pub(crate) const MASTER: &str = "eseq.kinds:master";
+pub(crate) const ENGINE: &str = "eseq.kinds:engine";
+
+/// How the host keeps a field current (see the module docs).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Feed {
+    /// Re-derived from the `App` for every registered instance whenever the
+    /// [`ModelRevision`] moves.
+    Model,
+    /// Computed only while observed; cold reads go through the reader hook.
+    Live,
+}
+
+use Feed::{Live, Model};
+
+/// A published field: (kind id, field name).
+pub(crate) type FieldKey = (&'static str, &'static str);
+
+/// Every published field, by name. [`PUBLISHED`] lists them all.
+pub(crate) mod f {
+    use super::*;
+
+    pub(crate) const TRACK_INDEX: FieldKey = (TRACK, "index");
+    pub(crate) const TRACK_NAME: FieldKey = (TRACK, "name");
+    pub(crate) const TRACK_COLOR: FieldKey = (TRACK, "color");
+    pub(crate) const TRACK_VOLUME: FieldKey = (TRACK, "volume");
+    pub(crate) const TRACK_PEAK: FieldKey = (TRACK, "peak");
+    pub(crate) const TRACK_MUTED: FieldKey = (TRACK, "muted");
+    pub(crate) const TRACK_AUDIBLE: FieldKey = (TRACK, "audible");
+    pub(crate) const TRACK_ARMED: FieldKey = (TRACK, "armed");
+    pub(crate) const TRACK_SELECTED: FieldKey = (TRACK, "selected");
+    pub(crate) const TRACK_PRESET: FieldKey = (TRACK, "preset");
+    pub(crate) const TRACK_NUM_STEPS: FieldKey = (TRACK, "num-steps");
+    pub(crate) const TRACK_STEPS: FieldKey = (TRACK, "steps");
+    pub(crate) const TRACK_DEVICES: FieldKey = (TRACK, "devices");
+    pub(crate) const TRACK_PAN: FieldKey = (TRACK, "pan");
+    pub(crate) const TRACK_SOLOED: FieldKey = (TRACK, "soloed");
+    pub(crate) const TRACK_COLLAPSED: FieldKey = (TRACK, "collapsed");
+    pub(crate) const TRACK_PLAYHEAD: FieldKey = (TRACK, "playhead");
+    pub(crate) const TRACK_TIMEBASE: FieldKey = (TRACK, "timebase");
+    pub(crate) const TRACK_INSTRUMENT_TYPE: FieldKey = (TRACK, "instrument-type");
+    pub(crate) const TRACK_RACK: FieldKey = (TRACK, "rack");
+    pub(crate) const TRACK_GROUP: FieldKey = (TRACK, "group");
+    pub(crate) const TRACK_SENDS: FieldKey = (TRACK, "sends");
+
+    pub(crate) const STEP_INDEX: FieldKey = (STEP, "index");
+    pub(crate) const STEP_TRACK: FieldKey = (STEP, "track");
+    pub(crate) const STEP_ACTIVE: FieldKey = (STEP, "active");
+    pub(crate) const STEP_PLAYING: FieldKey = (STEP, "playing");
+    pub(crate) const STEP_SELECTED: FieldKey = (STEP, "selected");
+    pub(crate) const STEP_HELD: FieldKey = (STEP, "held");
+    pub(crate) const STEP_VELOCITY: FieldKey = (STEP, "velocity");
+    pub(crate) const STEP_DURATION: FieldKey = (STEP, "duration");
+    pub(crate) const STEP_TRANSPOSE: FieldKey = (STEP, "transpose");
+    pub(crate) const STEP_DELAY: FieldKey = (STEP, "delay");
+    pub(crate) const STEP_RETRIG: FieldKey = (STEP, "retrig");
+    pub(crate) const STEP_RETRIG_RATE: FieldKey = (STEP, "retrig-rate");
+    pub(crate) const STEP_PAN: FieldKey = (STEP, "pan");
+    pub(crate) const STEP_SYNC: FieldKey = (STEP, "sync");
+    pub(crate) const STEP_AUX_A: FieldKey = (STEP, "aux-a");
+
+    pub(crate) const SEND_TRACK: FieldKey = (SEND, "track");
+    pub(crate) const SEND_BUS: FieldKey = (SEND, "bus");
+    pub(crate) const SEND_AMOUNT: FieldKey = (SEND, "amount");
+    pub(crate) const SEND_DISPLAY: FieldKey = (SEND, "display");
+    pub(crate) const SEND_LOCKED: FieldKey = (SEND, "locked");
+
+    pub(crate) const BUS_INDEX: FieldKey = (BUS, "index");
+    pub(crate) const BUS_BID: FieldKey = (BUS, "bid");
+    pub(crate) const BUS_NAME: FieldKey = (BUS, "name");
+    pub(crate) const BUS_VOLUME: FieldKey = (BUS, "volume");
+    pub(crate) const BUS_MUTED: FieldKey = (BUS, "muted");
+    pub(crate) const BUS_SOLOED: FieldKey = (BUS, "soloed");
+    pub(crate) const BUS_PEAK: FieldKey = (BUS, "peak");
+
+    pub(crate) const GROUP_INDEX: FieldKey = (GROUP, "index");
+    pub(crate) const GROUP_GID: FieldKey = (GROUP, "gid");
+    pub(crate) const GROUP_NAME: FieldKey = (GROUP, "name");
+    pub(crate) const GROUP_COLOR: FieldKey = (GROUP, "color");
+    pub(crate) const GROUP_COLLAPSED: FieldKey = (GROUP, "collapsed");
+    pub(crate) const GROUP_RACK: FieldKey = (GROUP, "rack");
+    pub(crate) const GROUP_TRACKS: FieldKey = (GROUP, "tracks");
+    pub(crate) const GROUP_BUS: FieldKey = (GROUP, "bus");
+
+    pub(crate) const DEVICE_TRACK: FieldKey = (DEVICE, "track");
+    pub(crate) const DEVICE_SLOT: FieldKey = (DEVICE, "slot");
+    pub(crate) const DEVICE_NAME: FieldKey = (DEVICE, "name");
+    pub(crate) const DEVICE_ENABLED: FieldKey = (DEVICE, "enabled");
+
+    pub(crate) const SCENE_INDEX: FieldKey = (SCENE, "index");
+    pub(crate) const SCENE_NUMBER: FieldKey = (SCENE, "number");
+    pub(crate) const SCENE_NAME: FieldKey = (SCENE, "name");
+    pub(crate) const SCENE_ACTIVE: FieldKey = (SCENE, "active");
+    pub(crate) const SCENE_QUEUED: FieldKey = (SCENE, "queued");
+    pub(crate) const SCENE_BANK: FieldKey = (SCENE, "bank");
+
+    pub(crate) const BANK_INDEX: FieldKey = (BANK, "index");
+    pub(crate) const BANK_LABEL: FieldKey = (BANK, "label");
+    pub(crate) const BANK_SCENES: FieldKey = (BANK, "scenes");
+    pub(crate) const BANK_PLAYING: FieldKey = (BANK, "playing");
+
+    pub(crate) const TRANSPORT_PLAYING: FieldKey = (TRANSPORT, "playing");
+    pub(crate) const TRANSPORT_RECORDING: FieldKey = (TRANSPORT, "recording");
+    pub(crate) const TRANSPORT_SCENE: FieldKey = (TRANSPORT, "scene");
+    pub(crate) const TRANSPORT_QUEUED: FieldKey = (TRANSPORT, "queued");
+    pub(crate) const TRANSPORT_LAUNCH_QUANTIZE: FieldKey = (TRANSPORT, "launch-quantize");
+    pub(crate) const TRANSPORT_BPM: FieldKey = (TRANSPORT, "bpm");
+    pub(crate) const TRANSPORT_POSITION: FieldKey = (TRANSPORT, "position");
+    pub(crate) const TRANSPORT_METRONOME: FieldKey = (TRANSPORT, "metronome");
+    pub(crate) const TRANSPORT_ROLL_MODE: FieldKey = (TRANSPORT, "roll-mode");
+    pub(crate) const TRANSPORT_RECORD_QUANTIZE: FieldKey = (TRANSPORT, "record-quantize");
+
+    pub(crate) const MASTER_PEAK_L: FieldKey = (MASTER, "peak-l");
+    pub(crate) const MASTER_PEAK_R: FieldKey = (MASTER, "peak-r");
+    pub(crate) const MASTER_RECORDING: FieldKey = (MASTER, "recording");
+
+    pub(crate) const ENGINE_CPU_LOAD: FieldKey = (ENGINE, "cpu-load");
+    pub(crate) const ENGINE_LATENCY_MS: FieldKey = (ENGINE, "latency-ms");
+
+    pub(crate) const SELECTION_TRACK: FieldKey = (SELECTION, "track");
+    pub(crate) const SELECTION_TRACKS: FieldKey = (SELECTION, "tracks");
+
+    pub(crate) const PROJECT_TRACKS: FieldKey = (PROJECT, "tracks");
+    pub(crate) const PROJECT_SCENES: FieldKey = (PROJECT, "scenes");
+    pub(crate) const PROJECT_BANKS: FieldKey = (PROJECT, "banks");
+    pub(crate) const PROJECT_BUSES: FieldKey = (PROJECT, "buses");
+    pub(crate) const PROJECT_GROUPS: FieldKey = (PROJECT, "groups");
+}
+
+/// Every kind and `:host` field the host publishes, with its type as
+/// `eseq.kinds` spells it and its feed, grouped by kind. [`check_schema`]
+/// holds the module to this; the live-field loops and the reserved kind
+/// names derive from it.
+pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
+    (f::TRACK_INDEX, ":int", Model),
+    (f::TRACK_NAME, ":string", Model),
+    (f::TRACK_COLOR, ":rgb", Model),
+    (f::TRACK_VOLUME, ":number", Live),
+    (f::TRACK_PEAK, ":number", Live),
+    (f::TRACK_MUTED, ":bool", Live),
+    (f::TRACK_AUDIBLE, ":bool", Live),
+    (f::TRACK_ARMED, ":bool", Live),
+    (f::TRACK_SELECTED, ":bool", Live),
+    (f::TRACK_PRESET, ":string", Model),
+    (f::TRACK_NUM_STEPS, ":int", Live),
+    (f::TRACK_STEPS, "(list-of step)", Live),
+    (f::TRACK_DEVICES, "(list-of device)", Model),
+    (f::TRACK_PAN, ":number", Live),
+    (f::TRACK_SOLOED, ":bool", Live),
+    (f::TRACK_COLLAPSED, ":bool", Live),
+    (f::TRACK_PLAYHEAD, ":int", Live),
+    (f::TRACK_TIMEBASE, ":string", Live),
+    (f::TRACK_INSTRUMENT_TYPE, ":string", Model),
+    (f::TRACK_RACK, ":bool", Model),
+    (f::TRACK_GROUP, "group", Model),
+    (f::TRACK_SENDS, "(list-of send)", Model),
+    (f::STEP_INDEX, ":int", Model),
+    (f::STEP_TRACK, "track", Model),
+    (f::STEP_ACTIVE, ":bool", Live),
+    (f::STEP_PLAYING, ":bool", Live),
+    (f::STEP_SELECTED, ":bool", Live),
+    (f::STEP_HELD, ":bool", Live),
+    (f::STEP_VELOCITY, ":number", Live),
+    (f::STEP_DURATION, ":number", Live),
+    (f::STEP_TRANSPOSE, ":number", Live),
+    (f::STEP_DELAY, ":number", Live),
+    (f::STEP_RETRIG, ":number", Live),
+    (f::STEP_RETRIG_RATE, ":number", Live),
+    (f::STEP_PAN, ":number", Live),
+    (f::STEP_SYNC, ":number", Live),
+    (f::STEP_AUX_A, ":number", Live),
+    (f::SEND_TRACK, "track", Model),
+    (f::SEND_BUS, "bus", Model),
+    (f::SEND_AMOUNT, ":number", Live),
+    (f::SEND_DISPLAY, ":number", Live),
+    (f::SEND_LOCKED, ":bool", Live),
+    (f::DEVICE_TRACK, "track", Model),
+    (f::DEVICE_SLOT, ":int", Model),
+    (f::DEVICE_NAME, ":string", Model),
+    (f::DEVICE_ENABLED, ":bool", Model),
+    (f::SCENE_INDEX, ":int", Model),
+    (f::SCENE_NUMBER, ":int", Model),
+    (f::SCENE_NAME, ":string", Model),
+    (f::SCENE_ACTIVE, ":bool", Model),
+    (f::SCENE_QUEUED, ":bool", Model),
+    (f::SCENE_BANK, "bank", Model),
+    (f::BANK_INDEX, ":int", Model),
+    (f::BANK_LABEL, ":string", Model),
+    (f::BANK_SCENES, "(list-of scene)", Model),
+    (f::BANK_PLAYING, ":bool", Model),
+    (f::BUS_INDEX, ":int", Model),
+    (f::BUS_BID, ":int", Model),
+    (f::BUS_NAME, ":string", Model),
+    // Pushed every tick from the `App` (a handful of buses).
+    (f::BUS_VOLUME, ":number", Model),
+    (f::BUS_MUTED, ":bool", Model),
+    (f::BUS_SOLOED, ":bool", Model),
+    (f::BUS_PEAK, ":number", Live),
+    (f::GROUP_INDEX, ":int", Model),
+    (f::GROUP_GID, ":int", Model),
+    (f::GROUP_NAME, ":string", Model),
+    (f::GROUP_COLOR, ":rgb", Model),
+    (f::GROUP_COLLAPSED, ":bool", Model),
+    (f::GROUP_RACK, ":bool", Model),
+    (f::GROUP_TRACKS, "(list-of track)", Model),
+    (f::GROUP_BUS, "bus", Model),
+    (f::TRANSPORT_PLAYING, ":bool", Live),
+    (f::TRANSPORT_RECORDING, ":bool", Live),
+    (f::TRANSPORT_SCENE, "scene", Model),
+    (f::TRANSPORT_QUEUED, "scene", Model),
+    (f::TRANSPORT_LAUNCH_QUANTIZE, ":string", Model),
+    (f::TRANSPORT_BPM, ":int", Live),
+    (f::TRANSPORT_POSITION, ":int", Live),
+    (f::TRANSPORT_METRONOME, ":bool", Live),
+    (f::TRANSPORT_ROLL_MODE, ":bool", Live),
+    (f::TRANSPORT_RECORD_QUANTIZE, ":string", Live),
+    (f::MASTER_PEAK_L, ":number", Live),
+    (f::MASTER_PEAK_R, ":number", Live),
+    (f::MASTER_RECORDING, ":bool", Live),
+    (f::ENGINE_CPU_LOAD, ":number", Live),
+    (f::ENGINE_LATENCY_MS, ":number", Live),
+    (f::SELECTION_TRACK, "track", Live),
+    (f::SELECTION_TRACKS, "(list-of track)", Live),
+    (f::PROJECT_TRACKS, "(list-of track)", Model),
+    (f::PROJECT_SCENES, "(list-of scene)", Model),
+    (f::PROJECT_BANKS, "(list-of bank)", Model),
+    (f::PROJECT_BUSES, "(list-of bus)", Model),
+    (f::PROJECT_GROUPS, "(list-of group)", Model),
+];
+
+/// The published kinds, in [`PUBLISHED`] order.
+static PUBLISHED_KINDS: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
+    let mut kinds: Vec<&'static str> = Vec::new();
+    for ((kind, _), _, _) in PUBLISHED {
+        if !kinds.contains(kind) {
+            kinds.push(kind);
+        }
+    }
+    kinds
+});
+
+/// The kind names `eseq.kinds` reserves (spec §3.4): every published kind.
+pub(crate) fn host_kind_names() -> Vec<&'static str> {
+    PUBLISHED_KINDS
+        .iter()
+        .map(|kind| eseqlisp::vm::kind_name_of(kind))
+        .collect()
+}
+
+/// The live fields of one kind, with their names for
+/// `Runtime::host_fields_observed` (bit `i` is `keys[i]`).
+pub(super) struct LiveFields {
+    pub(super) keys: Vec<FieldKey>,
+    pub(super) names: Vec<&'static str>,
+}
+
+impl LiveFields {
+    fn of(kind: &str) -> Self {
+        let keys: Vec<FieldKey> = PUBLISHED
+            .iter()
+            .filter(|((published, _), _, feed)| *published == kind && *feed == Live)
+            .map(|(key, _, _)| *key)
+            .collect();
+        let names = keys.iter().map(|(_, name)| *name).collect();
+        Self { keys, names }
+    }
+
+    /// The observed-mask bit of `key`.
+    pub(super) fn bit(&self, key: FieldKey) -> u32 {
+        let index = self.keys.iter().position(|live| *live == key);
+        index.map_or(0, |index| 1 << index)
+    }
+}
+
+pub(super) static TRACK_LIVE: LazyLock<LiveFields> = LazyLock::new(|| LiveFields::of(TRACK));
+pub(super) static STEP_LIVE: LazyLock<LiveFields> = LazyLock::new(|| LiveFields::of(STEP));
+pub(super) static TRANSPORT_LIVE: LazyLock<LiveFields> =
+    LazyLock::new(|| LiveFields::of(TRANSPORT));
+pub(super) static SELECTION_LIVE: LazyLock<LiveFields> =
+    LazyLock::new(|| LiveFields::of(SELECTION));
+pub(super) static SEND_LIVE: LazyLock<LiveFields> = LazyLock::new(|| LiveFields::of(SEND));
+pub(super) static BUS_LIVE: LazyLock<LiveFields> = LazyLock::new(|| LiveFields::of(BUS));
+pub(super) static MASTER_LIVE: LazyLock<LiveFields> = LazyLock::new(|| LiveFields::of(MASTER));
+pub(super) static ENGINE_LIVE: LazyLock<LiveFields> = LazyLock::new(|| LiveFields::of(ENGINE));
+
+/// The step fields diffed by value per tick (beside `active`, `selected`
+/// and `playing`): `held`, then the step parameters, whose field names are
+/// their `seq-set-step-param` keywords ([`step_param_named`]).
+pub(super) const STEP_VALUES: [FieldKey; 10] = [
+    f::STEP_HELD,
+    f::STEP_VELOCITY,
+    f::STEP_DURATION,
+    f::STEP_TRANSPOSE,
+    f::STEP_DELAY,
+    f::STEP_RETRIG,
+    f::STEP_RETRIG_RATE,
+    f::STEP_PAN,
+    f::STEP_SYNC,
+    f::STEP_AUX_A,
+];
+
+/// Every live field.
+pub(super) static LIVE_KEYS: LazyLock<Vec<FieldKey>> = LazyLock::new(|| {
+    PUBLISHED
+        .iter()
+        .filter(|(_, _, feed)| *feed == Live)
+        .map(|(key, _, _)| *key)
+        .collect()
+});
+
+/// One way the loaded `eseq.kinds` differs from [`PUBLISHED`].
+struct Mismatch {
+    message: String,
+    /// The published fields the host must not push while it stands.
+    skip: Vec<FieldKey>,
+}
+
+fn schema_mismatches(rt: &Runtime) -> Vec<Mismatch> {
+    let mut mismatches = Vec::new();
+    for kind in PUBLISHED_KINDS.iter().copied() {
+        let fields = || {
+            PUBLISHED
+                .iter()
+                .filter(move |((published, _), _, _)| *published == kind)
+        };
+        let Some(schema) = rt.instance_kind_schema(kind) else {
+            mismatches.push(Mismatch {
+                message: format!("{KINDS_MODULE}: kind '{kind}' is not declared"),
+                skip: fields().map(|(key, _, _)| *key).collect(),
+            });
+            continue;
+        };
+        for (key, ty, _) in fields() {
+            let field = key.1;
+            let message = match schema
+                .host
+                .iter()
+                .find(|declared| declared.field.name == field)
+            {
+                None => format!(
+                    "{kind}: the host publishes '{field}' ({ty}), which is not a :host field"
+                ),
+                Some(declared) if declared.field.ty.to_string() != *ty => format!(
+                    "{kind}: '{field}' is declared {}, the host publishes {ty}",
+                    declared.field.ty
+                ),
+                Some(_) => continue,
+            };
+            mismatches.push(Mismatch {
+                message,
+                skip: vec![*key],
+            });
+        }
+        for declared in &schema.host {
+            if !fields().any(|(key, _, _)| key.1 == declared.field.name) {
+                mismatches.push(Mismatch {
+                    message: format!(
+                        "{kind}: :host field '{}' is declared but the host never publishes it",
+                        declared.field.name
+                    ),
+                    skip: Vec::new(),
+                });
+            }
+        }
+    }
+    mismatches
+}
+
+/// Check the loaded `eseq.kinds` against [`PUBLISHED`]: every published
+/// field is a declared `:host` field of that type, and every declared
+/// `:host` field is published. Returns one message per mismatch.
+pub(crate) fn check_schema(rt: &Runtime) -> Result<(), Vec<String>> {
+    let errors: Vec<String> = schema_mismatches(rt)
+        .into_iter()
+        .map(|mismatch| mismatch.message)
+        .collect();
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
+}
+
+fn schema_message(errors: &[String]) -> String {
+    format!(
+        "host kinds do not match {KINDS_MODULE} (content/core/modules/kinds.lisp):\n  {}",
+        errors.join("\n  ")
+    )
+}
+
+/// Run [`check_schema`] at startup: a hard error in debug builds, a
+/// warning in release (spec §3.4). After startup the tick re-checks on
+/// every schema change and only warns ([`HostKinds::sync`]).
+pub(crate) fn check_schema_at_startup(rt: &Runtime) {
+    if let Err(errors) = check_schema(rt) {
+        let message = schema_message(&errors);
+        if cfg!(debug_assertions) {
+            panic!("{message}");
+        }
+        eprintln!("metal_seq: warning: {message}");
+    }
+}
+
+/// Reserve the host kind names for `eseq.kinds` (spec §3.4).
+pub(crate) fn reserve_kind_names(rt: &mut Runtime) {
+    rt.reserve_kind_names(KINDS_MODULE, &host_kind_names());
+}
+
+fn number(n: impl Into<f64>) -> Value {
+    Value::Number(n.into())
+}
+
+fn instance_or_nil(id: Option<InstanceId>) -> Value {
+    id.map_or(Value::Nil, Value::Instance)
+}
+
+fn instance_list(ids: impl IntoIterator<Item = InstanceId>) -> Value {
+    list_value(ids.into_iter().map(Value::Instance))
+}
+
+fn rgb3([r, g, b]: [f32; 3]) -> Value {
+    eseqlisp::vm::tagged_list("rgb", vec![number(r), number(g), number(b)])
+}
+
+fn rgb(color: sequencer::track_color::TrackColor) -> Value {
+    rgb3([color.r, color.g, color.b])
+}
+
+// ── the tick ────────────────────────────────────────────────────────────
+
+/// The change counters the model fields derive from; the model half of a
+/// sync runs only when this moves (or the track order does). Mirrors
+/// `capture_param_sync_revision` (reactive_tick.rs).
+#[derive(Clone, PartialEq)]
+struct ModelRevision {
+    ui_epoch: usize,
+    fx_epoch: usize,
+    fx_value_epoch: usize,
+    pattern_epoch: u64,
+    song_row_mirror_epoch: u64,
+    sound_binding_epoch: usize,
+    history_revision: u64,
+    scenes_revision: u64,
+    current_scene: usize,
+    tracks: usize,
+    active_tracks: usize,
+    track_generation: u64,
+    /// The display tint and palette track colors go through (a theme change
+    /// bumps no epoch).
+    track_tint: (
+        eseqlisp::backend::Color,
+        [eseqlisp::backend::Color; eseqlisp::theme::TRACK_PALETTE_SLOTS],
+    ),
+}
+
+impl ModelRevision {
+    fn capture(app: &app::App, shared: &KindsHandles) -> Self {
+        Self {
+            ui_epoch: shared.ui_epoch.load(Ordering::Relaxed),
+            fx_epoch: shared.fx_epoch.load(Ordering::Relaxed),
+            fx_value_epoch: shared.fx_value_epoch.load(Ordering::Relaxed),
+            pattern_epoch: app.state.transport.pattern_epoch.load(Ordering::Relaxed),
+            song_row_mirror_epoch: app.song_row_mirror_epoch,
+            sound_binding_epoch: app.sound_binding_epoch,
+            history_revision: app.history.current_revision(),
+            scenes_revision: app.state.project_scenes_revision(),
+            current_scene: app.state.current_scene_index(),
+            tracks: app.tracks.len(),
+            active_tracks: app.state.active_track_count(),
+            track_generation: app.track_registry.generation(),
+            track_tint: eseqlisp::theme::track_display_key(),
+        }
+    }
+}
+
+/// The host side of `eseq.kinds`, kept across ticks (in
+/// `FrameDiffState`).
+#[derive(Default)]
+pub(crate) struct HostKinds {
+    pub(crate) shared: Rc<RefCell<KindsShared>>,
+    /// Built when the reader is installed.
+    sources: Option<Rc<KindsHandles>>,
+    /// The schema generation [`check_schema`] last ran against, and the
+    /// mismatches it warned about.
+    schema_generation: Option<u64>,
+    warned: Vec<String>,
+    /// The model revision of the last model sync; `None` forces one.
+    model: Option<ModelRevision>,
+    /// The track registry's order at the last model sync.
+    model_track_ids: Vec<sequencer::sequencer::TrackId>,
+    /// `TrackId` → instance, for the registry generation in
+    /// `track_generation`, so a reorder re-keys rather than re-registers
+    /// (spec §4) and a project load replaces every track (and bus and
+    /// group).
+    tracks: HashMap<u64, InstanceId>,
+    track_generation: Option<u64>,
+    /// Scene / bank / bus / group id → instance.
+    scenes: HashMap<u64, InstanceId>,
+    banks: HashMap<u64, InstanceId>,
+    buses: HashMap<u64, InstanceId>,
+    groups: HashMap<u64, InstanceId>,
+    /// The bus ids and groups of the last model sync: a bus added or
+    /// removed, or any group edit (collapse included), forces one.
+    model_bus_ids: Vec<u64>,
+    model_groups: Vec<sequencer::project::ProjectTrackGroup>,
+    /// The instances at each position as of the last model sync.
+    track_ids: Vec<Option<InstanceId>>,
+    scene_ids: Vec<Option<InstanceId>>,
+    bank_ids: Vec<Option<InstanceId>>,
+    bus_ids: Vec<Option<InstanceId>>,
+    group_ids: Vec<Option<InstanceId>>,
+    /// Every send instance, for the live loop.
+    send_ids: Vec<InstanceId>,
+    /// The union of the send (bus) instances' observed live fields, as of
+    /// `Runtime::instance_observer_epoch` ([`observed_union`]).
+    send_observers: Option<(u64, u32)>,
+    bus_observers: Option<(u64, u32)>,
+    /// Bus (volume, mute, solo) last pushed, by bus position.
+    bus_mixer: Vec<Option<(f32, bool, bool)>>,
+    /// `selection.tracks` (sorted track positions) last pushed; `None`
+    /// while unobserved.
+    selection_tracks: Option<Vec<usize>>,
+    steps: HashMap<InstanceId, StepDiff>,
+    selection: StepSelection,
+    /// Per-step changed-field masks, reused across tracks and ticks.
+    step_changes: Vec<u32>,
+    /// The transport's queued scene and launch quantization last pushed.
+    queued: Option<Option<usize>>,
+    launch_quantize: Option<String>,
+    /// Whether any track's `peak`, any bus's `peak`, or a master peak
+    /// was observed at the last sync.
+    peaks_observed: bool,
+    bus_peaks_observed: bool,
+    master_peaks_observed: bool,
+}
+
+impl HostKinds {
+    /// Whether any track's `peak` was observed at the last sync: the tick
+    /// then keeps the track meter cache polled even with no legacy meter
+    /// on screen.
+    pub(crate) fn wants_peaks(&self) -> bool {
+        self.peaks_observed
+    }
+
+    /// Like [`Self::wants_peaks`], for the bus meters.
+    pub(crate) fn wants_bus_peaks(&self) -> bool {
+        self.bus_peaks_observed
+    }
+
+    /// Like [`Self::wants_peaks`], for the master meter.
+    pub(crate) fn wants_master_peaks(&self) -> bool {
+        self.master_peaks_observed
+    }
+
+    /// One sync: schema check (on change), registry and model fields (on a
+    /// model revision change), queued scene and quantization, observed live
+    /// fields. `meters` is the tick's meter cache.
+    /// Returns whether anything changed (the reactive cycle has then run).
+    pub(crate) fn sync(
+        &mut self,
+        app: &app::App,
+        rt: &mut Runtime,
+        shared: &SharedHandles,
+        meters: &KindsMeters<'_>,
+    ) -> bool {
+        match &self.sources {
+            Some(sources) => self.sync_sources(app, rt, sources.clone(), meters),
+            None => self.sync_with(app, rt, &KindsHandles::of(shared), meters),
+        }
+    }
+
+    /// [`Self::sync`] over explicit handles (headless capture).
+    pub(crate) fn sync_with(
+        &mut self,
+        app: &app::App,
+        rt: &mut Runtime,
+        handles: &KindsHandles,
+        meters: &KindsMeters<'_>,
+    ) -> bool {
+        let sources = match &self.sources {
+            Some(sources) => sources.clone(),
+            None => Rc::new(handles.clone()),
+        };
+        self.sync_sources(app, rt, sources, meters)
+    }
+
+    fn sync_sources(
+        &mut self,
+        app: &app::App,
+        rt: &mut Runtime,
+        sources: Rc<KindsHandles>,
+        meters: &KindsMeters<'_>,
+    ) -> bool {
+        if rt.instance_kind_schema(TRACK).is_none() {
+            return false; // eseq.kinds is not loaded
+        }
+        if self.refresh_schema(rt) {
+            self.model = None;
+        }
+        if self.sources.is_none() {
+            install_reader(rt, sources.clone(), self.shared.clone());
+            self.sources = Some(sources.clone());
+            self.model = None;
+        }
+        self.shared.borrow_mut().copy_meters(app, meters);
+        let shared_kinds = self.shared.clone();
+        let mut pusher = Pusher {
+            rt,
+            sources: &sources,
+            shared: &shared_kinds,
+            changed: false,
+        };
+        let revision = ModelRevision::capture(app, &sources);
+        let model_due = self.model.as_ref() != Some(&revision)
+            || app.track_registry.ids() != self.model_track_ids.as_slice()
+            || !app
+                .buses
+                .iter()
+                .map(|bus| bus.id.0)
+                .eq(self.model_bus_ids.iter().copied())
+            || app.groups != self.model_groups
+            || self.cached_instances_stale(pusher.rt);
+        if model_due {
+            self.launch_quantize = None;
+            self.send_observers = None;
+            self.bus_observers = None;
+            self.bus_mixer.clear();
+            self.selection_tracks = None;
+            self.replace_on_project_load(&mut pusher, app);
+            let buses_done = self.sync_bus_model(&mut pusher, app);
+            let tracks_done = self.sync_track_model(&mut pusher, app);
+            let scenes_done = self.sync_scene_model(&mut pusher, app);
+            self.shared.borrow_mut().model_syncs += 1;
+            if buses_done && tracks_done && scenes_done {
+                self.model = Some(revision);
+                self.model_track_ids.clear();
+                self.model_track_ids
+                    .extend_from_slice(app.track_registry.ids());
+                self.model_bus_ids.clear();
+                self.model_bus_ids
+                    .extend(app.buses.iter().map(|bus| bus.id.0));
+                self.model_groups.clone_from(&app.groups);
+            } else {
+                // Ids were unavailable this frame: try again next tick.
+                self.model = None;
+            }
+        }
+        self.sync_transport_queue(&mut pusher, app);
+        self.sync_bus_mixer(&mut pusher, app);
+        let selection_changed = self.selection.refresh(&sources);
+        self.sync_track_live(&mut pusher, selection_changed);
+        self.sync_send_live(&mut pusher);
+        self.sync_bus_live(&mut pusher);
+        for (kind, fields) in [(TRANSPORT, &*TRANSPORT_LIVE), (ENGINE, &*ENGINE_LIVE)] {
+            if let Some(id) = pusher.singleton(kind) {
+                pusher.push_live(id, fields);
+            }
+        }
+        let master_peaks = MASTER_LIVE.bit(f::MASTER_PEAK_L) | MASTER_LIVE.bit(f::MASTER_PEAK_R);
+        self.master_peaks_observed = pusher
+            .singleton(MASTER)
+            .is_some_and(|id| pusher.push_live(id, &MASTER_LIVE) & master_peaks != 0);
+        self.sync_selection(&mut pusher);
+        let changed = pusher.changed;
+        if changed {
+            rt.run_reactive_cycle();
+        }
+        changed
+    }
+
+    /// Re-run [`check_schema`] when a kind schema changed (a hot reload of
+    /// `eseq.kinds`): warn once per distinct mismatch set and skip the
+    /// mismatched fields until fixed. Returns whether the generation moved.
+    fn refresh_schema(&mut self, rt: &Runtime) -> bool {
+        let generation = rt.instance_kind_schema_generation();
+        if self.schema_generation == Some(generation) {
+            return false;
+        }
+        self.schema_generation = Some(generation);
+        let mismatches = schema_mismatches(rt);
+        let messages: Vec<String> = mismatches.iter().map(|m| m.message.clone()).collect();
+        if !messages.is_empty() && messages != self.warned {
+            eprintln!(
+                "metal_seq: warning: {}\n  (skipping those fields until fixed)",
+                schema_message(&messages)
+            );
+        }
+        self.warned = messages;
+        self.shared.borrow_mut().skip = mismatches
+            .into_iter()
+            .flat_map(|mismatch| mismatch.skip)
+            .collect();
+        true
+    }
+
+    /// Whether an instance the last model sync produced is gone (a hot
+    /// reload dropped it): the model sync must run again.
+    fn cached_instances_stale(&self, rt: &Runtime) -> bool {
+        self.track_ids
+            .iter()
+            .chain(&self.scene_ids)
+            .chain(&self.bank_ids)
+            .chain(&self.bus_ids)
+            .chain(&self.group_ids)
+            .flatten()
+            .any(|id| !rt.instance_is_live(*id))
+    }
+
+    /// A new track registry generation (a project load or clear): track,
+    /// bus and group ids restart with the project, so they name other
+    /// things now. Drops every such instance, once per generation, so the
+    /// syncs after it re-register them (and keep the new ones across ticks
+    /// while the registry lags the track list).
+    fn replace_on_project_load(&mut self, pusher: &mut Pusher<'_>, app: &app::App) {
+        let generation = app.track_registry.generation();
+        if self.track_generation == Some(generation) {
+            return;
+        }
+        let doomed = self
+            .tracks
+            .drain()
+            .chain(self.buses.drain())
+            .chain(self.groups.drain());
+        for (_, id) in doomed {
+            pusher.rt.drop_instance(id);
+            pusher.changed = true;
+        }
+        self.track_generation = Some(generation);
+    }
+
+    /// `selection.track`, and `selection.tracks` when observed and the
+    /// sorted selection changed since the last push.
+    fn sync_selection(&mut self, pusher: &mut Pusher<'_>) {
+        let Some(id) = pusher.singleton(SELECTION) else {
+            return;
+        };
+        let mask = pusher.rt.host_fields_observed(id, &SELECTION_LIVE.names);
+        if mask & SELECTION_LIVE.bit(f::SELECTION_TRACK) != 0 {
+            pusher.push_live_field(id, f::SELECTION_TRACK);
+        }
+        if mask & SELECTION_LIVE.bit(f::SELECTION_TRACKS) == 0 {
+            self.selection_tracks = None;
+            return;
+        }
+        let tracks = sorted_selected_tracks(&pusher.sources.selected_tracks.lock().unwrap());
+        if self.selection_tracks.as_ref() != Some(&tracks) {
+            pusher.push_live_field(id, f::SELECTION_TRACKS);
+            self.selection_tracks = Some(tracks);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests;

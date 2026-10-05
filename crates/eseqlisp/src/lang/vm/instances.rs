@@ -2303,6 +2303,7 @@ impl VM {
 
     /// Whether any live child of `parent` of kind `kind` has one of
     /// `fields` observed ([`Self::host_fields_observed`]).
+    #[cfg(test)]
     pub fn keyed_children_observed(&self, parent: InstanceId, kind: &str, fields: &[&str]) -> bool {
         self.keyed_children_of_kind(parent, kind)
             .any(|(child, _)| self.host_fields_observed(child, fields) != 0)
