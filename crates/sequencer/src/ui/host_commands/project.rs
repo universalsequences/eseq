@@ -7,6 +7,7 @@ mod tests;
 pub(super) const COMMANDS: &[&str] = &[
     "move-saved-instrument",
     "load-instrument-preset",
+    "step-instrument-preset",
     "save-preset",
     "overwrite-preset",
     "new-project",
@@ -151,6 +152,42 @@ pub(super) fn handle(
                     }
                 }
             }
+        }
+        // Groovebox-style preset stepping: load the preset before (-1) or
+        // after (+1) the track's loaded one in its preset list, wrapping.
+        "step-instrument-preset" => {
+            let track = extract_usize_from_payload(&payload, "track")
+                .unwrap_or_else(|| current_track.load(Ordering::Relaxed));
+            let delta = match &payload {
+                Value::Map(map) => match map.get("delta").map(|cell| cell.borrow().clone()) {
+                    Some(Value::Number(n)) if n < 0.0 => -1i64,
+                    _ => 1,
+                },
+                _ => 1,
+            };
+            let items = visible_preset_items_for_track(app, track);
+            if items.is_empty() {
+                editor.handle_host_event(HostEvent::Status("No presets for this track".to_string()));
+                return;
+            }
+            let loaded = app.state.pattern.track_sound_state.lock().unwrap()
+                .get(track)
+                .and_then(|meta| meta.loaded_preset.clone())
+                .unwrap_or_default();
+            let len = items.len() as i64;
+            let next = match items.iter().position(|item| *item == loaded) {
+                Some(index) => (index as i64 + delta).rem_euclid(len),
+                None if delta < 0 => len - 1,
+                None => 0,
+            } as usize;
+            // load-instrument-preset loads onto the current track.
+            current_track.store(track, Ordering::Relaxed);
+            let mut map = std::collections::HashMap::new();
+            map.insert(
+                "name".to_string(),
+                std::rc::Rc::new(std::cell::RefCell::new(Value::String(items[next].clone()))),
+            );
+            handle("load-instrument-preset", Value::Map(map), app, editor, ctx);
         }
         "save-preset" => {
             if let Value::Map(ref map) = payload {
