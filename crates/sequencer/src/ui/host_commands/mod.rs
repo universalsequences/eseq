@@ -20,6 +20,7 @@ mod misc;
 pub(crate) mod packages;
 mod project;
 mod rack;
+pub(crate) mod rack_kinds;
 pub(crate) mod rack_grooves;
 pub(crate) mod factory_promote;
 pub(crate) mod resample;

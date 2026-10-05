@@ -2896,9 +2896,7 @@ impl App {
 
     /// Index (in `groups`) of the plain group holding this rack, if any.
     pub fn rack_parent_group(&self, rack_id: u64) -> Option<usize> {
-        self.groups
-            .iter()
-            .position(|group| group.rack_members.contains(&rack_id))
+        crate::project::rack_parent(&self.groups, rack_id)
     }
 
     /// Points a rack's backing bus at `parent` (or back at the master mix with
@@ -10516,19 +10514,9 @@ pub fn apply_rack_groove_amount_drag(
     clip: Option<crate::sequencer::RackClipId>,
     mutate: impl FnOnce(&mut crate::groove::RackGrooveSettings),
 ) -> Result<bool, String> {
-    let current = app
-        .groups
-        .iter()
-        .find(|group| group.id == group_id)
-        .and_then(|group| group.rack.as_ref())
-        .map(|rack| rack.groove_for_clip(clip).clone())
-        .ok_or_else(|| format!("Track group {group_id} is not a drum rack"))?;
-    let mut next = current.clone();
-    mutate(&mut next);
-    next.sanitize();
-    if next == current {
+    let Some(next) = app.next_rack_groove(group_id, clip, mutate)? else {
         return Ok(false);
-    }
+    };
     let merge_key = MergeKey::new(format!("rack-groove-amounts:{group_id}:{clip:?}"));
     let continuing = app
         .history

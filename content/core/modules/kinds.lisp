@@ -3,8 +3,9 @@
 ;;
 ;; Each kind here is a projection of the sequencer's own state. The host
 ;; registers the instances (tracks, scenes, banks, buses, groups, devices,
-;; sends, clips, cells, scene spans; steps on first read of `t.steps`, params
-;; on first read of `d.params`), pushes their `:host` fields,
+;; sends, clips, cells, scene spans, drum rack pads, rack clips and grooves;
+;; steps on first read of `t.steps`, params on first read of `d.params`),
+;; pushes their `:host` fields,
 ;; and checks at startup that it publishes exactly the fields declared below
 ;; (crates/sequencer/src/ui/host_kinds/). A view imports what it uses:
 ;;
@@ -30,7 +31,11 @@
         mute-group-options accum-mode-options tuning-root-options tuning-mode-options
         voice-priority-options mono-trigger-options swing-resolution-options
         roll-rate-options
-        launch-cell! select-region! select-region-in! clear-region! take-none take-governed take-latched)
+        launch-cell! select-region! select-region-in! clear-region! take-none take-governed take-latched
+        pad-role-options groove-scale-options
+        trigger-pad! launch-rack-clip! silence-rack! save-rack-clip-as! delete-rack-clip!
+        convert-rack-to-clips! use-library-groove! apply-groove-to-all-clips! extract-groove!
+        duplicate-groove! delete-groove! save-groove-to-library!)
 
 ;; Short fixed option lists (the host checks they match its own). The lists
 ;; the host owns (scales, step sync resolutions, accumulators, track outputs)
@@ -43,6 +48,11 @@
 (def mono-trigger-options '("retrig" "legato"))
 (def swing-resolution-options '("1/16" "1/8" "1/4" "1/2"))
 (def roll-rate-options '("4" "4T" "8" "8T" "16" "16T" "32" "32T"))
+;; A drum rack pad's explicit role keys (pad.role; "" is Standard: the role
+;; the standard layout infers from the note), and a groove's time scales.
+(def pad-role-options '("kick" "snare" "rim" "clap" "closed-hat" "pedal-hat" "open-hat"
+                        "tom-low" "tom-mid" "tom-high" "crash" "ride" "shaker" "perc"))
+(def groove-scale-options '(0.5 1 2))
 
 ;; ── :set functions (thin wrappers over the existing natives) ──
 
@@ -153,6 +163,35 @@
 (def set-param-base (p v)
   (host-command "set-device-param"
     (dict :track-id p.device.track.tid :device p.device.did :param-idx p.index :value v)))
+
+;; Drum racks (spec §14.2e). Pads are addressed by their rack's group id and
+;; their member track's stable id, rack clips by (group id, clip id), grooves
+;; by (group id, clip id; 0 for the rack's own), pool grooves by their id, all
+;; resolved when the command lands. A groove amount's set!s while the pointer
+;; is down join one undo entry; everything else is its own entry.
+(def pad-setter (field)
+  (lambda (p v)
+    (host-command "set-pad"
+      (dict :group-id p.group.gid :track-id p.track.tid :field field :value v))))
+(def set-group-armed (g v) (seq-set-rack-armed g.gid v))
+(def rack-clip-setter (field)
+  (lambda (rc v)
+    (host-command "set-rack-clip"
+      (dict :group-id rc.group.gid :clip-id rc.cid :field field :value v))))
+(def groove-clip-id (gr) (if gr.clip gr.clip.cid 0))
+(def groove-setter (field)
+  (lambda (gr v)
+    (host-command "set-groove"
+      (dict :group-id gr.group.gid :clip-id (groove-clip-id gr) :field field :value v))))
+(def set-groove-pool-groove (gr pg)
+  ((groove-setter "pool-groove") gr (if pg pg.groove-id nil)))
+(def pad-groove-setter (field)
+  (lambda (pq v)
+    (host-command "set-groove"
+      (dict :group-id pq.groove.group.gid :clip-id (groove-clip-id pq.groove)
+            :track-id pq.pad.track.tid :field field :value v))))
+(def set-pool-groove-name (pg v)
+  (host-command "set-pool-groove" (dict :groove-id pg.groove-id :field "name" :value v)))
 
 ;; ── Kinds ──
 
@@ -291,7 +330,8 @@
          (cells     (list-of cell) :doc "The track's patterns (the mixer's clip grid), by pattern id")
          (governed  :int    :doc "take-none, take-governed (a take plays on the lane: steps dimmed and locked) or take-latched (a take lane the performer latched away)")
          (latched   :bool   :set set-track-latched
-                    :doc "Latched away from the song by a manual launch; set false to hand the lane back to the song")))
+                    :doc "Latched away from the song by a manual launch; set false to hand the lane back to the song")
+         (pad       pad     :doc "The drum rack pad this member track backs, or nil")))
 
 ;; A clip on a track's arrangement lane: (nth t.clips 0). Keyed by its stable
 ;; clip id: moving or resizing it keeps the instance.
@@ -428,7 +468,97 @@
          (collapsed :bool   :set set-group-collapsed)
          (rack      :bool   :doc "A drum rack")
          (tracks    (list-of track) :doc "Member tracks, in order")
-         (bus       bus     :doc "The group's bus, or nil")))
+         (bus       bus     :doc "The group's bus, or nil")
+         (racks     (list-of group) :doc "The drum racks this (plain) group draws inside its block")
+         (parent    group   :doc "The group drawing this rack inside its block, or nil")
+         ;; Drum racks (empty, nil or false on a plain group).
+         (armed     :bool   :set set-group-armed
+                    :doc "The live keyboard plays this rack's pads (one rack at a time; arming disarms its member tracks)")
+         (pads      (list-of pad) :doc "The rack's pads, in pad order")
+         (clips     (list-of rack-clip) :doc "The rack's clip bank, in order")
+         (rack-clip rack-clip :doc "The clip the current scene plays, or nil (silent, or no clips)")
+         (legacy    :bool   :doc "A rack without a clip bank: its members play the project scenes (convert-rack-to-clips!)")
+         (groove    groove  :doc "The rack's own groove (what its clips follow unless they own one)")))
+
+;; A drum rack pad: (nth g.pads 0). Keyed by its member track, so moving the
+;; pad to another note (a swap included) or reordering keeps the instance.
+(def-kind pad
+  :key (group tid)
+  :host ((group     group  :doc "The rack")
+         (track     track  :doc "The member track the pad plays (its steps: p.track.steps)")
+         (note      :int    :range (-36 51) :set (pad-setter "note")
+                    :doc "The note the pad answers to (0 is C4); setting an occupied note swaps the two pads")
+         (label     :string :doc "The note's name (C1 … D#8)")
+         (choke     :int    :range (0 16) :set (pad-setter "choke") :doc "Choke group, 0 for none")
+         (role      :string :set (pad-setter "role")
+                    :doc "The explicit drum role, one of pad-role-options; empty for Standard")
+         (role-tag  :string :doc "The effective role's short tag (BD, SD, …); empty when none")
+         (role-label :string :doc "The effective role's name; empty when none")
+         (standard-role :string :doc "The role key the standard layout infers from the note (as role, one of pad-role-options); empty when none")
+         (standard-role-label :string :doc "That role's name; empty when none")
+         (triggered :bool   :doc "Sounding: lit for a moment after each hit, however it was played")))
+
+;; A clip of a drum rack's own scene axis: (nth g.clips 0). Keyed by its
+;; stable clip id. Launch with (launch-rack-clip! rc).
+(def-kind rack-clip
+  :key (group cid)
+  :host ((group  group  :doc "The rack")
+         (cid    :int    :doc "The host's stable clip id")
+         (index  :int    :doc "Position in the rack's bank, from 0")
+         (name   :string :set (rack-clip-setter "name") :doc "Non-empty")
+         (active :bool   :doc "The current scene plays it")
+         (scenes (list-of scene) :doc "The scenes that play it")
+         (groove groove  :doc "The clip's own groove, or nil while it follows the rack's")
+         (own-groove :bool :set (rack-clip-setter "own-groove")
+                     :doc "Plays its own groove (set true: a copy of the rack's; false: follow the rack's again)")))
+
+;; A rack's groove setting: g.groove (the rack's own) or rc.groove (a clip's
+;; own). What a groove does to the rack's hits: the pool groove it plays and
+;; how much of it.
+(def-kind groove
+  :key (group clip)
+  :host ((group    group  :doc "The rack")
+         (clip     rack-clip :doc "The clip owning it, or nil for the rack's own")
+         (pool-groove pool-groove :set set-groove-pool-groove :doc "The pool groove played, or nil for none")
+         (enabled  :bool   :set (groove-setter "enabled") :doc "False bypasses it, keeping the rest")
+         (timing   :number :range (0 1.5) :set (groove-setter "timing"))
+         (velocity :number :range (0 1.5) :set (groove-setter "velocity"))
+         (random   :number :range (0 1) :set (groove-setter "random"))
+         (scale    :number :set (groove-setter "scale") :doc "Time scale, one of groove-scale-options")
+         (grid     :string :doc "The grid it plays at (1 bar · 1/16, …), scale applied; empty with none")
+         (slots    :int    :doc "Slots in one bar of the lanes (16 with no groove)")
+         (cells    (list-of :number) :doc "The All lane: each slot's offset from the grid, in slots (late +, early -)")
+         (measured (list-of :bool) :doc "Per slot of the All lane: measured rather than filled")
+         (pads     (list-of pad-groove) :doc "Each pad's share and lane, in note order")))
+
+;; One pad's share of a groove: (nth gr.pads 0).
+(def-kind pad-groove
+  :key (groove tid)
+  :host ((groove   groove :doc "The groove")
+         (pad      pad    :doc "The pad")
+         (amount   :number :range (0 1) :set (pad-groove-setter "pad-amount") :doc "Scales the groove on this pad")
+         (enabled  :bool   :set (pad-groove-setter "pad-enabled") :doc "False leaves the pad straight (its amount is kept)")
+         (cells    (list-of :number) :doc "The pad's lane: each slot's offset from the grid, in slots")
+         (measured (list-of :bool) :doc "Per slot: measured rather than filled")))
+
+;; A groove of the project's pool: (nth project.groove-pool 0). Positional;
+;; the instance follows its groove id across reorders, like a bus.
+(def-kind pool-groove
+  :key (index)
+  :host ((index     :int    :doc "Position in the pool, from 0")
+         (groove-id :int    :doc "The host's stable groove id")
+         (name      :string :set set-pool-groove-name :doc "Non-empty")
+         (grid      :string :doc "Its own grid: 1 bar · 1/16, …")
+         (racks     (list-of group) :doc "The racks playing it (their own groove or a clip's)")))
+
+;; A groove file of the library (factory or user): (nth project.groove-library
+;; 0). (use-library-groove! gr lg) copies it into the pool and plays it.
+(def-kind library-groove
+  :key (index)
+  :host ((index :int    :doc "Position in the library listing, from 0")
+         (choice :string :doc "Its picker key: factory:<stem> or user:<stem>")
+         (name  :string)
+         (tier  :string :doc "factory or user")))
 
 ;; A scene; `bank` holds it. Launch with (launch! s).
 (def-kind scene
@@ -502,7 +632,9 @@
          (fts-options (list-of :string) :doc "The built-in scales, for track.fts")
          (sync-options (list-of :string) :doc "step.sync labels, by value")
          (accumulator-options (list-of :string) :doc "Built-in and script accumulators, for track.accumulator")
-         (output-options (list-of bus) :doc "The buses a track's output may be set to (nil is sends only)")))
+         (output-options (list-of bus) :doc "The buses a track's output may be set to (nil is sends only)")
+         (groove-pool (list-of pool-groove) :doc "The project's grooves, in pool order")
+         (groove-library (list-of library-groove) :doc "The groove files of the library, factory first")))
 
 ;; ── Collections and actions ──
 
@@ -601,3 +733,58 @@
       (if (= i 3) #'x.mod-in-3
         (if (= i 4) #'x.mod-in-4
           (seq-error (str "mod-in-level: no input " i " (inputs are 1-4)")))))))
+
+;; ── Drum racks ──
+
+;; Hit pad p as a pad key does (its member track at base pitch, so choke and
+;; the member's effects apply).
+(def trigger-pad! (p)
+  (host-command "trigger-rack-pad" (dict :group-id p.group.gid :track-id p.track.tid)))
+
+;; Launch rack clip rc in the current scene, with the transport's launch
+;; quantization (one undo entry, as a clip launch).
+(def launch-rack-clip! (rc)
+  (host-command "launch-rack-clip"
+    (dict :group-id rc.group.gid :clip-id rc.cid :quantize transport.launch-quantize)))
+
+;; Silence rack g in the current scene.
+(def silence-rack! (g)
+  (host-command "launch-rack-clip"
+    (dict :group-id g.gid :clip-id 0 :quantize transport.launch-quantize)))
+
+;; Save what rack g plays as a new clip named name.
+(def save-rack-clip-as! (g name)
+  (host-command "save-rack-clip-as" (dict :group-id g.gid :name name)))
+
+(def delete-rack-clip! (rc)
+  (host-command "delete-rack-clip" (dict :group-id rc.group.gid :clip-id rc.cid)))
+
+;; Give a legacy rack (g.legacy) its clip bank: a clip per scene.
+(def convert-rack-to-clips! (g)
+  (host-command "convert-rack-to-clips" (dict :group-id g.gid)))
+
+;; Copy library groove lg into the pool (reusing a pool groove of the same
+;; feel) and make it groove gr's.
+(def use-library-groove! (gr lg)
+  (host-command "set-rack-groove"
+    (dict :group-id gr.group.gid :clip-id (groove-clip-id gr) :key lg.choice)))
+
+;; Make groove gr the rack's own, and every clip follow it.
+(def apply-groove-to-all-clips! (gr)
+  (host-command "apply-rack-groove-to-all-clips"
+    (dict :group-id gr.group.gid :clip-id (groove-clip-id gr))))
+
+;; Extract a groove from rack g's clip into the pool: bars 1 or 2,
+;; resolution "1/16" or "1/32"; with quantize the source is straightened and
+;; the groove played, in one undo entry.
+(def extract-groove! (g name bars resolution quantize)
+  (host-command "extract-rack-groove"
+    (dict :group-id g.gid :name name :bars bars :resolution resolution :quantize quantize)))
+
+;; Pool groove edits: duplicating or deleting is one undo entry each
+;; (deleting turns the groove off on every rack playing it, in that entry).
+;; Saving to the library writes a file, which undo does not take back.
+(def duplicate-groove! (pg) (host-command "duplicate-pool-groove" (dict :groove-id pg.groove-id)))
+(def delete-groove! (pg) (host-command "delete-rack-groove" (dict :groove-id pg.groove-id)))
+(def save-groove-to-library! (pg)
+  (host-command "save-groove-to-library" (dict :groove-id pg.groove-id)))

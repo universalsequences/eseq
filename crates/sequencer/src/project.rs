@@ -1411,6 +1411,23 @@ impl ProjectTrackGroup {
         let pad = rack.pads.get(rack.pad_index_for_note(pad_note)?)?;
         self.members.get(pad.member).copied()
     }
+
+    /// The index (in the pad map) of the pad member track `track` backs,
+    /// when this group is a rack with one: [`Self::rack_pad_track`]'s
+    /// inverse.
+    pub fn rack_pad_index_of_track(&self, track: usize) -> Option<usize> {
+        let rack = self.rack.as_ref()?;
+        let member = self.members.iter().position(|member| *member == track)?;
+        rack.pads.iter().position(|pad| pad.member == member)
+    }
+}
+
+/// The position (in `groups`) of the plain group drawing rack `rack_id`
+/// inside its block (its `rack_members`), if any.
+pub fn rack_parent(groups: &[ProjectTrackGroup], rack_id: u64) -> Option<usize> {
+    groups
+        .iter()
+        .position(|group| group.rack_members.contains(&rack_id))
 }
 
 /// The drum-rack layer over a track group: an ordered pad map plus per-pad

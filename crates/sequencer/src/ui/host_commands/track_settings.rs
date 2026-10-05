@@ -14,6 +14,7 @@
 //! [`super::ScriptEdit`].
 
 use crate::*;
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 pub(super) const COMMANDS: &[&str] = &[
@@ -80,7 +81,7 @@ pub(super) fn bar_transpose_applied(ctx: &LoopCtx<'_>, track: usize) {
 /// A setter's value under the value rule (see the module docs), named
 /// `what` in errors. Shared with the arrangement setters.
 pub(super) struct SetValue<'a> {
-    what: &'a str,
+    what: Cow<'a, str>,
     value: Value,
 }
 
@@ -97,7 +98,18 @@ impl<'a> SetValue<'a> {
         let value = map
             .get(key)
             .map_or(Value::Nil, |cell| cell.borrow().clone());
-        Self { what, value }
+        Self {
+            what: Cow::Borrowed(what),
+            value,
+        }
+    }
+
+    /// A field setter's `:field` and its `:value`, named by the field.
+    pub(super) fn field(map: &Payload) -> Result<(String, SetValue<'static>), String> {
+        let field = map_string(map, "field").ok_or("needs a :field")?;
+        let mut value = SetValue::of(map, "value", "");
+        value.what = Cow::Owned(field.clone());
+        Ok((field, value))
     }
 
     pub(super) fn fail<T>(&self, wants: &str) -> Result<T, String> {
@@ -132,10 +144,18 @@ impl<'a> SetValue<'a> {
         }
     }
 
-    fn label(&self) -> Result<&str, String> {
+    pub(super) fn label(&self) -> Result<&str, String> {
         match &self.value {
             Value::String(label) => Ok(label),
             _ => self.fail("a label"),
+        }
+    }
+
+    /// A name: a string, trimmed, that is not empty.
+    pub(super) fn name(&self) -> Result<&str, String> {
+        match &self.value {
+            Value::String(name) if !name.trim().is_empty() => Ok(name.trim()),
+            _ => self.fail("a non-empty name"),
         }
     }
 
@@ -157,15 +177,27 @@ impl<'a> SetValue<'a> {
     }
 
     /// A finite number in `min..=max`.
-    fn number(&self, min: f64, max: f64) -> Result<f64, String> {
+    pub(super) fn number(&self, min: f64, max: f64) -> Result<f64, String> {
         match self.value {
             Value::Number(value) if value.is_finite() && (min..=max).contains(&value) => Ok(value),
             _ => self.fail(&format!("a number from {min} to {max}")),
         }
     }
 
+    /// An integer in `min..=max`, which may be negative (a pad note).
+    pub(super) fn signed(&self, min: i64, max: i64) -> Result<i64, String> {
+        match self.value {
+            Value::Number(value)
+                if value.fract() == 0.0 && (min as f64..=max as f64).contains(&value) =>
+            {
+                Ok(value as i64)
+            }
+            _ => self.fail(&format!("an integer from {min} to {max}")),
+        }
+    }
+
     /// An integer in `min..=max`.
-    fn integer(&self, min: usize, max: usize) -> Result<usize, String> {
+    pub(super) fn integer(&self, min: usize, max: usize) -> Result<usize, String> {
         match self.value {
             Value::Number(value)
                 if value.fract() == 0.0 && (min as f64..=max as f64).contains(&value) =>

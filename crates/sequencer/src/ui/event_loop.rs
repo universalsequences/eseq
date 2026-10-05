@@ -414,6 +414,7 @@ pub(crate) fn run_event_loop(
         prev_mod_display_values: Default::default(),
         prev_rack_pad_triggers: Vec::new(),
         rack_pad_triggered_at: Vec::new(),
+        rack_pad_triggers: Vec::new(),
         prev_track_playheads: Vec::new(),
         prev_track_process_lengths: Vec::new(),
         prev_track_button_states: track_button_state_snapshot(&shared.state),

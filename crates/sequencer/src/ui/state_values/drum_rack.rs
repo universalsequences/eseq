@@ -34,7 +34,7 @@ pub(super) fn rack_slot_raw_name(
     }
 }
 
-pub(super) fn drum_rack_pad_label(pad_note: i32) -> String {
+pub(crate) fn drum_rack_pad_label(pad_note: i32) -> String {
     let name = match pad_note.rem_euclid(12) {
         0 => "C",
         1 => "C#",

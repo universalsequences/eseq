@@ -103,18 +103,33 @@ pub(super) fn handle(
         // Pad grid hit: the same live path a pad key takes — the pad's member
         // track at base pitch (transpose 0), so choke groups and the member's
         // own fx chain apply exactly as they do from the keyboard.
+        // The pad by its note, or (`trigger-pad!`) by its member track's
+        // stable id, resolved now: a gone rack or pad is then an error, as
+        // with the kinds' setters (the grid's note hit stays silent).
         "trigger-rack-pad" => {
             let group_id = extract_usize_from_payload(&payload, "group-id").map(|id| id as u64);
-            let pad_note = extract_i32_from_payload(&payload, "pad-note");
-            let (Some(group_id), Some(pad_note)) = (group_id, pad_note) else {
-                return;
+            let group = group_id.and_then(|id| app.groups.iter().find(|group| group.id == id));
+            let track = match extract_usize_from_payload(&payload, "track-id") {
+                Some(tid) => {
+                    let pad = group.ok_or("the rack is gone").and_then(|group| {
+                        live_track_index(app, sequencer::sequencer::TrackId(tid as u64))
+                            .filter(|track| group.rack_pad_index_of_track(*track).is_some())
+                            .ok_or("the pad is gone")
+                    });
+                    match pad {
+                        Ok(track) => Some(track),
+                        Err(error) => {
+                            editor.handle_host_event(HostEvent::Error(format!("{name}: {error}")));
+                            return;
+                        }
+                    }
+                }
+                None => group.and_then(|group| {
+                    extract_i32_from_payload(&payload, "pad-note")
+                        .and_then(|pad_note| group.rack_pad_track(pad_note))
+                }),
             };
-            let Some(track) = app
-                .groups
-                .iter()
-                .find(|group| group.id == group_id)
-                .and_then(|group| group.rack_pad_track(pad_note))
-            else {
+            let Some(track) = track else {
                 return;
             };
             release_matching_key_lock_auditions(
@@ -713,7 +728,7 @@ pub(super) fn group_name(app: &app::App, group_id: u64) -> Option<String> {
 /// Republishes what a pad-map edit can change: the group value the grid reads
 /// its pad badges and choke selectors from, and the groups snapshot the live
 /// keyboard's pad routing reads.
-fn sync_rack_pad_map(
+pub(super) fn sync_rack_pad_map(
     app: &mut app::App,
     editor: &mut Editor,
     track_groups: &Arc<Mutex<Vec<sequencer::project::ProjectTrackGroup>>>,

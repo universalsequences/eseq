@@ -159,37 +159,97 @@ fn resolution_label(resolution_beats: f64) -> &'static str {
 
 /// A short "1 bar · 1/16" description of a groove's grid.
 pub(crate) fn groove_grid_label(groove: &ProjectGroove) -> String {
-    let bars = groove.period_beats / GROOVE_PERIOD_ONE_BAR;
+    grid_label(groove.period_beats, groove.resolution_beats)
+}
+
+/// [`groove_grid_label`] of a period and resolution, in beats.
+fn grid_label(period_beats: f64, resolution_beats: f64) -> String {
+    let bars = period_beats / GROOVE_PERIOD_ONE_BAR;
     let period = if (bars - 1.0).abs() < 1e-9 {
         "1 bar".to_string()
     } else if (bars - bars.round()).abs() < 1e-9 && bars >= 1.0 {
         format!("{} bars", bars.round() as u32)
     } else {
-        match groove.period_beats {
+        match period_beats {
             beats if (beats - 1.0).abs() < 1e-9 => "1 beat".to_string(),
             beats => format!("{beats} beats"),
         }
     };
-    format!("{period} · {}", resolution_label(groove.resolution_beats))
+    format!("{period} · {}", resolution_label(resolution_beats))
 }
 
 /// Slots in one bar of lane cells when the rack plays straight: the
 /// buffer's hit dots read the members' first 16 steps.
 const STRAIGHT_LANE_SLOTS: usize = 16;
 
-fn lane_cells(row: &sequencer::groove::GrooveRow, repeats: usize) -> (Value, Value) {
-    let cells = (0..repeats).flat_map(|_| row.slots.iter());
-    (
-        list_value(cells.clone().map(|slot| Value::Number(slot.offset as f64))),
-        list_value(cells.map(|slot| Value::Bool(slot.source.is_measured()))),
-    )
+/// One lane of the groove buffer: where each slot of a bar lands (offset
+/// from the grid, in slots: late positive, early negative) and whether the
+/// slot was measured rather than filled.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct GrooveLane {
+    pub(crate) offsets: Vec<f64>,
+    pub(crate) measured: Vec<bool>,
 }
 
-/// The rack groove buffer's lanes: the shared ("All") row and one row per
-/// pad in pad-note order, each with the groove row that pad actually plays
-/// (`resolve_pad_row`, else the shared row) tiled out to a bar, plus the
-/// pad's include flag. With no groove the cells are empty and `slots` is a
-/// bar of 16ths, so the buffer draws the pads' hits on the grid instead.
+impl GrooveLane {
+    fn of(row: &sequencer::groove::GrooveRow, repeats: usize) -> Self {
+        let slots = (0..repeats).flat_map(|_| row.slots.iter());
+        Self {
+            offsets: slots.clone().map(|slot| slot.offset as f64).collect(),
+            measured: slots.map(|slot| slot.source.is_measured()).collect(),
+        }
+    }
+
+    pub(crate) fn values(&self) -> (Value, Value) {
+        (
+            list_value(self.offsets.iter().map(|offset| Value::Number(*offset))),
+            list_value(self.measured.iter().map(|measured| Value::Bool(*measured))),
+        )
+    }
+}
+
+/// The groove buffer's lanes for a rack playing `groove` (`None`: straight):
+/// the slot count of a bar, the shared ("All") lane and one lane per pad in
+/// pad-note order, each the groove row that pad actually plays
+/// (`row_for_pad`, else the shared row) tiled out to a bar. With no groove
+/// the lanes are empty and `slots` is a bar of 16ths, so the buffer draws
+/// the pads' hits on the grid instead. Shared by `SEQ.rack-grooves` and the
+/// `groove` / `pad-groove` kinds.
+pub(crate) struct GrooveLanes<'a> {
+    pub(crate) slots: usize,
+    pub(crate) all: GrooveLane,
+    pub(crate) pads: Vec<(&'a sequencer::project::ProjectRackPad, GrooveLane)>,
+}
+
+pub(crate) fn groove_lanes<'a>(
+    rack: &'a ProjectRackConfig,
+    groove: Option<&ProjectGroove>,
+) -> GrooveLanes<'a> {
+    let repeats = groove.map_or(1, heat_repeats);
+    let slots = groove.map_or(STRAIGHT_LANE_SLOTS, |groove| groove.slot_count() * repeats);
+    let all = groove.map_or_else(GrooveLane::default, |groove| {
+        GrooveLane::of(&groove.shared_row, repeats)
+    });
+    let mut pads: Vec<&sequencer::project::ProjectRackPad> = rack.pads.iter().collect();
+    pads.sort_by_key(|pad| pad.pad_note);
+    let pads = pads
+        .into_iter()
+        .map(|pad| {
+            let lane = groove.map_or_else(GrooveLane::default, |groove| {
+                GrooveLane::of(
+                    groove.row_for_pad(pad.pad_note, pad.effective_role()),
+                    repeats,
+                )
+            });
+            (pad, lane)
+        })
+        .collect();
+    GrooveLanes { slots, all, pads }
+}
+
+/// The rack groove buffer's lanes ([`groove_lanes`]) as `SEQ.rack-grooves`
+/// carries them, with each pad's member track, include flag and amount
+/// field.
 fn rack_groove_lanes(
     group: &ProjectTrackGroup,
     rack: &ProjectRackConfig,
@@ -197,20 +257,10 @@ fn rack_groove_lanes(
     settings: &sequencer::groove::RackGrooveSettings,
     clip: Option<u64>,
 ) -> Value {
-    let repeats = groove.map_or(1, heat_repeats);
-    let slots = groove.map_or(STRAIGHT_LANE_SLOTS, |groove| groove.slot_count() * repeats);
-    let empty = || (list_value(std::iter::empty()), list_value(std::iter::empty()));
-    let (all_cells, all_measured) =
-        groove.map_or_else(empty, |groove| lane_cells(&groove.shared_row, repeats));
-    let mut pads: Vec<&sequencer::project::ProjectRackPad> = rack.pads.iter().collect();
-    pads.sort_by_key(|pad| pad.pad_note);
-    let pad_rows = pads.into_iter().map(|pad| {
-        let (cells, measured) = groove.map_or_else(empty, |groove| {
-            lane_cells(
-                groove.row_for_pad(pad.pad_note, pad.effective_role()),
-                repeats,
-            )
-        });
+    let lanes = groove_lanes(rack, groove);
+    let (all_cells, all_measured) = lanes.all.values();
+    let pad_rows = lanes.pads.iter().map(|(pad, lane)| {
+        let (cells, measured) = lane.values();
         let track = group.members.get(pad.member).copied();
         let share = settings.pad(pad.pad_note);
         map_value([
@@ -237,7 +287,7 @@ fn rack_groove_lanes(
         ])
     });
     map_value([
-        ("slots", Value::Number(slots as f64)),
+        ("slots", Value::Number(lanes.slots as f64)),
         ("all-cells", all_cells),
         ("all-measured", all_measured),
         ("pads", list_value(pad_rows.collect::<Vec<_>>().into_iter())),
@@ -294,11 +344,9 @@ pub(crate) fn groove_scale_label(scale: f32) -> &'static str {
 
 /// The grid a groove plays at on a rack: its own, stretched by the rack's
 /// Scale ("2 bars · 1/8" for a 1 bar · 1/16 groove at 2×).
-fn scaled_grid_label(groove: &ProjectGroove, scale: f32) -> String {
-    let mut scaled = groove.clone();
-    scaled.period_beats *= scale as f64;
-    scaled.resolution_beats *= scale as f64;
-    groove_grid_label(&scaled)
+pub(crate) fn scaled_grid_label(groove: &ProjectGroove, scale: f32) -> String {
+    let scale = scale as f64;
+    grid_label(groove.period_beats * scale, groove.resolution_beats * scale)
 }
 
 /// What the buffer shows for one groove setting of a rack: the rack's own
@@ -491,6 +539,21 @@ pub(crate) fn sync_rack_groove_amount_fields(rt: &mut Runtime, groups: &[Project
     }
 }
 
+/// The groove library as the rack groove pickers list it: read (through
+/// `list_groove_library`'s cached listing) only when the project has a drum
+/// rack or a pool groove to show it beside; empty otherwise. Shared by
+/// `SEQ.groove-library` / the picker and `project.groove-library`.
+pub(crate) fn listed_groove_library(
+    groups: &[ProjectTrackGroup],
+    pool: &[ProjectGroove],
+) -> Vec<GrooveLibraryEntry> {
+    if groups.iter().any(|group| group.rack.is_some()) || !pool.is_empty() {
+        list_groove_library()
+    } else {
+        Vec::new()
+    }
+}
+
 /// Publishes every rack groove field. Called wherever `SEQ.groups` is. Reads
 /// the groove library only when the project has a drum rack or a pool groove
 /// to show it beside, through `list_groove_library`'s cached listing (re-read
@@ -500,11 +563,7 @@ pub(crate) fn sync_rack_groove_state(
     groups: &[ProjectTrackGroup],
     pool: &[ProjectGroove],
 ) {
-    let library = if groups.iter().any(|group| group.rack.is_some()) || !pool.is_empty() {
-        list_groove_library()
-    } else {
-        Vec::new()
-    };
+    let library = listed_groove_library(groups, pool);
     rt.set_reactive(
         "SEQ",
         "rack-grooves",

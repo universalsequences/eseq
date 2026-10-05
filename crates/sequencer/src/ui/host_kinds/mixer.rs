@@ -17,6 +17,8 @@ pub(crate) struct KindsMeters<'a> {
     pub(crate) mod_ports: &'a ModPortLevels,
     /// Whether the audio-overload warning shows.
     pub(crate) overloaded: bool,
+    /// Drum rack pad lights by track position (`pad.triggered`).
+    pub(crate) pad_triggers: &'a [bool],
 }
 
 /// No mod port levels, for [`KindsMeters::default`].
@@ -35,6 +37,7 @@ impl Default for KindsMeters<'_> {
             cpu_load: 0.0,
             mod_ports: &NO_MOD_PORTS,
             overloaded: false,
+            pad_triggers: &[],
         }
     }
 }
@@ -184,6 +187,16 @@ impl HostKinds {
         self.route_observed.push_masked(pusher, &ROUTE_LIVE);
     }
 
+    /// The observed group fields (`armed`), from a list kept per observer
+    /// epoch ([`ObservedList`]).
+    pub(super) fn sync_group_live(&mut self, pusher: &mut Pusher<'_>) {
+        let ids = &self.group_ids;
+        let names = &GROUP_LIVE.names;
+        let ids = || ids.iter().flatten().copied().collect();
+        self.group_observed.refresh(pusher.rt, names, ids);
+        self.group_observed.push_masked(pusher, &GROUP_LIVE);
+    }
+
     /// The group registry (by group id), the group fields and
     /// `project.groups`. Returns, per position of `tracks` (the track
     /// instances), the group holding the track; `None` when the group ids
@@ -220,13 +233,24 @@ impl HostKinds {
             pusher.push(id, f::GROUP_TRACKS, instance_list(members));
             let bus = self.buses.get(&group.bus_id).copied();
             pusher.push(id, f::GROUP_BUS, instance_or_nil(bus));
+            // Nesting, both ways (as `SEQ.groups` :rack-members / :parent).
+            let racks = group.rack_members.iter();
+            let racks = racks.filter_map(|gid| self.groups.get(gid).copied());
+            pusher.push(id, f::GROUP_RACKS, instance_list(racks));
+            let parent = sequencer::project::rack_parent(&app.groups, group.id)
+                .and_then(|parent| self.groups.get(&app.groups[parent].id).copied());
+            pusher.push(id, f::GROUP_PARENT, instance_or_nil(parent));
         }
+        pusher.shared.borrow_mut().group_gids = model;
         if let Some(project) = pusher.singleton(PROJECT) {
             pusher.push(
                 project,
                 f::PROJECT_GROUPS,
                 instance_list(groups.iter().flatten().copied()),
             );
+        }
+        if groups != self.group_ids {
+            self.group_observed.reset();
         }
         self.group_ids = groups;
         Some(holders)

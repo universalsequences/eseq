@@ -42,7 +42,11 @@
 //! track has one `tuning`, keyed (track instance id, 0), whose `degree`s
 //! are keyed (tuning instance id, index), registered at the model sync.
 //! Arrangement clips are keyed (track instance id, clip id) and pattern
-//! cells (track instance id, pattern id); scene spans are positional.
+//! cells (track instance id, pattern id); scene spans are positional. Drum
+//! rack pads are keyed (group instance id, member `TrackId`), rack clips
+//! (group instance id, clip id), grooves (group instance id, clip id; 0 for
+//! the rack's own); pool grooves are positional, the instance kept by
+//! groove id across reorders and replaced on a project load.
 //!
 //! [`check_schema`] compares [`PUBLISHED`] with the loaded `eseq.kinds`; the
 //! tick re-runs it whenever a kind schema changes (a hot reload) and skips
@@ -52,8 +56,8 @@
 //! ([`HostKinds::sync`]); `live` the shared handles, live-field values and
 //! the reader hook; `registry` the instance registry helpers and pushes;
 //! `tracks`, `steps`, `params`, `scenes`, `mixer` (buses, groups, routes),
-//! `settings` (track settings) and `arrangement` (song, clips, cells) the
-//! per-kind syncs.
+//! `settings` (track settings), `arrangement` (song, clips, cells) and
+//! `racks` (drum rack pads, rack clips, grooves) the per-kind syncs.
 
 use crate::*;
 use eseqlisp::vm::{HostFieldReader, InstanceId, VM};
@@ -64,6 +68,7 @@ mod arrangement;
 mod live;
 mod mixer;
 mod params;
+mod racks;
 mod registry;
 mod scenes;
 mod settings;
@@ -76,6 +81,7 @@ use live::*;
 pub(crate) use mixer::KindsMeters;
 use mixer::RouteKey;
 use params::*;
+use racks::RackState;
 use registry::*;
 use settings::*;
 use steps::*;
@@ -105,6 +111,12 @@ pub(crate) const REGION: &str = "eseq.kinds:region";
 pub(crate) const SCENE_SPAN: &str = "eseq.kinds:scene-span";
 pub(crate) const CLIP: &str = "eseq.kinds:clip";
 pub(crate) const CELL: &str = "eseq.kinds:cell";
+pub(crate) const PAD: &str = "eseq.kinds:pad";
+pub(crate) const RACK_CLIP: &str = "eseq.kinds:rack-clip";
+pub(crate) const GROOVE: &str = "eseq.kinds:groove";
+pub(crate) const PAD_GROOVE: &str = "eseq.kinds:pad-groove";
+pub(crate) const POOL_GROOVE: &str = "eseq.kinds:pool-groove";
+pub(crate) const LIBRARY_GROOVE: &str = "eseq.kinds:library-groove";
 
 /// How the host keeps a field current (see the module docs).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -177,6 +189,60 @@ pub(crate) mod f {
     pub(crate) const TRACK_CELLS: FieldKey = (TRACK, "cells");
     pub(crate) const TRACK_GOVERNED: FieldKey = (TRACK, "governed");
     pub(crate) const TRACK_LATCHED: FieldKey = (TRACK, "latched");
+    pub(crate) const TRACK_PAD: FieldKey = (TRACK, "pad");
+
+    pub(crate) const PAD_GROUP: FieldKey = (PAD, "group");
+    pub(crate) const PAD_TRACK: FieldKey = (PAD, "track");
+    pub(crate) const PAD_NOTE: FieldKey = (PAD, "note");
+    pub(crate) const PAD_LABEL: FieldKey = (PAD, "label");
+    pub(crate) const PAD_CHOKE: FieldKey = (PAD, "choke");
+    pub(crate) const PAD_ROLE: FieldKey = (PAD, "role");
+    pub(crate) const PAD_ROLE_TAG: FieldKey = (PAD, "role-tag");
+    pub(crate) const PAD_ROLE_LABEL: FieldKey = (PAD, "role-label");
+    pub(crate) const PAD_STANDARD_ROLE: FieldKey = (PAD, "standard-role");
+    pub(crate) const PAD_STANDARD_ROLE_LABEL: FieldKey = (PAD, "standard-role-label");
+    pub(crate) const PAD_TRIGGERED: FieldKey = (PAD, "triggered");
+
+    pub(crate) const RACK_CLIP_GROUP: FieldKey = (RACK_CLIP, "group");
+    pub(crate) const RACK_CLIP_CID: FieldKey = (RACK_CLIP, "cid");
+    pub(crate) const RACK_CLIP_INDEX: FieldKey = (RACK_CLIP, "index");
+    pub(crate) const RACK_CLIP_NAME: FieldKey = (RACK_CLIP, "name");
+    pub(crate) const RACK_CLIP_ACTIVE: FieldKey = (RACK_CLIP, "active");
+    pub(crate) const RACK_CLIP_SCENES: FieldKey = (RACK_CLIP, "scenes");
+    pub(crate) const RACK_CLIP_GROOVE: FieldKey = (RACK_CLIP, "groove");
+    pub(crate) const RACK_CLIP_OWN_GROOVE: FieldKey = (RACK_CLIP, "own-groove");
+
+    pub(crate) const GROOVE_GROUP: FieldKey = (GROOVE, "group");
+    pub(crate) const GROOVE_CLIP: FieldKey = (GROOVE, "clip");
+    pub(crate) const GROOVE_POOL_GROOVE: FieldKey = (GROOVE, "pool-groove");
+    pub(crate) const GROOVE_ENABLED: FieldKey = (GROOVE, "enabled");
+    pub(crate) const GROOVE_TIMING: FieldKey = (GROOVE, "timing");
+    pub(crate) const GROOVE_VELOCITY: FieldKey = (GROOVE, "velocity");
+    pub(crate) const GROOVE_RANDOM: FieldKey = (GROOVE, "random");
+    pub(crate) const GROOVE_SCALE: FieldKey = (GROOVE, "scale");
+    pub(crate) const GROOVE_GRID: FieldKey = (GROOVE, "grid");
+    pub(crate) const GROOVE_SLOTS: FieldKey = (GROOVE, "slots");
+    pub(crate) const GROOVE_CELLS: FieldKey = (GROOVE, "cells");
+    pub(crate) const GROOVE_MEASURED: FieldKey = (GROOVE, "measured");
+    pub(crate) const GROOVE_PADS: FieldKey = (GROOVE, "pads");
+
+    pub(crate) const PAD_GROOVE_GROOVE: FieldKey = (PAD_GROOVE, "groove");
+    pub(crate) const PAD_GROOVE_PAD: FieldKey = (PAD_GROOVE, "pad");
+    pub(crate) const PAD_GROOVE_AMOUNT: FieldKey = (PAD_GROOVE, "amount");
+    pub(crate) const PAD_GROOVE_ENABLED: FieldKey = (PAD_GROOVE, "enabled");
+    pub(crate) const PAD_GROOVE_CELLS: FieldKey = (PAD_GROOVE, "cells");
+    pub(crate) const PAD_GROOVE_MEASURED: FieldKey = (PAD_GROOVE, "measured");
+
+    pub(crate) const POOL_GROOVE_INDEX: FieldKey = (POOL_GROOVE, "index");
+    pub(crate) const POOL_GROOVE_ID: FieldKey = (POOL_GROOVE, "groove-id");
+    pub(crate) const POOL_GROOVE_NAME: FieldKey = (POOL_GROOVE, "name");
+    pub(crate) const POOL_GROOVE_GRID: FieldKey = (POOL_GROOVE, "grid");
+    pub(crate) const POOL_GROOVE_RACKS: FieldKey = (POOL_GROOVE, "racks");
+
+    pub(crate) const LIBRARY_GROOVE_INDEX: FieldKey = (LIBRARY_GROOVE, "index");
+    pub(crate) const LIBRARY_GROOVE_CHOICE: FieldKey = (LIBRARY_GROOVE, "choice");
+    pub(crate) const LIBRARY_GROOVE_NAME: FieldKey = (LIBRARY_GROOVE, "name");
+    pub(crate) const LIBRARY_GROOVE_TIER: FieldKey = (LIBRARY_GROOVE, "tier");
 
     pub(crate) const CLIP_TRACK: FieldKey = (CLIP, "track");
     pub(crate) const CLIP_CID: FieldKey = (CLIP, "cid");
@@ -303,6 +369,14 @@ pub(crate) mod f {
     pub(crate) const GROUP_RACK: FieldKey = (GROUP, "rack");
     pub(crate) const GROUP_TRACKS: FieldKey = (GROUP, "tracks");
     pub(crate) const GROUP_BUS: FieldKey = (GROUP, "bus");
+    pub(crate) const GROUP_RACKS: FieldKey = (GROUP, "racks");
+    pub(crate) const GROUP_PARENT: FieldKey = (GROUP, "parent");
+    pub(crate) const GROUP_ARMED: FieldKey = (GROUP, "armed");
+    pub(crate) const GROUP_PADS: FieldKey = (GROUP, "pads");
+    pub(crate) const GROUP_CLIPS: FieldKey = (GROUP, "clips");
+    pub(crate) const GROUP_RACK_CLIP: FieldKey = (GROUP, "rack-clip");
+    pub(crate) const GROUP_LEGACY: FieldKey = (GROUP, "legacy");
+    pub(crate) const GROUP_GROOVE: FieldKey = (GROUP, "groove");
 
     pub(crate) const DEVICE_TRACK: FieldKey = (DEVICE, "track");
     pub(crate) const DEVICE_SLOT: FieldKey = (DEVICE, "slot");
@@ -381,6 +455,8 @@ pub(crate) mod f {
     pub(crate) const PROJECT_SYNC_OPTIONS: FieldKey = (PROJECT, "sync-options");
     pub(crate) const PROJECT_ACCUMULATOR_OPTIONS: FieldKey = (PROJECT, "accumulator-options");
     pub(crate) const PROJECT_OUTPUT_OPTIONS: FieldKey = (PROJECT, "output-options");
+    pub(crate) const PROJECT_GROOVE_POOL: FieldKey = (PROJECT, "groove-pool");
+    pub(crate) const PROJECT_GROOVE_LIBRARY: FieldKey = (PROJECT, "groove-library");
 }
 
 /// Every kind and `:host` field the host publishes, with its type as
@@ -443,6 +519,58 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     (f::TRACK_CELLS, "(list-of cell)", Model),
     (f::TRACK_GOVERNED, ":int", Model),
     (f::TRACK_LATCHED, ":bool", Live),
+    // Drum racks (`racks`): the pads, grooves and pool at the rack sync
+    // (the groups, the pool and the instances moved), the rack clips at the
+    // rack clip sync (the scenes moved); `armed` and `triggered` live.
+    (f::TRACK_PAD, "pad", Model),
+    (f::PAD_GROUP, "group", Model),
+    (f::PAD_TRACK, "track", Model),
+    (f::PAD_NOTE, ":int", Model),
+    (f::PAD_LABEL, ":string", Model),
+    (f::PAD_CHOKE, ":int", Model),
+    (f::PAD_ROLE, ":string", Model),
+    (f::PAD_ROLE_TAG, ":string", Model),
+    (f::PAD_ROLE_LABEL, ":string", Model),
+    (f::PAD_STANDARD_ROLE, ":string", Model),
+    (f::PAD_STANDARD_ROLE_LABEL, ":string", Model),
+    (f::PAD_TRIGGERED, ":bool", Live),
+    (f::RACK_CLIP_GROUP, "group", Model),
+    (f::RACK_CLIP_CID, ":int", Model),
+    (f::RACK_CLIP_INDEX, ":int", Model),
+    (f::RACK_CLIP_NAME, ":string", Model),
+    (f::RACK_CLIP_ACTIVE, ":bool", Model),
+    (f::RACK_CLIP_SCENES, "(list-of scene)", Model),
+    (f::RACK_CLIP_GROOVE, "groove", Model),
+    (f::RACK_CLIP_OWN_GROOVE, ":bool", Model),
+    (f::GROOVE_GROUP, "group", Model),
+    (f::GROOVE_CLIP, "rack-clip", Model),
+    (f::GROOVE_POOL_GROOVE, "pool-groove", Model),
+    (f::GROOVE_ENABLED, ":bool", Model),
+    (f::GROOVE_TIMING, ":number", Model),
+    (f::GROOVE_VELOCITY, ":number", Model),
+    (f::GROOVE_RANDOM, ":number", Model),
+    (f::GROOVE_SCALE, ":number", Model),
+    (f::GROOVE_GRID, ":string", Model),
+    (f::GROOVE_SLOTS, ":int", Model),
+    (f::GROOVE_CELLS, "(list-of :number)", Model),
+    (f::GROOVE_MEASURED, "(list-of :bool)", Model),
+    (f::GROOVE_PADS, "(list-of pad-groove)", Model),
+    (f::PAD_GROOVE_GROOVE, "groove", Model),
+    (f::PAD_GROOVE_PAD, "pad", Model),
+    (f::PAD_GROOVE_AMOUNT, ":number", Model),
+    (f::PAD_GROOVE_ENABLED, ":bool", Model),
+    (f::PAD_GROOVE_CELLS, "(list-of :number)", Model),
+    (f::PAD_GROOVE_MEASURED, "(list-of :bool)", Model),
+    (f::POOL_GROOVE_INDEX, ":int", Model),
+    (f::POOL_GROOVE_ID, ":int", Model),
+    (f::POOL_GROOVE_NAME, ":string", Model),
+    (f::POOL_GROOVE_GRID, ":string", Model),
+    (f::POOL_GROOVE_RACKS, "(list-of group)", Model),
+    // The library listing when the rack inputs or the UI epoch moved.
+    (f::LIBRARY_GROOVE_INDEX, ":int", Model),
+    (f::LIBRARY_GROOVE_CHOICE, ":string", Model),
+    (f::LIBRARY_GROOVE_NAME, ":string", Model),
+    (f::LIBRARY_GROOVE_TIER, ":string", Model),
     (f::CLIP_TRACK, "track", Model),
     (f::CLIP_CID, ":int", Model),
     (f::CLIP_START, ":number", Model),
@@ -594,6 +722,14 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     (f::GROUP_RACK, ":bool", Model),
     (f::GROUP_TRACKS, "(list-of track)", Model),
     (f::GROUP_BUS, "bus", Model),
+    (f::GROUP_RACKS, "(list-of group)", Model),
+    (f::GROUP_PARENT, "group", Model),
+    (f::GROUP_ARMED, ":bool", Live),
+    (f::GROUP_PADS, "(list-of pad)", Model),
+    (f::GROUP_CLIPS, "(list-of rack-clip)", Model),
+    (f::GROUP_RACK_CLIP, "rack-clip", Model),
+    (f::GROUP_LEGACY, ":bool", Model),
+    (f::GROUP_GROOVE, "groove", Model),
     (f::TRANSPORT_PLAYING, ":bool", Live),
     (f::TRANSPORT_RECORDING, ":bool", Live),
     (f::TRANSPORT_SCENE, "scene", Model),
@@ -632,6 +768,8 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     (f::PROJECT_SYNC_OPTIONS, "(list-of :string)", Model),
     (f::PROJECT_ACCUMULATOR_OPTIONS, "(list-of :string)", Model),
     (f::PROJECT_OUTPUT_OPTIONS, "(list-of bus)", Model),
+    (f::PROJECT_GROOVE_POOL, "(list-of pool-groove)", Model),
+    (f::PROJECT_GROOVE_LIBRARY, "(list-of library-groove)", Model),
 ];
 
 /// The published kinds, in [`PUBLISHED`] order.
@@ -699,6 +837,8 @@ pub(super) static PARAM_LIVE: LazyLock<LiveFields> = LazyLock::new(|| LiveFields
 pub(super) static ROUTE_LIVE: LazyLock<LiveFields> = LazyLock::new(|| LiveFields::of(ROUTE));
 pub(super) static CELL_LIVE: LazyLock<LiveFields> = LazyLock::new(|| LiveFields::of(CELL));
 pub(super) static SONG_LIVE: LazyLock<LiveFields> = LazyLock::new(|| LiveFields::of(SONG));
+pub(super) static GROUP_LIVE: LazyLock<LiveFields> = LazyLock::new(|| LiveFields::of(GROUP));
+pub(super) static PAD_LIVE: LazyLock<LiveFields> = LazyLock::new(|| LiveFields::of(PAD));
 
 /// The step fields diffed by value per tick (beside `active`, `selected`
 /// and `playing`): `held`, then the step parameters, whose field names are
@@ -924,6 +1064,9 @@ pub(crate) struct HostKinds {
     /// removed, or any group edit (collapse included), forces one.
     model_bus_ids: Vec<u64>,
     model_groups: Vec<sequencer::project::ProjectTrackGroup>,
+    /// Moved whenever the model sync records new `model_groups` (the rack
+    /// sync's key, so it need not compare the groups itself).
+    groups_generation: u64,
     /// The instances at each position as of the last model sync.
     track_ids: Vec<Option<InstanceId>>,
     scene_ids: Vec<Option<InstanceId>>,
@@ -980,6 +1123,8 @@ pub(crate) struct HostKinds {
     next_route_id: u64,
     route_ids: Vec<Option<InstanceId>>,
     route_observed: ObservedList,
+    /// The observed groups (`armed`), reset when the group instances move.
+    group_observed: ObservedList,
     /// `engine.compiling` last pushed.
     compiling: Option<bool>,
     /// The current track `selection.rack-slot` was last computed for.
@@ -989,6 +1134,8 @@ pub(crate) struct HostKinds {
     selection_cursor: Option<(usize, usize, usize)>,
     /// The song, its clips and scene spans, and the tracks' cells.
     song: SongState,
+    /// The drum racks' pads, clips and grooves, the groove pool and library.
+    racks: RackState,
 }
 
 impl HostKinds {
@@ -1060,6 +1207,7 @@ impl HostKinds {
             self.model = None;
             self.reset_project_options();
             self.song.invalidate();
+            self.racks.invalidate();
         }
         if self
             .song
@@ -1068,6 +1216,10 @@ impl HostKinds {
         {
             // A hot reload dropped arrangement instances.
             self.song.invalidate();
+        }
+        if (self.racks.representatives()).any(|id| !rt.instance_is_live(*id)) {
+            // A hot reload dropped drum rack instances.
+            self.racks.invalidate();
         }
         if self.sources.is_none() {
             install_reader(rt, sources.clone(), self.shared.clone());
@@ -1084,6 +1236,7 @@ impl HostKinds {
             changed: false,
         };
         let revision = ModelRevision::capture(app, &sources);
+        let groups_moved = app.groups != self.model_groups;
         let model_due = self.model.as_ref() != Some(&revision)
             || app.track_registry.ids() != self.model_track_ids.as_slice()
             || !app
@@ -1091,7 +1244,7 @@ impl HostKinds {
                 .iter()
                 .map(|bus| bus.id.0)
                 .eq(self.model_bus_ids.iter().copied())
-            || app.groups != self.model_groups
+            || groups_moved
             || self.cached_instances_stale(pusher.rt);
         if model_due {
             self.launch_quantize = None;
@@ -1115,13 +1268,19 @@ impl HostKinds {
                 self.model_bus_ids.clear();
                 self.model_bus_ids
                     .extend(app.buses.iter().map(|bus| bus.id.0));
-                self.model_groups.clone_from(&app.groups);
+                if groups_moved {
+                    self.model_groups.clone_from(&app.groups);
+                    self.groups_generation += 1;
+                }
             } else {
                 // Ids were unavailable this frame: try again next tick.
                 self.model = None;
             }
         }
         self.sync_cell_model(&mut pusher, app);
+        self.sync_rack_clips(&mut pusher, app);
+        self.sync_rack_model(&mut pusher, app);
+        self.sync_groove_library(&mut pusher, app);
         self.sync_song_model(&mut pusher, app);
         self.sync_song_pushed(&mut pusher, app);
         self.sync_governed(&mut pusher, app);
@@ -1135,7 +1294,9 @@ impl HostKinds {
         self.sync_device_live(&mut pusher, app);
         self.sync_bus_live(&mut pusher);
         self.sync_route_live(&mut pusher);
+        self.sync_group_live(&mut pusher);
         self.sync_cell_live(&mut pusher);
+        self.sync_rack_live(&mut pusher);
         let singletons = [
             (TRANSPORT, &*TRANSPORT_LIVE),
             (ENGINE, &*ENGINE_LIVE),
@@ -1198,8 +1359,9 @@ impl HostKinds {
     }
 
     /// A new track registry generation (a project load or clear): track,
-    /// bus and group ids restart with the project, so they name other
-    /// things now. Drops every such instance, once per generation, so the
+    /// bus, group and pool groove ids restart with the project, so they
+    /// name other things now. Drops every such instance (a group's pads,
+    /// rack clips and grooves with it), once per generation, so the
     /// syncs after it re-register them (and keep the new ones across ticks
     /// while the registry lags the track list).
     fn replace_on_project_load(&mut self, pusher: &mut Pusher<'_>, app: &app::App) {
@@ -1212,7 +1374,8 @@ impl HostKinds {
             .drain()
             .chain(self.buses.drain())
             .chain(self.groups.drain())
-            .chain(self.routes.drain());
+            .chain(self.routes.drain())
+            .chain(self.racks.pool.drain());
         for (_, id) in doomed {
             pusher.rt.drop_instance(id);
             pusher.changed = true;

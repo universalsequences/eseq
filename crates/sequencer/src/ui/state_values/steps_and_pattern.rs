@@ -597,11 +597,8 @@ pub(crate) fn build_groups_value(groups: &[sequencer::project::ProjectTrackGroup
         // draws inside its own block, `parent` is the group id drawing this
         // one (-1 when it is top level). See docs/drum-rack-v2-spec.md,
         // "Racks inside track groups".
-        let parent = groups
-            .iter()
-            .find(|candidate| candidate.rack_members.contains(&group.id))
-            .map(|candidate| candidate.id as f64)
-            .unwrap_or(-1.0);
+        let parent = sequencer::project::rack_parent(groups, group.id)
+            .map_or(-1.0, |parent| groups[parent].id as f64);
         map_value([
             ("id", Value::Number(group.id as f64)),
             ("name", Value::String(group.name.clone().into())),

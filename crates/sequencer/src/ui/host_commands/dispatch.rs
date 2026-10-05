@@ -30,6 +30,7 @@ pub(crate) fn dispatch_custom_host_command(
         n if super::rack::COMMANDS.contains(&n) => super::rack::handle(name, payload, app, editor, ctx),
         n if super::drum_rack_v2::COMMANDS.contains(&n) => super::drum_rack_v2::handle(name, payload, app, editor, ctx),
         n if super::rack_grooves::COMMANDS.contains(&n) => super::rack_grooves::handle(name, payload, app, editor, ctx),
+        n if super::rack_kinds::COMMANDS.contains(&n) => super::rack_kinds::handle(name, payload, app, editor, ctx),
         n if super::instances::COMMANDS.contains(&n) => super::instances::handle(name, payload, app, editor, ctx),
         n if super::instrument_params::COMMANDS.contains(&n) => super::instrument_params::handle(name, payload, app, editor, ctx),
         n if super::learn::COMMANDS.contains(&n) => super::learn::handle(name, payload, app, editor, ctx),

@@ -5,8 +5,8 @@ use sequencer::groove::library::{
     delete_library_groove, load_library_groove, rename_library_groove,
 };
 use sequencer::groove::{
-    GrooveChoice, GrooveExtractOptions, GROOVE_PERIOD_ONE_BAR, GROOVE_PERIOD_TWO_BARS,
-    GROOVE_RESOLUTION_SIXTEENTH, GROOVE_RESOLUTION_THIRTY_SECOND,
+    GrooveChoice, GrooveExtractOptions, RackGrooveSettings, GROOVE_PERIOD_ONE_BAR,
+    GROOVE_PERIOD_TWO_BARS, GROOVE_RESOLUTION_SIXTEENTH, GROOVE_RESOLUTION_THIRTY_SECOND,
 };
 
 /// Groove commands (docs/rack-groove-spec.md, "UI"): the drum rack panel's
@@ -53,6 +53,39 @@ pub(crate) enum RackGrooveEdit {
     StructureAndPatterns,
     /// An amount knob moved; `false` when the value did not change.
     Amount(bool),
+}
+
+/// Which groove amount an amount edit sets: the rack's timing, velocity or
+/// random amount, or one pad's share (by its note). Shared by
+/// `set-rack-groove-amount` / `set-rack-groove-pad-amount` and the kinds'
+/// `set-groove`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Amount {
+    Timing,
+    Velocity,
+    Random,
+    Pad(i32),
+}
+
+impl Amount {
+    /// "timing", "velocity" or "random".
+    pub(crate) fn from_key(key: &str) -> Option<Self> {
+        match key {
+            "timing" => Some(Self::Timing),
+            "velocity" => Some(Self::Velocity),
+            "random" => Some(Self::Random),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn set(self, settings: &mut RackGrooveSettings, value: f32) {
+        match self {
+            Self::Timing => settings.timing_amount = value,
+            Self::Velocity => settings.velocity_amount = value,
+            Self::Random => settings.random_amount = value,
+            Self::Pad(note) => settings.pad_mut(note).amount = value,
+        }
+    }
 }
 
 fn group_id(payload: &Value, name: &str) -> Result<u64, String> {
@@ -115,11 +148,12 @@ fn apply(name: &str, payload: &Value, app: &mut app::App) -> Result<RackGrooveEd
         return apply_pool_command(name, payload, app);
     }
     let group = group_id(payload, name)?;
-    // The clip whose groove the edit targets (`clip-id`, absent or -1 for the
-    // rack's own): the buffer names the clip it shows, so a launch landing
-    // between drawing and clicking cannot redirect the edit.
+    // The clip whose groove the edit targets (`clip-id`; absent, 0 or -1 for
+    // the rack's own, clip ids starting at 1): the buffer names the clip it
+    // shows, so a launch landing between drawing and clicking cannot
+    // redirect the edit.
     let clip = extract_i32_from_payload(payload, "clip-id")
-        .filter(|clip| *clip >= 0)
+        .filter(|clip| *clip > 0)
         .map(|clip| clip as u64);
     // A clip deleted between drawing and clicking: editing it would mint a
     // `clip_grooves` entry for a clip that no longer exists.
@@ -183,21 +217,15 @@ fn apply(name: &str, payload: &Value, app: &mut app::App) -> Result<RackGrooveEd
         // `amount` is "timing", "velocity" or "random"; the value is clamped
         // into the amount's range. A knob drag coalesces into one undo step.
         "set-rack-groove-amount" => {
-            let amount = extract_string_from_payload(payload, "amount").unwrap_or_default();
-            if !matches!(amount.as_str(), "timing" | "velocity" | "random") {
-                return Err(format!("Unknown groove amount {amount:?}"));
-            }
+            let key = extract_string_from_payload(payload, "amount").unwrap_or_default();
+            let amount =
+                Amount::from_key(&key).ok_or_else(|| format!("Unknown groove amount {key:?}"))?;
             let value = extract_f32_from_payload(payload, "value")
                 .filter(|value| value.is_finite())
                 .ok_or_else(|| format!("{name} needs a finite value"))?;
             let forked = follows_rack(app);
             let changed = app::edit::apply_rack_groove_amount_drag(app, group, clip, |settings| {
-                match amount.as_str() {
-                    "timing" => settings.timing_amount = value,
-                    "velocity" => settings.velocity_amount = value,
-                    "random" => settings.random_amount = value,
-                    _ => {}
-                }
+                amount.set(settings, value)
             })?;
             Ok(amount_edit(changed, forked))
         }
@@ -234,7 +262,7 @@ fn apply(name: &str, payload: &Value, app: &mut app::App) -> Result<RackGrooveEd
             require_pad(app, group, pad_note)?;
             let forked = follows_rack(app);
             let changed = app::edit::apply_rack_groove_amount_drag(app, group, clip, |settings| {
-                settings.pad_mut(pad_note).amount = value;
+                Amount::Pad(pad_note).set(settings, value)
             })?;
             Ok(amount_edit(changed, forked))
         }
@@ -469,8 +497,25 @@ pub(super) fn handle(
         editor.show_transient_message(format!("Saved '{saved}' to the groove library"));
     }
     match result {
-        Ok(RackGrooveEdit::Amount(false)) => {}
-        Ok(RackGrooveEdit::Amount(true)) => {
+        Ok(edit) => groove_edit_landed(app, editor, ctx, edit),
+        Err(error) => editor.handle_host_event(HostEvent::Status(error)),
+    }
+}
+
+/// Republish what an applied groove edit changed (shared with the kinds'
+/// setters, `set-groove` and `set-rack-clip`): an amount only its scalar
+/// fields, so the knob being dragged is not rebuilt; anything else the
+/// groups and the groove section (and, after a quantizing extract, the
+/// members' patterns).
+pub(super) fn groove_edit_landed(
+    app: &app::App,
+    editor: &mut Editor,
+    ctx: &mut LoopCtx<'_>,
+    edit: RackGrooveEdit,
+) {
+    match edit {
+        RackGrooveEdit::Amount(false) => {}
+        RackGrooveEdit::Amount(true) => {
             // Scalar fields only: the knob being dragged is not rebuilt.
             *ctx.shared.track_groups.lock().unwrap() = app.groups.clone();
             // Already published: keep the next tick's groups reconcile from
@@ -482,7 +527,7 @@ pub(super) fn handle(
             rt.run_reactive_cycle();
             editor.refresh_runtime_side_effects();
         }
-        Ok(edit) => {
+        edit => {
             *ctx.shared.track_groups.lock().unwrap() = app.groups.clone();
             let rt = editor.runtime_mut();
             sync_groups_bindings(rt, &app.groups, &app.grooves);
@@ -498,7 +543,6 @@ pub(super) fn handle(
             }
             ctx.shared.ui_epoch.fetch_add(1, Ordering::Relaxed);
         }
-        Err(error) => editor.handle_host_event(HostEvent::Status(error)),
     }
 }
 

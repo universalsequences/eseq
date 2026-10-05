@@ -62,6 +62,14 @@ pub(crate) struct KindsShared {
     /// The arrangement capture's record head, copied by the tick (the
     /// `song.position` fallback while capturing over an empty song).
     pub(super) capture_head: Option<f64>,
+    /// The group ids by group position, as of the last model sync
+    /// (`group.armed`).
+    pub(super) group_gids: Vec<u64>,
+    /// Each pad instance's member track position, as of the last rack sync,
+    /// and the pad lights by track position, copied by the tick
+    /// (`pad.triggered`).
+    pub(super) pad_tracks: HashMap<InstanceId, usize>,
+    pad_triggers: Vec<bool>,
 }
 
 impl KindsShared {
@@ -81,6 +89,11 @@ impl KindsShared {
             self.mod_ports.clone_from(meters.mod_ports);
         }
         self.overloaded = meters.overloaded;
+        let triggers = &meters.pad_triggers[..app.tracks.len().min(meters.pad_triggers.len())];
+        if self.pad_triggers.as_slice() != triggers {
+            self.pad_triggers.clear();
+            self.pad_triggers.extend_from_slice(triggers);
+        }
         let overrides = app.macro_engine.overrides();
         if &self.macro_overrides != overrides {
             self.macro_overrides.clone_from(overrides);
@@ -125,6 +138,9 @@ pub(crate) struct KindsHandles {
     /// While a deadline in it lies ahead, the view does not follow the
     /// playhead (`selection.auto-follow`).
     pub(crate) auto_follow_override_until: Arc<Mutex<Option<Instant>>>,
+    /// The drum rack the live keyboard plays as pads, by group id
+    /// (`group.armed`).
+    pub(crate) armed_rack: Arc<Mutex<Option<u64>>>,
 }
 
 impl KindsHandles {
@@ -146,6 +162,7 @@ impl KindsHandles {
             ui_invalidations: shared.ui_invalidations.clone(),
             step_print: shared.step_print.clone(),
             auto_follow_override_until: shared.auto_follow_override_until.clone(),
+            armed_rack: shared.armed_rack.clone(),
         }
     }
 
@@ -402,6 +419,16 @@ pub(super) fn live_value<S: KindStore>(
                 }
                 _ => return None,
             }
+        }
+        GROUP => {
+            let group = *store.key_of(id)?.first()? as usize;
+            let gid = *shared.borrow().group_gids.get(group)?;
+            Value::Bool(*sources.armed_rack.lock().unwrap() == Some(gid))
+        }
+        PAD => {
+            let shared = shared.borrow();
+            let track = *shared.pad_tracks.get(&id)?;
+            Value::Bool(shared.pad_triggers.get(track).copied().unwrap_or(false))
         }
         ROUTE => {
             let connection = *shared.borrow().routes.get(&id)?;

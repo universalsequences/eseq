@@ -1,6 +1,6 @@
 # Kind bindings
 
-Status: spec rev 3, 2026-10-04. Stages 1–6 built, stage 7 in part (§14; 7, 7b, 7d and 7i built) (§3.1, §3.2, §3.3, §3.4, §4, §7.1, §7.3, §8, §9 notes). Bead: epic `eseq-0l17` (`bd list --label kind-bindings`).
+Status: spec rev 3, 2026-10-04. Stages 1–6 built, stage 7 in part (§14; 7, 7b, 7d, 7h and 7i built) (§3.1, §3.2, §3.3, §3.4, §4, §7.1, §7.3, §8, §9 notes). Bead: epic `eseq-0l17` (`bd list --label kind-bindings`).
 Rev 3 resolves the open questions (§12 Decisions). Rev 2 dropped the separate `defrecord` form of rev 1: host state and view state
 are declared with `def-kind`, which gains keyed and singleton kinds, a `:host`
 field group and typed fields.
@@ -345,7 +345,7 @@ Built (stage 4):
   other module is an error (`kind name 'track' is reserved for the host
   kinds of eseq.kinds; …`). The host reserves every kind in `PUBLISHED`
   (`host_kind_names`: `track step device scene bank transport selection
-  project`, and since stage 7 `send bus group master engine`, since 7b `param`, since 7i `route`, since 7d `song region scene-span clip cell`) before
+  project`, and since stage 7 `send bus group master engine`, since 7b `param`, since 7i `route`, since 7d `song region scene-span clip cell`, since 7h `pad rack-clip groove pad-groove pool-groove library-groove`) before
   evaluating the root.
 - **Schema check.** `host_kinds::PUBLISHED`
   (`crates/sequencer/src/ui/host_kinds/mod.rs`) lists every field the host
@@ -996,6 +996,9 @@ its instance and field.
    Built (stage 7i, eseq-0l17.35): track settings, routing (`route`, bus
    outputs, mod port levels), option constants, selection, transport and
    engine extras (§14.2c).
+   Built (stage 7h, eseq-0l17.34): drum racks: `pad`, `rack-clip`,
+   `groove`, `pad-groove`, `pool-groove`, `library-groove`, the group's
+   rack fields and `track.pad` (§14.2e).
 8. **Factory port**, one area at a time, each removing that area's legacy
    field names: sequencer grid and step editing; transport, scenes and
    banks; mixer; effect and instrument panels (incl. custom-ui runtime,
@@ -1548,6 +1551,133 @@ Built (7d):
   surface: pending take lanes, scene and track launches) as positional
   sub-kinds.
 
+### 14.2e Built in stage 7h (eseq-0l17.34)
+
+| Kind | Key | New `:host` fields (`:set` in brackets) |
+|---|---|---|
+| `group` | `(index)` | `racks (list-of group)`, `parent group` (nesting, as `SEQ.groups` :rack-members / :parent), `armed :bool` (L) [`seq-set-rack-armed`], `pads (list-of pad)`, `clips (list-of rack-clip)`, `rack-clip rack-clip` (nil: silent or no clips), `legacy :bool`, `groove groove` (empty / nil / false on a plain group) |
+| `pad` | `(group tid)` | `group group`, `track track`, `note :int` (−36–51) [p], `label :string`, `choke :int` (0–16, 0 = none) [p], `role :string` [p], `role-tag`, `role-label`, `standard-role :string` (the role key the note's standard layout infers, comparable with `role`), `standard-role-label :string`, `triggered :bool` (L) |
+| `rack-clip` | `(group cid)` | `group group`, `cid :int`, `index :int`, `name :string` [r], `active :bool`, `scenes (list-of scene)`, `groove groove` (nil: follows the rack's), `own-groove :bool` [r] |
+| `groove` | `(group clip)`, clip part 0 for the rack's own | `group group`, `clip rack-clip` (nil: the rack's own), `pool-groove pool-groove` (nil: none) [g], `enabled :bool` [g], `timing`, `velocity` (0–1.5), `random :number` (0–1) [g], `scale :number` [g], `grid :string`, `slots :int`, `cells (list-of :number)`, `measured (list-of :bool)`, `pads (list-of pad-groove)` |
+| `pad-groove` | `(groove tid)` | `groove groove`, `pad pad`, `amount :number` (0–1) [g], `enabled :bool` [g], `cells (list-of :number)`, `measured (list-of :bool)` |
+| `pool-groove` | `(index)` | `index :int`, `groove-id :int`, `name :string` [`set-pool-groove`], `grid :string`, `racks (list-of group)` |
+| `library-groove` | `(index)` | `index :int`, `choice :string` (the picker key; `key` is a keyed kind's built-in field), `name :string`, `tier :string` |
+| `track` | `(index)` | `pad pad` (the pad a member track backs, or nil) |
+| `project` | `()` | `groove-pool (list-of pool-groove)`, `groove-library (list-of library-groove)` |
+
+[p] = the `set-pad` host command (`:group-id`, `:track-id` of the member,
+`:field`, `:value`); [r] = `set-rack-clip` (`:group-id`, `:clip-id`); [g] =
+`set-groove` (`:group-id`, `:clip-id` (0: the rack's own), `:field`; a pad
+share's `pad-amount` / `pad-enabled` with `:track-id`; `pool-groove` with
+the groove's id as `:value`, nil for none); all in
+`host_commands/rack_kinds.rs`. Clip id 0 is the one sentinel for a rack's
+own groove (clip ids start at 1): the kinds send it (`groove-clip-id`), the
+legacy groove commands take it (and the buffer's -1), and a clip loaded
+with id 0 is given a fresh id (`repair_rack_clips`, its scene pointers
+following).
+Constants: `pad-role-options` (the role keys, `PadRole::ALL` order),
+`groove-scale-options` (`(0.5 1 2)`, `GROOVE_SCALES`). Actions:
+`(trigger-pad! p)`, `(launch-rack-clip! rc)`, `(silence-rack! g)` (both
+with `transport.launch-quantize`), `(save-rack-clip-as! g name)`,
+`(delete-rack-clip! rc)`, `(convert-rack-to-clips! g)`,
+`(use-library-groove! gr lg)` (copy-on-apply into the pool),
+`(apply-groove-to-all-clips! gr)`, `(extract-groove! g name bars
+resolution quantize)`, `(duplicate-groove! pg)`, `(delete-groove! pg)`
+(one undo entry each; deleting turns the groove off on every rack playing
+it) and `(save-groove-to-library! pg)` (writes a file: not undoable), over
+the legacy commands (racks by group id, clips by clip id, grooves by pool
+id; `trigger-rack-pad` gained `:track-id`, the member resolved when it
+lands, a gone rack or pad an error).
+
+Built (7h):
+
+- **Identity.** A rack's pads are keyed (group instance id, member
+  `TrackId`), not by note or member position: a pad move, a swap (pad shares
+  follow the drum, as `remap_pad_note`), a member joining or leaving another
+  pad, and a track deleted in front (members re-index) keep the instance.
+  Rack clips are keyed by the bank's stable, never-reused clip id; grooves
+  (group instance id, clip id), the rack's own under 0 (clip ids start at
+  1), each clip's own while it owns one (`rc.own-groove`); a pad's share
+  (groove instance id, member `TrackId`). All are children of the group (or
+  groove) instance, so a project load (groups replaced with the registry
+  generation) drops them. Pool grooves are positional (`(index)`), the
+  instance kept by `GrooveId` across reorders (`registry::reconcile`,
+  replaced on a project load, like buses); library
+  grooves (index) by an id allocated per picker key while the file is
+  listed (like routes). `pad.track.steps` is the member's lane (legacy
+  `SEQ.track-steps`); `t.pad` is the inverse.
+- **The playing groove is a view derivation.** The legacy buffer shows the
+  playing clip's own groove, else the rack's (`groove-state`):
+  `(or (and g.rack-clip g.rack-clip.groove) g.groove)`. A `set!` acts on the
+  groove instance it names: the rack's own changes what every following
+  clip plays; to give the playing clip its own first (the legacy buffer's
+  copy-on-first-edit), `(set! rc.own-groove true)`.
+- **Feeds.** Each behind its own key; none reads the history revision
+  (`RackState::syncs` counts: an edit elsewhere runs no rack sync). *Rack
+  clips*: the scenes revision (every bank or pointer edit moves it), the
+  current scene, the racks (id, is-rack) and the group and scene instances;
+  the bank is read under one scenes lock and pushed after. *Pads, grooves,
+  pool*: the groups' generation (`HostKinds::groups_generation`, moved when
+  the model sync records changed groups: any pad-map or groove edit), the
+  pool (by value), the track and group instances and the rack clip
+  instances. A groove's lanes (`slots`,
+  `cells`, `measured`, the shares' instances and lanes: `groove_lanes`,
+  shared with `SEQ.rack-grooves`) are rebuilt only when the pool groove it
+  plays or the pads (track ids, notes, roles) moved (`LaneKey`, compared
+  in place), so an amount drag pushes the amounts alone
+  (`RackState::lane_builds`). *The library*: re-listed
+  (`listed_groove_library`, shared with `SEQ.groove-library`; the cached
+  listing) when the UI epoch, the library generation
+  (`groove::library::library_generation`; a library save, rename or delete
+  moves both) or whether the project has a rack or a pool groove moved, so
+  an amount drag lists nothing (`RackState::library_listings`); pushed when
+  it changed. *Live*: `group.armed` from the shared armed rack
+  (`KindsHandles::armed_rack`; the group sync's observed list, `mixer.rs`)
+  and `pad.triggered` from the tick's pad
+  lights (`read_rack_pad_trigger_flags`, which consumes the audio thread's
+  trigger latch every tick; the flags are kept in
+  `FrameDiffState::rack_pad_triggers` and handed over in
+  `KindsMeters::pad_triggers`, so the legacy fields, gated by *fx*, and the
+  kinds, gated by observers, share one read), each kept in an
+  `ObservedList`.
+- **Setters.** Racks by group id, pads by their member's `TrackId`, clips
+  by clip id, grooves by (group id, clip id) and pool grooves by id, all
+  resolved when the command lands; a gone rack, pad (a member that left),
+  clip, clip groove (a clip that follows the rack again) or pool groove is
+  an error. They act only where the model differs, through the panel's
+  recorded edits (`set_rack_pad_note_recorded`, `…_choke_group_…`,
+  `…_role_…`, `rename_rack_clip_recorded`,
+  `set_rack_clip_own_groove_recorded`, `set_rack_active_groove_recorded`,
+  `…_enabled_…`, `…_scale_…`, `…_pad_enabled_…`,
+  `rename_pool_groove_recorded`: one bus/group structure entry each, which
+  undo restores) and land like the legacy commands (`sync_rack_pad_map`;
+  `groove_edit_landed`, now shared with `rack_grooves::handle`). Values
+  follow §14.2c: a note an integer in −36–51 (an occupied note swaps, as the
+  pad grid's drag), a choke group 0–16, a role one of `pad-role-options`
+  (case-insensitive, `PadRole::from_key_ignore_case`) or "" for Standard,
+  the amounts finite numbers in their ranges (no clamping; the declared
+  `:range`s are checked against the host's maxima), a scale one of
+  `groove-scale-options`, names non-empty (`SetValue::name`), `pool-groove`
+  a pool groove or nil. `group.armed` is the absolute native
+  `seq-set-rack-armed` (toggles only when the arm differs; built with
+  `seq-toggle-rack-arm` from one factory, so both take the same exclusive
+  arm in the same lock order; no history, as the legacy arm).
+- **Gestures.** A groove amount or pad share `set!` while the pointer is
+  down (and no user gesture is active, `ScriptEdit::drags`) joins the
+  script's drag: `apply_rack_groove_amount_drag`, the knob drag's coalescing
+  (one entry per group and clip; all of a groove's amounts and shares share
+  it). Otherwise it is its own entry (`set_rack_groove_amounts_recorded`,
+  the one-shot form, also used beside a user's gesture; both derive the next
+  settings with `App::next_rack_groove`, and both setters and the legacy
+  amount commands name the amount with `rack_grooves::Amount`); every other
+  setter is its own entry.
+- **Not covered.** Rack slot voices and polyphony stay with the rack slot
+  devices (eseq-0l17.36, §14.2c), as do a rack's macros (eseq-0l17.37).
+  The groove picker's labels, headers and details (`:picker-labels`,
+  `:picker-headers`, `:picker-details`) are a view's to build from
+  `project.groove-pool` (`pg.racks` says where else one plays) and
+  `project.groove-library`. Kit presets stay with the browser (eseq-0l17.32).
+
 ### 14.3 Follow-up beads
 
 Each port bead depends on the beads whose rows it uses (`bd dep`).
@@ -1563,7 +1693,7 @@ Each port bead depends on the beads whose rows it uses (`bd dep`).
 | 7e | eseq-0l17.31 | `note`, `piano-roll` singleton, tracker rows and grid playheads | .16 .20 |
 | 7f | eseq-0l17.32 | `browser`, `sound`, `editor`, `learn`, `retro`, `export`, settings and agent singletons, `track.instrument-id` | .12 .17 .18 |
 | 7g | eseq-0l17.33 | `graph-node`, neural networks, visualizations, generator marks, track events | .20 |
-| 7h | eseq-0l17.34 | rack pads, rack clips, grooves, armed rack | .11 .13 .19 |
+| 7h | eseq-0l17.34 (built) | rack pads, rack clips, grooves (rack, clip, pad shares, pool, library), armed rack | .11 .13 .19 |
 | 7i | eseq-0l17.35 (built) | track settings (`tp-*`), scales (`tuning`, `degree`), routing (outputs, mod routes and levels), the project's option lists and option constants, selection extras (delete targets, step cursor, auto-follow), transport/engine extras | .11 .12 .13 .14 .18 |
 
 ### 14.4 Families
@@ -1839,16 +1969,16 @@ builds the field name.
 | `SEQ.track-active-notes` | 5 | effects/panel-bodies, scripts/sequencers/graph-neural-8x8-demo, scripts/sequencers/graph-neural-variable-reset-demo +2 | reactive_tick.rs | live | track.active-notes (live) | .33 | .14 .20 |
 | `SEQ.track-event-current-beat` | 3 | scripts/processes/process-ui-control-demo, scripts/sequencers/band-coupling-matrix-demo, scripts/sequencers/graph-neural-8x8-demo | ui_replay_probe.rs | live | track events | .33 | .20 |
 | `SEQ.track-events` | 3 | scripts/processes/process-ui-control-demo, scripts/sequencers/band-coupling-matrix-demo, scripts/sequencers/graph-neural-8x8-demo | ui_replay_probe.rs | model | track events (demo scripts) | .33 | .20 |
-| `SEQ.<rack/groove-amount-field>` | 1 | rack-groove-buffer | sv/rack_groove_fields.rs | model | groove.amount | .34 | .19 |
-| `SEQ.armed-rack-id` | 2 | mixer, drum-rack-v2 | reactive_tick.rs | model | group.armed | .34 | .13 .19 |
-| `SEQ.groove-pool` | 2 | rack-groove-buffer | sv/rack_groove_fields.rs | model | groove pool | .34 | .19 |
-| `SEQ.rack-clip-active-*` | 3 | sequencer, mixer | sv/topology_and_visualization.rs | model | rack-clip.active | .34 | .11 .13 |
-| `SEQ.rack-clip-banks` | 1 | drum-rack-v2 | sv/topology_and_visualization.rs | model | rack-clip banks | .34 | .19 |
-| `SEQ.rack-clip-index-*` | 1 | sequencer | sv/topology_and_visualization.rs | model | group.rack-clip | .34 | .11 |
-| `SEQ.rack-clips` | 2 | mixer, drum-rack-v2 | sv/topology_and_visualization.rs | model | rack-clip kind | .34 | .13 .19 |
-| `SEQ.rack-grooves` | 1 | drum-rack-v2 | sv/rack_groove_fields.rs | model | groove kind | .34 | .19 |
-| `SEQ.rack-pad-trigger-*` | 3 | sequencer | sv/drum_rack.rs | live | pad.triggered (live) | .34 | .11 |
-| `SEQ.track-steps` | 2 | rack-groove-buffer | sv/param_fields_and_sync.rs | model | rack member steps | .34 | .19 |
+| `SEQ.<rack/groove-amount-field>` | 1 | rack-groove-buffer | sv/rack_groove_fields.rs | model | groove.timing / velocity / random; a pad's share pad-groove.amount (of the playing clip's groove: `(or g.rack-clip.groove g.groove)`) | built (.34) | .19 |
+| `SEQ.armed-rack-id` | 2 | mixer, drum-rack-v2 | reactive_tick.rs | model | group.armed (live) | built (.34) | .13 .19 |
+| `SEQ.groove-pool` | 2 | rack-groove-buffer | sv/rack_groove_fields.rs | model | project.groove-pool (pool-groove) | built (.34) | .19 |
+| `SEQ.rack-clip-active-*` | 3 | sequencer, mixer | sv/topology_and_visualization.rs | model | rack-clip.active | built (.34) | .11 .13 |
+| `SEQ.rack-clip-banks` | 1 | drum-rack-v2 | sv/topology_and_visualization.rs | model | group.clips (rack-clip.cid, name) | built (.34) | .19 |
+| `SEQ.rack-clip-index-*` | 1 | sequencer | sv/topology_and_visualization.rs | model | group.rack-clip (an instance, nil while silent; its position rc.index) | built (.34) | .11 |
+| `SEQ.rack-clips` | 2 | mixer, drum-rack-v2 | sv/topology_and_visualization.rs | model | rack-clip kind: group.clips, rack-clip.scenes (:scene-clips), group.legacy (no entry) | built (.34) | .13 .19 |
+| `SEQ.rack-grooves` | 1 | drum-rack-v2 | sv/rack_groove_fields.rs | model | groove kind (group.groove, rack-clip.groove; lanes, pad-groove shares); the picker: project.groove-pool, project.groove-library | built (.34) | .19 |
+| `SEQ.rack-pad-trigger-*` | 3 | sequencer | sv/drum_rack.rs | live | pad.triggered (live; a member track's pad: t.pad) | built (.34) | .11 |
+| `SEQ.track-steps` | 2 | rack-groove-buffer | sv/param_fields_and_sync.rs | model | pad.track.steps → step.active | built (.34) | .19 |
 | `SEQ.<slot-bar-transpose-field>` | 1 | sequencer | sv/expanded_step.rs | model | track.bar-transposes | built (.35) | .11 |
 | `SEQ.<slot-bar-transpose-set-field>` | 1 | sequencer | sv/expanded_step.rs | model | track.bar-transposes (≠ 0; `set-bar-transpose!`) | built (.35) | .11 |
 | `SEQ.accum-mode-options` | 1 | effects/track-panels | sv/project_state.rs | model | constant | built (.35) | .14 |

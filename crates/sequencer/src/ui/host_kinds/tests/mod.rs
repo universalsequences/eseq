@@ -202,6 +202,7 @@ impl Harness {
             cpu_load: f32::from_bits(self.meters.cached_cpu_load_bits) as f64,
             mod_ports: &self.meters.cached_mod_port_levels,
             overloaded: self.frame.cpu_overload.displayed(),
+            pad_triggers: &self.frame.rack_pad_triggers,
         };
         self.frame
             .host_kinds
@@ -323,6 +324,7 @@ impl Harness {
 mod arrangement;
 mod mixer;
 mod params;
+mod racks;
 mod scenes;
 mod schema;
 mod settings;

@@ -15,6 +15,7 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::SystemTime;
 
@@ -349,10 +350,22 @@ fn dir_mtime(dir: &Path) -> Option<SystemTime> {
     std::fs::metadata(dir).and_then(|meta| meta.modified()).ok()
 }
 
+/// Moved by every [`invalidate_library_listing`] (an app save, rename or
+/// delete, or a test's directory redirect).
+static LIBRARY_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// A counter moved whenever the app's own edits drop the cached listing, so
+/// a reader can skip re-listing while it holds still (an external edit is
+/// caught by the listing's directory mtimes instead).
+pub fn library_generation() -> u64 {
+    LIBRARY_GENERATION.load(Ordering::Relaxed)
+}
+
 fn invalidate_library_listing() {
     if let Ok(mut cache) = LIBRARY_LISTING.lock() {
         *cache = None;
     }
+    LIBRARY_GENERATION.fetch_add(1, Ordering::Relaxed);
 }
 
 /// The app's merged library, cached (see `LibraryListingCache`).

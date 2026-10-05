@@ -7442,35 +7442,56 @@ pub(crate) fn init_runtime(
     // chromatically and starts hitting this kit's pads. Only one rack is armed
     // at a time, and arming it disarms its own member tracks so a member never
     // answers a key both as a pad and chromatically.
-    let ra = record_armed.clone();
-    let ar = armed_rack.clone();
-    let groups_state = track_groups.clone();
-    let ui_ep = ui_epoch.clone();
-    runtime.register_native("seq-toggle-rack-arm", move |args, _ctx| {
-        let Some(Value::Number(group_id)) = args.first() else {
-            return Err("seq-toggle-rack-arm: expected group id".into());
-        };
-        let group_id = *group_id as u64;
-        let members = {
-            let groups = groups_state.lock().unwrap();
-            match groups
-                .iter()
-                .find(|group| group.id == group_id && group.is_rack())
-            {
-                Some(group) => group.members.clone(),
-                None => {
-                    return Err(format!("seq-toggle-rack-arm: rack {group_id} not found").into());
+    // seq-set-rack-armed — (seq-set-rack-armed group-id armed): absolute (the
+    // `group.armed` :set); toggles only when the rack's arm differs, through
+    // the same exclusive arm.
+    let rack_arm = |name: &'static str, absolute: bool| {
+        let ra = record_armed.clone();
+        let ar = armed_rack.clone();
+        let groups_state = track_groups.clone();
+        let ui_ep = ui_epoch.clone();
+        move |args: Vec<Value>, _ctx: &mut eseqlisp::NativeContext| -> eseqlisp::NativeResult {
+            let usage = if absolute {
+                "(group-id armed)"
+            } else {
+                "group id"
+            };
+            let (group_id, wanted) = match (args.first(), args.get(1)) {
+                (Some(Value::Number(group_id)), _) if !absolute => (*group_id as u64, None),
+                (Some(Value::Number(group_id)), Some(Value::Bool(armed))) => {
+                    (*group_id as u64, Some(*armed))
                 }
+                _ => return Err(format!("{name}: expected {usage}").into()),
+            };
+            let members = {
+                let groups = groups_state.lock().unwrap();
+                match groups
+                    .iter()
+                    .find(|group| group.id == group_id && group.is_rack())
+                {
+                    Some(group) => group.members.clone(),
+                    None => {
+                        return Err(format!("{name}: rack {group_id} not found").into());
+                    }
+                }
+            };
+            // Lock order matches `seq-toggle-record-arm`: record arms, then
+            // the rack arm.
+            let mut track_armed = ra.lock().unwrap();
+            let mut rack = ar.lock().unwrap();
+            if let Some(armed) = wanted.filter(|armed| (*rack == Some(group_id)) == *armed) {
+                return Ok(Value::Bool(armed));
             }
-        };
-        // Lock order matches `seq-toggle-record-arm`: record arms, then the
-        // rack arm.
-        let mut track_armed = ra.lock().unwrap();
-        let mut rack = ar.lock().unwrap();
-        let armed = toggle_rack_pad_arm(&mut rack, &mut track_armed, &members, group_id);
-        ui_ep.fetch_add(1, Ordering::Relaxed);
-        Ok(Value::Bool(armed))
-    });
+            let armed = toggle_rack_pad_arm(&mut rack, &mut track_armed, &members, group_id);
+            ui_ep.fetch_add(1, Ordering::Relaxed);
+            Ok(Value::Bool(armed))
+        }
+    };
+    runtime.register_native(
+        "seq-toggle-rack-arm",
+        rack_arm("seq-toggle-rack-arm", false),
+    );
+    runtime.register_native("seq-set-rack-armed", rack_arm("seq-set-rack-armed", true));
 
     let sample_db = Rc::new(
         sequencer::sample_db::SampleDb::open(

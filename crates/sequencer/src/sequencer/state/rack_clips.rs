@@ -256,9 +256,12 @@ impl ProjectScenes {
         }
     }
 
-    /// §3 invariants: clip cell length matches the member count, and every
-    /// scene pointer names a clip that still exists.
+    /// §3 invariants: clip cell length matches the member count, clip ids
+    /// start at 1 (0 names a rack's own groove, never a clip: a clip loaded
+    /// with id 0 gets a fresh id, and the scene pointers already installed
+    /// follow it), and every scene pointer names a clip that still exists.
     pub fn repair_rack_clips(&mut self) {
+        let mut renumbered: Vec<(u64, RackClipId)> = Vec::new();
         for bank in &mut self.rack_banks {
             let members = bank.members.len();
             let mut next = bank.next_clip_id;
@@ -266,7 +269,25 @@ impl ProjectScenes {
                 clip.cells.resize(members, None);
                 next = next.max(clip.id + 1);
             }
-            bank.next_clip_id = next.max(1);
+            next = next.max(1);
+            for clip in &mut bank.clips {
+                if clip.id == 0 {
+                    clip.id = next;
+                    renumbered.push((bank.group_id, next));
+                    next += 1;
+                }
+            }
+            bank.next_clip_id = next;
+        }
+        for scene in &mut self.scenes {
+            for (group_id, clip_id) in &mut scene.rack_clips {
+                if *clip_id == 0 {
+                    let renamed = renumbered.iter().find(|(gid, _)| gid == group_id);
+                    if let Some((_, id)) = renamed {
+                        *clip_id = *id;
+                    }
+                }
+            }
         }
         let live: Vec<(u64, Vec<RackClipId>)> = self
             .rack_banks
@@ -1192,6 +1213,34 @@ mod tests {
         scenes.rack_clip_member_removed(RACK, 0);
         scenes.rack_bank_mut(RACK).unwrap().members = vec![2, 3];
         assert_eq!(scenes.rack_bank(RACK).unwrap().clip(clip).unwrap().cells.len(), 2);
+    }
+
+    #[test]
+    fn a_clip_loaded_with_id_0_gets_a_fresh_id_and_keeps_its_pointers() {
+        let mut scenes = scenes();
+        let clip = |id: RackClipId| RackClip {
+            id,
+            name: format!("Clip {id}"),
+            cells: vec![None; MEMBERS.len()],
+            ..RackClip::default()
+        };
+        scenes.install_rack_banks(vec![RackClipBank {
+            group_id: RACK,
+            members: MEMBERS.to_vec(),
+            clips: vec![clip(0), clip(3)],
+            next_clip_id: 0,
+        }]);
+        let bank = scenes.rack_bank(RACK).unwrap();
+        let ids: Vec<RackClipId> = bank.clips.iter().map(|clip| clip.id).collect();
+        assert_eq!(ids, vec![4, 3], "0 is the rack's own groove, never a clip");
+        assert_eq!(bank.next_clip_id, 5);
+        // A pointer installed before the repair follows the clip.
+        scenes.rack_bank_mut(RACK).unwrap().clips[0].id = 0;
+        scenes.scenes[1].rack_clips.push((RACK, 0));
+        scenes.repair_rack_clips();
+        let renamed = scenes.rack_bank(RACK).unwrap().clips[0].id;
+        assert_ne!(renamed, 0);
+        assert_eq!(scenes.scene_rack_clip(1, RACK), Some(renamed));
     }
 
     #[test]

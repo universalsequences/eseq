@@ -2571,9 +2571,8 @@ impl App {
             self.track_registry.id_at(*track)
                 .ok_or_else(|| format!("Drum rack member {} has no stable identity", track + 1))
         }).collect::<Result<Vec<_>, String>>()?;
-        let parent_id = self.groups.iter()
-            .find(|parent| parent.rack_members.contains(&group_id))
-            .map(|parent| parent.id);
+        let parent_id = crate::project::rack_parent(&self.groups, group_id)
+            .map(|parent| self.groups[parent].id);
 
         let history_checkpoint = self.history.clone();
         let history_len = self.history.undo_len();

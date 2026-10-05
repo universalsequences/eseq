@@ -204,6 +204,9 @@ pub(crate) struct FrameDiffState {
     /// decays from.
     pub(crate) prev_rack_pad_triggers: Vec<bool>,
     pub(crate) rack_pad_triggered_at: Vec<Option<Instant>>,
+    /// The flags of the last tick, published or not (`pad.triggered` reads
+    /// them through `KindsMeters`).
+    pub(crate) rack_pad_triggers: Vec<bool>,
     pub(crate) prev_track_playheads: Vec<u32>,
     /// Last published length-lane marker step per track (`length!`).
     pub(crate) prev_track_process_lengths: Vec<Option<usize>>,

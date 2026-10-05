@@ -1102,8 +1102,11 @@ pub(crate) fn sync_reactive_tick(
                     &ctx.frame.prev_rack_pad_triggers,
                     &rack_pad_triggers,
                 );
-                ctx.frame.prev_rack_pad_triggers = rack_pad_triggers;
+                ctx.frame.prev_rack_pad_triggers.clone_from(&rack_pad_triggers);
             }
+            // Host kinds read every tick's flags (`pad.triggered`, gated by
+            // its observers, not by a panel).
+            ctx.frame.rack_pad_triggers = rack_pad_triggers;
         }
         if ctx.meters.cached_modulator_phases != ctx.frame.prev_modulator_phases {
             if fx_visible {
@@ -2215,6 +2218,7 @@ pub(crate) fn sync_reactive_tick(
         cpu_load: f32::from_bits(ctx.meters.cached_cpu_load_bits) as f64,
         mod_ports: &ctx.meters.cached_mod_port_levels,
         overloaded: ctx.frame.cpu_overload.displayed(),
+        pad_triggers: &ctx.frame.rack_pad_triggers,
     };
     if ctx
         .frame
