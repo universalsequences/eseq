@@ -7904,7 +7904,8 @@ impl Editor {
         let handled = match self.runtime.invoke_global(fn_name, args.to_vec()) {
             Ok(Some(Value::Bool(false))) => false,
             Ok(Some(result)) => {
-                self.show_transient_message(format_value_for_minibuffer(&result));
+                let text = truncate_for_minibuffer(self.runtime.format_value(&result));
+                self.show_transient_message(text);
                 true
             }
             Ok(None) => {
@@ -7996,7 +7997,10 @@ impl Editor {
         }
 
         match self.runtime.eval_str(&source) {
-            Ok(Some(result)) => self.show_transient_message(format_value_for_minibuffer(&result)),
+            Ok(Some(result)) => {
+                let text = truncate_for_minibuffer(self.runtime.format_value(&result));
+                self.show_transient_message(text);
+            }
             Ok(None) => self.show_transient_message("No result"),
             Err(e) => self.show_transient_message(format!("Error: {e:?}")),
         }
@@ -11063,8 +11067,8 @@ fn filter_candidates(candidates: &[String], input: &str) -> Vec<String> {
         .collect()
 }
 
-fn format_value_for_minibuffer(value: &Value) -> String {
-    let mut s = format_lisp_value(value);
+fn truncate_for_minibuffer(formatted: String) -> String {
+    let mut s = formatted;
     if s.len() > 240 {
         s.truncate(237);
         s.push_str("...");

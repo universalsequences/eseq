@@ -416,3 +416,54 @@ fn a_legacy_ref_in_a_condition_follows_its_value() {
         Some(Value::Number(2.0))
     );
 }
+
+#[test]
+fn a_ref_held_in_a_local_reads_itself_as_a_get_field_target() {
+    let mut vm = vm();
+    // The target reads to its value first, so `.field` on a held number
+    // binding is the same error as on the number itself.
+    assert_eq!(
+        vm.eval_str("(let ((r #'k.level)) r.x)"),
+        vm.eval_str("(let ((v k.level)) v.x)")
+    );
+    assert_eq!(
+        vm.eval_str("(let ((r #'k.level)) r.x)"),
+        Err(VMError::IncorrectType)
+    );
+    // A legacy ref the same way.
+    assert_eq!(
+        vm.eval_str("(let ((r (bind \"SEQ\" \"x\"))) r.y)"),
+        Err(VMError::IncorrectType)
+    );
+}
+
+#[test]
+fn a_ref_used_as_a_reactive_nth_index_reads_itself_and_records_its_dependency() {
+    let mut runtime = runtime();
+    runtime.register_reactive(
+        "SEQ",
+        vec![(
+            "names",
+            super::super::list_from_values(["a", "b", "c"].map(|name| Value::String(name.into()))),
+        )],
+        true,
+    );
+    runtime
+        .eval_str("(def-kind k :key () :state ((i 1)))")
+        .expect("def-kind");
+    assert_eq!(
+        runtime.eval_str("(nth SEQ.names #'k.i)").expect("nth"),
+        Some(Value::String("b".into()))
+    );
+    runtime
+        .eval_str("(effect (label (nth SEQ.names #'k.i)))")
+        .expect("effect");
+    let _ = runtime.drain_rendered_layouts();
+    runtime.eval_str("(set! k.i 2)").expect("write");
+    let layouts = runtime.drain_rendered_layouts();
+    assert_eq!(layouts.len(), 1, "the index ref's field is a dependency");
+    assert_eq!(
+        runtime.eval_str("(nth SEQ.names #'k.i)").expect("nth"),
+        Some(Value::String("c".into()))
+    );
+}

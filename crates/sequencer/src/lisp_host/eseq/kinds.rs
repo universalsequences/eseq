@@ -25,11 +25,19 @@ use crate::graph::GraphManifest;
 use eseqlisp::vm::KindField;
 pub use eseqlisp::vm::{SCRATCH_KIND_PACKAGE, kind_id, kind_name_of};
 
-pub const DEF_KIND_SIGNATURE: &str =
-    "(def-kind name :sequencer (graph-body ...) | :generator (:resolution r :requires (m ...) :tick body) :document ((field default) | (field type :default d) ...) :state ((field default) | (field type :default d) ...) :view f :keymap mode :on-create f) | (def-kind name :key () :state (...))";
-pub const DEF_KIND_DOCS: &str = "Define an instance kind. The host owns instances of it: each one publishes the :sequencer graph body (or the :generator tick body, in which `self` reads the instance's document) under its own id, carries its own :document (per pattern, saved, undoable) and :state cells, and renders (view instance) in its own buffer and step tab (whose keymap is the optional :keymap mode). The optional :on-create function runs once with a freshly created instance (not a duplicate, kit load or reopened project) to write document defaults the :sequencer body cannot express. Returns the kind id \"<package>:<name>\". A field's type is inferred from its default or declared as (field type :default d): :number :int :bool :rgb :point :string :any, a kind name, or (list-of type); writes of another type are errors. With :key () the kind is a singleton: def-kind creates its one instance and binds the kind's name to it (only :state, no host instances).";
-pub const DEF_KIND_KEYWORDS: &[&str] =
-    &["key", "sequencer", "generator", "document", "state", "view", "keymap", "on-create"];
+pub const DEF_KIND_SIGNATURE: &str = "(def-kind name :sequencer (graph-body ...) | :generator (:resolution r :requires (m ...) :tick body) :document ((field default) | (field type :default d) ...) :state ((field default) | (field type :default d) ...) :view f :keymap mode :on-create f) | (def-kind name :key () | (index) | (parent index) :host ((field type :set f :range (lo hi) :doc \"...\") ...) :state (...))";
+pub const DEF_KIND_DOCS: &str = "Define an instance kind. The host owns instances of it: each one publishes the :sequencer graph body (or the :generator tick body, in which `self` reads the instance's document) under its own id, carries its own :document (per pattern, saved, undoable) and :state cells, and renders (view instance) in its own buffer and step tab (whose keymap is the optional :keymap mode). The optional :on-create function runs once with a freshly created instance (not a duplicate, kit load or reopened project) to write document defaults the :sequencer body cannot express. Returns the kind id \"<package>:<name>\". A field's type is inferred from its default or declared as (field type :default d): :number :int :bool :rgb :point :string :any, a kind name, or (list-of type); writes of another type are errors. With :key () the kind is a singleton: def-kind creates its one instance and binds the kind's name to it. With :key (index) the host registers the instances by key and the kind's name is bound to the constructor (name i), which answers the instance under key i or nil; with :key (parent index) they are reached through the parent. Kinds with a :key take only :host fields (typed, pushed by the host; (set! x.field v) calls the field's :set function, and without one the field is read-only) and :state fields, and are never project instances.";
+pub const DEF_KIND_KEYWORDS: &[&str] = &[
+    "key",
+    "host",
+    "sequencer",
+    "generator",
+    "document",
+    "state",
+    "view",
+    "keymap",
+    "on-create",
+];
 
 /// One registered kind, as the host sees it. Everything here is `Send`; the
 /// `:view` closure and the evaluated `:state` defaults live in the defining
@@ -568,18 +576,18 @@ pub fn sync_instance_records(
         }
         let owner = instance_owner_value(instance.owner);
         if runtime.instance_field(instance.id, "owner").ok().as_ref() != Some(&owner) {
-            let _ = runtime.set_instance_host_field(
+            let _ = runtime.set_instance_builtin_field(
                 instance.id,
-                eseqlisp::vm::InstanceHostField::Owner,
+                eseqlisp::vm::InstanceBuiltinField::Owner,
                 owner,
             );
             changed = true;
         }
         let label = EValue::String(instance.label.clone());
         if runtime.instance_field(instance.id, "label").ok().as_ref() != Some(&label) {
-            let _ = runtime.set_instance_host_field(
+            let _ = runtime.set_instance_builtin_field(
                 instance.id,
-                eseqlisp::vm::InstanceHostField::Label,
+                eseqlisp::vm::InstanceBuiltinField::Label,
                 label,
             );
             changed = true;

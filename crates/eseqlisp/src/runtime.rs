@@ -2901,19 +2901,63 @@ impl Runtime {
         self.vm.set_instance_field(id, field, value)
     }
 
-    pub fn set_instance_host_field(
+    pub fn set_instance_builtin_field(
         &mut self,
         id: crate::vm::InstanceId,
-        field: crate::vm::InstanceHostField,
+        field: crate::vm::InstanceBuiltinField,
         value: Value,
     ) -> Result<(), crate::vm::InstanceError> {
-        self.vm.set_instance_host_field(id, field, value)
+        self.vm.set_instance_builtin_field(id, field, value)
+    }
+
+    /// Register the instance of a keyed kind under `key`, or return the one
+    /// already there (kind-bindings spec §4, §9); see
+    /// [`crate::vm::VM::register_keyed_instance`].
+    pub fn register_keyed_instance(
+        &mut self,
+        kind: &str,
+        key: &[u64],
+    ) -> Result<crate::vm::InstanceId, crate::vm::InstanceError> {
+        self.vm.register_keyed_instance(kind, key)
+    }
+
+    /// The live instance of a keyed kind under `key`.
+    pub fn keyed_instance(&self, kind: &str, key: &[u64]) -> Option<crate::vm::InstanceId> {
+        self.vm.keyed_instance(kind, key)
+    }
+
+    /// Drop the instance of a keyed kind under `key` (and its children).
+    pub fn drop_keyed_instance(&mut self, kind: &str, key: &[u64]) -> bool {
+        self.vm.drop_keyed_instance(kind, key)
+    }
+
+    /// Re-key one keyed instance; its id stays.
+    pub fn rekey_instance(
+        &mut self,
+        id: crate::vm::InstanceId,
+        key: &[u64],
+    ) -> Result<(), crate::vm::InstanceError> {
+        self.vm.rekey_instance(id, key)
+    }
+
+    /// Re-key several keyed instances at once (a reorder that swaps keys).
+    pub fn rekey_instances(
+        &mut self,
+        moves: &[(crate::vm::InstanceId, crate::vm::InstanceKey)],
+    ) -> Result<(), crate::vm::InstanceError> {
+        self.vm.rekey_instances(moves)
+    }
+
+    /// [`crate::vm::format_lisp_value`], printing instances of kinds with a
+    /// `:key` by kind and key (`<track#41 [3]>`).
+    pub fn format_value(&self, value: &Value) -> String {
+        self.vm.format_value(value)
     }
 
     /// Route Lisp `(set! x.label v)` to the host as a queued
     /// `HostCommand::Custom { name: command, payload: {:id :label} }`, so a
     /// rename is the host's (undoable) edit; the host pushes the accepted
-    /// label back with [`Self::set_instance_host_field`].
+    /// label back with [`Self::set_instance_builtin_field`].
     pub fn route_instance_labels_to_host_command(&mut self, command: &str) {
         let shared = self.shared.clone();
         let command = command.to_string();

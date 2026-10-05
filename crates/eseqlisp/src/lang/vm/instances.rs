@@ -14,20 +14,33 @@
 //! reactive namespaces, with no new DAG machinery. The field *values* live in
 //! this store (indexed by schema position), never in a VM global.
 //!
-//! Fields are either host fields (`id`, `kind`, `owner`, `label`) or the
-//! kind's declared `:state` fields. `id` and `kind` come from the record,
-//! `owner` and `label` are pushed by the host
-//! (`VM::set_instance_host_field`). Only `label` is writable from Lisp: with a
-//! label hook installed the write is forwarded to the host (a rename is an
-//! undoable project edit, the host pushes the accepted label back); without
-//! one the label cell is written locally.
+//! Fields are either built-in fields (for a created kind `id`, `kind`,
+//! `owner`, `label`) or the kind's declared fields. `id` and `kind` come
+//! from the record, `owner` and `label` are pushed by the host
+//! (`VM::set_instance_builtin_field`). Only `label` is writable from Lisp:
+//! with a label hook installed the write is forwarded to the host (a rename
+//! is an undoable project edit, the host pushes the accepted label back);
+//! without one the label cell is written locally.
 //!
 //! Declared fields are typed (docs/kind-bindings-spec.md §3.3, [`FieldType`]):
 //! the type is inferred from the default or declared, and every write is
 //! checked against it. A singleton kind (`:key ()`, §3.1) has exactly one
 //! instance, created by `def-kind` and bound to the kind's name; its
-//! built-in fields are only `id` and `kind`, and host enumerations
-//! (`live_instances`, `instance_kind_ids`) leave it out.
+//! built-in fields are only `id` and `kind` (keyed kinds add `key`), and
+//! host enumerations (`live_instances`, `instance_kind_ids`) leave every
+//! kind with a `:key` out.
+//!
+//! A keyed kind (`:key (index)` or `:key (parent index)`, kind-bindings
+//! spec §3.1, §4) projects host things: the host registers an instance per
+//! key ([`VM::register_keyed_instance`]), re-keys it on reorder (the id, and
+//! so every captured handle, keeps meaning the same thing) and drops it.
+//! `def-kind` binds an index-keyed kind's name to a constructor, `(track 3)`,
+//! that answers the instance under that key (or nil) and depends on that one
+//! key's source under `%keys/<kind>`. Kinds with a key carry `:host` fields
+//! ([`HostField`], §3.2): cells the host pushes with
+//! [`VM::set_instance_field`]; a Lisp write calls the field's `:set`
+//! function and leaves the cell to the host, and without `:set` it is
+//! read-only.
 //!
 //! A dropped instance keeps a tombstone naming its kind: reads answer the
 //! kind's defaults, writes are silent no-ops (spec §4 "stale self").
@@ -50,7 +63,7 @@
 //! history. A VM without those natives keeps document fields in local cells,
 //! exactly like `:state`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use super::{
@@ -62,7 +75,7 @@ pub type InstanceId = u64;
 
 /// Receives a Lisp `(set! x.label v)` when the host wants renames routed
 /// through its own (undoable) edit path. The host is expected to push the
-/// accepted label back with `VM::set_instance_host_field`.
+/// accepted label back with `VM::set_instance_builtin_field`.
 pub type InstanceLabelHook = Rc<dyn Fn(InstanceId, &Value)>;
 
 /// Reserved DAG namespace prefix for instance field sources.
@@ -80,23 +93,34 @@ pub const INSTANCE_DOC_READ_NATIVE: &str = "__instance-doc-read";
 /// field writes. It dirties its own readers and records history.
 pub const INSTANCE_DOC_WRITE_NATIVE: &str = "__instance-doc-write";
 
-/// The native `(def-kind name :key () ...)` compiles to (kind-bindings
-/// spec §3.1); it returns the singleton instance the compiler then binds to
-/// the kind's name.
-pub const DEF_SINGLETON_KIND_NATIVE: &str = "__def-singleton-kind";
+/// The native every `(def-kind name :key (...) ...)` compiles to
+/// (kind-bindings spec §3.1). For a singleton (`:key ()`) it returns the one
+/// instance and for an index-keyed kind (`:key (index)`) the constructor,
+/// either of which the compiler binds to the kind's name; a parent-keyed
+/// kind (`:key (track index)`) gets no binding and returns its kind id.
+pub const DEF_KEYED_KIND_NATIVE: &str = "__def-keyed-kind";
 
-/// Host-owned field names every instance answers, in this order.
-pub const INSTANCE_HOST_FIELDS: [&str; 4] = ["id", "kind", "owner", "label"];
+/// Reserved DAG namespace prefix for an index-keyed kind's key map: field
+/// `"3"` of `%keys/<kind id>` is the source a constructor call `(track 3)`
+/// depends on, advanced whenever that key starts or stops naming an
+/// instance (registration, drop, re-key). Parent-keyed kinds have no
+/// constructor, so no such sources.
+pub const KIND_KEYS_NAMESPACE_PREFIX: &str = "%keys/";
 
-/// The host fields whose value the host pushes (`id`/`kind` are fixed by the
-/// record).
+/// The built-in fields every instance of a created kind (no `:key`)
+/// answers, in this order.
+pub const CREATED_BUILTIN_FIELDS: [&str; 4] = ["id", "kind", "owner", "label"];
+
+/// The built-in fields of a created kind whose value the host pushes
+/// ([`VM::set_instance_builtin_field`]; `id`/`kind` are fixed by the
+/// record). Not to be confused with a keyed kind's `:host` fields.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InstanceHostField {
+pub enum InstanceBuiltinField {
     Owner,
     Label,
 }
 
-impl InstanceHostField {
+impl InstanceBuiltinField {
     pub fn name(self) -> &'static str {
         match self {
             Self::Owner => "owner",
@@ -109,10 +133,89 @@ impl InstanceHostField {
 /// `owner`/`label`, which only host-created instances have.
 pub(crate) const SINGLETON_BUILTIN_FIELDS: [&str; 2] = ["id", "kind"];
 
+/// The built-in fields of a keyed kind: `key` is the instance's current key
+/// as a list (`(3)`, `(41 12)`), re-published on a re-key.
+pub(crate) const KEYED_BUILTIN_FIELDS: [&str; 3] = ["id", "kind", "key"];
+
+/// A keyed instance's key (kind-bindings spec §4): one component for
+/// `:key (index)`; for `:key (parent index)` the parent instance's id, then
+/// the index (§12 D2: re-keying a parent leaves its children alone).
+pub type InstanceKey = Vec<u64>;
+
+/// The parent instance a key names: the first part of a two-part
+/// (`:key (parent index)`) key.
+fn key_parent(key: &[u64]) -> Option<InstanceId> {
+    match key {
+        [parent, _] => Some(*parent),
+        _ => None,
+    }
+}
+
+/// A key as messages and printing show it: `3`, `41 12`.
+fn key_text(key: &[u64]) -> String {
+    key.iter().map(u64::to_string).collect::<Vec<_>>().join(" ")
+}
+
+/// A kind's `:key` (kind-bindings spec §3.1).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum KindKey {
+    /// No `:key`: the host creates (and saves) the instances.
+    #[default]
+    Created,
+    /// `:key ()`: exactly one instance, created by `def-kind` itself and
+    /// bound to the kind's name.
+    Singleton,
+    /// `:key (index)`: the host registers an instance per integer key
+    /// ([`VM::register_keyed_instance`]); the kind's name is bound to the
+    /// constructor `(name i)`.
+    Indexed { index: String },
+    /// `:key (parent index)`: an instance per (parent instance id, index),
+    /// reached through the parent, an instance of the keyed kind `parent`.
+    Under { parent: String, index: String },
+}
+
+impl KindKey {
+    /// How many parts a registered key has (0 for kinds the host does not
+    /// register by key).
+    pub fn arity(&self) -> usize {
+        match self {
+            Self::Created | Self::Singleton => 0,
+            Self::Indexed { .. } => 1,
+            Self::Under { .. } => 2,
+        }
+    }
+
+    /// Whether a re-registration keeps the key's shape: the same variant
+    /// and, under a parent, the same parent kind name. Index names may
+    /// change.
+    fn same_shape(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Under { parent: a, .. }, Self::Under { parent: b, .. }) => a == b,
+            _ => std::mem::discriminant(self) == std::mem::discriminant(other),
+        }
+    }
+
+    /// How the key reads in messages.
+    fn describe(&self) -> String {
+        match self {
+            Self::Created => "without :key".to_string(),
+            Self::Singleton => "as a singleton (:key ())".to_string(),
+            Self::Indexed { index } => format!("keyed (:key ({index}))"),
+            Self::Under { parent, index } => format!("keyed (:key ({parent} {index}))"),
+        }
+    }
+}
+
+/// Keyed instances take ids from here up. They are ordinary instance ids
+/// (same store, equality, tombstones), allocated by the VM in a range of
+/// their own: they are never saved, so they must not collide with the ids
+/// the host assigns and saves for created instances (counting up from 1).
+pub(crate) const KEYED_INSTANCE_ID_BASE: InstanceId = 1 << 32;
+
 /// Singleton instances take ids from here up, one per singleton kind, so
 /// they never collide with host-assigned instance ids (which count up from
 /// 1) and stay exact as a Lisp number. Only allocation uses it: whether an
-/// instance is a singleton is its kind's [`InstanceKindSchema::singleton`].
+/// instance is a singleton is its kind's [`InstanceKindSchema::is_singleton`].
 pub(crate) const SINGLETON_INSTANCE_ID_BASE: InstanceId = 1 << 48;
 
 /// Kind id prefix for kinds defined in headerless (scratch) code.
@@ -241,6 +344,20 @@ impl FieldType {
         }
     }
 
+    /// The value a field of this type answers before anything is written
+    /// (a `:host` field before the host pushes one, or on a stale
+    /// instance): `0`, `false`, `""`, `(rgb 0 0 0)`, `()`, or nil.
+    pub fn default_value(&self) -> Value {
+        match self {
+            Self::Number | Self::Int => Value::Number(0.0),
+            Self::Bool => Value::Bool(false),
+            Self::String => Value::String(String::new()),
+            Self::Rgb => super::tagged_list("rgb", vec![Value::Number(0.0); 3]),
+            Self::ListOf(_) => Value::List(Vec::new()),
+            Self::Point | Self::Any | Self::Kind(_) => Value::Nil,
+        }
+    }
+
     /// Whether `#'` can bind a field of this type.
     pub fn is_bindable(&self) -> bool {
         self.binding_kind(0).is_some()
@@ -364,6 +481,108 @@ impl KindField {
     }
 }
 
+/// One `:host` field (kind-bindings spec §3.2): host-owned, always typed,
+/// starting at its type's default until the host pushes a value. With
+/// `:set f`, `(set! t.field v)` calls `(f t v)` instead of writing the cell;
+/// without it the field is read-only from Lisp.
+#[derive(Clone, Debug)]
+pub struct HostField {
+    pub field: KindField,
+    /// `:set f`: a function of the instance and the new value.
+    pub set: Option<Value>,
+    /// `:range (lo hi)`: metadata for widgets that scale themselves.
+    pub range: Option<(f64, f64)>,
+    /// `:doc "…"`.
+    pub doc: Option<String>,
+}
+
+impl HostField {
+    pub fn new(name: impl Into<String>, ty: FieldType) -> Self {
+        let default = ty.default_value();
+        Self {
+            field: KindField::typed(name, ty, default),
+            set: None,
+            range: None,
+            doc: None,
+        }
+    }
+
+    pub fn with_set(mut self, set: Value) -> Self {
+        self.set = Some(set);
+        self
+    }
+
+    pub fn with_range(mut self, lo: f64, hi: f64) -> Self {
+        self.range = Some((lo, hi));
+        self
+    }
+
+    pub fn with_doc(mut self, doc: impl Into<String>) -> Self {
+        self.doc = Some(doc.into());
+        self
+    }
+
+    /// Parse one `(field type option…)` entry as the compiler hands it over
+    /// (the type as data, `:set` evaluated, `:range` as data).
+    pub fn from_entry(kind: &str, entry: &Value) -> Result<Self, String> {
+        let shape = || host_entry_shape_message(kind);
+        let Value::List(items) = entry else {
+            return Err(shape());
+        };
+        let items: Vec<Value> = items.iter().map(|item| item.borrow().clone()).collect();
+        let (Some(Value::Symbol(name)), Some(ty)) = (items.first(), items.get(1)) else {
+            return Err(shape());
+        };
+        let ty = FieldType::from_value(ty)
+            .map_err(|error| format!("def-kind {kind}: :host field '{name}': {error}"))?;
+        let mut field = Self::new(name.clone(), ty);
+        for pair in items[2..].chunks(2) {
+            match pair {
+                [Value::Keyword(option), value] => match (option.as_str(), value) {
+                    ("set", Value::Nil) => {}
+                    ("set", setter) => field = field.with_set(setter.clone()),
+                    ("range", Value::List(bounds)) if bounds.len() == 2 => {
+                        let bound = |index: usize| match &*bounds[index].borrow() {
+                            Value::Number(n) => Some(*n),
+                            _ => None,
+                        };
+                        let (Some(lo), Some(hi)) = (bound(0), bound(1)) else {
+                            return Err(host_option_message(kind, name, "range"));
+                        };
+                        field = field.with_range(lo, hi);
+                    }
+                    ("doc", Value::String(doc)) => field = field.with_doc(doc.clone()),
+                    (option, _) => return Err(host_option_message(kind, name, option)),
+                },
+                _ => return Err(shape()),
+            }
+        }
+        Ok(field)
+    }
+}
+
+/// The error for a malformed `:host` entry.
+pub(crate) fn host_entry_shape_message(kind: &str) -> String {
+    format!(
+        "def-kind {kind}: each :host entry is (field type option…) with options \
+         :set f, :range (lo hi), :doc \"…\""
+    )
+}
+
+/// The error for a bad `:host` field option.
+pub(crate) fn host_option_message(kind: &str, field: &str, option: &str) -> String {
+    match option {
+        "set" => format!("def-kind {kind}: :host field '{field}': :set takes a function"),
+        "range" => {
+            format!("def-kind {kind}: :host field '{field}': :range takes (lo hi), two numbers")
+        }
+        "doc" => format!("def-kind {kind}: :host field '{field}': :doc takes a string"),
+        other => format!(
+            "def-kind {kind}: :host field '{field}': unknown option :{other}; options are :set, :range, :doc"
+        ),
+    }
+}
+
 /// A value as an error message shows it, cut short.
 fn describe_value(value: &Value) -> String {
     let text = super::format_lisp_source(value);
@@ -389,12 +608,15 @@ pub struct InstanceKindSchema {
     /// `:document` fields, in declaration order: stored by the host per
     /// pattern (docs/jaki-kind-spec.md §3).
     pub document: Vec<KindField>,
-    /// `:key ()` (kind-bindings spec §3.1): exactly one instance, created by
-    /// `def-kind` itself and bound to the kind's name. Its built-in fields
-    /// are `id` and `kind` only, and the host never sees it (no project
-    /// instance, tab, view or Packages row): [`VM::live_instances`] and
-    /// [`VM::instance_kind_ids`] leave singletons out.
-    pub singleton: bool,
+    /// `:host` fields, in declaration order: pushed by the host
+    /// (kind-bindings spec §3.2); only on kinds with a `:key`.
+    pub host: Vec<HostField>,
+    /// The kind's `:key` (kind-bindings spec §3.1). A kind with a key
+    /// opts out of what only created kinds have: its built-in fields are
+    /// `id` and `kind` (plus `key` when keyed), and the host never sees it
+    /// as a project instance (no tab, view or Packages row):
+    /// [`VM::live_instances`] and [`VM::instance_kind_ids`] leave it out.
+    pub key: KindKey,
     /// The kind's `:view`, a function of one argument (the instance). The
     /// host renders `(view self)` per instance; `None` for a view-less kind.
     pub view: Option<Value>,
@@ -415,7 +637,8 @@ impl InstanceKindSchema {
             kind: kind.into(),
             fields: Vec::new(),
             document: Vec::new(),
-            singleton: false,
+            host: Vec::new(),
+            key: KindKey::Created,
             view: None,
             keymap: None,
             on_create: None,
@@ -438,8 +661,48 @@ impl InstanceKindSchema {
     }
 
     pub fn singleton(mut self) -> Self {
-        self.singleton = true;
+        self.key = KindKey::Singleton;
         self
+    }
+
+    /// `:key (index)`.
+    pub fn indexed(mut self, index: impl Into<String>) -> Self {
+        self.key = KindKey::Indexed {
+            index: index.into(),
+        };
+        self
+    }
+
+    /// `:key (parent index)`, under the keyed kind `parent`.
+    pub fn under(mut self, parent: impl Into<String>, index: impl Into<String>) -> Self {
+        self.key = KindKey::Under {
+            parent: parent.into(),
+            index: index.into(),
+        };
+        self
+    }
+
+    pub fn with_host_field(mut self, field: HostField) -> Self {
+        self.host.push(field);
+        self
+    }
+
+    /// `:key ()`.
+    pub fn is_singleton(&self) -> bool {
+        self.key == KindKey::Singleton
+    }
+
+    /// `:key (index)` or `:key (parent index)`.
+    pub fn is_keyed(&self) -> bool {
+        matches!(self.key, KindKey::Indexed { .. } | KindKey::Under { .. })
+    }
+
+    /// The parent kind name of a `:key (parent index)` kind.
+    pub fn parent_kind_name(&self) -> Option<&str> {
+        match &self.key {
+            KindKey::Under { parent, .. } => Some(parent),
+            _ => None,
+        }
     }
 
     /// An untyped `:state` field; its type is inferred from the default.
@@ -464,11 +727,37 @@ impl InstanceKindSchema {
 
     /// The fields every instance of this kind answers before its own.
     pub fn builtin_fields(&self) -> &'static [&'static str] {
-        if self.singleton { &SINGLETON_BUILTIN_FIELDS } else { &INSTANCE_HOST_FIELDS }
+        match &self.key {
+            KindKey::Created => &CREATED_BUILTIN_FIELDS,
+            KindKey::Singleton => &SINGLETON_BUILTIN_FIELDS,
+            KindKey::Indexed { .. } | KindKey::Under { .. } => &KEYED_BUILTIN_FIELDS,
+        }
     }
 
     fn index_of(&self, field: &str) -> Option<usize> {
         index_in(&self.fields, field)
+    }
+
+    fn host_index_of(&self, field: &str) -> Option<usize> {
+        self.host
+            .iter()
+            .position(|declared| declared.field.name == field)
+    }
+
+    fn host_default_of(&self, index: usize) -> Value {
+        self.host
+            .get(index)
+            .map(|declared| declared.field.default.deep_clone())
+            .unwrap_or(Value::Nil)
+    }
+
+    /// Declared fields of every group: `:host`, `:state`, `:document`.
+    fn declared_fields(&self) -> impl Iterator<Item = &KindField> {
+        self.host
+            .iter()
+            .map(|declared| &declared.field)
+            .chain(self.fields.iter())
+            .chain(self.document.iter())
     }
 
     fn document_index_of(&self, field: &str) -> Option<usize> {
@@ -491,19 +780,31 @@ impl InstanceKindSchema {
 
     /// The checks [`VM::register_instance_kind`] applies: a non-empty kind
     /// id, and field names that are non-empty, free of `.`, unique, and
-    /// never a host field. Hosts run it before recording a kind anywhere
+    /// never a built-in field. Hosts run it before recording a kind anywhere
     /// else, so a schema the VM would reject is never half-registered.
     pub fn validate(&self) -> Result<(), InstanceError> {
         if self.kind.is_empty() {
             return Err(InstanceError::InvalidSchema("empty kind id".to_string()));
         }
+        if !self.host.is_empty() && self.key == KindKey::Created {
+            // kind-bindings spec §12 D5.
+            return Err(InstanceError::InvalidSchema(format!(
+                "kind '{}': :host fields need :key",
+                self.kind
+            )));
+        }
+        if self.key != KindKey::Created && !self.document.is_empty() {
+            return Err(InstanceError::InvalidSchema(format!(
+                "kind '{}' has a :key, so it has no :document",
+                self.kind
+            )));
+        }
         let mut seen = std::collections::HashSet::new();
-        for KindField { name, .. } in self.fields.iter().chain(self.document.iter()) {
+        for KindField { name, .. } in self.declared_fields() {
             if self.builtin_fields().contains(&name.as_str()) {
                 return Err(InstanceError::InvalidSchema(format!(
-                    "kind '{}' declares state field '{name}', which is a {} field",
-                    self.kind,
-                    if self.singleton { "built-in" } else { "host" }
+                    "kind '{}' declares field '{name}', which is a built-in field",
+                    self.kind
                 )));
             }
             if name.is_empty() || name.contains('.') {
@@ -527,8 +828,7 @@ impl InstanceKindSchema {
         self.builtin_fields()
             .iter()
             .map(|name| (*name).to_string())
-            .chain(self.fields.iter().map(|declared| declared.name.clone()))
-            .chain(self.document.iter().map(|declared| declared.name.clone()))
+            .chain(self.declared_fields().map(|declared| declared.name.clone()))
             .collect()
     }
 }
@@ -556,6 +856,23 @@ pub enum InstanceError {
     },
     /// The host asked to create an instance of a singleton kind.
     SingletonKind(String),
+    /// A Lisp write of a `:host` field without `:set`.
+    ReadOnlyHostField {
+        kind: String,
+        field: String,
+    },
+    /// The host asked to create an instance of a keyed kind: those are
+    /// registered by key ([`VM::register_keyed_instance`]). `parent` is the
+    /// parent kind name of a `:key (parent index)` kind.
+    KeyedKind {
+        kind: String,
+        parent: Option<String>,
+    },
+    /// A keyed registration or re-key the kind's `:key` does not admit.
+    InvalidKey(String),
+    /// The host asked to create an instance with an id from the range the
+    /// VM allocates keyed and singleton instances in.
+    ReservedId(InstanceId),
     InvalidSchema(String),
 }
 
@@ -587,6 +904,26 @@ impl std::fmt::Display for InstanceError {
                 f,
                 "kind '{kind}' is a singleton (:key ()); its one instance comes from def-kind"
             ),
+            Self::ReadOnlyHostField { kind, field } => {
+                write!(f, "{}.{field} is read-only", kind_name_of(kind))
+            }
+            Self::KeyedKind { kind, parent: None } => {
+                let name = kind_name_of(kind);
+                write!(f, "{name} instances come from the project; use ({name} i)")
+            }
+            Self::KeyedKind {
+                kind,
+                parent: Some(parent),
+            } => write!(
+                f,
+                "{} instances come from the project; reach them through their {parent}",
+                kind_name_of(kind)
+            ),
+            Self::InvalidKey(message) => write!(f, "{message}"),
+            Self::ReservedId(id) => write!(
+                f,
+                "instance id {id} is reserved for keyed and singleton instances"
+            ),
             Self::InvalidSchema(message) => write!(f, "invalid instance kind schema: {message}"),
         }
     }
@@ -600,7 +937,8 @@ impl From<InstanceError> for VMError {
 
 #[derive(Clone)]
 struct InstanceRecord {
-    kind: String,
+    /// The kind id, shared with the store's kind table.
+    kind: Rc<str>,
     /// One value per schema field, in schema order.
     state: Vec<Value>,
     /// Local document cells, one per `:document` field, used only when the
@@ -608,6 +946,10 @@ struct InstanceRecord {
     document: Vec<Value>,
     owner: Value,
     label: Value,
+    /// One value per `:host` field, pushed by the host.
+    host: Vec<Value>,
+    /// A keyed instance's current key.
+    key: Option<InstanceKey>,
 }
 
 /// Which cell a field name resolves to.
@@ -617,20 +959,61 @@ enum FieldSlot {
     Kind,
     Owner,
     Label,
+    /// A keyed instance's built-in `key`.
+    Key,
     State(usize),
     Document(usize),
+    Host(usize),
+}
+
+/// A field name resolved against an instance: its kind, its cell, the
+/// declared field behind a `:host`/`:state`/`:document` cell, and the
+/// record when the instance is live (`None` for a stale one).
+struct Resolved<'s> {
+    kind: &'s str,
+    slot: FieldSlot,
+    declared: Option<&'s KindField>,
+    record: Option<&'s InstanceRecord>,
+}
+
+/// The live instances of one keyed kind by key (kind-bindings spec §4).
+#[derive(Clone, Default)]
+struct KeyRegistry {
+    ids: HashMap<InstanceKey, InstanceId>,
+    /// `%keys/<kind id>` for an index-keyed kind, whose constructor reads
+    /// one source per key; `None` for a parent-keyed kind (no constructor).
+    namespace: Option<Rc<str>>,
+}
+
+/// `%keys/<kind id>`, the namespace of an index-keyed kind's key sources.
+fn key_namespace(kind: &str) -> Rc<str> {
+    format!("{KIND_KEYS_NAMESPACE_PREFIX}{kind}").into()
 }
 
 #[derive(Default)]
 pub(crate) struct InstanceStore {
-    kinds: HashMap<String, InstanceKindSchema>,
+    kinds: HashMap<Rc<str>, InstanceKindSchema>,
     live: HashMap<InstanceId, InstanceRecord>,
     /// Dropped instance -> its kind, so a stale handle still reads defaults.
-    dropped: HashMap<InstanceId, String>,
+    dropped: HashMap<InstanceId, Rc<str>>,
     /// Singleton kind id -> its one instance. Entries are never removed, so
     /// a re-evaluated `def-kind` finds the same instance (and ids are
     /// allocated as `SINGLETON_INSTANCE_ID_BASE + len`).
     singletons: HashMap<String, InstanceId>,
+    /// Keyed kind id -> its live instances by key.
+    keyed: HashMap<Rc<str>, KeyRegistry>,
+    /// `:key (parent index)` kind id -> its parent kind id, resolved when
+    /// the first instance registers and then fixed, so a kind defined later
+    /// (one that would make the parent name ambiguous) never re-parents
+    /// live children.
+    parent_kinds: HashMap<Rc<str>, Rc<str>>,
+    /// Parent instance -> its live children (instances of `:key (parent
+    /// index)` kinds whose key names it), dropped with it.
+    children: HashMap<InstanceId, HashSet<InstanceId>>,
+    /// Keyed instance ids allocated so far (from [`KEYED_INSTANCE_ID_BASE`]);
+    /// never reused, so a stale handle never comes back as another thing.
+    /// A rollback keeps it.
+    keyed_allocated: u64,
     label_hook: Option<InstanceLabelHook>,
 }
 
@@ -647,6 +1030,12 @@ impl InstanceStore {
                     let mut schema = schema.clone();
                     for field in schema.fields.iter_mut().chain(schema.document.iter_mut()) {
                         field.default = clone_value_for_snapshot(&field.default);
+                    }
+                    for host in &mut schema.host {
+                        host.field.default = clone_value_for_snapshot(&host.field.default);
+                        if let Some(set) = &mut host.set {
+                            *set = clone_value_for_snapshot(set);
+                        }
                     }
                     if let Some(view) = &mut schema.view {
                         *view = clone_value_for_snapshot(view);
@@ -669,59 +1058,88 @@ impl InstanceStore {
                             document: record.document.iter().map(clone_value_for_snapshot).collect(),
                             owner: clone_value_for_snapshot(&record.owner),
                             label: clone_value_for_snapshot(&record.label),
+                            host: record.host.iter().map(clone_value_for_snapshot).collect(),
+                            key: record.key.clone(),
                         },
                     )
                 })
                 .collect(),
             dropped: self.dropped.clone(),
             singletons: self.singletons.clone(),
+            keyed: self.keyed.clone(),
+            parent_kinds: self.parent_kinds.clone(),
+            children: self.children.clone(),
+            keyed_allocated: self.keyed_allocated,
             label_hook: self.label_hook.clone(),
         }
     }
 
-    /// Roll back to `snapshot`, keeping the host's current label hook.
+    /// Roll back to `snapshot`, keeping the host's current label hook and
+    /// every keyed id allocated since (ids are never reused).
     pub(crate) fn restore_from(&mut self, snapshot: Self) {
         let hook = self.label_hook.take();
+        let keyed_allocated = self.keyed_allocated.max(snapshot.keyed_allocated);
         *self = snapshot;
         self.label_hook = hook;
+        self.keyed_allocated = keyed_allocated;
     }
 
     fn kind_of(&self, id: InstanceId) -> Option<&str> {
         self.live
             .get(&id)
-            .map(|record| record.kind.as_str())
-            .or_else(|| self.dropped.get(&id).map(String::as_str))
+            .map(|record| &*record.kind)
+            .or_else(|| self.dropped.get(&id).map(|kind| &**kind))
     }
 
-    fn resolve(&self, id: InstanceId, field: &str) -> Result<(String, FieldSlot), InstanceError> {
-        let (kind, slot, _) = self.resolve_declared(id, field)?;
-        Ok((kind.to_string(), slot))
+    /// The shared kind id the store holds for `kind`.
+    fn kind_rc(&self, kind: &str) -> Option<Rc<str>> {
+        self.kinds.get_key_value(kind).map(|(kind, _)| kind.clone())
     }
 
-    /// [`Self::resolve`], borrowing the kind id, plus the declared field
-    /// behind a `:state`/`:document` slot.
-    fn resolve_declared(
-        &self,
-        id: InstanceId,
-        field: &str,
-    ) -> Result<(&str, FieldSlot, Option<&KindField>), InstanceError> {
-        let kind = self.kind_of(id).ok_or(InstanceError::UnknownInstance(id))?;
+    /// Resolve `field` of instance `id` (live or stale) with one lookup.
+    fn resolve(&self, id: InstanceId, field: &str) -> Result<Resolved<'_>, InstanceError> {
+        let record = self.live.get(&id);
+        let kind = match record {
+            Some(record) => &*record.kind,
+            None => self
+                .dropped
+                .get(&id)
+                .map(|kind| &**kind)
+                .ok_or(InstanceError::UnknownInstance(id))?,
+        };
         let schema = self.kinds.get(kind);
-        // A singleton has no owner/label: those names are its own fields
-        // (or unknown).
-        let singleton = schema.is_some_and(|schema| schema.singleton);
+        // A kind with a :key has no owner/label (those names are its own
+        // fields, or unknown); a keyed kind has `key`.
+        let created = schema.is_none_or(|schema| schema.key == KindKey::Created);
+        let keyed = schema.is_some_and(InstanceKindSchema::is_keyed);
+        let resolved = |slot, declared| Resolved {
+            kind,
+            slot,
+            declared,
+            record,
+        };
         let slot = match field {
             "id" => FieldSlot::Id,
             "kind" => FieldSlot::Kind,
-            "owner" if !singleton => FieldSlot::Owner,
-            "label" if !singleton => FieldSlot::Label,
+            "owner" if created => FieldSlot::Owner,
+            "label" if created => FieldSlot::Label,
+            "key" if keyed => FieldSlot::Key,
             _ => {
                 let schema = schema.ok_or_else(|| InstanceError::UnknownKind(kind.to_string()))?;
+                if let Some(index) = schema.host_index_of(field) {
+                    return Ok(resolved(
+                        FieldSlot::Host(index),
+                        Some(&schema.host[index].field),
+                    ));
+                }
                 return match (schema.index_of(field), schema.document_index_of(field)) {
-                    (Some(index), _) => Ok((kind, FieldSlot::State(index), schema.fields.get(index))),
-                    (None, Some(index)) => {
-                        Ok((kind, FieldSlot::Document(index), schema.document.get(index)))
+                    (Some(index), _) => {
+                        Ok(resolved(FieldSlot::State(index), schema.fields.get(index)))
                     }
+                    (None, Some(index)) => Ok(resolved(
+                        FieldSlot::Document(index),
+                        schema.document.get(index),
+                    )),
                     (None, None) => Err(InstanceError::UnknownField {
                         kind: kind.to_string(),
                         field: field.to_string(),
@@ -730,18 +1148,28 @@ impl InstanceStore {
                 };
             }
         };
-        Ok((kind, slot, None))
+        Ok(resolved(slot, None))
     }
 
-    /// Current value of a resolved slot: the live cell, or the default for a
-    /// dropped instance.
-    fn value(&self, id: InstanceId, kind: &str, slot: FieldSlot) -> Value {
-        let record = self.live.get(&id);
-        match slot {
+    /// Current value of a resolved field: the live cell, or the default for
+    /// a dropped instance.
+    fn value_of(&self, id: InstanceId, resolved: &Resolved<'_>) -> Value {
+        let record = resolved.record;
+        let kind = resolved.kind;
+        match resolved.slot {
             FieldSlot::Id => Value::Number(id as f64),
             FieldSlot::Kind => Value::String(kind.to_string()),
             FieldSlot::Owner => record.map(|r| r.owner.clone()).unwrap_or(Value::Nil),
             FieldSlot::Label => record.map(|r| r.label.clone()).unwrap_or(Value::Nil),
+            FieldSlot::Key => key_value(record.and_then(|r| r.key.as_deref()).unwrap_or(&[])),
+            FieldSlot::Host(index) => match record.and_then(|r| r.host.get(index)) {
+                Some(value) => value.clone(),
+                None => self
+                    .kinds
+                    .get(kind)
+                    .map(|schema| schema.host_default_of(index))
+                    .unwrap_or(Value::Nil),
+            },
             FieldSlot::State(index) => match record.and_then(|r| r.state.get(index)) {
                 Some(value) => value.clone(),
                 None => self
@@ -755,6 +1183,12 @@ impl InstanceStore {
                 None => self.document_default(kind, index),
             },
         }
+    }
+
+    /// Resolve and read one field.
+    fn field_value(&self, id: InstanceId, field: &str) -> Result<Value, InstanceError> {
+        let resolved = self.resolve(id, field)?;
+        Ok(self.value_of(id, &resolved))
     }
 
     fn document_default(&self, kind: &str, index: usize) -> Value {
@@ -802,8 +1236,10 @@ impl InstanceStore {
             &schema.document[..]
         };
         let names: Vec<&str> = schema
-            .fields
+            .host
             .iter()
+            .map(|declared| &declared.field)
+            .chain(schema.fields.iter())
             .chain(documents)
             .filter(|field| field.ty.is_bindable())
             .map(|field| field.name.as_str())
@@ -829,10 +1265,167 @@ impl InstanceStore {
             })
             .collect()
     }
+
+    /// The keyed kind `kind` names: its exact id, or a bare name (`track`)
+    /// that exactly one keyed kind has.
+    fn resolve_keyed_kind(
+        &self,
+        kind: &str,
+    ) -> Result<(&Rc<str>, &InstanceKindSchema), InstanceError> {
+        let not_keyed = |schema: &InstanceKindSchema| {
+            InstanceError::InvalidKey(format!(
+                "kind '{}' is not keyed; it is defined {}",
+                schema.kind,
+                schema.key.describe()
+            ))
+        };
+        if let Some((id, schema)) = self.kinds.get_key_value(kind) {
+            return if schema.is_keyed() {
+                Ok((id, schema))
+            } else {
+                Err(not_keyed(schema))
+            };
+        }
+        let mut matches = self
+            .kinds
+            .iter()
+            .filter(|(_, schema)| schema.is_keyed() && kind_name_of(&schema.kind) == kind);
+        match (matches.next(), matches.next()) {
+            (Some(found), None) => Ok(found),
+            (Some((first, _)), Some((second, _))) => Err(InstanceError::InvalidKey(format!(
+                "keyed kind name '{kind}' is ambiguous ('{first}', '{second}'); use its kind id"
+            ))),
+            (None, _) => match self
+                .kinds
+                .values()
+                .find(|schema| kind_name_of(&schema.kind) == kind)
+            {
+                Some(schema) => Err(not_keyed(schema)),
+                None => Err(InstanceError::UnknownKind(kind.to_string())),
+            },
+        }
+    }
+
+    /// The parent kind id of the `:key (parent index)` kind `kind`: the
+    /// parent named in its own module first (`m:track` for `m:step`), else
+    /// the one keyed kind with that name. Resolved when the first instance
+    /// registers (so kinds can be declared in any order) and then fixed.
+    fn parent_kind(&mut self, kind: &str) -> Result<Rc<str>, InstanceError> {
+        if let Some(parent) = self.parent_kinds.get(kind) {
+            return Ok(parent.clone());
+        }
+        let Some((kind, schema)) = self.kinds.get_key_value(kind) else {
+            return Err(InstanceError::UnknownKind(kind.to_string()));
+        };
+        let KindKey::Under { parent, .. } = &schema.key else {
+            return Err(InstanceError::InvalidKey(format!(
+                "kind '{kind}' is not keyed under a parent"
+            )));
+        };
+        let local = kind.rsplit_once(':').and_then(|(module, _)| {
+            self.kinds
+                .get_key_value(format!("{module}:{parent}").as_str())
+        });
+        let found = match local {
+            Some(found) => Ok(found),
+            None => self.resolve_keyed_kind(parent),
+        };
+        let resolved = match found {
+            Ok((parent_kind, parent_schema)) if parent_schema.is_keyed() => parent_kind.clone(),
+            _ => {
+                return Err(InstanceError::InvalidKey(format!(
+                    "kind '{kind}' is keyed under '{parent}', which is not a keyed kind"
+                )));
+            }
+        };
+        let kind = kind.clone();
+        self.parent_kinds.insert(kind, resolved.clone());
+        Ok(resolved)
+    }
+
+    /// Whether `key` fits keyed kind `kind`: its length, and for a
+    /// parent-keyed kind a live parent instance as its first part, which is
+    /// returned.
+    fn check_key(&mut self, kind: &str, key: &[u64]) -> Result<Option<InstanceId>, InstanceError> {
+        let schema = self
+            .kinds
+            .get(kind)
+            .ok_or_else(|| InstanceError::UnknownKind(kind.to_string()))?;
+        if key.len() != schema.key.arity() {
+            return Err(InstanceError::InvalidKey(format!(
+                "kind '{kind}' is {}; got key ({})",
+                schema.key.describe(),
+                key_text(key)
+            )));
+        }
+        let Some(parent) = key_parent(key) else {
+            return Ok(None);
+        };
+        let parent_kind = self.parent_kind(kind)?;
+        let live_parent = self
+            .live
+            .get(&parent)
+            .is_some_and(|record| record.kind == parent_kind);
+        if !live_parent {
+            return Err(InstanceError::InvalidKey(format!(
+                "kind '{kind}': key ({}) names parent {parent}, which is not a live '{parent_kind}' instance",
+                key_text(key)
+            )));
+        }
+        Ok(Some(parent))
+    }
+
+    /// The live instance of keyed kind id `kind` under `key`.
+    fn keyed_id(&self, kind: &str, key: &[u64]) -> Option<InstanceId> {
+        self.keyed.get(kind)?.ids.get(key).copied()
+    }
+
+    /// Record `child` under `parent` (or forget it, for `None`).
+    fn set_parent(&mut self, child: InstanceId, from: Option<InstanceId>, to: Option<InstanceId>) {
+        if from == to {
+            return;
+        }
+        if let Some(from) = from
+            && let Some(siblings) = self.children.get_mut(&from)
+        {
+            siblings.remove(&child);
+            if siblings.is_empty() {
+                self.children.remove(&from);
+            }
+        }
+        if let Some(to) = to {
+            self.children.entry(to).or_default().insert(child);
+        }
+    }
+
+    /// How an instance prints when its kind has a `:key` (kind-bindings
+    /// spec §4): `<track#41 [3]>`, `<step#902 [41 12]>`, `<transport>`; a
+    /// dropped keyed instance has no key (`<track#41>`). `None` for a
+    /// created kind's instance, which prints as `<instance:id>`.
+    fn display(&self, id: InstanceId) -> Option<String> {
+        let kind = self.kind_of(id)?;
+        let schema = self.kinds.get(kind)?;
+        let name = kind_name_of(kind);
+        match &schema.key {
+            KindKey::Created => None,
+            KindKey::Singleton => Some(format!("<{name}>")),
+            KindKey::Indexed { .. } | KindKey::Under { .. } => Some(
+                match self.live.get(&id).and_then(|record| record.key.as_deref()) {
+                    Some(key) => format!("<{name}#{id} [{}]>", key_text(key)),
+                    None => format!("<{name}#{id}>"),
+                },
+            ),
+        }
+    }
 }
 
 pub(crate) fn instance_namespace(id: InstanceId) -> String {
     format!("{INSTANCE_NAMESPACE_PREFIX}{id}")
+}
+
+/// A key as Lisp sees it: `(41 12)`.
+fn key_value(key: &[u64]) -> Value {
+    super::list_from_values(key.iter().map(|part| Value::Number(*part as f64)))
 }
 
 impl VM {
@@ -841,53 +1434,63 @@ impl VM {
     /// Register (or re-register, on hot reload) a kind's `:state` schema.
     /// Live instances of the kind keep their values by field name while the
     /// field's (new) type admits them; new fields start at their default and
-    /// removed fields are dropped (spec §5). A kind cannot switch between
-    /// created and singleton (`:key ()`) while the VM holds it.
+    /// removed fields are dropped (spec §5). A kind cannot change the shape
+    /// of its `:key` (created, singleton, keyed, keyed under which parent)
+    /// while the VM holds it.
     pub fn register_instance_kind(&mut self, schema: InstanceKindSchema) -> Result<(), InstanceError> {
         schema.validate()?;
-        if let Some(previous) = self.instances.kinds.get(&schema.kind)
-            && previous.singleton != schema.singleton
+        if let Some(previous) = self.instances.kinds.get(schema.kind.as_str())
+            && !previous.key.same_shape(&schema.key)
         {
             return Err(InstanceError::InvalidSchema(format!(
                 "kind '{}' is already defined {}; restart to change its :key",
                 schema.kind,
-                if previous.singleton { "as a singleton (:key ())" } else { "without :key" }
+                previous.key.describe()
             )));
         }
-        let previous = self.instances.kinds.insert(schema.kind.clone(), schema.clone());
+        let kind = self
+            .instances
+            .kind_rc(&schema.kind)
+            .unwrap_or_else(|| Rc::from(schema.kind.as_str()));
+        let previous = self.instances.kinds.insert(kind.clone(), schema);
         // A (re)registered kind may carry a new `:view`: every bound view
         // buffer of its instances re-renders through it.
-        self.mark_instance_views_of_kind_dirty(&schema.kind);
-        if let Some(previous) = previous {
-            let ids: Vec<InstanceId> = self
-                .instances
-                .live
+        self.mark_instance_views_of_kind_dirty(&kind);
+        let Some(previous) = previous else {
+            return Ok(());
+        };
+        let schema = &self.instances.kinds[&kind];
+        let host_fields = |schema: &InstanceKindSchema| -> Vec<KindField> {
+            schema
+                .host
                 .iter()
-                .filter(|(_, record)| record.kind == schema.kind)
-                .map(|(id, _)| *id)
-                .collect();
-            for id in ids {
-                let Some(record) = self.instances.live.get(&id) else {
-                    continue;
-                };
-                let document =
-                    self.instances
-                        .retained_cells(&previous.document, &schema.document, &record.document);
-                let state = self
-                    .instances
-                    .retained_cells(&previous.fields, &schema.fields, &record.state);
-                if let Some(record) = self.instances.live.get_mut(&id) {
-                    record.document = document;
-                    record.state = state;
-                }
-                // A newly declared field may already have (error-state)
-                // readers; bring every retained source up to date.
-                for (index, field) in schema.fields.iter().enumerate() {
-                    let value = self.instances.value(id, &schema.kind, FieldSlot::State(index));
-                    self.publish_instance_field(id, &field.name, value);
-                }
-                self.sync_bound_slots(Some(id));
+                .map(|declared| declared.field.clone())
+                .collect()
+        };
+        let (previous_host, host) = (host_fields(&previous), host_fields(schema));
+        let (fields, document) = (schema.fields.clone(), schema.document.clone());
+        for id in self.live_instances_of_kind(&kind) {
+            let Some(record) = self.instances.live.get(&id) else {
+                continue;
+            };
+            let document =
+                self.instances
+                    .retained_cells(&previous.document, &document, &record.document);
+            let state = self
+                .instances
+                .retained_cells(&previous.fields, &fields, &record.state);
+            let host = self
+                .instances
+                .retained_cells(&previous_host, &host, &record.host);
+            if let Some(record) = self.instances.live.get_mut(&id) {
+                record.document = document;
+                record.state = state;
+                record.host = host;
             }
+            // A newly declared field may already have (error-state)
+            // readers; bring every read source up to date.
+            self.republish_instance_sources(id, true);
+            self.sync_bound_slots(Some(id));
         }
         Ok(())
     }
@@ -896,14 +1499,14 @@ impl VM {
         self.instances.kinds.get(kind)
     }
 
-    /// Every created (non-singleton) kind id this VM holds a schema for,
-    /// sorted: the kinds the host can hold instances of.
+    /// Every created kind id (no `:key`) this VM holds a schema for,
+    /// sorted: the kinds the host can hold project instances of.
     pub fn instance_kind_ids(&self) -> Vec<String> {
         let mut kinds: Vec<String> = self
             .instances
             .kinds
             .values()
-            .filter(|schema| !schema.singleton)
+            .filter(|schema| schema.key == KindKey::Created)
             .map(|schema| schema.kind.clone())
             .collect();
         kinds.sort_unstable();
@@ -912,47 +1515,66 @@ impl VM {
 
     /// Create the cells of a new instance with its kind's defaults and return
     /// the Lisp handle. Reusing a dropped id revives it with fresh defaults.
-    /// A singleton kind's one instance comes from `def-kind`, never here.
+    /// A singleton kind's one instance comes from `def-kind` and a keyed
+    /// kind's from [`Self::register_keyed_instance`], never here, and ids
+    /// from [`KEYED_INSTANCE_ID_BASE`] up are the VM's to allocate.
     pub fn create_instance(&mut self, id: InstanceId, kind: &str) -> Result<Value, InstanceError> {
-        if self
-            .instances
-            .kinds
-            .get(kind)
-            .is_some_and(|schema| schema.singleton)
-        {
-            return Err(InstanceError::SingletonKind(kind.to_string()));
+        if id >= KEYED_INSTANCE_ID_BASE {
+            return Err(InstanceError::ReservedId(id));
         }
-        self.insert_instance_record(id, kind)
+        if let Some(schema) = self.instances.kinds.get(kind) {
+            if schema.is_singleton() {
+                return Err(InstanceError::SingletonKind(kind.to_string()));
+            }
+            if schema.is_keyed() {
+                return Err(InstanceError::KeyedKind {
+                    kind: kind.to_string(),
+                    parent: schema.parent_kind_name().map(str::to_string),
+                });
+            }
+        }
+        self.insert_instance_record(id, kind, None)
     }
 
-    fn insert_instance_record(&mut self, id: InstanceId, kind: &str) -> Result<Value, InstanceError> {
+    fn insert_instance_record(
+        &mut self,
+        id: InstanceId,
+        kind: &str,
+        key: Option<InstanceKey>,
+    ) -> Result<Value, InstanceError> {
         if self.instances.live.contains_key(&id) {
             return Err(InstanceError::DuplicateInstance(id));
         }
-        let schema = self
+        let (kind, schema) = self
             .instances
             .kinds
-            .get(kind)
+            .get_key_value(kind)
             .ok_or_else(|| InstanceError::UnknownKind(kind.to_string()))?;
+        let defaults = |fields: &[KindField]| -> Vec<Value> {
+            fields
+                .iter()
+                .map(|field| field.default.deep_clone())
+                .collect()
+        };
         let record = InstanceRecord {
-            kind: kind.to_string(),
-            state: schema
-                .fields
-                .iter()
-                .map(|field| field.default.deep_clone())
-                .collect(),
-            document: schema
-                .document
-                .iter()
-                .map(|field| field.default.deep_clone())
-                .collect(),
+            kind: kind.clone(),
+            state: defaults(&schema.fields),
+            document: defaults(&schema.document),
             owner: Value::Nil,
             label: Value::Nil,
+            host: schema
+                .host
+                .iter()
+                .map(|declared| declared.field.default.deep_clone())
+                .collect(),
+            key,
         };
-        self.instances.dropped.remove(&id);
         self.instances.live.insert(id, record);
-        // Readers of a previously dropped id see the revived values.
-        self.republish_instance_sources(id);
+        // Readers of a previously dropped id see the revived values (an id
+        // never live before has no readers: reading it is an error).
+        if self.instances.dropped.remove(&id).is_some() {
+            self.republish_instance_sources(id, false);
+        }
         Ok(Value::Instance(id))
     }
 
@@ -967,65 +1589,377 @@ impl VM {
         let next = SINGLETON_INSTANCE_ID_BASE + self.instances.singletons.len() as InstanceId;
         let id = *self.instances.singletons.entry(kind.clone()).or_insert(next);
         if !self.instances.live.contains_key(&id) {
-            self.insert_instance_record(id, &kind)?;
+            self.insert_instance_record(id, &kind, None)?;
         }
         Ok(Value::Instance(id))
     }
 
-    /// The [`DEF_SINGLETON_KIND_NATIVE`] call `(def-kind name :key () :state
-    /// (...))` compiles to: the name as a symbol, then `:state` with the
-    /// entries the compiler built. The kind id is `<module>:<name>`
+    /// The [`DEF_KEYED_KIND_NATIVE`] call every `(def-kind name :key (...)
+    /// ...)` compiles to: the name as a symbol, then `:key` with the key
+    /// names as data (the compiler checked their shape) and `:host`/`:state`
+    /// with the entries the compiler built. The kind id is `<module>:<name>`
     /// (`scratch:<name>` in headerless code), the fallback the host uses for
-    /// kinds outside a package; singletons are never saved, so it only has to
-    /// be unique within the VM.
-    pub(super) fn def_singleton_kind_from_args(&mut self, args: Vec<Value>) -> Result<Value, VMError> {
+    /// kinds outside a package; these kinds are never saved, so it only has
+    /// to be unique within the VM. Returns what the compiler binds to the
+    /// name: the singleton's instance, an index-keyed kind's constructor,
+    /// or (for a parent-keyed kind, which gets no binding) the kind id.
+    pub(super) fn def_keyed_kind_from_args(&mut self, args: Vec<Value>) -> Result<Value, VMError> {
         let Some(Value::Symbol(name)) = args.first() else {
             return Err(VMError::Instance("def-kind expects a kind name".to_string()));
         };
+        let name = name.clone();
         let module = Some(self.current_module_name())
             .filter(|module| *module != crate::modules::IMPLICIT_MODULE);
-        let mut schema = InstanceKindSchema::new(kind_id(None, module, name));
+        let mut schema = InstanceKindSchema::new(kind_id(None, module, &name));
+        let malformed_key = || VMError::Instance(format!("def-kind {name}: malformed :key"));
         for pair in args[1..].chunks(2) {
             match pair {
-                [Value::Keyword(key), Value::List(entries)] if key == "state" => {
+                [Value::Keyword(slot), Value::Nil] if slot == "key" => schema = schema.singleton(),
+                [Value::Keyword(slot), Value::List(names)] if slot == "key" => {
+                    let names = names
+                        .iter()
+                        .map(|item| match &*item.borrow() {
+                            Value::Symbol(name) => Ok(name.clone()),
+                            _ => Err(malformed_key()),
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    schema = match <[String; 2]>::try_from(names) {
+                        Ok([parent, index]) => schema.under(parent, index),
+                        Err(names) => match <[String; 1]>::try_from(names) {
+                            Ok([index]) => schema.indexed(index),
+                            Err(_) => return Err(malformed_key()),
+                        },
+                    };
+                }
+                [Value::Keyword(slot), Value::Nil] if slot == "state" || slot == "host" => {}
+                [Value::Keyword(slot), Value::List(entries)] if slot == "state" => {
                     for entry in entries {
-                        let field = KindField::from_entry(name, "state", &entry.borrow())
+                        let field = KindField::from_entry(&name, "state", &entry.borrow())
                             .map_err(VMError::Instance)?;
                         schema = schema.with_field(field);
                     }
                 }
-                [Value::Keyword(key), Value::Nil] if key == "state" => {}
+                [Value::Keyword(slot), Value::List(entries)] if slot == "host" => {
+                    for entry in entries {
+                        let field = HostField::from_entry(&name, &entry.borrow())
+                            .map_err(VMError::Instance)?;
+                        if field
+                            .set
+                            .as_ref()
+                            .is_some_and(|set| !super::is_callable(set))
+                        {
+                            return Err(VMError::Instance(host_option_message(
+                                &name,
+                                &field.field.name,
+                                "set",
+                            )));
+                        }
+                        schema = schema.with_host_field(field);
+                    }
+                }
                 _ => {
                     return Err(VMError::Instance(format!(
-                        "def-kind {name}: a singleton (:key ()) takes only :state"
+                        "def-kind {name}: a kind with :key takes only :key, :host and :state"
                     )));
                 }
             }
         }
-        Ok(self.define_singleton_kind(schema)?)
+        if schema.is_singleton() {
+            return Ok(self.define_singleton_kind(schema)?);
+        }
+        let kind = schema.kind.clone();
+        let indexed = matches!(schema.key, KindKey::Indexed { .. });
+        self.register_instance_kind(schema)?;
+        if !indexed {
+            return Ok(Value::String(kind));
+        }
+        // `(track 3)`: the instance registered under key [3], or nil.
+        let namespace = key_namespace(&kind);
+        let constructor = super::NativeFunction::new(name.clone(), move |args, vm| {
+            match vm.keyed_constructor_call(&kind, &namespace, &name, &args) {
+                Ok(instance) => instance,
+                Err(error) => {
+                    vm.fail_native_call(error);
+                    Value::Nil
+                }
+            }
+        });
+        Ok(Value::NativeFunction(constructor))
+    }
+
+    /// `(track i)`: the instance under key `[i]` of `kind`, or nil, with a
+    /// dependency on that key's source (field `i` of `namespace`, the
+    /// kind's `%keys/<kind>`) so the reader re-runs when a track `i`
+    /// appears, goes or moves.
+    fn keyed_constructor_call(
+        &mut self,
+        kind: &str,
+        namespace: &str,
+        name: &str,
+        args: &[Value],
+    ) -> Result<Value, VMError> {
+        if self.active_expander.is_some() {
+            return Err(self.expansion_error("keyed instance lookup"));
+        }
+        let index = match args {
+            [Value::Number(index)]
+                if *index >= 0.0 && index.fract() == 0.0 && index.is_finite() =>
+            {
+                *index as u64
+            }
+            _ => {
+                return Err(VMError::Instance(format!(
+                    "({name} i) takes one non-negative integer; got ({name}{})",
+                    args.iter()
+                        .map(|arg| format!(" {}", describe_value(arg)))
+                        .collect::<String>()
+                )));
+            }
+        };
+        let value = self
+            .instances
+            .keyed_id(kind, &[index])
+            .map_or(Value::Nil, Value::Instance);
+        self.track_instance_source_read(namespace, &index.to_string(), &value);
+        Ok(value)
+    }
+
+    // ---- keyed registry (kind-bindings spec §4, §9) --------------------
+
+    /// Register the instance of keyed kind `kind` (its kind id, or a bare
+    /// name exactly one keyed kind has) under `key`, or return the one
+    /// already there. A `:key (parent index)` key is the parent instance's
+    /// id and the index: the parent must be a live instance of the parent
+    /// kind, which is resolved at the kind's first registration (so kinds
+    /// may be declared in any order). The instance starts with its `:host`
+    /// fields at their type defaults until the host pushes values
+    /// ([`Self::set_instance_field`]).
+    pub fn register_keyed_instance(
+        &mut self,
+        kind: &str,
+        key: &[u64],
+    ) -> Result<InstanceId, InstanceError> {
+        let (kind, schema) = self.instances.resolve_keyed_kind(kind)?;
+        if let Some(id) = self.instances.keyed_id(kind, key) {
+            return Ok(id);
+        }
+        let indexed = matches!(schema.key, KindKey::Indexed { .. });
+        let kind = kind.clone();
+        let parent = self.instances.check_key(&kind, key)?;
+        let id = KEYED_INSTANCE_ID_BASE + self.instances.keyed_allocated;
+        self.instances.keyed_allocated += 1;
+        self.insert_instance_record(id, &kind, Some(key.to_vec()))?;
+        self.instances
+            .keyed
+            .entry(kind.clone())
+            .or_insert_with(|| KeyRegistry {
+                ids: HashMap::new(),
+                namespace: indexed.then(|| key_namespace(&kind)),
+            })
+            .ids
+            .insert(key.to_vec(), id);
+        self.instances.set_parent(id, None, parent);
+        self.publish_key_source(&kind, key);
+        Ok(id)
+    }
+
+    /// The live instance of keyed kind `kind` (its kind id or unique bare
+    /// name) under `key`, untracked.
+    pub fn keyed_instance(&self, kind: &str, key: &[u64]) -> Option<InstanceId> {
+        let (kind, _) = self.instances.resolve_keyed_kind(kind).ok()?;
+        self.instances.keyed_id(kind, key)
+    }
+
+    /// The current key of a live keyed instance.
+    pub fn instance_key(&self, id: InstanceId) -> Option<&[u64]> {
+        self.instances.live.get(&id)?.key.as_deref()
+    }
+
+    /// Drop the instance of keyed kind `kind` under `key` (as
+    /// [`Self::drop_instance`]). Returns whether there was one.
+    pub fn drop_keyed_instance(&mut self, kind: &str, key: &[u64]) -> bool {
+        match self.keyed_instance(kind, key) {
+            Some(id) => self.drop_instance(id),
+            None => false,
+        }
+    }
+
+    /// Re-key one keyed instance (a reorder): its id, and so every handle
+    /// to it, keeps meaning the same thing; `(track i)` answers change.
+    pub fn rekey_instance(&mut self, id: InstanceId, key: &[u64]) -> Result<(), InstanceError> {
+        self.rekey_instances(&[(id, key.to_vec())])
+    }
+
+    /// Re-key several keyed instances at once, so a reorder can swap keys
+    /// (`[(a, [4]), (b, [3])]`). Nothing changes unless every move fits:
+    /// each id a live keyed instance named once, each key valid for its
+    /// kind, and no two instances of a kind left under one key. A child
+    /// moved to another parent (`[(step, [t2, 0])]`) is dropped with its
+    /// new parent from then on.
+    pub fn rekey_instances(
+        &mut self,
+        moves: &[(InstanceId, InstanceKey)],
+    ) -> Result<(), InstanceError> {
+        // Each move's kind, old key and new parent.
+        let mut plan: Vec<(Rc<str>, InstanceKey, Option<InstanceId>)> =
+            Vec::with_capacity(moves.len());
+        let mut moved = HashSet::with_capacity(moves.len());
+        for (id, key) in moves {
+            if !moved.insert(*id) {
+                return Err(InstanceError::InvalidKey(format!(
+                    "instance {id} is re-keyed twice in one move"
+                )));
+            }
+            let (kind, old) = self
+                .instances
+                .live
+                .get(id)
+                .and_then(|record| Some((record.kind.clone(), record.key.clone()?)))
+                .ok_or(InstanceError::UnknownInstance(*id))?;
+            let parent = self.instances.check_key(&kind, key)?;
+            plan.push((kind, old, parent));
+        }
+        // Conflicts, against the registry overlaid with the moves: a key
+        // vacated by a mover is free, and no two movers share a target.
+        let vacated: HashSet<(&str, &[u64])> = plan
+            .iter()
+            .map(|(kind, old, _)| (&**kind, old.as_slice()))
+            .collect();
+        let mut targets: HashMap<(&str, &[u64]), InstanceId> = HashMap::with_capacity(moves.len());
+        for ((id, key), (kind, _, _)) in moves.iter().zip(&plan) {
+            let target = (&**kind, key.as_slice());
+            let held = match targets.insert(target, *id) {
+                Some(other) => Some(other),
+                None => self
+                    .instances
+                    .keyed_id(kind, key)
+                    .filter(|held| held != id && !vacated.contains(&target)),
+            };
+            if let Some(held) = held {
+                return Err(InstanceError::InvalidKey(format!(
+                    "kind '{kind}': key ({}) is already held by instance {held}",
+                    key_text(key)
+                )));
+            }
+        }
+        // Apply: vacate every old key first, so swaps land.
+        for ((id, _), (kind, old, _)) in moves.iter().zip(&plan) {
+            if let Some(registry) = self.instances.keyed.get_mut(kind)
+                && registry.ids.get(old) == Some(id)
+            {
+                registry.ids.remove(old);
+            }
+        }
+        for ((id, key), (kind, old, parent)) in moves.iter().zip(&plan) {
+            if let Some(registry) = self.instances.keyed.get_mut(kind) {
+                registry.ids.insert(key.clone(), *id);
+            }
+            if let Some(record) = self.instances.live.get_mut(id) {
+                record.key = Some(key.clone());
+            }
+            self.instances.set_parent(*id, key_parent(old), *parent);
+        }
+        for ((id, key), (kind, old, _)) in moves.iter().zip(&plan) {
+            if old != key {
+                self.publish_key_source(kind, old);
+                self.publish_key_source(kind, key);
+                self.publish_instance_field(*id, "key", key_value(key));
+            }
+        }
+        Ok(())
+    }
+
+    /// Advance the source of one key of an index-keyed `kind` to the
+    /// instance it names now (parent-keyed kinds have no key sources).
+    fn publish_key_source(&mut self, kind: &str, key: &[u64]) {
+        let Some(registry) = self.instances.keyed.get(kind) else {
+            return;
+        };
+        let (Some(namespace), [index]) = (&registry.namespace, key) else {
+            return;
+        };
+        let value = registry
+            .ids
+            .get(key)
+            .map_or(Value::Nil, |id| Value::Instance(*id));
+        let namespace = namespace.clone();
+        self.dirty_namespace_field(&namespace, &index.to_string(), value);
+    }
+
+    /// `<track#41 [3]>`-style printing for an instance of a kind with a
+    /// `:key`; `None` for a created kind's instance.
+    pub(crate) fn instance_display(&self, id: InstanceId) -> Option<String> {
+        self.instances.display(id)
     }
 
     /// Drop an instance. Its handle turns stale: readers are dirtied and see
     /// defaults, writes become no-ops. Returns whether it was live.
+    /// A keyed instance leaves its key (readers of `(track i)` re-run), its
+    /// children (instances of `:key (parent index)` kinds under it) are
+    /// dropped with it, and its field sources nothing reads any more are
+    /// freed (its id is never reused).
     pub fn drop_instance(&mut self, id: InstanceId) -> bool {
         let Some(record) = self.instances.live.remove(&id) else {
             return false;
         };
+        let keyed = record.key.is_some();
+        if let Some(key) = &record.key {
+            if let Some(registry) = self.instances.keyed.get_mut(&record.kind)
+                && registry.ids.get(key) == Some(&id)
+            {
+                registry.ids.remove(key);
+            }
+            self.instances.set_parent(id, key_parent(key), None);
+            self.publish_key_source(&record.kind, key);
+        }
+        let children = self.instances.children.remove(&id);
         self.instances.dropped.insert(id, record.kind);
-        self.republish_instance_sources(id);
+        self.republish_instance_sources(id, false);
         // Held bindings read the stale defaults; the store forgets the slots
         // (a revived id binds fresh ones).
         self.sync_bound_slots(Some(id));
-        let namespace = instance_namespace(id);
-        let reactive_float_slots = &self.reactive_float_slots;
-        self.bound_instance_fields.retain(|(bound_id, field), _| {
-            let keep = *bound_id != id;
-            if !keep {
-                reactive_float_slots.remove_field_slots(&namespace, field);
+        if let Some(fields) = self.bound_instance_fields.remove(&id) {
+            let namespace = instance_namespace(id);
+            for field in fields.keys() {
+                self.reactive_float_slots
+                    .remove_field_slots(&namespace, field);
             }
-            keep
-        });
+        }
+        if keyed {
+            self.free_unread_instance_sources(id);
+        }
+        if let Some(children) = children {
+            let mut children: Vec<InstanceId> = children.into_iter().collect();
+            children.sort_unstable();
+            for child in children {
+                self.drop_instance(child);
+            }
+        }
         true
+    }
+
+    /// Remove the field sources of instance `id` that no reader depends on.
+    fn free_unread_instance_sources(&mut self, id: InstanceId) {
+        let Some(fields) = self
+            .dag
+            .namespace_field_sources
+            .get(&instance_namespace(id))
+        else {
+            return;
+        };
+        let unread: Vec<super::NodeId> = fields
+            .values()
+            .copied()
+            .filter(|node| {
+                matches!(
+                    self.dag.nodes.get(node),
+                    Some(ReactiveNode::Source { dependents, .. }) if dependents.is_empty()
+                )
+            })
+            .collect();
+        for node in unread {
+            self.dag.remove_node(node);
+        }
     }
 
     pub fn instance_is_live(&self, id: InstanceId) -> bool {
@@ -1036,19 +1970,19 @@ impl VM {
         self.instances.kind_of(id)
     }
 
-    /// Live host-created instance ids, sorted. Singleton instances are the
-    /// VM's own and left out, so host syncs never drop them.
+    /// Live host-created instance ids, sorted. Instances of kinds with a
+    /// `:key` (singletons, keyed projections) are not project instances and
+    /// are left out, so host syncs never drop them.
     pub fn live_instances(&self) -> Vec<InstanceId> {
         let mut ids: Vec<InstanceId> = self
             .instances
             .live
             .iter()
             .filter(|(_, record)| {
-                !self
-                    .instances
+                self.instances
                     .kinds
                     .get(&record.kind)
-                    .is_some_and(|schema| schema.singleton)
+                    .is_none_or(|schema| schema.key == KindKey::Created)
             })
             .map(|(id, _)| *id)
             .collect();
@@ -1056,11 +1990,12 @@ impl VM {
         ids
     }
 
-    /// Push a host-owned field value (`owner`, `label`) and dirty its readers.
-    pub fn set_instance_host_field(
+    /// Push a created kind's host-owned built-in field (`owner`, `label`)
+    /// and dirty its readers.
+    pub fn set_instance_builtin_field(
         &mut self,
         id: InstanceId,
-        field: InstanceHostField,
+        field: InstanceBuiltinField,
         value: Value,
     ) -> Result<(), InstanceError> {
         let record = self
@@ -1070,8 +2005,8 @@ impl VM {
             .ok_or(InstanceError::UnknownInstance(id))?;
         let stored = value.deep_clone();
         match field {
-            InstanceHostField::Owner => record.owner = stored,
-            InstanceHostField::Label => record.label = stored,
+            InstanceBuiltinField::Owner => record.owner = stored,
+            InstanceBuiltinField::Label => record.label = stored,
         }
         self.publish_instance_field(id, field.name(), value);
         Ok(())
@@ -1085,19 +2020,24 @@ impl VM {
 
     /// Untracked read of any field, for the host.
     pub fn instance_field(&self, id: InstanceId, field: &str) -> Result<Value, InstanceError> {
-        let (kind, slot) = self.instances.resolve(id, field)?;
-        Ok(self.instances.value(id, &kind, slot))
+        self.instances.field_value(id, field)
     }
 
-    /// Write a field exactly as Lisp `(set! x.field v)` would (for example to
-    /// seed per-instance evaluated defaults).
+    /// The host's write of a field: a `:host` field's push (kind-bindings
+    /// spec §9: the cell, its readers, and its slot when bound), or any other
+    /// field exactly as Lisp `(set! x.field v)` would write it (for example
+    /// to seed per-instance evaluated defaults). Type-checked like every
+    /// write; a stale instance ignores it.
     pub fn set_instance_field(
         &mut self,
         id: InstanceId,
         field: &str,
         value: Value,
     ) -> Result<(), InstanceError> {
-        self.write_instance_field(id, field, value)
+        match self.checked_write_slot(id, field, &value)? {
+            Some(slot) => self.write_slot(id, field, slot, value),
+            None => Ok(()),
+        }
     }
 
     /// The kind's `:view` to render a live instance with (spec §7): `None`
@@ -1115,7 +2055,7 @@ impl VM {
             .instances
             .kinds
             .get(&record.kind)
-            .ok_or_else(|| InstanceError::UnknownKind(record.kind.clone()))?;
+            .ok_or_else(|| InstanceError::UnknownKind(record.kind.to_string()))?;
         match &schema.view {
             Some(view) => Ok(Some(view.clone())),
             None => Err(InstanceError::InvalidSchema(format!(
@@ -1131,7 +2071,7 @@ impl VM {
             .instances
             .live
             .iter()
-            .filter(|(_, record)| record.kind == kind)
+            .filter(|(_, record)| &*record.kind == kind)
             .map(|(id, _)| *id)
             .collect();
         ids.sort_unstable();
@@ -1150,84 +2090,140 @@ impl VM {
         if self.active_expander.is_some() {
             return Err(self.expansion_error("instance field read"));
         }
-        let (kind, slot) = self.instances.resolve(id, field)?;
-        if let FieldSlot::Document(index) = slot {
-            if let Some(read) = self.instance_doc_native(INSTANCE_DOC_READ_NATIVE) {
-                // The host resolves the current pattern's value and injects
-                // its own reactive edge (the scene-slot source).
-                let default = self.instances.document_default(&kind, index);
-                return Ok(read(
-                    vec![Value::Number(id as f64), Value::String(field.to_string()), default],
-                    self,
-                ));
-            }
+        let resolved = self.instances.resolve(id, field)?;
+        if let FieldSlot::Document(index) = resolved.slot
+            && let Some(read) = self.instance_doc_native(INSTANCE_DOC_READ_NATIVE)
+        {
+            // The host resolves the current pattern's value and injects
+            // its own reactive edge (the scene-slot source).
+            let default = self.instances.document_default(resolved.kind, index);
+            return Ok(read(
+                vec![
+                    Value::Number(id as f64),
+                    Value::String(field.to_string()),
+                    default,
+                ],
+                self,
+            ));
         }
-        let value = self.instances.value(id, &kind, slot);
-        let namespace = instance_namespace(id);
-        self.record_reactive_read(&namespace, field);
-        if let Some(ctx_id) = self.tracking_stack.last().copied() {
-            let source_id = self.get_or_create_instance_source_node(&namespace, field, &value);
-            self.dag.add_edge(source_id, ctx_id);
-        }
+        let value = self.instances.value_of(id, &resolved);
+        self.track_instance_source_read(&instance_namespace(id), field, &value);
         Ok(value)
     }
 
-    /// `StoreField` on an instance.
+    /// Record a read of the store-backed source `(namespace, field)`, whose
+    /// current value is `value`: the effect/subtree read set and, while
+    /// something is being tracked, a DAG edge from the source to it.
+    fn track_instance_source_read(&mut self, namespace: &str, field: &str, value: &Value) {
+        self.record_reactive_read(namespace, field);
+        if let Some(ctx_id) = self.tracking_stack.last().copied() {
+            let source_id = self.get_or_create_instance_source_node(namespace, field, value);
+            self.dag.add_edge(source_id, ctx_id);
+        }
+    }
+
+    /// `StoreField` on an instance: `(set! x.field v)`. A `:host` field
+    /// with `:set f` calls `(f x v)` and leaves the cell to the host, which
+    /// pushes the accepted value back (kind-bindings spec §6); without one
+    /// it is read-only.
     pub(super) fn write_instance_field(
         &mut self,
         id: InstanceId,
         field: &str,
         value: Value,
-    ) -> Result<(), InstanceError> {
-        let (kind, slot, declared) = self.instances.resolve_declared(id, field)?;
-        if !self.instances.live.contains_key(&id) {
-            // Stale handle: an event handler outliving its instance.
+    ) -> Result<(), VMError> {
+        let Some(slot) = self.checked_write_slot(id, field, &value)? else {
             return Ok(());
+        };
+        let FieldSlot::Host(index) = slot else {
+            return Ok(self.write_slot(id, field, slot, value)?);
+        };
+        let kind = self.instances.kind_of(id).unwrap_or_default();
+        let setter = self
+            .instances
+            .kinds
+            .get(kind)
+            .and_then(|schema| schema.host.get(index))
+            .and_then(|declared| declared.set.clone());
+        let Some(setter) = setter else {
+            return Err(InstanceError::ReadOnlyHostField {
+                kind: kind.to_string(),
+                field: field.to_string(),
+            }
+            .into());
+        };
+        self.invoke(setter, vec![Value::Instance(id), value])?;
+        Ok(())
+    }
+
+    /// Resolve a write of `value` to `field` and type-check it: the cell to
+    /// write, or `None` for a stale instance (writes to it are no-ops: an
+    /// event handler outliving its instance).
+    fn checked_write_slot(
+        &self,
+        id: InstanceId,
+        field: &str,
+        value: &Value,
+    ) -> Result<Option<FieldSlot>, InstanceError> {
+        let resolved = self.instances.resolve(id, field)?;
+        if resolved.record.is_none() {
+            return Ok(None);
         }
-        if let Some(declared) = declared {
-            self.instances.check_write(kind, field, declared, &value)?;
+        if let Some(declared) = resolved.declared {
+            self.instances
+                .check_write(resolved.kind, field, declared, value)?;
         }
-        let kind = kind.to_string();
-        match slot {
-            FieldSlot::Id | FieldSlot::Kind | FieldSlot::Owner => {
+        Ok(Some(resolved.slot))
+    }
+
+    /// Store a checked write in a live instance's cell (a `:host` cell is
+    /// the host's push) and publish it.
+    fn write_slot(
+        &mut self,
+        id: InstanceId,
+        field: &str,
+        slot: FieldSlot,
+        value: Value,
+    ) -> Result<(), InstanceError> {
+        let index = match slot {
+            FieldSlot::Id | FieldSlot::Kind | FieldSlot::Owner | FieldSlot::Key => {
                 return Err(InstanceError::ReadOnlyField {
-                    kind,
+                    kind: self.instances.kind_of(id).unwrap_or_default().to_string(),
                     field: field.to_string(),
                 });
             }
             FieldSlot::Label => {
-                if let Some(hook) = self.instances.label_hook.clone() {
-                    hook(id, &value);
-                    return Ok(());
+                match self.instances.label_hook.clone() {
+                    Some(hook) => hook(id, &value),
+                    None => {
+                        self.set_instance_builtin_field(id, InstanceBuiltinField::Label, value)?
+                    }
                 }
-                return self.set_instance_host_field(id, InstanceHostField::Label, value);
+                return Ok(());
             }
-            FieldSlot::State(index) => {
-                if let Some(cell) = self
-                    .instances
-                    .live
-                    .get_mut(&id)
-                    .and_then(|record| record.state.get_mut(index))
-                {
-                    *cell = value.deep_clone();
-                }
-            }
-            FieldSlot::Document(index) => {
-                if let Some(write) = self.instance_doc_native(INSTANCE_DOC_WRITE_NATIVE) {
-                    write(
-                        vec![Value::Number(id as f64), Value::String(field.to_string()), value],
-                        self,
-                    );
-                    return Ok(());
-                }
-                if let Some(cell) = self
-                    .instances
-                    .live
-                    .get_mut(&id)
-                    .and_then(|record| record.document.get_mut(index))
-                {
-                    *cell = value.deep_clone();
-                }
+            FieldSlot::Host(index) | FieldSlot::State(index) | FieldSlot::Document(index) => index,
+        };
+        if matches!(slot, FieldSlot::Document(_))
+            && let Some(write) = self.instance_doc_native(INSTANCE_DOC_WRITE_NATIVE)
+        {
+            write(
+                vec![
+                    Value::Number(id as f64),
+                    Value::String(field.to_string()),
+                    value,
+                ],
+                self,
+            );
+            return Ok(());
+        }
+        if let Some(record) = self.instances.live.get_mut(&id) {
+            let cells = match slot {
+                FieldSlot::Host(_) => &mut record.host,
+                FieldSlot::State(_) => &mut record.state,
+                _ => &mut record.document,
+            };
+            if let Some(cell) = cells.get_mut(index) {
+                *cell = value.deep_clone();
             }
         }
         self.publish_instance_field(id, field, value);
@@ -1266,31 +2262,37 @@ impl VM {
 
     /// Advance one field's source (if anything ever read it) and dirty only
     /// its readers, and write its binding slot if it has one. Unread,
-    /// unbound fields allocate nothing.
+    /// unbound fields allocate nothing but the namespace name.
     fn publish_instance_field(&mut self, id: InstanceId, field: &str, value: Value) {
-        self.write_bound_slot(id, field, &value);
         let namespace = instance_namespace(id);
-        if let Some(source_id) = self.dag.find_namespace_field_source_node(&namespace, field) {
+        self.write_bound_slot(&namespace, id, field, &value);
+        self.dirty_namespace_field(&namespace, field, value);
+    }
+
+    /// Advance the source `(namespace, field)`, if anything ever read it,
+    /// to `value`, dirtying its readers when that changes it.
+    fn dirty_namespace_field(&mut self, namespace: &str, field: &str, value: Value) {
+        if let Some(source_id) = self.dag.find_namespace_field_source_node(namespace, field) {
             self.mark_source_dependents_dirty(source_id, value);
         }
     }
 
-    /// Write a bound field's slot(s); queue a repaint of its widgets when
-    /// that changed them.
-    fn write_bound_slot(&mut self, id: InstanceId, field: &str, value: &Value) {
-        if self.bound_instance_fields.is_empty() {
-            return;
-        }
-        let key = (id, field.to_string());
-        let Some(&kind) = self.bound_instance_fields.get(&key) else {
+    /// Write a bound field's slot(s) (`namespace` is the instance's); queue
+    /// a repaint of its widgets when that changed them.
+    fn write_bound_slot(&mut self, namespace: &str, id: InstanceId, field: &str, value: &Value) {
+        let Some(&kind) = self
+            .bound_instance_fields
+            .get(&id)
+            .and_then(|fields| fields.get(field))
+        else {
             return;
         };
-        let namespace = instance_namespace(id);
         let (_, changed) = self
             .reactive_float_slots
-            .write_binding(&namespace, field, kind, value);
+            .write_binding(namespace, field, kind, value);
         if changed {
-            self.pending_binding_repaints.insert(key);
+            self.pending_binding_repaints
+                .insert((id, field.to_string()));
         }
     }
 
@@ -1299,29 +2301,43 @@ impl VM {
     /// changed what its fields answer. A field whose new type is no longer
     /// slot-backed loses its slot.
     pub(super) fn sync_bound_slots(&mut self, id: Option<InstanceId>) {
-        let keys: Vec<(InstanceId, String)> = self
-            .bound_instance_fields
-            .keys()
-            .filter(|(bound_id, _)| id.is_none_or(|id| id == *bound_id))
-            .cloned()
-            .collect();
-        for key in keys {
-            let (id, field) = &key;
-            let resolved = self.instances.resolve_declared(*id, field).ok().and_then(
-                |(kind, slot, declared)| {
-                    let binding = declared?.ty.binding_kind(*id)?;
-                    Some((self.instances.value(*id, kind, slot), binding))
-                },
-            );
-            match resolved {
-                Some((value, binding)) => {
-                    self.bound_instance_fields.insert(key.clone(), binding);
-                    self.write_bound_slot(*id, field, &value);
-                }
-                None => {
-                    self.reactive_float_slots
-                        .remove_field_slots(&instance_namespace(*id), field);
-                    self.bound_instance_fields.remove(&key);
+        let ids: Vec<InstanceId> = match id {
+            Some(id) if self.bound_instance_fields.contains_key(&id) => vec![id],
+            Some(_) => return,
+            None => self.bound_instance_fields.keys().copied().collect(),
+        };
+        for id in ids {
+            let namespace = instance_namespace(id);
+            let fields: Vec<String> = self
+                .bound_instance_fields
+                .get(&id)
+                .map(|fields| fields.keys().cloned().collect())
+                .unwrap_or_default();
+            for field in fields {
+                let resolved = self
+                    .instances
+                    .resolve(id, &field)
+                    .ok()
+                    .and_then(|resolved| {
+                        let binding = resolved.declared?.ty.binding_kind(id)?;
+                        Some((self.instances.value_of(id, &resolved), binding))
+                    });
+                let Some(bound) = self.bound_instance_fields.get_mut(&id) else {
+                    continue;
+                };
+                match resolved {
+                    Some((value, binding)) => {
+                        bound.insert(field.clone(), binding);
+                        self.write_bound_slot(&namespace, id, &field, &value);
+                    }
+                    None => {
+                        bound.remove(&field);
+                        if bound.is_empty() {
+                            self.bound_instance_fields.remove(&id);
+                        }
+                        self.reactive_float_slots
+                            .remove_field_slots(&namespace, &field);
+                    }
                 }
             }
         }
@@ -1351,7 +2367,7 @@ impl VM {
         field: &str,
     ) -> Result<Value, VMError> {
         let host_documents = self.instance_doc_native(INSTANCE_DOC_READ_NATIVE).is_some();
-        let (kind, slot, declared) = match self.instances.resolve_declared(id, field) {
+        let resolved = match self.instances.resolve(id, field) {
             Ok(resolved) => resolved,
             Err(InstanceError::UnknownField { kind, field, .. }) => {
                 let bindable = self.instances.bindable_fields(&kind, host_documents);
@@ -1361,13 +2377,14 @@ impl VM {
             }
             Err(error) => return Err(error.into()),
         };
+        let kind = resolved.kind;
         let unbindable = |what: String| {
             VMError::Instance(format!(
                 "#': field '{field}' of kind '{kind}' {what}; bindable fields: {}",
                 self.instances.bindable_fields(kind, host_documents)
             ))
         };
-        let Some(declared) = declared else {
+        let Some(declared) = resolved.declared else {
             return Err(unbindable("is a built-in field".to_string()));
         };
         let Some(binding) = declared.ty.binding_kind(id) else {
@@ -1376,25 +2393,24 @@ impl VM {
                 declared.ty
             )));
         };
-        if matches!(slot, FieldSlot::Document(_)) && host_documents {
+        if matches!(resolved.slot, FieldSlot::Document(_)) && host_documents {
             return Err(unbindable("is a host-stored :document field".to_string()));
         }
         let namespace = instance_namespace(id);
-        if !self.instances.live.contains_key(&id) {
+        let value = self.instances.value_of(id, &resolved);
+        if resolved.record.is_none() {
             // A stale instance: a detached slot holding the default.
-            let value = self.instances.value(id, kind, slot);
             return Ok(crate::reactive::detached_binding_ref(
                 namespace, field, binding, &value,
             ));
         }
-        let key = (id, field.to_string());
-        let slot = if self.bound_instance_fields.contains_key(&key) {
+        let bound = self.bound_instance_fields.entry(id).or_default();
+        let slot = if bound.contains_key(field) {
             // Already bound: every change of the field keeps the slot current.
             self.reactive_float_slots
                 .binding_slot(&namespace, field, binding)
         } else {
-            let value = self.instances.value(id, kind, slot);
-            self.bound_instance_fields.insert(key, binding);
+            bound.insert(field.to_string(), binding);
             let (slot, _) = self
                 .reactive_float_slots
                 .write_binding(&namespace, field, binding, &value);
@@ -1409,20 +2425,25 @@ impl VM {
         })
     }
 
-    /// Re-publish every retained source of an instance from the store (after
-    /// create/drop changed what each field answers).
-    fn republish_instance_sources(&mut self, id: InstanceId) {
+    /// Re-publish every read source of an instance from the store (after
+    /// create/drop/re-registration changed what each field answers). A
+    /// field it no longer has publishes nil, unless `keep_removed` (a hot
+    /// reload leaves readers of a removed field alone rather than re-running
+    /// them into an error mid-reload).
+    fn republish_instance_sources(&mut self, id: InstanceId, keep_removed: bool) {
         let namespace = instance_namespace(id);
         let Some(fields) = self.dag.namespace_field_sources.get(&namespace) else {
             return;
         };
         let fields: Vec<String> = fields.keys().cloned().collect();
         for field in fields {
-            let value = match self.instances.resolve(id, &field) {
-                Ok((kind, slot)) => self.instances.value(id, &kind, slot),
+            let value = match self.instances.field_value(id, &field) {
+                Ok(value) => value,
+                Err(_) if keep_removed => continue,
                 Err(_) => Value::Nil,
             };
-            self.publish_instance_field(id, &field, value);
+            self.write_bound_slot(&namespace, id, &field, &value);
+            self.dirty_namespace_field(&namespace, &field, value);
         }
     }
 }
@@ -1432,12 +2453,16 @@ impl VM {
 mod field_binding_tests;
 
 #[cfg(test)]
+#[path = "keyed_kind_tests.rs"]
+mod keyed_kind_tests;
+
+#[cfg(test)]
 mod tests {
     use std::cell::RefCell;
     use std::rc::Rc;
 
     use super::super::{EffectTarget, PendingUiUpdate, VM, VMError, Value};
-    use super::{InstanceHostField, InstanceKindSchema};
+    use super::{InstanceBuiltinField, InstanceKindSchema};
 
     const KIND: &str = "test/pkg:probe";
 
@@ -1651,8 +2676,12 @@ mod tests {
             "#,
         );
         eval(&mut vm, "(set! a.x 8)");
-        vm.set_instance_host_field(1, InstanceHostField::Label, Value::String("Kit A".into()))
-            .expect("label");
+        vm.set_instance_builtin_field(
+            1,
+            InstanceBuiltinField::Label,
+            Value::String("Kit A".into()),
+        )
+        .expect("label");
         rendered_targets(&mut vm);
 
         assert!(vm.drop_instance(1));
@@ -1700,8 +2729,12 @@ mod tests {
         );
         rendered_targets(&mut vm);
 
-        vm.set_instance_host_field(4, InstanceHostField::Owner, Value::String("Kit A".into()))
-            .expect("owner");
+        vm.set_instance_builtin_field(
+            4,
+            InstanceBuiltinField::Owner,
+            Value::String("Kit A".into()),
+        )
+        .expect("owner");
         vm.process_dirty_reactive().expect("process");
         assert_eq!(rendered_targets(&mut vm), vec!["*owner*"]);
 
@@ -1719,9 +2752,16 @@ mod tests {
         eval(&mut vm, r#"(set! a.label "second")"#);
         assert_eq!(*renames.borrow(), vec![(4, Value::String("second".into()))]);
         assert!(rendered_targets(&mut vm).is_empty());
-        assert_eq!(vm.instance_field(4, "label"), Ok(Value::String("first".into())));
-        vm.set_instance_host_field(4, InstanceHostField::Label, Value::String("second".into()))
-            .expect("push label");
+        assert_eq!(
+            vm.instance_field(4, "label"),
+            Ok(Value::String("first".into()))
+        );
+        vm.set_instance_builtin_field(
+            4,
+            InstanceBuiltinField::Label,
+            Value::String("second".into()),
+        )
+        .expect("push label");
         vm.process_dirty_reactive().expect("process");
         assert_eq!(rendered_targets(&mut vm), vec!["*label*"]);
     }
@@ -1976,12 +3016,8 @@ mod tests {
     }
 
     #[test]
-    fn keyed_kinds_and_created_kind_slots_on_singletons_are_errors() {
+    fn created_kind_slots_on_singletons_are_errors() {
         let mut vm = instance_vm();
-        assert!(
-            compile_errors(&mut vm, "(def-kind track :key (index) :state ((x 0)))")
-                .contains("keyed kinds (:key (index ...)) are not supported yet")
-        );
         assert!(
             compile_errors(&mut vm, "(def-kind menu :key () :state ((x 0)) :view show)")
                 .contains("a singleton (:key ()) has no :view")

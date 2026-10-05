@@ -18,11 +18,15 @@ use std::time::{Duration, Instant};
 mod instances;
 mod view_buffers;
 pub use instances::{
-    DEF_SINGLETON_KIND_NATIVE, FIELD_REF_NATIVE, FieldType, INSTANCE_HOST_FIELDS,
-    INSTANCE_NAMESPACE_PREFIX, InstanceError, InstanceHostField, InstanceId, InstanceKindSchema,
-    InstanceLabelHook, KindField, SCRATCH_KIND_PACKAGE, kind_id, kind_name_of,
+    CREATED_BUILTIN_FIELDS, DEF_KEYED_KIND_NATIVE, FIELD_REF_NATIVE, FieldType, HostField,
+    INSTANCE_NAMESPACE_PREFIX, InstanceBuiltinField, InstanceError, InstanceId, InstanceKey,
+    InstanceKindSchema, InstanceLabelHook, KIND_KEYS_NAMESPACE_PREFIX, KindField, KindKey,
+    SCRATCH_KIND_PACKAGE, kind_id, kind_name_of,
 };
-pub(crate) use instances::{FIELD_TYPES_HINT, nil_default_message, state_entry_shape_message};
+pub(crate) use instances::{
+    FIELD_TYPES_HINT, host_entry_shape_message, host_option_message, nil_default_message,
+    state_entry_shape_message,
+};
 pub use view_buffers::BoundView;
 
 static RAND_STATE: AtomicU64 = AtomicU64::new(0x9e37_79b9_7f4a_7c15);
@@ -952,7 +956,31 @@ pub struct ReactiveDag {
     detached_subtree_effects: HashSet<NodeId>,
 }
 
+/// Whether [`VM::invoke`] can call `value`: a closure, a native, a host
+/// handle or an override dispatcher/original.
+pub(crate) fn is_callable(value: &Value) -> bool {
+    matches!(
+        value,
+        Value::Closure(..)
+            | Value::NativeFunction(_)
+            | Value::HostHandle { .. }
+            | Value::OverrideDispatcher(_)
+            | Value::OverrideOriginal(_)
+    )
+}
+
 pub fn format_lisp_value(value: &Value) -> String {
+    format_lisp_value_with(value, &|_| None)
+}
+
+/// [`format_lisp_value`], printing an instance as `instance` names it
+/// (`<track#41 [3]>`, kind-bindings spec §4) or, for `None`, as
+/// `<instance:id>`. [`VM::format_value`] passes the VM's instance store.
+pub fn format_lisp_value_with(
+    value: &Value,
+    instance: &dyn Fn(InstanceId) -> Option<String>,
+) -> String {
+    let recur = |value: &Value| format_lisp_value_with(value, instance);
     match value {
         Value::Number(n) => {
             if n.fract() == 0.0 {
@@ -969,7 +997,7 @@ pub fn format_lisp_value(value: &Value) -> String {
         Value::List(items) => {
             let rendered = items
                 .iter()
-                .map(|item| format_lisp_value(&item.borrow()))
+                .map(|item| recur(&item.borrow()))
                 .collect::<Vec<_>>()
                 .join(" ");
             format!("({rendered})")
@@ -977,7 +1005,7 @@ pub fn format_lisp_value(value: &Value) -> String {
         Value::Map(map) => {
             let mut entries = map
                 .iter()
-                .map(|(key, value)| (key.clone(), format_lisp_value(&value.borrow())))
+                .map(|(key, value)| (key.clone(), recur(&value.borrow())))
                 .collect::<Vec<_>>();
             entries.sort_by(|a, b| a.0.cmp(&b.0));
             let rendered = entries
@@ -1000,7 +1028,7 @@ pub fn format_lisp_value(value: &Value) -> String {
         Value::OverrideDispatcher(name) => format!("<override:{name}>"),
         Value::OverrideOriginal(name) => format!("<original:{name}>"),
         Value::HostHandle { kind, id, .. } => format!("<{kind}:{id}>"),
-        Value::Instance(id) => format!("<instance:{id}>"),
+        Value::Instance(id) => instance(*id).unwrap_or_else(|| format!("<instance:{id}>")),
     }
 }
 
@@ -1084,12 +1112,12 @@ enum FmtAlign {
     Left,
 }
 
-fn format_fmt_value(value: &Value, spec: &FmtSpec) -> String {
+fn format_fmt_value(vm: &VM, value: &Value, spec: &FmtSpec) -> String {
     // Format the raw value first
     let raw = match (value, spec.precision) {
         (Value::Number(n), Some(precision)) => format!("{n:.precision$}"),
         (Value::String(s), _) => s.clone(),
-        _ => format_lisp_value(value),
+        _ => vm.format_value(value),
     };
     // Apply width + alignment padding
     let Some(width) = spec.width else {
@@ -1528,6 +1556,65 @@ fn convert_let_bindings(
     )
 }
 
+/// A def-kind `:host`/`:state`/`:document` group, like
+/// [`convert_let_bindings`]: in each entry the field name and its type are
+/// data, while a default (`(field default)` outside `:host`, `:default d`)
+/// and a `:set f` are code, so widget calls in them keep their source
+/// props and lambdas convert normally.
+fn convert_def_kind_entries(
+    expr: &Expr,
+    host: bool,
+    source_revision: u64,
+    local_defwidgets: &HashSet<String>,
+    shadowed_widget_names: &HashSet<String>,
+    macro_names: &HashSet<String>,
+) -> Expression {
+    let data = |expr: &Expr| {
+        convert_source_data_expr(
+            expr,
+            source_revision,
+            local_defwidgets,
+            shadowed_widget_names,
+            macro_names,
+        )
+    };
+    let ExprKind::List(entries) = &expr.kind else {
+        return data(expr);
+    };
+    Expression::List(
+        entries
+            .iter()
+            .map(|entry| {
+                let ExprKind::List(parts) = &entry.kind else {
+                    return data(entry);
+                };
+                Expression::List(
+                    parts
+                        .iter()
+                        .enumerate()
+                        .map(|(idx, part)| {
+                            let code = (idx == 1 && parts.len() == 2 && !host)
+                                || (idx >= 2
+                                    && matches!(
+                                        &parts[idx - 1].kind,
+                                        ExprKind::Keyword(option) if option == "default" || option == "set"
+                                    ));
+                            convert_source_expr(
+                                part,
+                                source_revision,
+                                local_defwidgets,
+                                shadowed_widget_names,
+                                macro_names,
+                                code,
+                            )
+                        })
+                        .collect(),
+                )
+            })
+            .collect(),
+    )
+}
+
 fn convert_list_with_code_from_idx(
     items: &[Expr],
     source_revision: u64,
@@ -1727,6 +1814,44 @@ fn convert_source_expr(
                         shadowed_widget_names,
                         macro_names,
                         body_start_idx,
+                    );
+                }
+                // A def-kind's field groups are entry lists, not calls:
+                // `(label :string)` is a field named label, never the widget.
+                Some("def-kind") => {
+                    return Expression::List(
+                        items
+                            .iter()
+                            .enumerate()
+                            .map(|(idx, item)| {
+                                let slot = idx.checked_sub(1).and_then(|previous| {
+                                    match &items[previous].kind {
+                                        ExprKind::Keyword(slot) => Some(slot.as_str()),
+                                        _ => None,
+                                    }
+                                });
+                                match slot {
+                                    Some(group @ ("host" | "state" | "document")) => {
+                                        convert_def_kind_entries(
+                                            item,
+                                            group == "host",
+                                            source_revision,
+                                            local_defwidgets,
+                                            shadowed_widget_names,
+                                            macro_names,
+                                        )
+                                    }
+                                    _ => convert_source_expr(
+                                        item,
+                                        source_revision,
+                                        local_defwidgets,
+                                        shadowed_widget_names,
+                                        macro_names,
+                                        slot != Some("key"),
+                                    ),
+                                }
+                            })
+                            .collect(),
                     );
                 }
                 Some("defmacro") => {
@@ -2553,7 +2678,9 @@ pub struct VM {
     /// Instance fields with binding slots (`#'x.field`, kind-bindings spec
     /// §7.1) and their binding kind. Like the slots this is not eval state:
     /// a rollback keeps it and re-syncs the slots.
-    bound_instance_fields: HashMap<(InstanceId, String), BindingKind>,
+    /// Keyed by instance first, so a push looks its field up without
+    /// allocating and a drop touches only that instance's entries.
+    bound_instance_fields: HashMap<InstanceId, HashMap<String, BindingKind>>,
     /// Bound instance fields whose slots changed since the host last asked
     /// ([`Self::take_pending_binding_repaints`]).
     pending_binding_repaints: HashSet<(InstanceId, String)>,
@@ -2912,7 +3039,7 @@ pub fn register_core_natives(vm: &mut VM) {
         let (Some(Value::String(target)), Some(callable)) = (args.first(), args.get(1)) else {
             return Value::Bool(false);
         };
-        if !matches!(callable, Value::Closure(..) | Value::Function(_) | Value::NativeFunction(_)) {
+        if !is_callable(callable) {
             return Value::Bool(false);
         }
         let view = BoundView::Call {
@@ -2936,11 +3063,13 @@ pub fn register_core_natives(vm: &mut VM) {
         _ => Value::Nil,
     });
 
-    // `(def-kind name :key () :state (...))` (kind-bindings spec §3.1):
-    // register the singleton kind and return its one instance. A malformed
-    // entry or a default its type rejects fails the eval.
-    vm.register_native_with_vm(DEF_SINGLETON_KIND_NATIVE, |args, vm| {
-        match vm.def_singleton_kind_from_args(args) {
+    // `(def-kind name :key (...) :host (...) :state (...))` (kind-bindings
+    // spec §3.1): register the singleton or keyed kind and return what the
+    // compiler binds to its name (the singleton's instance, a keyed kind's
+    // constructor). A malformed entry or a default its type rejects fails
+    // the eval.
+    vm.register_native_with_vm(DEF_KEYED_KIND_NATIVE, |args, vm| {
+        match vm.def_keyed_kind_from_args(args) {
             Ok(instance) => instance,
             Err(error) => {
                 vm.fail_native_call(error);
@@ -3772,12 +3901,12 @@ pub fn register_core_natives(vm: &mut VM) {
     });
 
     // (str val ...) → concatenated Lisp string representation
-    vm.register_native("str", |args| {
+    vm.register_native_with_vm("str", |args, vm| {
         let mut s = String::new();
         for v in &args {
             match v {
                 Value::String(val) => s.push_str(val),
-                other => s.push_str(&format_lisp_value(other)),
+                other => s.push_str(&vm.format_value(other)),
             }
         }
         Value::String(s)
@@ -3848,7 +3977,7 @@ pub fn register_core_natives(vm: &mut VM) {
         Value::String(s)
     });
 
-    vm.register_native("fmt", |args| {
+    vm.register_native_with_vm("fmt", |args, vm| {
         let Some(Value::String(template)) = args.first() else {
             return Value::Nil;
         };
@@ -3863,7 +3992,7 @@ pub fn register_core_natives(vm: &mut VM) {
                     search_from = idx + 1;
                     continue;
                 };
-                let replacement = format_fmt_value(value, &spec);
+                let replacement = format_fmt_value(vm, value, &spec);
                 rendered.replace_range(idx..idx + len, &replacement);
                 replaced = true;
                 break;
@@ -4824,6 +4953,12 @@ impl VM {
         };
         vm.register_native(SOURCE_ORIGIN_NATIVE, source_origin_native);
         vm
+    }
+
+    /// [`format_lisp_value`], printing instances of kinds with a `:key` by
+    /// kind and key (`<track#41 [3]>`, `<transport>`).
+    pub fn format_value(&self, value: &Value) -> String {
+        format_lisp_value_with(value, &|id| self.instance_display(id))
     }
 
     /// Make the running native call fail with `error` once it returns (a

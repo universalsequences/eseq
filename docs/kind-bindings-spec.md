@@ -1,6 +1,6 @@
 # Kind bindings
 
-Status: spec rev 3, 2026-10-04. Stages 1–2 built (§3.1, §3.3, §7.1, §8 notes). Bead: epic `eseq-0l17` (`bd list --label kind-bindings`).
+Status: spec rev 3, 2026-10-04. Stages 1–3 built (§3.1, §3.2, §3.3, §4, §7.1, §8 notes). Bead: epic `eseq-0l17` (`bd list --label kind-bindings`).
 Rev 3 resolves the open questions (§12 Decisions). Rev 2 dropped the separate `defrecord` form of rev 1: host state and view state
 are declared with `def-kind`, which gains keyed and singleton kinds, a `:host`
 field group and typed fields.
@@ -164,8 +164,64 @@ per-instance project state, which a singleton is not). Its kind id is
 `<module>:<name>` (`scratch:<name>` headerless); its instance id comes from
 `SINGLETON_INSTANCE_ID_BASE` (2^48) up, clear of host ids. Re-evaluating the
 `def-kind` keeps the instance and its values (§3.3 reload rule). A kind
-cannot switch between created and singleton without a restart. `:key` with
-key names is a compile error until stage 3.
+cannot switch between created and singleton without a restart.
+
+Built (stage 3, keyed kinds):
+
+- Every `:key` form compiles to `__def-keyed-kind` (no host `def-kind`
+  call). `:key (index)` binds the name to the constructor (a native closing
+  over the kind id); `:key (parent index)` binds nothing and the form's
+  value is the kind id. Keys longer than two names are a compile error.
+  Kinds with a `:key` take `:host` and `:state`, singletons included, in any
+  mix (`transport` can carry a local `:state` field); `:view`, `:document`,
+  `:on-create` and the rest are errors. `:key` stays fixed in shape
+  (created / singleton / `(index)` / `(parent index)` under the same parent
+  name; index names may change) until restart. The schema holds it as
+  `KindKey::{Created, Singleton, Indexed, Under}`; the compiler is the one
+  place the "at most two names" rule is checked.
+- Keys are `&[u64]`. For `(parent index)` the first part is the parent
+  instance's **id** (D2: re-keying a track leaves its steps alone), so
+  `<step#902 [41 12]>` prints the track id. The VM keeps a children index
+  (parent id → child ids), maintained by register, re-key (a step moved to
+  another track belongs to the new one) and drop; dropping a parent drops
+  exactly its current children.
+- The parent named in `:key` is resolved when the kind's first instance
+  registers, not at `def-kind`, so `eseq.kinds` can declare `step` before
+  `track`: the parent's own module first (`m:track` for `m:step`), else the
+  one keyed kind with that name. The resolved parent kind id is then fixed
+  for the VM's life, so a kind defined later that makes the name ambiguous
+  never re-parents (or orphans) live children. A parent that is not keyed,
+  or a key whose first part is not a live parent instance, is a
+  registration error.
+- Built-ins of a keyed kind are `id`, `kind` and **`key`** (the key as a
+  list, `(3)`, tracked and re-published on re-key; read-only). `t.index`
+  is not built in: the host declares and publishes `index` as a `:host`
+  field where views want it (§4).
+- Keyed instance ids are VM-allocated from `KEYED_INSTANCE_ID_BASE` (2^32)
+  up, never reused (an eval rollback keeps the allocation counter):
+  ordinary instance ids (equality, tombstones, `#'`), in a range clear of
+  the ids the host saves for created instances; `create_instance` with an
+  id from that range (or the singleton range) is an error
+  (`InstanceError::ReservedId`). Dropping a keyed instance frees its field
+  sources nothing reads any more.
+- `(track i)` records a dependency on the source `(%keys/<kind id>, "i")`,
+  one per key, advanced on register, drop and re-key; a non-integer or
+  negative argument is an error. Only index-keyed kinds (which have a
+  constructor) publish key sources.
+- Host API (VM, mirrored on `Runtime`): `register_keyed_instance(kind,
+  &[u64]) -> Result<InstanceId>` (kind id or a unique bare name;
+  idempotent), `keyed_instance(kind, key)`, `drop_keyed_instance(kind, key)`
+  (or `drop_instance(id)`), `rekey_instance(id, key)` and
+  `rekey_instances(&[(id, key)])` (atomic, so a reorder can swap keys; a
+  conflicting move, or a list naming one id twice, changes nothing),
+  `instance_key(id)`.
+  `create_instance` on a keyed kind is an error
+  (`track instances come from the project; use (track i)`, or `…; reach
+  them through their track` for a parent-keyed kind).
+- Printing: `VM::format_value` / `Runtime::format_value` (used by `str`,
+  `fmt` and the minibuffer echo) print `<track#41 [3]>`, `<step#902 [41 12]>`,
+  `<transport>`, and a dropped keyed instance as `<track#41>`;
+  `format_lisp_value` without a VM still prints `<instance:id>`.
 
 ### 3.2 `:host`
 
@@ -179,6 +235,25 @@ Fields whose values the host owns. Entries are typed (§3.3) and may carry:
 
 `:host` is allowed only on keyed and singleton kinds. On a created kind it is
 an error: `:host fields need :key` (§12 D5).
+
+Built (stage 3): a `:host` field (`HostField`) starts at its type's default
+(`0`, `false`, `""`, `(rgb 0 0 0)`, `()`, nil) until the host pushes a
+value with `set_instance_field`, which type-checks the push (an error, as
+for every write, §3.3) and writes the cell, the readers' source and a bound
+slot. `:set` is evaluated when `def-kind` runs (like `:view`), so the setter
+must be defined first, and must be something `invoke` can call (a closure,
+a native, a host handle). The created kind's `owner`/`label` are *built-in*
+fields (`InstanceBuiltinField`, `set_instance_builtin_field`), not `:host`
+ones. A Lisp write checks the
+value's type, then calls `(f t v)` and writes nothing; without `:set` it is
+`track.peak is read-only` (the kind name part of the kind id). Stale
+instances ignore both. `:range` takes two literal numbers; `:range`/`:doc`
+are schema metadata (`InstanceKindSchema::host`) until `field-range`/
+`describe-kind` land. `:host` fields bind with `#'` like `:state` ones.
+In `def-kind` field groups (`:key`, `:host`, `:state`, `:document`) the
+field names and types are read as data, so a field named like a widget
+(`(label :string)`) is not annotated as a widget call; defaults,
+`:default` and `:set` expressions convert as ordinary code.
 
 ### 3.3 Field types
 
@@ -458,8 +533,8 @@ Built (stage 2):
 ## 9. Host side
 
 **Publishing.** A structured push replaces `format!`-built field names,
-generalizing `VM::set_instance_host_field` (`instances.rs:536`, today
-`owner`/`label` only):
+generalizing `VM::set_instance_builtin_field` (formerly
+`set_instance_host_field`; `owner`/`label` only):
 
 ```rust
 rt.set_instance_field(track_id, "volume", Value::Number(0.8));

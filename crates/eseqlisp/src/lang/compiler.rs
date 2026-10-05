@@ -1,5 +1,6 @@
 use super::SOURCE_ORIGIN_NATIVE;
 use crate::parser::Expression;
+use crate::vm::KindKey;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
@@ -269,16 +270,21 @@ fn is_widget_name(name: &str) -> bool {
     )
 }
 
-/// The `:slot value` pairs of a `def-kind` form, in order, and whether it
-/// declares a singleton (`:key ()`); without `:key` it is a created kind.
-/// Keyed kinds (`:key (index)`, kind-bindings spec §3.1) are not built yet
-/// and are an error, as is a malformed slot list.
+/// The `:slot value` pairs of a `def-kind` form, in order, and its `:key`
+/// (kind-bindings spec §3.1): `None` without `:key` (a created kind). This
+/// is the one place the key's shape (at most two names) is checked. A
+/// malformed slot list or key is an error.
 fn def_kind_slots<'e>(
     name: &str,
     list: &'e [Expression],
-) -> Result<(Vec<(String, &'e Expression)>, bool), CompilerError> {
+) -> Result<(Vec<(String, &'e Expression)>, Option<KindKey>), CompilerError> {
     let mut slots = Vec::new();
-    let mut singleton = false;
+    let mut key = None;
+    let key_shape = || {
+        CompilerError::Message(format!(
+            "def-kind {name}: :key expects () (a singleton), (index) or (parent index)"
+        ))
+    };
     for (offset, pair) in list[2..].chunks(2).enumerate() {
         let Expression::Keyword(slot) = strip_source_origin_wrappers(pair[0].clone()) else {
             return Err(CompilerError::Message(format!(
@@ -292,27 +298,40 @@ fn def_kind_slots<'e>(
             )));
         };
         if slot == "key" {
-            match strip_source_origin_wrappers(value.clone()) {
-                Expression::List(fields) | Expression::QuoteList(fields) if fields.is_empty() => {
-                    singleton = true;
-                }
-                Expression::Symbol(nil) if nil == "nil" => singleton = true,
-                Expression::List(_) | Expression::QuoteList(_) => {
-                    return Err(CompilerError::Message(format!(
-                        "def-kind {name}: keyed kinds (:key (index ...)) are not supported yet; \
-                         :key () declares a singleton"
-                    )));
-                }
-                _ => {
-                    return Err(CompilerError::Message(format!(
-                        "def-kind {name}: :key expects () (a singleton) or a list of key names"
-                    )));
-                }
-            }
+            let key_name = |name: &Expression| match name {
+                Expression::Symbol(name) if name != "nil" => Ok(name.clone()),
+                _ => Err(key_shape()),
+            };
+            key = Some(match strip_source_origin_wrappers(value.clone()) {
+                Expression::List(names) | Expression::QuoteList(names) => match names.as_slice() {
+                    [] => KindKey::Singleton,
+                    [index] => KindKey::Indexed {
+                        index: key_name(index)?,
+                    },
+                    [parent, index] => KindKey::Under {
+                        parent: key_name(parent)?,
+                        index: key_name(index)?,
+                    },
+                    _ => return Err(key_shape()),
+                },
+                Expression::Symbol(nil) if nil == "nil" => KindKey::Singleton,
+                _ => return Err(key_shape()),
+            });
         }
         slots.push((slot, value));
     }
-    Ok((slots, singleton))
+    Ok((slots, key))
+}
+
+/// The entries of a def-kind field group (`:host`, `:state`), free of
+/// source-origin wrappers at every level; `None` for anything but a list
+/// (or nil, no entries).
+fn def_kind_entries(value: &Expression) -> Option<Vec<Expression>> {
+    match strip_source_origin_wrappers(value.clone()) {
+        Expression::List(items) | Expression::QuoteList(items) => Some(items),
+        Expression::Symbol(symbol) if symbol == "nil" => Some(Vec::new()),
+        _ => None,
+    }
 }
 
 /// Compile-time check of a typed field entry's type (kind-bindings spec
@@ -1918,7 +1937,8 @@ impl<'a> Compiler<'a> {
     ///   an error (kind-bindings spec §3.3).
     /// - every other slot (`:view`, ...) evaluates normally.
     ///
-    /// `:key ()` makes it a singleton ([`Self::compile_def_singleton_kind`]).
+    /// A `:key` makes it a singleton or keyed kind
+    /// ([`Self::compile_def_keyed_kind`]).
     fn compile_def_kind_form(&mut self, list: &[Expression]) -> Result<(), CompilerError> {
         let Some(name) = list.get(1).map(|name| strip_source_origin_wrappers(name.clone())) else {
             return Err(CompilerError::Message("def-kind expects a kind name".to_string()));
@@ -1928,9 +1948,15 @@ impl<'a> Compiler<'a> {
                 "def-kind expects a kind name symbol".to_string(),
             ));
         };
-        let (slots, singleton) = def_kind_slots(&name, list)?;
-        if singleton {
-            return self.compile_def_singleton_kind(&name, &slots);
+        let (slots, key) = def_kind_slots(&name, list)?;
+        if let Some(key) = &key {
+            return self.compile_def_keyed_kind(&name, key, &slots);
+        }
+        if slots.iter().any(|(slot, _)| slot == "host") {
+            // kind-bindings spec §12 D5.
+            return Err(CompilerError::Message(format!(
+                "def-kind {name}: :host fields need :key"
+            )));
         }
         let name_idx = self.use_string_constant(&name);
         self.emit(OpCode::PushSymbol(name_idx));
@@ -1962,45 +1988,126 @@ impl<'a> Compiler<'a> {
         Ok(())
     }
 
-    /// `(def-kind name :key () :state (...))` (kind-bindings spec §3.1):
-    /// `(def name (__def-singleton-kind 'name :state (...)))`, so the kind's
-    /// name is an ordinary definition of the defining module bound to its
-    /// one instance. The form's value is that instance. Singletons opt out
-    /// of everything only created kinds have, so `:state` is the only other
-    /// slot.
-    fn compile_def_singleton_kind(
+    /// `(def-kind name :key (...) :host (...) :state (...))` (kind-bindings
+    /// spec §3.1) compiles to `(__def-keyed-kind 'name :key '(...) ...)`.
+    /// A singleton (`:key ()`) and an index-keyed kind (`:key (index)`)
+    /// wrap it in `(def name ...)`, so the kind's name is an ordinary
+    /// definition of the defining module, bound to the one instance or to
+    /// the constructor `(name i)`; the form's value is that binding. A
+    /// parent-keyed kind (`:key (parent index)`) binds nothing: its
+    /// instances are reached through the parent. These kinds opt out of
+    /// everything only created kinds have, so `:host` and `:state` are the
+    /// only other slots.
+    fn compile_def_keyed_kind(
         &mut self,
         name: &str,
+        key: &KindKey,
         slots: &[(String, &Expression)],
     ) -> Result<(), CompilerError> {
         let name_idx = self.use_string_constant(name);
         self.emit(OpCode::PushSymbol(name_idx));
-        let mut arity = 1;
-        for (key, value) in slots {
-            match key.as_str() {
+        let key_idx = self.use_string_constant("key");
+        self.emit(OpCode::PushKeyword(key_idx));
+        let parts: Vec<&str> = match key {
+            KindKey::Created | KindKey::Singleton => Vec::new(),
+            KindKey::Indexed { index } => vec![index],
+            KindKey::Under { parent, index } => vec![parent, index],
+        };
+        for part in &parts {
+            let part_idx = self.use_string_constant(part);
+            self.emit(OpCode::PushSymbol(part_idx));
+        }
+        if parts.is_empty() {
+            self.emit(OpCode::PushNil);
+        } else {
+            self.emit(OpCode::MakeList(parts.len()));
+        }
+        let mut arity = 3;
+        let what = if parts.is_empty() {
+            "a singleton (:key ())"
+        } else {
+            "a keyed kind"
+        };
+        for (slot, value) in slots {
+            match slot.as_str() {
                 "key" => continue,
-                "state" => {
-                    let key_idx = self.use_string_constant(key);
-                    self.emit(OpCode::PushKeyword(key_idx));
-                    self.compile_def_kind_state(name, key, value)?;
+                "state" | "host" => {
+                    let slot_idx = self.use_string_constant(slot);
+                    self.emit(OpCode::PushKeyword(slot_idx));
+                    if slot == "state" {
+                        self.compile_def_kind_state(name, slot, value)?;
+                    } else {
+                        self.compile_def_kind_host(name, value)?;
+                    }
                     arity += 2;
-                }
-                "host" => {
-                    return Err(CompilerError::Message(format!(
-                        "def-kind {name}: :host fields are not supported yet"
-                    )));
                 }
                 other => {
                     return Err(CompilerError::Message(format!(
-                        "def-kind {name}: a singleton (:key ()) has no :{other}; it takes only :state"
+                        "def-kind {name}: {what} has no :{other}; it takes only :host and :state"
                     )));
                 }
             }
         }
-        self.emit_symbol_load(crate::vm::DEF_SINGLETON_KIND_NATIVE);
+        self.emit_symbol_load(crate::vm::DEF_KEYED_KIND_NATIVE);
         self.emit(OpCode::Call(arity));
-        self.emit_symbol_store_for_definition(name);
-        self.emit_symbol_load(name);
+        if !matches!(key, KindKey::Under { .. }) {
+            self.emit_symbol_store_for_definition(name);
+            self.emit_symbol_load(name);
+        }
+        Ok(())
+    }
+
+    /// `:host ((field type option…) ...)` (kind-bindings spec §3.2): each
+    /// entry becomes `(field type option…)` with the name and type as data,
+    /// `:set` evaluated (a function), `:range` as data and `:doc` as is.
+    fn compile_def_kind_host(
+        &mut self,
+        kind: &str,
+        value: &Expression,
+    ) -> Result<(), CompilerError> {
+        let shape = || CompilerError::Message(crate::vm::host_entry_shape_message(kind));
+        let items = def_kind_entries(value).ok_or_else(shape)?;
+        for item in &items {
+            let Expression::List(entry) = item else {
+                return Err(shape());
+            };
+            let [Expression::Symbol(field), ty, options @ ..] = entry.as_slice() else {
+                return Err(shape());
+            };
+            check_def_kind_field_type(ty).map_err(|error| {
+                CompilerError::Message(format!("def-kind {kind}: :host field '{field}': {error}"))
+            })?;
+            let field_idx = self.use_string_constant(field);
+            self.emit(OpCode::PushSymbol(field_idx));
+            self.compile_quoted_expression(ty)?;
+            if options.len() % 2 != 0 {
+                return Err(shape());
+            }
+            for pair in options.chunks(2) {
+                let Expression::Keyword(option) = &pair[0] else {
+                    return Err(shape());
+                };
+                let option_message =
+                    || CompilerError::Message(crate::vm::host_option_message(kind, field, option));
+                let option_idx = self.use_string_constant(option);
+                self.emit(OpCode::PushKeyword(option_idx));
+                match (option.as_str(), &pair[1]) {
+                    ("set", setter) => self.compile_expression(setter)?,
+                    ("range", Expression::List(bounds))
+                        if bounds.len() == 2
+                            && bounds
+                                .iter()
+                                .all(|bound| matches!(bound, Expression::Number(_))) =>
+                    {
+                        self.compile_quoted_expression(&pair[1])?
+                    }
+                    ("doc", Expression::String(_)) => self.compile_expression(&pair[1])?,
+                    _ => return Err(option_message()),
+                }
+            }
+            self.emit(OpCode::MakeList(2 + options.len()));
+        }
+        self.emit(OpCode::MakeList(items.len()));
         Ok(())
     }
 
@@ -2038,17 +2145,13 @@ impl<'a> Compiler<'a> {
         slot: &str,
         value: &Expression,
     ) -> Result<(), CompilerError> {
-        let items = match strip_source_origin_wrappers(value.clone()) {
-            Expression::List(items) | Expression::QuoteList(items) => items,
-            Expression::Symbol(symbol) if symbol == "nil" => Vec::new(),
-            _ => {
-                return Err(CompilerError::Message(format!(
-                    "def-kind {kind}: :{slot} expects ((field default) ...)"
-                )));
-            }
-        };
-        // `items` came out of `strip_source_origin_wrappers`, which strips
-        // every level, so the entries below are already unwrapped.
+        let items = def_kind_entries(value).ok_or_else(|| {
+            CompilerError::Message(format!(
+                "def-kind {kind}: :{slot} expects ((field default) ...)"
+            ))
+        })?;
+        // `def_kind_entries` strips source-origin wrappers at every level,
+        // so the entries below are already unwrapped.
         let nil_default =
             |field: &str| CompilerError::Message(crate::vm::nil_default_message(kind, slot, field));
         let entry_shape =
