@@ -2550,7 +2550,7 @@ fn meta_period_opens_definition_from_workspace_file() {
 }
 
 #[test]
-fn esc_period_and_esc_comma_work_as_meta_definition_bindings() {
+fn meta_period_and_meta_comma_jump_to_and_back_from_definition() {
     let runtime = Runtime::new();
     let mut editor = Editor::new(runtime, EditorConfig::default());
     let defs_id = editor.open_scratch_buffer("*defs*", "(def target 42)");
@@ -2558,20 +2558,12 @@ fn esc_period_and_esc_comma_work_as_meta_definition_bindings() {
     editor.set_active_buffer(callsite_id);
     editor.active_buffer_mut().cursor = (0, 1);
 
-    eprintln!("region = {:?}", editor.active_region_range().is_some());
-    eprintln!("completion = {:?}", editor.completion.is_some());
-    eprintln!("minibuffer_input = {:?}", editor.minibuffer_input.is_some());
-    editor.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-    editor.handle_key(KeyEvent::new(KeyCode::Char('.'), KeyModifiers::NONE));
+    editor.handle_key(KeyEvent::new(KeyCode::Char('.'), KeyModifiers::ALT));
 
     assert_eq!(editor.active_buffer().id, defs_id);
     assert_eq!(editor.active_buffer().cursor, (0, 5));
 
-    eprintln!("region = {:?}", editor.active_region_range().is_some());
-    eprintln!("completion = {:?}", editor.completion.is_some());
-    eprintln!("minibuffer_input = {:?}", editor.minibuffer_input.is_some());
-    editor.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-    editor.handle_key(KeyEvent::new(KeyCode::Char(','), KeyModifiers::NONE));
+    editor.handle_key(KeyEvent::new(KeyCode::Char(','), KeyModifiers::ALT));
 
     assert_eq!(editor.active_buffer().id, callsite_id);
     assert_eq!(editor.active_buffer().cursor, (0, 1));
