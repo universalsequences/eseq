@@ -166,9 +166,10 @@
       (sdf/stroke shape 0.012 (* 0.45 (gradient :white 0.3 0.2))))))
 
 ;; ── Layout helpers ──
-;; A w × h control (scaled) painted by `widget`; props go to the box.
-(defmacro ctl (w h widget &rest props)
-  `(box :width (sc ,w) :height (sc ,h) :background ,widget ,@props))
+;; A control painted by `widget`, :w × :h (scaled); the other options (its
+;; widget's state, handlers) go to the box.
+(def ctl (widget &rest props &key (w 8) (h 4) &allow-other-keys)
+  (apply box :width (sc w) :height (sc h) :background widget props))
 
 ;; A pointer handler that selects track t, then runs body (`e` is the event).
 (defmacro on-track (t &rest body)
@@ -177,17 +178,17 @@
 ;; Takes the rest of a row.
 (def fill () (box :flex 1 :height 0))
 
-;; A pill with a centered label, dark text while `lit` (a value or a #'
-;; binding). Extra props (:queued, :dim, handlers) go to the box.
-(defmacro pill (w h text font lit &rest props)
-  `(box :width (sc ,w) :height (sc ,h) :background "daw-pill" :active ,lit
-     :h-align :center :v-align :center ,@props
-     (label ,text :font-size (sc ,font) :bg :transparent
-       :color :white :active ,lit :active-color :black)))
-;; Scene and bank pills.
-(defmacro big-pill (text lit &rest props) `(pill 10 4 ,text 14 ,lit ,@props))
-;; Device and rack slot pills, w wide.
-(defmacro slot-pill (w text lit &rest props) `(pill ,w 3 ,text 10 ,lit ,@props))
+;; A pill with a centered label, dark text while :active (a value or a #'
+;; binding); :w × :h (scaled) with text at :font. The other options
+;; (:active, :queued, :dim, handlers) go to the box.
+(def pill (text &rest props &key active (w 10) (h 4) (font 14) &allow-other-keys)
+  (apply box :width (sc w) :height (sc h) :background "daw-pill"
+    :h-align :center :v-align :center
+    (label text :font-size (sc font) :bg :transparent
+      :color :white :active active :active-color :black)
+    props))
+;; Device and rack slot pills.
+(def slot-pill (text &rest props) (apply pill text :h 3 :font 10 props))
 
 ;; ── Steps ──
 ;; Pointer handling is the main grid's (sgi/down …): click empty = on (drag
@@ -224,9 +225,9 @@
 
 (def mixer-view (t)
   (h-stack :gap (sc 1) :v-align :center
-    (ctl 8 4 "daw-mute" :track t :on-click (on-track t (toggle! t.muted)))
-    (ctl 8 4 "daw-arm" :armed #'t.armed :on-click (on-track t (toggle! t.armed)))
-    (ctl 24 4 "daw-fader" :track t
+    (ctl "daw-mute" :track t :on-click (on-track t (toggle! t.muted)))
+    (ctl "daw-arm" :armed #'t.armed :on-click (on-track t (toggle! t.armed)))
+    (ctl "daw-fader" :w 24 :track t
       :on-mouse-down (on-track t (set-volume t e))
       :on-drag (on-track t (set-volume t e)))
     (fill)))
@@ -234,14 +235,16 @@
 (def set-volume (t e) (when e.u (set! t.volume e.u)))
 
 ;; ‹ preset › — steps through the track's preset list (wrapping).
+(def chevron (t dir)
+  (ctl "daw-chevron" :w 6 :h 3 :dir dir :on-click (on-track t (step-preset! t dir))))
 (def preset-view (t)
   (subtree :key (list :preset t)
     (h-stack :gap (sc 0.5)
       (box :width (sc 16.5))
-      (ctl 6 3 "daw-chevron" :dir -1 :on-click (on-track t (step-preset! t -1)))
+      (chevron t -1)
       ;; 14 characters fit the pill at font 12
-      (pill 12 3 (if (= t.preset "") "—" (substring t.preset 0 14)) 12 false)
-      (ctl 6 3 "daw-chevron" :dir 1 :on-click (on-track t (step-preset! t 1)))
+      (pill (if (= t.preset "") "—" (substring t.preset 0 14)) :w 12 :h 3 :font 12)
+      (chevron t 1)
       (fill))))
 
 ;; ── Device slots: click one to open its panel in the top tile ──
@@ -255,8 +258,8 @@
     (wrap :width (sc 42) :gap (sc 0.5) :row-gap (sc 0.5)
       (each t.devices |d|
         ;; wide enough for the name at font 10
-        (slot-pill (max 8 (+ 3 (* 0.8 (len d.name)))) d.name (= view.open-device d)
-          :dim (not d.enabled)
+        (slot-pill d.name :w (max 8 (+ 3 (* 0.8 (len d.name))))
+          :active (= view.open-device d) :dim (not d.enabled)
           :on-click (lambda (e) (toggle-device d)))))))
 
 ;; ── Scenes ──
@@ -271,14 +274,13 @@
     (v-stack :gap (sc 1)
       (h-stack :gap (sc 1)
         (each (banks) |b|
-          (big-pill b.label (= b shown)
+          (pill b.label :active (= b shown)
             :queued (and b.playing (not (= b shown)))
             :on-click (lambda (e) (set! view.bank b.index))))
         (fill))
       (h-stack :gap (sc 1)
         (each (if shown shown.scenes (list)) |s|
-          (big-pill (str s.number) #'s.active
-            :queued #'s.queued
+          (pill (str s.number) :active #'s.active :queued #'s.queued
             :on-click (lambda (e) (launch! s))
             :on-right-click (lambda (e)
               (do (set! scene-menu.scene s)
@@ -310,8 +312,8 @@
   (scroll :key "mini-daw-rack-slots" :width (sc 34) :height (+ fx/panel-height 4)
     (wrap :width (sc 33) :gap (sc 0.5) :row-gap (sc 0.5)
       (each (get rack :slots) |slot|
-        (slot-pill 16 (str (+ (get slot :idx) 1) "  " (get slot :display-name))
-          (= (get slot :idx) (get rack :selected-slot))
+        (slot-pill (str (+ (get slot :idx) 1) "  " (get slot :display-name)) :w 16
+          :active (= (get slot :idx) (get rack :selected-slot))
           :dim (not (get slot :enabled))
           :on-click (lambda (e) (fx/rack-slot-select slot)))))))
 
@@ -337,8 +339,8 @@
   (let ((d view.open-device))
     (h-stack :padding (sc 3.5) :width :fill :height :fill :gap (sc 1)
       (v-stack :gap (sc 1)
-        (ctl 8 4 "daw-play" :on-click (lambda (e) (toggle! transport.playing)))
-        (ctl 8 4 "daw-arm" :armed #'transport.recording
+        (ctl "daw-play" :on-click (lambda (e) (toggle! transport.playing)))
+        (ctl "daw-arm" :armed #'transport.recording
           :on-click (lambda (e) (toggle! transport.recording))))
       (if (fx/device-panel d)
         (subtree :key (list :device d) (device-view d))

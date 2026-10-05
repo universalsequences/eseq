@@ -6,7 +6,7 @@ use sequencer::sequencer::{ClipId, LaneSource, PatternId};
 
 const REFER_7D: &str =
     "(import eseq.kinds :refer (track tracks scenes banks song region transport \
-                        launch-cell! select-region! select-region-in! clear-region! take-none take-governed \
+                        launch-cell! select-region! clear-region! take-none take-governed \
                         take-latched))
                         (def track-clips (i) (let ((t (track i))) t.clips))
                         (def track-cells (i) (let ((t (track i))) t.cells))";
@@ -719,13 +719,16 @@ fn regions_take_the_scene_lane_and_clear_the_singleton() {
     let mut h = Harness::new();
     h.sync();
     h.eval_7d("(def t0 (track 0)) (def t1 (track 1))");
-    h.run_7d("(select-region-in! t0 t1 2 6 true)");
+    h.run_7d("(select-region! t0 t1 2 6 :scene-lane true)");
     assert!(h.app.song_region_selection.expect("region").scene_lane);
     assert_eq!(h.eval_7d("region.scene-lane"), Value::Bool(true));
     assert_eq!(h.eval_7d("song.region"), h.eval_7d("region"));
     h.run_7d("(select-region! t0 t1 2 6)");
     assert_eq!(h.eval_7d("region.scene-lane"), Value::Bool(false));
-    h.rejects_7d("(select-region-in! t0 t1 2 6 1)", "scene-lane takes");
+    h.rejects_7d(
+        "(select-region! t0 t1 2 6 :scene-lane 1)",
+        "scene-lane takes",
+    );
     h.run_7d("(clear-region!)");
     assert_eq!(h.eval_7d("song.region"), Value::Nil);
     assert_eq!(h.eval_7d("region.tracks"), list_value(Vec::<Value>::new()));

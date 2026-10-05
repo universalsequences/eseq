@@ -31,7 +31,7 @@
         mute-group-options accum-mode-options tuning-root-options tuning-mode-options
         voice-priority-options mono-trigger-options swing-resolution-options
         roll-rate-options
-        launch-cell! select-region! select-region-in! clear-region! take-none take-governed take-latched
+        launch-cell! select-region! clear-region! take-none take-governed take-latched
         pad-role-options groove-scale-options
         trigger-pad! launch-rack-clip! silence-rack! save-rack-clip-as! delete-rack-clip!
         convert-rack-to-clips! use-library-groove! apply-groove-to-all-clips! extract-groove!
@@ -390,7 +390,7 @@
          (edit-error :string :doc "Why the last arrangement edit was rejected; empty after a successful one")
          (capture-failed :bool :doc "The last arrangement capture failed")
          (capture-error :string :doc "Why it failed; empty otherwise")
-         (region region :doc "The selected region, or nil; (select-region! t1 t2 start end), (select-region-in! t1 t2 start end scene-lane), (clear-region!)")
+         (region region :doc "The selected region, or nil; (select-region! t1 t2 start end [:scene-lane true]), (clear-region!)")
          (bound-clip clip :set set-song-bound-clip
                      :doc "The selected clip (its track's sound binds to it), or nil")
          (spans (list-of scene-span) :doc "The scene lane, in time order")))
@@ -670,14 +670,12 @@
     (dict :track-id c.track.tid :pattern-id c.pid :quantize transport.launch-quantize)))
 
 ;; Select the region from track t1 to track t2 (either order) between beats
-;; start and end (song.region); a degenerate one clears it.
-;; select-region-in! takes scene-lane too (a bool; functions have no optional
-;; parameters): true sweeps the scene lane, so copy, paste and delete carry
-;; its scene changes.
-(def select-region-in! (t1 t2 start end scene-lane)
+;; start and end (song.region); a degenerate one clears it. :scene-lane true
+;; also sweeps the scene lane, so copy, paste and delete carry its scene
+;; changes.
+(def select-region! (t1 t2 start end &key (scene-lane false))
   (host-command "set-song-region"
     (dict :track-ids (list t1.tid t2.tid) :start start :end end :scene-lane scene-lane)))
-(def select-region! (t1 t2 start end) (select-region-in! t1 t2 start end false))
 (def clear-region! () (host-command "set-song-region" nil))
 
 ;; step.lock-kind values.

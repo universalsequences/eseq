@@ -1436,10 +1436,9 @@ Built (7i):
 `set-scene-cell`, extended to take `:track-id` and no `:scene`, both
 resolved when it lands: the track by id, the current scene; legacy
 `:scene :track` payloads still work; with `transport.launch-quantize`),
-`(select-region! t1 t2 start end)`, `(select-region-in! t1 t2 start end
-scene-lane)` (functions have no optional parameters; `scene-lane` a bool,
-sent as `:scene-lane`) and `(clear-region!)` (`set-song-region`, tracks by
-`tid`).
+`(select-region! t1 t2 start end :scene-lane true)` (`&key scene-lane`, a
+bool defaulting to false, sent as `:scene-lane`) and `(clear-region!)`
+(`set-song-region`, tracks by `tid`).
 Constants: `take-none` (0), `take-governed` (1), `take-latched` (2).
 
 Built (7d):

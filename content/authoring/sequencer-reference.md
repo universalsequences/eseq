@@ -199,7 +199,9 @@ to grow last in the row.
 ## eseqlisp gotchas
 
 - `0` is falsy. Test with `(= x 0)` / `(= x nil)`, never `(if count …)`.
-- Functions have fixed arity (`&rest` only in `defmacro`).
+- Plain argument lists are fixed-arity; `def`/`lambda` also take
+  `&optional`, `&rest` and `&key` (`(def f (a &key (b 1) c) …)`,
+  called `(f 0 :c 2)`). Macros take `&rest` only.
 - `(merge dict :k v :k2 v2)` returns an updated dict; `(get dict :k)` reads.
   `(dict :a 1)` builds one. `(nth list i)`, `(len list)`, `(range a b)`,
   `(append list (list x))`, `(reduce f init list)`, `(map f list)`,

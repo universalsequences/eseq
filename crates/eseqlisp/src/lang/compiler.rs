@@ -25,6 +25,38 @@ pub struct Chunk {
     /// `OpCode::ExpansionOriginBegin(idx)`. Kept out of the op stream so
     /// `OpCode` stays `Copy` and the VM fetches ops without cloning.
     pub origins: Vec<std::rc::Rc<ExpansionOrigin>>,
+    /// `Some` only for a function whose argument list declares `&optional`,
+    /// `&rest` or `&key`; plain fixed-arity functions keep the direct call
+    /// path. See [`LambdaList`].
+    pub lambda_list: Option<std::rc::Rc<LambdaList>>,
+}
+
+/// How a call binds its arguments to a function that declares `&optional`,
+/// `&rest` or `&key` (Common Lisp lambda-list conventions). Locals are laid
+/// out `required… optional… [rest] key…`; an optional or key local the call
+/// leaves unsupplied stays unbound, and the function's prologue
+/// (`OpCode::JumpIfLocalBound`) fills it with its default.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LambdaList {
+    pub required: usize,
+    pub optional: usize,
+    pub rest: bool,
+    /// Keyword names (without the colon), in local order after the rest
+    /// local.
+    pub keys: Vec<String>,
+    pub allow_other_keys: bool,
+}
+
+impl LambdaList {
+    /// The `&rest` local, when the list declares one.
+    pub fn rest_slot(&self) -> usize {
+        self.required + self.optional
+    }
+
+    /// The first `&key` local.
+    pub fn key_base(&self) -> usize {
+        self.rest_slot() + usize::from(self.rest)
+    }
 }
 
 #[derive(Debug)]
@@ -139,6 +171,9 @@ pub enum OpCode {
     JumpIfFalse(usize),
     PushBool(bool),
     PushNil,
+    /// Skip `offset` ops when local `idx` is bound (an optional or key
+    /// argument the call supplied); otherwise fall through to its default.
+    JumpIfLocalBound(usize, usize),
     /// Index into the executing chunk's `Chunk::origins`.
     ExpansionOriginBegin(usize),
     ExpansionOriginEnd,
@@ -370,6 +405,202 @@ fn extract_function_definition(
         {
             Some((None, args.clone(), list[2..].to_vec()))
         }
+        _ => None,
+    }
+}
+
+/// A function argument list split at its lambda-list markers. `None` from
+/// [`parse_lambda_list`] means a plain fixed-arity list.
+struct ParsedLambdaList {
+    /// Symbols or map-destructuring patterns, as in a fixed-arity list.
+    required: Vec<Expression>,
+    optional: Vec<(String, Option<Expression>)>,
+    rest: Option<String>,
+    keys: Vec<(String, Option<Expression>)>,
+    allow_other_keys: bool,
+}
+
+/// Splits `(a b &optional c (d 10) &rest more &key size (color :white)
+/// &allow-other-keys)`. Markers must appear in that order, each at most
+/// once; an optional or key parameter is `name` or `(name default)`.
+fn parse_lambda_list(
+    function: Option<&str>,
+    args: &[Expression],
+) -> Result<Option<ParsedLambdaList>, CompilerError> {
+    let is_marker = |arg: &Expression| matches!(arg, Expression::Symbol(s) if s.starts_with('&'));
+    if !args.iter().any(is_marker) {
+        return Ok(None);
+    }
+    let function = function.unwrap_or("lambda");
+    let error = |message: String| CompilerError::Message(format!("{function}: {message}"));
+    #[derive(PartialEq, PartialOrd, Clone, Copy)]
+    enum Section {
+        Required,
+        Optional,
+        Rest,
+        Key,
+        AllowOtherKeys,
+    }
+    let mut parsed = ParsedLambdaList {
+        required: Vec::new(),
+        optional: Vec::new(),
+        rest: None,
+        keys: Vec::new(),
+        allow_other_keys: false,
+    };
+    let mut section = Section::Required;
+    let mut saw_optional = false;
+    let mut names = HashSet::new();
+    let mut add_name = |name: &str| {
+        if names.insert(name.to_string()) {
+            Ok(())
+        } else {
+            Err(error(format!("parameter `{name}` appears twice")))
+        }
+    };
+    let defaulted = |arg: &Expression| -> Result<(String, Option<Expression>), CompilerError> {
+        match arg {
+            Expression::Symbol(name) => Ok((name.clone(), None)),
+            Expression::List(items) => match items.as_slice() {
+                [Expression::Symbol(name)] => Ok((name.clone(), None)),
+                [Expression::Symbol(name), default] => Ok((name.clone(), Some(default.clone()))),
+                _ => Err(error(
+                    "an optional or key parameter is `name` or `(name default)`".to_string(),
+                )),
+            },
+            _ => Err(error("invalid parameter".to_string())),
+        }
+    };
+    for arg in args {
+        if let Expression::Symbol(marker) = arg
+            && marker.starts_with('&')
+        {
+            let next = match marker.as_str() {
+                "&optional" => Section::Optional,
+                "&rest" => Section::Rest,
+                "&key" => Section::Key,
+                "&allow-other-keys" => Section::AllowOtherKeys,
+                _ => {
+                    return Err(error(format!(
+                        "unknown lambda-list marker `{marker}`; use &optional, &rest, &key or &allow-other-keys"
+                    )));
+                }
+            };
+            if next <= section {
+                return Err(error(format!(
+                    "`{marker}` out of order; the order is required &optional &rest &key &allow-other-keys"
+                )));
+            }
+            saw_optional |= next == Section::Optional;
+            if next == Section::Key && saw_optional {
+                return Err(error(
+                    "&optional and &key together are ambiguous; use &key".to_string(),
+                ));
+            }
+            if section == Section::Rest && parsed.rest.is_none() {
+                return Err(error("&rest needs a parameter name".to_string()));
+            }
+            if next == Section::AllowOtherKeys {
+                if section != Section::Key {
+                    return Err(error("&allow-other-keys must follow &key".to_string()));
+                }
+                parsed.allow_other_keys = true;
+            }
+            section = next;
+            continue;
+        }
+        match section {
+            Section::Required => {
+                let mut bound = Vec::new();
+                collect_pattern_symbols(arg, &mut bound);
+                for name in &bound {
+                    add_name(name)?;
+                }
+                parsed.required.push(arg.clone());
+            }
+            Section::Optional => {
+                let (name, default) = defaulted(arg)?;
+                add_name(&name)?;
+                parsed.optional.push((name, default));
+            }
+            Section::Rest => {
+                let Expression::Symbol(name) = arg else {
+                    return Err(error("&rest takes one parameter name".to_string()));
+                };
+                if parsed.rest.is_some() {
+                    return Err(error("&rest takes one parameter name".to_string()));
+                }
+                add_name(name)?;
+                parsed.rest = Some(name.clone());
+            }
+            Section::Key => {
+                let (name, default) = defaulted(arg)?;
+                add_name(&name)?;
+                parsed.keys.push((name, default));
+            }
+            Section::AllowOtherKeys => {
+                return Err(error("nothing may follow &allow-other-keys".to_string()));
+            }
+        }
+    }
+    if section == Section::Rest && parsed.rest.is_none() {
+        return Err(error("&rest needs a parameter name".to_string()));
+    }
+    Ok(Some(parsed))
+}
+
+/// A `defmacro` argument list: plain names, optionally ending in `&rest
+/// name`.
+fn parse_macro_params(
+    name: &str,
+    args: &[Expression],
+) -> Result<(Vec<String>, Option<String>), CompilerError> {
+    let error = |message: &str| CompilerError::Message(format!("{name}: {message}"));
+    let parsed = parse_lambda_list(Some(name), args)?;
+    let (required, rest) = match parsed {
+        Some(parsed) => {
+            if !parsed.optional.is_empty() || !parsed.keys.is_empty() || parsed.allow_other_keys {
+                return Err(error("macros take &rest only"));
+            }
+            (parsed.required, parsed.rest)
+        }
+        None => (args.to_vec(), None),
+    };
+    let mut names = HashSet::new();
+    let mut params = Vec::with_capacity(required.len());
+    for param in required {
+        let Expression::Symbol(param) = param else {
+            return Err(error("macros take &rest only; a parameter must be a name"));
+        };
+        if !names.insert(param.clone()) {
+            return Err(error(&format!("parameter `{param}` appears twice")));
+        }
+        params.push(param);
+    }
+    Ok((params, rest))
+}
+
+/// The first of `names` that `expression` reads (a bare symbol or the head
+/// of a dotted one), quoted data excluded. Conservative: an inner binding of
+/// the same name still counts.
+fn first_symbol_read<'a>(expression: &Expression, names: &[&'a str]) -> Option<&'a str> {
+    match expression {
+        Expression::Symbol(symbol) => {
+            let head = symbol.split('.').next().unwrap_or(symbol);
+            names
+                .iter()
+                .copied()
+                .find(|name| *name == symbol || *name == head)
+        }
+        Expression::List(items)
+            if matches!(items.first(), Some(Expression::Symbol(head)) if head == "quote") =>
+        {
+            None
+        }
+        Expression::List(items) => items.iter().find_map(|item| first_symbol_read(item, names)),
+        Expression::Quasiquote(inner)
+        | Expression::Unquote(inner)
+        | Expression::UnquoteSplicing(inner) => first_symbol_read(inner, names),
         _ => None,
     }
 }
@@ -987,11 +1218,8 @@ impl<'a> Compiler<'a> {
                 let Expression::List(params) = &items[1] else {
                     unreachable!()
                 };
-                let mut body_bound = bound.to_vec();
-                for param in params {
-                    collect_pattern_symbols(param, &mut body_bound);
-                }
-                let mut lowered = vec![items[0].clone(), items[1].clone()];
+                let (params, body_bound) = self.lower_scene_references_in_params(params, bound);
+                let mut lowered = vec![items[0].clone(), params];
                 lowered.extend(items[2..].iter().map(|body| lower(body, &body_bound)));
                 Expression::List(lowered)
             }
@@ -1031,11 +1259,8 @@ impl<'a> Compiler<'a> {
                 let Expression::List(params) = &items[2] else {
                     unreachable!()
                 };
-                let mut body_bound = bound.to_vec();
-                for param in params {
-                    collect_pattern_symbols(param, &mut body_bound);
-                }
-                let mut lowered = items[..3].to_vec();
+                let (params, body_bound) = self.lower_scene_references_in_params(params, bound);
+                let mut lowered = vec![items[0].clone(), items[1].clone(), params];
                 lowered.extend(items[3..].iter().map(|body| lower(body, &body_bound)));
                 Expression::List(lowered)
             }
@@ -1089,6 +1314,40 @@ impl<'a> Compiler<'a> {
             }
             _ => expression.clone(),
         }
+    }
+
+    /// Lowers an argument list's default expressions, each seeing only the
+    /// parameters before it, and returns the list with every name it binds
+    /// (for the body).
+    fn lower_scene_references_in_params(
+        &self,
+        params: &[Expression],
+        bound: &[String],
+    ) -> (Expression, Vec<String>) {
+        let mut body_bound = bound.to_vec();
+        let mut after_marker = false;
+        let mut lowered = Vec::with_capacity(params.len());
+        for param in params {
+            match param {
+                Expression::Symbol(name) if name.starts_with('&') => after_marker = true,
+                Expression::List(items) if after_marker => {
+                    if let [name, default] = items.as_slice() {
+                        let default =
+                            self.lower_scene_references_for_shipping(default, &body_bound);
+                        lowered.push(Expression::List(vec![name.clone(), default]));
+                    } else {
+                        lowered.push(param.clone());
+                    }
+                    if let Some(Expression::Symbol(name)) = items.first() {
+                        body_bound.push(name.clone());
+                    }
+                    continue;
+                }
+                _ => collect_pattern_symbols(param, &mut body_bound),
+            }
+            lowered.push(param.clone());
+        }
+        (Expression::List(lowered), body_bound)
     }
 
     /// Descend a quasiquoted template: its symbols are data, so only the
@@ -1324,6 +1583,7 @@ impl<'a> Compiler<'a> {
             source_file: self.source_file.clone(),
             source_module: None,
             origins: Vec::new(),
+            lambda_list: None,
         });
 
         if kind != ReactiveChunkKind::Derived {
@@ -2708,6 +2968,17 @@ impl<'a> Compiler<'a> {
         if let Some(rest) = rest_param {
             symbols.push(rest.to_string());
         }
+        // A `&rest` macro binds through the lambda-list path, which packs
+        // the trailing arguments into the rest list.
+        let lambda_list = rest_param.map(|_| {
+            std::rc::Rc::new(LambdaList {
+                required: params.len(),
+                optional: 0,
+                rest: true,
+                keys: Vec::new(),
+                allow_other_keys: false,
+            })
+        });
         let (chunk_idx, previous_chunk_idx) = self.new_chunk(Chunk {
             ops: vec![],
             constants: vec![],
@@ -2718,6 +2989,7 @@ impl<'a> Compiler<'a> {
             source_file: self.source_file.clone(),
             source_module: self.declared_module(),
             origins: Vec::new(),
+            lambda_list,
         });
         self.compiling_macro_body += 1;
         let compile_result = self.compile_expression(body);
@@ -2748,6 +3020,11 @@ impl<'a> Compiler<'a> {
             exprs.extend(body.iter().cloned());
             Expression::List(exprs)
         };
+        let lambda_list = parse_lambda_list(name.as_deref(), &args)?;
+        let args = match &lambda_list {
+            Some(parsed) => parsed.required.clone(),
+            None => args,
+        };
         let mut arg_symbols = Vec::with_capacity(args.len());
         for arg in args.iter() {
             match arg {
@@ -2759,16 +3036,50 @@ impl<'a> Compiler<'a> {
                 _ => return Err(CompilerError::InvalidArg),
             }
         }
-        for (arg, symbol) in args.iter().zip(arg_symbols.iter()).rev() {
-            if matches!(arg, Expression::List(_)) {
-                wrapped_body = self.desugar_pattern_binding(
-                    arg,
-                    Expression::Symbol(symbol.clone()),
-                    wrapped_body,
-                )?;
+        // A fixed-arity function destructures a pattern parameter around its
+        // body; a lambda-list function does it into locals ahead of its
+        // defaults prologue (below), so defaults can read the fields.
+        if lambda_list.is_none() {
+            for (arg, symbol) in args.iter().zip(arg_symbols.iter()).rev() {
+                if matches!(arg, Expression::List(_)) {
+                    wrapped_body = self.desugar_pattern_binding(
+                        arg,
+                        Expression::Symbol(symbol.clone()),
+                        wrapped_body,
+                    )?;
+                }
             }
         }
         symbols.extend(arg_symbols);
+        let runtime_lambda_list = lambda_list.as_ref().map(|parsed| {
+            symbols.extend(parsed.optional.iter().map(|(param, _)| param.clone()));
+            symbols.extend(parsed.rest.iter().cloned());
+            symbols.extend(parsed.keys.iter().map(|(param, _)| param.clone()));
+            std::rc::Rc::new(LambdaList {
+                required: parsed.required.len(),
+                optional: parsed.optional.len(),
+                rest: parsed.rest.is_some(),
+                keys: parsed.keys.iter().map(|(param, _)| param.clone()).collect(),
+                allow_other_keys: parsed.allow_other_keys,
+            })
+        });
+        // (pattern temp local, field, field local) for a lambda-list
+        // function's destructured required parameters.
+        let mut destructured = Vec::new();
+        if lambda_list.is_some() {
+            for (idx, arg) in args.iter().enumerate() {
+                let Expression::List(fields) = arg else {
+                    continue;
+                };
+                for field in fields {
+                    let Expression::Symbol(field) = field else {
+                        return Err(CompilerError::InvalidArg);
+                    };
+                    destructured.push((symbols[idx].clone(), field.clone(), symbols.len()));
+                    symbols.push(field.clone());
+                }
+            }
+        }
         let (new_chunk_idx, previous_chunk_idx) = self.new_chunk(Chunk {
             ops: vec![],
             constants: vec![],
@@ -2779,7 +3090,54 @@ impl<'a> Compiler<'a> {
             source_file: self.source_file.clone(),
             source_module: None,
             origins: Vec::new(),
+            lambda_list: runtime_lambda_list.clone(),
         });
+        if let (Some(parsed), Some(layout)) = (&lambda_list, &runtime_lambda_list) {
+            for (temp, field, local) in &destructured {
+                self.compile_expression(&Expression::List(vec![
+                    Expression::Symbol("get".to_string()),
+                    Expression::Symbol(temp.clone()),
+                    Expression::Keyword(field.clone()),
+                ]))?;
+                self.emit(OpCode::StoreLocal(*local));
+            }
+            // Prologue: each unsupplied optional/key local gets its default,
+            // evaluated here in the callee so it can read earlier params.
+            // (local, name, default; None for the rest local)
+            let mut later_params: Vec<(usize, &str, Option<&Option<Expression>>)> = Vec::new();
+            for (idx, (param, default)) in parsed.optional.iter().enumerate() {
+                later_params.push((layout.required + idx, param, Some(default)));
+            }
+            if let Some(rest) = &parsed.rest {
+                later_params.push((layout.rest_slot(), rest, None));
+            }
+            for (idx, (param, default)) in parsed.keys.iter().enumerate() {
+                later_params.push((layout.key_base() + idx, param, Some(default)));
+            }
+            for (position, &(local, param, default)) in later_params.iter().enumerate() {
+                let Some(default) = default else {
+                    continue;
+                };
+                if let Some(default) = default {
+                    let later = later_params[position..].iter().map(|&(_, name, _)| name);
+                    if let Some(read) = first_symbol_read(default, &later.collect::<Vec<_>>()) {
+                        return Err(CompilerError::Message(format!(
+                            "{}: the default for `{param}` reads `{read}`, which is not bound yet; defaults see earlier parameters only",
+                            name.as_deref().unwrap_or("lambda")
+                        )));
+                    }
+                }
+                let jump_idx = self.op_idx();
+                self.emit(OpCode::JumpIfLocalBound(local, 0));
+                match default {
+                    Some(default) => self.compile_expression(default)?,
+                    None => self.emit(OpCode::PushNil),
+                }
+                self.emit(OpCode::StoreLocal(local));
+                let offset = self.op_idx() - jump_idx;
+                self.chunk_mut().unwrap().ops[jump_idx] = OpCode::JumpIfLocalBound(local, offset);
+            }
+        }
         self.compile_expression(&wrapped_body)?;
 
         let scope = self.scopes.pop().unwrap();
@@ -3421,33 +3779,7 @@ impl<'a> Compiler<'a> {
                 let Expression::List(params_expr) = &list[2] else {
                     return Err(CompilerError::InvalidArg);
                 };
-                let mut params = Vec::new();
-                let mut param_names = HashSet::new();
-                let mut rest_param = None;
-                let mut index = 0;
-                while index < params_expr.len() {
-                    let Expression::Symbol(param) = &params_expr[index] else {
-                        return Err(CompilerError::InvalidArg);
-                    };
-                    if param == "&rest" {
-                        let Some(Expression::Symbol(rest)) = params_expr.get(index + 1) else {
-                            return Err(CompilerError::InvalidArg);
-                        };
-                        if index + 2 != params_expr.len()
-                            || rest == "&rest"
-                            || !param_names.insert(rest.clone())
-                        {
-                            return Err(CompilerError::InvalidArg);
-                        }
-                        rest_param = Some(rest.clone());
-                        break;
-                    }
-                    if !param_names.insert(param.clone()) {
-                        return Err(CompilerError::InvalidArg);
-                    }
-                    params.push(param.clone());
-                    index += 1;
-                }
+                let (params, rest_param) = parse_macro_params(name, params_expr)?;
                 // Inside a declared module, bare macro names intern
                 // qualified (`sdf/circle`); headerless (eseq.vanilla)
                 // files keep flat keys until slice 3 so the patcher's
@@ -3876,6 +4208,7 @@ impl<'a> Compiler<'a> {
             source_file: self.source_file.clone(),
             source_module: entry_module,
             origins: Vec::new(),
+            lambda_list: None,
         });
         let expressions = std::mem::take(&mut self.expressions);
         for expression in &expressions {

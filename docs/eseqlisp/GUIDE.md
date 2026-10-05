@@ -106,6 +106,7 @@ The callback comes first, except in `each`, where the list comes first:
 (filter |x| (> x 1) xs)
 (reduce |acc x| (+ acc x) 0 xs)
 (for-each |x| (status (str x)) xs)
+(apply f a b xs)                          ; f with a, b, then the items of xs
 (each xs |x i| (label (str i ": " x)))    ; widget children; see below
 ```
 
@@ -147,10 +148,44 @@ not a list by position:
 |x| (* x x)
 ```
 
-Arity is fixed. There are no optional, keyword, or rest arguments for
-functions; calling with the wrong count is an error. Pass a map when you
-want options. Closures capture their environment and recursion works through
-the global name.
+Closures capture their environment and recursion works through the global
+name.
+
+#### Optional, keyword, and rest parameters
+
+`def` and `lambda` argument lists follow Common Lisp, in the order
+`required &optional &rest &key` (but not `&optional` and `&key` together):
+
+```lisp
+(def tone (note &optional (vel 100) ch) …)      ; (tone 60) (tone 60 90) (tone 60 90 2)
+(def pill (text &key (w 10) (h 4) lit on-click) …)
+(pill "A" :lit true :w 12)                       ; keys in any order
+(def sum (&rest xs) (reduce |a x| (+ a x) 0 xs)) ; (sum 1 2 3)
+(apply sum 1 (list 2 3))                         ; spread a list into the call
+```
+
+- A parameter is `name` (default `nil`) or `(name default)`. The default
+  is evaluated on each call that leaves it out, inside the function, so it
+  can read earlier parameters (destructured fields included):
+  `(b (* a 2))`. Defaults see earlier parameters only; reading a later one
+  (or the parameter itself) is a compile error. Passing `nil` explicitly is
+  passing a value; the default does not apply.
+- Keyword errors name the function: an unknown key
+  (`pill: unknown keyword :colour; accepts :w :h :lit :on-click`), a key
+  given twice, a key with no value, or a non-keyword where a key belongs.
+- `&rest` gets the arguments after the required and optional ones as a list.
+  With `&key` too, the rest list holds the key/value pairs as well (so a
+  wrapper can forward them with `apply`), and unknown keys are still an
+  error unless the list ends with `&allow-other-keys`:
+  `(def ctl (widget &rest props &key (w 8) &allow-other-keys) (apply box :width w props))`.
+- `&optional` and `&key` together are a compile error (whether `(f 0 :c 9)`
+  passes `:c` as the optional or as a key is ambiguous); use `&key`.
+- Too few or too many arguments is an error that gives the range
+  (`f takes 2 to 4 arguments, got 5`).
+- A function without `&` markers keeps plain fixed arity and its direct
+  call path: a missing argument is unbound and errors when read, an extra
+  one is an `ArityMismatch`. The `|x|` shorthand is always fixed-arity.
+- Map-destructuring patterns are allowed for required parameters only.
 
 ### Macros
 
@@ -164,8 +199,8 @@ the global name.
 ```
 
 Exactly one body form. Quasiquote, `,x`, and `,@xs` work only inside a
-`defmacro` body; elsewhere a backtick is a plain quote. `&rest` is allowed in
-macros only. Inside a module, a macro is interned as `module/name`, which is
+`defmacro` body; elsewhere a backtick is a plain quote. Macros take `&rest`
+only (no `&optional` or `&key`). Inside a module, a macro is interned as `module/name`, which is
 why the shader stdlib is called as `(sdf/circle r)`.
 
 ## Reactive State
@@ -593,7 +628,8 @@ the project's scratch buffer.
 ## Gotchas
 
 - **`0`, `""`, and `()` are false.** Compare with `nil` explicitly.
-- **Functions have fixed arity.** No optional args; pass a map.
+- **A plain argument list is fixed-arity.** Use `&optional`, `&key`, or
+  `&rest` for anything else; `|x|` lambdas stay fixed.
 - **`merge` takes keyword pairs**, not a second map.
 - **No `\"` in strings.** Build the string with `str` or `fmt`.
 - **`each` for widget children, never `map`.** And give `each` a named list.
@@ -666,6 +702,8 @@ cargo nextest run -p sequencer -E 'test(/customize_lists_the_mixer_clip_knob/)'
 
 ```lisp
 (def name value)  (def name (args…) body…)  (lambda (args…) body…)
+;; args…: a b [&optional c (d 1)] [&rest more] [&key e (f 2)] [&allow-other-keys]
+;;        (&optional or &key, not both)
 (defmacro name (args… [&rest r]) body)
 (defstate name init)  (def name (state init))  (def name (derived body…))
 (defscene name default)                 ; per-pattern persisted slot

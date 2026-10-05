@@ -1,6 +1,6 @@
 use super::SOURCE_ORIGIN_NATIVE;
 use crate::compiler::{
-    Chunk, Compiler, CompilerError, ExpansionOrigin, MacroCompilerState, MacroDef,
+    Chunk, Compiler, CompilerError, ExpansionOrigin, LambdaList, MacroCompilerState, MacroDef,
     MacroExpansionSite, OpCode,
 };
 use crate::host::BufferId;
@@ -17,6 +17,8 @@ use std::time::{Duration, Instant};
 
 mod instances;
 mod view_buffers;
+#[cfg(test)]
+mod lambda_list_tests;
 pub use instances::{
     CREATED_BUILTIN_FIELDS, DEF_KEYED_KIND_NATIVE, FIELD_REF_NATIVE, FieldType, HostField,
     HostFieldReader, INSTANCE_NAMESPACE_PREFIX, InstanceBuiltinField, InstanceError, InstanceId,
@@ -54,6 +56,12 @@ pub enum VMError {
     ReadonlyReactive(String),
     ExpectedFunction,
     ArityMismatch,
+    /// A call that does not fit a function's `&optional`/`&rest`/`&key`
+    /// argument list; the message names the function and what it accepts.
+    Arity(String),
+    /// An argument of the wrong type; the message names the call and what
+    /// it expected.
+    Type(String),
     ParseError,
     CompileError,
     ExpansionUnsafe {
@@ -1892,16 +1900,29 @@ fn convert_source_expr(
             }
             let is_macro_call =
                 annotate_widgets && head_name.is_some_and(|name| macro_names.contains(name));
+            let is_widget_constructor = |name: &str| {
+                is_widget_constructor_name(name, local_defwidgets)
+                    && !shadowed_widget_names.contains(name)
+            };
+            // `(apply box … props)` builds a widget too: annotate it like the
+            // direct call, with the props ahead of the spread list.
+            let applied_widget = match (head_name, items.get(1).map(|item| &item.kind)) {
+                (Some("apply"), Some(ExprKind::Symbol(name)))
+                    if annotate_widgets && items.len() >= 3 && is_widget_constructor(name) =>
+                {
+                    Some(name.as_str())
+                }
+                _ => None,
+            };
             let should_annotate = annotate_widgets
                 && !is_macro_call
-                && head_name.is_some_and(|name| {
-                    is_widget_constructor_name(name, local_defwidgets)
-                        && !shadowed_widget_names.contains(name)
-                });
+                && (applied_widget.is_some() || head_name.is_some_and(is_widget_constructor));
+            let callee_name = applied_widget.or(head_name);
+            let first_prop_idx = if applied_widget.is_some() { 2 } else { 1 };
             let mut idx = 0;
             while idx < items.len() {
                 let item = &items[idx];
-                if should_annotate && idx > 0 && is_source_prop_keyword(item) {
+                if should_annotate && idx >= first_prop_idx && is_source_prop_keyword(item) {
                     idx += 2;
                     continue;
                 }
@@ -1919,7 +1940,7 @@ fn convert_source_expr(
                     ExprKind::List(child_items),
                     Expression::List(child_converted),
                 ) = (
-                    head_name,
+                    callee_name,
                     idx.checked_sub(1)
                         .and_then(|previous| items.get(previous))
                         .map(|expr| &expr.kind),
@@ -1955,6 +1976,8 @@ fn convert_source_expr(
                 }
                 idx += 1;
             }
+            // The spread list stays last, after the annotation.
+            let spread = applied_widget.and_then(|_| converted.pop());
             if should_annotate && !converted.is_empty() {
                 if head_name
                     .is_some_and(|name| matches!(name, "~slider" | "~knob" | "~toggle" | "~lane"))
@@ -1980,6 +2003,7 @@ fn convert_source_expr(
                 converted.push(Expression::Keyword(SOURCE_REVISION_PROP.to_string()));
                 converted.push(Expression::String(source_revision.to_string()));
             }
+            converted.extend(spread);
             let converted = Expression::List(converted);
             if is_macro_call {
                 Expression::List(vec![
@@ -1994,6 +2018,123 @@ fn convert_source_expr(
             }
         }
     }
+}
+
+type ArgCell = Rc<RefCell<Value>>;
+
+/// Binds a call's arguments to the locals of `chunk`, the callee: a
+/// fixed-arity function takes them positionally; one declaring `&optional`,
+/// `&rest` or `&key` goes through [`bind_lambda_list`].
+fn bind_call_args(
+    chunk: &Chunk,
+    args: &[ArgCell],
+    locals: &mut [Option<ArgCell>],
+) -> Result<(), VMError> {
+    if let Some(lambda_list) = chunk.lambda_list.as_deref() {
+        return bind_lambda_list(chunk, lambda_list, args, locals);
+    }
+    if args.len() > locals.len() {
+        return Err(VMError::ArityMismatch);
+    }
+    for (local, arg) in locals.iter_mut().zip(args) {
+        *local = Some(Rc::clone(arg));
+    }
+    Ok(())
+}
+
+/// Binds a call's arguments to `chunk`, a function declaring `&optional`,
+/// `&rest` or `&key` (its `lambda_list`, see [`LambdaList`]). Unsupplied optional and key locals stay
+/// unbound for the function's default prologue.
+fn bind_lambda_list(
+    chunk: &Chunk,
+    lambda_list: &LambdaList,
+    args: &[ArgCell],
+    locals: &mut [Option<ArgCell>],
+) -> Result<(), VMError> {
+    let function = chunk.source_symbol.as_deref().unwrap_or("lambda");
+    let fail = |message: String| VMError::Arity(format!("{function}: {message}"));
+    let LambdaList {
+        required,
+        optional,
+        rest,
+        keys,
+        allow_other_keys,
+    } = lambda_list;
+    let (required, optional, rest) = (*required, *optional, *rest);
+    let count = args.len();
+    let arity_error = || {
+        let takes = if rest || !keys.is_empty() {
+            format!("at least {required}")
+        } else if optional == 0 {
+            required.to_string()
+        } else {
+            format!("{required} to {}", required + optional)
+        };
+        let noun = if matches!(takes.as_str(), "1" | "at least 1") {
+            "argument"
+        } else {
+            "arguments"
+        };
+        VMError::Arity(format!("{function} takes {takes} {noun}, got {count}"))
+    };
+    if count < required {
+        return Err(arity_error());
+    }
+    // `&optional` and `&key` never mix (the compiler rejects it), so the
+    // optional slots simply take the next arguments.
+    let position = count.min(required + optional);
+    let tail = &args[position..];
+    if !rest && keys.is_empty() && !tail.is_empty() {
+        return Err(arity_error());
+    }
+    if !keys.is_empty() {
+        let accepts = || {
+            keys.iter()
+                .map(|key| format!(":{key}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        for pair in tail.chunks(2) {
+            let key_cell = pair[0].borrow();
+            let Value::Keyword(keyword) = &*key_cell else {
+                return Err(fail(format!(
+                    "expected a keyword argument, got {}; accepts {}",
+                    format_lisp_source(&key_cell),
+                    accepts()
+                )));
+            };
+            let Some(value) = pair.get(1) else {
+                return Err(fail(format!("keyword :{keyword} has no value")));
+            };
+            match keys.iter().position(|key| key == keyword) {
+                Some(idx) => {
+                    let slot = &mut locals[lambda_list.key_base() + idx];
+                    if slot.is_some() {
+                        return Err(fail(format!("keyword :{keyword} given twice")));
+                    }
+                    *slot = Some(Rc::clone(value));
+                }
+                None if *allow_other_keys => {}
+                None => {
+                    return Err(fail(format!(
+                        "unknown keyword :{keyword}; accepts {}",
+                        accepts()
+                    )));
+                }
+            }
+        }
+    }
+    if rest {
+        let items = tail
+            .iter()
+            .map(|cell| Rc::new(RefCell::new(cell.borrow().clone())))
+            .collect();
+        locals[lambda_list.rest_slot()] = Some(Rc::new(RefCell::new(Value::List(items))));
+    }
+    for (local, arg) in locals.iter_mut().zip(&args[..position]) {
+        *local = Some(Rc::clone(arg));
+    }
+    Ok(())
 }
 
 /// The unit-wide name collections the source→Expression conversion needs:
@@ -3222,6 +3363,46 @@ pub fn register_core_natives(vm: &mut VM) {
             out.push(Rc::new(RefCell::new(mapped)));
         }
         Value::List(out)
+    });
+
+    // `(apply f a b rest)`: calls f with a, b and the items of the final list,
+    // so a wrapper can forward its `&rest` arguments. Ref-aware: it forwards
+    // `#'` bindings as they are, and `invoke` reads them for a callee that
+    // does not take refs.
+    vm.register_ref_aware_native_with_vm("apply", |mut args, vm| {
+        if args.is_empty() {
+            vm.fail_native_call(VMError::Arity(
+                "apply takes a function and an argument list".into(),
+            ));
+            return Value::Nil;
+        }
+        let callback = args.remove(0);
+        // The spread list itself may arrive as a `#'` binding: read it.
+        let spread = match args.pop().map(|last| vm.read_binding_ref(&last)).transpose() {
+            Ok(spread) => spread,
+            Err(error) => {
+                vm.fail_native_call(error);
+                return Value::Nil;
+            }
+        };
+        match spread {
+            Some(Value::List(items)) => args.extend(items.iter().map(|item| item.borrow().clone())),
+            Some(Value::Nil) | None => {}
+            Some(other) => {
+                vm.fail_native_call(VMError::Type(format!(
+                    "apply: the last argument must be a list, got {}",
+                    format_lisp_source(&other)
+                )));
+                return Value::Nil;
+            }
+        }
+        match vm.invoke(callback, args) {
+            Ok(value) => value.unwrap_or(Value::Nil),
+            Err(error) => {
+                vm.fail_native_call(error);
+                Value::Nil
+            }
+        }
     });
 
     // `(find-by-key list :key value)` -> the first entry in `list` whose `:key`
@@ -5433,19 +5614,12 @@ impl VM {
         site: &MacroExpansionSite,
         state: &mut MacroCompilerState,
     ) -> Result<Expression, String> {
-        let mut values = args
+        // A `&rest` expander's chunk carries a lambda list that packs the
+        // trailing arguments.
+        let values = args
             .iter()
-            .take(mac.params.len())
             .map(Self::expression_to_macro_value)
             .collect::<Vec<_>>();
-        if mac.rest_param.is_some() {
-            values.push(Value::List(
-                args[mac.params.len()..]
-                    .iter()
-                    .map(|arg| Rc::new(RefCell::new(Self::expression_to_macro_value(arg))))
-                    .collect(),
-            ));
-        }
 
         self.chunks = std::mem::take(&mut state.chunks);
         self.global_names = std::mem::take(&mut state.global_symbols);
@@ -7611,12 +7785,13 @@ impl VM {
         self.current_chunk = chunk_idx;
         let mut frame = self.new_frame();
         frame.upvalues = upvalues;
-        if args.len() > frame.locals.len() {
+        let cells: Vec<ArgCell> = args
+            .into_iter()
+            .map(|arg| Rc::new(RefCell::new(arg)))
+            .collect();
+        if let Err(error) = bind_call_args(&self.chunks[chunk_idx], &cells, &mut frame.locals) {
             self.current_chunk = previous_chunk;
-            return Err(VMError::ArityMismatch);
-        }
-        for (idx, arg) in args.into_iter().enumerate() {
-            frame.locals[idx] = Some(Rc::new(RefCell::new(arg)));
+            return Err(error);
         }
 
         let result = self.execute_with_frames(vec![frame]);
@@ -8620,6 +8795,12 @@ impl VM {
                     stack.push(Rc::new(RefCell::new(Value::List(list))));
                     frames.last_mut().unwrap().pc += 1;
                 }
+                OpCode::JumpIfLocalBound(idx, offset) => {
+                    if let Some(frame) = frames.last_mut() {
+                        let bound = matches!(frame.locals.get(idx), Some(Some(_)));
+                        frame.pc += if bound { offset } else { 1 };
+                    }
+                }
                 OpCode::Jump(pc) => {
                     if let Some(frame) = frames.last_mut() {
                         frame.pc += pc;
@@ -9159,19 +9340,16 @@ impl VM {
                                 frame.locals.resize(self.chunk().symbols.len(), None);
                                 frame.pc = 0;
                                 frame.chunk_idx = chunk_idx;
-                                if arity > frame.locals.len() {
-                                    return Err(VMError::ArityMismatch);
-                                }
                                 if stack.len() < arity {
                                     return Err(VMError::StackUnderflow);
                                 }
-                                for i in 0..arity {
-                                    let local_idx = arity - i - 1;
-                                    let Some(slot) = frame.locals.get_mut(local_idx) else {
-                                        return Err(VMError::ArityMismatch);
-                                    };
-                                    *slot = stack.pop();
-                                }
+                                let base = stack.len() - arity;
+                                bind_call_args(
+                                    &self.chunks[chunk_idx],
+                                    &stack[base..],
+                                    &mut frame.locals,
+                                )?;
+                                stack.truncate(base);
                                 frames.last_mut().unwrap().pc += 1;
                                 if PROFILE {
                                     self.profile_enter_chunk(chunk_idx);
@@ -12213,6 +12391,49 @@ counter
         assert_eq!(
             map_prop(&pending.tree, SOURCE_SYMBOL_PROP).as_deref(),
             Some(&Value::String("sampler-param-knob".to_string()))
+        );
+    }
+
+    #[test]
+    fn source_metadata_marks_apply_built_widget_span() {
+        let mut vm = VM::new(Vec::new());
+        super::register_core_natives(&mut vm);
+        crate::widgets::register_widget_natives(&mut vm);
+        let path = std::env::temp_dir().join(format!(
+            "eseqlisp-source-span-apply-{}.lisp",
+            std::process::id()
+        ));
+        let source = r#"(def pill (text &rest props &key (w 10) &allow-other-keys)
+  (apply box :width w (label text) props))
+(effect (pill "a" :w 4 :padding 2))"#;
+
+        vm.eval_module_source(path, source, 13)
+            .expect("module eval");
+
+        let Some(PendingUiUpdate::FullTree(pending)) = vm.pending_widget_trees.pop() else {
+            panic!("expected emitted widget tree");
+        };
+        let apply_start = source.find("(apply box").expect("apply form");
+        let apply_end = source.find(" props)").expect("apply end") + " props)".len();
+        assert_eq!(
+            source_byte_prop(&pending.tree, SOURCE_START_BYTE_PROP),
+            apply_start
+        );
+        assert_eq!(source_byte_prop(&pending.tree, SOURCE_END_BYTE_PROP), apply_end);
+        assert_eq!(
+            map_prop(&pending.tree, SOURCE_REVISION_PROP).as_deref(),
+            Some(&Value::String("13".to_string()))
+        );
+        // The spread props still reach the box.
+        assert_eq!(
+            map_prop(&pending.tree, "padding").as_deref(),
+            Some(&Value::Number(2.0))
+        );
+        // The label child keeps its own span inside the helper.
+        let child = first_child(&pending.tree).expect("label child");
+        assert_eq!(
+            source_byte_prop(&child, SOURCE_START_BYTE_PROP),
+            source.find("(label text)").expect("label form")
         );
     }
 

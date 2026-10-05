@@ -81,8 +81,6 @@
 ;; ── Sources ────────────────────────────────────────────────────────────────
 
 ;; Sources match on any channel unless wrapped with `on-channel`.
-;; Functions here are fixed-arity (no &rest outside macros), so options are
-;; layered with small wrappers rather than keyword arguments.
 (def cc (controller)
   (dict :kind :cc :cc controller))
 

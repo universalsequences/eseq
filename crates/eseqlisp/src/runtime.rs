@@ -2105,6 +2105,7 @@ impl Runtime {
             ("empty?", "(empty? value)", "Return whether a list, string, map, or nil is empty."),
             ("set-nth", "(set-nth list index value)", "Return a copy of list with the 0-based item replaced."),
             ("each", "(each list owner-path callback)", "Map over a list with item index and optional widget ownership metadata."),
+            ("apply", "(apply callback arg ... list)", "Call callback with the args followed by the items of list."),
             ("map", "(map callback list)", "Return a list containing callback applied to each item."),
             ("filter", "(filter callback list)", "Return list items for which callback is truthy."),
             ("find-by-key", "(find-by-key list :key value)", "Return the first map in list whose :key field equals value, or nil."),
