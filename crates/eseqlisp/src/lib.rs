@@ -858,6 +858,14 @@ mod tests {
             eval(&mut runtime, "(def m (dict :on false)) (toggle! m.on) m.on"),
             Some(Value::Bool(true))
         );
+        // toggle!: a singleton kind's field (kind-bindings spec §3.1).
+        assert_eq!(
+            eval(
+                &mut runtime,
+                "(def-kind menu :key () :state ((open false))) (toggle! menu.open) menu.open"
+            ),
+            Some(Value::Bool(true))
+        );
     }
 
     #[test]

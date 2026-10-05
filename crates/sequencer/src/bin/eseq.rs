@@ -637,7 +637,8 @@ fn declared_module(source: &str) -> Option<String> {
     (!name.is_empty()).then_some(name)
 }
 
-/// Every `(def-kind NAME` in the source, in order.
+/// Every `(def-kind NAME` in the source, in order, except singletons
+/// (`:key`): they have no instances or tab to check.
 fn def_kind_names(source: &str) -> Vec<String> {
     let code = code_only(source);
     let mut names = Vec::new();
@@ -652,11 +653,35 @@ fn def_kind_names(source: &str) -> Vec<String> {
             .chars()
             .take_while(|ch| !ch.is_whitespace() && *ch != ')' && *ch != '(')
             .collect();
-        if !name.is_empty() && !names.contains(&name) {
+        if !name.is_empty() && !names.contains(&name) && !form_has_key_slot(rest) {
             names.push(name);
         }
     }
     names
+}
+
+/// Whether the form whose body starts at `rest` (just after its head) has a
+/// top-level `:key` slot.
+fn form_has_key_slot(rest: &str) -> bool {
+    let mut depth = 0usize;
+    for (at, ch) in rest.char_indices() {
+        match ch {
+            '(' | '[' => depth += 1,
+            ')' | ']' if depth == 0 => return false,
+            ')' | ']' => depth -= 1,
+            ':' if depth == 0 => {
+                let slot: String = rest[at + 1..]
+                    .chars()
+                    .take_while(|ch| !ch.is_whitespace() && *ch != '(' && *ch != ')')
+                    .collect();
+                if slot == "key" {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 /// Load the module in the app's own runtime, create instance 1 of the kind
@@ -765,7 +790,8 @@ mod tests {
     fn sequencer_check_reads_the_module_header_and_kind_names() {
         let source = ";; (def-kind commented-out)\n(module my.pulse)\n(import my.pulse-core)\n\
                       (def x \"(def-kind in-a-string\")\n(def-kind pulse\n  :view p)\n\
-                      (def-kind other :view q) ; (def-kind trailing)\n(def-kinds nope)\n";
+                      (def-kind other :view q) ; (def-kind trailing)\n(def-kinds nope)\n\
+                      (def-kind menu :key () :state ((open false)))\n";
         assert_eq!(declared_module(source).as_deref(), Some("my.pulse"));
         assert_eq!(def_kind_names(source), vec!["pulse".to_string(), "other".to_string()]);
         assert_eq!(declared_module("(def x 1)\n(module late)"), None);

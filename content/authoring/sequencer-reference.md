@@ -63,6 +63,11 @@ Slots (all optional except that a sequencer needs `:generator` or
   functions, no reactive refs.
 - `:state ((field default) …)`: per-instance view state (selection, open
   menus). Not saved, not seen by the tick.
+- Field types: `(field default)` infers the type from the default (a number,
+  `true`/`false`, a string, a list, else any); `(field :number :default nil)`
+  declares it (`:number :int :bool :rgb :point :string :any`, a kind name,
+  `(list-of type)`), and is required for a nil default. Writing a value of
+  another type is an error.
 - `:view FN`: `(FN self)` returns the panel widget tree for the instance's
   tab.
 - `:on-create FN`, `:keymap MODE`: optional.

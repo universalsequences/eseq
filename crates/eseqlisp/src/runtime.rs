@@ -1591,13 +1591,9 @@ impl Runtime {
         // Note: vec2 is already registered in vm.rs with numeric semantics — don't override it.
         for name in &["vec3", "vec4", "rgba", "material", "lighting", "shadow"] {
             let tag = name.to_string();
-            runtime.vm.register_native(name, move |args| {
-                let mut items = vec![Rc::new(RefCell::new(Value::Symbol(tag.clone())))];
-                for a in args {
-                    items.push(Rc::new(RefCell::new(a)));
-                }
-                Value::List(items)
-            });
+            runtime
+                .vm
+                .register_native(name, move |args| crate::vm::tagged_list(&tag, args));
         }
         // Load SDF standard library (macros for SDF primitives)
         let sdf_src = include_str!("../../../content/core/sdf-stdlib.lisp");
@@ -2098,6 +2094,7 @@ impl Runtime {
             ("vec3", "(vec3 x y z)", "Return a tagged SDF vec3 expression."),
             ("vec4", "(vec4 x y z w)", "Return a tagged SDF vec4 expression."),
             ("rgba", "(rgba r g b a)", "Return a tagged SDF color expression."),
+            ("rgb", "(rgb r g b)", "Return the color (rgb r g b): the value of an :rgb kind field, usable wherever a color is."),
             // Shader-native forms are interpreted by sdf_codegen, so they have
             // no VM global or macro entry for completion to discover.
             ("sdf/layer", "(sdf/layer shape ...)", "Composite SDF colors in order, with later shapes painted over earlier ones."),

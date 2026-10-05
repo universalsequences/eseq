@@ -18,9 +18,11 @@ use std::time::{Duration, Instant};
 mod instances;
 mod view_buffers;
 pub use instances::{
-    INSTANCE_HOST_FIELDS, INSTANCE_NAMESPACE_PREFIX, InstanceError, InstanceHostField,
-    InstanceId, InstanceKindSchema, InstanceLabelHook,
+    DEF_SINGLETON_KIND_NATIVE, FieldType, INSTANCE_HOST_FIELDS, INSTANCE_NAMESPACE_PREFIX,
+    InstanceError, InstanceHostField, InstanceId, InstanceKindSchema, InstanceLabelHook,
+    KindField, SCRATCH_KIND_PACKAGE, kind_id, kind_name_of,
 };
+pub(crate) use instances::{FIELD_TYPES_HINT, nil_default_message, state_entry_shape_message};
 pub use view_buffers::BoundView;
 
 static RAND_STATE: AtomicU64 = AtomicU64::new(0x9e37_79b9_7f4a_7c15);
@@ -1151,6 +1153,12 @@ fn is_falsey(value: &Value) -> bool {
         Value::List(items) => items.is_empty(),
         _ => false,
     }
+}
+
+/// The tagged list `(tag arg ...)`, as constructor natives like `rgb` and
+/// the SDF `vec3`/`rgba` build it.
+pub(crate) fn tagged_list(tag: &str, args: Vec<Value>) -> Value {
+    list_from_values(std::iter::once(Value::Symbol(tag.to_string())).chain(args))
 }
 
 fn list_from_values(values: impl IntoIterator<Item = Value>) -> Value {
@@ -2587,9 +2595,11 @@ pub struct VM {
     /// stateful bytecodes consult this as the VM-level sandbox backstop.
     active_expander: Option<String>,
     active_expansion_site: Option<ActiveExpansionSite>,
-    /// Some callback-oriented natives historically turn callback errors into
-    /// Lisp `nil`. Sandbox violations must never be swallowed that way.
-    expansion_violation: Option<VMError>,
+    /// An error the running native call fails with once it returns: sandbox
+    /// violations (some callback-oriented natives historically turn callback
+    /// errors into Lisp `nil`, and violations must never be swallowed that
+    /// way) and [`VM::fail_native_call`].
+    pending_native_error: Option<VMError>,
     active_execution_origins: Vec<Rc<ExpansionOrigin>>,
     /// Kind schemas and per-instance field cells (instance-kinds spec §4).
     instances: instances::InstanceStore,
@@ -2875,6 +2885,23 @@ pub fn register_core_natives(vm: &mut VM) {
         }
         _ => Value::Nil,
     });
+
+    // `(def-kind name :key () :state (...))` (kind-bindings spec §3.1):
+    // register the singleton kind and return its one instance. A malformed
+    // entry or a default its type rejects fails the eval.
+    vm.register_native_with_vm(DEF_SINGLETON_KIND_NATIVE, |args, vm| {
+        match vm.def_singleton_kind_from_args(args) {
+            Ok(instance) => instance,
+            Err(error) => {
+                vm.fail_native_call(error);
+                Value::Nil
+            }
+        }
+    });
+
+    // (rgb r g b) → the tagged list `(rgb r g b)`: an :rgb field's value
+    // (kind-bindings spec §3.3), and a color wherever widgets parse one.
+    vm.register_native("rgb", |args| tagged_list("rgb", args));
 
     // (unbind-view-buffer "*name*") → stop rendering a bound buffer.
     vm.register_native_with_vm("unbind-view-buffer", |args, vm| match args.first() {
@@ -4708,7 +4735,7 @@ impl VM {
             import_pass_epoch: 1,
             active_expander: None,
             active_expansion_site: None,
-            expansion_violation: None,
+            pending_native_error: None,
             active_execution_origins: Vec::new(),
             global_store_hooks: Vec::new(),
             inline_widget_metadata_resolver: None,
@@ -4717,6 +4744,13 @@ impl VM {
         };
         vm.register_native(SOURCE_ORIGIN_NATIVE, source_origin_native);
         vm
+    }
+
+    /// Make the running native call fail with `error` once it returns (a
+    /// direct call surfaces it as the eval's error, like an expansion
+    /// violation). For natives that must not fail silently.
+    pub(crate) fn fail_native_call(&mut self, error: VMError) {
+        self.pending_native_error = Some(error);
     }
 
     /// Register a Rust function as a named global callable from Lisp.
@@ -4812,7 +4846,7 @@ impl VM {
             macro_name: self.active_expander.clone().unwrap_or_default(),
             operation: operation.to_string(),
         };
-        self.expansion_violation = Some(error.clone());
+        self.pending_native_error = Some(error.clone());
         error
     }
 
@@ -5165,14 +5199,14 @@ impl VM {
             identity_hash,
             next_gensym: 0,
         });
-        let previous_violation = self.expansion_violation.take();
+        let previous_violation = self.pending_native_error.take();
         let result = self
             .validate_expander_chunk(mac.function_chunk, &mut HashSet::new())
             .and_then(|_| self.invoke(Value::Closure(mac.function_chunk, Vec::new()), values));
-        let violation = self.expansion_violation.take();
+        let violation = self.pending_native_error.take();
         self.active_expander = previous_expander;
         self.active_expansion_site = previous_site;
-        self.expansion_violation = previous_violation;
+        self.pending_native_error = previous_violation;
         state.chunks = std::mem::take(&mut self.chunks);
         state.global_symbols = std::mem::take(&mut self.global_names);
 
@@ -7136,7 +7170,7 @@ impl VM {
             Value::NativeFunction(native) => {
                 self.check_native_expansion_safety(&native)?;
                 let result = (native.callable)(args, self);
-                if let Some(error) = self.expansion_violation.take() {
+                if let Some(error) = self.pending_native_error.take() {
                     return Err(error);
                 }
                 if self.execution_depth == 0
@@ -8813,7 +8847,7 @@ impl VM {
                                     .collect();
                                 args.reverse();
                                 let result = (native.callable)(args, self);
-                                if let Some(error) = self.expansion_violation.take() {
+                                if let Some(error) = self.pending_native_error.take() {
                                     return Err(error);
                                 }
                                 stack.push(Rc::new(RefCell::new(result)));

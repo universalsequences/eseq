@@ -1,6 +1,6 @@
 # Kind bindings
 
-Status: spec rev 3, 2026-10-04. Nothing built. Bead: epic `eseq-0l17` (`bd list --label kind-bindings`).
+Status: spec rev 3, 2026-10-04. Stage 1 built (§3.1, §3.3 notes). Bead: epic `eseq-0l17` (`bd list --label kind-bindings`).
 Rev 3 resolves the open questions (§12 Decisions). Rev 2 dropped the separate `defrecord` form of rev 1: host state and view state
 are declared with `def-kind`, which gains keyed and singleton kinds, a `:host`
 field group and typed fields.
@@ -154,6 +154,19 @@ tab rows, no `:view`/tabs/buffers, no `:on-create`, no manifest entry. Their
 built-in fields are `id` and `kind` only (no `owner`/`label`). Asking to
 create one is an error: `track instances come from the project; use (track i)`.
 
+Built (stage 1, singletons): `(def-kind k :key () :state …)` compiles to
+`(def k (__def-singleton-kind 'k :state …))` and never calls the host's
+`def-kind` native, so the host registry, manifest check, project instance
+list, tabs and kits never see it; `VM::live_instances` and
+`instance_kind_ids` leave singletons out, and `eseq sequencer check` skips
+`:key` kinds. A singleton takes only `:state` (`:document` is saved
+per-instance project state, which a singleton is not). Its kind id is
+`<module>:<name>` (`scratch:<name>` headerless); its instance id comes from
+`SINGLETON_INSTANCE_ID_BASE` (2^48) up, clear of host ids. Re-evaluating the
+`def-kind` keeps the instance and its values (§3.3 reload rule). A kind
+cannot switch between created and singleton without a restart. `:key` with
+key names is a compile error until stage 3.
+
 ### 3.2 `:host`
 
 Fields whose values the host owns. Entries are typed (§3.3) and may carry:
@@ -196,6 +209,24 @@ Everything else is **value-only**: a DAG source, no slot.
 
 Existing kinds keep working untyped; their numeric `:state` fields become
 slot-backed and bindable for free.
+
+Built (stage 1), decisions the above left open:
+
+- Types are checked on every write (`set!` and host `set_instance_field`,
+  `:state` and `:document`), always, as an error
+  `field 'n' of kind 'm:k' is :number; got "x"`. nil is accepted only by a
+  field whose default is nil (an optional field) and by `(list-of …)` (the
+  empty list). A typed default its type rejects is an error at `def-kind`.
+- A nil default with no type (`f`, `(f)`, `(f nil)`) is a compile error, for
+  created kinds too; a default that evaluates to nil errors when `def-kind`
+  runs.
+- `:rgb` values are the tagged list `(rgb r g b)` from the core `rgb` native
+  (the shape widget color parsing already accepts); `:point` is a map with
+  numeric `:col`/`:row`. A bare kind type (`scene`) matches an instance
+  whose kind id's name part is the name (`pkg:scene`, `kind_name_of`); a
+  qualified one (`pkg:scene`) must equal the kind id exactly.
+- Hot reload keeps a value by field name only while the new type admits it;
+  otherwise the field restarts at its default (instance-kinds §5 otherwise).
 
 ### 3.4 Where host kinds are declared
 

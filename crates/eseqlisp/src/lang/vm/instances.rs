@@ -22,6 +22,13 @@
 //! undoable project edit, the host pushes the accepted label back); without
 //! one the label cell is written locally.
 //!
+//! Declared fields are typed (docs/kind-bindings-spec.md §3.3, [`FieldType`]):
+//! the type is inferred from the default or declared, and every write is
+//! checked against it. A singleton kind (`:key ()`, §3.1) has exactly one
+//! instance, created by `def-kind` and bound to the kind's name; its
+//! built-in fields are only `id` and `kind`, and host enumerations
+//! (`live_instances`, `instance_kind_ids`) leave it out.
+//!
 //! A dropped instance keeps a tombstone naming its kind: reads answer the
 //! kind's defaults, writes are silent no-ops (spec §4 "stale self").
 //!
@@ -56,6 +63,11 @@ pub const INSTANCE_DOC_READ_NATIVE: &str = "__instance-doc-read";
 /// field writes. It dirties its own readers and records history.
 pub const INSTANCE_DOC_WRITE_NATIVE: &str = "__instance-doc-write";
 
+/// The native `(def-kind name :key () ...)` compiles to (kind-bindings
+/// spec §3.1); it returns the singleton instance the compiler then binds to
+/// the kind's name.
+pub const DEF_SINGLETON_KIND_NATIVE: &str = "__def-singleton-kind";
+
 /// Host-owned field names every instance answers, in this order.
 pub const INSTANCE_HOST_FIELDS: [&str; 4] = ["id", "kind", "owner", "label"];
 
@@ -76,16 +88,280 @@ impl InstanceHostField {
     }
 }
 
+/// The built-in fields of a singleton kind (kind-bindings spec §3.1): no
+/// `owner`/`label`, which only host-created instances have.
+pub(crate) const SINGLETON_BUILTIN_FIELDS: [&str; 2] = ["id", "kind"];
+
+/// Singleton instances take ids from here up, one per singleton kind, so
+/// they never collide with host-assigned instance ids (which count up from
+/// 1) and stay exact as a Lisp number. Only allocation uses it: whether an
+/// instance is a singleton is its kind's [`InstanceKindSchema::singleton`].
+pub(crate) const SINGLETON_INSTANCE_ID_BASE: InstanceId = 1 << 48;
+
+/// Kind id prefix for kinds defined in headerless (scratch) code.
+pub const SCRATCH_KIND_PACKAGE: &str = "scratch";
+
+/// `<package name>:<kind name>`. Kinds outside any installed package fall
+/// back to their module (`<module>:<kind>`), and headerless code to
+/// `scratch:<kind>`, so a kind id is never ambiguous with a package's.
+pub fn kind_id(package: Option<&str>, module: Option<&str>, name: &str) -> String {
+    match (package, module) {
+        (Some(package), _) => format!("{package}:{name}"),
+        (None, Some(module)) => format!("{module}:{name}"),
+        (None, None) => format!("{SCRATCH_KIND_PACKAGE}:{name}"),
+    }
+}
+
+/// The kind name part of a kind id (`alez/neural:neural` -> `neural`).
+pub fn kind_name_of(kind_id: &str) -> &str {
+    kind_id
+        .rsplit_once(':')
+        .map(|(_, name)| name)
+        .unwrap_or(kind_id)
+}
+
+pub(crate) const FIELD_TYPES_HINT: &str =
+    "types are :number :int :bool :rgb :point :string :any, a kind name, or (list-of type)";
+
+/// The error for a `:state`/`:document` entry with an untyped nil default
+/// (kind-bindings spec §3.3): nil says nothing about the field's type.
+pub(crate) fn nil_default_message(kind: &str, slot: &str, field: &str) -> String {
+    format!(
+        "def-kind {kind}: :{slot} field '{field}' defaults to nil; declare its type: \
+         ({field} <type> :default nil)"
+    )
+}
+
+/// The error for a malformed `:state`/`:document` entry.
+pub(crate) fn state_entry_shape_message(kind: &str, slot: &str) -> String {
+    format!("def-kind {kind}: each :{slot} entry is (field default) or (field type :default d)")
+}
+
+/// The declared type of a `:state`/`:document` field (kind-bindings spec
+/// §3.3). Writes are checked against it: `(set! x.f v)` with a value of
+/// another type is an error naming the kind, the field and its type.
+#[derive(Clone, Debug, PartialEq)]
+pub enum FieldType {
+    Number,
+    /// A number with no fractional part.
+    Int,
+    Bool,
+    /// `(rgb r g b)`, the tagged list the `rgb` native builds.
+    Rgb,
+    /// `(dict :col c :row r)`.
+    Point,
+    String,
+    Any,
+    /// An instance of the named kind: a qualified name (`pkg:scene`) is
+    /// the exact kind id, a bare one (`scene`) matches the kind name part
+    /// of the instance's kind id ([`kind_name_of`]).
+    Kind(String),
+    ListOf(Box<FieldType>),
+}
+
+/// Answers an instance's kind id, for checking kind-typed fields.
+type KindOf<'a, 'k> = Option<&'a dyn Fn(InstanceId) -> Option<&'k str>>;
+
+impl FieldType {
+    /// The type an untyped `(field default)` entry declares: `false`/`true`
+    /// → `:bool`, a number → `:number`, a string → `:string`, a list →
+    /// `(list-of :any)`, anything else → `:any`.
+    pub fn infer(default: &Value) -> Self {
+        match default {
+            Value::Bool(_) => Self::Bool,
+            Value::Number(_) => Self::Number,
+            Value::String(_) => Self::String,
+            Value::List(_) => Self::ListOf(Box::new(Self::Any)),
+            _ => Self::Any,
+        }
+    }
+
+    /// The type a keyword names (`number` for `:number`), if any.
+    pub fn from_keyword(name: &str) -> Option<Self> {
+        Some(match name {
+            "number" => Self::Number,
+            "int" => Self::Int,
+            "bool" => Self::Bool,
+            "rgb" => Self::Rgb,
+            "point" => Self::Point,
+            "string" => Self::String,
+            "any" => Self::Any,
+            _ => return None,
+        })
+    }
+
+    /// Parse a type spelled as data: `:bool`, `scene`, `(list-of :number)`.
+    pub fn from_value(value: &Value) -> Result<Self, String> {
+        match value {
+            Value::Keyword(name) => {
+                let name = name.trim_start_matches(':');
+                Self::from_keyword(name)
+                    .ok_or_else(|| format!("unknown field type :{name}; {FIELD_TYPES_HINT}"))
+            }
+            Value::Symbol(name) if !matches!(name.as_str(), "" | "nil" | "true" | "false") => {
+                Ok(Self::Kind(name.clone()))
+            }
+            Value::List(items) if items.len() == 2 => {
+                match (&*items[0].borrow(), &*items[1].borrow()) {
+                    (Value::Symbol(head), inner) if head == "list-of" => {
+                        Ok(Self::ListOf(Box::new(Self::from_value(inner)?)))
+                    }
+                    _ => Err(format!("invalid field type; {FIELD_TYPES_HINT}")),
+                }
+            }
+            _ => Err(format!("invalid field type; {FIELD_TYPES_HINT}")),
+        }
+    }
+
+    /// Whether `value` has this type. Without `kind_of` (no store to ask) a
+    /// kind type accepts any instance.
+    fn accepts(&self, value: &Value, kind_of: KindOf<'_, '_>) -> bool {
+        let number = |item: &Rc<std::cell::RefCell<Value>>| matches!(&*item.borrow(), Value::Number(_));
+        match (self, value) {
+            (Self::Any, _) => true,
+            (Self::Number, Value::Number(_)) => true,
+            (Self::Int, Value::Number(n)) => n.is_finite() && n.fract() == 0.0,
+            (Self::Bool, Value::Bool(_)) => true,
+            (Self::String, Value::String(_)) => true,
+            (Self::Rgb, Value::List(items)) => {
+                items.len() == 4
+                    && matches!(&*items[0].borrow(), Value::Symbol(head) if head == "rgb")
+                    && items[1..].iter().all(number)
+            }
+            (Self::Point, Value::Map(map)) => {
+                map.get("col").is_some_and(number) && map.get("row").is_some_and(number)
+            }
+            (Self::Kind(name), Value::Instance(id)) => match kind_of {
+                None => true,
+                Some(kind_of) => kind_of(*id).is_some_and(|kind| {
+                    if name.contains(':') {
+                        kind == name
+                    } else {
+                        kind_name_of(kind) == name
+                    }
+                }),
+            },
+            (Self::ListOf(item), Value::List(_)) if **item == Self::Any => true,
+            (Self::ListOf(item), Value::List(items)) => {
+                items.iter().all(|value| item.accepts(&value.borrow(), kind_of))
+            }
+            _ => false,
+        }
+    }
+}
+
+impl std::fmt::Display for FieldType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Number => write!(f, ":number"),
+            Self::Int => write!(f, ":int"),
+            Self::Bool => write!(f, ":bool"),
+            Self::Rgb => write!(f, ":rgb"),
+            Self::Point => write!(f, ":point"),
+            Self::String => write!(f, ":string"),
+            Self::Any => write!(f, ":any"),
+            Self::Kind(name) => write!(f, "{name}"),
+            Self::ListOf(item) => write!(f, "(list-of {item})"),
+        }
+    }
+}
+
+/// One declared `:state`/`:document` field: its name, default and type.
+#[derive(Clone, Debug)]
+pub struct KindField {
+    pub name: String,
+    pub default: Value,
+    pub ty: FieldType,
+}
+
+impl KindField {
+    /// An untyped `(field default)` entry: the type is inferred.
+    pub fn new(name: impl Into<String>, default: Value) -> Self {
+        let ty = FieldType::infer(&default);
+        Self { name: name.into(), default, ty }
+    }
+
+    pub fn typed(name: impl Into<String>, ty: FieldType, default: Value) -> Self {
+        Self { name: name.into(), default, ty }
+    }
+
+    /// Parse one entry as the compiler hands it over: `(field default)` or
+    /// `(field default type)` (from `(field type :default d)`). An untyped
+    /// entry whose default is nil is an error: nil says nothing about the
+    /// type. `kind`/`slot` only label the error.
+    pub fn from_entry(kind: &str, slot: &str, entry: &Value) -> Result<Self, String> {
+        let Value::List(items) = entry else {
+            return Err(state_entry_shape_message(kind, slot));
+        };
+        let items: Vec<Value> = items.iter().map(|item| item.borrow().clone()).collect();
+        let name = match items.first() {
+            Some(Value::Symbol(name) | Value::String(name)) if !name.is_empty() => name.clone(),
+            _ => return Err(format!("def-kind {kind}: :{slot} field names must be symbols")),
+        };
+        let default = items.get(1).cloned().unwrap_or(Value::Nil);
+        let field = match items.get(2) {
+            None if matches!(default, Value::Nil) => {
+                return Err(nil_default_message(kind, slot, &name));
+            }
+            None => Self::new(name, default),
+            Some(ty) => {
+                let ty = FieldType::from_value(ty)
+                    .map_err(|error| format!("def-kind {kind}: :{slot} field '{name}': {error}"))?;
+                Self::typed(name, ty, default)
+            }
+        };
+        if !field.accepts(&field.default, None) {
+            return Err(format!(
+                "def-kind {kind}: :{slot} field '{}' is {}; its default {} is not",
+                field.name,
+                field.ty,
+                describe_value(&field.default)
+            ));
+        }
+        Ok(field)
+    }
+
+    /// Whether the field can hold `value`: a value of its type, or nil when
+    /// the field defaults to nil (an optional field) or is a list (nil is
+    /// the empty list).
+    fn accepts(&self, value: &Value, kind_of: KindOf<'_, '_>) -> bool {
+        self.ty.accepts(value, kind_of)
+            || (matches!(value, Value::Nil)
+                && (matches!(self.default, Value::Nil) || matches!(self.ty, FieldType::ListOf(_))))
+    }
+}
+
+/// A value as an error message shows it, cut short.
+fn describe_value(value: &Value) -> String {
+    let text = super::format_lisp_source(value);
+    if text.chars().count() > 48 {
+        format!("{}…", text.chars().take(48).collect::<String>())
+    } else {
+        text
+    }
+}
+
+/// The position of the field named `name` in `fields`.
+fn index_in(fields: &[KindField], name: &str) -> Option<usize> {
+    fields.iter().position(|declared| declared.name == name)
+}
+
 /// Ordered `:state` fields of one kind with their default values.
 #[derive(Clone, Debug)]
 pub struct InstanceKindSchema {
     /// Kind id, `<package name>:<kind name>` (spec §5).
     pub kind: String,
-    /// `(field default)` pairs, in declaration order.
-    pub fields: Vec<(String, Value)>,
-    /// `:document` `(field default)` pairs, in declaration order: stored by
-    /// the host per pattern (docs/jaki-kind-spec.md §3).
-    pub document: Vec<(String, Value)>,
+    /// `:state` fields, in declaration order.
+    pub fields: Vec<KindField>,
+    /// `:document` fields, in declaration order: stored by the host per
+    /// pattern (docs/jaki-kind-spec.md §3).
+    pub document: Vec<KindField>,
+    /// `:key ()` (kind-bindings spec §3.1): exactly one instance, created by
+    /// `def-kind` itself and bound to the kind's name. Its built-in fields
+    /// are `id` and `kind` only, and the host never sees it (no project
+    /// instance, tab, view or Packages row): [`VM::live_instances`] and
+    /// [`VM::instance_kind_ids`] leave singletons out.
+    pub singleton: bool,
     /// The kind's `:view`, a function of one argument (the instance). The
     /// host renders `(view self)` per instance; `None` for a view-less kind.
     pub view: Option<Value>,
@@ -106,6 +382,7 @@ impl InstanceKindSchema {
             kind: kind.into(),
             fields: Vec::new(),
             document: Vec::new(),
+            singleton: false,
             view: None,
             keymap: None,
             on_create: None,
@@ -127,35 +404,55 @@ impl InstanceKindSchema {
         self
     }
 
-    pub fn field(mut self, name: impl Into<String>, default: Value) -> Self {
-        self.fields.push((name.into(), default));
+    pub fn singleton(mut self) -> Self {
+        self.singleton = true;
         self
     }
 
-    pub fn document_field(mut self, name: impl Into<String>, default: Value) -> Self {
-        self.document.push((name.into(), default));
+    /// An untyped `:state` field; its type is inferred from the default.
+    pub fn field(self, name: impl Into<String>, default: Value) -> Self {
+        self.with_field(KindField::new(name, default))
+    }
+
+    pub fn with_field(mut self, field: KindField) -> Self {
+        self.fields.push(field);
         self
+    }
+
+    /// An untyped `:document` field; its type is inferred from the default.
+    pub fn document_field(self, name: impl Into<String>, default: Value) -> Self {
+        self.with_document_field(KindField::new(name, default))
+    }
+
+    pub fn with_document_field(mut self, field: KindField) -> Self {
+        self.document.push(field);
+        self
+    }
+
+    /// The fields every instance of this kind answers before its own.
+    pub fn builtin_fields(&self) -> &'static [&'static str] {
+        if self.singleton { &SINGLETON_BUILTIN_FIELDS } else { &INSTANCE_HOST_FIELDS }
     }
 
     fn index_of(&self, field: &str) -> Option<usize> {
-        self.fields.iter().position(|(name, _)| name == field)
+        index_in(&self.fields, field)
     }
 
     fn document_index_of(&self, field: &str) -> Option<usize> {
-        self.document.iter().position(|(name, _)| name == field)
+        index_in(&self.document, field)
     }
 
     fn document_default_of(&self, index: usize) -> Value {
         self.document
             .get(index)
-            .map(|(_, default)| default.deep_clone())
+            .map(|declared| declared.default.deep_clone())
             .unwrap_or(Value::Nil)
     }
 
     fn default_of(&self, index: usize) -> Value {
         self.fields
             .get(index)
-            .map(|(_, default)| default.deep_clone())
+            .map(|declared| declared.default.deep_clone())
             .unwrap_or(Value::Nil)
     }
 
@@ -168,11 +465,12 @@ impl InstanceKindSchema {
             return Err(InstanceError::InvalidSchema("empty kind id".to_string()));
         }
         let mut seen = std::collections::HashSet::new();
-        for (name, _) in self.fields.iter().chain(self.document.iter()) {
-            if INSTANCE_HOST_FIELDS.contains(&name.as_str()) {
+        for KindField { name, .. } in self.fields.iter().chain(self.document.iter()) {
+            if self.builtin_fields().contains(&name.as_str()) {
                 return Err(InstanceError::InvalidSchema(format!(
-                    "kind '{}' declares state field '{name}', which is a host field",
-                    self.kind
+                    "kind '{}' declares state field '{name}', which is a {} field",
+                    self.kind,
+                    if self.singleton { "built-in" } else { "host" }
                 )));
             }
             if name.is_empty() || name.contains('.') {
@@ -191,13 +489,13 @@ impl InstanceKindSchema {
         Ok(())
     }
 
-    /// Every readable field name, host fields first.
+    /// Every readable field name, built-in fields first.
     pub fn all_field_names(&self) -> Vec<String> {
-        INSTANCE_HOST_FIELDS
+        self.builtin_fields()
             .iter()
             .map(|name| (*name).to_string())
-            .chain(self.fields.iter().map(|(name, _)| name.clone()))
-            .chain(self.document.iter().map(|(name, _)| name.clone()))
+            .chain(self.fields.iter().map(|declared| declared.name.clone()))
+            .chain(self.document.iter().map(|declared| declared.name.clone()))
             .collect()
     }
 }
@@ -216,6 +514,15 @@ pub enum InstanceError {
         kind: String,
         field: String,
     },
+    /// A write of a value the field's declared type does not admit.
+    TypeMismatch {
+        kind: String,
+        field: String,
+        expected: String,
+        got: String,
+    },
+    /// The host asked to create an instance of a singleton kind.
+    SingletonKind(String),
     InvalidSchema(String),
 }
 
@@ -237,6 +544,16 @@ impl std::fmt::Display for InstanceError {
             Self::ReadOnlyField { kind, field } => {
                 write!(f, "field '{field}' of kind '{kind}' is read-only")
             }
+            Self::TypeMismatch {
+                kind,
+                field,
+                expected,
+                got,
+            } => write!(f, "field '{field}' of kind '{kind}' is {expected}; got {got}"),
+            Self::SingletonKind(kind) => write!(
+                f,
+                "kind '{kind}' is a singleton (:key ()); its one instance comes from def-kind"
+            ),
             Self::InvalidSchema(message) => write!(f, "invalid instance kind schema: {message}"),
         }
     }
@@ -277,6 +594,10 @@ pub(crate) struct InstanceStore {
     live: HashMap<InstanceId, InstanceRecord>,
     /// Dropped instance -> its kind, so a stale handle still reads defaults.
     dropped: HashMap<InstanceId, String>,
+    /// Singleton kind id -> its one instance. Entries are never removed, so
+    /// a re-evaluated `def-kind` finds the same instance (and ids are
+    /// allocated as `SINGLETON_INSTANCE_ID_BASE + len`).
+    singletons: HashMap<String, InstanceId>,
     label_hook: Option<InstanceLabelHook>,
 }
 
@@ -291,8 +612,8 @@ impl InstanceStore {
                 .iter()
                 .map(|(name, schema)| {
                     let mut schema = schema.clone();
-                    for (_, default) in schema.fields.iter_mut().chain(schema.document.iter_mut()) {
-                        *default = clone_value_for_snapshot(default);
+                    for field in schema.fields.iter_mut().chain(schema.document.iter_mut()) {
+                        field.default = clone_value_for_snapshot(&field.default);
                     }
                     if let Some(view) = &mut schema.view {
                         *view = clone_value_for_snapshot(view);
@@ -320,6 +641,7 @@ impl InstanceStore {
                 })
                 .collect(),
             dropped: self.dropped.clone(),
+            singletons: self.singletons.clone(),
             label_hook: self.label_hook.clone(),
         }
     }
@@ -339,34 +661,43 @@ impl InstanceStore {
     }
 
     fn resolve(&self, id: InstanceId, field: &str) -> Result<(String, FieldSlot), InstanceError> {
-        let kind = self
-            .kind_of(id)
-            .ok_or(InstanceError::UnknownInstance(id))?
-            .to_string();
+        let (kind, slot, _) = self.resolve_declared(id, field)?;
+        Ok((kind.to_string(), slot))
+    }
+
+    /// [`Self::resolve`], borrowing the kind id, plus the declared field
+    /// behind a `:state`/`:document` slot.
+    fn resolve_declared(
+        &self,
+        id: InstanceId,
+        field: &str,
+    ) -> Result<(&str, FieldSlot, Option<&KindField>), InstanceError> {
+        let kind = self.kind_of(id).ok_or(InstanceError::UnknownInstance(id))?;
+        let schema = self.kinds.get(kind);
+        // A singleton has no owner/label: those names are its own fields
+        // (or unknown).
+        let singleton = schema.is_some_and(|schema| schema.singleton);
         let slot = match field {
             "id" => FieldSlot::Id,
             "kind" => FieldSlot::Kind,
-            "owner" => FieldSlot::Owner,
-            "label" => FieldSlot::Label,
+            "owner" if !singleton => FieldSlot::Owner,
+            "label" if !singleton => FieldSlot::Label,
             _ => {
-                let schema = self
-                    .kinds
-                    .get(&kind)
-                    .ok_or_else(|| InstanceError::UnknownKind(kind.clone()))?;
-                match (schema.index_of(field), schema.document_index_of(field)) {
-                    (Some(index), _) => FieldSlot::State(index),
-                    (None, Some(index)) => FieldSlot::Document(index),
-                    (None, None) => {
-                        return Err(InstanceError::UnknownField {
-                            kind: kind.clone(),
-                            field: field.to_string(),
-                            fields: schema.all_field_names(),
-                        });
+                let schema = schema.ok_or_else(|| InstanceError::UnknownKind(kind.to_string()))?;
+                return match (schema.index_of(field), schema.document_index_of(field)) {
+                    (Some(index), _) => Ok((kind, FieldSlot::State(index), schema.fields.get(index))),
+                    (None, Some(index)) => {
+                        Ok((kind, FieldSlot::Document(index), schema.document.get(index)))
                     }
-                }
+                    (None, None) => Err(InstanceError::UnknownField {
+                        kind: kind.to_string(),
+                        field: field.to_string(),
+                        fields: schema.all_field_names(),
+                    }),
+                };
             }
         };
-        Ok((kind, slot))
+        Ok((kind, slot, None))
     }
 
     /// Current value of a resolved slot: the live cell, or the default for a
@@ -399,6 +730,47 @@ impl InstanceStore {
             .map(|schema| schema.document_default_of(index))
             .unwrap_or(Value::Nil)
     }
+
+    /// Whether `field` can hold `value`, checking a kind-typed field
+    /// against the instance's actual kind.
+    fn field_accepts(&self, field: &KindField, value: &Value) -> bool {
+        let kind_of = |id: InstanceId| self.kind_of(id);
+        field.accepts(value, Some(&kind_of))
+    }
+
+    /// Reject a write the declared field's type does not admit.
+    fn check_write(
+        &self,
+        kind: &str,
+        field: &str,
+        declared: &KindField,
+        value: &Value,
+    ) -> Result<(), InstanceError> {
+        if self.field_accepts(declared, value) {
+            return Ok(());
+        }
+        Err(InstanceError::TypeMismatch {
+            kind: kind.to_string(),
+            field: field.to_string(),
+            expected: declared.ty.to_string(),
+            got: describe_value(value),
+        })
+    }
+
+    /// Cells for `fields` from an instance's cells under `previous`: a value
+    /// survives by name while the new type still admits it; anything else
+    /// starts at its default.
+    fn retained_cells(&self, previous: &[KindField], fields: &[KindField], old: &[Value]) -> Vec<Value> {
+        fields
+            .iter()
+            .map(|field| {
+                index_in(previous, &field.name)
+                    .and_then(|index| old.get(index).cloned())
+                    .filter(|value| self.field_accepts(field, value))
+                    .unwrap_or_else(|| field.default.deep_clone())
+            })
+            .collect()
+    }
 }
 
 pub(crate) fn instance_namespace(id: InstanceId) -> String {
@@ -409,10 +781,21 @@ impl VM {
     // ---- host API -------------------------------------------------------
 
     /// Register (or re-register, on hot reload) a kind's `:state` schema.
-    /// Live instances of the kind keep their values by field name; new fields
-    /// start at their default and removed fields are dropped (spec §5).
+    /// Live instances of the kind keep their values by field name while the
+    /// field's (new) type admits them; new fields start at their default and
+    /// removed fields are dropped (spec §5). A kind cannot switch between
+    /// created and singleton (`:key ()`) while the VM holds it.
     pub fn register_instance_kind(&mut self, schema: InstanceKindSchema) -> Result<(), InstanceError> {
         schema.validate()?;
+        if let Some(previous) = self.instances.kinds.get(&schema.kind)
+            && previous.singleton != schema.singleton
+        {
+            return Err(InstanceError::InvalidSchema(format!(
+                "kind '{}' is already defined {}; restart to change its :key",
+                schema.kind,
+                if previous.singleton { "as a singleton (:key ())" } else { "without :key" }
+            )));
+        }
         let previous = self.instances.kinds.insert(schema.kind.clone(), schema.clone());
         // A (re)registered kind may carry a new `:view`: every bound view
         // buffer of its instances re-renders through it.
@@ -426,36 +809,24 @@ impl VM {
                 .map(|(id, _)| *id)
                 .collect();
             for id in ids {
-                let Some(record) = self.instances.live.get_mut(&id) else {
+                let Some(record) = self.instances.live.get(&id) else {
                     continue;
                 };
-                let old_document = std::mem::take(&mut record.document);
-                record.document = schema
-                    .document
-                    .iter()
-                    .map(|(name, default)| {
-                        previous
-                            .document_index_of(name)
-                            .and_then(|old| old_document.get(old).cloned())
-                            .unwrap_or_else(|| default.deep_clone())
-                    })
-                    .collect();
-                let old_state = std::mem::take(&mut record.state);
-                record.state = schema
-                    .fields
-                    .iter()
-                    .map(|(name, default)| {
-                        previous
-                            .index_of(name)
-                            .and_then(|old| old_state.get(old).cloned())
-                            .unwrap_or_else(|| default.deep_clone())
-                    })
-                    .collect();
+                let document =
+                    self.instances
+                        .retained_cells(&previous.document, &schema.document, &record.document);
+                let state = self
+                    .instances
+                    .retained_cells(&previous.fields, &schema.fields, &record.state);
+                if let Some(record) = self.instances.live.get_mut(&id) {
+                    record.document = document;
+                    record.state = state;
+                }
                 // A newly declared field may already have (error-state)
                 // readers; bring every retained source up to date.
-                for (index, (name, _)) in schema.fields.iter().enumerate() {
+                for (index, field) in schema.fields.iter().enumerate() {
                     let value = self.instances.value(id, &schema.kind, FieldSlot::State(index));
-                    self.publish_instance_field(id, name, value);
+                    self.publish_instance_field(id, &field.name, value);
                 }
             }
         }
@@ -466,16 +837,36 @@ impl VM {
         self.instances.kinds.get(kind)
     }
 
-    /// Every kind id this VM holds a schema for, sorted.
+    /// Every created (non-singleton) kind id this VM holds a schema for,
+    /// sorted: the kinds the host can hold instances of.
     pub fn instance_kind_ids(&self) -> Vec<String> {
-        let mut kinds: Vec<String> = self.instances.kinds.keys().cloned().collect();
+        let mut kinds: Vec<String> = self
+            .instances
+            .kinds
+            .values()
+            .filter(|schema| !schema.singleton)
+            .map(|schema| schema.kind.clone())
+            .collect();
         kinds.sort_unstable();
         kinds
     }
 
     /// Create the cells of a new instance with its kind's defaults and return
     /// the Lisp handle. Reusing a dropped id revives it with fresh defaults.
+    /// A singleton kind's one instance comes from `def-kind`, never here.
     pub fn create_instance(&mut self, id: InstanceId, kind: &str) -> Result<Value, InstanceError> {
+        if self
+            .instances
+            .kinds
+            .get(kind)
+            .is_some_and(|schema| schema.singleton)
+        {
+            return Err(InstanceError::SingletonKind(kind.to_string()));
+        }
+        self.insert_instance_record(id, kind)
+    }
+
+    fn insert_instance_record(&mut self, id: InstanceId, kind: &str) -> Result<Value, InstanceError> {
         if self.instances.live.contains_key(&id) {
             return Err(InstanceError::DuplicateInstance(id));
         }
@@ -489,12 +880,12 @@ impl VM {
             state: schema
                 .fields
                 .iter()
-                .map(|(_, default)| default.deep_clone())
+                .map(|field| field.default.deep_clone())
                 .collect(),
             document: schema
                 .document
                 .iter()
-                .map(|(_, default)| default.deep_clone())
+                .map(|field| field.default.deep_clone())
                 .collect(),
             owner: Value::Nil,
             label: Value::Nil,
@@ -504,6 +895,55 @@ impl VM {
         // Readers of a previously dropped id see the revived values.
         self.republish_instance_sources(id);
         Ok(Value::Instance(id))
+    }
+
+    /// `(def-kind name :key () ...)`: register the singleton kind and return
+    /// its one instance, creating it on first definition. Re-evaluating the
+    /// `def-kind` (hot reload) keeps the same instance and its values, as
+    /// [`Self::register_instance_kind`] does for any kind.
+    pub fn define_singleton_kind(&mut self, schema: InstanceKindSchema) -> Result<Value, InstanceError> {
+        let schema = schema.singleton();
+        let kind = schema.kind.clone();
+        self.register_instance_kind(schema)?;
+        let next = SINGLETON_INSTANCE_ID_BASE + self.instances.singletons.len() as InstanceId;
+        let id = *self.instances.singletons.entry(kind.clone()).or_insert(next);
+        if !self.instances.live.contains_key(&id) {
+            self.insert_instance_record(id, &kind)?;
+        }
+        Ok(Value::Instance(id))
+    }
+
+    /// The [`DEF_SINGLETON_KIND_NATIVE`] call `(def-kind name :key () :state
+    /// (...))` compiles to: the name as a symbol, then `:state` with the
+    /// entries the compiler built. The kind id is `<module>:<name>`
+    /// (`scratch:<name>` in headerless code), the fallback the host uses for
+    /// kinds outside a package; singletons are never saved, so it only has to
+    /// be unique within the VM.
+    pub(super) fn def_singleton_kind_from_args(&mut self, args: Vec<Value>) -> Result<Value, VMError> {
+        let Some(Value::Symbol(name)) = args.first() else {
+            return Err(VMError::Instance("def-kind expects a kind name".to_string()));
+        };
+        let module = Some(self.current_module_name())
+            .filter(|module| *module != crate::modules::IMPLICIT_MODULE);
+        let mut schema = InstanceKindSchema::new(kind_id(None, module, name));
+        for pair in args[1..].chunks(2) {
+            match pair {
+                [Value::Keyword(key), Value::List(entries)] if key == "state" => {
+                    for entry in entries {
+                        let field = KindField::from_entry(name, "state", &entry.borrow())
+                            .map_err(VMError::Instance)?;
+                        schema = schema.with_field(field);
+                    }
+                }
+                [Value::Keyword(key), Value::Nil] if key == "state" => {}
+                _ => {
+                    return Err(VMError::Instance(format!(
+                        "def-kind {name}: a singleton (:key ()) takes only :state"
+                    )));
+                }
+            }
+        }
+        Ok(self.define_singleton_kind(schema)?)
     }
 
     /// Drop an instance. Its handle turns stale: readers are dirtied and see
@@ -525,9 +965,22 @@ impl VM {
         self.instances.kind_of(id)
     }
 
-    /// Live instance ids, sorted.
+    /// Live host-created instance ids, sorted. Singleton instances are the
+    /// VM's own and left out, so host syncs never drop them.
     pub fn live_instances(&self) -> Vec<InstanceId> {
-        let mut ids: Vec<InstanceId> = self.instances.live.keys().copied().collect();
+        let mut ids: Vec<InstanceId> = self
+            .instances
+            .live
+            .iter()
+            .filter(|(_, record)| {
+                !self
+                    .instances
+                    .kinds
+                    .get(&record.kind)
+                    .is_some_and(|schema| schema.singleton)
+            })
+            .map(|(id, _)| *id)
+            .collect();
         ids.sort_unstable();
         ids
     }
@@ -655,11 +1108,15 @@ impl VM {
         field: &str,
         value: Value,
     ) -> Result<(), InstanceError> {
-        let (kind, slot) = self.instances.resolve(id, field)?;
+        let (kind, slot, declared) = self.instances.resolve_declared(id, field)?;
         if !self.instances.live.contains_key(&id) {
             // Stale handle: an event handler outliving its instance.
             return Ok(());
         }
+        if let Some(declared) = declared {
+            self.instances.check_write(kind, field, declared, &value)?;
+        }
+        let kind = kind.to_string();
         match slot {
             FieldSlot::Id | FieldSlot::Kind | FieldSlot::Owner => {
                 return Err(InstanceError::ReadOnlyField {
@@ -1093,6 +1550,273 @@ mod tests {
         vm.create_instance(1, KIND).expect("create");
         assert!(vm.create_instance(1, KIND).is_err());
     }
+
+    // ---- singleton kinds and typed fields (kind-bindings spec §3.1, §3.3) --
+
+    const SINGLETON_ID: u64 = super::SINGLETON_INSTANCE_ID_BASE;
+
+    /// The message of an eval that must fail with an instance error.
+    fn instance_error(vm: &mut VM, code: &str) -> String {
+        match vm.eval_str(code) {
+            Err(VMError::Instance(message)) => message,
+            other => panic!("{code}: expected an instance error, got {other:?}"),
+        }
+    }
+
+    /// The source-load errors of an eval that must fail to compile.
+    fn compile_errors(vm: &mut VM, code: &str) -> String {
+        assert_eq!(vm.eval_str(code), Err(VMError::CompileError), "{code}");
+        vm.take_source_load_errors().join("\n")
+    }
+
+    #[test]
+    fn singleton_fields_read_write_and_dirty_only_their_readers() {
+        let mut vm = instance_vm();
+        assert_eq!(
+            eval(&mut vm, "(def-kind menu :key () :state ((open false) (count 0)))"),
+            Some(Value::Instance(SINGLETON_ID)),
+            "the form's value is the instance"
+        );
+        assert_eq!(eval(&mut vm, "menu"), Some(Value::Instance(SINGLETON_ID)));
+        assert_eq!(eval(&mut vm, "menu.open"), Some(Value::Bool(false)));
+        assert_eq!(eval(&mut vm, "menu.kind"), Some(Value::String("scratch:menu".into())));
+        assert_eq!(eval(&mut vm, "menu.id"), Some(Value::Number(SINGLETON_ID as f64)));
+        eval(
+            &mut vm,
+            r#"
+            (effect-buffer "*open*" (label (if menu.open "open" "closed")))
+            (effect-buffer "*count*" (box :width menu.count :height 1))
+            "#,
+        );
+        assert_eq!(rendered_targets(&mut vm), vec!["*count*", "*open*"]);
+
+        assert_eq!(eval(&mut vm, "(set! menu.open true)"), Some(Value::Bool(true)));
+        assert_eq!(rendered_targets(&mut vm), vec!["*open*"]);
+        assert_eq!(eval(&mut vm, "menu.open"), Some(Value::Bool(true)));
+        eval(&mut vm, "(set! menu.count 3)");
+        assert_eq!(rendered_targets(&mut vm), vec!["*count*"]);
+        // A closure reaches the same instance through the binding.
+        eval(&mut vm, "(def close-menu () (set! menu.open false))");
+        eval(&mut vm, "(close-menu)");
+        assert_eq!(rendered_targets(&mut vm), vec!["*open*"]);
+    }
+
+    #[test]
+    fn singleton_built_in_fields_are_id_and_kind_only() {
+        let mut vm = instance_vm();
+        eval(&mut vm, "(def-kind menu :key () :state ((open false) (label \"File\")))");
+        // `label` is the singleton's own field, not a host rename.
+        assert_eq!(eval(&mut vm, "menu.label"), Some(Value::String("File".into())));
+        eval(&mut vm, "(set! menu.label \"Edit\")");
+        assert_eq!(eval(&mut vm, "menu.label"), Some(Value::String("Edit".into())));
+        assert_eq!(
+            instance_error(&mut vm, "menu.owner"),
+            "kind 'scratch:menu' has no field 'owner'; fields: id, kind, open, label"
+        );
+        assert!(instance_error(&mut vm, "(set! menu.id 2)").contains("read-only"));
+        // `id`/`kind` cannot be declared.
+        assert!(
+            instance_error(&mut vm, "(def-kind bad :key () :state ((kind 1)))")
+                .contains("built-in field")
+        );
+    }
+
+    #[test]
+    fn singletons_are_invisible_to_host_instance_enumeration() {
+        let mut vm = instance_vm();
+        bind(&mut vm, "a", 1);
+        eval(&mut vm, "(def-kind menu :key () :state ((open false)))");
+        assert_eq!(vm.live_instances(), vec![1]);
+        assert_eq!(vm.instance_kind_ids(), vec![KIND.to_string()]);
+        assert!(vm.instance_is_live(SINGLETON_ID));
+        assert_eq!(
+            vm.create_instance(2, "scratch:menu"),
+            Err(super::InstanceError::SingletonKind("scratch:menu".into()))
+        );
+        // A created kind cannot turn into a singleton (or back) in place.
+        let error = vm
+            .register_instance_kind(InstanceKindSchema::new("scratch:menu").field("open", Value::Bool(false)))
+            .expect_err("kind kept its :key");
+        assert!(error.to_string().contains("singleton"), "{error}");
+    }
+
+    #[test]
+    fn re_evaluating_a_singleton_def_kind_keeps_its_instance_and_values() {
+        let mut vm = instance_vm();
+        eval(&mut vm, "(def-kind menu :key () :state ((open false) (count 0) (gone 1)))");
+        eval(&mut vm, "(def-kind other :key () :state ((x 1)))");
+        eval(&mut vm, "(set! menu.open true) (set! menu.count 4)");
+        eval(&mut vm, r#"(effect-buffer "*open*" (label (if menu.open "open" "closed")))"#);
+        rendered_targets(&mut vm);
+        // Hot reload: `count` changes type (its value no longer fits, so it
+        // restarts at the new default), `gone` goes, `extra` arrives.
+        assert_eq!(
+            eval(
+                &mut vm,
+                "(def-kind menu :key () :state ((open false) (count \"none\") (extra 2)))"
+            ),
+            Some(Value::Instance(SINGLETON_ID))
+        );
+        assert_eq!(eval(&mut vm, "menu.open"), Some(Value::Bool(true)));
+        assert_eq!(eval(&mut vm, "menu.count"), Some(Value::String("none".into())));
+        assert_eq!(eval(&mut vm, "menu.extra"), Some(Value::Number(2.0)));
+        assert!(matches!(vm.eval_str("menu.gone"), Err(VMError::Instance(_))));
+        assert_eq!(eval(&mut vm, "other"), Some(Value::Instance(SINGLETON_ID + 1)));
+        assert!(rendered_targets(&mut vm).is_empty(), "an unchanged field dirties nothing");
+    }
+
+    #[test]
+    fn field_types_are_inferred_or_declared_and_checked_on_write() {
+        let mut vm = instance_vm();
+        eval(
+            &mut vm,
+            "(def-kind t :key ()
+               :state ((n 0) (flag false) (name \"\") (items (list)) (mode :loop)
+                       (i :int :default 0)
+                       (color :rgb :default (rgb 1 0 0))
+                       (at :point :default nil)
+                       (nums (list-of :number) :default (list))
+                       (other t :default nil)
+                       (anything :any :default nil)))
+             (def-kind u :key () :state ((x 1)))",
+        );
+        let types: Vec<String> = vm
+            .instance_kind_schema("scratch:t")
+            .expect("schema")
+            .fields
+            .iter()
+            .map(|field| field.ty.to_string())
+            .collect();
+        assert_eq!(
+            types,
+            vec![
+                ":number", ":bool", ":string", "(list-of :any)", ":any", ":int", ":rgb", ":point",
+                "(list-of :number)", "t", ":any"
+            ]
+        );
+        for ok in [
+            "(set! t.n 2.5)",
+            "(set! t.flag true)",
+            "(set! t.name \"x\")",
+            "(set! t.items (list 1 \"a\"))",
+            "(set! t.items nil)",
+            "(set! t.mode 3)",
+            "(set! t.i -2)",
+            "(set! t.color (rgb 0 0.5 1))",
+            "(set! t.at (dict :col 1 :row 2))",
+            "(set! t.at nil)",
+            "(set! t.nums (list 1 2))",
+            "(set! t.other t)",
+            "(set! t.other nil)",
+            "(set! t.anything (dict :a 1))",
+        ] {
+            eval(&mut vm, ok);
+        }
+        assert_eq!(
+            instance_error(&mut vm, "(set! t.n \"x\")"),
+            "field 'n' of kind 'scratch:t' is :number; got \"x\""
+        );
+        for (bad, expected) in [
+            ("(set! t.n nil)", ":number"),
+            ("(set! t.flag 1)", ":bool"),
+            ("(set! t.name :x)", ":string"),
+            ("(set! t.i 2.5)", ":int"),
+            ("(set! t.color (list 1 0 0))", ":rgb"),
+            ("(set! t.color (list 'rgb 1 0))", ":rgb"),
+            ("(set! t.at 3)", ":point"),
+            ("(set! t.at (dict :col 1))", ":point"),
+            ("(set! t.nums (list 1 \"a\"))", "(list-of :number)"),
+            ("(set! t.other u)", "is t;"),
+        ] {
+            let message = instance_error(&mut vm, bad);
+            assert!(message.contains(expected), "{bad}: {message}");
+        }
+        assert_eq!(eval(&mut vm, "t.i"), Some(Value::Number(-2.0)), "failed writes change nothing");
+    }
+
+    #[test]
+    fn a_nil_default_needs_a_declared_type() {
+        let mut vm = instance_vm();
+        for code in [
+            "(def-kind a :key () :state ((x nil)))",
+            "(def-kind a :key () :state ((x)))",
+            "(def-kind a :key () :state (x))",
+        ] {
+            let errors = compile_errors(&mut vm, code);
+            assert!(
+                errors.contains("field 'x' defaults to nil; declare its type: (x <type> :default nil)"),
+                "{code}: {errors}"
+            );
+        }
+        // A default that evaluates to nil is caught when def-kind runs.
+        assert!(
+            instance_error(&mut vm, "(def-kind a :key () :state ((x (if false 1 nil))))")
+                .contains("field 'x' defaults to nil")
+        );
+        assert!(
+            instance_error(&mut vm, "(def-kind a :key () :state ((x :bool :default 3)))")
+                .contains("field 'x' is :bool; its default 3 is not")
+        );
+        assert!(
+            compile_errors(&mut vm, "(def-kind a :key () :state ((x :float :default 0)))")
+                .contains("unknown field type :float")
+        );
+        assert!(vm.eval_str("a").is_err(), "nothing was defined");
+    }
+
+    #[test]
+    fn keyed_kinds_and_created_kind_slots_on_singletons_are_errors() {
+        let mut vm = instance_vm();
+        assert!(
+            compile_errors(&mut vm, "(def-kind track :key (index) :state ((x 0)))")
+                .contains("keyed kinds (:key (index ...)) are not supported yet")
+        );
+        assert!(
+            compile_errors(&mut vm, "(def-kind menu :key () :state ((x 0)) :view show)")
+                .contains("a singleton (:key ()) has no :view")
+        );
+        assert!(
+            compile_errors(&mut vm, "(def-kind menu :key () :document ((x 0)))")
+                .contains("has no :document")
+        );
+    }
+
+    #[test]
+    fn a_singleton_binding_is_a_module_definition_reachable_by_import() {
+        let mut vm = VM::new(Vec::new());
+        super::super::register_core_natives(&mut vm);
+        let module = format!("test.singleton-kind-{}", std::process::id());
+        let helper = std::env::temp_dir().join(format!("{module}.lisp"));
+        std::fs::write(
+            &helper,
+            format!(
+                "(module {module})\n(export menu toggle-menu)\n\
+                 (def-kind menu :key () :state ((open false)))\n\
+                 (def toggle-menu () (set! menu.open (not menu.open)))"
+            ),
+        )
+        .expect("write helper module");
+        let main = helper.with_file_name(format!("eseqlisp-singleton-main-{}.lisp", std::process::id()));
+        let result = vm.eval_module_source(
+            main.clone(),
+            &format!("(import {module} :refer (menu toggle-menu))\n(toggle-menu)\nmenu.open"),
+            1,
+        );
+        assert_eq!(result, Ok(Some(Value::Bool(true))), "{:?}", vm.take_source_load_errors());
+        assert_eq!(
+            vm.eval_module_source(
+                main,
+                &format!("(import {module} :refer (menu))\n(set! menu.open false)\nmenu.open"),
+                1
+            ),
+            Ok(Some(Value::Bool(false)))
+        );
+        assert_eq!(
+            vm.instance_field(SINGLETON_ID, "kind"),
+            Ok(Value::String(format!("{module}:menu")))
+        );
+        let _ = std::fs::remove_file(helper);
+    }
 }
 
 /// `def-kind` compilation, the native-context kind registration and the
@@ -1125,15 +1849,10 @@ mod runtime_tests {
             let mut idx = 1;
             while idx + 1 < args.len() {
                 match (&args[idx], &args[idx + 1]) {
-                    (Value::Keyword(key), Value::List(pairs)) if key == "state" => {
-                        for pair in pairs {
-                            let Value::List(pair) = &*pair.borrow() else {
-                                return Err("state pair".to_string());
-                            };
-                            let Value::Symbol(field) = &*pair[0].borrow() else {
-                                return Err("state field".to_string());
-                            };
-                            schema = schema.field(field.clone(), pair[1].borrow().clone());
+                    (Value::Keyword(key), Value::List(entries)) if key == "state" => {
+                        for entry in entries {
+                            schema = schema
+                                .with_field(super::KindField::from_entry(&name, key, &entry.borrow())?);
                         }
                     }
                     (Value::Keyword(key), view) if key == "view" => {
@@ -1167,7 +1886,7 @@ mod runtime_tests {
                    :sequencer (:shape (line 4) :max-poly ,(+ base 1)
                                (def-node nrn :update (if (> 1 0) (emit :note 1) nil))
                                (edges :from nrn :to nrn))
-                   :state ((sel (- base 4)) (open) (name \"x\"))
+                   :state ((sel (- base 4)) (open :bool :default nil) (name \"x\"))
                    :view gvr-panel)",
             )
             .expect("def-kind evaluates");
@@ -1196,7 +1915,10 @@ mod runtime_tests {
             list_items(&state[0]),
             vec![Value::Symbol("sel".to_string()), Value::Number(-1.0)]
         );
-        assert_eq!(list_items(&state[1]), vec![Value::Symbol("open".to_string()), Value::Nil]);
+        assert_eq!(
+            list_items(&state[1]),
+            vec![Value::Symbol("open".to_string()), Value::Nil, Value::Keyword("bool".to_string())]
+        );
         assert_eq!(args[5], Value::Keyword("view".to_string()));
         drop(calls);
 
@@ -1204,8 +1926,12 @@ mod runtime_tests {
             .instance_kind_schema("test/pkg:neural")
             .expect("the native registered the schema in the evaluating VM");
         assert_eq!(
-            schema.fields.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>(),
+            schema.fields.iter().map(|field| field.name.as_str()).collect::<Vec<_>>(),
             vec!["sel", "open", "name"]
+        );
+        assert_eq!(
+            schema.fields.iter().map(|field| field.ty.to_string()).collect::<Vec<_>>(),
+            vec![":number", ":bool", ":string"]
         );
         assert!(schema.view.is_some());
 
@@ -1215,6 +1941,33 @@ mod runtime_tests {
             runtime.eval_str("(gvr-panel inst)").expect("view reads a field"),
             Some(Value::Number(-1.0))
         );
+    }
+
+    #[test]
+    fn created_kinds_take_typed_fields_and_singletons_skip_the_host_native() {
+        let (mut runtime, captured) = runtime_with_def_kind();
+        runtime
+            .eval_str("(def-kind probe :state ((x 1) (tags (list-of :string) :default (list))))")
+            .expect("kind");
+        let handle = runtime.create_instance(3, "test/pkg:probe").expect("create");
+        runtime.set_global_value("inst", handle);
+        runtime.eval_str("(set! inst.tags (list \"a\"))").expect("typed write");
+        assert!(runtime.eval_str("(set! inst.tags (list 1))").is_err());
+        assert!(runtime.eval_str("(set! inst.x \"one\")").is_err());
+        assert_eq!(
+            runtime.instance_field(3, "tags"),
+            Ok(Value::List(vec![Rc::new(RefCell::new(Value::String("a".into())))]))
+        );
+
+        // A singleton never reaches the host's `def-kind` native.
+        runtime
+            .eval_str("(def-kind menu :key () :state ((open false)))")
+            .expect("singleton");
+        assert_eq!(
+            runtime.eval_str("(set! menu.open true) menu.open").expect("write"),
+            Some(Value::Bool(true))
+        );
+        assert_eq!(captured.borrow().len(), 1);
     }
 
     #[test]
