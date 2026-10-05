@@ -3990,7 +3990,8 @@
       :width pad-map-cell-width :height pad-map-cell-height
       :background-color (if (>= track 0)
         '(rgba 0.60 0.72 0.75 1.0)
-        '(rgba 0.19 0.20 0.21 1.0))
+        :buffer-bg
+        )
       :selected (if (>= track 0) (bind-seq (str "rack-pad-trigger-" track)) nil)
       :selected-background-color '(rgba 0.95 0.98 1.0 1.0)
       :drop-types (list "rack-pad")
@@ -4057,10 +4058,11 @@
           :track-g (nth c 1)
           :track-b (nth c 2)
           :on-click |x y r| (select-group gidx))
-        (disclosure-button
+        (disclosure-button 
           :key (group-element-key gidx "collapse")
           :width 1.55 :height 1.4
           :collapsed (eseq.drum-rack-v2/collapsed? gidx)
+          :col 1
           :surface-alpha 1.0
           :focusable true
           :on-click |x y r| (eseq.drum-rack-v2/toggle-collapsed gidx))

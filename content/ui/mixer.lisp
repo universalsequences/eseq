@@ -1881,7 +1881,7 @@
       (bus-idx (bus-index-by-id (get (nth SEQ.groups gidx) :bus-id)))
       ;; Compact mode has no clip area for the column to stand in.
       (show-clips (and (not (compact?))
-        (eseq.drum-rack-v2/has-clips? (get (nth SEQ.groups gidx) :id)))))
+          (eseq.drum-rack-v2/has-clips? (get (nth SEQ.groups gidx) :id)))))
     (box :key (str "group-bus-strip-" bus-idx)
       :width 10.2 :height (group-bus-strip-height)
       :corner-radius (eseq.seq-core-state/radius 12)
@@ -1930,6 +1930,7 @@
               :width 1.7 :height 0.8
               :collapsed (get group :collapsed)
               :surface-alpha 0.35
+              :col 0.1
               :on-click (lambda (event)
                 (do
                   (select-group gidx)
