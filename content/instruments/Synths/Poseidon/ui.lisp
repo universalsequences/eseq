@@ -22,7 +22,7 @@
 (def tri-switch (name title width)
   (let ((p (eseq.effects.custom-ui-runtime/custom-ui-current-param name))
         (scope (eseq.effects.custom-ui-runtime/custom-ui-current-scope)))
-    (let ((on (> (reactive-value (eseq.effects.custom-ui-runtime/custom-ui-param-binding p)) 0.5)))
+    (let ((on (> (eseq.effects.custom-ui-runtime/custom-ui-param-value p) 0.5)))
       (button title :debug-name (str "tri-switch-" name) :width width :height 0.75 :font-size 8 :padding 0 :corner-radius 1
         :color (if on (tri-ink) :dim)
         :background-color (if on (tri-accent) :instrument-control-bg)
@@ -124,7 +124,7 @@
 (def tri-hp-enabled? ()
   (let ((mode-p (eseq.effects.custom-ui-runtime/custom-ui-current-param "filter_mode")))
     (if mode-p
-      (> (reactive-value (eseq.effects.custom-ui-runtime/custom-ui-param-value mode-p)) 0.5)
+      (> (eseq.effects.custom-ui-runtime/custom-ui-param-value mode-p) 0.5)
       true)))
 
 (def tri-filter-bands (cut-p res-p hp-p)
@@ -280,7 +280,7 @@
   (let ((wave (eseq.effects.custom-ui-controls/ui-param-bound-value (str prefix "_wave") 0)))
     (subtree :key (str "tri-lfo-preview-" (eseq.effects.custom-ui-runtime/custom-ui-scope-name) "-" prefix)
       (lfo-curve :width 35.2 :height 3.8 :debug-name "tri-lfo-preview"
-        :shape (nth '(0 8 2 1 4) (round (reactive-value wave)))
+        :shape (nth '(0 8 2 1 4) (round wave))
         :cycles 2 :curve-color (tri-accent) :fill-color :transparent :background-color :instrument-control-bg))))
 (def tri-lfo-page (prefix ams target target-title)
   (v-stack :gap 0.3

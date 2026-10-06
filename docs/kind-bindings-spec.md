@@ -1,6 +1,6 @@
 # Kind bindings
 
-Status: spec rev 3, 2026-10-04. Stages 1–6 built, stage 7 in part (§14; 7, 7b, 7b-2, 7b-3, 7c, 7d, 7e, 7f, 7g, 7h and 7i built), stage 8 in part (§13, §13.1: .12, .13 and .17 ported) (§3.1, §3.2, §3.3, §3.4, §4, §7.1, §7.3, §8, §9 notes). Bead: epic `eseq-0l17` (`bd list --label kind-bindings`).
+Status: spec rev 3, 2026-10-04. Stages 1–6 built, stage 7 in part (§14; 7, 7b, 7b-2, 7b-3, 7c, 7d, 7e, 7f, 7g, 7h and 7i built), stage 8 in part (§13, §13.1: .12, .13, .17 and .21 ported) (§3.1, §3.2, §3.3, §3.4, §4, §7.1, §7.3, §8, §9 notes). Bead: epic `eseq-0l17` (`bd list --label kind-bindings`).
 Rev 3 resolves the open questions (§12 Decisions). Rev 2 dropped the separate `defrecord` form of rev 1: host state and view state
 are declared with `def-kind`, which gains keyed and singleton kinds, a `:host`
 field group and typed fields.
@@ -1363,6 +1363,43 @@ its instance and field.
      ported-file scanners share `assert_ported` (`host_kinds::tests::views`).
      A track and its sample pushed together (one
      cycle, as one sync) keep the browser's sample-search reset rule.
+   Built (stage 8, eseq-0l17.21): the factory device UIs
+   (`content/instruments/**/ui.lisp`, `content/effects/**/ui.lisp`,
+   `content/midi-fx/**/ui.lisp`; 18 files used legacy forms: 808 Clap,
+   909 Open Hat, PM Ride Kit, PM Tabla, PM Bongos, PM Ride, PM Milagre
+   Brass, Digi Syn (and its `versions/1`, Digi Drift), Digi Wave, Digi FM,
+   Grit, Heat, Melt, Poseidon, Revsynt, Vox, spatial-harmonic-delay):
+   - **Shape.** These files speak the `eseq.effects` custom-UI vocabulary
+     (`custom-ui-current-param`, `custom-ui-param-binding`, the lego and
+     surface helpers), which resolves a param from the panel the host
+     builds and is .14's to port to `param` / `device`; they hold no field
+     names of their own. So no kind field was needed: a value Lisp decides
+     on is `custom-ui-param-value p` / `ui-param-value name fallback` (the
+     existing value twins of `custom-ui-param-binding` /
+     `ui-param-bound-value`), a binding a widget draws stays the binding,
+     and a binding held in a local outside a `subtree` and read inside it
+     reads itself (§8: `(round mode)`, `(* first-cutoff …)`), so the read
+     still records its dependency in the subtree. Small per-file value
+     helpers sit beside the binding ones (`idclap-value`, `idhat-value`,
+     `melt-value`, `heat-value`, `idclap-scope-value` for a drag handler's
+     resolved scope). `:bindable` is deleted (ignored since stage 5).
+     spatial-harmonic-delay's tap count keeps one COMPAT
+     `(reactive-get "SEQ" (get p :value-field))`: `fx-param-value-for` shows
+     mod depth while mods are open, and the tap count must read the stored
+     value. It moves to `param.value` with the custom-UI layer (.14).
+   - **Kept:** the per-scope `defstate` lists of VILLAIN Kick / Hat /
+     Snare and Digi Wave (Lisp view state keyed by panel scope, not a
+     reactive binding; the scanner allows them).
+   - **Legacy removed:** none: the files read no host field by name; the
+     legacy param fields they reach (through `fx-param-value-for`'s
+     `bind-seq` of the panel's `:value-field`) belong to the custom-UI
+     runtime and go with .14.
+   - **Tests.** `host_kinds::tests::views::factory_device_uis_use_no_legacy_binding_forms`
+     walks every `ui.lisp` under the three directories (versions included)
+     and asserts no `legacy_forms` but `defstate`. The baseline and after
+     captures (every fixture of these instruments, sections 0-5 of the
+     ones without fixtures, the factory synth mods view, the MIDI effect)
+     are byte-identical.
 9. **Diagnostics.** Re-render reason log, `describe-kind`. Useful from
    stage 6 on; can run in parallel with the ports.
 
@@ -3137,7 +3174,7 @@ builds the field name.
 | `SEQ.velocities` | 2 | seq-core-state, seqv-track-params | app/retrospective.rs | model | step.velocity | built (.10) | .11 |
 | `SEQV.<sel-track-vis-field>` | 1 | seq-core-state | Lisp (reactive-set) | Lisp-owned | track.selected | built (.10) | .11 |
 | `<ns-var name>` | 2 | effects/drum-surface | custom_ui.rs | - | param.value via (device-param d "x") | built (.28) | .14 |
-| `SEQ.<get>` | 23 | effects/param-controls, effects/instrument-panel, effects/sampler-panel +9 | sv/param_fields_and_sync.rs, instrument_panel.rs, effects_panel.rs | model | param.value / param.name (panel :value-field, :label-field, :name-field, :short-field); MIDI fx / bus / rack slot params (built .36), rack macro names → rack-macro.name (built .37) | built (.28, .36, .37) | .14 .16 .18 .19 .20 .21 |
+| `SEQ.<get>` | 23 | effects/param-controls, effects/instrument-panel, effects/sampler-panel +9 | sv/param_fields_and_sync.rs, instrument_panel.rs, effects_panel.rs | model | param.value / param.name (panel :value-field, :label-field, :name-field, :short-field); MIDI fx / bus / rack slot params (built .36), rack macro names → rack-macro.name (built .37) | built (.28, .36, .37); factory device UIs (.21) read no field name except spatial-harmonic-delay's COMPAT `:value-field` tap count, the panel's fields stay with the custom-UI runtime (.14) | .14 .16 .18 .19 .20 .21 |
 | `SEQ.<slot-field>` | 12 | sequencer | sv/expanded_step.rs | model | step.active/selected/playing/plocked/lock-kind/variant-color through the view's own slot→step map (expanded-step projection removed) | built (.28) | .11 |
 | `SEQ.<var field>` | 8 | effects/param-controls, effects/custom-ui-runtime, mixer +1 | sv/param_fields_and_sync.rs | model | param.value / send.display (field strings from panel data); mod / process fields → param.mod-offset / mod-value / mod-scale / process-value / process-clamped, device.mod-phases (built .37) | built (.28, .37); mixer sends ported (.13): `track-N-bus-M-send` and its `-plock-*` / `-proc-*` removed (kept: `tp-bus-M-send`, track-panels) | .13 .14 |
 | `SEQ.effects` | 3 | application-menus, effects/index, effects/buffers | lisp_host/dgen/instrument_storage.rs | model | track.devices → device.params; mod targets, sources, tensors → param.mod-targets / section / mod-slot / visible, device.tensors (built .37); tables, IR names, editors .43 | built (.28, .37) | .14 .18 |
@@ -3391,9 +3428,9 @@ builds the field name.
 | `SEQV.plk-var-g` | 1 | effects/param-controls | Lisp (reactive-set) | Lisp-owned | p-lock menu view singleton | view-local | .14 |
 | `SEQV.plk-var-r` | 1 | effects/param-controls | Lisp (reactive-set) | Lisp-owned | p-lock menu view singleton (:rgb) | view-local | .14 |
 | `SEQV.rack-clip-center-*` | 1 | mixer | Lisp (reactive-set) | Lisp-owned | mixer view singleton | view-local; ported (.13), removed | .13 |
-| `:bindable` | 97 | effects/physical-model-surface, sequencer, effects/drum-surface +24 | - | - | delete (ignored since stage 5) | remove (gone from .12's files); gone from .13's files | .11 .12 .13 .14 .20 .21 |
+| `:bindable` | 97 | effects/physical-model-surface, sequencer, effects/drum-surface +24 | - | - | delete (ignored since stage 5) | remove (gone from .12's files); gone from .13's files; gone from the factory device UIs (.21) | .11 .12 .13 .14 .20 .21 |
 | `<ns-var namespace>` | 3 | bindings | - | - | bindings.lisp generic scopes → kinds | remove | .18 |
-| `reactive-value` | 75 | instruments/Synths/Heat/ui, effects/param-controls, scripts/sequencers/graph-neural-variable-reset-demo +27 | - | - | t.x / #'t.x read as a value (§8) | remove; gone from .13's files | .11 .13 .14 .20 .21 |
+| `reactive-value` | 75 | instruments/Synths/Heat/ui, effects/param-controls, scripts/sequencers/graph-neural-variable-reset-demo +27 | - | - | t.x / #'t.x read as a value (§8) | remove; gone from .13's files; gone from the factory device UIs (.21: custom-ui value helpers or the binding read as a value) | .11 .13 .14 .20 .21 |
 | `SEQ.bus-ids` | 10 | mixer, drum-rack-v2, seq-core-state +1 | sv/track_and_mixer.rs | model | instance identity | remove; ported (.13), kept: drum-rack-v2, seq-core-state | .11 .13 .19 |
 | `SEQ.delete-target-version` | 4 | mixer, browser, application-menus +1 | reactive_tick.rs | model | implicit (fields re-render) | remove; ported (.13, .17: the browser reads slot device.delete-target), kept: application-menus + | .13 .14 .17 .18 |
 | `SEQ.num-patterns` | 6 | transport, macros, scene-banks | sv/topology_and_visualization.rs | model | (len (scenes)) | remove; ported (.12), kept: macros (.18) | .12 .18 |

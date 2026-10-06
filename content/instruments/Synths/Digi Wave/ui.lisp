@@ -153,7 +153,7 @@
 (def dw-hp-enabled? ()
   (let ((mode-p (eseq.effects.custom-ui-runtime/custom-ui-current-param "filter_mode")))
     (if mode-p
-      (> (reactive-value (eseq.effects.custom-ui-runtime/custom-ui-param-value mode-p)) 0.5)
+      (> (eseq.effects.custom-ui-runtime/custom-ui-param-value mode-p) 0.5)
       true)))
 
 ;; Filter response in place of the envelope plot while the FILTER panel
@@ -265,7 +265,7 @@
       (if hp-on
         (eseq.effects.custom-ui-lego/ui-lego-micro-num-s 3 "hp_freq" "hp" 5.0 0 "Hz" (dw-text))
         (let ((hp-p (eseq.effects.custom-ui-runtime/custom-ui-current-param "hp_freq")))
-          (let ((hp-val (if hp-p (reactive-value (eseq.effects.custom-ui-runtime/custom-ui-param-value hp-p)) 0)))
+          (let ((hp-val (if hp-p (eseq.effects.custom-ui-runtime/custom-ui-param-value hp-p) 0)))
             (v-stack :width 5.0 :height 1.0 :gap 0.06 :align :start
               (label "hp" :font-size 9.0 :width 5.0 :height 0.75 :color (rgba 0.36 0.37 0.41 1) :bg :transparent)
               (label (str " " (round hp-val) " Hz") :font-size 9.5 :width 5.0 :height 0.85

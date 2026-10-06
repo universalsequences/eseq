@@ -275,6 +275,49 @@ pub(super) fn assert_ported(files: &[(&str, &str)]) {
     }
 }
 
+/// Every `ui.lisp` under `dir` (recursively: package versions included).
+fn ui_lisp_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+    for entry in std::fs::read_dir(dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display())) {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            ui_lisp_files(&path, out);
+        } else if path.file_name().is_some_and(|name| name == "ui.lisp") {
+            out.push(path);
+        }
+    }
+}
+
+#[test]
+fn factory_device_uis_use_no_legacy_binding_forms() {
+    // eseq-0l17.21: the factory instrument, effect and MIDI effect UIs read
+    // params through the eseq.effects custom-UI vocabulary, values as
+    // values (§8), with no `:bindable`. Their per-scope `defstate` lists are
+    // Lisp view state, not reactive bindings, and stay. The spatial harmonic
+    // delay's tap count keeps one COMPAT `reactive-get` until eseq-0l17.14
+    // ports the custom-UI param layer.
+    let content = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../content");
+    let mut files = Vec::new();
+    for dir in ["instruments", "effects", "midi-fx"] {
+        ui_lisp_files(&content.join(dir), &mut files);
+    }
+    assert!(
+        files.len() > 50,
+        "found only {} factory ui.lisp files",
+        files.len()
+    );
+    for file in files {
+        let source = std::fs::read_to_string(&file).unwrap();
+        let found: Vec<_> = legacy_forms(&source)
+            .into_iter()
+            .filter(|form| *form != "defstate")
+            .filter(|form| {
+                !(*form == "reactive-get" && file.ends_with("spatial-harmonic-delay/ui.lisp"))
+            })
+            .collect();
+        assert_eq!(found, Vec::<&str>::new(), "{}", file.display());
+    }
+}
+
 #[test]
 fn mini_daw_example_has_no_string_key_bindings() {
     let code = strip_lisp_comments(MINI_DAW);

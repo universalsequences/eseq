@@ -4,7 +4,9 @@
 (def melt-bind (name)
   (eseq.effects.custom-ui-runtime/custom-ui-param-binding
     (eseq.effects.custom-ui-runtime/custom-ui-current-param name)))
-(def melt-value (name) (reactive-value (melt-bind name)))
+(def melt-value (name)
+  (eseq.effects.custom-ui-runtime/custom-ui-param-value
+    (eseq.effects.custom-ui-runtime/custom-ui-current-param name)))
 (def melt-knob (section name title width decimals taper)
   (eseq.effects.custom-ui-lego/ui-lego-knob-styled-s section name title width 3.55 2.6
     (melt-accent) decimals taper :widget-knob-track 10 9.5 :center))
@@ -130,8 +132,8 @@
                 (melt-write scope "flt_res_hi" (get event :q)))
             (do (melt-write scope "flt_width"
                   (/ (log (/ (max 30 (get event :freq))
-                    (reactive-value (eseq.effects.custom-ui-runtime/custom-ui-param-binding
-                      (eseq.effects.custom-ui-runtime/custom-ui-param-in-scope scope "flt_base"))))) (log 2)))
+                    (eseq.effects.custom-ui-runtime/custom-ui-param-value
+                      (eseq.effects.custom-ui-runtime/custom-ui-param-in-scope scope "flt_base")))) (log 2)))
                 (melt-write scope "flt_res_lo" (get event :q)))) false)))))
 (def melt-filter-page ()
   (v-stack :gap 0.15
@@ -146,7 +148,7 @@
       (melt-num "keytrack" "Keytrack" 2))))
 
 (defwidget melt-routing
-  :width 35.2 :height 3.8 :state (stack feedback) :bindable (stack feedback)
+  :width 35.2 :height 3.8 :state (stack feedback)
   :shader
   (let ((left (* aspect -0.65)) (right (* aspect 0.65))
         (serial (rgba 0 0 0 (+ 0.15 (* 0.85 stack))))

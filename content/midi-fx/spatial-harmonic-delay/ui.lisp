@@ -15,10 +15,13 @@
 (def shd-set-param (p v)
   (eseq.effects.param-controls/param-set-control-value midi-fx-ui-current-fx p v))
 
+;; COMPAT(eseq-0l17.14): the tap count reads the stored value, not the
+;; mod-depth view fx-param-value-for shows while mods are open. Moves to
+;; the param kind's value field when the custom-UI layer is ported.
 (def shd-param-live-value (p)
   (if (get p :value-field)
     (reactive-get "SEQ" (get p :value-field))
-    (reactive-value (shd-param-value p))))
+    (shd-param-value p)))
 
 (def shd-clamp (v lo hi)
   (if (< v lo) lo (if (> v hi) hi v)))

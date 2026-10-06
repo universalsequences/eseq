@@ -15,7 +15,7 @@
 (def drift-switch (name title width)
   (let ((p (eseq.effects.custom-ui-runtime/custom-ui-current-param name))
         (scope (eseq.effects.custom-ui-runtime/custom-ui-current-scope)))
-    (let ((on (> (reactive-value (eseq.effects.custom-ui-runtime/custom-ui-param-binding p)) 0.5)))
+    (let ((on (> (eseq.effects.custom-ui-runtime/custom-ui-param-value p) 0.5)))
       (button title :debug-name (str "drift-switch-" name) :width width :height 0.75 :font-size 8 :padding 0 :corner-radius 1
         :color (if on (drift-ink) :dim)
         :background-color (if on (drift-accent) :instrument-control-bg)
@@ -282,7 +282,7 @@
   (let ((wave (drift-preview-binding "lfo_wave")))
     (subtree :key (str "drift-lfo-preview-" (eseq.effects.custom-ui-runtime/custom-ui-scope-name))
       (lfo-curve :width 8.2 :height 2.0 :debug-name "drift-lfo-preview"
-        :shape (nth '(1 0 3 8 2 4 5) (round (reactive-value wave)))
+        :shape (nth '(1 0 3 8 2 4 5) (round wave))
         :cycles 1.5 :curve-color (drift-accent) :fill-color :transparent
         :background-color :instrument-control-bg))))
 (def drift-lfo-panel ()

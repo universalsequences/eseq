@@ -18,7 +18,7 @@
 (def syn-switch (name title width)
   (let ((p (eseq.effects.custom-ui-runtime/custom-ui-current-param name))
         (scope (eseq.effects.custom-ui-runtime/custom-ui-current-scope)))
-    (let ((on (> (reactive-value (eseq.effects.custom-ui-runtime/custom-ui-param-binding p)) 0.5)))
+    (let ((on (> (eseq.effects.custom-ui-runtime/custom-ui-param-value p) 0.5)))
       (button title :debug-name (str "syn-switch-" name) :width width :height 0.75 :font-size 8 :padding 0 :corner-radius 1
         :color (if on (syn-ink) :dim)
         :background-color (if on (syn-accent) :instrument-control-bg)
@@ -335,7 +335,7 @@
 (def syn-mode-button (mode title)
   (let ((p (eseq.effects.custom-ui-runtime/custom-ui-current-param "voice_mode"))
         (scope (eseq.effects.custom-ui-runtime/custom-ui-current-scope)))
-    (let ((on (= (round (reactive-value (eseq.effects.custom-ui-runtime/custom-ui-param-binding p))) mode)))
+    (let ((on (= (round (eseq.effects.custom-ui-runtime/custom-ui-param-value p)) mode)))
       (button title :debug-name (str "syn-voice-mode-" mode) :width 8.1 :height 1.1 :font-size 9 :padding 0 :corner-radius 0
         :color (if on (syn-accent) (syn-ink))
         :background-color (if on (syn-ink) (syn-accent))
@@ -428,7 +428,7 @@
         (syn-num "vel_to_vol" "Velocity" 5.8 2 :dim))
       (eseq.effects.custom-ui-lego/ui-lego-micro-base-note-s (syn-section) 5.8 :fg))))
 (def syn-rate-param (prefix)
-  (let ((mode (round (reactive-value (eseq.effects.custom-ui-controls/ui-param-bound-value (str prefix "_mode") 0)))))
+  (let ((mode (round (eseq.effects.custom-ui-controls/ui-param-value (str prefix "_mode") 0))))
     (str prefix (nth '("_rate_hz" "_time_ms" "_ratio" "_beats") mode))))
 
 (defsynth-ui
