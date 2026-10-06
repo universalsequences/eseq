@@ -1261,7 +1261,7 @@ pub(super) fn preserve_sample_browser_context_for_loaded_sample(editor: &mut Edi
     let path = escape_lisp_string(path);
     if let Err(error) = editor
         .runtime_mut()
-        .eval_str(&format!("(set! eseq.browser/sbrowser-auditioned-sample \"{path}\")"))
+        .eval_str(&format!("(eseq.browser/mark-auditioned! \"{path}\")"))
     {
         eprintln!("sample browser: failed to mark browser-initiated sample load: {error:?}");
     }

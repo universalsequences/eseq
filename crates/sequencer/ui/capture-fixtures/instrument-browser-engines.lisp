@@ -3,4 +3,4 @@
   (track :instrument "core/drift"))
 
 (def capture-after-sync ()
-  (set! sbrowser-tab "instruments"))
+  (let ((v eseq.browser/browser-view)) (set! v.tab "instruments")))

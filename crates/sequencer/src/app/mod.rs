@@ -1108,7 +1108,7 @@ pub struct App {
     pub song_region_selection: Option<song_region::SongRegionSelection>,
     /// The open sound-palette overlay (takes spec §17.6): the track it was
     /// opened on and the referent its Apply/Fork gestures target. `None` =
-    /// closed (the `SEQ.sound-palette` surface publishes Nil).
+    /// closed (`sound-palette.open` false).
     pub sound_palette_open: Option<(usize, sound_palette::PaletteTarget)>,
     /// Mirror of the arrangement edit cursor (region spec 5.3). The Lisp view
     /// owns the click gesture, but the Cmd-V seam lives in Rust and needs a

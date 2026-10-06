@@ -3694,7 +3694,7 @@
           (status "Drop a sample or saved instrument onto a pad")
           (if name
             (do
-              (set! sbrowser-loading-instrument-name name)
+              (eseq.browser/show-loading! name)
               (host-command "add-track-instrument"
                 (dict :name name :group-id group-id :pad-note note)))
             (status "Drop an instrument, not a folder")))
@@ -3702,7 +3702,7 @@
           (let ((instrument (eseq.browser/preset-payload-instrument payload)))
             (if instrument
               (do
-                (set! sbrowser-loading-instrument-name instrument)
+                (eseq.browser/show-loading! instrument)
                 (host-command "add-track-instrument"
                   (dict :name instrument :preset (get payload :preset)
                     :group-id group-id :pad-note note)))

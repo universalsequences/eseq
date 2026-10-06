@@ -996,6 +996,7 @@ pub(crate) mod f {
     pub(crate) const PROJECT_NAME: FieldKey = (PROJECT, "name");
     pub(crate) const PROJECT_AUDIO_WORKERS_OPTIONS: FieldKey = (PROJECT, "audio-workers-options");
     pub(crate) const PROJECT_GRAPHS: FieldKey = (PROJECT, "graphs");
+    pub(crate) const PROJECT_INSTANCES: FieldKey = (PROJECT, "instances");
 }
 
 /// Every kind and `:host` field the host publishes, with its type as
@@ -1515,6 +1516,9 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     // with the settings (`presented`).
     (f::PROJECT_NAME, ":string", Model),
     (f::PROJECT_AUDIO_WORKERS_OPTIONS, "(list-of :string)", Model),
+    // The package instances (the Packages tab's rows), compared every tick
+    // by fingerprint like the legacy `SEQ.instances`.
+    (f::PROJECT_INSTANCES, "(list-of :any)", Model),
     // The browser, the sound palette, the editor and the app's views
     // (`presented`): pushed from what the legacy publishers record
     // (`ui::presented`), each area when its generation moved; the sample

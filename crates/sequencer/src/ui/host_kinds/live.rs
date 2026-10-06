@@ -697,7 +697,7 @@ pub(super) fn live_value<S: KindStore>(
             }
             f::SONG_MANUAL_LATCH => Value::Bool(song_manual_latch(&sources.state)),
             f::BROWSER_PREVIEW_PLAYING => Value::Bool(sequencer::audio::preview::is_playing()),
-            // 0 while stopped, as the legacy `browser-preview-playhead`.
+            // 0 while stopped.
             f::BROWSER_PREVIEW_POSITION => number(if sequencer::audio::preview::is_playing() {
                 sequencer::audio::preview::position_seconds()
             } else {

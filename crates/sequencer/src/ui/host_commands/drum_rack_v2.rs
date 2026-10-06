@@ -183,7 +183,7 @@ pub(super) fn handle(
             match app.save_rack_as_kit(group_id, &name, overwrite, &scenes) {
                 Ok((path, warnings)) => {
                     let rt = editor.runtime_mut();
-                    rt.set_reactive("SEQ", "kit-presets", build_kit_presets_value());
+                    record_kit_presets();
                     rt.run_reactive_cycle();
                     editor.refresh_runtime_side_effects();
                     sync_rack_pad_map(app, editor, &track_groups, &ui_epoch);

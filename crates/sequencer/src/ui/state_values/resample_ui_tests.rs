@@ -4,6 +4,11 @@ fn eval(editor: &mut Editor, source: &str) -> Value {
     editor.runtime_mut().eval_str(source).unwrap().unwrap_or(Value::Nil)
 }
 
+/// A field of the modal's state (`eseq.resample/resample-view`).
+fn view(field: &str) -> String {
+    format!("(let ((v eseq.resample/resample-view)) v.{field})")
+}
+
 fn eval_number(editor: &mut Editor, source: &str) -> f64 {
     match eval(editor, source) {
         Value::Number(value) => value,
@@ -50,15 +55,15 @@ fn resample_command_prints_the_ring_and_sends_the_crop_with_name_and_tags() {
         HostCommand::Custom { name, .. } if name == "resample-open")), "M-x command");
     crate::host_commands::resample::open(&app, &mut editor).unwrap();
 
-    assert_eq!(eval(&mut editor, "eseq.resample/open?"), Value::Bool(true));
-    assert_eq!(eval_number(&mut editor, "RESAMPLE.duration"), 4.0);
+    assert_eq!(eval(&mut editor, &view("open")), Value::Bool(true));
+    assert_eq!(eval_number(&mut editor, &view("duration")), 4.0);
     // The crop opens on the audible span, not the silence around it.
-    assert!((eval_number(&mut editor, "eseq.resample/crop-start") - 1.0).abs() < 0.002);
-    assert!((eval_number(&mut editor, "eseq.resample/crop-end") - 3.0).abs() < 0.002);
-    assert!(matches!(eval(&mut editor, "eseq.resample/name"),
+    assert!((eval_number(&mut editor, &view("crop-start")) - 1.0).abs() < 0.002);
+    assert!((eval_number(&mut editor, &view("crop-end")) - 3.0).abs() < 0.002);
+    assert!(matches!(eval(&mut editor, &view("name")),
         Value::String(name) if name.starts_with("Resample 20")));
-    assert_eq!(eval_number(&mut editor, "(len eseq.resample/tags)"), 1.0);
-    assert_eq!(eval(&mut editor, "(first eseq.resample/tags)"), Value::String("Resampled".into()));
+    assert_eq!(eval_number(&mut editor, "(let ((v eseq.resample/resample-view)) (len v.tags))"), 1.0);
+    assert_eq!(eval(&mut editor, "(let ((v eseq.resample/resample-view)) (first v.tags))"), Value::String("Resampled".into()));
 
     // The modal lays out with the waveform, crop pickers and the Add button.
     editor.runtime_mut().run_reactive_cycle();
@@ -75,8 +80,8 @@ fn resample_command_prints_the_ring_and_sends_the_crop_with_name_and_tags() {
     eval(&mut editor, "(eseq.resample/action (dict :type :set-selection :start 1.5 :end 2.25))");
     eval(&mut editor, "(eseq.resample/add-tag \"resampled\")");
     eval(&mut editor, "(eseq.resample/add-tag \"loop\")");
-    eval(&mut editor, "(set! eseq.resample/name \"Big chord\")");
-    eval(&mut editor, "(set! eseq.resample/tag-draft \"dusty\")");
+    eval(&mut editor, "(let ((v eseq.resample/resample-view)) (set! v.name \"Big chord\"))");
+    eval(&mut editor, "(let ((v eseq.resample/resample-view)) (set! v.tag-draft \"dusty\"))");
     editor.drain_host_commands();
     eval(&mut editor, "(eseq.resample/commit)");
     let payload = editor.drain_host_commands().into_iter().find_map(|command| match command {
@@ -93,7 +98,7 @@ fn resample_command_prints_the_ring_and_sends_the_crop_with_name_and_tags() {
     assert_eq!(tags, ["Resampled", "loop", "dusty"].map(|t| Value::String(t.into())));
 
     crate::host_commands::resample::close(&mut editor).unwrap();
-    assert_eq!(eval(&mut editor, "eseq.resample/open?"), Value::Bool(false));
+    assert_eq!(eval(&mut editor, &view("open")), Value::Bool(false));
     eseqlisp::widget_render::clear_overlay();
 }
 
@@ -102,5 +107,5 @@ fn resample_without_a_ring_reports_instead_of_opening() {
     let mut editor = full_grid_editor_for_scroll_tests();
     let app = test_app_for_track_visual_state(Arc::new(SequencerState::new(1, vec![])));
     assert!(crate::host_commands::resample::open(&app, &mut editor).is_err());
-    assert_eq!(eval(&mut editor, "eseq.resample/open?"), Value::Bool(false));
+    assert_eq!(eval(&mut editor, &view("open")), Value::Bool(false));
 }

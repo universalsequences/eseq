@@ -3160,6 +3160,10 @@ pub(crate) fn init_runtime(
     let accumulator_names = Arc::new(Mutex::new(build_accumulator_names(&app)));
     let midi_fx_names = Arc::new(Mutex::new(Vec::<String>::new()));
 
+    // The browser's saved Sounds and kits (`browser.sound-presets` /
+    // `kit-presets`, through the presented record).
+    record_sound_presets();
+    record_kit_presets();
     // Register SEQ reactive namespace
     runtime.register_reactive(
         "SEQ",
@@ -3198,10 +3202,8 @@ pub(crate) fn init_runtime(
                 ("song-lanes", Value::List(vec![])),
                 ("scene-spans", Value::List(vec![])),
                 ("song-lane-events", Value::List(vec![])),
-                // Sound palette read surfaces (takes spec 17.6/18.3): the
-                // open overlay's entries (Nil = closed) and the per-clip
-                // sound divergence/color join for the timeline dots.
-                ("sound-palette", Value::Nil),
+                // The per-clip sound divergence/color join for the timeline
+                // dots (takes spec 17.6/18.3).
                 ("song-clip-sounds", Value::List(vec![])),
                 // Provisional arrangement-capture content
                 // (docs/realtime-arrangement-feedback-spec.md 3.2): nil
@@ -3256,11 +3258,8 @@ pub(crate) fn init_runtime(
                 ("auto-follow", Value::Bool(true)),
                 ("playhead", Value::Number(0.0)),
                 ("sampler-playhead", Value::Number(0.0)),
-                ("browser-preview-playing", Value::Bool(false)),
-                ("browser-preview-playhead", Value::Number(0.0)),
                 ("track-ids", build_track_ids(&app)),
                 ("track-instrument-types", build_track_instrument_types(&app)),
-                ("track-instrument-ids", build_track_instrument_ids(&app)),
                 (
                     "track-instrument-run-modes",
                     build_track_instrument_run_modes(&app),
@@ -3734,28 +3733,7 @@ pub(crate) fn init_runtime(
                     build_record_armed_value(&record_armed.lock().unwrap()),
                 ),
                 ("eseq.seq-core-state/playhead-page", Value::Number(0.0)),
-                ("sidebar-kind", Value::String("sampler".to_string())),
                 ("sidebar-instrument-name", Value::String(String::new())),
-                (
-                    "sidebar-instrument-display-name",
-                    Value::String(String::new()),
-                ),
-                ("sidebar-loaded-preset", Value::String(String::new())),
-                ("sidebar-selected-sample", Value::String(String::new())),
-                ("sidebar-track-index", Value::Number(0.0)),
-                ("sidebar-presets", Value::List(vec![])),
-                ("sidebar-user-presets", Value::List(vec![])),
-                ("sidebar-rack-slot-presets", Value::List(vec![])),
-                ("sidebar-preset-tree", Value::List(vec![])),
-                (
-                    "project-instrument-engines",
-                    build_string_list(&project_instrument_engine_names(app)),
-                ),
-                // Bumped when the instrument/effect library changes on disk
-                // (lisp_hot_reload::bump_content_library_epoch).
-                ("content-library-epoch", Value::Number(0.0)),
-                ("sound-presets", build_sound_presets_value()),
-                ("kit-presets", build_kit_presets_value()),
                 ("rack-clips", Value::List(vec![])),
                 ("current-project-name", Value::String(String::new())),
                 ("rack-panel-view-generation", Value::Number(0.0)),
@@ -3854,7 +3832,6 @@ pub(crate) fn init_runtime(
     crate::host_commands::audio_settings::register_state(&mut runtime);
     crate::roll_input::register_natives(&mut runtime, state.clone());
     crate::retrospective::register_state(&mut runtime);
-    crate::host_commands::resample::register_state(&mut runtime);
     crate::host_commands::factory_promote::register_state(&mut runtime);
     runtime.register_reactive("AGENT", crate::presented::agent_registration(), false);
     if track_count > 0 {

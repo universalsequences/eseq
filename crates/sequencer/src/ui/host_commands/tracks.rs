@@ -25,6 +25,21 @@ pub(super) const COMMANDS: &[&str] = &[
     "remove-track-from-group",
 ];
 
+/// The browser's saved-instrument row `name` spins (`""` stops it).
+fn show_loading(editor: &mut Editor, name: &str) {
+    let name = escape_lisp_string(name);
+    let _ = editor
+        .runtime_mut()
+        .eval_str(&format!("(eseq.browser/show-loading! \"{name}\")"));
+}
+
+/// The browser shows tab `name`, its searches kept.
+fn show_browser_tab(editor: &mut Editor, name: &str) {
+    let _ = editor
+        .runtime_mut()
+        .eval_str(&format!("(eseq.browser/show-browser-tab! \"{name}\")"));
+}
+
 fn extract_track_indices(payload: &Value) -> Option<Vec<usize>> {
     let Value::Map(fields) = payload else {
         return None;
@@ -481,9 +496,7 @@ pub(super) fn handle(
                         preserve_track_selection,
                     ) {
                         Ok(result) => {
-                            let _ = editor
-                                .runtime_mut()
-                                .eval_str("(set! sbrowser-tab \"samples\")");
+                            show_browser_tab(editor, "samples");
                             let status = result.reset_summary.map_or_else(
                                 || format!("Sampler already active ({})", result.name),
                                 |summary| {
@@ -686,9 +699,7 @@ pub(super) fn handle(
                         .map(|name| sequencer::lisp_host::pin_instrument_for_new_track(&name)),
                 ) {
                     if track_runs_instrument(&app, track, &instrument_name) {
-                        let _ = editor
-                            .runtime_mut()
-                            .eval_str("(set! sbrowser-loading-instrument-name \"\")");
+                        show_loading(editor, "");
                         apply_dropped_instrument_preset(
                             &mut app,
                             &mut editor,
@@ -703,10 +714,7 @@ pub(super) fn handle(
                 }
             }
             if let Some(pending) = ctx.sessions.pending_saved_instrument_load.as_ref() {
-                let escaped = escape_lisp_string(&pending.name);
-                let _ = editor.runtime_mut().eval_str(&format!(
-                    "(set! sbrowser-loading-instrument-name \"{escaped}\")"
-                ));
+                show_loading(editor, &pending.name);
                 editor.handle_host_event(HostEvent::Status(
                     "An instrument is already loading".to_string(),
                 ));
@@ -714,9 +722,7 @@ pub(super) fn handle(
             }
             let Some(instrument_name) = extract_string_from_payload(&payload, "name")
             else {
-                let _ = editor
-                    .runtime_mut()
-                    .eval_str("(set! sbrowser-loading-instrument-name \"\")");
+                show_loading(editor, "");
                 editor.handle_host_event(HostEvent::Status(
                     "Instrument load is missing a name".to_string(),
                 ));
@@ -726,9 +732,7 @@ pub(super) fn handle(
                 extract_bool_from_payload(&payload, "preserve-track-selection");
             let target = if name == "swap-track-instrument" {
                 let Some(track) = extract_usize_from_payload(&payload, "track") else {
-                    let _ = editor
-                        .runtime_mut()
-                        .eval_str("(set! sbrowser-loading-instrument-name \"\")");
+                    show_loading(editor, "");
                     editor.handle_host_event(HostEvent::Status(
                         "Instrument swap is missing a track".to_string(),
                     ));
@@ -741,9 +745,7 @@ pub(super) fn handle(
                 ) {
                     Ok(target) => target,
                     Err(error) => {
-                        let _ = editor
-                            .runtime_mut()
-                            .eval_str("(set! sbrowser-loading-instrument-name \"\")");
+                        show_loading(editor, "");
                         editor.handle_host_event(HostEvent::Status(format!(
                             "Cannot swap instrument: {error}"
                         )));
@@ -760,10 +762,7 @@ pub(super) fn handle(
                     pad_note: extract_i32_from_payload(&payload, "pad-note"),
                 }
             };
-            let escaped = escape_lisp_string(&instrument_name);
-            let _ = editor.runtime_mut().eval_str(&format!(
-                "(set! sbrowser-loading-instrument-name \"{escaped}\")"
-            ));
+            show_loading(editor, &instrument_name);
             // The browser row names a versioned instrument by its top folder;
             // the track gets the lineage's `current` release, pinned
             // (docs/instrument-versioning-spec.md §Ids). The loading marker
@@ -774,9 +773,7 @@ pub(super) fn handle(
                 match sequencer::lisp_host::load_instrument_source(&instrument_name) {
                     Ok(source) => source,
                     Err(error) => {
-                        let _ = editor
-                            .runtime_mut()
-                            .eval_str("(set! sbrowser-loading-instrument-name \"\")");
+                        show_loading(editor, "");
                         editor.handle_host_event(HostEvent::Status(format!(
                             "Error loading instrument source: {error}"
                         )));
@@ -788,9 +785,7 @@ pub(super) fn handle(
             ) {
                 Ok(run_mode) => run_mode,
                 Err(error) => {
-                    let _ = editor
-                        .runtime_mut()
-                        .eval_str("(set! sbrowser-loading-instrument-name \"\")");
+                    show_loading(editor, "");
                     editor.handle_host_event(HostEvent::Status(format!(
                         "Error loading instrument metadata: {error}"
                     )));
@@ -804,9 +799,7 @@ pub(super) fn handle(
                 &source,
                 run_mode,
             ) {
-                let _ = editor
-                    .runtime_mut()
-                    .eval_str("(set! sbrowser-loading-instrument-name \"\")");
+                show_loading(editor, "");
                 match cached_result {
                     Ok(SavedInstrumentLoadApply::Added { track, group_id, pad_note }) => {
                         let committed = finish_added_instrument_track(

@@ -34,7 +34,7 @@ pub(super) fn rack_slot_indicator_editor() -> (app::App, eseqlisp::Editor) {
     editor.runtime_mut().eval_str(r#"
         (def eseq.seq-core-state/selected-bus-name () "Mix")
         (def seq-has-selection? () false)
-        (def eseq.browser/sbrowser-editor-name "")
+        (def eseq.browser/clear-editor-name! () nil)
         (def eseq.browser/sample-selected-path () "")
         (def eseq.browser/add-selected-rack-layer () false)
         (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))

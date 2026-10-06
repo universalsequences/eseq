@@ -1,7 +1,7 @@
 //! The factory mixer, its legacy predecessor and the MIDImix map, ported to
 //! the kinds (kind-bindings spec §13 stage 8, eseq-0l17.13).
 
-use super::views::{distro, instance_bindings, legacy_forms};
+use super::views::{assert_ported, distro, instance_bindings, legacy_forms};
 use super::*;
 
 /// The ported files' sources.
@@ -22,17 +22,11 @@ const PORTED: [(&str, &str); 3] = [
 
 #[test]
 fn ported_mixer_views_use_no_legacy_binding_forms() {
-    for (file, source) in PORTED {
-        assert_eq!(legacy_forms(source), Vec::<&str>::new(), "{file}");
-    }
     // The views refer their kinds; the MIDImix map reaches them through
     // the mixer's render items.
-    for (file, source) in &PORTED[..2] {
-        assert!(
-            source.contains("(import eseq.kinds :refer ("),
-            "{file} refers its kinds"
-        );
-    }
+    assert_ported(&PORTED[..2]);
+    let (file, source) = PORTED[2];
+    assert_eq!(legacy_forms(source), Vec::<&str>::new(), "{file}");
 }
 
 #[test]

@@ -263,6 +263,18 @@ pub(super) fn legacy_forms(source: &str) -> Vec<&'static str> {
     found
 }
 
+/// Each ported `(file, source)` uses no [`legacy_forms`] and refers its
+/// kinds.
+pub(super) fn assert_ported(files: &[(&str, &str)]) {
+    for (file, source) in files {
+        assert_eq!(legacy_forms(source), Vec::<&str>::new(), "{file}");
+        assert!(
+            source.contains("(import eseq.kinds :refer ("),
+            "{file} refers its kinds"
+        );
+    }
+}
+
 #[test]
 fn mini_daw_example_has_no_string_key_bindings() {
     let code = strip_lisp_comments(MINI_DAW);

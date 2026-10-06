@@ -1132,6 +1132,7 @@ mod solo_binding_tests;
             "ui/track-collapse.lisp",
             "ui/sound-palette.lisp",
             "ui/sample-import.lisp",
+            "ui/preview-strip.lisp",
             "ui/effects/process-panel.lisp",
             "ui/effects/builtin/compressor.lisp",
             "ui/effects/builtin/convolution-reverb.lisp",
@@ -2561,7 +2562,6 @@ mod solo_binding_tests;
                 ("current-track", Value::Number(0.0)),
                 ("song-bound-clip", Value::Nil),
                 ("track-instrument-types", test_list(vec![])),
-                ("track-instrument-ids", test_list(vec![])),
                 // The real eseq.seq-core-state (imported by browser.lisp)
                 // gates seq-has-selected-bus? on the bus list length.
                 (
@@ -2571,34 +2571,9 @@ mod solo_binding_tests;
                         Value::String("Bus B".to_string()),
                     ]),
                 ),
-                ("sidebar-kind", Value::String("sampler".to_string())),
-                ("sidebar-track-index", Value::Number(0.0)),
-                ("sidebar-selected-sample", Value::String(String::new())),
-                ("sidebar-presets", test_list(vec![])),
-                ("sidebar-user-presets", test_list(vec![])),
-                ("sidebar-loaded-preset", Value::String(String::new())),
-                ("sidebar-instrument-name", Value::String(String::new())),
-                ("project-instrument-engines", test_list(vec![])),
-                ("content-library-epoch", Value::Number(0.0)),
-                (
-                    "sound-presets",
-                    test_list(vec![map_value([
-                        ("kind", Value::String("sound".to_string())),
-                        ("label", Value::String("Wide Plate".to_string())),
-                        ("name", Value::String("Wide Plate".to_string())),
-                        ("path", Value::String("sounds/wide-plate.sound".to_string())),
-                    ])]),
-                ),
                 // The kit save panel's scene checklist (rack-clips spec §7.2)
-                // reads the scene names and the rack's per-scene clip pointers.
-                (
-                    "scene-names",
-                    test_list(vec![
-                        Value::String("Intro".to_string()),
-                        Value::String("Verse".to_string()),
-                        Value::String("Chorus".to_string()),
-                    ]),
-                ),
+                // reads the rack's per-scene clip pointers (the scenes are
+                // kinds: `seed_browser_kinds`).
                 (
                     "rack-clips",
                     test_list(vec![map_value([
@@ -2614,31 +2589,6 @@ mod solo_binding_tests;
                         ),
                         ("clips", test_list(vec![])),
                     ])]),
-                ),
-                (
-                    "kit-presets",
-                    test_list(vec![map_value([
-                        ("kind", Value::String("kit".to_string())),
-                        ("label", Value::String("House Kit".to_string())),
-                        ("name", Value::String("House Kit".to_string())),
-                        ("path", Value::String("kits/House-Kit.kit".to_string())),
-                    ])]),
-                ),
-                (
-                    "sidebar-instrument-display-name",
-                    Value::String(String::new()),
-                ),
-                ("instrument-panel", test_list(vec![])),
-                ("current-project-name", Value::String(String::new())),
-                ("editor-mode", Value::String(String::new())),
-                ("editor-buffer-name", Value::String(String::new())),
-                ("editor-canceling", Value::Bool(false)),
-                ("editor-error", Value::String(String::new())),
-                ("editor-active-macro-name", Value::String(String::new())),
-                ("editor-active-macro-action", Value::String(String::new())),
-                (
-                    "editor-instrument-run-mode",
-                    Value::String("instrument".to_string()),
                 ),
             ],
             true,
@@ -2742,10 +2692,8 @@ mod solo_binding_tests;
             .runtime_mut()
             .eval_str(&src)
             .expect("load browser lisp");
-        editor
-            .runtime_mut()
-            .eval_str("(set! sbrowser-tab \"instruments\")")
-            .expect("select instrument tab");
+        seed_browser_kinds(&mut editor, &["Intro", "Verse", "Chorus"]);
+        set_browser_view_field(&mut editor, "browser-view", "tab", r#""instruments""#);
         editor.refresh_runtime_side_effects();
         if let Some(status) = editor.runtime_mut().take_status_message() {
             panic!("browser lisp status after refresh: {status}");
@@ -2774,10 +2722,7 @@ mod solo_binding_tests;
     #[test]
     fn metal_seq_browser_sounds_tab_renders_sound_presets() {
         let mut editor = browser_editor_on_instrument_tab();
-        editor
-            .runtime_mut()
-            .eval_str("(set! sbrowser-tab \"sounds\")")
-            .expect("select Sounds tab");
+        set_browser_view_field(&mut editor, "browser-view", "tab", r#""sounds""#);
         editor.refresh_runtime_side_effects();
         let id = browser_id(&editor);
         editor.set_active_buffer(id);
@@ -2799,10 +2744,7 @@ mod solo_binding_tests;
     #[test]
     fn metal_seq_browser_kits_tab_loads_a_kit_as_a_new_rack() {
         let mut editor = browser_editor_on_instrument_tab();
-        editor
-            .runtime_mut()
-            .eval_str("(set! sbrowser-tab \"kits\")")
-            .expect("select Kits tab");
+        set_browser_view_field(&mut editor, "browser-view", "tab", r#""kits""#);
         editor.refresh_runtime_side_effects();
         let id = browser_id(&editor);
         editor.set_active_buffer(id);
@@ -2850,12 +2792,8 @@ mod solo_binding_tests;
     fn metal_seq_browser_selected_rack_addresses_auditions_without_using_stale_track() {
         let mut editor = browser_editor_on_instrument_tab();
         apply_rack_group_bindings(&mut editor, false);
+        seed_browser_tracks(&mut editor, &["sampler", "custom", "sampler"], 1);
         let rt = editor.runtime_mut();
-        rt.set_reactive("SEQ", "num-tracks", Value::Number(3.0));
-        rt.set_reactive("SEQ", "current-track", Value::Number(1.0));
-        rt.set_reactive("SEQ", "track-instrument-types", test_string_list(&[
-            "sampler", "custom", "sampler",
-        ]));
         rt.eval_str("(set! eseq.seq-core-state/selected-bus 2)")
             .expect("select rack backing bus");
         editor.runtime_mut().run_reactive_cycle();
@@ -2911,11 +2849,8 @@ mod solo_binding_tests;
         editor.refresh_runtime_side_effects();
 
         assert_eq!(
-            editor
-                .runtime_mut()
-                .eval_str("sbrowser-tab")
-                .expect("read selected browser tab"),
-            Some(Value::String("kits".to_string())),
+            browser_view_field(&mut editor, "browser-view", "tab"),
+            Value::String("kits".to_string()),
         );
         let id = browser_id(&editor);
         editor.set_active_buffer(id);
@@ -2931,7 +2866,7 @@ mod solo_binding_tests;
         editor
             .runtime_mut()
             .eval_str(
-                r#"(do (set! eseq.browser/kit-save-name "Breakbeat") (eseq.browser/save-kit))"#,
+                r#"(do (let ((p eseq.browser/kit-save)) (set! p.name "Breakbeat")) (eseq.browser/save-kit))"#,
             )
             .expect("confirm kit save");
         let commands = editor.drain_host_commands();
@@ -2973,10 +2908,7 @@ mod solo_binding_tests;
             ("sounds", "eseq.browser/sounds-tab-tree"),
             ("instruments", "eseq.browser/instruments-tab-tree"),
         ] {
-            editor
-                .runtime_mut()
-                .eval_str(&format!("(set! sbrowser-tab \"{tab}\")"))
-                .expect("select tab");
+            set_browser_view_field(&mut editor, "browser-view", "tab", &format!("{tab:?}"));
             editor.refresh_runtime_side_effects();
             let id = browser_id(&editor);
             editor.set_active_buffer(id);
@@ -3367,17 +3299,17 @@ mod solo_binding_tests;
             .expect("browser widget tree")
     }
 
+    /// The content library epoch moving, as the host kinds push it
+    /// (`browser.library-epoch`).
     fn bump_test_content_library_epoch(editor: &mut eseqlisp::Editor, epoch: f64) {
-        let runtime = editor.runtime_mut();
-        runtime.set_reactive("SEQ", "content-library-epoch", Value::Number(epoch));
-        runtime.run_reactive_cycle();
+        set_kind_field(editor, "browser", "library-epoch", Value::Number(epoch));
         editor.refresh_runtime_side_effects();
     }
 
     /// eseq-63j4.4: a folder a coding agent writes into the user instruments
-    /// dir lists in the Instruments tab once the host bumps
-    /// `SEQ.content-library-epoch` (the file watcher does), with no restart
-    /// and no other browser interaction.
+    /// dir lists in the Instruments tab once the host bumps the content
+    /// library epoch (`browser.library-epoch`; the file watcher does), with
+    /// no restart and no other browser interaction.
     #[test]
     fn metal_seq_browser_instrument_tab_relists_library_on_content_epoch() {
         let mut editor = browser_editor_on_instrument_tab();
@@ -3420,10 +3352,7 @@ mod solo_binding_tests;
                 counter.set(counter.get() + 1);
                 Ok(test_list(vec![]))
             });
-        editor
-            .runtime_mut()
-            .eval_str("(set! sbrowser-tab \"audio-fx\")")
-            .expect("select audio fx tab");
+        set_browser_view_field(&mut editor, "browser-view", "tab", r#""audio-fx""#);
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
         let before = calls.get();
@@ -3453,7 +3382,7 @@ mod solo_binding_tests;
     #[test]
     fn metal_seq_browser_factory_category_search_has_visible_instruments() {
         let mut editor = browser_editor_on_instrument_tab();
-        editor.runtime_mut().eval_str(r#"(set! eseq.browser/search-filter "Gamelan")"#).unwrap();
+        set_browser_view_field(&mut editor, "browser-view", "search", r#""Gamelan""#);
         editor.runtime_mut().eval_str("(eseq.browser/refresh-buffer)").unwrap();
         editor.refresh_runtime_side_effects();
         editor.set_active_buffer(browser_id(&editor));
@@ -3471,12 +3400,12 @@ mod solo_binding_tests;
     #[test]
     fn metal_seq_browser_project_engine_rows_have_visible_layout() {
         let mut editor = browser_editor_on_instrument_tab();
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "project-instrument-engines",
+        set_kind_field(
+            &mut editor,
+            "browser",
+            "engines",
             build_string_list(&["core/drift/".to_string()]),
         );
-        editor.runtime_mut().run_reactive_cycle();
         editor
             .runtime_mut()
             .eval_str("(eseq.browser/refresh-buffer)")
@@ -3669,10 +3598,7 @@ mod solo_binding_tests;
     #[test]
     fn metal_seq_browser_audio_fx_tab_renders_new_effect_button_outside_tree() {
         let mut editor = browser_editor_on_instrument_tab();
-        editor
-            .runtime_mut()
-            .eval_str("(set! sbrowser-tab \"audio-fx\")")
-            .expect("select audio fx tab");
+        set_browser_view_field(&mut editor, "browser-view", "tab", r#""audio-fx""#);
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
 
@@ -3726,23 +3652,20 @@ mod solo_binding_tests;
         editor
             .runtime_mut()
             .register_native("seq-package-tree", move |_args, _ctx| Ok(tree_items.clone()));
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "groups",
-            test_list(vec![
-                map_value([
-                    ("id", Value::Number(9.0)),
-                    ("name", Value::String("Kit A".into())),
-                    ("rack", Value::Bool(true)),
-                ]),
-                map_value([
-                    ("id", Value::Number(11.0)),
-                    ("name", Value::String("Kit B".into())),
-                    ("rack", Value::Bool(true)),
-                ]),
-            ]),
-        );
-        editor.runtime_mut().eval_str("(set! sbrowser-tab \"packages\")").unwrap();
+        // Two drum racks (`(groups)`), the instances' move targets.
+        {
+            let rt = editor.runtime_mut();
+            let racks = register_kind_range(rt, "eseq.kinds:group", 2);
+            for (&id, (gid, name)) in racks.iter().zip([(9.0, "Kit A"), (11.0, "Kit B")]) {
+                set_field(rt, id, "gid", Value::Number(gid));
+                set_field(rt, id, "name", Value::String(name.into()));
+                set_field(rt, id, "rack", Value::Bool(true));
+            }
+            let project = kind_singleton_rt(rt, "project");
+            set_field(rt, project, "groups", instance_list(racks));
+            rt.run_reactive_cycle();
+        }
+        set_browser_view_field(&mut editor, "browser-view", "tab", r#""packages""#);
         editor.runtime_mut().eval_str("(eseq.browser/refresh-buffer)").unwrap();
         editor.refresh_runtime_side_effects();
         editor.set_active_buffer(browser_id(&editor));
@@ -3811,7 +3734,7 @@ mod solo_binding_tests;
             editor
                 .runtime_mut()
                 .eval_str(&format!(
-                    "(do (eseq.browser/open-package-menu (dict :item {target} :col 1 :row 1))
+                    "(do (eseq.browser/open-package-menu (dict :item {target} :at (dict :col 1 :row 1)))
                          (map (lambda (action) (get action :label)) (eseq.browser/package-menu-actions)))"
                 ))
                 .unwrap()
@@ -3845,7 +3768,7 @@ mod solo_binding_tests;
             editor
                 .runtime_mut()
                 .eval_str(&format!(
-                    "(do (eseq.browser/open-package-menu (dict :item {target} :col 1 :row 1))
+                    "(do (eseq.browser/open-package-menu (dict :item {target} :at (dict :col 1 :row 1)))
                          (eseq.browser/select-package-menu-action
                            (nth (filter (lambda (action) (= (get action :label) \"{label}\"))
                                   (eseq.browser/package-menu-actions)) 0)))"
@@ -3904,11 +3827,7 @@ mod solo_binding_tests;
     #[test]
     fn metal_seq_browser_new_instrument_editor_uses_finalize_copy() {
         let mut editor = browser_editor_on_instrument_tab();
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "editor-mode",
-            Value::String("new-instrument".to_string()),
-        );
+        set_kind_field(&mut editor, "editor", "mode", Value::String("new-instrument".to_string()));
         editor
             .runtime_mut()
             .set_reactive("SEQ", "current-track", Value::Number(2.0));
@@ -3955,14 +3874,7 @@ mod solo_binding_tests;
     #[test]
     fn metal_seq_browser_new_effect_editor_uses_finalize_controls() {
         let mut editor = browser_editor_on_instrument_tab();
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "editor-active", Value::Bool(true));
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "editor-mode",
-            Value::String("new-effect".to_string()),
-        );
+        set_kind_field(&mut editor, "editor", "mode", Value::String("new-effect".to_string()));
         editor
             .runtime_mut()
             .set_reactive("SEQ", "current-track", Value::Number(2.0));
@@ -4013,12 +3925,7 @@ mod solo_binding_tests;
     fn metal_seq_browser_edit_modes_offer_fork_next_to_save() {
         for mode in ["edit-instrument", "edit-effect"] {
             let mut editor = browser_editor_on_instrument_tab();
-            editor
-                .runtime_mut()
-                .set_reactive("SEQ", "editor-active", Value::Bool(true));
-            editor
-                .runtime_mut()
-                .set_reactive("SEQ", "editor-mode", Value::String(mode.to_string()));
+            set_kind_field(&mut editor, "editor", "mode", Value::String(mode.to_string()));
             editor.runtime_mut().run_reactive_cycle();
             editor.refresh_runtime_side_effects();
             let tree = editor
@@ -4041,14 +3948,7 @@ mod solo_binding_tests;
     #[test]
     fn metal_seq_browser_new_instrument_editor_has_nothing_to_fork() {
         let mut editor = browser_editor_on_instrument_tab();
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "editor-active", Value::Bool(true));
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "editor-mode",
-            Value::String("new-instrument".to_string()),
-        );
+        set_kind_field(&mut editor, "editor", "mode", Value::String("new-instrument".to_string()));
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
         let tree = editor
@@ -4070,14 +3970,8 @@ mod solo_binding_tests;
     #[test]
     fn metal_seq_browser_fork_selected_instrument_queues_host_command() {
         let mut editor = browser_editor_on_instrument_tab();
-        editor
-            .runtime_mut()
-            .eval_str("(set! eseq.browser/selected-instrument-name \"core/triton\")")
-            .expect("seed selected instrument");
-        editor
-            .runtime_mut()
-            .eval_str("(set! eseq.browser/sbrowser-editor-name \"leftover\")")
-            .expect("seed stale editor name");
+        set_browser_view_field(&mut editor, "instrument-pick", "instrument", r#""core/triton""#);
+        set_browser_view_field(&mut editor, "editor-draft", "name", r#""leftover""#);
         editor
             .runtime_mut()
             .eval_str("(eseq.browser/fork-selected-instrument)")
@@ -4103,11 +3997,8 @@ mod solo_binding_tests;
         }
         // Spec §3.4: the name field starts empty; no `<source>-2` prefill.
         assert_eq!(
-            editor
-                .runtime_mut()
-                .eval_str("eseq.browser/sbrowser-editor-name")
-                .expect("read editor name"),
-            Some(Value::String(String::new()))
+            browser_view_field(&mut editor, "editor-draft", "name"),
+            Value::String(String::new())
         );
     }
 
@@ -4123,10 +4014,7 @@ mod solo_binding_tests;
             "forking with no selection must not enter an editor"
         );
 
-        editor
-            .runtime_mut()
-            .eval_str("(set! eseq.browser/selected-audio-effect-name \"lexilush\")")
-            .expect("seed selected effect");
+        set_browser_view_field(&mut editor, "instrument-pick", "audio-effect", r#""lexilush""#);
         editor
             .runtime_mut()
             .eval_str("(eseq.browser/fork-selected-audio-effect)")
@@ -4151,11 +4039,8 @@ mod solo_binding_tests;
             )
             .expect("select a custom effect");
         assert_eq!(
-            editor
-                .runtime_mut()
-                .eval_str("eseq.browser/selected-audio-effect-name")
-                .expect("read selection"),
-            Some(Value::String("lexilush".to_string()))
+            browser_view_field(&mut editor, "instrument-pick", "audio-effect"),
+            Value::String("lexilush".to_string())
         );
         editor
             .runtime_mut()
@@ -4164,11 +4049,8 @@ mod solo_binding_tests;
             )
             .expect("select a builtin effect");
         assert_eq!(
-            editor
-                .runtime_mut()
-                .eval_str("eseq.browser/selected-audio-effect-name")
-                .expect("read selection"),
-            Some(Value::String(String::new())),
+            browser_view_field(&mut editor, "instrument-pick", "audio-effect"),
+            Value::String(String::new()),
             "builtins are Rust and have no dsp.lisp to fork"
         );
     }
@@ -4176,24 +4058,9 @@ mod solo_binding_tests;
     #[test]
     fn metal_seq_browser_editor_macro_action_replaces_finalize_controls() {
         let mut editor = browser_editor_on_instrument_tab();
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "editor-active", Value::Bool(true));
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "editor-mode",
-            Value::String("new-instrument".to_string()),
-        );
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "editor-active-macro-name",
-            Value::String("simp".to_string()),
-        );
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "editor-active-macro-action",
-            Value::String("save-to-library".to_string()),
-        );
+        set_kind_field(&mut editor, "editor", "mode", Value::String("new-instrument".to_string()));
+        set_kind_field(&mut editor, "editor", "active-macro", Value::String("simp".to_string()));
+        set_kind_field(&mut editor, "editor", "active-macro-action", Value::String("save-to-library".to_string()));
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
         let browser = editor
@@ -4256,14 +4123,7 @@ mod solo_binding_tests;
             "test setup should exercise the inactive-buffer refresh path"
         );
 
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "editor-active", Value::Bool(true));
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "editor-mode",
-            Value::String("new-effect".to_string()),
-        );
+        set_kind_field(&mut editor, "editor", "mode", Value::String("new-effect".to_string()));
         editor
             .runtime_mut()
             .set_reactive("SEQ", "current-track", Value::Number(2.0));
@@ -4352,18 +4212,9 @@ mod solo_binding_tests;
             sidebar_kind: &str,
             track: f64,
         ) -> f32 {
-            editor.runtime_mut().set_reactive(
-                "SEQ",
-                "sidebar-kind",
-                Value::String(sidebar_kind.to_string()),
-            );
-            editor
-                .runtime_mut()
-                .set_reactive("SEQ", "sidebar-track-index", Value::Number(track));
-            editor
-                .runtime_mut()
-                .eval_str("(set! sbrowser-tab \"samples\")")
-                .expect("select samples tab");
+            set_kind_field(editor, "browser", "instrument-kind", Value::String(sidebar_kind.to_string()));
+            show_browser_track(editor, track as usize);
+            set_browser_view_field(editor, "browser-view", "tab", r#""samples""#);
             editor.refresh_runtime_side_effects();
             editor.set_active_buffer(browser_id(editor));
             editor.set_layout_viewport(72, 60);
@@ -4410,10 +4261,7 @@ mod solo_binding_tests;
         }
 
         let mut editor = browser_editor_on_instrument_tab();
-        editor
-            .runtime_mut()
-            .eval_str("(set! sbrowser-tab \"samples\")")
-            .expect("select samples tab");
+        set_browser_view_field(&mut editor, "browser-view", "tab", r#""samples""#);
         editor.refresh_runtime_side_effects();
         editor.set_active_buffer(browser_id(&editor));
         editor.set_layout_viewport(72, 60);
@@ -4459,7 +4307,7 @@ mod solo_binding_tests;
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("eseq.browser/kit-save-scenes")
+                .eval_str("(let ((p eseq.browser/kit-save)) p.scenes)")
                 .expect("selection"),
             Some(test_list(vec![Value::Number(1.0), Value::Number(2.0)])),
         );
@@ -4516,12 +4364,9 @@ mod solo_binding_tests;
     #[test]
     fn metal_seq_kit_save_panel_checklist_grows_to_show_every_scene() {
         let mut editor = browser_editor_on_instrument_tab();
-        let names: Vec<Value> = (1..=14)
-            .map(|i| Value::String(format!("Scene {i}")))
-            .collect();
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "scene-names", test_list(names));
+        let names: Vec<String> = (1..=14).map(|i| format!("Scene {i}")).collect();
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        seed_kind_scene_names(&mut editor, &names);
         editor
             .runtime_mut()
             .eval_str("(eseq.browser/enter-kit-save 8 \"Break\")")
@@ -4568,10 +4413,7 @@ mod solo_binding_tests;
         }
 
         let mut editor = browser_editor_on_instrument_tab();
-        editor
-            .runtime_mut()
-            .eval_str("(set! sbrowser-tab \"projects\")")
-            .expect("select projects tab");
+        set_browser_view_field(&mut editor, "browser-view", "tab", r#""projects""#);
         editor.refresh_runtime_side_effects();
         editor.set_active_buffer(browser_id(&editor));
         editor.set_layout_viewport(72, 60);
@@ -4600,18 +4442,12 @@ mod solo_binding_tests;
     #[test]
     fn metal_seq_browser_render_does_not_mutate_sample_search_without_track_change() {
         let mut editor = browser_editor_on_instrument_tab();
-        editor
-            .runtime_mut()
-            .eval_str("(set! sbrowser-tab \"samples\")")
-            .expect("select samples tab");
+        set_browser_view_field(&mut editor, "browser-view", "tab", r#""samples""#);
         editor
             .runtime_mut()
             .eval_str("(eseq.browser/build-widgets)")
             .expect("sync initial sampler track");
-        editor
-            .runtime_mut()
-            .eval_str("(set! eseq.browser/search-filter \"kick\")")
-            .expect("set sample search");
+        set_browser_view_field(&mut editor, "browser-view", "search", r#""kick""#);
         editor.refresh_runtime_side_effects();
         editor.set_active_buffer(browser_id(&editor));
         editor.set_layout_viewport(72, 60);
@@ -4622,8 +4458,8 @@ mod solo_binding_tests;
             .expect("build browser widgets");
 
         assert_eq!(
-            editor.runtime_mut().eval_str("eseq.browser/search-filter"),
-            Ok(Some(Value::String("kick".to_string()))),
+            browser_view_field(&mut editor, "browser-view", "search"),
+            Value::String("kick".to_string()),
             "rendering the browser should not clear the search filter as a side effect"
         );
     }
@@ -4631,26 +4467,13 @@ mod solo_binding_tests;
     #[test]
     fn metal_seq_browser_track_sample_sync_clears_sample_search() {
         let mut editor = browser_editor_on_instrument_tab();
-        editor
-            .runtime_mut()
-            .eval_str("(set! sbrowser-tab \"samples\")")
-            .expect("select samples tab");
+        set_browser_view_field(&mut editor, "browser-view", "tab", r#""samples""#);
         editor
             .runtime_mut()
             .eval_str("(eseq.browser/build-widgets)")
             .expect("sync initial sampler track");
-        editor
-            .runtime_mut()
-            .eval_str("(set! eseq.browser/search-filter \"snare\")")
-            .expect("set sample search");
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "sidebar-track-index", Value::Number(1.0));
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "sidebar-selected-sample",
-            Value::String("samples/loaded-a.wav".to_string()),
-        );
+        set_browser_view_field(&mut editor, "browser-view", "search", r#""snare""#);
+        show_browser_track_sample(&mut editor, 1, "samples/loaded-a.wav");
 
         editor
             .runtime_mut()
@@ -4658,14 +4481,14 @@ mod solo_binding_tests;
             .expect("sync switched sampler track");
 
         assert_eq!(
-            editor.runtime_mut().eval_str("eseq.browser/search-filter"),
-            Ok(Some(Value::String(String::new()))),
+            browser_view_field(&mut editor, "browser-view", "search"),
+            Value::String(String::new()),
             "switching sampler tracks should clear the sample search"
         );
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(len eseq.browser/selected-tags)"),
+                .eval_str("(let ((p eseq.browser/sample-pick)) (len p.tags))"),
             Ok(Some(Value::Number(2.0))),
             "switching sampler tracks should load the selected sample's tags"
         );
@@ -4715,18 +4538,9 @@ mod solo_binding_tests;
     #[test]
     fn metal_seq_browser_tab_switch_clears_search_text() {
         let mut editor = browser_editor_on_instrument_tab();
-        editor
-            .runtime_mut()
-            .eval_str("(set! sbrowser-tab \"samples\")")
-            .expect("select samples tab");
-        editor
-            .runtime_mut()
-            .eval_str("(set! eseq.browser/search-filter \"kick\")")
-            .expect("set browser search");
-        editor
-            .runtime_mut()
-            .eval_str("(set! eseq.browser/preset-filter \"pad\")")
-            .expect("set preset search");
+        set_browser_view_field(&mut editor, "browser-view", "tab", r#""samples""#);
+        set_browser_view_field(&mut editor, "browser-view", "search", r#""kick""#);
+        set_browser_view_field(&mut editor, "browser-view", "preset-search", r#""pad""#);
 
         editor
             .runtime_mut()
@@ -4734,13 +4548,13 @@ mod solo_binding_tests;
             .expect("select instruments tab");
 
         assert_eq!(
-            editor.runtime_mut().eval_str("eseq.browser/search-filter"),
-            Ok(Some(Value::String(String::new()))),
+            browser_view_field(&mut editor, "browser-view", "search"),
+            Value::String(String::new()),
             "switching tabs should clear the shared search text"
         );
         assert_eq!(
-            editor.runtime_mut().eval_str("eseq.browser/preset-filter"),
-            Ok(Some(Value::String(String::new()))),
+            browser_view_field(&mut editor, "browser-view", "preset-search"),
+            Value::String(String::new()),
             "switching tabs should clear the separate preset search text"
         );
         let destination_items = editor
@@ -4757,18 +4571,9 @@ mod solo_binding_tests;
     #[test]
     fn metal_seq_browser_reselecting_active_tab_preserves_search_text() {
         let mut editor = browser_editor_on_instrument_tab();
-        editor
-            .runtime_mut()
-            .eval_str("(set! sbrowser-tab \"samples\")")
-            .expect("select samples tab");
-        editor
-            .runtime_mut()
-            .eval_str("(set! eseq.browser/search-filter \"kick\")")
-            .expect("set browser search");
-        editor
-            .runtime_mut()
-            .eval_str("(set! eseq.browser/preset-filter \"pad\")")
-            .expect("set preset search");
+        set_browser_view_field(&mut editor, "browser-view", "tab", r#""samples""#);
+        set_browser_view_field(&mut editor, "browser-view", "search", r#""kick""#);
+        set_browser_view_field(&mut editor, "browser-view", "preset-search", r#""pad""#);
 
         editor
             .runtime_mut()
@@ -4776,13 +4581,13 @@ mod solo_binding_tests;
             .expect("reselect samples tab");
 
         assert_eq!(
-            editor.runtime_mut().eval_str("eseq.browser/search-filter"),
-            Ok(Some(Value::String("kick".to_string()))),
+            browser_view_field(&mut editor, "browser-view", "search"),
+            Value::String("kick".to_string()),
             "reselecting the active tab should not clear the active pane search"
         );
         assert_eq!(
-            editor.runtime_mut().eval_str("eseq.browser/preset-filter"),
-            Ok(Some(Value::String("pad".to_string()))),
+            browser_view_field(&mut editor, "browser-view", "preset-search"),
+            Value::String("pad".to_string()),
             "reselecting the active tab should not clear the separate preset search"
         );
     }
@@ -4790,18 +4595,9 @@ mod solo_binding_tests;
     #[test]
     fn metal_seq_browser_leaving_samples_clears_sample_search_and_tags() {
         let mut editor = browser_editor_on_instrument_tab();
-        editor
-            .runtime_mut()
-            .eval_str("(set! sbrowser-tab \"samples\")")
-            .expect("select samples tab");
-        editor
-            .runtime_mut()
-            .eval_str("(set! eseq.browser/search-filter \"kick\")")
-            .expect("set sample search");
-        editor
-            .runtime_mut()
-            .eval_str("(set! eseq.browser/selected-tags (list \"kick\" \"808\"))")
-            .expect("seed selected tags");
+        set_browser_view_field(&mut editor, "browser-view", "tab", r#""samples""#);
+        set_browser_view_field(&mut editor, "browser-view", "search", r#""kick""#);
+        set_browser_view_field(&mut editor, "sample-pick", "tags", r#"(list "kick" "808")"#);
 
         editor
             .runtime_mut()
@@ -4809,14 +4605,14 @@ mod solo_binding_tests;
             .expect("select instruments tab");
 
         assert_eq!(
-            editor.runtime_mut().eval_str("eseq.browser/search-filter"),
-            Ok(Some(Value::String(String::new()))),
+            browser_view_field(&mut editor, "browser-view", "search"),
+            Value::String(String::new()),
             "switching away from samples should clear search text"
         );
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(len eseq.browser/selected-tags)"),
+                .eval_str("(let ((p eseq.browser/sample-pick)) (len p.tags))"),
             Ok(Some(Value::Number(0.0))),
             "switching away from samples should clear sample-only tag filters"
         );
@@ -4825,22 +4621,13 @@ mod solo_binding_tests;
     #[test]
     fn metal_seq_browser_audition_preserves_sample_filter_context() {
         let mut editor = browser_editor_on_instrument_tab();
-        editor
-            .runtime_mut()
-            .eval_str("(set! sbrowser-tab \"samples\")")
-            .expect("select samples tab");
+        set_browser_view_field(&mut editor, "browser-view", "tab", r#""samples""#);
         editor
             .runtime_mut()
             .eval_str("(eseq.browser/build-widgets)")
             .expect("sync initial sampler track");
-        editor
-            .runtime_mut()
-            .eval_str("(set! eseq.browser/search-filter \"break\")")
-            .expect("set sample search");
-        editor
-            .runtime_mut()
-            .eval_str("(set! eseq.browser/selected-tags (list \"kick\" \"808\"))")
-            .expect("seed selected tags");
+        set_browser_view_field(&mut editor, "browser-view", "search", r#""break""#);
+        set_browser_view_field(&mut editor, "sample-pick", "tags", r#"(list "kick" "808")"#);
         editor
             .runtime_mut()
             .eval_str(
@@ -4848,11 +4635,7 @@ mod solo_binding_tests;
                     (dict :label "audition.wav" :path "samples/audition.wav"))"#,
             )
             .expect("audition sample");
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "sidebar-selected-sample",
-            Value::String("samples/audition.wav".to_string()),
-        );
+        set_kind_field(&mut editor, "browser", "sample", Value::String("samples/audition.wav".to_string()));
 
         editor
             .runtime_mut()
@@ -4860,21 +4643,21 @@ mod solo_binding_tests;
             .expect("sync auditioned sampler sample");
 
         assert_eq!(
-            editor.runtime_mut().eval_str("eseq.browser/search-filter"),
-            Ok(Some(Value::String("break".to_string()))),
+            browser_view_field(&mut editor, "browser-view", "search"),
+            Value::String("break".to_string()),
             "auditioning a sample should preserve the active sample search"
         );
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(len eseq.browser/selected-tags)"),
+                .eval_str("(let ((p eseq.browser/sample-pick)) (len p.tags))"),
             Ok(Some(Value::Number(2.0))),
             "auditioning a sample should preserve selected tag filters"
         );
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(eseq.browser/list-contains? eseq.browser/selected-tags \"kick\")"),
+                .eval_str("(let ((p eseq.browser/sample-pick)) (eseq.browser/list-contains? p.tags \"kick\"))"),
             Ok(Some(Value::Bool(true))),
             "auditioning a sample should not replace selected tags with that sample's tags"
         );
@@ -4883,34 +4666,15 @@ mod solo_binding_tests;
     #[test]
     fn metal_seq_browser_browser_initiated_new_track_preserves_sample_filter_context() {
         let mut editor = browser_editor_on_instrument_tab();
-        editor
-            .runtime_mut()
-            .eval_str("(set! sbrowser-tab \"samples\")")
-            .expect("select samples tab");
+        set_browser_view_field(&mut editor, "browser-view", "tab", r#""samples""#);
         editor
             .runtime_mut()
             .eval_str("(eseq.browser/build-widgets)")
             .expect("sync initial sampler track");
-        editor
-            .runtime_mut()
-            .eval_str("(set! eseq.browser/search-filter \"break\")")
-            .expect("set sample search");
-        editor
-            .runtime_mut()
-            .eval_str("(set! eseq.browser/selected-tags (list \"kick\" \"808\"))")
-            .expect("seed selected tags");
-        editor
-            .runtime_mut()
-            .eval_str("(set! eseq.browser/sbrowser-auditioned-sample \"samples/new-track.wav\")")
-            .expect("mark browser initiated sample load");
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "sidebar-track-index", Value::Number(1.0));
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "sidebar-selected-sample",
-            Value::String("samples/new-track.wav".to_string()),
-        );
+        set_browser_view_field(&mut editor, "browser-view", "search", r#""break""#);
+        set_browser_view_field(&mut editor, "sample-pick", "tags", r#"(list "kick" "808")"#);
+        set_browser_view_field(&mut editor, "sample-pick", "auditioned", r#""samples/new-track.wav""#);
+        show_browser_track_sample(&mut editor, 1, "samples/new-track.wav");
 
         editor
             .runtime_mut()
@@ -4918,14 +4682,14 @@ mod solo_binding_tests;
             .expect("sync browser-created sampler track");
 
         assert_eq!(
-            editor.runtime_mut().eval_str("eseq.browser/search-filter"),
-            Ok(Some(Value::String("break".to_string()))),
+            browser_view_field(&mut editor, "browser-view", "search"),
+            Value::String("break".to_string()),
             "browser-initiated new sampler tracks should preserve sample search"
         );
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(len eseq.browser/selected-tags)"),
+                .eval_str("(let ((p eseq.browser/sample-pick)) (len p.tags))"),
             Ok(Some(Value::Number(2.0))),
             "browser-initiated new sampler tracks should preserve selected tag filters"
         );
@@ -4946,14 +4710,8 @@ mod solo_binding_tests;
         }
 
         let mut editor = browser_editor_on_instrument_tab();
-        editor
-            .runtime_mut()
-            .eval_str("(set! sbrowser-tab \"samples\")")
-            .expect("select samples tab");
-        editor
-            .runtime_mut()
-            .eval_str("(set! eseq.browser/selected-tags (list \"kick\" \"808\"))")
-            .expect("seed selected tags");
+        set_browser_view_field(&mut editor, "browser-view", "tab", r#""samples""#);
+        set_browser_view_field(&mut editor, "sample-pick", "tags", r#"(list "kick" "808")"#);
         editor.refresh_runtime_side_effects();
         editor.set_active_buffer(browser_id(&editor));
         editor.set_layout_viewport(72, 60);
@@ -4977,14 +4735,14 @@ mod solo_binding_tests;
             .expect("invoke browser search on-change");
 
         assert_eq!(
-            editor.runtime_mut().eval_str("eseq.browser/search-filter"),
-            Ok(Some(Value::String("snare".to_string()))),
+            browser_view_field(&mut editor, "browser-view", "search"),
+            Value::String("snare".to_string()),
             "typing in sample search should update the search text"
         );
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(len eseq.browser/selected-tags)"),
+                .eval_str("(let ((p eseq.browser/sample-pick)) (len p.tags))"),
             Ok(Some(Value::Number(0.0))),
             "typing in sample search should clear selected tag filters"
         );
@@ -4993,10 +4751,7 @@ mod solo_binding_tests;
     #[test]
     fn metal_seq_browser_search_keeps_focus_for_consecutive_typing() {
         let mut editor = browser_editor_on_instrument_tab();
-        editor
-            .runtime_mut()
-            .eval_str("(set! sbrowser-tab \"samples\")")
-            .expect("select samples tab");
+        set_browser_view_field(&mut editor, "browser-view", "tab", r#""samples""#);
         editor.refresh_runtime_side_effects();
         editor.set_active_buffer(browser_id(&editor));
         editor.set_layout_viewport(72, 60);
@@ -5085,8 +4840,8 @@ mod solo_binding_tests;
         let _ = eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 72, 60);
 
         assert_eq!(
-            editor.runtime_mut().eval_str("eseq.browser/search-filter"),
-            Ok(Some(Value::String("pi".to_string()))),
+            browser_view_field(&mut editor, "browser-view", "search"),
+            Value::String("pi".to_string()),
             "browser search should accept consecutive keypresses"
         );
         assert_eq!(
@@ -5105,8 +4860,8 @@ mod solo_binding_tests;
             crossterm::event::KeyModifiers::NONE,
         ));
         assert_eq!(
-            editor.runtime_mut().eval_str("eseq.browser/search-filter"),
-            Ok(Some(Value::String("pia".to_string()))),
+            browser_view_field(&mut editor, "browser-view", "search"),
+            Value::String("pia".to_string()),
             "browser search should keep accepting text after delayed refresh"
         );
     }
@@ -5114,10 +4869,7 @@ mod solo_binding_tests;
     #[test]
     fn metal_seq_tiled_browser_search_keeps_focus_for_consecutive_typing() {
         let mut editor = full_grid_editor_for_scroll_tests();
-        editor
-            .runtime_mut()
-            .eval_str("(set! sbrowser-tab \"samples\")")
-            .expect("select samples tab");
+        set_browser_view_field(&mut editor, "browser-view", "tab", r#""samples""#);
         editor.refresh_runtime_side_effects();
 
         let frame = eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 180, 90);
@@ -5186,8 +4938,8 @@ mod solo_binding_tests;
         let _ = eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 180, 90);
 
         assert_eq!(
-            editor.runtime_mut().eval_str("eseq.browser/search-filter"),
-            Ok(Some(Value::String("pi".to_string()))),
+            browser_view_field(&mut editor, "browser-view", "search"),
+            Value::String("pi".to_string()),
             "tiled browser search should accept consecutive keypresses"
         );
         assert_eq!(
@@ -5206,8 +4958,8 @@ mod solo_binding_tests;
             crossterm::event::KeyModifiers::NONE,
         ));
         assert_eq!(
-            editor.runtime_mut().eval_str("eseq.browser/search-filter"),
-            Ok(Some(Value::String("pia".to_string()))),
+            browser_view_field(&mut editor, "browser-view", "search"),
+            Value::String("pia".to_string()),
             "tiled browser search should keep accepting text after delayed refresh"
         );
     }
@@ -5233,25 +4985,16 @@ mod solo_binding_tests;
             other => panic!("expected new-project host command, got {other:?}"),
         }
         assert_eq!(
-            editor
-                .runtime_mut()
-                .eval_str("sbrowser-tab")
-                .expect("read browser tab"),
-            Some(Value::String("projects".to_string()))
+            browser_view_field(&mut editor, "browser-view", "tab"),
+            Value::String("projects".to_string())
         );
     }
 
     #[test]
     fn metal_seq_browser_sample_click_only_updates_browser_selection() {
         let mut editor = browser_editor_on_instrument_tab();
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "num-tracks", Value::Number(1.0));
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "sidebar-kind",
-            Value::String("sampler".to_string()),
-        );
+        seed_browser_tracks(&mut editor, &["sampler"; 1], 0);
+        set_kind_field(&mut editor, "browser", "instrument-kind", Value::String("sampler".to_string()));
         editor
             .runtime_mut()
             .eval_str(
@@ -5265,44 +5008,25 @@ mod solo_binding_tests;
             "sample click should not audition or add a track"
         );
         assert_eq!(
-            editor
-                .runtime_mut()
-                .eval_str("eseq.browser/selected-sample")
-                .expect("read selected sample"),
-            Some(Value::String("samples/kick.wav".to_string()))
+            browser_view_field(&mut editor, "sample-pick", "sample"),
+            Value::String("samples/kick.wav".to_string())
         );
     }
 
     #[test]
     fn metal_seq_browser_syncs_selected_sample_from_sampler_track_changes() {
         let mut editor = browser_editor_on_instrument_tab();
-        editor
-            .runtime_mut()
-            .eval_str("(set! sbrowser-tab \"samples\")")
-            .expect("select samples tab");
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "num-tracks", Value::Number(2.0));
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "sidebar-kind",
-            Value::String("sampler".to_string()),
-        );
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "sidebar-selected-sample",
-            Value::String("samples/loaded-a.wav".to_string()),
-        );
+        set_browser_view_field(&mut editor, "browser-view", "tab", r#""samples""#);
+        seed_browser_tracks(&mut editor, &["sampler"; 2], 0);
+        set_kind_field(&mut editor, "browser", "instrument-kind", Value::String("sampler".to_string()));
+        set_kind_field(&mut editor, "browser", "sample", Value::String("samples/loaded-a.wav".to_string()));
         editor
             .runtime_mut()
             .eval_str("(eseq.browser/build-widgets)")
             .expect("sync initial sampler sample");
         assert_eq!(
-            editor
-                .runtime_mut()
-                .eval_str("eseq.browser/selected-sample")
-                .expect("read selected sample"),
-            Some(Value::String("samples/loaded-a.wav".to_string()))
+            browser_view_field(&mut editor, "sample-pick", "sample"),
+            Value::String("samples/loaded-a.wav".to_string())
         );
 
         editor
@@ -5317,46 +5041,27 @@ mod solo_binding_tests;
             .eval_str("(eseq.browser/build-widgets)")
             .expect("render without host sample change");
         assert_eq!(
-            editor
-                .runtime_mut()
-                .eval_str("eseq.browser/selected-sample")
-                .expect("read browsed sample"),
-            Some(Value::String("samples/browse.wav".to_string())),
+            browser_view_field(&mut editor, "sample-pick", "sample"),
+            Value::String("samples/browse.wav".to_string()),
             "local browsing selection should survive renders until the loaded sample changes"
         );
 
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "sidebar-track-index", Value::Number(1.0));
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "sidebar-selected-sample",
-            Value::String("samples/loaded-b.wav".to_string()),
-        );
+        show_browser_track_sample(&mut editor, 1, "samples/loaded-b.wav");
         editor
             .runtime_mut()
             .eval_str("(eseq.browser/build-widgets)")
             .expect("sync switched sampler sample");
         assert_eq!(
-            editor
-                .runtime_mut()
-                .eval_str("eseq.browser/selected-sample")
-                .expect("read switched selected sample"),
-            Some(Value::String("samples/loaded-b.wav".to_string()))
+            browser_view_field(&mut editor, "sample-pick", "sample"),
+            Value::String("samples/loaded-b.wav".to_string())
         );
     }
 
     #[test]
     fn metal_seq_browser_sample_activation_rejects_current_instrument_track() {
         let mut editor = browser_editor_on_instrument_tab();
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "num-tracks", Value::Number(1.0));
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "sidebar-kind",
-            Value::String("instrument".to_string()),
-        );
+        seed_browser_tracks(&mut editor, &["sampler"; 1], 0);
+        set_kind_field(&mut editor, "browser", "instrument-kind", Value::String("instrument".to_string()));
         editor
             .runtime_mut()
             .eval_str(
@@ -5378,14 +5083,8 @@ mod solo_binding_tests;
     #[test]
     fn metal_seq_browser_sample_activation_auditions_sampler_track() {
         let mut editor = browser_editor_on_instrument_tab();
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "num-tracks", Value::Number(1.0));
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "sidebar-kind",
-            Value::String("sampler".to_string()),
-        );
+        seed_browser_tracks(&mut editor, &["sampler"; 1], 0);
+        set_kind_field(&mut editor, "browser", "instrument-kind", Value::String("sampler".to_string()));
         editor
             .runtime_mut()
             .eval_str(
@@ -5482,9 +5181,7 @@ mod solo_binding_tests;
     #[test]
     fn metal_seq_browser_cursor_auto_previews_with_headphone_toggle() {
         let mut editor = browser_editor_on_instrument_tab();
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "num-tracks", Value::Number(1.0));
+        seed_browser_tracks(&mut editor, &["sampler"; 1], 0);
         // The fixture's seq-sample-waveform stub answers false (undecodable);
         // this test needs a decodable sample, so override it with a buffer map.
         editor
@@ -5513,11 +5210,8 @@ mod solo_binding_tests;
             "cursor moves with the headphone off should not play anything"
         );
         assert_eq!(
-            editor
-                .runtime_mut()
-                .eval_str("eseq.browser/preview-path")
-                .expect("read preview path"),
-            Some(Value::String("samples/kick.wav".to_string()))
+            browser_view_field(&mut editor, "sample-preview", "path"),
+            Value::String("samples/kick.wav".to_string())
         );
 
         // Toggling the headphone on auditions the focused sample...
@@ -5566,9 +5260,7 @@ mod solo_binding_tests;
         }
 
         // Toggling the headphone off stops the preview still in flight.
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "browser-preview-playing", Value::Bool(true));
+        set_kind_field(&mut editor, "browser", "preview-playing", Value::Bool(true));
         editor
             .runtime_mut()
             .eval_str("(eseq.browser/toggle-auto-preview)")
@@ -5601,11 +5293,8 @@ mod solo_binding_tests;
                     "blank sampler payload should be an empty dict: {payload:?}"
                 );
                 assert_eq!(
-                    editor
-                        .runtime_mut()
-                        .eval_str("sbrowser-tab")
-                        .expect("read browser tab"),
-                    Some(Value::String("samples".to_string()))
+                    browser_view_field(&mut editor, "browser-view", "tab"),
+                    Value::String("samples".to_string())
                 );
             }
             other => panic!("expected add-track-sampler host command, got {other:?}"),
@@ -5630,11 +5319,8 @@ mod solo_binding_tests;
                     "empty rack payload should be an empty dict: {payload:?}"
                 );
                 assert_eq!(
-                    editor
-                        .runtime_mut()
-                        .eval_str("sbrowser-tab")
-                        .expect("read browser tab"),
-                    Some(Value::String("samples".to_string()))
+                    browser_view_field(&mut editor, "browser-view", "tab"),
+                    Value::String("samples".to_string())
                 );
             }
             other => panic!("expected add-track-rack host command, got {other:?}"),
@@ -5644,11 +5330,7 @@ mod solo_binding_tests;
     #[test]
     fn metal_seq_browser_rack_button_includes_selected_sample_for_drum_rack() {
         let mut editor = browser_editor_on_instrument_tab();
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "sidebar-selected-sample",
-            Value::String("samples/kick.wav".to_string()),
-        );
+        set_kind_field(&mut editor, "browser", "sample", Value::String("samples/kick.wav".to_string()));
         editor
             .runtime_mut()
             .eval_str("(eseq.browser/add-rack-track)")
@@ -5724,11 +5406,8 @@ mod solo_binding_tests;
             // The spinner is keyed to saved-instrument loads; builtins land
             // synchronously and would leave it stuck.
             assert_eq!(
-                editor
-                    .runtime_mut()
-                    .eval_str("sbrowser-loading-instrument-name")
-                    .expect("read loading name"),
-                Some(Value::String(String::new()))
+                browser_view_field(&mut editor, "instrument-pick", "loading"),
+                Value::String(String::new())
             );
         }
     }
@@ -5761,11 +5440,8 @@ mod solo_binding_tests;
             other => panic!("expected add-track-instrument host command, got {other:?}"),
         }
         assert_eq!(
-            editor
-                .runtime_mut()
-                .eval_str("sbrowser-loading-instrument-name")
-                .expect("read loading name"),
-            Some(Value::String("emulations/digitone".to_string()))
+            browser_view_field(&mut editor, "instrument-pick", "loading"),
+            Value::String("emulations/digitone".to_string())
         );
     }
 
@@ -5797,8 +5473,8 @@ mod solo_binding_tests;
         assert_eq!(extract_string_from_payload(&payload, "preset").as_deref(), Some("Warm"));
         assert_eq!(extract_usize_from_payload(&payload, "group-id"), Some(7));
         assert_eq!(
-            editor.runtime_mut().eval_str("sbrowser-loading-instrument-name").unwrap(),
-            Some(Value::String("synths/digi".to_string()))
+            browser_view_field(&mut editor, "instrument-pick", "loading"),
+            Value::String("synths/digi".to_string())
         );
 
         // Loose tracks carry no group.
@@ -5832,17 +5508,7 @@ mod solo_binding_tests;
     #[test]
     fn metal_seq_browser_preset_drop_on_track_swaps_with_preset() {
         let mut editor = browser_editor_on_instrument_tab();
-        let rt = editor.runtime_mut();
-        rt.set_reactive("SEQ", "num-tracks", Value::Number(2.0));
-        rt.set_reactive(
-            "SEQ",
-            "track-instrument-types",
-            test_list(vec![
-                Value::String("custom".to_string()),
-                Value::String("modulator".to_string()),
-            ]),
-        );
-        rt.run_reactive_cycle();
+        seed_browser_tracks(&mut editor, &["custom", "modulator"], 0);
         editor
             .runtime_mut()
             .eval_str(
@@ -5962,30 +5628,74 @@ mod solo_binding_tests;
         }
     }
 
+    /// The sidebar shows a rack track (`browser.track.rack`; the host's
+    /// `browser.instrument-kind` reads "instrument" for it, never "rack")
+    /// with samples/snare.wav selected.
+    fn seed_sidebar_rack_track(editor: &mut Editor) {
+        seed_browser_tracks(editor, &["rack"], 0);
+        let rack = kind_track(editor.runtime(), 0);
+        set_field(editor.runtime_mut(), rack, "rack", Value::Bool(true));
+        set_kind_field(editor, "browser", "instrument-kind", Value::String("instrument".to_string()));
+        set_kind_field(editor, "browser", "sample", Value::String("samples/snare.wav".to_string()));
+    }
+
+    #[test]
+    fn metal_seq_browser_modified_activate_on_a_rack_track_adds_a_layer() {
+        let mut editor = browser_editor_on_instrument_tab();
+        seed_sidebar_rack_track(&mut editor);
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(eseq.browser/modified-activate-sample
+                    (dict :path "samples/kick.wav" :label "kick"))"#,
+            )
+            .expect("modified-activate a sample");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "add-rack-sample-slot");
+                let Value::Map(payload) = payload else {
+                    panic!("rack layer payload should be a dict: {payload:?}");
+                };
+                assert_eq!(
+                    payload.get("path").map(|value| value.borrow().clone()),
+                    Some(Value::String("samples/kick.wav".to_string()))
+                );
+            }
+            other => panic!("expected add-rack-sample-slot host command, got {other:?}"),
+        }
+    }
+
+    /// The Instrument Rack builtin always adds a new track, even while the
+    /// sidebar shows a rack track (only the Layer action appends to it).
+    #[test]
+    fn metal_seq_browser_layer_rack_builtin_on_a_rack_track_adds_a_new_track() {
+        let mut editor = browser_editor_on_instrument_tab();
+        seed_sidebar_rack_track(&mut editor);
+        editor
+            .runtime_mut()
+            .eval_str(r#"(eseq.browser/add-builtin-instrument-track "layer-rack")"#)
+            .expect("add the layer-rack builtin");
+        let names: Vec<String> = editor
+            .drain_host_commands()
+            .into_iter()
+            .filter_map(|command| match command {
+                eseqlisp::host::HostCommand::Custom { name, .. } => Some(name),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            names.iter().any(|name| name == "add-track-layer-rack")
+                && !names.iter().any(|name| name == "add-rack-sample-slot"),
+            "the builtin should add a new rack track: {names:?}"
+        );
+    }
+
     #[test]
     fn metal_seq_browser_layer_button_appends_sample_to_the_open_rack_panel() {
         let mut editor = browser_editor_on_instrument_tab();
-        let mut rack = HashMap::new();
-        rack.insert(
-            "is-rack".to_string(),
-            Rc::new(RefCell::new(Value::Bool(true))),
-        );
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "num-tracks", Value::Number(1.0));
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "sidebar-kind", Value::String("rack".to_string()));
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "sidebar-selected-sample",
-            Value::String("samples/snare.wav".to_string()),
-        );
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "instrument-panel",
-            test_list(vec![Value::Map(rack)]),
-        );
+        seed_sidebar_rack_track(&mut editor);
         editor
             .runtime_mut()
             .eval_str("(eseq.browser/add-layer-rack-track)")
@@ -6045,11 +5755,8 @@ mod solo_binding_tests;
             other => panic!("expected add-track-instrument host command, got {other:?}"),
         }
         assert_eq!(
-            editor
-                .runtime_mut()
-                .eval_str("sbrowser-tab")
-                .expect("read browser tab"),
-            Some(Value::String("instruments".to_string()))
+            browser_view_field(&mut editor, "browser-view", "tab"),
+            Value::String("instruments".to_string())
         );
         assert_eq!(
             editor.runtime_mut().take_status_message(),
@@ -6060,14 +5767,7 @@ mod solo_binding_tests;
     #[test]
     fn metal_seq_browser_instrument_activation_swaps_and_stays_on_instruments() {
         let mut editor = browser_editor_on_instrument_tab();
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "num-tracks", Value::Number(1.0));
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "track-instrument-types",
-            test_string_list(&["custom"]),
-        );
+        seed_browser_tracks(&mut editor, &["custom"], 0);
 
         editor
             .runtime_mut()
@@ -6097,15 +5797,12 @@ mod solo_binding_tests;
             other => panic!("expected swap-track-instrument host command, got {other:?}"),
         }
         assert_eq!(
-            editor.runtime_mut().eval_str("sbrowser-tab").unwrap(),
-            Some(Value::String("instruments".to_string()))
+            browser_view_field(&mut editor, "browser-view", "tab"),
+            Value::String("instruments".to_string())
         );
         assert_eq!(
-            editor
-                .runtime_mut()
-                .eval_str("sbrowser-loading-instrument-name")
-                .unwrap(),
-            Some(Value::String("emulations/digitone".to_string()))
+            browser_view_field(&mut editor, "instrument-pick", "loading"),
+            Value::String("emulations/digitone".to_string())
         );
     }
 
@@ -6113,14 +5810,7 @@ mod solo_binding_tests;
     fn metal_seq_browser_instrument_activation_adds_for_non_swappable_tracks() {
         for track_type in ["modulator"] {
             let mut editor = browser_editor_on_instrument_tab();
-            editor
-                .runtime_mut()
-                .set_reactive("SEQ", "num-tracks", Value::Number(1.0));
-            editor.runtime_mut().set_reactive(
-                "SEQ",
-                "track-instrument-types",
-                test_string_list(&[track_type]),
-            );
+            seed_browser_tracks(&mut editor, &[track_type], 0);
 
             editor
                 .runtime_mut()
@@ -6150,14 +5840,7 @@ mod solo_binding_tests;
     fn metal_seq_browser_saved_instrument_activation_replaces_flat_or_rack_track() {
         for track_type in ["sampler", "rack"] {
             let mut editor = browser_editor_on_instrument_tab();
-            editor
-                .runtime_mut()
-                .set_reactive("SEQ", "num-tracks", Value::Number(1.0));
-            editor.runtime_mut().set_reactive(
-                "SEQ",
-                "track-instrument-types",
-                test_string_list(&[track_type]),
-            );
+            seed_browser_tracks(&mut editor, &[track_type], 0);
 
             editor
                 .runtime_mut()
@@ -6179,8 +5862,8 @@ mod solo_binding_tests;
                                 && map.get("name").is_some_and(|value| *value.borrow() == Value::String("core/drift".to_string())))
             ));
             assert_eq!(
-                editor.runtime_mut().eval_str("sbrowser-tab").unwrap(),
-                Some(Value::String("instruments".to_string()))
+                browser_view_field(&mut editor, "browser-view", "tab"),
+                Value::String("instruments".to_string())
             );
         }
     }
@@ -6188,14 +5871,7 @@ mod solo_binding_tests;
     #[test]
     fn metal_seq_browser_builtin_sampler_activation_converts_the_current_custom_track() {
         let mut editor = browser_editor_on_instrument_tab();
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "num-tracks", Value::Number(1.0));
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "track-instrument-types",
-            test_string_list(&["custom"]),
-        );
+        seed_browser_tracks(&mut editor, &["custom"], 0);
 
         editor
             .runtime_mut()
@@ -6214,22 +5890,15 @@ mod solo_binding_tests;
                             && map.get("name").is_some_and(|value| *value.borrow() == Value::String("sampler".to_string())))
         ));
         assert_eq!(
-            editor.runtime_mut().eval_str("sbrowser-tab").unwrap(),
-            Some(Value::String("samples".to_string()))
+            browser_view_field(&mut editor, "browser-view", "tab"),
+            Value::String("samples".to_string())
         );
     }
 
     #[test]
     fn metal_seq_browser_instrument_drop_marks_the_loading_row_in_the_tree() {
         let mut editor = browser_editor_on_instrument_tab();
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "num-tracks", Value::Number(1.0));
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "track-instrument-types",
-            test_string_list(&["custom"]),
-        );
+        seed_browser_tracks(&mut editor, &["custom"], 0);
         editor.set_active_buffer(browser_id(&editor));
         editor.set_layout_viewport(48, 24);
         let idle_tree_y = find_layout_node_by_stable_key_suffix(
@@ -6270,17 +5939,11 @@ mod solo_binding_tests;
     #[test]
     fn metal_seq_browser_tree_greys_the_current_tracks_instrument() {
         let mut editor = browser_editor_on_instrument_tab();
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "num-tracks", Value::Number(2.0));
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "track-instrument-ids",
-            test_string_list(&["builtin:sampler", "factory:core/triton"]),
-        );
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "current-track", Value::Number(1.0));
+        seed_browser_tracks(&mut editor, &["sampler", "custom"], 1);
+        for (index, id) in ["builtin:sampler", "factory:core/triton"].into_iter().enumerate() {
+            let track = kind_track(editor.runtime(), index);
+            set_field(editor.runtime_mut(), track, "instrument-id", Value::String(id.into()));
+        }
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
         editor.set_active_buffer(browser_id(&editor));
@@ -6369,11 +6032,8 @@ mod solo_binding_tests;
             "single-click focus should not add an instrument track"
         );
         assert_eq!(
-            editor
-                .runtime_mut()
-                .eval_str("sbrowser-tab")
-                .expect("read browser tab"),
-            Some(Value::String("instruments".to_string()))
+            browser_view_field(&mut editor, "browser-view", "tab"),
+            Value::String("instruments".to_string())
         );
     }
 
@@ -8697,7 +8357,7 @@ mod solo_binding_tests;
                 r#"
                 (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def eseq.browser/sbrowser-editor-name "")
+                (def eseq.browser/clear-editor-name! () nil)
                 (def eseq.seq-core-state/cool-off-follow () false)
                 (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-instrument-synth-ui (inst) false)
@@ -9044,7 +8704,7 @@ mod solo_binding_tests;
                 r#"
                 (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def eseq.browser/sbrowser-editor-name "")
+                (def eseq.browser/clear-editor-name! () nil)
                 (def eseq.seq-core-state/cool-off-follow () false)
                 (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-instrument-synth-ui (inst) false)
@@ -13610,7 +13270,7 @@ mod solo_binding_tests;
                 r#"
                 (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () true)
-                (def eseq.browser/sbrowser-editor-name "")
+                (def eseq.browser/clear-editor-name! () nil)
                 (def eseq.browser/sample-selected-path () "")
                 (def eseq.browser/add-selected-rack-layer () false)
                 (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
@@ -13727,7 +13387,7 @@ mod solo_binding_tests;
                 r#"
                 (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () true)
-                (def eseq.browser/sbrowser-editor-name "")
+                (def eseq.browser/clear-editor-name! () nil)
                 (def eseq.browser/sample-selected-path () "")
                 (def eseq.browser/add-selected-rack-layer () false)
                 (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
@@ -13874,7 +13534,7 @@ mod solo_binding_tests;
                 r#"
                 (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def eseq.browser/sbrowser-editor-name "")
+                (def eseq.browser/clear-editor-name! () nil)
                 (def eseq.browser/sample-selected-path () "")
                 (def eseq.browser/add-selected-rack-layer () false)
                 (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
@@ -14249,7 +13909,7 @@ mod solo_binding_tests;
             .eval_str(
                 r#"
                 (def eseq.seq-core-state/selected-bus-name () "Mix")
-                (def eseq.browser/sbrowser-editor-name "")
+                (def eseq.browser/clear-editor-name! () nil)
                 (def eseq.browser/sample-selected-path () "")
                 (def eseq.browser/add-selected-rack-layer () false)
                 (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
@@ -16810,6 +16470,164 @@ mod solo_binding_tests;
         rt.run_reactive_cycle();
     }
 
+    /// The browser's host state as the host-kinds tick pushes it, for the
+    /// host-less browser harness: a sampler sidebar, an instrument draft's
+    /// run mode, one saved Sound and one kit (`preset-file`s), and scenes
+    /// named `scenes` (`project.scenes`).
+    fn seed_browser_kinds(editor: &mut Editor, scenes: &[&str]) {
+        set_kind_field(editor, "browser", "instrument-kind", Value::String("sampler".into()));
+        set_kind_field(editor, "editor", "run-mode", Value::String("instrument".into()));
+        let rt = editor.runtime_mut();
+        let files = register_kind_range(rt, "eseq.kinds:preset-file", 2);
+        for (&id, (index, kind, icon, name, path)) in files.iter().zip([
+            (0.0, "sound", "piano", "Wide Plate", "sounds/wide-plate.sound"),
+            (0.0, "kit", "sampler", "House Kit", "kits/House-Kit.kit"),
+        ]) {
+            set_field(rt, id, "index", Value::Number(index));
+            set_field(rt, id, "type", Value::String(kind.into()));
+            set_field(rt, id, "icon", Value::String(icon.into()));
+            set_field(rt, id, "name", Value::String(name.into()));
+            set_field(rt, id, "path", Value::String(path.into()));
+        }
+        let browser = kind_singleton_rt(rt, "browser");
+        set_field(rt, browser, "sound-presets", instance_list([files[0]]));
+        set_field(rt, browser, "kit-presets", instance_list([files[1]]));
+        seed_kind_scene_names(editor, scenes);
+    }
+
+    /// Tracks playing `types` (`track.instrument-type`), as
+    /// `project.tracks`, with track `current` selected (`selection.track`,
+    /// `browser.track`): what the browser reads of the project.
+    fn seed_browser_tracks(editor: &mut Editor, types: &[&'static str], current: usize) {
+        let tracks: Vec<_> = (types.iter().enumerate())
+            .map(|(index, kind)| KindTrack::new(&format!("Track {index}"), [0.5; 3]).instrument(kind))
+            .collect();
+        seed_kind_tracks(editor, &tracks);
+        if types.is_empty() {
+            return;
+        }
+        let track = Value::Instance(kind_track(editor.runtime(), current));
+        set_kind_field(editor, "selection", "track", track.clone());
+        set_kind_field(editor, "browser", "track", track);
+    }
+
+    /// The browser sidebar showing track `index` (`browser.track`; the
+    /// track instance registered if it is not yet).
+    fn show_browser_track(editor: &mut Editor, index: usize) {
+        let track = (editor.runtime_mut())
+            .register_keyed_instance("eseq.kinds:track", &[index as u64])
+            .unwrap();
+        set_kind_field(editor, "browser", "track", Value::Instance(track));
+    }
+
+    /// The browser sidebar showing track `index` and its sample: both
+    /// pushed before one reactive cycle, as one host-kinds sync does.
+    fn show_browser_track_sample(editor: &mut Editor, index: usize, sample: &str) {
+        let rt = editor.runtime_mut();
+        let track = rt.register_keyed_instance("eseq.kinds:track", &[index as u64]).unwrap();
+        let browser = kind_singleton_rt(rt, "browser");
+        set_field(rt, browser, "track", Value::Instance(track));
+        set_field(rt, browser, "sample", Value::String(sample.into()));
+        rt.run_reactive_cycle();
+    }
+
+    /// The sidebar `sync_sidebar_browser` recorded, pushed into the
+    /// `browser` kind as the host-kinds tick does (host_kinds/presentation.rs):
+    /// its fields, the shown track, and a drum rack's slots as `slot-presets`
+    /// rows, each naming a stand-in slot device (keyed under the track by
+    /// slot + 1). Returns the slot devices, whose `delete-target` a test sets
+    /// as the host would.
+    fn push_presented_sidebar(editor: &mut Editor) -> Vec<eseqlisp::vm::InstanceId> {
+        let sidebar = crate::presented::presented(|p| p.sidebar.get().clone());
+        let rt = editor.runtime_mut();
+        let track = rt
+            .register_keyed_instance("eseq.kinds:track", &[sidebar.track as u64])
+            .unwrap();
+        let mut devices = Vec::new();
+        let rows = register_kind_range(rt, "eseq.kinds:slot-presets", sidebar.slots.len());
+        for (slot, &row) in sidebar.slots.iter().zip(&rows) {
+            let device = rt
+                .register_keyed_instance("eseq.kinds:device", &[track, slot.slot as u64 + 1])
+                .unwrap();
+            set_field(rt, device, "track", Value::Instance(track));
+            set_field(rt, device, "slot", Value::Number(slot.slot as f64));
+            devices.push(device);
+            for (field, value) in [
+                ("index", Value::Number(slot.slot as f64)),
+                ("device", Value::Instance(device)),
+                ("instrument", Value::String(slot.instrument.clone())),
+                ("instrument-label", Value::String(slot.instrument_label.clone())),
+                ("presets", test_owned_string_list(&slot.presets)),
+                ("user-presets", test_owned_string_list(&slot.user_presets)),
+                ("preset", Value::String(slot.preset.clone())),
+            ] {
+                set_field(rt, row, field, value);
+            }
+        }
+        let browser = kind_singleton_rt(rt, "browser");
+        for (field, value) in [
+            ("track", Value::Instance(track)),
+            ("instrument-kind", Value::String(sidebar.instrument_kind.into())),
+            ("instrument", Value::String(sidebar.instrument.clone())),
+            ("instrument-label", Value::String(sidebar.instrument_label.clone())),
+            ("preset", Value::String(sidebar.preset.clone())),
+            ("presets", test_owned_string_list(&sidebar.presets)),
+            ("user-presets", test_owned_string_list(&sidebar.user_presets)),
+            ("sample", Value::String(sidebar.sample.clone())),
+            ("engines", test_owned_string_list(&sidebar.engines)),
+            ("rack-slots", instance_list(rows)),
+        ] {
+            set_field(rt, browser, field, value);
+        }
+        rt.run_reactive_cycle();
+        devices
+    }
+
+    /// The instrument types of the kind tracks registered so far
+    /// (`track.instrument-type`), mirroring a test's
+    /// `SEQ.track-instrument-types` for the views that read the kinds.
+    fn set_kind_instrument_types(editor: &mut Editor, types: &[&str]) {
+        let rt = editor.runtime_mut();
+        for (index, kind) in types.iter().enumerate() {
+            if let Some(track) = rt.keyed_instance("eseq.kinds:track", &[index as u64]) {
+                set_field(rt, track, "instrument-type", Value::String(kind.to_string()));
+            }
+        }
+        rt.run_reactive_cycle();
+    }
+
+    /// Scenes named `names` (`scene.index`, `name`), as `project.scenes`.
+    fn seed_kind_scene_names(editor: &mut Editor, names: &[&str]) {
+        let rt = editor.runtime_mut();
+        let ids = register_kind_range(rt, "eseq.kinds:scene", names.len());
+        for (index, (&id, name)) in ids.iter().zip(names).enumerate() {
+            set_field(rt, id, "index", Value::Number(index as f64));
+            set_field(rt, id, "name", Value::String(name.to_string()));
+        }
+        let project = kind_singleton_rt(rt, "project");
+        set_field(rt, project, "scenes", instance_list(ids));
+        rt.run_reactive_cycle();
+    }
+
+    /// Set a field of the browser's view state singleton `single`
+    /// (`eseq.browser/<single>`) to the Lisp form `lisp_value`.
+    fn set_browser_view_field(editor: &mut Editor, single: &str, field: &str, lisp_value: &str) {
+        editor
+            .runtime_mut()
+            .eval_str(&format!("(let ((v eseq.browser/{single})) (set! v.{field} {lisp_value}))"))
+            .unwrap_or_else(|error| panic!("set {single}.{field}: {error:?}"));
+    }
+
+    /// A field of the browser's view state singleton `single`
+    /// (`eseq.browser/<single>`).
+    fn browser_view_field(editor: &mut Editor, single: &str, field: &str) -> Value {
+        editor
+            .runtime_mut()
+            .eval_str(&format!("(let ((v eseq.browser/{single})) v.{field})"))
+            .unwrap_or_else(|error| panic!("{single}.{field}: {error:?}"))
+            .unwrap_or(Value::Nil)
+    }
+
     /// Make tracks `indices` the multi-selection (`selection.tracks`).
     fn select_kind_tracks(editor: &mut Editor, indices: &[usize]) {
         let ids: Vec<_> = (indices.iter())
@@ -17171,7 +16989,6 @@ mod solo_binding_tests;
         register_full_grid_test_natives(&mut editor);
         crate::retrospective::register_state(editor.runtime_mut());
         crate::presented::register_fixture_native(editor.runtime_mut());
-        crate::host_commands::resample::register_state(editor.runtime_mut());
         // Transport owns a real defscene value, so full-UI fixtures need the
         // same scene authoring natives as the application.
         let scene_state = scene_state.unwrap_or_else(|| Arc::new(SequencerState::new(
@@ -17225,7 +17042,6 @@ mod solo_binding_tests;
                 ),
                 ("current-track", Value::Number(0.0)),
                 ("song-bound-clip", Value::Nil),
-                ("sound-palette", Value::Nil),
                 ("song-clip-sounds", test_list(vec![])),
                 ("song-region", Value::Nil),
                 ("delete-target-version", Value::Number(0.0)),
@@ -17356,25 +17172,11 @@ mod solo_binding_tests;
                 ("piano-roll-automation", Value::Nil),
                 ("piano-roll-items", Value::List(vec![])),
                 ("piano-roll-selection", Value::List(vec![])),
-                ("sidebar-kind", Value::String("sampler".to_string())),
-                ("sidebar-track-index", Value::Number(0.0)),
-                ("sidebar-selected-sample", Value::String(String::new())),
-                ("sidebar-presets", test_list(vec![])),
-                ("sidebar-user-presets", test_list(vec![])),
-                ("sidebar-loaded-preset", Value::String(String::new())),
                 ("sidebar-instrument-name", Value::String(String::new())),
-                (
-                    "sidebar-instrument-display-name",
-                    Value::String(String::new()),
-                ),
                 ("current-project-name", Value::String("test".to_string())),
                 ("current-pattern", Value::Number(0.0)),
                 ("num-patterns", Value::Number(1.0)),
                 ("editor-mode", Value::String(String::new())),
-                ("editor-buffer-name", Value::String(String::new())),
-                ("editor-error", Value::String(String::new())),
-                ("editor-active-macro-name", Value::String(String::new())),
-                ("editor-active-macro-action", Value::String(String::new())),
                 ("learn-target-path", Value::String(String::new())),
                 ("learn-target-name", Value::String(String::new())),
                 ("learn-phase", Value::String("pick".to_string())),
@@ -17407,10 +17209,6 @@ mod solo_binding_tests;
                 ("learn-result-deltas", Value::List(vec![])),
                 ("learn-final-wav", Value::String(String::new())),
                 ("learn-error", Value::String(String::new())),
-                (
-                    "editor-instrument-run-mode",
-                    Value::String("instrument".to_string()),
-                ),
                 ("recording", Value::Bool(false)),
                 ("bpm", Value::Number(120.0)),
                 ("scene-launch-quantize", Value::String("off".to_string())),
@@ -18888,19 +18686,13 @@ mod solo_binding_tests;
             .runtime_mut()
             .eval_str("(do (defstate eseq.seq-core-state/selected-bus -1) (defstate cursor-step 0) (def eseq.seq-core-state/page-size 16))")
             .expect("install standalone sequencer globals");
-        // ui/browser.lisp owns `sbrowser-loading-instrument-name` and is not
-        // loaded in this stub harness.  Now that ui/sequencer.lisp is
-        // `(module eseq.sequencer)`, the `(set! sbrowser-loading-instrument-name
-        // …)` in its `drop-new-track` resolves against whatever exists at
-        // compile time and otherwise lands in the module's own namespace,
-        // instead of creating the flat global the way a vanilla `set!` used to
-        // (module spec §10 hazard j).  Declared up front, exactly as in
-        // production where ui/browser.lisp loads at main.lisp:17 and
-        // ui/sequencer.lisp at :57.
+        // ui/browser.lisp owns the loading-instrument mark (`show-loading!`,
+        // which ui/sequencer.lisp's `drop-new-track` calls) and is not loaded
+        // in this stub harness: stub it.
         editor
             .runtime_mut()
-            .eval_str("(defstate sbrowser-loading-instrument-name \"\")")
-            .expect("install browser-owned loading-instrument state");
+            .eval_str("(def eseq.browser/show-loading! (name) nil)")
+            .expect("stub the browser's loading-instrument mark");
         apply_sequencer_perf_pattern(&mut editor, track_count, step_count, 0);
         editor
             .runtime_mut()
@@ -19799,7 +19591,10 @@ mod solo_binding_tests;
         assert!(find_layout_node_by_stable_key_suffix(&layout, "/title-input").is_some());
         assert!(find_layout_node_by_stable_key_suffix(&layout, "/file-input").is_some());
         assert_eq!(
-            editor.runtime_mut().eval_str("eseq.sample-import/title-draft").unwrap(),
+            editor
+                .runtime_mut()
+                .eval_str("(let ((v eseq.sample-import/import-view)) v.title-draft)")
+                .unwrap(),
             Some(Value::String("kick".to_string()))
         );
 
@@ -23729,6 +23524,7 @@ mod solo_binding_tests;
             "track-instrument-types",
             test_string_list(&["custom", "sampler", "rack"]),
         );
+        set_kind_instrument_types(&mut editor, &["custom", "sampler", "rack"]);
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
         let sequencer_id = editor
@@ -23811,6 +23607,7 @@ mod solo_binding_tests;
             "track-instrument-types",
             test_string_list(&["custom", "custom", "rack"]),
         );
+        set_kind_instrument_types(&mut editor, &["custom", "custom", "rack"]);
         let _ = editor.drain_host_commands();
         editor
             .runtime_mut()
@@ -23876,11 +23673,8 @@ mod solo_binding_tests;
             other => panic!("expected swap-track-instrument host command, got {other:?}"),
         }
         assert_eq!(
-            editor
-                .runtime_mut()
-                .eval_str("sbrowser-loading-instrument-name")
-                .unwrap(),
-            Some(Value::String("core/triton".to_string()))
+            browser_view_field(&mut editor, "instrument-pick", "loading"),
+            Value::String("core/triton".to_string())
         );
 
         editor
@@ -26300,57 +26094,63 @@ mod solo_binding_tests;
 
     /// Sound palette fixture (takes spec 17.6): two entries — the gray base
     /// (scene-effective, color nil) and a colored current entry.
-    fn sound_palette_fixture() -> Value {
-        map_value([
-            ("track", Value::Number(0.0)),
-            ("target-kind", Value::String("take".to_string())),
+    /// The sound palette open on track 0 (its "take 1" target), as the host
+    /// kinds push it: a gray scene-base sound (patch 0) and the current,
+    /// colored track sound (patch 3, mix 2).
+    fn seed_open_sound_palette(editor: &mut Editor) {
+        let rt = editor.runtime_mut();
+        let track = kind_track(rt, 0);
+        let mut sounds = Vec::new();
+        for (patch, mix, name, referents, base, current, track_sound, color, preset, up, down) in [
+            (0u64, 0.0, "Patch 1", "Scene 1", true, false, false, None, "", 3.0, 1.0),
+            (
+                3, 2.0, "Warm Keys", "Pattern 3, Take 2", false, true, true,
+                Some([0.909_803_9, 0.643_137_3, 0.309_803_93]), "Warm Keys.json", 0.0, 0.0,
+            ),
+        ] {
+            let id = rt.register_keyed_instance("eseq.kinds:sound", &[track, patch]).unwrap();
+            for (field, value) in [
+                ("track", Value::Instance(track)),
+                ("patch-id", Value::Number(patch as f64)),
+                ("mix-id", Value::Number(mix)),
+                ("name", Value::String(name.into())),
+                ("referents", Value::String(referents.into())),
+                ("base", Value::Bool(base)),
+                ("current", Value::Bool(current)),
+                ("track-sound", Value::Bool(track_sound)),
+                ("colored", Value::Bool(color.is_some())),
+                ("color", test_rgb(color.unwrap_or([0.62, 0.62, 0.66]))),
+                ("preset", Value::String(preset.into())),
+                ("diff-up", Value::Number(up)),
+                ("diff-down", Value::Number(down)),
+                ("glyph-key", Value::String(format!("sound-glyph:track:0:patch:{patch}"))),
+            ] {
+                set_field(rt, id, field, value);
+            }
+            sounds.push(id);
+        }
+        let palette = kind_singleton_rt(rt, "sound-palette");
+        for (field, value) in [
+            ("open", Value::Bool(true)),
+            ("track", Value::Instance(track)),
+            ("target", Value::String("take".into())),
             ("target-id", Value::Number(1.0)),
-            (
-                "instrument-name",
-                Value::String("ultrakick".to_string()),
-            ),
-            (
-                "entries",
-                test_list(vec![
-                    map_value([
-                        ("patch-id", Value::Number(0.0)),
-                        ("mix-id", Value::Number(0.0)),
-                        ("name", Value::String("Patch 1".to_string())),
-                        ("referents", Value::String("Scene 1".to_string())),
-                        ("base", Value::Bool(true)),
-                        ("current", Value::Bool(false)),
-                        ("color", Value::Nil),
-                        ("preset", Value::Nil),
-                        ("sample", Value::Nil),
-                        ("diff-up", Value::Number(3.0)),
-                        ("diff-down", Value::Number(1.0)),
-                    ]),
-                    map_value([
-                        ("patch-id", Value::Number(3.0)),
-                        ("mix-id", Value::Number(2.0)),
-                        ("name", Value::String("Warm Keys".to_string())),
-                        ("referents", Value::String("Pattern 3, Take 2".to_string())),
-                        ("base", Value::Bool(false)),
-                        ("current", Value::Bool(true)),
-                        // This pair IS the track's own sound (track-sound
-                        // spec §2.1): the card renders the TRK chip.
-                        ("track-sound", Value::Bool(true)),
-                        ("color", Value::Number(1.0)),
-                        ("color-r", Value::Number(0.909_803_9)),
-                        ("color-g", Value::Number(0.643_137_3)),
-                        ("color-b", Value::Number(0.309_803_93)),
-                        (
-                            "glyph-key",
-                            Value::String("sound-glyph:track:0:patch:3".to_string()),
-                        ),
-                        ("preset", Value::String("Warm Keys.json".to_string())),
-                        ("sample", Value::Nil),
-                        ("diff-up", Value::Number(0.0)),
-                        ("diff-down", Value::Number(0.0)),
-                    ]),
-                ]),
-            ),
-        ])
+            ("instrument", Value::String("ultrakick".into())),
+            ("sounds", instance_list(sounds)),
+        ] {
+            set_field(rt, palette, field, value);
+        }
+        rt.run_reactive_cycle();
+    }
+
+    /// The palette closing, as the host kinds push it.
+    fn close_seeded_sound_palette(editor: &mut Editor) {
+        let rt = editor.runtime_mut();
+        let palette = kind_singleton_rt(rt, "sound-palette");
+        set_field(rt, palette, "open", Value::Bool(false));
+        set_field(rt, palette, "track", Value::Nil);
+        set_field(rt, palette, "sounds", test_list(vec![]));
+        rt.run_reactive_cycle();
     }
 
     /// Since S4 retired the flat compat aliases, the sound-palette chord binds
@@ -26365,27 +26165,19 @@ mod solo_binding_tests;
         // registrations into the editor's dispatch table; a real session
         // does this every frame.
         editor.refresh_runtime_side_effects();
-        // The fixture's palette natives are silent `true` stubs; make the
-        // open native observable so the assertion sees the dispatch.
-        editor
-            .runtime_mut()
-            .register_native("seq-sound-palette-open", |_args, ctx| {
-                ctx.enqueue_command(eseqlisp::host::HostCommand::Custom {
-                    name: "palette-open-probe".to_string(),
-                    payload: Value::Nil,
-                });
-                Ok(Value::Bool(true))
-            });
         editor.drain_host_commands();
         editor.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
         editor.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
         let commands = editor.drain_host_commands();
+        // No clip is bound, so it opens on the current track (its stable id).
         assert!(
             commands.iter().any(|command| matches!(
                 command,
-                eseqlisp::host::HostCommand::Custom { name, .. } if name == "palette-open-probe"
+                eseqlisp::host::HostCommand::Custom { name, payload } if name == "sound-palette-open"
+                    && matches!(payload, Value::Map(map)
+                        if map.get("track-id").is_some_and(|id| *id.borrow() == Value::Number(0.0)))
             )),
-            "C-c p should reach the seq-sound-palette-open native, got {commands:?}"
+            "C-c p should open the sound palette on the current track, got {commands:?}"
         );
         assert!(
             editor
@@ -26419,13 +26211,11 @@ mod solo_binding_tests;
     /// Takes spec 18.3 exit criterion: the palette overlay renders — header,
     /// both entry rows (gray base + colored current), the preset/sample
     /// source line, and the param diff badges — all inside the panel;
-    /// closed (Nil) it collapses. Apply is the row click itself.
+    /// closed it collapses. Apply is the row click itself.
     #[test]
     fn metal_seq_sound_palette_overlay_layout() {
         let mut editor = full_grid_editor_for_scroll_tests();
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "sound-palette", sound_palette_fixture());
+        seed_open_sound_palette(&mut editor);
         editor
             .runtime_mut()
             .eval_str(r#"(effect-buffer "*sound-palette-test*" (eseq.sound-palette/panel))"#)
@@ -26487,11 +26277,8 @@ mod solo_binding_tests;
             "glyph source key comes from the entry's glyph-key"
         );
 
-        // Closed again: the reactive Nil collapses the panel to nothing.
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "sound-palette", Value::Nil);
-        editor.runtime_mut().run_reactive_cycle();
+        // Closed again: the panel collapses to nothing.
+        close_seeded_sound_palette(&mut editor);
         editor.refresh_runtime_side_effects();
         editor.refresh_visible_layouts_for_buffer_named("*sound-palette-test*");
         let layout = editor.widget_layout().expect("closed palette layout");
@@ -26520,10 +26307,7 @@ mod solo_binding_tests;
             editor.switch_active_tile_to_buffer_named("*step*"),
             "step tile must exist in the startup grid"
         );
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "sound-palette", sound_palette_fixture());
-        editor.runtime_mut().run_reactive_cycle();
+        seed_open_sound_palette(&mut editor);
         editor.refresh_runtime_side_effects();
         let _ = eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 140, 36);
 
@@ -26593,48 +26377,62 @@ mod solo_binding_tests;
         );
     }
 
-    /// The overlay's Apply/Apply-with-mix rows dispatch the palette natives
-    /// with the entry's ids (takes spec 17.6).
+    /// The overlay's Apply rows dispatch the palette's apply command with
+    /// the sound's track id and patch id (takes spec 17.6).
     #[test]
     fn metal_seq_sound_palette_apply_click_dispatches_the_entry() {
         let mut editor = full_grid_editor_for_scroll_tests();
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "sound-palette", sound_palette_fixture());
-        editor.runtime_mut().run_reactive_cycle();
-        // Capture the native calls as host commands so the dispatch is
-        // observable (the real natives enqueue the same wire commands).
-        editor
-            .runtime_mut()
-            .register_native("seq-sound-apply", |args, ctx| {
-                ctx.enqueue_command(eseqlisp::host::HostCommand::Custom {
-                    name: "test-sound-apply".to_string(),
-                    payload: Value::List(
-                        args.iter()
-                            .map(|value| std::rc::Rc::new(std::cell::RefCell::new(value.clone())))
-                            .collect(),
-                    ),
-                });
-                Ok(Value::Bool(true))
-            });
+        seed_open_sound_palette(&mut editor);
         editor.drain_host_commands();
         editor
             .runtime_mut()
-            .eval_str(r#"(eseq.sound-palette/apply-entry (dict :patch-id 3 :mix-id 2))"#)
+            .eval_str(
+                "(let ((p eseq.kinds/sound-palette)) (eseq.sound-palette/apply-entry (nth p.sounds 1)))",
+            )
             .expect("apply the fixture entry");
         let commands = editor.drain_host_commands();
         assert_eq!(commands.len(), 1, "commands={commands:?}");
         match &commands[0] {
             eseqlisp::host::HostCommand::Custom { name, payload } => {
-                assert_eq!(name, "test-sound-apply");
-                let Value::List(args) = payload else {
-                    panic!("captured args should be a list: {payload:?}");
+                assert_eq!(name, "sound-apply");
+                let Value::Map(map) = payload else {
+                    panic!("the apply payload should be a dict: {payload:?}");
                 };
-                assert_eq!(*args[0].borrow(), Value::Number(0.0), "track from the open palette");
-                assert_eq!(*args[1].borrow(), Value::Number(3.0), "the entry's patch id");
+                let field = |key: &str| map.get(key).map(|value| value.borrow().clone());
+                assert_eq!(field("track-id"), Some(Value::Number(0.0)), "the sound's track");
+                assert_eq!(field("patch"), Some(Value::Number(3.0)), "the sound's patch id");
             }
-            other => panic!("expected the captured apply, got {other:?}"),
+            other => panic!("expected the apply command, got {other:?}"),
         }
+
+        // The inline rename holds the sound and its draft; "ok" commits
+        // through the sound's name setter.
+        editor
+            .runtime_mut()
+            .eval_str(
+                "(let ((p eseq.kinds/sound-palette) (r eseq.sound-palette/sound-rename))
+                   (eseq.sound-palette/begin-rename (nth p.sounds 1))
+                   (set! r.draft \"Bright Keys\")
+                   (eseq.sound-palette/commit-rename (nth p.sounds 1)))",
+            )
+            .expect("rename the fixture sound");
+        let commands = editor.drain_host_commands();
+        assert!(
+            matches!(commands.as_slice(), [eseqlisp::host::HostCommand::Custom { name, payload }]
+                if name == "sound-rename"
+                    && matches!(payload, Value::Map(map)
+                        if map.get("name").is_some_and(|v| *v.borrow() == Value::String("Bright Keys".into()))
+                            && map.get("entity").is_some_and(|v| *v.borrow() == Value::Number(3.0)))),
+            "{commands:?}"
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(let ((r eseq.sound-palette/sound-rename)) r.sound)")
+                .unwrap(),
+            Some(Value::Nil),
+            "the rename ends"
+        );
     }
 
     /// Clip dot join logic (takes spec 17.6, amended to patch IDENTITY):
@@ -30947,6 +30745,9 @@ mod solo_binding_tests;
     #[test]
     fn metal_seq_browser_device_activation_reveals_fx_panel() {
         let mut editor = full_grid_editor_for_scroll_tests();
+        // A track a saved instrument cannot replace, so activation adds one.
+        let track = kind_track(editor.runtime(), 0);
+        set_field(editor.runtime_mut(), track, "instrument-type", Value::String("modulator".into()));
         for (action, command) in [
             (r#"(eseq.browser/activate-instrument "test-synth")"#, "add-track-instrument"),
             (r#"(eseq.browser/activate-builtin-instrument "modulator")"#, "add-track-modulator"),
@@ -32220,6 +32021,7 @@ mod solo_binding_tests;
             "track-instrument-types",
             test_string_list(&["custom"]),
         );
+        set_kind_instrument_types(&mut editor, &["custom"]);
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
         let sequencer_id = editor
@@ -32635,8 +32437,9 @@ mod solo_binding_tests;
         editor.drain_host_commands();
         editor.runtime_mut().invoke(callback, vec![Value::Nil]).unwrap();
         editor.refresh_runtime_side_effects();
-        assert_eq!(editor.runtime_mut().eval_str("sbrowser-tab").unwrap(),
-            Some(Value::String("instruments".to_string())));
+        assert_eq!(
+            browser_view_field(&mut editor, "browser-view", "tab"),
+            Value::String("instruments".to_string()));
         assert_eq!(editor.runtime_mut().eval_str("eseq.seq-core-state/samples-sidebar-visible").unwrap(),
             Some(Value::Bool(true)));
         let commands = editor.drain_host_commands();
@@ -32670,11 +32473,12 @@ mod solo_binding_tests;
         let badge = find_layout_node_by_stable_key(&mixer_layout, "mixer-v2-strip-label-0").unwrap();
         let callback = badge.props["on-double-click"].clone();
         editor.runtime_mut().eval_str(
-            "(eseq.seq-panels/seq-open-piano-roll-bottom-for-track 0) (set! sbrowser-tab \"samples\")"
+            "(eseq.seq-panels/seq-open-piano-roll-bottom-for-track 0) (let ((v eseq.browser/browser-view)) (set! v.tab \"samples\"))"
         ).unwrap();
         editor.runtime_mut().invoke(callback, vec![Value::Nil]).unwrap();
-        assert_eq!(editor.runtime_mut().eval_str("sbrowser-tab").unwrap(),
-            Some(Value::String("instruments".to_string())),
+        assert_eq!(
+            browser_view_field(&mut editor, "browser-view", "tab"),
+            Value::String("instruments".to_string()),
             "empty mixer headers should choose a device, including from piano roll");
     }
 
@@ -33714,8 +33518,8 @@ mod solo_binding_tests;
                   (load "ui/materials.lisp")
                   (load "ui/track-collapse.lisp")
                   (defstate eseq.seq-core-state/selected-bus -1)
-                  ;; browser.lisp owns this; see the hazard-j note above.
-                  (defstate sbrowser-loading-instrument-name "")
+                  ;; browser.lisp owns this; see the stub note above.
+                  (def eseq.browser/show-loading! (name) nil)
                   (load "ui/mixer.lisp")
                   (load "ui/sequencer.lisp")
                 "#,
@@ -34483,6 +34287,7 @@ mod solo_binding_tests;
             "track-instrument-types",
             test_string_list(&["custom"]),
         );
+        set_kind_instrument_types(&mut editor, &["custom"]);
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
 
@@ -34653,6 +34458,7 @@ mod solo_binding_tests;
             "track-instrument-types",
             test_string_list(&["sampler"]),
         );
+        set_kind_instrument_types(&mut editor, &["sampler"]);
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
 
@@ -34780,6 +34586,7 @@ mod solo_binding_tests;
             "track-instrument-types",
             test_string_list(&["custom"]),
         );
+        set_kind_instrument_types(&mut editor, &["custom"]);
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
 
@@ -34856,6 +34663,7 @@ mod solo_binding_tests;
             "track-instrument-types",
             test_string_list(&["sampler"]),
         );
+        set_kind_instrument_types(&mut editor, &["sampler"]);
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
         editor.refresh_visible_layouts_for_buffer_named("*mixer*");
@@ -34869,6 +34677,7 @@ mod solo_binding_tests;
             "track-instrument-types",
             test_string_list(&["rack"]),
         );
+        set_kind_instrument_types(&mut editor, &["rack"]);
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
         editor.refresh_visible_layouts_for_buffer_named("*mixer*");
@@ -39527,7 +39336,7 @@ mod solo_binding_tests;
                 r#"
                 (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def eseq.browser/sbrowser-editor-name "")
+                (def eseq.browser/clear-editor-name! () nil)
                 (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-instrument-synth-ui (inst) false)
                 (def custom-midi-fx-ui (fx) false)
@@ -39972,7 +39781,7 @@ mod solo_binding_tests;
                 r#"
                 (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def eseq.browser/sbrowser-editor-name "")
+                (def eseq.browser/clear-editor-name! () nil)
                 (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-instrument-synth-ui (inst) false)
                 (def custom-midi-fx-ui (fx) false)
@@ -40082,7 +39891,7 @@ mod solo_binding_tests;
                 r#"
                 (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def eseq.browser/sbrowser-editor-name "")
+                (def eseq.browser/clear-editor-name! () nil)
                 (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-instrument-synth-ui (inst) false)
                 (def custom-midi-fx-ui (fx) false)
@@ -40190,7 +39999,7 @@ mod solo_binding_tests;
                 r#"
                 (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def eseq.browser/sbrowser-editor-name "")
+                (def eseq.browser/clear-editor-name! () nil)
                 (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-instrument-synth-ui (inst) false)
                 (def custom-midi-fx-ui (fx) false)
@@ -40310,7 +40119,7 @@ mod solo_binding_tests;
                 r#"
                 (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def eseq.browser/sbrowser-editor-name "")
+                (def eseq.browser/clear-editor-name! () nil)
                 (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-instrument-synth-ui (inst) false)
                 (def custom-midi-fx-ui (fx) false)
@@ -40503,7 +40312,7 @@ mod solo_binding_tests;
                 r#"
                 (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def eseq.browser/sbrowser-editor-name "")
+                (def eseq.browser/clear-editor-name! () nil)
                 (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-instrument-synth-ui (inst) false)
                 (def custom-midi-fx-ui (fx) false)
@@ -40998,7 +40807,7 @@ mod solo_binding_tests;
                 r#"
                 (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def eseq.browser/sbrowser-editor-name "")
+                (def eseq.browser/clear-editor-name! () nil)
                 (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-instrument-synth-ui (inst) false)
                 (def custom-midi-fx-ui (fx) false)
@@ -41173,7 +40982,7 @@ mod solo_binding_tests;
                 r#"
                 (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () true)
-                (def eseq.browser/sbrowser-editor-name "")
+                (def eseq.browser/clear-editor-name! () nil)
                 (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-instrument-synth-ui (inst) false)
                 (def custom-midi-fx-ui (fx) false)
@@ -41323,7 +41132,7 @@ mod solo_binding_tests;
                 r#"
                 (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def eseq.browser/sbrowser-editor-name "")
+                (def eseq.browser/clear-editor-name! () nil)
                 (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-instrument-synth-ui (inst) false)
                 (def custom-midi-fx-ui (fx) false)
@@ -41488,7 +41297,7 @@ mod solo_binding_tests;
                 r#"
                 (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def eseq.browser/sbrowser-editor-name "")
+                (def eseq.browser/clear-editor-name! () nil)
                 (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-instrument-synth-ui (inst) false)
                 (def custom-midi-fx-ui (fx) false)
@@ -41588,7 +41397,7 @@ mod solo_binding_tests;
                 r#"
                 (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def eseq.browser/sbrowser-editor-name "")
+                (def eseq.browser/clear-editor-name! () nil)
                 (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-instrument-synth-ui (inst) false)
                 (def custom-midi-fx-ui (fx) false)
@@ -41725,7 +41534,7 @@ mod solo_binding_tests;
                 r#"
                 (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def eseq.browser/sbrowser-editor-name "")
+                (def eseq.browser/clear-editor-name! () nil)
                 (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-instrument-synth-ui (inst) false)
                 (def custom-midi-fx-ui (fx) false)
@@ -41949,7 +41758,7 @@ mod solo_binding_tests;
                 r#"
                 (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def eseq.browser/sbrowser-editor-name "")
+                (def eseq.browser/clear-editor-name! () nil)
                 (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-instrument-synth-ui (inst) false)
                 (def custom-midi-fx-ui (fx) false)
@@ -42101,7 +41910,7 @@ mod solo_binding_tests;
                 r#"
                 (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def eseq.browser/sbrowser-editor-name "")
+                (def eseq.browser/clear-editor-name! () nil)
                 (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-instrument-synth-ui (inst) false)
                 (def custom-midi-fx-ui (fx) false)
@@ -42282,7 +42091,7 @@ mod solo_binding_tests;
                 r#"
                 (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def eseq.browser/sbrowser-editor-name "")
+                (def eseq.browser/clear-editor-name! () nil)
                 (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-instrument-synth-ui (inst) false)
                 (def custom-midi-fx-ui (fx) false)
@@ -42441,7 +42250,7 @@ mod solo_binding_tests;
                 r#"
                 (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def eseq.browser/sbrowser-editor-name "")
+                (def eseq.browser/clear-editor-name! () nil)
                 (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-instrument-synth-ui (inst) false)
                 (def custom-midi-fx-ui (fx) false)
@@ -42738,7 +42547,7 @@ mod solo_binding_tests;
             r#"
             (def eseq.seq-core-state/selected-bus-name () "Mix")
             (def seq-has-selection? () false)
-            (def eseq.browser/sbrowser-editor-name "")
+            (def eseq.browser/clear-editor-name! () nil)
             (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
             (def custom-instrument-synth-ui (inst) false)
             (def custom-midi-fx-ui (fx) false)
@@ -43138,7 +42947,7 @@ mod solo_binding_tests;
             r#"
             (def eseq.seq-core-state/selected-bus-name () "Mix")
             (def seq-has-selection? () false)
-            (def eseq.browser/sbrowser-editor-name "")
+            (def eseq.browser/clear-editor-name! () nil)
             (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
             (def custom-instrument-synth-ui (inst) false)
             (def custom-midi-fx-ui (fx) false)
@@ -43312,7 +43121,7 @@ mod solo_binding_tests;
             r#"
             (def eseq.seq-core-state/selected-bus-name () "Mix")
             (def seq-has-selection? () false)
-            (def eseq.browser/sbrowser-editor-name "")
+            (def eseq.browser/clear-editor-name! () nil)
             (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
             (def custom-instrument-synth-ui (inst) false)
             (def custom-midi-fx-ui (fx) false)
@@ -43531,7 +43340,7 @@ mod solo_binding_tests;
                 r#"
                 (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def eseq.browser/sbrowser-editor-name "")
+                (def eseq.browser/clear-editor-name! () nil)
                 (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-instrument-synth-ui (inst) false)
                 (def custom-midi-fx-ui (fx) false)
@@ -43620,7 +43429,7 @@ mod solo_binding_tests;
                 r#"
                 (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def eseq.browser/sbrowser-editor-name "")
+                (def eseq.browser/clear-editor-name! () nil)
                 (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-instrument-synth-ui (inst) false)
                 (def custom-midi-fx-ui (fx) false)
@@ -43837,7 +43646,7 @@ mod solo_binding_tests;
                 r#"
                 (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def eseq.browser/sbrowser-editor-name "")
+                (def eseq.browser/clear-editor-name! () nil)
                 (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-instrument-synth-ui (inst) false)
                 (def custom-midi-fx-ui (fx) false)
@@ -43971,7 +43780,7 @@ mod solo_binding_tests;
                 r#"
                 (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def eseq.browser/sbrowser-editor-name "")
+                (def eseq.browser/clear-editor-name! () nil)
                 (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-instrument-synth-ui (inst) false)
                 (def custom-midi-fx-ui (fx) false)
@@ -44185,7 +43994,7 @@ mod solo_binding_tests;
                 r#"
                 (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def eseq.browser/sbrowser-editor-name "")
+                (def eseq.browser/clear-editor-name! () nil)
                 (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-instrument-synth-ui (inst) false)
                 (def custom-midi-fx-ui (fx) false)
@@ -45405,7 +45214,7 @@ mod solo_binding_tests;
                 r#"
                 (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def eseq.browser/sbrowser-editor-name "")
+                (def eseq.browser/clear-editor-name! () nil)
                 (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-instrument-synth-ui (inst) false)
                 (def custom-midi-fx-ui (fx) false)
@@ -45508,7 +45317,7 @@ mod solo_binding_tests;
                 r#"
                 (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def eseq.browser/sbrowser-editor-name "")
+                (def eseq.browser/clear-editor-name! () nil)
                 (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-instrument-synth-ui (inst) false)
                 (def custom-midi-fx-ui (fx) false)
@@ -45646,7 +45455,7 @@ mod solo_binding_tests;
                 r#"
                 (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def eseq.browser/sbrowser-editor-name "")
+                (def eseq.browser/clear-editor-name! () nil)
                 (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-instrument-synth-ui (inst) false)
                 (def custom-midi-fx-ui (fx) false)
@@ -45776,7 +45585,7 @@ mod solo_binding_tests;
                 r#"
                 (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def eseq.browser/sbrowser-editor-name "")
+                (def eseq.browser/clear-editor-name! () nil)
                 (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-instrument-synth-ui (inst) false)
                 (def custom-midi-fx-ui (fx) false)
@@ -45926,7 +45735,7 @@ mod solo_binding_tests;
                 r#"
                 (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def eseq.browser/sbrowser-editor-name "")
+                (def eseq.browser/clear-editor-name! () nil)
                 (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-midi-fx-ui (fx) false)
                 (defstate eseq.seq-core-state/selected-bus -1)
@@ -46093,7 +45902,7 @@ mod solo_binding_tests;
                 r#"
                 (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def eseq.browser/sbrowser-editor-name "")
+                (def eseq.browser/clear-editor-name! () nil)
                 (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-midi-fx-ui (fx) false)
                 (def custom-audio-fx-ui (fx) false)
@@ -46238,7 +46047,7 @@ mod solo_binding_tests;
                 r#"
                 (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () true)
-                (def eseq.browser/sbrowser-editor-name "")
+                (def eseq.browser/clear-editor-name! () nil)
                 (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-midi-fx-ui (fx) false)
                 (defstate eseq.seq-core-state/selected-bus -1)
@@ -46401,7 +46210,7 @@ mod solo_binding_tests;
                 r#"
                 (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def eseq.browser/sbrowser-editor-name "")
+                (def eseq.browser/clear-editor-name! () nil)
                 (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-midi-fx-ui (fx) false)
                 (defstate eseq.seq-core-state/selected-bus -1)
@@ -46540,7 +46349,7 @@ mod solo_binding_tests;
                 r#"
                 (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def eseq.browser/sbrowser-editor-name "")
+                (def eseq.browser/clear-editor-name! () nil)
                 (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-midi-fx-ui (fx) false)
                 (def custom-audio-fx-ui (fx) false)
@@ -46949,7 +46758,7 @@ mod solo_binding_tests;
                 r#"
                 (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def eseq.browser/sbrowser-editor-name "")
+                (def eseq.browser/clear-editor-name! () nil)
                 (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-midi-fx-ui (fx) false)
                 (def custom-audio-fx-ui (fx) false)
@@ -47565,7 +47374,7 @@ mod solo_binding_tests;
                 r#"
                 (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def eseq.browser/sbrowser-editor-name "")
+                (def eseq.browser/clear-editor-name! () nil)
                 (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-instrument-synth-ui (inst) false)
                 (def custom-midi-fx-ui (fx) false)
@@ -47822,7 +47631,7 @@ mod solo_binding_tests;
                 r#"
                 (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def eseq.browser/sbrowser-editor-name "")
+                (def eseq.browser/clear-editor-name! () nil)
                 (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-midi-fx-ui (fx) false)
                 (def custom-audio-fx-ui (fx) false)
@@ -47951,7 +47760,7 @@ mod solo_binding_tests;
                 r#"
                 (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def eseq.browser/sbrowser-editor-name "")
+                (def eseq.browser/clear-editor-name! () nil)
                 (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-midi-fx-ui (fx) false)
                 (def custom-audio-fx-ui (fx) false)
@@ -48196,7 +48005,7 @@ mod solo_binding_tests;
         editor.runtime_mut().eval_str(r#"
             (def eseq.seq-core-state/selected-bus-name () "Mix")
             (def seq-has-selection? () false)
-            (def eseq.browser/sbrowser-editor-name "")
+            (def eseq.browser/clear-editor-name! () nil)
             (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
             (def custom-midi-fx-ui (fx) false)
             (def custom-audio-fx-ui (fx) false)
@@ -48322,7 +48131,7 @@ mod solo_binding_tests;
         editor.runtime_mut().eval_str(r#"
             (def eseq.seq-core-state/selected-bus-name () "Mix")
             (def seq-has-selection? () false)
-            (def eseq.browser/sbrowser-editor-name "")
+            (def eseq.browser/clear-editor-name! () nil)
             (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
             (def custom-midi-fx-ui (fx) false)
             (def custom-audio-fx-ui (fx) false)
@@ -48740,7 +48549,7 @@ mod solo_binding_tests;
                 r#"
                 (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def eseq.browser/sbrowser-editor-name "")
+                (def eseq.browser/clear-editor-name! () nil)
                 (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-midi-fx-ui (fx) false)
                 (def custom-audio-fx-ui (fx) false)
@@ -48911,7 +48720,7 @@ mod solo_binding_tests;
         editor.runtime_mut().eval_str(r#"
             (def eseq.seq-core-state/selected-bus-name () "Mix")
             (def seq-has-selection? () false)
-            (def eseq.browser/sbrowser-editor-name "")
+            (def eseq.browser/clear-editor-name! () nil)
             (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
             (def custom-midi-fx-ui (fx) false)
             (def custom-audio-fx-ui (fx) false)
@@ -49143,7 +48952,7 @@ mod solo_binding_tests;
                 r#"
                 (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def eseq.browser/sbrowser-editor-name "")
+                (def eseq.browser/clear-editor-name! () nil)
                 (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-instrument-synth-ui (inst) false)
                 (def custom-midi-fx-ui (fx) false)
@@ -49405,7 +49214,7 @@ mod solo_binding_tests;
                 r#"
                 (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def eseq.browser/sbrowser-editor-name "")
+                (def eseq.browser/clear-editor-name! () nil)
                 (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-instrument-synth-ui (inst) false)
                 (def custom-midi-fx-ui (fx) false)
@@ -49575,7 +49384,7 @@ mod solo_binding_tests;
                 r#"
                 (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def eseq.browser/sbrowser-editor-name "")
+                (def eseq.browser/clear-editor-name! () nil)
                 (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-instrument-synth-ui (inst) false)
                 (def custom-midi-fx-ui (fx) false)
@@ -49917,7 +49726,7 @@ mod solo_binding_tests;
                 r#"
                 (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def eseq.browser/sbrowser-editor-name "")
+                (def eseq.browser/clear-editor-name! () nil)
                 (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-instrument-synth-ui (inst) false)
                 (def custom-midi-fx-ui (fx) false)
@@ -50299,7 +50108,7 @@ mod solo_binding_tests;
                 r#"
                 (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def eseq.browser/sbrowser-editor-name "")
+                (def eseq.browser/clear-editor-name! () nil)
                 (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-instrument-synth-ui (inst) false)
                 (def custom-midi-fx-ui (fx) false)
@@ -50969,7 +50778,7 @@ mod solo_binding_tests;
             r#"
             (def eseq.seq-core-state/selected-bus-name () "Mix")
             (def seq-has-selection? () false)
-            (def eseq.browser/sbrowser-editor-name "")
+            (def eseq.browser/clear-editor-name! () nil)
             (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
             (def custom-instrument-synth-ui (inst) false)
             (def custom-midi-fx-ui (fx) false)
@@ -51127,7 +50936,7 @@ mod solo_binding_tests;
                 r#"
                 (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def eseq.browser/sbrowser-editor-name "")
+                (def eseq.browser/clear-editor-name! () nil)
                 (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-instrument-synth-ui (inst) false)
                 (def custom-midi-fx-ui (fx) false)
@@ -51265,7 +51074,7 @@ mod solo_binding_tests;
                 r#"
                 (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def eseq.browser/sbrowser-editor-name "")
+                (def eseq.browser/clear-editor-name! () nil)
                 (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-midi-fx-ui (fx) false)
                 (def custom-audio-fx-ui (fx) false)
@@ -51386,7 +51195,7 @@ mod solo_binding_tests;
                 r#"
                 (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def eseq.browser/sbrowser-editor-name "")
+                (def eseq.browser/clear-editor-name! () nil)
                 (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-midi-fx-ui (fx) false)
                 (def custom-audio-fx-ui (fx) false)
@@ -51533,7 +51342,7 @@ mod solo_binding_tests;
                 r#"
                 (def eseq.seq-core-state/selected-bus-name () "Mix")
                 (def seq-has-selection? () false)
-                (def eseq.browser/sbrowser-editor-name "")
+                (def eseq.browser/clear-editor-name! () nil)
                 (defmacro eseq.materials/slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-midi-fx-ui (fx) false)
                 (def custom-audio-fx-ui (fx) false)
@@ -51707,19 +51516,13 @@ mod solo_binding_tests;
             .runtime_mut()
             .eval_str("(defstate eseq.seq-core-state/selected-bus -1)")
             .expect("install shared mixer selection state");
-        // browser.lisp owns this one and is not loaded in this stub harness.
-        // Before ui/mixer.lisp became `(module eseq.mixer)` its `(set!
-        // sbrowser-loading-instrument-name …)` compiled in eseq.vanilla and
-        // *created* the flat global on first write, which is what the
-        // assertion below used to read. A module's bare outbound write
-        // resolves against whatever exists at its compile time and otherwise
-        // lands in the module's own namespace, so the vanilla owner has to be
-        // declared first — exactly as it is in production, where
-        // ui/browser.lisp loads at main.lisp:17 and ui/mixer.lisp at :18.
+        // browser.lisp owns the loading-instrument mark (`show-loading!`,
+        // which the mixer's group drop calls) and is not loaded in this stub
+        // harness: stub it.
         editor
             .runtime_mut()
-            .eval_str("(defstate sbrowser-loading-instrument-name \"\")")
-            .expect("install browser-owned loading-instrument state");
+            .eval_str("(def eseq.browser/show-loading! (name) nil)")
+            .expect("stub the browser's loading-instrument mark");
         let active_delete_target = register_test_delete_target_natives(&mut editor, 2);
         // The host's model, as kinds: a modulator and an instrument with a
         // mod output, grouped (group 7 on Bus B), the modulator routed into
@@ -56002,6 +55805,7 @@ mod solo_binding_tests;
             "track-instrument-types",
             test_string_list(&["custom", "sampler", "rack"]),
         );
+        set_kind_instrument_types(&mut editor, &["custom", "sampler", "rack"]);
         let cases = [
             (
                 "sample",
@@ -56455,7 +56259,7 @@ mod solo_binding_tests;
                 r#"
                 (def eseq.seq-core-state/selected-bus-name () "Kit")
                 (def seq-has-selection? () false)
-                (def eseq.browser/sbrowser-editor-name "")
+                (def eseq.browser/clear-editor-name! () nil)
                 (def eseq.browser/sample-selected-path () "")
                 (def eseq.browser/add-selected-rack-layer () false)
                 (def custom-instrument-synth-ui (inst) false)

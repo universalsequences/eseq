@@ -6,6 +6,7 @@
 //! `track.instrument-id`).
 
 use super::*;
+use sequencer::app::sound_palette::PaletteTarget;
 use crate::presented::{
     present_kit_presets, present_sound_presets, presented, AssetInfo, EditorAsset, LearnPlanParam,
     PresetFile, RetroItem, RetroView, LEARN_METHODS, LEARN_REFINE_MODES,
@@ -95,36 +96,38 @@ fn rows_of(value: Value) -> Vec<Value> {
 }
 
 #[test]
-fn browser_sidebar_and_track_instruments_match_the_legacy_fields() {
+fn browser_sidebar_and_track_instruments_follow_the_presented_sidebar() {
     let mut h = Harness::new();
     h.sync();
-    let sidebar = [
-        ("instrument-kind", "sidebar-kind"),
-        ("instrument", "sidebar-instrument-name"),
-        ("instrument-label", "sidebar-instrument-display-name"),
-        ("preset", "sidebar-loaded-preset"),
-        ("presets", "sidebar-presets"),
-        ("user-presets", "sidebar-user-presets"),
-        ("sample", "sidebar-selected-sample"),
-        ("engines", "project-instrument-engines"),
-    ];
+    // The fields are what the sidebar publisher recorded (`presented`).
     let check = |h: &Harness| {
-        for (field, legacy) in sidebar {
-            assert_eq!(
-                h.single(BROWSER, field),
-                h.legacy_in("SEQ", legacy),
-                "{field}"
-            );
+        let sidebar = presented(|p| p.sidebar.get().clone());
+        for (field, value) in [
+            ("instrument-kind", s(sidebar.instrument_kind)),
+            ("instrument", s(&sidebar.instrument)),
+            ("instrument-label", s(&sidebar.instrument_label)),
+            ("preset", s(&sidebar.preset)),
+            ("sample", s(&sidebar.sample)),
+        ] {
+            assert_eq!(h.single(BROWSER, field), value, "{field}");
         }
-        let track = num(h.legacy_in("SEQ", "sidebar-track-index")) as u64;
+        for (field, values) in [
+            ("presets", &sidebar.presets),
+            ("user-presets", &sidebar.user_presets),
+            ("engines", &sidebar.engines),
+        ] {
+            assert_eq!(&strings_of(h.single(BROWSER, field)), values, "{field}");
+        }
         assert_eq!(
             h.single(BROWSER, "track"),
-            Value::Instance(h.track_id(track))
+            Value::Instance(h.track_id(sidebar.track as u64))
         );
         let slots = h.instances(h.single(BROWSER, "rack-slots"));
+        assert_eq!(slots.len(), sidebar.slots.len());
+        // The legacy name unported views still read mirrors the instrument.
         assert_eq!(
-            slots.len(),
-            rows_of(h.legacy_in("SEQ", "sidebar-rack-slot-presets")).len()
+            h.legacy_in("SEQ", "sidebar-instrument-name"),
+            s(&sidebar.instrument)
         );
     };
     check(&h);
@@ -141,17 +144,18 @@ fn browser_sidebar_and_track_instruments_match_the_legacy_fields() {
     check(&h);
     assert_eq!(h.single(BROWSER, "track"), Value::Instance(h.track_id(2)));
     assert_eq!(h.single(BROWSER, "instrument-kind"), s("sampler"));
-    // Each track's instrument id is the Instruments tab's
-    // (SEQ.track-instrument-ids).
-    let ids = strings_of(build_track_instrument_ids(&h.app));
-    for (index, id) in ids.iter().enumerate() {
+    // Each track's instrument id is the Instruments tab's.
+    for index in 0..h.app.tracks.len() {
         assert_eq!(
             h.cell(h.track_id(index as u64), "instrument-id"),
-            s(id),
+            s(&track_instrument_id(&h.app, index)),
             "track {index}"
         );
     }
-    assert_eq!(ids[2], crate::browser::builtin_instrument_id("sampler"));
+    assert_eq!(
+        h.cell(h.track_id(2), "instrument-id"),
+        s(&crate::browser::builtin_instrument_id("sampler"))
+    );
 }
 
 #[test]
@@ -213,18 +217,19 @@ fn preset(file_type: &'static str, name: &str, pads: usize) -> PresetFile {
 #[test]
 fn preset_files_follow_their_file_across_listings() {
     let mut h = Harness::new();
-    let legacy = present_sound_presets(vec![preset("sound", "a", 0), preset("sound", "b", 0)]);
+    let listed = vec![preset("sound", "a", 0), preset("sound", "b", 0)];
+    present_sound_presets(listed.clone());
     present_kit_presets(vec![preset("kit", "k", 8)]);
     h.sync();
     let sounds = h.instances(h.single(BROWSER, "sound-presets"));
     let kits = h.instances(h.single(BROWSER, "kit-presets"));
     assert_eq!(sounds.len(), 2);
     assert_eq!(kits.len(), 1);
-    // The fields are the legacy rows'.
-    for (row, id) in rows_of(legacy).iter().zip(&sounds) {
-        assert_eq!(h.cell(*id, "name"), map_get(row, "name"));
-        assert_eq!(h.cell(*id, "path"), map_get(row, "path"));
-        assert_eq!(h.cell(*id, "author"), map_get(row, "author"));
+    // The fields are the listed files'.
+    for (file, id) in listed.iter().zip(&sounds) {
+        assert_eq!(h.cell(*id, "name"), s(&file.name));
+        assert_eq!(h.cell(*id, "path"), s(&file.path));
+        assert_eq!(h.cell(*id, "author"), s(&file.author));
         assert_eq!(h.cell(*id, "type"), s("sound"));
         assert_eq!(h.cell(*id, "icon"), s("piano"));
     }
@@ -258,32 +263,38 @@ fn sound_palette_lists_the_tracks_sounds_by_patch_id() {
     h.drain();
     h.publish_palette();
     h.sync();
-    let legacy = h.legacy_in("SEQ", "sound-palette");
-    let entries = rows_of(map_get(&legacy, "entries"));
-    assert!(!entries.is_empty(), "a track has a sound");
+    // The fields are what the palette publisher recorded (`presented`).
+    let palette = presented(|p| p.palette.get().clone()).expect("the palette is open");
+    assert!(!palette.entries.is_empty(), "a track has a sound");
     assert_eq!(h.single(SOUND_PALETTE, "open"), Value::Bool(true));
     assert_eq!(
         h.single(SOUND_PALETTE, "track"),
         Value::Instance(h.track_id(0))
     );
-    assert_eq!(
-        h.single(SOUND_PALETTE, "target"),
-        map_get(&legacy, "target-kind")
-    );
+    let (target, target_id) = match palette.target {
+        PaletteTarget::Take(id) => ("take", id.0 as f64),
+        PaletteTarget::Pattern(id) => ("pattern", id.0 as f64),
+        PaletteTarget::Cell => ("cell", -1.0),
+    };
+    assert_eq!(h.single(SOUND_PALETTE, "target"), s(target));
+    assert_eq!(h.single(SOUND_PALETTE, "target-id"), Value::Number(target_id));
     assert_eq!(
         h.single(SOUND_PALETTE, "instrument"),
-        map_get(&legacy, "instrument-name")
+        s(&palette.instrument)
     );
     let sounds = h.instances(h.single(SOUND_PALETTE, "sounds"));
-    assert_eq!(sounds.len(), entries.len());
-    for (entry, id) in entries.iter().zip(&sounds) {
-        assert_eq!(h.cell(*id, "patch-id"), map_get(entry, "patch-id"));
-        assert_eq!(h.cell(*id, "name"), map_get(entry, "name"));
-        assert_eq!(h.cell(*id, "referents"), map_get(entry, "referents"));
-        assert_eq!(h.cell(*id, "current"), map_get(entry, "current"));
-        assert_eq!(h.cell(*id, "base"), map_get(entry, "base"));
-        assert_eq!(h.cell(*id, "glyph-key"), map_get(entry, "glyph-key"));
-        let colored = map_get(entry, "color") != Value::Nil;
+    assert_eq!(sounds.len(), palette.entries.len());
+    for (entry, id) in palette.entries.iter().zip(&sounds) {
+        assert_eq!(h.cell(*id, "patch-id"), Value::Number(entry.patch.0 as f64));
+        assert_eq!(h.cell(*id, "name"), s(&entry.name));
+        assert_eq!(h.cell(*id, "referents"), s(&entry.referents));
+        assert_eq!(h.cell(*id, "current"), Value::Bool(entry.is_current));
+        assert_eq!(h.cell(*id, "base"), Value::Bool(entry.is_base));
+        assert_eq!(
+            h.cell(*id, "glyph-key"),
+            s(&sound_glyph_key(palette.track, entry.patch.0))
+        );
+        let colored = sound_palette_rgb(entry.color).is_some();
         assert_eq!(h.cell(*id, "colored"), Value::Bool(colored));
         assert_eq!(h.cell(*id, "track"), Value::Instance(h.track_id(0)));
     }
@@ -336,20 +347,19 @@ fn editor_fields_follow_the_published_editor_state() {
         e.open_macro = "lfo".to_string();
     });
     h.sync();
-    for (field, legacy) in [
-        ("mode", "editor-mode"),
-        ("surface", "editor-surface"),
-        ("buffer", "editor-buffer-name"),
-        ("error", "editor-error"),
-        ("canceling", "editor-canceling"),
-        ("open-macro", "editor-open-macro"),
+    for (field, value) in [
+        ("mode", s("new-instrument")),
+        ("surface", s("patch")),
+        ("buffer", s("*draft*")),
+        ("error", s("Preview compiling...")),
+        ("canceling", Value::Bool(true)),
+        ("open-macro", s("lfo")),
     ] {
-        assert_eq!(
-            h.single(EDITOR, field),
-            h.legacy_in("SEQ", legacy),
-            "{field}"
-        );
+        assert_eq!(h.single(EDITOR, field), value, "{field}");
     }
+    // The names unported views still read are mirrored.
+    assert_eq!(h.legacy_in("SEQ", "editor-mode"), s("new-instrument"));
+    assert_eq!(h.legacy_in("SEQ", "editor-open-macro"), s("lfo"));
     // The macro sidebar: the patch's macros, then the library's, kept by
     // name.
     let patch = patch_macro_sidebar(vec![
@@ -415,8 +425,9 @@ fn editor_fields_follow_the_published_editor_state() {
     h.eval_7f("(set! editor.run-mode editor.run-mode) (set! editor.run-mode \"Instrument\")");
     h.drain();
     assert_eq!(h.status_7f(), "");
+    h.sync();
     assert_eq!(
-        h.legacy_in("SEQ", "editor-error"),
+        h.single(EDITOR, "error"),
         s("Preview compiling..."),
         "no error either"
     );
@@ -720,23 +731,17 @@ fn a_drum_racks_slots_carry_their_presets_and_their_slot_device() {
     h.sync();
     sync_sidebar_browser(h.editor.runtime_mut(), &h.app, 2);
     h.sync();
-    let legacy = rows_of(h.legacy_in("SEQ", "sidebar-rack-slot-presets"));
+    let sidebar = presented(|p| p.sidebar.get().clone());
     let slots = h.instances(h.single(BROWSER, "rack-slots"));
-    assert_eq!(slots.len(), legacy.len());
+    assert_eq!(slots.len(), sidebar.slots.len());
     assert_eq!(slots.len(), 1);
-    assert_eq!(
-        h.single(BROWSER, "instrument"),
-        h.legacy_in("SEQ", "sidebar-instrument-name")
-    );
-    for (row, id) in legacy.iter().zip(&slots) {
-        assert_eq!(h.cell(*id, "index"), map_get(row, "slot"));
-        assert_eq!(h.cell(*id, "instrument"), map_get(row, "instrument"));
-        assert_eq!(
-            h.cell(*id, "instrument-label"),
-            map_get(row, "display-name")
-        );
-        assert_eq!(h.cell(*id, "presets"), map_get(row, "presets"));
-        assert_eq!(h.cell(*id, "preset"), map_get(row, "loaded-preset"));
+    assert_eq!(h.single(BROWSER, "instrument"), s(&sidebar.instrument));
+    for (slot, id) in sidebar.slots.iter().zip(&slots) {
+        assert_eq!(h.cell(*id, "index"), Value::Number(slot.slot as f64));
+        assert_eq!(h.cell(*id, "instrument"), s(&slot.instrument));
+        assert_eq!(h.cell(*id, "instrument-label"), s(&slot.instrument_label));
+        assert_eq!(strings_of(h.cell(*id, "presets")), slot.presets);
+        assert_eq!(h.cell(*id, "preset"), s(&slot.preset));
     }
     // The slot names its rack slot device (instance refs, not indices).
     h.eval_all("(def t2 (track 2)) (def rk (first t2.devices)) (def rs (first rk.devices))");

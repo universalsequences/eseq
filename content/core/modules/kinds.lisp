@@ -1422,7 +1422,9 @@
          (macros (list-of macro) :doc "The project's macros, in macro order")
          (name :string :doc "The project's name; empty while unsaved")
          (audio-workers-options (list-of :string) :doc "The audio worker choices, for settings.audio-workers-choice")
-         (graphs (list-of graph) :doc "The graph-mode sequencers, in publish order")))
+         (graphs (list-of graph) :doc "The graph-mode sequencers, in publish order")
+         (instances (list-of :any)
+                    :doc "The project's package instances, as seq-package-tree takes them: dicts :id :kind :label :owner-label :owner-rack (a rack's group id, nil for the project) :registered? (false: its kind is not loaded)")))
 
 ;; ── Collections and actions ──
 

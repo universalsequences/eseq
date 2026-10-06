@@ -204,7 +204,7 @@ pub(super) fn handle(
                 EditorSurface::Patch,
             ));
             let rt = editor.runtime_mut();
-            let _ = rt.eval_str("(set! eseq.browser/sbrowser-editor-name \"\")");
+            let _ = rt.eval_str("(eseq.browser/clear-editor-name!)");
             present_editor_open(
                 rt,
                 "new-instrument",
@@ -400,7 +400,7 @@ pub(super) fn handle(
             // The name field starts empty on purpose (spec 3.4): a prefilled
             // `<source>-2` is a default you Enter through, and naming the fork
             // is the moment you decide what it is.
-            let _ = rt.eval_str("(set! eseq.browser/sbrowser-editor-name \"\")");
+            let _ = rt.eval_str("(eseq.browser/clear-editor-name!)");
             present_editor_open(rt, "new-instrument", &buf_name, Some(run_mode), surface);
             rt.run_reactive_cycle();
             editor.refresh_runtime_side_effects();
@@ -1942,7 +1942,7 @@ pub(super) fn handle(
                 EditorSurface::Patch,
             ));
             let rt = editor.runtime_mut();
-            let _ = rt.eval_str("(set! eseq.browser/sbrowser-editor-name \"\")");
+            let _ = rt.eval_str("(eseq.browser/clear-editor-name!)");
             present_editor_open(rt, "new-effect", &buf_name, None, EditorSurface::Patch);
             rt.set_reactive(
                 "SEQ",
@@ -2146,7 +2146,7 @@ pub(super) fn handle(
                 surface,
             ));
             let rt = editor.runtime_mut();
-            let _ = rt.eval_str("(set! eseq.browser/sbrowser-editor-name \"\")");
+            let _ = rt.eval_str("(eseq.browser/clear-editor-name!)");
             present_editor_open(rt, "new-effect", &buf_name, None, surface);
             rt.set_reactive(
                 "SEQ",
@@ -2783,7 +2783,7 @@ pub(super) fn handle(
                     ctx.sessions.editor_mode = Some("new-instrument".to_string());
                     let rt = editor.runtime_mut();
                     // Empty on purpose — see spec §3.4.
-                    let _ = rt.eval_str("(set! eseq.browser/sbrowser-editor-name \"\")");
+                    let _ = rt.eval_str("(eseq.browser/clear-editor-name!)");
                     present_editor(rt, |e| {
                         e.mode = "new-instrument".to_string();
                         e.error.clear();
@@ -2928,7 +2928,7 @@ pub(super) fn handle(
                     ctx.sessions.editor_buffer_name = Some(buf_name.clone());
                     ctx.sessions.editor_mode = Some("new-effect".to_string());
                     let rt = editor.runtime_mut();
-                    let _ = rt.eval_str("(set! eseq.browser/sbrowser-editor-name \"\")");
+                    let _ = rt.eval_str("(eseq.browser/clear-editor-name!)");
                     present_editor(rt, |e| {
                         e.mode = "new-effect".to_string();
                         e.error.clear();

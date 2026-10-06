@@ -34,7 +34,8 @@
 ;; Shared scene-bank view state: the clip grid below shows only the bank the
 ;; transport strip is viewing (scene-banks spec 10.1).
 (import eseq.scene-banks :refer (scene-viewed-bank clip-in-viewed-bank?))
-(import eseq.view-kit :refer (open-menu! menu-of nothing listed? index-of prop-if))
+(import eseq.view-kit :refer (open-menu! menu-of nothing listed? index-of prop-if
+                              rgb-part color-rgba))
 (import eseq.kinds :refer (track tracks buses groups routes graphs selection master project
                            mod-in-level launch-cell! launch-rack-clip! save-rack-clip-as!
                            convert-rack-to-clips!))
@@ -255,19 +256,12 @@
 
 ;; ── Colors ──
 
-;; A component (0 r, 1 g, 2 b) of an :rgb value `(rgb r g b)`.
-(def rgb-part (c i) (nth c (+ i 1)))
-
 ;; Muted strips pull component i (0 r, 1 g, 2 b) of their color toward a
 ;; dark gray.
 (def dimmed (v i muted)
   (if muted (+ (* v 0.34) (* (if (= i 2) 0.11 0.10) 0.66)) v))
 
 (def color-part (c i muted) (dimmed (rgb-part c i) i muted))
-
-;; Color c as an rgba with `alpha`.
-(def color-rgba (c alpha)
-  (rgba (rgb-part c 0) (rgb-part c 1) (rgb-part c 2) alpha))
 
 (def track-rgba (t muted alpha)
   (let ((c t.color))
@@ -1577,7 +1571,7 @@
         (status "Builtin instruments cannot be added inside a group")
         (if name
           (do
-            (set! sbrowser-loading-instrument-name name)
+            (eseq.browser/show-loading! name)
             (host-command "add-track-instrument" (dict :name name :group-id g.gid)))
           (status "Drop an instrument, not a folder")))
       _

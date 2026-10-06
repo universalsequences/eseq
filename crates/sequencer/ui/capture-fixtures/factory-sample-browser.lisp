@@ -2,4 +2,4 @@
 (capture-project (track :sampler :name "Sampler"))
 (def capture-after-sync ()
   (eseq.browser/select-tab "samples")
-  (set! eseq.browser/selected-tags (list "salamander")))
+  (let ((p eseq.browser/sample-pick)) (set! p.tags (list "salamander"))))

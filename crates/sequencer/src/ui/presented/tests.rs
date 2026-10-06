@@ -90,17 +90,22 @@ fn the_mirror_writes_only_the_fields_that_changed() {
         &mut writes,
         |p| &mut p.editor,
         |e| {
-            e.error = "bad".to_string();
-            e.canceling = true;
+            e.mode = "edit-effect".to_string();
+            e.open_macro = "lfo".to_string();
         },
         legacy::mirror_editor,
     );
-    assert_eq!(writes.names(), vec!["editor-error", "editor-canceling"]);
+    assert_eq!(writes.names(), vec!["editor-mode", "editor-open-macro"]);
     let mut writes = Writes::default();
     present(
         &mut writes,
         |p| &mut p.editor,
-        |e| e.canceling = true,
+        |e| {
+            e.open_macro = "lfo".to_string();
+            // No legacy name mirrors the error any more (the browser reads
+            // `editor.error`).
+            e.error = "bad".to_string();
+        },
         legacy::mirror_editor,
     );
     assert!(writes.0.is_empty(), "unchanged: {:?}", writes.names());
@@ -119,29 +124,28 @@ fn editor_mirror_matches_the_legacy_publishers() {
     for (field, value) in [
         ("editor-active", Value::Bool(true)),
         ("editor-mode", s("new-instrument")),
-        (
-            "editor-buffer-name",
-            s("*instrument-patcher:new-instrument*"),
-        ),
-        ("editor-instrument-run-mode", s("free_patch")),
-        ("editor-surface", s("patch")),
     ] {
         assert_eq!(legacy(&rt, "SEQ", field), value, "{field}");
     }
+    let editor = presented(|p| p.editor.get().clone());
+    assert_eq!(editor.buffer, "*instrument-patcher:new-instrument*");
+    assert_eq!(editor.run_mode, "free_patch");
+    assert_eq!(editor.surface, "patch");
     present_editor(&mut rt, |e| e.canceling = true);
     present_editor_closed(&mut rt);
     for (field, value) in [
         ("editor-active", Value::Bool(false)),
-        ("editor-canceling", Value::Bool(false)),
         ("editor-mode", s("")),
-        ("editor-error", s("")),
-        ("editor-buffer-name", s("")),
-        ("editor-instrument-run-mode", s("instrument")),
-        // The surface is kept for the next open.
-        ("editor-surface", s("patch")),
     ] {
         assert_eq!(legacy(&rt, "SEQ", field), value, "{field}");
     }
+    let editor = presented(|p| p.editor.get().clone());
+    assert!(!editor.canceling);
+    assert_eq!(editor.error, "");
+    assert_eq!(editor.buffer, "");
+    assert_eq!(editor.run_mode, "instrument");
+    // The surface is kept for the next open.
+    assert_eq!(editor.surface, "patch");
     // The macro sidebar's rows, as `build_*_sidebar_value` built them.
     present_editor_sidebar(&mut rt, |sidebar| {
         sidebar.patch_macros = vec![EditorMacro {
@@ -329,7 +333,7 @@ fn registrations_derive_from_the_record() {
     let seq: HashMap<&str, Value> = seq_registration().into_iter().collect();
     for (field, value) in [
         ("editor-active", Value::Bool(false)),
-        ("editor-instrument-run-mode", s("instrument")),
+        ("editor-mode", s("")),
         ("editor-selected-asset", Value::Nil),
         ("learn-phase", s("pick")),
         ("learn-method", s(LEARN_METHODS[0])),

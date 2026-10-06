@@ -5,7 +5,7 @@
 //! `learn-epoch-param` and `learn-delta` rows, `retro` with its
 //! `retro-lane`s and `retro-item`s, `song-export`, `settings` with its
 //! `midi-device`s, `agent`, and `project.name` /
-//! `project.audio-workers-options`.
+//! `project.audio-workers-options` / `instances`.
 //!
 //! **Feeds.** The model fields come from the presented record
 //! (`ui::presented`, which commands, job events and the snapshot
@@ -18,11 +18,13 @@
 //! compared every tick, in place: the sidebar's track and slot devices
 //! against the track and device instances, the palette's track and the
 //! variant tint its colors go through (read once per tick, in the
-//! `ModelRevision`), the project's name (the `App`'s) and the content
-//! library epoch (`browser.library-epoch`). Live (computed only while
-//! observed): `browser.preview-playing` / `preview-position` (the preview
-//! player) and `retro.playing` / `position` / `playhead` (the audition
-//! mailbox).
+//! `ModelRevision`), the project's name (the `App`'s), its package
+//! instances (`project.instances`, by fingerprint, the rows the Packages tree
+//! takes; only while observed, pushed on the first observing tick) and the
+//! content library epoch (`browser.library-epoch`). Live
+//! (computed only while observed): `browser.preview-playing` /
+//! `preview-position` (the preview player) and `retro.playing` / `position`
+//! / `playhead` (the audition mailbox).
 //!
 //! **Identity.** Sounds are keyed (track instance id, patch id): registered
 //! for the palette's track, dropped when the palette leaves it or closes, so
@@ -79,6 +81,9 @@ pub(crate) struct PresentedState {
     midi_devices: KeyedRows,
     project_name: Option<Option<String>>,
     library_epoch: Option<u64>,
+    /// The package instances' fingerprint as last pushed (`None` forces a
+    /// push; reset while nothing observes `project.instances`).
+    instances: Option<u64>,
     /// Area pushes (an area whose generation moved), for tests.
     pub(crate) pushes: u64,
     /// Instances the stale check asked about (one per collection), for
@@ -109,6 +114,7 @@ impl PresentedState {
         self.palette_tint = None;
         self.project_name = None;
         self.library_epoch = None;
+        self.instances = None;
     }
 
     /// One instance of each collection this sync registers but the sounds
@@ -195,6 +201,21 @@ impl HostKinds {
             if state.project_name.as_ref().map(Option::as_deref) != Some(name) {
                 pusher.push(project, f::PROJECT_NAME, text(name.unwrap_or_default()));
                 state.project_name = Some(name.map(str::to_string));
+            }
+            // Only while the Packages tree (or anything) observes it: the
+            // fingerprint hashes every instance, and resetting it while
+            // unobserved makes the first observing tick push.
+            if pusher
+                .rt
+                .host_fields_observed(project, &[f::PROJECT_INSTANCES.1])
+                == 0
+            {
+                state.instances = None;
+            } else if let Some(rows) = crate::host_commands::instances::instances_value_if_changed(
+                app,
+                &mut state.instances,
+            ) {
+                pusher.push(project, f::PROJECT_INSTANCES, rows);
             }
         }
     }

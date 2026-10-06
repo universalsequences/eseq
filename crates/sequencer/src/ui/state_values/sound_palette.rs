@@ -1,12 +1,12 @@
-//! Sound palette read surfaces (takes spec §17.6 / §18.3):
-//! `SEQ.sound-palette` (the open overlay's entries) and
-//! `SEQ.song-clip-sounds` (the timeline clip-dot identity join). Both diff by value
-//! before publishing, like `scene-names` — the underlying scenes have no
-//! revision counter and palette gestures can move refs without touching the
-//! committed-song revision.
+//! Sound palette read surfaces (takes spec §17.6 / §18.3): the open
+//! overlay (recorded for the `sound-palette` host kind through `presented`)
+//! and `SEQ.song-clip-sounds` (the timeline clip-dot identity join). Both
+//! diff by value before publishing, like `scene-names` — the underlying
+//! scenes have no revision counter and palette gestures can move refs
+//! without touching the committed-song revision.
 
 use super::*;
-use crate::app::sound_palette::{PaletteEntry, PaletteTarget, SOUND_PALETTE_RGB};
+use crate::app::sound_palette::{PaletteEntry, SOUND_PALETTE_RGB};
 use eseqlisp::sound_glyph_data::{
     publish_sound_glyph_frames, retain_sound_glyph_frames, set_sound_glyph_play_keys,
     SoundGlyphFrame, SoundGlyphPiece,
@@ -23,9 +23,9 @@ use std::rc::Rc;
 
 #[derive(Default)]
 pub(crate) struct SoundPaletteFrameState {
-    /// `(track, target, instrument name, entries)` of the last published
-    /// overlay, `None` when the last publish was Nil (closed).
-    cached: Option<(usize, PaletteTarget, String, Vec<PaletteEntry>)>,
+    /// The last published overlay, `None` when the last publish was Nil
+    /// (closed).
+    cached: Option<crate::presented::Palette>,
     /// Whether anything was ever published (so the first closed frame does
     /// not publish Nil over the registered default).
     published_open: bool,
@@ -1322,113 +1322,6 @@ fn palette_instrument_name(app: &app::App, track: usize) -> String {
     }
 }
 
-fn build_palette_value(
-    track: usize,
-    target: PaletteTarget,
-    instrument_name: &str,
-    entries: &[PaletteEntry],
-) -> Value {
-    let mut map = HashMap::new();
-    map.insert(
-        "track".to_string(),
-        Rc::new(RefCell::new(Value::Number(track as f64))),
-    );
-    map.insert(
-        "instrument-name".to_string(),
-        Rc::new(RefCell::new(Value::String(instrument_name.to_string()))),
-    );
-    let (kind, id) = match target {
-        PaletteTarget::Take(id) => ("take", Some(id.0)),
-        PaletteTarget::Pattern(id) => ("pattern", Some(id.0)),
-        PaletteTarget::Cell => ("cell", None),
-    };
-    map.insert(
-        "target-kind".to_string(),
-        Rc::new(RefCell::new(Value::String(kind.to_string()))),
-    );
-    map.insert(
-        "target-id".to_string(),
-        Rc::new(RefCell::new(match id {
-            Some(id) => Value::Number(id as f64),
-            None => Value::Nil,
-        })),
-    );
-    let rows = entries
-        .iter()
-        .map(|entry| {
-            let mut row = HashMap::new();
-            row.insert(
-                "patch-id".to_string(),
-                Rc::new(RefCell::new(Value::Number(entry.patch.0 as f64))),
-            );
-            row.insert(
-                "mix-id".to_string(),
-                Rc::new(RefCell::new(match entry.mix {
-                    Some(id) => Value::Number(id.0 as f64),
-                    None => Value::Nil,
-                })),
-            );
-            row.insert(
-                "name".to_string(),
-                Rc::new(RefCell::new(Value::String(entry.name.clone()))),
-            );
-            row.insert(
-                "referents".to_string(),
-                Rc::new(RefCell::new(Value::String(entry.referents.clone()))),
-            );
-            row.insert(
-                "referents-short".to_string(),
-                Rc::new(RefCell::new(Value::String(entry.referents_short.clone()))),
-            );
-            row.insert(
-                "base".to_string(),
-                Rc::new(RefCell::new(Value::Bool(entry.is_base))),
-            );
-            row.insert(
-                "track-sound".to_string(),
-                Rc::new(RefCell::new(Value::Bool(entry.is_track_sound))),
-            );
-            row.insert(
-                "current".to_string(),
-                Rc::new(RefCell::new(Value::Bool(entry.is_current))),
-            );
-            row.insert(
-                "glyph-key".to_string(),
-                Rc::new(RefCell::new(Value::String(sound_glyph_key(track, entry.patch.0)))),
-            );
-            row.insert(
-                "preset".to_string(),
-                Rc::new(RefCell::new(match &entry.preset {
-                    Some(name) => Value::String(name.clone()),
-                    None => Value::Nil,
-                })),
-            );
-            row.insert(
-                "sample".to_string(),
-                Rc::new(RefCell::new(match &entry.sample {
-                    Some(name) => Value::String(name.clone()),
-                    None => Value::Nil,
-                })),
-            );
-            row.insert(
-                "diff-up".to_string(),
-                Rc::new(RefCell::new(Value::Number(entry.params_up as f64))),
-            );
-            row.insert(
-                "diff-down".to_string(),
-                Rc::new(RefCell::new(Value::Number(entry.params_down as f64))),
-            );
-            color_fields(&mut row, entry.color);
-            Rc::new(RefCell::new(Value::Map(row)))
-        })
-        .collect();
-    map.insert(
-        "entries".to_string(),
-        Rc::new(RefCell::new(Value::List(rows))),
-    );
-    Value::Map(map)
-}
-
 fn build_clip_sounds_value(tracks: &[Vec<(u64, bool, Option<u8>)>]) -> Value {
     Value::List(
         tracks
@@ -1479,30 +1372,20 @@ pub(crate) fn sync_sound_palette(
         Some((track, target)) => {
             let entries = app.sound_palette_entries(track, target);
             sync_glyph_frames(app, track, &entries, &mut frame.glyphs);
-            let snapshot = (track, target, palette_instrument_name(app, track), entries);
-            if frame.cached.as_ref() != Some(&snapshot) {
-                dirty |= rt
-                    .set_reactive(
-                        "SEQ",
-                        "sound-palette",
-                        build_palette_value(snapshot.0, snapshot.1, &snapshot.2, &snapshot.3),
-                    )
-                    .effects_dirty;
-                crate::presented::present_palette(Some(crate::presented::Palette {
-                    track: snapshot.0,
-                    target: snapshot.1,
-                    instrument: snapshot.2.clone(),
-                    entries: snapshot.3.clone(),
-                }));
-                frame.cached = Some(snapshot);
+            let palette = crate::presented::Palette {
+                track,
+                target,
+                instrument: palette_instrument_name(app, track),
+                entries,
+            };
+            if frame.cached.as_ref() != Some(&palette) {
+                frame.cached = Some(palette.clone());
+                crate::presented::present_palette(Some(palette));
                 frame.published_open = true;
             }
         }
         None => {
             if frame.published_open || frame.cached.is_some() {
-                dirty |= rt
-                    .set_reactive("SEQ", "sound-palette", Value::Nil)
-                    .effects_dirty;
                 crate::presented::present_palette(None);
                 frame.cached = None;
                 frame.published_open = false;

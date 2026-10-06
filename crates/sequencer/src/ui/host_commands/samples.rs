@@ -102,10 +102,8 @@ pub(super) fn handle(
                         std::sync::Arc::new(stereo),
                         decoded.sample_rate,
                     );
-                    let rt = editor.runtime_mut();
-                    rt.set_reactive("SEQ", "browser-preview-playing", Value::Bool(true));
-                    rt.run_reactive_cycle();
-                    editor.refresh_runtime_side_effects();
+                    // `browser.preview-playing` / `preview-position` read
+                    // the player itself (live host kind fields).
                     editor.mark_needs_redraw();
                     let name = path
                         .file_name()
@@ -122,11 +120,6 @@ pub(super) fn handle(
         }
         "stop-sample-preview" => {
             sequencer::audio::preview::stop();
-            let rt = editor.runtime_mut();
-            rt.set_reactive("SEQ", "browser-preview-playing", Value::Bool(false));
-            rt.set_reactive("SEQ", "browser-preview-playhead", Value::Number(0.0));
-            rt.run_reactive_cycle();
-            editor.refresh_runtime_side_effects();
             editor.mark_needs_redraw();
         }
         "reanalyze-sample" => {

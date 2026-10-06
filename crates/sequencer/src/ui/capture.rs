@@ -1466,7 +1466,7 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
     );
     publish_capture_sound_glyphs(&mut editor)?;
     // The live tick publishes `SEQ.instances`; capture has no tick.
-    let mut instances_fingerprint = u64::MAX;
+    let mut instances_fingerprint = None;
     if let Some(value) =
         crate::host_commands::instances::instances_value_if_changed(&app, &mut instances_fingerprint)
     {

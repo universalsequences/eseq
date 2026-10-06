@@ -7,7 +7,7 @@
 
 (module eseq.view-kit)
 
-(export open-menu! menu-of nothing listed? index-of prop-if)
+(export open-menu! menu-of nothing listed? index-of prop-if rgb-part color-rgba)
 
 ;; m's context menu opens at the pointer event's grid point.
 (def open-menu! (m event)
@@ -36,3 +36,10 @@
 
 ;; `(k v)` to splice into a widget's props when v is set, else nothing.
 (def prop-if (k v) (if v (list k v) (list)))
+
+;; A component (0 r, 1 g, 2 b) of an :rgb value `(rgb r g b)`.
+(def rgb-part (c i) (nth c (+ i 1)))
+
+;; Color c (an :rgb value) as an rgba with `alpha`.
+(def color-rgba (c alpha)
+  (rgba (rgb-part c 0) (rgb-part c 1) (rgb-part c 2) alpha))

@@ -1,7 +1,7 @@
 //! The factory transport, scene banks and MIDI capture views, ported to the
 //! kinds (kind-bindings spec §13 stage 8, eseq-0l17.12).
 
-use super::views::{distro, instance_bindings, legacy_forms, widgets_with_prop};
+use super::views::{assert_ported, distro, instance_bindings, legacy_forms, widgets_with_prop};
 use super::*;
 
 /// The ported views' sources.
@@ -22,13 +22,7 @@ const PORTED: [(&str, &str); 3] = [
 
 #[test]
 fn ported_transport_views_use_no_legacy_binding_forms() {
-    for (file, source) in PORTED {
-        assert_eq!(legacy_forms(source), Vec::<&str>::new(), "{file}");
-        assert!(
-            source.contains("(import eseq.kinds :refer ("),
-            "{file} refers its kinds"
-        );
-    }
+    assert_ported(&PORTED);
     // The scanner sees through comments, never strings.
     assert_eq!(
         legacy_forms(";; SEQ.playing (bind-seq \"x\")\n(label \"SEQ.x\")"),

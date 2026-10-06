@@ -159,9 +159,8 @@ pub(crate) fn present_agent(rt: &mut Runtime, generation: u64) -> bool {
     )
 }
 
-/// What the browser sidebar shows for the current track (legacy
-/// `SEQ.sidebar-*`, `project-instrument-engines`), as
-/// `sync_sidebar_browser` derives it.
+/// What the browser sidebar shows for the current track (the `browser`
+/// kind), as `sync_sidebar_browser` derives it.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Sidebar {
     pub(crate) track: usize,
@@ -195,7 +194,7 @@ impl Default for Sidebar {
     }
 }
 
-/// One drum rack slot's presets (legacy `SEQ.sidebar-rack-slot-presets`).
+/// One drum rack slot's presets (`slot-presets`).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct SlotPresets {
     pub(crate) track: usize,
@@ -212,8 +211,8 @@ pub(crate) fn present_sidebar(sidebar: Sidebar) {
     seed(|p| p.sidebar.set(sidebar));
 }
 
-/// A saved Sound or kit file of the browser's Sounds and Kits tabs (legacy
-/// `SEQ.sound-presets`, `SEQ.kit-presets`).
+/// A saved Sound or kit file of the browser's Sounds and Kits tabs
+/// (`preset-file`).
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct PresetFile {
     /// `sound` or `kit`.
@@ -227,22 +226,17 @@ pub(crate) struct PresetFile {
     pub(crate) tags: Vec<String>,
 }
 
-/// Record the saved Sounds `build_sound_presets_value` listed and return
-/// the legacy `SEQ.sound-presets` value.
-pub(crate) fn present_sound_presets(files: Vec<PresetFile>) -> Value {
-    let value = legacy::preset_files_value(&files);
+/// Record the saved Sounds `record_sound_presets` listed.
+pub(crate) fn present_sound_presets(files: Vec<PresetFile>) {
     seed(|p| p.sound_presets.set(files));
-    value
 }
 
 /// Like [`present_sound_presets`], for the kits.
-pub(crate) fn present_kit_presets(files: Vec<PresetFile>) -> Value {
-    let value = legacy::preset_files_value(&files);
+pub(crate) fn present_kit_presets(files: Vec<PresetFile>) {
     seed(|p| p.kit_presets.set(files));
-    value
 }
 
-/// The open sound palette (legacy `SEQ.sound-palette`; `None` while closed).
+/// The open sound palette (the `sound-palette` kind; `None` while closed).
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Palette {
     pub(crate) track: usize,

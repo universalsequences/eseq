@@ -408,7 +408,6 @@ sbrowser-drop-sound-on-track	eseq.browser/drop-sound-on-track	content/ui/browser
 sbrowser-editor-status-row	eseq.browser/editor-status-row	content/ui/browser.lisp
 sbrowser-enter-new-effect-editor	eseq.browser/enter-new-effect-editor	content/ui/browser.lisp
 sbrowser-enter-preset-save	eseq.browser/enter-preset-save	content/ui/browser.lisp
-sbrowser-filter	eseq.browser/search-filter	content/ui/browser.lisp
 sbrowser-focus-create-item	eseq.browser/focus-create-item	content/ui/browser.lisp
 sbrowser-fork-selected-audio-effect	eseq.browser/fork-selected-audio-effect	content/ui/browser.lisp
 sbrowser-fork-selected-instrument	eseq.browser/fork-selected-instrument	content/ui/browser.lisp
@@ -417,7 +416,6 @@ sbrowser-list-contains?	eseq.browser/list-contains?	content/ui/browser.lisp
 sbrowser-new-project	eseq.browser/new-project	content/ui/browser.lisp
 sbrowser-next-tab	eseq.browser/next-tab	content/ui/browser.lisp
 sbrowser-open-project-save	eseq.browser/open-project-save	content/ui/browser.lisp
-sbrowser-preset-filter	eseq.browser/preset-filter	content/ui/browser.lisp
 sbrowser-project-save-mode?	eseq.browser/project-save-mode?	content/ui/browser.lisp
 sbrowser-refresh-buffer	eseq.browser/refresh-buffer	content/ui/browser.lisp
 sbrowser-sample-selected-path	eseq.browser/sample-selected-path	content/ui/browser.lisp
@@ -426,10 +424,6 @@ sbrowser-select-create-item	eseq.browser/select-create-item	content/ui/browser.l
 sbrowser-select-midi-effect	eseq.browser/select-midi-effect	content/ui/browser.lisp
 sbrowser-select-sample	eseq.browser/select-sample	content/ui/browser.lisp
 sbrowser-select-tab	eseq.browser/select-tab	content/ui/browser.lisp
-sbrowser-selected-audio-effect-name	eseq.browser/selected-audio-effect-name	content/ui/browser.lisp
-sbrowser-selected-instrument-name	eseq.browser/selected-instrument-name	content/ui/browser.lisp
-sbrowser-selected-sample	eseq.browser/selected-sample	content/ui/browser.lisp
-sbrowser-selected-tags	eseq.browser/selected-tags	content/ui/browser.lisp
 sbrowser-tabbed-content	eseq.browser/tabbed-content	content/ui/browser.lisp
 sbrowser-tabs	eseq.browser/tab-rail	content/ui/browser.lisp
 scene-macro-config	eseq.macros/scene-macro-config	content/ui/macros.lisp

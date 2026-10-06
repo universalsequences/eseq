@@ -246,12 +246,12 @@ fn instances_value(rows: &[InstanceRow]) -> Value {
 }
 
 /// The `SEQ.instances` value when it differs from the one `last`
-/// fingerprints (updating `last`), else `None`. Runs every reactive tick,
+/// fingerprints (updating `last`; `None` always differs), else `None`. Runs every reactive tick,
 /// so the fingerprint borrows instead of building rows: each instance's
 /// fields, its owner rack's name, and ONE registry version read (which moves
 /// whenever any kind's registration does) stand in for `:registered?`.
 /// Rows are only built on a change.
-pub(crate) fn instances_value_if_changed(app: &app::App, last: &mut u64) -> Option<Value> {
+pub(crate) fn instances_value_if_changed(app: &app::App, last: &mut Option<u64>) -> Option<Value> {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     sequencer::lisp_host::kind_registry_version().hash(&mut hasher);
@@ -264,10 +264,10 @@ pub(crate) fn instances_value_if_changed(app: &app::App, last: &mut u64) -> Opti
     }
     app.instances.list.len().hash(&mut hasher);
     let fingerprint = hasher.finish();
-    if fingerprint == *last {
+    if *last == Some(fingerprint) {
         return None;
     }
-    *last = fingerprint;
+    *last = Some(fingerprint);
     Some(instances_value(&instance_rows(app)))
 }
 

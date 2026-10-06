@@ -98,15 +98,15 @@ pub(crate) fn sync_project_state(rt: &mut Runtime, app: &app::App) {
         "current-project-name",
         Value::String(app.current_project_name.clone().unwrap_or_default()),
     );
-    rt.set_reactive("SEQ", "sound-presets", build_sound_presets_value());
-    rt.set_reactive("SEQ", "kit-presets", build_kit_presets_value());
+    record_sound_presets();
+    record_kit_presets();
 }
 
-/// Builds `SEQ.kit-presets`: the drum-rack kits the browser's Kits tab lists
-/// (docs/drum-rack-v2-spec.md, "Polish"). One entry per `.kit` file, with the
-/// pad count so a kit reads as a kit and not as another Sound. Recorded for
-/// the `browser` host kind (`presented`).
-pub(crate) fn build_kit_presets_value() -> Value {
+/// Lists the drum-rack kits the browser's Kits tab shows
+/// (docs/drum-rack-v2-spec.md, "Polish") into the presented record, the
+/// `browser.kit-presets` source. One entry per `.kit` file, with the pad
+/// count so a kit reads as a kit and not as another Sound.
+pub(crate) fn record_kit_presets() {
     let kits = sequencer::project::list_kit_presets().unwrap_or_default();
     let files = kits
         .into_iter()
@@ -128,7 +128,7 @@ pub(crate) fn build_kit_presets_value() -> Value {
             })
         })
         .collect();
-    crate::presented::present_kit_presets(files)
+    crate::presented::present_kit_presets(files);
 }
 
 /// Browser icon for a saved Sound. Every Sound is serialized as a rack track,
@@ -152,9 +152,9 @@ pub(crate) fn sound_preset_icon(preset: &sequencer::project::ProjectSoundPreset)
     }
 }
 
-/// Builds `SEQ.sound-presets`: the saved Sounds the browser's Sounds tab
-/// lists, recorded for the `browser` host kind (`presented`).
-pub(crate) fn build_sound_presets_value() -> Value {
+/// Lists the saved Sounds the browser's Sounds tab shows into the presented
+/// record, the `browser.sound-presets` source.
+pub(crate) fn record_sound_presets() {
     let sounds = sequencer::project::list_sound_presets().unwrap_or_default();
     let files = sounds
         .into_iter()
@@ -177,7 +177,7 @@ pub(crate) fn build_sound_presets_value() -> Value {
             })
         })
         .collect();
-    crate::presented::present_sound_presets(files)
+    crate::presented::present_sound_presets(files);
 }
 
 pub(crate) const PROJECT_SCRATCH_BUFFER_NAME: &str = "*scratch*";
@@ -429,75 +429,21 @@ pub(crate) fn sync_sidebar_browser(rt: &mut Runtime, app: &app::App, track: usiz
         build_string_list(&loaded_presets),
     );
     let sidebar = sidebar_browser(app, track);
-    let slot_contexts = sidebar.slots.iter().map(|slot| {
-        map_value([
-            ("track", Value::Number(slot.track as f64)),
-            ("slot", Value::Number(slot.slot as f64)),
-            ("instrument", Value::String(slot.instrument.clone())),
-            ("display-name", Value::String(slot.instrument_label.clone())),
-            ("presets", build_string_list(&slot.presets)),
-            ("user-presets", build_string_list(&slot.user_presets)),
-            ("loaded-preset", Value::String(slot.preset.clone())),
-        ])
-    });
-    rt.set_reactive(
-        "SEQ",
-        "sidebar-rack-slot-presets",
-        list_value(slot_contexts),
-    );
-    rt.set_reactive(
-        "SEQ",
-        "project-instrument-engines",
-        build_string_list(&sidebar.engines),
-    );
-    rt.set_reactive(
-        "SEQ",
-        "sidebar-kind",
-        Value::String(sidebar.instrument_kind.to_string()),
-    );
+    // Still read by unported views (application menus, the panel frame);
+    // the browser reads the `browser` host kind.
     rt.set_reactive(
         "SEQ",
         "sidebar-instrument-name",
         Value::String(sidebar.instrument.clone()),
-    );
-    rt.set_reactive(
-        "SEQ",
-        "sidebar-instrument-display-name",
-        Value::String(sidebar.instrument_label.clone()),
-    );
-    rt.set_reactive(
-        "SEQ",
-        "sidebar-loaded-preset",
-        Value::String(sidebar.preset.clone()),
-    );
-    rt.set_reactive("SEQ", "sidebar-track-index", Value::Number(track as f64));
-    rt.set_reactive(
-        "SEQ",
-        "sidebar-selected-sample",
-        Value::String(sidebar.sample.clone()),
-    );
-    rt.set_reactive(
-        "SEQ",
-        "sidebar-presets",
-        build_string_list(&sidebar.presets),
-    );
-    rt.set_reactive(
-        "SEQ",
-        "sidebar-user-presets",
-        build_string_list(&sidebar.user_presets),
-    );
-    rt.set_reactive(
-        "SEQ",
-        "sidebar-preset-tree",
-        build_flat_tree_items(&sidebar.presets),
     );
     crate::presented::present_sidebar(sidebar);
 }
 
 /// What the browser sidebar shows for `track`: its instrument (a sampler's
 /// sample), the presets it can load, a drum rack's slots' presets, and the
-/// project's instrument engines. Shared by the legacy `SEQ.sidebar-*` fields
-/// and the `browser` host kind (through `presented`).
+/// project's instrument engines. The `browser` host kind's source (through
+/// `presented`); the legacy `SEQ.sidebar-instrument-name` mirrors its
+/// instrument.
 fn sidebar_browser(app: &app::App, track: usize) -> crate::presented::Sidebar {
     use crate::presented::{Sidebar, SlotPresets};
     // Each slot independently of the edit cursor: only the explicit

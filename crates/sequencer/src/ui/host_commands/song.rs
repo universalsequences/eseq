@@ -86,7 +86,7 @@ pub(super) const COMMANDS: &[&str] = &[
     "sound-apply-to-all-takes",
     // Sound palette (takes spec §17.6/§18.3). Apply/fork route through the
     // single repoint seam (`after_sound_repoint`); open/close drive the
-    // `SEQ.sound-palette` read surface.
+    // `sound-palette` kind.
     "sound-palette-open",
     "sound-palette-close",
     "sound-apply",

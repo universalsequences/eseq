@@ -28,13 +28,14 @@
 ;; active tile, so Rust activates the mount's tile before calling `open`.
 (module eseq.sample-import)
 
-(export open?
-        generation
+(import eseq.kinds :refer (browser))
+(import eseq.preview-strip :refer (stop-preview sync-preview! toggle-preview! preview-strip))
+
+(export import-view
+        import-preview
         open
         close
         panel
-        ;; Read by the layout test.
-        title-draft
         ;; Actions, exported so tests can drive the modal by name.
         select-node
         add-batch-tag
@@ -44,77 +45,58 @@
         chip-row
         tag-entry)
 
-(defstate open? false)
-;; Bumped after every draft mutation: the natives are plain calls and are
-;; not reactive on their own.
-(defstate generation 0)
-
-;; Text-input drafts (per keystroke; committed on Enter or a chip click).
-(defstate batch-draft "")
-(defstate selection-draft "")
-(defstate title-draft "")
-;; Preview strip for the selected file, same shape as the sample browser's:
-;; the decoded waveform map from `seq-sample-waveform` (false while the
-;; selection is a folder or undecodable) and the headphone toggle. With the
-;; headphone on, selecting a file plays it once. `preview-headphone-icon` is
-;; the browser's defwidget; widget names do not module-qualify.
-(defstate preview-path "")
-(defstate preview-buffer false)
-(defstate auto-preview false)
+;; The modal: open, `generation` (bumped after every draft mutation: the
+;; natives are plain calls and are not reactive on their own), and the
+;; text-input drafts (per keystroke; committed on Enter or a chip click).
 ;; The title draft is reseeded from the staged title whenever the selected
 ;; node changes (`select-node`, `open`), never during render.
+(def-kind import-view
+  :key ()
+  :state ((open false)
+          (generation 0)
+          (batch-draft "")
+          (selection-draft "")
+          (title-draft "")))
+
+;; Preview strip for the selected file, the sample browser's
+;; (eseq.preview-strip, whose functions take this singleton): the decoded waveform map from `seq-sample-waveform` (false
+;; while the selection is a folder or undecodable) and the headphone toggle.
+;; With the headphone on, selecting a file plays it once.
+(def-kind import-preview
+  :key ()
+  :state ((path "")
+          (buffer :any :default false)
+          (auto false)))
+
 (def reset-drafts ()
-  (set! batch-draft "")
-  (set! selection-draft "")
-  (set! title-draft ""))
+  (set! import-view.batch-draft "")
+  (set! import-view.selection-draft "")
+  (set! import-view.title-draft ""))
 
 (def seed-title-draft ()
   (let ((file (get (seq-sample-import-selection) :file)))
-    (set! title-draft (if (= file nil) "" (get file :title)))))
+    (set! import-view.title-draft (if (= file nil) "" (get file :title)))))
 
 (def open ()
   (reset-drafts)
   (seq-sample-import-select "")
   (seed-title-draft)
-  (set! generation (+ generation 1))
-  (set! open? true))
-
-(def stop-preview ()
-  (if SEQ.browser-preview-playing
-    (host-command "stop-sample-preview" (dict))
-    nil))
+  (set! import-view.generation (+ import-view.generation 1))
+  (set! import-view.open true))
 
 (def sync-preview ()
-  (let ((file (get (seq-sample-import-selection) :file))
-      (path (if (= file nil) "" (get file :path))))
-    (if (= path preview-path) nil
-      (do
-        (set! preview-path path)
-        (set! preview-buffer (if (= path "") false (seq-sample-waveform path)))
-        (if (and auto-preview preview-buffer)
-          (host-command "preview-sample" (dict :path path))
-          (stop-preview))))))
-
-(def toggle-auto-preview ()
-  (if auto-preview
-    (do
-      (set! auto-preview false)
-      (stop-preview))
-    (do
-      (set! auto-preview true)
-      (if preview-buffer
-        (host-command "preview-sample" (dict :path preview-path))
-        nil))))
+  (let ((file (get (seq-sample-import-selection) :file)))
+    (sync-preview! import-preview (if (= file nil) "" (get file :path)))))
 
 (def close ()
   (reset-drafts)
   (stop-preview)
-  (set! preview-path "")
-  (set! preview-buffer false)
-  (set! open? false))
+  (set! import-preview.path "")
+  (set! import-preview.buffer false)
+  (set! import-view.open false))
 
 (def bump ()
-  (set! generation (+ generation 1)))
+  (set! import-view.generation (+ import-view.generation 1)))
 
 (def commit ()
   (host-command "sample-import-commit" (dict)))
@@ -213,7 +195,7 @@
 
 (def add-batch-tag (tag)
   (if (seq-sample-import-add-batch-tag tag)
-    (do (set! batch-draft "") (bump))
+    (do (set! import-view.batch-draft "") (bump))
     nil))
 
 (def remove-batch-tag (tag)
@@ -235,8 +217,8 @@
             (each suggested |tag|
               (suggestion-chip "batch-folder" tag (lambda (t) (add-batch-tag t)))))
           (box :width 0 :height 0 :bg :transparent))
-        (tag-entry "batch" batch-draft
-          (lambda (v) (set! batch-draft v))
+        (tag-entry "batch" import-view.batch-draft
+          (lambda (v) (set! import-view.batch-draft v))
           batch
           (lambda (tag) (add-batch-tag tag))
           "add a tag for all, Enter to apply")))))
@@ -245,14 +227,14 @@
 
 (def select-node (node)
   (seq-sample-import-select node)
-  (set! selection-draft "")
+  (set! import-view.selection-draft "")
   (seed-title-draft)
   (sync-preview)
   (bump))
 
 (def add-selection-tag (tag)
   (if (seq-sample-import-add-selection-tag tag)
-    (do (set! selection-draft "") (bump))
+    (do (set! import-view.selection-draft "") (bump))
     nil))
 
 (def remove-selection-tag (tag)
@@ -262,7 +244,7 @@
 ;; Single-file edits go by staged index (the file pane's own entry).
 (def add-file-tag (index tag)
   (if (seq-sample-import-add-tag index tag)
-    (do (set! selection-draft "") (bump))
+    (do (set! import-view.selection-draft "") (bump))
     nil))
 
 (def remove-file-tag (index tag)
@@ -270,7 +252,7 @@
   (bump))
 
 (def commit-title (index)
-  (seq-sample-import-set-title index title-draft)
+  (seq-sample-import-set-title index import-view.title-draft)
   (bump))
 
 (def status-text (entry)
@@ -304,43 +286,21 @@
           (str "Pick a folder or file on the left, or tag all " count " samples here.")
           (str "Tags below apply to all " count " sample" (if (= count 1) "" "s") " in this folder.")))
       (chip-row "selection" tags (lambda (tag) (remove-selection-tag tag)))
-      (tag-entry "selection" selection-draft
-        (lambda (v) (set! selection-draft v))
+      (tag-entry "selection" import-view.selection-draft
+        (lambda (v) (set! import-view.selection-draft v))
         tags
         (lambda (tag) (add-selection-tag tag))
         (if (= kind "all") "tag every sample, Enter to apply" "tag this folder, Enter to apply")))))
 
-;; The browser's preview strip (ui/browser.lisp `sample-preview-strip`):
-;; headphone toggle + waveform with the shared preview playhead.
-(def preview-strip ()
-  (if preview-buffer
-    ;; The browser strip sits on :buffer-bg (near black); inside the modal
-    ;; that reads as a hole, so the strip takes the input-field gray instead.
-    (box :key "preview-strip" :width :fill :height 1.5
-      :background-color (strip-bg) :corner-radius 8 :padding 0.03
-      (h-stack :width :fill :gap 0.35 :align :baseline
-        (box :key "preview-headphone" :width 2.3 :height 2.2 :align :center
-          :on-click |x y r| (toggle-auto-preview)
-          (preview-headphone-icon :active (if auto-preview 1 0)))
-        (box :width 0 :flex 1 :height 2.3
-          (subtree :key (str "preview-wave-" preview-path)
-            (waveform
-              :height 2
-              :header-height 0
-              :bg (strip-bg)
-              :waveform-color :dim
-              :grid-major-color :transparent
-              :grid-minor-color :transparent
-              :inactive-waveform-color '(rgba 0.25 0.25 0.25 1)
-              :view-start 0
-              :view-duration (get preview-buffer :duration)
-              :selection-start 0
-              :selection-end (get preview-buffer :duration)
-              :playhead-time (bind-seq "browser-preview-playhead")
-              :buffer preview-buffer)))))
+;; The browser's preview strip (eseq.preview-strip). The browser
+;; strip sits on :buffer-bg (near black); inside the modal that reads as a
+;; hole, so the strip takes the input-field gray instead.
+(def import-preview-strip ()
+  (preview-strip import-preview "" (strip-bg)
     (label "no preview for this file"
       :key "preview-empty"
-      :font-size 8.5 :color :dim :bg :transparent)))
+      :font-size 8.5 :color :dim :bg :transparent)
+    (lambda () (toggle-preview! import-preview))))
 
 ;; Single file: title, preview, and its own tags.
 (def file-pane (entry)
@@ -353,18 +313,18 @@
           :flex 1
           :height 1.35
           :font-size 11
-          :value title-draft
+          :value import-view.title-draft
           :placeholder "title"
-          :on-change (lambda (v) (set! title-draft v))
+          :on-change (lambda (v) (set! import-view.title-draft v))
           :on-submit (lambda () (commit-title index)))
         (button "ok"
           :key "title-ok"
           :font-size 10 :height 1.35 :padding 0.6
           :on-click |x y r| (commit-title index)))
-      (preview-strip)
+      (import-preview-strip)
       (chip-row "file" tags (lambda (tag) (remove-file-tag index tag)))
-      (tag-entry "file" selection-draft
-        (lambda (v) (set! selection-draft v))
+      (tag-entry "file" import-view.selection-draft
+        (lambda (v) (set! import-view.selection-draft v))
         tags
         (lambda (tag) (add-file-tag index tag))
         "add a tag to this sample"))))
@@ -445,7 +405,7 @@
 
 (def body ()
   ;; Reading the generation is what re-renders after every draft edit.
-  (let ((epoch generation)
+  (let ((epoch import-view.generation)
       (summary (seq-sample-import-summary)))
     (if (= summary nil)
       (label "Nothing staged for import."
@@ -467,11 +427,11 @@
                 (selection-section selection)))))))))
 
 (def panel ()
-  (modal :is-open open?
+  (modal :is-open import-view.open
          :on-close (lambda () (cancel))
          :width-px 1240 :height-px 860
     (box :debug-name "sample-import-panel"
       :width :fill :height :fill :bg :transparent :padding 0.6
       ;; The natives are only consulted while open: closed, the modal has
       ;; zero footprint and the body is never built.
-      (if open? (body) (box :width 0 :height 0 :bg :transparent)))))
+      (if import-view.open (body) (box :width 0 :height 0 :bg :transparent)))))

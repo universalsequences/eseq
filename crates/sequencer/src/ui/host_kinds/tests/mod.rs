@@ -376,6 +376,7 @@ impl Harness {
 
 mod arrangement;
 mod browser;
+mod browser_view;
 mod devices;
 mod graph;
 mod lanes;

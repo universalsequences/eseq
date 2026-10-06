@@ -391,7 +391,7 @@ pub(crate) fn run_event_loop(
         prev_song_row_mirror_epoch: 0,
         prev_graph_read_key: (u64::MAX, u64::MAX, usize::MAX),
         prev_instance_key: (u64::MAX, u64::MAX, u64::MAX, 0),
-        prev_instances_fingerprint: u64::MAX,
+        prev_instances_fingerprint: None,
         prev_current_track: usize::MAX,
         cpu_overload: CpuOverloadIndicator::default(),
         recording_history_open: false,
@@ -439,7 +439,6 @@ pub(crate) fn run_event_loop(
         // analysis may have completed between graph binding and loop startup.
         prev_sampler_analysis_generation: u64::MAX,
         prev_auto_follow: true,
-        prev_browser_preview_playing: false,
         song: SongFrameState::default(),
         sound_palette: SoundPaletteFrameState::default(),
         watched_sampler_voice_track: None,
@@ -1827,7 +1826,7 @@ pub(crate) fn run_event_loop(
                 .expect("completed saved instrument load must have pending state");
             let _ = editor
                 .runtime_mut()
-                .eval_str("(set! sbrowser-loading-instrument-name \"\")");
+                .eval_str("(eseq.browser/show-loading! \"\")");
             let display_name = instrument_display_name(&pending.name);
             match &completed_load {
                 Ok(_) => editor.show_toast(format!("Loaded {display_name}"), eseqlisp::ToastKind::Success),

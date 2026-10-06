@@ -57,25 +57,23 @@ fn paths_watchable(release: bool, factory_root: &Path, path: &Path) -> bool {
     !release || !watch_path(path).starts_with(watch_path(factory_root))
 }
 
-/// Next value of `SEQ.content-library-epoch`. The browser's Instruments and
-/// Audio FX trees read it so a changed library re-lists without restart.
+/// The content library's epoch (`browser.library-epoch`). The browser's
+/// Instruments and Audio FX trees read it so a changed library re-lists
+/// without restart.
 static CONTENT_LIBRARY_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// The content library's epoch (`SEQ.content-library-epoch`): moves on every
-/// library change the watcher sees, so a cache of library contents (the host
-/// kinds' MIDI effect descriptors) reloads only then.
+/// The content library's epoch (`browser.library-epoch`, which the host
+/// kinds compare every tick): moves on every library change the watcher
+/// sees, so a cache of library contents (the host kinds' MIDI effect
+/// descriptors) reloads only then.
 pub(crate) fn content_library_epoch() -> u64 {
     CONTENT_LIBRARY_EPOCH.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-/// Re-list the instrument/effect library in the browser: bumps
-/// `SEQ.content-library-epoch` and runs the reactive cycle.
+/// Re-list the instrument/effect library in the browser: bumps the content
+/// library epoch, which the next tick pushes to `browser.library-epoch`.
 pub(crate) fn bump_content_library_epoch(editor: &mut Editor) {
-    let epoch = CONTENT_LIBRARY_EPOCH.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-    let runtime = editor.runtime_mut();
-    runtime.set_reactive("SEQ", "content-library-epoch", eseqlisp::vm::Value::Number(epoch as f64));
-    runtime.run_reactive_cycle();
-    editor.refresh_runtime_side_effects();
+    CONTENT_LIBRARY_EPOCH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     editor.mark_needs_redraw();
 }
 
@@ -525,20 +523,17 @@ mod tests {
     #[test]
     fn library_only_batch_bumps_content_library_epoch() {
         let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
-        editor.runtime_mut().register_reactive(
-            "SEQ", vec![("content-library-epoch", Value::Number(0.0))], true);
-        let read = |editor: &mut Editor| editor.runtime_mut().eval_str("SEQ.content-library-epoch").unwrap();
-        assert!(matches!(read(&mut editor), Some(Value::Number(n)) if n == 0.0));
+        let start = content_library_epoch();
         assert!(!process_lisp_hot_reload_paths(&mut editor, ReloadBatch::default()));
-        assert!(matches!(read(&mut editor), Some(Value::Number(n)) if n == 0.0));
+        assert_eq!(content_library_epoch(), start);
         assert!(
             process_lisp_hot_reload_paths(&mut editor, ReloadBatch { library: true, ..Default::default() }),
             "a library change must redraw"
         );
-        let first = match read(&mut editor) { Some(Value::Number(n)) => n, other => panic!("{other:?}") };
-        assert!(first > 0.0);
+        let first = content_library_epoch();
+        assert!(first > start);
         assert!(process_lisp_hot_reload_paths(&mut editor, ReloadBatch { library: true, ..Default::default() }));
-        assert!(matches!(read(&mut editor), Some(Value::Number(n)) if n > first));
+        assert!(content_library_epoch() > first);
     }
 
     #[test]

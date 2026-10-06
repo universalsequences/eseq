@@ -2,4 +2,4 @@
 (capture-project)
 (def capture-after-sync ()
   (eseq.browser/select-tab "instruments")
-  (set! eseq.browser/search-filter "Digi Syn"))
+  (let ((v eseq.browser/browser-view)) (set! v.search "Digi Syn")))

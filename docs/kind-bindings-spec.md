@@ -1,6 +1,6 @@
 # Kind bindings
 
-Status: spec rev 3, 2026-10-04. Stages 1–6 built, stage 7 in part (§14; 7, 7b, 7b-2, 7b-3, 7c, 7d, 7e, 7f, 7g, 7h and 7i built), stage 8 in part (§13, §13.1: .12 and .13 ported) (§3.1, §3.2, §3.3, §3.4, §4, §7.1, §7.3, §8, §9 notes). Bead: epic `eseq-0l17` (`bd list --label kind-bindings`).
+Status: spec rev 3, 2026-10-04. Stages 1–6 built, stage 7 in part (§14; 7, 7b, 7b-2, 7b-3, 7c, 7d, 7e, 7f, 7g, 7h and 7i built), stage 8 in part (§13, §13.1: .12, .13 and .17 ported) (§3.1, §3.2, §3.3, §3.4, §4, §7.1, §7.3, §8, §9 notes). Bead: epic `eseq-0l17` (`bd list --label kind-bindings`).
 Rev 3 resolves the open questions (§12 Decisions). Rev 2 dropped the separate `defrecord` form of rev 1: host state and view state
 are declared with `def-kind`, which gains keyed and singleton kinds, a `:host`
 field group and typed fields.
@@ -1243,6 +1243,126 @@ its instance and field.
      asserts the mixer and patch mixer repaint without re-running for
      mute, solo, audibility, arm, selection, delete target, faders and
      meters; the MIDImix tests publish their topology as kinds.
+   Built (stage 8, eseq-0l17.17): the browser (`ui/browser.lisp`), the
+   sample import modal (`ui/sample-import.lisp`), resample
+   (`ui/resample.lisp`) and the sound palette (`ui/sound-palette.lisp`):
+   - **Kinds.** `project.instances (list-of :any)`: the package instances
+     as the Packages tree's `seq-package-tree` takes them (dicts `:id :kind
+     :label :owner-label :owner-rack :registered?`, the legacy
+     `SEQ.instances` rows), pushed when their fingerprint moves
+     (`instances_value_if_changed`, compared in
+     `host_kinds/presentation.rs` like `project.name`, but only while
+     observed: the fingerprint resets while nothing reads the field, so
+     the first observing tick pushes and a first render of the Packages
+     tab may show the previous rows for one tick). Everything else was
+     built by 7f: `browser.*` (the sidebar, `rack-slots` → `slot-presets`,
+     `sound-presets` / `kit-presets` → `preset-file`, `engines`,
+     `library-epoch`, `preview-playing` / `preview-position`), `editor.*`,
+     `sound-palette` / `sound`, `project.name`, `track.instrument-id`,
+     `song.bound-clip` and `clip.take` / `clip.cell` (open a clip's sound).
+     `present-fixture` is unchanged (the edit session republishes the
+     editor, so editor states are covered by tests, not captures).
+   - **View state** (all `:key ()` singletons; no `defstate` or `(state …)`
+     is left in the four files): in `eseq.browser`, `browser-view` (tab,
+     mode, the tab's and the preset list's search), `sample-pick` (tag and
+     origin filters, the selected and auditioned sample, the shown track
+     instance and sample the filters were last reset for),
+     `sample-preview` (path, buffer, auto), `instrument-pick` (tier filter,
+     favorites, the highlighted instrument and custom effect, the
+     instrument loading), `editor-draft` (Save-as name), `kit-save` (open,
+     name, group id, scene indices: the save command's address),
+     `preset-save`, `package-menu` / `instrument-menu` (open, at, the row),
+     `package-draft` and `instance-rename` (its target is the instance id
+     the rename command takes). `eseq.sample-import`: `import-view` (open,
+     generation, the drafts) and `import-preview`. `eseq.resample`:
+     `resample-view`, which also holds the print the host hands `open`
+     (buffer and duration, passed as arguments: the legacy `RESAMPLE`
+     namespace, which the §14 inventory missed, is gone) and the last error
+     (`show-error`, which the host invokes on a failed command).
+     `eseq.sound-palette`: `sound-rename` (the sound, the draft). The
+     former `eseq.vanilla` host protocol (`sbrowser-tab`,
+     `sbrowser-loading-instrument-name`, `sbrowser-editor-name`, written by
+     name from Rust) is the singletons now: the host calls
+     `(eseq.browser/show-loading! name)`, `(eseq.browser/clear-editor-name!)`,
+     `(eseq.browser/show-browser-tab! name)` (the tab, its searches kept:
+     `select-tab` clears them) and `(eseq.browser/mark-auditioned! path)`;
+     `ui/mixer.lisp` and `ui/sequencer.lisp` call `show-loading!` too.
+   - **Bindings.** The preview strips (browser, sample import) and the
+     resample waveform bind `#'browser.preview-position`; resample's play
+     icon `#'browser.preview-playing`. Values stay where Lisp decides
+     (`browser.preview-playing` gates the resample playhead and the stop
+     calls; `editor.*` picks the editor header; the sidebar's fields pick
+     the tab and the presets). Tracks: drop handlers keep the host's drop
+     meta (a track position) and look the track up (`track-at`) for its
+     `instrument-type`; the current track is `selection.track` (`t.index`
+     addresses the commands). The selected rack slot's presets come from
+     `browser.rack-slots`, the slot whose `device.delete-target` is set
+     (replacing `seq-delete-target?` + `SEQ.delete-target-version`). Kit
+     export lists `(scenes)`; rack menus `(groups)` (`g.rack`, `g.gid`).
+     The rack check (`rack-panel-open?`: the Layer action and a modified
+     activation add the sample as a layer of the shown rack) reads
+     `browser.track.rack` alone: `browser.instrument-kind` is never "rack"
+     (the legacy `SEQ.sidebar-kind` never was either, so the check was
+     dead before the port). The Instrument Rack builtin always adds a new
+     track (`add-new-layer-rack-track`). The preview strips share one
+     implementation taking the preview singleton (`sync-preview!`,
+     `toggle-preview!`, `preview-strip`, `stop-preview` and the headphone
+     widget, in `eseq.preview-strip` (`ui/preview-strip.lisp`: importing
+     the browser from the import modal would load it into harnesses that
+     only load the sequencer); the import modal passes `import-preview`).
+     Setters: `(set! editor.run-mode …)` replaces the run-mode command;
+     the palette's rename is `(set! s.name draft)`, apply / fork / open /
+     close are `apply-sound!`, `fork-sound!`, `open-sound-palette!` (a clip's
+     take or pattern: `c.take`, `c.cell.pid`), `close-sound-palette!`.
+     `eseq.view-kit` gains `rgb-part` and `color-rgba` (moved from the
+     mixer, which imports them).
+   - **Fixes found on the way.** `SEQ.current-pNroject-name` (a typo:
+     unregistered, so the Projects tree never marked the open project) is
+     `project.name`. A number 0 is falsy in eseqlisp: guard a position with
+     `(= i nil)`, never `(and i …)`, or track 0 reads as missing.
+   - **Legacy removed:** `SEQ.browser-preview-playing` / `-playhead` (with
+     the tick's mirror and `prev_browser_preview_playing`),
+     `content-library-epoch` (the watcher only bumps the counter the kinds
+     compare), `sidebar-kind`, `sidebar-track-index`,
+     `sidebar-selected-sample`, `sidebar-presets`, `sidebar-user-presets`,
+     `sidebar-loaded-preset`, `sidebar-instrument-display-name`,
+     `sidebar-rack-slot-presets`, `sidebar-preset-tree` (unread),
+     `project-instrument-engines`, `sound-presets`, `kit-presets` (the
+     listings only record into `presented` now: `record_sound_presets` /
+     `record_kit_presets`), `sound-palette`, `track-instrument-ids`,
+     `editor-surface`, `editor-buffer-name`, `editor-error`,
+     `editor-canceling`, `editor-instrument-run-mode`,
+     `editor-active-macro-name`, `editor-active-macro-action` (dropped from
+     the `presented/legacy.rs` mirror), all of `RESAMPLE`, and the
+     compat alias rows of the removed browser state. Kept, still read by
+     unported areas (eseq-0l17.22): `SEQ.current-project-name`
+     (application menus), `sidebar-instrument-name` (application menus,
+     the panel frame), `editor-mode` / `editor-active` / `editor-open-macro`
+     (seq-panels, scale editor, patch macros), `instances` (alez.neural),
+     `scene-names`, `song-lanes`, `song-bound-clip` (arrangement), `groups`,
+     `num-tracks`, `current-track`, `instrument-panel`,
+     `delete-target-version`, `track-loaded-presets` (no reader; not this
+     area's).
+   - **Tests.** `host_kinds::tests::browser_view` (Distro root): the four
+     files (and `ui/preview-strip.lisp`) use no legacy form and refer
+     their kinds; the preview strip binds
+     `browser.preview-position` and an idle sync re-renders nothing;
+     `project.instances` follows the `App`'s instances once the Packages
+     tab observes it (not before); resample's error and
+     print land in `resample-view`. `host_kinds::tests::browser` checks the
+     kinds against the presented record (sidebar, palette, editor, rack
+     slots) instead of the removed legacy names. The host-less browser
+     harness (`browser_editor_on_instrument_tab`) seeds kinds
+     (`seed_browser_kinds`: a sampler sidebar, one Sound, one kit, three
+     scenes; `seed_browser_tracks`, `show_browser_track(_sample)`,
+     `push_presented_sidebar`, `set_kind_instrument_types`,
+     `seed_kind_scene_names`, `seed_open_sound_palette`); tests reach view
+     state through `set_browser_view_field` / `browser_view_field`. A
+     rack track shown in the sidebar takes the Layer action and a modified
+     activation as a layer, the Instrument Rack builtin as a new track. The
+     ported-file scanners share `assert_ported` (`host_kinds::tests::views`).
+     A track and its sample pushed together (one
+     cycle, as one sync) keep the browser's sample-search reset rule.
 9. **Diagnostics.** Re-render reason log, `describe-kind`. Useful from
    stage 6 on; can run in parallel with the ports.
 
@@ -1318,6 +1438,18 @@ the other port beads follow it):
      state modules that read `SEQ` at load need an (empty) `SEQ` namespace;
    - a capture may differ where a legacy publisher lagged a sync (live
      kind fields read the host at once): compare the pair, not the bytes.
+   Learned by the browser (.17):
+   - 0 is falsy: a position guard is `(= i nil)`, never `(and i …)` (track
+     0 read as missing);
+   - a parameter named like a module function shadows it (resample's
+     `open` took `duration` and broke `(duration)`): name arguments for
+     what they hold;
+   - a view that resets on "this field changed" (the browser's
+     sample-search reset on a new track or sample) needs related fields
+     pushed in one cycle: host-less tests push them together, as one sync;
+   - host protocol state written from Rust by name becomes singleton
+     fields reached through a local or a small exported helper
+     (`show-loading!`), never a flat `defstate`.
 4. **Legacy publishers.** For each family the area read, grep every
    reader and mention: `content/` Lisp, all of `crates/` Rust (tests and
    capture fixtures included), `tools/` and `docs/` (the compat alias
@@ -2495,7 +2627,7 @@ Built (7c):
 | `settings` | `()` | `audio-workers-choice :string` [`audio-set-workers`], `audio-workers-note`, `midi-error :string`, `midi-persistent :bool`, `midi-devices (list-of midi-device)` |
 | `midi-device` | `(index)` | `index :int`, `device-id`, `name`, `status :string`, `enabled :bool` [`midi-set-enabled`], `connected :bool` |
 | `agent` | `()` | `generation :int` |
-| `project` | `()` | `name :string`, `audio-workers-options (list-of :string)` |
+| `project` | `()` | `name :string`, `audio-workers-options (list-of :string)`; since .17 `instances (list-of :any)` (the package instances, the Packages tree's rows) |
 | `track` | `(index)` | `instrument-id :string` (the Instruments tab's `:instrument-id`) |
 
 [l] = the `set-learn` host command (`:field`, `:value`;
@@ -2601,7 +2733,9 @@ Built (7f):
   Settings' open flag are each read by one view (Lisp `defstate`s today):
   `:state` singletons in their own modules when ported (.12, .17, .18),
   not host kinds. Sample import and resample read no host state beyond the
-  preview (`browser.preview-*`).
+  preview (`browser.preview-*`; resample's print came through a `RESAMPLE`
+  namespace this inventory missed, which .17 replaced with arguments to
+  `eseq.resample/open`).
 - **Not covered:** the legacy-only fields no content reads
   (`SEQ.sidebar-preset-tree`, `MIDI.ports`; `learn-checkpoint-wav` and
   `editor-active` are in the record, mirrored, but no kind pushes them),
@@ -2928,10 +3062,10 @@ builds the field name.
 | `SEQ.bus-volumes` | 3 | mixer, sequencer, legacy/mixer | sv/track_and_mixer.rs | model | bus.volume | built (.10); ported (.13), kept: sequencer | .11 .13 |
 | `SEQ.cpu-load-pct` | 1 | transport | reactive_tick.rs | live | engine.cpu-load | built (.10); ported, legacy removed (.12) | .12 |
 | `SEQ.current-pattern` | 18 | transport, arrangement, mixer +10 | sv/topology_and_visualization.rs | model | transport.scene (s.index) | built (.10); ported (.12, .13), kept: arrangement, macros, scripts | .12 .13 .15 .20 |
-| `SEQ.current-track` | 108 | piano-roll, effects/process-panel, browser +19 | piano_roll.rs | live | selection.track | built (.10); ported (.13), kept: many | .11 .13 .14 .15 .16 .17 .18 .19 .20 |
+| `SEQ.current-track` | 108 | piano-roll, effects/process-panel, browser +19 | piano_roll.rs | live | selection.track | built (.10); ported (.13, .17), kept: many | .11 .13 .14 .15 .16 .17 .18 .19 .20 |
 | `SEQ.delays` | 1 | seqv-track-params | event_loop.rs | model | step.delay | built (.10) | .11 |
 | `SEQ.durations` | 2 | seq-core-state, seqv-track-params | event_loop.rs | model | step.duration | built (.10) | .11 |
-| `SEQ.groups` | 53 | mixer, drum-rack-v2, seq-core-state +12 | project.rs | model | group.* via (groups), track.group | built (.10); ported (.13), kept: drum-rack-v2, seq-core-state + | .11 .13 .17 .19 .20 |
+| `SEQ.groups` | 53 | mixer, drum-rack-v2, seq-core-state +12 | project.rs | model | group.* via (groups), track.group | built (.10); ported (.13, .17), kept: drum-rack-v2, seq-core-state + | .11 .13 .17 .19 .20 |
 | `SEQ.master-peak-l` | 2 | mixer, transport | event_loop.rs | live | master.peak-l | built (.10); ported (.12, .13), removed | .12 .13 |
 | `SEQ.master-peak-r` | 2 | mixer, transport | event_loop.rs | live | master.peak-r | built (.10); ported (.12, .13), removed | .12 .13 |
 | `SEQ.master-recording` | 2 | transport | reactive_tick.rs | live | master.recording | built (.10); ported, legacy removed (.12) | .12 |
@@ -2950,7 +3084,7 @@ builds the field name.
 | `SEQ.roll-mode` | 2 | transport | reactive_tick.rs | live | transport.roll-mode | built (.10); ported, legacy removed (.12) | .12 |
 | `SEQ.scene-banks` | 2 | scene-banks | sv/song_state.rs | model | (banks) → bank.label/scenes | built (.10); ported, legacy removed (.12) | .12 |
 | `SEQ.scene-launch-quantize` | 6 | transport, drum-rack-v2, mixer | rack_clip_switch_probe.rs | model | transport.launch-quantize | built (.10); ported (.12, .13), kept: drum-rack-v2; the host kinds read transport.launch-quantize from it | .12 .13 .19 |
-| `SEQ.scene-names` | 8 | browser, arrangement | sv/song_state.rs | model | scene.name | built (.10) | .15 .17 |
+| `SEQ.scene-names` | 8 | browser, arrangement | sv/song_state.rs | model | scene.name | built (.10); ported (.17), kept: arrangement | .15 .17 |
 | `SEQ.selected-steps` | 4 | step-grid, effects/param-controls | reactive_tick.rs | live | step.selected | built (.10) | .11 .14 |
 | `SEQ.selected-tracks` | 5 | mixer, step-grid-interactions | sv/steps_and_pattern.rs | live | selection.tracks | built (.10); ported (.13), kept: step-grid-interactions | .11 .13 |
 | `SEQ.seq-track-step-active-*` | 2 | sequencer | sv/steps_and_pattern.rs | live | step.active | built (.10) | .11 |
@@ -3007,7 +3141,7 @@ builds the field name.
 | `SEQ.<slot-field>` | 12 | sequencer | sv/expanded_step.rs | model | step.active/selected/playing/plocked/lock-kind/variant-color through the view's own slot→step map (expanded-step projection removed) | built (.28) | .11 |
 | `SEQ.<var field>` | 8 | effects/param-controls, effects/custom-ui-runtime, mixer +1 | sv/param_fields_and_sync.rs | model | param.value / send.display (field strings from panel data); mod / process fields → param.mod-offset / mod-value / mod-scale / process-value / process-clamped, device.mod-phases (built .37) | built (.28, .37); mixer sends ported (.13): `track-N-bus-M-send` and its `-plock-*` / `-proc-*` removed (kept: `tp-bus-M-send`, track-panels) | .13 .14 |
 | `SEQ.effects` | 3 | application-menus, effects/index, effects/buffers | lisp_host/dgen/instrument_storage.rs | model | track.devices → device.params; mod targets, sources, tensors → param.mod-targets / section / mod-slot / visible, device.tensors (built .37); tables, IR names, editors .43 | built (.28, .37) | .14 .18 |
-| `SEQ.instrument-panel` | 10 | effects/param-controls, browser, effects/index +3 | reactive_tick.rs | model | device panel data (device.params; rack slots: the rack device's devices (built .36); key locks → param.key-locks / device.key-locked-notes / device.variants, macros → device.macros, modulation → param.mod-* / mod-targets, base note → device.base-note, tensors → device.tensors, process → param.process-* (built .37); sampler media, sound binding, modulator display .43) | built (.28, .36, .37) | .14 .17 .18 |
+| `SEQ.instrument-panel` | 10 | effects/param-controls, browser, effects/index +3 | reactive_tick.rs | model | device panel data (device.params; rack slots: the rack device's devices (built .36); key locks → param.key-locks / device.key-locked-notes / device.variants, macros → device.macros, modulation → param.mod-* / mod-targets, base note → device.base-note, tensors → device.tensors, process → param.process-* (built .37); sampler media, sound binding, modulator display .43) | built (.28, .36, .37); ported (.17: the browser's rack check, dead before the port (it also required `SEQ.sidebar-kind` "rack", which the host never set), reads browser.track.rack alone and is live now) | .14 .17 .18 |
 | `SEQ.macros` | 5 | macros, effects/param-controls | project.rs | model | project macros → project.macros / macro (mappings → macro-mapping); rack macros → device.macros of the rack's instrument (rack-macro) | built (.37) | .14 .18 |
 | `SEQ.sampler-playhead` | 1 | effects/sampler-panel | reactive_tick.rs | live | device.playhead (live) | built (.28) | .14 |
 | `SEQ.seq-track-step-plock-kind-*` | 1 | sequencer | sv/steps_and_pattern.rs | model | step.lock-kind | built (.28) | .11 |
@@ -3032,13 +3166,13 @@ builds the field name.
 | `SEQ.track-process-slots` | 4 | sequencer, seqv-track-params, scripts/sequencers/band-coupling-matrix-demo | input.rs | model | track.processes → process | built (.29) | .11 .20 |
 | `SEQ.queued-track-clips` | 1 | mixer | event_loop.rs | model | cell.queued (live) | built (.30); ported (.13), removed | .13 |
 | `SEQ.scene-spans` | 9 | arrangement | sv/song_state.rs | model | song.spans → scene-span | built (.30) | .15 |
-| `SEQ.song-bound-clip` | 2 | arrangement, sound-palette | sv/song_state.rs | model | song.bound-clip | built (.30) | .15 .17 |
+| `SEQ.song-bound-clip` | 2 | arrangement, sound-palette | sv/song_state.rs | model | song.bound-clip | built (.30); ported (.17), kept: arrangement | .15 .17 |
 | `SEQ.song-clip-sounds` | 2 | arrangement | sv/sound_palette.rs | model | clip.dot / dot-color | built (.30) | .15 |
 | `SEQ.song-cursor-beats` | 1 | transport | sv/song_state.rs | model | song.cursor | built (.30); ported, legacy removed (.12) | .12 |
 | `SEQ.song-edit-error` | 2 | arrangement | sv/song_state.rs | model | song.edit-error | built (.30) | .15 |
 | `SEQ.song-end-beat` | 2 | arrangement | sv/song_state.rs | model | song.end | built (.30) | .15 |
 | `SEQ.song-lane-events` | 4 | arrangement | sv/song_state.rs | model | clip.events / num-steps / length | built (.30) | .15 |
-| `SEQ.song-lanes` | 7 | arrangement, sound-palette | sv/song_state.rs | model | `t.clips` → clip | built (.30) | .15 .17 |
+| `SEQ.song-lanes` | 7 | arrangement, sound-palette | sv/song_state.rs | model | `t.clips` → clip | built (.30); ported (.17: a bound clip's c.take / c.cell), kept: arrangement | .15 .17 |
 | `SEQ.song-manual-latch` | 2 | transport | sv/song_state.rs | model | song.manual-latch | built (.30); ported, legacy removed (.12) | .12 |
 | `SEQ.song-mode` | 2 | transport, arrangement | sv/song_state.rs | model | song.mode | built (.30); ported (.12), kept: arrangement (.15) | .12 .15 |
 | `SEQ.song-pending` | 8 | arrangement | sv/song_state.rs | model | song.pending | .39 | .15 |
@@ -3098,25 +3232,25 @@ builds the field name.
 | `RETRO.playing` | 5 | retrospective | sequencer/state/sequencer_state/scene_launch.rs | live | retro.playing (live) | built (.32); ported, legacy removed (.12) | .12 |
 | `RETRO.position` | 1 | retrospective | retrospective.rs | live | retro.playhead (live, .12: the host maps the loop position onto the crop) | built (.32); ported, legacy removed (.12) | .12 |
 | `RETRO.truncated` | 1 | retrospective | retrospective.rs | model | retro.truncated | built (.32); ported, legacy removed (.12) | .12 |
-| `SEQ.browser-preview-playhead` | 3 | sample-import, browser, resample | reactive_tick.rs | live | browser.preview-position (live) | built (.32) | .17 |
-| `SEQ.browser-preview-playing` | 4 | browser, sample-import, resample | reactive_tick.rs | model | browser.preview-playing (live) | built (.32) | .17 |
-| `SEQ.content-library-epoch` | 2 | browser | lisp_hot_reload.rs | model | browser.library-epoch (the library trees are natives taking a search filter, so a read of the epoch re-lists them) | built (.32) | .17 |
-| `SEQ.current-pNroject-name` | 1 | browser | - | model | project.name (typo in browser.lisp) | built (.32) | .17 |
-| `SEQ.current-project-name` | 4 | browser, application-menus | sv/project_state.rs | model | project.name | built (.32) | .17 .18 |
-| `SEQ.editor-active-macro-action` | 3 | browser | reactive_tick.rs | model | editor.active-macro-action | built (.32) | .17 |
-| `SEQ.editor-active-macro-name` | 1 | browser | reactive_tick.rs | model | editor.active-macro | built (.32) | .17 |
+| `SEQ.browser-preview-playhead` | 3 | sample-import, browser, resample | reactive_tick.rs | live | browser.preview-position (live) | built (.32); ported, legacy removed (.17) | .17 |
+| `SEQ.browser-preview-playing` | 4 | browser, sample-import, resample | reactive_tick.rs | model | browser.preview-playing (live) | built (.32); ported, legacy removed (.17) | .17 |
+| `SEQ.content-library-epoch` | 2 | browser | lisp_hot_reload.rs | model | browser.library-epoch (the library trees are natives taking a search filter, so a read of the epoch re-lists them) | built (.32); ported, legacy removed (.17) | .17 |
+| `SEQ.current-pNroject-name` | 1 | browser | - | model | project.name (typo in browser.lisp) | built (.32); ported (.17): the typo read an unregistered name | .17 |
+| `SEQ.current-project-name` | 4 | browser, application-menus | sv/project_state.rs | model | project.name | built (.32); ported (.17), kept: application-menus | .17 .18 |
+| `SEQ.editor-active-macro-action` | 3 | browser | reactive_tick.rs | model | editor.active-macro-action | built (.32); ported, legacy removed (.17) | .17 |
+| `SEQ.editor-active-macro-name` | 1 | browser | reactive_tick.rs | model | editor.active-macro | built (.32); ported, legacy removed (.17) | .17 |
 | `SEQ.editor-assets` | 2 | patch-macros | reactive_tick.rs | model | editor.assets → editor-asset | built (.32) | .18 |
-| `SEQ.editor-buffer-name` | 1 | browser | event_loop.rs | model | editor.buffer | built (.32) | .17 |
-| `SEQ.editor-canceling` | 4 | browser | event_loop.rs | model | editor.canceling | built (.32) | .17 |
-| `SEQ.editor-error` | 5 | browser | event_loop.rs | model | editor.error | built (.32) | .17 |
-| `SEQ.editor-instrument-run-mode` | 4 | browser | host_commands/instrument_authoring.rs | model | editor.run-mode | built (.32) | .17 |
+| `SEQ.editor-buffer-name` | 1 | browser | event_loop.rs | model | editor.buffer | built (.32); ported, legacy removed (.17) | .17 |
+| `SEQ.editor-canceling` | 4 | browser | event_loop.rs | model | editor.canceling | built (.32); ported, legacy removed (.17) | .17 |
+| `SEQ.editor-error` | 5 | browser | event_loop.rs | model | editor.error | built (.32); ported, legacy removed (.17) | .17 |
+| `SEQ.editor-instrument-run-mode` | 4 | browser | host_commands/instrument_authoring.rs | model | editor.run-mode | built (.32); ported, legacy removed (.17) | .17 |
 | `SEQ.editor-library-macros` | 2 | patch-macros | reactive_tick.rs | model | editor.library-macros → editor-macro | built (.32) | .18 |
-| `SEQ.editor-mode` | 18 | browser, seq-panels | event_loop.rs | model | editor.mode | built (.32) | .11 .17 |
+| `SEQ.editor-mode` | 18 | browser, seq-panels | event_loop.rs | model | editor.mode | built (.32); ported (.17), kept: seq-panels, scale-editor | .11 .17 |
 | `SEQ.editor-open-macro` | 2 | patch-macros | reactive_tick.rs | model | editor.open-macro | built (.32) | .18 |
 | `SEQ.editor-patch-macros` | 4 | patch-macros | reactive_tick.rs | model | editor.patch-macros → editor-macro | built (.32) | .18 |
 | `SEQ.editor-selected-asset` | 1 | patch-macros | reactive_tick.rs | model | editor.selected-asset → asset-info (nil: none) | built (.32) | .18 |
-| `SEQ.editor-surface` | 3 | browser | host_commands/instrument_authoring.rs | model | editor.surface | built (.32) | .17 |
-| `SEQ.kit-presets` | 2 | browser | host_commands/drum_rack_v2.rs | model | browser.kit-presets → preset-file | built (.32) | .17 |
+| `SEQ.editor-surface` | 3 | browser | host_commands/instrument_authoring.rs | model | editor.surface | built (.32); ported, legacy removed (.17) | .17 |
+| `SEQ.kit-presets` | 2 | browser | host_commands/drum_rack_v2.rs | model | browser.kit-presets → preset-file | built (.32); ported, legacy removed (.17) | .17 |
 | `SEQ.learn-abs-distance` | 1 | patch-learn | patch_learn.rs | model | learn.abs-distance | built (.32) | .18 |
 | `SEQ.learn-applied` | 1 | patch-learn | patch_learn.rs | model | learn.applied | built (.32) | .18 |
 | `SEQ.learn-basin-check` | 1 | patch-learn | patch_learn.rs | model | learn.basin-check | built (.32) | .18 |
@@ -3150,19 +3284,19 @@ builds the field name.
 | `SEQ.learn-target-name` | 3 | patch-learn | host_commands/learn.rs | model | learn.target-name | built (.32) | .18 |
 | `SEQ.learn-target-path` | 3 | patch-learn | host_commands/learn.rs | model | learn.target-path | built (.32) | .18 |
 | `SEQ.learn-total-epochs` | 1 | patch-learn | patch_learn.rs | model | learn.total-epochs | built (.32) | .18 |
-| `SEQ.project-instrument-engines` | 1 | browser | sv/project_state.rs | model | browser.engines | built (.32) | .17 |
-| `SEQ.sidebar-instrument-display-name` | 2 | browser | sv/project_state.rs | model | browser.instrument-label | built (.32) | .17 |
-| `SEQ.sidebar-instrument-name` | 5 | browser, application-menus, effects/panel-frame | sv/project_state.rs | model | browser.instrument | built (.32) | .14 .17 .18 |
-| `SEQ.sidebar-kind` | 7 | browser | sv/project_state.rs | model | browser.instrument-kind (`kind` is a built-in field) | built (.32) | .17 |
-| `SEQ.sidebar-loaded-preset` | 3 | browser | sv/project_state.rs | model | browser.preset | built (.32) | .17 |
-| `SEQ.sidebar-presets` | 1 | browser | sv/project_state.rs | model | browser.presets | built (.32) | .17 |
-| `SEQ.sidebar-rack-slot-presets` | 1 | browser | sv/project_state.rs | model | browser.rack-slots → slot-presets (each names its rack slot device) | built (.32) | .17 |
-| `SEQ.sidebar-selected-sample` | 7 | browser | sv/project_state.rs | model | browser.sample | built (.32) | .17 |
-| `SEQ.sidebar-track-index` | 4 | browser | sv/project_state.rs | model | browser.track | built (.32) | .17 |
-| `SEQ.sidebar-user-presets` | 1 | browser | sv/project_state.rs | model | browser.user-presets | built (.32) | .17 |
-| `SEQ.sound-palette` | 7 | sound-palette | sv/sound_palette.rs | model | sound-palette singleton; sound-palette.sounds → sound (track, patch-id) | built (.32) | .17 |
-| `SEQ.sound-presets` | 2 | browser | sv/project_state.rs | model | browser.sound-presets → preset-file | built (.32) | .17 |
-| `SEQ.track-instrument-ids` | 1 | browser | sv/track_and_mixer.rs | model | track.instrument-id | built (.32) | .17 |
+| `SEQ.project-instrument-engines` | 1 | browser | sv/project_state.rs | model | browser.engines | built (.32); ported, legacy removed (.17) | .17 |
+| `SEQ.sidebar-instrument-display-name` | 2 | browser | sv/project_state.rs | model | browser.instrument-label | built (.32); ported, legacy removed (.17) | .17 |
+| `SEQ.sidebar-instrument-name` | 5 | browser, application-menus, effects/panel-frame | sv/project_state.rs | model | browser.instrument | built (.32); ported (.17), kept: application-menus, panel-frame | .14 .17 .18 |
+| `SEQ.sidebar-kind` | 7 | browser | sv/project_state.rs | model | browser.instrument-kind (`kind` is a built-in field; "sampler", "instrument" or "empty", never "rack": the rack checks read browser.track.rack) | built (.32); ported, legacy removed (.17) | .17 |
+| `SEQ.sidebar-loaded-preset` | 3 | browser | sv/project_state.rs | model | browser.preset | built (.32); ported, legacy removed (.17) | .17 |
+| `SEQ.sidebar-presets` | 1 | browser | sv/project_state.rs | model | browser.presets | built (.32); ported, legacy removed (.17) | .17 |
+| `SEQ.sidebar-rack-slot-presets` | 1 | browser | sv/project_state.rs | model | browser.rack-slots → slot-presets (each names its rack slot device) | built (.32); ported, legacy removed (.17) | .17 |
+| `SEQ.sidebar-selected-sample` | 7 | browser | sv/project_state.rs | model | browser.sample | built (.32); ported, legacy removed (.17) | .17 |
+| `SEQ.sidebar-track-index` | 4 | browser | sv/project_state.rs | model | browser.track | built (.32); ported, legacy removed (.17) | .17 |
+| `SEQ.sidebar-user-presets` | 1 | browser | sv/project_state.rs | model | browser.user-presets | built (.32); ported, legacy removed (.17) | .17 |
+| `SEQ.sound-palette` | 7 | sound-palette | sv/sound_palette.rs | model | sound-palette singleton; sound-palette.sounds → sound (track, patch-id) | built (.32); ported, legacy removed (.17) | .17 |
+| `SEQ.sound-presets` | 2 | browser | sv/project_state.rs | model | browser.sound-presets → preset-file | built (.32); ported, legacy removed (.17) | .17 |
+| `SEQ.track-instrument-ids` | 1 | browser | sv/track_and_mixer.rs | model | track.instrument-id | built (.32); ported, legacy removed (.17) | .17 |
 | `GRAPH.<ggm-route-color-field>` | 4 | scripts/sequencers/graph-neural-group-matrix-demo | lisp_host/eseq/graph_authoring.rs (+ Lisp writes) | model | n.route.color (view derivation from graph-node.route) | built (.33) | .20 |
 | `GRAPH.<gvr-route-color-field>` | 4 | scripts/sequencers/graph-neural-variable-reset-demo | lisp_host/eseq/graph_authoring.rs (+ Lisp writes) | model | n.route.color (view derivation from graph-node.route) | built (.33) | .20 |
 | `SEQ.<neural->` | 8 | scripts/sequencers/neural-8x8-track-router | sv/topology_and_visualization.rs | model | neuron.selected (the native neural engine) | .50 | .20 |
@@ -3261,13 +3395,13 @@ builds the field name.
 | `<ns-var namespace>` | 3 | bindings | - | - | bindings.lisp generic scopes → kinds | remove | .18 |
 | `reactive-value` | 75 | instruments/Synths/Heat/ui, effects/param-controls, scripts/sequencers/graph-neural-variable-reset-demo +27 | - | - | t.x / #'t.x read as a value (§8) | remove; gone from .13's files | .11 .13 .14 .20 .21 |
 | `SEQ.bus-ids` | 10 | mixer, drum-rack-v2, seq-core-state +1 | sv/track_and_mixer.rs | model | instance identity | remove; ported (.13), kept: drum-rack-v2, seq-core-state | .11 .13 .19 |
-| `SEQ.delete-target-version` | 4 | mixer, browser, application-menus +1 | reactive_tick.rs | model | implicit (fields re-render) | remove; ported (.13), kept: browser, application-menus + | .13 .14 .17 .18 |
+| `SEQ.delete-target-version` | 4 | mixer, browser, application-menus +1 | reactive_tick.rs | model | implicit (fields re-render) | remove; ported (.13, .17: the browser reads slot device.delete-target), kept: application-menus + | .13 .14 .17 .18 |
 | `SEQ.num-patterns` | 6 | transport, macros, scene-banks | sv/topology_and_visualization.rs | model | (len (scenes)) | remove; ported (.12), kept: macros (.18) | .12 .18 |
-| `SEQ.num-tracks` | 38 | mixer, track-collapse, sequencer +10 | reactive_sync.rs | model | (len (tracks)) | remove; ported (.13), kept: many | .11 .13 .14 .17 .18 .19 |
+| `SEQ.num-tracks` | 38 | mixer, track-collapse, sequencer +10 | reactive_sync.rs | model | (len (tracks)) | remove; ported (.13, .17), kept: many | .11 .13 .14 .17 .18 .19 |
 | `SEQ.rack-panel-view-generation` | 1 | effects/state | sv/project_state.rs | model | implicit | remove | .14 |
 | `SEQ.scene-bank-view-generation` | 1 | scene-banks | sv/project_state.rs | model | implicit (collections re-render) | remove; ported, legacy removed (.12) | .12 |
 | `SEQ.track-ids` | 30 | sequencer, arrangement, mixer +1 | reactive_sync.rs | model | instance identity (subtree :key t) | remove; ported (.13), kept: sequencer, arrangement + | .11 .13 .15 .20 |
-| `SEQ.instances` | 3 | mixer, browser, packages/alez.neural/src/variable-reset | lisp_host/eseq/process_dsl_parse.rs | model | package instances (live_instances) | keep; ported (.13), kept: browser, alez.neural | .13 .17 .20 |
+| `SEQ.instances` | 3 | mixer, browser, packages/alez.neural/src/variable-reset | lisp_host/eseq/process_dsl_parse.rs | model | package instances (live_instances); project.instances (.17) | keep; ported (.13, .17: the Packages tree reads project.instances), kept: alez.neural | .13 .17 .20 |
 | `THEME.buffer_bg` | 1 | sequencer | - | model | THEME stays (theme namespace, not host state) | keep | .11 |
 | `THEME.plock_base` | 2 | effects/panel-bodies, effects/track-panels | - | model | THEME stays (theme namespace, not host state) | keep | .14 |
 | `THEME.scene_clip_bg` | 1 | arrangement | - | model | THEME stays (theme namespace, not host state) | keep | .15 |

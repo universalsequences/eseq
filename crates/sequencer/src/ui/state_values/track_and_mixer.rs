@@ -203,19 +203,11 @@ pub(crate) fn instrument_type_label(
     }
 }
 
-/// Per track, the id of the instrument it plays ([`track_instrument_id`]).
-pub(crate) fn build_track_instrument_ids(app: &app::App) -> Value {
-    let items = (0..app.graph.track_instrument_types.len())
-        .map(|track| Rc::new(RefCell::new(Value::String(track_instrument_id(app, track)))))
-        .collect();
-    Value::List(items)
-}
-
 /// The id of the instrument `track` plays, in the Instruments tab's
 /// `:instrument-id` form: the canonical saved-instrument id for custom
 /// tracks, `builtin:<name>` for samplers and modulators, and "" otherwise
-/// (empty tracks and racks, which the tab does not load in place). Shared by
-/// `SEQ.track-instrument-ids` and `track.instrument-id`.
+/// (empty tracks and racks, which the tab does not load in place):
+/// `track.instrument-id`.
 pub(crate) fn track_instrument_id(app: &app::App, track: usize) -> String {
     match app.graph.track_instrument_types.get(track) {
         Some(sequencer::sequencer::InstrumentType::Sampler) => {
@@ -264,7 +256,6 @@ pub(crate) fn sync_track_name_state(
         "track-instrument-types",
         build_track_instrument_types(app),
     );
-    rt.set_reactive("SEQ", "track-instrument-ids", build_track_instrument_ids(app));
     sync_all_rack_slot_selection_binding_fields(rt, app);
     rt.set_reactive(
         "SEQ",
@@ -663,7 +654,6 @@ pub(crate) fn sync_track_mixer_state(
         "track-instrument-types",
         build_track_instrument_types(app),
     );
-    rt.set_reactive("SEQ", "track-instrument-ids", build_track_instrument_ids(app));
     // Compact channel views list devices by name; this rides the same sync
     // as the instrument types so any mixer refresh (project load, effect
     // add/remove, dgen compile landing) carries the chain too.
@@ -771,7 +761,6 @@ pub(crate) fn sync_track_mixer_empty_state(rt: &mut Runtime) {
     rt.set_reactive("SEQ", "track-pattern-cells", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-active-pattern-ids", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-instrument-types", Value::List(vec![]));
-    rt.set_reactive("SEQ", "track-instrument-ids", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-mutes", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-solos", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-muted-by-solo", Value::List(vec![]));

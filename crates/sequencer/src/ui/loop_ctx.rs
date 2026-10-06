@@ -166,7 +166,7 @@ pub(crate) struct FrameDiffState {
     pub(crate) prev_instance_key: (u64, u64, u64, u64),
     /// Fingerprint of the last `SEQ.instances` value (the Packages tab and
     /// the rack menu read it; owner names follow rack renames).
-    pub(crate) prev_instances_fingerprint: u64,
+    pub(crate) prev_instances_fingerprint: Option<u64>,
     pub(crate) prev_current_track: usize,
     pub(crate) cpu_overload: CpuOverloadIndicator,
     /// Whether the recording-take undo transaction is open. Mirrors
@@ -244,9 +244,6 @@ pub(crate) struct FrameDiffState {
     pub(crate) prev_sampler_analysis_key: Option<(usize, i32, u32, u32, usize)>,
     pub(crate) prev_sampler_analysis_generation: u64,
     pub(crate) prev_auto_follow: bool,
-    /// Browser sample preview: last published playing flag; the playhead
-    /// republishes every tick while true.
-    pub(crate) prev_browser_preview_playing: bool,
     /// Song-mode reactive diff state (docs/song-mode-spec.md 12).
     pub(crate) song: SongFrameState,
     /// Sound-palette reactive diff state (takes spec §17.6/§18.3).

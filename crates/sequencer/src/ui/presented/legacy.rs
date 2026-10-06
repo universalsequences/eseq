@@ -1,8 +1,9 @@
 //! The legacy reactive names the record mirrors (spec §13 stage 8,
 //! §14.2i): `SEQ.editor-*`, `SEQ.learn-*`, `EXPORT.export-*`, `AUDIO.*`,
-//! `MIDI.devices` / `error` / `persistent`, `AGENT.generation`, and the
-//! preset listings' rows. (`RETRO.*` went with the MIDI capture view's port,
-//! eseq-0l17.12: the capture area is unmirrored.)
+//! `MIDI.devices` / `error` / `persistent` and `AGENT.generation`.
+//! (`RETRO.*` went with the MIDI capture view's port, eseq-0l17.12: the
+//! capture area is unmirrored; the preset listings' rows and most editor
+//! fields with the browser's, eseq-0l17.17.)
 //!
 //! Every legacy name lives here. Each area's fields are listed once
 //! ([`fields!`]): a typed edit writes the ones that changed
@@ -49,17 +50,12 @@ fn strings(values: &[String]) -> Value {
     list_value(values.iter().map(|value| text(value)))
 }
 
+/// The editor fields unported views still read (the browser reads the
+/// `editor` host kind).
 fn editor_fields(old: Option<&EditorView>, new: &EditorView, emit: Emit<'_>) {
     fields!(old, new, emit;
         "editor-active" => active: flag,
         "editor-mode" => mode: text,
-        "editor-surface" => surface: text,
-        "editor-buffer-name" => buffer: text,
-        "editor-error" => error: text,
-        "editor-canceling" => canceling: flag,
-        "editor-instrument-run-mode" => run_mode: text,
-        "editor-active-macro-name" => active_macro: text,
-        "editor-active-macro-action" => active_macro_action: text,
         "editor-open-macro" => open_macro: text,
     );
 }
@@ -344,24 +340,4 @@ pub(crate) fn agent_registration() -> Vec<(&'static str, Value)> {
         "generation",
         Value::Number(presented(|p| *p.agent.get()) as f64),
     )]
-}
-
-/// The legacy `SEQ.sound-presets` / `SEQ.kit-presets` rows (`:label` and
-/// `:name` are both the name; a kit's `:pads`).
-pub(crate) fn preset_files_value(files: &[PresetFile]) -> Value {
-    list_value(files.iter().map(|file| {
-        let mut entries = vec![
-            ("kind", Value::String(file.file_type.to_string())),
-            ("icon", Value::Keyword(file.icon.to_string())),
-            ("label", text(&file.name)),
-            ("name", text(&file.name)),
-            ("path", text(&file.path)),
-        ];
-        if file.file_type == "kit" {
-            entries.push(("pads", Value::Number(file.pads as f64)));
-        }
-        entries.push(("author", text(&file.author)));
-        entries.push(("tags", strings(&file.tags)));
-        map_value(entries)
-    }))
 }
