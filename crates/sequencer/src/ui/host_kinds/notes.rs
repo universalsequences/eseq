@@ -1,0 +1,660 @@
+//! The piano roll (spec §14, stage 7e): the `piano-roll` singleton (the
+//! current track's edit focus: legacy `SEQ.focus-*`, `piano-roll-playhead`)
+//! and its `note`s (legacy `SEQ.piano-roll-items`, `piano-roll-selection`).
+//!
+//! **Identity.** The model gives a note no id: a step holds its notes as
+//! (transpose, duration, offset) entries, at most one per (transpose,
+//! offset) ([`NoteKey`]). The host allocates each key a note id (`nid`, never
+//! reused) while a note sits there, and keys the note instance (track
+//! instance id, nid). The note setters move a note's id with it
+//! ([`NoteShared::rekey`]), so a handle follows its note through a `set!` or
+//! a script drag; a note moved onto another replaces it (the model keeps one
+//! note per key), and the other's handle goes stale. An edit made any other
+//! way (the legacy piano roll, the step grid, recording) keeps a note's
+//! instance while it stays at its key and otherwise replaces it: a held
+//! handle never names another note, it goes stale. An undo or redo that
+//! changes the notes makes every handle of the source stale (the ids moved
+//! with the edits it reverts are not tracked back). The notes are those
+//! of the piano roll's source ([`NoteSource`]: the current track's resolved
+//! focus, the effective pattern for a live focus); another source (a track
+//! switch, a clip pinned, a scene launch, a project load) replaces them all.
+//!
+//! **Feeds.** The focus fields are model fields behind [`FocusKey`] (the
+//! source, the pinned clip, the committed song and scenes revisions, the
+//! pattern epoch, the live length and the song structure generation),
+//! compared every tick without allocating; they derive through
+//! the `App`'s focus accessors, shared with the legacy publisher
+//! (`sync_piano_roll_state`). The notes are registered lazily, on the first
+//! read of `piano-roll.notes` (the reader hook, or the tick once observed),
+//! like a device's params; then the tick re-reads them
+//! (`PianoRollLanes::note_rows_batch`, the legacy items' batch read with
+//! the step velocities) only when the scheduler published the source's
+//! track again (a live focus: the published track snapshot moved), the
+//! scenes or pool content revision, the pattern epoch or the source moved,
+//! an undo or redo replayed (`App::history_replays`), or a setter edited
+//! them: an idle tick loads a few counters. The selection (`note.selected`) is the legacy
+//! piano roll's, compared every tick while notes are registered.
+//! `piano-roll.playhead` is live: the focus playhead
+//! (`App::focus_playhead_step`) while observed; a cold read of a pinned
+//! focus sees -1 while stopped, else the last one computed.
+
+use super::*;
+use sequencer::sequencer::{PatternId, SequencerTrackSnapshot};
+
+/// A note's place in its source: its step, and its transpose and offset as
+/// the model holds them (bit-exact). A step holds one note per key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct NoteKey {
+    pub(crate) step: usize,
+    transpose: u32,
+    delay: u32,
+}
+
+impl NoteKey {
+    pub(crate) fn of(step: usize, note: &PianoRollNote) -> Self {
+        // `+ 0.0` makes -0.0 the key of 0.0.
+        Self {
+            step,
+            transpose: (note.transpose + 0.0).to_bits(),
+            delay: (note.delay + 0.0).to_bits(),
+        }
+    }
+
+    /// The voice of the note this key names among its step's `notes`.
+    pub(crate) fn voice_in(&self, notes: &[PianoRollNote]) -> Option<usize> {
+        (notes.iter()).position(|note| Self::of(self.step, note) == *self)
+    }
+}
+
+/// Where the piano roll's notes come from: a track (its position and
+/// instance) and its resolved edit focus (with the effective pattern of a
+/// live focus, so a scene launch is another source).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct NoteSource {
+    pub(crate) track: usize,
+    pub(crate) track_id: InstanceId,
+    pub(crate) focus: PianoRollFocusSpec,
+    pattern: Option<PatternId>,
+}
+
+impl NoteSource {
+    pub(crate) fn resolve(app: &app::App, track: usize, track_id: InstanceId) -> Self {
+        let focus = PianoRollFocusSpec::from_focus(app.track_edit_focus(track));
+        let pattern = match focus {
+            PianoRollFocusSpec::Live => app
+                .state
+                .with_project_scenes(|scenes| scenes.effective_pattern_id(track)),
+            _ => None,
+        };
+        Self {
+            track,
+            track_id,
+            focus,
+            pattern,
+        }
+    }
+
+    pub(crate) fn lanes(&self, state: &Arc<SequencerState>) -> PianoRollLanes {
+        PianoRollLanes::new(state, self.track, self.focus)
+    }
+
+    /// Whether `other` holds the same notes (a track reorder moves only the
+    /// position).
+    pub(crate) fn same_notes(&self, other: &NoteSource) -> bool {
+        (self.track_id, self.focus, self.pattern) == (other.track_id, other.focus, other.pattern)
+    }
+}
+
+/// One listed note: its instance, id, key and voice, and its length and
+/// velocity (as of the last sync).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct NoteRow {
+    pub(crate) id: InstanceId,
+    pub(crate) nid: u64,
+    pub(crate) key: NoteKey,
+    pub(crate) voice: usize,
+    length: f32,
+    velocity: f32,
+}
+
+impl NoteRow {
+    /// What an undo or redo compares: where the note sits and its values.
+    fn content(&self) -> (NoteKey, u32, u32) {
+        (self.key, self.length.to_bits(), self.velocity.to_bits())
+    }
+}
+
+/// The notes' share of [`KindsShared`] (the reader hook registers them; the
+/// note setters move their ids).
+#[derive(Default)]
+pub(crate) struct NoteShared {
+    /// `piano-roll.notes` was read or observed: the notes are registered and
+    /// kept current.
+    registered: bool,
+    /// The tick has pushed `piano-roll.notes` since they were (re)registered.
+    pushed: bool,
+    /// The source the rows are of, and the one the tick resolved last (a
+    /// cold read registers against it).
+    pub(crate) source: Option<NoteSource>,
+    focus: Option<NoteSource>,
+    /// Each note's id by its key, while it sits there, and the reverse.
+    ids: HashMap<NoteKey, u64>,
+    keys: HashMap<u64, NoteKey>,
+    next: u64,
+    /// The listed notes in order (step, then voice).
+    pub(crate) rows: Vec<NoteRow>,
+    /// The notes a script drag lies over: kept registered (unlisted,
+    /// `hidden`) until it ends.
+    pub(crate) held: HashSet<u64>,
+    /// A setter edited the notes: re-read them at the next tick.
+    dirty: bool,
+    /// The focus playhead last computed (a cold read of a pinned focus).
+    playhead: f64,
+    /// Note re-reads and script drag frames, for tests.
+    pub(crate) syncs: u64,
+    pub(crate) drag_frames: u64,
+}
+
+impl NoteShared {
+    /// The id of the note at `key`, if one is known there.
+    pub(crate) fn nid_at(&self, key: &NoteKey) -> Option<u64> {
+        self.ids.get(key).copied()
+    }
+
+    /// Where note `nid` sits, while it is known.
+    pub(crate) fn key_of(&self, nid: u64) -> Option<NoteKey> {
+        self.keys.get(&nid).copied()
+    }
+
+    /// Every known (key, id).
+    pub(crate) fn ids(&self) -> HashMap<NoteKey, u64> {
+        self.ids.clone()
+    }
+
+    /// Note `nid` now sits at `to`; a note known at `to` before is replaced
+    /// (its handle goes stale at the next sync).
+    pub(crate) fn rekey(&mut self, nid: u64, to: NoteKey) {
+        if let Some(from) = self.keys.remove(&nid) {
+            self.ids.remove(&from);
+        }
+        if let Some(other) = self.ids.insert(to, nid) {
+            self.keys.remove(&other);
+        }
+        self.keys.insert(nid, to);
+        self.dirty = true;
+    }
+
+    /// Notes `nids` are gone.
+    pub(crate) fn forget(&mut self, nids: &[u64]) {
+        for nid in nids {
+            if let Some(key) = self.keys.remove(nid) {
+                self.ids.remove(&key);
+            }
+        }
+        self.dirty = true;
+    }
+
+    /// The ids during a script drag: `ids` as the drag computed them, and
+    /// the notes it lies over.
+    pub(crate) fn set_drag_ids(&mut self, ids: HashMap<NoteKey, u64>, held: HashSet<u64>) {
+        self.keys = ids.iter().map(|(key, nid)| (*nid, *key)).collect();
+        self.ids = ids;
+        self.held = held;
+        self.dirty = true;
+    }
+
+    fn id_for(&mut self, key: NoteKey) -> u64 {
+        if let Some(nid) = self.ids.get(&key) {
+            return *nid;
+        }
+        self.next += 1;
+        self.ids.insert(key, self.next);
+        self.keys.insert(self.next, key);
+        self.next
+    }
+
+    /// Forget every note's id but `kept`'s.
+    fn keep_only(&mut self, kept: &HashSet<u64>) {
+        self.ids.retain(|_, nid| kept.contains(nid));
+        self.keys.retain(|nid, _| kept.contains(nid));
+    }
+
+    /// Forget every note (another source); returns the source they were
+    /// of (its note instances are to be dropped).
+    fn reset(&mut self) -> Option<NoteSource> {
+        self.ids.clear();
+        self.keys.clear();
+        self.rows.clear();
+        self.held.clear();
+        self.pushed = false;
+        self.source.take()
+    }
+}
+
+/// Bring the note instances in line with `source`'s notes (see the module
+/// docs): register the new ones, push every field (each compared with its
+/// cell), drop the gone ones but those a script drag lies over while
+/// `keep_held` (`hidden`). After an undo or redo (`replayed`) that changed
+/// the notes, every note gets a fresh id. Returns the listed instances and
+/// whether anything changed.
+pub(super) fn sync_notes<S: KindStore>(
+    store: &mut S,
+    sources: &KindsHandles,
+    shared: &RefCell<KindsShared>,
+    source: NoteSource,
+    keep_held: bool,
+    replayed: bool,
+) -> (Vec<InstanceId>, bool) {
+    let mut changed = false;
+    let replaced = {
+        let notes = &mut shared.borrow_mut().notes;
+        let same = notes.source.is_some_and(|known| known.same_notes(&source));
+        let replaced = if same { None } else { notes.reset() };
+        // A track reorder moves only the position.
+        notes.source = Some(source);
+        replaced
+    };
+    if let Some(old) = replaced {
+        changed |= reconcile_children(store, old.track_id, NOTE, &[], |_, _, _| {}).1;
+    }
+    let lanes = source.lanes(&sources.state);
+    // The listed notes: a repeat of a key gets no instance.
+    let mut seen = HashSet::new();
+    let steps = lanes.note_rows_batch(lanes.num_steps());
+    let listed: Vec<(NoteKey, usize, PianoRollNote, f32)> = (steps.into_iter().enumerate())
+        .flat_map(|(step, (notes, velocity))| {
+            let notes = notes.into_iter().enumerate();
+            notes.map(move |(voice, note)| (NoteKey::of(step, &note), voice, note, velocity))
+        })
+        .filter(|(key, ..)| seen.insert(*key))
+        .collect();
+    let (nids, held) = {
+        let notes = &mut shared.borrow_mut().notes;
+        let content = |(key, _, note, velocity): &(NoteKey, usize, PianoRollNote, f32)| {
+            (*key, note.duration.to_bits(), velocity.to_bits())
+        };
+        if replayed && !(notes.rows.iter().map(NoteRow::content)).eq(listed.iter().map(content)) {
+            notes.ids.clear();
+            notes.keys.clear();
+        }
+        if !keep_held {
+            notes.held.clear();
+        }
+        let nids: Vec<u64> = (listed.iter())
+            .map(|(key, ..)| notes.id_for(*key))
+            .collect();
+        let held: Vec<u64> = (notes.held.iter())
+            .filter(|nid| !notes.keys.contains_key(nid))
+            .copied()
+            .collect();
+        (nids, held)
+    };
+    let wanted: Vec<u64> = nids.iter().chain(&held).copied().collect();
+    let (ids, registered) =
+        reconcile_children(store, source.track_id, NOTE, &wanted, |store, id, nid| {
+            put(
+                store,
+                shared,
+                id,
+                f::NOTE_TRACK,
+                Value::Instance(source.track_id),
+            );
+            put(store, shared, id, f::NOTE_NID, number(nid as f64));
+        });
+    changed |= registered;
+    let mut rows = Vec::with_capacity(listed.len());
+    {
+        let selection = sources.piano_roll_selection.lock().unwrap();
+        for ((key, voice, note, velocity), (nid, id)) in listed.iter().zip(nids.iter().zip(&ids)) {
+            let Some(id) = *id else {
+                continue;
+            };
+            let selected = selection.contains(&piano_roll_item_id(key.step, *voice));
+            let fields = [
+                (f::NOTE_PITCH, number(note.transpose.round())),
+                (f::NOTE_START, number(key.step as f32 + note.delay)),
+                (f::NOTE_LENGTH, number(note.duration)),
+                (f::NOTE_VELOCITY, number(*velocity)),
+                (f::NOTE_SELECTED, Value::Bool(selected)),
+                (f::NOTE_LABEL, Value::String(piano_roll_note_label(note))),
+                (f::NOTE_HIDDEN, Value::Bool(false)),
+            ];
+            for (field, value) in fields {
+                changed |= put(store, shared, id, field, value);
+            }
+            rows.push(NoteRow {
+                id,
+                nid: *nid,
+                key: *key,
+                voice: *voice,
+                length: note.duration,
+                velocity: *velocity,
+            });
+        }
+    }
+    for id in ids[nids.len()..].iter().flatten() {
+        changed |= put(store, shared, *id, f::NOTE_HIDDEN, Value::Bool(true));
+    }
+    let notes = &mut shared.borrow_mut().notes;
+    // A gone note's key names no note any more: a later note there gets a
+    // fresh id, never the old handle.
+    notes.keep_only(&wanted.iter().copied().collect());
+    notes.rows = rows;
+    notes.dirty = false;
+    notes.syncs += 1;
+    let listed = notes.rows.iter().map(|row| row.id).collect();
+    (listed, changed)
+}
+
+/// Push `note.selected` of every listed note from `selection` (the legacy
+/// piano roll's item ids).
+fn push_selected(pusher: &mut Pusher<'_>, selection: &HashSet<u64>) {
+    let rows = pusher.shared.borrow().notes.rows.clone();
+    for row in rows {
+        let selected = selection.contains(&piano_roll_item_id(row.key.step, row.voice));
+        pusher.push(row.id, f::NOTE_SELECTED, Value::Bool(selected));
+    }
+}
+
+/// A cold read of `piano-roll.notes` (the reader hook): registers the notes
+/// the first time; afterwards the model field answers (`None`) once the tick
+/// pushed it.
+pub(super) fn cold_piano_roll_notes<S: KindStore>(
+    store: &mut S,
+    sources: &KindsHandles,
+    shared: &RefCell<KindsShared>,
+) -> Option<Value> {
+    let source = {
+        let shared = shared.borrow();
+        if shared.skip.contains(&f::PIANO_ROLL_NOTES) {
+            return None;
+        }
+        let notes = &shared.notes;
+        if notes.registered {
+            if notes.pushed {
+                return None;
+            }
+            return Some(instance_list(notes.rows.iter().map(|row| row.id)));
+        }
+        notes.focus?
+    };
+    shared.borrow_mut().notes.registered = true;
+    let (listed, _) = sync_notes(store, sources, shared, source, false, false);
+    shared.borrow_mut().count(f::PIANO_ROLL_NOTES);
+    Some(instance_list(listed))
+}
+
+/// `piano-roll.playhead`: a live focus's playhead step (the legacy
+/// `piano-roll-playhead`, which passes the raw track playhead), else the
+/// pinned focus's as last computed by the tick; -1 without a track.
+pub(super) fn piano_roll_playhead(sources: &KindsHandles, shared: &RefCell<KindsShared>) -> f64 {
+    let notes = &shared.borrow().notes;
+    match notes.focus {
+        Some(source) if source.focus == PianoRollFocusSpec::Live => {
+            let playheads = &sources.state.transport.track_playheads;
+            (playheads.get(source.track)).map_or(-1.0, |head| head.load(Ordering::Relaxed) as f64)
+        }
+        Some(_) => notes.playhead,
+        None => -1.0,
+    }
+}
+
+/// What the focus fields were last pushed under (compared every tick).
+#[derive(Clone, Copy, PartialEq)]
+struct FocusKey {
+    roll: InstanceId,
+    source: Option<NoteSource>,
+    clip: Option<u64>,
+    clip_kind: Option<&'static str>,
+    song: u64,
+    scenes: u64,
+    epoch: u64,
+    num_steps: usize,
+    structure: u64,
+}
+
+/// What the notes were last read under, beside the published track
+/// snapshot ([`PianoRollState::snapshot`]).
+#[derive(Clone, Copy, PartialEq)]
+struct NotesKey {
+    source: NoteSource,
+    scenes: u64,
+    pool: u64,
+    epoch: u64,
+    num_steps: usize,
+}
+
+/// The piano roll sync's state (in [`HostKinds`]).
+#[derive(Default)]
+pub(crate) struct PianoRollState {
+    focus: Option<FocusKey>,
+    notes: Option<NotesKey>,
+    /// The scheduler snapshot version last looked at, and the source
+    /// track's published snapshot then (a live focus's notes moved when it
+    /// is another one).
+    snapshot: Option<(u64, Option<Arc<SequencerTrackSnapshot>>)>,
+    /// The selection last pushed.
+    selection: Option<HashSet<u64>>,
+    /// `App::history_replays` as the notes were last read.
+    replays: u64,
+    /// Focus field pushes, for tests.
+    pub(crate) focus_syncs: u64,
+}
+
+impl PianoRollState {
+    /// Sync everything at the next tick (a schema change).
+    pub(super) fn invalidate(&mut self) {
+        self.focus = None;
+        self.notes = None;
+        self.selection = None;
+    }
+}
+
+/// The fields a piano roll's observed mask covers: its live fields (bit
+/// `i` is `PIANO_ROLL_LIVE.keys[i]`), then `notes` ([`NOTES_BIT`]).
+static PIANO_ROLL_OBSERVED: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
+    let mut names = PIANO_ROLL_LIVE.names.clone();
+    names.push(f::PIANO_ROLL_NOTES.1);
+    names
+});
+static NOTES_BIT: LazyLock<u32> = LazyLock::new(|| 1 << PIANO_ROLL_LIVE.keys.len());
+
+impl HostKinds {
+    /// The piano roll: its focus fields when [`FocusKey`] moved, its notes
+    /// once registered when their source or a counter moved, the selection
+    /// when it changed, the playhead while observed. Runs after the song
+    /// sync (`piano-roll.clip` is a clip instance).
+    pub(super) fn sync_piano_roll(&mut self, pusher: &mut Pusher<'_>, app: &app::App) {
+        let Some(roll) = pusher.singleton(PIANO_ROLL) else {
+            return;
+        };
+        let (sources, shared) = (pusher.sources, pusher.shared);
+        let current = sources.current_track.load(Ordering::Relaxed);
+        let track_id = self.track_ids.get(current).copied().flatten();
+        let source = (track_id.filter(|_| sources.track_exists(current)))
+            .map(|id| NoteSource::resolve(app, current, id));
+        let stale = {
+            let mut shared = shared.borrow_mut();
+            shared.notes.focus = source;
+            let first = shared.notes.rows.first();
+            first.is_some_and(|row| !pusher.rt.instance_is_live(row.id))
+        };
+        if stale {
+            // A hot reload dropped the note instances.
+            shared.borrow_mut().notes.reset();
+            self.piano_roll.notes = None;
+        }
+        self.sync_piano_roll_focus(pusher, app, roll, source);
+        let mask = pusher.rt.host_fields_observed(roll, &PIANO_ROLL_OBSERVED);
+        if mask & *NOTES_BIT != 0 {
+            shared.borrow_mut().notes.registered = true;
+        }
+        if shared.borrow().notes.registered {
+            if let Some(source) = source {
+                self.sync_piano_roll_notes(pusher, app, roll, source);
+            }
+        }
+        let playhead = PIANO_ROLL_LIVE.bit(f::PIANO_ROLL_PLAYHEAD);
+        let pinned = source.filter(|source| source.focus != PianoRollFocusSpec::Live);
+        if mask & playhead == 0 && pinned.is_some() && !sources.state.is_playing() {
+            // Stopped, a pinned source shows no playhead (an atomic load:
+            // a cold read sees -1, not a stale step).
+            shared.borrow_mut().notes.playhead = -1.0;
+        }
+        if mask & playhead != 0 {
+            let playheads = &sources.state.transport.track_playheads;
+            let pinned = pinned.and_then(|source| Some((source, playheads.get(source.track)?)));
+            if let Some((source, head)) = pinned {
+                let head = head.load(Ordering::Relaxed) as usize;
+                let step = app.focus_playhead_step(source.track, head);
+                shared.borrow_mut().notes.playhead = step.unwrap_or(-1.0);
+            }
+            let value = piano_roll_playhead(sources, shared);
+            pusher.push_computed(roll, f::PIANO_ROLL_PLAYHEAD, number(value));
+        }
+    }
+
+    /// The focus fields, when [`FocusKey`] moved.
+    fn sync_piano_roll_focus(
+        &mut self,
+        pusher: &mut Pusher<'_>,
+        app: &app::App,
+        roll: InstanceId,
+        source: Option<NoteSource>,
+    ) {
+        let state = &app.state;
+        let track = source.map(|source| source.track);
+        let clip_kind = track.and_then(|track| app.focus_clip_source_kind(track));
+        let clip = clip_kind
+            .and(app.song_clip_selection)
+            .map(|selection| selection.clip_id.0);
+        let key = FocusKey {
+            roll,
+            source,
+            clip,
+            clip_kind,
+            song: state.committed_song_revision(),
+            scenes: state.project_scenes_revision(),
+            epoch: state.transport.pattern_epoch.load(Ordering::Relaxed),
+            num_steps: track.map_or(0, |track| pusher.sources.num_steps(track)),
+            structure: self.song.generation(),
+        };
+        let state = &mut self.piano_roll;
+        if !moved(&mut state.focus, key, &mut state.focus_syncs) {
+            return;
+        }
+        let focus = source.map_or(PianoRollFocusSpec::Live, |source| source.focus);
+        let clip_id = (source.zip(clip))
+            .and_then(|(source, clip)| pusher.rt.keyed_instance(CLIP, &[source.track_id, clip]));
+        let (label, num_steps, (marker, span, repeat)) = match track {
+            Some(track) => (
+                app.focus_label(track).unwrap_or_default(),
+                app.focus_num_steps(track),
+                piano_roll_window(app, track),
+            ),
+            None => (String::new(), 0, (-1.0, None, 0.0)),
+        };
+        let track_id = source.map(|source| source.track_id);
+        pusher.push(roll, f::PIANO_ROLL_TRACK, instance_or_nil(track_id));
+        pusher.push(roll, f::PIANO_ROLL_FOCUS_KIND, text(focus.kind_name()));
+        pusher.push(
+            roll,
+            f::PIANO_ROLL_CLIP_KIND,
+            text(clip_kind.unwrap_or("none")),
+        );
+        pusher.push(roll, f::PIANO_ROLL_CLIP, instance_or_nil(clip_id));
+        pusher.push(roll, f::PIANO_ROLL_FOCUS_LABEL, Value::String(label));
+        pusher.push(
+            roll,
+            f::PIANO_ROLL_FOCUS_NUM_STEPS,
+            number(num_steps as f64),
+        );
+        // The loop window: sentinel-shaped as the legacy fields.
+        let span = match span {
+            Some((start, end)) => list_value([number(start), number(end)]),
+            None => list_value(Vec::<Value>::new()),
+        };
+        pusher.push(roll, f::PIANO_ROLL_WINDOW_MARKER, number(marker));
+        pusher.push(roll, f::PIANO_ROLL_WINDOW_SPAN, span);
+        pusher.push(roll, f::PIANO_ROLL_WINDOW_REPEAT, number(repeat));
+    }
+
+    /// The registered notes, re-read when their source, a counter or the
+    /// source track's published snapshot moved, or a setter edited them;
+    /// the selection when it changed.
+    fn sync_piano_roll_notes(
+        &mut self,
+        pusher: &mut Pusher<'_>,
+        app: &app::App,
+        roll: InstanceId,
+        source: NoteSource,
+    ) {
+        let (sources, shared) = (pusher.sources, pusher.shared);
+        let state = &sources.state;
+        let version = state.scheduler_snapshot_version();
+        let republished = match &self.piano_roll.snapshot {
+            Some((seen, _)) if *seen == version => false,
+            previous => {
+                let latest = state.latest_scheduler_snapshot();
+                let track = latest.tracks.get(source.track).cloned();
+                let moved = match (
+                    previous.as_ref().and_then(|(_, track)| track.as_ref()),
+                    &track,
+                ) {
+                    (Some(before), Some(now)) => !Arc::ptr_eq(before, now),
+                    (None, None) => false,
+                    _ => true,
+                };
+                self.piano_roll.snapshot = Some((version, track));
+                moved
+            }
+        };
+        let key = NotesKey {
+            source,
+            scenes: state.project_scenes_revision(),
+            pool: state.pool_content_revision(),
+            epoch: state.transport.pattern_epoch.load(Ordering::Relaxed),
+            num_steps: sources.num_steps(source.track),
+        };
+        let dragging = app.active_note_drag().is_some();
+        let replayed = self.piano_roll.replays != app.history_replays;
+        let due = {
+            let notes = &shared.borrow().notes;
+            (republished && source.focus == PianoRollFocusSpec::Live)
+                || replayed
+                || self.piano_roll.notes != Some(key)
+                || notes.dirty
+                || !notes.pushed
+                || notes.source != Some(source)
+                || (!dragging && !notes.held.is_empty())
+        };
+        // Compared in place: an idle tick copies nothing.
+        let selected = {
+            let selection = sources.piano_roll_selection.lock().unwrap();
+            (due || self.piano_roll.selection.as_ref() != Some(&*selection))
+                .then(|| selection.clone())
+        };
+        if due {
+            let (listed, changed) =
+                sync_notes(&mut *pusher.rt, sources, shared, source, dragging, replayed);
+            pusher.changed |= changed;
+            self.piano_roll.replays = app.history_replays;
+            pusher.push(roll, f::PIANO_ROLL_NOTES, instance_list(listed));
+            shared.borrow_mut().notes.pushed = true;
+            self.piano_roll.notes = Some(key);
+        } else if let Some(selection) = &selected {
+            push_selected(pusher, selection);
+        }
+        if selected.is_some() {
+            self.piano_roll.selection = selected;
+        }
+    }
+}
+
+impl HostKinds {
+    /// The track instance of stable track id `tid` (the note setters'
+    /// source check).
+    pub(crate) fn track_instance(&self, tid: u64) -> Option<InstanceId> {
+        self.tracks.get(&tid).copied()
+    }
+}

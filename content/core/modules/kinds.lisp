@@ -11,7 +11,7 @@
 ;; capture's lanes and notes, MIDI inputs; steps on first read of `t.steps`, params (with their
 ;; modulation lanes) on first read of `d.params`, a track's processes (and
 ;; their lanes, inlets, ports and state cells) on first read of `t.processes`
-;; or `t.lanes`),
+;; or `t.lanes`, the piano roll's notes on first read of `piano-roll.notes`),
 ;; pushes their `:host` fields,
 ;; and checks at startup that it publishes exactly the fields declared below
 ;; (crates/sequencer/src/ui/host_kinds/). A view imports what it uses:
@@ -21,7 +21,8 @@
 ;; Read a field by value (`t.name`, re-renders the reader) or bind it
 ;; (`#'t.volume`, repaints only). Writable fields carry `:set`: `(set! t.volume
 ;; 0.5)`, `(toggle! t.muted)`, `(toggle! s.active)`, `(set! selection.track t)`,
-;; `(set! t.swing 56)`, `(set! t.output nil)`, `(set! tn.morph 0.5)` (tn = t.tuning).
+;; `(set! t.swing 56)`, `(set! t.output nil)`, `(set! tn.morph 0.5)` (tn = t.tuning),
+;; `(set! n.start 4)` (n a note of piano-roll.notes).
 ;; The host computes a field only while something observes it (a reader or a
 ;; held `#'`); reading an unobserved one asks the host for its value.
 
@@ -49,7 +50,8 @@
         remove-fanout!
         browser sound-palette editor learn retro song-export settings agent
         apply-sound! apply-sound-with-mix! fork-sound! open-sound-palette! close-sound-palette!
-        learn-method-options learn-refine-mode-options)
+        learn-method-options learn-refine-mode-options
+        piano-roll add-note! delete-notes! pitch-min pitch-max)
 
 ;; Short fixed option lists (the host checks they match its own). The lists
 ;; the host owns (scales, step sync resolutions, accumulators, track outputs,
@@ -172,6 +174,15 @@
 (def set-cell-selected (c v)
   (host-command "set-cell"
     (dict :track-id c.track.tid :pattern-id c.pid :field "selected" :value v)))
+;; A piano roll note by its track's id and its note id (spec §14, stage 7e):
+;; pitch, start, length and velocity move or reshape it (one undo entry each;
+;; a drag's set!s join one), selected selects it in the piano roll.
+;; Values (spec §14.2c): pitch an integer in pitch-min to pitch-max, start a
+;; step from 0 to below piano-roll.focus-num-steps, length 1/32 to 32 steps,
+;; velocity 0 to 1.
+(def note-setter (field)
+  (lambda (n v)
+    (host-command "set-note" (dict :track-id n.track.tid :nid n.nid :field field :value v))))
 ;; A device by stable ids: its track's id (a chain device, a MIDI effect, a
 ;; drum rack slot or one of its effects) or its bus's (a bus effect), and its
 ;; did, so a reorder before the command lands cannot retarget it.
@@ -348,7 +359,8 @@
          (process-mapped :bool :doc "An enabled process slot of the track writes this instrument param")
          (process-value :number :doc "The value a process last wrote here (display units); value when none has")
          (process-clamped :bool :doc "That write hit the end of the param's range")
-         (key-locks (list-of (list-of :number)) :doc "An instrument param's key locks, (note value) per locked key, ascending (display units)")))
+         (key-locks (list-of (list-of :number)) :doc "An instrument param's key locks, (note value) per locked key, ascending (display units)")
+         (step-locks (list-of (list-of :number)) :doc "The p-locks of the track's pattern (its first num-steps steps), (step value) per locked step, ascending (display units)")))
 
 ;; One modulation lane onto a param: (nth p.mod-targets 0).
 (def-kind mod-target
@@ -417,6 +429,7 @@
                  :doc "The macro's own value (setting it never p-locks)")
          (locked :bool :doc "value comes from a p-lock")
          (has-locks :bool :doc "Some step of the track's pattern locks it")
+         (step-locks (list-of (list-of :number)) :doc "The p-locks of the track's pattern, (step value) per locked step, ascending")
          (mappings (list-of macro-mapping))))
 
 ;; What one macro drives: (nth m.mappings 0). A mapping has no stable id, so
@@ -1203,6 +1216,44 @@
   :key ()
   :host ((generation :int :doc "Moves whenever an agent session changes")))
 
+;; A note of the piano roll's source: (nth piano-roll.notes 0). The host gives
+;; each note an id while it exists; a set! that moves a note keeps its id (and
+;; its handle), and one moved onto another replaces it (the other's handle goes
+;; stale). An edit made otherwise (the legacy piano roll, the step grid,
+;; recording) keeps a note's handle while the note stays where it was; an undo
+;; or redo that changes the notes makes every note handle stale. A set! or
+;; delete of a stale note is an error ("the note is gone").
+(def-kind note
+  :key (track nid)
+  :host ((track    track  :doc "The track whose source holds the note (the piano roll's track)")
+         (nid      :int   :doc "The host's id for the note while it exists")
+         (pitch    :int   :range (-48 48) :set (note-setter "pitch")
+                   :doc "Semitones from C4 (the track's root); the lane is pitch-max minus pitch")
+         (start    :number :set (note-setter "start")
+                   :doc "Onset in steps on the source's axis: its step plus its offset into it")
+         (length   :number :range (0.03125 32) :set (note-setter "length") :doc "Duration in steps")
+         (velocity :number :range (0 1) :set (note-setter "velocity")
+                   :doc "Its step's velocity: a chord's notes share it; a note keeps its own on a step it moves to alone")
+         (selected :bool   :set (note-setter "selected") :doc "Selected in the piano roll (no undo entry)")
+         (label    :string :doc "Its pitch name, with its offset when off the step: C4, D#3 +0.50")
+         (hidden   :bool   :doc "A script drag's note lies over it: unlisted until the drag ends (or moves on); its set! and delete are errors meanwhile")))
+
+;; The piano roll: what the current track's note editor edits (its edit
+;; focus) and the notes there. Model fields but playhead.
+(def-kind piano-roll
+  :key ()
+  :host ((track      track  :doc "The track it edits (the current track)")
+         (focus-kind :string :doc "Where its edits land: live (the playing pattern), pattern (a pinned pattern) or take (a pinned take)")
+         (clip-kind  :string :doc "The pinned arrangement clip's source: pattern or take; none in follow mode")
+         (clip       clip   :doc "The pinned arrangement clip (clip.start, end, offset: the clip panel), or nil")
+         (focus-label :string :doc "The header's source name: Pattern 3 (scene), Pattern 5 — 2 clips, a take's name")
+         (focus-num-steps :int :doc "The source's length in steps (a take's playable length)")
+         (window-marker :number :doc "The pinned clip's start in its source, in steps; -1 without one")
+         (window-span (list-of :number) :doc "(start end) of the window the clip plays when shorter than its source; empty otherwise")
+         (window-repeat :number :doc "How many times the clip plays its source over, when more than once; 0 otherwise")
+         (playhead   :number :doc "The playing step on the source's axis; -1 while hidden (a pinned source the song does not play)")
+         (notes      (list-of note) :doc "The source's notes, by step, then pitch and offset; (add-note! …), (delete-notes! …)")))
+
 ;; The collections, for (tracks), (scenes), (banks), (buses), (groups) and
 ;; (routes), and the option lists the host owns.
 (def-kind project
@@ -1456,6 +1507,34 @@
 ;; Remove fan-out entry fo.
 (def remove-fanout! (fo &key (all false))
   (edit-process (fanout-address fo) "remove-fanout" :all all))
+
+;; ── The piano roll ──
+
+;; note.pitch's range: semitones from C4.
+(def pitch-min -48)
+(def pitch-max 48)
+
+;; Add a note to the piano roll's source at start (steps), pitch, length
+;; (steps); velocity nil keeps the step's. One undo entry; a note already
+;; there (same step, pitch and offset) is replaced. Returns nil: the note
+;; shows in piano-roll.notes after the next tick.
+(def add-note! (start pitch length &key (velocity nil))
+  (host-command "add-note"
+    (dict :track-id piano-roll.track.tid :start start :pitch pitch :length length
+          :velocity velocity)))
+
+;; Delete notes, all of one track (else an error that deletes none); one undo
+;; entry. A note gone (or hidden under a drag) is an error that deletes none.
+(def note-track-id (n)
+  (let ((t n.track))
+    (if t t.tid nil)))
+(def delete-notes! (notes)
+  (if (empty? notes)
+    nil
+    (host-command "delete-notes"
+      (dict :track-id (note-track-id (first notes))
+            :track-ids (map note-track-id notes)
+            :nids (map (lambda (x) x.nid) notes)))))
 
 ;; ── The sound palette and Patch Learn ──
 

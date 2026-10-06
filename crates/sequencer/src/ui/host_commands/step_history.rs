@@ -32,6 +32,37 @@ pub(super) const COMMANDS: &[&str] = &[
     "clear-step-variant-locks",
 ];
 
+/// Which piano-roll note edit landed ([`piano_roll_edit_landed`]).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum PianoRollLanding {
+    /// A drag frame (its entry stays open).
+    Frame,
+    /// A drag's release (its entry committed).
+    Release,
+    /// A one-shot edit, recorded.
+    Recorded,
+}
+
+/// What a piano-roll note edit refreshes, the legacy piano roll's actions
+/// and the note setters alike: the piano roll's items (and the views over
+/// the track), the step panels once an entry is committed, and a pause in
+/// the playhead follow while the user edits.
+pub(super) fn piano_roll_edit_landed(ctx: &LoopCtx<'_>, track: usize, landing: PianoRollLanding) {
+    let shared = ctx.shared;
+    if landing != PianoRollLanding::Release {
+        *shared.auto_follow_override_until.lock().unwrap() =
+            Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
+    }
+    shared.ui_invalidations.push(UiInvalidation::PianoRoll {
+        track,
+        change: PianoRollInvalidation::Items,
+    });
+    if landing != PianoRollLanding::Frame {
+        shared.fx_epoch.fetch_add(1, Ordering::Relaxed);
+    }
+    shared.ui_epoch.fetch_add(1, Ordering::Relaxed);
+}
+
 #[allow(clippy::too_many_lines)]
 pub(super) fn handle(
     name: &str,
@@ -262,13 +293,7 @@ pub(super) fn handle(
                 &payload,
             ) {
                 Ok((status, track)) => {
-                    *auto_follow_override_until.lock().unwrap() =
-                        Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
-                    ui_invalidations.push(UiInvalidation::PianoRoll {
-                        track,
-                        change: PianoRollInvalidation::Items,
-                    });
-                    ui_epoch.fetch_add(1, Ordering::Relaxed);
+                    piano_roll_edit_landed(ctx, track, PianoRollLanding::Frame);
                     editor.show_transient_message(status);
                 }
                 Err(error) => editor.handle_host_event(HostEvent::Error(error)),
@@ -282,12 +307,7 @@ pub(super) fn handle(
                 &payload,
             ) {
                 Ok((app::edit::EditOutcome::Applied(result), track)) => {
-                    ui_invalidations.push(UiInvalidation::PianoRoll {
-                        track,
-                        change: PianoRollInvalidation::Items,
-                    });
-                    fx_epoch.fetch_add(1, Ordering::Relaxed);
-                    ui_epoch.fetch_add(1, Ordering::Relaxed);
+                    piano_roll_edit_landed(ctx, track, PianoRollLanding::Release);
                     editor.show_transient_message(result.label);
                 }
                 Ok((app::edit::EditOutcome::NoOp, _)) => {}
@@ -309,14 +329,7 @@ pub(super) fn handle(
             ) {
                 Ok((outcome, status, track)) => {
                     if matches!(outcome, app::edit::EditOutcome::Applied(_)) {
-                        *auto_follow_override_until.lock().unwrap() =
-                            Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
-                        ui_invalidations.push(UiInvalidation::PianoRoll {
-                            track,
-                            change: PianoRollInvalidation::Items,
-                        });
-                        fx_epoch.fetch_add(1, Ordering::Relaxed);
-                        ui_epoch.fetch_add(1, Ordering::Relaxed);
+                        piano_roll_edit_landed(ctx, track, PianoRollLanding::Recorded);
                     }
                     editor.show_transient_message(status);
                 }

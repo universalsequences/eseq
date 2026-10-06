@@ -181,13 +181,23 @@ impl Harness {
         dispatch_custom_host_command(name, payload, &mut self.app, &mut self.editor, &mut ctx);
     }
 
-    /// Apply what Lisp queued, as the event loop does.
+    /// Apply what Lisp queued, as the event loop does (a script note
+    /// drag's frame once, after the batch).
     fn drain(&mut self) {
         for command in self.editor.drain_host_commands() {
             if let HostCommand::Custom { name, payload } = command {
                 self.command(&name, payload);
             }
         }
+        let mut ctx = LoopCtx {
+            sessions: &mut self.sessions,
+            meters: &mut self.meters,
+            frame: &mut self.frame,
+            gesture: &mut self.gesture,
+            track_names: &mut self.track_names,
+            shared: &self.shared,
+        };
+        crate::host_commands::notes::flush_note_drag(&mut self.app, &mut self.editor, &mut ctx);
     }
 
     /// One host-kinds sync; returns whether anything changed.
@@ -329,6 +339,7 @@ mod lanes;
 mod mixer;
 mod panel;
 mod params;
+mod piano_roll;
 mod racks;
 mod scenes;
 mod schema;

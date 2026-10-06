@@ -416,8 +416,8 @@ impl HostKinds {
     }
 
     /// The observed live fields of every rack macro, read under one rack
-    /// lock and pushed after it; `has-locks` only when its track's
-    /// [`PlockKey`] moved.
+    /// lock and pushed after it; `has-locks` and `step-locks` only when its
+    /// track's [`PlockKey`] moved.
     pub(super) fn sync_rack_macro_live(&mut self, pusher: &mut Pusher<'_>) {
         let state = &mut self.macros;
         let ids = &state.rack_ids;
@@ -425,7 +425,8 @@ impl HostKinds {
         if state.rack_observed.entries.is_empty() {
             return;
         }
-        let has_locks = RACK_MACRO_LIVE.bit(f::RACK_MACRO_HAS_LOCKS);
+        let plock_keyed =
+            RACK_MACRO_LIVE.bits(&[f::RACK_MACRO_HAS_LOCKS, f::RACK_MACRO_STEP_LOCKS]);
         let (sources, shared) = (pusher.sources, pusher.shared);
         let pending = &mut state.rack_pending;
         {
@@ -442,10 +443,10 @@ impl HostKinds {
                 if !sources.track_exists(track) {
                     continue;
                 }
-                if mask & has_locks != 0 {
+                if mask & plock_keyed != 0 {
                     let key = sources.plock_key(track);
                     if seen == Some(key) {
-                        mask &= !has_locks;
+                        mask &= !plock_keyed;
                     }
                     entry.2 = Some(key);
                 }
@@ -503,6 +504,11 @@ fn rack_macro_field(
         f::RACK_MACRO_HAS_LOCKS => {
             Value::Bool((0..sources.num_steps(track)).any(|step| lock_at(step).is_some()))
         }
+        // `(step value)` rows of the pattern's locks (the tracker's cells).
+        f::RACK_MACRO_STEP_LOCKS => list_value((0..sources.num_steps(track)).filter_map(|step| {
+            let value = lock_at(step)?;
+            Some(list_value([number(step as f64), number(value)]))
+        })),
         _ => return None,
     })
 }

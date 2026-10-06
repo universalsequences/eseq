@@ -100,6 +100,8 @@ pub(crate) struct KindsShared {
     /// The process lanes' registered tracks, runtime ids, classes and
     /// caches (`lanes`).
     pub(crate) lanes: LaneShared,
+    /// The piano roll's notes: their source, ids and instances (`piano_roll`).
+    pub(crate) notes: NoteShared,
 }
 
 type VariantKey = sequencer::plock_variants::PlockVariantKey;
@@ -213,6 +215,8 @@ pub(crate) struct KindsHandles {
     /// The neural neurons selected for step editing: a selected neuron's
     /// output override shows in `param.value` (as the legacy fields).
     pub(crate) selected_neural_neurons: sequencer::lisp_host::SharedSelectedNeuralNeurons,
+    /// The piano roll's selected notes, by item id (`note.selected`).
+    pub(crate) piano_roll_selection: Arc<Mutex<HashSet<u64>>>,
 }
 
 impl KindsHandles {
@@ -237,6 +241,7 @@ impl KindsHandles {
             armed_rack: shared.armed_rack.clone(),
             bus_state: shared.bus_state.clone(),
             selected_neural_neurons: shared.selected_neural_neurons.clone(),
+            piano_roll_selection: shared.piano_roll_selection.clone(),
         }
     }
 
@@ -611,6 +616,7 @@ pub(super) fn live_value<S: KindStore>(
                 let track = sources.current_track.load(Ordering::Relaxed) as u64;
                 instance_or_nil(store.keyed(TRACK, &[track]))
             }
+            f::PIANO_ROLL_PLAYHEAD => number(piano_roll_playhead(sources, shared)),
             f::SELECTION_TRACKS => {
                 let tracks = sorted_selected_tracks(&sources.selected_tracks.lock().unwrap());
                 instance_list(
@@ -720,6 +726,10 @@ pub(super) fn install_reader(
         if field == f::DEVICE_PARAMS.1 && vm.instance_kind(id) == Some(DEVICE) {
             // A model field, but registered on the first read.
             return cold_device_params(vm, &shared, id);
+        }
+        if field == f::PIANO_ROLL_NOTES.1 && vm.instance_kind(id) == Some(PIANO_ROLL) {
+            // A model field, but registered on the first read.
+            return cold_piano_roll_notes(vm, &sources, &shared);
         }
         let lanes = [f::TRACK_PROCESSES, f::TRACK_LANES];
         if let Some(key) = lanes.into_iter().find(|key| key.1 == field) {

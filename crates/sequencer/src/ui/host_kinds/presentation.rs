@@ -317,17 +317,6 @@ fn slot_device(
     pusher.rt.keyed_instance(DEVICE, &[track, did])
 }
 
-/// Whether an area's generation moved since `seen` (`None` forces a push):
-/// records it and counts the push.
-fn moved<G: PartialEq>(seen: &mut Option<G>, generation: G, pushes: &mut u64) -> bool {
-    if seen.as_ref() == Some(&generation) {
-        return false;
-    }
-    *seen = Some(generation);
-    *pushes += 1;
-    true
-}
-
 /// The sidebar's fields and its slots.
 fn push_sidebar(
     pusher: &mut Pusher<'_>,

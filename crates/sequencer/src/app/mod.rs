@@ -1142,15 +1142,18 @@ pub struct App {
     /// during a coalescing drag records its pool pattern here and the
     /// gesture end re-preflights once, instead of per drag frame.
     pub(crate) pending_song_row_invalidation: Option<(usize, crate::sequencer::PatternId)>,
-    /// An in-flight process lane slider drag: the scene structure captured
-    /// before its first write, committed as one history entry when the
-    /// gesture finishes (see `edit::apply_process_lane_drag_steps`).
-    pub(crate) process_lane_drag: Option<edit::ProcessLaneDrag>,
-    /// An in-flight rack groove amount drag (Timing / Velocity / Random):
-    /// the bus/group structure captured before its first write, committed
-    /// as one history entry when the gesture finishes (see
-    /// `edit::apply_rack_groove_amount_drag`).
-    pub(crate) rack_groove_drag: Option<edit::RackGrooveDrag>,
+    /// An in-flight drag whose writes go straight to state, committed as one
+    /// history entry when its gesture finishes: a process lane slider drag
+    /// (the scene structure captured before its first write, see
+    /// `edit::apply_process_lane_drag_steps`), a rack groove amount drag
+    /// (Timing / Velocity / Random: the bus/group structure, see
+    /// `edit::apply_rack_groove_amount_drag`) or a script note drag
+    /// (kind-bindings spec §14, stage 7e: the focus steps, every frame
+    /// rebuilt from them, see `edit::note_drag_frame`).
+    pub(crate) pending_drag: Option<edit::PendingDrag>,
+    /// Bumped by every undo and redo that replays an entry (the host kinds
+    /// forget the note ids of a source a replay changed).
+    pub history_replays: u64,
     /// Bumped whenever a track's loaded binding actually moves. The device
     /// panels are rebuilt from epochs, not polled, so swapping the mirror is
     /// invisible until this tells the reactive tick to republish them.
@@ -2910,8 +2913,8 @@ impl App {
             song_held_sources: Vec::new(),
             sound_binding_monitored: Vec::new(),
             pending_song_row_invalidation: None,
-            process_lane_drag: None,
-            rack_groove_drag: None,
+            pending_drag: None,
+            history_replays: 0,
             sound_binding_epoch: 0,
             graph: GraphState {
                 lg,

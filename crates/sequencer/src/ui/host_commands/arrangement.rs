@@ -97,15 +97,8 @@ impl SongEdit {
 /// and the arrangement is rebuilt from the gesture's start with all of them.
 fn apply_drag(app: &mut app::App, ctx: &mut LoopCtx<'_>, edit: &SongEdit) -> Result<(), String> {
     let key = MergeKey::new(DRAG_KEY);
-    let open = app
-        .history
-        .active_gesture()
-        .filter(|gesture| gesture.merge_key == key)
-        .map(|gesture| gesture.id);
-    let mut targets = match &ctx.gesture.script_arrangement_drag {
-        Some((gesture, targets)) if Some(*gesture) == open => targets.clone(),
-        _ => ArrangementDragTargets::default(),
-    };
+    let slot = &mut ctx.gesture.script_arrangement_drag;
+    let mut targets = (super::open_drag_targets(app, slot, &key).cloned()).unwrap_or_default();
     edit.target(&mut targets);
     app.arr_script_drag(key, &targets)?;
     ctx.gesture.script_arrangement_drag = app

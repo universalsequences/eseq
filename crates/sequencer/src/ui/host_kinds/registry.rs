@@ -459,6 +459,18 @@ pub(super) fn reconcile(
         .collect()
 }
 
+/// Whether a feed's key (a generation, or the state it was pushed under)
+/// moved since `seen` (`None` forces a push): records it and counts the
+/// push.
+pub(super) fn moved<G: PartialEq>(seen: &mut Option<G>, generation: G, pushes: &mut u64) -> bool {
+    if seen.as_ref() == Some(&generation) {
+        return false;
+    }
+    *seen = Some(generation);
+    *pushes += 1;
+    true
+}
+
 /// Bring the `kind` children of `parent`, keyed (parent, sub-key), in line
 /// with `wanted` sub-keys: drop the others, register the missing ones and
 /// run `init` on each new one (its fixed fields). Returns the instance of

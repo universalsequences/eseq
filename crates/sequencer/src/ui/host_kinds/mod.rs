@@ -54,7 +54,9 @@
 //! instance id, label index); project macros are positional, kept by macro
 //! id (replaced on a project load), a drum rack's macros keyed (rack
 //! instrument device instance id, index), macro mappings (macro instance
-//! id, position).
+//! id, position). The piano roll's notes are keyed (track instance id,
+//! note id), an id the host allocates per (step, transpose, offset) while a
+//! note sits there and the note setters move with it (`notes`).
 //!
 //! [`check_schema`] compares [`PUBLISHED`] with the loaded `eseq.kinds`; the
 //! tick re-runs it whenever a kind schema changes (a hot reload) and skips
@@ -69,8 +71,9 @@
 //! beyond the track chain), `panel` (the device panel extras: modulation
 //! lanes and display, process mapping, key locks, tensors), `variants`
 //! (p-lock variants), `macros` (project and drum rack macros), `lanes`
-//! (process lanes) and `presentation` (the browser, the sound palette, the
-//! editor and the app's views, from `ui::presented`) the per-kind syncs.
+//! (process lanes), `presentation` (the browser, the sound palette, the
+//! editor and the app's views, from `ui::presented`) and `notes` (the piano
+//! roll and its notes) the per-kind syncs.
 
 use crate::*;
 use eseqlisp::vm::{HostFieldReader, InstanceId, VM};
@@ -83,6 +86,7 @@ mod lanes;
 mod live;
 mod macros;
 mod mixer;
+mod notes;
 mod panel;
 mod params;
 mod presentation;
@@ -94,6 +98,8 @@ mod steps;
 mod tracks;
 mod variants;
 
+use self::notes::*;
+pub(crate) use self::notes::{NoteKey, NoteShared, NoteSource};
 use arrangement::SongState;
 use devices::*;
 use lanes::*;
@@ -176,6 +182,8 @@ pub(crate) const SONG_EXPORT: &str = "eseq.kinds:song-export";
 pub(crate) const SETTINGS: &str = "eseq.kinds:settings";
 pub(crate) const MIDI_DEVICE: &str = "eseq.kinds:midi-device";
 pub(crate) const AGENT: &str = "eseq.kinds:agent";
+pub(crate) const NOTE: &str = "eseq.kinds:note";
+pub(crate) const PIANO_ROLL: &str = "eseq.kinds:piano-roll";
 
 /// How the host keeps a field current (see the module docs).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -439,6 +447,28 @@ pub(crate) mod f {
     pub(crate) const SETTINGS_MIDI_PERSISTENT: FieldKey = (SETTINGS, "midi-persistent");
 
     pub(crate) const AGENT_GENERATION: FieldKey = (AGENT, "generation");
+
+    pub(crate) const NOTE_TRACK: FieldKey = (NOTE, "track");
+    pub(crate) const NOTE_NID: FieldKey = (NOTE, "nid");
+    pub(crate) const NOTE_PITCH: FieldKey = (NOTE, "pitch");
+    pub(crate) const NOTE_START: FieldKey = (NOTE, "start");
+    pub(crate) const NOTE_LENGTH: FieldKey = (NOTE, "length");
+    pub(crate) const NOTE_VELOCITY: FieldKey = (NOTE, "velocity");
+    pub(crate) const NOTE_SELECTED: FieldKey = (NOTE, "selected");
+    pub(crate) const NOTE_LABEL: FieldKey = (NOTE, "label");
+    pub(crate) const NOTE_HIDDEN: FieldKey = (NOTE, "hidden");
+
+    pub(crate) const PIANO_ROLL_TRACK: FieldKey = (PIANO_ROLL, "track");
+    pub(crate) const PIANO_ROLL_FOCUS_KIND: FieldKey = (PIANO_ROLL, "focus-kind");
+    pub(crate) const PIANO_ROLL_CLIP_KIND: FieldKey = (PIANO_ROLL, "clip-kind");
+    pub(crate) const PIANO_ROLL_CLIP: FieldKey = (PIANO_ROLL, "clip");
+    pub(crate) const PIANO_ROLL_FOCUS_LABEL: FieldKey = (PIANO_ROLL, "focus-label");
+    pub(crate) const PIANO_ROLL_FOCUS_NUM_STEPS: FieldKey = (PIANO_ROLL, "focus-num-steps");
+    pub(crate) const PIANO_ROLL_WINDOW_MARKER: FieldKey = (PIANO_ROLL, "window-marker");
+    pub(crate) const PIANO_ROLL_WINDOW_SPAN: FieldKey = (PIANO_ROLL, "window-span");
+    pub(crate) const PIANO_ROLL_WINDOW_REPEAT: FieldKey = (PIANO_ROLL, "window-repeat");
+    pub(crate) const PIANO_ROLL_PLAYHEAD: FieldKey = (PIANO_ROLL, "playhead");
+    pub(crate) const PIANO_ROLL_NOTES: FieldKey = (PIANO_ROLL, "notes");
 
     pub(crate) const CLASS_INDEX: FieldKey = (PROCESS_CLASS, "index");
     pub(crate) const CLASS_NAME: FieldKey = (PROCESS_CLASS, "name");
@@ -769,6 +799,7 @@ pub(crate) mod f {
     pub(crate) const PARAM_PROCESS_VALUE: FieldKey = (PARAM, "process-value");
     pub(crate) const PARAM_PROCESS_CLAMPED: FieldKey = (PARAM, "process-clamped");
     pub(crate) const PARAM_KEY_LOCKS: FieldKey = (PARAM, "key-locks");
+    pub(crate) const PARAM_STEP_LOCKS: FieldKey = (PARAM, "step-locks");
 
     pub(crate) const MOD_TARGET_PARAM: FieldKey = (MOD_TARGET, "param");
     pub(crate) const MOD_TARGET_INDEX: FieldKey = (MOD_TARGET, "index");
@@ -819,6 +850,7 @@ pub(crate) mod f {
     pub(crate) const RACK_MACRO_BASE: FieldKey = (RACK_MACRO, "base");
     pub(crate) const RACK_MACRO_LOCKED: FieldKey = (RACK_MACRO, "locked");
     pub(crate) const RACK_MACRO_HAS_LOCKS: FieldKey = (RACK_MACRO, "has-locks");
+    pub(crate) const RACK_MACRO_STEP_LOCKS: FieldKey = (RACK_MACRO, "step-locks");
     pub(crate) const RACK_MACRO_MAPPINGS: FieldKey = (RACK_MACRO, "mappings");
 
     pub(crate) const MAPPING_MACRO: FieldKey = (MACRO_MAPPING, "macro");
@@ -1133,6 +1165,7 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     (f::PARAM_PROCESS_VALUE, ":number", Live),
     (f::PARAM_PROCESS_CLAMPED, ":bool", Live),
     (f::PARAM_KEY_LOCKS, "(list-of (list-of :number))", Live),
+    (f::PARAM_STEP_LOCKS, "(list-of (list-of :number))", Live),
     (f::MOD_TARGET_PARAM, "param", Model),
     (f::MOD_TARGET_INDEX, ":int", Model),
     (f::MOD_TARGET_SOURCE, "param", Model),
@@ -1181,6 +1214,11 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     (f::RACK_MACRO_BASE, ":number", Live),
     (f::RACK_MACRO_LOCKED, ":bool", Live),
     (f::RACK_MACRO_HAS_LOCKS, ":bool", Live),
+    (
+        f::RACK_MACRO_STEP_LOCKS,
+        "(list-of (list-of :number))",
+        Live,
+    ),
     (f::RACK_MACRO_MAPPINGS, "(list-of macro-mapping)", Model),
     (f::MAPPING_MACRO, "macro", Model),
     (f::MAPPING_RACK_MACRO, "rack-macro", Model),
@@ -1569,6 +1607,30 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     (f::SETTINGS_MIDI_ERROR, ":string", Model),
     (f::SETTINGS_MIDI_PERSISTENT, ":bool", Model),
     (f::AGENT_GENERATION, ":int", Model),
+    // The piano roll (`piano_roll`): the focus behind its key, the notes
+    // registered on the first read of `notes` and re-read when their source
+    // or a counter moved, the selection compared every tick; the playhead
+    // live.
+    (f::PIANO_ROLL_TRACK, "track", Model),
+    (f::PIANO_ROLL_FOCUS_KIND, ":string", Model),
+    (f::PIANO_ROLL_CLIP_KIND, ":string", Model),
+    (f::PIANO_ROLL_CLIP, "clip", Model),
+    (f::PIANO_ROLL_FOCUS_LABEL, ":string", Model),
+    (f::PIANO_ROLL_FOCUS_NUM_STEPS, ":int", Model),
+    (f::PIANO_ROLL_WINDOW_MARKER, ":number", Model),
+    (f::PIANO_ROLL_WINDOW_SPAN, "(list-of :number)", Model),
+    (f::PIANO_ROLL_WINDOW_REPEAT, ":number", Model),
+    (f::PIANO_ROLL_PLAYHEAD, ":number", Live),
+    (f::PIANO_ROLL_NOTES, "(list-of note)", Model),
+    (f::NOTE_TRACK, "track", Model),
+    (f::NOTE_NID, ":int", Model),
+    (f::NOTE_PITCH, ":int", Model),
+    (f::NOTE_START, ":number", Model),
+    (f::NOTE_LENGTH, ":number", Model),
+    (f::NOTE_VELOCITY, ":number", Model),
+    (f::NOTE_SELECTED, ":bool", Model),
+    (f::NOTE_LABEL, ":string", Model),
+    (f::NOTE_HIDDEN, ":bool", Model),
 ];
 
 /// The published kinds, in [`PUBLISHED`] order.
@@ -1648,6 +1710,8 @@ pub(super) static STATE_CELL_LIVE: LazyLock<LiveFields> =
     LazyLock::new(|| LiveFields::of(STATE_CELL));
 pub(super) static BROWSER_LIVE: LazyLock<LiveFields> = LazyLock::new(|| LiveFields::of(BROWSER));
 pub(super) static RETRO_LIVE: LazyLock<LiveFields> = LazyLock::new(|| LiveFields::of(RETRO));
+pub(super) static PIANO_ROLL_LIVE: LazyLock<LiveFields> =
+    LazyLock::new(|| LiveFields::of(PIANO_ROLL));
 
 /// The step fields diffed by value per tick (beside `active`, `selected`
 /// and `playing`): `held`, then the step parameters, whose field names are
@@ -1978,6 +2042,8 @@ pub(crate) struct HostKinds {
     pub(crate) lanes: LaneState,
     /// The browser, the sound palette, the editor and the app's views.
     pub(crate) presented: PresentedState,
+    /// The piano roll's focus and notes.
+    pub(crate) piano_roll: PianoRollState,
 }
 
 impl HostKinds {
@@ -2054,6 +2120,7 @@ impl HostKinds {
             self.macros.invalidate();
             self.lanes.invalidate(&self.shared);
             self.presented.invalidate();
+            self.piano_roll.invalidate();
         }
         if self
             .song
@@ -2138,6 +2205,7 @@ impl HostKinds {
         self.sync_song_model(&mut pusher, app);
         self.sync_song_pushed(&mut pusher, app);
         self.sync_governed(&mut pusher, app);
+        self.sync_piano_roll(&mut pusher, app);
         self.sync_presented(&mut pusher, app, &variant_tint);
         self.sync_transport_queue(&mut pusher, app);
         self.sync_bus_mixer(&mut pusher, app);

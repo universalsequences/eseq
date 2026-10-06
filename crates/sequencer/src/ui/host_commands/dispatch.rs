@@ -10,6 +10,10 @@ pub(crate) fn dispatch_custom_host_command(
     editor: &mut Editor,
     ctx: &mut LoopCtx<'_>,
 ) {
+    if name != "set-note" {
+        // A script note drag's pending frame lands before anything else.
+        super::notes::flush_note_drag(app, editor, ctx);
+    }
     match name {
         n if crate::retrospective::COMMANDS.contains(&n) => {
             crate::retrospective::handle(name, payload, app, editor);
@@ -36,6 +40,7 @@ pub(crate) fn dispatch_custom_host_command(
         n if super::learn::COMMANDS.contains(&n) => super::learn::handle(name, payload, app, editor, ctx),
         n if super::devices::COMMANDS.contains(&n) => super::devices::handle(name, payload, app, editor, ctx),
         n if super::lanes::COMMANDS.contains(&n) => super::lanes::handle(name, payload, app, editor, ctx),
+        n if super::notes::COMMANDS.contains(&n) => super::notes::handle(name, payload, app, editor, ctx),
         n if super::panel::COMMANDS.contains(&n) => super::panel::handle(name, payload, app, editor, ctx),
         n if super::effects::COMMANDS.contains(&n) => super::effects::handle(name, payload, app, editor, ctx),
         n if super::routing::COMMANDS.contains(&n) => super::routing::handle(name, payload, app, editor, ctx),

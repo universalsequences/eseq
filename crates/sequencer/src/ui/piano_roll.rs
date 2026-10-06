@@ -12,16 +12,16 @@ use sequencer::sequencer::{
 use super::state_values::{held_plock_value, rack_macro_name_field, rack_macro_short_name_field};
 use super::values::{list_value, map_value};
 
-const PIANO_ROLL_ID_STRIDE: usize = 16;
-const PIANO_ROLL_MIN_TRANSPOSE: i32 = -48;
-const PIANO_ROLL_MAX_TRANSPOSE: i32 = 48;
-const PIANO_ROLL_MIN_DURATION: f32 = 0.03125;
+pub(crate) const PIANO_ROLL_ID_STRIDE: usize = 16;
+pub(crate) const PIANO_ROLL_MIN_TRANSPOSE: i32 = -48;
+pub(crate) const PIANO_ROLL_MAX_TRANSPOSE: i32 = 48;
+pub(crate) const PIANO_ROLL_MIN_DURATION: f32 = 0.03125;
 
-#[derive(Clone)]
-struct PianoRollNote {
-    transpose: f32,
-    duration: f32,
-    delay: f32,
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct PianoRollNote {
+    pub(crate) transpose: f32,
+    pub(crate) duration: f32,
+    pub(crate) delay: f32,
 }
 
 /// Which note storage the piano roll is pointed at (clip-edit-target spec 3),
@@ -46,6 +46,32 @@ impl PianoRollFocusSpec {
             EditFocus::Take { take, .. } => PianoRollFocusSpec::Take(take),
         }
     }
+
+    /// Where its edits land, by name: `live`, `pattern` or `take`
+    /// (`SEQ.focus-kind`, `piano-roll.focus-kind`).
+    pub(crate) fn kind_name(self) -> &'static str {
+        match self {
+            PianoRollFocusSpec::Live => "live",
+            PianoRollFocusSpec::Pool(_) => "pattern",
+            PianoRollFocusSpec::Take(_) => "take",
+        }
+    }
+}
+
+/// The loop-window overlay of `track`'s focus (spec 5), sentinel-shaped for
+/// the float channels: the start marker at the clip's offset (-1: none),
+/// the played window when the span is under one source pass, the repeat
+/// count when it covers several (0: none).
+pub(crate) fn piano_roll_window(
+    app: &sequencer::app::App,
+    track: usize,
+) -> (f64, Option<(f64, f64)>, f64) {
+    let overlay = app.focus_window_overlay(track);
+    (
+        overlay.map_or(-1.0, |(marker, _, _)| marker),
+        overlay.and_then(|(_, span, _)| span),
+        overlay.and_then(|(_, _, repeat)| repeat).unwrap_or(0.0),
+    )
 }
 
 pub(crate) type SharedPianoRollFocus = Arc<Mutex<PianoRollFocusSpec>>;
@@ -140,7 +166,8 @@ impl PianoRollLanes {
         }
     }
 
-    fn item_parts(&self, id: u64) -> Option<(usize, usize)> {
+    /// The (step, voice) of piano roll item `id`, within the focus's steps.
+    pub(crate) fn item_parts(&self, id: u64) -> Option<(usize, usize)> {
         let id = id as usize;
         let step = id / PIANO_ROLL_ID_STRIDE;
         let voice_idx = id % PIANO_ROLL_ID_STRIDE;
@@ -169,7 +196,7 @@ impl PianoRollLanes {
         }
     }
 
-    fn note_entries(&self, step: usize) -> Vec<PianoRollNote> {
+    pub(crate) fn note_entries(&self, step: usize) -> Vec<PianoRollNote> {
         let Some((address, local)) = self.resolve_step(step) else {
             return Vec::new();
         };
@@ -186,18 +213,51 @@ impl PianoRollLanes {
     /// this opens `pattern.scenes` once per distinct pool pattern (once total
     /// for a pool focus, once per chunk for a take) instead of once per step —
     /// the items build walks the whole axis on every sync.
-    fn note_entries_batch(&self, num_steps: usize) -> Vec<Vec<PianoRollNote>> {
-        let mut out = vec![Vec::new(); num_steps];
+    pub(crate) fn note_entries_batch(&self, num_steps: usize) -> Vec<Vec<PianoRollNote>> {
+        self.steps_batch(
+            num_steps,
+            |step| live_note_entries(&self.state, self.track, step),
+            data_note_entries,
+        )
+    }
+
+    /// [`Self::note_entries_batch`] with each step's velocity, read under
+    /// the same lock.
+    pub(crate) fn note_rows_batch(&self, num_steps: usize) -> Vec<(Vec<PianoRollNote>, f32)> {
+        let velocity = StepParam::Velocity;
+        self.steps_batch(
+            num_steps,
+            |step| {
+                let value = self.state.pattern.step_data[self.track].get(step, velocity);
+                (live_note_entries(&self.state, self.track, step), value)
+            },
+            |data, step| {
+                let value = (data.step_data.get(step))
+                    .map_or(velocity.default_value(), |params| params[velocity.index()]);
+                (data_note_entries(data, step), value)
+            },
+        )
+    }
+
+    /// One value per step for `0..num_steps`: `live` for the live lanes,
+    /// else `pool` per (pool pattern, local step), each pattern opened once.
+    fn steps_batch<T: Clone + Default>(
+        &self,
+        num_steps: usize,
+        live: impl Fn(usize) -> T,
+        pool: impl Fn(&TrackPatternData, usize) -> T,
+    ) -> Vec<T> {
+        let mut out = vec![T::default(); num_steps];
         match self.focus {
             PianoRollFocusSpec::Live => {
                 for step in 0..num_steps.min(MAX_STEPS) {
-                    out[step] = live_note_entries(&self.state, self.track, step);
+                    out[step] = live(step);
                 }
             }
             PianoRollFocusSpec::Pool(pattern) => {
                 self.state.with_pool_pattern(self.track, pattern, |data| {
                     for step in 0..num_steps.min(MAX_STEPS) {
-                        out[step] = data_note_entries(data, step);
+                        out[step] = pool(data, step);
                     }
                 });
             }
@@ -214,7 +274,7 @@ impl PianoRollLanes {
                     let chunk_end = (base + MAX_STEPS).min(end);
                     self.state.with_pool_pattern(self.track, *pattern, |data| {
                         for step in base..chunk_end {
-                            out[step] = data_note_entries(data, step - base);
+                            out[step] = pool(data, step - base);
                         }
                     });
                 }
@@ -223,7 +283,7 @@ impl PianoRollLanes {
         out
     }
 
-    fn set_note_entries(&self, step: usize, notes: &[PianoRollNote]) {
+    pub(crate) fn set_note_entries(&self, step: usize, notes: &[PianoRollNote]) {
         let Some((address, local)) = self.resolve_step(step) else {
             return;
         };
@@ -241,7 +301,7 @@ impl PianoRollLanes {
         }
     }
 
-    fn set_step_param(&self, step: usize, param: StepParam, value: f32) {
+    pub(crate) fn set_step_param(&self, step: usize, param: StepParam, value: f32) {
         let Some((address, local)) = self.resolve_step(step) else {
             return;
         };
@@ -275,7 +335,7 @@ impl PianoRollLanes {
 
     /// One step parameter of the focused source, `default_value()` when the
     /// step is unaddressable.
-    fn step_param(&self, step: usize, param: StepParam) -> f32 {
+    pub(crate) fn step_param(&self, step: usize, param: StepParam) -> f32 {
         let Some((address, local)) = self.resolve_step(step) else {
             return param.default_value();
         };
@@ -384,18 +444,30 @@ fn data_note_entries(data: &TrackPatternData, step: usize) -> Vec<PianoRollNote>
     }
 }
 
+/// One note as the writers store it: transpose rounded and clamped,
+/// duration and delay sanitized.
+pub(crate) fn normalized_piano_roll_note(note: &PianoRollNote) -> PianoRollNote {
+    PianoRollNote {
+        transpose: note
+            .transpose
+            .round()
+            .clamp(StepParam::Transpose.min(), StepParam::Transpose.max()),
+        duration: piano_roll_sanitize_duration(note.duration),
+        delay: piano_roll_sanitize_delay(note.delay),
+    }
+}
+
+/// How many notes a step holds (both writers share the live chord lane's
+/// capacity).
+pub(crate) fn piano_roll_step_capacity() -> usize {
+    sequencer::audio::MAX_VOICES.min(PIANO_ROLL_ID_STRIDE)
+}
+
 /// Round/clamp/sort/dedup — the shared normalization both writers apply.
 fn normalized_piano_roll_notes(notes: &[PianoRollNote]) -> Vec<PianoRollNote> {
     let mut notes = notes
         .iter()
-        .map(|note| PianoRollNote {
-            transpose: note
-                .transpose
-                .round()
-                .clamp(StepParam::Transpose.min(), StepParam::Transpose.max()),
-            duration: piano_roll_sanitize_duration(note.duration),
-            delay: piano_roll_sanitize_delay(note.delay),
-        })
+        .map(normalized_piano_roll_note)
         .collect::<Vec<_>>();
     notes.sort_by(|a, b| {
         (a.delay, a.transpose)
@@ -408,7 +480,7 @@ fn normalized_piano_roll_notes(notes: &[PianoRollNote]) -> Vec<PianoRollNote> {
     // Both writers share the LIVE chord lane's capacity: `ChordData` refuses
     // notes past MAX_VOICES, and a pool pattern holding more than that would
     // truncate (and mis-index) when it becomes effective.
-    notes.truncate(sequencer::audio::MAX_VOICES.min(PIANO_ROLL_ID_STRIDE));
+    notes.truncate(piano_roll_step_capacity());
     notes
 }
 
@@ -490,11 +562,11 @@ fn piano_roll_sanitize_duration(duration: f32) -> f32 {
     duration.max(PIANO_ROLL_MIN_DURATION)
 }
 
-fn piano_roll_sanitize_delay(delay: f32) -> f32 {
+pub(crate) fn piano_roll_sanitize_delay(delay: f32) -> f32 {
     delay.clamp(StepParam::Delay.min(), StepParam::Delay.max())
 }
 
-fn piano_roll_time_to_step_delay(time: f64, num_steps: usize) -> (usize, f32) {
+pub(crate) fn piano_roll_time_to_step_delay(time: f64, num_steps: usize) -> (usize, f32) {
     let num_steps = num_steps.max(1);
     let clamped = time.clamp(0.0, num_steps as f64);
     if clamped >= num_steps as f64 {
@@ -574,7 +646,7 @@ fn piano_roll_transpose_label(transpose: f32) -> String {
     format!("{name}{}", 4 + rounded.div_euclid(12))
 }
 
-fn piano_roll_note_label(note: &PianoRollNote) -> String {
+pub(crate) fn piano_roll_note_label(note: &PianoRollNote) -> String {
     let pitch = piano_roll_transpose_label(note.transpose);
     if note.delay.abs() < 0.001 {
         pitch
@@ -1695,14 +1767,7 @@ pub(crate) fn sync_piano_roll_state(
     rt.set_reactive(
         "SEQ",
         "focus-kind",
-        Value::Keyword(
-            match focus {
-                PianoRollFocusSpec::Live => "live",
-                PianoRollFocusSpec::Pool(_) => "pattern",
-                PianoRollFocusSpec::Take(_) => "take",
-            }
-            .to_string(),
-        ),
+        Value::Keyword(focus.kind_name().to_string()),
     );
     // The pinned CLIP's source kind (:none/:pattern/:take), independent of
     // the resolved write focus: a pinned clip whose pattern is the effective
@@ -1719,25 +1784,17 @@ pub(crate) fn sync_piano_roll_state(
     // Loop-window overlay (spec 5): start marker at the clip's offset, the
     // played window when the span is under one source pass, repeat badge
     // when it covers several. All sentinel-shaped for the float channels.
-    let overlay = app.focus_window_overlay(track);
-    rt.set_reactive(
-        "SEQ",
-        "focus-window-marker",
-        Value::Number(overlay.map(|(marker, _, _)| marker).unwrap_or(-1.0)),
-    );
+    let (marker, span, repeat) = piano_roll_window(app, track);
+    rt.set_reactive("SEQ", "focus-window-marker", Value::Number(marker));
     rt.set_reactive(
         "SEQ",
         "focus-window-span",
-        match overlay.and_then(|(_, span, _)| span) {
+        match span {
             Some((start, end)) => list_value([Value::Number(start), Value::Number(end)]),
             None => Value::Nil,
         },
     );
-    rt.set_reactive(
-        "SEQ",
-        "focus-window-repeat",
-        Value::Number(overlay.and_then(|(_, _, repeat)| repeat).unwrap_or(0.0)),
-    );
+    rt.set_reactive("SEQ", "focus-window-repeat", Value::Number(repeat));
     // Clip-panel fields (spec 6): Start/End/Offset for the pinned clip,
     // Nil-shaped when hidden (follow mode).
     let clip_fields = app.focus_clip_fields(track);

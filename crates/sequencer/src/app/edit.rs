@@ -4538,24 +4538,30 @@ impl StepGestureTransaction {
         Ok(())
     }
 
-    pub fn rollback(self, app: &mut App) -> Result<(), EditError> {
-        let track = app
-            .track_registry
-            .index_of(self.target.track)
-            .ok_or(EditError::MissingStableTrack {
+    /// Put the captured steps back as the gesture found them, keeping the
+    /// gesture open (a script note drag rebuilds every frame from there).
+    /// Returns whether the scheduler needs a full publish.
+    fn restore_before(&self, app: &App) -> Result<bool, EditError> {
+        let track = app.track_registry.index_of(self.target.track).ok_or(
+            EditError::MissingStableTrack {
                 track: self.target.track,
-            })?;
-        let cells = self.before.into_iter().collect::<Vec<_>>();
-        let publish = app
-            .state
+            },
+        )?;
+        let cells = (self.before.iter())
+            .map(|(step, cell)| (*step, cell.clone()))
+            .collect::<Vec<_>>();
+        app.state
             .restore_pattern_step_cells_no_publish(
                 track,
                 self.target.pattern,
                 &cells,
                 &self.variant_registry_before,
             )
-            .map_err(EditError::ReplayFailed)?;
-        if publish {
+            .map_err(EditError::ReplayFailed)
+    }
+
+    pub fn rollback(self, app: &mut App) -> Result<(), EditError> {
+        if self.restore_before(app)? {
             app.state.publish_scheduler_snapshot();
         }
         Ok(())
@@ -4840,6 +4846,16 @@ impl FocusStepGesture {
             }
         }
         Ok(())
+    }
+
+    /// Put every captured step back as the gesture found it, keeping the
+    /// gesture open. Returns whether the scheduler needs a full publish.
+    pub fn restore_before(&self, app: &App) -> Result<bool, EditError> {
+        let mut publish = false;
+        for part in &self.parts {
+            publish |= part.restore_before(app)?;
+        }
+        Ok(publish)
     }
 
     pub fn rollback(self, app: &mut App) -> Result<(), EditError> {
@@ -10473,7 +10489,10 @@ pub fn apply_process_lane_drag_steps(
                 merge_key: merge_key.clone(),
             })
             .map_err(|_| "Another edit gesture is still active".to_string())?;
-        app.process_lane_drag = Some(ProcessLaneDrag { merge_key, before });
+        app.pending_drag = Some(PendingDrag::ProcessLane(ProcessLaneDrag {
+            merge_key,
+            before,
+        }));
     } else {
         app.history.touch_active_gesture();
     }
@@ -10522,10 +10541,7 @@ pub fn apply_rack_groove_amount_drag(
         .history
         .active_gesture()
         .is_some_and(|gesture| gesture.merge_key == merge_key)
-        && app
-            .rack_groove_drag
-            .as_ref()
-            .is_some_and(|drag| drag.merge_key == merge_key);
+        && matches!(&app.pending_drag, Some(PendingDrag::RackGroove(drag)) if drag.merge_key == merge_key);
     if continuing {
         app.history.touch_active_gesture();
     } else {
@@ -10539,7 +10555,10 @@ pub fn apply_rack_groove_amount_drag(
                 merge_key: merge_key.clone(),
             })
             .map_err(|_| "Another edit gesture is still active".to_string())?;
-        app.rack_groove_drag = Some(RackGrooveDrag { merge_key, before });
+        app.pending_drag = Some(PendingDrag::RackGroove(RackGrooveDrag {
+            merge_key,
+            before,
+        }));
     }
     if let Some(rack) = app
         .groups
@@ -10579,6 +10598,130 @@ fn commit_rack_groove_drag(app: &mut App, drag: RackGrooveDrag) {
     );
 }
 
+/// One script note drag in flight (kind-bindings spec §14, stage 7e): the
+/// focus steps it touched, captured before its first write; every frame
+/// restores them and rebuilds the drag from there, and the whole drag lands
+/// as ONE undo entry when the gesture finishes (pointer release, idle
+/// timeout, the next edit), the same shape as [`ProcessLaneDrag`].
+pub(crate) struct NoteDrag {
+    pub(crate) merge_key: MergeKey,
+    pub(crate) gesture: FocusStepGesture,
+}
+
+/// A drag whose writes go straight to state while its gesture is open and
+/// that lands as one history entry when the gesture finishes
+/// ([`finish_active_gesture`]'s hook); `App::pending_drag`.
+pub(crate) enum PendingDrag {
+    ProcessLane(ProcessLaneDrag),
+    RackGroove(RackGrooveDrag),
+    Note(NoteDrag),
+}
+
+impl PendingDrag {
+    fn merge_key(&self) -> &MergeKey {
+        match self {
+            Self::ProcessLane(drag) => &drag.merge_key,
+            Self::RackGroove(drag) => &drag.merge_key,
+            Self::Note(drag) => &drag.merge_key,
+        }
+    }
+
+    /// Commit the finished drag as one history entry.
+    fn commit(self, app: &mut App) {
+        match self {
+            Self::ProcessLane(drag) => {
+                app.commit_applied_scene_structure_mutation(drag.before, "Edit process lane")
+            }
+            Self::RackGroove(drag) => commit_rack_groove_drag(app, drag),
+            Self::Note(drag) => commit_note_drag(app, drag),
+        }
+    }
+}
+
+/// The merge key every script note drag shares.
+pub const NOTE_DRAG_KEY: &str = "kinds-notes";
+
+/// A fresh history gesture id (a script drag mints its own before it opens).
+pub fn next_gesture_id() -> GestureId {
+    GestureId(NEXT_HISTORY_GESTURE_ID.fetch_add(1, Ordering::Relaxed))
+}
+
+impl App {
+    /// The open script note drag's gesture id, while it is the active
+    /// gesture (a drag's frames are tied to it).
+    pub fn active_note_drag(&self) -> Option<GestureId> {
+        let Some(PendingDrag::Note(drag)) = &self.pending_drag else {
+            return None;
+        };
+        let active = self.history.active_gesture()?;
+        (active.merge_key == drag.merge_key).then_some(active.id)
+    }
+}
+
+/// A script note drag's frame on `focus`: opens drag `id` (closing any
+/// other gesture) unless it is the active one, captures the `steps` it has
+/// not yet (as they are: the drag has not written them), puts every
+/// captured step back as the drag found it and runs `rebuild` (which writes
+/// the drag's whole result), then publishes the scheduler once. A failed
+/// `rebuild` leaves the steps as the drag found them.
+pub fn note_drag_frame(
+    app: &mut App,
+    id: GestureId,
+    focus: crate::app::focus::EditFocus,
+    steps: &[usize],
+    rebuild: impl FnOnce(&mut App) -> Result<(), String>,
+) -> Result<(), String> {
+    let merge_key = MergeKey::new(NOTE_DRAG_KEY);
+    if app.active_note_drag() == Some(id) {
+        app.history.touch_active_gesture();
+    } else {
+        // Closes any other gesture (an earlier note drag, of another source,
+        // commits through the hook in `finish_active_gesture`).
+        finish_active_gesture(app);
+        let gesture = FocusStepGesture::begin(app, focus, steps, "Edit notes")
+            .map_err(|error| format!("could not begin the note drag: {error:?}"))?;
+        app.history
+            .begin_gesture(ActiveGesture {
+                id,
+                merge_key: merge_key.clone(),
+            })
+            .map_err(|_| "Another edit gesture is still active".to_string())?;
+        app.pending_drag = Some(PendingDrag::Note(NoteDrag { merge_key, gesture }));
+    }
+    let Some(PendingDrag::Note(mut drag)) = app.pending_drag.take() else {
+        unreachable!("the note drag was just opened");
+    };
+    let restored = (drag.gesture.capture_additional_steps(app, steps))
+        .and_then(|()| drag.gesture.restore_before(app))
+        .map_err(|error| format!("could not extend the note drag: {error:?}"));
+    let result = restored.and_then(|publish| {
+        rebuild(app).map(|()| publish).or_else(|error| {
+            drag.gesture
+                .restore_before(app)
+                .map_err(|undo| format!("{error}; restoring failed: {undo:?}"))?;
+            Err(error)
+        })
+    });
+    let focus = drag.gesture.focus();
+    app.pending_drag = Some(PendingDrag::Note(drag));
+    if result? {
+        app.state.publish_scheduler_snapshot();
+    } else if focus.is_live() {
+        app.state.publish_scheduler_track(focus.track());
+    }
+    Ok(())
+}
+
+/// Commits a finished note drag as one history entry.
+fn commit_note_drag(app: &mut App, drag: NoteDrag) {
+    if let Err(error) = drag.gesture.commit(app) {
+        app.editor.status_message = Some((
+            format!("Note drag could not be recorded: {error:?}"),
+            Instant::now(),
+        ));
+    }
+}
+
 /// Commit the active gesture's staged entry (publishing the scheduler when
 /// it needs it); the gesture's drag bookkeeping is the caller's.
 fn finish_gesture_entry(app: &mut App) -> Option<super::history::ActiveGesture> {
@@ -10610,12 +10753,10 @@ pub fn apply_command_beside_gesture(
 /// not a single `AppCommand`, such as a bar transpose).
 pub fn apply_beside_gesture<T>(app: &mut App, apply: impl FnOnce(&mut App) -> T) -> T {
     let suspended = app.history.suspend_gesture();
-    let process_lane_drag = app.process_lane_drag.take();
-    let rack_groove_drag = app.rack_groove_drag.take();
+    let pending_drag = app.pending_drag.take();
     let outcome = apply(app);
     finish_gesture_entry(app);
-    app.process_lane_drag = process_lane_drag;
-    app.rack_groove_drag = rack_groove_drag;
+    app.pending_drag = pending_drag;
     if let Some(suspended) = suspended {
         app.history.resume_gesture(suspended);
     }
@@ -10625,14 +10766,9 @@ pub fn apply_beside_gesture<T>(app: &mut App, apply: impl FnOnce(&mut App) -> T)
 pub fn finish_active_gesture(app: &mut App) -> bool {
     let finished_gesture = finish_gesture_entry(app);
     let finished = finished_gesture.is_some();
-    if let (Some(gesture), Some(drag)) = (finished_gesture.as_ref(), app.process_lane_drag.take()) {
-        if gesture.merge_key == drag.merge_key {
-            app.commit_applied_scene_structure_mutation(drag.before, "Edit process lane");
-        }
-    }
-    if let (Some(gesture), Some(drag)) = (finished_gesture.as_ref(), app.rack_groove_drag.take()) {
-        if gesture.merge_key == drag.merge_key {
-            commit_rack_groove_drag(app, drag);
+    if let (Some(gesture), Some(drag)) = (finished_gesture.as_ref(), app.pending_drag.take()) {
+        if gesture.merge_key == *drag.merge_key() {
+            drag.commit(app);
         }
     }
     if finished {
@@ -10748,6 +10884,9 @@ pub fn undo(app: &mut App) -> HistoryReplay<EditError> {
     let mut history = std::mem::take(&mut app.history);
     let result = history.undo(|patch| replay_patch(app, patch, ApplyMode::Undo));
     app.history = history;
+    if matches!(result, HistoryReplay::Applied(_)) {
+        app.history_replays += 1;
+    }
     if let Some(request) = topology_request {
         app.state.complete_topology_edit(request);
         app.state.publish_scheduler_snapshot();
@@ -10772,6 +10911,9 @@ pub fn redo(app: &mut App) -> HistoryReplay<EditError> {
     let mut history = std::mem::take(&mut app.history);
     let result = history.redo(|patch| replay_patch(app, patch, ApplyMode::Redo));
     app.history = history;
+    if matches!(result, HistoryReplay::Applied(_)) {
+        app.history_replays += 1;
+    }
     if let Some(request) = topology_request {
         app.state.complete_topology_edit(request);
         app.state.publish_scheduler_snapshot();
@@ -10812,6 +10954,19 @@ pub fn cancel_active_gesture(app: &mut App) -> Result<bool, EditError> {
     let Some(gesture) = app.history.active_gesture().cloned() else {
         return Ok(false);
     };
+    match app.pending_drag.take() {
+        Some(PendingDrag::Note(drag)) if drag.merge_key == gesture.merge_key => {
+            // A script note drag: put its steps back, record nothing.
+            let focus = drag.gesture.focus();
+            drag.gesture.rollback(app)?;
+            app.history.finish_active_gesture();
+            if focus.is_live() {
+                app.state.publish_scheduler_track(focus.track());
+            }
+            return Ok(true);
+        }
+        drag => app.pending_drag = drag,
+    }
     let Some(patch) = app.history.active_gesture_patch(&gesture.merge_key).cloned() else {
         finish_active_gesture(app);
         return Ok(false);

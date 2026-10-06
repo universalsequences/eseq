@@ -350,6 +350,7 @@ pub(crate) fn run_event_loop(
         pointer_down: false,
         script_param_gesture: None,
         script_arrangement_drag: None,
+        script_note_drag: None,
     };
 
     // Inline editor session state (instrument/effect creation/editing)
@@ -859,14 +860,28 @@ pub(crate) fn run_event_loop(
                             && raw_key.modifiers == crossterm::event::KeyModifiers::NONE
                             && app.history.active_gesture().is_some()
                         {
-                            match app::edit::cancel_active_gesture(&mut app) {
-                                Ok(true) => {
-                                    editor.show_transient_message("Parameter edit canceled")
-                                }
-                                Ok(false) => {}
-                                Err(error) => editor.handle_host_event(HostEvent::Error(format!(
-                                    "Could not cancel parameter edit: {error:?}"
-                                ))),
+                            let mut ctx = LoopCtx {
+                                sessions: &mut sessions,
+                                meters: &mut meters,
+                                frame: &mut frame,
+                                gesture: &mut gesture,
+                                track_names: &mut track_names,
+                                shared: &shared,
+                            };
+                            match host_commands::notes::cancel_note_drag(&mut app, &mut ctx) {
+                                Some(Ok(())) => editor.show_transient_message("Note drag canceled"),
+                                Some(Err(error)) => editor.handle_host_event(HostEvent::Error(
+                                    format!("Could not cancel the note drag: {error:?}"),
+                                )),
+                                None => match app::edit::cancel_active_gesture(&mut app) {
+                                    Ok(true) => {
+                                        editor.show_transient_message("Parameter edit canceled")
+                                    }
+                                    Ok(false) => {}
+                                    Err(error) => editor.handle_host_event(HostEvent::Error(
+                                        format!("Could not cancel parameter edit: {error:?}"),
+                                    )),
+                                },
                             }
                             pending_drag = None;
                             pointer_is_down = false;
@@ -1492,6 +1507,21 @@ pub(crate) fn run_event_loop(
                         continue;
                     }
                     let _ = current_track_for_app(&mut app, &shared.current_track);
+                    if name != "set-note" {
+                        // A script note drag's pending frame lands first.
+                        host_commands::notes::flush_note_drag(
+                            &mut app,
+                            &mut editor,
+                            &mut LoopCtx {
+                                sessions: &mut sessions,
+                                meters: &mut meters,
+                                frame: &mut frame,
+                                gesture: &mut gesture,
+                                track_names: &mut track_names,
+                                shared: &shared,
+                            },
+                        );
+                    }
                     match handle_macro_host_command(
                         &name,
                         &payload,
@@ -1524,6 +1554,20 @@ pub(crate) fn run_event_loop(
                 HostCommand::CompileInstrument { .. } | HostCommand::CompileEffect { .. } => {}
             }
         }
+        // A script note drag's frame: once per batch, before the host kinds
+        // sync reads the notes.
+        host_commands::notes::flush_note_drag(
+            &mut app,
+            &mut editor,
+            &mut LoopCtx {
+                sessions: &mut sessions,
+                meters: &mut meters,
+                frame: &mut frame,
+                gesture: &mut gesture,
+                track_names: &mut track_names,
+                shared: &shared,
+            },
+        );
 
         let mut project_load_still_pending = false;
         if app.has_pending_project_load() {

@@ -303,6 +303,13 @@ pub(crate) struct GestureState {
         sequencer::app::history::GestureId,
         sequencer::app::arr_edit::ArrangementDragTargets,
     )>,
+    /// The notes a script drag moves, tied to the drag's gesture id
+    /// (`App::active_note_drag`): every frame rebuilds from where the drag
+    /// started with all of them.
+    pub(crate) script_note_drag: Option<(
+        sequencer::app::history::GestureId,
+        super::host_commands::notes::NoteDragTargets,
+    )>,
 }
 
 /// Shared handles threaded between the event loop, lisp natives, and the

@@ -19,6 +19,7 @@ mod instrument_params;
 mod lanes;
 mod learn;
 mod misc;
+pub(crate) mod notes;
 pub(crate) mod packages;
 mod panel;
 mod process_edit;
@@ -139,6 +140,20 @@ impl ScriptEdit {
             }
             ctx.gesture.script_param_gesture = None;
         }
+    }
+}
+
+/// The targets of the script drag `slot` holds, while its gesture is the
+/// active one under `key` (a drag's frames are tied to its gesture id).
+pub(super) fn open_drag_targets<'a, T>(
+    app: &app::App,
+    slot: &'a mut Option<(app::history::GestureId, T)>,
+    key: &app::history::MergeKey,
+) -> Option<&'a mut T> {
+    let active = app.history.active_gesture()?;
+    match slot {
+        Some((id, targets)) if *id == active.id && active.merge_key == *key => Some(targets),
+        _ => None,
     }
 }
 

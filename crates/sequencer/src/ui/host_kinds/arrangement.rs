@@ -83,6 +83,12 @@ impl SongState {
         self.spans.values().chain(clip).chain(self.cells.first())
     }
 
+    /// Moves with every structure sync (the clip instances may have
+    /// changed).
+    pub(super) fn generation(&self) -> u64 {
+        self.generation
+    }
+
     /// Force every keyed feed at the next tick (a schema change or a hot
     /// reload dropped instances); the registered instances are kept.
     pub(super) fn invalidate(&mut self) {

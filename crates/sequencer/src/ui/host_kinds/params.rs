@@ -245,6 +245,7 @@ pub(super) struct ParamBits {
     pub(super) process_value: u32,
     pub(super) process_clamped: u32,
     pub(super) key_locks: u32,
+    pub(super) step_locks: u32,
 }
 
 impl ParamBits {
@@ -264,7 +265,7 @@ impl ParamBits {
     /// The fields that move only with their track's [`PlockKey`]: the tick
     /// recomputes them only when it moved.
     pub(super) fn plock_keyed(&self) -> u32 {
-        self.has_locks | self.process_mapped | self.key_locks
+        self.has_locks | self.process_mapped | self.key_locks | self.step_locks
     }
 }
 
@@ -284,6 +285,7 @@ pub(super) static PARAM_BITS: LazyLock<ParamBits> = LazyLock::new(|| ParamBits {
     process_value: PARAM_LIVE.bit(f::PARAM_PROCESS_VALUE),
     process_clamped: PARAM_LIVE.bit(f::PARAM_PROCESS_CLAMPED),
     key_locks: PARAM_LIVE.bit(f::PARAM_KEY_LOCKS),
+    step_locks: PARAM_LIVE.bit(f::PARAM_STEP_LOCKS),
 });
 
 /// What one param shows, as far as a mask asks: the displayed value
@@ -295,6 +297,8 @@ struct ParamReading {
     overridden: bool,
     base: Option<f32>,
     has_locks: Option<bool>,
+    /// (step, stored value) of every step of the pattern that locks it.
+    step_locks: Option<Vec<(usize, f32)>>,
 }
 
 /// A selected neural neuron's output override of a track chain param (the
@@ -337,6 +341,7 @@ fn read_param(
     let shown = mask & bits.shown() != 0;
     let base = mask & bits.base != 0;
     let has_locks = mask & bits.has_locks != 0;
+    let step_locks = mask & bits.step_locks != 0;
     let (state, owner) = (&sources.state, device.owner);
     let is_bus = matches!(device.device, DeviceSlot::BusEffect(_));
     if !is_bus && !sources.track_exists(owner) {
@@ -400,6 +405,11 @@ fn read_param(
             overridden: neural.is_some(),
             base: base.then(|| values.base(pdesc, index)),
             has_locks: has_locks.then(|| values.has_lock(index, num_steps())),
+            step_locks: step_locks.then(|| {
+                (0..num_steps())
+                    .filter_map(|step| Some((step, values.lock(step, index)?)))
+                    .collect()
+            }),
         }
     })
 }
@@ -454,6 +464,13 @@ pub(super) fn param_live_fields<'a>(
     }
     if let Some(any) = reading.has_locks {
         emit(f::PARAM_HAS_LOCKS, ParamField::Bool(any));
+    }
+    if let Some(locks) = &reading.step_locks {
+        // `(step value)` rows, the value in display units (the tracker's
+        // cells, legacy `SEQ.tracker-rows`).
+        let rows = (locks.iter())
+            .map(|(step, stored)| list_value([number(*step as f64), number(user(*stored))]));
+        emit(f::PARAM_STEP_LOCKS, ParamField::Value(list_value(rows)));
     }
     if mask & bits.printing != 0 {
         let state = &sources.state;

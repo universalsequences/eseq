@@ -1346,6 +1346,7 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
         armed_rack,
         bus_state: Arc::clone(&bus_state),
         selected_neural_neurons,
+        piano_roll_selection: Arc::clone(&piano_roll_selection),
     };
     let mut host_kinds = super::host_kinds::HostKinds::default();
     let mut sync_host_kinds = |editor: &mut Editor, app: &app::App| {
