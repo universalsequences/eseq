@@ -51,7 +51,8 @@
 ;; Shared scene-bank view state (see that module's header). A state/accessor
 ;; hub with no effect-buffer, and ui/main.lisp reaches it through this import
 ;; before the transport body runs.
-(import eseq.scene-banks :refer (scene-viewed-bank view-scene-bank! view-new-scene-bank! listed?))
+(import eseq.scene-banks :refer (scene-viewed-bank view-scene-bank! view-new-scene-bank!))
+(import eseq.view-kit :refer (open-menu! menu-of nothing listed?))
 (import eseq.kinds :refer (transport master engine song project scenes banks launch!
                            delete-scene! launch-quantize-options record-quantize-options))
 (import eseq.menus :as menus)
@@ -620,22 +621,9 @@
 (def seq-switch-relative (delta)
   (host-command "switch-pattern-relative" (dict :delta delta :quantize (launch-quantize))))
 
-;; An empty slot where a widget shows only sometimes.
-(def nothing () (box :width 0 :height 0))
-
 ;; ── Menus ──
 ;; Each context menu is a `:key ()` singleton with `open`, `at` (where it
-;; opens) and what it targets. A pointer event's `at` is its grid point.
-(def open-menu! (m event)
-  (set! m.at event.at)
-  (set! m.open true))
-
-;; m's context menu holding `items`.
-(def menu-of (m &rest items)
-  (context-menu :is-open m.open
-    :anchor m.at
-    :on-close (lambda () (set! m.open false))
-    items))
+;; opens) and what it targets (eseq.view-kit's open-menu! and menu-of).
 
 ;; ── Scene banks ──
 ;; The viewed bank lives in eseq.scene-banks so the mixer clip grid

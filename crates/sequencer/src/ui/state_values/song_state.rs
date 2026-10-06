@@ -859,7 +859,7 @@ pub(crate) fn queued_transport_scene(state: &SequencerState) -> Option<usize> {
 /// The pattern a track's pending quantized clip launch waits for, if any:
 /// the just-assigned scene cell (the click assigns the cell up front and
 /// defers the audible launch), or the pattern a song-authority override
-/// launch names. Shared by `SEQ.queued-track-clips` and `cell.queued`.
+/// launch names (`cell.queued`).
 pub(crate) fn queued_track_clip(state: &SequencerState, track: usize) -> Option<u64> {
     use sequencer::quantized_launch::{PatternLaunchTarget, QuantizedLaunchOwner};
     match state

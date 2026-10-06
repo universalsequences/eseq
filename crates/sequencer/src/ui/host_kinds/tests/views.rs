@@ -109,6 +109,44 @@ fn a_defwidget_with_instance_state_reads_host_kinds_and_only_repaints() {
 /// built on eseq.kinds, `#'` and defwidget instance state.
 const MINI_DAW: &str = include_str!("../../../../../../docs/examples/mini-daw.lisp");
 
+/// Every binding in `tree`: an instance's as (instance id, field) in `out`,
+/// any other (a legacy namespace's) as `namespace.field` in `legacy`.
+pub(super) fn instance_bindings(
+    tree: &Value,
+    out: &mut Vec<(InstanceId, String)>,
+    legacy: &mut Vec<String>,
+) {
+    match tree {
+        Value::ReactiveRef {
+            namespace, field, ..
+        } => match namespace.strip_prefix("%instance/") {
+            Some(id) => out.push((id.parse().expect("instance id"), field.clone())),
+            None => legacy.push(format!("{namespace}.{field}")),
+        },
+        Value::Map(map) => {
+            for value in map.values() {
+                instance_bindings(&value.borrow(), out, legacy);
+            }
+        }
+        Value::List(items) => {
+            for item in items {
+                instance_bindings(&item.borrow(), out, legacy);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The factory DAW, synced and rendered.
+pub(super) fn distro() -> Harness {
+    let mut h = Harness::with_root(UiRoot::Distro);
+    h.sync();
+    h.show_all();
+    h.sync();
+    h.show_all();
+    h
+}
+
 /// Every map in a widget tree that carries `prop` (a depth-first walk).
 pub(super) fn widgets_with_prop(tree: &Value, prop: &str, out: &mut Vec<HashMap<String, Value>>) {
     match tree {

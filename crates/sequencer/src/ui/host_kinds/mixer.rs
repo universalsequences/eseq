@@ -195,14 +195,27 @@ impl HostKinds {
         self.route_observed.push_masked(pusher, &ROUTE_LIVE);
     }
 
-    /// The observed group fields (`armed`), from a list kept per observer
-    /// epoch ([`ObservedList`]).
+    /// The observed group fields (`armed`, `delete-target`), from a list
+    /// kept per observer epoch ([`ObservedList`]); `delete-target` only
+    /// when the delete target's version (or the observers) moved.
     pub(super) fn sync_group_live(&mut self, pusher: &mut Pusher<'_>) {
         let ids = &self.group_ids;
         let names = &GROUP_LIVE.names;
         let ids = || ids.iter().flatten().copied().collect();
         self.group_observed.refresh(pusher.rt, names, ids);
-        self.group_observed.push_masked(pusher, &GROUP_LIVE);
+        let seen = (
+            (pusher.sources.active_delete_target_version).load(Ordering::Relaxed),
+            pusher.rt.instance_observer_epoch(),
+        );
+        let skip = if self.group_delete_target_seen == Some(seen) {
+            GROUP_LIVE.bit(f::GROUP_DELETE_TARGET)
+        } else {
+            0
+        };
+        self.group_delete_target_seen = Some(seen);
+        for &(id, mask, _) in &self.group_observed.entries {
+            pusher.push_live_masked(id, &GROUP_LIVE, mask & !skip);
+        }
     }
 
     /// The group registry (by group id), the group fields and

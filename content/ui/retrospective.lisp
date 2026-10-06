@@ -5,6 +5,7 @@
 ;; the audition's state); the crop and the roll's view are this view's own.
 (module eseq.retrospective)
 (import eseq.kinds :refer (retro transport))
+(import eseq.view-kit :refer (nothing))
 (export panel open close action apply-guess retro-crop retro-view)
 
 ;; The crop Send imports. `requested-bars` keeps the user's choice apart from
@@ -142,7 +143,6 @@
       (set! roll-rows.items-of source))
     roll-rows.items))
 
-(def nothing () (box :height 0 :width 0))
 (def note (text &rest props)
   (apply label text :bg :transparent :font-size 11 props))
 (def seconds (t) (/ (round (* 1000 t)) 1000))

@@ -58,11 +58,9 @@ impl Harness {
     fn publish_legacy_song(&mut self) {
         let state = self.shared.state.clone();
         let count = self.app.tracks.len();
-        let target = self.shared.active_delete_target.lock().unwrap().clone();
         let rt = self.editor.runtime_mut();
         sync_song_state(rt, &self.app, &mut SongFrameState::default(), true);
         sync_track_pattern_cell_state_fields(rt, &state, count);
-        sync_track_pattern_cell_selected_fields(rt, &state, count, target.as_ref());
     }
 
     fn seq(&self, field: &str) -> Value {
@@ -217,15 +215,17 @@ fn arrangement_fields_read_after_sync_and_match_the_legacy_fields() {
     );
     h.eval_7d("(def cl (first t0.cells))");
     assert_eq!(h.eval_7d("cl.track"), h.eval_7d("t0"));
-    for (legacy, field) in [
-        ("active", "active"),
-        ("assigned", "assigned"),
-        ("override", "override"),
-        ("selected", "selected"),
-    ] {
-        let legacy = h.seq(&format!("track-pattern-cell-{legacy}-0-1"));
-        assert_eq!(legacy, h.eval_7d(&format!("cl.{field}")), "{field}");
-    }
+    let model = &cells[0];
+    assert_eq!(
+        h.seq("track-pattern-cell-active-0-1"),
+        h.eval_7d("cl.active")
+    );
+    assert_eq!(
+        h.eval_7d("cl.assigned"),
+        Value::Bool(model.assigned_to_current_scene)
+    );
+    assert_eq!(h.eval_7d("cl.override"), Value::Bool(model.overridden));
+    assert_eq!(h.eval_7d("cl.selected"), Value::Bool(false));
     assert_eq!(h.eval_7d("cl.active"), Value::Bool(true));
     assert_eq!(h.eval_7d("cl.queued"), Value::Bool(false));
     assert_eq!(h.eval_7d("cl.banks"), h.eval_7d("(list (first (banks)))"));
@@ -784,35 +784,23 @@ fn cells_are_addressed_by_stable_ids_across_a_track_reorder() {
     h.sync();
     h.eval_7d("(def t1 (track 1)) (def cl (first t1.cells))");
     let pid = num(h.eval_7d("cl.pid")) as u64;
-    // The set! and the launch queue; the track in front goes before they land.
+    // The set! selects at once (a UI-thread delete target); the launch
+    // queues, and the track in front goes before it lands.
     h.eval_7d("(set! cl.selected true) (launch-cell! cl)");
+    let target = h.shared.active_delete_target.lock().unwrap().clone();
+    assert!(
+        track_pattern_cell_selected(target.as_ref(), 1, pid),
+        "selected before the launch lands: {target:?}"
+    );
     h.app.delete_track_recorded(0).expect("delete");
     h.drain();
     h.sync();
     assert_eq!(h.eval_7d("t1.index"), Value::Number(0.0));
-    let target = h.shared.active_delete_target.lock().unwrap().clone();
-    assert!(
-        track_pattern_cell_selected(target.as_ref(), 0, pid),
-        "the cell of the moved track: {target:?}"
-    );
-    assert_eq!(h.eval_7d("cl.selected"), Value::Bool(true));
     assert_eq!(h.eval_7d("cl.assigned"), Value::Bool(true), "launched");
-    h.run_7d("(set! cl.selected false)");
+    // Deselecting is synchronous too.
+    h.eval_7d("(set! cl.selected true)");
+    h.eval_7d("(set! cl.selected false)");
     assert!(h.shared.active_delete_target.lock().unwrap().is_none());
-    // A gone pattern is an error.
-    let track = h.eval_7d("t1.tid");
-    h.editor.minibuffer = None;
-    h.command(
-        "set-cell",
-        map_value([
-            ("track-id", track),
-            ("pattern-id", Value::Number(999.0)),
-            ("field", s("selected")),
-            ("value", Value::Bool(true)),
-        ]),
-    );
-    let error = h.editor.minibuffer.clone().unwrap_or_default();
-    assert!(error.contains("the pattern is gone"), "{error}");
 }
 
 #[test]

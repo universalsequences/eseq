@@ -122,7 +122,6 @@ pub(super) fn handle(
                     let rt = editor.runtime_mut();
                     sync_bus_mixer_state(rt, app);
                     sync_track_mixer_state(rt, app, &state);
-                    rt.set_reactive("SEQ", "track-output-options", build_track_output_options(app));
                     rt.run_reactive_cycle();
                     editor.refresh_runtime_side_effects();
                     ui_epoch.fetch_add(1, Ordering::Relaxed);
@@ -373,13 +372,8 @@ pub(super) fn handle(
                     let rt = editor.runtime_mut();
                     if has_selection {
                         // The persisted baseline intentionally did not change. Publish
-                        // the edited lock value instead of immediately snapping both
-                        // controls back to that baseline.
-                        rt.set_reactive(
-                            "SEQ",
-                            &track_bus_send_field(track, bus_idx),
-                            Value::Number(amount as f64),
-                        );
+                        // the edited lock value instead of immediately snapping the
+                        // control back to that baseline.
                         if track == current {
                             rt.set_reactive(
                                 "SEQ",
@@ -387,13 +381,8 @@ pub(super) fn handle(
                                 Value::Number(amount as f64),
                             );
                         }
-                    } else {
-                        sync_track_bus_send_binding_field(rt, &app, &state, track, bus_idx);
-                        if track == current {
-                            sync_current_track_bus_send_binding_field(
-                                rt, &app, &state, track, bus_idx,
-                            );
-                        }
+                    } else if track == current {
+                        sync_current_track_bus_send_binding_field(rt, &app, &state, track, bus_idx);
                     }
                     rt.run_reactive_cycle();
                     editor.refresh_runtime_side_effects();
@@ -419,9 +408,9 @@ pub(super) fn handle(
                 return;
             };
             let (track, bus_id) = (track as usize, sequencer::sequencer::BusId(bus_id as u64));
-            let Some(bus_idx) = app.buses.iter().position(|bus| bus.id == bus_id) else {
+            if !app.buses.iter().any(|bus| bus.id == bus_id) {
                 return;
-            };
+            }
             if bus_id == sequencer::sequencer::BusId::MIX || track >= state.active_track_count() {
                 return;
             }
@@ -436,8 +425,6 @@ pub(super) fn handle(
                     track,
                     &selected_steps,
                 );
-            } else {
-                sync_track_bus_send_binding_field(rt, app, &state, track, bus_idx);
             }
             rt.run_reactive_cycle();
             editor.refresh_runtime_side_effects();

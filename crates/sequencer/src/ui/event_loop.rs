@@ -389,14 +389,11 @@ pub(crate) fn run_event_loop(
         prev_playhead: u32::MAX,
         prev_pattern_epoch: 0,
         prev_song_row_mirror_epoch: 0,
-        prev_published_sequencers_version: u64::MAX,
         prev_graph_read_key: (u64::MAX, u64::MAX, usize::MAX),
         prev_instance_key: (u64::MAX, u64::MAX, u64::MAX, 0),
         prev_instances_fingerprint: u64::MAX,
         prev_current_track: usize::MAX,
         cpu_overload: CpuOverloadIndicator::default(),
-        prev_peak_l_level: -1.0f64,
-        prev_peak_r_level: -1.0f64,
         recording_history_open: false,
         prev_roll_windows: Vec::new(),
         prev_selected_tracks: HashSet::new(),
@@ -407,7 +404,6 @@ pub(crate) fn run_event_loop(
         prev_bus_peak_levels: Vec::new(),
         prev_modulator_phases: Vec::new(),
         prev_modulator_levels: Vec::new(),
-        prev_mod_port_levels: Default::default(),
         prev_mod_display_values: Default::default(),
         prev_rack_pad_triggers: Vec::new(),
         rack_pad_triggered_at: Vec::new(),
@@ -422,7 +418,6 @@ pub(crate) fn run_event_loop(
         prev_process_effective_params_version: shared.state.process_effective_params_version(),
         prev_process_run_errors_version: None,
         prev_process_effective_params: Default::default(),
-        prev_process_effective_sends: Default::default(),
         prev_track_tint: None,
         prev_variant_tint: None,
         prev_ui_epoch: 0,
@@ -445,7 +440,6 @@ pub(crate) fn run_event_loop(
         prev_sampler_analysis_generation: u64::MAX,
         prev_auto_follow: true,
         prev_browser_preview_playing: false,
-        prev_queued_track_clips: Vec::new(),
         song: SongFrameState::default(),
         sound_palette: SoundPaletteFrameState::default(),
         watched_sampler_voice_track: None,
@@ -596,34 +590,6 @@ pub(crate) fn run_event_loop(
             )));
         }
         app.graph_controller().reap_due_rack_teardowns();
-        // Pending quantized clip launches, as the pattern id each track has
-        // queued (-1 = none). The queued clip is the just-assigned scene
-        // cell (the click assigns the cell up front and defers the audible
-        // restore), so resolve the pending SceneTracks target's cell. Drives
-        // the mixer grid's blinking queued-cell background.
-        let queued_track_clips: Vec<i64> = (0..app.tracks.len())
-            .map(|track| queued_track_clip(&shared.state, track).map_or(-1, |id| id as i64))
-            .collect();
-        if queued_track_clips != frame.prev_queued_track_clips {
-            let rt = editor.runtime_mut();
-            rt.set_reactive(
-                "SEQ",
-                "queued-track-clips",
-                Value::List(
-                    queued_track_clips
-                        .iter()
-                        .map(|id| Rc::new(RefCell::new(Value::Number(*id as f64))))
-                        .collect(),
-                ),
-            );
-            rt.run_reactive_cycle();
-            editor.refresh_runtime_side_effects();
-            if editor_has_visible_mixer_buffer(&editor) {
-                refresh_visible_mixer_layouts(&mut editor);
-            }
-            editor.mark_needs_redraw();
-            frame.prev_queued_track_clips = queued_track_clips;
-        }
         if let Err(error) = publish_sample_browser_results(&mut editor, &shared.sample_browser) {
             editor.handle_host_event(HostEvent::Error(format!(
                 "Failed to query samples.db browser state: {error}"
@@ -1013,7 +979,6 @@ pub(crate) fn run_event_loop(
                                         rt,
                                         &meters.cached_modulator_levels,
                                     );
-                                    sync_mod_port_level_fields(rt, &meters.cached_mod_port_levels);
                                     rt.clear_subtree_effects_for_named_target("*sequencer*");
                                 }
                                 sync_bus_mixer_state(rt, &app);
@@ -1660,20 +1625,9 @@ pub(crate) fn run_event_loop(
                         sync_groups_bindings(rt, &app.groups, &app.grooves);
                         rt.set_reactive("SEQ", "playing", Value::Bool(playing));
                         rt.set_reactive("SEQ", "bpm", Value::Number(bpm as f64));
-                        rt.set_reactive(
-                            "SEQ",
-                            "master-peak-l",
-                            Value::Number(meters.cached_peak_l_level),
-                        );
-                        rt.set_reactive(
-                            "SEQ",
-                            "master-peak-r",
-                            Value::Number(meters.cached_peak_r_level),
-                        );
                         sync_bus_peak_fields(rt, &meters.cached_bus_peak_levels);
                         sync_modulator_phase_fields(rt, &meters.cached_modulator_phases);
                         sync_modulator_level_fields(rt, &meters.cached_modulator_levels);
-                        sync_mod_port_level_fields(rt, &meters.cached_mod_port_levels);
                         rt.set_reactive(
                             "SEQ",
                             "num-tracks",
@@ -1805,8 +1759,6 @@ pub(crate) fn run_event_loop(
                         frame.prev_bpm = bpm;
                         frame.prev_playing = playing;
                         frame.prev_pattern_epoch = epoch;
-                        frame.prev_peak_l_level = meters.cached_peak_l_level;
-                        frame.prev_peak_r_level = meters.cached_peak_r_level;
                         frame.prev_track_peak_levels = meters.cached_track_peak_levels.clone();
                         frame.prev_modulator_phases = meters.cached_modulator_phases.clone();
                         frame.prev_modulator_levels = meters.cached_modulator_levels.clone();

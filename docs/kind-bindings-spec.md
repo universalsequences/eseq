@@ -1,6 +1,6 @@
 # Kind bindings
 
-Status: spec rev 3, 2026-10-04. Stages 1–6 built, stage 7 in part (§14; 7, 7b, 7b-2, 7b-3, 7c, 7d, 7e, 7f, 7g, 7h and 7i built), stage 8 in part (§13, §13.1: .12 ported) (§3.1, §3.2, §3.3, §3.4, §4, §7.1, §7.3, §8, §9 notes). Bead: epic `eseq-0l17` (`bd list --label kind-bindings`).
+Status: spec rev 3, 2026-10-04. Stages 1–6 built, stage 7 in part (§14; 7, 7b, 7b-2, 7b-3, 7c, 7d, 7e, 7f, 7g, 7h and 7i built), stage 8 in part (§13, §13.1: .12 and .13 ported) (§3.1, §3.2, §3.3, §3.4, §4, §7.1, §7.3, §8, §9 notes). Bead: epic `eseq-0l17` (`bd list --label kind-bindings`).
 Rev 3 resolves the open questions (§12 Decisions). Rev 2 dropped the separate `defrecord` form of rev 1: host state and view state
 are declared with `def-kind`, which gains keyed and singleton kinds, a `:host`
 field group and typed fields.
@@ -635,11 +635,15 @@ Built (stage 5):
 - **Errors.** The plan's, the budget's and a name collision are evaluation
   errors (`VMError::Instance`). A shader codegen error (`<widget>: shader
   error: …`) stays non-fatal: a `[defwidget] warning:` on stderr and the
-  form's string value, as before. Making it fatal broke a content load:
-  `rec-arm-dot` in `ui/legacy/mixer.lisp` calls `eseq.materials/color`,
-  which is unknown when that file loads without `ui/materials.lisp`
-  (`legacy_mixer_definitions_are_top_level_and_source_loads`); it was
-  silently unregistered before. No other content `defwidget` hits one.
+  form's string value, as before. `rec-arm-dot` in `ui/legacy/mixer.lisp`
+  calls `eseq.materials/color`; since stage 8 (.13, eseq-0l17.25) that file
+  imports `eseq.materials`, so the widget registers when it loads on its
+  own (`legacy_mixer_definitions_are_top_level_and_source_loads`). Making
+  the error fatal still breaks a boot: `ui/sequencer.lisp`,
+  `ui/step-grid.lisp`, `ui/effects/param-grid.lisp` and
+  `ui/effects/track-panels.lisp` call `eseq.materials/` in shaders without
+  importing it, and `metal_seq_main_import_block_boots_in_reverse_order`
+  loads the sequencer before the materials (`seqv-rec-arm-dot`).
 - **Uniform layout.** `SdfWidgetDef::state_uniforms` stays one float name per
   slot, in slot order: scalar states first (as `collect_state_symbols`
   finds them, captured `defstate`s included), then fields in first-read
@@ -1109,7 +1113,7 @@ its instance and field.
      all of `RETRO` (registration, the mirror, the live audition fields;
      the capture area is `unmirrored`). Kept, still read by unported
      areas (eseq-0l17.22's list): `SEQ.playing`, `recording`, `bpm`,
-     `current-pattern`, `num-patterns`, `master-peak-l` / `-r`,
+     `current-pattern`, `num-patterns`, `master-peak-l` / `-r` (removed by .13),
      `scene-launch-quantize` (also the host kinds' source for
      `transport.launch-quantize`), `song-mode`, `song-position-beats`.
    - **Tests.** `host_kinds::tests::transport` (Distro root): the ported
@@ -1122,6 +1126,123 @@ its instance and field.
      a host (`full_grid_editor_for_scroll_tests`) seed kinds with
      `set_kind_field` / `seed_kind_scene_banks` (state_values tests) and
      `sync_retro_kind` (the capture tests) instead of `SEQ` fields.
+   Built (stage 8, eseq-0l17.13): the mixer (`ui/mixer.lisp`), its
+   unloaded predecessor (`ui/legacy/mixer.lisp`) and the MIDImix map
+   (`ui/midi-midimix.lisp`):
+   - **Kinds.** `track.in-selection :bool` (L): the current track or one
+     of `selection.tracks`, the strip highlight (legacy `track-selected-N`);
+     `group.delete-target :bool` (L) [`set-group-delete-target`: true
+     arms the group, false clears it when it is armed]; `send.process-mapped
+     :bool` and `send.process-value :number` (L): an enabled process slot of
+     the track writes the send, and the level it last wrote (the displayed
+     level until one has), the send twin of `param.process-mapped` /
+     `process-value` (the bound set cached per track under its `PlockKey`,
+     next to `process_bound` in `host_kinds/panel.rs`; the scheduler's
+     writes copied into `KindsShared` only when
+     `process_effective_params_version` moves). `send.has-locks` reads a
+     per-track set of locked buses cached under the `PlockKey` and step
+     count; the tick reads `selection.tracks` and each track's display step
+     once (`TickMemo`, for `in-selection`, `display`, `locked`,
+     `process-value`) and pushes `group.delete-target` only when the
+     delete target's version (or the observers) moved.
+   - **Strips take instances.** `track-strip`, `track-collapsed-strip`,
+     `bus-strip`, `group-container`, `patch-mixer-strip`, the menus and the
+     renames take track / bus / group / cell / rack-clip instances; the
+     drop handlers keep the host's drop meta (track and bus positions, the
+     add/drop commands' address). `render-order` lists `(dict :kind "loose"
+     :track t)` and `(dict :kind "group" :group g)`; `display-buses` the
+     buses with the main mix last; `group-bus?` and `main-bus` replace the
+     bus-id helpers (the MIDImix map follows them). `track-color-r/g/b` and
+     `track-collapsed-label` keep a position argument for the unported track
+     panel header.
+   - **View state** (`:key ()` singletons, exported): `strip-menu` (open,
+     at, the track or group), `strip-rename` (the track or group, the
+     draft: one rename at a time), `strip-select` (the range anchor, a
+     track) and `mod-patch` (the cable's source track). Menus open with
+     `eseq.view-kit`'s `open-menu!` / `menu-of`; held instances (a menu's
+     target, the range anchor) are checked `listed?` before use. Starting
+     a rename commits one in progress first (its input blurs only after
+     the rebuild).
+   - **Shape.** One frame for the three track strips (`track-frame`, with
+     `track-strip-props` for the mixer's drop target and clicks), one
+     click handler (`track-click event t plain`), one strip menu and
+     rename (`open-strip-menu` / `begin-rename` / `finish-rename`, track
+     or group), `strip-button` with its unlit look (`:bg`,
+     `:idle-color`; the inverted bus mute), `main-bus?` (bus id 0) for
+     every main mix check (`display-buses` puts it last wherever it sits),
+     the clip grid and the mod port rows in keyed subtrees (a launch or a
+     patch re-renders them alone), the output dropdown naming its buses
+     from one shared-name read.
+   - **Bindings.** Faders `#'t.volume` / `#'b.volume`, pan `#'t.pan`,
+     meters `#'t.peak`, `#'b.peak`, `#'master.peak-l/-r` (the main mix),
+     mute / solo / arm `#'t.audible`, `#'t.soloed`, `#'t.armed`,
+     `#'b.muted`, `#'b.soloed`, `#'g.armed`, highlights
+     `#'t.in-selection`, `#'t.delete-target`, `#'g.delete-target`, mod
+     ports `#'t.mod-out-level` and `(mod-in-level x i)`, sends
+     `#'s.display` / `#'s.locked` / `#'s.amount` (and `#'s.process-value`
+     while mapped), clip cells `#'c.active` / `assigned` / `override` /
+     `selected`, rack clip glyphs `#'rc.active`. Values stay where Lisp
+     decides: the clip grid (`t.cells`, `c.banks`, `c.queued` for the
+     blinking background), output dropdowns (`t.output`, `b.output`,
+     `project.output-options`), routes (`(routes)`, `r.selected` for the
+     cable lists), the rack clip column's follow row (`g.rack-clip.index`,
+     a subtree of its own, replacing the `SEQV.rack-clip-center-*`
+     observer). Setters: `toggle!` mute / solo / arm, `set!` volume, pan,
+     outputs, `selection.track`, `r.selected`, `g.delete-target`,
+     `g.collapsed`, `d.voices` (a rack slot's, in the patch mixer);
+     actions `launch-cell!`, `launch-rack-clip!`, `save-rack-clip-as!`,
+     `convert-rack-to-clips!`. The send knob keeps `set-track-bus-send`
+     (it p-locks the selected steps of the current track, which `set!
+     s.amount` never does). A cell launch arms the cell with `set!
+     c.selected true`: the delete-target setters (`cell.selected`,
+     `route.selected`, `group.delete-target`, through `eseq.kinds`'
+     `set-delete-target`) touch only UI-thread state and apply at once, so
+     BS or clone right after the click act on the cell (the `set-cell`
+     host command is gone). `eseq.track-collapse`
+     gains `instrument-icon` and `replaceable-type?` (by `t.instrument-type`);
+     `eseq.scene-banks/clip-in-viewed-bank?` takes a cell and a bank.
+   - **`eseq.view-kit`** (`ui/view-kit.lisp`, new): the side-effect-free
+     helpers the views shared by copy: `open-menu!`, `menu-of`, `nothing`
+     (a zero box), `listed?`, `index-of`, `prop-if` (`(k v)` to splice
+     into props when v is set). The transport, the retrospective view,
+     the mixer and the drum rack lookups use it; `eseq.scene-banks` keeps
+     `listed?` as a compat re-export. Not `ui/menus.lisp`: importing that
+     registers menus.
+   - **Legacy removed:** `SEQ.master-peak-l/-r`, `mod-routes`,
+     `selected-mod-routes`, `track-mod-output-available`, `track-outputs`,
+     `track-output-options`, `bus-output-routes`, `track-bus-sends`,
+     `queued-track-clips`, `graph-sequencers`, `track-mixer-pans`,
+     `track-N-pan`, `track-N-bus-M-send` with its `-plock-any/-active/
+     -default` and `-proc-mapped/-proc-value`, `mixer-track-delete-target-N`,
+     `track-pattern-cell-assigned/override/selected-*`, `mod-in-level-*`,
+     `mod-out-level-*`, `bus-mod-in-level-*`, and `SEQV.rack-clip-center-*`
+     (with their builders, frame state and the legacy-only tests). Kept,
+     still read by unported areas (eseq-0l17.22): `SEQ.groups`,
+     `bus-names`, `bus-ids`, `bus-mutes/solos/volumes`, `bus-peak-*`,
+     `track-peak-*`, `track-N-volume`, `track-volumes`, `track-mutes`,
+     `track-solos`, `track-muted-effective`, `record-armed`,
+     `track-selected-*`, `selected-tracks`, `track-names`, `track-colors`,
+     `track-instrument-types`, `track-ids`, `num-tracks`, `current-track`,
+     `track-pattern-cells`, `track-pattern-cell-active-*`, `rack-clips`,
+     `rack-clip-active-*`, `armed-rack-id`, `tp-*` (incl. `tp-bus-M-send`),
+     `delete-target-version`, `instances`, `scene-launch-quantize`,
+     `current-pattern`.
+   - **Tests.** `host_kinds::tests::mixer_view` (Distro root): the ported
+     files use no legacy form, the mixer binds its host state through kinds
+     and only repaints while mixing and metering, the selection highlight
+     and the group delete target, a send's process value. The host-less
+     editor (`full_grid_editor_for_scroll_tests`) publishes its tracks,
+     buses and groups as kinds (`seed_kind_tracks` with `KindTrack`,
+     `seed_kind_buses`, `seed_kind_groups`, `seed_kind_rack_clips`,
+     `kind_cell`; `set_full_grid_track_count` and `apply_groups_bindings`
+     seed them too; `kind_track`, `select_kind_tracks`, `kind_singleton_rt`
+     and `instance_or_nil` read and write them; `KindTrack` builds with
+     `.instrument()` / `.collapsed()`); the Distro-root view tests share
+     `instance_bindings` and `distro()` (`host_kinds::tests::views`) and
+     the process fixtures `one_slot_chain` (`host_kinds::tests`); `solo_binding_tests::mixer_mute_and_solo_only_repaint`
+     asserts the mixer and patch mixer repaint without re-running for
+     mute, solo, audibility, arm, selection, delete target, faders and
+     meters; the MIDImix tests publish their topology as kinds.
 9. **Diagnostics.** Re-render reason log, `describe-kind`. Useful from
    stage 6 on; can run in parallel with the ports.
 
@@ -1178,6 +1299,25 @@ the other port beads follow it):
      send a dropped instance's id, which can read 0).
    The authoring rules: no `\"` escapes inside Lisp strings, no `cond`
    (`match` / `if` / `when` / `unless`).
+   Learned by the mixer (.13):
+   - a binding cannot be negated: bind the positive field and put the lit
+     look on the bound state (`:muted #'t.audible` with the silenced look
+     on the plain props, a mute button lit by `:active #'t.audible`);
+   - `select` is a special form: a local named `select` is called as the
+     form (an `ArityMismatch`);
+   - dotted event reads (`event.shift`) need a map: tests that invoke a
+     handler pass a map event, with `:at` for anything opening a menu;
+   - a setter that touches only UI-thread state (the delete target, the
+     selection) applies at once through a native; only model edits, which
+     need the `App`, are host commands that land next frame;
+   - shared view helpers (menus, `listed?`, `nothing`, `prop-if`) come from
+     `eseq.view-kit`, never a copy in the view; a helper module a view
+     imports must have no import side effects;
+   - host-less tests seed kinds before loading a bare-runtime view, or the
+     last invalidation trace still shows the initial re-render; shared
+     state modules that read `SEQ` at load need an (empty) `SEQ` namespace;
+   - a capture may differ where a legacy publisher lagged a sync (live
+     kind fields read the host at once): compare the pair, not the bytes.
 4. **Legacy publishers.** For each family the area read, grep every
    reader and mention: `content/` Lisp, all of `crates/` Rust (tests and
    capture fixtures included), `tools/` and `docs/` (the compat alias
@@ -1619,9 +1759,10 @@ Built (7i):
 
 [c] = the `set-song` host command (`:field`, `:value`; `:track-id` for
 `latched`, `:clip-id` for `bound-clip`); [k] = `set-clip` (`:clip-id`,
-`:field`, `:value`; `:track-id`, `:pattern-id` for `cell`); [e] =
-`set-cell` (`:track-id`, `:pattern-id`, `:field`, `:value`); all in
-`host_commands/arrangement.rs`. Actions: `(launch-cell! c)` (the legacy
+`:field`, `:value`; `:track-id`, `:pattern-id` for `cell`), both in
+`host_commands/arrangement.rs`; [e] = the delete-target natives, applied at
+once (`seq-set-delete-target :track-pattern`, by track position and
+pattern id; eseq-0l17.13 replaced the `set-cell` host command). Actions: `(launch-cell! c)` (the legacy
 `set-scene-cell`, extended to take `:track-id` and no `:scene`, both
 resolved when it lands: the track by id, the current scene; legacy
 `:scene :track` payloads still work; with `transport.launch-quantize`),
@@ -1705,8 +1846,9 @@ Built (7d):
   resizes it, `clip.cell` sets its source to a pattern of its own track's
   pool (another track's cell, nil, or a pattern no longer in the pool is
   an error), `song.loop`, `song.end` (before a clip's end or the last
-  scene change the model refuses). `cell.selected` (`set-cell`) makes the
-  cell the mixer's delete target (false clears it when it is).
+  scene change the model refuses). `cell.selected` makes the cell the
+  mixer's delete target at once (false clears it when it is; originally
+  the `set-cell` host command, now the delete-target natives, .13).
 - **Script drags.** While the pointer is down (and no user gesture is
   active, `ScriptEdit::drags`), every `clip.start`, `clip.end` and
   `song.end` `set!`, across any number of clips, shares ONE coalescing key
@@ -2775,23 +2917,23 @@ builds the field name.
 | `SEQ.<slot-page-active-field>` | 1 | sequencer | sv/expanded_step.rs | model | track.playhead | built (.10) | .11 |
 | `SEQ.<slot-param-field>` | 2 | sequencer | sv/expanded_step.rs | model | step.‹param› | built (.10) | .11 |
 | `SEQ.<track-bus-send-field>` | 2 | effects/track-panels | sv/track_and_mixer.rs | model | send.display (of selection.track) | built (.10) | .14 |
-| `SEQ.<track-pan-field>` | 1 | mixer | sv/track_and_mixer.rs | model | track.pan | built (.10) | .13 |
-| `SEQ.<track-volume-field>` | 2 | mixer, sequencer | sv/track_and_mixer.rs | model | track.volume | built (.10) | .11 .13 |
+| `SEQ.<track-pan-field>` | 1 | mixer | sv/track_and_mixer.rs | model | track.pan | built (.10); ported (.13), removed | .13 |
+| `SEQ.<track-volume-field>` | 2 | mixer, sequencer | sv/track_and_mixer.rs | model | track.volume | built (.10); ported (.13), kept: sequencer | .11 .13 |
 | `SEQ.auxas` | 1 | seqv-track-params | reactive_sync.rs | model | step.aux-a | built (.10) | .11 |
 | `SEQ.bpm` | 2 | effects/builtin/phaser-flanger, transport | bounce/job.rs | live | transport.bpm | built (.10); ported (.12), kept: phaser-flanger (.14) | .12 .14 |
-| `SEQ.bus-mutes` | 5 | mixer, sequencer, legacy/mixer | sv/track_and_mixer.rs | model | bus.muted | built (.10) | .11 .13 |
-| `SEQ.bus-names` | 25 | mixer, legacy/mixer, seq-core-state +2 | sv/track_and_mixer.rs | model | bus.name | built (.10) | .11 .13 .14 |
-| `SEQ.bus-peak-*` | 3 | mixer, sequencer | sv/meters_and_modulation.rs | live | bus.peak | built (.10) | .11 .13 |
-| `SEQ.bus-solos` | 4 | mixer, sequencer, legacy/mixer | sv/track_and_mixer.rs | model | bus.soloed | built (.10) | .11 .13 |
-| `SEQ.bus-volumes` | 3 | mixer, sequencer, legacy/mixer | sv/track_and_mixer.rs | model | bus.volume | built (.10) | .11 .13 |
+| `SEQ.bus-mutes` | 5 | mixer, sequencer, legacy/mixer | sv/track_and_mixer.rs | model | bus.muted | built (.10); ported (.13), kept: sequencer | .11 .13 |
+| `SEQ.bus-names` | 25 | mixer, legacy/mixer, seq-core-state +2 | sv/track_and_mixer.rs | model | bus.name | built (.10); ported (.13), kept: seq-core-state | .11 .13 .14 |
+| `SEQ.bus-peak-*` | 3 | mixer, sequencer | sv/meters_and_modulation.rs | live | bus.peak | built (.10); ported (.13), kept: sequencer | .11 .13 |
+| `SEQ.bus-solos` | 4 | mixer, sequencer, legacy/mixer | sv/track_and_mixer.rs | model | bus.soloed | built (.10); ported (.13), kept: sequencer | .11 .13 |
+| `SEQ.bus-volumes` | 3 | mixer, sequencer, legacy/mixer | sv/track_and_mixer.rs | model | bus.volume | built (.10); ported (.13), kept: sequencer | .11 .13 |
 | `SEQ.cpu-load-pct` | 1 | transport | reactive_tick.rs | live | engine.cpu-load | built (.10); ported, legacy removed (.12) | .12 |
-| `SEQ.current-pattern` | 18 | transport, arrangement, mixer +10 | sv/topology_and_visualization.rs | model | transport.scene (s.index) | built (.10); ported (.12), kept: arrangement, mixer, macros, scripts | .12 .13 .15 .20 |
-| `SEQ.current-track` | 108 | piano-roll, effects/process-panel, browser +19 | piano_roll.rs | live | selection.track | built (.10) | .11 .13 .14 .15 .16 .17 .18 .19 .20 |
+| `SEQ.current-pattern` | 18 | transport, arrangement, mixer +10 | sv/topology_and_visualization.rs | model | transport.scene (s.index) | built (.10); ported (.12, .13), kept: arrangement, macros, scripts | .12 .13 .15 .20 |
+| `SEQ.current-track` | 108 | piano-roll, effects/process-panel, browser +19 | piano_roll.rs | live | selection.track | built (.10); ported (.13), kept: many | .11 .13 .14 .15 .16 .17 .18 .19 .20 |
 | `SEQ.delays` | 1 | seqv-track-params | event_loop.rs | model | step.delay | built (.10) | .11 |
 | `SEQ.durations` | 2 | seq-core-state, seqv-track-params | event_loop.rs | model | step.duration | built (.10) | .11 |
-| `SEQ.groups` | 53 | mixer, drum-rack-v2, seq-core-state +12 | project.rs | model | group.* via (groups), track.group | built (.10) | .11 .13 .17 .19 .20 |
-| `SEQ.master-peak-l` | 2 | mixer, transport | event_loop.rs | live | master.peak-l | built (.10); ported (.12), kept: mixer (.13) | .12 .13 |
-| `SEQ.master-peak-r` | 2 | mixer, transport | event_loop.rs | live | master.peak-r | built (.10); ported (.12), kept: mixer (.13) | .12 .13 |
+| `SEQ.groups` | 53 | mixer, drum-rack-v2, seq-core-state +12 | project.rs | model | group.* via (groups), track.group | built (.10); ported (.13), kept: drum-rack-v2, seq-core-state + | .11 .13 .17 .19 .20 |
+| `SEQ.master-peak-l` | 2 | mixer, transport | event_loop.rs | live | master.peak-l | built (.10); ported (.12, .13), removed | .12 .13 |
+| `SEQ.master-peak-r` | 2 | mixer, transport | event_loop.rs | live | master.peak-r | built (.10); ported (.12, .13), removed | .12 .13 |
 | `SEQ.master-recording` | 2 | transport | reactive_tick.rs | live | master.recording | built (.10); ported, legacy removed (.12) | .12 |
 | `SEQ.metronome` | 1 | transport | host_commands/misc.rs | live | transport.metronome | built (.10); ported, legacy removed (.12) | .12 |
 | `SEQ.output-latency-ms` | 1 | transport | reactive_tick.rs | live | engine.latency-ms | built (.10); ported, legacy removed (.12) | .12 |
@@ -2800,17 +2942,17 @@ builds the field name.
 | `SEQ.playhead-page` | 1 | seq-core-state | sv/meters_and_modulation.rs | live | track.playhead (page = playhead / 16 in the view) | built (.10) | .11 |
 | `SEQ.playing` | 11 | retrospective, transport, effects/track-panels +4 | sequencer/state/sequencer_state/scene_launch.rs | live | transport.playing | built (.10); ported (.12), kept: track-panels, param-controls, seq-core-state, sequencer | .11 .12 .14 .20 |
 | `SEQ.queued-scene` | 2 | transport | event_loop.rs | model | transport.queued | built (.10); ported, legacy removed (.12) | .12 |
-| `SEQ.record-armed` | 4 | mixer, sequencer, legacy/mixer | event_loop.rs | live | track.armed | built (.10) | .11 .13 |
+| `SEQ.record-armed` | 4 | mixer, sequencer, legacy/mixer | event_loop.rs | live | track.armed | built (.10); ported (.13), kept: sequencer | .11 .13 |
 | `SEQ.record-quantize` | 1 | transport | host_commands/misc.rs | live | transport.record-quantize | built (.10); ported, legacy removed (.12) | .12 |
 | `SEQ.recording` | 4 | effects/track-panels, transport, effects/param-controls | reactive_sync.rs | live | transport.recording | built (.10); ported (.12), kept: track-panels, param-controls (.14) | .12 .14 |
 | `SEQ.retrig-rates` | 2 | seq-core-state, seqv-track-params | reactive_sync.rs | model | step.retrig-rate | built (.10) | .11 |
 | `SEQ.retrigs` | 2 | seq-core-state, seqv-track-params | reactive_sync.rs | model | step.retrig | built (.10) | .11 |
 | `SEQ.roll-mode` | 2 | transport | reactive_tick.rs | live | transport.roll-mode | built (.10); ported, legacy removed (.12) | .12 |
 | `SEQ.scene-banks` | 2 | scene-banks | sv/song_state.rs | model | (banks) → bank.label/scenes | built (.10); ported, legacy removed (.12) | .12 |
-| `SEQ.scene-launch-quantize` | 6 | transport, drum-rack-v2, mixer | rack_clip_switch_probe.rs | model | transport.launch-quantize | built (.10); ported (.12), kept: mixer, drum-rack-v2; the host kinds read transport.launch-quantize from it | .12 .13 .19 |
+| `SEQ.scene-launch-quantize` | 6 | transport, drum-rack-v2, mixer | rack_clip_switch_probe.rs | model | transport.launch-quantize | built (.10); ported (.12, .13), kept: drum-rack-v2; the host kinds read transport.launch-quantize from it | .12 .13 .19 |
 | `SEQ.scene-names` | 8 | browser, arrangement | sv/song_state.rs | model | scene.name | built (.10) | .15 .17 |
 | `SEQ.selected-steps` | 4 | step-grid, effects/param-controls | reactive_tick.rs | live | step.selected | built (.10) | .11 .14 |
-| `SEQ.selected-tracks` | 5 | mixer, step-grid-interactions | sv/steps_and_pattern.rs | live | selection.tracks | built (.10) | .11 .13 |
+| `SEQ.selected-tracks` | 5 | mixer, step-grid-interactions | sv/steps_and_pattern.rs | live | selection.tracks | built (.10); ported (.13), kept: step-grid-interactions | .11 .13 |
 | `SEQ.seq-track-step-active-*` | 2 | sequencer | sv/steps_and_pattern.rs | live | step.active | built (.10) | .11 |
 | `SEQ.seq-track-step-duration-*` | 1 | sequencer | sv/steps_and_pattern.rs | model | step.held | built (.10) | .11 |
 | `SEQ.seq-track-step-param-haptic-*` | 1 | sequencer | sv/steps_and_pattern.rs | model | step.‹param› (detent in the view) | built (.10) | .11 |
@@ -2824,38 +2966,38 @@ builds the field name.
 | `SEQ.step-color-r-effective` | 2 | sequencer | sv/track_and_mixer.rs | model | track.color × track.audible (+ track.governed, 7d) | built (.10) | .11 |
 | `SEQ.steps` | 3 | step-grid | lisp_host/eseq/graph_authoring.rs | model | selection.track.steps → step.active | built (.10) | .11 |
 | `SEQ.syncs` | 2 | seqv-track-params, seq-grid-mode | ui_benchmark/ipc.rs | model | step.sync | built (.10) | .11 |
-| `SEQ.tp-is-rack` | 5 | effects/track-panels, mixer | sv/project_state.rs | model | selection.track.rack | built (.10) | .13 .14 |
+| `SEQ.tp-is-rack` | 5 | effects/track-panels, mixer | sv/project_state.rs | model | selection.track.rack | built (.10); ported (.13), kept: track-panels | .13 .14 |
 | `SEQ.tp-num-steps` | 8 | seq-grid-mode, seq-core-state, piano-roll +2 | reactive_sync.rs | model | selection.track.num-steps | built (.10) | .11 .14 .16 |
 | `SEQ.tp-timebase` | 2 | step-grid, effects/track-panels | sv/project_state.rs | model | selection.track.timebase | built (.10) | .11 .14 |
 | `SEQ.track-auxas` | 1 | seqv-track-params | reactive_sync.rs | model | step.aux-a | built (.10) | .11 |
-| `SEQ.track-bus-sends` | 2 | mixer, midi-midimix | reactive_sync.rs | model | track.sends → send.bus, send.display | built (.10) | .13 |
+| `SEQ.track-bus-sends` | 2 | mixer, midi-midimix | reactive_sync.rs | model | track.sends → send.bus, send.display | built (.10); ported (.13), removed | .13 |
 | `SEQ.track-collapsed` | 2 | track-collapse | reactive_sync.rs | live | track.collapsed | built (.10) | .11 |
 | `SEQ.track-color-b-effective` | 1 | sequencer | sv/track_and_mixer.rs | model | track.color × track.audible | built (.10) | .11 |
 | `SEQ.track-color-g-effective` | 1 | sequencer | sv/track_and_mixer.rs | model | track.color × track.audible | built (.10) | .11 |
 | `SEQ.track-color-r-effective` | 1 | sequencer | sv/track_and_mixer.rs | model | track.color × track.audible (dim in the shader) | built (.10) | .11 |
-| `SEQ.track-colors` | 21 | mixer, rack-groove-buffer, arrangement +12 | sv/track_and_mixer.rs | model | track.color | built (.10) | .11 .13 .14 .15 .16 .19 .20 |
+| `SEQ.track-colors` | 21 | mixer, rack-groove-buffer, arrangement +12 | sv/track_and_mixer.rs | model | track.color | built (.10); ported (.13), kept: sequencer + | .11 .13 .14 .15 .16 .19 .20 |
 | `SEQ.track-delays` | 1 | seqv-track-params | reactive_sync.rs | model | step.delay | built (.10) | .11 |
 | `SEQ.track-durations` | 1 | seqv-track-params | reactive_sync.rs | model | step.duration | built (.10) | .11 |
-| `SEQ.track-instrument-types` | 14 | track-collapse, mixer, application-menus | sv/track_and_mixer.rs | model | track.instrument-type | built (.10) | .11 .13 .18 |
+| `SEQ.track-instrument-types` | 14 | track-collapse, mixer, application-menus | sv/track_and_mixer.rs | model | track.instrument-type | built (.10); ported (.13), kept: track-collapse + | .11 .13 .18 |
 | `SEQ.track-length-row-*` | 1 | sequencer | sv/expanded_step.rs | model | track.num-steps | built (.10) | .11 |
-| `SEQ.track-muted-effective` | 11 | mixer, sequencer, legacy/mixer +1 | sv/track_and_mixer.rs | live | not track.audible | built (.10) | .11 .13 .14 |
-| `SEQ.track-mutes` | 3 | mixer, sequencer, legacy/mixer | reactive_sync.rs | live | track.muted | built (.10) | .11 .13 |
-| `SEQ.track-names` | 28 | sequencer, mixer, packages/alez.jaki/src/kind +14 | reactive_sync.rs | model | track.name | built (.10) | .11 .13 .14 .16 .18 .19 .20 |
+| `SEQ.track-muted-effective` | 11 | mixer, sequencer, legacy/mixer +1 | sv/track_and_mixer.rs | live | not track.audible | built (.10); ported (.13), kept: sequencer + | .11 .13 .14 |
+| `SEQ.track-mutes` | 3 | mixer, sequencer, legacy/mixer | reactive_sync.rs | live | track.muted | built (.10); ported (.13), kept: sequencer | .11 .13 |
+| `SEQ.track-names` | 28 | sequencer, mixer, packages/alez.jaki/src/kind +14 | reactive_sync.rs | model | track.name | built (.10); ported (.13), kept: many | .11 .13 .14 .16 .18 .19 .20 |
 | `SEQ.track-num-steps` | 5 | sequencer, packages/alez.tracker/src/ui | event_loop.rs | model | track.num-steps | built (.10) | .11 .20 |
 | `SEQ.track-pans` | 1 | seqv-track-params | reactive_sync.rs | model | step.pan (per-step lists, see steps) | built (.10) | .11 |
-| `SEQ.track-peak-*` | 3 | mixer, sequencer, legacy/mixer | sv/meters_and_modulation.rs | live | track.peak | built (.10) | .11 .13 |
+| `SEQ.track-peak-*` | 3 | mixer, sequencer, legacy/mixer | sv/meters_and_modulation.rs | live | track.peak | built (.10); ported (.13), kept: sequencer | .11 .13 |
 | `SEQ.track-playhead-page-*` | 1 | sequencer | sv/expanded_step.rs | live | track.playhead | built (.10) | .11 |
 | `SEQ.track-playhead-row-*` | 1 | sequencer | sv/expanded_step.rs | live | track.playhead | built (.10) | .11 |
 | `SEQ.track-playhead-row-active-*` | 1 | sequencer | sv/expanded_step.rs | live | track.playhead | built (.10) | .11 |
 | `SEQ.track-retrig-rates` | 1 | seqv-track-params | reactive_sync.rs | model | step.retrig-rate | built (.10) | .11 |
 | `SEQ.track-retrigs` | 1 | seqv-track-params | sv/topology_and_visualization.rs | model | step.retrig | built (.10) | .11 |
-| `SEQ.track-selected-*` | 3 | mixer, seq-core-state | sv/steps_and_pattern.rs | model | track.selected / (member t selection.tracks) | built (.10) | .11 .13 |
-| `SEQ.track-solos` | 3 | mixer, sequencer, legacy/mixer | reactive_sync.rs | live | track.soloed | built (.10) | .11 .13 |
+| `SEQ.track-selected-*` | 3 | mixer, seq-core-state | sv/steps_and_pattern.rs | model | track.selected / (member t selection.tracks) | built (.10); ported (.13), kept: sequencer, seq-core-state | .11 .13 |
+| `SEQ.track-solos` | 3 | mixer, sequencer, legacy/mixer | reactive_sync.rs | live | track.soloed | built (.10); ported (.13), kept: sequencer | .11 .13 |
 | `SEQ.track-syncs` | 1 | seqv-track-params | reactive_sync.rs | model | step.sync | built (.10) | .11 |
 | `SEQ.track-timebases` | 2 | sequencer | sv/param_fields_and_sync.rs | model | track.timebase | built (.10) | .11 |
 | `SEQ.track-transposes` | 1 | seqv-track-params | host_commands/step_history.rs | model | step.transpose | built (.10) | .11 |
 | `SEQ.track-velocities` | 1 | seqv-track-params | reactive_sync.rs | model | step.velocity | built (.10) | .11 |
-| `SEQ.track-volumes` | 3 | sequencer, legacy/mixer | reactive_sync.rs | live | track.volume | built (.10) | .11 .13 |
+| `SEQ.track-volumes` | 3 | sequencer, legacy/mixer | reactive_sync.rs | live | track.volume | built (.10); ported (.13), kept: sequencer | .11 .13 |
 | `SEQ.transport-playhead` | 1 | transport | ui_replay_probe.rs | live | transport.position | built (.10); ported, legacy removed (.12) | .12 |
 | `SEQ.transposes` | 2 | seq-core-state, seqv-track-params | reactive_sync.rs | model | step.transpose | built (.10) | .11 |
 | `SEQ.velocities` | 2 | seq-core-state, seqv-track-params | app/retrospective.rs | model | step.velocity | built (.10) | .11 |
@@ -2863,7 +3005,7 @@ builds the field name.
 | `<ns-var name>` | 2 | effects/drum-surface | custom_ui.rs | - | param.value via (device-param d "x") | built (.28) | .14 |
 | `SEQ.<get>` | 23 | effects/param-controls, effects/instrument-panel, effects/sampler-panel +9 | sv/param_fields_and_sync.rs, instrument_panel.rs, effects_panel.rs | model | param.value / param.name (panel :value-field, :label-field, :name-field, :short-field); MIDI fx / bus / rack slot params (built .36), rack macro names → rack-macro.name (built .37) | built (.28, .36, .37) | .14 .16 .18 .19 .20 .21 |
 | `SEQ.<slot-field>` | 12 | sequencer | sv/expanded_step.rs | model | step.active/selected/playing/plocked/lock-kind/variant-color through the view's own slot→step map (expanded-step projection removed) | built (.28) | .11 |
-| `SEQ.<var field>` | 8 | effects/param-controls, effects/custom-ui-runtime, mixer +1 | sv/param_fields_and_sync.rs | model | param.value / send.display (field strings from panel data); mod / process fields → param.mod-offset / mod-value / mod-scale / process-value / process-clamped, device.mod-phases (built .37) | built (.28, .37) | .13 .14 |
+| `SEQ.<var field>` | 8 | effects/param-controls, effects/custom-ui-runtime, mixer +1 | sv/param_fields_and_sync.rs | model | param.value / send.display (field strings from panel data); mod / process fields → param.mod-offset / mod-value / mod-scale / process-value / process-clamped, device.mod-phases (built .37) | built (.28, .37); mixer sends ported (.13): `track-N-bus-M-send` and its `-plock-*` / `-proc-*` removed (kept: `tp-bus-M-send`, track-panels) | .13 .14 |
 | `SEQ.effects` | 3 | application-menus, effects/index, effects/buffers | lisp_host/dgen/instrument_storage.rs | model | track.devices → device.params; mod targets, sources, tensors → param.mod-targets / section / mod-slot / visible, device.tensors (built .37); tables, IR names, editors .43 | built (.28, .37) | .14 .18 |
 | `SEQ.instrument-panel` | 10 | effects/param-controls, browser, effects/index +3 | reactive_tick.rs | model | device panel data (device.params; rack slots: the rack device's devices (built .36); key locks → param.key-locks / device.key-locked-notes / device.variants, macros → device.macros, modulation → param.mod-* / mod-targets, base note → device.base-note, tensors → device.tensors, process → param.process-* (built .37); sampler media, sound binding, modulator display .43) | built (.28, .36, .37) | .14 .17 .18 |
 | `SEQ.macros` | 5 | macros, effects/param-controls | project.rs | model | project macros → project.macros / macro (mappings → macro-mapping); rack macros → device.macros of the rack's instrument (rack-macro) | built (.37) | .14 .18 |
@@ -2888,7 +3030,7 @@ builds the field name.
 | `SEQ.track-process-lanes` | 2 | seqv-track-params, packages/alez.tracker/src/ui | sv/topology_and_visualization.rs | model | track.lanes → lane | built (.29) | .11 .20 |
 | `SEQ.track-process-scopes` | 3 | sequencer | ui_replay_probe.rs | live | process.cells → state-cell.values (live) | built (.29) | .11 |
 | `SEQ.track-process-slots` | 4 | sequencer, seqv-track-params, scripts/sequencers/band-coupling-matrix-demo | input.rs | model | track.processes → process | built (.29) | .11 .20 |
-| `SEQ.queued-track-clips` | 1 | mixer | event_loop.rs | model | cell.queued (live) | built (.30) | .13 |
+| `SEQ.queued-track-clips` | 1 | mixer | event_loop.rs | model | cell.queued (live) | built (.30); ported (.13), removed | .13 |
 | `SEQ.scene-spans` | 9 | arrangement | sv/song_state.rs | model | song.spans → scene-span | built (.30) | .15 |
 | `SEQ.song-bound-clip` | 2 | arrangement, sound-palette | sv/song_state.rs | model | song.bound-clip | built (.30) | .15 .17 |
 | `SEQ.song-clip-sounds` | 2 | arrangement | sv/sound_palette.rs | model | clip.dot / dot-color | built (.30) | .15 |
@@ -2905,11 +3047,11 @@ builds the field name.
 | `SEQ.song-scene-latched` | 1 | arrangement | sv/song_state.rs | model | song.scene-latched | built (.30) | .15 |
 | `SEQ.song-track-governed` | 3 | sequencer | sv/song_state.rs | model | track.governed | built (.30) | .11 |
 | `SEQ.song-track-latched` | 1 | arrangement | sv/song_state.rs | model | track.latched | built (.30) | .15 |
-| `SEQ.track-pattern-cell-active-*` | 2 | mixer, arrangement | sv/steps_and_pattern.rs | model | cell.active | built (.30) | .13 .15 |
-| `SEQ.track-pattern-cell-assigned-*` | 1 | mixer | sv/steps_and_pattern.rs | model | cell.assigned | built (.30) | .13 |
-| `SEQ.track-pattern-cell-override-*` | 1 | mixer | sv/steps_and_pattern.rs | model | cell.override | built (.30) | .13 |
-| `SEQ.track-pattern-cell-selected-*` | 1 | mixer | sv/steps_and_pattern.rs | model | cell.selected | built (.30) | .13 |
-| `SEQ.track-pattern-cells` | 4 | mixer, arrangement | sv/track_and_mixer.rs | model | cell kind (track pid): `t.cells` | built (.30) | .13 .15 |
+| `SEQ.track-pattern-cell-active-*` | 2 | mixer, arrangement | sv/steps_and_pattern.rs | model | cell.active | built (.30); ported (.13), kept: arrangement | .13 .15 |
+| `SEQ.track-pattern-cell-assigned-*` | 1 | mixer | sv/steps_and_pattern.rs | model | cell.assigned | built (.30); ported (.13), removed | .13 |
+| `SEQ.track-pattern-cell-override-*` | 1 | mixer | sv/steps_and_pattern.rs | model | cell.override | built (.30); ported (.13), removed | .13 |
+| `SEQ.track-pattern-cell-selected-*` | 1 | mixer | sv/steps_and_pattern.rs | model | cell.selected | built (.30); ported (.13), removed | .13 |
+| `SEQ.track-pattern-cells` | 4 | mixer, arrangement | sv/track_and_mixer.rs | model | cell kind (track pid): `t.cells` | built (.30); ported (.13), kept: arrangement | .13 .15 |
 | `SEQ.focus-clip-end` | 3 | piano-roll | piano_roll.rs | model | piano-roll.clip.end (`clip`, 7d) | built (.31) | .16 |
 | `SEQ.focus-clip-kind` | 5 | piano-roll | piano_roll.rs | model | piano-roll.clip-kind | built (.31) | .16 |
 | `SEQ.focus-clip-offset` | 4 | piano-roll | piano_roll.rs | model | piano-roll.clip.offset | built (.31) | .16 |
@@ -3025,7 +3167,7 @@ builds the field name.
 | `GRAPH.<gvr-route-color-field>` | 4 | scripts/sequencers/graph-neural-variable-reset-demo | lisp_host/eseq/graph_authoring.rs (+ Lisp writes) | model | n.route.color (view derivation from graph-node.route) | built (.33) | .20 |
 | `SEQ.<neural->` | 8 | scripts/sequencers/neural-8x8-track-router | sv/topology_and_visualization.rs | model | neuron.selected (the native neural engine) | .50 | .20 |
 | `SEQ.generator-mark-*` | 4 | packages/alez.jaki/src/kind | sv/meters_and_modulation.rs | model | jaki generator marks | .52 | .20 |
-| `SEQ.graph-sequencers` | 1 | mixer | reactive_tick.rs | model | project.graphs → graph (gid, name, owner) | built (.33) | .13 |
+| `SEQ.graph-sequencers` | 1 | mixer | reactive_tick.rs | model | project.graphs → graph (gid, name, owner) | built (.33); ported (.13), removed | .13 |
 | `SEQ.graph-visualizations` | 14 | scripts/sequencers/graph-neural-variable-reset-demo, packages/alez.neural/src/variable-reset, scripts/sequencers/graph-neural-16-demo +5 | sv/topology_and_visualization.rs | model | graph.active / beat / energy / triggers / dampening (live), weights → graph-param.value; event history, deltas, group traces: .51 | built (.33), .51 | .20 |
 | `SEQ.neural-dampening-matrix` | 1 | scripts/sequencers/neural-8x8-track-router | sv/topology_and_visualization.rs | model | network.dampening-matrix | .50 | .20 |
 | `SEQ.neural-energy-matrix` | 1 | scripts/sequencers/neural-8x8-track-router | sv/topology_and_visualization.rs | live | network.energy-matrix (live) | .50 | .20 |
@@ -3035,12 +3177,12 @@ builds the field name.
 | `SEQ.track-event-current-beat` | 3 | scripts/processes/process-ui-control-demo, scripts/sequencers/band-coupling-matrix-demo, scripts/sequencers/graph-neural-8x8-demo | ui_replay_probe.rs | live | track events | .51 | .20 |
 | `SEQ.track-events` | 3 | scripts/processes/process-ui-control-demo, scripts/sequencers/band-coupling-matrix-demo, scripts/sequencers/graph-neural-8x8-demo | ui_replay_probe.rs | model | track events (demo scripts) | .51 | .20 |
 | `SEQ.<rack/groove-amount-field>` | 1 | rack-groove-buffer | sv/rack_groove_fields.rs | model | groove.timing / velocity / random; a pad's share pad-groove.amount (of the playing clip's groove: `(or g.rack-clip.groove g.groove)`) | built (.34) | .19 |
-| `SEQ.armed-rack-id` | 2 | mixer, drum-rack-v2 | reactive_tick.rs | model | group.armed (live) | built (.34) | .13 .19 |
+| `SEQ.armed-rack-id` | 2 | mixer, drum-rack-v2 | reactive_tick.rs | model | group.armed (live) | built (.34); ported (.13), kept: drum-rack-v2 | .13 .19 |
 | `SEQ.groove-pool` | 2 | rack-groove-buffer | sv/rack_groove_fields.rs | model | project.groove-pool (pool-groove) | built (.34) | .19 |
-| `SEQ.rack-clip-active-*` | 3 | sequencer, mixer | sv/topology_and_visualization.rs | model | rack-clip.active | built (.34) | .11 .13 |
+| `SEQ.rack-clip-active-*` | 3 | sequencer, mixer | sv/topology_and_visualization.rs | model | rack-clip.active | built (.34); ported (.13), kept: sequencer | .11 .13 |
 | `SEQ.rack-clip-banks` | 1 | drum-rack-v2 | sv/topology_and_visualization.rs | model | group.clips (rack-clip.cid, name) | built (.34) | .19 |
 | `SEQ.rack-clip-index-*` | 1 | sequencer | sv/topology_and_visualization.rs | model | group.rack-clip (an instance, nil while silent; its position rc.index) | built (.34) | .11 |
-| `SEQ.rack-clips` | 2 | mixer, drum-rack-v2 | sv/topology_and_visualization.rs | model | rack-clip kind: group.clips, rack-clip.scenes (:scene-clips), group.legacy (no entry) | built (.34) | .13 .19 |
+| `SEQ.rack-clips` | 2 | mixer, drum-rack-v2 | sv/topology_and_visualization.rs | model | rack-clip kind: group.clips, rack-clip.scenes (:scene-clips), group.legacy (no entry) | built (.34); ported (.13), kept: drum-rack-v2 | .13 .19 |
 | `SEQ.rack-grooves` | 1 | drum-rack-v2 | sv/rack_groove_fields.rs | model | groove kind (group.groove, rack-clip.groove; lanes, pad-groove shares); the picker: project.groove-pool, project.groove-library | built (.34) | .19 |
 | `SEQ.rack-pad-trigger-*` | 3 | sequencer | sv/drum_rack.rs | live | pad.triggered (live; a member track's pad: t.pad) | built (.34) | .11 |
 | `SEQ.track-steps` | 2 | rack-groove-buffer | sv/param_fields_and_sync.rs | model | pad.track.steps → step.active | built (.34) | .19 |
@@ -3050,8 +3192,8 @@ builds the field name.
 | `SEQ.accumulator-options` | 1 | effects/track-panels | sv/project_state.rs | model | project.accumulator-options | built (.35) | .14 |
 | `SEQ.auto-follow` | 2 | seq-core-state, sequencer | reactive_tick.rs | model | selection.auto-follow | built (.35) | .11 |
 | `SEQ.bus-effects` | 3 | application-menus, effects/buffers, effects/panel-widgets | event_loop.rs | model | bus.devices | built (.36) | .14 .18 |
-| `SEQ.bus-mod-in-level-*` | 1 | mixer | sv/meters_and_modulation.rs | live | bus.mod-in-1 … -4 (live; `(mod-in-level b i)`) | built (.35) | .13 |
-| `SEQ.bus-output-routes` | 1 | mixer | sv/track_and_mixer.rs | model | bus.output, bus.output-options | built (.35) | .13 |
+| `SEQ.bus-mod-in-level-*` | 1 | mixer | sv/meters_and_modulation.rs | live | bus.mod-in-1 … -4 (live; `(mod-in-level b i)`) | built (.35); ported (.13), removed | .13 |
+| `SEQ.bus-output-routes` | 1 | mixer | sv/track_and_mixer.rs | model | bus.output, bus.output-options | built (.35); ported (.13), removed | .13 |
 | `SEQ.compiling` | 1 | effects/buffers | sv/host_commands.rs | model | engine.compiling | built (.35) | .14 |
 | `SEQ.cpu-overloaded` | 2 | transport | reactive_tick.rs | live | engine.overloaded | built (.35); ported, legacy removed (.12) | .12 |
 | `SEQ.fts-options` | 2 | effects/track-panels, effects/scale-editor | sv/project_state.rs | model | project.fts-options | built (.35) | .14 |
@@ -3060,14 +3202,14 @@ builds the field name.
 | `SEQ.fx-step-selection-count` | 2 | effects/track-panels, seq-core-state | sv/param_fields_and_sync.rs | model | (len selection.steps) | built (.35) | .11 .14 |
 | `SEQ.fx-step-value-*` | 1 | effects/track-panels | step_print.rs | model | step.‹param› of selection.edit-step | built (.35) | .14 |
 | `SEQ.midi-effects` | 1 | effects/buffers | event_loop.rs | model | track.midi-devices | built (.36) | .14 |
-| `SEQ.mixer-track-delete-target-*` | 1 | mixer | sv/steps_and_pattern.rs | model | track.delete-target | built (.35) | .13 |
-| `SEQ.mod-in-level-*` | 1 | mixer | sv/meters_and_modulation.rs | live | track.mod-in-1 … -4 (live; `(mod-in-level t i)`) | built (.35) | .13 |
-| `SEQ.mod-out-level-*` | 1 | mixer | sv/meters_and_modulation.rs | live | track.mod-out-level (live) | built (.35) | .13 |
-| `SEQ.mod-routes` | 6 | mixer | reactive_sync.rs | model | route kind, `(routes)` | built (.35) | .13 |
+| `SEQ.mixer-track-delete-target-*` | 1 | mixer | sv/steps_and_pattern.rs | model | track.delete-target | built (.35); ported (.13), removed | .13 |
+| `SEQ.mod-in-level-*` | 1 | mixer | sv/meters_and_modulation.rs | live | track.mod-in-1 … -4 (live; `(mod-in-level t i)`) | built (.35); ported (.13), removed | .13 |
+| `SEQ.mod-out-level-*` | 1 | mixer | sv/meters_and_modulation.rs | live | track.mod-out-level (live) | built (.35); ported (.13), removed | .13 |
+| `SEQ.mod-routes` | 6 | mixer | reactive_sync.rs | model | route kind, `(routes)` | built (.35); ported (.13), removed | .13 |
 | `SEQ.mute-group-options` | 1 | effects/track-panels | sv/project_state.rs | model | constant | built (.35) | .14 |
 | `SEQ.rack-slot-delete-target-*` | 1 | effects/instrument-panel | sv/steps_and_pattern.rs | model | device.delete-target | built (.36) | .14 |
 | `SEQ.roll-rate` | 1 | transport | reactive_tick.rs | live | transport.roll-rate | built (.35); ported, legacy removed (.12) | .12 |
-| `SEQ.selected-mod-routes` | 2 | mixer | sv/steps_and_pattern.rs | model | route.selected | built (.35) | .13 |
+| `SEQ.selected-mod-routes` | 2 | mixer | sv/steps_and_pattern.rs | model | route.selected | built (.35); ported (.13), removed | .13 |
 | `SEQ.sequence-rolling` | 1 | transport | reactive_tick.rs | live | transport.sequence-rolling | built (.35); ported, legacy removed (.12) | .12 |
 | `SEQ.sync-labels` | 8 | sequencer, step-grid, seqv-track-params +1 | natives.rs | model | project.sync-options | built (.35) | .11 |
 | `SEQ.tp-accum-limit` | 1 | effects/track-panels | sv/project_state.rs | model | track.accum-limit | built (.35) | .14 |
@@ -3075,11 +3217,11 @@ builds the field name.
 | `SEQ.tp-accumulator` | 1 | effects/track-panels | sv/project_state.rs | model | track.accumulator | built (.35) | .14 |
 | `SEQ.tp-fts` | 2 | effects/track-panels, effects/scale-editor | sv/project_state.rs | model | track.fts | built (.35) | .14 |
 | `SEQ.tp-gate` | 4 | effects/sampler-panel | sv/project_state.rs | model | track.gate | built (.35) | .14 |
-| `SEQ.tp-max-polyphony` | 2 | mixer, effects/track-panels | host_commands/rack.rs | model | track.max-polyphony (the track's own; a rack slot's: device.voices) | built (.35, .36) | .13 .14 |
+| `SEQ.tp-max-polyphony` | 2 | mixer, effects/track-panels | host_commands/rack.rs | model | track.max-polyphony (the track's own; a rack slot's: device.voices) | built (.35, .36); ported (.13), kept: track-panels | .13 .14 |
 | `SEQ.tp-mono-trigger` | 1 | effects/track-panels | sv/project_state.rs | model | track.mono-trigger | built (.35) | .14 |
 | `SEQ.tp-mute-group` | 1 | effects/track-panels | sv/project_state.rs | model | track.mute-group (`:int`; label `(nth mute-group-options g)`) | built (.35) | .14 |
-| `SEQ.tp-poly` | 12 | effects/track-panels, mixer, effects/instrument-panel | sv/project_state.rs | model | track.poly (the track's own; a rack slot's: (> device.voices 1)) | built (.35, .36) | .13 .14 |
-| `SEQ.tp-rack-slot-idx` | 5 | effects/track-panels, mixer | sv/project_state.rs | model | selection.rack-slot (-1: no rack) | built (.35) | .13 .14 |
+| `SEQ.tp-poly` | 12 | effects/track-panels, mixer, effects/instrument-panel | sv/project_state.rs | model | track.poly (the track's own; a rack slot's: (> device.voices 1)) | built (.35, .36); ported (.13), kept: track-panels | .13 .14 |
+| `SEQ.tp-rack-slot-idx` | 5 | effects/track-panels, mixer | sv/project_state.rs | model | selection.rack-slot (-1: no rack) | built (.35); ported (.13), kept: track-panels | .13 .14 |
 | `SEQ.tp-supports-mono-trigger` | 2 | effects/track-panels | sv/project_state.rs | model | track.supports-mono-trigger | built (.35) | .14 |
 | `SEQ.tp-swing` | 2 | effects/track-panels | sv/project_state.rs | model | track.swing | built (.35) | .14 |
 | `SEQ.tp-swing-resolution` | 1 | effects/track-panels | sv/project_state.rs | model | track.swing-resolution | built (.35) | .14 |
@@ -3094,9 +3236,9 @@ builds the field name.
 | `SEQ.tp-tuning-pitches` | 1 | effects/scale-editor | sv/param_fields_and_sync.rs | model | degree.pitch of track.tuning.degrees | built (.35) | .14 |
 | `SEQ.tp-tuning-root` | 1 | effects/scale-editor | sv/param_fields_and_sync.rs | model | tuning.root (`set!`) | built (.35) | .14 |
 | `SEQ.tp-voice-priority` | 1 | effects/track-panels | sv/project_state.rs | model | track.voice-priority | built (.35) | .14 |
-| `SEQ.track-mod-output-available` | 2 | mixer | sv/track_and_mixer.rs | model | track.mod-output | built (.35) | .13 |
-| `SEQ.track-output-options` | 1 | mixer | host_commands/routing.rs | model | project.output-options (bus instances; nil is sends only) | built (.35) | .13 |
-| `SEQ.track-outputs` | 1 | mixer | sv/track_and_mixer.rs | model | track.output (a bus; nil is sends only) | built (.35) | .13 |
+| `SEQ.track-mod-output-available` | 2 | mixer | sv/track_and_mixer.rs | model | track.mod-output | built (.35); ported (.13), removed | .13 |
+| `SEQ.track-output-options` | 1 | mixer | host_commands/routing.rs | model | project.output-options (bus instances; nil is sends only) | built (.35); ported (.13), removed | .13 |
+| `SEQ.track-outputs` | 1 | mixer | sv/track_and_mixer.rs | model | track.output (a bus; nil is sends only) | built (.35); ported (.13), removed | .13 |
 | `SEQ.tuning-root-options` | 1 | effects/scale-editor | sv/project_state.rs | model | constant | built (.35) | .14 |
 | `SEQV.<adsr-stage-active-field>` | 1 | effects/custom-ui-sections | Lisp (reactive-set) | Lisp-owned | custom-ui view state | view-local | .14 |
 | `SEQV.<channel>` | 20 | arrangement | Lisp (reactive-set) | Lisp-owned | arrangement view singleton (arr-*) | view-local | .15 |
@@ -3114,18 +3256,18 @@ builds the field name.
 | `SEQV.plk-var-b` | 1 | effects/param-controls | Lisp (reactive-set) | Lisp-owned | p-lock menu view singleton | view-local | .14 |
 | `SEQV.plk-var-g` | 1 | effects/param-controls | Lisp (reactive-set) | Lisp-owned | p-lock menu view singleton | view-local | .14 |
 | `SEQV.plk-var-r` | 1 | effects/param-controls | Lisp (reactive-set) | Lisp-owned | p-lock menu view singleton (:rgb) | view-local | .14 |
-| `SEQV.rack-clip-center-*` | 1 | mixer | Lisp (reactive-set) | Lisp-owned | mixer view singleton | view-local | .13 |
-| `:bindable` | 97 | effects/physical-model-surface, sequencer, effects/drum-surface +24 | - | - | delete (ignored since stage 5) | remove (gone from .12's files) | .11 .12 .13 .14 .20 .21 |
+| `SEQV.rack-clip-center-*` | 1 | mixer | Lisp (reactive-set) | Lisp-owned | mixer view singleton | view-local; ported (.13), removed | .13 |
+| `:bindable` | 97 | effects/physical-model-surface, sequencer, effects/drum-surface +24 | - | - | delete (ignored since stage 5) | remove (gone from .12's files); gone from .13's files | .11 .12 .13 .14 .20 .21 |
 | `<ns-var namespace>` | 3 | bindings | - | - | bindings.lisp generic scopes → kinds | remove | .18 |
-| `reactive-value` | 75 | instruments/Synths/Heat/ui, effects/param-controls, scripts/sequencers/graph-neural-variable-reset-demo +27 | - | - | t.x / #'t.x read as a value (§8) | remove | .11 .13 .14 .20 .21 |
-| `SEQ.bus-ids` | 10 | mixer, drum-rack-v2, seq-core-state +1 | sv/track_and_mixer.rs | model | instance identity | remove | .11 .13 .19 |
-| `SEQ.delete-target-version` | 4 | mixer, browser, application-menus +1 | reactive_tick.rs | model | implicit (fields re-render) | remove | .13 .14 .17 .18 |
+| `reactive-value` | 75 | instruments/Synths/Heat/ui, effects/param-controls, scripts/sequencers/graph-neural-variable-reset-demo +27 | - | - | t.x / #'t.x read as a value (§8) | remove; gone from .13's files | .11 .13 .14 .20 .21 |
+| `SEQ.bus-ids` | 10 | mixer, drum-rack-v2, seq-core-state +1 | sv/track_and_mixer.rs | model | instance identity | remove; ported (.13), kept: drum-rack-v2, seq-core-state | .11 .13 .19 |
+| `SEQ.delete-target-version` | 4 | mixer, browser, application-menus +1 | reactive_tick.rs | model | implicit (fields re-render) | remove; ported (.13), kept: browser, application-menus + | .13 .14 .17 .18 |
 | `SEQ.num-patterns` | 6 | transport, macros, scene-banks | sv/topology_and_visualization.rs | model | (len (scenes)) | remove; ported (.12), kept: macros (.18) | .12 .18 |
-| `SEQ.num-tracks` | 38 | mixer, track-collapse, sequencer +10 | reactive_sync.rs | model | (len (tracks)) | remove | .11 .13 .14 .17 .18 .19 |
+| `SEQ.num-tracks` | 38 | mixer, track-collapse, sequencer +10 | reactive_sync.rs | model | (len (tracks)) | remove; ported (.13), kept: many | .11 .13 .14 .17 .18 .19 |
 | `SEQ.rack-panel-view-generation` | 1 | effects/state | sv/project_state.rs | model | implicit | remove | .14 |
 | `SEQ.scene-bank-view-generation` | 1 | scene-banks | sv/project_state.rs | model | implicit (collections re-render) | remove; ported, legacy removed (.12) | .12 |
-| `SEQ.track-ids` | 30 | sequencer, arrangement, mixer +1 | reactive_sync.rs | model | instance identity (subtree :key t) | remove | .11 .13 .15 .20 |
-| `SEQ.instances` | 3 | mixer, browser, packages/alez.neural/src/variable-reset | lisp_host/eseq/process_dsl_parse.rs | model | package instances (live_instances) | keep | .13 .17 .20 |
+| `SEQ.track-ids` | 30 | sequencer, arrangement, mixer +1 | reactive_sync.rs | model | instance identity (subtree :key t) | remove; ported (.13), kept: sequencer, arrangement + | .11 .13 .15 .20 |
+| `SEQ.instances` | 3 | mixer, browser, packages/alez.neural/src/variable-reset | lisp_host/eseq/process_dsl_parse.rs | model | package instances (live_instances) | keep; ported (.13), kept: browser, alez.neural | .13 .17 .20 |
 | `THEME.buffer_bg` | 1 | sequencer | - | model | THEME stays (theme namespace, not host state) | keep | .11 |
 | `THEME.plock_base` | 2 | effects/panel-bodies, effects/track-panels | - | model | THEME stays (theme namespace, not host state) | keep | .14 |
 | `THEME.scene_clip_bg` | 1 | arrangement | - | model | THEME stays (theme namespace, not host state) | keep | .15 |

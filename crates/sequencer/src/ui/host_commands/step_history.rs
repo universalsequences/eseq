@@ -1617,7 +1617,6 @@ pub(super) fn handle(
                 }
             }
             if target == "bus-send" {
-                sync_track_bus_send_binding_field(editor.runtime_mut(), &app, &state, track, param_idx);
                 sync_selected_track_bus_send_binding_fields(
                     editor.runtime_mut(), &app, &state, selected_track, &selected_steps,
                 );

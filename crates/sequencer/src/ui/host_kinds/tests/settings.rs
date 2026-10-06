@@ -271,16 +271,11 @@ fn track_settings_read_after_sync_and_match_the_legacy_fields() {
     );
     let label = h.eval_7i("(nth mute-group-options t1.mute-group)");
     assert_eq!(h.legacy("tp-mute-group"), label);
-    // The output choices: the legacy labels less sends only (a nil output)
-    // are the buses' names, main first.
+    // The output choices: every bus, the main mix first (nil is sends only).
     let outputs = h.eval_7i("(map (lambda (b) b.name) project.output-options)");
-    let mut legacy_outputs = strings(h.legacy("track-output-options"));
-    legacy_outputs.remove(1);
-    assert_eq!(strings(outputs)[1..], legacy_outputs[1..]);
-    let Value::List(available) = build_track_mod_output_available(&h.app) else {
-        panic!("list");
-    };
-    let available = available[1].borrow().clone();
+    let names: Vec<String> = h.app.buses.iter().map(|bus| bus.name.clone()).collect();
+    assert_eq!(strings(outputs)[1..], names[1..]);
+    let available = Value::Bool(h.app.graph.track_exposes_mod_output(1));
     assert_eq!(available, h.eval_7i("t1.mod-output"));
     // Transport, engine and selection extras.
     h.shared.state.set_roll_rate(Timebase::EighthTriplet);
@@ -804,20 +799,14 @@ fn routes_and_bus_outputs_read_set_and_keep_identity() {
     assert_eq!(h.eval_7i("rb.dest-bus.bid"), Value::Number(a.0 as f64));
     assert_eq!(h.eval_7i("rb.input"), Value::Number(4.0));
     assert_eq!(h.eval_7i("m.mod-output"), Value::Bool(true));
-    // Selecting a route is the mixer's delete target, like the legacy
-    // `SEQ.selected-mod-routes`.
+    // Selecting a route is the mixer's delete target.
     h.eval_7i("(set! r.selected true)");
     h.sync();
     assert_eq!(h.eval_7i("r.selected"), Value::Bool(true));
     assert_eq!(h.eval_7i("rb.selected"), Value::Bool(false));
     let target = h.shared.active_delete_target.lock().unwrap().clone();
-    let legacy = selected_mod_routes_value(target.as_ref());
-    let state = h.shared.state.clone();
-    let first = |list: Value| match list {
-        Value::List(items) => items[0].borrow().clone(),
-        other => panic!("not a list: {other:?}"),
-    };
-    assert_eq!(first(legacy), first(build_mod_routes(&state)));
+    let first = h.shared.state.current_mod_connections()[0];
+    assert_eq!(target, Some(mod_route_delete_target(&first)));
     h.eval_7i("(set! r.selected false)");
     assert!(h.shared.active_delete_target.lock().unwrap().is_none());
     // Removing the first route moves the other to the front: it keeps its

@@ -9,6 +9,8 @@
         replaceable-instrument?
         sound-replaceable?
         type-icon
+        instrument-icon
+        replaceable-type?
         group-type-icon
         toggle-collapsed-ui)
 
@@ -39,34 +41,37 @@
     (< track (len SEQ.track-instrument-types))
     (= (nth SEQ.track-instrument-types track) "empty")))
 
+;; Whether a track playing instrument type `kind` (track.instrument-type)
+;; takes a dropped sound or instrument in place of its own.
+(def replaceable-type? (kind)
+  (or (= kind "empty") (= kind "custom") (= kind "sampler") (= kind "rack")))
+
 (def replaceable-instrument? (track)
   (and (>= track 0)
     (< track SEQ.num-tracks)
     (< track (len SEQ.track-instrument-types))
-    (let ((kind (nth SEQ.track-instrument-types track)))
-      (or (= kind "empty") (= kind "custom") (= kind "sampler") (= kind "rack")))))
+    (replaceable-type? (nth SEQ.track-instrument-types track))))
 
+;; COMPAT(eseq-0l17): replaceable-instrument? under the name
+;; ui/sequencer.lisp still calls; goes when that view ports to the kinds.
 (def sound-replaceable? (track)
-  (and (>= track 0)
-    (< track SEQ.num-tracks)
-    (< track (len SEQ.track-instrument-types))
-    (let ((kind (nth SEQ.track-instrument-types track)))
-      (or (= kind "empty") (= kind "custom") (= kind "sampler") (= kind "rack")))))
+  (replaceable-instrument? track))
 
 ;; Track identity icons intentionally share the same icon names as the sound
 ;; browser tabs. Keeping the mapping here prevents the mixer and sequencer from
 ;; drifting away from the sidebar's visual language.
+(def instrument-icon (track-type)
+  (match track-type
+    "sampler" :waveform
+    "custom" :piano
+    "rack" :sampler
+    "modulator" :sine
+    "empty" :midi
+    _ nil))
+
 (def type-icon (track)
   (if (< track (len SEQ.track-instrument-types))
-    (let ((track-type (nth SEQ.track-instrument-types track)))
-      (if (= track-type "sampler")
-        :waveform
-        (if (= track-type "custom")
-          :piano
-          (if (= track-type "rack")
-            :sampler
-            (if (= track-type "modulator") :sine
-              (if (= track-type "empty") :midi nil))))))
+    (instrument-icon (nth SEQ.track-instrument-types track))
     nil))
 
 (def group-type-icon (group)

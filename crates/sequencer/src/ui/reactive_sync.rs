@@ -932,16 +932,6 @@ pub(super) fn sync_step_batch_structural_bindings(
         .min(MAX_STEPS);
     let selected = selected_steps.lock().unwrap();
     let mut dirty = false;
-    let display_step = if track == current_track_idx {
-        displayed_plock_step(state, track, selected.iter().copied().min())
-    } else {
-        None
-    };
-    for (bus_idx, bus) in app.buses.iter().enumerate() {
-        if bus.id != sequencer::sequencer::BusId::MIX {
-            dirty |= sync_track_bus_send_plock_fields(rt, app, state, track, bus_idx, display_step);
-        }
-    }
     let render_values = plock_variant_step_render_values(state, track);
     for &step in steps {
         if step >= MAX_STEPS {
@@ -2285,17 +2275,8 @@ pub(super) fn apply_ui_invalidations(
                         )
                         .effects_dirty;
                 }
-                TrackMixerInvalidation::Pan => {
-                    sync_track_pan_binding_field(rt, state, track);
-                    needs_reactive_cycle |= rt
-                        .set_reactive_list_index(
-                            "SEQ",
-                            "track-mixer-pans",
-                            track,
-                            Value::Number(state.pattern.track_params[track].get_pan() as f64),
-                        )
-                        .effects_dirty;
-                }
+                // The host kinds push `track.pan`.
+                TrackMixerInvalidation::Pan => {}
                 TrackMixerInvalidation::Mute => {
                     needs_reactive_cycle |= rt
                         .set_reactive_list_index(
@@ -2340,9 +2321,6 @@ pub(super) fn apply_ui_invalidations(
                         .effects_dirty;
                 }
                 TrackMixerInvalidation::Output => {
-                    needs_reactive_cycle |= rt
-                        .set_reactive("SEQ", "track-outputs", build_track_outputs(app, state))
-                        .effects_dirty;
                     // Routing decides whether a bus solo mutes this track.
                     needs_reactive_cycle |= sync_track_mute_visual_binding_fields(
                         rt,
@@ -2399,27 +2377,17 @@ pub(super) fn apply_ui_invalidations(
                 }
             }
             UiInvalidation::TrackBusSend { track, bus } => {
-                sync_track_bus_send_binding_field(rt, app, state, track, bus);
                 if track == current_track_idx {
-                    sync_current_track_bus_send_binding_field(rt, app, state, track, bus);
+                    needs_reactive_cycle |=
+                        sync_current_track_bus_send_binding_field(rt, app, state, track, bus);
                 }
-                needs_reactive_cycle |= rt
-                    .set_reactive(
-                        "SEQ",
-                        "track-bus-sends",
-                        build_all_track_bus_sends(app, state),
-                    )
-                    .effects_dirty;
             }
             UiInvalidation::TrackRoute { .. } => {
                 sync_track_mixer_state(rt, app, state);
                 needs_reactive_cycle = true;
             }
-            UiInvalidation::ModRoutes => {
-                needs_reactive_cycle |= rt
-                    .set_reactive("SEQ", "mod-routes", build_mod_routes(state))
-                    .effects_dirty;
-            }
+            // The host kinds re-derive the routes (`route`).
+            UiInvalidation::ModRoutes => {}
             UiInvalidation::TrackParam { track, change } => {
                 if change == TrackParamInvalidation::NumSteps {
                     needs_reactive_cycle |= rt
@@ -2466,7 +2434,6 @@ pub(super) fn apply_ui_invalidations(
             }
             UiInvalidation::ProcessChain { track } => {
                 sync_process_chain_state(rt, state, app.tracks.len(), current_track_idx);
-                needs_reactive_cycle |= sync_process_send_mapped_fields(rt, app, state);
                 if sequencer_visible {
                     let _ = sync_all_expanded_step_viewports(
                         rt,

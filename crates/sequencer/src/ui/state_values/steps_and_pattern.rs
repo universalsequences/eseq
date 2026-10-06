@@ -325,10 +325,6 @@ pub(crate) fn track_selected_field(track: usize) -> String {
     format!("track-selected-{track}")
 }
 
-pub(crate) fn mixer_track_delete_target_field(track: usize) -> String {
-    format!("mixer-track-delete-target-{track}")
-}
-
 pub(crate) fn rack_slot_delete_target_field(track: usize, slot: usize) -> String {
     format!("rack-slot-delete-target-{track}-{slot}")
 }
@@ -337,34 +333,7 @@ pub(crate) fn track_pattern_cell_active_field(track: usize, pattern_id: u64) -> 
     format!("track-pattern-cell-active-{track}-{pattern_id}")
 }
 
-pub(crate) fn track_pattern_cell_assigned_field(track: usize, pattern_id: u64) -> String {
-    format!("track-pattern-cell-assigned-{track}-{pattern_id}")
-}
-
-pub(crate) fn track_pattern_cell_override_field(track: usize, pattern_id: u64) -> String {
-    format!("track-pattern-cell-override-{track}-{pattern_id}")
-}
-
-pub(crate) fn track_pattern_cell_selected_field(track: usize, pattern_id: u64) -> String {
-    format!("track-pattern-cell-selected-{track}-{pattern_id}")
-}
-
-pub(super) fn mod_destination_kind_value(destination: sequencer::sequencer::ModDestination) -> Value {
-    match destination {
-        sequencer::sequencer::ModDestination::Track(_) => Value::String("track".to_string()),
-        sequencer::sequencer::ModDestination::Bus(_) => Value::String("bus".to_string()),
-    }
-}
-
-pub(super) fn mod_destination_id_value(destination: sequencer::sequencer::ModDestination) -> Value {
-    match destination {
-        sequencer::sequencer::ModDestination::Track(track) => Value::Number(track as f64),
-        sequencer::sequencer::ModDestination::Bus(bus) => Value::Number(bus.0 as f64),
-    }
-}
-
-/// The delete target that selects a mod route (`SEQ.selected-mod-routes`,
-/// `route.selected`).
+/// The delete target that selects a mod route (`route.selected`).
 pub(crate) fn mod_route_delete_target(
     connection: &sequencer::sequencer::ModConnection,
 ) -> ActiveDeleteTarget {
@@ -372,24 +341,6 @@ pub(crate) fn mod_route_delete_target(
         source: connection.source_track,
         destination: connection.destination,
         input: connection.dest_input,
-    }
-}
-
-pub(crate) fn selected_mod_routes_value(
-    active_delete_target: Option<&ActiveDeleteTarget>,
-) -> Value {
-    match active_delete_target {
-        Some(ActiveDeleteTarget::ModRoute {
-            source,
-            destination,
-            input,
-        }) => list_value([map_value([
-            ("source", Value::Number(*source as f64)),
-            ("dest-kind", mod_destination_kind_value(*destination)),
-            ("dest", mod_destination_id_value(*destination)),
-            ("input", Value::Number(*input as f64)),
-        ])]),
-        _ => list_value(Vec::<Value>::new()),
     }
 }
 
@@ -431,22 +382,12 @@ pub(crate) fn sync_track_pattern_cell_state_fields(
                 &track_pattern_cell_active_field(track, pattern_id),
                 Value::Bool(cell.active_effective),
             );
-            rt.set_reactive(
-                "SEQ",
-                &track_pattern_cell_assigned_field(track, pattern_id),
-                Value::Bool(cell.assigned_to_current_scene),
-            );
-            rt.set_reactive(
-                "SEQ",
-                &track_pattern_cell_override_field(track, pattern_id),
-                Value::Bool(cell.overridden),
-            );
         }
     }
 }
 
 /// Whether the delete target selects `track`'s pool pattern `pattern_id`
-/// (`track-pattern-cell-selected-*`, `cell.selected`).
+/// (`cell.selected`).
 pub(crate) fn track_pattern_cell_selected(
     active_delete_target: Option<&ActiveDeleteTarget>,
     track: usize,
@@ -459,28 +400,6 @@ pub(crate) fn track_pattern_cell_selected(
             pattern_id: selected_pattern_id,
         }) if *selected_track == track && selected_pattern_id.0 == pattern_id
     )
-}
-
-pub(crate) fn sync_track_pattern_cell_selected_fields(
-    rt: &mut Runtime,
-    state: &Arc<SequencerState>,
-    track_count: usize,
-    active_delete_target: Option<&ActiveDeleteTarget>,
-) {
-    for track in 0..track_count {
-        for cell in state.track_pattern_cells(track) {
-            let pattern_id = cell.pattern_id.0;
-            rt.set_reactive(
-                "SEQ",
-                &track_pattern_cell_selected_field(track, pattern_id),
-                Value::Bool(track_pattern_cell_selected(
-                    active_delete_target,
-                    track,
-                    pattern_id,
-                )),
-            );
-        }
-    }
 }
 
 pub(crate) fn mixer_track_delete_target_selected(
@@ -502,11 +421,6 @@ pub(crate) fn sync_mixer_delete_target_binding_fields(
 ) {
     let rack_tracks = state.pattern.rack_tracks.lock().unwrap();
     for track in 0..track_count {
-        rt.set_reactive(
-            "SEQ",
-            &mixer_track_delete_target_field(track),
-            Value::Bool(mixer_track_delete_target_selected(active_delete_target, track)),
-        );
         let rack_slot_count = rack_tracks
             .get(track)
             .and_then(|rack| rack.as_ref())
@@ -528,13 +442,6 @@ pub(crate) fn sync_mixer_delete_target_binding_fields(
             );
         }
     }
-    drop(rack_tracks);
-    sync_track_pattern_cell_selected_fields(rt, state, track_count, active_delete_target);
-    rt.set_reactive(
-        "SEQ",
-        "selected-mod-routes",
-        selected_mod_routes_value(active_delete_target),
-    );
 }
 
 #[cfg(test)]

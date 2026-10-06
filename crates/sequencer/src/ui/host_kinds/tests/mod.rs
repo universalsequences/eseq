@@ -302,6 +302,29 @@ impl Harness {
     }
 }
 
+/// A process chain of one `rand` slot (`enabled` or not) whose `out` port
+/// writes `target` (shared with the state-value tests).
+pub(crate) fn one_slot_chain(
+    target: sequencer::process::ParamTarget,
+    enabled: bool,
+) -> sequencer::process::TrackProcessChain {
+    sequencer::process::TrackProcessChain {
+        slots: vec![sequencer::process::TrackProcessSlot {
+            instance_id: sequencer::process::ProcessInstanceId(1),
+            instance_name: None,
+            class_name: "rand".to_string(),
+            enabled,
+            project_layer: false,
+            inlets: Default::default(),
+            lanes: Default::default(),
+            fanout: Default::default(),
+            unbound_ports: Default::default(),
+            expr_source: None,
+            bindings: std::collections::BTreeMap::from([("out".to_string(), Some(target))]),
+        }],
+    }
+}
+
 fn s(text: &str) -> Value {
     Value::String(text.to_string())
 }
@@ -357,6 +380,7 @@ mod devices;
 mod graph;
 mod lanes;
 mod mixer;
+mod mixer_view;
 mod panel;
 mod params;
 mod piano_roll;

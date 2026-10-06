@@ -225,6 +225,7 @@ pub(crate) mod f {
     pub(crate) const TRACK_AUDIBLE: FieldKey = (TRACK, "audible");
     pub(crate) const TRACK_ARMED: FieldKey = (TRACK, "armed");
     pub(crate) const TRACK_SELECTED: FieldKey = (TRACK, "selected");
+    pub(crate) const TRACK_IN_SELECTION: FieldKey = (TRACK, "in-selection");
     pub(crate) const TRACK_PRESET: FieldKey = (TRACK, "preset");
     pub(crate) const TRACK_NUM_STEPS: FieldKey = (TRACK, "num-steps");
     pub(crate) const TRACK_STEPS: FieldKey = (TRACK, "steps");
@@ -756,6 +757,8 @@ pub(crate) mod f {
     pub(crate) const SEND_DISPLAY: FieldKey = (SEND, "display");
     pub(crate) const SEND_LOCKED: FieldKey = (SEND, "locked");
     pub(crate) const SEND_HAS_LOCKS: FieldKey = (SEND, "has-locks");
+    pub(crate) const SEND_PROCESS_MAPPED: FieldKey = (SEND, "process-mapped");
+    pub(crate) const SEND_PROCESS_VALUE: FieldKey = (SEND, "process-value");
 
     pub(crate) const BUS_INDEX: FieldKey = (BUS, "index");
     pub(crate) const BUS_BID: FieldKey = (BUS, "bid");
@@ -812,6 +815,7 @@ pub(crate) mod f {
     pub(crate) const GROUP_RACKS: FieldKey = (GROUP, "racks");
     pub(crate) const GROUP_PARENT: FieldKey = (GROUP, "parent");
     pub(crate) const GROUP_ARMED: FieldKey = (GROUP, "armed");
+    pub(crate) const GROUP_DELETE_TARGET: FieldKey = (GROUP, "delete-target");
     pub(crate) const GROUP_PADS: FieldKey = (GROUP, "pads");
     pub(crate) const GROUP_CLIPS: FieldKey = (GROUP, "clips");
     pub(crate) const GROUP_RACK_CLIP: FieldKey = (GROUP, "rack-clip");
@@ -1009,6 +1013,7 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     (f::TRACK_AUDIBLE, ":bool", Live),
     (f::TRACK_ARMED, ":bool", Live),
     (f::TRACK_SELECTED, ":bool", Live),
+    (f::TRACK_IN_SELECTION, ":bool", Live),
     (f::TRACK_PRESET, ":string", Model),
     (f::TRACK_NUM_STEPS, ":int", Live),
     (f::TRACK_STEPS, "(list-of step)", Live),
@@ -1182,6 +1187,8 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     (f::SEND_DISPLAY, ":number", Live),
     (f::SEND_LOCKED, ":bool", Live),
     (f::SEND_HAS_LOCKS, ":bool", Live),
+    (f::SEND_PROCESS_MAPPED, ":bool", Live),
+    (f::SEND_PROCESS_VALUE, ":number", Live),
     (f::DEVICE_TRACK, "track", Model),
     (f::DEVICE_BUS, "bus", Model),
     (f::DEVICE_SLOT, ":int", Model),
@@ -1362,6 +1369,7 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     (f::GROUP_RACKS, "(list-of group)", Model),
     (f::GROUP_PARENT, "group", Model),
     (f::GROUP_ARMED, ":bool", Live),
+    (f::GROUP_DELETE_TARGET, ":bool", Live),
     (f::GROUP_PADS, "(list-of pad)", Model),
     (f::GROUP_CLIPS, "(list-of rack-clip)", Model),
     (f::GROUP_RACK_CLIP, "rack-clip", Model),
@@ -2153,8 +2161,12 @@ pub(crate) struct HostKinds {
     next_route_id: u64,
     route_ids: Vec<Option<InstanceId>>,
     route_observed: ObservedList,
-    /// The observed groups (`armed`), reset when the group instances move.
+    /// The observed groups (`armed`, `delete-target`), reset when the
+    /// group instances move.
     group_observed: ObservedList,
+    /// The delete target's version and the observer epoch when the groups'
+    /// `delete-target` was last pushed: it moves only with the target.
+    group_delete_target_seen: Option<(usize, u64)>,
     /// `engine.compiling` last pushed.
     compiling: Option<bool>,
     /// The current track `selection.rack-slot` was last computed for.
@@ -2355,6 +2367,9 @@ impl HostKinds {
         self.sync_compiling(&mut pusher, app);
         self.sync_rack_slot(&mut pusher, app);
         let selection_changed = self.selection.refresh(&sources);
+        // The live fields share one read of what several of them derive
+        // from (the track selection, the p-lock display steps).
+        self.shared.borrow_mut().tick = Some(live::TickMemo::default());
         self.sync_track_live(&mut pusher, selection_changed);
         self.sync_send_live(&mut pusher);
         self.sync_device_live(&mut pusher);
@@ -2385,6 +2400,7 @@ impl HostKinds {
             .singleton(MASTER)
             .is_some_and(|id| pusher.push_live(id, &MASTER_LIVE) & master_peaks != 0);
         self.sync_selection(&mut pusher, selection_changed);
+        self.shared.borrow_mut().tick = None;
         let changed = pusher.changed;
         if changed {
             rt.run_reactive_cycle();
@@ -2545,4 +2561,4 @@ impl HostKinds {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

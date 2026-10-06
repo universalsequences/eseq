@@ -406,11 +406,11 @@ like every other target, writes on the process's own track.
 - **Effective-value dot.** The write is recorded as `ProcessEffectiveSend`
   (bus, base, value, clamped) in the overlay and published per `(track, bus)`
   through `publish_process_effective_sends`, sharing the instrument feed's
-  version counter. The UI tick republishes it as
-  `track-{t}-bus-{b}-send-proc-value`; process-chain edits republish
-  `…-send-proc-mapped` (1 while an enabled slot binds or fans out to that
-  bus). The mixer send knob gates its `process-value` amber dot on the
-  mapped flag, so an unbound send drops the dot without waiting for a write.
+  version counter. The host kinds show it as `send.process-value`, and
+  `send.process-mapped` is true while an enabled slot binds or fans out to
+  that bus (kind-bindings spec §13 stage 8, eseq-0l17.13). The mixer send
+  knob gates its `process-value` amber dot on the mapped flag, so an
+  unbound send drops the dot without waiting for a write.
 
 ## User-added track lanes (rev 6, epic eseq-53y7, 2026-09-15)
 

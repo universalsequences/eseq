@@ -12,6 +12,7 @@
 
 (module eseq.scene-banks)
 (import eseq.kinds :refer (banks transport))
+(import eseq.view-kit :as kit)
 
 (export scene-bank-view
         scene-viewed-bank
@@ -38,8 +39,9 @@
           (other bank :default nil)
           (pending -1)))
 
-;; Whether x is one of xs.
-(def listed? (x xs) (reduce |found y| (or found (= y x)) false xs))
+;; COMPAT(eseq-0l17): eseq.view-kit/listed?, re-exported for callers
+;; that still refer it from here.
+(def listed? kit/listed?)
 
 (def view-scene-bank! (b)
   (let ((other (first (filter (lambda (x) (not (= x b))) (banks))))
@@ -86,12 +88,12 @@
   (let ((b (scene-viewed-bank)))
     (if b b.index 0)))
 
-;; Clip-grid membership (spec §10.1). `:banks` is the host-published list of
-;; bank indices whose scenes reference this clip on its track; `viewed` is
-;; (scene-viewed-bank-index), read once per render. An empty list means no
-;; scene in any bank references it: those orphans (a freshly cloned clip, a
-;; clip whose only scene was deleted) stay visible in every bank so they are
-;; never stranded behind a bank the user cannot guess.
-(def clip-in-viewed-bank? (cell viewed)
-  (let ((in (or (get cell :banks) (list))))
+;; Clip-grid membership (spec §10.1): cell c (a track's pattern) belongs to
+;; the viewed bank `viewed` (a bank instance, (scene-viewed-bank), read once
+;; per render) when a scene of that bank uses it. A cell no scene uses yet
+;; (`c.banks` empty: a freshly cloned clip, a clip whose only scene was
+;; deleted) stays visible in every bank so it is never stranded behind a bank
+;; the user cannot guess.
+(def clip-in-viewed-bank? (c viewed)
+  (let ((in c.banks))
     (or (= (len in) 0) (listed? viewed in))))

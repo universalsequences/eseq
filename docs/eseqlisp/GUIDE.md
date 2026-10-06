@@ -252,7 +252,7 @@ A meter or a knob that follows audio should not rerun a view sixty times a
 second. Bind the prop to a float reference instead:
 
 ```lisp
-(meter :level (bind-seq "master-peak-l"))
+(meter :level #'master.peak-l)
 (slider :value (bind-nth "SEQV" "track-gain" i))
 ```
 

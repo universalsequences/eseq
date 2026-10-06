@@ -2,6 +2,7 @@
 //! state, the live-field values ([`live_value`]) and the reader hook.
 
 use super::*;
+use sequencer::sequencer::BusId;
 
 /// What the reader hook and the tick share.
 #[derive(Default)]
@@ -79,11 +80,20 @@ pub(crate) struct KindsShared {
     /// anew: the macro sync registers the params it targets).
     pub(crate) params_generation: u64,
     /// Per track position, under its [`PlockKey`] ([`plock_cached`]): the
-    /// instrument's key locks, the instrument params a process writes, the
-    /// step and key-lock variant registries (`panel`, `variants`).
+    /// instrument's key locks, the instrument params and the sends (by bus
+    /// id) a process writes, the step and key-lock variant registries
+    /// (`panel`, `variants`), the buses some step locks a send to.
     pub(super) key_locks: PlockCache<usize, InstrumentKeyLocks>,
     pub(super) process_bound: PlockCache<usize, HashSet<usize>>,
+    pub(super) process_bound_sends: PlockCache<usize, HashSet<u64>>,
     pub(super) variants: PlockCache<(usize, VariantScope), VariantSnapshot>,
+    pub(super) send_locks: PlockCache<usize, HashSet<BusId>>,
+    /// The scheduler's last send writes (`send.process-value`), copied
+    /// when their version moves.
+    process_sends: Option<(u64, Rc<ProcessSends>)>,
+    /// What the live fields share within one tick ([`TickMemo`]); `None`
+    /// between ticks, where a read computes afresh.
+    pub(super) tick: Option<TickMemo>,
     /// Per track position: the variant key its first selected step plays,
     /// under the [`PlockKey`] and the step it was read at (`variant.current`).
     pub(super) variant_current: HashMap<usize, (PlockKey, Option<usize>, Option<VariantKey>)>,
@@ -107,6 +117,17 @@ pub(crate) struct KindsShared {
 }
 
 type VariantKey = sequencer::plock_variants::PlockVariantKey;
+type ProcessSends = HashMap<(usize, u64), sequencer::process::ProcessEffectiveSend>;
+
+/// Per-tick snapshots ([`KindsShared::tick`]), each taken on first use.
+#[derive(Default)]
+pub(super) struct TickMemo {
+    /// `selection.tracks` (`track.in-selection`).
+    selected_tracks: Option<HashSet<usize>>,
+    /// Per track position, the step its p-locks show (`send.display`,
+    /// `locked`, `process-value`).
+    display_steps: HashMap<usize, Option<usize>>,
+}
 
 /// A per-track cache under its [`PlockKey`] and the descriptor it read
 /// against (0 when none does).
@@ -297,6 +318,73 @@ impl KindsHandles {
     }
 }
 
+/// Whether `track` is the current track or one of `selection.tracks` (the
+/// selection set read once per tick).
+fn in_selection(sources: &KindsHandles, shared: &RefCell<KindsShared>, track: usize) -> bool {
+    if sources.current_track.load(Ordering::Relaxed) == track {
+        return true;
+    }
+    let read = || sources.selected_tracks.lock().unwrap().clone();
+    match shared.borrow_mut().tick.as_mut() {
+        Some(tick) => tick
+            .selected_tracks
+            .get_or_insert_with(read)
+            .contains(&track),
+        None => sources.selected_tracks.lock().unwrap().contains(&track),
+    }
+}
+
+/// [`KindsHandles::plock_display_step`], once per track per tick.
+fn display_step(
+    sources: &KindsHandles,
+    shared: &RefCell<KindsShared>,
+    track: usize,
+) -> Option<usize> {
+    let memo = shared
+        .borrow()
+        .tick
+        .as_ref()
+        .map(|tick| tick.display_steps.get(&track).copied());
+    if let Some(Some(step)) = memo {
+        return step;
+    }
+    let step = sources.plock_display_step(track);
+    if let Some(tick) = shared.borrow_mut().tick.as_mut() {
+        tick.display_steps.insert(track, step);
+    }
+    step
+}
+
+/// The buses some step of `track` locks a send to, cached per track under
+/// its [`PlockKey`] and step count (`send.has-locks`).
+fn send_locks(
+    sources: &KindsHandles,
+    shared: &RefCell<KindsShared>,
+    track: usize,
+) -> Rc<HashSet<BusId>> {
+    let num_steps = sources.num_steps(track);
+    plock_cached(
+        shared,
+        |shared| &mut shared.send_locks,
+        track,
+        (sources.plock_key(track), num_steps),
+        || sources.state.pattern.track_send_plocks[track].locked_destinations(num_steps),
+    )
+}
+
+/// The scheduler's last send writes, copied when their version moves.
+fn process_sends(sources: &KindsHandles, shared: &RefCell<KindsShared>) -> Rc<ProcessSends> {
+    let version = sources.state.process_effective_params_version();
+    if let Some((seen, sends)) = &shared.borrow().process_sends {
+        if *seen == version {
+            return sends.clone();
+        }
+    }
+    let sends = Rc::new(sources.state.process_effective_sends());
+    shared.borrow_mut().process_sends = Some((version, sends.clone()));
+    sends
+}
+
 /// A live field's current value (see [`Feed::Live`]); `None` for anything
 /// else, and for a field a schema mismatch skips. Counts the computation.
 pub(super) fn live_value<S: KindStore>(
@@ -344,6 +432,8 @@ pub(super) fn live_value<S: KindStore>(
                 f::TRACK_SELECTED => {
                     Value::Bool(sources.current_track.load(Ordering::Relaxed) == track)
                 }
+                // The selection highlight, like the legacy `track-selected-N`.
+                f::TRACK_IN_SELECTION => Value::Bool(in_selection(sources, shared, track)),
                 f::TRACK_NUM_STEPS => number(sources.num_steps(track) as f64),
                 f::TRACK_STEPS => {
                     let num_steps = sources.num_steps(track);
@@ -439,22 +529,31 @@ pub(super) fn live_value<S: KindStore>(
             if !sources.track_exists(track) {
                 return None;
             }
-            let (state, bus) = (&sources.state, sequencer::sequencer::BusId(bus));
+            let (state, bus) = (&sources.state, BusId(bus));
+            let shown = || {
+                let step = display_step(sources, shared, track);
+                displayed_track_send_amount(state, track, bus, step)
+            };
             match key {
                 f::SEND_AMOUNT => number(track_send_base(state, track, bus)),
-                f::SEND_DISPLAY => number(displayed_track_send_amount(
-                    state,
-                    track,
-                    bus,
-                    sources.plock_display_step(track),
-                )),
-                f::SEND_LOCKED => Value::Bool(
-                    track_send_lock(state, track, bus, sources.plock_display_step(track)).is_some(),
-                ),
-                f::SEND_HAS_LOCKS => Value::Bool(
-                    state.pattern.track_send_plocks[track]
-                        .has_lock_for(bus, sources.num_steps(track)),
-                ),
+                f::SEND_DISPLAY => number(shown()),
+                f::SEND_LOCKED => {
+                    let step = display_step(sources, shared, track);
+                    Value::Bool(track_send_lock(state, track, bus, step).is_some())
+                }
+                f::SEND_HAS_LOCKS => Value::Bool(send_locks(sources, shared, track).contains(&bus)),
+                f::SEND_PROCESS_MAPPED => {
+                    let bound = panel::process_bound_sends(sources, shared, track);
+                    Value::Bool(bound.contains(&bus.0))
+                }
+                // The level a process last wrote, else the level shown.
+                f::SEND_PROCESS_VALUE => {
+                    let written = process_sends(sources, shared).get(&(track, bus.0)).copied();
+                    let written = written.filter(|_| {
+                        panel::process_bound_sends(sources, shared, track).contains(&bus.0)
+                    });
+                    number(written.map_or_else(shown, |written| written.value))
+                }
                 _ => return None,
             }
         }
@@ -528,7 +627,14 @@ pub(super) fn live_value<S: KindStore>(
         GROUP => {
             let group = *store.key_of(id)?.first()? as usize;
             let gid = *shared.borrow().group_gids.get(group)?;
-            Value::Bool(*sources.armed_rack.lock().unwrap() == Some(gid))
+            match key {
+                f::GROUP_ARMED => Value::Bool(*sources.armed_rack.lock().unwrap() == Some(gid)),
+                f::GROUP_DELETE_TARGET => Value::Bool(
+                    *sources.active_delete_target.lock().unwrap()
+                        == Some(ActiveDeleteTarget::MixerGroup { group_id: gid }),
+                ),
+                _ => return None,
+            }
         }
         PAD => {
             let shared = shared.borrow();

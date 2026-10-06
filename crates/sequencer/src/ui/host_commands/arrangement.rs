@@ -1,8 +1,8 @@
 //! The arrangement kinds' setters (kind-bindings spec §14, stage 7d):
 //! `set-song` (`song.cursor`, `end`, `loop`, `manual-latch`, `bound-clip`
-//! and `track.latched`), `set-clip` (`clip.start`, `end`, `cell`),
-//! `set-cell` (`cell.selected`) and `set-song-region` (`select-region!`,
-//! `clear-region!`).
+//! and `track.latched`), `set-clip` (`clip.start`, `end`, `cell`) and
+//! `set-song-region` (`select-region!`, `clear-region!`). `cell.selected`
+//! sets the delete target directly (`seq-set-delete-target`).
 //!
 //! Clips are named by their stable clip id, tracks by their stable
 //! `TrackId` and cells by (track id, pattern id), resolved when the command
@@ -24,11 +24,11 @@
 //! each `set!` is a one-shot edit and its own entry (`arr_clip_move`,
 //! `arr_clip_resize`, which grows a take past its end, `arr_set_end`).
 //!
-//! The cursor, the latches, the bound clip, the region and the selected
-//! cell are selection and transport state, without history, as for the
-//! legacy commands. Values follow the value rule ([`SetValue`]): beats are
-//! finite numbers of at least 0, flags bools, ids non-negative integers;
-//! anything else is an error that changes nothing.
+//! The cursor, the latches, the bound clip and the region are selection
+//! and transport state, without history, as for the legacy commands.
+//! Values follow the value rule ([`SetValue`]): beats are finite numbers of
+//! at least 0, flags bools, ids non-negative integers; anything else is an
+//! error that changes nothing.
 
 use super::track_settings::{command_track, value_id, SetValue};
 use crate::*;
@@ -38,7 +38,7 @@ use sequencer::app::song_region::SongRegionSelection;
 use sequencer::sequencer::{ArrClip, ClipId, LaneSource, PatternId, TrackId};
 use std::collections::HashMap;
 
-pub(super) const COMMANDS: &[&str] = &["set-song", "set-clip", "set-cell", "set-song-region"];
+pub(super) const COMMANDS: &[&str] = &["set-song", "set-clip", "set-song-region"];
 
 /// The merge key every script drag's arrangement edits share.
 const DRAG_KEY: &str = "kinds-arrangement";
@@ -257,26 +257,6 @@ fn set_clip(app: &app::App, map: &Payload) -> Result<Option<SongEdit>, String> {
     })
 }
 
-/// `set-cell`: `{:track-id :pattern-id :field :value}`; `selected` makes
-/// the cell the mixer's delete target (false clears it when it is).
-fn set_cell(app: &app::App, ctx: &LoopCtx<'_>, map: &Payload) -> Result<(), String> {
-    let track = command_track(app, map)?;
-    let pattern = pool_pattern(app, track, map)?;
-    let field = map_string(map, "field").ok_or("needs a :field")?;
-    let value = SetValue::of(map, "value", &field);
-    match field.as_str() {
-        "selected" => {
-            let on = value.flag()?;
-            let target = &mut *ctx.shared.active_delete_target.lock().unwrap();
-            if natives::set_track_pattern_delete_target(target, track, pattern.0, on) {
-                natives::bump_delete_target_version(&ctx.shared.active_delete_target_version);
-            }
-            Ok(())
-        }
-        other => Err(format!("unknown cell field '{other}'")),
-    }
-}
-
 /// `set-song-region`: `{:track-ids (a b) :start :end :scene-lane}`, or nil
 /// to clear.
 fn set_region(app: &mut app::App, payload: &Value) -> Result<(), String> {
@@ -326,7 +306,6 @@ pub(super) fn handle(
         ("set-song-region", payload) => set_region(app, payload).map(|()| (None, None)),
         ("set-song", Value::Map(map)) => set_song(app, map),
         ("set-clip", Value::Map(map)) => set_clip(app, map).map(|edit| (edit, None)),
-        ("set-cell", Value::Map(map)) => set_cell(app, ctx, map).map(|()| (None, None)),
         _ => Err("the payload is not a dict".to_string()),
     };
     match result {

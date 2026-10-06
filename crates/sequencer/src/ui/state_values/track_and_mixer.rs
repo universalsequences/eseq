@@ -237,17 +237,6 @@ pub(crate) fn track_instrument_id(app: &app::App, track: usize) -> String {
     }
 }
 
-pub(crate) fn build_track_mod_output_available(app: &app::App) -> Value {
-    let items: Vec<Rc<RefCell<Value>>> = (0..app.graph.track_instrument_types.len())
-        .map(|track| {
-            Rc::new(RefCell::new(Value::Bool(
-                app.graph.track_exposes_mod_output(track),
-            )))
-        })
-        .collect();
-    Value::List(items)
-}
-
 pub(crate) fn build_track_instrument_run_modes(app: &app::App) -> Value {
     let items: Vec<Rc<RefCell<Value>>> = app
         .graph
@@ -279,11 +268,6 @@ pub(crate) fn sync_track_name_state(
     sync_all_rack_slot_selection_binding_fields(rt, app);
     rt.set_reactive(
         "SEQ",
-        "track-mod-output-available",
-        build_track_mod_output_available(app),
-    );
-    rt.set_reactive(
-        "SEQ",
         "track-instrument-run-modes",
         build_track_instrument_run_modes(app),
     );
@@ -308,24 +292,8 @@ pub(crate) fn build_track_volumes(state: &Arc<SequencerState>) -> Value {
     Value::List(items)
 }
 
-pub(crate) fn build_track_pans(state: &Arc<SequencerState>) -> Value {
-    let count = state.active_track_count();
-    let items: Vec<Rc<RefCell<Value>>> = (0..count)
-        .map(|t| {
-            Rc::new(RefCell::new(Value::Number(
-                state.pattern.track_params[t].get_pan() as f64,
-            )))
-        })
-        .collect();
-    Value::List(items)
-}
-
 pub(crate) fn track_volume_field(track: usize) -> String {
     format!("track-{track}-volume")
-}
-
-pub(crate) fn track_pan_field(track: usize) -> String {
-    format!("track-{track}-pan")
 }
 
 pub(crate) fn sync_track_volume_binding_field(
@@ -342,55 +310,10 @@ pub(crate) fn sync_track_volume_binding_field(
     }
 }
 
-pub(crate) fn sync_track_pan_binding_field(
-    rt: &mut Runtime,
-    state: &Arc<SequencerState>,
-    track: usize,
-) {
-    if let Some(tp) = state.pattern.track_params.get(track) {
-        rt.set_reactive(
-            "SEQ",
-            &track_pan_field(track),
-            Value::Number(tp.get_pan() as f64),
-        );
-    }
-}
-
-pub(crate) fn sync_track_volume_pan_binding_fields(rt: &mut Runtime, state: &Arc<SequencerState>) {
+pub(crate) fn sync_track_volume_binding_fields(rt: &mut Runtime, state: &Arc<SequencerState>) {
     for track in 0..state.active_track_count() {
         sync_track_volume_binding_field(rt, state, track);
-        sync_track_pan_binding_field(rt, state, track);
     }
-}
-
-pub(crate) fn build_track_outputs(app: &app::App, state: &Arc<SequencerState>) -> Value {
-    let count = state.active_track_count();
-    let items: Vec<Rc<RefCell<Value>>> = (0..count)
-        .map(|t| {
-            Rc::new(RefCell::new(build_track_output_label(
-                app,
-                &state.pattern.track_params[t],
-            )))
-        })
-        .collect();
-    Value::List(items)
-}
-
-pub(crate) fn build_all_track_bus_sends(app: &app::App, state: &Arc<SequencerState>) -> Value {
-    let count = state.active_track_count();
-    let items: Vec<Rc<RefCell<Value>>> = (0..count)
-        .map(|t| {
-            Rc::new(RefCell::new(build_track_bus_sends(
-                app,
-                &state.pattern.track_params[t],
-            )))
-        })
-        .collect();
-    Value::List(items)
-}
-
-pub(crate) fn track_bus_send_field(track: usize, bus_idx: usize) -> String {
-    format!("track-{track}-bus-{bus_idx}-send")
 }
 
 pub(crate) fn current_track_bus_send_field(bus_idx: usize) -> String {
@@ -446,75 +369,23 @@ pub(crate) fn displayed_track_send_amount(
         .unwrap_or_else(|| track_send_base(state, track, bus))
 }
 
-pub(crate) fn sync_track_bus_send_binding_field(
-    rt: &mut Runtime,
-    app: &app::App,
-    state: &Arc<SequencerState>,
-    track: usize,
-    bus_idx: usize,
-) {
-    if let Some(amount) = track_bus_send_amount(app, state, track, bus_idx) {
-        rt.set_reactive(
-            "SEQ",
-            &track_bus_send_field(track, bus_idx),
-            Value::Number(amount as f64),
-        );
-        sync_track_bus_send_plock_fields(rt, app, state, track, bus_idx, None);
-    }
-}
-
-pub(crate) fn sync_track_bus_send_plock_fields(
-    rt: &mut Runtime,
-    app: &app::App,
-    state: &Arc<SequencerState>,
-    track: usize,
-    bus_idx: usize,
-    display_step: Option<usize>,
-) -> bool {
-    let bus = &app.buses[bus_idx];
-    let locks = state.pattern.track_send_plocks[track].snapshot();
-    let any = locks.iter().flatten().any(|send| send.destination == bus.id);
-    let active = display_step.and_then(|step| locks.get(step))
-        .is_some_and(|row| row.iter().any(|send| send.destination == bus.id));
-    let baseline = track_bus_send_amount(app, state, track, bus_idx).unwrap_or(0.0);
-    let field = track_bus_send_field(track, bus_idx);
-    let mut dirty = false;
-    for (suffix, value) in [("plock-any", any as u8 as f64),
-        ("plock-active", active as u8 as f64), ("plock-default", baseline as f64)] {
-        dirty |= rt.set_reactive("SEQ", &format!("{field}-{suffix}"), Value::Number(value))
-            .effects_dirty;
-    }
-    dirty
-}
-
-pub(crate) fn sync_track_bus_send_binding_fields(
-    rt: &mut Runtime,
-    app: &app::App,
-    state: &Arc<SequencerState>,
-) {
-    for track in 0..state.active_track_count() {
-        for (bus_idx, bus) in app.buses.iter().enumerate() {
-            if bus.id != sequencer::sequencer::BusId::MIX {
-                sync_track_bus_send_binding_field(rt, app, state, track, bus_idx);
-            }
-        }
-    }
-}
-
+/// Publish the current track's `tp-bus-N-send`; returns whether a reader
+/// needs the reactive cycle.
 pub(crate) fn sync_current_track_bus_send_binding_field(
     rt: &mut Runtime,
     app: &app::App,
     state: &Arc<SequencerState>,
     track: usize,
     bus_idx: usize,
-) {
-    if let Some(amount) = track_bus_send_amount(app, state, track, bus_idx) {
+) -> bool {
+    track_bus_send_amount(app, state, track, bus_idx).is_some_and(|amount| {
         rt.set_reactive(
             "SEQ",
             &current_track_bus_send_field(bus_idx),
             Value::Number(amount as f64),
-        );
-    }
+        )
+        .effects_dirty
+    })
 }
 
 pub(crate) fn sync_current_track_bus_send_binding_fields(
@@ -530,10 +401,10 @@ pub(crate) fn sync_current_track_bus_send_binding_fields(
     }
 }
 
-/// Synchronize send controls to the same display step used by synth/effect
-/// parameters: selection first, then the playback step, then the pattern
-/// baseline. Both mixer-strip and current-track controls share these fields,
-/// so selection and playhead changes must update both projections together.
+/// Synchronize the current track's send controls (`tp-bus-N-send`) to the
+/// same display step used by synth/effect parameters: selection first, then
+/// the playback step, then the pattern baseline. (The mixer's send knobs
+/// bind `send.display`, which the host kinds compute the same way.)
 pub(crate) fn sync_selected_track_bus_send_binding_fields(
     rt: &mut Runtime,
     app: &app::App,
@@ -550,53 +421,16 @@ pub(crate) fn sync_selected_track_bus_send_binding_fields(
         if track >= state.pattern.track_params.len() {
             continue;
         }
-        dirty |= sync_track_bus_send_plock_fields(rt, app, state, track, bus_idx, display_step);
         let amount = displayed_track_send_amount(state, track, bus.id, display_step);
-        dirty |= rt.set_reactive(
-            "SEQ",
-            &track_bus_send_field(track, bus_idx),
-            Value::Number(amount as f64),
-        ).effects_dirty;
-        dirty |= rt.set_reactive(
-            "SEQ",
-            &current_track_bus_send_field(bus_idx),
-            Value::Number(amount as f64),
-        ).effects_dirty;
+        dirty |= rt
+            .set_reactive(
+                "SEQ",
+                &current_track_bus_send_field(bus_idx),
+                Value::Number(amount as f64),
+            )
+            .effects_dirty;
     }
     dirty
-}
-
-pub(crate) fn build_mod_routes(state: &Arc<SequencerState>) -> Value {
-    let routes = state.current_mod_connections();
-    Value::List(
-        routes
-            .into_iter()
-            .map(|connection| {
-                let mut map = std::collections::HashMap::new();
-                map.insert(
-                    "source".to_string(),
-                    Rc::new(RefCell::new(Value::Number(connection.source_track as f64))),
-                );
-                map.insert(
-                    "dest-kind".to_string(),
-                    Rc::new(RefCell::new(mod_destination_kind_value(
-                        connection.destination,
-                    ))),
-                );
-                map.insert(
-                    "dest".to_string(),
-                    Rc::new(RefCell::new(mod_destination_id_value(
-                        connection.destination,
-                    ))),
-                );
-                map.insert(
-                    "input".to_string(),
-                    Rc::new(RefCell::new(Value::Number(connection.dest_input as f64))),
-                );
-                Rc::new(RefCell::new(Value::Map(map)))
-            })
-            .collect(),
-    )
 }
 
 pub(crate) fn build_track_mutes(state: &Arc<SequencerState>) -> Value {
@@ -841,26 +675,11 @@ pub(crate) fn sync_track_mixer_state(
     sync_all_rack_slot_selection_binding_fields(rt, app);
     rt.set_reactive(
         "SEQ",
-        "track-mod-output-available",
-        build_track_mod_output_available(app),
-    );
-    rt.set_reactive(
-        "SEQ",
         "track-instrument-run-modes",
         build_track_instrument_run_modes(app),
     );
     rt.set_reactive("SEQ", "track-volumes", build_track_volumes(state));
-    rt.set_reactive("SEQ", "track-mixer-pans", build_track_pans(state));
-    sync_track_volume_pan_binding_fields(rt, state);
-    rt.set_reactive("SEQ", "track-outputs", build_track_outputs(app, state));
-    rt.set_reactive(
-        "SEQ",
-        "track-bus-sends",
-        build_all_track_bus_sends(app, state),
-    );
-    sync_track_bus_send_binding_fields(rt, app, state);
-    sync_process_send_mapped_fields(rt, app, state);
-    rt.set_reactive("SEQ", "mod-routes", build_mod_routes(state));
+    sync_track_volume_binding_fields(rt, state);
     rt.set_reactive("SEQ", "track-mutes", build_track_mutes(state));
     rt.set_reactive("SEQ", "track-solos", build_track_solos(state));
     rt.set_reactive(
@@ -905,28 +724,9 @@ pub(crate) fn sync_track_mixer_state(
     );
 }
 
-/// The bus `bus` feeds (the main mix unless routed elsewhere;
-/// `SEQ.bus-output-routes` `:value`, `bus.output`).
+/// The bus `bus` feeds (the main mix unless routed elsewhere; `bus.output`).
 pub(crate) fn bus_output_destination(bus: &app::BusChannelState) -> sequencer::sequencer::BusId {
     sequencer::sequencer::BusId(bus.output.destination().unwrap_or(0))
-}
-
-pub(crate) fn build_bus_output_routes(app: &app::App) -> Value {
-    let label = |id: sequencer::sequencer::BusId| {
-        if id == sequencer::sequencer::BusId::MIX { return "main".to_string(); }
-        let Some(bus) = app.buses.iter().find(|bus| bus.id == id) else { return "main".to_string(); };
-        if bus.name == "main" || app.buses.iter().filter(|other| other.name == bus.name).count() > 1 {
-            format!("{} ({})", bus.name, id.0)
-        } else { bus.name.clone() }
-    };
-    list_value(app.buses.iter().map(|bus| {
-        let options = app.bus_output_options(bus.id);
-        map_value([
-            ("value", Value::String(label(bus_output_destination(bus)))),
-            ("options", list_value(options.iter().map(|id| Value::String(label(*id))))),
-            ("ids", list_value(options.iter().map(|id| Value::Number(id.0 as f64)))),
-        ])
-    }))
 }
 
 pub(crate) fn sync_bus_mixer_control_state(rt: &mut Runtime, app: &app::App) {
@@ -951,7 +751,6 @@ pub(crate) fn sync_bus_mixer_control_state(rt: &mut Runtime, app: &app::App) {
         .iter()
         .map(|bus| Rc::new(RefCell::new(Value::Number(bus.id.0 as f64))))
         .collect();
-    rt.set_reactive("SEQ", "bus-output-routes", build_bus_output_routes(app));
     rt.set_reactive("SEQ", "bus-ids", Value::List(ids));
     rt.set_reactive("SEQ", "bus-names", build_name_list(&names));
     rt.set_reactive("SEQ", "bus-volumes", Value::List(volumes));
@@ -967,16 +766,12 @@ pub(crate) fn sync_bus_mixer_state(rt: &mut Runtime, app: &app::App) {
 
 pub(crate) fn sync_track_mixer_empty_state(rt: &mut Runtime) {
     rt.set_reactive("SEQ", "track-volumes", Value::List(vec![]));
-    rt.set_reactive("SEQ", "track-mixer-pans", Value::List(vec![]));
-    rt.set_reactive("SEQ", "track-outputs", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-colors", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-collapsed", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-pattern-cells", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-active-pattern-ids", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-instrument-types", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-instrument-ids", Value::List(vec![]));
-    rt.set_reactive("SEQ", "track-mod-output-available", Value::List(vec![]));
-    rt.set_reactive("SEQ", "track-bus-sends", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-mutes", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-solos", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-muted-by-solo", Value::List(vec![]));

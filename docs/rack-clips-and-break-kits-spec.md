@@ -365,9 +365,9 @@ or nil, and `(graph-route-tracks handle)` → the member track index behind
 each route option (nil when project-owned). Route option *n* is always route
 value *n* with "Off" last, and `bind-graph … :route options` indexes by that
 value rather than by label, so the demo builds pad labels and colours from
-the member tracks and the rest of its route code is unchanged. The UI also
-publishes `SEQ.graph-sequencers` (`{id name owner-rack}` per instance) for
-UI that lists instances, such as the rack menu.
+the member tracks and the rest of its route code is unchanged. UI that
+lists instances, such as the rack menu, reads them as the `graph` kind
+(`project.graphs`: `gid`, `name`, `owner`; kind-bindings spec §14.2k).
 
 ### 5.4 Route semantics (built)
 

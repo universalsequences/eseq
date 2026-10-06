@@ -164,6 +164,15 @@ impl TrackSendPLockData {
             .any(|row| row.iter().any(|send| send.destination == destination))
     }
 
+    /// The destinations some of the first `num_steps` steps locks a send
+    /// to.
+    pub fn locked_destinations(&self, num_steps: usize) -> std::collections::HashSet<BusId> {
+        let steps = self.steps.lock().unwrap();
+        let rows = steps.iter().take(num_steps);
+        rows.flat_map(|row| row.iter().map(|send| send.destination))
+            .collect()
+    }
+
     pub fn snapshot(&self) -> Vec<Vec<TrackSendSnapshot>> {
         self.steps.lock().unwrap().clone()
     }

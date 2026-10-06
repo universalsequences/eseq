@@ -929,11 +929,6 @@ fn sync_track_param_fields(
     );
     rt.set_reactive("SEQ", "tp-send", Value::Number(tp.get_send() as f64));
     rt.set_reactive("SEQ", "tp-output", build_track_output_label(app, tp));
-    rt.set_reactive(
-        "SEQ",
-        "track-output-options",
-        build_track_output_options(app),
-    );
     rt.set_reactive("SEQ", "tp-bus-sends", build_track_bus_sends(app, tp));
     sync_current_track_bus_send_binding_fields(rt, app, state, track);
     rt.set_reactive(

@@ -22,7 +22,8 @@
 //!   `process-clamped`): a track instrument's params an enabled process slot
 //!   writes (`process_bound_instrument_params`, cached per track under its
 //!   [`PlockKey`]: a process chain edit moves it) and the scheduler's last
-//!   write (`SequencerState::process_effective_param`).
+//!   write (`SequencerState::process_effective_param`). The track's sends
+//!   a process writes (`send.process-mapped`) are cached the same way.
 //! - **Key locks** (`param.key-locks`, `device.key-locked-notes`): a track
 //!   instrument's ([`instrument_key_locks`], shared with the panel), cached
 //!   per track under its [`PlockKey`] (a key-lock edit moves the fx and UI
@@ -334,6 +335,22 @@ fn process_bound(
         track,
         key,
         || process_bound_instrument_params(&sources.state, &device.desc.desc, track),
+    )
+}
+
+/// The buses (by id) an enabled process slot of `track` writes a send of
+/// (`send.process-mapped`), cached per track under its [`PlockKey`].
+pub(super) fn process_bound_sends(
+    sources: &KindsHandles,
+    shared: &RefCell<KindsShared>,
+    track: usize,
+) -> Rc<HashSet<u64>> {
+    plock_cached(
+        shared,
+        |shared| &mut shared.process_bound_sends,
+        track,
+        (sources.plock_key(track), 0),
+        || process_bound_bus_sends(&sources.state, track),
     )
 }
 

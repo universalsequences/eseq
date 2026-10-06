@@ -3,11 +3,6 @@ use crate::midi_dispatch::{dispatch_midi_input, dispatch_midi_to_lisp, register_
 use sequencer::midi_input::{MidiInputEvent, MidiMessage, MidiNoteEvent};
 use sequencer::sequencer::{RollCommand, SequenceRollSource, Timebase};
 
-fn set_field(editor: &mut Editor, field: &str, source: &str) {
-    let value = editor.runtime_mut().eval_str(source).unwrap().unwrap();
-    editor.runtime_mut().set_reactive("SEQ", field, value);
-}
-
 fn fixture() -> Editor {
     fixture_with_state(Arc::new(SequencerState::new(0, vec![])))
 }
@@ -21,9 +16,9 @@ fn fixture_with_state(state: Arc<SequencerState>) -> Editor {
     sync_midi_port(&mut editor, 0, Some(("akai-id".into(), "MIDI Mix".into())));
     sync_midi_port(&mut editor, 1, Some(("ni-id".into(), "Komplete Kontrol".into())));
     editor.runtime_mut().register_native("seq-rack-macro-value", |_, _| Ok(Value::Nil));
-    for name in ["seq-set-track-volume", "seq-set-bus-volume", "seq-toggle-track-mute",
-        "seq-toggle-bus-mute", "seq-toggle-track-solo", "seq-toggle-bus-solo",
-        "seq-toggle-record-arm", "seq-toggle-rack-arm"] {
+    for name in ["seq-set-track-volume", "seq-set-bus-volume", "seq-set-track-mute",
+        "seq-set-bus-mute", "seq-set-track-solo", "seq-set-bus-solo",
+        "seq-set-record-arm", "seq-set-rack-armed"] {
         editor.runtime_mut().register_native(name, move |args, ctx| {
             ctx.enqueue_command(HostCommand::Custom {
                 name: name.into(),
@@ -32,20 +27,55 @@ fn fixture_with_state(state: Arc<SequencerState>) -> Editor {
             Ok(Value::Bool(true))
         });
     }
-    set_field(&mut editor, "num-tracks", "12");
-    set_field(&mut editor, "groups", r#"(list
-        (dict :id 90 :bus-id 40 :parent -1 :members '(1 2 5) :anchor 1 :rack false :rack-members '(91))
-        (dict :id 91 :bus-id 41 :parent 90 :members '(4) :anchor 4 :rack true)
-        (dict :id 92 :bus-id 42 :parent -1 :members '() :anchor -1 :rack true))"#);
-    // Storage order intentionally differs from identity and puts master last.
-    set_field(&mut editor, "bus-ids", "'(40 2 41 1 42 7 0)");
-    set_field(&mut editor, "bus-names", r#"'("Group" "Bus B" "Nested rack" "Bus A" "Rack" "Bus C" "Mix")"#);
-    set_field(&mut editor, "track-bus-sends", r#"(map |i| (list
-        (dict :bus-id 40 :bus-idx 0) (dict :bus-id 2 :bus-idx 1)
-        (dict :bus-id 41 :bus-idx 2) (dict :bus-id 1 :bus-idx 3)
-        (dict :bus-id 42 :bus-idx 4) (dict :bus-id 7 :bus-idx 5)) (range 0 12))"#);
+    // Storage order intentionally differs from identity and puts master
+    // last; every track sends to every bus but the main mix.
+    topology(&mut editor, 12, &default_groups(), &[(40, "Group"), (2, "Bus B"), (41, "Nested rack"),
+        (1, "Bus A"), (42, "Rack"), (7, "Bus C"), (0, "Mix")]);
     editor.drain_host_commands();
     editor
+}
+
+/// A group of the mixer topology: `id` on bus `bus`, `members` its tracks,
+/// `racks` the rack groups drawn inside it.
+fn group(id: u64, bus: u64, members: &[usize], racks: &[u64], rack: bool) -> sequencer::project::ProjectTrackGroup {
+    let mut group = rack_group_fixture(false);
+    group.id = id;
+    group.bus_id = bus;
+    group.members = members.to_vec();
+    group.rack_members = racks.to_vec();
+    if !rack {
+        group.rack = None;
+    }
+    group
+}
+
+/// A plain group (Group, on bus 40) holding a nested rack (bus 41) and an
+/// empty top-level rack (bus 42).
+fn default_groups() -> Vec<sequencer::project::ProjectTrackGroup> {
+    vec![
+        group(90, 40, &[1, 2, 5], &[91], false),
+        group(91, 41, &[4], &[], true),
+        group(92, 42, &[], &[], true),
+    ]
+}
+
+/// Publish the mixer's topology as the host kinds do: `tracks` tracks,
+/// `groups`, and buses `(bid, name)` in storage order.
+fn topology(editor: &mut Editor, tracks: usize, groups: &[sequencer::project::ProjectTrackGroup], buses: &[(u64, &str)]) {
+    seed_kind_test_tracks(editor, tracks, |track| format!("track-{track}"));
+    seed_kind_buses(editor, buses);
+    seed_kind_groups(editor, groups);
+}
+
+fn native_values(editor: &mut Editor, name: &str, args: Vec<Value>) {
+    let expected = Value::List(args.into_iter().map(|v| Rc::new(RefCell::new(v))).collect());
+    assert_eq!(commands(editor), vec![(name.into(), expected)]);
+}
+
+/// A kind setter's absolute write: the target and `true` (a toggle of a
+/// state that reads false).
+fn set_on(editor: &mut Editor, name: &str, target: f64) {
+    native_values(editor, name, vec![Value::Number(target), Value::Bool(true)]);
 }
 
 fn cc(editor: &mut Editor, port: usize, controller: u8, value: u8) -> bool {
@@ -107,8 +137,7 @@ fn midimix_arm_buttons_preselect_rates_and_solo_holds_roll() {
         "the roll starts with the preselected rate");
     assert_eq!(state.drain_roll_commands(), vec![RollCommand::SequenceRoll { on: true }]);
     // Rates are hardware positions, independent of mixer topology.
-    set_field(&mut editor, "num-tracks", "0");
-    set_field(&mut editor, "groups", "'()");
+    topology(&mut editor, 0, &[], &[(0, "Mix")]);
     for i in 0..8 {
         assert!(roll_note(&mut editor, &state, 0, 3 + i * 3, true));
         assert!(roll_note(&mut editor, &state, 0, 3 + i * 3, false));
@@ -125,7 +154,7 @@ fn midimix_arm_buttons_preselect_rates_and_solo_holds_roll() {
     assert!(roll_note(&mut editor, &state, 0, 27, false));
     assert!(!state.transport.sequence_rolling.load(Ordering::Acquire));
     assert_eq!(state.drain_roll_commands(), vec![RollCommand::SequenceRoll { on: false }]);
-    set_field(&mut editor, "num-tracks", "1");
+    topology(&mut editor, 1, &[], &[(0, "Mix")]);
     assert!(roll_note(&mut editor, &state, 0, 3, false));
     assert!(commands(&mut editor).is_empty(), "releasing an old rate button cannot arm");
     assert!(roll_note(&mut editor, &state, 0, 3, true));
@@ -195,23 +224,18 @@ fn midimix_faders_follow_top_level_mixer_order_and_live_topology() {
         native(&mut editor, name, &[target, 64.0 / 127.0]);
     }
     // Collapsing a group changes no hardware target.
-    set_field(&mut editor, "groups", r#"(list
-        (dict :id 90 :bus-id 40 :parent -1 :members '(1 2 4 5) :anchor 1 :collapsed true))"#);
+    let mut collapsed = group(90, 40, &[1, 2, 4, 5], &[], false);
+    collapsed.collapsed = true;
+    seed_kind_groups(&mut editor, &[collapsed]);
     assert!(cc(&mut editor, 0, 27, 0));
     native(&mut editor, "seq-set-track-volume", &[3.0, 0.0]);
     // Ungroup/delete/project replacement takes effect on the next event.
-    set_field(&mut editor, "groups", "'()");
-    set_field(&mut editor, "num-tracks", "2");
-    set_field(&mut editor, "bus-ids", "'()");
-    set_field(&mut editor, "bus-names", "'()");
+    topology(&mut editor, 2, &[], &[]);
     assert!(cc(&mut editor, 0, 23, 127));
     native(&mut editor, "seq-set-track-volume", &[1.0, 1.0]);
     assert!(cc(&mut editor, 0, 27, 127));
     assert!(commands(&mut editor).is_empty());
-    set_field(&mut editor, "groups", r#"(list
-        (dict :id 92 :bus-id 42 :parent -1 :members '() :anchor -1 :rack true))"#);
-    set_field(&mut editor, "bus-ids", "'(42 0)");
-    set_field(&mut editor, "bus-names", r#"'("Rack" "Mix")"#);
+    topology(&mut editor, 2, &[group(92, 42, &[], &[], true)], &[(42, "Rack"), (0, "Mix")]);
     assert!(cc(&mut editor, 0, 27, 127));
     native(&mut editor, "seq-set-bus-volume", &[0.0, 1.0]);
 }
@@ -221,17 +245,16 @@ fn midimix_remaining_strips_follow_visible_bus_order_and_reassign_after_bus_chan
     let mut editor = fixture();
     // Four top-level items: track 0, group (including its nested rack), track 3,
     // and an empty rack. The remaining four faders reach B, A, C and Mix.
-    set_field(&mut editor, "num-tracks", "6");
-    set_field(&mut editor, "bus-ids", "'(0 40 2 41 1 42 7)");
-    set_field(&mut editor, "bus-names", r#"'("Mix" "Group" "Bus B" "Nested rack" "Bus A" "Rack" "Bus C")"#);
+    topology(&mut editor, 6, &default_groups(), &[(0, "Mix"), (40, "Group"), (2, "Bus B"),
+        (41, "Nested rack"), (1, "Bus A"), (42, "Rack"), (7, "Bus C")]);
     for (number, bus) in [(23, 1.0), (31, 5.0), (49, 2.0), (53, 4.0), (57, 6.0), (61, 0.0), (62, 0.0)] {
         assert!(cc(&mut editor, 0, number, 127));
         native(&mut editor, "seq-set-bus-volume", &[bus, 1.0]);
     }
     note(&mut editor, 13, true);
-    native(&mut editor, "seq-toggle-bus-mute", &[2.0]);
+    set_on(&mut editor, "seq-set-bus-mute", 2.0);
     note(&mut editor, 14, true);
-    native(&mut editor, "seq-toggle-bus-solo", &[2.0]);
+    set_on(&mut editor, "seq-set-bus-solo", 2.0);
     for number in [13, 14, 15] {
         note(&mut editor, number, false);
     }
@@ -243,8 +266,8 @@ fn midimix_remaining_strips_follow_visible_bus_order_and_reassign_after_bus_chan
 
     // Remove C and reorder the stored buses. Targets follow the live display,
     // and its mixer controls become inert instead of retaining C/Mix.
-    set_field(&mut editor, "bus-ids", "'(0 42 1 40 2 41)");
-    set_field(&mut editor, "bus-names", r#"'("Mix" "Rack" "Bus A" "Group" "Bus B" "Nested rack")"#);
+    topology(&mut editor, 6, &default_groups(), &[(0, "Mix"), (42, "Rack"), (1, "Bus A"),
+        (40, "Group"), (2, "Bus B"), (41, "Nested rack")]);
     for (number, bus) in [(49, 2.0), (53, 4.0), (57, 0.0)] {
         assert!(cc(&mut editor, 0, number, 0));
         native(&mut editor, "seq-set-bus-volume", &[bus, 0.0]);
@@ -260,10 +283,7 @@ fn midimix_remaining_strips_follow_visible_bus_order_and_reassign_after_bus_chan
 
     // A project with no tracks/groups still maps its visible Mix strip, even
     // though its bus index is zero (falsy in Lisp).
-    set_field(&mut editor, "num-tracks", "0");
-    set_field(&mut editor, "groups", "'()");
-    set_field(&mut editor, "bus-ids", "'(0)");
-    set_field(&mut editor, "bus-names", r#"'("Mix")"#);
+    topology(&mut editor, 0, &[], &[(0, "Mix")]);
     assert!(cc(&mut editor, 0, 19, 64));
     native(&mut editor, "seq-set-bus-volume", &[0.0, 64.0 / 127.0]);
     assert!(cc(&mut editor, 0, 23, 127));
@@ -293,7 +313,12 @@ fn midimix_sends_skip_group_buses_and_keyboard_ccs_keep_their_mapping() {
         assert!(cc(&mut editor, 0, number, 127));
         assert!(commands(&mut editor).is_empty(), "group knobs are inert");
     }
-    set_field(&mut editor, "track-bus-sends", "(list (list (dict :bus-id 1 :bus-idx 3)))");
+    {
+        let rt = editor.runtime_mut();
+        let track = kind_track(rt, 0);
+        let send = rt.keyed_instance("eseq.kinds:send", &[track, 1]).unwrap();
+        set_field(rt, track, "sends", instance_list([send]));
+    }
     assert!(cc(&mut editor, 0, 17, 127));
     assert!(commands(&mut editor).is_empty(), "absent sends are inert");
     assert!(cc(&mut editor, 1, 16, 127));
@@ -329,7 +354,7 @@ fn midimix_bottom_knobs_follow_strip_rack_macros_and_live_topology() {
     editor.runtime_mut().register_native("seq-armed-tracks", |_, _| {
         Ok(Value::List(vec![Rc::new(RefCell::new(Value::Number(10.0)))]))
     });
-    set_field(&mut editor, "current-track", "10");
+    editor.runtime_mut().set_reactive("SEQ", "current-track", Value::Number(10.0));
     // Zero-valued macro/track indices and CC values are valid. UI focus and
     // the armed keyboard target must not redirect the strip's macro.
     for (controller, track, raw) in [(18, 0, 0), (26, 3, 64), (60, 10, 127)] {
@@ -350,11 +375,12 @@ fn midimix_bottom_knobs_follow_strip_rack_macros_and_live_topology() {
     assert!(cc(&mut editor, 0, 26, 127));
     assert!(commands(&mut editor).is_empty(), "removing the rack clears its macro target");
     // Ungrouping exposes track 1 in strip 2; before this its macro was hidden.
-    set_field(&mut editor, "groups", "'()");
+    seed_kind_groups(&mut editor, &[]);
     assert!(cc(&mut editor, 0, 22, 0));
     let expected = editor.runtime_mut().eval_str("(dict :track 1 :id 0 :value 0)").unwrap().unwrap();
     assert_eq!(commands(&mut editor), vec![("set-rack-macro-plock".into(), expected)]);
-    set_field(&mut editor, "num-tracks", "1");
+    topology(&mut editor, 1, &[], &[(40, "Group"), (2, "Bus B"), (41, "Nested rack"),
+        (1, "Bus A"), (42, "Rack"), (7, "Bus C"), (0, "Mix")]);
     assert!(cc(&mut editor, 0, 22, 127));
     assert!(commands(&mut editor).is_empty(), "a bus replacing the track has no rack macro");
 }
@@ -364,21 +390,20 @@ fn midimix_buttons_toggle_only_on_press_and_scene_buttons_keep_quantization() {
     let state = Arc::new(SequencerState::new(0, vec![]));
     let mut editor = fixture_with_state(state.clone());
     for (number, name, target) in [
-        (1, "seq-toggle-track-mute", 0.0),
-        (4, "seq-toggle-bus-mute", 0.0), (7, "seq-toggle-track-mute", 3.0),
-        (22, "seq-toggle-track-mute", 10.0), (2, "seq-toggle-track-solo", 0.0),
-        (5, "seq-toggle-bus-solo", 0.0),
+        (1, "seq-set-track-mute", 0.0),
+        (4, "seq-set-bus-mute", 0.0), (7, "seq-set-track-mute", 3.0),
+        (22, "seq-set-track-mute", 10.0), (2, "seq-set-track-solo", 0.0),
+        (5, "seq-set-bus-solo", 0.0),
     ] {
         note(&mut editor, number, true);
-        native(&mut editor, name, &[target]);
+        set_on(&mut editor, name, target);
         note(&mut editor, number, false);
         assert!(commands(&mut editor).is_empty());
     }
     note(&mut editor, 6, true);
     assert_eq!(state.drain_roll_commands(), vec![RollCommand::SetRate { rate: Timebase::QuarterTriplet }]);
     assert!(commands(&mut editor).is_empty(), "plain groups do not arm member tracks");
-    set_field(&mut editor, "groups", r#"(list
-        (dict :id 90 :bus-id 40 :parent -1 :members '(1 2 4 5) :anchor 1 :rack true))"#);
+    seed_kind_groups(&mut editor, &[group(90, 40, &[1, 2, 4, 5], &[], true)]);
     note(&mut editor, 6, true);
     assert_eq!(state.drain_roll_commands(), vec![RollCommand::SetRate { rate: Timebase::QuarterTriplet }]);
     assert!(commands(&mut editor).is_empty(), "rack strips select rate without arming the rack");

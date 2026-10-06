@@ -48,66 +48,6 @@ mod solo_binding_tests;
     use super::*;
     use eseqlisp::parser::{ASTParser, Expression, Parser, ParserError, Token};
 
-    fn mod_port_level_number(runtime: &Runtime, field: &str) -> f64 {
-        match runtime.reactive_field_value("SEQ", field) {
-            Some(Value::Number(value)) => *value,
-            other => panic!("{field}: expected a number, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn mod_port_level_delta_publishes_changes_and_zeroes_removed_ports() {
-        let mut runtime = Runtime::new();
-        let mut fields: Vec<(&str, Value)> = Vec::new();
-        for track in 0..2 {
-            for input in 0..sequencer::sequencer::EXT_MOD_INPUT_COUNT {
-                fields.push((
-                    Box::leak(mod_in_level_field(track, input).into_boxed_str()),
-                    Value::Number(0.0),
-                ));
-            }
-            fields.push((
-                Box::leak(mod_out_level_field(track).into_boxed_str()),
-                Value::Number(0.0),
-            ));
-        }
-        for input in 0..sequencer::sequencer::EXT_MOD_INPUT_COUNT {
-            fields.push((
-                Box::leak(bus_mod_in_level_field(7, input).into_boxed_str()),
-                Value::Number(0.0),
-            ));
-        }
-        runtime.register_reactive("SEQ", fields, true);
-
-        let mut previous = ModPortLevels {
-            track_inputs: vec![[0.0; 4], [0.0; 4]],
-            track_outputs: vec![0.0, 0.0],
-            bus_inputs: vec![(7, [0.0; 4])],
-        };
-        let mut current = previous.clone();
-        current.track_inputs[1][2] = 0.5;
-        current.track_outputs[0] = 0.25;
-        current.bus_inputs[0].1[3] = 1.0;
-
-        sync_mod_port_level_field_delta(&mut runtime, &previous, &current);
-        assert_eq!(mod_port_level_number(&runtime, "mod-in-level-1-2"), 0.5);
-        assert_eq!(mod_port_level_number(&runtime, "mod-out-level-0"), 0.25);
-        assert_eq!(mod_port_level_number(&runtime, "bus-mod-in-level-7-3"), 1.0);
-        assert_eq!(mod_port_level_number(&runtime, "mod-in-level-0-0"), 0.0);
-
-        // Dropping the second track and the bus zeroes their fields so no
-        // stale light survives the delete.
-        previous = current.clone();
-        current.track_inputs.truncate(1);
-        current.track_outputs.truncate(1);
-        current.bus_inputs.clear();
-        current.track_outputs[0] = 0.75;
-        sync_mod_port_level_field_delta(&mut runtime, &previous, &current);
-        assert_eq!(mod_port_level_number(&runtime, "mod-in-level-1-2"), 0.0);
-        assert_eq!(mod_port_level_number(&runtime, "bus-mod-in-level-7-3"), 0.0);
-        assert_eq!(mod_port_level_number(&runtime, "mod-out-level-0"), 0.75);
-    }
-
     #[test]
     fn mod_port_levels_quantize_to_sixty_fourths_inside_the_unit_range() {
         assert_eq!(quantize_mod_port_level(-0.5), 0.0);
@@ -1178,6 +1118,7 @@ mod solo_binding_tests;
             // gains a module header, add it here in the same commit.
             "ui/seq-core-state.lisp",
             "ui/scene-banks.lisp",
+            "ui/view-kit.lisp",
             "ui/seq-grid-mode.lisp",
             "ui/seq-step-tabs.lisp",
             "ui/seq-script-picker.lisp",
@@ -1227,6 +1168,9 @@ mod solo_binding_tests;
                         format!("{kind} {name}")
                     }
                     [Expression::Symbol(kind)] if kind == "export" => kind.clone(),
+                    [Expression::Symbol(kind), Expression::Symbol(name), ..] if kind == "import" => {
+                        format!("{kind} {name}")
+                    }
                     [Expression::Symbol(kind), ..] if kind == "effect-buffer" => kind.clone(),
                     _ => panic!("unexpected top-level legacy mixer form: {expression:?}"),
                 },
@@ -1237,8 +1181,9 @@ mod solo_binding_tests;
             signatures,
             [
                 "module eseq.legacy.mixer",
+                "import eseq.materials",
+                "import eseq.kinds",
                 "export",
-                "def track-peak",
                 "defwidget track-container",
                 "defwidget rec-arm-dot",
                 "def mute-button-bg",
@@ -1247,21 +1192,13 @@ mod solo_binding_tests;
                 "defwidget mixer-track-meter",
                 "defwidget delete-track-icon",
                 "def bus-row-label",
-                "def has-mix-bus?",
-                "def display-bus-index",
+                "def display-buses",
+                "def current?",
                 "effect-buffer",
             ]
         );
 
         let mut runtime = Runtime::new();
-        runtime.register_reactive(
-            "SEQ",
-            vec![
-                ("num-tracks", Value::Number(0.0)),
-                ("bus-names", Value::List(vec![])),
-            ],
-            true,
-        );
         let loaded = runtime
             .eval_str(r#"(load "ui/legacy/mixer.lisp")"#)
             .expect("load legacy mixer lisp")
@@ -1269,6 +1206,12 @@ mod solo_binding_tests;
         assert!(
             !matches!(&loaded, Value::String(error) if error.starts_with("load:")),
             "legacy mixer load failed: {loaded:?}"
+        );
+        // Its own eseq.materials import resolves the shader's
+        // `eseq.materials/color` (eseq-0l17.25).
+        assert!(
+            eseqlisp::widget_render::sdf_widget::sdf_widget_def("rec-arm-dot").is_some(),
+            "rec-arm-dot registers when the file loads on its own"
         );
     }
 
@@ -6766,18 +6709,15 @@ mod solo_binding_tests;
             .find("(define-mode \"seq-mixer-mode\"")
             .expect("group dispatcher should precede mixer mode setup");
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
-        editor.runtime_mut().register_reactive(
-            "SEQ",
-            vec![(
-                "selected-tracks",
-                test_list(vec![Value::Number(0.0), Value::Number(1.0)]),
-            )],
-            true,
-        );
         editor
             .runtime_mut()
-            .eval_str(&format!("(module eseq.mixer)\n{}", &src[start..end]))
+            .eval_str(&format!(
+                "(module eseq.mixer)\n(import eseq.kinds :refer (selection))\n{}",
+                &src[start..end]
+            ))
             .expect("load track group dispatcher");
+        seed_kind_test_tracks(&mut editor, 2, |track| format!("track-{track}"));
+        select_kind_tracks(&mut editor, &[0, 1]);
 
         editor
             .runtime_mut()
@@ -6791,11 +6731,7 @@ mod solo_binding_tests;
         ));
         assert_eq!(editor.runtime_mut().take_status_message(), None);
 
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "selected-tracks",
-            test_list(vec![Value::Number(0.0)]),
-        );
+        select_kind_tracks(&mut editor, &[0]);
         editor
             .runtime_mut()
             .eval_str("(eseq.mixer/seq-ctrl-g)")
@@ -6902,25 +6838,6 @@ mod solo_binding_tests;
         )
     }
 
-    fn test_track_bus_send(bus_idx: usize, name: &str, amount: f64) -> Value {
-        let mut map = std::collections::HashMap::new();
-        let id = match name { "Bus A" => 1, "Bus B" => 2, _ => bus_idx };
-        map.insert("bus-id".to_string(), Rc::new(RefCell::new(Value::Number(id as f64))));
-        map.insert(
-            "bus-idx".to_string(),
-            Rc::new(RefCell::new(Value::Number(bus_idx as f64))),
-        );
-        map.insert(
-            "name".to_string(),
-            Rc::new(RefCell::new(Value::String(name.to_string()))),
-        );
-        map.insert(
-            "amount".to_string(),
-            Rc::new(RefCell::new(Value::Number(amount))),
-        );
-        Value::Map(map)
-    }
-
     fn test_track_pattern_cell(
         id: f64,
         _assigned: bool,
@@ -6930,6 +6847,8 @@ mod solo_binding_tests;
         map_value([("id", Value::Number(id))])
     }
 
+    /// Push pattern cell `pattern_id` of track `track` as the host-kinds
+    /// tick does (host_kinds/arrangement.rs: the cell kind).
     fn set_test_track_pattern_cell_bindings(
         editor: &mut eseqlisp::Editor,
         track: usize,
@@ -6939,27 +6858,18 @@ mod solo_binding_tests;
         override_active: bool,
         selected: bool,
     ) {
+        let cell = kind_cell(editor, track, pattern_id);
         let rt = editor.runtime_mut();
-        rt.set_reactive(
-            "SEQ",
-            &track_pattern_cell_assigned_field(track, pattern_id),
-            Value::Bool(assigned),
-        );
-        rt.set_reactive(
-            "SEQ",
-            &track_pattern_cell_active_field(track, pattern_id),
-            Value::Bool(active),
-        );
-        rt.set_reactive(
-            "SEQ",
-            &track_pattern_cell_override_field(track, pattern_id),
-            Value::Bool(override_active),
-        );
-        rt.set_reactive(
-            "SEQ",
-            &track_pattern_cell_selected_field(track, pattern_id),
-            Value::Bool(selected),
-        );
+        set_field(rt, cell, "assigned", Value::Bool(assigned));
+        set_field(rt, cell, "active", Value::Bool(active));
+        set_field(rt, cell, "override", Value::Bool(override_active));
+        set_field(rt, cell, "selected", Value::Bool(selected));
+    }
+
+    /// Track `track`'s cell for pattern `pattern_id` ([`seed_kind_tracks`]).
+    fn kind_cell(editor: &Editor, track: usize, pattern_id: u64) -> eseqlisp::vm::InstanceId {
+        let rt = editor.runtime();
+        rt.keyed_instance("eseq.kinds:cell", &[kind_track(rt, track), pattern_id]).expect("cell")
     }
 
     #[test]
@@ -9754,20 +9664,9 @@ mod solo_binding_tests;
             &selected,
         );
         assert_eq!(
-            reactive_field_value(&runtime, "SEQ", &track_bus_send_field(0, bus_idx)),
-            Value::Number(0.8_f32 as f64),
-        );
-        assert_eq!(
             reactive_field_value(&runtime, "SEQ", &current_track_bus_send_field(bus_idx)),
             Value::Number(0.8_f32 as f64),
         );
-
-        let field = track_bus_send_field(0, bus_idx);
-        for (suffix, expected) in [("plock-any", 1.0), ("plock-active", 1.0),
-            ("plock-default", 0.2_f32 as f64)] {
-            assert_eq!(reactive_field_value(&runtime, "SEQ", &format!("{field}-{suffix}")),
-                Value::Number(expected));
-        }
         selected.lock().unwrap().clear();
         sync_selected_track_bus_send_binding_fields(
             &mut runtime,
@@ -9809,26 +9708,6 @@ mod solo_binding_tests;
     }
 
     #[test]
-    fn mixer_send_plock_presence_is_track_specific_and_retires_after_clear() {
-        let state = Arc::new(SequencerState::new(2, vec![]));
-        let app = test_app_for_track_visual_state(state.clone());
-        let destination = sequencer::sequencer::BusId::DEFAULT_A;
-        let bus = app.buses.iter().position(|bus| bus.id == destination).unwrap();
-        let mut runtime = Runtime::new();
-        runtime.register_reactive("SEQ", vec![], false);
-        state.pattern.track_send_plocks[1].set(40, destination, 0.8);
-        sync_track_bus_send_binding_fields(&mut runtime, &app, &state);
-        for (track, expected) in [(0, 0.0), (1, 1.0)] {
-            assert_eq!(reactive_field_value(&runtime, "SEQ",
-                &format!("{}-plock-any", track_bus_send_field(track, bus))), Value::Number(expected));
-        }
-        state.pattern.track_send_plocks[1].clear(40, destination);
-        sync_track_bus_send_binding_fields(&mut runtime, &app, &state);
-        assert_eq!(reactive_field_value(&runtime, "SEQ",
-            &format!("{}-plock-any", track_bus_send_field(1, bus))), Value::Number(0.0));
-    }
-
-    #[test]
     fn track_send_plock_has_standard_step_indicator() {
         let state = Arc::new(SequencerState::new(1, vec![]));
         state.pattern.track_send_plocks[0].set(
@@ -9854,7 +9733,6 @@ mod solo_binding_tests;
             vec![
                 ("track-ids", Value::List(vec![])),
                 ("track-instrument-types", Value::List(vec![])),
-                ("track-mod-output-available", Value::List(vec![])),
                 ("track-instrument-run-modes", Value::List(vec![])),
                 ("num-tracks", Value::Number(1.0)),
                 ("track-names", build_track_names(&["Track 1".to_string()])),
@@ -15685,28 +15563,11 @@ mod solo_binding_tests;
     }
 
     fn process_chain_bound_to(param: &str, enabled: bool) -> sequencer::process::TrackProcessChain {
-        use std::collections::BTreeMap;
-        sequencer::process::TrackProcessChain {
-            slots: vec![sequencer::process::TrackProcessSlot {
-                instance_id: sequencer::process::ProcessInstanceId(1),
-                instance_name: None,
-                class_name: "rand".to_string(),
-                enabled,
-                project_layer: false,
-                inlets: BTreeMap::new(),
-                lanes: BTreeMap::new(),
-                fanout: Default::default(),
-                unbound_ports: Default::default(),
-                expr_source: None,
-                bindings: BTreeMap::from([(
-                    "out".to_string(),
-                    Some(sequencer::process::ParamTarget::InstrumentParam {
-                        param: param.to_string(),
-                        param_id: None,
-                    }),
-                )]),
-            }],
-        }
+        let target = sequencer::process::ParamTarget::InstrumentParam {
+            param: param.to_string(),
+            param_id: None,
+        };
+        crate::host_kinds::tests::one_slot_chain(target, enabled)
     }
 
     #[test]
@@ -15791,78 +15652,6 @@ mod solo_binding_tests;
         let before = previous.clone();
         super::sync_process_effective_param_fields(&mut runtime, &app, &app.state, &mut previous);
         assert_eq!(previous, before);
-    }
-
-    #[test]
-    fn process_effective_send_fields_publish_per_bus_and_gate_on_a_live_binding() {
-        use std::collections::BTreeMap;
-        let app = test_app_with_instrument_descriptor(
-            sequencer::effects::EffectDescriptor::builtin_filter(),
-        );
-        let bus_a = sequencer::sequencer::BusId::DEFAULT_A;
-        let bus_a_idx = app
-            .buses
-            .iter()
-            .position(|bus| bus.id == bus_a)
-            .expect("default bus A");
-        let chain_bound_to_send = |enabled: bool| sequencer::process::TrackProcessChain {
-            slots: vec![sequencer::process::TrackProcessSlot {
-                instance_id: sequencer::process::ProcessInstanceId(1),
-                instance_name: None,
-                class_name: "rand".to_string(),
-                enabled,
-                project_layer: false,
-                inlets: BTreeMap::new(),
-                lanes: BTreeMap::new(),
-                fanout: Default::default(),
-                unbound_ports: Default::default(),
-                expr_source: None,
-                bindings: BTreeMap::from([(
-                    "out".to_string(),
-                    Some(sequencer::process::ParamTarget::BusSend { bus: bus_a.0 }),
-                )]),
-            }],
-        };
-        let mut runtime = Runtime::new();
-        runtime.register_reactive("SEQ", vec![], false);
-        let mapped_field = super::track_bus_send_proc_mapped_field(0, bus_a_idx);
-
-        assert!(app.state.set_track_process_chain(0, chain_bound_to_send(true)));
-        super::sync_process_send_mapped_fields(&mut runtime, &app, &app.state);
-        assert_eq!(
-            runtime.reactive_field_value("SEQ", &mapped_field),
-            Some(&Value::Number(1.0))
-        );
-        assert!(app.state.set_track_process_chain(0, chain_bound_to_send(false)));
-        super::sync_process_send_mapped_fields(&mut runtime, &app, &app.state);
-        assert_eq!(
-            runtime.reactive_field_value("SEQ", &mapped_field),
-            Some(&Value::Number(0.0)),
-            "a disabled slot's binding does not count as mapped"
-        );
-
-        app.state.publish_process_effective_sends(
-            0,
-            &[sequencer::process::ProcessEffectiveSend {
-                bus: bus_a.0,
-                base: 0.2,
-                value: 0.7,
-                clamped: false,
-            }],
-        );
-        let mut previous = std::collections::HashMap::new();
-        super::sync_process_effective_send_fields(&mut runtime, &app, &app.state, &mut previous);
-        assert_eq!(
-            runtime.reactive_field_value(
-                "SEQ",
-                &super::track_bus_send_proc_value_field(0, bus_a_idx)
-            ),
-            Some(&Value::Number(0.7_f32 as f64))
-        );
-        assert_eq!(previous.len(), 1);
-        let before = previous.clone();
-        super::sync_process_effective_send_fields(&mut runtime, &app, &app.state, &mut previous);
-        assert_eq!(previous, before, "same feed again publishes nothing");
     }
 
     #[test]
@@ -16668,8 +16457,9 @@ mod solo_binding_tests;
         )
     }
 
-    fn test_multi_track_colors(track_count: usize) -> Value {
-        let palette = [
+    /// The test track colors, by track position modulo their count.
+    fn test_palette() -> [[f64; 3]; 10] {
+        [
             [0.96, 0.28, 0.52],
             [0.98, 0.55, 0.25],
             [0.95, 0.78, 0.28],
@@ -16680,7 +16470,11 @@ mod solo_binding_tests;
             [0.72, 0.74, 0.78],
             [0.92, 0.38, 0.34],
             [0.38, 0.86, 0.68],
-        ];
+        ]
+    }
+
+    fn test_multi_track_colors(track_count: usize) -> Value {
+        let palette = test_palette();
         test_list(
             (0..track_count)
                 .map(|track| {
@@ -16976,10 +16770,19 @@ mod solo_binding_tests;
     /// in an editor without the host-kinds tick (kind-bindings spec §13
     /// stage 8: ported views read kinds, not `SEQ`).
     fn kind_singleton(editor: &Editor, kind: &str) -> eseqlisp::vm::InstanceId {
-        editor
-            .runtime()
-            .singleton_instance(&format!("eseq.kinds:{kind}"))
+        kind_singleton_rt(editor.runtime(), kind)
+    }
+
+    /// [`kind_singleton`] of a runtime.
+    fn kind_singleton_rt(rt: &Runtime, kind: &str) -> eseqlisp::vm::InstanceId {
+        rt.singleton_instance(&format!("eseq.kinds:{kind}"))
             .unwrap_or_else(|| panic!("no {kind} singleton"))
+    }
+
+    /// Track `index`'s instance ([`seed_kind_tracks`]).
+    fn kind_track(rt: &Runtime, index: usize) -> eseqlisp::vm::InstanceId {
+        rt.keyed_instance("eseq.kinds:track", &[index as u64])
+            .unwrap_or_else(|| panic!("no track {index}"))
     }
 
     /// Push an instance's field as the host-kinds tick does.
@@ -16993,6 +16796,11 @@ mod solo_binding_tests;
         test_list(ids.into_iter().map(Value::Instance).collect())
     }
 
+    /// An instance field's value: the instance, or nil.
+    fn instance_or_nil(id: Option<eseqlisp::vm::InstanceId>) -> Value {
+        id.map_or(Value::Nil, Value::Instance)
+    }
+
     /// Push `field` of host-kind singleton `kind` as the host-kinds tick
     /// does, then run a reactive cycle.
     fn set_kind_field(editor: &mut Editor, kind: &str, field: &str, value: Value) {
@@ -17000,6 +16808,279 @@ mod solo_binding_tests;
         let rt = editor.runtime_mut();
         set_field(rt, id, field, value);
         rt.run_reactive_cycle();
+    }
+
+    /// Make tracks `indices` the multi-selection (`selection.tracks`).
+    fn select_kind_tracks(editor: &mut Editor, indices: &[usize]) {
+        let ids: Vec<_> = (indices.iter())
+            .map(|&index| kind_track(editor.runtime(), index))
+            .collect();
+        set_kind_field(editor, "selection", "tracks", instance_list(ids));
+    }
+
+    /// A track of [`seed_kind_tracks`]: what the mixer reads of it.
+    #[derive(Clone)]
+    struct KindTrack {
+        name: String,
+        color: [f64; 3],
+        instrument_type: &'static str,
+        collapsed: bool,
+        /// The pattern cells: (pid, active, assigned).
+        cells: Vec<(u64, bool, bool)>,
+    }
+
+    impl KindTrack {
+        fn new(name: &str, color: [f64; 3]) -> Self {
+            Self {
+                name: name.to_string(),
+                color,
+                instrument_type: "sampler",
+                collapsed: false,
+                cells: Vec::new(),
+            }
+        }
+
+        fn cells(mut self, cells: &[(u64, bool, bool)]) -> Self {
+            self.cells = cells.to_vec();
+            self
+        }
+
+        fn instrument(mut self, instrument_type: &'static str) -> Self {
+            self.instrument_type = instrument_type;
+            self
+        }
+
+        fn collapsed(mut self, collapsed: bool) -> Self {
+            self.collapsed = collapsed;
+            self
+        }
+    }
+
+    /// `(rgb r g b)`, an `:rgb` field's value.
+    fn test_rgb([r, g, b]: [f64; 3]) -> Value {
+        test_list(vec![
+            Value::Symbol("rgb".into()),
+            Value::Number(r),
+            Value::Number(g),
+            Value::Number(b),
+        ])
+    }
+
+    /// The instances of a keyed kind at keys `0..count`, registered (and
+    /// any later ones dropped) as the host-kinds registry does.
+    fn register_kind_range(rt: &mut Runtime, kind: &str, count: usize) -> Vec<eseqlisp::vm::InstanceId> {
+        let mut extra = count as u64;
+        while rt.drop_keyed_instance(kind, &[extra]) {
+            extra += 1;
+        }
+        (0..count)
+            .map(|index| rt.register_keyed_instance(kind, &[index as u64]).unwrap())
+            .collect()
+    }
+
+    /// Whether eseq.kinds is loaded (a bare test runtime has no kinds).
+    fn has_host_kinds(rt: &Runtime) -> bool {
+        rt.singleton_instance("eseq.kinds:project").is_some()
+    }
+
+    fn project_list(rt: &Runtime, field: &str) -> Vec<eseqlisp::vm::InstanceId> {
+        let project = kind_singleton_rt(rt, "project");
+        match rt.instance_field(project, field) {
+            Ok(Value::List(items)) => items
+                .iter()
+                .filter_map(|item| match &*item.borrow() {
+                    Value::Instance(id) => Some(*id),
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Publish the host-less editor's tracks as the host-kinds tick does
+    /// (host_kinds/tracks.rs and mixer.rs): track `i` at key `i`, its sends
+    /// to every bus but the main mix (key: track instance, bus id), its
+    /// pattern cells, `project.tracks`, and track 0 as the current track.
+    /// Mute, solo and arm start off, volume at 1; a track is heard.
+    fn seed_kind_tracks(editor: &mut Editor, tracks: &[KindTrack]) {
+        let rt = editor.runtime_mut();
+        if !has_host_kinds(rt) {
+            return;
+        }
+        let ids = register_kind_range(rt, "eseq.kinds:track", tracks.len());
+        for (index, (track, &id)) in tracks.iter().zip(&ids).enumerate() {
+            for (field, value) in [
+                ("index", Value::Number(index as f64)),
+                ("tid", Value::Number(index as f64)),
+                ("name", Value::String(track.name.clone())),
+                ("color", test_rgb(track.color)),
+                ("volume", Value::Number(1.0)),
+                ("audible", Value::Bool(true)),
+                ("instrument-type", Value::String(track.instrument_type.into())),
+                ("collapsed", Value::Bool(track.collapsed)),
+                ("selected", Value::Bool(index == 0)),
+                ("in-selection", Value::Bool(index == 0)),
+            ] {
+                set_field(rt, id, field, value);
+            }
+            let cells: Vec<_> = track
+                .cells
+                .iter()
+                .map(|&(pid, active, assigned)| {
+                    let cell = rt.register_keyed_instance("eseq.kinds:cell", &[id, pid]).unwrap();
+                    set_field(rt, cell, "track", Value::Instance(id));
+                    set_field(rt, cell, "pid", Value::Number(pid as f64));
+                    set_field(rt, cell, "active", Value::Bool(active));
+                    set_field(rt, cell, "assigned", Value::Bool(assigned));
+                    cell
+                })
+                .collect();
+            set_field(rt, id, "cells", instance_list(cells));
+        }
+        let project = kind_singleton_rt(rt, "project");
+        set_field(rt, project, "tracks", instance_list(ids.iter().copied()));
+        let selection = kind_singleton_rt(rt, "selection");
+        set_field(rt, selection, "track", instance_or_nil(ids.first().copied()));
+        seed_kind_sends(rt);
+        rt.run_reactive_cycle();
+    }
+
+    /// Every track's sends: one per bus but the main mix (bid 0).
+    fn seed_kind_sends(rt: &mut Runtime) {
+        let buses = project_list(rt, "buses");
+        for track in project_list(rt, "tracks") {
+            let sends: Vec<_> = buses
+                .iter()
+                .filter_map(|&bus| {
+                    let Ok(Value::Number(bid)) = rt.instance_field(bus, "bid") else {
+                        return None;
+                    };
+                    (bid != 0.0).then(|| {
+                        let send = rt
+                            .register_keyed_instance("eseq.kinds:send", &[track, bid as u64])
+                            .unwrap();
+                        set_field(rt, send, "track", Value::Instance(track));
+                        set_field(rt, send, "bus", Value::Instance(bus));
+                        send
+                    })
+                })
+                .collect();
+            set_field(rt, track, "sends", instance_list(sends));
+        }
+    }
+
+    /// Publish buses `(bid, name)` in bus order as the host-kinds tick does
+    /// (host_kinds/mixer.rs): every bus but the main mix (bid 0) feeds the
+    /// main mix and may feed nothing else; `project.output-options` is every
+    /// bus. The tracks' sends follow.
+    fn seed_kind_buses(editor: &mut Editor, buses: &[(u64, &str)]) {
+        let rt = editor.runtime_mut();
+        if !has_host_kinds(rt) {
+            return;
+        }
+        let ids = register_kind_range(rt, "eseq.kinds:bus", buses.len());
+        let mix = buses.iter().position(|(bid, _)| *bid == 0).map(|index| ids[index]);
+        for (index, ((bid, name), &id)) in buses.iter().zip(&ids).enumerate() {
+            set_field(rt, id, "index", Value::Number(index as f64));
+            set_field(rt, id, "bid", Value::Number(*bid as f64));
+            set_field(rt, id, "name", Value::String(name.to_string()));
+            set_field(rt, id, "volume", Value::Number(1.0));
+            let output = mix.filter(|_| *bid != 0);
+            set_field(rt, id, "output", instance_or_nil(output));
+            set_field(rt, id, "output-options", instance_list(output));
+        }
+        let project = kind_singleton_rt(rt, "project");
+        set_field(rt, project, "buses", instance_list(ids.iter().copied()));
+        set_field(rt, project, "output-options", instance_list(ids.iter().copied()));
+        seed_kind_sends(rt);
+        rt.run_reactive_cycle();
+    }
+
+    /// Publish `groups` as the host-kinds tick does (host_kinds/mixer.rs):
+    /// group `i` at key `i`, its member tracks and its bus (by bus id) as
+    /// instances, nesting both ways, and each member's `group`.
+    fn seed_kind_groups(editor: &mut Editor, groups: &[sequencer::project::ProjectTrackGroup]) {
+        let rt = editor.runtime_mut();
+        if !has_host_kinds(rt) {
+            return;
+        }
+        let ids = register_kind_range(rt, "eseq.kinds:group", groups.len());
+        let tracks = project_list(rt, "tracks");
+        let buses = project_list(rt, "buses");
+        let bus_of = |rt: &Runtime, bid: u64| {
+            buses.iter().copied().find(|&bus| {
+                rt.instance_field(bus, "bid").ok() == Some(Value::Number(bid as f64))
+            })
+        };
+        let group_of = |gid: u64| groups.iter().position(|group| group.id == gid).map(|g| ids[g]);
+        for &track in &tracks {
+            set_field(rt, track, "group", Value::Nil);
+        }
+        for (index, (group, &id)) in groups.iter().zip(&ids).enumerate() {
+            set_field(rt, id, "index", Value::Number(index as f64));
+            set_field(rt, id, "gid", Value::Number(group.id as f64));
+            set_field(rt, id, "name", Value::String(group.name.clone()));
+            set_field(rt, id, "color", test_rgb(group.color.map(f64::from)));
+            set_field(rt, id, "collapsed", Value::Bool(group.collapsed));
+            set_field(rt, id, "rack", Value::Bool(group.rack.is_some()));
+            let members: Vec<_> =
+                group.members.iter().filter_map(|&m| tracks.get(m).copied()).collect();
+            for &member in &members {
+                if rt.instance_field(member, "group").ok() == Some(Value::Nil) {
+                    set_field(rt, member, "group", Value::Instance(id));
+                }
+            }
+            set_field(rt, id, "tracks", instance_list(members));
+            let bus = bus_of(rt, group.bus_id);
+            set_field(rt, id, "bus", instance_or_nil(bus));
+            let racks = group.rack_members.iter().filter_map(|&gid| group_of(gid));
+            set_field(rt, id, "racks", instance_list(racks));
+            let parent = sequencer::project::rack_parent(groups, group.id)
+                .map(|parent| ids[parent]);
+            set_field(rt, id, "parent", instance_or_nil(parent));
+        }
+        let project = kind_singleton_rt(rt, "project");
+        set_field(rt, project, "groups", instance_list(ids.iter().copied()));
+        rt.run_reactive_cycle();
+    }
+
+    /// Publish the clip bank of group `group` (its position) as the
+    /// host-kinds tick does (host_kinds/racks.rs): `(cid, name)` in bank
+    /// order, `active` the clip the current scene plays.
+    fn seed_kind_rack_clips(editor: &mut Editor, group: usize, clips: &[(u64, &str)], active: Option<u64>) {
+        let rt = editor.runtime_mut();
+        let gid = rt.keyed_instance("eseq.kinds:group", &[group as u64]).expect("group");
+        let ids: Vec<_> = clips
+            .iter()
+            .enumerate()
+            .map(|(index, (cid, name))| {
+                let id = rt.register_keyed_instance("eseq.kinds:rack-clip", &[gid, *cid]).unwrap();
+                set_field(rt, id, "group", Value::Instance(gid));
+                set_field(rt, id, "cid", Value::Number(*cid as f64));
+                set_field(rt, id, "index", Value::Number(index as f64));
+                set_field(rt, id, "name", Value::String(name.to_string()));
+                set_field(rt, id, "active", Value::Bool(active == Some(*cid)));
+                id
+            })
+            .collect();
+        let playing = clips.iter().zip(&ids).find(|((cid, _), _)| active == Some(*cid));
+        set_field(rt, gid, "rack-clip", instance_or_nil(playing.map(|(_, id)| *id)));
+        set_field(rt, gid, "clips", instance_list(ids));
+        rt.run_reactive_cycle();
+    }
+
+    /// The factory test editor's mixer: `count` tracks named `name(i)` over
+    /// the test palette, each with one cell (pattern `i + 1`, active on
+    /// track 0), and the main mix with Bus A and Bus B.
+    fn seed_kind_test_tracks(editor: &mut Editor, count: usize, name: impl Fn(usize) -> String) {
+        let palette = test_palette();
+        let tracks: Vec<_> = (0..count)
+            .map(|i| {
+                KindTrack::new(&name(i), palette[i % palette.len()])
+                    .cells(&[(i as u64 + 1, i == 0, true)])
+            })
+            .collect();
+        seed_kind_tracks(editor, &tracks);
     }
 
     /// Publish scene banks as the host-kinds tick does (host_kinds/scenes.rs):
@@ -17017,14 +17098,10 @@ mod solo_binding_tests;
         const BANK: &str = "eseq.kinds:bank";
         let rt = editor.runtime_mut();
         let total: usize = banks.iter().map(|(_, _, len)| len).sum();
-        let scene_ids: Vec<_> = (0..total)
-            .map(|scene| rt.register_keyed_instance(SCENE, &[scene as u64]).unwrap())
-            .collect();
+        let scene_ids = register_kind_range(rt, SCENE, total);
+        let bank_ids = register_kind_range(rt, BANK, banks.len());
         let mut offset = 0;
-        let mut bank_ids = Vec::new();
-        for (bank, (bid, name, len)) in banks.iter().enumerate() {
-            let id = rt.register_keyed_instance(BANK, &[bank as u64]).unwrap();
-            bank_ids.push(id);
+        for (bank, ((bid, name, len), &id)) in banks.iter().zip(&bank_ids).enumerate() {
             let span = offset..offset + len;
             offset += len;
             set_field(rt, id, "index", Value::Number(bank as f64));
@@ -17045,14 +17122,12 @@ mod solo_binding_tests;
                 set_field(rt, sid, "bank", Value::Instance(id));
             }
         }
-        let project = rt.singleton_instance("eseq.kinds:project").unwrap();
+        let project = kind_singleton_rt(rt, "project");
         set_field(rt, project, "scenes", instance_list(scene_ids.iter().copied()));
         set_field(rt, project, "banks", instance_list(bank_ids));
-        let transport = rt.singleton_instance("eseq.kinds:transport").unwrap();
+        let transport = kind_singleton_rt(rt, "transport");
         let instance = |scene: Option<usize>| {
-            scene
-                .and_then(|scene| scene_ids.get(scene))
-                .map_or(Value::Nil, |id| Value::Instance(*id))
+            instance_or_nil(scene.and_then(|scene| scene_ids.get(scene)).copied())
         };
         set_field(rt, transport, "scene", instance(Some(current)));
         set_field(rt, transport, "queued", instance(queued));
@@ -17132,10 +17207,6 @@ mod solo_binding_tests;
             1.0, 0.0, 0.8, 0.0, 0.7, 0.0, 0.9, 0.0, 0.6, 0.0, 0.8, 0.0, 1.0, 0.0, 0.7, 0.0,
         ]);
         let empty_plocks = test_bool_list(&[false; 16]);
-        let one_track_bus_sends = test_list(vec![
-            test_track_bus_send(0, "Bus A", 0.0),
-            test_track_bus_send(1, "Bus B", 0.0),
-        ]);
 
         editor.runtime_mut().register_reactive(
             "SEQ",
@@ -17168,16 +17239,6 @@ mod solo_binding_tests;
                 ("track-color-b-effective", test_number_list(&[0.52])),
                 ("track-volumes", test_number_list(&[1.0])),
                 ("track-0-volume", Value::Number(1.0)),
-                ("track-mixer-pans", test_number_list(&[0.0])),
-                ("track-0-pan", Value::Number(0.0)),
-                ("track-outputs", test_string_list(&["main"])),
-                (
-                    "track-output-options",
-                    test_string_list(&["main", "sends only", "Bus A", "Bus B"]),
-                ),
-                ("track-bus-sends", test_list(vec![one_track_bus_sends])),
-                ("track-0-bus-0-send", Value::Number(0.0)),
-                ("track-0-bus-1-send", Value::Number(0.0)),
                 ("tp-bus-0-send", Value::Number(0.0)),
                 ("tp-bus-1-send", Value::Number(0.0)),
                 ("track-steps", test_list(vec![steps.clone()])),
@@ -17373,8 +17434,6 @@ mod solo_binding_tests;
                 ("song-lane-events", Value::List(vec![])),
                 ("scene-names", Value::List(vec![])),
                 ("sampler-playhead", Value::Number(0.0)),
-                ("master-peak-l", Value::Number(0.0)),
-                ("master-peak-r", Value::Number(0.0)),
                 ("track-peak-0", Value::Number(0.0)),
                 ("bus-peak-0", Value::Number(0.0)),
                 ("bus-peak-1", Value::Number(0.0)),
@@ -17470,6 +17529,13 @@ mod solo_binding_tests;
             editor.widget_layout().is_some(),
             "full grid test fixture should activate a sequencer widget layout"
         );
+        // The mixer reads kinds: the SEQ seed above, as the host publishes it.
+        seed_kind_buses(&mut editor, &[(0, "Mix"), (1, "Bus A"), (2, "Bus B")]);
+        seed_kind_tracks(
+            &mut editor,
+            &[KindTrack::new("bd02", [0.96, 0.28, 0.52]).cells(&[(1, true, true), (2, false, false)])],
+        );
+        editor.refresh_runtime_side_effects();
         crate::application_menu::sync_context(&menu_state, &mut editor);
         editor
     }
@@ -18131,6 +18197,7 @@ mod solo_binding_tests;
                 .map(|_| test_repeated_number_list(value, step_count))
                 .collect::<Vec<_>>()
         };
+        seed_kind_test_tracks(editor, track_count, |track| format!("track-{track}"));
         let rt = editor.runtime_mut();
         rt.set_reactive("SEQ", "num-tracks", Value::Number(track_count as f64));
         rt.set_reactive("SEQ", "track-ids", test_list(ids));
@@ -18202,11 +18269,6 @@ mod solo_binding_tests;
             "SEQ",
             "track-volumes",
             test_repeated_number_list(1.0, track_count),
-        );
-        rt.set_reactive(
-            "SEQ",
-            "track-mixer-pans",
-            test_repeated_number_list(0.0, track_count),
         );
         rt.set_reactive("SEQ", "track-steps", test_list(steps));
         rt.set_reactive(
@@ -18338,7 +18400,6 @@ mod solo_binding_tests;
         rt.set_reactive("SEQ", "track-plock-variants", test_list(vec![]));
         for track in 0..track_count {
             rt.set_reactive("SEQ", &format!("track-{track}-volume"), Value::Number(1.0));
-            rt.set_reactive("SEQ", &format!("track-{track}-pan"), Value::Number(0.0));
             rt.set_reactive("SEQ", &format!("track-peak-{track}"), Value::Number(0.0));
             for step in 0..step_count {
                 rt.set_reactive(
@@ -18570,6 +18631,7 @@ mod solo_binding_tests;
             .map(|_| test_repeated_number_list(0.0, step_count))
             .collect::<Vec<_>>();
 
+        seed_kind_test_tracks(editor, track_count, |track| format!("perf-track-{track:02}"));
         let rt = editor.runtime_mut();
         rt.set_reactive("SEQ", "num-tracks", Value::Number(track_count as f64));
         rt.set_reactive("SEQ", "track-ids", test_list(ids));
@@ -18589,13 +18651,6 @@ mod solo_binding_tests;
                     .collect(),
             ),
         );
-        rt.set_reactive(
-            "SEQ",
-            "track-mod-output-available",
-            test_repeated_bool_list(false, track_count),
-        );
-        rt.set_reactive("SEQ", "mod-routes", test_list(vec![]));
-        rt.set_reactive("SEQ", "selected-mod-routes", test_list(vec![]));
         rt.set_reactive("SEQ", "current-track", Value::Number(0.0));
         rt.set_reactive(
             "SEQ",
@@ -18641,20 +18696,6 @@ mod solo_binding_tests;
             "SEQ",
             "track-volumes",
             test_repeated_number_list(1.0, track_count),
-        );
-        rt.set_reactive(
-            "SEQ",
-            "track-mixer-pans",
-            test_repeated_number_list(0.0, track_count),
-        );
-        rt.set_reactive(
-            "SEQ",
-            "track-outputs",
-            test_list(
-                (0..track_count)
-                    .map(|_| Value::String("main".to_string()))
-                    .collect(),
-            ),
         );
         rt.set_reactive(
             "SEQ",
@@ -18765,7 +18806,6 @@ mod solo_binding_tests;
         let max_rows = (step_count + PAGE_SIZE - 1) / PAGE_SIZE;
         for track in 0..track_count {
             rt.set_reactive("SEQ", &format!("track-{track}-volume"), Value::Number(1.0));
-            rt.set_reactive("SEQ", &format!("track-{track}-pan"), Value::Number(0.0));
             rt.set_reactive("SEQ", &format!("track-peak-{track}"), Value::Number(0.0));
             for step in 0..step_count {
                 let active = (step + track + generation) % 3 == 0;
@@ -18960,11 +19000,6 @@ mod solo_binding_tests;
         editor
             .runtime_mut()
             .set_reactive("SEQ", "num-patterns", Value::Number(cell_count as f64));
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "track-pattern-cells",
-            mixer_v2_perf_cells(track_count, cell_count),
-        );
         apply_mixer_v2_perf_pattern(editor, track_count, cell_count, generation);
     }
 
@@ -18982,17 +19017,6 @@ mod solo_binding_tests;
 
         let names = (0..track_count)
             .map(|track| format!("perf-track-{track:02}"))
-            .collect::<Vec<_>>();
-        let outputs = (0..track_count)
-            .map(|_| Value::String("main".to_string()))
-            .collect::<Vec<_>>();
-        let bus_sends = (0..track_count)
-            .map(|_| {
-                test_list(vec![
-                    test_track_bus_send(1, "Bus A", 0.0),
-                    test_track_bus_send(2, "Bus B", 0.0),
-                ])
-            })
             .collect::<Vec<_>>();
 
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
@@ -19047,29 +19071,11 @@ mod solo_binding_tests;
                             .collect(),
                     ),
                 ),
-                (
-                    "track-mod-output-available",
-                    test_repeated_bool_list(true, track_count),
-                ),
-                ("mod-routes", test_list(vec![])),
-                ("selected-mod-routes", test_list(vec![])),
                 ("track-volumes", test_repeated_number_list(1.0, track_count)),
-                (
-                    "track-mixer-pans",
-                    test_repeated_number_list(0.0, track_count),
-                ),
-                ("track-outputs", test_list(outputs)),
-                (
-                    "track-output-options",
-                    test_string_list(&["main", "sends only", "Bus A", "Bus B"]),
-                ),
-                ("track-bus-sends", test_list(bus_sends)),
                 ("bus-names", test_string_list(&["Mix", "Bus A", "Bus B"])),
                 ("bus-volumes", test_number_list(&[1.0, 1.0, 1.0])),
                 ("bus-mutes", test_bool_list(&[false, false, false])),
                 ("bus-solos", test_bool_list(&[false, false, false])),
-                ("master-peak-l", Value::Number(0.0)),
-                ("master-peak-r", Value::Number(0.0)),
                 ("bus-peak-0", Value::Number(0.0)),
                 ("bus-peak-1", Value::Number(0.0)),
                 ("bus-peak-2", Value::Number(0.0)),
@@ -19085,11 +19091,6 @@ mod solo_binding_tests;
             );
             editor.runtime_mut().set_reactive(
                 "SEQ",
-                &mixer_track_delete_target_field(track),
-                Value::Bool(false),
-            );
-            editor.runtime_mut().set_reactive(
-                "SEQ",
                 &format!("track-peak-{track}"),
                 Value::Number(0.0),
             );
@@ -19098,29 +19099,6 @@ mod solo_binding_tests;
                 &format!("track-{track}-volume"),
                 Value::Number(1.0),
             );
-            editor.runtime_mut().set_reactive(
-                "SEQ",
-                &format!("track-{track}-pan"),
-                Value::Number(0.0),
-            );
-            for bus in 1..=2 {
-                editor.runtime_mut().set_reactive(
-                    "SEQ",
-                    &format!("track-{track}-bus-{bus}-send"),
-                    Value::Number(0.0),
-                );
-            }
-            for cell in 0..cell_count {
-                set_test_track_pattern_cell_bindings(
-                    &mut editor,
-                    track,
-                    (track * 100 + cell + 1) as u64,
-                    true,
-                    cell == 0,
-                    cell == track % cell_count,
-                    false,
-                );
-            }
         }
 
         editor
@@ -19143,6 +19121,40 @@ mod solo_binding_tests;
             .runtime_mut()
             .eval_str("(load \"ui/track-collapse.lisp\")")
             .expect("load track-collapse module");
+        // The kinds the mixer reads, published before it first renders.
+        editor
+            .runtime_mut()
+            .eval_str("(import eseq.kinds)")
+            .expect("load eseq.kinds");
+        seed_kind_buses(&mut editor, &[(0, "Mix"), (1, "Bus A"), (2, "Bus B")]);
+        let palette = test_palette();
+        let tracks: Vec<_> = (0..track_count)
+            .map(|track| {
+                let seed = KindTrack::new(&names[track], palette[track % palette.len()])
+                    .instrument("instrument");
+                let cells: Vec<_> = (0..cell_count)
+                    .map(|cell| ((track * 100 + cell + 1) as u64, false, true))
+                    .collect();
+                seed.cells(&cells)
+            })
+            .collect();
+        seed_kind_tracks(&mut editor, &tracks);
+        for track in 0..track_count {
+            let id = kind_track(editor.runtime(), track);
+            set_field(editor.runtime_mut(), id, "mod-output", Value::Bool(true));
+            for cell in 0..cell_count {
+                set_test_track_pattern_cell_bindings(
+                    &mut editor,
+                    track,
+                    (track * 100 + cell + 1) as u64,
+                    true,
+                    cell == 0,
+                    cell == track % cell_count,
+                    false,
+                );
+            }
+        }
+        editor.runtime_mut().run_reactive_cycle();
         editor
             .runtime_mut()
             .eval_str(&src)
@@ -32596,6 +32608,8 @@ mod solo_binding_tests;
         let mut editor = full_grid_editor_for_scroll_tests();
         editor.runtime_mut().set_reactive("SEQ", "track-instrument-types",
             build_string_list(&["empty".to_string(), "sampler".to_string()]));
+        let track = kind_track(editor.runtime(), 0);
+        set_field(editor.runtime_mut(), track, "instrument-type", Value::String("empty".into()));
         editor.runtime_mut().eval_str(
             "(set! eseq.seq-core-state/samples-sidebar-visible false)"
         ).unwrap();
@@ -32976,20 +32990,19 @@ mod solo_binding_tests;
         let mixer = editor.buffers.iter().find(|buffer| buffer.name == "*mixer*").unwrap().id;
         editor.set_active_buffer(mixer);
         editor.set_layout_viewport(160, 32);
-        editor.runtime_mut().set_reactive("SEQ", "track-bus-sends", test_list(vec![
-            test_list(vec![test_track_bus_send(9, "Extra", 0.0),
-                test_track_bus_send(2, "Bus B", 0.0), test_track_bus_send(1, "Bus A", 0.0)]),
-            test_list(vec![]),
-        ]));
-        let route = map_value([
-            ("value", Value::String("main".into())),
-            ("options", test_string_list(&["main", "Extra"])),
-            ("ids", test_number_list(&[0.0, 9.0])),
-        ]);
-        editor.runtime_mut().set_reactive("SEQ", "bus-output-routes", test_list(vec![
-            map_value([("options", test_list(vec![]))]), route.clone(), route,
-        ]));
-        editor.runtime_mut().run_reactive_cycle();
+        // A fourth bus, Extra (id 9): Bus A and the group's bus may feed the
+        // main mix or Extra.
+        seed_kind_buses(&mut editor, &[(0, "Mix"), (1, "Bus A"), (2, "Group"), (9, "Extra")]);
+        {
+            let rt = editor.runtime_mut();
+            let bus = |rt: &Runtime, index: u64| rt.keyed_instance("eseq.kinds:bus", &[index]).unwrap();
+            let (mix, extra) = (bus(rt, 0), bus(rt, 3));
+            for index in [1, 2] {
+                let id = bus(rt, index);
+                set_field(rt, id, "output-options", instance_list([mix, extra]));
+            }
+            rt.run_reactive_cycle();
+        }
         editor.refresh_runtime_side_effects();
         let layout = editor.widget_layout().expect("mixer layout");
         assert!(find_layout_node_by_stable_key_suffix(&layout, "track-0-send-9").is_none());
@@ -33019,21 +33032,23 @@ mod solo_binding_tests;
         let mixer = editor.buffers.iter().find(|buffer| buffer.name == "*mixer*").unwrap().id;
         editor.set_active_buffer(mixer);
         editor.set_layout_viewport(140, 30);
-        editor.runtime_mut().set_reactive("SEQ", "track-bus-sends", test_list(vec![
-            test_list(vec![test_track_bus_send(0, "Bus A", 0.2)]),
-            test_list(vec![test_track_bus_send(0, "Bus A", 0.3)]),
-        ]));
-        for (field, value) in [("track-1-bus-0-send", 0.8),
-            ("track-1-bus-0-send-plock-any", 1.0),
-            ("track-1-bus-0-send-plock-active", 1.0),
-            ("track-1-bus-0-send-plock-default", 0.3)] {
-            editor.runtime_mut().set_reactive("SEQ", field, Value::Number(value));
+        // Track 1's Bus A send (bus 1 in bus order): a p-lock shows 0.8 over
+        // its own 0.3.
+        let track = kind_track(editor.runtime(), 1);
+        let send = editor.runtime().keyed_instance("eseq.kinds:send", &[track, 1]).unwrap();
+        for (field, value) in [
+            ("display", Value::Number(0.8)),
+            ("amount", Value::Number(0.3)),
+            ("has-locks", Value::Bool(true)),
+            ("locked", Value::Bool(true)),
+        ] {
+            set_field(editor.runtime_mut(), send, field, value);
         }
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
         editor.drain_host_commands();
         let layout = editor.widget_layout().expect("mixer send layout");
-        let wrapper = find_layout_node_by_debug_name(&layout, "track-1-send-0-plock").unwrap();
+        let wrapper = find_layout_node_by_debug_name(&layout, "track-1-send-1-plock").unwrap();
         assert_finite_nonzero_rect(wrapper, "send wrapper");
         assert_eq!(layout_prop_number(wrapper, "plock-any"), Some(1.0));
         let knob = find_layout_node_by_widget_type(wrapper, "knob-number")
@@ -33053,7 +33068,7 @@ mod solo_binding_tests;
                 if name == "clear-param-plocks"
                     && *payload["track"].borrow() == Value::Number(1.0)
                     && *payload["target"].borrow() == Value::String("bus-send".into())
-                    && *payload["param-idx"].borrow() == Value::Number(0.0)), "{commands:?}");
+                    && *payload["param-idx"].borrow() == Value::Number(1.0)), "{commands:?}");
     }
 
     #[test]
@@ -33090,23 +33105,22 @@ mod solo_binding_tests;
                 vec![map_value([
                     ("col", Value::Number(83.25)),
                     ("row", Value::Number(7.5)),
+                    ("at", map_value([("col", Value::Number(83.25)), ("row", Value::Number(7.5))])),
                 ])],
             )
             .expect("right-click mixer track strip");
         editor.refresh_runtime_side_effects();
         assert_eq!(
-            editor.runtime_mut().eval_str("eseq.mixer/track-menu-track").unwrap(),
-            Some(Value::Number(0.0)),
+            editor
+                .runtime_mut()
+                .eval_str("(let ((m eseq.mixer/strip-menu)) (= m.track (eseq.kinds/track 0)))")
+                .unwrap(),
+            Some(Value::Bool(true)),
         );
         assert_eq!(
-            editor.runtime_mut().eval_str("eseq.mixer/track-menu-col").unwrap(),
-            Some(Value::Number(83.25)),
-            "the context menu should retain the pointer column",
-        );
-        assert_eq!(
-            editor.runtime_mut().eval_str("eseq.mixer/track-menu-row").unwrap(),
-            Some(Value::Number(7.5)),
-            "the context menu should retain the pointer row",
+            editor.runtime_mut().eval_str("(let ((m eseq.mixer/strip-menu)) (list m.at.col m.at.row))").unwrap(),
+            Some(test_number_list(&[83.25, 7.5])),
+            "the context menu should retain the pointer's grid point",
         );
 
         let menu_layout = editor.widget_layout().expect("track context menu layout should build");
@@ -33122,13 +33136,16 @@ mod solo_binding_tests;
         editor.refresh_runtime_side_effects();
 
         assert_eq!(
-            editor.runtime_mut().eval_str("eseq.mixer/track-menu-open").unwrap(),
+            editor.runtime_mut().eval_str("(let ((m eseq.mixer/strip-menu)) m.open)").unwrap(),
             Some(Value::Bool(false)),
             "selecting rename should close the context menu",
         );
         assert_eq!(
-            editor.runtime_mut().eval_str("eseq.mixer/track-renaming").unwrap(),
-            Some(Value::Number(0.0)),
+            editor
+                .runtime_mut()
+                .eval_str("(let ((r eseq.mixer/strip-rename)) (= r.track (eseq.kinds/track 0)))")
+                .unwrap(),
+            Some(Value::Bool(true)),
         );
         let rename_layout = editor.widget_layout().expect("inline rename layout should build");
         let rename_input = find_layout_node_by_stable_key_suffix(
@@ -33140,13 +33157,10 @@ mod solo_binding_tests;
         assert_eq!(rename_input.props.get("select-all-on-focus"), Some(&Value::Bool(true)));
 
         editor.runtime_mut()
-            .eval_str("(eseq.mixer/finish-track-rename 0 false)")
+            .eval_str("(eseq.mixer/finish-rename (eseq.kinds/track 0) nil false)")
             .expect("finish expanded inline rename");
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "track-collapsed",
-            test_bool_list(&[true]),
-        );
+        let track = kind_track(editor.runtime(), 0);
+        set_field(editor.runtime_mut(), track, "collapsed", Value::Bool(true));
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
         let collapsed_layout = editor.widget_layout().expect("collapsed mixer layout should build");
@@ -33169,16 +33183,14 @@ mod solo_binding_tests;
     #[test]
     fn metal_seq_mixer_track_context_menu_only_groups_the_clicked_multi_selection() {
         let mut editor = full_grid_editor_for_scroll_tests();
+        set_full_grid_track_count(&mut editor, 3, 16);
 
-        fn track_menu_action_ids(editor: &mut Editor, target: usize, selected: &[f64]) -> Vec<String> {
-            editor.runtime_mut().set_reactive(
-                "SEQ",
-                "selected-tracks",
-                test_number_list(selected),
-            );
-            editor.runtime_mut().run_reactive_cycle();
+        fn track_menu_action_ids(editor: &mut Editor, target: usize, selected: &[usize]) -> Vec<String> {
+            select_kind_tracks(editor, selected);
             editor.runtime_mut().eval_str(&format!(
-                "(do (set! eseq.mixer/track-menu-group-id -1) (set! eseq.mixer/track-menu-track {target}))",
+                "(let ((m eseq.mixer/strip-menu))
+                   (set! m.group nil)
+                   (set! m.track (eseq.kinds/track {target})))",
             )).expect("select track context-menu target");
             let Some(Value::List(actions)) = editor.runtime_mut()
                 .eval_str("(eseq.mixer/track-context-menu-actions)")
@@ -33200,26 +33212,28 @@ mod solo_binding_tests;
         }
 
         assert_eq!(
-            track_menu_action_ids(&mut editor, 0, &[0.0, 1.0]),
+            track_menu_action_ids(&mut editor, 0, &[0, 1]),
             vec!["rename", "group"],
         );
         assert_eq!(
-            track_menu_action_ids(&mut editor, 2, &[0.0, 1.0]),
+            track_menu_action_ids(&mut editor, 2, &[0, 1]),
             vec!["rename"],
             "right-clicking outside the multi-selection keeps the single-track menu",
         );
         assert_eq!(
-            track_menu_action_ids(&mut editor, 0, &[0.0]),
+            track_menu_action_ids(&mut editor, 0, &[0]),
             vec!["rename"],
         );
 
-        track_menu_action_ids(&mut editor, 0, &[0.0, 1.0]);
+        track_menu_action_ids(&mut editor, 0, &[0, 1]);
         editor.drain_host_commands();
         editor.runtime_mut().eval_str(
-            "(do (set! eseq.mixer/track-menu-open true) (eseq.mixer/select-track-menu-action (dict :id :group)))",
+            "(let ((m eseq.mixer/strip-menu))
+               (set! m.open true)
+               (eseq.mixer/select-track-menu-action (dict :id :group)))",
         ).expect("select Group Tracks");
         assert_eq!(
-            editor.runtime_mut().eval_str("eseq.mixer/track-menu-open").unwrap(),
+            editor.runtime_mut().eval_str("(let ((m eseq.mixer/strip-menu)) m.open)").unwrap(),
             Some(Value::Bool(false)),
         );
         let commands = editor.drain_host_commands();
@@ -33276,6 +33290,14 @@ mod solo_binding_tests;
             editor.runtime_mut().set_reactive("SEQ", field, Value::Number(value));
         }
         editor.runtime_mut().run_reactive_cycle();
+        // The mixer's view of the same rack: kinds.
+        let mut kind_rack = rack_group_fixture(true);
+        kind_rack.id = 8;
+        kind_rack.name = "Break".to_string();
+        kind_rack.members = vec![0];
+        kind_rack.bus_id = 1;
+        seed_kind_groups(&mut editor, &[kind_rack]);
+        seed_kind_rack_clips(&mut editor, 0, &[(1, "Intro"), (2, "Break")], Some(2));
         editor.refresh_runtime_side_effects();
         let seq = editor.buffers.iter().find(|buffer| buffer.name == "*sequencer*").unwrap().id;
         editor.set_active_buffer(seq);
@@ -33299,7 +33321,6 @@ mod solo_binding_tests;
             let scroll = find_layout_node_by_stable_key_suffix(&layout, "/rack-clip-scroll-8").unwrap();
             assert_finite_nonzero_rect(scroll, "mixer clip scroll");
             assert_layout_inside(scroll, &layout, "mixer clip scroll");
-            assert!(matches!(scroll.props.get("center-row"), Some(Value::ReactiveRef { .. })));
             assert!((layout_prop_number(scroll, "center-row").unwrap() - (active - 1) as f64 * 0.91).abs() < 0.0001);
             for id in 1..=2 {
                 let cell = find_layout_node_by_stable_key_suffix(&layout, &format!("/mixer-rack-clip-8-{id}")).unwrap();
@@ -33325,6 +33346,7 @@ mod solo_binding_tests;
             ("clips", test_list(vec![clip(1.0, "Intro"), clip(2.0, "Break")])),
         ])]));
         editor.runtime_mut().run_reactive_cycle();
+        seed_kind_rack_clips(&mut editor, 0, &[(1, "Intro"), (2, "Break")], Some(1));
         editor.refresh_runtime_side_effects();
         let layout = editor.widget_layout().unwrap();
         let cell = find_layout_node_by_stable_key_suffix(&layout, "/rack-clip-8-2").unwrap();
@@ -33352,7 +33374,7 @@ mod solo_binding_tests;
             "the collapsed rack row renders its clip grid",
         );
         assert!(
-            editor.runtime_mut().eval_str("(eseq.mixer/rack-clip-column 8 0)").unwrap().is_some(),
+            editor.runtime_mut().eval_str("(eseq.mixer/rack-clip-column (first (eseq.kinds/groups)))").unwrap().is_some(),
             "the collapsed mixer strip renders its clip run",
         );
 
@@ -33387,7 +33409,7 @@ mod solo_binding_tests;
         // legacy conversion.
         editor
             .runtime_mut()
-            .eval_str("(set! eseq.mixer/track-menu-group-id 8)")
+            .eval_str("(let ((m eseq.mixer/strip-menu)) (set! m.group (first (eseq.kinds/groups))))")
             .expect("target the rack");
         let Some(Value::List(actions)) = editor
             .runtime_mut()
@@ -33424,21 +33446,20 @@ mod solo_binding_tests;
     #[test]
     fn metal_seq_mixer_group_context_menu_actions_distinguish_plain_groups_and_racks() {
         let mut editor = full_grid_editor_for_scroll_tests();
-        let group = |id: f64, rack: bool| {
-            map_value([("id", Value::Number(id)), ("rack", Value::Bool(rack))])
-        };
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "groups",
-            test_list(vec![group(7.0, false), group(8.0, true)]),
-        );
-        editor.runtime_mut().run_reactive_cycle();
+        let mut plain = regular_group_fixture(false);
+        plain.id = 7;
+        plain.members = Vec::new();
+        let mut rack = rack_group_fixture(false);
+        rack.id = 8;
+        rack.members = Vec::new();
+        seed_kind_groups(&mut editor, &[plain, rack]);
 
         fn menu_action_ids(editor: &mut Editor, group_id: f64) -> Vec<String> {
             editor
                 .runtime_mut()
                 .eval_str(&format!(
-                    "(set! eseq.mixer/track-menu-group-id {group_id})",
+                    "(let ((m eseq.mixer/strip-menu))
+                       (set! m.group (first (filter (lambda (g) (= g.gid {group_id})) (eseq.kinds/groups)))))",
                 ))
                 .expect("select group context-menu target");
             let Some(Value::List(actions)) = editor.runtime_mut()
@@ -33511,10 +33532,12 @@ mod solo_binding_tests;
 
         editor.drain_host_commands();
         editor.runtime_mut().eval_str(
-            "(do (set! eseq.mixer/track-menu-open true) (eseq.mixer/select-track-menu-action (dict :id :ungroup)))",
+            "(let ((m eseq.mixer/strip-menu))
+               (set! m.open true)
+               (eseq.mixer/select-track-menu-action (dict :id :ungroup)))",
         ).expect("select Ungroup");
         assert_eq!(
-            editor.runtime_mut().eval_str("eseq.mixer/track-menu-open").unwrap(),
+            editor.runtime_mut().eval_str("(let ((m eseq.mixer/strip-menu)) m.open)").unwrap(),
             Some(Value::Bool(false)),
         );
         let commands = editor.drain_host_commands();
@@ -33594,39 +33617,8 @@ mod solo_binding_tests;
                     test_string_list(&["sampler", "custom", "rack", "modulator"]),
                 ),
                 (
-                    "track-mod-output-available",
-                    test_repeated_bool_list(false, 4),
-                ),
-                ("mod-routes", test_list(vec![])),
-                ("selected-mod-routes", test_list(vec![])),
-                (
                     "track-volumes",
                     test_number_list(&[1.0, 1.0, 1.0, 1.0]),
-                ),
-                (
-                    "track-mixer-pans",
-                    test_number_list(&[0.0, 0.0, 0.0, 0.0]),
-                ),
-                (
-                    "track-outputs",
-                    test_string_list(&["main", "main", "main", "main"]),
-                ),
-                (
-                    "track-output-options",
-                    test_string_list(&["main", "sends only", "Bus A", "Bus B"]),
-                ),
-                (
-                    "track-bus-sends",
-                    test_list(
-                        (0..4)
-                            .map(|_| {
-                                test_list(vec![
-                                    test_track_bus_send(1, "Bus A", 0.0),
-                                    test_track_bus_send(2, "Bus B", 0.0),
-                                ])
-                            })
-                            .collect(),
-                    ),
                 ),
                 (
                     "track-num-steps",
@@ -33640,8 +33632,6 @@ mod solo_binding_tests;
                 ("bus-volumes", test_number_list(&[1.0, 1.0, 1.0])),
                 ("bus-mutes", test_repeated_bool_list(false, 3)),
                 ("bus-solos", test_repeated_bool_list(false, 3)),
-                ("master-peak-l", Value::Number(0.0)),
-                ("master-peak-r", Value::Number(0.0)),
                 ("bus-peak-0", Value::Number(0.0)),
                 ("bus-peak-1", Value::Number(0.0)),
                 ("bus-peak-2", Value::Number(0.0)),
@@ -33653,13 +33643,7 @@ mod solo_binding_tests;
             let rt = editor.runtime_mut();
             for track in 0..4 {
                 rt.set_reactive("SEQ", &format!("track-{track}-volume"), Value::Number(1.0));
-                rt.set_reactive("SEQ", &format!("track-{track}-pan"), Value::Number(0.0));
                 rt.set_reactive("SEQ", &format!("track-peak-{track}"), Value::Number(0.0));
-                rt.set_reactive(
-                    "SEQ",
-                    &format!("mixer-track-delete-target-{track}"),
-                    Value::Bool(false),
-                );
                 rt.set_reactive(
                     "SEQ",
                     &format!("track-selected-{track}"),
@@ -33670,13 +33654,6 @@ mod solo_binding_tests;
                     &track_playhead_row_field(track, 0),
                     Value::Number(if track == 0 { 0.0 } else { -1.0 }),
                 );
-                for bus in 1..=2 {
-                    rt.set_reactive(
-                        "SEQ",
-                        &format!("track-{track}-bus-{bus}-send"),
-                        Value::Number(0.0),
-                    );
-                }
                 for step in 0..16 {
                     rt.set_reactive(
                         "SEQ",
@@ -33713,6 +33690,21 @@ mod solo_binding_tests;
                 }
             }
         }
+        // The mixer's view of the same tracks: kinds.
+        editor
+            .runtime_mut()
+            .eval_str("(import eseq.kinds)")
+            .expect("load eseq.kinds");
+        seed_kind_buses(&mut editor, &[(0, "Mix"), (1, "Bus A"), (2, "Bus B")]);
+        let palette = test_palette();
+        let tracks: Vec<_> = [("kick", "sampler"), ("snare", "custom"), ("hat", "rack"), ("modulator", "modulator")]
+            .into_iter()
+            .enumerate()
+            .map(|(index, (name, kind))| {
+                KindTrack::new(name, palette[index]).instrument(kind).collapsed(index == 3)
+            })
+            .collect();
+        seed_kind_tracks(&mut editor, &tracks);
         editor
             .runtime_mut()
             .eval_str(
@@ -33815,7 +33807,7 @@ mod solo_binding_tests;
         );
 
         editor.runtime_mut()
-            .eval_str("(eseq.mixer/begin-track-rename 0)")
+            .eval_str("(eseq.mixer/begin-rename (eseq.kinds/track 0) nil)")
             .expect("begin inline track rename");
         editor.refresh_runtime_side_effects();
         let rename_layout = editor.widget_layout()
@@ -33829,7 +33821,7 @@ mod solo_binding_tests;
         assert_eq!(rename_input.props.get("auto-focus"), Some(&Value::Bool(true)));
         assert_eq!(rename_input.props.get("select-all-on-focus"), Some(&Value::Bool(true)));
         editor.runtime_mut()
-            .eval_str("(eseq.mixer/finish-track-rename 0 false)")
+            .eval_str("(eseq.mixer/finish-rename (eseq.kinds/track 0) nil false)")
             .expect("cancel inline track rename");
         editor.refresh_runtime_side_effects();
 
@@ -33838,6 +33830,8 @@ mod solo_binding_tests;
             "track-collapsed",
             test_bool_list(&[false, false, false, false]),
         );
+        let modulator = kind_track(editor.runtime(), 3);
+        set_field(editor.runtime_mut(), modulator, "collapsed", Value::Bool(false));
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
         let expanded_mixer_layout = editor
@@ -38415,29 +38409,13 @@ mod solo_binding_tests;
         // Scene-banks spec 10.1: the clip grid shows the clips of the bank the
         // transport strip is viewing, plus orphans no scene references yet.
         let mut editor = mixer_v2_perf_editor(1, 4);
-        let banked_cell = |id: f64, banks: Vec<f64>| {
-            map_value([
-                ("id", Value::Number(id)),
-                (
-                    "banks",
-                    test_list(banks.into_iter().map(Value::Number).collect()),
-                ),
-            ])
-        };
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "track-pattern-cells",
-            test_list(vec![test_list(vec![
-                banked_cell(1.0, vec![0.0]),
-                banked_cell(2.0, vec![0.0, 1.0]),
-                banked_cell(3.0, vec![1.0]),
-                banked_cell(4.0, Vec::new()),
-            ])]),
-        );
         seed_kind_scene_banks(&mut editor, &[(11, None, 2), (22, None, 2)], 0, None);
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "current-pattern", Value::Number(0.0));
+        let banks = project_list(editor.runtime(), "banks");
+        for (pattern_id, in_banks) in [(1, vec![0]), (2, vec![0, 1]), (3, vec![1]), (4, vec![])] {
+            let cell = kind_cell(&editor, 0, pattern_id);
+            let in_banks = in_banks.into_iter().map(|bank: usize| banks[bank]);
+            set_field(editor.runtime_mut(), cell, "banks", instance_list(in_banks));
+        }
         editor
             .runtime_mut()
             .eval_str("(eseq.scene-banks/view-scene-bank! (first (eseq.kinds/banks)))")
@@ -39372,132 +39350,8 @@ mod solo_binding_tests;
     fn metal_seq_mixer_lisp_loads_and_builds_widget_tree() {
         let src = read_ui_source("mixer.lisp").expect("read mixer lisp");
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
-        editor.runtime_mut().register_reactive(
-            "SEQ",
-            vec![
-                (
-                    "track-names",
-                    test_list(vec![Value::String("kick".to_string())]),
-                ),
-                ("track-colors", test_track_colors()),
-                ("track-collapsed", test_bool_list(&[false])),
-                ("num-tracks", Value::Number(1.0)),
-                ("current-track", Value::Number(0.0)),
-                ("song-bound-clip", Value::Nil),
-                ("song-region", Value::Nil),
-                ("delete-target-version", Value::Number(0.0)),
-                (
-                    "record-armed",
-                    test_list(vec![Value::Bool(false), Value::Bool(false)]),
-                ),
-                ("track-mutes", test_list(vec![Value::Bool(false)])),
-                ("track-solos", test_list(vec![Value::Bool(false)])),
-                ("track-muted-by-solo", test_list(vec![Value::Bool(false)])),
-                (
-                    "track-instrument-types",
-                    test_list(vec![Value::String("modulator".to_string())]),
-                ),
-                (
-                    "track-mod-output-available",
-                    test_list(vec![Value::Bool(true)]),
-                ),
-                (
-                    "mod-routes",
-                    test_list(vec![
-                        Value::Map({
-                            let mut map = std::collections::HashMap::new();
-                            map.insert(
-                                "source".to_string(),
-                                Rc::new(RefCell::new(Value::Number(0.0))),
-                            );
-                            map.insert(
-                                "dest-kind".to_string(),
-                                Rc::new(RefCell::new(Value::String("track".to_string()))),
-                            );
-                            map.insert(
-                                "dest".to_string(),
-                                Rc::new(RefCell::new(Value::Number(1.0))),
-                            );
-                            map.insert(
-                                "input".to_string(),
-                                Rc::new(RefCell::new(Value::Number(2.0))),
-                            );
-                            map
-                        }),
-                        Value::Map({
-                            let mut map = std::collections::HashMap::new();
-                            map.insert(
-                                "source".to_string(),
-                                Rc::new(RefCell::new(Value::Number(0.0))),
-                            );
-                            map.insert(
-                                "dest-kind".to_string(),
-                                Rc::new(RefCell::new(Value::String("bus".to_string()))),
-                            );
-                            map.insert(
-                                "dest".to_string(),
-                                Rc::new(RefCell::new(Value::Number(2.0))),
-                            );
-                            map.insert(
-                                "input".to_string(),
-                                Rc::new(RefCell::new(Value::Number(1.0))),
-                            );
-                            map
-                        }),
-                    ]),
-                ),
-                ("selected-mod-routes", test_list(vec![])),
-                ("track-volumes", test_list(vec![Value::Number(1.0)])),
-                ("track-mixer-pans", test_list(vec![Value::Number(0.0)])),
-                (
-                    "track-outputs",
-                    test_list(vec![Value::String("main".to_string())]),
-                ),
-                (
-                    "track-output-options",
-                    test_list(vec![
-                        Value::String("main".to_string()),
-                        Value::String("sends only".to_string()),
-                        Value::String("Bus A".to_string()),
-                        Value::String("Bus B".to_string()),
-                    ]),
-                ),
-                (
-                    "track-bus-sends",
-                    test_list(vec![test_list(vec![
-                        test_track_bus_send(0, "Bus A", 0.0),
-                        test_track_bus_send(1, "Bus B", 0.0),
-                    ])]),
-                ),
-                ("track-0-bus-0-send", Value::Number(0.0)),
-                ("track-0-bus-1-send", Value::Number(0.0)),
-                ("track-peak-0", Value::Number(0.0)),
-                ("master-peak-l", Value::Number(0.0)),
-                ("master-peak-r", Value::Number(0.0)),
-                ("bus-peak-0", Value::Number(0.0)),
-                ("bus-peak-1", Value::Number(0.0)),
-                (
-                    "bus-names",
-                    test_list(vec![
-                        Value::String("Bus A".to_string()),
-                        Value::String("Bus B".to_string()),
-                    ]),
-                ),
-                (
-                    "bus-volumes",
-                    test_list(vec![Value::Number(1.0), Value::Number(1.0)]),
-                ),
-                (
-                    "bus-mutes",
-                    test_list(vec![Value::Bool(false), Value::Bool(false)]),
-                ),
-                (
-                    "bus-solos",
-                    test_list(vec![Value::Bool(false), Value::Bool(false)]),
-                ),
-            ],
-            true,
-        );
+        // The shared state modules the mixer imports still read SEQ.
+        editor.runtime_mut().register_reactive("SEQ", vec![], true);
         editor
             .runtime_mut()
             .eval_str(
@@ -39517,6 +39371,28 @@ mod solo_binding_tests;
             .runtime_mut()
             .eval_str("(load \"ui/track-collapse.lisp\")")
             .expect("load track-collapse module");
+        // The host's model, as kinds: a modulator routed into Bus B's input 2.
+        editor
+            .runtime_mut()
+            .eval_str("(import eseq.kinds)")
+            .expect("load eseq.kinds");
+        seed_kind_buses(&mut editor, &[(1, "Bus A"), (2, "Bus B")]);
+        let kick = KindTrack::new("kick", [0.96, 0.28, 0.52]).instrument("modulator");
+        seed_kind_tracks(&mut editor, &[kick]);
+        let rt = editor.runtime_mut();
+        let track = kind_track(rt, 0);
+        let (bus_a, bus_b) = (
+            rt.keyed_instance("eseq.kinds:bus", &[0]).unwrap(),
+            rt.keyed_instance("eseq.kinds:bus", &[1]).unwrap(),
+        );
+        set_field(rt, track, "mod-output", Value::Bool(true));
+        let route = rt.register_keyed_instance("eseq.kinds:route", &[0]).unwrap();
+        set_field(rt, route, "source", Value::Instance(track));
+        set_field(rt, route, "dest-bus", Value::Instance(bus_b));
+        set_field(rt, route, "input", Value::Number(2.0));
+        let project = kind_singleton_rt(rt, "project");
+        set_field(rt, project, "routes", instance_list([route]));
+        rt.run_reactive_cycle();
         editor
             .runtime_mut()
             .eval_str(&src)
@@ -39543,76 +39419,33 @@ mod solo_binding_tests;
             value_contains_string(tree, "Bus A") && value_contains_string(tree, "Bus B"),
             "mixer widget tree should contain bus rows"
         );
-        let _ = editor.runtime_mut().take_pending_buffer_widget_trees();
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "track-peak-0", Value::Number(0.5));
-        editor.runtime_mut().run_reactive_cycle();
-        assert!(
-            editor
-                .runtime_mut()
-                .take_pending_buffer_widget_trees()
-                .is_empty(),
-            "bound track peak updates must not enqueue mixer widget tree rebuilds"
-        );
-
-        let _ = editor.runtime_mut().take_pending_buffer_widget_trees();
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "bus-peak-1", Value::Number(0.5));
-        editor.runtime_mut().run_reactive_cycle();
-        assert!(
-            editor
-                .runtime_mut()
-                .take_pending_buffer_widget_trees()
-                .is_empty(),
-            "bound bus peak updates must not enqueue mixer widget tree rebuilds"
-        );
-
-        let _ = editor.runtime_mut().take_pending_buffer_widget_trees();
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "track-volumes",
-            test_list(vec![Value::Number(0.42)]),
-        );
-        editor.runtime_mut().run_reactive_cycle();
-        assert!(
-            editor
-                .runtime_mut()
-                .take_pending_buffer_widget_trees()
-                .is_empty(),
-            "bound track volume updates must not enqueue mixer widget tree rebuilds"
-        );
-
-        let _ = editor.runtime_mut().take_pending_buffer_widget_trees();
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "track-mixer-pans",
-            test_list(vec![Value::Number(-0.35)]),
-        );
-        editor.runtime_mut().run_reactive_cycle();
-        assert!(
-            editor
-                .runtime_mut()
-                .take_pending_buffer_widget_trees()
-                .is_empty(),
-            "bound track pan updates must not enqueue mixer widget tree rebuilds"
-        );
-
-        let _ = editor.runtime_mut().take_pending_buffer_widget_trees();
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "bus-volumes",
-            test_list(vec![Value::Number(1.0), Value::Number(0.37)]),
-        );
-        editor.runtime_mut().run_reactive_cycle();
-        assert!(
-            editor
-                .runtime_mut()
-                .take_pending_buffer_widget_trees()
-                .is_empty(),
-            "bound bus volume updates must not enqueue mixer widget tree rebuilds"
-        );
+        // Meters, faders, knobs and mute / solo / arm are bindings: a
+        // change of any repaints and never rebuilds the mixer.
+        for (id, field, value) in [
+            (track, "peak", Value::Number(0.5)),
+            (bus_a, "peak", Value::Number(0.5)),
+            (track, "volume", Value::Number(0.42)),
+            (track, "pan", Value::Number(-0.35)),
+            (bus_b, "volume", Value::Number(0.37)),
+            (track, "muted", Value::Bool(true)),
+            (track, "audible", Value::Bool(false)),
+            (track, "soloed", Value::Bool(true)),
+            (track, "armed", Value::Bool(true)),
+            (track, "mod-out-level", Value::Number(0.7)),
+            (bus_b, "mod-in-3", Value::Number(0.6)),
+            (bus_a, "muted", Value::Bool(true)),
+        ] {
+            let _ = editor.runtime_mut().take_pending_buffer_widget_trees();
+            set_field(editor.runtime_mut(), id, field, value);
+            editor.runtime_mut().run_reactive_cycle();
+            assert!(
+                editor
+                    .runtime_mut()
+                    .take_pending_buffer_widget_trees()
+                    .is_empty(),
+                "bound {field} updates must not enqueue mixer widget tree rebuilds"
+            );
+        }
     }
 
     #[test]
@@ -51862,246 +51695,8 @@ mod solo_binding_tests;
         let calls = Arc::new(Mutex::new(Vec::<String>::new()));
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
         editor.set_layout_viewport(120, 30);
-        editor.runtime_mut().register_reactive(
-            "SEQ",
-            vec![
-                (
-                    "track-names",
-                    test_list(vec![
-                        Value::String("kick".to_string()),
-                        Value::String("snare".to_string()),
-                    ]),
-                ),
-                ("track-colors", test_track_colors()),
-                (
-                    "track-collapsed",
-                    test_list(vec![Value::Bool(false), Value::Bool(false)]),
-                ),
-                (
-                    "track-pattern-cells",
-                    test_list(vec![
-                        test_list(vec![
-                            test_track_pattern_cell(1.0, true, true, false),
-                            test_track_pattern_cell(2.0, false, false, false),
-                        ]),
-                        test_list(vec![
-                            test_track_pattern_cell(3.0, true, false, true),
-                            test_track_pattern_cell(4.0, false, true, true),
-                        ]),
-                    ]),
-                ),
-                ("num-tracks", Value::Number(2.0)),
-                ("current-track", Value::Number(0.0)),
-                ("armed-rack-id", Value::Number(-1.0)),
-                ("song-bound-clip", Value::Nil),
-                ("track-selected-0", Value::Bool(true)),
-                ("track-selected-1", Value::Bool(false)),
-                ("delete-target-version", Value::Number(0.0)),
-                (
-                    "record-armed",
-                    test_list(vec![Value::Bool(false), Value::Bool(false)]),
-                ),
-                (
-                    "track-mutes",
-                    test_list(vec![Value::Bool(false), Value::Bool(false)]),
-                ),
-                (
-                    "track-solos",
-                    test_list(vec![Value::Bool(false), Value::Bool(false)]),
-                ),
-                (
-                    "track-muted-by-solo",
-                    test_list(vec![Value::Bool(false), Value::Bool(false)]),
-                ),
-                (
-                    "track-instrument-types",
-                    test_list(vec![
-                        Value::String("modulator".to_string()),
-                        Value::String("instrument".to_string()),
-                    ]),
-                ),
-                (
-                    "track-mod-output-available",
-                    test_list(vec![Value::Bool(true), Value::Bool(true)]),
-                ),
-                (
-                    "mod-routes",
-                    test_list(vec![
-                        Value::Map({
-                            let mut map = std::collections::HashMap::new();
-                            map.insert(
-                                "source".to_string(),
-                                Rc::new(RefCell::new(Value::Number(0.0))),
-                            );
-                            map.insert(
-                                "dest-kind".to_string(),
-                                Rc::new(RefCell::new(Value::String("track".to_string()))),
-                            );
-                            map.insert(
-                                "dest".to_string(),
-                                Rc::new(RefCell::new(Value::Number(1.0))),
-                            );
-                            map.insert(
-                                "input".to_string(),
-                                Rc::new(RefCell::new(Value::Number(2.0))),
-                            );
-                            map
-                        }),
-                        Value::Map({
-                            let mut map = std::collections::HashMap::new();
-                            map.insert(
-                                "source".to_string(),
-                                Rc::new(RefCell::new(Value::Number(0.0))),
-                            );
-                            map.insert(
-                                "dest-kind".to_string(),
-                                Rc::new(RefCell::new(Value::String("bus".to_string()))),
-                            );
-                            map.insert(
-                                "dest".to_string(),
-                                Rc::new(RefCell::new(Value::Number(2.0))),
-                            );
-                            map.insert(
-                                "input".to_string(),
-                                Rc::new(RefCell::new(Value::Number(1.0))),
-                            );
-                            map
-                        }),
-                    ]),
-                ),
-                ("selected-mod-routes", test_list(vec![])),
-                (
-                    "track-volumes",
-                    test_list(vec![Value::Number(1.0), Value::Number(1.0)]),
-                ),
-                (
-                    "track-mixer-pans",
-                    test_list(vec![Value::Number(0.0), Value::Number(0.0)]),
-                ),
-                (
-                    "track-outputs",
-                    test_list(vec![
-                        Value::String("main".to_string()),
-                        Value::String("main".to_string()),
-                    ]),
-                ),
-                (
-                    "track-output-options",
-                    test_list(vec![
-                        Value::String("main".to_string()),
-                        Value::String("sends only".to_string()),
-                        Value::String("Bus A".to_string()),
-                        Value::String("Bus B".to_string()),
-                    ]),
-                ),
-                (
-                    "track-bus-sends",
-                    test_list(vec![
-                        test_list(vec![
-                            test_track_bus_send(1, "Bus A", 0.0),
-                            test_track_bus_send(2, "Bus B", 0.0),
-                        ]),
-                        test_list(vec![
-                            test_track_bus_send(1, "Bus A", 0.0),
-                            test_track_bus_send(2, "Bus B", 0.0),
-                        ]),
-                    ]),
-                ),
-                ("track-0-bus-1-send", Value::Number(0.0)),
-                ("track-0-bus-2-send", Value::Number(0.0)),
-                ("track-1-bus-1-send", Value::Number(0.0)),
-                ("track-1-bus-2-send", Value::Number(0.0)),
-                ("mixer-track-delete-target-0", Value::Bool(false)),
-                ("mixer-track-delete-target-1", Value::Bool(false)),
-                ("track-peak-0", Value::Number(0.0)),
-                ("track-peak-1", Value::Number(0.0)),
-                ("master-peak-l", Value::Number(0.0)),
-                ("master-peak-r", Value::Number(0.0)),
-                ("bus-peak-0", Value::Number(0.0)),
-                ("bus-peak-1", Value::Number(0.0)),
-                ("bus-peak-2", Value::Number(0.0)),
-                (
-                    "bus-names",
-                    test_list(vec![
-                        Value::String("Mix".to_string()),
-                        Value::String("Bus A".to_string()),
-                        Value::String("Bus B".to_string()),
-                    ]),
-                ),
-                (
-                    "bus-ids",
-                    test_list(vec![
-                        Value::Number(0.0),
-                        Value::Number(1.0),
-                        Value::Number(2.0),
-                    ]),
-                ),
-                (
-                    "groups",
-                    test_list(vec![Value::Map({
-                        let mut map = std::collections::HashMap::new();
-                        map.insert("id".to_string(), Rc::new(RefCell::new(Value::Number(7.0))));
-                        map.insert(
-                            "name".to_string(),
-                            Rc::new(RefCell::new(Value::String("Group 1".to_string()))),
-                        );
-                        map.insert(
-                            "color".to_string(),
-                            Rc::new(RefCell::new(test_list(vec![
-                                Value::Number(0.9),
-                                Value::Number(0.45),
-                                Value::Number(0.15),
-                            ]))),
-                        );
-                        map.insert(
-                            "bus-id".to_string(),
-                            Rc::new(RefCell::new(Value::Number(2.0))),
-                        );
-                        map.insert(
-                            "anchor".to_string(),
-                            Rc::new(RefCell::new(Value::Number(0.0))),
-                        );
-                        map.insert(
-                            "collapsed".to_string(),
-                            Rc::new(RefCell::new(Value::Bool(false))),
-                        );
-                        map.insert(
-                            "members".to_string(),
-                            Rc::new(RefCell::new(test_list(vec![
-                                Value::Number(0.0),
-                                Value::Number(1.0),
-                            ]))),
-                        );
-                        map
-                    })]),
-                ),
-                (
-                    "bus-volumes",
-                    test_list(vec![
-                        Value::Number(1.0),
-                        Value::Number(1.0),
-                        Value::Number(1.0),
-                    ]),
-                ),
-                (
-                    "bus-mutes",
-                    test_list(vec![
-                        Value::Bool(false),
-                        Value::Bool(false),
-                        Value::Bool(false),
-                    ]),
-                ),
-                (
-                    "bus-solos",
-                    test_list(vec![
-                        Value::Bool(false),
-                        Value::Bool(false),
-                        Value::Bool(false),
-                    ]),
-                ),
-            ],
-            true,
-        );
+        // The shared state modules the mixer imports still read SEQ.
+        editor.runtime_mut().register_reactive("SEQ", vec![], true);
         editor
             .runtime_mut()
             .eval_str(
@@ -52126,21 +51721,67 @@ mod solo_binding_tests;
             .eval_str("(defstate sbrowser-loading-instrument-name \"\")")
             .expect("install browser-owned loading-instrument state");
         let active_delete_target = register_test_delete_target_natives(&mut editor, 2);
+        // The host's model, as kinds: a modulator and an instrument with a
+        // mod output, grouped (group 7 on Bus B), the modulator routed into
+        // the instrument's Ext3 and the group bus's Ext2.
+        editor
+            .runtime_mut()
+            .eval_str("(import eseq.kinds)")
+            .expect("load eseq.kinds");
+        seed_kind_buses(&mut editor, &[(0, "Mix"), (1, "Bus A"), (2, "Bus B")]);
+        let kick = KindTrack::new("kick", [0.96, 0.28, 0.52])
+            .cells(&[(1, false, false), (2, false, false)])
+            .instrument("modulator");
+        let snare = KindTrack::new("snare", [0.98, 0.55, 0.25])
+            .cells(&[(3, false, false), (4, false, false)])
+            .instrument("instrument");
+        seed_kind_tracks(&mut editor, &[kick, snare]);
+        let mut group = regular_group_fixture(false);
+        group.id = 7;
+        group.name = "Group 1".to_string();
+        group.members = vec![0, 1];
+        seed_kind_groups(&mut editor, &[group]);
         set_test_track_pattern_cell_bindings(&mut editor, 0, 1, true, true, false, false);
         set_test_track_pattern_cell_bindings(&mut editor, 0, 2, false, false, false, false);
         set_test_track_pattern_cell_bindings(&mut editor, 1, 3, true, false, true, false);
         set_test_track_pattern_cell_bindings(&mut editor, 1, 4, false, true, true, false);
+        let kind = |editor: &Editor, kind: &str, key: u64| {
+            editor
+                .runtime()
+                .keyed_instance(&format!("eseq.kinds:{kind}"), &[key])
+                .unwrap()
+        };
+        let (track0, track1) = (kind(&editor, "track", 0), kind(&editor, "track", 1));
+        let group7 = kind(&editor, "group", 0);
+        {
+            let bus_b = kind(&editor, "bus", 2);
+            let rt = editor.runtime_mut();
+            for track in [track0, track1] {
+                set_field(rt, track, "mod-output", Value::Bool(true));
+            }
+            let into_track = rt.register_keyed_instance("eseq.kinds:route", &[0]).unwrap();
+            set_field(rt, into_track, "source", Value::Instance(track0));
+            set_field(rt, into_track, "dest", Value::Instance(track1));
+            set_field(rt, into_track, "input", Value::Number(3.0));
+            let into_bus = rt.register_keyed_instance("eseq.kinds:route", &[1]).unwrap();
+            set_field(rt, into_bus, "source", Value::Instance(track0));
+            set_field(rt, into_bus, "dest-bus", Value::Instance(bus_b));
+            set_field(rt, into_bus, "input", Value::Number(2.0));
+            let project = kind_singleton_rt(rt, "project");
+            set_field(rt, project, "routes", instance_list([into_track, into_bus]));
+            rt.run_reactive_cycle();
+        }
 
         for name in [
-            "seq-toggle-record-arm",
-            "seq-toggle-track-mute",
-            "seq-toggle-track-solo",
-            "seq-toggle-rack-arm",
+            "seq-set-record-arm",
+            "seq-set-track-mute",
+            "seq-set-track-solo",
+            "seq-set-rack-armed",
             "seq-set-track",
             "seq-set-track-volume",
             "seq-set-track-pan",
-            "seq-toggle-bus-mute",
-            "seq-toggle-bus-solo",
+            "seq-set-bus-mute",
+            "seq-set-bus-solo",
             "seq-set-bus-volume",
             "seq-clear-selection",
             "eseq.browser/drop-sample-on-track",
@@ -52279,31 +51920,31 @@ mod solo_binding_tests;
         calls.lock().unwrap().clear();
         editor
             .runtime_mut()
-            .eval_str("(eseq.mixer/track-body-click (dict) 0)")
+            .eval_str("(eseq.mixer/track-click (dict) (eseq.kinds/track 0) eseq.mixer/select-track)")
             .expect("plain body click establishes range anchor");
         editor
             .runtime_mut()
-            .eval_str("(eseq.mixer/track-body-click (dict :shift true) 1)")
+            .eval_str("(eseq.mixer/track-click (dict :shift true) (eseq.kinds/track 1) eseq.mixer/select-track)")
             .expect("shift body click extends from anchor");
         editor
             .runtime_mut()
-            .eval_str("(eseq.mixer/track-body-click (dict :shift true) 0)")
+            .eval_str("(eseq.mixer/track-click (dict :shift true) (eseq.kinds/track 0) eseq.mixer/select-track)")
             .expect("second shift body click re-extends from the same anchor");
         editor
             .runtime_mut()
-            .eval_str("(eseq.mixer/track-body-click (dict :additive-selection true) 1)")
+            .eval_str("(eseq.mixer/track-click (dict :additive-selection true) (eseq.kinds/track 1) eseq.mixer/select-track)")
             .expect("additive-selection body click toggles without moving anchor");
         editor
             .runtime_mut()
-            .eval_str("(eseq.mixer/track-label-click (dict :shift true) 1)")
+            .eval_str("(eseq.mixer/track-click (dict :shift true) (eseq.kinds/track 1) eseq.mixer/select-track-delete-target)")
             .expect("shift label click extends from the unchanged anchor");
         editor
             .runtime_mut()
-            .eval_str("(eseq.mixer/track-label-click (dict) 1)")
+            .eval_str("(eseq.mixer/track-click (dict) (eseq.kinds/track 1) eseq.mixer/select-track-delete-target)")
             .expect("plain label click resets range anchor and preserves delete gesture");
         editor
             .runtime_mut()
-            .eval_str("(eseq.mixer/track-label-click (dict :shift true) 0)")
+            .eval_str("(eseq.mixer/track-click (dict :shift true) (eseq.kinds/track 0) eseq.mixer/select-track-delete-target)")
             .expect("shift label click supports a reverse range");
         assert_eq!(
             calls.lock().unwrap().as_slice(),
@@ -52354,15 +51995,13 @@ mod solo_binding_tests;
             Some(Value::Number(-1.0)),
             "next track selection should keep selected-bus cleared"
         );
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "current-track", Value::Number(1.0));
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", &track_selected_field(0), Value::Bool(false));
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", &track_selected_field(1), Value::Bool(true));
+        {
+            let rt = editor.runtime_mut();
+            let selection = kind_singleton_rt(rt, "selection");
+            set_field(rt, selection, "track", Value::Instance(track1));
+            set_field(rt, track0, "in-selection", Value::Bool(false));
+            set_field(rt, track1, "in-selection", Value::Bool(true));
+        }
         editor
             .runtime_mut()
             .eval_str("(eseq.mixer/select-next-channel)")
@@ -52406,7 +52045,7 @@ mod solo_binding_tests;
         );
         editor
             .runtime_mut()
-            .eval_str("(eseq.mixer/select-track 0)")
+            .eval_str("(eseq.mixer/select-track (eseq.kinds/track 0))")
             .expect("explicit mixer track selection should not claim delete target");
         assert_reveal_command(&editor.drain_host_commands(), 0.0);
         assert_eq!(
@@ -52419,7 +52058,7 @@ mod solo_binding_tests;
         );
         editor
             .runtime_mut()
-            .eval_str("(eseq.mixer/select-track-delete-target 0)")
+            .eval_str("(eseq.mixer/select-track-delete-target (eseq.kinds/track 0))")
             .expect("explicit mixer track badge selection should claim delete target");
         assert_reveal_command(&editor.drain_host_commands(), 0.0);
         assert_eq!(
@@ -52687,7 +52326,7 @@ mod solo_binding_tests;
                       :drag-type "sample"
                       :payload (dict :path "samples/hat.wav")
                       :target (dict :kind "bus" :bus 2))
-                    0)"#,
+                    (first (eseq.kinds/groups)))"#,
             )
             .expect("drop sample on group header");
         let commands = editor.drain_host_commands();
@@ -52714,7 +52353,7 @@ mod solo_binding_tests;
                       :drag-type "instrument"
                       :payload (dict :kind "instrument" :name "core/drift")
                       :target (dict :kind "bus" :bus 2))
-                    0)"#,
+                    (first (eseq.kinds/groups)))"#,
             )
             .expect("drop instrument on group header");
         let commands = editor.drain_host_commands();
@@ -52820,13 +52459,17 @@ mod solo_binding_tests;
             .expect("mixer layout should be available");
         let send_knob = find_node_by_stable_key_suffix(&layout, "/track-0-send-1")
             .expect("track 1 Bus A send knob");
+        let send = editor
+            .runtime()
+            .keyed_instance("eseq.kinds:send", &[track0, 1])
+            .expect("track 1's Bus A send");
         assert!(matches!(
             send_knob.props.get("value"),
             Some(Value::ReactiveRef {
                 namespace,
                 field,
                 ..
-            }) if namespace == "SEQ" && field == "track-0-bus-1-send"
+            }) if *namespace == format!("%instance/{send}") && field == "display"
         ));
         assert!(
             send_knob.rect.width > 0.0 && send_knob.rect.height > 0.0,
@@ -52835,9 +52478,7 @@ mod solo_binding_tests;
         );
         let send_knob_widget_id = send_knob.widget_id;
         let _ = editor.take_dirty_widget_ids();
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "track-0-bus-1-send", Value::Number(0.42));
+        set_field(editor.runtime_mut(), send, "display", Value::Number(0.42));
         assert_eq!(
             editor.take_dirty_widget_ids(),
             vec![send_knob_widget_id],
@@ -52911,8 +52552,8 @@ mod solo_binding_tests;
             "an unmuted group's label uses the matching on-state foreground"
         );
         for (control, expected) in [
-            (group_mute, "seq-toggle-bus-mute:[2]"),
-            (group_solo, "seq-toggle-bus-solo:[2]"),
+            (group_mute, "seq-set-bus-mute:[2, true]"),
+            (group_solo, "seq-set-bus-solo:[2, true]"),
         ] {
             let on_click = control
                 .props
@@ -52945,6 +52586,7 @@ mod solo_binding_tests;
                 vec![map_value([
                     ("col", Value::Number(20.0)),
                     ("row", Value::Number(8.0)),
+                    ("at", map_value([("col", Value::Number(20.0)), ("row", Value::Number(8.0))])),
                 ])],
             )
             .expect("open plain group context menu");
@@ -52982,22 +52624,8 @@ mod solo_binding_tests;
         // A drum rack uses the same group bus controls and adds pad-play arm.
         // Mutating the fixture from a plain group proves the two strip kinds
         // intentionally diverge rather than all groups receiving an R button.
-        let Some(Value::List(groups)) = editor.runtime_mut().eval_str("SEQ.groups").unwrap() else {
-            panic!("mixer groups should be a list");
-        };
-        let Some(group_cell) = groups.first() else {
-            panic!("mixer fixture should contain a group");
-        };
-        let Value::Map(mut rack_group) = group_cell.borrow().clone() else {
-            panic!("mixer group should be a map");
-        };
-        rack_group.insert("rack".to_string(), Rc::new(RefCell::new(Value::Bool(true))));
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "groups",
-            Value::List(vec![Rc::new(RefCell::new(Value::Map(rack_group)))]),
-        );
-        editor.runtime_mut().set_reactive("SEQ", "armed-rack-id", Value::Number(7.0));
+        set_field(editor.runtime_mut(), group7, "rack", Value::Bool(true));
+        set_field(editor.runtime_mut(), group7, "armed", Value::Bool(true));
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
         let rack_layout = editor.widget_layout().expect("rack mixer layout");
@@ -53023,6 +52651,7 @@ mod solo_binding_tests;
                 vec![map_value([
                     ("col", Value::Number(20.0)),
                     ("row", Value::Number(8.0)),
+                    ("at", map_value([("col", Value::Number(20.0)), ("row", Value::Number(8.0))])),
                 ])],
             )
             .expect("open rack context menu");
@@ -53093,7 +52722,7 @@ mod solo_binding_tests;
             .expect("click rack arm");
         assert_eq!(
             calls.lock().unwrap().last().map(String::as_str),
-            Some("seq-toggle-rack-arm:[7]"),
+            Some("seq-set-rack-armed:[7, false]"),
             "rack arm should toggle the rack's stable group id"
         );
         calls.lock().unwrap().clear();
@@ -53127,13 +52756,9 @@ mod solo_binding_tests;
             Some(Value::String("mixer-group".to_string())),
             "clicking the group badge should arm the whole group for deletion"
         );
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "delete-target-version", Value::Number(1.0));
-        // The real tick always runs a reactive cycle after publishing the
-        // delete-target version; the group badge re-renders through that
-        // dependency now that mixer group containers no longer re-render on
-        // every `selected-bus` write (eseq-4jv *sel-sync* projection).
+        // The host kinds push the group's delete target on the next tick;
+        // the badge binds it.
+        set_field(editor.runtime_mut(), group7, "delete-target", Value::Bool(true));
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
         let armed_layout = editor.widget_layout().expect("armed group mixer layout");
@@ -53269,7 +52894,7 @@ mod solo_binding_tests;
         );
         editor
             .runtime_mut()
-            .eval_str("(eseq.mixer/launch-track-pattern 1 (nth (eseq.mixer/track-pattern-cells 1) 1))")
+            .eval_str("(eseq.mixer/launch-track-pattern (nth (let ((t (eseq.kinds/track 1))) t.cells) 1))")
             .expect("launch track pattern from mixer grid");
         let commands = editor.drain_host_commands();
         assert_eq!(commands.len(), 1);
@@ -53280,11 +52905,7 @@ mod solo_binding_tests;
                     panic!("set-scene-cell payload should be a dict: {payload:?}");
                 };
                 assert_eq!(
-                    payload.get("scene").map(|value| value.borrow().clone()),
-                    Some(Value::Number(0.0))
-                );
-                assert_eq!(
-                    payload.get("track").map(|value| value.borrow().clone()),
+                    payload.get("track-id").map(|value| value.borrow().clone()),
                     Some(Value::Number(1.0))
                 );
                 assert_eq!(
@@ -53302,14 +52923,10 @@ mod solo_binding_tests;
             other => panic!("expected set-scene-cell host command, got {other:?}"),
         }
         // The clip click must forward the LIVE transport quantize selection.
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "scene-launch-quantize",
-            Value::String("1 bar".to_string()),
-        );
+        set_kind_field(&mut editor, "transport", "launch-quantize", Value::String("1 bar".into()));
         editor
             .runtime_mut()
-            .eval_str("(eseq.mixer/launch-track-pattern 1 (nth (eseq.mixer/track-pattern-cells 1) 1))")
+            .eval_str("(eseq.mixer/launch-track-pattern (nth (let ((t (eseq.kinds/track 1))) t.cells) 1))")
             .expect("launch track pattern with quantize set");
         let commands = editor.drain_host_commands();
         assert_eq!(commands.len(), 1);
@@ -53329,14 +52946,8 @@ mod solo_binding_tests;
         }
         // A pending quantized clip launch swaps the cell background to the
         // blinking queued widget (glyph untouched); clearing it swaps back.
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "queued-track-clips",
-            Value::List(vec![
-                Rc::new(RefCell::new(Value::Number(-1.0))),
-                Rc::new(RefCell::new(Value::Number(4.0))),
-            ]),
-        );
+        let cell_1_4 = kind_cell(&editor, 1, 4);
+        set_field(editor.runtime_mut(), cell_1_4, "queued", Value::Bool(true));
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
         let layout = editor
@@ -53351,14 +52962,7 @@ mod solo_binding_tests;
             Some(&Value::String("track-pattern-cell-queued-bg".to_string())),
             "a cell with a pending quantized launch must use the blinking background"
         );
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "queued-track-clips",
-            Value::List(vec![
-                Rc::new(RefCell::new(Value::Number(-1.0))),
-                Rc::new(RefCell::new(Value::Number(-1.0))),
-            ]),
-        );
+        set_field(editor.runtime_mut(), cell_1_4, "queued", Value::Bool(false));
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
         let layout = editor
@@ -53373,11 +52977,7 @@ mod solo_binding_tests;
             Some(&Value::String("track-pattern-cell-bg".to_string())),
             "clearing the pending launch must restore the normal cell background"
         );
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            &track_pattern_cell_selected_field(1, 4),
-            Value::Bool(true),
-        );
+        set_field(editor.runtime_mut(), cell_1_4, "selected", Value::Bool(true));
         editor.refresh_runtime_side_effects();
         let layout_with_focused_pattern = editor
             .runtime_mut()
@@ -53450,14 +53050,10 @@ mod solo_binding_tests;
         }
         editor
             .runtime_mut()
-            .eval_str("(eseq.mixer/select-track 0)")
+            .eval_str("(eseq.mixer/select-track (eseq.kinds/track 0))")
             .expect("select track before clicking track control");
         assert_reveal_command(&editor.drain_host_commands(), 0.0);
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            &track_pattern_cell_selected_field(1, 4),
-            Value::Bool(false),
-        );
+        set_field(editor.runtime_mut(), cell_1_4, "selected", Value::Bool(false));
         editor.refresh_runtime_side_effects();
         let layout_after_track_select = editor
             .runtime_mut()
@@ -53474,14 +53070,7 @@ mod solo_binding_tests;
             Some(false),
             "selecting a different track target should clear the track-pattern focus border"
         );
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "delete-target-version", Value::Number(2.0));
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            &mixer_track_delete_target_field(0),
-            Value::Bool(true),
-        );
+        set_field(editor.runtime_mut(), track0, "delete-target", Value::Bool(true));
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
         let layout_for_control_click = editor
@@ -53509,7 +53098,7 @@ mod solo_binding_tests;
         );
         assert_eq!(
             calls.lock().unwrap().last().map(String::as_str),
-            Some("seq-toggle-track-mute:[0]")
+            Some("seq-set-track-mute:[0, true]")
         );
         assert_eq!(
             editor
@@ -53534,7 +53123,7 @@ mod solo_binding_tests;
             .expect("track label on-click");
         editor
             .runtime_mut()
-            .invoke(track_label_callback, vec![Value::Bool(true)])
+            .invoke(track_label_callback, vec![Value::Map(Default::default())])
             .expect("invoke track label click");
         assert_reveal_command(&editor.drain_host_commands(), 0.0);
         assert_eq!(
@@ -53549,14 +53138,7 @@ mod solo_binding_tests;
             Some(Value::String("mixer-track".to_string())),
             "track-name badge should claim mixer track deletion"
         );
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "delete-target-version", Value::Number(2.0));
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            &mixer_track_delete_target_field(0),
-            Value::Bool(true),
-        );
+        set_field(editor.runtime_mut(), track0, "delete-target", Value::Bool(true));
         editor.refresh_runtime_side_effects();
         let selected_layout = editor
             .widget_layout()
@@ -53627,7 +53209,7 @@ mod solo_binding_tests;
             matches!(
                 track_strip_after_bus_select.props.get("selected"),
                 Some(Value::ReactiveRef { namespace, field, .. })
-                    if namespace == "SEQ" && field == &track_selected_field(0)
+                    if *namespace == format!("%instance/{track0}") && field == "in-selection"
             ),
             "selecting a bus should not replace track selected bindings with literals"
         );
@@ -53654,7 +53236,7 @@ mod solo_binding_tests;
         );
         assert_eq!(
             calls.lock().unwrap().last().map(String::as_str),
-            Some("seq-toggle-bus-solo:[1]"),
+            Some("seq-set-bus-solo:[1, true]"),
             "Bus A solo button should only toggle Bus A solo after selecting the bus"
         );
 
@@ -55684,6 +55266,8 @@ mod solo_binding_tests;
         editor: &mut eseqlisp::Editor,
         groups: &[sequencer::project::ProjectTrackGroup],
     ) {
+        seed_kind_buses(editor, &[(0, "Mix"), (1, "Bus A"), (2, "Group")]);
+        seed_kind_groups(editor, groups);
         let rt = editor.runtime_mut();
         rt.set_reactive("SEQ", "groups", build_groups_value(groups));
         rt.set_reactive("SEQ", "group-collapsed", build_group_collapsed_value(groups));

@@ -1,7 +1,7 @@
 //! The factory transport, scene banks and MIDI capture views, ported to the
 //! kinds (kind-bindings spec §13 stage 8, eseq-0l17.12).
 
-use super::views::{legacy_forms, widgets_with_prop};
+use super::views::{distro, instance_bindings, legacy_forms, widgets_with_prop};
 use super::*;
 
 /// The ported views' sources.
@@ -41,51 +41,13 @@ fn ported_transport_views_use_no_legacy_binding_forms() {
     );
 }
 
-/// Every instance binding in `tree` as (instance id, field).
-fn instance_bindings(tree: &Value, out: &mut Vec<(InstanceId, String)>) {
-    match tree {
-        Value::ReactiveRef {
-            namespace, field, ..
-        } => {
-            assert!(
-                namespace.starts_with("%instance/"),
-                "a legacy binding {namespace}.{field}"
-            );
-            let id = namespace["%instance/".len()..]
-                .parse()
-                .expect("instance id");
-            out.push((id, field.clone()));
-        }
-        Value::Map(map) => {
-            for value in map.values() {
-                instance_bindings(&value.borrow(), out);
-            }
-        }
-        Value::List(items) => {
-            for item in items {
-                instance_bindings(&item.borrow(), out);
-            }
-        }
-        _ => {}
-    }
-}
-
-/// The factory DAW, synced and rendered.
-fn distro() -> Harness {
-    let mut h = Harness::with_root(UiRoot::Distro);
-    h.sync();
-    h.show_all();
-    h.sync();
-    h.show_all();
-    h
-}
-
 #[test]
 fn the_transport_binds_its_host_state_through_kinds_and_only_repaints_on_playback() {
     let mut h = distro();
     let (tree, revision) = h.buffer_tree("*transport*");
-    let mut bound = Vec::new();
-    instance_bindings(&tree, &mut bound);
+    let (mut bound, mut legacy) = (Vec::new(), Vec::new());
+    instance_bindings(&tree, &mut bound, &mut legacy);
+    assert_eq!(legacy, Vec::<String>::new(), "legacy bindings");
     let (transport, master, engine, song) = (
         h.singleton(TRANSPORT),
         h.singleton(MASTER),

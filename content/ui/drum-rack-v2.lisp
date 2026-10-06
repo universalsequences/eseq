@@ -9,6 +9,7 @@
 (module eseq.drum-rack-v2)
 
 (import eseq.track-collapse)
+(import eseq.view-kit :refer (index-of))
 
 (export group-at
         rack?
@@ -291,12 +292,6 @@
 ;; from its visible order.
 (def mixer-visible-track-order ()
   (flatten-track-order (grid-render-items-with-collapsed-tracks true) true false))
-
-(def index-of (xs value)
-  (reduce |found i|
-    (if (>= found 0) found (if (= (nth xs i) value) i found))
-    -1
-    (range 0 (len xs))))
 
 ;; Return the adjacent visible track in `delta`'s direction. When `track` is
 ;; hidden, walk from its position in the same structural row order until a

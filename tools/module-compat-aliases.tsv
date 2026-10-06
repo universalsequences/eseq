@@ -303,7 +303,6 @@ mixer-v2-track-collapsed-label	eseq.mixer/track-collapsed-label	content/ui/mixer
 mixer-v2-track-color-b	eseq.mixer/track-color-b	content/ui/mixer.lisp
 mixer-v2-track-color-g	eseq.mixer/track-color-g	content/ui/mixer.lisp
 mixer-v2-track-color-r	eseq.mixer/track-color-r	content/ui/mixer.lisp
-mixer-v2-track-pattern-cells	eseq.mixer/track-pattern-cells	content/ui/mixer.lisp
 page-button-width	eseq.step-grid-interactions/page-button-width	content/ui/step-grid-interactions.lisp
 page-count	eseq.seq-core-state/page-count	content/ui/seq-core-state.lisp
 page-offset	eseq.seq-core-state/page-offset	content/ui/seq-core-state.lisp

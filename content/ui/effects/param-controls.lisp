@@ -197,7 +197,8 @@
 ;; Mixer / track-panel bus sends as process targets. A process writes on
 ;; its own track, so only that track's send knobs light up while mapping:
 ;; clicking another strip's send would silently bind this track's send.
-;; `send` is one SEQ.track-bus-sends entry (:bus-id :bus-idx :name).
+;; `send` names the bus as a dict (:bus-id :bus-idx :name): the track
+;; panel's send entries, the mixer's `send-target` of a send instance.
 (def process-send-target-map (send)
   (dict :kind "bus-send" :bus-id (get send :bus-id) :bus-idx (get send :bus-idx)
         :param (get send :name)))

@@ -826,7 +826,13 @@ fn step_plock_render_and_send_lock_flags_match_the_legacy_fields() {
     assert_eq!(h.eval_all("fx-send.locked"), Value::Bool(false));
     h.shared.selected_steps.lock().unwrap().insert(5);
     assert_eq!(h.eval_all("fx-send.locked"), Value::Bool(true));
+    // `has-locks` is cached under the track's p-lock key: an edit moves it,
+    // as the send p-lock commands' invalidation does.
     h.shared.state.pattern.track_send_plocks[0].clear(5, fx);
+    h.shared.ui_invalidations.push(UiInvalidation::TrackParam {
+        track: 0,
+        change: TrackParamInvalidation::BusSends,
+    });
     assert_eq!(h.eval_all("fx-send.has-locks"), Value::Bool(false));
 }
 

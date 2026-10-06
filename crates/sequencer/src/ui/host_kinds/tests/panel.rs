@@ -330,26 +330,12 @@ fn process_mapping_follows_the_track_process_chain() {
         (h.slot("written") - base).abs() < 1e-3,
         "unmapped: the shown value"
     );
-    let chain = |enabled: bool| sequencer::process::TrackProcessChain {
-        slots: vec![sequencer::process::TrackProcessSlot {
-            instance_id: sequencer::process::ProcessInstanceId(1),
-            instance_name: None,
-            class_name: "rand".to_string(),
-            enabled,
-            project_layer: false,
-            inlets: Default::default(),
-            lanes: Default::default(),
-            fanout: Default::default(),
-            unbound_ports: Default::default(),
-            expr_source: None,
-            bindings: std::collections::BTreeMap::from([(
-                "out".to_string(),
-                Some(sequencer::process::ParamTarget::InstrumentParam {
-                    param: "start".to_string(),
-                    param_id: None,
-                }),
-            )]),
-        }],
+    let chain = |enabled: bool| {
+        let start = sequencer::process::ParamTarget::InstrumentParam {
+            param: "start".to_string(),
+            param_id: None,
+        };
+        one_slot_chain(start, enabled)
     };
     // A process chain edit moves the track's p-lock key, as the legacy
     // commands' invalidation does.

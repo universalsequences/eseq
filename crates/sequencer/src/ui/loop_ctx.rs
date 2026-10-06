@@ -159,8 +159,6 @@ pub(crate) struct FrameDiffState {
     /// transitions (which never bump the real pattern epoch) still trigger
     /// the full pattern-switch resync.
     pub(crate) prev_song_row_mirror_epoch: u64,
-    /// Last `published_sequencers_version` mirrored into `SEQ.graph-sequencers`.
-    pub(crate) prev_published_sequencers_version: u64,
     /// (scheduler snapshot version, published sequencers version, pattern)
     /// at the last sweep of tracked graph reads (`queue_graph_read_invalidations`).
     pub(crate) prev_graph_read_key: (u64, u64, usize),
@@ -171,8 +169,6 @@ pub(crate) struct FrameDiffState {
     pub(crate) prev_instances_fingerprint: u64,
     pub(crate) prev_current_track: usize,
     pub(crate) cpu_overload: CpuOverloadIndicator,
-    pub(crate) prev_peak_l_level: f64,
-    pub(crate) prev_peak_r_level: f64,
     /// Whether the recording-take undo transaction is open. Mirrors
     /// (recording armed && transport playing) via
     /// `App::sync_recording_history_boundary`; force it false whenever
@@ -187,7 +183,6 @@ pub(crate) struct FrameDiffState {
     pub(crate) prev_bus_peak_levels: Vec<f64>,
     pub(crate) prev_modulator_phases: Vec<f64>,
     pub(crate) prev_modulator_levels: Vec<f64>,
-    pub(crate) prev_mod_port_levels: ModPortLevels,
     pub(crate) prev_mod_display_values: ModDisplayValues,
     /// Drum-rack pad lights (eseq-4b5.16): the published flag per track, plus
     /// the instant each rack member last triggered, which is what the light
@@ -217,8 +212,6 @@ pub(crate) struct FrameDiffState {
     /// Last published `(display value, clamped)` per `(track, param)` of the
     /// process effective-value feed, so the tick only writes deltas.
     pub(crate) prev_process_effective_params: HashMap<(usize, usize), (f32, bool)>,
-    /// Same for the bus-send feed, keyed `(track, bus id)`.
-    pub(crate) prev_process_effective_sends: HashMap<(usize, u64), f32>,
     pub(crate) prev_track_tint:
         Option<(eseqlisp::backend::Color, [eseqlisp::backend::Color; eseqlisp::theme::TRACK_PALETTE_SLOTS])>,
     pub(crate) prev_variant_tint:
@@ -254,9 +247,6 @@ pub(crate) struct FrameDiffState {
     /// Browser sample preview: last published playing flag; the playhead
     /// republishes every tick while true.
     pub(crate) prev_browser_preview_playing: bool,
-    /// Per-track pattern id (-1 = none) with a pending quantized clip
-    /// launch, for the mixer grid's queued-cell blink.
-    pub(crate) prev_queued_track_clips: Vec<i64>,
     /// Song-mode reactive diff state (docs/song-mode-spec.md 12).
     pub(crate) song: SongFrameState,
     /// Sound-palette reactive diff state (takes spec §17.6/§18.3).

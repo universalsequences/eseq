@@ -134,13 +134,21 @@
   (if dest
     (host-command "set-bus-output" (dict :bus-id b.bid :destination-id dest.bid))
     nil))
+;; The delete-target setters (a group's, a route's, a cell's) touch only UI
+;; thread state, so they apply at once: true makes `target` (a `kind` delete
+;; target, as `seq-set-delete-target` takes it) the mixer's delete target;
+;; false clears the delete target when it is that one.
+(def set-delete-target (kind target v)
+  (if v
+    (seq-set-delete-target kind target)
+    (if (seq-delete-target? kind target) (seq-clear-delete-target) nil)))
+;; g, by group id.
+(def set-group-delete-target (g v)
+  (set-delete-target :mixer-group (dict :group-id g.gid) v))
 (def route-target (r)
   (dict :source r.source.index :dest-kind (if r.dest "track" "bus")
         :dest (if r.dest r.dest.index r.dest-bus.bid) :input (- r.input 1)))
-(def set-route-selected (r v)
-  (if v
-    (seq-set-delete-target :mod-route (route-target r))
-    (if (seq-delete-target? :mod-route (route-target r)) (seq-clear-delete-target) nil)))
+(def set-route-selected (r v) (set-delete-target :mod-route (route-target r) v))
 ;; The step cursor: makes s's track the current one and moves the grid's
 ;; cursor to s, as a click on the step does.
 (def set-cursor-step (sel s)
@@ -181,9 +189,9 @@
   (host-command "set-clip"
     (dict :clip-id c.cid :field "cell"
           :track-id (if cl cl.track.tid nil) :pattern-id (if cl cl.pid nil))))
+;; A cell (track position, pattern id) as the mixer's delete target.
 (def set-cell-selected (c v)
-  (host-command "set-cell"
-    (dict :track-id c.track.tid :pattern-id c.pid :field "selected" :value v)))
+  (set-delete-target :track-pattern (dict :track c.track.index :pattern-id c.pid) v))
 ;; A piano roll note by its track's id and its note id (spec §14, stage 7e):
 ;; pitch, start, length and velocity move or reshape it (one undo entry each;
 ;; a drag's set!s join one), selected selects it in the piano roll.
@@ -358,7 +366,9 @@
          (display :number :range (0 1)
                   :doc "The level shown: on the current track the p-lock at the selected (or playing) step, else amount")
          (locked  :bool   :doc "display comes from a p-lock")
-         (has-locks :bool :doc "Some step of the track's pattern locks this send")))
+         (has-locks :bool :doc "Some step of the track's pattern locks this send")
+         (process-mapped :bool :doc "An enabled process slot of the track writes this send")
+         (process-value :number :doc "The level a process last wrote here; display when none has")))
 
 ;; One parameter of a device: (nth d.params 3), or (device-param d "cutoff").
 ;; Params belong to their device: a reorder keeps them; another effect or
@@ -746,6 +756,7 @@
          (audible   :bool   :doc "Heard: neither muted nor silenced by another track's solo")
          (armed     :bool   :set set-track-armed :doc "Record-armed")
          (selected  :bool   :doc "The current track (set selection.track)")
+         (in-selection :bool :doc "The current track or one of selection.tracks (the multi-selection highlight)")
          (preset    :string :doc "Loaded preset name; empty when none")
          (num-steps :int    :doc "Pattern length in steps")
          (steps     (list-of step))
@@ -948,6 +959,8 @@
          ;; Drum racks (empty, nil or false on a plain group).
          (armed     :bool   :set set-group-armed
                     :doc "The live keyboard plays this rack's pads (one rack at a time; arming disarms its member tracks)")
+         (delete-target :bool :set set-group-delete-target
+                    :doc "The mixer's delete target (Backspace deletes or ungroups it)")
          (pads      (list-of pad) :doc "The rack's pads, in pad order")
          (clips     (list-of rack-clip) :doc "The rack's clip bank, in order")
          (rack-clip rack-clip :doc "The clip the current scene plays, or nil (silent, or no clips)")

@@ -2315,25 +2315,6 @@ pub(crate) fn set_track_delete_target(
     true
 }
 
-/// `cell.selected`'s setter (`set-cell`) on `target`: `on` makes `track`'s
-/// pool pattern `pattern_id` the target; off clears the target when it is
-/// that cell. Returns whether the target changed.
-pub(crate) fn set_track_pattern_delete_target(
-    target: &mut Option<ActiveDeleteTarget>,
-    track: usize,
-    pattern_id: u64,
-    on: bool,
-) -> bool {
-    if on == track_pattern_cell_selected(target.as_ref(), track, pattern_id) {
-        return false;
-    }
-    *target = on.then_some(ActiveDeleteTarget::TrackPattern {
-        track,
-        pattern_id: PatternId(pattern_id),
-    });
-    true
-}
-
 pub(crate) fn bump_delete_target_version(active_delete_target_version: &Arc<AtomicUsize>) {
     active_delete_target_version.fetch_add(1, Ordering::Relaxed);
 }
@@ -3191,9 +3172,6 @@ pub(crate) fn init_runtime(
                 // Per-track false or (start_beats len_beats), published by
                 // the scheduler for the sequence-roll bracket/playhead UI.
                 ("roll-window", Value::List(vec![])),
-                // Per-track pattern id (-1 = none) with a pending quantized
-                // clip launch — drives the mixer grid's queued-cell blink.
-                ("queued-track-clips", Value::List(vec![])),
                 // Song mode observability (docs/song-mode-spec.md 12).
                 ("song-exists", Value::Bool(false)),
                 ("song-mode", Value::String("stopped".to_string())),
@@ -3242,7 +3220,6 @@ pub(crate) fn init_runtime(
                 // Group id of the pad-armed drum rack; -1 = none.
                 ("armed-rack-id", Value::Number(-1.0)),
                 ("delete-target-version", Value::Number(0.0)),
-                ("selected-mod-routes", Value::List(vec![])),
                 (
                     "current-pattern",
                     Value::Number(state.current_scene_index() as f64),
@@ -3284,10 +3261,6 @@ pub(crate) fn init_runtime(
                 ("track-ids", build_track_ids(&app)),
                 ("track-instrument-types", build_track_instrument_types(&app)),
                 ("track-instrument-ids", build_track_instrument_ids(&app)),
-                (
-                    "track-mod-output-available",
-                    build_track_mod_output_available(&app),
-                ),
                 (
                     "track-instrument-run-modes",
                     build_track_instrument_run_modes(&app),
@@ -3484,14 +3457,9 @@ pub(crate) fn init_runtime(
                     "track-retrig-rates",
                     build_all_track_param_lists_value(&state, &app, StepParam::RetrigRate),
                 ),
-                ("track-mixer-pans", build_track_pans(&state)),
-                ("track-outputs", build_track_outputs(&app, &state)),
-                ("track-bus-sends", build_all_track_bus_sends(&app, &state)),
-                ("mod-routes", build_mod_routes(&state)),
                 ("track-mutes", build_track_mutes(&state)),
                 ("track-solos", build_track_solos(&state)),
                 ("track-muted-by-solo", build_track_muted_by_solo(&app, &state)),
-                ("bus-output-routes", build_bus_output_routes(&app)),
                 (
                     "bus-ids",
                     Value::List(
@@ -3593,7 +3561,6 @@ pub(crate) fn init_runtime(
                     "tp-output",
                     Value::String(track_output_label(app, &state.pattern.track_params[0])),
                 ),
-                ("track-output-options", build_track_output_options(app)),
                 ("tp-bus-sends", {
                     use std::collections::HashMap;
                     let tp = &state.pattern.track_params[0];
@@ -3762,8 +3729,6 @@ pub(crate) fn init_runtime(
                 ),
                 ("compiling", Value::Bool(false)),
                 ("recording", Value::Bool(false)),
-                ("master-peak-l", Value::Number(0.0)),
-                ("master-peak-r", Value::Number(0.0)),
                 (
                     "record-armed",
                     build_record_armed_value(&record_armed.lock().unwrap()),
@@ -3791,7 +3756,6 @@ pub(crate) fn init_runtime(
                 ("content-library-epoch", Value::Number(0.0)),
                 ("sound-presets", build_sound_presets_value()),
                 ("kit-presets", build_kit_presets_value()),
-                ("graph-sequencers", Value::List(vec![])),
                 ("rack-clips", Value::List(vec![])),
                 ("current-project-name", Value::String(String::new())),
                 ("rack-panel-view-generation", Value::Number(0.0)),
@@ -3806,10 +3770,6 @@ pub(crate) fn init_runtime(
                     Box::leak(track_selected_field(idx).into_boxed_str()),
                     Value::Bool(idx == 0),
                 ));
-                fields.push((
-                    Box::leak(mixer_track_delete_target_field(idx).into_boxed_str()),
-                    Value::Bool(false),
-                ));
                 for cell in state.track_pattern_cells(idx) {
                     let pattern_id = cell.pattern_id.0;
                     fields.push((
@@ -3817,24 +3777,6 @@ pub(crate) fn init_runtime(
                             track_pattern_cell_active_field(idx, pattern_id).into_boxed_str(),
                         ),
                         Value::Bool(cell.active_effective),
-                    ));
-                    fields.push((
-                        Box::leak(
-                            track_pattern_cell_assigned_field(idx, pattern_id).into_boxed_str(),
-                        ),
-                        Value::Bool(cell.assigned_to_current_scene),
-                    ));
-                    fields.push((
-                        Box::leak(
-                            track_pattern_cell_override_field(idx, pattern_id).into_boxed_str(),
-                        ),
-                        Value::Bool(cell.overridden),
-                    ));
-                    fields.push((
-                        Box::leak(
-                            track_pattern_cell_selected_field(idx, pattern_id).into_boxed_str(),
-                        ),
-                        Value::Bool(false),
                     ));
                 }
                 fields.push((
@@ -3849,44 +3791,12 @@ pub(crate) fn init_runtime(
                     Box::leak(format!("modulator-level-{idx}").into_boxed_str()),
                     Value::Number(1.0),
                 ));
-                for input in 0..sequencer::sequencer::EXT_MOD_INPUT_COUNT {
-                    fields.push((
-                        Box::leak(mod_in_level_field(idx, input).into_boxed_str()),
-                        Value::Number(0.0),
-                    ));
-                }
-                fields.push((
-                    Box::leak(mod_out_level_field(idx).into_boxed_str()),
-                    Value::Number(0.0),
-                ));
             }
             for idx in 0..app.buses.len() {
                 fields.push((
                     Box::leak(format!("bus-peak-{idx}").into_boxed_str()),
                     Value::Number(0.0),
                 ));
-            }
-            for bus in &app.buses {
-                for input in 0..sequencer::sequencer::EXT_MOD_INPUT_COUNT {
-                    fields.push((
-                        Box::leak(bus_mod_in_level_field(bus.id.0, input).into_boxed_str()),
-                        Value::Number(0.0),
-                    ));
-                }
-            }
-            for track in 0..track_count {
-                for (bus_idx, bus) in app.buses.iter().enumerate() {
-                    if bus.id == sequencer::sequencer::BusId::MIX {
-                        continue;
-                    }
-                    fields.push((
-                        Box::leak(track_bus_send_field(track, bus_idx).into_boxed_str()),
-                        Value::Number(
-                            track_bus_send_amount(&app, &state, track, bus_idx).unwrap_or(0.0)
-                                as f64,
-                        ),
-                    ));
-                }
             }
             if track_count > 0 {
                 for (bus_idx, bus) in app.buses.iter().enumerate() {

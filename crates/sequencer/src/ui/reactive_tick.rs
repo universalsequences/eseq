@@ -263,17 +263,11 @@ pub(crate) fn sync_reactive_tick(
     let process_effective_params_version = ctx.shared.state.process_effective_params_version();
     if process_effective_params_version != ctx.frame.prev_process_effective_params_version {
         ctx.frame.prev_process_effective_params_version = process_effective_params_version;
-        let mut dirty = state_values::sync_process_effective_param_fields(
+        let dirty = state_values::sync_process_effective_param_fields(
             editor.runtime_mut(),
             app,
             &ctx.shared.state,
             &mut ctx.frame.prev_process_effective_params,
-        );
-        dirty |= state_values::sync_process_effective_send_fields(
-            editor.runtime_mut(),
-            app,
-            &ctx.shared.state,
-            &mut ctx.frame.prev_process_effective_sends,
         );
         if dirty {
             editor.runtime_mut().run_reactive_cycle();
@@ -913,34 +907,6 @@ pub(crate) fn sync_reactive_tick(
         );
         needs_reactive_cycle |= palette_sync.effects_dirty;
         if palette_sync.paint_dirty { editor.mark_needs_redraw(); }
-        if master_meter_visible && ctx.meters.cached_peak_l_level != ctx.frame.prev_peak_l_level {
-            needs_reactive_cycle |= editor
-                .runtime_mut()
-                .set_reactive(
-                    "SEQ",
-                    "master-peak-l",
-                    Value::Number(ctx.meters.cached_peak_l_level),
-                )
-                .effects_dirty;
-            ctx.frame.prev_peak_l_level = ctx.meters.cached_peak_l_level;
-        }
-        if !master_meter_visible && ctx.meters.cached_peak_l_level != ctx.frame.prev_peak_l_level {
-            ctx.frame.prev_peak_l_level = ctx.meters.cached_peak_l_level;
-        }
-        if master_meter_visible && ctx.meters.cached_peak_r_level != ctx.frame.prev_peak_r_level {
-            needs_reactive_cycle |= editor
-                .runtime_mut()
-                .set_reactive(
-                    "SEQ",
-                    "master-peak-r",
-                    Value::Number(ctx.meters.cached_peak_r_level),
-                )
-                .effects_dirty;
-            ctx.frame.prev_peak_r_level = ctx.meters.cached_peak_r_level;
-        }
-        if !master_meter_visible && ctx.meters.cached_peak_r_level != ctx.frame.prev_peak_r_level {
-            ctx.frame.prev_peak_r_level = ctx.meters.cached_peak_r_level;
-        }
         if ctx.meters.cached_track_peak_levels != ctx.frame.prev_track_peak_levels {
             if track_and_bus_meter_visible {
                 needs_reactive_cycle |= sync_track_peak_field_delta(
@@ -1037,18 +1003,6 @@ pub(crate) fn sync_reactive_tick(
                 );
             }
             ctx.frame.prev_modulator_levels = ctx.meters.cached_modulator_levels.clone();
-        }
-        // Mod-port lights live in the mixer, so publishing is gated on it the
-        // way the modulator readouts above are gated on the FX panel.
-        if ctx.meters.cached_mod_port_levels != ctx.frame.prev_mod_port_levels {
-            if mixer_visible {
-                needs_reactive_cycle |= sync_mod_port_level_field_delta(
-                    editor.runtime_mut(),
-                    &ctx.frame.prev_mod_port_levels,
-                    &ctx.meters.cached_mod_port_levels,
-                );
-            }
-            ctx.frame.prev_mod_port_levels = ctx.meters.cached_mod_port_levels.clone();
         }
         // Effective-value bindings (eseq-dtx.13, eseq-hpc). Published whatever
         // the panel visibility: the sampler already reports base values while
@@ -1364,27 +1318,13 @@ pub(crate) fn sync_reactive_tick(
             needs_reactive_cycle |=
                 editor.runtime_mut().set_reactive("SEQ", "instances", value).effects_dirty;
         }
-        // Registering or unpublishing a sequencer bumps only the UI epoch, so
-        // the instance list the rack menu reads is mirrored on its own version.
-        let sequencers_version = ctx.shared.state.published_sequencers_version();
-        if sequencers_version != ctx.frame.prev_published_sequencers_version {
-            ctx.frame.prev_published_sequencers_version = sequencers_version;
-            needs_reactive_cycle |= editor
-                .runtime_mut()
-                .set_reactive(
-                    "SEQ",
-                    "graph-sequencers",
-                    build_graph_sequencers_value(&ctx.shared.state),
-                )
-                .effects_dirty;
-        }
         // Tracked graph reads (`graph-edge-value` & co., instance-kinds spec
         // §6): Lisp `graph-*` writes dirty their readers synchronously; this
         // sweep catches everything else that can move a resolved graph value.
         // Generations are the resolved values, so unchanged reads stay clean.
         let graph_read_key = (
             ctx.shared.state.scheduler_snapshot_version(),
-            sequencers_version,
+            ctx.shared.state.published_sequencers_version(),
             ctx.shared.state.current_pattern_index(),
         );
         if graph_read_key != ctx.frame.prev_graph_read_key {
