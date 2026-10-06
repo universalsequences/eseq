@@ -16223,6 +16223,19 @@ fn scene_transpose_follows_live_scene_values_without_a_scratch_runtime() {
 
         const SAMPLE_RATE: u32 = 48_000;
 
+        /// A graph's state at `beat`, without its events stamps (identities
+        /// two runs never share, not state).
+        fn graph_state_at(
+            graph: &crate::graph::GraphRuntime,
+            beat: f64,
+        ) -> crate::graph::GraphVisualizationSnapshot {
+            crate::graph::GraphVisualizationSnapshot {
+                history_stamp: 0,
+                node_events_stamp: 0,
+                ..graph.visualization_snapshot_at(beat)
+            }
+        }
+
         fn groove(period: f64, resolution: f64, offsets: &[f32]) -> TrackGrooveSnapshot {
             TrackGrooveSnapshot {
                 period_beats: period,
@@ -17743,8 +17756,8 @@ fn scene_transpose_follows_live_scene_values_without_a_scratch_runtime() {
                 assert_eq!(ahead.graph_runtimes.len(), 1);
                 let beat = ahead.clock.total_beats;
                 assert!((beat - reference.clock.total_beats).abs() < 1e-9, "{label}");
-                let ahead_state = ahead.graph_runtimes[0].visualization_snapshot_at(beat);
-                let reference_state = reference.graph_runtimes[0].visualization_snapshot_at(beat);
+                let ahead_state = graph_state_at(&ahead.graph_runtimes[0], beat);
+                let reference_state = graph_state_at(&reference.graph_runtimes[0], beat);
                 assert!(
                     !ahead_state.event_history.is_empty(),
                     "the graph fired during the run"
@@ -18113,8 +18126,8 @@ fn scene_transpose_follows_live_scene_values_without_a_scratch_runtime() {
                         let graph = &scheduler.graph_runtimes[0];
                         let reference_graph = &reference_scheduler.graph_runtimes[0];
                         assert_eq!(
-                            graph.visualization_snapshot_at(beat),
-                            reference_graph.visualization_snapshot_at(beat),
+                            graph_state_at(graph, beat),
+                            graph_state_at(reference_graph, beat),
                             "{label}"
                         );
                         for node in 0..graph.num_nodes() {

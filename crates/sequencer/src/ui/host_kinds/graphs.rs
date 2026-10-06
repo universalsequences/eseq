@@ -38,8 +38,11 @@
 //! `graph_seed_follows_route`). Live (observed only, compared in place with
 //! the last push into scratch buffers, so an idle tick allocates nothing):
 //! a graph's playback (`active`, `beat`, `energy`, `triggers`, `dampening`,
-//! read in place from the scheduler's visualization snapshot with the legacy
-//! `SEQ.graph-visualizations` display transforms), a node's `sounding` (the
+//! `deltas`, `node-deltas`, `group-activity`, `group-suppression`, read in
+//! place from the scheduler's visualization snapshot with the legacy
+//! `SEQ.graph-visualizations` display transforms; its event streams,
+//! `events` and `node-events`, each copied only when its snapshot stamp
+//! moved, the history's new rows alone: `events.rs`), a node's `sounding` (the
 //! legacy `graph-node-notes` read, nodes kept in an [`ObservedList`] and read
 //! under one snapshot lock per graph) and `track.active-notes`
 //! (`active_note_activity_into`, the legacy `SEQ.track-active-notes`).
@@ -47,7 +50,7 @@
 use super::*;
 use sequencer::graph::{
     graph_group_cells, GraphManifest, GraphRuntimeConfig, ParamSpec, ProjectGraphOverrides,
-    NODE_SOUNDING_DISPLAY,
+    NEURAL_GROUP_MAX, NODE_SOUNDING_DISPLAY,
 };
 use sequencer::lisp_host::{
     graph_config_field_value, graph_edge_param_value, graph_node_intrinsic_value,
@@ -133,8 +136,8 @@ struct GraphKey {
     group_ids: Vec<Option<InstanceId>>,
 }
 
-/// A graph's live fields as last pushed (`flat` is the dampening matrix,
-/// row-major, `nodes` wide).
+/// A graph's live fields as last pushed (the matrices row-major, `nodes`
+/// wide).
 #[derive(Clone, Default, PartialEq)]
 struct GraphLive {
     active: bool,
@@ -143,6 +146,34 @@ struct GraphLive {
     energy: Vec<f64>,
     triggers: Vec<f64>,
     dampening: Vec<f64>,
+    deltas: Vec<f64>,
+    node_deltas: Vec<f64>,
+    group_activity: Vec<f64>,
+    group_suppression: Vec<f64>,
+    /// The snapshot's stamps (0 before the scheduler ran the graph):
+    /// `events` moved when `history_stamp` did, `node-events` when
+    /// `node_events_stamp` or `nodes` did.
+    history_stamp: u64,
+    node_events_stamp: u64,
+}
+
+/// A graph's event streams as rows, each copied from its snapshot only
+/// while observed and when its stamp moved (`graph.events`, `node-events`).
+#[derive(Default)]
+struct GraphEvents {
+    /// The history stamp `history` was copied at.
+    history_copied: Option<u64>,
+    history: RowHistory,
+    /// The (node events stamp, node count) `nodes` was copied at.
+    nodes_copied: Option<(u64, usize)>,
+    nodes: Vec<Option<EventRow>>,
+}
+
+/// Which of a graph's event streams a read copies (the observed ones).
+#[derive(Clone, Copy)]
+struct Streams {
+    history: bool,
+    nodes: bool,
 }
 
 /// What the graph half of the sync keeps across ticks.
@@ -162,6 +193,10 @@ pub(crate) struct GraphState {
     /// with a scratch buffer each so a tick compares in place.
     live: HashMap<InstanceId, GraphLive>,
     live_scratch: GraphLive,
+    /// Per graph whose `events` or `node-events` is observed; `no_events`
+    /// (empty) stands in for the others.
+    events: HashMap<InstanceId, GraphEvents>,
+    no_events: GraphEvents,
     sounding: HashMap<InstanceId, Vec<f32>>,
     /// The observed nodes' reads this tick, (graph sequencer id, node
     /// index, node instance), grouped by graph; their (note, velocity)
@@ -186,6 +221,7 @@ impl GraphState {
         self.key = None;
         self.manifests = None;
         self.live.clear();
+        self.events.clear();
         self.sounding.clear();
         self.active_notes.clear();
         self.node_observed.reset();
@@ -428,24 +464,50 @@ pub(super) fn cold_graph_parts<S: KindStore>(
 
 /// A graph's live values from the scheduler's visualization snapshot (the
 /// legacy `SEQ.graph-visualizations` transforms), into `live`; zeros sized
-/// to its active nodes before the scheduler ran it.
-fn read_graph_live(sources: &KindsHandles, src: &GraphSource, live: &mut GraphLive) {
-    live.energy.clear();
-    live.triggers.clear();
-    live.dampening.clear();
+/// to its active nodes before the scheduler ran it. Its event streams into
+/// `events` too, when given: the ones `streams` asks for whose stamp moved.
+fn read_graph_live(
+    sources: &KindsHandles,
+    src: &GraphSource,
+    live: &mut GraphLive,
+    events: Option<(&mut GraphEvents, Streams)>,
+) {
+    let groups = NEURAL_GROUP_MAX as usize;
+    let vectors = [
+        &mut live.energy,
+        &mut live.triggers,
+        &mut live.dampening,
+        &mut live.deltas,
+        &mut live.node_deltas,
+        &mut live.group_activity,
+        &mut live.group_suppression,
+    ];
+    for vector in vectors {
+        vector.clear();
+    }
     sources
         .state
         .with_graph_visualization(src.manifest.id, |snapshot| {
             let Some(snapshot) = snapshot else {
                 let nodes = src.config.nodes.len();
                 (live.active, live.beat, live.nodes) = (false, 0.0, nodes);
+                (live.history_stamp, live.node_events_stamp) = (0, 0);
                 live.energy.resize(nodes, 0.0);
                 live.triggers.resize(nodes, 0.0);
                 live.dampening.resize(nodes * nodes, 0.0);
+                live.deltas.resize(nodes * nodes, 0.0);
+                live.node_deltas.resize(nodes, 0.0);
+                live.group_activity.resize(groups, 0.0);
+                live.group_suppression.resize(groups, 0.0);
+                if let Some((events, streams)) = events {
+                    events.copy_from(None, nodes, streams);
+                }
                 return;
             };
             let nodes = snapshot.num_nodes;
             (live.active, live.beat, live.nodes) = (snapshot.active, snapshot.current_beat, nodes);
+            live.history_stamp = snapshot.history_stamp;
+            live.node_events_stamp = snapshot.node_events_stamp;
             let energy = snapshot.energy.iter().take(nodes);
             live.energy
                 .extend(energy.map(|value| graph_energy_display_value(*value)));
@@ -459,7 +521,57 @@ fn read_graph_live(sources: &KindsHandles, src: &GraphSource, live: &mut GraphLi
                         neural_dampening_display_value(edge.dampening as f32);
                 }
             }
+            live.deltas.resize(nodes * nodes, 0.0);
+            live.node_deltas.resize(nodes, 0.0);
+            graph_delta_values(snapshot, &mut live.deltas, &mut live.node_deltas);
+            live.group_activity
+                .extend_from_slice(&snapshot.group_activity);
+            live.group_suppression
+                .extend_from_slice(&snapshot.group_suppression);
+            if let Some((events, streams)) = events {
+                events.copy_from(Some(snapshot), nodes, streams);
+            }
         });
+}
+
+impl GraphEvents {
+    /// Copy the `streams` of `snapshot` (none before the scheduler ran the
+    /// graph) whose stamp (and, for the nodes', `nodes`) moved since their
+    /// last copy.
+    fn copy_from(
+        &mut self,
+        snapshot: Option<&sequencer::graph::GraphVisualizationSnapshot>,
+        nodes: usize,
+        streams: Streams,
+    ) {
+        let history_stamp = snapshot.map_or(0, |snapshot| snapshot.history_stamp);
+        if streams.history && self.history_copied != Some(history_stamp) {
+            self.history_copied = Some(history_stamp);
+            self.history.update(|rows| {
+                let history = snapshot.map_or(&[][..], |snapshot| &snapshot.event_history);
+                rows.extend(history.iter().map(graph_event_row));
+            });
+        }
+        let nodes_stamp = snapshot.map_or(0, |snapshot| snapshot.node_events_stamp);
+        if streams.nodes && self.nodes_copied != Some((nodes_stamp, nodes)) {
+            self.nodes_copied = Some((nodes_stamp, nodes));
+            self.nodes.clear();
+            self.nodes.resize(nodes, None);
+            if let Some(snapshot) = snapshot {
+                let latest = snapshot.node_events.iter().take(nodes);
+                for (row, event) in self.nodes.iter_mut().zip(latest) {
+                    *row = event.as_ref().map(graph_node_event_row);
+                }
+            }
+        }
+    }
+
+    fn node_rows(&self) -> Value {
+        list_value(self.nodes.iter().map(|row| match row {
+            Some(row) => numbers(row),
+            None => list_value(std::iter::empty()),
+        }))
+    }
 }
 
 /// `values` as rows of `width` numbers (none when `width` is 0).
@@ -529,19 +641,53 @@ pub(super) fn graph_live_value<S: KindStore>(
         _ => {
             let src = shared.borrow().graphs.sources.get(&id)?.clone();
             let mut live = GraphLive::default();
-            read_graph_live(sources, &src, &mut live);
-            Some(graph_live_field(&live, key))
+            let mut events = GraphEvents::default();
+            let streams = Streams {
+                history: key == f::GRAPH_EVENTS,
+                nodes: key == f::GRAPH_NODE_EVENTS,
+            };
+            read_graph_live(sources, &src, &mut live, Some((&mut events, streams)));
+            Some(graph_live_field(&live, &events, key))
         }
     }
 }
 
-fn graph_live_field(live: &GraphLive, key: FieldKey) -> Value {
+/// A graph's live field. Every graph live field has an arm here and in
+/// [`graph_live_moved`] (a missed one panics in the tests that observe it).
+fn graph_live_field(live: &GraphLive, events: &GraphEvents, key: FieldKey) -> Value {
     match key {
         f::GRAPH_ACTIVE => Value::Bool(live.active),
         f::GRAPH_BEAT => number(live.beat),
         f::GRAPH_ENERGY => numbers(&live.energy),
         f::GRAPH_TRIGGERS => numbers(&live.triggers),
-        _ => matrix(&live.dampening, live.nodes),
+        f::GRAPH_DAMPENING => matrix(&live.dampening, live.nodes),
+        f::GRAPH_DELTAS => matrix(&live.deltas, live.nodes),
+        f::GRAPH_NODE_DELTAS => numbers(&live.node_deltas),
+        f::GRAPH_GROUP_ACTIVITY => numbers(&live.group_activity),
+        f::GRAPH_GROUP_SUPPRESSION => numbers(&live.group_suppression),
+        f::GRAPH_EVENTS => events.history.value(),
+        f::GRAPH_NODE_EVENTS => events.node_rows(),
+        _ => unreachable!("{key:?} is no graph live field"),
+    }
+}
+
+/// Whether a graph's live field moved between two reads.
+fn graph_live_moved(last: &GraphLive, now: &GraphLive, key: FieldKey) -> bool {
+    match key {
+        f::GRAPH_ACTIVE => last.active != now.active,
+        f::GRAPH_BEAT => last.beat != now.beat,
+        f::GRAPH_ENERGY => last.energy != now.energy,
+        f::GRAPH_TRIGGERS => last.triggers != now.triggers,
+        f::GRAPH_DAMPENING => last.nodes != now.nodes || last.dampening != now.dampening,
+        f::GRAPH_DELTAS => last.nodes != now.nodes || last.deltas != now.deltas,
+        f::GRAPH_NODE_DELTAS => last.node_deltas != now.node_deltas,
+        f::GRAPH_GROUP_ACTIVITY => last.group_activity != now.group_activity,
+        f::GRAPH_GROUP_SUPPRESSION => last.group_suppression != now.group_suppression,
+        f::GRAPH_EVENTS => last.history_stamp != now.history_stamp,
+        f::GRAPH_NODE_EVENTS => {
+            last.node_events_stamp != now.node_events_stamp || last.nodes != now.nodes
+        }
+        _ => unreachable!("{key:?} is no graph live field"),
     }
 }
 
@@ -819,21 +965,28 @@ impl HostKinds {
             let Some(src) = pusher.shared.borrow().graphs.sources.get(&id).cloned() else {
                 continue;
             };
+            let streams = Streams {
+                history: mask & GRAPH_LIVE.bit(f::GRAPH_EVENTS) != 0,
+                nodes: mask & GRAPH_LIVE.bit(f::GRAPH_NODE_EVENTS) != 0,
+            };
+            let events = if streams.history || streams.nodes {
+                Some((graphs.events.entry(id).or_default(), streams))
+            } else {
+                graphs.events.remove(&id);
+                None
+            };
             let scratch = &mut graphs.live_scratch;
-            read_graph_live(pusher.sources, &src, scratch);
+            read_graph_live(pusher.sources, &src, scratch, events);
             let last = graphs.live.get(&id);
+            let events = graphs.events.get(&id).unwrap_or(&graphs.no_events);
             for (bit, key) in GRAPH_LIVE.keys.iter().enumerate() {
                 if mask & (1 << bit) == 0 {
                     continue;
                 }
-                let changed = last.is_none_or(|last| match *key {
-                    f::GRAPH_ACTIVE => last.active != scratch.active,
-                    f::GRAPH_BEAT => last.beat != scratch.beat,
-                    f::GRAPH_ENERGY => last.energy != scratch.energy,
-                    f::GRAPH_TRIGGERS => last.triggers != scratch.triggers,
-                    _ => last.nodes != scratch.nodes || last.dampening != scratch.dampening,
+                let changed = last.is_none_or(|last| graph_live_moved(last, scratch, *key));
+                pusher.push_computed_if(id, *key, changed, || {
+                    graph_live_field(scratch, events, *key)
                 });
-                pusher.push_computed_if(id, *key, changed, || graph_live_field(scratch, *key));
             }
             match graphs.live.get_mut(&id) {
                 Some(last) if *last == *scratch => {}

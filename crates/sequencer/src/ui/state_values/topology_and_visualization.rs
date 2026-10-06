@@ -445,35 +445,19 @@ pub(super) fn graph_visualization_value(snapshot: &sequencer::graph::GraphVisual
             edge.delay_steps as f64
         })),
     );
-    let mut delta_matrix = vec![vec![0.0; snapshot.num_nodes]; snapshot.num_nodes];
-    let mut node_delta_magnitudes = vec![0.0; snapshot.num_nodes];
-    for entry in &snapshot.deltas {
-        match &entry.key {
-            sequencer::graph::GraphDeltaKey::NodeDelay { node }
-            | sequencer::graph::GraphDeltaKey::NodeParam { node, .. } => {
-                if let Some(total) = node_delta_magnitudes.get_mut(*node) {
-                    *total += entry.delta.abs() as f64;
-                }
-            }
-            sequencer::graph::GraphDeltaKey::EdgeParam { from, to, param }
-                if param == "weight" =>
-            {
-                if *from < snapshot.num_nodes && *to < snapshot.num_nodes {
-                    delta_matrix[*from][*to] = entry.delta as f64;
-                }
-            }
-            sequencer::graph::GraphDeltaKey::EdgeParam { .. } => {}
-        }
-    }
+    let nodes = snapshot.num_nodes;
+    let (mut delta_matrix, mut node_delta_magnitudes) =
+        (vec![0.0; nodes * nodes], vec![0.0; nodes]);
+    graph_delta_values(snapshot, &mut delta_matrix, &mut node_delta_magnitudes);
     map.insert(
         "delta-matrix".to_string(),
         value_cell(Value::List(
             delta_matrix
-                .into_iter()
+                .chunks(nodes.max(1))
                 .map(|row| {
                     Rc::new(RefCell::new(Value::List(
-                        row.into_iter()
-                            .map(|cell| Rc::new(RefCell::new(Value::Number(cell))))
+                        row.iter()
+                            .map(|cell| Rc::new(RefCell::new(Value::Number(*cell))))
                             .collect(),
                     )))
                 })
@@ -536,6 +520,35 @@ pub(super) fn graph_visualization_value(snapshot: &sequencer::graph::GraphVisual
         )),
     );
     Value::Map(map)
+}
+
+/// A graph's live deltas (the legacy `delta-matrix` and `node-delta-column`,
+/// and the host kinds' `graph.deltas` / `node-deltas`): into `matrix`
+/// (zeroed, `num_nodes` square, row-major) each weight delta by from row and
+/// to column, and into `magnitudes` (zeroed, `num_nodes` long) the sum of
+/// each node's delay and param deltas' magnitudes.
+pub(crate) fn graph_delta_values(
+    snapshot: &sequencer::graph::GraphVisualizationSnapshot,
+    matrix: &mut [f64],
+    magnitudes: &mut [f64],
+) {
+    use sequencer::graph::GraphDeltaKey;
+    let nodes = snapshot.num_nodes;
+    for entry in &snapshot.deltas {
+        match &entry.key {
+            GraphDeltaKey::NodeDelay { node } | GraphDeltaKey::NodeParam { node, .. } => {
+                if let Some(total) = magnitudes.get_mut(*node) {
+                    *total += entry.delta.abs() as f64;
+                }
+            }
+            GraphDeltaKey::EdgeParam { from, to, param } if param == "weight" => {
+                if *from < nodes && *to < nodes {
+                    matrix[from * nodes + to] = entry.delta as f64;
+                }
+            }
+            GraphDeltaKey::EdgeParam { .. } => {}
+        }
+    }
 }
 
 pub(super) fn value_cell(value: Value) -> Rc<RefCell<Value>> {
@@ -697,7 +710,7 @@ pub(crate) fn graph_energy_display_value(value: f64) -> f64 {
     (value * 100.0).round() / 100.0
 }
 
-pub(super) fn graph_weight_display_value(value: f64) -> f64 {
+pub(crate) fn graph_weight_display_value(value: f64) -> f64 {
     (value * 100.0).round() / 100.0
 }
 

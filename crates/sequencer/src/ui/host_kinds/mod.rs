@@ -98,6 +98,7 @@ use std::sync::LazyLock;
 
 mod arrangement;
 mod devices;
+mod events;
 mod graphs;
 mod lanes;
 mod live;
@@ -126,6 +127,7 @@ use self::notes::*;
 pub(crate) use self::notes::{NoteKey, NoteShared, NoteSource};
 use arrangement::SongState;
 use devices::*;
+use events::*;
 use graphs::*;
 use lanes::*;
 pub(crate) use live::KindsHandles;
@@ -328,6 +330,12 @@ pub(crate) mod f {
     pub(crate) const GRAPH_ENERGY: FieldKey = (GRAPH, "energy");
     pub(crate) const GRAPH_TRIGGERS: FieldKey = (GRAPH, "triggers");
     pub(crate) const GRAPH_DAMPENING: FieldKey = (GRAPH, "dampening");
+    pub(crate) const GRAPH_DELTAS: FieldKey = (GRAPH, "deltas");
+    pub(crate) const GRAPH_NODE_DELTAS: FieldKey = (GRAPH, "node-deltas");
+    pub(crate) const GRAPH_GROUP_ACTIVITY: FieldKey = (GRAPH, "group-activity");
+    pub(crate) const GRAPH_GROUP_SUPPRESSION: FieldKey = (GRAPH, "group-suppression");
+    pub(crate) const GRAPH_EVENTS: FieldKey = (GRAPH, "events");
+    pub(crate) const GRAPH_NODE_EVENTS: FieldKey = (GRAPH, "node-events");
 
     pub(crate) const GRAPH_NODE_GRAPH: FieldKey = (GRAPH_NODE, "graph");
     pub(crate) const GRAPH_NODE_INDEX: FieldKey = (GRAPH_NODE, "index");
@@ -1133,6 +1141,8 @@ pub(crate) mod f {
     pub(crate) const TRANSPORT_RECORD_QUANTIZE: FieldKey = (TRANSPORT, "record-quantize");
     pub(crate) const TRANSPORT_ROLL_RATE: FieldKey = (TRANSPORT, "roll-rate");
     pub(crate) const TRANSPORT_SEQUENCE_ROLLING: FieldKey = (TRANSPORT, "sequence-rolling");
+    pub(crate) const TRANSPORT_TRACK_EVENTS: FieldKey = (TRANSPORT, "track-events");
+    pub(crate) const TRANSPORT_TRACK_EVENTS_BEAT: FieldKey = (TRANSPORT, "track-events-beat");
 
     pub(crate) const MASTER_PEAK_L: FieldKey = (MASTER, "peak-l");
     pub(crate) const MASTER_PEAK_R: FieldKey = (MASTER, "peak-r");
@@ -1675,6 +1685,13 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     (f::TRANSPORT_RECORD_QUANTIZE, ":string", Live),
     (f::TRANSPORT_ROLL_RATE, ":string", Live),
     (f::TRANSPORT_SEQUENCE_ROLLING, ":bool", Live),
+    // Read only when the history's revision moved (`events.rs`).
+    (
+        f::TRANSPORT_TRACK_EVENTS,
+        "(list-of (list-of :number))",
+        Live,
+    ),
+    (f::TRANSPORT_TRACK_EVENTS_BEAT, ":number", Live),
     (f::MASTER_PEAK_L, ":number", Live),
     (f::MASTER_PEAK_R, ":number", Live),
     (f::MASTER_RECORDING, ":bool", Live),
@@ -2058,6 +2075,13 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     (f::GRAPH_ENERGY, "(list-of :number)", Live),
     (f::GRAPH_TRIGGERS, "(list-of :number)", Live),
     (f::GRAPH_DAMPENING, "(list-of (list-of :number))", Live),
+    (f::GRAPH_DELTAS, "(list-of (list-of :number))", Live),
+    (f::GRAPH_NODE_DELTAS, "(list-of :number)", Live),
+    (f::GRAPH_GROUP_ACTIVITY, "(list-of :number)", Live),
+    (f::GRAPH_GROUP_SUPPRESSION, "(list-of :number)", Live),
+    // The event streams: copied only when the snapshot's events stamp moved.
+    (f::GRAPH_EVENTS, "(list-of (list-of :number))", Live),
+    (f::GRAPH_NODE_EVENTS, "(list-of (list-of :number))", Live),
     (f::GRAPH_NODE_GRAPH, "graph", Model),
     (f::GRAPH_NODE_INDEX, ":int", Model),
     (f::GRAPH_NODE_RESOLUTION, ":string", Model),
@@ -2551,6 +2575,8 @@ pub(crate) struct HostKinds {
     pub(crate) table_editor: TableEditorState,
     /// Native neural networks and their neurons.
     pub(crate) networks: NeuralState,
+    /// The tracks' output event stream (`transport.track-events`).
+    track_events: TrackEventsState,
 }
 
 impl HostKinds {
@@ -2640,6 +2666,7 @@ impl HostKinds {
             self.graphs.invalidate(&self.shared);
             self.table_editor.invalidate();
             self.networks.invalidate();
+            self.track_events.invalidate();
         }
         if self
             .song
@@ -2762,8 +2789,8 @@ impl HostKinds {
         self.sync_graph_live(&mut pusher);
         self.sync_table_editor(&mut pusher);
         self.sync_network_live(&mut pusher);
+        self.sync_transport_live(&mut pusher);
         let singletons = [
-            (TRANSPORT, &*TRANSPORT_LIVE),
             (ENGINE, &*ENGINE_LIVE),
             (SONG, &*SONG_LIVE),
             (BROWSER, &*BROWSER_LIVE),

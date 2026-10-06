@@ -3245,7 +3245,7 @@ Built (7g):
   (`SEQ.neural-networks`, `neural-*-matrix`, the neuron selection;
   eseq-0l17.50, built: §14.2q); event streams (the graph's event history, node events,
   deltas and group traces; `SEQ.track-events`, `track-event-current-beat`;
-  eseq-0l17.51); generator marks (alez.jaki, eseq-0l17.52); a node's
+  eseq-0l17.51, built: §14.2s); generator marks (alez.jaki, eseq-0l17.52); a node's
   `duration` / `swing` overrides (no content edits them).
 
 ### 14.2l Built in stage 7b-4 (eseq-0l17.43)
@@ -3834,6 +3834,79 @@ Built (7g-3):
   display is `param.value` / `param.overridden`, §14.2g); a network's
   `seed-on-reset` (no content reads it).
 
+### 14.2s Built in stage 7g-4 (eseq-0l17.51)
+
+| Kind | Key | New `:host` fields (`:set` in brackets) |
+|---|---|---|
+| `graph` | `(index)` | live: `deltas (list-of (list-of :number))` (each edge's weight delta, by from row and to column), `node-deltas (list-of :number)` (each node's summed delay and param delta magnitudes), `group-activity`, `group-suppression (list-of :number)` (4 groups), `events (list-of (list-of :number))` (its fired events, oldest first, at most 1024), `node-events (list-of (list-of :number))` (each node's latest event while it shows, an empty row when none) (all L) |
+| `transport` | `()` | live: `track-events (list-of (list-of :number))` (the tracks' output notes, oldest first, at most 1024), `track-events-beat :number` (the scheduler's rendered beat) (L) |
+
+An event is a positional row `(node track beat transpose velocity)`
+(`ROW_FIELDS` in `widget_render/event_view.rs`), -1 for no node (every
+track output event) or no track (a graph event whose node routes none).
+
+Built (7g-4):
+
+- **Rows, not an event sub-kind.** The event-view widget takes a list of
+  events and reads each by field name (`:x :transpose`, `:y :node`, `:z
+  :beat-phase`, `:color-by :track`); it never needs an event's identity, a
+  setter or a per-event binding. A sub-kind would register, key and drop an
+  instance per emission (up to 1024 per history, each with its field cells)
+  and reconcile the whole history on every fire, for handles nothing holds.
+  Rows cost one list of numbers per event, built only when the history
+  moved, and nothing while idle (below). The widget now reads a row as well
+  as the legacy map (`EventItem`; a row's negative node or track reads as
+  missing, as a map's nil does; a row has no `sample`, which no view plots),
+  and no longer copies each event while filtering. The shape matches
+  `track.active-notes` and `graph-node.sounding` (number rows the widget
+  reads by position).
+- **Feeds.** Live, observed only. Each stream carries a revision so an
+  idle tick compares one number and copies nothing: a graph snapshot's
+  `history_stamp` (`event_history`: an emission, a reset) and
+  `node_events_stamp` (`node_events`: an emission, a node event expiring, a
+  reset), each taken anew from a process-wide counter (unique across
+  runtimes, so a rebuilt runtime never repeats an older one's stamp), and the
+  track output history's revision
+  (`SequencerState::track_output_events_revision`, moved under its lock by an
+  append that added events or a clear that removed some). A stream is copied
+  only while observed and when its own stamp moved (`node-events` also with
+  the node count), so an expiring node event re-pushes `node-events` alone.
+  A history push builds cells for its new rows only (`RowHistory`: the rows
+  and cells of the last push are kept; a history drops from the front and
+  grows at the end, so the longest old tail the new rows start with keeps its
+  cells, and a reset keeps none): an emission costs its new rows, one vector
+  of cell pointers and the store's compare-before-push (numbers, nothing
+  allocated), not 1024 rebuilt rows. The graph's other new fields are read
+  with its playback under the same snapshot lock and compared in place
+  (`deltas` through `graph_delta_values`, shared with the legacy
+  `delta-matrix` / `node-delta-column`); `track-events-beat` is a number
+  compared as any live field. Before the scheduler runs a graph: no events,
+  an empty row per node, zero deltas and group traces. A cold read asks the
+  host (it builds its own cells).
+- **Values.** As the legacy `SEQ.graph-visualizations` entry: `events` is
+  its `event-history` (raw transpose and velocity), `node-events` its
+  `node-events` with their display transforms (transpose to 0.01, velocity
+  clamped 0–1: `graph_weight_display_value`, `neural_trigger_display_value`),
+  `deltas` its `delta-matrix`, `node-deltas`, `group-activity` and
+  `group-suppression` its column matrices flattened (like `energy`);
+  `transport.track-events` is `SEQ.track-events`, `track-events-beat`
+  `SEQ.track-event-current-beat`.
+- **The legacy reads map to fields** (the views port in .20): `(get viz
+  :event-history)` → `g.events`, `(get viz :current-beat)` → `g.beat` (or
+  `#'g.beat`), `:node-events` → `g.node-events`, `:events` (the nodes'
+  latest, flattened) → `(filter (lambda (r) (> (len r) 0)) g.node-events)`,
+  `:delta-matrix` → `g.deltas`, `:node-delta-column` → `(map (lambda (d)
+  (list d)) g.node-deltas)`, the `:group-*-matrix` columns likewise;
+  `SEQ.track-events` → `transport.track-events`,
+  `SEQ.track-event-current-beat` → `transport.track-events-beat`. A list
+  field is value-only (no `#'`): the event-view's `:events` reads the field
+  in its `subtree` (as the views do now), its `:current-beat` may bind
+  `#'g.beat` / `#'transport.track-events-beat`.
+- **Not covered:** an event's audio sample time (the legacy maps' `sample`;
+  no view plots it); the legacy `weight-matrix`, `delay-matrix`, `edges`
+  and `delta-leak-per-beat` (the weights are `graph-param.value`, §14.2k;
+  nothing reads the rest).
+
 ### 14.3 Follow-up beads
 
 Each port bead depends on the beads whose rows it uses (`bd dep`).
@@ -3860,7 +3933,7 @@ Each port bead depends on the beads whose rows it uses (`bd dep`).
 | 7g | eseq-0l17.33 (built) | `graph`, `graph-node`, `graph-edge`, `graph-param` (the GRAPH namespace, graph playback), `project.graphs`, `track.active-notes` | .13 .14 .20 |
 | 7g-2 | eseq-0l17.49 (built) | a graph node's process patch as `process` instances (`graph-node.processes`), its setters through `edit-process` | .20 (and .45) |
 | 7g-3 | eseq-0l17.50 (built) | the native neural engine's networks and neuron selection: `network`, `neuron`, `project.networks` | .20 |
-| 7g-4 | eseq-0l17.51 | event streams: graph event history, deltas, group traces; track events | .20 |
+| 7g-4 | eseq-0l17.51 (built) | event streams as positional rows: `graph.events`, `node-events`, `deltas`, `node-deltas`, `group-activity`, `group-suppression`; `transport.track-events`, `track-events-beat` | .20 |
 | 7g-5 | eseq-0l17.52 | generator marks (alez.jaki) | .20 |
 | 7h | eseq-0l17.34 (built) | rack pads, rack clips, grooves (rack, clip, pad shares, pool, library), armed rack | .11 .13 .19 |
 | 7i | eseq-0l17.35 (built) | track settings (`tp-*`), scales (`tuning`, `degree`), routing (outputs, mod routes and levels), the project's option lists and option constants, selection extras (delete targets, step cursor, auto-follow), transport/engine extras | .11 .12 .13 .14 .18 |
@@ -4130,14 +4203,14 @@ builds the field name.
 | `SEQ.<neural->` | 8 | scripts/sequencers/neural-8x8-track-router | sv/topology_and_visualization.rs | live | neuron.selected (the native neural engine; `nr.selected`, setter `neural-set-neuron-selected`) | built (.50) | .20 |
 | `SEQ.generator-mark-*` | 4 | packages/alez.jaki/src/kind | sv/meters_and_modulation.rs | model | jaki generator marks | .52 | .20 |
 | `SEQ.graph-sequencers` | 1 | mixer | reactive_tick.rs | model | project.graphs → graph (gid, name, owner) | built (.33); ported (.13), removed | .13 |
-| `SEQ.graph-visualizations` | 14 | scripts/sequencers/graph-neural-variable-reset-demo, packages/alez.neural/src/variable-reset, scripts/sequencers/graph-neural-16-demo +5 | sv/topology_and_visualization.rs | model | graph.active / beat / energy / triggers / dampening (live), weights → graph-param.value; event history, deltas, group traces: .51 | built (.33), .51 | .20 |
+| `SEQ.graph-visualizations` | 14 | scripts/sequencers/graph-neural-variable-reset-demo, packages/alez.neural/src/variable-reset, scripts/sequencers/graph-neural-16-demo +5 | sv/topology_and_visualization.rs | model | graph.active / beat / energy / triggers / dampening (live), weights → graph-param.value; event-history → graph.events, node-events → graph.node-events (events: its non-empty rows), delta-matrix → graph.deltas, node-delta-column → graph.node-deltas, group-activity / group-suppression-matrix → graph.group-activity / group-suppression (live, built .51) | built (.33, .51) | .20 |
 | `SEQ.neural-dampening-matrix` | 1 | scripts/sequencers/neural-8x8-track-router | sv/topology_and_visualization.rs | live | neuron.dampening (live; the matrix is `(map (lambda (nr) nr.dampening) nw.neurons)`) | built (.50) | .20 |
 | `SEQ.neural-energy-matrix` | 1 | scripts/sequencers/neural-8x8-track-router | sv/topology_and_visualization.rs | live | neuron.energy (live; one per neuron) | built (.50) | .20 |
 | `SEQ.neural-networks` | 1 | scripts/sequencers/neural-8x8-track-router | sv/topology_and_visualization.rs | model | project.networks → network / neuron | built (.50) | .20 |
 | `SEQ.neural-trigger-matrix` | 1 | scripts/sequencers/neural-8x8-track-router | sv/topology_and_visualization.rs | live | neuron.trigger (live; one per neuron) | built (.50) | .20 |
 | `SEQ.track-active-notes` | 5 | effects/panel-bodies, scripts/sequencers/graph-neural-8x8-demo, scripts/sequencers/graph-neural-variable-reset-demo +2 | reactive_tick.rs | live | track.active-notes (live; `(note velocity trigger-id)` rows) | built (.33); ported (.14 A: panel-bodies reads t.active-notes), kept: scripts | .14 .20 |
-| `SEQ.track-event-current-beat` | 3 | scripts/processes/process-ui-control-demo, scripts/sequencers/band-coupling-matrix-demo, scripts/sequencers/graph-neural-8x8-demo | ui_replay_probe.rs | live | track events | .51 | .20 |
-| `SEQ.track-events` | 3 | scripts/processes/process-ui-control-demo, scripts/sequencers/band-coupling-matrix-demo, scripts/sequencers/graph-neural-8x8-demo | ui_replay_probe.rs | model | track events (demo scripts) | .51 | .20 |
+| `SEQ.track-event-current-beat` | 3 | scripts/processes/process-ui-control-demo, scripts/sequencers/band-coupling-matrix-demo, scripts/sequencers/graph-neural-8x8-demo | ui_replay_probe.rs | live | transport.track-events-beat (live) | built (.51) | .20 |
+| `SEQ.track-events` | 3 | scripts/processes/process-ui-control-demo, scripts/sequencers/band-coupling-matrix-demo, scripts/sequencers/graph-neural-8x8-demo | ui_replay_probe.rs | model | transport.track-events (live, positional rows) | built (.51) | .20 |
 | `SEQ.<rack/groove-amount-field>` | 1 | rack-groove-buffer | sv/rack_groove_fields.rs | model | groove.timing / velocity / random; a pad's share pad-groove.amount (of the playing clip's groove: `(or g.rack-clip.groove g.groove)`) | built (.34) | .19 |
 | `SEQ.armed-rack-id` | 2 | mixer, drum-rack-v2 | reactive_tick.rs | model | group.armed (live) | built (.34); ported (.13), kept: drum-rack-v2 | .13 .19 |
 | `SEQ.groove-pool` | 2 | rack-groove-buffer | sv/rack_groove_fields.rs | model | project.groove-pool (pool-groove) | built (.34) | .19 |

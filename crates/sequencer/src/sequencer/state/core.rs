@@ -727,6 +727,10 @@ pub struct SequencerState {
     /// recording). Realtime-safe SPSC ring — the callback never locks.
     pub(super) live_trigger_stamps: crate::sequencer::LiveTriggerStampRing,
     pub(super) track_output_events: Mutex<Vec<TrackOutputEvent>>,
+    /// Moved (under the `track_output_events` lock) by every append and
+    /// clear that changed the history, so a reader skips an unchanged one
+    /// with one atomic load.
+    pub(super) track_output_events_revision: AtomicU64,
     pub(super) track_output_current_beat_bits: AtomicU64,
     pub(super) active_note_until_samples: Vec<[AtomicU64; 128]>,
     pub(super) active_note_velocity_bits: Vec<[AtomicU32; 128]>,

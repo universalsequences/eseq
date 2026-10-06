@@ -604,6 +604,8 @@ use panel_kinds_seed::*;
                 transpose: -7.25,
                 velocity: 0.625,
             }],
+            history_stamp: 1,
+            node_events_stamp: 1,
             node_sounding: Vec::new(),
             edges: vec![sequencer::graph::GraphVisualizationEdge {
                 from: 0,

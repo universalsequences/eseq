@@ -290,6 +290,14 @@ pub struct GraphVisualizationSnapshot {
     pub trigger_activity: Vec<f32>,
     pub node_events: Vec<Option<GraphVisualizationEvent>>,
     pub event_history: Vec<GraphVisualizationEvent>,
+    /// Moves whenever `event_history` changed: unique across runtimes and
+    /// never reused ([`next_events_stamp`]), so a reader that kept the stamp
+    /// of its last read skips an unchanged history without comparing it (0:
+    /// no runtime made it).
+    pub history_stamp: u64,
+    /// Likewise for `node_events` (an emission moves both; a node event
+    /// expiring only this one).
+    pub node_events_stamp: u64,
     /// Per node, its recent audible notes with gate windows (oldest first,
     /// at most `NODE_SOUNDING_CAP`); filter with `is_sounding_at`.
     pub node_sounding: Vec<Vec<GraphSoundingNote>>,
@@ -304,6 +312,14 @@ pub struct GraphVisualizationSnapshot {
 }
 
 const GRAPH_EVENT_HISTORY_CAP: usize = 1024;
+
+/// A fresh [`GraphVisualizationSnapshot::history_stamp`] or
+/// `node_events_stamp` (process-wide, from
+/// 1; lock-free, so the scheduler may take one per emission).
+fn next_events_stamp() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
 /// How many of a node's recent emitted notes `(read (neuron k :key))` sees
 /// (`docs/graph-node-processes-spec.md` §4).
 pub const NEURON_RECENT_NOTES: usize = 8;
@@ -1282,6 +1298,10 @@ pub struct GraphRuntime {
     trigger_visual_until_beats: Vec<f64>,
     node_events: Vec<Option<GraphVisualizationEvent>>,
     event_history: Vec<GraphVisualizationEvent>,
+    /// Taken anew whenever `event_history`, and `node_events`, change (see
+    /// [`GraphVisualizationSnapshot::history_stamp`]).
+    history_stamp: u64,
+    node_events_stamp: u64,
     input_accum: Vec<f64>,
     input_seen: Vec<bool>,
     /// The payload that last arrived at each node (Ext 1), consumed by its next fire.
@@ -1424,6 +1444,8 @@ impl GraphRuntime {
             trigger_visual_until_beats: vec![0.0; num_nodes],
             node_events: vec![None; num_nodes],
             event_history: Vec::new(),
+            history_stamp: next_events_stamp(),
+            node_events_stamp: next_events_stamp(),
             input_accum: vec![0.0; num_nodes],
             input_seen: vec![false; num_nodes],
             source_event: vec![None; num_nodes],
@@ -1471,6 +1493,8 @@ impl GraphRuntime {
             trigger_activity: self.trigger_activity.clone(),
             node_events: self.node_events.clone(),
             event_history: self.event_history.clone(),
+            history_stamp: self.history_stamp,
+            node_events_stamp: self.node_events_stamp,
             node_sounding: self.node_sounding.clone(),
             edges: self
                 .edges
@@ -1780,6 +1804,7 @@ impl GraphRuntime {
             self.trigger_visual_until_beats[node_index] = trigger_visual_until_beats;
             self.node_events[node_index] = node_event;
         }
+        self.node_events_stamp = next_events_stamp();
     }
 
     /// Reset from outside the block loop (a track process or the UI): lands
@@ -1797,7 +1822,9 @@ impl GraphRuntime {
         self.energy[idx] = self.nodes[idx].seed_on_reset;
         self.trigger_activity[idx] = 0.0;
         self.trigger_visual_until_beats[idx] = 0.0;
-        self.node_events[idx] = None;
+        if self.node_events[idx].take().is_some() {
+            self.node_events_stamp = next_events_stamp();
+        }
         self.input_accum[idx] = 0.0;
         self.input_seen[idx] = false;
         self.source_event[idx] = None;
@@ -1814,7 +1841,10 @@ impl GraphRuntime {
     }
 
     fn reset_internal(&mut self, total_beats: f64, preserve_external_seeds: bool) {
-        self.event_history.clear();
+        if !self.event_history.is_empty() {
+            self.event_history.clear();
+            self.history_stamp = next_events_stamp();
+        }
         self.last_accepted.fill(false);
         for notes in &mut self.node_recent_notes {
             notes.clear();
@@ -2769,6 +2799,8 @@ impl GraphRuntime {
         if overflow > 0 {
             self.event_history.drain(0..overflow);
         }
+        self.history_stamp = next_events_stamp();
+        self.node_events_stamp = next_events_stamp();
         out.push(GraphEmission {
             sample_time,
             grid_beats,
@@ -2874,7 +2906,9 @@ impl GraphRuntime {
             self.trigger_activity[idx] = if total_beats <= self.trigger_visual_until_beats[idx] {
                 1.0
             } else {
-                self.node_events[idx] = None;
+                if self.node_events[idx].take().is_some() {
+                    self.node_events_stamp = next_events_stamp();
+                }
                 0.0
             };
         }
@@ -5526,7 +5560,26 @@ mod tests {
             always_fire_with_dampen(0.0),
             &mut out,
         );
-        assert_eq!(runtime.visualization_snapshot().trigger_activity[1], 1.0);
+        let fired = runtime.visualization_snapshot();
+        assert_eq!(fired.trigger_activity[1], 1.0);
+        // The stamps move with their streams only, and are never another
+        // runtime's.
+        let fresh = GraphRuntime::new(
+            1,
+            "g".into(),
+            vec![node(Timebase::Quarter)],
+            vec![],
+            1.0,
+            0.0,
+        );
+        assert_ne!(
+            fresh.visualization_snapshot().history_stamp,
+            fired.history_stamp
+        );
+        assert_eq!(
+            runtime.visualization_snapshot().history_stamp,
+            fired.history_stamp
+        );
 
         runtime.process_block(
             1.0,
@@ -5541,6 +5594,26 @@ mod tests {
         assert_eq!(expired.trigger_activity[1], 0.0);
         assert!(expired.node_events[1].is_none());
         assert_eq!(expired.event_history.len(), 1);
+        assert_ne!(
+            expired.node_events_stamp, fired.node_events_stamp,
+            "a node event expired"
+        );
+        assert_eq!(expired.history_stamp, fired.history_stamp, "no event fired");
+        runtime.process_block(
+            1.26,
+            1.26,
+            60_480,
+            48_000.0,
+            0,
+            |_eval| NodeFire::default(),
+            &mut out,
+        );
+        let idle = runtime.visualization_snapshot();
+        assert_eq!(
+            (idle.history_stamp, idle.node_events_stamp),
+            (expired.history_stamp, expired.node_events_stamp),
+            "nothing fired or expired"
+        );
 
         runtime.push_propagation(0, 1.26, GraphPayload::default());
         runtime.process_block(
@@ -5553,11 +5626,14 @@ mod tests {
             &mut out,
         );
         assert_eq!(runtime.visualization_snapshot().trigger_activity[1], 1.0);
+        let refired = runtime.visualization_snapshot().history_stamp;
+        assert_ne!(refired, expired.history_stamp);
         runtime.reset(2.0);
         let reset = runtime.visualization_snapshot();
         assert_eq!(reset.trigger_activity[1], 0.0);
         assert!(reset.node_events[1].is_none());
         assert!(reset.event_history.is_empty());
+        assert_ne!(reset.history_stamp, refired);
     }
 
     #[test]

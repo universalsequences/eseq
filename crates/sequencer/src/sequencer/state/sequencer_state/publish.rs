@@ -143,15 +143,43 @@ impl SequencerState {
 
     pub fn append_track_output_events(&self, events: impl IntoIterator<Item = TrackOutputEvent>) {
         let mut history = self.track_output_events.lock().unwrap();
+        let before = history.len();
         history.extend(events);
+        if history.len() == before {
+            return;
+        }
         let overflow = history.len().saturating_sub(TRACK_OUTPUT_EVENT_HISTORY_CAP);
         if overflow > 0 {
             history.drain(0..overflow);
         }
+        self.track_output_events_revision
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn clear_track_output_events(&self) {
-        self.track_output_events.lock().unwrap().clear();
+        let mut history = self.track_output_events.lock().unwrap();
+        if !history.is_empty() {
+            history.clear();
+            self.track_output_events_revision
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// The track output history's revision (see
+    /// [`Self::with_track_output_events`]): one atomic load.
+    pub fn track_output_events_revision(&self) -> u64 {
+        self.track_output_events_revision.load(Ordering::Relaxed)
+    }
+
+    /// Read the track output history in place, oldest first, with its
+    /// revision as of the read (the host kinds' `transport.track-events`
+    /// reads it only when [`Self::track_output_events_revision`] moved).
+    pub fn with_track_output_events<R>(
+        &self,
+        read: impl FnOnce(u64, &[TrackOutputEvent]) -> R,
+    ) -> R {
+        let history = self.track_output_events.lock().unwrap();
+        read(self.track_output_events_revision(), &history)
     }
 
     pub fn track_output_events(&self) -> Vec<TrackOutputEvent> {

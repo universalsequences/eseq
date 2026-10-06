@@ -953,7 +953,18 @@
          (beat       :number :doc "Its current beat")
          (energy     (list-of :number) :doc "Each node's energy, 0-4")
          (triggers   (list-of :number) :doc "Each node's trigger activity, 0-1")
-         (dampening  (list-of (list-of :number)) :doc "Each edge's live dampening, by from row and to column, 0-1")))
+         (dampening  (list-of (list-of :number)) :doc "Each edge's live dampening, by from row and to column, 0-1")
+         (deltas     (list-of (list-of :number)) :doc "Each edge's live weight delta, by from row and to column")
+         (node-deltas (list-of :number) :doc "Each node's summed delay and param delta magnitudes")
+         (group-activity (list-of :number) :doc "Each neural group's leaky activity trace (4 groups)")
+         (group-suppression (list-of :number)
+                     :doc "Each neural group's threshold offset from the others' activity: positive suppresses, negative excites")
+         ;; Event streams: (node track beat transpose velocity) rows, the
+         ;; event-view's :events (a negative node or track is none).
+         (events     (list-of (list-of :number))
+                     :doc "Its fired events, oldest first (at most 1024), as rows; track -1 when none; cleared by a reset")
+         (node-events (list-of (list-of :number))
+                     :doc "Each node's latest event while it shows (transpose to 0.01, velocity 0-1), an empty row when none")))
 
 (def-kind track
   :key (index)
@@ -1332,7 +1343,10 @@
          (record-quantize :string :set set-transport-record-quantize
                           :doc "Live-record quantization: off, 1/16, …, 1 bar")
          (roll-rate       :string :set set-transport-roll-rate :doc "One of roll-rate-options")
-         (sequence-rolling :bool  :doc "A sequence roll is held")))
+         (sequence-rolling :bool  :doc "A sequence roll is held")
+         (track-events    (list-of (list-of :number))
+                          :doc "The tracks' output notes, oldest first (at most 1024): (node track beat transpose velocity) rows, node -1 (the event-view's :events)")
+         (track-events-beat :number :doc "The scheduler's rendered beat (track-events' current beat)")))
 
 ;; The master output.
 (def-kind master

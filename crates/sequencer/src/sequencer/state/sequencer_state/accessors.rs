@@ -302,6 +302,7 @@ impl SequencerState {
             rack_macro_print_override: RackMacroPrintOverride::default(),
             take_rack_macro_override: TakeRackMacroOverride::default(),
             track_output_events: Mutex::new(Vec::new()),
+            track_output_events_revision: AtomicU64::new(0),
             track_output_current_beat_bits: AtomicU64::new(0.0_f64.to_bits()),
             active_note_until_samples: (0..MAX_TRACKS)
                 .map(|_| std::array::from_fn(|_| AtomicU64::new(0)))

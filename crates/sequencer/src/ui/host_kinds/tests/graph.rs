@@ -1,9 +1,16 @@
 //! Stage 7g: graph sequencers (graphs, nodes, edges, params, playback,
 //! active notes), their setters, identity and observed gating; 7g-2: a
-//! node's process patch (`n.processes`) and its setters.
+//! node's process patch (`n.processes`) and its setters; 7g-4: the event
+//! streams (`graph.events`, `node-events`, deltas and group traces,
+//! `transport.track-events`).
 
 use super::*;
-use sequencer::graph::{GraphSoundingNote, GraphVisualizationEdge, GraphVisualizationSnapshot};
+use eseqlisp::widget_render::event_view::ROW_FIELDS;
+use sequencer::graph::{
+    GraphDeltaEntry, GraphDeltaKey, GraphSoundingNote, GraphVisualizationEdge,
+    GraphVisualizationEvent, GraphVisualizationSnapshot,
+};
+use sequencer::sequencer::TrackOutputEvent;
 
 const REFER_GRAPH: &str = "(import eseq.kinds :refer (track tracks project graphs graph-of \
                            graph-param-named graph-edge-to set-group-gain! set-group-coupling! \
@@ -1291,4 +1298,329 @@ fn node_process_errors_and_scopes_are_live_observed_gated_and_drop_with_their_sl
     h.eval_graph("(set! g.node-count 2)");
     h.graph_drain();
     assert!(!h.rt().instance_is_live(hit));
+}
+
+/// A legacy event map (`event-history`, `node-events`, `SEQ.track-events`)
+/// as the kinds' positional row: [`ROW_FIELDS`] in order, nil as -1.
+fn legacy_event_row(event: &Value) -> Value {
+    list_value(ROW_FIELDS.iter().map(|field| match get(event, field) {
+        Value::Nil => number(-1.0),
+        value => value,
+    }))
+}
+
+fn legacy_event_rows(events: &Value) -> Value {
+    list_value(items(events).iter().map(legacy_event_row))
+}
+
+/// A legacy column matrix (`((a) (b) …)`) as a flat list.
+fn legacy_column(column: &Value) -> Value {
+    list_value(items(column).iter().map(|row| items(row)[0].clone()))
+}
+
+/// The first row of `id`'s list `field` as pushed (its identity shows
+/// whether a tick pushed the list again).
+fn first_row(h: &Harness, id: InstanceId, field: &str) -> Rc<RefCell<Value>> {
+    match h.rt().instance_field(id, field) {
+        Ok(Value::List(rows)) => rows[0].clone(),
+        other => panic!("{field}: {other:?}"),
+    }
+}
+
+/// Node `node`'s event at `beat` (track 3 for an odd node, none for an
+/// even one), its transpose and velocity past the display transforms.
+fn graph_event(node: usize, beat: f64) -> GraphVisualizationEvent {
+    GraphVisualizationEvent {
+        node_index: node,
+        track: (node % 2 == 1).then_some(3),
+        sample_time: (beat * 1000.0) as u64,
+        beat,
+        transpose: -7.256,
+        velocity: 1.5,
+    }
+}
+
+#[test]
+fn graph_event_streams_read_like_the_legacy_visualization_and_skip_an_unchanged_stamp() {
+    let mut h = Harness::new();
+    h.neural("nn");
+    h.eval_graph("(def g (graph-of nn))");
+    let gid = num(h.eval_graph("g.gid")) as u64;
+    let snapshot = |stamp: u64, history: &[GraphVisualizationEvent]| GraphVisualizationSnapshot {
+        id: gid,
+        name: "nn".to_string(),
+        active: true,
+        current_beat: 4.0,
+        num_nodes: 2,
+        node_events: vec![None, history.last().copied()],
+        event_history: history.to_vec(),
+        history_stamp: stamp,
+        node_events_stamp: stamp,
+        deltas: vec![
+            GraphDeltaEntry {
+                key: GraphDeltaKey::EdgeParam {
+                    from: 0,
+                    to: 1,
+                    param: "weight".to_string(),
+                },
+                delta: -0.25,
+            },
+            GraphDeltaEntry {
+                key: GraphDeltaKey::NodeParam {
+                    node: 1,
+                    param: "threshold".to_string(),
+                },
+                delta: 2.0,
+            },
+            GraphDeltaEntry {
+                key: GraphDeltaKey::NodeDelay { node: 1 },
+                delta: -0.5,
+            },
+        ],
+        group_activity: vec![0.75, 0.0, 0.0, 0.0],
+        group_suppression: vec![0.0, -0.375, 0.0, 0.0],
+        ..Default::default()
+    };
+    let history = [graph_event(0, 1.0), graph_event(1, 2.0)];
+    let state = h.shared.state.clone();
+    state.set_graph_visualizations(vec![snapshot(7, &history)]);
+    for _ in 0..3 {
+        h.sync();
+    }
+    let streams = [
+        f::GRAPH_EVENTS,
+        f::GRAPH_NODE_EVENTS,
+        f::GRAPH_DELTAS,
+        f::GRAPH_NODE_DELTAS,
+        f::GRAPH_GROUP_ACTIVITY,
+        f::GRAPH_GROUP_SUPPRESSION,
+    ];
+    for key in streams {
+        assert_eq!(h.computed(key), 0, "{key:?} unobserved");
+    }
+
+    // Cold reads: the legacy `SEQ.graph-visualizations` entry, as rows.
+    let legacy = items(&build_graph_visualizations_value(&state))[0].clone();
+    assert_eq!(
+        h.eval_graph("g.events"),
+        legacy_event_rows(&get(&legacy, "event-history"))
+    );
+    let node_events = items(&get(&legacy, "node-events"));
+    let node_rows = list_value(node_events.iter().map(|event| match event {
+        Value::Nil => list_value(std::iter::empty()),
+        event => legacy_event_row(event),
+    }));
+    assert_eq!(h.eval_graph("g.node-events"), node_rows);
+    // The legacy `events` are the nodes' that show one.
+    assert_eq!(
+        h.eval_graph("(filter (lambda (row) (> (len row) 0)) g.node-events)"),
+        legacy_event_rows(&get(&legacy, "events"))
+    );
+    assert_eq!(h.eval_graph("g.deltas"), get(&legacy, "delta-matrix"));
+    assert_eq!(
+        h.eval_graph("g.node-deltas"),
+        legacy_column(&get(&legacy, "node-delta-column"))
+    );
+    assert_eq!(
+        h.eval_graph("g.group-activity"),
+        legacy_column(&get(&legacy, "group-activity-matrix"))
+    );
+    assert_eq!(
+        h.eval_graph("g.group-suppression"),
+        legacy_column(&get(&legacy, "group-suppression-matrix"))
+    );
+    // Rows: no track is -1; a node's latest shows the display transforms.
+    let row = |cells: [f64; 5]| list_value(cells.map(number));
+    assert_eq!(
+        h.eval_graph("(list (first g.events) (nth g.node-events 1))"),
+        list_value([
+            row([0.0, -1.0, 1.0, -7.256_f32 as f64, 1.5]),
+            row([1.0, 3.0, 2.0, -7.26, 1.0]),
+        ])
+    );
+
+    // Observed: pushed, then an idle tick reads the stamp alone.
+    h.eval_graph(
+        r#"(effect-buffer "*events*" (label (str (len g.events) (len g.node-events) (len g.deltas) (len g.node-deltas) (len g.group-activity) (len g.group-suppression))))"#,
+    );
+    h.editor.runtime_mut().run_reactive_cycle();
+    h.sync();
+    let g = h.graph_instance("g");
+    for key in streams {
+        assert!(h.computed(key) > 0, "{key:?} observed");
+    }
+    let pushed = first_row(&h, g, "events");
+    // Same stamp, other history: not read (the stamp says nothing moved).
+    state.set_graph_visualizations(vec![snapshot(7, &[graph_event(1, 9.0)])]);
+    for _ in 0..3 {
+        h.sync();
+    }
+    assert!(
+        Rc::ptr_eq(&pushed, &first_row(&h, g, "events")),
+        "no push while idle"
+    );
+    assert_eq!(h.eval_graph("(len g.events)"), number(2.0));
+    // Playing: a new stamp pushes the new history and latest events.
+    let played = [
+        graph_event(0, 1.0),
+        graph_event(1, 2.0),
+        graph_event(0, 3.0),
+    ];
+    state.set_graph_visualizations(vec![snapshot(8, &played)]);
+    h.sync();
+    let legacy = items(&build_graph_visualizations_value(&state))[0].clone();
+    assert_eq!(
+        h.eval_graph("g.events"),
+        legacy_event_rows(&get(&legacy, "event-history"))
+    );
+    assert_eq!(
+        h.eval_graph("(first (nth g.node-events 1))"),
+        number(0.0),
+        "node 1 shows the latest event"
+    );
+    // The history dropping its oldest row.
+    let shifted = [
+        graph_event(1, 2.0),
+        graph_event(0, 3.0),
+        graph_event(1, 4.0),
+    ];
+    state.set_graph_visualizations(vec![GraphVisualizationSnapshot {
+        history_stamp: 30,
+        event_history: shifted.to_vec(),
+        ..snapshot(8, &played)
+    }]);
+    h.sync();
+    assert_eq!(h.eval_graph("(nth (nth g.events 2) 2)"), number(4.0));
+    // A node event expiring re-pushes node-events alone.
+    let nodes_pushed = first_row(&h, g, "node-events");
+    let events_pushed = first_row(&h, g, "events");
+    state.set_graph_visualizations(vec![GraphVisualizationSnapshot {
+        history_stamp: 30,
+        event_history: shifted.to_vec(),
+        node_events: vec![None, None],
+        node_events_stamp: 31,
+        ..snapshot(8, &played)
+    }]);
+    h.sync();
+    assert!(!Rc::ptr_eq(&nodes_pushed, &first_row(&h, g, "node-events")));
+    assert_eq!(
+        h.eval_graph("g.node-events"),
+        h.eval_graph("(list (list) (list))")
+    );
+    assert!(
+        Rc::ptr_eq(&events_pushed, &first_row(&h, g, "events")),
+        "events not re-pushed"
+    );
+    // A reset clears them.
+    state.set_graph_visualizations(vec![GraphVisualizationSnapshot {
+        node_events: vec![None, None],
+        ..snapshot(9, &[])
+    }]);
+    h.sync();
+    assert_eq!(
+        h.eval_graph("(list g.events g.node-events)"),
+        h.eval_graph("(list (list) (list (list) (list)))")
+    );
+    // Before the scheduler runs the graph: none, sized to its nodes.
+    state.set_graph_visualizations(Vec::new());
+    h.sync();
+    assert_eq!(
+        h.eval_graph("(list (len g.events) (len g.node-events) g.group-activity)"),
+        h.eval_graph("(list 0 (len g.nodes) (list 0 0 0 0))")
+    );
+}
+
+#[test]
+fn transport_track_events_read_like_the_legacy_and_skip_an_unchanged_revision() {
+    let mut h = Harness::new();
+    let state = h.shared.state.clone();
+    let event = |track: usize, beat: f64| TrackOutputEvent {
+        track,
+        sample_time: (beat * 1000.0) as u64,
+        beat,
+        transpose: 7.0,
+        velocity: 0.5,
+        ..Default::default()
+    };
+    state.set_track_output_current_beat(2.0);
+    state.append_track_output_events([event(1, 1.5)]);
+    for _ in 0..3 {
+        h.sync();
+    }
+    assert_eq!(h.computed(f::TRANSPORT_TRACK_EVENTS), 0, "unobserved");
+    // Cold reads: the legacy `SEQ.track-events`, as rows (no node: -1).
+    assert_eq!(
+        h.eval_all("transport.track-events"),
+        legacy_event_rows(&build_track_output_events_value(&state))
+    );
+    assert_eq!(
+        h.eval_all("(first transport.track-events)"),
+        h.eval_all("(list -1 1 1.5 7 0.5)")
+    );
+    assert_eq!(
+        h.eval_all("transport.track-events-beat"),
+        build_track_output_current_beat_value(&state)
+    );
+
+    h.eval_all(
+        r#"(effect-buffer "*track-events*" (label (str (len transport.track-events) transport.track-events-beat)))"#,
+    );
+    h.editor.runtime_mut().run_reactive_cycle();
+    h.sync();
+    let transport = h.singleton(TRANSPORT);
+    let pushed = first_row(&h, transport, "track-events");
+    // Idle: the revision alone is read; an empty append moves nothing.
+    let revision = state.track_output_events_revision();
+    state.append_track_output_events([]);
+    assert_eq!(state.track_output_events_revision(), revision);
+    for _ in 0..3 {
+        h.sync();
+    }
+    assert!(Rc::ptr_eq(
+        &pushed,
+        &first_row(&h, transport, "track-events")
+    ));
+    // Playing: an append and the scheduler's beat push.
+    state.append_track_output_events([event(0, 3.0)]);
+    state.set_track_output_current_beat(3.5);
+    h.sync();
+    assert_eq!(
+        h.eval_all("transport.track-events"),
+        legacy_event_rows(&build_track_output_events_value(&state))
+    );
+    assert_eq!(h.eval_all("transport.track-events-beat"), number(3.5));
+    state.clear_track_output_events();
+    h.sync();
+    assert_eq!(h.eval_all("transport.track-events"), h.eval_all("(list)"));
+}
+
+#[test]
+fn row_history_builds_only_new_rows() {
+    let cells = |history: &RowHistory| match history.value() {
+        Value::List(cells) => cells,
+        other => panic!("{other:?}"),
+    };
+    let row = |beat: f64| [0.0, -1.0, beat, 0.0, 1.0];
+    let mut history = RowHistory::default();
+    history.update(|rows| rows.extend([row(1.0), row(2.0)]));
+    let first = cells(&history);
+    // Grown at the end: the kept rows keep their cells.
+    history.update(|rows| rows.extend([row(1.0), row(2.0), row(3.0)]));
+    let grown = cells(&history);
+    assert!(Rc::ptr_eq(&first[0], &grown[0]) && Rc::ptr_eq(&first[1], &grown[1]));
+    // Dropped from the front: the rest keep theirs.
+    history.update(|rows| rows.extend([row(2.0), row(3.0), row(4.0)]));
+    let shifted = cells(&history);
+    assert!(Rc::ptr_eq(&grown[1], &shifted[0]) && Rc::ptr_eq(&grown[2], &shifted[1]));
+    assert_eq!(
+        history.value(),
+        list_value([2.0, 3.0, 4.0].map(|beat| numbers(&row(beat))))
+    );
+    // Reset and refilled: nothing kept.
+    history.update(|rows| rows.push(row(9.0)));
+    assert!(!shifted
+        .iter()
+        .any(|cell| Rc::ptr_eq(cell, &cells(&history)[0])));
+    history.update(|_| ());
+    assert_eq!(history.value(), list_value(std::iter::empty()));
 }
