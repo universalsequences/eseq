@@ -1,7 +1,11 @@
 //! The host kinds' device setters (kind-bindings spec §14.2b, §14.2f):
 //! `set-device-param` (`param.base`), `set-device-param-locks` /
 //! `clear-device-param-locks` (`lock-param!` / `unlock-param!`) and
-//! `set-device` (`device.voices`, `device.delete-target`, `device.base-note`).
+//! `set-device` (`device.voices`, `device.delete-target`, `device.base-note`,
+//! a rack slot's strip controls `gain`, `pan`, `muted`, `soloed`, `choke`
+//! and `enabled`), and `set-device-strip-locks` / `clear-device-strip-locks`
+//! (`lock-strip!` / `unlock-strip!`: a rack slot's gain, pan, mute and solo
+//! p-locks).
 //!
 //! A device is named by its owner's stable id, `:track-id` (a track's
 //! chain, MIDI effects, drum rack slots and their effects) or `:bus-id` (a
@@ -25,14 +29,26 @@
 //! value field; shared helpers). Bus effects take no p-locks, and a rack
 //! slot's instrument p-locks have no clear command yet: both are errors.
 //!
-//! Gestures as [`super::ScriptEdit`]: a base edit or a voices edit while
+//! A strip control's value follows the value rule: gain a number in 0–2,
+//! pan in −1–1, the choke group an integer in 0–16 (0: none), the flags a
+//! bool; anything else (or a device that is no rack slot) is an error that
+//! changes nothing. They go through the legacy rack strip commands'
+//! history edits (`SetRackSlotGain`, …, `SetRackSlotParamPlockMulti`,
+//! `ClearRackSlotParamPlockMulti`) with their refreshes
+//! (`rack_slot_strip_applied`, `rack_slot_plock_applied`).
+//!
+//! Gestures as [`super::ScriptEdit`]: a base edit, a gain or pan edit or a
+//! voices edit while
 //! the pointer is down stays open and later script edits join it (a drag
 //! view's `set!` per frame is one undo entry, which the release ends); any
 //! other script edit ends its entry at once. An edit landing while another
 //! gesture is active (a user's knob drag) gets an entry of its own beside
 //! it.
 
-use super::rack::{rack_param_applied, rack_slot_voices_applied};
+use super::rack::{
+    rack_param_applied, rack_slot_plock_applied, rack_slot_strip_applied, rack_slot_voices_applied,
+    StripControl,
+};
 use super::routing::bus_effect_param_applied;
 use super::track_settings::SetValue;
 use super::{apply_device_param_base, clear_plocks_command, step_list, ScriptEdit};
@@ -44,6 +60,8 @@ pub(super) const COMMANDS: &[&str] = &[
     "set-device-param-locks",
     "clear-device-param-locks",
     "set-device",
+    "set-device-strip-locks",
+    "clear-device-strip-locks",
 ];
 
 type Payload = HashMap<String, Rc<RefCell<Value>>>;
@@ -93,6 +111,9 @@ pub(super) fn handle(
     };
     let result = match name {
         "set-device" => device_edit(map, app, editor, ctx),
+        "set-device-strip-locks" | "clear-device-strip-locks" => {
+            strip_lock_edit(name, map, app, editor, ctx)
+        }
         _ => param_edit(name, map, app, editor, ctx),
     };
     if let Err(message) = result {
@@ -165,51 +186,35 @@ fn param_edit(
     let Some(track_id) = track_id else {
         return Err("bus effects take no p-locks".into());
     };
-    let steps = map_usize_list(map, "steps").unwrap_or_default();
-    let tracks = map_usize_list(map, "step-tracks").unwrap_or_default();
-    if tracks.len() != steps.len() || tracks.iter().any(|tid| *tid as u64 != track_id.0) {
-        return Err("steps must be steps of the param's track".into());
-    }
+    let steps = super::track_steps(map, track_id, "the param's track")?;
+    let locking = name == "set-device-param-locks";
+    let lock = match locking {
+        true => Some(value.ok_or("needs a :value")?),
+        false => None,
+    };
     // The step the rack panel shows, and whether it held a lock before
     // (a rack lock's row refresh, as the rack knobs do).
     let shown = rack_target(device, param_idx).and_then(|_| {
         let selected = selected_plock_step(&ctx.shared.selected_steps);
         displayed_plock_step(&state, owner, selected)
     });
-    let (locks, shown_locked): (Vec<Option<f32>>, bool) = device
+    let (steps, shown_locked) = device
         .with_values(&state, &app.buses, owner, |values| {
-            let locks = steps.iter().map(|step| values.lock(*step, param_idx));
-            let shown_locked = shown.is_some_and(|step| values.lock(step, param_idx).is_some());
-            (locks.collect(), shown_locked)
+            let held = |step| values.lock(step, param_idx);
+            let shown_locked = shown.is_some_and(|step| held(step).is_some());
+            (pending_steps(&steps, held, lock), shown_locked)
         })
         .ok_or("the device is gone")?;
     let track = owner;
-    let locking = name == "set-device-param-locks";
-    let (steps, command) = if locking {
-        let value = value.ok_or("needs a :value")?;
-        let pending = steps
-            .iter()
-            .zip(&locks)
-            .filter(|(_, lock)| **lock != Some(value));
-        let steps = step_list(pending.map(|(step, _)| *step));
-        let command = device.lock_command(track, steps.clone(), param_idx, value);
-        (steps, command)
-    } else {
-        let (target, slot_idx, rack_slot) = device
-            .plock_target()
-            .ok_or("a rack slot instrument's p-locks have no clear command yet")?;
-        let locked = steps.iter().zip(&locks).filter(|(_, lock)| lock.is_some());
-        let steps = step_list(locked.map(|(step, _)| *step));
-        let command = clear_plocks_command(
-            app,
-            target,
-            track,
-            steps.clone(),
-            param_idx,
-            slot_idx,
-            rack_slot,
-        );
-        (steps, command)
+    let command = match lock {
+        Some(value) => device.lock_command(track, steps.clone(), param_idx, value),
+        None => {
+            let (target, slot_idx, rack_slot) = device
+                .plock_target()
+                .ok_or("a rack slot instrument's p-locks have no clear command yet")?;
+            let steps = steps.clone();
+            clear_plocks_command(app, target, track, steps, param_idx, slot_idx, rack_slot)
+        }
     };
     let Some(command) = command.filter(|_| !steps.is_empty()) else {
         return Ok(());
@@ -221,26 +226,51 @@ fn param_edit(
         if let Some(invalidation) = device.invalidation(track, param_idx, true) {
             invalidations.push(invalidation);
         }
+        let rows = plock_rows(shown, shown_locked, &steps, locking);
         invalidations.push(UiInvalidation::StepInvalidationBatch {
             track,
-            steps: steps.clone(),
+            steps,
             change: StepInvalidation::PlockPresence,
         });
         if let Some(target) = rack_target(device, param_idx) {
             let rebuild = param_change_needs_fx_rebuild(&pdesc);
-            // The shown step's row set moves when a lock lands there anew
-            // (as the rack knobs' `for_plock_write`) or is cleared there.
-            let touched = shown.is_some_and(|step| steps.contains(&step));
-            let rows = match (touched, locking) {
-                (false, _) => RackPlockRowsSync::Unchanged,
-                (true, true) => RackPlockRowsSync::for_plock_write(shown_locked),
-                (true, false) => RackPlockRowsSync::RowSetChanged,
-            };
             rack_param_applied(editor, app, ctx, track, target, rebuild, Some(rows));
         }
     }
     script.end(app, ctx, false, changed);
     Ok(())
+}
+
+/// The steps of `steps` a lock edit acts on (sorted, deduplicated): those
+/// whose lock (`held`) differs from `lock`, or, to clear (`None`), that
+/// hold one.
+fn pending_steps(
+    steps: &[usize],
+    held: impl Fn(usize) -> Option<f32>,
+    lock: Option<f32>,
+) -> Vec<usize> {
+    step_list(steps.iter().copied().filter(|step| match lock {
+        Some(lock) => held(*step) != Some(lock),
+        None => held(*step).is_some(),
+    }))
+}
+
+/// How a lock edit on `steps` moves the rack panel's p-lock rows at the
+/// shown step: a lock landing there anew (as the rack knobs'
+/// `for_plock_write`, `shown_locked`: it held one before) or a clear there
+/// changes the row set.
+fn plock_rows(
+    shown: Option<usize>,
+    shown_locked: bool,
+    steps: &[usize],
+    locking: bool,
+) -> RackPlockRowsSync {
+    let touched = shown.is_some_and(|step| steps.contains(&step));
+    match (touched, locking) {
+        (false, _) => RackPlockRowsSync::Unchanged,
+        (true, true) => RackPlockRowsSync::for_plock_write(shown_locked),
+        (true, false) => RackPlockRowsSync::RowSetChanged,
+    }
 }
 
 /// Set a device param's base (stored units) through its family's history
@@ -373,8 +403,131 @@ fn device_edit(
             script.end(app, ctx, true, changed);
             Ok(())
         }
-        other => Err(format!("a device has no settable field {other}")),
+        other => match StripControl::from_field(other) {
+            Some(control) => strip_edit(owner, device, control, &value, app, editor, ctx),
+            None => Err(format!("a device has no settable field {other}")),
+        },
     }
+}
+
+/// A strip control's base edit (`set-device` `gain`, `pan`, `muted`,
+/// `soloed`, `choke`, `enabled`): the value the slot holds now is a no-op
+/// (even one stored out of range), else the value rule, then the legacy
+/// command through history (a gain or pan drag joins one entry) and its
+/// refresh.
+fn strip_edit(
+    owner: usize,
+    device: DeviceSlot,
+    control: StripControl,
+    value: &SetValue<'_>,
+    app: &mut app::App,
+    editor: &mut Editor,
+    ctx: &mut LoopCtx<'_>,
+) -> Result<(), String> {
+    let DeviceSlot::RackSlot(slot_idx) = device else {
+        return Err(match control {
+            StripControl::Enabled => format!("a {}'s enabled is not settable", device.role()),
+            _ => format!("a {} has no {}", device.role(), control.field()),
+        });
+    };
+    let current = with_rack_slot(&app.state, owner, slot_idx, |_, slot| control.read(slot))
+        .ok_or("the device is gone")?;
+    if current.is(value.value()) {
+        return Ok(());
+    }
+    let wanted = control.parse(value)?;
+    let continuous = matches!(control, StripControl::Gain | StripControl::Pan);
+    let script = ScriptEdit::begin(app, ctx);
+    let changed = script.apply(app, control.command(owner, slot_idx, wanted));
+    if changed {
+        rack_slot_strip_applied(editor, app, ctx, owner, slot_idx, control);
+    }
+    script.end(app, ctx, continuous, changed);
+    Ok(())
+}
+
+/// `set-device-strip-locks` / `clear-device-strip-locks` (`:field` `gain`,
+/// `pan`, `muted` or `soloed`, `:steps` with their `:step-tracks`, and a
+/// lock's `:value` under the value rule): the steps whose lock differs (or
+/// that hold one, to clear) through `SetRackSlotParamPlockMulti` /
+/// `ClearRackSlotParamPlockMulti`, one undo entry.
+fn strip_lock_edit(
+    name: &str,
+    map: &Payload,
+    app: &mut app::App,
+    editor: &mut Editor,
+    ctx: &mut LoopCtx<'_>,
+) -> Result<(), String> {
+    let Addressed {
+        owner,
+        device,
+        track_id,
+    } = addressed(app, map)?;
+    let (field, value) = SetValue::field(map)?;
+    let control = StripControl::from_field(&field);
+    let Some((control, param)) = control.and_then(|control| Some((control, control.param()?)))
+    else {
+        return Err(format!(
+            "{field} takes no p-locks (gain, pan, muted or soloed)"
+        ));
+    };
+    let (DeviceSlot::RackSlot(slot_idx), Some(track_id)) = (device, track_id) else {
+        return Err(format!("a {} has no strip controls", device.role()));
+    };
+    let locking = name == "set-device-strip-locks";
+    let lock = match locking {
+        true => Some(control.parse(&value)?.number()),
+        false => None,
+    };
+    let steps = super::track_steps(map, track_id, "the device's track")?;
+    let track = owner;
+    let state = app.state.clone();
+    // The step the rack panel shows, and whether it held a lock before
+    // (its p-lock rows move when a lock lands there anew or is cleared).
+    let shown = displayed_plock_step(
+        &state,
+        track,
+        selected_plock_step(&ctx.shared.selected_steps),
+    );
+    let (steps, shown_locked) = with_rack_slot(&state, track, slot_idx, |_, slot| {
+        let held = |step| slot.param_plocks.get(step, param);
+        let shown_locked = shown.is_some_and(|step| held(step).is_some());
+        (pending_steps(&steps, held, lock), shown_locked)
+    })
+    .ok_or("the device is gone")?;
+    if steps.is_empty() {
+        return Ok(());
+    }
+    let command = match lock {
+        Some(value) => app::AppCommand::SetRackSlotParamPlockMulti {
+            track,
+            slot_idx,
+            steps: steps.clone(),
+            param,
+            value,
+        },
+        None => app::AppCommand::ClearRackSlotParamPlockMulti {
+            track,
+            slot_idx,
+            steps: steps.clone(),
+            param,
+        },
+    };
+    let script = ScriptEdit::begin(app, ctx);
+    let changed = script.apply(app, command);
+    if changed {
+        let rows = plock_rows(shown, shown_locked, &steps, locking);
+        ctx.shared
+            .ui_invalidations
+            .push(UiInvalidation::StepInvalidationBatch {
+                track,
+                steps,
+                change: StepInvalidation::PlockPresence,
+            });
+        rack_slot_plock_applied(editor, app, ctx, track, slot_idx, param, rows);
+    }
+    script.end(app, ctx, false, changed);
+    Ok(())
 }
 
 /// Rack slot `slot_idx` of `track`'s voices (`device.voices`).

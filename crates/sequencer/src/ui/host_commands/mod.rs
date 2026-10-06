@@ -42,12 +42,13 @@ mod song;
 mod step_history;
 mod track_settings;
 use effects::{apply_device_param_base, rebuild_panel_if_needed};
-use step_history::{clear_plocks_command, step_list};
+use step_history::{clear_plocks_command, step_list, track_steps};
 mod tracks;
 
 pub(crate) use dispatch::dispatch_custom_host_command;
 pub(crate) use routing::apply_bus_routing_command;
 pub(crate) use rack::initialize_loaded_rack_view;
+pub(crate) use rack::StripControl;
 pub(crate) use rack_grooves::apply_rack_groove_command;
 #[cfg(test)]
 pub(crate) use learn::open_patch_learn_buffer;

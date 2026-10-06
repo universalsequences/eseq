@@ -1766,6 +1766,21 @@ pub(super) fn variant_edit_applied(shared: &SharedHandles) {
     shared.ui_epoch.fetch_add(1, Ordering::Relaxed);
 }
 
+/// A command's `:steps`, whose `:step-tracks` must each name `track_id`
+/// (else an error: the steps must be steps of `noun`).
+pub(super) fn track_steps(
+    map: &std::collections::HashMap<String, std::rc::Rc<std::cell::RefCell<Value>>>,
+    track_id: sequencer::sequencer::TrackId,
+    noun: &str,
+) -> Result<Vec<usize>, String> {
+    let steps = map_usize_list(map, "steps").unwrap_or_default();
+    let tracks = map_usize_list(map, "step-tracks").unwrap_or_default();
+    if tracks.len() != steps.len() || tracks.iter().any(|tid| *tid as u64 != track_id.0) {
+        return Err(format!("steps must be steps of {noun}"));
+    }
+    Ok(steps)
+}
+
 /// Steps sorted, deduplicated, within `MAX_STEPS`.
 pub(super) fn step_list(steps: impl IntoIterator<Item = usize>) -> Vec<usize> {
     let mut steps: Vec<usize> = steps.into_iter().filter(|step| *step < MAX_STEPS).collect();

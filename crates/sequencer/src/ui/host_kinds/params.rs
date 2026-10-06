@@ -803,7 +803,12 @@ impl HostKinds {
                 }
                 self.device_observed.entries[index].2 = Some(key);
             }
-            self.push_device_fields(pusher, id, &source, mask);
+            let strips = mask & bits.strips;
+            if strips != 0 {
+                let (sources, shared) = (pusher.sources, pusher.shared);
+                (self.devices).queue_strips(sources, shared, id, &source, strips);
+            }
+            self.push_device_fields(pusher, id, &source, mask & !strips);
             let registered = pusher.shared.borrow().param_devices.contains(&id);
             if mask & *DEVICE_PARAMS_BIT != 0 && !registered {
                 if let Some(params) = register_params(&mut *pusher.rt, pusher.shared, id) {
@@ -813,6 +818,7 @@ impl HostKinds {
                 }
             }
         }
+        self.devices.push_strips(pusher);
         // Rebuilt from the registered devices' params only when the observer
         // epoch moved: a tick between costs work in proportion to the
         // observed params.
@@ -917,6 +923,8 @@ struct DeviceBits {
     key_locked_notes: u32,
     variants: u32,
     plock_keyed: u32,
+    /// The strip fields' ([`strip_keys`]).
+    strips: u32,
 }
 
 impl DeviceBits {
@@ -932,6 +940,7 @@ impl DeviceBits {
                 key_locked_notes,
                 variants,
                 plock_keyed: key_locked_notes | variants,
+                strips: DEVICE_LIVE.bits(&strip_keys().collect::<Vec<_>>()),
             }
         });
         &BITS

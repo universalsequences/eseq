@@ -842,6 +842,19 @@ pub(crate) mod f {
     pub(crate) const DEVICE_KEY_LOCKED_NOTES: FieldKey = (DEVICE, "key-locked-notes");
     pub(crate) const DEVICE_VARIANTS: FieldKey = (DEVICE, "variants");
     pub(crate) const DEVICE_MACROS: FieldKey = (DEVICE, "macros");
+    pub(crate) const DEVICE_GAIN: FieldKey = (DEVICE, "gain");
+    pub(crate) const DEVICE_GAIN_DISPLAY: FieldKey = (DEVICE, "gain-display");
+    pub(crate) const DEVICE_GAIN_LOCKED: FieldKey = (DEVICE, "gain-locked");
+    pub(crate) const DEVICE_PAN: FieldKey = (DEVICE, "pan");
+    pub(crate) const DEVICE_PAN_DISPLAY: FieldKey = (DEVICE, "pan-display");
+    pub(crate) const DEVICE_PAN_LOCKED: FieldKey = (DEVICE, "pan-locked");
+    pub(crate) const DEVICE_MUTED: FieldKey = (DEVICE, "muted");
+    pub(crate) const DEVICE_MUTED_DISPLAY: FieldKey = (DEVICE, "muted-display");
+    pub(crate) const DEVICE_MUTED_LOCKED: FieldKey = (DEVICE, "muted-locked");
+    pub(crate) const DEVICE_SOLOED: FieldKey = (DEVICE, "soloed");
+    pub(crate) const DEVICE_SOLOED_DISPLAY: FieldKey = (DEVICE, "soloed-display");
+    pub(crate) const DEVICE_SOLOED_LOCKED: FieldKey = (DEVICE, "soloed-locked");
+    pub(crate) const DEVICE_CHOKE: FieldKey = (DEVICE, "choke");
 
     pub(crate) const PARAM_DEVICE: FieldKey = (PARAM, "device");
     pub(crate) const PARAM_INDEX: FieldKey = (PARAM, "index");
@@ -1215,6 +1228,21 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     (f::DEVICE_VARIANTS, "(list-of variant)", Live),
     // The rack macro sync (`macros`), when the rack's macros moved.
     (f::DEVICE_MACROS, "(list-of rack-macro)", Model),
+    // A rack slot's strip controls (`devices::rack_strip_field`): computed
+    // while observed, under one rack lock per tick.
+    (f::DEVICE_GAIN, ":number", Live),
+    (f::DEVICE_GAIN_DISPLAY, ":number", Live),
+    (f::DEVICE_GAIN_LOCKED, ":bool", Live),
+    (f::DEVICE_PAN, ":number", Live),
+    (f::DEVICE_PAN_DISPLAY, ":number", Live),
+    (f::DEVICE_PAN_LOCKED, ":bool", Live),
+    (f::DEVICE_MUTED, ":bool", Live),
+    (f::DEVICE_MUTED_DISPLAY, ":bool", Live),
+    (f::DEVICE_MUTED_LOCKED, ":bool", Live),
+    (f::DEVICE_SOLOED, ":bool", Live),
+    (f::DEVICE_SOLOED_DISPLAY, ":bool", Live),
+    (f::DEVICE_SOLOED_LOCKED, ":bool", Live),
+    (f::DEVICE_CHOKE, ":int", Live),
     (f::PARAM_DEVICE, "device", Model),
     (f::PARAM_INDEX, ":int", Model),
     (f::PARAM_NAME, ":string", Model),

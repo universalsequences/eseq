@@ -36,8 +36,18 @@
 //! Rack slot devices are synced under the rack lock (nothing in a push
 //! reads the rack). `voices` (a rack slot's max polyphony) is a model field
 //! of that pass; `delete-target` is live (the device sync's observed list).
+//!
+//! **Strip controls** (eseq-0l17.42). A rack slot's `gain`, `pan`, `muted`,
+//! `soloed` (each with its `-display` and `-locked`) and `choke` are live
+//! fields: the device live loop collects the observed ones and reads them
+//! all under one rack lock per tick ([`DeviceState::push_strips`]); a cold
+//! read takes the lock for its one field ([`device_strip_field`]). The
+//! shown value is `rack_slot_control_value` (shared with the legacy rack
+//! panel fields) at the displayed step (the current track's selected step,
+//! else its playing step).
 
 use super::*;
+use crate::host_commands::StripControl;
 use sequencer::effects::EffectDescriptor;
 use std::hash::{Hash, Hasher};
 
@@ -64,6 +74,24 @@ pub(crate) struct DeviceState {
     pub(crate) racks_synced: u64,
     /// MIDI effect library loads, for tests.
     pub(crate) midi_fx_loads: u64,
+    /// The observed strip fields this tick, and the values read under the
+    /// rack lock, pushed once it is released (both reused across ticks).
+    strip_work: Vec<StripWork>,
+    strip_pending: Vec<(InstanceId, FieldKey, Value)>,
+    /// Rack locks the strip fields took, for tests (one per tick at most).
+    pub(crate) strip_locks: u64,
+}
+
+/// One observed device's strip fields to read this tick.
+struct StripWork {
+    id: InstanceId,
+    /// The device's track.
+    track: usize,
+    device: DeviceSlot,
+    /// The displayed step (read before the rack lock).
+    step: Option<usize>,
+    /// The observed strip bits.
+    mask: u32,
 }
 
 /// One rack's devices as of its last pass.
@@ -625,5 +653,190 @@ impl DeviceState {
         outcome.ids_changed = ids != self.bus_ids;
         self.bus_ids = ids;
         outcome
+    }
+}
+
+/// What a strip field reads of its control: the slot's own value, the value
+/// shown at the displayed step, or whether that step locks it.
+#[derive(Clone, Copy)]
+enum StripPart {
+    Base,
+    Display,
+    Locked,
+}
+
+/// The strip fields: each with the strip control it reads and what it reads
+/// of it.
+const STRIP_FIELDS: [(FieldKey, StripControl, StripPart); 13] = [
+    (f::DEVICE_GAIN, StripControl::Gain, StripPart::Base),
+    (
+        f::DEVICE_GAIN_DISPLAY,
+        StripControl::Gain,
+        StripPart::Display,
+    ),
+    (f::DEVICE_GAIN_LOCKED, StripControl::Gain, StripPart::Locked),
+    (f::DEVICE_PAN, StripControl::Pan, StripPart::Base),
+    (f::DEVICE_PAN_DISPLAY, StripControl::Pan, StripPart::Display),
+    (f::DEVICE_PAN_LOCKED, StripControl::Pan, StripPart::Locked),
+    (f::DEVICE_MUTED, StripControl::Mute, StripPart::Base),
+    (
+        f::DEVICE_MUTED_DISPLAY,
+        StripControl::Mute,
+        StripPart::Display,
+    ),
+    (
+        f::DEVICE_MUTED_LOCKED,
+        StripControl::Mute,
+        StripPart::Locked,
+    ),
+    (f::DEVICE_SOLOED, StripControl::Solo, StripPart::Base),
+    (
+        f::DEVICE_SOLOED_DISPLAY,
+        StripControl::Solo,
+        StripPart::Display,
+    ),
+    (
+        f::DEVICE_SOLOED_LOCKED,
+        StripControl::Solo,
+        StripPart::Locked,
+    ),
+    (f::DEVICE_CHOKE, StripControl::Choke, StripPart::Base),
+];
+
+/// The strip fields' keys.
+pub(super) fn strip_keys() -> impl Iterator<Item = FieldKey> {
+    STRIP_FIELDS.iter().map(|(key, ..)| *key)
+}
+
+/// Whether `key` is a strip field.
+pub(super) fn is_strip_field(key: FieldKey) -> bool {
+    STRIP_FIELDS.iter().any(|(strip, ..)| *strip == key)
+}
+
+/// Strip field `key` of rack slot `slot_idx` of `rack` (read under the rack
+/// lock) at the displayed step `step`; `None` for another key. The base
+/// value is the slot's stored one, unclamped (as `set-device` compares it),
+/// so it round-trips as a no-op.
+fn rack_strip_field(
+    rack: &sequencer::sequencer::RackTrackSnapshot,
+    slot_idx: usize,
+    slot: &sequencer::sequencer::RackSlotSnapshot,
+    key: FieldKey,
+    step: Option<usize>,
+) -> Option<Value> {
+    let &(_, control, part) = STRIP_FIELDS.iter().find(|(strip, ..)| *strip == key)?;
+    let Some(param) = control.param() else {
+        return Some(number(control.read(slot).number()));
+    };
+    Some(match part {
+        StripPart::Base => rack_slot_control_reactive_value(param, control.read(slot).number()),
+        StripPart::Display => rack_slot_control_reactive_value(
+            param,
+            rack_slot_control_value(rack, slot_idx, slot, param, step),
+        ),
+        StripPart::Locked => {
+            Value::Bool(step.is_some_and(|step| slot.param_plocks.get(step, param).is_some()))
+        }
+    })
+}
+
+/// Strip field `key` of a device that is no rack slot: 0 or false.
+fn no_strip_field(key: FieldKey) -> Option<Value> {
+    let &(_, control, part) = STRIP_FIELDS.iter().find(|(strip, ..)| *strip == key)?;
+    Some(match (control.param(), part) {
+        (_, StripPart::Locked) => Value::Bool(false),
+        (Some(param), _) => rack_slot_control_reactive_value(param, 0.0),
+        (None, _) => number(0),
+    })
+}
+
+/// Strip field `key` of `device` (the reader hook's cold read); `None`
+/// while its slot is gone.
+pub(super) fn device_strip_field(
+    sources: &KindsHandles,
+    shared: &RefCell<KindsShared>,
+    device: &DeviceSource,
+    key: FieldKey,
+) -> Option<Value> {
+    let DeviceSlot::RackSlot(slot_idx) = device.device else {
+        return no_strip_field(key);
+    };
+    let step = display_step(sources, shared, device.owner);
+    with_rack_slot(&sources.state, device.owner, slot_idx, |rack, slot| {
+        rack_strip_field(rack, slot_idx, slot, key, step)
+    })
+    .flatten()
+}
+
+impl DeviceState {
+    /// Queue observed device `id`'s strip fields in `mask` (strip bits
+    /// only) for [`Self::push_strips`].
+    pub(super) fn queue_strips(
+        &mut self,
+        sources: &KindsHandles,
+        shared: &RefCell<KindsShared>,
+        id: InstanceId,
+        device: &DeviceSource,
+        mask: u32,
+    ) {
+        // The displayed step before the rack lock (it reads the selection).
+        let step = match device.device {
+            DeviceSlot::RackSlot(_) => display_step(sources, shared, device.owner),
+            _ => None,
+        };
+        self.strip_work.push(StripWork {
+            id,
+            track: device.owner,
+            device: device.device,
+            step,
+            mask,
+        });
+    }
+
+    /// Read every queued strip field under one rack lock, then push them.
+    pub(super) fn push_strips(&mut self, pusher: &mut Pusher<'_>) {
+        if self.strip_work.is_empty() {
+            return;
+        }
+        let pending = &mut self.strip_pending;
+        let any_slot =
+            (self.strip_work.iter()).any(|work| matches!(work.device, DeviceSlot::RackSlot(_)));
+        {
+            let racks = any_slot.then(|| pusher.sources.state.pattern.rack_tracks.lock().unwrap());
+            if any_slot {
+                self.strip_locks += 1;
+            }
+            for work in &self.strip_work {
+                let StripWork {
+                    id,
+                    track,
+                    device,
+                    step,
+                    mask,
+                } = *work;
+                for (bit, key) in DEVICE_LIVE.keys.iter().enumerate() {
+                    if mask & (1 << bit) == 0 {
+                        continue;
+                    }
+                    let value = match (device, &racks) {
+                        (DeviceSlot::RackSlot(slot_idx), Some(racks)) => {
+                            let rack = racks.get(track).and_then(Option::as_ref);
+                            rack.and_then(|rack| {
+                                let slot = rack.slots.get(slot_idx)?;
+                                rack_strip_field(rack, slot_idx, slot, *key, step)
+                            })
+                        }
+                        _ => no_strip_field(*key),
+                    };
+                    if let Some(value) = value {
+                        pending.push((id, *key, value));
+                    }
+                }
+            }
+        }
+        self.strip_work.clear();
+        for (id, key, value) in pending.drain(..) {
+            pusher.push_computed(id, key, value);
+        }
     }
 }

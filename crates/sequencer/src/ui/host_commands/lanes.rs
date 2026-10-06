@@ -419,12 +419,8 @@ fn set_lane_steps(
         .iter()
         .find(|entry| entry.instance_id == id && entry.inlet_name == inlet)
         .ok_or_else(|| format!("no lane '{inlet}'"))?;
-    let steps = map_usize_list(map, "steps").unwrap_or_default();
-    let track_id = app.track_registry.ids().get(track).map(|id| id.0 as usize);
-    let step_tracks = map_usize_list(map, "step-tracks").unwrap_or_default();
-    if step_tracks.len() != steps.len() || step_tracks.iter().any(|t| Some(*t) != track_id) {
-        return Err("steps must be steps of the lane's track".to_string());
-    }
+    let track_id = app.track_registry.id_at(track).ok_or("the track is gone")?;
+    let steps = super::track_steps(map, track_id, "the lane's track")?;
     let num_steps = state.pattern.track_params[track]
         .get_num_steps()
         .min(MAX_STEPS);

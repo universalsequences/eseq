@@ -291,7 +291,11 @@ pub(crate) fn sync_rack_macro_value_field(
     needs_ui
 }
 
-pub(super) fn rack_slot_control_value(
+/// The value rack slot `slot_idx`'s strip control `param` shows at
+/// `display_step`: the step's p-lock, else a rack macro mapped onto it, else
+/// the slot's own value (the legacy `rack_slot_value_field` and the host
+/// kinds' `device.gain-display`, …).
+pub(crate) fn rack_slot_control_value(
     rack: &sequencer::sequencer::RackTrackSnapshot,
     slot_idx: usize,
     slot: &sequencer::sequencer::RackSlotSnapshot,
@@ -313,6 +317,21 @@ pub(super) fn rack_slot_control_value(
     })
     .map(|value| param.clamp(value))
     .unwrap_or_else(|| param.clamp(slot.param_value_at_step(param, usize::MAX)))
+}
+
+/// A rack slot strip control's value as its fields show it: a flag for
+/// mute and solo, else a number (the legacy `rack_slot_value_field` and the
+/// host kinds' `device.gain`, …).
+pub(crate) fn rack_slot_control_reactive_value(
+    param: sequencer::sequencer::RackSlotParam,
+    value: f32,
+) -> Value {
+    match param {
+        sequencer::sequencer::RackSlotParam::Mute | sequencer::sequencer::RackSlotParam::Solo => {
+            Value::Bool(value > 0.5)
+        }
+        _ => Value::Number(value as f64),
+    }
 }
 
 pub(super) fn set_rack_value_field_updates(
@@ -378,14 +397,7 @@ pub(crate) fn sync_rack_slot_control_value_field(
         };
         rack_slot_control_value(rack, slot_idx, slot, param, display_step)
     };
-    let value = if matches!(
-        param,
-        sequencer::sequencer::RackSlotParam::Mute | sequencer::sequencer::RackSlotParam::Solo
-    ) {
-        Value::Bool(value > 0.5)
-    } else {
-        Value::Number(value as f64)
-    };
+    let value = rack_slot_control_reactive_value(param, value);
     reactive_set_needs_ui(rt.set_reactive(
         "SEQ",
         &rack_slot_value_field(track, slot_idx, param),
@@ -493,15 +505,7 @@ pub(crate) fn sync_rack_panel_param_value_fields(
         for (slot_idx, slot) in rack.slots.iter().enumerate() {
             for param in sequencer::sequencer::RackSlotParam::ALL {
                 let value = rack_slot_control_value(rack, slot_idx, slot, param, display_step);
-                let value = if matches!(
-                    param,
-                    sequencer::sequencer::RackSlotParam::Mute
-                        | sequencer::sequencer::RackSlotParam::Solo
-                ) {
-                    Value::Bool(value > 0.5)
-                } else {
-                    Value::Number(value as f64)
-                };
+                let value = rack_slot_control_reactive_value(param, value);
                 updates.push((rack_slot_value_field(track, slot_idx, param), value));
             }
 
@@ -596,15 +600,7 @@ pub(crate) fn sync_rack_macro_target_value_fields(
                     };
                     let displayed =
                         rack_slot_control_value(rack, *slot, slot_data, param, display_step);
-                    let value = if matches!(
-                        param,
-                        sequencer::sequencer::RackSlotParam::Mute
-                            | sequencer::sequencer::RackSlotParam::Solo
-                    ) {
-                        Value::Bool(displayed > 0.5)
-                    } else {
-                        Value::Number(displayed as f64)
-                    };
+                    let value = rack_slot_control_reactive_value(param, displayed);
                     updates.push((rack_slot_value_field(track, *slot, param), value));
                 }
                 sequencer::sequencer::RackMacroTarget::SlotInstrumentParam {

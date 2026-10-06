@@ -52,11 +52,15 @@ impl Harness {
     }
 
     pub(super) fn rack_slot(&self) -> sequencer::sequencer::RackSlotSnapshot {
+        self.rack_slot_at(0)
+    }
+
+    fn rack_slot_at(&self, slot: usize) -> sequencer::sequencer::RackSlotSnapshot {
         self.shared
             .state
             .live_rack_track_snapshot(2)
             .expect("rack")
-            .slots[0]
+            .slots[slot]
             .clone()
     }
 
@@ -926,4 +930,384 @@ fn value_edits_read_no_file_and_do_no_device_work() {
     h.add_midi_fx(0, "arp");
     h.sync();
     assert_eq!(h.frame.host_kinds.devices.midi_fx_loads, loads);
+}
+
+impl Harness {
+    /// Rack track 2 (see [`Self::rack_track`]) gains a second, blank
+    /// sampler slot (through the recorded slot add, which binds its id).
+    fn second_rack_slot(&mut self) {
+        let buffer = sequencer::instruments::sampler::create_silent_buffer(self.app.graph.lg.0)
+            .expect("buffer");
+        self.app
+            .apply_recorded_rack_slot_add(2, "Add rack sample", |app| {
+                app.graph_controller()
+                    .add_sampler_slot_to_rack_buffer(2, buffer, 44_100, "Second")
+            })
+            .expect("second slot");
+        self.shared.ui_epoch.fetch_add(1, Ordering::Relaxed);
+        self.shared.fx_epoch.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn strip_computed(&self) -> u64 {
+        strip_keys().map(|key| self.computed(key)).sum()
+    }
+}
+
+#[test]
+fn rack_slot_strip_controls_read_their_base_display_and_lock_state() {
+    let mut h = Harness::new();
+    h.rack_track();
+    h.sync();
+    h.eval_all(
+        "(def t2 (track 2)) (def rk (first t2.devices)) (def rs (first rk.devices))
+         (def s2 (nth t2.steps 2)) (def s5 (nth t2.steps 5))",
+    );
+    let slot = h.rack_slot();
+    assert_eq!(
+        h.eval_all(
+            "(list rs.gain rs.gain-display rs.gain-locked rs.pan rs.pan-display rs.pan-locked
+                   rs.muted rs.muted-display rs.soloed rs.soloed-locked rs.choke)"
+        ),
+        h.eval_all(&format!(
+            "(list {g} {g} false {p} {p} false false false false false 0)",
+            g = slot.gain,
+            p = slot.pan
+        ))
+    );
+    // Any other device reads 0 / false.
+    assert_eq!(
+        h.eval_all("(list rk.gain rk.gain-display rk.pan rk.muted rk.soloed-locked rk.choke)"),
+        h.eval_all("(list 0 0 0 false false 0)")
+    );
+    // Locks (one undo entry each); the base stays.
+    let before = h.app.history.undo_len();
+    h.eval_all("(lock-strip! rs \"gain\" (list s2 s5) 0.5)");
+    h.eval_all("(lock-strip! rs \"muted\" (list s2) true)");
+    h.eval_all("(lock-strip! rs \"pan\" (list s5) -0.25)");
+    h.drain();
+    assert_eq!(h.app.history.undo_len(), before + 3);
+    let locks = h.rack_slot().param_plocks;
+    assert_eq!(locks.get(2, RackSlotParam::Gain), Some(0.5));
+    assert_eq!(locks.get(5, RackSlotParam::Gain), Some(0.5));
+    assert_eq!(locks.get(2, RackSlotParam::Mute), Some(1.0));
+    assert_eq!(locks.get(5, RackSlotParam::Pan), Some(-0.25));
+    // Nothing displayed (the rack is not the current track): the base.
+    h.sync();
+    assert_eq!(
+        h.eval_all("(list rs.gain-display rs.gain-locked rs.muted-display rs.muted-locked)"),
+        h.eval_all(&format!("(list {} false false false)", slot.gain))
+    );
+    // The current track's selected step shows its locks.
+    h.shared.current_track.store(2, Ordering::Relaxed);
+    h.shared.selected_steps.lock().unwrap().insert(2);
+    h.sync();
+    assert_eq!(
+        h.eval_all(
+            "(list rs.gain rs.gain-display rs.gain-locked rs.muted rs.muted-display
+                   rs.muted-locked rs.pan-display rs.pan-locked)"
+        ),
+        h.eval_all(&format!(
+            "(list {} 0.5 true false true true {} false)",
+            slot.gain, slot.pan
+        ))
+    );
+    // The legacy rack strip field shows the same value.
+    for (param, field) in [
+        (RackSlotParam::Gain, "rs.gain-display"),
+        (RackSlotParam::Mute, "rs.muted-display"),
+    ] {
+        sync_rack_slot_control_value_field(h.editor.runtime_mut(), &h.app, 2, 0, param, Some(2));
+        assert_eq!(
+            legacy(&h, &rack_slot_value_field(2, 0, param)),
+            Some(h.eval_all(field)),
+            "{field}"
+        );
+    }
+    // While playing with no selection: the playing step's.
+    h.shared.selected_steps.lock().unwrap().clear();
+    let transport = &h.shared.state.transport;
+    transport.track_playheads[2].store(5, Ordering::Relaxed);
+    transport.playing.store(true, Ordering::Relaxed);
+    h.sync();
+    assert_eq!(
+        h.eval_all("(list rs.gain-display rs.pan-display rs.pan-locked rs.muted-display)"),
+        h.eval_all("(list 0.5 -0.25 true false)")
+    );
+    h.shared
+        .state
+        .transport
+        .playing
+        .store(false, Ordering::Relaxed);
+    // Locks already holding the value are left alone; clearing is one
+    // entry, and only steps holding a lock count.
+    let before = h.app.history.undo_len();
+    h.eval_all("(lock-strip! rs \"gain\" (list s2 s5) 0.5)");
+    h.eval_all("(unlock-strip! rs \"pan\" (list s2))");
+    h.drain();
+    assert_eq!(h.app.history.undo_len(), before, "nothing to do");
+    h.eval_all("(unlock-strip! rs \"gain\" (list s2 s5))");
+    h.drain();
+    assert_eq!(h.app.history.undo_len(), before + 1);
+    assert_eq!(h.rack_slot().param_plocks.get(2, RackSlotParam::Gain), None);
+    h.shared.selected_steps.lock().unwrap().insert(2);
+    h.sync();
+    assert_eq!(
+        h.eval_all("(list rs.gain-display rs.gain-locked)"),
+        h.eval_all(&format!("(list {} false)", slot.gain))
+    );
+    app::edit::undo(&mut h.app);
+    assert_eq!(
+        h.rack_slot().param_plocks.get(2, RackSlotParam::Gain),
+        Some(0.5)
+    );
+    // The value rule: the field's own range, a bool for the flags; locks of
+    // another track's steps, of an unlockable field, of another device.
+    h.fails(
+        "(lock-strip! rs \"gain\" (list s2) 3)",
+        "a number from 0 to 2",
+    );
+    h.fails(
+        "(lock-strip! rs \"pan\" (list s2) -2)",
+        "a number from -1 to 1",
+    );
+    h.fails("(lock-strip! rs \"muted\" (list s2) 1)", "true or false");
+    h.fails("(lock-strip! rs \"choke\" (list s2) 1)", "takes no p-locks");
+    h.fails(
+        "(let ((t0 (track 0))) (lock-strip! rs \"gain\" (list (nth t0.steps 2)) 1))",
+        "steps of the device's track",
+    );
+    h.fails("(lock-strip! rk \"gain\" (list s2) 1)", "no strip controls");
+    assert_eq!(
+        h.rack_slot().param_plocks.get(2, RackSlotParam::Gain),
+        Some(0.5)
+    );
+}
+
+#[test]
+fn rack_slot_strip_setters_follow_the_value_rule_through_history() {
+    let mut h = Harness::new();
+    h.rack_track();
+    h.sync();
+    h.eval_all("(def t2 (track 2)) (def rk (first t2.devices)) (def rs (first rk.devices))");
+    let slot = h.rack_slot();
+    // Each a history entry of its own; undone.
+    let before = h.app.history.undo_len();
+    h.eval_all("(set! rs.gain 1.5)");
+    h.drain();
+    h.eval_all("(set! rs.pan -0.5)");
+    h.drain();
+    h.eval_all("(toggle! rs.muted)");
+    h.drain();
+    h.eval_all("(toggle! rs.soloed)");
+    h.drain();
+    h.eval_all("(set! rs.choke 3)");
+    h.drain();
+    h.eval_all("(set! rs.enabled false)");
+    h.drain_and_sync();
+    let edited = h.rack_slot();
+    assert_eq!(
+        (edited.gain, edited.pan, edited.mute, edited.solo),
+        (1.5, -0.5, true, true)
+    );
+    assert_eq!((edited.choke_group, edited.enabled), (Some(3), false));
+    assert_eq!(h.app.history.undo_len(), before + 6);
+    assert_eq!(
+        h.eval_all("(list rs.gain rs.pan rs.muted rs.soloed rs.choke rs.enabled)"),
+        h.eval_all("(list 1.5 -0.5 true true 3 false)")
+    );
+    // The current value is a no-op (no entry).
+    h.eval_all("(set! rs.gain 1.5) (set! rs.muted true) (set! rs.choke 3) (set! rs.enabled false)");
+    h.drain();
+    assert_eq!(h.app.history.undo_len(), before + 6);
+    // Choke 0 is none.
+    h.eval_all("(set! rs.choke 0)");
+    h.drain();
+    assert_eq!(h.rack_slot().choke_group, None);
+    app::edit::undo(&mut h.app);
+    for _ in 0..6 {
+        app::edit::undo(&mut h.app);
+    }
+    let undone = h.rack_slot();
+    assert_eq!(
+        (undone.gain, undone.pan, undone.mute, undone.solo),
+        (slot.gain, slot.pan, slot.mute, slot.solo)
+    );
+    assert_eq!(
+        (undone.choke_group, undone.enabled),
+        (slot.choke_group, slot.enabled)
+    );
+    // Out of range, wrong type, another device: errors that change nothing.
+    h.fails("(set! rs.gain 2.5)", "a number from 0 to 2");
+    h.fails("(set! rs.gain -0.1)", "a number from 0 to 2");
+    h.fails("(set! rs.pan 1.5)", "a number from -1 to 1");
+    h.fails("(set! rs.choke 17)", "an integer from 0 to 16");
+    for code in [
+        "(set! rs.choke 2.5)",
+        "(set! rs.muted 1)",
+        "(set! rs.gain \"1\")",
+    ] {
+        let error = h
+            .editor
+            .runtime_mut()
+            .eval_str(&format!("{REFER_ALL} {code}"))
+            .expect_err("set! checks the declared type");
+        assert!(format!("{error:?}").contains("is :"), "{code}: {error:?}");
+    }
+    h.fails("(set! rk.gain 1)", "has no gain");
+    h.fails("(set! rk.muted true)", "has no muted");
+    h.fails("(set! rk.enabled false)", "enabled is not settable");
+    assert_eq!(h.rack_slot().gain, slot.gain);
+    // A drag view's gain set!s while the pointer is down join one entry; a
+    // flag set while it is down is an entry of its own.
+    let before = h.app.history.undo_len();
+    h.gesture.pointer_down = true;
+    for value in ["0.2", "0.3", "0.4"] {
+        h.eval_all(&format!("(set! rs.gain {value})"));
+        h.drain();
+    }
+    h.gesture.pointer_down = false;
+    h.eval_all("(set! rs.gain 0.45)");
+    h.drain();
+    assert_eq!(h.rack_slot().gain, 0.45);
+    assert_eq!(h.app.history.undo_len(), before + 1, "one drag entry");
+    h.gesture.pointer_down = true;
+    h.eval_all("(set! rs.muted true)");
+    h.drain();
+    h.eval_all("(set! rs.muted false)");
+    h.drain();
+    h.gesture.pointer_down = false;
+    assert_eq!(h.app.history.undo_len(), before + 3, "a flag each");
+    app::edit::undo(&mut h.app);
+    app::edit::undo(&mut h.app);
+    app::edit::undo(&mut h.app);
+    assert_eq!(h.rack_slot().gain, slot.gain);
+}
+
+#[test]
+fn rack_slot_strip_base_reads_round_trip_even_out_of_range() {
+    let mut h = Harness::new();
+    h.rack_track();
+    h.sync();
+    h.eval_all("(def t2 (track 2)) (def rk (first t2.devices)) (def rs (first rk.devices))");
+    // A gain stored past the value rule's range (as a loaded project may
+    // hold) reads back unclamped.
+    {
+        let racks = &h.shared.state.pattern.rack_tracks;
+        let mut racks = racks.lock().unwrap();
+        racks[2].as_mut().expect("rack").slots[0].gain = 2.5;
+    }
+    h.sync();
+    assert_eq!(h.eval_all("rs.gain"), Value::Number(2.5));
+    // Setting the value read back is a no-op: no error, no undo entry.
+    let before = h.app.history.undo_len();
+    h.editor.minibuffer = None;
+    h.eval_all("(set! rs.gain rs.gain)");
+    h.drain();
+    assert_eq!(h.error(), "", "the current value is no error");
+    assert_eq!(h.app.history.undo_len(), before);
+    assert_eq!(h.rack_slot().gain, 2.5);
+    // Any other value still follows the value rule.
+    h.fails("(set! rs.gain 2.4)", "a number from 0 to 2");
+    assert_eq!(h.rack_slot().gain, 2.5);
+}
+
+#[test]
+fn rack_slot_strip_fields_are_computed_only_while_observed() {
+    let mut h = Harness::new();
+    h.rack_track();
+    h.sync();
+    h.eval_all("(def t2 (track 2)) (def rk (first t2.devices)) (def rs (first rk.devices))");
+    h.sync();
+    let (computed, locks) = (h.strip_computed(), h.frame.host_kinds.devices.strip_locks);
+    for _ in 0..3 {
+        h.sync();
+    }
+    assert_eq!(
+        h.strip_computed(),
+        computed,
+        "nothing observes a strip field"
+    );
+    assert_eq!(h.frame.host_kinds.devices.strip_locks, locks);
+    // Two held bindings: computed per tick under one rack lock.
+    h.eval_all("(def g #'rs.gain-display) (def m #'rs.muted-locked) (def c #'rk.choke)");
+    h.sync();
+    let (computed, locks) = (h.strip_computed(), h.frame.host_kinds.devices.strip_locks);
+    // Unchanged values are compared with their cells, so they push nothing.
+    assert!(!h.sync(), "unchanged strip values push nothing");
+    assert_eq!(
+        h.strip_computed(),
+        computed + 3,
+        "the three observed fields"
+    );
+    assert_eq!(
+        h.frame.host_kinds.devices.strip_locks,
+        locks + 1,
+        "one rack lock per tick"
+    );
+    // A drag repaints the binding without device work.
+    let syncs = h.device_syncs();
+    h.shared.current_track.store(2, Ordering::Relaxed);
+    h.eval_all("(set! rs.gain 0.25)");
+    h.drain_and_sync();
+    assert_eq!(h.slot("g"), 0.25);
+    assert_eq!(h.device_syncs(), syncs, "no device work");
+    h.eval_all("(lock-strip! rs \"muted\" (list (nth t2.steps 1)) true)");
+    h.drain();
+    h.shared.selected_steps.lock().unwrap().insert(1);
+    h.sync();
+    assert_eq!(h.slot("m"), 1.0);
+}
+
+#[test]
+fn rack_slot_strip_handles_follow_their_slot_and_go_stale_with_it() {
+    let mut h = Harness::new();
+    h.rack_track();
+    h.second_rack_slot();
+    h.sync();
+    h.eval_all(
+        "(def t2 (track 2)) (def rk (first t2.devices))
+         (def first-slot (nth rk.devices 0)) (def second-slot (nth rk.devices 1))",
+    );
+    h.eval_all("(set! second-slot.gain 0.75) (set! second-slot.choke 2)");
+    h.drain_and_sync();
+    assert_eq!(h.rack_slot_at(1).gain, 0.75);
+    let first = h.eval_all("(list first-slot)");
+    let first = h.instances(first)[0];
+    // Delete the first slot: the second's handle follows it to position 0.
+    h.eval_all("(host-command \"delete-rack-slot\" (dict :track 2 :slot 0))");
+    h.drain_and_sync();
+    let rack = h.shared.state.live_rack_track_snapshot(2).expect("rack");
+    assert_eq!(rack.slots.len(), 1);
+    assert!(!h.rt().instance_is_live(first), "the deleted slot is stale");
+    assert_eq!(
+        h.eval_all("(list second-slot.slot second-slot.gain second-slot.choke)"),
+        h.eval_all("(list 0 0.75 2)")
+    );
+    h.eval_all("(set! second-slot.pan 0.5)");
+    h.drain();
+    assert_eq!(h.rack_slot_at(0).pan, 0.5, "the handle edits its own slot");
+    // A stale handle's setter changes nothing.
+    let before = h.app.history.undo_len();
+    h.editor.minibuffer = None;
+    let _ = h
+        .editor
+        .runtime_mut()
+        .eval_str(&format!("{REFER_ALL} (set! first-slot.gain 1.25)"));
+    h.drain();
+    assert_eq!(h.app.history.undo_len(), before);
+    assert_eq!(h.rack_slot_at(0).gain, 0.75);
+    // Undoing the pan and the delete brings the first slot back under its
+    // own identity (a new instance; the old handle stays stale).
+    app::edit::undo(&mut h.app);
+    app::edit::undo(&mut h.app);
+    h.shared.fx_epoch.fetch_add(1, Ordering::Relaxed);
+    h.sync();
+    assert_eq!(
+        h.eval_all("(list (len rk.devices) (nth rk.devices 1) second-slot.slot)"),
+        h.eval_all("(list 2 second-slot 1)")
+    );
+    assert_eq!(
+        h.eval_all("(let ((d (first rk.devices))) d.did)"),
+        Value::Number(1.0)
+    );
 }

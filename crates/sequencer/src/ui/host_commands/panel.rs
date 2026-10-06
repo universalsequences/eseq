@@ -149,11 +149,7 @@ fn stamp_variant(map: &Payload, app: &mut app::App, ctx: &mut LoopCtx<'_>) -> Re
     let track_id = map_usize(map, "track-id").ok_or("needs :track-id")?;
     let track_id = sequencer::sequencer::TrackId(track_id as u64);
     let track = live_track_index(app, track_id).ok_or("the track is gone")?;
-    let steps = map_usize_list(map, "steps").unwrap_or_default();
-    let tracks = map_usize_list(map, "step-tracks").unwrap_or_default();
-    if tracks.len() != steps.len() || tracks.iter().any(|tid| *tid as u64 != track_id.0) {
-        return Err("steps must be steps of the track".into());
-    }
+    let steps = super::track_steps(map, track_id, "the track")?;
     let label = variant_label(map)?;
     let key = match &label {
         None => None,

@@ -335,7 +335,7 @@ fn in_selection(sources: &KindsHandles, shared: &RefCell<KindsShared>, track: us
 }
 
 /// [`KindsHandles::plock_display_step`], once per track per tick.
-fn display_step(
+pub(super) fn display_step(
     sources: &KindsHandles,
     shared: &RefCell<KindsShared>,
     track: usize,
@@ -570,6 +570,7 @@ pub(super) fn live_value<S: KindStore>(
                     key_locked_notes(sources, shared, &device, panel::numbers)
                 }
                 f::DEVICE_VARIANTS => device_variants(store, sources, shared, id, &device),
+                key if is_strip_field(key) => device_strip_field(sources, shared, &device, key)?,
                 _ => return None,
             }
         }

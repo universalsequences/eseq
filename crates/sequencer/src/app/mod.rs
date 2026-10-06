@@ -1757,14 +1757,46 @@ impl DeviceIdentityRegistry {
         for (location, rack_slot) in removed {
             self.rack_slots.remove(&location);
             self.rack_slot_locations.remove(&rack_slot);
-            let effects = self.rack_audio_effects.iter()
-                .filter(|((owner, _), _)| *owner == rack_slot)
-                .map(|(effect_location, id)| (*effect_location, *id))
-                .collect::<Vec<_>>();
-            for (effect_location, effect_id) in effects {
-                self.rack_audio_effects.remove(&effect_location);
-                self.rack_audio_effect_locations.remove(&effect_id);
+            self.forget_rack_slot_effects(rack_slot);
+        }
+    }
+
+    /// Forget the identities of rack slot `slot`'s audio effects.
+    fn forget_rack_slot_effects(&mut self, slot: crate::sequencer::RackSlotId) {
+        let effects = self
+            .rack_audio_effects
+            .iter()
+            .filter(|((owner, _), _)| *owner == slot)
+            .map(|(effect_location, id)| (*effect_location, *id))
+            .collect::<Vec<_>>();
+        for (effect_location, effect_id) in effects {
+            self.rack_audio_effects.remove(&effect_location);
+            self.rack_audio_effect_locations.remove(&effect_id);
+        }
+    }
+
+    /// Forget `track`'s rack slot `slot` (a deleted slot) and its effects'
+    /// identities; the slots after it keep theirs, each one position down,
+    /// so no identity passes to another slot.
+    pub fn remove_rack_slot(&mut self, track: crate::sequencer::TrackId, slot: usize) {
+        self.generation += 1;
+        let shifted = self
+            .rack_slots
+            .iter()
+            .filter(|((owner, at), _)| *owner == track && *at >= slot)
+            .map(|((_, at), id)| (*at, *id))
+            .collect::<Vec<_>>();
+        for (at, id) in &shifted {
+            self.rack_slots.remove(&(track, *at));
+            self.rack_slot_locations.remove(id);
+        }
+        for (at, id) in shifted {
+            if at == slot {
+                self.forget_rack_slot_effects(id);
+                continue;
             }
+            self.rack_slots.insert((track, at - 1), id);
+            self.rack_slot_locations.insert(id, (track, at - 1));
         }
     }
 

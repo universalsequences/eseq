@@ -35,7 +35,7 @@
         song region
         tracks scenes banks buses groups routes macros
         launch! clone-scene! delete-scene! step-preset!
-        device-param lock-param! unlock-param!
+        device-param lock-param! unlock-param! lock-strip! unlock-strip!
         set-tensor-cell! stamp-variant! stamp-key-variant!
         lock-none lock-seq lock-variant
         reset-tuning! justify-tuning! randomize-tuning! stretch-tuning!
@@ -212,8 +212,8 @@
 (def set-param-base (p v)
   (host-command "set-device-param"
     (merge (device-target p.device) :param-idx p.index :value v)))
-;; A device's own fields (set-device): a rack slot's voices, the delete
-;; target.
+;; A device's own fields (set-device): a rack slot's voices and strip
+;; controls, the delete target, an instrument's base note.
 (def device-setter (field)
   (lambda (d v)
     (host-command "set-device" (merge (device-target d) :field field :value v))))
@@ -509,7 +509,8 @@
          (role    :string :doc "instrument, effect, midi-fx, rack-slot, rack-effect or bus-effect")
          (type    :string :doc "What the device is: the instrument type (synth, sampler, rack, …) or the effect (Filter, Reverb, …)")
          (name    :string :doc "Device name")
-         (enabled :bool   :doc "False while bypassed (a rack slot: switched off)")
+         (enabled :bool   :set (device-setter "enabled")
+                  :doc "False while bypassed (a rack slot: switched off). Only a rack slot's is settable (one undo entry); any other device's set! is an error")
          (params  (list-of param) :doc "The device's parameters, in descriptor order")
          (playhead :number :doc "A sampler's playing position in seconds, 0 when idle or not a sampler")
          (devices (list-of device) :doc "The devices it holds: a drum rack's slots, a rack slot's effects; empty otherwise")
@@ -525,7 +526,29 @@
          (tensors (list-of tensor) :doc "The device's tensors (tables of cells)")
          (key-locked-notes (list-of :int) :doc "A track instrument's keys holding a key lock, ascending")
          (variants (list-of variant) :doc "A track instrument's key-lock variants (stamp-key-variant!)")
-         (macros (list-of rack-macro) :doc "A drum rack's macros (on its instrument device); empty otherwise")))
+         (macros (list-of rack-macro) :doc "A drum rack's macros (on its instrument device); empty otherwise")
+         ;; A drum rack slot's strip controls (spec §14.2f): the slot's own
+         ;; value (setting it never p-locks; lock-strip! does), the value
+         ;; shown (the p-lock at the current track's selected or playing step,
+         ;; else a rack macro mapped onto it, else the own value) and whether
+         ;; a p-lock supplies it. Any other device reads 0 / false and takes
+         ;; no set!.
+         (gain :number :range (0 2) :set (device-setter "gain")
+               :doc "A rack slot's own gain (linear, 1 = unity); a drag's set!s join one undo entry")
+         (gain-display :number :range (0 2) :doc "The gain shown")
+         (gain-locked :bool :doc "gain-display comes from a p-lock")
+         (pan :number :range (-1 1) :set (device-setter "pan")
+              :doc "A rack slot's own pan, -1 (left) to 1 (right); a drag's set!s join one undo entry")
+         (pan-display :number :range (-1 1) :doc "The pan shown")
+         (pan-locked :bool :doc "pan-display comes from a p-lock")
+         (muted :bool :set (device-setter "muted") :doc "A rack slot's own mute")
+         (muted-display :bool :doc "The mute shown")
+         (muted-locked :bool :doc "muted-display comes from a p-lock")
+         (soloed :bool :set (device-setter "soloed") :doc "A rack slot's own solo")
+         (soloed-display :bool :doc "The solo shown")
+         (soloed-locked :bool :doc "soloed-display comes from a p-lock")
+         (choke :int :range (0 16) :set (device-setter "choke")
+                :doc "A rack slot's choke group, 0 for none (no p-locks)")))
 
 ;; A process class of the library (process-library.classes): what
 ;; (add-process! t c) adds.
@@ -1529,6 +1552,24 @@
   (host-command "clear-device-param-locks"
     (merge (device-target p.device)
            :param-idx p.index :steps (map (lambda (s) s.index) steps)
+           :step-tracks (map (lambda (s) s.track.tid) steps))))
+
+;; P-lock rack slot d's strip control field (gain, pan, muted or soloed) to v
+;; on steps, a list of step instances of d's track (any other track's step is
+;; an error); one undo entry. Steps already locked to v are left alone. v
+;; follows the field's own range: gain 0-2, pan -1-1, a bool for muted and
+;; soloed.
+(def lock-strip! (d field steps v)
+  (host-command "set-device-strip-locks"
+    (merge (device-target d)
+           :field field :steps (map (lambda (s) s.index) steps)
+           :step-tracks (map (lambda (s) s.track.tid) steps) :value v)))
+
+;; Clear rack slot d's strip control field's p-locks on steps; one undo entry.
+(def unlock-strip! (d field steps)
+  (host-command "clear-device-strip-locks"
+    (merge (device-target d)
+           :field field :steps (map (lambda (s) s.index) steps)
            :step-tracks (map (lambda (s) s.track.tid) steps))))
 
 ;; Set cell cell (row * tz.cols + col) of tensor tz to v (the device's own

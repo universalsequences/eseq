@@ -1,3 +1,5 @@
+use super::track_settings::SetValue;
+use crate::host_kinds::{f, FieldKey};
 use crate::*;
 
 pub(super) const COMMANDS: &[&str] = &[
@@ -117,6 +119,242 @@ pub(super) fn rack_param_applied(
             &shared.expanded_step_projection,
             &shared.ui_epoch,
         ),
+    }
+}
+
+/// A rack slot strip control: a rack slot device's kind field (`gain`,
+/// `pan`, `muted`, `soloed`, `enabled`, `choke`) and the legacy
+/// `set-rack-slot-*` command it shares.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(crate) enum StripControl {
+    Gain,
+    Pan,
+    Mute,
+    Solo,
+    Enabled,
+    Choke,
+}
+
+/// A strip control's value as a slot stores it.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(crate) enum StripValue {
+    Number(f32),
+    Flag(bool),
+    Choke(u8),
+}
+
+impl StripValue {
+    /// The value as a number (a flag 1 or 0).
+    pub(crate) fn number(self) -> f32 {
+        match self {
+            Self::Number(value) => value,
+            Self::Flag(on) => f32::from(u8::from(on)),
+            Self::Choke(group) => f32::from(group),
+        }
+    }
+
+    /// Whether a script's `value` is this value (as given, before the
+    /// value rule).
+    pub(super) fn is(self, value: &Value) -> bool {
+        match (self, value) {
+            (Self::Flag(on), Value::Bool(given)) => on == *given,
+            (Self::Flag(_), _) => false,
+            (_, Value::Number(given)) => *given as f32 == self.number(),
+            _ => false,
+        }
+    }
+}
+
+/// Each strip control's kind field.
+const STRIP_CONTROL_FIELDS: [(StripControl, FieldKey); 6] = [
+    (StripControl::Gain, f::DEVICE_GAIN),
+    (StripControl::Pan, f::DEVICE_PAN),
+    (StripControl::Mute, f::DEVICE_MUTED),
+    (StripControl::Solo, f::DEVICE_SOLOED),
+    (StripControl::Enabled, f::DEVICE_ENABLED),
+    (StripControl::Choke, f::DEVICE_CHOKE),
+];
+
+impl StripControl {
+    /// The control a `device` kind field names.
+    pub(super) fn from_field(field: &str) -> Option<Self> {
+        let found = STRIP_CONTROL_FIELDS.iter().find(|(_, key)| key.1 == field);
+        found.map(|(control, _)| *control)
+    }
+
+    /// The control's `device` kind field name.
+    pub(super) fn field(self) -> &'static str {
+        let found = STRIP_CONTROL_FIELDS
+            .iter()
+            .find(|(control, _)| *control == self);
+        found.map_or("", |(_, key)| key.1)
+    }
+
+    /// The rack slot param the control's value field and p-locks use
+    /// (`None`: enabled and the choke group, which take neither).
+    pub(crate) fn param(self) -> Option<RackSlotParam> {
+        match self {
+            Self::Gain => Some(RackSlotParam::Gain),
+            Self::Pan => Some(RackSlotParam::Pan),
+            Self::Mute => Some(RackSlotParam::Mute),
+            Self::Solo => Some(RackSlotParam::Solo),
+            Self::Enabled | Self::Choke => None,
+        }
+    }
+
+    /// A script's value under the value rule: gain a number in 0–2, pan in
+    /// −1–1, the choke group an integer in 0–16 (0: none), the flags a bool.
+    pub(super) fn parse(self, value: &SetValue<'_>) -> Result<StripValue, String> {
+        Ok(match self {
+            Self::Gain => StripValue::Number(value.number(0.0, 2.0)? as f32),
+            Self::Pan => StripValue::Number(value.number(-1.0, 1.0)? as f32),
+            Self::Mute | Self::Solo | Self::Enabled => StripValue::Flag(value.flag()?),
+            Self::Choke => {
+                StripValue::Choke(value.integer(0, super::rack_kinds::CHOKE_GROUPS)? as u8)
+            }
+        })
+    }
+
+    /// The control's value as `slot` stores it (unclamped, so a stored value
+    /// out of the value rule's range reads back as it is).
+    pub(crate) fn read(self, slot: &sequencer::sequencer::RackSlotSnapshot) -> StripValue {
+        match self {
+            Self::Gain => StripValue::Number(slot.gain),
+            Self::Pan => StripValue::Number(slot.pan),
+            Self::Mute => StripValue::Flag(slot.mute),
+            Self::Solo => StripValue::Flag(slot.solo),
+            Self::Enabled => StripValue::Flag(slot.enabled),
+            Self::Choke => StripValue::Choke(slot.choke_group.unwrap_or(0)),
+        }
+    }
+
+    /// The legacy history command setting rack slot `slot_idx` of `track`
+    /// to `value`.
+    pub(super) fn command(
+        self,
+        track: usize,
+        slot_idx: usize,
+        value: StripValue,
+    ) -> app::AppCommand {
+        let flag = value.number() > 0.5;
+        match self {
+            Self::Gain => app::AppCommand::SetRackSlotGain {
+                track,
+                slot_idx,
+                value: value.number(),
+            },
+            Self::Pan => app::AppCommand::SetRackSlotPan {
+                track,
+                slot_idx,
+                value: value.number(),
+            },
+            Self::Mute => app::AppCommand::SetRackSlotMute {
+                track,
+                slot_idx,
+                value: flag,
+            },
+            Self::Solo => app::AppCommand::SetRackSlotSolo {
+                track,
+                slot_idx,
+                value: flag,
+            },
+            Self::Enabled => app::AppCommand::SetRackSlotEnabled {
+                track,
+                slot_idx,
+                value: flag,
+            },
+            Self::Choke => app::AppCommand::SetRackSlotChokeGroup {
+                track,
+                slot_idx,
+                value: value.number() as u8,
+            },
+        }
+    }
+}
+
+/// After a rack slot strip control's own value changed: republish the rack
+/// control snapshot (else per-trigger panner pushes clobber the new value
+/// with the stale snapshot's) and repaint the control's value field; mute
+/// and solo also rebuild the rack panel's pad/slot dicts (which carry them
+/// as plain values), enabled the slot header (and the fx panel).
+pub(super) fn rack_slot_strip_applied(
+    editor: &mut Editor,
+    app: &app::App,
+    ctx: &mut LoopCtx<'_>,
+    track: usize,
+    slot_idx: usize,
+    control: StripControl,
+) {
+    let shared = ctx.shared;
+    if control == StripControl::Choke {
+        // The choke group: no snapshot republish (as the legacy command),
+        // and no field to repaint (no value field shows it; the legacy
+        // command's base-note field refresh repainted an unchanged value
+        // and is dropped).
+        return;
+    }
+    ctx.gesture.rack_control_snapshot_dirty = true;
+    if let Some(param) = control.param() {
+        refresh_rack_direct_param_reactive(
+            editor,
+            app,
+            &shared.state,
+            track,
+            RackDirectDisplayTarget::SlotParam { slot_idx, param },
+            &shared.selected_steps,
+            RackPlockRowsSync::Unchanged,
+            &shared.expanded_step_projection,
+            &shared.ui_epoch,
+        );
+    }
+    if matches!(
+        control,
+        StripControl::Mute | StripControl::Solo | StripControl::Enabled
+    ) {
+        sync_rack_slot_instrument_authoring_display(
+            editor,
+            app,
+            &shared.state,
+            track,
+            &shared.selected_steps,
+        );
+    }
+    if control == StripControl::Enabled {
+        shared.fx_epoch.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// After a rack slot strip p-lock edit landed (`set-rack-slot-param-plock`,
+/// the host kinds' `lock-strip!` / `unlock-strip!`): republish the rack
+/// control snapshot and repaint the param's value field (`rows`: whether
+/// the shown step's p-lock rows changed); mute and solo flip the slot
+/// header's structure (the fx panel rebuilds), while gain, pan, base note
+/// and polyphony are plain readouts that must not rebuild it per drag event
+/// (eseq-lf72).
+pub(super) fn rack_slot_plock_applied(
+    editor: &mut Editor,
+    app: &app::App,
+    ctx: &mut LoopCtx<'_>,
+    track: usize,
+    slot_idx: usize,
+    param: RackSlotParam,
+    rows: RackPlockRowsSync,
+) {
+    let shared = ctx.shared;
+    ctx.gesture.rack_control_snapshot_dirty = true;
+    refresh_rack_direct_param_reactive(
+        editor,
+        app,
+        &shared.state,
+        track,
+        RackDirectDisplayTarget::SlotParam { slot_idx, param },
+        &shared.selected_steps,
+        rows,
+        &shared.expanded_step_projection,
+        &shared.ui_epoch,
+    );
+    if matches!(param, RackSlotParam::Mute | RackSlotParam::Solo) {
+        shared.fx_epoch.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -308,7 +546,16 @@ pub(super) fn handle(
                     match app.apply_recorded_instrument_binding_mutation(
                         track,
                         "Delete rack layer",
-                        |app| app.graph_controller().delete_rack_slot(track, slot_idx),
+                        |app| {
+                            app.graph_controller().delete_rack_slot(track, slot_idx)?;
+                            // The slots after it keep their identities (the
+                            // after-state captures them), so a held device
+                            // handle never passes to the next slot.
+                            if let Some(track_id) = app.track_registry.id_at(track) {
+                                app.device_registry.remove_rack_slot(track_id, slot_idx);
+                            }
+                            Ok(())
+                        },
                     ) {
                         Ok(()) => {
                             refresh_instrument_panel_reactive(
@@ -1111,21 +1358,7 @@ pub(super) fn handle(
                             value,
                         },
                     );
-                    ctx.gesture.rack_control_snapshot_dirty = true;
-                    refresh_rack_direct_param_reactive(
-                        &mut editor,
-                        &app,
-                        &state,
-                        track,
-                        RackDirectDisplayTarget::SlotParam {
-                            slot_idx,
-                            param: RackSlotParam::Gain,
-                        },
-                        &selected_steps,
-                        RackPlockRowsSync::Unchanged,
-                        &ctx.shared.expanded_step_projection,
-                        &ui_epoch,
-                    );
+                    rack_slot_strip_applied(editor, app, ctx, track, slot_idx, StripControl::Gain);
                 }
             }
         }
@@ -1155,21 +1388,7 @@ pub(super) fn handle(
                             value,
                         },
                     );
-                    ctx.gesture.rack_control_snapshot_dirty = true;
-                    refresh_rack_direct_param_reactive(
-                        &mut editor,
-                        &app,
-                        &state,
-                        track,
-                        RackDirectDisplayTarget::SlotParam {
-                            slot_idx,
-                            param: RackSlotParam::Pan,
-                        },
-                        &selected_steps,
-                        RackPlockRowsSync::Unchanged,
-                        &ctx.shared.expanded_step_projection,
-                        &ui_epoch,
-                    );
+                    rack_slot_strip_applied(editor, app, ctx, track, slot_idx, StripControl::Pan);
                 }
             }
         }
@@ -1198,34 +1417,7 @@ pub(super) fn handle(
                             value,
                         },
                     );
-                    // Without republishing the scheduler snapshot,
-                    // per-trigger panner pushes clobber the new
-                    // mute with the stale snapshot's value.
-                    ctx.gesture.rack_control_snapshot_dirty = true;
-                    refresh_rack_direct_param_reactive(
-                        &mut editor,
-                        &app,
-                        &state,
-                        track,
-                        RackDirectDisplayTarget::SlotParam {
-                            slot_idx,
-                            param: RackSlotParam::Mute,
-                        },
-                        &selected_steps,
-                        RackPlockRowsSync::Unchanged,
-                        &ctx.shared.expanded_step_projection,
-                        &ui_epoch,
-                    );
-                    // The rack panel's pad/slot dicts carry mute as a
-                    // plain value, so rebuild them or the panel shows
-                    // stale M/S state.
-                    sync_rack_slot_instrument_authoring_display(
-                        &mut editor,
-                        &app,
-                        &state,
-                        track,
-                        &selected_steps,
-                    );
+                    rack_slot_strip_applied(editor, app, ctx, track, slot_idx, StripControl::Mute);
                 }
             }
         }
@@ -1243,17 +1435,14 @@ pub(super) fn handle(
                             value,
                         },
                     );
-                    ctx.gesture.rack_control_snapshot_dirty = true;
-                    // The slot dict carries `enabled` as a plain value, so
-                    // rebuild it or the header keeps the stale state.
-                    sync_rack_slot_instrument_authoring_display(
-                        &mut editor,
-                        &app,
-                        &state,
+                    rack_slot_strip_applied(
+                        editor,
+                        app,
+                        ctx,
                         track,
-                        &selected_steps,
+                        slot_idx,
+                        StripControl::Enabled,
                     );
-                    fx_epoch.fetch_add(1, Ordering::Relaxed);
                 }
             }
         }
@@ -1282,28 +1471,7 @@ pub(super) fn handle(
                             value,
                         },
                     );
-                    ctx.gesture.rack_control_snapshot_dirty = true;
-                    refresh_rack_direct_param_reactive(
-                        &mut editor,
-                        &app,
-                        &state,
-                        track,
-                        RackDirectDisplayTarget::SlotParam {
-                            slot_idx,
-                            param: RackSlotParam::Solo,
-                        },
-                        &selected_steps,
-                        RackPlockRowsSync::Unchanged,
-                        &ctx.shared.expanded_step_projection,
-                        &ui_epoch,
-                    );
-                    sync_rack_slot_instrument_authoring_display(
-                        &mut editor,
-                        &app,
-                        &state,
-                        track,
-                        &selected_steps,
-                    );
+                    rack_slot_strip_applied(editor, app, ctx, track, slot_idx, StripControl::Solo);
                 }
             }
         }
@@ -1353,20 +1521,7 @@ pub(super) fn handle(
                             value,
                         },
                     );
-                    refresh_rack_direct_param_reactive(
-                        &mut editor,
-                        &app,
-                        &state,
-                        track,
-                        RackDirectDisplayTarget::SlotParam {
-                            slot_idx,
-                            param: RackSlotParam::BaseNote,
-                        },
-                        &selected_steps,
-                        RackPlockRowsSync::Unchanged,
-                        &ctx.shared.expanded_step_projection,
-                        &ui_epoch,
-                    );
+                    rack_slot_strip_applied(editor, app, ctx, track, slot_idx, StripControl::Choke);
                 }
             }
         }
@@ -1444,25 +1599,8 @@ pub(super) fn handle(
                             value,
                         },
                     );
-                    ctx.gesture.rack_control_snapshot_dirty = true;
-                    refresh_rack_direct_param_reactive(
-                        &mut editor,
-                        &app,
-                        &state,
-                        track,
-                        RackDirectDisplayTarget::SlotParam { slot_idx, param },
-                        &selected_steps,
-                        RackPlockRowsSync::for_plock_write(plock_row_existed),
-                        &ctx.shared.expanded_step_projection,
-                        &ui_epoch,
-                    );
-                    // Mute/solo flip the slot header's structure; gain, pan,
-                    // base-note and polyphony are plain readouts bound to
-                    // `rack_slot_value_field` and must not rebuild *fx* per
-                    // drag event (eseq-lf72).
-                    if matches!(param, RackSlotParam::Mute | RackSlotParam::Solo) {
-                        fx_epoch.fetch_add(1, Ordering::Relaxed);
-                    }
+                    let rows = RackPlockRowsSync::for_plock_write(plock_row_existed);
+                    rack_slot_plock_applied(editor, app, ctx, track, slot_idx, param, rows);
                 }
             }
         }
