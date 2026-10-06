@@ -8,8 +8,8 @@
 ;; stretch of lane is empty, while the Kick and Hat play straight through.
 ;;
 ;; The delete is a REAL gesture, not a declarative hole: the fixture reads
-;; SEQ.song-lanes for the clip's id and removes it with the same primitive the
-;; Backspace key lowers to.
+;; the track's clips for the clip's id and removes it with the same primitive
+;; the Backspace key lowers to.
 
 (capture-project
   (track :sampler :name "Kick" :steps (0 4 8 12))
@@ -27,11 +27,9 @@
 ;; The id of the clip covering `beat` on `track`, read from the same surface
 ;; the view renders.
 (def arrangement-clip-id-at (track beat)
-  (let ((hits (filter (lambda (clip)
-                        (and (<= (get clip :start-beat) beat)
-                          (> (get clip :end-beat) beat)))
-                (nth SEQ.song-lanes track))))
-    (if (> (len hits) 0) (get (nth hits 0) :clip-id) nil)))
+  (let ((t (nth (eseq.kinds/tracks) track)))
+    (let ((hits (filter (lambda (c) (and (<= c.start beat) (> c.end beat))) t.clips)))
+      (if (> (len hits) 0) (let ((c (nth hits 0))) c.cid) nil))))
 
 (def capture-after-sync ()
   (eseq.seq-panels/seq-open-arrangement)

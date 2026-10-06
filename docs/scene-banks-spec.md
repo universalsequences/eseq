@@ -242,7 +242,9 @@ serialization change. Consequences:
   would strand a new clip behind a bank the user cannot guess, and the first
   click on one assigns it to the current scene, which gives it a bank.
 
-Host feed: `SEQ.track-pattern-cells` cells gain a `:banks` field — the list of
+Host feed (now the `cell` kind's `banks`, kind-bindings spec §14.2d; the
+legacy `SEQ.track-pattern-cells` is gone): `SEQ.track-pattern-cells` cells
+gained a `:banks` field — the list of
 bank indices referencing that clip, empty for orphans — built in
 `build_track_pattern_cells_value` from
 `ProjectScenes::track_pattern_bank_indices`. The viewed bank stays pure Lisp

@@ -7,7 +7,7 @@
 use crate::*;
 
 use sequencer::sequencer::{
-    ClipId, LaneSource, PatternId, ProjectSongTrackOverride, TakeId,
+    ClipId, LaneSource, PatternId, ProjectSongTrackOverride, TakeId, TrackId,
 };
 use sequencer::app::song_edit::SongRowSpec;
 
@@ -395,10 +395,10 @@ fn run(name: &str, payload: &Value, app: &mut app::App) -> Result<String, String
         "arrangement-pattern-place" => {
             let map = payload_map(payload)?;
             let track = require_track(map)?;
-            let track_id = map_entity_id(map, "track-id")?;
-            // SEQ.track-ids uses the graph's persistent pan node identity,
-            // the same identity used by arrangement subtrees and mixer drags.
-            if app.graph.track_node_ids.get(track).map(|ids| ids.pan_id as u64) != Some(track_id) {
+            // `:track-id` is the stable `TrackId` (`track.tid`) the pattern
+            // was picked on, as the mixer's pattern drags carry it.
+            let track_id = TrackId(map_entity_id(map, "track-id")?);
+            if live_track_index(app, track_id) != Some(track) {
                 return Err("The target track changed; select the pattern again".to_string());
             }
             let pattern = PatternId(map_entity_id(map, "pattern-id")?);
@@ -1004,7 +1004,7 @@ pub(super) fn handle(
 /// After a song edit landed (`run`'s primitives, the arrangement kinds'
 /// setters): a success clears the latched rejection and resyncs the piano
 /// roll's clip-shaped surfaces, showing `status` when there is one; a
-/// failure is latched for `SEQ.song-edit-error` / `song.edit-error`.
+/// failure is latched for `song.edit-error`.
 pub(super) fn song_edit_landed(
     app: &mut app::App,
     editor: &mut Editor,
@@ -1030,7 +1030,7 @@ pub(super) fn song_edit_landed(
             }
         }
         Err(error) => {
-            // Latch the rejection for SEQ.song-edit-error: the step tile
+            // Latch the rejection for song.edit-error: the step tile
             // hides the status line, so the arrangement view surfaces it.
             app.song_edit_error = Some(error.clone());
             editor.handle_host_event(HostEvent::Error(format!("{name} failed: {error}")));

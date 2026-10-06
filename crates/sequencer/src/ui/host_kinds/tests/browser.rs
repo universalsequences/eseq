@@ -53,15 +53,9 @@ impl Harness {
         self.editor.minibuffer.clone().unwrap_or_default()
     }
 
-    /// The legacy sound palette publish, as the tick runs it.
+    /// The sound palette publish, as the tick runs it.
     fn publish_palette(&mut self) {
-        sync_sound_palette(
-            self.editor.runtime_mut(),
-            &self.app,
-            &mut self.frame.sound_palette,
-            false,
-            false,
-        );
+        sync_sound_palette(&self.app, &mut self.frame.sound_palette, false);
     }
 }
 

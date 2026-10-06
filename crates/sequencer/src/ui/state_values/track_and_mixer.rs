@@ -645,12 +645,6 @@ pub(crate) fn sync_track_mixer_state(
     rt.set_reactive("SEQ", "track-collapsed", build_track_collapsed(app));
     rt.set_reactive(
         "SEQ",
-        "track-pattern-cells",
-        build_track_pattern_cells_value(state, app.tracks.len()),
-    );
-    sync_track_pattern_cell_state_fields(rt, state, app.tracks.len());
-    rt.set_reactive(
-        "SEQ",
         "track-instrument-types",
         build_track_instrument_types(app),
     );
@@ -758,8 +752,6 @@ pub(crate) fn sync_track_mixer_empty_state(rt: &mut Runtime) {
     rt.set_reactive("SEQ", "track-volumes", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-colors", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-collapsed", Value::List(vec![]));
-    rt.set_reactive("SEQ", "track-pattern-cells", Value::List(vec![]));
-    rt.set_reactive("SEQ", "track-active-pattern-ids", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-instrument-types", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-mutes", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-solos", Value::List(vec![]));

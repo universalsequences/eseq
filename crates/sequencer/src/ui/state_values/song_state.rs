@@ -1,13 +1,14 @@
 //! Song-mode reactive bindings (docs/song-mode-spec.md section 12): builds
 //! and diff-publishes the `SEQ.song-*` values each
-//! frame from `App` transport state plus the committed song.
+//! frame from `App` transport state plus the committed song. The arrangement
+//! reads the host kinds (`song`, `clip`, `scene-span`, kind-bindings spec
+//! §14.2d); the helpers here that build their content are shared with them.
 
 use super::*;
 
 use sequencer::app::song_transport::SongTransportMode;
 use sequencer::sequencer::{
-    arrangement_scene_spans, state_at_beat, ArrClip, ProjectScenes, ProjectSong, ProjectSongRow,
-    SceneSpan, StepParam,
+    state_at_beat, ArrClip, ProjectScenes, ProjectSong, ProjectSongRow, StepParam,
 };
 
 /// Scalar song bindings published to `SEQ.*`, snapshotted per frame so each
@@ -18,80 +19,32 @@ pub(crate) struct SongBindingsSnapshot {
     /// "" while not recording, else "take" / "dub"
     /// (docs/unified-transport-spec.md 8).
     pub(crate) recording_kind: &'static str,
-    pub(crate) mode: &'static str,
     /// Current row ordinal during song playback, else -1.
     pub(crate) current_row: f64,
     /// Current row stable id during song playback, else -1.
     pub(crate) current_row_id: f64,
     pub(crate) row_count: f64,
-    /// Smooth render-rate song position (spec 10.2); 0.0 while inactive.
-    pub(crate) position_beats: f64,
-    pub(crate) end_beat: f64,
     pub(crate) loop_enabled: bool,
     /// Latched failure state of the most recent arrangement capture
     /// (docs/song-mode-spec.md 12); cleared when the next capture starts.
     pub(crate) capture_failed: bool,
     pub(crate) capture_error: Option<String>,
-    /// Latched rejection of the most recent song editing primitive, cleared
-    /// by the next successful edit. Bound to `SEQ.song-edit-error` so the
-    /// arrangement view can surface it (the step tile hides the status line).
-    pub(crate) edit_error: Option<String>,
     /// Per-track take-lane state (takes spec 10/11.2 UX): 0 = the lane is
     /// not playing a take (pattern lanes stay fully editable — "jam with the
     /// step sequencer"), 1 = take-governed (dimmed, non-interactive steps +
     /// lit Back-to-Song button), 2 = a take lane the performer manually
     /// latched away (editable again; grey button returns it to the song).
     pub(crate) take_lane_states: Vec<u8>,
-    /// Per-track manual-override latch (unified-transport rev 4): drives the
-    /// per-lane dimming of overridden timeline clips.
-    pub(crate) latched_tracks: Vec<bool>,
-    /// The scene identity is the performer's (scene latch): dims the scene
-    /// lane the same way.
-    pub(crate) scene_latched: bool,
-    /// The bound clip's `(track, clip-id)` when a timeline selection holds the
-    /// binding (rule 1), for the bound-clip highlight. `None` under rules 2/3.
-    pub(crate) bound_clip: Option<(usize, u64)>,
-    /// The committed region selection as `(track-a track-b start end
-    /// scene-lane?)` (docs/arrangement-region-editing-spec.md 4.1), or `None`.
-    /// Rust-owned so every lane's `:selection-rect` survives a view switch.
-    pub(crate) region: Option<(usize, usize, f64, f64, bool)>,
 }
 
-/// Per-frame diff state for the song bindings: the committed song and
-/// arrangement are cached and re-read only when `committed_song_revision`
-/// changes (`set_committed_arrangement` bumps it). The lane surfaces
-/// (`song-lanes`, `scene-spans`) are functions of the arrangement alone, so
-/// they follow the revision; `scene-names` depends on the live scenes, which
-/// have no revision counter, so it diffs by value.
+/// Per-frame diff state for the song bindings: the committed song is cached
+/// and re-read only when `committed_song_revision` changes
+/// (`set_committed_arrangement` bumps it).
 #[derive(Default)]
 pub(crate) struct SongFrameState {
     pub(crate) revision: Option<u64>,
     pub(crate) cached_song: Option<ProjectSong>,
-    pub(crate) cached_arrangement: Option<sequencer::sequencer::ProjectArrangement>,
     pub(crate) prev: Option<SongBindingsSnapshot>,
-    /// The stored clip lanes, published verbatim as `SEQ.song-lanes`.
-    pub(crate) cached_lanes: Option<Vec<Vec<ArrClip>>>,
-    pub(crate) cached_scene_spans: Option<Vec<SceneSpan>>,
-    pub(crate) cached_scene_names: Option<Vec<String>>,
-    /// Pattern-pool event snapshots for the patterns the lane projection
-    /// references (`song-lane-events`), rekeyed when the projection or the
-    /// pattern epoch changes — not per frame.
-    pub(crate) cached_lane_events: Option<Vec<Vec<LanePatternEvents>>>,
-    pub(crate) prev_pattern_epoch: Option<u64>,
-    /// Pool-content revision at the last lane-events rebuild
-    /// (docs/realtime-arrangement-feedback-spec.md 5.2): a step edit moves
-    /// pool content without touching either the committed-song revision or
-    /// the pattern epoch, so the dots need this third key to refresh.
-    pub(crate) prev_pool_content_revision: Option<u64>,
-    /// Provisional capture content (spec 3.3), rebuilt only when
-    /// [`pending_content_key`] moves. `None` means the last frame saw no
-    /// active capture — the whole `SEQ.song-pending` block is skipped then,
-    /// so an idle frame pays one boolean.
-    pub(crate) cached_pending: Option<PendingContent>,
-    pub(crate) prev_pending_revision: Option<(u64, u64, u64)>,
-    /// The QUANTIZED record head last published, the span half of the
-    /// surface: it moves on the position cadence, not per frame.
-    pub(crate) prev_pending_head: Option<f64>,
 }
 
 /// Display grain of the record head (spec 3.3): the head advances every
@@ -100,8 +53,7 @@ pub(crate) struct SongFrameState {
 /// provisional clip still grows one step at a time.
 const PENDING_HEAD_QUANTUM: f64 = 0.25;
 
-/// One pending take lane's flattened content, the expensive half of
-/// `SEQ.song-pending`.
+/// One pending take lane's flattened content (`song.pending-lanes`).
 #[derive(Clone, PartialEq)]
 pub(crate) struct PendingLaneContent {
     pub(crate) track: usize,
@@ -180,8 +132,7 @@ pub(crate) struct PendingContent {
 
 /// The record head while a capture take exists, floored to
 /// `PENDING_HEAD_QUANTUM` (0 before the record clock has an anchor); `None`
-/// with no capture take. Shared by `SEQ.song-pending` and the host kinds'
-/// `song.pending-head`.
+/// with no capture take: the host kinds' `song.pending-head`.
 pub(crate) fn quantized_pending_head(app: &app::App) -> Option<f64> {
     let head = app
         .pending_capture_active()
@@ -193,7 +144,7 @@ pub(crate) fn quantized_pending_head(app: &app::App) -> Option<f64> {
 /// itself (`App::pending_revision`, which also moves when a take begins or
 /// ends): the pool content and the project scenes the captured launches
 /// name (a launched pattern's steps / length, a scene's cell assignment).
-/// Both readers rebuild only when this moves.
+/// The host kinds rebuild it only when this moves.
 pub(crate) fn pending_content_key(app: &app::App) -> (u64, u64, u64) {
     (
         app.pending_revision,
@@ -275,111 +226,6 @@ fn build_pending_content(
         scene_events: pending.scene_events,
         track_events,
     }
-}
-
-/// `song-pending` value (spec 3.2). Lanes carry RAW events, not dots: the
-/// view normalizes them through the same `arrangement-windowed-dots`
-/// pipeline the committed clips use, so provisional and committed content
-/// are drawn by one code path. Nothing here carries an id — provisional
-/// content is inert (spec 7).
-fn build_song_pending_value(content: &PendingContent, head_beat: f64) -> Value {
-    let lanes = content
-        .lanes
-        .iter()
-        .map(|lane| {
-            let mut map = HashMap::new();
-            number_field(&mut map, "track", lane.track as f64);
-            number_field(&mut map, "start-beat", lane.punch_in_beat);
-            number_field(&mut map, "end-beat", lane.span().end_beat(head_beat));
-            number_field(&mut map, "num-steps", lane.num_steps as f64);
-            number_field(&mut map, "length-beats", lane.length_beats);
-            map.insert(
-                "events".to_string(),
-                Rc::new(RefCell::new(pattern_events_value(&lane.events))),
-            );
-            Rc::new(RefCell::new(Value::Map(map)))
-        })
-        .collect();
-    let scene_events = content
-        .scene_events
-        .iter()
-        .map(|(start_beat, scene)| {
-            let mut map = HashMap::new();
-            number_field(&mut map, "start-beat", *start_beat);
-            number_field(&mut map, "scene", *scene as f64);
-            Rc::new(RefCell::new(Value::Map(map)))
-        })
-        .collect();
-    let track_events = content
-        .track_events
-        .iter()
-        .map(|event| {
-            let mut map = HashMap::new();
-            number_field(&mut map, "track", event.track as f64);
-            number_field(&mut map, "start-beat", event.start_beat);
-            number_field(&mut map, "pattern-id", event.pattern_id as f64);
-            number_field(&mut map, "num-steps", event.num_steps as f64);
-            number_field(&mut map, "length-beats", event.length_beats);
-            map.insert(
-                "events".to_string(),
-                Rc::new(RefCell::new(pattern_events_value(&event.events))),
-            );
-            Rc::new(RefCell::new(Value::Map(map)))
-        })
-        .collect();
-    let mut map = HashMap::new();
-    number_field(&mut map, "origin-beat", content.origin_beat);
-    number_field(&mut map, "head-beat", head_beat);
-    map.insert(
-        "lanes".to_string(),
-        Rc::new(RefCell::new(Value::List(lanes))),
-    );
-    map.insert(
-        "scene-events".to_string(),
-        Rc::new(RefCell::new(Value::List(scene_events))),
-    );
-    map.insert(
-        "track-events".to_string(),
-        Rc::new(RefCell::new(Value::List(track_events))),
-    );
-    Value::Map(map)
-}
-
-/// Publish (or clear) the provisional capture surface (spec 3). Nothing is
-/// published while no capture take exists, which is also how every exit path
-/// clears it: stop, cancel and failure all drop `song_capture_take`.
-pub(crate) fn sync_song_pending(
-    rt: &mut Runtime,
-    app: &app::App,
-    frame: &mut SongFrameState,
-) -> bool {
-    let Some(head) = quantized_pending_head(app) else {
-        if frame.prev_pending_revision.is_none() {
-            return false;
-        }
-        rt.set_reactive("SEQ", "song-pending", Value::Nil);
-        frame.cached_pending = None;
-        frame.prev_pending_revision = None;
-        frame.prev_pending_head = None;
-        return true;
-    };
-    let revision = pending_content_key(app);
-    let content_changed = frame.prev_pending_revision != Some(revision);
-    if content_changed {
-        frame.cached_pending = pending_capture_content(app);
-        frame.prev_pending_revision = Some(revision);
-    }
-    if !content_changed && frame.prev_pending_head == Some(head) {
-        return false;
-    }
-    let content = frame.cached_pending.clone().unwrap_or_default();
-    rt.set_reactive(
-        "SEQ",
-        "song-pending",
-        build_song_pending_value(&content, head),
-    );
-    frame.prev_pending_head = Some(head);
-    true
 }
 
 /// Flattened preview events for one pool pattern referenced by a track's
@@ -573,8 +419,8 @@ pub(crate) fn collect_lane_pattern_events(
         .collect()
 }
 
-/// `song-lane-events` value: per track, a list of
-/// `{pattern-id, num-steps, events: ((time transpose velocity)...)}` maps.
+/// The `seq-arrangement-pattern` preview value (pattern placement):
+/// `{pattern-id, take-id, num-steps, length-beats, events}`.
 pub(crate) fn build_pattern_preview_value(pattern: &LanePatternEvents) -> Value {
     map_value([
         ("pattern-id", if pattern.take_id.is_some() { Value::Nil }
@@ -587,7 +433,7 @@ pub(crate) fn build_pattern_preview_value(pattern: &LanePatternEvents) -> Value 
 }
 
 /// A pattern's or take's flattened events as `((time transpose velocity
-/// duration) …)` (`SEQ.song-lane-events`, `clip.events`).
+/// duration) …)` (`clip.events`, the pending rows' `events`).
 pub(crate) fn pattern_events_value(events: &[(f64, f64, f64, f64)]) -> Value {
     list_value(events.iter().map(|(time, pitch, velocity, duration)| {
         list_value(
@@ -596,11 +442,6 @@ pub(crate) fn pattern_events_value(events: &[(f64, f64, f64, f64)]) -> Value {
                 .map(Value::Number),
         )
     }))
-}
-
-pub(crate) fn build_song_lane_events_value(events: &[Vec<LanePatternEvents>]) -> Value {
-    list_value(events.iter().map(|patterns|
-        list_value(patterns.iter().map(build_pattern_preview_value))))
 }
 
 /// The row governing `beats` for display purposes: `state_at_beat` semantics
@@ -620,7 +461,6 @@ pub(crate) fn build_song_bindings_snapshot(
     app: &app::App,
     song: Option<&ProjectSong>,
 ) -> SongBindingsSnapshot {
-    let mode = app.song_transport_mode.binding_str();
     // Capturing over an EMPTY song runs the plain session transport, so the
     // song-playback position atomics are inactive and every arrangement lane
     // drew its playhead pinned at beat 0. The capture's own record head is
@@ -646,43 +486,17 @@ pub(crate) fn build_song_bindings_snapshot(
     SongBindingsSnapshot {
         exists: song.is_some(),
         recording_kind: song_recording_kind_label(app.recording_kind),
-        mode,
         current_row,
         current_row_id,
         row_count: song.map(|song| song.rows.len()).unwrap_or(0) as f64,
-        // Quantized to a milli-beat for display: still render-rate smooth,
-        // but sub-display-precision jitter does not force a reactive cycle
-        // every frame.
-        position_beats: displayed_song_position_beats(position),
-        end_beat: song.map(|song| song.end_beat).unwrap_or(0.0),
         loop_enabled: song.map(|song| song.loop_enabled).unwrap_or(false),
         capture_failed: app.song_capture_failed,
         capture_error: app.song_capture_error.clone(),
-        edit_error: app.song_edit_error.clone(),
         take_lane_states: song_take_lane_states(app),
-        latched_tracks: {
-            let mask = app.state.song_manual_latch_mask();
-            (0..app.tracks.len())
-                .map(|track| song_lane_latched(mask, track))
-                .collect()
-        },
-        scene_latched: app.state.song_scene_latch(),
-        bound_clip: app
-            .song_clip_selection
-            .map(|selection| (selection.track, selection.clip_id.0)),
-        region: app.song_region_selection.map(|region| {
-            (
-                region.track_a,
-                region.track_b,
-                region.start_beat,
-                region.end_beat,
-                region.scene_lane,
-            )
-        }),
     }
 }
 
-/// The song position (`SEQ.song-position-beats`, `song.position`): the song
+/// The song position (`song.position`): the song
 /// playback position, else `capture_head` (capturing over an EMPTY song runs
 /// the plain session transport, so the playback position is inactive and the
 /// capture's record head is the honest clock; see
@@ -718,7 +532,7 @@ pub(crate) fn song_manual_latch(state: &SequencerState) -> bool {
 }
 
 /// Whether `track`'s bit is set in the manual-latch `mask`
-/// (`SEQ.song-track-latched`, `track.latched`).
+/// (`track.latched`).
 pub(crate) fn song_lane_latched(mask: u64, track: usize) -> bool {
     track < 64 && mask >> track & 1 == 1
 }
@@ -763,86 +577,6 @@ pub(crate) fn song_take_lane_states(app: &app::App) -> Vec<u8> {
         }
     });
     states
-}
-
-fn number_field(map: &mut HashMap<String, Rc<RefCell<Value>>>, key: &str, value: f64) {
-    map.insert(key.to_string(), Rc::new(RefCell::new(Value::Number(value))));
-}
-
-fn optional_number_field(
-    map: &mut HashMap<String, Rc<RefCell<Value>>>,
-    key: &str,
-    value: Option<u64>,
-) {
-    map.insert(
-        key.to_string(),
-        Rc::new(RefCell::new(match value {
-            Some(value) => Value::Number(value as f64),
-            None => Value::Nil,
-        })),
-    );
-}
-
-/// Read-only `song-lanes` value (arrangement-lane-model-spec 12): the STORED
-/// clips, one list per track, each `{clip-id, start-beat, end-beat,
-/// pattern-id, take-id, offset-steps}`. Real identity — the view never merges
-/// or re-derives anything, and `from-override` is gone: every lane item IS a
-/// clip. Lane gaps carry no entry: they are silence.
-pub(crate) fn build_song_lanes_value(lanes: Option<&Vec<Vec<ArrClip>>>) -> Value {
-    let Some(lanes) = lanes else {
-        return Value::List(vec![]);
-    };
-    let tracks = lanes
-        .iter()
-        .map(|clips| {
-            let clips = clips
-                .iter()
-                .map(|clip| {
-                    let mut map = HashMap::new();
-                    number_field(&mut map, "clip-id", clip.id.0 as f64);
-                    number_field(&mut map, "start-beat", clip.start_beat);
-                    number_field(&mut map, "end-beat", clip.end_beat);
-                    optional_number_field(&mut map, "pattern-id", clip.pattern_id);
-                    optional_number_field(&mut map, "take-id", clip.take_id);
-                    number_field(&mut map, "offset-steps", clip.offset_steps);
-                    Rc::new(RefCell::new(Value::Map(map)))
-                })
-                .collect();
-            Rc::new(RefCell::new(Value::List(clips)))
-        })
-        .collect();
-    Value::List(tracks)
-}
-
-/// Read-only `scene-spans` value (spec 12): one span per scene EVENT,
-/// `{start-beat, end-beat, scene}`. Replaces the scene half of the retired
-/// `song-rows`; the scene lane renders these directly, so a clip edge on some
-/// track can no longer fragment it.
-pub(crate) fn build_scene_spans_value(spans: Option<&Vec<SceneSpan>>) -> Value {
-    let Some(spans) = spans else {
-        return Value::List(vec![]);
-    };
-    Value::List(
-        spans
-            .iter()
-            .map(|span| {
-                let mut map = HashMap::new();
-                number_field(&mut map, "start-beat", span.start_beat);
-                number_field(&mut map, "end-beat", span.end_beat);
-                number_field(&mut map, "scene", span.scene as f64);
-                Rc::new(RefCell::new(Value::Map(map)))
-            })
-            .collect(),
-    )
-}
-
-fn build_scene_names_value(names: &[String]) -> Value {
-    Value::List(
-        names
-            .iter()
-            .map(|name| Rc::new(RefCell::new(Value::String(name.clone()))))
-            .collect(),
-    )
 }
 
 pub(crate) fn scene_bank_auto_label(mut index: usize) -> String {
@@ -900,98 +634,21 @@ pub(crate) fn queued_track_clip(state: &SequencerState, track: usize) -> Option<
     }
 }
 
-/// Per-frame publish of the song bindings (spec 12). The committed song and
-/// arrangement are re-read only when the committed-song revision changes; the
-/// scene names diff by value (the scenes side has no revision counter);
-/// scalars publish on change; the render-rate `song-position-beats` publishes
-/// only while a panel that renders it (transport or arrangement) is visible.
-/// Returns true when a reactive cycle is needed.
+/// Per-frame publish of the song bindings (spec 12). The committed song is
+/// re-read only when the committed-song revision changes; scalars publish on
+/// change. Returns true when a reactive cycle is needed.
 pub(crate) fn sync_song_state(
     rt: &mut Runtime,
     app: &app::App,
     frame: &mut SongFrameState,
-    song_position_visible: bool,
 ) -> bool {
     let mut dirty = false;
     let revision = app.state.committed_song_revision();
-    // `song-lanes` and `scene-spans` are functions of the arrangement ALONE,
-    // so they are rebuilt only when the revision moves.
-    let mut lanes_changed = false;
     if frame.revision != Some(revision) {
         frame.cached_song = app.state.committed_song();
-        let arrangement = app.state.committed_arrangement();
-        let lanes = arrangement
-            .as_ref()
-            .map(|arrangement| arrangement.track_lanes.clone());
-        let scene_spans = arrangement.as_ref().map(arrangement_scene_spans);
-        if frame.cached_lanes != lanes {
-            rt.set_reactive("SEQ", "song-lanes", build_song_lanes_value(lanes.as_ref()));
-            frame.cached_lanes = lanes;
-            lanes_changed = true;
-        }
-        if frame.cached_scene_spans != scene_spans {
-            rt.set_reactive(
-                "SEQ",
-                "scene-spans",
-                build_scene_spans_value(scene_spans.as_ref()),
-            );
-            frame.cached_scene_spans = scene_spans;
-        }
-        frame.cached_arrangement = arrangement;
         frame.revision = Some(revision);
         dirty = true;
     }
-    let scene_names = app.state.with_project_scenes(|scenes| {
-        scenes
-            .scenes
-            .iter()
-            .map(|scene| scene.name.clone())
-            .collect::<Vec<_>>()
-    });
-    if frame.cached_scene_names.as_ref() != Some(&scene_names) {
-        rt.set_reactive("SEQ", "scene-names", build_scene_names_value(&scene_names));
-        frame.cached_scene_names = Some(scene_names);
-        dirty = true;
-    }
-    // Preview events for the patterns the projection references: re-snapshot
-    // only when the projection itself or the pattern data (epoch) changed,
-    // then diff by value so an unchanged snapshot publishes nothing
-    // (docs/arrangement-timeline-ui-spec.md 7.1: recompute on pattern/row
-    // change, not per frame).
-    let pattern_epoch = app
-        .state
-        .transport
-        .pattern_epoch
-        .load(std::sync::atomic::Ordering::Relaxed);
-    // A step edit moves neither the projection nor the epoch (the epoch is
-    // scene-launch scale and a per-note bump would stampede unrelated
-    // caches — spec 5.2), so pool content carries its own revision.
-    let pool_content_revision = app.state.pool_content_revision();
-    if lanes_changed
-        || frame.prev_pattern_epoch != Some(pattern_epoch)
-        || frame.prev_pool_content_revision != Some(pool_content_revision)
-    {
-        let events = match frame.cached_lanes.as_ref() {
-            Some(lanes) => app
-                .state
-                .with_project_scenes(|scenes| collect_lane_pattern_events(lanes, scenes)),
-            None => Vec::new(),
-        };
-        if frame.cached_lane_events.as_ref() != Some(&events) {
-            rt.set_reactive(
-                "SEQ",
-                "song-lane-events",
-                build_song_lane_events_value(&events),
-            );
-            frame.cached_lane_events = Some(events);
-            dirty = true;
-        }
-        frame.prev_pattern_epoch = Some(pattern_epoch);
-        frame.prev_pool_content_revision = Some(pool_content_revision);
-    }
-    // Provisional capture content (spec 3): its own revision, never the
-    // committed one — a recording must not invalidate the lane caches above.
-    dirty |= sync_song_pending(rt, app, frame);
     let next = build_song_bindings_snapshot(app, frame.cached_song.as_ref());
     let prev = frame.prev.as_ref();
     macro_rules! publish_on_change {
@@ -1008,7 +665,6 @@ pub(crate) fn sync_song_state(
         recording_kind,
         Value::String(next.recording_kind.to_string())
     );
-    publish_on_change!("song-mode", mode, Value::String(next.mode.to_string()));
     publish_on_change!("song-current-row", current_row, Value::Number(next.current_row));
     publish_on_change!(
         "song-current-row-id",
@@ -1016,7 +672,6 @@ pub(crate) fn sync_song_state(
         Value::Number(next.current_row_id)
     );
     publish_on_change!("song-row-count", row_count, Value::Number(next.row_count));
-    publish_on_change!("song-end-beat", end_beat, Value::Number(next.end_beat));
     publish_on_change!(
         "song-loop-enabled",
         loop_enabled,
@@ -1035,14 +690,6 @@ pub(crate) fn sync_song_state(
             None => Value::Nil,
         }
     );
-    publish_on_change!(
-        "song-edit-error",
-        edit_error,
-        match &next.edit_error {
-            Some(error) => Value::String(error.clone()),
-            None => Value::Nil,
-        }
-    );
     let governed_changed = prev
         .map(|prev| prev.take_lane_states != next.take_lane_states)
         .unwrap_or(true);
@@ -1053,25 +700,6 @@ pub(crate) fn sync_song_state(
             .map(|state| Rc::new(RefCell::new(Value::Number(*state as f64))))
             .collect();
         rt.set_reactive("SEQ", "song-track-governed", Value::List(items));
-    }
-    let latched_changed = prev
-        .map(|prev| prev.latched_tracks != next.latched_tracks)
-        .unwrap_or(true);
-    if latched_changed {
-        let items: Vec<Rc<RefCell<Value>>> = next
-            .latched_tracks
-            .iter()
-            .map(|latched| Rc::new(RefCell::new(Value::Bool(*latched))))
-            .collect();
-        rt.set_reactive("SEQ", "song-track-latched", Value::List(items));
-        dirty = true;
-    }
-    publish_on_change!(
-        "song-scene-latched",
-        scene_latched,
-        Value::Bool(next.scene_latched)
-    );
-    if governed_changed {
         // The take-governed dim rides the step-cell color channels (the
         // header keeps its full track color); resync them so the step
         // shells restyle live as rows enter/leave take lanes.
@@ -1081,42 +709,6 @@ pub(crate) fn sync_song_state(
             &app.state,
             0..next.take_lane_states.len(),
             false,
-        );
-        dirty = true;
-    }
-    publish_on_change!(
-        "song-bound-clip",
-        bound_clip,
-        match next.bound_clip {
-            Some((track, row_id)) => Value::List(vec![
-                Rc::new(RefCell::new(Value::Number(track as f64))),
-                Rc::new(RefCell::new(Value::Number(row_id as f64))),
-            ]),
-            None => Value::Nil,
-        }
-    );
-    publish_on_change!(
-        "song-region",
-        region,
-        match next.region {
-            Some((track_a, track_b, start, end, scene_lane)) => Value::List(vec![
-                Rc::new(RefCell::new(Value::Number(track_a as f64))),
-                Rc::new(RefCell::new(Value::Number(track_b as f64))),
-                Rc::new(RefCell::new(Value::Number(start))),
-                Rc::new(RefCell::new(Value::Number(end))),
-                Rc::new(RefCell::new(Value::Bool(scene_lane))),
-            ]),
-            None => Value::Nil,
-        }
-    );
-    let position_changed = prev
-        .map(|prev| prev.position_beats != next.position_beats)
-        .unwrap_or(true);
-    if position_changed && song_position_visible {
-        rt.set_reactive(
-            "SEQ",
-            "song-position-beats",
-            Value::Number(next.position_beats),
         );
         dirty = true;
     }

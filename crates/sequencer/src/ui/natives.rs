@@ -1536,7 +1536,7 @@ pub(crate) fn register_song_natives(runtime: &mut Runtime) {
         "Select an arrangement REGION — the inclusive model-track span \
          `track-a`..`track-b` over the half-open beat span `[start, end)` \
          (region spec 4.1). Rust-owned, so it survives view switches; \
-         published as SEQ.song-region. A region names no single clip, so it \
+         published as song.region. A region names no single clip, so it \
          clears the clip selection and releases the sound binding. Pass a \
          truthy `scene-lane` for a marquee swept in the SCENE lane: \
          copy/paste/delete then carry the scene EVENTS inside the rectangle \
@@ -1579,7 +1579,7 @@ pub(crate) fn register_song_natives(runtime: &mut Runtime) {
         "seq-song-clear-region",
         "(seq-song-clear-region)",
         "Clear the arrangement region selection (region spec 4.1): \
-         SEQ.song-region goes nil and every lane drops its region highlight.",
+         song.region goes nil and every lane drops its region highlight.",
         move |_args, ctx| {
             ctx.enqueue_command(HostCommand::Custom {
                 name: "song-clear-region".to_string(),
@@ -3178,39 +3178,14 @@ pub(crate) fn init_runtime(
                 ("roll-window", Value::List(vec![])),
                 // Song mode observability (docs/song-mode-spec.md 12).
                 ("song-exists", Value::Bool(false)),
-                ("song-mode", Value::String("stopped".to_string())),
                 ("song-recording-kind", Value::String("".to_string())),
-                ("song-track-latched", Value::List(vec![])),
-                ("song-scene-latched", Value::Bool(false)),
                 ("song-current-row", Value::Number(-1.0)),
                 ("song-current-row-id", Value::Number(-1.0)),
                 ("song-row-count", Value::Number(0.0)),
-                ("song-position-beats", Value::Number(0.0)),
-                ("song-end-beat", Value::Number(0.0)),
                 ("song-loop-enabled", Value::Bool(false)),
                 ("song-capture-failed", Value::Bool(false)),
                 ("song-capture-error", Value::Nil),
-                ("song-edit-error", Value::Nil),
                 ("song-track-governed", Value::List(vec![])),
-                ("song-bound-clip", Value::Nil),
-                // Region selection (region spec 4.1): nil, or
-                // (track-a track-b start end scene-lane?).
-                ("song-region", Value::Nil),
-                // Arrangement read surfaces (lane spec 12): the stored clips
-                // and the derived scene-event spans. There is no third
-                // surface — a lane gap is silence, so it renders as nothing.
-                ("song-lanes", Value::List(vec![])),
-                ("scene-spans", Value::List(vec![])),
-                ("song-lane-events", Value::List(vec![])),
-                // The per-clip sound divergence/color join for the timeline
-                // dots (takes spec 17.6/18.3).
-                ("song-clip-sounds", Value::List(vec![])),
-                // Provisional arrangement-capture content
-                // (docs/realtime-arrangement-feedback-spec.md 3.2): nil
-                // unless a capture is running. Inert — no ids, so no gesture
-                // can address it.
-                ("song-pending", Value::Nil),
-                ("scene-names", Value::List(vec![])),
                 ("num-steps", Value::Number(PAGE_SIZE as f64)),
                 ("num-tracks", Value::Number(track_count as f64)),
                 ("current-track", Value::Number(0.0)),
@@ -3266,10 +3241,6 @@ pub(crate) fn init_runtime(
                 ),
                 ("track-names", build_track_names(&track_names)),
                 ("track-collapsed", build_track_collapsed(app)),
-                (
-                    "track-pattern-cells",
-                    build_track_pattern_cells_value(&state, track_count),
-                ),
                 (
                     "track-num-steps",
                     build_all_track_num_steps_value(&state, app),
@@ -3716,15 +3687,6 @@ pub(crate) fn init_runtime(
                     Box::leak(track_selected_field(idx).into_boxed_str()),
                     Value::Bool(idx == 0),
                 ));
-                for cell in state.track_pattern_cells(idx) {
-                    let pattern_id = cell.pattern_id.0;
-                    fields.push((
-                        Box::leak(
-                            track_pattern_cell_active_field(idx, pattern_id).into_boxed_str(),
-                        ),
-                        Value::Bool(cell.active_effective),
-                    ));
-                }
                 fields.push((
                     Box::leak(format!("track-peak-{idx}").into_boxed_str()),
                     Value::Number(0.0),

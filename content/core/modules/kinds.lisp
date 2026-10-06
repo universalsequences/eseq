@@ -1078,6 +1078,8 @@
          (length :number :doc "The source's length in beats: one pattern cycle, or the whole take")
          (events (list-of (list-of :number))
                  :doc "The source's notes, each (time transpose velocity duration), time and duration in steps")
+         (note-dots (list-of :any)
+                 :doc "The notes the clip plays as the timeline's dots (:offset :value :width, each 0..1 of the clip's source window): a pattern clip's whole cycle, a take clip's window, at most 256")
          (dot    :bool   :doc "The clip resolves a sound (it shows the sound identity dot)")
          (dot-color :rgb :doc "The sound's palette color, themed; the timeline's gray when it has none")))
 

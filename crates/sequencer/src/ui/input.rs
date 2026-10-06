@@ -1276,17 +1276,18 @@ fn handle_arrangement_region_delete_shortcut(
     {
         return false;
     }
-    let value_is_set = |editor: &mut Editor, expr: &str| {
-        editor
-            .runtime_mut()
-            .eval_str(expr)
-            .ok()
-            .flatten()
-            .is_some_and(|value| !matches!(value, Value::Nil))
+    // The host kinds' song selection (`song.region`, `song.bound-clip`),
+    // read from the singleton's cells.
+    let runtime = editor.runtime();
+    let Some(song) = runtime.singleton_instance("eseq.kinds:song") else {
+        return false;
     };
-    if !value_is_set(editor, "SEQ.song-region")
-        || value_is_set(editor, "SEQ.song-bound-clip")
-    {
+    let is_set = |field: &str| {
+        runtime
+            .instance_field(song, field)
+            .is_ok_and(|value| !matches!(value, Value::Nil))
+    };
+    if !is_set("region") || is_set("bound-clip") {
         return false;
     }
     editor

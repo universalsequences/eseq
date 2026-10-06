@@ -1,9 +1,9 @@
 //! Sound palette read surfaces (takes spec §17.6 / §18.3): the open
-//! overlay (recorded for the `sound-palette` host kind through `presented`)
-//! and `SEQ.song-clip-sounds` (the timeline clip-dot identity join). Both
-//! diff by value before publishing, like `scene-names` — the underlying
-//! scenes have no revision counter and palette gestures can move refs
-//! without touching the committed-song revision.
+//! overlay (recorded for the `sound-palette` host kind through `presented`),
+//! diffed by value before publishing — the underlying scenes have no
+//! revision counter and palette gestures can move refs without touching the
+//! committed-song revision. The timeline clip-dot identity join is the host
+//! kinds' `clip.dot` / `dot-color`.
 
 use super::*;
 use crate::app::sound_palette::{PaletteEntry, SOUND_PALETTE_RGB};
@@ -16,10 +16,8 @@ use sequencer::delta_glyph::{
     ParamTaper,
 };
 use sequencer::effects::{ParamKind, ParamScaling};
-use std::cell::RefCell;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use std::rc::Rc;
 
 #[derive(Default)]
 pub(crate) struct SoundPaletteFrameState {
@@ -29,17 +27,15 @@ pub(crate) struct SoundPaletteFrameState {
     /// Whether anything was ever published (so the first closed frame does
     /// not publish Nil over the registered default).
     published_open: bool,
-    cached_clip_sounds: Option<Vec<Vec<(u64, bool, Option<u8>)>>>,
     glyphs: GlyphFrames,
 }
 
 impl SoundPaletteFrameState {
-    /// Drop the published-row caches so the next sync republishes every color
-    /// field. Used when the theme's variant tint changes: the entries and clip
-    /// sounds are unchanged, only their displayed colors are.
+    /// Drop the published-row cache so the next sync republishes every color
+    /// field. Used when the theme's variant tint changes: the entries are
+    /// unchanged, only their displayed colors are.
     pub(crate) fn invalidate_published_colors(&mut self) {
         self.cached = None;
-        self.cached_clip_sounds = None;
     }
 }
 
@@ -1273,38 +1269,11 @@ pub(super) fn collect_pattern_cell_glyph_frames(
 }
 
 /// A sound's palette color index and its themed color, `None` for no (or an
-/// unknown) color: the palette rows and clip dots (`SEQ.song-clip-sounds`,
-/// `clip.dot-color`).
+/// unknown) color: the palette rows and clip dots (`clip.dot-color`).
 pub(crate) fn sound_palette_rgb(color: Option<u8>) -> Option<(usize, [f32; 3])> {
     let idx = usize::from(color?);
     let rgb = SOUND_PALETTE_RGB.get(idx)?;
     Some((idx, super::track_and_mixer::themed_variant_rgb(*rgb)))
-}
-
-fn color_fields(map: &mut HashMap<String, Rc<RefCell<Value>>>, color: Option<u8>) {
-    match sound_palette_rgb(color) {
-        Some((idx, [r, g, b])) => {
-            map.insert(
-                "color".to_string(),
-                Rc::new(RefCell::new(Value::Number(idx as f64))),
-            );
-            map.insert(
-                "color-r".to_string(),
-                Rc::new(RefCell::new(Value::Number(r as f64))),
-            );
-            map.insert(
-                "color-g".to_string(),
-                Rc::new(RefCell::new(Value::Number(g as f64))),
-            );
-            map.insert(
-                "color-b".to_string(),
-                Rc::new(RefCell::new(Value::Number(b as f64))),
-            );
-        }
-        None => {
-            map.insert("color".to_string(), Rc::new(RefCell::new(Value::Nil)));
-        }
-    }
 }
 
 /// The track's instrument display name for the palette header — the same
@@ -1322,48 +1291,14 @@ fn palette_instrument_name(app: &app::App, track: usize) -> String {
     }
 }
 
-fn build_clip_sounds_value(tracks: &[Vec<(u64, bool, Option<u8>)>]) -> Value {
-    Value::List(
-        tracks
-            .iter()
-            .map(|clips| {
-                let clips = clips
-                    .iter()
-                    .map(|(clip_id, dot, color)| {
-                        let mut map = HashMap::new();
-                        map.insert(
-                            "clip-id".to_string(),
-                            Rc::new(RefCell::new(Value::Number(*clip_id as f64))),
-                        );
-                        map.insert("dot".to_string(), Rc::new(RefCell::new(Value::Bool(*dot))));
-                        color_fields(&mut map, *color);
-                        Rc::new(RefCell::new(Value::Map(map)))
-                    })
-                    .collect();
-                Rc::new(RefCell::new(Value::List(clips)))
-            })
-            .collect(),
-    )
-}
-
-pub(crate) struct SoundPaletteSyncResult {
-    pub effects_dirty: bool,
-    pub paint_dirty: bool,
-}
-
-/// Publish the palette read surfaces, distinguishing effect work from paint
-/// resource changes. The clip-sounds join (two lock scopes + a full per-clip build)
-/// only runs while the arrangement is visible — nothing else reads it; the
-/// cache clears on hide so re-showing republishes fresh. The palette half
-/// stays ungated (cheap, and it also mounts in the *step* side panel).
+/// Publish the palette read surfaces; returns whether a paint resource
+/// (a glyph frame) changed. Ungated (cheap, and it also mounts in the *step*
+/// side panel).
 pub(crate) fn sync_sound_palette(
-    rt: &mut Runtime,
     app: &app::App,
     frame: &mut SoundPaletteFrameState,
-    arrangement_visible: bool,
     pattern_glyphs_visible: bool,
-) -> SoundPaletteSyncResult {
-    let mut dirty = false;
+) -> bool {
     let paint_before = eseqlisp::widget_render::widget_state_generation();
     if pattern_glyphs_visible {
         sync_pattern_cell_glyph_frames(app, &mut frame.glyphs);
@@ -1394,27 +1329,7 @@ pub(crate) fn sync_sound_palette(
             }
         }
     }
-    if arrangement_visible {
-        let clip_sounds = app.song_clip_sounds();
-        if frame.cached_clip_sounds.as_ref() != Some(&clip_sounds) {
-            dirty |= rt
-                .set_reactive(
-                    "SEQ",
-                    "song-clip-sounds",
-                    build_clip_sounds_value(&clip_sounds),
-                )
-                .effects_dirty;
-            frame.cached_clip_sounds = Some(clip_sounds);
-        }
-    } else {
-        // Hidden: skip the join entirely and forget the cache so the next
-        // visible frame recomputes and republishes.
-        frame.cached_clip_sounds = None;
-    }
-    SoundPaletteSyncResult {
-        effects_dirty: dirty,
-        paint_dirty: paint_before != eseqlisp::widget_render::widget_state_generation(),
-    }
+    paint_before != eseqlisp::widget_render::widget_state_generation()
 }
 
 /// Rack composite surface tests (docs/rack-glyph-spec.md §4). These exercise

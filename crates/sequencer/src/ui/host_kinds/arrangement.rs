@@ -16,11 +16,16 @@
 //!   scene instances (a reorder remaps the lanes in place, moving no song
 //!   revision) and the cell set ([`SongState::structure_syncs`] counts).
 //! - Source content (`num-steps`, `length`, `events`, from
-//!   `collect_lane_pattern_events`, shared with `SEQ.song-lane-events`): the
-//!   pattern epoch and pool content revision. Values are cached per (track
-//!   instance, source); after a structure-only change only clips whose
-//!   (track, source) is new are pushed, and only missing sources' lanes are
-//!   previewed.
+//!   `collect_lane_pattern_events`): the pattern epoch and pool content
+//!   revision. Values are cached per (track instance, source); after a
+//!   structure-only change only clips whose (track, source) is new are
+//!   pushed, and only missing sources' lanes are previewed.
+//! - Note dots (`note-dots`, the timeline's flattened preview of the notes
+//!   the clip plays, [`clip_note_dots`]): a pattern clip's are its source's
+//!   whole cycle, built with the source; a take clip's are the take's window
+//!   at the clip's span and offset, kept per clip under that window. Pushed
+//!   after a structure sync or a content change, so a lane that re-renders
+//!   (a recording lane, every frame) flattens nothing.
 //! - Sound dots (`dot`, `dot-color`, `App::song_clip_sounds_in`): the song
 //!   revision, the scenes revision (the patches and their palette colors
 //!   live there), the sound binding epoch and the structure.
@@ -54,7 +59,10 @@ pub(super) struct SongState {
     /// (pattern epoch, pool content revision) the source cache holds.
     sources_key: Option<(u64, u64)>,
     /// Built source values per (track instance, source).
-    sources: HashMap<(InstanceId, ClipSource), [Value; 3]>,
+    sources: HashMap<(InstanceId, ClipSource), SourceContent>,
+    /// A take clip's note dots, under the window (start, end, offset bits)
+    /// they were flattened for; cleared with the sources.
+    take_dots: HashMap<InstanceId, ([u64; 3], Value)>,
     /// (song revision, scenes revision, sound binding epoch, generation)
     /// the dots were last pushed under.
     dots_key: Option<(u64, u64, usize, u64)>,
@@ -98,6 +106,7 @@ impl SongState {
         self.structure = None;
         self.sources_key = None;
         self.sources.clear();
+        self.take_dots.clear();
         self.dots_key = None;
         self.cells_key = None;
         self.cell_observed.reset();
@@ -173,8 +182,8 @@ impl CellKey {
     }
 }
 
-/// One registered clip: its lane (track position), track instance, clip id
-/// and source.
+/// One registered clip: its lane (track position), track instance, clip id,
+/// source and span (start and end beats, offset steps).
 #[derive(Clone, Copy)]
 struct ClipRow {
     id: InstanceId,
@@ -182,6 +191,100 @@ struct ClipRow {
     track_id: InstanceId,
     cid: u64,
     source: ClipSource,
+    span: [f64; 3],
+}
+
+/// One source's content: the kind values and, for the note dots, the raw
+/// notes and one whole cycle flattened.
+struct SourceContent {
+    num_steps: f64,
+    length: f64,
+    notes: Vec<(f64, f64, f64, f64)>,
+    events: Value,
+    cycle_dots: Value,
+}
+
+impl SourceContent {
+    fn of(entry: Option<&LanePatternEvents>) -> Self {
+        let (num_steps, length, notes) = entry.map_or((0.0, 0.0, Vec::new()), |entry| {
+            (
+                entry.num_steps as f64,
+                entry.length_beats,
+                entry.events.clone(),
+            )
+        });
+        Self {
+            num_steps,
+            length,
+            events: pattern_events_value(&notes),
+            cycle_dots: windowed_dots(&notes, 0.0, num_steps.max(1.0)),
+            notes,
+        }
+    }
+}
+
+/// Dots per item at most (`windowed_dots`).
+const DOT_CAP: f64 = 256.0;
+
+/// A clip's notes as the timeline's dots (arrangement timeline spec 7.1),
+/// the Lisp view's `clip-content` before it moved here: a pattern clip shows
+/// its source's whole cycle (the widget tiles and phases it); a take clip the
+/// step window it plays, clamped to the take's end (takes spec 11.3).
+pub(crate) fn clip_note_dots(
+    take: bool,
+    [start, end, offset]: [f64; 3],
+    num_steps: f64,
+    length: f64,
+    notes: &[(f64, f64, f64, f64)],
+) -> Value {
+    if !take || length <= 0.0 || num_steps <= 0.0 {
+        return windowed_dots(notes, 0.0, num_steps.max(1.0));
+    }
+    let step_beats = length / num_steps;
+    let remaining_steps = (num_steps - offset).max(0.0);
+    let end = end.min(start + remaining_steps * step_beats);
+    windowed_dots(notes, offset, ((end - start) / step_beats).max(0.000001))
+}
+
+/// The notes inside the step window [from, from + span) as dots normalized
+/// to it (`offset`, `value`: the transpose spread over the notes' range,
+/// `width`: the note's length, never past the window's end), at most
+/// [`DOT_CAP`]: notes in one 1/cap-wide bucket draw as the bucket's first.
+/// The same arithmetic as the view's `windowed-dots` (the provisional items
+/// still flatten there), so both draw alike.
+fn windowed_dots(notes: &[(f64, f64, f64, f64)], from: f64, span: f64) -> Value {
+    let inside: Vec<_> = notes
+        .iter()
+        .filter(|(time, ..)| *time >= from && *time < from + span)
+        .collect();
+    let Some(first) = inside.first() else {
+        return list_value(Vec::<Value>::new());
+    };
+    let (lo, hi) = inside.iter().fold((first.1, first.1), |(lo, hi), note| {
+        (lo.min(note.1), hi.max(note.1))
+    });
+    let mut last = -1.0;
+    let mut dots = Vec::new();
+    for (time, note, _, duration) in inside {
+        let offset = ((time - from) / span).min(0.999).max(0.0);
+        let bucket = (offset * DOT_CAP).floor();
+        if bucket == last {
+            continue;
+        }
+        last = bucket;
+        let value = if hi == lo {
+            0.5
+        } else {
+            0.15 + 0.7 * ((note - lo) / (hi - lo))
+        };
+        let width = (duration.max(0.0) / span).min(1.0 - offset).max(0.0);
+        dots.push(map_value([
+            ("offset", number(offset)),
+            ("value", number(value)),
+            ("width", number(width)),
+        ]));
+    }
+    list_value(dots)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -320,6 +423,7 @@ impl HostKinds {
             None => (Vec::new(), Some(Vec::new())),
         });
         let mut fresh = Vec::new();
+        let structure_synced = spans.is_some();
         if let Some(spans) = spans {
             fresh = self.sync_song_structure(pusher, app, &lanes, &spans);
             self.song.structure = Some(StructureKey {
@@ -335,7 +439,11 @@ impl HostKinds {
             self.sync_clip_dots(pusher, app, &lanes);
             self.song.dots_key = Some((sound.0, sound.1, sound.2, self.song.generation));
         }
+        let content_moved = self.song.sources_key != Some(content);
         self.sync_clip_sources(pusher, app, &lanes, content, &fresh);
+        if structure_synced || content_moved {
+            self.sync_clip_note_dots(pusher);
+        }
     }
 
     /// The song's `exists`, `end`, `loop` and `spans`, and every track's
@@ -400,6 +508,7 @@ impl HostKinds {
                     track_id,
                     cid,
                     source,
+                    span: [clip.start_beat, clip.end_beat, clip.offset_steps],
                 });
             }
             let list = instance_list(rows[first..].iter().map(|row| row.id));
@@ -429,7 +538,7 @@ impl HostKinds {
 
     /// Each clip's sound dot (`dot`, `dot-color`; the timeline's gray for a
     /// patch without a palette color), from `App::song_clip_sounds_in`
-    /// (shared with `SEQ.song-clip-sounds`) over the lanes in hand.
+    /// over the lanes in hand.
     fn sync_clip_dots(&mut self, pusher: &mut Pusher<'_>, app: &app::App, lanes: &[Vec<ArrClip>]) {
         if self.song.clips.is_empty() {
             return;
@@ -452,7 +561,7 @@ impl HostKinds {
     /// Each clip's source content (`num-steps`, `length`, `events`): every
     /// row when the content key moved (the cache is cleared), else the
     /// `fresh` rows only. Values come from the cache, or from the previews
-    /// (`collect_lane_pattern_events`, shared with `SEQ.song-lane-events`)
+    /// (`collect_lane_pattern_events`)
     /// of the lanes holding a missing source, each source built once.
     fn sync_clip_sources(
         &mut self,
@@ -466,6 +575,7 @@ impl HostKinds {
         let all = song.sources_key != Some(content);
         if all {
             song.sources.clear();
+            song.take_dots.clear();
             song.sources_key = Some(content);
         } else if !fresh.is_empty() {
             // Drop the sources no clip plays any more.
@@ -496,23 +606,50 @@ impl HostKinds {
                 .state
                 .with_project_scenes(|scenes| collect_lane_pattern_events(&needed, scenes));
             for row in missing {
-                let entries = previews.get(row.track).into_iter().flatten();
-                let values = match entries.into_iter().find(|entry| row.source.previews(entry)) {
-                    Some(entry) => [
-                        number(entry.num_steps as f64),
-                        number(entry.length_beats),
-                        pattern_events_value(&entry.events),
-                    ],
-                    None => [number(0.0), number(0.0), list_value(Vec::<Value>::new())],
-                };
-                song.sources.insert((row.track_id, row.source), values);
+                let mut entries = previews.get(row.track).into_iter().flatten();
+                let entry = entries.find(|entry| row.source.previews(entry));
+                song.sources
+                    .insert((row.track_id, row.source), SourceContent::of(entry));
             }
         }
         for row in &rows {
-            let [steps, length, events] = song.sources[&(row.track_id, row.source)].clone();
-            pusher.push(row.id, f::CLIP_NUM_STEPS, steps);
-            pusher.push(row.id, f::CLIP_LENGTH, length);
-            pusher.push(row.id, f::CLIP_EVENTS, events);
+            let source = &song.sources[&(row.track_id, row.source)];
+            pusher.push(row.id, f::CLIP_NUM_STEPS, number(source.num_steps));
+            pusher.push(row.id, f::CLIP_LENGTH, number(source.length));
+            pusher.push(row.id, f::CLIP_EVENTS, source.events.clone());
+        }
+    }
+
+    /// Every clip's `note-dots` ([`clip_note_dots`]): a pattern clip's
+    /// source cycle, a take clip's window, flattened again only when the
+    /// clip's span or its take's content moved.
+    fn sync_clip_note_dots(&mut self, pusher: &mut Pusher<'_>) {
+        let song = &mut self.song;
+        let live: HashSet<InstanceId> = song.clips.iter().map(|row| row.id).collect();
+        song.take_dots.retain(|id, _| live.contains(id));
+        for row in &song.clips {
+            let source = &song.sources[&(row.track_id, row.source)];
+            let dots = match row.source {
+                ClipSource::Pattern(_) => source.cycle_dots.clone(),
+                ClipSource::Take(_) => {
+                    let window = row.span.map(f64::to_bits);
+                    match song.take_dots.get(&row.id) {
+                        Some((kept, dots)) if *kept == window => dots.clone(),
+                        _ => {
+                            let dots = clip_note_dots(
+                                true,
+                                row.span,
+                                source.num_steps,
+                                source.length,
+                                &source.notes,
+                            );
+                            song.take_dots.insert(row.id, (window, dots.clone()));
+                            dots
+                        }
+                    }
+                }
+            };
+            pusher.push(row.id, f::CLIP_NOTE_DOTS, dots);
         }
     }
 

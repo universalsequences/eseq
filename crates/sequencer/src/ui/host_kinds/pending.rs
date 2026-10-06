@@ -1,7 +1,8 @@
 //! The provisional capture surface (spec §14, stage 7d-2): `song.pending`,
 //! `pending-origin`, `pending-head` and the positional `pending-lane`,
-//! `pending-scene` and `pending-launch` instances (legacy
-//! `SEQ.song-pending`), while an arrangement capture take exists.
+//! `pending-scene` and `pending-launch` instances (the legacy
+//! `SEQ.song-pending` was removed with eseq-0l17.15), while an arrangement
+//! capture take exists.
 //!
 //! **Identity.** Provisional content has no ids (it is inert until the
 //! stop-commit), so each kind is positional (`(index)`, like `scene-span`):

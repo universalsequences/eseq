@@ -57,6 +57,7 @@ pub(crate) use learn::open_patch_learn_buffer;
 #[cfg(test)]
 pub(crate) use tracks::apply_rename_group_host_command;
 pub(crate) use song::{apply_song_edit_command, apply_sound_palette_view_command};
+pub(crate) use arrangement::apply_capture_selection_command;
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicUsize, Ordering};

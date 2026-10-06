@@ -1740,7 +1740,7 @@ impl App {
             .max(step as f64 + 1.0)
             .max(step as f64 + f64::from(delay) + f64::from(duration_steps));
         // One of the two writers of provisional content (spec 3.3): the
-        // `SEQ.song-pending` dots rebuild only when this moves.
+        // `song.pending-*` dots rebuild only when this moves.
         self.pending_revision = self.pending_revision.wrapping_add(1);
         true
     }

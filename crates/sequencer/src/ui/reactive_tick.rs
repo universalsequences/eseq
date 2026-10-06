@@ -898,22 +898,11 @@ pub(crate) fn sync_reactive_tick(
             );
         }
         needs_reactive_cycle |= crate::retrospective::sync(editor.runtime_mut(), &app);
-        needs_reactive_cycle |= sync_song_state(
-            editor.runtime_mut(),
-            &app,
-            &mut ctx.frame.song,
-            transport_visible || arrangement_visible,
-        );
+        needs_reactive_cycle |= sync_song_state(editor.runtime_mut(), &app, &mut ctx.frame.song);
         let pattern_glyphs_visible = editor.has_visible_widget_source("sound-glyph", "pattern-glyph:");
-        let palette_sync = sync_sound_palette(
-            editor.runtime_mut(),
-            &app,
-            &mut ctx.frame.sound_palette,
-            arrangement_visible,
-            pattern_glyphs_visible,
-        );
-        needs_reactive_cycle |= palette_sync.effects_dirty;
-        if palette_sync.paint_dirty { editor.mark_needs_redraw(); }
+        if sync_sound_palette(&app, &mut ctx.frame.sound_palette, pattern_glyphs_visible) {
+            editor.mark_needs_redraw();
+        }
         if ctx.meters.cached_track_peak_levels != ctx.frame.prev_track_peak_levels {
             if track_and_bus_meter_visible {
                 needs_reactive_cycle |= sync_track_peak_field_delta(

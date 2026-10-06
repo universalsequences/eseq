@@ -383,8 +383,9 @@ Per-lane, not global: a latched lane's committed timeline clips render at
 35% color (`arrangement-lane-clip-color`), and the scene lane dims the same
 way while the scene identity is latched — "the arrangement is not what you
 hear here until Back to Arrangement". Driven by two new bindings published
-from the latch atomics in `sync_song_state`: `SEQ.song-track-latched`
-(per-track bool list) and `SEQ.song-scene-latched`. Provisional
+from the latch atomics: `track.latched` and `song.scene-latched` (the host
+kinds, kind-bindings spec §14.2d; formerly `SEQ.song-track-latched` and
+`SEQ.song-scene-latched` from `sync_song_state`). Provisional
 (pending-capture) items never dim — they ARE what is being recorded.
 
 ## 10.4 A latched lane owns its sound (2026-08-03, user-reported bug)

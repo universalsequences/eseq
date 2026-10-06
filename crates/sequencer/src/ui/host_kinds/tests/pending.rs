@@ -53,25 +53,19 @@ impl Harness {
             .sum()
     }
 
-    /// The legacy `SEQ.song-pending`, published as the reactive tick does.
-    fn legacy_pending(&mut self) -> Value {
-        self.legacy_pending_in(&mut SongFrameState::default())
-    }
-
-    /// [`Self::legacy_pending`] through a frame kept across ticks (its
-    /// rebuild gate in play).
-    fn legacy_pending_in(&mut self, frame: &mut SongFrameState) -> Value {
-        sync_song_pending(self.editor.runtime_mut(), &self.app, frame);
-        (self
-            .rt()
-            .reactive_field_value("SEQ", "song-pending")
-            .cloned())
-        .unwrap_or(Value::Nil)
+    /// The model's provisional content and quantized record head (the
+    /// functions the host kinds push from).
+    fn model_pending(&self) -> (PendingContent, f64) {
+        let content = pending_capture_content(&self.app).expect("a capture take");
+        (
+            content,
+            quantized_pending_head(&self.app).expect("a record head"),
+        )
     }
 }
 
 #[test]
-fn pending_fields_match_the_legacy_surface() {
+fn pending_fields_match_the_model() {
     let mut h = Harness::new();
     h.sync();
     assert_eq!(h.eval_7d2("song.pending"), Value::Bool(false));
@@ -79,53 +73,55 @@ fn pending_fields_match_the_legacy_surface() {
     h.record_note(anchor, 0, 4.0, 3.0);
     h.app.observe_manual_clip_launch(1, PatternId(0));
     h.sync();
-    let legacy = h.legacy_pending();
+    let (content, head) = h.model_pending();
     assert_eq!(h.eval_7d2("song.pending"), Value::Bool(true));
     assert_eq!(
         h.eval_7d2("song.pending-origin"),
-        get(&legacy, "origin-beat")
+        Value::Number(content.origin_beat)
     );
-    assert_eq!(h.eval_7d2("song.pending-head"), get(&legacy, "head-beat"));
-    let lanes = items(&get(&legacy, "lanes"));
-    assert_eq!(lanes.len(), 1);
+    assert_eq!(h.eval_7d2("song.pending-head"), Value::Number(head));
+    assert_eq!(content.lanes.len(), 1);
     assert_eq!(
         h.eval_7d2("(len song.pending-lanes)"),
-        Value::Number(lanes.len() as f64)
+        Value::Number(content.lanes.len() as f64)
     );
-    for (i, lane) in lanes.iter().enumerate() {
+    for (i, lane) in content.lanes.iter().enumerate() {
         let field = |h: &mut Harness, name: &str| {
             h.eval_7d2(&format!("(let ((l (lane-at {i}))) l.{name})"))
         };
-        let track = num(get(lane, "track"));
         assert_eq!(
             field(&mut h, "track"),
-            h.eval_7d2(&format!("(track {track})"))
+            h.eval_7d2(&format!("(track {})", lane.track))
         );
         assert_eq!(field(&mut h, "index"), Value::Number(i as f64));
-        assert_eq!(field(&mut h, "start"), get(lane, "start-beat"));
-        assert_eq!(field(&mut h, "end"), get(lane, "end-beat"));
-        assert_eq!(field(&mut h, "num-steps"), get(lane, "num-steps"));
-        assert_eq!(field(&mut h, "length"), get(lane, "length-beats"));
-        assert_eq!(field(&mut h, "events"), get(lane, "events"));
+        assert_eq!(field(&mut h, "start"), Value::Number(lane.punch_in_beat));
+        assert_eq!(
+            field(&mut h, "end"),
+            Value::Number(lane.span().end_beat(head))
+        );
+        assert_eq!(
+            field(&mut h, "num-steps"),
+            Value::Number(lane.num_steps as f64)
+        );
+        assert_eq!(field(&mut h, "length"), Value::Number(lane.length_beats));
+        assert_eq!(field(&mut h, "events"), pattern_events_value(&lane.events));
     }
     // The whole-song capture's starting scene, then every launch.
-    let scenes = items(&get(&legacy, "scene-events"));
-    assert!(!scenes.is_empty(), "the capture's starting scene");
+    assert!(
+        !content.scene_events.is_empty(),
+        "the capture's starting scene"
+    );
     assert_eq!(
         h.eval_7d2("(len song.pending-scenes)"),
-        Value::Number(scenes.len() as f64)
+        Value::Number(content.scene_events.len() as f64)
     );
-    for (i, scene) in scenes.iter().enumerate() {
+    for (i, (start, scene)) in content.scene_events.iter().enumerate() {
         let code =
             format!("(let ((s (nth song.pending-scenes {i}))) (list s.index s.start s.scene))");
-        let expected = format!(
-            "(list {i} {} (nth (scenes) {}))",
-            num(get(scene, "start-beat")),
-            num(get(scene, "scene"))
-        );
+        let expected = format!("(list {i} {start} (nth (scenes) {scene}))");
         assert_eq!(h.eval_7d2(&code), h.eval_7d2(&expected));
     }
-    let launches = items(&get(&legacy, "track-events"));
+    let launches = &content.track_events;
     assert!(!launches.is_empty(), "the clip launch at least");
     assert_eq!(
         h.eval_7d2("(len song.pending-launches)"),
@@ -135,18 +131,22 @@ fn pending_fields_match_the_legacy_surface() {
         let field = |h: &mut Harness, name: &str| {
             h.eval_7d2(&format!("(let ((l (launch-at {i}))) l.{name})"))
         };
-        let track = num(get(launch, "track"));
         assert_eq!(
             field(&mut h, "track"),
-            h.eval_7d2(&format!("(track {track})"))
+            h.eval_7d2(&format!("(track {})", launch.track))
         );
-        assert_eq!(field(&mut h, "start"), get(launch, "start-beat"));
-        assert_eq!(field(&mut h, "num-steps"), get(launch, "num-steps"));
-        assert_eq!(field(&mut h, "length"), get(launch, "length-beats"));
-        assert_eq!(field(&mut h, "events"), get(launch, "events"));
-        let pid = num(get(launch, "pattern-id"));
+        assert_eq!(field(&mut h, "start"), Value::Number(launch.start_beat));
+        assert_eq!(
+            field(&mut h, "num-steps"),
+            Value::Number(launch.num_steps as f64)
+        );
+        assert_eq!(field(&mut h, "length"), Value::Number(launch.length_beats));
+        assert_eq!(
+            field(&mut h, "events"),
+            pattern_events_value(&launch.events)
+        );
         let cell = format!("(let ((c (launch-at {i}))) (list c.cell.pid c.cell.track))");
-        let expected = format!("(list {pid} (track {track}))");
+        let expected = format!("(list {} (track {}))", launch.pattern_id, launch.track);
         assert_eq!(h.eval_7d2(&cell), h.eval_7d2(&expected));
     }
 }
@@ -244,8 +244,6 @@ fn a_launched_patterns_pool_edit_mid_capture_rebuilds_its_launch() {
     let mut h = Harness::new();
     h.start_capture();
     h.sync();
-    let mut legacy = SongFrameState::default();
-    h.legacy_pending_in(&mut legacy);
     // The whole-song capture's starting clip on track 0.
     assert_eq!(h.launch_field(0, "track"), h.eval_7d2("(track 0)"));
     let events = h.launch_field(0, "events");
@@ -260,11 +258,11 @@ fn a_launched_patterns_pool_edit_mid_capture_rebuilds_its_launch() {
     h.sync();
     assert_eq!(h.pending_syncs(), syncs + 1, "a pool edit rebuilds");
     assert_ne!(h.launch_field(0, "events"), events, "the new step shows");
-    let launch = &items(&get(&h.legacy_pending_in(&mut legacy), "track-events"))[0];
+    let launch = &h.model_pending().0.track_events[0];
     assert_eq!(
         h.launch_field(0, "events"),
-        get(launch, "events"),
-        "the legacy surface rebuilds too"
+        pattern_events_value(&launch.events),
+        "it shows the model's"
     );
     // A length change: num-steps and length follow.
     let steps = num(h.launch_field(0, "num-steps")) as usize;
@@ -278,8 +276,11 @@ fn a_launched_patterns_pool_edit_mid_capture_rebuilds_its_launch() {
     h.sync();
     assert_eq!(h.launch_field(0, "num-steps"), Value::Number(n as f64));
     assert_ne!(h.launch_field(0, "length"), length);
-    let launch = &items(&get(&h.legacy_pending_in(&mut legacy), "track-events"))[0];
-    assert_eq!(h.launch_field(0, "length"), get(launch, "length-beats"));
+    let launch = &h.model_pending().0.track_events[0];
+    assert_eq!(
+        h.launch_field(0, "length"),
+        Value::Number(launch.length_beats)
+    );
 }
 
 #[test]
@@ -289,8 +290,6 @@ fn a_scene_reassignment_mid_capture_rebuilds_the_launches_it_expands() {
     h.sync();
     h.start_capture();
     h.sync();
-    let mut legacy = SongFrameState::default();
-    h.legacy_pending_in(&mut legacy);
     assert_eq!(h.launch_field(0, "track"), h.eval_7d2("(track 0)"));
     let before = num(h.eval_7d2("(let ((l (launch-at 0))) l.cell.pid)")) as u64;
     let other = h
@@ -319,9 +318,12 @@ fn a_scene_reassignment_mid_capture_rebuilds_the_launches_it_expands() {
         Value::Number(other.0 as f64),
         "the starting clip names the newly assigned pattern"
     );
-    let launch = &items(&get(&h.legacy_pending_in(&mut legacy), "track-events"))[0];
-    assert_eq!(get(launch, "pattern-id"), Value::Number(other.0 as f64));
-    assert_eq!(h.launch_field(0, "events"), get(launch, "events"));
+    let launch = &h.model_pending().0.track_events[0];
+    assert_eq!(launch.pattern_id, other.0);
+    assert_eq!(
+        h.launch_field(0, "events"),
+        pattern_events_value(&launch.events)
+    );
 }
 
 #[test]
@@ -330,8 +332,6 @@ fn a_capture_started_in_the_tick_another_ended_shows_its_own_content() {
     let anchor = h.start_capture();
     h.record_note(anchor, 0, 2.0, 0.0);
     h.sync();
-    let mut legacy = SongFrameState::default();
-    h.legacy_pending_in(&mut legacy);
     assert_eq!(h.eval_7d2("(len song.pending-lanes)"), Value::Number(1.0));
     // The reads settle.
     h.sync();
@@ -345,8 +345,7 @@ fn a_capture_started_in_the_tick_another_ended_shows_its_own_content() {
         Value::Number(0.0),
         "the cancelled take's lane is gone"
     );
-    let legacy = h.legacy_pending_in(&mut legacy);
-    assert!(items(&get(&legacy, "lanes")).is_empty());
+    assert!(h.model_pending().0.lanes.is_empty());
 }
 
 #[test]
@@ -375,6 +374,6 @@ fn the_record_head_moves_only_the_head_fields_a_quantum_at_a_time() {
     assert_eq!(h.eval_7d2("song.pending-head"), Value::Number(2.25));
     let moved = h.eval_7d2("(let ((l (lane-at 0))) l.end)");
     assert_ne!(moved, end);
-    let lane = &items(&get(&h.legacy_pending(), "lanes"))[0];
-    assert_eq!(moved, get(lane, "end-beat"));
+    let (content, head) = h.model_pending();
+    assert_eq!(moved, Value::Number(content.lanes[0].span().end_beat(head)));
 }

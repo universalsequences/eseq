@@ -126,6 +126,8 @@ mod table_editor;
 mod tracks;
 mod variants;
 
+#[cfg(test)]
+pub(crate) use self::arrangement::clip_note_dots;
 pub(crate) use self::focus_steps::focus_step_param;
 use self::focus_steps::*;
 use self::notes::*;
@@ -802,6 +804,7 @@ pub(crate) mod f {
     pub(crate) const CLIP_EVENTS: FieldKey = (CLIP, "events");
     pub(crate) const CLIP_DOT: FieldKey = (CLIP, "dot");
     pub(crate) const CLIP_DOT_COLOR: FieldKey = (CLIP, "dot-color");
+    pub(crate) const CLIP_NOTE_DOTS: FieldKey = (CLIP, "note-dots");
 
     pub(crate) const CELL_TRACK: FieldKey = (CELL, "track");
     pub(crate) const CELL_PID: FieldKey = (CELL, "pid");
@@ -1334,6 +1337,8 @@ pub(crate) const PUBLISHED: &[(FieldKey, &str, Feed)] = &[
     (f::CLIP_NUM_STEPS, ":int", Model),
     (f::CLIP_LENGTH, ":number", Model),
     (f::CLIP_EVENTS, "(list-of (list-of :number))", Model),
+    // With the content, or the clip's span (a take clip's window).
+    (f::CLIP_NOTE_DOTS, "(list-of :any)", Model),
     (f::CLIP_DOT, ":bool", Model),
     (f::CLIP_DOT_COLOR, ":rgb", Model),
     (f::CELL_TRACK, "track", Model),

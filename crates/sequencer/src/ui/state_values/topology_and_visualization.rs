@@ -195,12 +195,6 @@ pub(crate) fn sync_pattern_state(rt: &mut Runtime, state: &Arc<SequencerState>) 
         "num-patterns",
         Value::Number(state.scene_count() as f64),
     );
-    rt.set_reactive(
-        "SEQ",
-        "track-pattern-cells",
-        build_track_pattern_cells_value(state, state.active_track_count()),
-    );
-    sync_track_pattern_cell_state_fields(rt, state, state.active_track_count());
     sync_rack_clip_state(rt, state);
     rt.set_reactive("SEQ", "neural-networks", build_neural_networks_value(state));
     rt.set_reactive(

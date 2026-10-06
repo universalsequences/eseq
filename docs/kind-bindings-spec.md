@@ -1,6 +1,6 @@
 # Kind bindings
 
-Status: spec rev 3, 2026-10-04. Stages 1–6 built, stage 7 in part (§14; 7, 7b, 7b-2, 7b-3, 7c, 7d, 7e, 7f, 7g, 7h and 7i built), stage 8 in part (§13, §13.1: .12, .13, .16, .17 and .21 ported, .14 in part) (§3.1, §3.2, §3.3, §3.4, §4, §7.1, §7.3, §8, §9 notes). Bead: epic `eseq-0l17` (`bd list --label kind-bindings`).
+Status: spec rev 3, 2026-10-04. Stages 1–6 built, stage 7 in part (§14; 7, 7b, 7b-2, 7b-3, 7c, 7d, 7e, 7f, 7g, 7h and 7i built), stage 8 in part (§13, §13.1: .12, .13, .15, .16, .17 and .21 ported, .14 in part) (§3.1, §3.2, §3.3, §3.4, §4, §7.1, §7.3, §8, §9 notes). Bead: epic `eseq-0l17` (`bd list --label kind-bindings`).
 Rev 3 resolves the open questions (§12 Decisions). Rev 2 dropped the separate `defrecord` form of rev 1: host state and view state
 are declared with `def-kind`, which gains keyed and singleton kinds, a `:host`
 field group and typed fields.
@@ -1247,6 +1247,146 @@ its instance and field.
      asserts the mixer and patch mixer repaint without re-running for
      mute, solo, audibility, arm, selection, delete target, faders and
      meters; the MIDImix tests publish their topology as kinds.
+   Built (stage 8, eseq-0l17.15): the arrangement (`ui/arrangement.lisp`):
+   - **Kinds read.** The song is `song` (`end`, `mode`, `position`,
+     `scene-latched`, `edit-error`, `region` → `region`, `bound-clip`,
+     `spans` → `scene-span`, `pending` and `pending-head` / `-lanes` /
+     `-scenes` / `-launches`), each lane `t.clips` (`clip`: `cid`, `start`,
+     `end`, `cell.pid`, `take`, `offset`, `num-steps`, `length`,
+     `note-dots`), `t.color`, `t.latched`, `t.cells` (placement, with
+     each `c.active` read for invalidation), `(scenes)` / `s.name`,
+     `transport.scene` and `selection.track`. One field was added:
+     `clip.note-dots`, the clip's notes flattened to the timeline's dots
+     (the view's `clip-content` flattening, moved to the host:
+     `host_kinds::arrangement::clip_note_dots`, a pattern clip's built
+     once per (track, source) with the source cache, a take clip's kept
+     per clip under its window), so a lane re-render (a recording lane
+     re-renders every frame) flattens no committed clip; the provisional
+     items still flatten in the view (`windowed-dots`, the same
+     arithmetic).
+     Lanes stay addressed by track position (the timeline commands', the
+     sequencer header's and `visible-track-indices`' address; `(track i)`
+     is the lane's track); rows are subtrees keyed `arr-track-<tid>` (the
+     header), each lane a subtree nested in its row (`arr-lane-<tid>`), so
+     a lane re-render leaves the header alone; the first visible track is
+     found once by the rows' parent and passed in. The scene row's placement
+     toolbar, starting scene, hint and scene lane, the lane sync and the song
+     end (`arr-view.content-length`, which moves with playback past the end)
+     are subtrees of their own.
+   - **Bindings.** Every playhead `#'song.position`; the time axis
+     `#'arr-view.start` / `duration` / `content-length`, the cursor
+     `#'arr-view.cursor-time` (the scene lane's marker included, no longer a
+     by-value read). The per-lane channels (`SEQV.arr-<channel>-<i>`, 11
+     floats × 128 lanes seeded at load) are four view singletons every
+     track lane binds the same fields of: `arr-select` (`lane`, `clip`: the
+     click selection), `arr-lanes` (`bound-lane` / `bound-clip`,
+     `region-on` / `region-lane-a` / `-b` / `region-a` / `-b`, written by
+     the `sync-lanes` subtree from `song.bound-clip` and `song.region`) and
+     `arr-drag` (`ghost` (the kind), `clip`, `time`, `region-a` / `-b`,
+     `lane-a` / `-b`). The timeline widget gained **lane ownership**
+     (`crates/eseqlisp/src/widget_render/timeline.rs`, `lane_owns`): a lane
+     passes `:lane-key` (its position) and per channel the owner —
+     `:cursor-lane`, `:selected-lane`, `:bound-lane`, the ranges
+     `:ghost-lane-a` / `-b` and `:region-lane-a` / `-b` (inclusive, either
+     order) — and draws the channel only on the owning lane(s); without
+     `:lane-key` or the owner props nothing changes (the scene lane, the
+     piano roll). A write repaints every bound lane (the legacy channels
+     repainted only the written lanes; the region and cursor publishes
+     already wrote every visible lane), never re-runs one.
+   - **View state** (`:key ()` singletons, exported): `arr-view` (axis and
+     cursor), `arr-select` (also `scenes`, `rect`, `clips`, the
+     defstate / def selection), `arr-lanes`, `arr-drag` (also the scene
+     ghost `scene`, the track drag `track` and the sweep `region`, read by
+     no render), `arr-placement` (`active`, and `choice`: the cell the
+     dropdown picked, replacing the (track id, pattern id) pair) and the
+     menus `arr-scene-menu` (`open`, `at`, `time`, `span`) and
+     `arr-pattern-menu` (`open`, `at`, `track`, `source`, `time`, `clip`),
+     through `eseq.view-kit`'s `open-menu!` / `menu-of` (a menu's items
+     spread with `apply`: `menu-of` passes one list, and a list nested in
+     it is not flattened). `kind` and `id` are built-in fields: the ghost
+     kind is `arr-drag.ghost`, its clip `arr-drag.clip`. Held instances are
+     checked `listed?` before use (a menu's span, clip and track, the
+     placement's track; the scene menu also keeps the span's start beat,
+     `span-start`, and acts only while the span still starts there, since
+     spans are positional). `lane-ghost` joins `lane-region-rect` and
+     `lane-selection` as the test surface over the bound fields.
+   - **Setters.** A clip click is `(set! song.bound-clip c)` (binds and
+     selects the clip's span as the region, as `seq-song-select-clip`
+     did, also when the clip is already bound: a binding from a capture
+     commit or with the region cleared still gets its region; the status
+     line reports "Bound: …"), a release `(set! song.bound-clip nil)`; regions `select-region!`
+     / `clear-region!` (tracks as instances); Change Pattern `(set! c.cell
+     cell)` (was `arrangement-clip-set-source`). Kept host commands: the
+     `seq-arrangement-action` translator (every gesture, one primitive),
+     `seq-song-set-arr-cursor` (`song.cursor` has no track), the region
+     clipboard natives, the scene commands, `arrangement-pattern-place`,
+     `seq-arrangement-empty-take-create` and the `seq-arrangement-pattern`
+     preview query.
+   - **Fixes found on the way.** `arrangement-pattern-place` checked
+     `:track-id` against the track's pan node id (`SEQ.track-ids`), while
+     the mixer's pattern drags carry `t.tid` since .13, so a mixer →
+     arrangement pattern drop never matched the lane's `track-pattern-<id>`
+     drop type and placement failed with "The target track changed": the
+     command now takes the `TrackId` (`live_track_index`), the lane's drop
+     type is `track-pattern-<tid>` (this fixed the known failure
+     `metal_seq_arrangement_pattern_placement_controls_and_dispatch`, whose
+     last assertion is corrected: placement is sticky). The capture setup
+     applies the arrangement kinds' selection setters
+     (`apply_capture_selection_command`: `set-song-region` and `set-song`'s
+     non-edit fields); the legacy `song-select-clip` / `song-set-region`
+     were silently dropped there (transport-class commands), so a fixture
+     that selected a clip or a region rendered without it. Three capture
+     fixtures set view state that never reached the widgets (the
+     `view-start` / `view-duration` defstates without the SEQV publish, and
+     a track-resize ghost in the scene ghost): they now set `arr-view` and
+     drive `track-action` (`arrangement-resize-offset`,
+     `arrangement-zoomed-out-grid`), and the menu fixtures pass `:at`.
+   - **Legacy removed:** `SEQ.song-lanes`, `scene-spans`,
+     `song-lane-events`, `song-clip-sounds`, `song-pending` (with
+     `sync_song_pending` and `build_song_pending_value`; §14.2o),
+     `scene-names`, `song-mode`, `song-end-beat`, `song-position-beats`,
+     `song-edit-error`, `song-track-latched`, `song-scene-latched`,
+     `song-bound-clip`, `song-region`, `track-pattern-cells`,
+     `track-pattern-cell-active-*` and the unread `track-active-pattern-ids`
+     (with their builders, `SongFrameState`'s lane, scene-name, event and
+     pending caches, `sync_song_state`'s visibility argument and
+     `sync_sound_palette`'s runtime and visibility arguments), every
+     `SEQV.arr-*` channel, the alias rows of the removed names. The
+     arrangement-region Backspace path (`input.rs`) reads `song.region` /
+     `song.bound-clip` from the singleton's cells. Kept, still read by unported areas (eseq-0l17.22):
+     `SEQ.current-pattern` (macros, scripts), `track-colors` (sequencer +),
+     `track-ids` (sequencer, tracker), `current-track` (many),
+     `song-track-governed` (sequencer), `THEME.scene_clip_bg` (theme); and
+     the orphan song scalars no content reads (`song-exists`,
+     `song-recording-kind`, `song-current-row(-id)`, `song-row-count`,
+     `song-loop-enabled`, `song-capture-failed` / `-error`); the natives
+     `seq-song-select-clip`, `-deselect-clip`, `-set-region`,
+     `-clear-region` and `seq-arrangement-clip-set-source` (script API, no
+     factory caller now).
+   - **Tests.** `host_kinds::tests::arrangement_view` (Distro root): the
+     file uses no legacy form; the lanes bind `song.position` and the four
+     view singletons; a title-bar click binds the clip and lights only its
+     lane, a scene click releases both; a click on the bound clip with no
+     region selects its span; `note-dots` match the view's flattening and
+     follow a step edit; a capture in flight draws inert
+     provisional items that go with the capture; the edit-error banner.
+     The host-less editor tests seed the song as kinds (`KindClip`,
+     `seed_kind_clips` / `cells` / `spans` / `song`, `set_kind_region` /
+     `bound_clip`) and read the setters' commands (`bound_clip_writes`,
+     `region_writes`); the legacy publisher tests became model checks
+     (`pending_surface`) or kinds tests
+     (`a_step_edit_refreshes_clip_events_without_a_song_edit`), the
+     legacy-parity halves of `host_kinds::tests::arrangement` / `pending`
+     compare with the model. The timeline's lane ownership is in
+     `bound_ghost_channels_transform_items_like_the_lisp_projection`. The
+     baseline and after captures (every arrangement fixture, plus scratch
+     ones for regions, a bound clip, track and scene selection, cursor,
+     loop, zoom and scroll, move / resize / marquee ghosts, scene ghosts,
+     placement and the pattern menu) are byte-identical but for the two
+     fixtures whose view state now reaches the widgets (identical to the
+     intended state rendered on the legacy view) and the track-select
+     capture, which now shows the clip's region (the capture applies the
+     selection).
    Built (stage 8, eseq-0l17.17): the browser (`ui/browser.lisp`), the
    sample import modal (`ui/sample-import.lisp`), resample
    (`ui/resample.lisp`) and the sound palette (`ui/sound-palette.lisp`):
@@ -1761,6 +1901,24 @@ the other port beads follow it):
    - host protocol state written from Rust by name becomes singleton
      fields reached through a local or a small exported helper
      (`show-loading!`), never a flat `defstate`.
+   Learned by the arrangement (.15):
+   - per-item view state a widget draws (one channel per lane) is one
+     singleton the items all bind, with the owner as a bound field the
+     widget compares to its own key (the timeline's `:lane-key`); a
+     by-value owner check would re-run every item on each change;
+   - `kind` and `id` are built-in instance fields: a `:state` field of
+     either name is a schema error;
+   - `menu-of` passes its items as one list, and a list nested in it is
+     dropped: build conditional items as one list and `apply` it;
+   - a subtree's key replaces its root widget's (qualified) `:key`: a
+     keyed widget that tests or captures find stays below an unkeyed root
+     (the lane subtrees wrap their timeline in a flex `h-stack`);
+   - a channel every lane binds repaints every lane: the timeline keeps
+     each widget's parsed `:items` while the items list is the same
+     (`cached_items`), so the repaint parses nothing;
+   - headless capture drops the transport-class song commands (the clip
+     and region selection): fixtures that select go through the kind
+     setters, which capture applies.
 4. **Legacy publishers.** For each family the area read, grep every
    reader and mention: `content/` Lisp, all of `crates/` Rust (tests and
    capture fixtures included), `tools/` and `docs/` (the compat alias
@@ -2196,7 +2354,7 @@ Built (7i):
 | `song` | `()` | `exists :bool`, `mode :string` (`stopped`, `song-playback`, `arrangement-capture`), `recording-kind :string` (empty, `take`, `dub`), `position :number` (L, beats), `cursor :number` [c], `end :number` [c], `loop :bool` [c], `manual-latch :bool` (L) [c, false only], `scene-latched :bool` (L), `edit-error :string`, `capture-failed :bool`, `capture-error :string`, `region region` (nil: none), `bound-clip clip` [c], `spans (list-of scene-span)` |
 | `region` | `()` | `tracks (list-of track)`, `start`, `end :number`, `scene-lane :bool` |
 | `scene-span` | `(index)` | `index :int`, `scene scene`, `start`, `end :number` |
-| `clip` | `(track cid)` | `track track`, `cid :int`, `start :number` [k], `end :number` [k], `cell cell` [k] (nil for a take), `take :int` (-1 for a pattern), `offset :number` (steps), `num-steps :int`, `length :number` (beats), `events (list-of (list-of :number))`, `dot :bool`, `dot-color :rgb` (the timeline's gray without a palette color) |
+| `clip` | `(track cid)` | `track track`, `cid :int`, `start :number` [k], `end :number` [k], `cell cell` [k] (nil for a take), `take :int` (-1 for a pattern), `offset :number` (steps), `num-steps :int`, `length :number` (beats), `events (list-of (list-of :number))`, `note-dots (list-of :any)` (the notes as the timeline's dots, .15), `dot :bool`, `dot-color :rgb` (the timeline's gray without a palette color) |
 | `cell` | `(track pid)` | `track track`, `pid :int`, `active`, `assigned`, `override :bool`, `queued :bool` (L), `selected :bool` (L) [e], `banks (list-of bank)` |
 | `track` | `(index)` | `clips (list-of clip)`, `cells (list-of cell)`, `governed :int` (`take-none`, `take-governed`, `take-latched`), `latched :bool` (L) [c, false only] |
 
@@ -3931,9 +4089,9 @@ Built (7d-2):
   advance pushes nothing, and neither rebuilds the content). Every push
   is compared with its cell; the stale check covers the first instance of
   each kind.
-- **Not covered:** the view (`ui/arrangement.lisp`, port .15) still reads
-  `SEQ.song-pending`; .15 moves it to these fields and removes the legacy
-  publisher.
+- **Ported (.15):** the view (`ui/arrangement.lisp`) reads these fields;
+  the legacy `SEQ.song-pending` publisher is removed (the shared content
+  functions stay, the host kinds' alone).
 ### 14.2q Built in stage 7g-3 (eseq-0l17.50)
 
 | Kind | Key | New `:host` fields (`:set` in brackets) |
@@ -4242,8 +4400,8 @@ builds the field name.
 | `SEQ.bus-solos` | 4 | mixer, sequencer, legacy/mixer | sv/track_and_mixer.rs | model | bus.soloed | built (.10); ported (.13), kept: sequencer | .11 .13 |
 | `SEQ.bus-volumes` | 3 | mixer, sequencer, legacy/mixer | sv/track_and_mixer.rs | model | bus.volume | built (.10); ported (.13), kept: sequencer | .11 .13 |
 | `SEQ.cpu-load-pct` | 1 | transport | reactive_tick.rs | live | engine.cpu-load | built (.10); ported, legacy removed (.12) | .12 |
-| `SEQ.current-pattern` | 18 | transport, arrangement, mixer +10 | sv/topology_and_visualization.rs | model | transport.scene (s.index) | built (.10); ported (.12, .13), kept: arrangement, macros, scripts | .12 .13 .15 .20 |
-| `SEQ.current-track` | 108 | piano-roll, effects/process-panel, browser +19 | piano_roll.rs | live | selection.track | built (.10); ported (.13, .17), kept: many; ported (.14 A: param-controls, panel-frame read selection.track.index) | .11 .13 .14 .15 .16 .17 .18 .19 .20 |
+| `SEQ.current-pattern` | 18 | transport, arrangement, mixer +10 | sv/topology_and_visualization.rs | model | transport.scene (s.index) | built (.10); ported (.12, .13, .15), kept: macros, scripts | .12 .13 .15 .20 |
+| `SEQ.current-track` | 108 | piano-roll, effects/process-panel, browser +19 | piano_roll.rs | live | selection.track | built (.10); ported (.13, .15, .17), kept: many; ported (.14 A: param-controls, panel-frame read selection.track.index) | .11 .13 .14 .15 .16 .17 .18 .19 .20 |
 | `SEQ.delays` | 1 | seqv-track-params | event_loop.rs | model | step.delay | built (.10) | .11 |
 | `SEQ.durations` | 2 | seq-core-state, seqv-track-params | event_loop.rs | model | step.duration | built (.10) | .11 |
 | `SEQ.groups` | 53 | mixer, drum-rack-v2, seq-core-state +12 | project.rs | model | group.* via (groups), track.group | built (.10); ported (.13, .17), kept: drum-rack-v2, seq-core-state + | .11 .13 .17 .19 .20 |
@@ -4265,7 +4423,7 @@ builds the field name.
 | `SEQ.roll-mode` | 2 | transport | reactive_tick.rs | live | transport.roll-mode | built (.10); ported, legacy removed (.12) | .12 |
 | `SEQ.scene-banks` | 2 | scene-banks | sv/song_state.rs | model | (banks) → bank.label/scenes | built (.10); ported, legacy removed (.12) | .12 |
 | `SEQ.scene-launch-quantize` | 6 | transport, drum-rack-v2, mixer | rack_clip_switch_probe.rs | model | transport.launch-quantize | built (.10); ported (.12, .13), kept: drum-rack-v2; the host kinds read transport.launch-quantize from it | .12 .13 .19 |
-| `SEQ.scene-names` | 8 | browser, arrangement | sv/song_state.rs | model | scene.name | built (.10); ported (.17), kept: arrangement | .15 .17 |
+| `SEQ.scene-names` | 8 | browser, arrangement | sv/song_state.rs | model | scene.name | built (.10); ported (.15, .17), legacy removed (.15) | .15 .17 |
 | `SEQ.selected-steps` | 4 | step-grid, effects/param-controls | reactive_tick.rs | live | step.selected | built (.10); ported (.14 A: (len selection.steps)), kept: step-grid | .11 .14 |
 | `SEQ.selected-tracks` | 5 | mixer, step-grid-interactions | sv/steps_and_pattern.rs | live | selection.tracks | built (.10); ported (.13), kept: step-grid-interactions | .11 .13 |
 | `SEQ.seq-track-step-active-*` | 2 | sequencer | sv/steps_and_pattern.rs | live | step.active | built (.10) | .11 |
@@ -4290,7 +4448,7 @@ builds the field name.
 | `SEQ.track-color-b-effective` | 1 | sequencer | sv/track_and_mixer.rs | model | track.color × track.audible | built (.10) | .11 |
 | `SEQ.track-color-g-effective` | 1 | sequencer | sv/track_and_mixer.rs | model | track.color × track.audible | built (.10) | .11 |
 | `SEQ.track-color-r-effective` | 1 | sequencer | sv/track_and_mixer.rs | model | track.color × track.audible (dim in the shader) | built (.10) | .11 |
-| `SEQ.track-colors` | 21 | mixer, rack-groove-buffer, arrangement +12 | sv/track_and_mixer.rs | model | track.color | built (.10); ported (.13), kept: sequencer +; ported (.14 A: panel-bodies) | .11 .13 .14 .15 .16 .19 .20 |
+| `SEQ.track-colors` | 21 | mixer, rack-groove-buffer, arrangement +12 | sv/track_and_mixer.rs | model | track.color | built (.10); ported (.13, .15), kept: sequencer +; ported (.14 A: panel-bodies) | .11 .13 .14 .15 .16 .19 .20 |
 | `SEQ.track-delays` | 1 | seqv-track-params | reactive_sync.rs | model | step.delay | built (.10) | .11 |
 | `SEQ.track-durations` | 1 | seqv-track-params | reactive_sync.rs | model | step.duration | built (.10) | .11 |
 | `SEQ.track-instrument-types` | 14 | track-collapse, mixer, application-menus | sv/track_and_mixer.rs | model | track.instrument-type | built (.10); ported (.13, .16), kept: track-collapse + | .11 .13 .18 |
@@ -4346,27 +4504,27 @@ builds the field name.
 | `SEQ.track-process-scopes` | 3 | sequencer | ui_replay_probe.rs | live | process.cells → state-cell.values (live) | built (.29) | .11 |
 | `SEQ.track-process-slots` | 4 | sequencer, seqv-track-params, scripts/sequencers/band-coupling-matrix-demo | input.rs | model | track.processes → process | built (.29) | .11 .20 |
 | `SEQ.queued-track-clips` | 1 | mixer | event_loop.rs | model | cell.queued (live) | built (.30); ported (.13), removed | .13 |
-| `SEQ.scene-spans` | 9 | arrangement | sv/song_state.rs | model | song.spans → scene-span | built (.30) | .15 |
-| `SEQ.song-bound-clip` | 2 | arrangement, sound-palette | sv/song_state.rs | model | song.bound-clip | built (.30); ported (.17), kept: arrangement | .15 .17 |
-| `SEQ.song-clip-sounds` | 2 | arrangement | sv/sound_palette.rs | model | clip.dot / dot-color | built (.30) | .15 |
+| `SEQ.scene-spans` | 9 | arrangement | sv/song_state.rs | model | song.spans → scene-span | built (.30); ported, legacy removed (.15) | .15 |
+| `SEQ.song-bound-clip` | 2 | arrangement, sound-palette | sv/song_state.rs | model | song.bound-clip | built (.30); ported (.15, .17), legacy removed (.15) | .15 .17 |
+| `SEQ.song-clip-sounds` | 2 | arrangement | sv/sound_palette.rs | model | clip.dot / dot-color | built (.30); ported, legacy removed (.15) | .15 |
 | `SEQ.song-cursor-beats` | 1 | transport | sv/song_state.rs | model | song.cursor | built (.30); ported, legacy removed (.12) | .12 |
-| `SEQ.song-edit-error` | 2 | arrangement | sv/song_state.rs | model | song.edit-error | built (.30) | .15 |
-| `SEQ.song-end-beat` | 2 | arrangement | sv/song_state.rs | model | song.end | built (.30) | .15 |
-| `SEQ.song-lane-events` | 4 | arrangement | sv/song_state.rs | model | clip.events / num-steps / length | built (.30) | .15 |
-| `SEQ.song-lanes` | 7 | arrangement, sound-palette | sv/song_state.rs | model | `t.clips` → clip | built (.30); ported (.17: a bound clip's c.take / c.cell), kept: arrangement | .15 .17 |
+| `SEQ.song-edit-error` | 2 | arrangement | sv/song_state.rs | model | song.edit-error | built (.30); ported, legacy removed (.15) | .15 |
+| `SEQ.song-end-beat` | 2 | arrangement | sv/song_state.rs | model | song.end | built (.30); ported, legacy removed (.15) | .15 |
+| `SEQ.song-lane-events` | 4 | arrangement | sv/song_state.rs | model | clip.events / num-steps / length | built (.30); ported, legacy removed (.15) | .15 |
+| `SEQ.song-lanes` | 7 | arrangement, sound-palette | sv/song_state.rs | model | `t.clips` → clip | built (.30); ported (.15, .17: a bound clip's c.take / c.cell), legacy removed (.15) | .15 .17 |
 | `SEQ.song-manual-latch` | 2 | transport | sv/song_state.rs | model | song.manual-latch | built (.30); ported, legacy removed (.12) | .12 |
-| `SEQ.song-mode` | 2 | transport, arrangement | sv/song_state.rs | model | song.mode | built (.30); ported (.12), kept: arrangement (.15) | .12 .15 |
-| `SEQ.song-pending` | 8 | arrangement | sv/song_state.rs | model | song.pending, pending-origin, pending-head, pending-lanes → pending-lane, pending-scenes → pending-scene, pending-launches → pending-launch | built (.39) | .15 |
-| `SEQ.song-position-beats` | 5 | arrangement, transport | sv/song_state.rs | live | song.position (live) | built (.30); ported (.12), kept: arrangement (.15) | .12 .15 |
-| `SEQ.song-region` | 31 | arrangement | sv/song_state.rs | model | song.region | built (.30) | .15 |
-| `SEQ.song-scene-latched` | 1 | arrangement | sv/song_state.rs | model | song.scene-latched | built (.30) | .15 |
+| `SEQ.song-mode` | 2 | transport, arrangement | sv/song_state.rs | model | song.mode | built (.30); ported (.12, .15), legacy removed (.15) | .12 .15 |
+| `SEQ.song-pending` | 8 | arrangement | sv/song_state.rs | model | song.pending, pending-origin, pending-head, pending-lanes → pending-lane, pending-scenes → pending-scene, pending-launches → pending-launch | built (.39); ported, legacy removed (.15) | .15 |
+| `SEQ.song-position-beats` | 5 | arrangement, transport | sv/song_state.rs | live | song.position (live) | built (.30); ported (.12, .15), legacy removed (.15) | .12 .15 |
+| `SEQ.song-region` | 31 | arrangement | sv/song_state.rs | model | song.region | built (.30); ported, legacy removed (.15) | .15 |
+| `SEQ.song-scene-latched` | 1 | arrangement | sv/song_state.rs | model | song.scene-latched | built (.30); ported, legacy removed (.15) | .15 |
 | `SEQ.song-track-governed` | 3 | sequencer | sv/song_state.rs | model | track.governed | built (.30) | .11 |
-| `SEQ.song-track-latched` | 1 | arrangement | sv/song_state.rs | model | track.latched | built (.30) | .15 |
-| `SEQ.track-pattern-cell-active-*` | 2 | mixer, arrangement | sv/steps_and_pattern.rs | model | cell.active | built (.30); ported (.13), kept: arrangement | .13 .15 |
+| `SEQ.song-track-latched` | 1 | arrangement | sv/song_state.rs | model | track.latched | built (.30); ported, legacy removed (.15) | .15 |
+| `SEQ.track-pattern-cell-active-*` | 2 | mixer, arrangement | sv/steps_and_pattern.rs | model | cell.active | built (.30); ported (.13, .15), legacy removed (.15) | .13 .15 |
 | `SEQ.track-pattern-cell-assigned-*` | 1 | mixer | sv/steps_and_pattern.rs | model | cell.assigned | built (.30); ported (.13), removed | .13 |
 | `SEQ.track-pattern-cell-override-*` | 1 | mixer | sv/steps_and_pattern.rs | model | cell.override | built (.30); ported (.13), removed | .13 |
 | `SEQ.track-pattern-cell-selected-*` | 1 | mixer | sv/steps_and_pattern.rs | model | cell.selected | built (.30); ported (.13), removed | .13 |
-| `SEQ.track-pattern-cells` | 4 | mixer, arrangement | sv/track_and_mixer.rs | model | cell kind (track pid): `t.cells` | built (.30); ported (.13), kept: arrangement | .13 .15 |
+| `SEQ.track-pattern-cells` | 4 | mixer, arrangement | sv/track_and_mixer.rs | model | cell kind (track pid): `t.cells` | built (.30); ported (.13, .15), legacy removed (.15) | .13 .15 |
 | `SEQ.focus-clip-end` | 3 | piano-roll | piano_roll.rs | model | piano-roll.clip.end (`clip`, 7d) | built (.31); ported (.16), removed | .16 |
 | `SEQ.focus-clip-kind` | 5 | piano-roll | piano_roll.rs | model | piano-roll.clip-kind | built (.31); ported (.16), removed | .16 |
 | `SEQ.focus-clip-offset` | 4 | piano-roll | piano_roll.rs | model | piano-roll.clip.offset | built (.31); ported (.16), removed | .16 |
@@ -4556,14 +4714,14 @@ builds the field name.
 | `SEQ.track-outputs` | 1 | mixer | sv/track_and_mixer.rs | model | track.output (a bus; nil is sends only) | built (.35); ported (.13), removed | .13 |
 | `SEQ.tuning-root-options` | 1 | effects/scale-editor | sv/project_state.rs | model | constant | built (.35) | .14 |
 | `SEQV.<adsr-stage-active-field>` | 1 | effects/custom-ui-sections | Lisp (reactive-set) | Lisp-owned | custom-ui view state | view-local; ported (.14 A: the adsr-gesture singleton in eseq.effects.custom-ui-sections) | .14 |
-| `SEQV.<channel>` | 20 | arrangement | Lisp (reactive-set) | Lisp-owned | arrangement view singleton (arr-*) | view-local | .15 |
+| `SEQV.<channel>` | 20 | arrangement | Lisp (reactive-set) | Lisp-owned | arrangement view singleton (arr-*) | view-local; ported (.15: arr-select, arr-lanes, arr-drag, with the timeline's lane ownership), removed | .15 |
 | `SEQV.<cursor-highlight-field>` | 1 | sequencer | Lisp (reactive-set) | Lisp-owned | sequencer view singleton (cursor) | view-local | .11 |
 | `SEQV.<expanded-track-field>` | 1 | sequencer | Lisp (reactive-set) | Lisp-owned | sequencer view singleton (expanded tracks) | view-local | .11 |
 | `SEQV.<sel-bus-vis-field>` | 1 | seq-core-state | Lisp (reactive-set) | Lisp-owned | bus selection (view singleton) | view-local | .11 |
 | `SEQV.<sel-group-vis-field>` | 1 | seq-core-state | Lisp (reactive-set) | Lisp-owned | group selection (view singleton) | view-local | .11 |
-| `SEQV.arr-content-length` | 3 | arrangement | Lisp (reactive-set) | Lisp-owned | arrangement view singleton | view-local | .15 |
-| `SEQV.arr-view-duration` | 3 | arrangement | Lisp (reactive-set) | Lisp-owned | arrangement view singleton | view-local | .15 |
-| `SEQV.arr-view-start` | 3 | arrangement | Lisp (reactive-set) | Lisp-owned | arrangement view singleton | view-local | .15 |
+| `SEQV.arr-content-length` | 3 | arrangement | Lisp (reactive-set) | Lisp-owned | arrangement view singleton | view-local; ported (.15: arr-view), removed | .15 |
+| `SEQV.arr-view-duration` | 3 | arrangement | Lisp (reactive-set) | Lisp-owned | arrangement view singleton | view-local; ported (.15: arr-view), removed | .15 |
+| `SEQV.arr-view-start` | 3 | arrangement | Lisp (reactive-set) | Lisp-owned | arrangement view singleton | view-local; ported (.15: arr-view), removed | .15 |
 | `SEQV.cursor-field-*` | 1 | sequencer | Lisp (reactive-set) | Lisp-owned | sequencer view singleton (cursor) | view-local | .11 |
 | `SEQV.cursor-step-*` | 1 | sequencer | Lisp (reactive-set) | Lisp-owned | sequencer view singleton (cursor) | view-local | .11 |
 | `SEQV.piano-roll-arrangement-mode` | 1 | piano-roll | Lisp (reactive-set) | Lisp-owned | piano-roll view singleton | view-local; ported (.16): piano-roll-view.arrangement, removed | .16 |
@@ -4581,11 +4739,11 @@ builds the field name.
 | `SEQ.num-tracks` | 38 | mixer, track-collapse, sequencer +10 | reactive_sync.rs | model | (len (tracks)) | remove; ported (.13, .17), kept: many | .11 .13 .14 .17 .18 .19 |
 | `SEQ.rack-panel-view-generation` | 1 | effects/state | sv/project_state.rs | model | implicit | remove; removed (.14 A: rack panel views live in the rack-panel-view singleton by track id; the host calls eseq.effects.state/reset-rack-panel-views! on a project replacement) | .14 |
 | `SEQ.scene-bank-view-generation` | 1 | scene-banks | sv/project_state.rs | model | implicit (collections re-render) | remove; ported, legacy removed (.12) | .12 |
-| `SEQ.track-ids` | 30 | sequencer, arrangement, mixer +1 | reactive_sync.rs | model | instance identity (subtree :key t) | remove; ported (.13), kept: sequencer, arrangement + | .11 .13 .15 .20 |
+| `SEQ.track-ids` | 30 | sequencer, arrangement, mixer +1 | reactive_sync.rs | model | instance identity (subtree :key t) | remove; ported (.13, .15), kept: sequencer + | .11 .13 .15 .20 |
 | `SEQ.instances` | 3 | mixer, browser, packages/alez.neural/src/variable-reset | lisp_host/eseq/process_dsl_parse.rs | model | package instances (live_instances); project.instances (.17) | keep; ported (.13, .17: the Packages tree reads project.instances), kept: alez.neural | .13 .17 .20 |
 | `THEME.buffer_bg` | 1 | sequencer | - | model | THEME stays (theme namespace, not host state) | keep | .11 |
 | `THEME.plock_base` | 2 | effects/panel-bodies, effects/track-panels | - | model | THEME stays (theme namespace, not host state) | keep | .14 |
-| `THEME.scene_clip_bg` | 1 | arrangement | - | model | THEME stays (theme namespace, not host state) | keep | .15 |
+| `THEME.scene_clip_bg` | 1 | arrangement | - | model | THEME stays (theme namespace, not host state) | keep; kept (.15) | .15 |
 | `GRAPH` via `bind-graph` / `bind-graph-config` (103 calls) | 103 | scripts/sequencers/graph-*, packages/alez.neural | lisp_host/eseq/graph_authoring.rs | model | graph-node.‹field›, graph-param.value, graph.‹field› (`#'` bindings) | built (.33) | .20 |
 | `reactive-set "GRAPH"` (52 writes) | 52 | scripts/sequencers/graph-* | Lisp | Lisp-owned | graph-node / graph-param / graph `:set` (`set-graph`) | built (.33) | .20 |
 | `reactive-set "SEQ" "fx-step-*"` (8 writes) | 8 | seq-core-state | Lisp | Lisp-owned | selection.cursor-step (`:set`) / step.‹param› | built (.35) | .11 |

@@ -141,7 +141,8 @@ source: BoundSource }>` (`app/mod.rs:949`, `sound_binding.rs:94-99`), set
 by `seq-song-select-clip` on clip click (`arrangement.lisp:834-839` →
 host command `song-select-clip`). Consumers today: device panel state,
 monitor sound, record-clone template (`sound_binding.rs` rules 1-3,
-`bound_read_pattern` `:220`). Published as `SEQ.song-bound-clip`.
+`bound_read_pattern` `:220`). Published as `song.bound-clip` (the host
+kinds, kind-bindings spec §14.2d; formerly `SEQ.song-bound-clip`).
 
 **Double-click plumbing exists end to end.** Editor synthesizes it (350ms
 / 1.5-cell slop, `editor/widget_interaction.rs:1124-1222`), dispatched

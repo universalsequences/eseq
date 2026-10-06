@@ -1025,6 +1025,15 @@ fn apply_capture_macro_host_commands(
             applied = true;
             continue;
         }
+        // The arrangement kinds' selection setters (song.bound-clip, the
+        // region), so a fixture can drive the arrangement view's gestures.
+        if let Some(result) =
+            crate::host_commands::apply_capture_selection_command(&name, &payload, app)
+        {
+            result.map_err(|error| format!("capture setup {name} failed: {error}"))?;
+            applied = true;
+            continue;
+        }
         // Sound-palette open/close so fixtures can capture the palette modal.
         if let Some(result) =
             crate::host_commands::apply_sound_palette_view_command(&name, &payload, app)
@@ -1407,7 +1416,7 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
             "bus-effects",
             build_bus_effects_value_for_selection(&app, Some(&selected_steps)),
         );
-        sync_song_state(runtime, &app, &mut SongFrameState::default(), true);
+        sync_song_state(runtime, &app, &mut SongFrameState::default());
         runtime.run_reactive_cycle();
     }
     editor.refresh_runtime_side_effects();
@@ -1429,12 +1438,7 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
     if apply_capture_macro_host_commands(&mut editor, &mut app, &state, args.track)? {
         sync_macro_state(editor.runtime_mut(), &app);
         sync_groups_bindings(editor.runtime_mut(), &app.groups, &app.grooves);
-        sync_song_state(
-            editor.runtime_mut(),
-            &app,
-            &mut SongFrameState::default(),
-            true,
-        );
+        sync_song_state(editor.runtime_mut(), &app, &mut SongFrameState::default());
     }
     // Selection gestures in the hook mutate the same shared state as live UI
     // clicks. Publish it before drawing, as the live reactive tick does.
@@ -1460,13 +1464,7 @@ pub(crate) fn run(args: CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
     sync_rack_slot_mod_phase_field_delta(editor.runtime_mut(), None, mod_values.rack_slot.as_ref());
     // Publish the sound-palette read surfaces so capture scripts can open the
     // palette modal via the real (seq-sound-palette-open ...) funnel.
-    let _ = sync_sound_palette(
-        editor.runtime_mut(),
-        &app,
-        &mut SoundPaletteFrameState::default(),
-        true,
-        true,
-    );
+    let _ = sync_sound_palette(&app, &mut SoundPaletteFrameState::default(), true);
     publish_capture_sound_glyphs(&mut editor)?;
     // The live tick publishes `SEQ.instances`; capture has no tick.
     let mut instances_fingerprint = None;

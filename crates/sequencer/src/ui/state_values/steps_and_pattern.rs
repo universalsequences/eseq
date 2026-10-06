@@ -135,38 +135,6 @@ pub(crate) struct AllTrackSequencerSyncProfile {
     pub playhead_fields: Duration,
 }
 
-pub(crate) fn build_track_pattern_cells_value(
-    state: &Arc<SequencerState>,
-    track_count: usize,
-) -> Value {
-    // Scene-bank membership per clip (scene-banks spec 10.1): the mixer clip
-    // grid renders only the viewed bank's clips, and the viewed bank is pure
-    // Lisp state, so the host publishes the membership rather than the slice.
-    // Resolved for every track under one lock, before `track_pattern_cells`
-    // takes it again per track.
-    let bank_memberships = state.with_project_scenes(|scenes| {
-        (0..track_count)
-            .map(|track| scenes.track_pattern_bank_indices(track))
-            .collect::<Vec<_>>()
-    });
-    list_value((0..track_count).map(|track| {
-        let memberships = &bank_memberships[track];
-        list_value(state.track_pattern_cells(track).into_iter().map(|cell| {
-            let banks = memberships
-                .get(&cell.pattern_id)
-                .map(|banks| banks.as_slice())
-                .unwrap_or(&[]);
-            map_value([
-                ("id", Value::Number(cell.pattern_id.0 as f64)),
-                (
-                    "banks",
-                    list_value(banks.iter().map(|index| Value::Number(*index as f64))),
-                ),
-            ])
-        }))
-    }))
-}
-
 pub(crate) fn build_all_track_num_steps_value(
     state: &Arc<SequencerState>,
     app: &app::App,
@@ -329,10 +297,6 @@ pub(crate) fn rack_slot_delete_target_field(track: usize, slot: usize) -> String
     format!("rack-slot-delete-target-{track}-{slot}")
 }
 
-pub(crate) fn track_pattern_cell_active_field(track: usize, pattern_id: u64) -> String {
-    format!("track-pattern-cell-active-{track}-{pattern_id}")
-}
-
 /// The delete target that selects a mod route (`route.selected`).
 pub(crate) fn mod_route_delete_target(
     connection: &sequencer::sequencer::ModConnection,
@@ -341,48 +305,6 @@ pub(crate) fn mod_route_delete_target(
         source: connection.source_track,
         destination: connection.destination,
         input: connection.dest_input,
-    }
-}
-
-/// The effectively active clip per track (pattern id, or -1 while a track
-/// has none), as one list. The per-cell `track-pattern-cell-active-*`
-/// bindings answer "is this cell playing?"; this answers "which cell?", which
-/// is what a list-shaped clip view needs to scroll the active clip into view.
-pub(crate) fn build_track_active_pattern_ids_value(
-    state: &Arc<SequencerState>,
-    track_count: usize,
-) -> Value {
-    list_value((0..track_count).map(|track| {
-        Value::Number(
-            state
-                .track_pattern_cells(track)
-                .into_iter()
-                .find(|cell| cell.active_effective)
-                .map(|cell| cell.pattern_id.0 as f64)
-                .unwrap_or(-1.0),
-        )
-    }))
-}
-
-pub(crate) fn sync_track_pattern_cell_state_fields(
-    rt: &mut Runtime,
-    state: &Arc<SequencerState>,
-    track_count: usize,
-) {
-    rt.set_reactive(
-        "SEQ",
-        "track-active-pattern-ids",
-        build_track_active_pattern_ids_value(state, track_count),
-    );
-    for track in 0..track_count {
-        for cell in state.track_pattern_cells(track) {
-            let pattern_id = cell.pattern_id.0;
-            rt.set_reactive(
-                "SEQ",
-                &track_pattern_cell_active_field(track, pattern_id),
-                Value::Bool(cell.active_effective),
-            );
-        }
     }
 }
 

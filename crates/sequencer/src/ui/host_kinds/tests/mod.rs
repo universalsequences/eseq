@@ -439,6 +439,7 @@ impl Harness {
 }
 
 mod arrangement;
+mod arrangement_view;
 mod browser;
 mod browser_view;
 mod devices;

@@ -1,8 +1,8 @@
 ;; Arrangement clip preview with a live left-edge trim at an off-cycle beat.
 ;; The four-beat pattern is audible over [2, 6), so its source phase at beat
-;; 2 is step 8. The capture ghost trims the clip to beat 3; the visible notes
-;; must stay at beats 3/4/5 rather than restarting or stretching to the new
-;; three-beat span.
+;; 2 is step 8. The capture's live start-edge drag trims the clip to beat 3;
+;; the visible notes must stay at beats 3/4/5 rather than restarting or
+;; stretching to the new three-beat span.
 
 (capture-project
   (track :sampler :name "Offset Pattern" :steps (0 4 8 12)))
@@ -16,13 +16,9 @@
 (def capture-after-sync ()
   (do
     (eseq.seq-panels/seq-open-arrangement)
-    (set! eseq.arrangement/view-start 0)
-    (set! eseq.arrangement/view-duration 16)
-    (let ((clip (nth (nth SEQ.song-lanes 0) 0)))
-      (set! eseq.arrangement/ghost
-        (dict
-          :kind :track-resize
-          :track 0
-          :clip-id (get clip :clip-id)
-          :edge :start
-          :time 3)))))
+    (let ((view eseq.arrangement/arr-view)) (set! view.duration 16))
+    (eseq.arrangement/set-view-start 0 16)
+    (let ((t (nth (eseq.kinds/tracks) 0)))
+      (let ((c (nth t.clips 0)))
+        (eseq.arrangement/track-action 0
+          (dict :type :resize-item-absolute :id c.cid :ids (list c.cid) :edge :start :time 3))))))

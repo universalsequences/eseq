@@ -54,22 +54,6 @@ impl Harness {
         })
     }
 
-    /// Publish the legacy song and cell fields as the reactive tick does.
-    fn publish_legacy_song(&mut self) {
-        let state = self.shared.state.clone();
-        let count = self.app.tracks.len();
-        let rt = self.editor.runtime_mut();
-        sync_song_state(rt, &self.app, &mut SongFrameState::default(), true);
-        sync_track_pattern_cell_state_fields(rt, &state, count);
-    }
-
-    fn seq(&self, field: &str) -> Value {
-        self.rt()
-            .reactive_field_value("SEQ", field)
-            .unwrap_or_else(|| panic!("SEQ.{field}"))
-            .clone()
-    }
-
     /// A second pattern in track 0's pool: a cloned scene's cell.
     fn second_pattern(&mut self) -> u64 {
         self.command("clone-pattern", Value::Nil);
@@ -81,15 +65,6 @@ impl Harness {
     }
 }
 
-fn map_get(value: &Value, key: &str) -> Value {
-    match value {
-        Value::Map(map) => map
-            .get(key)
-            .map_or(Value::Nil, |cell| cell.borrow().clone()),
-        other => panic!("not a map: {other:?}"),
-    }
-}
-
 fn items(value: Value) -> Vec<Value> {
     match value {
         Value::List(items) => items.iter().map(|item| item.borrow().clone()).collect(),
@@ -98,7 +73,7 @@ fn items(value: Value) -> Vec<Value> {
 }
 
 #[test]
-fn arrangement_fields_read_after_sync_and_match_the_legacy_fields() {
+fn arrangement_fields_read_after_sync_and_match_the_model() {
     let mut h = Harness::new();
     let a = h.clip(0, 0.0, 4.0, 1);
     let b = h.clip(0, 8.0, 12.0, 1);
@@ -134,78 +109,53 @@ fn arrangement_fields_read_after_sync_and_match_the_legacy_fields() {
     assert_eq!(h.eval_7d("song.manual-latch"), Value::Bool(false));
     assert_eq!(h.eval_7d("t0.governed"), h.eval_7d("take-none"));
     assert_eq!(h.eval_7d("t0.latched"), Value::Bool(false));
-    // Legacy parity.
-    h.publish_legacy_song();
-    assert_eq!(h.seq("song-end-beat"), h.eval_7d("song.end"));
-    assert_eq!(h.seq("song-loop-enabled"), h.eval_7d("song.loop"));
-    assert_eq!(h.seq("song-exists"), h.eval_7d("song.exists"));
-    assert_eq!(h.seq("song-mode"), h.eval_7d("song.mode"));
-    assert_eq!(h.seq("song-position-beats"), h.eval_7d("song.position"));
-    assert_eq!(
-        h.seq("song-recording-kind"),
-        h.eval_7d("song.recording-kind")
-    );
-    assert_eq!(h.seq("song-scene-latched"), h.eval_7d("song.scene-latched"));
-    let governed = items(h.seq("song-track-governed"));
-    let latched = items(h.seq("song-track-latched"));
-    for track in 0..2 {
-        h.eval_7d(&format!("(def tx (track {track}))"));
-        assert_eq!(governed[track], h.eval_7d("tx.governed"));
-        assert_eq!(latched[track], h.eval_7d("tx.latched"));
-    }
-    // The lanes: ids, spans and source previews.
-    let lanes = items(h.seq("song-lanes"));
-    let events = items(h.seq("song-lane-events"));
-    for (track, lane) in lanes.into_iter().enumerate() {
-        let previews = items(events[track].clone());
-        for (index, legacy) in items(lane).into_iter().enumerate() {
+    // The lanes: ids, spans and source previews, as the model has them.
+    let lanes = h
+        .app
+        .state
+        .with_committed_arrangement(|arrangement| arrangement.expect("a song").track_lanes.clone());
+    let previews = h
+        .app
+        .state
+        .with_project_scenes(|scenes| collect_lane_pattern_events(&lanes, scenes));
+    for (track, lane) in lanes.iter().enumerate() {
+        for (index, model) in lane.iter().enumerate() {
             h.eval_7d(&format!("(def cx (nth (track-clips {track}) {index}))"));
-            let clip = "cx";
-            assert_eq!(
-                map_get(&legacy, "clip-id"),
-                h.eval_7d(&format!("{clip}.cid"))
-            );
-            let start = h.eval_7d(&format!("{clip}.start"));
-            assert_eq!(map_get(&legacy, "start-beat"), start);
-            assert_eq!(
-                map_get(&legacy, "end-beat"),
-                h.eval_7d(&format!("{clip}.end"))
-            );
-            let pattern = map_get(&legacy, "pattern-id");
-            let preview = previews
+            assert_eq!(h.eval_7d("cx.cid"), Value::Number(model.id.0 as f64));
+            assert_eq!(h.eval_7d("cx.start"), Value::Number(model.start_beat));
+            assert_eq!(h.eval_7d("cx.end"), Value::Number(model.end_beat));
+            let preview = previews[track]
                 .iter()
-                .find(|preview| map_get(preview, "pattern-id") == pattern)
+                .find(|preview| Some(preview.pattern_id) == model.pattern_id)
                 .expect("the clip's preview");
-            let fields = [
-                ("num-steps", "num-steps"),
-                ("length-beats", "length"),
-                ("events", "events"),
-            ];
-            for (legacy_key, field) in fields {
-                let value = h.eval_7d(&format!("{clip}.{field}"));
-                assert_eq!(map_get(preview, legacy_key), value, "{field}");
-            }
+            let length = Value::Number(preview.length_beats);
+            assert_eq!(
+                h.eval_7d("cx.num-steps"),
+                Value::Number(preview.num_steps as f64)
+            );
+            assert_eq!(h.eval_7d("cx.length"), length);
+            assert_eq!(
+                h.eval_7d("cx.events"),
+                pattern_events_value(&preview.events)
+            );
         }
     }
-    let spans = items(h.seq("scene-spans"));
+    let spans = h.app.state.with_committed_arrangement(|arrangement| {
+        sequencer::sequencer::arrangement_scene_spans(arrangement.expect("a song"))
+    });
     assert_eq!(
         h.eval_7d("(len song.spans)"),
         Value::Number(spans.len() as f64)
     );
     for (index, span) in spans.iter().enumerate() {
         h.eval_7d(&format!("(def sx (nth song.spans {index}))"));
-        let ours = "sx";
+        assert_eq!(h.eval_7d("sx.index"), Value::Number(index as f64));
+        assert_eq!(h.eval_7d("sx.start"), Value::Number(span.start_beat));
+        assert_eq!(h.eval_7d("sx.end"), Value::Number(span.end_beat));
         assert_eq!(
-            h.eval_7d(&format!("{ours}.index")),
-            Value::Number(index as f64)
+            h.eval_7d("sx.scene.index"),
+            Value::Number(span.scene as f64)
         );
-        assert_eq!(
-            map_get(span, "start-beat"),
-            h.eval_7d(&format!("{ours}.start"))
-        );
-        assert_eq!(map_get(span, "end-beat"), h.eval_7d(&format!("{ours}.end")));
-        let scene = h.eval_7d(&format!("{ours}.scene.index"));
-        assert_eq!(map_get(span, "scene"), scene);
     }
     // Cells.
     let cells = h.shared.state.track_pattern_cells(0);
@@ -216,10 +166,7 @@ fn arrangement_fields_read_after_sync_and_match_the_legacy_fields() {
     h.eval_7d("(def cl (first t0.cells))");
     assert_eq!(h.eval_7d("cl.track"), h.eval_7d("t0"));
     let model = &cells[0];
-    assert_eq!(
-        h.seq("track-pattern-cell-active-0-1"),
-        h.eval_7d("cl.active")
-    );
+    assert_eq!(h.eval_7d("cl.active"), Value::Bool(model.active_effective));
     assert_eq!(
         h.eval_7d("cl.assigned"),
         Value::Bool(model.assigned_to_current_scene)
@@ -229,8 +176,7 @@ fn arrangement_fields_read_after_sync_and_match_the_legacy_fields() {
     assert_eq!(h.eval_7d("cl.active"), Value::Bool(true));
     assert_eq!(h.eval_7d("cl.queued"), Value::Bool(false));
     assert_eq!(h.eval_7d("cl.banks"), h.eval_7d("(list (first (banks)))"));
-    // The region, the bound clip and the edit error follow the legacy
-    // commands.
+    // The region, the bound clip and the edit error follow the commands.
     let region = map_value([
         ("track-a", Value::Number(1.0)),
         ("track-b", Value::Number(0.0)),
@@ -258,13 +204,12 @@ fn arrangement_fields_read_after_sync_and_match_the_legacy_fields() {
         map_value([("clip-id", Value::Number(999.0))]),
     );
     h.sync();
-    h.publish_legacy_song();
-    assert_eq!(h.seq("song-edit-error"), h.eval_7d("song.edit-error"));
-    assert_ne!(h.eval_7d("song.edit-error"), s(""));
-    assert_eq!(h.seq("song-region"), {
-        let region = [0.0, 0.0, 8.0, 12.0].map(Value::Number);
-        list_value(region.into_iter().chain([Value::Bool(false)]))
-    });
+    let error = h.app.song_edit_error.clone().expect("a rejection");
+    assert_eq!(h.eval_7d("song.edit-error"), s(&error));
+    // Binding the clip selected its span as the region.
+    assert_eq!(h.eval_7d("region.tracks"), h.eval_7d("(list t0)"));
+    assert_eq!(h.eval_7d("region.start"), Value::Number(8.0));
+    assert_eq!(h.eval_7d("region.end"), Value::Number(12.0));
     // Nothing changed: a second sync pushes nothing.
     h.sync();
     assert!(!h.sync());
@@ -473,6 +418,48 @@ fn clips_and_cells_keep_identity_across_edits_reorders_and_project_load() {
     assert_ne!(
         h.eval_7d("(first (track-cells 1))"),
         Value::Instance(cell_id)
+    );
+}
+
+/// Note edit-through, visible half (docs/realtime-arrangement-feedback-spec.md
+/// 5.2): a step edit moves the pool content, not the committed song nor the
+/// pattern epoch, and the clip's events follow it.
+#[test]
+fn a_step_edit_refreshes_clip_events_without_a_song_edit() {
+    let mut h = Harness::new();
+    h.clip(0, 0.0, 4.0, 1);
+    h.sync();
+    h.eval_7d("(def c (first (track-clips 0)))");
+    let before = h.eval_7d("c.events");
+    let song = h.app.state.committed_song_revision();
+    let epoch = h
+        .app
+        .state
+        .transport
+        .pattern_epoch
+        .load(std::sync::atomic::Ordering::Relaxed);
+    app::edit::try_apply_command(
+        &mut h.app,
+        app::AppCommand::ToggleStep { track: 0, step: 3 },
+    )
+    .expect("step edit applies");
+    h.sync();
+    assert_eq!(
+        h.app.state.committed_song_revision(),
+        song,
+        "not a song edit"
+    );
+    let after = h
+        .app
+        .state
+        .transport
+        .pattern_epoch
+        .load(std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(after, epoch, "step commits never bump the pattern epoch");
+    assert_ne!(
+        h.eval_7d("c.events"),
+        before,
+        "the edited note reaches the clip"
     );
 }
 
@@ -772,7 +759,7 @@ fn clip_dots_follow_palette_colors_and_are_gray_without_one() {
         h.frame.host_kinds.song.structure_syncs, syncs,
         "a color change rebuilds no clips"
     );
-    // The legacy join agrees.
+    // The app's join agrees.
     let sounds = h.app.song_clip_sounds();
     assert_eq!(sounds[0][0].2, Some(3));
 }

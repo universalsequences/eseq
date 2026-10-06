@@ -1073,8 +1073,8 @@ pub struct App {
     /// The actionable error for the most recent failed capture, bound to
     /// `SEQ.song-capture-error`.
     pub song_capture_error: Option<String>,
-    /// The most recent song editing-primitive rejection, bound to
-    /// `SEQ.song-edit-error` so the arrangement view can surface it (the
+    /// The most recent song editing-primitive rejection, pushed as
+    /// `song.edit-error` so the arrangement view can surface it (the
     /// step tile hides the global status line). Cleared by the next
     /// successful song edit.
     pub song_edit_error: Option<String>,
@@ -1086,7 +1086,7 @@ pub struct App {
     /// (docs/realtime-arrangement-feedback-spec.md 3.3): bumped by the
     /// writers of pending take notes and captured launches, and when a
     /// capture take begins or ends (begin / discard / finish), and by
-    /// nothing else. `SEQ.song-pending` rebuilds its dots only when this (or
+    /// nothing else. `song.pending-*` rebuilds its dots only when this (or
     /// the pool / scenes content the launches name, `pending_content_key`)
     /// moves, so a recording never invalidates the committed-lane caches
     /// per note. It is deliberately neither `committed_song_revision`

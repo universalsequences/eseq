@@ -207,17 +207,20 @@ fn set_song(
             match clip.map(ClipId) {
                 None => {
                     app.set_song_clip_selection(None);
+                    None
                 }
+                // Binding the bound clip again still selects its span: a
+                // click lights the clip as a region even when the binding
+                // came from a path that left none (a capture commit, a
+                // cleared region). A no-op when nothing changed.
                 Some(id) => {
                     let (track, clip) = committed_clip(app, id)?;
-                    let selected = app.song_clip_selection.map(|selection| selection.clip_id);
-                    if selected != Some(id) {
-                        let span = Some((clip.start_beat, clip.end_beat));
-                        app.select_song_clip_span(track, id, span)?;
-                    }
+                    let span = Some((clip.start_beat, clip.end_beat));
+                    app.select_song_clip_span(track, id, span)?;
+                    app.track_binding_label(track)
+                        .map(|label| format!("Bound: {label}"))
                 }
             }
-            None
         }
         other => return Err(format!("unknown song field '{other}'")),
     };
@@ -292,6 +295,26 @@ fn latches_errors(name: &str, payload: &Value) -> bool {
             matches!(map_string(map, "field").as_deref(), Some("loop" | "end"))
         }
         _ => false,
+    }
+}
+
+/// The selection setters a headless capture applies (it has no event loop
+/// to land edits through): `set-song-region`, and the `set-song` fields that
+/// edit no arrangement (`bound-clip`, `cursor`, the latches). None for other
+/// commands.
+pub(crate) fn apply_capture_selection_command(
+    name: &str,
+    payload: &Value,
+    app: &mut app::App,
+) -> Option<Result<(), String>> {
+    match (name, payload) {
+        ("set-song-region", payload) => Some(set_region(app, payload)),
+        ("set-song", Value::Map(map)) => Some(match set_song(app, map) {
+            Ok((None, _)) => Ok(()),
+            Ok((Some(_), _)) => Err("arrangement edits need the event loop".to_string()),
+            Err(message) => Err(message),
+        }),
+        _ => None,
     }
 }
 

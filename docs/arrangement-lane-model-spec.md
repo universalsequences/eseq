@@ -429,6 +429,10 @@ Direct ports of the row versions, simpler on lanes:
 
 ## 12. UI read surfaces
 
+Since eseq-0l17.15 the view reads these as the host kinds (kind-bindings
+spec §14.2d): `t.clips` (`clip`), `song.spans` (`scene-span`) and the clip's
+`events` / `num-steps` / `length`; the `SEQ` surfaces below are gone.
+
 - **`SEQ.song-lanes`** now serializes the stored clips directly:
   `{clip-id, start-beat, end-beat, pattern-id, take-id, offset-steps}` —
   real identity, already merged, `from-override` obsolete (every lane item

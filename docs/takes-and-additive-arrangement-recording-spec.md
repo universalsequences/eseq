@@ -928,7 +928,8 @@ Deliberate scope calls, all noted rather than silently dropped:
   reason. They need a home — most likely the instrument header actions menu.
 - **Rule-2 bound-clip highlight is not drawn.** Under rule 1 the bound clip
   is the selected clip and already highlights (now driven by the persistent
-  Rust-side `SEQ.song-bound-clip`, so it survives view switches per 16.6).
+  Rust-side `song.bound-clip`, formerly `SEQ.song-bound-clip`, so it
+  survives view switches per 16.6).
   Under rule 2 the playing clip does not yet carry a distinct highlight.
 
 ## 17. Sounds — shared parameter entities and the palette

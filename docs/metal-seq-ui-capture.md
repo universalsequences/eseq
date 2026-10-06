@@ -131,7 +131,7 @@ script.
 or a `(step transpose)` pair, e.g. `:steps (0 4 (8 12) 12)`. The steps are
 applied to the live pattern and then persisted into the scene's pattern pool
 through the production scene-launch path, so pool-derived read surfaces (such
-as the arrangement timeline's `song-lane-events` clip previews) observe them.
+as the arrangement timeline's clip previews, `clip.events`) observe them.
 
 `:step-params` authors step values, and `:instrument-locks` authors instrument
 p-locks by parameter name in the instrument's stored units:

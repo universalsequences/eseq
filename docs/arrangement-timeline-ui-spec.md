@@ -146,7 +146,8 @@ reactive values:
 - `:content-length` — the song's `end_beat`, read from the `song-end-beat`
   binding (`song-mode-spec.md` §12), fed identically to every instance so
   the end-of-song marker lines up on every row.
-- `:playhead-time` — bound to `song-position-beats` (§12; render-rate
+- `:playhead-time` — bound to `song-position-beats` (§12; since eseq-0l17.15
+  `#'song.position`, kind-bindings spec §14.2d; render-rate
   readable per §10.2), the same binding on every lane, so the playhead
   sweeps all rows in lockstep without tree rebuilds.
 
@@ -464,7 +465,7 @@ priority order. None require stored-model changes; each is its own slice.
 3. **Editing during song playback** — primitives are locked while
    `SongPlayback`/`ArrangementCapture` are active (single launch
    authority; the scheduler plays prebuilt row snapshots). Rejections
-   are now VISIBLE via `SEQ.song-edit-error` + the arrangement banner.
+   are now VISIBLE via `song.edit-error` + the arrangement banner.
    Making edits audible mid-playback needs prepared-swap machinery:
    diff the committed song against the active `RuntimeSong`, rebuild
    affected row snapshots off the audio thread, hand over atomically

@@ -2565,7 +2565,6 @@ use panel_kinds_seed::*;
             vec![
                 ("num-tracks", Value::Number(0.0)),
                 ("current-track", Value::Number(0.0)),
-                ("song-bound-clip", Value::Nil),
                 ("track-instrument-types", test_list(vec![])),
                 // The real eseq.seq-core-state (imported by browser.lisp)
                 // gates seq-has-selected-bus? on the bus list length.
@@ -6472,28 +6471,6 @@ use panel_kinds_seed::*;
             .expect("parse ui/sequencer.lisp");
     }
 
-    /// One `SEQ.scene-spans` entry (lane spec 12): a scene EVENT plus its
-    /// derived end. The span's identity — and every scene gesture's id — is
-    /// its start beat.
-    fn scene_span(start: f64, end: f64, scene: f64) -> Value {
-        map_value([
-            ("start-beat", Value::Number(start)),
-            ("end-beat", Value::Number(end)),
-            ("scene", Value::Number(scene)),
-        ])
-    }
-
-    /// One `SEQ.song-lanes` entry (lane spec 12): a STORED clip, addressed
-    /// by its real `clip-id`.
-    fn lane_clip(clip_id: f64, start: f64, end: f64, pattern: Value) -> Value {
-        map_value([
-            ("clip-id", Value::Number(clip_id)),
-            ("start-beat", Value::Number(start)),
-            ("end-beat", Value::Number(end)),
-            ("pattern-id", pattern),
-        ])
-    }
-
     fn test_list(values: Vec<Value>) -> Value {
         Value::List(
             values
@@ -6501,15 +6478,6 @@ use panel_kinds_seed::*;
                 .map(|value| Rc::new(RefCell::new(value)))
                 .collect(),
         )
-    }
-
-    fn test_track_pattern_cell(
-        id: f64,
-        _assigned: bool,
-        _active: bool,
-        _override_active: bool,
-    ) -> Value {
-        map_value([("id", Value::Number(id))])
     }
 
     /// Push pattern cell `pattern_id` of track `track` as the host-kinds
@@ -6535,67 +6503,6 @@ use panel_kinds_seed::*;
     fn kind_cell(editor: &Editor, track: usize, pattern_id: u64) -> eseqlisp::vm::InstanceId {
         let rt = editor.runtime();
         rt.keyed_instance("eseq.kinds:cell", &[kind_track(rt, track), pattern_id]).expect("cell")
-    }
-
-    #[test]
-    fn build_track_pattern_cells_value_exports_cell_maps() {
-        let state = Arc::new(SequencerState::new(1, vec![vec![]]));
-        let value = build_track_pattern_cells_value(&state, 1);
-        let Value::List(tracks) = value else {
-            panic!("track pattern cells should be a track list");
-        };
-        assert_eq!(tracks.len(), 1);
-        let Value::List(cells) = &*tracks[0].borrow() else {
-            panic!("track pattern cells should contain per-track cell lists");
-        };
-        assert_eq!(cells.len(), 1);
-        let Value::Map(cell) = &*cells[0].borrow() else {
-            panic!("track pattern cell should be a map");
-        };
-        assert_eq!(
-            cell.get("id").map(|value| value.borrow().clone()),
-            Some(Value::Number(1.0))
-        );
-        assert_eq!(
-            cell.get("banks").map(|value| match &*value.borrow() {
-                Value::List(items) =>
-                    items.iter().map(|item| item.borrow().clone()).collect::<Vec<_>>(),
-                other => panic!("bank membership should be a list, got {other:?}"),
-            }),
-            Some(vec![Value::Number(0.0)]),
-            "the sole scene's clip reports membership in bank A"
-        );
-        assert_eq!(
-            cell.len(),
-            2,
-            "track pattern cell topology should only include stable identity \
-             and scene-bank membership"
-        );
-    }
-
-    #[test]
-    fn build_track_active_pattern_ids_value_reports_the_effective_clip_per_track() {
-        let state = Arc::new(SequencerState::new(2, vec![vec![], vec![]]));
-        let value = build_track_active_pattern_ids_value(&state, 2);
-        let Value::List(ids) = value else {
-            panic!("active pattern ids should be a per-track list");
-        };
-        let ids = ids.iter().map(|id| id.borrow().clone()).collect::<Vec<_>>();
-        let expected = (0..2)
-            .map(|track| {
-                state
-                    .track_pattern_cells(track)
-                    .into_iter()
-                    .find(|cell| cell.active_effective)
-                    .map(|cell| Value::Number(cell.pattern_id.0 as f64))
-                    .unwrap_or(Value::Number(-1.0))
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(ids, expected);
-        assert!(
-            ids.iter().all(|id| matches!(id, Value::Number(n) if *n >= 1.0)),
-            "a fresh project's sole scene makes each track's first clip effective: {ids:?}"
-        );
     }
 
     #[test]
@@ -7316,7 +7223,6 @@ use panel_kinds_seed::*;
             "SEQ",
             vec![
                 ("current-track", Value::Number(0.0)),
-                ("song-bound-clip", Value::Nil),
                 ("macros", test_list(vec![])),
                 ("track-plocks", test_list(vec![])),
                 ("track-plock-variants", test_list(vec![])),
@@ -7383,7 +7289,6 @@ use panel_kinds_seed::*;
             "SEQ",
             vec![
                 ("current-track", Value::Number(0.0)),
-                ("song-bound-clip", Value::Nil),
                 ("macros", test_list(vec![])),
                 ("track-plocks", test_list(vec![])),
                 ("track-plock-variants", test_list(vec![])),
@@ -16251,11 +16156,6 @@ use panel_kinds_seed::*;
         // panel call these on selection and propagation gestures; the layout
         // tests only need them to exist.
         for name in [
-            "seq-song-select-clip",
-            "seq-song-deselect-clip",
-            // Region selection (region spec 4.1).
-            "seq-song-set-region",
-            "seq-song-clear-region",
             // Region clipboard + edit-cursor mirror (region spec 5.1-5.3).
             "seq-song-set-arr-cursor",
             "seq-song-region-copy",
@@ -16598,9 +16498,7 @@ use panel_kinds_seed::*;
                 .cells
                 .iter()
                 .map(|&(pid, active, assigned)| {
-                    let cell = rt.register_keyed_instance("eseq.kinds:cell", &[id, pid]).unwrap();
-                    set_field(rt, cell, "track", Value::Instance(id));
-                    set_field(rt, cell, "pid", Value::Number(pid as f64));
+                    let cell = register_kind_cell(rt, id, pid);
                     set_field(rt, cell, "active", Value::Bool(active));
                     set_field(rt, cell, "assigned", Value::Bool(assigned));
                     cell
@@ -16805,6 +16703,264 @@ use panel_kinds_seed::*;
         rt.run_reactive_cycle();
     }
 
+    /// A clip of [`seed_kind_clips`]: what the arrangement reads of it.
+    #[derive(Clone)]
+    struct KindClip {
+        cid: u64,
+        start: f64,
+        end: f64,
+        /// The pattern it plays, or the take (`take` >= 0).
+        pid: Option<u64>,
+        take: i64,
+        offset: f64,
+        num_steps: f64,
+        length: f64,
+        /// (time transpose velocity duration) per note, in steps.
+        events: Vec<[f64; 4]>,
+    }
+
+    impl KindClip {
+        /// A clip of pattern `pid` over [start, end): one 16-step,
+        /// four-beat cycle with no notes.
+        fn pattern(cid: u64, start: f64, end: f64, pid: u64) -> Self {
+            Self {
+                cid,
+                start,
+                end,
+                pid: Some(pid),
+                take: -1,
+                offset: 0.0,
+                num_steps: 16.0,
+                length: 4.0,
+                events: Vec::new(),
+            }
+        }
+
+        /// A clip of take `take` (from 0) over [start, end).
+        fn take(cid: u64, start: f64, end: f64, take: i64) -> Self {
+            Self { pid: None, take, ..Self::pattern(cid, start, end, 0) }
+        }
+
+        /// The source: `num_steps` steps over `length` beats, its notes.
+        fn source(mut self, num_steps: f64, length: f64, events: &[[f64; 4]]) -> Self {
+            self.num_steps = num_steps;
+            self.length = length;
+            self.events = events.to_vec();
+            self
+        }
+
+        fn offset(mut self, offset: f64) -> Self {
+            self.offset = offset;
+            self
+        }
+    }
+
+    /// `(…)` rows of numbers, as `clip.events` holds them.
+    fn kind_events(events: &[[f64; 4]]) -> Value {
+        test_list(events.iter().map(|event| test_number_list(event)).collect())
+    }
+
+    /// A clip's `note-dots` as the host-kinds tick flattens them.
+    fn kind_note_dots(clip: &KindClip) -> Value {
+        let notes: Vec<_> = clip.events.iter().map(|&[a, b, c, d]| (a, b, c, d)).collect();
+        let span = [clip.start, clip.end, clip.offset];
+        let take = clip.take >= 0;
+        crate::host_kinds::clip_note_dots(take, span, clip.num_steps, clip.length, &notes)
+    }
+
+    /// Publish track `track`'s arrangement lane as the host-kinds tick does
+    /// (host_kinds/arrangement.rs): a clip keyed (track id, cid) each, the
+    /// cells their patterns are, and `t.clips`.
+    fn seed_kind_clips(editor: &mut Editor, track: usize, clips: &[KindClip]) {
+        let rt = editor.runtime_mut();
+        let tid = kind_track(rt, track);
+        let ids: Vec<_> = clips
+            .iter()
+            .map(|clip| {
+                let id = rt
+                    .register_keyed_instance("eseq.kinds:clip", &[tid, clip.cid])
+                    .unwrap();
+                let cell = clip.pid.map(|pid| register_kind_cell(rt, tid, pid));
+                for (field, value) in [
+                    ("track", Value::Instance(tid)),
+                    ("cid", Value::Number(clip.cid as f64)),
+                    ("start", Value::Number(clip.start)),
+                    ("end", Value::Number(clip.end)),
+                    ("cell", instance_or_nil(cell)),
+                    ("take", Value::Number(clip.take as f64)),
+                    ("offset", Value::Number(clip.offset)),
+                    ("num-steps", Value::Number(clip.num_steps)),
+                    ("length", Value::Number(clip.length)),
+                    ("events", kind_events(&clip.events)),
+                    ("note-dots", kind_note_dots(clip)),
+                    ("dot", Value::Bool(false)),
+                    ("dot-color", test_rgb([0.5, 0.5, 0.5])),
+                ] {
+                    set_field(rt, id, field, value);
+                }
+                id
+            })
+            .collect();
+        set_field(rt, tid, "clips", instance_list(ids));
+        rt.run_reactive_cycle();
+    }
+
+    /// Track instance `tid`'s cell for pattern `pid`, registered with its
+    /// `track` and `pid` (as the host-kinds tick does).
+    fn register_kind_cell(
+        rt: &mut Runtime,
+        tid: eseqlisp::vm::InstanceId,
+        pid: u64,
+    ) -> eseqlisp::vm::InstanceId {
+        let cell = rt.register_keyed_instance("eseq.kinds:cell", &[tid, pid]).unwrap();
+        set_field(rt, cell, "track", Value::Instance(tid));
+        set_field(rt, cell, "pid", Value::Number(pid as f64));
+        cell
+    }
+
+    /// Publish track `track`'s pool (`t.cells`): a cell per pattern id.
+    fn seed_kind_cells(editor: &mut Editor, track: usize, pids: &[u64]) {
+        let rt = editor.runtime_mut();
+        let tid = kind_track(rt, track);
+        let cells: Vec<_> = pids.iter().map(|&pid| register_kind_cell(rt, tid, pid)).collect();
+        set_field(rt, tid, "cells", instance_list(cells));
+        rt.run_reactive_cycle();
+    }
+
+    /// The bound-clip writes the arrangement sent (`set! song.bound-clip`,
+    /// the `set-song` command): each clip id, nil for a deselect. Drains the
+    /// host commands.
+    fn bound_clip_writes(editor: &mut Editor) -> Vec<Value> {
+        editor
+            .drain_host_commands()
+            .into_iter()
+            .filter_map(|command| match command {
+                eseqlisp::host::HostCommand::Custom { name, payload } if name == "set-song" => {
+                    let Value::Map(map) = &payload else {
+                        return None;
+                    };
+                    let field = map.get("field").map(|field| field.borrow().clone());
+                    (field == Some(Value::String("bound-clip".into()))).then(|| {
+                        map.get("clip-id")
+                            .map_or(Value::Nil, |id| id.borrow().clone())
+                    })
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The region writes the arrangement sent (`select-region!` /
+    /// `clear-region!`, the `set-song-region` command): each selection as
+    /// `(track ids, start, end, scene-lane)`, `None` for a clear. Drains the
+    /// host commands.
+    fn region_writes(editor: &mut Editor) -> Vec<Option<(Vec<f64>, f64, f64, bool)>> {
+        let number = |value: Option<&Rc<RefCell<Value>>>| match value.map(|v| v.borrow().clone()) {
+            Some(Value::Number(n)) => n,
+            other => panic!("expected a number, got {other:?}"),
+        };
+        editor
+            .drain_host_commands()
+            .into_iter()
+            .filter_map(|command| match command {
+                eseqlisp::host::HostCommand::Custom { name, payload }
+                    if name == "set-song-region" =>
+                {
+                    let Value::Map(map) = &payload else {
+                        return Some(None);
+                    };
+                    let Some(Value::List(ids)) = map.get("track-ids").map(|v| v.borrow().clone())
+                    else {
+                        panic!("set-song-region needs :track-ids");
+                    };
+                    let ids = ids.iter().map(|id| number(Some(id))).collect();
+                    let scene_lane = map.get("scene-lane").map(|v| v.borrow().clone());
+                    Some(Some((
+                        ids,
+                        number(map.get("start")),
+                        number(map.get("end")),
+                        scene_lane == Some(Value::Bool(true)),
+                    )))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Publish the scene lane (`song.spans`): one `(start, end, scene)` per
+    /// scene change, the scenes registered (`seed_kind_scene_names`).
+    fn seed_kind_spans(editor: &mut Editor, spans: &[(f64, f64, usize)]) {
+        let rt = editor.runtime_mut();
+        let ids = register_kind_range(rt, "eseq.kinds:scene-span", spans.len());
+        for (index, (&id, &(start, end, scene))) in ids.iter().zip(spans).enumerate() {
+            let scene = rt.keyed_instance("eseq.kinds:scene", &[scene as u64]);
+            set_field(rt, id, "index", Value::Number(index as f64));
+            set_field(rt, id, "scene", instance_or_nil(scene));
+            set_field(rt, id, "start", Value::Number(start));
+            set_field(rt, id, "end", Value::Number(end));
+        }
+        let song = kind_singleton_rt(rt, "song");
+        set_field(rt, song, "spans", instance_list(ids));
+        rt.run_reactive_cycle();
+    }
+
+    /// Publish a committed song ending at `end` whose scene lane is `spans`
+    /// (`(start, end, scene)` each), with `scenes` scenes named `Scene n`.
+    fn seed_kind_song(editor: &mut Editor, end: f64, scenes: usize, spans: &[(f64, f64, usize)]) {
+        let names: Vec<String> = (1..=scenes).map(|scene| format!("Scene {scene}")).collect();
+        seed_kind_scene_names(
+            editor,
+            &names.iter().map(String::as_str).collect::<Vec<_>>(),
+        );
+        set_kind_field(editor, "song", "exists", Value::Bool(true));
+        set_kind_field(editor, "song", "end", Value::Number(end));
+        seed_kind_spans(editor, spans);
+    }
+
+    /// Publish `song.region`: tracks `a..=b` over [start, end) (swept in the
+    /// scene lane with `scene_lane`), or none.
+    fn set_kind_region(editor: &mut Editor, region: Option<(usize, usize, f64, f64, bool)>) {
+        let rt = editor.runtime_mut();
+        let song = kind_singleton_rt(rt, "song");
+        let Some((a, b, start, end, scene_lane)) = region else {
+            set_field(rt, song, "region", Value::Nil);
+            rt.run_reactive_cycle();
+            return;
+        };
+        let id = kind_singleton_rt(rt, "region");
+        let tracks: Vec<_> = (a.min(b)..=a.max(b))
+            .map(|track| kind_track(rt, track))
+            .collect();
+        set_field(rt, id, "tracks", instance_list(tracks));
+        set_field(rt, id, "start", Value::Number(start));
+        set_field(rt, id, "end", Value::Number(end));
+        set_field(rt, id, "scene-lane", Value::Bool(scene_lane));
+        set_field(rt, song, "region", Value::Instance(id));
+        rt.run_reactive_cycle();
+    }
+
+    /// Publish `song.bound-clip`: clip `cid` of track `track`, or none.
+    fn set_kind_bound_clip(editor: &mut Editor, clip: Option<(usize, u64)>) {
+        let rt = editor.runtime_mut();
+        let clip = clip.map(|(track, cid)| {
+            let tid = kind_track(rt, track);
+            rt.keyed_instance("eseq.kinds:clip", &[tid, cid])
+                .expect("a seeded clip")
+        });
+        let song = kind_singleton_rt(rt, "song");
+        set_field(rt, song, "bound-clip", instance_or_nil(clip));
+        rt.run_reactive_cycle();
+    }
+
+    /// Evaluate `code` against the arrangement view (its exports referred).
+    fn eval_arrangement(editor: &mut Editor, code: &str) -> Value {
+        editor
+            .runtime_mut()
+            .eval_str(code)
+            .unwrap_or_else(|error| panic!("{code}: {error:?}"))
+            .unwrap_or(Value::Nil)
+    }
+
     fn full_grid_editor_for_scroll_tests() -> eseqlisp::Editor {
         let src = read_ui_source("main.lisp").expect("read grid lisp");
         full_grid_editor_with_main_source(&src)
@@ -16886,17 +17042,7 @@ use panel_kinds_seed::*;
                 ("track-names", test_string_list(&["bd02"])),
                 ("track-colors", test_track_colors()),
                 ("track-collapsed", test_bool_list(&[false])),
-                (
-                    "track-pattern-cells",
-                    test_list(vec![test_list(vec![
-                        test_track_pattern_cell(1.0, true, true, false),
-                        test_track_pattern_cell(2.0, false, false, false),
-                    ])]),
-                ),
                 ("current-track", Value::Number(0.0)),
-                ("song-bound-clip", Value::Nil),
-                ("song-clip-sounds", test_list(vec![])),
-                ("song-region", Value::Nil),
                 ("delete-target-version", Value::Number(0.0)),
                 ("record-armed", test_bool_list(&[false])),
                 ("track-mutes", test_bool_list(&[false])),
@@ -17063,22 +17209,13 @@ use panel_kinds_seed::*;
                 // Song-mode bindings (docs/song-mode-spec.md 12), mirroring
                 // the real registration in natives.rs.
                 ("song-exists", Value::Bool(false)),
-                ("song-mode", Value::String("stopped".to_string())),
                 ("song-recording-kind", Value::String("".to_string())),
-                ("song-track-latched", Value::List(vec![])),
-                ("song-scene-latched", Value::Bool(false)),
                 ("song-current-row", Value::Number(-1.0)),
                 ("song-current-row-id", Value::Number(-1.0)),
                 ("song-row-count", Value::Number(0.0)),
-                ("song-position-beats", Value::Number(0.0)),
-                ("song-end-beat", Value::Number(0.0)),
                 ("song-loop-enabled", Value::Bool(false)),
                 ("song-capture-failed", Value::Bool(false)),
                 ("song-capture-error", Value::Nil),
-                ("song-lanes", Value::List(vec![])),
-                ("scene-spans", Value::List(vec![])),
-                ("song-lane-events", Value::List(vec![])),
-                ("scene-names", Value::List(vec![])),
                 ("sampler-playhead", Value::Number(0.0)),
                 ("track-peak-0", Value::Number(0.0)),
                 ("bus-peak-0", Value::Number(0.0)),
@@ -17854,22 +17991,6 @@ use panel_kinds_seed::*;
             "track-collapsed",
             test_repeated_bool_list(false, track_count),
         );
-        rt.set_reactive(
-            "SEQ",
-            "track-pattern-cells",
-            test_list(
-                (0..track_count)
-                    .map(|track| {
-                        test_list(vec![test_track_pattern_cell(
-                            (track + 1) as f64,
-                            true,
-                            track == 0,
-                            false,
-                        )])
-                    })
-                    .collect(),
-            ),
-        );
         rt.set_reactive("SEQ", "current-track", Value::Number(0.0));
         rt.set_reactive(
             "SEQ",
@@ -18588,23 +18709,6 @@ use panel_kinds_seed::*;
         editor
     }
 
-    fn mixer_v2_perf_cells(track_count: usize, cell_count: usize) -> Value {
-        test_list(
-            (0..track_count)
-                .map(|track| {
-                    test_list(
-                        (0..cell_count)
-                            .map(|cell| {
-                                let pattern_id = (track * 100 + cell + 1) as f64;
-                                test_track_pattern_cell(pattern_id, true, false, false)
-                            })
-                            .collect(),
-                    )
-                })
-                .collect(),
-        )
-    }
-
     fn apply_mixer_v2_perf_pattern(
         editor: &mut eseqlisp::Editor,
         track_count: usize,
@@ -18671,14 +18775,8 @@ use panel_kinds_seed::*;
                     "track-collapsed",
                     test_repeated_bool_list(false, track_count),
                 ),
-                (
-                    "track-pattern-cells",
-                    mixer_v2_perf_cells(track_count, cell_count),
-                ),
                 ("num-tracks", Value::Number(track_count as f64)),
                 ("current-track", Value::Number(0.0)),
-                ("song-bound-clip", Value::Nil),
-                ("song-region", Value::Nil),
                 ("delete-target-version", Value::Number(0.0)),
                 ("record-armed", test_repeated_bool_list(false, track_count)),
                 ("track-mutes", test_repeated_bool_list(false, track_count)),
@@ -18829,36 +18927,32 @@ use panel_kinds_seed::*;
     #[test]
     fn metal_seq_arrangement_select_all_spans_every_clip_on_every_track() {
         let mut editor = full_grid_editor_for_scroll_tests();
-        let span = editor
-            .runtime_mut()
-            .eval_str(
-                r#"
-                (do
-                  (reactive-set "SEQ" "song-lanes"
-                    (list
-                      (list (dict :clip-id 1 :start-beat 4 :end-beat 8))
-                      (list)
-                      (list (dict :clip-id 2 :start-beat 2 :end-beat 6)
-                            (dict :clip-id 3 :start-beat 12 :end-beat 20))))
-                  (let ((span (eseq.arrangement/clip-span-all-tracks)))
-                    (list (get span :start) (get span :end))))
-                "#,
-            )
-            .expect("compute the all-clips span");
-        assert_eq!(format!("{span:?}"), "Some((2 20))");
+        seed_kind_test_tracks(&mut editor, 3, |track| format!("track-{track}"));
+        seed_kind_clips(&mut editor, 0, &[KindClip::pattern(1, 4.0, 8.0, 1)]);
+        seed_kind_clips(
+            &mut editor,
+            2,
+            &[
+                KindClip::pattern(2, 2.0, 6.0, 3),
+                KindClip::pattern(3, 12.0, 20.0, 3),
+            ],
+        );
+        let span = eval_arrangement(
+            &mut editor,
+            "(let ((span (eseq.arrangement/clip-span-all-tracks)))
+               (list (get span :start) (get span :end)))",
+        );
+        assert_eq!(format!("{span:?}"), "(2 20)");
 
-        let empty = editor
-            .runtime_mut()
-            .eval_str(
-                r#"
-                (do
-                  (reactive-set "SEQ" "song-lanes" (list (list) (list)))
-                  (list (eseq.arrangement/clip-span-all-tracks)
-                        (eseq.arrangement/select-all-clips)))
-                "#,
-            )
-            .expect("empty song");
-        assert_eq!(format!("{empty:?}"), "Some((nil false))");
+        for track in [0, 2] {
+            seed_kind_clips(&mut editor, track, &[]);
+        }
+        let empty = eval_arrangement(
+            &mut editor,
+            "(list (eseq.arrangement/clip-span-all-tracks)
+                   (eseq.arrangement/select-all-clips))",
+        );
+        assert_eq!(format!("{empty:?}"), "(nil false)");
     }
 
     #[test]
@@ -18910,11 +19004,12 @@ use panel_kinds_seed::*;
                 let notes = if populated { vec![note] } else { vec![] };
                 set_kind_field(&mut editor, "piano-roll", "notes", instance_list(notes));
                 editor.runtime_mut().eval_str(if populated {
-                    r#"(reactive-set "SEQ" "song-lanes"
-                         (list (list (dict :clip-id 1 :start-beat 0 :end-beat 4))))"#
+                    "nil"
                 } else {
-                    r#"(reactive-set "SEQ" "song-lanes" (list (list)))"#
+                    "nil"
                 }).expect("populate or empty surface");
+                let clips = if populated { vec![KindClip::pattern(1, 0.0, 4.0, 1)] } else { vec![] };
+                seed_kind_clips(&mut editor, 0, &clips);
                 // Repeating Cmd+A must cancel deletion even if selection
                 // is unchanged, or there is nothing on the surface to select.
                 for _ in 0..2 {
@@ -26285,73 +26380,6 @@ use panel_kinds_seed::*;
         );
     }
 
-    /// Clip dot join logic (takes spec 17.6, amended to patch IDENTITY):
-    /// dotted clips yield their patch color, name-only patches the gray
-    /// fallback (true), clips with no resolvable sound nothing.
-    #[test]
-    fn metal_seq_arrangement_clip_sound_dot_resolves_color_and_fallback() {
-        let mut editor = full_grid_editor_for_scroll_tests();
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "song-clip-sounds",
-            test_list(vec![test_list(vec![
-                map_value([
-                    ("clip-id", Value::Number(5.0)),
-                    ("dot", Value::Bool(true)),
-                    ("color", Value::Number(1.0)),
-                    ("color-r", Value::Number(0.9)),
-                    ("color-g", Value::Number(0.6)),
-                    ("color-b", Value::Number(0.3)),
-                ]),
-                map_value([
-                    ("clip-id", Value::Number(6.0)),
-                    ("dot", Value::Bool(true)),
-                    ("color", Value::Nil),
-                ]),
-                // dot false = the clip's sound does not resolve; the
-                // producer never emits color fields alongside it.
-                map_value([
-                    ("clip-id", Value::Number(7.0)),
-                    ("dot", Value::Bool(false)),
-                ]),
-            ])]),
-        );
-        editor.runtime_mut().run_reactive_cycle();
-        let colored = editor
-            .runtime_mut()
-            .eval_str("(eseq.arrangement/clip-sound-dot 0 5)")
-            .expect("colored clip")
-            .expect("dot value");
-        let Value::List(rgb) = colored else {
-            panic!("expected (r g b), got {colored:?}");
-        };
-        assert_eq!(*rgb[0].borrow(), Value::Number(0.9));
-        assert_eq!(*rgb[2].borrow(), Value::Number(0.3));
-        assert_eq!(
-            editor
-                .runtime_mut()
-                .eval_str("(eseq.arrangement/clip-sound-dot 0 6)")
-                .expect("name-only clip"),
-            Some(Value::Bool(true)),
-            "name-only clip uses the gray fallback"
-        );
-        assert_eq!(
-            editor
-                .runtime_mut()
-                .eval_str("(eseq.arrangement/clip-sound-dot 0 7)")
-                .expect("unresolvable clip"),
-            Some(Value::Nil),
-            "a clip with no resolvable sound draws no dot"
-        );
-        assert_eq!(
-            editor
-                .runtime_mut()
-                .eval_str("(eseq.arrangement/clip-sound-dot 3 5)")
-                .expect("out-of-range track"),
-            Some(Value::Nil)
-        );
-    }
-
     #[test]
     fn metal_seq_preview_plock_row_backspace_does_not_clear_real_step() {
         let mut editor = full_grid_editor_for_scroll_tests();
@@ -26500,10 +26528,10 @@ use panel_kinds_seed::*;
 
         set_kind_field(&mut editor, "song", "mode", Value::String("stopped".to_string()));
         set_kind_field(&mut editor, "song", "cursor", Value::Number(512.0));
-        editor
-            .runtime_mut()
-            .eval_str("(set! eseq.arrangement/cursor-time 512)")
-            .expect("park stopped arrangement cursor at bar 129");
+        eval_arrangement(
+            &mut editor,
+            "(let ((view eseq.arrangement/arr-view)) (set! view.cursor-time 512))",
+        );
         editor.runtime_mut().run_reactive_cycle();
         editor.refresh_runtime_side_effects();
         let layout = editor.widget_layout().expect("stopped song transport layout");
@@ -27002,8 +27030,8 @@ use panel_kinds_seed::*;
         editor
             .runtime_mut()
             .eval_str(
-                "(do (set! eseq.arrangement/cursor-time 20) \
-                 (set! eseq.arrangement/cursor-track 2) \
+                "(do (let ((view eseq.arrangement/arr-view)) \
+                   (set! view.cursor-time 20) (set! view.cursor-track 2)) \
                  (set-window-buffer \"*transport*\"))",
             )
             .expect("park arrangement cursor and open transport");
@@ -27034,14 +27062,14 @@ use panel_kinds_seed::*;
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("eseq.arrangement/cursor-time")
+                .eval_str("(let ((view eseq.arrangement/arr-view)) view.cursor-time)")
                 .expect("cursor time evaluates"),
             Some(Value::Number(0.0))
         );
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("eseq.arrangement/cursor-track")
+                .eval_str("(let ((view eseq.arrangement/arr-view)) view.cursor-track)")
                 .expect("cursor track evaluates"),
             Some(Value::Number(-1.0))
         );
@@ -27066,12 +27094,13 @@ use panel_kinds_seed::*;
     }
 
     /// Reactive-bindings smoke test (docs/song-mode-spec.md 12) at the
-    /// `sync_song_state` seam the event loop calls each frame: after entering
-    /// song playback the mode binding reads "song-playback", the derived
-    /// lane surfaces rebuild when the committed revision changes, and stop
-    /// returns the bindings to "stopped". The exact `song-current-row`
-    /// display value needs the scheduler's position atomics, which stay
-    /// inactive in this headless test, so it must read -1 here.
+    /// `sync_song_state` seam the event loop calls each frame: the scalar
+    /// song bindings follow the committed song and the capture failure. The
+    /// mode, latches and lane surfaces are the host kinds' (`song`, `clip`,
+    /// `scene-span`; host_kinds::tests::arrangement). The exact
+    /// `song-current-row` display value needs the scheduler's position
+    /// atomics, which stay inactive in this headless test, so it must read
+    /// -1 here.
     #[test]
     fn metal_seq_song_reactive_bindings_reflect_transport_mode() {
         let mut editor = full_grid_editor_for_scroll_tests();
@@ -27119,7 +27148,7 @@ use panel_kinds_seed::*;
 
         let mut frame = SongFrameState::default();
         assert!(
-            sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true),
+            sync_song_state(editor.runtime_mut(), &test_app, &mut frame),
             "the first sync publishes everything"
         );
         editor.runtime_mut().run_reactive_cycle();
@@ -27131,73 +27160,25 @@ use panel_kinds_seed::*;
                 .expect("binding read returns a value")
         };
         assert_eq!(read(&mut editor, "SEQ.song-exists"), Value::Bool(true));
-        assert_eq!(read(&mut editor, "SEQ.song-mode"), Value::String("stopped".into()));
         assert_eq!(
             read(&mut editor, "SEQ.song-recording-kind"),
             Value::String("".into())
         );
         assert_eq!(read(&mut editor, "SEQ.song-row-count"), Value::Number(3.0));
-        assert_eq!(read(&mut editor, "SEQ.song-end-beat"), Value::Number(16.0));
         assert_eq!(read(&mut editor, "SEQ.song-loop-enabled"), Value::Bool(true));
         assert_eq!(read(&mut editor, "SEQ.song-current-row"), Value::Number(-1.0));
         assert_eq!(read(&mut editor, "SEQ.song-capture-failed"), Value::Bool(false));
-        let Value::List(spans) = read(&mut editor, "SEQ.scene-spans") else {
-            panic!("scene-spans must be a list");
-        };
-        assert_eq!(spans.len(), 3, "one span per scene event");
 
         // No change: no publish, and nothing is rebuilt (revision key).
         assert!(
-            !sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true),
+            !sync_song_state(editor.runtime_mut(), &test_app, &mut frame),
             "an unchanged frame publishes nothing"
         );
-
-        // Enter song playback through the state machine.
-        test_app.song_transport_play(false).expect("song playback starts");
-        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
-        editor.runtime_mut().run_reactive_cycle();
-        assert_eq!(
-            read(&mut editor, "SEQ.song-mode"),
-            Value::String("song-playback".into())
-        );
-
-        // A manual launch latches (rev 4) and the per-track override list
-        // drives the arrangement's per-lane dim.
-        assert_eq!(
-            read(&mut editor, "(nth SEQ.song-track-latched 0)"),
-            Value::Bool(false)
-        );
-        test_app
-            .apply_manual_pattern_launch(
-                &sequencer::quantized_launch::PatternLaunchTarget::Scene { scene: 1 },
-            )
-            .expect("manual launch latches");
-        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
-        editor.runtime_mut().run_reactive_cycle();
-        assert_eq!(
-            read(&mut editor, "(nth SEQ.song-track-latched 0)"),
-            Value::Bool(true)
-        );
-        assert_eq!(read(&mut editor, "SEQ.song-scene-latched"), Value::Bool(true));
-        test_app.back_to_song().expect("back to arrangement");
-        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
-        editor.runtime_mut().run_reactive_cycle();
-        assert_eq!(
-            read(&mut editor, "(nth SEQ.song-track-latched 0)"),
-            Value::Bool(false)
-        );
-        assert_eq!(read(&mut editor, "SEQ.song-scene-latched"), Value::Bool(false));
-
-        // Stop returns the bindings to stopped.
-        test_app.song_transport_stop().expect("stop succeeds");
-        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
-        editor.runtime_mut().run_reactive_cycle();
-        assert_eq!(read(&mut editor, "SEQ.song-mode"), Value::String("stopped".into()));
 
         // A latched capture failure publishes both failure bindings.
         test_app.song_capture_failed = true;
         test_app.song_capture_error = Some("take could not be committed".to_string());
-        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
+        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame));
         editor.runtime_mut().run_reactive_cycle();
         assert_eq!(read(&mut editor, "SEQ.song-capture-failed"), Value::Bool(true));
         assert_eq!(
@@ -27206,187 +27187,21 @@ use panel_kinds_seed::*;
         );
         test_app.song_capture_failed = false;
         test_app.song_capture_error = None;
-        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
+        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame));
         editor.runtime_mut().run_reactive_cycle();
         assert_eq!(read(&mut editor, "SEQ.song-capture-failed"), Value::Bool(false));
         assert_eq!(read(&mut editor, "SEQ.song-capture-error"), Value::Nil);
 
         // Clearing resets to the EMPTY arrangement (empty-arrangement spec
-        // 4.3): song-exists stays true — there is no "no song" mode — and
-        // the lane surfaces empty out (no scene spans, no clips in any
-        // lane).
+        // 4.3): song-exists stays true — there is no "no song" mode.
         test_app.arr_clear().expect("clear succeeds");
-        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
+        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame));
         editor.runtime_mut().run_reactive_cycle();
         assert_eq!(read(&mut editor, "SEQ.song-exists"), Value::Bool(true));
-        let Value::List(spans) = read(&mut editor, "SEQ.scene-spans") else {
-            panic!("scene-spans must be a list");
-        };
-        assert!(spans.is_empty());
-        let Value::List(lanes) = read(&mut editor, "SEQ.song-lanes") else {
-            panic!("song-lanes must be a list");
-        };
-        for lane in lanes {
-            let Value::List(clips) = &*lane.borrow() else {
-                panic!("each lane must be a list");
-            };
-            assert!(clips.is_empty(), "the empty arrangement has no clips");
-        }
-    }
-
-    /// Note edit-through, visible half
-    /// (docs/realtime-arrangement-feedback-spec.md 5.2): a step edit moves
-    /// `pool_content_revision` and the lane dots rebuild off it — with no
-    /// committed-song revision change and no `pattern_epoch` bump (the
-    /// mirror invariant). An edit to a pattern no lane resolves still opens
-    /// the gate, and the existing value-diff is what suppresses the publish.
-    #[test]
-    fn metal_seq_song_lane_events_refresh_on_a_pool_content_edit() {
-        let mut editor = full_grid_editor_for_scroll_tests();
-
-        let state = sequencer::sequencer::SequencerState::new(
-            1,
-            vec![sequencer::sequencer::default_empty_effect_chain()],
-        );
-        state.replace_pattern_repository(
-            vec![
-                sequencer::sequencer::PatternSnapshot::new_default(1, &[]),
-                sequencer::sequencer::PatternSnapshot::new_default(1, &[]),
-            ],
-            0,
-        );
-        let (keyboard_tx, _keyboard_rx) = std::sync::mpsc::channel();
-        let mut test_app = sequencer::app::App::new(
-            std::sync::Arc::new(state),
-            sequencer::audiograph::LiveGraphPtr(std::ptr::null_mut()),
-            44_100,
-            sequencer::app::AudioBuses {
-                bus_l_id: 0,
-                bus_r_id: 0,
-                default_bus_nodes: Vec::new(),
-                bus_effect_runtime: std::sync::Arc::new(std::sync::Mutex::new(std::sync::Arc::new(Vec::new()))),
-                reverb_bus_id: 0,
-                reverb_node_id: 0,
-            },
-            std::sync::Arc::new(sequencer::recorder::MasterRecorder::new(44_100, 2)),
-            keyboard_tx,
-        );
-        test_app.tracks = vec!["Track 1".to_string()];
-        test_app.track_registry =
-            sequencer::sequencer::TrackRegistry::for_legacy_track_count(1).unwrap();
-        // The song plays scene 0 only, so the lanes reference exactly one
-        // pool pattern: scene 1's is edited later as the "no lane resolves"
-        // case.
-        test_app
-            .arr_replace_rows(
-                vec![sequencer::app::song_edit::SongRowSpec {
-                    start_beat: 0.0,
-                    scene: 0,
-                    overrides: Vec::new(),
-                }],
-                8.0,
-                false,
-            )
-            .expect("song committed");
-
-        let mut frame = SongFrameState::default();
-        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
-        editor.runtime_mut().run_reactive_cycle();
-        let read = |editor: &mut eseqlisp::Editor, expr: &str| {
-            editor
-                .runtime_mut()
-                .eval_str(expr)
-                .expect("binding read evaluates")
-                .expect("binding read returns a value")
-        };
-        let before = read(&mut editor, "SEQ.song-lane-events");
-        let Value::List(entries) = &before else {
-            panic!("song-lane-events must be a list");
-        };
-        assert!(
-            !entries.is_empty(),
-            "the fixture's lane must reference a pool pattern, or this test is vacuous"
-        );
-
-        let song_revision = test_app.state.committed_song_revision();
-        let pool_revision = test_app.state.pool_content_revision();
-        let pattern_epoch = test_app
-            .state
-            .transport
-            .pattern_epoch
-            .load(std::sync::atomic::Ordering::Relaxed);
-
-        sequencer::app::edit::try_apply_command(
-            &mut test_app,
-            sequencer::app::AppCommand::ToggleStep { track: 0, step: 3 },
-        )
-        .expect("step edit applies");
-
-        assert!(
-            test_app.state.pool_content_revision() > pool_revision,
-            "the step commit moves pool content"
-        );
-        assert_eq!(
-            test_app.state.committed_song_revision(),
-            song_revision,
-            "a note edit is not a song edit"
-        );
-        assert_eq!(
-            test_app
-                .state
-                .transport
-                .pattern_epoch
-                .load(std::sync::atomic::Ordering::Relaxed),
-            pattern_epoch,
-            "step commits must never bump the pattern epoch (song_transport invariant)"
-        );
-
-        assert!(
-            sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true),
-            "the dots rebuild off the pool-content revision alone"
-        );
-        editor.runtime_mut().run_reactive_cycle();
-        let after = read(&mut editor, "SEQ.song-lane-events");
-        assert_ne!(after, before, "the edited note reaches the timeline");
-
-        // An edit to a pattern no lane resolves: scene 1's pattern. The gate
-        // opens (pool content moved), the value-diff keeps it off the wire.
-        test_app.state.launch_scene(
-            1,
-            1,
-            &[-1],
-            &[44_100],
-            &["Track 1".to_string()],
-            &[sequencer::sequencer::InstrumentType::Sampler],
-        );
-        // The launch bumps the pattern epoch, so the gate opens and the dots
-        // are recollected — identically, so nothing is published.
-        sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true);
-        editor.runtime_mut().run_reactive_cycle();
-        let unrelated_before = read(&mut editor, "SEQ.song-lane-events");
-        assert_eq!(unrelated_before, after, "a scene launch changes no dots here");
-
-        let pool_revision = test_app.state.pool_content_revision();
-        sequencer::app::edit::try_apply_command(
-            &mut test_app,
-            sequencer::app::AppCommand::ToggleStep { track: 0, step: 5 },
-        )
-        .expect("step edit applies");
-        assert!(
-            test_app.state.pool_content_revision() > pool_revision,
-            "the gate opens even for a pattern no lane resolves"
-        );
-        sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true);
-        editor.runtime_mut().run_reactive_cycle();
-        assert_eq!(
-            read(&mut editor, "SEQ.song-lane-events"),
-            unrelated_before,
-            "no lane resolves the edited pattern, so nothing is republished"
-        );
     }
 
     /// Build a one-track app with a committed one-row song, ready to enter
-    /// arrangement capture (the fixture the two `song-pending` tests share).
+    /// arrangement capture (the fixture the `song-pending` tests share).
     fn pending_capture_test_app() -> sequencer::app::App {
         let state = sequencer::sequencer::SequencerState::new(
             1,
@@ -27453,47 +27268,33 @@ use panel_kinds_seed::*;
             .expect("press instant")
     }
 
-    /// Provisional recording feedback, publish side
-    /// (docs/realtime-arrangement-feedback-spec.md 3.2/3.3): `SEQ.song-pending`
-    /// exists only while a capture take does. It appears on capture start,
-    /// gains a lane at punch-in, does NOT republish on a frame that recorded
-    /// nothing (the revision gate), and returns to nil on all three exit
-    /// paths — Stop, Cancel and a FAILED stop alike.
-    #[test]
-    fn metal_seq_song_pending_publishes_while_capturing_and_clears_on_every_exit() {
-        let mut editor = full_grid_editor_for_scroll_tests();
-        let mut test_app = pending_capture_test_app();
-        let mut frame = SongFrameState::default();
-        let read = |editor: &mut eseqlisp::Editor, expr: &str| {
-            editor
-                .runtime_mut()
-                .eval_str(expr)
-                .expect("binding read evaluates")
-                .expect("binding read returns a value")
-        };
+    /// The pending content the host kinds push (`song.pending-*`), or
+    /// `None` with no capture take: the provisional surface's model.
+    fn pending_surface(app: &sequencer::app::App) -> Option<(PendingContent, f64)> {
+        let head = quantized_pending_head(app)?;
+        Some((pending_capture_content(app).expect("a capture take"), head))
+    }
 
-        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
-        editor.runtime_mut().run_reactive_cycle();
-        assert_eq!(
-            read(&mut editor, "SEQ.song-pending"),
-            Value::Nil,
-            "nothing is published while no capture runs"
+    /// Provisional recording feedback, model side
+    /// (docs/realtime-arrangement-feedback-spec.md 3.2/3.3): the pending
+    /// surface exists only while a capture take does. It appears on capture
+    /// start, gains a lane at punch-in, and goes on all three exit paths —
+    /// Stop, Cancel and a FAILED stop alike. (Its push and revision gate are
+    /// the host kinds', host_kinds::tests::pending.)
+    #[test]
+    fn metal_seq_song_pending_exists_while_capturing_and_clears_on_every_exit() {
+        let mut test_app = pending_capture_test_app();
+        assert!(
+            pending_surface(&test_app).is_none(),
+            "nothing while no capture runs"
         );
 
         // ── Stop ──────────────────────────────────────────────────────────
         test_app.set_arrangement_view_visible(true);
         test_app.song_transport_play(true).expect("capture starts");
         assert!(test_app.pending_capture_active());
-        assert!(
-            sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true),
-            "entering capture publishes the surface"
-        );
-        editor.runtime_mut().run_reactive_cycle();
-        assert_eq!(
-            read(&mut editor, "(len (get SEQ.song-pending :lanes))"),
-            Value::Number(0.0),
-            "no lane until a track punches in"
-        );
+        let (content, _) = pending_surface(&test_app).expect("entering capture shows the surface");
+        assert!(content.lanes.is_empty(), "no lane until a track punches in");
 
         let anchor = anchor_record_clock(&test_app);
         let revision = test_app.pending_revision;
@@ -27508,70 +27309,37 @@ use panel_kinds_seed::*;
             song_revision,
             "and it rides its OWN counter: nothing is committed yet"
         );
-        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
-        editor.runtime_mut().run_reactive_cycle();
+        let (content, _) = pending_surface(&test_app).expect("capturing");
+        assert_eq!(content.lanes.len(), 1);
+        assert_eq!(content.lanes[0].track, 0);
         assert_eq!(
-            read(&mut editor, "(len (get SEQ.song-pending :lanes))"),
-            Value::Number(1.0)
-        );
-        assert_eq!(
-            read(&mut editor, "(get (nth (get SEQ.song-pending :lanes) 0) :track)"),
-            Value::Number(0.0)
-        );
-        assert_eq!(
-            read(
-                &mut editor,
-                "(get (nth (get SEQ.song-pending :lanes) 0) :start-beat)"
-            ),
-            Value::Number(4.0),
+            content.lanes[0].punch_in_beat, 4.0,
             "the span starts at the punch-in beat"
         );
         assert_eq!(
-            read(
-                &mut editor,
-                "(len (get (nth (get SEQ.song-pending :lanes) 0) :events))"
-            ),
-            Value::Number(1.0),
+            content.lanes[0].events.len(),
+            1,
             "the recorded note is drawable content"
-        );
-
-        // The revision gate: a frame with no new note and no new head
-        // quantum republishes nothing. Asserted at the `song-pending` seam
-        // itself — `sync_song_state` still reports dirty every frame during
-        // capture, because the render-rate playhead is moving.
-        assert!(
-            !sync_song_pending(editor.runtime_mut(), &test_app, &mut frame),
-            "a frame that recorded nothing must not republish the dots"
         );
 
         test_app.song_transport_stop().expect("stop commits");
         assert!(!test_app.pending_capture_active());
-        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
-        editor.runtime_mut().run_reactive_cycle();
-        assert_eq!(
-            read(&mut editor, "SEQ.song-pending"),
-            Value::Nil,
-            "Stop replaces the provisional items with the committed clips"
-        );
         assert!(
-            !sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true),
-            "and it stays cleared without republishing"
+            pending_surface(&test_app).is_none(),
+            "Stop replaces the provisional items with the committed clips"
         );
 
         // ── Cancel ────────────────────────────────────────────────────────
         test_app.set_arrangement_view_visible(true);
-        test_app.song_transport_play(true).expect("capture restarts");
+        test_app
+            .song_transport_play(true)
+            .expect("capture restarts");
         let anchor = anchor_record_clock(&test_app);
         assert!(test_app.take_record_note(0, press_at_beats(anchor, 2.0), 60.0, 2.0));
-        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
-        editor.runtime_mut().run_reactive_cycle();
-        assert_ne!(read(&mut editor, "SEQ.song-pending"), Value::Nil);
+        assert!(pending_surface(&test_app).is_some());
         test_app.song_capture_cancel().expect("cancel succeeds");
-        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
-        editor.runtime_mut().run_reactive_cycle();
-        assert_eq!(
-            read(&mut editor, "SEQ.song-pending"),
-            Value::Nil,
+        assert!(
+            pending_surface(&test_app).is_none(),
             "Cancel makes the provisional items vanish"
         );
 
@@ -27579,12 +27347,12 @@ use panel_kinds_seed::*;
         // A lost notice fails the stop-commit (spec 10.3): the take is
         // discarded, so the surface must clear on this path too.
         test_app.set_arrangement_view_visible(true);
-        test_app.song_transport_play(true).expect("capture restarts");
+        test_app
+            .song_transport_play(true)
+            .expect("capture restarts");
         let anchor = anchor_record_clock(&test_app);
         assert!(test_app.take_record_note(0, press_at_beats(anchor, 2.0), 60.0, 2.0));
-        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
-        editor.runtime_mut().run_reactive_cycle();
-        assert_ne!(read(&mut editor, "SEQ.song-pending"), Value::Nil);
+        assert!(pending_surface(&test_app).is_some());
         for _ in 0..300 {
             test_app.state.song_playback().push_notice(
                 sequencer::sequencer::SongPlaybackNotice::Ended {
@@ -27599,11 +27367,8 @@ use panel_kinds_seed::*;
             "the flooded notice channel must fail the commit, got {failure:?}"
         );
         assert!(!test_app.pending_capture_active());
-        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
-        editor.runtime_mut().run_reactive_cycle();
-        assert_eq!(
-            read(&mut editor, "SEQ.song-pending"),
-            Value::Nil,
+        assert!(
+            pending_surface(&test_app).is_none(),
             "a FAILED capture clears the surface too"
         );
     }
@@ -27616,16 +27381,6 @@ use panel_kinds_seed::*;
     /// content nothing is seeded until the performer launches something.
     #[test]
     fn metal_seq_song_pending_seeds_nothing_before_the_first_launch() {
-        let mut editor = full_grid_editor_for_scroll_tests();
-        let mut frame = SongFrameState::default();
-        let read = |editor: &mut eseqlisp::Editor, expr: &str| {
-            editor
-                .runtime_mut()
-                .eval_str(expr)
-                .expect("binding read evaluates")
-                .expect("binding read returns a value")
-        };
-
         // Into an empty arrangement: the SILENT start auto-latches the
         // selected scene (unified-transport spec 4.1), and that launch IS
         // captured — the performer hears the scene from beat zero, so the
@@ -27634,11 +27389,10 @@ use panel_kinds_seed::*;
         empty.arr_clear().expect("clear the song");
         empty.set_arrangement_view_visible(true);
         empty.song_transport_play(true).expect("capture starts");
-        assert!(sync_song_state(editor.runtime_mut(), &empty, &mut frame, true));
-        editor.runtime_mut().run_reactive_cycle();
+        let (content, _) = pending_surface(&empty).expect("capturing");
         assert_eq!(
-            read(&mut editor, "(len (get SEQ.song-pending :scene-events))"),
-            Value::Number(1.0),
+            content.scene_events.len(),
+            1,
             "the auto-latched scene is the audible-and-captured initial state"
         );
         empty.song_capture_cancel().expect("cancel succeeds");
@@ -27646,26 +27400,15 @@ use panel_kinds_seed::*;
         // On top of a committed song, same rule: the splice starts at the
         // first launch, so nothing is seeded at beat zero.
         let mut over_song = pending_capture_test_app();
-        let mut frame = SongFrameState::default();
         over_song.set_arrangement_view_visible(true);
         over_song.song_transport_play(true).expect("capture starts");
-        assert!(sync_song_state(
-            editor.runtime_mut(),
-            &over_song,
-            &mut frame,
-            true
-        ));
-        editor.runtime_mut().run_reactive_cycle();
-        assert_eq!(
-            read(&mut editor, "(len (get SEQ.song-pending :scene-events))"),
-            Value::Number(0.0),
+        let (content, _) = pending_surface(&over_song).expect("capturing");
+        assert!(
+            content.scene_events.is_empty(),
             "capture ON TOP of a song leaves the pre-existing arrangement to \
              draw itself until the performer launches something"
         );
-        assert_eq!(
-            read(&mut editor, "(len (get SEQ.song-pending :track-events))"),
-            Value::Number(0.0)
-        );
+        assert!(content.track_events.is_empty());
     }
 
     /// Capture round trip (spec 6 item 1): what the provisional item drew is
@@ -27674,338 +27417,42 @@ use panel_kinds_seed::*;
     /// the recording landed would be worse than no feedback.
     #[test]
     fn metal_seq_song_pending_span_matches_the_committed_clip_after_stop() {
-        let mut editor = full_grid_editor_for_scroll_tests();
         let mut test_app = pending_capture_test_app();
-        let mut frame = SongFrameState::default();
-        let read = |editor: &mut eseqlisp::Editor, expr: &str| {
-            editor
-                .runtime_mut()
-                .eval_str(expr)
-                .expect("binding read evaluates")
-                .expect("binding read returns a value")
-        };
-
         test_app.set_arrangement_view_visible(true);
         test_app.song_transport_play(true).expect("capture starts");
         let anchor = anchor_record_clock(&test_app);
         // Punch in at beat 4, last note at beat 6 running 4 steps (1 beat).
         assert!(test_app.take_record_note(0, press_at_beats(anchor, 4.0), 60.0, 4.0));
         assert!(test_app.take_record_note(0, press_at_beats(anchor, 6.0), 64.0, 4.0));
-        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
-        editor.runtime_mut().run_reactive_cycle();
-        let lane = "(nth (get SEQ.song-pending :lanes) 0)";
-        let provisional_start = read(&mut editor, &format!("(get {lane} :start-beat)"));
-        let provisional_end = read(&mut editor, &format!("(get {lane} :end-beat)"));
-        assert_eq!(provisional_start, Value::Number(4.0));
-        assert_eq!(
-            provisional_end,
-            Value::Number(7.0),
-            "punch-in 4 + 12 steps of 0.25 beats"
-        );
+        let (content, head) = pending_surface(&test_app).expect("capturing");
+        let lane = &content.lanes[0];
+        let (provisional_start, provisional_end) = (lane.punch_in_beat, lane.span().end_beat(head));
+        assert_eq!(provisional_start, 4.0);
+        assert_eq!(provisional_end, 7.0, "punch-in 4 + 12 steps of 0.25 beats");
 
         test_app.song_transport_stop().expect("stop commits");
-        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
-        editor.runtime_mut().run_reactive_cycle();
         // The take clip is spliced INTO the scene clip that covered the lane,
         // so the lane now holds [0,4), the take, and the remainder.
-        let takes = "(filter (lambda (clip) (not (= (get clip :take-id) nil))) \
-                      (nth SEQ.song-lanes 0))";
+        let takes: Vec<(f64, f64)> = test_app.state.with_committed_arrangement(|arrangement| {
+            arrangement.expect("a song").track_lanes[0]
+                .iter()
+                .filter(|clip| clip.take_id.is_some())
+                .map(|clip| (clip.start_beat, clip.end_beat))
+                .collect()
+        });
         assert_eq!(
-            read(&mut editor, &format!("(len {takes})")),
-            Value::Number(1.0),
-            "the capture committed exactly one take clip"
-        );
-        assert_eq!(
-            read(&mut editor, &format!("(get (nth {takes} 0) :start-beat)")),
-            provisional_start,
-            "the committed clip starts where the provisional item did"
-        );
-        assert_eq!(
-            read(&mut editor, &format!("(get (nth {takes} 0) :end-beat)")),
-            provisional_end,
-            "...and ends where it did"
+            takes,
+            vec![(provisional_start, provisional_end)],
+            "the capture committed exactly one take clip, where the provisional item was"
         );
     }
 
-    /// `SEQ.song-region` publish + diff
-    /// (docs/arrangement-region-editing-spec.md 4.1): the Rust-owned region
-    /// surfaces as `(track-a track-b start end)`, republishes only when it
-    /// actually moved, and goes back to nil on clear. Rust ownership is what
-    /// makes the highlight survive a view switch, so this seam — not a Lisp
-    /// defstate — is the source of truth.
     #[test]
-    fn metal_seq_song_region_publishes_and_diffs() {
-        let mut editor = full_grid_editor_for_scroll_tests();
-
-        let state = sequencer::sequencer::SequencerState::new(
-            1,
-            vec![sequencer::sequencer::default_empty_effect_chain()],
-        );
-        state.replace_pattern_repository(
-            vec![sequencer::sequencer::PatternSnapshot::new_default(1, &[])],
-            0,
-        );
-        let (keyboard_tx, _keyboard_rx) = std::sync::mpsc::channel();
-        let mut test_app = sequencer::app::App::new(
-            std::sync::Arc::new(state),
-            sequencer::audiograph::LiveGraphPtr(std::ptr::null_mut()),
-            44_100,
-            sequencer::app::AudioBuses {
-                bus_l_id: 0,
-                bus_r_id: 0,
-                default_bus_nodes: Vec::new(),
-                bus_effect_runtime: std::sync::Arc::new(std::sync::Mutex::new(std::sync::Arc::new(Vec::new()))),
-                reverb_bus_id: 0,
-                reverb_node_id: 0,
-            },
-            std::sync::Arc::new(sequencer::recorder::MasterRecorder::new(44_100, 2)),
-            keyboard_tx,
-        );
-        test_app.tracks = vec!["Track 1".to_string()];
-        test_app.track_registry =
-            sequencer::sequencer::TrackRegistry::for_legacy_track_count(1).unwrap();
-
-        let mut frame = SongFrameState::default();
-        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
-        editor.runtime_mut().run_reactive_cycle();
-        let read = |editor: &mut eseqlisp::Editor, expr: &str| {
-            editor
-                .runtime_mut()
-                .eval_str(expr)
-                .expect("binding read evaluates")
-                .expect("binding read returns a value")
-        };
-        assert_eq!(
-            read(&mut editor, "SEQ.song-region"),
-            Value::Nil,
-            "no region selected yet"
-        );
-
-        // Setting a region publishes the rectangle plus the scene-lane bit.
-        test_app.set_song_region(sequencer::app::song_region::SongRegionSelection::new(
-            1, 3, 8.0, 24.0,
-        ));
-        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
-        editor.runtime_mut().run_reactive_cycle();
-        let Value::List(region) = read(&mut editor, "SEQ.song-region") else {
-            panic!("song-region must be a list once a region is selected");
-        };
-        let region: Vec<Value> = region.iter().map(|cell| cell.borrow().clone()).collect();
-        assert_eq!(
-            region,
-            vec![
-                Value::Number(1.0),
-                Value::Number(3.0),
-                Value::Number(8.0),
-                Value::Number(24.0),
-                Value::Bool(false),
-            ]
-        );
-
-        // A scene-lane marquee over the same rectangle is a DIFFERENT region
-        // (lane spec 8: it carries the scene events too), so it republishes.
-        test_app.set_song_region(
-            sequencer::app::song_region::SongRegionSelection::new_in_lane(
-                1, 3, 8.0, 24.0, true,
-            ),
-        );
-        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
-        editor.runtime_mut().run_reactive_cycle();
-        let Value::List(region) = read(&mut editor, "SEQ.song-region") else {
-            panic!("song-region must still be a list");
-        };
-        assert_eq!(region[4].borrow().clone(), Value::Bool(true));
-        test_app.set_song_region(sequencer::app::song_region::SongRegionSelection::new(
-            1, 3, 8.0, 24.0,
-        ));
-        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
-        editor.runtime_mut().run_reactive_cycle();
-
-        // Same region again: nothing to republish.
-        assert!(
-            !sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true),
-            "an unchanged region publishes nothing"
-        );
-
-        // Moving one edge republishes.
-        test_app.set_song_region(sequencer::app::song_region::SongRegionSelection::new(
-            1, 3, 8.0, 32.0,
-        ));
-        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
-        editor.runtime_mut().run_reactive_cycle();
-        let Value::List(region) = read(&mut editor, "SEQ.song-region") else {
-            panic!("song-region must still be a list");
-        };
-        assert_eq!(region[3].borrow().clone(), Value::Number(32.0));
-
-        // Clearing goes back to nil, and stays quiet afterwards.
-        test_app.clear_song_region();
-        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
-        editor.runtime_mut().run_reactive_cycle();
-        assert_eq!(read(&mut editor, "SEQ.song-region"), Value::Nil);
-        assert!(
-            !sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true),
-            "clearing an already-clear region publishes nothing"
-        );
-    }
-
-    /// Lane-projection read surface for the arrangement timeline
-    /// (docs/arrangement-timeline-ui-spec.md; song-mode-spec 5.5): `song-lanes`
-    /// publishes the per-track clip spans derived from the committed song plus
-    /// the live scenes, while `scene-names` publishes scene structure (bank
-    /// structure is the host kinds' `bank`). They diff by value — an unchanged frame publishes
-    /// nothing, structural edits (including undo) republish scene metadata,
-    /// and a song edit republishes lanes.
-    #[test]
-    fn metal_seq_song_lanes_and_scene_metadata_publish_on_change() {
-        let mut editor = full_grid_editor_for_scroll_tests();
-
-        let state = sequencer::sequencer::SequencerState::new(
-            1,
-            vec![sequencer::sequencer::default_empty_effect_chain()],
-        );
-        state.replace_pattern_repository(
-            vec![
-                sequencer::sequencer::PatternSnapshot::new_default(1, &[]),
-                sequencer::sequencer::PatternSnapshot::new_default(1, &[]),
-                sequencer::sequencer::PatternSnapshot::new_default(1, &[]),
-            ],
-            0,
-        );
-        let (keyboard_tx, _keyboard_rx) = std::sync::mpsc::channel();
-        let mut test_app = sequencer::app::App::new(
-            std::sync::Arc::new(state),
-            sequencer::audiograph::LiveGraphPtr(std::ptr::null_mut()),
-            44_100,
-            sequencer::app::AudioBuses {
-                bus_l_id: 0,
-                bus_r_id: 0,
-                default_bus_nodes: Vec::new(),
-                bus_effect_runtime: std::sync::Arc::new(std::sync::Mutex::new(std::sync::Arc::new(Vec::new()))),
-                reverb_bus_id: 0,
-                reverb_node_id: 0,
-            },
-            std::sync::Arc::new(sequencer::recorder::MasterRecorder::new(44_100, 2)),
-            keyboard_tx,
-        );
-        test_app.tracks = vec!["Track 1".to_string()];
-        test_app.track_registry =
-            sequencer::sequencer::TrackRegistry::for_legacy_track_count(1).unwrap();
-        let row = |start_beat: f64, scene: usize| sequencer::app::song_edit::SongRowSpec {
-            start_beat,
-            scene,
-            overrides: Vec::new(),
-        };
-        test_app
-            .arr_replace_rows(vec![row(0.0, 0), row(4.0, 1), row(8.0, 2)], 16.0, false)
-            .expect("song committed");
-
-        let mut frame = SongFrameState::default();
-        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
-        editor.runtime_mut().run_reactive_cycle();
-        let read = |editor: &mut eseqlisp::Editor, expr: &str| {
-            editor
-                .runtime_mut()
-                .eval_str(expr)
-                .expect("binding read evaluates")
-                .expect("binding read returns a value")
-        };
-
-        // Lane spec 12: `song-lanes` carries the STORED clips. This song is
-        // three scene changes with no overrides, and a scene event STAMPS its
-        // cells (spec 6.2) — so the lane holds one clip per scene span.
-        assert_eq!(read(&mut editor, "(len SEQ.song-lanes)"), Value::Number(1.0));
-        assert_eq!(
-            read(&mut editor, "(len (nth SEQ.song-lanes 0))"),
-            Value::Number(3.0),
-            "each scene event stamped its cell as a real clip"
-        );
-        assert_eq!(
-            read(&mut editor, "(get (nth (nth SEQ.song-lanes 0) 1) :start-beat)"),
-            Value::Number(4.0)
-        );
-        assert_eq!(
-            read(&mut editor, "(get (nth (nth SEQ.song-lanes 0) 2) :pattern-id)"),
-            Value::Number(3.0),
-            "rebuilt-on-load scene cells resolve scene j to PatternId(j + 1)"
-        );
-        // One scene span per scene EVENT, ending at the next.
-        assert_eq!(read(&mut editor, "(len SEQ.scene-spans)"), Value::Number(3.0));
-        assert_eq!(
-            read(&mut editor, "(get (nth SEQ.scene-spans 1) :start-beat)"),
-            Value::Number(4.0)
-        );
-        assert_eq!(
-            read(&mut editor, "(get (nth SEQ.scene-spans 1) :end-beat)"),
-            Value::Number(8.0)
-        );
-        assert_eq!(
-            read(&mut editor, "(len SEQ.scene-names)"),
-            Value::Number(3.0)
-        );
-        // The lane-event read surface publishes one entry per referenced
-        // pool pattern (three scenes -> three patterns on the one track).
-        assert_eq!(
-            read(&mut editor, "(len SEQ.song-lane-events)"),
-            Value::Number(1.0)
-        );
-        assert_eq!(
-            read(&mut editor, "(len (nth SEQ.song-lane-events 0))"),
-            Value::Number(3.0)
-        );
-        // Default 16-step sixteenth-note patterns are one 4-beat cycle.
-        assert_eq!(
-            read(
-                &mut editor,
-                "(get (nth (nth SEQ.song-lane-events 0) 0) :length-beats)"
-            ),
-            Value::Number(4.0)
-        );
-
-        // Value diffing: an unchanged frame publishes nothing.
-        assert!(
-            !sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true),
-            "an unchanged frame must not republish lanes or scene metadata"
-        );
-
+    fn scene_bank_auto_labels_continue_after_z() {
         // Spreadsheet-style auto labels continue after Z.
         assert_eq!(scene_bank_auto_label(25), "Z");
         assert_eq!(scene_bank_auto_label(26), "AA");
         assert_eq!(scene_bank_auto_label(27), "AB");
-
-        // Bank structure is the host kinds' (`bank`, host_kinds tests::scenes).
-
-        // A scenes-side change (no song revision bump) republishes names.
-        assert!(test_app.state.rename_scene(1, "Drop".to_string()));
-        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
-        editor.runtime_mut().run_reactive_cycle();
-        assert_eq!(
-            read(&mut editor, "(nth SEQ.scene-names 1)"),
-            Value::String("Drop".to_string())
-        );
-
-        // A song edit republishes the derived surfaces.
-        test_app.arr_set_end(24.0).expect("end moved");
-        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
-        editor.runtime_mut().run_reactive_cycle();
-        assert_eq!(
-            read(&mut editor, "(get (nth SEQ.scene-spans 2) :end-beat)"),
-            Value::Number(24.0)
-        );
-
-        // The latched primitive-rejection error publishes (the arrangement
-        // banner reads it) and clears back to nil.
-        test_app.song_edit_error = Some("song editing is unavailable".to_string());
-        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
-        editor.runtime_mut().run_reactive_cycle();
-        assert_eq!(
-            read(&mut editor, "SEQ.song-edit-error"),
-            Value::String("song editing is unavailable".to_string())
-        );
-        test_app.song_edit_error = None;
-        assert!(sync_song_state(editor.runtime_mut(), &test_app, &mut frame, true));
-        editor.runtime_mut().run_reactive_cycle();
-        assert_eq!(read(&mut editor, "SEQ.song-edit-error"), Value::Nil);
     }
 
     /// Scene-lane gesture lifecycle (docs/arrangement-timeline-ui-spec.md
@@ -28026,15 +27473,7 @@ use panel_kinds_seed::*;
                 Ok(Value::String("recorded".to_string()))
             });
 
-        let rt = editor.runtime_mut();
-        rt.set_reactive("SEQ", "song-exists", Value::Bool(true));
-        rt.set_reactive("SEQ", "song-end-beat", Value::Number(16.0));
-        rt.set_reactive(
-            "SEQ",
-            "scene-spans",
-            test_list(vec![scene_span(0.0, 8.0, 0.0), scene_span(8.0, 16.0, 1.0)]),
-        );
-        rt.run_reactive_cycle();
+        seed_kind_song(&mut editor, 16.0, 2, &[(0.0, 8.0, 0), (8.0, 16.0, 1)]);
 
         let eval = |editor: &mut eseqlisp::Editor, expr: &str| {
             editor
@@ -28068,7 +27507,7 @@ use panel_kinds_seed::*;
             &mut editor,
             "(eseq.arrangement/scene-action (dict :type :finish-move-items :anchor-id 8 :ids (list 8)))",
         );
-        assert_eq!(read(&mut editor, "eseq.arrangement/ghost"), Value::Nil);
+        assert_eq!(read(&mut editor, "(let ((d eseq.arrangement/arr-drag)) d.scene)"), Value::Nil);
         {
             let recorded = recorded.lock().unwrap();
             assert_eq!(recorded.len(), 1, "one commit per completed gesture");
@@ -28172,15 +27611,11 @@ use panel_kinds_seed::*;
         // ── Track-clip editing over the STORED clips (lane spec 12) ───────
         // Lane 0: clip 0 spans [0,8) on pattern 1 and clip 2 spans [8,12) on
         // pattern 2; [12,16) has no clip and is simply silent.
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "song-lanes",
-            test_list(vec![test_list(vec![
-                lane_clip(0.0, 0.0, 8.0, Value::Number(1.0)),
-                lane_clip(2.0, 8.0, 12.0, Value::Number(2.0)),
-            ])]),
+        seed_kind_clips(
+            &mut editor,
+            0,
+            &[KindClip::pattern(0, 0.0, 8.0, 1), KindClip::pattern(2, 8.0, 12.0, 2)],
         );
-        editor.runtime_mut().run_reactive_cycle();
         assert_eq!(
             read(&mut editor, "(len (eseq.arrangement/track-clips 0))"),
             Value::Number(2.0),
@@ -28210,7 +27645,7 @@ use panel_kinds_seed::*;
         assert_eq!(
             read(
                 &mut editor,
-                "(reactive-get \"SEQV\" (eseq.arrangement/channel \"ghost-kind\" 0))"
+                "(get (eseq.arrangement/lane-ghost 0) :kind)"
             ),
             Value::Number(3.0),
             "an end-edge drag publishes the resize-end ghost"
@@ -28218,24 +27653,24 @@ use panel_kinds_seed::*;
         assert_eq!(
             read(
                 &mut editor,
-                "(reactive-get \"SEQV\" (eseq.arrangement/channel \"ghost-time\" 0))"
+                "(get (eseq.arrangement/lane-ghost 0) :time)"
             ),
             Value::Number(6.0),
             "the ghost channel previews the clip's new end"
         );
         assert_eq!(
-            read(&mut editor, "(get eseq.arrangement/track-drag :time)"),
+            read(&mut editor, "(let ((d eseq.arrangement/arr-drag)) (get d.track :time))"),
             Value::Number(6.0)
         );
         eval(
             &mut editor,
             "(eseq.arrangement/track-action 0 (dict :type :finish-resize-items :id 0 :ids (list 0)))",
         );
-        assert_eq!(read(&mut editor, "eseq.arrangement/track-drag"), Value::Nil);
+        assert_eq!(read(&mut editor, "(let ((d eseq.arrangement/arr-drag)) d.track)"), Value::Nil);
         assert_eq!(
             read(
                 &mut editor,
-                "(reactive-get \"SEQV\" (eseq.arrangement/channel \"ghost-kind\" 0))"
+                "(get (eseq.arrangement/lane-ghost 0) :kind)"
             ),
             Value::Number(0.0),
             "the release clears the lane ghost channel"
@@ -28281,13 +27716,13 @@ use panel_kinds_seed::*;
              (eseq.arrangement/track-action 0 (dict :type :select :ids (list 0) :time 1)))",
         );
         assert_eq!(
-            read(&mut editor, "eseq.arrangement/selection"),
+            read(&mut editor, "(let ((s eseq.arrangement/arr-select)) s.scenes)"),
             Value::List(vec![]),
             "selecting a track clip clears the scene selection"
         );
-        assert_eq!(read(&mut editor, "eseq.arrangement/selected-track"), Value::Number(0.0));
+        assert_eq!(read(&mut editor, "(let ((s eseq.arrangement/arr-select)) s.lane)"), Value::Number(0.0));
         assert_eq!(
-            read(&mut editor, "eseq.arrangement/cursor-time"),
+            read(&mut editor, "(let ((v eseq.arrangement/arr-view)) v.cursor-time)"),
             Value::Number(0.0),
             "clicking inside a clip parks transport start at the clip beginning"
         );
@@ -28334,8 +27769,8 @@ use panel_kinds_seed::*;
             &mut editor,
             "(eseq.arrangement/track-action 0 (dict :type :clear-selection :time 5))",
         );
-        assert_eq!(read(&mut editor, "eseq.arrangement/cursor-time"), Value::Number(5.0));
-        assert_eq!(read(&mut editor, "eseq.arrangement/cursor-track"), Value::Number(0.0));
+        assert_eq!(read(&mut editor, "(let ((v eseq.arrangement/arr-view)) v.cursor-time)"), Value::Number(5.0));
+        assert_eq!(read(&mut editor, "(let ((v eseq.arrangement/arr-view)) v.cursor-track)"), Value::Number(0.0));
         assert_eq!(
             read(&mut editor, "(eseq.arrangement/lane-cursor-time 0)"),
             Value::Number(5.0)
@@ -28345,7 +27780,7 @@ use panel_kinds_seed::*;
             &mut editor,
             "(eseq.arrangement/scene-action (dict :type :clear-selection :time 7))",
         );
-        assert_eq!(read(&mut editor, "eseq.arrangement/cursor-track"), Value::Number(-1.0));
+        assert_eq!(read(&mut editor, "(let ((v eseq.arrangement/arr-view)) v.cursor-track)"), Value::Number(-1.0));
         assert_eq!(
             read(&mut editor, "(eseq.arrangement/lane-cursor-time -1)"),
             Value::Number(7.0)
@@ -28356,7 +27791,7 @@ use panel_kinds_seed::*;
         // view's midpoint: view 0..64 -> beat 32.
         eval(
             &mut editor,
-            "(do (set! eseq.arrangement/view-start 0) (set! eseq.arrangement/view-duration 64) \
+            "(do (let ((v eseq.arrangement/arr-view)) (set! v.start 0)) (let ((v eseq.arrangement/arr-view)) (set! v.duration 64)) \
              (eseq.arrangement/drop-scene (dict :sx 0.02 :payload (dict :scene 1))))",
         );
         {
@@ -28388,7 +27823,7 @@ use panel_kinds_seed::*;
         assert_eq!(
             read(
                 &mut editor,
-                "(reactive-get \"SEQV\" (eseq.arrangement/channel \"ghost-kind\" 0))"
+                "(get (eseq.arrangement/lane-ghost 0) :kind)"
             ),
             Value::Number(2.0),
             "a start-edge drag publishes the resize-start ghost"
@@ -28396,7 +27831,7 @@ use panel_kinds_seed::*;
         assert_eq!(
             read(
                 &mut editor,
-                "(reactive-get \"SEQV\" (eseq.arrangement/channel \"ghost-time\" 0))"
+                "(get (eseq.arrangement/lane-ghost 0) :time)"
             ),
             Value::Number(10.0),
             "the ghost channel previews the clip's new start"
@@ -28405,7 +27840,7 @@ use panel_kinds_seed::*;
             &mut editor,
             "(eseq.arrangement/track-action 0 (dict :type :finish-resize-items :id 2 :ids (list 2)))",
         );
-        assert_eq!(read(&mut editor, "eseq.arrangement/track-drag"), Value::Nil);
+        assert_eq!(read(&mut editor, "(let ((d eseq.arrangement/arr-drag)) d.track)"), Value::Nil);
         {
             let recorded = recorded.lock().unwrap();
             assert_eq!(recorded.len(), 10);
@@ -28451,7 +27886,7 @@ use panel_kinds_seed::*;
             &mut editor,
             "(eseq.arrangement/scene-action (dict :type :finish-resize-items :id 8 :ids (list 8)))",
         );
-        assert_eq!(read(&mut editor, "eseq.arrangement/ghost"), Value::Nil);
+        assert_eq!(read(&mut editor, "(let ((d eseq.arrangement/arr-drag)) d.scene)"), Value::Nil);
         {
             let recorded = recorded.lock().unwrap();
             assert_eq!(recorded.len(), 12);
@@ -28478,7 +27913,7 @@ use panel_kinds_seed::*;
         assert_eq!(
             read(
                 &mut editor,
-                "(reactive-get \"SEQV\" (eseq.arrangement/channel \"ghost-kind\" 0))"
+                "(get (eseq.arrangement/lane-ghost 0) :kind)"
             ),
             Value::Number(1.0),
             "a title-bar drag publishes the move ghost"
@@ -28486,7 +27921,7 @@ use panel_kinds_seed::*;
         assert_eq!(
             read(
                 &mut editor,
-                "(reactive-get \"SEQV\" (eseq.arrangement/channel \"ghost-time\" 0))"
+                "(get (eseq.arrangement/lane-ghost 0) :time)"
             ),
             Value::Number(20.0),
             "the ghost channel previews the clip's new start"
@@ -28495,7 +27930,7 @@ use panel_kinds_seed::*;
             &mut editor,
             "(eseq.arrangement/track-action 0 (dict :type :finish-move-items :ids (list 2)))",
         );
-        assert_eq!(read(&mut editor, "eseq.arrangement/track-drag"), Value::Nil);
+        assert_eq!(read(&mut editor, "(let ((d eseq.arrangement/arr-drag)) d.track)"), Value::Nil);
         {
             let recorded = recorded.lock().unwrap();
             assert_eq!(recorded.len(), 13);
@@ -28516,7 +27951,7 @@ use panel_kinds_seed::*;
             "(do (eseq.arrangement/track-action 0 (dict :type :move-items-absolute :anchor-id 2 :ids (list 2) :start 20 :lane 0)) \
              (eseq.arrangement/track-action 1 (dict :type :finish-move-items :ids (list 2))))",
         );
-        assert_eq!(read(&mut editor, "eseq.arrangement/track-drag"), Value::Nil);
+        assert_eq!(read(&mut editor, "(let ((d eseq.arrangement/arr-drag)) d.track)"), Value::Nil);
         assert_eq!(recorded.lock().unwrap().len(), 13);
 
         // A drag on a clip inside a region that reaches BEYOND it moves the
@@ -28524,18 +27959,7 @@ use panel_kinds_seed::*;
         // by the drag delta, every covered clip previews the slide, and the
         // release carries only that delta. (A region equal to the dragged
         // clip's own span is just the clip — that is the branch above.)
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "song-region",
-            test_list(vec![
-                Value::Number(0.0),
-                Value::Number(0.0),
-                Value::Number(4.0),
-                Value::Number(16.0),
-                Value::Bool(false),
-            ]),
-        );
-        editor.runtime_mut().run_reactive_cycle();
+        set_kind_region(&mut editor, Some((0, 0, 4.0, 16.0, false)));
         eval(
             &mut editor,
             "(eseq.arrangement/track-action 0 (dict :type :move-items-absolute :anchor-id 2 :ids (list 2) :start 12 :lane 0))",
@@ -28545,12 +27969,12 @@ use panel_kinds_seed::*;
             Value::Bool(true)
         );
         assert_eq!(
-            read(&mut editor, "(get eseq.arrangement/region-ghost :start)"),
+            read(&mut editor, "(let ((d eseq.arrangement/arr-drag)) (get d.region :start))"),
             Value::Number(8.0),
             "the region ghost previews the shifted rectangle"
         );
         assert_eq!(
-            read(&mut editor, "(get eseq.arrangement/region-ghost :end)"),
+            read(&mut editor, "(let ((d eseq.arrangement/arr-drag)) (get d.region :end))"),
             Value::Number(20.0)
         );
         // ...and the covered lanes carry the region-move channel (kind 5)
@@ -28559,7 +27983,7 @@ use panel_kinds_seed::*;
         assert_eq!(
             read(
                 &mut editor,
-                "(reactive-get \"SEQV\" (eseq.arrangement/channel \"ghost-kind\" 0))"
+                "(get (eseq.arrangement/lane-ghost 0) :kind)"
             ),
             Value::Number(5.0),
             "a covered lane previews the slide through its channel"
@@ -28567,7 +27991,7 @@ use panel_kinds_seed::*;
         assert_eq!(
             read(
                 &mut editor,
-                "(reactive-get \"SEQV\" (eseq.arrangement/channel \"ghost-time\" 0))"
+                "(get (eseq.arrangement/lane-ghost 0) :time)"
             ),
             Value::Number(4.0)
         );
@@ -28583,8 +28007,8 @@ use panel_kinds_seed::*;
             &mut editor,
             "(eseq.arrangement/track-action 0 (dict :type :finish-move-items :ids (list 2)))",
         );
-        assert_eq!(read(&mut editor, "eseq.arrangement/track-drag"), Value::Nil);
-        assert_eq!(read(&mut editor, "eseq.arrangement/region-ghost"), Value::Nil);
+        assert_eq!(read(&mut editor, "(let ((d eseq.arrangement/arr-drag)) d.track)"), Value::Nil);
+        assert_eq!(read(&mut editor, "(let ((d eseq.arrangement/arr-drag)) d.region)"), Value::Nil);
         {
             let recorded = recorded.lock().unwrap();
             assert_eq!(recorded.len(), 14);
@@ -28611,10 +28035,7 @@ use panel_kinds_seed::*;
                 "the rectangle starts at beat 4, so it can slide 4 beats at most"
             );
         }
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "song-region", Value::Nil);
-        editor.runtime_mut().run_reactive_cycle();
+        set_kind_region(&mut editor, None);
     }
 
     /// The content-length handle's floor must stay strictly inside what
@@ -28624,12 +28045,8 @@ use panel_kinds_seed::*;
     #[test]
     fn metal_seq_arrangement_content_length_min_clears_both_model_boundaries() {
         let mut editor = full_grid_editor_for_scroll_tests();
-        let rt = editor.runtime_mut();
-        rt.set_reactive("SEQ", "song-exists", Value::Bool(true));
-        rt.set_reactive("SEQ", "song-end-beat", Value::Number(64.0));
-        rt.set_reactive("SEQ", "scene-spans", test_list(vec![]));
-        rt.set_reactive("SEQ", "song-lanes", test_list(vec![]));
-        rt.run_reactive_cycle();
+        seed_kind_test_tracks(&mut editor, 2, |track| format!("track-{track}"));
+        seed_kind_song(&mut editor, 64.0, 2, &[]);
 
         let read = |editor: &mut eseqlisp::Editor, expr: &str| -> Value {
             editor
@@ -28647,12 +28064,7 @@ use panel_kinds_seed::*;
 
         // A scene change at 32 makes 32 itself illegal, so the handle floor
         // has to sit past it.
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "scene-spans",
-            test_list(vec![scene_span(0.0, 32.0, 0.0), scene_span(32.0, 64.0, 1.0)]),
-        );
-        editor.runtime_mut().run_reactive_cycle();
+        seed_kind_spans(&mut editor, &[(0.0, 32.0, 0), (32.0, 64.0, 1)]);
         assert_eq!(
             read(&mut editor, "(eseq.arrangement/content-length-min)"),
             Value::Number(33.0),
@@ -28661,15 +28073,8 @@ use panel_kinds_seed::*;
 
         // A clip running to 40 outranks the scene boundary: shortening below
         // its end is refused too.
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "song-lanes",
-            test_list(vec![
-                test_list(vec![lane_clip(0.0, 0.0, 12.0, Value::Number(1.0))]),
-                test_list(vec![lane_clip(1.0, 16.0, 40.0, Value::Number(1.0))]),
-            ]),
-        );
-        editor.runtime_mut().run_reactive_cycle();
+        seed_kind_clips(&mut editor, 0, &[KindClip::pattern(0, 0.0, 12.0, 1)]);
+        seed_kind_clips(&mut editor, 1, &[KindClip::pattern(1, 16.0, 40.0, 2)]);
         assert_eq!(
             read(&mut editor, "(eseq.arrangement/content-length-min)"),
             Value::Number(40.0),
@@ -28934,29 +28339,12 @@ use panel_kinds_seed::*;
                 Ok(Value::String("recorded".to_string()))
             });
 
-        let rt = editor.runtime_mut();
-        rt.set_reactive("SEQ", "song-exists", Value::Bool(true));
-        rt.set_reactive("SEQ", "song-end-beat", Value::Number(16.0));
-        rt.set_reactive(
-            "SEQ",
-            "scene-spans",
-            test_list(vec![scene_span(0.0, 16.0, 0.0)]),
-        );
-        rt.set_reactive(
-            "SEQ",
-            "song-lanes",
-            test_list(vec![test_list(vec![lane_clip(
-                0.0,
-                0.0,
-                16.0,
-                Value::Number(1.0),
-            )])]),
-        );
-        rt.run_reactive_cycle();
+        seed_kind_song(&mut editor, 16.0, 1, &[(0.0, 16.0, 0)]);
+        seed_kind_clips(&mut editor, 0, &[KindClip::pattern(0, 0.0, 16.0, 1)]);
         editor
             .runtime_mut()
-            .eval_str("(do (eseq.seq-panels/seq-open-arrangement) (set! eseq.arrangement/view-start 0) \
-                       (set! eseq.arrangement/view-duration 64))")
+            .eval_str("(do (eseq.seq-panels/seq-open-arrangement) (let ((v eseq.arrangement/arr-view)) (set! v.start 0)) \
+                       (let ((v eseq.arrangement/arr-view)) (set! v.duration 64)))")
             .expect("open arrangement view");
         editor.refresh_runtime_side_effects();
 
@@ -29068,30 +28456,14 @@ use panel_kinds_seed::*;
             "track-ids",
             test_number_list(&(0..track_count).map(|i| i as f64).collect::<Vec<_>>()),
         );
-        rt.set_reactive("SEQ", "song-exists", Value::Bool(true));
-        rt.set_reactive("SEQ", "song-end-beat", Value::Number(16.0));
-        rt.set_reactive(
-            "SEQ",
-            "scene-spans",
-            test_list(vec![scene_span(0.0, 16.0, 0.0)]),
-        );
-        let lanes: Vec<Value> = (0..track_count)
-            .map(|track| {
-                if track == 5 {
-                    test_list(vec![lane_clip(0.0, 0.0, 16.0, Value::Number(1.0))])
-                } else {
-                    test_list(vec![lane_clip(0.0, 0.0, 16.0, Value::Nil)])
-                }
-            })
-            .collect();
-        rt.set_reactive("SEQ", "song-lanes", Value::List(
-            lanes.into_iter().map(|lane| Rc::new(RefCell::new(lane))).collect(),
-        ));
         rt.run_reactive_cycle();
+        seed_kind_test_tracks(&mut editor, track_count, |track| format!("track-{track}"));
+        seed_kind_song(&mut editor, 16.0, 1, &[(0.0, 16.0, 0)]);
+        seed_kind_clips(&mut editor, 5, &[KindClip::pattern(0, 0.0, 16.0, 1)]);
         editor
             .runtime_mut()
-            .eval_str("(do (eseq.seq-panels/seq-open-arrangement) (set! eseq.arrangement/view-start 0) \
-                       (set! eseq.arrangement/view-duration 64))")
+            .eval_str("(do (eseq.seq-panels/seq-open-arrangement) (let ((v eseq.arrangement/arr-view)) (set! v.start 0)) \
+                       (let ((v eseq.arrangement/arr-view)) (set! v.duration 64)))")
             .expect("open arrangement view");
         editor.refresh_runtime_side_effects();
         // A short viewport so the eight lanes overflow the scroll container.
@@ -29211,7 +28583,7 @@ use panel_kinds_seed::*;
         // song clamps max-view-start to 0 and no pan could be observed.
         editor
             .runtime_mut()
-            .eval_str("(set! eseq.arrangement/view-duration 8)")
+            .eval_str("(let ((v eseq.arrangement/arr-view)) (set! v.duration 8))")
             .expect("zoom in for the pan check");
         editor.refresh_runtime_side_effects();
         let _ = editor.widget_layout();
@@ -29219,13 +28591,13 @@ use panel_kinds_seed::*;
         editor.refresh_runtime_side_effects();
         let panned_neg = editor
             .runtime_mut()
-            .eval_str("eseq.arrangement/view-start")
+            .eval_str("(let ((v eseq.arrangement/arr-view)) v.start)")
             .unwrap();
         assert!(editor.handle_touchpad_scroll(0, 0, click_col, click_row, 40.0, 0.5));
         editor.refresh_runtime_side_effects();
         let panned_pos = editor
             .runtime_mut()
-            .eval_str("eseq.arrangement/view-start")
+            .eval_str("(let ((v eseq.arrangement/arr-view)) v.start)")
             .unwrap();
         assert!(
             panned_neg != Some(Value::Number(0.0)) || panned_pos != Some(Value::Number(0.0)),
@@ -29235,7 +28607,7 @@ use panel_kinds_seed::*;
         editor
             .runtime_mut()
             .eval_str(
-                "(do (set! eseq.arrangement/view-duration 64) (eseq.arrangement/set-view-start 0 64))",
+                "(do (let ((v eseq.arrangement/arr-view)) (set! v.duration 64)) (eseq.arrangement/set-view-start 0 64))",
             )
             .expect("restore the view for the resize check");
         editor.refresh_runtime_side_effects();
@@ -29314,49 +28686,32 @@ use panel_kinds_seed::*;
     fn metal_seq_arrangement_dots_flatten_normalized_and_capped() {
         let mut editor = full_grid_editor_for_scroll_tests();
 
-        let sparse = LanePatternEvents {
-            pattern_id: 1,
-            take_id: None,
-            num_steps: 16,
-            // 16 sixteenth steps = one 4-beat cycle.
-            length_beats: 4.0,
-            // Durations (region spec 3.2): one step, two steps, and a
-            // note running well past the pattern's end.
-            events: vec![
-                (0.0, 0.0, 1.0, 1.0),
-                (4.0, 12.0, 1.0, 2.0),
-                (8.0, -12.0, 1.0, 20.0),
-            ],
-        };
-        let dense = LanePatternEvents {
-            pattern_id: 2,
-            take_id: None,
-            num_steps: 64,
-            length_beats: 16.0,
-            events: (0..600)
-                .map(|index| (index as f64 * 0.1, 0.0, 1.0, 1.0))
-                .collect(),
-        };
-        let rt = editor.runtime_mut();
-        rt.set_reactive(
-            "SEQ",
-            "song-lanes",
-            test_list(vec![test_list(vec![map_value([
-                ("clip-id", Value::Number(0.0)),
-                ("start-beat", Value::Number(0.0)),
-                ("end-beat", Value::Number(16.0)),
-                ("pattern-id", Value::Number(1.0)),
-                ("take-id", Value::Nil),
+        seed_kind_test_tracks(&mut editor, 2, |track| format!("track-{track}"));
+        // Durations (region spec 3.2): one step, two steps, and a note
+        // running well past the pattern's end; 16 sixteenth steps = one
+        // 4-beat cycle.
+        let sparse = [
+            [0.0, 0.0, 1.0, 1.0],
+            [4.0, 12.0, 1.0, 2.0],
+            [8.0, -12.0, 1.0, 20.0],
+        ];
+        let dense: Vec<[f64; 4]> = (0..600)
+            .map(|index| [index as f64 * 0.1, 0.0, 1.0, 1.0])
+            .collect();
+        seed_kind_clips(
+            &mut editor,
+            0,
+            &[
                 // Halfway through the pattern at the clip's left edge.
-                ("offset-steps", Value::Number(8.0)),
-            ])])]),
+                KindClip::pattern(0, 0.0, 16.0, 1).source(16.0, 4.0, &sparse).offset(8.0),
+                KindClip::pattern(1, 16.0, 18.0, 1).source(16.0, 4.0, &sparse),
+            ],
         );
-        rt.set_reactive(
-            "SEQ",
-            "song-lane-events",
-            build_song_lane_events_value(&[vec![sparse, dense]]),
+        seed_kind_clips(
+            &mut editor,
+            1,
+            &[KindClip::pattern(0, 0.0, 16.0, 2).source(64.0, 16.0, &dense)],
         );
-        rt.run_reactive_cycle();
 
         let read = |editor: &mut eseqlisp::Editor, expr: &str| {
             editor
@@ -29394,9 +28749,7 @@ use panel_kinds_seed::*;
         assert_eq!(
             read(
                 &mut editor,
-                "(eseq.arrangement/clip-cycle \
-                   (eseq.arrangement/lane-pattern-events 0 1) \
-                   (dict :start-beat 0 :end-beat 2))"
+                "(eseq.arrangement/clip-cycle (nth (eseq.arrangement/track-clips 0) 1))"
             ),
             Value::Number(2.0),
             "a clip shorter than its pattern exposes a partial source cycle"
@@ -29449,7 +28802,8 @@ use panel_kinds_seed::*;
         // 600 events collapse into <= 256 time buckets.
         let Value::Number(capped) = read(
             &mut editor,
-            "(len (eseq.arrangement/pattern-dots (eseq.arrangement/lane-pattern-events 0 2)))",
+            "(let ((c (first (eseq.arrangement/track-clips 1))))
+               (len (eseq.arrangement/pattern-dots c.events c.num-steps)))",
         ) else {
             panic!("dot count must be a number");
         };
@@ -29466,47 +28820,27 @@ use panel_kinds_seed::*;
     #[test]
     fn metal_seq_arrangement_take_clips_clamp_and_window_dots() {
         let mut editor = full_grid_editor_for_scroll_tests();
-        let take_clip = |clip_id: f64, start: f64, end: f64, offset: f64| {
-            map_value(vec![
-                ("clip-id", Value::Number(clip_id)),
-                ("start-beat", Value::Number(start)),
-                ("end-beat", Value::Number(end)),
-                ("pattern-id", Value::Nil),
-                ("take-id", Value::Number(7.0)),
-                ("offset-steps", Value::Number(offset)),
-            ])
-        };
         // 32-step take over 8 beats (0.25 beats/step); events at steps
         // 0 / 16 / 31.
-        let take_entry = LanePatternEvents {
-            pattern_id: 0,
-            take_id: Some(7),
-            num_steps: 32,
-            length_beats: 8.0,
-            events: vec![
-                (0.0, 0.0, 1.0, 1.0),
-                (16.0, 12.0, 1.0, 1.0),
-                (31.0, -12.0, 1.0, 1.0),
-            ],
+        let events = [
+            [0.0, 0.0, 1.0, 1.0],
+            [16.0, 12.0, 1.0, 1.0],
+            [31.0, -12.0, 1.0, 1.0],
+        ];
+        let take_clip = |cid: u64, start: f64, end: f64, offset: f64| {
+            KindClip::take(cid, start, end, 7).source(32.0, 8.0, &events).offset(offset)
         };
-        let rt = editor.runtime_mut();
-        rt.set_reactive(
-            "SEQ",
-            "song-lanes",
-            test_list(vec![test_list(vec![
+        seed_kind_clips(
+            &mut editor,
+            0,
+            &[
                 // One stored take clip [0,10) anchored at step 0. The stored
                 // span reaches 10 but the take itself ends at beat 8.
-                take_clip(0.0, 0.0, 10.0, 0.0),
+                take_clip(0, 0.0, 10.0, 0.0),
                 // A re-anchored clip: [12,16) playing from step 16.
-                take_clip(2.0, 12.0, 16.0, 16.0),
-            ])]),
+                take_clip(2, 12.0, 16.0, 16.0),
+            ],
         );
-        rt.set_reactive(
-            "SEQ",
-            "song-lane-events",
-            build_song_lane_events_value(&[vec![take_entry]]),
-        );
-        rt.run_reactive_cycle();
 
         let read = |editor: &mut eseqlisp::Editor, expr: &str| {
             editor
@@ -29566,7 +28900,7 @@ use panel_kinds_seed::*;
 
     /// Provisional capture content
     /// (docs/realtime-arrangement-feedback-spec.md 3.4): while a capture
-    /// runs, `SEQ.song-pending` composes extra items into each lane AFTER the
+    /// runs, `song.pending-*` composes extra items into each lane AFTER the
     /// committed clips, drawn through the committed clips' own dot pipeline.
     /// They are inert: no id, no label, absent from `arrangement-track-clips`
     /// (the gesture source of truth), and a `:select` on one selects nothing.
@@ -29584,92 +28918,65 @@ use panel_kinds_seed::*;
 
         // One committed clip on track 0 over [0,4) — the thing that IS
         // addressable, so the inertness assertions below are not vacuous.
-        let rt = editor.runtime_mut();
-        rt.set_reactive("SEQ", "song-exists", Value::Bool(true));
-        rt.set_reactive("SEQ", "song-end-beat", Value::Number(16.0));
-        rt.set_reactive(
-            "SEQ",
-            "scene-spans",
-            test_list(vec![scene_span(0.0, 16.0, 0.0)]),
-        );
-        rt.set_reactive(
-            "SEQ",
-            "song-lanes",
-            test_list(vec![test_list(vec![lane_clip(
-                0.0,
-                0.0,
-                4.0,
-                Value::Number(1.0),
-            )])]),
-        );
-        rt.set_reactive(
-            "SEQ",
-            "song-lane-events",
-            build_song_lane_events_value(&[vec![LanePatternEvents {
-                pattern_id: 1,
-                take_id: None,
-                num_steps: 16,
-                length_beats: 4.0,
-                events: vec![(0.0, 0.0, 1.0, 1.0)],
-            }]]),
+        seed_kind_song(&mut editor, 16.0, 2, &[(0.0, 16.0, 0)]);
+        seed_kind_clips(
+            &mut editor,
+            0,
+            &[KindClip::pattern(0, 0.0, 4.0, 1).source(16.0, 4.0, &[[0.0, 0.0, 1.0, 1.0]])],
         );
         // A capture in flight: track 0 punched in at beat 4 and the record
         // head has reached beat 10; two launches captured, at 0 and 8.
         // The recorded content (12 steps of 0.25 beats = 3 beats) is SHORTER
         // than the drawn span, which is what pins the dots to their real
         // positions instead of stretching them across the growing rect.
-        let pending_lane = map_value(vec![
-            ("track", Value::Number(0.0)),
-            ("start-beat", Value::Number(4.0)),
-            ("end-beat", Value::Number(10.0)),
+        let rt = editor.runtime_mut();
+        let track = kind_track(rt, 0);
+        let lane = register_kind_range(rt, "eseq.kinds:pending-lane", 1)[0];
+        for (field, value) in [
+            ("index", Value::Number(0.0)),
+            ("track", Value::Instance(track)),
+            ("start", Value::Number(4.0)),
+            ("end", Value::Number(10.0)),
             ("num-steps", Value::Number(12.0)),
-            ("length-beats", Value::Number(3.0)),
-            (
-                "events",
-                test_list(vec![
-                    test_number_list(&[0.0, 0.0, 1.0, 1.0]),
-                    test_number_list(&[12.0, 12.0, 1.0, 1.0]),
-                ]),
-            ),
-        ]);
-        let scene_event = |beat: f64, scene: f64| {
-            map_value(vec![
-                ("start-beat", Value::Number(beat)),
-                ("scene", Value::Number(scene)),
-            ])
-        };
+            ("length", Value::Number(3.0)),
+            ("events", kind_events(&[[0.0, 0.0, 1.0, 1.0], [12.0, 12.0, 1.0, 1.0]])),
+        ] {
+            set_field(rt, lane, field, value);
+        }
+        let scenes = register_kind_range(rt, "eseq.kinds:pending-scene", 2);
+        for (index, (&id, beat)) in scenes.iter().zip([0.0, 8.0]).enumerate() {
+            let scene = rt.keyed_instance("eseq.kinds:scene", &[index as u64]);
+            set_field(rt, id, "index", Value::Number(index as f64));
+            set_field(rt, id, "scene", instance_or_nil(scene));
+            set_field(rt, id, "start", Value::Number(beat));
+        }
         // The clips those launches put on track 0: a 4-step pattern (1 beat)
         // at beat 0, replaced by another at beat 8.
-        let track_event = |beat: f64| {
-            map_value(vec![
-                ("track", Value::Number(0.0)),
-                ("start-beat", Value::Number(beat)),
-                ("pattern-id", Value::Number(3.0)),
+        let cell = register_kind_cell(rt, track, 3);
+        let launches = register_kind_range(rt, "eseq.kinds:pending-launch", 2);
+        for (index, (&id, beat)) in launches.iter().zip([0.0, 8.0]).enumerate() {
+            for (field, value) in [
+                ("index", Value::Number(index as f64)),
+                ("track", Value::Instance(track)),
+                ("start", Value::Number(beat)),
+                ("cell", Value::Instance(cell)),
                 ("num-steps", Value::Number(4.0)),
-                ("length-beats", Value::Number(1.0)),
-                (
-                    "events",
-                    test_list(vec![test_number_list(&[0.0, 0.0, 1.0, 1.0])]),
-                ),
-            ])
-        };
-        rt.set_reactive(
-            "SEQ",
-            "song-pending",
-            map_value(vec![
-                ("origin-beat", Value::Number(0.0)),
-                ("head-beat", Value::Number(10.0)),
-                ("lanes", test_list(vec![pending_lane])),
-                (
-                    "scene-events",
-                    test_list(vec![scene_event(0.0, 0.0), scene_event(8.0, 1.0)]),
-                ),
-                (
-                    "track-events",
-                    test_list(vec![track_event(0.0), track_event(8.0)]),
-                ),
-            ]),
-        );
+                ("length", Value::Number(1.0)),
+                ("events", kind_events(&[[0.0, 0.0, 1.0, 1.0]])),
+            ] {
+                set_field(rt, id, field, value);
+            }
+        }
+        let song = kind_singleton_rt(rt, "song");
+        for (field, value) in [
+            ("pending", Value::Bool(true)),
+            ("pending-head", Value::Number(10.0)),
+            ("pending-lanes", instance_list([lane])),
+            ("pending-scenes", instance_list(scenes)),
+            ("pending-launches", instance_list(launches)),
+        ] {
+            set_field(rt, song, field, value);
+        }
         rt.run_reactive_cycle();
 
         let eval = |editor: &mut eseqlisp::Editor, expr: &str| {
@@ -29752,7 +29059,7 @@ use panel_kinds_seed::*;
         );
         assert_eq!(
             read(&mut editor, "(get (nth (eseq.arrangement/scene-items) 1) :label)"),
-            read(&mut editor, "(eseq.arrangement/scene-name 0)"),
+            read(&mut editor, "(eseq.arrangement/scene-name (first (eseq.kinds/scenes)))"),
             "a captured launch is labelled with the scene it launched"
         );
         assert_eq!(
@@ -29803,19 +29110,13 @@ use panel_kinds_seed::*;
             Value::Number(16.0),
             "the committed end still wins while it is the furthest content"
         );
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "song-end-beat", Value::Number(0.0));
-        editor.runtime_mut().run_reactive_cycle();
+        set_kind_field(&mut editor, "song", "end", Value::Number(0.0));
         assert_eq!(
             read(&mut editor, "(eseq.arrangement/scroll-extent)"),
             Value::Number(10.0),
             "with no committed song the record head is the extent"
         );
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "song-end-beat", Value::Number(16.0));
-        editor.runtime_mut().run_reactive_cycle();
+        set_kind_field(&mut editor, "song", "end", Value::Number(16.0));
 
         // Inert: the real clip selects, the provisional item does not.
         eval(
@@ -29832,7 +29133,7 @@ use panel_kinds_seed::*;
             "(eseq.arrangement/track-action 0 (dict :type :select :ids (list nil) :time 5))",
         );
         assert_eq!(
-            read(&mut editor, "eseq.arrangement/track-selection"),
+            read(&mut editor, "(let ((s eseq.arrangement/arr-select)) s.clips)"),
             Value::List(vec![]),
             "selecting a provisional item selects nothing"
         );
@@ -29841,7 +29142,7 @@ use panel_kinds_seed::*;
             "(eseq.arrangement/scene-action (dict :type :select :ids (list nil) :time 5))",
         );
         assert_eq!(
-            read(&mut editor, "eseq.arrangement/selection"),
+            read(&mut editor, "(let ((s eseq.arrangement/arr-select)) s.scenes)"),
             Value::List(vec![]),
             "the same holds in the scene lane"
         );
@@ -29880,12 +29181,9 @@ use panel_kinds_seed::*;
             .expect("open arrangement");
         editor.refresh_runtime_side_effects();
         for populated in [false, true] {
-            editor.runtime_mut().set_reactive("SEQ", "song-end-beat",
-                Value::Number(if populated { 128.0 } else { 0.0 }));
-            editor.runtime_mut().set_reactive("SEQ", "song-lanes", test_list(if populated {
-                vec![test_list(vec![lane_clip(0.0, 0.0, 8.0, Value::Number(1.0))])]
-            } else { vec![] }));
-            editor.runtime_mut().run_reactive_cycle();
+            set_kind_field(&mut editor, "song", "end", Value::Number(if populated { 128.0 } else { 0.0 }));
+            let clips = if populated { vec![KindClip::pattern(0, 0.0, 8.0, 1)] } else { vec![] };
+            seed_kind_clips(&mut editor, 0, &clips);
             editor.refresh_runtime_side_effects();
             for (width, height, start) in [(140, 60, 0), (200, 80, 12), (120, 18, 24), (160, 70, 0)] {
                 editor.runtime_mut().eval_str(&format!(
@@ -29933,31 +29231,14 @@ use panel_kinds_seed::*;
     fn metal_seq_arrangement_layout_one_ruler_headerless_lanes_and_sparse_items() {
         let mut editor = full_grid_editor_for_scroll_tests();
 
+        seed_kind_scene_names(&mut editor, &["Intro", "Drop"]);
+        set_kind_field(&mut editor, "song", "exists", Value::Bool(true));
+        set_kind_field(&mut editor, "song", "end", Value::Number(16.0));
+        seed_kind_spans(&mut editor, &[(0.0, 8.0, 0), (8.0, 16.0, 1)]);
+        // A sparse lane: one clip over [0, 8) and NOTHING over [8, 16),
+        // which is how the model spells silence (lane spec 6.2).
+        seed_kind_clips(&mut editor, 0, &[KindClip::pattern(0, 0.0, 8.0, 1)]);
         let rt = editor.runtime_mut();
-        rt.set_reactive("SEQ", "song-exists", Value::Bool(true));
-        rt.set_reactive("SEQ", "song-end-beat", Value::Number(16.0));
-        rt.set_reactive(
-            "SEQ",
-            "scene-spans",
-            test_list(vec![scene_span(0.0, 8.0, 0.0), scene_span(8.0, 16.0, 1.0)]),
-        );
-        rt.set_reactive(
-            "SEQ",
-            "song-lanes",
-            // A sparse lane: one clip over [0, 8) and NOTHING over [8, 16),
-            // which is how the model spells silence (lane spec 6.2).
-            test_list(vec![test_list(vec![lane_clip(
-                0.0,
-                0.0,
-                8.0,
-                Value::Number(1.0),
-            )])]),
-        );
-        rt.set_reactive(
-            "SEQ",
-            "scene-names",
-            test_string_list(&["Intro", "Drop"]),
-        );
         rt.set_reactive("SEQ", "track-selected-0", Value::Bool(true));
         rt.run_reactive_cycle();
 
@@ -30200,35 +29481,20 @@ use panel_kinds_seed::*;
                     .collect::<Vec<_>>(),
             ),
         );
-        rt.set_reactive("SEQ", "song-exists", Value::Bool(true));
-        rt.set_reactive("SEQ", "song-end-beat", Value::Number(64.0));
-        rt.set_reactive("SEQ", "scene-spans", test_list(vec![scene_span(0.0, 16.0, 0.0)]));
-        rt.set_reactive(
-            "SEQ",
-            "song-lanes",
-            Value::List(
-                (0..tracks)
-                    .map(|track| {
-                        // The LAST track stays bare (nil pattern renders no
-                        // item), so tests have empty lane background to click.
-                        let pattern = if track + 1 == tracks {
-                            Value::Nil
-                        } else {
-                            Value::Number(1.0)
-                        };
-                        Rc::new(RefCell::new(test_list(vec![lane_clip(
-                            0.0, 0.0, 64.0, pattern,
-                        )])))
-                    })
-                    .collect(),
-            ),
-        );
         rt.run_reactive_cycle();
+        seed_kind_test_tracks(&mut editor, tracks, |track| format!("track-{track}"));
+        seed_kind_song(&mut editor, 64.0, 1, &[(0.0, 16.0, 0)]);
+        // Clip `i` on track `i`; the LAST track stays bare, so tests have
+        // empty lane background to click.
+        for track in 0..tracks.saturating_sub(1) {
+            let clip = KindClip::pattern(track as u64, 0.0, 64.0, track as u64 + 1);
+            seed_kind_clips(&mut editor, track, &[clip]);
+        }
         editor
             .runtime_mut()
             .eval_str(
-                "(do (eseq.seq-panels/seq-open-arrangement) (set! eseq.arrangement/view-start 0) \
-                 (set! eseq.arrangement/view-duration 64))",
+                "(do (eseq.seq-panels/seq-open-arrangement) (let ((v eseq.arrangement/arr-view)) (set! v.start 0)) \
+                 (let ((v eseq.arrangement/arr-view)) (set! v.duration 64)))",
             )
             .expect("open arrangement view");
         editor.refresh_runtime_side_effects();
@@ -30239,10 +29505,8 @@ use panel_kinds_seed::*;
     #[test]
     fn metal_seq_arrangement_scene_controls_dispatch_from_real_timeline_right_clicks() {
         let mut editor = arrangement_region_editor(2, &[]);
-        editor.runtime_mut().eval_str(
-            "(do (reactive-set \"SEQ\" \"scene-names\" (list \"Verse\" \"Chorus\"))
-                 (reactive-set \"SEQ\" \"scene-spans\" (list)))"
-        ).unwrap();
+        seed_kind_scene_names(&mut editor, &["Verse", "Chorus"]);
+        seed_kind_spans(&mut editor, &[]);
         editor.refresh_runtime_side_effects();
         let layout = editor.widget_layout().unwrap();
         let selector = find_layout_node_by_stable_key_suffix(&layout, "/arr-starting-scene").unwrap();
@@ -30292,8 +29556,7 @@ use panel_kinds_seed::*;
                 if name == "arrangement-scene-insert" && *payload == map_value([
                     ("beat", Value::Number(8.0)), ("scene", Value::Number(1.0))]))));
 
-        editor.runtime_mut().set_reactive("SEQ", "scene-spans", test_list(vec![scene_span(0.0, 16.0, 0.0)]));
-        editor.runtime_mut().run_reactive_cycle();
+        seed_kind_spans(&mut editor, &[(0.0, 16.0, 0)]);
         editor.refresh_runtime_side_effects();
         right_click(&mut editor);
         let layout = editor.widget_layout().unwrap();
@@ -30411,11 +29674,8 @@ use panel_kinds_seed::*;
                 ("events", test_list(vec![])),
             ]))
         });
-        editor.runtime_mut().eval_str(
-            "(do (reactive-set \"SEQ\" \"current-track\" 0)
-                 (reactive-set \"SEQ\" \"track-pattern-cells\"
-                   (list (list (dict :id 1)) (list (dict :id 1) (dict :id 2)))))"
-        ).unwrap();
+        seed_kind_cells(&mut editor, 0, &[1]);
+        seed_kind_cells(&mut editor, 1, &[1, 2]);
         editor.refresh_runtime_side_effects();
         let layout = editor.widget_layout().unwrap();
         for key in ["/arr-place-pattern", "/arr-placement-pattern"] {
@@ -30480,16 +29740,22 @@ use panel_kinds_seed::*;
                 && test_map_number(payload, "track-id") == Some(1.0)
                 && test_map_number(payload, "pattern-id") == Some(2.0)
                 && test_map_number(payload, "start-beat") == Some(20.0))));
-        assert_eq!(editor.runtime_mut().eval_str("eseq.arrangement/placement").unwrap(), Some(Value::Nil));
+        // Placement is sticky: it stays armed across clicks until cancelled.
+        assert_ne!(
+            editor.runtime_mut().eval_str("(let ((p eseq.arrangement/arr-placement)) p.active)").unwrap(),
+            Some(Value::Nil)
+        );
+        assert_eq!(
+            editor.runtime_mut().eval_str("(eseq.arrangement/cancel-placement)").unwrap(),
+            Some(Value::Bool(true))
+        );
     }
 
     #[test]
     fn metal_seq_arrangement_clip_pattern_submenu_retargets_only_the_clicked_clip() {
         let mut editor = arrangement_region_editor(2, &[]);
-        editor.runtime_mut().eval_str(
-            "(do (reactive-set \"SEQ\" \"track-pattern-cells\"
-                   (list (list (dict :id 1) (dict :id 2) (dict :id 3)) (list (dict :id 1)))))"
-        ).unwrap();
+        seed_kind_cells(&mut editor, 0, &[1, 2, 3]);
+        seed_kind_cells(&mut editor, 1, &[1]);
         editor.refresh_runtime_side_effects();
         let right_click_lane = |editor: &mut eseqlisp::Editor, track: usize| {
             let layout = editor.widget_layout().unwrap();
@@ -30524,12 +29790,20 @@ use panel_kinds_seed::*;
         editor.runtime_mut().invoke(callback, vec![Value::Nil]).unwrap();
         let commands = editor.drain_host_commands();
         let changes: Vec<_> = commands.iter().filter_map(|cmd| match cmd {
-            eseqlisp::host::HostCommand::Custom { name, payload } if name == "arrangement-clip-set-source" => Some(payload),
+            eseqlisp::host::HostCommand::Custom { name, payload } if name == "set-clip" => Some(payload),
             _ => None,
         }).collect();
-        assert_eq!(changes.len(), 1);
-        assert_eq!(changes[0], &map_value(vec![("clip-id", Value::Number(0.0)), ("pattern-id", Value::Number(3.0))]));
-        assert_eq!(editor.runtime_mut().eval_str("eseq.arrangement/placement-menu").unwrap(), Some(Value::Nil));
+        assert_eq!(changes.len(), 1, "`set! c.cell` retargets the one clip");
+        assert_eq!(changes[0], &map_value(vec![
+            ("clip-id", Value::Number(0.0)),
+            ("field", Value::String("cell".into())),
+            ("track-id", Value::Number(0.0)),
+            ("pattern-id", Value::Number(3.0)),
+        ]));
+        assert_eq!(
+            editor.runtime_mut().eval_str("(let ((m eseq.arrangement/arr-pattern-menu)) m.open)").unwrap(),
+            Some(Value::Bool(false))
+        );
         eseqlisp::widget_render::clear_overlay();
         right_click_lane(&mut editor, 1);
         editor.refresh_runtime_side_effects();
@@ -30632,22 +29906,7 @@ use panel_kinds_seed::*;
     fn metal_seq_arrangement_clip_selection_follows_explicit_lower_panel_mode() {
         // Tracks 0 and 1 have clips; track 2 is intentionally empty.
         let mut editor = arrangement_region_editor(3, &[]);
-        let selected: Arc<Mutex<Vec<Vec<Value>>>> = Arc::new(Mutex::new(Vec::new()));
-        let selected_sink = selected.clone();
-        editor
-            .runtime_mut()
-            .register_native("seq-song-select-clip", move |args, _ctx| {
-                selected_sink.lock().unwrap().push(args);
-                Ok(Value::Bool(true))
-            });
-        let deselected = Arc::new(Mutex::new(0usize));
-        let deselected_sink = deselected.clone();
-        editor
-            .runtime_mut()
-            .register_native("seq-song-deselect-clip", move |_args, _ctx| {
-                *deselected_sink.lock().unwrap() += 1;
-                Ok(Value::Bool(true))
-            });
+        let _ = editor.drain_host_commands();
 
         // In FX mode a clip-body press remains a cursor/region gesture.
         editor
@@ -30657,8 +29916,11 @@ use panel_kinds_seed::*;
                    (dict :type :clear-selection :ids (list 0) :time 3))",
             )
             .expect("press clip body in FX mode");
-        assert!(selected.lock().unwrap().is_empty());
-        assert!(*deselected.lock().unwrap() > 0);
+        assert_eq!(
+            bound_clip_writes(&mut editor),
+            vec![Value::Nil],
+            "an FX-mode body press binds nothing and releases the binding"
+        );
         assert_eq!(
             editor.runtime_mut().eval_str("eseq.seq-step-tabs/lower-panel-buffer").unwrap(),
             Some(Value::String("*fx*".to_string()))
@@ -30692,7 +29954,7 @@ use panel_kinds_seed::*;
             .expect("double-click clip title bar");
         assert_eq!(mode_after_open, Some(Value::Bool(true)));
         editor.refresh_runtime_side_effects();
-        assert_eq!(selected.lock().unwrap().len(), 1);
+        assert_eq!(bound_clip_writes(&mut editor), vec![Value::Number(0.0)]);
         assert_eq!(
             editor.runtime_mut().eval_str("eseq.seq-step-tabs/lower-panel-buffer").unwrap(),
             Some(Value::String("*piano-roll*".to_string()))
@@ -30706,7 +29968,6 @@ use panel_kinds_seed::*;
         );
 
         // Once in piano-roll mode, the SAME body event retargets the clip.
-        selected.lock().unwrap().clear();
         editor
             .runtime_mut()
             .eval_str(
@@ -30715,14 +29976,14 @@ use panel_kinds_seed::*;
             )
             .expect("press clip body in piano-roll mode");
         assert_eq!(
-            selected.lock().unwrap().len(),
-            1,
+            bound_clip_writes(&mut editor),
+            vec![Value::Number(0.0)],
             "clip bodies select only while the arrangement piano roll is open"
         );
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(len eseq.arrangement/track-selection)")
+                .eval_str("(let ((s eseq.arrangement/arr-select)) (len s.clips))")
                 .unwrap(),
             Some(Value::Number(1.0))
         );
@@ -30730,17 +29991,16 @@ use panel_kinds_seed::*;
         // A title-bar single click on another track changes the piano-roll
         // target without implicitly returning to FX. Only the track-header
         // double-click owns that mode transition.
-        selected.lock().unwrap().clear();
         editor
             .runtime_mut()
             .eval_str(
                 "(eseq.arrangement/track-action 1 \
-                   (dict :type :select :ids (list 0) :time 6))",
+                   (dict :type :select :ids (list 1) :time 6))",
             )
             .expect("press another track's clip title in piano-roll mode");
         assert_eq!(
-            selected.lock().unwrap().last().and_then(|args| args.first()),
-            Some(&Value::Number(1.0)),
+            bound_clip_writes(&mut editor),
+            vec![Value::Number(1.0)],
             "the newly clicked track's clip becomes the piano-roll target"
         );
         assert_eq!(
@@ -30760,17 +30020,16 @@ use panel_kinds_seed::*;
         // A true background press has no clip id: keep piano-roll mode but
         // clear its target so the lower panel renders the empty state. Use the
         // third track to cover a cross-track empty-space click too.
-        let deselect_before = *deselected.lock().unwrap();
         editor
             .runtime_mut()
             .eval_str("(eseq.arrangement/track-action 2 (dict :type :clear-selection :time 20))")
             .expect("press empty lane space in piano-roll mode");
         editor.refresh_runtime_side_effects();
-        assert!(*deselected.lock().unwrap() > deselect_before);
+        assert_eq!(bound_clip_writes(&mut editor), vec![Value::Nil]);
         assert_eq!(
             editor
                 .runtime_mut()
-                .eval_str("(len eseq.arrangement/track-selection)")
+                .eval_str("(let ((s eseq.arrangement/arr-select)) (len s.clips))")
                 .unwrap(),
             Some(Value::Number(0.0))
         );
@@ -30858,12 +30117,12 @@ use panel_kinds_seed::*;
             "the collapsed track is absent from the visible order"
         );
         assert_eq!(
-            read(&mut editor, "(eseq.arrangement/visible-ordinal (eseq.track-collapse/visible-track-indices) 3)"),
+            read(&mut editor, "(eseq.view-kit/index-of (eseq.track-collapse/visible-track-indices) 3)"),
             Value::Number(2.0),
             "model track 3 is the THIRD visible row once track 2 collapses"
         );
         assert_eq!(
-            read(&mut editor, "(eseq.arrangement/visible-ordinal (eseq.track-collapse/visible-track-indices) 2)"),
+            read(&mut editor, "(eseq.view-kit/index-of (eseq.track-collapse/visible-track-indices) 2)"),
             Value::Number(-1.0),
             "a collapsed track has no visible ordinal"
         );
@@ -30917,40 +30176,14 @@ use panel_kinds_seed::*;
 
     /// End-to-end body-marquee (region spec 4.2/4.3/4.4): pressing a clip's
     /// BODY and dragging down two lanes commits one region through
-    /// seq-song-set-region, grid-quantized, spanning the swept tracks — and
+    /// `select-region!`, grid-quantized, spanning the swept tracks — and
     /// the intermediate frames paint the ghost highlight on every lane in
     /// between, including ones with no clip under the pointer. A plain click
     /// clears the region and parks the edit cursor.
     #[test]
     fn metal_seq_arrangement_body_drag_sweeps_a_cross_track_region() {
         let mut editor = arrangement_region_editor(5, &[]);
-        let regions: Arc<Mutex<Vec<Vec<f64>>>> = Arc::new(Mutex::new(Vec::new()));
-        let cleared: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
-        let sink = regions.clone();
-        editor
-            .runtime_mut()
-            .register_native("seq-song-set-region", move |args, _ctx| {
-                // The 5th argument is the scene-lane bit (lane spec 8); the
-                // rectangle itself is the first four numbers.
-                sink.lock().unwrap().push(
-                    args.iter()
-                        .take(4)
-                        .map(|arg| match arg {
-                            Value::Number(value) => *value,
-                            other => panic!("region args must be numbers, got {other:?}"),
-                        })
-                        .collect(),
-                );
-                Ok(Value::Bool(true))
-            });
-        let clear_sink = cleared.clone();
-        editor
-            .runtime_mut()
-            .register_native("seq-song-clear-region", move |_args, _ctx| {
-                *clear_sink.lock().unwrap() += 1;
-                Ok(Value::Bool(true))
-            });
-
+        let _ = editor.drain_host_commands();
         let layout = editor.widget_layout().expect("arrangement layout");
         let lane_rect = |key: &str| {
             let container =
@@ -31012,7 +30245,7 @@ use panel_kinds_seed::*;
             "lanes outside the sweep stay unhighlighted"
         );
         assert!(
-            regions.lock().unwrap().is_empty(),
+            region_writes(&mut editor).iter().all(Option::is_none),
             "live drag frames must not commit — ghost only"
         );
 
@@ -31023,24 +30256,22 @@ use panel_kinds_seed::*;
             drag_row,
         );
 
-        let committed = regions.lock().unwrap().clone();
+        let committed = region_writes(&mut editor);
         assert_eq!(committed.len(), 1, "one region per gesture, got {committed:?}");
-        let region = &committed[0];
-        assert_eq!(region[0], 1.0, "the drag started on track 1");
-        assert_eq!(region[1], 3.0, "and swept down to track 3");
+        let (tracks, start, end, _) = committed[0].clone().expect("a region, not a clear");
+        assert_eq!(tracks, vec![1.0, 3.0], "swept from track 1 down to track 3");
         // Grid-quantized: the view shows 64 beats, so the ladder step divides
         // the raw span outward rather than landing on the raw pointer beats.
-        assert!(region[2] <= 9.0 && region[2] >= 8.0, "start floors: {region:?}");
-        assert!(region[3] >= 23.0 && region[3] <= 24.0, "end ceils: {region:?}");
+        assert!((8.0..=9.0).contains(&start), "start floors: {start}");
+        assert!((23.0..=24.0).contains(&end), "end ceils: {end}");
         assert_eq!(
-            read(&mut editor, "eseq.arrangement/region-ghost"),
+            read(&mut editor, "(let ((d eseq.arrangement/arr-drag)) d.region)"),
             Value::Nil,
             "the ghost clears on commit; the committed region is Rust-owned"
         );
 
         // A plain click on empty lane space clears the region and parks the
         // edit cursor on that track (region spec 4.4).
-        *cleared.lock().unwrap() = 0;
         let lane4 = lane_rect("/track-lane-4");
         let click_col = lane4.col + lane4.width * (40.0 / 64.0);
         let click_row = lane4.row + lane4.height * 0.5;
@@ -31051,11 +30282,11 @@ use panel_kinds_seed::*;
             send(&mut editor, kind, click_col, click_row);
         }
         assert!(
-            *cleared.lock().unwrap() > 0,
+            region_writes(&mut editor).contains(&None),
             "a zero-movement release clears the region"
         );
         assert_eq!(
-            read(&mut editor, "eseq.arrangement/cursor-track"),
+            read(&mut editor, "(let ((v eseq.arrangement/arr-view)) v.cursor-track)"),
             Value::Number(4.0),
             "the click parks the edit cursor on the clicked track"
         );
@@ -31077,8 +30308,8 @@ use panel_kinds_seed::*;
                 editor
                     .runtime_mut()
                     .eval_str(&format!(
-                        "(do (set! eseq.arrangement/view-start {start}) \
-                         (set! eseq.arrangement/view-duration {duration}))"
+                        "(do (let ((v eseq.arrangement/arr-view)) (set! v.start {start})) \
+                         (let ((v eseq.arrangement/arr-view)) (set! v.duration {duration})))"
                     ))
                     .expect("set the view");
                 editor.refresh_runtime_side_effects();
@@ -31208,15 +30439,8 @@ use panel_kinds_seed::*;
                 Ok(Value::Bool(true))
             });
         }
-        editor.runtime_mut().set_reactive(
-            "SEQ",
-            "song-region",
-            test_number_list(&[0.0, 2.0, 4.0, 8.0]),
-        );
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "song-bound-clip", Value::Nil);
-        editor.runtime_mut().run_reactive_cycle();
+        set_kind_region(&mut editor, Some((0, 2, 4.0, 8.0, false)));
+        set_kind_bound_clip(&mut editor, None);
         editor.runtime_mut().eval_str(
             "(do (def arrangement-step-delete-count (state 0))
                  (def eseq.step-grid-interactions/delete-selected-steps ()
@@ -31242,7 +30466,7 @@ use panel_kinds_seed::*;
             .runtime_mut()
             .register_native("seq-has-selection?", |_args, _ctx| Ok(Value::Bool(true)));
         assert_eq!(
-            editor.runtime_mut().eval_str("SEQ.song-bound-clip").unwrap(),
+            editor.runtime_mut().eval_str("(let ((song eseq.kinds/song)) song.bound-clip)").unwrap(),
             Some(Value::Nil),
         );
         let clipboard_modifier = clipboard_shortcut_modifier_for(CURRENT_SHORTCUT_PLATFORM);
@@ -31296,10 +30520,7 @@ use panel_kinds_seed::*;
             "marquee deletion must take priority over selected-step deletion"
         );
 
-        editor
-            .runtime_mut()
-            .set_reactive("SEQ", "song-region", Value::Nil);
-        editor.runtime_mut().run_reactive_cycle();
+        set_kind_region(&mut editor, None);
         let backspace = KeyEvent::new(KeyCode::Backspace, crossterm::event::KeyModifiers::NONE);
         assert!(
             !handle_metal_command_shortcut(
@@ -31325,22 +30546,7 @@ use panel_kinds_seed::*;
     #[test]
     fn metal_seq_arrangement_title_bar_click_selects_the_clip_as_a_region() {
         let mut editor = arrangement_region_editor(3, &[]);
-        let selects: Arc<Mutex<Vec<Vec<Value>>>> = Arc::new(Mutex::new(Vec::new()));
-        let sink = selects.clone();
-        editor
-            .runtime_mut()
-            .register_native("seq-song-select-clip", move |args, _ctx| {
-                sink.lock().unwrap().push(args.to_vec());
-                Ok(Value::Bool(true))
-            });
-        let cleared: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
-        let clear_sink = cleared.clone();
-        editor
-            .runtime_mut()
-            .register_native("seq-song-clear-region", move |_args, _ctx| {
-                *clear_sink.lock().unwrap() += 1;
-                Ok(Value::Bool(true))
-            });
+        let _ = editor.drain_host_commands();
         editor
             .runtime_mut()
             .register_native("seq-arrangement-action", |_args, _ctx| {
@@ -31371,18 +30577,11 @@ use panel_kinds_seed::*;
             editor.refresh_runtime_side_effects();
         }
 
-        let recorded = selects.lock().unwrap().clone();
-        assert_eq!(recorded.len(), 1, "one select per click, got {recorded:?}");
+        // `song.bound-clip` binds the clip and selects its span as the region.
         assert_eq!(
-            recorded[0],
-            vec![
-                Value::Number(1.0),
-                Value::Number(0.0),
-                // The fixture's clip covers the whole 64-beat song.
-                Value::Number(0.0),
-                Value::Number(64.0),
-            ],
-            "the clip's span rides along so the selection is also a region"
+            bound_clip_writes(&mut editor),
+            vec![Value::Number(1.0)],
+            "one select per click, of the clicked track's clip"
         );
 
         // The lane renders that region through the same per-lane prop a swept
@@ -31394,14 +30593,9 @@ use panel_kinds_seed::*;
                 .expect("expr evaluates")
                 .expect("expr returns a value")
         };
-        editor
-            .runtime_mut()
-            .set_reactive(
-                "SEQ",
-                "song-region",
-                test_number_list(&[1.0, 1.0, 0.0, 64.0]),
-            );
-        editor.runtime_mut().run_reactive_cycle();
+        // The fixture's clip covers the whole 64-beat song.
+        set_kind_region(&mut editor, Some((1, 1, 0.0, 64.0, false)));
+        editor.refresh_runtime_side_effects();
         assert_ne!(
             read(&mut editor, "(eseq.arrangement/lane-region-rect 1)"),
             Value::Nil,
@@ -31422,7 +30616,7 @@ use panel_kinds_seed::*;
         ));
         editor.refresh_runtime_side_effects();
         assert!(
-            *cleared.lock().unwrap() > 0,
+            region_writes(&mut editor).contains(&None),
             "deleting the selected clip clears its region"
         );
         assert_eq!(
@@ -33242,8 +32436,6 @@ use panel_kinds_seed::*;
                     test_bool_list(&[false, false, false, true]),
                 ),
                 ("current-track", Value::Number(0.0)),
-                ("song-bound-clip", Value::Nil),
-                ("song-region", Value::Nil),
                 ("delete-target-version", Value::Number(0.0)),
                 ("record-armed", test_repeated_bool_list(false, 4)),
                 ("track-mutes", test_repeated_bool_list(false, 4)),

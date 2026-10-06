@@ -3623,7 +3623,6 @@
             // carries takes + use_arrangement, so this exercises the
             // take-pool-aware lane-event collection every frame.
             let mut song_frame = super::state_values::SongFrameState::default();
-            let transport_visible = editor_has_visible_buffer(&editor, "*transport*");
             assert!(
                 !editor_has_visible_buffer(&editor, "*arrangement*"),
                 "pianohold probe must measure the Seq view"
@@ -3633,14 +3632,16 @@
                 editor.runtime_mut(),
                 &app,
                 &mut song_frame,
-                transport_visible,
             );
             assert!(
-                song_frame
-                    .cached_lanes
-                    .as_ref()
-                    .is_some_and(|lanes| lanes.iter().map(|lane| lane.len()).sum::<usize>() >= 100),
-                "pianohold must publish its real clip lanes"
+                app.state.with_committed_arrangement(|arrangement| arrangement
+                    .is_some_and(|arrangement| arrangement
+                        .track_lanes
+                        .iter()
+                        .map(|lane| lane.len())
+                        .sum::<usize>()
+                        >= 100)),
+                "pianohold must carry its real clip lanes"
             );
             editor.runtime_mut().run_reactive_cycle();
             editor.refresh_runtime_side_effects();
@@ -3751,7 +3752,6 @@
                     editor.runtime_mut(),
                     app,
                     &mut song_frame,
-                    transport_visible,
                 );
                 editor.runtime_mut().run_reactive_cycle();
                 editor.refresh_runtime_side_effects();
@@ -4177,7 +4177,6 @@
                 editor.runtime_mut(),
                 &app,
                 &mut song_frame,
-                transport_visible,
             );
             editor.runtime_mut().run_reactive_cycle();
             editor.refresh_runtime_side_effects();
@@ -4417,7 +4416,6 @@
                     editor.runtime_mut(),
                     app,
                     &mut song_frame,
-                    transport_visible,
                 );
                 let tick_sync_done = Instant::now();
                 let invalidations = ui_invalidations.drain();
@@ -5627,7 +5625,6 @@
                 editor.runtime_mut(),
                 &app,
                 &mut song_frame,
-                transport_visible,
             );
             editor.runtime_mut().run_reactive_cycle();
             editor.refresh_runtime_side_effects();
@@ -5826,7 +5823,6 @@
                     editor.runtime_mut(),
                     app,
                     &mut song_frame,
-                    transport_visible,
                 );
                 let tick_sync_done = Instant::now();
                 let invalidations = ui_invalidations.drain();
@@ -7856,7 +7852,6 @@
                     editor.runtime_mut(),
                     app,
                     &mut song_frame,
-                    transport_visible,
                 );
                 let invalidations = ui_invalidations.drain();
                 if !invalidations.is_empty() {
@@ -8320,7 +8315,6 @@
                 editor.runtime_mut(),
                 &app,
                 &mut song_frame,
-                transport_visible,
             );
             editor.runtime_mut().run_reactive_cycle();
             editor.refresh_runtime_side_effects();
@@ -8525,7 +8519,6 @@
                     editor.runtime_mut(),
                     app,
                     &mut song_frame,
-                    transport_visible,
                 );
                 let tick_sync_done = Instant::now();
                 let invalidations = ui_invalidations.drain();
@@ -9536,17 +9529,10 @@
             };
 
             app.sync_track_sound_bindings();
-            super::state_values::sync_song_state(
-                editor.runtime_mut(),
-                &app,
-                &mut frame_diff.song,
-                transport_visible,
-            );
+            super::state_values::sync_song_state(editor.runtime_mut(), &app, &mut frame_diff.song);
             let _ = super::state_values::sync_sound_palette(
-                editor.runtime_mut(),
                 &app,
                 &mut frame_diff.sound_palette,
-                false,
                 true,
             );
             editor.runtime_mut().run_reactive_cycle();
@@ -9654,15 +9640,8 @@
                     editor.runtime_mut(),
                     app,
                     &mut frame.song,
-                    transport_visible,
                 );
-                let _ = super::state_values::sync_sound_palette(
-                    editor.runtime_mut(),
-                    app,
-                    &mut frame.sound_palette,
-                    false,
-                    true,
-                );
+                let _ = super::state_values::sync_sound_palette(app, &mut frame.sound_palette, true);
                 let tick_sync_done = Instant::now();
                 let ct = current_track.load(Ordering::Relaxed);
                 let invalidations = ui_invalidations.drain();
@@ -10902,7 +10881,6 @@
                 editor.runtime_mut(),
                 &app,
                 &mut frame_diff.song,
-                transport_visible,
             );
             // These probes time track switches within ONE layout. Selecting
             // a drum rack member splits the sidebar for the *groove* buffer
@@ -11133,7 +11111,6 @@
                     editor.runtime_mut(),
                     app,
                     &mut frame.song,
-                    transport_visible,
                 );
                 let tick_sync_done = Instant::now();
 
@@ -12498,7 +12475,6 @@
                 editor.runtime_mut(),
                 &app,
                 &mut song_frame,
-                transport_visible,
             );
             editor.runtime_mut().run_reactive_cycle();
             editor.refresh_runtime_side_effects();
@@ -12678,7 +12654,6 @@
                     editor.runtime_mut(),
                     app,
                     &mut song_frame,
-                    transport_visible,
                 );
                 let tick_sync_done = Instant::now();
                 editor.runtime_mut().run_reactive_cycle();
@@ -13017,28 +12992,26 @@
             // arrangement read surfaces are published and warm, then include
             // the same syncs inside the timed region below.
             let mut song_frame = super::state_values::SongFrameState::default();
-            let transport_visible = editor_has_visible_buffer(&editor, "*transport*");
             let arrangement_buffer_visible =
                 editor_has_visible_buffer(&editor, "*arrangement*");
             assert!(
                 !arrangement_buffer_visible,
                 "step probes must measure the Seq view, not the Arr view"
             );
-            let song_position_visible = transport_visible || arrangement_buffer_visible;
             app.sync_track_sound_bindings();
             super::state_values::sync_song_state(
                 editor.runtime_mut(),
                 &app,
                 &mut song_frame,
-                song_position_visible,
             );
             if arranged {
                 assert!(
-                    song_frame
-                        .cached_lanes
-                        .as_ref()
-                        .is_some_and(|lanes| lanes.iter().any(|lane| !lane.is_empty())),
-                    "arranged probe must publish non-empty song lanes"
+                    app.state.with_committed_arrangement(|arrangement| arrangement
+                        .is_some_and(|arrangement| arrangement
+                            .track_lanes
+                            .iter()
+                            .any(|lane| !lane.is_empty()))),
+                    "arranged probe must carry non-empty song lanes"
                 );
             }
             editor.runtime_mut().run_reactive_cycle();
@@ -13213,7 +13186,6 @@
                     editor.runtime_mut(),
                     app,
                     &mut song_frame,
-                    song_position_visible,
                 );
                 let tick_sync_done = Instant::now();
                 editor.runtime_mut().run_reactive_cycle();
@@ -14972,6 +14944,31 @@
         let (cached_modulator_phases, cached_modulator_levels) =
             read_modulator_display_values(app.graph.lg, &app);
         let mut song_frame = SongFrameState::default();
+        // The arrangement reads the host kinds; the live loop syncs them
+        // every tick.
+        let kinds_handles = super::host_kinds::KindsHandles {
+            state: state.clone(),
+            current_track: current_track.clone(),
+            selected_steps: selected_steps.clone(),
+            active_delete_target: active_delete_target.clone(),
+            active_delete_target_version: active_delete_target_version.clone(),
+            record_armed: record_armed.clone(),
+            recording: recording.clone(),
+            master_recording: master_recording.clone(),
+            selected_tracks: selected_tracks.clone(),
+            track_collapsed: track_collapsed.clone(),
+            ui_epoch: ui_epoch.clone(),
+            fx_epoch: fx_epoch.clone(),
+            fx_value_epoch: Arc::new(AtomicUsize::new(0)),
+            ui_invalidations: ui_invalidations.clone(),
+            step_print: Default::default(),
+            auto_follow_override_until: auto_follow_override_until.clone(),
+            armed_rack: armed_rack.clone(),
+            bus_state: bus_state.clone(),
+            selected_neural_neurons: selected_neural_neurons.clone(),
+            piano_roll_selection: piano_roll_selection.clone(),
+        };
+        let mut host_kinds = super::host_kinds::HostKinds::default();
         {
             let rt = editor.runtime_mut();
             sync_project_state(rt, &app);
@@ -14989,7 +14986,8 @@
             sync_bus_peak_fields(rt, &cached_bus_peak_levels);
             sync_modulator_phase_fields(rt, &cached_modulator_phases);
             sync_modulator_level_fields(rt, &cached_modulator_levels);
-            sync_song_state(rt, &app, &mut song_frame, true);
+            sync_song_state(rt, &app, &mut song_frame);
+            host_kinds.sync_with(&app, rt, &kinds_handles, &Default::default());
             rt.run_reactive_cycle();
         }
         editor.refresh_runtime_side_effects();
@@ -15030,7 +15028,7 @@
         // Pin the shared time axis so gesture geometry is deterministic.
         eval(
             &mut editor,
-            "(do (set! eseq.arrangement/view-duration 64) (eseq.arrangement/set-view-start 0 64))",
+            "(do (let ((v eseq.arrangement/arr-view)) (set! v.duration 64)) (eseq.arrangement/set-view-start 0 64))",
         );
         editor.refresh_runtime_side_effects();
         editor.update_tile_rects(VIEW_W as u16, VIEW_H as u16);
@@ -15163,7 +15161,13 @@
                                          app: &mut app::App,
                                          song_frame: &mut SongFrameState| {
             let started = Instant::now();
-            sync_song_state(editor.runtime_mut(), app, song_frame, true);
+            sync_song_state(editor.runtime_mut(), app, song_frame);
+            host_kinds.sync_with(
+                app,
+                editor.runtime_mut(),
+                &kinds_handles,
+                &Default::default(),
+            );
             let sync_done = Instant::now();
             editor.runtime_mut().run_reactive_cycle();
             editor.refresh_runtime_side_effects();
@@ -15206,7 +15210,7 @@
         // inside the pinned 64-beat view, at least 8 beats long, with at
         // least 2 beats of empty lane after it so the end-edge grab cannot
         // land on the next clip's start handle. Searched across all tracks.
-        let track_count = read_num(&mut editor, "(len SEQ.song-lanes)") as usize;
+        let track_count = read_num(&mut editor, "(len (eseq.kinds/tracks))") as usize;
         let mut fixture: Option<(usize, f64, f64, f64, usize)> = None;
         'outer: for track in 0..track_count {
             let clip_count = read_num(
@@ -15217,26 +15221,26 @@
                 let clip = |editor: &mut Editor, key: &str| {
                     eval(
                         editor,
-                        &format!("(get (nth (eseq.arrangement/track-clips {track}) {index}) :{key})"),
+                        &format!("(let ((c (nth (eseq.arrangement/track-clips {track}) {index}))) c.{key})"),
                     )
                 };
-                let Some(Value::Number(start)) = clip(&mut editor, "start-beat") else {
+                let Some(Value::Number(start)) = clip(&mut editor, "start") else {
                     continue;
                 };
-                let Some(Value::Number(end)) = clip(&mut editor, "end-beat") else {
+                let Some(Value::Number(end)) = clip(&mut editor, "end") else {
                     continue;
                 };
                 if !(start >= 0.0 && end - start >= 8.0 && end - start <= 48.0) {
                     continue;
                 }
-                if !matches!(clip(&mut editor, "take-id"), Some(Value::Nil)) {
+                if clip(&mut editor, "take") != Some(Value::Number(-1.0)) {
                     continue;
                 }
                 let next_start = if index + 1 < clip_count {
                     read_num(
                         &mut editor,
                         &format!(
-                            "(get (nth (eseq.arrangement/track-clips {track}) {}) :start-beat)",
+                            "(let ((c (nth (eseq.arrangement/track-clips {track}) {}))) c.start)",
                             index + 1
                         ),
                     )
@@ -15246,7 +15250,7 @@
                 if next_start - end < 2.0 {
                     continue;
                 }
-                let Some(Value::Number(id)) = clip(&mut editor, "clip-id") else {
+                let Some(Value::Number(id)) = clip(&mut editor, "cid") else {
                     continue;
                 };
                 fixture = Some((track, id, start, end, index));
@@ -15268,7 +15272,7 @@
             &format!("(eseq.arrangement/set-view-start {view_start} 64)"),
         );
         // The setter clamps against the scroll extent; use what it kept.
-        let view_start = read_num(&mut editor, "eseq.arrangement/view-start");
+        let view_start = read_num(&mut editor, "(let ((v eseq.arrangement/arr-view)) v.start)");
         editor.refresh_runtime_side_effects();
         let _ = editor.widget_layout();
         let lane_rect = |editor: &mut Editor| -> (f32, f32, f32, f32) {
@@ -15329,7 +15333,7 @@
             assert_eq!(
                 read_num(
                     &mut editor,
-                    &format!("(get (nth (eseq.arrangement/track-clips {fixture_track}) {clip_index}) :end-beat)"),
+                    &format!("(let ((c (nth (eseq.arrangement/track-clips {fixture_track}) {clip_index}))) c.end)"),
                 ),
                 shrunk_end,
                 "clip-resize commit must republish the shrunk clip"
@@ -15399,7 +15403,7 @@
                 read_num(
                     &mut editor,
                     &format!(
-                        "(reactive-get \"SEQV\" (eseq.arrangement/channel \"ghost-kind\" {fixture_track}))"
+                        "(get (eseq.arrangement/lane-ghost {fixture_track}) :kind)"
                     ),
                 ) >= 2.0,
                 "the resize tick must publish the lane ghost channel"
@@ -15408,7 +15412,7 @@
                 read_num(
                     &mut editor,
                     &format!(
-                        "(reactive-get \"SEQV\" (eseq.arrangement/channel \"ghost-time\" {fixture_track}))"
+                        "(get (eseq.arrangement/lane-ghost {fixture_track}) :time)"
                     ),
                 ) < clip_end,
                 "the resize ghost must shorten the drawn clip"
@@ -15425,7 +15429,7 @@
             send_mouse(&mut editor, MouseEventKind::Up(MouseButton::Left), edge_col, row);
             apply_pending_song_commands(&mut editor, &mut app);
             finish_visible_update(&mut editor, &mut app, &mut song_frame);
-            assert_eq!(eval(&mut editor, "eseq.arrangement/track-drag"), Some(Value::Nil));
+            assert_eq!(eval(&mut editor, "(let ((d eseq.arrangement/arr-drag)) d.track)"), Some(Value::Nil));
             // Whatever the release committed, restore the fixture geometry.
             apply_clip_resize(&mut app, clip_end);
             finish_visible_update(&mut editor, &mut app, &mut song_frame);
@@ -15464,7 +15468,7 @@
             finish_visible_update(&mut editor, &mut app, &mut song_frame);
             if read_num(
                 &mut editor,
-                &format!("(get (nth (eseq.arrangement/track-clips {fixture_track}) {clip_index}) :start-beat)"),
+                &format!("(let ((c (nth (eseq.arrangement/track-clips {fixture_track}) {clip_index}))) c.start)"),
             ) != clip_start
             {
                 let restore_payload = Value::Map(
@@ -15499,7 +15503,7 @@
             finish_visible_update(&mut editor, &mut app, &mut song_frame);
             let elapsed = duration_ms(started.elapsed());
             assert!(
-                eval(&mut editor, "eseq.arrangement/region-ghost") != Some(Value::Nil),
+                eval(&mut editor, "(let ((d eseq.arrangement/arr-drag)) d.region)") != Some(Value::Nil),
                 "the live marquee tick must be previewing the region ghost"
             );
             if iteration >= WARMUPS {
@@ -15534,7 +15538,7 @@
             finish_visible_update(&mut editor, &mut app, &mut song_frame);
             let elapsed = duration_ms(started.elapsed());
             assert!(
-                read_num(&mut editor, "eseq.arrangement/view-start") != view_start,
+                read_num(&mut editor, "(let ((v eseq.arrangement/arr-view)) v.start)") != view_start,
                 "the pan tick must move the shared time axis"
             );
             if iteration >= WARMUPS {

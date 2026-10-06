@@ -67,7 +67,7 @@ ownership of the whole `[P, Q)` splice is worth keeping simple.
 - Every `arr_*` primitive (`arr_edit.rs`) and every region primitive
   (`song_region.rs`) calls it first, so the lock is one seam, not fifty.
 - The UI already surfaces the rejection: the arrangement error banner renders
-  `SEQ.song-edit-error` (`arrangement.lisp`). Gestures themselves are not
+  `song.edit-error` (`arrangement.lisp`). Gestures themselves are not
   blocked — ghosts preview fine while playing; only the commit is refused.
 
 **The scheduler consumes a preflighted, immutable song.**
@@ -165,7 +165,9 @@ While `ArrangementCapture` is active:
 
 ### 3.2 The surface
 
-One new reactive binding, `SEQ.song-pending`, published only while capture is
+(Since eseq-0l17.15 the view reads this surface as the host kinds'
+`song.pending-*` sub-kinds, kind-bindings spec §14.2o; `SEQ.song-pending` is
+gone.) One new reactive binding, `SEQ.song-pending`, published only while capture is
 active and cleared on every exit path (stop, cancel, failure):
 
 ```

@@ -230,7 +230,7 @@ staging), but:
   lane renders blank there. Row/status readouts show no scene name for
   `scene: None` rows.
 - `arrangement-content-length-min` (ui/arrangement.lisp:346) currently
-  floors on `SEQ.scene-spans`; make it also consider clip extents and the
+  floors on `SEQ.scene-spans` (now `song.spans`); make it also consider clip extents and the
   stored `end_beat` so an empty arrangement still draws its default length.
 - def-song is unchanged (`lower_rows_to_arrangement` still requires ≥ 1
   row — a def-song with no rows stays an error; "empty" is reached by
